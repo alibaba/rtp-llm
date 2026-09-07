@@ -1,0 +1,390 @@
+{
+  "schema_version": 1,
+  "target_logical_scenarios": 29,
+  "document_baseline_contracts": 131,
+  "current_contracts": 139,
+  "source_document_sha256": "fbefa30c139291284eebdc37f47f88048f735ceddaa63137048fde7ea437c4fd",
+  "supplemental_contracts": {
+    "elastic_kv_full_shrink": "elastic_lifecycle",
+    "elastic_kv_skew_shrink_cold": "elastic_lifecycle",
+    "elastic_kv_skew_shrink_hot": "elastic_lifecycle",
+    "elastic_steady_state_recovery": "elastic_lifecycle",
+    "elastic_transient_imbalance_bound": "elastic_lifecycle",
+    "kv_leader_saturation_spill": "cache_affinity",
+    "master_debug_snapshot": "status_protocol",
+    "normal_no_fetch_observation": "status_protocol"
+  },
+  "definitions": [
+    {
+      "id": "admission_queue",
+      "category": "admission",
+      "owner": "agent2",
+      "implementation_status": "planned",
+      "legacy_case_ids": [
+        "admission_queue_depth_reject",
+        "admission_slo_queue_deadline",
+        "admission_master_capacity_reject"
+      ]
+    },
+    {
+      "id": "batcher_placement_admission",
+      "category": "admission",
+      "owner": "agent2",
+      "implementation_status": "planned",
+      "legacy_case_ids": [
+        "admission_batcher_queue_capacity_park",
+        "admission_batcher_queue_deadline",
+        "admission_placement_pool_wait"
+      ]
+    },
+    {
+      "id": "engine_admission_gate",
+      "category": "admission",
+      "owner": "agent2",
+      "implementation_status": "planned",
+      "legacy_case_ids": [
+        "engine_prefill_concurrency_gate_park",
+        "engine_decode_hard_gate_unbounded_park",
+        "admission_engine_waiting_batch_cap_reject",
+        "admission_engine_kv_lack_mem_fast_reject"
+      ]
+    },
+    {
+      "id": "prefill_batch_token_budget",
+      "category": "admission",
+      "owner": "agent2",
+      "implementation_status": "planned",
+      "legacy_case_ids": [
+        "engine_prefill_token_budget_split",
+        "engine_prefill_token_budget_split_fifo",
+        "engine_prefill_token_budget_boundary",
+        "engine_prefill_regroup_disabled_verbatim"
+      ]
+    },
+    {
+      "id": "priority_admission",
+      "category": "admission",
+      "owner": "agent2",
+      "implementation_status": "planned",
+      "legacy_case_ids": [
+        "admission_priority_incomer_reject"
+      ]
+    },
+    {
+      "id": "balance_distribution",
+      "category": "balance",
+      "owner": "agent2",
+      "implementation_status": "planned",
+      "legacy_case_ids": [
+        "balance_uniform_serial",
+        "balance_concurrent_mix",
+        "balance_decode_spread",
+        "balance_len_mixed"
+      ]
+    },
+    {
+      "id": "balance_overload_transfer",
+      "category": "balance",
+      "owner": "agent2",
+      "implementation_status": "planned",
+      "legacy_case_ids": [
+        "balance_overload_avoid_prefill",
+        "balance_overload_avoid_decode"
+      ]
+    },
+    {
+      "id": "cancel_lifecycle",
+      "category": "cancel",
+      "owner": "agent2",
+      "implementation_status": "planned",
+      "legacy_case_ids": [
+        "cancel_basic",
+        "cancel_idempotent",
+        "cancel_sibling_isolation",
+        "cancel_after_terminal",
+        "cancel_unknown_rid",
+        "cancel_phase_timing",
+        "cancel_anomaly_path",
+        "cancel_deadline_exempt_inflight",
+        "cancel_schedule_drop_delivered",
+        "cancel_preemption_victim",
+        "cancel_stream_break_prefill_autonomous",
+        "cancel_stream_break_decode_autonomous"
+      ]
+    },
+    {
+      "id": "cancel_fence_settlement",
+      "category": "cancel",
+      "owner": "agent2",
+      "implementation_status": "planned",
+      "legacy_case_ids": [
+        "cancel_engine_notfound_settle",
+        "cancel_engine_restarted_tombstoned_settle",
+        "cancel_prefill_dead_await_terminal",
+        "cancel_decode_retire_closes_fence",
+        "cancel_fencing_lost_on_engine_restart",
+        "cancel_transport_failure_one_shot",
+        "cancel_unexpected_status_await_terminal"
+      ]
+    },
+    {
+      "id": "elastic_lifecycle",
+      "category": "elastic",
+      "owner": "agent1",
+      "implementation_status": "planned",
+      "legacy_case_ids": [
+        "elastic_add_flow",
+        "elastic_remove_flow",
+        "elastic_add_remove_cycle",
+        "elastic_rebalance",
+        "elastic_add_preference",
+        "elastic_kv_full_shrink",
+        "elastic_kv_skew_shrink_hot",
+        "elastic_kv_skew_shrink_cold",
+        "elastic_transient_imbalance_bound",
+        "elastic_steady_state_recovery"
+      ]
+    },
+    {
+      "id": "elastic_pending_drain",
+      "category": "elastic",
+      "owner": "agent1",
+      "implementation_status": "planned",
+      "legacy_case_ids": [
+        "elastic_remove_pending_drain"
+      ]
+    },
+    {
+      "id": "elastic_concurrent_mutation",
+      "category": "elastic",
+      "owner": "agent1",
+      "implementation_status": "planned",
+      "legacy_case_ids": [
+        "elastic_concurrent_ops"
+      ]
+    },
+    {
+      "id": "elastic_added_worker_fault",
+      "category": "elastic",
+      "owner": "agent1",
+      "implementation_status": "planned",
+      "legacy_case_ids": [
+        "elastic_stop_after_add"
+      ]
+    },
+    {
+      "id": "engine_fault_recovery",
+      "category": "engine_fault",
+      "owner": "agent2",
+      "implementation_status": "planned",
+      "legacy_case_ids": [
+        "engine_fault_down_phases",
+        "engine_fault_flap",
+        "engine_fault_crash_after",
+        "engine_fault_recovery_generation_bump",
+        "engine_fault_recovery_kv_resync",
+        "engine_fault_recovery_no_resurrect",
+        "engine_fault_status_gap_no_bump",
+        "engine_fault_status_gap_long_retire",
+        "engine_fault_recovery_kv_usage_reset"
+      ]
+    },
+    {
+      "id": "engine_rpc_fault",
+      "category": "engine_fault",
+      "owner": "agent2",
+      "implementation_status": "planned",
+      "legacy_case_ids": [
+        "engine_fault_no_respond",
+        "engine_fault_enqueue_error",
+        "engine_fault_enqueue_delay",
+        "engine_fault_generate_delay"
+      ]
+    },
+    {
+      "id": "cache_local_index",
+      "category": "kv",
+      "owner": "agent2",
+      "implementation_status": "planned",
+      "legacy_case_ids": [
+        "kv_pe_admit_isolation",
+        "kv_pe_evict_zero_match",
+        "kv_pe_prefix_continuity"
+      ]
+    },
+    {
+      "id": "cache_global_holders",
+      "category": "kv",
+      "owner": "agent2",
+      "implementation_status": "planned",
+      "legacy_case_ids": [
+        "kv_g_shared_block_both_match",
+        "kv_g_partial_release_redirect",
+        "kv_g_full_release_no_ghost",
+        "kv_g_sync_convergence",
+        "kv_g_engine_down_cleanup"
+      ]
+    },
+    {
+      "id": "cache_affinity",
+      "category": "kv",
+      "owner": "agent2",
+      "implementation_status": "planned",
+      "legacy_case_ids": [
+        "kv_prefix_stickiness",
+        "kv_hot_prefix_tension",
+        "kv_match_mixed",
+        "kv_leader_saturation_spill"
+      ]
+    },
+    {
+      "id": "cache_capacity_recovery",
+      "category": "kv",
+      "owner": "agent2",
+      "implementation_status": "planned",
+      "legacy_case_ids": [
+        "kv_capacity_conflict_overflow",
+        "kv_decode_capacity_park",
+        "kv_pool_saturation_evict_reject_recover",
+        "kv_decode_pool_exhaustion_terminal"
+      ]
+    },
+    {
+      "id": "cache_churn",
+      "category": "kv",
+      "owner": "agent2",
+      "implementation_status": "planned",
+      "legacy_case_ids": [
+        "kv_storm_hot_churn",
+        "kv_lru_eviction_affinity"
+      ]
+    },
+    {
+      "id": "master_lifecycle",
+      "category": "master",
+      "owner": "agent4",
+      "implementation_status": "planned",
+      "legacy_case_ids": [
+        "master_kill",
+        "master_freeze"
+      ]
+    },
+    {
+      "id": "master_dispatch_quota",
+      "category": "master",
+      "owner": "agent4",
+      "implementation_status": "planned",
+      "legacy_case_ids": [
+        "master_quota_block"
+      ]
+    },
+    {
+      "id": "master_coldstart",
+      "category": "master",
+      "owner": "agent4",
+      "implementation_status": "planned",
+      "legacy_case_ids": [
+        "master_coldstart_burst"
+      ]
+    },
+    {
+      "id": "master_ha_failover",
+      "category": "master",
+      "owner": "agent4",
+      "implementation_status": "planned",
+      "legacy_case_ids": [
+        "master_ha_failover"
+      ]
+    },
+    {
+      "id": "client_fallback_failback",
+      "category": "master",
+      "owner": "agent4",
+      "implementation_status": "planned",
+      "legacy_case_ids": [
+        "fallback_direct",
+        "fallback_negative_errorcode",
+        "failback_wraparound",
+        "direct_generate_error"
+      ]
+    },
+    {
+      "id": "priority_queue",
+      "category": "priority",
+      "owner": "agent2",
+      "implementation_status": "planned",
+      "legacy_case_ids": [
+        "prio_order_basic",
+        "prio_same_level_fifo",
+        "prio_normalize",
+        "prio_low_no_starvation",
+        "prio_queue_timeout_terminal"
+      ]
+    },
+    {
+      "id": "priority_preemption",
+      "category": "priority",
+      "owner": "agent2",
+      "implementation_status": "planned",
+      "legacy_case_ids": [
+        "atpm_preempt_prefill_queued",
+        "atpm_preempt_decode_engine_owned",
+        "atpm_same_priority_zero_eviction",
+        "atpm_preemption_disabled_zero_eviction",
+        "atpm_timeout_attribution",
+        "atpm_comparator_frozen_weak",
+        "atpm_error_code_family",
+        "atpm_config_strict_reject",
+        "atpm_decode_reservation_priority",
+        "atpm_observability_integrity",
+        "atpm_preempt_prefill_queued_live",
+        "atpm_preempt_decode_reserved_live",
+        "atpm_preempt_cancel_not_found",
+        "atpm_preempt_cancel_tombstoned"
+      ]
+    },
+    {
+      "id": "batch_ack_and_execution",
+      "category": "status",
+      "owner": "agent5",
+      "implementation_status": "planned",
+      "legacy_case_ids": [
+        "status_ack_partial_fail",
+        "status_batch_async_partial_fail",
+        "status_ack_multi_error",
+        "status_ack_empty_no_crash"
+      ]
+    },
+    {
+      "id": "status_protocol",
+      "category": "status",
+      "owner": "agent5",
+      "implementation_status": "planned",
+      "legacy_case_ids": [
+        "status_inflight_ttl_cleanup",
+        "status_prefill_suppress_all",
+        "status_prefill_suppress_finished",
+        "status_status_no_respond",
+        "status_unknown_rid_finished",
+        "status_version_regress",
+        "status_decode_suppress_finished",
+        "status_decode_before_prefill",
+        "status_decode_running_before_prefill",
+        "status_decode_waiting_before_prefill",
+        "status_unknown_rid_running",
+        "status_unknown_batchid",
+        "status_special_ids",
+        "status_unbatched_single_request",
+        "status_foreign_batchid",
+        "status_duplicate_finished",
+        "status_cursor_regress",
+        "status_finished_then_running",
+        "status_zombie_completed_running",
+        "status_zombie_fake_running",
+        "status_fetch_error",
+        "master_debug_snapshot",
+        "normal_no_fetch_observation"
+      ]
+    }
+  ]
+}

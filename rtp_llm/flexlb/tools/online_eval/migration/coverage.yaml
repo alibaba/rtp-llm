@@ -1,0 +1,1211 @@
+schema_version: 1
+legacy_cases:
+  cancel_basic:
+    disposition: retain_legacy
+    planned_scenario: cancel_lifecycle
+    retained_profiles:
+    - batch-window
+    - single-nonbatch
+    - single-batch
+    - window-nonbatch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  cancel_idempotent:
+    disposition: retain_legacy
+    planned_scenario: cancel_lifecycle
+    retained_profiles:
+    - batch-window
+    - single-nonbatch
+    - single-batch
+    - window-nonbatch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  cancel_sibling_isolation:
+    disposition: retain_legacy
+    planned_scenario: cancel_lifecycle
+    retained_profiles:
+    - batch-window
+    - single-nonbatch
+    - single-batch
+    - window-nonbatch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  cancel_after_terminal:
+    disposition: retain_legacy
+    planned_scenario: cancel_lifecycle
+    retained_profiles:
+    - batch-window
+    - single-nonbatch
+    - single-batch
+    - window-nonbatch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  cancel_unknown_rid:
+    disposition: retain_legacy
+    planned_scenario: cancel_lifecycle
+    retained_profiles:
+    - batch-window
+    - single-nonbatch
+    - single-batch
+    - window-nonbatch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  cancel_phase_timing:
+    disposition: retain_legacy
+    planned_scenario: cancel_lifecycle
+    retained_profiles:
+    - batch-window
+    - single-nonbatch
+    - single-batch
+    - window-nonbatch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  cancel_anomaly_path:
+    disposition: retain_legacy
+    planned_scenario: cancel_lifecycle
+    retained_profiles:
+    - batch-window
+    - single-nonbatch
+    - single-batch
+    - window-nonbatch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  cancel_deadline_exempt_inflight:
+    disposition: retain_legacy
+    planned_scenario: cancel_lifecycle
+    retained_profiles:
+    - batch-window
+    - single-nonbatch
+    - single-batch
+    - window-nonbatch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  cancel_schedule_drop_delivered:
+    disposition: retain_legacy
+    planned_scenario: cancel_lifecycle
+    retained_profiles:
+    - batch-window
+    - single-batch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  cancel_engine_notfound_settle:
+    disposition: retain_legacy
+    planned_scenario: cancel_fence_settlement
+    retained_profiles:
+    - batch-window
+    - single-nonbatch
+    - single-batch
+    - window-nonbatch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  cancel_preemption_victim:
+    disposition: retain_legacy
+    planned_scenario: cancel_lifecycle
+    retained_profiles:
+    - batch-window
+    - single-nonbatch
+    - single-batch
+    - window-nonbatch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  cancel_stream_break_prefill_autonomous:
+    disposition: retain_legacy
+    planned_scenario: cancel_lifecycle
+    retained_profiles:
+    - batch-window
+    - single-batch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  cancel_stream_break_decode_autonomous:
+    disposition: retain_legacy
+    planned_scenario: cancel_lifecycle
+    retained_profiles:
+    - single-nonbatch
+    - window-nonbatch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  cancel_engine_restarted_tombstoned_settle:
+    disposition: retain_legacy
+    planned_scenario: cancel_fence_settlement
+    retained_profiles:
+    - batch-window
+    - single-nonbatch
+    - single-batch
+    - window-nonbatch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  cancel_prefill_dead_await_terminal:
+    disposition: retain_legacy
+    planned_scenario: cancel_fence_settlement
+    retained_profiles:
+    - batch-window
+    - single-nonbatch
+    - single-batch
+    - window-nonbatch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  cancel_decode_retire_closes_fence:
+    disposition: retain_legacy
+    planned_scenario: cancel_fence_settlement
+    retained_profiles:
+    - batch-window
+    - single-nonbatch
+    - single-batch
+    - window-nonbatch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  cancel_fencing_lost_on_engine_restart:
+    disposition: retain_legacy
+    planned_scenario: cancel_fence_settlement
+    retained_profiles:
+    - batch-window
+    - single-nonbatch
+    - single-batch
+    - window-nonbatch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  cancel_transport_failure_one_shot:
+    disposition: retain_legacy
+    planned_scenario: cancel_fence_settlement
+    retained_profiles:
+    - batch-window
+    - single-nonbatch
+    - single-batch
+    - window-nonbatch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  cancel_unexpected_status_await_terminal:
+    disposition: retain_legacy
+    planned_scenario: cancel_fence_settlement
+    retained_profiles:
+    - batch-window
+    - single-nonbatch
+    - single-batch
+    - window-nonbatch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  status_inflight_ttl_cleanup:
+    disposition: retain_legacy
+    planned_scenario: status_protocol
+    retained_profiles:
+    - batch-window
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  status_ack_partial_fail:
+    disposition: retain_legacy
+    planned_scenario: batch_ack_and_execution
+    retained_profiles:
+    - batch-window
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  status_batch_async_partial_fail:
+    disposition: retain_legacy
+    planned_scenario: batch_ack_and_execution
+    retained_profiles:
+    - batch-window
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  status_ack_multi_error:
+    disposition: retain_legacy
+    planned_scenario: batch_ack_and_execution
+    retained_profiles:
+    - batch-window
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  status_ack_empty_no_crash:
+    disposition: retain_legacy
+    planned_scenario: batch_ack_and_execution
+    retained_profiles:
+    - batch-window
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  status_prefill_suppress_all:
+    disposition: retain_legacy
+    planned_scenario: status_protocol
+    retained_profiles:
+    - batch-window
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  status_prefill_suppress_finished:
+    disposition: retain_legacy
+    planned_scenario: status_protocol
+    retained_profiles:
+    - batch-window
+    - single-nonbatch
+    - single-batch
+    - window-nonbatch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  status_status_no_respond:
+    disposition: retain_legacy
+    planned_scenario: status_protocol
+    retained_profiles:
+    - batch-window
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  status_unknown_rid_finished:
+    disposition: retain_legacy
+    planned_scenario: status_protocol
+    retained_profiles:
+    - batch-window
+    - single-nonbatch
+    - single-batch
+    - window-nonbatch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  status_version_regress:
+    disposition: retain_legacy
+    planned_scenario: status_protocol
+    retained_profiles:
+    - batch-window
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  status_decode_suppress_finished:
+    disposition: retain_legacy
+    planned_scenario: status_protocol
+    retained_profiles:
+    - batch-window
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  status_decode_before_prefill:
+    disposition: retain_legacy
+    planned_scenario: status_protocol
+    retained_profiles:
+    - batch-window
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  status_decode_running_before_prefill:
+    disposition: retain_legacy
+    planned_scenario: status_protocol
+    retained_profiles:
+    - batch-window
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  status_decode_waiting_before_prefill:
+    disposition: retain_legacy
+    planned_scenario: status_protocol
+    retained_profiles:
+    - batch-window
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  status_unknown_rid_running:
+    disposition: retain_legacy
+    planned_scenario: status_protocol
+    retained_profiles:
+    - batch-window
+    - single-nonbatch
+    - single-batch
+    - window-nonbatch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  status_unknown_batchid:
+    disposition: retain_legacy
+    planned_scenario: status_protocol
+    retained_profiles:
+    - batch-window
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  status_special_ids:
+    disposition: retain_legacy
+    planned_scenario: status_protocol
+    retained_profiles:
+    - batch-window
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  status_unbatched_single_request:
+    disposition: retain_legacy
+    planned_scenario: status_protocol
+    retained_profiles:
+    - batch-window
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  status_foreign_batchid:
+    disposition: retain_legacy
+    planned_scenario: status_protocol
+    retained_profiles:
+    - batch-window
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  status_duplicate_finished:
+    disposition: retain_legacy
+    planned_scenario: status_protocol
+    retained_profiles:
+    - batch-window
+    - single-nonbatch
+    - single-batch
+    - window-nonbatch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  status_cursor_regress:
+    disposition: retain_legacy
+    planned_scenario: status_protocol
+    retained_profiles:
+    - batch-window
+    - single-nonbatch
+    - single-batch
+    - window-nonbatch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  status_finished_then_running:
+    disposition: retain_legacy
+    planned_scenario: status_protocol
+    retained_profiles:
+    - batch-window
+    - single-nonbatch
+    - single-batch
+    - window-nonbatch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  status_zombie_completed_running:
+    disposition: retain_legacy
+    planned_scenario: status_protocol
+    retained_profiles:
+    - batch-window
+    - single-nonbatch
+    - single-batch
+    - window-nonbatch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  status_zombie_fake_running:
+    disposition: retain_legacy
+    planned_scenario: status_protocol
+    retained_profiles:
+    - batch-window
+    - single-nonbatch
+    - single-batch
+    - window-nonbatch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  status_fetch_error:
+    disposition: retain_legacy
+    planned_scenario: status_protocol
+    retained_profiles:
+    - batch-window
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  master_debug_snapshot:
+    disposition: retain_legacy
+    planned_scenario: status_protocol
+    retained_profiles:
+    - batch-window
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  normal_no_fetch_observation:
+    disposition: retain_legacy
+    planned_scenario: status_protocol
+    retained_profiles:
+    - batch-window
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  kv_pe_admit_isolation:
+    disposition: retain_legacy
+    planned_scenario: cache_local_index
+    retained_profiles:
+    - batch-window
+    - single-nonbatch
+    - single-batch
+    - window-nonbatch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  kv_pe_evict_zero_match:
+    disposition: retain_legacy
+    planned_scenario: cache_local_index
+    retained_profiles:
+    - batch-window
+    - single-nonbatch
+    - single-batch
+    - window-nonbatch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  kv_pe_prefix_continuity:
+    disposition: retain_legacy
+    planned_scenario: cache_local_index
+    retained_profiles:
+    - batch-window
+    - single-nonbatch
+    - single-batch
+    - window-nonbatch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  kv_g_shared_block_both_match:
+    disposition: retain_legacy
+    planned_scenario: cache_global_holders
+    retained_profiles:
+    - batch-window
+    - single-nonbatch
+    - single-batch
+    - window-nonbatch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  kv_g_partial_release_redirect:
+    disposition: retain_legacy
+    planned_scenario: cache_global_holders
+    retained_profiles:
+    - batch-window
+    - single-nonbatch
+    - single-batch
+    - window-nonbatch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  kv_g_full_release_no_ghost:
+    disposition: retain_legacy
+    planned_scenario: cache_global_holders
+    retained_profiles:
+    - batch-window
+    - single-nonbatch
+    - single-batch
+    - window-nonbatch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  kv_g_sync_convergence:
+    disposition: retain_legacy
+    planned_scenario: cache_global_holders
+    retained_profiles:
+    - batch-window
+    - single-nonbatch
+    - single-batch
+    - window-nonbatch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  kv_g_engine_down_cleanup:
+    disposition: retain_legacy
+    planned_scenario: cache_global_holders
+    retained_profiles:
+    - batch-window
+    - single-nonbatch
+    - single-batch
+    - window-nonbatch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  kv_storm_hot_churn:
+    disposition: retain_legacy
+    planned_scenario: cache_churn
+    retained_profiles:
+    - batch-window
+    - single-nonbatch
+    - single-batch
+    - window-nonbatch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  kv_capacity_conflict_overflow:
+    disposition: retain_legacy
+    planned_scenario: cache_capacity_recovery
+    retained_profiles:
+    - batch-window
+    - single-nonbatch
+    - single-batch
+    - window-nonbatch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  kv_prefix_stickiness:
+    disposition: retain_legacy
+    planned_scenario: cache_affinity
+    retained_profiles:
+    - batch-window
+    - single-nonbatch
+    - single-batch
+    - window-nonbatch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  kv_hot_prefix_tension:
+    disposition: retain_legacy
+    planned_scenario: cache_affinity
+    retained_profiles:
+    - batch-window
+    - single-nonbatch
+    - single-batch
+    - window-nonbatch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  kv_match_mixed:
+    disposition: retain_legacy
+    planned_scenario: cache_affinity
+    retained_profiles:
+    - batch-window
+    - single-nonbatch
+    - single-batch
+    - window-nonbatch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  kv_lru_eviction_affinity:
+    disposition: retain_legacy
+    planned_scenario: cache_churn
+    retained_profiles:
+    - batch-window
+    - single-nonbatch
+    - single-batch
+    - window-nonbatch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  kv_decode_capacity_park:
+    disposition: retain_legacy
+    planned_scenario: cache_capacity_recovery
+    retained_profiles:
+    - batch-window
+    - single-nonbatch
+    - single-batch
+    - window-nonbatch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  kv_pool_saturation_evict_reject_recover:
+    disposition: retain_legacy
+    planned_scenario: cache_capacity_recovery
+    retained_profiles:
+    - batch-window
+    - single-nonbatch
+    - single-batch
+    - window-nonbatch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  kv_decode_pool_exhaustion_terminal:
+    disposition: retain_legacy
+    planned_scenario: cache_capacity_recovery
+    retained_profiles:
+    - batch-window
+    - single-nonbatch
+    - single-batch
+    - window-nonbatch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  kv_leader_saturation_spill:
+    disposition: retain_legacy
+    planned_scenario: cache_affinity
+    retained_profiles:
+    - batch-window
+    - single-nonbatch
+    - single-batch
+    - window-nonbatch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  balance_uniform_serial:
+    disposition: retain_legacy
+    planned_scenario: balance_distribution
+    retained_profiles:
+    - batch-window
+    - single-nonbatch
+    - single-batch
+    - window-nonbatch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  balance_concurrent_mix:
+    disposition: retain_legacy
+    planned_scenario: balance_distribution
+    retained_profiles:
+    - batch-window
+    - single-nonbatch
+    - single-batch
+    - window-nonbatch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  balance_overload_avoid_prefill:
+    disposition: retain_legacy
+    planned_scenario: balance_overload_transfer
+    retained_profiles:
+    - batch-window
+    - single-nonbatch
+    - single-batch
+    - window-nonbatch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  balance_overload_avoid_decode:
+    disposition: retain_legacy
+    planned_scenario: balance_overload_transfer
+    retained_profiles:
+    - batch-window
+    - single-nonbatch
+    - single-batch
+    - window-nonbatch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  balance_decode_spread:
+    disposition: retain_legacy
+    planned_scenario: balance_distribution
+    retained_profiles:
+    - batch-window
+    - single-nonbatch
+    - single-batch
+    - window-nonbatch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  balance_len_mixed:
+    disposition: retain_legacy
+    planned_scenario: balance_distribution
+    retained_profiles:
+    - batch-window
+    - single-nonbatch
+    - single-batch
+    - window-nonbatch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  elastic_add_flow:
+    disposition: retain_legacy
+    planned_scenario: elastic_lifecycle
+    retained_profiles:
+    - batch-window
+    - single-nonbatch
+    - single-batch
+    - window-nonbatch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  elastic_remove_flow:
+    disposition: retain_legacy
+    planned_scenario: elastic_lifecycle
+    retained_profiles:
+    - batch-window
+    - single-nonbatch
+    - single-batch
+    - window-nonbatch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  elastic_add_remove_cycle:
+    disposition: retain_legacy
+    planned_scenario: elastic_lifecycle
+    retained_profiles:
+    - batch-window
+    - single-nonbatch
+    - single-batch
+    - window-nonbatch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  elastic_rebalance:
+    disposition: retain_legacy
+    planned_scenario: elastic_lifecycle
+    retained_profiles:
+    - batch-window
+    - single-nonbatch
+    - single-batch
+    - window-nonbatch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  elastic_stop_after_add:
+    disposition: retain_legacy
+    planned_scenario: elastic_added_worker_fault
+    retained_profiles:
+    - batch-window
+    - single-nonbatch
+    - single-batch
+    - window-nonbatch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  elastic_concurrent_ops:
+    disposition: retain_legacy
+    planned_scenario: elastic_concurrent_mutation
+    retained_profiles:
+    - batch-window
+    - single-nonbatch
+    - single-batch
+    - window-nonbatch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  elastic_remove_pending_drain:
+    disposition: retain_legacy
+    planned_scenario: elastic_pending_drain
+    retained_profiles:
+    - batch-window
+    - single-batch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  elastic_add_preference:
+    disposition: retain_legacy
+    planned_scenario: elastic_lifecycle
+    retained_profiles:
+    - batch-window
+    - single-nonbatch
+    - single-batch
+    - window-nonbatch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  elastic_kv_full_shrink:
+    disposition: retain_legacy
+    planned_scenario: elastic_lifecycle
+    retained_profiles:
+    - batch-window
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  elastic_kv_skew_shrink_hot:
+    disposition: retain_legacy
+    planned_scenario: elastic_lifecycle
+    retained_profiles:
+    - batch-window
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  elastic_kv_skew_shrink_cold:
+    disposition: retain_legacy
+    planned_scenario: elastic_lifecycle
+    retained_profiles:
+    - batch-window
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  elastic_transient_imbalance_bound:
+    disposition: retain_legacy
+    planned_scenario: elastic_lifecycle
+    retained_profiles:
+    - batch-window
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  elastic_steady_state_recovery:
+    disposition: retain_legacy
+    planned_scenario: elastic_lifecycle
+    retained_profiles:
+    - batch-window
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  engine_fault_down_phases:
+    disposition: retain_legacy
+    planned_scenario: engine_fault_recovery
+    retained_profiles:
+    - batch-window
+    - single-nonbatch
+    - single-batch
+    - window-nonbatch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  engine_fault_flap:
+    disposition: retain_legacy
+    planned_scenario: engine_fault_recovery
+    retained_profiles:
+    - batch-window
+    - single-nonbatch
+    - single-batch
+    - window-nonbatch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  engine_fault_crash_after:
+    disposition: retain_legacy
+    planned_scenario: engine_fault_recovery
+    retained_profiles:
+    - batch-window
+    - single-batch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  engine_fault_no_respond:
+    disposition: retain_legacy
+    planned_scenario: engine_rpc_fault
+    retained_profiles:
+    - batch-window
+    - single-nonbatch
+    - single-batch
+    - window-nonbatch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  engine_fault_enqueue_error:
+    disposition: retain_legacy
+    planned_scenario: engine_rpc_fault
+    retained_profiles:
+    - batch-window
+    - single-nonbatch
+    - single-batch
+    - window-nonbatch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  engine_fault_enqueue_delay:
+    disposition: retain_legacy
+    planned_scenario: engine_rpc_fault
+    retained_profiles:
+    - batch-window
+    - single-batch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  engine_fault_generate_delay:
+    disposition: retain_legacy
+    planned_scenario: engine_rpc_fault
+    retained_profiles:
+    - batch-window
+    - single-nonbatch
+    - single-batch
+    - window-nonbatch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  engine_fault_recovery_generation_bump:
+    disposition: retain_legacy
+    planned_scenario: engine_fault_recovery
+    retained_profiles:
+    - batch-window
+    - single-nonbatch
+    - single-batch
+    - window-nonbatch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  engine_fault_recovery_kv_resync:
+    disposition: retain_legacy
+    planned_scenario: engine_fault_recovery
+    retained_profiles:
+    - batch-window
+    - single-batch
+    - window-nonbatch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  engine_fault_recovery_no_resurrect:
+    disposition: retain_legacy
+    planned_scenario: engine_fault_recovery
+    retained_profiles:
+    - batch-window
+    - single-batch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  engine_fault_status_gap_no_bump:
+    disposition: retain_legacy
+    planned_scenario: engine_fault_recovery
+    retained_profiles:
+    - batch-window
+    - single-nonbatch
+    - single-batch
+    - window-nonbatch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  engine_fault_status_gap_long_retire:
+    disposition: retain_legacy
+    planned_scenario: engine_fault_recovery
+    retained_profiles:
+    - batch-window
+    - single-nonbatch
+    - single-batch
+    - window-nonbatch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  engine_fault_recovery_kv_usage_reset:
+    disposition: retain_legacy
+    planned_scenario: engine_fault_recovery
+    retained_profiles:
+    - batch-window
+    - single-nonbatch
+    - single-batch
+    - window-nonbatch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  master_kill:
+    disposition: retain_legacy
+    planned_scenario: master_lifecycle
+    retained_profiles:
+    - batch-window
+    - single-nonbatch
+    - single-batch
+    - window-nonbatch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  master_quota_block:
+    disposition: retain_legacy
+    planned_scenario: master_dispatch_quota
+    retained_profiles:
+    - batch-window
+    - single-batch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  master_coldstart_burst:
+    disposition: retain_legacy
+    planned_scenario: master_coldstart
+    retained_profiles:
+    - batch-window
+    - single-nonbatch
+    - single-batch
+    - window-nonbatch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  master_freeze:
+    disposition: retain_legacy
+    planned_scenario: master_lifecycle
+    retained_profiles:
+    - batch-window
+    - single-nonbatch
+    - single-batch
+    - window-nonbatch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  master_ha_failover:
+    disposition: retain_legacy
+    planned_scenario: master_ha_failover
+    retained_profiles:
+    - batch-window
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  fallback_direct:
+    disposition: retain_legacy
+    planned_scenario: client_fallback_failback
+    retained_profiles:
+    - batch-window
+    - single-nonbatch
+    - single-batch
+    - window-nonbatch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  fallback_negative_errorcode:
+    disposition: retain_legacy
+    planned_scenario: client_fallback_failback
+    retained_profiles:
+    - batch-window
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  failback_wraparound:
+    disposition: retain_legacy
+    planned_scenario: client_fallback_failback
+    retained_profiles:
+    - batch-window
+    - single-nonbatch
+    - single-batch
+    - window-nonbatch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  direct_generate_error:
+    disposition: retain_legacy
+    planned_scenario: client_fallback_failback
+    retained_profiles:
+    - batch-window
+    - single-nonbatch
+    - single-batch
+    - window-nonbatch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  admission_queue_depth_reject:
+    disposition: retain_legacy
+    planned_scenario: admission_queue
+    retained_profiles:
+    - batch-window
+    - single-batch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  admission_slo_queue_deadline:
+    disposition: retain_legacy
+    planned_scenario: admission_queue
+    retained_profiles:
+    - batch-window
+    - single-batch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  admission_master_capacity_reject:
+    disposition: retain_legacy
+    planned_scenario: admission_queue
+    retained_profiles:
+    - batch-window
+    - single-batch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  engine_prefill_concurrency_gate_park:
+    disposition: retain_legacy
+    planned_scenario: engine_admission_gate
+    retained_profiles:
+    - batch-window
+    - single-batch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  engine_decode_hard_gate_unbounded_park:
+    disposition: retain_legacy
+    planned_scenario: engine_admission_gate
+    retained_profiles:
+    - batch-window
+    - single-batch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  admission_priority_incomer_reject:
+    disposition: retain_legacy
+    planned_scenario: priority_admission
+    retained_profiles:
+    - batch-window
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  admission_batcher_queue_capacity_park:
+    disposition: retain_legacy
+    planned_scenario: batcher_placement_admission
+    retained_profiles:
+    - batch-window
+    - single-batch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  admission_batcher_queue_deadline:
+    disposition: retain_legacy
+    planned_scenario: batcher_placement_admission
+    retained_profiles:
+    - batch-window
+    - single-batch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  admission_placement_pool_wait:
+    disposition: retain_legacy
+    planned_scenario: batcher_placement_admission
+    retained_profiles:
+    - single-nonbatch
+    - window-nonbatch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  admission_engine_waiting_batch_cap_reject:
+    disposition: retain_legacy
+    planned_scenario: engine_admission_gate
+    retained_profiles:
+    - batch-window
+    - single-batch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  admission_engine_kv_lack_mem_fast_reject:
+    disposition: retain_legacy
+    planned_scenario: engine_admission_gate
+    retained_profiles:
+    - batch-window
+    - single-batch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  engine_prefill_token_budget_split:
+    disposition: retain_legacy
+    planned_scenario: prefill_batch_token_budget
+    retained_profiles:
+    - batch-window
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  engine_prefill_token_budget_split_fifo:
+    disposition: retain_legacy
+    planned_scenario: prefill_batch_token_budget
+    retained_profiles:
+    - batch-window
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  engine_prefill_token_budget_boundary:
+    disposition: retain_legacy
+    planned_scenario: prefill_batch_token_budget
+    retained_profiles:
+    - batch-window
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  engine_prefill_regroup_disabled_verbatim:
+    disposition: retain_legacy
+    planned_scenario: prefill_batch_token_budget
+    retained_profiles:
+    - batch-window
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  prio_order_basic:
+    disposition: retain_legacy
+    planned_scenario: priority_queue
+    retained_profiles:
+    - single-nonbatch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  prio_same_level_fifo:
+    disposition: retain_legacy
+    planned_scenario: priority_queue
+    retained_profiles:
+    - single-nonbatch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  prio_normalize:
+    disposition: retain_legacy
+    planned_scenario: priority_queue
+    retained_profiles:
+    - batch-window
+    - single-nonbatch
+    - single-batch
+    - window-nonbatch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  prio_low_no_starvation:
+    disposition: retain_legacy
+    planned_scenario: priority_queue
+    retained_profiles:
+    - single-nonbatch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  prio_queue_timeout_terminal:
+    disposition: retain_legacy
+    planned_scenario: priority_queue
+    retained_profiles:
+    - single-nonbatch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  atpm_preempt_prefill_queued:
+    disposition: retain_legacy
+    planned_scenario: priority_preemption
+    retained_profiles:
+    - single-nonbatch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  atpm_preempt_decode_engine_owned:
+    disposition: retain_legacy
+    planned_scenario: priority_preemption
+    retained_profiles:
+    - single-nonbatch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  atpm_same_priority_zero_eviction:
+    disposition: retain_legacy
+    planned_scenario: priority_preemption
+    retained_profiles:
+    - single-nonbatch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  atpm_preemption_disabled_zero_eviction:
+    disposition: retain_legacy
+    planned_scenario: priority_preemption
+    retained_profiles:
+    - single-nonbatch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  atpm_timeout_attribution:
+    disposition: retain_legacy
+    planned_scenario: priority_preemption
+    retained_profiles:
+    - single-nonbatch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  atpm_comparator_frozen_weak:
+    disposition: retain_legacy
+    planned_scenario: priority_preemption
+    retained_profiles:
+    - single-nonbatch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  atpm_error_code_family:
+    disposition: retain_legacy
+    planned_scenario: priority_preemption
+    retained_profiles:
+    - single-nonbatch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  atpm_config_strict_reject:
+    disposition: retain_legacy
+    planned_scenario: priority_preemption
+    retained_profiles:
+    - single-nonbatch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  atpm_decode_reservation_priority:
+    disposition: retain_legacy
+    planned_scenario: priority_preemption
+    retained_profiles:
+    - single-nonbatch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  atpm_observability_integrity:
+    disposition: retain_legacy
+    planned_scenario: priority_preemption
+    retained_profiles:
+    - single-nonbatch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  atpm_preempt_prefill_queued_live:
+    disposition: retain_legacy
+    planned_scenario: priority_preemption
+    retained_profiles:
+    - batch-window
+    - single-batch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  atpm_preempt_decode_reserved_live:
+    disposition: retain_legacy
+    planned_scenario: priority_preemption
+    retained_profiles:
+    - batch-window
+    - single-batch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  atpm_preempt_cancel_not_found:
+    disposition: retain_legacy
+    planned_scenario: priority_preemption
+    retained_profiles:
+    - single-nonbatch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.
+  atpm_preempt_cancel_tombstoned:
+    disposition: retain_legacy
+    planned_scenario: priority_preemption
+    retained_profiles:
+    - batch-window
+    - single-batch
+    rationale: Stage/check equivalence and compatible-profile execution evidence remain
+      pending; retain the complete legacy callable.

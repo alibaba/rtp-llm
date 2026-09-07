@@ -1,0 +1,2152 @@
+{
+  "schema_version": 1,
+  "revision": "7419b2943559c2d78f65baf4da15790a5494016d",
+  "legacy_cases": [
+    {
+      "id": "cancel_basic",
+      "category": "cancel",
+      "profiles": [
+        "batch-window",
+        "single-nonbatch",
+        "single-batch",
+        "window-nonbatch"
+      ],
+      "declared_profiles": null,
+      "requires": [],
+      "expected_fail": false,
+      "source": "cancel_smoke.py T1",
+      "contract_digest": "52cfc07a793936aca693bb6ecbb83a273e1511b21726f2cf1645ea9ccaf17fa0"
+    },
+    {
+      "id": "cancel_idempotent",
+      "category": "cancel",
+      "profiles": [
+        "batch-window",
+        "single-nonbatch",
+        "single-batch",
+        "window-nonbatch"
+      ],
+      "declared_profiles": null,
+      "requires": [],
+      "expected_fail": false,
+      "source": "cancel_smoke.py T2",
+      "contract_digest": "aed68e042923cfa46a189520aba5f517d7f755056f4268f1e9e1bdf41c4eb438"
+    },
+    {
+      "id": "cancel_sibling_isolation",
+      "category": "cancel",
+      "profiles": [
+        "batch-window",
+        "single-nonbatch",
+        "single-batch",
+        "window-nonbatch"
+      ],
+      "declared_profiles": null,
+      "requires": [],
+      "expected_fail": false,
+      "source": "cancel_smoke.py T3",
+      "contract_digest": "04b3713d739984ad170d4035a57d380fe480c07acd0cd0006ae1976a8403a71d"
+    },
+    {
+      "id": "cancel_after_terminal",
+      "category": "cancel",
+      "profiles": [
+        "batch-window",
+        "single-nonbatch",
+        "single-batch",
+        "window-nonbatch"
+      ],
+      "declared_profiles": null,
+      "requires": [],
+      "expected_fail": false,
+      "source": "cancel_smoke.py T4",
+      "contract_digest": "659ffbc6e274bc628f26d4cf710ea129766e4d2a82fb67a88be6011efde27d78"
+    },
+    {
+      "id": "cancel_unknown_rid",
+      "category": "cancel",
+      "profiles": [
+        "batch-window",
+        "single-nonbatch",
+        "single-batch",
+        "window-nonbatch"
+      ],
+      "declared_profiles": null,
+      "requires": [],
+      "expected_fail": false,
+      "source": "cancel_smoke.py T5",
+      "contract_digest": "dfa6fa76fdedc104d98e30819ce6cbf69c47d1a01ad8fa864ff975632561d32a"
+    },
+    {
+      "id": "cancel_phase_timing",
+      "category": "cancel",
+      "profiles": [
+        "batch-window",
+        "single-nonbatch",
+        "single-batch",
+        "window-nonbatch"
+      ],
+      "declared_profiles": null,
+      "requires": [],
+      "expected_fail": false,
+      "source": "cancel_smoke.py T6",
+      "contract_digest": "3c50a7bae1926ff6903be9258f381683c252f1e04d7b9a8647a9326b11321aad"
+    },
+    {
+      "id": "cancel_anomaly_path",
+      "category": "cancel",
+      "profiles": [
+        "batch-window",
+        "single-nonbatch",
+        "single-batch",
+        "window-nonbatch"
+      ],
+      "declared_profiles": null,
+      "requires": [],
+      "expected_fail": false,
+      "source": "anomaly_smoke.py E1",
+      "contract_digest": "ab0a136bd2f202fe40a3b65d453aae4e931d143ce012d2f8ae99307c78d3449e"
+    },
+    {
+      "id": "cancel_deadline_exempt_inflight",
+      "category": "cancel",
+      "profiles": [
+        "batch-window",
+        "single-nonbatch",
+        "single-batch",
+        "window-nonbatch"
+      ],
+      "declared_profiles": null,
+      "requires": [],
+      "expected_fail": false,
+      "source": "",
+      "contract_digest": "37967ca456c1af46a54591674cbf021b6d434145e7737da53cbd54002ff89390"
+    },
+    {
+      "id": "cancel_schedule_drop_delivered",
+      "category": "cancel",
+      "profiles": [
+        "batch-window",
+        "single-batch"
+      ],
+      "declared_profiles": null,
+      "requires": [
+        "enqueue_batch"
+      ],
+      "expected_fail": false,
+      "source": "",
+      "contract_digest": "f984f5b5cc690d044cfdf34a168371f45faa58d4b53f56aad65f56f3955e79b8"
+    },
+    {
+      "id": "cancel_engine_notfound_settle",
+      "category": "cancel",
+      "profiles": [
+        "batch-window",
+        "single-nonbatch",
+        "single-batch",
+        "window-nonbatch"
+      ],
+      "declared_profiles": null,
+      "requires": [],
+      "expected_fail": false,
+      "source": "",
+      "contract_digest": "9ccface437c21b38dee5df7bd885b1571d58c17471285f3af6eba5d211492ab9"
+    },
+    {
+      "id": "cancel_preemption_victim",
+      "category": "cancel",
+      "profiles": [
+        "batch-window",
+        "single-nonbatch",
+        "single-batch",
+        "window-nonbatch"
+      ],
+      "declared_profiles": null,
+      "requires": [],
+      "expected_fail": false,
+      "source": "",
+      "contract_digest": "a71a4c5e2989f62d255c590756809697d3c23cd1ea469a19cb865bf0611cd1eb"
+    },
+    {
+      "id": "cancel_stream_break_prefill_autonomous",
+      "category": "cancel",
+      "profiles": [
+        "batch-window",
+        "single-batch"
+      ],
+      "declared_profiles": null,
+      "requires": [
+        "enqueue_batch"
+      ],
+      "expected_fail": false,
+      "source": "",
+      "contract_digest": "52af9c964f11597642205dcb873998285d6c6dfbf427b4099f2598d74b48913c"
+    },
+    {
+      "id": "cancel_stream_break_decode_autonomous",
+      "category": "cancel",
+      "profiles": [
+        "single-nonbatch",
+        "window-nonbatch"
+      ],
+      "declared_profiles": null,
+      "requires": [
+        "generate_stream"
+      ],
+      "expected_fail": false,
+      "source": "",
+      "contract_digest": "eeb300ef55a17b379eff94a700c5ea9c20aaaadbd95dc74d838038e56fc9fe9f"
+    },
+    {
+      "id": "cancel_engine_restarted_tombstoned_settle",
+      "category": "cancel",
+      "profiles": [
+        "batch-window",
+        "single-nonbatch",
+        "single-batch",
+        "window-nonbatch"
+      ],
+      "declared_profiles": [
+        "batch-window",
+        "single-nonbatch",
+        "single-batch",
+        "window-nonbatch"
+      ],
+      "requires": [],
+      "expected_fail": false,
+      "source": "",
+      "contract_digest": "c21de6a5099e8e30d012b1254b77c8f472a62a749023321ac54b37746a0b0726"
+    },
+    {
+      "id": "cancel_prefill_dead_await_terminal",
+      "category": "cancel",
+      "profiles": [
+        "batch-window",
+        "single-nonbatch",
+        "single-batch",
+        "window-nonbatch"
+      ],
+      "declared_profiles": [
+        "batch-window",
+        "single-nonbatch",
+        "single-batch",
+        "window-nonbatch"
+      ],
+      "requires": [],
+      "expected_fail": false,
+      "source": "",
+      "contract_digest": "94bb219b04e1527834aa3405233a9237bad725d299c2df74e1c41161cf504742"
+    },
+    {
+      "id": "cancel_decode_retire_closes_fence",
+      "category": "cancel",
+      "profiles": [
+        "batch-window",
+        "single-nonbatch",
+        "single-batch",
+        "window-nonbatch"
+      ],
+      "declared_profiles": [
+        "batch-window",
+        "single-nonbatch",
+        "single-batch",
+        "window-nonbatch"
+      ],
+      "requires": [],
+      "expected_fail": false,
+      "source": "",
+      "contract_digest": "ade8401f1142e37571acb14ac0c45afa65ba5455ab6cc8d250398c872ddace04"
+    },
+    {
+      "id": "cancel_fencing_lost_on_engine_restart",
+      "category": "cancel",
+      "profiles": [
+        "batch-window",
+        "single-nonbatch",
+        "single-batch",
+        "window-nonbatch"
+      ],
+      "declared_profiles": [
+        "batch-window",
+        "single-nonbatch",
+        "single-batch",
+        "window-nonbatch"
+      ],
+      "requires": [],
+      "expected_fail": false,
+      "source": "",
+      "contract_digest": "0917a902fbaad23ac9cb043d6e2fe9fcf77876c0fd369e4a85f78405bb624d36"
+    },
+    {
+      "id": "cancel_transport_failure_one_shot",
+      "category": "cancel",
+      "profiles": [
+        "batch-window",
+        "single-nonbatch",
+        "single-batch",
+        "window-nonbatch"
+      ],
+      "declared_profiles": [
+        "batch-window",
+        "single-nonbatch",
+        "single-batch",
+        "window-nonbatch"
+      ],
+      "requires": [],
+      "expected_fail": false,
+      "source": "",
+      "contract_digest": "76bcd9b2150bd35088d73f427f99c1c7108f6ebb660ad6881ca80b681b473075"
+    },
+    {
+      "id": "cancel_unexpected_status_await_terminal",
+      "category": "cancel",
+      "profiles": [
+        "batch-window",
+        "single-nonbatch",
+        "single-batch",
+        "window-nonbatch"
+      ],
+      "declared_profiles": [
+        "batch-window",
+        "single-nonbatch",
+        "single-batch",
+        "window-nonbatch"
+      ],
+      "requires": [],
+      "expected_fail": false,
+      "source": "",
+      "contract_digest": "fefa7fd78e05313e7485569bfbc22de2c40c23313848a55cd523d13d8099bf59"
+    },
+    {
+      "id": "status_inflight_ttl_cleanup",
+      "category": "status",
+      "profiles": [
+        "batch-window"
+      ],
+      "declared_profiles": [
+        "batch-window"
+      ],
+      "requires": [],
+      "expected_fail": false,
+      "source": "flexlb_behavior_test.sh S1 (stuck inflight TTL cleanup)",
+      "contract_digest": "fb252ca889c6ab91babd4d32e273d1888fce2ea53673b158f112e4f38d02a90f"
+    },
+    {
+      "id": "status_ack_partial_fail",
+      "category": "status",
+      "profiles": [
+        "batch-window"
+      ],
+      "declared_profiles": [
+        "batch-window"
+      ],
+      "requires": [],
+      "expected_fail": true,
+      "source": "P0 status fault family: enqueue_ack_partial_fail(k=1) on a 4-request batch",
+      "contract_digest": "f5c7aaa337453217c567ad4d0ae767fda3d039e0cebb723097baf5f6af8e4771"
+    },
+    {
+      "id": "status_batch_async_partial_fail",
+      "category": "status",
+      "profiles": [
+        "batch-window"
+      ],
+      "declared_profiles": [
+        "batch-window"
+      ],
+      "requires": [],
+      "expected_fail": false,
+      "source": "P0 status fault family: prefill_async_partial_fail(k=1, code=8500) on 4 concurrent requests (execution-phase in-batch failure)",
+      "contract_digest": "5b790b76f076b2fe131da58dc46780201c611f0029873301292c9909d02af93b"
+    },
+    {
+      "id": "status_ack_multi_error",
+      "category": "status",
+      "profiles": [
+        "batch-window"
+      ],
+      "declared_profiles": [
+        "batch-window"
+      ],
+      "requires": [],
+      "expected_fail": false,
+      "source": "P0 status fault family: enqueue_ack_error_code with two distinct codes",
+      "contract_digest": "55cf573d798761e89b437e15c8bce648bff1cf8ccabce82fc7db14f9ab260dd6"
+    },
+    {
+      "id": "status_ack_empty_no_crash",
+      "category": "status",
+      "profiles": [
+        "batch-window"
+      ],
+      "declared_profiles": [
+        "batch-window"
+      ],
+      "requires": [],
+      "expected_fail": true,
+      "source": "P0 status fault family: enqueue_ack_drop — empty ack (dispatch-uncertain)",
+      "contract_digest": "3538f4741bc9394eeb3efb3d0f30fb9798a060ef80b445f8c65693ce3c30ecef"
+    },
+    {
+      "id": "status_prefill_suppress_all",
+      "category": "status",
+      "profiles": [
+        "batch-window"
+      ],
+      "declared_profiles": [
+        "batch-window"
+      ],
+      "requires": [],
+      "expected_fail": false,
+      "source": "P0 status fault family: status_suppress_running+finished on every prefill",
+      "contract_digest": "fd0f15bdca70806e550d2d0ff9c08d948a9d503bff65cb29472bba5fa6333b97"
+    },
+    {
+      "id": "status_prefill_suppress_finished",
+      "category": "status",
+      "profiles": [
+        "batch-window",
+        "single-nonbatch",
+        "single-batch",
+        "window-nonbatch"
+      ],
+      "declared_profiles": null,
+      "requires": [],
+      "expected_fail": false,
+      "source": "P0 status fault family: status_suppress_finished on every prefill",
+      "contract_digest": "b3d583f7535ab04f4d8ba92e1dded748941031fe73210983fce64a88cb1eb60f"
+    },
+    {
+      "id": "status_status_no_respond",
+      "category": "status",
+      "profiles": [
+        "batch-window"
+      ],
+      "declared_profiles": [
+        "batch-window"
+      ],
+      "requires": [],
+      "expected_fail": false,
+      "source": "P0 status fault family: status_no_respond — engine stops answering the status RPC",
+      "contract_digest": "9c090f10b4fecff07c9c720cc1144b534e4d480b7722d1a1a1764db77bd2096e"
+    },
+    {
+      "id": "status_unknown_rid_finished",
+      "category": "status",
+      "profiles": [
+        "batch-window",
+        "single-nonbatch",
+        "single-batch",
+        "window-nonbatch"
+      ],
+      "declared_profiles": null,
+      "requires": [],
+      "expected_fail": false,
+      "source": "P0 status fault family: status_fake_task(finished, unknown rid), one-shot",
+      "contract_digest": "f6ec11ed1bc348ff9778dbd18632d2db8c37e8717c2d1008aae3933b450fb440"
+    },
+    {
+      "id": "status_version_regress",
+      "category": "status",
+      "profiles": [
+        "batch-window"
+      ],
+      "declared_profiles": [
+        "batch-window"
+      ],
+      "requires": [],
+      "expected_fail": false,
+      "source": "P0 status fault family: status_version_regress — stale status version",
+      "contract_digest": "46cd348da3fb1da704753d8e94b3805bd61d576a336530ba978b76174b981d5c"
+    },
+    {
+      "id": "status_decode_suppress_finished",
+      "category": "status",
+      "profiles": [
+        "batch-window"
+      ],
+      "declared_profiles": [
+        "batch-window"
+      ],
+      "requires": [],
+      "expected_fail": false,
+      "source": "P1 status fault family: status_suppress_finished on every decode engine",
+      "contract_digest": "72e6c677fb473af75db664baee99dcf2e678b3127f85658cb86ed1a6bc90c757"
+    },
+    {
+      "id": "status_decode_before_prefill",
+      "category": "status",
+      "profiles": [
+        "batch-window"
+      ],
+      "declared_profiles": [
+        "batch-window"
+      ],
+      "requires": [],
+      "expected_fail": true,
+      "source": "P1 status fault family: status_suppress_rids(full batch) on prefills, decodes normal",
+      "contract_digest": "6343c43d5bdb14884821b60ef9abe926c11cf4c6c04e6b9ba282d35d9b9d13b4"
+    },
+    {
+      "id": "status_decode_running_before_prefill",
+      "category": "status",
+      "profiles": [
+        "batch-window"
+      ],
+      "declared_profiles": [
+        "batch-window"
+      ],
+      "requires": [],
+      "expected_fail": false,
+      "source": "decode-before-prefill matrix, RUNNING arm: decode ACTIVE-only (status_suppress_finished on decodes) + full prefill suppression (status_suppress_rids)",
+      "contract_digest": "7076cbfda76d9e1aed5669915b0f4b94173f14ac5b7ae1e9afbb1ddc1440ff82"
+    },
+    {
+      "id": "status_decode_waiting_before_prefill",
+      "category": "status",
+      "profiles": [
+        "batch-window"
+      ],
+      "declared_profiles": [
+        "batch-window"
+      ],
+      "requires": [],
+      "expected_fail": false,
+      "source": "decode-before-prefill matrix, waiting arm: decode reports an early-phase RECEIVED fact only (status_suppress_rids + status_fake_task(RECEIVED) on decodes) while prefills suppress the whole batch (status_suppress_rids)",
+      "contract_digest": "729ae31fc176b69d1e5ab8332736f6f1e610cdca70e8551fd034116f1214c855"
+    },
+    {
+      "id": "status_unknown_rid_running",
+      "category": "status",
+      "profiles": [
+        "batch-window",
+        "single-nonbatch",
+        "single-batch",
+        "window-nonbatch"
+      ],
+      "declared_profiles": null,
+      "requires": [],
+      "expected_fail": false,
+      "source": "P1 status fault family: status_fake_task(running, unknown rid), one-shot",
+      "contract_digest": "abf5bc9a78786156767c895c078165f336a4db99d66388ce24b66e4414cf16b4"
+    },
+    {
+      "id": "status_unknown_batchid",
+      "category": "status",
+      "profiles": [
+        "batch-window"
+      ],
+      "declared_profiles": [
+        "batch-window"
+      ],
+      "requires": [],
+      "expected_fail": false,
+      "source": "P1 status fault family: status_fake_task(real rid + fake batchId, finished), concurrent with live traffic",
+      "contract_digest": "8eb0d83dc595714a5e0abd92631d19acfffa88a1bd06be5f2bf150533694a1c8"
+    },
+    {
+      "id": "status_special_ids",
+      "category": "status",
+      "profiles": [
+        "batch-window"
+      ],
+      "declared_profiles": [
+        "batch-window"
+      ],
+      "requires": [],
+      "expected_fail": false,
+      "source": "unknown-id defense matrix: sentinel/boundary ids (rid -1 / rid 0 / batch_id 0 / batch_id -1) on the fake-task channel",
+      "contract_digest": "f69770125435767817650ca03c58314f32ffa0c4ead2db6545ef52305a0926e8"
+    },
+    {
+      "id": "status_unbatched_single_request",
+      "category": "status",
+      "profiles": [
+        "batch-window"
+      ],
+      "declared_profiles": [
+        "batch-window"
+      ],
+      "requires": [],
+      "expected_fail": false,
+      "source": "unknown-id defense matrix: unbatched single-request facts (batch_id omitted vs 0, RUNNING vs finished)",
+      "contract_digest": "d33c528039ac5b9d1e63f8a9e90e818e182d34a2d5d341d35dcecf38716e47c0"
+    },
+    {
+      "id": "status_foreign_batchid",
+      "category": "status",
+      "profiles": [
+        "batch-window"
+      ],
+      "declared_profiles": [
+        "batch-window"
+      ],
+      "requires": [],
+      "expected_fail": false,
+      "source": "unknown-id defense matrix: out-of-range batchId (a foreign dispatch space) with concurrent real traffic",
+      "contract_digest": "65e12a0597f8ee444ad3191b5af37f792dee12b19d2be392030d6ecfd2ed5e85"
+    },
+    {
+      "id": "status_duplicate_finished",
+      "category": "status",
+      "profiles": [
+        "batch-window",
+        "single-nonbatch",
+        "single-batch",
+        "window-nonbatch"
+      ],
+      "declared_profiles": null,
+      "requires": [],
+      "expected_fail": false,
+      "source": "P1 status fault family: status_duplicate_finished — same terminal reported twice",
+      "contract_digest": "57e219ca2e0b7c36dbc55348ce860a7d68d37cf1d929ce70bd538c27deef70e8"
+    },
+    {
+      "id": "status_cursor_regress",
+      "category": "status",
+      "profiles": [
+        "batch-window",
+        "single-nonbatch",
+        "single-batch",
+        "window-nonbatch"
+      ],
+      "declared_profiles": null,
+      "requires": [],
+      "expected_fail": false,
+      "source": "P1 status fault family: status_cursor_regress(3) — completion cursor rewinds",
+      "contract_digest": "77479499c888330f054b6446fcbd7c6679a4562669c88c25a73558aa1b061388"
+    },
+    {
+      "id": "status_finished_then_running",
+      "category": "status",
+      "profiles": [
+        "batch-window",
+        "single-nonbatch",
+        "single-batch",
+        "window-nonbatch"
+      ],
+      "declared_profiles": null,
+      "requires": [],
+      "expected_fail": false,
+      "source": "P1 status fault family: fake_task sequence — finished replay then persistent RUNNING for a settled rid",
+      "contract_digest": "597963aa23dd2845d998a824dbe12628f0035c4b68261db58df468da316ca513"
+    },
+    {
+      "id": "status_zombie_completed_running",
+      "category": "status",
+      "profiles": [
+        "batch-window",
+        "single-nonbatch",
+        "single-batch",
+        "window-nonbatch"
+      ],
+      "declared_profiles": null,
+      "requires": [],
+      "expected_fail": false,
+      "source": "P1 status fault family: status_zombie_running — completed tasks re-reported RUNNING",
+      "contract_digest": "300037ee73327fa62fb99a02fa6ba4d3abd5b5a92e2793030102516ac8b5fe76"
+    },
+    {
+      "id": "status_zombie_fake_running",
+      "category": "status",
+      "profiles": [
+        "batch-window",
+        "single-nonbatch",
+        "single-batch",
+        "window-nonbatch"
+      ],
+      "declared_profiles": null,
+      "requires": [],
+      "expected_fail": true,
+      "source": "P2 status fault family (DECLARED FINDING PROBE): persistent fake RUNNING for N ghost rids, >= 2x TTL",
+      "contract_digest": "cc23eb96d2d227b3aeccb5972b43be26e3febc4d59f519d98f15679bcb5bf8f4"
+    },
+    {
+      "id": "status_fetch_error",
+      "category": "status",
+      "profiles": [
+        "batch-window"
+      ],
+      "declared_profiles": [
+        "batch-window"
+      ],
+      "requires": [],
+      "expected_fail": false,
+      "source": "gap G6/G7: /inject type=fetch_error (cross-process, batch FetchResponse path)",
+      "contract_digest": "87d5b6dad82a4e830a2ba154068d8fe6b635b79e80dc7fc1fc3d265dc412784e"
+    },
+    {
+      "id": "master_debug_snapshot",
+      "category": "status",
+      "profiles": [
+        "batch-window"
+      ],
+      "declared_profiles": [
+        "batch-window"
+      ],
+      "requires": [
+        "enqueue_batch"
+      ],
+      "expected_fail": false,
+      "source": "debug_snapshot_readonly.py",
+      "contract_digest": "f5613666a1f3521ee78cd0e13c7d275b88477d8fca0870680e6234833e93c0b3"
+    },
+    {
+      "id": "normal_no_fetch_observation",
+      "category": "status",
+      "profiles": [
+        "batch-window"
+      ],
+      "declared_profiles": [
+        "batch-window"
+      ],
+      "requires": [
+        "enqueue_batch"
+      ],
+      "expected_fail": false,
+      "source": "no_fetch_observation.py",
+      "contract_digest": "5fdd85eafa0e06f163d5c35f85cd396a071092006297e260ce729ee63c9dd3cf"
+    },
+    {
+      "id": "kv_pe_admit_isolation",
+      "category": "kv",
+      "profiles": [
+        "batch-window",
+        "single-nonbatch",
+        "single-batch",
+        "window-nonbatch"
+      ],
+      "declared_profiles": null,
+      "requires": [],
+      "expected_fail": false,
+      "source": "kv family: per-engine cache ledger isolation",
+      "contract_digest": "7a59c28510350f4a64104a5c792a662a4a95b84a96444af6c6b37d10ae1da5fb"
+    },
+    {
+      "id": "kv_pe_evict_zero_match",
+      "category": "kv",
+      "profiles": [
+        "batch-window",
+        "single-nonbatch",
+        "single-batch",
+        "window-nonbatch"
+      ],
+      "declared_profiles": null,
+      "requires": [],
+      "expected_fail": false,
+      "source": "kv family: eviction event syncs through the master index",
+      "contract_digest": "a68bf1aee53b2298c5eb9b8a259b5f16cf37f78193035efe47bb280a9dd11b70"
+    },
+    {
+      "id": "kv_pe_prefix_continuity",
+      "category": "kv",
+      "profiles": [
+        "batch-window",
+        "single-nonbatch",
+        "single-batch",
+        "window-nonbatch"
+      ],
+      "declared_profiles": null,
+      "requires": [],
+      "expected_fail": false,
+      "source": "kv family: continuous-prefix matching, gap truncates",
+      "contract_digest": "cbdf158e325fd60f8e7e4406182b3a9ceb1ac314e518223ee8491b3fd2b607fe"
+    },
+    {
+      "id": "kv_g_shared_block_both_match",
+      "category": "kv",
+      "profiles": [
+        "batch-window",
+        "single-nonbatch",
+        "single-batch",
+        "window-nonbatch"
+      ],
+      "declared_profiles": null,
+      "requires": [],
+      "expected_fail": false,
+      "source": "kv family: shared holder set -> equal-hit tie",
+      "contract_digest": "c7ee1b89b19de65d1e0b1dd6ddc2661da6338cec055d293c2772c8ac54d9a69e"
+    },
+    {
+      "id": "kv_g_partial_release_redirect",
+      "category": "kv",
+      "profiles": [
+        "batch-window",
+        "single-nonbatch",
+        "single-batch",
+        "window-nonbatch"
+      ],
+      "declared_profiles": null,
+      "requires": [],
+      "expected_fail": false,
+      "source": "kv family: partial release of a shared block",
+      "contract_digest": "fac91ad30a7bc0e31b04c133cd08386e59e2a3473b67f82008dc6684cc24976e"
+    },
+    {
+      "id": "kv_g_full_release_no_ghost",
+      "category": "kv",
+      "profiles": [
+        "batch-window",
+        "single-nonbatch",
+        "single-batch",
+        "window-nonbatch"
+      ],
+      "declared_profiles": null,
+      "requires": [],
+      "expected_fail": false,
+      "source": "kv family: full release leaves no ghost entries",
+      "contract_digest": "56217968969bd0d69dd28744ed5c7930c0118d811fb081eff4cf0a16233f542a"
+    },
+    {
+      "id": "kv_g_sync_convergence",
+      "category": "kv",
+      "profiles": [
+        "batch-window",
+        "single-nonbatch",
+        "single-batch",
+        "window-nonbatch"
+      ],
+      "declared_profiles": null,
+      "requires": [],
+      "expected_fail": false,
+      "source": "kv family: mixed admit/evict stream converges to snapshot truth",
+      "contract_digest": "5c38413d5eebc36c3eb73841151e82831d962280978a81f19c912456f7edd6c7"
+    },
+    {
+      "id": "kv_g_engine_down_cleanup",
+      "category": "kv",
+      "profiles": [
+        "batch-window",
+        "single-nonbatch",
+        "single-batch",
+        "window-nonbatch"
+      ],
+      "declared_profiles": null,
+      "requires": [],
+      "expected_fail": false,
+      "source": "kv family: engine removal cleans only its own entries",
+      "contract_digest": "e2bcd68999ed3988d03ec72612794043a58bd72f1fd25b1a6230d4d4f88863f7"
+    },
+    {
+      "id": "kv_storm_hot_churn",
+      "category": "kv",
+      "profiles": [
+        "batch-window",
+        "single-nonbatch",
+        "single-batch",
+        "window-nonbatch"
+      ],
+      "declared_profiles": null,
+      "requires": [],
+      "expected_fail": false,
+      "source": "kv family: hot-prefix churn storm vs small LRU",
+      "contract_digest": "f434c699761d694baeb3f61f2aa6eb796282e3eb5e818d3eef5c784407538257"
+    },
+    {
+      "id": "kv_capacity_conflict_overflow",
+      "category": "kv",
+      "profiles": [
+        "batch-window",
+        "single-nonbatch",
+        "single-batch",
+        "window-nonbatch"
+      ],
+      "declared_profiles": null,
+      "requires": [],
+      "expected_fail": false,
+      "source": "kv family: affinity yields to a full holder ledger",
+      "contract_digest": "aa881d2960491a9ce262ae770ba33d00790ea6271385b730fe08cfd580ee480d"
+    },
+    {
+      "id": "kv_prefix_stickiness",
+      "category": "kv",
+      "profiles": [
+        "batch-window",
+        "single-nonbatch",
+        "single-batch",
+        "window-nonbatch"
+      ],
+      "declared_profiles": null,
+      "requires": [],
+      "expected_fail": false,
+      "source": "scheduling_smoke.py S2+S5 (merged; M1 generalized)",
+      "contract_digest": "4d67e1ad4eb53513671153382ae4b536bfad7eb80a4dec1d6d6d3226d2ca0a2c"
+    },
+    {
+      "id": "kv_hot_prefix_tension",
+      "category": "kv",
+      "profiles": [
+        "batch-window",
+        "single-nonbatch",
+        "single-batch",
+        "window-nonbatch"
+      ],
+      "declared_profiles": null,
+      "requires": [],
+      "expected_fail": false,
+      "source": "hot-prefix tension M2",
+      "contract_digest": "25dc1fecad3ad6d045113f95ef4c12567aa7a3e60eb964d9250d16df4a1f3935"
+    },
+    {
+      "id": "kv_match_mixed",
+      "category": "kv",
+      "profiles": [
+        "batch-window",
+        "single-nonbatch",
+        "single-batch",
+        "window-nonbatch"
+      ],
+      "declared_profiles": null,
+      "requires": [],
+      "expected_fail": false,
+      "source": "hit-rate tier contrast M3",
+      "contract_digest": "02fb90761f7c0399c208b60a4343cf7a3c3e15ea8e3f61b797fbe101e270773e"
+    },
+    {
+      "id": "kv_lru_eviction_affinity",
+      "category": "kv",
+      "profiles": [
+        "batch-window",
+        "single-nonbatch",
+        "single-batch",
+        "window-nonbatch"
+      ],
+      "declared_profiles": null,
+      "requires": [],
+      "expected_fail": false,
+      "source": "gap G10: LRU prefix reuse + capacity eviction + affinity routing end-to-end",
+      "contract_digest": "d40d30a385e522e82fbf40fc1996171cbd4df4e618e967b1402cf5dfe5a049db"
+    },
+    {
+      "id": "kv_decode_capacity_park",
+      "category": "kv",
+      "profiles": [
+        "batch-window",
+        "single-nonbatch",
+        "single-batch",
+        "window-nonbatch"
+      ],
+      "declared_profiles": null,
+      "requires": [],
+      "expected_fail": false,
+      "source": "decode-side anomaly gap (G1) — new (anomaly E4 until the category reorg)",
+      "contract_digest": "7be3a18110a2b03ec1e9cffa8791ccf37f41fcc8227aed86fe2879b6bd730273"
+    },
+    {
+      "id": "kv_pool_saturation_evict_reject_recover",
+      "category": "kv",
+      "profiles": [
+        "batch-window",
+        "single-nonbatch",
+        "single-batch",
+        "window-nonbatch"
+      ],
+      "declared_profiles": [
+        "batch-window",
+        "single-nonbatch",
+        "single-batch",
+        "window-nonbatch"
+      ],
+      "requires": [],
+      "expected_fail": false,
+      "source": "KV v2 saturation: evict wave + typed 602 + bounded failures + recovery",
+      "contract_digest": "34986377c52ad41a73da0f3eb159c4cd9cf62ac8fae03b9fa86b722e033b580f"
+    },
+    {
+      "id": "kv_decode_pool_exhaustion_terminal",
+      "category": "kv",
+      "profiles": [
+        "batch-window",
+        "single-nonbatch",
+        "single-batch",
+        "window-nonbatch"
+      ],
+      "declared_profiles": [
+        "batch-window",
+        "single-nonbatch",
+        "single-batch",
+        "window-nonbatch"
+      ],
+      "requires": [],
+      "expected_fail": false,
+      "source": "KV v2 decode-exhaustion: D-pool reservation 602 + clean recovery",
+      "contract_digest": "f1ae869dc1aaff25353d7e319a4e398b33cf2ffd380af5e61d8a1e711af5f90f"
+    },
+    {
+      "id": "kv_leader_saturation_spill",
+      "category": "kv",
+      "profiles": [
+        "batch-window",
+        "single-nonbatch",
+        "single-batch",
+        "window-nonbatch"
+      ],
+      "declared_profiles": null,
+      "requires": [],
+      "expected_fail": true,
+      "source": "kv family: leader saturation spill — queue-full affinity give-up cascades eviction onto the surviving engine (production observation)",
+      "contract_digest": "1e4d184785b177960dbf2524477d703bd02ae923baf060165c4de780ef69a8bf"
+    },
+    {
+      "id": "balance_uniform_serial",
+      "category": "balance",
+      "profiles": [
+        "batch-window",
+        "single-nonbatch",
+        "single-batch",
+        "window-nonbatch"
+      ],
+      "declared_profiles": null,
+      "requires": [],
+      "expected_fail": false,
+      "source": "scheduling_smoke.py S1+S6+S8 (merged)",
+      "contract_digest": "79f830a7a09fadba10bfccb5c5e447dad7ff3aa2a99f6b8b0fb3ffd1f463cd0b"
+    },
+    {
+      "id": "balance_concurrent_mix",
+      "category": "balance",
+      "profiles": [
+        "batch-window",
+        "single-nonbatch",
+        "single-batch",
+        "window-nonbatch"
+      ],
+      "declared_profiles": null,
+      "requires": [],
+      "expected_fail": false,
+      "source": "scheduling_smoke.py S7 (strengthened)",
+      "contract_digest": "7755b8bd63ee1bbc3c16805f9e00289c9dcebd2e602a7ef0976a265d8d8f7230"
+    },
+    {
+      "id": "balance_overload_avoid_prefill",
+      "category": "balance",
+      "profiles": [
+        "batch-window",
+        "single-nonbatch",
+        "single-batch",
+        "window-nonbatch"
+      ],
+      "declared_profiles": null,
+      "requires": [],
+      "expected_fail": false,
+      "source": "scheduling_smoke.py S4 + short-request protection",
+      "contract_digest": "ba74e01906360b478b7530280592c48174a9de767c90a951e65b7992cbebbe1b"
+    },
+    {
+      "id": "balance_overload_avoid_decode",
+      "category": "balance",
+      "profiles": [
+        "batch-window",
+        "single-nonbatch",
+        "single-batch",
+        "window-nonbatch"
+      ],
+      "declared_profiles": null,
+      "requires": [],
+      "expected_fail": false,
+      "source": "scheduling_smoke.py S11 (strengthened)",
+      "contract_digest": "3fec4db08e16900d925432a497728951d77cd28e6a5c56bf0b846f0741b921c6"
+    },
+    {
+      "id": "balance_decode_spread",
+      "category": "balance",
+      "profiles": [
+        "batch-window",
+        "single-nonbatch",
+        "single-batch",
+        "window-nonbatch"
+      ],
+      "declared_profiles": null,
+      "requires": [],
+      "expected_fail": false,
+      "source": "scheduling_smoke.py S3+S10 (merged)",
+      "contract_digest": "3782839b940c2497cd6addefc6ba85e36fd30bce9e3751ddd1bdb24fdbc59278"
+    },
+    {
+      "id": "balance_len_mixed",
+      "category": "balance",
+      "profiles": [
+        "batch-window",
+        "single-nonbatch",
+        "single-batch",
+        "window-nonbatch"
+      ],
+      "declared_profiles": null,
+      "requires": [],
+      "expected_fail": false,
+      "source": "length-heterogeneity dimension L1",
+      "contract_digest": "00b5cdc44f6388e94e29199209565fdb581c4b74b6fe80ae2efac484f23bc29c"
+    },
+    {
+      "id": "elastic_add_flow",
+      "category": "elastic",
+      "profiles": [
+        "batch-window",
+        "single-nonbatch",
+        "single-batch",
+        "window-nonbatch"
+      ],
+      "declared_profiles": null,
+      "requires": [],
+      "expected_fail": false,
+      "source": "elastic acceptance: add under load (FileDiscoveryDynamicScaleEndToEndTest phase 2)",
+      "contract_digest": "2de28775993ffd19e6b52f74641ae386b78d2b4096fdc35ac503a7a5c59a181f"
+    },
+    {
+      "id": "elastic_remove_flow",
+      "category": "elastic",
+      "profiles": [
+        "batch-window",
+        "single-nonbatch",
+        "single-batch",
+        "window-nonbatch"
+      ],
+      "declared_profiles": null,
+      "requires": [],
+      "expected_fail": false,
+      "source": "elastic acceptance: remove under load (FileDiscoveryDynamicScaleEndToEndTest phase 3)",
+      "contract_digest": "8c23a4f189c4e330a2d3642f3d9e3e2eb5df7bce1355797abcbdf4f176c9aa36"
+    },
+    {
+      "id": "elastic_add_remove_cycle",
+      "category": "elastic",
+      "profiles": [
+        "batch-window",
+        "single-nonbatch",
+        "single-batch",
+        "window-nonbatch"
+      ],
+      "declared_profiles": null,
+      "requires": [],
+      "expected_fail": false,
+      "source": "elastic acceptance: 3x add→verify→remove under load→verify cycle",
+      "contract_digest": "7de3f2786739bea5fdc3c82e8374720ea04f534e2c1f585e0d45733cdee1cafd"
+    },
+    {
+      "id": "elastic_rebalance",
+      "category": "elastic",
+      "profiles": [
+        "batch-window",
+        "single-nonbatch",
+        "single-batch",
+        "window-nonbatch"
+      ],
+      "declared_profiles": null,
+      "requires": [],
+      "expected_fail": false,
+      "source": "elastic acceptance: cost-based rebalance after scale-out (share < 60%)",
+      "contract_digest": "0bf24ef4dcbd844c0051558a1019605f5e861bc69d35ad1e4ad2a1c39da0a583"
+    },
+    {
+      "id": "elastic_stop_after_add",
+      "category": "elastic",
+      "profiles": [
+        "batch-window",
+        "single-nonbatch",
+        "single-batch",
+        "window-nonbatch"
+      ],
+      "declared_profiles": null,
+      "requires": [],
+      "expected_fail": false,
+      "source": "elastic acceptance: add → traffic → /stop_engine (3-fail evict) → /start_engine recovery",
+      "contract_digest": "4dd984453f7ddb4ef0db2e2ad312da17a8b47041e32547d41d67689d412fc47a"
+    },
+    {
+      "id": "elastic_concurrent_ops",
+      "category": "elastic",
+      "profiles": [
+        "batch-window",
+        "single-nonbatch",
+        "single-batch",
+        "window-nonbatch"
+      ],
+      "declared_profiles": null,
+      "requires": [],
+      "expected_fail": false,
+      "source": "elastic acceptance: concurrent add/remove storm, master stays healthy",
+      "contract_digest": "d3671d01f720683268f7a4619c50a4b5eb72b7212071270d6d6aa3236a3019c9"
+    },
+    {
+      "id": "elastic_remove_pending_drain",
+      "category": "elastic",
+      "profiles": [
+        "batch-window",
+        "single-batch"
+      ],
+      "declared_profiles": [
+        "batch-window",
+        "single-batch"
+      ],
+      "requires": [],
+      "expected_fail": false,
+      "source": "user-identified gap: scale-in protection for requests queued-but-undispatched on the removed engine",
+      "contract_digest": "7bb7a21eeecfcf84854d5ffe7ee5d9be975b174d206e7d0c8f2535684ff06d2f"
+    },
+    {
+      "id": "elastic_add_preference",
+      "category": "elastic",
+      "profiles": [
+        "batch-window",
+        "single-nonbatch",
+        "single-batch",
+        "window-nonbatch"
+      ],
+      "declared_profiles": null,
+      "requires": [],
+      "expected_fail": false,
+      "source": "user-named gap: post-scale-out traffic preference shape (queue-empty newcomer)",
+      "contract_digest": "62c314074dde9b0c4617557aa19d819b75a7cb5ec5d7455b81118ed03b6ba686"
+    },
+    {
+      "id": "elastic_kv_full_shrink",
+      "category": "elastic",
+      "profiles": [
+        "batch-window"
+      ],
+      "declared_profiles": [
+        "batch-window"
+      ],
+      "requires": [],
+      "expected_fail": false,
+      "source": "balance-metrics v2 design §2.1 (flexlb-balance-metrics-v2-design.md): KV-full scale-in, drain_ok + drain_timeout variants",
+      "contract_digest": "813c98c1b6c2b613de699d3a2f183def29067b250f1f2feae6d0a33268623899"
+    },
+    {
+      "id": "elastic_kv_skew_shrink_hot",
+      "category": "elastic",
+      "profiles": [
+        "batch-window"
+      ],
+      "declared_profiles": [
+        "batch-window"
+      ],
+      "requires": [],
+      "expected_fail": false,
+      "source": "balance-metrics v2 design §2.2 (flexlb-balance-metrics-v2-design.md): KV-skew shrink, hot variant",
+      "contract_digest": "21ad32ad5d6e6effc33ed48cdb7299d038f56bf4f90aeb55c65cf1d22dd047a3"
+    },
+    {
+      "id": "elastic_kv_skew_shrink_cold",
+      "category": "elastic",
+      "profiles": [
+        "batch-window"
+      ],
+      "declared_profiles": [
+        "batch-window"
+      ],
+      "requires": [],
+      "expected_fail": false,
+      "source": "balance-metrics v2 design §2.2 (flexlb-balance-metrics-v2-design.md): KV-skew shrink, cold variant",
+      "contract_digest": "e02f15e8cc09f44eea159dedacb0f960c0d16f4489310219749f10d5ad5241cd"
+    },
+    {
+      "id": "elastic_transient_imbalance_bound",
+      "category": "elastic",
+      "profiles": [
+        "batch-window"
+      ],
+      "declared_profiles": [
+        "batch-window"
+      ],
+      "requires": [],
+      "expected_fail": false,
+      "source": "balance-metrics v2 design §2.3 (flexlb-balance-metrics-v2-design.md): abrupt scale-in under sustained load, transient bounds from explicit capacities",
+      "contract_digest": "1ae4420ff9b56dbd43974428e08b78a5b7056f7687a8d2dfb26d1d4838e02b44"
+    },
+    {
+      "id": "elastic_steady_state_recovery",
+      "category": "elastic",
+      "profiles": [
+        "batch-window"
+      ],
+      "declared_profiles": [
+        "batch-window"
+      ],
+      "requires": [],
+      "expected_fail": false,
+      "source": "balance-metrics v2 design §2.4 (flexlb-balance-metrics-v2-design.md): graceful scale-in, steady-state recovery over a pure 60s observation window",
+      "contract_digest": "93230dcdefc9b383e839360dfd269b1133eb52d3e6efdca5ab698ebe1bafe219"
+    },
+    {
+      "id": "engine_fault_down_phases",
+      "category": "engine_fault",
+      "profiles": [
+        "batch-window",
+        "single-nonbatch",
+        "single-batch",
+        "window-nonbatch"
+      ],
+      "declared_profiles": null,
+      "requires": [],
+      "expected_fail": false,
+      "source": "flexlb_behavior_test.sh S2/S4 merged — five-phase engine-down assertion set",
+      "contract_digest": "e781b507ab06bbc4fc974a31e7400c0c4f1e2cc05ef360b389090df4faf35520"
+    },
+    {
+      "id": "engine_fault_flap",
+      "category": "engine_fault",
+      "profiles": [
+        "batch-window",
+        "single-nonbatch",
+        "single-batch",
+        "window-nonbatch"
+      ],
+      "declared_profiles": null,
+      "requires": [],
+      "expected_fail": false,
+      "source": "gap G2: rapid /stop_engine+/start_engine oscillation, 3-strike eviction vs re-discovery race",
+      "contract_digest": "53f3dada2eb4092dae7a7e61c0e61405cdb20544af38b4b660472993b70a1f2f"
+    },
+    {
+      "id": "engine_fault_crash_after",
+      "category": "engine_fault",
+      "profiles": [
+        "batch-window",
+        "single-batch"
+      ],
+      "declared_profiles": [
+        "batch-window",
+        "single-batch"
+      ],
+      "requires": [],
+      "expected_fail": false,
+      "source": "gap G6/G7: /inject type=crash_after (enqueue-count triggered true crash)",
+      "contract_digest": "11b98480d5472e3aba5c87de365a4ac0453a538b83c79c2aa9b01ca5df3d71f6"
+    },
+    {
+      "id": "engine_fault_no_respond",
+      "category": "engine_fault",
+      "profiles": [
+        "batch-window",
+        "single-nonbatch",
+        "single-batch",
+        "window-nonbatch"
+      ],
+      "declared_profiles": null,
+      "requires": [],
+      "expected_fail": false,
+      "source": "anomaly_smoke.py E2",
+      "contract_digest": "895b9e829e3b83156b35d7b1c31f6eafb11a4c41d7fe4af97e346356d6782818"
+    },
+    {
+      "id": "engine_fault_enqueue_error",
+      "category": "engine_fault",
+      "profiles": [
+        "batch-window",
+        "single-nonbatch",
+        "single-batch",
+        "window-nonbatch"
+      ],
+      "declared_profiles": null,
+      "requires": [],
+      "expected_fail": false,
+      "source": "anomaly_smoke.py E3",
+      "contract_digest": "604f34a4fbeaf9c60b39e9e80bd5e2f2f84324c23eeb1a22d0d4203ee7495d38"
+    },
+    {
+      "id": "engine_fault_enqueue_delay",
+      "category": "engine_fault",
+      "profiles": [
+        "batch-window",
+        "single-batch"
+      ],
+      "declared_profiles": null,
+      "requires": [
+        "enqueue_batch"
+      ],
+      "expected_fail": false,
+      "source": "gap G6/G7: /inject type=enqueue_delay (deferred enqueue ack, BATCH dispatch)",
+      "contract_digest": "85d7f9aca155d30e11f1536d5c569783b81e2248598b85482e62f8f4d556f9f9"
+    },
+    {
+      "id": "engine_fault_generate_delay",
+      "category": "engine_fault",
+      "profiles": [
+        "batch-window",
+        "single-nonbatch",
+        "single-batch",
+        "window-nonbatch"
+      ],
+      "declared_profiles": null,
+      "requires": [],
+      "expected_fail": false,
+      "source": "gap G6/G7: /inject type=generate_delay (prefill execution inflation, all profiles)",
+      "contract_digest": "6729348941c9b34a41bd93811bfc14679f0c51326960d3fb179da9118e9b182f"
+    },
+    {
+      "id": "engine_fault_recovery_generation_bump",
+      "category": "engine_fault",
+      "profiles": [
+        "batch-window",
+        "single-nonbatch",
+        "single-batch",
+        "window-nonbatch"
+      ],
+      "declared_profiles": null,
+      "requires": [],
+      "expected_fail": false,
+      "source": "E1: engine recovery must publish a fresh endpoint generation",
+      "contract_digest": "d653e13efcbd1c30e3a77ca46b310720125bc1ed39a3e05502dc7cd097c27a55"
+    },
+    {
+      "id": "engine_fault_recovery_kv_resync",
+      "category": "engine_fault",
+      "profiles": [
+        "batch-window",
+        "single-batch",
+        "window-nonbatch"
+      ],
+      "declared_profiles": [
+        "batch-window",
+        "single-batch",
+        "window-nonbatch"
+      ],
+      "requires": [],
+      "expected_fail": false,
+      "source": "E2: recovery must rebuild the cache view from a full snapshot",
+      "contract_digest": "63c8eff27b5ba852313983d46c07b4e91872915b97f4e3e11246a479cc24300c"
+    },
+    {
+      "id": "engine_fault_recovery_no_resurrect",
+      "category": "engine_fault",
+      "profiles": [
+        "batch-window",
+        "single-batch"
+      ],
+      "declared_profiles": [
+        "batch-window",
+        "single-batch"
+      ],
+      "requires": [],
+      "expected_fail": false,
+      "source": "E3: pre-outage inflight requests must not resurrect after recovery",
+      "contract_digest": "d9409609cf8d2870e56370785f774b44245eea8f932e1e7b5d8607cfbcbdf6c5"
+    },
+    {
+      "id": "engine_fault_status_gap_no_bump",
+      "category": "engine_fault",
+      "profiles": [
+        "batch-window",
+        "single-nonbatch",
+        "single-batch",
+        "window-nonbatch"
+      ],
+      "declared_profiles": null,
+      "requires": [],
+      "expected_fail": false,
+      "source": "E4: a short status-reporting gap must not retire the generation",
+      "contract_digest": "3bb0ff49c535fc6deb3ca13faf82710f88a8150484dcdba42a6515d722a1bcb4"
+    },
+    {
+      "id": "engine_fault_status_gap_long_retire",
+      "category": "engine_fault",
+      "profiles": [
+        "batch-window",
+        "single-nonbatch",
+        "single-batch",
+        "window-nonbatch"
+      ],
+      "declared_profiles": null,
+      "requires": [],
+      "expected_fail": false,
+      "source": "E5: a long status gap must retire the generation and fence its ledger",
+      "contract_digest": "d4dab317cf7b38b2916ef661bc584c210556675e855881fe6689fe117b9050cc"
+    },
+    {
+      "id": "engine_fault_recovery_kv_usage_reset",
+      "category": "engine_fault",
+      "profiles": [
+        "batch-window",
+        "single-nonbatch",
+        "single-batch",
+        "window-nonbatch"
+      ],
+      "declared_profiles": null,
+      "requires": [],
+      "expected_fail": false,
+      "source": "E6: KV usage must restart from zero after a full restart",
+      "contract_digest": "a5f0e537c6bc30028e08edc433c40a835b61d6beb28fc1aeaaac2314c511c6d9"
+    },
+    {
+      "id": "master_kill",
+      "category": "master",
+      "profiles": [
+        "batch-window",
+        "single-nonbatch",
+        "single-batch",
+        "window-nonbatch"
+      ],
+      "declared_profiles": null,
+      "requires": [],
+      "expected_fail": false,
+      "source": "master HA: kill -9 master → restart → clean state + recovery",
+      "contract_digest": "3b81d7cc308e282cfc442d65152fc04ee5cddf86da716380a3b24aa0ebde5c97"
+    },
+    {
+      "id": "master_quota_block",
+      "category": "master",
+      "profiles": [
+        "batch-window",
+        "single-batch"
+      ],
+      "declared_profiles": null,
+      "requires": [
+        "enqueue_batch"
+      ],
+      "expected_fail": false,
+      "source": "flexlb_behavior_test.sh S3 (1P+1D quota blocking + TTL recovery)",
+      "contract_digest": "7fc1108de9ec0e56880231001f352e9775ddf07f87e1da484c9e954eafbb1344"
+    },
+    {
+      "id": "master_coldstart_burst",
+      "category": "master",
+      "profiles": [
+        "batch-window",
+        "single-nonbatch",
+        "single-batch",
+        "window-nonbatch"
+      ],
+      "declared_profiles": [
+        "batch-window",
+        "single-nonbatch",
+        "single-batch",
+        "window-nonbatch"
+      ],
+      "requires": [],
+      "expected_fail": false,
+      "source": "intake defect regression probe (cold-start first-connect storm)",
+      "contract_digest": "d6a0e5c4db6bb0d8d32ba323117bed52239bbf2b4033dc587e819e0c10cd86f6"
+    },
+    {
+      "id": "master_freeze",
+      "category": "master",
+      "profiles": [
+        "batch-window",
+        "single-nonbatch",
+        "single-batch",
+        "window-nonbatch"
+      ],
+      "declared_profiles": [
+        "batch-window",
+        "single-nonbatch",
+        "single-batch",
+        "window-nonbatch"
+      ],
+      "requires": [],
+      "expected_fail": false,
+      "source": "Mode 2 freeze (SIGSTOP→SIGCONT): content-not-lost assertions, short + long hang tiers (brief p3/p4)",
+      "contract_digest": "2d4f8621fb6babb7a9b690c5433eac21b85f8633f4a42afcb208e84cc849005c"
+    },
+    {
+      "id": "master_ha_failover",
+      "category": "master",
+      "profiles": [
+        "batch-window"
+      ],
+      "declared_profiles": [
+        "batch-window"
+      ],
+      "requires": [],
+      "expected_fail": false,
+      "source": "scenario 2 failover (brief p5/p6): sticky A, kill -9 A, same-request retry to B once, sticky moves to B",
+      "contract_digest": "63619fde8641887fbd2ebd4d3e464f3a8d7f3c1839cadeecff8b5c9b70955fb8"
+    },
+    {
+      "id": "fallback_direct",
+      "category": "master",
+      "profiles": [
+        "batch-window",
+        "single-nonbatch",
+        "single-batch",
+        "window-nonbatch"
+      ],
+      "declared_profiles": [
+        "batch-window",
+        "single-nonbatch",
+        "single-batch",
+        "window-nonbatch"
+      ],
+      "requires": [],
+      "expected_fail": false,
+      "source": "scenario 3 positive (brief p7/p8): kill A + kill B (all masters down) -> ENABLE_FALLBACK -> direct-to-engine streams",
+      "contract_digest": "48d1f3185606c982280ff7ae81394486a2d40cba0bd05f02489964dbcf92b7c9"
+    },
+    {
+      "id": "fallback_negative_errorcode",
+      "category": "master",
+      "profiles": [
+        "batch-window"
+      ],
+      "declared_profiles": [
+        "batch-window"
+      ],
+      "requires": [],
+      "expected_fail": false,
+      "source": "scenario 3 negative (brief p7/p8): business error codes / DEADLINE never trigger the direct fallback",
+      "contract_digest": "d4fe71a2690fc2e9400b12c169a8dc263104752d94a30c88d49d61881db631b5"
+    },
+    {
+      "id": "failback_wraparound",
+      "category": "master",
+      "profiles": [
+        "batch-window",
+        "single-nonbatch",
+        "single-batch",
+        "window-nonbatch"
+      ],
+      "declared_profiles": [
+        "batch-window",
+        "single-nonbatch",
+        "single-batch",
+        "window-nonbatch"
+      ],
+      "requires": [],
+      "expected_fail": false,
+      "source": "scenario 4 recovery (brief p9/p10): rebuild scenario-2 end state (sticky B, A dead), restart + converge A, kill B -> wrap back to A",
+      "contract_digest": "17d1a5562fa3618764e4eac632a6c08b2c80a7043cc733a4c320cf30f712e4f2"
+    },
+    {
+      "id": "direct_generate_error",
+      "category": "master",
+      "profiles": [
+        "batch-window",
+        "single-nonbatch",
+        "single-batch",
+        "window-nonbatch"
+      ],
+      "declared_profiles": null,
+      "requires": [],
+      "expected_fail": false,
+      "source": "gap G6/G7: /inject type=generate_error (GenerateStreamCall entry, client-direct path)",
+      "contract_digest": "83fcb9c5b81f943b9c6e0c3846b8add66c7f5349cfca69fee67cb18a940c1e0f"
+    },
+    {
+      "id": "admission_queue_depth_reject",
+      "category": "admission",
+      "profiles": [
+        "batch-window",
+        "single-batch"
+      ],
+      "declared_profiles": null,
+      "requires": [
+        "enqueue_batch"
+      ],
+      "expected_fail": false,
+      "source": "gap G8: engine queue_depth admission gate (fast reject + recovery)",
+      "contract_digest": "4063de4207ad0e21bd435ca4a8a4c99d0d75d8d20b12ebb265ceefa43369b6df"
+    },
+    {
+      "id": "admission_slo_queue_deadline",
+      "category": "admission",
+      "profiles": [
+        "batch-window",
+        "single-batch"
+      ],
+      "declared_profiles": [
+        "batch-window",
+        "single-batch"
+      ],
+      "requires": [],
+      "expected_fail": false,
+      "source": "gap G11: SLO queue deadline + kv_pressure admission (wait-then-expire)",
+      "contract_digest": "5371c94f36be1b30bca5cbd12c418b0d375701cd16cee112f271e8fc762004b7"
+    },
+    {
+      "id": "admission_master_capacity_reject",
+      "category": "admission",
+      "profiles": [
+        "batch-window",
+        "single-batch"
+      ],
+      "declared_profiles": [
+        "batch-window",
+        "single-batch"
+      ],
+      "requires": [],
+      "expected_fail": false,
+      "source": "gap G11: master outstanding-capacity admission — typed QUEUE_FULL (8502 TooManyRequests) fast reject.  F6 verdict overturned: the reject IS typed (dedicated code + status_name + detail); the legacy assertion family ('outstanding'/'exhaust'/'resource'/'8431') matched zero tokens of the actual response payload.",
+      "contract_digest": "a9e89be5f6c115a19db38f75328f18cca046f92d66b3edd0731a68ab3c5ad803"
+    },
+    {
+      "id": "engine_prefill_concurrency_gate_park",
+      "category": "admission",
+      "profiles": [
+        "batch-window",
+        "single-batch"
+      ],
+      "declared_profiles": [
+        "batch-window",
+        "single-batch"
+      ],
+      "requires": [
+        "enqueue_batch"
+      ],
+      "expected_fail": false,
+      "source": "admission wave-2 W1: engine prefill-concurrency gate (maxPrefillConcurrency park — wait condition, no reject)",
+      "contract_digest": "b4d9ac7231655ada935c429907dadfdd49e22fb1452fe2fae927a8ec8b2daca2"
+    },
+    {
+      "id": "engine_decode_hard_gate_unbounded_park",
+      "category": "admission",
+      "profiles": [
+        "batch-window",
+        "single-batch"
+      ],
+      "declared_profiles": [
+        "batch-window",
+        "single-batch"
+      ],
+      "requires": [
+        "enqueue_batch"
+      ],
+      "expected_fail": false,
+      "source": "admission wave-2 W2: engine decode hard gate (decodeMaxConcurrency=128 unbounded park — no queue-pressure reject)",
+      "contract_digest": "77ec533e7b73252883b867624fd04321f2f3844c38debf74174b846ea0e54cb4"
+    },
+    {
+      "id": "admission_priority_incomer_reject",
+      "category": "admission",
+      "profiles": [
+        "batch-window"
+      ],
+      "declared_profiles": [
+        "batch-window"
+      ],
+      "requires": [
+        "enqueue_batch"
+      ],
+      "expected_fail": false,
+      "source": "admission wave-2 W3: PRIORITY incomer under new-B permit semantics — permit frees at DecodeAccepted, incomer admitted fast alongside the running victim (name kept for history)",
+      "contract_digest": "64676ddbffaf04f7df576e524862e5ab1f2c3e8ca8f7f33775617e122f7d8189"
+    },
+    {
+      "id": "admission_batcher_queue_capacity_park",
+      "category": "admission",
+      "profiles": [
+        "batch-window",
+        "single-batch"
+      ],
+      "declared_profiles": [
+        "batch-window",
+        "single-batch"
+      ],
+      "requires": [
+        "enqueue_batch"
+      ],
+      "expected_fail": false,
+      "source": "admission wave-2 A5: master batcher-queue capacity gate (maxWaitingRequestsPerPrefillWorker park — waitable, no fast reject)",
+      "contract_digest": "69977047ba1b8ea9ad5a8dba6a5972c1ad4d58d48fc03e1b5237db16b37c3877"
+    },
+    {
+      "id": "admission_batcher_queue_deadline",
+      "category": "admission",
+      "profiles": [
+        "batch-window",
+        "single-batch"
+      ],
+      "declared_profiles": [
+        "batch-window",
+        "single-batch"
+      ],
+      "requires": [
+        "enqueue_batch"
+      ],
+      "expected_fail": false,
+      "source": "admission wave-2 A5: batcher-queue gate deadline — the same BATCH_SLO_EXPIRED (8511) terminal as admission_slo_queue_deadline, with the trigger source moved from the KV gate to the batcher queue capacity gate (same code, different source — the deadline classification must stay uniform)",
+      "contract_digest": "226340c063085fd8178f628caabe0d2d8bd839123204b4b95abcf0c4cd060051"
+    },
+    {
+      "id": "admission_placement_pool_wait",
+      "category": "admission",
+      "profiles": [
+        "single-nonbatch",
+        "window-nonbatch"
+      ],
+      "declared_profiles": [
+        "single-nonbatch",
+        "window-nonbatch"
+      ],
+      "requires": [
+        "generate_stream"
+      ],
+      "expected_fail": false,
+      "source": "admission wave-2 A4 (verdict §4.1 rebuild): prefill placement capacity wait — real backlog via delivery-lease cap 1 + queue cap 2, concurrent park sampling, serialized completion (name kept for history)",
+      "contract_digest": "96ef28e2082516339aa3fad323a21160b810f349cc56e8f6818e17f499e58844"
+    },
+    {
+      "id": "admission_engine_waiting_batch_cap_reject",
+      "category": "admission",
+      "profiles": [
+        "batch-window",
+        "single-batch"
+      ],
+      "declared_profiles": [
+        "batch-window",
+        "single-batch"
+      ],
+      "requires": [
+        "enqueue_batch"
+      ],
+      "expected_fail": false,
+      "source": "admission wave-3 B3: engine prefill waiting-queue cap (max_waiting_batches whole-batch backpressure reject — the non-waitable complement of W1's unbounded park)",
+      "contract_digest": "1bb5b445529330381214bffc539eb0d3043f0645c171a4ab9d5ce9a4b57ae124"
+    },
+    {
+      "id": "admission_engine_kv_lack_mem_fast_reject",
+      "category": "admission",
+      "profiles": [
+        "batch-window",
+        "single-batch"
+      ],
+      "declared_profiles": [
+        "batch-window",
+        "single-batch"
+      ],
+      "requires": [
+        "enqueue_batch"
+      ],
+      "expected_fail": false,
+      "source": "admission wave-3 B2: engine prefill KV block-pool gate (KV v2 BlockLease admission — 602 LACK_MEM synchronous fast reject, the non-waitable engine-side complement of the master KV squeeze in admission_slo_queue_deadline)",
+      "contract_digest": "858284755c1a488e7c18aa84896c7430c727d9408b4e1d75303456e835dbb2ac"
+    },
+    {
+      "id": "engine_prefill_token_budget_split",
+      "category": "admission",
+      "profiles": [
+        "batch-window"
+      ],
+      "declared_profiles": [
+        "batch-window"
+      ],
+      "requires": [
+        "enqueue_batch"
+      ],
+      "expected_fail": false,
+      "source": "engine regroup #8: in-engine dual-budget prefill regroup (over-budget master batch split + closed ledger)",
+      "contract_digest": "924fab6bebc1a7eb404d6e6a58db6f012f97be36b38d3b3b3043bc203d19bc00"
+    },
+    {
+      "id": "engine_prefill_token_budget_split_fifo",
+      "category": "admission",
+      "profiles": [
+        "batch-window"
+      ],
+      "declared_profiles": [
+        "batch-window"
+      ],
+      "requires": [
+        "enqueue_batch"
+      ],
+      "expected_fail": false,
+      "source": "engine regroup #8: in-engine dual-budget prefill regroup (split preserves arrival order across execution batches)",
+      "contract_digest": "fca38afdf742c62db5af5649bf513a8dfe92dd202045ba560a579507a4f252d7"
+    },
+    {
+      "id": "engine_prefill_token_budget_boundary",
+      "category": "admission",
+      "profiles": [
+        "batch-window"
+      ],
+      "declared_profiles": [
+        "batch-window"
+      ],
+      "requires": [
+        "enqueue_batch"
+      ],
+      "expected_fail": false,
+      "source": "engine regroup #8: in-engine dual-budget prefill regroup (boundary — a batch exactly at the token budget is NOT split)",
+      "contract_digest": "292fd76610b8dd3bf8522efd2b17a54588c08b935a6ba801d75401debb3d6719"
+    },
+    {
+      "id": "engine_prefill_regroup_disabled_verbatim",
+      "category": "admission",
+      "profiles": [
+        "batch-window"
+      ],
+      "declared_profiles": [
+        "batch-window"
+      ],
+      "requires": [
+        "enqueue_batch"
+      ],
+      "expected_fail": false,
+      "source": "engine regroup #8: in-engine dual-budget prefill regroup (0/0 disables regroup — legacy verbatim master batches)",
+      "contract_digest": "5b69ca5ee608eb5d3cfc67c8bead6f1b3c5433362e6bd7a7441fba60a7fea0ef"
+    },
+    {
+      "id": "prio_order_basic",
+      "category": "priority",
+      "profiles": [
+        "single-nonbatch"
+      ],
+      "declared_profiles": [
+        "single-nonbatch"
+      ],
+      "requires": [],
+      "expected_fail": false,
+      "source": "design §2.2 #1 — PR1(band) + PR2 + P6",
+      "contract_digest": "714d78b99e497710eedcc62e32515f2eed6a1261b12bedcdf28012dfd3765d64"
+    },
+    {
+      "id": "prio_same_level_fifo",
+      "category": "priority",
+      "profiles": [
+        "single-nonbatch"
+      ],
+      "declared_profiles": [
+        "single-nonbatch"
+      ],
+      "requires": [],
+      "expected_fail": false,
+      "source": "design §2.2 #2 — PR2 + P6",
+      "contract_digest": "211296785d5f3195c92ba2cad5e774e4ee8c1f5e5450ea74bb9bbce4bb3de104"
+    },
+    {
+      "id": "prio_normalize",
+      "category": "priority",
+      "profiles": [
+        "batch-window",
+        "single-nonbatch",
+        "single-batch",
+        "window-nonbatch"
+      ],
+      "declared_profiles": null,
+      "requires": [
+        "queue"
+      ],
+      "expected_fail": false,
+      "source": "design §2.2 #3 — PR3 + P6",
+      "contract_digest": "557f75edb4bb227f3135f0837e34be167ae2f857fe8d3994e0b943b7c318811b"
+    },
+    {
+      "id": "prio_low_no_starvation",
+      "category": "priority",
+      "profiles": [
+        "single-nonbatch"
+      ],
+      "declared_profiles": [
+        "single-nonbatch"
+      ],
+      "requires": [],
+      "expected_fail": false,
+      "source": "design §2.2 #4 — PR8(完成口径) + P6",
+      "contract_digest": "fca4edd5661e5acb113e958d710d9e1f9d3f724e7f5e83a3c771f2709c3e2621"
+    },
+    {
+      "id": "prio_queue_timeout_terminal",
+      "category": "priority",
+      "profiles": [
+        "single-nonbatch"
+      ],
+      "declared_profiles": [
+        "single-nonbatch"
+      ],
+      "requires": [],
+      "expected_fail": false,
+      "source": "design §2.2 #5 — PR8(band) + P6",
+      "contract_digest": "c9bc5ebcb520f69db47271581674e726783226060d57013568e46cb67f2cd13c"
+    },
+    {
+      "id": "atpm_preempt_prefill_queued",
+      "category": "priority",
+      "profiles": [
+        "single-nonbatch"
+      ],
+      "declared_profiles": [
+        "single-nonbatch"
+      ],
+      "requires": [],
+      "expected_fail": false,
+      "source": "design §2.3 #6 — PR10 + PR5 + PR6 + PR4",
+      "contract_digest": "5d006a38957f4c6e59c916cba28db45ba9117e185d9b4581bb4fca660f1c66ae"
+    },
+    {
+      "id": "atpm_preempt_decode_engine_owned",
+      "category": "priority",
+      "profiles": [
+        "single-nonbatch"
+      ],
+      "declared_profiles": [
+        "single-nonbatch"
+      ],
+      "requires": [],
+      "expected_fail": false,
+      "source": "design §2.3 #7 — AT5(band) + PR6 + PR10(decode)",
+      "contract_digest": "de9ce6866afa379d3bf2f00332abcc96c09a9f4acc4d6eaab1eb1c045b4f9070"
+    },
+    {
+      "id": "atpm_same_priority_zero_eviction",
+      "category": "priority",
+      "profiles": [
+        "single-nonbatch"
+      ],
+      "declared_profiles": [
+        "single-nonbatch"
+      ],
+      "requires": [],
+      "expected_fail": false,
+      "source": "design §2.3 #8 — PR4 + AT3",
+      "contract_digest": "cbb0beb41dc831a6140299d4f4c0f7b9173be663fd7c1da0efff53aec62ebffb"
+    },
+    {
+      "id": "atpm_preemption_disabled_zero_eviction",
+      "category": "priority",
+      "profiles": [
+        "single-nonbatch"
+      ],
+      "declared_profiles": [
+        "single-nonbatch"
+      ],
+      "requires": [],
+      "expected_fail": false,
+      "source": "design §2.3 #9 — AT2",
+      "contract_digest": "11dfd9a17a3b8fd3fd4c0cc3b2c6c90d82888664231fdd9450dea33b15a7f7e1"
+    },
+    {
+      "id": "atpm_timeout_attribution",
+      "category": "priority",
+      "profiles": [
+        "single-nonbatch"
+      ],
+      "declared_profiles": [
+        "single-nonbatch"
+      ],
+      "requires": [],
+      "expected_fail": false,
+      "source": "design §2.3 #10 — PR7 (+PR8 deadline-no-extension)",
+      "contract_digest": "5e2655bdb01f6e7061f26e1e5562fe26f719b7d3ec5ea3cf5143ca33e57dff34"
+    },
+    {
+      "id": "atpm_comparator_frozen_weak",
+      "category": "priority",
+      "profiles": [
+        "single-nonbatch"
+      ],
+      "declared_profiles": [
+        "single-nonbatch"
+      ],
+      "requires": [],
+      "expected_fail": false,
+      "source": "design §2.3 #11 — PR9 (weak form)",
+      "contract_digest": "4c1109d2894260ce4a2688fd284edbe5b15a7be842c93b4b74eca8bed712c5be"
+    },
+    {
+      "id": "atpm_error_code_family",
+      "category": "priority",
+      "profiles": [
+        "single-nonbatch"
+      ],
+      "declared_profiles": [
+        "single-nonbatch"
+      ],
+      "requires": [],
+      "expected_fail": false,
+      "source": "design §2.4 #12 — AT4 + P6",
+      "contract_digest": "694f81f2a49b2746ece925bf74217329333c173df92a0a32186f684c7d005d2b"
+    },
+    {
+      "id": "atpm_config_strict_reject",
+      "category": "priority",
+      "profiles": [
+        "single-nonbatch"
+      ],
+      "declared_profiles": [
+        "single-nonbatch"
+      ],
+      "requires": [],
+      "expected_fail": false,
+      "source": "design §2.4 #13 — AT1",
+      "contract_digest": "89493ac1559655a4a7b4b89d8f24c236f551c5082ab4100f7ea05220f8b5d824"
+    },
+    {
+      "id": "atpm_decode_reservation_priority",
+      "category": "priority",
+      "profiles": [
+        "single-nonbatch"
+      ],
+      "declared_profiles": [
+        "single-nonbatch"
+      ],
+      "requires": [],
+      "expected_fail": false,
+      "source": "design §2.4 #14 — AT7 + P6",
+      "contract_digest": "b0f0d9a57704393e42454912f97b22dd92ac59bc37081fc6c4b5dd587a702329"
+    },
+    {
+      "id": "atpm_observability_integrity",
+      "category": "priority",
+      "profiles": [
+        "single-nonbatch"
+      ],
+      "declared_profiles": [
+        "single-nonbatch"
+      ],
+      "requires": [],
+      "expected_fail": false,
+      "source": "design §2.4 #15 — AT8 + P6",
+      "contract_digest": "06eddb82929f2846f06551fa37f1b96ca0ab273c0863941e8036f820a202c6ad"
+    },
+    {
+      "id": "atpm_preempt_prefill_queued_live",
+      "category": "priority",
+      "profiles": [
+        "batch-window",
+        "single-batch"
+      ],
+      "declared_profiles": [
+        "single-batch",
+        "batch-window"
+      ],
+      "requires": [],
+      "expected_fail": false,
+      "source": "preemption-stages audit (2026-09) — live PREFILL_QUEUED eviction",
+      "contract_digest": "991c6daccdc6ba8fcc297444b9446ec3eac2a420744f6e4d4ebf4391b6ae6ac0"
+    },
+    {
+      "id": "atpm_preempt_decode_reserved_live",
+      "category": "priority",
+      "profiles": [
+        "batch-window",
+        "single-batch"
+      ],
+      "declared_profiles": [
+        "single-batch",
+        "batch-window"
+      ],
+      "requires": [],
+      "expected_fail": false,
+      "source": "preemption-stages audit (2026-09) — live DECODE_RESERVED eviction",
+      "contract_digest": "178507d12ad2be7e67ca08c9f6f8a622e229a04bcb4a0a547c7aed55c3825869"
+    },
+    {
+      "id": "atpm_preempt_cancel_not_found",
+      "category": "priority",
+      "profiles": [
+        "single-nonbatch"
+      ],
+      "declared_profiles": [
+        "single-nonbatch"
+      ],
+      "requires": [],
+      "expected_fail": false,
+      "source": "preemption-stages audit (2026-09) — Cancel NOT_FOUND branch",
+      "contract_digest": "28ba21a156703c058831f37ce35004c64c65f087db0e03d0d4cba1ddc26c8469"
+    },
+    {
+      "id": "atpm_preempt_cancel_tombstoned",
+      "category": "priority",
+      "profiles": [
+        "batch-window",
+        "single-batch"
+      ],
+      "declared_profiles": null,
+      "requires": [
+        "enqueue_batch"
+      ],
+      "expected_fail": false,
+      "source": "preemption-stages audit (2026-09) — Cancel TOMBSTONED branch",
+      "contract_digest": "30d5603acba160b7f1810f78c438322f88d64609d3c10a87145e057b33f4032f"
+    }
+  ]
+}
