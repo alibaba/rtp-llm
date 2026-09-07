@@ -1,0 +1,1942 @@
+schema_version: 1
+id: cache_capacity_recovery
+description: Explicit P/D pool ownership, capacity WAIT versus terminal rejection,
+  pressure eviction and affinity overflow.
+category: kv
+profiles:
+- batch-window
+- single-nonbatch
+- single-batch
+- window-nonbatch
+legacy_case_ids:
+- kv_decode_pool_exhaustion_terminal
+- kv_decode_capacity_park
+- kv_pool_saturation_evict_reject_recover
+- kv_capacity_conflict_overflow
+environment:
+  backend: java_mock
+  n_prefill: 2
+  n_decode: 2
+  perf_preset: default
+execution:
+  timeout_s: 900
+  stage_timeout_s: 60
+  cleanup_timeout_s: 120
+variants:
+- id: decode_pool_exhaustion_terminal
+  legacy_case_ids:
+  - kv_decode_pool_exhaustion_terminal
+  environment_overrides:
+    n_prefill: 2
+    n_decode: 1
+    decode_cache_blocks: 3
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: d_base
+    action: kv_capacity_observe
+    params:
+      targets:
+      - decode-0
+      fields:
+      - lack_mem_rejects
+      - kv_admission_fails
+      duration_s: 0
+      interval_s: 0.5
+    timeout_s: 10
+  - id: p_base
+    action: kv_capacity_observe
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+      fields:
+      - lack_mem_rejects
+      - held_blocks
+      duration_s: 0
+      interval_s: 0.5
+    timeout_s: 10
+  - id: probe
+    action: kv_capacity_request
+    params:
+      input_len: 2560
+      output_len: 2
+      mode: complete
+      stream_timeout_s: 15
+      schedule_timeout_s: 30
+      expected_rpc_statuses:
+      - UNKNOWN
+      - INTERNAL
+      block_keys:
+      - 1400000
+      - 1400001
+    timeout_s: 70
+  - id: decode_error
+    action: kv_capacity_outcome
+    params:
+      requests:
+      - $ref: stages.probe.output.requests
+      metric: typed_error
+      tokens:
+      - lack_mem
+      - decode-side
+      max_s: 3
+  - id: d_grew
+    action: kv_capacity_observe
+    params:
+      targets:
+      - decode-0
+      fields:
+      - lack_mem_rejects
+      duration_s: 10
+      interval_s: 0.5
+      until_field: lack_mem_rejects
+      until_op: eq
+      until_value: 1
+      baseline:
+        $ref: stages.d_base.output.observation
+    timeout_s: 15
+  - id: exact_once
+    action: kv_capacity_counter
+    params:
+      observations:
+      - $ref: stages.d_grew.output.observation
+      field: lack_mem_rejects
+      op: eq
+      expected: 1
+      stat: latest
+      baseline:
+        $ref: stages.d_base.output.observation
+  - id: counter_sync
+    action: master_mark
+    params:
+      wait_s: 0.5
+  - id: d_after
+    action: kv_capacity_observe
+    params:
+      targets:
+      - decode-0
+      fields:
+      - kv_admission_fails
+      duration_s: 0
+      interval_s: 0.5
+    timeout_s: 10
+  - id: retry_counter_flat
+    action: kv_capacity_counter
+    params:
+      observations:
+      - $ref: stages.d_after.output.observation
+      field: kv_admission_fails
+      op: eq
+      expected: 0
+      stat: all
+      baseline:
+        $ref: stages.d_base.output.observation
+  - id: p_after
+    action: kv_capacity_observe
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+      fields:
+      - lack_mem_rejects
+      duration_s: 0
+      interval_s: 0.5
+    timeout_s: 10
+  - id: prefill_rejects_flat
+    action: kv_capacity_counter
+    params:
+      observations:
+      - $ref: stages.p_after.output.observation
+      field: lack_mem_rejects
+      op: eq
+      expected: 0
+      stat: all
+      baseline:
+        $ref: stages.p_base.output.observation
+  - id: released
+    action: kv_capacity_observe
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+      fields:
+      - held_blocks
+      duration_s: 10
+      interval_s: 0.5
+      until_field: held_blocks
+      until_op: eq
+      until_value: 0
+      baseline:
+        $ref: stages.p_base.output.observation
+    timeout_s: 15
+  - id: p_leases_released
+    action: kv_capacity_counter
+    params:
+      observations:
+      - $ref: stages.released.output.observation
+      field: held_blocks
+      op: eq
+      expected: 0
+      stat: latest
+      baseline:
+        $ref: stages.p_base.output.observation
+  - id: d_recovery_base
+    action: kv_capacity_observe
+    params:
+      targets:
+      - decode-0
+      fields:
+      - lack_mem_rejects
+      - kv_admission_fails
+      duration_s: 0
+      interval_s: 0.5
+    timeout_s: 10
+  - id: headroom
+    action: kv_capacity_request
+    params:
+      input_len: 1024
+      output_len: 2
+      mode: complete
+      stream_timeout_s: 15
+      schedule_timeout_s: 30
+      expected_rpc_statuses: []
+      block_keys:
+      - 1410000
+      - 1410001
+    timeout_s: 70
+  - id: headroom_succeeded
+    action: kv_capacity_outcome
+    params:
+      requests:
+      - $ref: stages.headroom.output.requests
+      metric: success
+  - id: recovery_sync
+    action: master_mark
+    params:
+      wait_s: 0.5
+  - id: d_stable
+    action: kv_capacity_observe
+    params:
+      targets:
+      - decode-0
+      fields:
+      - lack_mem_rejects
+      - kv_admission_fails
+      duration_s: 0
+      interval_s: 0.5
+    timeout_s: 10
+  - id: terminal_counter_stable
+    action: kv_capacity_counter
+    params:
+      observations:
+      - $ref: stages.d_stable.output.observation
+      field: lack_mem_rejects
+      op: eq
+      expected: 0
+      stat: all
+      baseline:
+        $ref: stages.d_recovery_base.output.observation
+  - id: retry_counter_stable
+    action: kv_capacity_counter
+    params:
+      observations:
+      - $ref: stages.d_stable.output.observation
+      field: kv_admission_fails
+      op: eq
+      expected: 0
+      stat: all
+      baseline:
+        $ref: stages.d_base.output.observation
+  - id: master_clean
+    action: master_ready
+    params:
+      target: single
+      inflight_zero: true
+    timeout_s: 30
+  - id: engine_clean
+    action: admission_engine_clean
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+      - decode-0
+    timeout_s: 30
+  - id: recovery
+    action: kv_capacity_request
+    params:
+      input_len: 2048
+      output_len: 2
+      mode: complete
+      stream_timeout_s: 30
+      schedule_timeout_s: 30
+      expected_rpc_statuses: []
+    timeout_s: 70
+  - id: recovered
+    action: kv_capacity_outcome
+    params:
+      requests:
+      - $ref: stages.recovery.output.requests
+      metric: success
+  - id: cleanup
+    action: teardown
+- id: decode_capacity_park
+  legacy_case_ids:
+  - kv_decode_capacity_park
+  environment_overrides:
+    n_prefill: 2
+    n_decode: 4
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: pressure
+    action: kv_capacity_pressure
+    params:
+      targets:
+      - decode-0
+      - decode-1
+      - decode-2
+      - decode-3
+  - id: status_sync
+    action: master_mark
+    params:
+      wait_s: 1.5
+  - id: before
+    action: kv_capacity_watermark
+  - id: probe
+    action: kv_capacity_request
+    params:
+      input_len: 2048
+      output_len: 10
+      mode: complete
+      stream_timeout_s: 15
+      schedule_timeout_s: 5
+      expected_rpc_statuses:
+      - DEADLINE_EXCEEDED
+    timeout_s: 70
+  - id: schedule_stayed_pending
+    action: kv_capacity_outcome
+    params:
+      requests:
+      - $ref: stages.probe.output.requests
+      metric: schedule_deadline
+  - id: delivery_sync
+    action: master_mark
+    params:
+      wait_s: 0.5
+  - id: delivery
+    action: kv_capacity_observe
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+      - decode-0
+      - decode-1
+      - decode-2
+      - decode-3
+      fields:
+      - request_lifecycle
+      duration_s: 0
+      interval_s: 0.5
+    timeout_s: 10
+  - id: not_delivered
+    action: kv_capacity_not_delivered
+    params:
+      requests:
+        $ref: stages.probe.output.requests
+      observation:
+        $ref: stages.delivery.output.observation
+  - id: cancel
+    action: kv_capacity_cancel
+    params:
+      requests:
+        $ref: stages.probe.output.requests
+  - id: cancel_sync
+    action: master_mark
+    params:
+      wait_s: 0.5
+  - id: watermark_restored
+    action: kv_capacity_watermark_wait
+    params:
+      baseline:
+        $ref: stages.before.output.watermark
+    timeout_s: 10
+  - id: clear
+    action: kv_capacity_clear
+    params:
+      pressure:
+        $ref: stages.pressure.output.pressure
+  - id: recovery_status_sync
+    action: master_mark
+    params:
+      wait_s: 2
+  - id: fresh
+    action: kv_capacity_request
+    params:
+      input_len: 2048
+      output_len: 2
+      mode: complete
+      stream_timeout_s: 15
+      schedule_timeout_s: 30
+      expected_rpc_statuses: []
+    timeout_s: 70
+  - id: fresh_succeeded
+    action: kv_capacity_outcome
+    params:
+      requests:
+      - $ref: stages.fresh.output.requests
+      metric: success
+  - id: recovery
+    action: kv_capacity_request
+    params:
+      input_len: 2048
+      output_len: 2
+      mode: complete
+      stream_timeout_s: 30
+      schedule_timeout_s: 30
+      expected_rpc_statuses: []
+    timeout_s: 70
+  - id: recovered
+    action: kv_capacity_outcome
+    params:
+      requests:
+      - $ref: stages.recovery.output.requests
+      metric: success
+  - id: cleanup
+    action: teardown
+- id: pool_saturation_evict_reject_recover
+  legacy_case_ids:
+  - kv_pool_saturation_evict_reject_recover
+  environment_overrides:
+    n_prefill: 1
+    n_decode: 2
+    prefill_cache_blocks: 27
+    decode_cache_blocks: 32
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: base
+    action: kv_capacity_observe
+    params:
+      targets:
+      - prefill-0
+      fields:
+      - cache_evictions
+      - lack_mem_rejects
+      duration_s: 0
+      interval_s: 0.5
+    timeout_s: 10
+  - id: evict_wave_0
+    action: kv_capacity_request
+    params:
+      input_len: 2048
+      output_len: 2
+      mode: complete
+      stream_timeout_s: 15
+      schedule_timeout_s: 30
+      expected_rpc_statuses: []
+      block_keys:
+      - 500000
+      - 500001
+      - 500002
+      - 500003
+      - 500004
+      - 500005
+      - 500006
+      - 500007
+    timeout_s: 70
+  - id: evict_wave_0_ok
+    action: kv_capacity_outcome
+    params:
+      requests:
+      - $ref: stages.evict_wave_0.output.requests
+      metric: success
+  - id: pool_0
+    action: kv_capacity_observe
+    params:
+      targets:
+      - prefill-0
+      fields:
+      - cache_blocks
+      - held_blocks
+      - referenced_blocks
+      - available_blocks
+      duration_s: 0
+      interval_s: 0.5
+    timeout_s: 10
+  - id: evict_wave_1
+    action: kv_capacity_request
+    params:
+      input_len: 2048
+      output_len: 2
+      mode: complete
+      stream_timeout_s: 15
+      schedule_timeout_s: 30
+      expected_rpc_statuses: []
+      block_keys:
+      - 501000
+      - 501001
+      - 501002
+      - 501003
+      - 501004
+      - 501005
+      - 501006
+      - 501007
+    timeout_s: 70
+  - id: evict_wave_1_ok
+    action: kv_capacity_outcome
+    params:
+      requests:
+      - $ref: stages.evict_wave_1.output.requests
+      metric: success
+  - id: pool_1
+    action: kv_capacity_observe
+    params:
+      targets:
+      - prefill-0
+      fields:
+      - cache_blocks
+      - held_blocks
+      - referenced_blocks
+      - available_blocks
+      duration_s: 0
+      interval_s: 0.5
+    timeout_s: 10
+  - id: evict_wave_2
+    action: kv_capacity_request
+    params:
+      input_len: 2048
+      output_len: 2
+      mode: complete
+      stream_timeout_s: 15
+      schedule_timeout_s: 30
+      expected_rpc_statuses: []
+      block_keys:
+      - 502000
+      - 502001
+      - 502002
+      - 502003
+      - 502004
+      - 502005
+      - 502006
+      - 502007
+    timeout_s: 70
+  - id: evict_wave_2_ok
+    action: kv_capacity_outcome
+    params:
+      requests:
+      - $ref: stages.evict_wave_2.output.requests
+      metric: success
+  - id: pool_2
+    action: kv_capacity_observe
+    params:
+      targets:
+      - prefill-0
+      fields:
+      - cache_blocks
+      - held_blocks
+      - referenced_blocks
+      - available_blocks
+      duration_s: 0
+      interval_s: 0.5
+    timeout_s: 10
+  - id: evict_wave_3
+    action: kv_capacity_request
+    params:
+      input_len: 2048
+      output_len: 2
+      mode: complete
+      stream_timeout_s: 15
+      schedule_timeout_s: 30
+      expected_rpc_statuses: []
+      block_keys:
+      - 503000
+      - 503001
+      - 503002
+      - 503003
+      - 503004
+      - 503005
+      - 503006
+      - 503007
+    timeout_s: 70
+  - id: evict_wave_3_ok
+    action: kv_capacity_outcome
+    params:
+      requests:
+      - $ref: stages.evict_wave_3.output.requests
+      metric: success
+  - id: pool_3
+    action: kv_capacity_observe
+    params:
+      targets:
+      - prefill-0
+      fields:
+      - cache_blocks
+      - held_blocks
+      - referenced_blocks
+      - available_blocks
+      duration_s: 0
+      interval_s: 0.5
+    timeout_s: 10
+  - id: evict_wave_4
+    action: kv_capacity_request
+    params:
+      input_len: 2048
+      output_len: 2
+      mode: complete
+      stream_timeout_s: 15
+      schedule_timeout_s: 30
+      expected_rpc_statuses: []
+      block_keys:
+      - 504000
+      - 504001
+      - 504002
+      - 504003
+      - 504004
+      - 504005
+      - 504006
+      - 504007
+    timeout_s: 70
+  - id: evict_wave_4_ok
+    action: kv_capacity_outcome
+    params:
+      requests:
+      - $ref: stages.evict_wave_4.output.requests
+      metric: success
+  - id: pool_4
+    action: kv_capacity_observe
+    params:
+      targets:
+      - prefill-0
+      fields:
+      - cache_blocks
+      - held_blocks
+      - referenced_blocks
+      - available_blocks
+      duration_s: 0
+      interval_s: 0.5
+    timeout_s: 10
+  - id: evict_wave_5
+    action: kv_capacity_request
+    params:
+      input_len: 2048
+      output_len: 2
+      mode: complete
+      stream_timeout_s: 15
+      schedule_timeout_s: 30
+      expected_rpc_statuses: []
+      block_keys:
+      - 505000
+      - 505001
+      - 505002
+      - 505003
+      - 505004
+      - 505005
+      - 505006
+      - 505007
+    timeout_s: 70
+  - id: evict_wave_5_ok
+    action: kv_capacity_outcome
+    params:
+      requests:
+      - $ref: stages.evict_wave_5.output.requests
+      metric: success
+  - id: pool_5
+    action: kv_capacity_observe
+    params:
+      targets:
+      - prefill-0
+      fields:
+      - cache_blocks
+      - held_blocks
+      - referenced_blocks
+      - available_blocks
+      duration_s: 0
+      interval_s: 0.5
+    timeout_s: 10
+  - id: evict_wave_6
+    action: kv_capacity_request
+    params:
+      input_len: 2048
+      output_len: 2
+      mode: complete
+      stream_timeout_s: 15
+      schedule_timeout_s: 30
+      expected_rpc_statuses: []
+      block_keys:
+      - 506000
+      - 506001
+      - 506002
+      - 506003
+      - 506004
+      - 506005
+      - 506006
+      - 506007
+    timeout_s: 70
+  - id: evict_wave_6_ok
+    action: kv_capacity_outcome
+    params:
+      requests:
+      - $ref: stages.evict_wave_6.output.requests
+      metric: success
+  - id: pool_6
+    action: kv_capacity_observe
+    params:
+      targets:
+      - prefill-0
+      fields:
+      - cache_blocks
+      - held_blocks
+      - referenced_blocks
+      - available_blocks
+      duration_s: 0
+      interval_s: 0.5
+    timeout_s: 10
+  - id: evict_wave_7
+    action: kv_capacity_request
+    params:
+      input_len: 2048
+      output_len: 2
+      mode: complete
+      stream_timeout_s: 15
+      schedule_timeout_s: 30
+      expected_rpc_statuses: []
+      block_keys:
+      - 507000
+      - 507001
+      - 507002
+      - 507003
+      - 507004
+      - 507005
+      - 507006
+      - 507007
+    timeout_s: 70
+  - id: evict_wave_7_ok
+    action: kv_capacity_outcome
+    params:
+      requests:
+      - $ref: stages.evict_wave_7.output.requests
+      metric: success
+  - id: pool_7
+    action: kv_capacity_observe
+    params:
+      targets:
+      - prefill-0
+      fields:
+      - cache_blocks
+      - held_blocks
+      - referenced_blocks
+      - available_blocks
+      duration_s: 0
+      interval_s: 0.5
+    timeout_s: 10
+  - id: evict_wave_8
+    action: kv_capacity_request
+    params:
+      input_len: 2048
+      output_len: 2
+      mode: complete
+      stream_timeout_s: 15
+      schedule_timeout_s: 30
+      expected_rpc_statuses: []
+      block_keys:
+      - 508000
+      - 508001
+      - 508002
+      - 508003
+      - 508004
+      - 508005
+      - 508006
+      - 508007
+    timeout_s: 70
+  - id: evict_wave_8_ok
+    action: kv_capacity_outcome
+    params:
+      requests:
+      - $ref: stages.evict_wave_8.output.requests
+      metric: success
+  - id: pool_8
+    action: kv_capacity_observe
+    params:
+      targets:
+      - prefill-0
+      fields:
+      - cache_blocks
+      - held_blocks
+      - referenced_blocks
+      - available_blocks
+      duration_s: 0
+      interval_s: 0.5
+    timeout_s: 10
+  - id: evict_wave_9
+    action: kv_capacity_request
+    params:
+      input_len: 2048
+      output_len: 2
+      mode: complete
+      stream_timeout_s: 15
+      schedule_timeout_s: 30
+      expected_rpc_statuses: []
+      block_keys:
+      - 509000
+      - 509001
+      - 509002
+      - 509003
+      - 509004
+      - 509005
+      - 509006
+      - 509007
+    timeout_s: 70
+  - id: evict_wave_9_ok
+    action: kv_capacity_outcome
+    params:
+      requests:
+      - $ref: stages.evict_wave_9.output.requests
+      metric: success
+  - id: pool_9
+    action: kv_capacity_observe
+    params:
+      targets:
+      - prefill-0
+      fields:
+      - cache_blocks
+      - held_blocks
+      - referenced_blocks
+      - available_blocks
+      duration_s: 0
+      interval_s: 0.5
+    timeout_s: 10
+  - id: evicted
+    action: kv_capacity_observe
+    params:
+      targets:
+      - prefill-0
+      fields:
+      - cache_evictions
+      - cache_key_set
+      duration_s: 0
+      interval_s: 0.5
+    timeout_s: 10
+  - id: capacity_evictions
+    action: kv_capacity_counter
+    params:
+      observations:
+      - $ref: stages.evicted.output.observation
+      field: cache_evictions
+      op: ge
+      expected: 1
+      stat: all
+      baseline:
+        $ref: stages.base.output.observation
+  - id: key_cap
+    action: kv_capacity_counter
+    params:
+      observations:
+      - $ref: stages.evicted.output.observation
+      field: key_count
+      op: le
+      expected: 27
+      stat: all
+  - id: eviction_conservation
+    action: kv_capacity_counter
+    params:
+      observations:
+      - $ref: stages.pool_0.output.observation
+      - $ref: stages.pool_1.output.observation
+      - $ref: stages.pool_2.output.observation
+      - $ref: stages.pool_3.output.observation
+      - $ref: stages.pool_4.output.observation
+      - $ref: stages.pool_5.output.observation
+      - $ref: stages.pool_6.output.observation
+      - $ref: stages.pool_7.output.observation
+      - $ref: stages.pool_8.output.observation
+      - $ref: stages.pool_9.output.observation
+      field: conservation
+      op: eq
+      expected: 0
+      stat: all
+  - id: slow
+    action: engine_control
+    params:
+      operation: set_perf
+      targets:
+      - prefill-0
+      perf:
+        prefill_fixed_ms: 3000
+  - id: perf_sync
+    action: master_mark
+    params:
+      wait_s: 1.5
+  - id: occupant_0
+    action: kv_capacity_request
+    params:
+      input_len: 2048
+      output_len: 2
+      mode: fire
+      stream_timeout_s: 30
+      schedule_timeout_s: 30
+      expected_rpc_statuses: []
+      block_keys:
+      - 600000
+      - 600001
+      - 600002
+      - 600003
+      - 600004
+      - 600005
+      - 600006
+      - 600007
+    timeout_s: 70
+  - id: occupant_0_admitted
+    action: kv_capacity_outcome
+    params:
+      requests:
+      - $ref: stages.occupant_0.output.requests
+      metric: admitted
+  - id: occupant_spacing_0
+    action: master_mark
+    params:
+      wait_s: 0.4
+  - id: occupant_1
+    action: kv_capacity_request
+    params:
+      input_len: 2048
+      output_len: 2
+      mode: fire
+      stream_timeout_s: 30
+      schedule_timeout_s: 30
+      expected_rpc_statuses: []
+      block_keys:
+      - 601000
+      - 601001
+      - 601002
+      - 601003
+      - 601004
+      - 601005
+      - 601006
+      - 601007
+    timeout_s: 70
+  - id: occupant_1_admitted
+    action: kv_capacity_outcome
+    params:
+      requests:
+      - $ref: stages.occupant_1.output.requests
+      metric: admitted
+  - id: occupant_spacing_1
+    action: master_mark
+    params:
+      wait_s: 0.4
+  - id: occupant_2
+    action: kv_capacity_request
+    params:
+      input_len: 2048
+      output_len: 2
+      mode: fire
+      stream_timeout_s: 30
+      schedule_timeout_s: 30
+      expected_rpc_statuses: []
+      block_keys:
+      - 602000
+      - 602001
+      - 602002
+      - 602003
+      - 602004
+      - 602005
+      - 602006
+      - 602007
+    timeout_s: 70
+  - id: occupant_2_admitted
+    action: kv_capacity_outcome
+    params:
+      requests:
+      - $ref: stages.occupant_2.output.requests
+      metric: admitted
+  - id: occupant_spacing_2
+    action: master_mark
+    params:
+      wait_s: 0.4
+  - id: enqueues_landed
+    action: master_mark
+    params:
+      wait_s: 0.3
+  - id: await_saturation
+    action: kv_capacity_observe
+    params:
+      targets:
+      - prefill-0
+      fields:
+      - held_blocks
+      duration_s: 2
+      interval_s: 0.05
+      until_field: held_blocks
+      until_op: ge
+      until_value: 24
+    timeout_s: 10
+  - id: leading_pool
+    action: kv_capacity_observe
+    params:
+      targets:
+      - prefill-0
+      fields:
+      - cache_blocks
+      - held_blocks
+      - referenced_blocks
+      - available_blocks
+      duration_s: 0
+      interval_s: 0.5
+    timeout_s: 10
+  - id: probe
+    action: kv_capacity_request
+    params:
+      input_len: 2048
+      output_len: 2
+      mode: complete
+      stream_timeout_s: 15
+      schedule_timeout_s: 30
+      expected_rpc_statuses:
+      - UNKNOWN
+      - INTERNAL
+      block_keys:
+      - 690000
+      - 690001
+      - 690002
+      - 690003
+      - 690004
+      - 690005
+      - 690006
+      - 690007
+    timeout_s: 70
+  - id: probe_typed_fast
+    action: kv_capacity_outcome
+    params:
+      requests:
+      - $ref: stages.probe.output.requests
+      metric: typed_error
+      tokens:
+      - lack_mem
+      - insufficient kv cache
+      max_s: 3
+  - id: burst_0
+    action: kv_capacity_request
+    params:
+      input_len: 2048
+      output_len: 2
+      mode: complete
+      stream_timeout_s: 15
+      schedule_timeout_s: 30
+      expected_rpc_statuses:
+      - UNKNOWN
+      - INTERNAL
+      block_keys:
+      - 680000
+      - 680001
+      - 680002
+      - 680003
+      - 680004
+      - 680005
+      - 680006
+      - 680007
+    timeout_s: 70
+  - id: burst_1
+    action: kv_capacity_request
+    params:
+      input_len: 2048
+      output_len: 2
+      mode: complete
+      stream_timeout_s: 15
+      schedule_timeout_s: 30
+      expected_rpc_statuses:
+      - UNKNOWN
+      - INTERNAL
+      block_keys:
+      - 681000
+      - 681001
+      - 681002
+      - 681003
+      - 681004
+      - 681005
+      - 681006
+      - 681007
+    timeout_s: 70
+  - id: burst_typed_fast
+    action: kv_capacity_outcome
+    params:
+      requests:
+      - $ref: stages.burst_0.output.requests
+      - $ref: stages.burst_1.output.requests
+      metric: bounded_errors
+      tokens:
+      - lack_mem
+      max_s: 3
+  - id: failure_share
+    action: kv_capacity_failure_bound
+    params:
+      requests:
+      - $ref: stages.probe.output.requests
+      - $ref: stages.burst_0.output.requests
+      - $ref: stages.burst_1.output.requests
+      minimum: 1
+      maximum: 3
+  - id: saturation_window
+    action: kv_capacity_observe
+    params:
+      targets:
+      - prefill-0
+      fields:
+      - cache_blocks
+      - held_blocks
+      - referenced_blocks
+      - available_blocks
+      duration_s: 3
+      interval_s: 0.1
+    timeout_s: 10
+  - id: held_peak
+    action: kv_capacity_counter
+    params:
+      observations:
+      - $ref: stages.leading_pool.output.observation
+      - $ref: stages.saturation_window.output.observation
+      field: held_blocks
+      op: ge
+      expected: 24
+      stat: max
+  - id: available_floor
+    action: kv_capacity_counter
+    params:
+      observations:
+      - $ref: stages.leading_pool.output.observation
+      - $ref: stages.saturation_window.output.observation
+      field: available_blocks
+      op: le
+      expected: 3
+      stat: min
+  - id: saturation_conservation
+    action: kv_capacity_counter
+    params:
+      observations:
+      - $ref: stages.leading_pool.output.observation
+      - $ref: stages.saturation_window.output.observation
+      field: conservation
+      op: eq
+      expected: 0
+      stat: all
+  - id: lack_after
+    action: kv_capacity_observe
+    params:
+      targets:
+      - prefill-0
+      fields:
+      - lack_mem_rejects
+      duration_s: 0
+      interval_s: 0.5
+    timeout_s: 10
+  - id: rejections_accounted
+    action: kv_capacity_counter
+    params:
+      observations:
+      - $ref: stages.lack_after.output.observation
+      field: lack_mem_rejects
+      op: ge
+      expected: 1
+      stat: all
+      baseline:
+        $ref: stages.base.output.observation
+  - id: occupants_done
+    action: kv_capacity_wait
+    params:
+      requests:
+      - $ref: stages.occupant_0.output.requests
+      - $ref: stages.occupant_1.output.requests
+      - $ref: stages.occupant_2.output.requests
+    timeout_s: 90
+  - id: occupants_complete
+    action: kv_capacity_outcome
+    params:
+      requests:
+      - $ref: stages.occupant_0.output.requests
+      - $ref: stages.occupant_1.output.requests
+      - $ref: stages.occupant_2.output.requests
+      metric: success
+  - id: available_again
+    action: kv_capacity_observe
+    params:
+      targets:
+      - prefill-0
+      fields:
+      - available_blocks
+      duration_s: 10
+      interval_s: 0.5
+      until_field: available_blocks
+      until_op: ge
+      until_value: 8
+    timeout_s: 15
+  - id: capacity_recovered
+    action: kv_capacity_counter
+    params:
+      observations:
+      - $ref: stages.available_again.output.observation
+      field: available_blocks
+      op: ge
+      expected: 8
+      stat: latest
+  - id: fresh
+    action: kv_capacity_request
+    params:
+      input_len: 2048
+      output_len: 2
+      mode: complete
+      stream_timeout_s: 15
+      schedule_timeout_s: 30
+      expected_rpc_statuses: []
+      block_keys:
+      - 1000000
+      - 1000001
+      - 1000002
+      - 1000003
+      - 1000004
+      - 1000005
+      - 1000006
+      - 1000007
+    timeout_s: 70
+  - id: fresh_succeeded
+    action: kv_capacity_outcome
+    params:
+      requests:
+      - $ref: stages.fresh.output.requests
+      metric: success
+  - id: master_clean
+    action: master_ready
+    params:
+      target: single
+      inflight_zero: true
+    timeout_s: 30
+  - id: engine_clean
+    action: admission_engine_clean
+    params:
+      targets:
+      - prefill-0
+      - decode-0
+      - decode-1
+    timeout_s: 30
+  - id: recovery
+    action: kv_capacity_request
+    params:
+      input_len: 2048
+      output_len: 2
+      mode: complete
+      stream_timeout_s: 30
+      schedule_timeout_s: 30
+      expected_rpc_statuses: []
+    timeout_s: 70
+  - id: recovered
+    action: kv_capacity_outcome
+    params:
+      requests:
+      - $ref: stages.recovery.output.requests
+      metric: success
+  - id: restore_perf
+    action: engine_control
+    params:
+      operation: set_perf
+      targets:
+      - prefill-0
+      perf:
+        prefill_fixed_ms: 100
+  - id: cleanup
+    action: teardown
+- id: capacity_conflict_overflow
+  legacy_case_ids:
+  - kv_capacity_conflict_overflow
+  environment_overrides:
+    n_prefill: 2
+    n_decode: 2
+    decode_cache_blocks: 180
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: prime
+    action: kv_capacity_request
+    params:
+      input_len: 40960
+      output_len: 2
+      mode: complete
+      stream_timeout_s: 15
+      schedule_timeout_s: 30
+      expected_rpc_statuses: []
+      block_keys:
+      - 500000
+      - 500001
+      - 500002
+      - 500003
+      - 500004
+      - 500005
+      - 500006
+      - 500007
+      - 500008
+      - 500009
+      - 500010
+      - 500011
+      - 500012
+      - 500013
+      - 500014
+      - 500015
+      - 500016
+      - 500017
+      - 500018
+      - 500019
+      - 500020
+      - 500021
+      - 500022
+      - 500023
+      - 500024
+      - 500025
+      - 500026
+      - 500027
+      - 500028
+      - 500029
+      - 500030
+      - 500031
+      - 500032
+      - 500033
+      - 500034
+      - 500035
+      - 500036
+      - 500037
+      - 500038
+      - 500039
+    timeout_s: 70
+  - id: prime_succeeded
+    action: kv_capacity_outcome
+    params:
+      requests:
+      - $ref: stages.prime.output.requests
+      metric: success
+  - id: holder
+    action: kv_landing
+    params:
+      requests:
+        $ref: stages.prime.output.requests
+      phase: terminal
+  - id: cool
+    action: kv_capacity_other
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+      exclude:
+        $ref: stages.holder.output.engine
+  - id: cache_sync
+    action: kv_snapshot
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 3.5
+    timeout_s: 8
+  - id: slow_all
+    action: engine_control
+    params:
+      operation: set_perf
+      targets:
+      - prefill-0
+      - prefill-1
+      perf:
+        prefill_fixed_ms: 5000
+  - id: perf_sync
+    action: master_mark
+    params:
+      wait_s: 1.5
+  - id: seed
+    action: kv_capacity_request
+    params:
+      input_len: 147456
+      output_len: 2
+      mode: fire
+      stream_timeout_s: 30
+      schedule_timeout_s: 30
+      expected_rpc_statuses: []
+      block_keys:
+      - 500000
+      - 500001
+      - 500002
+      - 500003
+      - 500004
+      - 500005
+      - 500006
+      - 500007
+      - 500008
+      - 500009
+      - 500010
+      - 500011
+      - 500012
+      - 500013
+      - 500014
+      - 500015
+      - 500016
+      - 500017
+      - 500018
+      - 500019
+      - 500020
+      - 500021
+      - 500022
+      - 500023
+      - 500024
+      - 500025
+      - 500026
+      - 500027
+      - 500028
+      - 500029
+      - 500030
+      - 500031
+      - 500032
+      - 500033
+      - 500034
+      - 500035
+      - 500036
+      - 500037
+      - 500038
+      - 500039
+      - 509000
+      - 509001
+      - 509002
+      - 509003
+      - 509004
+      - 509005
+      - 509006
+      - 509007
+      - 509008
+      - 509009
+      - 509010
+      - 509011
+      - 509012
+      - 509013
+      - 509014
+      - 509015
+      - 509016
+      - 509017
+      - 509018
+      - 509019
+      - 509020
+      - 509021
+      - 509022
+      - 509023
+      - 509024
+      - 509025
+      - 509026
+      - 509027
+      - 509028
+      - 509029
+      - 509030
+      - 509031
+      - 509032
+      - 509033
+      - 509034
+      - 509035
+      - 509036
+      - 509037
+      - 509038
+      - 509039
+      - 509040
+      - 509041
+      - 509042
+      - 509043
+      - 509044
+      - 509045
+      - 509046
+      - 509047
+      - 509048
+      - 509049
+      - 509050
+      - 509051
+      - 509052
+      - 509053
+      - 509054
+      - 509055
+      - 509056
+      - 509057
+      - 509058
+      - 509059
+      - 509060
+      - 509061
+      - 509062
+      - 509063
+      - 509064
+      - 509065
+      - 509066
+      - 509067
+      - 509068
+      - 509069
+      - 509070
+      - 509071
+      - 509072
+      - 509073
+      - 509074
+      - 509075
+      - 509076
+      - 509077
+      - 509078
+      - 509079
+      - 509080
+      - 509081
+      - 509082
+      - 509083
+      - 509084
+      - 509085
+      - 509086
+      - 509087
+      - 509088
+      - 509089
+      - 509090
+      - 509091
+      - 509092
+      - 509093
+      - 509094
+      - 509095
+      - 509096
+      - 509097
+      - 509098
+      - 509099
+      - 509100
+      - 509101
+      - 509102
+      - 509103
+    timeout_s: 70
+  - id: seed_admitted
+    action: kv_capacity_outcome
+    params:
+      requests:
+      - $ref: stages.seed.output.requests
+      metric: admitted
+  - id: seed_holder
+    action: kv_landing
+    params:
+      requests:
+        $ref: stages.seed.output.requests
+      phase: scheduled
+  - id: seed_pinned
+    action: kv_same
+    params:
+      first:
+        $ref: stages.holder.output.engine
+      second:
+        $ref: stages.seed_holder.output.engine
+  - id: seed_pending
+    action: kv_capacity_observe
+    params:
+      targets:
+      - $ref: stages.holder.output.engine
+      fields:
+      - pending
+      duration_s: 6
+      interval_s: 0.1
+      until_field: pending
+      until_op: ge
+      until_value: 1
+    timeout_s: 11
+  - id: seed_seen
+    action: kv_capacity_counter
+    params:
+      observations:
+      - $ref: stages.seed_pending.output.observation
+      field: pending
+      op: ge
+      expected: 1
+      stat: latest
+  - id: cool_fast
+    action: engine_control
+    params:
+      operation: set_perf
+      targets:
+      - $ref: stages.cool.output.engine
+      perf:
+        prefill_fixed_ms: 100
+  - id: cool_sync
+    action: master_mark
+    params:
+      wait_s: 0.3
+  - id: baseline
+    action: kv_capacity_request
+    params:
+      input_len: 2048
+      output_len: 2
+      mode: complete
+      stream_timeout_s: 15
+      schedule_timeout_s: 30
+      expected_rpc_statuses: []
+    timeout_s: 70
+  - id: baseline_ok
+    action: kv_capacity_outcome
+    params:
+      requests:
+      - $ref: stages.baseline.output.requests
+      metric: success
+  - id: wave_0
+    action: kv_capacity_request
+    params:
+      input_len: 40960
+      output_len: 2
+      mode: fire
+      stream_timeout_s: 30
+      schedule_timeout_s: 30
+      expected_rpc_statuses: []
+      block_keys:
+      - 500000
+      - 500001
+      - 500002
+      - 500003
+      - 500004
+      - 500005
+      - 500006
+      - 500007
+      - 500008
+      - 500009
+      - 500010
+      - 500011
+      - 500012
+      - 500013
+      - 500014
+      - 500015
+      - 500016
+      - 500017
+      - 500018
+      - 500019
+      - 500020
+      - 500021
+      - 500022
+      - 500023
+      - 500024
+      - 500025
+      - 500026
+      - 500027
+      - 500028
+      - 500029
+      - 500030
+      - 500031
+      - 500032
+      - 500033
+      - 500034
+      - 500035
+      - 500036
+      - 500037
+      - 500038
+      - 500039
+    timeout_s: 70
+  - id: wave_spacing_0
+    action: master_mark
+    params:
+      wait_s: 0.12
+  - id: wave_1
+    action: kv_capacity_request
+    params:
+      input_len: 40960
+      output_len: 2
+      mode: fire
+      stream_timeout_s: 30
+      schedule_timeout_s: 30
+      expected_rpc_statuses: []
+      block_keys:
+      - 500000
+      - 500001
+      - 500002
+      - 500003
+      - 500004
+      - 500005
+      - 500006
+      - 500007
+      - 500008
+      - 500009
+      - 500010
+      - 500011
+      - 500012
+      - 500013
+      - 500014
+      - 500015
+      - 500016
+      - 500017
+      - 500018
+      - 500019
+      - 500020
+      - 500021
+      - 500022
+      - 500023
+      - 500024
+      - 500025
+      - 500026
+      - 500027
+      - 500028
+      - 500029
+      - 500030
+      - 500031
+      - 500032
+      - 500033
+      - 500034
+      - 500035
+      - 500036
+      - 500037
+      - 500038
+      - 500039
+    timeout_s: 70
+  - id: wave_spacing_1
+    action: master_mark
+    params:
+      wait_s: 0.12
+  - id: wave_2
+    action: kv_capacity_request
+    params:
+      input_len: 40960
+      output_len: 2
+      mode: fire
+      stream_timeout_s: 30
+      schedule_timeout_s: 30
+      expected_rpc_statuses: []
+      block_keys:
+      - 500000
+      - 500001
+      - 500002
+      - 500003
+      - 500004
+      - 500005
+      - 500006
+      - 500007
+      - 500008
+      - 500009
+      - 500010
+      - 500011
+      - 500012
+      - 500013
+      - 500014
+      - 500015
+      - 500016
+      - 500017
+      - 500018
+      - 500019
+      - 500020
+      - 500021
+      - 500022
+      - 500023
+      - 500024
+      - 500025
+      - 500026
+      - 500027
+      - 500028
+      - 500029
+      - 500030
+      - 500031
+      - 500032
+      - 500033
+      - 500034
+      - 500035
+      - 500036
+      - 500037
+      - 500038
+      - 500039
+    timeout_s: 70
+  - id: wave_spacing_2
+    action: master_mark
+    params:
+      wait_s: 0.12
+  - id: wave_3
+    action: kv_capacity_request
+    params:
+      input_len: 40960
+      output_len: 2
+      mode: fire
+      stream_timeout_s: 30
+      schedule_timeout_s: 30
+      expected_rpc_statuses: []
+      block_keys:
+      - 500000
+      - 500001
+      - 500002
+      - 500003
+      - 500004
+      - 500005
+      - 500006
+      - 500007
+      - 500008
+      - 500009
+      - 500010
+      - 500011
+      - 500012
+      - 500013
+      - 500014
+      - 500015
+      - 500016
+      - 500017
+      - 500018
+      - 500019
+      - 500020
+      - 500021
+      - 500022
+      - 500023
+      - 500024
+      - 500025
+      - 500026
+      - 500027
+      - 500028
+      - 500029
+      - 500030
+      - 500031
+      - 500032
+      - 500033
+      - 500034
+      - 500035
+      - 500036
+      - 500037
+      - 500038
+      - 500039
+    timeout_s: 70
+  - id: wave_spacing_3
+    action: master_mark
+    params:
+      wait_s: 0.12
+  - id: wave_4
+    action: kv_capacity_request
+    params:
+      input_len: 40960
+      output_len: 2
+      mode: fire
+      stream_timeout_s: 30
+      schedule_timeout_s: 30
+      expected_rpc_statuses: []
+      block_keys:
+      - 500000
+      - 500001
+      - 500002
+      - 500003
+      - 500004
+      - 500005
+      - 500006
+      - 500007
+      - 500008
+      - 500009
+      - 500010
+      - 500011
+      - 500012
+      - 500013
+      - 500014
+      - 500015
+      - 500016
+      - 500017
+      - 500018
+      - 500019
+      - 500020
+      - 500021
+      - 500022
+      - 500023
+      - 500024
+      - 500025
+      - 500026
+      - 500027
+      - 500028
+      - 500029
+      - 500030
+      - 500031
+      - 500032
+      - 500033
+      - 500034
+      - 500035
+      - 500036
+      - 500037
+      - 500038
+      - 500039
+    timeout_s: 70
+  - id: drained
+    action: kv_capacity_wait
+    params:
+      requests:
+      - $ref: stages.seed.output.requests
+      - $ref: stages.wave_0.output.requests
+      - $ref: stages.wave_1.output.requests
+      - $ref: stages.wave_2.output.requests
+      - $ref: stages.wave_3.output.requests
+      - $ref: stages.wave_4.output.requests
+    timeout_s: 180
+  - id: probe
+    action: kv_capacity_request
+    params:
+      input_len: 40960
+      output_len: 2
+      mode: complete
+      stream_timeout_s: 15
+      schedule_timeout_s: 30
+      expected_rpc_statuses: []
+      block_keys:
+      - 500000
+      - 500001
+      - 500002
+      - 500003
+      - 500004
+      - 500005
+      - 500006
+      - 500007
+      - 500008
+      - 500009
+      - 500010
+      - 500011
+      - 500012
+      - 500013
+      - 500014
+      - 500015
+      - 500016
+      - 500017
+      - 500018
+      - 500019
+      - 500020
+      - 500021
+      - 500022
+      - 500023
+      - 500024
+      - 500025
+      - 500026
+      - 500027
+      - 500028
+      - 500029
+      - 500030
+      - 500031
+      - 500032
+      - 500033
+      - 500034
+      - 500035
+      - 500036
+      - 500037
+      - 500038
+      - 500039
+    timeout_s: 70
+  - id: protection
+    action: kv_capacity_protection
+    params:
+      baseline:
+        $ref: stages.baseline.output.requests
+      probe:
+        $ref: stages.probe.output.requests
+      holder:
+        $ref: stages.holder.output.engine
+      wave:
+      - $ref: stages.wave_0.output.requests
+      - $ref: stages.wave_1.output.requests
+      - $ref: stages.wave_2.output.requests
+      - $ref: stages.wave_3.output.requests
+      - $ref: stages.wave_4.output.requests
+      share_bands:
+        strict: 0
+        normal: 0.05
+        loose: 0.1
+      ratio_bands:
+        strict: 2
+        normal: 3
+        loose: 5
+  - id: restore_perf
+    action: engine_control
+    params:
+      operation: set_perf
+      targets:
+      - prefill-0
+      - prefill-1
+      perf:
+        prefill_fixed_ms: 100
+  - id: cleanup
+    action: teardown
