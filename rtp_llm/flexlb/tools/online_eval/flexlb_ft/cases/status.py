@@ -1328,7 +1328,6 @@ def status_prefill_suppress_all(ctx: CaseContext):
 
 @case(
     "status_prefill_suppress_finished",
-    profiles=["batch-window"],
     source="P0 status fault family: status_suppress_finished on every prefill",
 )
 def status_prefill_suppress_finished(ctx: CaseContext):
@@ -1510,7 +1509,6 @@ def status_status_no_respond(ctx: CaseContext):
 
 @case(
     "status_unknown_rid_finished",
-    profiles=["batch-window"],
     source="P0 status fault family: status_fake_task(finished, unknown rid), one-shot",
 )
 def status_unknown_rid_finished(ctx: CaseContext):
@@ -2058,7 +2056,6 @@ def status_decode_waiting_before_prefill(ctx: CaseContext):
 
 @case(
     "status_unknown_rid_running",
-    profiles=["batch-window"],
     source="P1 status fault family: status_fake_task(running, unknown rid), one-shot",
 )
 def status_unknown_rid_running(ctx: CaseContext):
@@ -2564,7 +2561,6 @@ def status_foreign_batchid(ctx: CaseContext):
 
 @case(
     "status_duplicate_finished",
-    profiles=["batch-window"],
     source="P1 status fault family: status_duplicate_finished — same terminal reported twice",
 )
 def status_duplicate_finished(ctx: CaseContext):
@@ -2592,7 +2588,15 @@ def status_duplicate_finished(ctx: CaseContext):
             errs = _run_requests(ops, base, 4, concurrency=4)
             # Fingerprint pair taken INSIDE the replay window (the injection
             # is still armed) — a clear-then-compare pair would only observe
-            # the post-injection calm and never the replay itself.
+            # the post-injection calm and never the replay itself.  The
+            # before baseline must sit on a SETTLED ledger: under the SINGLE
+            # decision axis the ledger release trails the client streams by
+            # a few seconds, so a snapshot taken straight after
+            # _run_requests carries the drain tail and the window would
+            # measure the tail settling, not the replay (batch-window
+            # settles synchronously, which is why the baseline never
+            # needed this gate there).
+            _wait_scheduler_zero(ops)
             before = _inflight_fingerprint(ops)
             time.sleep(5.0)  # replay window: terminals re-delivered
             after = _inflight_fingerprint(ops)
@@ -2632,7 +2636,6 @@ def status_duplicate_finished(ctx: CaseContext):
 
 @case(
     "status_cursor_regress",
-    profiles=["batch-window"],
     source="P1 status fault family: status_cursor_regress(3) — completion cursor rewinds",
 )
 def status_cursor_regress(ctx: CaseContext):
@@ -2694,7 +2697,6 @@ def status_cursor_regress(ctx: CaseContext):
 
 @case(
     "status_finished_then_running",
-    profiles=["batch-window"],
     source="P1 status fault family: fake_task sequence — finished replay then persistent RUNNING for a settled rid",
 )
 def status_finished_then_running(ctx: CaseContext):
@@ -2772,7 +2774,6 @@ def status_finished_then_running(ctx: CaseContext):
 
 @case(
     "status_zombie_completed_running",
-    profiles=["batch-window"],
     source="P1 status fault family: status_zombie_running — completed tasks re-reported RUNNING",
 )
 def status_zombie_completed_running(ctx: CaseContext):
@@ -2848,7 +2849,6 @@ def status_zombie_completed_running(ctx: CaseContext):
 
 @case(
     "status_zombie_fake_running",
-    profiles=["batch-window"],
     source="P2 status fault family (DECLARED FINDING PROBE): persistent fake RUNNING for N ghost rids, >= 2x TTL",
     expected_fail=True,
 )
