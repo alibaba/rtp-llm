@@ -50,6 +50,38 @@ def _fleet(ctx, p, deadline):
     return StageOutput(dict(prefill=names[0]))
 
 
+def _perf_params(p, plan):
+    p = _params(
+        p,
+        {"prefill_fixed_ms", "expected_prefill"},
+        {"prefill_fixed_ms", "expected_prefill"},
+    )
+    _number(p["prefill_fixed_ms"], 0, 60000)
+    _number(p["expected_prefill"], 1, 8, True)
+    return p
+
+
+def _prefill_perf(ctx, p, deadline):
+    from .engine_control import execute
+
+    rows = _http(ctx.ops, "snapshot", deadline).get("engines")
+    if not isinstance(rows, list):
+        raise ValueError("missing Prefill inventory")
+    targets = [r.get("name") for r in rows if r.get("role") == "prefill"]
+    if len(targets) != p["expected_prefill"]:
+        raise ValueError("Prefill inventory differs from explicit choreography")
+    result = execute(
+        ctx,
+        dict(
+            operation="set_perf",
+            targets=targets,
+            perf=dict(prefill_fixed_ms=p["prefill_fixed_ms"]),
+        ),
+        deadline,
+    )
+    return StageOutput(artifacts=result.artifacts)
+
+
 def _wave_params(p, plan):
     p = _params(p, {"requests", "gap_s", "serial_schedule"}, {"requests"})
     if not isinstance(p["requests"], list) or not 1 <= len(p["requests"]) <= 32:
@@ -304,6 +336,7 @@ def _fifo(ctx, p, deadline):
 
 
 HANDLERS = [
+    StageHandler("priority_prefill_perf", _perf_params, _prefill_perf, {}),
     StageHandler("priority_fleet", _empty, _fleet, {"prefill": "string"}),
     StageHandler("priority_start", _wave_params, _start, {"requests": "requests"}),
     StageHandler("priority_wait", _reference, _wait, {}),
