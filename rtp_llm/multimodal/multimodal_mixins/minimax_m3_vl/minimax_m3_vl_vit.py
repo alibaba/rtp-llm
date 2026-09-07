@@ -120,7 +120,10 @@ def _select_attention_backend(tensor: torch.Tensor) -> str:
     if not tensor.is_cuda:
         return "sdpa"
     capability = torch.cuda.get_device_capability(tensor.device)
-    if _FA4_VARLEN_FUNC is not None and capability in ((9, 0), (10, 0), (11, 0)):
+    # CUDA 13 reports L20D as SM103. FA4's CuTe varlen kernel supports this
+    # target and avoids the FlashInfer CuTe DSL path used as the fallback.
+    fa4_capabilities = ((9, 0), (10, 0), (10, 3), (11, 0))
+    if _FA4_VARLEN_FUNC is not None and capability in fa4_capabilities:
         return "fa4"
     if _FLASH_ATTN_VARLEN_FUNC is not None and capability[0] in (8, 9):
         return "flash_attn"
@@ -755,7 +758,10 @@ class MiniMaxM3VLVisionModel(nn.Module):
         cu_seqlens, _, _ = self._compute_attention_metadata(grid_thw_list, device)
         backend = _select_attention_backend(torch.empty((), device=device, dtype=dtype))
         if backend != "flashinfer":
-            return PackedAttentionContext(backend=backend)
+            return PackedAttentionContext(
+                backend=backend,
+                cu_seqlens=cu_seqlens,
+            )
         if _FLASHINFER_RAGGED_WRAPPER is None:
             raise RuntimeError("FlashInfer graph context requested but unavailable")
 
@@ -847,14 +853,29 @@ class MiniMaxM3VLVisionModel(nn.Module):
                 hidden_states, cu_seqlens
             )
 
-        hidden_states = self.encoder(
-            hidden_states,
-            cu_seqlens,
-            position_embeddings,
-            max_seqlen,
-            segment_offsets,
-            attention_context,
-        )
+        try:
+            hidden_states = self.encoder(
+                hidden_states,
+                cu_seqlens,
+                position_embeddings,
+                max_seqlen,
+                segment_offsets,
+                attention_context,
+            )
+        except Exception:
+            logger.exception(
+                "MiniMax M3VL vision forward failed: backend=%s segments=%d "
+                "total_patches=%d max_seqlen=%d segment_lengths=%s",
+                attention_context.backend,
+                len(segment_offsets) - 1,
+                segment_offsets[-1],
+                max_seqlen,
+                tuple(
+                    end - start
+                    for start, end in zip(segment_offsets, segment_offsets[1:])
+                ),
+            )
+            raise
         logger.debug(
             "MiniMax M3VL vision attention backend=%s segments=%d max_seqlen=%d",
             self.encoder.layers[0].self_attn.last_backend,

@@ -1,5 +1,6 @@
 import unittest
 from types import SimpleNamespace
+from unittest import mock
 
 import torch
 import torch.nn as nn
@@ -33,6 +34,7 @@ class MiniMaxM3VLWorkEstimateTest(unittest.TestCase):
         self.embedding.mm_processor = SimpleNamespace(
             patch_size=14,
             max_pixels=451584,
+            max_total_pixels=451584,
         )
         self.embedding.temporal_patch_size = 2
         self.embedding.merge_size = 2
@@ -256,6 +258,15 @@ class MiniMaxM3VLVisionAttentionTest(unittest.TestCase):
         torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-6)
         self.assertEqual(attention.last_backend, "sdpa")
 
+    def test_sm103_prefers_fa4_when_available(self):
+        tensor = SimpleNamespace(is_cuda=True, device=torch.device("cuda"))
+        with mock.patch.object(
+            vit_module, "_FA4_VARLEN_FUNC", object()
+        ), mock.patch.object(torch.cuda, "get_device_capability", return_value=(10, 3)):
+            backend = vit_module._select_attention_backend(tensor)
+
+        self.assertEqual(backend, "fa4")
+
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
     def test_cuda_fused_qkv_rope_matches_eager_and_packs_outputs(self):
         sequence_length = 11
@@ -402,21 +413,38 @@ class MiniMaxM3VLVisionAttentionTest(unittest.TestCase):
         if backend not in ("fa4", "flash_attn"):
             self.skipTest(f"vision backend {backend} is not graph-enabled")
 
+        attention_context = model.prepare_cuda_graph_attention_context(
+            grid_thw,
+            sample.device,
+            sample.dtype,
+        )
         capture_stream = torch.cuda.Stream()
         capture_stream.wait_stream(torch.cuda.current_stream())
         with torch.cuda.stream(capture_stream), torch.inference_mode():
             for _ in range(3):
-                model(sample, grid_thw)
+                model(
+                    sample,
+                    grid_thw,
+                    attention_context=attention_context,
+                )
         torch.cuda.current_stream().wait_stream(capture_stream)
         torch.cuda.synchronize()
 
         static_input = sample.clone()
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph), torch.inference_mode():
-            static_output = model(static_input, grid_thw)
+            static_output = model(
+                static_input,
+                grid_thw,
+                attention_context=attention_context,
+            )
 
         replay_input = torch.randn_like(sample)
-        expected = model(replay_input, grid_thw)
+        expected = model(
+            replay_input,
+            grid_thw,
+            attention_context=attention_context,
+        )
         static_input.copy_(replay_input)
         graph.replay()
 
