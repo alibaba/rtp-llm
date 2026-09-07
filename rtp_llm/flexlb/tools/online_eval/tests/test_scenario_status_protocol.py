@@ -1,5 +1,6 @@
 """Protocol checks use independent owner evidence and real bounded fake-RPC drivers."""
 
+import ast
 import copy
 import json
 import tempfile
@@ -12,7 +13,7 @@ from unittest.mock import patch
 from flexlb_ft.scenario.actions import status_protocol as status
 from flexlb_ft.scenario.contracts import PlanContext
 from flexlb_ft.scenario.runtime import Deadline, RuntimeContext
-from test_scenario_backend import Ops
+from test_scenario_backend import Ops, Stream
 
 
 def owner_frame(decode_load=0):
@@ -144,6 +145,9 @@ class StatusProtocolTest(unittest.TestCase):
             return dict(
                 issued_s=1,
                 consumer_exit_s=2,
+                transport_terminal_s=2,
+                consumer_done=True,
+                consumer_completion_verified=True,
                 business_finished=False,
                 business_error_code=8500 if phase == "execution" else None,
                 business_error_message="injected",
@@ -151,10 +155,12 @@ class StatusProtocolTest(unittest.TestCase):
                 schedule={
                     "status": "OK" if phase == "execution" else "REJECTED",
                     "error": "8500",
+                    "ended_s": 2,
                 },
                 stream={
                     "status": "OK" if phase == "execution" else None,
                     "started_s": 1 if phase == "execution" else None,
+                    "ended_s": 2 if phase == "execution" else None,
                 },
             )
 
@@ -174,13 +180,133 @@ class StatusProtocolTest(unittest.TestCase):
             snapshot_records=lambda: [
                 dict(
                     record("execution"),
-                    stream={"status": "DEADLINE_EXCEEDED", "started_s": 1},
+                    stream={
+                        "status": "DEADLINE_EXCEEDED",
+                        "started_s": 1,
+                        "ended_s": 2,
+                    },
                 )
             ]
         )
         handle = self.ctx.register_resource("requests", provider)
         with self.assertRaises(TimeoutError):
             status.execute_outcomes(self.ctx, {"requests": handle}, self.deadline())
+
+    def test_expected_rpc_failure_requires_typed_status_and_all_exit_evidence(self):
+        class RpcFailure(Exception):
+            def code(self):
+                return NS(name="INTERNAL")
+
+        self.ctx.ops.pb2_grpc.RpcServiceStub = lambda channel: NS(
+            FetchResponse=lambda *args, **kwargs: Stream(error=RpcFailure("injected"))
+        )
+        p = status.validate_prepare(
+            {"count": 1, "expected_rpc_statuses": ["INTERNAL"]}, self.plan
+        )
+        result = status.execute_prepare(self.ctx, p, self.deadline())
+        cohort = self.ctx.resource(result.output["requests"], "requests")
+        cohort.dispatch(self.deadline())
+        self.assertEqual(
+            {"completed": False, "error_count": 1}, cohort.wait(self.deadline())
+        )
+        record = cohort.snapshot_records()[0]
+        self.assertTrue(cohort.children[0].status_done.is_set())
+        self.assertTrue(record["consumer_done"])
+        self.assertTrue(record["consumer_completion_verified"])
+        status._terminal_records([record], ["INTERNAL"])
+        for key in ("consumer_exit_s", "transport_terminal_s"):
+            broken = dict(record, **{key: None})
+            with self.assertRaises(RuntimeError):
+                status._terminal_records([broken], ["INTERNAL"])
+        broken = copy.deepcopy(record)
+        broken["stream"]["status"] = "ERROR"
+        with self.assertRaises(RuntimeError):
+            status._terminal_records([broken], ["INTERNAL"])
+        with self.assertRaises(TimeoutError):
+            cohort.wait(Deadline(time.monotonic() - 1, time.monotonic, time.sleep))
+
+    def test_prefill_acceptance_cannot_be_inflated_by_decode(self):
+        frame = {
+            "mock": {
+                "p": {"role": "PREFILL", "accepted": 2},
+                "d": {"role": "DECODE", "accepted": 20},
+            }
+        }
+        self.assertEqual(2, status.metric(frame, "prefill_accepted"))
+        self.assertEqual(22, status.metric(frame, "accepted"))
+
+    def test_all_legacy_cases_have_explicit_programs_and_profile_mapping(self):
+        from flexlb_cfg import PROFILES
+        from flexlb_ft.scenario.catalog import handlers
+        from flexlb_ft.scenario.compiler import compile_scenarios, plan_counts
+        from flexlb_ft.scenario.loader import load_scenarios
+
+        root = Path(__file__).resolve().parents[1]
+        docs = load_scenarios(root / "scenarios/status")
+        registry = handlers()
+        registry.update({h.name: h for h in status.HANDLERS})
+        plans = compile_scenarios(docs, handlers=registry)
+        self.assertEqual(2, plan_counts(plans)["logical_scenarios"])
+        self.assertEqual(27, plan_counts(plans)["variants"])
+        expected = {}
+        for path in (root / "flexlb_ft/cases/status").glob("*.py"):
+            for node in ast.walk(ast.parse(path.read_text())):
+                if (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Name)
+                    and node.func.id == "case"
+                ):
+                    expected[ast.literal_eval(node.args[0])] = set(
+                        next(
+                            (
+                                ast.literal_eval(k.value)
+                                for k in node.keywords
+                                if k.arg == "profiles"
+                            ),
+                            PROFILES,
+                        )
+                    )
+        self.assertEqual(25, len(expected))
+        for case, profiles in expected.items():
+            self.assertEqual(
+                profiles, {p["profile"] for p in plans if case in p["legacy_case_ids"]}
+            )
+            variants = {
+                (p["scenario_id"], p["variant_id"])
+                for p in plans
+                if case in p["legacy_case_ids"]
+            }
+            self.assertEqual(1, len(variants), case)
+        for _, doc in docs:
+            for variant in doc["variants"]:
+                self.assertTrue(variant["stages"])
+                self.assertNotIn("stage_overrides", variant)
+                self.assertTrue(
+                    all(s["action"] != "legacy_case" for s in variant["stages"])
+                )
+        zombie = next(p for p in plans if p["variant_id"] == "zombie_fake_running")
+        self.assertEqual([], zombie["findings"])
+        stages = {s["id"]: s for s in zombie["stages"]}
+        self.assertEqual(60, stages["active_ghost_window"]["params"]["duration_s"])
+        self.assertEqual(95, stages["clear_retirement_window"]["params"]["duration_s"])
+        unbatched = next(
+            p for p in plans if p["variant_id"] == "unbatched_single_request"
+        )
+        self.assertEqual(
+            4, sum(s["id"].endswith("_ignored") for s in unbatched["stages"])
+        )
+        nofetch = next(p for p in plans if p["variant_id"] == "normal_no_fetch")
+        self.assertFalse(
+            any(s["action"] == "status_control" for s in nofetch["stages"])
+        )
+        self.assertFalse(
+            any(
+                s["action"] == "wait"
+                and s["params"]["requests"].get("$ref")
+                == "stages.unfetched.output.requests"
+                for s in nofetch["stages"]
+            )
+        )
 
     def test_stability_false_is_not_ignored_and_missing_owner_source_is_error(self):
         frames = [owner_frame(), owner_frame()]

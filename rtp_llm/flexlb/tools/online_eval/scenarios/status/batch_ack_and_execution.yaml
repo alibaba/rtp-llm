@@ -75,17 +75,6 @@ variants:
       op: le
       expected: 3
       aggregate: max
-  - id: nonempty_engine_acceptance
-    action: status_check
-    params:
-      snapshot:
-        $ref: stages.ledger_window.output.snapshot
-      metric: accepted
-      op: ge
-      expected: 4
-      aggregate: last
-      baseline:
-        $ref: stages.ledger_before.output.snapshot
   - id: partial_off
     action: status_control
     params:
@@ -146,6 +135,8 @@ variants:
       input_len: 2048
       output_len: 2
       consume: immediate
+      expected_rpc_statuses:
+      - DEADLINE_EXCEEDED
   - id: transient_before
     action: status_sample
     params:
@@ -198,7 +189,7 @@ variants:
     params:
       requests:
         $ref: stages.transient_cohort.output.requests
-      slo_or_success: true
+      timeout_or_success: true
   - id: transient_retry_window
     action: status_sample
     params:
@@ -212,6 +203,7 @@ variants:
       input_len: 2048
       output_len: 2
       consume: immediate
+      expected_rpc_statuses: []
   - id: permanent_before
     action: status_sample
     params:
@@ -268,6 +260,11 @@ variants:
       failure_min: 1
       failure_max: 2
       error_code: 8431
+  - id: permanent_member_isolation_phase
+    action: status_outcomes
+    params:
+      requests:
+        $ref: stages.permanent_cohort.output.requests
       failure_phase: schedule
   - id: permanent_after
     action: status_sample
@@ -279,7 +276,7 @@ variants:
     params:
       snapshot:
         $ref: stages.permanent_after.output.snapshot
-      metric: enqueue_rpc
+      metric: prefill_enqueue_rpc
       op: ge
       expected: 1
       aggregate: last
@@ -290,7 +287,7 @@ variants:
     params:
       snapshot:
         $ref: stages.permanent_after.output.snapshot
-      metric: enqueue_rpc
+      metric: prefill_enqueue_rpc
       op: le
       expected: 2
       aggregate: last
@@ -409,6 +406,11 @@ variants:
       failure_min: 1
       failure_max: 2
       error_code: 8500
+  - id: normal_execution_terminal_phase
+    action: status_outcomes
+    params:
+      requests:
+        $ref: stages.normal_cohort.output.requests
       failure_phase: execution
   - id: normal_drained
     action: status_sample
@@ -548,6 +550,11 @@ variants:
       failure_min: 1
       failure_max: 2
       error_code: 8500
+  - id: serial_execution_terminal_phase
+    action: status_outcomes
+    params:
+      requests:
+        $ref: stages.serial_cohort.output.requests
       failure_phase: execution
   - id: serial_drained
     action: status_sample
@@ -660,6 +667,11 @@ variants:
       failure_min: 2
       failure_max: 2
       error_code: 8431
+  - id: code_8431_passthrough_phase
+    action: status_outcomes
+    params:
+      requests:
+        $ref: stages.code_8431_cohort.output.requests
       failure_phase: schedule
   - id: code_8510_cohort
     action: status_prepare
@@ -704,6 +716,11 @@ variants:
       failure_min: 2
       failure_max: 2
       error_code: 8510
+  - id: code_8510_passthrough_phase
+    action: status_outcomes
+    params:
+      requests:
+        $ref: stages.code_8510_cohort.output.requests
       failure_phase: schedule
   - id: failed_batches_drained
     action: status_sample
@@ -799,6 +816,8 @@ variants:
       input_len: 2048
       output_len: 2
       consume: immediate
+      expected_rpc_statuses:
+      - DEADLINE_EXCEEDED
   - id: drop_on
     action: status_control
     params:
@@ -808,6 +827,12 @@ variants:
       role: prefill
   - id: uncertain_dispatch
     action: status_dispatch
+    params:
+      requests:
+        $ref: stages.uncertain_cohort.output.requests
+    timeout_s: 75
+  - id: uncertain_wait
+    action: wait
     params:
       requests:
         $ref: stages.uncertain_cohort.output.requests

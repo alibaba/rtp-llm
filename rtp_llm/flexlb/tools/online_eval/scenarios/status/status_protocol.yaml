@@ -1,0 +1,3979 @@
+schema_version: 1
+description: Explicit status protocol boundary programs; old whole-case expected_fail is narrowed to reviewed checks
+  only.
+category: status
+profiles:
+- batch-window
+- single-nonbatch
+- single-batch
+- window-nonbatch
+tags:
+- protocol
+- migration
+environment:
+  backend: java_mock
+  n_prefill: 2
+  n_decode: 2
+  config_overrides:
+    ordering: priority
+    queue_timeout_ms: 10000
+    stale_inflight_ms: 30000
+execution:
+  timeout_s: 600
+  stage_timeout_s: 120
+  cleanup_timeout_s: 120
+id: status_protocol
+legacy_case_ids:
+- status_inflight_ttl_cleanup
+- status_prefill_suppress_all
+- status_prefill_suppress_finished
+- status_decode_suppress_finished
+- status_status_no_respond
+- status_version_regress
+- status_unknown_rid_finished
+- status_unknown_rid_running
+- status_unknown_batchid
+- status_special_ids
+- status_unbatched_single_request
+- status_foreign_batchid
+- status_duplicate_finished
+- status_cursor_regress
+- status_finished_then_running
+- status_zombie_completed_running
+- status_zombie_fake_running
+- status_decode_before_prefill
+- status_decode_running_before_prefill
+- status_decode_waiting_before_prefill
+- status_fetch_error
+- master_debug_snapshot
+- normal_no_fetch_observation
+variants:
+- id: inflight_ttl_cleanup
+  legacy_case_ids:
+  - status_inflight_ttl_cleanup
+  profiles:
+  - batch-window
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: slow_prefill
+    action: status_perf
+    params:
+      prefill_fixed_ms: 10000
+      restore_prefill_fixed_ms: 100
+  - id: silent
+    action: status_prepare
+    params:
+      count: 6
+      concurrency: 4
+      input_len: 2048
+      output_len: 2
+      consume: deferred
+  - id: ttl_before
+    action: status_sample
+    params:
+      duration_s: 0
+      include:
+      - inflight
+      - mock
+      - info
+      - ttl
+    timeout_s: 30
+  - id: p_suppress
+    action: status_control
+    params:
+      fault: status_suppress_rids
+      config: {}
+      enabled: true
+      role: prefill
+      requests:
+        $ref: stages.silent.output.requests
+      rids: all
+  - id: d_suppress
+    action: status_control
+    params:
+      fault: status_suppress_rids
+      config: {}
+      enabled: true
+      role: decode
+      requests:
+        $ref: stages.silent.output.requests
+      rids: all
+  - id: silent_dispatch
+    action: status_dispatch
+    params:
+      requests:
+        $ref: stages.silent.output.requests
+    timeout_s: 75
+  - id: accepted_window
+    action: status_sample
+    params:
+      duration_s: 15
+      until:
+        metric: prefill_accepted
+        op: ge
+        value: 6
+    timeout_s: 30
+  - id: six_prefill_accepted
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.accepted_window.output.snapshot
+      metric: prefill_accepted
+      op: ge
+      expected: 6
+      aggregate: last
+      baseline:
+        $ref: stages.ttl_before.output.snapshot
+  - id: active_at_twelve_seconds
+    action: status_sample
+    params:
+      duration_s: 12
+    timeout_s: 30
+  - id: ledger_nonempty_after_twelve
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.active_at_twelve_seconds.output.snapshot
+      metric: scheduler
+      op: ge
+      expected: 1
+      aggregate: last
+  - id: ttl_drain
+    action: status_sample
+    params:
+      duration_s: 95
+      until:
+        metric: scheduler
+        op: eq
+        value: 0
+    timeout_s: 110
+  - id: scheduler_ttl_drain
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.ttl_drain.output.snapshot
+      metric: scheduler
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: ttl_event_window
+    action: status_sample
+    params:
+      duration_s: 105
+      until:
+        metric: ttl_scheduler
+        op: ge
+        value: 6
+      include:
+      - inflight
+      - mock
+      - info
+      - ttl
+    timeout_s: 120
+  - id: six_ttl_eviction_events
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.ttl_event_window.output.snapshot
+      metric: ttl_scheduler
+      op: ge
+      expected: 6
+      aggregate: last
+      baseline:
+        $ref: stages.ttl_before.output.snapshot
+  - id: p_clear
+    action: status_control
+    params:
+      fault: status_suppress_rids
+      config: {}
+      enabled: false
+      role: prefill
+      requests:
+        $ref: stages.silent.output.requests
+      rids: all
+  - id: d_clear
+    action: status_control
+    params:
+      fault: status_suppress_rids
+      config: {}
+      enabled: false
+      role: decode
+      requests:
+        $ref: stages.silent.output.requests
+      rids: all
+  - id: recovery
+    action: status_prepare
+    params:
+      count: 1
+      concurrency: 1
+      input_len: 2048
+      output_len: 2
+      consume: immediate
+  - id: recovery_dispatch
+    action: status_dispatch
+    params:
+      requests:
+        $ref: stages.recovery.output.requests
+    timeout_s: 75
+  - id: recovery_wait
+    action: wait
+    params:
+      requests:
+        $ref: stages.recovery.output.requests
+    timeout_s: 75
+  - id: recovery_success
+    action: status_outcomes
+    params:
+      requests:
+        $ref: stages.recovery.output.requests
+      success_min: 1
+      failure_max: 0
+  - id: final_health
+    action: status_sample
+    params:
+      duration_s: 0
+    timeout_s: 30
+  - id: master_http_200
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.final_health.output.snapshot
+      metric: master_http
+      op: eq
+      expected: 200
+      aggregate: last
+  - id: cleanup
+    action: teardown
+- id: prefill_suppress_all
+  legacy_case_ids:
+  - status_prefill_suppress_all
+  profiles:
+  - batch-window
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: ttl_before
+    action: status_sample
+    params:
+      duration_s: 0
+      include:
+      - inflight
+      - mock
+      - info
+      - ttl
+    timeout_s: 30
+  - id: traffic
+    action: status_prepare
+    params:
+      count: 4
+      concurrency: 4
+      input_len: 2048
+      output_len: 2
+      consume: immediate
+      stream_timeout_s: 45
+      expected_rpc_statuses:
+      - DEADLINE_EXCEEDED
+  - id: on_0
+    action: status_control
+    params:
+      fault: status_suppress_running
+      config: {}
+      enabled: true
+      role: prefill
+  - id: on_1
+    action: status_control
+    params:
+      fault: status_suppress_finished
+      config: {}
+      enabled: true
+      role: prefill
+  - id: traffic_dispatch
+    action: status_dispatch
+    params:
+      requests:
+        $ref: stages.traffic.output.requests
+    timeout_s: 75
+  - id: traffic_wait
+    action: wait
+    params:
+      requests:
+        $ref: stages.traffic.output.requests
+    timeout_s: 75
+  - id: legal_request_terminals
+    action: status_outcomes
+    params:
+      requests:
+        $ref: stages.traffic.output.requests
+      timeout_or_success: true
+  - id: scheduler_window
+    action: status_sample
+    params:
+      duration_s: 95
+      until:
+        metric: scheduler
+        op: eq
+        value: 0
+    timeout_s: 110
+  - id: scheduler_retires
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.scheduler_window.output.snapshot
+      metric: scheduler
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: prefill_window
+    action: status_sample
+    params:
+      duration_s: 95
+      until:
+        metric: prefill_batches
+        op: eq
+        value: 0
+    timeout_s: 110
+  - id: prefill_retires
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.prefill_window.output.snapshot
+      metric: prefill_batches
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: ttl_channel_after
+    action: status_sample
+    params:
+      duration_s: 0
+      include:
+      - inflight
+      - mock
+      - info
+      - ttl
+    timeout_s: 30
+  - id: scheduler_ttl_channel_reachable
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.ttl_channel_after.output.snapshot
+      metric: ttl_scheduler
+      op: ge
+      expected: 0
+      aggregate: last
+  - id: prefill_ttl_channel_reachable
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.ttl_channel_after.output.snapshot
+      metric: ttl_prefill
+      op: ge
+      expected: 0
+      aggregate: last
+  - id: off_0
+    action: status_control
+    params:
+      fault: status_suppress_running
+      config: {}
+      enabled: false
+      role: prefill
+  - id: off_1
+    action: status_control
+    params:
+      fault: status_suppress_finished
+      config: {}
+      enabled: false
+      role: prefill
+  - id: final_owners
+    action: status_sample
+    params:
+      duration_s: 0
+    timeout_s: 30
+  - id: final_scheduler_zero
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.final_owners.output.snapshot
+      metric: scheduler
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: final_prefill_batches_zero
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.final_owners.output.snapshot
+      metric: prefill_batches
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: recovery
+    action: status_prepare
+    params:
+      count: 1
+      concurrency: 1
+      input_len: 2048
+      output_len: 2
+      consume: immediate
+  - id: recovery_dispatch
+    action: status_dispatch
+    params:
+      requests:
+        $ref: stages.recovery.output.requests
+    timeout_s: 75
+  - id: recovery_wait
+    action: wait
+    params:
+      requests:
+        $ref: stages.recovery.output.requests
+    timeout_s: 75
+  - id: recovery_success
+    action: status_outcomes
+    params:
+      requests:
+        $ref: stages.recovery.output.requests
+      success_min: 1
+      failure_max: 0
+  - id: final_health
+    action: status_sample
+    params:
+      duration_s: 0
+    timeout_s: 30
+  - id: master_http_200
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.final_health.output.snapshot
+      metric: master_http
+      op: eq
+      expected: 200
+      aggregate: last
+  - id: cleanup
+    action: teardown
+- id: prefill_suppress_finished
+  legacy_case_ids:
+  - status_prefill_suppress_finished
+  profiles:
+  - batch-window
+  - single-nonbatch
+  - single-batch
+  - window-nonbatch
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: traffic
+    action: status_prepare
+    params:
+      count: 4
+      concurrency: 4
+      input_len: 2048
+      output_len: 2
+      consume: immediate
+      stream_timeout_s: 20
+      expected_rpc_statuses:
+      - DEADLINE_EXCEEDED
+  - id: on_0
+    action: status_control
+    params:
+      fault: status_suppress_finished
+      config: {}
+      enabled: true
+      role: prefill
+  - id: traffic_dispatch
+    action: status_dispatch
+    params:
+      requests:
+        $ref: stages.traffic.output.requests
+    timeout_s: 75
+  - id: traffic_wait
+    action: wait
+    params:
+      requests:
+        $ref: stages.traffic.output.requests
+    timeout_s: 75
+  - id: legal_request_terminals
+    action: status_outcomes
+    params:
+      requests:
+        $ref: stages.traffic.output.requests
+      timeout_or_success: true
+  - id: off_0
+    action: status_control
+    params:
+      fault: status_suppress_finished
+      config: {}
+      enabled: false
+      role: prefill
+  - id: after_clear
+    action: status_sample
+    params:
+      duration_s: 95
+      until:
+        metric: all_inflight
+        op: eq
+        value: 0
+    timeout_s: 110
+  - id: after_clear_scheduler
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.after_clear.output.snapshot
+      metric: scheduler
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: after_clear_prefill_batches
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.after_clear.output.snapshot
+      metric: prefill_batches
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: after_clear_prefill_members
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.after_clear.output.snapshot
+      metric: prefill_requests
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: after_clear_decode_load
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.after_clear.output.snapshot
+      metric: decode_total_load
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: final_health
+    action: status_sample
+    params:
+      duration_s: 0
+    timeout_s: 30
+  - id: master_http_200
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.final_health.output.snapshot
+      metric: master_http
+      op: eq
+      expected: 200
+      aggregate: last
+  - id: cleanup
+    action: teardown
+- id: decode_suppress_finished
+  legacy_case_ids:
+  - status_decode_suppress_finished
+  profiles:
+  - batch-window
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: traffic
+    action: status_prepare
+    params:
+      count: 4
+      concurrency: 4
+      input_len: 2048
+      output_len: 2
+      consume: immediate
+      stream_timeout_s: 45
+      expected_rpc_statuses:
+      - DEADLINE_EXCEEDED
+  - id: on_0
+    action: status_control
+    params:
+      fault: status_suppress_finished
+      config: {}
+      enabled: true
+      role: decode
+  - id: traffic_dispatch
+    action: status_dispatch
+    params:
+      requests:
+        $ref: stages.traffic.output.requests
+    timeout_s: 75
+  - id: traffic_wait
+    action: wait
+    params:
+      requests:
+        $ref: stages.traffic.output.requests
+    timeout_s: 75
+  - id: legal_request_terminals
+    action: status_outcomes
+    params:
+      requests:
+        $ref: stages.traffic.output.requests
+      timeout_or_success: true
+  - id: p_finished_window
+    action: status_sample
+    params:
+      duration_s: 20
+      until:
+        metric: prefill_batches
+        op: eq
+        value: 0
+    timeout_s: 35
+  - id: prefill_finishes_independently
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.p_finished_window.output.snapshot
+      metric: prefill_batches
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: off_0
+    action: status_control
+    params:
+      fault: status_suppress_finished
+      config: {}
+      enabled: false
+      role: decode
+  - id: decode_recovery_window
+    action: status_sample
+    params:
+      duration_s: 120
+      until:
+        metric: decode_total_load
+        op: eq
+        value: 0
+    timeout_s: 135
+  - id: decode_retires_after_clear
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.decode_recovery_window.output.snapshot
+      metric: decode_total_load
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: final_health
+    action: status_sample
+    params:
+      duration_s: 0
+    timeout_s: 30
+  - id: master_http_200
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.final_health.output.snapshot
+      metric: master_http
+      op: eq
+      expected: 200
+      aggregate: last
+  - id: cleanup
+    action: teardown
+- id: no_respond
+  legacy_case_ids:
+  - status_status_no_respond
+  profiles:
+  - batch-window
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: slow_prefill
+    action: status_perf
+    params:
+      prefill_fixed_ms: 3000
+      restore_prefill_fixed_ms: 100
+  - id: live
+    action: status_prepare
+    params:
+      count: 4
+      concurrency: 4
+      input_len: 2048
+      output_len: 2
+      consume: deferred
+  - id: live_dispatch
+    action: status_dispatch
+    params:
+      requests:
+        $ref: stages.live.output.requests
+    timeout_s: 75
+  - id: ttl_before
+    action: status_sample
+    params:
+      duration_s: 0
+      include:
+      - inflight
+      - mock
+      - info
+      - ttl
+    timeout_s: 30
+  - id: retire_on
+    action: status_control
+    params:
+      fault: status_no_respond
+      config: {}
+      enabled: true
+      role: prefill
+  - id: some_retired_window
+    action: status_sample
+    params:
+      duration_s: 30
+      until:
+        metric: alive_prefill
+        op: le
+        value: 1
+      include:
+      - inflight
+      - mock
+      - info
+      - ttl
+    timeout_s: 45
+  - id: at_least_one_prefill_retired
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.some_retired_window.output.snapshot
+      metric: alive_prefill
+      op: le
+      expected: 1
+      aggregate: last
+  - id: all_retired_window
+    action: status_sample
+    params:
+      duration_s: 30
+      until:
+        metric: alive_prefill
+        op: eq
+        value: 0
+      include:
+      - inflight
+      - mock
+      - info
+      - ttl
+    timeout_s: 45
+  - id: all_prefill_retired
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.all_retired_window.output.snapshot
+      metric: alive_prefill
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: retired_ledger_window
+    action: status_sample
+    params:
+      duration_s: 95
+      until:
+        metric: scheduler
+        op: eq
+        value: 0
+    timeout_s: 110
+  - id: retired_ledger_drained
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.retired_ledger_window.output.snapshot
+      metric: scheduler
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: ttl_channel_after
+    action: status_sample
+    params:
+      duration_s: 0
+      include:
+      - inflight
+      - mock
+      - info
+      - ttl
+    timeout_s: 30
+  - id: scheduler_ttl_channel_reachable
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.ttl_channel_after.output.snapshot
+      metric: ttl_scheduler
+      op: ge
+      expected: 0
+      aggregate: last
+  - id: retire_off
+    action: status_control
+    params:
+      fault: status_no_respond
+      config: {}
+      enabled: false
+      role: prefill
+  - id: final_scheduler
+    action: status_sample
+    params:
+      duration_s: 0
+    timeout_s: 30
+  - id: final_scheduler_zero
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.final_scheduler.output.snapshot
+      metric: scheduler
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: topology_recovery
+    action: status_sample
+    params:
+      duration_s: 30
+      until:
+        metric: alive_prefill
+        op: ge
+        value: 2
+      include:
+      - inflight
+      - mock
+      - info
+      - ttl
+    timeout_s: 45
+  - id: topology_recovers
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.topology_recovery.output.snapshot
+      metric: alive_prefill
+      op: ge
+      expected: 2
+      aggregate: last
+  - id: reconnect_window
+    action: status_sample
+    params:
+      duration_s: 2
+    timeout_s: 30
+  - id: recovery
+    action: status_prepare
+    params:
+      count: 1
+      concurrency: 1
+      input_len: 2048
+      output_len: 2
+      consume: immediate
+  - id: recovery_dispatch
+    action: status_dispatch
+    params:
+      requests:
+        $ref: stages.recovery.output.requests
+    timeout_s: 75
+  - id: recovery_wait
+    action: wait
+    params:
+      requests:
+        $ref: stages.recovery.output.requests
+    timeout_s: 75
+  - id: recovery_success
+    action: status_outcomes
+    params:
+      requests:
+        $ref: stages.recovery.output.requests
+      success_min: 1
+      failure_max: 0
+  - id: final_health
+    action: status_sample
+    params:
+      duration_s: 0
+    timeout_s: 30
+  - id: master_http_200
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.final_health.output.snapshot
+      metric: master_http
+      op: eq
+      expected: 200
+      aggregate: last
+  - id: cleanup
+    action: teardown
+- id: version_regress
+  legacy_case_ids:
+  - status_version_regress
+  profiles:
+  - batch-window
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: slow_prefill
+    action: status_perf
+    params:
+      prefill_fixed_ms: 3000
+      restore_prefill_fixed_ms: 100
+  - id: live
+    action: status_prepare
+    params:
+      count: 4
+      concurrency: 4
+      input_len: 2048
+      output_len: 2
+      consume: deferred
+  - id: live_dispatch
+    action: status_dispatch
+    params:
+      requests:
+        $ref: stages.live.output.requests
+    timeout_s: 75
+  - id: ttl_before
+    action: status_sample
+    params:
+      duration_s: 0
+      include:
+      - inflight
+      - mock
+      - info
+      - ttl
+    timeout_s: 30
+  - id: retire_on
+    action: status_control
+    params:
+      fault: status_version_regress
+      config: {}
+      enabled: true
+      role: prefill
+  - id: some_retired_window
+    action: status_sample
+    params:
+      duration_s: 30
+      until:
+        metric: alive_prefill
+        op: le
+        value: 1
+      include:
+      - inflight
+      - mock
+      - info
+      - ttl
+    timeout_s: 45
+  - id: at_least_one_prefill_retired
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.some_retired_window.output.snapshot
+      metric: alive_prefill
+      op: le
+      expected: 1
+      aggregate: last
+  - id: retired_ledger_window
+    action: status_sample
+    params:
+      duration_s: 95
+      until:
+        metric: scheduler
+        op: eq
+        value: 0
+    timeout_s: 110
+  - id: retired_ledger_drained
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.retired_ledger_window.output.snapshot
+      metric: scheduler
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: ttl_channel_after
+    action: status_sample
+    params:
+      duration_s: 0
+      include:
+      - inflight
+      - mock
+      - info
+      - ttl
+    timeout_s: 30
+  - id: scheduler_ttl_channel_reachable
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.ttl_channel_after.output.snapshot
+      metric: ttl_scheduler
+      op: ge
+      expected: 0
+      aggregate: last
+  - id: retire_off
+    action: status_control
+    params:
+      fault: status_version_regress
+      config: {}
+      enabled: false
+      role: prefill
+  - id: final_scheduler
+    action: status_sample
+    params:
+      duration_s: 0
+    timeout_s: 30
+  - id: final_scheduler_zero
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.final_scheduler.output.snapshot
+      metric: scheduler
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: topology_recovery
+    action: status_sample
+    params:
+      duration_s: 30
+      until:
+        metric: alive_prefill
+        op: ge
+        value: 2
+      include:
+      - inflight
+      - mock
+      - info
+      - ttl
+    timeout_s: 45
+  - id: final_health
+    action: status_sample
+    params:
+      duration_s: 0
+    timeout_s: 30
+  - id: master_http_200
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.final_health.output.snapshot
+      metric: master_http
+      op: eq
+      expected: 200
+      aggregate: last
+  - id: cleanup
+    action: teardown
+- id: unknown_rid_finished
+  legacy_case_ids:
+  - status_unknown_rid_finished
+  profiles:
+  - batch-window
+  - single-nonbatch
+  - single-batch
+  - window-nonbatch
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: clean_baseline
+    action: status_sample
+    params:
+      duration_s: 20
+      until:
+        metric: all_inflight
+        op: eq
+        value: 0
+    timeout_s: 35
+  - id: clean_baseline_scheduler
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.clean_baseline.output.snapshot
+      metric: scheduler
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: clean_baseline_prefill_batches
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.clean_baseline.output.snapshot
+      metric: prefill_batches
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: clean_baseline_prefill_members
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.clean_baseline.output.snapshot
+      metric: prefill_requests
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: clean_baseline_decode_load
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.clean_baseline.output.snapshot
+      metric: decode_total_load
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: ghost
+    action: status_prepare
+    params:
+      count: 1
+      concurrency: 1
+      input_len: 2048
+      output_len: 2
+      consume: immediate
+  - id: ghost_on
+    action: status_control
+    params:
+      fault: status_fake_task
+      config:
+        phase: finished
+      enabled: true
+      role: prefill
+      selection: first
+      requests:
+        $ref: stages.ghost.output.requests
+      rids: all
+  - id: ghost_window
+    action: status_sample
+    params:
+      duration_s: 3
+    timeout_s: 30
+  - id: ghost_off
+    action: status_control
+    params:
+      fault: status_fake_task
+      config: {}
+      enabled: false
+      role: prefill
+  - id: unknown_terminal_ignored
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.ghost_window.output.snapshot
+      metric: fingerprint
+      op: eq
+      expected: true
+      aggregate: last
+      baseline:
+        $ref: stages.clean_baseline.output.snapshot
+  - id: final_health
+    action: status_sample
+    params:
+      duration_s: 0
+    timeout_s: 30
+  - id: master_http_200
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.final_health.output.snapshot
+      metric: master_http
+      op: eq
+      expected: 200
+      aggregate: last
+  - id: cleanup
+    action: teardown
+- id: unknown_rid_running
+  legacy_case_ids:
+  - status_unknown_rid_running
+  profiles:
+  - batch-window
+  - single-nonbatch
+  - single-batch
+  - window-nonbatch
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: clean_baseline
+    action: status_sample
+    params:
+      duration_s: 20
+      until:
+        metric: all_inflight
+        op: eq
+        value: 0
+    timeout_s: 35
+  - id: clean_baseline_scheduler
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.clean_baseline.output.snapshot
+      metric: scheduler
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: clean_baseline_prefill_batches
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.clean_baseline.output.snapshot
+      metric: prefill_batches
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: clean_baseline_prefill_members
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.clean_baseline.output.snapshot
+      metric: prefill_requests
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: clean_baseline_decode_load
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.clean_baseline.output.snapshot
+      metric: decode_total_load
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: ghost
+    action: status_prepare
+    params:
+      count: 1
+      concurrency: 1
+      input_len: 2048
+      output_len: 2
+      consume: immediate
+  - id: ghost_on
+    action: status_control
+    params:
+      fault: status_fake_task
+      config:
+        phase: RUNNING
+      enabled: true
+      role: prefill
+      selection: first
+      requests:
+        $ref: stages.ghost.output.requests
+      rids: all
+  - id: ghost_window
+    action: status_sample
+    params:
+      duration_s: 3
+    timeout_s: 30
+  - id: ghost_off
+    action: status_control
+    params:
+      fault: status_fake_task
+      config: {}
+      enabled: false
+      role: prefill
+  - id: unknown_active_clear_window
+    action: status_sample
+    params:
+      duration_s: 95
+      until:
+        metric: scheduler
+        op: eq
+        value: 0
+    timeout_s: 110
+  - id: unknown_active_retires_after_clear
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.unknown_active_clear_window.output.snapshot
+      metric: scheduler
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: final_health
+    action: status_sample
+    params:
+      duration_s: 0
+    timeout_s: 30
+  - id: master_http_200
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.final_health.output.snapshot
+      metric: master_http
+      op: eq
+      expected: 200
+      aggregate: last
+  - id: cleanup
+    action: teardown
+- id: unknown_batchid
+  legacy_case_ids:
+  - status_unknown_batchid
+  profiles:
+  - batch-window
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: baseline_request
+    action: status_prepare
+    params:
+      count: 1
+      concurrency: 1
+      input_len: 2048
+      output_len: 2
+      consume: immediate
+  - id: baseline_request_dispatch
+    action: status_dispatch
+    params:
+      requests:
+        $ref: stages.baseline_request.output.requests
+    timeout_s: 75
+  - id: baseline_request_wait
+    action: wait
+    params:
+      requests:
+        $ref: stages.baseline_request.output.requests
+    timeout_s: 75
+  - id: baseline_request_success
+    action: status_outcomes
+    params:
+      requests:
+        $ref: stages.baseline_request.output.requests
+      success_min: 1
+      failure_max: 0
+  - id: slow_prefill
+    action: status_perf
+    params:
+      prefill_fixed_ms: 3000
+      restore_prefill_fixed_ms: 100
+  - id: real
+    action: status_prepare
+    params:
+      count: 1
+      concurrency: 1
+      input_len: 2048
+      output_len: 2
+      consume: deferred
+  - id: real_dispatch
+    action: status_dispatch
+    params:
+      requests:
+        $ref: stages.real.output.requests
+    timeout_s: 75
+  - id: legacy_effective_batch_zero
+    action: status_control
+    params:
+      fault: status_fake_task
+      config:
+        phase: finished
+        batch_id: 0
+      enabled: true
+      role: prefill
+      selection: landing
+      requests:
+        $ref: stages.real.output.requests
+      rids: all
+  - id: real_wait
+    action: wait
+    params:
+      requests:
+        $ref: stages.real.output.requests
+    timeout_s: 75
+  - id: real_request_unaffected
+    action: status_outcomes
+    params:
+      requests:
+        $ref: stages.real.output.requests
+      success_min: 1
+      failure_max: 0
+  - id: fake_clear
+    action: status_control
+    params:
+      fault: status_fake_task
+      config: {}
+      enabled: false
+      role: prefill
+  - id: after_clear
+    action: status_sample
+    params:
+      duration_s: 95
+      until:
+        metric: all_inflight
+        op: eq
+        value: 0
+    timeout_s: 110
+  - id: after_clear_scheduler
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.after_clear.output.snapshot
+      metric: scheduler
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: after_clear_prefill_batches
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.after_clear.output.snapshot
+      metric: prefill_batches
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: after_clear_prefill_members
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.after_clear.output.snapshot
+      metric: prefill_requests
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: after_clear_decode_load
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.after_clear.output.snapshot
+      metric: decode_total_load
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: final_health
+    action: status_sample
+    params:
+      duration_s: 0
+    timeout_s: 30
+  - id: master_http_200
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.final_health.output.snapshot
+      metric: master_http
+      op: eq
+      expected: 200
+      aggregate: last
+  - id: cleanup
+    action: teardown
+- id: special_ids
+  legacy_case_ids:
+  - status_special_ids
+  profiles:
+  - batch-window
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: slow_prefill
+    action: status_perf
+    params:
+      prefill_fixed_ms: 3000
+      restore_prefill_fixed_ms: 100
+  - id: clean_baseline
+    action: status_sample
+    params:
+      duration_s: 20
+      until:
+        metric: all_inflight
+        op: eq
+        value: 0
+    timeout_s: 35
+  - id: clean_baseline_scheduler
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.clean_baseline.output.snapshot
+      metric: scheduler
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: clean_baseline_prefill_batches
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.clean_baseline.output.snapshot
+      metric: prefill_batches
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: clean_baseline_prefill_members
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.clean_baseline.output.snapshot
+      metric: prefill_requests
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: clean_baseline_decode_load
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.clean_baseline.output.snapshot
+      metric: decode_total_load
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: negative_rid_on
+    action: status_control
+    params:
+      fault: status_fake_task
+      config:
+        rid: -1
+        phase: finished
+        error_code: 8500
+      enabled: true
+      role: prefill
+      selection: first
+  - id: negative_rid_window
+    action: status_sample
+    params:
+      duration_s: 3
+    timeout_s: 30
+  - id: negative_rid_clear
+    action: status_control
+    params:
+      fault: status_fake_task
+      config: {}
+      enabled: false
+      role: prefill
+  - id: negative_rid_ignored
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.negative_rid_window.output.snapshot
+      metric: fingerprint
+      op: eq
+      expected: true
+      aggregate: last
+      baseline:
+        $ref: stages.clean_baseline.output.snapshot
+  - id: zero_rid_channel_probe
+    action: status_control
+    params:
+      fault: status_fake_task
+      config:
+        rid: 0
+        phase: finished
+      enabled: true
+      role: prefill
+      selection: first
+      expected_http:
+      - 200
+      - 400
+  - id: zero_rid_clear
+    action: status_control
+    params:
+      fault: status_fake_task
+      config: {}
+      enabled: false
+      role: prefill
+  - id: zero_real
+    action: status_prepare
+    params:
+      count: 1
+      concurrency: 1
+      input_len: 2048
+      output_len: 2
+      consume: deferred
+  - id: zero_dispatch
+    action: status_dispatch
+    params:
+      requests:
+        $ref: stages.zero_real.output.requests
+    timeout_s: 75
+  - id: zero_batch_on
+    action: status_control
+    params:
+      fault: status_fake_task
+      config:
+        phase: finished
+        batch_id: 0
+      enabled: true
+      role: prefill
+      selection: landing
+      requests:
+        $ref: stages.zero_real.output.requests
+      rids: all
+  - id: zero_wait
+    action: wait
+    params:
+      requests:
+        $ref: stages.zero_real.output.requests
+    timeout_s: 75
+  - id: zero_batch_unaffected
+    action: status_outcomes
+    params:
+      requests:
+        $ref: stages.zero_real.output.requests
+      success_min: 1
+      failure_max: 0
+  - id: zero_clear
+    action: status_control
+    params:
+      fault: status_fake_task
+      config: {}
+      enabled: false
+      role: prefill
+  - id: negative_real
+    action: status_prepare
+    params:
+      count: 1
+      concurrency: 1
+      input_len: 2048
+      output_len: 2
+      consume: deferred
+  - id: negative_dispatch
+    action: status_dispatch
+    params:
+      requests:
+        $ref: stages.negative_real.output.requests
+    timeout_s: 75
+  - id: negative_batch_on
+    action: status_control
+    params:
+      fault: status_fake_task
+      config:
+        phase: finished
+        batch_id: -1
+      enabled: true
+      role: prefill
+      selection: landing
+      requests:
+        $ref: stages.negative_real.output.requests
+      rids: all
+  - id: negative_wait
+    action: wait
+    params:
+      requests:
+        $ref: stages.negative_real.output.requests
+    timeout_s: 75
+  - id: negative_batch_unaffected
+    action: status_outcomes
+    params:
+      requests:
+        $ref: stages.negative_real.output.requests
+      success_min: 1
+      failure_max: 0
+  - id: negative_clear
+    action: status_control
+    params:
+      fault: status_fake_task
+      config: {}
+      enabled: false
+      role: prefill
+  - id: after_clear
+    action: status_sample
+    params:
+      duration_s: 30
+      until:
+        metric: all_inflight
+        op: eq
+        value: 0
+    timeout_s: 45
+  - id: after_clear_scheduler
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.after_clear.output.snapshot
+      metric: scheduler
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: after_clear_prefill_batches
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.after_clear.output.snapshot
+      metric: prefill_batches
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: after_clear_prefill_members
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.after_clear.output.snapshot
+      metric: prefill_requests
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: after_clear_decode_load
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.after_clear.output.snapshot
+      metric: decode_total_load
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: final_health
+    action: status_sample
+    params:
+      duration_s: 0
+    timeout_s: 30
+  - id: master_http_200
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.final_health.output.snapshot
+      metric: master_http
+      op: eq
+      expected: 200
+      aggregate: last
+  - id: cleanup
+    action: teardown
+- id: unbatched_single_request
+  legacy_case_ids:
+  - status_unbatched_single_request
+  profiles:
+  - batch-window
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: clean_baseline
+    action: status_sample
+    params:
+      duration_s: 20
+      until:
+        metric: all_inflight
+        op: eq
+        value: 0
+    timeout_s: 35
+  - id: clean_baseline_scheduler
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.clean_baseline.output.snapshot
+      metric: scheduler
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: clean_baseline_prefill_batches
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.clean_baseline.output.snapshot
+      metric: prefill_batches
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: clean_baseline_prefill_members
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.clean_baseline.output.snapshot
+      metric: prefill_requests
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: clean_baseline_decode_load
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.clean_baseline.output.snapshot
+      metric: decode_total_load
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: omitted_running
+    action: status_prepare
+    params:
+      count: 1
+      concurrency: 1
+      input_len: 2048
+      output_len: 2
+      consume: immediate
+  - id: omitted_running_before
+    action: status_sample
+    params:
+      duration_s: 0
+    timeout_s: 30
+  - id: omitted_running_on
+    action: status_control
+    params:
+      fault: status_fake_task
+      config:
+        phase: RUNNING
+      enabled: true
+      role: prefill
+      selection: first
+      requests:
+        $ref: stages.omitted_running.output.requests
+      rids: all
+  - id: omitted_running_window
+    action: status_sample
+    params:
+      duration_s: 3
+    timeout_s: 30
+  - id: omitted_running_off
+    action: status_control
+    params:
+      fault: status_fake_task
+      config: {}
+      enabled: false
+      role: prefill
+  - id: omitted_running_ignored
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.omitted_running_window.output.snapshot
+      metric: fingerprint
+      op: eq
+      expected: true
+      aggregate: last
+      baseline:
+        $ref: stages.omitted_running_before.output.snapshot
+  - id: omitted_finished
+    action: status_prepare
+    params:
+      count: 1
+      concurrency: 1
+      input_len: 2048
+      output_len: 2
+      consume: immediate
+  - id: omitted_finished_before
+    action: status_sample
+    params:
+      duration_s: 0
+    timeout_s: 30
+  - id: omitted_finished_on
+    action: status_control
+    params:
+      fault: status_fake_task
+      config:
+        phase: finished
+        error_code: 8500
+      enabled: true
+      role: prefill
+      selection: first
+      requests:
+        $ref: stages.omitted_finished.output.requests
+      rids: all
+  - id: omitted_finished_window
+    action: status_sample
+    params:
+      duration_s: 3
+    timeout_s: 30
+  - id: omitted_finished_off
+    action: status_control
+    params:
+      fault: status_fake_task
+      config: {}
+      enabled: false
+      role: prefill
+  - id: omitted_finished_ignored
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.omitted_finished_window.output.snapshot
+      metric: fingerprint
+      op: eq
+      expected: true
+      aggregate: last
+      baseline:
+        $ref: stages.omitted_finished_before.output.snapshot
+  - id: zero_running
+    action: status_prepare
+    params:
+      count: 1
+      concurrency: 1
+      input_len: 2048
+      output_len: 2
+      consume: immediate
+  - id: zero_running_before
+    action: status_sample
+    params:
+      duration_s: 0
+    timeout_s: 30
+  - id: zero_running_on
+    action: status_control
+    params:
+      fault: status_fake_task
+      config:
+        phase: RUNNING
+        batch_id: 0
+      enabled: true
+      role: prefill
+      selection: first
+      requests:
+        $ref: stages.zero_running.output.requests
+      rids: all
+  - id: zero_running_window
+    action: status_sample
+    params:
+      duration_s: 3
+    timeout_s: 30
+  - id: zero_running_off
+    action: status_control
+    params:
+      fault: status_fake_task
+      config: {}
+      enabled: false
+      role: prefill
+  - id: zero_running_ignored
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.zero_running_window.output.snapshot
+      metric: fingerprint
+      op: eq
+      expected: true
+      aggregate: last
+      baseline:
+        $ref: stages.zero_running_before.output.snapshot
+  - id: zero_finished
+    action: status_prepare
+    params:
+      count: 1
+      concurrency: 1
+      input_len: 2048
+      output_len: 2
+      consume: immediate
+  - id: zero_finished_before
+    action: status_sample
+    params:
+      duration_s: 0
+    timeout_s: 30
+  - id: zero_finished_on
+    action: status_control
+    params:
+      fault: status_fake_task
+      config:
+        phase: finished
+        batch_id: 0
+        error_code: 8500
+      enabled: true
+      role: prefill
+      selection: first
+      requests:
+        $ref: stages.zero_finished.output.requests
+      rids: all
+  - id: zero_finished_window
+    action: status_sample
+    params:
+      duration_s: 3
+    timeout_s: 30
+  - id: zero_finished_off
+    action: status_control
+    params:
+      fault: status_fake_task
+      config: {}
+      enabled: false
+      role: prefill
+  - id: zero_finished_ignored
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.zero_finished_window.output.snapshot
+      metric: fingerprint
+      op: eq
+      expected: true
+      aggregate: last
+      baseline:
+        $ref: stages.zero_finished_before.output.snapshot
+  - id: after_clear
+    action: status_sample
+    params:
+      duration_s: 20
+      until:
+        metric: all_inflight
+        op: eq
+        value: 0
+    timeout_s: 35
+  - id: after_clear_scheduler
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.after_clear.output.snapshot
+      metric: scheduler
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: after_clear_prefill_batches
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.after_clear.output.snapshot
+      metric: prefill_batches
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: after_clear_prefill_members
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.after_clear.output.snapshot
+      metric: prefill_requests
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: after_clear_decode_load
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.after_clear.output.snapshot
+      metric: decode_total_load
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: final_health
+    action: status_sample
+    params:
+      duration_s: 0
+    timeout_s: 30
+  - id: master_http_200
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.final_health.output.snapshot
+      metric: master_http
+      op: eq
+      expected: 200
+      aggregate: last
+  - id: cleanup
+    action: teardown
+- id: foreign_batchid
+  legacy_case_ids:
+  - status_foreign_batchid
+  profiles:
+  - batch-window
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: clean_baseline
+    action: status_sample
+    params:
+      duration_s: 20
+      until:
+        metric: all_inflight
+        op: eq
+        value: 0
+    timeout_s: 35
+  - id: clean_baseline_scheduler
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.clean_baseline.output.snapshot
+      metric: scheduler
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: clean_baseline_prefill_batches
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.clean_baseline.output.snapshot
+      metric: prefill_batches
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: clean_baseline_prefill_members
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.clean_baseline.output.snapshot
+      metric: prefill_requests
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: clean_baseline_decode_load
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.clean_baseline.output.snapshot
+      metric: decode_total_load
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: ghost
+    action: status_prepare
+    params:
+      count: 1
+      concurrency: 1
+      input_len: 2048
+      output_len: 2
+      consume: immediate
+  - id: foreign_on
+    action: status_control
+    params:
+      fault: status_fake_task
+      config:
+        phase: finished
+        batch_id: 10000000
+        error_code: 8500
+      enabled: true
+      role: prefill
+      selection: all
+      requests:
+        $ref: stages.ghost.output.requests
+      rids: all
+  - id: foreign_ghost_window
+    action: status_sample
+    params:
+      duration_s: 3
+    timeout_s: 30
+  - id: foreign_terminal_ignored
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.foreign_ghost_window.output.snapshot
+      metric: fingerprint
+      op: eq
+      expected: true
+      aggregate: last
+      baseline:
+        $ref: stages.clean_baseline.output.snapshot
+  - id: real_traffic
+    action: status_prepare
+    params:
+      count: 4
+      concurrency: 4
+      input_len: 2048
+      output_len: 2
+      consume: immediate
+  - id: real_traffic_dispatch
+    action: status_dispatch
+    params:
+      requests:
+        $ref: stages.real_traffic.output.requests
+    timeout_s: 75
+  - id: real_traffic_wait
+    action: wait
+    params:
+      requests:
+        $ref: stages.real_traffic.output.requests
+    timeout_s: 75
+  - id: real_traffic_success
+    action: status_outcomes
+    params:
+      requests:
+        $ref: stages.real_traffic.output.requests
+      success_min: 4
+      failure_max: 0
+  - id: foreign_off
+    action: status_control
+    params:
+      fault: status_fake_task
+      config: {}
+      enabled: false
+      role: prefill
+  - id: after_foreign
+    action: status_sample
+    params:
+      duration_s: 30
+      until:
+        metric: all_inflight
+        op: eq
+        value: 0
+    timeout_s: 45
+  - id: after_foreign_scheduler
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.after_foreign.output.snapshot
+      metric: scheduler
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: after_foreign_prefill_batches
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.after_foreign.output.snapshot
+      metric: prefill_batches
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: after_foreign_prefill_members
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.after_foreign.output.snapshot
+      metric: prefill_requests
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: after_foreign_decode_load
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.after_foreign.output.snapshot
+      metric: decode_total_load
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: final_health
+    action: status_sample
+    params:
+      duration_s: 0
+    timeout_s: 30
+  - id: master_http_200
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.final_health.output.snapshot
+      metric: master_http
+      op: eq
+      expected: 200
+      aggregate: last
+  - id: cleanup
+    action: teardown
+- id: duplicate_finished
+  legacy_case_ids:
+  - status_duplicate_finished
+  profiles:
+  - batch-window
+  - single-nonbatch
+  - single-batch
+  - window-nonbatch
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: duplicate_on
+    action: status_control
+    params:
+      fault: status_duplicate_finished
+      config: {}
+      enabled: true
+      role: prefill
+  - id: traffic
+    action: status_prepare
+    params:
+      count: 4
+      concurrency: 4
+      input_len: 2048
+      output_len: 2
+      consume: immediate
+  - id: traffic_dispatch
+    action: status_dispatch
+    params:
+      requests:
+        $ref: stages.traffic.output.requests
+    timeout_s: 75
+  - id: traffic_wait
+    action: wait
+    params:
+      requests:
+        $ref: stages.traffic.output.requests
+    timeout_s: 75
+  - id: traffic_success
+    action: status_outcomes
+    params:
+      requests:
+        $ref: stages.traffic.output.requests
+      success_min: 4
+      failure_max: 0
+  - id: initial_drain
+    action: status_sample
+    params:
+      duration_s: 95
+      until:
+        metric: scheduler
+        op: eq
+        value: 0
+    timeout_s: 110
+  - id: scheduler_retires
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.initial_drain.output.snapshot
+      metric: scheduler
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: duplicate_replay_window
+    action: status_sample
+    params:
+      duration_s: 5
+    timeout_s: 30
+  - id: duplicate_off
+    action: status_control
+    params:
+      fault: status_duplicate_finished
+      config: {}
+      enabled: false
+      role: prefill
+  - id: terminal_replay_is_idempotent
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.duplicate_replay_window.output.snapshot
+      metric: fingerprint
+      op: eq
+      expected: true
+      aggregate: last
+      baseline:
+        $ref: stages.initial_drain.output.snapshot
+  - id: after_clear
+    action: status_sample
+    params:
+      duration_s: 30
+      until:
+        metric: all_inflight
+        op: eq
+        value: 0
+    timeout_s: 45
+  - id: after_clear_scheduler
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.after_clear.output.snapshot
+      metric: scheduler
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: after_clear_prefill_batches
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.after_clear.output.snapshot
+      metric: prefill_batches
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: after_clear_prefill_members
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.after_clear.output.snapshot
+      metric: prefill_requests
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: after_clear_decode_load
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.after_clear.output.snapshot
+      metric: decode_total_load
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: final_health
+    action: status_sample
+    params:
+      duration_s: 0
+    timeout_s: 30
+  - id: master_http_200
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.final_health.output.snapshot
+      metric: master_http
+      op: eq
+      expected: 200
+      aggregate: last
+  - id: cleanup
+    action: teardown
+- id: cursor_regress
+  legacy_case_ids:
+  - status_cursor_regress
+  profiles:
+  - batch-window
+  - single-nonbatch
+  - single-batch
+  - window-nonbatch
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: history
+    action: status_prepare
+    params:
+      count: 3
+      concurrency: 3
+      input_len: 2048
+      output_len: 2
+      consume: immediate
+  - id: history_dispatch
+    action: status_dispatch
+    params:
+      requests:
+        $ref: stages.history.output.requests
+    timeout_s: 75
+  - id: history_wait
+    action: wait
+    params:
+      requests:
+        $ref: stages.history.output.requests
+    timeout_s: 75
+  - id: history_success
+    action: status_outcomes
+    params:
+      requests:
+        $ref: stages.history.output.requests
+      success_min: 3
+      failure_max: 0
+  - id: clean_baseline
+    action: status_sample
+    params:
+      duration_s: 30
+      until:
+        metric: all_inflight
+        op: eq
+        value: 0
+    timeout_s: 45
+  - id: clean_baseline_scheduler
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.clean_baseline.output.snapshot
+      metric: scheduler
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: clean_baseline_prefill_batches
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.clean_baseline.output.snapshot
+      metric: prefill_batches
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: clean_baseline_prefill_members
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.clean_baseline.output.snapshot
+      metric: prefill_requests
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: clean_baseline_decode_load
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.clean_baseline.output.snapshot
+      metric: decode_total_load
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: cursor_on
+    action: status_control
+    params:
+      fault: status_cursor_regress
+      config:
+        n: 3
+      enabled: true
+      role: prefill
+  - id: replay_before
+    action: status_sample
+    params:
+      duration_s: 0
+    timeout_s: 30
+  - id: replay_window
+    action: status_sample
+    params:
+      duration_s: 5
+    timeout_s: 30
+  - id: cursor_off
+    action: status_control
+    params:
+      fault: status_cursor_regress
+      config: {}
+      enabled: false
+      role: prefill
+  - id: cursor_replay_is_idempotent
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.replay_window.output.snapshot
+      metric: fingerprint
+      op: eq
+      expected: true
+      aggregate: last
+      baseline:
+        $ref: stages.replay_before.output.snapshot
+  - id: after_replay
+    action: status_sample
+    params:
+      duration_s: 20
+      until:
+        metric: all_inflight
+        op: eq
+        value: 0
+    timeout_s: 35
+  - id: after_replay_scheduler
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.after_replay.output.snapshot
+      metric: scheduler
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: after_replay_prefill_batches
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.after_replay.output.snapshot
+      metric: prefill_batches
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: after_replay_prefill_members
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.after_replay.output.snapshot
+      metric: prefill_requests
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: after_replay_decode_load
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.after_replay.output.snapshot
+      metric: decode_total_load
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: recovery
+    action: status_prepare
+    params:
+      count: 1
+      concurrency: 1
+      input_len: 2048
+      output_len: 2
+      consume: immediate
+  - id: recovery_dispatch
+    action: status_dispatch
+    params:
+      requests:
+        $ref: stages.recovery.output.requests
+    timeout_s: 75
+  - id: recovery_wait
+    action: wait
+    params:
+      requests:
+        $ref: stages.recovery.output.requests
+    timeout_s: 75
+  - id: recovery_success
+    action: status_outcomes
+    params:
+      requests:
+        $ref: stages.recovery.output.requests
+      success_min: 1
+      failure_max: 0
+  - id: final_health
+    action: status_sample
+    params:
+      duration_s: 0
+    timeout_s: 30
+  - id: master_http_200
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.final_health.output.snapshot
+      metric: master_http
+      op: eq
+      expected: 200
+      aggregate: last
+  - id: cleanup
+    action: teardown
+- id: finished_then_running
+  legacy_case_ids:
+  - status_finished_then_running
+  profiles:
+  - batch-window
+  - single-nonbatch
+  - single-batch
+  - window-nonbatch
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: settled
+    action: status_prepare
+    params:
+      count: 1
+      concurrency: 1
+      input_len: 2048
+      output_len: 2
+      consume: immediate
+  - id: settled_dispatch
+    action: status_dispatch
+    params:
+      requests:
+        $ref: stages.settled.output.requests
+    timeout_s: 75
+  - id: settled_wait
+    action: wait
+    params:
+      requests:
+        $ref: stages.settled.output.requests
+    timeout_s: 75
+  - id: settled_success
+    action: status_outcomes
+    params:
+      requests:
+        $ref: stages.settled.output.requests
+      success_min: 1
+      failure_max: 0
+  - id: clean_baseline
+    action: status_sample
+    params:
+      duration_s: 20
+      until:
+        metric: all_inflight
+        op: eq
+        value: 0
+    timeout_s: 35
+  - id: clean_baseline_scheduler
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.clean_baseline.output.snapshot
+      metric: scheduler
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: clean_baseline_prefill_batches
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.clean_baseline.output.snapshot
+      metric: prefill_batches
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: clean_baseline_prefill_members
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.clean_baseline.output.snapshot
+      metric: prefill_requests
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: clean_baseline_decode_load
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.clean_baseline.output.snapshot
+      metric: decode_total_load
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: terminal_replay
+    action: status_control
+    params:
+      fault: status_fake_task
+      config:
+        phase: finished
+      enabled: true
+      role: prefill
+      selection: first
+      requests:
+        $ref: stages.settled.output.requests
+      rids: all
+  - id: terminal_window
+    action: status_sample
+    params:
+      duration_s: 2
+    timeout_s: 30
+  - id: terminal_off
+    action: status_control
+    params:
+      fault: status_fake_task
+      config: {}
+      enabled: false
+      role: prefill
+  - id: active_replay
+    action: status_control
+    params:
+      fault: status_fake_task
+      config:
+        phase: RUNNING
+      enabled: true
+      role: prefill
+      selection: first
+      requests:
+        $ref: stages.settled.output.requests
+      rids: all
+  - id: active_window
+    action: status_sample
+    params:
+      duration_s: 5
+    timeout_s: 30
+  - id: active_off
+    action: status_control
+    params:
+      fault: status_fake_task
+      config: {}
+      enabled: false
+      role: prefill
+  - id: terminal_cannot_resurrect
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.active_window.output.snapshot
+      metric: fingerprint
+      op: eq
+      expected: true
+      aggregate: last
+      baseline:
+        $ref: stages.clean_baseline.output.snapshot
+  - id: after_replay
+    action: status_sample
+    params:
+      duration_s: 20
+      until:
+        metric: all_inflight
+        op: eq
+        value: 0
+    timeout_s: 35
+  - id: after_replay_scheduler
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.after_replay.output.snapshot
+      metric: scheduler
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: after_replay_prefill_batches
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.after_replay.output.snapshot
+      metric: prefill_batches
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: after_replay_prefill_members
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.after_replay.output.snapshot
+      metric: prefill_requests
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: after_replay_decode_load
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.after_replay.output.snapshot
+      metric: decode_total_load
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: final_health
+    action: status_sample
+    params:
+      duration_s: 0
+    timeout_s: 30
+  - id: master_http_200
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.final_health.output.snapshot
+      metric: master_http
+      op: eq
+      expected: 200
+      aggregate: last
+  - id: cleanup
+    action: teardown
+- id: zombie_completed_running
+  legacy_case_ids:
+  - status_zombie_completed_running
+  profiles:
+  - batch-window
+  - single-nonbatch
+  - single-batch
+  - window-nonbatch
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: decode_zombie_on
+    action: status_control
+    params:
+      fault: status_zombie_running
+      config: {}
+      enabled: true
+      role: decode
+  - id: traffic
+    action: status_prepare
+    params:
+      count: 4
+      concurrency: 4
+      input_len: 2048
+      output_len: 2
+      consume: immediate
+  - id: traffic_dispatch
+    action: status_dispatch
+    params:
+      requests:
+        $ref: stages.traffic.output.requests
+    timeout_s: 75
+  - id: traffic_wait
+    action: wait
+    params:
+      requests:
+        $ref: stages.traffic.output.requests
+    timeout_s: 75
+  - id: traffic_success
+    action: status_outcomes
+    params:
+      requests:
+        $ref: stages.traffic.output.requests
+      success_min: 4
+      failure_max: 0
+  - id: zombie_window
+    action: status_sample
+    params:
+      duration_s: 10
+    timeout_s: 30
+  - id: decode_zombie_off
+    action: status_control
+    params:
+      fault: status_zombie_running
+      config: {}
+      enabled: false
+      role: decode
+  - id: after_zombie
+    action: status_sample
+    params:
+      duration_s: 95
+      until:
+        metric: all_inflight
+        op: eq
+        value: 0
+    timeout_s: 110
+  - id: after_zombie_scheduler
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.after_zombie.output.snapshot
+      metric: scheduler
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: after_zombie_prefill_batches
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.after_zombie.output.snapshot
+      metric: prefill_batches
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: after_zombie_prefill_members
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.after_zombie.output.snapshot
+      metric: prefill_requests
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: after_zombie_decode_load
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.after_zombie.output.snapshot
+      metric: decode_total_load
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: decode_load_zero
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.after_zombie.output.snapshot
+      metric: decode_total_load
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: final_health
+    action: status_sample
+    params:
+      duration_s: 0
+    timeout_s: 30
+  - id: master_http_200
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.final_health.output.snapshot
+      metric: master_http
+      op: eq
+      expected: 200
+      aggregate: last
+  - id: cleanup
+    action: teardown
+- id: zombie_fake_running
+  legacy_case_ids:
+  - status_zombie_fake_running
+  profiles:
+  - batch-window
+  - single-nonbatch
+  - single-batch
+  - window-nonbatch
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: clean_baseline
+    action: status_sample
+    params:
+      duration_s: 20
+      until:
+        metric: all_inflight
+        op: eq
+        value: 0
+    timeout_s: 35
+  - id: clean_baseline_scheduler
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.clean_baseline.output.snapshot
+      metric: scheduler
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: clean_baseline_prefill_batches
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.clean_baseline.output.snapshot
+      metric: prefill_batches
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: clean_baseline_prefill_members
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.clean_baseline.output.snapshot
+      metric: prefill_requests
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: clean_baseline_decode_load
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.clean_baseline.output.snapshot
+      metric: decode_total_load
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: ghosts
+    action: status_prepare
+    params:
+      count: 3
+      concurrency: 3
+      input_len: 2048
+      output_len: 2
+      consume: immediate
+  - id: ghosts_on
+    action: status_control
+    params:
+      fault: status_fake_task
+      config:
+        phase: RUNNING
+      enabled: true
+      role: prefill
+      selection: first
+      requests:
+        $ref: stages.ghosts.output.requests
+      rids: all
+  - id: active_ghost_window
+    action: status_sample
+    params:
+      duration_s: 60
+      interval_s: 5
+    timeout_s: 75
+  - id: resident_growth_bounded
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.active_ghost_window.output.snapshot
+      metric: scheduler
+      op: le
+      expected: 3
+      aggregate: last
+      baseline:
+        $ref: stages.clean_baseline.output.snapshot
+  - id: master_healthy_during_active
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.active_ghost_window.output.snapshot
+      metric: master_http
+      op: eq
+      expected: 200
+      aggregate: last
+  - id: ghosts_clear
+    action: status_control
+    params:
+      fault: status_fake_task
+      config: {}
+      enabled: false
+      role: prefill
+  - id: clear_retirement_window
+    action: status_sample
+    params:
+      duration_s: 95
+      until:
+        metric: scheduler
+        op: eq
+        value: 0
+    timeout_s: 110
+  - id: ghosts_retire_after_clear
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.clear_retirement_window.output.snapshot
+      metric: scheduler
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: final_health
+    action: status_sample
+    params:
+      duration_s: 0
+    timeout_s: 30
+  - id: master_http_200
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.final_health.output.snapshot
+      metric: master_http
+      op: eq
+      expected: 200
+      aggregate: last
+  - id: cleanup
+    action: teardown
+- id: decode_before_prefill
+  legacy_case_ids:
+  - status_decode_before_prefill
+  profiles:
+  - batch-window
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: traffic
+    action: status_prepare
+    params:
+      count: 4
+      concurrency: 4
+      input_len: 2048
+      output_len: 2
+      consume: immediate
+  - id: p_terminals_off
+    action: status_control
+    params:
+      fault: status_suppress_rids
+      config: {}
+      enabled: true
+      role: prefill
+      requests:
+        $ref: stages.traffic.output.requests
+      rids: all
+  - id: traffic_dispatch
+    action: status_dispatch
+    params:
+      requests:
+        $ref: stages.traffic.output.requests
+    timeout_s: 75
+  - id: traffic_wait
+    action: wait
+    params:
+      requests:
+        $ref: stages.traffic.output.requests
+    timeout_s: 75
+  - id: decode_completes_requests
+    action: status_outcomes
+    params:
+      requests:
+        $ref: stages.traffic.output.requests
+      success_min: 4
+      failure_max: 0
+  - id: event_driven_window
+    action: status_sample
+    params:
+      duration_s: 10
+      until:
+        metric: prefill_batches
+        op: eq
+        value: 0
+    timeout_s: 30
+  - id: decode_terminal_retires_prefill_promptly
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.event_driven_window.output.snapshot
+      metric: prefill_batches
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: fallback_retirement_window
+    action: status_sample
+    params:
+      duration_s: 95
+      until:
+        metric: prefill_batches
+        op: eq
+        value: 0
+    timeout_s: 110
+  - id: prefill_eventually_retires
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.fallback_retirement_window.output.snapshot
+      metric: prefill_batches
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: p_terminal_restore
+    action: status_control
+    params:
+      fault: status_suppress_rids
+      config: {}
+      enabled: false
+      role: prefill
+      requests:
+        $ref: stages.traffic.output.requests
+      rids: all
+  - id: recovery
+    action: status_prepare
+    params:
+      count: 1
+      concurrency: 1
+      input_len: 2048
+      output_len: 2
+      consume: immediate
+  - id: recovery_dispatch
+    action: status_dispatch
+    params:
+      requests:
+        $ref: stages.recovery.output.requests
+    timeout_s: 75
+  - id: recovery_wait
+    action: wait
+    params:
+      requests:
+        $ref: stages.recovery.output.requests
+    timeout_s: 75
+  - id: recovery_success
+    action: status_outcomes
+    params:
+      requests:
+        $ref: stages.recovery.output.requests
+      success_min: 1
+      failure_max: 0
+  - id: final_health
+    action: status_sample
+    params:
+      duration_s: 0
+    timeout_s: 30
+  - id: master_http_200
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.final_health.output.snapshot
+      metric: master_http
+      op: eq
+      expected: 200
+      aggregate: last
+  - id: cleanup
+    action: teardown
+  findings:
+  - decode_terminal_retires_prefill_promptly.contract
+- id: decode_running_before_prefill
+  legacy_case_ids:
+  - status_decode_running_before_prefill
+  profiles:
+  - batch-window
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: traffic
+    action: status_prepare
+    params:
+      count: 4
+      concurrency: 4
+      input_len: 2048
+      output_len: 2
+      consume: deferred
+  - id: p_suppress
+    action: status_control
+    params:
+      fault: status_suppress_rids
+      config: {}
+      enabled: true
+      role: prefill
+      requests:
+        $ref: stages.traffic.output.requests
+      rids: all
+  - id: d_finished_suppress
+    action: status_control
+    params:
+      fault: status_suppress_finished
+      config: {}
+      enabled: true
+      role: decode
+  - id: traffic_dispatch
+    action: status_dispatch
+    params:
+      requests:
+        $ref: stages.traffic.output.requests
+    timeout_s: 75
+  - id: nonempty_window
+    action: status_sample
+    params:
+      duration_s: 15
+      until:
+        metric: prefill_batches
+        op: ge
+        value: 1
+    timeout_s: 30
+  - id: batch_really_dispatched
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.nonempty_window.output.snapshot
+      metric: prefill_batches
+      op: ge
+      expected: 1
+      aggregate: last
+  - id: intermediate_hold_window
+    action: status_sample
+    params:
+      duration_s: 10
+    timeout_s: 30
+  - id: intermediate_cannot_retire_prefill
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.intermediate_hold_window.output.snapshot
+      metric: prefill_batches
+      op: ge
+      expected: 1
+      aggregate: last
+  - id: intermediate_cannot_retire_scheduler
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.intermediate_hold_window.output.snapshot
+      metric: scheduler
+      op: ge
+      expected: 1
+      aggregate: last
+  - id: p_clear
+    action: status_control
+    params:
+      fault: status_suppress_rids
+      config: {}
+      enabled: false
+      role: prefill
+      requests:
+        $ref: stages.traffic.output.requests
+      rids: all
+  - id: d_finished_clear
+    action: status_control
+    params:
+      fault: status_suppress_finished
+      config: {}
+      enabled: false
+      role: decode
+  - id: after_clear
+    action: status_sample
+    params:
+      duration_s: 95
+      until:
+        metric: all_inflight
+        op: eq
+        value: 0
+    timeout_s: 110
+  - id: after_clear_scheduler
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.after_clear.output.snapshot
+      metric: scheduler
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: after_clear_prefill_batches
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.after_clear.output.snapshot
+      metric: prefill_batches
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: after_clear_prefill_members
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.after_clear.output.snapshot
+      metric: prefill_requests
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: after_clear_decode_load
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.after_clear.output.snapshot
+      metric: decode_total_load
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: final_health
+    action: status_sample
+    params:
+      duration_s: 0
+    timeout_s: 30
+  - id: master_http_200
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.final_health.output.snapshot
+      metric: master_http
+      op: eq
+      expected: 200
+      aggregate: last
+  - id: cleanup
+    action: teardown
+- id: decode_waiting_before_prefill
+  legacy_case_ids:
+  - status_decode_waiting_before_prefill
+  profiles:
+  - batch-window
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: traffic
+    action: status_prepare
+    params:
+      count: 4
+      concurrency: 4
+      input_len: 2048
+      output_len: 2
+      consume: deferred
+  - id: p_suppress
+    action: status_control
+    params:
+      fault: status_suppress_rids
+      config: {}
+      enabled: true
+      role: prefill
+      requests:
+        $ref: stages.traffic.output.requests
+      rids: all
+  - id: d_suppress
+    action: status_control
+    params:
+      fault: status_suppress_rids
+      config: {}
+      enabled: true
+      role: decode
+      requests:
+        $ref: stages.traffic.output.requests
+      rids: all
+  - id: d_waiting_on
+    action: status_control
+    params:
+      fault: status_fake_task
+      config:
+        phase: RECEIVED
+      enabled: true
+      role: decode
+      selection: all
+      requests:
+        $ref: stages.traffic.output.requests
+      rids: all
+  - id: traffic_dispatch
+    action: status_dispatch
+    params:
+      requests:
+        $ref: stages.traffic.output.requests
+    timeout_s: 75
+  - id: nonempty_window
+    action: status_sample
+    params:
+      duration_s: 15
+      until:
+        metric: prefill_batches
+        op: ge
+        value: 1
+    timeout_s: 30
+  - id: batch_really_dispatched
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.nonempty_window.output.snapshot
+      metric: prefill_batches
+      op: ge
+      expected: 1
+      aggregate: last
+  - id: intermediate_hold_window
+    action: status_sample
+    params:
+      duration_s: 10
+    timeout_s: 30
+  - id: intermediate_cannot_retire_prefill
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.intermediate_hold_window.output.snapshot
+      metric: prefill_batches
+      op: ge
+      expected: 1
+      aggregate: last
+  - id: intermediate_cannot_retire_scheduler
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.intermediate_hold_window.output.snapshot
+      metric: scheduler
+      op: ge
+      expected: 1
+      aggregate: last
+  - id: p_clear
+    action: status_control
+    params:
+      fault: status_suppress_rids
+      config: {}
+      enabled: false
+      role: prefill
+      requests:
+        $ref: stages.traffic.output.requests
+      rids: all
+  - id: d_clear
+    action: status_control
+    params:
+      fault: status_suppress_rids
+      config: {}
+      enabled: false
+      role: decode
+      requests:
+        $ref: stages.traffic.output.requests
+      rids: all
+  - id: d_waiting_clear
+    action: status_control
+    params:
+      fault: status_fake_task
+      config: {}
+      enabled: false
+      role: decode
+  - id: after_clear
+    action: status_sample
+    params:
+      duration_s: 95
+      until:
+        metric: all_inflight
+        op: eq
+        value: 0
+    timeout_s: 110
+  - id: after_clear_scheduler
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.after_clear.output.snapshot
+      metric: scheduler
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: after_clear_prefill_batches
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.after_clear.output.snapshot
+      metric: prefill_batches
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: after_clear_prefill_members
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.after_clear.output.snapshot
+      metric: prefill_requests
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: after_clear_decode_load
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.after_clear.output.snapshot
+      metric: decode_total_load
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: final_health
+    action: status_sample
+    params:
+      duration_s: 0
+    timeout_s: 30
+  - id: master_http_200
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.final_health.output.snapshot
+      metric: master_http
+      op: eq
+      expected: 200
+      aggregate: last
+  - id: cleanup
+    action: teardown
+- id: fetch_error
+  legacy_case_ids:
+  - status_fetch_error
+  profiles:
+  - batch-window
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: faulted
+    action: status_prepare
+    params:
+      count: 1
+      concurrency: 1
+      input_len: 2048
+      output_len: 2
+      consume: immediate
+      expected_rpc_statuses:
+      - UNKNOWN
+  - id: fetch_fault_on
+    action: status_control
+    params:
+      fault: fetch_error
+      config: {}
+      enabled: true
+      role: prefill
+  - id: faulted_dispatch
+    action: status_dispatch
+    params:
+      requests:
+        $ref: stages.faulted.output.requests
+    timeout_s: 75
+  - id: faulted_wait
+    action: wait
+    params:
+      requests:
+        $ref: stages.faulted.output.requests
+    timeout_s: 75
+  - id: fetch_fault_surfaces
+    action: status_outcomes
+    params:
+      requests:
+        $ref: stages.faulted.output.requests
+      failure_min: 1
+      failure_max: 1
+  - id: fetch_fault_off
+    action: status_control
+    params:
+      fault: fetch_error
+      config: {}
+      enabled: false
+      role: prefill
+  - id: fresh_request
+    action: status_prepare
+    params:
+      count: 1
+      concurrency: 1
+      input_len: 2048
+      output_len: 2
+      consume: immediate
+  - id: fresh_request_dispatch
+    action: status_dispatch
+    params:
+      requests:
+        $ref: stages.fresh_request.output.requests
+    timeout_s: 75
+  - id: fresh_request_wait
+    action: wait
+    params:
+      requests:
+        $ref: stages.fresh_request.output.requests
+    timeout_s: 75
+  - id: fresh_request_success
+    action: status_outcomes
+    params:
+      requests:
+        $ref: stages.fresh_request.output.requests
+      success_min: 1
+      failure_max: 0
+  - id: after_fetch_error
+    action: status_sample
+    params:
+      duration_s: 95
+      until:
+        metric: all_inflight
+        op: eq
+        value: 0
+    timeout_s: 110
+  - id: after_fetch_error_scheduler
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.after_fetch_error.output.snapshot
+      metric: scheduler
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: after_fetch_error_prefill_batches
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.after_fetch_error.output.snapshot
+      metric: prefill_batches
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: after_fetch_error_prefill_members
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.after_fetch_error.output.snapshot
+      metric: prefill_requests
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: after_fetch_error_decode_load
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.after_fetch_error.output.snapshot
+      metric: decode_total_load
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: engine_after_fetch
+    action: status_sample
+    params:
+      duration_s: 0
+    timeout_s: 30
+  - id: prefill_engine_drained
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.engine_after_fetch.output.snapshot
+      metric: prefill_engine_inflight
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: recovery
+    action: status_prepare
+    params:
+      count: 1
+      concurrency: 1
+      input_len: 2048
+      output_len: 2
+      consume: immediate
+  - id: recovery_dispatch
+    action: status_dispatch
+    params:
+      requests:
+        $ref: stages.recovery.output.requests
+    timeout_s: 75
+  - id: recovery_wait
+    action: wait
+    params:
+      requests:
+        $ref: stages.recovery.output.requests
+    timeout_s: 75
+  - id: recovery_success
+    action: status_outcomes
+    params:
+      requests:
+        $ref: stages.recovery.output.requests
+      success_min: 1
+      failure_max: 0
+  - id: final_health
+    action: status_sample
+    params:
+      duration_s: 0
+    timeout_s: 30
+  - id: master_http_200
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.final_health.output.snapshot
+      metric: master_http
+      op: eq
+      expected: 200
+      aggregate: last
+  - id: cleanup
+    action: teardown
+  environment_overrides:
+    n_prefill: 2
+    n_decode: 2
+    config_overrides:
+      ordering: priority
+      queue_timeout_ms: 60000
+      stale_inflight_ms: 30000
+- id: debug_snapshot
+  legacy_case_ids:
+  - master_debug_snapshot
+  profiles:
+  - batch-window
+  requires:
+  - enqueue_batch
+  environment_overrides:
+    debug_enabled: true
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: debug_before
+    action: status_sample
+    params:
+      include:
+      - inflight
+      - mock
+      - debug
+      duration_s: 0
+    timeout_s: 30
+  - id: completed
+    action: status_prepare
+    params:
+      count: 1
+      concurrency: 1
+      input_len: 2048
+      output_len: 2
+      consume: immediate
+  - id: completed_dispatch
+    action: status_dispatch
+    params:
+      requests:
+        $ref: stages.completed.output.requests
+    timeout_s: 75
+  - id: completed_wait
+    action: wait
+    params:
+      requests:
+        $ref: stages.completed.output.requests
+    timeout_s: 75
+  - id: completed_success
+    action: status_outcomes
+    params:
+      requests:
+        $ref: stages.completed.output.requests
+      success_min: 1
+      failure_max: 0
+  - id: tombstone_window
+    action: status_sample
+    params:
+      include:
+      - inflight
+      - mock
+      - debug
+      duration_s: 15
+      requests:
+        $ref: stages.completed.output.requests
+      until:
+        metric: scheduler_tombstones
+        op: eq
+        value: 1
+    timeout_s: 30
+  - id: resource_free_queryable_tombstone
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.tombstone_window.output.snapshot
+      metric: scheduler_tombstones
+      op: eq
+      expected: 1
+      aggregate: last
+  - id: final_health
+    action: status_sample
+    params:
+      duration_s: 0
+    timeout_s: 30
+  - id: master_http_200
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.final_health.output.snapshot
+      metric: master_http
+      op: eq
+      expected: 200
+      aggregate: last
+  - id: cleanup
+    action: teardown
+- id: normal_no_fetch
+  legacy_case_ids:
+  - normal_no_fetch_observation
+  profiles:
+  - batch-window
+  requires:
+  - enqueue_batch
+  environment_overrides:
+    debug_enabled: true
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: fresh_baseline
+    action: status_sample
+    params:
+      include:
+      - inflight
+      - mock
+      - debug
+      duration_s: 0
+    timeout_s: 30
+  - id: fresh_accepted_zero
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.fresh_baseline.output.snapshot
+      metric: accepted
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: fresh_fetch_zero
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.fresh_baseline.output.snapshot
+      metric: fetch_rpc
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: unfetched
+    action: status_prepare
+    params:
+      count: 1
+      concurrency: 1
+      input_len: 2048
+      output_len: 2
+      consume: deferred
+  - id: schedule_only
+    action: status_dispatch
+    params:
+      requests:
+        $ref: stages.unfetched.output.requests
+    timeout_s: 75
+  - id: prefill_completion_window
+    action: status_sample
+    params:
+      include:
+      - inflight
+      - mock
+      - debug
+      duration_s: 20
+      requests:
+        $ref: stages.unfetched.output.requests
+      until:
+        metric: cohort_prefill_completed
+        op: eq
+        value: 1
+    timeout_s: 35
+  - id: prefill_completed
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.prefill_completion_window.output.snapshot
+      metric: cohort_prefill_completed
+      op: eq
+      expected: 1
+      aggregate: last
+  - id: master_enqueued
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.prefill_completion_window.output.snapshot
+      metric: cohort_enqueued
+      op: eq
+      expected: 1
+      aggregate: all
+  - id: completion_window_no_fetch
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.prefill_completion_window.output.snapshot
+      metric: fetch_rpc
+      op: eq
+      expected: 0
+      aggregate: all
+  - id: post_completion_window
+    action: status_sample
+    params:
+      include:
+      - inflight
+      - mock
+      - debug
+      duration_s: 2
+      requests:
+        $ref: stages.unfetched.output.requests
+    timeout_s: 30
+  - id: prefill_stays_completed
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.post_completion_window.output.snapshot
+      metric: cohort_prefill_completed
+      op: eq
+      expected: 1
+      aggregate: all
+  - id: post_completion_no_fetch
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.post_completion_window.output.snapshot
+      metric: fetch_rpc
+      op: eq
+      expected: 0
+      aggregate: all
+  - id: client_never_fetches
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.post_completion_window.output.snapshot
+      metric: cohort_fetch_invocations
+      op: eq
+      expected: 0
+      aggregate: all
+  - id: one_prefill_acceptance
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.post_completion_window.output.snapshot
+      metric: prefill_accepted
+      op: eq
+      expected: 1
+      aggregate: last
+  - id: separate_recovery
+    action: status_prepare
+    params:
+      count: 1
+      concurrency: 1
+      input_len: 2048
+      output_len: 2
+      consume: immediate
+  - id: separate_recovery_dispatch
+    action: status_dispatch
+    params:
+      requests:
+        $ref: stages.separate_recovery.output.requests
+    timeout_s: 75
+  - id: separate_recovery_wait
+    action: wait
+    params:
+      requests:
+        $ref: stages.separate_recovery.output.requests
+    timeout_s: 75
+  - id: separate_recovery_success
+    action: status_outcomes
+    params:
+      requests:
+        $ref: stages.separate_recovery.output.requests
+      success_min: 1
+      failure_max: 0
+  - id: final_health
+    action: status_sample
+    params:
+      duration_s: 0
+    timeout_s: 30
+  - id: master_http_200
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.final_health.output.snapshot
+      metric: master_http
+      op: eq
+      expected: 200
+      aggregate: last
+  - id: cleanup
+    action: teardown
