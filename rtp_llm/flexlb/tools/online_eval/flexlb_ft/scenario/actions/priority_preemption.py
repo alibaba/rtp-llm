@@ -445,6 +445,10 @@ def _comparator(ctx, p, deadline):
                 expected=expected,
                 outcomes=outcomes,
                 placeholder_ok=ph_ok,
+                actual=actual,
+                all_ok=all_ok,
+                shape_ok=shape,
+                passed=passed,
             ),
             indent=2,
         )
@@ -452,14 +456,6 @@ def _comparator(ctx, p, deadline):
     )
     return StageOutput(
         {"passed": passed},
-        checks=[
-            CheckResult(
-                "order_and_terminal",
-                "PASS" if passed else "FAIL",
-                actual=dict(dispatch=actual, placeholder_ok=ph_ok, all_ok=all_ok),
-                expected=expected,
-            )
-        ],
         artifacts=[str(path)],
     )
 
@@ -818,7 +814,6 @@ HANDLERS = [
         _comparator_params,
         _comparator,
         {"passed": "boolean"},
-        checks=frozenset({"order_and_terminal"}),
     ),
     StageHandler("preemption_wait", _settled_params, _terminal_wait, {}),
     StageHandler(

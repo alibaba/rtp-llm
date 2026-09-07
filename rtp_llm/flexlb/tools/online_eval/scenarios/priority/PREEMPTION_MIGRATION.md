@@ -242,8 +242,8 @@ Generate120, ph35, five fresh35 drains and clean30 are preserved. Priority
 dispatch is submit indices [0,2,3,4,1]; FIFO is [0,1,2,3,4], using actual
 Prefill running_ms with settlement-rank/ID ties. All twelve consumers and
 both placeholders must succeed. PR9/P6 conjoin both half verdicts and the
-preceding mandatory per-half clean gates. A failing first half prevents
-second-half diagnostics, unlike the old accumulating report.
+preceding mandatory per-half clean gates. Half predicates are collected as
+scalar evidence; PR9/P6 fail at the final aggregate after both halves run.
 
 Shared environment_reconfigure from fixed
 7a1d3aa2f91ba1a3cd46c7b18c4b792ff99608c3 performs complete override replacement
@@ -343,3 +343,34 @@ blocking incoming, missing capacity evidence as ERROR, independent20s
 per-request RUNNING windows, parent deadline capping, and malformed
 RUNNING timestamps as ERROR. These are external-IO fixtures over actual
 consumer workers, not Java acceptance.
+
+
+### Comparator runtime finding and control-flow correction
+
+The frozen0be83d8363 Java comparator run failed its original priority
+order predicate: expected[20002,20004,20005,20006,20003], observed
+[20004,20005,20006,20002,20003]. Placeholder and all five wave consumers
+succeeded. Raw evidence is under
+/tmp/agent1-yaml-evidence/preemption-env0be83/comparator; the raw
+preemption-comparator-6c066f8a256e4d6cbe27b0db9de9d34f.json SHA256 is
+d1f476c24c290ee49a4b58f31bdfe2dc89d57fef76f1e155997187d72071e59f.
+That result remains FAIL; it does not establish a root cause or a valid
+replacement ordering contract.
+
+The initial formal half check stopped before clean1/FIFO setup, so the
+second environment was not exercised. The old run_half returns a Boolean
+tuple on an order failure and continues the FIFO half, then fails PR9/P6
+at the aggregate. The corrected adapter records half passed/shape/all_ok
+and raw actual/expected order as evidence, without a premature check. The
+unchanged final PR9/P6 conjunction reports FAIL after both halves. Existing
+placeholder and cleanup gates remain mandatory and can still stop the
+program; in particular, stopping on failed clean remains stricter than the
+old diagnostic continuation after a dirty half. No ordering predicate,
+request shape, configuration, timeout or acceptance threshold is changed.
+
+A complete-program regression reproduces the observed pure-priority first
+half, verifies12 consumers/two environments/FIFO clean, and asserts final
+PR9/P6 FAIL with priority_half=false and fifo_half=true. The existing FIFO
+inversion still yields final FAIL; construction failure still prevents
+reconfiguration. This correction provides missing diagnostic coverage,
+not a green result for the original runtime failure.
