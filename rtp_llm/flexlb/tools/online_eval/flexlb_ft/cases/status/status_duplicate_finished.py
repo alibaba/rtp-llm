@@ -55,7 +55,11 @@ def status_duplicate_finished(ctx: CaseContext):
             # measure the tail settling, not the replay (batch-window
             # settles synchronously, which is why the baseline never
             # needed this gate there).
-            _wait_scheduler_zero(ops)
+            if not _wait_scheduler_zero(ops):
+                return (
+                    False,
+                    "ledger did not settle before replay-window baseline sample",
+                )
             before = _inflight_fingerprint(ops)
             time.sleep(5.0)  # replay window: terminals re-delivered
             after = _inflight_fingerprint(ops)

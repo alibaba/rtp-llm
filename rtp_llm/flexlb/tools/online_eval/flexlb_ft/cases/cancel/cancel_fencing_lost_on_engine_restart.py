@@ -21,7 +21,7 @@ from ...support.cancel import (
 @case(
     "cancel_fencing_lost_on_engine_restart",
     category="cancel",
-    profiles=["batch-window", "single-nonbatch", "single-batch", "window-nonbatch"],
+    requires=["enqueue_batch"],  # mock crash_after is an EnqueueBatch hook
 )
 def cancel_fencing_lost_on_engine_restart(ctx: CaseContext):
     """Design boundary: fencing is engine memory — a second crash drops it.

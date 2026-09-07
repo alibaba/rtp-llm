@@ -21,7 +21,7 @@ from ...support.cancel import (
 @case(
     "cancel_engine_restarted_tombstoned_settle",
     category="cancel",
-    profiles=["batch-window", "single-nonbatch", "single-batch", "window-nonbatch"],
+    requires=["enqueue_batch"],  # mock crash_after is an EnqueueBatch hook
 )
 def cancel_engine_restarted_tombstoned_settle(ctx: CaseContext):
     """Engine restart + pre-restart cancel: TOMBSTONED settles immediately.
