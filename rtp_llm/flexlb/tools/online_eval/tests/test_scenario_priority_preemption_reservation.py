@@ -16,7 +16,12 @@ from test_scenario_priority_preemption_decode import DecodeBackend
 
 class ReservationBackend(DecodeBackend):
     def __init__(
-        self, metric_change=False, sparse=False, scrape_error=False, wrong_third=False
+        self,
+        metric_change=False,
+        sparse=False,
+        scrape_error=False,
+        wrong_third=False,
+        malformed_labels=False,
     ):
         super().__init__()
         self.metric_change, self.sparse, self.scrape_error = (
@@ -24,6 +29,7 @@ class ReservationBackend(DecodeBackend):
             sparse,
             scrape_error,
         )
+        self.malformed_labels = malformed_labels
         self.metric_calls = 0
         original = self.ops.future
 
@@ -55,6 +61,11 @@ class ReservationBackend(DecodeBackend):
         self.metric_calls += 1
         if self.scrape_error:
             raise OSError("fixture unavailable management endpoint")
+        if self.malformed_labels:
+            return (
+                200,
+                'flexlb_auto_tpm_victim_count{victim_priority="30",incoming_priority=broken} 9\njvm_threads_live_threads 1\n',
+            )
         if self.sparse:
             return 200, "jvm_threads_live_threads 1\n"
         value = 1 if self.metric_change and self.metric_calls >= 2 else 0
@@ -236,3 +247,50 @@ class ReservationPrograms(unittest.TestCase):
                     preempt._reservation_metric(
                         ctx, {"labels": {}}, Deadline(time.monotonic() + 10)
                     )
+
+    def test_malformed_victim_labels_fail_real_action_before_subset(self):
+        import time
+
+        from flexlb_ft.scenario.runtime import Deadline
+
+        labels = (
+            'victim_priority="30",incoming_priority=broken',
+            'victim_priority="30",incoming_priority="70",incoming_priority="70"',
+            'victim_priority="30" incoming_priority="70"',
+            'victim_priority="30",incoming_priority="70"garbage',
+        )
+        for block in labels:
+            with self.subTest(block=block), tempfile.TemporaryDirectory() as tmp, patch(
+                "flexlb_ft.scenario.actions.status_protocol._http",
+                return_value=(
+                    200,
+                    f"flexlb_auto_tpm_victim_count{{{block}}} 9\njvm_threads_live_threads 1\n",
+                ),
+            ):
+                ctx = NS(
+                    env_epoch=1,
+                    artifact_dir=Path(tmp),
+                    register_resource=lambda kind, value, **kwargs: value,
+                )
+                with self.assertRaises(ValueError):
+                    preempt._reservation_metric(
+                        ctx,
+                        {
+                            "labels": {
+                                "victim_priority": "30",
+                                "incoming_priority": "70",
+                            }
+                        },
+                        Deadline(time.monotonic() + 10),
+                    )
+
+    def test_bad_metric_labels_stop_complete_program_before_incoming(self):
+        result, waves, metrics, backend = self.run_program(malformed_labels=True)
+        self.assertEqual("ERROR", result["status"], result)
+        self.assertEqual(4, len(backend.shapes))
+        self.assertEqual([], waves)
+        stages = {s["id"]: s for s in result["stages"]}
+        self.assertEqual("ERROR", stages["r1_baseline"]["status"])
+        self.assertEqual("BLOCKED", stages["r1_incoming"]["status"])
+        self.assertEqual("BLOCKED", stages["r2_occupants"]["status"])
+        self.assertIn("label", metrics[0]["error"])

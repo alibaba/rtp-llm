@@ -476,3 +476,12 @@ weak-zero arithmetic, unavailable scrape failing before incoming,8511
 rejected in wave3 while legal in wave2, fixed fallback endpoint/label scope,
 and malformed/nonfinite victim samples as ERROR. Full verification uses
 fixed cdd856 plus these owned files. No actual Java result is implied.
+
+Independent review follow-up: validate complete classic-name victim sample
+label blocks before applying the label subset. Unquoted values, duplicate
+label keys, missing separators, trailing garbage, and duplicate series
+raise ERROR; they cannot disappear into the sparse-series zero fallback.
+The valid absent-series arithmetic and all wave thresholds are unchanged.
+Two additional regressions exercise malformed labels through the real
+metric action and through the complete program: baseline ERROR blocks
+incoming and later waves while retaining the raw metric error artifact.

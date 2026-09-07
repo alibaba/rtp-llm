@@ -897,6 +897,44 @@ def _reservation_metric_params(p, plan):
     return p
 
 
+def _strict_victim_sample(line):
+    """Validate an emitted classic-name victim sample before label selection."""
+    import re
+
+    sample = re.fullmatch(
+        r"([A-Za-z_:][A-Za-z0-9_:]*)(?:[ \t]*\{(.*)\})?[ \t]+"
+        r"([+-]?(?:(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?|Inf|NaN))"
+        r"(?:[ \t]+([+-]?[0-9]+))?[ \t]*",
+        line,
+    )
+    if sample is None:
+        raise ValueError("malformed victim metric sample")
+    name, block, value, timestamp = sample.groups()
+    labels = {}
+    rest = "" if block is None else block.strip(" \t")
+    label_pattern = re.compile(
+        r'([A-Za-z_][A-Za-z0-9_]*)[ \t]*=[ \t]*"((?:[^"\\\n]|\\[\\"n])*)"'
+    )
+    while rest:
+        label = label_pattern.match(rest)
+        if label is None:
+            raise ValueError("malformed victim metric label")
+        key, raw = label.groups()
+        if key in labels:
+            raise ValueError("duplicate victim metric label")
+        labels[key] = re.sub(
+            r'\\([\\"n])', lambda match: "\n" if match[1] == "n" else match[1], raw
+        )
+        rest = rest[label.end() :].lstrip(" \t")
+        if rest:
+            if rest[0] != ",":
+                raise ValueError("trailing victim metric label content")
+            rest = rest[1:].lstrip(" \t")
+    if timestamp is not None and not -(2**63) <= int(timestamp) < 2**63:
+        raise ValueError("victim metric timestamp outside int64")
+    return name, labels, _number(float(value), 0, 1e18)
+
+
 def _reservation_metric(ctx, p, deadline):
     from ...engine_ops import parse_prometheus_samples
     from .status_protocol import _http as metric_http
@@ -920,22 +958,29 @@ def _reservation_metric(ctx, p, deadline):
             samples = parse_prometheus_samples(body, "")
             if not samples:
                 raise ValueError("missing valid Prometheus exposition")
-            # An absent sparse counter remains None; a malformed matching line
-            # must not become an absent counter through the permissive parser.
+            # Validate complete matching samples before applying a label subset.
+            # The shared permissive parser can discard malformed label pairs.
+            import re
+
+            victim_samples = []
+            identities = set()
             for line in body.splitlines():
                 stripped = line.strip()
-                if (
-                    stripped
-                    and not stripped.startswith("#")
-                    and "auto_tpm_victim" in stripped.split("{", 1)[0].split(" ", 1)[0]
-                    and not parse_prometheus_samples(stripped, "")
-                ):
-                    raise ValueError("malformed victim metric sample")
+                if not stripped or stripped.startswith("#"):
+                    continue
+                name = re.split(r"[{\s]", stripped, maxsplit=1)[0]
+                if "auto_tpm_victim" not in name:
+                    continue
+                sample = _strict_victim_sample(stripped)
+                identity = (sample[0], tuple(sorted(sample[1].items())))
+                if identity in identities:
+                    raise ValueError("duplicate victim metric series")
+                identities.add(identity)
+                victim_samples.append(sample)
             selected = [
-                (name, labels, _number(value, 0, 1e18))
-                for name, labels, value in samples
-                if "auto_tpm_victim" in name
-                and all(labels.get(k) == v for k, v in p["labels"].items())
+                sample
+                for sample in victim_samples
+                if all(sample[1].get(k) == v for k, v in p["labels"].items())
             ]
             value = sum(row[2] for row in selected) if selected else None
             evidence.update(
