@@ -18,13 +18,19 @@ def empty(params, plan):
 def flow_validate(params, plan):
     from .elastic import _validate
 
-    p = _validate(params, plan, {"interval_s"}, {"interval_s"})
+    p = _validate(params, plan, {"interval_s", "stream_timeout_s"}, {"interval_s"})
     if type(p["interval_s"]) not in (int, float) or p["interval_s"] not in (
         0.1,
         0.2,
         0.5,
     ):
         raise ValueError("balance flow interval must be .1, .2 or .5 seconds")
+    p.setdefault("stream_timeout_s", 30)
+    if type(p["stream_timeout_s"]) not in (int, float) or p["stream_timeout_s"] not in (
+        10,
+        30,
+    ):
+        raise ValueError("balance flow stream timeout must be 10 or 30")
     return p
 
 
@@ -43,9 +49,11 @@ def flow_start(ctx, params, deadline):
                     self.run(
                         record,
                         dict(input_len=2048, output_len=2, block_keys=[rid * 100 + 1]),
-                        timeout_s=min(60, end - self.clock()),
+                        timeout_s=min(
+                            30 + params["stream_timeout_s"], end - self.clock()
+                        ),
                         schedule_timeout_s=30,
-                        stream_timeout_s=30,
+                        stream_timeout_s=params["stream_timeout_s"],
                     )
                     self._stop.wait(self.interval_s)
             except BaseException as exc:
@@ -85,6 +93,7 @@ def observe_start(ctx, params, deadline):
     from .elastic import ElasticMetrics
 
     deadline.check()
+    started_s = ctx.clock()
     metrics = ElasticMetrics(ctx, max_duration_s=1200)
     handle = ctx.register_resource("observation", metrics, cleanup=metrics.stop)
     try:
@@ -92,16 +101,21 @@ def observe_start(ctx, params, deadline):
     except BaseException:
         metrics.done.set()
         raise
-    return StageOutput(output=dict(observation=handle))
+    return StageOutput(output=dict(observation=handle, started_s=started_s))
 
 
 def window_validate(params, plan):
     from .elastic import _validate
 
     p = _validate(
-        params, plan, {"observation", "duration_s"}, {"observation", "duration_s"}
+        params,
+        plan,
+        {"observation", "duration_s", "since"},
+        {"observation", "duration_s"},
     )
     plan.reference(p["observation"], "observation")
+    if "since" in p:
+        plan.reference(p["since"], "number")
     if type(p["duration_s"]) not in (int, float) or p["duration_s"] not in (20, 60):
         raise ValueError("balance window must be 20 or 60 seconds")
     return p
@@ -109,7 +123,14 @@ def window_validate(params, plan):
 
 def window(ctx, params, deadline):
     metrics = ctx.resource(params["observation"], "observation")
-    start = ctx.clock()
+    now = ctx.clock()
+    start = ctx.resolve(params["since"]) if "since" in params else now
+    if (
+        type(start) not in (int, float)
+        or not math.isfinite(start)
+        or not 0 <= now - start <= 1200
+    ):
+        raise ValueError("balance window has an invalid start anchor")
     deadline.sleep(params["duration_s"])
     end = ctx.clock()
     result = dict(start_s=start, end_s=end, data=metrics.snapshot())
@@ -381,7 +402,13 @@ def remove(ctx, params, deadline):
     return _mutation(ctx, params, deadline, "remove", request_http=mutation_http)
 
 
+def mark(ctx, params, deadline):
+    deadline.check()
+    return StageOutput(output=dict(time_s=ctx.clock()))
+
+
 HANDLERS = [
+    StageHandler("elastic_balance_mark", empty, mark, {"time_s": "number"}),
     StageHandler(
         "elastic_balance_remove",
         remove_validate,
@@ -391,7 +418,10 @@ HANDLERS = [
     ),
     StageHandler("elastic_balance_flow", flow_validate, flow_start, {"flow": "flow"}),
     StageHandler(
-        "elastic_balance_observe", empty, observe_start, {"observation": "observation"}
+        "elastic_balance_observe",
+        empty,
+        observe_start,
+        {"observation": "observation", "started_s": "number"},
     ),
     StageHandler(
         "elastic_balance_window", window_validate, window, {"window": "snapshot"}

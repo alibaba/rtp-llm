@@ -45,7 +45,7 @@ legacy function is retained.
 
 ## Ordered lifecycle
 
-`lifecycle.yaml` defines six explicit `batch-window` variants. `normal` and
+`lifecycle.yaml` defines seven explicit `batch-window` variants. `normal` and
 `strict` each contain 57 stages and preserve four original lifecycle
 contracts below. The independent 10-stage `rebalance` variant preserves the fifth
 contract without preference traffic warming the new worker. `kv_skew_hot` and `kv_skew_cold` retain the two pilot programs
@@ -244,10 +244,69 @@ services. Independent checks cover a balanced last third with earlier persistent
 drift, queue depth three, missing occupancy, counter resets and empty subwindow
 gaps. This candidate still needs independent review and real Java mock acceptance.
 
+## KV-full shrink variant
+
+`elastic_lifecycle::kv_full_shrink::batch-window` preserves both drain branches
+of `elastic_kv_full_shrink` in one ordered 35-stage, 33-check program. Its private
+2P/2D environment declares `decode_cache_blocks: 24`. Both initial and dynamically
+added Decode workers use that actual pool size; no artificial KV-pressure setter
+is used. The candidate requires the core's explicit cache-pool environment fields.
+
+| Legacy full-shrink contract | Actual stage/check or evidence |
+| --- | --- |
+| Real running leases saturate the next-request Master KV gate | `fill_ok.saturated`, `fill_timeout.saturated`: 24 blocks, >=2 reserve blocks, running>0, projected next 2048 tokens strictly exceed 90% |
+| Fill shape does not grow from two to three blocks on first decode step | 2035 input + 13 output, two unique cold keys per request; <=60s fill, eight serial Schedule submissions per 100ms round |
+| Graceful branch actually drains | `terminal_ok.drain_branch`: `drained=true` |
+| Graceful admitted requests succeed or are pre-event 8211 fill refusals | `terminal_ok.terminal_family`, `.retirement_contract` |
+| Every admitted post-event terminal is <=40s; no hang | Each branch's `terminal_40s`; client timestamps, not collector order |
+| Accounting cleans within 50s after branch-one collection | `accounting_ok` owner-specific scheduler/Prefill/Decode checks |
+| Timeout branch is real and uses milliseconds | `terminal_timeout.drain_branch`: `drained=false`, 5000<=drain_ms<=10000 |
+| Timeout yields at least one exact Decode generation retirement | `terminal_timeout.retirement_contract`, `.terminal_family`: 8510 plus `Decode endpoint generation retired`; unrelated errors fail |
+| Survivor transient occupancy <=0.95 and reject delta <= ceil(max(0,victim occupied-survivor free)) | `transient_ok`, `transient_timeout`, each over the full 20s from removal |
+| Branch-one steady Decode occupancy spread <= baseline+0.05; waiting peak <=2 | `steady_bounds.occupancy_spread`, `.waiting_peak` over the last third |
+| Steady Decode share max <= max(baseline+0.10,0.65), min>=0.10 | `steady_bounds.share_max`, `.share_min`, `.nonempty_share`; completed-counter deltas over the whole steady window, matching the legacy implementation |
+| Final survivor recovery >=19/20 | `recovery.complete`, `.success_rate`, concurrency 10 |
+| Steady cluster TPS | Observation in the steady artifact, never a pass threshold |
+
+The two background windows preserve serial 2048/2/one-key requests followed by a
+500ms pause, Schedule 30s and stream **10s**. They stop for remove/accounting; an
+always-running flow would prevent the zero-inflight measurement. Explicit start
+anchors retain the baseline ramp and the branch-one steady ramp in the old
+measurement ranges. The steady tail begins 40s after its settle anchor.
+
+The candidate intentionally preserves the old literal `/set_perf` order, but
+that order does **not** prove a victim-only 1000x tail. All mock services share
+one `MockPerformanceModel`, including dynamic engines; branch two writes
+`victim=1000`, then `survivor=60`, leaving both at 60. Its actual drain response
+and client terminal checks still gate the verdict. A fixture may exercise the
+timeout branch with remaining work at 60x, but that is not a Java proof of the
+old comments' independent per-worker slowdowns. The fixture models the shared
+field and checks every write in order. No Java or production code is changed.
+See [the full-shrink migration analysis](MIGRATION_FULL_SHRINK.md) for the exact
+control sequence, affected owners, and a separately proposed correction; the
+legacy-mapped candidate does not silently substitute that correction.
+
+Additional construction guards are explicit: all admitted consumers must exit;
+8211 is exempt only when terminal **before** removal (the old code allowed 8211
+without checking that comment's pre-event qualification); required metric series
+cannot be missing; post-add topology is a hard gate (the old `v2_topo_ok` was
+recorded but unused by its final verdict). The second transient verdict waits for
+its entire 20s window rather than inspecting whatever partial samples happened
+to exist immediately after collection. These strengthen measurement validity and
+are not advertised as exact legacy behavior. Schedule refusals remain recorded
+observations, outside the admitted-stream terminal-family contract. A transport
+error or collector cancellation cannot impersonate a permitted business error.
+
+Local tests execute the complete formal YAML with actual fill/pump threads and
+simulated request/metric services, plus boundary tests for saturation, reserve,
+zero rejection budget, milliseconds, 40s, pre-event 8211 and retirement messages.
+Independent review and real Java acceptance are pending. Legacy code is retained;
+a later blocked branch is not counted as covered by earlier successful checks.
+
 ## Remaining variants
 
-Full-shrink and transient-imbalance contracts remain legacy and
-must be folded into the four families. Along with the two skew variants mapped
+The transient-imbalance contract remains legacy and must be folded into the
+four families. Along with the two skew variants mapped
 above, these are the five additions beyond the original eight elastic cases
 (13 current legacy cases). They must not be deleted to reach the four-family
 target. All four final families now have YAML candidates; this is not complete

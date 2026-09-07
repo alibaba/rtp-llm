@@ -16,6 +16,7 @@ legacy_case_ids:
 - elastic_kv_skew_shrink_hot
 - elastic_kv_skew_shrink_cold
 - elastic_steady_state_recovery
+- elastic_kv_full_shrink
 estimated_duration_s: 420
 environment:
   backend: java_mock
@@ -386,6 +387,230 @@ variants:
         $ref: stages.baseline.output.window
       steady:
         $ref: stages.steady.output.window
+  - id: teardown
+    action: teardown
+- id: kv_full_shrink
+  legacy_case_ids:
+  - elastic_kv_full_shrink
+  environment_overrides:
+    n_prefill: 2
+    n_decode: 2
+    decode_cache_blocks: 24
+  execution:
+    timeout_s: 1600
+    stage_timeout_s: 40
+    cleanup_timeout_s: 120
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: initial_topology
+    action: elastic_topology
+    params:
+      role: DECODE
+      discovered: 2
+      alive: 2
+    timeout_s: 35
+  - id: observe
+    action: elastic_balance_observe
+  - id: baseline_flow
+    action: elastic_balance_flow
+    params:
+      interval_s: 0.5
+      stream_timeout_s: 10
+  - id: baseline_ramp
+    action: elastic_pause
+    params:
+      seconds: 1
+  - id: baseline
+    action: elastic_balance_window
+    params:
+      observation:
+        $ref: stages.observe.output.observation
+      since:
+        $ref: stages.observe.output.started_s
+      duration_s: 20
+    timeout_s: 25
+  - id: baseline_stop
+    action: elastic_flow_stop
+    params:
+      flow:
+        $ref: stages.baseline_flow.output.flow
+    timeout_s: 65
+  - id: slow_both
+    action: engine_control
+    params:
+      operation: set_perf
+      targets:
+      - decode-0
+      - decode-1
+      perf:
+        decode_scale: 60
+  - id: slow_sync
+    action: elastic_pause
+    params:
+      seconds: 1
+  - id: fill_ok
+    action: elastic_decode_fill
+    params:
+      victim: decode-0
+      survivor: decode-1
+    timeout_s: 70
+  - id: remove_ok
+    action: elastic_balance_remove
+    params:
+      engine: decode-0
+      drain_timeout_ms: 60000
+    timeout_s: 110
+  - id: collect_ok
+    action: elastic_full_collect
+    params:
+      requests:
+        $ref: stages.fill_ok.output.requests
+      mutation:
+        $ref: stages.remove_ok.output.mutation
+    timeout_s: 100
+  - id: accounting_ok
+    action: elastic_pending_accounting
+    timeout_s: 60
+  - id: add_decode
+    action: elastic_add
+    params:
+      role: decode
+  - id: restored_topology
+    action: elastic_topology
+    params:
+      role: DECODE
+      discovered: 2
+      alive: 2
+      port:
+        $ref: stages.add_decode.output.port
+      present: true
+    timeout_s: 35
+  - id: settled
+    action: elastic_balance_mark
+  - id: steady_flow
+    action: elastic_balance_flow
+    params:
+      interval_s: 0.5
+      stream_timeout_s: 10
+  - id: steady_ramp
+    action: elastic_pause
+    params:
+      seconds: 1
+  - id: steady
+    action: elastic_balance_window
+    params:
+      observation:
+        $ref: stages.observe.output.observation
+      since:
+        $ref: stages.settled.output.time_s
+      duration_s: 60
+    timeout_s: 65
+  - id: steady_stop
+    action: elastic_flow_stop
+    params:
+      flow:
+        $ref: stages.steady_flow.output.flow
+    timeout_s: 65
+  - id: steady_bounds
+    action: elastic_full_steady
+    params:
+      baseline:
+        $ref: stages.baseline.output.window
+      steady:
+        $ref: stages.steady.output.window
+      newcomer:
+        $ref: stages.add_decode.output.engine
+  - id: transient_ok
+    action: elastic_full_transient
+    params:
+      observation:
+        $ref: stages.observe.output.observation
+      fill:
+        $ref: stages.fill_ok.output.fill
+      mutation:
+        $ref: stages.remove_ok.output.mutation
+  - id: terminal_ok
+    action: elastic_full_terminal
+    params:
+      result:
+        $ref: stages.collect_ok.output.result
+      branch: drain_ok
+  - id: slow_victim
+    action: engine_control
+    params:
+      operation: set_perf
+      targets:
+      - decode-1
+      perf:
+        decode_scale: 1000
+  - id: slow_survivor
+    action: engine_control
+    params:
+      operation: set_perf
+      targets:
+      - $ref: stages.add_decode.output.engine
+      perf:
+        decode_scale: 60
+  - id: timeout_sync
+    action: elastic_pause
+    params:
+      seconds: 1
+  - id: fill_timeout
+    action: elastic_decode_fill
+    params:
+      victim: decode-1
+      survivor:
+        $ref: stages.add_decode.output.engine
+    timeout_s: 70
+  - id: remove_timeout
+    action: elastic_balance_remove
+    params:
+      engine: decode-1
+      drain_timeout_ms: 5000
+    timeout_s: 110
+  - id: collect_timeout
+    action: elastic_full_collect
+    params:
+      requests:
+        $ref: stages.fill_timeout.output.requests
+      mutation:
+        $ref: stages.remove_timeout.output.mutation
+    timeout_s: 100
+  - id: observe_full_transient
+    action: elastic_balance_window
+    params:
+      observation:
+        $ref: stages.observe.output.observation
+      duration_s: 20
+    timeout_s: 25
+  - id: transient_timeout
+    action: elastic_full_transient
+    params:
+      observation:
+        $ref: stages.observe.output.observation
+      fill:
+        $ref: stages.fill_timeout.output.fill
+      mutation:
+        $ref: stages.remove_timeout.output.mutation
+  - id: terminal_timeout
+    action: elastic_full_terminal
+    params:
+      result:
+        $ref: stages.collect_timeout.output.result
+      branch: drain_timeout
+  - id: restore_survivor
+    action: engine_control
+    params:
+      operation: set_perf
+      targets:
+      - $ref: stages.add_decode.output.engine
+      perf:
+        decode_scale: 1
+  - id: recovery
+    action: elastic_pending_recovery
+    timeout_s: 100
   - id: teardown
     action: teardown
 stages:
