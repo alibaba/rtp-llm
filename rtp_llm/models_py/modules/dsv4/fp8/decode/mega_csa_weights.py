@@ -15,7 +15,9 @@ O_LORA_RANK = 1024
 INDEX_HEADS = 64
 INDEX_HEAD_DIM = 128
 COMPRESS_RATIO = 4
-MAX_BATCH = 128
+# Maximum flattened query tokens accepted by the TP1 CSA/HCA adapters.
+# The CUDA MQA and projection paths support this 256-token decode tile.
+MAX_BATCH = 256
 MQA_SPLIT_KV = 256
 
 

@@ -371,7 +371,7 @@ class MegaHCARTPEagerTest(unittest.TestCase):
             beta_fast=32,
             beta_slow=1,
             original_seq_len=65536,
-            max_batch_size=128,
+            max_batch_size=256,
             max_seq_len=65536,
             index_n_heads=64,
             index_head_dim=128,

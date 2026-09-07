@@ -405,7 +405,7 @@ class MegaCSARTPEagerTest(unittest.TestCase):
             beta_fast=32,
             beta_slow=1,
             original_seq_len=65536,
-            max_batch_size=128,
+            max_batch_size=256,
             max_seq_len=_MODEL_MAX_SEQ_LEN,
             index_n_heads=INDEX_HEADS,
             index_head_dim=INDEX_HEAD_DIM,
