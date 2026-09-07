@@ -157,15 +157,13 @@ bool cacheStatusSnapshotEnabled() {
 
 void reportCacheOperation(const kmonitor::MetricsReporterPtr&          metrics_reporter,
                           RtpLLMCacheOperationMetricsCollector::OpType operation_type,
-                          int64_t                                      begin_time_us,
-                          bool                                         success) {
+                          int64_t                                      begin_time_us) {
     if (metrics_reporter == nullptr) {
         return;
     }
     RtpLLMCacheOperationMetricsCollector collector;
     collector.operation_type = operation_type;
     collector.latency_us     = currentTimeUs() - begin_time_us;
-    collector.success        = success;
     metrics_reporter->report<RtpLLMCacheOperationMetrics, RtpLLMCacheOperationMetricsCollector>(nullptr, &collector);
 }
 
@@ -385,8 +383,7 @@ MallocResult KVCacheManager::malloc(const MallocInfo& malloc_info) {
     if (result.load_attempted) {
         result.load_prepare_latency_us = std::max<int64_t>(malloc_end_time_us - result.match_end_time_us, 0);
     }
-    reportCacheOperation(
-        metrics_reporter_, RtpLLMCacheOperationMetricsCollector::OpType::MALLOC, malloc_begin_time_us, result.success);
+    reportCacheOperation(metrics_reporter_, RtpLLMCacheOperationMetricsCollector::OpType::MALLOC, malloc_begin_time_us);
     return result;
 }
 
@@ -410,7 +407,7 @@ void KVCacheManager::free(const FreeInfo& free_info) {
     const int64_t begin_time_us = metrics_reporter_ == nullptr ? 0 : currentTimeUs();
     RTP_LLM_CHECK(free_info.batch_kv_cache_resource && free_info.complete_token_ids);
     allocator_->free(free_info);
-    reportCacheOperation(metrics_reporter_, RtpLLMCacheOperationMetricsCollector::OpType::FREE, begin_time_us, true);
+    reportCacheOperation(metrics_reporter_, RtpLLMCacheOperationMetricsCollector::OpType::FREE, begin_time_us);
 }
 
 bool KVCacheManager::abortPendingLoad(const std::shared_ptr<AsyncContext>& context) {
@@ -422,7 +419,7 @@ void KVCacheManager::insertIntoCache(const InsertInfo& insert_info) {
     const int64_t begin_time_us = metrics_reporter_ == nullptr ? 0 : currentTimeUs();
     dropLastPartialBlock(insert_info.batch_kv_cache_resource);
     allocator_->insertIntoCache(insert_info);
-    reportCacheOperation(metrics_reporter_, RtpLLMCacheOperationMetricsCollector::OpType::INSERT, begin_time_us, true);
+    reportCacheOperation(metrics_reporter_, RtpLLMCacheOperationMetricsCollector::OpType::INSERT, begin_time_us);
 }
 
 int KVCacheManager::singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,

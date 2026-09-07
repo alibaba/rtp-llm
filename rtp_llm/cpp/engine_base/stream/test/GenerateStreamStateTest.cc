@@ -2,6 +2,9 @@
 #include "gtest/gtest.h"
 #include "gmock/gmock.h"
 
+#include "kmonitor/client/MetricsReporter.h"
+#include "kmonitor/client/core/MetricsData.h"
+
 #define private public
 #define protected public
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
@@ -23,6 +26,17 @@ namespace {
 
 thread_local const AsyncContext* tracked_abort_context = nullptr;
 thread_local size_t              tracked_abort_count   = 0;
+
+void expectQps(kmonitor::MutableMetric* metric, const kmonitor::MetricsTags& tags, double expected) {
+    ASSERT_NE(metric, nullptr);
+    auto* series = metric->DeclareMetric(&tags);
+    ASSERT_NE(series, nullptr);
+    kmonitor::MetricsRecord record(nullptr, nullptr, 0);
+    series->Snapshot(&record, 1000);
+    EXPECT_TRUE(metric->UndeclareMetric(series));
+    ASSERT_EQ(record.Values().size(), 1u);
+    EXPECT_DOUBLE_EQ(std::stod(record.Values().front()->Value()), expected);
+}
 
 }  // namespace
 
@@ -82,13 +96,14 @@ protected:
             generate_input, model_config, runtime_config, resource_context, nullptr);
     }
 
-    void installRetryableInitMalloc() {
+    std::shared_ptr<testing::NiceMock<MockKVCacheAllocator>> installRetryableInitMalloc() {
         auto allocator = std::make_shared<testing::NiceMock<MockKVCacheAllocator>>(cache_manager_->config_);
         ON_CALL(*allocator, totalBlocksNum()).WillByDefault(testing::Return(64));
         ON_CALL(*allocator, getNeedBlocks(testing::_)).WillByDefault(testing::Return(1));
         ON_CALL(*allocator, initMallocForCommonLen(testing::_))
             .WillByDefault(testing::Return(MallocResult{false, 0, 0, MallocStatus::RETRYABLE_RESOURCE_EXHAUSTED}));
-        cache_manager_->allocator_ = std::move(allocator);
+        cache_manager_->allocator_ = allocator;
+        return allocator;
     }
 
 protected:
@@ -106,6 +121,51 @@ TEST_F(GenerateStreamStateTest, testInitialStateIsWaiting) {
     ASSERT_FALSE(stream->isFinished());
     ASSERT_FALSE(stream->getStatus() == StreamState::RUNNING);
     ASSERT_FALSE(stream->getStatus() == StreamState::LOADING_CACHE);
+}
+
+TEST_F(GenerateStreamStateTest, testMallocRetryMetricsIndependentOfTerminalOutcome) {
+    const struct {
+        ErrorCode error;
+        int       retries;
+    } cases[] = {{ErrorCode::NONE_ERROR, 3},
+                 {ErrorCode::MALLOC_FAILED, 3},
+                 {ErrorCode::DECODE_MALLOC_FAILED, 3},
+                 {ErrorCode::CANCELLED, 1},
+                 {ErrorCode::GENERATE_TIMEOUT, 3},
+                 {ErrorCode::MALLOC_FAILED, 0},
+                 {ErrorCode::DECODE_MALLOC_FAILED, 0}};
+    for (const auto& test : cases) {
+        SCOPED_TRACE(testing::Message() << "error=" << static_cast<int>(test.error) << " retries=" << test.retries);
+        kmonitor::MetricsTags tags;
+        auto                  reporter = std::make_shared<kmonitor::MetricsReporter>("", "", tags);
+        auto                  stream   = createStream({1, 2, 3}, /*reuse_cache=*/false, RoleType::PREFILL);
+        stream->setMetricsReporter(reporter);
+        auto  allocator  = installRetryableInitMalloc();
+        auto* operations = reporter->getMetricsGroup<RtpLLMCacheOperationMetrics>();
+        stream->reportEvent(StreamEvents::CanRun);
+        for (int i = 0; i < test.retries; ++i) {
+            EXPECT_EQ(stream->moveToNext(), StreamState::WAITING);
+        }
+        // Retry decisions are visible while waiting, even if cancelled before the next attempt.
+        expectQps(operations->malloc_retry_qps_metric, tags, test.retries);
+        if (test.error == ErrorCode::NONE_ERROR) {
+            ON_CALL(*allocator, initMallocForCommonLen(testing::_))
+                .WillByDefault(testing::Return(MallocResult{true, 0}));
+            ON_CALL(*allocator, incrMalloc(testing::_)).WillByDefault(testing::Return(MallocResult{true, 0}));
+            EXPECT_EQ(stream->moveToNext(), StreamState::RUNNING);
+            stream->reportEvent(StreamEvents::GenerateDone);
+        } else {
+            stream->reportError(test.error, "terminal error");
+        }
+        EXPECT_EQ(stream->moveToNext(), StreamState::FINISHED);
+        stream->reportMetricOnce();
+        stream->reportMetricOnce();
+        stream.reset();
+        expectQps(reporter->getMetricsGroup<RtpLLMStreamMetrics>()->kv_cache_malloc_failed_qps_metric,
+                  tags,
+                  test.error == ErrorCode::MALLOC_FAILED || test.error == ErrorCode::DECODE_MALLOC_FAILED);
+        expectQps(operations->malloc_retry_qps_metric, tags, 0);
+    }
 }
 
 TEST_F(GenerateStreamStateTest, testDirectStateManipulation) {
