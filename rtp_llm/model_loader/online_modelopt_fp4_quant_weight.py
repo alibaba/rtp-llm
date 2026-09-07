@@ -18,7 +18,11 @@ from typing import Any, Optional
 
 import torch
 
-from rtp_llm.config.quant_config import ModelOptFp4Config, QuantizationConfig
+from rtp_llm.config.quant_config import (
+    NVFP4_BLOCK_SIZE,
+    ModelOptFp4Config,
+    QuantizationConfig,
+)
 from rtp_llm.model_loader.ffn_weight import MoeAtomicWeight
 from rtp_llm.model_loader.load_config import LoadConfig
 from rtp_llm.model_loader.tensor_source import TensorSource
@@ -31,7 +35,6 @@ from rtp_llm.utils.model_weight import W, identity
 
 FLOAT4_E2M1_MAX = 6.0
 FLOAT8_E4M3_MAX = 448.0
-NVFP4_BLOCK_SIZE = 16
 
 _E2M1_BOUNDS = torch.tensor([0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5.0])
 _E2M1_ODD_BOUNDS = _E2M1_BOUNDS[[1, 3, 5]]  # banker-rounding ties
@@ -264,6 +267,8 @@ class OnlineModelOptFp4MoeWeight(CompositeWeight, QuantWeight):
                 self.scale.name,
                 kernel_w,
                 scale_w,
+                scale_2=processed[self.scale_2.name],
+                input_scale=processed[self.input_scale.name],
             )
         )
         processed[self.kernel.name] = kernel_w

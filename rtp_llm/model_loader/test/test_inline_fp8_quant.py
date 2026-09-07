@@ -94,11 +94,10 @@ class TestTensorCollectorFp8(unittest.TestCase):
 
 
 class TestBuildStackedKeyConfigNoOverwrite(unittest.TestCase):
-    """_build_stacked_key_config must not overwrite kernel template with scale template."""
+    """_build_stacked_key_config retains all templates for a shared key."""
 
-    def test_same_checkpoint_key_preserves_first_template(self):
-        """When kernel and scale share the same stacked checkpoint key,
-        _build_stacked_key_config must keep the kernel's template (first seen)."""
+    def test_same_checkpoint_key_keeps_all_templates(self):
+        """When kernel and scale share a stacked key, both consumers load it."""
         from unittest.mock import patch
 
         from rtp_llm.model_loader.loader import ModelLoader
@@ -133,9 +132,10 @@ class TestBuildStackedKeyConfigNoOverwrite(unittest.TestCase):
         resolved_key = shared_ckpt_key.format(i="0")
         self.assertIn(resolved_key, result)
 
-        template = result[resolved_key]
-        self.assertIn(W.moe_w1, template)
-        self.assertNotIn(W.moe_s1, template)
+        templates = result[resolved_key]
+        self.assertEqual(len(templates), 2)
+        self.assertTrue(any(W.moe_w1 in template for template in templates))
+        self.assertTrue(any(W.moe_s1 in template for template in templates))
 
 
 class TestPerChannelCastToFp8Expert(unittest.TestCase):
@@ -228,10 +228,7 @@ class TestTransposeStackMoeW1Swap(unittest.TestCase):
         up_data = torch.randn(num_experts, gate_dim, hidden_dim)
         fused_experts = torch.cat([gate_data, up_data], dim=1)
 
-        expert_keys = {
-            f"layers.0.moe.{W.moe_w1}.{eid}.0"
-            for eid in range(num_experts)
-        }
+        expert_keys = {f"layers.0.moe.{W.moe_w1}.{eid}.0" for eid in range(num_experts)}
         collector = TensorCollector(expert_keys, FakeDatabase())
         for eid in range(num_experts):
             key = f"layers.0.moe.{W.moe_w1}.{eid}.0"
