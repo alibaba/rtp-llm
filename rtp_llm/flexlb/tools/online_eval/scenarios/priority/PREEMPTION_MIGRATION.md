@@ -193,3 +193,39 @@ recorded as None. No actual Java/error-family completeness is claimed until
 that dependency and real execution are verified. Fixture tests cover20
 successful consumers,18 legal8511 Schedule rejections, queued8430 failure,
 and complete T1 config comparison. Shared clean d955 remains required.
+
+
+## Typed stream terminal integration
+
+This checkpoint requires reviewed shared backend
+`e8e53612d995a2f97dcdd3069a8e021c65b5df03` plus the d955 clean fix.
+It adds no new legacy case count; four candidates remain implemented and ten
+remain pending. Bare preemption branches without this backend cannot execute
+the new typed-terminal tests successfully. Integrated verification overlays
+these owned files onto the fixed e8 source, preserving the shared owner code.
+
+All cohort drain stages now use preemption_wait, which retains the independent
+Schedule joins, fresh35s per-consumer budget and actual completion witnesses.
+An ordinary RuntimeError from a stream can reach the scenario verdict only
+when Schedule was OK, the actual consumer completion is verified, done and
+transport/exit timestamps exist, and the backend recorded a parsed integer
+trailer code. Missing/ambiguous evidence and transport CANCELLED remain errors.
+Actual stage and RPC deadline exceptions are not swallowed, even with metadata;
+this is a deliberate strict timeout boundary rather than exact equivalence to
+the old helper's untyped/typed timeout collection behavior. Core RequestBatch
+wait is unchanged and does not globally permit failed RPCs.
+
+The outcome policy preserves the legacy distinction: an in-band enum2 on an
+otherwise OK stream maps to8429, whereas trailer literal2 remains2. A failed
+non-CANCELLED transport uses the parsed trailer code without in-band fallback;
+transport CANCELLED supplies no engine terminal even if a trailer is present.
+Original transport status, raw trailer bytes and in-band fields remain separate.
+The disabled case's literal-trailer2 counterexample passes its old exclusion
+predicate; it is not being mislabeled as a successful business request.
+
+Six additional tests include five complete programs with actual consumer
+workers and real protobuf ErrorDetailsPB bytes: typed8430 reaches the disabled verdict and
+fails it, literal trailer2 retains2, CANCELLED is not an engine victim, missing
+metadata is ERROR, and DEADLINE_EXCEEDED is TIMEOUT; an in-band policy test
+retains2-to8429 mapping. These are local external-IO fixtures, not Java runs or
+acceptance of the ten outstanding victim/error-family contracts.

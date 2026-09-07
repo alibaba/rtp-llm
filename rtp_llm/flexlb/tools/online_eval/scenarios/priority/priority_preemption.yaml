@@ -133,13 +133,13 @@ variants:
       requests:
         $ref: stages.r1_wave.output.requests
   - id: r1_placeholder_drain
-    action: priority_wait
+    action: preemption_wait
     timeout_s: 35
     params:
       requests:
         $ref: stages.r1_placeholder.output.requests
   - id: r1_wave_drain
-    action: priority_wait
+    action: preemption_wait
     timeout_s: 315
     params:
       requests:
@@ -233,13 +233,13 @@ variants:
       requests:
         $ref: stages.r2_wave.output.requests
   - id: r2_placeholder_drain
-    action: priority_wait
+    action: preemption_wait
     timeout_s: 35
     params:
       requests:
         $ref: stages.r2_placeholder.output.requests
   - id: r2_wave_drain
-    action: priority_wait
+    action: preemption_wait
     timeout_s: 315
     params:
       requests:
@@ -378,13 +378,13 @@ variants:
       requests:
         $ref: stages.r1_wave.output.requests
   - id: r1_placeholder_drain
-    action: priority_wait
+    action: preemption_wait
     timeout_s: 35
     params:
       requests:
         $ref: stages.r1_placeholder.output.requests
   - id: r1_wave_drain
-    action: priority_wait
+    action: preemption_wait
     timeout_s: 385
     params:
       requests:
@@ -490,13 +490,13 @@ variants:
       requests:
         $ref: stages.r2_wave.output.requests
   - id: r2_placeholder_drain
-    action: priority_wait
+    action: preemption_wait
     timeout_s: 35
     params:
       requests:
         $ref: stages.r2_placeholder.output.requests
   - id: r2_wave_drain
-    action: priority_wait
+    action: preemption_wait
     timeout_s: 315
     params:
       requests:
@@ -628,13 +628,13 @@ variants:
       requests:
         $ref: stages.r1_wave.output.requests
   - id: r1_placeholder_drain
-    action: priority_wait
+    action: preemption_wait
     timeout_s: 35
     params:
       requests:
         $ref: stages.r1_placeholder.output.requests
   - id: r1_wave_drain
-    action: priority_wait
+    action: preemption_wait
     timeout_s: 315
     params:
       requests:
@@ -728,13 +728,13 @@ variants:
       requests:
         $ref: stages.r2_wave.output.requests
   - id: r2_placeholder_drain
-    action: priority_wait
+    action: preemption_wait
     timeout_s: 35
     params:
       requests:
         $ref: stages.r2_placeholder.output.requests
   - id: r2_wave_drain
-    action: priority_wait
+    action: preemption_wait
     timeout_s: 315
     params:
       requests:
@@ -860,13 +860,13 @@ stages:
     requests:
       $ref: stages.wave.output.requests
 - id: placeholder_drain
-  action: priority_wait
+  action: preemption_wait
   timeout_s: 35
   params:
     requests:
       $ref: stages.placeholder.output.requests
 - id: wave_drain
-  action: priority_wait
+  action: preemption_wait
   timeout_s: 315
   params:
     requests:
