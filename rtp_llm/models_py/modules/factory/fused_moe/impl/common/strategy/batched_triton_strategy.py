@@ -12,6 +12,12 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.strategy_base import MoeSt
 class BatchedTritonStrategy(MoeStrategy):
     """CUDA single GPU without quantization strategy"""
 
+    @classmethod
+    def check_conditions(cls, checker, config):
+        from rtp_llm.config.moe_config import MoeStrategyName
+
+        checker.check(config.moe_strategy == MoeStrategyName.AUTO.value)
+
     def get_attributes(self) -> StrategyAttributes:
         from rtp_llm.models_py.modules.factory.fused_moe.impl.common.executor.batched_triton_executor import (
             BatchedTritonExperts,

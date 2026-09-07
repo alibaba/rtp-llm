@@ -4,6 +4,7 @@ from typing import Any
 
 import torch
 
+from rtp_llm.config.moe_config import MoeStrategyName
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
@@ -28,8 +29,8 @@ class CudaNoQuantEpLowLatencyStrategy(MoeStrategy):
         quant_method = resolver.get_quant_method(config)
         checker.check(quant_method is None)
         checker.check(
-            config.moe_strategy == "no_auant_ep_low_latency"
-            or config.moe_strategy == "auto"
+            config.moe_strategy == MoeStrategyName.NO_QUANT_EP_LOW_LATENCY.value
+            or config.moe_strategy == MoeStrategyName.AUTO.value
         )
 
     def get_attributes(self) -> StrategyAttributes:
@@ -57,7 +58,8 @@ class CudaNoQuantCppStrategy(MoeStrategy):
         quant_method = resolver.get_quant_method(config)
         checker.check(quant_method is None)
         checker.check(
-            config.moe_strategy == "no_auant_cpp" or config.moe_strategy == "auto"
+            config.moe_strategy == MoeStrategyName.NO_QUANT_CPP.value
+            or config.moe_strategy == MoeStrategyName.AUTO.value
         )
 
     def get_attributes(self) -> StrategyAttributes:
@@ -85,7 +87,8 @@ class CudaNoQuantDpNormalStrategy(MoeStrategy):
         quant_method = resolver.get_quant_method(config)
         checker.check(quant_method is None)
         checker.check(
-            config.moe_strategy == "no_auant_dp_normal" or config.moe_strategy == "auto"
+            config.moe_strategy == MoeStrategyName.NO_QUANT_DP_NORMAL.value
+            or config.moe_strategy == MoeStrategyName.AUTO.value
         )
 
     def get_attributes(self) -> StrategyAttributes:

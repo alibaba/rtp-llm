@@ -30,8 +30,10 @@ class TrtllmFp4Executor(FusedMoeExpertExecutor):
         from rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver import (
             MoeConfigResolver,
         )
+        from rtp_llm.models_py.utils.arch import is_sm12x
 
         resolver = MoeConfigResolver()
+        checker.check(not is_sm12x())
         checker.check(resolver.is_bf16(config))
         # Check if quantization is enabled and uses FP4 (uint8 dtype)
         # FP4 weights are packed as uint8, so we check for quant_config with uint8 dtype
