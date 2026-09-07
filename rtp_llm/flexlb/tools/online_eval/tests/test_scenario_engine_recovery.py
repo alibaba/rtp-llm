@@ -26,6 +26,9 @@ class Model:
         self.mode, self.restored, self.cleaned = mode, False, False
         self.wiped = set()
         self.routed = {}
+        self.cancel_failure_ids = set()
+        self.master_cancel_attempts = 0
+        self.worker_cancel_attempts = 0
         self.scheduler_samples = 0
         self.holder_view = None
         self.round_robin = 0
@@ -38,6 +41,11 @@ class Model:
             call = future(*args, **kwargs)
             req = args[0]
             rid, shape = req
+            if (
+                self.mode == "master_cancel_unavailable"
+                and shape.get("input_len") == 512
+            ):
+                self.cancel_failure_ids.add(rid)
             keys = shape.get("block_keys", [])
             if len(keys) == 10:
                 index = (
@@ -98,9 +106,19 @@ class Model:
         )
         factory = self.ops.schedule_pb2_grpc.FlexlbServiceStub
 
+        class UnavailableRpc(RuntimeError):
+            def code(self):
+                return NS(name="UNAVAILABLE")
+
+        def master_cancel(request, timeout):
+            self.master_cancel_attempts += 1
+            if request.request_id in self.cancel_failure_ids:
+                raise UnavailableRpc("master cancel unavailable")
+            return NS(found=True)
+
         def service(channel):
             stub = factory(channel)
-            stub.Cancel = lambda request, timeout: NS(found=True)
+            stub.Cancel = master_cancel
             return stub
 
         self.ops.schedule_pb2_grpc.FlexlbServiceStub = service
@@ -121,6 +139,34 @@ class Model:
             return fetch(request, timeout)
 
         self.ops.fetch = fetch_after_crash
+        fetch_with_crash = self.ops.fetch
+        generate = self.ops.generate
+
+        def controlled_fetch(request, timeout):
+            if request["request_id"] in self.cancel_failure_ids:
+                return Stream(error=UnavailableRpc("payload unavailable"))
+            return fetch_with_crash(request, timeout)
+
+        def controlled_generate(request, timeout):
+            if request[0] in self.cancel_failure_ids:
+                return Stream(error=UnavailableRpc("payload unavailable"))
+            return generate(request, timeout)
+
+        self.ops.fetch, self.ops.generate = controlled_fetch, controlled_generate
+        worker_factory = self.ops.pb2_grpc.RpcServiceStub
+        self.ops.pb2.CancelRequestPB = lambda **kw: NS(**kw)
+        self.ops.pb2.CANCEL_STATUS_NOT_FOUND = 1
+
+        def worker_cancel(request, timeout):
+            self.worker_cancel_attempts += 1
+            return NS(status=0)
+
+        def worker_service(channel):
+            stub = worker_factory(channel)
+            stub.Cancel = worker_cancel
+            return stub
+
+        self.ops.pb2_grpc.RpcServiceStub = worker_service
         self.engines = {}
         for role in ("prefill", "decode"):
             for i in range(2):
@@ -352,6 +398,9 @@ class RecoveryTest(unittest.TestCase):
                     )
                 self.assertEqual(expected, result["status"], result)
                 self.assertTrue(model.cleaned)
+                if mode == "master_cancel_unavailable":
+                    self.assertGreater(model.master_cancel_attempts, 0)
+                    self.assertEqual(0, model.worker_cancel_attempts)
                 self.assertTrue(
                     all(row["status"] == "PASS" for row in result["cleanup"])
                 )
@@ -444,6 +493,9 @@ class RecoveryTest(unittest.TestCase):
 
     def test_complete_long_gap_program(self):
         self.run_program("status_gap_long_retire", "correct", "PASS")
+
+    def test_master_cancel_failure_does_not_add_worker_cancel(self):
+        self.run_program("status_gap_long_retire", "master_cancel_unavailable", "PASS")
 
     def test_recovered_ttft_regression_fails(self):
         self.run_program("down_phases", "ttft_regression", "FAIL", "ttft_recovers")

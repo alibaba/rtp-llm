@@ -63,6 +63,7 @@ successful actual routes, requires >=4 routed payloads, observes every selected
 endpoint retire with its own 30-second window, and checks all five wipe fields
 before opening old payload streams. Per-request consume observations retain the
 old 2/5-second windows and Master/extra-NON_BATCH-worker cancellation fallback;
+a failed Master Cancel still skips worker Cancel as in the old helper;
 subsequent client transport cleanup supplies mandatory consumer exit proof without
 changing the already-captured resurrection verdict. The uncertain crash residue
 bound is 1 + failed takeover observations, followed by the original 8-second
@@ -76,7 +77,7 @@ environments; teardown replaces shared-state restoration after failures. Explici
 perf/pressure restore callbacks remain owned and execute before environment
 teardown. Old callables remain retained, and no old case body is invoked.
 
-Local validation: 26 focused tests pass, including 68 full-program executions
+Local validation: 27 focused tests pass, including 72 full-program executions
 across all nine variants and positive/negative profile combinations. Additional
 unit evidence covers exact endpoint log matching, truncation/missing-log errors,
 missing target ledgers, independent Schedule/Generate shapes, upper-index TTFT
