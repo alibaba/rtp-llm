@@ -201,13 +201,12 @@ PPValidationResult validatePPTopology(const std::vector<StageCacheSnapshot>& sta
                         + " has LINEAR cache groups but no FULL group; every hybrid PP stage must own at least one "
                           "full attention layer");
         }
-        const bool has_swa = std::any_of(stages[s].group_types.begin(),
-                                         stages[s].group_types.end(),
-                                         [](CacheGroupType t) { return t == CacheGroupType::SWA; });
-        if (has_swa) {
-            return fail("stage " + std::to_string(s)
-                        + " holds an SWA cache group; sliding-window pools do not support pipeline parallelism yet");
-        }
+        // SWA groups are accepted: they were rejected here only while their
+        // step-derived capacities had no cross-stage reconciliation. That
+        // reconciliation is applyPPLogicalBlockNums below (per-tag min cap plus
+        // a fail-fast CHECK against the leading stage issuing ids beyond a
+        // smaller downstream pool) together with the policy-fingerprint and
+        // skew guards, none of which special-case SWA.
     }
 
     const auto& ref            = stages[0];

@@ -335,19 +335,40 @@ TEST(PPTopologyValidatorTest, SnapshotSerializeRoundTrip) {
     EXPECT_THROW(StageCacheSnapshot::deserialize("v1|full|0|4|2|1,2|0|p"), std::exception);
 }
 
-TEST(PPTopologyValidatorTest, SwaGroupFails) {
-    StageCacheSnapshot with_swa = makeFullSnapshot(50);
-    with_swa.group_tags.push_back("swa");
-    with_swa.group_types.push_back(CacheGroupType::SWA);
-    with_swa.seq_size_per_block.push_back(4);
-    with_swa.kernel_seq_size_per_block.push_back(4);
-    with_swa.block_nums.push_back(25);
-    with_swa.explicit_block_nums.push_back(0);
-    with_swa.policy_fingerprints.push_back("t2:r1:e0:v1:x0:c0:p0:a0:w1:m0:s0");
+TEST(PPTopologyValidatorTest, SwaGroupPassesWhenEveryStageOwnsIt) {
+    // DeepSeek-V4's shape: its state-ring descriptors (swa_kv, indexer_state,
+    // csa_state, hca_state) are OpaqueState, which SpecBuilder::groupType maps
+    // to CacheGroupType::SWA, so every stage carries SWA groups. SWA used to be
+    // rejected outright here while its step-derived capacities had no
+    // cross-stage reconciliation; that reconciliation is the per-tag min cap in
+    // applyPPLogicalBlockNums.
+    auto make = [](uint32_t full_blocks, uint32_t swa_blocks) {
+        StageCacheSnapshot s = makeFullSnapshot(full_blocks);
+        s.group_tags.push_back("swa");
+        s.group_types.push_back(CacheGroupType::SWA);
+        s.seq_size_per_block.push_back(4);
+        s.kernel_seq_size_per_block.push_back(4);
+        s.block_nums.push_back(swa_blocks);
+        s.explicit_block_nums.push_back(0);
+        s.policy_fingerprints.push_back("t2:r1:e0:v1:x0:c0:p0:a0:w1:m0:s0");
+        return s;
+    };
 
-    auto result = validatePPTopology({makeFullSnapshot(50), with_swa});
-    ASSERT_FALSE(result.ok);
-    EXPECT_NE(result.error.find("SWA"), std::string::npos);
+    auto identical = validatePPTopology({make(50, 25), make(50, 25)});
+    ASSERT_TRUE(identical.ok) << identical.error;
+    EXPECT_EQ(canonicalBlockNums(identical), (std::vector<uint32_t>{50, 25}));
+
+    // Unequal SWA capacities reconcile to the cross-stage minimum (30/25 = 1.2,
+    // inside the 1.5 skew threshold).
+    auto skewed = validatePPTopology({make(50, 30), make(50, 25)});
+    ASSERT_TRUE(skewed.ok) << skewed.error;
+    EXPECT_EQ(canonicalBlockNums(skewed), (std::vector<uint32_t>{50, 25}));
+
+    // A stage that does not own the SWA group at all still trips the superset
+    // gate, because the leading stage issues every block id.
+    auto missing = validatePPTopology({makeFullSnapshot(50), make(50, 25)});
+    ASSERT_FALSE(missing.ok);
+    EXPECT_NE(missing.error.find("leading PP stage must own every cache group"), std::string::npos);
 }
 
 TEST(PPTopologyValidatorTest, ExplicitBlockNumMismatchFails) {
