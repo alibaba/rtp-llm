@@ -376,6 +376,19 @@ class MasterActionsTest(unittest.TestCase):
         self.assertEqual(5, len({p["scenario_id"] for p in plans}))
         self.assertTrue(all(any(s["check_ids"] for s in p["stages"]) for p in plans))
         for plan in plans:
+            if plan["variant_id"] in {"kill_single", "kill_dual_b_to_a"}:
+                ids = [s["id"] for s in plan["stages"]]
+                ready, clean = (
+                    ("restored_topology", "restored_inflight")
+                    if plan["variant_id"] == "kill_single"
+                    else ("ready_b", "clean_b")
+                )
+                index = ids.index(ready)
+                self.assertEqual(clean, ids[index + 1])
+                self.assertEqual(60, plan["stages"][index]["timeout_s"])
+                self.assertFalse(plan["stages"][index]["params"]["inflight_zero"])
+                self.assertEqual(10, plan["stages"][index + 1]["timeout_s"])
+                self.assertTrue(plan["stages"][index + 1]["params"]["inflight_zero"])
             self.assertEqual(0, plan["resource_budget"]["max_dynamic_additions"])
             if plan["scenario_id"] == "master_coldstart":
                 self.assertEqual(0, plan["environment"]["master_stable_window_s"])

@@ -306,8 +306,14 @@ variants:
     action: master_ready
     params:
       target: B
-      inflight_zero: true
+      inflight_zero: false
     timeout_s: 60
+  - id: clean_b
+    action: master_ready
+    params:
+      target: B
+      inflight_zero: true
+    timeout_s: 10
   - id: recovery_a
     action: master_request_batch
     params:
@@ -468,7 +474,14 @@ stages:
   action: master_ready
   params:
     target: single
+    inflight_zero: false
+  timeout_s: 60
+- id: restored_inflight
+  action: master_ready
+  params:
+    target: single
     inflight_zero: true
+  timeout_s: 10
 - id: recovery
   action: request
   params:
