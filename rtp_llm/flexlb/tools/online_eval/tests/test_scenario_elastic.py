@@ -301,3 +301,54 @@ class ElasticVerdictTests(unittest.TestCase):
             [c.id for c in result.checks], ["drained", "PC", "PQ", "PK", "P6", "P2"]
         )
         self.assertTrue(all(c.status == "FAIL" for c in result.checks))
+
+
+class ElasticFlowTests(unittest.TestCase):
+    def test_flow_stays_bounded_and_stop_accounts_for_all_issued(self):
+        import itertools
+        import threading
+
+        ids = itertools.count(1)
+        flow = e.BoundedFlow(
+            NS(next_request_id=lambda: next(ids)), 1, [[1], [2]], interval_s=0.005
+        )
+        release = threading.Event()
+        saturated = threading.Event()
+        active = 0
+        maximum = 0
+        lock = threading.Lock()
+
+        def run(record, shape):
+            nonlocal active, maximum
+            with lock:
+                active += 1
+                maximum = max(maximum, active)
+                if active == 2:
+                    saturated.set()
+            release.wait(2)
+            flow.update(
+                record,
+                business_finished=True,
+                schedule=dict(status="OK"),
+                stream=dict(status="OK"),
+                consumer_exit_s=time.monotonic(),
+                transport_terminal_s=time.monotonic(),
+            )
+            with lock:
+                active -= 1
+
+        flow.run = run
+        flow.start()
+        try:
+            self.assertTrue(saturated.wait(2))
+            self.assertEqual(len(flow.snapshot_records()), 2)
+            flow._stop.set()
+            release.set()
+            summary = flow.stop(Deadline(2))
+            self.assertEqual(maximum, 2)
+            self.assertTrue(summary["result_complete"])
+            self.assertTrue(summary["zero_errors"])
+            self.assertFalse(flow.thread.is_alive())
+        finally:
+            release.set()
+            flow.stop(Deadline(2), cancel=True)

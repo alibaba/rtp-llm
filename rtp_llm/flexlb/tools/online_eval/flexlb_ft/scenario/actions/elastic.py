@@ -115,6 +115,9 @@ def completeness(records):
     missing = [r["wire_request_id"] for r in records if r["consumer_exit_s"] is None]
     return dict(
         issued=len(records),
+        sample_count=len(records),
+        min_samples=1,
+        complete=bool(records) and not missing,
         completed=sum(request_success(r) for r in records),
         incomplete_request_ids=missing,
         failed_request_ids=failures,
@@ -547,7 +550,12 @@ def _scale(ctx, params, deadline):
         deadline,
         dict(engine=victim, mode="graceful", drain_timeout_ms=60000),
     )
+    if not isinstance(response, dict) or type(response.get("drained")) is not bool:
+        raise ValueError("remove_engine response lacks boolean drained evidence")
     evidence = dict(
+        complete=True,
+        sample_count=1,
+        min_samples=1,
         response=response,
         started_s=started,
         ended_s=ctx.clock(),
@@ -754,6 +762,8 @@ def metric_window(data, start, end, survivor=None):
         start_s=start,
         end_s=end,
         sample_count=len(samples),
+        min_samples=max(2, int((end - start) / 2)),
+        complete=True,
         hit_rate=hits / requested,
         hits=hits,
         requested=requested,
@@ -865,6 +875,40 @@ def _window(ctx, params, deadline):
         start + (20 if phase == "steady" else duration),
         survivor,
     )
+    if phase == "steady":
+        base = ctx.resource(params["baseline"], "snapshot")["hit_rate"]
+        removed_s = ctx.resource(params["scale"], "snapshot")["started_s"]
+        raw = metrics.snapshot()
+        rolling = []
+        anchor = removed_s
+        while anchor + 10 <= start + 20:
+            try:
+                rate = metric_window(raw, anchor, anchor + 10)["hit_rate"]
+                rolling.append(dict(start_s=anchor, hit_rate=rate))
+            except ValueError as exc:
+                rolling.append(
+                    dict(start_s=anchor, hit_rate=None, unavailable=str(exc))
+                )
+            anchor += 2
+        available = [r for r in rolling if r["hit_rate"] is not None]
+        trough = min((r["hit_rate"] for r in available), default=None)
+        recovered = next(
+            (
+                r["start_s"] - removed_s
+                for r in available
+                if r["hit_rate"] >= base - 0.15
+            ),
+            None,
+        )
+        evidence["observations"] = dict(
+            rolling_10s=rolling,
+            recovery_duration_s=recovered,
+            baseline_hit=base,
+            trough=trough,
+            gates=False,
+            rebound_floor=None if trough is None else trough + 0.5 * (base - trough),
+            steady_base_floor=base - 0.15,
+        )
     handle = ctx.register_resource("snapshot", evidence, historical=True)
     return StageOutput(output={"window": handle})
 
@@ -920,6 +964,8 @@ def _verdict(ctx, params, deadline):
         0.9 * base["hit_rate"] + 0.1 if params["victim"] == "hot" else 0.1
     )
     rate = recovery["completed"] / 20
+    recovery["min_samples"] = 20
+    recovery["complete"] = recovery["result_complete"] and recovery["issued"] == 20
     checks = [
         CheckResult(
             "drained",
@@ -938,17 +984,20 @@ def _verdict(ctx, params, deadline):
             "PASS" if steady["waiting_peak"] <= 2 else "FAIL",
             actual=steady["waiting_peak"],
             expected=2,
+            evidence=steady,
         ),
         CheckResult(
             "PK",
             "PASS" if steady["occupancy_peak"] <= 0.95 else "FAIL",
             actual=steady["occupancy_peak"],
             expected=0.95,
+            evidence=steady,
         ),
         CheckResult(
             "P6",
             "PASS" if flow["zero_errors"] and flow["result_complete"] else "FAIL",
             actual=flow,
+            evidence=flow,
         ),
         CheckResult(
             "P2",
