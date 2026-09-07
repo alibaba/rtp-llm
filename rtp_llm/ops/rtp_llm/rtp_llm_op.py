@@ -61,3 +61,6 @@ class RtpLLMOp:
 
     def onflight_request_num(self) -> int:
         return int(self.ft_op.onflight_request_num())  # type: ignore
+
+    def set_serving(self, serving: bool):
+        self.ft_op.set_serving(serving)  # type: ignore

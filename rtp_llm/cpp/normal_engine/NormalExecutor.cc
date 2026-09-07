@@ -126,7 +126,7 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
     role_type_(params.pd_sep_config.role_type),
     warm_up_(warm_up),
     use_all_gather_(params.moe_config.use_all_gather && !params.moe_config.use_deepep_low_latency),
-    metrics_reporter_(params.metrics_reporter),
+    metrics_reporter_(warm_up ? nullptr : params.metrics_reporter),
     tps_reporter_(MetricsLoopReporter<RtpLLMTokenPSMetrics, RtpLLMTokenPSMetricsCollector>(
         params.parallelism_config.tp_rank == 0 && !warm_up ? metrics_reporter_ : nullptr)),
     wall_tps_reporter_(WallClockMetricsLoopReporter<RtpLLMWallClockTokenPSMetrics, RtpLLMTokenPSMetricsCollector>(
@@ -248,14 +248,16 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
     if (schedule_time_us <= 0) {
         schedule_time_us = process_start_time_us;
     }
+    // A warmup step can publish its final output before its metrics are collected.
+    const bool                     report_metrics = isKmonMetricReportingEnabled();
     RtpLLMExecutorMetricsCollector executor_collector;
     RtpLLMTokenPSMetricsCollector  tps_collector;
     const bool                     has_real_stream =
         std::any_of(streams.begin(), streams.end(), [](const auto& stream) { return !stream->isFakeStream(); });
-    auto tps_active_guard =
-        tps_reporter_.makeActiveGuard(metrics_reporter_ && tp_rank_ == 0 && !warm_up_ && has_real_stream);
-    auto wall_tps_active_guard =
-        wall_tps_reporter_.makeActiveGuard(metrics_reporter_ && tp_rank_ == 0 && !warm_up_ && has_real_stream);
+    auto tps_active_guard      = tps_reporter_.makeActiveGuard(report_metrics && metrics_reporter_ && tp_rank_ == 0
+                                                          && !warm_up_ && has_real_stream);
+    auto wall_tps_active_guard = wall_tps_reporter_.makeActiveGuard(report_metrics && metrics_reporter_ && tp_rank_ == 0
+                                                                    && !warm_up_ && has_real_stream);
     GptModelInputs  model_input;
     GptModelOutputs model_output;
     SamplerOutput   sampler_output;
@@ -415,7 +417,10 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         stream_groups.addFrontendContextExecuteMetrics(tps_execute_time_us);
         stream_groups.addFrontendGenerateExecuteMetrics(tps_execute_time_us,
                                                         static_cast<int64_t>(stream_groups.totalDecodeBatchSize()));
-        reportMetrics(stream_groups, executor_collector, tps_collector, tps_execute_time_us, token_counts_by_priority);
+        if (report_metrics) {
+            reportMetrics(
+                stream_groups, executor_collector, tps_collector, tps_execute_time_us, token_counts_by_priority);
+        }
 
         // REBASE CONFLICT CONTEXT(704f3c147): source branch closed the profiler
         // before async dispatch to avoid thread-affine Kineto callbacks. New
@@ -446,7 +451,10 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         publishNormalDeviceState(stream_groups, merge_outputs.sampler_output);
         auto result                           = batch_stream_processor_->dispatch(stream_groups, merge_outputs);
         executor_collector.dispatch_output_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
-        reportMetrics(stream_groups, executor_collector, tps_collector, tps_execute_time_us, token_counts_by_priority);
+        if (report_metrics) {
+            reportMetrics(
+                stream_groups, executor_collector, tps_collector, tps_execute_time_us, token_counts_by_priority);
+        }
 
         if (profile_step_finish_) {
             profile_step_finish_();

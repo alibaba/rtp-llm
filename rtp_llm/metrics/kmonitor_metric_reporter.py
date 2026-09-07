@@ -1,10 +1,15 @@
 import logging
+import os
+import threading
 from enum import Enum
-from typing import Any, Dict, Union
+from typing import Any, Dict, Optional, Union
 
 # Auto-TPM QoS priority header conveyed by the DashScope gateway; the same
 # value the engine forwards to FlexLB as ``Schedule.priority``.
 QOS_PRIORITY_HEADER = "x-dashscope-inner-qos-level"
+SERVICE_STATUS_TAG = "is_serving"
+SERVICE_STATUS_METRIC = "rtp_llm_service_status"
+STARTUP_WARMUP_HEALTH_GATE_FILE_ENV = "RTP_LLM_STARTUP_WARMUP_HEALTH_GATE_FILE"
 
 
 def qos_priority_tag(qos_level: Any) -> str:
@@ -66,6 +71,7 @@ class AccMetrics(Enum):
 
 
 class GaugeMetrics(Enum):
+    SERVICE_STATUS_METRIC = SERVICE_STATUS_METRIC
     RESPONSE_FIRST_TOKEN_RT_METRIC = "py_rtp_response_first_token_rt"
     RESPONSE_ITER_RT_METRIC = "py_rtp_response_iterate_rt"
     RESPONSE_ITERATE_COUNT = "py_rtp_response_iterate_count"
@@ -132,36 +138,97 @@ class GaugeMetrics(Enum):
     )
 
 
+class ServiceState(Enum):
+    STARTING = "starting"
+    WAITING_FOR_WARMUP = "waiting_for_warmup"
+    SERVING = "serving"
+    DRAINING = "draining"
+    STOPPED = "stopped"
+
+
 class MetricReporter(object):
     def __init__(self, kmonitor: Any):
         self._kmon = kmonitor
         self._matic_map: Dict[str, Any] = {}
         self._inited = False
+        self._state_lock = threading.RLock()
+        self._state = ServiceState.STARTING
+        self._gate_file = ""
+        self._kmon.report_worker.before_report = self._report_service_status
 
     def report(
         self,
         metric: Union[AccMetrics, GaugeMetrics],
         value: float = 1,
-        tags: Dict[str, Any] = {},
+        tags: Optional[Dict[str, Any]] = None,
     ):
-        kmon_metric = self._matic_map.get(metric.value, None)
-        if kmon_metric is None:
-            logging.warning(f"no metric named {metric.name}")
-            return
-        kmon_metric.report(value, tags)
+        with self._state_lock:
+            if self._state not in (ServiceState.SERVING, ServiceState.DRAINING):
+                return
+            kmon_metric = self._matic_map.get(metric.value)
+            if kmon_metric is None:
+                logging.warning(f"no metric named {metric.name}")
+                return
+            kmon_metric.report(value, dict(tags or {}))
 
     def flush(self) -> None:
         self._kmon.flush()
 
     def init(self):
-        if not self._inited:
-            self._inited = True
+        with self._state_lock:
+            if self._inited:
+                return
             for metric in AccMetrics:
                 self._matic_map[metric.value] = self._kmon.register_acc_metric(
                     metric.value
                 )
-
             for metric in GaugeMetrics:
                 self._matic_map[metric.value] = self._kmon.register_gauge_metric(
                     metric.value
                 )
+            self._inited = True
+
+    def start_serving_when_ready(self) -> None:
+        with self._state_lock:
+            if not self._inited or self._state != ServiceState.STARTING:
+                return
+            self._gate_file = os.environ.get(
+                STARTUP_WARMUP_HEALTH_GATE_FILE_ENV, ""
+            ).strip()
+            self._state = ServiceState.WAITING_FOR_WARMUP
+        self.flush()
+
+    def set_serving(self, serving: bool) -> None:
+        if serving:
+            self.start_serving_when_ready()
+            return
+        with self._state_lock:
+            # Shutdown is terminal, including when it precedes init/readiness.
+            if self._state in (ServiceState.DRAINING, ServiceState.STOPPED):
+                return
+            self._state = (
+                ServiceState.DRAINING
+                if self._state == ServiceState.SERVING
+                else ServiceState.STOPPED
+            )
+        self.flush()
+
+    def _report_service_status(self) -> Optional[Dict[str, str]]:
+        # Reuse the worker's reporting cycle for both readiness and heartbeat.
+        # Checking the gate and committing readiness share the shutdown lock.
+        with self._state_lock:
+            if self._state == ServiceState.WAITING_FOR_WARMUP and (
+                not self._gate_file or os.path.exists(self._gate_file)
+            ):
+                # Reset accumulator clocks before accepting the first real sample.
+                self._kmon.report_worker.get_report_events()
+                self._state = ServiceState.SERVING
+            if self._state not in (ServiceState.SERVING, ServiceState.DRAINING):
+                return None
+            self.report(GaugeMetrics.SERVICE_STATUS_METRIC, float(self.is_serving))
+            return {SERVICE_STATUS_TAG: str(self.is_serving).lower()}
+
+    @property
+    def is_serving(self) -> bool:
+        with self._state_lock:
+            return self._state == ServiceState.SERVING

@@ -93,3 +93,7 @@ class LanguageCppEngine(BaseEngine):
     @override
     def onflight_request_num(self) -> int:
         return self.rtp_llm_op_.onflight_request_num()
+
+    @override
+    def set_serving(self, serving: bool) -> None:
+        self.rtp_llm_op_.set_serving(serving)

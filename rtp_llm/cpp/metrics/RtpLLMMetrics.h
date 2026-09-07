@@ -2,7 +2,9 @@
 
 #include "autil/Log.h"
 #include "kmonitor/client/MetricsReporter.h"
+#include "rtp_llm/cpp/metrics/ServiceStatus.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -670,7 +672,10 @@ public:
 
     void report(const CollectType* collector) {
         std::lock_guard<std::mutex> lock(mutex_);
-        collector_.merge(collector);
+        // Drop warmup samples at collection time, before the startup gate can open.
+        if (isKmonMetricReportingEnabled()) {
+            collector_.merge(collector);
+        }
     }
 
 private:
@@ -718,7 +723,7 @@ private:
 
 private:
     std::mutex                   mutex_;
-    bool                         stop_ = false;
+    std::atomic<bool>            stop_{false};
     CollectType                  collector_;
     int                          active_count_ = 0;
     int                          interval_ms_  = 1000;
@@ -790,7 +795,10 @@ public:
 
     void report(const CollectType* collector) {
         std::lock_guard<std::mutex> lock(mutex_);
-        collector_.merge(collector);
+        // Drop warmup samples at collection time, before the startup gate can open.
+        if (isKmonMetricReportingEnabled()) {
+            collector_.merge(collector);
+        }
     }
 
 private:
@@ -807,7 +815,10 @@ private:
     }
 
     bool takeReportCollector(const std::chrono::steady_clock::time_point& now, CollectType& report_collector) {
-        auto window_us   = std::chrono::duration_cast<std::chrono::microseconds>(now - last_report_time_).count();
+        // The first serving window must not include time spent in warmup.
+        last_report_time_ = std::max(last_report_time_, kmonMetricReportingStartTime());
+        auto window_us    = std::max<int64_t>(
+            0, std::chrono::duration_cast<std::chrono::microseconds>(now - last_report_time_).count());
         report_collector = collector_;
         report_collector.setReportWindowUs(window_us);
         collector_        = CollectType();
@@ -822,7 +833,10 @@ private:
             {
                 std::lock_guard<std::mutex> lock(mutex_);
                 auto                        now = std::chrono::steady_clock::now();
-                if (collector_.hasMetrics()) {
+                if (!isKmonMetricReportingEnabled()) {
+                    collector_        = CollectType();
+                    last_report_time_ = now;
+                } else if (collector_.hasMetrics()) {
                     should_report = takeReportCollector(now, report_collector);
                 } else if (active_count_ == 0) {
                     // Idle service reports 0 wall TPS with priority="0". In-flight long steps stay

@@ -13,6 +13,7 @@ class _FakeEngine:
         self.coordinated = None
         self.target_step = None
         self.stopped = False
+        self.serving_states = []
         self.armed_target = None
         self.armed_stop_cancelled = False
 
@@ -37,6 +38,9 @@ class _FakeEngine:
 
     def onflight_request_num(self):
         return 0
+
+    def set_serving(self, serving):
+        self.serving_states.append(serving)
 
 
 class _FakeDistributedServer:
@@ -87,6 +91,7 @@ class BackendManagerStopTest(unittest.TestCase):
         manager = BackendManager.__new__(BackendManager)
         manager.engine = engine
         manager._stopped = threading.Event()
+        manager._shutdown_requested = threading.Event()
         manager._distributed_server = _FakeDistributedServer()
         manager.py_env_configs = _FakePyEnvConfigs()
         return manager
@@ -107,6 +112,21 @@ class BackendManagerStopTest(unittest.TestCase):
         self.assertEqual(
             manager._distributed_server.waited, ["drained", "engine_stopped"]
         )
+        self.assertEqual(engine.serving_states[0], False)
+
+    def test_request_shutdown_marks_metrics_and_native_engine_not_serving(self):
+        engine = _FakeEngine()
+        manager = self._manager(engine)
+
+        with patch(
+            "rtp_llm.server.backend_manager.kmonitor.set_serving"
+        ) as set_python_serving:
+            manager.request_shutdown()
+
+        set_python_serving.assert_called_once_with(False)
+        self.assertEqual(engine.serving_states, [False])
+        self.assertTrue(manager._shutdown_requested.is_set())
+        self.assertTrue(manager._distributed_server.shutdown_requested)
 
     def test_stop_without_global_controller_still_stops_engine(self):
         engine = _FakeEngine()

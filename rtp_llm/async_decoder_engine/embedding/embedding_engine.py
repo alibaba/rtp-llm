@@ -34,3 +34,7 @@ class EmbeddingCppEngine(BaseEngine):
         self.cpp_engine.init(
             self.model, self.engine_config, self.model.vit_config, self.mm_engine
         )
+
+    @override
+    def set_serving(self, serving: bool) -> None:
+        self.cpp_engine.set_serving(serving)

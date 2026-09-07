@@ -23,6 +23,18 @@ cc_library(
 )
 
 cc_test(
+    name = "service_status_test",
+    srcs = [
+        "ServiceStatusTest.cc",
+    ],
+    deps = [
+        ":metrics",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
     name = "rtp_llm_token_ps_metrics_collector_test",
     srcs = [
         "RtpLLMTokenPSMetricsCollectorTest.cc",

@@ -4,6 +4,7 @@
 #include "rtp_llm/cpp/embedding_engine/EmbeddingStream.h"
 #include "rtp_llm/cpp/embedding_engine/EmbeddingScheduler.h"
 #include "rtp_llm/cpp/embedding_engine/EmbeddingExecutor.h"
+#include "rtp_llm/cpp/metrics/ServiceStatus.h"
 
 using namespace py::literals;
 
@@ -42,11 +43,14 @@ EmbeddingEndpoint::handle(const std::string&                              body,
     auto mm_features    = getMultimodalFeature(batch_input.attr("multimodal_inputs"), token_ids);
 
     py::gil_scoped_release gil_release;
-    metrics_reporter->report((autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us) / 1000.0,
-                             "ft_pre_pipeline_rt",
-                             kmonitor::MetricType::GAUGE,
-                             nullptr,
-                             true);
+    if (metrics_reporter && isKmonMetricReportingEnabled()) {
+        auto service_tags = kmonTagsWithServiceStatus(nullptr);
+        metrics_reporter->report((autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us) / 1000.0,
+                                 "ft_pre_pipeline_rt",
+                                 kmonitor::MetricType::GAUGE,
+                                 &service_tags,
+                                 true);
+    }
     auto results  = embedding_engine_->decode(token_ids, token_type_ids, input_lengths, 0, mm_features);
     start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
 
@@ -67,11 +71,14 @@ EmbeddingEndpoint::handle(const std::string&                              body,
     coro                  = embedding_handler.attr("render_log_response")();
     auto logable_response = getAsyncResult(loop, coro);
 
-    metrics_reporter->report((autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us) / 1000.0,
-                             "ft_post_pipeline_rt",
-                             kmonitor::MetricType::GAUGE,
-                             nullptr,
-                             true);
+    if (metrics_reporter && isKmonMetricReportingEnabled()) {
+        auto service_tags = kmonTagsWithServiceStatus(nullptr);
+        metrics_reporter->report((autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us) / 1000.0,
+                                 "ft_post_pipeline_rt",
+                                 kmonitor::MetricType::GAUGE,
+                                 &service_tags,
+                                 true);
+    }
     if (logable_response == "null") {
         return std::make_pair(response, std::nullopt);
     } else {

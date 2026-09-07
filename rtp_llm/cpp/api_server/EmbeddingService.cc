@@ -55,8 +55,9 @@ void EmbeddingService::report(const double                 value,
                               const kmonitor::MetricType   type) {
     kmonitor::MetricsTags metric_tags = kmonitor::MetricsTags(tags);
     metric_tags.AddTag("priority", "0");
-    if (metrics_reporter_) {
-        metrics_reporter_->report(value, name, type, &metric_tags, true);
+    if (metrics_reporter_ && isKmonMetricReportingEnabled()) {
+        auto service_tags = kmonTagsWithServiceStatus(&metric_tags);
+        metrics_reporter_->report(value, name, type, &service_tags, true);
     }
 }
 

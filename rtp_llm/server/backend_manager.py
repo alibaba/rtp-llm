@@ -132,6 +132,7 @@ class BackendManager(object):
             "engine created successfully: self.engine.task_type=%s",
             self.engine.task_type,
         )
+        kmonitor.start_serving_when_ready()
 
     def serve_forever(self):
         """Enter service loop to keep the process alive until shutdown is requested"""
@@ -152,6 +153,7 @@ class BackendManager(object):
                 logging.exception("failed to poll job-wide backend shutdown request")
             if peer_shutdown_requested:
                 logging.info("job-wide backend shutdown requested by a peer rank")
+                self._mark_not_serving()
                 self._shutdown_requested.set()
                 break
             time.sleep(0.1)  # Check shutdown flag more frequently
@@ -162,6 +164,7 @@ class BackendManager(object):
     def request_shutdown(self):
         """Request graceful shutdown of the backend manager"""
         logging.info("BackendManager shutdown requested")
+        self._mark_not_serving()
         self._shutdown_requested.set()
         try:
             self._distributed_server.request_backend_shutdown()
@@ -171,6 +174,7 @@ class BackendManager(object):
 
     def stop(self) -> None:
         """Stop the backend manager and cleanup resources"""
+        self._mark_not_serving()
         # REBASE CONFLICT CONTEXT(cdc1b18b6): source branch made stop idempotent
         # and stops the engine before unmounting NFS; keep that with the new base
         # BackendManager structure.
@@ -269,6 +273,11 @@ class BackendManager(object):
                 raise engine_stop_error
             if drain_error is not None:
                 raise drain_error
+
+    def _mark_not_serving(self) -> None:
+        if self.engine is not None:
+            self.engine.set_serving(False)
+        kmonitor.set_serving(False)
 
     def _drain_backend_rpc(self, engine: BaseEngine) -> None:
         """Keep this rank alive until its native RPC work has drained."""

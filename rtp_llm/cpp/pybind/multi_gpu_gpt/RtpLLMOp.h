@@ -30,6 +30,7 @@ public:
     void    armStop(int64_t target_step);
     void    cancelArmedStop();
     void    prepareStop(bool coordinated = true, int64_t target_step = -1);
+    void    setServing(bool serving);
     void    stop();
     void
     startHttpServer(py::object model_weights_loader, py::object world_info, py::object tokenizer, py::object render);

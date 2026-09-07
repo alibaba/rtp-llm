@@ -1,4 +1,14 @@
 py_test(
+    name = "kmonitor_metric_reporter_test",
+    srcs = [
+        "kmonitor_metric_reporter_test.py",
+    ],
+    deps = [
+        "//rtp_llm/metrics",
+    ],
+)
+
+py_test(
     name = "generate_config_test",
     srcs = [
         "generate_config_test.py",

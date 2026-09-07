@@ -32,6 +32,7 @@ from rtp_llm.distribute.distributed_server import (
 from rtp_llm.embedding.embedding_type import TYPE_STR, EmbeddingType
 from rtp_llm.frontend.frontend_server import FrontendServer
 from rtp_llm.frontend.shutdown_manager import FrontendShutdownManager
+from rtp_llm.metrics import kmonitor
 from rtp_llm.openai.api_datatype import ChatCompletionRequest
 from rtp_llm.server.misc import format_exception
 from rtp_llm.utils.concurrency_controller import ConcurrencyException
@@ -370,6 +371,7 @@ class FrontendApp(object):
                     self.frontend_server._global_controller.max_concurrency * 2
                 )
             )
+            kmonitor.start_serving_when_ready()
 
         def draining_response():
             reason = (

@@ -4,7 +4,7 @@ import os
 import time
 import traceback
 from threading import Lock, Thread
-from typing import Dict, List
+from typing import Callable, Dict, List, Optional
 
 from rtp_llm.aios.kmonitor.python_client.flume.pyflume import FlumeClient
 from rtp_llm.aios.kmonitor.python_client.flume.ttypes import ThriftFlumeEvent
@@ -34,6 +34,8 @@ class ReportWorker(object):
         )
         self.metrics: Dict[str, MetricBase] = {}
         self.metric_lock: Lock = Lock()
+        self.report_lock: Lock = Lock()
+        self.before_report: Optional[Callable[[], Optional[Dict[str, str]]]] = None
         self.started = False
         if HippoHelper.is_hippo_env():
             self.flume = FlumeClient(
@@ -72,37 +74,45 @@ class ReportWorker(object):
             self.metrics[metric.name] = metric
 
     def render_event(
-        self, metric_name: str, timestamp: int, data_point: MetricDataPoint
+        self,
+        metric_name: str,
+        timestamp: int,
+        data_point: MetricDataPoint,
+        dynamic_tags: Optional[Dict[str, str]] = None,
     ) -> ThriftFlumeEvent:
         value_str = str(data_point.value)
+        report_tags = {**data_point.tags, **(dynamic_tags or {})}
         tag_str: str = " ".join(
-            ["=".join([k, v]) for (k, v) in list(data_point.tags.items())]
+            ["=".join([k, v]) for (k, v) in list(report_tags.items())]
         )
         report_message: bytes = " ".join(
             [metric_name, str(timestamp), value_str, tag_str]
         ).encode("utf-8")
         return ThriftFlumeEvent(_ReportWorker__REPORT_HEADERS, report_message)
 
-    def get_report_events(self) -> List[ThriftFlumeEvent]:
+    def get_report_events(
+        self, dynamic_tags: Optional[Dict[str, str]] = None
+    ) -> List[ThriftFlumeEvent]:
         events: List[ThriftFlumeEvent] = []
         timestamp: int = int(round(time.time()))
         with self.metric_lock:
             for metric_name, metric in self.metrics.items():
                 reported_data = metric.fetch_reported_data()
                 for data_point in reported_data:
-                    event = self.render_event(metric_name, timestamp, data_point)
+                    event = self.render_event(
+                        metric_name, timestamp, data_point, dynamic_tags
+                    )
                     events.append(event)
         return events
 
     def do_report(self) -> None:
-        events = self.get_report_events()
-        # logging.debug(f'kmonitor collected {len(events)} events.')
-        if self.flume:
-            self.flume.send_batch(events)
-        else:
-            for event in events:
-                pass
-                # logging.debug(event.body)
+        # Explicit flushes and the background cycle share one Flume transport.
+        with self.report_lock:
+            dynamic_tags = self.before_report() if self.before_report else {}
+            # Collect even while suppressed to reset accumulator time windows.
+            events = self.get_report_events(dynamic_tags)
+            if dynamic_tags is not None and self.flume and events:
+                self.flume.send_batch(events)
 
     def report_cycle(self) -> None:
         try:

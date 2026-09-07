@@ -1266,7 +1266,7 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                          CacheStatusSnapshotRefreshCallback             cache_status_snapshot_refresh_callback):
     Executor(),
     cache_manager_(cache_manager),
-    metrics_reporter_(params.metrics_reporter),
+    metrics_reporter_(warm_up ? nullptr : params.metrics_reporter),
     tps_reporter_(MetricsLoopReporter<RtpLLMTokenPSMetrics, RtpLLMTokenPSMetricsCollector>(
         params.parallelism_config.tp_rank == 0 && !warm_up ? metrics_reporter_ : nullptr)),
     wall_tps_reporter_(WallClockMetricsLoopReporter<RtpLLMWallClockTokenPSMetrics, RtpLLMTokenPSMetricsCollector>(
@@ -3162,13 +3162,14 @@ absl::Status MtpExecutor::process(const std::list<GenerateStreamPtr>& streams, i
     if (schedule_time_us <= 0) {
         schedule_time_us = process_start_time_us;
     }
+    const bool          report_metrics = isKmonMetricReportingEnabled();
     MtpMetricsCollector metrics_collector;
     const bool          has_real_stream =
         std::any_of(streams.begin(), streams.end(), [](const auto& stream) { return !stream->isFakeStream(); });
-    auto tps_active_guard =
-        tps_reporter_.makeActiveGuard(metrics_reporter_ && isTpRank0() && !warm_up_ && has_real_stream);
-    auto wall_tps_active_guard =
-        wall_tps_reporter_.makeActiveGuard(metrics_reporter_ && isTpRank0() && !warm_up_ && has_real_stream);
+    auto tps_active_guard      = tps_reporter_.makeActiveGuard(report_metrics && metrics_reporter_ && isTpRank0()
+                                                          && !warm_up_ && has_real_stream);
+    auto wall_tps_active_guard = wall_tps_reporter_.makeActiveGuard(report_metrics && metrics_reporter_ && isTpRank0()
+                                                                    && !warm_up_ && has_real_stream);
 
     std::list<GenerateStreamPtr> prefill_streams;
     std::list<GenerateStreamPtr> decode_streams;
@@ -3191,7 +3192,7 @@ absl::Status MtpExecutor::process(const std::list<GenerateStreamPtr>& streams, i
         autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
 
     // report metrics
-    if (isTpRank0() && metrics_reporter_ && metrics_collector.not_skip) {
+    if (report_metrics && isTpRank0() && metrics_reporter_ && metrics_collector.not_skip) {
         // decode metrics
         auto& tps_collector       = metrics_collector.tps_collector;
         auto& sp_engine_collector = metrics_collector.sp_engine_collector;

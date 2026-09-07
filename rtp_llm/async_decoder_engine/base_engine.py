@@ -47,6 +47,9 @@ class BaseEngine:
         """Return this rank's native RPC request count when supported."""
         return 0
 
+    def set_serving(self, serving: bool) -> None:
+        """Propagate process serving state to native metric reporters."""
+
     @property
     def task_type(self):
         # Task type is stored on ModelConfig; use config to avoid depending on

@@ -218,6 +218,7 @@ EngineInitParams RtpLLMOp::initModel(py::object model, py::object engine_config,
             auto kmon_tags = kmonitor::MetricsTags();
             kmon_tags.AddTag("dp_rank", std::to_string(parallelism_config.dp_rank));
             params.metrics_reporter.reset(new kmonitor::MetricsReporter("", "", kmon_tags));
+            startKmonServiceStatus(params.metrics_reporter);
         }
         return params;
     } catch (const std::exception& e) {
@@ -324,6 +325,7 @@ void RtpLLMOp::initRPCServer(const EngineInitParams                        maga_
                                                  token_processor));
             if (model_rpc_port < 0) {
                 is_server_ready_ = true;
+                setKmonServiceServing(true);
                 return;
             }
         }
@@ -365,6 +367,7 @@ void RtpLLMOp::initRPCServer(const EngineInitParams                        maga_
                                              token_processor));
     }
     is_server_ready_ = true;
+    setKmonServiceServing(true);
     grpc_server_->Wait();
     RTP_LLM_LOG_INFO("Server exit on %s", server_address.c_str());
 }
@@ -455,6 +458,7 @@ void RtpLLMOp::prepareStop(bool coordinated, int64_t target_step) {
 }
 
 void RtpLLMOp::stop() {
+    setKmonServiceServing(false);
     bool expected = false;
     if (is_server_shutdown_.compare_exchange_strong(expected, true)) {
         if (model_rpc_service_) {
@@ -494,6 +498,10 @@ void RtpLLMOp::stop() {
         }
         stopKmonitorFactory();
     }
+}
+
+void RtpLLMOp::setServing(bool serving) {
+    setKmonServiceServing(serving);
 }
 
 RtpLLMOp::~RtpLLMOp() {
@@ -544,6 +552,7 @@ void registerRtpLLMOp(const py::module& m) {
         .def("arm_stop", &RtpLLMOp::armStop)
         .def("cancel_armed_stop", &RtpLLMOp::cancelArmedStop)
         .def("prepare_stop", &RtpLLMOp::prepareStop, py::arg("coordinated") = true, py::arg("target_step") = -1)
+        .def("set_serving", &RtpLLMOp::setServing)
         .def("stop", &RtpLLMOp::stop);
 }
 

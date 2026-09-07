@@ -95,6 +95,7 @@ class DashScShutdownManager:
         self._active_requests = 0
 
     def start_unavailable(self, reason: str) -> None:
+        kmonitor.set_serving(False)
         with self._lock:
             if self._unavailable:
                 return
@@ -109,6 +110,7 @@ class DashScShutdownManager:
         )
 
     def start_draining(self, reason: str) -> None:
+        kmonitor.set_serving(False)
         with self._lock:
             if self._draining:
                 return
@@ -600,6 +602,7 @@ class DashScApp:
                 rank_id=self.server_config.rank_id,
             )
             logging.info("[DashScApp] gRPC server bound on port %s", port)
+            kmonitor.start_serving_when_ready()
         except BaseException as e:
             error_trace = traceback.format_exc()
             logging.error("[DashScApp] start failed: %s\n%s", e, error_trace)
