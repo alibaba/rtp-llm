@@ -33,7 +33,6 @@ py_test (
     data = [
         "//:th_transformer"
     ],
-    exec_properties = {'gpu':'H20'},
 )
 
 test_deps = [

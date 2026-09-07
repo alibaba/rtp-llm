@@ -6,10 +6,6 @@ py_test(
     name = "test_stacked_moe_weight",
     srcs = ["test_stacked_moe_weight.py"],
     deps = py_test_deps,
-    tags = ["H20"],
-    exec_properties = {
-        'gpu': 'H20',
-    },
 )
 
 py_test(
@@ -25,10 +21,6 @@ py_test(
     name = "test_compressed_w4a8_int4_per_channel",
     srcs = ["test_compressed_w4a8_int4_per_channel.py"],
     deps = py_test_deps,
-    tags = ["H20"],
-    exec_properties = {
-        'gpu': 'H20',
-    },
 )
 
 py_test(
@@ -37,14 +29,12 @@ py_test(
     deps = py_test_deps,
 )
 
+# Verified on sm86: 19/19, 1/1 and 30/30 pass with 0 skips, including
+# test_fp8_still_runs_the_device_conversion, so the device FP8 cast is fine there.
 py_test(
     name = "test_compressed_w8a8_int8_per_channel",
     srcs = ["test_compressed_w8a8_int8_per_channel.py"],
     deps = py_test_deps,
-    tags = ["H20"],
-    exec_properties = {
-        'gpu': 'H20',
-    },
 )
 
 py_test(

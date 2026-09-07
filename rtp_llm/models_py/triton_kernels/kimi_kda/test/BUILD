@@ -12,5 +12,4 @@ py_test(
         "//rtp_llm/models_py/triton_kernels:kimi_kda",
     ] + [":triton", ":torch", ":numpy", ":einops", ":packaging"],
     visibility = ["//visibility:public"],
-    exec_properties = {"gpu": "H20"},
 )

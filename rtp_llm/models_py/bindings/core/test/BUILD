@@ -38,7 +38,6 @@ cc_test(
     args = ["--gtest_filter=" + cache_store_test_filter],
     deps = exec_ops_test_deps,
     copts = test_copts,
-    exec_properties = {"gpu": "H20"},
 )
 
 # Run the packed-mask boundary cases against the production CUDA kernel in
@@ -49,7 +48,6 @@ cc_test(
     args = ["--gtest_filter=" + packed_mask_logits_test_filter],
     deps = exec_ops_test_deps,
     copts = test_copts,
-    exec_properties = {"gpu": "H20"},
 )
 
 # Exercise the CPU fallback without initializing or allocating a GPU.
@@ -63,7 +61,6 @@ cc_test(
         "@com_google_googletest//:gtest_main",
     ] + torch_deps(),
     copts = test_copts,
-    exec_properties = {"gpu": "H20"},
 )
 
 cc_test(
@@ -102,7 +99,6 @@ cc_test_wrapper(
     }),
     copts = test_copts,
     exec_properties = select({
-        "@//:using_cuda": {"gpu": "H20"},
         "@//:using_rocm": {"gpu": "MI308X-ROCM7"},
         "//conditions:default": {},
     }),

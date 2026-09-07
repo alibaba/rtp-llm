@@ -57,10 +57,12 @@ class TestXQAAttnOp(BaseAttentionTest):
         logging.info(f"XQAAttnOp support check: {is_supported}")
 
         if not is_supported:
-            logging.warning(
-                f"XQAAttnOp does not support this configuration, skipping correctness test"
+            self.skipTest(
+                "XQAAttnOp.support() returned False for this configuration: XQA is "
+                "compiled for sm_90a only and XQAAttnOp::support requires "
+                "get_sm() >= 90. Skipping instead of returning so the missing "
+                "coverage cannot masquerade as a pass."
             )
-            return
 
         # Prepare parameters
         params_base = attn_op.prepare(attn_inputs)

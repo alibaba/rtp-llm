@@ -44,7 +44,6 @@ cc_test(
         ],
     }),
     exec_properties = select({
-        "@//:using_cuda": {"gpu": "H20"},
         "@//:using_rocm": {"gpu": "MI308X-ROCM7"},
         "//conditions:default": {},
     }),
@@ -70,7 +69,6 @@ cc_test(
         ],
     }),
     exec_properties = select({
-        "@//:using_cuda": {"gpu": "H20"},
         "@//:using_rocm": {"gpu": "MI308X-ROCM7"},
         "//conditions:default": {},
     }),

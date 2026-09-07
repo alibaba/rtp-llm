@@ -7,7 +7,6 @@ py_test (
     name = "fused_moe_test",
     srcs = ["fused_moe_test.py"],
     deps = py_test_deps,
-    exec_properties = {'gpu':'H20'},
 )
 
 # TODO: Fix this test
@@ -29,7 +28,6 @@ py_test (
         "//rtp_llm:testlib",
         "//rtp_llm/test/model_test/test_util:test_util"
     ],
-    tags = ["open_skip", "H20"],
-    exec_properties = {'gpu':'H20'},
+    tags = ["open_skip"],
 )
 

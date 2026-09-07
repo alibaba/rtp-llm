@@ -47,8 +47,7 @@ py_test(
         "//rtp_llm/models_py/standalone:py_standalone_testlib",
     ],
     env = {"GPU_COUNT": "1"},
-    tags = ["H20"],
-    exec_properties = {'gpu': 'H20', 'gpu_count': '1'},
+    exec_properties = {'gpu_count': '1'},
 )
 
 py_test(

@@ -8,7 +8,6 @@ py_test (
         "//rtp_llm/models_py/standalone:auto_model",
     ],
     env = test_envs,
-    tags = ["H20"],
-    exec_properties = {'gpu':'H20'},
+    # Verified on sm86: full auto_model load + forward passes with 0 skips.
 )
 

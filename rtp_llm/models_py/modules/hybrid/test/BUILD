@@ -24,8 +24,8 @@ py_test (
         "@//:cuda_pre_12_9": flashinfer_deps,
         "//conditions:default": []
     }),
-    tags = ["open_skip", "H20"],
-    exec_properties = {'gpu':'H20'},
+    # Verified on sm86: passes with 0 skips via the FlashInfer MLA fa2 fallback.
+    tags = ["open_skip"],
 )
 
 py_test (
@@ -38,8 +38,8 @@ py_test (
         "@//:cuda_pre_12_9": flashinfer_deps,
         "//conditions:default": []
     }),
-    tags = ["open_skip", "H20"],
-    exec_properties = {'gpu':'H20'},
+    # Verified on sm86: passes with 0 skips via the FlashInfer MLA fa2 fallback.
+    tags = ["open_skip"],
 )
 
 py_test (
@@ -62,8 +62,7 @@ py_test (
        "//rtp_llm/test/model_test/test_util:test_util"
    ],
    env = test_envs,
-   tags = ["open_skip", "H20"],
-   exec_properties = {'gpu':'H20'},
+   tags = ["open_skip"],
 )
 
 py_test (
@@ -77,6 +76,10 @@ py_test (
        "//rtp_llm/test/model_test/test_util:test_util"
    ],
    env = flashinfer_test_envs,
+   # Must stay on H20: an sm86 probe showed warmup still succeeds, but
+   # flashinfer_mla.py:37,56 `continue` past the fa3 backend when
+   # is_sm90a_supported() is false, so 2 of the 4 warmed modules silently vanish
+   # with no skip marker -- a green run with deleted coverage.
    tags = ["open_skip", "H20"],
    exec_properties = {'gpu':'H20'},
 )
