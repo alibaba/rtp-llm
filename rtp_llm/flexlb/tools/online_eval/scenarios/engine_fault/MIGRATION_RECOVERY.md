@@ -68,7 +68,10 @@ changing the already-captured resurrection verdict. The uncertain crash residue
 bound is 1 + failed takeover observations, followed by the original 8-second
 non-growth sample. It is not a global zero assertion.
 
-Requests, log readers, controls and repeated probes are bounded. The two serial
+Request dispatch stage budgets cover every serial Schedule plus its legacy result
+window, with execution overhead allowance; they do not shorten the five serial
+KV samples or the two TTFT waves. Requests, log readers, controls and repeated
+probes are bounded. The two serial
 pumps allow at most 256 attempts (above the 0.2-second cadence's maximum in their
 30-second configurable window). Log reads cap deltas at 8 MiB; observations cap
 4,000 frames / 32 MiB. Shared old environments become fresh per-instance owned

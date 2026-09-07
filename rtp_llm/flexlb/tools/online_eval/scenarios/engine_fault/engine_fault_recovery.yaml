@@ -414,7 +414,7 @@ variants:
     params:
       requests:
         $ref: stages.baseline.output.requests
-    timeout_s: 120
+    timeout_s: 150
   - id: baseline_state
     action: recovery_observe
     params:
@@ -560,7 +560,7 @@ variants:
     params:
       requests:
         $ref: stages.recovery_batch.output.requests
-    timeout_s: 120
+    timeout_s: 150
   - id: recovery_batch_state
     action: recovery_observe
     params:
@@ -1240,7 +1240,7 @@ variants:
     params:
       requests:
         $ref: stages.intact_wave.output.requests
-    timeout_s: 120
+    timeout_s: 255
   - id: intact_wave_state
     action: recovery_observe
     params:
@@ -1346,7 +1346,7 @@ variants:
     params:
       requests:
         $ref: stages.wiped_wave.output.requests
-    timeout_s: 120
+    timeout_s: 255
   - id: wiped_wave_state
     action: recovery_observe
     params:
@@ -1567,7 +1567,7 @@ variants:
     params:
       requests:
         $ref: stages.first_wave.output.requests
-    timeout_s: 120
+    timeout_s: 150
   - id: first_wave_state
     action: recovery_observe
     params:
