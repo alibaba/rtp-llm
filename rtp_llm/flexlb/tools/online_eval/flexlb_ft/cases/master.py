@@ -104,8 +104,10 @@ def _master_http(ops) -> str:
 
 
 @case(
-    "master_kill",
-    profiles=["batch-window"],  # _elastic_env pins the legacy fault axes
+    "master_kill",  # all profiles (tier2 wave2): the kill -9 → restart →
+    # topology/inflight/recovery contract is scheduler-axis agnostic, and
+    # _elastic_env is profile-aware (PRIORITY ordering on the ctx axes) —
+    # the NON_BATCH pull-model reconvergence lanes were never exercised.
     source="master HA: kill -9 master → restart → clean state + recovery",
 )
 def master_kill(ctx: CaseContext):
@@ -173,7 +175,8 @@ def _quota_spec(ctx: CaseContext) -> EnvSpec:
     """Quota-block env (S3): 1P+1D, maxInflightBatches=1 via config
     override (dispatcher.maxInflightBatchesPerPrefillWorker — the v1 env
     var FLEXLB_BATCH_FIXED_MAX_INFLIGHT_BATCHES has no v2 consumer;
-    formerly harness.quota_spec)."""
+    formerly harness.quota_spec; decision/dispatcher axes are the ctx
+    profile's own since the tier2 spec unpick)."""
     return EnvSpec(
         label=f"fault_quota_{ctx.profile}",
         n_prefill=1,
@@ -183,8 +186,6 @@ def _quota_spec(ctx: CaseContext) -> EnvSpec:
         discovery="discovery_file",
         config_overrides=ConfigOverride(
             ordering="priority",
-            decision="fixed_window",
-            dispatcher="batch",
             queue_timeout_ms=OMIT,
             max_inflight_batches=1,
         ),
@@ -193,7 +194,10 @@ def _quota_spec(ctx: CaseContext) -> EnvSpec:
 
 @case(
     "master_quota_block",
-    profiles=["batch-window"],
+    requires=["enqueue_batch"],  # tier2 wave2 (audit): the quota knob is
+    # BATCH-dispatcher-only, so the capability declaration keeps the case
+    # to the two BATCH lanes (batch-window + single-batch) — the requires
+    # vocabulary now owns the real dependency (formerly a bw-only list).
     source="flexlb_behavior_test.sh S3 (1P+1D quota blocking + TTL recovery)",
 )
 def master_quota_block(ctx: CaseContext):
@@ -202,9 +206,14 @@ def master_quota_block(ctx: CaseContext):
 
     Profile semantics (v2): the quota knob itself
     (dispatcher.maxInflightBatchesPerPrefillWorker) exists only under the
-    BATCH dispatcher, and _quota_spec pins the legacy fault axes (PRIORITY +
-    FIXED_WINDOW + BATCH, maxInflightBatches=1) via config override — the
-    declaration stays batch-window.
+    BATCH dispatcher — requires=["enqueue_batch"] keeps the case to the
+    batch-window and single-batch lanes (capability self-documenting;
+    audit 2026-09), and _quota_spec layers PRIORITY ordering on the ctx
+    profile's own decision/dispatcher axes with maxInflightBatches=1 via
+    config override (profile-aware since the tier2 spec unpick).  The
+    blocked-phase ≥50% failure floor is expected to hold on the
+    single-batch lane too (single prefill down + quota consumed); the
+    failure-shape difference is to be observed on first runs.
     """
     env = ctx.env_manager.ensure(_quota_spec(ctx))
     ops = ctx.engine_ops(env)
@@ -331,7 +340,7 @@ def _coldstart_spec(ctx: CaseContext) -> EnvSpec:
 
 @case(
     "master_coldstart_burst",
-    profiles=["batch-window"],
+    profiles=["batch-window", "single-nonbatch", "single-batch", "window-nonbatch"],
     source="intake defect regression probe (cold-start first-connect storm)",
 )
 def coldstart_burst(ctx: CaseContext):
@@ -624,7 +633,7 @@ def _master_kill_dual(ctx: CaseContext):
 
 @case(
     "master_freeze",
-    profiles=["batch-window"],
+    profiles=["batch-window", "single-nonbatch", "single-batch", "window-nonbatch"],
     source="Mode 2 freeze (SIGSTOP→SIGCONT): content-not-lost assertions, "
     "short + long hang tiers (brief p3/p4)",
 )
@@ -985,7 +994,7 @@ def master_ha_failover(ctx: CaseContext):
 
 @case(
     "fallback_direct",
-    profiles=["batch-window"],
+    profiles=["batch-window", "single-nonbatch", "single-batch", "window-nonbatch"],
     source="scenario 3 positive (brief p7/p8): kill A + kill B (all masters "
     "down) -> ENABLE_FALLBACK -> direct-to-engine streams",
 )
@@ -1243,7 +1252,7 @@ def fallback_negative_errorcode(ctx: CaseContext):
 
 @case(
     "failback_wraparound",
-    profiles=["batch-window"],
+    profiles=["batch-window", "single-nonbatch", "single-batch", "window-nonbatch"],
     source="scenario 4 recovery (brief p9/p10): rebuild scenario-2 end "
     "state (sticky B, A dead), restart + converge A, kill B -> wrap "
     "back to A",

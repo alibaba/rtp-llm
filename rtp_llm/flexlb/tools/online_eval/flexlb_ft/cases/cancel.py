@@ -1570,6 +1570,10 @@ def _crash_and_restart(ops, engine_name: str) -> tuple:
     the restarted instance has never seen any pre-restart rid.  Returns
     (alive_dropped, alive_restored).
     """
+    # crash_after fires only on the EnqueueBatch entry in the mock engine —
+    # generateStreamCall has no crash hook; this helper is therefore
+    # BATCH-dispatcher only (sn/wn callers are structurally excluded via
+    # requires=enqueue_batch).
     inject_type(ops, engine_name, "crash_after", n=1)
     try:
         sacrificial = ops.next_request_id()
@@ -1623,7 +1627,12 @@ def _ha_env(ctx: CaseContext, label_suffix: str) -> tuple:
     return ctx.engine_ops(env), env
 
 
-@case("cancel_engine_restarted_tombstoned_settle", requires=["enqueue_batch"])
+@case(
+    "cancel_engine_restarted_tombstoned_settle",
+    requires=[
+        "enqueue_batch"
+    ],  # crash_after fires only at the EnqueueBatch entry (BATCH dispatcher only)
+)
 def cancel_engine_restarted_tombstoned_settle(ctx: CaseContext):
     """Engine restart + pre-restart cancel: TOMBSTONED settles immediately.
 
@@ -1680,7 +1689,10 @@ def cancel_engine_restarted_tombstoned_settle(ctx: CaseContext):
 
         baseline_cancel = _cancel_rpc_total(ops)
         settle_t0 = time.monotonic()
-        ops.cancel(rid, response)
+        # Response only under BATCH (its batch_id rides the master Cancel);
+        # a NON_BATCH response would add the worker_cancel direct connect
+        # — a second engine-side Cancel and a dead-port RpcError risk.
+        ops.cancel(rid, response if response.enqueued_by_master else None)
         settled_fast = handle.wait_end(CANCEL_SETTLE_BOUND_S)
         settle_latency = time.monotonic() - settle_t0
         # The master settles the slot locally within milliseconds, but the
@@ -1706,8 +1718,13 @@ def cancel_engine_restarted_tombstoned_settle(ctx: CaseContext):
         except Exception as exc:
             fence_detail = repr(exc)
 
+        # Window calibration: the R1 orphan is a 5000-token decode —
+        # measured ~50-55s end-to-end (slower than the ~38s pricing note
+        # above), and this point is reached ~10-15s into it, so the clean
+        # poll needs the same 60s budget fencing_lost grants the identical
+        # orphan (45s flaked right on the boundary — bw smoke 2026-09-07).
         engine_clean, engine_detail = engine_inflight_clean(
-            ops, _all_engine_names(ops), 45.0
+            ops, _all_engine_names(ops), 60.0
         )
         residue_ok, residue_detail = _fence_residue_stable(ops, 1)
         recovery_ok, recovery_msg = ops.verify_recovery()
@@ -1739,7 +1756,10 @@ def cancel_engine_restarted_tombstoned_settle(ctx: CaseContext):
         _restore_engines(ops)
 
 
-@case("cancel_prefill_dead_await_terminal", requires=["enqueue_batch"])
+@case(
+    "cancel_prefill_dead_await_terminal",
+    profiles=["batch-window", "single-nonbatch", "single-batch", "window-nonbatch"],
+)
 def cancel_prefill_dead_await_terminal(ctx: CaseContext):
     """Dead prefill mid-cancel-window: the decode leg is the authority.
 
@@ -1785,7 +1805,9 @@ def cancel_prefill_dead_await_terminal(ctx: CaseContext):
         # at the transport layer for sure (port closed), exercising the
         # awaitAuthoritativeTerminal path deterministically.
         ops.stop_engine("prefill-0")
-        ops.cancel(rid, response)
+        # Response only under BATCH — a NON_BATCH response would add the
+        # worker_cancel direct connect at the now-dead prefill port.
+        ops.cancel(rid, response if response.enqueued_by_master else None)
 
         ended = handle.wait_end(30.0)
         inflight_ok, inflight_detail = AssertUtils.inflight_clean(
@@ -1815,7 +1837,10 @@ def cancel_prefill_dead_await_terminal(ctx: CaseContext):
         _restore_engines(ops)
 
 
-@case("cancel_decode_retire_closes_fence", requires=["enqueue_batch"])
+@case(
+    "cancel_decode_retire_closes_fence",
+    profiles=["batch-window", "single-nonbatch", "single-batch", "window-nonbatch"],
+)
 def cancel_decode_retire_closes_fence(ctx: CaseContext):
     """Decode generation retire closes an AWAIT_TERMINAL cancel fence.
 
@@ -1864,7 +1889,9 @@ def cancel_decode_retire_closes_fence(ctx: CaseContext):
         # Fence parks in AWAIT_TERMINAL (cancel to the dead prefill port
         # fails at the transport layer), then the decode dies too.
         ops.stop_engine("prefill-0")
-        ops.cancel(rid, response)
+        # Response only under BATCH — a NON_BATCH response would add the
+        # worker_cancel direct connect at the now-dead prefill port.
+        ops.cancel(rid, response if response.enqueued_by_master else None)
         ops.stop_engine("decode-0")
 
         ended = handle.wait_end(45.0)
@@ -1899,7 +1926,12 @@ def cancel_decode_retire_closes_fence(ctx: CaseContext):
         _restore_engines(ops)
 
 
-@case("cancel_fencing_lost_on_engine_restart", requires=["enqueue_batch"])
+@case(
+    "cancel_fencing_lost_on_engine_restart",
+    requires=[
+        "enqueue_batch"
+    ],  # crash_after fires only at the EnqueueBatch entry (BATCH dispatcher only)
+)
 def cancel_fencing_lost_on_engine_restart(ctx: CaseContext):
     """Design boundary: fencing is engine memory — a second crash drops it.
 
@@ -1952,7 +1984,10 @@ def cancel_fencing_lost_on_engine_restart(ctx: CaseContext):
             return False, (f"first crash/restart failed: {dropped1}/{restored1}")
         baseline_cancel = _cancel_rpc_total(ops)
         settle_t0 = time.monotonic()
-        ops.cancel(rid, response)
+        # Response only under BATCH (its batch_id rides the master Cancel);
+        # a NON_BATCH response would add the worker_cancel direct connect
+        # — a second engine-side Cancel and a dead-port RpcError risk.
+        ops.cancel(rid, response if response.enqueued_by_master else None)
         settled_fast = handle.wait_end(CANCEL_SETTLE_BOUND_S)
         settle_latency = time.monotonic() - settle_t0
         # The ABSENT_FENCE tombstone is installed engine-side only when the
@@ -2044,7 +2079,10 @@ def cancel_fencing_lost_on_engine_restart(ctx: CaseContext):
         _restore_engines(ops)
 
 
-@case("cancel_transport_failure_one_shot", requires=["enqueue_batch"])
+@case(
+    "cancel_transport_failure_one_shot",
+    profiles=["batch-window", "single-nonbatch", "single-batch", "window-nonbatch"],
+)
 def cancel_transport_failure_one_shot(ctx: CaseContext):
     """One-shot cancel under transport failure: no retry, decode settles.
 
@@ -2090,7 +2128,10 @@ def cancel_transport_failure_one_shot(ctx: CaseContext):
         prefill_names = _prefill_names(ops)
         inject_type_all(ops, prefill_names, "cancel_no_respond")
         baseline_cancel = _cancel_rpc_total(ops)
-        ops.cancel(rid, response)
+        # Response only under BATCH — a NON_BATCH response would add the
+        # worker_cancel direct connect: a SECOND engine-side Cancel that
+        # breaks the hard cancel_delta == 1 one-shot assertion below.
+        ops.cancel(rid, response if response.enqueued_by_master else None)
         # Settle window: the decode leg finishes R1 (~4s) and its
         # WorkerStatus terminal settles the slot; a master retry would
         # move the engine counter past 1 inside this window — the
@@ -2127,7 +2168,10 @@ def cancel_transport_failure_one_shot(ctx: CaseContext):
             clear_type_all(ops, prefill_names, "cancel_no_respond")
 
 
-@case("cancel_unexpected_status_await_terminal", requires=["enqueue_batch"])
+@case(
+    "cancel_unexpected_status_await_terminal",
+    profiles=["batch-window", "single-nonbatch", "single-batch", "window-nonbatch"],
+)
 def cancel_unexpected_status_await_terminal(ctx: CaseContext):
     """Out-of-contract cancel ack: no false success, no false terminal.
 
@@ -2171,7 +2215,10 @@ def cancel_unexpected_status_await_terminal(ctx: CaseContext):
         prefill_names = _prefill_names(ops)
         inject_type_all(ops, prefill_names, "cancel_unexpected_status")
         baseline_cancel = _cancel_rpc_total(ops)
-        ops.cancel(rid, response)
+        # Response only under BATCH — a NON_BATCH response would add the
+        # worker_cancel direct connect: a SECOND engine-side Cancel that
+        # breaks the hard cancel_delta == 1 one-shot assertion below.
+        ops.cancel(rid, response if response.enqueued_by_master else None)
         # Settle window: the UNSPECIFIED ack fails the master's mapping,
         # the fence parks in awaitAuthoritativeTerminal and the decode
         # terminal settles the slot; re-sample the counter afterwards so

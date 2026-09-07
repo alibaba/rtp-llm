@@ -267,7 +267,6 @@ def _anomaly_error_case(
 
 @case(
     "engine_fault_down_phases",
-    profiles=["batch-window"],  # _elastic_env pins the legacy fault axes
     source="flexlb_behavior_test.sh S2/S4 merged — five-phase engine-down assertion set",
 )
 def engine_down_http_stop_prefill(ctx: CaseContext):
@@ -386,7 +385,6 @@ def engine_down_http_stop_prefill(ctx: CaseContext):
 
 @case(
     "engine_fault_flap",
-    profiles=["batch-window"],  # _elastic_env pins the legacy fault axes
     source="gap G2: rapid /stop_engine+/start_engine oscillation, 3-strike eviction vs re-discovery race",
 )
 def engine_flap(ctx: CaseContext):
@@ -503,7 +501,8 @@ def _fault_spec(ctx: CaseContext) -> EnvSpec:
     master ledger entry of an accepted-but-abandoned request is settled
     by the stale-inflight TTL, not by an immediate terminal (formerly
     harness._fault_spec; queueTimeoutMs stays at the functional-profile
-    60s).
+    60s; decision/dispatcher axes are the ctx profile's own since the
+    tier2 spec unpick).
     """
     return EnvSpec(
         label=f"inject_fault_{ctx.profile}",
@@ -513,8 +512,6 @@ def _fault_spec(ctx: CaseContext) -> EnvSpec:
         master_profile=ctx.profile,
         config_overrides=ConfigOverride(
             ordering="priority",
-            decision="fixed_window",
-            dispatcher="batch",
             queue_timeout_ms=60_000,
             stale_inflight_ms=30_000,
         ),
@@ -523,7 +520,10 @@ def _fault_spec(ctx: CaseContext) -> EnvSpec:
 
 @case(
     "engine_fault_crash_after",
-    profiles=["batch-window"],
+    profiles=[
+        "batch-window",
+        "single-batch",
+    ],  # crash fires at the EnqueueBatch entry (BATCH dispatcher only)
     source="gap G6/G7: /inject type=crash_after (enqueue-count triggered true crash)",
 )
 def inject_crash_after(ctx: CaseContext):
@@ -550,10 +550,12 @@ def inject_crash_after(ctx: CaseContext):
     (and whose memory the crash wiped anyway), must be fully clean.
 
     Profile semantics (v2): the fault fires at the engine's
-    EnqueueBatch entry (BATCH dispatcher only) and _fault_spec pins the
-    legacy fault axes (PRIORITY + FIXED_WINDOW + BATCH) via FLEXLB_CONFIG,
-    so the declaration stays batch-window — re-running under another
-    --profile would execute the identical configuration.
+    EnqueueBatch entry (BATCH dispatcher only) and _fault_spec layers
+    PRIORITY ordering on the ctx profile's own decision/dispatcher axes
+    (profile-aware since the tier2 spec unpick) — so the declaration
+    covers the BATCH-dispatch profiles (batch-window, single-batch);
+    the NON_BATCH dispatch channel never reaches the EnqueueBatch entry,
+    mechanically excluding single-nonbatch / window-nonbatch.
     """
     ops = ctx.engine_ops(ctx.env_manager.ensure(_fault_spec(ctx)))
     base = rid_base(ctx, "engine_fault")
@@ -886,7 +888,9 @@ SYNC_LOG_ROOT = Path(tempfile.gettempdir()) / "flexlb_ft_sync"
 
 
 def _recovery_spec(ctx: CaseContext, suffix: str = "") -> EnvSpec:
-    """Dedicated E1-E6 env: 2P+2D, dynamic file discovery, fault axes, 30s
+    """Dedicated E1-E6 env: 2P+2D, dynamic file discovery, PRIORITY
+    ordering over the profile's own decision/dispatcher axes
+    (profile-aware since the tier2 spec unpick), 30s
     TTL — deliberately a separate label from the shared fault_/kv_ envs.
     A non-empty *suffix* gives a case its OWN env: E2's routing-shape
     assertions (regime A stick / regime B spread) are perturbed by a
@@ -905,8 +909,6 @@ def _recovery_spec(ctx: CaseContext, suffix: str = "") -> EnvSpec:
         discovery="discovery_file",
         config_overrides=ConfigOverride(
             ordering="priority",
-            decision="fixed_window",
-            dispatcher="batch",
             queue_timeout_ms=OMIT,
         ),
         # Route ALL master logback output (application/sync/flexlb/pv) into
@@ -1075,7 +1077,6 @@ def _ensure_started(ops, names) -> None:
 
 @case(
     "engine_fault_recovery_generation_bump",
-    profiles=["batch-window"],  # _recovery_spec pins the fault axes
     source="E1: engine recovery must publish a fresh endpoint generation",
 )
 def recovery_generation_bump(ctx: CaseContext):
@@ -1166,7 +1167,13 @@ def recovery_generation_bump(ctx: CaseContext):
 
 @case(
     "engine_fault_recovery_kv_resync",
-    profiles=["batch-window"],  # _recovery_spec pins the fault axes
+    profiles=["batch-window", "single-batch", "window-nonbatch"],
+    # routing-shape bars calibrated on bw; sb/wn smoke-verified as-is.
+    # single-nonbatch DEFERRED: 6 sampled sn runs swung between <=3/5,
+    # 4/5 and 5/5 holder-stick (3 FAIL / 3 PASS, holder switching sides)
+    # — the spread bar cannot separate the routing variance from the
+    # 5/5 stale-baseline FINDING fingerprint on the SINGLE decision axis,
+    # so the sn registration is parked until that variance is understood.
     source="E2: recovery must rebuild the cache view from a full snapshot",
 )
 def recovery_kv_resync(ctx: CaseContext):
@@ -1323,7 +1330,10 @@ def recovery_kv_resync(ctx: CaseContext):
 
 @case(
     "engine_fault_recovery_no_resurrect",
-    profiles=["batch-window"],  # _recovery_spec pins the fault axes
+    profiles=[
+        "batch-window",
+        "single-batch",
+    ],  # crash_after trigger rides EnqueueBatch (BATCH dispatcher only)
     source="E3: pre-outage inflight requests must not resurrect after recovery",
 )
 def recovery_no_resurrect(ctx: CaseContext):
@@ -1526,7 +1536,6 @@ def recovery_no_resurrect(ctx: CaseContext):
 
 @case(
     "engine_fault_status_gap_no_bump",
-    profiles=["batch-window"],  # _recovery_spec pins the fault axes
     source="E4: a short status-reporting gap must not retire the generation",
 )
 def status_gap_no_bump(ctx: CaseContext):
@@ -1605,7 +1614,7 @@ def status_gap_no_bump(ctx: CaseContext):
 
 @case(
     "engine_fault_status_gap_long_retire",
-    profiles=["batch-window"],  # _recovery_spec pins the fault axes
+    # sb zero-adapt; sn + wn legs smoke-verified (NON_BATCH fence-payload contract holds)
     source="E5: a long status gap must retire the generation and fence its ledger",
 )
 def status_gap_long_retire(ctx: CaseContext):
@@ -1705,7 +1714,6 @@ def status_gap_long_retire(ctx: CaseContext):
 
 @case(
     "engine_fault_recovery_kv_usage_reset",
-    profiles=["batch-window"],  # _recovery_spec pins the fault axes
     source="E6: KV usage must restart from zero after a full restart",
 )
 def recovery_kv_usage_reset(ctx: CaseContext):

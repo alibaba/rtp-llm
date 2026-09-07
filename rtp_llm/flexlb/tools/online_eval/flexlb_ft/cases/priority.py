@@ -748,6 +748,8 @@ _MONITOR_AUTO_TPM_ENV = {"FLEXLB_MONITOR_METRIC_WHITELIST": "flexlb_auto_tpm"}
 def _prio_config(
     *,
     ordering: str = "priority",
+    decision: str = "single",
+    max_collection_wait_ms: Optional[int] = None,
     preemption: Optional[dict] = None,
     default_priority: Optional[int] = None,
     queue_timeout_ms: Optional[int] = None,
@@ -760,6 +762,16 @@ def _prio_config(
     """Unified priority-family override (PRIORITY + SINGLE + NON_BATCH
     base; dispatcher="batch" variant for the live-eviction family, 2026-09)
     layered on the ctx profile's base document.
+
+    ``decision`` (tier2 wave2, audit 2026-09 candidates #16/#17): the
+    decision axis stays SINGLE by default — the historical family base
+    every choreography below was calibrated on.  The live-eviction
+    lanes pass a profile-derived decision so the batch-window lane runs
+    the production-isomorphic FIXED_WINDOW shape
+    (maxRequests=32/maxCollectionWaitMs=400 — master_fixed_window.json);
+    ``max_collection_wait_ms`` only takes effect under FIXED_WINDOW
+    (build_flexlb_config ignores it under SINGLE, so passing it for the
+    single-decision lane is harmless but pointless).
 
     Implementation-period additions over the design's config sketch
     (all verified against the Java code):
@@ -789,7 +801,8 @@ def _prio_config(
     """
     return ConfigOverride(
         ordering=ordering,
-        decision="single",
+        decision=decision,
+        max_collection_wait_ms=max_collection_wait_ms,
         dispatcher=dispatcher,
         default_priority=default_priority,
         preemption=preemption,
@@ -4316,11 +4329,22 @@ def _pq_live_spec(ctx: CaseContext) -> EnvSpec:
     """ENV for atpm_preempt_prefill_queued_live: BATCH dispatcher +
     PREFILL_QUEUED-only preemption + maxWaiting=2, so the third submitter
     (the P70 incoming) overflows the queue into AdmissionFallback's
-    queue-replacement path (1P+4D)."""
+    queue-replacement path (1P+4D).
+
+    Decision axis (tier2 wave2, audit #16): lane-derived — single-batch
+    keeps the original SINGLE live family; the batch-window lane runs
+    FIXED_WINDOW + BATCH + PRIORITY with the production window
+    (maxRequests=32 / maxCollectionWaitMs=400, master_fixed_window.json),
+    the production-isomorphic combination whose live eviction chain had
+    zero coverage (every case's decision was hard-coded single).
+    """
+    prod_shape = ctx.profile == "batch-window"
     return _spec(
         ctx,
         "atpm_pq_live",
         config_overrides=_prio_config(
+            decision=("fixed_window" if prod_shape else "single"),
+            max_collection_wait_ms=(400 if prod_shape else None),
             dispatcher="batch",
             preemption=_PREEMPT_PQ,
             max_waiting=2,
@@ -4335,13 +4359,24 @@ def _dr_live_spec(ctx: CaseContext) -> EnvSpec:
     production-baseline stage set {PREFILL_QUEUED, DECODE_RESERVED} + a
     4-block decode KV pool (4096 tokens at blockSize=1024) on a SINGLE
     decode engine, so the victim's shadow reservation — not a slot
-    deficit — makes the incoming's decode placement fail."""
+    deficit — makes the incoming's decode placement fail.
+
+    Decision axis (tier2 wave2, audit #17): same lane-derived shape as
+    _pq_live_spec — single-batch keeps the SINGLE live family,
+    batch-window runs the production-isomorphic FIXED_WINDOW window
+    (maxRequests=32 / maxCollectionWaitMs=400; the audit note that the
+    400ms collection window's effect on shadow-reservation eviction
+    timing is UNVERIFIED is exactly what the bw smoke run checks).
+    """
+    prod_shape = ctx.profile == "batch-window"
     return _spec(
         ctx,
         "atpm_dr_live",
         n_decode=1,
         decode_cache_blocks=4,
         config_overrides=_prio_config(
+            decision=("fixed_window" if prod_shape else "single"),
+            max_collection_wait_ms=(400 if prod_shape else None),
             dispatcher="batch",
             preemption={"allowed_victim_stages": ["PREFILL_QUEUED", "DECODE_RESERVED"]},
             queue_timeout_ms=60_000,
@@ -4370,7 +4405,15 @@ def _ts_spec(ctx: CaseContext) -> EnvSpec:
     """ENV for atpm_preempt_cancel_tombstoned: the live preemption config
     (all three stages + engineCancellation) + decode maxEngineRequests=1
     on the BATCH dispatcher (1P+1D) — same shape as cancel.py's
-    cancel_preemption_victim."""
+    cancel_preemption_victim.
+
+    Lane note (coverage matrix): unlike _pq_live_spec this spec is NOT
+    lane-derived — decision stays SINGLE on every lane (the unpassed
+    _prio_config default), so the bw expansion runs SINGLE+BATCH, the
+    same config as sb: a pure lane-regression gain, not a shape
+    increment (audit positioning, kept deliberately — do not read the
+    bw row as FIXED_WINDOW coverage).
+    """
     return _spec(
         ctx,
         "atpm_ts",
@@ -4386,7 +4429,10 @@ def _ts_spec(ctx: CaseContext) -> EnvSpec:
 
 @case(
     "atpm_preempt_prefill_queued_live",
-    profiles=["single-batch"],
+    profiles=["single-batch", "batch-window"],  # +bw (tier2 wave2, audit
+    # #16): the bw lane runs the production-isomorphic FIXED_WINDOW+BATCH+
+    # PRIORITY shape (spec derives the decision axis per lane) — the live
+    # 8400 eviction chain under the production decision form.
     source="preemption-stages audit (2026-09) — live PREFILL_QUEUED eviction",
 )
 def atpm_preempt_prefill_queued_live(ctx: CaseContext):
@@ -4400,7 +4446,11 @@ def atpm_preempt_prefill_queued_live(ctx: CaseContext):
     puts the queue back in the master (WorkerBatcher + maxWaiting cap →
     AdmissionFallback → EvictionManager.tryAdmitByPrefillEviction).
     preemption={PREFILL_QUEUED} only, maxWaiting=2, 1P+4D, prefill
-    slowed to 4s.
+    slowed to 4s.  Decision axis: SINGLE on the single-batch lane (the
+    original live family); FIXED_WINDOW maxRequests=32/wait 400ms on
+    batch-window (production-isomorphic — audit #16; the 400ms window's
+    timing effect on the queue-overflow choreography is exactly what
+    the bw smoke run verifies).
 
     Choreography: a P50 placeholder dispatches first (occupying the
     engine's single prefill concurrency slot — the dispatch gate holds
@@ -4580,7 +4630,10 @@ def atpm_preempt_prefill_queued_live(ctx: CaseContext):
 
 @case(
     "atpm_preempt_decode_reserved_live",
-    profiles=["single-batch"],
+    profiles=["single-batch", "batch-window"],  # +bw (tier2 wave2, audit
+    # #17): same lane-derived decision axis as the prefill-queued live
+    # case — the bw lane covers the production FIXED_WINDOW+BATCH+PRIORITY
+    # shadow-reservation eviction form.
     source="preemption-stages audit (2026-09) — live DECODE_RESERVED eviction",
 )
 def atpm_preempt_decode_reserved_live(ctx: CaseContext):
@@ -4594,7 +4647,11 @@ def atpm_preempt_decode_reserved_live(ctx: CaseContext):
     {PREFILL_QUEUED, DECODE_RESERVED} (master_fixed_window.json values —
     no engineCancellation because no engine-owned stage is enabled), a
     4-block decode KV pool (4096 tokens at blockSize=1024) on a SINGLE
-    decode engine, 1P+1D, prefill slowed to 4s.
+    decode engine, 1P+1D, prefill slowed to 4s.  Decision axis: SINGLE
+    on the single-batch lane; FIXED_WINDOW maxRequests=32/wait 400ms on
+    batch-window (production-isomorphic — audit #17; the 400ms
+    collection window's effect on shadow-reservation eviction timing is
+    UNVERIFIED and is exactly what the bw smoke run checks).
 
     Choreography (both shadows land on the one decode pool):
       * P90 placeholder input=512 dispatches to prefill — its decode
@@ -4897,7 +4954,6 @@ def atpm_preempt_cancel_not_found(ctx: CaseContext):
 
 @case(
     "atpm_preempt_cancel_tombstoned",
-    profiles=["single-batch"],
     requires=["enqueue_batch"],
     source="preemption-stages audit (2026-09) — Cancel TOMBSTONED branch",
 )

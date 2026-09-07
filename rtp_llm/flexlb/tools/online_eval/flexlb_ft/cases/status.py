@@ -25,8 +25,9 @@ the agreed spec — do not invent alternatives):
     enqueue_ack_partial_fail(int k) / enqueue_ack_error_code(int code)
     enqueue_ack_drop(bool)
 
-Shared environment (_status_spec): 2P+2D, legacy fault axes pinned via
-FLEXLB_CONFIG (PRIORITY + FIXED_WINDOW + BATCH), staleInflightTimeoutMs=30s
+Shared environment (_status_spec): 2P+2D, PRIORITY ordering over the
+profile's own decision/dispatcher axes (profile-aware since the tier2
+spec unpick), staleInflightTimeoutMs=30s
 (TTL observations cap at TTL+margin) and scheduler.queueTimeoutMs=10s —
 zombie keep-alive scenarios (a suppressed-finished request keeps appearing
 RUNNING, which refreshes lastWorkerStatusAtMs and disarms the stale TTL)
@@ -200,7 +201,9 @@ def case(
 
 
 def _status_spec(ctx: CaseContext) -> EnvSpec:
-    """Family env: 2P+2D, legacy fault axes, TTL=30s, queueTimeout=10s.
+    """Family env: 2P+2D, PRIORITY ordering over the profile's own
+    decision/dispatcher axes (profile-aware since the tier2 spec
+    unpick), TTL=30s, queueTimeout=10s.
 
     queueTimeoutMs=10s is the zombie keep-alive bottom line: a request
     whose terminal is suppressed but which keeps appearing RUNNING on the
@@ -216,8 +219,6 @@ def _status_spec(ctx: CaseContext) -> EnvSpec:
         master_profile=ctx.profile,
         config_overrides=ConfigOverride(
             ordering="priority",
-            decision="fixed_window",
-            dispatcher="batch",
             queue_timeout_ms=int(QUEUE_TIMEOUT_S * 1000),
             stale_inflight_ms=int(STALE_INFLIGHT_TTL_S * 1000),
         ),
@@ -564,8 +565,9 @@ def inflight_ttl_cleanup(ctx: CaseContext):
     population (105s event window); the fleet still serves after the
     release (recovery).
 
-    Profile semantics (v2): the env pins the legacy fault
-    axes (PRIORITY + FIXED_WINDOW + BATCH, no queueTimeoutMs — the Java
+    Profile semantics (v2): PRIORITY ordering over the ctx
+    profile's own decision/dispatcher axes (profile-aware since the
+    tier2 spec unpick), no queueTimeoutMs — the Java
     default 1h cannot expire these requests before the TTL; formerly
     harness.ttl_spec) — the
     declaration stays batch-window (label honesty + regression
@@ -582,8 +584,6 @@ def inflight_ttl_cleanup(ctx: CaseContext):
             discovery="discovery_file",
             config_overrides=ConfigOverride(
                 ordering="priority",
-                decision="fixed_window",
-                dispatcher="batch",
                 queue_timeout_ms=OMIT,
             ),
         )
@@ -709,7 +709,9 @@ def inflight_ttl_cleanup(ctx: CaseContext):
 
 @case(
     "status_ack_partial_fail",
-    profiles=["batch-window"],  # _status_spec pins the legacy fault axes
+    profiles=[
+        "batch-window"
+    ],  # EnqueueBatch ack/batchId settlement channel — BATCH-dispatcher only
     source="P0 status fault family: enqueue_ack_partial_fail(k=1) on a 4-request batch",
     expected_fail=True,  # MIXED form (see docstring) — whole-case probe
 )
@@ -891,7 +893,9 @@ def status_ack_partial_fail(ctx: CaseContext):
 
 @case(
     "status_batch_async_partial_fail",
-    profiles=["batch-window"],  # _status_spec pins the legacy fault axes
+    profiles=[
+        "batch-window"
+    ],  # EnqueueBatch ack/batchId settlement channel — BATCH-dispatcher only
     source="P0 status fault family: prefill_async_partial_fail(k=1, code=8500) "
     "on 4 concurrent requests (execution-phase in-batch failure)",
 )
@@ -1329,7 +1333,6 @@ def status_prefill_suppress_all(ctx: CaseContext):
 
 @case(
     "status_prefill_suppress_finished",
-    profiles=["batch-window"],
     source="P0 status fault family: status_suppress_finished on every prefill",
 )
 def status_prefill_suppress_finished(ctx: CaseContext):
@@ -1511,7 +1514,6 @@ def status_status_no_respond(ctx: CaseContext):
 
 @case(
     "status_unknown_rid_finished",
-    profiles=["batch-window"],
     source="P0 status fault family: status_fake_task(finished, unknown rid), one-shot",
 )
 def status_unknown_rid_finished(ctx: CaseContext):
@@ -2059,7 +2061,6 @@ def status_decode_waiting_before_prefill(ctx: CaseContext):
 
 @case(
     "status_unknown_rid_running",
-    profiles=["batch-window"],
     source="P1 status fault family: status_fake_task(running, unknown rid), one-shot",
 )
 def status_unknown_rid_running(ctx: CaseContext):
@@ -2565,7 +2566,6 @@ def status_foreign_batchid(ctx: CaseContext):
 
 @case(
     "status_duplicate_finished",
-    profiles=["batch-window"],
     source="P1 status fault family: status_duplicate_finished — same terminal reported twice",
 )
 def status_duplicate_finished(ctx: CaseContext):
@@ -2593,7 +2593,22 @@ def status_duplicate_finished(ctx: CaseContext):
             errs = _run_requests(ops, base, 4, concurrency=4)
             # Fingerprint pair taken INSIDE the replay window (the injection
             # is still armed) — a clear-then-compare pair would only observe
-            # the post-injection calm and never the replay itself.
+            # the post-injection calm and never the replay itself.  The
+            # before baseline must sit on a SETTLED ledger: under the SINGLE
+            # decision axis the ledger release trails the client streams by
+            # a few seconds, so a snapshot taken straight after
+            # _run_requests carries the drain tail and the window would
+            # measure the tail settling, not the replay (batch-window
+            # settles synchronously, which is why the baseline never
+            # needed this gate there).
+            # The gate result IS part of the case verdict: a timeout here
+            # means the before-baseline would snapshot a mid-drain ledger
+            # and the replay window would measure the tail settling (bw
+            # passes the gate synchronously — behaviour unchanged).
+            if not _wait_scheduler_zero(ops):
+                return False, (
+                    "ledger did not settle before replay-window baseline sample"
+                )
             before = _inflight_fingerprint(ops)
             time.sleep(5.0)  # replay window: terminals re-delivered
             after = _inflight_fingerprint(ops)
@@ -2633,7 +2648,6 @@ def status_duplicate_finished(ctx: CaseContext):
 
 @case(
     "status_cursor_regress",
-    profiles=["batch-window"],
     source="P1 status fault family: status_cursor_regress(3) — completion cursor rewinds",
 )
 def status_cursor_regress(ctx: CaseContext):
@@ -2695,7 +2709,6 @@ def status_cursor_regress(ctx: CaseContext):
 
 @case(
     "status_finished_then_running",
-    profiles=["batch-window"],
     source="P1 status fault family: fake_task sequence — finished replay then persistent RUNNING for a settled rid",
 )
 def status_finished_then_running(ctx: CaseContext):
@@ -2773,7 +2786,6 @@ def status_finished_then_running(ctx: CaseContext):
 
 @case(
     "status_zombie_completed_running",
-    profiles=["batch-window"],
     source="P1 status fault family: status_zombie_running — completed tasks re-reported RUNNING",
 )
 def status_zombie_completed_running(ctx: CaseContext):
@@ -2849,7 +2861,6 @@ def status_zombie_completed_running(ctx: CaseContext):
 
 @case(
     "status_zombie_fake_running",
-    profiles=["batch-window"],
     source="P2 status fault family (DECLARED FINDING PROBE): persistent fake RUNNING for N ghost rids, >= 2x TTL",
     expected_fail=True,
 )
@@ -2957,11 +2968,11 @@ def inject_fetch_error(ctx: CaseContext):
 
     Profile semantics (v2): the fault is checked only at the
     engine's fetchResponse entry, which exists only under the BATCH
-    dispatcher — and the env below pins the legacy fault axes
-    (PRIORITY + FIXED_WINDOW + BATCH; formerly harness._fault_spec)
-    via the config override layer, so re-running
-    under another --profile would execute the identical configuration.
-    The declaration stays batch-window (regression efficiency + label
+    dispatcher — and the env below layers PRIORITY ordering on the ctx
+    profile's own decision/dispatcher axes (profile-aware since the
+    tier2 spec unpick; formerly harness._fault_spec)
+    via the config override layer.  The declaration stays batch-window
+    (regression efficiency + label
     honesty); a NON_BATCH master-path generate_error variant is
     dedicated-phase material.
     """
@@ -2975,8 +2986,6 @@ def inject_fetch_error(ctx: CaseContext):
                 master_profile=ctx.profile,
                 config_overrides=ConfigOverride(
                     ordering="priority",
-                    decision="fixed_window",
-                    dispatcher="batch",
                     queue_timeout_ms=60_000,
                     stale_inflight_ms=30_000,
                 ),

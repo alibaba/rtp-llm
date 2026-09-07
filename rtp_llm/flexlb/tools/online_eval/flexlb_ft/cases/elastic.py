@@ -107,8 +107,9 @@ def _master_http(ops) -> str:
 
 
 @case(
-    "elastic_add_flow",
-    profiles=["batch-window"],  # elastic_spec pins the legacy fault axes
+    "elastic_add_flow",  # all profiles (tier2 wave2): _elastic_env is
+    # profile-aware (PRIORITY ordering on the ctx axes), and the
+    # convergence contract is discovery/sync layer — shape agnostic.
     source="elastic acceptance: add under load (FileDiscoveryDynamicScaleEndToEndTest phase 2)",
 )
 def elastic_add_flow(ctx: CaseContext):
@@ -157,8 +158,9 @@ def elastic_add_flow(ctx: CaseContext):
 
 
 @case(
-    "elastic_remove_flow",
-    profiles=["batch-window"],  # elastic_spec pins the legacy fault axes
+    "elastic_remove_flow",  # all profiles (tier2 wave2): the graceful
+    # drain / zero-failure contract is engine-layer ordering; the spec
+    # keeps stale_inflight_ms=30_000 via the build default (95s cap).
     source="elastic acceptance: remove under load (FileDiscoveryDynamicScaleEndToEndTest phase 3)",
 )
 def elastic_remove_flow(ctx: CaseContext):
@@ -252,8 +254,9 @@ def elastic_remove_flow(ctx: CaseContext):
 
 
 @case(
-    "elastic_add_remove_cycle",
-    profiles=["batch-window"],  # elastic_spec pins the legacy fault axes
+    "elastic_add_remove_cycle",  # all profiles (tier2 wave2): remove_flow
+    # contract x3 + verify_recovery (dual-path adaptive) — shape agnostic;
+    # stale_inflight_ms=30_000 rides the build default like remove_flow.
     source="elastic acceptance: 3x add→verify→remove under load→verify cycle",
 )
 def elastic_add_remove_cycle(ctx: CaseContext):
@@ -353,8 +356,10 @@ def elastic_add_remove_cycle(ctx: CaseContext):
 
 
 @case(
-    "elastic_rebalance",
-    profiles=["batch-window"],  # elastic_spec pins the legacy fault axes
+    "elastic_rebalance",  # all profiles (tier2 wave2): routing parity is
+    # router-layer (FORMULA + RANDOM_WITHIN_TOLERANCE), shape agnostic;
+    # share bands were calibrated on bw — first runs on the new lanes
+    # record the observed steady share before any band tightening.
     source="elastic acceptance: cost-based rebalance after scale-out (share < 60%)",
 )
 def elastic_rebalance(ctx: CaseContext):
@@ -448,8 +453,9 @@ def elastic_rebalance(ctx: CaseContext):
 
 
 @case(
-    "elastic_stop_after_add",
-    profiles=["batch-window"],  # elastic_spec pins the legacy fault axes
+    "elastic_stop_after_add",  # all profiles (tier2 wave2): the whole
+    # chain (3-strike eviction, topology, health, recovery) is
+    # topology/health layer — the family's least shape-coupled case.
     source="elastic acceptance: add → traffic → /stop_engine (3-fail evict) → /start_engine recovery",
 )
 def elastic_stop_after_add(ctx: CaseContext):
@@ -537,8 +543,9 @@ def elastic_stop_after_add(ctx: CaseContext):
 
 
 @case(
-    "elastic_concurrent_ops",
-    profiles=["batch-window"],  # elastic_spec pins the legacy fault axes
+    "elastic_concurrent_ops",  # all profiles (tier2 wave2): the hard
+    # asserts are master HTTP 200 + discovery-file consistency + health
+    # floor — topology/availability layer, shape agnostic.
     source="elastic acceptance: concurrent add/remove storm, master stays healthy",
 )
 def elastic_concurrent_ops(ctx: CaseContext):
@@ -714,9 +721,12 @@ PENDING_DRAIN_TERMINAL_S = 40.0
 # 3s cleaner period) + generous margin, but far below queueTimeout (1h).
 PENDING_DRAIN_CLEAN_S = 50.0
 # Wave shaping: serial sends at ~30x the 10ms FIXED_WINDOW collection
-# window so every request forms its own batch — a fast burst collapses
-# into one batch, dispatches wholesale behind ONE lease and strands
-# nothing on the master side.
+# window (batch-window lane) so every request forms its own batch; under
+# the SINGLE decision (single-batch lane) each serial fire is decided
+# per-request and forms its own single-member batch naturally.  Either
+# way a fast burst is what must be avoided: it collapses into one batch,
+# dispatches wholesale behind ONE lease and strands nothing on the
+# master side.
 PENDING_DRAIN_WAVE_INTERVAL_S = 0.3
 PENDING_DRAIN_WAVE_MAX = 14
 # Fail-fast floors for the scenario construction (the case is meaningless
@@ -741,7 +751,9 @@ PENDING_DRAIN_STALE_WINDOW_S = 16.0
 
 def _pending_drain_spec(ctx: CaseContext) -> EnvSpec:
     """Dedicated env for the pending-drain case: 2P+2D, dynamic file
-    discovery, legacy fault axes with maxInflightBatchesPerPrefillWorker=2.
+    discovery, PRIORITY ordering over the profile's own
+    decision/dispatcher axes (profile-aware since the tier2 spec
+    unpick) with maxInflightBatchesPerPrefillWorker=2.
 
     Two reasons the case does NOT reuse elastic_spec: (a) 2 inflight
     batches per worker is the production-aligned lease cap, giving exactly
@@ -761,8 +773,6 @@ def _pending_drain_spec(ctx: CaseContext) -> EnvSpec:
         discovery="discovery_file",
         config_overrides=ConfigOverride(
             ordering="priority",
-            decision="fixed_window",
-            dispatcher="batch",
             queue_timeout_ms=OMIT,
             max_inflight_batches=2,
         ),
@@ -771,7 +781,11 @@ def _pending_drain_spec(ctx: CaseContext) -> EnvSpec:
 
 @case(
     "elastic_remove_pending_drain",
-    profiles=["batch-window"],  # elastic family: BATCH dispatcher + fault axes
+    profiles=["batch-window", "single-batch"],  # BATCH dispatcher only
+    # (tier2 wave2 +sb): the stranded gap needs EnqueueBatch leases + the
+    # master-side WorkerBatcher queue — under SINGLE each serial fire
+    # naturally forms its own batch, so the construction holds unchanged
+    # (sn/wn stay structurally excluded: no EnqueueBatch, no gap).
     source="user-identified gap: scale-in protection for requests queued-but-undispatched on the removed engine",
 )
 def elastic_remove_pending_drain(ctx: CaseContext):
@@ -783,7 +797,9 @@ def elastic_remove_pending_drain(ctx: CaseContext):
     discovery-file rewrite -> master FileServiceDiscovery loss).  Both
     prefills run at 8s so the victim's two inflight-batch leases stay
     occupied while a serial wave (one request per 300ms — each its own
-    FIXED_WINDOW batch) keeps landing requests on it: after the first two
+    batch: its own FIXED_WINDOW batch on batch-window, a single-member
+    batch per fire under the SINGLE decision on single-batch) keeps
+    landing requests on it: after the first two
     single-request batches dispatch, every further victim-routed request
     sits in the master-side WorkerBatcher queue — accepted by Schedule,
     never EnqueueBatch'd.  A pre-assertion proves the stranded set is
@@ -862,7 +878,8 @@ def elastic_remove_pending_drain(ctx: CaseContext):
             ops.set_perf(name, prefill_fixed_ms=PENDING_DRAIN_SLOW_MS)
         time.sleep(1.5)  # master perf sync
 
-        # -- serial wave: each request its own FIXED_WINDOW batch; the
+        # -- serial wave: each request its own batch (FIXED_WINDOW window
+        #    on batch-window, per-fire SINGLE decision on single-batch); the
         #    victim's first two batches take both leases, everything routed
         #    there afterwards parks in the master-side WorkerBatcher queue.
         wave = 0
@@ -1163,8 +1180,10 @@ def _accepted_timeline(ops, engine_names, offsets_s):
 
 
 @case(
-    "elastic_add_preference",
-    profiles=["batch-window"],  # elastic family: BATCH dispatcher + fault axes
+    "elastic_add_preference",  # all profiles (tier2 wave2): measurement
+    # is accepted-count deltas + router-layer scoring, shape agnostic;
+    # ADD_PREF_SHARE_BANDS and the 10% floor were calibrated on bw — first
+    # runs on the new lanes follow the in-case CALIBRATION PLAN below.
     source=(
         "user-named gap: post-scale-out traffic preference shape "
         "(queue-empty newcomer)"
@@ -1705,7 +1724,9 @@ FULL_SHRINK_DECODE_KV_FAIL_CODE = 8211
 
 def _full_shrink_spec(ctx: CaseContext) -> EnvSpec:
     """Private env for elastic_kv_full_shrink: 2P+2D, 24-block decode
-    pools, dynamic file discovery, legacy fault axes.
+    pools, dynamic file discovery, PRIORITY ordering over the profile's
+    own decision/dispatcher axes (profile-aware since the tier2 spec
+    unpick).
 
     The decode_cache_blocks fingerprint differs from every other spec
     (elastic_spec 3000 / quota / pending-drain), so the one-shot
@@ -1724,8 +1745,6 @@ def _full_shrink_spec(ctx: CaseContext) -> EnvSpec:
         decode_cache_blocks=FULL_SHRINK_DECODE_CACHE_BLOCKS,
         config_overrides=ConfigOverride(
             ordering="priority",
-            decision="fixed_window",
-            dispatcher="batch",
             queue_timeout_ms=OMIT,
         ),
         # Fingerprint discriminator (Kim fix): EnvSpec.fingerprint()
@@ -1741,7 +1760,9 @@ def _full_shrink_spec(ctx: CaseContext) -> EnvSpec:
 
 @case(
     "elastic_kv_full_shrink",
-    profiles=["batch-window"],  # elastic family: BATCH dispatcher + fault axes
+    profiles=[
+        "batch-window"
+    ],  # spec is profile-aware since the tier2 unpick; bw-only scope is historical/pending expansion
     source=(
         "balance-metrics v2 design §2.1 "
         "(flexlb-balance-metrics-v2-design.md): KV-full scale-in, "
@@ -2493,7 +2514,8 @@ SKEW_PC_REBOUND = 0.5
 
 def _skew_spec(ctx: CaseContext, variant: str) -> EnvSpec:
     """Private env for one KV-skew case: 2P+2D, dynamic file discovery,
-    fault axes.
+    PRIORITY ordering over the profile's own decision/dispatcher axes
+    (profile-aware since the tier2 spec unpick).
 
     DESIGN DEVIATION, recorded per the brief: the design says "2P，无
     decode"; a PD-split cluster with n_decode=0 exposes no decode
@@ -2522,8 +2544,6 @@ def _skew_spec(ctx: CaseContext, variant: str) -> EnvSpec:
         discovery="discovery_file",
         config_overrides=ConfigOverride(
             ordering="priority",
-            decision="fixed_window",
-            dispatcher="batch",
             queue_timeout_ms=OMIT,
         ),
         # Fingerprint discriminator (Kim fix, corrected docstring above):
@@ -2884,7 +2904,9 @@ def _run_kv_skew_shrink(ctx: CaseContext, shrink_hot: bool):
 
 @case(
     "elastic_kv_skew_shrink_hot",
-    profiles=["batch-window"],  # elastic family: BATCH dispatcher + fault axes
+    profiles=[
+        "batch-window"
+    ],  # spec is profile-aware since the tier2 unpick; bw-only scope is historical/pending expansion
     source=(
         "balance-metrics v2 design §2.2 "
         "(flexlb-balance-metrics-v2-design.md): KV-skew shrink, hot variant"
@@ -2899,7 +2921,9 @@ def elastic_kv_skew_shrink_hot(ctx: CaseContext):
 
 @case(
     "elastic_kv_skew_shrink_cold",
-    profiles=["batch-window"],  # elastic family: BATCH dispatcher + fault axes
+    profiles=[
+        "batch-window"
+    ],  # spec is profile-aware since the tier2 unpick; bw-only scope is historical/pending expansion
     source=(
         "balance-metrics v2 design §2.2 "
         "(flexlb-balance-metrics-v2-design.md): KV-skew shrink, cold variant"
@@ -2951,7 +2975,9 @@ TRANSIENT_BURST_STREAM_TIMEOUT_S = 45.0
 
 def _transient_spec(ctx: CaseContext) -> EnvSpec:
     """Private env for elastic_transient_imbalance_bound: 3P+2D, all
-    capacity axes explicit, dynamic file discovery, fault/admission axes.
+    capacity axes explicit, dynamic file discovery, PRIORITY ordering
+    over the profile's own decision/dispatcher axes (profile-aware
+    since the tier2 spec unpick).
 
     Topology note (construction choice, not a threshold change): the
     design does not fix the role count; 2P would leave ONE prefill
@@ -2972,8 +2998,6 @@ def _transient_spec(ctx: CaseContext) -> EnvSpec:
         discovery="discovery_file",
         config_overrides=ConfigOverride(
             ordering="priority",
-            decision="fixed_window",
-            dispatcher="batch",
             queue_timeout_ms=60_000,
             max_waiting_requests_per_prefill_worker=(
                 TRANSIENT_MAX_WAITING_REQUESTS_PER_WORKER
@@ -2991,7 +3015,9 @@ def _transient_spec(ctx: CaseContext) -> EnvSpec:
 
 @case(
     "elastic_transient_imbalance_bound",
-    profiles=["batch-window"],  # elastic family: BATCH dispatcher + fault axes
+    profiles=[
+        "batch-window"
+    ],  # spec is profile-aware since the tier2 unpick; bw-only scope is historical/pending expansion
     source=(
         "balance-metrics v2 design §2.3 "
         "(flexlb-balance-metrics-v2-design.md): abrupt scale-in under "
@@ -3561,8 +3587,9 @@ def _steady_recovery_spec(ctx: CaseContext) -> EnvSpec:
     """Private env for elastic_steady_state_recovery: 2P+4D (the heavier
     role is decode — four pools carry the KV load — so the victim is a
     decode engine, leaving THREE decode survivors so the share /
-    spread rows stay non-degenerate), dynamic file discovery, fault
-    axes.
+    spread rows stay non-degenerate), dynamic file discovery, PRIORITY
+    ordering over the profile's own decision/dispatcher axes
+    (profile-aware since the tier2 spec unpick).
 
     Fingerprint note (Kim fix, CORRECTED — the pre-fix docstring
     wrongly claimed "the label fingerprint differs from every other
@@ -3586,8 +3613,6 @@ def _steady_recovery_spec(ctx: CaseContext) -> EnvSpec:
         discovery="discovery_file",
         config_overrides=ConfigOverride(
             ordering="priority",
-            decision="fixed_window",
-            dispatcher="batch",
             queue_timeout_ms=OMIT,
         ),
         # Fingerprint discriminator (Kim fix, corrected docstring above):
@@ -3628,7 +3653,9 @@ def _bal_exec_cv(
 
 @case(
     "elastic_steady_state_recovery",
-    profiles=["batch-window"],  # elastic family: BATCH dispatcher + fault axes
+    profiles=[
+        "batch-window"
+    ],  # spec is profile-aware since the tier2 unpick; bw-only scope is historical/pending expansion
     source=(
         "balance-metrics v2 design §2.4 "
         "(flexlb-balance-metrics-v2-design.md): graceful scale-in, "
