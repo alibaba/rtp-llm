@@ -245,3 +245,5 @@ Checks: `fresh_accepted_zero.contract`, `fresh_fetch_zero.contract`, `prefill_co
 The four TTL-metric variants retain the old 180-second cold-exporter readiness gate, recorded attempts and two-path fallback. Debug observation requires scheduler/queues and the complete declared Prefill/Decode/engine directory with matching endpoint generations.
 
 ACK multi-error checks only scheduler drain and its three-second endpoint sample. Execution partial compares fingerprint endpoints and restores serial Prefill to 100 ms immediately after clearing its fault. Duplicate-finished does not promote the ignored preliminary drain result to an assertion. Decode-before-Prefill keeps fallback drain observational and checks final Prefill batches after clear.
+
+Special-ID real-request probes retain `error_code: 8500` for both batch zero and batch negative-one. The unknown-batch program installs 3000 ms Prefill performance before its control request, then sends its target request, matching the original construction order.
