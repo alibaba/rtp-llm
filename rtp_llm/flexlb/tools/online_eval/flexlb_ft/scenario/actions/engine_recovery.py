@@ -293,6 +293,12 @@ def execute_observe(ctx, params, deadline):
     try:
         while True:
             deadline.check()
+            if (
+                frames
+                and params.get("until")
+                and ctx.clock() >= start + params["duration_s"]
+            ):
+                break
             if ctx.env_epoch != epoch:
                 raise RuntimeError("environment changed during recovery observation")
             frame = status._frame(
@@ -330,7 +336,11 @@ def execute_observe(ctx, params, deadline):
             if ctx.clock() >= start + params["duration_s"]:
                 break
             deadline.sleep(
-                min(params["interval_s"], start + params["duration_s"] - ctx.clock())
+                params["interval_s"]
+                if until
+                else min(
+                    params["interval_s"], start + params["duration_s"] - ctx.clock()
+                )
             )
     except Exception as error:
         status._artifact(
@@ -803,7 +813,8 @@ def execute_pump(ctx, params, deadline):
     name = next(iter(selection["targets"]))
     before = status._count(status._mock(ctx, deadline)[name]["accepted"])
     started, frames = ctx.clock(), []
-    while True:
+    after = before
+    while ctx.clock() < started + params["duration_s"]:
         deadline.check()
         if len(frames) >= 256:
             raise RuntimeError("accepted pump exceeds 256-attempt budget")
@@ -842,9 +853,12 @@ def execute_pump(ctx, params, deadline):
         frames.append(
             {"records": cohort.snapshot_records(), "accepted": after, "at": ctx.clock()}
         )
-        if after > before or ctx.clock() >= started + params["duration_s"]:
+        if after > before:
             break
-        deadline.sleep(min(0.2, started + params["duration_s"] - ctx.clock()))
+        deadline.sleep(0.2)
+    if after <= before:
+        after = status._count(status._mock(ctx, deadline)[name]["accepted"])
+        frames.append({"records": [], "accepted": after, "at": ctx.clock()})
     return StageOutput(
         {"grew": after > before},
         [
@@ -1295,14 +1309,15 @@ def execute_retire_all(ctx, params, deadline):
     samples, verdicts = [], {}
     for name in targets:
         end = ctx.clock() + params["per_target_s"]
-        while True:
+        retired = False
+        while ctx.clock() < end:
             counts = _log_counts(mark, deadline)
             samples.append(counts)
             retired = counts["counts"][name]["retired"] > 0
-            if retired or ctx.clock() >= end:
-                verdicts[name] = retired
+            if retired:
                 break
-            deadline.sleep(min(0.2, end - ctx.clock()))
+            deadline.sleep(0.2)
+        verdicts[name] = retired
     passed = all(verdicts.values())
     return StageOutput(
         {},
@@ -1345,13 +1360,16 @@ def execute_residue(ctx, params, deadline):
         params["base_residue"] + len(records) - metric({"records": records}, "success")
     )
     frames, end = [], ctx.clock() + params["settle_s"]
-    while True:
+    first = None
+    while ctx.clock() < end:
         frame = status._frame(ctx, {"include": ["inflight"]}, deadline)
         frames.append(frame)
         first = metric(frame, "scheduler")
-        if first <= allowed or ctx.clock() >= end:
+        if first <= allowed:
             break
-        deadline.sleep(min(1, end - ctx.clock()))
+        deadline.sleep(1)
+    if first is None:
+        raise RuntimeError("residue observation contains no scheduler sample")
     bounded = first <= allowed
     later = None
     if bounded:

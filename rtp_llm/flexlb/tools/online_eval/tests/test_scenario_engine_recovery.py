@@ -25,6 +25,7 @@ class Model:
     def __init__(self, mode="correct"):
         self.mode, self.restored, self.cleaned = mode, False, False
         self.wiped = set()
+        self.schedule_shapes = []
         self.routed = {}
         self.cancel_failure_ids = set()
         self.master_cancel_attempts = 0
@@ -41,6 +42,7 @@ class Model:
             call = future(*args, **kwargs)
             req = args[0]
             rid, shape = req
+            self.schedule_shapes.append(dict(shape))
             if (
                 self.mode == "master_cancel_unavailable"
                 and shape.get("input_len") == 512
@@ -338,6 +340,32 @@ class RecoveryTest(unittest.TestCase):
         with self.assertRaises(FileNotFoundError):
             recovery._log_counts(mark, Deadline(100, lambda: 0))
 
+    def test_poll_does_not_accept_a_new_sample_at_the_expired_window(self):
+        clock = Clock()
+        with tempfile.TemporaryDirectory() as root:
+            ctx = RuntimeContext(
+                {"environment": {"n_prefill": 2}}, None, root, clock, clock.sleep
+            )
+            ctx.env_epoch = 1
+            params = {
+                "duration_s": 0.5,
+                "interval_s": 0.5,
+                "include": ["info"],
+                "until": {"metric": "alive_prefill", "op": "ge", "value": 2},
+            }
+            frames = [
+                {"info": {"worker_summary": {"PREFILL": {"alive": n}}}} for n in (1, 2)
+            ]
+            with patch.object(recovery.status, "_frame", side_effect=frames) as capture:
+                result = recovery.execute_observe(
+                    ctx, params, Deadline(clock() + 10, clock, clock.sleep)
+                )
+            snapshot = recovery._snapshot(ctx, result.output["snapshot"])
+            self.assertEqual(1, capture.call_count)
+            self.assertEqual(
+                1, recovery.metric(snapshot["frames"][-1], "alive_prefill")
+            )
+
     def test_missing_target_ledger_is_error_not_zero(self):
         frame = {"targets": {"p": {"ip_port": "missing"}}, **owner_frame()}
         with self.assertRaises(RuntimeError):
@@ -374,6 +402,16 @@ class RecoveryTest(unittest.TestCase):
             len(plans),
         )
         for plan in plans:
+            if variant == "crash_after":
+                prepared = [
+                    st for st in plan["stages"] if st["action"] == "recovery_prepare"
+                ]
+                self.assertEqual(
+                    ["trigger", "takeover", "recovery"], [st["id"] for st in prepared]
+                )
+                self.assertEqual(
+                    [10, 10, 10], [st["params"]["output_len"] for st in prepared]
+                )
             with self.subTest(
                 profile=plan["profile"], mode=mode
             ), tempfile.TemporaryDirectory() as root:
@@ -398,6 +436,11 @@ class RecoveryTest(unittest.TestCase):
                     )
                 self.assertEqual(expected, result["status"], result)
                 self.assertTrue(model.cleaned)
+                if variant == "crash_after":
+                    self.assertEqual(7, len(model.schedule_shapes))
+                    self.assertEqual(
+                        {10}, {shape["output_len"] for shape in model.schedule_shapes}
+                    )
                 if mode == "master_cancel_unavailable":
                     self.assertGreater(model.master_cancel_attempts, 0)
                     self.assertEqual(0, model.worker_cancel_attempts)

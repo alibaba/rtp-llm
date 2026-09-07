@@ -48,6 +48,7 @@ variants:
         metric: cleanup_inflight
         op: eq
         value: 0
+      interval_s: 0.5
     timeout_s: 110
   - id: target
     action: recovery_select
@@ -117,6 +118,7 @@ variants:
         $ref: stages.log_mark.output.snapshot
       include:
       - log
+      interval_s: 0.2
     timeout_s: 45
   - id: transport_retired
     action: recovery_check
@@ -142,6 +144,7 @@ variants:
         value: 2
       include:
       - info
+      interval_s: 0.5
     timeout_s: 45
   - id: alive_back
     action: recovery_check
@@ -240,6 +243,7 @@ variants:
         metric: cleanup_inflight
         op: eq
         value: 0
+      interval_s: 0.5
     timeout_s: 110
   - id: target
     action: recovery_select
@@ -399,6 +403,7 @@ variants:
         metric: cleanup_inflight
         op: eq
         value: 0
+      interval_s: 0.5
     timeout_s: 110
   - id: baseline
     action: recovery_prepare
@@ -463,6 +468,7 @@ variants:
         value: 1
       include:
       - info
+      interval_s: 0.5
     timeout_s: 45
   - id: survivor_only_alive
     action: recovery_check
@@ -532,6 +538,7 @@ variants:
         value: 2
       include:
       - info
+      interval_s: 0.5
     timeout_s: 45
   - id: alive_back
     action: recovery_check
@@ -608,6 +615,7 @@ variants:
         metric: cleanup_inflight
         op: eq
         value: 0
+      interval_s: 0.5
     timeout_s: 110
   - id: closing_drain_scheduler
     action: recovery_check
@@ -938,6 +946,7 @@ variants:
         value: 0
       include:
       - info
+      interval_s: 0.2
     timeout_s: 45
   - id: topology_discovered
     action: recovery_check
@@ -992,6 +1001,7 @@ variants:
         metric: cleanup_inflight
         op: eq
         value: 0
+      interval_s: 0.5
     timeout_s: 110
   - id: closing_drain_scheduler
     action: recovery_check
@@ -1038,6 +1048,7 @@ variants:
         metric: cleanup_inflight
         op: eq
         value: 0
+      interval_s: 0.5
     timeout_s: 110
   - id: seed
     action: recovery_prepare
@@ -1113,6 +1124,7 @@ variants:
         $ref: stages.holder.output.selection
       include:
       - mock
+      interval_s: 0.5
     timeout_s: 30
   - id: holder_has_whole_family
     action: recovery_check
@@ -1159,6 +1171,7 @@ variants:
         $ref: stages.log_mark.output.snapshot
       include:
       - log
+      interval_s: 0.2
     timeout_s: 45
   - id: holder_retired
     action: recovery_check
@@ -1184,6 +1197,7 @@ variants:
         value: 2
       include:
       - info
+      interval_s: 0.5
     timeout_s: 45
   - id: holder_alive_back
     action: recovery_check
@@ -1309,6 +1323,7 @@ variants:
         $ref: stages.holder.output.selection
       include:
       - mock
+      interval_s: 0.5
     timeout_s: 30
   - id: wiped_family_absent
     action: recovery_check
@@ -1392,6 +1407,7 @@ variants:
         metric: cleanup_inflight
         op: eq
         value: 0
+      interval_s: 0.5
     timeout_s: 110
   - id: target
     action: recovery_select
@@ -1445,6 +1461,7 @@ variants:
         $ref: stages.target.output.selection
       include:
       - mock
+      interval_s: 0.5
     timeout_s: 30
   - id: pressure_construction_observed
     action: recovery_check
@@ -1486,6 +1503,7 @@ variants:
         $ref: stages.log_mark.output.snapshot
       include:
       - log
+      interval_s: 0.2
     timeout_s: 45
   - id: pressure_generation_retired
     action: recovery_check
@@ -1511,6 +1529,7 @@ variants:
         value: 2
       include:
       - info
+      interval_s: 0.5
     timeout_s: 45
   - id: alive_back
     action: recovery_check
@@ -1608,7 +1627,7 @@ variants:
       selection:
         $ref: stages.target.output.selection
       duration_s: 15
-    timeout_s: 50
+    timeout_s: 90
   - id: recovery
     action: recovery_prepare
     params:
@@ -1678,6 +1697,7 @@ variants:
       count: 1
       concurrency: 1
       stream_timeout_s: 12
+      output_len: 10
   - id: trigger_dispatch
     action: recovery_dispatch
     params:
@@ -1741,6 +1761,7 @@ variants:
         value: 1
       include:
       - info
+      interval_s: 0.5
     timeout_s: 45
   - id: master_observed_loss
     action: recovery_check
@@ -1761,6 +1782,7 @@ variants:
       count: 5
       concurrency: 5
       stream_timeout_s: 12
+      output_len: 10
   - id: takeover_dispatch
     action: recovery_dispatch
     params:
@@ -1800,6 +1822,7 @@ variants:
         value: 2
       include:
       - info
+      interval_s: 0.5
     timeout_s: 45
   - id: crashed_engine_rediscovers
     action: recovery_check
@@ -1820,6 +1843,7 @@ variants:
       count: 1
       concurrency: 1
       stream_timeout_s: 12
+      output_len: 10
   - id: recovery_dispatch
     action: recovery_dispatch
     params:
@@ -1864,6 +1888,7 @@ variants:
         $ref: stages.prefills.output.selection
       include:
       - mock
+      interval_s: 0.5
     timeout_s: 30
   - id: prefill_engines_clean_inflight
     action: recovery_check
@@ -1903,6 +1928,7 @@ variants:
         metric: cleanup_inflight
         op: eq
         value: 0
+      interval_s: 0.5
     timeout_s: 110
   - id: prefills
     action: recovery_select
@@ -2017,6 +2043,7 @@ variants:
         value: 2
       include:
       - info
+      interval_s: 0.5
     timeout_s: 45
   - id: all_prefills_alive
     action: recovery_check
@@ -2124,6 +2151,7 @@ variants:
         $ref: stages.targets.output.selection
       include:
       - mock
+      interval_s: 0.5
     timeout_s: 30
   - id: engine_drain_inflight
     action: recovery_check
@@ -2149,6 +2177,7 @@ variants:
         metric: cleanup_inflight
         op: eq
         value: 0
+      interval_s: 0.5
     timeout_s: 110
   - id: master_drain_scheduler
     action: recovery_check
@@ -2220,6 +2249,7 @@ variants:
         metric: cleanup_inflight
         op: eq
         value: 0
+      interval_s: 0.5
     timeout_s: 110
   - id: target
     action: recovery_select
@@ -2310,6 +2340,7 @@ variants:
         $ref: stages.log_mark.output.snapshot
       include:
       - log
+      interval_s: 0.2
     timeout_s: 30
   - id: long_gap_retires
     action: recovery_check
@@ -2340,6 +2371,7 @@ variants:
         value: 2
       include:
       - info
+      interval_s: 0.5
     timeout_s: 45
   - id: prefill_alive_back
     action: recovery_check
@@ -2388,6 +2420,7 @@ variants:
         metric: cleanup_inflight
         op: eq
         value: 0
+      interval_s: 0.5
     timeout_s: 110
   - id: master_drain_scheduler
     action: recovery_check

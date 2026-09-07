@@ -56,6 +56,14 @@ generation turnover, first-wave success and zero LACK_MEM delta, accepted-counte
 growth and recovery. The fixture where used_after stays nonzero passes this
 intentional old boundary.
 
+Crash-after trigger, takeover and recovery explicitly keep the old default output
+length of 10; other families retain their explicit output length of 2. Alive,
+cache ownership, KV usage and drain polls keep the old 0.5-second cadence;
+retirement and topology polls keep 0.2 seconds. Predicate polling does not add
+a new sample at an expired observation deadline. Missing-source handling and
+owned cleanup remain explicit differences, so wall-clock execution is not claimed
+to be identical.
+
 Crash controls arm either the first EnqueueBatch or the selected engine's current
 EnqueueBatch counter plus one. The actual stopped set chooses restart targets;
 survivors are disarmed before takeover. The no-resurrection path selects only
@@ -70,7 +78,10 @@ bound is 1 + failed takeover observations, followed by the original 8-second
 non-growth sample. It is not a global zero assertion.
 
 Request dispatch stage budgets cover every serial Schedule plus its legacy result
-window, with execution overhead allowance; they do not shorten the five serial
+window, with execution overhead allowance. The accepted pump also permits a
+request begun just before its 15-second window to finish Schedule and its
+10-second observation; the loop keeps the old 0.2-second cadence and final
+counter read. Execution caps do not shorten the five serial
 KV samples or the two TTFT waves. Requests, log readers, controls and repeated
 probes are bounded. The two serial
 pumps allow at most 256 attempts (above the 0.2-second cadence's maximum in their
@@ -80,7 +91,7 @@ environments; teardown replaces shared-state restoration after failures. Explici
 perf/pressure restore callbacks remain owned and execute before environment
 teardown. Old callables remain retained, and no old case body is invoked.
 
-Local validation: 27 focused tests pass, including 72 full-program executions
+Local validation: 28 focused tests pass, including 72 full-program executions
 across all nine variants and positive/negative profile combinations. Additional
 unit evidence covers exact endpoint log matching, truncation/missing-log errors,
 missing target ledgers, independent Schedule/Generate shapes, upper-index TTFT
