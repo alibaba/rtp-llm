@@ -1266,12 +1266,22 @@ def aggregate(
                 # Runner died before writing JSON (crash / Ctrl-C): the
                 # missing rows are accounted by the lane rc, not faked.
                 continue
-            # Counts come from the runner's own summary (single source of
-            # truth for the four-way classification); case rows are merged
-            # verbatim below.
+            # Preserve child classification counts, with a failure floor
+            # from concrete result rows; rows are merged verbatim below.
             summary = payload.get("summary", {})
             for key in counts:
-                counts[key] += int(summary.get(key, 0))
+                value = int(summary.get(key, 0))
+                if key == "failed":
+                    # Execution errors cannot disappear in an older or
+                    # incomplete child summary, including expected-fail cases.
+                    value = max(
+                        value,
+                        sum(
+                            row.get("status") in {"FAIL", "ERROR", "TIMEOUT"}
+                            for row in payload.get("cases", [])
+                        ),
+                    )
+                counts[key] += value
             for row in payload.get("cases", []):
                 row["lane"] = lr.lane_idx
                 all_cases.append(row)

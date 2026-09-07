@@ -365,6 +365,34 @@ class AggregateTest(unittest.TestCase):
         self.assertEqual([0, 0, 1], [row["lane"] for row in payload["cases"]])
         self.assertEqual(2, len(payload["lanes"]))
 
+    def test_execution_errors_fail_even_when_summary_omits_them(self):
+        for status in ("ERROR", "TIMEOUT"):
+            for summary_failed in (0, 1):
+                with self.subTest(
+                    status=status, summary_failed=summary_failed
+                ), tempfile.TemporaryDirectory() as tmp:
+                    path = Path(tmp) / "result.json"
+                    _write_runner_json(
+                        path,
+                        [
+                            {
+                                "name": "observation",
+                                "status": status,
+                                "expected_fail": True,
+                            }
+                        ],
+                        {"total": 1, "failed": summary_failed},
+                    )
+                    args = argparse.Namespace(
+                        parallel=1, profile="batch-window", grade="normal"
+                    )
+                    payload = parallel_runner.aggregate(
+                        [_lane_result(0, [("status", 0, path)])], args, wall_s=1
+                    )
+                    self.assertEqual(1, payload["summary"]["failed"])
+                    self.assertEqual(1, payload["summary"]["exit_code"])
+                    self.assertEqual(status, payload["cases"][0]["status"])
+
     def test_lane_rc_failure_forces_exit_code_even_without_fail_rows(self):
         # A runner that crashed before writing JSON has no FAIL rows, but
         # its rc must still gate the aggregate exit code.
