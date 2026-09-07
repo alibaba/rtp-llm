@@ -1351,3 +1351,93 @@ class DeepSeekV4Model(GptModelBase):
                 fmha_impl,
                 prepare_hidden_fn=prep_decode,
             )
+
+
+# ---------------------------------------------------------------------------
+# M4 capture probe (Sep 8 night): DSV4_PREFILL_CAPTURE=1 wraps
+# DeepSeekV4Model.forward with a per-signature CUDA-graph capture attempt.
+# After 2 identical calls (same tensor shapes AND same data_ptrs — the probe
+# targets the workspace/pool-backed stable-address regime), call 3 attempts a
+# capture; later same-signature calls replay. Any capture-illegal op (a DtoH
+# sync, an unsupported kernel) raises cudaErrorStreamCaptureInvalidated — the
+# wrapper logs the error and falls back to eager permanently for that
+# signature (safe degradation; the log IS the M4 integration checklist).
+# Default off; probe-only, production paths unaffected.
+# ---------------------------------------------------------------------------
+_PREFILL_CAPTURE = os.environ.get("DSV4_PREFILL_CAPTURE", "0") == "1"
+if _PREFILL_CAPTURE and not globals().get("_PREFILL_CAPTURE_PATCHED", False):
+    _PREFILL_CAPTURE_PATCHED = True
+    import traceback as _tb
+
+    def _p4_signature(inputs):
+        sig = []
+        ptrs = []
+        def _walk(obj, path, depth):
+            if depth > 3:
+                return
+            if torch.is_tensor(obj):
+                sig.append((path, tuple(obj.shape), str(obj.dtype)))
+                ptrs.append((path, obj.data_ptr()))
+            elif isinstance(obj, (list, tuple)):
+                for i, v in enumerate(obj[:16]):
+                    _walk(v, f"{path}[{i}]", depth + 1)
+            else:
+                for name in dir(obj):
+                    if name.startswith("_"):
+                        continue
+                    try:
+                        v = getattr(obj, name)
+                    except Exception:
+                        continue
+                    if callable(v):
+                        continue
+                    _walk(v, f"{path}.{name}", depth + 1)
+        _walk(inputs, "inputs", 0)
+        return tuple(sig), tuple(ptrs)
+
+    _p4_state = {}
+    _orig_forward = DeepSeekV4Model.forward
+
+    def _capturing_forward(self, inputs, fmha_impl=None):
+        try:
+            sig, ptrs = _p4_signature(inputs)
+        except Exception:
+            return _orig_forward(self, inputs, fmha_impl)
+        st = _p4_state.get(sig)
+        if st is None:
+            _p4_state[sig] = {"n": 1, "ptrs": ptrs}
+            print("[P4CAP] call#1 signature tensors=%d" % len(sig), flush=True)
+            return _orig_forward(self, inputs, fmha_impl)
+        st["n"] += 1
+        if st["n"] == 2:
+            if ptrs == st["ptrs"]:
+                print("[P4CAP] call#2 ptrs STABLE -> capturing on #3", flush=True)
+            else:
+                st["unstable"] = True
+                print("[P4CAP] call#2 ptrs UNSTABLE (per-request allocs) -> eager only", flush=True)
+            return _orig_forward(self, inputs, fmha_impl)
+        if st.get("dead") or st.get("unstable"):
+            return _orig_forward(self, inputs, fmha_impl)
+        if st.get("graph") is not None:
+            st["graph"].replay()
+            return st["out"]
+        if st["n"] != 3:
+            return _orig_forward(self, inputs, fmha_impl)
+        # call #3: attempt capture of the full forward (output lives in the
+        # graph pool — stable across replays)
+        print("[P4CAP] call#3 ATTEMPTING capture", flush=True)
+        g = torch.cuda.CUDAGraph()
+        try:
+            with torch.cuda.graph(g):
+                out2 = _orig_forward(self, inputs, fmha_impl)
+            torch.cuda.synchronize()
+            st["graph"] = g
+            st["out"] = out2
+            print("[P4CAP] CAPTURE OK — replaying from call#4", flush=True)
+        except Exception as ex:
+            st["dead"] = True
+            print("[P4CAP] CAPTURE FAILED (first blocker): %s" % repr(ex)[:400], flush=True)
+        return _orig_forward(self, inputs, fmha_impl)
+
+    DeepSeekV4Model.forward = _capturing_forward
+    print("[P4CAP] capture probe installed (DSV4_PREFILL_CAPTURE=1)", flush=True)
