@@ -30,12 +30,14 @@ class Backend:
         terminals=None,
         comparator=False,
         invert_fifo=False,
+        pure_priority=False,
     ):
         self.ops = Ops(batch=False)
         self.ops.master_http_port = 1
         self.reverse, self.missing = reverse, missing
         self.queued = queued
         self.comparator, self.invert_fifo = comparator, invert_fifo
+        self.pure_priority = pure_priority
         self.environments = []
         original_future = self.ops.future
 
@@ -115,6 +117,8 @@ class Backend:
             }
         if self.comparator:
             order = [1, 2, 4, 5, 6, 3, 7, 8, 9, 10, 11, 12]
+            if self.pure_priority:
+                order[:6] = [1, 4, 5, 6, 2, 3]
             if self.invert_fifo:
                 order[8], order[9] = order[9], order[8]
             lifecycle = {
@@ -416,7 +420,8 @@ class PreemptionPrograms(unittest.TestCase):
         self.assertEqual(12, backend.ops.generate_count)
         stages = {s["id"]: s for s in result["stages"]}
         self.assertEqual("PASS", stages["r1_same_priority"]["status"])
-        self.assertEqual("FAIL", stages["r2_same_priority"]["status"])
+        self.assertEqual("PASS", stages["r2_same_priority"]["status"])
+        self.assertEqual("FAIL", stages["comparator_verdict"]["status"])
 
     def test_comparator_rejected_first_placeholder_never_rebuilds_environment(self):
         result, _, backend = self.run_program(
@@ -425,3 +430,21 @@ class PreemptionPrograms(unittest.TestCase):
         self.assertEqual("FAIL", result["status"])
         self.assertEqual(1, len(backend.environments))
         self.assertEqual(1, len(backend.shapes))
+
+    def test_comparator_first_half_failure_still_executes_fifo_and_fails_final(self):
+        result, cohorts, backend = self.run_program(
+            variant="comparator_frozen_weak", comparator=True, pure_priority=True
+        )
+        self.assertEqual("FAIL", result["status"], result)
+        self.assertEqual(12, backend.ops.generate_count)
+        self.assertEqual(2, len(backend.environments))
+        self.assertEqual([1, 1, 5, 5], sorted(map(len, cohorts)))
+        stages = {s["id"]: s for s in result["stages"]}
+        self.assertEqual("PASS", stages["fifo_environment"]["status"])
+        self.assertEqual("PASS", stages["r2_master_clean"]["status"])
+        checks = {c["id"]: c for c in stages["comparator_verdict"]["checks"]}
+        self.assertEqual(
+            {"priority_half": False, "fifo_half": True}, checks["PR9"]["actual"]
+        )
+        self.assertEqual("FAIL", checks["PR9"]["status"])
+        self.assertEqual("FAIL", checks["P6"]["status"])
