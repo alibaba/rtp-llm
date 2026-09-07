@@ -346,6 +346,52 @@ class PendingTests(unittest.TestCase):
                 result = pending.accounting(ctx, {}, Deadline(60, clock, clock.sleep))
             self.assertEqual([c.status for c in result.checks], ["FAIL"] * 3)
 
+    def test_accounting_local_deadline_crossing_never_returns_negative(self):
+        clock = Clock()
+
+        def outer_remaining():
+            clock.now = 50.01
+            return 100
+
+        with tempfile.TemporaryDirectory() as temp:
+            ctx = NS(clock=clock, artifact_dir=Path(temp))
+
+            def crossing(ctx, endpoint, deadline):
+                clock.now = 49.99
+                # The outer deadline call crosses the local deadline before
+                # its remaining value can be returned to urlopen.
+                return deadline.remaining()
+
+            with patch.object(life, "_master_get", side_effect=crossing):
+                with self.assertRaisesRegex(TimeoutError, "accounting"):
+                    pending.accounting(ctx, {}, NS(remaining=outer_remaining))
+
+    def test_accounting_poll_sleep_is_positive_at_the_local_boundary(self):
+        clock = Clock()
+        sleeps = []
+
+        def sleeper(seconds):
+            self.assertGreater(seconds, 0)
+            sleeps.append(seconds)
+            clock.now += seconds + 0.02
+
+        with tempfile.TemporaryDirectory() as temp:
+            ctx = NS(clock=clock, artifact_dir=Path(temp))
+
+            def near_end(*args):
+                clock.now = 49.99
+                return dict(
+                    scheduler_inflight=1,
+                    prefill_endpoints=[dict(inflight_batches=1)],
+                    decode_endpoints=[dict(total_load=1)],
+                )
+
+            with patch.object(life, "_master_get", side_effect=near_end):
+                result = pending.accounting(ctx, {}, NS(sleep=sleeper))
+            self.assertEqual(len(sleeps), 1)
+            self.assertAlmostEqual(sleeps[0], 0.01)
+            self.assertEqual([c.status for c in result.checks], ["FAIL"] * 3)
+
     def test_zero_errors_is_stronger_than_legacy_terminal(self):
         result, _ = self.run_program("zero_errors")
         rows = {r["id"]: r for r in result["stages"]}
