@@ -7,10 +7,9 @@ from typing import TYPE_CHECKING, Any, Dict, Optional
 import torch
 
 from rtp_llm.models_py.distributed.collective_torch import Group, get_process_group
-from rtp_llm.models_py.distributed.sequence_parallel import TokenShardLayout
+from rtp_llm.models_py.distributed.sequence_parallel import SequenceParallelLayout
 from rtp_llm.models_py.modules.base import RMSNorm
 from rtp_llm.models_py.modules.factory import LinearFactory
-from rtp_llm.models_py.modules.factory.linear.parallel import row_parallel_linear
 from rtp_llm.models_py.modules.hybrid.mla_attention import MlaAttention
 from rtp_llm.models_py.modules.kimi_k3.all_gather_gemm import all_gather_gemm
 from rtp_llm.models_py.modules.kimi_k3.gemm_reduce_scatter import gemm_reduce_scatter
@@ -122,41 +121,31 @@ class KimiK3MLA(MlaAttention):
                 )
         self.output_gate_op = Fp8SigmoidGate() if self._fp8_enabled else SigmoidGate()
         self._sp_active_for_forward = False
-        self._sp_padded_for_forward = False
-        self._sp_prefill_input_is_sharded = False
-        self._sp_prefill_layout_for_forward: Optional[TokenShardLayout] = None
+        self._sp_layout_for_forward: Optional[SequenceParallelLayout] = None
 
     def _project_qkv_a_input(
         self, hidden_states: torch.Tensor
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
-        prefill_layout = getattr(self, "_sp_prefill_layout_for_forward", None)
+        sp_layout = self._sp_layout_for_forward
         if getattr(self, "_fp8_enabled", False):
-            if self._sp_prefill_input_is_sharded:
-                logical_tokens = (
-                    hidden_states.shape[0] * self.attn_tp_size
-                    if prefill_layout is None
-                    else prefill_layout.logical_tokens
-                )
+            if self._sp_active_for_forward:
+                assert sp_layout is not None
                 qkv, gate = all_gather_gemm(
                     hidden_states,
                     [self.fused_qkv_a_proj, self._fp8_gate],
-                    logical_m=logical_tokens,
+                    logical_m=sp_layout.physical_tokens,
                 )
             else:
                 quantized = self.fused_qkv_a_proj.quantize_input(hidden_states)
                 qkv = self.fused_qkv_a_proj.forward_quantized(*quantized)
                 gate = self._fp8_gate.forward_quantized(*quantized)
             return qkv, gate
-        if self._sp_prefill_input_is_sharded:
-            logical_tokens = (
-                hidden_states.shape[0] * self.attn_tp_size
-                if prefill_layout is None
-                else prefill_layout.logical_tokens
-            )
+        if self._sp_active_for_forward:
+            assert sp_layout is not None
             packed = all_gather_gemm(
                 hidden_states,
                 [self._packed_qkv_gate_w],
-                logical_m=logical_tokens,
+                logical_m=sp_layout.physical_tokens,
             )[0]
             return torch.split(
                 packed,
@@ -197,25 +186,11 @@ class KimiK3MLA(MlaAttention):
 
     def _project_output(self, attn_output: torch.Tensor) -> torch.Tensor:
         if self._sp_active_for_forward:
-            tp_size = self.parallelism_config.get_attn_tp_size()
-            pad_reduce_scatter = self._sp_padded_for_forward or (
-                self._sp_prefill_input_is_sharded
-                and attn_output.shape[0] % tp_size != 0
-            )
-            if self._sp_prefill_input_is_sharded:
-                return gemm_reduce_scatter(
-                    attn_output,
-                    self._o_w,
-                    get_process_group(Group.TP),
-                    pad_rows=pad_reduce_scatter,
-                )
-            return row_parallel_linear(
+            return gemm_reduce_scatter(
                 attn_output,
                 self._o_w,
-                tp_size,
-                reduce_scatter_tokens=True,
-                pad_reduce_scatter_tokens=pad_reduce_scatter,
-                use_input_dtype_reduce_scatter=(self._sp_prefill_input_is_sharded),
+                get_process_group(Group.TP),
+                pad_rows=False,
             )
         return super()._project_output(attn_output)
 
@@ -226,7 +201,7 @@ class KimiK3MLA(MlaAttention):
         kv_cache: Optional[LayerKVCache] = None,
         attention_inputs: Optional[PyAttentionInputs] = None,
         sequence_parallel: bool = False,
-        prefill_sp_layout: Optional[TokenShardLayout] = None,
+        sp_layout: Optional[SequenceParallelLayout] = None,
     ) -> torch.Tensor:
         attn_inputs = _select_mla_attention_inputs(attention_inputs, fmha_impl)
         self._sp_active_for_forward = bool(
@@ -235,31 +210,21 @@ class KimiK3MLA(MlaAttention):
             and hidden_states.is_cuda
             and attn_inputs is not None
         )
-        self._sp_prefill_input_is_sharded = prefill_sp_layout is not None
-        self._sp_prefill_layout_for_forward = prefill_sp_layout
-        if prefill_sp_layout is not None and (
-            not self._sp_active_for_forward
-            or attn_inputs is None
-            or not attn_inputs.is_prefill
+        self._sp_layout_for_forward = sp_layout
+        if self._sp_active_for_forward and (
+            sp_layout is None
+            or int(hidden_states.shape[0]) != sp_layout.local_tokens
         ):
             raise ValueError(
-                "prefill_sp_layout requires production CUDA MLA Prefill "
-                "Sequence Parallel with TP>1"
+                "K3 MLA Sequence Parallel requires the matching physical token shard"
             )
-        self._sp_padded_for_forward = bool(
-            self._sp_active_for_forward
-            and attn_inputs is not None
-            and not attn_inputs.is_prefill
-        )
         if not hidden_states.is_cuda:
             raise RuntimeError("Kimi K3 MLA requires CUDA")
         try:
             return super().forward(hidden_states, fmha_impl, kv_cache)
         finally:
             self._sp_active_for_forward = False
-            self._sp_padded_for_forward = False
-            self._sp_prefill_input_is_sharded = False
-            self._sp_prefill_layout_for_forward = None
+            self._sp_layout_for_forward = None
 
 
 __all__ = [

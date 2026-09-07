@@ -11,15 +11,10 @@ from torch import nn
 from rtp_llm.model_loader.linear_attn_weight import split_kda_qkvg_fa_beta_sections
 from rtp_llm.models_py.distributed.collective_torch import (
     Group,
-    all_reduce,
     get_process_group,
 )
-from rtp_llm.models_py.distributed.sequence_parallel import (
-    TokenShardLayout,
-    shard_tokens_with_padding,
-)
+from rtp_llm.models_py.distributed.sequence_parallel import SequenceParallelLayout
 from rtp_llm.models_py.modules.factory import LinearFactory
-from rtp_llm.models_py.modules.factory.linear.parallel import row_parallel_linear
 from rtp_llm.models_py.modules.kimi_k3.all_gather_gemm import all_gather_gemm
 from rtp_llm.models_py.modules.kimi_k3.gemm_reduce_scatter import gemm_reduce_scatter
 from rtp_llm.models_py.modules.kimi_k3.projection_ktp import (
@@ -248,7 +243,7 @@ class KimiK3KDA(nn.Module):
         self,
         hidden_states: torch.Tensor,
         *,
-        prefill_sp_layout: Optional[TokenShardLayout],
+        sp_layout: Optional[SequenceParallelLayout],
     ) -> tuple[
         torch.Tensor,
         torch.Tensor,
@@ -261,8 +256,6 @@ class KimiK3KDA(nn.Module):
         """Run and unpack the loader-provided Q/K/V/G/F_A/beta projection."""
 
         if self.ktp_size > 1:
-            if prefill_sp_layout is not None:
-                raise RuntimeError("Projection KTP cannot run the Prefill SP path")
             result = project_kda_inputs_ktp(
                 hidden_states,
                 self.kda_fused_w,
@@ -289,11 +282,11 @@ class KimiK3KDA(nn.Module):
                 result.output_gate,
             )
 
-        if prefill_sp_layout is not None:
+        if self.attn_tp_size > 1 and sp_layout is not None:
             projected_fused = all_gather_gemm(
                 hidden_states,
                 [self.kda_fused_w],
-                logical_m=prefill_sp_layout.logical_tokens,
+                logical_m=sp_layout.physical_tokens,
             )[0]
         else:
             projected_fused = (
@@ -377,60 +370,30 @@ class KimiK3KDA(nn.Module):
         output: torch.Tensor,
         output_gate: torch.Tensor,
         *,
-        is_target_verify: bool,
         sequence_parallel: bool,
-        hidden_states: torch.Tensor,
         mode: KDAExecutionMode,
     ) -> torch.Tensor:
         token_count = output_gate.shape[1]
-        # Decode and target-verify must use the same numerics. Mixing the fused
-        # projection path with this explicit path can change near-tied logits.
-        use_explicit_output = mode == "decode"
+        # Prefill, Decode, and target verify share one normalization and
+        # projection path. Physical rows are padded once before modeling, so
+        # the fused ReduceScatter never allocates an intermediate pad buffer.
         output = self.output_norm(output, output_gate, mode)
 
         projection_input = output.reshape(token_count, self.projection_size)
         output_weight = self._fp8_projections.get(
             W.linear_attn_out_w, self.weights[W.linear_attn_out_w]
         )
-        if use_explicit_output:
-            output = (
-                output_weight(projection_input)
-                if self._fp8_enabled
-                else torch.matmul(projection_input, output_weight)
-            )
-            if self.attn_tp_size > 1:
-                output = all_reduce(output, group=Group.TP)
-                decode_sp = (
-                    sequence_parallel and not is_target_verify and hidden_states.is_cuda
-                )
-                if decode_sp:
-                    output, _ = shard_tokens_with_padding(
-                        output,
-                        token_count,
-                        self.attn_tp_size,
-                        self.attn_tp_rank,
-                    )
-            return output
-        use_reduce_scatter = (
-            sequence_parallel and self.attn_tp_size > 1 and hidden_states.is_cuda
-        )
-        pad_reduce_scatter = use_reduce_scatter and (
-            mode == "decode" or token_count % self.attn_tp_size != 0
-        )
-        if mode == "prefill" and use_reduce_scatter:
+        if sequence_parallel and self.attn_tp_size > 1:
             return gemm_reduce_scatter(
                 projection_input,
                 output_weight,
                 get_process_group(Group.TP),
-                pad_rows=pad_reduce_scatter,
+                pad_rows=False,
             )
-        return row_parallel_linear(
-            projection_input,
-            output_weight,
-            self.attn_tp_size,
-            reduce_scatter_tokens=use_reduce_scatter,
-            pad_reduce_scatter_tokens=pad_reduce_scatter,
-            use_input_dtype_reduce_scatter=(mode == "prefill"),
+        return (
+            output_weight(projection_input)
+            if self._fp8_enabled
+            else torch.matmul(projection_input, output_weight)
         )
 
     def _validate_request(
@@ -441,7 +404,7 @@ class KimiK3KDA(nn.Module):
         kv_cache: Optional[LayerKVCache],
         attention_inputs: Optional[PyAttentionInputs],
         sequence_parallel: bool,
-        prefill_sp_layout: Optional[TokenShardLayout],
+        sp_layout: SequenceParallelLayout,
     ) -> bool:
         """Validate the role-specific contract and return target-verify mode."""
 
@@ -461,14 +424,14 @@ class KimiK3KDA(nn.Module):
             raise RuntimeError(
                 "Kimi K3 Prefill, Decode, and target verify require direct paged cache"
             )
-        if prefill_sp_layout is not None and (
-            mode != "prefill"
-            or not sequence_parallel
-            or self.attn_tp_size <= 1
+        if sequence_parallel and (
+            self.attn_tp_size <= 1
             or not hidden_states.is_cuda
+            or int(hidden_states.shape[0]) != sp_layout.local_tokens
         ):
             raise ValueError(
-                "prefill_sp_layout requires CUDA Prefill Sequence Parallel with TP>1"
+                "K3 Sequence Parallel requires a CUDA physical token shard "
+                "whose layout matches attention TP"
             )
         return is_target_verify
 
@@ -481,17 +444,19 @@ class KimiK3KDA(nn.Module):
         kv_cache: Optional[LayerKVCache] = None,
         attention_inputs: Optional[PyAttentionInputs] = None,
         sequence_parallel: bool = False,
-        prefill_sp_layout: Optional[TokenShardLayout] = None,
+        sp_layout: Optional[SequenceParallelLayout] = None,
         prefill_metadata: Optional[KimiKDAPrefillMetadata] = None,
         current_state_registry: Optional[KimiKDACurrentStateRegistry] = None,
     ) -> torch.Tensor:
+        if sp_layout is None:
+            raise ValueError("K3 attention requires a physical token layout")
         is_target_verify = self._validate_request(
             hidden_states,
             mode=mode,
             kv_cache=kv_cache,
             attention_inputs=attention_inputs,
             sequence_parallel=sequence_parallel,
-            prefill_sp_layout=prefill_sp_layout,
+            sp_layout=sp_layout,
         )
         (
             mixed_qkv_projected,
@@ -503,7 +468,7 @@ class KimiK3KDA(nn.Module):
             output_gate_projected,
         ) = self._project_fused_kda_inputs(
             hidden_states,
-            prefill_sp_layout=prefill_sp_layout,
+            sp_layout=sp_layout,
         )
         token_count = q_projected.shape[0]
         output_gate = output_gate_projected.reshape(
@@ -540,9 +505,7 @@ class KimiK3KDA(nn.Module):
         output = self._project_output(
             output,
             output_gate,
-            is_target_verify=is_target_verify,
             sequence_parallel=sequence_parallel,
-            hidden_states=hidden_states,
             mode=mode,
         )
         return output
