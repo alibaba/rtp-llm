@@ -10,6 +10,7 @@ import os
 import signal
 import subprocess
 import threading
+from dataclasses import replace
 from pathlib import Path
 
 from .actions.elastic import ClientRecords, request_success
@@ -547,9 +548,17 @@ class JavaMockBackend:
         class OwnedManager(EnvManager):
             def _start_mock(self, env):
                 owner.environments.append(env)
+                master_spec = env.spec
                 try:
+                    if raw_config is not None:
+                        # A negative startup probe targets Master parsing. The
+                        # mock also parses its config to construct performance
+                        # models, so feeding it the invalid document prevents
+                        # the target Master from ever being launched.
+                        env.spec = replace(master_spec, raw_config=None)
                     return super()._start_mock(env)
                 finally:
+                    env.spec = master_spec
                     owner.remember_processes(env)
 
             def start_master(self, env, *args, **kwargs):
@@ -605,6 +614,7 @@ class JavaMockBackend:
                     lease=self.lease,
                     resolved_config=plan["resolved_config"],
                     raw_config=raw_config,
+                    raw_config_target="master" if raw_config is not None else None,
                     env_epoch=ctx.env_epoch,
                     master_log_dir=str(private_log) if private_log else None,
                     master_sync_log_path=str(sync_log_path) if sync_log_path else None,

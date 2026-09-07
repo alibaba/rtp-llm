@@ -107,7 +107,12 @@ Omitted topology/metric fields retain their prior declaration, while
 raw mutations: `removed_auto_tpm`, `fifo_default_priority`, or
 `owned_without_cancellation`. It launches Java with the resulting raw config,
 records owned Master PIDs/exit codes and private parser logs, then cleans the
-attempt. Python validation failure does not count as Java rejection. `rejected`
+attempt. Python validation failure does not count as Java rejection. The probe
+uses a valid base configuration for the supporting mock process; the raw invalid
+document is injected only into the target Master. The mock config envelope and
+Master raw config remain separate artifacts, since a mock parser rejection does
+not test Master startup. The legacy general-purpose `raw_config` path is unchanged.
+`rejected`
 requires a failed launch, an exited owned Master and a matching parser message;
 `environment_absent` records the manager state **before** forced cleanup, so an
 unexpected successful startup cannot pass that condition by being stopped later.
