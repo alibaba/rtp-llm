@@ -191,19 +191,6 @@ void checkPpIndependentPools(const ModelConfig& model_config, const ParallelismC
                             parallelism_config.pp_size);
 }
 
-void validateStageScopedDescsForPP(const ModelConfig& stage_config) {
-    for (size_t layer_id = 0; layer_id < stage_config.kv_cache_spec_descs.size(); ++layer_id) {
-        for (const auto& desc : stage_config.kv_cache_spec_descs[layer_id]) {
-            RTP_LLM_CHECK_WITH_INFO(desc.cache_type != KVCacheSpecType::OpaqueKV
-                                        && desc.cache_type != KVCacheSpecType::OpaqueState,
-                                    "pipeline parallelism does not support opaque kv cache pools (layer %zu, "
-                                    "cache_type=%d) yet",
-                                    layer_id,
-                                    static_cast<int>(desc.cache_type));
-        }
-    }
-}
-
 ModelConfig CacheConfigCreator::stageScopedModelConfig(const ModelConfig&       model_config,
                                                        const ParallelismConfig& parallelism_config) {
     const int64_t pp_size = std::max<int64_t>(1, parallelism_config.pp_size);
@@ -246,7 +233,6 @@ ModelConfig CacheConfigCreator::stageScopedModelConfig(const ModelConfig&       
                                 model_config.num_layers);
         types.assign(types.begin() + begin, types.begin() + end);
     }
-    validateStageScopedDescsForPP(stage_config);
 
     RTP_LLM_LOG_INFO("PP cache stage %ld/%ld owns global layers [%ld, %ld) of %ld",
                      parallelism_config.pp_rank,
