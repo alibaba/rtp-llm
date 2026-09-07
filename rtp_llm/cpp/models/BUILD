@@ -42,8 +42,9 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
-# Versioned runtime CSR snapshot, kept separate from the legacy DFA library so
-# startup-only Prefix Map users do not acquire the DeviceBase link closure.
+# Versioned runtime CSR snapshot, kept separate from the legacy DFA library.
+# DeviceFactory and device registration belong to librtp_compute_ops.so; do not
+# statically link devices_base into the upper-level libth_transformer.so.
 cc_library(
     name = "constraint_tree_csr",
     srcs = [
@@ -54,7 +55,8 @@ cc_library(
     ],
     deps = [
         "//rtp_llm/cpp/core:buffer",
-        "//rtp_llm/cpp/devices:devices_base",
+        "//rtp_llm/cpp/core:types",
+        "//:rtp_compute_ops",
         "//rtp_llm/cpp/utils:core_utils",
     ],
     copts = copts(),

@@ -4,7 +4,7 @@ load("//bazel:arch_select.bzl", "embedding_arpc_deps")
 embedding_arpc_deps()
 
 # Runtime constraint-tree update endpoint. Kept separate from the full API
-# server so its CPU-only update path can be compiled and tested in isolation.
+# server so its update path can be tested without starting a full model engine.
 cc_library(
     name = "constraint_tree_service",
     srcs = [
@@ -16,7 +16,7 @@ cc_library(
     copts = copts(),
     deps = [
         ":http_server",
-        "//rtp_llm/cpp/devices:devices_base_impl",
+        "//:rtp_compute_ops",
         "//rtp_llm/cpp/models:constraint_tree_csr",
         "//rtp_llm/cpp/utils:core_utils",
         "@havenask//aios/autil:json",

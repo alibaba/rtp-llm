@@ -1,6 +1,8 @@
 package(default_visibility = ["//visibility:public"])
 load("//bazel:arch_select.bzl", "requirement")
 
+exports_files(["check_device_registry_linkage.sh"])
+
 requirement([
     "torch",
 ])

@@ -118,6 +118,19 @@ cc_binary(
 )
 
 
+sh_test(
+    name = "device_registry_linkage_test",
+    srcs = ["//rtp_llm/test/utils:check_device_registry_linkage.sh"],
+    args = [
+        "$(location :rtp_compute_ops)",
+        "$(location :th_transformer)",
+    ],
+    data = [
+        ":rtp_compute_ops",
+        ":th_transformer",
+    ],
+)
+
 py_runtime(
     name = "python310",
     interpreter_path = "/opt/conda310/bin/python",
