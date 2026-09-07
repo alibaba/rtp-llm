@@ -274,10 +274,10 @@ void PrefillRpcServer::getRpcConnection(PrefillGenerateContext& prefill_context)
         logPrefillFailureTrace("get_rpc_connection_no_decode_host", prefill_context);
         return;
     }
-    auto decode_addr          = host->ip + ":" + std::to_string(host->rpc_port);
+    auto decode_addr = host->ip + ":" + std::to_string(host->rpc_port);
     auto ready_timeout        = resolveDecodeChannelReadyTimeout(prefill_context.request_timeout_ms,
                                                           prefill_context.request_begin_time_us);
-    auto connect_status       = resource_.rpc_pool.getReadyConnection(decode_addr, ready_timeout);
+    auto connect_status = resource_.rpc_pool.getReadyConnection(decode_addr, ready_timeout);
     if (!connect_status.ok()) {
         setContextError(prefill_context,
                         ErrorInfo(ErrorCode::GET_CONNECTION_FAILED,
@@ -589,6 +589,8 @@ void PrefillRpcServer::pollRemoteOutput(PrefillGenerateContext& prefill_context)
     auto              prefill_local_reuse_len  = prefill_context.getStream()->localReuseLength();
     auto              prefill_remote_reuse_len = prefill_context.getStream()->remoteReuseLength();
     auto              prefill_memory_reuse_len = prefill_context.getStream()->memoryReuseLength();
+    const auto        cache_manager            = prefill_context.getStream()->resourceContext().cache_manager;
+    const bool use_independent_block_pools = cache_manager && cache_manager->cacheConfig().use_independent_block_pools;
     // Decode workers do not receive ViT features in PD mode, so preserve the
     // prefill-side media usage metadata when forwarding their responses.
     const auto multimodal_lengths =
@@ -612,34 +614,15 @@ void PrefillRpcServer::pollRemoteOutput(PrefillGenerateContext& prefill_context)
         mergeMultimodalLengths(response, multimodal_lengths);
         int64_t cost_time_us = currentTimeUs() - prefill_context.request_begin_time_us;
         for (size_t i = 0; i < response.flatten_output().aux_info_size(); i++) {
-            auto decode_total_reuse_len  = response.flatten_output().aux_info(i).total_reuse_len();
-            auto decode_local_reuse_len  = response.flatten_output().aux_info(i).local_reuse_len();
-            auto decode_remote_reuse_len = response.flatten_output().aux_info(i).remote_reuse_len();
-            auto decode_memory_reuse_len = response.flatten_output().aux_info(i).memory_reuse_len();
-
-            response.mutable_flatten_output()->mutable_aux_info(i)->set_first_token_cost_time_us(first_token_rt_us);
-            response.mutable_flatten_output()->mutable_aux_info(i)->set_cost_time_us(cost_time_us);
-
-            response.mutable_flatten_output()->mutable_aux_info(i)->set_total_reuse_len(prefill_total_reuse_len);
-            response.mutable_flatten_output()->mutable_aux_info(i)->set_local_reuse_len(prefill_local_reuse_len);
-            response.mutable_flatten_output()->mutable_aux_info(i)->set_remote_reuse_len(prefill_remote_reuse_len);
-            response.mutable_flatten_output()->mutable_aux_info(i)->set_memory_reuse_len(prefill_memory_reuse_len);
-
-            response.mutable_flatten_output()->mutable_aux_info(i)->set_prefill_total_reuse_len(
-                prefill_total_reuse_len);
-            response.mutable_flatten_output()->mutable_aux_info(i)->set_prefill_local_reuse_len(
-                prefill_local_reuse_len);
-            response.mutable_flatten_output()->mutable_aux_info(i)->set_prefill_remote_reuse_len(
-                prefill_remote_reuse_len);
-            response.mutable_flatten_output()->mutable_aux_info(i)->set_prefill_memory_reuse_len(
-                prefill_memory_reuse_len);
-
-            response.mutable_flatten_output()->mutable_aux_info(i)->set_decode_total_reuse_len(decode_total_reuse_len);
-            response.mutable_flatten_output()->mutable_aux_info(i)->set_decode_local_reuse_len(decode_local_reuse_len);
-            response.mutable_flatten_output()->mutable_aux_info(i)->set_decode_remote_reuse_len(
-                decode_remote_reuse_len);
-            response.mutable_flatten_output()->mutable_aux_info(i)->set_decode_memory_reuse_len(
-                decode_memory_reuse_len);
+            auto* aux_info = response.mutable_flatten_output()->mutable_aux_info(i);
+            aux_info->set_first_token_cost_time_us(first_token_rt_us);
+            aux_info->set_cost_time_us(cost_time_us);
+            mergeCacheReuseInfo(*aux_info,
+                                prefill_total_reuse_len,
+                                prefill_local_reuse_len,
+                                prefill_remote_reuse_len,
+                                prefill_memory_reuse_len,
+                                use_independent_block_pools);
         }
         if (!prefill_context.rpc_context.writer->Write(response)) {
             RTP_LLM_LOG_WARNING("request [%ld] write outputs pb failed", request_id);
@@ -652,6 +635,40 @@ void PrefillRpcServer::pollRemoteOutput(PrefillGenerateContext& prefill_context)
     auto status = prefill_context.closeGrpcStream();
     if (!status.ok() && status.error_code() != grpc::StatusCode::CANCELLED) {
         CLIENT_GRPC_RET_IF_ERROR(prefill_context, false, ErrorCode::REMOTE_GENERATE_FAILED);
+    }
+}
+
+void PrefillRpcServer::mergeCacheReuseInfo(AuxInfoPB& aux_info,
+                                           int        prefill_total_reuse_len,
+                                           int        prefill_local_reuse_len,
+                                           int        prefill_remote_reuse_len,
+                                           int        prefill_memory_reuse_len,
+                                           bool       use_independent_block_pools) {
+    const int decode_total_reuse_len  = aux_info.total_reuse_len();
+    const int decode_local_reuse_len  = aux_info.local_reuse_len();
+    const int decode_remote_reuse_len = aux_info.remote_reuse_len();
+    const int decode_memory_reuse_len = aux_info.memory_reuse_len();
+
+    aux_info.set_prefill_total_reuse_len(prefill_total_reuse_len);
+    aux_info.set_prefill_local_reuse_len(prefill_local_reuse_len);
+    aux_info.set_prefill_remote_reuse_len(prefill_remote_reuse_len);
+    aux_info.set_prefill_memory_reuse_len(prefill_memory_reuse_len);
+
+    aux_info.set_decode_total_reuse_len(decode_total_reuse_len);
+    aux_info.set_decode_local_reuse_len(decode_local_reuse_len);
+    aux_info.set_decode_remote_reuse_len(decode_remote_reuse_len);
+    aux_info.set_decode_memory_reuse_len(decode_memory_reuse_len);
+
+    if (use_independent_block_pools && decode_total_reuse_len > prefill_total_reuse_len) {
+        aux_info.set_total_reuse_len(decode_total_reuse_len);
+        aux_info.set_local_reuse_len(decode_local_reuse_len);
+        aux_info.set_remote_reuse_len(decode_remote_reuse_len);
+        aux_info.set_memory_reuse_len(decode_memory_reuse_len);
+    } else {
+        aux_info.set_total_reuse_len(prefill_total_reuse_len);
+        aux_info.set_local_reuse_len(prefill_local_reuse_len);
+        aux_info.set_remote_reuse_len(prefill_remote_reuse_len);
+        aux_info.set_memory_reuse_len(prefill_memory_reuse_len);
     }
 }
 

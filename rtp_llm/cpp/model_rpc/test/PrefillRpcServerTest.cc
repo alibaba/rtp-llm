@@ -225,6 +225,56 @@ TEST_F(PrefillRpcServerTest, mergeMultimodalLengthsUsesPrefillMetadata) {
     EXPECT_EQ(second_aux_info->multimodal_lengths().at(1), 64);
 }
 
+TEST_F(PrefillRpcServerTest, mergeCacheReuseInfoReportsCompletedDecodeHandoffForColdPrefill) {
+    AuxInfoPB aux_info;
+    aux_info.set_total_reuse_len(1280);
+    aux_info.set_local_reuse_len(1280);
+
+    PrefillRpcServer::mergeCacheReuseInfo(aux_info, 0, 0, 0, 0, /*use_independent_block_pools=*/true);
+
+    EXPECT_EQ(aux_info.total_reuse_len(), 1280);
+    EXPECT_EQ(aux_info.prefill_total_reuse_len(), 0);
+    EXPECT_EQ(aux_info.decode_total_reuse_len(), 1280);
+    EXPECT_EQ(aux_info.decode_local_reuse_len(), 1280);
+}
+
+TEST_F(PrefillRpcServerTest, mergeCacheReuseInfoKeepsLongerPrefillPrefixWithoutAddingPhases) {
+    AuxInfoPB aux_info;
+    aux_info.set_total_reuse_len(1280);
+    aux_info.set_local_reuse_len(1280);
+
+    PrefillRpcServer::mergeCacheReuseInfo(aux_info, 1536, 1536, 0, 1536, /*use_independent_block_pools=*/true);
+
+    EXPECT_EQ(aux_info.total_reuse_len(), 1536);
+    EXPECT_EQ(aux_info.memory_reuse_len(), 1536);
+    EXPECT_EQ(aux_info.prefill_total_reuse_len(), 1536);
+    EXPECT_EQ(aux_info.decode_total_reuse_len(), 1280);
+}
+
+TEST_F(PrefillRpcServerTest, mergeCacheReuseInfoPrefersPrefillAttributionOnEqualPrefix) {
+    AuxInfoPB aux_info;
+    aux_info.set_total_reuse_len(512);
+    aux_info.set_local_reuse_len(512);
+
+    PrefillRpcServer::mergeCacheReuseInfo(aux_info, 512, 512, 0, 512, /*use_independent_block_pools=*/true);
+
+    EXPECT_EQ(aux_info.total_reuse_len(), 512);
+    EXPECT_EQ(aux_info.memory_reuse_len(), 512);
+    EXPECT_EQ(aux_info.decode_memory_reuse_len(), 0);
+}
+
+TEST_F(PrefillRpcServerTest, mergeCacheReuseInfoKeepsSharedPoolTopLevelPrefillOnly) {
+    AuxInfoPB aux_info;
+    aux_info.set_total_reuse_len(1280);
+    aux_info.set_local_reuse_len(1280);
+
+    PrefillRpcServer::mergeCacheReuseInfo(aux_info, 0, 0, 0, 0, /*use_independent_block_pools=*/false);
+
+    EXPECT_EQ(aux_info.total_reuse_len(), 0);
+    EXPECT_EQ(aux_info.prefill_total_reuse_len(), 0);
+    EXPECT_EQ(aux_info.decode_total_reuse_len(), 1280);
+}
+
 TEST_F(PrefillRpcServerTest, multimodalProcessMarksDeterministicErrorNonRetryable) {
     GenerateInputPB request;
     request.set_request_id(1);

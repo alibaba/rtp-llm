@@ -258,7 +258,7 @@ torch_ext::PyCacheStoreInputs makeDsv4WriteInputs(int64_t                       
     inputs.request_id            = torch::tensor({request_id}, torch::kInt64);
     inputs.request_pd_separation = torch::tensor({true}, torch::kBool);
     inputs.cache_keys            = torch::from_blob(const_cast<CacheKeyType*>(cache_keys.data()),
-                                                    {1, (int64_t)cache_keys.size()},
+                                         {1, (int64_t)cache_keys.size()},
                                          torch::TensorOptions(torch::kInt64))
                             .clone();
     return inputs;
@@ -873,8 +873,9 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegions)
                                                      /*partition_count=*/1,
                                                      /*partition_id=*/0,
                                                      &server_context);
-    auto                                status = server.loadCache(load_context);
-    ASSERT_TRUE(status.ok()) << status.ToString();
+    auto                                result = server.loadCache(load_context);
+    ASSERT_TRUE(result.ok()) << result.error_info.ToString();
+    EXPECT_EQ(result.loaded_cache_block_count, 4u);
 
     EXPECT_EQ(cache_store->load_buffer_requests_.size(), expected_requests);
     EXPECT_EQ(cache_store->load_request_keys_.size(), expected_requests);
@@ -1017,8 +1018,9 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4DecoupledCacheStoreTransfersPhysicalBloc
                                                      /*partition_count=*/1,
                                                      /*partition_id=*/0,
                                                      &server_context);
-    auto                                status = server.loadCache(load_context);
-    ASSERT_TRUE(status.ok()) << status.ToString();
+    auto                                result = server.loadCache(load_context);
+    ASSERT_TRUE(result.ok()) << result.error_info.ToString();
+    EXPECT_EQ(result.loaded_cache_block_count, 2u);
 
     for (int layer_id = 0; layer_id < 4; ++layer_id) {
         for (int gid : cache_config.groupIdsForLayer(layer_id)) {
@@ -1165,8 +1167,9 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegionsW
                                                      /*partition_count=*/1,
                                                      /*partition_id=*/0,
                                                      &server_context);
-    auto                                status = server.loadCache(load_context);
-    ASSERT_TRUE(status.ok()) << status.ToString();
+    auto                                result = server.loadCache(load_context);
+    ASSERT_TRUE(result.ok()) << result.error_info.ToString();
+    EXPECT_EQ(result.loaded_cache_block_count, 4u);
 
     EXPECT_EQ(cache_store->load_buffer_requests_.size(), expected_requests);
     EXPECT_EQ(cache_store->load_request_keys_.size(), expected_requests);
@@ -1259,7 +1262,7 @@ TEST_F(PdSepKVCacheReleaseTest, testWriteCacheStoreWithPinnedHostMetadataAndEven
     // --- Call runtimeWriteCacheStore (event->synchronize() inside) ---
     auto cache_store = std::make_shared<MemoryBackedCacheStore>();
     auto block_ids   = torch::from_blob(const_cast<int*>(resource->blocks(0, 0).data()),
-                                        {1, (int64_t)resource->blocks(0, 0).size()},
+                                      {1, (int64_t)resource->blocks(0, 0).size()},
                                       torch::kInt32)
                          .clone();
 

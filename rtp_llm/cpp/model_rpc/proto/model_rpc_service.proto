@@ -412,6 +412,7 @@ message BroadcastLoadRequestPB {
 message BroadcastLoadResponsePB {
     RpcErrorPB error_info = 1;
     int64 done_time_us = 2;
+    int64 loaded_cache_block_count = 3;
 }
 
 message RemoteFinishRequestPB {
