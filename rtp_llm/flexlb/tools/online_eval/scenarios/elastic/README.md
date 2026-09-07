@@ -305,11 +305,72 @@ zero rejection budget, milliseconds, 40s, pre-event 8211 and retirement messages
 Independent review and real Java acceptance are pending. Legacy code is retained;
 a later blocked branch is not counted as covered by earlier successful checks.
 
-## Remaining variants
+## Transient imbalance
 
-The transient-imbalance contract remains legacy and must be folded into the
-four families. Along with the two skew variants mapped
-above, these are the five additions beyond the original eight elastic cases
-(13 current legacy cases). They must not be deleted to reach the four-family
-target. All four final families now have YAML candidates; this is not complete
-coverage or acceptance of all 13 legacy contracts.
+`elastic_lifecycle::transient_imbalance::batch-window` migrates
+`elastic_transient_imbalance_bound` as an explicit 19-stage, 20-check program.
+The private 3P/2D environment preserves fault performance, priority ordering,
+queue timeout 60000ms, Master per-Prefill waiting capacity64, and the **born**
+Prefill `max_waiting_batches: 16`. The latter uses the core's typed
+`prefill_max_waiting_batches` field, not a post-start performance update.
+Decode concurrency remains the Java default128. The full resolved Master config,
+performance dictionary, topology and both pool sizes are compared with the old
+spec in a local test. The unused `FLEXLB_FT_SPEC_ID` fingerprint marker is omitted
+because the instance owns a private environment; it was not a runtime control.
+This variant requires shared-core commit `4e2139c1398f1ed3039d235d2f736456612fa0f8`
+or its integrated equivalent for the typed birth field.
+
+The serial pump uses 2048 input, 2 output, one unique cold key, Schedule30s,
+stream30s and a100ms pause. A30-request crossing burst uses concurrency15 and
+stream45s (Schedule30s); every issued attempt retains its raw record and consumer
+exit evidence. The removal targets Prefill1 in abrupt mode with a5s HTTP cap. Its artifact
+freezes burst request records immediately before the call: starting the burst
+thread alone does not prove any victim-routed request is pending, and no such
+unmeasured overlap is claimed.
+The transient window starts immediately before that control call and ends20s
+**after the burst settles**, preserving the legacy implementation's variable
+window, rather than relabeling it as exactly20s. The steady window starts after
+Master convergence, spans60s, and its tail starts at+40s. The pump remains active
+through recovery20 (concurrency10, >=19 successful).
+
+| Contract | Explicit check / source |
+| --- | --- |
+| Surviving Prefill waiting peak <=16 | `transient_bounds.prefill_waiting`; engine metric counts requests although the configured capacity counts batches. This legacy unit mismatch is retained, not silently multiplied by batch size. |
+| Decode waiting peak <=128 | `transient_bounds.decode_waiting`; Java default concurrency. |
+| Master Prefill survivor inflight requests <=64 | `transient_bounds.master_inflight`; the endpoint registry's HTTP addresses select P0/P2 explicitly. This is an inflight proxy, including dispatched work, not a pure waiting counter. The victim's HTTP address is excluded. |
+| All four survivors' occupancy <=0.95 | `transient_bounds.occupancy`; each engine's own pool. |
+| All-survivor rejection delta bounded by displaced demand | `transient_bounds.rejects`; ceil(max(0, victim occupied blocks - sum(all four survivor free blocks))) from the pre-burst snapshot, compared with all-survivor lack-memory + admission-failure counter deltas. |
+| Prefill steady share max <=max(base+0.10,0.65), min>=0.10 | `steady_bounds.share_max`, `.share_min`; accepted-counter deltas over the whole60s, matching the legacy code. |
+| Steady tail waiting <=2 and P/D occupancy spreads <= respective baseline+0.05 | `steady_bounds.waiting`, `.prefill_spread`, `.decode_spread`; independent owner planes and +40s tail. |
+| No survivor-routed failures | `locality.survivor_failures`; nonempty RPC address different from victim counts as survivor; empty string/None failures remain explicit unrouted observations. |
+| All issued consumers exit; recovery >=19/20 | `burst_settled.complete`, `locality.complete`, `recovery.complete`, `.success_rate`. |
+
+Transient cluster TPS and baseline*4/5*0.85, plus Decode steady share, remain
+observations. Missing required metrics, endpoint identity ambiguity, counter
+reset, acquisition errors and uncovered sample gaps are errors, never zeroes.
+Raw continuous mock and Master samples are separate artifacts; request outcomes
+do not imply scheduler, Engine-slot or KV ownership release.
+
+Construction changes are explicit. Post-removal topology is a hard check; old
+`alive_ok` was diagnostic only. An empty baseline share is an error instead of a
+zero fallback. Locality now freezes the **whole stopped pump cohort after the
+recovery batch**, whereas the old code inspected the pump before recovery and
+could omit an outstanding consumer. Recovery requests retain their separate
+>=95% contract; the enlarged pump cohort has the same zero survivor-failure
+bound. Cancellation cannot be counted as successful business completion.
+The old case's final best-effort inflight cleanup was not a verdict; this
+candidate uses private environment teardown and does not claim a new accounting
+PASS. Core first-failure blocking is explicit: blocked later checks do not count
+as coverage.
+
+Local tests use actual pump/burst threads with simulated RPC and sampler data;
+they exercise the full formal YAML and boundary/error cases. They are not real
+Java evidence. Independent static review and Java acceptance remain pending.
+
+## Coverage status
+
+All13 current legacy elastic IDs now have batch-window YAML candidates within
+the four target families. Candidate mapping is not complete profile coverage or
+acceptance: the legacy implementations remain, required non-batch-window
+profiles still need dedicated migration/validation, and static/model results
+cannot substitute for real Java runs.

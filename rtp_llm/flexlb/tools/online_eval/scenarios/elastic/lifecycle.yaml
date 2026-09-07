@@ -17,6 +17,7 @@ legacy_case_ids:
 - elastic_kv_skew_shrink_cold
 - elastic_steady_state_recovery
 - elastic_kv_full_shrink
+- elastic_transient_imbalance_bound
 estimated_duration_s: 420
 environment:
   backend: java_mock
@@ -618,6 +619,125 @@ variants:
   - id: recovery
     action: elastic_pending_recovery
     timeout_s: 100
+  - id: teardown
+    action: teardown
+- id: transient_imbalance
+  legacy_case_ids:
+  - elastic_transient_imbalance_bound
+  environment_overrides:
+    n_prefill: 3
+    n_decode: 2
+    prefill_max_waiting_batches: 16
+    config_overrides:
+      ordering: priority
+      queue_timeout_ms: 60000
+      max_waiting_requests_per_prefill_worker: 64
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: initial_topology
+    action: elastic_topology
+    params:
+      role: PREFILL
+      discovered: 3
+      alive: 3
+    timeout_s: 35
+  - id: observe
+    action: elastic_transient_observe
+  - id: flow
+    action: elastic_balance_flow
+    params:
+      interval_s: 0.1
+  - id: baseline
+    action: elastic_balance_window
+    params:
+      observation:
+        $ref: stages.observe.output.observation
+      duration_s: 20
+      since:
+        $ref: stages.observe.output.started_s
+    timeout_s: 30
+  - id: pre_event
+    action: elastic_transient_prepare
+  - id: burst
+    action: elastic_transient_burst
+    timeout_s: 10
+  - id: remove
+    action: elastic_transient_remove
+    params:
+      requests:
+        $ref: stages.burst.output.requests
+    timeout_s: 15
+  - id: burst_settled
+    action: elastic_transient_collect
+    params:
+      requests:
+        $ref: stages.burst.output.requests
+    timeout_s: 160
+  - id: transient
+    action: elastic_balance_window
+    params:
+      observation:
+        $ref: stages.observe.output.observation
+      duration_s: 20
+      since:
+        $ref: stages.remove.output.started_s
+    timeout_s: 30
+  - id: survivor_topology
+    action: elastic_topology
+    params:
+      role: PREFILL
+      discovered: 2
+      alive: 2
+    timeout_s: 35
+  - id: settled
+    action: elastic_balance_mark
+  - id: steady
+    action: elastic_balance_window
+    params:
+      observation:
+        $ref: stages.observe.output.observation
+      duration_s: 60
+      since:
+        $ref: stages.settled.output.time_s
+    timeout_s: 70
+  - id: transient_bounds
+    action: elastic_transient_bounds
+    params:
+      pre_event:
+        $ref: stages.pre_event.output.snapshot
+      baseline:
+        $ref: stages.baseline.output.window
+      transient:
+        $ref: stages.transient.output.window
+      master_observation:
+        $ref: stages.observe.output.master_observation
+  - id: steady_bounds
+    action: elastic_transient_steady
+    params:
+      baseline:
+        $ref: stages.baseline.output.window
+      steady:
+        $ref: stages.steady.output.window
+  - id: recovery
+    action: elastic_pending_recovery
+    timeout_s: 60
+  - id: flow_stop
+    action: elastic_flow_stop
+    params:
+      flow:
+        $ref: stages.flow.output.flow
+    timeout_s: 65
+  - id: locality
+    action: elastic_transient_locality
+    params:
+      pre_event:
+        $ref: stages.pre_event.output.snapshot
+      flow:
+        $ref: stages.flow.output.flow
+      requests:
+        $ref: stages.burst.output.requests
   - id: teardown
     action: teardown
 stages:
