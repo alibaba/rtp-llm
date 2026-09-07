@@ -79,3 +79,37 @@ List output includes separate selected `logical_scenarios`, `variants`, `instanc
 and declared `checks` counts. Its filesystem storage key hashes the public ID to
 avoid JVM `-Xlog` colon delimiters; explicit output roots containing colons are
 rejected before process startup.
+
+`environment_reconfigure` replaces the complete typed `config_overrides` for a
+new environment within the same instance and leased ports. Worker counts, layout,
+decision and dispatcher stay fixed. It first cleans all existing consumers and
+processes; any failure prevents the next startup and retains failed callbacks
+for final cleanup. A new epoch invalidates old live handles. Earlier scalar
+results and explicitly historical snapshots remain available for comparison.
+This is reconstruction, not runtime configuration reload. Allow at least 30 s
+for intermediate cleanup plus the normal startup budget in the stage timeout.
+
+`environment_startup_probe` accepts a valid typed base and one of three bounded
+raw mutations: `removed_auto_tpm`, `fifo_default_priority`, or
+`owned_without_cancellation`. It launches Java with the resulting raw config,
+records owned Master PIDs/exit codes and private parser logs, then cleans the
+attempt. Python validation failure does not count as Java rejection. `rejected`
+requires a failed launch, an exited owned Master and a matching parser message;
+`environment_absent` records the manager state **before** forced cleanup, so an
+unexpected successful startup cannot pass that condition by being stopped later.
+Probe outputs require explicit case checks; generic startup failure or missing
+parser evidence is not a parser pass. A normal initial setup remains required,
+which is an additional baseline construction compared with a negative-only case.
+
+The first environment retains the existing artifact layout; later environments
+write under `environment-epoch-N`. Each epoch retains its cleanup report, and the
+root cleanup report remains the latest cumulative PID ledger. Startup probes
+write raw configuration and observations even when they cannot complete.
+
+RequestBatch stream errors record `stream.trailer_error_code` separately from
+transport status and in-band `business_error_code`. `stream.error_trailer` retains
+bounded original `grpc-status-details-bin` bytes as base64, length and SHA256.
+Missing, duplicate, malformed or default-only protobuf payloads leave the typed
+code unset with an explicit evidence status. Recording a CANCELLED transport does
+not imply engine cancellation. The ordinary request wait still rejects failed
+streams; expected-error scenarios must implement their own explicit verdicts.

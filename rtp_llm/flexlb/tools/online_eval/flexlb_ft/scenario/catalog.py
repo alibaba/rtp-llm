@@ -7,6 +7,7 @@ from .actions.elastic import HANDLERS as ELASTIC_HANDLERS
 from .actions.engine_control import HANDLERS as ENGINE_CONTROL_HANDLERS
 from .actions.engine_fault import HANDLERS as ENGINE_FAULT_HANDLERS
 from .actions.engine_recovery import HANDLERS as ENGINE_RECOVERY_HANDLERS
+from .actions.environment import HANDLERS as ENVIRONMENT_HANDLERS
 from .actions.kv import HANDLERS as KV_HANDLERS
 from .actions.kv_capacity import HANDLERS as KV_CAPACITY_HANDLERS
 from .actions.kv_measurement import HANDLERS as KV_MEASUREMENT_HANDLERS
@@ -28,6 +29,7 @@ def handlers():
         *ENGINE_CONTROL_HANDLERS,
         *ENGINE_FAULT_HANDLERS,
         *ENGINE_RECOVERY_HANDLERS,
+        *ENVIRONMENT_HANDLERS,
         *KV_HANDLERS,
         *KV_CAPACITY_HANDLERS,
         *KV_MEASUREMENT_HANDLERS,

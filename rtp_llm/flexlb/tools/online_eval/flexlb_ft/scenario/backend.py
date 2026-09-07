@@ -517,6 +517,9 @@ class JavaMockBackend:
                 self.owned_processes[mp.pid] = mp
 
     def setup(self, ctx, plan, deadline):
+        return self._setup(ctx, plan, deadline)
+
+    def _setup(self, ctx, plan, deadline, raw_config=None):
         if ":" in str(ctx.artifact_dir.resolve()):
             raise ValueError(
                 "Java mock artifact path contains the JVM -Xlog colon delimiter"
@@ -556,12 +559,40 @@ class JavaMockBackend:
                     owner.environments.append(env)
 
         spec = make_env_spec(plan, ctx.instance["profile"], self.lease)
+        # Keep the first-epoch artifact layout compatible with existing runs.
+        # Later environments never overwrite its config, logs or cleanup proof.
+        artifact_dir = (
+            ctx.artifact_dir
+            if ctx.env_epoch == 1
+            else ctx.artifact_dir / f"environment-epoch-{ctx.env_epoch}"
+        )
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        self.current_artifact_dir = artifact_dir
+        if raw_config is not None:
+            spec.raw_config = raw_config
+            private_log = artifact_dir / "master-logs"
+            private_log.mkdir(exist_ok=False)
+            spec.master_extra_args.append(f"--flexlb.log.path={private_log.resolve()}")
         sync_log_path = (
-            configure_master_sync_log(spec, ctx.artifact_dir, ctx.env_epoch)
+            configure_master_sync_log(spec, artifact_dir, ctx.env_epoch)
             if plan.get("master_sync_log", False)
             else None
         )
-        self.manager = OwnedManager(ctx.artifact_dir / "environment")
+        self.manager = OwnedManager(artifact_dir / "environment")
+        (artifact_dir / "environment.json").write_text(
+            json.dumps(
+                dict(
+                    fingerprint=spec.fingerprint(),
+                    lease=self.lease,
+                    resolved_config=plan["resolved_config"],
+                    raw_config=raw_config,
+                    env_epoch=ctx.env_epoch,
+                    master_sync_log_path=str(sync_log_path) if sync_log_path else None,
+                ),
+                indent=2,
+            )
+            + "\n"
+        )
         env = self.manager.ensure(spec)
         env.master_sync_log_path = sync_log_path
         ctx.master_sync_log_path = sync_log_path
@@ -575,21 +606,45 @@ class JavaMockBackend:
         self.raw_ops = EngineOps("127.0.0.1", env.master_http_port, env.mock_http_port)
         ops = BoundedOps(self.raw_ops, ctx.instance["resource_budget"], self.lease)
         ctx.case_context = CaseContext(
-            self.manager, ctx.instance["profile"], ctx.artifact_dir
-        )
-        (ctx.artifact_dir / "environment.json").write_text(
-            json.dumps(
-                dict(
-                    fingerprint=spec.fingerprint(),
-                    lease=self.lease,
-                    resolved_config=plan["resolved_config"],
-                    master_sync_log_path=str(sync_log_path) if sync_log_path else None,
-                ),
-                indent=2,
-            )
-            + "\n"
+            self.manager, ctx.instance["profile"], artifact_dir
         )
         return env, ops
+
+    def probe_startup(self, ctx, plan, raw_config, deadline):
+        """Actually launch the raw config; parsing a Python mirror is no probe."""
+        first = len(self.environments)
+        error = None
+        try:
+            ctx.env, ctx.ops = self._setup(ctx, plan, deadline, raw_config=raw_config)
+        except RuntimeError as exc:
+            error = repr(exc)
+        # Timeout/interrupt/IO failure is not an expected parser rejection.
+        deadline.check()
+        masters = [
+            env.master for env in self.environments[first:] if env.master is not None
+        ]
+        if not masters:
+            raise RuntimeError("startup probe has no owned Master process evidence")
+        logs = []
+        app_log = self.current_artifact_dir / "master-logs" / "application.log"
+        for path in [app_log, *[mp.log_file for mp in masters]]:
+            if path.exists():
+                with path.open("rb") as stream:
+                    stream.seek(max(0, path.stat().st_size - 262144))
+                    logs.append(
+                        dict(
+                            path=str(path),
+                            tail=stream.read(262144).decode("utf-8", errors="replace"),
+                        )
+                    )
+        return dict(
+            startup_error=error,
+            started=error is None,
+            master_pids=[mp.pid for mp in masters],
+            master_returncodes=[mp.proc.poll() for mp in masters],
+            logs=logs,
+            current_absent_before_cleanup=self.manager.current is None,
+        )
 
     def start_requests(self, ctx, params, deadline):
         batch = RequestBatch(ctx, params)
@@ -645,6 +700,13 @@ class JavaMockBackend:
                 dict(owned_pids=list(unique), remaining_pids=remaining_pids), indent=2
             )
             + "\n"
+        )
+        current = getattr(self, "current_artifact_dir", ctx.artifact_dir)
+        if current == ctx.artifact_dir:
+            current = ctx.artifact_dir / f"environment-epoch-{ctx.env_epoch}"
+        current.mkdir(parents=True, exist_ok=True)
+        (current / "process-cleanup.json").write_text(
+            (ctx.artifact_dir / "process-cleanup.json").read_text()
         )
         if remaining_pids:
             raise StageTimeout(f"owned processes not reaped: {remaining_pids}")

@@ -1447,7 +1447,13 @@ class EnvManager:
         # every master start in the container), so capture its size now
         # and append the bytes written by THIS start to the failure
         # diagnostics.
-        app_log = Path.home() / "ai-whale" / "logs" / "application.log"
+        # Honor an explicitly isolated log directory for every diagnostic read.
+        # Offsets on the shared default file do not establish process ownership.
+        log_root = Path.home() / "ai-whale" / "logs"
+        for arg in spec.master_extra_args:
+            if arg.startswith("--flexlb.log.path="):
+                log_root = Path(arg.split("=", 1)[1])
+        app_log = log_root / "application.log"
         try:
             app_log_offset = app_log.stat().st_size
         except OSError:
@@ -1456,7 +1462,7 @@ class EnvManager:
         # (~/ai-whale/logs/flexlb.log — shared across every master in the
         # container): cases read "the bytes THIS master wrote" via
         # env.flexlb_log_offset (see cases/priority.py _master_log_text).
-        flexlb_log = Path.home() / "ai-whale" / "logs" / "flexlb.log"
+        flexlb_log = log_root / "flexlb.log"
         try:
             env.flexlb_log_offset = flexlb_log.stat().st_size
         except OSError:
@@ -1466,7 +1472,7 @@ class EnvManager:
         # the container): cases read only THIS master's rows via
         # env.pv_log_offset (see cases/priority.py _pv_log_tail), with an
         # additional per-case requestId filter on top.
-        pv_log = Path.home() / "ai-whale" / "logs" / "pv.log"
+        pv_log = log_root / "pv.log"
         try:
             env.pv_log_offset = pv_log.stat().st_size
         except OSError:
@@ -1500,22 +1506,14 @@ class EnvManager:
             time.sleep(1.0)
         if not master_up:
             app_tail = _app_log_tail_this_start()
-            extra = (
-                "\n--- ~/ai-whale/logs/application.log (this start) ---\n" + app_tail
-                if app_tail
-                else ""
-            )
+            extra = f"\n--- {app_log} (this start) ---\n" + app_tail if app_tail else ""
             raise RuntimeError(f"master failed to start:\n{proc.tail_log()}{extra}")
         # Guard against a foreign master squatting on the HTTP port: if our own
         # JVM died on BindException, the port probe above may still succeed
         # against the foreign process. Re-check our own pid.
         if not proc.alive():
             app_tail = _app_log_tail_this_start()
-            extra = (
-                "\n--- ~/ai-whale/logs/application.log (this start) ---\n" + app_tail
-                if app_tail
-                else ""
-            )
+            extra = f"\n--- {app_log} (this start) ---\n" + app_tail if app_tail else ""
             raise RuntimeError(
                 f"master process exited during startup (port conflict?):\n"
                 f"{proc.tail_log()}{extra}"

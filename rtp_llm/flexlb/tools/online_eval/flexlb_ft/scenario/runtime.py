@@ -126,10 +126,10 @@ class RuntimeContext:
             raise ValueError("stale environment epoch")
         return record[1]
 
-    def cleanup(self, budget_s):
+    def cleanup(self, budget_s, retain_failed=False):
         # Instance expiry does not consume the separately reserved cleanup time.
         deadline = Deadline(self.clock() + budget_s, self.clock, self.sleeper)
-        results = []
+        results, retry = [], []
         while self._cleanup:
             name, callback = self._cleanup.pop()
             started = self.clock()
@@ -146,6 +146,8 @@ class RuntimeContext:
             except Exception as exc:
                 status = "TIMEOUT" if isinstance(exc, TimeoutError) else "ERROR"
                 error = f"{type(exc).__name__}: {exc}"
+                if retain_failed:
+                    retry.append((name, callback))
             results.append(
                 {
                     "id": name,
@@ -154,6 +156,9 @@ class RuntimeContext:
                     "duration_ms": int((self.clock() - started) * 1000),
                 }
             )
+        # A failed intermediate teardown must remain reachable by the final
+        # separately budgeted cleanup; do not retry it in this same loop.
+        self._cleanup.extend(reversed(retry))
         self.cleanup_results.extend(results)
         return results
 
