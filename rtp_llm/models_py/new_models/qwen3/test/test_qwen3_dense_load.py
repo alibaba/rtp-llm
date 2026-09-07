@@ -26,6 +26,15 @@ def _validate(module) -> None:
 
 
 class LinearPartitionTest(unittest.TestCase):
+    def test_parallel_linear_rejects_unknown_constructor_argument(self):
+        with self.assertRaisesRegex(TypeError, "tp_szie"):
+            ColumnParallelLinear(
+                input_size=2,
+                output_size=4,
+                tp_szie=2,
+                params_dtype=torch.float32,
+            )
+
     def test_parallel_lm_head_gathers_vocab_shards(self):
         head = ParallelLMHead(
             vocab_size=4,

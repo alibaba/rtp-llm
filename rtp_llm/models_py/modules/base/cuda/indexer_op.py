@@ -1,5 +1,8 @@
 """CUDA-specific indexer operations for DeepSeek-V3.2 DSA mechanism."""
 
+import importlib
+from functools import lru_cache
+from types import ModuleType
 from typing import Any, Optional, Tuple
 
 import torch
@@ -9,30 +12,25 @@ from rtp_llm.models_py.distributed.collective_torch import Group, all_gather, ba
 from rtp_llm.models_py.kernels.cuda.fp8_kernel import sgl_per_token_group_quant_fp8
 from rtp_llm.ops.compute_ops import LayerKVCache, rtp_llm_ops
 
-# Try to import CUDA dependencies, but don't fail if running on CPU
-try:
-    import deep_gemm
-except Exception as e:
-    print(f"Warning: Failed to import deep_gemm (likely running on CPU): {e}")
-    deep_gemm = None
 
-try:
-    import flashinfer.rope as rope
-except Exception as e:
-    print(f"Warning: Failed to import flashinfer.rope (likely running on CPU): {e}")
-    rope = None
+@lru_cache(maxsize=1)
+def _resolve_deep_gemm() -> ModuleType:
+    try:
+        return importlib.import_module("deep_gemm")
+    except (ImportError, OSError) as exc:
+        raise ImportError(
+            "DeepSeek indexer requires the optional deep_gemm backend"
+        ) from exc
 
 
-from rtp_llm.models_py.triton_kernels.legacy_fp8_indexer_score import (
-    legacy_fp8_mqa_logits,
-    legacy_fp8_paged_mqa_logits,
-)
-
-
-def _fp8_mqa_logits_compat(*args, **kwargs):
-    if deep_gemm is not None and hasattr(deep_gemm, "fp8_mqa_logits"):
-        return deep_gemm.fp8_mqa_logits(*args, **kwargs)
-    return legacy_fp8_mqa_logits(*args, **kwargs)
+@lru_cache(maxsize=1)
+def _resolve_flashinfer_rope() -> ModuleType:
+    try:
+        return importlib.import_module("flashinfer.rope")
+    except (ImportError, OSError) as exc:
+        raise ImportError(
+            "DeepSeek indexer RoPE requires the optional flashinfer backend"
+        ) from exc
 
 
 _paged_mqa_context_lens_dim: Optional[int] = None
@@ -55,12 +53,8 @@ def _fp8_paged_mqa_logits_compat(
     rank only after the complete logits call succeeds, instead of coupling
     RTP-LLM to a vendor package version string.
     """
-    if deep_gemm is None or not hasattr(deep_gemm, "fp8_paged_mqa_logits"):
-        return legacy_fp8_paged_mqa_logits(
-            q, kv_cache, weights, context_lens, block_table, max_context_len
-        )
-
     global _paged_mqa_context_lens_dim
+    deep_gemm = _resolve_deep_gemm()
 
     # Keep this call's probing decision stable if another call populates the cache.
     cached_dim = _paged_mqa_context_lens_dim
@@ -261,7 +255,7 @@ class IndexerOp(nn.Module):
         # Apply RoPE (same as vllm indexer rope)
         cos_sin_cache = self.cos_sin_cache
         if cos_sin_cache is not None:
-            rope._apply_rope_pos_ids_cos_sin_cache(
+            _resolve_flashinfer_rope()._apply_rope_pos_ids_cos_sin_cache(
                 q=q_pe,
                 k=k_pe.unsqueeze(1),
                 q_rope=q_pe,
@@ -306,7 +300,7 @@ class IndexerOp(nn.Module):
 
         cos_sin_cache = self.cos_sin_cache
         if cos_sin_cache is not None and full_rope_pos_ids is not None:
-            rope._apply_rope_pos_ids_cos_sin_cache(
+            _resolve_flashinfer_rope()._apply_rope_pos_ids_cos_sin_cache(
                 q=q_pe,
                 k=k_pe.unsqueeze(1),
                 q_rope=q_pe,
@@ -342,7 +336,7 @@ class IndexerOp(nn.Module):
         # Apply RoPE (same as vllm indexer rope)
         cos_sin_cache = self.cos_sin_cache
         if cos_sin_cache is not None:
-            rope._apply_rope_pos_ids_cos_sin_cache(
+            _resolve_flashinfer_rope()._apply_rope_pos_ids_cos_sin_cache(
                 q=k_pe.unsqueeze(1),
                 k=k_pe.unsqueeze(1),
                 q_rope=k_pe.unsqueeze(1),
@@ -602,7 +596,7 @@ class IndexerOp(nn.Module):
             fmha_params.ks is not None and fmha_params.ke is not None
         ), "ks/ke must be prepared in prefill"
 
-        logits = _fp8_mqa_logits_compat(
+        logits = _resolve_deep_gemm().fp8_mqa_logits(
             q_fp8,
             kv_fp8,
             weights,
@@ -713,7 +707,7 @@ class IndexerOp(nn.Module):
             lengths: torch.Tensor,
             topk_off: torch.Tensor,
         ) -> torch.Tensor:
-            logits_p = _fp8_mqa_logits_compat(
+            logits_p = _resolve_deep_gemm().fp8_mqa_logits(
                 q_part,
                 kv_fp8_full,
                 weights_part,
