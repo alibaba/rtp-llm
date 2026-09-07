@@ -8,7 +8,7 @@ import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace as NS
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from flexlb_ft.scenario.backend import BoundedOps, RequestBatch
@@ -222,6 +222,49 @@ class BackendTest(unittest.TestCase):
         with self.assertRaises(StageTimeout):
             with interruptible(Deadline(time.monotonic() + 0.02), True):
                 time.sleep(1)
+
+    def test_cleanup_needs_consumer_witness_even_if_thread_reports_dead(self):
+        # A controlled false-alive fixture tests the proof gap. It does not
+        # assert that a particular CPython/signal implementation causes it.
+        requests, ctx = self.run_batch("immediate", hanging=True)
+        ready = Deadline(time.monotonic() + 1)
+        while len(ctx.ops.streams) != 2:
+            ready.sleep(0.001)
+        for stream in ctx.ops.streams:
+            stream.cancel = Mock(return_value=True)  # acknowledged, still blocked
+        patches = [
+            patch.object(e["thread"], "is_alive", return_value=False)
+            for e in requests.entries
+        ]
+        for p in patches:
+            p.start()
+        try:
+            rows = ctx.cleanup(0.02)
+            self.assertEqual(rows[0]["status"], "TIMEOUT")
+            persisted = json.loads(requests.artifact.read_text())
+            self.assertTrue(all(r["consumer_exit_s"] is None for r in persisted))
+        finally:
+            for p in patches:
+                p.stop()
+            for stream in ctx.ops.streams:
+                stream.cancelled.set()
+            for entry in requests.entries:
+                self.assertTrue(entry["done"].wait(1))
+                entry["thread"].join(1)
+
+    def test_cleanup_persists_consumer_completion_before_reporting_pass(self):
+        requests, ctx = self.run_batch("immediate", hanging=True)
+        ready = Deadline(time.monotonic() + 1)
+        while len(ctx.ops.streams) != 2:
+            ready.sleep(0.001)
+        self.assertEqual(ctx.cleanup(1)[0]["status"], "PASS")
+        persisted = json.loads(requests.artifact.read_text())
+        for row in persisted:
+            self.assertIs(row["consumer_done"], True)
+            self.assertIs(row["consumer_completion_verified"], True)
+            self.assertIsNotNone(row["consumer_exit_s"])
+            self.assertIsNotNone(row["transport_terminal_s"])
+            self.assertIsNotNone(row["stream"]["ended_s"])
 
 
 if __name__ == "__main__":
