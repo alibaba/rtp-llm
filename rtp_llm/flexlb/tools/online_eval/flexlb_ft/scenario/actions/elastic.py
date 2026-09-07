@@ -77,6 +77,7 @@ class ClientRecords:
             transport_terminal_s=None,
             consumer_exit_s=None,
             cancel=dict(
+                scope="transport",
                 requested_s=None,
                 reason=None,
                 acknowledged=None,
@@ -345,10 +346,22 @@ def _seed_validate(params, plan):
     return p
 
 
+def _record_cleanup(ctx, records, name):
+    def cleanup(deadline):
+        records.cancel_active("cleanup")
+        (ctx.artifact_dir / name).write_text(
+            json.dumps(records.snapshot_records(), indent=2)
+        )
+
+    return cleanup
+
+
 def _seed(ctx, params, deadline):
     records = RecordedRequests(ctx.ops, ctx.env_epoch, ctx.clock)
     handle = ctx.register_resource(
-        "requests", records, cleanup=lambda d: records.cancel_active()
+        "requests",
+        records,
+        cleanup=_record_cleanup(ctx, records, "elastic-seed-records.json"),
     )
     snapshot = _snapshot(ctx, deadline)
     hot, cold = params["hot"], params["cold"]
@@ -367,6 +380,7 @@ def _seed(ctx, params, deadline):
             dict(input_len=10240, output_len=2, block_keys=keys),
             deadline.remaining(),
         )
+        deadline.check()
         name = addr_names.get(record["prefill_addr"])
         if not request_success(record) or name not in selected:
             return StageOutput(
@@ -455,9 +469,16 @@ def _flow_validate(params, plan):
 def _flow_start(ctx, params, deadline):
     families = ctx.resource(params["families"], "snapshot")
     flow = BoundedFlow(ctx.ops, ctx.env_epoch, families["families"], clock=ctx.clock)
-    handle = ctx.register_resource(
-        "flow", flow, cleanup=lambda d: flow.stop(d, cancel=True)
-    )
+
+    def cleanup(d):
+        try:
+            flow.stop(d, cancel=True)
+        finally:
+            (ctx.artifact_dir / "elastic-client-records.json").write_text(
+                json.dumps(flow.snapshot_records(), indent=2)
+            )
+
+    handle = ctx.register_resource("flow", flow, cleanup=cleanup)
     deadline.check()
     flow.start()
     return StageOutput(output={"flow": handle})
@@ -476,19 +497,13 @@ def _flow_stop(ctx, params, deadline):
         raise RuntimeError(flow.pump_error)
     path = ctx.artifact_dir / "elastic-client-records.json"
     path.write_text(json.dumps(flow.snapshot_records(), indent=2))
+    evidence = ctx.register_resource("snapshot", result, historical=True)
     return StageOutput(
-        output={"complete": result["result_complete"], "issued": result["issued"]},
-        checks=[
-            CheckResult(
-                "P6",
-                (
-                    "PASS"
-                    if result["zero_errors"] and result["result_complete"]
-                    else "FAIL"
-                ),
-                actual=result,
-            )
-        ],
+        output={
+            "complete": result["result_complete"],
+            "issued": result["issued"],
+            "result": evidence,
+        },
         artifacts=[str(path)],
     )
 
@@ -544,11 +559,6 @@ def _scale(ctx, params, deadline):
         output={"scale": handle, "drained": response.get("drained") is True},
         checks=[
             CheckResult("pre_scale_skew", "PASS", actual=counts),
-            CheckResult(
-                "drained",
-                "PASS" if response.get("drained") is True else "FAIL",
-                evidence=evidence,
-            ),
         ],
     )
 
@@ -560,7 +570,9 @@ def _recovery_validate(params, plan):
 def _recovery(ctx, params, deadline):
     records = RecordedRequests(ctx.ops, ctx.env_epoch, ctx.clock)
     handle = ctx.register_resource(
-        "requests", records, cleanup=lambda d: records.cancel_active()
+        "requests",
+        records,
+        cleanup=_record_cleanup(ctx, records, "elastic-recovery-records.json"),
     )
     for _ in range(20):
         deadline.check()
@@ -574,19 +586,11 @@ def _recovery(ctx, params, deadline):
             ),
             deadline.remaining(),
         )
+    deadline.check()
     summary = completeness(records.snapshot_records())
     rate = summary["completed"] / 20
     return StageOutput(
         output={"requests": handle, "success_rate": rate},
-        checks=[
-            CheckResult(
-                "P2",
-                "PASS" if rate >= 0.95 and summary["result_complete"] else "FAIL",
-                actual=rate,
-                expected=0.95,
-                evidence=summary,
-            )
-        ],
     )
 
 
@@ -603,21 +607,381 @@ HANDLERS = [
         "elastic_flow_stop",
         _flow_stop_validate,
         _flow_stop,
-        {"complete": "boolean", "issued": "integer"},
-        checks=frozenset({"P6"}),
+        {"complete": "boolean", "issued": "integer", "result": "snapshot"},
     ),
     StageHandler(
         "elastic_scale",
         _scale_validate,
         _scale,
         {"scale": "snapshot", "drained": "boolean"},
-        checks=frozenset({"pre_scale_skew", "drained"}),
+        checks=frozenset({"pre_scale_skew"}),
     ),
     StageHandler(
         "elastic_recovery",
         _recovery_validate,
         _recovery,
         {"requests": "requests", "success_rate": "number"},
-        checks=frozenset({"P2"}),
     ),
 ]
+
+
+METRICS = {
+    "mock_engine_cache_key_hits_total",
+    "mock_engine_cache_keys_requested_total",
+    "mock_engine_waiting",
+    "mock_engine_available_blocks",
+    "mock_engine_cache_blocks",
+    "rtp_llm_context_tps",
+    "rtp_llm_generate_tps",
+}
+
+
+def parse_metrics(text):
+    import re
+
+    values = {}
+    for line in text.splitlines():
+        match = re.fullmatch(
+            r"([a-zA-Z_:][a-zA-Z0-9_:]*)\{([^}]*)\}\s+([^\s]+)(?:\s+\S+)?", line.strip()
+        )
+        if not match or match[1] not in METRICS:
+            continue
+        labels = dict(re.findall(r'(\w+)="([^"]*)"', match[2]))
+        if not labels.get("engine_name"):
+            raise ValueError("metric has no engine_name")
+        value = float(match[3])
+        if not __import__("math").isfinite(value):
+            raise ValueError("nonfinite metric")
+        engine = values.setdefault(labels["engine_name"], {"role": labels.get("role")})
+        if match[1] in engine:
+            raise ValueError("ambiguous duplicate metric series")
+        engine[match[1]] = value
+    if not values:
+        raise ValueError("empty metric response")
+    return values
+
+
+class ElasticMetrics:
+    """Continuous, bounded sampling across a blocking graceful scale call."""
+
+    def __init__(self, ctx, max_duration_s=600):
+        self.ctx, self.env_epoch = ctx, ctx.env_epoch
+        self.end = ctx.clock() + max_duration_s
+        self.samples, self.errors = [], []
+        self._lock, self._stop = threading.Lock(), threading.Event()
+        self.thread = threading.Thread(
+            target=self._run, daemon=True, name="elastic-metrics"
+        )
+
+    def _run(self):
+        while not self._stop.is_set():
+            now = self.ctx.clock()
+            if now >= self.end:
+                with self._lock:
+                    self.errors.append(
+                        dict(time_s=now, error="metrics duration budget exceeded")
+                    )
+                return
+            try:
+                if self.ctx.env_epoch != self.env_epoch:
+                    raise ValueError("environment epoch changed during measurement")
+                url = f"http://127.0.0.1:{self.ctx.ops.mock_http_port}/metrics?per_engine=true"
+                with urllib.request.urlopen(
+                    url, timeout=min(2, self.end - now)
+                ) as response:
+                    body = response.read(2_000_001)
+                    if len(body) > 2_000_000:
+                        raise ValueError("metrics response exceeds byte budget")
+                    values = parse_metrics(body.decode())
+                with self._lock:
+                    self.samples.append(dict(time_s=self.ctx.clock(), engines=values))
+            except Exception as exc:
+                with self._lock:
+                    self.errors.append(dict(time_s=self.ctx.clock(), error=repr(exc)))
+            self._stop.wait(1)
+
+    def snapshot(self):
+        with self._lock:
+            return copy.deepcopy(
+                dict(samples=self.samples, errors=self.errors, env_epoch=self.env_epoch)
+            )
+
+    def stop(self, deadline):
+        self._stop.set()
+        if self.thread.ident is not None:
+            self.thread.join(max(0, deadline.remaining()))
+            if self.thread.is_alive():
+                raise TimeoutError("metrics thread did not stop within cleanup budget")
+        path = self.ctx.artifact_dir / "elastic-metrics.json"
+        path.write_text(json.dumps(self.snapshot(), indent=2))
+        if self.errors:
+            raise ValueError(f"metric acquisition errors: {self.errors}")
+
+
+def metric_window(data, start, end, survivor=None):
+    samples = [s for s in data["samples"] if start <= s["time_s"] <= end]
+    errors = [e for e in data["errors"] if start <= e["time_s"] <= end]
+    if errors:
+        raise ValueError(f"metric acquisition failed: {errors}")
+    if len(samples) < max(2, int((end - start) / 2)):
+        raise ValueError("insufficient metric samples")
+    stamps = [start] + [s["time_s"] for s in samples] + [end]
+    if any(b - a > 3.5 for a, b in zip(stamps, stamps[1:])):
+        raise ValueError("metric window has an uncovered gap")
+    by_engine = {}
+    for sample in samples:
+        for name, values in sample["engines"].items():
+            by_engine.setdefault(name, []).append(values)
+    hits = requested = 0
+    for name, rows in by_engine.items():
+        for metric in (
+            "mock_engine_cache_key_hits_total",
+            "mock_engine_cache_keys_requested_total",
+        ):
+            if any(metric not in row for row in rows):
+                raise ValueError(f"{name}: missing hit counter")
+            counters = [r[metric] for r in rows]
+            if any(b < a for a, b in zip(counters, counters[1:])):
+                raise ValueError(f"{name}: counter epoch reset")
+            delta = counters[-1] - counters[0]
+            if metric.endswith("hits_total"):
+                hits += delta
+            else:
+                requested += delta
+    if requested <= 0 or hits < 0 or hits > requested:
+        raise ValueError("nonzero valid cache-request denominator required")
+    result = dict(
+        start_s=start,
+        end_s=end,
+        sample_count=len(samples),
+        hit_rate=hits / requested,
+        hits=hits,
+        requested=requested,
+        membership=sorted(by_engine),
+        membership_policy="union of observed engines; removed engines retain their last counter",
+    )
+    tps = 0
+    tps_complete = True
+    for rows in by_engine.values():
+        metric = (
+            "rtp_llm_context_tps"
+            if rows[0].get("role", "").lower() == "prefill"
+            else "rtp_llm_generate_tps"
+        )
+        values = [r.get(metric) for r in rows]
+        if any(v is None for v in values):
+            tps_complete = False
+        else:
+            tps += sum(values) / len(values)
+    result["tps_observation"] = tps if tps_complete else None
+    if survivor:
+        if any(survivor not in s["engines"] for s in samples):
+            raise ValueError("survivor missing from steady samples")
+        waiting, occupancy = [], []
+        for sample in samples:
+            values = sample["engines"][survivor]
+            total = values["mock_engine_cache_blocks"]
+            available = values["mock_engine_available_blocks"]
+            if total <= 0 or not 0 <= available <= total:
+                raise ValueError("invalid KV block gauge")
+            waiting.append(values["mock_engine_waiting"])
+            occupancy.append(1 - available / total)
+        result.update(waiting_peak=max(waiting), occupancy_peak=max(occupancy))
+    return result
+
+
+def _metrics_start_validate(params, plan):
+    return _validate(params, plan, set())
+
+
+def _metrics_start(ctx, params, deadline):
+    metrics = ElasticMetrics(ctx)
+    handle = ctx.register_resource("observation", metrics, cleanup=metrics.stop)
+    deadline.check()
+    metrics.thread.start()
+    return StageOutput(output={"observation": handle})
+
+
+def _window_validate(params, plan):
+    p = _validate(
+        params,
+        plan,
+        {"observation", "phase", "baseline", "scale", "families", "victim"},
+        {"observation", "phase"},
+    )
+    plan.reference(p["observation"], "observation")
+    if p["phase"] not in {"baseline", "transient", "steady"}:
+        raise ValueError("unknown elastic metric phase")
+    if p["phase"] != "baseline":
+        for field in ("baseline", "scale", "families"):
+            plan.reference(p[field], "snapshot")
+        if p.get("victim") not in {"hot", "cold"}:
+            raise ValueError("victim must be hot or cold")
+    return p
+
+
+def _window(ctx, params, deadline):
+    metrics = ctx.resource(params["observation"], "observation")
+    phase = params["phase"]
+    if phase == "baseline":
+        start, duration = ctx.clock(), 20
+    elif phase == "transient":
+        start = ctx.resource(params["scale"], "snapshot")["started_s"]
+        duration = 20
+    else:
+        # Wait for the single survivor topology before starting the 60s settle window.
+        from ...harness import http_post_json
+
+        topology_deadline = ctx.clock() + 30
+        while True:
+            deadline.check()
+            if ctx.clock() >= topology_deadline:
+                raise TimeoutError(
+                    "Master prefill topology did not converge within 30s"
+                )
+            status, body = http_post_json(
+                f"http://127.0.0.1:{ctx.ops.master_http_port}/rtp_llm/master/info",
+                {},
+                timeout=min(2, deadline.remaining()),
+            )
+            if status != 200 or not isinstance(body, dict):
+                raise ValueError(f"master topology probe failed: {status}")
+            summary = body.get("worker_summary", {}).get("PREFILL", {})
+            if summary.get("discovered") == 1 and summary.get("alive") == 1:
+                break
+            deadline.sleep(0.5)
+        start, duration = ctx.clock(), 60
+    wait = start + duration - ctx.clock()
+    if wait > 0:
+        deadline.sleep(wait)
+    survivor = None
+    if phase == "steady":
+        families = ctx.resource(params["families"], "snapshot")
+        survivor = families["cold" if params["victim"] == "hot" else "hot"]
+        start += 40
+    evidence = metric_window(
+        metrics.snapshot(),
+        start,
+        start + (20 if phase == "steady" else duration),
+        survivor,
+    )
+    handle = ctx.register_resource("snapshot", evidence, historical=True)
+    return StageOutput(output={"window": handle})
+
+
+HANDLERS += [
+    StageHandler(
+        "elastic_metrics_start",
+        _metrics_start_validate,
+        _metrics_start,
+        {"observation": "observation"},
+    ),
+    StageHandler(
+        "elastic_window",
+        _window_validate,
+        _window,
+        {"window": "snapshot"},
+    ),
+]
+
+
+def _verdict_validate(params, plan):
+    fields = {
+        "baseline",
+        "transient",
+        "steady",
+        "scale",
+        "flow_result",
+        "recovery",
+        "victim",
+    }
+    p = _validate(params, plan, fields, fields)
+    for field in fields - {"victim", "recovery"}:
+        plan.reference(p[field], "snapshot")
+    plan.reference(p["recovery"], "requests")
+    if p["victim"] not in {"hot", "cold"}:
+        raise ValueError("victim must be hot or cold")
+    return p
+
+
+def _verdict(ctx, params, deadline):
+    deadline.check()
+    evidence = {
+        key: ctx.resource(params[key], "snapshot")
+        for key in ("baseline", "transient", "steady", "scale", "flow_result")
+    }
+    recovery = completeness(
+        ctx.resource(params["recovery"], "requests").snapshot_records()
+    )
+    base, transient, steady, scale, flow = (
+        evidence[k] for k in ("baseline", "transient", "steady", "scale", "flow_result")
+    )
+    floor = base["hit_rate"] - (
+        0.9 * base["hit_rate"] + 0.1 if params["victim"] == "hot" else 0.1
+    )
+    rate = recovery["completed"] / 20
+    checks = [
+        CheckResult(
+            "drained",
+            "PASS" if scale["response"].get("drained") is True else "FAIL",
+            evidence=scale,
+        ),
+        CheckResult(
+            "PC",
+            "PASS" if transient["hit_rate"] >= floor else "FAIL",
+            actual=transient["hit_rate"],
+            expected=floor,
+            evidence=transient,
+        ),
+        CheckResult(
+            "PQ",
+            "PASS" if steady["waiting_peak"] <= 2 else "FAIL",
+            actual=steady["waiting_peak"],
+            expected=2,
+        ),
+        CheckResult(
+            "PK",
+            "PASS" if steady["occupancy_peak"] <= 0.95 else "FAIL",
+            actual=steady["occupancy_peak"],
+            expected=0.95,
+        ),
+        CheckResult(
+            "P6",
+            "PASS" if flow["zero_errors"] and flow["result_complete"] else "FAIL",
+            actual=flow,
+        ),
+        CheckResult(
+            "P2",
+            (
+                "PASS"
+                if recovery["issued"] == 20
+                and recovery["result_complete"]
+                and rate >= 0.95
+                else "FAIL"
+            ),
+            actual=rate,
+            expected=0.95,
+            evidence=recovery,
+        ),
+    ]
+    evidence["recovery"] = recovery
+    evidence["observations"] = {
+        "steady_hit": steady["hit_rate"],
+        "baseline_hit": base["hit_rate"],
+        "P1": "degenerate with one prefill",
+        "PK_spread": "degenerate with one prefill",
+    }
+    path = ctx.artifact_dir / "elastic-verdict.json"
+    path.write_text(json.dumps(evidence, indent=2))
+    return StageOutput(checks=checks, artifacts=[str(path)])
+
+
+HANDLERS.append(
+    StageHandler(
+        "elastic_verdict",
+        _verdict_validate,
+        _verdict,
+        {},
+        checks=frozenset({"drained", "PC", "PQ", "PK", "P6", "P2"}),
+    )
+)
