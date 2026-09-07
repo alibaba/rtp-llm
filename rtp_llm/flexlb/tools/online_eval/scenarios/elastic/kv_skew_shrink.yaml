@@ -42,7 +42,7 @@ stages:
     params:
       families: {$ref: stages.seed.output.families}
   - id: baseline
-    action: elastic_window
+    action: elastic_baseline
     timeout_s: 30
     params:
       observation: {$ref: stages.metrics.output.observation}

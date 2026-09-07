@@ -836,7 +836,7 @@ def _metrics_start(ctx, params, deadline):
     return StageOutput(output={"observation": handle})
 
 
-def _window_validate(params, plan):
+def _metric_phase_validate(params, plan):
     p = _validate(
         params,
         plan,
@@ -851,6 +851,20 @@ def _window_validate(params, plan):
             plan.reference(p[field], "snapshot")
         if p.get("victim") not in {"hot", "cold"}:
             raise ValueError("victim must be hot or cold")
+    return p
+
+
+def _baseline_validate(params, plan):
+    p = _metric_phase_validate(params, plan)
+    if p["phase"] != "baseline":
+        raise ValueError("elastic_baseline requires phase baseline")
+    return p
+
+
+def _window_validate(params, plan):
+    p = _metric_phase_validate(params, plan)
+    if p["phase"] == "baseline":
+        raise ValueError("baseline requires elastic_baseline high-hit guard")
     return p
 
 
@@ -958,11 +972,17 @@ HANDLERS += [
         {"observation": "observation"},
     ),
     StageHandler(
+        "elastic_baseline",
+        _baseline_validate,
+        _window,
+        {"window": "snapshot"},
+        checks=frozenset({"high_hit"}),
+    ),
+    StageHandler(
         "elastic_window",
         _window_validate,
         _window,
         {"window": "snapshot"},
-        checks=frozenset({"high_hit"}),
     ),
 ]
 
