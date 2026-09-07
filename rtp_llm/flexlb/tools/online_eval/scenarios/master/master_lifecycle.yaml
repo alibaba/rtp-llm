@@ -1,9 +1,16 @@
 schema_version: 1
 id: master_lifecycle
-description: Cold restart of the owned master, clean scheduler state, topology and request recovery.
+description: Cold restart of the owned master, clean scheduler state, topology and
+  request recovery.
 category: master
-profiles: [batch-window]
-legacy_case_ids: [master_kill]
+profiles:
+- batch-window
+- single-nonbatch
+- single-batch
+- window-nonbatch
+legacy_case_ids:
+- master_kill
+- master_freeze
 environment:
   backend: java_mock
   n_prefill: 2
@@ -12,65 +19,312 @@ environment:
   perf_preset: fault_env
   config_overrides:
     ordering: priority
-    queue_timeout_ms: {omit: true}
+    queue_timeout_ms:
+      omit: true
 execution:
   timeout_s: 420
   stage_timeout_s: 60
   cleanup_timeout_s: 120
 variants:
-  - id: kill_single
-stages:
+- id: kill_single
+  profiles:
+  - batch-window
+  legacy_case_ids:
+  - master_kill
+- id: freeze_short_long
+  legacy_case_ids:
+  - master_freeze
+  environment_overrides:
+    master_layout: dual_standalone
+    discovery: file
+    perf_preset: default
+    config_overrides: {}
+  stages:
   - id: setup
     action: setup
     timeout_s: 180
-  - id: baseline
-    action: request
-    params: {count: 1, output_len: 2}
-  - id: baseline_done
-    action: wait
+  - id: flow
+    action: master_client_start
     params:
-      requests: {$ref: stages.baseline.output.requests}
-  - id: baseline_complete
-    action: check
+      targets:
+      - B
+      - A
+      duration_s: 100
+  - id: short_begin
+    action: master_mark
     params:
-      actual: {$ref: stages.baseline_done.output.completed}
-      op: eq
-      expected: true
-  - id: baseline_no_errors
-    action: check
-    params:
-      actual: {$ref: stages.baseline_done.output.error_count}
-      op: eq
-      expected: 0
-  - id: kill
+      wait_s: 12
+  - id: short_freeze
     action: master_fault
-    params: {mode: kill, target: single}
-  - id: restart
+    params:
+      mode: freeze
+      target: B
+  - id: short_end
+    action: master_mark
+    params:
+      wait_s: 6
+  - id: short_restore
     action: master_restore
-    timeout_s: 180
     params:
-      fault: {$ref: stages.kill.output.fault}
-  - id: restored_topology
+      fault:
+        $ref: stages.short_freeze.output.fault
+  - id: post_short_end
+    action: master_mark
+    params:
+      wait_s: 8
+  - id: before
+    action: master_state
+    params:
+      target: B
+  - id: long_begin
+    action: master_mark
+    params:
+      wait_s: 0
+  - id: long_freeze
+    action: master_fault
+    params:
+      mode: freeze
+      target: B
+  - id: long_end
+    action: master_mark
+    params:
+      wait_s: 46
+  - id: long_restore
+    action: master_restore
+    params:
+      fault:
+        $ref: stages.long_freeze.output.fault
+  - id: after
+    action: master_state
+    params:
+      target: B
+  - id: post_long_end
+    action: master_mark
+    params:
+      wait_s: 10
+  - id: ready_b
     action: master_ready
-    params: {target: single, inflight_zero: true}
-  - id: recovery
-    action: request
-    params: {count: 1, output_len: 2}
-  - id: recovery_done
-    action: wait
     params:
-      requests: {$ref: stages.recovery.output.requests}
-  - id: recovery_complete
-    action: check
+      target: B
+      inflight_zero: false
+  - id: continuity
+    action: master_continuity
     params:
-      actual: {$ref: stages.recovery_done.output.completed}
+      before:
+        $ref: stages.before.output.state
+      after:
+        $ref: stages.after.output.state
+  - id: finish
+    action: master_client_finish
+    params:
+      client:
+        $ref: stages.flow.output.client
+    timeout_s: 120
+  - id: short_hang
+    action: master_client_window
+    params:
+      rows:
+        $ref: stages.finish.output.rows
+      from:
+        $ref: stages.short_begin.output.epoch_s
+      until:
+        $ref: stages.short_end.output.epoch_s
+  - id: short_post
+    action: master_client_window
+    params:
+      rows:
+        $ref: stages.finish.output.rows
+      from:
+        $ref: stages.short_end.output.epoch_s
+      until:
+        $ref: stages.post_short_end.output.epoch_s
+  - id: short_burst
+    action: master_client_window
+    params:
+      rows:
+        $ref: stages.finish.output.rows
+      from:
+        $ref: stages.short_end.output.epoch_s
+      until:
+        $ref: stages.long_begin.output.epoch_s
+      until_offset_s: -0.5
+  - id: short_verdict
+    action: master_short_hang_check
+    params:
+      hang:
+        $ref: stages.short_hang.output.rows
+      burst:
+        $ref: stages.short_burst.output.rows
+      post:
+        $ref: stages.short_post.output.rows
+      target: B
+  - id: judged
+    action: master_client_window
+    params:
+      rows:
+        $ref: stages.finish.output.rows
+      from:
+        $ref: stages.long_begin.output.epoch_s
+      from_offset_s: 29
+      until:
+        $ref: stages.long_end.output.epoch_s
+  - id: pre_freeze
+    action: master_client_window
+    params:
+      rows:
+        $ref: stages.finish.output.rows
+      from:
+        $ref: stages.long_begin.output.epoch_s
+      from_offset_s: -2
+      until:
+        $ref: stages.long_begin.output.epoch_s
+  - id: deadline_straddle
+    action: master_client_window
+    params:
+      rows:
+        $ref: stages.finish.output.rows
+      from:
+        $ref: stages.long_begin.output.epoch_s
+      from_offset_s: -4
+      until:
+        $ref: stages.long_end.output.epoch_s
+  - id: post_long
+    action: master_client_window
+    params:
+      rows:
+        $ref: stages.finish.output.rows
+      from:
+        $ref: stages.long_end.output.epoch_s
+      until:
+        $ref: stages.post_long_end.output.epoch_s
+  - id: retry_seen
+    action: master_client_check
+    params:
+      rows:
+        $ref: stages.judged.output.rows
+      metric: failover_count
+      op: ge
+      expected: 1
+  - id: switch_to_a
+    action: master_client_check
+    params:
+      rows:
+        $ref: stages.judged.output.rows
+      metric: target_share
+      op: ge
+      expected: 0.01
+      target: A
+  - id: visible_terminal
+    action: master_client_check
+    params:
+      rows:
+        $ref: stages.pre_freeze.output.rows
+      metric: visible_terminal_share
       op: eq
-      expected: true
-  - id: recovery_no_errors
-    action: check
+      expected: 1
+  - id: deadline_visible
+    action: master_client_check
     params:
-      actual: {$ref: stages.recovery_done.output.error_count}
+      rows:
+        $ref: stages.deadline_straddle.output.rows
+      metric: error_kind_count
+      op: ge
+      expected: 1
+      error_kind: deadline
+  - id: post_success
+    action: master_client_check
+    params:
+      rows:
+        $ref: stages.post_long.output.rows
+      metric: success_rate
+      op: ge
+      expected: 0.9
+  - id: post_on_a
+    action: master_client_check
+    params:
+      rows:
+        $ref: stages.post_long.output.rows
+      metric: target_share
+      op: ge
+      expected: 0.8
+      target: A
+  - id: unique_requests
+    action: master_client_check
+    params:
+      rows:
+        $ref: stages.finish.output.rows
+      metric: duplicate_ids
       op: eq
       expected: 0
   - id: cleanup
     action: teardown
+stages:
+- id: setup
+  action: setup
+  timeout_s: 180
+- id: baseline
+  action: request
+  params:
+    count: 1
+    output_len: 2
+- id: baseline_done
+  action: wait
+  params:
+    requests:
+      $ref: stages.baseline.output.requests
+- id: baseline_complete
+  action: check
+  params:
+    actual:
+      $ref: stages.baseline_done.output.completed
+    op: eq
+    expected: true
+- id: baseline_no_errors
+  action: check
+  params:
+    actual:
+      $ref: stages.baseline_done.output.error_count
+    op: eq
+    expected: 0
+- id: kill
+  action: master_fault
+  params:
+    mode: kill
+    target: single
+- id: restart
+  action: master_restore
+  timeout_s: 180
+  params:
+    fault:
+      $ref: stages.kill.output.fault
+- id: restored_topology
+  action: master_ready
+  params:
+    target: single
+    inflight_zero: true
+- id: recovery
+  action: request
+  params:
+    count: 1
+    output_len: 2
+- id: recovery_done
+  action: wait
+  params:
+    requests:
+      $ref: stages.recovery.output.requests
+- id: recovery_complete
+  action: check
+  params:
+    actual:
+      $ref: stages.recovery_done.output.completed
+    op: eq
+    expected: true
+- id: recovery_no_errors
+  action: check
+  params:
+    actual:
+      $ref: stages.recovery_done.output.error_count
+    op: eq
+    expected: 0
+- id: cleanup
+  action: teardown

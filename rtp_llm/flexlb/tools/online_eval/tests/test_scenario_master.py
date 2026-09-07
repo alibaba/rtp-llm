@@ -268,7 +268,7 @@ class MasterActionsTest(unittest.TestCase):
             load_scenarios(root),
             handlers={h.name: h for h in master.HANDLERS + controls},
         )
-        self.assertEqual(15, len(plans))
+        self.assertEqual(19, len(plans))
         self.assertEqual(5, len({p["scenario_id"] for p in plans}))
         self.assertTrue(all(any(s["check_ids"] for s in p["stages"]) for p in plans))
         for plan in plans:
@@ -282,6 +282,78 @@ class MasterActionsTest(unittest.TestCase):
                 self.assertEqual(
                     "dual_standalone", plan["environment"]["master_layout"]
                 )
+
+    def test_short_hang_empty_send_window_still_requires_real_recovery_burst(self):
+        self.manager.master_instance_target.return_value = "B:18085"
+        good = [{"status": "ok", "master_target": "B:18085"}] * 3
+        empty = self.ctx.register_resource("ha_rows", [])
+        burst = self.ctx.register_resource("ha_rows", good)
+        self.assertEqual(
+            "PASS",
+            master._short(
+                self.ctx,
+                dict(hang=empty, burst=burst, post=burst, target="B"),
+                self.deadline,
+            )
+            .checks[0]
+            .status,
+        )
+        self.assertEqual(
+            "FAIL",
+            master._short(
+                self.ctx,
+                dict(hang=empty, burst=empty, post=empty, target="B"),
+                self.deadline,
+            )
+            .checks[0]
+            .status,
+        )
+
+    def test_direct_request_bypasses_schedule_and_records_actual_grpc_error(self):
+        class RpcError(Exception):
+            def code(self):
+                return SimpleNamespace(name="UNKNOWN")
+
+        class Call:
+            def __iter__(self):
+                raise RpcError("injected")
+
+            def cancel(self):
+                return True
+
+        self.ctx.ops = SimpleNamespace(
+            next_request_id=lambda: 42,
+            _channel=lambda target: target,
+            build_generate_input=lambda *args, **kw: object(),
+            pb2_grpc=SimpleNamespace(
+                RpcServiceStub=lambda channel: SimpleNamespace(
+                    GenerateStreamCall=lambda *args, **kw: Call()
+                )
+            ),
+        )
+        snapshot = {
+            "engines": [
+                {
+                    "name": "prefill-0",
+                    "role": "prefill",
+                    "grpc_addr": "127.0.0.1:55151",
+                    "stopped": False,
+                }
+            ]
+        }
+        with patch.dict(
+            sys.modules, {"grpc": SimpleNamespace(RpcError=RpcError)}
+        ), patch(
+            "flexlb_ft.scenario.actions.engine_control._http", return_value=snapshot
+        ):
+            out = master._direct(self.ctx, {"engine": "prefill-0"}, self.deadline)
+        self.assertTrue(out.output["error"])
+        self.assertFalse(out.output["finished"])
+        record = self.ctx.resource(out.output["result"], "direct_request")
+        self.assertEqual("GenerateStreamCall", record["method"])
+        self.assertEqual("direct", record["route"])
+        self.assertTrue(record["consumer_done"])
+        self.assertIsNotNone(record["consumer_exit_s"])
 
     def test_strict_parameters_and_typed_prior_fault(self):
         plan = PlanContext("fault", {})

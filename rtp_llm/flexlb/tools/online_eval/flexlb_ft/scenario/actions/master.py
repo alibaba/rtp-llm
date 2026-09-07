@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import json
 import math
+import re
 import subprocess
 import time
 import urllib.request
@@ -479,6 +480,7 @@ HA_METRICS = {
     "failed_rate_above_one",
     "business_rate_above_one",
     "visible_terminal_count",
+    "visible_terminal_share",
 }
 
 
@@ -565,12 +567,14 @@ def _client_check(ctx, params, deadline):
             for r in rows
         )
         actual = count / n if count > 1 and n else 0
-    elif metric == "visible_terminal_count":
+    elif metric in {"visible_terminal_count", "visible_terminal_share"}:
         actual = sum(
             r["status"] == "ok"
             or r["error_kind"] in {"deadline", "transport", "business"}
             for r in rows
         )
+        if metric == "visible_terminal_share":
+            actual = actual / n if n else 0
     elif metric == "wrong_error_code":
         actual = sum(str(params["code"]) not in str(r.get("error", "")) for r in rows)
     else:
@@ -886,5 +890,295 @@ HANDLERS.append(
         _inflight,
         {"count": "integer"},
         checks=frozenset({"scheduler_inflight"}),
+    )
+)
+
+
+def _direct_validate(params, plan):
+    p = _params(params, plan, {"engine"})
+    p.setdefault("engine", "prefill-0")
+    if not isinstance(p["engine"], str) or not re.fullmatch(
+        r"prefill-[0-9]+", p["engine"]
+    ):
+        raise ValueError("direct request requires an explicit prefill engine")
+    return p
+
+
+def _direct(ctx, params, deadline):
+    import grpc
+
+    from .engine_control import _engines, _http
+
+    entry = _engines(_http(ctx.ops, "snapshot", deadline), [params["engine"]])[
+        params["engine"]
+    ]
+    if entry["role"] != "prefill":
+        raise ValueError("direct request target is not prefill")
+    state = dict(
+        route="direct",
+        request_id=ctx.ops.next_request_id(),
+        engine=params["engine"],
+        target=entry["grpc_addr"],
+        method="GenerateStreamCall",
+        issued_s=ctx.clock(),
+        consumer_done=False,
+        consumer_exit_s=None,
+        error=None,
+        business_finished=False,
+    )
+    call_box = [None]
+
+    def cleanup(d):
+        if call_box[0] is not None and not state["consumer_done"]:
+            call_box[0].cancel()
+
+    handle = ctx.register_resource("direct_request", state, cleanup, historical=True)
+    artifact = ctx.artifact_dir / f"direct-{handle['id']}.json"
+    try:
+        deadline.check()
+        stub = ctx.ops.pb2_grpc.RpcServiceStub(ctx.ops._channel(entry["grpc_addr"]))
+        call = stub.GenerateStreamCall(
+            ctx.ops.build_generate_input(state["request_id"], output_len=2),
+            timeout=min(15, deadline.remaining()),
+        )
+        call_box[0] = call
+        for frame in call:
+            deadline.check()
+            if frame.error_info.error_code:
+                state["error"] = str(frame.error_info.error_message)
+            if any(frame.flatten_output.finished):
+                state["business_finished"] = True
+    except grpc.RpcError as exc:
+        state["error"] = dict(code=exc.code().name, detail=str(exc))
+    finally:
+        # The consumer is this synchronous stage, never an unjoined thread.
+        if call_box[0] is not None:
+            call_box[0].cancel()
+        state["consumer_done"] = True
+        state["consumer_exit_s"] = ctx.clock()
+        artifact.write_text(json.dumps(state, indent=2) + "\n")
+    return StageOutput(
+        {
+            "result": handle,
+            "error": state["error"] is not None,
+            "finished": state["business_finished"],
+        },
+        artifacts=[str(artifact)],
+    )
+
+
+def _direct_clean_validate(params, plan):
+    return _params(params, plan, set())
+
+
+def _direct_clean(ctx, params, deadline):
+    from .engine_control import _engines, _http
+
+    names = [f"prefill-{i}" for i in range(ctx.env.spec.n_prefill)]
+    while True:
+        deadline.check()
+        engines = _engines(_http(ctx.ops, "snapshot", deadline), names)
+        states = {}
+        for name, row in engines.items():
+            if (
+                type(row.get("inflight")) is not int
+                or row["inflight"] < 0
+                or type(row.get("leak_detected")) is not bool
+            ):
+                raise ValueError("direct engine cleanup observation missing or invalid")
+            states[name] = dict(
+                inflight=row["inflight"], leak_detected=row["leak_detected"]
+            )
+        if all(
+            v["inflight"] == 0 and v["leak_detected"] is False for v in states.values()
+        ):
+            break
+        deadline.sleep(0.5)
+    return StageOutput(
+        {"snapshot": ctx.register_resource("snapshot", states, historical=True)},
+        [
+            CheckResult(
+                "engine_inflight",
+                "PASS",
+                actual=states,
+                expected="all prefill engine inflight zero and leak_detected false",
+            )
+        ],
+    )
+
+
+HANDLERS += [
+    StageHandler(
+        "master_direct_request",
+        _direct_validate,
+        _direct,
+        {"result": "direct_request", "error": "boolean", "finished": "boolean"},
+    ),
+    StageHandler(
+        "master_direct_clean",
+        _direct_clean_validate,
+        _direct_clean,
+        {"snapshot": "snapshot"},
+        checks=frozenset({"engine_inflight"}),
+    ),
+]
+
+
+def _state_validate(params, plan):
+    p = _target(_params(params, plan, {"target"}))
+    _layout(p, plan)
+    return p
+
+
+def _state(ctx, params, deadline):
+    proc = _process(ctx, params["target"])
+    info = _master_json(ctx, params["target"], "/rtp_llm/master/info", deadline, True)
+    inflight = _master_json(ctx, params["target"], "/rtp_llm/inflight_status", deadline)
+    count = inflight["scheduler_inflight"]
+    if type(count) is not int or count < 0:
+        raise ValueError("master state has no valid scheduler count")
+    topology = {}
+    for role in ("PREFILL", "DECODE"):
+        value = info["worker_summary"][role]["discovered"]
+        if type(value) is not int or value < 0:
+            raise ValueError("master state lacks discovered count")
+        topology[role] = value
+    state = dict(
+        target=params["target"],
+        pid=proc.pid,
+        ready=info.get("ready"),
+        topology=topology,
+        scheduler_inflight=count,
+        sampled_s=ctx.clock(),
+    )
+    handle = ctx.register_resource("master_state", state, historical=True)
+    artifact = ctx.artifact_dir / f"master-state-{handle['id']}.json"
+    artifact.write_text(json.dumps(state, indent=2) + "\n")
+    return StageOutput({"state": handle}, artifacts=[str(artifact)])
+
+
+def _continuity_validate(params, plan):
+    p = _params(params, plan, {"before", "after"}, {"before", "after"})
+    for key in p:
+        plan.reference(p[key], "master_state")
+    return p
+
+
+def _continuity(ctx, params, deadline):
+    deadline.check()
+    before, after = [
+        ctx.resource(params[key], "master_state") for key in ("before", "after")
+    ]
+    if before["target"] != after["target"]:
+        raise ValueError("cannot compare different master owners")
+    identity = before["pid"] == after["pid"]
+    topology = after["ready"] is True and all(
+        after["topology"][role] >= before["topology"][role]
+        and after["topology"][role] == expected
+        for role, expected in (
+            ("PREFILL", ctx.env.spec.n_prefill),
+            ("DECODE", ctx.env.spec.n_decode),
+        )
+    )
+    witnessed = before["scheduler_inflight"] > 0
+    retained = not witnessed or after["scheduler_inflight"] >= 1
+    return StageOutput(
+        {"retained": identity and topology and retained},
+        [
+            CheckResult(
+                "same_process",
+                "PASS" if identity else "FAIL",
+                actual=after["pid"],
+                expected=before["pid"],
+            ),
+            CheckResult(
+                "discovered_continuity",
+                "PASS" if topology else "FAIL",
+                actual=after["topology"],
+                expected=before["topology"],
+            ),
+            CheckResult(
+                "scheduler_continuity",
+                "PASS" if retained else "FAIL",
+                actual=after["scheduler_inflight"],
+                expected="nonzero if nonzero before freeze",
+                evidence={
+                    "before": before["scheduler_inflight"],
+                    "nonzero_before_observed": witnessed,
+                },
+            ),
+        ],
+    )
+
+
+HANDLERS += [
+    StageHandler("master_state", _state_validate, _state, {"state": "master_state"}),
+    StageHandler(
+        "master_continuity",
+        _continuity_validate,
+        _continuity,
+        {"retained": "boolean"},
+        checks=frozenset(
+            {"same_process", "discovered_continuity", "scheduler_continuity"}
+        ),
+    ),
+]
+
+
+def _short_validate(params, plan):
+    p = _params(
+        params,
+        plan,
+        {"hang", "burst", "post", "target"},
+        {"hang", "burst", "post", "target"},
+    )
+    for key in ("hang", "burst", "post"):
+        plan.reference(p[key], "ha_rows")
+    if p["target"] not in ("A", "B"):
+        raise ValueError("short-hang target must be an actual HA master")
+    return p
+
+
+def _short(ctx, params, deadline):
+    deadline.check()
+    hang, burst, post = [
+        ctx.resource(params[key], "ha_rows") for key in ("hang", "burst", "post")
+    ]
+    target = ctx.backend.manager.master_instance_target(ctx.env, params["target"])
+    complete = lambda rows: all(
+        r["status"] == "ok" and r["master_target"] == target for r in rows
+    )
+    # A saturated eight-client flow can legitimately issue zero NEW requests
+    # while frozen. A nonempty post-thaw burst remains mandatory evidence.
+    passed = (
+        complete(hang)
+        and len(burst) >= 3
+        and complete(burst)
+        and all(r["master_target"] == target for r in post)
+    )
+    return StageOutput(
+        {"passed": passed},
+        [
+            CheckResult(
+                "short_hang",
+                "PASS" if passed else "FAIL",
+                actual={
+                    "hang_rows": len(hang),
+                    "burst_rows": len(burst),
+                    "post_rows": len(post),
+                },
+                expected="all issued hang and >=3 burst requests complete on the same master",
+            )
+        ],
+    )
+
+
+HANDLERS.append(
+    StageHandler(
+        "master_short_hang_check",
+        _short_validate,
+        _short,
+        {"passed": "boolean"},
+        checks=frozenset({"short_hang"}),
     )
 )
