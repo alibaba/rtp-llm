@@ -9,14 +9,8 @@ profiles:
 - single-nonbatch
 environment:
   backend: java_mock
-  n_prefill: 1
+  n_prefill: 2
   n_decode: 4
-  config_overrides:
-    ordering: priority
-    queue_timeout_ms:
-      omit: true
-    max_inflight_requests_per_worker: 1
-    max_waiting_requests_per_prefill_worker: 8
 execution:
   timeout_s: 600
   stage_timeout_s: 60
@@ -102,11 +96,17 @@ variants:
   - id: teardown
     action: teardown
     timeout_s: 120
+  environment_overrides:
+    n_prefill: 1
+    config_overrides:
+      ordering: priority
+      queue_timeout_ms:
+        omit: true
+      max_inflight_requests_per_worker: 1
+      max_waiting_requests_per_prefill_worker: 8
 - id: low_no_starvation
   legacy_case_ids:
   - prio_low_no_starvation
-  environment_overrides:
-    config_overrides: {}
   execution:
     timeout_s: 2400
     stage_timeout_s: 60
@@ -115,16 +115,11 @@ variants:
   - id: setup
     action: setup
     timeout_s: 180
-  - id: fleet
-    action: priority_fleet
   - id: slow
-    action: engine_control
+    action: priority_prefill_perf
     params:
-      operation: set_perf
-      targets:
-      - $ref: stages.fleet.output.prefill
-      perf:
-        prefill_fixed_ms: 50
+      expected_prefill: 2
+      prefill_fixed_ms: 50
   - id: sync
     action: balance_pause
     params:
@@ -243,13 +238,10 @@ variants:
       - $ref: stages.wave0.output.requests
       - $ref: stages.wave1.output.requests
   - id: restore
-    action: engine_control
+    action: priority_prefill_perf
     params:
-      operation: set_perf
-      targets:
-      - $ref: stages.fleet.output.prefill
-      perf:
-        prefill_fixed_ms: 100
+      expected_prefill: 2
+      prefill_fixed_ms: 100
   - id: teardown
     action: teardown
     timeout_s: 120

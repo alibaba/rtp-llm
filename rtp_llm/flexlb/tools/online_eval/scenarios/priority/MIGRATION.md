@@ -46,7 +46,11 @@ run, independent static signoff or old/new paired run is claimed at this point.
 ## Low-priority completion
 
 `low_no_starvation` maps `prio_low_no_starvation` in the single-nonbatch
-shared-profile configuration: 1P4D, no explicit delivery/wait cap overrides.
+shared-profile configuration: 2P4D, FIFO ordering, queueTimeoutMs=60000,
+no explicit delivery/wait cap overrides. Both Prefill workers receive the perf
+control and restore. The family default is the shared profile; Q1 overrides
+are scoped exclusively to same_level_fifo. An empty variant dict is not used
+to erase inherited settings because the compiler merges config_overrides.
 Fresh instance isolation replaces reuse of the runner shared environment.
 Prefill50ms -> sync1.5s -> two waves of eight (30x4 then70x4), each
 Schedule settled before the next 1.5s gap (including after the last request).

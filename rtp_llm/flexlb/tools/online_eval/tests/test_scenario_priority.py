@@ -25,6 +25,8 @@ class Backend:
         self.ops.master_http_port = 1
         self.reverse, self.missing = reverse, missing
         self.ops.last_shapes = []
+        self.perf_calls = []
+        self.n_prefill = 1
         original = self.ops.build_schedule_request
 
         def build(rid, **shape):
@@ -45,6 +47,7 @@ class Backend:
             )
 
     def setup(self, ctx, environment, deadline):
+        self.n_prefill = environment["n_prefill"]
         return NS(), self.ops
 
     def teardown(self, ctx, deadline):
@@ -52,6 +55,7 @@ class Backend:
 
     def http(self, ops, endpoint, deadline, body=None):
         if endpoint == "set_perf":
+            self.perf_calls.append((body["engine"], body["prefill_fixed_ms"]))
             return dict(status="ok", engine=body["engine"], port=1234)
         if endpoint != "snapshot":
             raise AssertionError(endpoint)
@@ -64,13 +68,14 @@ class Backend:
         return dict(
             engines=[
                 dict(
-                    name="p0",
+                    name=f"p{index}",
                     role="prefill",
                     grpc_addr="prefill",
                     port=1234,
                     stopped=False,
-                    request_lifecycle=lifecycle,
+                    request_lifecycle=lifecycle if index == 0 else {},
                 )
+                for index in range(self.n_prefill)
             ]
         )
 
@@ -159,6 +164,9 @@ class Tests(unittest.TestCase):
         self.assertEqual(result["status"], "PASS", result)
         self.assertEqual(len(records), 16)
         self.assertEqual(
+            backend.perf_calls, [("p0", 50), ("p1", 50), ("p0", 100), ("p1", 100)]
+        )
+        self.assertEqual(
             [s["priority"] for s in backend.ops.last_shapes], ([30] * 4 + [70] * 4) * 2
         )
         self.assertTrue(all(r["consumer_completion_verified"] for r in records))
@@ -172,9 +180,32 @@ class Tests(unittest.TestCase):
     def test_low_original_choreography(self):
         doc = load_scenarios(ROOT / "scenarios/priority/priority_queue.yaml")[0][1]
         variant = next(v for v in doc["variants"] if v["id"] == "low_no_starvation")
-        self.assertEqual(variant["environment_overrides"]["config_overrides"], {})
+        registry = handlers()
+        registry.update({h.name: h for h in p.HANDLERS})
+        plans = compile_scenarios(
+            load_scenarios(ROOT / "scenarios/priority/priority_queue.yaml"),
+            handlers=registry,
+        )
+        low = next(plan for plan in plans if plan["variant_id"] == "low_no_starvation")
+        self.assertEqual(
+            (low["environment"]["n_prefill"], low["environment"]["n_decode"]), (2, 4)
+        )
+        config = low["environment"]["resolved_config"]
+        self.assertEqual(config["scheduler"]["ordering"]["type"], "FIFO")
+        self.assertEqual(config["scheduler"]["queueTimeoutMs"], 60000)
+        self.assertNotIn("maxInflightRequestsPerPrefillWorker", json.dumps(config))
+        self.assertNotIn("maxWaitingRequestsPerPrefillWorker", json.dumps(config))
+        fifo = next(plan for plan in plans if plan["variant_id"] == "same_level_fifo")
+        self.assertEqual(fifo["environment"]["n_prefill"], 1)
+        self.assertEqual(
+            fifo["environment"]["resolved_config"]["scheduler"]["ordering"]["type"],
+            "PRIORITY",
+        )
+        self.assertNotIn(
+            "queueTimeoutMs", fifo["environment"]["resolved_config"]["scheduler"]
+        )
         stages = {s["id"]: s for s in variant["stages"]}
-        self.assertEqual(stages["slow"]["params"]["perf"]["prefill_fixed_ms"], 50)
+        self.assertEqual(stages["slow"]["params"]["prefill_fixed_ms"], 50)
         for w in range(2):
             self.assertTrue(stages[f"wave{w}"]["params"]["serial_schedule"])
             self.assertEqual(stages[f"wave{w}"]["params"]["gap_s"], 1.5)
