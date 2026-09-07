@@ -1612,7 +1612,90 @@ def _live_final(ctx, p, deadline):
     )
 
 
+def _live_reserved(ctx, p, deadline):
+    ph_wave, wave = [_cohort(ctx, p[k]) for k in ("placeholder", "wave")]
+    if not ph_wave.complete or not wave.complete:
+        raise ValueError("live reserved verdict requires drained survivor cohorts")
+    ph, rows = ph_wave.records(), wave.records()
+    if len(ph) != 1 or len(rows) != 2:
+        raise ValueError(
+            "live reserved cohort must contain placeholder, victim and incoming"
+        )
+    for cohort, tags, priorities, lengths in (
+        (ph_wave, ["placeholder"], [90], [512]),
+        (wave, ["victim", "incoming"], [30, 70], [512, 3500]),
+    ):
+        shapes = cohort.p["requests"]
+        if (
+            [r["tag"] for r in shapes] != tags
+            or [r.get("priority") for r in shapes] != priorities
+            or [r["input_len"] for r in shapes] != lengths
+            or any(r["output_len"] != 2 for r in shapes)
+        ):
+            raise ValueError("live reserved request shape differs from old contract")
+    responses = [e["batch"].entries[0]["response"] for e in wave.entries]
+    if any(r is None for r in responses):
+        raise ValueError("live reserved verdict lacks Schedule response")
+    victim, inc = responses
+    evicted = victim.code == 8400 and not victim.success
+    completed = all(request_success(r) for r in (ph[0], rows[1]))
+    raw, engines = _live_engine_rows(ctx, deadline)
+    if any(not isinstance(e.get("request_lifecycle"), dict) for e in engines):
+        raise ValueError("live never-delivered proof lacks lifecycle inventory")
+    rid = rows[0]["wire_request_id"]
+    never_seen = all(str(rid) not in e["request_lifecycle"] for e in engines)
+    metric = _reservation_metric(ctx, {"labels": {}}, deadline)
+    snapshot = ctx.resource(metric.output["snapshot"], "snapshot")
+    from ...engine_ops import parse_prometheus_samples
+
+    samples = parse_prometheus_samples(snapshot["attempts"][-1]["body"], "")
+
+    def total(name):
+        values = [
+            _number(value, 0, 1e18)
+            for metric_name, labels, value in samples
+            if name in metric_name and labels.get("stage") == "decode_reserved"
+        ]
+        return sum(values) if values else None
+
+    count = total("auto_tpm_victim_count")
+    kv = total("auto_tpm_victim_kv_tokens")
+    pr10 = (
+        evicted
+        and victim.code != 8429
+        and inc.code == 200
+        and inc.success
+        and completed
+    )
+    pr5 = never_seen and evicted
+    pr6 = evicted and count == 1.0 and (kv or 0.0) >= 428.0
+    evidence = dict(
+        placeholder=ph,
+        wave=rows,
+        schedule_codes=[r.code for r in responses],
+        survivors_completed=completed,
+        never_seen=never_seen,
+        raw=raw,
+        victim_total=count,
+        victim_kv_total=kv,
+        PR10=pr10,
+        PR5=pr5,
+        PR6=pr6,
+    )
+    path = ctx.artifact_dir / f"preemption-live-reserved-{uuid.uuid4().hex}.json"
+    path.write_text(json.dumps(evidence, indent=2) + "\n")
+    return StageOutput(
+        {"pr10": pr10, "pr5": pr5, "pr6": pr6}, artifacts=metric.artifacts + [str(path)]
+    )
+
+
 HANDLERS = [
+    StageHandler(
+        "preemption_live_reserved",
+        _same_params,
+        _live_reserved,
+        {"pr10": "boolean", "pr5": "boolean", "pr6": "boolean"},
+    ),
     StageHandler(
         "preemption_live_start",
         _live_start_params,

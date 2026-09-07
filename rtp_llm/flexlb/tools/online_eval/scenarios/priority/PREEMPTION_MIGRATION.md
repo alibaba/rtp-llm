@@ -1,7 +1,7 @@
 # Priority preemption migration
 
 Owner: agent4. Source baseline: `295af797bd7ed3a842c9cad42b5722c64cd24c9a`.
-This checkpoint implements eleven complete candidate families out of fourteen old
+This checkpoint implements twelve complete candidate families out of fourteen old
 contracts. No old case is called or deleted. Independent review, default catalog
 integration and actual Java execution remain pending.
 
@@ -55,9 +55,8 @@ observed order and terminal outcomes are saved as artifacts.
   restores its original blocking dependency. An explicit zero submission gap
   avoids inserting a .15s pause after the standalone placeholder.
 
-## Pending contracts (3)
+## Pending contracts (2)
 
-- atpm_preempt_decode_reserved_live
 - atpm_preempt_cancel_not_found
 - atpm_preempt_cancel_tombstoned
 
@@ -582,8 +581,9 @@ fresh recovery request (unset priority,2048/2, unique RID*100+1 key,
 Schedule30/stream transport60/observation30). Recovery runs with Prefill
 still at4000, as in the old source. RestoreP100 follows the final report,
 with registered cleanup also covering failure paths. Missing engine
-owners/typed fields, invalid metric evidence or consumer-observation
+owners/typed fields, failed metric HTTP, invalid victim samples or consumer-observation
 expiry raise ERROR/TIMEOUT instead of weak old defaults/soft diagnostics;
+The priority_preempt series still uses the old permissive parser.
 Master cleanup remains a mandatory hard gate, an explicit stronger
 boundary. Ordinary PR failures still allow engine clean and recovery.
 
@@ -595,3 +595,40 @@ tags and missing engine inventory. Existing ten compiled plans retain
 identical environment/stages/execution/resource_budget values after
 adding the two profiles. This is fixture evidence, not live Java eviction
 or paired acceptance.
+
+
+## Live Decode reservation replacement
+
+`decode_reserved_live_single` / `decode_reserved_live_window` port
+`atpm_preempt_decode_reserved_live` on the same SB/BW profile pair.
+The checkpoint now contains12 families/14 compiled instances. Both
+actual EnvSpecs are compared to `_dr_live_spec`, including the four-block
+Decode cache pool: 1P/1D, default perf, PRIORITY+BATCH, waiting8,
+queue60000, PREFILL_QUEUED+DECODE_RESERVED without engineCancellation,
+SINGLE or original FIXED_WINDOW32/400, auto_tpm whitelist.
+
+Reuse the explicitly owned live Schedule/deferred Fetch machinery from
+PQ: P4000/sync1.5, placeholder90/512/2 admitted and pending6/.1, victim30/
+512/2 then incoming70/3500/2 with only one .15s inter-submission gap.
+All three Schedule RPCs (90s) settle before serial survivor Fetch of
+placeholder then incoming. Each has transport60 and fresh observation45;
+victim receives no Fetch. Original survivor completion must be backed by
+actual output, terminal transport and verified consumer exit.
+
+PR10 requires victim Schedule8400 with success=false (never8429),
+incoming Schedule200+success and both survivors completed. PR5 is the
+exact8400 plus no victim lifecycle entry in the complete engine fleet.
+PR6 is actual8400, stage=decode_reserved victim_count==1 and
+victim_kv_tokens>=428. No production acceptance or engine-owned cancellation
+is inferred from a master-local shadow eviction. The 428 threshold and
+3500-token incoming are unchanged; a427 sample fails only PR6.
+
+Masterclean30, engineclean30/.5 and one independent fresh recovery
+request form P6, still at P4000 before restore100. Hard cleanup and strict
+owner/victim-sample evidence boundaries are inherited and explicitly
+stronger than the old diagnostic defaults. Four additional complete-
+program tests cover both actual profile/config/cache-pool constructions,
+zero Fetch until all three Schedule responses, two serial real survivors
+plus recovery,427 versus428,8429 versus8400 and engine-seen victim.
+These and the preceding PQ fixtures are run together; no Java or paired
+result is claimed.
