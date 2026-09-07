@@ -155,6 +155,7 @@ def environment(value, path, profile):
             "master_layout",
             "master_stable_window_s",
             "master_sync_log",
+            "metric_whitelist",
         },
     )
     if value.get("backend", "java_mock") != "java_mock":
@@ -175,6 +176,18 @@ def environment(value, path, profile):
     if type(value.get("debug_enabled", False)) is not bool:
         fail(path + ".debug_enabled", "expected boolean")
     result["debug_enabled"] = value.get("debug_enabled", False)
+    if "metric_whitelist" in value:
+        whitelist = value["metric_whitelist"]
+        if not isinstance(whitelist, str) or not re.fullmatch(
+            r"[A-Za-z_][A-Za-z0-9_]*(,[A-Za-z_][A-Za-z0-9_]*){0,15}", whitelist
+        ):
+            fail(
+                path + ".metric_whitelist",
+                "expected 1..16 comma-separated metric identifiers",
+            )
+        if len(whitelist) > 1024:
+            fail(path + ".metric_whitelist", "metric whitelist exceeds byte budget")
+        result["metric_whitelist"] = whitelist
     if type(value.get("master_sync_log", False)) is not bool:
         fail(path + ".master_sync_log", "expected boolean")
     result["master_sync_log"] = value.get("master_sync_log", False)
@@ -566,6 +579,7 @@ def compile_scenarios(documents, profile=None, handlers=None, grade="normal"):
                     "master_layout",
                     "master_stable_window_s",
                     "master_sync_log",
+                    "metric_whitelist",
                 },
             )
             for key, value in patch.items():
