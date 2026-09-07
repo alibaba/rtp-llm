@@ -27,6 +27,7 @@ class Backend:
         queued=False,
         expiry=False,
         reason=0,
+        terminals=None,
     ):
         self.ops = Ops(batch=False)
         self.ops.master_http_port = 1
@@ -46,6 +47,10 @@ class Backend:
                 response.code = 8511
                 response.success = False
                 response.admission_reject_reason = reason
+            if terminals and req[0] in terminals:
+                response = self.ops.responses[-1]
+                response.code = terminals[req[0]]
+                response.success = response.code == 200
             return call
 
         self.ops.future = future
@@ -127,7 +132,7 @@ class PreemptionPrograms(unittest.TestCase):
             load_scenarios(ROOT / "scenarios/priority/priority_preemption.yaml"),
             handlers=registry,
         )
-        self.assertEqual(3, len(plans))
+        self.assertEqual(4, len(plans))
         return next(p for p in plans if p["variant_id"] == variant), registry
 
     def run_program(self, variant="same_priority_zero_eviction", **kwargs):
@@ -319,3 +324,45 @@ class PreemptionPrograms(unittest.TestCase):
         self.assertEqual("ERROR", result["status"])
         self.assertEqual(12, len(backend.shapes))
         self.assertTrue(all(c["status"] == "PASS" for c in result["cleanup"]))
+
+    def test_disabled_all_success_preserves_twenty_consumers(self):
+        result, cohorts, backend = self.run_program(
+            variant="disabled_zero_eviction", queued=True
+        )
+        self.assertEqual("PASS", result["status"], result)
+        self.assertEqual(20, backend.ops.generate_count)
+        self.assertEqual([1, 1, 9, 9], sorted(map(len, cohorts)))
+
+    def test_disabled_queue_expiries_are_legal_in_both_rounds(self):
+        terminals = {rid: 8511 for rid in list(range(2, 11)) + list(range(12, 21))}
+        result, _, backend = self.run_program(
+            variant="disabled_zero_eviction", terminals=terminals
+        )
+        self.assertEqual("PASS", result["status"], result)
+        self.assertEqual(20, len(backend.shapes))
+        self.assertEqual(2, backend.ops.generate_count)
+
+    def test_disabled_forbidden_queued_code_fails_both_checks(self):
+        result, _, backend = self.run_program(
+            variant="disabled_zero_eviction", terminals={2: 8430}
+        )
+        self.assertEqual("FAIL", result["status"])
+        self.assertEqual(10, len(backend.shapes))
+        checks = next(s for s in result["stages"] if s["id"] == "r1_same_priority")[
+            "checks"
+        ]
+        self.assertEqual(
+            {"AT2": "FAIL", "P6_terminal": "FAIL"},
+            {c["id"]: c["status"] for c in checks},
+        )
+
+    def test_disabled_config_matches_full_legacy_t1_render(self):
+        from flexlb_ft.harness import render_env
+        from flexlb_ft.support.priority import _t1_spec
+
+        plan, _ = self.plan("disabled_zero_eviction")
+        spec = _t1_spec(NS(profile="single-nonbatch"))
+        expected = json.loads(render_env(spec.master_profile, spec.config_overrides))
+        self.assertEqual(expected, plan["environment"]["resolved_config"])
+        self.assertNotIn("preemption", expected["scheduler"]["ordering"])
+        self.assertEqual(8000, expected["scheduler"]["queueTimeoutMs"])
