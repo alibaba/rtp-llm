@@ -1,8 +1,8 @@
 # Priority migration checkpoint
 
-Candidate only: 3 of 19 old priority cases. `priority_queue::same_level_fifo`
+Candidate only: 4 of 19 old priority cases. `priority_queue::same_level_fifo`
 maps `prio_same_level_fifo` on `single-nonbatch`. No legacy callable is invoked
-or removed. Two remaining queue cases are pending here. The separate preemption module is owned by agent4.
+or removed. The remaining normalization queue case is pending here. The separate preemption module is owned by agent4.
 Default catalog registration is owned by the central framework task; this
 checkpoint's tests explicitly merge the exported HANDLERS.
 
@@ -84,3 +84,18 @@ Whole-program external-RPC fixtures verify one actual consumer/four rejected
 requests, wrong8503 FAIL and stage ordering. A measured-record fixture checks
 1.4 ratio strictFAIL/normalPASS. Synthetic immediate expiry fixtures are not
 real8s deadline measurements and do not claim Java coverage.
+
+## Mixed priority order
+
+`order_basic` maps `prio_order_basic` using the same Q1 as FIFO. P3000+1.5s,
+placeholder50, pending6s/.1s, then30a/30b/50a/50b/70a/70b with .15s gaps.
+All Schedule settle before draining placeholder then each peer, preserving
+90/120/35 budgets. PR1 excludes placeholder and first peer30a from inversion
+scoring; PR2 keeps30a inside same-priority FIFO and requires wave order
+30a,70a,70b,50a,50b,30b. As in the old design_final_pattern the wave-only
+shape does not add a new placeholder-first requirement. PR6 requires the
+shape and all seven successful code200 outcomes. P6 combines terminal
+checks and a separate30s owner clean (shared d955 correction required).
+Priority inversion and same-level inversion are independently exercised:
+swapping70a/70b leaves PR1 zero but fails PR2. All7 consumers are real core
+threads with fake RPC; no Java coverage is claimed.
