@@ -47,7 +47,14 @@ py_test(
         "//rtp_llm/models_py/standalone:py_standalone_testlib",
     ],
     env = {"GPU_COUNT": "1"},
-    exec_properties = {'gpu':'A10', 'gpu_count': '1'},
+    tags = ["H20"],
+    # Back on H20 after measuring on sm86: test_fused_slice_equals_separate_gemms
+    # mismatches 282 of 4096 elements, greatest abs diff 0.25 against atol=1e-2.
+    # Byte-identical across two sm86 runs, and it passes on H20. This is a plain
+    # bf16 x @ w GEMM -- the tolerance was tuned for the sm90/hipBLASLt tiling
+    # (see the test's own comment) and the sm86 cuBLAS kernel accumulates in a
+    # different order. Widening the tolerance for a GEMM this size would move it.
+    exec_properties = {'gpu':'H20', 'gpu_count': '1'},
 )
 
 py_test(

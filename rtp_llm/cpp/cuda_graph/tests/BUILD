@@ -90,7 +90,15 @@ py_test(
         "SEQ_SIZE_PER_BLOCK": "64",
         "ACT_TYPE": "BF16",
     },
-    exec_properties = {'gpu':'A10'},
+    tags = ["H20"],
+    # Back on H20 after measuring on sm86. Passes on H20 (ut-sm9x, run
+    # 69503829); on sm86 it fails deterministically, 2 of 2, during unittest
+    # collection: py_flashinfer_mha.py:369 raises "kv_cache is required for
+    # paged attention" from __init__ -> init_prefill. A different fmha backend
+    # is selected below sm90 and this fixture does not supply a kv_cache for it.
+    # Which selection branch diverges is not yet pinned down -- the is_sm90()
+    # gate at py_flashinfer_mha.py:135 is FP8-Q-only, so it is not that one.
+    exec_properties = {'gpu':'H20'},
 )
 
 py_test(

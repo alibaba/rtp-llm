@@ -64,8 +64,13 @@ py_test (
        "//rtp_llm/test/model_test/test_util:test_util"
    ],
    env = test_envs,
-   tags = ["open_skip"],
-   exec_properties = {'gpu':'A10'},
+   tags = ["open_skip", "H20"],
+   # Back on H20 after measuring on sm86: 1 of 40 subTest combinations fails --
+   # (num_tokens=83, hidden_size=8192, bfloat16) on allclose(atol=1e-2,
+   # rtol=1e-2). Deterministic under manual_seed(0) and identical across two
+   # sm86 runs, and it passes on H20, so this is fused-vs-reference bf16
+   # accumulation order at that one shape, not flakiness.
+   exec_properties = {'gpu':'H20'},
 )
 
 py_test (
