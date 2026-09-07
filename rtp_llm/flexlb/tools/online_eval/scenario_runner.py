@@ -20,6 +20,8 @@ LIST_FIELDS = (
     "variant_id",
     "profile",
     "grade",
+    "effective_axes",
+    "effective_capabilities",
     "category",
     "tags",
     "requires",

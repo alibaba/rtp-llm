@@ -5,7 +5,14 @@ import json
 import math
 import re
 
-from flexlb_cfg import OMIT, PROFILE_CAPS, PROFILES, ConfigOverride, render_env
+from flexlb_cfg import (
+    OMIT,
+    PROFILE_CAPS,
+    PROFILES,
+    VICTIM_STAGES,
+    ConfigOverride,
+    render_env,
+)
 
 from .contracts import PlanContext
 from .loader import ScenarioError
@@ -61,6 +68,34 @@ INTEGER_OVERRIDES = {
     "status_rpc_ms",
     "decode_max_engine_requests",
 }
+CAPABILITIES = set().union(*PROFILE_CAPS.values()) | {
+    "priority",
+    "preemption",
+    "engine_cancellation",
+}
+
+
+def effective_capabilities(config):
+    scheduler, dispatcher = config["scheduler"], config["dispatcher"]
+    axes = dict(
+        scheduler=scheduler["type"],
+        ordering=scheduler["ordering"]["type"],
+        decision=scheduler["decision"]["type"],
+        dispatcher=dispatcher["type"],
+    )
+    caps = {"queue", axes["ordering"].lower(), axes["decision"].lower()}
+    if dispatcher["type"] == "BATCH":
+        caps.update({"batch_dispatch", "enqueue_batch", "fetch_response"})
+    elif dispatcher["type"] == "NON_BATCH":
+        caps.update({"non_batch_dispatch", "frontend_send", "generate_stream"})
+    else:
+        raise ValueError("unrecognized effective dispatcher")
+    preemption = scheduler["ordering"].get("preemption")
+    if preemption:
+        caps.add("preemption")
+        if preemption.get("engineCancellation"):
+            caps.add("engine_cancellation")
+    return axes, sorted(caps)
 
 
 def fail(path, message):
@@ -147,14 +182,47 @@ def environment(value, path, profile):
     overrides = mapping(
         value.get("config_overrides", {}),
         path + ".config_overrides",
-        INTEGER_OVERRIDES | {"ordering"},
+        INTEGER_OVERRIDES | {"ordering", "decision", "dispatcher", "preemption"},
     )
     kwargs = {}
     for key, val in overrides.items():
         field = path + ".config_overrides." + key
-        if key == "ordering":
-            if val not in ("fifo", "priority"):
-                fail(field, "expected fifo or priority")
+        if key in {"ordering", "decision", "dispatcher"}:
+            choices = {
+                "ordering": ("fifo", "priority"),
+                "decision": ("single", "fixed_window"),
+                "dispatcher": ("batch", "non_batch"),
+            }[key]
+            if val not in choices:
+                fail(field, f"expected one of {choices}")
+        elif key == "preemption":
+            mapping(
+                val,
+                field,
+                {"allowed_victim_stages", "engine_cancellation"},
+                {"allowed_victim_stages"},
+            )
+            victim_stages = names(
+                val["allowed_victim_stages"],
+                field + ".allowed_victim_stages",
+                VICTIM_STAGES,
+            )
+            if not victim_stages:
+                fail(field, "preemption victim stages cannot be empty")
+            if "engine_cancellation" in val:
+                cancellation = mapping(
+                    val["engine_cancellation"],
+                    field + ".engine_cancellation",
+                    {"ack_timeout_ms", "completion_timeout_ms"},
+                    {"ack_timeout_ms", "completion_timeout_ms"},
+                )
+                for name, timeout in cancellation.items():
+                    number(
+                        timeout,
+                        field + ".engine_cancellation." + name,
+                        minimum=1,
+                        integer=True,
+                    )
         elif isinstance(val, dict):
             if val != {"omit": True} or type(val.get("omit")) is not bool:
                 fail(field, "expected exact {omit: true}")
@@ -169,6 +237,9 @@ def environment(value, path, profile):
     except (TypeError, ValueError) as exc:
         fail(path + ".config_overrides", str(exc))
     result["config_overrides"] = copy.deepcopy(overrides)
+    result["effective_axes"], result["effective_capabilities"] = effective_capabilities(
+        result["resolved_config"]
+    )
     return result
 
 
@@ -386,7 +457,7 @@ def compile_scenarios(documents, profile=None, handlers=None, grade="normal"):
         requires = names(
             doc.get("requires", []),
             source + ".requires",
-            set().union(*PROFILE_CAPS.values()),
+            CAPABILITIES,
         )
         execution = mapping(
             doc.get("execution", {}),
@@ -445,7 +516,7 @@ def compile_scenarios(documents, profile=None, handlers=None, grade="normal"):
                 names(
                     variant.get("requires", []),
                     loc + ".requires",
-                    set().union(*PROFILE_CAPS.values()),
+                    CAPABILITIES,
                 )
             )
             variant_legacy = names(
@@ -547,10 +618,12 @@ def compile_scenarios(documents, profile=None, handlers=None, grade="normal"):
             )
             for p in selected:
                 # Validate all declared variants, even when CLI selects a subset.
-                if action_requires - PROFILE_CAPS[p]:
+                resolved = environment(env, source + f"::{vid}.environment", p)
+                caps = set(resolved["effective_capabilities"])
+                if action_requires - caps:
                     fail(
                         source,
-                        f"profile {p} lacks capabilities {sorted(action_requires - PROFILE_CAPS[p])}",
+                        f"profile {p} effective environment lacks capabilities {sorted(action_requires - caps)}",
                     )
                 if (
                     any(
@@ -558,13 +631,12 @@ def compile_scenarios(documents, profile=None, handlers=None, grade="normal"):
                         and s["params"]["consume"] == "deferred"
                         for s in compiled
                     )
-                    and "enqueue_batch" not in PROFILE_CAPS[p]
+                    and "enqueue_batch" not in caps
                 ):
                     fail(
                         source,
                         f"profile {p}: deferred consumption requires enqueue_batch",
                     )
-                resolved = environment(env, source + f"::{vid}.environment", p)
                 if resolved["n_prefill"] + resolved["n_decode"] + additions > 149:
                     fail(
                         source,
@@ -580,6 +652,8 @@ def compile_scenarios(documents, profile=None, handlers=None, grade="normal"):
                         "variant": vid,
                         "variant_id": vid,
                         "profile": p,
+                        "effective_axes": resolved["effective_axes"],
+                        "effective_capabilities": resolved["effective_capabilities"],
                         "grade": grade,
                         "category": doc["category"],
                         "description": doc["description"],

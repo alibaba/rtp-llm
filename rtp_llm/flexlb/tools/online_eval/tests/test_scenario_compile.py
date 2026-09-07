@@ -171,7 +171,7 @@ class CompileTest(unittest.TestCase):
         for environment in (
             {"backend": "gpu"},
             {"tp": 2},
-            {"config_overrides": {"dispatcher": "batch"}},
+            {"config_overrides": {"dispatcher": "invented"}},
         ):
             doc = scenario()
             doc["environment"] = environment
