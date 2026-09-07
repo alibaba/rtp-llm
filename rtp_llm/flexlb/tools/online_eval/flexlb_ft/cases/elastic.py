@@ -106,8 +106,9 @@ def _master_http(ops) -> str:
 
 
 @case(
-    "elastic_add_flow",
-    profiles=["batch-window"],  # elastic_spec pins the legacy fault axes
+    "elastic_add_flow",  # all profiles (tier2 wave2): _elastic_env is
+    # profile-aware (PRIORITY ordering on the ctx axes), and the
+    # convergence contract is discovery/sync layer — shape agnostic.
     source="elastic acceptance: add under load (FileDiscoveryDynamicScaleEndToEndTest phase 2)",
 )
 def elastic_add_flow(ctx: CaseContext):
@@ -156,8 +157,9 @@ def elastic_add_flow(ctx: CaseContext):
 
 
 @case(
-    "elastic_remove_flow",
-    profiles=["batch-window"],  # elastic_spec pins the legacy fault axes
+    "elastic_remove_flow",  # all profiles (tier2 wave2): the graceful
+    # drain / zero-failure contract is engine-layer ordering; the spec
+    # keeps stale_inflight_ms=30_000 via the build default (95s cap).
     source="elastic acceptance: remove under load (FileDiscoveryDynamicScaleEndToEndTest phase 3)",
 )
 def elastic_remove_flow(ctx: CaseContext):
@@ -251,8 +253,9 @@ def elastic_remove_flow(ctx: CaseContext):
 
 
 @case(
-    "elastic_add_remove_cycle",
-    profiles=["batch-window"],  # elastic_spec pins the legacy fault axes
+    "elastic_add_remove_cycle",  # all profiles (tier2 wave2): remove_flow
+    # contract x3 + verify_recovery (dual-path adaptive) — shape agnostic;
+    # stale_inflight_ms=30_000 rides the build default like remove_flow.
     source="elastic acceptance: 3x add→verify→remove under load→verify cycle",
 )
 def elastic_add_remove_cycle(ctx: CaseContext):
@@ -352,8 +355,10 @@ def elastic_add_remove_cycle(ctx: CaseContext):
 
 
 @case(
-    "elastic_rebalance",
-    profiles=["batch-window"],  # elastic_spec pins the legacy fault axes
+    "elastic_rebalance",  # all profiles (tier2 wave2): routing parity is
+    # router-layer (FORMULA + RANDOM_WITHIN_TOLERANCE), shape agnostic;
+    # share bands were calibrated on bw — first runs on the new lanes
+    # record the observed steady share before any band tightening.
     source="elastic acceptance: cost-based rebalance after scale-out (share < 60%)",
 )
 def elastic_rebalance(ctx: CaseContext):
@@ -447,8 +452,9 @@ def elastic_rebalance(ctx: CaseContext):
 
 
 @case(
-    "elastic_stop_after_add",
-    profiles=["batch-window"],  # elastic_spec pins the legacy fault axes
+    "elastic_stop_after_add",  # all profiles (tier2 wave2): the whole
+    # chain (3-strike eviction, topology, health, recovery) is
+    # topology/health layer — the family's least shape-coupled case.
     source="elastic acceptance: add → traffic → /stop_engine (3-fail evict) → /start_engine recovery",
 )
 def elastic_stop_after_add(ctx: CaseContext):
@@ -536,8 +542,9 @@ def elastic_stop_after_add(ctx: CaseContext):
 
 
 @case(
-    "elastic_concurrent_ops",
-    profiles=["batch-window"],  # elastic_spec pins the legacy fault axes
+    "elastic_concurrent_ops",  # all profiles (tier2 wave2): the hard
+    # asserts are master HTTP 200 + discovery-file consistency + health
+    # floor — topology/availability layer, shape agnostic.
     source="elastic acceptance: concurrent add/remove storm, master stays healthy",
 )
 def elastic_concurrent_ops(ctx: CaseContext):
@@ -713,9 +720,12 @@ PENDING_DRAIN_TERMINAL_S = 40.0
 # 3s cleaner period) + generous margin, but far below queueTimeout (1h).
 PENDING_DRAIN_CLEAN_S = 50.0
 # Wave shaping: serial sends at ~30x the 10ms FIXED_WINDOW collection
-# window so every request forms its own batch — a fast burst collapses
-# into one batch, dispatches wholesale behind ONE lease and strands
-# nothing on the master side.
+# window (batch-window lane) so every request forms its own batch; under
+# the SINGLE decision (single-batch lane) each serial fire is decided
+# per-request and forms its own single-member batch naturally.  Either
+# way a fast burst is what must be avoided: it collapses into one batch,
+# dispatches wholesale behind ONE lease and strands nothing on the
+# master side.
 PENDING_DRAIN_WAVE_INTERVAL_S = 0.3
 PENDING_DRAIN_WAVE_MAX = 14
 # Fail-fast floors for the scenario construction (the case is meaningless
@@ -770,7 +780,11 @@ def _pending_drain_spec(ctx: CaseContext) -> EnvSpec:
 
 @case(
     "elastic_remove_pending_drain",
-    profiles=["batch-window"],  # elastic family: BATCH dispatcher + fault axes
+    profiles=["batch-window", "single-batch"],  # BATCH dispatcher only
+    # (tier2 wave2 +sb): the stranded gap needs EnqueueBatch leases + the
+    # master-side WorkerBatcher queue — under SINGLE each serial fire
+    # naturally forms its own batch, so the construction holds unchanged
+    # (sn/wn stay structurally excluded: no EnqueueBatch, no gap).
     source="user-identified gap: scale-in protection for requests queued-but-undispatched on the removed engine",
 )
 def elastic_remove_pending_drain(ctx: CaseContext):
@@ -782,7 +796,9 @@ def elastic_remove_pending_drain(ctx: CaseContext):
     discovery-file rewrite -> master FileServiceDiscovery loss).  Both
     prefills run at 8s so the victim's two inflight-batch leases stay
     occupied while a serial wave (one request per 300ms — each its own
-    FIXED_WINDOW batch) keeps landing requests on it: after the first two
+    batch: its own FIXED_WINDOW batch on batch-window, a single-member
+    batch per fire under the SINGLE decision on single-batch) keeps
+    landing requests on it: after the first two
     single-request batches dispatch, every further victim-routed request
     sits in the master-side WorkerBatcher queue — accepted by Schedule,
     never EnqueueBatch'd.  A pre-assertion proves the stranded set is
@@ -861,7 +877,8 @@ def elastic_remove_pending_drain(ctx: CaseContext):
             ops.set_perf(name, prefill_fixed_ms=PENDING_DRAIN_SLOW_MS)
         time.sleep(1.5)  # master perf sync
 
-        # -- serial wave: each request its own FIXED_WINDOW batch; the
+        # -- serial wave: each request its own batch (FIXED_WINDOW window
+        #    on batch-window, per-fire SINGLE decision on single-batch); the
         #    victim's first two batches take both leases, everything routed
         #    there afterwards parks in the master-side WorkerBatcher queue.
         wave = 0
@@ -1162,8 +1179,10 @@ def _accepted_timeline(ops, engine_names, offsets_s):
 
 
 @case(
-    "elastic_add_preference",
-    profiles=["batch-window"],  # elastic family: BATCH dispatcher + fault axes
+    "elastic_add_preference",  # all profiles (tier2 wave2): measurement
+    # is accepted-count deltas + router-layer scoring, shape agnostic;
+    # ADD_PREF_SHARE_BANDS and the 10% floor were calibrated on bw — first
+    # runs on the new lanes follow the in-case CALIBRATION PLAN below.
     source=(
         "user-named gap: post-scale-out traffic preference shape "
         "(queue-empty newcomer)"
