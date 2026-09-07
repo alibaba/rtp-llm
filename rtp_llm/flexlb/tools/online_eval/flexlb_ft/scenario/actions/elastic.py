@@ -474,6 +474,125 @@ def _remove(ctx, params, deadline):
     return _mutation(ctx, params, deadline, "remove")
 
 
+def _topology_validate(params, plan):
+    p = _validate(
+        params,
+        plan,
+        {"role", "discovered", "alive", "port", "present"},
+        {"role", "discovered", "alive"},
+    )
+    if p["role"] not in {"PREFILL", "DECODE"}:
+        raise ValueError("topology role must be PREFILL or DECODE")
+    for name in ("discovered", "alive"):
+        if type(p[name]) is not int or not 0 <= p[name] <= 32:
+            raise ValueError(f"topology {name} must be an integer in [0,32]")
+    if p["alive"] > p["discovered"]:
+        raise ValueError("alive cannot exceed discovered")
+    if ("port" in p) != ("present" in p):
+        raise ValueError("topology port and present must be specified together")
+    if "port" in p:
+        if isinstance(p["port"], dict):
+            plan.reference(p["port"], "integer")
+        elif type(p["port"]) is not int or not 1 < p["port"] <= 65535:
+            raise ValueError("topology port must be a valid grpc port")
+        if type(p["present"]) is not bool:
+            raise ValueError("topology present must be boolean")
+    return p
+
+
+def _topology(ctx, params, deadline):
+    """File convergence (10s) and Master convergence (30s) stay distinct.
+
+    A stopped engine can remain discovered while becoming non-alive. File
+    entries and Master discovered counts therefore are never substituted for
+    each other. Every failed/missing probe remains in the artifact.
+    """
+    from ...harness import http_post_json
+
+    started = ctx.clock()
+    path = ctx.artifact_dir / f"elastic-topology-{time.time_ns()}.json"
+    evidence = dict(started_s=started, params=params, samples=[], complete=False)
+    domain = {
+        "PREFILL": "mock.prefill.hosts.address",
+        "DECODE": "mock.decode.hosts.address",
+    }[params["role"]]
+    port = ctx.resolve(params["port"]) if "port" in params else None
+    file_ok = master_ok = False
+    file_finished = False
+    try:
+        while True:
+            deadline.check()
+            now = ctx.clock()
+            sample = dict(time_s=now)
+            payload = json.loads(ctx.env.discovery_file.read_text(encoding="utf-8"))
+            hosts = payload.get(domain) if isinstance(payload, dict) else None
+            if not isinstance(hosts, list) or any(
+                not isinstance(h, str) for h in hosts
+            ):
+                raise ValueError("discovery file lacks role host-list evidence")
+            sample["discovery_hosts"] = hosts
+            file_matches = len(hosts) == params["discovered"]
+            if port is not None:
+                found = any(h.endswith(f":{port - 1}") for h in hosts)
+                file_matches = file_matches and found == params["present"]
+            if not file_finished:
+                file_ok = file_matches and now - started <= 10
+                file_finished = file_ok or now - started >= 10
+                if file_finished:
+                    evidence["file_convergence_s"] = now - started
+            status, body = http_post_json(
+                f"http://127.0.0.1:{ctx.ops.master_http_port}/rtp_llm/master/info",
+                {},
+                timeout=min(2, deadline.remaining()),
+            )
+            sample["master_status"] = status
+            sample["master_response"] = body
+            evidence["samples"].append(sample)
+            if status != 200 or not isinstance(body, dict):
+                raise ValueError(f"master topology probe failed: {status}")
+            summary = body.get("worker_summary", {}).get(params["role"], {})
+            if any(type(summary.get(k)) is not int for k in ("discovered", "alive")):
+                raise ValueError("master topology lacks discovered/alive evidence")
+            master_ok = (
+                all(summary[k] == params[k] for k in ("discovered", "alive"))
+                and ctx.clock() - started <= 30
+            )
+            if (file_finished and master_ok) or ctx.clock() - started >= 30:
+                break
+            deadline.sleep(0.2)
+        file_ok = file_ok and file_matches
+        evidence.update(
+            complete=True, file_converged=file_ok, master_converged=master_ok
+        )
+        handle = ctx.register_resource("snapshot", evidence, historical=True)
+        return StageOutput(
+            output=dict(snapshot=handle),
+            checks=[
+                CheckResult(
+                    "discovery",
+                    "PASS" if file_ok else "FAIL",
+                    actual=evidence.get("file_convergence_s"),
+                    expected="file topology within 10s",
+                    evidence=evidence,
+                ),
+                CheckResult(
+                    "master",
+                    "PASS" if master_ok else "FAIL",
+                    actual=summary,
+                    expected={k: params[k] for k in ("discovered", "alive")},
+                    evidence=evidence,
+                ),
+            ],
+            artifacts=[str(path)],
+        )
+    except BaseException as exc:
+        evidence["error"] = f"{type(exc).__name__}: {exc}"
+        raise
+    finally:
+        evidence["ended_s"] = ctx.clock()
+        path.write_text(json.dumps(evidence, indent=2), encoding="utf-8")
+
+
 def _seed_validate(params, plan):
     p = _validate(params, plan, {"hot", "cold"})
     p.setdefault("hot", "prefill-0")
@@ -740,6 +859,13 @@ def _recovery(ctx, params, deadline):
 
 
 HANDLERS = [
+    StageHandler(
+        "elastic_topology",
+        _topology_validate,
+        _topology,
+        {"snapshot": "snapshot"},
+        checks=frozenset({"discovery", "master"}),
+    ),
     StageHandler(
         "elastic_add",
         _add_validate,

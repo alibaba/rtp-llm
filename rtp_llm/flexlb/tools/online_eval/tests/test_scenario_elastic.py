@@ -527,3 +527,47 @@ class ElasticMutationTests(unittest.TestCase):
                 e._remove_validate(
                     dict(engine="p2", drain_timeout_ms=cap), NS(path="remove")
                 )
+
+    def topology(self, summary):
+        import json
+
+        now = [0.0]
+        self.ctx.clock = lambda: now[0]
+
+        def sleep(seconds):
+            now[0] += seconds
+
+        deadline = NS(check=lambda: None, remaining=lambda: 35 - now[0], sleep=sleep)
+        self.ctx.ops = NS(master_http_port=1)
+        file = Path(self.temp.name) / "discovery.json"
+        file.write_text(
+            json.dumps(
+                {
+                    "mock.prefill.hosts.address": [
+                        "127.0.0.1:12344",
+                        "127.0.0.1:12346",
+                        "127.0.0.1:12348",
+                    ]
+                }
+            )
+        )
+        self.ctx.env = NS(discovery_file=file)
+        with patch(
+            "flexlb_ft.harness.http_post_json",
+            return_value=(200, {"worker_summary": {"PREFILL": summary}}),
+        ):
+            return e._topology(
+                self.ctx, dict(role="PREFILL", discovered=3, alive=2), deadline
+            )
+
+    def test_topology_stopped_worker_remains_discovered(self):
+        result = self.topology(dict(discovered=3, alive=2))
+        self.assertEqual([c.status for c in result.checks], ["PASS", "PASS"])
+
+    def test_topology_alive_does_not_substitute_discovered(self):
+        result = self.topology(dict(discovered=4, alive=2))
+        self.assertEqual([c.status for c in result.checks], ["PASS", "FAIL"])
+
+    def test_topology_missing_fields_are_not_zero(self):
+        with self.assertRaisesRegex(ValueError, "lacks discovered/alive"):
+            self.topology(dict(alive=2))
