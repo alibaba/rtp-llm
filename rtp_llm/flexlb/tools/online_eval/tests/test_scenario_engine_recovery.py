@@ -390,6 +390,11 @@ class RecoveryTest(unittest.TestCase):
             )
         self.assertEqual(3000, recovery._ttft({"frames": [{"records": records}]}))
         for record in records:
+            record["recovery_first_output_observed_s"] = (
+                record["stream"]["first_output_s"] + 0.1
+            )
+        self.assertEqual(3100, recovery._ttft({"frames": [{"records": records}]}))
+        for record in records:
             record["stream"]["first_output_s"] = None
         self.assertIsNone(recovery._ttft({"frames": [{"records": records}]}))
 

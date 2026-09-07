@@ -468,21 +468,25 @@ class RecoveryRequests(cancel.CancelRequests):
                         if entry["thread"] is not None:
                             if self.measure_ttft:
                                 first_end = self.ctx.clock() + 15
-                                while (
-                                    not entry["done"].is_set()
-                                    and entry["record"]["stream"]["first_output_s"]
-                                    is None
-                                    and self.ctx.clock() < first_end
-                                ):
+                                observed_first = None
+                                while self.ctx.clock() < first_end:
                                     deadline.check()
+                                    if (
+                                        entry["record"]["stream"]["first_output_s"]
+                                        is not None
+                                    ):
+                                        observed_first = self.ctx.clock()
+                                        break
+                                    if entry["done"].is_set():
+                                        break
                                     entry["done"].wait(
-                                        min(0.002, first_end - self.ctx.clock())
+                                        min(0.002, max(0, first_end - self.ctx.clock()))
                                     )
-                                first = entry["record"]["stream"]["first_output_s"]
                                 child.update(
                                     entry["record"],
-                                    recovery_first_output_observed=first is not None
-                                    and first <= first_end,
+                                    recovery_first_output_observed=observed_first
+                                    is not None,
+                                    recovery_first_output_observed_s=observed_first,
                                 )
                             end = self.ctx.clock() + self.observation_wait_s
                             while not entry["done"].is_set() and self.ctx.clock() < end:
@@ -652,7 +656,12 @@ def _ttft(source):
             )
         ):
             continue
-        elapsed = (first - record["schedule"]["started_s"]) * 1000
+        # The old helper records the polling observer's time, not the
+        # consumer's earlier receive timestamp. Keep both evidence sources.
+        observed_first = record.get("recovery_first_output_observed_s", first)
+        if observed_first is None:
+            continue
+        elapsed = (observed_first - record["schedule"]["started_s"]) * 1000
         if elapsed < 0:
             raise RuntimeError("inverted TTFT timestamps")
         values.append(elapsed)

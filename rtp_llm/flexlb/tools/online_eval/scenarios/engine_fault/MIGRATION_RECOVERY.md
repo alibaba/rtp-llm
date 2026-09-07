@@ -38,7 +38,9 @@ terminal fields and independently verified exit during cleanup. Known gRPC
 failures are retained as failed observations; untyped failures are ERROR.
 
 The TTFT batch keeps a first-output wait of 15 seconds followed by a 15-second
-end wait. `generate_payload` independently declares match_schedule versus
+end wait. Its TTFT uses the polling observer timestamp, preserving the old
+2 ms observation granularity; the consumer receive timestamp remains separate raw
+evidence. `generate_payload` independently declares match_schedule versus
 legacy_default: NON_BATCH TTFT keeps Generate's default payload while Schedule
 carries output2 and three keys. E3/E5 manual payloads likewise open the legacy
 default Generate payload only in their consume stage. A manual NON_BATCH Schedule
@@ -137,4 +139,3 @@ Legacy: `engine_fault_recovery_no_resurrect`.
 Legacy: `engine_fault_status_gap_long_retire`.
 
 `long_gap_retires`, `prefill_alive_back`, `long_gap_creates_generation`, `master_drain_scheduler`, `master_drain_prefill_batches`, `master_drain_decode_load`, `recovery_succeeds`
-
