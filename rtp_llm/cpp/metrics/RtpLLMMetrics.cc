@@ -199,6 +199,7 @@ bool RtpLLMStreamMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_QPS_MUTABLE_METRIC(cancel_qps_metric, "rtp_llm_cancel_qps");
     REGISTER_QPS_MUTABLE_METRIC(is_streaming_qps_metric, "rtp_llm_is_streaming_qps");
     REGISTER_QPS_MUTABLE_METRIC(not_streaming_qps_metric, "rtp_llm_not_streaming_qps");
+    REGISTER_QPS_MUTABLE_METRIC(kv_cache_malloc_failed_qps_metric, "rtp_llm_kv_cache_malloc_failed_qps");
 
     REGISTER_GAUGE_MUTABLE_METRIC(total_latency_us_metric, "rtp_llm_latency_us");
     REGISTER_GAUGE_MUTABLE_METRIC(first_token_latency_us_metric, "rtp_llm_first_token_latency_us");
@@ -230,6 +231,7 @@ void RtpLLMStreamMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMStream
     REPORT_QPS(error_qps);
     REPORT_QPS(is_streaming_qps);
     REPORT_QPS(not_streaming_qps);
+    REPORT_QPS(kv_cache_malloc_failed_qps);
 
     REPORT_GAUGE(total_latency_us);
     REPORT_GAUGE(first_token_latency_us);
@@ -477,8 +479,8 @@ void RtpLLMCacheMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMCacheMe
 }
 
 bool RtpLLMCacheOperationMetrics::init(kmonitor::MetricsGroupManager* manager) {
+    REGISTER_QPS_MUTABLE_METRIC(malloc_retry_qps_metric, "rtp_llm_kv_cache_malloc_retry_qps");
     REGISTER_QPS_MUTABLE_METRIC(malloc_qps_metric, "rtp_llm_kv_cache_malloc_qps");
-    REGISTER_QPS_MUTABLE_METRIC(malloc_failed_qps_metric, "rtp_llm_kv_cache_malloc_failed_qps");
     REGISTER_QPS_MUTABLE_METRIC(insert_qps_metric, "rtp_llm_kv_cache_insert_qps");
     REGISTER_QPS_MUTABLE_METRIC(free_qps_metric, "rtp_llm_kv_cache_free_qps");
     REGISTER_GAUGE_MUTABLE_METRIC(malloc_latency_us_metric, "rtp_llm_kv_cache_malloc_latency_us");
@@ -491,8 +493,9 @@ void RtpLLMCacheOperationMetrics::report(const kmonitor::MetricsTags*          t
                                          RtpLLMCacheOperationMetricsCollector* collector) {
     if (collector->operation_type == RtpLLMCacheOperationMetricsCollector::OpType::MALLOC) {
         malloc_qps_metric->Report(tags, 1);
-        malloc_failed_qps_metric->Report(tags, collector->success ? 0 : 1);
         REPORT_MUTABLE_METRIC(malloc_latency_us_metric, collector->latency_us);
+    } else if (collector->operation_type == RtpLLMCacheOperationMetricsCollector::OpType::MALLOC_RETRY) {
+        malloc_retry_qps_metric->Report(tags, 1);
     } else if (collector->operation_type == RtpLLMCacheOperationMetricsCollector::OpType::INSERT) {
         insert_qps_metric->Report(tags, 1);
         REPORT_MUTABLE_METRIC(insert_latency_us_metric, collector->latency_us);

@@ -87,6 +87,7 @@ private:
     void handleWaiting();
     void handleLoading();
     void handleRunning();
+    void transitionToRunning();
     void releaseResource();
 
     StreamEvents events_;

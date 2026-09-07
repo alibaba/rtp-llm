@@ -52,8 +52,10 @@ public:
     int estimatePeakNeedBlocks(
         int seq_len, int common_seq_len, int remaining_tokens, int reserve_step, int target_batch_size) const;
 
-    int  curBlocksNum() const;
-    int  mallocFailedTimes() const;
+    int curBlocksNum() const;
+    int mallocFailedTimes() const;
+    // Count each decision to retry, even if cancelled before the next allocation.
+    void reportMallocRetry() const;
     bool isContextStream() const;
 
     const BatchKVCacheResource& kvCache() const;

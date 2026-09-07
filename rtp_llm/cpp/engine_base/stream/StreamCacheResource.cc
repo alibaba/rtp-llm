@@ -435,6 +435,7 @@ bool StreamCacheResource::loadCacheDone() {
         if (absl::IsUnavailable(status)) {
             ++malloc_failed_times_;
             stream_->generate_status_->clearLoadInitiated();
+            reportMallocRetry();
         } else if (!status.ok()) {
             stream_->reportEventWithoutLock(
                 StreamEvents::Error, ErrorCode::MALLOC_FAILED, std::string(status.message()));
@@ -494,6 +495,16 @@ void StreamCacheResource::fakeInitKVBlock(size_t reserved_blocks) {
 
 int StreamCacheResource::mallocFailedTimes() const {
     return malloc_failed_times_;
+}
+
+void StreamCacheResource::reportMallocRetry() const {
+    if (!stream_->metrics_reporter_) {
+        return;
+    }
+    RtpLLMCacheOperationMetricsCollector collector;
+    collector.operation_type = RtpLLMCacheOperationMetricsCollector::OpType::MALLOC_RETRY;
+    stream_->metrics_reporter_->report<RtpLLMCacheOperationMetrics, RtpLLMCacheOperationMetricsCollector>(nullptr,
+                                                                                                          &collector);
 }
 
 bool StreamCacheResource::reuseCache() const {

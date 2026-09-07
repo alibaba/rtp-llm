@@ -68,6 +68,7 @@ void GenerateStateMachine::handleWaiting() {
             const bool retryable_prefill_init = (role_type == RoleType::PDFUSION || role_type == RoleType::PREFILL)
                                                 && stream_cache_resource_->isContextStream();
             if (absl::IsUnavailable(result) && retryable_prefill_init) {
+                stream_cache_resource_->reportMallocRetry();
                 return;
             }
             error_info = ErrorInfo(ErrorCode::MALLOC_FAILED, "LACK MEM");
@@ -86,10 +87,7 @@ void GenerateStateMachine::handleWaiting() {
         } else if (stream_cache_resource_->resourceContext().role_type != RoleType::DECODE) {
             // Loading cache 失败或不需要loading，直接触发重计算
             // 当前decodeRpcServer会调用moveToNext，判断role type避免decodeRpcServer在enqueue前提早走到running状态
-            if (stream != nullptr) {
-                stream->recordRunningTime();
-            }
-            status.store(StreamState::RUNNING, std::memory_order_release);
+            transitionToRunning();
         }
         return;
     }
@@ -101,11 +99,7 @@ void GenerateStateMachine::handleWaiting() {
     // exactly like a decode stream.
     if (stream_cache_resource_->resourceContext().role_type == RoleType::PREFILL
         && stream_cache_resource_->isContextStream()) {
-        auto stream = stream_cache_resource_->stream();
-        if (stream != nullptr) {
-            stream->recordRunningTime();
-        }
-        status.store(StreamState::RUNNING, std::memory_order_release);
+        transitionToRunning();
         return;
     }
 
@@ -118,12 +112,7 @@ void GenerateStateMachine::handleWaiting() {
         releaseResource();
         return;
     }
-    auto stream = stream_cache_resource_->stream();
-    if (stream != nullptr) {
-        stream->recordRunningTime();
-    }
-    status.store(StreamState::RUNNING, std::memory_order_release);
-    return;
+    transitionToRunning();
 }
 
 void GenerateStateMachine::handleLoading() {
@@ -134,6 +123,14 @@ void GenerateStateMachine::handleLoading() {
         }
         status.store(StreamState::WAITING, std::memory_order_release);
     }
+}
+
+void GenerateStateMachine::transitionToRunning() {
+    auto stream = stream_cache_resource_->stream();
+    if (stream != nullptr) {
+        stream->recordRunningTime();
+    }
+    status.store(StreamState::RUNNING, std::memory_order_release);
 }
 
 void GenerateStateMachine::handleRunning() {

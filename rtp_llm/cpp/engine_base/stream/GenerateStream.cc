@@ -1310,14 +1310,19 @@ void GenerateStream::reportMetric() {
 void GenerateStream::reportStreamMetrics() {
     RTP_LLM_PROFILE_FUNCTION();
     if (metrics_reporter_) {
-        bool                         cancelled = statusInfo().code() == ErrorCode::CANCELLED;
-        bool                         timeout   = statusInfo().code() == ErrorCode::GENERATE_TIMEOUT;
+        const auto error_info = statusInfo();
+        const auto error_code = error_info.code();
+        const bool cancelled  = error_code == ErrorCode::CANCELLED;
+        const bool timeout    = error_code == ErrorCode::GENERATE_TIMEOUT;
+        const bool malloc_terminal_failed =
+            error_code == ErrorCode::MALLOC_FAILED || error_code == ErrorCode::DECODE_MALLOC_FAILED;
         RtpLLMStreamMetricsCollector collector;
-        collector.qps               = true;
-        collector.cancel_qps        = cancelled;
-        collector.error_qps         = hasError() && !cancelled;
-        collector.is_streaming_qps  = generate_input_->generate_config->is_streaming;
-        collector.not_streaming_qps = !generate_input_->generate_config->is_streaming;
+        collector.qps                        = true;
+        collector.cancel_qps                 = cancelled;
+        collector.error_qps                  = error_info.hasError() && !cancelled;
+        collector.is_streaming_qps           = generate_input_->generate_config->is_streaming;
+        collector.not_streaming_qps          = !generate_input_->generate_config->is_streaming;
+        collector.kv_cache_malloc_failed_qps = malloc_terminal_failed;
         if (getStatus() == StreamState::FINISHED || cancelled || timeout) {
             collector.reuse_length       = initial_reuse_length_;
             collector.input_token_length = inputLength();

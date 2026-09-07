@@ -193,11 +193,12 @@ private:
 
 class RtpLLMStreamMetricsCollector final {
 public:
-    bool qps               = false;
-    bool cancel_qps        = false;
-    bool error_qps         = false;
-    bool is_streaming_qps  = false;
-    bool not_streaming_qps = true;
+    bool qps                        = false;
+    bool cancel_qps                 = false;
+    bool error_qps                  = false;
+    bool is_streaming_qps           = false;
+    bool not_streaming_qps          = true;
+    bool kv_cache_malloc_failed_qps = false;
 
     int64_t total_latency_us         = 0;
     int64_t first_token_latency_us   = 0;
@@ -228,11 +229,12 @@ public:
     void report(const kmonitor::MetricsTags* tags, RtpLLMStreamMetricsCollector* collector);
 
 public:
-    kmonitor::MutableMetric* qps_metric               = nullptr;
-    kmonitor::MutableMetric* cancel_qps_metric        = nullptr;
-    kmonitor::MutableMetric* error_qps_metric         = nullptr;
-    kmonitor::MutableMetric* is_streaming_qps_metric  = nullptr;
-    kmonitor::MutableMetric* not_streaming_qps_metric = nullptr;
+    kmonitor::MutableMetric* qps_metric                        = nullptr;
+    kmonitor::MutableMetric* cancel_qps_metric                 = nullptr;
+    kmonitor::MutableMetric* error_qps_metric                  = nullptr;
+    kmonitor::MutableMetric* is_streaming_qps_metric           = nullptr;
+    kmonitor::MutableMetric* not_streaming_qps_metric          = nullptr;
+    kmonitor::MutableMetric* kv_cache_malloc_failed_qps_metric = nullptr;
 
     kmonitor::MutableMetric* total_latency_us_metric         = nullptr;
     kmonitor::MutableMetric* first_token_latency_us_metric   = nullptr;
@@ -872,13 +874,13 @@ class RtpLLMCacheOperationMetricsCollector final {
 public:
     enum class OpType : int8_t {
         MALLOC,
+        MALLOC_RETRY,  // A retry decision, not an executed allocation.
         INSERT,
         FREE,
     };
 
     OpType  operation_type = OpType::MALLOC;
     int64_t latency_us     = 0;
-    bool    success        = true;
 };
 
 class RtpLLMCacheOperationMetrics: public kmonitor::MetricsGroup {
@@ -887,8 +889,8 @@ public:
     void report(const kmonitor::MetricsTags* tags, RtpLLMCacheOperationMetricsCollector* collector);
 
 private:
+    kmonitor::MutableMetric* malloc_retry_qps_metric  = nullptr;
     kmonitor::MutableMetric* malloc_qps_metric        = nullptr;
-    kmonitor::MutableMetric* malloc_failed_qps_metric = nullptr;
     kmonitor::MutableMetric* insert_qps_metric        = nullptr;
     kmonitor::MutableMetric* free_qps_metric          = nullptr;
     kmonitor::MutableMetric* malloc_latency_us_metric = nullptr;

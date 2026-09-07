@@ -415,24 +415,43 @@ TEST(BlockTreeCacheMetricsTest, LoadJoinMetricsKeepRequestAndDependencyGranulari
     EXPECT_DOUBLE_EQ(snapshotQps(reuse_metrics->load_join_wait_latency_us_metric, tags), 123);
 }
 
-TEST(BlockTreeCacheMetricsTest, FailedQpsMetricsPublishZeroForSuccessfulOperations) {
+TEST(BlockTreeCacheMetricsTest, FailureMetricsPublishExpectedValues) {
     kmonitor::MetricsTags                      tags;
     std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter =
         std::make_shared<kmonitor::MetricsReporter>("", "", tags);
 
     RtpLLMCacheOperationMetricsCollector malloc_collector;
     malloc_collector.operation_type = RtpLLMCacheOperationMetricsCollector::OpType::MALLOC;
-    malloc_collector.success        = true;
+    malloc_collector.latency_us     = 123;
     ASSERT_TRUE((metrics_reporter->report<RtpLLMCacheOperationMetrics, RtpLLMCacheOperationMetricsCollector>(
         nullptr, &malloc_collector)));
     RtpLLMCacheOperationMetrics* operation_metrics = metrics_reporter->getMetricsGroup<RtpLLMCacheOperationMetrics>();
     ASSERT_NE(operation_metrics, nullptr);
-    EXPECT_EQ(metricSeriesCount(operation_metrics->malloc_failed_qps_metric), 1u);
-    EXPECT_DOUBLE_EQ(snapshotQps(operation_metrics->malloc_failed_qps_metric, tags), 0);
-    malloc_collector.success = false;
-    ASSERT_TRUE((metrics_reporter->report<RtpLLMCacheOperationMetrics, RtpLLMCacheOperationMetricsCollector>(
-        nullptr, &malloc_collector)));
-    EXPECT_DOUBLE_EQ(snapshotQps(operation_metrics->malloc_failed_qps_metric, tags), 1);
+    EXPECT_DOUBLE_EQ(snapshotQps(operation_metrics->malloc_qps_metric, tags), 1);
+    EXPECT_DOUBLE_EQ(snapshotQps(operation_metrics->malloc_latency_us_metric, tags), 123);
+
+    RtpLLMStreamMetricsCollector stream_collector;
+    ASSERT_TRUE(
+        (metrics_reporter->report<RtpLLMStreamMetrics, RtpLLMStreamMetricsCollector>(nullptr, &stream_collector)));
+    RtpLLMStreamMetrics* stream_metrics = metrics_reporter->getMetricsGroup<RtpLLMStreamMetrics>();
+    ASSERT_NE(stream_metrics, nullptr);
+    EXPECT_EQ(metricSeriesCount(stream_metrics->kv_cache_malloc_failed_qps_metric), 0u);
+    EXPECT_EQ(metricSeriesCount(operation_metrics->malloc_retry_qps_metric), 0u);
+
+    stream_collector.kv_cache_malloc_failed_qps = true;
+    ASSERT_TRUE(
+        (metrics_reporter->report<RtpLLMStreamMetrics, RtpLLMStreamMetricsCollector>(nullptr, &stream_collector)));
+    EXPECT_DOUBLE_EQ(snapshotQps(stream_metrics->kv_cache_malloc_failed_qps_metric, tags), 1);
+
+    RtpLLMCacheOperationMetricsCollector retry_collector;
+    retry_collector.operation_type = RtpLLMCacheOperationMetricsCollector::OpType::MALLOC_RETRY;
+    for (int i = 0; i < 3; ++i) {
+        ASSERT_TRUE((metrics_reporter->report<RtpLLMCacheOperationMetrics, RtpLLMCacheOperationMetricsCollector>(
+            nullptr, &retry_collector)));
+    }
+    EXPECT_DOUBLE_EQ(snapshotQps(operation_metrics->malloc_retry_qps_metric, tags), 3);
+    EXPECT_DOUBLE_EQ(snapshotQps(operation_metrics->malloc_qps_metric, tags), 0);
+    EXPECT_EQ(metricSeriesCount(stream_metrics->qps_metric), 0u);
 
     RtpLLMCacheTransferMetricsCollector transfer_collector;
     transfer_collector.operation                = "load";
