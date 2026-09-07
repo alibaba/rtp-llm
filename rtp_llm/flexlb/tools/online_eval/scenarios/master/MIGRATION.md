@@ -1,6 +1,6 @@
 # Master migration contract
 
-Status: all five families are implemented. Two exact batch-window lifecycle instances have real Java PASS evidence on fixed integration commit `5affc1c6de64fc8a1bf0d74dc3789d035c9a7307`, pending independent runtime acceptance. The other 23 profile instances have no real execution claim here. Legacy functions remain intact and are never invoked by these YAML programs. Baseline legacy source: commit `834b5eea2866dea71e3d27adb37f8c8a8b02c160`, `flexlb_ft/cases/master/`. Paths below are relative to `online_eval`.
+Status: all five families are implemented. Two exact batch-window lifecycle instances have real Java PASS evidence on fixed integration commit `5affc1c6de64fc8a1bf0d74dc3789d035c9a7307`, independently accepted by agent3. The other 23 profile instances have no real execution claim here. Legacy functions remain intact and are never invoked by these YAML programs. Baseline legacy source: commit `834b5eea2866dea71e3d27adb37f8c8a8b02c160`, `flexlb_ft/cases/master/`. Paths below are relative to `online_eval`.
 
 Nine legacy cases map to five YAML families, ten variants and 25 profile instances. `all4` means batch-window, single-nonbatch, single-batch, window-nonbatch. `batch` means batch-window only. HA uses actual owned dual standalone masters, without an ambient HA skip gate, ZK forwarding or Tier-3 claims.
 
@@ -109,8 +109,9 @@ Evidence root: `/tmp/agent1-yaml-evidence/master5aff`.
 0 findings and exit code 0; the parent also exited 0. Single-Master restart
 changed PID 101738 to 102157; restored topology was 2P/4D and the separate
 inflight check returned zero. The two ordinary request artifacts have business
-completion, consumer_done and nonempty transport/consumer exit timestamps.
-Do not infer an absent verification field from these request records.
+completion, consumer_done, consumer_completion_verified and nonempty
+transport/consumer exit timestamps. The exact verification field is
+consumer_completion_verified; no distinct completion_verified field is claimed.
 
 Dual-Master restart changed B PID 103646 to 106151. Actual checks measured
 steady B share 1.0, eight retries, 213 switch-window requests to A, zero switch
@@ -139,4 +140,13 @@ PPID-1 zombie state rather than a live test process.
 
 This pilot does not establish real execution coverage of all 25 Master
 instances, all four profiles, the other Master families, or the full migration.
-Legacy functions remain retained. Independent runtime acceptance is the next gate.
+Legacy functions remain retained. Agent3 independently accepted these exact two
+instances: it recomputed all 783 source hashes from the frozen Git archive,
+compared raw results against aggregate fields, and recomputed the 1894 client
+events (237 steady requests, B share 1; eight straddle failovers; 213 switch
+requests to A, zero errors; after A/success shares 1; zero duplicate IDs). It
+verified the retained ownership and release evidence with the provenance limit
+above. The final 200-port scan range is supported by the same archived tar and
+its collection command, whose hash and range(base,base+200) were checked; the
+original scanning MCP envelope remains unavailable. This is selected-instance
+runtime acceptance, not full-family acceptance.
