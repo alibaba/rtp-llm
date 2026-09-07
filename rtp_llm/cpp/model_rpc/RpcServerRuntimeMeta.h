@@ -112,9 +112,10 @@ public:
         if (running != running_streams_.end()) {
             task_info = running->second.task_info;
         } else {
-            for (auto it = finished_streams_.rbegin(); it != finished_streams_.rend(); ++it) {
-                if (it->second.request_id == request_id) {
+            for (auto it = finished_streams_.begin(); it != finished_streams_.end(); ++it) {
+                if (it->second.request_id == identity.request_id && it->second.batch_id == identity.batch_id) {
                     task_info = it->second;
+                    finished_streams_.erase(it);
                     break;
                 }
             }
@@ -206,6 +207,9 @@ public:
         auto                                ptr = running_streams_.find(request_id);
         if (ptr != running_streams_.end()) {
             task_info = ptr->second.task_info;
+            if (ptr->second.stream) {
+                task_info.prefix_length = ptr->second.stream->initialReuseLength();
+            }
             if (input_length > 0) {
                 task_info.input_length = input_length;
             }

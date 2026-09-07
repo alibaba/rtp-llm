@@ -377,7 +377,7 @@ bool PDFusionRatioScheduler::classifyActivePrefillBatch() {
         const bool terminal = stream->hasError() || stream->hasEvent(StreamEvents::GenerateDone);
         if (state != StreamState::RUNNING || terminal) {
             if (state != StreamState::RUNNING && state != StreamState::FINISHED && !stream->hasError()) {
-                stream->reportError(ErrorCode::UNKNOWN_ERROR, "invalid active-prefill stream state");
+                stream->reportError(ErrorCode::EXECUTION_EXCEPTION, "invalid active-prefill stream state");
             }
             stream->moveToNext();
             it = new_streams_.erase(it);
@@ -403,7 +403,7 @@ bool PDFusionRatioScheduler::promotePendingDecodeStreams() {
         const auto state = stream->getStatus();
         if ((state != StreamState::RUNNING || stream->isContextStream()) && state != StreamState::FINISHED
             && !stream->hasError()) {
-            stream->reportError(ErrorCode::UNKNOWN_ERROR, "invalid pending-decode stream state");
+            stream->reportError(ErrorCode::EXECUTION_EXCEPTION, "invalid pending-decode stream state");
         }
 
         const auto new_state = stream->moveToNext();
@@ -412,7 +412,7 @@ bool PDFusionRatioScheduler::promotePendingDecodeStreams() {
             running_streams_.splice(running_streams_.end(), pending_decode_streams_, current);
         } else {
             if (new_state != StreamState::FINISHED) {
-                stream->reportError(ErrorCode::UNKNOWN_ERROR, "unexpected pending-decode promotion state");
+                stream->reportError(ErrorCode::EXECUTION_EXCEPTION, "unexpected pending-decode promotion state");
                 stream->moveToNext();
             }
             it = pending_decode_streams_.erase(it);

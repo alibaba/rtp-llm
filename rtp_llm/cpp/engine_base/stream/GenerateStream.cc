@@ -133,7 +133,7 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
                                                                               nullptr;
         if (reason != nullptr) {
             reportEvent(StreamEvents::Error,
-                        ErrorCode::ERROR_GENERATE_CONFIG_FORMAT,
+                        ErrorCode::INVALID_PARAMS,
                         "chunked prefill incompatible: " + std::string(reason));
             return;
         }
@@ -554,7 +554,7 @@ void GenerateStream::advanceChunk() {
         // reuse_length_ has already moved; leaving it as-is would poison every later chunk of
         // this stream. Mark the stream errored so the engine drops it after this step.
         reportEventWithoutLock(StreamEvents::Error,
-                               ErrorCode::UNKNOWN_ERROR,
+                               ErrorCode::EXECUTION_EXCEPTION,
                                "[chunked_prefill] reuse_length not block-aligned after advance; "
                                "this stream is errored (engine drops it next step) to protect "
                                "other streams' KV cache");

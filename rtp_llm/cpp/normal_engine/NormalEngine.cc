@@ -509,7 +509,7 @@ WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
 
             const int64_t block_size = model_config_.attn_config.tokens_per_block;
             const int64_t row_count =
-                std::min(token_budget, static_cast<int64_t>(std::numeric_limits<int>::max()));
+                std::min(token_budget, runtime_config.fifo_scheduler_config.max_context_batch_size);
             const int64_t row_heavy_reuse = (token_heavy_seq_len - 1) / block_size * block_size;
             auto          row_heavy_input = makeFakeInput(static_cast<size_t>(row_heavy_reuse + 1));
             row_heavy_input->generate_config->num_return_sequences = static_cast<int>(row_count);
