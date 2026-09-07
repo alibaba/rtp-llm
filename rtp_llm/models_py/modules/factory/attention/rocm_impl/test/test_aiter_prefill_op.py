@@ -2346,7 +2346,7 @@ class TestFusedRopeKVCacheMropeContract(unittest.TestCase):
             with self.subTest(op_class=op_class.__name__):
                 with self.assertRaisesRegex(
                     RuntimeError,
-                    "expected 12 for 4 tokens and index_factor 3",
+                    "expected at least 12 for 4 tokens and index_factor 3",
                 ):
                     op.forward(multi_token_qkv, layer_cache, params)
 
@@ -2651,6 +2651,82 @@ class TestAiterPrefillImplMropePositionIds(unittest.TestCase):
 
     def test_nonasm_mrope_matches_reference(self):
         self._check_mrope_matches_reference(AiterPrefillImplNonAsm)
+
+    def test_prefill_cuda_graph_accepts_position_id_capacity(self):
+        input_lengths = [2, 1]
+        head_num = 4
+        head_num_kv = 2
+        head_dim = 256
+        rope_dim = 64
+        mrope_sections = (11, 11, 10)
+        cfg = _make_mrope_attn_configs(
+            head_num=head_num,
+            head_num_kv=head_num_kv,
+            head_dim=head_dim,
+            dtype=self.dtype,
+            rope_dim=rope_dim,
+            mrope_sections=mrope_sections,
+        )
+        attn_inputs = _make_mrope_prefill_inputs(input_lengths, self.device, self.dtype)
+        active_position_ids = attn_inputs.combo_position_ids.clone()
+        capacity_tokens = len(input_lengths) * 4
+        position_id_capacity = torch.full(
+            (capacity_tokens, 3),
+            97,
+            dtype=torch.int32,
+            device=self.device,
+        )
+        position_id_capacity[: sum(input_lengths)].copy_(active_position_ids)
+        attn_inputs.combo_position_ids = position_id_capacity
+        attn_inputs.is_cuda_graph = True
+
+        op = FusedRopeKVCachePrefillOpAsm(cfg)
+        op.use_paged_fmha = True
+        op.pad_query = True
+        params = op.prepare(attn_inputs)
+
+        total_tokens = sum(input_lengths)
+        q = torch.randn(
+            total_tokens, head_num, head_dim, dtype=self.dtype, device=self.device
+        )
+        k = torch.randn(
+            total_tokens,
+            head_num_kv,
+            head_dim,
+            dtype=self.dtype,
+            device=self.device,
+        )
+        v = torch.randn_like(k)
+        qkv = _pack_qkv(q, k, v)
+
+        warmup_stream = torch.cuda.Stream()
+        warmup_stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(warmup_stream):
+            op.forward(qkv, None, params)
+        torch.cuda.current_stream().wait_stream(warmup_stream)
+
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            captured_q, _, _ = op.forward(qkv, None, params)
+
+        replay_position_ids = active_position_ids + torch.tensor(
+            [5, 3, 1], dtype=torch.int32, device=self.device
+        )
+        position_id_capacity[:total_tokens].copy_(replay_position_ids)
+        graph.replay()
+        torch.cuda.synchronize()
+
+        expected_q, _ = _apply_mrope(
+            q, k, replay_position_ids, mrope_sections, rope_dim
+        )
+        active_padded_rows = torch.tensor([0, 1, 3], device=self.device)
+        torch.testing.assert_close(
+            captured_q.index_select(0, active_padded_rows),
+            expected_q,
+            atol=1e-2,
+            rtol=1e-2,
+        )
+        self.assertTrue(torch.equal(captured_q[2], torch.zeros_like(captured_q[2])))
 
 
 @unittest.skipUnless(_OPS_IMPORTABLE, "Requires ROCm attention wrappers")
