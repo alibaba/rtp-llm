@@ -30,12 +30,12 @@ class _FakeStrategy:
         self.dim = dim
         self.launches = []
         self._mega_buf = SimpleNamespace(
-            num_max_tokens_per_rank=128,
-            x=torch.empty((128, dim), dtype=torch.float8_e4m3fn),
-            x_sf=torch.empty((128, max(dim // 128, 1)), dtype=torch.int32),
+            num_max_tokens_per_rank=256,
+            x=torch.empty((256, dim), dtype=torch.float8_e4m3fn),
+            x_sf=torch.empty((256, max(dim // 128, 1)), dtype=torch.int32),
             shared_l1_acts_sf=torch.empty((1, 128), dtype=torch.int32),
-            topk_idx=torch.empty((128, 6), dtype=torch.int64),
-            topk_weights=torch.empty((128, 6), dtype=torch.float32),
+            topk_idx=torch.empty((256, 6), dtype=torch.int64),
+            topk_weights=torch.empty((256, 6), dtype=torch.float32),
         )
 
     def _block_m(self, tokens: int) -> int:
@@ -68,14 +68,14 @@ def _fake_adapter(dim: int = 128) -> tuple[MegaMoeFrontAdapter, _FakePlan]:
     adapter.gate = _FakeGate()
     adapter.ffn_hc = _FakeHC()
     adapter.ffn_norm = _FakeNorm()
-    adapter.hidden = torch.empty((128, 4, dim), dtype=torch.bfloat16)
-    adapter.collapsed = torch.empty((128, dim), dtype=torch.bfloat16)
-    adapter.collapse_ssq = torch.empty((128,), dtype=torch.float32)
-    adapter.normalized_mix = torch.empty((128, 24), dtype=torch.float32)
-    adapter.normalized = torch.empty((128, dim), dtype=torch.bfloat16)
-    adapter.router_logits = torch.empty((128, 256), dtype=torch.float32)
-    adapter.post = torch.empty((128, 4), dtype=torch.float32)
-    adapter.comb = torch.empty((128, 4, 4), dtype=torch.float32)
+    adapter.hidden = torch.empty((256, 4, dim), dtype=torch.bfloat16)
+    adapter.collapsed = torch.empty((256, dim), dtype=torch.bfloat16)
+    adapter.collapse_ssq = torch.empty((256,), dtype=torch.float32)
+    adapter.normalized_mix = torch.empty((256, 24), dtype=torch.float32)
+    adapter.normalized = torch.empty((256, dim), dtype=torch.bfloat16)
+    adapter.router_logits = torch.empty((256, 256), dtype=torch.float32)
+    adapter.post = torch.empty((256, 4), dtype=torch.float32)
+    adapter.comb = torch.empty((256, 4, 4), dtype=torch.float32)
     adapter.hc_base = torch.empty((24,), dtype=torch.float32)
     adapter.hc_scale = torch.empty((3,), dtype=torch.float32)
     adapter.ffn_norm_weight = torch.empty((dim,), dtype=torch.bfloat16)
@@ -171,14 +171,26 @@ class MegaMoeFrontAdapterTest(unittest.TestCase):
             (8, 16, 24, 32, 48, 64, 96, 128),
         )
 
-    def test_capture_tokens_filter_outside_front_abi(self) -> None:
-        self.assertEqual(_capture_tokens_for_batches([8, 256, 0, -5], 0), (8,))
+    def test_capture_tokens_are_sorted_and_filter_unsupported_sizes(self) -> None:
+        self.assertEqual(_capture_tokens_for_batches([8, 1, 8, 32], 0), (1, 8, 32))
+        self.assertEqual(
+            _capture_tokens_for_batches([8, 256, 257, 0, -5], 0),
+            (8, 256),
+        )
+        self.assertEqual(
+            _capture_tokens_for_batches([32, 64], 3),
+            (32, 64, 96, 128, 192, 256),
+        )
 
     def test_front_support_is_bounded_by_extension_and_mega_buffer(self) -> None:
         adapter, _ = _fake_adapter()
 
         self.assertTrue(adapter.supports(torch.empty(64, 2, 4, adapter.dim)))
-        self.assertFalse(adapter.supports(torch.empty(43, 3, 4, adapter.dim)))
+        self.assertTrue(adapter.supports(torch.empty(128, 2, 4, adapter.dim)))
+        self.assertTrue(adapter.supports(torch.empty(256, 1, 4, adapter.dim)))
+        self.assertFalse(adapter.supports(torch.empty(257, 1, 4, adapter.dim)))
+        self.assertTrue(adapter.supports(torch.empty(43, 3, 4, adapter.dim)))
+        self.assertFalse(adapter.supports(torch.empty(43, 6, 4, adapter.dim)))
 
         adapter.strategy._mega_buf.num_max_tokens_per_rank = 32
         self.assertTrue(adapter.supports(torch.empty(16, 2, 4, adapter.dim)))

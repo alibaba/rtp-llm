@@ -51,7 +51,7 @@ class MegaMoeFrontAdapter:
     """Stage mHC state into the extension and launch prepacked MegaMoE-SE.
 
     The extension's DeepGEMM TMA descriptor binds the input address when a plan
-    is created. Each layer therefore owns a stable 128-row staging tensor and a
+    is created. Each layer therefore owns a stable 256-row staging tensor and a
     plan per configured decode batch. The extension writes quantized activations,
     routing results, and shared-expert scales directly into DeepGEMM's aligned
     symmetric buffer; no RTP gate/quant/pack kernel runs on this path.
