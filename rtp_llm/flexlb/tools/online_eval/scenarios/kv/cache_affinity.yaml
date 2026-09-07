@@ -7193,7 +7193,7 @@ variants:
     action: kv_replication_check
     params:
       snapshot:
-        $ref: stages.recovery_digest.output.snapshot
+        $ref: stages.recovery_w5_end.output.snapshot
       families:
       - - 810000
         - 810001
@@ -10600,7 +10600,7 @@ variants:
     action: kv_replication_check
     params:
       snapshot:
-        $ref: stages.recovery_digest.output.snapshot
+        $ref: stages.recovery_w5_end.output.snapshot
       families:
       - - 810000
         - 810001

@@ -125,6 +125,36 @@ class SpillTests(unittest.TestCase):
             result = self.run_plan(self.plans[0], model)
             self.assertEqual(result["status"], status, result["error"])
 
+    def test_replication_uses_last_window_before_final_sync(self):
+        class LateReplicationModel(SpillModel):
+            final_snapshots = 0
+
+            def http(self, ops, endpoint, deadline, body=None):
+                if endpoint == "snapshot" and self.rid == 54:
+                    self.final_snapshots += 1
+                    if self.final_snapshots >= 2:
+                        # A delayed cache update after the final 2s sync changes
+                        # holder count, but must not change the old P5 verdict.
+                        for keys in self.keys.values():
+                            keys.update((810000, 811000))
+                return super().http(ops, endpoint, deadline, body)
+
+        for plan in self.plans:
+            replication = next(s for s in plan["stages"] if s["id"] == "replication")
+            self.assertEqual(
+                replication["params"]["snapshot"],
+                {"$ref": "stages.recovery_w5_end.output.snapshot"},
+            )
+            result = self.run_plan(plan, LateReplicationModel())
+            self.assertEqual(result["status"], "FINDING-RESOLVED", result["error"])
+            late_plan = copy.deepcopy(plan)
+            late = next(s for s in late_plan["stages"] if s["id"] == "replication")
+            late["params"]["snapshot"] = {
+                "$ref": "stages.recovery_digest.output.snapshot"
+            }
+            result = self.run_plan(late_plan, LateReplicationModel())
+            self.assertEqual(result["status"], "FAIL", result["error"])
+
     def test_finding_cannot_hide_duplicate_saturation_samples(self):
         plan = copy.deepcopy(self.plans[0])
         stage = next(s for s in plan["stages"] if s["id"] == "saturation_hit")

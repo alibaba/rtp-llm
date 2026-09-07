@@ -179,7 +179,7 @@ The program then preserves all52 phase requests plus two steering requests:
 | baseline | 3 windows of4 serial A/B/A/B requests,15s stream/wait, pre-request8-contiguous-key hit view,2s after each window; all12 M3 .90/.85/.80 |
 | saturation | P0 slow3000ms and1.5s settle;4 windows of A/A/B/B fired requests, .12s only after positions1..3, none after position4; BATCH Fetch deferred until each window drains,30s per request; all16 M3 .50/.40/.30 |
 | recovery | Restore P0 to100ms, settle1.5s, quiet3.5s within8s;6 windows of4 serial A/B/A/B requests with2s after every window; final2 windows/8 samples M3 .85/.80/.75 |
-| final replication | Last-window any-key holder counts averaged across the two families, P5 1.5/1.75/2.0 and explicit structural cap2 |
+| final replication | Last-window snapshot before the final 2s sync (the later recovery digest is observational only); any-key holder counts averaged across the two families, P5 1.5/1.75/2.0 and explicit structural cap2 |
 
 The existing declared finding is mapped only to `saturation_hit.M3`, the healthy
 saturation hit-rate contract. `all_phase_requests.P6` covers all52 phase requests,
