@@ -1,5 +1,8 @@
 """Numerical tests for the AITER FlyDSL GDN prefill adapter."""
 
+import builtins
+import logging
+
 import pytest
 import torch
 
@@ -56,6 +59,36 @@ def test_pinned_aiter_api_passes_support_gate(
     finally:
         _is_aiter_flydsl_gdn_prefill_disabled.cache_clear()
         _get_aiter_flydsl_gdn_prefill_ops.cache_clear()
+
+
+@pytest.mark.parametrize("error_type", [RuntimeError, OSError])
+def test_extension_loader_failure_is_cached_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    error_type: type[Exception],
+) -> None:
+    """A found-but-unloadable optional extension must retain Triton fallback."""
+    original_import = builtins.__import__
+    import_attempts = 0
+
+    def failing_import(name: str, *args: object, **kwargs: object) -> object:
+        nonlocal import_attempts
+        if name == "aiter.ops.flydsl.linear_attention_prefill_kernels":
+            import_attempts += 1
+            raise error_type("synthetic extension loader failure")
+        return original_import(name, *args, **kwargs)
+
+    _get_aiter_flydsl_gdn_prefill_ops.cache_clear()
+    monkeypatch.setattr(builtins, "__import__", failing_import)
+    with caplog.at_level(logging.WARNING):
+        assert _get_aiter_flydsl_gdn_prefill_ops() is None
+        assert _get_aiter_flydsl_gdn_prefill_ops() is None
+
+    assert import_attempts == 1
+    assert caplog.messages == [
+        "AITER FlyDSL GDN prefill API is unavailable; falling back: synthetic extension loader failure"
+    ]
+    _get_aiter_flydsl_gdn_prefill_ops.cache_clear()
 
 
 @pytest.mark.parametrize(

@@ -14,7 +14,6 @@ import triton.language as tl
 from rtp_llm.models_py.triton_kernels.fla.utils import (
     env_flag,
     is_amd_cdna3,
-    is_amd_cdna4,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -52,6 +51,7 @@ class AiterFlydslGdnDecodeStateMetadata:
     """
 
     block_map: torch.Tensor
+    host_block_map: torch.Tensor
     block_map_width: int
     sequence_lengths_plus_1: torch.Tensor
     seq_size_per_block: int
@@ -62,6 +62,7 @@ class AiterFlydslGdnDecodeStateMetadata:
         """Return a per-forward cache key while retaining tensor identity."""
         return self.make_cache_key(
             self.block_map,
+            self.host_block_map,
             self.block_map_width,
             self.sequence_lengths_plus_1,
             self.host_sequence_lengths,
@@ -73,6 +74,7 @@ class AiterFlydslGdnDecodeStateMetadata:
     @staticmethod
     def make_cache_key(
         block_map: torch.Tensor,
+        host_block_map: torch.Tensor,
         block_map_width: int,
         sequence_lengths_plus_1: torch.Tensor,
         host_sequence_lengths: torch.Tensor,
@@ -86,6 +88,9 @@ class AiterFlydslGdnDecodeStateMetadata:
             block_map.data_ptr(),
             tuple(block_map.shape),
             tuple(block_map.stride()),
+            host_block_map.data_ptr(),
+            tuple(host_block_map.shape),
+            tuple(host_block_map.stride()),
             block_map_width,
             sequence_lengths_plus_1.data_ptr(),
             tuple(sequence_lengths_plus_1.shape),
@@ -99,6 +104,73 @@ class AiterFlydslGdnDecodeStateMetadata:
             seq_size_per_block,
             state_pool_size,
             state_dtype,
+        )
+
+
+def validate_aiter_flydsl_gdn_decode_real_state_indices(
+    state_metadata: AiterFlydslGdnDecodeStateMetadata,
+) -> None:
+    """Fail before execution when a real request has an invalid state block.
+
+    Zero-length rows are graph padding. Serving refreshes the CPU block table
+    and length mirror before capture/replay, so this check needs no GPU sync.
+    """
+    block_map = state_metadata.host_block_map
+    sequence_lengths = state_metadata.host_sequence_lengths
+    if (
+        block_map.device.type != "cpu"
+        or block_map.ndim != 2
+        or block_map.dtype != torch.int32
+        or block_map.stride(1) != 1
+    ):
+        raise RuntimeError(
+            "GDN decode host block table must be a column-contiguous CPU int32 matrix"
+        )
+    if (
+        sequence_lengths.device.type != "cpu"
+        or sequence_lengths.ndim != 1
+        or sequence_lengths.dtype not in (torch.int32, torch.int64)
+        or sequence_lengths.stride(0) != 1
+    ):
+        raise RuntimeError(
+            "GDN decode host sequence lengths must be contiguous CPU int32/int64"
+        )
+    if (
+        state_metadata.block_map_width <= 0
+        or state_metadata.seq_size_per_block <= 0
+        or state_metadata.state_pool_size <= 0
+    ):
+        raise RuntimeError(
+            "GDN decode host state metadata contains non-positive bounds"
+        )
+    if block_map.shape[0] != sequence_lengths.numel():
+        raise RuntimeError("GDN decode host block table and lengths differ in batch")
+    if block_map.shape[1] < state_metadata.block_map_width:
+        raise RuntimeError("GDN decode host block table is narrower than logical width")
+
+    real_rows = torch.nonzero(sequence_lengths > 0, as_tuple=False).flatten()
+    if real_rows.numel() == 0:
+        return
+    real_lengths = sequence_lengths[real_rows].to(torch.int64)
+    read_positions = (real_lengths - 1) // state_metadata.seq_size_per_block
+    write_positions = real_lengths // state_metadata.seq_size_per_block
+    if (read_positions < 0).any().item() or (
+        write_positions >= state_metadata.block_map_width
+    ).any().item():
+        raise RuntimeError("GDN decode real request exceeds host block-table width")
+
+    read_ids = block_map[real_rows, read_positions]
+    write_ids = block_map[real_rows, write_positions]
+    invalid_ids = (
+        (read_ids <= 0)
+        | (write_ids <= 0)
+        | (read_ids >= state_metadata.state_pool_size)
+        | (write_ids >= state_metadata.state_pool_size)
+    )
+    if invalid_ids.any().item():
+        invalid_rows = real_rows[invalid_ids].tolist()
+        raise RuntimeError(
+            f"GDN decode real request has invalid state block IDs at rows {invalid_rows}"
         )
 
 
@@ -216,8 +288,12 @@ def _aiter_flydsl_gdn_decode_unsupported_reason(
 ) -> str | None:
     if _is_aiter_flydsl_gdn_decode_disabled():
         return "disabled by DISABLE_AITER_FLYDSL_GDN_DECODE"
-    if not (is_amd_cdna3 or is_amd_cdna4):
-        return "device is not AMD CDNA3/gfx942 or CDNA4/gfx950"
+    # Keep automatic dispatch limited to the architecture covered by real
+    # numerical and HIP Graph CI. CDNA4/gfx950 falls back until an equivalent
+    # hardware target is available; a mocked architecture flag is not enough
+    # to validate generated FlyDSL code.
+    if not is_amd_cdna3:
+        return "device is not validated AMD CDNA3/gfx942"
     if q.ndim != 4 or k.ndim != 4 or v.ndim != 4 or state.ndim != 4:
         return "q/k/v/state rank is unsupported"
 
@@ -500,10 +576,10 @@ def prepare_aiter_flydsl_gdn_decode_state_indices(
     view's ``shape[1]`` only when the view retains a sufficiently wide backing
     row stride and storage, as with RTP's CUDA Graph ``block_map[:, :1]`` view.
 
-    The returned int32 tensor flags real-request rows with invalid positions or
-    state-pool IDs; graph padding is excluded. It is updated by the existing
-    index kernel during Graph replay and retained by the model for diagnostics,
-    without an additional hot-path kernel or device synchronization.
+    The returned int32 tensor is a defensive device-side diagnostic for invalid
+    positions or state-pool IDs; zero-length graph padding is excluded. During
+    serving, real rows are validated from the refreshed host lengths and block
+    table before replay, while padding device lengths are cleared to zero.
     """
     reason = _decode_state_metadata_unsupported_reason(
         state_metadata.block_map,

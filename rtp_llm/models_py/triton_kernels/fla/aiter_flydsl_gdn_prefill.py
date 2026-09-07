@@ -45,7 +45,12 @@ def _get_aiter_flydsl_gdn_prefill_ops() -> _AiterFlydslGdnPrefillOps | None:
         from aiter.ops.prefill_batch_metadata import (
             build_gated_delta_rule_prefill_metadata,
         )
-    except (AttributeError, ImportError) as error:
+    # Importing the optional extension may fail after Python finds the module,
+    # for example while loading a shared object or initializing its runtime.
+    # Treat expected loader failures exactly like a missing API so callers can
+    # retain the Triton path. Cache the result to avoid repeated loader work and
+    # warning spam on every prefill request.
+    except (AttributeError, ImportError, OSError, RuntimeError) as error:
         _LOGGER.warning(
             "AITER FlyDSL GDN prefill API is unavailable; falling back: %s",
             error,

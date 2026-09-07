@@ -12,6 +12,16 @@ cc_test(
     exec_properties = {'gpu':'A10'},
 )
 
+cc_test(
+    name = "gdn_decode_state_validation_test",
+    srcs = ["gdn_decode_state_validation_test.cc"],
+    copts = copts(),
+    deps = [
+        "//rtp_llm/cpp/cuda_graph:gdn_decode_state_validation",
+        "@com_google_googletest//:gtest_main",
+    ] + torch_deps(),
+)
+
 cc_library(
     name = "test_cuda_graph_runner_libs",
     srcs = [

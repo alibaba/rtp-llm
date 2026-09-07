@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_runner.h"
 #include "rtp_llm/cpp/cuda_graph/combo_position_ids_validation.h"
+#include "rtp_llm/cpp/cuda_graph/gdn_decode_state_validation.h"
 
 #include <algorithm>
 #include <cstdlib>
@@ -372,6 +373,15 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
                                                     max_bs_ + 1,
                                                     inputs.attention_inputs.cu_kv_seqlens_device,
                                                     state.current_batch_size);
+        } else {
+            // A decode graph bucket may be larger than the live batch. Clear
+            // stale post-decode lengths so captured linear-attention kernels
+            // recognize those rows as padding rather than state transitions.
+            addCudaGraphPrepareFillRegion(fill_params,
+                                          py_model_inputs_.attention_inputs.sequence_lengths_plus_1_device,
+                                          state.current_batch_size,
+                                          selected_graph_batch_size,
+                                          0);
         }
         // Target-verify padding (input_lengths / prefix_lengths / cu_*) is cleared by
         // the shared tail block below, which covers both the host mirrors and the
@@ -386,6 +396,11 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
             (void)tag;
             dst_inputs.kv_cache_kernel_block_id_device.fill_(0);
         }
+    }
+    if (!is_prefill_cuda_graph_mode_ && state.current_batch_size < selected_graph_batch_size) {
+        py_model_inputs_.attention_inputs.sequence_lengths_plus_1_device
+            .slice(0, state.current_batch_size, selected_graph_batch_size)
+            .fill_(0);
     }
 #endif
 
@@ -636,6 +651,25 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
             // values instead of the previous step's.
             RTP_LLM_PROFILE_SCOPE("cuda_graph.prepareAttentionInputs(wait_host_mirror_d2h)");
             cuda_graph::graphGetCurrentStream().synchronize();
+        }
+        // Qwen3.5 records the SSM pool bound during graph capture. Validate the
+        // refreshed pinned host metadata for only the live rows before replay;
+        // this consumes no device flag and adds no decode-path synchronization.
+        auto validate_gdn_state_blocks = [&state, this](const PyAttentionInputs& attn_inputs) {
+            const auto error = validateGdnDecodeStateBlockTable(attn_inputs.kv_cache_kernel_block_id,
+                                                                 attn_inputs.sequence_lengths,
+                                                                 state.current_batch_size,
+                                                                 seq_size_per_block_,
+                                                                 attn_inputs.gdn_decode_state_pool_size);
+            RTP_LLM_CHECK_WITH_INFO(error.empty(), "%s", error.c_str());
+        };
+        if (py_model_inputs_.attention_inputs_by_tag.empty()) {
+            validate_gdn_state_blocks(py_model_inputs_.attention_inputs);
+        } else {
+            for (const auto& [tag, attn_inputs] : py_model_inputs_.attention_inputs_by_tag) {
+                (void)tag;
+                validate_gdn_state_blocks(attn_inputs);
+            }
         }
         py::gil_scoped_acquire gil;
         callPrepareCudaGraph(attn_pyobj, py_model_inputs_);

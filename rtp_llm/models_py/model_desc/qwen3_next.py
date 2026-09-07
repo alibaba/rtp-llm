@@ -611,9 +611,14 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
             and not is_target_verify
             and block_map is not None
         ):
+            # Persisted on the captured attention-input object. Before every
+            # replay C++ validates the refreshed host block table for the real
+            # batch against this pool bound; padding rows are excluded there.
+            attn_inputs.gdn_decode_state_pool_size = ssm_states.shape[0]
             sequence_lengths = attn_inputs.sequence_lengths_plus_1_device
             state_metadata = AiterFlydslGdnDecodeStateMetadata(
                 block_map=block_map,
+                host_block_map=attn_inputs.kv_cache_kernel_block_id,
                 # The host mirror retains the logical table width even when a
                 # graph consumer later uses a narrow device view.
                 block_map_width=attn_inputs.kv_cache_kernel_block_id.shape[1],

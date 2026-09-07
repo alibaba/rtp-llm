@@ -13,6 +13,7 @@ from rtp_llm.models_py.triton_kernels.fla.aiter_flydsl_gdn_decode import (
     aiter_flydsl_gdn_decode,
     is_aiter_flydsl_gdn_decode_supported,
     prepare_aiter_flydsl_gdn_decode_state_indices,
+    validate_aiter_flydsl_gdn_decode_real_state_indices,
 )
 from rtp_llm.models_py.triton_kernels.fla.fused_recurrent import (
     cal_block_idx,
@@ -25,9 +26,13 @@ def _make_state_metadata(block_map, lengths, block_size, **kwargs):
     host_sequence_lengths = kwargs.pop("host_sequence_lengths", None)
     if host_sequence_lengths is None:
         host_sequence_lengths = (lengths.cpu() - 1).clamp_min(0)
+    host_block_map = kwargs.pop("host_block_map", None)
+    if host_block_map is None:
+        host_block_map = block_map.cpu()
     default_width = block_map.shape[1] if block_map.ndim == 2 else 1
     return AiterFlydslGdnDecodeStateMetadata(
         block_map=block_map,
+        host_block_map=host_block_map,
         block_map_width=kwargs.pop("block_map_width", default_width),
         sequence_lengths_plus_1=lengths,
         seq_size_per_block=block_size,
@@ -44,6 +49,7 @@ def _prepare_indices_for_test(
     *,
     state_pool_size,
     block_map_width=None,
+    host_block_map=None,
 ):
     metadata_kwargs = {"state_pool_size": state_pool_size}
     if block_map_width is not None:
@@ -54,6 +60,7 @@ def _prepare_indices_for_test(
             lengths,
             block_size,
             host_sequence_lengths=host_sequence_lengths,
+            host_block_map=host_block_map,
             **metadata_kwargs,
         )
     )
@@ -185,7 +192,6 @@ def _call_mock_decode(kwargs, flydsl_decode=None, *, capturing=False, arch=True)
     flydsl_decode = flydsl_decode or _mock_flydsl_decode()
     with (
         mock.patch.object(adapter, "is_amd_cdna3", arch),
-        mock.patch.object(adapter, "is_amd_cdna4", False),
         mock.patch.object(
             adapter, "_get_aiter_flydsl_gdn_decode", return_value=flydsl_decode
         ),
@@ -194,13 +200,20 @@ def _call_mock_decode(kwargs, flydsl_decode=None, *, capturing=False, arch=True)
         return aiter_flydsl_gdn_decode(**kwargs)
 
 
-def _decode_from_block_map(kwargs, block_map, lengths, host_sequence_lengths=None):
+def _decode_from_block_map(
+    kwargs,
+    block_map,
+    lengths,
+    host_sequence_lengths=None,
+    host_block_map=None,
+):
     read_indices, write_indices, _ = _prepare_indices_for_test(
         block_map,
         lengths,
         1024,
         host_sequence_lengths=host_sequence_lengths,
         state_pool_size=kwargs["state"].shape[0],
+        host_block_map=host_block_map,
     )
     output = aiter_flydsl_gdn_decode(
         **(kwargs | {"read_indices": read_indices, "write_indices": write_indices})
@@ -271,6 +284,35 @@ class FlaEnvironmentFlagTest(unittest.TestCase):
 class AiterFlydslGdnDecodeCommonTest(unittest.TestCase):
     def setUp(self):
         _reset_adapter_process_state(self)
+
+    def test_host_validation_accepts_padding_and_rejects_invalid_real_row(self):
+        device_block_map = torch.tensor(
+            [[1, 2], [0, 0]], device="cuda", dtype=torch.int32
+        )
+        lengths = torch.tensor([1024, 0], dtype=torch.int32)
+        metadata = _make_state_metadata(
+            device_block_map,
+            (lengths + 1).to(device="cuda"),
+            1024,
+            host_sequence_lengths=lengths,
+            host_block_map=device_block_map.cpu(),
+            state_pool_size=3,
+        )
+
+        validate_aiter_flydsl_gdn_decode_real_state_indices(metadata)
+
+        invalid_host_map = device_block_map.cpu()
+        invalid_host_map[0, 1] = 0
+        invalid_metadata = _make_state_metadata(
+            device_block_map,
+            (lengths + 1).to(device="cuda"),
+            1024,
+            host_sequence_lengths=lengths,
+            host_block_map=invalid_host_map,
+            state_pool_size=3,
+        )
+        with self.assertRaisesRegex(RuntimeError, "invalid state block IDs"):
+            validate_aiter_flydsl_gdn_decode_real_state_indices(invalid_metadata)
 
     def test_prepare_decode_indices_honors_noncontiguous_block_map_stride(self):
         padded_block_map = torch.tensor(
@@ -472,6 +514,7 @@ class AiterFlydslGdnDecodeCommonTest(unittest.TestCase):
         with self.assertRaisesRegex(TypeError, "state_pool_size"):
             AiterFlydslGdnDecodeStateMetadata(
                 block_map=valid_map,
+                host_block_map=valid_map.cpu(),
                 block_map_width=valid_map.shape[1],
                 sequence_lengths_plus_1=valid_lengths,
                 seq_size_per_block=1024,
@@ -625,10 +668,7 @@ class AiterFlydslGdnDecodeCommonTest(unittest.TestCase):
         with mock.patch.object(
             adapter, "_get_aiter_flydsl_gdn_decode", return_value=_mock_flydsl_decode()
         ):
-            with (
-                mock.patch.object(adapter, "is_amd_cdna3", False),
-                mock.patch.object(adapter, "is_amd_cdna4", False),
-            ):
+            with (mock.patch.object(adapter, "is_amd_cdna3", False),):
                 self.assertFalse(
                     is_aiter_flydsl_gdn_decode_supported(
                         *valid,
@@ -637,7 +677,7 @@ class AiterFlydslGdnDecodeCommonTest(unittest.TestCase):
                         state_metadata=_make_valid_state_metadata(valid),
                     )
                 )
-                with self.assertRaisesRegex(ValueError, "not AMD CDNA3"):
+                with self.assertRaisesRegex(ValueError, "not validated AMD CDNA3"):
                     aiter_flydsl_gdn_decode(
                         A_log=A_log,
                         a=valid[3],
@@ -671,6 +711,27 @@ class AiterFlydslGdnDecodeCommonTest(unittest.TestCase):
                     )
                     self.assertIn("DISABLE_AITER_FLYDSL_GDN_DECODE", reason)
 
+    def test_cdna4_is_not_automatically_enabled_without_real_ci(self):
+        """Only the hardware-validated CDNA3 flag can enable dispatch."""
+        valid = _make_decode_inputs()
+        value_heads = valid[2].shape[2]
+        with (
+            mock.patch.object(adapter, "is_amd_cdna3", False),
+            mock.patch.object(
+                adapter,
+                "_get_aiter_flydsl_gdn_decode",
+                return_value=_mock_flydsl_decode(),
+            ),
+        ):
+            reason = adapter._aiter_flydsl_gdn_decode_unsupported_reason(
+                *valid,
+                A_log=torch.randn(value_heads, device="cuda", dtype=torch.float32),
+                dt_bias=torch.randn(value_heads, device="cuda", dtype=torch.bfloat16),
+                scale=None,
+            )
+
+        self.assertIn("not validated AMD CDNA3/gfx942", reason)
+
     @unittest.skipIf(torch.version.hip is not None, "NVIDIA-only dispatch guard")
     def test_real_nvidia_device_rejects_aiter_dispatch(self):
         valid = _make_decode_inputs()
@@ -689,7 +750,7 @@ class AiterFlydslGdnDecodeCommonTest(unittest.TestCase):
         reason = adapter._aiter_flydsl_gdn_decode_unsupported_reason(
             *valid, A_log=A_log, dt_bias=dt_bias, scale=None
         )
-        self.assertIn("not AMD CDNA3", reason)
+        self.assertIn("not validated AMD CDNA3", reason)
 
     def test_shape_gate_rejects_invalid_decode_state_metadata(self):
         valid = _make_decode_inputs()
@@ -911,6 +972,7 @@ class AiterFlydslGdnDecodeRocmTest(unittest.TestCase):
         kwargs = _make_decode_kwargs(batch=1)
         state = kwargs["state"]
         block_map = torch.tensor([[1, 2]], device="cuda", dtype=torch.int32)
+        host_block_map = block_map.cpu()
         lengths = torch.tensor([1002], device="cuda", dtype=torch.int32)
 
         warm_state = state.clone()
@@ -920,6 +982,7 @@ class AiterFlydslGdnDecodeRocmTest(unittest.TestCase):
             block_map,
             lengths,
             host_lengths,
+            host_block_map,
         )
         torch.cuda.synchronize()
 
@@ -931,6 +994,7 @@ class AiterFlydslGdnDecodeRocmTest(unittest.TestCase):
                 block_map,
                 lengths,
                 host_lengths,
+                host_block_map,
             )
         torch.cuda.synchronize()
 
@@ -941,6 +1005,7 @@ class AiterFlydslGdnDecodeRocmTest(unittest.TestCase):
             block_map,
             lengths,
             host_lengths,
+            host_block_map,
         )
 
         graph.replay()
@@ -948,6 +1013,71 @@ class AiterFlydslGdnDecodeRocmTest(unittest.TestCase):
 
         torch.testing.assert_close(graph_output, eager_output, rtol=0, atol=0)
         torch.testing.assert_close(graph_state, eager_state, rtol=0, atol=0)
+
+    def test_graph_replay_mixes_real_request_and_zero_length_padding(self):
+        """A rounded graph bucket updates the real row and skips padding."""
+        torch.manual_seed(31)
+        kwargs = _make_decode_kwargs(batch=2)
+        original_state = kwargs["state"]
+        block_map = torch.tensor([[1, 2], [0, 0]], device="cuda", dtype=torch.int32)
+        host_block_map = block_map.cpu()
+        lengths = torch.tensor([1002, 0], device="cuda", dtype=torch.int32)
+        host_lengths = torch.tensor([1001, 0], dtype=torch.int32)
+
+        # Complete lazy initialization before capture.
+        warm_state = original_state.clone()
+        _decode_from_block_map(
+            kwargs | {"state": warm_state},
+            block_map,
+            lengths,
+            host_lengths,
+            host_block_map,
+        )
+        torch.cuda.synchronize()
+
+        graph_state = original_state.clone()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            read_indices, write_indices, invalid_flags = _prepare_indices_for_test(
+                block_map,
+                lengths,
+                1024,
+                host_sequence_lengths=host_lengths,
+                state_pool_size=graph_state.shape[0],
+                host_block_map=host_block_map,
+            )
+            graph_output = aiter_flydsl_gdn_decode(
+                **(
+                    kwargs
+                    | {
+                        "state": graph_state,
+                        "read_indices": read_indices,
+                        "write_indices": write_indices,
+                    }
+                )
+            )
+
+        eager_state = graph_state.clone()
+        lengths.copy_(torch.tensor([1025, 0], device="cuda", dtype=torch.int32))
+        eager_output, eager_read, eager_write = _decode_from_block_map(
+            kwargs | {"state": eager_state},
+            block_map,
+            lengths,
+            host_lengths,
+            host_block_map,
+        )
+
+        graph.replay()
+        torch.cuda.synchronize()
+
+        self.assertEqual(read_indices.cpu().tolist(), eager_read.cpu().tolist())
+        self.assertEqual(write_indices.cpu().tolist(), eager_write.cpu().tolist())
+        self.assertEqual(invalid_flags.cpu().tolist(), [0, 0])
+        self.assertEqual(read_indices[1].item(), -1)
+        self.assertEqual(write_indices[1].item(), -1)
+        torch.testing.assert_close(graph_output, eager_output, rtol=0, atol=0)
+        torch.testing.assert_close(graph_state, eager_state, rtol=0, atol=0)
+        self.assertEqual(graph_output[1].count_nonzero().item(), 0)
 
     def test_mixed_block_boundary_batch_matches_triton_and_preserves_pool(self):
         torch.manual_seed(17)
