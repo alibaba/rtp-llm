@@ -105,6 +105,11 @@ The first environment retains the existing artifact layout; later environments
 write under `environment-epoch-N`. Each epoch retains its cleanup report, and the
 root cleanup report remains the latest cumulative PID ledger. Startup probes
 write raw configuration and observations even when they cannot complete.
+All single-Master scenarios also use private per-epoch application/PV/FlexLB logs;
+adapters can obtain the owned directory from `ctx.master_log_dir` or
+`ctx.env.master_log_dir`. Dual-Master startup retains its separate directories
+for each owner. No scenario needs to infer ownership from offsets in a shared
+home-directory log.
 
 RequestBatch stream errors record `stream.trailer_error_code` separately from
 transport status and in-band `business_error_code`. `stream.error_trailer` retains

@@ -570,14 +570,19 @@ class JavaMockBackend:
         self.current_artifact_dir = artifact_dir
         if raw_config is not None:
             spec.raw_config = raw_config
-            private_log = artifact_dir / "master-logs"
-            private_log.mkdir(exist_ok=False)
-            spec.master_extra_args.append(f"--flexlb.log.path={private_log.resolve()}")
         sync_log_path = (
             configure_master_sync_log(spec, artifact_dir, ctx.env_epoch)
             if plan.get("master_sync_log", False)
             else None
         )
+        private_log = sync_log_path.parent if sync_log_path else None
+        if not spec.masters and private_log is None:
+            private_log = (artifact_dir / "master-logs").resolve()
+            private_log.mkdir(exist_ok=False)
+            spec.master_extra_args.append(f"--flexlb.log.path={private_log}")
+        # Dual Master startup already assigns one private directory per owner.
+        # A single Master always gets one too, not only negative-test probes.
+        ctx.master_log_dir = private_log
         self.manager = OwnedManager(artifact_dir / "environment")
         (artifact_dir / "environment.json").write_text(
             json.dumps(
@@ -587,6 +592,7 @@ class JavaMockBackend:
                     resolved_config=plan["resolved_config"],
                     raw_config=raw_config,
                     env_epoch=ctx.env_epoch,
+                    master_log_dir=str(private_log) if private_log else None,
                     master_sync_log_path=str(sync_log_path) if sync_log_path else None,
                 ),
                 indent=2,
@@ -594,6 +600,7 @@ class JavaMockBackend:
             + "\n"
         )
         env = self.manager.ensure(spec)
+        env.master_log_dir = private_log
         env.master_sync_log_path = sync_log_path
         ctx.master_sync_log_path = sync_log_path
         deadline.check()

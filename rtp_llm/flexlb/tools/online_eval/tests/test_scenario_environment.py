@@ -218,9 +218,11 @@ class EnvironmentTest(unittest.TestCase):
             master_management_port=28001,
             mock_http_port=54999,
         )
-        with patch("flexlb_ft.harness.EnvManager.ensure", return_value=env), patch(
-            "flexlb_ft.engine_ops.EngineOps"
-        ), patch("flexlb_ft.context.CaseContext"):
+        with patch(
+            "flexlb_ft.harness.EnvManager.ensure", return_value=env
+        ) as ensure, patch("flexlb_ft.engine_ops.EngineOps"), patch(
+            "flexlb_ft.context.CaseContext"
+        ):
             self.ctx.env_epoch = 1
             first = environment(self.raw_env, "test", PROFILE)
             backend.setup(self.ctx, first, self.deadline)
@@ -230,6 +232,19 @@ class EnvironmentTest(unittest.TestCase):
                 {"config_overrides": {"ordering": "fifo"}}, "test", PROFILE
             )
             backend.setup(self.ctx, second, self.deadline)
+            log_args = [
+                next(
+                    arg
+                    for arg in call.args[0].master_extra_args
+                    if arg.startswith("--flexlb.log.path=")
+                )
+                for call in ensure.call_args_list
+            ]
+            self.assertNotEqual(log_args[0], log_args[1])
+            self.assertTrue(
+                all(str(Path(self.tmp.name).resolve()) in arg for arg in log_args)
+            )
+            self.assertEqual(env.master_log_dir, self.ctx.master_log_dir)
         self.assertEqual(
             (Path(self.tmp.name) / "environment.json").read_bytes(), initial
         )
@@ -237,6 +252,7 @@ class EnvironmentTest(unittest.TestCase):
             (Path(self.tmp.name) / "environment-epoch-2/environment.json").read_text()
         )
         self.assertEqual(later["resolved_config"], second["resolved_config"])
+        self.assertEqual(later["master_log_dir"], str(self.ctx.master_log_dir))
 
     def test_backend_probe_requires_owned_master_and_reads_private_files(self):
         backend = JavaMockBackend(lease_manifest())
