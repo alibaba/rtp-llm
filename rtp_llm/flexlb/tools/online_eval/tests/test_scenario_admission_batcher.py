@@ -28,12 +28,28 @@ class BatcherPrograms(unittest.TestCase):
         )
         return compile_scenarios(load_scenarios(root), handlers=registry), registry
 
-    def run_program(self, variant, profile, no_park=False, bad_deadline=False):
+    def run_program(
+        self, variant, profile, no_park=False, bad_deadline=False, reversed_fifo=False
+    ):
         plans, registry = self.plans()
         plan = next(
             p for p in plans if p["variant_id"] == variant and p["profile"] == profile
         )
-        state = SimpleNamespace(sent=0, waited=0, lock=threading.Lock())
+        state = SimpleNamespace(
+            sent=0, waited=0, wait_epoch=None, lock=threading.Lock()
+        )
+
+        class Clock:
+            local = threading.local()
+
+            def __call__(self):
+                if hasattr(self.local, "completion_stamp"):
+                    value = self.local.completion_stamp
+                    del self.local.completion_stamp
+                    return value
+                return time.monotonic()
+
+        clock = Clock()
 
         class Batch:
             def __init__(self, ctx, params):
@@ -79,9 +95,15 @@ class BatcherPrograms(unittest.TestCase):
                 ]
 
             def wait(self, deadline):
-                time.sleep(0.005 * self.index)
                 with state.lock:
                     state.waited += 1
+                    if state.wait_epoch is None:
+                        state.wait_epoch = time.monotonic()
+                    rank = 8 - self.index if reversed_fifo else self.index
+                    # Explicit external-I/O fixture completion time, consumed by
+                    # the real drain's next clock read. Short sleeps cannot
+                    # guarantee OS thread return order under arbitrary load.
+                    clock.local.completion_stamp = state.wait_epoch + 0.005 * rank
 
             def cancel(self, reason):
                 pass
@@ -145,7 +167,7 @@ class BatcherPrograms(unittest.TestCase):
                 backend,
                 registry,
                 out,
-                clock=time.monotonic,
+                clock=clock,
                 sleeper=lambda s: time.sleep(min(s, 0.001)),
             )
 
@@ -165,6 +187,18 @@ class BatcherPrograms(unittest.TestCase):
                     self.assertTrue(
                         all(s["status"] == "PASS" for s in result["cleanup"])
                     )
+
+    def test_reversed_wait_return_order_fails_the_real_fifo_predicate(self):
+        result = self.run_program(
+            "batcher_queue_capacity_park", "single-batch", reversed_fifo=True
+        )
+        self.assertEqual("FAIL", result["status"], result)
+        self.assertEqual(
+            "FAIL",
+            next(s for s in result["stages"] if s["id"] == "fifo")["checks"][0][
+                "status"
+            ],
+        )
 
     def test_post_fire_or_absent_park_does_not_pass(self):
         result = self.run_program(
