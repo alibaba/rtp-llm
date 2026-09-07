@@ -1152,3 +1152,391 @@ HANDLERS += [
         "admission_drain", _drain_validate, _drain, {"rows": "admission_rows"}
     ),
 ]
+
+
+def _burst_validate(params, plan):
+    p = dict(params)
+    await_submissions = p.pop("await_submissions", True)
+    if type(await_submissions) is not bool:
+        raise ValueError("await_submissions must be boolean")
+    p = _fire_validate(p, plan)
+    if p["count"] > 32 or p["concurrency"] < p["count"]:
+        raise ValueError("burst needs one bounded worker per submitted request")
+    if not await_submissions and p["consume"] != "immediate":
+        raise ValueError("timed asynchronous burst needs immediate consumers")
+    p["await_submissions"] = await_submissions
+    p["submission_only"] = await_submissions
+    return p
+
+
+def _burst(ctx, params, deadline):
+    wave = AdmissionWave(ctx, params)
+    handle = ctx.register_resource("admission_wave", wave, wave.cleanup)
+    for i in range(params["count"]):
+        deadline.check()
+        wave.submit(deadline)
+        if (i + 1) % params["spacing_every"] == 0:
+            deadline.sleep(params["spacing_s"])
+    if params["await_submissions"]:
+        for item in wave.items:
+            if not item["done"].wait(deadline.remaining()):
+                raise TimeoutError("burst submission lacks completion signal")
+            item["future"].result(timeout=deadline.remaining())
+            if item["error"]:
+                raise item["error"]
+    return StageOutput({"wave": handle})
+
+
+def _drain_start(ctx, params, deadline):
+    waves = [ctx.resource(ref, "admission_wave") for ref in params["waves"]]
+    if not 1 <= sum(len(w.items) for w in waves) <= 32:
+        raise ValueError("concurrent drain limited to 32 requests")
+    drain = AdmissionDrain(ctx, waves)
+    handle = ctx.register_resource("admission_drain", drain, drain.cleanup)
+    drain.start(deadline)
+    return StageOutput({"drain": handle})
+
+
+def _drain_collect_validate(params, plan):
+    p = _fields(params, {"drain"}, {"drain"})
+    plan.reference(p["drain"], "admission_drain")
+    return p
+
+
+def _drain_collect(ctx, params, deadline):
+    drain = ctx.resource(params["drain"], "admission_drain")
+    rows = drain.await_done(deadline)
+    return StageOutput(
+        {"rows": ctx.register_resource("admission_rows", rows, historical=True)},
+        artifacts=[str(drain.path)],
+    )
+
+
+def _ledger_validate(params, plan):
+    p = _fields(params, {"duration_s"}, {"duration_s"})
+    if (
+        type(p["duration_s"]) not in (int, float)
+        or not math.isfinite(p["duration_s"])
+        or not 0 < p["duration_s"] <= 60
+    ):
+        raise ValueError("ledger observation needs finite bounded duration")
+    return p
+
+
+def _ledger(ctx, params, deadline):
+    samples = []
+    until = ctx.clock() + params["duration_s"]
+    path = ctx.artifact_dir / f"admission-ledger-{len(ctx._resources)}.json"
+    try:
+        while ctx.clock() < until:
+            data = _master_json(ctx, "single", "/rtp_llm/inflight_status", deadline)
+            sched = data.get("scheduler_inflight")
+            endpoints = data.get("prefill_endpoints")
+            if (
+                type(sched) is not int
+                or sched < 0
+                or not isinstance(endpoints, list)
+                or not endpoints
+            ):
+                raise ValueError(
+                    "ledger requires scheduler and explicit prefill endpoints"
+                )
+            batches = requests = 0
+            for endpoint in endpoints:
+                b, r = endpoint.get("inflight_batches"), endpoint.get(
+                    "inflight_requests"
+                )
+                b = len(b) if isinstance(b, list) else b
+                if any(type(v) is not int or v < 0 for v in (b, r)):
+                    raise ValueError("ledger requires actual owner batch/member counts")
+                batches += b
+                requests += r
+            samples.append(
+                dict(
+                    time_s=ctx.clock(),
+                    scheduler=sched,
+                    batches=batches,
+                    requests=requests,
+                    raw=data,
+                )
+            )
+            deadline.sleep(min(0.2, max(0, until - ctx.clock())))
+    finally:
+        path.write_text(json.dumps(samples, indent=2) + "\n")
+    return StageOutput(
+        {
+            "samples": ctx.register_resource(
+                "admission_ledger", samples, historical=True
+            )
+        },
+        artifacts=[str(path)],
+    )
+
+
+def _ledger_check_validate(params, plan):
+    p = _fields(
+        params,
+        {"samples", "n_requests", "expect_intermediate"},
+        {"samples", "n_requests", "expect_intermediate"},
+    )
+    plan.reference(p["samples"], "admission_ledger")
+    if (
+        type(p["n_requests"]) is not int
+        or p["n_requests"] < 1
+        or type(p["expect_intermediate"]) is not bool
+    ):
+        raise ValueError("invalid ledger linkage expectation")
+    return p
+
+
+def _ledger_check(ctx, params, deadline):
+    deadline.check()
+    samples = ctx.resource(params["samples"], "admission_ledger")
+    peak_batches = max((s["batches"] for s in samples), default=-1)
+    peak_requests = max((s["requests"] for s in samples), default=-1)
+    intermediate = sorted(
+        {s["requests"] for s in samples if 0 < s["requests"] < peak_requests}
+    )
+    monotonic = all(
+        b["scheduler"] <= a["scheduler"] for a, b in zip(samples, samples[1:])
+    )
+    passed = (
+        bool(samples)
+        and peak_batches == 1
+        and peak_requests == params["n_requests"]
+        and bool(intermediate) == params["expect_intermediate"]
+        and monotonic
+    )
+    return StageOutput(
+        {"passed": passed},
+        [
+            CheckResult(
+                "linkage",
+                "PASS" if passed else "FAIL",
+                actual=dict(
+                    peak_batches=peak_batches,
+                    peak_requests=peak_requests,
+                    intermediate=intermediate,
+                    scheduler_non_increasing=monotonic,
+                ),
+            )
+        ],
+    )
+
+
+def _budget_snapshot_validate(params, plan):
+    p = _clean_validate(params, plan)
+    if len(p["targets"]) != 1 or not p["targets"][0].startswith("prefill-"):
+        raise ValueError("budget snapshot requires one explicit prefill")
+    return p
+
+
+def _budget_snapshot(ctx, params, deadline):
+    rows = _engines(_http(ctx.ops, "snapshot", deadline), params["targets"])
+    row = rows[params["targets"][0]]
+    for name in ("prefill_batches", "prefill_batch_requests", "max_prefill_batch_size"):
+        if type(row.get(name)) is not int or row[name] < 0:
+            raise ValueError("missing executed-batch counters")
+    path = ctx.artifact_dir / f"admission-budget-{len(ctx._resources)}.json"
+    path.write_text(json.dumps(row, indent=2) + "\n")
+    return StageOutput(
+        {
+            "snapshot": ctx.register_resource(
+                "admission_budget_snapshot", row, historical=True
+            )
+        },
+        artifacts=[str(path)],
+    )
+
+
+def _shape_validate(params, plan):
+    p = _fields(
+        params, {"before", "after", "expected"}, {"before", "after", "expected"}
+    )
+    for name in ("before", "after"):
+        plan.reference(p[name], "admission_budget_snapshot")
+    if (
+        not isinstance(p["expected"], list)
+        or len(p["expected"]) != 3
+        or any(type(x) is not int or x < 0 for x in p["expected"])
+    ):
+        raise ValueError("shape expectation is three nonnegative counters")
+    return p
+
+
+def _shape(ctx, params, deadline):
+    deadline.check()
+    before, after = [
+        ctx.resource(params[k], "admission_budget_snapshot")
+        for k in ("before", "after")
+    ]
+    actual = [
+        after[k] - before[k] for k in ("prefill_batches", "prefill_batch_requests")
+    ] + [after["max_prefill_batch_size"]]
+    # Old construction gate is diagnostic, explicitly excluded from the verdict.
+    path = ctx.artifact_dir / f"admission-shape-{len(ctx.outputs)}.json"
+    path.write_text(
+        json.dumps(
+            dict(
+                actual=actual,
+                expected=params["expected"],
+                matches=actual == params["expected"],
+            ),
+            indent=2,
+        )
+        + "\n"
+    )
+    return StageOutput({"matches": actual == params["expected"]}, artifacts=[str(path)])
+
+
+def _budget_check_validate(params, plan):
+    p = _fields(
+        params, {"rows", "snapshot", "baseline_rows", "metric"}, {"rows", "metric"}
+    )
+    plan.reference(p["rows"], "admission_rows")
+    if p["metric"] == "batch_identity":
+        plan.reference(p.get("snapshot"), "admission_budget_snapshot")
+    elif p["metric"] == "ttft_degradation":
+        plan.reference(p.get("baseline_rows"), "admission_rows")
+    elif p["metric"] != "client_two_clusters":
+        raise ValueError("unknown budget check")
+    return p
+
+
+def _two_clusters(values, sep):
+    if len(values) != 4 or any(
+        type(v) not in (int, float) or not math.isfinite(v) or v <= 0 for v in values
+    ):
+        return False
+    a, b, c, d = sorted(values)
+    return b - a <= sep and c - b > sep and d - c <= sep
+
+
+def _budget_check(ctx, params, deadline):
+    deadline.check()
+    rows = ctx.resource(params["rows"], "admission_rows")
+    if params["metric"] == "batch_identity":
+        snap = ctx.resource(params["snapshot"], "admission_budget_snapshot")
+        lifecycle = snap.get("request_lifecycle", {})
+        values = [
+            lifecycle.get(str(r["wire_request_id"]), {}).get("batch_id") for r in rows
+        ]
+        passed = (
+            bool(values) and len(set(values)) == 1 and values[0] not in (None, 0, -1)
+        )
+        actual = values
+    elif params["metric"] == "client_two_clusters":
+        actual = [r.get("await_return_s") for r in rows]
+        passed = _two_clusters(actual, 1.0)
+    else:
+        baseline = ctx.resource(params["baseline_rows"], "admission_rows")
+
+        def p50(records):
+            values = []
+            for r in records:
+                start, end = r["schedule"]["started_s"], r["consumer_exit_s"]
+                if (
+                    not request_success(r)
+                    or any(
+                        type(v) not in (int, float) or not math.isfinite(v)
+                        for v in (start, end)
+                    )
+                    or end < start
+                ):
+                    raise ValueError("TTFT requires successful real request timing")
+                values.append(end - start)
+            return sorted(values)[int(len(values) * 0.5)] if values else None
+
+        base, wave = p50(baseline), p50(rows)
+        degradation = (
+            ((wave - base) / base * 100 if base > 0 else 0)
+            if base is not None and wave is not None
+            else None
+        )
+        passed = degradation is not None and degradation <= 50
+        actual = dict(baseline_p50_s=base, wave_p50_s=wave, degradation_pct=degradation)
+    return StageOutput(
+        {"passed": passed},
+        [CheckResult("criterion", "PASS" if passed else "FAIL", actual=actual)],
+    )
+
+
+def _engine_clusters_validate(params, plan):
+    p = _fields(params, {"rows", "snapshot"}, {"rows", "snapshot"})
+    plan.reference(p["rows"], "admission_rows")
+    plan.reference(p["snapshot"], "admission_budget_snapshot")
+    return p
+
+
+def _engine_clusters(ctx, params, deadline):
+    deadline.check()
+    rows = ctx.resource(params["rows"], "admission_rows")
+    snap = ctx.resource(params["snapshot"], "admission_budget_snapshot")
+    values = [
+        snap.get("request_lifecycle", {})
+        .get(str(r["wire_request_id"]), {})
+        .get("end_ms", 0)
+        for r in rows
+    ]
+    matches = _two_clusters(values, 1000)
+    path = ctx.artifact_dir / f"admission-engine-clusters-{len(ctx.outputs)}.json"
+    path.write_text(json.dumps(dict(values=values, matches=matches), indent=2) + "\n")
+    return StageOutput({"matches": matches}, artifacts=[str(path)])
+
+
+HANDLERS += [
+    StageHandler(
+        "admission_burst",
+        _burst_validate,
+        _burst,
+        {"wave": "admission_wave"},
+        requires=frozenset({"enqueue_batch"}),
+    ),
+    StageHandler(
+        "admission_drain_start",
+        _drain_validate,
+        _drain_start,
+        {"drain": "admission_drain"},
+    ),
+    StageHandler(
+        "admission_drain_collect",
+        _drain_collect_validate,
+        _drain_collect,
+        {"rows": "admission_rows"},
+    ),
+    StageHandler(
+        "admission_ledger_observe",
+        _ledger_validate,
+        _ledger,
+        {"samples": "admission_ledger"},
+    ),
+    StageHandler(
+        "admission_ledger_check",
+        _ledger_check_validate,
+        _ledger_check,
+        {"passed": "boolean"},
+        checks=frozenset({"linkage"}),
+    ),
+    StageHandler(
+        "admission_budget_snapshot",
+        _budget_snapshot_validate,
+        _budget_snapshot,
+        {"snapshot": "admission_budget_snapshot"},
+    ),
+    StageHandler(
+        "admission_shape_observe", _shape_validate, _shape, {"matches": "boolean"}
+    ),
+    StageHandler(
+        "admission_budget_check",
+        _budget_check_validate,
+        _budget_check,
+        {"passed": "boolean"},
+        checks=frozenset({"criterion"}),
+    ),
+    StageHandler(
+        "admission_engine_clusters",
+        _engine_clusters_validate,
+        _engine_clusters,
+        {"matches": "boolean"},
+    ),
+]
