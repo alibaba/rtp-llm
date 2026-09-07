@@ -3,8 +3,8 @@
 `cache_local_index` now has explicit programs for all three contracts: prefix
 continuity, eviction propagation and per-engine admission isolation. Each has
 BATCH/NON_BATCH programs across all four profiles (six variants, twelve instances).
-The global-holder family is also implemented below; affinity, capacity and churn
-remain pending. All old callables remain retained.
+The global-holder family is also implemented below. Affinity has three candidate
+contracts; its leader-saturation finding, capacity and churn remain pending. All old callables remain retained.
 
 | Original operation or assertion | Explicit stage |
 | --- | --- |
@@ -87,3 +87,34 @@ stale routing after acknowledged eviction, foreign landing outside the holder
 union, acknowledged eviction without effect, unavailable cache observations,
 and duplicate/unobserved holder expectations. These model runs are not Java,
 Master cache-index version proof, or permission to remove old callables.
+
+
+## Affinity checkpoint: three of four contracts
+
+`cache_affinity` currently maps prefix stickiness, hot-prefix tension and mixed
+hit tiers (four variants, twelve profile instances). The supplemental
+`kv_leader_saturation_spill` finding is still pending, so this family is partial.
+
+All three use the original smoke environment (2P/4D, default cache/performance),
+15s serial waits and fixed2s post-seed cache sync. They do not replace that fixed
+wait with the3.5s observed-quiet contract used by eviction cases.
+
+| Old contract | Explicit retained program and predicates |
+| --- | --- |
+| prefix_stickiness | A8keys/input8192 first seed with2000ms/1.5s/pending6s; distinct B8keys before first drain30s; restore100ms, sync2s, distinct gate; thirty serial requests in3:2 order (18 same-family,12 unique free); P9 .95/.90/.80 and free P2 at least2 workers, complete cohorts P6 |
+| hot_prefix_tension | One16key/input16384 seed, sync2s, forty serial requests in7:3 order (28 same-family,12 unique free); P9 .95/.90/.80; M2 .88/.93/.96 with seed+all40 requests as the41-record denominator; P2 at least1 free request off-holder; P6 complete cohorts |
+| match_mixed | Full8key/input8192 seed and sync2s then10 full continuations; half4key/input4096 seed and sync2s then10 input8192 requests with the same4-prefix plus4 unique suffix keys each; finally10 completely unique8key requests; full/half M3 .8/.7/.6 and zero-hit P2 at least2 workers with P6 complete cohorts |
+
+Fresh keys are explicit disjoint per-instance namespaces. They preserve key
+counts, prefix overlap and uniqueness; their numeric values are not generated
+from wire request IDs. No latency-benefit verdict or cache-key-count verdict is
+added: those were observational in the legacy cases. Holder names still derive
+from actual landing addresses. M2 uses the original request-share denominator;
+token share is equal only because every included request has the same input_len.
+
+Existing mandatory terminal-evidence/deadline differences apply. Legacy
+best-effort shared-environment restoration is replaced by owned instance
+teardown. Three tests execute all twelve compiled programs with the cache model,
+lock the3:2 interleave, unique half-hit suffixes and seed-inclusive denominator,
+and demonstrate lost affinity and holder overconcentration FAIL. They are local
+model fixtures, not real Java acceptance or completion of the fourth contract.

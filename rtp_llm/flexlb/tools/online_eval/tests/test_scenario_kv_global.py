@@ -79,6 +79,18 @@ class CacheModel:
     def master_info(self, *args, **kwargs):
         return 200, dict(worker_summary=dict(PREFILL=dict(alive=len(self.keys))))
 
+    def select(self, wanted):
+        def score(name):
+            recently_issued = self.clock() - self.last.get(name, -100) < 2
+            return (
+                int(recently_issued),
+                -len(wanted & self.keys[name]),
+                self.issued[name],
+                name,
+            )
+
+        return min(self.keys, key=score)
+
     def start_requests(self, ctx, params, deadline):
         records = ClientRecords(ctx.env_epoch)
         records.rows = []
@@ -86,16 +98,7 @@ class CacheModel:
             self.rid += 1
             wanted = set(params["block_keys"])
 
-            def score(name):
-                recently_issued = self.clock() - self.last.get(name, -100) < 2
-                return (
-                    int(recently_issued),
-                    -len(wanted & self.keys[name]),
-                    self.issued[name],
-                    name,
-                )
-
-            name = min(self.keys, key=score)
+            name = self.select(wanted)
             if self.collapse and self.evictions >= 2:
                 name = sorted(self.keys)[0]
             self.keys[name].update(wanted)

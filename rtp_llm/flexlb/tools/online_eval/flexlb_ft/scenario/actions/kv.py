@@ -291,7 +291,7 @@ def prefix(ctx, params, deadline):
     )
 
 
-def _affinity_validate(params, plan):
+def _affinity_validate(params, plan, upper=False):
     p = _fields(
         params,
         {"requests", "holder", "min_samples", "bands"},
@@ -312,7 +312,11 @@ def _affinity_validate(params, plan):
             type(v) not in (int, float) or not math.isfinite(v) or not 0 <= v <= 1
             for v in bands.values()
         )
-        or not bands["strict"] >= bands["normal"] >= bands["loose"]
+        or not (
+            bands["strict"] <= bands["normal"] <= bands["loose"]
+            if upper
+            else bands["strict"] >= bands["normal"] >= bands["loose"]
+        )
     ):
         raise ValueError("affinity requires ordered explicit concentration bands")
     return p
@@ -326,7 +330,12 @@ def affinity(ctx, params, deadline, property_id="M3"):
     ]
     if not rows or len({row["wire_request_id"] for row in rows}) != len(rows):
         raise ValueError("affinity cohort empty or duplicated")
-    if any(row.get("consumer_completion_verified") is not True for row in rows):
+    if any(
+        row.get("consumer_completion_verified") is not True
+        or not isinstance(row.get("prefill_addr"), str)
+        or not row["prefill_addr"]
+        for row in rows
+    ):
         raise ValueError("affinity cohort lacks consumer exit evidence")
     name = _target(ctx, params["holder"])
     holder = _engines(_http(ctx.ops, "snapshot", deadline), [name])[name]
@@ -370,6 +379,80 @@ def affinity(ctx, params, deadline, property_id="M3"):
 
 def fidelity(ctx, params, deadline):
     return affinity(ctx, params, deadline, property_id="P9")
+
+
+def _holder_share_validate(params, plan):
+    return _affinity_validate(params, plan, upper=True)
+
+
+def holder_share(ctx, params, deadline):
+    return affinity(ctx, params, deadline, property_id="M2")
+
+
+def _off_holder_validate(params, plan):
+    p = _fields(
+        params,
+        {"requests", "holder", "min_samples"},
+        {"requests", "holder", "min_samples"},
+    )
+    # Reuse the same cohort/holder/sample contract; this action has no graded band.
+    validated = _affinity_validate(
+        dict(p, bands=dict(strict=0, normal=0, loose=0)), plan
+    )
+    validated.pop("bands")
+    return validated
+
+
+def off_holder(ctx, params, deadline):
+    rows = [
+        row
+        for ref in params["requests"]
+        for row in ctx.resource(ref, "requests").snapshot_records()
+    ]
+    if (
+        not rows
+        or len({row["wire_request_id"] for row in rows}) != len(rows)
+        or any(
+            row.get("consumer_completion_verified") is not True
+            or not isinstance(row.get("prefill_addr"), str)
+            or not row["prefill_addr"]
+            for row in rows
+        )
+    ):
+        raise ValueError("off-holder cohort lacks distinct terminal landing evidence")
+    name = _target(ctx, params["holder"])
+    engine = _engines(_http(ctx.ops, "snapshot", deadline), [name])[name]
+    count = sum(row["prefill_addr"] != engine["grpc_addr"] for row in rows)
+    complete = len(rows) >= params["min_samples"] and all(
+        request_success(row) for row in rows
+    )
+    evidence = dict(
+        complete=True,
+        sample_count=len(rows),
+        min_samples=params["min_samples"],
+        records=rows,
+        holder=engine,
+    )
+    return StageOutput(
+        {"count": count},
+        [
+            CheckResult(
+                "P2",
+                "PASS" if complete and count >= 1 else "FAIL",
+                actual=count,
+                expected="at least one off-holder landing",
+                evidence=evidence,
+            ),
+            CheckResult(
+                "P6",
+                "PASS" if complete else "FAIL",
+                actual=complete,
+                expected=True,
+                evidence=evidence,
+            ),
+        ],
+        [_artifact(ctx, "kv-off-holder", evidence)],
+    )
 
 
 def _spread_validate(params, plan):
@@ -596,7 +679,8 @@ def union(ctx, params, deadline):
         or len({row["wire_request_id"] for row in rows}) != len(rows)
         or any(
             row.get("consumer_completion_verified") is not True
-            or not row.get("prefill_addr")
+            or not isinstance(row.get("prefill_addr"), str)
+            or not row["prefill_addr"]
             for row in rows
         )
     ):
@@ -691,6 +775,20 @@ def master_alive(ctx, params, deadline):
 
 
 HANDLERS = [
+    StageHandler(
+        "kv_holder_share_check",
+        _holder_share_validate,
+        holder_share,
+        {"share": "number"},
+        checks=frozenset({"P6", "M2"}),
+    ),
+    StageHandler(
+        "kv_off_holder_check",
+        _off_holder_validate,
+        off_holder,
+        {"count": "integer"},
+        checks=frozenset({"P2", "P6"}),
+    ),
     StageHandler(
         "kv_holders_check",
         _holders_validate,
