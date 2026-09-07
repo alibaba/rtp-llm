@@ -105,6 +105,7 @@ struct ParallelismConfig {
 };
 
 // Returns the effective cache CP geometry as {cp_rank, cp_size}.
+// Resolve local cache sharding only; decode reads peer geometry from prefill_cp_size.
 std::pair<int, int> resolveCacheCpRankAndSize(const ParallelismConfig& parallelism_config);
 
 struct ConcurrencyConfig {

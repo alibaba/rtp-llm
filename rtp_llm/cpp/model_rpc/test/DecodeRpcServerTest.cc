@@ -6,6 +6,7 @@
 #include "rtp_llm/cpp/model_rpc/DecodeRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
+#include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/cpp/testing/TestLogCapture.h"
 
 namespace rtp_llm {
@@ -573,6 +574,47 @@ TEST(DecodeRpcServerTest, TaggedBlockRowsKeepRoundRobinFullTableInGlobalSlots) {
 
     row->add_block_ids(3);
     EXPECT_TRUE(DecodeRpcServer::decodeGroupBlockIds(request, config, decoded).ok());
+}
+
+TEST(DecodeRpcServerTest, DecodeTpOneAllocatesFullRowsForPrefillCpTwo) {
+    auto group                      = makeSizedRpcGroup("full");
+    group.policy.explicit_block_num = 16;
+    CacheConfig config({group}, {{"full"}}, 1);
+    config.seq_size_per_block = 8;
+    ParallelismConfig parallelism;
+    parallelism.role_type                          = RoleType::DECODE;
+    parallelism.prefill_cp_config.method           = CPRotateMethod::PREFILL_CP;
+    parallelism.prefill_cp_config.kv_cache_sharded = true;
+    parallelism.prefill_cp_config.prefill_cp_size  = 2;
+    auto manager =
+        std::make_shared<KVCacheManager>(std::move(config), /*warmup=*/true, nullptr, KVCacheConfig{}, parallelism);
+    ASSERT_TRUE(manager->init());
+    EXPECT_EQ(manager->cpSlotMapper(), nullptr);
+
+    auto resource = std::make_shared<BatchKVCacheResource>();
+    resource->resetBatchSize(1);
+    resource->initGroups(manager->cacheConfig());
+    auto input             = std::make_shared<GenerateInput>();
+    input->input_ids       = torch::arange(64, torch::kInt32);
+    input->generate_config = std::make_shared<GenerateConfig>();
+    auto tokens            = std::make_shared<CompleteTokenIds>(1, 1, 80, 8);
+    tokens->init(input);
+    MallocInfo info{resource, tokens};
+    info.enable_device_cache = false;
+    ASSERT_TRUE(manager->malloc(info).success);
+    EXPECT_EQ(resource->blocksNum(0, "full"), 8);
+
+    DecodeRpcServer                 server;
+    const std::vector<CacheKeyType> keys{101, 102, 103, 104, 105, 106, 107, 108};
+    const std::vector<std::string>  peers{"prefill0", "prefill1"};
+    const auto                      context = makeLoadContext("decode-cp", peers, keys, resource->blocksByGroup(0), 2);
+    const auto                      request = server.constructRemoteLoadRequest(context, 0, context.peer_addrs);
+    EXPECT_EQ(request.prefill_cp_size(), 2);
+    std::map<std::string, BlockIds> decoded;
+    EXPECT_TRUE(DecodeRpcServer::decodeGroupBlockIds(request, manager->cacheConfig(), decoded).ok());
+    ASSERT_EQ(decoded.size(), 1u);
+    EXPECT_EQ(decoded.at("full").blocks(), resource->blocks(0, "full"));
+    manager->free(FreeInfo{resource, tokens});
 }
 
 TEST(DecodeRpcServerTest, EmptyTaggedBlockRowsAreRejected) {

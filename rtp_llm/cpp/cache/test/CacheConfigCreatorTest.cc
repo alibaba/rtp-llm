@@ -429,7 +429,7 @@ TEST(CacheConfigCreatorTest, SpecBuilderDerivesPhysicalSpanFromCpMapping) {
     EXPECT_EQ(inactive_compact->kernel_seq_size_per_block, 64u);
 }
 
-TEST(CacheConfigCreatorTest, ResolveCacheCpRankAndSizeUsesOneRoleAwareGeometry) {
+TEST(CacheConfigCreatorTest, ResolveCacheCpRankAndSizeUsesLocalGeometry) {
     ParallelismConfig config;
     config.tp_rank = 2;
     config.tp_size = 4;
@@ -448,10 +448,38 @@ TEST(CacheConfigCreatorTest, ResolveCacheCpRankAndSizeUsesOneRoleAwareGeometry) 
 
     config.prefill_cp_config.method          = CPRotateMethod::PREFILL_CP;
     config.prefill_cp_config.prefill_cp_size = 2;
-    EXPECT_EQ(resolveCacheCpRankAndSize(config), std::make_pair(1, 2));
+    EXPECT_EQ(resolveCacheCpRankAndSize(config), std::make_pair(2, 4));
 
+    config.tp_rank = 0;
+    config.tp_size = 1;
+    EXPECT_EQ(resolveCacheCpRankAndSize(config), std::make_pair(0, 1));
     config.prefill_cp_config.prefill_cp_size = 1;
-    EXPECT_THROW(resolveCacheCpRankAndSize(config), std::invalid_argument);
+    EXPECT_EQ(resolveCacheCpRankAndSize(config), std::make_pair(0, 1));
+}
+
+TEST(CacheConfigCreatorTest, DecodeCompactSpecUsesPrefillGeometryWithoutLocalSharding) {
+    auto              model_config = makeMhaModel(/*layer_num=*/1);
+    ParallelismConfig parallelism_config;
+    parallelism_config.role_type                          = RoleType::DECODE;
+    parallelism_config.prefill_cp_config.kv_cache_sharded = true;
+    parallelism_config.prefill_cp_config.method           = CPRotateMethod::PREFILL_CP;
+    parallelism_config.prefill_cp_config.prefill_cp_size  = 2;
+
+    SpecBuildContext ctx;
+    ctx.dtype                     = DataType::TYPE_FP16;
+    ctx.seq_size_per_block        = 128;
+    ctx.kernel_seq_size_per_block = 64;
+    ctx.attn_config               = &model_config.attn_config;
+    ctx.parallelism_config        = &parallelism_config;
+    auto desc                     = model_config.kv_cache_spec_descs[0][0];
+    EXPECT_EQ(SpecBuilder::build(desc, ctx).spec->seq_size_per_block, 128u);
+    desc.cp          = CacheCpPolicyDesc{};
+    desc.cp->mapping = CpBlockMappingMode::COMPACT_LAST_RANK;
+    EXPECT_EQ(SpecBuilder::build(desc, ctx).spec->seq_size_per_block, 256u);
+    EXPECT_EQ(resolveCacheCpRankAndSize(parallelism_config), std::make_pair(0, 1));
+
+    parallelism_config.prefill_cp_config.prefill_cp_size = 0;
+    EXPECT_THROW(SpecBuilder::build(desc, ctx), std::exception);
 }
 
 TEST(CacheConfigCreatorTest, SpecFingerprintIncludesKernelGeometry) {

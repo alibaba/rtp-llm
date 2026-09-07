@@ -23,8 +23,8 @@ inline bool isNullBlockIdx(BlockIdxType block_idx) {
     return block_idx == NULL_BLOCK_IDX;
 }
 
-// Legacy block tables and wire records use block 0 as their missing/default
-// value. Keep NULL_BLOCK_IDX internal to request-owned sparse metadata.
+// Legacy kernel block tables use block 0 as their missing/default value.
+// Connector wire records preserve NULL_BLOCK_IDX and must not use this projection.
 inline BlockIdxType toLegacyBlockIdx(BlockIdxType block_idx) {
     RTP_LLM_CHECK_WITH_INFO(block_idx >= NULL_BLOCK_IDX, "invalid internal block id=%d", block_idx);
     return isNullBlockIdx(block_idx) ? 0 : block_idx;

@@ -1512,7 +1512,7 @@ KVCacheMemoryConnector::sendCopyPlan(const std::shared_ptr<CopyPlan>& copy_plan)
                                                                             MemoryOperationRequestPB::D2H);
     for (const auto& copy_info : copy_plan->copy_infos) {
         auto* item = mem_req.add_copy_items();
-        item->set_mem_block(toLegacyBlockIdx(copy_info.mem_block));
+        item->set_mem_block(copy_info.mem_block);
         if (!isNullBlockIdx(copy_info.src_mem_block)) {
             item->set_src_mem_block(copy_info.src_mem_block);
         }
@@ -1554,7 +1554,7 @@ KVCacheMemoryConnector::sendCopyPlan(const std::shared_ptr<CopyPlan>& copy_plan)
             auto* tagged_block = item->add_tagged_gpu_blocks();
             tagged_block->set_layer_id(tagged.layer_id);
             tagged_block->set_tag(tagged.tag);
-            tagged_block->set_block_id(toLegacyBlockIdx(tagged.pool_block_id));
+            tagged_block->set_block_id(tagged.pool_block_id);
         }
         for (const auto valid : copy_info.slot_valid_mask) {
             item->add_slot_valid_mask(valid);
@@ -1693,11 +1693,7 @@ KVCacheMemoryConnector::normalizeCopyItemGpuBlocks(const MemoryOperationRequestP
     std::map<std::pair<int, std::string>, BlockIdxType> tagged_blocks;
     for (const auto& tagged_block : item.tagged_gpu_blocks()) {
         const auto key = std::make_pair(static_cast<int>(tagged_block.layer_id()), tagged_block.tag());
-        RTP_LLM_CHECK_WITH_INFO(tagged_block.block_id() >= 0,
-                                "memory copy wire block id must be nonnegative, got %d",
-                                tagged_block.block_id());
-        const auto block_id = tagged_block.block_id() == 0 ? NULL_BLOCK_IDX : tagged_block.block_id();
-        RTP_LLM_CHECK_WITH_INFO(tagged_blocks.emplace(key, block_id).second,
+        RTP_LLM_CHECK_WITH_INFO(tagged_blocks.emplace(key, tagged_block.block_id()).second,
                                 "duplicate memory copy block for layer=%d tag=%s",
                                 tagged_block.layer_id(),
                                 tagged_block.tag().c_str());
@@ -1723,8 +1719,7 @@ KVCacheMemoryConnector::NormalizedCopyItem
 KVCacheMemoryConnector::normalizeCopyItem(const MemoryOperationRequestPB::CopyItem& item,
                                           const std::vector<LayerTagSlot>&          slots) {
     NormalizedCopyItem normalized;
-    RTP_LLM_CHECK_WITH_INFO(item.mem_block() >= 0, "memory copy wire mem block must be nonnegative");
-    normalized.mem_block         = item.mem_block() == 0 ? NULL_BLOCK_IDX : static_cast<BlockIdxType>(item.mem_block());
+    normalized.mem_block         = static_cast<BlockIdxType>(item.mem_block());
     normalized.tagged_gpu_blocks = normalizeCopyItemGpuBlocks(item, slots);
     normalized.is_complete       = copyItemIsComplete(item);
     normalized.layer_kind        = item.cache_block_kind() == MemoryOperationRequestPB::COMPLETE_KV
@@ -1762,7 +1757,7 @@ bool KVCacheMemoryConnector::validateCopyItemBacking(const MemoryOperationReques
             return false;
         }
     } else if (item.backing_type() == MemoryOperationRequestPB::DISK) {
-        if (item.mem_block() > 0) {
+        if (!isNullBlockIdx(static_cast<BlockIdxType>(item.mem_block()))) {
             RTP_LLM_LOG_WARNING("disk copy item has non-null mem_block=%d", item.mem_block());
             return false;
         }
@@ -3379,7 +3374,18 @@ void KVCacheMemoryConnector::reportDiskWriteMetrics(bool    success,
 }
 
 int KVCacheMemoryConnector::connectorCpSize() const {
-    return resolveCacheCpRankAndSize(parallelism_config_).second;
+    const auto& cp_cfg = parallelism_config_.prefill_cp_config;
+    if (!cp_cfg.kv_cache_sharded) {
+        return 1;
+    }
+    if (parallelism_config_.tp_size > 1) {
+        return static_cast<int>(parallelism_config_.tp_size);
+    }
+    if (parallelism_config_.role_type == RoleType::DECODE && cp_cfg.is_prefill_enabled()
+        && cp_cfg.prefill_cp_size > 1) {
+        return static_cast<int>(cp_cfg.prefill_cp_size);
+    }
+    return 1;
 }
 
 size_t KVCacheMemoryConnector::connectorEntryCount(const KVCacheResource& resource, size_t global_key_blocks) const {

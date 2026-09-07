@@ -16,6 +16,7 @@
 #include "rtp_llm/cpp/cache/SharedBlockCache.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnectorCoordinator.h"
 #include "rtp_llm/cpp/cache/KVCacheHashUtil.h"
+#include "rtp_llm/cpp/cache/KVCacheSpecDesc.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -183,16 +184,19 @@ void KVCacheManager::initialize(bool warmup) {
     }
 
     const auto [cp_rank, cp_size] = resolveCacheCpRankAndSize(parallelism_config_);
+    SpecBuildContext spec_context;
+    spec_context.parallelism_config = &parallelism_config_;
+    const auto layout_cp_size       = effectiveCacheCpSize(spec_context);
     for (const auto& group : config_.groups()) {
         if (group.policy.cp_mapping != CpBlockMappingMode::COMPACT_LAST_RANK) {
             continue;
         }
-        RTP_LLM_CHECK_WITH_INFO(group.seqSizePerBlock() == config_.seq_size_per_block * cp_size,
+        RTP_LLM_CHECK_WITH_INFO(group.seqSizePerBlock() == config_.seq_size_per_block * layout_cp_size,
                                 "compact cache CP geometry mismatch: tag=%s physical_span=%zu base_span=%zu cp_size=%d",
                                 group.tag.c_str(),
                                 group.seqSizePerBlock(),
                                 config_.seq_size_per_block,
-                                cp_size);
+                                layout_cp_size);
     }
     if (cp_size > 1) {
         cp_slot_mapper_ =

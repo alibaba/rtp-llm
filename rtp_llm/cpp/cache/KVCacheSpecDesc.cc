@@ -11,7 +11,15 @@ uint32_t effectiveCacheCpSize(const SpecBuildContext& ctx) {
     if (ctx.parallelism_config == nullptr) {
         return 1;
     }
-    return static_cast<uint32_t>(resolveCacheCpRankAndSize(*ctx.parallelism_config).second);
+    const auto& parallelism_config = *ctx.parallelism_config;
+    const auto& cp_config          = parallelism_config.prefill_cp_config;
+    if (cp_config.kv_cache_sharded && parallelism_config.role_type == RoleType::DECODE
+        && cp_config.is_prefill_enabled()) {
+        RTP_LLM_CHECK_WITH_INFO(cp_config.prefill_cp_size > 1,
+                                "decode PREFILL_CP cache layout requires explicit PREFILL_CP_SIZE");
+        return static_cast<uint32_t>(cp_config.prefill_cp_size);
+    }
+    return static_cast<uint32_t>(resolveCacheCpRankAndSize(parallelism_config).second);
 }
 
 namespace {

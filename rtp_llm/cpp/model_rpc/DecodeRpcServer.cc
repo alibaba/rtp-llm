@@ -266,8 +266,15 @@ void DecodeRpcServer::prepareGenerateContext(DecodeGenerateContext& decode_conte
     for (auto& addr : allocate_request.peer_addrs()) {
         decode_context.peer_addrs.push_back(addr);
     }
-    decode_context.prefill_cp_size =
-        static_cast<int32_t>(resolveCacheCpRankAndSize(maga_init_params_.parallelism_config).second);
+    if (maga_init_params_.parallelism_config.prefill_cp_config.kv_cache_sharded
+        && maga_init_params_.parallelism_config.prefill_cp_config.is_prefill_enabled()) {
+        const auto configured_prefill_cp_size = maga_init_params_.parallelism_config.prefill_cp_config.prefill_cp_size;
+        RTP_LLM_CHECK_WITH_INFO(configured_prefill_cp_size > 1,
+                                "decode PREFILL_CP sharded mode requires explicit PREFILL_CP_SIZE");
+        decode_context.prefill_cp_size = static_cast<int32_t>(configured_prefill_cp_size);
+    } else {
+        decode_context.prefill_cp_size = 1;
+    }
     RTP_LLM_LOG_DEBUG("request [%s] prepare generate context done, prefill_cp_size=%d",
                       decode_context.request_key.c_str(),
                       decode_context.prefill_cp_size);

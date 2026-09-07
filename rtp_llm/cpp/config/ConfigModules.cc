@@ -15,13 +15,6 @@ std::pair<int, int> resolveCacheCpRankAndSize(const ParallelismConfig& paralleli
     if (!cp_config.kv_cache_sharded) {
         return {0, 1};
     }
-    if (parallelism_config.role_type == RoleType::DECODE && cp_config.is_prefill_enabled()) {
-        if (cp_config.prefill_cp_size <= 1) {
-            throw std::invalid_argument(
-                "decode PREFILL_CP sharded cache requires explicit prefill_cp_size greater than one");
-        }
-        return {static_cast<int>(cp_config.prefill_cp_size - 1), static_cast<int>(cp_config.prefill_cp_size)};
-    }
     if (parallelism_config.tp_size > 1) {
         return {static_cast<int>(parallelism_config.tp_rank), static_cast<int>(parallelism_config.tp_size)};
     }

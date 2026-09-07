@@ -512,7 +512,7 @@ private:
             auto* tagged_block = item.add_tagged_gpu_blocks();
             tagged_block->set_layer_id(slot.layer_id);
             tagged_block->set_tag(slot.tag);
-            tagged_block->set_block_id(toLegacyBlockIdx(blocks_by_layer[static_cast<size_t>(slot.layer_id)]));
+            tagged_block->set_block_id(blocks_by_layer[static_cast<size_t>(slot.layer_id)]);
         }
     }
 
@@ -1090,7 +1090,7 @@ TEST_F(KVCacheMemoryConnectorTest, validateCopyItemBacking_AcceptsUnsetDiskSlotF
 
     MemoryOperationRequestPB::CopyItem disk_item;
     disk_item.set_backing_type(MemoryOperationRequestPB::DISK);
-    disk_item.set_mem_block(0);
+    disk_item.set_mem_block(NULL_BLOCK_IDX);
     EXPECT_FALSE(connector_->validateCopyItemBacking(disk_item));
     disk_item.set_disk_slot(0);
     EXPECT_FALSE(connector_->validateCopyItemBacking(disk_item));
@@ -1101,6 +1101,12 @@ TEST_F(KVCacheMemoryConnectorTest, validateCopyItemBacking_AcceptsUnsetDiskSlotF
         cache_config_, kv_cfg, makeParallelismConfig(), coordinator_cache_manager_, server_addrs_, nullptr);
     ASSERT_TRUE(disk_conn->init());
     EXPECT_TRUE(disk_conn->validateCopyItemBacking(disk_item));
+
+    for (BlockIdxType block_id : {BlockIdxType{-2}, BlockIdxType{0}, BlockIdxType{1}}) {
+        disk_item.set_mem_block(block_id);
+        EXPECT_FALSE(disk_conn->validateCopyItemBacking(disk_item));
+    }
+    disk_item.set_mem_block(NULL_BLOCK_IDX);
 
     disk_item.set_src_backing_type(MemoryOperationRequestPB::DISK);
     EXPECT_FALSE(disk_conn->validateCopyItemBacking(disk_item));
@@ -3260,7 +3266,7 @@ TEST_F(KVCacheMemoryConnectorTest, copyCache_ReturnTrue_H2D_SingleLayer) {
     verifyBlockInfosContent(gpu_bufs, 'a');
 }
 
-TEST_F(KVCacheMemoryConnectorTest, copyCache_ReturnTrue_H2D_SkipsReservedZeroGpuBlock) {
+TEST_F(KVCacheMemoryConnectorTest, copyCache_ReturnTrue_H2D_PreservesLegacyBlockZeroCopy) {
     const int          layer_id      = 0;
     const BlockIdxType gpu_block_idx = 0;
     const auto         gpu_bufs      = coordinator_cache_manager_->convertIndexToBuffer(layer_id, gpu_block_idx);
@@ -3287,7 +3293,8 @@ TEST_F(KVCacheMemoryConnectorTest, copyCache_ReturnTrue_H2D_SkipsReservedZeroGpu
     MemoryOperationResponsePB response;
     ASSERT_TRUE(connector_->copyCache(request, response));
     ASSERT_TRUE(response.success());
-    verifyBlockInfosContent(gpu_bufs, 'x');
+    // An explicitly supplied reserved block is distinct from a null slot on the wire.
+    verifyBlockInfosContent(gpu_bufs, 'z');
 }
 
 // MLA FP8 online-style: separate kv + kv-scale blobs per layer (656 + 132 bytes/token at seq_size_per_block=512).

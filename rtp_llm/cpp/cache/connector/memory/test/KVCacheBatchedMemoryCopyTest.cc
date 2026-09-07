@@ -40,7 +40,7 @@ void addTaggedGpuBlocks(MemoryOperationRequestPB::CopyItem&                     
         auto* tagged_block = item.add_tagged_gpu_blocks();
         tagged_block->set_layer_id(slots[i].layer_id);
         tagged_block->set_tag(slots[i].tag);
-        tagged_block->set_block_id(toLegacyBlockIdx(block_ids[i]));
+        tagged_block->set_block_id(block_ids[i]);
     }
 }
 
@@ -123,7 +123,7 @@ TEST(KVCacheMemoryProtocolTest, NullBlockPreservesPartialGroupTagIdentity) {
     auto*                              full = item.add_tagged_gpu_blocks();
     full->set_layer_id(0);
     full->set_tag("full");
-    full->set_block_id(0);
+    full->set_block_id(NULL_BLOCK_IDX);
     auto* linear = item.add_tagged_gpu_blocks();
     linear->set_layer_id(0);
     linear->set_tag("linear");
@@ -135,6 +135,32 @@ TEST(KVCacheMemoryProtocolTest, NullBlockPreservesPartialGroupTagIdentity) {
     EXPECT_EQ(tagged_blocks[0].pool_block_id, 3);
     EXPECT_EQ(tagged_blocks[1].tag, "full");
     EXPECT_TRUE(isNullBlockIdx(tagged_blocks[1].pool_block_id));
+}
+
+TEST(KVCacheMemoryProtocolTest, WireBlockIdsPreserveNullReservedAndAllocatedBlocks) {
+    std::vector<KVCacheMemoryConnector::LayerTagSlot> slots(1);
+    slots[0].layer_id = 0;
+    slots[0].tag      = "full";
+    for (BlockIdxType block_id : {NULL_BLOCK_IDX, BlockIdxType{0}, BlockIdxType{7}}) {
+        MemoryOperationRequestPB::CopyItem item;
+        item.set_mem_block(block_id);
+        item.set_src_mem_block(block_id);
+        addTaggedGpuBlocks(item, slots, {block_id});
+
+        MemoryOperationRequestPB::CopyItem received;
+        ASSERT_TRUE(received.ParseFromString(item.SerializeAsString()));
+        const auto normalized = KVCacheMemoryConnector::normalizeCopyItem(received, slots);
+        EXPECT_EQ(normalized.mem_block, block_id);
+        ASSERT_EQ(normalized.tagged_gpu_blocks.size(), 1u);
+        EXPECT_EQ(normalized.tagged_gpu_blocks[0].pool_block_id, block_id);
+        EXPECT_TRUE(normalized.has_src_mem_block);
+        EXPECT_EQ(normalized.src_mem_block, block_id);
+
+        received.clear_src_mem_block();
+        const auto without_source = KVCacheMemoryConnector::normalizeCopyItem(received, slots);
+        EXPECT_FALSE(without_source.has_src_mem_block);
+        EXPECT_EQ(without_source.src_mem_block, NULL_BLOCK_IDX);
+    }
 }
 
 CacheConfig makeCompactDsv4TypedMemoryCopyConfig(bool use_flash) {

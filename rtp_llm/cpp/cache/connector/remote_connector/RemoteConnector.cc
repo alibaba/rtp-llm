@@ -718,7 +718,18 @@ void RemoteConnector::asyncReadTask(const std::shared_ptr<KVCacheResource>&     
 }
 
 int RemoteConnector::connectorCpSize() const {
-    return resolveCacheCpRankAndSize(init_params_->parallelism_config).second;
+    const auto& cp_cfg = init_params_->parallelism_config.prefill_cp_config;
+    if (!cp_cfg.kv_cache_sharded) {
+        return 1;
+    }
+    if (init_params_->parallelism_config.tp_size > 1) {
+        return static_cast<int>(init_params_->parallelism_config.tp_size);
+    }
+    if (init_params_->parallelism_config.role_type == RoleType::DECODE && cp_cfg.is_prefill_enabled()
+        && cp_cfg.prefill_cp_size > 1) {
+        return static_cast<int>(cp_cfg.prefill_cp_size);
+    }
+    return 1;
 }
 
 size_t RemoteConnector::connectorEntryCount(const KVCacheResource& resource, size_t global_key_blocks) const {
@@ -890,7 +901,7 @@ bool RemoteConnector::genReadRequest(size_t                                   tp
                 return false;
             }
             auto block_id = block_indices.at(block_idx);
-            remote_request->add_block_ids(toLegacyBlockIdx(block_id));
+            remote_request->add_block_ids(block_id);
             remote_request->add_uris(location_spec.uri.data());
         }
         block_idx++;
@@ -958,7 +969,7 @@ bool RemoteConnector::genWriteRequest(size_t                                  tp
                 return false;
             }
             auto block_id = block_indices.at(cache_key_idx);
-            remote_request->add_block_ids(toLegacyBlockIdx(block_id));
+            remote_request->add_block_ids(block_id);
             remote_request->add_uris(location_spec.uri);
             actual_uri_gather[spec_info.tp_rank].push_back(
                 const_cast<kv_cache_manager::LocationSpecUnit*>(&location_spec));
