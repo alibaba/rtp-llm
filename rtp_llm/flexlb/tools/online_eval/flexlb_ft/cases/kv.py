@@ -2726,7 +2726,7 @@ def _pool_state(ops, engine_name: str) -> tuple:
 
 @case(
     "kv_pool_saturation_evict_reject_recover",
-    requires=["enqueue_batch"],
+    profiles=["batch-window", "single-nonbatch", "single-batch", "window-nonbatch"],
     source="KV v2 saturation: evict wave + typed 602 + bounded failures + recovery",
 )
 def kv_pool_saturation_evict_reject_recover(ctx: CaseContext):
@@ -2885,11 +2885,18 @@ def kv_pool_saturation_evict_reject_recover(ctx: CaseContext):
         )
         probe_dur = time.monotonic() - probe_t0
         probe_text = probe_err or ""
+        # "EnqueueBatch rejected" is the master BATCH dispatcher's error
+        # wrapper; under NON_BATCH the same engine reject surfaces as a
+        # stream onError (snap.error) — the substring family is
+        # dispatcher-shared, only the prefix is batch-specific.
         probe_typed = (
             probe_err is not None
-            and "enqueuebatch rejected" in probe_text.lower()
             and "lack_mem" in probe_text.lower()
             and "insufficient kv cache" in probe_text.lower()
+            and (
+                not ctx.batch_dispatch()
+                or "enqueuebatch rejected" in probe_text.lower()
+            )
         )
         probe_fast = probe_err is not None and probe_dur < SAT_PROBE_BOUND_S
 
@@ -3011,7 +3018,7 @@ def kv_pool_saturation_evict_reject_recover(ctx: CaseContext):
 
 @case(
     "kv_decode_pool_exhaustion_terminal",
-    requires=["enqueue_batch"],
+    profiles=["batch-window", "single-nonbatch", "single-batch", "window-nonbatch"],
     source="KV v2 decode-exhaustion: D-pool reservation 602 + clean recovery",
 )
 def kv_decode_pool_exhaustion_terminal(ctx: CaseContext):
@@ -3113,11 +3120,18 @@ def kv_decode_pool_exhaustion_terminal(ctx: CaseContext):
         )
         probe_dur = time.monotonic() - t0
         probe_text = err or ""
+        # Per-dispatcher probe typing: "EnqueueBatch rejected" is the
+        # master BATCH dispatcher's wrapper; under NON_BATCH the same
+        # engine reject surfaces as a stream onError (snap.error) — only
+        # the substring family is dispatcher-shared.
         probe_typed = (
             err is not None
-            and "enqueuebatch rejected" in probe_text.lower()
             and "lack_mem" in probe_text.lower()
             and "decode-side" in probe_text.lower()
+            and (
+                not ctx.batch_dispatch()
+                or "enqueuebatch rejected" in probe_text.lower()
+            )
         )
         probe_fast = err is not None and probe_dur < DSAT_PROBE_BOUND_S
 
