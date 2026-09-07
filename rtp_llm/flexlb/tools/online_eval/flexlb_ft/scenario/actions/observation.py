@@ -373,6 +373,8 @@ class Observer:
         self.started = ctx.clock()
         self.end = self.started + params["duration_s"]
         self.stop_event = threading.Event()
+        self.done_event = threading.Event()
+        self.worker_exit_mono = None
         self.thread = None
         self.samples = []
         self.bytes = 0
@@ -417,6 +419,10 @@ class Observer:
                 )
         except Exception as error:
             self.error = f"incomplete sampling: {type(error).__name__}: {error}"
+        finally:
+            # Publish the exit record after the last possible sample/error write.
+            self.worker_exit_mono = self.ctx.clock()
+            self.done_event.set()
 
     def stop(self, deadline):
         if not self.stop_lock.acquire(timeout=deadline.remaining()):
@@ -436,6 +442,11 @@ class Observer:
         )
         self.stop_event.set()
         if self.thread is not None:
+            while not self.done_event.is_set():
+                deadline.check()
+                self.done_event.wait(min(0.05, deadline.remaining()))
+            if self.worker_exit_mono is None:
+                raise DebugUnavailable("observer completion signal has no exit record")
             self.thread.join(timeout=deadline.remaining())
             if self.thread.is_alive():
                 raise TimeoutError(
@@ -488,6 +499,9 @@ class Observer:
             window=[self.started, self.stopped_at],
             cohort_basis=self.params["cohort"],
             cohort_records=records,
+            worker_exit_mono=self.worker_exit_mono,
+            background_started=self.thread is not None,
+            background_done=self.done_event.is_set(),
             cohort_settle="not_waited",
             samples=samples,
             sample_count=len(samples),
@@ -527,9 +541,9 @@ def execute_observe(ctx, params, deadline):
             )
             checks = _coverage(params["required"], initial)
             return StageOutput(output={"observation": observer.handle}, checks=checks)
-        while observer.thread.is_alive():
+        while not observer.done_event.is_set():
             deadline.check()
-            observer.thread.join(timeout=min(0.1, deadline.remaining()))
+            observer.done_event.wait(timeout=min(0.1, deadline.remaining()))
         frozen = observer.stop(deadline)
     data = frozen.to_dict()
     if observer.artifact is None:
