@@ -4,12 +4,15 @@ FlexLB 调度器的场景测试套件：每个用例启动一小片 mock 引擎�
 
 ## 快速开始
 
-前置：JDK 21+（`JAVA_HOME` 指向它，下文命令写作 `<JDK21>`）。先用 maven 构建两个 jar（缺失时启动会直接报错指路）：
+前置清单（任一不满足时，启动会直接报错指路）：
+
+1. **JDK 21+**：解析顺序 `JAVA_HOME` → `JAVA21_HOME` → `~/java21` → homebrew（`/opt/homebrew/opt/openjdk@21`；harness 内置该顺序，任一命中即可，下文命令写作 `<JDK21>`）。
+2. **Python ≥3.8**，并安装 gRPC 工具链：`pip install grpcio grpcio-tools protobuf`（import 链在 `engine_ops.py` 模块级 import grpc，缺 `grpcio` 连 `--list` 都无法运行）。
+3. **构建两个 jar**（mock 引擎与 master，一条命令同时构建）：
 
 ```bash
 cd rtp_llm/flexlb
-JAVA_HOME=<JDK21> ./mvnw -P"opensource,!internal" -pl flexlb-mock-engine -am package -DskipTests
-JAVA_HOME=<JDK21> ./mvnw -P"opensource,!internal" -pl flexlb-api -am package -DskipTests
+JAVA_HOME=<JDK21> ./mvnw -P'opensource,!internal' -pl flexlb-mock-engine,flexlb-api -am package -Dmaven.test.skip=true
 ```
 
 产物：`flexlb-mock-engine/target/flexlb-mock-engine-1.0.0-SNAPSHOT-all.jar`（mock 引擎与 load client 共用的 all-in-one jar）与 `flexlb-api/target/flexlb-api-1.0.0-SNAPSHOT.jar`（master），即 `harness.MOCK_JAR` / `harness.API_JAR`。profile 组合的含义：`opensource` 是默认激活的 profile；`internal` 只在仓内存在 `internal_source` 目录时自动激活，`!internal` 显式关掉它，防止旁边的内网仓把依赖解析到 internal-only 构件。改动代码后可先做编译验证：`JAVA_HOME=<JDK21> ./mvnw -pl flexlb-mock-engine -am clean test-compile -P '!internal'`。
@@ -49,7 +52,7 @@ python3 flexlb_functional_tests.py --category kv --json results.json   # 单分�
 python3 flexlb_functional_tests.py --filter cancel_basic --profile single-nonbatch   # 子串过滤
 ```
 
-`--cases` 为精确 case 名逗号列表，仍受 `--profile` 过滤，未知名报错退出（rc=2）。其余 runner 参数（`--run-root` 等）见其 `--help`；全集 **136 例**（9 分类），`--list` 按当前 profile 过滤，默认 batch-window 下 116 例（priority 14 例仅 single-nonbatch、1 例仅 NON_BATCH 投递形态适用；新增的 4 例抢占 live/分支 case 在 single-batch / single-nonbatch 形态下），用例间环境按需复用 / 重建。
+`--cases` 为精确 case 名逗号列表，仍受 `--profile` 过滤，未知名报错退出（rc=2）。其余 runner 参数（`--run-root` 等）见其 `--help`；全集 **137 例**（9 分类），`--list` 按当前 profile 过滤，默认 batch-window 下 117 例（含 5 个 expected-fail 探针：status 家族 4 个、kv 家族 1 个）；不进 batch-window 形态的 20 例 = priority 18 例（15 例固定 single-nonbatch、3 例固定 single-batch——含 4 例抢占 live/分支 case；priority 家族仅 `prio_normalize` 全 profile）+ `admission_placement_pool_wait`（固定 single-nonbatch）+ `cancel_stream_break_decode_autonomous`（仅 NON_BATCH 投递），用例间环境按需复用 / 重建。
 
 `--profile` / `--grade` 的取值语义（两个入口通用）：
 
@@ -60,7 +63,7 @@ python3 flexlb_functional_tests.py --filter cancel_basic --profile single-nonbat
 
 ## 并行编排与耗时基线
 
-串行全量 103 例约 35–55 分钟，瓶颈是各 case 的等待窗口（batch drain / TTL / 收敛）而非 CPU。默认的 `--shard case` 把每个 case 按实测耗时逐例 LPT 摊到 N 路（status 24 例不再独占一路，wall 跟随均衡总和而非最重家族）；每条 lane 是一个独立 runner 子进程树，端口与 run 目录显式分段，互不相碰。
+串行全量的瓶颈是各 case 的等待窗口（batch drain / TTL / 收敛）而非 CPU——早期规模（约 100 例）实测约 35–55 分钟，套件现注册 137 例，串行耗时随规模增长（快照口径见下方实测块）。默认的 `--shard case` 把每个 case 按实测耗时逐例 LPT 摊到 N 路（status 24 例不再独占一路，wall 跟随均衡总和而非最重家族）；每条 lane 是一个独立 runner 子进程树，端口与 run 目录显式分段，互不相碰。parallel_runner 为**单机 lane 并行**（端口分段隔离），不支持多机分发。
 
 **耗时基线自维护**：每轮跑完（任何分片模式、任何子集），编排器把逐例 `duration_ms` **合并**写入共享基线 `/tmp/flexlb_ft_timing_baseline.json`（原子写；合并语义——定向子集 run 只刷新它跑过的 case，不破坏全量基线；env `FLEXLB_FT_TIMING_BASELINE` 改址，多操作员共享一台机时可各用各的）。case 分片未显式传 `--timing-json` 时自动读该文件：首轮不存在则均匀切分（正常态，无告警）；个别 case 无记录退化为该家族单例权重（stderr 警告）。显式 `--timing-json` 仍可覆盖（缺失/不可读 → 均匀切分 + 警告）。
 
@@ -68,24 +71,24 @@ python3 flexlb_functional_tests.py --filter cancel_basic --profile single-nonbat
 
 | 段 | 区间 | 说明 |
 | --- | --- | --- |
-| master 组 | `18080+10i .. 18080+10i+5` | http/mgmt/grpc = +0/+1/+2（单 master 与 HA Tier-1 A 二选一路径共用组首）；HA Tier-1 B = +3..+5 |
+| master 组 | `18080+10i .. 18080+10i+5` | http/mgmt/grpc = +0/+1/+2（单 master、HA Tier-1 A、Tier-3 三选一路径共用组首）；HA Tier-1 B = +3..+5 |
 | mock 窗口 | `55151+S*i .. +151` | 显式 `FLEXLB_FT_MOCK_BASE_GRPC_PORT`，消除并发自动扫描的 bind TOCTOU；实测占用宽度恒为 153 口（http=base-1、engines=base..base+n-1、victim zone=base+149..151） |
 
 - `--parallel` 上限由 mock stride 推导：`base+stride*(N-1)+151 ≤ 65535`（默认 stride 2000 → 6 路；`--mock-stride 500` → 21 路上限，容器实测承载 4–8；stride 下限 153 = 窗口宽度，代码内校验）。
-- 同机与他人共用且对方占用默认段时，用 `FLEXLB_FT_PARALLEL_MASTER_BASE` / `FLEXLB_FT_PARALLEL_MOCK_BASE` 整体平移（stride 不变，lane 间仍互斥）。
+- 同机与他人共用且对方占用默认段时，用 `FLEXLB_FT_PARALLEL_MASTER_BASE`（master 端口基址，默认 18080）/ `FLEXLB_FT_PARALLEL_MOCK_BASE`（mock 端口基址）整体平移——如 `FLEXLB_FT_PARALLEL_MASTER_BASE=18300` 把 master 组从 18080 段挪开（stride 不变，lane 间仍互斥）。
 - 其余 env（如 `FLEXLB_FT_HA_DUAL_MASTER=1`）原样透传给每条 lane；HA 分组与 mock 段已按 lane 同步分段，无需手工干预。
 
 聚合 `--json` 保持单 runner schema（summary + cases[]），另加：`cases[].lane`、`lanes[]`（各路 category 集合 / exit_codes / wall_s）、`summary.parallel / wall_time_s / serial_case_time_s`（最后一项为逐例耗时之和，是串行 wall 的下界，报告加速比时对标实测串行 35–55 分钟而非它）；case 级分片另记 `summary.shard`（category|case）与 `lanes[].case_names`（各路精确 case 名单，分片矩阵是 run 记录的一部分）。退出码 = 任一 lane runner 非零或存在 FAIL。`--parallel 1` 单 lane 跑全量（case 模式为一次 `--cases` 全列表调用，category 模式走 `--category all` 单进程路径），与直接串行等价，可作编排无回归的冒烟基线。
 
-实测参考（110 开发机容器，batch-window profile，共享负载）：串行单进程 wall 4918s（98 例快照）；category 级 4 路 wall 2444s（2.01x）——wall 被最重家族钳制（status 24 例实测 2104s，占串行 43%）；case 级 6 路 wall 941s（5.22x，15.7 分钟，最重路 16 例），8 路（`--mock-stride 500`，mock base 平移避开他人占用段）wall 703s（6.99x，11.7 分钟）——逐例摊平后钳制消除。等价性口径：并行 run 对串行基线逐例对照 + FINDING 集一致；实测 6 路 89/98 一致、9 例翻转全部单向好转（对翻转例同 jar 同 env 定向复跑两轮结果稳定，属快照漂移而非编排回归）；8 路对 6 路 FINDING 集完全相等。
+实测参考（110 开发机容器——参考环境为 256 核共享 Linux 容器，数字随环境与负载变化；batch-window profile，共享负载）：串行单进程 wall 4918s（98 例快照——计时快照取自套件早期规模，现注册 137 例，串行耗时随套件规模增长，相对加速比仍具参考性）；category 级 4 路 wall 2444s（2.01x）——wall 被最重家族钳制（status 24 例实测 2104s，占串行 43%）；case 级 6 路 wall 941s（5.22x，15.7 分钟，最重路 16 例），8 路（`--mock-stride 500`，mock base 平移避开他人占用段）wall 703s（6.99x，11.7 分钟）——逐例摊平后钳制消除。等价性口径：并行 run 对串行基线逐例对照 + FINDING 集一致；实测 6 路 89/98 一致、9 例翻转全部单向好转（对翻转例同 jar 同 env 定向复跑两轮结果稳定，属快照漂移而非编排回归）；8 路对 6 路 FINDING 集完全相等。
 
 **proto 缓存隔离（同机多线并行必读）**：harness 首次用到 proto 时会把 `rtp_llm/cpp/model_rpc/proto` 下的 `.proto` 编译到共享缓存目录（默认 `$TMPDIR/flexlb_eval_proto`，env `FLEXLB_EVAL_PROTO_OUT` 改址）。同一台机上另一条测试线（另一份仓或另一会话）几乎同时启动时，两条线会互相覆盖对方的编译产物，典型症状是大面积 `AttributeError: module 'model_rpc_service_pb2' has no attribute 'GenerateConfigPB'` 连坐——这不是套件坏了，是缓存目录撞了。解法：每条线各自设独立的 `FLEXLB_EVAL_PROTO_OUT` 目录。
 
-## 测试分类（136 例）
+## 测试分类（137 例）
 
 断言一律写**正确契约**而非当前实现——跑挂即 finding。表内「期望」为一句话摘要，完整断言与构造细节以各用例 docstring 为准。
 
-### cancel（13 例 · 全 profile）
+### cancel（19 例 · 10 例全 profile、8 例仅 BATCH 投递、1 例仅 NON_BATCH 投递）
 
 客户端取消的全生命周期契约：流终止、引擎侧释放、master 账目排空——幂等、跨投递边界（master 持有 vs 已投引擎）、覆盖 prefill / decode 各相位。
 
@@ -104,6 +107,12 @@ python3 flexlb_functional_tests.py --filter cancel_basic --profile single-nonbat
 | `cancel_preemption_victim` | PRIORITY 排序下高优先级（priority=70）请求驱逐正在运行的低优先级（priority=30）请求 | 受害者以抢占错误码 8429 终态结算；系统继续运行 |
 | `cancel_stream_break_prefill_autonomous` | 客户端直接断流（不发 Cancel），prefill 引擎侧自主清理（仅 BATCH 投递） | 引擎感知断流并清理自身状态；账目无残渣 |
 | `cancel_stream_break_decode_autonomous` | 客户端直接断流，decode 侧自主提前终态（仅 NON_BATCH 投递） | decode 不等 stale-inflight TTL、主动上报终态；账目无残渣 |
+| `cancel_engine_restarted_tombstoned_settle` | R1 已进 decode 时原 prefill 真崩溃（内存擦除+端口杀）并重启，master 的 Cancel 到达从未见过该 rid 的新实例（仅 BATCH 投递） | 三分支契约答 TOMBSTONED 并装 ABSENT_FENCE 墓碑；resumeTombstoned 立即结清 slot（客户端 5s 内 typed cancelled，不走 95s TTL 兑底）；引擎 Cancel RPC 计数 ≥1；墓碑以 typed 8429 拒绝同 rid 迟到直投；孤儿 decode 有界完成、inflight 无泄漏；后续请求正常 |
+| `cancel_prefill_dead_await_terminal` | 先停 prefill（gRPC 端口关、内存保留）再发 Cancel，Cancel RPC 传输层失败（仅 BATCH 投递） | fence 停 awaitAuthoritativeTerminal（一次性、无重试、无定时器）；客户端结果有界——decode 终局窗口内流结束（typed cancelled 或 completed 均正确）；slot 经 decode WorkerStatus 终局结清；master 账本排空；引擎 inflight 0；prefill 恢复后后续请求正常 |
+| `cancel_decode_retire_closes_fence` | prefill 先停使客户端 cancel 传输层失败停等，decode 引擎也在 R1 完成前停止（仅 BATCH 投递） | master 健康轮询 3-strike 退役 decode generation，reduceDecodeGenerationRetired 成为未决 fence 的生产关闭路径：slot 在退役窗口内结清（3-strike 驱逐 ≤30s + 退役处理）、客户端收到 typed cancelled；master 账本排空；引擎（重启后内存保留）inflight 0 无泄漏；拓扑恢复后后续请求正常 |
+| `cancel_fencing_lost_on_engine_restart` | 两阶段：阶段一墓碑拒绝 8429（对照）；阶段二 prefill 二次崩溃重启，墓碑仅存引擎内存，同一迟到直投被新实例接受（仅 BATCH 投递；文档化设计权衡：引擎侧 fence 无持久化） | 阶段一 8429 拒绝；二次重启后同一探针被接受（≥1 成功、无 8429）；master 账本不复活已结清 rid；孤儿计算有界、inflight 0；后续请求完成 |
+| `cancel_transport_failure_one_shot` | prefill 装 cancel_no_respond：Cancel RPC 只计数并挂起，先于引擎取消状态机（仅 BATCH 投递） | 引擎侧 Cancel RPC 到达计数恰好 1（结清窗口后复采样，隐藏重试会暴露）；请求经 decode 腿权威终局结清；master 账本排空、无泄漏；注入清除后后续请求正常 |
+| `cancel_unexpected_status_await_terminal` | prefill 装 cancel_unexpected_status：Cancel RPC「成功」但答契约外状态 UNSPECIFIED（仅 BATCH 投递） | master 既不误读为成功、也不因 cancel 单独失败请求；请求经 decode 腿权威终局结清（结果有界）；引擎恰好一次 cancel 到达；账目排空、无泄漏、无异常逃逸；注入清除后恢复 |
 
 ### status（25 例 · 固定 batch-window）
 
@@ -137,7 +146,7 @@ engine→master 状态上报通道的故障注入：ack 丢失 / 部分失败 / 
 | `status_zombie_fake_running` | 永久驻留的假 RUNNING 探针 | 假 inflight 最终清零（不得永久驻留） |
 | `status_fetch_error` | 批量 FetchResponse 流中途故障 | 故障表面化到客户端；账目收敛；恢复 |
 
-### kv（15 例 · 全 profile）
+### kv（18 例 · 16 例全 profile、2 例仅 BATCH 投递）
 
 KV 前缀缓存生命周期契约：per-engine 账本隔离、全局共享块的多持有者语义、增量同步收敛、热前缀风暴、容量冲突与亲和路由。
 
@@ -158,6 +167,9 @@ KV 前缀缓存生命周期契约：per-engine 账本隔离、全局共享块的
 | `kv_match_mixed` | 全命中 / 半命中 / 零命中三档流量 | 全命中与半命中集中在持有者；零命中平摊多引擎 |
 | `kv_lru_eviction_affinity` | 容量 4 的 LRU：同键回放 + 前缀扩展新键 | 回放粘原引擎；扩展触发 LRU 逐出最老块且 key 数封顶；前缀命中保亲和 |
 | `kv_decode_capacity_park` | 所有 decode 引擎 KV 耗尽时新请求到达 | 请求被 park（等待而非拒绝）；Cancel 释放无残渣；清压后恢复路由 |
+| `kv_leader_saturation_spill` | 12 块池双 10 块族（20 块工作集 > 单池）唯一稳定放置后，cache leader（P1）持续饱和（3s prefill），每窗 [A,A,B,B] back-to-back fire-and-forget（0.12s 间距压在途 ledger） | 饱和期命中率崩塌有界／恢复稳态（末 1/3 窗）命中率回基线（恢复窗数为观察项）；finding 已远端证实（FINDING-CONFIRMED），带宽标定待 n≥3 复跑（expected-fail 探针） |
+| `kv_pool_saturation_evict_reject_recover` | 1P+2D、P 池 27 块；驱逐波 10 串行不相交键请求 + 饱和探针（仅 BATCH 投递） | 驱逐是泄压阀不是拒绝：10 请求全完成、evictions 增长、键集封顶 27；三态守恒 held+referenced+available==cache_blocks；饱和探针被同步拒绝（快速 typed 602，错误串含 EnqueueBatch rejected / LACK_MEM / insufficient KV cache blocks）；失败份额有界（无 park/超时混入）；占用者排空后池恢复、新请求完成、账本与 inflight 清零 |
+| `kv_decode_pool_exhaustion_terminal` | 2P+1D、D 池 3 块（reserve 1），净 decode 需求 3 块的探针在 EnqueueBatch Phase 1.6 撞门（3−3=0<1）（仅 BATCH 投递） | decode 侧同步 602 且归入 lack_mem_rejects（永久类：need+reserve=4>3，任何池状态都不可准入）；P 租约无残留释放；让出 1 块余量后服务恢复（与生产 decode 侧重试次数的口径差异已有文档化说明） |
 
 ### balance（6 例 · 全 profile）
 
@@ -192,7 +204,7 @@ KV 前缀缓存生命周期契约：per-engine 账本隔离、全局共享块的
 | `elastic_transient_imbalance_bound` | abrupt 缩容 + 高压背景流 + 一次性 burst（队列容量轴全部显式设值：maxWaitingPrefillBatches / maxWaitingRequestsPerPrefillWorker / decodeMaxConcurrency） | 队列峰值不超配置界（引擎侧 waiting / master 侧 inflight / decode 并发三界）；幸存者 occupancy ≤0.95、Δ拒绝 ≤K_reject；fail-close 局部性：失败仅出现在被缩引擎在途集，幸存者路由流零失败；稳态全维度恢复；TPS 谷值观察项 |
 | `elastic_steady_state_recovery` | graceful 缩 1 台 decode，背景流不断，60s 纯观察窗（3s 子窗 ×20） | 末 1/3 各维度回基线容差（share / 队列 depth / KV spread / occupancy ≤0.95）；连续两个子窗同向偏离超容差即 fail（震荡指纹）；swing / exec CV / 命中率 / TPS 为观察项 |
 
-### engine_fault（13 例 · 9 例固定 batch-window、4 例全 profile）
+### engine_fault（13 例 · 9 例固定 batch-window、3 例全 profile、1 例仅 BATCH 投递）
 
 引擎进程级故障（下线 / 摇摆 / 真崩溃 / 停应答 / 入队错误 / 延迟）与恢复契约（代际、缓存重建、不复活、状态空窗、KV 归零）。
 
@@ -228,7 +240,7 @@ master 自身进程级故障与冷启动行为，以及双实例 HA 链路（冻
 | `failback_wraparound` | 重建 sticky B 端态后重启 A、再杀 B | A 60s 内重新收敛并接恢复流量；对称切换绕回 A；inflight 干净、无 8511 风暴 |
 | `direct_generate_error` | 直连引擎入口 GenerateStreamCall 注入 generate_error | 立即失败；不注册 inflight；注入清除后恢复 |
 
-### admission（15 例 · 14 例固定 batch-window、1 例仅 BATCH 投递）
+### admission（15 例 · 13 例固定 batch-window、1 例固定 single-nonbatch、1 例仅 BATCH 投递）
 
 准入门全谱——可等待 park 与快速拒两种语义：引擎侧（prefill 并发、decode 硬门、等待批上限、KV 块池、队列深度）与 master 侧（batcher 队列容量、placement 池、准入许可、全局 outstanding），外加 SLO 排队超时终态。
 
@@ -242,7 +254,7 @@ master 自身进程级故障与冷启动行为，以及双实例 HA 链路（冻
 | `admission_priority_incomer_reject` | 唯一准入许可被低优先级请求占用，高优先级新来者到达且无抢占块 | 快速带类型 8431 拒绝、不悬挂；受害者不被抢占正常完成；许可释放后恢复 |
 | `admission_batcher_queue_capacity_park` | batcher 等待队列容量收紧为 2，7 请求逐发溢出 | master 侧 park：零快速拒、parked≥1；FIFO 串行完成（批间隔≥1.2s）；排空后账目干净并恢复 |
 | `admission_batcher_queue_deadline` | batcher 队列容量门下 queueTimeout=1.5s，溢出波 park 后到期 | 排队者 1-5s 内带类型 deadline 终态（8511，与 KV 门同码分类统一）；已投递者不受扰；账目干净并恢复 |
-| `admission_placement_pool_wait` | prefill placement 池仅 1 席，A 运行中 B 到达被拒入池 | 池满为 WAIT：B 驻留 master 侧，池释放后被唤醒重试并晚于 A≥1s 完成；账目干净并恢复 |
+| `admission_placement_pool_wait` | prefill placement 池仅 1 席，A 运行中 B 到达被拒入池（固定 single-nonbatch） | 池满为 WAIT：B 驻留 master 侧，池释放后被唤醒重试并晚于 A≥1s 完成；账目干净并恢复 |
 | `admission_engine_waiting_batch_cap_reject` | 引擎等待批上限=1（运行时注入）打满后探测批到达 | 非等待门：快速整批 backpressure 拒绝；占用者不受扰；同压力下放开 cap 可 park；账目干净并恢复 |
 | `admission_engine_kv_lack_mem_fast_reject` | 17 块引擎 KV 池被两个 8 块租 约占满后第 3 个 8 块请求入队 | 非等待门：快速 602 LACK_MEM 拒绝（引擎侧码非 8431）；租约完成后归还；恢复后新请求成功、账目干净 |
 | `engine_prefill_token_budget_split` | 引擎内双预算重组（#8）：token 预算 1024，4×512 请求合一 master 批（Σ2048 超预算 2x） | 拆散前缀+尾段 park：全部完成；执行批计数 2 批/4 请求/最大 2（构造 gate）；master 账目联动：inflight_batches 峰值恒 1、requests 事件驱动台阶下降、scheduler_inflight 不回升；成员 batch_id 归属同一 master 批；账目干净并恢复 |
