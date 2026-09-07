@@ -121,9 +121,18 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
                                 "pipeline parallelism does not support data parallelism");
         RTP_LLM_CHECK_WITH_INFO(parallelism_config.ep_size == 1,
                                 "pipeline parallelism does not support expert parallelism");
-        RTP_LLM_CHECK_WITH_INFO(parallelism_config.prefill_cp_config.method == CPRotateMethod::DISABLED
-                                    && !parallelism_config.prefill_cp_config.kv_cache_sharded,
-                                "pipeline parallelism does not support context parallelism");
+        // CP composes with PP as long as the paged pool is not ALSO sharded
+        // across CP ranks: PP projects the layer axis (stage-sliced cache
+        // descriptors) while CP splits the sequence axis inside each stage.
+        // PPLayout::rankOfStage preserves tp_rank, so equal cp_ranks pair across
+        // adjacent stages; the activation transport is shape-agnostic; and each
+        // stage re-applies the zigzag split to its own copy of the plan
+        // (PyWrappedModel::forwardPP copies GptModelInputs).  kv_cache_sharded
+        // is the exception: it puts a second, within-pool slicer on top of the
+        // stage slicing, which nothing validates.
+        RTP_LLM_CHECK_WITH_INFO(!parallelism_config.prefill_cp_config.kv_cache_sharded,
+                                "pipeline parallelism does not support a CP-sharded kv cache "
+                                "(prefill_cp_kv_cache_sharded); disable it or disable PP");
         RTP_LLM_CHECK_WITH_INFO(!parallelism_config.enable_sp && parallelism_config.ffn_sp_size == 1,
                                 "pipeline parallelism does not support sequence parallelism");
         RTP_LLM_CHECK_WITH_INFO(!parallelism_config.use_ub_comm,
