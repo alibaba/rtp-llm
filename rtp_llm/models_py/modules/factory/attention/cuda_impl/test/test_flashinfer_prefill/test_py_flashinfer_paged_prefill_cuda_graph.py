@@ -181,7 +181,20 @@ class _PrefillPagedCudaGraphTestMixin:
         )
         cg_op = PyFlashinferPrefillPagedAttnOp(config.attn_configs, cg_init)
         cg_op.prepare(cg_init)
-        cg_replay = self._make_inputs(input_lengths, prefix_lengths, True, max_seq_len)
+
+        replay_batch_size = len(input_lengths)
+        graph_batch_size = len(capture_input_lengths)
+        self.assertLessEqual(replay_batch_size, graph_batch_size)
+        padding_size = graph_batch_size - replay_batch_size
+        cg_replay = self._make_inputs(
+            input_lengths + [0] * padding_size,
+            prefix_lengths + [0] * padding_size,
+            True,
+            max_seq_len,
+        )
+        cg_replay.prefill_cuda_graph_copy_params.cuda_graph_prefill_batch_size[0] = (
+            replay_batch_size
+        )
         cg_op.prepare(cg_replay, forbid_realloc=True)
         cg_out = cg_op.forward(q, kv_cache)
 
