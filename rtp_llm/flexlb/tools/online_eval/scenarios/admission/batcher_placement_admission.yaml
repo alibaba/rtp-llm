@@ -1,0 +1,526 @@
+schema_version: 1
+id: batcher_placement_admission
+description: Master queue and placement backlog, sampled during Schedule; explicit
+  old deadline, FIFO wait-return and recovery contracts.
+category: admission
+profiles:
+- batch-window
+- single-batch
+- single-nonbatch
+- window-nonbatch
+legacy_case_ids:
+- admission_batcher_queue_capacity_park
+- admission_batcher_queue_deadline
+- admission_placement_pool_wait
+environment:
+  backend: java_mock
+  n_prefill: 1
+  n_decode: 2
+  perf_preset: default
+  config_overrides:
+    ordering: priority
+    queue_timeout_ms: 60000
+    max_waiting_requests_per_prefill_worker: 2
+execution:
+  timeout_s: 600
+  stage_timeout_s: 60
+  cleanup_timeout_s: 120
+variants:
+- id: batcher_queue_capacity_park
+  profiles:
+  - batch-window
+  - single-batch
+  requires:
+  - enqueue_batch
+  legacy_case_ids:
+  - admission_batcher_queue_capacity_park
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: slow
+    action: engine_control
+    params:
+      operation: set_perf
+      targets:
+      - prefill-0
+      perf:
+        prefill_fixed_ms: 3000
+  - id: sampling
+    action: admission_park_start
+    params:
+      targets:
+      - prefill-0
+      - decode-0
+      - decode-1
+    timeout_s: 15
+  - id: wave
+    action: admission_tracked_fire
+    params:
+      count: 7
+      consume: immediate
+      input_len: 512
+      output_len: 2
+      request_timeout_s: 45
+      schedule_timeout_s: 30
+      spacing_s: 0.4
+    timeout_s: 90
+  - id: sampled
+    action: admission_park_stop
+    params:
+      sampler:
+        $ref: stages.sampling.output.sampler
+    timeout_s: 15
+  - id: all_admitted
+    action: admission_check
+    params:
+      rows:
+        $ref: stages.wave.output.rows
+      metric: admitted_count
+      expected: 7
+      op: eq
+      scope: all
+  - id: park_proven
+    action: admission_park_check
+    params:
+      samples:
+        $ref: stages.sampled.output.samples
+  - id: done
+    action: admission_drain
+    params:
+      waves:
+      - $ref: stages.wave.output.wave
+    timeout_s: 45
+  - id: all_completed
+    action: admission_check
+    params:
+      rows:
+        $ref: stages.done.output.rows
+      metric: success_count
+      expected: 7
+      op: eq
+      scope: all
+  - id: fifo
+    action: admission_check
+    params:
+      rows:
+        $ref: stages.done.output.rows
+      metric: await_fifo
+      expected: true
+      op: eq
+      scope: all
+  - id: empty
+    action: admission_observe
+    params:
+      targets:
+      - prefill-0
+      fields:
+      - waiting
+      - prefill_waiting_batches
+      duration_s: 10
+      until_op: eq
+      until_value: 0
+    timeout_s: 15
+  - id: park_empty
+    action: admission_gauge_check
+    params:
+      snapshot:
+        $ref: stages.empty.output.snapshot
+      fields:
+      - waiting
+      - prefill_waiting_batches
+      stat: max_latest
+      op: eq
+      expected: 0
+  - id: master_clean
+    action: master_ready
+    params:
+      target: single
+      inflight_zero: true
+    timeout_s: 30
+  - id: recovery
+    action: admission_wave
+    params:
+      count: 1
+      input_len: 2048
+      output_len: 2
+      request_timeout_s: 30
+  - id: recovery_done
+    action: admission_wait
+    params:
+      wave:
+        $ref: stages.recovery.output.wave
+    timeout_s: 40
+  - id: recovered
+    action: admission_check
+    params:
+      rows:
+        $ref: stages.recovery_done.output.rows
+      metric: success_count
+      expected: 1
+      op: eq
+      scope: all
+  - id: relieve
+    action: engine_control
+    params:
+      operation: set_perf
+      targets:
+      - prefill-0
+      perf:
+        prefill_fixed_ms: 100
+  - id: cleanup
+    action: teardown
+- id: batcher_queue_deadline
+  profiles:
+  - batch-window
+  - single-batch
+  requires:
+  - enqueue_batch
+  legacy_case_ids:
+  - admission_batcher_queue_deadline
+  environment_overrides:
+    config_overrides:
+      queue_timeout_ms: 1500
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: slow
+    action: engine_control
+    params:
+      operation: set_perf
+      targets:
+      - prefill-0
+      perf:
+        prefill_fixed_ms: 3000
+  - id: sampling
+    action: admission_park_start
+    params:
+      targets:
+      - prefill-0
+      - decode-0
+      - decode-1
+    timeout_s: 15
+  - id: wave
+    action: admission_tracked_fire
+    params:
+      count: 8
+      consume: immediate
+      input_len: 512
+      output_len: 2
+      request_timeout_s: 30
+      schedule_timeout_s: 30
+      spacing_s: 0.15
+    timeout_s: 90
+  - id: sampled
+    action: admission_park_stop
+    params:
+      sampler:
+        $ref: stages.sampling.output.sampler
+    timeout_s: 15
+  - id: six_admitted
+    action: admission_check
+    params:
+      rows:
+        $ref: stages.wave.output.rows
+      metric: admitted_count
+      expected: 6
+      op: eq
+      scope: all
+  - id: two_rejected
+    action: admission_check
+    params:
+      rows:
+        $ref: stages.wave.output.rows
+      metric: reject_count
+      expected: 2
+      op: eq
+      scope: all
+  - id: deadline_family
+    action: admission_check
+    params:
+      rows:
+        $ref: stages.wave.output.rows
+      metric: deadline_reject_family
+      expected: true
+      op: eq
+      scope: rejected
+  - id: deadline_min
+    action: admission_check
+    params:
+      rows:
+        $ref: stages.wave.output.rows
+      metric: schedule_latency_min
+      expected: 1
+      op: ge
+      scope: rejected
+  - id: deadline_max
+    action: admission_check
+    params:
+      rows:
+        $ref: stages.wave.output.rows
+      metric: schedule_latency_max
+      expected: 5
+      op: le
+      scope: rejected
+  - id: park_proven
+    action: admission_park_check
+    params:
+      samples:
+        $ref: stages.sampled.output.samples
+      overflow_rows:
+        $ref: stages.wave.output.rows
+  - id: done
+    action: admission_drain
+    params:
+      waves:
+      - $ref: stages.wave.output.wave
+    timeout_s: 30
+  - id: six_completed
+    action: admission_check
+    params:
+      rows:
+        $ref: stages.done.output.rows
+      metric: success_count
+      expected: 6
+      op: eq
+      scope: all
+  - id: no_serving_errors
+    action: admission_check
+    params:
+      rows:
+        $ref: stages.done.output.rows
+      metric: serve_error_count
+      expected: 0
+      op: eq
+      scope: all
+  - id: relieve
+    action: engine_control
+    params:
+      operation: set_perf
+      targets:
+      - prefill-0
+      perf:
+        prefill_fixed_ms: 100
+  - id: master_clean
+    action: master_ready
+    params:
+      target: single
+      inflight_zero: true
+    timeout_s: 30
+  - id: recovery
+    action: admission_wave
+    params:
+      count: 1
+      input_len: 2048
+      output_len: 2
+      request_timeout_s: 30
+  - id: recovery_done
+    action: admission_wait
+    params:
+      wave:
+        $ref: stages.recovery.output.wave
+    timeout_s: 40
+  - id: recovered
+    action: admission_check
+    params:
+      rows:
+        $ref: stages.recovery_done.output.rows
+      metric: success_count
+      expected: 1
+      op: eq
+      scope: all
+  - id: cleanup
+    action: teardown
+- id: placement_pool_wait
+  profiles:
+  - single-nonbatch
+  - window-nonbatch
+  requires:
+  - generate_stream
+  legacy_case_ids:
+  - admission_placement_pool_wait
+  environment_overrides:
+    config_overrides:
+      ordering: fifo
+      max_inflight_requests_per_worker: 1
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: slow
+    action: engine_control
+    params:
+      operation: set_perf
+      targets:
+      - prefill-0
+      perf:
+        prefill_fixed_ms: 5000
+  - id: a
+    action: admission_tracked_fire
+    params:
+      count: 1
+      consume: immediate
+      input_len: 512
+      output_len: 2
+      request_timeout_s: 30
+      schedule_timeout_s: 30
+      spacing_s: 0
+    timeout_s: 90
+  - id: a_admitted
+    action: admission_check
+    params:
+      rows:
+        $ref: stages.a.output.rows
+      metric: admitted_count
+      expected: 1
+      op: eq
+      scope: all
+  - id: running
+    action: admission_observe
+    params:
+      targets:
+      - prefill-0
+      fields:
+      - running
+      duration_s: 10
+      until_op: ge
+      until_value: 1
+    timeout_s: 15
+  - id: a_running
+    action: admission_gauge_check
+    params:
+      snapshot:
+        $ref: stages.running.output.snapshot
+      fields:
+      - running
+      stat: max_seen
+      op: ge
+      expected: 1
+  - id: lease_before_b
+    action: admission_lease_precondition
+    params:
+      targets:
+      - prefill-0
+      - decode-0
+      - decode-1
+    timeout_s: 15
+  - id: sampling
+    action: admission_park_start
+    params:
+      targets:
+      - prefill-0
+      - decode-0
+      - decode-1
+    timeout_s: 15
+  - id: b
+    action: admission_tracked_fire
+    params:
+      count: 1
+      consume: immediate
+      input_len: 512
+      output_len: 2
+      request_timeout_s: 30
+      schedule_timeout_s: 60
+      spacing_s: 0
+    timeout_s: 90
+  - id: sampled
+    action: admission_park_stop
+    params:
+      sampler:
+        $ref: stages.sampling.output.sampler
+    timeout_s: 15
+  - id: b_admitted
+    action: admission_check
+    params:
+      rows:
+        $ref: stages.b.output.rows
+      metric: admitted_count
+      expected: 1
+      op: eq
+      scope: all
+  - id: b_rpc_parked
+    action: admission_check
+    params:
+      rows:
+        $ref: stages.b.output.rows
+      metric: schedule_latency_min
+      expected: 0.5
+      op: gt
+      scope: all
+  - id: park_proven
+    action: admission_park_check
+    params:
+      samples:
+        $ref: stages.sampled.output.samples
+  - id: done
+    action: admission_drain
+    params:
+      waves:
+      - $ref: stages.a.output.wave
+      - $ref: stages.b.output.wave
+    timeout_s: 30
+  - id: both_completed
+    action: admission_check
+    params:
+      rows:
+        $ref: stages.done.output.rows
+      metric: success_count
+      expected: 2
+      op: eq
+      scope: all
+  - id: b_after_a
+    action: admission_check
+    params:
+      rows:
+        $ref: stages.done.output.rows
+      metric: await_strict_fifo
+      expected: true
+      op: eq
+      scope: all
+  - id: master_clean
+    action: master_ready
+    params:
+      target: single
+      inflight_zero: true
+    timeout_s: 30
+  - id: engine_clean
+    action: admission_engine_clean
+    params:
+      targets:
+      - prefill-0
+      - decode-0
+      - decode-1
+    timeout_s: 15
+  - id: recovery
+    action: admission_wave
+    params:
+      count: 1
+      input_len: 2048
+      output_len: 2
+      request_timeout_s: 30
+  - id: recovery_done
+    action: admission_wait
+    params:
+      wave:
+        $ref: stages.recovery.output.wave
+    timeout_s: 40
+  - id: recovered
+    action: admission_check
+    params:
+      rows:
+        $ref: stages.recovery_done.output.rows
+      metric: success_count
+      expected: 1
+      op: eq
+      scope: all
+  - id: relieve
+    action: engine_control
+    params:
+      operation: set_perf
+      targets:
+      - prefill-0
+      perf:
+        prefill_fixed_ms: 100
+  - id: cleanup
+    action: teardown

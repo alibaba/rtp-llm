@@ -10,6 +10,7 @@ from ..contracts import CheckResult, StageHandler, StageOutput
 from ..runtime import Deadline
 from .elastic import request_success
 from .engine_control import _engines, _http
+from .master import _master_json
 
 
 def _fields(params, allowed, required=()):
@@ -34,6 +35,7 @@ def _traffic_validate(params, plan):
             "consume",
             "keys_per_request",
             "priority",
+            "schedule_timeout_s",
         },
     )
     for key, default, limit in (
@@ -50,6 +52,13 @@ def _traffic_validate(params, plan):
     ):
         raise ValueError("priority must be an explicit int32 when present")
     p.setdefault("request_timeout_s", 20)
+    p.setdefault("schedule_timeout_s", 30)
+    if (
+        type(p["schedule_timeout_s"]) not in (int, float)
+        or not math.isfinite(p["schedule_timeout_s"])
+        or not 0 < p["schedule_timeout_s"] <= 60
+    ):
+        raise ValueError("invalid admission schedule deadline")
     if (
         type(p["request_timeout_s"]) not in (int, float)
         or not math.isfinite(p["request_timeout_s"])
@@ -93,7 +102,7 @@ class AdmissionWave:
                 input_len=p["input_len"],
                 output_len=p["output_len"],
                 consume=p.get("consume", "immediate"),
-                schedule_timeout_s=30,
+                schedule_timeout_s=p.get("schedule_timeout_s", 30),
                 stream_timeout_s=p["request_timeout_s"],
             ),
         )
@@ -120,7 +129,9 @@ class AdmissionWave:
                 request_deadline = Deadline(
                     min(
                         self.ctx.instance_deadline_s,
-                        self.ctx.clock() + 30 + p["request_timeout_s"],
+                        self.ctx.clock()
+                        + p.get("schedule_timeout_s", 30)
+                        + p["request_timeout_s"],
                     ),
                     self.ctx.clock,
                     self.ctx.sleeper,
@@ -316,6 +327,10 @@ METRICS = {
     "all_reject_code",
     "all_schedule_code",
     "schedule_latency_max",
+    "schedule_latency_min",
+    "deadline_reject_family",
+    "await_fifo",
+    "await_strict_fifo",
     "latency_min",
     "latency_max",
 }
@@ -337,7 +352,7 @@ def _check_validate(params, plan):
         {"rows", "metric", "expected", "op"},
     )
     plan.reference(p["rows"], "admission_rows")
-    if p["metric"] not in METRICS or p["op"] not in {"eq", "ge", "le", "lt"}:
+    if p["metric"] not in METRICS or p["op"] not in {"eq", "ge", "le", "lt", "gt"}:
         raise ValueError("unsupported admission metric")
     p.setdefault("case_sensitive", False)
     if type(p["case_sensitive"]) is not bool:
@@ -381,6 +396,32 @@ def _check(ctx, params, deadline):
             r["schedule"]["status"] != "REJECTED" and not request_success(r)
             for r in selected
         )
+    elif metric == "deadline_reject_family":
+        actual = bool(selected) and all(
+            r["schedule"]["status"] == "REJECTED"
+            and (
+                r["schedule_response"]["code"] == 8511
+                or any(
+                    token in str(r["schedule_response"]["error_message"]).lower()
+                    for token in (
+                        "deadline",
+                        "expired",
+                        "exhaust",
+                        "8400",
+                        "8511",
+                        "8431",
+                    )
+                )
+            )
+            for r in selected
+        )
+    elif metric in {"await_fifo", "await_strict_fifo"}:
+        ends = [r.get("await_return_s") for r in selected]
+        if any(type(t) not in (int, float) or not math.isfinite(t) for t in ends):
+            raise ValueError("FIFO needs actual concurrent wait-return timestamps")
+        actual = len(ends) >= 2 and all(
+            a <= b if metric == "await_fifo" else a < b for a, b in zip(ends, ends[1:])
+        )
     elif metric in {"all_reject_code", "all_schedule_code"}:
         checked = rejected if metric == "all_reject_code" else selected
         actual = bool(checked) and all(
@@ -417,7 +458,7 @@ def _check(ctx, params, deadline):
             end = (
                 row["schedule"]["ended_s"]
                 if row["schedule"]["status"] == "REJECTED"
-                or metric == "schedule_latency_max"
+                or metric in {"schedule_latency_max", "schedule_latency_min"}
                 else row["consumer_exit_s"]
             )
             start = row["schedule"]["started_s"]
@@ -431,7 +472,11 @@ def _check(ctx, params, deadline):
                 raise ValueError("latency needs real request timestamps")
             values.append(end - start)
         actual = (
-            (min(values) if metric == "latency_min" else max(values))
+            (
+                min(values)
+                if metric in {"latency_min", "schedule_latency_min"}
+                else max(values)
+            )
             if values
             else None
         )
@@ -448,7 +493,13 @@ def _check(ctx, params, deadline):
             else (
                 actual >= expected
                 if params["op"] == "ge"
-                else actual <= expected if params["op"] == "le" else actual < expected
+                else (
+                    actual <= expected
+                    if params["op"] == "le"
+                    else (
+                        actual < expected if params["op"] == "lt" else actual > expected
+                    )
+                )
             )
         )
     return StageOutput(
@@ -792,3 +843,312 @@ HANDLERS.append(
         checks=frozenset({"engine_clean"}),
     )
 )
+
+
+def _tracked_validate(params, plan):
+    p = dict(params)
+    p.setdefault("consume", "immediate")
+    p = _fire_validate(p, plan)
+    if p["consume"] != "immediate":
+        raise ValueError("tracked fire supports immediate consumers only")
+    return p
+
+
+def _park_validate(params, plan):
+    p = _clean_validate(params, plan)
+    if len(set(p["targets"])) != len(p["targets"]):
+        raise ValueError("park counter owners must be distinct")
+    return p
+
+
+def _park_sample(ctx, targets, deadline):
+    data = _master_json(ctx, "single", "/rtp_llm/inflight_status", deadline)
+    count = data.get("scheduler_inflight")
+    if type(count) is not int or count < 0:
+        raise ValueError("missing/invalid scheduler_inflight")
+    engines = _engines(_http(ctx.ops, "snapshot", deadline), targets)
+    counters = {}
+    for name, row in engines.items():
+        if any(
+            type(row.get(k)) is not int or row[k] < 0 for k in ("waiting", "running")
+        ):
+            raise ValueError("park evidence needs actual engine waiting/running")
+        counters[name] = {k: row[k] for k in ("waiting", "running")}
+    live = sum(v for row in counters.values() for v in row.values())
+    return dict(
+        time_s=ctx.clock(),
+        scheduler_inflight=count,
+        engines=counters,
+        engine_live=live,
+        parked=count - live,
+    )
+
+
+class ParkSampler:
+    """Sample during submissions; stop/done/join are separate ownership facts."""
+
+    def __init__(self, ctx, targets):
+        self.ctx, self.targets = ctx, targets
+        self.stop_event, self.done = threading.Event(), threading.Event()
+        self.samples, self.errors = [], []
+        self.error = None
+        self.thread = None
+        self.path = ctx.artifact_dir / f"admission-park-{len(ctx._resources)}.json"
+
+    def start(self, deadline):
+        # Establish one real sample before returning the resource to the fire stage.
+        self.samples.append(_park_sample(self.ctx, self.targets, deadline))
+
+        def loop():
+            try:
+                while not self.stop_event.wait(0.2):
+                    d = Deadline(
+                        self.ctx.instance_deadline_s, self.ctx.clock, self.ctx.sleeper
+                    )
+                    self.samples.append(_park_sample(self.ctx, self.targets, d))
+            except Exception as exc:
+                self.error = exc
+                self.errors.append(repr(exc))
+            finally:
+                self.done.set()
+
+        self.thread = threading.Thread(target=loop, name="admission-park", daemon=True)
+        self.thread.start()
+
+    def persist(self):
+        self.path.write_text(
+            json.dumps(
+                dict(
+                    samples=self.samples,
+                    errors=self.errors,
+                    worker_done=self.done.is_set(),
+                    worker_alive=self.thread.is_alive() if self.thread else False,
+                ),
+                indent=2,
+            )
+            + "\n"
+        )
+
+    def cleanup(self, deadline):
+        self.stop_event.set()
+        try:
+            if self.thread is not None:
+                if not self.done.wait(deadline.remaining()):
+                    raise TimeoutError(
+                        "park sampler has no independent completion signal"
+                    )
+                self.thread.join(deadline.remaining())
+                if self.thread.is_alive():
+                    raise TimeoutError("park sampler did not exit")
+            if self.error:
+                raise self.error
+        finally:
+            self.persist()
+
+
+def _park_start(ctx, params, deadline):
+    sampler = ParkSampler(ctx, params["targets"])
+    handle = ctx.register_resource("admission_sampler", sampler, sampler.cleanup)
+    sampler.start(deadline)
+    return StageOutput({"sampler": handle})
+
+
+def _park_stop_validate(params, plan):
+    p = _fields(params, {"sampler"}, {"sampler"})
+    plan.reference(p["sampler"], "admission_sampler")
+    return p
+
+
+def _park_stop(ctx, params, deadline):
+    sampler = ctx.resource(params["sampler"], "admission_sampler")
+    sampler.cleanup(deadline)
+    return StageOutput(
+        {
+            "samples": ctx.register_resource(
+                "admission_park_samples", list(sampler.samples), historical=True
+            )
+        },
+        artifacts=[str(sampler.path)],
+    )
+
+
+def _park_check_validate(params, plan):
+    p = _fields(params, {"samples", "overflow_rows"}, {"samples"})
+    plan.reference(p["samples"], "admission_park_samples")
+    if "overflow_rows" in p:
+        plan.reference(p["overflow_rows"], "admission_rows")
+    return p
+
+
+def _park_check(ctx, params, deadline):
+    deadline.check()
+    samples = ctx.resource(params["samples"], "admission_park_samples")
+    selected = samples
+    window = None
+    if "overflow_rows" in params:
+        rows = ctx.resource(params["overflow_rows"], "admission_rows")
+        rejected = [r for r in rows if r["schedule"]["status"] == "REJECTED"]
+        if rejected:
+            starts = [r["schedule"]["started_s"] for r in rejected]
+            ends = [r["schedule"]["ended_s"] for r in rejected]
+            if any(
+                type(t) not in (int, float) or not math.isfinite(t)
+                for t in starts + ends
+            ):
+                raise ValueError("overflow alignment needs actual Schedule timestamps")
+            window = [min(starts), max(ends)]
+            selected = [s for s in samples if window[0] <= s["time_s"] <= window[1]]
+        else:
+            selected = []
+    peak = max((s["parked"] for s in selected), default=-1)
+    passed = peak >= 1
+    return StageOutput(
+        {"passed": passed},
+        [
+            CheckResult(
+                "parked",
+                "PASS" if passed else "FAIL",
+                actual=peak,
+                expected=1,
+                evidence=dict(window=window, samples=len(selected)),
+            )
+        ],
+    )
+
+
+def _lease_precondition(ctx, params, deadline):
+    sample = _park_sample(ctx, params["targets"], deadline)
+    passed = sample["scheduler_inflight"] >= 1 and any(
+        name.startswith("prefill-") and row["running"] >= 1
+        for name, row in sample["engines"].items()
+    )
+    return StageOutput(
+        {"passed": passed},
+        [CheckResult("lease_held", "PASS" if passed else "FAIL", actual=sample)],
+    )
+
+
+class AdmissionDrain:
+    """Concurrent legacy wait-return observation, distinct from consumer exit time."""
+
+    def __init__(self, ctx, waves):
+        self.ctx, self.waves = ctx, waves
+        self.pool = ThreadPoolExecutor(max_workers=sum(len(w.items) for w in waves))
+        self.jobs = []
+        self.path = ctx.artifact_dir / f"admission-drain-{len(ctx._resources)}.json"
+
+    def start(self, deadline):
+        for wave in self.waves:
+            for item in wave.items:
+                if item["error"]:
+                    raise item["error"]
+                job = dict(
+                    done=threading.Event(), future=None, end=None, error=None, item=item
+                )
+                self.jobs.append(job)
+
+                def run(job=job):
+                    try:
+                        job["item"]["batch"].wait(deadline)
+                        job["end"] = self.ctx.clock()
+                    except Exception as exc:
+                        job["error"] = exc
+                    finally:
+                        job["done"].set()
+
+                job["future"] = self.pool.submit(run)
+
+    def await_done(self, deadline):
+        for job in self.jobs:
+            if not job["done"].wait(deadline.remaining()):
+                raise TimeoutError("concurrent drain has no completion signal")
+            job["future"].result(timeout=deadline.remaining())
+            if job["error"]:
+                raise job["error"]
+        rows = []
+        for wave in self.waves:
+            wave_rows = wave.rows()
+            by_id = {id(j["item"]): j for j in self.jobs}
+            for item, row in zip(wave.items, wave_rows):
+                row["await_return_s"] = by_id[id(item)]["end"]
+                rows.append(row)
+        self.path.write_text(json.dumps(rows, indent=2) + "\n")
+        return rows
+
+    def cleanup(self, deadline):
+        self.pool.shutdown(wait=False, cancel_futures=True)
+        for wave in self.waves:
+            for item in wave.items:
+                item["batch"].cancel("admission_drain_cleanup")
+        futures = [j["future"] for j in self.jobs if j["future"] is not None]
+        if futures and wait(futures, timeout=deadline.remaining())[1]:
+            raise TimeoutError("concurrent drain workers did not exit")
+        if any(
+            not j["done"].is_set() and not j["future"].cancelled()
+            for j in self.jobs
+            if j["future"] is not None
+        ):
+            raise RuntimeError("concurrent drain missing independent worker exit")
+        self.pool.shutdown(wait=True, cancel_futures=True)
+
+
+def _drain_validate(params, plan):
+    p = _fields(params, {"waves"}, {"waves"})
+    if not isinstance(p["waves"], list) or not 1 <= len(p["waves"]) <= 8:
+        raise ValueError("drain needs bounded explicit waves")
+    for ref in p["waves"]:
+        plan.reference(ref, "admission_wave")
+    return p
+
+
+def _drain(ctx, params, deadline):
+    waves = [ctx.resource(ref, "admission_wave") for ref in params["waves"]]
+    if not 1 <= sum(len(w.items) for w in waves) <= 32:
+        raise ValueError("concurrent drain limited to 32 requests")
+    drain = AdmissionDrain(ctx, waves)
+    ctx.register_resource("admission_drain", drain, drain.cleanup)
+    drain.start(deadline)
+    rows = drain.await_done(deadline)
+    return StageOutput(
+        {"rows": ctx.register_resource("admission_rows", rows, historical=True)},
+        artifacts=[str(drain.path)],
+    )
+
+
+HANDLERS += [
+    StageHandler(
+        "admission_tracked_fire",
+        _tracked_validate,
+        _fire,
+        {"wave": "admission_wave", "rows": "admission_rows"},
+    ),
+    StageHandler(
+        "admission_park_start",
+        _park_validate,
+        _park_start,
+        {"sampler": "admission_sampler"},
+    ),
+    StageHandler(
+        "admission_park_stop",
+        _park_stop_validate,
+        _park_stop,
+        {"samples": "admission_park_samples"},
+    ),
+    StageHandler(
+        "admission_park_check",
+        _park_check_validate,
+        _park_check,
+        {"passed": "boolean"},
+        checks=frozenset({"parked"}),
+    ),
+    StageHandler(
+        "admission_lease_precondition",
+        _park_validate,
+        _lease_precondition,
+        {"passed": "boolean"},
+        checks=frozenset({"lease_held"}),
+    ),
+    StageHandler(
+        "admission_drain", _drain_validate, _drain, {"rows": "admission_rows"}
+    ),
+]
