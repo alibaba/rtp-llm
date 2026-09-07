@@ -22,6 +22,10 @@ Environment fields include worker counts, cache block counts, controlled
 `perf_preset: default|fault_env` and `debug_enabled: true|false`. Profile axes come
 from the existing flexlb_cfg generator. Arbitrary imports, expressions, raw config,
 master environment variables and undeclared backend topologies are rejected.
+The optional `metric_whitelist` field maps only to
+`FLEXLB_MONITOR_METRIC_WHITELIST`; it accepts 1..16 comma-separated metric
+identifiers such as `flexlb_auto_tpm_request_count`. It does not change the
+rendered scheduler configuration or open a general environment-variable channel.
 
 Stages execute in order. Typed references use
 `{$ref: stages.submit.output.requests}` and can only reference earlier outputs.
