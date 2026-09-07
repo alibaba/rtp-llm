@@ -251,30 +251,35 @@ bool ClientWrapper::tryReinit(const std::string& unique_id) {
     return true;
 }
 
+std::shared_ptr<kv_cache_manager::MetaClient> ClientWrapper::getMetaClient(const std::string& unique_id) {
+    if (!tryReinit(unique_id)) {
+        return nullptr;
+    }
+    std::shared_lock lock(reinit_mutex_);
+    return meta_client_map_.at(unique_id);
+}
+
 #define DEFER(...) __VA_ARGS__
-#define CHECK_INIT_BASE(unique_i, return_value)                                                                        \
+#define CHECK_INIT_BASE(unique_id, return_value)                                                                       \
     std::shared_lock read_guard(rr_mutex_, std::try_to_lock);                                                          \
     if (!read_guard.owns_lock()) {                                                                                     \
         RTP_LLM_LOG_WARNING("doing re-registration");                                                                  \
         return return_value;                                                                                           \
     }                                                                                                                  \
-    if (!tryReinit(unique_id)) {                                                                                       \
+    const auto client = getMetaClient(unique_id);                                                                      \
+    if (!client) {                                                                                                     \
         return return_value;                                                                                           \
     }
 #define CHECK_INIT2(unique_id) CHECK_INIT_BASE(unique_id, DEFER({false, {}}))
 #define CHECK_INIT1(unique_id) CHECK_INIT_BASE(unique_id, false)
 
-#define CALL_CLIENT2(unique_id, function_name, ...)                                                                    \
-    if (const auto& client_iter = meta_client_map_.find(unique_id); client_iter != meta_client_map_.end()) {           \
-        auto [ec, result] = client_iter->second->function_name(__VA_ARGS__);                                           \
-        if (!checkError(ec)) {                                                                                         \
-            RTP_LLM_LOG_WARNING(#function_name " fail, ec [%d]", ec);                                                  \
-            return {false, {}};                                                                                        \
-        }                                                                                                              \
-        return {true, std::move(result)};                                                                              \
+#define CALL_CLIENT2(function_name, ...)                                                                               \
+    auto [ec, result] = client->function_name(__VA_ARGS__);                                                            \
+    if (!checkError(ec)) {                                                                                             \
+        RTP_LLM_LOG_WARNING(#function_name " fail, ec [%d]", ec);                                                      \
+        return {false, {}};                                                                                            \
     }                                                                                                                  \
-    RTP_LLM_LOG_WARNING("not find client [%s]", unique_id.c_str());                                                    \
-    return {false, {}};
+    return {true, std::move(result)};
 
 std::pair<bool, kv_cache_manager::Locations>
 ClientWrapper::match(const std::string&                      unique_id,
@@ -284,7 +289,7 @@ ClientWrapper::match(const std::string&                      unique_id,
                      const kv_cache_manager::BlockMask&      block_mask,
                      const kv_cache_manager::ForwardContext& forward_context) {
     CHECK_INIT2(unique_id);
-    CALL_CLIENT2(unique_id, MatchLocation, trace_id, query_type, keys, {}, block_mask, forward_context.sw_size, {});
+    CALL_CLIENT2(MatchLocation, trace_id, query_type, keys, {}, block_mask, forward_context.sw_size, {});
 }
 
 std::pair<bool, kv_cache_manager::WriteLocation>
@@ -295,7 +300,7 @@ ClientWrapper::getWriteLocation(const std::string&              unique_id,
                                 const std::vector<std::string>& location_spec_group_names,
                                 int64_t                         write_timeout_seconds) {
     CHECK_INIT2(unique_id);
-    CALL_CLIENT2(unique_id, StartWrite, trace_id, keys, tokens, location_spec_group_names, write_timeout_seconds);
+    CALL_CLIENT2(StartWrite, trace_id, keys, tokens, location_spec_group_names, write_timeout_seconds);
 }
 
 bool ClientWrapper::finishWrite(const std::string&                 unique_id,
@@ -304,16 +309,12 @@ bool ClientWrapper::finishWrite(const std::string&                 unique_id,
                                 const kv_cache_manager::BlockMask& block_mask,
                                 const kv_cache_manager::Locations& locations) {
     CHECK_INIT1(unique_id);
-    if (const auto& client_iter = meta_client_map_.find(unique_id); client_iter != meta_client_map_.end()) {
-        auto ec = client_iter->second->FinishWrite(trace_id, write_session_id, block_mask, locations);
-        if (!checkError(ec)) {
-            RTP_LLM_LOG_WARNING("FinishWrite fail, ec [%d]", ec);
-            return false;
-        }
-        return true;
+    auto ec = client->FinishWrite(trace_id, write_session_id, block_mask, locations);
+    if (!checkError(ec)) {
+        RTP_LLM_LOG_WARNING("FinishWrite fail, ec [%d]", ec);
+        return false;
     }
-    RTP_LLM_LOG_WARNING("not find client [%s]", unique_id.c_str());
-    return false;
+    return true;
 }
 
 bool ClientWrapper::checkError(kv_cache_manager::ClientErrorCode ec) {

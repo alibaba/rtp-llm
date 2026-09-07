@@ -256,9 +256,11 @@ class EnvArgumentParser(argparse.ArgumentParser):
 
         EnvArgumentParser._env_mappings[action.dest] = full_env_name
         EnvArgumentParser._env_alias_mappings[action.dest] = tuple(
-            f"{self.env_prefix}_{alias.upper().replace('-', '_')}"
-            if self.env_prefix
-            else alias.upper().replace("-", "_")
+            (
+                f"{self.env_prefix}_{alias.upper().replace('-', '_')}"
+                if self.env_prefix
+                else alias.upper().replace("-", "_")
+            )
             for alias in (env_aliases or ())
         )
 
