@@ -261,9 +261,11 @@ def stages(values, path, default_timeout, handlers, env=None, profiles=()):
                 if (
                     not isinstance(keys, list)
                     or not 1 <= len(keys) <= 4096
-                    or any(type(k) is not int or not 0 <= k < 2**64 for k in keys)
+                    or any(
+                        type(k) is not int or not -(2**63) <= k < 2**63 for k in keys
+                    )
                 ):
-                    fail(loc, "block_keys must be 1..4096 explicit uint64 keys")
+                    fail(loc, "block_keys must be 1..4096 explicit int64 keys")
             for key in ("priority", "qos_level"):
                 if key in params and (
                     type(params[key]) is not int or not -(2**31) <= params[key] < 2**31

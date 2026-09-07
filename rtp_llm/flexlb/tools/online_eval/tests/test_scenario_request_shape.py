@@ -22,7 +22,7 @@ class RequestShapeTests(unittest.TestCase):
             {"priority": 0},
             {"priority": 70, "qos_level": 30},
             {"priority": -1},
-            {"block_keys": [0, 2**64 - 1]},
+            {"block_keys": [-(2**63), 0, 2**63 - 1]},
         ):
             source["stages"][1]["params"] = dict(params, **extra)
             compiled = compile_scenarios([("shape.yaml", source)])[0]["stages"][1][
@@ -37,8 +37,8 @@ class RequestShapeTests(unittest.TestCase):
         for extra in (
             {"block_keys": []},
             {"block_keys": [True]},
-            {"block_keys": [-1]},
-            {"block_keys": [2**64]},
+            {"block_keys": [-(2**63) - 1]},
+            {"block_keys": [2**63]},
             {"block_keys": [0] * 4097},
             {"priority": True},
             {"priority": 2**31},
