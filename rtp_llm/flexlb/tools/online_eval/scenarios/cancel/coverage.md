@@ -103,7 +103,7 @@ Source baseline: `7120c1ff19446f694cbd99c5c9c5545bbd11e0c2`; shared status fixes
 
 ### cancel_lifecycle / sibling_isolation_batch
 
-`a_first_received`, `c_first_received`, `b_termination_ended`, `cancelled_slot_removed`, `a_completion_ended`, `a_completed`, `c_completion_ended`, `c_completed`, `b_not_completed`, `b_engine_cancelled`, `recovery_succeeds`, `closing_drain_scheduler`, `closing_drain_prefill_batches`, `closing_drain_decode_load`
+`a_first_received`, `c_first_received`, `b_termination_ended`, `cancelled_slot_removed`, `a_completion_ended`, `a_completed`, `c_completion_ended`, `c_completed`, `recovery_succeeds`, `b_not_completed`, `b_engine_cancelled`, `closing_drain_scheduler`, `closing_drain_prefill_batches`, `closing_drain_decode_load`
 
 ### cancel_lifecycle / phase_timing_batch
 
@@ -119,7 +119,7 @@ Source baseline: `7120c1ff19446f694cbd99c5c9c5545bbd11e0c2`; shared status fixes
 
 ### cancel_lifecycle / sibling_isolation_nonbatch
 
-`a_first_received`, `c_first_received`, `b_termination_ended`, `a_completion_ended`, `a_completed`, `c_completion_ended`, `c_completed`, `b_not_completed`, `b_engine_cancelled`, `recovery_succeeds`
+`a_first_received`, `c_first_received`, `b_termination_ended`, `a_completion_ended`, `a_completed`, `c_completion_ended`, `c_completed`, `recovery_succeeds`, `b_not_completed`, `b_engine_cancelled`
 
 ### cancel_lifecycle / phase_timing_nonbatch
 

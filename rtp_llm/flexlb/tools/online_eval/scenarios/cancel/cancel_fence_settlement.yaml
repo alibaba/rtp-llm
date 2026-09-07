@@ -89,6 +89,19 @@ variants:
       metric: engine_not_found
       expected: 1
       op: eq
+  - id: old_extra_wait_observed
+    action: cancel_observe
+    params:
+      duration_s: 2
+      requests:
+        $ref: stages.target.output.requests
+      until:
+        metric: stream_ended
+        op: eq
+        value: 1
+      include:
+      - client_records
+    timeout_s: 30
   - id: post_terminal
     action: cancel_observe
     params:
@@ -247,6 +260,19 @@ variants:
       metric: engine_not_found
       expected: 1
       op: eq
+  - id: old_extra_wait_observed
+    action: cancel_observe
+    params:
+      duration_s: 2
+      requests:
+        $ref: stages.target.output.requests
+      until:
+        metric: stream_ended
+        op: eq
+        value: 1
+      include:
+      - client_records
+    timeout_s: 30
   - id: post_terminal
     action: cancel_observe
     params:
