@@ -1031,8 +1031,10 @@ TEST(HybridPoolConfigCreatorTest, DecodePrefillCp8MtpGenNum2MatchesFixedAndSwaRi
     decode_pc.prefill_cp_config.kv_cache_sharded = true;
     decode_pc.prefill_cp_config.prefill_cp_size  = cp_size;
 
-    auto prefill_config = HybridPoolConfigCreator::createConfig(mc, prefill_pc, makeDsv4KvCacheConfig(), false, 2);
-    auto decode_config  = HybridPoolConfigCreator::createConfig(mc, decode_pc, makeDsv4KvCacheConfig(), false, 2);
+    auto prefill_config = CacheConfigCreator::createBasicConfig(mc, prefill_pc, makeDsv4KvCacheConfig(), false, 2);
+    auto decode_config  = CacheConfigCreator::createBasicConfig(mc, decode_pc, makeDsv4KvCacheConfig(), false, 2);
+    EXPECT_EQ(prefill_config.cp_size, 8);
+    EXPECT_EQ(decode_config.cp_size, 1);  // The fixed rings below still use remote Prefill C8.
 
     ASSERT_EQ(prefill_config.cache_specs.size(), 7u);
     ASSERT_EQ(decode_config.cache_specs.size(), 7u);

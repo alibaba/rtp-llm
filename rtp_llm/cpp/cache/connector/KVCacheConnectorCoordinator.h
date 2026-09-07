@@ -68,7 +68,7 @@ private:
     std::shared_ptr<KVCacheMemoryConnector> initMemoryConnector();
     std::shared_ptr<RemoteConnector>        initRemoteConnector();
     bool                                    initP2PConnectorInternal();
-    // Returns CP size when page-level RR sharding is active; 1 otherwise.
+    // Local cache sharding factor; remote Prefill geometry does not select local blocks.
     int  cpSize() const;
     void initUpdateThread();
     void updateOnce();

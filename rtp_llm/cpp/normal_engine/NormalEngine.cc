@@ -330,6 +330,8 @@ WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
     // it back to attn_config.tokens_per_block would clobber DSV4's promoted
     // value when the user passed --seq_size_per_block < 256.
     cache_config.block_num = 5;
+    // Warmup uses fake block0 tables, not real sharded allocation (see preRun).
+    cache_config.cp_size = 1;
     // Snapshot hybrid-cache group info from the warmup cache_config so that the
     // NormalExecutor → PyWrappedModel → CudaGraphRunner created below sees the
     // real kv_cache_group_num_ / kv_cache_layer_to_group_.  Without this the

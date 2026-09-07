@@ -236,6 +236,27 @@ class ServerArgsSetTest(TestCase):
         restored = pickle.loads(pickle.dumps(py_env_configs.kv_cache_config))
         self.assertEqual(restored.kimi_k3_kda_pool_blocks, 16)
 
+    def test_decode_cache_sharding_parser_and_pickle(self):
+        from rtp_llm.server.server_args.server_args import setup_args
+
+        sys.argv = ["prog"]
+        self.assertFalse(setup_args().parallelism_config.decode_cp_kv_cache_sharded)
+        os.environ["DECODE_CP_KV_CACHE_SHARDED"] = "1"
+        pc = setup_args().parallelism_config
+        self.assertTrue(pc.decode_cp_kv_cache_sharded)
+        restored = pickle.loads(pickle.dumps(pc))
+        self.assertTrue(restored.decode_cp_kv_cache_sharded)
+        self.assertEqual(restored.to_string(), pc.to_string())
+        sys.argv = ["prog", "--decode_cp_kv_cache_sharded", "0", "--tp_size", "8"]
+        pc = setup_args().parallelism_config
+        self.assertFalse(pc.decode_cp_kv_cache_sharded)
+
+        state = pc.__getstate__()
+        self.assertEqual(len(state), 19)
+        restored = pickle.loads(pickle.dumps(pc))
+        self.assertFalse(restored.decode_cp_kv_cache_sharded)
+        self.assertEqual(restored.to_string(), pc.to_string())
+
     def test_mixed_env_and_cmd_args(self):
         """Test mixed environment variables and command line arguments."""
         # Set some environment variables

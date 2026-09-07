@@ -53,6 +53,7 @@ struct CacheConfig {
     uint32_t block_num;
     size_t   seq_size_per_block        = 1;
     size_t   kernel_seq_size_per_block = 1;
+    int      cp_size                   = 1;  // Derived local storage geometry, not remote Prefill CP size.
 
     // Returns how many kernel blocks fit inside one physical (kv-manager) block.
     size_t kernelBlocksPerKvBlock() const {

@@ -367,18 +367,7 @@ std::shared_ptr<RemoteConnector> KVCacheConnectorCoordinator::initRemoteConnecto
 }
 
 int KVCacheConnectorCoordinator::cpSize() const {
-    const auto& cp_cfg = parallelism_config_.prefill_cp_config;
-    if (!cp_cfg.kv_cache_sharded) {
-        return 1;
-    }
-    if (parallelism_config_.tp_size > 1) {
-        return static_cast<int>(parallelism_config_.tp_size);
-    }
-    if (parallelism_config_.role_type == RoleType::DECODE && cp_cfg.is_prefill_enabled()
-        && cp_cfg.prefill_cp_size > 1) {
-        return static_cast<int>(cp_cfg.prefill_cp_size);
-    }
-    return 1;
+    return cache_config_.cp_size;
 }
 
 void KVCacheConnectorCoordinator::updateOnce() {

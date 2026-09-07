@@ -1140,6 +1140,7 @@ class ParallelismConfig:
     ktp_size: int
     pp_size: int
     prefill_cp_config: ...
+    decode_cp_kv_cache_sharded: bool
     tp_rank: int
     tp_size: int
     world_rank: int

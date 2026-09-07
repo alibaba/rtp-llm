@@ -73,7 +73,8 @@ std::string ParallelismConfig::to_string() const {
         << "ffn_disaggregate_config: {\n"
         << ffn_disaggregate_config.to_string() << "\n}\n"
         << "prefill_cp_config: {\n"
-        << prefill_cp_config.to_string() << "}\n";
+        << prefill_cp_config.to_string() << "}\n"
+        << "decode_cp_kv_cache_sharded: " << decode_cp_kv_cache_sharded << "\n";
     return oss.str();
 }
 

@@ -161,6 +161,28 @@ void validateDsv4KernelSeqSize(size_t seq_size_per_block, size_t kernel_seq_size
                             kernel_seq_size_per_block);
 }
 
+void configureLocalCpCacheGeometry(CacheConfig& config, const ParallelismConfig& parallelism_config) {
+    const bool sharded = parallelism_config.role_type == RoleType::DECODE ?
+                             parallelism_config.decode_cp_kv_cache_sharded :
+                             parallelism_config.prefill_cp_config.kv_cache_sharded;
+    if (!sharded || parallelism_config.tp_size <= 1) {
+        return;
+    }
+
+    config.cp_size = static_cast<int>(parallelism_config.tp_size);
+    config.group_seq_size_per_block.resize(config.cache_specs.size(), config.seq_size_per_block);
+    for (size_t gid = 0; gid < config.cache_specs.size(); ++gid) {
+        if (config.group_types[gid] != CacheGroupType::LINEAR) {
+            continue;
+        }
+        // LINEAR slots hold checkpoint states, not token KV: changing the
+        // checkpoint interval does not change their physical SSM/conv bytes.
+        const auto interval = config.seq_size_per_block * config.cp_size;
+        config.cache_specs[gid]->seq_size_per_block = interval;
+        config.group_seq_size_per_block[gid] = interval;
+    }
+}
+
 }  // namespace
 
 CacheConfig CacheConfigCreator::createBasicConfig(const ModelConfig&       model_config,
@@ -168,14 +190,18 @@ CacheConfig CacheConfigCreator::createBasicConfig(const ModelConfig&       model
                                                   const KVCacheConfig&     kv_cache_config,
                                                   bool                     is_mtp,
                                                   int                      gen_num_per_cycle) {
+    CacheConfig config;
     if (shouldUseHybridPoolLayout(model_config)) {
-        return HybridPoolConfigCreator::createConfig(
+        config = HybridPoolConfigCreator::createConfig(
             model_config, parallelism_config, kv_cache_config, is_mtp, gen_num_per_cycle);
     } else if (model_config.hybrid_attention_config.enable_hybrid_attention) {
-        return HybridConfigCreator::createHybridConfig(model_config, parallelism_config, is_mtp);
+        config = HybridConfigCreator::createHybridConfig(model_config, parallelism_config, is_mtp);
     } else {
-        return SingleConfigCreator::createSingleConfig(model_config, parallelism_config, is_mtp);
+        config = SingleConfigCreator::createSingleConfig(model_config, parallelism_config, is_mtp);
     }
+
+    configureLocalCpCacheGeometry(config, parallelism_config);
+    return config;
 }
 
 CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                               model_config,

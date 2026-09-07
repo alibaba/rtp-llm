@@ -74,15 +74,14 @@ KVCacheManager::KVCacheManager(const CacheConfig&                 config,
     // malloc()/insertIntoCache().  When kv_cache_sharded=false (or tp_size==1),
     // cp_slot_mapper_ stays nullptr and every call site stays bit-equal to the
     // pre-RR behaviour.
-    const auto& cp_cfg = parallelism_config_.prefill_cp_config;
-    if (cp_cfg.kv_cache_sharded && parallelism_config_.tp_size > 1) {
+    if (config_.cp_size > 1) {
         cp_slot_mapper_ = std::make_shared<CPSlotMapper>(static_cast<int>(parallelism_config_.tp_rank),
-                                                         static_cast<int>(parallelism_config_.tp_size),
+                                                         config_.cp_size,
                                                          static_cast<int>(config_.seq_size_per_block));
         RTP_LLM_LOG_INFO("CP sharded KV cache enabled: cp_rank=%d, cp_size=%d, block_size=%zu, "
                          "virtual_block_size=%d",
                          (int)parallelism_config_.tp_rank,
-                         (int)parallelism_config_.tp_size,
+                         config_.cp_size,
                          config_.seq_size_per_block,
                          cp_slot_mapper_->virtualBlockSize());
     }

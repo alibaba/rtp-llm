@@ -539,6 +539,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_ReturnNull_WhenCacheKeysEmpty
 
 TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_CPShardedKeepsNonFullGroupsInLogicalCoordinates) {
     CacheConfig cp_cache_config       = cache_config_;
+    cp_cache_config.cp_size = 2;
     cp_cache_config.layer_num         = 2;
     cp_cache_config.layer_all_num     = 2;
     cp_cache_config.layer_to_group_id = {0, 1};
@@ -546,7 +547,8 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_CPShardedKeepsNonFullGroupsIn
 
     ParallelismConfig parallelism_config;
     parallelism_config.tp_size                            = 2;
-    parallelism_config.prefill_cp_config.kv_cache_sharded = true;
+    parallelism_config.role_type = RoleType::DECODE;
+    parallelism_config.decode_cp_kv_cache_sharded = true;
 
     auto coordinator = std::make_shared<KVCacheConnectorCoordinator>(cp_cache_config,
                                                                      kv_cache_config_,
@@ -598,6 +600,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_CPShardedKeepsNonFullGroupsIn
 
 TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_CPShardedSkipsRemapForCanonicalEvictedResource) {
     CacheConfig cp_cache_config       = cache_config_;
+    cp_cache_config.cp_size = 2;
     cp_cache_config.layer_num         = 2;
     cp_cache_config.layer_all_num     = 2;
     cp_cache_config.layer_to_group_id = {0, 1};
@@ -673,6 +676,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_CPShardedSkipsRemapForCanonic
 
 TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_CPShardedKeepsCompactFixedGroupsInCanonicalCoordinates) {
     CacheConfig cp_cache_config                    = cache_config_;
+    cp_cache_config.cp_size = 2;
     cp_cache_config.layer_num                      = 2;
     cp_cache_config.layer_all_num                  = 2;
     cp_cache_config.seq_size_per_block             = 128;
@@ -732,7 +736,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_CPShardedKeepsCompactFixedGro
     coordinator.reset();
 }
 
-TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_DecodePrefillCpRemapsFullAndCompactFixedGroups) {
+TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_DenseDecodeKeepsLocalCoordinatesWithPrefillCp) {
     CacheConfig cp_cache_config                    = cache_config_;
     cp_cache_config.layer_num                      = 2;
     cp_cache_config.layer_all_num                  = 2;
@@ -771,11 +775,11 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_DecodePrefillCpRemapsFullAndC
         .WillOnce(
             testing::Invoke([](const KVCacheResource& ref_resource, const CacheKeysType& ref_keys, bool is_connector) {
                 (void)is_connector;
-                EXPECT_THAT(ref_keys, testing::ElementsAre(11, 13, 14));
-                EXPECT_THAT(ref_resource.cacheKeys(), testing::ElementsAre(11, 13, 14));
+                EXPECT_THAT(ref_keys, testing::ElementsAre(10, 11, 12, 13, 14));
+                EXPECT_THAT(ref_resource.cacheKeys(), testing::ElementsAre(10, 11, 12, 13, 14));
                 EXPECT_FALSE(ref_resource.lastBlockAligned());
-                EXPECT_THAT(ref_resource.blocks(/*gid=*/0), testing::ElementsAre(101, 103));
-                EXPECT_THAT(ref_resource.blocks(/*gid=*/1), testing::ElementsAre(200, 201));
+                EXPECT_THAT(ref_resource.blocks(/*gid=*/0), testing::ElementsAre(100, 101, 102, 103, 104));
+                EXPECT_THAT(ref_resource.blocks(/*gid=*/1), testing::ElementsAre(200, 201, 202));
                 return std::make_shared<KVCacheResource>();
             }));
 
@@ -798,6 +802,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_DecodePrefillCpRemapsFullAndC
 
 TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_CPShardedAppendsDummyTailWhenPartialIsNotLastRank) {
     CacheConfig cp_cache_config       = cache_config_;
+    cp_cache_config.cp_size = 2;
     cp_cache_config.layer_num         = 2;
     cp_cache_config.layer_all_num     = 2;
     cp_cache_config.layer_to_group_id = {0, 1};
@@ -997,8 +1002,12 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_ReturnFusedContext_WhenNoConn
 
 TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_ReturnFusedContext_WhenNoConnectors_NewCoordinator) {
     // Use fixture allocator_/exec_ctx_ so allocator has a valid BlockPool.
+    ParallelismConfig parallelism_config;
+    parallelism_config.role_type = RoleType::DECODE;
+    parallelism_config.tp_size = 8;
+    parallelism_config.prefill_cp_config.kv_cache_sharded = true;
     auto coordinator = std::make_shared<KVCacheConnectorCoordinator>(
-        cache_config_, KVCacheConfig{}, RuntimeConfig{}, ParallelismConfig{}, SpeculativeExecutionConfig{}, allocator_);
+        cache_config_, KVCacheConfig{}, RuntimeConfig{}, parallelism_config, SpeculativeExecutionConfig{}, allocator_);
 
     auto req_resource = KVCacheResource{};
     req_resource.cacheKeys().assign({1, 2, 3});
@@ -1006,7 +1015,9 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_ReturnFusedContext_WhenNoConn
 
     auto resource_holder = std::make_shared<std::shared_ptr<KVCacheResource>>(resource);
     EXPECT_CALL(*allocator_, incrKVCacheRef(testing::_, testing::_, testing::_))
-        .WillOnce(testing::Invoke([resource_holder](const KVCacheResource&, const CacheKeysType&, bool is_connector) {
+        .WillOnce(testing::Invoke([resource_holder](const KVCacheResource&, const CacheKeysType& keys, bool is_connector) {
+            // The peer Prefill is sharded; this Decode pool and its connector keys are not.
+            EXPECT_THAT(keys, testing::ElementsAre(1, 2, 3));
             auto out = *resource_holder;
             resource_holder->reset();
             return out;

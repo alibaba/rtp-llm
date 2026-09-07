@@ -89,6 +89,7 @@ struct ParallelismConfig {
 
     // Context Parallel configuration
     PrefillCPConfig prefill_cp_config;
+    bool decode_cp_kv_cache_sharded = false;
 
     int64_t get_attn_tp_size() const {
         return prefill_cp_config.is_enabled() ? 1 : tp_size;

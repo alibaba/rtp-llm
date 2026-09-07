@@ -1193,6 +1193,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("role_type", &ParallelismConfig::role_type)
         .def_readwrite("ffn_disaggregate_config", &ParallelismConfig::ffn_disaggregate_config)
         .def_readwrite("prefill_cp_config", &ParallelismConfig::prefill_cp_config)
+        .def_readwrite("decode_cp_kv_cache_sharded", &ParallelismConfig::decode_cp_kv_cache_sharded)
         .def("to_string", &ParallelismConfig::to_string)
         .def("get_attn_tp_size", &ParallelismConfig::get_attn_tp_size)
         .def("get_attn_tp_rank", &ParallelismConfig::get_attn_tp_rank)
@@ -1221,14 +1222,15 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.ffn_disaggregate_config,
                                       self.prefill_cp_config,
                                       self.use_ub_comm,
-                                      self.role_type);
+                                      self.role_type,
+                                      self.decode_cp_kv_cache_sharded);
             },
             [](py::tuple t) {
-                if (t.size() != 18 && t.size() != 20)
+                if (t.size() < 18 || t.size() > 21)
                     throw std::runtime_error("Invalid state!");
                 ParallelismConfig c;
                 try {
-                    if (t.size() == 18) {
+                    if (t.size() == 18 || t.size() == 19) {
                         c.tp_size                 = t[0].cast<int64_t>();
                         c.ep_size                 = t[1].cast<int64_t>();
                         c.dp_size                 = t[2].cast<int64_t>();
@@ -1247,6 +1249,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                         c.prefill_cp_config       = t[15].cast<PrefillCPConfig>();
                         c.use_ub_comm             = t[16].cast<bool>();
                         c.role_type               = t[17].cast<RoleType>();
+                        if (t.size() == 19) {
+                            c.decode_cp_kv_cache_sharded = t[18].cast<bool>();
+                        }
                         return c;
                     }
                     c.tp_size                 = t[0].cast<int64_t>();
@@ -1269,6 +1274,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.prefill_cp_config       = t[17].cast<PrefillCPConfig>();
                     c.use_ub_comm             = t[18].cast<bool>();
                     c.role_type               = t[19].cast<RoleType>();
+                    if (t.size() == 21) {
+                        c.decode_cp_kv_cache_sharded = t[20].cast<bool>();
+                    }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("ParallelismConfig unpickle error: ") + e.what());
                 }

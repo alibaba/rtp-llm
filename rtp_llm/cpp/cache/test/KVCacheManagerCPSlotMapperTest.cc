@@ -4,6 +4,7 @@
 
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
+#include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/cache/test/BlockPoolTestHelper.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
@@ -90,6 +91,7 @@ TEST_F(KVCacheManagerCPSlotMapperTest, SingleRank_ReturnsNullMapper) {
 TEST_F(KVCacheManagerCPSlotMapperTest, CPShardingEnabled_ReturnsValidMapper) {
     const int seq_size_per_block = 4;
     auto      config             = makeTestConfig(/*block_num=*/20, seq_size_per_block);
+    config.cp_size = 2;
 
     ParallelismConfig par;
     par.tp_rank                            = 1;
@@ -114,6 +116,7 @@ TEST_F(KVCacheManagerCPSlotMapperTest, CPShardingEnabled_ReturnsValidMapper) {
 TEST_F(KVCacheManagerCPSlotMapperTest, CPShardingEnabled_CacheInfoReportsVirtualBlockSize) {
     const int seq_size_per_block = 4;
     auto      config             = makeTestConfig(/*block_num=*/20, seq_size_per_block);
+    config.cp_size = 4;
 
     ParallelismConfig par;
     par.tp_rank                            = 0;
@@ -125,6 +128,56 @@ TEST_F(KVCacheManagerCPSlotMapperTest, CPShardingEnabled_CacheInfoReportsVirtual
 
     auto info = mgr->getKVCacheInfo(/*latest_version=*/-1, /*need_cache_keys=*/false);
     EXPECT_EQ(info.block_size, static_cast<size_t>(seq_size_per_block * par.tp_size));
+}
+
+TEST_F(KVCacheManagerCPSlotMapperTest, CreatorSelectsLocalRoleIndependentOfComputeCP) {
+    ModelConfig model;
+    // The creator consumes validated role flags, not a model-name whitelist.
+    model.num_layers = 2;
+    model.data_type = DataType::TYPE_FP16;
+    model.attn_config.head_num = 8;
+    model.attn_config.kv_head_num = 8;
+    model.attn_config.size_per_head = 16;
+    model.attn_config.tokens_per_block = 4;
+
+    struct Case {
+        RoleType role;
+        bool prefill;
+        bool decode;
+        int local_c;
+    };
+    for (const auto& c : {Case{RoleType::PREFILL, true, false, 8},
+                          Case{RoleType::PREFILL, false, true, 1},
+                          Case{RoleType::DECODE, false, true, 8},
+                          Case{RoleType::DECODE, true, false, 1},
+                          Case{RoleType::PDFUSION, true, true, 8},
+                          Case{RoleType::PDFUSION, false, false, 1}}) {
+        for (const auto method : {CPRotateMethod::DISABLED, CPRotateMethod::ALL_GATHER, CPRotateMethod::PREFILL_CP}) {
+            ParallelismConfig par;
+            par.role_type = c.role;
+            par.tp_size = 8;
+            par.tp_rank = 3;
+            par.prefill_cp_config.kv_cache_sharded = c.prefill;
+            par.prefill_cp_config.method = method;
+            par.decode_cp_kv_cache_sharded = c.decode;
+            auto config = CacheConfigCreator::createBasicConfig(model, par, KVCacheConfig{}, false, 0);
+            ASSERT_EQ(config.cp_size, c.local_c);
+            EXPECT_EQ(config.seq_size_per_block, 4);
+
+            // Only bypass the distributed block-count sync; construct real groups and pools.
+            KVCacheManager manager(config, true, nullptr, KVCacheConfig{}, par);
+            ASSERT_TRUE(manager.init());
+            auto mapper = manager.cpSlotMapper();
+            if (c.local_c == 1) {
+                EXPECT_EQ(mapper, nullptr);
+            } else {
+                ASSERT_NE(mapper, nullptr);
+                EXPECT_EQ(mapper->cpSize(), 8);
+                EXPECT_EQ(mapper->cpRank(), 3);
+                EXPECT_EQ(mapper->blockSize(), 4);
+            }
+        }
+    }
 }
 
 // Partial tails may be allocated as live KV blocks before they become cacheable
