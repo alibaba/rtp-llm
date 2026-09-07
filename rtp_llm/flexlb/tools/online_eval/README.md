@@ -517,3 +517,35 @@ is healthy only if:
 For capacity search, run the same trace with increasing `REPLAY_SPEED` or use
 different trace slices. The practical capacity point is the highest completed
 QPS before TTFT p99, error rate, or queue backlog bends upward.
+
+### Structured parent entry integration
+
+The YAML parent entry is `parallel_runner.py --source yaml`, using `--case-dir`
+for the scenario directory and `--instances` for exact compiled IDs. It requires
+`--shard case`; `--keep` is unsupported. This parent owns the machine port-window
+locks, output lock, resource budget, child execution and aggregate result checks.
+Calling `scenario_runner.py --list-json` only verifies the child catalog.
+
+The parent implementation and its tests were restored from the verified fixed
+source `e11f482df040088a3c3999a1f805845cce4e9ea8` onto the child/core integration
+`9d8576c44bf6dda4191f5d9070c3cc929b7fc5a0`. The restored files are
+`parallel_runner.py`, `flexlb_ft/{instance_runner,instance_plan,resource_plan}.py`
+and their four matching test modules. The core/compiler/actions stay at the new
+integration revision.
+
+From the repository root, validate the parent before real execution:
+
+```bash
+python3 rtp_llm/flexlb/tools/online_eval/parallel_runner.py \
+  --source yaml \
+  --case-dir rtp_llm/flexlb/tools/online_eval/scenarios/admission \
+  --instances 'priority_admission::permit_released_without_preemption::batch-window,prefill_batch_token_budget::boundary::batch-window' \
+  --profile batch-window --grade normal --parallel 1 --shard case \
+  --dry-run --out-dir /tmp/flexlb-admission-parent-probe
+```
+
+Use the assigned lease's explicit port bases and remove `--dry-run` only for an
+authorized real run. The exact same fixed checkout must contain parent and child;
+do not bypass the parent or copy files into a running revision. Grade is passed to
+both child listing and execution and recorded in the manifest/results. A mismatched
+grade or an execution/cleanup error cannot be accepted as a green result.
