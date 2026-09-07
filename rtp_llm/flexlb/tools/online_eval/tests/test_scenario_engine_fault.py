@@ -144,6 +144,18 @@ class EngineFaultTests(unittest.TestCase):
                 ef.inject(self.ctx, self.params, self.deadline)
             self.assertEqual(self.ctx.cleanup(5)[0]["status"], "PASS")
 
+    def test_ack_port_must_match_pre_mutation_endpoint(self):
+        def wrong(ops, endpoint, deadline, body=None):
+            result = self.http(ops, endpoint, deadline, body)
+            if body and body["enabled"]:
+                result["port"] = 2
+            return result
+
+        with patch.object(ef, "_http", side_effect=wrong):
+            with self.assertRaises(ValueError):
+                ef.inject(self.ctx, self.params, self.deadline)
+            self.assertEqual(self.ctx.cleanup(5)[0]["status"], "PASS")
+
     def test_typed_reference_and_epoch_fence(self):
         self.ctx.outputs["add"] = {"engine": "p0"}
         params = dict(self.params, targets=[{"$ref": "stages.add.output.engine"}])

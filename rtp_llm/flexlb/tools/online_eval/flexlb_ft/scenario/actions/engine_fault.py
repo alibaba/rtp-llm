@@ -65,6 +65,7 @@ def validate_clear(params, plan):
 class EngineFault:
     def __init__(self, ctx, targets, fault_type, options, claims):
         self.ctx, self.targets, self.fault_type = ctx, targets, fault_type
+        self.ops = ctx.ops
         self.options, self.claims = options, claims
         self.epoch = ctx.env_epoch
         self.pending = set()
@@ -90,7 +91,7 @@ class EngineFault:
         self.evidence["injection" if enabled else "clearing"].append(row)
         try:
             response = _http(
-                self.ctx.ops,
+                self.ops,
                 "inject",
                 deadline,
                 dict(
@@ -103,6 +104,7 @@ class EngineFault:
                 or response.get("engine") != name
                 or response.get("type") != self.fault_type
                 or type(response.get("port")) is not int
+                or response["port"] != self.ports[name]
             ):
                 raise ValueError(
                     "fault control lacks successful target/type acknowledgement"
@@ -137,6 +139,15 @@ def inject(ctx, params, deadline):
     ) or len(set(targets)) != len(targets):
         raise ValueError("resolved fault targets must be distinct engine names")
     before = _engines(_http(ctx.ops, "snapshot", deadline), targets)
+    ports = {}
+    for name, entry in before.items():
+        try:
+            port = int(entry["grpc_addr"].rsplit(":", 1)[1])
+        except (ValueError, IndexError) as exc:
+            raise ValueError("engine snapshot has no valid endpoint port") from exc
+        if not 1 <= port <= 65535:
+            raise ValueError("engine snapshot endpoint port outside TCP range")
+        ports[name] = port
     claims = getattr(ctx, "_engine_fault_claims", None)
     if claims is None:
         claims = ctx._engine_fault_claims = set()
@@ -157,6 +168,7 @@ def inject(ctx, params, deadline):
             if state is not False:
                 raise ValueError("existing or unobserved fault configuration")
     fault = EngineFault(ctx, targets, params["type"], params["options"], claims)
+    fault.ports = ports
     fault.evidence["before"] = before
     handle = ctx.register_resource("engine_fault", fault, fault.cleanup)
     for name in targets:
