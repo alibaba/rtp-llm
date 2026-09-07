@@ -2,13 +2,13 @@
 
 Status: all five families are implemented. Fixed 5affc1c6de64fc8a1bf0d74dc3789d035c9a7307 now has original Java results for all 25 instances: 16 PASS, 4 freeze FAIL, 4 wraparound TIMEOUT and 1 quota ERROR. The first two lifecycle PASS results had independent runtime review on that original source; the remaining run is awaiting independent evidence review. These results do not validate later corrections, including dual/freeze configuration inheritance. Legacy functions remain intact and are never invoked by these YAML programs. Baseline legacy source: commit `834b5eea2866dea71e3d27adb37f8c8a8b02c160`, `flexlb_ft/cases/master/`. Paths below are relative to `online_eval`.
 
-Nine legacy cases map to five YAML families, ten variants and 25 profile instances. `all4` means batch-window, single-nonbatch, single-batch, window-nonbatch. `batch` means batch-window only. HA uses actual owned dual standalone masters, without an ambient HA skip gate, ZK forwarding or Tier-3 claims.
+Nine legacy cases map to five YAML families, ten variants and 29 candidate profile instances. The original 25-instance runtime reports above remain historical and do not include the four newly enabled profiles. `all4` means batch-window, single-nonbatch, single-batch, window-nonbatch. `batch` means batch-window only. HA uses actual owned dual standalone masters, without an ambient HA skip gate, ZK forwarding or Tier-3 claims.
 
 | Legacy case | YAML family / variant | Profiles |
 |---|---|---|
-| master_kill | master_lifecycle / kill_single + kill_dual_b_to_a (former explicit HA gate) | batch |
+| master_kill | master_lifecycle / kill_single; kill_dual_b_to_a (former explicit HA gate) | kill_single all4; dual batch |
 | master_freeze | master_lifecycle / freeze_short_long | all4 |
-| master_quota_block | master_dispatch_quota / single_prefill_ttl | batch |
+| master_quota_block | master_dispatch_quota / single_prefill_ttl | batch-window, single-batch |
 | master_coldstart_burst | master_coldstart / burst_twenty | all4 |
 | master_ha_failover | master_ha_failover / standalone_a_to_b | batch |
 | fallback_direct | client_fallback_failback / all_masters_down | all4 |
@@ -268,3 +268,32 @@ timeout, invalid counters and the formal stage boundaries.
 The original5aff blocked ERROR and corrected45 ready ERROR are both retained.
 This repair requires a new fixed-source run; passing local tests is not a
 quota Java PASS and does not reinterpret either prior result.
+
+
+## Four missing legacy profile pairs
+
+Based on fixed a22f0678a2beb479c3da7ff9fa09df9c354f3d19, kill_single now
+includes single-nonbatch, single-batch and window-nonbatch, and quota adds
+single-batch with the old explicit enqueue_batch capability requirement.
+The legacy default single-Master kill has no profile exclusion; _elastic_env
+uses each profile's own decision/dispatcher axes, PRIORITY and omitted queue
+timeout. _quota_spec likewise preserves the selected axes with batch quota1.
+Tests compare every full resolved configuration and actual EnvSpec perf,
+topology and discovery with those old constructors; no runtime action calls
+the old case. The optional dual-kill construction remains batch-window only
+and is not claimed as new HA coverage for the three added profiles.
+
+No stages, owner checks, thresholds or timing budgets change in this profile
+expansion. Earlier declared stronger candidate gates still apply: enabling a
+profile does not assert exact behavioral equivalence or paired replacement.
+Both kill requests use the actual core consumer: BATCH responses Fetch once,
+NON_BATCH responses Generate once. Quota fill retains four deferred Schedule
+requests with no Fetch and no claimed business completion on either profile.
+The request-worker fixtures replace external RPCs; they do not execute a Java
+Master fault, prove quota blocking or establish profile runtime acceptance.
+Existing blocked/recovery boundary tests and all Master tests remain required.
+
+All four new pairs require their own fixed-source runtime/paired evidence.
+The historical batch-window quota PASS and kill PASS are not inherited; the
+seven known Master FAIL/TIMEOUT instances are unchanged. Legacy registry and
+371 profile selections remain intact.

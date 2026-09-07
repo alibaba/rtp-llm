@@ -18,7 +18,7 @@ class MasterConfigTests(unittest.TestCase):
             / "scenarios/master/master_lifecycle.yaml"
         )
         plans = compile_scenarios(load_scenarios(path), handlers=handlers())
-        self.assertEqual(6, len(plans))
+        self.assertEqual(9, len(plans))
         for plan in plans:
             with self.subTest(variant=plan["variant_id"], profile=plan["profile"]):
                 if plan["variant_id"] == "kill_single":

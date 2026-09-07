@@ -372,7 +372,7 @@ class MasterActionsTest(unittest.TestCase):
             load_scenarios(root),
             handlers={h.name: h for h in master.HANDLERS + controls + faults},
         )
-        self.assertEqual(25, len(plans))
+        self.assertEqual(29, len(plans))
         self.assertEqual(5, len({p["scenario_id"] for p in plans}))
         self.assertTrue(all(any(s["check_ids"] for s in p["stages"]) for p in plans))
         for plan in plans:

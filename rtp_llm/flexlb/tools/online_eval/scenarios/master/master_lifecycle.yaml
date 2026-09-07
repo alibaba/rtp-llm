@@ -26,6 +26,9 @@ variants:
 - id: kill_single
   profiles:
   - batch-window
+  - single-nonbatch
+  - single-batch
+  - window-nonbatch
   legacy_case_ids:
   - master_kill
   environment_overrides:

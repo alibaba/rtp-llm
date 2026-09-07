@@ -5,6 +5,9 @@ description: Fill one batch quota, stop its prefill, observe blocked traffic and
 category: master
 profiles:
 - batch-window
+- single-batch
+requires:
+- enqueue_batch
 legacy_case_ids:
 - master_quota_block
 environment:
