@@ -33,35 +33,32 @@ bool StoreTaskRunner::prepareTask(Task& task, const std::vector<std::vector<Grou
                     TransferDescriptor::deviceToHost(group_set_id, source.device_blocks, target_block) :
                     TransferDescriptor::deviceToDisk(group_set_id, source.device_blocks, target_block);
             descriptor.path_index = key_index;
-            task.descriptors.push_back(std::move(descriptor));
+            task.transfer_task.addDescriptor(std::move(descriptor));
         }
     }
     return true;
 }
 
-void StoreTaskRunner::runTransfer(TaskPtr                         task,
+void StoreTaskRunner::runTransfer(TaskPtr                        task,
                                   const BlockTransferDispatcher& transfer_dispatcher,
                                   BlockTreeCacheMetricsReporter& metrics_reporter,
-                                  int                            host_timeout_ms,
-                                  int                            disk_timeout_ms,
                                   TransferDoneCallback           callback) {
     try {
-        const int timeout_ms = task->target_tier == Tier::DISK ? disk_timeout_ms : host_timeout_ms;
         task->phase = Task::Phase::TRANSFERRING;
-        task->transfer_begin_time_us =
+        const int64_t transfer_begin =
             metrics_reporter.reportTransferStarted(CacheTransferOperation::STORE, Tier::DEVICE, task->target_tier);
 
         auto stage_state = std::make_shared<TransferStageState>(
-            [this, task, &metrics_reporter, callback](ErrorInfo error) mutable {
+            [this, task, &metrics_reporter, transfer_begin, callback](ErrorInfo error) mutable {
                 try {
                     static const std::vector<TransferDescriptor> empty_descriptors;
                     metrics_reporter.reportTransferFinished(CacheTransferOperation::STORE,
                                                             Tier::DEVICE,
                                                             task->target_tier,
-                                                            task->descriptors.size(),
-                                                            task->transfer_begin_time_us,
+                                                            task->descriptors().size(),
+                                                            transfer_begin,
                                                             error.ok(),
-                                                            error.ok() ? task->descriptors : empty_descriptors,
+                                                            error.ok() ? task->descriptors() : empty_descriptors,
                                                             group_sets_);
                     task->phase = Task::Phase::FINISHED;
                     callback(std::move(error));
@@ -76,17 +73,16 @@ void StoreTaskRunner::runTransfer(TaskPtr                         task,
 
         const auto submit_batch = [&](const std::vector<TransferDescriptor>& descriptors) {
             stage_state->addBatch();
-            transfer_dispatcher.runTransfer(
-                descriptors,
-                timeout_ms,
-                [stage_state](ErrorInfo error) { stage_state->completeBatch(std::move(error)); });
+            transfer_dispatcher.runTransfer(task->transfer_task.subtask(descriptors), [stage_state](ErrorInfo error) {
+                stage_state->completeBatch(std::move(error));
+            });
         };
         if (task->target_tier == Tier::DISK) {
-            for (const auto& descriptor : task->descriptors) {
+            for (const auto& descriptor : task->descriptors()) {
                 submit_batch({descriptor});
             }
-        } else if (!task->descriptors.empty()) {
-            submit_batch(task->descriptors);
+        } else if (!task->descriptors().empty()) {
+            submit_batch(task->descriptors());
         }
         stage_state->finishSubmitting();
     } catch (const std::exception& error) {
@@ -99,7 +95,7 @@ void StoreTaskRunner::runTransfer(TaskPtr                         task,
 }
 
 void StoreTaskRunner::releaseTaskResources(const Task& task) {
-    for (const TransferDescriptor& descriptor : task.descriptors) {
+    for (const TransferDescriptor& descriptor : task.descriptors()) {
         const GroupSetPtr& group_set = group_sets_[descriptor.group_set_id];
         group_set->releaseSingleBlock(
             task.target_tier, descriptor.singleBlockAt(task.target_tier), BlockTreeRefType::STORE);

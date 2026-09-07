@@ -15,10 +15,7 @@ class EvictionTaskRunner {
 public:
     using EvictionDoneCallback = std::function<void(bool success)>;
 
-    EvictionTaskRunner(const std::vector<GroupSetPtr>& group_sets,
-                       const BlockTransferDispatcher*  transfer_dispatcher,
-                       int                             memory_timeout_ms,
-                       int                             disk_timeout_ms);
+    EvictionTaskRunner(const std::vector<GroupSetPtr>& group_sets, const BlockTransferDispatcher* transfer_dispatcher);
 
     void runTransfer(std::shared_ptr<const EvictionTransferTask> task,
                      BlockTreeCacheMetricsReporter&              metrics_reporter,
@@ -27,8 +24,6 @@ public:
 private:
     const std::vector<GroupSetPtr>& group_sets_;
     const BlockTransferDispatcher*  transfer_dispatcher_{nullptr};
-    int                             memory_timeout_ms_{0};
-    int                             disk_timeout_ms_{0};
 };
 
 }  // namespace rtp_llm

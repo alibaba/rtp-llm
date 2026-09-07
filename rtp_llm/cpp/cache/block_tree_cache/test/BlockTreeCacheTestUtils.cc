@@ -60,10 +60,14 @@ const char* transferCopyActionName(TransferCopyAction action) {
 ControlledPerRankBlockTransferEngine::ControlledPerRankBlockTransferEngine(const std::vector<GroupSetPtr>&  groups,
                                                                            TransferCopyAction               action,
                                                                            std::shared_ptr<CallbackBarrier> barrier):
-    PerRankBlockTransferEngine(groups), action_(action), barrier_(std::move(barrier)) {}
+    PerRankBlockTransferEngine(groups,
+                               std::any_of(groups.begin(),
+                                           groups.end(),
+                                           [](const GroupSetPtr& group) { return group->diskPool() != nullptr; })),
+    action_(action),
+    barrier_(std::move(barrier)) {}
 
-std::shared_ptr<AsyncContext>
-ControlledPerRankBlockTransferEngine::submit(const std::vector<TransferDescriptor>& descriptors) {
+std::shared_ptr<AsyncContext> ControlledPerRankBlockTransferEngine::execute(TransferTask task) {
     submit_count_.fetch_add(1);
     if (barrier_ != nullptr) {
         barrier_->enterAndWait();
@@ -75,7 +79,7 @@ ControlledPerRankBlockTransferEngine::submit(const std::vector<TransferDescripto
         return std::make_shared<CompletedAsyncContext>(
             ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "injected copy failure"));
     }
-    return PerRankBlockTransferEngine::submit(descriptors);
+    return PerRankBlockTransferEngine::execute(std::move(task));
 }
 
 size_t ControlledPerRankBlockTransferEngine::submittedBatchCount() const {
@@ -412,10 +416,11 @@ void prepareGroupSetsForTest(std::vector<GroupSetPtr>& group_sets) {
     prepareGroupSets(group_sets);
 }
 
-std::unique_ptr<BlockTreeCache> makeBlockTreeCacheForTest(std::vector<GroupSetPtr>          group_sets,
-                                                          BlockTreeCacheConfig              config,
-                                                          std::shared_ptr<StorageBackend>   storage_backend,
-                                                          std::shared_ptr<BroadcastManager> broadcast_manager) {
+std::unique_ptr<BlockTreeCache> makeBlockTreeCacheForTest(std::vector<GroupSetPtr>                   group_sets,
+                                                          BlockTreeCacheConfig                       config,
+                                                          std::shared_ptr<StorageBackend>            storage_backend,
+                                                          std::shared_ptr<BroadcastManager>          broadcast_manager,
+                                                          std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter) {
     prepareGroupSets(group_sets);
     if (!config.enable_remote_cache) {
         storage_backend = nullptr;
@@ -441,7 +446,17 @@ std::unique_ptr<BlockTreeCache> makeBlockTreeCacheForTest(std::vector<GroupSetPt
                 static_cast<int>(std::distance(layers.begin(), layer)), block_id);
         };
     }
-    auto per_rank_engine = std::make_shared<PerRankBlockTransferEngine>(group_sets);
+    auto cache_metrics_reporter = std::make_shared<BlockTreeCacheMetricsReporter>(std::move(metrics_reporter));
+    auto per_rank_engine =
+        std::make_shared<PerRankBlockTransferEngine>(group_sets,
+                                                     config.enable_disk_cache,
+                                                     DeviceHostCopyOptions{},
+                                                     config.device_disk_staging_block_count,
+                                                     config.max_descriptors_per_transfer_batch,
+                                                     config.transfer_worker_count,
+                                                     config.max_descriptors_per_non_device_host_transfer_batch,
+                                                     config.transfer_queue_max_size,
+                                                     cache_metrics_reporter);
     std::shared_ptr<MultiRankBlockTransferEngine> multi_rank_engine;
     if (broadcast_manager != nullptr) {
         multi_rank_engine = std::make_shared<MultiRankBlockTransferEngine>(group_sets, std::move(broadcast_manager));
@@ -455,7 +470,8 @@ std::unique_ptr<BlockTreeCache> makeBlockTreeCacheForTest(std::vector<GroupSetPt
                                                   std::move(config),
                                                   std::move(storage_backend),
                                                   std::move(transfer_dispatcher),
-                                                  std::move(task_pool));
+                                                  std::move(task_pool),
+                                                  std::move(cache_metrics_reporter));
     if (cache->storageBackend()) {
         RTP_LLM_CHECK_WITH_INFO(cache->storageBackend()->init(std::move(storage_topology),
                                                               std::move(storage_device_pools),
@@ -674,14 +690,15 @@ bool BlockTreeCacheTestPeer::restoreQueueAfterRejectionForTest(BlockTreeCache& c
 }
 
 ScriptedPerRankBlockTransferEngine::ScriptedPerRankBlockTransferEngine(const std::vector<GroupSetPtr>& groups,
-                                                                       bool perform_successful_transfers):
-    PerRankBlockTransferEngine(groups),
+                                                                       bool perform_successful_transfers,
+                                                                       bool enable_disk_cache):
+    PerRankBlockTransferEngine(groups, enable_disk_cache),
     group_set_results_(groups.size()),
     perform_successful_transfers_(perform_successful_transfers) {}
 
-std::shared_ptr<AsyncContext>
-ScriptedPerRankBlockTransferEngine::submit(const std::vector<TransferDescriptor>& descriptors) {
-    bool success = true;
+std::shared_ptr<AsyncContext> ScriptedPerRankBlockTransferEngine::execute(TransferTask task) {
+    const auto& descriptors = task.descriptors();
+    bool        success     = true;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         ++submitted_batch_count_;
@@ -696,7 +713,7 @@ ScriptedPerRankBlockTransferEngine::submit(const std::vector<TransferDescriptor>
         }
     }
     if (success && perform_successful_transfers_) {
-        return PerRankBlockTransferEngine::submit(descriptors);
+        return PerRankBlockTransferEngine::execute(std::move(task));
     }
     if (success) {
         return std::make_shared<CompletedAsyncContext>(ErrorInfo::OkStatus());
@@ -854,7 +871,7 @@ std::unique_ptr<FullSWAEnvironment> FullSWAEnvironment::create(const FullSWAEnvi
     config.enable_disk_cache   = options.enable_disk;
 
     environment->scripted_per_rank_transfer_engine =
-        std::make_shared<ScriptedPerRankBlockTransferEngine>(environment->groups);
+        std::make_shared<ScriptedPerRankBlockTransferEngine>(environment->groups, true, options.enable_disk);
 
     std::vector<GroupSetPtr> cache_groups = environment->groups;
     environment->cache                    = makeBlockTreeCacheForTest(std::move(cache_groups), std::move(config));

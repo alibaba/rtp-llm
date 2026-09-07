@@ -369,10 +369,11 @@ TEST(BlockTreeStorerTest, SynchronousRemoteOnlyInsertWaitsForExactBackendWriteBu
     auto local_task_entered_future = local_task_entered->get_future();
     auto release_local_task        = std::make_shared<std::promise<void>>();
     auto release_local_task_future = release_local_task->get_future().share();
-    ASSERT_TRUE(env->cache->task_pool_->submit([local_task_entered, release_local_task_future] {
-        local_task_entered->set_value();
-        release_local_task_future.wait();
-    }));
+    ASSERT_TRUE(
+        env->cache->task_pool_->submit(BlockTreeTaskClass::BACKGROUND, [local_task_entered, release_local_task_future] {
+            local_task_entered->set_value();
+            release_local_task_future.wait();
+        }));
     const auto local_task_status = local_task_entered_future.wait_for(std::chrono::seconds(5));
     if (local_task_status != std::future_status::ready) {
         release_local_task->set_value();

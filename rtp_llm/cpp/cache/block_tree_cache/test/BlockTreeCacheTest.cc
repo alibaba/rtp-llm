@@ -21,6 +21,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
+#include "rtp_llm/cpp/utils/TimeUtil.h"
 
 namespace rtp_llm {
 namespace {
@@ -211,11 +212,17 @@ private:
 class BlockTreeCacheTest: public ::testing::Test {
 protected:
     void SetUp() override {
+        resetCache();
+    }
+
+    void resetCache(std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter = nullptr) {
+        cache_.reset();
         auto full_group = std::make_shared<FullGroupSet>(
             std::vector<DeviceBlockPoolPtr>{block_tree_cache_test::makeStructuralDevicePool(0)}, nullptr, nullptr);
         std::vector<GroupSetPtr> groups = {full_group};
 
-        cache_ = makeBlockTreeCacheForTest(std::move(groups));
+        cache_ = makeBlockTreeCacheForTest(
+            std::move(groups), BlockTreeCacheConfig{}, nullptr, nullptr, std::move(metrics_reporter));
     }
 
     std::unique_ptr<BlockTreeCache> cache_;
@@ -294,8 +301,7 @@ TEST_F(BlockTreeCacheTest, ReportTransferFinishedAcceptsSuccessfulDescriptors) {
         TransferDescriptor::deviceToHost(0, {2}, 11),
     };
     kmonitor::MetricsTags         tags;
-    BlockTreeCacheMetricsReporter reporter;
-    reporter.setMetricsReporter(std::make_shared<kmonitor::MetricsReporter>("", "", tags));
+    BlockTreeCacheMetricsReporter reporter(std::make_shared<kmonitor::MetricsReporter>("", "", tags));
 
     const int64_t begin_time_us =
         reporter.reportTransferStarted(CacheTransferOperation::STORE, Tier::DEVICE, Tier::HOST);
@@ -312,22 +318,19 @@ TEST(BlockTreeCacheMetricsTest, BusinessQueueWaitReportsQpsLatencyOperationAndPo
     kmonitor::MetricsTags                      tags;
     std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter =
         std::make_shared<kmonitor::MetricsReporter>("", "", tags);
-    BlockTreeCacheMetricsReporter reporter;
-    reporter.setMetricsReporter(metrics_reporter);
+    BlockTreeCacheMetricsReporter reporter(metrics_reporter);
 
-    const int64_t begin_time_us          = reporter.reportBusinessQueueWaitStarted(CacheTransferOperation::LOAD, false);
-    const int64_t callback_begin_time_us = reporter.reportBusinessQueueWaitStarted(CacheTransferOperation::LOAD, true);
-    reporter.reportBusinessQueueWaitFinished(CacheTransferOperation::LOAD, false, begin_time_us);
-    reporter.reportBusinessQueueWaitFinished(CacheTransferOperation::LOAD, true, callback_begin_time_us);
+    reporter.reportQueueWaitMetric(false, "business", "load", Tier::NONE, Tier::NONE, 17);
+    reporter.reportQueueWaitMetric(true, "business", "load", Tier::NONE, Tier::NONE, 23);
 
     RtpLLMCacheTransferMetrics* transfer_metrics = metrics_reporter->getMetricsGroup<RtpLLMCacheTransferMetrics>();
     ASSERT_NE(transfer_metrics, nullptr);
     kmonitor::MetricsTags queue_wait_tags("pool_type", "business");
     queue_wait_tags.AddTag("operation", "load");
     EXPECT_EQ(metricSeriesCount(transfer_metrics->transfer_task_queue_wait_latency_us_metric), 1u);
-    EXPECT_GE(snapshotQps(transfer_metrics->transfer_task_queue_wait_latency_us_metric, queue_wait_tags), 0);
+    EXPECT_DOUBLE_EQ(snapshotQps(transfer_metrics->transfer_task_queue_wait_latency_us_metric, queue_wait_tags), 17);
     EXPECT_EQ(metricSeriesCount(transfer_metrics->callback_queue_wait_latency_us_metric), 1u);
-    EXPECT_GE(snapshotQps(transfer_metrics->callback_queue_wait_latency_us_metric, queue_wait_tags), 0);
+    EXPECT_DOUBLE_EQ(snapshotQps(transfer_metrics->callback_queue_wait_latency_us_metric, queue_wait_tags), 23);
     EXPECT_EQ(metricSeriesCount(transfer_metrics->task_queue_waiting_tasks_metric), 1u);
     EXPECT_DOUBLE_EQ(snapshotQps(transfer_metrics->task_queue_waiting_tasks_metric, queue_wait_tags), 1);
     EXPECT_EQ(metricSeriesCount(transfer_metrics->callback_queue_waiting_tasks_metric), 1u);
@@ -340,10 +343,9 @@ TEST(BlockTreeCacheMetricsTest, TransferQueueWaitReportsLatencyAndDirection) {
     kmonitor::MetricsTags                      tags;
     std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter =
         std::make_shared<kmonitor::MetricsReporter>("", "", tags);
-    BlockTreeCacheMetricsReporter reporter;
-    reporter.setMetricsReporter(metrics_reporter);
+    BlockTreeCacheMetricsReporter reporter(metrics_reporter);
 
-    reporter.reportTransferQueueWait(Tier::HOST, Tier::DISK, 17);
+    reporter.reportQueueWaitMetric(false, "transfer", nullptr, Tier::HOST, Tier::DISK, 17);
 
     RtpLLMCacheTransferMetrics* transfer_metrics = metrics_reporter->getMetricsGroup<RtpLLMCacheTransferMetrics>();
     ASSERT_NE(transfer_metrics, nullptr);
@@ -363,13 +365,12 @@ TEST(BlockTreeCacheMetricsTest, QueueBacklogReportsLoadBackgroundAndCompletion) 
     kmonitor::MetricsTags                      tags;
     std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter =
         std::make_shared<kmonitor::MetricsReporter>("", "", tags);
-    BlockTreeCacheMetricsReporter reporter;
-    reporter.setMetricsReporter(metrics_reporter);
+    BlockTreeCacheMetricsReporter reporter(metrics_reporter);
 
     BlockTreeTaskPool pool(1, 8, "QueueBacklogTest");
     ASSERT_TRUE(pool.start());
     auto barrier = std::make_shared<CallbackBarrier>();
-    ASSERT_TRUE(pool.submit([barrier] { barrier->enterAndWait(); }));
+    ASSERT_TRUE(pool.submit(BlockTreeTaskClass::BACKGROUND, [barrier] { barrier->enterAndWait(); }));
     barrier->waitUntilEntered();
     [[maybe_unused]] auto release_guard = std::shared_ptr<void>(nullptr, [barrier](void*) { barrier->release(); });
 
@@ -402,8 +403,7 @@ TEST(BlockTreeCacheMetricsTest, LoadJoinMetricsKeepRequestAndDependencyGranulari
     kmonitor::MetricsTags                      tags;
     std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter =
         std::make_shared<kmonitor::MetricsReporter>("", "", tags);
-    BlockTreeCacheMetricsReporter reporter;
-    reporter.setMetricsReporter(metrics_reporter);
+    BlockTreeCacheMetricsReporter reporter(metrics_reporter);
 
     reporter.reportLoadJoin(2);
     reporter.reportLoadJoinWait(123);
@@ -512,8 +512,7 @@ TEST_F(BlockTreeCacheTest, EvictionTriggerQpsPublishesOnlyExistingGroupTypes) {
     kmonitor::MetricsTags                      tags;
     std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter =
         std::make_shared<kmonitor::MetricsReporter>("", "", tags);
-    BlockTreeCacheMetricsReporter reporter;
-    reporter.setMetricsReporter(metrics_reporter);
+    BlockTreeCacheMetricsReporter reporter(metrics_reporter);
 
     const std::vector<BlockTreeEvictableMetricsSnapshot> snapshots =
         reporter.collectEvictableMetricsSnapshots(cache_->groupSets(), cache_->evictor_);
@@ -560,8 +559,7 @@ TEST_F(BlockTreeCacheTest, SettledEvictionQpsCountsPrimaryDependentAndCascadeDes
     kmonitor::MetricsTags                      tags;
     std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter =
         std::make_shared<kmonitor::MetricsReporter>("", "", tags);
-    BlockTreeCacheMetricsReporter reporter;
-    reporter.setMetricsReporter(metrics_reporter);
+    BlockTreeCacheMetricsReporter reporter(metrics_reporter);
 
     EvictionDropTask task;
     task.primary_desc.group_set_id = 0;
@@ -599,7 +597,7 @@ TEST_F(BlockTreeCacheTest, ForceDropTriggerQpsCountsOneSuccessfulRequest) {
     kmonitor::MetricsTags                      tags;
     std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter =
         std::make_shared<kmonitor::MetricsReporter>("", "", tags);
-    cache_->setMetricsReporter(metrics_reporter);
+    resetCache(metrics_reporter);
 
     std::vector<std::vector<GroupSetResource>> first_resources(1, std::vector<GroupSetResource>(1));
     first_resources[0][0].device_blocks = {42};
@@ -622,7 +620,7 @@ TEST_F(BlockTreeCacheTest, WatermarkTriggerQpsCountsOneSuccessfulSchedulingRound
     kmonitor::MetricsTags                      tags;
     std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter =
         std::make_shared<kmonitor::MetricsReporter>("", "", tags);
-    cache_->setMetricsReporter(metrics_reporter);
+    resetCache(metrics_reporter);
 
     std::vector<std::vector<GroupSetResource>> first_resources(1, std::vector<GroupSetResource>(1));
     first_resources[0][0].device_blocks = {42};
@@ -2174,7 +2172,8 @@ TEST_F(BlockTreeCacheTest, LoadPreparedPrefixFailureRollsBackAllSourceAndTargetH
     std::unique_ptr<BlockTreeCache> cache      = makeBlockTreeCacheForTest(std::move(group_sets), std::move(config));
     ASSERT_NE(cache, nullptr);
 
-    auto per_rank_transfer_engine = std::make_shared<ScriptedPerRankBlockTransferEngine>(cache->groupSets());
+    auto per_rank_transfer_engine =
+        std::make_shared<ScriptedPerRankBlockTransferEngine>(cache->groupSets(), true, cache->isDiskCacheEnabled());
     BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*cache, per_rank_transfer_engine);
 
     const BlockIdxType first_source  = first_group->allocateSingleBlock(Tier::HOST, BlockTreeRefType::CACHE);
@@ -2285,7 +2284,8 @@ TEST_F(BlockTreeCacheTest, LoadQueueRejectionRollsBackCoreHoldersAndRetainsReque
     std::unique_ptr<BlockTreeCache> cache = makeBlockTreeCacheForTest(std::move(groups), std::move(config));
     ASSERT_NE(cache, nullptr);
 
-    auto per_rank_transfer_engine = std::make_shared<ScriptedPerRankBlockTransferEngine>(cache->groupSets());
+    auto per_rank_transfer_engine =
+        std::make_shared<ScriptedPerRankBlockTransferEngine>(cache->groupSets(), true, cache->isDiskCacheEnabled());
     BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*cache, per_rank_transfer_engine);
 
     const BlockIdxType source_block = full->allocateSingleBlock(Tier::HOST, BlockTreeRefType::CACHE);
@@ -2362,7 +2362,8 @@ TEST_F(BlockTreeCacheTest, LoadQueueRejectionRollsBackMixedDeviceAndHostDescript
     std::unique_ptr<BlockTreeCache> cache  = makeBlockTreeCacheForTest(std::move(groups), std::move(config));
     ASSERT_NE(cache, nullptr);
 
-    auto per_rank_transfer_engine = std::make_shared<ScriptedPerRankBlockTransferEngine>(cache->groupSets());
+    auto per_rank_transfer_engine =
+        std::make_shared<ScriptedPerRankBlockTransferEngine>(cache->groupSets(), true, cache->isDiskCacheEnabled());
     BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*cache, per_rank_transfer_engine);
 
     MultiNodeBlocks cache_holder = allocateDeviceBlocksForTest(*cache_group, 1, BlockTreeRefType::CACHE);
@@ -2633,8 +2634,8 @@ TEST_F(BlockTreeCacheTest, ShutdownDrainsOnlyHoldsRemainingAfterPartialMixedTier
     std::vector<GroupSetPtr> groups = {full};
     auto                     cache  = makeBlockTreeCacheForTest(std::move(groups), std::move(config));
     ASSERT_NE(cache, nullptr);
-    auto per_rank_transfer_engine =
-        std::make_shared<ScriptedPerRankBlockTransferEngine>(std::vector<GroupSetPtr>{full});
+    auto per_rank_transfer_engine = std::make_shared<ScriptedPerRankBlockTransferEngine>(
+        std::vector<GroupSetPtr>{full}, true, cache->isDiskCacheEnabled());
     BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*cache, per_rank_transfer_engine);
 
     MultiNodeBlocks device_holder = allocateDeviceBlocksForTest(*full, 1);

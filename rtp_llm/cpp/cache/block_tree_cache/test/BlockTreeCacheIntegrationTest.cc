@@ -86,21 +86,23 @@ size_t transferBatchCount(const std::vector<TransferDescriptor>& descriptors, co
 class PausablePerRankBlockTransferEngine: public PerRankBlockTransferEngine {
 public:
     PausablePerRankBlockTransferEngine(const std::vector<GroupSetPtr>& groups,
+                                       bool                            enable_disk_cache,
                                        bool                            succeed,
                                        bool                            pause_enabled   = true,
                                        size_t                          throw_on_submit = 0):
-        PerRankBlockTransferEngine(groups),
+        PerRankBlockTransferEngine(groups, enable_disk_cache),
         pause_enabled_(pause_enabled),
         throw_on_submit_(throw_on_submit),
         succeed_(succeed) {}
 
-    std::shared_ptr<AsyncContext> submit(const std::vector<TransferDescriptor>& descriptors) override {
-        size_t submit_index = 0;
+    std::shared_ptr<AsyncContext> execute(TransferTask task) override {
+        const auto& descriptors  = task.descriptors();
+        size_t      submit_index = 0;
         {
             std::unique_lock<std::mutex> lock(mutex_);
             if (!pause_enabled_) {
                 lock.unlock();
-                return PerRankBlockTransferEngine::submit(descriptors);
+                return PerRankBlockTransferEngine::execute(std::move(task));
             }
             ++submit_count_;
             submit_index = submit_count_;
@@ -116,7 +118,7 @@ public:
             return std::make_shared<CompletedAsyncContext>(
                 ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "scripted transfer failure"));
         }
-        return PerRankBlockTransferEngine::submit(descriptors);
+        return PerRankBlockTransferEngine::execute(std::move(task));
     }
 
     void enablePause() {
@@ -252,20 +254,21 @@ private:
 
 class ManuallyCompletedPerRankBlockTransferEngine final: public PerRankBlockTransferEngine {
 public:
-    explicit ManuallyCompletedPerRankBlockTransferEngine(const std::vector<GroupSetPtr>& groups):
-        PerRankBlockTransferEngine(groups) {}
+    ManuallyCompletedPerRankBlockTransferEngine(const std::vector<GroupSetPtr>& groups, bool enable_disk_cache):
+        PerRankBlockTransferEngine(groups, enable_disk_cache) {}
 
-    std::shared_ptr<AsyncContext> submit(const std::vector<TransferDescriptor>& descriptors) override {
+    std::shared_ptr<AsyncContext> execute(TransferTask task) override {
         std::unique_lock<std::mutex> lock(mutex_);
         if (!manual_completion_enabled_) {
             lock.unlock();
-            return PerRankBlockTransferEngine::submit(descriptors);
+            return PerRankBlockTransferEngine::execute(std::move(task));
         }
         if (cleanup_requested_) {
             return std::make_shared<CompletedAsyncContext>(
                 ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "manual transfer test exited before completion"));
         }
         auto context = std::make_shared<ManuallyCompletedAsyncContext>();
+        const auto& descriptors = task.descriptors();
         descriptors_.insert(descriptors_.end(), descriptors.begin(), descriptors.end());
         contexts_.push_back(context);
         lock.unlock();
@@ -338,9 +341,11 @@ private:
 };
 
 TEST(ManualTransferCleanupGuardTest, FailsPendingAndFutureManualTransfers) {
-    auto transfer_engine = std::make_shared<ManuallyCompletedPerRankBlockTransferEngine>(std::vector<GroupSetPtr>{});
+    auto transfer_engine =
+        std::make_shared<ManuallyCompletedPerRankBlockTransferEngine>(std::vector<GroupSetPtr>{}, false);
     transfer_engine->enableManualCompletion();
-    const std::shared_ptr<AsyncContext> pending = transfer_engine->submit({TransferDescriptor{}});
+    const std::shared_ptr<AsyncContext> pending =
+        transfer_engine->execute(TransferTask({TransferDescriptor{}}, std::chrono::seconds(30)));
     ASSERT_NE(pending, nullptr);
     ASSERT_FALSE(pending->done());
 
@@ -348,7 +353,8 @@ TEST(ManualTransferCleanupGuardTest, FailsPendingAndFutureManualTransfers) {
 
     EXPECT_TRUE(pending->done());
     EXPECT_FALSE(pending->success());
-    const std::shared_ptr<AsyncContext> future = transfer_engine->submit({TransferDescriptor{}});
+    const std::shared_ptr<AsyncContext> future =
+        transfer_engine->execute(TransferTask({TransferDescriptor{}}, std::chrono::seconds(30)));
     ASSERT_NE(future, nullptr);
     EXPECT_TRUE(future->done());
     EXPECT_FALSE(future->success());
@@ -356,12 +362,12 @@ TEST(ManualTransferCleanupGuardTest, FailsPendingAndFutureManualTransfers) {
 
 class ThrowingPerRankBlockTransferEngine final: public PerRankBlockTransferEngine {
 public:
-    explicit ThrowingPerRankBlockTransferEngine(const std::vector<GroupSetPtr>& groups):
-        PerRankBlockTransferEngine(groups) {}
+    ThrowingPerRankBlockTransferEngine(const std::vector<GroupSetPtr>& groups, bool enable_disk_cache):
+        PerRankBlockTransferEngine(groups, enable_disk_cache) {}
 
-    std::shared_ptr<AsyncContext> submit(const std::vector<TransferDescriptor>& descriptors) override {
+    std::shared_ptr<AsyncContext> execute(TransferTask task) override {
         if (!throw_enabled_) {
-            return PerRankBlockTransferEngine::submit(descriptors);
+            return PerRankBlockTransferEngine::execute(std::move(task));
         }
         throw std::runtime_error("injected load copy failure");
     }
@@ -611,7 +617,8 @@ TEST_F(BlockTreeCacheIntegrationTest, WatermarkChecksLowerTierBeforeUpperTier) {
     std::vector<GroupSetPtr> groups{group};
     auto                     cache = makeBlockTreeCacheForTest(std::move(groups), config);
     ASSERT_NE(cache, nullptr);
-    auto scripted_copy = std::make_shared<ScriptedPerRankBlockTransferEngine>(cache->groupSets(), false);
+    auto scripted_copy = std::make_shared<ScriptedPerRankBlockTransferEngine>(
+        cache->groupSets(), /*perform_successful_transfers=*/false, cache->isDiskCacheEnabled());
     BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*cache, scripted_copy);
 
     const MultiNodeBlocks device_blocks = allocateDeviceBlocksForTest(*group, 1, BlockTreeRefType::CACHE);
@@ -663,7 +670,8 @@ TEST_F(BlockTreeCacheIntegrationTest, HostDiskOnlyLifecycle) {
 
     auto cache = makeBlockTreeCacheForTest(std::move(groups), std::move(cfg));
     ASSERT_NE(cache, nullptr);
-    auto scripted_copy = std::make_shared<ScriptedPerRankBlockTransferEngine>(std::vector<GroupSetPtr>{full});
+    auto scripted_copy = std::make_shared<ScriptedPerRankBlockTransferEngine>(
+        std::vector<GroupSetPtr>{full}, true, cache->isDiskCacheEnabled());
     BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*cache, scripted_copy);
 
     std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(1));
@@ -881,8 +889,8 @@ TEST_F(BlockTreeCacheIntegrationTest, CacheShutdownWaitsForSubmitReturnedStoreCo
         config.enable_device_cache = false;
         config.enable_host_cache   = true;
         auto cache                 = makeBlockTreeCacheForTest({full}, config);
-        auto manual_transfer_engine =
-            std::make_shared<ManuallyCompletedPerRankBlockTransferEngine>(std::vector<GroupSetPtr>{full});
+        auto manual_transfer_engine = std::make_shared<ManuallyCompletedPerRankBlockTransferEngine>(
+            std::vector<GroupSetPtr>{full}, cache->isDiskCacheEnabled());
         manual_transfer_engine->enableManualCompletion();
         ManualTransferCleanupGuard cleanup_guard(manual_transfer_engine);
         BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*cache, manual_transfer_engine);
@@ -961,8 +969,8 @@ TEST_F(BlockTreeCacheIntegrationTest, CacheShutdownWaitsForSubmitReturnedLoadCon
         auto cache                 = makeBlockTreeCacheForTest(std::move(groups), std::move(config));
         ASSERT_NE(cache, nullptr);
 
-        auto manual_transfer_engine =
-            std::make_shared<ManuallyCompletedPerRankBlockTransferEngine>(std::vector<GroupSetPtr>{full});
+        auto manual_transfer_engine = std::make_shared<ManuallyCompletedPerRankBlockTransferEngine>(
+            std::vector<GroupSetPtr>{full}, cache->isDiskCacheEnabled());
         manual_transfer_engine->enableManualCompletion();
         ManualTransferCleanupGuard cleanup_guard(manual_transfer_engine);
         BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*cache, manual_transfer_engine);
@@ -1084,7 +1092,7 @@ TEST_F(BlockTreeCacheIntegrationTest, DirectDropDetachesInFlightDemotionAndDisca
     ASSERT_NE(cache, nullptr);
 
     auto pausable_copy = std::make_shared<PausablePerRankBlockTransferEngine>(
-        std::vector<GroupSetPtr>{full}, /*succeed=*/true, /*pause_enabled=*/false);
+        std::vector<GroupSetPtr>{full}, cache->isDiskCacheEnabled(), /*succeed=*/true, /*pause_enabled=*/false);
     PausableTransferReleaseGuard release_guard(pausable_copy);
     BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*cache, pausable_copy);
 
@@ -1179,7 +1187,7 @@ TEST_F(BlockTreeCacheIntegrationTest, DirectDropDetachesInFlightLoadAndDiscardsI
     ASSERT_NE(cache, nullptr);
 
     auto pausable_copy = std::make_shared<PausablePerRankBlockTransferEngine>(
-        std::vector<GroupSetPtr>{full}, /*succeed=*/false, /*pause_enabled=*/false);
+        std::vector<GroupSetPtr>{full}, cache->isDiskCacheEnabled(), /*succeed=*/false, /*pause_enabled=*/false);
     PausableTransferReleaseGuard release_guard(pausable_copy);
     BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*cache, pausable_copy);
 
@@ -1366,8 +1374,8 @@ TEST_F(BlockTreeCacheIntegrationTest, MatchHardStopsDuringDemotionAndJoinsLoad) 
         options.enable_disk = false;
         auto environment    = FullSWAEnvironment::create(options);
         ASSERT_NE(environment, nullptr);
-        auto pausable_copy =
-            std::make_shared<PausablePerRankBlockTransferEngine>(environment->groups, /*succeed=*/true);
+        auto pausable_copy = std::make_shared<PausablePerRankBlockTransferEngine>(
+            environment->groups, environment->cache->isDiskCacheEnabled(), /*succeed=*/true);
         PausableTransferReleaseGuard release_guard(pausable_copy);
         BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*environment->cache, pausable_copy);
         environment->insertRequestPath();
@@ -1435,8 +1443,11 @@ TEST_F(BlockTreeCacheIntegrationTest, MatchHardStopsDuringDemotionAndJoinsLoad) 
         options.enable_disk = false;
         auto environment    = FullSWAEnvironment::create(options);
         ASSERT_NE(environment, nullptr);
-        auto pausable_copy = std::make_shared<PausablePerRankBlockTransferEngine>(
-            environment->groups, /*succeed=*/true, /*pause_enabled=*/false);
+        auto pausable_copy =
+            std::make_shared<PausablePerRankBlockTransferEngine>(environment->groups,
+                                                                 environment->cache->isDiskCacheEnabled(),
+                                                                 /*succeed=*/true,
+                                                                 /*pause_enabled=*/false);
         PausableTransferReleaseGuard release_guard(pausable_copy);
         BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*environment->cache, pausable_copy);
         environment->insertRequestPath();
@@ -1575,7 +1586,7 @@ TEST_F(BlockTreeCacheIntegrationTest, MixedRequestTierJoinAlwaysPromotesWhenAnyP
         auto environment    = FullSWAEnvironment::create(options);
         ASSERT_NE(environment, nullptr);
         auto pausable_copy = std::make_shared<PausablePerRankBlockTransferEngine>(
-            environment->groups, /*succeed=*/true, /*pause_enabled=*/false);
+            environment->groups, environment->cache->isDiskCacheEnabled(), /*succeed=*/true, /*pause_enabled=*/false);
         PausableTransferReleaseGuard release_guard(pausable_copy);
         BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*environment->cache, pausable_copy);
         environment->insertRequestPath();
@@ -1667,7 +1678,8 @@ TEST_P(JoinedParentSettlementTest, OwnedChildPublishesOnlyAfterJoinedParentSettl
     auto environment    = FullSWAEnvironment::create(options);
     ASSERT_NE(environment, nullptr);
 
-    auto transfer_engine = std::make_shared<ManuallyCompletedPerRankBlockTransferEngine>(environment->groups);
+    auto transfer_engine = std::make_shared<ManuallyCompletedPerRankBlockTransferEngine>(
+        environment->groups, environment->cache->isDiskCacheEnabled());
     BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*environment->cache, transfer_engine);
     environment->insertRequestPath();
     environment->releaseRequestRefs();
@@ -2079,7 +2091,8 @@ TEST_P(BlockTreeCacheLowerTierTest, TransferExceptionSettlesContextAndReleasesAl
     ASSERT_NE(environment, nullptr);
     ASSERT_NE(environment->cache, nullptr);
 
-    auto throwing_engine = std::make_shared<ThrowingPerRankBlockTransferEngine>(environment->groups);
+    auto throwing_engine = std::make_shared<ThrowingPerRankBlockTransferEngine>(
+        environment->groups, environment->cache->isDiskCacheEnabled());
     BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*environment->cache, throwing_engine);
     environment->insertRequestPath();
     environment->releaseRequestRefs();
@@ -2172,8 +2185,10 @@ TEST_P(BlockTreeCacheLowerTierTest, SettlementStateMismatchRollsBackWholeBatch) 
     ASSERT_NE(environment, nullptr);
 
     std::shared_ptr<PausablePerRankBlockTransferEngine> pausable_transfer_engine =
-        std::make_shared<PausablePerRankBlockTransferEngine>(
-            environment->groups, /*succeed=*/true, /*pause_enabled=*/false);
+        std::make_shared<PausablePerRankBlockTransferEngine>(environment->groups,
+                                                             environment->cache->isDiskCacheEnabled(),
+                                                             /*succeed=*/true,
+                                                             /*pause_enabled=*/false);
     BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*environment->cache, pausable_transfer_engine);
     environment->insertRequestPath();
     environment->releaseRequestRefs();
@@ -2260,9 +2275,12 @@ TEST_P(BlockTreeCacheLowerTierTest, AbortCommittedLoadReturnsFalseAndTransferCom
         GTEST_SKIP() << "CUDA not available";
     }
 
-    auto environment                       = FullSWAEnvironment::create();
-    auto pausable_per_rank_transfer_engine = std::make_shared<PausablePerRankBlockTransferEngine>(
-        environment->groups, /*succeed=*/true, /*pause_enabled=*/false);
+    auto environment = FullSWAEnvironment::create();
+    auto pausable_per_rank_transfer_engine =
+        std::make_shared<PausablePerRankBlockTransferEngine>(environment->groups,
+                                                             environment->cache->isDiskCacheEnabled(),
+                                                             /*succeed=*/true,
+                                                             /*pause_enabled=*/false);
     BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*environment->cache,
                                                                  pausable_per_rank_transfer_engine);
     environment->insertRequestPath();
@@ -2358,8 +2376,11 @@ TEST_P(BlockTreeCacheLowerTierTest, AbortCompletionRaceDoesNotChangeCommittedRes
     options.path_length = 1;
     auto environment    = FullSWAEnvironment::create(options);
     ASSERT_NE(environment, nullptr);
-    auto pausable_per_rank_transfer_engine = std::make_shared<PausablePerRankBlockTransferEngine>(
-        environment->groups, /*succeed=*/true, /*pause_enabled=*/false);
+    auto pausable_per_rank_transfer_engine =
+        std::make_shared<PausablePerRankBlockTransferEngine>(environment->groups,
+                                                             environment->cache->isDiskCacheEnabled(),
+                                                             /*succeed=*/true,
+                                                             /*pause_enabled=*/false);
     BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*environment->cache,
                                                                  pausable_per_rank_transfer_engine);
     environment->insertRequestPath();
@@ -2441,6 +2462,7 @@ TEST_P(BlockTreeCacheLowerTierTest, TransferExceptionSettlesLoadAndRestoresCandi
     auto environment = FullSWAEnvironment::create();
     auto pausable_per_rank_transfer_engine =
         std::make_shared<PausablePerRankBlockTransferEngine>(environment->groups,
+                                                             environment->cache->isDiskCacheEnabled(),
                                                              /*succeed=*/true,
                                                              /*pause_enabled=*/false,
                                                              /*throw_on_submit=*/1);
@@ -2587,8 +2609,11 @@ TEST_F(BlockTreeCacheIntegrationTest, DiskLoadDirectTransferExceptionRestoresSou
     options.path_length = 1;
     auto environment    = FullSWAEnvironment::create(options);
     ASSERT_NE(environment, nullptr);
-    auto pausable_per_rank_transfer_engine = std::make_shared<PausablePerRankBlockTransferEngine>(
-        environment->groups, /*succeed=*/true, /*pause_enabled=*/false);
+    auto pausable_per_rank_transfer_engine =
+        std::make_shared<PausablePerRankBlockTransferEngine>(environment->groups,
+                                                             environment->cache->isDiskCacheEnabled(),
+                                                             /*succeed=*/true,
+                                                             /*pause_enabled=*/false);
     BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*environment->cache,
                                                                  pausable_per_rank_transfer_engine);
     environment->insertRequestPath();
@@ -2910,7 +2935,7 @@ TEST_F(BlockTreeCacheIntegrationTest, LoadingHostChildSkipsDeviceParentUntilSett
     ASSERT_NE(cache, nullptr);
 
     auto pausable_per_rank_transfer_engine =
-        std::make_shared<PausablePerRankBlockTransferEngine>(groups, /*succeed=*/true);
+        std::make_shared<PausablePerRankBlockTransferEngine>(groups, cache->isDiskCacheEnabled(), /*succeed=*/true);
     PausableTransferReleaseGuard release_guard(pausable_per_rank_transfer_engine);
     BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*cache, pausable_per_rank_transfer_engine);
 
@@ -3048,8 +3073,11 @@ TEST_F(BlockTreeCacheIntegrationTest, DeviceLoadAsyncCompletionKeepsRequestSourc
 
     auto environment = FullSWAEnvironment::create();
     ASSERT_NE(environment, nullptr);
-    auto pausable_per_rank_transfer_engine = std::make_shared<PausablePerRankBlockTransferEngine>(
-        environment->groups, /*succeed=*/true, /*pause_enabled=*/false);
+    auto pausable_per_rank_transfer_engine =
+        std::make_shared<PausablePerRankBlockTransferEngine>(environment->groups,
+                                                             environment->cache->isDiskCacheEnabled(),
+                                                             /*succeed=*/true,
+                                                             /*pause_enabled=*/false);
     BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*environment->cache,
                                                                  pausable_per_rank_transfer_engine);
     BlockTreeMatchResult              result  = makePartialReadyDeviceContext(*environment);

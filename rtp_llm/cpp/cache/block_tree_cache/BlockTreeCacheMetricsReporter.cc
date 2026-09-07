@@ -73,14 +73,9 @@ BlockTreePoolMetricsSnapshot makeDevicePoolMetricsSnapshot(const DeviceBlockPool
 
 }  // namespace
 
-void BlockTreeCacheMetricsReporter::setMetricsReporter(
-    const std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter) {
-    metrics_reporter_ = metrics_reporter;
-}
-
-bool BlockTreeCacheMetricsReporter::enabled() const {
-    return metrics_reporter_ != nullptr;
-}
+BlockTreeCacheMetricsReporter::BlockTreeCacheMetricsReporter(
+    std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter):
+    metrics_reporter_(std::move(metrics_reporter)) {}
 
 std::vector<BlockTreePoolMetricsSnapshot>
 BlockTreeCacheMetricsReporter::collectPoolMetricsSnapshots(const std::vector<GroupSetPtr>& group_sets) const {
@@ -285,8 +280,9 @@ void BlockTreeCacheMetricsReporter::reportEvictionFinished(const EvictionTransfe
         return;
     }
     const int64_t finish_time_us = currentTimeUs();
-    for (size_t desc_index = 0; desc_index < task.descs.size(); ++desc_index) {
-        reportEvictedDescriptor(task.descs[desc_index], task.timings[desc_index], group_sets, finish_time_us, true);
+    for (size_t desc_index = 0; desc_index < task.descriptors().size(); ++desc_index) {
+        reportEvictedDescriptor(
+            task.descriptors()[desc_index], task.timings[desc_index], group_sets, finish_time_us, true);
     }
 }
 
@@ -379,49 +375,13 @@ int BlockTreeCacheMetricsReporter::transferDirectionIndex(Tier source_tier, Tier
     return -1;
 }
 
-int64_t BlockTreeCacheMetricsReporter::reportBusinessQueueWaitStarted(CacheTransferOperation operation,
-                                                                      bool                   callback) noexcept {
-    if (!enabled()) {
-        return 0;
-    }
-    return currentTimeUs();
-}
-
-void BlockTreeCacheMetricsReporter::reportBusinessQueueWaitFinished(CacheTransferOperation operation,
-                                                                    bool                   callback,
-                                                                    int64_t                begin_time_us,
-                                                                    bool                   report_latency) noexcept {
-    if (begin_time_us == 0 || !report_latency) {
-        return;
-    }
-    reportQueueWaitMetric(callback,
-                          "business",
-                          cacheTransferOperationName(operation),
-                          Tier::NONE,
-                          Tier::NONE,
-                          currentTimeUs() - begin_time_us);
-}
-
-void BlockTreeCacheMetricsReporter::reportTransferQueueWait(Tier    source_tier,
-                                                            Tier    target_tier,
-                                                            int64_t latency_us) noexcept {
-    if (latency_us < 0) {
-        return;
-    }
-    const int index = transferDirectionIndex(source_tier, target_tier);
-    if (index < 0) {
-        return;
-    }
-    reportQueueWaitMetric(false, "transfer", nullptr, source_tier, target_tier, latency_us);
-}
-
 void BlockTreeCacheMetricsReporter::reportQueueWaitMetric(bool        callback,
                                                           const char* pool_type,
                                                           const char* operation,
                                                           Tier        source_tier,
                                                           Tier        target_tier,
                                                           int64_t     latency_us) const noexcept {
-    if (!enabled()) {
+    if (metrics_reporter_ == nullptr) {
         return;
     }
     try {
@@ -442,7 +402,7 @@ void BlockTreeCacheMetricsReporter::reportQueueWaitMetric(bool        callback,
 
 void BlockTreeCacheMetricsReporter::reportQueueBacklog(const BlockTreeQueueSizes& queue_sizes,
                                                        const char*                pool_type) const {
-    if (!enabled()) {
+    if (metrics_reporter_ == nullptr) {
         return;
     }
     RtpLLMCacheTransferMetricsCollector collector;

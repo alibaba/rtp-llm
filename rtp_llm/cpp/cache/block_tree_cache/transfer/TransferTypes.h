@@ -1,9 +1,11 @@
 #pragma once
 
 #include <algorithm>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -21,8 +23,6 @@ enum class TransferStatus {
     DISK_IO_ERROR,
     RESOURCE_EXHAUSTED,
 };
-
-using TransferQueueWaitReporter = std::function<void(Tier, Tier, int64_t)>;
 
 struct DeviceHostCopyOptions {
     size_t staged_sm_min_tile_count{16};
@@ -184,6 +184,54 @@ private:
         }
         return result;
     }
+};
+
+class TransferTask {
+public:
+    using Clock = std::chrono::steady_clock;
+
+    TransferTask(std::vector<TransferDescriptor> descriptors, std::chrono::milliseconds timeout):
+        descriptors_(std::move(descriptors)), deadline_(Clock::now() + timeout) {}
+
+    const std::vector<TransferDescriptor>& descriptors() const {
+        return descriptors_;
+    }
+
+    Clock::time_point deadline() const {
+        return deadline_;
+    }
+
+    void addDescriptor(TransferDescriptor descriptor) {
+        descriptors_.push_back(std::move(descriptor));
+    }
+
+    // Business task builders may fill or resolve descriptors before admission.
+    std::vector<TransferDescriptor>& mutableDescriptorsForPreparation() {
+        return descriptors_;
+    }
+
+    std::optional<std::chrono::milliseconds> remainingTimeout() const {
+        const auto remaining = deadline_ - Clock::now();
+        if (remaining <= Clock::duration::zero()) {
+            return std::nullopt;
+        }
+        return std::chrono::ceil<std::chrono::milliseconds>(remaining);
+    }
+
+    bool expired() const {
+        return !remainingTimeout().has_value();
+    }
+
+    TransferTask subtask(std::vector<TransferDescriptor> descriptors) const {
+        return TransferTask(std::move(descriptors), deadline_);
+    }
+
+private:
+    TransferTask(std::vector<TransferDescriptor> descriptors, Clock::time_point deadline):
+        descriptors_(std::move(descriptors)), deadline_(deadline) {}
+
+    std::vector<TransferDescriptor> descriptors_;
+    Clock::time_point               deadline_;
 };
 
 }  // namespace rtp_llm

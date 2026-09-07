@@ -167,11 +167,13 @@ private:
 class PausableRecordingTransferEngine: public PerRankBlockTransferEngine {
 public:
     explicit PausableRecordingTransferEngine(const std::vector<GroupSetPtr>& groups,
+                                             bool                            enable_disk_cache,
                                              size_t                          device_disk_staging_block_count = 4):
-        PerRankBlockTransferEngine(groups, {}, device_disk_staging_block_count) {}
+        PerRankBlockTransferEngine(groups, enable_disk_cache, {}, device_disk_staging_block_count) {}
 
-    std::shared_ptr<AsyncContext> submit(const std::vector<TransferDescriptor>& descriptors) override {
-        bool scripted_success = true;
+    std::shared_ptr<AsyncContext> execute(TransferTask task) override {
+        const auto& descriptors      = task.descriptors();
+        bool        scripted_success = true;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             ++submitted_batch_count_;
@@ -183,7 +185,7 @@ public:
             if (pause_armed_) {
                 ++phase_entered_;
                 auto context = std::make_shared<TransferBatchAsyncContext>();
-                pending_.push_back({descriptors, scripted_success, context});
+                pending_.push_back({std::move(task), scripted_success, context});
                 cv_.notify_all();
                 return context;
             }
@@ -192,7 +194,7 @@ public:
             return std::make_shared<CompletedAsyncContext>(
                 ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "scripted transfer failure"));
         }
-        return PerRankBlockTransferEngine::submit(descriptors);
+        return PerRankBlockTransferEngine::execute(std::move(task));
     }
 
     void enqueueResult(bool success) {
@@ -245,7 +247,7 @@ public:
                 submit.context->complete(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "scripted transfer failure"));
                 continue;
             }
-            auto context = PerRankBlockTransferEngine::submit(submit.descriptors);
+            auto context = PerRankBlockTransferEngine::execute(std::move(submit.task));
             context->waitDone();
             submit.context->complete(context->errorInfo());
         }
@@ -268,7 +270,7 @@ public:
 
 private:
     struct PendingSubmit {
-        std::vector<TransferDescriptor>            descriptors;
+        TransferTask                               task;
         bool                                       success;
         std::shared_ptr<TransferBatchAsyncContext> context;
     };
@@ -370,19 +372,19 @@ inline CacheConfig makeCompactDsv4CacheConfig(uint32_t block_num) {
 
 inline KVCacheConfig makeTierConfig(TierLayout layout, const std::string& disk_path, int64_t lower_cache_size_mb = 8) {
     KVCacheConfig config;
-    config.reuse_cache                           = true;
-    config.reserve_block_ratio                   = 0;
-    config.enable_device_cache                   = true;
-    config.enable_host_cache                     = true;
-    config.host_cache_size_mb                    = lower_cache_size_mb;
-    config.host_cache_sync_timeout_ms            = 5000;
-    config.enable_disk_cache                     = layout == TierLayout::HOST_DISK;
-    config.disk_cache_paths                      = layout == TierLayout::HOST_DISK ? disk_path : "";
-    config.disk_cache_size_mb                    = layout == TierLayout::HOST_DISK ? lower_cache_size_mb : 0;
-    config.disk_cache_buffered_io                = true;
-    config.disk_cache_sync_timeout_ms            = 5000;
-    config.disk_cache_staging_block_count        = 2;
-    config.linear_step                           = 1;
+    config.reuse_cache                    = true;
+    config.reserve_block_ratio            = 0;
+    config.enable_device_cache            = true;
+    config.enable_host_cache              = true;
+    config.host_cache_size_mb             = lower_cache_size_mb;
+    config.host_cache_sync_timeout_ms     = 5000;
+    config.enable_disk_cache              = layout == TierLayout::HOST_DISK;
+    config.disk_cache_paths               = layout == TierLayout::HOST_DISK ? disk_path : "";
+    config.disk_cache_size_mb             = layout == TierLayout::HOST_DISK ? lower_cache_size_mb : 0;
+    config.disk_cache_buffered_io         = true;
+    config.disk_cache_sync_timeout_ms     = 5000;
+    config.disk_cache_staging_block_count = 2;
+    config.linear_step                    = 1;
     return config;
 }
 
@@ -1374,7 +1376,8 @@ protected:
         BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, 0.0);
         BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::HOST, 0.0);
         BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DISK, 0.0);
-        transfer_engine_ = std::make_shared<ScriptedPerRankBlockTransferEngine>(cache->groupSets());
+        transfer_engine_ =
+            std::make_shared<ScriptedPerRankBlockTransferEngine>(cache->groupSets(), true, cache->isDiskCacheEnabled());
         BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*cache, transfer_engine_);
     }
 
@@ -1630,7 +1633,8 @@ protected:
         ASSERT_NE(manager_, nullptr);
         auto cache = manager_->blockTreeCache();
 
-        auto pausable_engine = std::make_shared<PausableRecordingTransferEngine>(cache->groupSets());
+        auto pausable_engine =
+            std::make_shared<PausableRecordingTransferEngine>(cache->groupSets(), cache->isDiskCacheEnabled());
         BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*cache, pausable_engine);
         transfer_engine_.reset();
 
@@ -1710,9 +1714,9 @@ protected:
             EXPECT_EQ(disk_source_count, cache->groupSets().size());
         }
 
-        const auto   device_before_failure = snapshotDevicePools(manager_);
-        const auto   lower_before_failure  = snapshotLowerPools(*cache, GetParam());
-        const auto   stats_before_failure  = cache->getStats();
+        const auto   device_before_failure      = snapshotDevicePools(manager_);
+        const auto   lower_before_failure       = snapshotLowerPools(*cache, GetParam());
+        const auto   stats_before_failure       = cache->getStats();
         const size_t descriptors_before_failure = pausable_engine->submittedDescriptorCount();
         const size_t batches_before_failure     = pausable_engine->submittedBatchCount();
 
@@ -1887,7 +1891,8 @@ protected:
         ASSERT_NE(manager_, nullptr);
         auto cache = manager_->blockTreeCache();
 
-        auto engine = std::make_shared<PausableRecordingTransferEngine>(cache->groupSets());
+        auto engine =
+            std::make_shared<PausableRecordingTransferEngine>(cache->groupSets(), cache->isDiskCacheEnabled());
         BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*cache, engine);
         transfer_engine_.reset();
 
@@ -1972,8 +1977,7 @@ protected:
         EXPECT_FALSE(first_result.async_context->done());
         const size_t expected_submits_before_join = submits_before_load + cache->groupSets().size();
         ASSERT_TRUE(engine->waitUntilSubmittedDescriptorCountFor(
-            expected_submits_before_join,
-            std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout)));
+            expected_submits_before_join, std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout)));
         const auto   descriptors_before_join = engine->descriptors();
         const size_t submits_before_join     = descriptors_before_join.size();
         ASSERT_EQ(submits_before_join, expected_submits_before_join);

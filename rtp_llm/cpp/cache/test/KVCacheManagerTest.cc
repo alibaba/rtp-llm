@@ -1107,17 +1107,18 @@ TEST_F(KVCacheManagerTest, ExecuteFunctionFormsNoResponseForUnsupportedRequestTy
 static void appendValidGroupedTransfer(const std::shared_ptr<KVCacheManager>& manager, FunctionRequestPB& request) {
     ASSERT_NE(manager->blockTreeCache(), nullptr);
     const TransferDescriptor descriptor = TransferDescriptor::deviceToHost(/*group_id=*/0, {1}, /*host_block=*/1);
-    ASSERT_TRUE(BlockTransferRequestConverter::encodeTransfer(
-        *request.mutable_mem_request(), {descriptor}, manager->blockTreeCache()->groupSets()));
+    ASSERT_TRUE(BlockTransferRequestConverter::encodeTransfer(*request.mutable_mem_request(),
+                                                              TransferTask({descriptor}, std::chrono::seconds(30)),
+                                                              manager->blockTreeCache()->groupSets()));
 }
 
 class RecordingBatchTransferEngine final: public PerRankBlockTransferEngine {
 public:
     RecordingBatchTransferEngine(): PerRankBlockTransferEngine(std::vector<GroupSetPtr>{}) {}
 
-    std::shared_ptr<AsyncContext> submit(const std::vector<TransferDescriptor>& descriptors) override {
+    std::shared_ptr<AsyncContext> execute(TransferTask task) override {
         ++submitted_batch_count;
-        submitted_descriptor_count += descriptors.size();
+        submitted_descriptor_count += task.descriptors().size();
         return std::make_shared<CompletedAsyncContext>(ErrorInfo::OkStatus());
     }
 
@@ -1155,8 +1156,9 @@ TEST_F(KVCacheManagerTest, ExecuteFunctionSubmitsAllMemoryItemsAsOneBatch) {
         TransferDescriptor::deviceToHost(0, {1}, 1),
         TransferDescriptor::deviceToHost(0, {2}, 2),
     };
-    ASSERT_TRUE(BlockTransferRequestConverter::encodeTransfer(
-        *request.mutable_mem_request(), descriptors, manager->blockTreeCache()->groupSets()));
+    ASSERT_TRUE(BlockTransferRequestConverter::encodeTransfer(*request.mutable_mem_request(),
+                                                              TransferTask(descriptors, std::chrono::seconds(30)),
+                                                              manager->blockTreeCache()->groupSets()));
     FunctionResponsePB response;
 
     EXPECT_TRUE(manager->executeFunction(request, response));

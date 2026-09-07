@@ -833,12 +833,12 @@ TEST_F(BlockTreeCacheFactoryTest, PerRankBlockTransferEnginePreservesNonContiguo
     writeDevicePattern(full_group->convertIndexToAddr(/*global_layer=*/0, device_block).kv_addr, layer_bytes, 0x31);
     writeDevicePattern(full_group->convertIndexToAddr(/*global_layer=*/2, device_block).kv_addr, layer_bytes, 0x72);
 
-    EXPECT_TRUE(cache->executeTransfer(
-        {TransferDescriptor::deviceToHost(group_set->groupSetId(), {device_block}, host_block)}));
+    EXPECT_TRUE(cache->executeTransfer(block_transfer_engine_test::makeTransferTask(
+        {TransferDescriptor::deviceToHost(group_set->groupSetId(), {device_block}, host_block)})));
     writeDevicePattern(full_group->convertIndexToAddr(/*global_layer=*/0, device_block).kv_addr, layer_bytes, 0x00);
     writeDevicePattern(full_group->convertIndexToAddr(/*global_layer=*/2, device_block).kv_addr, layer_bytes, 0x00);
-    EXPECT_TRUE(cache->executeTransfer(
-        {TransferDescriptor::hostToDevice(group_set->groupSetId(), host_block, {device_block})}));
+    EXPECT_TRUE(cache->executeTransfer(block_transfer_engine_test::makeTransferTask(
+        {TransferDescriptor::hostToDevice(group_set->groupSetId(), host_block, {device_block})})));
 
     expectDevicePattern(full_group->convertIndexToAddr(/*global_layer=*/0, device_block).kv_addr, layer_bytes, 0x31);
     expectDevicePattern(full_group->convertIndexToAddr(/*global_layer=*/2, device_block).kv_addr, layer_bytes, 0x72);
@@ -1158,8 +1158,8 @@ TEST_F(BlockTreeCacheFactoryTest, SharedPhysicalBackingWatermarkSharesPendingRel
     ASSERT_EQ(cache->groupSets()[0]->devicePools()[0].get(), backing.get());
     ASSERT_EQ(cache->groupSets()[1]->devicePools()[0].get(), backing.get());
 
-    auto scripted_copy =
-        std::make_shared<block_tree_cache_test::ScriptedPerRankBlockTransferEngine>(cache->groupSets());
+    auto scripted_copy = std::make_shared<block_tree_cache_test::ScriptedPerRankBlockTransferEngine>(
+        cache->groupSets(), true, cache->isDiskCacheEnabled());
     block_tree_cache_test::BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*cache, scripted_copy);
     block_tree_cache_test::BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, 0.6);
 
@@ -1206,8 +1206,8 @@ TEST_F(BlockTreeCacheFactoryTest, FailedWatermarkPlanStopsThisPassAndRecomputesO
     ASSERT_NE(cache, nullptr);
     allocator->attachBlockTreeCache(cache);
 
-    auto scripted_copy =
-        std::make_shared<block_tree_cache_test::ScriptedPerRankBlockTransferEngine>(cache->groupSets());
+    auto scripted_copy = std::make_shared<block_tree_cache_test::ScriptedPerRankBlockTransferEngine>(
+        cache->groupSets(), true, cache->isDiskCacheEnabled());
     block_tree_cache_test::BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*cache, scripted_copy);
     scripted_copy->enqueue(/*success=*/false);
 
@@ -1246,8 +1246,8 @@ TEST_F(BlockTreeCacheFactoryTest, DeviceMinFreeDoesNotTriggerBlockTreeWatermarkE
     ASSERT_NE(cache, nullptr);
     allocator->attachBlockTreeCache(cache);
 
-    auto scripted_copy =
-        std::make_shared<block_tree_cache_test::ScriptedPerRankBlockTransferEngine>(cache->groupSets());
+    auto scripted_copy = std::make_shared<block_tree_cache_test::ScriptedPerRankBlockTransferEngine>(
+        cache->groupSets(), true, cache->isDiskCacheEnabled());
     block_tree_cache_test::BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*cache, scripted_copy);
 
     const auto blocks  = insertOneKeyThroughAllocator(config, allocator, /*key=*/811);
@@ -1989,10 +1989,10 @@ TEST_F(BlockTreeCacheFactoryTest, Factory_CreatesExecutableFullSWAConfig) {
         const BlockIdxType host_block = *host_block_result;
         const BlockIdxType disk_block = *disk_block_result;
 
-        EXPECT_TRUE(factory_cache->executeTransfer(
-            {TransferDescriptor::deviceToHost(group->groupSetId(), device_blocks[0], host_block)}));
-        EXPECT_TRUE(factory_cache->executeTransfer(
-            {TransferDescriptor::hostToDisk(group->groupSetId(), host_block, disk_block)}));
+        EXPECT_TRUE(factory_cache->executeTransfer(block_transfer_engine_test::makeTransferTask(
+            {TransferDescriptor::deviceToHost(group->groupSetId(), device_blocks[0], host_block)})));
+        EXPECT_TRUE(factory_cache->executeTransfer(block_transfer_engine_test::makeTransferTask(
+            {TransferDescriptor::hostToDisk(group->groupSetId(), host_block, disk_block)})));
 
         block_tree_cache_test::unreferenceDeviceBlocksForTest(*group, device_blocks);
         group->hostPool()->decTreeRef(host_block, BlockTreeRefType::STORE);

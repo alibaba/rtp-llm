@@ -45,36 +45,24 @@ bool BlockTreeTaskPool::start() {
     return true;
 }
 
-bool BlockTreeTaskPool::submit(std::function<void()>     task,
-                               std::chrono::milliseconds max_queue_wait,
-                               std::function<void()>     on_timeout) {
-    return submit(BlockTreeTaskClass::BACKGROUND, std::move(task), max_queue_wait, std::move(on_timeout));
-}
-
-bool BlockTreeTaskPool::submit(BlockTreeTaskClass        task_class,
-                               std::function<void()>     task,
-                               std::chrono::milliseconds max_queue_wait,
-                               std::function<void()>     on_timeout) {
-    if (!task) {
+bool BlockTreeTaskPool::submit(BlockTreeTaskClass               task_class,
+                               std::function<void()>            task,
+                               std::optional<Clock::time_point> deadline,
+                               std::function<void()>            on_timeout) {
+    if (!task || deadline.has_value() != static_cast<bool>(on_timeout)) {
         return false;
     }
 
-    std::optional<std::chrono::steady_clock::time_point> deadline;
-    if (max_queue_wait < std::chrono::milliseconds::zero()) {
-        return false;
-    }
-    if (max_queue_wait > std::chrono::milliseconds::zero()) {
-        if (!on_timeout) {
-            return false;
-        }
-        deadline = std::chrono::steady_clock::now() + max_queue_wait;
-    } else {
-        on_timeout = {};
-    }
-
-    std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+    std::unique_lock<std::mutex> lock(lifecycle_mutex_);
     if (!started_ || admission_stopped_ || shutdown_) {
         return false;
+    }
+    if (deadline.has_value() && Clock::now() >= *deadline) {
+        lock.unlock();
+        try {
+            on_timeout();
+        } catch (...) {}
+        return true;
     }
     if (queue_size_ != 0) {
         if (normalQueueSizeLocked() >= queue_size_) {

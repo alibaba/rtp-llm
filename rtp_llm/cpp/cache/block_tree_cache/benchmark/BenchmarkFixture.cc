@@ -203,13 +203,17 @@ std::unique_ptr<BlockTreeCache> BenchmarkFixture::createCache(std::vector<GroupS
         config.watermark_host = {host_watermark_ratio, std::nextafter(host_watermark_ratio, 1.0)};
     }
 
+    auto cache_metrics_reporter = std::make_shared<BlockTreeCacheMetricsReporter>();
     auto engine =
         std::make_shared<PerRankBlockTransferEngine>(group_sets,
+                                                     config.enable_disk_cache,
                                                      DeviceHostCopyOptions{},
                                                      config.device_disk_staging_block_count,
                                                      config.max_descriptors_per_transfer_batch,
                                                      config.transfer_worker_count,
-                                                     config.max_descriptors_per_non_device_host_transfer_batch);
+                                                     config.max_descriptors_per_non_device_host_transfer_batch,
+                                                     config.transfer_queue_max_size,
+                                                     cache_metrics_reporter);
     auto dispatcher =
         std::make_unique<BlockTransferDispatcher>(engine,
                                                   nullptr,
@@ -219,8 +223,12 @@ std::unique_ptr<BlockTreeCache> BenchmarkFixture::createCache(std::vector<GroupS
         std::make_unique<BlockTreeTaskPool>(config.task_pool_size, 1000, "BlockTreeCacheBenchmarkTaskPool");
     auto tree = std::make_unique<BlockTree>(group_sets);
 
-    auto cache =
-        std::make_unique<BlockTreeCache>(std::move(tree), config, nullptr, std::move(dispatcher), std::move(task_pool));
+    auto cache = std::make_unique<BlockTreeCache>(std::move(tree),
+                                                  config,
+                                                  nullptr,
+                                                  std::move(dispatcher),
+                                                  std::move(task_pool),
+                                                  std::move(cache_metrics_reporter));
 
     if (!cache->init()) {
         throw std::runtime_error("Failed to initialize BlockTreeCache");

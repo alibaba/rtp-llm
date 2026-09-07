@@ -18,11 +18,12 @@ size_t computeHostUsableBlockCount(size_t capacity_bytes, size_t stride_bytes);
 
 std::string resolveDiskMountPath(const std::string& disk_paths_csv, int64_t local_world_size, int64_t local_rank);
 
-BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       cache_config,
-                                       const KVCacheConfig&                     kv_cache_config,
-                                       const std::shared_ptr<KVCacheAllocator>& allocator,
-                                       const ParallelismConfig&                 parallelism_config = {},
-                                       std::shared_ptr<StorageBackend>          storage_backend    = nullptr,
-                                       std::shared_ptr<BroadcastManager>        broadcast_manager  = nullptr);
+BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                         cache_config,
+                                       const KVCacheConfig&                       kv_cache_config,
+                                       const std::shared_ptr<KVCacheAllocator>&   allocator,
+                                       const ParallelismConfig&                   parallelism_config = {},
+                                       std::shared_ptr<StorageBackend>            storage_backend    = nullptr,
+                                       std::shared_ptr<BroadcastManager>          broadcast_manager  = nullptr,
+                                       std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter   = nullptr);
 
 }  // namespace rtp_llm
