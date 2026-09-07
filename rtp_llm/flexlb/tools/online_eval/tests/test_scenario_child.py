@@ -16,10 +16,34 @@ sys.path.insert(0, str(TOOLS))
 from flexlb_ft.scenario.backend import JavaMockBackend
 from flexlb_ft.scenario.loader import ScenarioError
 from flexlb_ft.scenario.runtime import Deadline, RuntimeContext
-from scenario_runner import select, summarize
+from scenario_runner import instance_directory, select, summarize
 
 
 class ChildTest(unittest.TestCase):
+    def test_storage_key_cannot_be_parsed_as_jvm_log_options(self):
+        ids = [
+            "request_completion::immediate::batch-window",
+            "request_completion::deferred_fetch::batch-window",
+            "../odd:id",
+        ]
+        keys = [instance_directory(value) for value in ids]
+        self.assertEqual(len(set(keys)), len(ids))
+        for key in keys:
+            self.assertRegex(key, r"^instance-[0-9a-f]{64}$")
+            self.assertNotIn(":", key)
+            self.assertNotIn("/", key)
+        self.assertEqual(instance_directory(ids[0]), keys[0])
+
+    def test_backend_rejects_unsafe_root_before_process_harness_import(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ctx = RuntimeContext(
+                {}, None, Path(tmp) / "unsafe:root", time.monotonic, time.sleep
+            )
+            backend = JavaMockBackend({})
+            with self.assertRaisesRegex(ValueError, "JVM -Xlog"):
+                backend.setup(ctx, {}, Deadline(time.monotonic() + 1))
+            self.assertEqual(backend.environments, [])
+
     def test_list_contract_no_runtime_and_exact_selection(self):
         proc = subprocess.run(
             [

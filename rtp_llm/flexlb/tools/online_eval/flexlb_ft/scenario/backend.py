@@ -356,6 +356,10 @@ class JavaMockBackend:
         self.environments = []
 
     def setup(self, ctx, plan, deadline):
+        if ":" in str(ctx.artifact_dir.resolve()):
+            raise ValueError(
+                "Java mock artifact path contains the JVM -Xlog colon delimiter"
+            )
         from flexlb_cfg import OMIT, ConfigOverride
         from flexlb_ft.context import CaseContext
         from flexlb_ft.engine_ops import EngineOps
