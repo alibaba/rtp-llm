@@ -199,6 +199,7 @@ def forwarded_optional_environment(role: str) -> dict[str, str]:
         "SMOKE_CHUNK_TOKENS",
         "SMOKE_LINEAR_STEP",
         "SMOKE_CHUNKWISE_RDMA",
+        "SMOKE_KEEP_CLUSTER_ON_SUCCESS",
         "RTP_LLM_SKIP_BUILD",
         "KIMI_K3_ATTENTION_QUANTIZATION",
         "KIMI_K3_FP8_COLLECTIVE_GEMM",

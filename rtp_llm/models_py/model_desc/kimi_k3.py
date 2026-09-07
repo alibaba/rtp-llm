@@ -941,6 +941,9 @@ class KimiK3Model(GptModelBase):
                 input_ids,
                 attention_inputs,
                 round_plan=round_plan,
+                multimodal_inputs=inputs.multimodal_inputs,
+                embedding_inputs=inputs.embedding_inputs,
+                force_disable_sp_run=inputs.force_disable_sp_run,
             )
             chunk_attention = chunk_inputs.attention_inputs
             prepare_round_fmha(fmha_impl, chunk_attention)

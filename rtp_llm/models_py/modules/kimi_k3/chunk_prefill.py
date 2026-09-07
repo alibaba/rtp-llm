@@ -15,7 +15,12 @@ from typing import TYPE_CHECKING, Any, Optional, Sequence
 
 import torch
 
-from rtp_llm.ops.compute_ops import PyAttentionInputs, PyModelInputs
+from rtp_llm.ops.compute_ops import (
+    PyAttentionInputs,
+    PyEmbeddingInputs,
+    PyModelInputs,
+    PyMultimodalInputs,
+)
 
 if TYPE_CHECKING:
     from rtp_llm.ops.compute_ops import PyCacheStorePublishPlan
@@ -505,11 +510,23 @@ def validate_whole_chunk_prefill(
             "whole-model K3 Prefill does not support framework Prefill CP"
         )
     multimodal = inputs.multimodal_inputs
-    if multimodal.multimodal_features or (
-        multimodal.mm_features_locs_host is not None
-        and multimodal.mm_features_locs_host.numel()
-    ):
-        raise RuntimeError("whole-model K3 Prefill does not support multimodal input")
+    features = multimodal.multimodal_features
+    locs = multimodal.mm_features_locs_host
+    loc_count = 0 if locs is None else int(locs.numel())
+    if bool(features) != bool(loc_count):
+        raise RuntimeError(
+            "whole-model K3 Prefill requires matching multimodal features and "
+            f"locations: features={len(features)} locations={loc_count}"
+        )
+    if len(features) != loc_count:
+        raise RuntimeError(
+            "whole-model K3 Prefill multimodal feature/location counts differ: "
+            f"features={len(features)} locations={loc_count}"
+        )
+    if getattr(multimodal, "mm_extra_input", []):
+        raise RuntimeError(
+            "whole-model K3 Prefill does not support multimodal extra inputs"
+        )
 
 
 def host_lengths(value: torch.Tensor, name: str) -> list[int]:
@@ -545,6 +562,119 @@ def _select_group_batch_rows(
     values: Sequence[torch.Tensor], indices: list[int]
 ) -> list[torch.Tensor]:
     return [_select_batch_rows(value, indices) for value in values]
+
+
+def _slice_token_aligned_tensor(
+    value: Optional[torch.Tensor],
+    input_ids: torch.Tensor,
+    round_plan: KimiK3ChunkRound,
+    name: str,
+) -> Optional[torch.Tensor]:
+    if value is None or not value.numel():
+        return value
+    if value.ndim == 0 or value.shape[0] != input_ids.numel():
+        raise RuntimeError(
+            f"whole-model K3 Prefill requires token-aligned {name}: "
+            f"shape={tuple(value.shape)} tokens={input_ids.numel()}"
+        )
+    return torch.cat(
+        [
+            value.narrow(0, item.source_start, item.new_length)
+            for item in round_plan.slices
+        ],
+        dim=0,
+    )
+
+
+def _build_chunk_multimodal_inputs(
+    multimodal_inputs: Optional[PyMultimodalInputs],
+    round_plan: KimiK3ChunkRound,
+    input_lengths: Sequence[int],
+    *,
+    device: torch.device,
+) -> PyMultimodalInputs:
+    chunk = PyMultimodalInputs()
+    if multimodal_inputs is None or not multimodal_inputs.multimodal_features:
+        return chunk
+
+    features = multimodal_inputs.multimodal_features
+    locs = multimodal_inputs.mm_features_locs_host
+    if locs is None or locs.numel() != len(features):
+        loc_count = 0 if locs is None else int(locs.numel())
+        raise RuntimeError(
+            "whole-model K3 Prefill requires one location per multimodal "
+            f"feature: features={len(features)} locations={loc_count}"
+        )
+    if getattr(multimodal_inputs, "mm_extra_input", []):
+        raise RuntimeError(
+            "whole-model K3 Prefill does not support multimodal extra inputs"
+        )
+
+    request_offsets = [0]
+    for length in input_lengths:
+        if int(length) <= 0:
+            raise RuntimeError(
+                "whole-model K3 Prefill requires positive request lengths"
+            )
+        request_offsets.append(request_offsets[-1] + int(length))
+
+    source_locs = [int(value) for value in locs.cpu().view(-1).tolist()]
+    feature_owners: list[int] = []
+    for feature, feature_start in zip(features, source_locs):
+        if feature.ndim != 2 or feature.shape[0] <= 0:
+            raise RuntimeError(
+                "whole-model K3 Prefill requires non-empty 2-D multimodal "
+                f"features, got shape={tuple(feature.shape)}"
+            )
+        # A partially reused image can start before its request's packed-token
+        # range. Its final row still lies in the owning request, which makes the
+        # ownership unambiguous and prevents those prefix rows from leaking into
+        # the previous request's chunk.
+        feature_last = feature_start + int(feature.shape[0]) - 1
+        owner = next(
+            (
+                index
+                for index, (start, end) in enumerate(
+                    zip(request_offsets, request_offsets[1:])
+                )
+                if start <= feature_last < end
+            ),
+            None,
+        )
+        if owner is None:
+            raise RuntimeError(
+                "whole-model K3 Prefill multimodal feature is outside the "
+                f"packed requests: loc={feature_start} rows={feature.shape[0]}"
+            )
+        feature_owners.append(owner)
+
+    chunk_features: list[torch.Tensor] = []
+    chunk_locs: list[int] = []
+    packed_offset = 0
+    for item in round_plan.slices:
+        slice_start = int(item.source_start)
+        slice_end = int(item.source_end)
+        for feature, feature_start, owner in zip(features, source_locs, feature_owners):
+            if owner != int(item.original_batch_idx):
+                continue
+            feature_end = feature_start + int(feature.shape[0])
+            intersection_start = max(slice_start, feature_start)
+            intersection_end = min(slice_end, feature_end)
+            if intersection_start >= intersection_end:
+                continue
+            feature_offset = intersection_start - feature_start
+            feature_length = intersection_end - intersection_start
+            chunk_features.append(feature.narrow(0, feature_offset, feature_length))
+            chunk_locs.append(packed_offset + intersection_start - slice_start)
+        packed_offset += item.new_length
+
+    if chunk_features:
+        chunk.multimodal_features = chunk_features
+        chunk.mm_features_locs_host = torch.tensor(chunk_locs, dtype=torch.int32)
+        chunk.mm_features_locs = chunk.mm_features_locs_host.to(
+            device=device, non_blocking=True
+        )
+    return chunk
 
 
 def build_chunk_attention_inputs(
@@ -628,6 +758,9 @@ def build_chunk_model_inputs(
     attention_inputs: PyAttentionInputs,
     *,
     round_plan: KimiK3ChunkRound,
+    multimodal_inputs: Optional[PyMultimodalInputs] = None,
+    embedding_inputs: Optional[PyEmbeddingInputs] = None,
+    force_disable_sp_run: bool = False,
 ) -> PyModelInputs:
     chunk = PyModelInputs()
     chunk.input_ids = torch.cat(
@@ -642,6 +775,31 @@ def build_chunk_model_inputs(
         round_plan=round_plan,
         device=input_ids.device,
     )
+    chunk.multimodal_inputs = _build_chunk_multimodal_inputs(
+        multimodal_inputs,
+        round_plan,
+        host_lengths(attention_inputs.input_lengths_host, "input_lengths_host"),
+        device=input_ids.device,
+    )
+    if embedding_inputs is not None:
+        chunk.embedding_inputs = PyEmbeddingInputs()
+        combo_tokens_type_ids = _slice_token_aligned_tensor(
+            getattr(embedding_inputs, "combo_tokens_type_ids", None),
+            input_ids,
+            round_plan,
+            "combo_tokens_type_ids",
+        )
+        if combo_tokens_type_ids is not None:
+            chunk.embedding_inputs.combo_tokens_type_ids = combo_tokens_type_ids
+        text_tokens_mask = _slice_token_aligned_tensor(
+            getattr(embedding_inputs, "text_tokens_mask", None),
+            input_ids,
+            round_plan,
+            "text_tokens_mask",
+        )
+        if text_tokens_mask is not None:
+            chunk.embedding_inputs.text_tokens_mask = text_tokens_mask
+    chunk.force_disable_sp_run = force_disable_sp_run
     return chunk
 
 

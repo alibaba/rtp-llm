@@ -84,6 +84,122 @@ torch::Tensor catDefinedTokenParts(const std::vector<torch::Tensor>& parts) {
     return torch::cat(parts, 0);
 }
 
+void sliceRoundMultimodalInputs(GptModelInputs&          chunk_input,
+                                const GptModelInputs&    full_inputs,
+                                const PrefillChunkRound& round,
+                                size_t                   total_tokens,
+                                size_t                   source_shift) {
+    chunk_input.multimodal_features.reset();
+    chunk_input.mm_features_locs = torch::Tensor();
+    chunk_input.mm_extra_input.reset();
+
+    const bool has_features = full_inputs.multimodal_features.has_value() && !full_inputs.multimodal_features->empty();
+    const int64_t loc_count = full_inputs.mm_features_locs.defined() ? full_inputs.mm_features_locs.numel() : 0;
+    RTP_LLM_CHECK_WITH_INFO(!full_inputs.mm_extra_input.has_value() || full_inputs.mm_extra_input->empty(),
+                            "MTP chunk Prefill does not support multimodal extra inputs");
+    RTP_LLM_CHECK_WITH_INFO(has_features == (loc_count > 0),
+                            "MTP chunk Prefill requires matching multimodal features and locations");
+    if (!has_features) {
+        return;
+    }
+
+    const auto& features = *full_inputs.multimodal_features;
+    RTP_LLM_CHECK_WITH_INFO(static_cast<int64_t>(features.size()) == loc_count,
+                            "MTP chunk Prefill multimodal feature/location counts differ: features=%zu locations=%ld",
+                            features.size(),
+                            loc_count);
+
+    auto input_lengths_host = full_inputs.input_lengths_host_for_log;
+    if (!input_lengths_host.defined() || input_lengths_host.numel() == 0) {
+        RTP_LLM_CHECK_WITH_INFO(full_inputs.input_lengths.defined(),
+                                "MTP chunk Prefill multimodal slicing requires input lengths");
+        input_lengths_host =
+            full_inputs.input_lengths.to(torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU));
+    } else if (input_lengths_host.is_cuda() || input_lengths_host.scalar_type() != torch::kInt32) {
+        input_lengths_host = input_lengths_host.to(torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU));
+    }
+    input_lengths_host = input_lengths_host.contiguous().view({-1});
+    RTP_LLM_CHECK_WITH_INFO(static_cast<size_t>(input_lengths_host.numel())
+                                == static_cast<size_t>(full_inputs.input_lengths.numel()),
+                            "MTP chunk Prefill input-length host mirror size mismatch");
+
+    std::vector<int64_t> request_offsets{0};
+    request_offsets.reserve(static_cast<size_t>(input_lengths_host.numel()) + 1);
+    const auto* input_lengths_data = input_lengths_host.data_ptr<int32_t>();
+    for (int64_t request_idx = 0; request_idx < input_lengths_host.numel(); ++request_idx) {
+        RTP_LLM_CHECK_WITH_INFO(input_lengths_data[request_idx] > 0,
+                                "MTP chunk Prefill requires positive request lengths");
+        request_offsets.push_back(request_offsets.back() + input_lengths_data[request_idx]);
+    }
+    RTP_LLM_CHECK_WITH_INFO(request_offsets.back() == static_cast<int64_t>(total_tokens),
+                            "MTP chunk Prefill packed request lengths do not match token count: lengths=%ld tokens=%zu",
+                            request_offsets.back(),
+                            total_tokens);
+
+    auto locs_host = full_inputs.mm_features_locs;
+    if (locs_host.is_cuda() || locs_host.scalar_type() != torch::kInt32) {
+        locs_host = locs_host.to(torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU));
+    }
+    locs_host             = locs_host.contiguous().view({-1});
+    const auto* locs_data = locs_host.data_ptr<int32_t>();
+
+    std::vector<size_t> feature_owners;
+    feature_owners.reserve(features.size());
+    for (size_t feature_idx = 0; feature_idx < features.size(); ++feature_idx) {
+        const auto& feature = features[feature_idx];
+        RTP_LLM_CHECK_WITH_INFO(feature.defined() && feature.dim() == 2 && feature.size(0) > 0,
+                                "MTP chunk Prefill requires non-empty 2-D multimodal features");
+        const int64_t feature_last = static_cast<int64_t>(locs_data[feature_idx]) + feature.size(0) - 1;
+        auto          owner_it     = std::upper_bound(request_offsets.begin(), request_offsets.end(), feature_last);
+        RTP_LLM_CHECK_WITH_INFO(owner_it != request_offsets.begin() && owner_it != request_offsets.end(),
+                                "MTP chunk Prefill multimodal feature is outside packed requests: loc=%d rows=%ld",
+                                locs_data[feature_idx],
+                                feature.size(0));
+        feature_owners.push_back(static_cast<size_t>(std::distance(request_offsets.begin(), owner_it) - 1));
+    }
+
+    std::vector<torch::Tensor> chunk_features;
+    std::vector<int32_t>       chunk_locs;
+    int64_t                    packed_offset = 0;
+    for (const auto& slice : round.slices) {
+        const int64_t window_start = static_cast<int64_t>(slice.source_start) + source_shift;
+        const int64_t window_end   = window_start + slice.new_length;
+        RTP_LLM_CHECK_WITH_INFO(window_start >= 0 && window_end <= static_cast<int64_t>(total_tokens),
+                                "MTP chunk Prefill multimodal slice overruns the packed token count");
+        for (size_t feature_idx = 0; feature_idx < features.size(); ++feature_idx) {
+            if (feature_owners[feature_idx] != static_cast<size_t>(slice.original_batch_idx)) {
+                continue;
+            }
+            const int64_t feature_start      = locs_data[feature_idx];
+            const int64_t feature_end        = feature_start + features[feature_idx].size(0);
+            const int64_t intersection_start = std::max(window_start, feature_start);
+            const int64_t intersection_end   = std::min(window_end, feature_end);
+            if (intersection_start >= intersection_end) {
+                continue;
+            }
+            chunk_features.push_back(features[feature_idx].narrow(
+                0, intersection_start - feature_start, intersection_end - intersection_start));
+            const int64_t chunk_loc = packed_offset + intersection_start - slice.source_start;
+            RTP_LLM_CHECK_WITH_INFO(chunk_loc >= 0 && chunk_loc <= std::numeric_limits<int32_t>::max(),
+                                    "MTP chunk Prefill multimodal location is out of int32 range");
+            // For a shifted draft window this location intentionally remains
+            // in target coordinates. Kimi K3 Eagle3 performs the common -1
+            // shift when it injects features into the draft embedding.
+            chunk_locs.push_back(static_cast<int32_t>(chunk_loc));
+        }
+        packed_offset += slice.new_length;
+    }
+
+    if (!chunk_features.empty()) {
+        chunk_input.multimodal_features = std::move(chunk_features);
+        auto loc_options                = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU);
+        if (full_inputs.mm_features_locs.is_pinned()) {
+            loc_options = loc_options.pinned_memory(true);
+        }
+        chunk_input.mm_features_locs = torch::tensor(chunk_locs, loc_options);
+    }
+}
+
 bool debugTargetVerifyInputEnabled() {
     static const bool enabled = []() {
         const char* env = std::getenv("RTP_LLM_DEBUG_TARGET_VERIFY_INPUT");
@@ -337,6 +453,8 @@ GptModelInputs MtpExecutor::makePrefillRoundInput(const GptModelInputs& full_inp
     chunk.request_pd_separation = selectBatchRows(full_inputs.request_pd_separation, indices, 0);
     chunk.cache_keys            = selectBatchRows(full_inputs.cache_keys, indices, 0);
 
+    sliceRoundMultimodalInputs(chunk, full_inputs, round, total_tokens, /*source_shift=*/0);
+
     chunk.last_hidden_states     = torch::Tensor();
     chunk.is_prefill_chunk       = true;
     chunk.prefill_chunk_kv_length = static_cast<size_t>(round.kv_length());
@@ -440,6 +558,7 @@ void MtpExecutor::shiftRoundComboTokens(GptModelInputs&         chunk_input,
     }
     chunk_input.combo_tokens            = torch::cat(token_parts, 0);
     chunk_input.combo_tokens_host_for_log = catDefinedTokenParts(host_parts);
+    sliceRoundMultimodalInputs(chunk_input, full_inputs, round, total_tokens, /*source_shift=*/1);
 }
 
 torch::Tensor MtpExecutor::buildDraftCacheGroupTypes(const CacheConfig&      global_cache_config,
@@ -1214,9 +1333,8 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
                                     && model_input.input_lengths.numel() == model_input.prefix_lengths.numel()
                                     && model_input.sequence_lengths.numel() == 0,
                                 "MTP chunk Prefill requires context-only requests with prefix metadata");
-        RTP_LLM_CHECK_WITH_INFO(!model_input.multimodal_features.has_value()
-                                    || model_input.multimodal_features->empty(),
-                                "MTP chunk Prefill does not support multimodal features");
+        RTP_LLM_CHECK_WITH_INFO(!model_input.mm_extra_input.has_value() || model_input.mm_extra_input->empty(),
+                                "MTP chunk Prefill does not support multimodal extra inputs");
         RTP_LLM_CHECK_WITH_INFO(!model_input.input_embeddings.has_value() || model_input.input_embeddings->empty(),
                                 "MTP chunk Prefill does not support input embeddings");
 

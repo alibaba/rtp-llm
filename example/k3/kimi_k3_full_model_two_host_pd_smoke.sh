@@ -141,6 +141,9 @@ Important optional variables:
                             defaults to 4294967296 (4 GiB) per rank;
                             0 disables historical KV expansion limits.
                             Current-chunk KV and FP8 temporaries are not capped.
+  SMOKE_KEEP_CLUSTER_ON_SUCCESS
+                            1 keeps both role runners, services and GPU locks
+                            alive after PASS; TERM the role runners to clean up
   RTP_LLM_SERVER_BINARY     use an existing Bazel launcher
   RTP_LLM_SKIP_BUILD=1      skip the CUDA13/SM10x build in the launcher
 EOF
@@ -281,6 +284,7 @@ smoke_kernel_block_size="${SMOKE_KERNEL_BLOCK_SIZE:-128}"
 smoke_chunk_tokens="${SMOKE_CHUNK_TOKENS:-65536}"
 smoke_linear_step="${SMOKE_LINEAR_STEP:-1}"
 smoke_chunkwise_rdma="${SMOKE_CHUNKWISE_RDMA:-1}"
+smoke_keep_cluster_on_success="${SMOKE_KEEP_CLUSTER_ON_SUCCESS:-0}"
 smoke_rdma_prewarm_attempts="${SMOKE_RDMA_PREWARM_ATTEMPTS:-3}"
 smoke_rdma_prewarm_backoff_s="${SMOKE_RDMA_PREWARM_BACKOFF_S:-5}"
 smoke_rdma_prewarm_settle_s="${SMOKE_RDMA_PREWARM_SETTLE_S:-2}"
@@ -298,6 +302,8 @@ done
     || die "SMOKE_BLOCK_SIZE must be divisible by the cuLA checkpoint step 64"
 [[ "${smoke_chunkwise_rdma}" == "0" || "${smoke_chunkwise_rdma}" == "1" ]] \
     || die "SMOKE_CHUNKWISE_RDMA must be 0 or 1"
+[[ "${smoke_keep_cluster_on_success}" == "0" || "${smoke_keep_cluster_on_success}" == "1" ]] \
+    || die "SMOKE_KEEP_CLUSTER_ON_SUCCESS must be 0 or 1"
 [[ "${smoke_rdma_prewarm_attempts}" =~ ^[0-9]+$ ]] \
     || die "SMOKE_RDMA_PREWARM_ATTEMPTS must be a non-negative integer"
 for seconds_value in \
@@ -386,6 +392,15 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+
+keep_cluster_after_success() {
+    [[ "${smoke_keep_cluster_on_success}" == "1" ]] || return 0
+    echo "PASS: ${role} service remains live at ${role_dir}; waiting for TERM"
+    while kill -0 "${service_pid}" 2>/dev/null; do
+        sleep 30
+    done
+    die "${role} service exited while the validated cluster was being retained"
+}
 
 wait_for_health() {
     local host="$1"
@@ -781,6 +796,7 @@ PY
     [[ "${verdict}" == "PASS" ]] || die "Prefill reported ${verdict}"
     verify_rdma_selected_devices
     echo "PASS: Decode stayed healthy and Prefill validated the PD response and semantic accuracy"
+    keep_cluster_after_success
     exit 0
 fi
 
@@ -828,4 +844,5 @@ python3 "${case_runner}" \
 verify_rdma_selected_devices
 notify_decode PASS "smoke-suite-${smoke_suite}-validated"
 echo "PASS: Prefill validated suite=${smoke_suite}; artifacts=${role_dir}"
+keep_cluster_after_success
 exit 0

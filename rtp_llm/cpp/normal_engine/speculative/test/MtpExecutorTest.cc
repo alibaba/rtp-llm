@@ -626,6 +626,47 @@ TEST_F(MtpExecutorTest, testMakePrefillRoundInputPacksMultiRequestRounds) {
     EXPECT_EQ(last.prefill_chunk_kv_length, 8);
 }
 
+TEST_F(MtpExecutorTest, testMakePrefillRoundInputSlicesMultimodalRowsPerRequest) {
+    auto           components = createMtpExecutorComponents(MtpExecutorTestConfig{});
+    GptModelInputs inputs;
+    inputs.combo_tokens                  = torch::arange(0, 8, torch::kInt32).cuda();
+    inputs.input_lengths                 = torch::tensor({4, 4}, torch::kInt32).cuda();
+    inputs.input_lengths_host_for_log    = inputs.input_lengths.cpu().clone();
+    inputs.prefix_lengths                = torch::tensor({0, 0}, torch::kInt32).cuda();
+    inputs.sequence_lengths              = torch::empty({0}, torch::kInt32).cuda();
+    auto first_feature                   = torch::arange(0, 8, torch::kFloat32).reshape({2, 4}).cuda();
+    auto partially_reused_second_feature = torch::arange(12, 24, torch::kFloat32).reshape({3, 4}).cuda();
+    inputs.multimodal_features           = std::vector<torch::Tensor>{first_feature, partially_reused_second_feature};
+    // Feature 1 belongs to request 1. Its first row is in request 1's reused
+    // prefix and therefore has a packed location inside request 0's range.
+    inputs.mm_features_locs = torch::tensor({2, 3}, torch::kInt32);
+
+    PrefillChunkRound first_round;
+    first_round.slices = {
+        {0, 0, 3, 3, 0, 3, false},
+        {1, 4, 5, 1, 0, 1, false},
+    };
+    PrefillChunkRound second_round;
+    second_round.slices = {
+        {0, 3, 4, 1, 3, 4, true},
+        {1, 5, 8, 3, 1, 4, true},
+    };
+
+    auto first = components.executor->makePrefillRoundInput(inputs, first_round, /*total_tokens=*/8);
+    ASSERT_TRUE(first.multimodal_features.has_value());
+    ASSERT_EQ(first.multimodal_features->size(), 2);
+    EXPECT_EQ(toVec<int32_t>(first.mm_features_locs), (std::vector<int32_t>{2, 3}));
+    EXPECT_EQ(toVec<float>((*first.multimodal_features)[0]), (std::vector<float>{0, 1, 2, 3}));
+    EXPECT_EQ(toVec<float>((*first.multimodal_features)[1]), (std::vector<float>{16, 17, 18, 19}));
+
+    auto second = components.executor->makePrefillRoundInput(inputs, second_round, /*total_tokens=*/8);
+    ASSERT_TRUE(second.multimodal_features.has_value());
+    ASSERT_EQ(second.multimodal_features->size(), 2);
+    EXPECT_EQ(toVec<int32_t>(second.mm_features_locs), (std::vector<int32_t>{0, 1}));
+    EXPECT_EQ(toVec<float>((*second.multimodal_features)[0]), (std::vector<float>{4, 5, 6, 7}));
+    EXPECT_EQ(toVec<float>((*second.multimodal_features)[1]), (std::vector<float>{20, 21, 22, 23}));
+}
+
 TEST_F(MtpExecutorTest, testMakePrefillRoundInputSelectsPerRequestMetadataRows) {
     auto components = createMtpExecutorComponents(MtpExecutorTestConfig{});
     GptModelInputs inputs;
@@ -694,6 +735,34 @@ TEST_F(MtpExecutorTest, testShiftRoundComboTokensAppliesPerSliceLookahead) {
     // shift would overrun and must be rejected (final rounds never shift).
     EXPECT_THROW(
         components.executor->shiftRoundComboTokens(first, inputs, last_round), std::runtime_error);
+}
+
+TEST_F(MtpExecutorTest, testShiftRoundComboTokensCarriesMultimodalLookahead) {
+    auto           components = createMtpExecutorComponents(MtpExecutorTestConfig{});
+    GptModelInputs inputs;
+    inputs.combo_tokens               = torch::arange(0, 4, torch::kInt32).cuda();
+    inputs.input_lengths              = torch::tensor({4}, torch::kInt32).cuda();
+    inputs.input_lengths_host_for_log = inputs.input_lengths.cpu().clone();
+    inputs.prefix_lengths             = torch::tensor({0}, torch::kInt32).cuda();
+    auto feature                      = torch::arange(0, 8, torch::kFloat32).reshape({2, 4}).cuda();
+    inputs.multimodal_features        = std::vector<torch::Tensor>{feature};
+    inputs.mm_features_locs           = torch::tensor({2}, torch::kInt32);
+
+    PrefillChunkRound round;
+    round.slices = {
+        {0, 0, 2, 2, 0, 2, false},
+    };
+
+    auto shifted = components.executor->makePrefillRoundInput(inputs, round, /*total_tokens=*/4);
+    EXPECT_FALSE(shifted.multimodal_features.has_value());
+
+    components.executor->shiftRoundComboTokens(shifted, inputs, round);
+    ASSERT_TRUE(shifted.multimodal_features.has_value());
+    ASSERT_EQ(shifted.multimodal_features->size(), 1);
+    // The draft model shifts this target-coordinate location by -1, placing
+    // the lookahead image row at local draft position 1.
+    EXPECT_EQ(toVec<int32_t>(shifted.mm_features_locs), (std::vector<int32_t>{2}));
+    EXPECT_EQ(toVec<float>((*shifted.multimodal_features)[0]), (std::vector<float>{0, 1, 2, 3}));
 }
 
 TEST_F(MtpExecutorTest, testBuildDraftCacheGroupTypesPreservesGlobalGroupNamespace) {

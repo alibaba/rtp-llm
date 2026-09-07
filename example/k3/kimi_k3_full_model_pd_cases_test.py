@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import pathlib
 import unittest
 from unittest import mock
 
@@ -109,6 +110,19 @@ class KimiK3FullModelPdCasesTest(unittest.TestCase):
         self.assertTrue(mtp_chunk.require_mtp)
         self.assertGreater(len(mtp_chunk.prompt), runner.args.chunk_tokens)
 
+        multimodal_chunk = stages["multimodal_mtp_chunk_prefill_miss"][0]
+        self.assertEqual(multimodal_chunk.max_tokens, 256)
+        self.assertTrue(multimodal_chunk.require_chunk)
+        self.assertTrue(multimodal_chunk.require_mtp)
+        self.assertTrue(multimodal_chunk.require_multimodal)
+        self.assertIsInstance(multimodal_chunk.prompt, list)
+        self.assertEqual(
+            [part["type"] for part in multimodal_chunk.prompt],
+            ["text", "image_url", "text"],
+        )
+        image_path = multimodal_chunk.prompt[1]["image_url"]["url"]
+        self.assertTrue(pathlib.Path(image_path).is_file())
+
         for stage_name in (
             "partial_prefix_seed",
             "partial_prefix_hit",
@@ -151,6 +165,7 @@ class KimiK3FullModelPdCasesTest(unittest.TestCase):
                 "iter_count": 9,
                 "reuse_len": 0,
                 "prefill_total_reuse_len": 0,
+                "multimodal_lengths": {0: 576},
             },
             "debug_info": {"output_ids": [[1, 2, 3]]},
         }
@@ -162,6 +177,47 @@ class KimiK3FullModelPdCasesTest(unittest.TestCase):
         response["aux_info"]["iter_count"] = 12
         with self.assertRaisesRegex(SmokeFailure, "no accepted draft token"):
             runner.validate(case, response, 1.0, 128)
+
+    def test_multimodal_chunk_case_requires_processed_input_url(self) -> None:
+        runner = Runner(make_args())
+        case = Case(
+            "multimodal_mtp_chunk_prefill_miss",
+            [{"type": "image_url", "image_url": {"url": "image.jpg"}}],
+            numbered_answer_pattern(6241),
+            "miss",
+            require_chunk=True,
+            require_mtp=True,
+            require_multimodal=True,
+            max_tokens=128,
+        )
+        response = {
+            "choices": [
+                {
+                    "message": {
+                        "content": "6241",
+                        "reasoning_content": "",
+                    }
+                }
+            ],
+            "aux_info": {
+                "pd_sep": True,
+                "input_len": 70000,
+                "output_len": 12,
+                "iter_count": 9,
+                "reuse_len": 0,
+                "prefill_total_reuse_len": 0,
+                "multimodal_lengths": {},
+            },
+            "debug_info": {"output_ids": [[1, 2, 3]], "input_urls": []},
+        }
+
+        with self.assertRaisesRegex(SmokeFailure, "no processed multimodal input URL"):
+            runner.validate(case, response, 1.0, 128)
+
+        response["debug_info"]["input_urls"] = ["image.jpg"]
+        record = runner.validate(case, response, 1.0, 128)
+        self.assertEqual(record["input_urls"], ["image.jpg"])
+        self.assertTrue(record["require_multimodal"])
 
 
 if __name__ == "__main__":

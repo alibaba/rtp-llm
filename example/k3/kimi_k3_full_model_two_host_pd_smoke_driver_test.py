@@ -62,6 +62,18 @@ class ForwardedOptionalEnvironmentTest(unittest.TestCase):
                 driver.forwarded_optional_environment("prefill"),
             )
 
+    def test_forwards_keep_cluster_mode_to_both_roles(self) -> None:
+        with mock.patch.dict(
+            os.environ, {"SMOKE_KEEP_CLUSTER_ON_SUCCESS": "1"}, clear=True
+        ):
+            for role in ("prefill", "decode"):
+                self.assertEqual(
+                    driver.forwarded_optional_environment(role)[
+                        "SMOKE_KEEP_CLUSTER_ON_SUCCESS"
+                    ],
+                    "1",
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

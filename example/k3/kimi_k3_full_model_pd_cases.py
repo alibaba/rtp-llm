@@ -19,11 +19,12 @@ from typing import Any
 @dataclass(frozen=True)
 class Case:
     name: str
-    prompt: str
+    prompt: str | list[dict[str, Any]]
     expected_regex: str
     reuse: str
     require_chunk: bool = False
     require_mtp: bool = False
+    require_multimodal: bool = False
     max_tokens: int | None = None
 
 
@@ -119,6 +120,32 @@ def make_whole_chunk_prompt(namespace: str, case_name: str, value: int) -> str:
     return marker + filler * 5000 + f"\n只回答数字：{value} 的平方是多少？"
 
 
+def make_multimodal_chunk_prompt(
+    namespace: str, case_name: str, value: int
+) -> list[dict[str, Any]]:
+    image_path = (
+        pathlib.Path(__file__).resolve().parents[2]
+        / "rtp_llm/multimodal/test/testdata/qwen2_vl/1.jpg"
+    )
+    if not image_path.is_file():
+        raise SmokeFailure(f"multimodal smoke image is missing: {image_path}")
+    marker = f"多模态分块测试标识：{namespace}/{case_name}。"
+    filler = "多模态长上下文分块验证材料，请勿复述，继续阅读到末尾问题。"
+    # The image is deliberately placed near the 65,536-token boundary observed
+    # for this tokenizer, while the complete request remains comfortably above
+    # the boundary. Runtime checks below remain authoritative if tokenization
+    # changes.
+    return [
+        {"type": "text", "text": marker + filler * 3600},
+        {"type": "image_url", "image_url": {"url": str(image_path)}},
+        {
+            "type": "text",
+            "text": filler * 1400
+            + f"\n无需描述图片，只回答数字：{value} 的平方是多少？",
+        },
+    ]
+
+
 def make_flow_prompt(namespace: str) -> str:
     """Build a modest multi-round prompt for the four-layer RDMA flow smoke."""
     marker = f"四层流程测试标识：{namespace}/chunkwise-rdma-flow。"
@@ -168,6 +195,9 @@ class Runner:
                 ),
                 "mtp_case_count": sum(
                     bool(r.get("require_mtp")) for r in self.records
+                ),
+                "multimodal_case_count": sum(
+                    bool(r.get("require_multimodal")) for r in self.records
                 ),
                 "concurrent_stages": sum(s.get("concurrent", False) for s in self.stages),
             },
@@ -256,7 +286,8 @@ class Runner:
             aux = response["aux_info"]
         except (KeyError, IndexError, TypeError) as exc:
             raise SmokeFailure(f"{case.name}: malformed response: {response!r}") from exc
-        output_ids = (response.get("debug_info") or {}).get("output_ids")
+        debug_info = response.get("debug_info") or {}
+        output_ids = debug_info.get("output_ids")
         if not isinstance(content, str) or not isinstance(reasoning_content, str):
             raise SmokeFailure(f"{case.name}: malformed model response")
         # A four-layer checkpoint is only a transport preflight. With the
@@ -315,6 +346,16 @@ class Runner:
                 f"{case.name}: input_len={input_len} did not exceed chunk threshold "
                 f"{self.args.chunk_tokens}"
             )
+        multimodal_lengths = aux.get("multimodal_lengths") or {}
+        input_urls = debug_info.get("input_urls") or []
+        if case.require_multimodal:
+            if not isinstance(input_urls, list) or not any(
+                isinstance(url, str) and url for url in input_urls
+            ):
+                raise SmokeFailure(
+                    f"{case.name}: no processed multimodal input URL was reported: "
+                    f"{input_urls!r}"
+                )
         iter_count = int(aux.get("iter_count", 0))
         mtp_accepted_tokens = output_len - iter_count
         if case.require_mtp and (iter_count <= 0 or mtp_accepted_tokens <= 0):
@@ -334,6 +375,9 @@ class Runner:
             "iter_count": iter_count,
             "mtp_accepted_tokens": mtp_accepted_tokens,
             "require_mtp": case.require_mtp,
+            "require_multimodal": case.require_multimodal,
+            "multimodal_lengths": multimodal_lengths,
+            "input_urls": input_urls,
             "max_tokens": request_max_tokens,
             "pd_sep": True,
             "elapsed_s": round(elapsed_s, 3),
@@ -626,6 +670,30 @@ class Runner:
                     "miss",
                     require_chunk=True,
                     require_mtp=True,
+                    max_tokens=max(
+                        self.args.max_tokens,
+                        self.args.mtp_chunk_max_tokens,
+                    ),
+                )
+            ],
+        )
+
+        multimodal_chunk_prompt = make_multimodal_chunk_prompt(
+            self.args.namespace,
+            "multimodal-mtp-chunk-prefill",
+            79,
+        )
+        self.run_stage(
+            "multimodal_mtp_chunk_prefill_miss",
+            [
+                Case(
+                    "multimodal_mtp_chunk_prefill_miss",
+                    multimodal_chunk_prompt,
+                    numbered_answer_pattern(6241),
+                    "miss",
+                    require_chunk=True,
+                    require_mtp=True,
+                    require_multimodal=True,
                     max_tokens=max(
                         self.args.max_tokens,
                         self.args.mtp_chunk_max_tokens,

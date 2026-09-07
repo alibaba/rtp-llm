@@ -6,7 +6,11 @@ import torch
 from torch import nn
 
 from rtp_llm.models_py.model_desc.kimi_k3 import KimiK3Model
-from rtp_llm.models_py.modules.kimi_k3.chunk_prefill import KimiK3ChunkRound
+from rtp_llm.models_py.modules.kimi_k3.chunk_prefill import (
+    KimiK3ChunkRound,
+    KimiK3ChunkSlice,
+    build_chunk_model_inputs,
+)
 from rtp_llm.models_py.modules.kimi_k3.kda.prefill import KimiKDACurrentStateRegistry
 from rtp_llm.ops.compute_ops import PyAttentionInputs
 
@@ -53,8 +57,87 @@ class KimiK3MtpChunkPrefillUnitTest(unittest.TestCase):
             input_ids=torch.arange(num_tokens, dtype=torch.int32),
             attention_inputs=attention_inputs,
             multimodal_inputs=SimpleNamespace(
-                multimodal_features=[], mm_features_locs_host=None
+                multimodal_features=[],
+                mm_features_locs_host=None,
+                mm_extra_input=[],
             ),
+            embedding_inputs=SimpleNamespace(
+                combo_tokens_type_ids=None,
+                text_tokens_mask=None,
+            ),
+            force_disable_sp_run=False,
+        )
+
+    def test_chunk_inputs_slice_multimodal_rows_without_cross_request_leakage(
+        self,
+    ) -> None:
+        inputs = self._inputs(8, [4, 4], [0, 0])
+        first_feature = torch.arange(8, dtype=torch.float32).reshape(2, 4)
+        # The second feature belongs to request 1. Its first row is already in
+        # that request's reused prefix, so its gathered location falls at the
+        # final packed position of request 0.
+        second_feature = torch.arange(12, 24, dtype=torch.float32).reshape(3, 4)
+        inputs.multimodal_inputs = SimpleNamespace(
+            multimodal_features=[first_feature, second_feature],
+            mm_features_locs_host=torch.tensor([2, 3], dtype=torch.int32),
+            mm_extra_input=[],
+        )
+        inputs.embedding_inputs.text_tokens_mask = torch.tensor(
+            [1, 1, 0, 1, 0, 0, 1, 1], dtype=torch.bool
+        )
+
+        first_round = KimiK3ChunkRound(
+            slices=(
+                KimiK3ChunkSlice(0, 0, 3, 0, 0, 3, 0, 3, False),
+                KimiK3ChunkSlice(1, 4, 5, 0, 0, 1, 0, 1, False),
+            )
+        )
+        second_round = KimiK3ChunkRound(
+            slices=(
+                KimiK3ChunkSlice(0, 3, 4, 0, 3, 1, 3, 4, True),
+                KimiK3ChunkSlice(1, 5, 8, 0, 1, 3, 1, 4, True),
+            )
+        )
+
+        first = build_chunk_model_inputs(
+            inputs.input_ids,
+            inputs.attention_inputs,
+            round_plan=first_round,
+            multimodal_inputs=inputs.multimodal_inputs,
+            embedding_inputs=inputs.embedding_inputs,
+        )
+        second = build_chunk_model_inputs(
+            inputs.input_ids,
+            inputs.attention_inputs,
+            round_plan=second_round,
+            multimodal_inputs=inputs.multimodal_inputs,
+            embedding_inputs=inputs.embedding_inputs,
+        )
+
+        self.assertEqual(first.input_ids.tolist(), [0, 1, 2, 4])
+        self.assertEqual(first.multimodal_inputs.mm_features_locs_host.tolist(), [2, 3])
+        torch.testing.assert_close(
+            first.multimodal_inputs.multimodal_features[0], first_feature[:1]
+        )
+        torch.testing.assert_close(
+            first.multimodal_inputs.multimodal_features[1], second_feature[1:2]
+        )
+        self.assertEqual(
+            first.embedding_inputs.text_tokens_mask.tolist(), [True, True, False, False]
+        )
+
+        self.assertEqual(second.input_ids.tolist(), [3, 5, 6, 7])
+        self.assertEqual(
+            second.multimodal_inputs.mm_features_locs_host.tolist(), [0, 1]
+        )
+        torch.testing.assert_close(
+            second.multimodal_inputs.multimodal_features[0], first_feature[1:]
+        )
+        torch.testing.assert_close(
+            second.multimodal_inputs.multimodal_features[1], second_feature[2:]
+        )
+        self.assertEqual(
+            second.embedding_inputs.text_tokens_mask.tolist(), [True, False, True, True]
         )
 
     def test_forward_dispatches_oversized_prefill_to_whole_chunk_path(self) -> None:
@@ -132,6 +215,14 @@ class KimiK3MtpChunkPrefillUnitTest(unittest.TestCase):
         object.__setattr__(model, "_publish_whole_chunk_cache", publish_mock)
 
         inputs = self._inputs(128, [128], [0])
+        feature = torch.arange(16, dtype=torch.float32).reshape(4, 4)
+        inputs.multimodal_inputs = SimpleNamespace(
+            multimodal_features=[feature],
+            mm_features_locs_host=torch.tensor([62], dtype=torch.int32),
+            mm_extra_input=[],
+        )
+        inputs.embedding_inputs.text_tokens_mask = torch.ones(128, dtype=torch.bool)
+        inputs.embedding_inputs.text_tokens_mask[62:66] = False
         fmha = MagicMock()
         with patch("rtp_llm.models_py.model_desc.kimi_k3.barrier") as barrier:
             result = model._forward_whole_chunk_prefill(
@@ -163,6 +254,18 @@ class KimiK3MtpChunkPrefillUnitTest(unittest.TestCase):
         )
         self.assertEqual(
             forward_kwargs[1][0].input_ids.tolist(), list(range(64, 128))
+        )
+        first_mm = forward_kwargs[0][0].multimodal_inputs
+        second_mm = forward_kwargs[1][0].multimodal_inputs
+        self.assertEqual(first_mm.mm_features_locs_host.tolist(), [62])
+        self.assertEqual(second_mm.mm_features_locs_host.tolist(), [0])
+        torch.testing.assert_close(first_mm.multimodal_features[0], feature[:2])
+        torch.testing.assert_close(second_mm.multimodal_features[0], feature[2:])
+        self.assertEqual(
+            int(forward_kwargs[0][0].embedding_inputs.text_tokens_mask.sum()), 62
+        )
+        self.assertEqual(
+            int(forward_kwargs[1][0].embedding_inputs.text_tokens_mask.sum()), 62
         )
         self.assertEqual(fmha.prepare.call_count, 2)
         for round_inputs, _ in forward_kwargs:
