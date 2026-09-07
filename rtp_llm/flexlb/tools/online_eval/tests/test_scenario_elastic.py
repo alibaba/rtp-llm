@@ -352,3 +352,28 @@ class ElasticFlowTests(unittest.TestCase):
         finally:
             release.set()
             flow.stop(Deadline(2), cancel=True)
+
+
+class ElasticBaselineTests(unittest.TestCase):
+    def test_real_low_hit_rate_blocks_scale_construction(self):
+        data = ElasticMetricTests.data()
+        for sample in data["samples"]:
+            sample["engines"]["p1"]["mock_engine_cache_key_hits_total"] = (
+                sample["time_s"] * 5
+            )
+        metrics = NS(snapshot=lambda: data)
+        ctx = NS(
+            clock=lambda: 0,
+            resource=lambda *args: metrics,
+            register_resource=lambda *args, **kw: {
+                "kind": "snapshot",
+                "id": "1",
+                "env_epoch": 1,
+            },
+        )
+        result = e._window(ctx, dict(observation={}, phase="baseline"), Deadline())
+        self.assertEqual(result.checks[0].id, "high_hit")
+        self.assertEqual(result.checks[0].status, "FAIL")
+        self.assertEqual(result.checks[0].actual, 0.5)
+        self.assertEqual(result.checks[0].expected, 0.9)
+        self.assertTrue(result.checks[0].evidence["complete"])
