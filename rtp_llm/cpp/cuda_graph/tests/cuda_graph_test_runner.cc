@@ -48,7 +48,8 @@ public:
                      std::vector<int>         decode_capture_batch_sizes,
                      std::vector<std::string> group_tags,
                      bool                     is_target_verify,
-                     int64_t                  num_tokens_per_bs) {
+                     int64_t                  num_tokens_per_bs,
+                     int64_t                  position_id_len_factor) {
         reset_runner();
         GraphParams params;
         params.enable_cuda_graph_debug_mode = false;
@@ -64,6 +65,7 @@ public:
         params.decode_capture_batch_sizes   = std::move(decode_capture_batch_sizes);
         params.kv_cache_group_tags          = std::move(group_tags);
         params.is_target_verify             = is_target_verify;
+        params.position_id_len_factor       = static_cast<int>(position_id_len_factor);
 
         runner_ = CudaGraphRunner::createForDecode(std::move(py_instance), std::move(params));
     }
@@ -128,7 +130,8 @@ PYBIND11_MODULE(libtest_cuda_graph_runner, m) {
              py::arg("decode_capture_batch_sizes"),
              py::arg("group_tags")        = std::vector<std::string>{},
              py::arg("is_target_verify")  = false,
-             py::arg("num_tokens_per_bs") = 1)
+             py::arg("num_tokens_per_bs") = 1,
+             py::arg("position_id_len_factor") = 0)
         .def("canRun", &CudaGraphTestRunner::canRun)
         .def("forward", &CudaGraphTestRunner::forward)
         .def("getCurrentRealGraphSize", &CudaGraphTestRunner::getCurrentRealGraphSize);
