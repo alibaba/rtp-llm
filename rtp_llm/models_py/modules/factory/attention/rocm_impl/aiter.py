@@ -4,6 +4,7 @@ from typing import Any, Optional
 import aiter
 import torch
 
+from rtp_llm.config.cuda_graph import CudaGraphSelectionMode
 from rtp_llm.models_py.modules.factory.attention import common
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
 from rtp_llm.models_py.modules.factory.attention.rocm_impl._attn_utils import (
@@ -859,8 +860,12 @@ class AiterPrefillAttnOpPaged:
         self.cuda_graph_prepared = True
 
     def forward(self, qkv, kv_cache, fmha_params) -> torch.Tensor:
-        # This operator serves prefix-cache eager prefill as well as no-prefix
-        # full-prefill HIP Graph capture/replay on ROCm.
+        # NOTE: This is a *prefill*-stage operator (handles prefix-cache prefill).
+        # The graph_ready branches below are interface-compatible scaffolding for
+        # potential future CUDA-graph-captured prefill; in production, CUDA graph
+        # capture only happens in the decode stage (AiterDecodeAttnOp), so the
+        # graph_ready path here is never triggered and does not require dedicated
+        # regression tests.
         q_tensor = qkv[0][: fmha_params.token_q_num]
         device = q_tensor.device
 
@@ -1108,7 +1113,7 @@ class AiterPrefillAttnOpTriton:
         attn_configs: AttentionConfigs,
         *,
         linear_v: bool = False,
-        full_prefill_graph: bool = False,
+        use_unified_attention: bool = False,
     ):
         self.head_num = attn_configs.head_num
         self.head_dim = attn_configs.size_per_head
@@ -1117,7 +1122,7 @@ class AiterPrefillAttnOpTriton:
         self.alloc_scale = attn_configs.kv_cache_dtype == KvCacheDataType.FP8
         self.enable_cuda_graph = False
         self.linear_v = linear_v
-        self.full_prefill_graph = full_prefill_graph
+        self.use_unified_attention = use_unified_attention
 
     def support(self, attn_inputs: PyAttentionInputs) -> bool:
         has_prefix = (
@@ -1135,7 +1140,7 @@ class AiterPrefillAttnOpTriton:
             alloc_scale=self.alloc_scale,
         )
 
-        if self.enable_cuda_graph:
+        if self.enable_cuda_graph or self.use_unified_attention:
             block_table = getattr(attn_inputs, "kv_cache_kernel_block_id_device", None)
             if block_table is None:
                 block_table = getattr(attn_inputs, "kv_cache_block_id_device", None)
@@ -1152,7 +1157,8 @@ class AiterPrefillAttnOpTriton:
                 get_scalar_type(attn_inputs.dtype),
                 fmha_params.graph_device,
             )
-            self.prepare_cuda_graph(fmha_params, attn_inputs)
+            if self.enable_cuda_graph:
+                self.prepare_cuda_graph(fmha_params, attn_inputs)
         else:
             fmha_params.compact_indices = self._calc_compact_indices(fmha_params)
 
@@ -1177,7 +1183,7 @@ class AiterPrefillAttnOpTriton:
         output_dtype = self._graph_output_dtype(attn_dtype)
         fmha_params.graph_query_length = query_length
         fmha_params.graph_token_q_capacity = fmha_params.token_q_num
-        if self.full_prefill_graph:
+        if self.use_unified_attention:
             # unified_attention consumes packed Q and reads all K/V from the
             # paged cache. The graph bucket (including its sentinel request)
             # keeps this output shape and address stable across replay.
@@ -1256,7 +1262,7 @@ class AiterPrefillAttnOpTriton:
     def prepare_cuda_graph(
         self, fmha_params: FMHAParams, attn_inputs: PyAttentionInputs
     ) -> None:
-        if self.full_prefill_graph:
+        if self.use_unified_attention:
             return
         compact_indices = self._calc_compact_indices(fmha_params)
         fmha_params.compact_indices.fill_(0)
@@ -1276,10 +1282,10 @@ class AiterPrefillAttnOpTriton:
         real_token_num = fmha_params.token_q_num
         seq_lens = fmha_params.prefill_seqlen_k_int32
 
-        if self.full_prefill_graph:
+        if self.use_unified_attention:
             if self.linear_v:
                 raise ValueError(
-                    "full-prefill Triton PA requires the shuffled ASM KV layout; "
+                    "generation-prefill Triton PA requires the shuffled ASM KV layout; "
                     "enable USE_ASM_PA together with USE_TRITON_PA"
                 )
             from aiter.ops.triton.attention.unified_attention import unified_attention
@@ -1759,10 +1765,12 @@ class AiterPrefillImplPaged(FMHAImplBase):
 
     - seq_len <= 4: Triton PA (short query optimization)
     - Otherwise: CK batch-prefill (general paged prefill)
-    - Full no-prefix graph + USE_TRITON_PA: unified Triton PA for every bucket
+    Full no-prefix graph uses the separate AiterPrefillImplTriton backend while
+    eager prefill keeps the existing ASM/CK backend priority.
     """
 
     accepts_fmha_config = True
+    use_unified_attention = False
 
     def __init__(
         self,
@@ -1795,13 +1803,10 @@ class AiterPrefillImplPaged(FMHAImplBase):
         self.enable_cuda_graph = attn_inputs.is_cuda_graph
         self.fmha_params: Optional[FMHAParams] = None
         self.triton_fmha_params: Optional[FMHAParams] = None
-        self.force_triton_prefill_graph = self._should_force_triton_prefill_graph(
-            attn_inputs
-        )
         self.triton_prefill_impl = AiterPrefillAttnOpTriton(
             attn_configs,
             linear_v=self.linear_v,
-            full_prefill_graph=self.force_triton_prefill_graph,
+            use_unified_attention=self.use_unified_attention,
         )
         # attn_inputs is fixed for this implementation instance. Select before
         # prepare() so only the dispatched backend owns metadata and workspace,
@@ -1814,7 +1819,7 @@ class AiterPrefillImplPaged(FMHAImplBase):
             self.need_rope_kv_cache
             and self.enable_cuda_graph
             and self.backend == "triton"
-            and not self.force_triton_prefill_graph
+            and not self.use_unified_attention
         )
         self.rope_params = self.rope_kvcache_impl.prepare(attn_inputs)
         self.write_cache_store_impl = common.create_write_cache_store_impl(attn_inputs)
@@ -1825,25 +1830,8 @@ class AiterPrefillImplPaged(FMHAImplBase):
         max_q_len = int(input_lengths.max().item()) if batch_size > 0 else 0
         return batch_size > 0 and 0 < max_q_len <= self.max_triton_q_len
 
-    def _should_force_triton_prefill_graph(
-        self, attn_inputs: PyAttentionInputs
-    ) -> bool:
-        prefix_lengths = getattr(attn_inputs, "prefix_lengths", None)
-        has_prefix = (
-            prefix_lengths is not None
-            and prefix_lengths.numel() > 0
-            and int(prefix_lengths.max().item()) > 0
-        )
-        return (
-            self.enable_cuda_graph
-            and not has_prefix
-            and self.fmha_config is not None
-            and self.fmha_config.use_triton_pa
-            and self.fmha_config.use_asm_pa
-        )
-
     def _select_backend(self, attn_inputs: PyAttentionInputs) -> str:
-        if self.force_triton_prefill_graph:
+        if self.use_unified_attention:
             return "triton"
         return "triton" if self._use_triton_paged_prefill(attn_inputs) else "batch"
 
@@ -1879,22 +1867,14 @@ class AiterPrefillImplPaged(FMHAImplBase):
 
         pl = attn_inputs.prefix_lengths
         has_prefix = pl is not None and pl.numel() > 0 and int(pl.max().item()) > 0
-        block_table = getattr(attn_inputs, "kv_cache_kernel_block_id_device", None)
-        if block_table is None:
-            block_table = getattr(attn_inputs, "kv_cache_block_id_device", None)
-        is_no_prefix_full_graph = (
-            bool(getattr(attn_inputs, "is_cuda_graph", False))
-            and not has_prefix
-            and block_table is not None
-            and block_table.numel() > 0
-        )
-        return has_prefix or is_no_prefix_full_graph
+        return has_prefix
 
-    def supports_prefill_cuda_graph(self) -> bool:
+    def supports_generation_prefill_cuda_graph(self) -> bool:
         configs = self.attn_configs
         return bool(
-            self.force_triton_prefill_graph
+            self.use_unified_attention
             and self.backend == "triton"
+            and not self.linear_v
             and configs.dtype == torch.bfloat16
             and configs.kv_cache_dtype == KvCacheDataType.BASE
             and configs.is_causal
@@ -2088,7 +2068,7 @@ class AiterPrefillImplPaged(FMHAImplBase):
         if self.need_rope_kv_cache:
             self.rope_kvcache_impl.pad_query = (
                 use_triton
-                and not self.force_triton_prefill_graph
+                and not self.use_unified_attention
                 and (self.enable_cuda_graph or token_num != batch_size * max_q_len)
             )
             fmha_input = self.rope_kvcache_impl.forward(qkv, kv_cache, self.rope_params)
@@ -2110,6 +2090,44 @@ class AiterPrefillImplPaged(FMHAImplBase):
             return self.triton_prefill_impl.forward(fmha_input, kv_cache, fmha_params)
         else:
             return self.batch_prefill_impl.forward(fmha_input, kv_cache, fmha_params)
+
+
+class AiterPrefillImplTriton(AiterPrefillImplPaged):
+    """No-prefix paged prefill backed by Triton unified_attention.
+
+    USE_TRITON_PA enables this implementation only for generation-prefill graph
+    capture. Eager prefill keeps its existing backend and can be rolled back
+    independently by disabling the graph feature.
+    """
+
+    use_unified_attention = True
+    cuda_graph_selection_modes = frozenset(
+        {CudaGraphSelectionMode.GENERATION_PREFILL_GRAPH}
+    )
+
+    @classmethod
+    def support(
+        cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
+    ) -> bool:
+        if (
+            not attn_inputs.is_cuda_graph
+            or not _is_mrope_interleaved_supported(attn_configs)
+            or attn_configs.dtype != torch.bfloat16
+            or attn_configs.kv_cache_dtype != KvCacheDataType.BASE
+            or not attn_configs.is_causal
+        ):
+            return False
+
+        prefix_lengths = getattr(attn_inputs, "prefix_lengths", None)
+        has_prefix = (
+            prefix_lengths is not None
+            and prefix_lengths.numel() > 0
+            and int(prefix_lengths.max().item()) > 0
+        )
+        block_table = getattr(attn_inputs, "kv_cache_kernel_block_id_device", None)
+        if block_table is None:
+            block_table = getattr(attn_inputs, "kv_cache_block_id_device", None)
+        return not has_prefix and block_table is not None and block_table.numel() > 0
 
 
 class AiterDecodeImplBase(FMHAImplBase):

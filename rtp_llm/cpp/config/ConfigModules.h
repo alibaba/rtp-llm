@@ -147,8 +147,8 @@ struct FMHAConfig {
     bool use_aiter_pa                        = true;
     bool use_asm_pa                          = true;
     // Default off: Triton PA on ROCm regressed vs ASM PA after the rocm_impl
-    // refactor; ASM/NonAsm now own the default decode path. Set to true to opt
-    // back into the Triton kernel.
+    // refactor. Set to true to select Triton for decode and no-prefix prefill;
+    // the latter is the ROCm generation-prefill graph-capable backend.
     bool        use_triton_pa  = false;
     int64_t     absorb_opt_len = 1024;
     std::string to_string() const;
@@ -259,8 +259,16 @@ struct ProfilingDebugLoggingConfig {
 };
 
 struct HWKernelConfig {
-    static constexpr int kPrefillCudaGraphMaxRequestsLimit = 64;
-    static constexpr int kPrefillCudaGraphMaxCaptureTokens = 1 << 20;
+    static constexpr int kGenerationPrefillCudaGraphMaxCaptureTokens = 1 << 20;
+    // Every bucket retains a whole-model device graph and its graph-owned
+    // allocations. Keep malformed list/range/file input from turning startup
+    // into an unbounded capture loop; production presets use only seven.
+    static constexpr int kGenerationPrefillCudaGraphMaxCaptureBuckets = 64;
+    // The generation-prefill attention backend receives one additional
+    // positive-length padding-sentinel row. CUDA's graph-safe paged-attention
+    // plan is a single-CTA kernel with at most 1024 rows, so real requests must
+    // stay at or below 1023.
+    static constexpr int kGenerationPrefillCudaGraphMaxRequests = 1023;
 
     int         deep_gemm_num_sm             = -1;
     bool        arm_gemm_use_kai             = false;
@@ -270,14 +278,10 @@ struct HWKernelConfig {
     bool        use_swizzleA                 = false;
     bool        enable_cuda_graph            = false;
     bool        enable_cuda_graph_debug_mode = false;
-    // Experimental prefill CUDA graph for graph-safe generative attention
-    // backends. It requires the CUDA graph master switch and defaults to disabled.
-    bool enable_prefill_cuda_graph       = false;
-    int  prefill_cuda_graph_max_requests = 8;
-    // Empty means auto-select the sparse default buckets and clip them to the
-    // model's max sequence length. An explicit non-empty list is validated
-    // strictly during model construction.
-    std::vector<int> prefill_cuda_graph_capture_seq_lens;
+    // Generation-prefill graph is enabled only when the CUDA graph master
+    // switch is on and this capture bucket list is explicitly configured.
+    int              generation_prefill_cuda_graph_max_requests = 1;
+    std::vector<int> generation_prefill_capture_token_buckets;
     bool             enable_native_cuda_graph = false;
     int              num_native_cuda_graph    = 200;
     // Prefill CUDA Graph capture configuration
@@ -448,7 +452,7 @@ struct GrammarConfig {
     // Positive number of grammar compiles that may run concurrently in this engine process.
     int compile_concurrency = 1;
     // Positive number of distinct compiles that may wait behind running work.
-    int compile_queue_size = 2;
+    int         compile_queue_size = 2;
     std::string tokenizer_info_json;
     // Total byte cap split between xgrammar's cache and the engine verdict LRU; <=0 = unlimited.
     int64_t     compiler_cache_bytes = 2L * 1024L * 1024L * 1024L;

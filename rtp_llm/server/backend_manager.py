@@ -12,6 +12,9 @@ from rtp_llm.distribute.distributed_server import DistributedServer, get_world_i
 from rtp_llm.metrics import kmonitor
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.models_py.distributed.collective_torch import init_distributed_environment
+from rtp_llm.server.server_args.hw_kernel_group_args import (
+    validate_hw_kernel_group_args,
+)
 from rtp_llm.utils.concurrency_controller import get_global_controller
 
 if TYPE_CHECKING:
@@ -83,6 +86,22 @@ class BackendManager(object):
         ModelFactory.update_engine_config_from_model_config(
             engine_config=engine_config,
             model_config=model_config,
+        )
+        # Generation-prefill is a secondary runner owned only by the normalized
+        # PDFUSION language-model process. Validate its cross-option capacity
+        # after EngineConfig has applied the implicit VIT role and ModelFactory
+        # has resolved explicit/checkpoint-inferred task types. Earlier parser
+        # validation would reject shared configs in processes that never create
+        # this runner.
+        validate_hw_kernel_group_args(
+            engine_config.hw_kernel_config,
+            max_context_batch_size=(
+                engine_config.runtime_config.fifo_scheduler_config.max_context_batch_size
+            ),
+            concurrency_limit=engine_config.concurrency_config.concurrency_limit,
+            role_type=engine_config.parallelism_config.role_type,
+            speculative_type=engine_config.sp_config.type,
+            task_type=model_config.task_type,
         )
 
         # Initialize DeepEP/MoriEP wrapper if MOE model and EP is enabled

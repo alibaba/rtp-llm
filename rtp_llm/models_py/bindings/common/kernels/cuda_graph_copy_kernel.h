@@ -30,25 +30,25 @@
 namespace rtp_llm {
 
 template<typename T>
-void invokeCudaGraphCopySmall2Large(T*           input_tensor,
-                                    T*           output_tensor,
-                                    int*         batch_size,
-                                    const int    max_batch_size,
-                                    const int    max_seq_len,
-                                    int*         input_lengths,
-                                    const int    hidden_size,
-                                    int*         cu_seq_len,
-                                    cudaStream_t stream);
+void invokeCudaGraphCopySmall2Large(T*            input_tensor,
+                                    T*            output_tensor,
+                                    const int*    batch_size,
+                                    const int64_t max_batch_size,
+                                    const int64_t max_seq_len,
+                                    const int*    input_lengths,
+                                    const int64_t hidden_size,
+                                    const int*    cu_seq_len,
+                                    cudaStream_t  stream);
 
 template<typename T>
-void invokeCudaGraphCopyLarge2Small(T*           input_tensor,
-                                    T*           output_tensor,
-                                    int*         batch_size,
-                                    const int    max_batch_size,
-                                    const int    max_seq_len,
-                                    int*         input_lengths,
-                                    const int    hidden_size,
-                                    int*         cu_seq_len,
-                                    cudaStream_t stream);
+void invokeCudaGraphCopyLarge2Small(T*            input_tensor,
+                                    T*            output_tensor,
+                                    const int*    batch_size,
+                                    const int64_t max_batch_size,
+                                    const int64_t max_seq_len,
+                                    const int*    input_lengths,
+                                    const int64_t hidden_size,
+                                    const int*    cu_seq_len,
+                                    cudaStream_t  stream);
 
 }  // namespace rtp_llm

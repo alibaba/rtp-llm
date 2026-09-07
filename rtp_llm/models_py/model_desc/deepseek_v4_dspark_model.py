@@ -61,10 +61,6 @@ from rtp_llm.models_py.modules.dsv4.kv_cache_utils import (
     primary_attention_inputs,
 )
 from rtp_llm.models_py.modules.dsv4.utils import _v4_fp8_linear
-from rtp_llm.models_py.modules.factory.attention.attn_factory import (
-    CudaGraphSelectionMode,
-    PrefillCudaGraphUnsupportedBackend,
-)
 from rtp_llm.models_py.modules.factory.attention.common import (
     create_write_cache_store_impl,
 )
@@ -208,10 +204,7 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         return int(self._dspark_aux_feature_dim)
 
     def prepare_fmha_impl(
-        self,
-        inputs: PyModelInputs,
-        is_cuda_graph: bool = False,
-        cuda_graph_selection_mode: Optional[str] = None,
+        self, inputs: PyModelInputs, is_cuda_graph: bool = False
     ) -> Any:
         """Build the per-graph DSpARK metadata owner.
 
@@ -222,10 +215,6 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         the graph (via ``get_or_build_sched_meta``), so the schedule-build
         kernels replay with the current device-side ``topk_length`` values.
         """
-        if cuda_graph_selection_mode == CudaGraphSelectionMode.PREFILL_GRAPH:
-            raise PrefillCudaGraphUnsupportedBackend(
-                "DeepSeek-V4 DSpARK attention does not support prefill CUDA Graph"
-            )
         if not is_cuda_graph:
             return None
         return SimpleNamespace(

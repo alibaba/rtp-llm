@@ -133,7 +133,7 @@ TEST_F(GenerateStreamTest, testConstruct) {
     auto stream2 = builder.createDecoderStream({1, 2, 3, 4, 5}, {1, 2, 3});
 }
 
-TEST_F(GenerateStreamTest, prefillCudaGraphReplayStatusIsReturnedInAuxInfo) {
+TEST_F(GenerateStreamTest, generationPrefillCudaGraphReplayStatusIsReturnedInAuxInfo) {
     auto builder = GenerateStreamBuilder();
     auto stream  = std::dynamic_pointer_cast<NormalGenerateStream>(builder.createComplexContextStream({1, 2, 3}));
     stream->generateConfig()->num_return_sequences = 1;
@@ -154,13 +154,13 @@ TEST_F(GenerateStreamTest, prefillCudaGraphReplayStatusIsReturnedInAuxInfo) {
                                  torch::Tensor(),
                                  torch::Tensor(),
                                  torch::Tensor()};
-    update_info.prefill_cuda_graph_status = PrefillCudaGraphStatus::REPLAYED;
+    update_info.generation_prefill_cuda_graph_status = GenerationPrefillCudaGraphStatus::REPLAYED;
     stream->update(update_info);
 
     auto output_result = stream->nextOutput();
     ASSERT_TRUE(output_result.ok());
     ASSERT_EQ(output_result.value().generate_outputs.size(), 1);
-    EXPECT_EQ(output_result.value().generate_outputs[0].aux_info.prefill_cuda_graph_status, "replayed");
+    EXPECT_EQ(output_result.value().generate_outputs[0].aux_info.generation_prefill_cuda_graph_status, "replayed");
 
     // A later decode update carries the default status and must not erase the
     // request's meaningful prefill result.
@@ -178,7 +178,8 @@ TEST_F(GenerateStreamTest, prefillCudaGraphReplayStatusIsReturnedInAuxInfo) {
     auto decode_output_result = stream->nextOutput();
     ASSERT_TRUE(decode_output_result.ok());
     ASSERT_EQ(decode_output_result.value().generate_outputs.size(), 1);
-    EXPECT_EQ(decode_output_result.value().generate_outputs[0].aux_info.prefill_cuda_graph_status, "replayed");
+    EXPECT_EQ(decode_output_result.value().generate_outputs[0].aux_info.generation_prefill_cuda_graph_status,
+              "replayed");
 }
 
 TEST_F(GenerateStreamTest, mtpUpdateKeepsLastGpuProposalWhenNextProposalIsMissing) {

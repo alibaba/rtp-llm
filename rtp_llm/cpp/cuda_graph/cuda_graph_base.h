@@ -14,7 +14,7 @@ enum class CudaGraphRole : uint8_t {
     TARGET_VERIFY,
     EMBEDDING_PREFILL,
     MTP_DRAFT_PREFILL,
-    GENERATIVE_PREFILL,
+    GENERATION_PREFILL,
 };
 
 enum class CudaGraphCheckMode : uint8_t {
@@ -24,17 +24,17 @@ enum class CudaGraphCheckMode : uint8_t {
 
 // Current state of CUDA graph execution (used when calling canRun/forward with graph runner)
 struct CudaGraphState {
-    int                    current_batch_size{1};
-    int                    current_seq_len{1};
-    int                    current_real_graph_bs{1};       // for decode
-    int                    current_real_graph_seq_len{1};  // for prefill
-    int                    seq_len_sum{0};
-    int                    real_request_count{0};
-    int                    real_token_count{0};
-    int                    graph_token_capacity{0};
-    int                    graph_request_capacity{0};
-    int                    captured_backend_batch_size{0};
-    PrefillCudaGraphStatus prefill_status{PrefillCudaGraphStatus::NOT_REQUESTED};
+    int                              current_batch_size{1};
+    int                              current_seq_len{1};
+    int                              current_real_graph_bs{1};       // for decode
+    int                              current_real_graph_seq_len{1};  // for prefill
+    int                              seq_len_sum{0};
+    int                              real_request_count{0};
+    int                              real_token_count{0};
+    int                              graph_token_capacity{0};
+    int                              graph_request_capacity{0};
+    int                              captured_backend_batch_size{0};
+    GenerationPrefillCudaGraphStatus generation_prefill_status{GenerationPrefillCudaGraphStatus::NOT_REQUESTED};
 };
 
 struct GraphParams {
@@ -53,13 +53,9 @@ struct GraphParams {
     c10::ScalarType  model_data_type        = c10::ScalarType::Float;
     std::vector<int> prefill_capture_seq_lens;
     std::vector<int> decode_capture_batch_sizes;
-    int64_t          hc_mult                         = 1;
-    int              prefill_cuda_graph_max_requests = 0;
-    int              prefill_cuda_graph_pad_token_id = 0;
-    // One vector per kv_cache_group_tags entry (or one vector for the legacy
-    // single-group path), containing kernel block IDs owned by the runner's
-    // sentinel scratch resource.
-    std::vector<std::vector<int>> prefill_scratch_kernel_block_ids;
+    int64_t          hc_mult                                    = 1;
+    int              generation_prefill_cuda_graph_max_requests = 0;
+    int              generation_prefill_cuda_graph_pad_token_id = 0;
     // Golden cache-group identity for CUDA graph capture/replay. A one-group
     // topology keeps the direct AttentionInputs fast path; multiple groups
     // require an exact tag -> AttentionInputs mapping at replay time.

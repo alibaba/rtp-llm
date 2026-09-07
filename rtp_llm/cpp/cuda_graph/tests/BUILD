@@ -32,11 +32,11 @@ cc_test(
 )
 
 cc_test(
-    name = "prefill_cuda_graph_replay_metadata_test",
-    srcs = ["prefill_cuda_graph_replay_metadata_test.cc"],
+    name = "generation_prefill_cuda_graph_replay_metadata_test",
+    srcs = ["generation_prefill_cuda_graph_replay_metadata_test.cc"],
     copts = copts(),
     deps = [
-        "//rtp_llm/cpp/cuda_graph:prefill_cuda_graph_replay_metadata",
+        "//rtp_llm/cpp/cuda_graph:generation_prefill_cuda_graph_replay_metadata",
         "@com_google_googletest//:gtest_main",
     ],
 )
@@ -166,6 +166,54 @@ py_test(
     env = {
         "ENABLE_CUDA_GRAPH_DEBUG_MODE": "1",
         "NOT_USE_DEFAULT_STREAM": "1",
+        "TEST_USING_DEVICE": "ROCM",
+    },
+    tags = ["rocm"],
+    exec_properties = {"gpu": "MI308X-ROCM7"},
+)
+
+py_test(
+    name = "cuda_graph_dirty_capture_test",
+    main = "cuda_graph_tagged_cache_test.py",
+    srcs = ["cuda_graph_tagged_cache_test.py"],
+    args = ["TestCudaGraphTaggedCache.test_dirty_capture_failure_is_fail_closed"],
+    data = [
+        ":test_cuda_graph_runner",
+        "//:th_transformer",
+    ],
+    deps = [
+        ":cuda_graph_test_utils",
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm/test/model_test/test_util:test_util",
+    ],
+    env = {
+        "ENABLE_CUDA_GRAPH_DEBUG_MODE": "1",
+        "NOT_USE_DEFAULT_STREAM": "1",
+        "RTP_LLM_RUN_DIRTY_CAPTURE_TEST": "1",
+        "TEST_USING_DEVICE": "CUDA",
+    },
+    tags = ["H20"],
+    exec_properties = {"gpu": "H20"},
+)
+
+py_test(
+    name = "cuda_graph_dirty_capture_test_rocm",
+    main = "cuda_graph_tagged_cache_test.py",
+    srcs = ["cuda_graph_tagged_cache_test.py"],
+    args = ["TestCudaGraphTaggedCache.test_dirty_capture_failure_is_fail_closed"],
+    data = [
+        ":test_cuda_graph_runner",
+        "//:th_transformer",
+    ],
+    deps = [
+        ":cuda_graph_test_utils",
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm/test/model_test/test_util:test_util",
+    ],
+    env = {
+        "ENABLE_CUDA_GRAPH_DEBUG_MODE": "1",
+        "NOT_USE_DEFAULT_STREAM": "1",
+        "RTP_LLM_RUN_DIRTY_CAPTURE_TEST": "1",
         "TEST_USING_DEVICE": "ROCM",
     },
     tags = ["rocm"],

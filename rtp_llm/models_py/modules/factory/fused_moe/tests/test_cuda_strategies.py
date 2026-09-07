@@ -349,7 +349,7 @@ class TestCudaFp8PerBlockNoDPMaskedStrategy(unittest.TestCase):
     def test_can_handle_cuda_graph_on_sm90(
         self, mock_has_deep_gemm: Any, mock_get_sm: Any
     ) -> None:
-        """The prefill CUDA Graph allowlist relies on this graph-safe strategy."""
+        """The generation-prefill CUDA Graph allowlist relies on this graph-safe strategy."""
         mock_has_deep_gemm.return_value = True
         mock_get_sm.return_value = (9, 0)
 

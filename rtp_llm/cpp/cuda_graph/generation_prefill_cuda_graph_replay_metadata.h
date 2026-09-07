@@ -5,16 +5,16 @@
 
 namespace rtp_llm {
 
-inline bool preparePrefillCudaGraphReplayMetadata(int32_t* input_lengths,
-                                                  size_t   input_lengths_capacity,
-                                                  int32_t* cu_seqlens,
-                                                  size_t   cu_seqlens_capacity,
-                                                  int32_t* padding_offset,
-                                                  size_t   padding_offset_capacity,
-                                                  int      real_request_count,
-                                                  int      max_request_count,
-                                                  int      real_token_count,
-                                                  int      token_capacity) {
+inline bool prepareGenerationPrefillCudaGraphReplayMetadata(int32_t* input_lengths,
+                                                            size_t   input_lengths_capacity,
+                                                            int32_t* cu_seqlens,
+                                                            size_t   cu_seqlens_capacity,
+                                                            int32_t* padding_offset,
+                                                            size_t   padding_offset_capacity,
+                                                            int      real_request_count,
+                                                            int      max_request_count,
+                                                            int      real_token_count,
+                                                            int      token_capacity) {
     if (input_lengths == nullptr || cu_seqlens == nullptr || padding_offset == nullptr || real_request_count <= 0
         || real_request_count > max_request_count || max_request_count <= 0 || real_token_count <= 0
         || real_token_count > token_capacity || input_lengths_capacity < static_cast<size_t>(max_request_count + 1)

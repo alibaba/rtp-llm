@@ -115,9 +115,10 @@ struct GptModelOutputs {
     std::vector<torch::Tensor> moe_gating;
 
     // A single request-visible status. `REPLAYED` means this forward actually
-    // executed a captured Prefill CUDA Graph; every other non-default value is
+    // executed a captured generation-prefill CUDA Graph; every other non-default value is
     // the readable fallback reason returned through AuxInfo.
-    PrefillCudaGraphStatus prefill_cuda_graph_status{PrefillCudaGraphStatus::NOT_REQUESTED};
+    GenerationPrefillCudaGraphStatus generation_prefill_cuda_graph_status{
+        GenerationPrefillCudaGraphStatus::NOT_REQUESTED};
 };
 
 struct CopyParams {

@@ -57,16 +57,9 @@ class _PrefillPagedCudaGraphTestMixin:
 
         # Device, in both cases. These are what FlashInfer keeps as its persistent
         # graph buffers and dereferences on the device at each replay, and the
-        # field names say _device. The copy-params path does not change that: the
-        # engine pins exactly one tensor, cuda_graph_prefill_batch_size, and
-        # asserts is_pinned() on it (initCaptureAttentionInputsPost) -- these two
-        # it passes as device tensors.
-        #
-        # This branch used to hand over pinned *host* memory whenever
-        # with_copy_params was set, which is what made the kernel read a host
-        # pointer and abort with an illegal memory access. That was a bug in the
-        # test, not in the op: "fixing" the op to copy these onto the device
-        # instead broke the real engine's multi-graph capture path.
+        # field names say _device. The copy-params path uses device metadata too,
+        # including cuda_graph_prefill_batch_size below; pinned host tensors do
+        # not satisfy that contract.
         inp.cu_seqlens_device = torch.tensor(cu, dtype=torch.int32, device="cuda")
         inp.cu_kv_seqlens_device = torch.tensor(cu, dtype=torch.int32, device="cuda")
 
@@ -83,8 +76,8 @@ class _PrefillPagedCudaGraphTestMixin:
             ms = max_seq_len if max_seq_len > 0 else max(input_lengths)
             cp = PyPrefillCudaGaphCopyParams()
             cp.cuda_graph_prefill_batch_size = torch.tensor(
-                [batch_size], dtype=torch.int32
-            ).pin_memory()
+                [batch_size], dtype=torch.int32, device="cuda"
+            )
             cp.max_seq_len = ms
             cp.max_batch_size = batch_size
             inp.prefill_cuda_graph_copy_params = cp
@@ -183,6 +176,11 @@ class _PrefillPagedCudaGraphTestMixin:
         cg_op.prepare(cg_init)
         cg_replay = self._make_inputs(input_lengths, prefix_lengths, True, max_seq_len)
         cg_op.prepare(cg_replay, forbid_realloc=True)
+        self.assertTrue(
+            cg_replay.prefill_cuda_graph_copy_params.cuda_graph_prefill_batch_size.is_cuda
+        )
+        self.assertTrue(cg_op.input_lengths.is_cuda)
+        self.assertTrue(cg_op.cu_seq_lens.is_cuda)
         cg_out = cg_op.forward(q, kv_cache)
 
         if verify_cast_buffer_reuse:

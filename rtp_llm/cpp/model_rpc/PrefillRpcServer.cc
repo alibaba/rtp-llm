@@ -629,8 +629,8 @@ void PrefillRpcServer::pollRemoteOutput(PrefillGenerateContext& prefill_context)
         prefill_context.generate_input ? prefill_context.generate_input->multimodalLengths() : std::map<int, int>{};
     // Decode-side updates use NOT_REQUESTED, so the prefill worker is the
     // authoritative source for this request-level status in PD separation.
-    const std::string prefill_cuda_graph_status =
-        prefillCudaGraphStatusString(prefill_context.getStream()->prefillCudaGraphStatus());
+    const std::string generation_prefill_cuda_graph_status =
+        generationPrefillCudaGraphStatusString(prefill_context.getStream()->generationPrefillCudaGraphStatus());
 
     auto first_token_rt_us = prefill_context.getStream()->getTimeInfo().first_token_rt_us;
     while (prefill_context.client_stream->Read(&response)) {
@@ -653,7 +653,7 @@ void PrefillRpcServer::pollRemoteOutput(PrefillGenerateContext& prefill_context)
             auto* aux_info = response.mutable_flatten_output()->mutable_aux_info(i);
             aux_info->set_first_token_cost_time_us(first_token_rt_us);
             aux_info->set_cost_time_us(cost_time_us);
-            aux_info->set_prefill_cuda_graph_status(prefill_cuda_graph_status);
+            aux_info->set_generation_prefill_cuda_graph_status(generation_prefill_cuda_graph_status);
             mergeCacheReuseInfo(*aux_info,
                                 prefill_total_reuse_len,
                                 prefill_local_reuse_len,

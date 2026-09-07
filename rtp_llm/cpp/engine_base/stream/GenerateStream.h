@@ -46,7 +46,8 @@ struct StreamUpdateInfo {
     // prompt scoring
     std::optional<PromptLogitsOutput> prompt_logits;
     std::optional<ErrorInfo>          error_info;
-    PrefillCudaGraphStatus            prefill_cuda_graph_status{PrefillCudaGraphStatus::NOT_REQUESTED};
+    GenerationPrefillCudaGraphStatus  generation_prefill_cuda_graph_status{
+        GenerationPrefillCudaGraphStatus::NOT_REQUESTED};
 };
 
 struct StreamSpecUpdateInfo {
@@ -158,9 +159,9 @@ public:
         return false;
     }
 
-    virtual void                   updateOutput(const StreamUpdateInfo& update_info) = 0;
-    virtual PrefillCudaGraphStatus prefillCudaGraphStatus() const {
-        return PrefillCudaGraphStatus::NOT_REQUESTED;
+    virtual void                             updateOutput(const StreamUpdateInfo& update_info) = 0;
+    virtual GenerationPrefillCudaGraphStatus generationPrefillCudaGraphStatus() const {
+        return GenerationPrefillCudaGraphStatus::NOT_REQUESTED;
     }
     void update(const StreamUpdateInfo& update_info);
     void specUpdate(const StreamSpecUpdateInfo& update_info);

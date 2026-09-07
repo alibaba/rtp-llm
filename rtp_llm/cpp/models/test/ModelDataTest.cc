@@ -3,7 +3,7 @@
 
 #include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/cpp/models/ModelTypes.h"
-#include "rtp_llm/cpp/models/PrefillCudaGraphEligibility.h"
+#include "rtp_llm/cpp/models/GenerationPrefillCudaGraphEligibility.h"
 #include "rtp_llm/cpp/models/PyWrappedModel.h"
 #include "rtp_llm/cpp/models/Sampler.h"
 
@@ -131,7 +131,7 @@ TEST_F(ModelDataTest, testMtpHiddenShapeRejectsInvalidMetadataBeforeAllocation) 
 
 namespace {
 
-GptModelDescription makePrefillCudaGraphMoeDescription() {
+GptModelDescription makeGenerationPrefillCudaGraphMoeDescription() {
     GptModelDescription description;
     description.data_type   = DataType::TYPE_BF16;
     description.act_qscheme = QScheme::Qfp8PerTokenBlock;
@@ -143,7 +143,7 @@ GptModelDescription makePrefillCudaGraphMoeDescription() {
     return description;
 }
 
-MoeConfig makePrefillCudaGraphMoeRuntimeConfig() {
+MoeConfig makeGenerationPrefillCudaGraphMoeRuntimeConfig() {
     MoeConfig config;
     config.moe_strategy           = "fp8_per_block_no_dp_masked";
     config.use_all_gather         = true;
@@ -153,50 +153,116 @@ MoeConfig makePrefillCudaGraphMoeRuntimeConfig() {
     return config;
 }
 
+constexpr bool kMaskedMoeBackendSupported = true;
+
 }  // namespace
 
-TEST_F(ModelDataTest, testPrefillCudaGraphSupportsDenseModel) {
-    GptModelDescription description;
-    EXPECT_TRUE(supportsPrefillCudaGraphMoe(description, ParallelismConfig{}, MoeConfig{}));
-}
+TEST_F(ModelDataTest, testGenerationPrefillCudaGraphRunnerOwnershipIsLimitedToNormalMainGeneration) {
+    HWKernelConfig config;
+    config.enable_cuda_graph                        = true;
+    config.generation_prefill_capture_token_buckets = {64, 128};
 
-TEST_F(ModelDataTest, testPrefillCudaGraphRequiresSingleFullCacheGroup) {
-    EXPECT_TRUE(supportsPrefillCudaGraphCacheTopology({CacheGroupType::FULL}));
-    EXPECT_FALSE(supportsPrefillCudaGraphCacheTopology({}));
-    EXPECT_FALSE(supportsPrefillCudaGraphCacheTopology({CacheGroupType::LINEAR}));
-    EXPECT_FALSE(supportsPrefillCudaGraphCacheTopology({CacheGroupType::SWA}));
-    EXPECT_FALSE(supportsPrefillCudaGraphCacheTopology({CacheGroupType::FULL, CacheGroupType::LINEAR}));
-    EXPECT_FALSE(supportsPrefillCudaGraphCacheTopology({CacheGroupType::FULL, CacheGroupType::SWA}));
-}
-
-TEST_F(ModelDataTest, testDefaultPrefillCudaGraphBucketsAreClippedToModelLimit) {
-    EXPECT_TRUE(defaultPrefillCudaGraphCaptureSeqLens(0).empty());
-    EXPECT_EQ(defaultPrefillCudaGraphCaptureSeqLens(4), (std::vector<int>{4}));
-    EXPECT_EQ(defaultPrefillCudaGraphCaptureSeqLens(64), (std::vector<int>{64}));
-    EXPECT_EQ(defaultPrefillCudaGraphCaptureSeqLens(160), (std::vector<int>{64, 128, 160}));
-    EXPECT_EQ(defaultPrefillCudaGraphCaptureSeqLens(4096), (std::vector<int>{64, 128, 256, 384, 512, 768, 1024}));
-
-    for (int64_t max_seq_len : {7, 64, 159}) {
-        const auto buckets = defaultPrefillCudaGraphCaptureSeqLens(max_seq_len);
-        ASSERT_FALSE(buckets.empty());
-        EXPECT_TRUE(std::is_sorted(buckets.begin(), buckets.end()));
-        EXPECT_EQ(buckets.back(), max_seq_len);
+    EXPECT_TRUE(isGenerationPrefillCudaGraphRequested(config));
+    EXPECT_TRUE(supportsGenerationPrefillCudaGraphExecutionMode(SP_TYPE_NONE, false));
+    EXPECT_FALSE(supportsGenerationPrefillCudaGraphExecutionMode(SP_TYPE_NONE, true));
+    for (const auto speculative_type :
+         {SP_TYPE_VANILLA, SP_TYPE_MTP, SP_TYPE_EAGLE3, SP_TYPE_EAGLE, SP_TYPE_DETERMINISTIC, SP_TYPE_DSPARK}) {
+        EXPECT_FALSE(supportsGenerationPrefillCudaGraphExecutionMode(speculative_type, true));
+        EXPECT_FALSE(shouldCreateGenerationPrefillCudaGraph(config, true, false, RoleType::PDFUSION, speculative_type));
     }
+    EXPECT_TRUE(shouldCreateGenerationPrefillCudaGraph(config, true, false, RoleType::PDFUSION, SP_TYPE_NONE));
+    EXPECT_FALSE(shouldCreateGenerationPrefillCudaGraph(config, true, false, RoleType::PREFILL, SP_TYPE_NONE));
+    // This role gate precedes topology validation, so both single- and
+    // multi-device DECODE wrappers avoid secondary-runner creation.
+    EXPECT_FALSE(shouldCreateGenerationPrefillCudaGraph(config, true, false, RoleType::DECODE, SP_TYPE_NONE));
+    // Speculative target/draft wrappers do not own the normal-generation
+    // prefill runner in the first implementation.
+    EXPECT_FALSE(shouldCreateGenerationPrefillCudaGraph(config, true, true, RoleType::PDFUSION, SP_TYPE_NONE));
+
+    config.enable_cuda_graph = false;
+    EXPECT_FALSE(isGenerationPrefillCudaGraphRequested(config));
+    EXPECT_FALSE(shouldCreateGenerationPrefillCudaGraph(config, true, false, RoleType::PDFUSION, SP_TYPE_NONE));
+    config.enable_cuda_graph = true;
+    config.generation_prefill_capture_token_buckets.clear();
+    EXPECT_FALSE(isGenerationPrefillCudaGraphRequested(config));
+    EXPECT_FALSE(shouldCreateGenerationPrefillCudaGraph(config, true, false, RoleType::PDFUSION, SP_TYPE_NONE));
+    EXPECT_FALSE(shouldCreateGenerationPrefillCudaGraph(config, false, false, RoleType::PDFUSION, SP_TYPE_NONE));
 }
 
-TEST_F(ModelDataTest, testPrefillCudaGraphSupportsSingleGpuFp8MaskedMoe) {
-    EXPECT_TRUE(supportsPrefillCudaGraphMoe(
-        makePrefillCudaGraphMoeDescription(), ParallelismConfig{}, makePrefillCudaGraphMoeRuntimeConfig()));
+TEST_F(ModelDataTest, testGenerationPrefillCudaGraphPaddedTokenIndexUsesCompleteSentinelRange) {
+    EXPECT_TRUE(generationPrefillCudaGraphPaddedTokenIndexFitsInt32(
+        HWKernelConfig::kGenerationPrefillCudaGraphMaxRequests,
+        HWKernelConfig::kGenerationPrefillCudaGraphMaxCaptureTokens));
+    // Keep the overflow helper defensive even though the public request-count
+    // limit now rejects this unreachable configuration much earlier.
+    EXPECT_FALSE(generationPrefillCudaGraphPaddedTokenIndexFitsInt32(715827882, 3));
+    EXPECT_FALSE(generationPrefillCudaGraphPaddedTokenIndexFitsInt32(0, 3));
+    EXPECT_FALSE(generationPrefillCudaGraphPaddedTokenIndexFitsInt32(1, 0));
 }
 
-TEST_F(ModelDataTest, testPrefillCudaGraphRequiresSingleDeviceParallelism) {
+TEST_F(ModelDataTest, testGenerationPrefillCudaGraphRequestCapacityUsesReachableContextBatchLimit) {
+    EXPECT_EQ(generationPrefillCudaGraphReachableRequestCapacity(8, 32), 8);
+    EXPECT_EQ(generationPrefillCudaGraphReachableRequestCapacity(64, 16), 16);
+    EXPECT_EQ(generationPrefillCudaGraphReachableRequestCapacity(1, 1), 1);
+    EXPECT_EQ(generationPrefillCudaGraphReachableRequestCapacity(0, 32), 0);
+    EXPECT_EQ(generationPrefillCudaGraphReachableRequestCapacity(8, 0), 0);
+    EXPECT_TRUE(generationPrefillCudaGraphMaxRequestsFitsCapacity(8, 8, 32));
+    EXPECT_FALSE(generationPrefillCudaGraphMaxRequestsFitsCapacity(9, 8, 32));
+    EXPECT_TRUE(generationPrefillCudaGraphMaxRequestsFitsCapacity(16, 64, 16));
+    EXPECT_FALSE(generationPrefillCudaGraphMaxRequestsFitsCapacity(17, 64, 16));
+    EXPECT_TRUE(
+        generationPrefillCudaGraphMaxRequestsFitsCapacity(HWKernelConfig::kGenerationPrefillCudaGraphMaxRequests,
+                                                          HWKernelConfig::kGenerationPrefillCudaGraphMaxRequests,
+                                                          HWKernelConfig::kGenerationPrefillCudaGraphMaxRequests));
+    EXPECT_FALSE(
+        generationPrefillCudaGraphMaxRequestsFitsCapacity(HWKernelConfig::kGenerationPrefillCudaGraphMaxRequests + 1,
+                                                          HWKernelConfig::kGenerationPrefillCudaGraphMaxRequests + 1,
+                                                          HWKernelConfig::kGenerationPrefillCudaGraphMaxRequests + 1));
+    EXPECT_FALSE(generationPrefillCudaGraphMaxRequestsFitsCapacity(0, 8, 32));
+}
+
+TEST_F(ModelDataTest, testGenerationPrefillCudaGraphSupportsDenseModel) {
+    GptModelDescription description;
+    EXPECT_TRUE(supportsGenerationPrefillCudaGraphMoe(
+        description, ParallelismConfig{}, MoeConfig{}, /*masked_moe_backend_supported=*/false));
+}
+
+TEST_F(ModelDataTest, testGenerationPrefillCudaGraphMaskedMoeBackendRequiresSm90) {
+    EXPECT_TRUE(supportsGenerationPrefillCudaGraphMaskedMoeBackend(9));
+    EXPECT_FALSE(supportsGenerationPrefillCudaGraphMaskedMoeBackend(10));
+    EXPECT_FALSE(supportsGenerationPrefillCudaGraphMaskedMoeBackend(12));
+    EXPECT_FALSE(supportsGenerationPrefillCudaGraphMaskedMoeBackend(-1));
+}
+
+TEST_F(ModelDataTest, testGenerationPrefillCudaGraphRequiresSingleFullCacheGroup) {
+    EXPECT_TRUE(supportsGenerationPrefillCudaGraphCacheTopology({CacheGroupType::FULL}));
+    EXPECT_FALSE(supportsGenerationPrefillCudaGraphCacheTopology({}));
+    EXPECT_FALSE(supportsGenerationPrefillCudaGraphCacheTopology({CacheGroupType::LINEAR}));
+    EXPECT_FALSE(supportsGenerationPrefillCudaGraphCacheTopology({CacheGroupType::SWA}));
+    EXPECT_FALSE(supportsGenerationPrefillCudaGraphCacheTopology({CacheGroupType::FULL, CacheGroupType::LINEAR}));
+    EXPECT_FALSE(supportsGenerationPrefillCudaGraphCacheTopology({CacheGroupType::FULL, CacheGroupType::SWA}));
+}
+
+TEST_F(ModelDataTest, testGenerationPrefillCudaGraphSupportsSingleGpuFp8MaskedMoe) {
+    EXPECT_TRUE(supportsGenerationPrefillCudaGraphMoe(makeGenerationPrefillCudaGraphMoeDescription(),
+                                                      ParallelismConfig{},
+                                                      makeGenerationPrefillCudaGraphMoeRuntimeConfig(),
+                                                      kMaskedMoeBackendSupported));
+
+    EXPECT_FALSE(supportsGenerationPrefillCudaGraphMoe(makeGenerationPrefillCudaGraphMoeDescription(),
+                                                       ParallelismConfig{},
+                                                       makeGenerationPrefillCudaGraphMoeRuntimeConfig(),
+                                                       /*masked_moe_backend_supported=*/false));
+}
+
+TEST_F(ModelDataTest, testGenerationPrefillCudaGraphRequiresSingleDeviceParallelism) {
     const auto expect_rejected = [](const std::function<void(ParallelismConfig&)>& mutate) {
         ParallelismConfig config;
         mutate(config);
-        EXPECT_FALSE(isSingleDevicePrefillCudaGraphConfig(config));
+        EXPECT_FALSE(isSingleDeviceGenerationPrefillCudaGraphConfig(config));
     };
 
-    EXPECT_TRUE(isSingleDevicePrefillCudaGraphConfig(ParallelismConfig{}));
+    EXPECT_TRUE(isSingleDeviceGenerationPrefillCudaGraphConfig(ParallelismConfig{}));
     expect_rejected([](auto& c) { c.world_size = 2; });
     expect_rejected([](auto& c) { c.tp_size = 2; });
     expect_rejected([](auto& c) { c.dp_size = 2; });
@@ -210,33 +276,40 @@ TEST_F(ModelDataTest, testPrefillCudaGraphRequiresSingleDeviceParallelism) {
     expect_rejected([](auto& c) { c.ffn_disaggregate_config.enable_ffn_disaggregate = true; });
 }
 
-TEST_F(ModelDataTest, testPrefillCudaGraphRejectsAutoMoeStrategy) {
-    auto config         = makePrefillCudaGraphMoeRuntimeConfig();
+TEST_F(ModelDataTest, testGenerationPrefillCudaGraphRejectsAutoMoeStrategy) {
+    auto config         = makeGenerationPrefillCudaGraphMoeRuntimeConfig();
     config.moe_strategy = "auto";
-    EXPECT_FALSE(supportsPrefillCudaGraphMoe(makePrefillCudaGraphMoeDescription(), ParallelismConfig{}, config));
+    EXPECT_FALSE(supportsGenerationPrefillCudaGraphMoe(
+        makeGenerationPrefillCudaGraphMoeDescription(), ParallelismConfig{}, config, kMaskedMoeBackendSupported));
 }
 
-TEST_F(ModelDataTest, testPrefillCudaGraphRejectsNonFp8PerBlockMoe) {
-    auto description        = makePrefillCudaGraphMoeDescription();
+TEST_F(ModelDataTest, testGenerationPrefillCudaGraphRejectsNonFp8PerBlockMoe) {
+    auto description        = makeGenerationPrefillCudaGraphMoeDescription();
     description.act_qscheme = QScheme::NoQuantize;
-    EXPECT_FALSE(supportsPrefillCudaGraphMoe(description, ParallelismConfig{}, makePrefillCudaGraphMoeRuntimeConfig()));
+    EXPECT_FALSE(supportsGenerationPrefillCudaGraphMoe(description,
+                                                       ParallelismConfig{},
+                                                       makeGenerationPrefillCudaGraphMoeRuntimeConfig(),
+                                                       kMaskedMoeBackendSupported));
 }
 
-TEST_F(ModelDataTest, testPrefillCudaGraphRejectsGraphUnsafeMoeTransport) {
-    auto config                   = makePrefillCudaGraphMoeRuntimeConfig();
+TEST_F(ModelDataTest, testGenerationPrefillCudaGraphRejectsGraphUnsafeMoeTransport) {
+    auto config                   = makeGenerationPrefillCudaGraphMoeRuntimeConfig();
     config.use_deepep_low_latency = true;
-    EXPECT_FALSE(supportsPrefillCudaGraphMoe(makePrefillCudaGraphMoeDescription(), ParallelismConfig{}, config));
+    EXPECT_FALSE(supportsGenerationPrefillCudaGraphMoe(
+        makeGenerationPrefillCudaGraphMoeDescription(), ParallelismConfig{}, config, kMaskedMoeBackendSupported));
 
-    config                = makePrefillCudaGraphMoeRuntimeConfig();
+    config                = makeGenerationPrefillCudaGraphMoeRuntimeConfig();
     config.use_all_gather = false;
-    EXPECT_FALSE(supportsPrefillCudaGraphMoe(makePrefillCudaGraphMoeDescription(), ParallelismConfig{}, config));
+    EXPECT_FALSE(supportsGenerationPrefillCudaGraphMoe(
+        makeGenerationPrefillCudaGraphMoeDescription(), ParallelismConfig{}, config, kMaskedMoeBackendSupported));
 }
 
-TEST_F(ModelDataTest, testPrefillCudaGraphMoeGateCoversEveryRuntimeConstraint) {
+TEST_F(ModelDataTest, testGenerationPrefillCudaGraphMoeGateCoversEveryRuntimeConstraint) {
     const auto expect_rejected = [](const std::function<void(MoeConfig&)>& mutate) {
-        auto config = makePrefillCudaGraphMoeRuntimeConfig();
+        auto config = makeGenerationPrefillCudaGraphMoeRuntimeConfig();
         mutate(config);
-        EXPECT_FALSE(supportsPrefillCudaGraphMoe(makePrefillCudaGraphMoeDescription(), ParallelismConfig{}, config));
+        EXPECT_FALSE(supportsGenerationPrefillCudaGraphMoe(
+            makeGenerationPrefillCudaGraphMoeDescription(), ParallelismConfig{}, config, kMaskedMoeBackendSupported));
     };
 
     expect_rejected([](auto& c) { c.use_deepep_moe = true; });
@@ -249,12 +322,14 @@ TEST_F(ModelDataTest, testPrefillCudaGraphMoeGateCoversEveryRuntimeConstraint) {
     expect_rejected([](auto& c) { c.use_all_gather = false; });
 }
 
-TEST_F(ModelDataTest, testPrefillCudaGraphMoeGateCoversEveryModelConstraint) {
+TEST_F(ModelDataTest, testGenerationPrefillCudaGraphMoeGateCoversEveryModelConstraint) {
     const auto expect_rejected = [](const std::function<void(MoeConfigs&)>& mutate) {
-        auto description = makePrefillCudaGraphMoeDescription();
+        auto description = makeGenerationPrefillCudaGraphMoeDescription();
         mutate(description.ffn_conf.moe_configs.value());
-        EXPECT_FALSE(
-            supportsPrefillCudaGraphMoe(description, ParallelismConfig{}, makePrefillCudaGraphMoeRuntimeConfig()));
+        EXPECT_FALSE(supportsGenerationPrefillCudaGraphMoe(description,
+                                                           ParallelismConfig{},
+                                                           makeGenerationPrefillCudaGraphMoeRuntimeConfig(),
+                                                           kMaskedMoeBackendSupported));
     };
 
     expect_rejected([](auto& c) { c.tp_size = 2; });
@@ -268,17 +343,22 @@ TEST_F(ModelDataTest, testPrefillCudaGraphMoeGateCoversEveryModelConstraint) {
     expect_rejected([](auto& c) { c.enable_eplb = true; });
 }
 
-TEST_F(ModelDataTest, testPrefillCudaGraphRejectsDistributedOrEplbMoe) {
+TEST_F(ModelDataTest, testGenerationPrefillCudaGraphRejectsDistributedOrEplbMoe) {
     auto parallelism       = ParallelismConfig{};
     parallelism.ep_size    = 2;
     parallelism.dp_size    = 2;
     parallelism.world_size = 2;
-    EXPECT_FALSE(supportsPrefillCudaGraphMoe(
-        makePrefillCudaGraphMoeDescription(), parallelism, makePrefillCudaGraphMoeRuntimeConfig()));
+    EXPECT_FALSE(supportsGenerationPrefillCudaGraphMoe(makeGenerationPrefillCudaGraphMoeDescription(),
+                                                       parallelism,
+                                                       makeGenerationPrefillCudaGraphMoeRuntimeConfig(),
+                                                       kMaskedMoeBackendSupported));
 
-    auto description                              = makePrefillCudaGraphMoeDescription();
+    auto description                              = makeGenerationPrefillCudaGraphMoeDescription();
     description.ffn_conf.moe_configs->enable_eplb = true;
-    EXPECT_FALSE(supportsPrefillCudaGraphMoe(description, ParallelismConfig{}, makePrefillCudaGraphMoeRuntimeConfig()));
+    EXPECT_FALSE(supportsGenerationPrefillCudaGraphMoe(description,
+                                                       ParallelismConfig{},
+                                                       makeGenerationPrefillCudaGraphMoeRuntimeConfig(),
+                                                       kMaskedMoeBackendSupported));
 }
 
 }  // namespace rtp_llm

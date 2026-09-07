@@ -101,9 +101,11 @@ static void copyTensorExactInPlace(torch::Tensor& dst, const torch::Tensor& src,
     dst_flat.copy_(src_match, true);
 }
 
-void rebuildPaddingOffsetForCaptureStride(CKAttn& params, const torch_ext::PyAttentionInputs& attn_inputs) {
+void rebuildHostPaddingOffsetForCaptureStride(CKAttn& params, const torch_ext::PyAttentionInputs& attn_inputs) {
     TORCH_CHECK(attn_inputs.input_lengths.defined(), "prepare_in_place expects input_lengths");
     TORCH_CHECK(params.padding_offset.defined(), "prepare_in_place expects a captured padding_offset tensor");
+    TORCH_CHECK(!params.padding_offset.is_cuda(),
+                "host padding_offset rebuild must not overwrite runner-owned device metadata");
     TORCH_CHECK(params.padding_offset.scalar_type() == at::kInt,
                 "captured padding_offset must be int32, got ",
                 params.padding_offset.scalar_type());
@@ -138,20 +140,13 @@ void rebuildPaddingOffsetForCaptureStride(CKAttn& params, const torch_ext::PyAtt
                 padding_offset_flat.numel(),
                 ", replay tokens=",
                 total_tokens);
-    auto host_padding_offset =
-        params.padding_offset.is_cuda() ?
-            torch::empty({total_tokens}, torch::TensorOptions().dtype(at::kInt).device(at::kCPU)) :
-            padding_offset_flat;
-    auto*   host_padding_offset_ptr = host_padding_offset.data_ptr<int32_t>();
-    int64_t token_cursor            = 0;
+    auto*   padding_offset_ptr = padding_offset_flat.data_ptr<int32_t>();
+    int64_t token_cursor       = 0;
     for (int64_t batch_idx = 0; batch_idx < batch_size; ++batch_idx) {
         const int32_t input_length = input_lengths_ptr[batch_idx];
         const int32_t offset = static_cast<int32_t>(batch_idx * params.prefill_capture_max_seq_len - token_cursor);
-        std::fill_n(host_padding_offset_ptr + token_cursor, input_length, offset);
+        std::fill_n(padding_offset_ptr + token_cursor, input_length, offset);
         token_cursor += input_length;
-    }
-    if (params.padding_offset.is_cuda() && total_tokens > 0) {
-        padding_offset_flat.slice(0, 0, total_tokens).copy_(host_padding_offset, false);
     }
 }
 
@@ -197,12 +192,14 @@ void prepareInPlace(CKAttn& params, const torch_ext::PyAttentionInputs& attn_inp
         max_prefix_len = attn_inputs.prefix_lengths.max().item<int32_t>();
     }
 
-    if (params.prefill_capture_max_seq_len > 0) {
-        rebuildPaddingOffsetForCaptureStride(params, attn_inputs);
+    // Generation-prefill uses a device tensor populated by CudaGraphRunner,
+    // which is its single metadata owner. Legacy padded-query/MTP capture keeps
+    // a host tensor and still needs this op to rebuild offsets for the frozen
+    // capture row stride.
+    if (params.prefill_capture_max_seq_len > 0 && !params.padding_offset.is_cuda()) {
+        rebuildHostPaddingOffsetForCaptureStride(params, attn_inputs);
     }
 
-    // Prefill graph replay freezes the fused RoPE row stride. Eager callers
-    // retain the live-length metadata path without rebuilding padding_offset.
     params.prefill_runtime_max_seq_len =
         params.prefill_capture_max_seq_len > 0 ? params.prefill_capture_max_seq_len : params.max_seq_len;
     params.prefill_runtime_max_prefix_len      = max_prefix_len;
@@ -246,11 +243,10 @@ CKAttnPtr FusedRopeKVCachePrefillOpBase::prepare(torch_ext::PyAttentionInputs at
     attn_params->cu_kv_seqlens = attn_inputs.cu_kv_seqlens_device;
     attn_params->input_lengths = attn_inputs.input_lengths;
     attn_params->max_seq_len   = attn_inputs.input_lengths.max().item<int32_t>();
-    // A full-prefill graph keeps packed Q, but the fused RoPE/KV writer still
-    // captures seq_len as a host scalar. Preserve that capture stride so
-    // prepare_in_place() can rebuild padding_offset for changing active-request
-    // layouts before replay. Without this, a capture containing only the final
-    // sentinel request keeps writing replay tokens into request 0's KV blocks.
+    // The fused RoPE/KV writer captures seq_len as a host scalar. Preserve the
+    // capture stride for both padded-query graphs and generation-prefill graphs; the
+    // former rebuild host offsets here, while CudaGraphRunner owns the latter's
+    // device offsets.
     if (pad_query || attn_inputs.is_cuda_graph) {
         attn_params->prefill_capture_max_seq_len = attn_params->max_seq_len;
     }
