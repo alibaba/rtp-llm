@@ -1,8 +1,10 @@
 import types
 import unittest
+from unittest import mock
 
 import torch
 import torch.nn.functional as F
+
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.models_py.model_loader import NewLoaderConfig, NewModelLoader
 from rtp_llm.models_py.new_models.qwen2_moe.language import (
@@ -290,6 +292,37 @@ class Qwen2MoeLoadTest(unittest.TestCase):
 
         expected = F.linear(F.silu(F.linear(hidden, gate)) * F.linear(hidden, up), down)
         torch.testing.assert_close(layer(hidden), expected)
+
+    def test_pure_tp_combines_partials_before_one_all_reduce(self):
+        model = Qwen2MoeForCausalLM(_config(), _load_config(tp_size=2))
+        block = model.layers[0].mlp
+        router = types.SimpleNamespace(
+            supports_skip_tp_allreduce=True,
+            tp_collective_size=2,
+        )
+        block.experts.fused_moe = types.SimpleNamespace(
+            router=router,
+            topk_ids_dtype=torch.int64,
+        )
+        hidden = torch.ones(2, 4)
+        block.gate.forward = mock.Mock(return_value=torch.ones(2, 2))
+        block.select_topk.forward = mock.Mock()
+        block.experts.forward = mock.Mock(return_value=torch.full_like(hidden, 2.0))
+        block.shared_expert.forward = mock.Mock(
+            return_value=torch.full_like(hidden, 3.0)
+        )
+        block.shared_expert_gate.forward = mock.Mock(return_value=torch.zeros(2, 1))
+
+        with mock.patch(
+            "rtp_llm.models_py.new_models.qwen2_moe.language.all_reduce",
+            side_effect=lambda tensor, **_: tensor,
+        ) as reduce:
+            output = block(hidden)
+
+        self.assertEqual(reduce.call_count, 1)
+        self.assertTrue(block.experts.forward.call_args.kwargs["skip_tp_allreduce"])
+        self.assertFalse(block.shared_expert.forward.call_args.kwargs["reduce_output"])
+        torch.testing.assert_close(output, torch.full_like(hidden, 3.5))
 
     def test_moe_decoder_forward_matches_cpu_reference(self):
         weights = _weights()

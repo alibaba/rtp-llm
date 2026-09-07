@@ -389,14 +389,26 @@ class RowParallelLinear(LinearBase):
         # process_weights_after_loading is invoked by NewModelLoader's
         # post-load hook after every shard has landed; see LinearBase.
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self, x: torch.Tensor, *, reduce_output: Optional[bool] = None
+    ) -> torch.Tensor:
         if x.dim() == 0 or x.shape[-1] != self.input_size:
             raise ValueError(
                 f"{self.prefix or type(self).__name__} expected input width "
                 f"{self.input_size}, got {tuple(x.shape)}"
             )
         output = self.quant_method.apply(self, x, None)
-        if self.reduce_output and self.tp_size > 1:
+        should_reduce = self.reduce_output if reduce_output is None else reduce_output
+        if (
+            reduce_output is False
+            and self.reduce_output
+            and self.tp_size > 1
+            and self.bias is not None
+        ):
+            raise ValueError(
+                "Cannot defer RowParallelLinear TP all-reduce when bias is present"
+            )
+        if should_reduce and self.tp_size > 1:
             output = all_reduce(output, group=Group.TP)
         if self.bias is not None:
             output = output + self.bias

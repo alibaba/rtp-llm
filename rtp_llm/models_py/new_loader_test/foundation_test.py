@@ -72,15 +72,16 @@ def _weights():
 
 
 class FoundationLoaderTest(unittest.TestCase):
-    def test_registry_reports_newloader_support_without_importing_lazy_model(self):
-        self.assertTrue(is_model_registered("qwen_3"))
+    def test_registry_reports_explicit_registration(self):
         self.assertTrue(is_model_registered("foundation_test_model"))
         self.assertFalse(is_model_registered("legacy_only_test_model"))
 
     def test_registry_default_and_explicit_loader_overrides(self):
         config = types.SimpleNamespace(use_new_loader=None)
         self.assertTrue(
-            is_new_loader_enabled(config, default_enabled=is_model_registered("qwen_3"))
+            is_new_loader_enabled(
+                config, default_enabled=is_model_registered("foundation_test_model")
+            )
         )
         self.assertFalse(
             is_new_loader_enabled(

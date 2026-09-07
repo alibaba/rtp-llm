@@ -380,7 +380,7 @@ class DeepSeekV32MoEBlock(RtpModule):
             )
         device_type = get_device_type()
         fast_select_topk_candidate = (
-            device_type == DeviceType.Cuda
+            device_type in (DeviceType.Cuda, DeviceType.ROCm)
             and not correction_bias
             and scoring_func == ScoringFunc.SOFTMAX
             and not self.group_limited

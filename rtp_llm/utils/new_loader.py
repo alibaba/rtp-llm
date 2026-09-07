@@ -2,7 +2,7 @@ from typing import TYPE_CHECKING, Optional, Protocol
 
 if TYPE_CHECKING:
     from rtp_llm.config.model_config import ModelConfig
-    from rtp_llm.ops import DeviceResourceConfig, ParallelismConfig
+    from rtp_llm.ops import DeviceResourceConfig, MoeConfig, ParallelismConfig
 
 
 class NewLoaderConfigSource(Protocol):
@@ -31,6 +31,7 @@ def new_loader_unsupported_reason(
     force_cpu_load_weights: bool = False,
     device_resource_config: Optional["DeviceResourceConfig"] = None,
     parallelism_config: Optional["ParallelismConfig"] = None,
+    moe_config: Optional["MoeConfig"] = None,
 ) -> Optional[str]:
     """Return why a runtime configuration still requires the legacy loader.
 
@@ -63,6 +64,11 @@ def new_loader_unsupported_reason(
             "online UpdateWeights is required but is not supported by NewLoader; "
             "use --use_new_loader false"
         )
+    if moe_config is not None and moe_config.use_deepep_low_latency:
+        from rtp_llm.device.device_type import DeviceType, get_device_type
+
+        if get_device_type() == DeviceType.ROCm:
+            return "DeepEP low-latency MoE is not supported by NewLoader on ROCm"
     quant_config = model_config.quant_config
     if quant_config is not None:
         runtime_method = quant_config.get_runtime_method_key()
@@ -72,9 +78,37 @@ def new_loader_unsupported_reason(
                 "provide a supported NewLoader runtime method"
             )
         if model_config.expert_num > 0:
+            from rtp_llm.device.device_type import DeviceType, get_device_type
+
             moe_reason = quant_config.get_new_loader_moe_unsupported_reason()
             if moe_reason is not None:
                 return moe_reason
+            device_type = get_device_type()
+            moe_runtime_method = quant_config.get_moe_runtime_method_key()
+            # Keep the routing capability matrix aligned with the strategies
+            # registered by fused_moe/__init__.py.  A non-empty linear runtime
+            # key alone does not prove that the device has a fused-MoE executor
+            # for the same checkpoint representation.
+            if device_type == DeviceType.ROCm:
+                supported_moe_methods = {
+                    "FP8_PER_BLOCK",
+                    "FP8_PER_CHANNEL_COMPRESSED",
+                    "FP8_PER_CHANNEL_QUARK",
+                }
+            elif device_type in (DeviceType.Cuda, DeviceType.Ppu):
+                supported_moe_methods = {
+                    "FP8_DYNAMIC_PER_TENSOR",
+                    "FP8_PER_BLOCK",
+                    "W4A8_INT4_PER_CHANNEL",
+                    "W4A8_INT4_PER_CHANNEL_COMPRESSED",
+                }
+            else:
+                supported_moe_methods = set()
+            if moe_runtime_method not in supported_moe_methods:
+                return (
+                    f"{device_type.name} {moe_runtime_method} MoE is unsupported "
+                    "by NewLoader; no matching fused-MoE strategy is registered"
+                )
     if (
         device_resource_config is not None
         and device_resource_config.enable_layer_micro_batch != 0

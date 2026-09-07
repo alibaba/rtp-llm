@@ -43,6 +43,8 @@ def create_config_adapter(
     model_config = ModelConfig()
     model_config.hidden_size = 1024
     model_config.expert_num = 8
+    model_config.num_layers = 1
+    model_config.moe_layer_index = [0]
     model_config.moe_k = 2
     model_config.data_type = data_type
     model_config.quant_config = quant_config
@@ -165,13 +167,36 @@ class TestMoeConfigResolver(unittest.TestCase):
         )
         process_capacity = (
             DeepepWrapperConfig.calc_model_low_latency_max_token_per_rank(
-                17, 2, ignored_layer.model_config.quant_config
+                17,
+                2,
+                ignored_layer.model_config.quant_config,
+                ignored_layer.model_config,
             )
         )
 
         self.assertEqual(quantized_capacity, 16)
         self.assertEqual(unquantized_capacity, 64)
         self.assertEqual(process_capacity, unquantized_capacity)
+
+    def test_non_moe_exclusion_keeps_quantized_deepep_capacity(self):
+        quant_config = Fp8PerTensorQuantConfig(
+            is_quanted=True,
+            ignored_layers=["model.layers.0.self_attn.o_proj", "lm_head"],
+        )
+        config = create_config_adapter(
+            ep_size=2,
+            quant_config=quant_config,
+            use_deepep_low_latency=True,
+        )
+
+        capacity = DeepepWrapperConfig.calc_model_low_latency_max_token_per_rank(
+            17,
+            2,
+            quant_config,
+            config.model_config,
+        )
+
+        self.assertEqual(capacity, 16)
 
     def test_deepep_low_latency_capacity_matches_dispatch_partition_under_cp(self):
         config = create_config_adapter(
@@ -209,6 +234,7 @@ class TestMoeConfigResolver(unittest.TestCase):
             config.ll_num_max_token,
             1,
             config.model_config.quant_config,
+            config.model_config,
         )
         tokens = torch.arange(24).reshape(6, 4)
         topk_ids = torch.zeros((6, 2), dtype=torch.int64)
@@ -255,6 +281,7 @@ class TestMoeConfigResolver(unittest.TestCase):
             128,
             1,
             config.model_config.quant_config,
+            config.model_config,
         )
 
     def test_is_bf16_false(self):

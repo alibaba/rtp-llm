@@ -701,6 +701,7 @@ void FlashInferMlaAttnParams::fillParamsMhaDevice(torch::Tensor t_prefix_lengths
                            page_indice_d,
                            batch_indice_d,
                            positions_d,
+                           input_token_num_upper,
                            batch_size,
                            stream);
 
