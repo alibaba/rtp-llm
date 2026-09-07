@@ -12,6 +12,25 @@ MOCK_WINDOW_LAST = max(VICTIM_OFFSETS)
 MIN_MOCK_STRIDE = MOCK_WINDOW_LAST - MOCK_CONTROL_OFFSET + 1
 
 
+def port_intervals(
+    master_base: int, mock_base: int
+) -> tuple[tuple[str, int, int], ...]:
+    return (
+        ("master", master_base, master_base + MASTER_PORT_COUNT - 1),
+        ("mock", mock_base + MOCK_CONTROL_OFFSET, mock_base + MOCK_WINDOW_LAST),
+    )
+
+
+def child_port_env(master_base: int, mock_base: int) -> dict[str, str]:
+    return {
+        "FLEXLB_FT_MASTER_HTTP_PORT": str(master_base),
+        "FLEXLB_FT_MASTER_MANAGEMENT_PORT": str(master_base + 1),
+        "FLEXLB_FT_HA_MASTER_A_HTTP_PORT": str(master_base),
+        "FLEXLB_FT_HA_MASTER_B_HTTP_PORT": str(master_base + 3),
+        "FLEXLB_FT_MOCK_BASE_GRPC_PORT": str(mock_base),
+    }
+
+
 class ResourcePlanError(ValueError):
     """The selected instances cannot be executed within a valid port lease."""
 
@@ -105,14 +124,7 @@ class LaneLease:
             raise ResourcePlanError("lane master and mock port intervals overlap")
 
     def intervals(self) -> tuple[tuple[str, int, int], ...]:
-        return (
-            ("master", self.master_base, self.master_base + MASTER_PORT_COUNT - 1),
-            (
-                "mock",
-                self.mock_base + MOCK_CONTROL_OFFSET,
-                self.mock_base + MOCK_WINDOW_LAST,
-            ),
-        )
+        return port_intervals(self.master_base, self.mock_base)
 
     def ports(self) -> tuple[int, ...]:
         return tuple(
@@ -126,13 +138,7 @@ class LaneLease:
         )
 
     def child_env(self) -> dict[str, str]:
-        return {
-            "FLEXLB_FT_MASTER_HTTP_PORT": str(self.master_base),
-            "FLEXLB_FT_MASTER_MANAGEMENT_PORT": str(self.master_base + 1),
-            "FLEXLB_FT_HA_MASTER_A_HTTP_PORT": str(self.master_base),
-            "FLEXLB_FT_HA_MASTER_B_HTTP_PORT": str(self.master_base + 3),
-            "FLEXLB_FT_MOCK_BASE_GRPC_PORT": str(self.mock_base),
-        }
+        return child_port_env(self.master_base, self.mock_base)
 
     def to_manifest(self) -> dict:
         return {

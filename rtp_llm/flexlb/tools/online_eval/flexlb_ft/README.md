@@ -110,7 +110,37 @@ done
 - 执行后同时核对进程退出码、`summary.total`、`summary.failed`、`summary.finding_confirmed` / `finding_resolved` 以及 `cases[].name` 是否符合运行前选择。普通 FAIL 或 lane 非零退出使编排结果失败；FINDING-CONFIRMED 表示声明的问题仍在，FINDING-RESOLVED 表示该探针通过并需复核标记，均不能写成普通 PASS。不要用零失败数掩盖漏跑或空结果。
 - 当前底层 runner 未匹配到任何 case 的实际执行返回 1；未知 `--cases` 名称或非法 CLI 参数返回 2；`--list` 的空选择可以返回 0。编排器对空分类集合/零有效用例报错停止。判断时保留原始 stderr，不把设计文档的未来退出码当作当前实现。
 
-本提交仍运行 legacy Python case。设计文档中的 `--source yaml`、`--case-id`、`--variant`、`--validate-only` 尚未实现；当前 `--list --json` 也不输出结构化清单 JSON。不要将这些未来接口混入上面的命令。
+### YAML 实例入口（需要同版本 scenario_runner）
+
+默认 `--source legacy` 保留上文的 Python case 行为。显式 `--source yaml` / `both` 需要安装支持清单协议 v1 和 `--lease-json` 的 `scenario_runner.py`；缺少 child 时父入口报错，不退回 legacy 冒充执行。YAML 解析需 `PyYAML`，场景动作及 backend 是否支持由 compiler 校验；增加 YAML 字段不会自动提供对应执行能力。
+
+在已包含 scenario compiler、Java mock backend 和 child CLI 的整合版本中，先列结构化实例，再规划；下面的路径对应仓内 `scenarios/`，可替换为明确的场景目录：
+
+```bash
+cd "$FT_REPO/rtp_llm/flexlb/tools/online_eval"
+test -f scenario_runner.py || exit 1
+FT_SCENARIOS="$FT_REPO/rtp_llm/flexlb/tools/online_eval/scenarios"
+python3 scenario_runner.py --source "$FT_SCENARIOS" --profile batch-window --list-json
+FT_YAML_OUT="$(mktemp -d "${TMPDIR:-/tmp}/flexlb_ft_yaml.XXXXXX")"
+export FLEXLB_EVAL_PROTO_OUT="$FT_YAML_OUT/proto"
+python3 parallel_runner.py --source yaml --case-dir "$FT_SCENARIOS" \
+    --profile batch-window --parallel 2 --out-dir "$FT_YAML_OUT" --dry-run
+```
+
+核对实际 instance 集合、预算和租约后，再用同样参数执行；`--parallel 1` 为串行，两种计划应包含相同完整 ID 集合：
+
+```bash
+python3 parallel_runner.py --source yaml --case-dir "$FT_SCENARIOS" \
+    --profile batch-window --parallel 2 --out-dir "$FT_YAML_OUT"
+```
+
+`--instances` 为完整 ID 逗号列表，YAML ID 为 `scenario::variant::profile`，例如仓内 smoke 的 `request_completion::immediate::batch-window`。`--source both` 同时编入两种来源，legacy ID 为 `legacy::<case_name>::<profile>`；它不会自动删掉具有相同旧契约映射的 YAML 实例。`--categories` 与 `--instances` 取交集；未知、空或 profile 排除后的零选择退出 2。结构化模式当前只支持 case 分片，不支持 `--keep`、category 分片或非 normal 的 CLI grade 覆盖，场景自身配置由 compiler 处理。
+
+父入口保持窗口锁 → out-dir 锁 → child 清单 → lane 执行顺序。预算按初始 worker 加累计新增次数计算，当前 Java mock 必须 ≤149，并保留 mock 控制口 -1 和 victim/control 偏移 +149..+151；无界或不支持的预算在启动实例前拒绝。每个 YAML child 收到 `--lease-json`，必须校验实际 env、租约区间及动态新增预算；直接执行 child 不能绕过父层预约。混合模式中的旧 case 仅沿用固定窗口兼容边界，不宣称其动态预算已经静态证明。
+
+结果位于 `<out-dir>/aggregate.json`，完整实例结果在 `instances[]`（兼容 `cases[].name` 使用完整 ID）；`manifest.json` 记录本次选择、预算和每 lane 租约。各来源分段写 `laneN/partK-yaml/scenarios.json` 或 `partK-legacy/cases.json`，同目录 `runner.log` 保存 child 日志、`lease.json` 保存传入 YAML child 的端口租约。缺失、重复、意外的结果 ID 或清理错误都使运行失败，不能被 finding 标记吞掉。YAML child 超时按选中实例的执行/清理预算之和加启动余量计算；取消只针对本次启动的进程组，先 TERM 留出清理预算，再按需 KILL，异常结果必须保留。
+
+实例耗时按完整 ID 写到独立版本化文件 `/tmp/flexlb_ft_instance_timing_v1.json`（`FLEXLB_FT_INSTANCE_TIMING_BASELINE` 可改址），无数据时用静态估计，不混用旧 case-name 耗时表。`--list --json` 仍不是结构化清单接口；child 使用 `--list-json`。设计文档中的 `--case-id`、`--variant`、`--validate-only` 尚未接入，不复制执行。
 
 ## 并行编排与耗时基线
 

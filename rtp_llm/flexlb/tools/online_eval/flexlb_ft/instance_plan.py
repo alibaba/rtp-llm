@@ -89,6 +89,23 @@ def parse_catalog(payload: dict, *, source: str, profile: str) -> list[Instance]
             )
         if source == "yaml":
             budget = JavaMockBudget.from_metadata(row.get("resource_budget"))
+            execution = row.get("execution")
+            if not isinstance(execution, dict) or set(execution) != {
+                "timeout_s",
+                "cleanup_timeout_s",
+            }:
+                raise InstancePlanError(
+                    f"instance {identity} requires execution time budgets"
+                )
+            if any(
+                type(value) not in (int, float)
+                or not math.isfinite(value)
+                or value <= 0
+                for value in execution.values()
+            ):
+                raise InstancePlanError(
+                    f"instance {identity} has invalid execution time budgets"
+                )
         elif source == "legacy":
             budget = (
                 None  # Existing fixed-window runner, not a compiled dynamic budget.
@@ -103,7 +120,25 @@ def parse_catalog(payload: dict, *, source: str, profile: str) -> list[Instance]
                 source,
                 float(duration),
                 budget,
-                dict(row),
+                {
+                    key: row[key]
+                    for key in (
+                        "id",
+                        "scenario_id",
+                        "variant_id",
+                        "profile",
+                        "category",
+                        "source",
+                        "source_path",
+                        "tags",
+                        "requires",
+                        "legacy_case_ids",
+                        "estimated_duration_s",
+                        "resource_budget",
+                        "execution",
+                    )
+                    if key in row
+                },
             )
         )
     return instances

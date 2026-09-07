@@ -100,6 +100,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from flexlb_ft.grade import overall_verdict  # noqa: E402
 from flexlb_ft.harness import PROBE_BIND_HOST, port_in_use  # noqa: E402
+from flexlb_ft.resource_plan import (  # noqa: E402
+    MOCK_WINDOW_LAST,
+    child_port_env,
+    port_intervals,
+)
 
 # (harness.py's import block is pure stdlib — no module-level grpc
 # import — so this import has zero side effects.)
@@ -148,7 +153,7 @@ MASTER_HTTP_BASE = 18080
 MASTER_PORT_STRIDE = 10
 MOCK_BASE_GRPC_PORT = 55151
 MOCK_PORT_STRIDE = 500
-MOCK_PORT_WINDOW_LAST = 151  # lane footprint [base-1 .. base+151]
+MOCK_PORT_WINDOW_LAST = MOCK_WINDOW_LAST  # lane footprint [base-1 .. base+151]
 
 # Stress/lease port band on the shared dev container: online_eval
 # (run_online_eval.sh MOCK_BASE_GRPC_PORT:-61000) and the flexlb lease
@@ -209,14 +214,10 @@ def lane_env(lane_idx: int, mock_stride: int = MOCK_PORT_STRIDE) -> dict[str, st
     listed here (e.g. FLEXLB_FT_HA_DUAL_MASTER) pass through unchanged from
     the orchestrator's environment.
     """
-    m = _master_base() + MASTER_PORT_STRIDE * lane_idx
-    return {
-        "FLEXLB_FT_MASTER_HTTP_PORT": str(m),
-        "FLEXLB_FT_MASTER_MANAGEMENT_PORT": str(m + 1),
-        "FLEXLB_FT_HA_MASTER_A_HTTP_PORT": str(m),
-        "FLEXLB_FT_HA_MASTER_B_HTTP_PORT": str(m + 3),
-        "FLEXLB_FT_MOCK_BASE_GRPC_PORT": str(_mock_base() + mock_stride * lane_idx),
-    }
+    return child_port_env(
+        _master_base() + MASTER_PORT_STRIDE * lane_idx,
+        _mock_base() + mock_stride * lane_idx,
+    )
 
 
 def _mock_stride_of(args: argparse.Namespace) -> int:
@@ -253,11 +254,10 @@ def _lane_ports(
     straight into a port a foreign process just grabbed — the exact
     failure mode this preflight exists to prevent.
     """
-    m = master_base + MASTER_PORT_STRIDE * lane_idx
-    base = mock_base + mock_stride * lane_idx
-    return list(range(m, m + 6)) + list(
-        range(base - 1, base + MOCK_PORT_WINDOW_LAST + 1)
+    intervals = port_intervals(
+        master_base + MASTER_PORT_STRIDE * lane_idx, mock_base + mock_stride * lane_idx
     )
+    return [port for _, lo, hi in intervals for port in range(lo, hi + 1)]
 
 
 def _busy_ports(ports: list[int]) -> list[int]:
@@ -281,23 +281,18 @@ def _window_lock_paths(
     Interval intersections are checked under the admission lock before
     these files are acquired. Master and mock ports share one namespace.
     """
-    paths = [
-        PORT_WINDOW_LOCK_DIR
-        / (
-            f"m{master_base + MASTER_PORT_STRIDE * i}_"
-            f"{master_base + MASTER_PORT_STRIDE * i + 5}.lock"
+    lanes = [
+        port_intervals(
+            master_base + MASTER_PORT_STRIDE * i, mock_base + mock_stride * i
         )
         for i in range(n_lanes)
     ]
-    paths += [
-        PORT_WINDOW_LOCK_DIR
-        / (
-            f"g{mock_base + mock_stride * i - 1}_"
-            f"{mock_base + mock_stride * i + MOCK_PORT_WINDOW_LAST}.lock"
-        )
-        for i in range(n_lanes)
+    return [
+        PORT_WINDOW_LOCK_DIR / f"{prefix}{lo}_{hi}.lock"
+        for side_index, prefix in [(0, "m"), (1, "g")]
+        for intervals in lanes
+        for _, lo, hi in [intervals[side_index]]
     ]
-    return paths
 
 
 def _close_window_locks(holders: list[IO] | None) -> None:
@@ -1505,7 +1500,32 @@ def main() -> int:
         action="store_true",
         help="print the lane plan + port matrix and exit (no execution)",
     )
+    parser.add_argument(
+        "--source",
+        choices=["legacy", "yaml", "both"],
+        default="legacy",
+        help="instance source (default legacy); YAML requires scenario_runner",
+    )
+    parser.add_argument(
+        "--case-dir", default=None, help="scenario YAML root for --source yaml/both"
+    )
+    parser.add_argument(
+        "--instances",
+        default=None,
+        help="exact compiled instance IDs for --source yaml/both",
+    )
     args = parser.parse_args()
+    if args.source == "legacy" and (
+        args.case_dir is not None or args.instances is not None
+    ):
+        parser.error("--case-dir/--instances require --source yaml or both")
+    if args.source != "legacy":
+        if not args.case_dir:
+            parser.error("--source yaml/both requires --case-dir")
+        if args.shard != "case" or args.keep or args.grade != "normal":
+            parser.error(
+                "structured instances require --shard case and do not support --keep or CLI --grade overrides"
+            )
 
     # Mock stride: CLI --mock-stride over the 500 default.  The verified
     # per-lane mock footprint is [base-1 .. base+151] (153 ports), so any
@@ -1533,6 +1553,11 @@ def main() -> int:
             f"--parallel must be 1..{cap} (mock stride {mock_stride}, "
             f"mock base {mbase}, master base {mabase})"
         )
+
+    if args.source != "legacy":
+        from flexlb_ft.instance_runner import run_structured
+
+        return run_structured(args, sys.modules[__name__])
 
     # Port-window preflight BEFORE any lane subprocess starts: the
     # machine-level window locks are taken here and held until process

@@ -29,6 +29,7 @@ def catalog():
                 "requires": [],
                 "legacy_case_ids": [],
                 "estimated_duration_s": i + 1,
+                "execution": {"timeout_s": 60, "cleanup_timeout_s": 10},
                 "resource_budget": {
                     "backend": "java_mock",
                     "initial_workers": 6,
