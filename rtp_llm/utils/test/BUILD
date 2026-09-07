@@ -98,6 +98,34 @@ py_test(
     exec_properties = {'gpu':'H20'}
 )
 
+py_test(
+    name = "process_lifecycle_test",
+    srcs = [
+        "process_lifecycle_test.py",
+    ],
+    deps = [
+        "//rtp_llm:utils",
+    ],
+    timeout = "short",
+)
+
+py_test(
+    name = "start_backend_server_lifecycle_test",
+    srcs = [
+        "start_backend_server_lifecycle_test.py",
+    ],
+    deps = [
+        "//rtp_llm:config",
+        "//rtp_llm:ops",
+        "//rtp_llm:sdk",
+        "//rtp_llm:utils",
+    ],
+    data = [
+        "//:th_transformer_config",
+    ],
+    timeout = "short",
+)
+
 load("//bazel:arch_select.bzl", "requirement")
 
 requirement([
