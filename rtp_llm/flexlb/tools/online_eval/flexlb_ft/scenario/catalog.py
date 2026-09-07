@@ -1,6 +1,8 @@
 """Explicit builtin adapter registration. Scenario data never imports Python."""
 
+from .actions.admission import HANDLERS as ADMISSION_HANDLERS
 from .actions.balance import HANDLERS as BALANCE_HANDLERS
+from .actions.cancel import HANDLERS as CANCEL_HANDLERS
 from .actions.elastic import HANDLERS as ELASTIC_HANDLERS
 from .actions.engine_control import HANDLERS as ENGINE_CONTROL_HANDLERS
 from .actions.engine_fault import HANDLERS as ENGINE_FAULT_HANDLERS
@@ -14,7 +16,9 @@ from .actions.status_protocol import HANDLERS as STATUS_PROTOCOL_HANDLERS
 def handlers():
     result = {}
     for descriptor in [
+        *ADMISSION_HANDLERS,
         *BALANCE_HANDLERS,
+        *CANCEL_HANDLERS,
         *ELASTIC_HANDLERS,
         *ENGINE_CONTROL_HANDLERS,
         *ENGINE_FAULT_HANDLERS,

@@ -9,7 +9,12 @@ contracts are assigned explicitly to existing families, never silently dropped.
 - `baseline.json` freezes current ordered registrations, profiles, findings and
   source digests. A digest is an audit anchor, not proof of YAML equivalence.
 - `target_manifest.json` assigns all 139 contracts to the 29 planned families and
-  records module ownership. Planned definitions are not executable placeholders.
+  records module ownership, candidate source files and counts, pending contract
+  IDs, and static reviews anchored to immutable revisions. `candidate_complete`
+  only means all assigned IDs have explicit candidate programs; it does not mean
+  runtime equivalence, full-profile Java execution or permission to delete them.
+  `candidate_scenario_ids` also records temporary pilot names separately from the
+  final target family. Planned definitions are not executable placeholders.
 - `coverage.yaml` currently retains every complete legacy callable. No contract is
   marked migrated merely because a pilot has a similar name or parses correctly.
 
@@ -26,6 +31,13 @@ the existing callable's result boundary for retained coverage; it is not a claim
 that each old function contains one assertion. Original assertions still need
 stage/check decomposition and paired configuration, threshold, sample-window and
 execution evidence before replacement.
+
+Current ownership: admission and master belong to agent4; balance and priority
+to agent6; cancellation and status to agent5; elastic to agent1; KV and engine
+faults to agent2. Core catalog, compiler and this ledger are integrated by agent2
+from the owners' fixed commits. The shared checkout is not used for these edits.
+The inventory includes core execution fixtures and pilots; its runnable-definition
+count must not be presented as the number of completed target families.
 
 To migrate a contract, explicitly replace its coverage entry with `disposition:
 migrate` and concrete `targets` containing `instance_id`, `check_ids` and the

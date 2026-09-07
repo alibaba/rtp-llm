@@ -18,85 +18,245 @@
     {
       "id": "admission_queue",
       "category": "admission",
-      "owner": "agent2",
-      "implementation_status": "planned",
+      "owner": "agent4",
+      "implementation_status": "candidate_complete",
       "legacy_case_ids": [
         "admission_queue_depth_reject",
         "admission_slo_queue_deadline",
         "admission_master_capacity_reject"
+      ],
+      "candidate_contracts": [
+        "admission_master_capacity_reject",
+        "admission_queue_depth_reject",
+        "admission_slo_queue_deadline"
+      ],
+      "pending_contracts": [],
+      "candidate_counts": {
+        "logical_scenarios": 1,
+        "variants": 3,
+        "instances": 6,
+        "checks": 46
+      },
+      "source_files": [
+        "scenarios/admission/admission_queue.yaml"
+      ],
+      "replacement_status": "retain_legacy_pending_paired_evidence",
+      "static_review": {
+        "status": "passed_at_revision",
+        "revision": "0386bdf07fa24e74e288468a91d2707e2ace3ef7",
+        "scope": "old predicates and declared differences; local fixtures only, not complete Java execution"
+      },
+      "candidate_scenario_ids": [
+        "admission_queue"
       ]
     },
     {
       "id": "batcher_placement_admission",
       "category": "admission",
-      "owner": "agent2",
-      "implementation_status": "planned",
+      "owner": "agent4",
+      "implementation_status": "candidate_complete",
       "legacy_case_ids": [
         "admission_batcher_queue_capacity_park",
         "admission_batcher_queue_deadline",
         "admission_placement_pool_wait"
+      ],
+      "candidate_contracts": [
+        "admission_batcher_queue_capacity_park",
+        "admission_batcher_queue_deadline",
+        "admission_placement_pool_wait"
+      ],
+      "pending_contracts": [],
+      "candidate_counts": {
+        "logical_scenarios": 1,
+        "variants": 3,
+        "instances": 6,
+        "checks": 62
+      },
+      "source_files": [
+        "scenarios/admission/batcher_placement_admission.yaml"
+      ],
+      "replacement_status": "retain_legacy_pending_paired_evidence",
+      "static_review": {
+        "status": "pending"
+      },
+      "candidate_scenario_ids": [
+        "batcher_placement_admission"
       ]
     },
     {
       "id": "engine_admission_gate",
       "category": "admission",
-      "owner": "agent2",
-      "implementation_status": "planned",
+      "owner": "agent4",
+      "implementation_status": "candidate_complete",
       "legacy_case_ids": [
         "engine_prefill_concurrency_gate_park",
         "engine_decode_hard_gate_unbounded_park",
         "admission_engine_waiting_batch_cap_reject",
         "admission_engine_kv_lack_mem_fast_reject"
+      ],
+      "candidate_contracts": [
+        "admission_engine_kv_lack_mem_fast_reject",
+        "admission_engine_waiting_batch_cap_reject",
+        "engine_decode_hard_gate_unbounded_park",
+        "engine_prefill_concurrency_gate_park"
+      ],
+      "pending_contracts": [],
+      "candidate_counts": {
+        "logical_scenarios": 1,
+        "variants": 4,
+        "instances": 8,
+        "checks": 72
+      },
+      "source_files": [
+        "scenarios/admission/engine_admission_gate.yaml"
+      ],
+      "replacement_status": "retain_legacy_pending_paired_evidence",
+      "static_review": {
+        "status": "passed_at_revision",
+        "revision": "8aa6986415d4191d8114309c5108854cddf13695",
+        "scope": "old predicates and declared differences; local fixtures only, not complete Java execution"
+      },
+      "candidate_scenario_ids": [
+        "engine_admission_gate"
       ]
     },
     {
       "id": "prefill_batch_token_budget",
       "category": "admission",
-      "owner": "agent2",
+      "owner": "agent4",
       "implementation_status": "planned",
       "legacy_case_ids": [
         "engine_prefill_token_budget_split",
         "engine_prefill_token_budget_split_fifo",
         "engine_prefill_token_budget_boundary",
         "engine_prefill_regroup_disabled_verbatim"
-      ]
+      ],
+      "candidate_contracts": [],
+      "pending_contracts": [
+        "engine_prefill_regroup_disabled_verbatim",
+        "engine_prefill_token_budget_boundary",
+        "engine_prefill_token_budget_split",
+        "engine_prefill_token_budget_split_fifo"
+      ],
+      "candidate_counts": {
+        "logical_scenarios": 0,
+        "variants": 0,
+        "instances": 0,
+        "checks": 0
+      },
+      "source_files": [],
+      "replacement_status": "retain_legacy_pending_paired_evidence",
+      "static_review": {
+        "status": "pending"
+      },
+      "candidate_scenario_ids": []
     },
     {
       "id": "priority_admission",
       "category": "admission",
-      "owner": "agent2",
-      "implementation_status": "planned",
+      "owner": "agent4",
+      "implementation_status": "candidate_complete",
       "legacy_case_ids": [
         "admission_priority_incomer_reject"
+      ],
+      "candidate_contracts": [
+        "admission_priority_incomer_reject"
+      ],
+      "pending_contracts": [],
+      "candidate_counts": {
+        "logical_scenarios": 1,
+        "variants": 1,
+        "instances": 1,
+        "checks": 11
+      },
+      "source_files": [
+        "scenarios/admission/priority_admission.yaml"
+      ],
+      "replacement_status": "retain_legacy_pending_paired_evidence",
+      "static_review": {
+        "status": "passed_at_revision",
+        "revision": "cd8c78eec6fd7ff311e2cd51ea461cbcbb6e2042",
+        "scope": "old predicates and declared differences; local fixtures only, not complete Java execution"
+      },
+      "candidate_scenario_ids": [
+        "priority_admission"
       ]
     },
     {
       "id": "balance_distribution",
       "category": "balance",
-      "owner": "agent2",
-      "implementation_status": "planned",
+      "owner": "agent6",
+      "implementation_status": "candidate_complete",
       "legacy_case_ids": [
         "balance_uniform_serial",
         "balance_concurrent_mix",
         "balance_decode_spread",
         "balance_len_mixed"
+      ],
+      "candidate_contracts": [
+        "balance_concurrent_mix",
+        "balance_decode_spread",
+        "balance_len_mixed",
+        "balance_uniform_serial"
+      ],
+      "pending_contracts": [],
+      "candidate_counts": {
+        "logical_scenarios": 1,
+        "variants": 4,
+        "instances": 16,
+        "checks": 148
+      },
+      "source_files": [
+        "scenarios/balance/balance_distribution.yaml"
+      ],
+      "replacement_status": "retain_legacy_pending_paired_evidence",
+      "static_review": {
+        "status": "passed_at_revision",
+        "revision": "bb2d14b4c63bd30d97c133f654fb572a10e30b9c",
+        "scope": "old predicates and declared differences; local fixtures only, not complete Java execution"
+      },
+      "candidate_scenario_ids": [
+        "balance_distribution"
       ]
     },
     {
       "id": "balance_overload_transfer",
       "category": "balance",
-      "owner": "agent2",
-      "implementation_status": "planned",
+      "owner": "agent6",
+      "implementation_status": "candidate_complete",
       "legacy_case_ids": [
         "balance_overload_avoid_prefill",
         "balance_overload_avoid_decode"
+      ],
+      "candidate_contracts": [
+        "balance_overload_avoid_decode",
+        "balance_overload_avoid_prefill"
+      ],
+      "pending_contracts": [],
+      "candidate_counts": {
+        "logical_scenarios": 1,
+        "variants": 2,
+        "instances": 8,
+        "checks": 32
+      },
+      "source_files": [
+        "scenarios/balance/balance_overload_transfer.yaml"
+      ],
+      "replacement_status": "retain_legacy_pending_paired_evidence",
+      "static_review": {
+        "status": "passed_at_revision",
+        "revision": "bb2d14b4c63bd30d97c133f654fb572a10e30b9c",
+        "scope": "old predicates and declared differences; local fixtures only, not complete Java execution"
+      },
+      "candidate_scenario_ids": [
+        "balance_overload_transfer"
       ]
     },
     {
       "id": "cancel_lifecycle",
       "category": "cancel",
-      "owner": "agent2",
-      "implementation_status": "planned",
+      "owner": "agent5",
+      "implementation_status": "candidate_complete",
       "legacy_case_ids": [
         "cancel_basic",
         "cancel_idempotent",
@@ -110,13 +270,46 @@
         "cancel_preemption_victim",
         "cancel_stream_break_prefill_autonomous",
         "cancel_stream_break_decode_autonomous"
+      ],
+      "candidate_contracts": [
+        "cancel_after_terminal",
+        "cancel_anomaly_path",
+        "cancel_basic",
+        "cancel_deadline_exempt_inflight",
+        "cancel_idempotent",
+        "cancel_phase_timing",
+        "cancel_preemption_victim",
+        "cancel_schedule_drop_delivered",
+        "cancel_sibling_isolation",
+        "cancel_stream_break_decode_autonomous",
+        "cancel_stream_break_prefill_autonomous",
+        "cancel_unknown_rid"
+      ],
+      "pending_contracts": [],
+      "candidate_counts": {
+        "logical_scenarios": 1,
+        "variants": 20,
+        "instances": 42,
+        "checks": 308
+      },
+      "source_files": [
+        "scenarios/cancel/cancel_lifecycle.yaml"
+      ],
+      "replacement_status": "retain_legacy_pending_paired_evidence",
+      "static_review": {
+        "status": "passed_at_revision",
+        "revision": "72c867b94c6dd1b3d0a5bc4753e1366924e3dd1f",
+        "scope": "old predicates and declared differences; local fixtures only, not complete Java execution"
+      },
+      "candidate_scenario_ids": [
+        "cancel_lifecycle"
       ]
     },
     {
       "id": "cancel_fence_settlement",
       "category": "cancel",
-      "owner": "agent2",
-      "implementation_status": "planned",
+      "owner": "agent5",
+      "implementation_status": "candidate_complete",
       "legacy_case_ids": [
         "cancel_engine_notfound_settle",
         "cancel_engine_restarted_tombstoned_settle",
@@ -125,13 +318,41 @@
         "cancel_fencing_lost_on_engine_restart",
         "cancel_transport_failure_one_shot",
         "cancel_unexpected_status_await_terminal"
+      ],
+      "candidate_contracts": [
+        "cancel_decode_retire_closes_fence",
+        "cancel_engine_notfound_settle",
+        "cancel_engine_restarted_tombstoned_settle",
+        "cancel_fencing_lost_on_engine_restart",
+        "cancel_prefill_dead_await_terminal",
+        "cancel_transport_failure_one_shot",
+        "cancel_unexpected_status_await_terminal"
+      ],
+      "pending_contracts": [],
+      "candidate_counts": {
+        "logical_scenarios": 1,
+        "variants": 8,
+        "instances": 24,
+        "checks": 216
+      },
+      "source_files": [
+        "scenarios/cancel/cancel_fence_settlement.yaml"
+      ],
+      "replacement_status": "retain_legacy_pending_paired_evidence",
+      "static_review": {
+        "status": "passed_at_revision",
+        "revision": "72c867b94c6dd1b3d0a5bc4753e1366924e3dd1f",
+        "scope": "old predicates and declared differences; local fixtures only, not complete Java execution"
+      },
+      "candidate_scenario_ids": [
+        "cancel_fence_settlement"
       ]
     },
     {
       "id": "elastic_lifecycle",
       "category": "elastic",
       "owner": "agent1",
-      "implementation_status": "planned",
+      "implementation_status": "candidate_partial",
       "legacy_case_ids": [
         "elastic_add_flow",
         "elastic_remove_flow",
@@ -143,6 +364,36 @@
         "elastic_kv_skew_shrink_cold",
         "elastic_transient_imbalance_bound",
         "elastic_steady_state_recovery"
+      ],
+      "candidate_contracts": [
+        "elastic_kv_skew_shrink_cold",
+        "elastic_kv_skew_shrink_hot"
+      ],
+      "pending_contracts": [
+        "elastic_add_flow",
+        "elastic_add_preference",
+        "elastic_add_remove_cycle",
+        "elastic_kv_full_shrink",
+        "elastic_rebalance",
+        "elastic_remove_flow",
+        "elastic_steady_state_recovery",
+        "elastic_transient_imbalance_bound"
+      ],
+      "candidate_counts": {
+        "logical_scenarios": 1,
+        "variants": 2,
+        "instances": 2,
+        "checks": 20
+      },
+      "source_files": [
+        "scenarios/elastic/kv_skew_shrink.yaml"
+      ],
+      "replacement_status": "retain_legacy_pending_paired_evidence",
+      "static_review": {
+        "status": "pending"
+      },
+      "candidate_scenario_ids": [
+        "elastic_kv_skew_shrink"
       ]
     },
     {
@@ -152,7 +403,23 @@
       "implementation_status": "planned",
       "legacy_case_ids": [
         "elastic_remove_pending_drain"
-      ]
+      ],
+      "candidate_contracts": [],
+      "pending_contracts": [
+        "elastic_remove_pending_drain"
+      ],
+      "candidate_counts": {
+        "logical_scenarios": 0,
+        "variants": 0,
+        "instances": 0,
+        "checks": 0
+      },
+      "source_files": [],
+      "replacement_status": "retain_legacy_pending_paired_evidence",
+      "static_review": {
+        "status": "pending"
+      },
+      "candidate_scenario_ids": []
     },
     {
       "id": "elastic_concurrent_mutation",
@@ -161,15 +428,51 @@
       "implementation_status": "planned",
       "legacy_case_ids": [
         "elastic_concurrent_ops"
-      ]
+      ],
+      "candidate_contracts": [],
+      "pending_contracts": [
+        "elastic_concurrent_ops"
+      ],
+      "candidate_counts": {
+        "logical_scenarios": 0,
+        "variants": 0,
+        "instances": 0,
+        "checks": 0
+      },
+      "source_files": [],
+      "replacement_status": "retain_legacy_pending_paired_evidence",
+      "static_review": {
+        "status": "pending"
+      },
+      "candidate_scenario_ids": []
     },
     {
       "id": "elastic_added_worker_fault",
       "category": "elastic",
       "owner": "agent1",
-      "implementation_status": "planned",
+      "implementation_status": "candidate_complete",
       "legacy_case_ids": [
         "elastic_stop_after_add"
+      ],
+      "candidate_contracts": [
+        "elastic_stop_after_add"
+      ],
+      "pending_contracts": [],
+      "candidate_counts": {
+        "logical_scenarios": 1,
+        "variants": 1,
+        "instances": 1,
+        "checks": 11
+      },
+      "source_files": [
+        "scenarios/elastic/added_worker_fault.yaml"
+      ],
+      "replacement_status": "retain_legacy_pending_paired_evidence",
+      "static_review": {
+        "status": "pending"
+      },
+      "candidate_scenario_ids": [
+        "elastic_added_worker_fault"
       ]
     },
     {
@@ -187,42 +490,137 @@
         "engine_fault_status_gap_no_bump",
         "engine_fault_status_gap_long_retire",
         "engine_fault_recovery_kv_usage_reset"
-      ]
+      ],
+      "candidate_contracts": [],
+      "pending_contracts": [
+        "engine_fault_crash_after",
+        "engine_fault_down_phases",
+        "engine_fault_flap",
+        "engine_fault_recovery_generation_bump",
+        "engine_fault_recovery_kv_resync",
+        "engine_fault_recovery_kv_usage_reset",
+        "engine_fault_recovery_no_resurrect",
+        "engine_fault_status_gap_long_retire",
+        "engine_fault_status_gap_no_bump"
+      ],
+      "candidate_counts": {
+        "logical_scenarios": 0,
+        "variants": 0,
+        "instances": 0,
+        "checks": 0
+      },
+      "source_files": [],
+      "replacement_status": "retain_legacy_pending_paired_evidence",
+      "static_review": {
+        "status": "pending"
+      },
+      "candidate_scenario_ids": []
     },
     {
       "id": "engine_rpc_fault",
       "category": "engine_fault",
       "owner": "agent2",
-      "implementation_status": "planned",
+      "implementation_status": "candidate_complete",
       "legacy_case_ids": [
         "engine_fault_no_respond",
         "engine_fault_enqueue_error",
         "engine_fault_enqueue_delay",
         "engine_fault_generate_delay"
+      ],
+      "candidate_contracts": [
+        "engine_fault_enqueue_delay",
+        "engine_fault_enqueue_error",
+        "engine_fault_generate_delay",
+        "engine_fault_no_respond"
+      ],
+      "pending_contracts": [],
+      "candidate_counts": {
+        "logical_scenarios": 1,
+        "variants": 5,
+        "instances": 14,
+        "checks": 58
+      },
+      "source_files": [
+        "scenarios/engine_fault/engine_rpc_fault.yaml"
+      ],
+      "replacement_status": "retain_legacy_pending_paired_evidence",
+      "static_review": {
+        "status": "pending"
+      },
+      "candidate_scenario_ids": [
+        "engine_rpc_fault"
       ]
     },
     {
       "id": "cache_local_index",
       "category": "kv",
       "owner": "agent2",
-      "implementation_status": "planned",
+      "implementation_status": "candidate_complete",
       "legacy_case_ids": [
         "kv_pe_admit_isolation",
         "kv_pe_evict_zero_match",
         "kv_pe_prefix_continuity"
+      ],
+      "candidate_contracts": [
+        "kv_pe_admit_isolation",
+        "kv_pe_evict_zero_match",
+        "kv_pe_prefix_continuity"
+      ],
+      "pending_contracts": [],
+      "candidate_counts": {
+        "logical_scenarios": 1,
+        "variants": 6,
+        "instances": 12,
+        "checks": 96
+      },
+      "source_files": [
+        "scenarios/kv/cache_local_index.yaml"
+      ],
+      "replacement_status": "retain_legacy_pending_paired_evidence",
+      "static_review": {
+        "status": "passed_at_revision",
+        "revision": "e7d48bacb5e42864d9e477ce70e8b6af8e78e0d3",
+        "scope": "old predicates and declared differences; local fixtures only, not complete Java execution"
+      },
+      "candidate_scenario_ids": [
+        "cache_local_index"
       ]
     },
     {
       "id": "cache_global_holders",
       "category": "kv",
       "owner": "agent2",
-      "implementation_status": "planned",
+      "implementation_status": "candidate_complete",
       "legacy_case_ids": [
         "kv_g_shared_block_both_match",
         "kv_g_partial_release_redirect",
         "kv_g_full_release_no_ghost",
         "kv_g_sync_convergence",
         "kv_g_engine_down_cleanup"
+      ],
+      "candidate_contracts": [
+        "kv_g_engine_down_cleanup",
+        "kv_g_full_release_no_ghost",
+        "kv_g_partial_release_redirect",
+        "kv_g_shared_block_both_match",
+        "kv_g_sync_convergence"
+      ],
+      "pending_contracts": [],
+      "candidate_counts": {
+        "logical_scenarios": 1,
+        "variants": 10,
+        "instances": 20,
+        "checks": 192
+      },
+      "source_files": [
+        "scenarios/kv/cache_global_holders.yaml"
+      ],
+      "replacement_status": "retain_legacy_pending_paired_evidence",
+      "static_review": {
+        "status": "pending"
+      },
+      "candidate_scenario_ids": [
+        "cache_global_holders"
       ]
     },
     {
@@ -235,7 +633,26 @@
         "kv_hot_prefix_tension",
         "kv_match_mixed",
         "kv_leader_saturation_spill"
-      ]
+      ],
+      "candidate_contracts": [],
+      "pending_contracts": [
+        "kv_hot_prefix_tension",
+        "kv_leader_saturation_spill",
+        "kv_match_mixed",
+        "kv_prefix_stickiness"
+      ],
+      "candidate_counts": {
+        "logical_scenarios": 0,
+        "variants": 0,
+        "instances": 0,
+        "checks": 0
+      },
+      "source_files": [],
+      "replacement_status": "retain_legacy_pending_paired_evidence",
+      "static_review": {
+        "status": "pending"
+      },
+      "candidate_scenario_ids": []
     },
     {
       "id": "cache_capacity_recovery",
@@ -247,7 +664,26 @@
         "kv_decode_capacity_park",
         "kv_pool_saturation_evict_reject_recover",
         "kv_decode_pool_exhaustion_terminal"
-      ]
+      ],
+      "candidate_contracts": [],
+      "pending_contracts": [
+        "kv_capacity_conflict_overflow",
+        "kv_decode_capacity_park",
+        "kv_decode_pool_exhaustion_terminal",
+        "kv_pool_saturation_evict_reject_recover"
+      ],
+      "candidate_counts": {
+        "logical_scenarios": 0,
+        "variants": 0,
+        "instances": 0,
+        "checks": 0
+      },
+      "source_files": [],
+      "replacement_status": "retain_legacy_pending_paired_evidence",
+      "static_review": {
+        "status": "pending"
+      },
+      "candidate_scenario_ids": []
     },
     {
       "id": "cache_churn",
@@ -257,42 +693,140 @@
       "legacy_case_ids": [
         "kv_storm_hot_churn",
         "kv_lru_eviction_affinity"
-      ]
+      ],
+      "candidate_contracts": [],
+      "pending_contracts": [
+        "kv_lru_eviction_affinity",
+        "kv_storm_hot_churn"
+      ],
+      "candidate_counts": {
+        "logical_scenarios": 0,
+        "variants": 0,
+        "instances": 0,
+        "checks": 0
+      },
+      "source_files": [],
+      "replacement_status": "retain_legacy_pending_paired_evidence",
+      "static_review": {
+        "status": "pending"
+      },
+      "candidate_scenario_ids": []
     },
     {
       "id": "master_lifecycle",
       "category": "master",
       "owner": "agent4",
-      "implementation_status": "planned",
+      "implementation_status": "candidate_complete",
       "legacy_case_ids": [
         "master_kill",
         "master_freeze"
+      ],
+      "candidate_contracts": [
+        "master_freeze",
+        "master_kill"
+      ],
+      "pending_contracts": [],
+      "candidate_counts": {
+        "logical_scenarios": 1,
+        "variants": 3,
+        "instances": 6,
+        "checks": 82
+      },
+      "source_files": [
+        "scenarios/master/master_lifecycle.yaml"
+      ],
+      "replacement_status": "retain_legacy_pending_paired_evidence",
+      "static_review": {
+        "status": "pending"
+      },
+      "candidate_scenario_ids": [
+        "master_lifecycle"
       ]
     },
     {
       "id": "master_dispatch_quota",
       "category": "master",
       "owner": "agent4",
-      "implementation_status": "planned",
+      "implementation_status": "candidate_complete",
       "legacy_case_ids": [
         "master_quota_block"
+      ],
+      "candidate_contracts": [
+        "master_quota_block"
+      ],
+      "pending_contracts": [],
+      "candidate_counts": {
+        "logical_scenarios": 1,
+        "variants": 1,
+        "instances": 1,
+        "checks": 7
+      },
+      "source_files": [
+        "scenarios/master/master_dispatch_quota.yaml"
+      ],
+      "replacement_status": "retain_legacy_pending_paired_evidence",
+      "static_review": {
+        "status": "pending"
+      },
+      "candidate_scenario_ids": [
+        "master_dispatch_quota"
       ]
     },
     {
       "id": "master_coldstart",
       "category": "master",
       "owner": "agent4",
-      "implementation_status": "planned",
+      "implementation_status": "candidate_complete",
       "legacy_case_ids": [
         "master_coldstart_burst"
+      ],
+      "candidate_contracts": [
+        "master_coldstart_burst"
+      ],
+      "pending_contracts": [],
+      "candidate_counts": {
+        "logical_scenarios": 1,
+        "variants": 1,
+        "instances": 4,
+        "checks": 12
+      },
+      "source_files": [
+        "scenarios/master/master_coldstart.yaml"
+      ],
+      "replacement_status": "retain_legacy_pending_paired_evidence",
+      "static_review": {
+        "status": "pending"
+      },
+      "candidate_scenario_ids": [
+        "master_coldstart"
       ]
     },
     {
       "id": "master_ha_failover",
       "category": "master",
       "owner": "agent4",
-      "implementation_status": "planned",
+      "implementation_status": "candidate_complete",
       "legacy_case_ids": [
+        "master_ha_failover"
+      ],
+      "candidate_contracts": [
+        "master_ha_failover"
+      ],
+      "pending_contracts": [],
+      "candidate_counts": {
+        "logical_scenarios": 1,
+        "variants": 1,
+        "instances": 1,
+        "checks": 9
+      },
+      "source_files": [
+        "scenarios/master/master_ha_failover.yaml"
+      ],
+      "replacement_status": "retain_legacy_pending_paired_evidence",
+      "static_review": {
+        "status": "pending"
+      },
+      "candidate_scenario_ids": [
         "master_ha_failover"
       ]
     },
@@ -300,18 +834,41 @@
       "id": "client_fallback_failback",
       "category": "master",
       "owner": "agent4",
-      "implementation_status": "planned",
+      "implementation_status": "candidate_complete",
       "legacy_case_ids": [
         "fallback_direct",
         "fallback_negative_errorcode",
         "failback_wraparound",
         "direct_generate_error"
+      ],
+      "candidate_contracts": [
+        "direct_generate_error",
+        "failback_wraparound",
+        "fallback_direct",
+        "fallback_negative_errorcode"
+      ],
+      "pending_contracts": [],
+      "candidate_counts": {
+        "logical_scenarios": 1,
+        "variants": 4,
+        "instances": 13,
+        "checks": 116
+      },
+      "source_files": [
+        "scenarios/master/client_fallback_failback.yaml"
+      ],
+      "replacement_status": "retain_legacy_pending_paired_evidence",
+      "static_review": {
+        "status": "pending"
+      },
+      "candidate_scenario_ids": [
+        "client_fallback_failback"
       ]
     },
     {
       "id": "priority_queue",
       "category": "priority",
-      "owner": "agent2",
+      "owner": "agent6",
       "implementation_status": "planned",
       "legacy_case_ids": [
         "prio_order_basic",
@@ -319,12 +876,32 @@
         "prio_normalize",
         "prio_low_no_starvation",
         "prio_queue_timeout_terminal"
-      ]
+      ],
+      "candidate_contracts": [],
+      "pending_contracts": [
+        "prio_low_no_starvation",
+        "prio_normalize",
+        "prio_order_basic",
+        "prio_queue_timeout_terminal",
+        "prio_same_level_fifo"
+      ],
+      "candidate_counts": {
+        "logical_scenarios": 0,
+        "variants": 0,
+        "instances": 0,
+        "checks": 0
+      },
+      "source_files": [],
+      "replacement_status": "retain_legacy_pending_paired_evidence",
+      "static_review": {
+        "status": "pending"
+      },
+      "candidate_scenario_ids": []
     },
     {
       "id": "priority_preemption",
       "category": "priority",
-      "owner": "agent2",
+      "owner": "agent6",
       "implementation_status": "planned",
       "legacy_case_ids": [
         "atpm_preempt_prefill_queued",
@@ -341,25 +918,79 @@
         "atpm_preempt_decode_reserved_live",
         "atpm_preempt_cancel_not_found",
         "atpm_preempt_cancel_tombstoned"
-      ]
+      ],
+      "candidate_contracts": [],
+      "pending_contracts": [
+        "atpm_comparator_frozen_weak",
+        "atpm_config_strict_reject",
+        "atpm_decode_reservation_priority",
+        "atpm_error_code_family",
+        "atpm_observability_integrity",
+        "atpm_preempt_cancel_not_found",
+        "atpm_preempt_cancel_tombstoned",
+        "atpm_preempt_decode_engine_owned",
+        "atpm_preempt_decode_reserved_live",
+        "atpm_preempt_prefill_queued",
+        "atpm_preempt_prefill_queued_live",
+        "atpm_preemption_disabled_zero_eviction",
+        "atpm_same_priority_zero_eviction",
+        "atpm_timeout_attribution"
+      ],
+      "candidate_counts": {
+        "logical_scenarios": 0,
+        "variants": 0,
+        "instances": 0,
+        "checks": 0
+      },
+      "source_files": [],
+      "replacement_status": "retain_legacy_pending_paired_evidence",
+      "static_review": {
+        "status": "pending"
+      },
+      "candidate_scenario_ids": []
     },
     {
       "id": "batch_ack_and_execution",
       "category": "status",
       "owner": "agent5",
-      "implementation_status": "planned",
+      "implementation_status": "candidate_complete",
       "legacy_case_ids": [
         "status_ack_partial_fail",
         "status_batch_async_partial_fail",
         "status_ack_multi_error",
         "status_ack_empty_no_crash"
+      ],
+      "candidate_contracts": [
+        "status_ack_empty_no_crash",
+        "status_ack_multi_error",
+        "status_ack_partial_fail",
+        "status_batch_async_partial_fail"
+      ],
+      "pending_contracts": [],
+      "candidate_counts": {
+        "logical_scenarios": 1,
+        "variants": 4,
+        "instances": 4,
+        "checks": 37
+      },
+      "source_files": [
+        "scenarios/status/batch_ack_and_execution.yaml"
+      ],
+      "replacement_status": "retain_legacy_pending_paired_evidence",
+      "static_review": {
+        "status": "passed_at_revision",
+        "revision": "3a79155e4c97455c68977490297226be32e1be39",
+        "scope": "old predicates and declared differences; local fixtures only, not complete Java execution"
+      },
+      "candidate_scenario_ids": [
+        "batch_ack_and_execution"
       ]
     },
     {
       "id": "status_protocol",
       "category": "status",
       "owner": "agent5",
-      "implementation_status": "planned",
+      "implementation_status": "candidate_complete",
       "legacy_case_ids": [
         "status_inflight_ttl_cleanup",
         "status_prefill_suppress_all",
@@ -384,7 +1015,52 @@
         "status_fetch_error",
         "master_debug_snapshot",
         "normal_no_fetch_observation"
+      ],
+      "candidate_contracts": [
+        "master_debug_snapshot",
+        "normal_no_fetch_observation",
+        "status_cursor_regress",
+        "status_decode_before_prefill",
+        "status_decode_running_before_prefill",
+        "status_decode_suppress_finished",
+        "status_decode_waiting_before_prefill",
+        "status_duplicate_finished",
+        "status_fetch_error",
+        "status_finished_then_running",
+        "status_foreign_batchid",
+        "status_inflight_ttl_cleanup",
+        "status_prefill_suppress_all",
+        "status_prefill_suppress_finished",
+        "status_special_ids",
+        "status_status_no_respond",
+        "status_unbatched_single_request",
+        "status_unknown_batchid",
+        "status_unknown_rid_finished",
+        "status_unknown_rid_running",
+        "status_version_regress",
+        "status_zombie_completed_running",
+        "status_zombie_fake_running"
+      ],
+      "pending_contracts": [],
+      "candidate_counts": {
+        "logical_scenarios": 1,
+        "variants": 23,
+        "instances": 47,
+        "checks": 321
+      },
+      "source_files": [
+        "scenarios/status/status_protocol.yaml"
+      ],
+      "replacement_status": "retain_legacy_pending_paired_evidence",
+      "static_review": {
+        "status": "passed_at_revision",
+        "revision": "3a79155e4c97455c68977490297226be32e1be39",
+        "scope": "old predicates and declared differences; local fixtures only, not complete Java execution"
+      },
+      "candidate_scenario_ids": [
+        "status_protocol"
       ]
     }
-  ]
+  ],
+  "implementation_status_scope": "Candidate programs cover declared contract IDs; this is separate from replacement coverage and runtime acceptance."
 }
