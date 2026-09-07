@@ -5,7 +5,7 @@ Master-debug/noFetch cases. Profile declarations are retained: 27 variants expan
 to 51 instances. See [coverage.md](coverage.md) for each old predicate, its named
 checks, observational items, findings and explicit semantic changes.
 
-The implementation uses `status_prepare`, `status_dispatch`, `status_control`,
+The implementation uses `status_metrics_ready`, `status_prepare`, `status_dispatch`, `status_control`,
 `status_perf`, `status_sample`, `status_check` and `status_outcomes`. The YAML lists
 every experiment stage and assertion. It never dispatches a legacy case function.
 The shared catalog owner registers the exported `HANDLERS`; this change does not
@@ -27,7 +27,7 @@ Prefill members, Decode admission and mock engine lifecycle remain distinct owne
 
 Verification so far:
 
-- 91 local scenario tests pass, including 11 status-specific tests for prepared
+- 93 local scenario tests pass, including 13 status-specific tests for prepared
   cohorts, typed error boundaries, consumer exit evidence, source failures,
   independent owner metrics, cleanup and the complete legacy/profile mapping.
 - Isolated host-111 Java mock runs used the unchanged 9821d9dc73 Java sources and

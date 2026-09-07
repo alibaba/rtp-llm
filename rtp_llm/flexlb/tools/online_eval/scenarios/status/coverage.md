@@ -4,7 +4,7 @@ Source baseline: `9821d9dc73e0ded021ebf85ebfe1fe26af5f625f`; the 25 legacy statu
 
 Every name below denotes `<stage>.contract` unless it is explicitly described as an observation or required source. A `*_drained_*`, `after_*_*`, or `clean_baseline_*` group expands into the separately listed scheduler, Prefill batch, Prefill member and Decode total-load checks. Each variant also maps old `master_ok` to `master_http_200.contract` and has explicit teardown plus mandatory owner cleanup.
 
-The runner continues after ordinary failed checks to collect independent results. An action error blocks dependent stages; missing evidence is never converted to a finding.
+The current core stops subsequent stages after an ordinary failed check or action error. Those later checks remain statically declared but are reported BLOCKED, not executed or passed. Only a declared finding failure allows later checks to run. Missing evidence is never converted to a finding.
 
 ## batch_ack_and_execution / ack_partial
 
@@ -239,3 +239,5 @@ Checks: `fresh_accepted_zero.contract`, `fresh_fetch_zero.contract`, `prefill_co
 - Metric channels are required and checked independently. Absent TTL series in a successful parsed exposition are sparse zero counters; unavailable HTTP or malformed owner fields are errors. Only `inflight_ttl_cleanup` asserts a positive scheduler-eviction delta; the other TTL deltas and old shared-log anchors remain observations. Shared log offsets are not used as required evidence.
 - Debug/noFetch now require every captured debug sample to be complete, a stricter evidence rule than the old noFetch loop, which tolerated partial intermediate frames. The first YAML run encountered a partial snapshot and correctly reported ERROR; a later fresh run passed without relaxing this rule. This is not a claim of stable repeated success. Source errors preserve a raw debug artifact.
 - Normal noFetch has a fresh backend instance, no injection, no wait/Fetch on its original cohort, a two-second post-completion observation and a different recovery request. Owner rows are observations, not a universal zero-owner assertion. No GPU, C++ onflight, connector KV or exact 600-second lifetime is tested.
+
+The four variants that read TTL metrics retain the old 180-second cold-exporter readiness gate as an explicit `metrics_ready` stage, with recorded attempts and actuator/prometheus → prometheus fallback. Later event observations use the selected epoch-bound source; a failed readiness deadline cannot become a zero counter.

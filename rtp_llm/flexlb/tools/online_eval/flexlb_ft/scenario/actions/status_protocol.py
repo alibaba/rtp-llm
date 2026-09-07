@@ -478,7 +478,12 @@ def _frame(ctx, params, deadline):
     if "ttl" in params["include"]:
         from ...engine_ops import parse_prometheus_samples
 
-        _, body = _http(ctx, "metrics", "actuator/prometheus", deadline, text=True)
+        source_epoch, source_path = getattr(
+            ctx, "status_metrics_source", (ctx.env_epoch, "actuator/prometheus")
+        )
+        if source_epoch != ctx.env_epoch:
+            raise RuntimeError("metric source belongs to a different epoch")
+        _, body = _http(ctx, "metrics", source_path, deadline, text=True)
         counts = {"scheduler": 0.0, "prefill": 0.0, "decode": 0.0}
         for _, labels, value in parse_prometheus_samples(
             body, "flexlb_app_flexlb_inflight_ttl_expired"
@@ -554,6 +559,10 @@ def validate_check(params, plan):
     p.setdefault("aggregate", "last")
     if p["aggregate"] not in {"last", "max", "min", "all", "stable"}:
         raise ValueError(f"{plan.path}: invalid aggregation")
+    if p["metric"] == "fingerprint" and p["aggregate"] == "stable" and "baseline" in p:
+        raise ValueError(
+            f"{plan.path}: fingerprint stability cannot also compare a baseline; use aggregate all"
+        )
     if p["aggregate"] == "stable" or p["metric"] == "fingerprint":
         if p["op"] != "eq" or type(p["expected"]) is not bool:
             raise ValueError(f"{plan.path}: fingerprint/stability compares a boolean")
@@ -1142,4 +1151,69 @@ def execute_perf(ctx, params, deadline):
 
 HANDLERS.append(
     StageHandler("status_perf", validate_perf, execute_perf, {"snapshot": "snapshot"})
+)
+
+
+def validate_metrics_ready(params, plan):
+    p = _validate(params, plan, {"duration_s", "interval_s"})
+    p["duration_s"] = _number(p.get("duration_s", 180), plan, "duration_s", 1, 180)
+    p["interval_s"] = _number(p.get("interval_s", 2), plan, "interval_s", 0.1, 5)
+    return p
+
+
+def execute_metrics_ready(ctx, params, deadline):
+    """Explicit old cold-exporter gate, distinct from the later event assertions."""
+    start, epoch, env = ctx.clock(), ctx.env_epoch, ctx.env
+    end = start + params["duration_s"]
+    attempts = []
+    try:
+        while True:
+            deadline.check()
+            if ctx.env_epoch != epoch or ctx.env is not env:
+                raise RuntimeError("metrics readiness epoch changed")
+            for path in ("actuator/prometheus", "prometheus"):
+                attempt = {"path": path, "at": ctx.clock()}
+                attempts.append(attempt)
+                try:
+                    code, body = _http(
+                        ctx,
+                        "metrics",
+                        path,
+                        deadline,
+                        allowed=(200, 404, 503),
+                        text=True,
+                    )
+                    attempt["http_status"] = code
+                    if code == 200:
+                        ctx.status_metrics_source = (epoch, path)
+                        return _frozen(
+                            ctx,
+                            "metrics-ready",
+                            {"attempts": attempts, "path": path, "body": body},
+                        )
+                except (OSError, urllib.error.URLError) as error:
+                    attempt["error"] = f"{type(error).__name__}: {error}"
+                if ctx.clock() >= end:
+                    raise TimeoutError("Master metric endpoint did not become ready")
+            deadline.sleep(min(params["interval_s"], end - ctx.clock()))
+    except Exception as error:
+        _artifact(
+            ctx,
+            "metrics-not-ready",
+            {
+                "env_epoch": epoch,
+                "attempts": attempts,
+                "error": f"{type(error).__name__}: {error}",
+            },
+        )
+        raise
+
+
+HANDLERS.append(
+    StageHandler(
+        "status_metrics_ready",
+        validate_metrics_ready,
+        execute_metrics_ready,
+        {"snapshot": "snapshot"},
+    )
 )

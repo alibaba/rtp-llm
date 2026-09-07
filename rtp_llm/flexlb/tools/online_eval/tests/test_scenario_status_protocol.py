@@ -308,6 +308,38 @@ class StatusProtocolTest(unittest.TestCase):
             )
         )
 
+    def test_fingerprint_baseline_stability_is_rejected(self):
+        plan = PlanContext(
+            "test",
+            {"before": {"snapshot": "snapshot"}, "after": {"snapshot": "snapshot"}},
+        )
+        with self.assertRaises(ValueError):
+            status.validate_check(
+                {
+                    "snapshot": {"$ref": "stages.after.output.snapshot"},
+                    "baseline": {"$ref": "stages.before.output.snapshot"},
+                    "metric": "fingerprint",
+                    "aggregate": "stable",
+                    "op": "eq",
+                    "expected": True,
+                },
+                plan,
+            )
+
+    def test_metrics_readiness_records_fallback_and_pins_epoch(self):
+        p = status.validate_metrics_ready({"duration_s": 1}, self.plan)
+        with patch.object(
+            status, "_http", side_effect=[(404, "not ready"), (200, "metric 1\n")]
+        ):
+            result = status.execute_metrics_ready(self.ctx, p, self.deadline())
+        data = self.ctx.resource(result.output["snapshot"], "snapshot").to_dict()
+        self.assertEqual([404, 200], [a["http_status"] for a in data["attempts"]])
+        self.assertEqual((1, "prometheus"), self.ctx.status_metrics_source)
+        self.ctx.env_epoch = 2
+        with self.assertRaises(RuntimeError), patch.object(status, "_http") as http:
+            status._frame(self.ctx, {"include": ["ttl"]}, self.deadline())
+        http.assert_not_called()
+
     def test_stability_false_is_not_ignored_and_missing_owner_source_is_error(self):
         frames = [owner_frame(), owner_frame()]
         result = status._frozen(self.ctx, "test", {"frames": frames})
