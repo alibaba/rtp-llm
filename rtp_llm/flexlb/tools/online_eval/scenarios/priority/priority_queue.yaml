@@ -4,6 +4,7 @@ description: Concurrent priority queue ordering with explicit terminal and owner
 category: priority
 legacy_case_ids:
 - prio_same_level_fifo
+- prio_low_no_starvation
 profiles:
 - single-nonbatch
 environment:
@@ -24,80 +25,231 @@ variants:
 - id: same_level_fifo
   legacy_case_ids:
   - prio_same_level_fifo
-stages:
-- id: setup
-  action: setup
-  timeout_s: 180
-- id: fleet
-  action: priority_fleet
-- id: slow
-  action: engine_control
-  params:
-    operation: set_perf
-    targets:
-    - $ref: stages.fleet.output.prefill
-    perf:
-      prefill_fixed_ms: 3000
-- id: sync
-  action: balance_pause
-  params:
-    seconds: 1.5
-- id: wave
-  action: priority_start
-  timeout_s: 15
-  params:
-    gap_s: 0.15
-    requests:
-    - tag: peer0
-      priority: 50
-      input_len: 2048
-      output_len: 2
-    - tag: peer1
-      priority: 50
-      input_len: 2048
-      output_len: 2
-    - tag: peer2
-      priority: 50
-      input_len: 2048
-      output_len: 2
-    - tag: peer3
-      priority: 50
-      input_len: 2048
-      output_len: 2
-    - tag: peer4
-      priority: 50
-      input_len: 2048
-      output_len: 2
-    - tag: peer5
-      priority: 50
-      input_len: 2048
-      output_len: 2
-    - tag: peer6
-      priority: 50
-      input_len: 2048
-      output_len: 2
-- id: terminal
-  action: priority_wait
-  timeout_s: 360
-  params:
-    requests:
-      $ref: stages.wave.output.requests
-- id: fifo
-  action: priority_fifo
-  params:
-    requests:
-      $ref: stages.wave.output.requests
-- id: owner_clean
-  action: balance_clean
-  timeout_s: 30
-- id: restore
-  action: engine_control
-  params:
-    operation: set_perf
-    targets:
-    - $ref: stages.fleet.output.prefill
-    perf:
-      prefill_fixed_ms: 100
-- id: teardown
-  action: teardown
-  timeout_s: 120
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: fleet
+    action: priority_fleet
+  - id: slow
+    action: engine_control
+    params:
+      operation: set_perf
+      targets:
+      - $ref: stages.fleet.output.prefill
+      perf:
+        prefill_fixed_ms: 3000
+  - id: sync
+    action: balance_pause
+    params:
+      seconds: 1.5
+  - id: wave
+    action: priority_start
+    timeout_s: 15
+    params:
+      gap_s: 0.15
+      requests:
+      - tag: peer0
+        priority: 50
+        input_len: 2048
+        output_len: 2
+      - tag: peer1
+        priority: 50
+        input_len: 2048
+        output_len: 2
+      - tag: peer2
+        priority: 50
+        input_len: 2048
+        output_len: 2
+      - tag: peer3
+        priority: 50
+        input_len: 2048
+        output_len: 2
+      - tag: peer4
+        priority: 50
+        input_len: 2048
+        output_len: 2
+      - tag: peer5
+        priority: 50
+        input_len: 2048
+        output_len: 2
+      - tag: peer6
+        priority: 50
+        input_len: 2048
+        output_len: 2
+  - id: terminal
+    action: priority_wait
+    timeout_s: 360
+    params:
+      requests:
+        $ref: stages.wave.output.requests
+  - id: fifo
+    action: priority_fifo
+    params:
+      requests:
+        $ref: stages.wave.output.requests
+  - id: owner_clean
+    action: balance_clean
+    timeout_s: 30
+  - id: restore
+    action: engine_control
+    params:
+      operation: set_perf
+      targets:
+      - $ref: stages.fleet.output.prefill
+      perf:
+        prefill_fixed_ms: 100
+  - id: teardown
+    action: teardown
+    timeout_s: 120
+- id: low_no_starvation
+  legacy_case_ids:
+  - prio_low_no_starvation
+  environment_overrides:
+    config_overrides: {}
+  execution:
+    timeout_s: 2400
+    stage_timeout_s: 60
+    cleanup_timeout_s: 120
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: fleet
+    action: priority_fleet
+  - id: slow
+    action: engine_control
+    params:
+      operation: set_perf
+      targets:
+      - $ref: stages.fleet.output.prefill
+      perf:
+        prefill_fixed_ms: 50
+  - id: sync
+    action: balance_pause
+    params:
+      seconds: 1.5
+  - id: wave0
+    action: priority_start
+    timeout_s: 760
+    params:
+      serial_schedule: true
+      gap_s: 1.5
+      requests:
+      - tag: w0-0
+        priority: 30
+        input_len: 2048
+        output_len: 2
+      - tag: w0-1
+        priority: 30
+        input_len: 2048
+        output_len: 2
+      - tag: w0-2
+        priority: 30
+        input_len: 2048
+        output_len: 2
+      - tag: w0-3
+        priority: 30
+        input_len: 2048
+        output_len: 2
+      - tag: w0-4
+        priority: 70
+        input_len: 2048
+        output_len: 2
+      - tag: w0-5
+        priority: 70
+        input_len: 2048
+        output_len: 2
+      - tag: w0-6
+        priority: 70
+        input_len: 2048
+        output_len: 2
+      - tag: w0-7
+        priority: 70
+        input_len: 2048
+        output_len: 2
+  - id: terminal0
+    action: priority_wait
+    timeout_s: 300
+    params:
+      requests:
+        $ref: stages.wave0.output.requests
+  - id: clean0
+    action: balance_clean
+    timeout_s: 30
+  - id: quiet0
+    action: balance_pause
+    params:
+      seconds: 2
+  - id: wave1
+    action: priority_start
+    timeout_s: 760
+    params:
+      serial_schedule: true
+      gap_s: 1.5
+      requests:
+      - tag: w1-0
+        priority: 30
+        input_len: 2048
+        output_len: 2
+      - tag: w1-1
+        priority: 30
+        input_len: 2048
+        output_len: 2
+      - tag: w1-2
+        priority: 30
+        input_len: 2048
+        output_len: 2
+      - tag: w1-3
+        priority: 30
+        input_len: 2048
+        output_len: 2
+      - tag: w1-4
+        priority: 70
+        input_len: 2048
+        output_len: 2
+      - tag: w1-5
+        priority: 70
+        input_len: 2048
+        output_len: 2
+      - tag: w1-6
+        priority: 70
+        input_len: 2048
+        output_len: 2
+      - tag: w1-7
+        priority: 70
+        input_len: 2048
+        output_len: 2
+  - id: terminal1
+    action: priority_wait
+    timeout_s: 300
+    params:
+      requests:
+        $ref: stages.wave1.output.requests
+  - id: clean1
+    action: balance_clean
+    timeout_s: 30
+  - id: quiet1
+    action: balance_pause
+    params:
+      seconds: 2
+  - id: final_clean
+    action: balance_clean
+    timeout_s: 30
+  - id: completion
+    action: priority_completion
+    params:
+      requests:
+      - $ref: stages.wave0.output.requests
+      - $ref: stages.wave1.output.requests
+  - id: restore
+    action: engine_control
+    params:
+      operation: set_perf
+      targets:
+      - $ref: stages.fleet.output.prefill
+      perf:
+        prefill_fixed_ms: 100
+  - id: teardown
+    action: teardown
+    timeout_s: 120

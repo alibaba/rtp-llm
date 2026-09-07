@@ -1,8 +1,8 @@
 # Priority migration checkpoint
 
-Candidate only: 1 of 19 old priority cases. `priority_queue::same_level_fifo`
+Candidate only: 2 of 19 old priority cases. `priority_queue::same_level_fifo`
 maps `prio_same_level_fifo` on `single-nonbatch`. No legacy callable is invoked
-or removed. The remaining queue cases and priority_preemption are pending.
+or removed. Three remaining queue cases are pending here. The separate preemption module is owned by agent4.
 Default catalog registration is owned by the central framework task; this
 checkpoint's tests explicitly merge the exported HANDLERS.
 
@@ -42,3 +42,20 @@ Validation: formal load_scenarios -> compile_scenarios -> execute_instance with
 actual RequestBatch Schedule and consumer threads, external RPC/HTTP only faked.
 FIFO passes; inverted dispatch fails; missing lifecycle is ERROR. No real Java
 run, independent static signoff or old/new paired run is claimed at this point.
+
+## Low-priority completion
+
+`low_no_starvation` maps `prio_low_no_starvation` in the single-nonbatch
+shared-profile configuration: 1P4D, no explicit delivery/wait cap overrides.
+Fresh instance isolation replaces reuse of the runner shared environment.
+Prefill50ms -> sync1.5s -> two waves of eight (30x4 then70x4), each
+Schedule settled before the next 1.5s gap (including after the last request).
+Each wave drains all consumers, checks owners independently within30s, then
+waits2s (including the final wave). Final owner-clean30s precedes one P6
+completion check over all16 records; each priority must complete8/8.
+The latency split remains diagnostic; no PR8 deadline band is applied.
+Tests use real RequestBatch threads and fake RPCs; low-case sleeps are skipped
+in fixtures while exact configured gaps/quiet periods are separately asserted.
+An unfinished stream fails the final completion check. Missing records raise
+ERROR. Existing FIFO seven-request tests still run unchanged in scope; tests
+load only priority_queue.yaml so independent preemption definitions coexist.

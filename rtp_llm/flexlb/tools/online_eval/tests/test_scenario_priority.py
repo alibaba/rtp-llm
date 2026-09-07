@@ -5,6 +5,7 @@ import sys
 import tempfile
 import time
 import unittest
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace as NS
 from unittest.mock import patch
@@ -19,7 +20,7 @@ from test_scenario_backend import Ops
 
 
 class Backend:
-    def __init__(self, reverse=False, missing=False):
+    def __init__(self, reverse=False, missing=False, unfinished=False):
         self.ops = Ops(batch=False)
         self.ops.master_http_port = 1
         self.reverse, self.missing = reverse, missing
@@ -31,6 +32,17 @@ class Backend:
             return original(rid, **shape)
 
         self.ops.build_schedule_request = build
+        if unfinished:
+            self.ops.pb2_grpc.RpcServiceStub = lambda channel: NS(
+                GenerateStreamCall=lambda req, timeout: iter(
+                    [
+                        NS(
+                            HasField=lambda key: False,
+                            flatten_output=NS(finished=[False]),
+                        )
+                    ]
+                )
+            )
 
     def setup(self, ctx, environment, deadline):
         return NS(), self.ops
@@ -81,12 +93,14 @@ class Clean:
 
 
 class Tests(unittest.TestCase):
-    def run_program(self, **kwargs):
+    def run_program(self, variant="same_level_fifo", **kwargs):
         registry = handlers()
         registry.update({h.name: h for h in p.HANDLERS})
         plans = compile_scenarios(
-            load_scenarios(ROOT / "scenarios/priority"), handlers=registry
+            load_scenarios(ROOT / "scenarios/priority/priority_queue.yaml"),
+            handlers=registry,
         )
+        plans = [plan for plan in plans if plan["variant_id"] == variant]
         self.assertEqual(len(plans), 1)
         backend = Backend(**kwargs)
         with tempfile.TemporaryDirectory() as tmp, patch.object(
@@ -96,13 +110,19 @@ class Tests(unittest.TestCase):
         ), patch(
             "flexlb_ft.scenario.actions.balance.urllib.request.urlopen",
             return_value=Clean(),
+        ), (
+            patch.object(p.Deadline, "sleep", lambda self, seconds: None)
+            if variant != "same_level_fifo"
+            else nullcontext()
         ):
             result = execute_instance(
                 plans[0], backend, handlers=registry, artifact_dir=tmp
             )
-            records = json.loads(
-                next(Path(tmp).glob("priority-wave-*.json")).read_text()
-            )
+            records = [
+                row
+                for path in Path(tmp).glob("priority-wave-*.json")
+                for row in json.loads(path.read_text())
+            ]
         return result, records, backend
 
     def test_fifo_real_consumers(self):
@@ -133,6 +153,33 @@ class Tests(unittest.TestCase):
         self.assertNotIn("priority", value["requests"][0])
         with self.assertRaises(ValueError):
             p._wave_params(dict(requests=[dict(tag="x", priority=True)]), None)
+
+    def test_low_two_waves_real_consumers(self):
+        result, records, backend = self.run_program(variant="low_no_starvation")
+        self.assertEqual(result["status"], "PASS", result)
+        self.assertEqual(len(records), 16)
+        self.assertEqual(
+            [s["priority"] for s in backend.ops.last_shapes], ([30] * 4 + [70] * 4) * 2
+        )
+        self.assertTrue(all(r["consumer_completion_verified"] for r in records))
+        completion = next(s for s in result["stages"] if s["id"] == "completion")
+        self.assertEqual(completion["checks"][0]["actual"]["30"]["completed"], 8)
+
+    def test_low_unfinished_is_failure(self):
+        result, _, _ = self.run_program(variant="low_no_starvation", unfinished=True)
+        self.assertEqual(result["status"], "FAIL", result)
+
+    def test_low_original_choreography(self):
+        doc = load_scenarios(ROOT / "scenarios/priority/priority_queue.yaml")[0][1]
+        variant = next(v for v in doc["variants"] if v["id"] == "low_no_starvation")
+        self.assertEqual(variant["environment_overrides"]["config_overrides"], {})
+        stages = {s["id"]: s for s in variant["stages"]}
+        self.assertEqual(stages["slow"]["params"]["perf"]["prefill_fixed_ms"], 50)
+        for w in range(2):
+            self.assertTrue(stages[f"wave{w}"]["params"]["serial_schedule"])
+            self.assertEqual(stages[f"wave{w}"]["params"]["gap_s"], 1.5)
+            self.assertEqual(stages[f"clean{w}"]["timeout_s"], 30)
+            self.assertEqual(stages[f"quiet{w}"]["params"]["seconds"], 2)
 
 
 if __name__ == "__main__":
