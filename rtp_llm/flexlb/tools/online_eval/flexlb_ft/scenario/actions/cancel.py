@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import threading
+
 from ..contracts import CheckResult, StageHandler, StageOutput
 from . import status_protocol as status
 from .elastic import request_success
@@ -21,6 +23,50 @@ class CancelRequests(status.StatusRequests):
                     start(entry, end)
 
             child._start_consumer = gated
+            submit = child.submit
+
+            def submitted(deadline, original_submit=submit, owned=child):
+                try:
+                    return original_submit(deadline)
+                except Exception as error:
+                    # Cancelling an owned grpc.Future produces FutureCancelledError,
+                    # not a gRPC wire status. Keep this distinct from unknown ERROR.
+                    entries = owned.entries
+                    if len(entries) != 1:
+                        raise
+                    entry, record = entries[0], entries[0]["record"]
+                    call = entry["call"]
+                    cancelled = getattr(call, "cancelled", None)
+                    if (
+                        type(error).__name__ != "FutureCancelledError"
+                        or type(error).__module__.split(".")[0] != "grpc"
+                        or not callable(cancelled)
+                        or not cancelled()
+                        or record["cancel"]["requested_s"] is None
+                        or record.get("transport_terminal_s") is None
+                        or record.get("consumer_exit_s") is None
+                    ):
+                        raise
+                    owned.update(record, schedule={"status": "FUTURE_CANCELLED"})
+                    owned.persist()
+
+            child.submit = submitted
+
+    def begin(self, deadline):
+        if self.dispatched:
+            raise RuntimeError("cohort was already dispatched")
+        self.dispatched = True
+        for index in range(min(self.params["concurrency"], len(self.children))):
+            done = threading.Event()
+            thread = threading.Thread(
+                target=self._worker,
+                args=(deadline, done, index),
+                name="cancel-schedule",
+                daemon=True,
+            )
+            self.done.append(done)
+            self.threads.append(thread)
+            thread.start()
 
     def open_streams(self, deadline):
         self.join_submission(deadline)
@@ -120,6 +166,52 @@ def _cohort(ctx, reference):
 def execute_dispatch(ctx, params, deadline):
     _cohort(ctx, params["requests"]).dispatch(deadline)
     return StageOutput({"requests": ctx.resolve(params["requests"])})
+
+
+def execute_begin(ctx, params, deadline):
+    _cohort(ctx, params["requests"]).begin(deadline)
+    return StageOutput({"requests": ctx.resolve(params["requests"])})
+
+
+def validate_transport(params, plan):
+    p = status._validate(params, plan, {"requests", "phase"}, {"requests", "phase"})
+    plan.reference(p["requests"], "requests")
+    if p["phase"] not in {"schedule", "stream"}:
+        raise ValueError(f"{plan.path}: transport phase must be explicit")
+    return p
+
+
+def execute_transport(ctx, params, deadline):
+    cohort = _cohort(ctx, params["requests"])
+    receipts = []
+    for child in cohort.children:
+        for entry in child.entries:
+            deadline.check()
+            record = entry["record"]
+            if params["phase"] == "stream" and record["stream"]["started_s"] is None:
+                raise RuntimeError("stream-break trigger has no opened stream")
+            if (
+                params["phase"] == "schedule"
+                and record["stream"]["started_s"] is not None
+            ):
+                raise RuntimeError(
+                    "refusing to cancel a stream through a Schedule-drop action"
+                )
+            started = ctx.clock()
+            child.cancel("explicit_" + params["phase"] + "_transport_drop")
+            receipts.append(
+                {
+                    "request_id": str(record["wire_request_id"]),
+                    "owner": "client_transport",
+                    "phase": params["phase"],
+                    "started_s": started,
+                    "ended_s": ctx.clock(),
+                    "cancel": child.snapshot_records()[0]["cancel"],
+                }
+            )
+    if not receipts:
+        raise RuntimeError("transport-drop trigger has no issued request")
+    return status._frozen(ctx, "cancel-transport", {"receipts": receipts})
 
 
 def execute_open(ctx, params, deadline):
@@ -226,6 +318,7 @@ def execute_rpc(ctx, params, deadline):
 COHORT_METRICS = {
     "issued",
     "schedule_ok",
+    "schedule_cancelled",
     "first_output",
     "stream_ended",
     "business_finished",
@@ -234,11 +327,16 @@ COHORT_METRICS = {
     "cancel_rpc_count",
     "rpc_ok",
     "rpc_not_found",
+    "engine_clean_total",
 }
 METRICS = COHORT_METRICS | status.METRICS
 
 
 def metric(frame, name):
+    if name == "engine_clean_total":
+        return status.metric(frame, "engine_inflight") + status.metric(
+            frame, "engine_leaks"
+        )
     if name == "cancel_rpc_count":
         return sum(
             status._count(e["rpc_counts"]["cancel"]) for e in frame["mock"].values()
@@ -272,6 +370,11 @@ def metric(frame, name):
     predicates = {
         "issued": lambda r: r["issued_s"] is not None,
         "schedule_ok": lambda r: r["schedule"]["status"] == "OK",
+        "schedule_cancelled": lambda r: r["schedule"]["status"] == "FUTURE_CANCELLED"
+        and r["cancel"]["scope"] == "client_transport"
+        and r["cancel"]["acknowledged"] is True
+        and r["transport_terminal_s"] is not None
+        and r["consumer_exit_s"] is not None,
         "first_output": lambda r: r["stream"]["first_output_s"] is not None,
         "stream_ended": lambda r: r["stream"]["ended_s"] is not None
         and r.get("consumer_done") is True
@@ -286,12 +389,35 @@ def metric(frame, name):
 
 def validate_observe(params, plan):
     p = status._validate(
-        params, plan, {"requests", "duration_s", "interval_s", "until", "since"}
+        params,
+        plan,
+        {
+            "requests",
+            "duration_s",
+            "interval_s",
+            "until",
+            "since",
+            "baseline",
+            "include",
+        },
     )
     if "requests" in p:
         plan.reference(p["requests"], "requests")
-    if "since" in p:
-        plan.reference(p["since"], "snapshot")
+    for key in ("since", "baseline"):
+        if key in p:
+            plan.reference(p[key], "snapshot")
+    p.setdefault("include", ["inflight", "mock"])
+    if (
+        not isinstance(p["include"], list)
+        or not p["include"]
+        or any(
+            value not in {"inflight", "mock", "client_records"}
+            for value in p["include"]
+        )
+    ):
+        raise ValueError(f"{plan.path}: invalid cancellation observation sources")
+    if "client_records" in p["include"] and "requests" not in p:
+        raise ValueError(f"{plan.path}: client records require a cohort")
     p["duration_s"] = status._number(p.get("duration_s", 0), plan, "duration_s", 0, 180)
     p["interval_s"] = status._number(
         p.get("interval_s", 0.05), plan, "interval_s", 0.01, 5
@@ -318,6 +444,11 @@ def execute_observe(ctx, params, deadline):
         if source["env_epoch"] != epoch or not source.get("receipts"):
             raise RuntimeError("cancellation timing anchor is missing or stale")
         anchor = min(r["started_s"] for r in source["receipts"])
+    baseline = None
+    if "baseline" in params:
+        baseline = ctx.resource(params["baseline"], "snapshot").to_dict()
+        if baseline["env_epoch"] != epoch or not baseline.get("frames"):
+            raise RuntimeError("missing or stale observation baseline")
     end = anchor + params["duration_s"]
     frames, size = [], 0
     try:
@@ -327,8 +458,16 @@ def execute_observe(ctx, params, deadline):
                 raise RuntimeError("cancellation observation epoch changed")
             cohort = _cohort(ctx, params["requests"]) if "requests" in params else None
             if cohort:
+                if cohort.done and all(event.is_set() for event in cohort.done):
+                    cohort.join_submission(deadline)
+                    if cohort.errors:
+                        raise cohort.errors[0]
                 cohort.prove_ended(deadline)
-            frame = status._frame(ctx, {"include": ["inflight", "mock"]}, deadline)
+            frame = status._frame(
+                ctx,
+                {"include": [s for s in params["include"] if s != "client_records"]},
+                deadline,
+            )
             if cohort:
                 frame["records"] = cohort.snapshot_records()
             frame["capture_finished_s"] = ctx.clock()
@@ -337,9 +476,10 @@ def execute_observe(ctx, params, deadline):
                 raise RuntimeError("cancellation observation budget exceeded")
             frames.append(frame)
             until = params.get("until")
-            if until and status._compare(
-                metric(frame, until["metric"]), until["op"], until["value"]
-            ):
+            actual = metric(frame, until["metric"]) if until else None
+            if until and baseline:
+                actual -= metric(baseline["frames"][-1], until["metric"])
+            if until and status._compare(actual, until["op"], until["value"]):
                 break
             if ctx.clock() >= end:
                 break
@@ -456,3 +596,47 @@ HANDLERS = [
         checks=frozenset({"contract"}),
     ),
 ]
+
+HANDLERS += [
+    StageHandler(
+        "cancel_begin", validate_request_ref, execute_begin, {"requests": "requests"}
+    ),
+    StageHandler(
+        "cancel_transport",
+        validate_transport,
+        execute_transport,
+        {"snapshot": "snapshot"},
+    ),
+]
+
+
+def validate_group(params, plan):
+    p = status._validate(params, plan, {"cohorts"}, {"cohorts"})
+    if not isinstance(p["cohorts"], list) or not 1 <= len(p["cohorts"]) <= 16:
+        raise ValueError(f"{plan.path}: 1..16 prepared cohorts are required")
+    for reference in p["cohorts"]:
+        plan.reference(reference, "requests")
+    return p
+
+
+def execute_group(ctx, params, deadline):
+    cohorts = [_cohort(ctx, reference) for reference in params["cohorts"]]
+    if (
+        len({id(c) for c in cohorts}) != len(cohorts)
+        or sum(c.params["concurrency"] for c in cohorts) > 16
+    ):
+        raise RuntimeError("duplicate cohorts or aggregate concurrency exceeds 16")
+    for cohort in cohorts:
+        cohort.begin(deadline)
+    for cohort in cohorts:
+        cohort.join_submission(deadline)
+        if cohort.errors:
+            raise cohort.errors[0]
+    return StageOutput({"started": sum(len(c.children) for c in cohorts)})
+
+
+HANDLERS.append(
+    StageHandler(
+        "cancel_dispatch_group", validate_group, execute_group, {"started": "integer"}
+    )
+)

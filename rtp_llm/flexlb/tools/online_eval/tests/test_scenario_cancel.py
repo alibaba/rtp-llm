@@ -1,6 +1,7 @@
 """Cancellation primitives reuse real consumer threads with bounded fake RPCs."""
 
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -136,6 +137,96 @@ class CancelTest(unittest.TestCase):
         with self.assertRaises(KeyError):
             cancel.metric({"records": [record]}, "stream_ended")
 
+    def test_async_schedule_drop_proves_the_owned_future_exit(self):
+        stopped = threading.Event()
+        entered = threading.Event()
+        cancelled_error = type(
+            "FutureCancelledError", (Exception,), {"__module__": "grpc"}
+        )
+
+        def result(timeout):
+            entered.set()
+            if not stopped.wait(timeout):
+                raise TimeoutError("fake Schedule was never cancelled")
+            raise cancelled_error()
+
+        self.ctx.ops.future = lambda *args, **kwargs: NS(
+            result=result,
+            cancel=lambda: (stopped.set() or True),
+            cancelled=stopped.is_set,
+        )
+        handle, cohort = self.prepare(consume="manual")
+        cohort.begin(self.deadline())
+        self.assertTrue(entered.wait(1))
+        cancel.execute_transport(
+            self.ctx, {"requests": handle, "phase": "schedule"}, self.deadline()
+        )
+        cohort.join_submission(self.deadline())
+        self.assertFalse(cohort.errors)
+        self.assertEqual(0, self.ctx.ops.fetch_count)
+        self.assertEqual(
+            1,
+            cancel.metric({"records": cohort.snapshot_records()}, "schedule_cancelled"),
+        )
+        self.assertTrue(all(not t.is_alive() for t in cohort.threads))
+
+    def test_group_rejects_duplicate_before_any_submission(self):
+        handle, cohort = self.prepare()
+        with self.assertRaisesRegex(RuntimeError, "duplicate"):
+            cancel.execute_group(
+                self.ctx, {"cohorts": [handle, handle]}, self.deadline()
+            )
+        self.assertFalse(cohort.dispatched)
+
+    def test_client_only_window_does_not_query_http_or_mock(self):
+        handle, cohort = self.prepare(consume="manual")
+        cohort.dispatch(self.deadline())
+        with patch.object(cancel.status, "_http") as http, patch.object(
+            cancel.status, "_mock"
+        ) as mock:
+            result = cancel.execute_observe(
+                self.ctx,
+                {
+                    "requests": handle,
+                    "include": ["client_records"],
+                    "duration_s": 0,
+                    "interval_s": 0.01,
+                },
+                self.deadline(),
+            )
+        http.assert_not_called()
+        mock.assert_not_called()
+        frame = self.ctx.resource(result.output["snapshot"], "snapshot").to_dict()[
+            "frames"
+        ][-1]
+        self.assertEqual(0, cancel.metric(frame, "first_output"))
+        cohort.open_streams(self.deadline())
+        cohort.prove_ended(self.deadline())
+
+    def test_delta_until_waits_for_new_cancel_not_existing_total(self):
+        baseline = cancel.status._frozen(
+            self.ctx,
+            "baseline",
+            {"frames": [{"mock": {"p": {"rpc_counts": {"cancel": 7}}}}]},
+        )
+        frames = iter([{"mock": {"p": {"rpc_counts": {"cancel": n}}}} for n in [7, 8]])
+        with patch.object(
+            cancel.status, "_frame", side_effect=lambda *args: next(frames)
+        ):
+            result = cancel.execute_observe(
+                self.ctx,
+                {
+                    "baseline": baseline.output["snapshot"],
+                    "include": ["mock"],
+                    "duration_s": 0.2,
+                    "interval_s": 0.01,
+                    "until": {"metric": "cancel_rpc_count", "op": "ge", "value": 1},
+                },
+                self.deadline(),
+            )
+        source = self.ctx.resource(result.output["snapshot"], "snapshot").to_dict()
+        self.assertEqual(2, len(source["frames"]))
+
     def test_initial_lifecycle_programs_keep_batch_and_nonbatch_contracts_explicit(
         self,
     ):
@@ -147,7 +238,7 @@ class CancelTest(unittest.TestCase):
         registry = handlers()
         registry.update({h.name: h for h in cancel.HANDLERS})
         plans = compile_scenarios(load_scenarios(root), handlers=registry)
-        self.assertEqual(16, plan_counts(plans)["instances"])
+        self.assertEqual(38, plan_counts(plans)["instances"])
         for plan in plans:
             ids = {s["id"] for s in plan["stages"]}
             if plan["variant_id"] == "basic_batch":
