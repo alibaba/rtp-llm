@@ -140,15 +140,17 @@ acceptance; real Java mock acceptance of this new family is pending.
 
 ## Pending drain
 
-`pending_drain.yaml` implements the fourth logical family as two explicit programs:
-`legacy_terminal` (12 stages, 12 checks) and `zero_errors` (13 stages, 15 checks).
-The migration here covers **batch-window only**. The legacy single-batch
-profile is retained and remains unmigrated; an ID mapping does not imply all
-profiles have been migrated or accepted.
-Only the former maps to `elastic_remove_pending_drain`; the stronger variant has
-an empty legacy mapping so it cannot be counted as old-contract acceptance.
-Both use a fresh private 2P/2D fault environment, PRIORITY/FIXED_WINDOW/BATCH,
-two Prefill batch leases and omitted queue timeout (the Java default remains).
+`pending_drain.yaml` implements the fourth logical family with profile-scoped
+programs: batch-window `legacy_terminal` (12 stages,12 checks), its stronger
+unmapped `zero_errors` (13 stages,15 checks), and the separate single-batch
+`single_batch_terminal` (13 stages,13 checks). Both terminal variants map to
+`elastic_remove_pending_drain` in their own profile; no other elastic profile is
+expanded. All use a fresh private2P/2D fault environment, PRIORITY ordering, BATCH
+dispatch, two Prefill batch leases and omitted queue timeout. The decision is
+FIXED_WINDOW for batch-window and SINGLE for single-batch; it is not pinned by
+an override. See [the single-batch migration analysis](MIGRATION_PENDING_SINGLE_BATCH.md)
+for the complete configuration comparison, singleton batch-credit model,
+additional FetchResponse guard and remaining Java evidence gap.
 
 | Legacy contract | Actual stage/check or evidence |
 | --- | --- |
@@ -195,7 +197,8 @@ engine completion, the 40s terminal boundary, empty/cancelled terminals, recover
 19/20 versus 18/20, and missing owner counters. Independent static review passed
 at `33f9d1d1e0f7f64af5e9af2691e55435fd984034`, for the batch-window legacy
 terminal candidate only. Real Java acceptance remains pending; legacy code stays
-available, including its unmigrated single-batch profile.
+available. The separate single-batch candidate still requires independent
+static review and real Java acceptance.
 
 ## Steady recovery variant
 

@@ -337,7 +337,46 @@ def recovery(ctx, params, deadline):
     return bounded_batch(ctx, 20, deadline, min_success_rate=0.95)
 
 
+def batch_path_validate(params, plan):
+    from .elastic import _validate
+
+    p = _validate(params, plan, {"requests"}, {"requests"})
+    plan.reference(p["requests"], "requests")
+    return p
+
+
+def batch_path(ctx, params, deadline):
+    """FetchResponse follows enqueued_by_master; it does not prove EnqueueBatch ran."""
+    deadline.check()
+    rows = ctx.resource(params["requests"], "requests").snapshot_records()
+    admitted = [
+        r for r in rows if r["schedule"]["status"] == "OK" and r["prefill_addr"]
+    ]
+    methods = {str(r["wire_request_id"]): r["stream"]["method"] for r in admitted}
+    return StageOutput(
+        checks=[
+            CheckResult(
+                "batch_fetch",
+                (
+                    "PASS"
+                    if methods and all(v == "FetchResponse" for v in methods.values())
+                    else "FAIL"
+                ),
+                actual=methods,
+                expected="every admitted stream uses the batch FetchResponse path",
+            )
+        ]
+    )
+
+
 HANDLERS = [
+    StageHandler(
+        "elastic_pending_batch_path",
+        batch_path_validate,
+        batch_path,
+        {},
+        checks=frozenset({"batch_fetch"}),
+    ),
     StageHandler(
         "elastic_pending_remove",
         validate_empty,
