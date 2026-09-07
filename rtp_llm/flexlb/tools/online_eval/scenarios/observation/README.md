@@ -45,3 +45,22 @@ collection, not a no-Fetch lifecycle proof. The separate Python case
 Schedule-only request, nonempty Prefill accepted/completed evidence, all-engine
 FetchResponse counter delta zero, then recovery outside that window. It does
 not inject status suppression, shorten TTL, or infer C++/GPU/connector ownership.
+
+## Validation
+
+Against core commit `3e192c94d4`, both YAML profile instances compile. The local
+suite passes 24 core and 12 observation tests, including execution through the
+real compiler/runtime with a fake backend, frozen nonempty terminal cohorts,
+required-source ERROR under a finding, and optional-source check contracts.
+The eight debug-client tests also pass. This does not claim remote YAML-backend
+execution or full-suite registration; those are the framework owner's integration
+steps.
+
+The normal no-Fetch case passed on isolated lease `agent5_nofetch_20260907`, host
+111, using 2 Prefill and 4 Decode mock engines. Request `7301200001` was accepted
+via EnqueueBatch on `prefill-0`, then completed. Twelve samples preserved zero
+FetchResponse deltas for every engine; the final Master components were complete.
+Recovery request `7301200002` passed outside the no-Fetch window. Both owned Java
+processes exited, all ports 61020–61039 were bindable, and the lease was released.
+The case does not assert that every owner clears: it preserves the separate
+scheduler, queue, Prefill, Decode and engine rows for interpretation.

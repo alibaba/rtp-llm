@@ -219,6 +219,114 @@ class ObservationTest(unittest.TestCase):
             observer.thread.join(1)
         observer.stop(deadline())
 
+    def test_real_compiler_runtime_freezes_yaml_cohort(self):
+        from flexlb_ft.scenario.actions.observation import HANDLERS
+        from flexlb_ft.scenario.compiler import compile_scenarios
+        from flexlb_ft.scenario.loader import load_scenarios
+        from flexlb_ft.scenario.runtime import execute_instance
+
+        class Backend:
+            def setup(inner, ctx, environment, limit):
+                return self.ctx.env, object()
+
+            def start_requests(inner, ctx, shape, limit):
+                records = Records()
+                for rid in range(shape["count"]):
+                    records.records.append(
+                        dict(
+                            schema_version=1,
+                            wire_request_id=rid,
+                            attempt=1,
+                            env_epoch=ctx.env_epoch,
+                            issued_s=ctx.clock(),
+                            schedule={"started_s": ctx.clock()},
+                            transport_terminal_s=None,
+                        )
+                    )
+                return ctx.register_resource("requests", records)
+
+            def wait_requests(inner, ctx, records, limit):
+                for record in records.records:
+                    record["transport_terminal_s"] = ctx.clock()
+                return {"completed": True, "error_count": 0}
+
+            def teardown(inner, ctx, limit):
+                pass
+
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parents[1] / "scenarios" / "observation"
+        handlers = {h.name: h for h in HANDLERS}
+        plans = compile_scenarios(load_scenarios(root), handlers=handlers)
+        self.assertEqual(2, len(plans))
+
+        def read(url, limit):
+            return (
+                {"engines": [{"name": "p1"}]}
+                if url.endswith("snapshot")
+                else {"p1": {}}
+            )
+
+        with patch(
+            "flexlb_ft.scenario.actions.observation._read_json", side_effect=read
+        ):
+            result = execute_instance(
+                plans[0], Backend(), handlers=handlers, artifact_dir=self.temp.name
+            )
+        self.assertEqual("PASS", result["status"], result)
+        frozen = next(row for row in result["stages"] if row["id"] == "frozen")
+        import json
+
+        data = json.loads(Path(frozen["artifacts"][0]).read_text())
+        self.assertEqual(2, len(data["cohort_records"]))
+        self.assertTrue(all(row["status"] == "PASS" for row in result["cleanup"]))
+
+    def test_core_optional_source_and_required_finding_semantics(self):
+        from flexlb_ft.scenario.actions.observation import HANDLERS
+        from flexlb_ft.scenario.compiler import compile_scenarios
+        from flexlb_ft.scenario.runtime import execute_instance
+
+        class Backend:
+            def setup(inner, ctx, environment, limit):
+                return self.ctx.env, object()
+
+            def teardown(inner, ctx, limit):
+                pass
+
+        handlers = {h.name: h for h in HANDLERS}
+        for required in (True, False):
+            doc = dict(
+                schema_version=1,
+                id="coverage",
+                description="Source availability",
+                category="status",
+                profiles=["batch-window"],
+                environment={},
+                stages=[
+                    {"id": "setup", "action": "setup"},
+                    {
+                        "id": "capture",
+                        "action": "snapshot",
+                        "params": {
+                            "sources": ["engine_snapshot"],
+                            "required": required,
+                        },
+                    },
+                ],
+            )
+            if required:
+                doc["findings"] = ["capture.sources"]
+            plan = compile_scenarios([("coverage.json", doc)], handlers=handlers)[0]
+            with patch(
+                "flexlb_ft.scenario.actions.observation._read_json",
+                side_effect=OSError("missing"),
+            ):
+                result = execute_instance(
+                    plan, Backend(), handlers=handlers, artifact_dir=self.temp.name
+                )
+            self.assertEqual("ERROR" if required else "PASS", result["status"], result)
+            self.assertEqual([], result["finding_confirmed"])
+
     def test_expired_deadline_prevents_io(self):
         source = Sources(
             self.ctx, validate_snapshot({"sources": ["engine_snapshot"]}, Plan())
