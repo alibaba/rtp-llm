@@ -41,3 +41,21 @@ py_test(
     tags = ["H20"],
     exec_properties = {'gpu': 'H20', 'gpu_count': '1'},
 )
+
+py_test(
+    name = "silu_mul_masked_packed_sm120_test",
+    srcs = ["silu_mul_masked_packed_sm120_test.py"],
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+    env = {"GPU_COUNT": "1"},
+    tags = ["RTX_5000_PRO"],
+    exec_properties = {"gpu": "RTX_5000_PRO", "gpu_count": "1"},
+)
+
+py_test(
+    name = "silu_mul_masked_packed_sm120_benchmark",
+    srcs = ["silu_mul_masked_packed_sm120_benchmark.py"],
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+    env = {"GPU_COUNT": "1"},
+    tags = ["manual", "open_skip", "RTX_5000_PRO"],
+    exec_properties = {"gpu": "RTX_5000_PRO", "gpu_count": "1"},
+)

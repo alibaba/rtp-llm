@@ -41,6 +41,12 @@ from rtp_llm.models_py.triton_kernels.common.activation import (
     silu_and_mul_masked_post_quant_packed_fwd,
     silu_mul_masked_fp8_post_quant_fwd,
 )
+from rtp_llm.models_py.triton_kernels.common.silu_mul_masked_packed_sm120 import (
+    create_packed_scale_tensor as create_sm120_packed_scale_tensor,
+)
+from rtp_llm.models_py.triton_kernels.common.silu_mul_masked_packed_sm120 import (
+    silu_and_mul_masked_post_quant_packed_fwd as silu_mul_masked_packed_sm120,
+)
 from rtp_llm.models_py.triton_kernels.moe.ep_kernels import (
     ep_gather,
     ep_scatter,
@@ -550,10 +556,26 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
                 dtype=torch.float8_e4m3fn,
             )
 
-            # SM100 (compute capability 10.x) uses fused packed kernel for better performance
-            # when UE8M0 scale format is enabled
+            # Emit packed UE8M0 scales directly on supported Blackwell paths.
             sm_major = torch.cuda.get_device_capability()[0]
-            if (
+            if sm_major == 12 and is_deep_gemm_e8m0_used():
+                # SM120 emits complete packed scales, including partial packs
+                # (e.g. Qwen3 H=768) and all masked/TMA padding rows.
+                down_input_scale = create_sm120_packed_scale_tensor(
+                    expert_num=self.num_experts_per_partition,
+                    token_num_padded=alignment,
+                    hidden_dim=self.N,
+                    quant_group_size=self.DEEPGEMM_BLOCK_SHAPE[0],
+                    device=down_input.device,
+                )
+                silu_mul_masked_packed_sm120(
+                    upgate_output,
+                    down_input,
+                    down_input_scale,
+                    self.DEEPGEMM_BLOCK_SHAPE[0],
+                    num_recv_tokens_per_expert,
+                )
+            elif (
                 sm_major == 10
                 and is_deep_gemm_e8m0_used()
                 and self.N % (self.DEEPGEMM_BLOCK_SHAPE[0] * 2 * 4) == 0
