@@ -24,8 +24,11 @@ The artifact retains partial/error status for any dependent checker.
 `observe` supports `window` with `duration_s`, `start` with `max_duration_s`, and
 `stop` with an observation reference. Sampling interval defaults to 0.5 seconds,
 with bounds of 10,000 samples and 32 MiB, including a final dataset size check.
-The registered cleanup cancels and joins only its own thread. A live thread at
-the cleanup deadline is TIMEOUT, not successful cleanup. Repeated stop returns
+The registered cleanup cancels and joins only its own thread. The worker writes
+`worker_exit_mono` and sets its independent completion event in `finally`, after
+its last sample or error write. Stop requires that event and exit record before
+freezing, even if `is_alive()` reports false. A missing completion signal at the
+cleanup deadline is TIMEOUT, not successful cleanup. Repeated stop returns
 the same handle, frozen dataset and artifact. After an environment epoch change,
 stop joins the old observer but never samples the replacement environment.
 
