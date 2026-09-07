@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -20,6 +21,8 @@ enum class TransferStatus {
     DISK_IO_ERROR,
     RESOURCE_EXHAUSTED,
 };
+
+using TransferQueueWaitReporter = std::function<void(Tier, Tier, int64_t)>;
 
 struct DeviceHostCopyOptions {
     size_t staged_sm_min_tile_count{16};

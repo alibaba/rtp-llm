@@ -147,6 +147,11 @@ size_t BlockTreeTaskPool::backgroundLimit() const {
     return queue_size_ > kLoadReservedSlots ? queue_size_ - kLoadReservedSlots : queue_size_;
 }
 
+BlockTreeQueueSizes BlockTreeTaskPool::queueSizes() const {
+    std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+    return {load_queue_.size(), background_queue_.size(), completion_queue_.size()};
+}
+
 size_t BlockTreeTaskPool::normalQueueSizeLocked() const {
     return load_queue_.size() + background_queue_.size();
 }

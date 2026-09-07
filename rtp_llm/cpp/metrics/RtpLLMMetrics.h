@@ -992,7 +992,6 @@ private:
     kmonitor::MutableMetric* callback_queue_waiting_tasks_metric        = nullptr;
     kmonitor::MutableMetric* callback_queue_wait_latency_us_metric      = nullptr;
     kmonitor::MutableMetric* task_queue_backlog_metric                  = nullptr;
-    kmonitor::MutableMetric* normal_task_queue_backlog_metric           = nullptr;
     kmonitor::MutableMetric* transfer_in_flight_metric                  = nullptr;
     kmonitor::MutableMetric* transfer_bytes_metric                      = nullptr;
 

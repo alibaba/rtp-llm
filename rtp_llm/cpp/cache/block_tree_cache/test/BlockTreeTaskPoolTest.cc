@@ -206,6 +206,10 @@ TEST(BlockTreeTaskPoolTest, ShutdownClearsPopulatedQueuesAndReclaimsPending) {
     ASSERT_TRUE(pool.submit(BlockTreeTaskClass::BACKGROUND, [&background_ran] { background_ran.store(true); }));
     ASSERT_TRUE(pool.submitCompletion([&completion_ran] { completion_ran.store(true); }));
     EXPECT_EQ(pool.pending_tasks_.load(), 4);
+    const auto queue_sizes = pool.queueSizes();
+    EXPECT_EQ(queue_sizes.load, 1);
+    EXPECT_EQ(queue_sizes.background, 1);
+    EXPECT_EQ(queue_sizes.completion, 1);
 
     // shutdown() clears the queues under the lock, then joins the worker, so run
     // it on another thread and release the worker only after the clear is

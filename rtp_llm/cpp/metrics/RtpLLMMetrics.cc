@@ -554,7 +554,6 @@ bool RtpLLMCacheTransferMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_GAUGE_MUTABLE_METRIC(callback_queue_wait_latency_us_metric,
                                   "rtp_llm_kv_cache_callback_queue_wait_latency_us");
     REGISTER_GAUGE_MUTABLE_METRIC(task_queue_backlog_metric, "rtp_llm_kv_cache_task_queue_backlog");
-    REGISTER_GAUGE_MUTABLE_METRIC(normal_task_queue_backlog_metric, "rtp_llm_kv_cache_normal_task_queue_backlog");
     REGISTER_GAUGE_MUTABLE_METRIC(transfer_in_flight_metric, "rtp_llm_kv_cache_transfer_in_flight");
     REGISTER_QPS_MUTABLE_METRIC(transfer_bytes_metric, "rtp_llm_kv_cache_transfer_bytes");
     return true;
@@ -572,8 +571,6 @@ void RtpLLMCacheTransferMetrics::report(const kmonitor::MetricsTags*         tag
         report_backlog("load", collector->load_queue_backlog);
         report_backlog("background", collector->background_queue_backlog);
         report_backlog("completion", collector->completion_queue_backlog);
-        normal_task_queue_backlog_metric->Report(&pool_tags,
-                                                 collector->load_queue_backlog + collector->background_queue_backlog);
     }
     if (collector->report_task_queue || collector->report_callback_queue) {
         kmonitor::MetricsTags queue_tags("pool_type", collector->pool_type);
