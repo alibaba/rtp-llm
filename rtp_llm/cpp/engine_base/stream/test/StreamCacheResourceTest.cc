@@ -2,6 +2,9 @@
 #include "gtest/gtest.h"
 #include "gmock/gmock.h"
 
+#include "kmonitor/client/MetricsReporter.h"
+#include "kmonitor/client/core/MetricsData.h"
+
 #define private public
 #define protected public
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
@@ -1069,7 +1072,20 @@ TEST_F(StreamCacheResourceTest, testPrefillAllocatorLoadFailureKeepsDeviceReadyR
 }
 
 TEST_F(StreamCacheResourceTest, testPrefillMaterializationShortfallRearmsAllocatorLoad) {
-    auto  backend  = prepareStorageBackendResource(/*block_matches=*/false, /*seed_host=*/false, RoleType::PREFILL);
+    auto backend = prepareStorageBackendResource(/*block_matches=*/false, /*seed_host=*/false, RoleType::PREFILL);
+    kmonitor::MetricsTags tags;
+    auto                  reporter = std::make_shared<kmonitor::MetricsReporter>("", "", tags);
+    stream_->setMetricsReporter(reporter);
+    auto* metrics          = reporter->getMetricsGroup<RtpLLMCacheOperationMetrics>();
+    auto  expect_retry_qps = [&](double expected) {
+        auto* series = metrics->malloc_retry_qps_metric->DeclareMetric(&tags);
+        ASSERT_NE(series, nullptr);
+        kmonitor::MetricsRecord record(nullptr, nullptr, 0);
+        series->Snapshot(&record, 1000);
+        EXPECT_TRUE(metrics->malloc_retry_qps_metric->UndeclareMetric(series));
+        ASSERT_EQ(record.Values().size(), 1u);
+        EXPECT_DOUBLE_EQ(std::stod(record.Values().front()->Value()), expected);
+    };
     auto& resource = stream_->streamCacheResource();
     ASSERT_EQ(resource.resourceContext().role_type, RoleType::PREFILL);
 
@@ -1092,6 +1108,9 @@ TEST_F(StreamCacheResourceTest, testPrefillMaterializationShortfallRearmsAllocat
     stream_->reportEvent(StreamEvents::LoadInitiated);
     stream_->generate_status_->status = StreamState::LOADING_CACHE;
     resource.malloc_failed_times_     = 9;
+    EXPECT_FALSE(resource.loadCacheDone());
+    EXPECT_FALSE(resource.loadCacheDone());
+    expect_retry_qps(0);
     context->startBackendMatch();
     context->waitDone();
     ASSERT_FALSE(context->success());
@@ -1104,6 +1123,10 @@ TEST_F(StreamCacheResourceTest, testPrefillMaterializationShortfallRearmsAllocat
     EXPECT_FALSE(stream_->hasEvent(StreamEvents::LoadInitiated));
     EXPECT_FALSE(stream_->hasError());
     EXPECT_EQ(resource.mallocFailedTimes(), 10);
+    expect_retry_qps(1);
+    EXPECT_TRUE(resource.loadCacheDone());
+    EXPECT_TRUE(resource.loadCacheDone());
+    expect_retry_qps(0);
     EXPECT_EQ(commits, 0u);
     EXPECT_EQ(aborts, 1u);
 
@@ -1122,6 +1145,7 @@ TEST_F(StreamCacheResourceTest, testPrefillMaterializationShortfallRearmsAllocat
 
     EXPECT_EQ(stream_->moveToNext(), StreamState::RUNNING);
     EXPECT_TRUE(stream_->hasEvent(StreamEvents::LoadInitiated));
+    expect_retry_qps(0);
     EXPECT_EQ(resource.curBlocksNum(), 1);
     coordinator->shutdown();
 }
