@@ -1,7 +1,7 @@
 # Priority preemption migration
 
 Owner: agent4. Source baseline: `295af797bd7ed3a842c9cad42b5722c64cd24c9a`.
-This checkpoint implements nine complete candidate programs out of fourteen old
+This checkpoint implements ten complete candidate programs out of fourteen old
 contracts. No old case is called or deleted. Independent review, default catalog
 integration and actual Java execution remain pending.
 
@@ -55,9 +55,8 @@ observed order and terminal outcomes are saved as artifacts.
   restores its original blocking dependency. An explicit zero submission gap
   avoids inserting a .15s pause after the standalone placeholder.
 
-## Pending contracts (5)
+## Pending contracts (4)
 
-- atpm_observability_integrity
 - atpm_preempt_prefill_queued_live
 - atpm_preempt_decode_reserved_live
 - atpm_preempt_cancel_not_found
