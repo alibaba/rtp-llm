@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstring>
@@ -161,6 +162,32 @@ TEST_F(PerRankBlockTransferEngineHostDiskTest, SubmitHostToDiskRoundTrip) {
 
     for (size_t i = 0; i < host_block_size_; ++i)
         EXPECT_EQ(host_data[i], static_cast<uint8_t>(i & 0xFF)) << "byte " << i;
+
+    releasePoolBlock(*host_pool_, host_block);
+    releasePoolBlock(*disk_pool_, disk_block);
+}
+
+TEST_F(PerRankBlockTransferEngineHostDiskTest, ReportsSuccessfulQueueWaitThroughCallback) {
+    std::atomic<size_t>  report_count{0};
+    std::atomic<Tier>    reported_source{Tier::NONE};
+    std::atomic<Tier>    reported_target{Tier::NONE};
+    std::atomic<int64_t> reported_latency_us{-1};
+    per_rank_transfer_engine_->setQueueWaitReporter([&](Tier source, Tier target, int64_t latency_us) {
+        reported_source.store(source);
+        reported_target.store(target);
+        reported_latency_us.store(latency_us);
+        report_count.fetch_add(1);
+    });
+
+    const BlockIdxType host_block = poolMalloc(*host_pool_);
+    const BlockIdxType disk_block = poolMalloc(*disk_pool_);
+    const auto         descriptor = makeDescriptor(Tier::HOST, Tier::DISK, {}, host_block, disk_block);
+
+    ASSERT_TRUE(submitSucceeded(per_rank_transfer_engine_, descriptor));
+    EXPECT_EQ(report_count.load(), 1);
+    EXPECT_EQ(reported_source.load(), Tier::HOST);
+    EXPECT_EQ(reported_target.load(), Tier::DISK);
+    EXPECT_GE(reported_latency_us.load(), 0);
 
     releasePoolBlock(*host_pool_, host_block);
     releasePoolBlock(*disk_pool_, disk_block);

@@ -17,11 +17,15 @@ class LockFreeThreadPool;
 
 namespace rtp_llm {
 
-class BlockTreeCacheMetricsReporter;
-
 enum class BlockTreeTaskClass {
     LOAD,
     BACKGROUND,
+};
+
+struct BlockTreeQueueSizes {
+    size_t load{0};
+    size_t background{0};
+    size_t completion{0};
 };
 
 class BlockTreeTaskPool {
@@ -58,9 +62,9 @@ public:
     void waitForIdle();
     void shutdown();
 
-private:
-    friend class BlockTreeCacheMetricsReporter;
+    BlockTreeQueueSizes queueSizes() const;
 
+private:
     static constexpr size_t kMaxLoadBurst = 4;
 
     struct QueuedTask {
@@ -81,7 +85,7 @@ private:
     const std::string thread_name_;
 
     std::shared_ptr<autil::LockFreeThreadPool> thread_pool_;
-    std::mutex                                 lifecycle_mutex_;
+    mutable std::mutex                         lifecycle_mutex_;
     std::condition_variable                    queue_cv_;
     std::deque<QueuedTask>                     load_queue_;
     std::deque<QueuedTask>                     background_queue_;
