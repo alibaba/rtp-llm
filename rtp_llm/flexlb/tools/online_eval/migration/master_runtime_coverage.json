@@ -784,5 +784,1352 @@
       }
     ],
     "freeze_observation_scope": "All four original freeze runs fail discovered_continuity with unchanged PID. Scheduler BW11->0, SN10->0, SB25->0; WN6->5 passes scheduler continuity. Do not describe every freeze as scheduler zero."
-  }
+  },
+  "revision_runs": [
+    {
+      "source_commit": "45e20061610c1c3950710d7d931eec885e849726",
+      "evidence_root": "/tmp/agent1-yaml-evidence/master-corrected45",
+      "independent_acceptance": "verified_fixed_source_run_by_agent3",
+      "scope": "Recorded execution outcomes, not full-source or paired replacement acceptance. Earlier runs retained.",
+      "status_counts": {
+        "TIMEOUT": 4,
+        "PASS": 2,
+        "FAIL": 3,
+        "ERROR": 1
+      },
+      "observed_checks": 63,
+      "cleanup_count": 48,
+      "summary": {
+        "source_sha": "45e20061610c1c3950710d7d931eec885e849726",
+        "groups": [
+          {
+            "profile": "batch-window",
+            "counts": {
+              "TIMEOUT": 1,
+              "PASS": 1,
+              "ERROR": 1,
+              "FAIL": 1
+            },
+            "checks": 27,
+            "cleanup_count": 18,
+            "cleanup_all_pass": true,
+            "instances": [
+              {
+                "id": "client_fallback_failback::wraparound::batch-window",
+                "status": "TIMEOUT",
+                "duration_ms": 82626
+              },
+              {
+                "id": "master_lifecycle::kill_dual_b_to_a::batch-window",
+                "status": "PASS",
+                "duration_ms": 109985
+              },
+              {
+                "id": "master_dispatch_quota::single_prefill_ttl::batch-window",
+                "status": "ERROR",
+                "duration_ms": 55189
+              },
+              {
+                "id": "master_lifecycle::freeze_short_long::batch-window",
+                "status": "FAIL",
+                "duration_ms": 120246
+              }
+            ],
+            "parent_rc": 1
+          },
+          {
+            "profile": "single-nonbatch",
+            "counts": {
+              "FAIL": 1,
+              "TIMEOUT": 1
+            },
+            "checks": 10,
+            "cleanup_count": 10,
+            "cleanup_all_pass": true,
+            "instances": [
+              {
+                "id": "master_lifecycle::freeze_short_long::single-nonbatch",
+                "status": "FAIL",
+                "duration_ms": 118704
+              },
+              {
+                "id": "client_fallback_failback::wraparound::single-nonbatch",
+                "status": "TIMEOUT",
+                "duration_ms": 81290
+              }
+            ],
+            "parent_rc": 1
+          },
+          {
+            "profile": "single-batch",
+            "counts": {
+              "PASS": 1,
+              "TIMEOUT": 1
+            },
+            "checks": 16,
+            "cleanup_count": 10,
+            "cleanup_all_pass": true,
+            "instances": [
+              {
+                "id": "master_lifecycle::freeze_short_long::single-batch",
+                "status": "PASS",
+                "duration_ms": 179989
+              },
+              {
+                "id": "client_fallback_failback::wraparound::single-batch",
+                "status": "TIMEOUT",
+                "duration_ms": 82927
+              }
+            ],
+            "parent_rc": 1
+          },
+          {
+            "profile": "window-nonbatch",
+            "counts": {
+              "FAIL": 1,
+              "TIMEOUT": 1
+            },
+            "checks": 10,
+            "cleanup_count": 10,
+            "cleanup_all_pass": true,
+            "instances": [
+              {
+                "id": "master_lifecycle::freeze_short_long::window-nonbatch",
+                "status": "FAIL",
+                "duration_ms": 119829
+              },
+              {
+                "id": "client_fallback_failback::wraparound::window-nonbatch",
+                "status": "TIMEOUT",
+                "duration_ms": 81833
+              }
+            ],
+            "parent_rc": 1
+          }
+        ]
+      },
+      "instances": [
+        {
+          "id": "client_fallback_failback::wraparound::batch-window",
+          "status": "TIMEOUT",
+          "duration_ms": 82626,
+          "error": "StageTimeout: stage wall-clock deadline expired",
+          "result_evidence": "/tmp/agent1-yaml-evidence/master-corrected45/batch-window/lane0/part0-yaml/instances/instance-2a4bd9e058561f63527a4c7de9f11bd362176f9d292a9171ed2ca124e943df77/result.json",
+          "result_sha256": "2023ea9fe9f159820f39bb52835ee0346ae9decd43f2f4326ca5652060433e3d",
+          "observed_check_count": 3,
+          "failure_stages": [
+            {
+              "id": "clean_a",
+              "status": "TIMEOUT",
+              "error": "StageTimeout: stage wall-clock deadline expired"
+            },
+            {
+              "id": "post_clean",
+              "status": "BLOCKED",
+              "error": null
+            },
+            {
+              "id": "finish",
+              "status": "BLOCKED",
+              "error": null
+            },
+            {
+              "id": "switch",
+              "status": "BLOCKED",
+              "error": null
+            },
+            {
+              "id": "straddle",
+              "status": "BLOCKED",
+              "error": null
+            },
+            {
+              "id": "after",
+              "status": "BLOCKED",
+              "error": null
+            },
+            {
+              "id": "retry_seen",
+              "status": "BLOCKED",
+              "error": null
+            },
+            {
+              "id": "switch_to_a",
+              "status": "BLOCKED",
+              "error": null
+            },
+            {
+              "id": "switch_errors",
+              "status": "BLOCKED",
+              "error": null
+            },
+            {
+              "id": "no_business_storm",
+              "status": "BLOCKED",
+              "error": null
+            },
+            {
+              "id": "after_a",
+              "status": "BLOCKED",
+              "error": null
+            },
+            {
+              "id": "after_success",
+              "status": "BLOCKED",
+              "error": null
+            },
+            {
+              "id": "unique_requests",
+              "status": "BLOCKED",
+              "error": null
+            },
+            {
+              "id": "cleanup",
+              "status": "BLOCKED",
+              "error": null
+            }
+          ],
+          "cleanup": [
+            {
+              "id": "resource_7",
+              "status": "PASS",
+              "error": null,
+              "duration_ms": 0
+            },
+            {
+              "id": "resource_5",
+              "status": "PASS",
+              "error": null,
+              "duration_ms": 1
+            },
+            {
+              "id": "master_batch_channels",
+              "status": "PASS",
+              "error": null,
+              "duration_ms": 0
+            },
+            {
+              "id": "resource_3",
+              "status": "PASS",
+              "error": null,
+              "duration_ms": 0
+            },
+            {
+              "id": "resource_2",
+              "status": "PASS",
+              "error": null,
+              "duration_ms": 364
+            },
+            {
+              "id": "environment",
+              "status": "PASS",
+              "error": null,
+              "duration_ms": 2339
+            }
+          ]
+        },
+        {
+          "id": "master_lifecycle::kill_dual_b_to_a::batch-window",
+          "status": "PASS",
+          "duration_ms": 109985,
+          "error": null,
+          "result_evidence": "/tmp/agent1-yaml-evidence/master-corrected45/batch-window/lane0/part0-yaml/instances/instance-90ef592edf09c5dcdbbb6dd6143cb34243727aafa8f61491271add8ea49e81f6/result.json",
+          "result_sha256": "544252ddda33a3dfcee332b1f7345aa7eb3ce76e5be4dae7fc64769d41322010",
+          "observed_check_count": 13,
+          "failure_stages": [],
+          "cleanup": [
+            {
+              "id": "resource_6",
+              "status": "PASS",
+              "error": null,
+              "duration_ms": 1
+            },
+            {
+              "id": "master_batch_channels",
+              "status": "PASS",
+              "error": null,
+              "duration_ms": 0
+            },
+            {
+              "id": "resource_3",
+              "status": "PASS",
+              "error": null,
+              "duration_ms": 0
+            },
+            {
+              "id": "resource_2",
+              "status": "PASS",
+              "error": null,
+              "duration_ms": 0
+            },
+            {
+              "id": "environment",
+              "status": "PASS",
+              "error": null,
+              "duration_ms": 2591
+            }
+          ]
+        },
+        {
+          "id": "master_lifecycle::freeze_short_long::batch-window",
+          "status": "FAIL",
+          "duration_ms": 120246,
+          "error": null,
+          "result_evidence": "/tmp/agent1-yaml-evidence/master-corrected45/batch-window/lane0/part0-yaml/instances/instance-bc329be9cb4ace28b0a25a7a6d12b86332d1d64572a508911439f43d286dfcf7/result.json",
+          "result_sha256": "4bd067b43205414503fba26b7d92e053b77c91d8b05600048021d782cdff3d3b",
+          "observed_check_count": 7,
+          "failure_stages": [
+            {
+              "id": "retry_seen",
+              "status": "FAIL",
+              "error": null
+            },
+            {
+              "id": "switch_to_a",
+              "status": "BLOCKED",
+              "error": null
+            },
+            {
+              "id": "visible_terminal",
+              "status": "BLOCKED",
+              "error": null
+            },
+            {
+              "id": "deadline_visible",
+              "status": "BLOCKED",
+              "error": null
+            },
+            {
+              "id": "post_success",
+              "status": "BLOCKED",
+              "error": null
+            },
+            {
+              "id": "post_on_a",
+              "status": "BLOCKED",
+              "error": null
+            },
+            {
+              "id": "unique_requests",
+              "status": "BLOCKED",
+              "error": null
+            },
+            {
+              "id": "cleanup",
+              "status": "BLOCKED",
+              "error": null
+            }
+          ],
+          "cleanup": [
+            {
+              "id": "resource_5",
+              "status": "PASS",
+              "error": null,
+              "duration_ms": 0
+            },
+            {
+              "id": "resource_3",
+              "status": "PASS",
+              "error": null,
+              "duration_ms": 0
+            },
+            {
+              "id": "resource_2",
+              "status": "PASS",
+              "error": null,
+              "duration_ms": 0
+            },
+            {
+              "id": "environment",
+              "status": "PASS",
+              "error": null,
+              "duration_ms": 2841
+            }
+          ]
+        },
+        {
+          "id": "master_dispatch_quota::single_prefill_ttl::batch-window",
+          "status": "ERROR",
+          "duration_ms": 55189,
+          "error": "ValueError: missing endpoint ledger observations",
+          "result_evidence": "/tmp/agent1-yaml-evidence/master-corrected45/batch-window/lane0/part0-yaml/instances/instance-c7b904908ccf0223ae796394cdc242c7ec9191e255682377a611cd00c68491f6/result.json",
+          "result_sha256": "4ff26d65e20715de93d65ab9d29d83b090621dfc4fac2b41511717f9e1df976e",
+          "observed_check_count": 4,
+          "failure_stages": [
+            {
+              "id": "ready",
+              "status": "ERROR",
+              "error": "ValueError: missing endpoint ledger observations"
+            },
+            {
+              "id": "settle",
+              "status": "BLOCKED",
+              "error": null
+            },
+            {
+              "id": "recovery",
+              "status": "BLOCKED",
+              "error": null
+            },
+            {
+              "id": "recovered",
+              "status": "BLOCKED",
+              "error": null
+            },
+            {
+              "id": "cleanup",
+              "status": "BLOCKED",
+              "error": null
+            }
+          ],
+          "cleanup": [
+            {
+              "id": "resource_5",
+              "status": "PASS",
+              "error": null,
+              "duration_ms": 0
+            },
+            {
+              "id": "resource_3",
+              "status": "PASS",
+              "error": null,
+              "duration_ms": 0
+            },
+            {
+              "id": "environment",
+              "status": "PASS",
+              "error": null,
+              "duration_ms": 2205
+            }
+          ]
+        },
+        {
+          "id": "client_fallback_failback::wraparound::single-batch",
+          "status": "TIMEOUT",
+          "duration_ms": 82927,
+          "error": "StageTimeout: stage wall-clock deadline expired",
+          "result_evidence": "/tmp/agent1-yaml-evidence/master-corrected45/single-batch/lane0/part0-yaml/instances/instance-6963fa230a065f51134739effabf0e1f7b5cdecd4f063d1b27d76243fdac9157/result.json",
+          "result_sha256": "f9e1449b81c0f9fa90fce5ec14da9b4a9f56a9ffd39508d302dec53252fda16a",
+          "observed_check_count": 3,
+          "failure_stages": [
+            {
+              "id": "clean_a",
+              "status": "TIMEOUT",
+              "error": "StageTimeout: stage wall-clock deadline expired"
+            },
+            {
+              "id": "post_clean",
+              "status": "BLOCKED",
+              "error": null
+            },
+            {
+              "id": "finish",
+              "status": "BLOCKED",
+              "error": null
+            },
+            {
+              "id": "switch",
+              "status": "BLOCKED",
+              "error": null
+            },
+            {
+              "id": "straddle",
+              "status": "BLOCKED",
+              "error": null
+            },
+            {
+              "id": "after",
+              "status": "BLOCKED",
+              "error": null
+            },
+            {
+              "id": "retry_seen",
+              "status": "BLOCKED",
+              "error": null
+            },
+            {
+              "id": "switch_to_a",
+              "status": "BLOCKED",
+              "error": null
+            },
+            {
+              "id": "switch_errors",
+              "status": "BLOCKED",
+              "error": null
+            },
+            {
+              "id": "no_business_storm",
+              "status": "BLOCKED",
+              "error": null
+            },
+            {
+              "id": "after_a",
+              "status": "BLOCKED",
+              "error": null
+            },
+            {
+              "id": "after_success",
+              "status": "BLOCKED",
+              "error": null
+            },
+            {
+              "id": "unique_requests",
+              "status": "BLOCKED",
+              "error": null
+            },
+            {
+              "id": "cleanup",
+              "status": "BLOCKED",
+              "error": null
+            }
+          ],
+          "cleanup": [
+            {
+              "id": "resource_7",
+              "status": "PASS",
+              "error": null,
+              "duration_ms": 0
+            },
+            {
+              "id": "resource_5",
+              "status": "PASS",
+              "error": null,
+              "duration_ms": 2
+            },
+            {
+              "id": "master_batch_channels",
+              "status": "PASS",
+              "error": null,
+              "duration_ms": 0
+            },
+            {
+              "id": "resource_3",
+              "status": "PASS",
+              "error": null,
+              "duration_ms": 0
+            },
+            {
+              "id": "resource_2",
+              "status": "PASS",
+              "error": null,
+              "duration_ms": 364
+            },
+            {
+              "id": "environment",
+              "status": "PASS",
+              "error": null,
+              "duration_ms": 2286
+            }
+          ]
+        },
+        {
+          "id": "master_lifecycle::freeze_short_long::single-batch",
+          "status": "PASS",
+          "duration_ms": 179989,
+          "error": null,
+          "result_evidence": "/tmp/agent1-yaml-evidence/master-corrected45/single-batch/lane0/part0-yaml/instances/instance-8af5e93c4b04d24d406edd66f1588d4fa783d5b8bed2f5612f65ded145605596/result.json",
+          "result_sha256": "2558b004388acd602581fd553f70f1d21cbfef0cf83da48a5d8ce5c4ffc2aab6",
+          "observed_check_count": 13,
+          "failure_stages": [],
+          "cleanup": [
+            {
+              "id": "resource_5",
+              "status": "PASS",
+              "error": null,
+              "duration_ms": 0
+            },
+            {
+              "id": "resource_3",
+              "status": "PASS",
+              "error": null,
+              "duration_ms": 0
+            },
+            {
+              "id": "resource_2",
+              "status": "PASS",
+              "error": null,
+              "duration_ms": 0
+            },
+            {
+              "id": "environment",
+              "status": "PASS",
+              "error": null,
+              "duration_ms": 2643
+            }
+          ]
+        },
+        {
+          "id": "client_fallback_failback::wraparound::single-nonbatch",
+          "status": "TIMEOUT",
+          "duration_ms": 81290,
+          "error": "StageTimeout: stage wall-clock deadline expired",
+          "result_evidence": "/tmp/agent1-yaml-evidence/master-corrected45/single-nonbatch/lane0/part0-yaml/instances/instance-31737f4752e9c0352c6d51f7845ed2844eebdfae721d8709099e97de52656a16/result.json",
+          "result_sha256": "da2f78fb7f75a93371a1bdfed9e54e6ecf3a8b499890d8249b8d3525ec8148be",
+          "observed_check_count": 3,
+          "failure_stages": [
+            {
+              "id": "clean_a",
+              "status": "TIMEOUT",
+              "error": "StageTimeout: stage wall-clock deadline expired"
+            },
+            {
+              "id": "post_clean",
+              "status": "BLOCKED",
+              "error": null
+            },
+            {
+              "id": "finish",
+              "status": "BLOCKED",
+              "error": null
+            },
+            {
+              "id": "switch",
+              "status": "BLOCKED",
+              "error": null
+            },
+            {
+              "id": "straddle",
+              "status": "BLOCKED",
+              "error": null
+            },
+            {
+              "id": "after",
+              "status": "BLOCKED",
+              "error": null
+            },
+            {
+              "id": "retry_seen",
+              "status": "BLOCKED",
+              "error": null
+            },
+            {
+              "id": "switch_to_a",
+              "status": "BLOCKED",
+              "error": null
+            },
+            {
+              "id": "switch_errors",
+              "status": "BLOCKED",
+              "error": null
+            },
+            {
+              "id": "no_business_storm",
+              "status": "BLOCKED",
+              "error": null
+            },
+            {
+              "id": "after_a",
+              "status": "BLOCKED",
+              "error": null
+            },
+            {
+              "id": "after_success",
+              "status": "BLOCKED",
+              "error": null
+            },
+            {
+              "id": "unique_requests",
+              "status": "BLOCKED",
+              "error": null
+            },
+            {
+              "id": "cleanup",
+              "status": "BLOCKED",
+              "error": null
+            }
+          ],
+          "cleanup": [
+            {
+              "id": "resource_7",
+              "status": "PASS",
+              "error": null,
+              "duration_ms": 0
+            },
+            {
+              "id": "resource_5",
+              "status": "PASS",
+              "error": null,
+              "duration_ms": 1
+            },
+            {
+              "id": "master_batch_channels",
+              "status": "PASS",
+              "error": null,
+              "duration_ms": 0
+            },
+            {
+              "id": "resource_3",
+              "status": "PASS",
+              "error": null,
+              "duration_ms": 0
+            },
+            {
+              "id": "resource_2",
+              "status": "PASS",
+              "error": null,
+              "duration_ms": 364
+            },
+            {
+              "id": "environment",
+              "status": "PASS",
+              "error": null,
+              "duration_ms": 2288
+            }
+          ]
+        },
+        {
+          "id": "master_lifecycle::freeze_short_long::single-nonbatch",
+          "status": "FAIL",
+          "duration_ms": 118704,
+          "error": null,
+          "result_evidence": "/tmp/agent1-yaml-evidence/master-corrected45/single-nonbatch/lane0/part0-yaml/instances/instance-7cea58e65937e27659b2ce4d9db263ce5d06e809fc0b2c35d0ff886214092adb/result.json",
+          "result_sha256": "785ab15f540cdd4b622ba6b5f50ed6fd48153695202c9b69064ceaa39c408fff",
+          "observed_check_count": 7,
+          "failure_stages": [
+            {
+              "id": "retry_seen",
+              "status": "FAIL",
+              "error": null
+            },
+            {
+              "id": "switch_to_a",
+              "status": "BLOCKED",
+              "error": null
+            },
+            {
+              "id": "visible_terminal",
+              "status": "BLOCKED",
+              "error": null
+            },
+            {
+              "id": "deadline_visible",
+              "status": "BLOCKED",
+              "error": null
+            },
+            {
+              "id": "post_success",
+              "status": "BLOCKED",
+              "error": null
+            },
+            {
+              "id": "post_on_a",
+              "status": "BLOCKED",
+              "error": null
+            },
+            {
+              "id": "unique_requests",
+              "status": "BLOCKED",
+              "error": null
+            },
+            {
+              "id": "cleanup",
+              "status": "BLOCKED",
+              "error": null
+            }
+          ],
+          "cleanup": [
+            {
+              "id": "resource_5",
+              "status": "PASS",
+              "error": null,
+              "duration_ms": 0
+            },
+            {
+              "id": "resource_3",
+              "status": "PASS",
+              "error": null,
+              "duration_ms": 0
+            },
+            {
+              "id": "resource_2",
+              "status": "PASS",
+              "error": null,
+              "duration_ms": 0
+            },
+            {
+              "id": "environment",
+              "status": "PASS",
+              "error": null,
+              "duration_ms": 2891
+            }
+          ]
+        },
+        {
+          "id": "client_fallback_failback::wraparound::window-nonbatch",
+          "status": "TIMEOUT",
+          "duration_ms": 81833,
+          "error": "StageTimeout: stage wall-clock deadline expired",
+          "result_evidence": "/tmp/agent1-yaml-evidence/master-corrected45/window-nonbatch/lane0/part0-yaml/instances/instance-5976904fb61806850038312c6233919c35295ff313e4f848382f845ee8d6494d/result.json",
+          "result_sha256": "b07b134113b5737f9513cca5708dabf430b4ac183881a8d36d242b712f4210c6",
+          "observed_check_count": 3,
+          "failure_stages": [
+            {
+              "id": "clean_a",
+              "status": "TIMEOUT",
+              "error": "StageTimeout: stage wall-clock deadline expired"
+            },
+            {
+              "id": "post_clean",
+              "status": "BLOCKED",
+              "error": null
+            },
+            {
+              "id": "finish",
+              "status": "BLOCKED",
+              "error": null
+            },
+            {
+              "id": "switch",
+              "status": "BLOCKED",
+              "error": null
+            },
+            {
+              "id": "straddle",
+              "status": "BLOCKED",
+              "error": null
+            },
+            {
+              "id": "after",
+              "status": "BLOCKED",
+              "error": null
+            },
+            {
+              "id": "retry_seen",
+              "status": "BLOCKED",
+              "error": null
+            },
+            {
+              "id": "switch_to_a",
+              "status": "BLOCKED",
+              "error": null
+            },
+            {
+              "id": "switch_errors",
+              "status": "BLOCKED",
+              "error": null
+            },
+            {
+              "id": "no_business_storm",
+              "status": "BLOCKED",
+              "error": null
+            },
+            {
+              "id": "after_a",
+              "status": "BLOCKED",
+              "error": null
+            },
+            {
+              "id": "after_success",
+              "status": "BLOCKED",
+              "error": null
+            },
+            {
+              "id": "unique_requests",
+              "status": "BLOCKED",
+              "error": null
+            },
+            {
+              "id": "cleanup",
+              "status": "BLOCKED",
+              "error": null
+            }
+          ],
+          "cleanup": [
+            {
+              "id": "resource_7",
+              "status": "PASS",
+              "error": null,
+              "duration_ms": 0
+            },
+            {
+              "id": "resource_5",
+              "status": "PASS",
+              "error": null,
+              "duration_ms": 1
+            },
+            {
+              "id": "master_batch_channels",
+              "status": "PASS",
+              "error": null,
+              "duration_ms": 0
+            },
+            {
+              "id": "resource_3",
+              "status": "PASS",
+              "error": null,
+              "duration_ms": 0
+            },
+            {
+              "id": "resource_2",
+              "status": "PASS",
+              "error": null,
+              "duration_ms": 363
+            },
+            {
+              "id": "environment",
+              "status": "PASS",
+              "error": null,
+              "duration_ms": 2287
+            }
+          ]
+        },
+        {
+          "id": "master_lifecycle::freeze_short_long::window-nonbatch",
+          "status": "FAIL",
+          "duration_ms": 119829,
+          "error": null,
+          "result_evidence": "/tmp/agent1-yaml-evidence/master-corrected45/window-nonbatch/lane0/part0-yaml/instances/instance-691d571c59ccaa2228f9e5929c7ce79eb850e3e1de4cc8707589dde2b8d50e36/result.json",
+          "result_sha256": "d341a0395cb8f873ece2b8c58f83c10f1d11499413359a06200ce04b3ecaba90",
+          "observed_check_count": 7,
+          "failure_stages": [
+            {
+              "id": "retry_seen",
+              "status": "FAIL",
+              "error": null
+            },
+            {
+              "id": "switch_to_a",
+              "status": "BLOCKED",
+              "error": null
+            },
+            {
+              "id": "visible_terminal",
+              "status": "BLOCKED",
+              "error": null
+            },
+            {
+              "id": "deadline_visible",
+              "status": "BLOCKED",
+              "error": null
+            },
+            {
+              "id": "post_success",
+              "status": "BLOCKED",
+              "error": null
+            },
+            {
+              "id": "post_on_a",
+              "status": "BLOCKED",
+              "error": null
+            },
+            {
+              "id": "unique_requests",
+              "status": "BLOCKED",
+              "error": null
+            },
+            {
+              "id": "cleanup",
+              "status": "BLOCKED",
+              "error": null
+            }
+          ],
+          "cleanup": [
+            {
+              "id": "resource_5",
+              "status": "PASS",
+              "error": null,
+              "duration_ms": 0
+            },
+            {
+              "id": "resource_3",
+              "status": "PASS",
+              "error": null,
+              "duration_ms": 0
+            },
+            {
+              "id": "resource_2",
+              "status": "PASS",
+              "error": null,
+              "duration_ms": 0
+            },
+            {
+              "id": "environment",
+              "status": "PASS",
+              "error": null,
+              "duration_ms": 2542
+            }
+          ]
+        }
+      ],
+      "artifacts": [
+        {
+          "file": "1788810284337248000-flexlb_acquire.json",
+          "sha256": "7f5763a84dee1bb2415eb417c9f2ee19ea35d71718089de59c5bd3ea200b9ced"
+        },
+        {
+          "file": "1788810297051557000-flexlb_sync.json",
+          "sha256": "e72055947b24531e7f04292d1104fae56811dfe2bb6cfdf37f68062dc7e4150d"
+        },
+        {
+          "file": "1788810318244020000-flexlb_docker_exec.json",
+          "sha256": "21474f84accd07f9e71ad5a1cdac21c13463fcbd06c0dc5d1965225dfcf1620d"
+        },
+        {
+          "file": "1788810318355746000-flexlb_sync.json",
+          "sha256": "afd91787009017c308c6580b79729ae0c78a2c6f244d0dcb3899632648d49d1d"
+        },
+        {
+          "file": "1788810367215840000-flexlb_job_start.json",
+          "sha256": "3535053d8a4d1b5cf5471244677b0d9ce6d2ef49bd6f63d3ec7f9c15fb9b2232"
+        },
+        {
+          "file": "1788810427389235000-inspect-batch-window.json",
+          "sha256": "86c238ebaa45cbcddbf9f15a0fdf8d706409f33fbdfc5de8f9adfb42d7e361e8"
+        },
+        {
+          "file": "1788810488954990000-inspect-batch-window.json",
+          "sha256": "02e02b7d120ef58a7ac7cb3fb42b07d7fa844613cde7f7b3e38021b393f519ad"
+        },
+        {
+          "file": "1788810563919734000-inspect-batch-window.json",
+          "sha256": "c7d85d1bcb7e7eee253faafd8017e4d81a217cbde74d67505ab22243344ad21c"
+        },
+        {
+          "file": "1788810639876125000-inspect-batch-window.json",
+          "sha256": "edea067e2226b73265e3dd3675580252c10066e84c0ed725ebb7b30b945a6890"
+        },
+        {
+          "file": "1788810710027021000-inspect-batch-window.json",
+          "sha256": "edea067e2226b73265e3dd3675580252c10066e84c0ed725ebb7b30b945a6890"
+        },
+        {
+          "file": "1788810777861182000-inspect-batch-window.json",
+          "sha256": "d44e295aacf9ed86fef7e2bd119da09dc3a9d9167567ca39003024761c40133b"
+        },
+        {
+          "file": "1788810788747663000-collect-batch-window.json",
+          "sha256": "99f33fd2a6753496557a50b86300625855bb9ca22c547e7be798c02a9394efd4"
+        },
+        {
+          "file": "1788810830399476000-flexlb_job_start.json",
+          "sha256": "92904d9e2e981a7fd88550d533eb2b9e3dfbdf5cedace1ed13e2d44a29812c68"
+        },
+        {
+          "file": "1788810894330550000-inspect-single-nonbatch.json",
+          "sha256": "80f5f0c4e4900ae5c494f3f2af1b0c6c65768af0e0b353a7f6e7bba758b816ff"
+        },
+        {
+          "file": "1788810960990205000-inspect-single-nonbatch.json",
+          "sha256": "1a9e6573d82fe95e14cbb971f1ddb6764fe8c4ed74908d463f84de4b0f6750a7"
+        },
+        {
+          "file": "1788811023368371000-inspect-single-nonbatch.json",
+          "sha256": "1a9e6573d82fe95e14cbb971f1ddb6764fe8c4ed74908d463f84de4b0f6750a7"
+        },
+        {
+          "file": "1788811086018511000-inspect-single-nonbatch.json",
+          "sha256": "5ab2dde1addba5995a35fb6862945d3d1cb5d7926e08a43d3064b7beea36e712"
+        },
+        {
+          "file": "1788811098508314000-collect-single-nonbatch.json",
+          "sha256": "2a9c1f847664ec29ae0d9c1be29b9cdbeacf94407f4bbad6eaa96f02294caa3a"
+        },
+        {
+          "file": "1788811121938679000-flexlb_job_start.json",
+          "sha256": "b81417682db530b8cc35fac0c7d06afc2a04b475ca1bba2afbd61f028040615a"
+        },
+        {
+          "file": "1788811184101746000-inspect-single-batch.json",
+          "sha256": "845de3dc8b96cbac366d44993b50962f68036c2ad4fa3aae874bf7a9a4d1e96a"
+        },
+        {
+          "file": "1788811246516932000-inspect-single-batch.json",
+          "sha256": "b3ac656c6f6b0ff11c4b494c5df6177daa20b92dd92bd82da93767ee88031a74"
+        },
+        {
+          "file": "1788811307861075000-inspect-single-batch.json",
+          "sha256": "b3ac656c6f6b0ff11c4b494c5df6177daa20b92dd92bd82da93767ee88031a74"
+        },
+        {
+          "file": "1788811370993748000-inspect-single-batch.json",
+          "sha256": "b3ac656c6f6b0ff11c4b494c5df6177daa20b92dd92bd82da93767ee88031a74"
+        },
+        {
+          "file": "1788811433921741000-inspect-single-batch.json",
+          "sha256": "4eefadca2f3307af5d0ae2fa8ab9e7b123102449c987b71bcd842e95d2796885"
+        },
+        {
+          "file": "1788811446281678000-collect-single-batch.json",
+          "sha256": "f93e9fc10e4a3fd79f9c6c508b458fb1b4fee56417280703aeb4565f714c15cb"
+        },
+        {
+          "file": "1788811469871091000-flexlb_job_start.json",
+          "sha256": "f203adbe50645f9471f417f1a351944cb75af98ec533c5860709e1874a3fac94"
+        },
+        {
+          "file": "1788811531634693000-inspect-window-nonbatch.json",
+          "sha256": "aa03cc932b7ee8ee1fdda797e69bc2ed38e7eec8dc56b9261bd20e23bf31b954"
+        },
+        {
+          "file": "1788811595714240000-inspect-window-nonbatch.json",
+          "sha256": "3c3b95f343cfc359b83b6ee7ac629d9dc976c75885deabf68d2d64054e465c30"
+        },
+        {
+          "file": "1788811658118020000-inspect-window-nonbatch.json",
+          "sha256": "3c3b95f343cfc359b83b6ee7ac629d9dc976c75885deabf68d2d64054e465c30"
+        },
+        {
+          "file": "1788811714042702000-inspect-window-nonbatch.json",
+          "sha256": "31596372e8313dce546421824e9131c927f92a84470bcfc36e5f22187d1920c3"
+        },
+        {
+          "file": "1788811728535927000-collect-window-nonbatch.json",
+          "sha256": "5dda7501b922b80e8245a6ef76a20c041ba11ddae0006ab481ab639d841e1c59"
+        },
+        {
+          "file": "1788811746744740000-flexlb_docker_exec.json",
+          "sha256": "b1f4d6e03505abe61f690779a947cb58bd37dc6beae4b5e88e6da73c844b00b8"
+        },
+        {
+          "file": "1788811768553221000-flexlb_release.json",
+          "sha256": "25d4e07f906c77e1a1d9a19f2c8512a4a7c51e229dd678dac18875afaa710e0a"
+        },
+        {
+          "file": "batch-window-dryrun.json",
+          "sha256": "3c39596c8f1af7d68c2586ead5b011b722ace73c1029ca57ca960b1583e14656"
+        },
+        {
+          "file": "batch-window-group-audit.json",
+          "sha256": "6d979a9c3141b5b99a83699a30dd09b634dea747ba5b0cafc180f50fccf7aa2d"
+        },
+        {
+          "file": "batch-window-live-lock-audit.json",
+          "sha256": "d72d03823d5113c91152e50c0c88f8fd648d7ef39ca88d40a297a697c9022c17"
+        },
+        {
+          "file": "batch-window-post-audit.json",
+          "sha256": "9d03e3d435346f12e3f03fda20da02ec1ebe3ec57d5d8409a71aeda2fdbc9f83"
+        },
+        {
+          "file": "jar-manifest.json",
+          "sha256": "19f01f3c311cc4d1ca608e6642663d08bd016172791b6793db1a41d72a386c43"
+        },
+        {
+          "file": "run-summary.json",
+          "sha256": "5147d0176d1835213eee2db6d4a5012b176940b3237d834bf888a7906b8677c6"
+        },
+        {
+          "file": "single-batch-dryrun.json",
+          "sha256": "56539b54193425e7a901b4eae71c4e25b6cc38bc3c595a95610e2a18bd39c16b"
+        },
+        {
+          "file": "single-batch-group-audit.json",
+          "sha256": "f3c6ebc8b966fdc0456c5b8e25987f74fc5050c8303f05ef638d8875203d37c6"
+        },
+        {
+          "file": "single-batch-live-lock-audit.json",
+          "sha256": "f179f2a81c0212da66821ce39956fcf059eeaff325991765fd2f33905afda868"
+        },
+        {
+          "file": "single-batch-post-audit.json",
+          "sha256": "ea20840de3e61386b8ed67bd8d011d9e1a62d5abed6ea33a01fd5418ca168c4f"
+        },
+        {
+          "file": "single-nonbatch-dryrun.json",
+          "sha256": "fc0124733bb91ac609a05f8bb3ae8113bfd9d7d2da46be0c6d312df400239b0f"
+        },
+        {
+          "file": "single-nonbatch-group-audit.json",
+          "sha256": "d8de0396a97f0f48028a1740a877c45ffce84d2e1fc26973cb2c0919e3ca6b2a"
+        },
+        {
+          "file": "single-nonbatch-live-lock-audit.json",
+          "sha256": "6cc66f92943e88b1e20dc553c7173299897a81e445ef1a1ffbbcdcb10bac897c"
+        },
+        {
+          "file": "single-nonbatch-post-audit.json",
+          "sha256": "ce924be1e5a5c56da69d826ceb5f1f09eee32ce7fa310040ff05e8b3dd75e53c"
+        },
+        {
+          "file": "source-jar-verification.json",
+          "sha256": "ac254aa99b1f7b357c67d31ca35519e9a25d68c163aae561aa1531841ca480c5"
+        },
+        {
+          "file": "source-manifest.json",
+          "sha256": "bca3e78585bbeb5a7cd95965e85ba5f0c018d80bed0de37bba6918df5aafdd4d"
+        },
+        {
+          "file": "window-nonbatch-dryrun.json",
+          "sha256": "3bc177c2fe57212b54b442e6d2aff42e21ced9435f81dc9f8ebfffeb56e8ef6d"
+        },
+        {
+          "file": "window-nonbatch-group-audit.json",
+          "sha256": "b0f78515d6eaf29b9d77723a395e73817984a55db6ce3a03283a1ea2ff5f3dd4"
+        },
+        {
+          "file": "window-nonbatch-live-lock-audit.json",
+          "sha256": "03f6440e5a7129800762f207076d056f0e27008e326e426605778fe83940915e"
+        },
+        {
+          "file": "window-nonbatch-post-audit.json",
+          "sha256": "8da55edaf41639e554a6a7cbaeebc738978a3e3882f9c3156b715f2a3e9c3f5a"
+        }
+      ]
+    },
+    {
+      "source_commit": "5344b02991b3f68d15f1624d40682c446f97ca7d",
+      "evidence_root": "/tmp/agent1-yaml-evidence/quota-final534",
+      "independent_acceptance": "verified_fixed_source_run_by_agent3",
+      "scope": "Recorded execution outcomes, not full-source or paired replacement acceptance. Earlier runs retained.",
+      "status_counts": {
+        "PASS": 1
+      },
+      "observed_checks": 6,
+      "cleanup_count": 4,
+      "summary": {
+        "source_sha": "5344b02991b3f68d15f1624d40682c446f97ca7d",
+        "id": "master_dispatch_quota::single_prefill_ttl::batch-window",
+        "status": "PASS",
+        "duration_ms": 62973,
+        "check_count": 6,
+        "cleanup": [
+          {
+            "id": "resource_9",
+            "status": "PASS",
+            "error": null,
+            "duration_ms": 1
+          },
+          {
+            "id": "resource_5",
+            "status": "PASS",
+            "error": null,
+            "duration_ms": 0
+          },
+          {
+            "id": "resource_3",
+            "status": "PASS",
+            "error": null,
+            "duration_ms": 0
+          },
+          {
+            "id": "environment",
+            "status": "PASS",
+            "error": null,
+            "duration_ms": 2237
+          }
+        ],
+        "parent_rc": 0
+      },
+      "instances": [
+        {
+          "id": "master_dispatch_quota::single_prefill_ttl::batch-window",
+          "status": "PASS",
+          "duration_ms": 62973,
+          "error": null,
+          "result_evidence": "/tmp/agent1-yaml-evidence/quota-final534/quota/lane0/part0-yaml/instances/instance-c7b904908ccf0223ae796394cdc242c7ec9191e255682377a611cd00c68491f6/result.json",
+          "result_sha256": "923c461095ec321e8613b2a770744aa1472769ef06964a3738a3c307d6532fdd",
+          "observed_check_count": 6,
+          "failure_stages": [],
+          "cleanup": [
+            {
+              "id": "resource_9",
+              "status": "PASS",
+              "error": null,
+              "duration_ms": 1
+            },
+            {
+              "id": "resource_5",
+              "status": "PASS",
+              "error": null,
+              "duration_ms": 0
+            },
+            {
+              "id": "resource_3",
+              "status": "PASS",
+              "error": null,
+              "duration_ms": 0
+            },
+            {
+              "id": "environment",
+              "status": "PASS",
+              "error": null,
+              "duration_ms": 2237
+            }
+          ]
+        }
+      ],
+      "artifacts": [
+        {
+          "file": "1788811847391596000-flexlb_acquire.json",
+          "sha256": "facee60cec002d785bffb78bfa73cc2962464d80850fe81b49e04dde40417921"
+        },
+        {
+          "file": "1788811860587004000-flexlb_sync.json",
+          "sha256": "ae3256286af862fc871dccd36184df15a9daa631b765a271a250a4774a6df772"
+        },
+        {
+          "file": "1788811861680729000-flexlb_docker_exec.json",
+          "sha256": "3a524a4715ecc912de39c756314c02f9cb1b0edaa140b6f74222e14883cab648"
+        },
+        {
+          "file": "1788811889088928000-flexlb_sync.json",
+          "sha256": "b12c3cb6db96bc4d312fd96aa8d0b9d74269e51f0d4d08ae4d33d4d3de40066a"
+        },
+        {
+          "file": "1788811920595752000-flexlb_job_start.json",
+          "sha256": "dc4b9a41958e5fdbe63a03b35d33da92dae95ff1228624a0f264225b041491d0"
+        },
+        {
+          "file": "1788811983165772000-inspect-quota.json",
+          "sha256": "451a71b2ee2a0b090714867479fd9050f1c18702d870b1ea18512d1cc0083da9"
+        },
+        {
+          "file": "1788812017879407000-inspect-quota.json",
+          "sha256": "0ebc5fd9bac6ea53ded108d0e08ad2d5e3603a03c6be581975fceb7a640b274a"
+        },
+        {
+          "file": "1788812031317345000-collect-quota.json",
+          "sha256": "88c5a7f09dcaea3c0aa908dea260d5b2ec7636286107069d7d4a293f5e8aa205"
+        },
+        {
+          "file": "1788812045598854000-flexlb_docker_exec.json",
+          "sha256": "779fdf04bf75a45d358ca5f9d82dd137b37cb45648f4e0f54a15a88e9da5baae"
+        },
+        {
+          "file": "1788812102771007000-collect-quota.json",
+          "sha256": "80365dda435be2ffd5a72d2669e045a27deb3604b96720e01626a0d5b77a470d"
+        },
+        {
+          "file": "1788812122526083000-flexlb_release.json",
+          "sha256": "f2f28c877c3187f2cb190d54a35fe05d45aede614e0431c9b57cf1b8c1be6db5"
+        },
+        {
+          "file": "jar-manifest.json",
+          "sha256": "19f01f3c311cc4d1ca608e6642663d08bd016172791b6793db1a41d72a386c43"
+        },
+        {
+          "file": "quota-dryrun.json",
+          "sha256": "4db4db95ae13fef45d16e6242349f1d9f502a0c1e085593e83cc9ad6cad47561"
+        },
+        {
+          "file": "quota-first-group-audit.json",
+          "sha256": "24cd87fae6f8ece563f42746de77a2d4df0e07c0d2e1f6d6850145b6dc58b6f6"
+        },
+        {
+          "file": "quota-group-audit.json",
+          "sha256": "a1776cc1c5cdb4d0c852be72921c368f7df18f57e4a6dc7c3c299e27cbc538a1"
+        },
+        {
+          "file": "quota-live-lock-audit.json",
+          "sha256": "6efc26b2feb53f81d60e995cc3a379a8d6ac9a396f717ac0e0851c8f478fd616"
+        },
+        {
+          "file": "quota-post-audit.json",
+          "sha256": "ad2debd45be6780d35bbaef801ef4ce512ec0697513eea7435bd7dc59f215497"
+        },
+        {
+          "file": "run-summary.json",
+          "sha256": "945a948298852c76a2c101dda3c1be1bf4a291902cd43067766e1865ea9f3a75"
+        },
+        {
+          "file": "source-jar-verification.json",
+          "sha256": "e5443b21124b58c6fec7dee61b329e0715c4b59cb9a329ee29f4f3faea173101"
+        },
+        {
+          "file": "source-manifest.json",
+          "sha256": "d3470c25d9dc9fc271bb0c93bec5d38ee90dcdb790083d01ccfc2edc4965c630"
+        }
+      ]
+    }
+  ]
 }

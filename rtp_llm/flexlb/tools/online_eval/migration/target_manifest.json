@@ -500,26 +500,36 @@
       "id": "elastic_concurrent_mutation",
       "category": "elastic",
       "owner": "agent1",
-      "implementation_status": "planned",
+      "implementation_status": "candidate_complete",
       "legacy_case_ids": [
         "elastic_concurrent_ops"
       ],
-      "candidate_contracts": [],
-      "pending_contracts": [
+      "candidate_contracts": [
         "elastic_concurrent_ops"
       ],
+      "pending_contracts": [],
       "candidate_counts": {
-        "logical_scenarios": 0,
-        "variants": 0,
-        "instances": 0,
-        "checks": 0
+        "logical_scenarios": 1,
+        "variants": 1,
+        "instances": 1,
+        "checks": 7
       },
-      "source_files": [],
+      "source_files": [
+        "scenarios/elastic/concurrent_mutation.yaml"
+      ],
       "replacement_status": "retain_legacy_pending_paired_evidence",
       "static_review": {
-        "status": "pending"
+        "status": "passed_at_revision",
+        "revision": "aac4afbe2b7a5fa7840f40a78f15e390417e2798",
+        "reviewed_contracts": [
+          "elastic_concurrent_ops"
+        ],
+        "unreviewed_candidate_contracts": [],
+        "scope": "old predicates and declared differences; local fixtures only, not complete Java execution"
       },
-      "candidate_scenario_ids": []
+      "candidate_scenario_ids": [
+        "elastic_concurrent_mutation"
+      ]
     },
     {
       "id": "elastic_added_worker_fault",
@@ -905,7 +915,7 @@
         "logical_scenarios": 1,
         "variants": 1,
         "instances": 1,
-        "checks": 7
+        "checks": 6
       },
       "source_files": [
         "scenarios/master/master_dispatch_quota.yaml"
@@ -1050,7 +1060,7 @@
           "prio_same_level_fifo"
         ],
         "unreviewed_candidate_contracts": [],
-        "scope": "Reviewed named programs only, conditional on Decode load OR fix d955; not all current variants or real Java execution.",
+        "scope": "Reviewed named programs only, conditional on listed shared fixes; not all current variants or real Java execution.",
         "dependencies": [
           "d955a8434b9c1458e1eadb76f90734eda47b1c23"
         ]
@@ -1091,7 +1101,9 @@
       ],
       "candidate_contracts": [
         "atpm_preempt_prefill_queued",
-        "atpm_same_priority_zero_eviction"
+        "atpm_preemption_disabled_zero_eviction",
+        "atpm_same_priority_zero_eviction",
+        "atpm_timeout_attribution"
       ],
       "pending_contracts": [
         "atpm_comparator_frozen_weak",
@@ -1103,15 +1115,13 @@
         "atpm_preempt_cancel_tombstoned",
         "atpm_preempt_decode_engine_owned",
         "atpm_preempt_decode_reserved_live",
-        "atpm_preempt_prefill_queued_live",
-        "atpm_preemption_disabled_zero_eviction",
-        "atpm_timeout_attribution"
+        "atpm_preempt_prefill_queued_live"
       ],
       "candidate_counts": {
         "logical_scenarios": 1,
-        "variants": 2,
-        "instances": 2,
-        "checks": 19
+        "variants": 4,
+        "instances": 4,
+        "checks": 39
       },
       "source_files": [
         "scenarios/priority/priority_preemption.yaml"
@@ -1119,15 +1129,18 @@
       "replacement_status": "retain_legacy_pending_paired_evidence",
       "static_review": {
         "status": "passed_at_revision",
-        "revision": "56da98b3e40d81037ddd3b4ee78862f190dca5b3",
+        "revision": "11ead5a073787b270130277880b9465892c01804",
         "reviewed_contracts": [
           "atpm_preempt_prefill_queued",
-          "atpm_same_priority_zero_eviction"
+          "atpm_preemption_disabled_zero_eviction",
+          "atpm_same_priority_zero_eviction",
+          "atpm_timeout_attribution"
         ],
         "unreviewed_candidate_contracts": [],
-        "scope": "Reviewed named programs only, conditional on Decode load OR fix d955; not all current variants or real Java execution.",
+        "scope": "Reviewed named programs only, conditional on listed shared fixes; not all current variants or real Java execution.",
         "dependencies": [
-          "d955a8434b9c1458e1eadb76f90734eda47b1c23"
+          "d955a8434b9c1458e1eadb76f90734eda47b1c23",
+          "e8e53612d995a2f97dcdd3069a8e021c65b5df03"
         ]
       },
       "candidate_scenario_ids": [

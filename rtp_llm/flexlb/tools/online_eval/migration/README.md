@@ -25,8 +25,14 @@ contracts are assigned explicitly to existing families, never silently dropped.
   marked migrated merely because a pilot has a similar name or parses correctly.
 - `runtime_evidence.json` anchors selected real Java results to source revisions,
   artifact hashes and cleanup observations. The three admission passes apply
-  only to their named batch-window instances; the Master passes likewise cover only
-  two named lifecycle instances. The earlier elastic P6 failure
+  only to their named batch-window instances; that file's initial Master pilot
+  covers two named lifecycle instances. `master_runtime_coverage.json` separately
+  retains all 25 original 5aff outcomes and appends corrected runs by source:
+  45e has 2 PASS, 3 FAIL, 4 TIMEOUT and 1 ERROR across 10 instances;
+  534 has one quota PASS. Both later runs have independently reviewed source,
+  raw result, process, port, lock and lease evidence. Neither overwrites an
+  earlier failure or establishes paired replacement for the whole family.
+  The earlier elastic P6 failure
   remains recorded as unresolved; selected passes are not a full execution census.
 
 Run `python3 migration/audit_manifest.py --out PATH` from `online_eval` to verify
