@@ -344,6 +344,55 @@ protected:
     }
 };
 
+struct RecordingGraphState {
+    std::vector<std::string> calls;
+    std::vector<int64_t>     position_id_numels;
+    std::vector<int64_t>     token_type_id_numels;
+    bool                     can_run_result{true};
+};
+
+class RecordingGraphBase: public GraphBase {
+public:
+    explicit RecordingGraphBase(std::shared_ptr<RecordingGraphState> recording):
+        GraphBase(py::none()), recording_(std::move(recording)) {}
+
+    void initCapture() override {}
+
+    PyModelOutputs forward(const PyModelInputs&, CudaGraphState&) override {
+        return {};
+    }
+
+    void setPositionEncoding(torch::Tensor) override {}
+    void setTokenTypeEmbedding(torch::Tensor) override {}
+    void setInputEmbeddingScalar(float) override {}
+
+    bool canRun(const PyModelInputs& inputs, CudaGraphState&) override {
+        record("canRun", inputs);
+        return recording_->can_run_result;
+    }
+
+    void prepareAttentionInputs(const PyModelInputs& inputs, CudaGraphState&, bool) override {
+        record("prepareAttentionInputs", inputs);
+    }
+
+    void updateKVCacheKernelBlockId(const PyModelInputs& inputs, CudaGraphState&) override {
+        record("updateKVCacheKernelBlockId", inputs);
+    }
+
+private:
+    void record(const std::string& call, const PyModelInputs& inputs) {
+        const auto numel_or_missing = [](const torch::Tensor& tensor) {
+            return tensor.defined() ? tensor.numel() : -1;
+        };
+        recording_->calls.push_back(call);
+        recording_->position_id_numels.push_back(numel_or_missing(inputs.bert_embedding_inputs.combo_position_ids));
+        recording_->token_type_id_numels.push_back(
+            numel_or_missing(inputs.bert_embedding_inputs.combo_tokens_type_ids));
+    }
+
+    std::shared_ptr<RecordingGraphState> recording_;
+};
+
 struct Scenario {
     CacheConfig                      manager_config;
     GroupedCacheLayerLayout          layout;
@@ -354,6 +403,11 @@ struct Scenario {
     size_t                           model_id{0};
     std::optional<int>               mtp_cache_config_index;
     bool                             replace_cp_processor{false};
+    bool                             bert_embedding_weights{false};
+    bool                             plan_micro_batches_only{false};
+    bool                             graph_wiring_only{false};
+    bool                             graph_can_run_result{true};
+    size_t                           layer_num{1};
 };
 
 Scenario makeMultiTagScenario() {
@@ -387,6 +441,93 @@ Scenario makeMicroBatchScenario() {
                              /*global_stride_bytes=*/16);
     Scenario scenario{std::move(config), std::move(layout.layout), std::move(layout.base_addresses), std::move(inputs)};
     scenario.device_resources.enable_layer_micro_batch = static_cast<int>(MicroBatchType::DS_PREFILL);
+    return scenario;
+}
+
+void addUnsupportedMicroBatchSignal(Scenario& scenario, const std::string& signal) {
+    const auto token_count          = scenario.inputs.combo_tokens.numel();
+    scenario.bert_embedding_weights = true;
+    if (signal == "text_mask") {
+        scenario.inputs.text_tokens_mask = pinnedTensor(std::vector<int32_t>(token_count, 1), {token_count});
+    } else if (signal == "features") {
+        scenario.inputs.multimodal_features =
+            std::vector<torch::Tensor>{torch::zeros({1, 1}, torch::TensorOptions().dtype(torch::kFloat16))};
+    } else if (signal == "locs") {
+        scenario.inputs.mm_features_locs = pinnedTensor({0}, {1});
+    } else if (signal == "extra") {
+        scenario.inputs.mm_extra_input =
+            std::vector<torch::Tensor>{torch::zeros({1, 1}, torch::TensorOptions().dtype(torch::kFloat16))};
+    } else {
+        throw std::invalid_argument("unknown micro-batch fallback signal: " + signal);
+    }
+}
+
+Scenario makeUnsupportedMicroBatchScenario(const std::string& signal) {
+    auto scenario = makeMicroBatchScenario();
+    addUnsupportedMicroBatchSignal(scenario, signal);
+    return scenario;
+}
+
+Scenario makeBertWithoutRequestOwnedMultimodalInputsScenario() {
+    auto scenario                    = makeMicroBatchScenario();
+    scenario.bert_embedding_weights  = true;
+    scenario.plan_micro_batches_only = true;
+    return scenario;
+}
+
+Scenario makeDegenerateUnsupportedMicroBatchScenario(const std::string& kind, const std::string& signal) {
+    auto config = makeCacheConfig({{"default", 2, 16}});
+    auto layout = makeLayout(config);
+
+    std::vector<int32_t> input_lengths;
+    if (kind == "single_request") {
+        input_lengths = {2};
+    } else if (kind == "mixed_multilayer") {
+        input_lengths = {1, 2};
+    } else {
+        throw std::invalid_argument("unknown degenerate micro-batch kind: " + kind);
+    }
+
+    const size_t batch_size = input_lengths.size();
+    auto         inputs     = makeInputs(input_lengths,
+                             /*request_ids=*/std::vector<int64_t>(batch_size, 501),
+                             /*cache_keys=*/std::vector<int64_t>(batch_size, 5101),
+                             /*cache_keys_width=*/1,
+                             /*block_ids=*/std::vector<int32_t>(batch_size, 1),
+                             /*group_count=*/1,
+                             /*block_table_width=*/1,
+                             /*global_tokens_per_block=*/2,
+                             /*global_stride_bytes=*/16);
+    Scenario scenario{std::move(config), std::move(layout.layout), std::move(layout.base_addresses), std::move(inputs)};
+    scenario.device_resources.enable_layer_micro_batch = static_cast<int>(MicroBatchType::DS_PREFILL);
+    if (kind == "mixed_multilayer") {
+        scenario.inputs.sequence_lengths = pinnedTensor({0}, {1});
+        scenario.plan_micro_batches_only = true;
+        scenario.layer_num               = 2;
+    }
+    addUnsupportedMicroBatchSignal(scenario, signal);
+    return scenario;
+}
+
+Scenario makeBertWiringScenario() {
+    auto                 scenario    = makeMultiTagScenario();
+    const auto           token_count = scenario.inputs.combo_tokens.numel();
+    std::vector<int32_t> position_ids(token_count);
+    std::iota(position_ids.begin(), position_ids.end(), int32_t{0});
+    scenario.inputs.combo_position_ids    = pinnedTensor(position_ids, {token_count});
+    scenario.inputs.combo_tokens_type_ids = pinnedTensor(std::vector<int32_t>(token_count, 1), {token_count});
+    scenario.bert_embedding_weights       = true;
+    return scenario;
+}
+
+Scenario makeBertGraphWiringScenario(bool request_owned_mask, bool can_run_result = true) {
+    auto scenario                 = makeBertWiringScenario();
+    scenario.graph_wiring_only    = true;
+    scenario.graph_can_run_result = can_run_result;
+    if (request_owned_mask) {
+        const auto token_count           = scenario.inputs.combo_tokens.numel();
+        scenario.inputs.text_tokens_mask = pinnedTensor(std::vector<int32_t>(token_count, 1), {token_count});
+    }
     return scenario;
 }
 
@@ -438,6 +579,35 @@ Scenario makeScenario(const std::string& name) {
     }
     if (name == "micro_batch") {
         return makeMicroBatchScenario();
+    }
+    if (name == "bert_wiring") {
+        return makeBertWiringScenario();
+    }
+    if (name == "bert_graph_wiring") {
+        return makeBertGraphWiringScenario(false);
+    }
+    if (name == "bert_graph_request_owned_mask") {
+        return makeBertGraphWiringScenario(true);
+    }
+    if (name == "bert_graph_can_run_false") {
+        return makeBertGraphWiringScenario(false, false);
+    }
+    if (name == "bert_without_request_owned_multimodal_inputs") {
+        return makeBertWithoutRequestOwnedMultimodalInputsScenario();
+    }
+    const std::string unsupported_micro_batch_prefix = "unsupported_micro_batch_";
+    if (name.rfind(unsupported_micro_batch_prefix, 0) == 0) {
+        return makeUnsupportedMicroBatchScenario(name.substr(unsupported_micro_batch_prefix.size()));
+    }
+    const std::string degenerate_micro_batch_prefix = "degenerate_micro_batch_";
+    if (name.rfind(degenerate_micro_batch_prefix, 0) == 0) {
+        const auto remainder = name.substr(degenerate_micro_batch_prefix.size());
+        for (const std::string kind : {"single_request", "mixed_multilayer"}) {
+            const auto kind_prefix = kind + "_";
+            if (remainder.rfind(kind_prefix, 0) == 0) {
+                return makeDegenerateUnsupportedMicroBatchScenario(kind, remainder.substr(kind_prefix.size()));
+            }
+        }
     }
     if (name == "cp_actual_lengths") {
         return makeContextParallelScenario();
@@ -503,7 +673,18 @@ py::dict runPyWrappedModelCacheStoreScenario(py::object py_model, const std::str
     manager->setCacheStore(cache_store);
 
     Weights weights;
-    weights.layers.resize(1);
+    weights.layers.resize(scenario.layer_num);
+    if (scenario.bert_embedding_weights) {
+        auto position_encoding = std::make_shared<DenseWeights>();
+        position_encoding->kernel =
+            torch::zeros({64, 1}, torch::TensorOptions().dtype(torch::kFloat16).device(torch::kCUDA));
+        weights.position_encoding = std::move(position_encoding);
+
+        auto token_type_embedding = std::make_shared<DenseWeights>();
+        token_type_embedding->kernel =
+            torch::zeros({2, 1}, torch::TensorOptions().dtype(torch::kFloat16).device(torch::kCUDA));
+        weights.token_type_embedding = std::move(token_type_embedding);
+    }
     GptModelDescription description;
     description.data_type                    = DataType::TYPE_FP16;
     description.norm_type                    = NormType::rmsnorm;
@@ -533,14 +714,36 @@ py::dict runPyWrappedModelCacheStoreScenario(py::object py_model, const std::str
                               manager,
                               scenario.mtp_cache_config_index};
 
+    std::optional<bool>                  micro_batch_plan_enabled;
+    std::shared_ptr<RecordingGraphState> graph_recording;
     {
         PyWrappedModel model(params, std::move(py_model));
         if (scenario.replace_cp_processor) {
             model.context_parallel_processor_ = std::make_unique<TestContextParallelProcessor>(scenario.parallelism);
         }
-        (void)model.forward(scenario.inputs);
+        if (scenario.graph_wiring_only) {
+            graph_recording                 = std::make_shared<RecordingGraphState>();
+            graph_recording->can_run_result = scenario.graph_can_run_result;
+            model.graph_runner_             = new RecordingGraphBase(graph_recording);
+            model.enable_cuda_graph_        = true;
+            model.prepareAttentionInputs(scenario.inputs, /*skip_forward_event_sync=*/true);
+            model.updateKVCacheKernelBlockId(scenario.inputs);
+        } else if (scenario.plan_micro_batches_only) {
+            micro_batch_plan_enabled = model.planMicroBatches(scenario.inputs).enable;
+        } else {
+            (void)model.forward(scenario.inputs);
+        }
     }
-    return serializeResult(*cache_store, scenario.base_addresses);
+    auto result = serializeResult(*cache_store, scenario.base_addresses);
+    if (micro_batch_plan_enabled.has_value()) {
+        result["micro_batch_plan_enabled"] = *micro_batch_plan_enabled;
+    }
+    if (graph_recording) {
+        result["graph_calls"]                = graph_recording->calls;
+        result["graph_position_id_numels"]   = graph_recording->position_id_numels;
+        result["graph_token_type_id_numels"] = graph_recording->token_type_id_numels;
+    }
+    return result;
 }
 
 }  // namespace

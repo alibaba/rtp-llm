@@ -261,5 +261,5 @@ class AutoModel:
         logits = torch.matmul(
             hidden_states.to(self.lm_head_weight.dtype), self.lm_head_weight.t()
         ).to(torch.float32)
-        next_token_id = torch.argmax(logits, dim=-1)
+        next_token_id = torch.argmax(logits, dim=-1).to(dtype=torch.int32)
         return next_token_id

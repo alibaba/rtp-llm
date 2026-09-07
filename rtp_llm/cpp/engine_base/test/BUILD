@@ -16,6 +16,19 @@ cuda13_torch_link_deps = select({
 })
 
 cc_test(
+    name = "embedding_id_range_test",
+    srcs = [
+        "EmbeddingIdRangeTest.cc",
+    ],
+    copts = copts(),
+    deps = [
+        "//rtp_llm/cpp/engine_base:embedding_id_range",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
     name = "step_window_profiler_configure_test",
     srcs = [
         "StepWindowProfilerConfigureTest.cc",

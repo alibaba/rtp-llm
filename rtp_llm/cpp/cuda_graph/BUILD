@@ -12,12 +12,24 @@ cc_library(
 )
 
 cc_library(
-    name = "combo_position_ids_validation",
-    hdrs = ["combo_position_ids_validation.h"],
+    name = "cuda_graph_replay_contracts",
+    hdrs = ["cuda_graph_replay_contracts.h"],
     deps = torch_deps(),
     visibility = ["//visibility:public"],
 )
 
+# This public compatibility target/header is compiled by its independent test;
+# remove it only after downstream migration is confirmed.
+cc_library(
+    name = "combo_position_ids_validation",
+    hdrs = ["combo_position_ids_validation.h"],
+    deps = [":cuda_graph_replay_contracts"],
+    visibility = ["//visibility:public"],
+)
+
+# These filegroups are public Bazel targets even though in-repo C++ targets use
+# cuda_graph_impl/cuda_graph_hdrs_lib. Removing or rewiring them requires a
+# dedicated compatibility review and downstream validation.
 filegroup(
     name = "cuda_graph_srcs",
     srcs = [
@@ -33,8 +45,9 @@ filegroup(
 filegroup(
     name = "cuda_graph_hdrs",
     srcs = [
-        "cuda_graph_base.h",
         "combo_position_ids_validation.h",
+        "cuda_graph_base.h",
+        "cuda_graph_replay_contracts.h",
         "cuda_graph_device_shims.h",
         "cuda_graph_utils.h",
         "cuda_graph_runner.h",
@@ -73,7 +86,7 @@ cc_library(
     ],
     deps = torch_deps() + [
         ":cuda_graph_base",
-        ":combo_position_ids_validation",
+        ":cuda_graph_replay_contracts",
         ":cuda_graph_hdrs_lib",
         "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
         "//rtp_llm/cpp/utils:core_utils",

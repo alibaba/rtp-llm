@@ -14,6 +14,7 @@ from rtp_llm.models_py.modules import (
     EmbeddingBert,
     FMHAImplBase,
     LayerNorm,
+    MultimodalEmbeddingInjector,
 )
 from rtp_llm.ops import HWKernelConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import (
@@ -117,6 +118,7 @@ class BertModel(GptModelBase):
             beta=weights.get_global_weight(W.pre_decoder_ln_beta),
             eps=config.layernorm_eps,
         )
+        self.multimodal_embedding_injector = MultimodalEmbeddingInjector()
         self.layers = nn.ModuleList(
             [
                 BertDecoderLayer(
@@ -135,6 +137,31 @@ class BertModel(GptModelBase):
     ) -> PyModelOutputs:
         input_ids: torch.Tensor = inputs.input_ids
         bert_embedding_inputs = inputs.bert_embedding_inputs
+        # MultimodalProcessor writes arbitrary signed int32 feature hashes into
+        # image slots for prefix-cache keys. The image features replace these
+        # rows below, but embedding lookup runs first and must only see valid IDs.
+        multimodal_features = inputs.multimodal_inputs.multimodal_features
+        multimodal_locs = inputs.multimodal_inputs.mm_features_locs
+        text_tokens_mask = inputs.embedding_inputs.text_tokens_mask
+        has_text_tokens_mask = (
+            text_tokens_mask is not None and text_tokens_mask.numel() != 0
+        )
+        has_multimodal_features = bool(multimodal_features)
+        has_multimodal_locs = (
+            multimodal_locs is not None and multimodal_locs.numel() != 0
+        )
+        # This is Bert-specific: image slots hold feature hashes before the
+        # word-table lookup, while feature/location pairing belongs to the
+        # shared injector below. Keep the check here, before any device lookup.
+        if not (has_multimodal_features == has_multimodal_locs == has_text_tokens_mask):
+            raise ValueError(
+                "multimodal features, locations, and text_tokens_mask must be "
+                "provided together: "
+                f"features={len(multimodal_features)}, "
+                f"locations={multimodal_locs.numel() if has_multimodal_locs else 0}, "
+                f"mask_tokens={text_tokens_mask.numel() if has_text_tokens_mask else 0}"
+            )
+
         inputs_embeds = self.embed_tokens(
             input_ids,
             bert_embedding_inputs.combo_position_ids,
@@ -142,8 +169,20 @@ class BertModel(GptModelBase):
             bert_embedding_inputs.combo_tokens_type_ids,
             bert_embedding_inputs.token_type_embedding,
             bert_embedding_inputs.input_embedding_scalar,
+            text_tokens_mask if has_text_tokens_mask else None,
         )
         hidden_states = self.pre_decoder_layernorm(inputs_embeds)
+
+        # Producer contract: every multimodal feature is already projected to
+        # hidden_size and normalized in the first decoder layer's input space.
+        # Replace image rows after the text pre-LN so producer-owned features do
+        # not inherit text position/type embeddings or get normalized twice.
+        hidden_states = self.multimodal_embedding_injector(
+            hidden_states,
+            multimodal_features,
+            multimodal_locs,
+        )
+
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(inputs)
         for i, decoder_layer in enumerate(self.layers[: self.layer_num]):

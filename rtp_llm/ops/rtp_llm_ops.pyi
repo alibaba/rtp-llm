@@ -14,6 +14,7 @@ __all__ = [
     "XQAAttnOp",
     "XQAParams",
     "embedding",
+    "embedding_bert",
     "fused_add_layernorm",
     "fused_add_rmsnorm",
     "fused_qk_rmsnorm",
@@ -77,12 +78,26 @@ def embedding(
     output: torch.Tensor,
     input: torch.Tensor,
     weight: torch.Tensor,
-    cuda_stream: int = 0,
+    position_ids: torch.Tensor | None = None,
+    token_type_ids: torch.Tensor | None = None,
+    text_tokens_mask: torch.Tensor | None = None,
 ) -> None:
     """
-    Embedding lookup kernel
+    Embedding lookup kernel. position_ids and token_type_ids are retained for
+    compatibility and ignored.
     """
 
+def embedding_bert(
+    output: torch.Tensor,
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    combo_position_ids: torch.Tensor,
+    position_encoding: torch.Tensor,
+    combo_tokens_type_ids: torch.Tensor,
+    token_type_embedding: torch.Tensor,
+    input_embedding_scalar: float = 1.0,
+    text_tokens_mask: torch.Tensor | None = None,
+) -> None: ...
 def fused_add_layernorm(
     input: torch.Tensor,
     residual: torch.Tensor,
