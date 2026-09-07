@@ -1,0 +1,723 @@
+schema_version: 1
+id: engine_admission_gate
+description: Separate prefill concurrency, decode hard gate, prefill waiting cap and
+  KV pool capacity programs.
+category: admission
+profiles:
+- batch-window
+- single-batch
+requires:
+- enqueue_batch
+environment:
+  backend: java_mock
+  n_prefill: 1
+  n_decode: 2
+  perf_preset: default
+  config_overrides:
+    ordering: priority
+    queue_timeout_ms: 60000
+execution:
+  timeout_s: 900
+  stage_timeout_s: 60
+  cleanup_timeout_s: 120
+variants:
+- id: prefill_concurrency
+  legacy_case_ids:
+  - engine_prefill_concurrency_gate_park
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: slow
+    action: engine_control
+    params:
+      targets:
+      - prefill-0
+      operation: set_perf
+      perf:
+        prefill_fixed_ms: 3000
+  - id: fired
+    action: admission_fire
+    params:
+      count: 4
+      concurrency: 1
+      input_len: 512
+      output_len: 2
+      consume: deferred
+      request_timeout_s: 45
+      spacing_s: 0.4
+      spacing_every: 1
+      keys_per_request: 0
+    timeout_s: 180
+  - id: all_admitted
+    action: admission_check
+    params:
+      rows:
+        $ref: stages.fired.output.rows
+      metric: admitted_count
+      expected: 4
+      op: eq
+  - id: park
+    action: admission_observe
+    params:
+      targets:
+      - prefill-0
+      fields:
+      - prefill_waiting_batches
+      - waiting
+      duration_s: 10
+      reduce: any
+      until_value: 1
+      until_op: ge
+    timeout_s: 20
+  - id: park_seen
+    action: admission_gauge_check
+    params:
+      snapshot:
+        $ref: stages.park.output.snapshot
+      fields:
+      - prefill_waiting_batches
+      - waiting
+      stat: max_seen
+      op: ge
+      expected: 1
+  - id: drained
+    action: admission_wait
+    params:
+      wave:
+        $ref: stages.fired.output.wave
+    timeout_s: 120
+  - id: all_completed
+    action: admission_check
+    params:
+      rows:
+        $ref: stages.drained.output.rows
+      metric: success_count
+      expected: 4
+      op: eq
+  - id: empty
+    action: admission_observe
+    params:
+      targets:
+      - prefill-0
+      fields:
+      - prefill_waiting_batches
+      - waiting
+      duration_s: 10
+      reduce: all
+      until_value: 0
+      until_op: eq
+    timeout_s: 20
+  - id: park_empty
+    action: admission_gauge_check
+    params:
+      snapshot:
+        $ref: stages.empty.output.snapshot
+      fields:
+      - prefill_waiting_batches
+      - waiting
+      stat: max_latest
+      op: eq
+      expected: 0
+  - id: master_clean
+    action: master_ready
+    params:
+      target: single
+      inflight_zero: true
+    timeout_s: 30
+  - id: recovery
+    action: admission_wave
+    params:
+      count: 1
+      concurrency: 1
+      input_len: 2048
+      output_len: 2
+      request_timeout_s: 30
+  - id: recovery_done
+    action: admission_wait
+    params:
+      wave:
+        $ref: stages.recovery.output.wave
+    timeout_s: 120
+  - id: recovered
+    action: admission_check
+    params:
+      rows:
+        $ref: stages.recovery_done.output.rows
+      metric: success_count
+      expected: 1
+      op: eq
+  - id: normal_perf
+    action: engine_control
+    params:
+      targets:
+      - prefill-0
+      operation: set_perf
+      perf:
+        prefill_fixed_ms: 100
+  - id: cleanup
+    action: teardown
+- id: decode_hard_gate
+  legacy_case_ids:
+  - engine_decode_hard_gate_unbounded_park
+  environment_overrides:
+    n_prefill: 2
+    n_decode: 1
+    config_overrides:
+      decode_max_engine_requests: 5000
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: slow_decode
+    action: engine_control
+    params:
+      targets:
+      - decode-0
+      operation: set_perf
+      perf:
+        decode_scale: 10
+  - id: fired
+    action: admission_fire
+    params:
+      count: 280
+      concurrency: 1
+      input_len: 512
+      output_len: 64
+      consume: deferred
+      request_timeout_s: 45
+      spacing_s: 0.05
+      spacing_every: 25
+      keys_per_request: 0
+    timeout_s: 180
+  - id: all_admitted
+    action: admission_check
+    params:
+      rows:
+        $ref: stages.fired.output.rows
+      metric: admitted_count
+      expected: 280
+      op: eq
+  - id: park
+    action: admission_observe
+    params:
+      targets:
+      - decode-0
+      fields:
+      - running
+      - waiting
+      duration_s: 18
+      reduce: all
+    timeout_s: 28
+  - id: conditional_park
+    action: admission_decode_park_check
+    params:
+      snapshot:
+        $ref: stages.park.output.snapshot
+      gate: 128
+  - id: drained
+    action: admission_wait
+    params:
+      wave:
+        $ref: stages.fired.output.wave
+    timeout_s: 300
+  - id: completed_95pct
+    action: admission_check
+    params:
+      rows:
+        $ref: stages.drained.output.rows
+      metric: success_count
+      expected: 266
+      op: ge
+  - id: empty
+    action: admission_observe
+    params:
+      targets:
+      - decode-0
+      fields:
+      - waiting
+      duration_s: 15
+      reduce: all
+      until_value: 0
+      until_op: eq
+    timeout_s: 25
+  - id: park_empty
+    action: admission_gauge_check
+    params:
+      snapshot:
+        $ref: stages.empty.output.snapshot
+      fields:
+      - waiting
+      stat: max_latest
+      op: eq
+      expected: 0
+  - id: master_clean
+    action: master_ready
+    params:
+      target: single
+      inflight_zero: true
+    timeout_s: 60
+  - id: recovery
+    action: admission_wave
+    params:
+      count: 1
+      concurrency: 1
+      input_len: 2048
+      output_len: 2
+      request_timeout_s: 30
+  - id: recovery_done
+    action: admission_wait
+    params:
+      wave:
+        $ref: stages.recovery.output.wave
+    timeout_s: 120
+  - id: recovered
+    action: admission_check
+    params:
+      rows:
+        $ref: stages.recovery_done.output.rows
+      metric: success_count
+      expected: 1
+      op: eq
+  - id: normal_perf
+    action: engine_control
+    params:
+      targets:
+      - decode-0
+      operation: set_perf
+      perf:
+        decode_scale: 1
+  - id: cleanup
+    action: teardown
+- id: prefill_waiting_cap
+  legacy_case_ids:
+  - admission_engine_waiting_batch_cap_reject
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: limited
+    action: engine_control
+    params:
+      targets:
+      - prefill-0
+      operation: set_perf
+      perf:
+        prefill_fixed_ms: 3000
+        max_waiting_batches: 1
+  - id: occupants
+    action: admission_fire
+    params:
+      count: 2
+      concurrency: 1
+      input_len: 512
+      output_len: 2
+      consume: immediate
+      request_timeout_s: 45
+      spacing_s: 0.4
+      spacing_every: 1
+      keys_per_request: 0
+    timeout_s: 180
+  - id: occupants_admitted
+    action: admission_check
+    params:
+      rows:
+        $ref: stages.occupants.output.rows
+      metric: admitted_count
+      expected: 2
+      op: eq
+  - id: saturated
+    action: admission_observe
+    params:
+      targets:
+      - prefill-0
+      fields:
+      - prefill_waiting_batches
+      duration_s: 8
+      reduce: all
+      until_value: 1
+      until_op: ge
+    timeout_s: 18
+  - id: cap_seen
+    action: admission_gauge_check
+    params:
+      snapshot:
+        $ref: stages.saturated.output.snapshot
+      fields:
+      - prefill_waiting_batches
+      stat: min_latest
+      op: ge
+      expected: 1
+  - id: probe
+    action: admission_wave
+    params:
+      count: 1
+      concurrency: 1
+      input_len: 512
+      output_len: 2
+      request_timeout_s: 10
+      keys_per_request: 0
+  - id: probe_done
+    action: admission_wait
+    params:
+      wave:
+        $ref: stages.probe.output.wave
+    timeout_s: 120
+  - id: backpressure_error
+    action: admission_check
+    params:
+      rows:
+        $ref: stages.probe_done.output.rows
+      metric: all_error_contains
+      expected: true
+      op: eq
+      text:
+      - prefill waiting queue full
+      - backpressure
+  - id: fast_reject
+    action: admission_check
+    params:
+      rows:
+        $ref: stages.probe_done.output.rows
+      metric: latency_max
+      expected: 3
+      op: lt
+  - id: unbounded
+    action: engine_control
+    params:
+      targets:
+      - prefill-0
+      operation: set_perf
+      perf:
+        max_waiting_batches: 0
+  - id: before_fourth
+    action: admission_observe
+    params:
+      targets:
+      - prefill-0
+      fields:
+      - prefill_waiting_batches
+      duration_s: 0
+      reduce: all
+    timeout_s: 10
+  - id: fourth
+    action: admission_fire
+    params:
+      count: 1
+      concurrency: 1
+      input_len: 512
+      output_len: 2
+      consume: immediate
+      request_timeout_s: 45
+      spacing_s: 0
+      spacing_every: 1
+      keys_per_request: 0
+    timeout_s: 180
+  - id: fourth_admitted
+    action: admission_check
+    params:
+      rows:
+        $ref: stages.fourth.output.rows
+      metric: admitted_count
+      expected: 1
+      op: eq
+  - id: occupants_done
+    action: admission_wait
+    params:
+      wave:
+        $ref: stages.occupants.output.wave
+    timeout_s: 120
+  - id: occupants_complete
+    action: admission_check
+    params:
+      rows:
+        $ref: stages.occupants_done.output.rows
+      metric: success_count
+      expected: 2
+      op: eq
+  - id: fourth_done
+    action: admission_wait
+    params:
+      wave:
+        $ref: stages.fourth.output.wave
+    timeout_s: 120
+  - id: pressure_recovery
+    action: admission_check
+    params:
+      rows:
+        $ref: stages.fourth_done.output.rows
+      metric: success_count
+      expected: 1
+      op: eq
+  - id: empty
+    action: admission_observe
+    params:
+      targets:
+      - prefill-0
+      fields:
+      - prefill_waiting_batches
+      - waiting
+      duration_s: 10
+      reduce: all
+      until_value: 0
+      until_op: eq
+    timeout_s: 20
+  - id: park_empty
+    action: admission_gauge_check
+    params:
+      snapshot:
+        $ref: stages.empty.output.snapshot
+      fields:
+      - prefill_waiting_batches
+      - waiting
+      stat: max_latest
+      op: eq
+      expected: 0
+  - id: master_clean
+    action: master_ready
+    params:
+      target: single
+      inflight_zero: true
+    timeout_s: 30
+  - id: recovery
+    action: admission_wave
+    params:
+      count: 1
+      concurrency: 1
+      input_len: 2048
+      output_len: 2
+      request_timeout_s: 30
+  - id: recovery_done
+    action: admission_wait
+    params:
+      wave:
+        $ref: stages.recovery.output.wave
+    timeout_s: 120
+  - id: recovered
+    action: admission_check
+    params:
+      rows:
+        $ref: stages.recovery_done.output.rows
+      metric: success_count
+      expected: 1
+      op: eq
+  - id: normal_perf
+    action: engine_control
+    params:
+      targets:
+      - prefill-0
+      operation: set_perf
+      perf:
+        prefill_fixed_ms: 100
+        max_waiting_batches: 0
+  - id: cleanup
+    action: teardown
+- id: kv_pool_capacity
+  legacy_case_ids:
+  - admission_engine_kv_lack_mem_fast_reject
+  environment_overrides:
+    prefill_cache_blocks: 17
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: slow
+    action: engine_control
+    params:
+      targets:
+      - prefill-0
+      operation: set_perf
+      perf:
+        prefill_fixed_ms: 3000
+  - id: occupants
+    action: admission_fire
+    params:
+      count: 2
+      concurrency: 1
+      input_len: 512
+      output_len: 2
+      consume: immediate
+      request_timeout_s: 45
+      spacing_s: 0.4
+      spacing_every: 1
+      keys_per_request: 8
+    timeout_s: 180
+  - id: occupants_admitted
+    action: admission_check
+    params:
+      rows:
+        $ref: stages.occupants.output.rows
+      metric: admitted_count
+      expected: 2
+      op: eq
+  - id: saturated
+    action: admission_observe
+    params:
+      targets:
+      - prefill-0
+      fields:
+      - held_blocks
+      duration_s: 8
+      reduce: all
+      until_value: 16
+      until_op: ge
+    timeout_s: 18
+  - id: pool_full
+    action: admission_gauge_check
+    params:
+      snapshot:
+        $ref: stages.saturated.output.snapshot
+      fields:
+      - held_blocks
+      stat: min_latest
+      op: ge
+      expected: 16
+  - id: probe
+    action: admission_wave
+    params:
+      count: 1
+      concurrency: 1
+      input_len: 512
+      output_len: 2
+      request_timeout_s: 10
+      keys_per_request: 8
+  - id: probe_done
+    action: admission_wait
+    params:
+      wave:
+        $ref: stages.probe.output.wave
+    timeout_s: 120
+  - id: lack_mem_error
+    action: admission_check
+    params:
+      rows:
+        $ref: stages.probe_done.output.rows
+      metric: all_error_contains
+      expected: true
+      op: eq
+      text:
+      - lack_mem
+      - insufficient kv cache
+      - enqueuebatch rejected
+  - id: fast_reject
+    action: admission_check
+    params:
+      rows:
+        $ref: stages.probe_done.output.rows
+      metric: latency_max
+      expected: 3
+      op: lt
+  - id: occupants_done
+    action: admission_wait
+    params:
+      wave:
+        $ref: stages.occupants.output.wave
+    timeout_s: 120
+  - id: occupants_complete
+    action: admission_check
+    params:
+      rows:
+        $ref: stages.occupants_done.output.rows
+      metric: success_count
+      expected: 2
+      op: eq
+  - id: available
+    action: admission_observe
+    params:
+      targets:
+      - prefill-0
+      fields:
+      - available_blocks
+      duration_s: 10
+      reduce: all
+      until_value: 8
+      until_op: ge
+    timeout_s: 20
+  - id: pool_recovered
+    action: admission_gauge_check
+    params:
+      snapshot:
+        $ref: stages.available.output.snapshot
+      fields:
+      - available_blocks
+      stat: min_latest
+      op: ge
+      expected: 8
+  - id: fresh_lease
+    action: admission_fire
+    params:
+      count: 1
+      concurrency: 1
+      input_len: 512
+      output_len: 2
+      consume: immediate
+      request_timeout_s: 45
+      spacing_s: 0
+      spacing_every: 1
+      keys_per_request: 8
+    timeout_s: 180
+  - id: fresh_done
+    action: admission_wait
+    params:
+      wave:
+        $ref: stages.fresh_lease.output.wave
+    timeout_s: 120
+  - id: fresh_succeeded
+    action: admission_check
+    params:
+      rows:
+        $ref: stages.fresh_done.output.rows
+      metric: success_count
+      expected: 1
+      op: eq
+  - id: engine_clean
+    action: admission_engine_clean
+    params:
+      targets:
+      - prefill-0
+      - decode-0
+      - decode-1
+    timeout_s: 15
+  - id: master_clean
+    action: master_ready
+    params:
+      target: single
+      inflight_zero: true
+    timeout_s: 30
+  - id: recovery
+    action: admission_wave
+    params:
+      count: 1
+      concurrency: 1
+      input_len: 2048
+      output_len: 2
+      request_timeout_s: 30
+  - id: recovery_done
+    action: admission_wait
+    params:
+      wave:
+        $ref: stages.recovery.output.wave
+    timeout_s: 120
+  - id: recovered
+    action: admission_check
+    params:
+      rows:
+        $ref: stages.recovery_done.output.rows
+      metric: success_count
+      expected: 1
+      op: eq
+  - id: normal_perf
+    action: engine_control
+    params:
+      targets:
+      - prefill-0
+      operation: set_perf
+      perf:
+        prefill_fixed_ms: 100
+  - id: cleanup
+    action: teardown
+legacy_case_ids:
+- engine_prefill_concurrency_gate_park
+- engine_decode_hard_gate_unbounded_park
+- admission_engine_waiting_batch_cap_reject
+- admission_engine_kv_lack_mem_fast_reject

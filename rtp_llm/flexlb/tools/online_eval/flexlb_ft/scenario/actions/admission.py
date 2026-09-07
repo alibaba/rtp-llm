@@ -24,7 +24,16 @@ def _fields(params, allowed, required=()):
 
 def _traffic_validate(params, plan):
     p = _fields(
-        params, {"count", "concurrency", "input_len", "output_len", "request_timeout_s"}
+        params,
+        {
+            "count",
+            "concurrency",
+            "input_len",
+            "output_len",
+            "request_timeout_s",
+            "consume",
+            "keys_per_request",
+        },
     )
     for key, default, limit in (
         ("count", 1, 300),
@@ -42,6 +51,21 @@ def _traffic_validate(params, plan):
         or not 0 < p["request_timeout_s"] <= 60
     ):
         raise ValueError("invalid admission request deadline")
+    p.setdefault("consume", "immediate")
+    p.setdefault("keys_per_request", 0)
+    if p["consume"] not in {"immediate", "deferred"}:
+        raise ValueError("invalid consumer mode")
+    if type(p["keys_per_request"]) is not int or not 0 <= p["keys_per_request"] <= 1024:
+        raise ValueError("invalid per-request block count")
+    return p
+
+
+def _wave_validate(params, plan):
+    p = _traffic_validate(params, plan)
+    if p["consume"] != "immediate":
+        raise ValueError(
+            "deferred admission uses admission_fire with its enqueue_batch capability"
+        )
     return p
 
 
@@ -63,11 +87,16 @@ class AdmissionWave:
                 count=1,
                 input_len=p["input_len"],
                 output_len=p["output_len"],
-                consume="immediate",
+                consume=p.get("consume", "immediate"),
                 schedule_timeout_s=30,
                 stream_timeout_s=p["request_timeout_s"],
             ),
         )
+        if p.get("keys_per_request", 0):
+            seed = self.ctx.ops.next_request_id()
+            batch.params["block_keys"] = [
+                seed * 2048 + i for i in range(1, p["keys_per_request"] + 1)
+            ]
         item = dict(
             batch=batch, started=False, done=threading.Event(), error=None, future=None
         )
@@ -90,7 +119,10 @@ class AdmissionWave:
                     self.ctx.sleeper,
                 )
                 batch.submit(request_deadline)
-                batch.wait(request_deadline)
+                if p.get("consume", "immediate") == "immediate" and not p.get(
+                    "submission_only"
+                ):
+                    batch.wait(request_deadline)
             except Exception as exc:
                 item["error"] = exc
             finally:
@@ -148,6 +180,12 @@ class AdmissionWave:
         errors = [x["error"] for x in self.items if x["error"]]
         if errors:
             raise errors[0]
+        if self.params.get("consume") == "deferred" or self.params.get(
+            "submission_only"
+        ):
+            for item in self.items:
+                if item["started"]:
+                    item["batch"].wait(deadline)
         self.persist()
 
     def cleanup(self, deadline):
@@ -262,6 +300,7 @@ def _occupy(ctx, params, deadline):
 
 
 METRICS = {
+    "admitted_count",
     "success_count",
     "reject_count",
     "serve_error_count",
@@ -310,7 +349,9 @@ def _check(ctx, params, deadline):
     rejected = [r for r in rows if r["schedule"]["status"] == "REJECTED"]
     selected = rejected if params["scope"] == "rejected" else rows
     metric = params["metric"]
-    if metric == "success_count":
+    if metric == "admitted_count":
+        actual = sum(r["schedule"]["status"] == "OK" for r in selected)
+    elif metric == "success_count":
         actual = sum(request_success(r) for r in selected)
     elif metric == "reject_count":
         actual = len(rejected)
@@ -355,6 +396,8 @@ def _check(ctx, params, deadline):
             if (
                 type(start) not in (int, float)
                 or type(end) not in (int, float)
+                or not math.isfinite(start)
+                or not math.isfinite(end)
                 or end < start
             ):
                 raise ValueError("latency needs real request timestamps")
@@ -395,9 +438,7 @@ def _check(ctx, params, deadline):
 
 
 HANDLERS = [
-    StageHandler(
-        "admission_wave", _traffic_validate, _wave, {"wave": "admission_wave"}
-    ),
+    StageHandler("admission_wave", _wave_validate, _wave, {"wave": "admission_wave"}),
     StageHandler("admission_wait", _wait_validate, _wait, {"rows": "admission_rows"}),
     StageHandler(
         "admission_occupy",
@@ -414,3 +455,308 @@ HANDLERS = [
         checks=frozenset({"criterion"}),
     ),
 ]
+
+
+def _fire_validate(params, plan):
+    p = dict(params)
+    spacing = p.pop("spacing_s", 0)
+    every = p.pop("spacing_every", 1)
+    p.setdefault("consume", "deferred")
+    p = _traffic_validate(p, plan)
+    if (
+        type(spacing) not in (int, float)
+        or not math.isfinite(spacing)
+        or not 0 <= spacing <= 2
+    ):
+        raise ValueError("fire spacing must be finite and bounded")
+    if type(every) is not int or every < 1:
+        raise ValueError("fire spacing cadence must be positive")
+    p.update(spacing_s=spacing, spacing_every=every, submission_only=True)
+    return p
+
+
+def _fire(ctx, params, deadline):
+    wave = AdmissionWave(ctx, params)
+    handle = ctx.register_resource("admission_wave", wave, wave.cleanup)
+    for i in range(params["count"]):
+        deadline.check()
+        wave.submit(deadline)
+        item = wave.items[-1]
+        item["future"].result(timeout=deadline.remaining())
+        if item["error"]:
+            raise item["error"]
+        if (i + 1) % params["spacing_every"] == 0:
+            deadline.sleep(params["spacing_s"])
+    wave.persist()
+    return StageOutput(
+        {
+            "wave": handle,
+            "rows": ctx.register_resource(
+                "admission_rows", wave.rows(), historical=True
+            ),
+        },
+        artifacts=[str(wave.path)],
+    )
+
+
+GAUGES = {
+    "waiting",
+    "running",
+    "prefill_waiting_batches",
+    "held_blocks",
+    "available_blocks",
+    "inflight",
+}
+
+
+def _observe_validate(params, plan):
+    p = _fields(
+        params,
+        {"targets", "fields", "duration_s", "until_value", "until_op", "reduce"},
+        {"targets", "fields"},
+    )
+    from .engine_control import ENGINE_NAME
+
+    if (
+        not isinstance(p["targets"], list)
+        or not p["targets"]
+        or any(
+            not isinstance(n, str) or not ENGINE_NAME.fullmatch(n) for n in p["targets"]
+        )
+    ):
+        raise ValueError("observation needs explicit valid engine targets")
+    if (
+        not isinstance(p["fields"], list)
+        or not p["fields"]
+        or any(f not in GAUGES for f in p["fields"])
+    ):
+        raise ValueError("unsupported engine gauge")
+    p.setdefault("duration_s", 0)
+    p.setdefault("reduce", "all")
+    if (
+        type(p["duration_s"]) not in (int, float)
+        or not math.isfinite(p["duration_s"])
+        or not 0 <= p["duration_s"] <= 60
+    ):
+        raise ValueError("observation interval must be bounded")
+    if ("until_value" in p) != ("until_op" in p):
+        raise ValueError("observation stopping condition requires value and operator")
+    if "until_value" in p and (
+        type(p["until_value"]) is not int
+        or p["until_value"] < 0
+        or p["until_op"] not in {"eq", "ge", "le"}
+    ):
+        raise ValueError("invalid observation stopping condition")
+    if p["reduce"] not in {"all", "any"}:
+        raise ValueError("observation reduction must be all/any")
+    return p
+
+
+def _observe(ctx, params, deadline):
+    samples = []
+    until = ctx.clock() + params["duration_s"]
+    path = ctx.artifact_dir / f"admission-observation-{len(ctx._resources)}.json"
+    try:
+        while True:
+            deadline.check()
+            engines = _engines(_http(ctx.ops, "snapshot", deadline), params["targets"])
+            sample = {}
+            for name, entry in engines.items():
+                sample[name] = {}
+                for field in params["fields"]:
+                    value = entry.get(field)
+                    if type(value) is not int or value < 0:
+                        raise ValueError(f"missing/invalid engine gauge {name}.{field}")
+                    sample[name][field] = value
+            samples.append(dict(time_s=ctx.clock(), engines=sample))
+            if "until_value" in params:
+                want, op = params["until_value"], params["until_op"]
+                matches = [
+                    v == want if op == "eq" else v >= want if op == "ge" else v <= want
+                    for row in sample.values()
+                    for v in row.values()
+                ]
+                if all(matches) if params["reduce"] == "all" else any(matches):
+                    break
+            if ctx.clock() >= until:
+                break
+            deadline.sleep(min(0.2, until - ctx.clock()))
+    finally:
+        path.write_text(json.dumps(samples, indent=2) + "\n")
+    return StageOutput(
+        {
+            "snapshot": ctx.register_resource(
+                "admission_observation", samples, historical=True
+            )
+        },
+        artifacts=[str(path)],
+    )
+
+
+def _gauge_validate(params, plan):
+    p = _fields(
+        params,
+        {"snapshot", "fields", "stat", "op", "expected"},
+        {"snapshot", "fields", "stat", "op", "expected"},
+    )
+    plan.reference(p["snapshot"], "admission_observation")
+    if (
+        not isinstance(p["fields"], list)
+        or not p["fields"]
+        or any(f not in GAUGES for f in p["fields"])
+    ):
+        raise ValueError("invalid check fields")
+    if (
+        p["stat"] not in {"max_seen", "max_latest", "min_latest"}
+        or p["op"] not in {"eq", "ge", "le"}
+        or type(p["expected"]) is not int
+        or p["expected"] < 0
+    ):
+        raise ValueError("invalid gauge comparison")
+    return p
+
+
+def _gauge(ctx, params, deadline):
+    deadline.check()
+    samples = ctx.resource(params["snapshot"], "admission_observation")
+    if not samples:
+        raise ValueError("gauge check has no actual observations")
+    used = samples if params["stat"] == "max_seen" else samples[-1:]
+    values = [
+        row[field]
+        for s in used
+        for row in s["engines"].values()
+        for field in params["fields"]
+    ]
+    actual = min(values) if params["stat"] == "min_latest" else max(values)
+    expected = params["expected"]
+    passed = (
+        actual == expected
+        if params["op"] == "eq"
+        else actual >= expected if params["op"] == "ge" else actual <= expected
+    )
+    return StageOutput(
+        {"passed": passed},
+        [
+            CheckResult(
+                "gauge", "PASS" if passed else "FAIL", actual=actual, expected=expected
+            )
+        ],
+    )
+
+
+def _decode_park_validate(params, plan):
+    p = _fields(params, {"snapshot", "gate"}, {"snapshot", "gate"})
+    plan.reference(p["snapshot"], "admission_observation")
+    if type(p["gate"]) is not int or p["gate"] <= 0:
+        raise ValueError("decode gate must be positive")
+    return p
+
+
+def _decode_park(ctx, params, deadline):
+    deadline.check()
+    samples = ctx.resource(params["snapshot"], "admission_observation")
+    if not samples:
+        raise ValueError("park inference requires observed decode gauges")
+    running = max(row["running"] for s in samples for row in s["engines"].values())
+    waiting = max(row["waiting"] for s in samples for row in s["engines"].values())
+    activated = running >= params["gate"]
+    passed = not activated or waiting >= 1
+    return StageOutput(
+        {"passed": passed},
+        [
+            CheckResult(
+                "conditional_park",
+                "PASS" if passed else "FAIL",
+                actual=dict(
+                    running_max=running, waiting_max=waiting, gate_filled=activated
+                ),
+                expected=params["gate"],
+            )
+        ],
+    )
+
+
+HANDLERS += [
+    StageHandler(
+        "admission_fire",
+        _fire_validate,
+        _fire,
+        {"wave": "admission_wave", "rows": "admission_rows"},
+        requires=frozenset({"enqueue_batch"}),
+    ),
+    StageHandler(
+        "admission_observe",
+        _observe_validate,
+        _observe,
+        {"snapshot": "admission_observation"},
+    ),
+    StageHandler(
+        "admission_gauge_check",
+        _gauge_validate,
+        _gauge,
+        {"passed": "boolean"},
+        checks=frozenset({"gauge"}),
+    ),
+    StageHandler(
+        "admission_decode_park_check",
+        _decode_park_validate,
+        _decode_park,
+        {"passed": "boolean"},
+        checks=frozenset({"conditional_park"}),
+    ),
+]
+
+
+def _clean_validate(params, plan):
+    p = _fields(params, {"targets"}, {"targets"})
+    from .engine_control import ENGINE_NAME
+
+    if (
+        not isinstance(p["targets"], list)
+        or not p["targets"]
+        or any(
+            not isinstance(n, str) or not ENGINE_NAME.fullmatch(n) for n in p["targets"]
+        )
+    ):
+        raise ValueError("engine cleanup requires explicit targets")
+    return p
+
+
+def _clean(ctx, params, deadline):
+    samples = []
+    path = ctx.artifact_dir / f"admission-engine-clean-{len(ctx._resources)}.json"
+    try:
+        while True:
+            snapshot = _engines(_http(ctx.ops, "snapshot", deadline), params["targets"])
+            rows = {}
+            for name, entry in snapshot.items():
+                count, leak = entry.get("inflight"), entry.get("leak_detected")
+                if type(count) is not int or count < 0 or type(leak) is not bool:
+                    raise ValueError("missing engine-owned inflight/leak evidence")
+                rows[name] = dict(inflight=count, leak_detected=leak)
+            samples.append(dict(time_s=ctx.clock(), engines=rows))
+            if all(
+                r["inflight"] == 0 and r["leak_detected"] is False
+                for r in rows.values()
+            ):
+                break
+            deadline.sleep(0.2)
+    finally:
+        path.write_text(json.dumps(samples, indent=2) + "\n")
+    return StageOutput(
+        {"clean": True},
+        [CheckResult("engine_clean", "PASS", actual=rows)],
+        artifacts=[str(path)],
+    )
+
+
+HANDLERS.append(
+    StageHandler(
+        "admission_engine_clean",
+        _clean_validate,
+        _clean,
+        {"clean": "boolean"},
+        checks=frozenset({"engine_clean"}),
+    )
+)

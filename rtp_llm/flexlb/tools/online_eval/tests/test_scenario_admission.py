@@ -146,6 +146,7 @@ class AdmissionTests(unittest.TestCase):
         h.update({x.name: x for x in admission.HANDLERS})
         root = Path(__file__).resolve().parents[1] / "scenarios/admission"
         plans = compile_scenarios(load_scenarios(root), handlers=h)
+        plans = [p for p in plans if p["scenario_id"] == "admission_queue"]
         self.assertEqual(6, len(plans))
         for plan in plans:
             self.assertIn(plan["profile"], ("batch-window", "single-batch"))
@@ -189,12 +190,13 @@ class AdmissionProgramsTest(unittest.TestCase):
         plan = next(
             p for p in plans if p["variant_id"] == variant and p["profile"] == profile
         )
-        state = SimpleNamespace(sent=0, active=False, lock=threading.Lock())
+        state = SimpleNamespace(sent=0, waited=0, active=False, lock=threading.Lock())
         test = self
 
         class Batch:
             def __init__(self, ctx, params):
                 self.ctx = ctx
+                self.params = params
                 self.entries = []
                 self.records = []
 
@@ -215,6 +217,13 @@ class AdmissionProgramsTest(unittest.TestCase):
                     )
                 if variant == "queue_depth" and state.active and i >= 3:
                     code, text = 8510, "queue depth limit exceeded"
+                if variant == "prefill_waiting_cap" and i == 3:
+                    code, text = 8510, "prefill waiting queue full backpressure"
+                if variant == "kv_pool_capacity" and i == 3:
+                    code, text = (
+                        8510,
+                        "enqueuebatch rejected LACK_MEM insufficient kv cache",
+                    )
                 row = test.row(code, text, latency)
                 row["wire_request_id"] = i
                 self.records = [row]
@@ -228,7 +237,7 @@ class AdmissionProgramsTest(unittest.TestCase):
                 ]
 
             def wait(self, deadline):
-                pass
+                state.waited += 1
 
             def cancel(self, reason):
                 pass
@@ -275,20 +284,58 @@ class AdmissionProgramsTest(unittest.TestCase):
         ]:
             registry[name] = external(registry[name])
         backend = SimpleNamespace(
-            setup=lambda *args: (SimpleNamespace(), None), teardown=lambda *args: None
+            setup=lambda *args: (
+                SimpleNamespace(),
+                SimpleNamespace(next_request_id=Mock(side_effect=range(1000, 2000))),
+            ),
+            teardown=lambda *args: None,
         )
+
+        def engine_rows(*args):
+            if variant in {"queue_depth", "slo_deadline", "master_capacity"}:
+                return {
+                    f"prefill-{i}": {"waiting": int(state.sent >= 2), "running": 0}
+                    for i in range(2)
+                }
+            names = (
+                ["decode-0"]
+                if variant == "decode_hard_gate"
+                else ["prefill-0", "decode-0", "decode-1"]
+            )
+            pending = state.waited < state.sent
+            return {
+                name: dict(
+                    waiting=int(pending),
+                    running=128 if pending else 0,
+                    prefill_waiting_batches=int(pending),
+                    held_blocks=16 if state.waited < 3 and state.sent >= 2 else 0,
+                    available_blocks=1 if state.waited < 3 else 17,
+                    inflight=0,
+                    leak_detected=False,
+                )
+                for name in names
+            }
+
+        class Clock:
+            value = 100.0
+
+            def __call__(self):
+                return self.value
+
+            def sleep(self, seconds):
+                self.value += seconds
+
+        clock = Clock()
         with patch.object(admission, "RequestBatch", Batch), patch.object(
             admission, "_http", return_value={}
-        ), patch.object(
-            admission,
-            "_engines",
-            side_effect=lambda *args: {
-                f"prefill-{i}": {"waiting": int(state.sent >= 2), "running": 0}
-                for i in range(2)
-            },
-        ):
+        ), patch.object(admission, "_engines", side_effect=engine_rows):
             return execute_instance(
-                plan, backend, registry, Path(self.tmp.name) / f"{variant}-{profile}"
+                plan,
+                backend,
+                registry,
+                Path(self.tmp.name) / f"{variant}-{profile}",
+                clock=clock,
+                sleeper=clock.sleep,
             )
 
     def test_all_six_compiled_programs_execute_every_declared_check(self):
@@ -308,6 +355,24 @@ class AdmissionProgramsTest(unittest.TestCase):
                             s["action"] == "admission_check" and s["checks"]
                             for s in result["stages"]
                         )
+                    )
+
+    def test_all_eight_engine_gate_programs_execute_their_declared_checks(self):
+        for variant in (
+            "prefill_concurrency",
+            "decode_hard_gate",
+            "prefill_waiting_cap",
+            "kv_pool_capacity",
+        ):
+            for profile in ("batch-window", "single-batch"):
+                with self.subTest(variant=variant, profile=profile):
+                    result = self.run_program(variant, profile)
+                    self.assertEqual("PASS", result["status"], result)
+                    self.assertTrue(
+                        all(s["status"] == "PASS" for s in result["stages"])
+                    )
+                    self.assertTrue(
+                        all(c["status"] == "PASS" for c in result["cleanup"])
                     )
 
     def test_wrong_numeric_capacity_code_fails_its_actual_program_check(self):
@@ -330,3 +395,106 @@ class AdmissionProgramsTest(unittest.TestCase):
         result = self.run_program("master_capacity", cleanup_error=True)
         self.assertEqual("ERROR", result["status"], result)
         self.assertTrue(any(c["status"] == "ERROR" for c in result["cleanup"]))
+
+
+class AdmissionGateTests(unittest.TestCase):
+    setUp = AdmissionTests.setUp
+
+    def test_deferred_fire_is_ack_only_until_explicit_wait(self):
+        made = []
+
+        def factory(ctx, params):
+            batch = Mock()
+            batch.params = params
+            batch.entries = []
+            batch.snapshot_records.return_value = []
+            made.append(batch)
+            return batch
+
+        params = admission._fire_validate(dict(count=4, spacing_s=0), None)
+        with patch.object(admission, "RequestBatch", side_effect=factory):
+            out = admission._fire(self.ctx, params, self.deadline)
+            self.assertEqual(4, len(made))
+            for batch in made:
+                batch.submit.assert_called_once()
+                batch.wait.assert_not_called()
+                self.assertEqual("deferred", batch.params["consume"])
+            admission._wait(self.ctx, {"wave": out.output["wave"]}, self.deadline)
+            for batch in made:
+                batch.wait.assert_called_once()
+            self.assertTrue(all(c["status"] == "PASS" for c in self.ctx.cleanup(2)))
+
+    def test_block_leases_use_disjoint_explicit_key_sets(self):
+        self.ctx.ops = SimpleNamespace(next_request_id=Mock(side_effect=[100, 101]))
+        made = []
+
+        def factory(ctx, params):
+            batch = Mock(params=params, entries=[])
+            batch.snapshot_records.return_value = []
+            made.append(batch)
+            return batch
+
+        params = admission._fire_validate(
+            dict(count=2, keys_per_request=8, spacing_s=0), None
+        )
+        with patch.object(admission, "RequestBatch", side_effect=factory):
+            admission._fire(self.ctx, params, self.deadline)
+            a, b = [batch.params["block_keys"] for batch in made]
+            self.assertEqual(8, len(a))
+            self.assertEqual(8, len(b))
+            self.assertFalse(set(a) & set(b))
+            self.ctx.cleanup(2)
+
+    def test_decode_overflow_predicate_activates_only_when_gate_was_observed(self):
+        for running, waiting, expected in [
+            (127, 0, "PASS"),
+            (128, 0, "FAIL"),
+            (128, 1, "PASS"),
+        ]:
+            handle = self.ctx.register_resource(
+                "admission_observation",
+                [{"engines": {"decode-0": {"running": running, "waiting": waiting}}}],
+            )
+            out = admission._decode_park(
+                self.ctx, {"snapshot": handle, "gate": 128}, self.deadline
+            )
+            self.assertEqual(expected, out.checks[0].status)
+            self.assertEqual(running >= 128, out.checks[0].actual["gate_filled"])
+
+    def test_observation_missing_counter_is_not_interpreted_as_empty_park(self):
+        with patch.object(admission, "_http", return_value={}), patch.object(
+            admission, "_engines", return_value={"prefill-0": {}}
+        ):
+            with self.assertRaises(ValueError):
+                admission._observe(
+                    self.ctx,
+                    dict(targets=["prefill-0"], fields=["waiting"], duration_s=0),
+                    self.deadline,
+                )
+
+    def test_compile_preserves_280_decode_wave_and_17_block_pool(self):
+        registry = handlers()
+        registry.update({h.name: h for h in admission.HANDLERS})
+        root = Path(__file__).resolve().parents[1] / "scenarios/admission"
+        plans = compile_scenarios(load_scenarios(root), handlers=registry)
+        plans = [p for p in plans if p["scenario_id"] == "engine_admission_gate"]
+        self.assertEqual(8, len(plans))
+        for plan in plans:
+            stages = {s["id"]: s for s in plan["stages"]}
+            if plan["variant_id"] == "decode_hard_gate":
+                self.assertEqual(280, stages["fired"]["params"]["count"])
+                self.assertEqual(64, stages["fired"]["params"]["output_len"])
+                self.assertEqual("deferred", stages["fired"]["params"]["consume"])
+                self.assertEqual(18, stages["park"]["params"]["duration_s"])
+                self.assertEqual(128, stages["conditional_park"]["params"]["gate"])
+                self.assertEqual(266, stages["completed_95pct"]["params"]["expected"])
+                self.assertEqual(
+                    5000,
+                    plan["environment"]["config_overrides"][
+                        "decode_max_engine_requests"
+                    ],
+                )
+            if plan["variant_id"] == "kv_pool_capacity":
+                self.assertEqual(17, plan["environment"]["prefill_cache_blocks"])
+                self.assertEqual(8, stages["occupants"]["params"]["keys_per_request"])
+                self.assertEqual(16, stages["pool_full"]["params"]["expected"])
