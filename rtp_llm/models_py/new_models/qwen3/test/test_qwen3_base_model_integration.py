@@ -404,6 +404,20 @@ class Qwen3BaseModelIntegrationTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "W4A8 requires bits=4"):
             init_quant_config(invalid)
 
+    def test_init_quant_config_rejects_invalid_json_shapes(self):
+        cases = {
+            "[]": "JSON object",
+            "null": "JSON object",
+            "{}": "non-empty string 'method' or 'quant_algo'",
+            '{"method": ""}': "non-empty string 'method' or 'quant_algo'",
+            '{"quant_algo": 7}': "non-empty string 'method' or 'quant_algo'",
+        }
+
+        for quantization, message in cases.items():
+            with self.subTest(quantization=quantization):
+                with self.assertRaisesRegex(ValueError, message):
+                    init_quant_config(quantization)
+
     def test_registry_default_falls_back_for_unsupported_quantization(self):
         config = _model_config()
         config.use_new_loader = None
