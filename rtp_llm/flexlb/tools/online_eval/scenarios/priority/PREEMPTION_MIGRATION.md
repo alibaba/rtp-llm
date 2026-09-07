@@ -1,7 +1,7 @@
 # Priority preemption migration
 
 Owner: agent4. Source baseline: `295af797bd7ed3a842c9cad42b5722c64cd24c9a`.
-This checkpoint implements three complete candidate programs out of fourteen old
+This checkpoint implements four complete candidate programs out of fourteen old
 contracts. No old case is called or deleted. Independent review, default catalog
 integration and actual Java execution remain pending.
 
@@ -55,10 +55,9 @@ observed order and terminal outcomes are saved as artifacts.
   restores its original blocking dependency. An explicit zero submission gap
   avoids inserting a .15s pause after the standalone placeholder.
 
-## Pending contracts (11)
+## Pending contracts (10)
 
 - atpm_preempt_decode_engine_owned
-- atpm_preemption_disabled_zero_eviction
 - atpm_comparator_frozen_weak
 - atpm_error_code_family
 - atpm_config_strict_reject
@@ -168,3 +167,29 @@ not exact Boolean equivalence for that old early-return path. The old case
 remains unchanged. Independent static acceptance of the third candidate is
 conditional on this stronger construction and shared clean fix d955; it does
 not constitute Java execution acceptance.
+
+
+## Fourth candidate: disabled_zero_eviction
+
+Legacy atpm_preemption_disabled_zero_eviction uses T1: 1P/4D, PRIORITY,
+SINGLE/NON_BATCH, queueTimeout8000, cap1/waiting8, no preemption block.
+The complete resolved configuration is tested against old _t1_spec/render_env.
+To avoid deep-merge inheritance, the family no longer supplies preemption;
+the first three variants explicitly add PREFILL_QUEUED instead. Their resolved
+behavior is retained. Empty dictionaries and null are not used to erase it.
+
+P3000 plus1.5 sync precedes two rounds: ph30+eight30+incoming70, then
+ph70+eight70+incoming90, all2048/2. Each placeholder must be admitted/pending,
+all9 peer Schedule calls settle before ph35 and eachpeer35; each round has
+clean30. AT2 and P6_terminal require no8400/8429/8430 among placeholder and
+eight queued peers, and incoming200 or8511. Legal expiry of queued requests
+is preserved; this does not require every request to succeed. Both rounds
+must finish for a PASS; early failure may skip later diagnostic work.
+
+Unknown terminal codes produce ERROR because they cannot prove absence of a
+forbidden family. General raw-trailer extraction remains a shared backend
+integration dependency: a trailer-only failed stream cannot pass by being
+recorded as None. No actual Java/error-family completeness is claimed until
+that dependency and real execution are verified. Fixture tests cover20
+successful consumers,18 legal8511 Schedule rejections, queued8430 failure,
+and complete T1 config comparison. Shared clean d955 remains required.

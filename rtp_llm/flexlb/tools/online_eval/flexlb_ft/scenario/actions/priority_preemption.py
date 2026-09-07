@@ -323,7 +323,54 @@ def _expiry(ctx, p, deadline):
     )
 
 
+def _disabled(ctx, p, deadline):
+    placeholder, wave = [_cohort(ctx, p[key]) for key in ("placeholder", "wave")]
+    if not placeholder.complete or not wave.complete:
+        raise ValueError("disabled verdict requires drained cohorts")
+    ph, rows = placeholder.records(), wave.records()
+    fill, incoming = (30, 70) if p["round"] == 1 else (70, 90)
+    if len(ph) != 1 or len(rows) != 9:
+        raise ValueError("disabled program needs one placeholder plus nine peers")
+    if [r["priority"] for r in wave.p["requests"]] != [fill] * 8 + [incoming]:
+        raise ValueError("disabled cohort priorities differ from legacy round")
+    if placeholder.p["requests"][0]["priority"] != fill:
+        raise ValueError("disabled placeholder priority differs from legacy round")
+    outcomes = [_outcome(e, r) for e, r in zip(wave.entries, rows)]
+    ph_outcome = _outcome(placeholder.entries[0], ph[0])
+    # An unknown terminal cannot prove absence of a forbidden error family.
+    if any(code is None for _, code in outcomes + [ph_outcome]):
+        raise ValueError("disabled preemption requires typed terminal evidence")
+    zero = all(
+        code not in (8400, 8429, 8430) for _, code in outcomes[:8] + [ph_outcome]
+    )
+    inc_ok = outcomes[-1][1] in (200, 8511)
+    evidence = dict(
+        zero_preemption=zero,
+        incoming_code=outcomes[-1][1],
+        outcomes=outcomes,
+        placeholder_outcome=ph_outcome,
+    )
+    path = ctx.artifact_dir / f"preemption-disabled-{uuid.uuid4().hex}.json"
+    path.write_text(
+        json.dumps(dict(placeholder=ph, wave=rows, evidence=evidence), indent=2) + "\n"
+    )
+    return StageOutput(
+        checks=[
+            CheckResult(key, "PASS" if zero and inc_ok else "FAIL", actual=evidence)
+            for key in ("AT2", "P6_terminal")
+        ],
+        artifacts=[str(path)],
+    )
+
+
 HANDLERS = [
+    StageHandler(
+        "preemption_disabled",
+        _queued_params,
+        _disabled,
+        {},
+        checks=frozenset({"AT2", "P6_terminal"}),
+    ),
     StageHandler(
         "preemption_expiry",
         _queued_params,
