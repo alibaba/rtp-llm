@@ -1001,7 +1001,7 @@
       "id": "priority_queue",
       "category": "priority",
       "owner": "agent6",
-      "implementation_status": "planned",
+      "implementation_status": "candidate_partial",
       "legacy_case_ids": [
         "prio_order_basic",
         "prio_same_level_fifo",
@@ -1009,26 +1009,31 @@
         "prio_low_no_starvation",
         "prio_queue_timeout_terminal"
       ],
-      "candidate_contracts": [],
+      "candidate_contracts": [
+        "prio_same_level_fifo"
+      ],
       "pending_contracts": [
         "prio_low_no_starvation",
         "prio_normalize",
         "prio_order_basic",
-        "prio_queue_timeout_terminal",
-        "prio_same_level_fifo"
+        "prio_queue_timeout_terminal"
       ],
       "candidate_counts": {
-        "logical_scenarios": 0,
-        "variants": 0,
-        "instances": 0,
-        "checks": 0
+        "logical_scenarios": 1,
+        "variants": 1,
+        "instances": 1,
+        "checks": 3
       },
-      "source_files": [],
+      "source_files": [
+        "scenarios/priority/priority_queue.yaml"
+      ],
       "replacement_status": "retain_legacy_pending_paired_evidence",
       "static_review": {
         "status": "pending"
       },
-      "candidate_scenario_ids": []
+      "candidate_scenario_ids": [
+        "priority_queue"
+      ]
     },
     {
       "id": "priority_preemption",

@@ -12,6 +12,7 @@ from .actions.kv_capacity import HANDLERS as KV_CAPACITY_HANDLERS
 from .actions.kv_measurement import HANDLERS as KV_MEASUREMENT_HANDLERS
 from .actions.master import HANDLERS as MASTER_HANDLERS
 from .actions.observation import HANDLERS as OBSERVATION_HANDLERS
+from .actions.priority import HANDLERS as PRIORITY_HANDLERS
 from .actions.rpc_measurement import HANDLERS as RPC_MEASUREMENT_HANDLERS
 from .actions.status_protocol import HANDLERS as STATUS_PROTOCOL_HANDLERS
 
@@ -31,6 +32,7 @@ def handlers():
         *KV_MEASUREMENT_HANDLERS,
         *MASTER_HANDLERS,
         *OBSERVATION_HANDLERS,
+        *PRIORITY_HANDLERS,
         *RPC_MEASUREMENT_HANDLERS,
         *STATUS_PROTOCOL_HANDLERS,
     ]:
