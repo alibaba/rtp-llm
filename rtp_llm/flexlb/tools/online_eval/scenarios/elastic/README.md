@@ -192,8 +192,10 @@ Local tests use formal loader -> compiler -> runtime, real request-consumer
 threads, and simulated HTTP/gRPC services. They cover legacy explicit-error PASS
 versus zero-error FAIL, Schedule-rejection accounting, false pending caused by
 engine completion, the 40s terminal boundary, empty/cancelled terminals, recovery
-19/20 versus 18/20, and missing owner counters. Real Java mock and independent
-contract acceptance remain pending; legacy code stays available.
+19/20 versus 18/20, and missing owner counters. Independent static review passed
+at `33f9d1d1e0f7f64af5e9af2691e55435fd984034`, for the batch-window legacy
+terminal candidate only. Real Java acceptance remains pending; legacy code stays
+available, including its unmigrated single-batch profile.
 
 ## Steady recovery variant
 
@@ -242,7 +244,9 @@ removal. No production code changed and no legacy function was removed.
 Local tests execute the formal YAML with actual pump threads and simulated
 services. Independent checks cover a balanced last third with earlier persistent
 drift, queue depth three, missing occupancy, counter resets and empty subwindow
-gaps. This candidate still needs independent review and real Java mock acceptance.
+gaps. Independent static review passed at `a4ec79ebe5acccf647ae152fb388daab010f4ade`
+plus `84e6250228bf1777980590a779d07b4706a6b300` on core23. Real Java mock
+acceptance remains pending.
 
 ## KV-full shrink variant
 
@@ -302,7 +306,9 @@ error or collector cancellation cannot impersonate a permitted business error.
 Local tests execute the complete formal YAML with actual fill/pump threads and
 simulated request/metric services, plus boundary tests for saturation, reserve,
 zero rejection budget, milliseconds, 40s, pre-event 8211 and retirement messages.
-Independent review and real Java acceptance are pending. Legacy code is retained;
+Independent static review passed at `9520f72d8703d1bc49a03163f3ed2a00b09a1e04`
+plus `c879d43dbb29ab6945a3b91b50189cf9a5ebd4c2` on core23, including the
+stop-period negative fixtures. Real Java acceptance remains pending. Legacy code is retained;
 a later blocked branch is not counted as covered by earlier successful checks.
 
 ## Transient imbalance
@@ -365,7 +371,9 @@ as coverage.
 
 Local tests use actual pump/burst threads with simulated RPC and sampler data;
 they exercise the full formal YAML and boundary/error cases. They are not real
-Java evidence. Independent static review and Java acceptance remain pending.
+Java evidence. Independent static review passed at
+`d1f84c134eca2e62a59066058b7b1bd85de108ce` on core4e2139, with90 elastic
+tests rerun independently. Java acceptance remains pending.
 
 ## Coverage status
 
