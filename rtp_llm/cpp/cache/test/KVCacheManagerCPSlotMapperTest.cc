@@ -186,17 +186,18 @@ TEST_F(KVCacheManagerCPSlotMapperTest, CreatorSelectsLocalRoleIndependentOfCompu
 TEST_F(KVCacheManagerCPSlotMapperTest, CPShardedMallocAllowsPartialTailWithoutCacheKey) {
     const int seq_size_per_block = 4;
     auto      config             = makeTestConfig(/*block_num=*/20, seq_size_per_block);
+    config.cp_size = 2;
 
     ParallelismConfig par;
 
     auto mgr = std::make_shared<KVCacheManager>(config, /*warmup=*/false, nullptr, KVCacheConfig{}, par);
     ASSERT_TRUE(mgr->init());
+    const auto free_before = mgr->freeBlocksNum();
 
     auto resource  = makeResource(1, config.layer_num);
     auto token_ids = makeTokenIds(1, /*seq_len=*/1, seq_size_per_block);
 
     MallocInfo info{resource, token_ids};
-    info.cp_slot_mapper = std::make_shared<CPSlotMapper>(0, 2, seq_size_per_block);
 
     auto result = mgr->malloc(info);
     ASSERT_TRUE(result.success);
@@ -207,6 +208,21 @@ TEST_F(KVCacheManagerCPSlotMapperTest, CPShardedMallocAllowsPartialTailWithoutCa
     ASSERT_TRUE(result.success);
     EXPECT_EQ(resource->blocksNum(0, 0), 1);
     EXPECT_EQ(resource->cacheKeys(0).size(), 0);
+
+    // The published allocation length can lead the async token-state update.
+    info.incr_seq_len_override = 9;
+    EXPECT_NO_THROW(result = mgr->malloc(info));
+    EXPECT_TRUE(result.success);
+    EXPECT_EQ(resource->blocksNum(0, 0), 2);
+
+    // One speculative token still fits in the second logical interval [8,16).
+    token_ids->setReserveStep(1);
+    EXPECT_NO_THROW(result = mgr->malloc(info));
+    EXPECT_TRUE(result.success);
+    EXPECT_EQ(resource->blocksNum(0, 0), 2);
+
+    mgr->free(FreeInfo{resource, token_ids});
+    EXPECT_EQ(mgr->freeBlocksNum(), free_before);
 }
 
 // malloc() should auto-inject cpSlotMapper when caller does not provide one.
@@ -217,6 +233,7 @@ TEST_F(KVCacheManagerCPSlotMapperTest, CPShardedMallocAllowsPartialTailWithoutCa
 TEST_F(KVCacheManagerCPSlotMapperTest, DISABLED_MallocAutoInjectReducesBlockCount) {
     const int seq_size_per_block = 4;
     auto      config             = makeTestConfig(/*block_num=*/20, seq_size_per_block);
+    config.cp_size = 2;
 
     ParallelismConfig par;
     par.tp_rank                            = 0;
@@ -273,39 +290,49 @@ TEST_F(KVCacheManagerCPSlotMapperTest, DISABLED_MallocWithoutCPAllocatesFullBloc
     EXPECT_EQ(resource->blocksNum(0, 0), 4);
 }
 
-// Caller-provided cp_slot_mapper should override the auto-injected one.
-// DISABLED: needs multi-rank NCCL harness (KVCacheManager::allocateAndSync calls
-// execAllGather across the tp_size group); covered end-to-end in Stage 6 smoke.
-TEST_F(KVCacheManagerCPSlotMapperTest, DISABLED_MallocExplicitMapperOverridesAutoInject) {
+TEST_F(KVCacheManagerCPSlotMapperTest, ExplicitMapperMustMatchInstanceBeforeMutation) {
     const int seq_size_per_block = 4;
     auto      config             = makeTestConfig(/*block_num=*/30, seq_size_per_block);
-
-    // Manager has cp_size=2, but we'll pass a mapper with cp_size=4.
+    config.cp_size = 2;
     ParallelismConfig par;
-    par.tp_rank                            = 0;
-    par.tp_size                            = 2;
-    par.prefill_cp_config.kv_cache_sharded = true;
-
-    // warmup=true skips allocateAndSync (which would NCCL all-gather across the
-    // tp_size process group; in single-process UT there are no peers).  cp_slot_mapper_
-    // is constructed regardless of warmup, so cpSlotMapper() check is unaffected.
-    auto mgr = std::make_shared<KVCacheManager>(config, /*warmup=*/true, nullptr, KVCacheConfig{}, par);
+    auto mgr = std::make_shared<KVCacheManager>(config, false, nullptr, KVCacheConfig{}, par);
     ASSERT_TRUE(mgr->init());
-
-    const int seq_len   = 64;
-    auto      resource  = makeResource(1, config.layer_num);
-    auto      token_ids = makeTokenIds(1, seq_len, seq_size_per_block);
-
-    auto explicit_mapper = std::make_shared<CPSlotMapper>(0, 4, seq_size_per_block);
-    // virtual_block_size = 4 * 4 = 16
-    // effectiveSeqLenForAlloc(64) = ceil(64/16)*4 = 16 tokens => ceil(16/4) = 4 blocks
-
+    const auto free_before = mgr->freeBlocksNum();
+    auto resource = makeResource(1, config.layer_num);
+    auto token_ids = makeTokenIds(1, 17, seq_size_per_block);
     MallocInfo info{resource, token_ids};
-    info.cp_slot_mapper = explicit_mapper;
-    auto result         = mgr->malloc(info);
-    ASSERT_TRUE(result.success);
+    const auto invalid = {std::make_shared<CPSlotMapper>(0, 4, 4),
+                          std::make_shared<CPSlotMapper>(1, 2, 4),
+                          std::make_shared<CPSlotMapper>(0, 2, 8),
+                          std::make_shared<CPSlotMapper>()};
+    for (const auto& mapper : invalid) {
+        info.cp_slot_mapper = mapper;
+        EXPECT_ANY_THROW(mgr->malloc(info));
+        EXPECT_EQ(resource->blocksNum(0, 0), 0);
+        EXPECT_TRUE(resource->cacheKeys(0).empty());
+        EXPECT_EQ(mgr->freeBlocksNum(), free_before);
+    }
 
-    EXPECT_EQ(resource->blocksNum(0, 0), 4);
+    // Equal C/rank/P is valid even for a separately constructed object.
+    info.cp_slot_mapper = std::make_shared<CPSlotMapper>(0, 2, 4);
+    ASSERT_NE(info.cp_slot_mapper, mgr->cpSlotMapper());
+    ASSERT_TRUE(mgr->malloc(info).success);
+    EXPECT_EQ(resource->blocksNum(0, 0), 3);
+    const auto blocks_before = resource->blocks(0, 0);
+    const auto keys_before = resource->cacheKeys(0);
+    const auto free_after = mgr->freeBlocksNum();
+    InsertInfo insert{resource, token_ids, false};
+    for (const auto& mapper : invalid) {
+        info.cp_slot_mapper = mapper;
+        EXPECT_ANY_THROW(mgr->malloc(info));
+        insert.cp_slot_mapper = mapper;
+        EXPECT_ANY_THROW(mgr->insertIntoCache(insert));
+        EXPECT_EQ(resource->blocks(0, 0), blocks_before);
+        EXPECT_EQ(resource->cacheKeys(0), keys_before);
+        EXPECT_EQ(mgr->freeBlocksNum(), free_after);
+    }
+    mgr->free(FreeInfo{resource, token_ids});
+    EXPECT_EQ(mgr->freeBlocksNum(), free_before);
 }
 
 // insertIntoCache() should also auto-inject the mapper.
@@ -313,6 +340,7 @@ TEST_F(KVCacheManagerCPSlotMapperTest, DISABLED_MallocExplicitMapperOverridesAut
 TEST_F(KVCacheManagerCPSlotMapperTest, DISABLED_InsertAutoInjectsMapper) {
     const int seq_size_per_block = 4;
     auto      config             = makeTestConfig(/*block_num=*/20, seq_size_per_block);
+    config.cp_size = 2;
 
     ParallelismConfig par;
     par.tp_rank                            = 0;

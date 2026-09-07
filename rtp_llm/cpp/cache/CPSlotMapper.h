@@ -31,6 +31,10 @@ public:
         return virtual_block_size_;
     }
 
+    bool operator==(const CPSlotMapper& other) const {
+        return cp_rank_ == other.cp_rank_ && cp_size_ == other.cp_size_ && block_size_ == other.block_size_;
+    }
+
     int localBlockCount(int seq_len) const;
 
     // Translate actual seq_len to an effective value that, when divided by

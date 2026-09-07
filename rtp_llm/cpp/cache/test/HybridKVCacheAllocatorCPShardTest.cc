@@ -155,7 +155,9 @@ TEST_F(HybridKVCacheAllocatorCPShardTest, NullMapperIsPassthrough) {
 //    physical blocks on this rank for the full group.
 TEST_F(HybridKVCacheAllocatorCPShardTest, ShardedAllocHalvesFullGroup) {
     auto config    = makeCPHybridConfig();
+    config.cp_size = 2;
     auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    allocator->setCPSlotMapper(std::make_shared<CPSlotMapper>(0, 2, 4));
     allocator->setSharedBlockCache(std::make_shared<SharedBlockCache>());
     ASSERT_TRUE(allocator->init());
 
@@ -178,7 +180,9 @@ TEST_F(HybridKVCacheAllocatorCPShardTest, ShardedAllocHalvesFullGroup) {
 //    returning reuse_len in units of virtualBlockSize (= block_size * cp_size).
 TEST_F(HybridKVCacheAllocatorCPShardTest, ReuseHitOnLastRankCanonicalKey) {
     auto config    = makeCPHybridConfig();
+    config.cp_size = 2;
     auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    allocator->setCPSlotMapper(std::make_shared<CPSlotMapper>(0, 2, 4));
     allocator->setSharedBlockCache(std::make_shared<SharedBlockCache>());
     ASSERT_TRUE(allocator->init());
 
@@ -214,10 +218,12 @@ TEST_F(HybridKVCacheAllocatorCPShardTest, ReuseHitOnLastRankCanonicalKey) {
     EXPECT_EQ(batch_res->blocksNum(0, gid_full), 2);
 }
 
-// 4) When reuse is disabled, cp_slot_mapper still translates seq_len for malloc and skips the match.
+// 4) Disabling reuse keeps the group's CP allocation geometry and skips the match.
 TEST_F(HybridKVCacheAllocatorCPShardTest, ShardedAllocSkipsReuseWhenDisabled) {
     auto config    = makeCPHybridConfig();
+    config.cp_size = 2;
     auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    allocator->setCPSlotMapper(std::make_shared<CPSlotMapper>(0, 2, 4));
     allocator->setSharedBlockCache(std::make_shared<SharedBlockCache>());
     ASSERT_TRUE(allocator->init());
 
@@ -246,7 +252,9 @@ TEST_F(HybridKVCacheAllocatorCPShardTest, ShardedAllocSkipsReuseWhenDisabled) {
 //    (= last-rank canonical key at index cp_size-1=1 of the first virtual block window).
 TEST_F(HybridKVCacheAllocatorCPShardTest, InsertIntoCacheUsesCanonicalKeysAndVirtualBlockSize) {
     auto config    = makeCPHybridConfig();
+    config.cp_size = 2;
     auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    allocator->setCPSlotMapper(std::make_shared<CPSlotMapper>(0, 2, 4));
     allocator->setSharedBlockCache(std::make_shared<SharedBlockCache>());
     ASSERT_TRUE(allocator->init());
 
@@ -282,7 +290,9 @@ TEST_F(HybridKVCacheAllocatorCPShardTest, InsertIntoCacheUsesCanonicalKeysAndVir
 // 6) Two-malloc smoke: cp_size=4 sharding, request occupies 8 logical blocks ⇒ 2 per rank.
 TEST_F(HybridKVCacheAllocatorCPShardTest, ShardedAllocCpSize4) {
     auto config    = makeCPHybridConfig();
+    config.cp_size = 4;
     auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    allocator->setCPSlotMapper(std::make_shared<CPSlotMapper>(2, 4, 4));
     allocator->setSharedBlockCache(std::make_shared<SharedBlockCache>());
     ASSERT_TRUE(allocator->init());
 

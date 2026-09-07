@@ -1184,7 +1184,7 @@ static CacheConfig makeDSV4CpAllocatorConfig(uint32_t cp_size) {
     pc.role_type                          = RoleType::PREFILL;
     pc.tp_size                            = cp_size;
     pc.prefill_cp_config.kv_cache_sharded = true;
-    auto config = HybridPoolConfigCreator::createConfig(mc, pc, makeDsv4KvCacheConfig(), false, 0);
+    auto config = CacheConfigCreator::createBasicConfig(mc, pc, makeDsv4KvCacheConfig(), false, 0);
     config.block_num = 200;
     config.group_block_nums.assign(config.groupNums(), config.block_num);
     return config;
@@ -1217,7 +1217,10 @@ TEST_F(DSV4AllocatorTest, InitAndBasicProperties) {
 TEST_F(DSV4AllocatorTest, CpPageRrFixedAndSwaAllocateOneBlockPerVirtualBlock) {
     constexpr uint32_t cp_size = 4;
     auto               config  = makeDSV4CpAllocatorConfig(cp_size);
+    ASSERT_EQ(config.cp_size, cp_size);
     auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    allocator->setCPSlotMapper(
+        std::make_shared<CPSlotMapper>(0, static_cast<int>(cp_size), static_cast<int>(config.seq_size_per_block)));
     ASSERT_TRUE(allocator->init());
 
     const int spb     = allocator->seqSizePerBlock();

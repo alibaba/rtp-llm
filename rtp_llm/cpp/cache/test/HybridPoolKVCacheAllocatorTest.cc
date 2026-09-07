@@ -438,8 +438,11 @@ TEST_F(HybridPoolKVCacheAllocatorTest, TokenAggregatorsUseCPVirtualBlockSizeForF
     EXPECT_EQ(allocator->maxAvailableTokensNum(), 7u * 4u);
     EXPECT_EQ(allocator->availableTokensNum(), 7u * 4u);
 
+    config.cp_size = 2;
+    allocator = makeAllocator(config);
     allocator->setCPSlotMapper(
         std::make_shared<CPSlotMapper>(/*cp_rank=*/0, /*cp_size=*/2, /*block_size=*/4));
+    ASSERT_TRUE(allocator->init());
 
     EXPECT_EQ(allocator->maxAvailableTokensNum(), 7u * 8u);
     EXPECT_EQ(allocator->availableTokensNum(), 7u * 8u);
@@ -770,7 +773,9 @@ TEST_F(HybridPoolKVCacheAllocatorTest, ReserveBlocksRejectsWhenGroupCannotMeetIt
 
 TEST_F(HybridPoolKVCacheAllocatorTest, ReserveBlocksUseCPShardedFullGroupNeed) {
     auto config    = makeTinyMultiPoolHybridConfig(/*linear_block_num=*/20, /*full_block_num=*/6);
+    config.cp_size = 2;
     auto allocator = makeAllocator(config);
+    allocator->setCPSlotMapper(std::make_shared<CPSlotMapper>(0, 2, 4));
     ASSERT_TRUE(allocator->init());
 
     allocator->setReserveBlockNum(1);
@@ -1275,7 +1280,9 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4SharedBlockCacheIsUnifiedAcrossGroups
 
 TEST_F(HybridPoolKVCacheAllocatorTest, DSV4CPShardedInsertThenReuseSamePrefix) {
     auto config    = makeDSV4HybridPoolConfig(/*block_num=*/64);
+    config.cp_size = 2;
     auto allocator = makeAllocator(config);
+    allocator->setCPSlotMapper(std::make_shared<CPSlotMapper>(0, 2, static_cast<int>(config.seq_size_per_block)));
     ASSERT_TRUE(allocator->init());
 
     const int spb     = static_cast<int>(config.seq_size_per_block);
@@ -1326,7 +1333,9 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4CPShardedInsertThenReuseSamePrefix) {
 
 TEST_F(HybridPoolKVCacheAllocatorTest, DSV4CPShardedEvictionMarksCanonicalResource) {
     auto config    = makeDSV4HybridPoolConfig(/*block_num=*/64);
+    config.cp_size = 2;
     auto allocator = makeAllocator(config);
+    allocator->setCPSlotMapper(std::make_shared<CPSlotMapper>(0, 2, static_cast<int>(config.seq_size_per_block)));
     ASSERT_TRUE(allocator->init());
 
     const int spb     = static_cast<int>(config.seq_size_per_block);

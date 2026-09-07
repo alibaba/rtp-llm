@@ -148,6 +148,7 @@ private:
     void allocateAndSync();
     void reportMetricsLoop();
     void reportPrefillCacheHitMetrics(const MallocInfo& malloc_info, bool is_first_malloc);
+    void validateCPSlotMapper(const std::shared_ptr<CPSlotMapper>& mapper) const;
     KVCacheInfo buildKVCacheInfo(int64_t latest_version, bool need_cache_keys) const;
 
     // 成员变量

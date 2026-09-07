@@ -76,6 +76,9 @@ public:
     }
 
     void setCPSlotMapper(std::shared_ptr<CPSlotMapper> cp_slot_mapper) {
+        RTP_LLM_CHECK_WITH_INFO(!block_pool_ || cp_slot_mapper == cp_slot_mapper_
+                                   || (cp_slot_mapper && cp_slot_mapper_ && *cp_slot_mapper == *cp_slot_mapper_),
+                               "cannot change cache CP geometry after allocator init");
         cp_slot_mapper_ = std::move(cp_slot_mapper);
     }
 
@@ -118,7 +121,6 @@ protected:
     virtual void         decrKVCacheRef(const KVCacheResource& kvcache_resource, bool is_connector = false) = 0;
     bool                 cpShardThisGroupForCapacity(size_t gid) const;
     size_t               logicalSeqSizePerBlockForCapacity(size_t gid) const;
-    int                  cpEffectiveSeqLenForAlloc(size_t gid, int seq_len) const;
     int                  deviceCacheMetricTokensPerBlock() const;
 
     CacheConfig                        config_;

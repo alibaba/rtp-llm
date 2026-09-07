@@ -838,17 +838,32 @@ TEST_F(SingleTypeKVCacheAllocatorTest, MaxSeqLen) {
 
 TEST_F(SingleTypeKVCacheAllocatorTest, CapacityAndNeedBlocksUseCPVirtualBlockSize) {
     auto config = createSingleTypeTestConfig(/*layer_num=*/4, /*block_num=*/10, /*seq_size_per_block=*/8);
+    config.cp_size = 2;
     allocator_  = std::make_shared<SingleTypeKVCacheAllocator>(config);
-    ASSERT_TRUE(allocator_->init());
-
+    EXPECT_ANY_THROW(allocator_->init());  // No pool is built with missing CP geometry.
+    allocator_->setCPSlotMapper(std::make_shared<CPSlotMapper>(0, 2, 4));
+    EXPECT_ANY_THROW(allocator_->init());
     allocator_->setCPSlotMapper(
         std::make_shared<CPSlotMapper>(/*cp_rank=*/0, /*cp_size=*/2, /*block_size=*/8));
+    ASSERT_TRUE(allocator_->init());
+
+    const auto original = allocator_->cpSlotMapper();
+    for (const auto& mapper : {std::shared_ptr<CPSlotMapper>{},
+                               std::make_shared<CPSlotMapper>(0, 4, 8),
+                               std::make_shared<CPSlotMapper>(1, 2, 8),
+                               std::make_shared<CPSlotMapper>(0, 2, 4)}) {
+        EXPECT_ANY_THROW(allocator_->setCPSlotMapper(mapper));
+        EXPECT_EQ(allocator_->cpSlotMapper(), original);
+    }
+    EXPECT_NO_THROW(allocator_->setCPSlotMapper(std::make_shared<CPSlotMapper>(0, 2, 8)));
 
     EXPECT_EQ(allocator_->maxAvailableTokensNum(), (10u - 1u) * 16u);
     EXPECT_EQ(allocator_->availableTokensNum(), (10u - 1u) * 16u);
 
     auto batch_resource = createBatchKVCacheResource(/*batch_size=*/1, config.layer_num);
     EXPECT_EQ(allocator_->singleBatchNeedBlocks(batch_resource, /*seq_len=*/65, /*reserve_step=*/0), 5);
+    EXPECT_EQ(allocator_->singleBatchNeedBlocks(batch_resource, /*seq_len=*/65, /*reserve_step=*/1), 5);
+    EXPECT_EQ(allocator_->seqSizePerBlock(), 8);  // Public key/buffer geometry stays physical.
 }
 
 // Test boundary conditions

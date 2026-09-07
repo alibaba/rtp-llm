@@ -51,7 +51,7 @@ bool HybridTypeKVCacheAllocator::doInit() {
                 ids, spec, block_pool_, gid, config_.linear_step, shared_cache_raw);
             linear_group_ids_.push_back(gid);
         } else {
-            group = std::make_shared<FullKVCacheGroup>(ids, spec, block_pool_, gid, shared_cache_raw);
+            group = std::make_shared<FullKVCacheGroup>(ids, spec, block_pool_, gid, shared_cache_raw, nullptr, config_.cp_size);
             full_group_ids_.push_back(gid);
         }
 

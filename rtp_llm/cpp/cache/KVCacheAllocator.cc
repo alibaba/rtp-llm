@@ -13,6 +13,12 @@
 namespace rtp_llm {
 
 bool KVCacheAllocator::init() {
+    RTP_LLM_CHECK_WITH_INFO(
+        cp_slot_mapper_ ? (cp_slot_mapper_->cpSize() == config_.cp_size
+                          && (!cp_slot_mapper_->isSharded()
+                              || cp_slot_mapper_->blockSize() == static_cast<int>(config_.seq_size_per_block))) :
+                          config_.cp_size == 1,
+        "cache CP mapper must match the configured C/P before allocator init");
     RTP_LLM_CHECK_WITH_INFO(doInit(), "init failed");
 
     // NOTE: `availableBlocksNum()` depends on `block_pool_` and must be queried after `doInit()`.
@@ -367,13 +373,6 @@ size_t KVCacheAllocator::logicalSeqSizePerBlockForCapacity(size_t gid) const {
     return (gid < config_.group_seq_size_per_block.size() && config_.group_seq_size_per_block[gid] > 0) ?
                config_.group_seq_size_per_block[gid] :
                config_.seq_size_per_block;
-}
-
-int KVCacheAllocator::cpEffectiveSeqLenForAlloc(size_t gid, int seq_len) const {
-    if (cpShardThisGroupForCapacity(gid)) {
-        return cp_slot_mapper_->effectiveSeqLenForAlloc(seq_len);
-    }
-    return seq_len;
 }
 
 int KVCacheAllocator::deviceCacheMetricTokensPerBlock() const {

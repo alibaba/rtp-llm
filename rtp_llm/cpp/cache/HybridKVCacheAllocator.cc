@@ -13,11 +13,6 @@
 namespace rtp_llm {
 namespace {
 
-// CP shard helpers: when mapper is null/passthrough, all helpers no-op.
-inline int cpEffectiveSeqLen(const std::shared_ptr<CPSlotMapper>& mapper, int seq_len) {
-    return (mapper && mapper->isSharded()) ? mapper->effectiveSeqLenForAlloc(seq_len) : seq_len;
-}
-
 inline CacheKeysType cpEffectiveCacheKeys(const std::shared_ptr<CPSlotMapper>& mapper, const CacheKeysType& full) {
     if (!mapper || !mapper->isSharded()) {
         return full;
@@ -35,20 +30,13 @@ inline int cpVirtualBlockSize(const std::shared_ptr<CPSlotMapper>& mapper, int b
     return (mapper && mapper->isSharded()) ? mapper->virtualBlockSize() : block_size;
 }
 
-// Per-group gate: only paged FULL groups are RR-sharded by changing the
-// sequence length fed into their allocator. Fixed/SWA groups use their own
-// group seq_size_per_block, which may already be CP-compact.
+// Paged FULL groups use rank-local blocks and canonical checkpoint keys.
 inline bool cpShardThisGroup(const std::shared_ptr<CPSlotMapper>& mapper, CacheGroupType group_type) {
     return mapper && mapper->isSharded() && group_type == CacheGroupType::FULL;
 }
 
 inline bool containsGroupId(const std::vector<int>& group_ids, int gid) {
     return std::find(group_ids.begin(), group_ids.end(), gid) != group_ids.end();
-}
-
-inline int
-cpEffectiveSeqLenForGroup(const std::shared_ptr<CPSlotMapper>& mapper, CacheGroupType group_type, int seq_len) {
-    return cpShardThisGroup(mapper, group_type) ? mapper->effectiveSeqLenForAlloc(seq_len) : seq_len;
 }
 
 inline int
@@ -224,9 +212,16 @@ MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& ma
     if (malloc_info.enable_device_cache) {
         // CP-sharded: subsample to last-rank canonical key namespace before matching.
         CacheKeysType cp_keys = cpEffectiveCacheKeys(cp_mapper, cache_keys);
-        // Always drop the last match key. It may be a partial tail; even when
-        // aligned, fully reusing the input leaves no prefill tokens to compute.
-        CacheKeysType match_keys(cp_keys.begin(), cp_keys.empty() ? cp_keys.end() : cp_keys.end() - 1);
+        CacheKeysType match_keys;
+        if (cp_mapper && cp_mapper->isSharded()) {
+            // A partial interval may have no canonical key. Bound reuse by tokens,
+            // keeping complete checkpoints and at least one token to compute.
+            const size_t match_count = std::min(cp_keys.size(),
+                static_cast<size_t>(std::max(common_seq_len - 1, 0) / reuse_unit_tokens));
+            match_keys.assign(cp_keys.begin(), cp_keys.begin() + match_count);
+        } else {
+            match_keys.assign(cp_keys.begin(), cp_keys.empty() ? cp_keys.end() : cp_keys.end() - 1);
+        }
         auto          begin_us = currentTimeUs();
         reuse_blocks           = reuseCache(match_keys, *kv_resource, cp_mapper);
         match_cost_time_us     = currentTimeUs() - begin_us;
@@ -259,12 +254,8 @@ MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& ma
     }
     for (int gid = 0; gid < kv_resource->groupNums(); ++gid) {
         auto&      block_ids_0   = kv_resource->mutableBlockIds(0, gid);
-        const auto group_type    = static_cast<size_t>(gid) < config_.group_types.size() ?
-                                       config_.group_types[static_cast<size_t>(gid)] :
-                                       CacheGroupType::FULL;
-        const int  group_seq_len = cpEffectiveSeqLenForGroup(cp_mapper, group_type, common_seq_len);
         if (!kv_cache_groups_[static_cast<size_t>(gid)]->malloc(
-                block_ids_0, group_seq_len, malloc_info.reuse_cache, 0)) {
+                block_ids_0, common_seq_len, malloc_info.reuse_cache, 0)) {
             rollbackInitMalloc(*kv_resource, referenced_blocks, original_sizes);
             return {false, 0};
         }
@@ -281,7 +272,6 @@ MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& ma
 
 MallocResult HybridKVCacheAllocator::incrMalloc(const MallocInfo& malloc_info) {
     auto&       kv_resource  = malloc_info.batch_kv_cache_resource;
-    const auto& cp_mapper    = malloc_info.cp_slot_mapper;
     const int   batch_size   = kv_resource->batchSize();
     const int   raw_seq_len  = malloc_info.incrSeqLen();
     const int   reserve_step = malloc_info.complete_token_ids->getReserveStep();
@@ -300,12 +290,8 @@ MallocResult HybridKVCacheAllocator::incrMalloc(const MallocInfo& malloc_info) {
     for (int b = 0; b < batch_size; ++b) {
         for (int gid = 0; gid < kv_resource->groupNums(); ++gid) {
             auto&      block_ids     = kv_resource->mutableBlockIds(b, gid);
-            const auto group_type    = static_cast<size_t>(gid) < config_.group_types.size() ?
-                                           config_.group_types[static_cast<size_t>(gid)] :
-                                           CacheGroupType::FULL;
-            const int  group_seq_len = cpEffectiveSeqLenForGroup(cp_mapper, group_type, raw_seq_len);
             if (!kv_cache_groups_[static_cast<size_t>(gid)]->malloc(
-                    block_ids, group_seq_len, malloc_info.reuse_cache, reserve_step)) {
+                    block_ids, raw_seq_len, malloc_info.reuse_cache, reserve_step)) {
                 all_success  = false;
                 failed_batch = b;
                 failed_group = gid;
@@ -478,7 +464,7 @@ void HybridKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) {
             if (src_keys.empty()) {
                 continue;
             }
-            const int    group_seq_size  = cpVirtualBlockSizeForGroup(cp_mapper, group_type, raw_group_seq);
+            const int    group_seq_size  = raw_group_seq;
             const size_t full_blocks_num = token_len / static_cast<size_t>(group_seq_size);
             const size_t n               = std::min(src_keys.size(), full_blocks_num);
             const auto&  blocks          = kv_cache_resource->blocks(batch_id, gid);
@@ -681,11 +667,10 @@ int HybridKVCacheAllocator::getNeedBlocks(const MallocInfo& malloc_info) const {
     if (!malloc_info.batch_kv_cache_resource || !malloc_info.complete_token_ids) {
         return 0;
     }
-    const auto& cp_mapper          = malloc_info.cp_slot_mapper;
     const int   batch_size         = malloc_info.batch_kv_cache_resource->batchSize();
     const int   total_seq_len      = malloc_info.complete_token_ids->totalSeqLength();
     const int   raw_common_seq_len = std::min(malloc_info.complete_token_ids->commonSeqLength(), total_seq_len);
-    const int   raw_seq_len        = malloc_info.complete_token_ids->seqLength();
+    const int   raw_seq_len        = malloc_info.incrSeqLen();
     const int   reserve_step       = malloc_info.complete_token_ids->getReserveStep();
     const bool  reuse_enabled      = malloc_info.reuse_cache;
     const int   reuse_blocks_len   = reuse_enabled ? malloc_info.batch_kv_cache_resource->curBlocksNum() : 0;
@@ -693,13 +678,8 @@ int HybridKVCacheAllocator::getNeedBlocks(const MallocInfo& malloc_info) const {
     int common_blocks_total = 0;
     int extra_blocks_total  = 0;
     for (int gid = 0; gid < static_cast<int>(kv_cache_groups_.size()); ++gid) {
-        const auto group_type       = static_cast<size_t>(gid) < config_.group_types.size() ?
-                                          config_.group_types[static_cast<size_t>(gid)] :
-                                          CacheGroupType::FULL;
-        const int  group_common_seq = cpEffectiveSeqLenForGroup(cp_mapper, group_type, raw_common_seq_len);
-        const int  group_seq_len    = cpEffectiveSeqLenForGroup(cp_mapper, group_type, raw_seq_len);
         const auto need             = kv_cache_groups_[static_cast<size_t>(gid)]->getNeedBlocks(
-            group_common_seq, group_seq_len, reserve_step, reuse_blocks_len, reuse_enabled);
+            raw_common_seq_len, raw_seq_len, reserve_step, reuse_blocks_len, reuse_enabled);
         common_blocks_total += need.common_blocks;
         extra_blocks_total += need.extra_blocks;
     }
@@ -712,9 +692,8 @@ int HybridKVCacheAllocator::singleBatchNeedBlocks(const BatchKVCacheResourcePtr&
     int need_blocks = 0;
     for (int gid = 0; gid < batch_kv_cache_resource->groupNums(); ++gid) {
         const int cur_blocks    = batch_kv_cache_resource->blocksNum(0, gid);
-        const int group_seq_len = cpEffectiveSeqLenForAlloc(static_cast<size_t>(gid), seq_len);
         need_blocks +=
-            kv_cache_groups_[static_cast<size_t>(gid)]->needBlocksNum(group_seq_len, cur_blocks, reserve_step);
+            kv_cache_groups_[static_cast<size_t>(gid)]->needBlocksNum(seq_len, cur_blocks, reserve_step);
     }
     return need_blocks;
 }

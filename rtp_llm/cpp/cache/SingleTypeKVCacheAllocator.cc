@@ -18,14 +18,9 @@ int SingleTypeKVCacheAllocator::getNeedBlocks(const MallocInfo& malloc_info) con
     const bool reuse_enabled    = malloc_info.reuse_cache;
     const int  reuse_blocks_len = reuse_enabled ? malloc_info.batch_kv_cache_resource->curBlocksNum() : 0;
     const int  batch_size       = malloc_info.batch_kv_cache_resource->batchSize();
-    int        seq_len          = malloc_info.complete_token_ids->seqLength();
+    int        seq_len          = malloc_info.incrSeqLen();
     const int  reserve_step     = malloc_info.complete_token_ids->getReserveStep();
     int        common_seq_len   = std::min(malloc_info.complete_token_ids->commonSeqLength(), seq_len);
-
-    if (malloc_info.cp_slot_mapper && malloc_info.cp_slot_mapper->isSharded()) {
-        seq_len        = malloc_info.cp_slot_mapper->effectiveSeqLenForAlloc(seq_len);
-        common_seq_len = malloc_info.cp_slot_mapper->effectiveSeqLenForAlloc(common_seq_len);
-    }
 
     const auto need =
         full_kv_cache_group_->getNeedBlocks(common_seq_len, seq_len, reserve_step, reuse_blocks_len, reuse_enabled);
@@ -64,7 +59,8 @@ bool SingleTypeKVCacheAllocator::doInit() {
     }
 
     std::vector<int> layer_ids(config_.global_layer_ids[0]);
-    full_kv_cache_group_ = std::make_shared<FullKVCacheGroup>(layer_ids, spec, block_pool_, 0, shared_cache_raw);
+    full_kv_cache_group_ =
+        std::make_shared<FullKVCacheGroup>(layer_ids, spec, block_pool_, 0, shared_cache_raw, nullptr, config_.cp_size);
 
     if (!full_kv_cache_group_->init()) {
         RTP_LLM_LOG_ERROR("Failed to initialize FullKVCacheGroup");
@@ -80,10 +76,6 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
     int   reuse_len   = 0;
     int   common_seq_len =
         std::min(malloc_info.complete_token_ids->commonSeqLength(), malloc_info.complete_token_ids->totalSeqLength());
-
-    if (malloc_info.cp_slot_mapper && malloc_info.cp_slot_mapper->isSharded()) {
-        common_seq_len = malloc_info.cp_slot_mapper->effectiveSeqLenForAlloc(common_seq_len);
-    }
 
     const auto& cache_keys         = kv_resource->cacheKeys(0);
     auto&       block_ids_0        = kv_resource->mutableBlockIds(0);
@@ -101,22 +93,18 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
     if (malloc_info.enable_device_cache) {
         CacheKeysType match_keys;
         if (malloc_info.cp_slot_mapper && malloc_info.cp_slot_mapper->isSharded()) {
-            // Drop the last virtual-block key (same reasoning as non-CP) to avoid
-            // a full-len reuse / empty-block crash. Use last-rank stride so all
-            // ranks share one canonical key namespace.
+            // Keep complete checkpoints strictly before the input end. A partial
+            // next interval need not have a last-rank key, so do not drop a full one.
             int  cp_size     = malloc_info.cp_slot_mapper->cpSize();
             auto vblock_keys = kv_resource->cacheResource(0).localCacheKeys(cp_size - 1, cp_size);
-            match_keys.assign(vblock_keys.begin(), vblock_keys.empty() ? vblock_keys.end() : vblock_keys.end() - 1);
+            const size_t match_count = std::min(vblock_keys.size(),
+                static_cast<size_t>(std::max(common_seq_len - 1, 0) / full_kv_cache_group_->seqSizePerBlock()));
+            match_keys.assign(vblock_keys.begin(), vblock_keys.begin() + match_count);
         } else {
             match_keys.assign(cache_keys.begin(), cache_keys.empty() ? cache_keys.end() : cache_keys.end() - 1);
         }
         auto        match_begin_time_us = currentTimeUs();
         MatchResult match_result        = full_kv_cache_group_->match(match_keys);
-        if (malloc_info.cp_slot_mapper && malloc_info.cp_slot_mapper->isSharded()) {
-            // virtual block ⇒ reuse_length covers cp_size physical blocks of
-            // tokens; reuse_blocks counts virtual blocks.
-            match_result.reuse_length = match_result.reuse_blocks * malloc_info.cp_slot_mapper->virtualBlockSize();
-        }
         match_cost_time_us = currentTimeUs() - match_begin_time_us;
         reuse_len          = static_cast<int>(match_result.reuse_length);
         reuse_blocks       = static_cast<int>(match_result.reuse_blocks);
@@ -162,10 +150,6 @@ MallocResult SingleTypeKVCacheAllocator::incrMalloc(const MallocInfo& malloc_inf
     int   current_blocks = kv_resource->curBlocksNum();
     int   seq_len        = malloc_info.incrSeqLen();
     int   reserve_step   = malloc_info.complete_token_ids->getReserveStep();
-
-    if (malloc_info.cp_slot_mapper && malloc_info.cp_slot_mapper->isSharded()) {
-        seq_len = malloc_info.cp_slot_mapper->effectiveSeqLenForAlloc(seq_len);
-    }
 
     auto need_blocks = full_kv_cache_group_->needBlocksNum(seq_len, current_blocks, reserve_step);
     if (need_blocks == 0) {
@@ -499,14 +483,14 @@ bool SingleTypeKVCacheAllocator::updateKVBlock(const BatchKVCacheResourcePtr& kv
 }
 
 int SingleTypeKVCacheAllocator::seqSizePerBlock() const {
-    return full_kv_cache_group_->seqSizePerBlock();
+    return static_cast<int>(config_.seq_size_per_block);
 }
 
 int SingleTypeKVCacheAllocator::singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
                                                       int                            seq_len,
                                                       int                            reserve_step) const {
     (void)batch_kv_cache_resource;
-    return full_kv_cache_group_->needBlocksNum(cpEffectiveSeqLenForAlloc(/*gid=*/0, seq_len), 0, reserve_step);
+    return full_kv_cache_group_->needBlocksNum(seq_len, 0, reserve_step);
 }
 
 }  // namespace rtp_llm

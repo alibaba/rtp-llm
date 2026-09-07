@@ -27,10 +27,7 @@ namespace rtp_llm {
 namespace {
 
 size_t expectedCPShardedLocalBlocks(const CPSlotMapper& mapper, int seq_len, int reserve_step) {
-    const int effective_seq_len = mapper.effectiveSeqLenForAlloc(std::max(seq_len, 0));
-    const int block_size        = mapper.blockSize();
-    const int total_len         = effective_seq_len + std::max(reserve_step, 0);
-    return static_cast<size_t>((total_len + block_size - 1) / block_size);
+    return static_cast<size_t>(mapper.localBlockCount(std::max(seq_len, 0) + std::max(reserve_step, 0)));
 }
 
 bool cacheStatusSnapshotEnabled() {
@@ -177,9 +174,15 @@ const CacheConfig& KVCacheManager::getMTPModuleCacheConfig(int mtp_module_id) co
 
 // 显存管理和缓存分配
 
+void KVCacheManager::validateCPSlotMapper(const std::shared_ptr<CPSlotMapper>& mapper) const {
+    RTP_LLM_CHECK_WITH_INFO(!mapper || (cp_slot_mapper_ ? *mapper == *cp_slot_mapper_ : !mapper->isSharded()),
+                            "request CP mapper conflicts with the cache instance C/rank/P");
+}
+
 MallocResult KVCacheManager::malloc(const MallocInfo& malloc_info) {
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_CHECK(malloc_info.batch_kv_cache_resource && malloc_info.complete_token_ids);
+    validateCPSlotMapper(malloc_info.cp_slot_mapper);
 
     // Auto-inject cp_slot_mapper when CP sharding is active and the caller
     // didn't supply one. Fast path: if cp_slot_mapper_ is null (sharding off)
@@ -209,21 +212,31 @@ MallocResult KVCacheManager::malloc(const MallocInfo& malloc_info) {
     // cacheKeys can be shorter than logical blocks because an in-flight partial
     // tail is not always cacheable, so derive the expected count from seq_len.
     if (result.success && effective->cp_slot_mapper && effective->cp_slot_mapper->isSharded()) {
-        const auto& res        = effective->batch_kv_cache_resource->cacheResource(0);
-        size_t      num_blocks = res.blocks().size();
         size_t      expected   = expectedCPShardedLocalBlocks(*effective->cp_slot_mapper,
-                                                       effective->complete_token_ids->seqLength(),
+                                                       effective->incrSeqLen(),
                                                        effective->complete_token_ids->getReserveStep());
-        RTP_LLM_CHECK_WITH_INFO(num_blocks == expected,
+        for (int batch = 0; batch < effective->batch_kv_cache_resource->batchSize(); ++batch) {
+            const auto& res = effective->batch_kv_cache_resource->cacheResource(batch);
+            for (int gid = 0; gid < res.groupNums(); ++gid) {
+                if (static_cast<size_t>(gid) < config_.group_types.size()
+                    && config_.group_types[gid] != CacheGroupType::FULL) {
+                    continue;
+                }
+                const size_t num_blocks = res.blocks(gid).size();
+                RTP_LLM_CHECK_WITH_INFO(num_blocks == expected,
                                 "CP invariant violated: blocks=%zu != expected_local_blocks=%zu "
-                                "(seq_len=%d, reserve_step=%d, cp_size=%d, block_size=%d, cacheKeys=%zu)",
+                                "(seq_len=%d, reserve_step=%d, cp_size=%d, block_size=%d, cacheKeys=%zu, batch=%d, group=%d)",
                                 num_blocks,
                                 expected,
-                                effective->complete_token_ids->seqLength(),
+                                effective->incrSeqLen(),
                                 effective->complete_token_ids->getReserveStep(),
                                 effective->cp_slot_mapper->cpSize(),
                                 effective->cp_slot_mapper->blockSize(),
-                                res.cacheKeys().size());
+                                res.cacheKeys().size(),
+                                batch,
+                                gid);
+            }
+        }
     }
 
     return result;
@@ -249,6 +262,7 @@ void KVCacheManager::free(const FreeInfo& free_info) {
 
 void KVCacheManager::insertIntoCache(const InsertInfo& insert_info) {
     RTP_LLM_PROFILE_FUNCTION();
+    validateCPSlotMapper(insert_info.cp_slot_mapper);
     dropLastPartialBlock(insert_info.batch_kv_cache_resource);
     if (cp_slot_mapper_ && !insert_info.cp_slot_mapper) {
         InsertInfo patched     = insert_info;

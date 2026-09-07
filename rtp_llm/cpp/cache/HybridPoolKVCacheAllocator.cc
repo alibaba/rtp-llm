@@ -18,20 +18,6 @@
 #include "rtp_llm/models_py/bindings/core/OpData.h"
 
 namespace rtp_llm {
-namespace {
-
-inline bool cpShardThisGroupForReserve(const std::shared_ptr<CPSlotMapper>& mapper, CacheGroupType group_type) {
-    return mapper && mapper->isSharded() && group_type == CacheGroupType::FULL;
-}
-
-inline int cpEffectiveSeqLenForReserve(const std::shared_ptr<CPSlotMapper>& mapper,
-                                       CacheGroupType                       group_type,
-                                       int                                  seq_len) {
-    return cpShardThisGroupForReserve(mapper, group_type) ? mapper->effectiveSeqLenForAlloc(seq_len) : seq_len;
-}
-
-}  // namespace
-
 HybridPoolKVCacheAllocator::HybridPoolKVCacheAllocator(const CacheConfig&                 config,
                                                        AllocationType                     allocation_type,
                                                        const kmonitor::MetricsReporterPtr metrics_reporter,
@@ -152,7 +138,8 @@ bool HybridPoolKVCacheAllocator::doInit() {
 	                ids, spec, group_pool, gid, config_.linear_step, shared_cache_raw, metrics_reporter_);
 	            swa_group_ids_.push_back(gid);
 	        } else {
-	            group = std::make_shared<FullKVCacheGroup>(ids, spec, group_pool, gid, shared_cache_raw, metrics_reporter_);
+	            group = std::make_shared<FullKVCacheGroup>(
+                    ids, spec, group_pool, gid, shared_cache_raw, metrics_reporter_, config_.cp_size);
 	            full_group_ids_.push_back(gid);
 	        }
 
@@ -612,11 +599,10 @@ bool HybridPoolKVCacheAllocator::hasAvailableBlocksForReserve(const MallocInfo& 
     if (!malloc_info.batch_kv_cache_resource || !malloc_info.complete_token_ids) {
         return true;
     }
-    const auto& cp_mapper          = malloc_info.cp_slot_mapper;
     const int   batch_size         = malloc_info.batch_kv_cache_resource->batchSize();
     const int   total_seq_len      = malloc_info.complete_token_ids->totalSeqLength();
     const int   raw_common_seq_len = std::min(malloc_info.complete_token_ids->commonSeqLength(), total_seq_len);
-    const int   raw_seq_len        = malloc_info.complete_token_ids->seqLength();
+    const int   raw_seq_len        = malloc_info.incrSeqLen();
     const int   reserve_step       = malloc_info.complete_token_ids->getReserveStep();
     const bool  reuse_enabled      = malloc_info.reuse_cache;
 
@@ -631,14 +617,9 @@ bool HybridPoolKVCacheAllocator::hasAvailableBlocksForReserve(const MallocInfo& 
     }
 
     for (int gid = 0; gid < static_cast<int>(kv_cache_groups_.size()); ++gid) {
-        const auto group_type = static_cast<size_t>(gid) < config_.group_types.size() ?
-                                    config_.group_types[static_cast<size_t>(gid)] :
-                                    CacheGroupType::FULL;
-        const int  group_common_seq      = cpEffectiveSeqLenForReserve(cp_mapper, group_type, raw_common_seq_len);
-        const int  group_seq_len          = cpEffectiveSeqLenForReserve(cp_mapper, group_type, raw_seq_len);
         const int  group_reuse_blocks_len = reuse_enabled ? malloc_info.batch_kv_cache_resource->blocksNum(0, gid) : 0;
         const auto need                   = kv_cache_groups_[static_cast<size_t>(gid)]->getNeedBlocks(
-            group_common_seq, group_seq_len, reserve_step, group_reuse_blocks_len, reuse_enabled);
+            raw_common_seq_len, raw_seq_len, reserve_step, group_reuse_blocks_len, reuse_enabled);
         const int need_blocks = need.common_blocks + batch_size * need.extra_blocks;
         if (need_blocks <= 0) {
             continue;

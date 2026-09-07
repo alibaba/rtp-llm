@@ -1106,14 +1106,12 @@ TEST_F(KVCacheManagerTest, MaxAvailableTokensNumUsesCPVirtualBlockSizeForHybridP
     auto kv_cache_manager = std::make_shared<KVCacheManager>(cache_config);
     ASSERT_TRUE(kv_cache_manager->init());
 
+    const size_t physical_capacity = kv_cache_manager->maxAvailableTokensNum();
+    cache_config.cp_size = 2;
+    kv_cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    ASSERT_TRUE(kv_cache_manager->init());
     auto hybrid_allocator = std::dynamic_pointer_cast<HybridPoolKVCacheAllocator>(kv_cache_manager->allocator_);
     ASSERT_NE(hybrid_allocator, nullptr);
-
-    const size_t physical_capacity = hybrid_allocator->maxAvailableTokensNum();
-    auto         cp_slot_mapper =
-        std::make_shared<CPSlotMapper>(/*cp_rank=*/0, /*cp_size=*/2, static_cast<int>(cache_config.seq_size_per_block));
-    kv_cache_manager->cp_slot_mapper_ = cp_slot_mapper;
-    hybrid_allocator->setCPSlotMapper(cp_slot_mapper);
 
     size_t      expected_logical_capacity = std::numeric_limits<size_t>::max();
     const auto& pools                     = hybrid_allocator->groupBlockPools();

@@ -13,8 +13,13 @@ public:
 	                     BlockPoolPtr                 block_pool,
 	                     int                          group_id,
 	                     SharedBlockCache*            shared_cache = nullptr,
-	                     const kmonitor::MetricsReporterPtr& metrics_reporter = nullptr):
-	        KVCacheGroup(layer_ids, kvcache_spec, block_pool, group_id, shared_cache, metrics_reporter) {}
+	                     const kmonitor::MetricsReporterPtr& metrics_reporter = nullptr,
+                         int                          cp_size = 1):
+	        KVCacheGroup(layer_ids, kvcache_spec, block_pool, group_id, shared_cache, metrics_reporter) {
+        // One rank-local physical page covers this global token interval.
+        // Keep the spec unchanged: buffer addressing still uses the physical page size.
+        seq_size_per_block_ *= cp_size;
+    }
 
     bool malloc(BlockIds& block_ids, int seq_len, bool enable_reuse_cache = false, int reserve_step = 0) override;
     MatchResult match(const CacheKeysType& cache_keys) override;
