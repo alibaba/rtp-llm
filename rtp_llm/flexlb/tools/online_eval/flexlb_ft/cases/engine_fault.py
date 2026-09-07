@@ -394,8 +394,9 @@ def engine_flap(ctx: CaseContext):
     Exercises the race window between the master's 3-strike health eviction
     and the engine's re-discovery: each cycle stops prefill-0, holds it down
     long enough for the health poller (20ms interval) to accumulate strikes,
-    then brings it back WITHOUT waiting for convergence (the flap).  A
-    background flow keeps traffic live throughout.
+    then brings it back WITHOUT waiting for convergence (the flap).  Four
+    independent serial background flows keep traffic live throughout;
+    one parked request therefore cannot collapse the observation to 0/0.
 
     Assertions (user-mandated):
       * master stays healthy the whole time — HTTP 200 probe every cycle,
@@ -413,13 +414,40 @@ def engine_flap(ctx: CaseContext):
     """
     env, ops = _elastic_env(ctx)
     base = rid_base(ctx, "engine_fault")
-    flow: Optional[_BackgroundFlow] = None
+    flows: list[_BackgroundFlow] = []
     try:
         _cleanup_dynamic(ops, env)
+        prefill_ready = _wait_master_topology(
+            ops, "PREFILL", env.spec.n_prefill, MASTER_EVICT_S
+        )
+        decode_ready = _wait_master_topology(
+            ops, "DECODE", env.spec.n_decode, MASTER_EVICT_S
+        )
+        if not (prefill_ready and decode_ready):
+            info = ops.master_info() or {}
+            return False, (
+                "initial topology did not converge after dynamic cleanup: "
+                f"prefill_ready={prefill_ready}, decode_ready={decode_ready}, "
+                f"worker_summary={info.get('worker_summary', {})}"
+            )
 
-        flow = _BackgroundFlow(ops, base, interval_s=0.2)
-        flow.start()
-        time.sleep(1.0)  # let the flow ramp up before the first stop
+        # A single synchronous flow can contribute 0/0 samples when its first
+        # request parks behind the flapped endpoint.  Multiple independent
+        # serial flows preserve the per-client behaviour while ensuring the
+        # availability assertion samples both the victim and its survivor.
+        flows = [_BackgroundFlow(ops, base, interval_s=0.2) for _ in range(4)]
+        for flow in flows:
+            flow.start()
+        warmed = wait_for(
+            lambda: all(flow.total >= 1 for flow in flows), 15.0, 0.1
+        )
+        if not warmed:
+            return False, (
+                "background flow did not warm up on the converged topology: "
+                f"completed={[flow.total for flow in flows]}"
+            )
+        warm_total = sum(flow.total for flow in flows)
+        warm_ok = sum(flow.ok for flow in flows)
 
         cycles = 6
         cycle_log: list[str] = []
@@ -446,7 +474,12 @@ def engine_flap(ctx: CaseContext):
             time.sleep(0.4)  # short gap — flap, no convergence wait
             cycle_log.append(f"c{i}[alive={alive_mid}, master={probe}]")
 
-        total, ok = flow.stop()
+        with ThreadPoolExecutor(max_workers=len(flows)) as pool:
+            stopped = list(pool.map(lambda flow: flow.stop(), flows))
+        completed_total = sum(total for total, _ in stopped)
+        completed_ok = sum(ok for _, ok in stopped)
+        total = max(0, completed_total - warm_total)
+        ok = max(0, completed_ok - warm_ok)
         rate = ok / total if total else 0.0
 
         # Post-flap convergence: full re-discovery of the flapped engine
@@ -477,7 +510,8 @@ def engine_flap(ctx: CaseContext):
         return passed, (
             f"cycles={cycles}, evictions_landed={evict_landings}/{cycles}, "
             f"flap=[{'; '.join(cycle_log)}], "
-            f"flow_success={ok}/{total}({rate:.0%}), "
+            f"flow_warmup={warm_ok}/{warm_total}, "
+            f"flap_flow_success={ok}/{total}({rate:.0%}), "
             f"topology_converged={topology_ok}, "
             f"post_flap_batch={ok_batch}/20, "
             f"inflight_clean={inflight_ok}({inflight_detail})"
@@ -485,8 +519,9 @@ def engine_flap(ctx: CaseContext):
     except Exception as exc:
         return False, f"exception: {exc!r}"
     finally:
-        if flow is not None:
-            flow.stop()
+        if flows:
+            with ThreadPoolExecutor(max_workers=len(flows)) as pool:
+                list(pool.map(lambda flow: flow.stop(), flows))
         try:
             snap = ops.snapshot_by_name()
             if snap.get("prefill-0", {}).get("stopped"):

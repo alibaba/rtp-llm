@@ -54,7 +54,7 @@ final class RequestSlot {
     private SlotPhase slotPhase = SlotPhase.ACTIVE;
     private EngineOwnership engineOwnership = EngineOwnership.DECODE_PENDING;
     private CancelReason cancellationReason;
-    /** Last full WorkerStatus observation proving this generation is active. */
+    /** Inactive-TTL baseline, established by registration/ACK and refreshed by WorkerStatus. */
     private long lastWorkerStatusAtMs;
 
     private boolean admissionOpen = true;
@@ -168,8 +168,11 @@ final class RequestSlot {
             case NONE -> throw new IllegalStateException(
                     "cannot confirm delivery without a delivery claim");
         };
-        return transition(RequestState.Phase.ACKNOWLEDGED,
-                confirmationDetail);
+        RequestState acknowledged = transition(
+                RequestState.Phase.ACKNOWLEDGED, confirmationDetail);
+        lastWorkerStatusAtMs = Math.max(
+                lastWorkerStatusAtMs, acknowledged.updatedAtMs());
+        return acknowledged;
     }
 
     RequestState timeout(String message) {
@@ -635,6 +638,18 @@ final class RequestSlot {
     }
 
     // ==================== Exact deadline capabilities ====================
+
+    /**
+     * Whether the absolute scheduling deadline still owns this generation.
+     *
+     * <p>The exact capability remains attached from registration through
+     * delivery acknowledgement. Inactive-Worker maintenance normally defers to
+     * it; a separately proven reclaimable Engine fence is the sole exception.</p>
+     */
+    boolean ownsSchedulingDeadline() {
+        requireSlotLock("scheduling deadline ownership lookup");
+        return requestDeadline != null;
+    }
 
     boolean installRequestDeadline(RequestDeadline exact) {
         requireSlotLock("request deadline installation");

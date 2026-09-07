@@ -15,6 +15,7 @@ import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -62,13 +63,16 @@ class DecodePreemptionCoordinatorTest {
                         EngineCancelChannel.CancelAck.ACCEPTED));
         DecodePreemptionCoordinator coordinator =
                 new DecodePreemptionCoordinator(cancelChannel, requests);
-        CompletableFuture<DecodePreemptionCoordinator.PreemptionResult> result =
+        DecodePreemptionCoordinator.PreemptionExecution execution =
                 coordinator.preempt(new DecodePreemptionCoordinator.PreemptionCommand(
                         endpoint, "20", 64L, 64L, 70,
                         new DecodeEndpoint.AdmissionCapacity(2L, 100L),
                         List.of(victim(11L, 101L), victim(12L, 102L)),
                         1_000L, 1_000L, () -> true, "test"));
+        CompletableFuture<DecodePreemptionCoordinator.PreemptionResult> result =
+                execution.completion();
 
+        assertTrue(execution.takeoverRequired());
         assertFalse(result.isDone());
         firstTerminal.complete(new VictimTerminal(11L));
         assertFalse(result.isDone(), "one terminal cannot release two victims");
@@ -76,6 +80,44 @@ class DecodePreemptionCoordinatorTest {
 
         assertTrue(result.get(1, TimeUnit.SECONDS).committed());
         verify(endpoint).commitPriorityPreemption(1L);
+        verify(endpoint, never()).abortPriorityPreemption(anyLong());
+    }
+
+    @Test
+    void infeasibleBeginDeclinesBeforeAdmissionTakeover() {
+        RequestRegistry requests = mock(RequestRegistry.class);
+        DecodeEndpoint endpoint = mock(DecodeEndpoint.class);
+        WorkerStatus status = mock(WorkerStatus.class);
+        when(endpoint.getStatus()).thenReturn(status);
+        when(status.getGenerationId()).thenReturn(9L);
+        when(endpoint.beginPriorityPreemption(
+                anyLong(), anyList(), anyString(), anyLong(), anyLong(),
+                anyInt(), any(DecodeEndpoint.AdmissionCapacity.class)))
+                .thenReturn(DecodeEndpoint.PreemptionBeginResult.INFEASIBLE);
+        when(requests.findCancelTarget(anyString(), anyLong())).thenReturn(
+                Optional.of(new CancelTarget("10.0.0.1", 9090)));
+        CompletableFuture<VictimTerminal> terminal = new CompletableFuture<>();
+        PreemptionRegistration claim = claim(11L, terminal);
+        when(requests.tryClaim(anyString(), anyLong(), anyLong(), any()))
+                .thenReturn(Optional.of(claim));
+
+        EngineCancelChannel cancelChannel = mock(EngineCancelChannel.class);
+        DecodePreemptionCoordinator coordinator =
+                new DecodePreemptionCoordinator(cancelChannel, requests);
+        DecodePreemptionCoordinator.PreemptionExecution execution =
+                coordinator.preempt(new DecodePreemptionCoordinator.PreemptionCommand(
+                        endpoint, "20", 64L, 64L, 70,
+                        new DecodeEndpoint.AdmissionCapacity(2L, 90L),
+                        List.of(victim(11L, 101L)),
+                        50L, 1_000L, () -> true, "test"));
+
+        assertFalse(execution.takeoverRequired());
+        DecodePreemptionCoordinator.PreemptionResult result =
+                execution.completion().join();
+        assertFalse(result.committed());
+        assertEquals("begin_infeasible", result.detail());
+        verify(requests).tryReleasePreemption(claim);
+        verify(cancelChannel, never()).cancel(any(), anyString(), anyLong());
         verify(endpoint, never()).abortPriorityPreemption(anyLong());
     }
 

@@ -2,6 +2,7 @@ package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.delivery.CapacityBoundary;
+import org.flexlb.balance.delivery.DeliveryRejection;
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
@@ -1650,6 +1651,9 @@ public class RequestRegistry {
             ScheduledRequest activeItem = exactSlot.activeItem();
             boolean reclaimableFence = activeItem != null
                     && exactSlot.ownsReclaimableInactiveFence(activeItem);
+            if (exactSlot.ownsSchedulingDeadline() && !reclaimableFence) {
+                return false;
+            }
             if (exactSlot.hasCancellationFirstCause() && !reclaimableFence) {
                 return false;
             }
@@ -1905,15 +1909,26 @@ public class RequestRegistry {
                             "delivery claim kind cannot be NONE");
                 };
             } else if (completion.status()
-                    == DeliveryResult.Status.FAILED) {
-                String detail = "Delivery failed: "
-                        + detailOf(completion.cause());
+                    == DeliveryResult.Status.FAILED
+                    || isRetryDeadlineExceeded(completion)) {
+                boolean retryDeadlineExceeded =
+                        isRetryDeadlineExceeded(completion);
+                String detail = retryDeadlineExceeded
+                        ? "retryable EnqueueBatch rejection remained until deadline"
+                        : "Delivery failed: " + detailOf(completion.cause());
                 if (exact.slot.decodeOwnsRequest()) {
-                    work = materializePostLockActionLocked(
-                            exact.slot,
-                            exact.slot.reduceDeliveryConfirmed(
-                                    exact.correlationId),
-                            null);
+                    if (retryDeadlineExceeded) {
+                        exact.slot.rememberCancellation(
+                                CancelReason.DEADLINE_EXCEEDED, detail);
+                        fenceReduction =
+                                exact.slot.requestCancellationFence(detail);
+                    } else {
+                        work = materializePostLockActionLocked(
+                                exact.slot,
+                                exact.slot.reduceDeliveryConfirmed(
+                                        exact.correlationId),
+                                null);
+                    }
                 } else {
                     DecodeEndpoint decode = exact.item.decodeEp();
                     DecodeEndpoint.ReservationHandle reservation =
@@ -1924,16 +1939,43 @@ public class RequestRegistry {
                                     : decode.settleDefiniteDispatchRejection(
                                             reservation);
                     switch (settlement) {
-                        case RELEASED -> work = reduceDeferredTerminalFactLocked(
-                                exact.slot,
-                                DeferredTerminal.deliveryRejected(detail));
-                        case ENGINE_ACCEPTED -> work = materializePostLockActionLocked(
-                                exact.slot,
-                                exact.slot.reduceDeliveryConfirmed(
-                                        exact.correlationId),
-                                null);
-                        case CONFLICT -> fenceReduction =
-                                exact.slot.requestDeliveryFence(detail);
+                        case RELEASED -> {
+                            if (retryDeadlineExceeded) {
+                                exact.slot.rememberCancellation(
+                                        CancelReason.DEADLINE_EXCEEDED,
+                                        detail);
+                            }
+                            work = reduceDeferredTerminalFactLocked(
+                                    exact.slot,
+                                    DeferredTerminal.deliveryRejected(detail));
+                        }
+                        case ENGINE_ACCEPTED -> {
+                            if (retryDeadlineExceeded) {
+                                exact.slot.rememberCancellation(
+                                        CancelReason.DEADLINE_EXCEEDED,
+                                        detail);
+                                fenceReduction = exact.slot
+                                        .requestCancellationFence(detail);
+                            } else {
+                                work = materializePostLockActionLocked(
+                                        exact.slot,
+                                        exact.slot.reduceDeliveryConfirmed(
+                                                exact.correlationId),
+                                        null);
+                            }
+                        }
+                        case CONFLICT -> {
+                            if (retryDeadlineExceeded) {
+                                exact.slot.rememberCancellation(
+                                        CancelReason.DEADLINE_EXCEEDED,
+                                        detail);
+                                fenceReduction = exact.slot
+                                        .requestCancellationFence(detail);
+                            } else {
+                                fenceReduction =
+                                        exact.slot.requestDeliveryFence(detail);
+                            }
+                        }
                         case STALE -> work = null;
                     }
                 }
@@ -1963,6 +2005,13 @@ public class RequestRegistry {
         }
         runPostLock(work);
         consumeFenceStart(exact.slot, fenceReduction, true);
+    }
+
+    private static boolean isRetryDeadlineExceeded(
+            DeliveryResult completion) {
+        return completion.status() == DeliveryResult.Status.TIMED_OUT
+                && completion.cause() instanceof DeliveryRejection rejection
+                && rejection.retryDeadlineExceeded();
     }
 
     /** Called with {@code entry} locked. */
@@ -2285,10 +2334,6 @@ public class RequestRegistry {
             return decode == null || reservation == null
                     ? null
                     : () -> decode.releaseLocalShadowIfExact(reservation);
-        }
-        if (entry.snapshot().deliveryClaimKind()
-                != DeliveryClaimKind.ROUTE_DECISION) {
-            return null;
         }
         return exactPrefillCounterpartCleanup(item);
     }

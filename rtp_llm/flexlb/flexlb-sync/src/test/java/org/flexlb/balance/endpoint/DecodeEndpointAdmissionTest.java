@@ -636,7 +636,7 @@ class DecodeEndpointAdmissionTest {
     }
 
     @Test
-    void staleCommittedPermitCannotAffectReplacementGeneration() throws Exception {
+    void staleCommittedPermitCannotAffectReplacementGeneration() {
         long requestId = 1L;
         reserve(requestId, 100, 110, 50);
         markQueued(requestId);
@@ -645,11 +645,6 @@ class DecodeEndpointAdmissionTest {
         assertEquals(TRANSFERRED, stale.transferToEngineLifecycle());
 
         settleFromWorkerStatus(requestId);
-        assertThrows(IllegalStateException.class,
-                () -> reserve(requestId, 200, 220, 70),
-                "the worker-terminal tombstone must fence immediate id reuse");
-        Thread.sleep(5L);
-        endpoint.evictExpiredRequests(1L, ignored -> false);
         reserve(requestId, 200, 220, 70);
         markQueued(requestId);
         DecodeEndpoint.DecodeRequestView replacement = reserved().get(requestId);
@@ -769,13 +764,37 @@ class DecodeEndpointAdmissionTest {
     }
 
     @Test
-    void workerTerminalTombstoneAbsorbsLaterZombieRunningStatus() {
+    void engineFencedWorkerTerminalAbsorbsLaterZombieRunningStatus() {
         reserve(11L, 500, 508, 30);
+        DecodeEndpoint.EngineFenceLease fence =
+                endpoint.beginEngineFenceProtection(reservations.get(11L));
+        assertNotNull(fence);
         settleFromWorkerStatus(11L);
 
         TaskInfo zombie = new TaskInfo();
         zombie.setRequestId("11");
         zombie.setPhase(TaskPhase.RUNNING);
+        updateStatus(Map.of("11", zombie), Map.of(), 10_000L);
+
+        assertNull(endpoint.reservationHandle(11L));
+        assertEquals(0, endpoint.routingView().totalLoad());
+        assertEquals(0, endpoint.getInflightCount());
+        fence.close();
+    }
+
+    @Test
+    void conflictingTerminalAndRunningStatusAbsorbsLaterZombieRunningStatus() {
+        reserve(11L, 500, 508, 30);
+
+        TaskInfo zombie = new TaskInfo();
+        zombie.setRequestId("11");
+        zombie.setPhase(TaskPhase.RUNNING);
+        TaskInfo finished = new TaskInfo();
+        finished.setRequestId("11");
+        finished.setErrorCode(0L);
+
+        updateStatus(
+                Map.of("11", zombie), Map.of("11", finished), 10_000L);
         updateStatus(Map.of("11", zombie), Map.of(), 10_000L);
 
         assertNull(endpoint.reservationHandle(11L));

@@ -43,6 +43,34 @@ public final class DecodePreemptionCoordinator {
         }
     }
 
+    /**
+     * One synchronous takeover decision plus its eventual protocol result.
+     * A declined execution has completed all cleanup before returning; a
+     * started execution may have crossed the outbound Cancel boundary and must
+     * retain ownership of the incoming admission until completion.
+     */
+    record PreemptionExecution(
+            boolean takeoverRequired,
+            CompletableFuture<PreemptionResult> completion) {
+        PreemptionExecution {
+            Objects.requireNonNull(completion, "completion");
+            if (!takeoverRequired && !completion.isDone()) {
+                throw new IllegalArgumentException(
+                        "a declined preemption must complete before returning");
+            }
+        }
+
+        static PreemptionExecution declined(PreemptionResult result) {
+            return new PreemptionExecution(
+                    false, CompletableFuture.completedFuture(result));
+        }
+
+        static PreemptionExecution started(
+                CompletableFuture<PreemptionResult> completion) {
+            return new PreemptionExecution(true, completion);
+        }
+    }
+
     record PreemptionCommand(
             DecodeEndpoint endpoint,
             String incomingRequestId,
@@ -102,7 +130,7 @@ public final class DecodePreemptionCoordinator {
         this.requests = Objects.requireNonNull(requests, "requests");
     }
 
-    CompletableFuture<PreemptionResult> preempt(
+    PreemptionExecution preempt(
             PreemptionCommand command) {
         long token = nextToken();
         List<CancelTarget> targets =
@@ -115,7 +143,7 @@ public final class DecodePreemptionCoordinator {
             Optional<CancelTarget> target = requests.findCancelTarget(
                     victim.requestId(), victim.reservationToken());
             if (target.isEmpty()) {
-                return CompletableFuture.completedFuture(new PreemptionResult(
+                return PreemptionExecution.declined(new PreemptionResult(
                         false, true,
                         "cancel_owner_missing:" + victim.requestId()));
             }
@@ -135,7 +163,7 @@ public final class DecodePreemptionCoordinator {
                         victim.requestId(), victim.reservationToken(),
                         token, command.detail());
                 if (claimAttempt.isEmpty()) {
-                    return CompletableFuture.completedFuture(capability.abort(
+                    return PreemptionExecution.declined(capability.abort(
                             false, "victim_inflight_gone"));
                 }
                 PreemptionRegistration claim = claimAttempt.get();
@@ -143,7 +171,7 @@ public final class DecodePreemptionCoordinator {
                         victim, targets.get(index), claim);
                 if (!Objects.equals(claim.requestId(), victim.requestId())
                         || claim.attemptToken() != token) {
-                    return CompletableFuture.completedFuture(capability.abort(
+                    return PreemptionExecution.declined(capability.abort(
                             true,
                             "lifecycle_returned_mismatched_claim:" + owned.requestId()));
                 }
@@ -156,13 +184,13 @@ public final class DecodePreemptionCoordinator {
                             command.incomingExpectedKvTokens(),
                             command.incomingPriority(), command.capacity());
             if (begin != DecodeEndpoint.PreemptionBeginResult.SUCCESS) {
-                return CompletableFuture.completedFuture(capability.abort(
+                return PreemptionExecution.declined(capability.abort(
                         begin == DecodeEndpoint.PreemptionBeginResult.ENDPOINT_RETIRED,
                         "begin_" + begin.name().toLowerCase()));
             }
             capability.endpointBegun();
             if (!command.endpoint().markPriorityCancelInFlight(token)) {
-                return CompletableFuture.completedFuture(capability.abort(
+                return PreemptionExecution.declined(capability.abort(
                         true,
                         "endpoint_cancel_linearization_failed"));
             }
@@ -170,14 +198,14 @@ public final class DecodePreemptionCoordinator {
                 if (!requests.tryApplyPreemptionPhase(
                         owned.claim(),
                         PreemptionCancelPhase.CANCEL_IN_FLIGHT)) {
-                    return CompletableFuture.completedFuture(capability.abort(
+                    return PreemptionExecution.declined(capability.abort(
                             true,
                             "inflight_cancel_linearization_failed:"
                                     + owned.requestId()));
                 }
             }
             if (!capability.markCancelStarted()) {
-                return CompletableFuture.completedFuture(capability.abort(
+                return PreemptionExecution.declined(capability.abort(
                         true,
                         "attempt_cancel_linearization_failed"));
             }
@@ -209,7 +237,7 @@ public final class DecodePreemptionCoordinator {
                             acknowledgements.toArray(new CompletableFuture[0]))
                     .thenCompose(ignored -> handleAcknowledgements(
                             capability, acknowledgements));
-            return protocol.handle((result, failure) -> {
+            return PreemptionExecution.started(protocol.handle((result, failure) -> {
                 if (failure != null) {
                     return capability.abort(
                             true,
@@ -221,11 +249,14 @@ public final class DecodePreemptionCoordinator {
                                 true,
                                 "coordinator_returned_null_result")
                         : result;
-            });
+            }));
         } catch (RuntimeException | Error failure) {
-            return CompletableFuture.completedFuture(capability.abort(
-                    true,
-                    "coordinator_setup_failed:" + failureDetail(failure)));
+            PreemptionResult result = capability.abort(
+                    true, "coordinator_setup_failed:" + failureDetail(failure));
+            return capability.takeoverRequired()
+                    ? PreemptionExecution.started(
+                            CompletableFuture.completedFuture(result))
+                    : PreemptionExecution.declined(result);
         }
     }
 
@@ -491,6 +522,10 @@ public final class DecodePreemptionCoordinator {
             }
             cancelStarted = true;
             return true;
+        }
+
+        private synchronized boolean takeoverRequired() {
+            return cancelStarted;
         }
 
         private synchronized boolean outboundStarted(ClaimedVictim owned) {

@@ -125,9 +125,8 @@ public class EvictionManager {
         }
 
         try {
-            commitDecodeEviction(
+            return commitDecodeEviction(
                     ctx, future, planned, config, preemption, admission);
-            return true;
         } catch (RuntimeException | Error failure) {
             admission.close();
             throw failure;
@@ -350,7 +349,7 @@ public class EvictionManager {
     }
 
     /** Commit exactly the immutable plan selected before takeover. */
-    private void commitDecodeEviction(
+    private boolean commitDecodeEviction(
             BalanceContext ctx,
             CompletableFuture<Response> future,
             PlannedDecodeEviction planned,
@@ -372,9 +371,8 @@ public class EvictionManager {
         // use a local transaction; Engine-may-have-seen/accepted/running
         // victims use the tokenized Cancel coordinator.
         if (proposal.requiresEngineCancel()) {
-            startEngineCancelPreemption(ctx, future, preemption, proposal,
+            return startEngineCancelPreemption(ctx, future, preemption, proposal,
                     decodeEp, seqLen, expectedKvTokens, capacity, admission);
-            return;
         }
 
         List<DecodeEndpoint.ReservationHandle> reservedVictims =
@@ -394,7 +392,7 @@ public class EvictionManager {
                         ctx.getRequestId(), future);
         if (mutation == null) {
             admission.close();
-            return;
+            return true;
         }
         try (mutation; admission) {
             boolean evictionCommitted =
@@ -418,7 +416,7 @@ public class EvictionManager {
                         StrategyErrorType.RESOURCE_EXHAUSTED,
                         AdmissionRejectReason.RESOURCE_EXHAUSTED,
                         "exact Decode eviction plan changed before commit"));
-                return;
+                return true;
             }
 
             // Shadow accounting already reversed atomically; drive each victim
@@ -438,15 +436,16 @@ public class EvictionManager {
                         StrategyErrorType.RESOURCE_EXHAUSTED,
                         AdmissionRejectReason.RESOURCE_EXHAUSTED,
                         "Decode reservation disappeared before canonical placement"));
-                return;
+                return true;
             }
             Response placementFailure = placeReservedDecode(
                     ctx, future, decodeEp, incoming, admission);
             if (placementFailure != null) {
                 mutation.terminate(placementFailure);
-                return;
+                return true;
             }
         }
+        return true;
     }
 
     /** Publish preempted Decode capacity through the already selected route. */
@@ -556,15 +555,15 @@ public class EvictionManager {
                 proposal.endpointId());
     }
 
-    private void startEngineCancelPreemption(BalanceContext ctx,
-                                             CompletableFuture<Response> future,
-                                             PreemptionConfig preemption,
-                                             DecodeEvictionProposal proposal,
-                                             DecodeEndpoint decodeEp,
-                                             long seqLen,
-                                             long expectedKvTokens,
-                                             DecodeEndpoint.AdmissionCapacity capacity,
-                                             QueueRouteAdmission admission) {
+    private boolean startEngineCancelPreemption(BalanceContext ctx,
+                                                CompletableFuture<Response> future,
+                                                PreemptionConfig preemption,
+                                                DecodeEvictionProposal proposal,
+                                                DecodeEndpoint decodeEp,
+                                                long seqLen,
+                                                long expectedKvTokens,
+                                                DecodeEndpoint.AdmissionCapacity capacity,
+                                                QueueRouteAdmission admission) {
         String detail = "preempted by higher-priority request " + ctx.getRequestId();
         EngineCancellationConfig cancellation = requiredEngineCancellation(preemption);
         DecodePreemptionCoordinator.PreemptionCommand command =
@@ -578,27 +577,30 @@ public class EvictionManager {
                         () -> requests.isAdmissionOpen(
                                 ctx.getRequestId(), future), detail);
 
-        CompletableFuture<DecodePreemptionCoordinator.PreemptionResult>
-                execution;
+        DecodePreemptionCoordinator.PreemptionExecution execution;
         AdmissionMutation mutation =
                 requests.claimAdmissionMutation(
                         ctx.getRequestId(), future);
         if (mutation == null) {
             admission.close();
-            return;
+            return true;
         }
         try {
-            reportCancelRequests(ctx, proposal);
             // execute() performs the victim-claim and sends every Cancel
             // before returning. The mutation claim keeps an incoming
             // Cancel pending until this asynchronous attempt settles.
             execution = preemptionCoordinator.preempt(command);
+            if (!execution.takeoverRequired()) {
+                mutation.close();
+                return false;
+            }
+            reportCancelRequests(ctx, proposal);
         } catch (RuntimeException | Error startFailure) {
             mutation.close();
             throw startFailure;
         }
 
-        execution.whenComplete(
+        execution.completion().whenComplete(
                 (result, error) -> {
                     try (mutation; admission) {
                         Response terminal;
@@ -623,6 +625,7 @@ public class EvictionManager {
                         }
                     }
                 });
+        return true;
     }
 
     /** Convert one typed coordinator result into commit or one terminal response. */

@@ -326,6 +326,28 @@ def _wait_cache_sync(ops, engine_names: list, timeout_s: float = 8.0) -> bool:
     return False
 
 
+def _unique_cache_placement(
+    ops, engine_names: list[str], holder: str, keys: list[int]
+) -> tuple[bool, str]:
+    """Verify that *holder* is the sole engine caching the requested keys."""
+    wanted = {int(key) for key in keys}
+    key_sets = {name: _engine_cache_keys(ops, name) for name in engine_names}
+    if holder not in key_sets:
+        return False, f"holder={holder} missing from engines={engine_names}"
+
+    missing = sorted(wanted - key_sets[holder])
+    replicas = {
+        name: sorted(wanted & cached)
+        for name, cached in key_sets.items()
+        if name != holder and wanted & cached
+    }
+    ok = not missing and not replicas
+    return ok, (
+        f"holder={holder}, missing={missing[:4]}, "
+        f"unexpected_replicas={replicas}"
+    )
+
+
 def _wait_master_alive(ops, role: str, count: int, timeout_s: float = 30.0) -> bool:
     return wait_for(lambda: ops.master_alive_count(role) == count, timeout_s, 0.5)
 
@@ -1858,8 +1880,9 @@ def kv_prefix_stickiness(ctx: CaseContext):
          in flight -> deterministically lands on the OTHER engine — the
          family separation the design calls for (a plain serial seeding
          would put both families on the same engine half the time);
-      3. after both seeds complete and the master cache syncs
-         (KV_CACHE_SYNC_WAIT_S), the main phase runs ~30 serial requests:
+      3. after both seeds complete and every mock cache stays unchanged for
+         the >=3.5s master-sync quiet window, the main phase runs ~30 serial
+         requests:
          60% family-A continuations (same keys, deterministic stickiness —
          the production-fit estimate prices the hit engine only ~6ms above
          the all-miss engine, but the bounded cache-affinity gate
@@ -1936,7 +1959,28 @@ def kv_prefix_stickiness(ctx: CaseContext):
             return report.finish(f"seed A did not complete: {outcomes[0][3]}")
         for name in prefill_names:
             ops.set_perf(name, prefill_fixed_ms=100.0)
-        time.sleep(KV_CACHE_SYNC_WAIT_S)  # master cache sync
+        if not _wait_cache_sync(ops, prefill_names):
+            report.invariant(
+                "P6", False, detail="seed caches did not reach the sync quiet window"
+            )
+            return report.finish("seed caches did not converge before affinity sampling")
+
+        family_a_ready, family_a_detail = _unique_cache_placement(
+            ops, prefill_names, seed_a_name, family_a_keys
+        )
+        family_b_ready, family_b_detail = _unique_cache_placement(
+            ops, prefill_names, seed_b_name, family_b_keys
+        )
+        if not (family_a_ready and family_b_ready):
+            report.invariant(
+                "P6",
+                False,
+                detail=(
+                    f"seed placement invalid: family_a=({family_a_detail}), "
+                    f"family_b=({family_b_detail})"
+                ),
+            )
+            return report.finish("seed placement invalid before affinity sampling")
 
         if seed_a_name == seed_b_name:
             # The ledger technique makes this practically impossible (the
@@ -2237,6 +2281,9 @@ def kv_match_mixed(ctx: CaseContext):
     full_keys = list(range(4001, 4009))
     half_shared_keys = list(range(5001, 5005))
     try:
+        prefill_names = _prefill_names(ops)
+        if len(prefill_names) < 2:
+            return False, "need >=2 prefill workers"
 
         def run_tier_cont(n: int, keys_fn, label: str):
             """Serial run of *n* requests, each keys from keys_fn(rid, i)."""
@@ -2268,7 +2315,18 @@ def kv_match_mixed(ctx: CaseContext):
         if seed1_err:
             report.invariant("P6", False, detail=f"seed1 failed: {seed1_err}")
             return report.finish(f"full-hit seed failed: {seed1_err}")
-        time.sleep(KV_CACHE_SYNC_WAIT_S)
+        if not _wait_cache_sync(ops, prefill_names):
+            report.invariant(
+                "P6", False, detail="full-hit seed cache did not converge"
+            )
+            return report.finish("full-hit seed cache did not converge")
+        seed1_name = ops.addr_to_name().get(seed1_addr, seed1_addr)
+        seed1_ready, seed1_detail = _unique_cache_placement(
+            ops, prefill_names, seed1_name, full_keys
+        )
+        if not seed1_ready:
+            report.invariant("P6", False, detail=f"full-hit seed: {seed1_detail}")
+            return report.finish("full-hit seed placement invalid before sampling")
         full_addrs, full_fail = run_tier_cont(10, lambda rid, i: full_keys, "full")
 
         # -- tier 2: half-hit (4 shared + 4 fresh per request).
@@ -2283,7 +2341,18 @@ def kv_match_mixed(ctx: CaseContext):
         if seed2_err:
             report.invariant("P6", False, detail=f"seed2 failed: {seed2_err}")
             return report.finish(f"half-hit seed failed: {seed2_err}")
-        time.sleep(KV_CACHE_SYNC_WAIT_S)
+        if not _wait_cache_sync(ops, prefill_names):
+            report.invariant(
+                "P6", False, detail="half-hit seed cache did not converge"
+            )
+            return report.finish("half-hit seed cache did not converge")
+        seed2_name = ops.addr_to_name().get(seed2_addr, seed2_addr)
+        seed2_ready, seed2_detail = _unique_cache_placement(
+            ops, prefill_names, seed2_name, half_shared_keys
+        )
+        if not seed2_ready:
+            report.invariant("P6", False, detail=f"half-hit seed: {seed2_detail}")
+            return report.finish("half-hit seed placement invalid before sampling")
         half_addrs, half_fail = run_tier_cont(
             10,
             lambda rid, i: half_shared_keys + [rid * 100 + 40 + j for j in range(4)],

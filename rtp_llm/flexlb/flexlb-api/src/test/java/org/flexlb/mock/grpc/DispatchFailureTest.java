@@ -29,23 +29,27 @@ class DispatchFailureTest extends FlexLBMockTestBase {
 
     @Override
     protected FlexlbConfig createConfig() {
-        return super.createConfig();
+        FlexlbConfig config = super.createConfig();
+        config.queueScheduler().setQueueTimeoutMs(1_000L);
+        return config;
     }
 
     @Test
-    void dispatchFailure_requestFailsAndRecovers() throws Exception {
+    void transientDispatchRejection_retriesUntilDeadlineAndRecovers() throws Exception {
         CompletableFuture<Response> future = submitRequest("7001");
         Response response = future.get(5, TimeUnit.SECONDS);
 
         assertFalse(response.isSuccess(), "Request should fail when EnqueueBatch returns error");
-        assertEquals(StrategyErrorType.BATCH_DISPATCH_FAILED.getErrorCode(), response.getCode());
-        assertEquals(1, mockPrefillWorker.getEnqueueCount(), response.getErrorMessage());
+        assertEquals(StrategyErrorType.BATCH_SLO_EXPIRED.getErrorCode(), response.getCode());
+        int rejectedEnqueues = mockPrefillWorker.getEnqueueCount();
+        assertTrue(rejectedEnqueues > 1,
+                "Transient code 13 should retry until the request deadline");
         assertEquals(0, mockDecodeWorker.getEnqueueCount());
         InflightAssertions.assertPrefillInflightEmpty(getPrefillEndpoint());
 
         mockPrefillWorker.setBehavior(MockWorkerBehavior.builder().build());
         Response recovered = submitRequest("7002").get(5, TimeUnit.SECONDS);
         assertTrue(recovered.isSuccess(), "Subsequent request should succeed after recovery");
-        assertEquals(2, mockPrefillWorker.getEnqueueCount());
+        assertEquals(rejectedEnqueues + 1, mockPrefillWorker.getEnqueueCount());
     }
 }

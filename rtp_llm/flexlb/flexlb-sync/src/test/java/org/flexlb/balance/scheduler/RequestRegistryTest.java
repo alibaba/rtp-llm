@@ -1,6 +1,7 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.PlacementResult;
+import org.flexlb.balance.delivery.DeliveryRejection;
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
@@ -18,6 +19,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -303,9 +305,249 @@ class RequestRegistryTest {
     }
 
     @Test
+    void retryDeadlineAfterDefiniteBatchRejectionsPublishesBatchSloTimeout() {
+        Registered registered = registerItem(5011L);
+        RequestLifecycleTestSupport.bind(lifecycle, registered);
+        when(registered.item().decodeEp().settleDefiniteDispatchRejection(
+                registered.item().decodeReservation())).thenReturn(
+                        DecodeEndpoint.DispatchRejectionSettlement.RELEASED);
+        RequestRegistry.DeliveryClaim claim = lifecycle.tryClaimBatchDelivery(
+                registered.item(), 901L, () -> true);
+        assertNotNull(claim);
+
+        lifecycle.complete(
+                claim,
+                DeliveryResult.retryDeadlineExceeded(
+                        new DeliveryRejection(
+                                registered.item().requestId(),
+                                13L,
+                                "transient engine rejection")));
+
+        Response response = registered.future().join();
+        assertEquals(StrategyErrorType.BATCH_SLO_EXPIRED.getErrorCode(),
+                response.getCode());
+        assertTrue(response.getErrorMessage().contains(
+                "request deadline exceeded"));
+        assertFalse(response.getErrorMessage().contains("error_code=13"));
+        assertEquals(RequestState.Phase.TIMED_OUT,
+                lifecycle.getRequestState("5011", 901L).state());
+        verify(registered.item().decodeEp())
+                .settleDefiniteDispatchRejection(
+                        registered.item().decodeReservation());
+    }
+
+    @Test
+    void batchDecodeTerminalReleasesExactPrefillCounterpartOnlyAtTerminal() {
+        PrefillEndpoint prefill = mock(PrefillEndpoint.class);
+        DecodeEndpoint decode = mock(DecodeEndpoint.class);
+        Registered registered = registerItem(
+                502L, prefill, decode, 1L);
+        RequestLifecycleTestSupport.bind(lifecycle, registered);
+        RequestRegistry.DeliveryClaim claim = lifecycle.tryClaimBatchDelivery(
+                registered.item(), 702L, () -> true);
+        assertNotNull(claim);
+        lifecycle.complete(claim, DeliveryResult.delivered());
+        assertEquals(200, registered.future().join().getCode());
+        EndpointEventProjector projector = new EndpointEventProjector(lifecycle);
+
+        projector.onDecodeStatus(decode, List.of(
+                DecodeEndpoint.WorkerStatusFact.active(
+                        registered.item().decodeReservation()),
+                DecodeEndpoint.WorkerStatusFact.accepted(
+                        registered.item().decodeReservation())));
+
+        verify(prefill, never()).releaseCommittedItem(registered.item());
+        assertEquals(RequestState.Phase.ACKNOWLEDGED,
+                lifecycle.getRequestState("502", 702L).state());
+
+        projector.onDecodeStatus(decode, List.of(
+                DecodeEndpoint.WorkerStatusFact.terminal(
+                        registered.item().decodeReservation(), 0L)));
+
+        verify(prefill).releaseCommittedItem(registered.item());
+        assertEquals(RequestState.Phase.COMPLETED,
+                lifecycle.getRequestState("502", 702L).state());
+    }
+
+    @Test
+    void staleDecodeTerminalCannotReleaseReplacementPrefillGeneration() {
+        PrefillEndpoint oldPrefill = mock(PrefillEndpoint.class);
+        PrefillEndpoint replacementPrefill = mock(PrefillEndpoint.class);
+        DecodeEndpoint decode = mock(DecodeEndpoint.class);
+        Registered old = registerItem(503L, oldPrefill, decode, 1L);
+        RequestLifecycleTestSupport.bind(lifecycle, old);
+        RequestSlot oldSlot = lifecycle.requestSlot("503");
+
+        lifecycle.cancelRequest("503", 0L, CancelReason.CLIENT_CANCELLED);
+        assertEquals(StrategyErrorType.REQUEST_CANCELLED.getErrorCode(),
+                old.future().join().getCode());
+        assertTrue(lifecycle.removeExactTombstone(
+                oldSlot, Long.MAX_VALUE));
+
+        Registered replacement = registerItem(
+                503L, replacementPrefill, decode, 2L);
+        RequestLifecycleTestSupport.bind(lifecycle, replacement);
+        RequestRegistry.DeliveryClaim claim = lifecycle.tryClaimBatchDelivery(
+                replacement.item(), 703L, () -> true);
+        assertNotNull(claim);
+        lifecycle.complete(claim, DeliveryResult.delivered());
+        assertEquals(200, replacement.future().join().getCode());
+
+        new EndpointEventProjector(lifecycle).onDecodeStatus(decode, List.of(
+                DecodeEndpoint.WorkerStatusFact.terminal(
+                        old.item().decodeReservation(), 0L)));
+
+        verify(replacementPrefill, never())
+                .releaseCommittedItem(replacement.item());
+        assertSame(replacement.future(), lifecycle.requestSlot("503").future());
+        assertEquals(RequestState.Phase.ACKNOWLEDGED,
+                lifecycle.getRequestState("503", 703L).state());
+    }
+
+    @Test
+    void schedulingDeadlineProtectsBlockedGlobalRequestFromInactiveTtl() {
+        BalanceContext context = context(600L);
+        CompletableFuture<Response> future = lifecycle.register(context, 4);
+        RequestSlot slot = lifecycle.requestSlot("600");
+        long ttlMs = 30_000L;
+        long maintenanceAtMs = slot.createdAtMs() + ttlMs + 1L;
+
+        synchronized (slot) {
+            assertNull(slot.activeItem(),
+                    "Decode-capacity blocking happens before item publication");
+            assertTrue(slot.ownsSchedulingDeadline());
+        }
+        assertTrue(maintenanceAtMs < context.getRequestExpiresAtMs());
+        assertFalse(lifecycle.reduceStale(
+                slot, maintenanceAtMs, ttlMs));
+
+        assertFalse(future.isDone());
+        assertEquals(RequestState.Phase.QUEUED,
+                lifecycle.getRequestState("600", 0L).state());
+    }
+
+    @Test
+    void schedulingDeadlineProtectsDispatchUntilDeliveryAcknowledgement() {
+        Registered registered = registerItem(6001L);
+        RequestLifecycleTestSupport.bind(lifecycle, registered);
+        RequestRegistry.DeliveryClaim claim = lifecycle.tryClaimRouteDelivery(
+                registered.item(), () -> true);
+        assertNotNull(claim);
+        RequestSlot slot = lifecycle.requestSlot("6001");
+        long ttlMs = 30_000L;
+
+        assertFalse(lifecycle.reduceStale(
+                slot, slot.createdAtMs() + ttlMs + 1L, ttlMs));
+        assertFalse(registered.future().isDone());
+        assertEquals(RequestState.Phase.DISPATCHING,
+                lifecycle.getRequestState("6001", 0L).state());
+
+        lifecycle.complete(claim, DeliveryResult.delivered());
+        assertEquals(200, registered.future().join().getCode());
+        long inactiveSince;
+        synchronized (slot) {
+            inactiveSince = slot.lastWorkerStatusAtMs();
+        }
+
+        assertTrue(lifecycle.reduceStale(
+                slot, inactiveSince + ttlMs + 1L, ttlMs));
+        assertEquals(RequestState.Phase.TIMED_OUT,
+                lifecycle.getRequestState("6001", 0L).state());
+    }
+
+    @Test
+    void inactivePreAckEngineFenceCanBeReclaimedBeforeLongSchedulingDeadline() {
+        ServerStatus prefill = new ServerStatus();
+        prefill.setServerIp("127.0.0.1");
+        prefill.setGrpcPort(8090);
+        Registered registered = registerItem(6002L, prefill);
+        DecodeEndpoint.EngineFenceLease fenceLease =
+                mock(DecodeEndpoint.EngineFenceLease.class);
+        when(registered.item().decodeEp().beginEngineFenceProtection(
+                registered.item().decodeReservation())).thenReturn(fenceLease);
+        RequestLifecycleTestSupport.bind(lifecycle, registered);
+        RequestRegistry.DeliveryClaim claim = lifecycle.tryClaimRouteDelivery(
+                registered.item(), () -> true);
+        assertNotNull(claim);
+        RequestSlot slot = lifecycle.requestSlot("6002");
+        long ttlMs = 1_000L;
+        long inactiveSince;
+
+        synchronized (slot) {
+            assertTrue(slot.ownsSchedulingDeadline());
+            RequestSlot.FenceReduction fence = slot.requestDeliveryFence(
+                    "pre_ack_delivery_outcome_unknown");
+            assertEquals(RequestSlot.FenceReduction.Status.START,
+                    fence.status());
+            assertEquals(RequestSlot.FenceReduction.Status.NONE,
+                    slot.applyFenceUpdate(
+                            fence.fence(),
+                            RequestSlot.FenceUpdate.CANCEL_STARTED).status());
+            assertEquals(RequestSlot.FenceReduction.Status.NONE,
+                    slot.applyFenceUpdate(
+                            fence.fence(),
+                            RequestSlot.FenceUpdate.AWAIT_TERMINAL).status());
+            assertTrue(slot.ownsReclaimableInactiveFence(registered.item()));
+            inactiveSince = slot.lastWorkerStatusAtMs();
+        }
+        long maintenanceAtMs = inactiveSince + ttlMs + 1L;
+        assertTrue(maintenanceAtMs
+                < registered.item().ctx().getRequestExpiresAtMs());
+
+        assertTrue(lifecycle.reduceStale(
+                slot, maintenanceAtMs, ttlMs));
+        assertEquals(RequestState.Phase.TIMED_OUT,
+                lifecycle.getRequestState("6002", 0L).state());
+        verify(fenceLease).close();
+    }
+
+    @Test
+    void deliveryAcknowledgementRebasesInactiveTtlBeforeFirstWorkerStatus()
+            throws Exception {
+        Registered registered = registerItem(6003L);
+        RequestLifecycleTestSupport.bind(lifecycle, registered);
+        RequestRegistry.DeliveryClaim claim = lifecycle.tryClaimRouteDelivery(
+                registered.item(), () -> true);
+        assertNotNull(claim);
+        RequestSlot slot = lifecycle.requestSlot("6003");
+        long ttlMs = 10L;
+        long preAckBaseline;
+        synchronized (slot) {
+            assertTrue(slot.ownsSchedulingDeadline());
+            preAckBaseline = slot.lastWorkerStatusAtMs();
+        }
+        awaitCondition(() -> System.currentTimeMillis()
+                > preAckBaseline + ttlMs);
+
+        lifecycle.complete(claim, DeliveryResult.delivered());
+        assertEquals(200, registered.future().join().getCode());
+        RequestState acknowledged = lifecycle.getRequestState("6003", 0L);
+        assertEquals(RequestState.Phase.ACKNOWLEDGED, acknowledged.state());
+        long postAckBaseline;
+        synchronized (slot) {
+            assertFalse(slot.ownsSchedulingDeadline());
+            postAckBaseline = slot.lastWorkerStatusAtMs();
+        }
+        assertTrue(acknowledged.updatedAtMs() - preAckBaseline > ttlMs);
+
+        assertFalse(lifecycle.reduceStale(
+                slot, acknowledged.updatedAtMs(), ttlMs));
+        assertEquals(acknowledged.updatedAtMs(), postAckBaseline,
+                "delivery ACK atomically starts a fresh inactivity interval");
+        assertEquals(RequestState.Phase.ACKNOWLEDGED,
+                lifecycle.getRequestState("6003", 0L).state());
+
+        assertTrue(lifecycle.reduceStale(
+                slot, postAckBaseline + ttlMs + 1L, ttlMs));
+        assertEquals(RequestState.Phase.TIMED_OUT,
+                lifecycle.getRequestState("6003", 0L).state());
+    }
+
+    @Test
     void workerActivityExtendsOnlyTheInactiveMaintenanceTtl() {
         Registered registered = registerItem(601L);
         RequestLifecycleTestSupport.bind(lifecycle, registered);
+        acknowledgeRoute(registered);
         RequestSlot slot = lifecycle.requestSlot("601");
         long ttlMs = 300_000L;
         long heartbeatAtMs = slot.createdAtMs() + ttlMs + 1_000L;
@@ -315,7 +557,7 @@ class RequestRegistryTest {
 
         assertFalse(lifecycle.reduceStale(
                 slot, heartbeatAtMs + ttlMs - 1L, ttlMs));
-        assertEquals(RequestState.Phase.QUEUED,
+        assertEquals(RequestState.Phase.ACKNOWLEDGED,
                 lifecycle.getRequestState("601", 0L).state());
 
         assertTrue(lifecycle.reduceStale(
@@ -333,11 +575,16 @@ class RequestRegistryTest {
         Registered registered = registerItem(602L);
         assertEquals(PlacementResult.Status.SUCCESS,
                 commitRoute(lifecycle, registered, 0, 30_000L));
+        acknowledgeRoute(registered);
         RequestSlot slot = lifecycle.requestSlot("602");
         long ttlMs = 300_000L;
+        long inactiveSince;
+        synchronized (slot) {
+            inactiveSince = slot.lastWorkerStatusAtMs();
+        }
 
         assertTrue(lifecycle.reduceStale(
-                slot, slot.createdAtMs() + ttlMs + 1L, ttlMs));
+                slot, inactiveSince + ttlMs + 1L, ttlMs));
 
         assertEquals(RequestState.Phase.TIMED_OUT,
                 lifecycle.getRequestState("602", 0L).state());
@@ -361,6 +608,7 @@ class RequestRegistryTest {
                 registered.item().decodeReservation())).thenReturn(fenceLease);
         assertEquals(PlacementResult.Status.SUCCESS,
                 commitRoute(lifecycle, registered, 0, 30_000L));
+        acknowledgeRoute(registered);
         RequestSlot slot = lifecycle.requestSlot("603");
         RequestSlot.FenceReduction fence;
         synchronized (slot) {
@@ -378,9 +626,13 @@ class RequestRegistryTest {
                             RequestSlot.FenceUpdate.AWAIT_TERMINAL).status());
         }
         long ttlMs = 300_000L;
+        long inactiveSince;
+        synchronized (slot) {
+            inactiveSince = slot.lastWorkerStatusAtMs();
+        }
 
         assertTrue(lifecycle.reduceStale(
-                slot, slot.createdAtMs() + ttlMs + 1L, ttlMs));
+                slot, inactiveSince + ttlMs + 1L, ttlMs));
 
         assertEquals(RequestState.Phase.TIMED_OUT,
                 lifecycle.getRequestState("603", 0L).state());
@@ -523,8 +775,40 @@ class RequestRegistryTest {
                         null,
                         decode,
                         reservation,
+                System.currentTimeMillis()),
+                future);
+    }
+
+    private Registered registerItem(
+            long requestId,
+            PrefillEndpoint prefill,
+            DecodeEndpoint decode,
+            long reservationToken) {
+        BalanceContext context = context(requestId);
+        CompletableFuture<Response> future = lifecycle.register(context, 4);
+        DecodeEndpoint.ReservationHandle reservation =
+                new DecodeEndpoint.ReservationHandle(
+                        1L, Long.toString(requestId), reservationToken);
+        return new Registered(
+                new ScheduledRequest(
+                        context,
+                        future,
+                        new Response(),
+                        null,
+                        null,
+                        prefill,
+                        decode,
+                        reservation,
                         System.currentTimeMillis()),
                 future);
+    }
+
+    private void acknowledgeRoute(Registered registered) {
+        RequestRegistry.DeliveryClaim claim = lifecycle.tryClaimRouteDelivery(
+                registered.item(), () -> true);
+        assertNotNull(claim);
+        lifecycle.complete(claim, DeliveryResult.delivered());
+        assertEquals(200, registered.future().join().getCode());
     }
 
 }

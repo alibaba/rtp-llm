@@ -871,6 +871,10 @@ def balance_len_mixed(ctx: CaseContext):
     token balance and request-count balance genuinely conflict in this
     scene, and P3 is the property that matters.
     """
+    # Runtime /set_perf overrides cannot be cleared back to the formula.
+    # Rebuild so this formula-calibrated case cannot inherit a fixed-ms
+    # override from an earlier case that shared the smoke environment.
+    ctx.env_manager.teardown()
     ops = ctx.ops()
     report = GradeReport(run_grade=ctx.grade)
     base = rid_base(ctx, "balance")

@@ -1,29 +1,35 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.delivery.CapacityBoundary;
+import org.flexlb.balance.delivery.DeliveryRejection;
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.scheduler.BatchDeliveryStrategy.PreparedSubmission;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.DebugInfo;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.engine.grpc.RequestId;
 import org.flexlb.engine.grpc.RoleTypeProtoConverter;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiConsumer;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
@@ -38,6 +44,7 @@ import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -97,6 +104,8 @@ class DefaultBatchDispatcherTest {
         assertEquals(1, callback.uncertainCount.get());
         assertEquals(0, callback.failureCount.get());
         assertEquals(0, callback.successCount.get());
+        verify(grpcClient, times(1)).batchEnqueueAsync(
+                anyString(), anyInt(), any(), anyLong());
     }
 
     @Test
@@ -291,6 +300,44 @@ class DefaultBatchDispatcherTest {
     }
 
     @Test
+    void acceptedRetryChainCompletesNormallyAfterShutdown() throws Exception {
+        PrefillEndpoint prefillEp = createPrefillEndpoint();
+        ScheduledRequest item = createScheduledRequest(
+                7L,
+                500,
+                200,
+                prefillEp,
+                System.currentTimeMillis() + TimeUnit.SECONDS.toMillis(5));
+        CompletableFuture<EngineRpcService.EnqueueBatchResponsePB> retryFuture =
+                new CompletableFuture<>();
+        CountDownLatch retryInvoked = new CountDownLatch(1);
+        AtomicInteger invocation = new AtomicInteger();
+        when(grpcClient.batchEnqueueAsync(
+                anyString(), anyInt(), any(), anyLong()))
+                .thenAnswer(call -> {
+                    if (invocation.incrementAndGet() == 1) {
+                        return CompletableFuture.completedFuture(
+                                partialAckResponse(
+                                        74L, List.of(), 7L, 13L));
+                    }
+                    retryInvoked.countDown();
+                    return retryFuture;
+                });
+
+        submit(List.of(item), 74L, 100, "shutdown_retry_drain", callback);
+        assertTrue(retryInvoked.await(5, TimeUnit.SECONDS));
+
+        dispatcher.shutdown();
+        retryFuture.complete(ackResponse(74L, List.of(7L)));
+
+        assertTrue(callback.successLatch.await(5, TimeUnit.SECONDS));
+        assertEquals(2, invocation.get());
+        assertEquals(1, callback.successCount.get());
+        assertEquals(0, callback.failureCount.get());
+        assertEquals(0, callback.uncertainCount.get());
+    }
+
+    @Test
     void dispatchHandlesResponseWithErrors() throws Exception {
         PrefillEndpoint prefillEp = createPrefillEndpoint();
         ScheduledRequest item = createScheduledRequest(1L, 500, 200, prefillEp);
@@ -314,6 +361,131 @@ class DefaultBatchDispatcherTest {
         assertTrue(callback.failureLatch.await(5, TimeUnit.SECONDS));
         assertEquals(1, callback.failureCount.get());
         assertTrue(callback.lastError.getMessage().contains("error_code=500"));
+    }
+
+    @Test
+    void partialTransientRejectionRetriesOnlyRejectedMemberAndCallbacksOnce()
+            throws Exception {
+        PrefillEndpoint prefillEp = createPrefillEndpoint();
+        long expiresAtMs = System.currentTimeMillis() + TimeUnit.SECONDS.toMillis(5);
+        List<ScheduledRequest> items = List.of(
+                createScheduledRequest(1L, 500, 200, prefillEp, expiresAtMs),
+                createScheduledRequest(2L, 500, 200, prefillEp, expiresAtMs),
+                createScheduledRequest(3L, 500, 200, prefillEp, expiresAtMs),
+                createScheduledRequest(4L, 500, 200, prefillEp, expiresAtMs));
+        List<EngineRpcService.EnqueueBatchRequestPB> sent =
+                new CopyOnWriteArrayList<>();
+        AtomicInteger invocation = new AtomicInteger();
+        when(grpcClient.batchEnqueueAsync(
+                anyString(), anyInt(), any(), anyLong()))
+                .thenAnswer(call -> {
+                    EngineRpcService.EnqueueBatchRequestPB request =
+                            call.getArgument(2);
+                    sent.add(request);
+                    if (invocation.incrementAndGet() == 1) {
+                        return CompletableFuture.completedFuture(
+                                partialAckResponse(
+                                        71L,
+                                        List.of(1L, 2L, 3L),
+                                        4L,
+                                        13L));
+                    }
+                    return CompletableFuture.completedFuture(
+                            ackResponse(71L, List.of(4L)));
+                });
+        ExactCallback exact = new ExactCallback(items.size());
+
+        submit(items, 71L, 100, "partial_transient", exact);
+
+        assertTrue(exact.completed.await(5, TimeUnit.SECONDS));
+        assertEquals(2, sent.size());
+        assertEquals(List.of("1", "2", "3", "4"), requestIds(sent.get(0)));
+        assertEquals(List.of("4"), requestIds(sent.get(1)),
+                "the retry RPC contains only the explicitly rejected member");
+        assertEquals(71L, sent.get(1).getBatchId(),
+                "the canonical batch id is reused by a distinct subset RPC");
+        assertEquals(Map.of("1", 1, "2", 1, "3", 1, "4", 1),
+                exact.callbackCounts());
+        assertTrue(exact.results.values().stream()
+                .allMatch(result -> result.status()
+                        == DeliveryResult.Status.DELIVERED));
+    }
+
+    @Test
+    void persistentTransientRejectionTerminatesAtAbsoluteDeadline()
+            throws Exception {
+        PrefillEndpoint prefillEp = createPrefillEndpoint();
+        long expiresAtMs = System.currentTimeMillis() + 300L;
+        ScheduledRequest item = createScheduledRequest(
+                9L, 500, 200, prefillEp, expiresAtMs);
+        AtomicInteger rpcCount = new AtomicInteger();
+        when(grpcClient.batchEnqueueAsync(
+                anyString(), anyInt(), any(), anyLong()))
+                .thenAnswer(call -> {
+                    rpcCount.incrementAndGet();
+                    return CompletableFuture.completedFuture(
+                            partialAckResponse(
+                                    72L, List.of(), 9L, 13L));
+                });
+        AtomicReference<Long> completedAtMs = new AtomicReference<>();
+        AtomicReference<DeliveryResult> result = new AtomicReference<>();
+        CountDownLatch completed = new CountDownLatch(1);
+
+        submit(List.of(item), 72L, 100, "persistent_transient",
+                (exact, completion) -> {
+                    completedAtMs.set(System.currentTimeMillis());
+                    result.set(completion);
+                    completed.countDown();
+                });
+
+        assertTrue(completed.await(5, TimeUnit.SECONDS));
+        assertTrue(rpcCount.get() >= 2, "code 13 must cross a fresh RPC boundary");
+        assertTrue(completedAtMs.get() >= expiresAtMs,
+                "retry completion cannot precede the absolute request deadline");
+        assertEquals(DeliveryResult.Status.TIMED_OUT, result.get().status());
+        DeliveryRejection rejection = assertInstanceOf(
+                DeliveryRejection.class, result.get().cause());
+        assertTrue(rejection.retryDeadlineExceeded());
+        assertEquals(13L, rejection.errorCode());
+    }
+
+    @Test
+    void permanentRejectionDoesNotRetry() throws Exception {
+        assertDefiniteRejectionDoesNotRetry(8431L);
+    }
+
+    @Test
+    void engineCapacityRejectionDoesNotRetry() throws Exception {
+        assertDefiniteRejectionDoesNotRetry(602L);
+    }
+
+    @Test
+    void ambiguousRetryTransportOutcomeIsNeverSubmittedAgain()
+            throws Exception {
+        PrefillEndpoint prefillEp = createPrefillEndpoint();
+        ScheduledRequest item = createScheduledRequest(
+                29L,
+                500,
+                200,
+                prefillEp,
+                System.currentTimeMillis() + TimeUnit.SECONDS.toMillis(5));
+        AtomicInteger invocation = new AtomicInteger();
+        when(grpcClient.batchEnqueueAsync(
+                anyString(), anyInt(), any(), anyLong()))
+                .thenAnswer(call -> invocation.incrementAndGet() == 1
+                        ? CompletableFuture.completedFuture(
+                                partialAckResponse(
+                                        75L, List.of(), 29L, 13L))
+                        : CompletableFuture.failedFuture(
+                                new RuntimeException("retry transport lost")));
+
+        submit(List.of(item), 75L, 100, "ambiguous_retry", callback);
+
+        assertTrue(callback.uncertainLatch.await(5, TimeUnit.SECONDS));
+        assertEquals(2, invocation.get());
+        assertEquals(1, callback.uncertainCount.get());
+        assertEquals(0, callback.failureCount.get());
+        assertEquals(0, callback.successCount.get());
     }
 
     @Test
@@ -624,6 +796,43 @@ class DefaultBatchDispatcherTest {
         return request.getDpSlotsList().getFirst().getRequestsList().getFirst().getInput();
     }
 
+    private void assertDefiniteRejectionDoesNotRetry(long errorCode)
+            throws Exception {
+        PrefillEndpoint prefillEp = createPrefillEndpoint();
+        ScheduledRequest item = createScheduledRequest(
+                19L,
+                500,
+                200,
+                prefillEp,
+                System.currentTimeMillis() + TimeUnit.SECONDS.toMillis(5));
+        AtomicInteger rpcCount = new AtomicInteger();
+        when(grpcClient.batchEnqueueAsync(
+                anyString(), anyInt(), any(), anyLong()))
+                .thenAnswer(call -> {
+                    rpcCount.incrementAndGet();
+                    return CompletableFuture.completedFuture(
+                            partialAckResponse(
+                                    73L, List.of(), 19L, errorCode));
+                });
+
+        submit(List.of(item), 73L, 100, "permanent_rejection", callback);
+
+        assertTrue(callback.failureLatch.await(5, TimeUnit.SECONDS));
+        assertEquals(1, rpcCount.get());
+        DeliveryRejection rejection = assertInstanceOf(
+                DeliveryRejection.class, callback.lastError);
+        assertEquals(errorCode, rejection.errorCode());
+        assertFalse(rejection.retryable());
+    }
+
+    private static List<String> requestIds(
+            EngineRpcService.EnqueueBatchRequestPB request) {
+        return request.getDpSlotsList().stream()
+                .flatMap(slot -> slot.getRequestsList().stream())
+                .map(member -> RequestId.parse(member.getInput()))
+                .toList();
+    }
+
     // ---- helpers ----
 
     private PreparedSubmission reservePermit() {
@@ -685,7 +894,21 @@ class DefaultBatchDispatcherTest {
         return endpoint;
     }
 
-    private ScheduledRequest createScheduledRequest(long requestId, long seqLen, long hitCacheLen, PrefillEndpoint prefillEp) {
+    private ScheduledRequest createScheduledRequest(
+            long requestId,
+            long seqLen,
+            long hitCacheLen,
+            PrefillEndpoint prefillEp) {
+        return createScheduledRequest(
+                requestId, seqLen, hitCacheLen, prefillEp, null);
+    }
+
+    private ScheduledRequest createScheduledRequest(
+            long requestId,
+            long seqLen,
+            long hitCacheLen,
+            PrefillEndpoint prefillEp,
+            Long expiresAtMs) {
         Request request = new Request();
         request.setRequestId(Long.toString(requestId));
         request.setSeqLen(seqLen);
@@ -693,6 +916,10 @@ class DefaultBatchDispatcherTest {
         BalanceContext ctx = new BalanceContext();
         ctx.setConfig(config);
         ctx.setRequest(request);
+        if (expiresAtMs != null) {
+            ctx.setSchedulingMetadata(
+                    SchedulingMetadata.explicit(50, expiresAtMs));
+        }
 
         // Provide a valid GenerateInputPB bytes (minimum: requestId + empty config)
         EngineRpcService.GenerateInputPB input = RequestIdFixtures.write(
@@ -725,6 +952,47 @@ class DefaultBatchDispatcherTest {
                     .build());
         }
         return builder.build();
+    }
+
+    private EngineRpcService.EnqueueBatchResponsePB partialAckResponse(
+            long batchId,
+            List<Long> successIds,
+            long rejectedId,
+            long errorCode) {
+        return ackResponse(batchId, successIds).toBuilder()
+                .addErrors(EngineRpcService.EnqueueBatchErrorPB.newBuilder()
+                        .setRequestId(rejectedId)
+                        .setErrorInfo(EngineRpcService.ErrorDetailsPB.newBuilder()
+                                .setErrorCode(errorCode)
+                                .setErrorMessage("injected rejection")
+                                .build())
+                        .build())
+                .build();
+    }
+
+    private static final class ExactCallback
+            implements BiConsumer<ScheduledRequest, DeliveryResult> {
+        private final CountDownLatch completed;
+        private final Map<String, Integer> counts = new ConcurrentHashMap<>();
+        private final Map<String, DeliveryResult> results =
+                new ConcurrentHashMap<>();
+
+        private ExactCallback(int expected) {
+            completed = new CountDownLatch(expected);
+        }
+
+        @Override
+        public void accept(
+                ScheduledRequest item,
+                DeliveryResult completion) {
+            counts.merge(item.requestId(), 1, Integer::sum);
+            results.put(item.requestId(), completion);
+            completed.countDown();
+        }
+
+        private Map<String, Integer> callbackCounts() {
+            return Map.copyOf(counts);
+        }
     }
 
     // ---- Test callback ----
