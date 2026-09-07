@@ -130,7 +130,7 @@ class SessionPlacementStoreTest {
         store.record("model", "session", "10.0.0.1:9000");
         for (int i = 0; i < 4; i++) {
             elapsed.addAndGet(RoutingConfig.SessionAffinityConfig.MAX_TTL_MS / 4);
-            store.find("model", "session", RoutingConfig.SessionAffinityConfig.MAX_TTL_MS);
+            store.find("model", "session", 2 * RoutingConfig.SessionAffinityConfig.MAX_TTL_MS);
         }
         assertEquals(0L, store.estimatedSize());
     }
