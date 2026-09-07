@@ -401,7 +401,7 @@ def accounting(ctx, params, deadline):
     return accounting_window(ctx, deadline, 95)
 
 
-def accounting_window(ctx, deadline, budget_s):
+def accounting_window(ctx, deadline, budget_s, legacy_prefill_defaults=False):
     start = ctx.clock()
     evidence = dict(started_s=start, samples=[], budget_s=budget_s)
     path = ctx.artifact_dir / f"elastic-accounting-{time.time_ns()}.json"
@@ -440,7 +440,14 @@ def accounting_window(ctx, deadline, budget_s):
                 or not decode
             ):
                 raise ValueError("endpoint accounting lists missing or empty")
-            pvalues = [row.get("inflight_batches") for row in prefill]
+            pvalues = [
+                (
+                    row.get("inflight_batches", 0)
+                    if legacy_prefill_defaults
+                    else row.get("inflight_batches")
+                )
+                for row in prefill
+            ]
             dvalues = []
             for row in decode:
                 values = [
@@ -603,3 +610,7 @@ HANDLERS = [
 from .elastic_rebalance import HANDLERS as REBALANCE_HANDLERS
 
 HANDLERS += REBALANCE_HANDLERS
+
+from .elastic_combined import HANDLERS as COMBINED_HANDLERS
+
+HANDLERS += COMBINED_HANDLERS

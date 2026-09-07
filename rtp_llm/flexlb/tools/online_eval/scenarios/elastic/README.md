@@ -53,14 +53,19 @@ legacy function is retained.
 contracts below. The independent 12-stage `rebalance` program preserves the fifth
 contract without preference traffic warming the new worker. `kv_skew_hot` and `kv_skew_cold` retain the two pilot programs
 with their 2P/2D environment and independent execution budgets. The main program
-uses the 2P/4D fault preset, PRIORITY/FIXED_WINDOW/BATCH axes and omitted queue
+uses the 2P/4D fault preset, PRIORITY with profile-selected axes and omitted queue
 timeout. The compiler/runtime interface requires `23b3893059` or a descendant.
 
 Rebalance also has explicit SB/SN/WN variants. All four rebalance profiles use
 the corrected old-worker counter anchor from before add, with the newcomer
-anchor after convergence. Other variants remain BW-only. See
+anchor after convergence. See
 [MIGRATION_REBALANCE_PROFILES.md](MIGRATION_REBALANCE_PROFILES.md) for the exact
 window correction and protocol fixtures.
+
+Normal/strict now also have explicit SB/SN/WN variants (57 stages, 75 checks).
+Their separate probe/background cohorts and literal NB accounting are described
+in [MIGRATION_COMBINED_PROFILES.md](MIGRATION_COMBINED_PROFILES.md). Remaining
+specialized lifecycle variants retain their BW-only requirements.
 
 | Legacy contract | Actual stage/check or evidence |
 | --- | --- |
@@ -73,12 +78,12 @@ window correction and protocol fixtures.
 | Preference flow success rate at least 90% | `preference_availability.success_rate` |
 | `elastic_rebalance`: 50 requests before and after addition | `rebalance_baseline`, `rebalance_after_add`: `.complete`, `.no_errors` |
 | New worker receives positive share strictly below 60% | `rebalance_share.nonempty`, `.new_share` |
-| Remove flow reaches the new worker within 10s of its fresh accepted baseline | `remove_counter`, `remove_traffic.received` |
+| Separate probe reaches the new worker from a 10s issuance window while background traffic runs | `remove_traffic.received` |
 | `elastic_remove_flow`: graceful removal, no request errors | `remove.membership`, `remove_zero_errors.success_rate` |
 | Removed worker disappears from discovery and Master | `removed_topology.discovery`, `.master` |
 | Scheduler, Prefill batch and Decode load drain | `remove_accounting.scheduler`, `.prefill_batches`, `.decode_load` |
 | `elastic_add_remove_cycle`: three full cycles | Explicit `cycle1_*`, `cycle2_*`, `cycle3_*` addition, topology, received-traffic, removal and zero-error checks |
-| Final request succeeds and topology returns to 2P | `recovery_completed.comparison`, `recovery_no_errors.comparison`, `final_topology` |
+| Final recovery has legacy FINISHED/no-transport-error evidence and topology returns to 2P | `recovery.legacy_success`, `final_topology`; consumer cleanup is separate |
 | `elastic_kv_skew_shrink_hot/cold` | Separate variant seed, actual baseline-hit guard, scale, transient/steady windows, recovery and fixed verdict checks |
 
 The normal variant also represents the legacy loose share ceiling; selecting a
@@ -88,8 +93,9 @@ invented pass thresholds. Rebalance runs in its own fresh environment: baseline 
 convergence, then the immediate post-add batch with no intervening warmup. It
 retains concurrency 10, 50 unique cold-key
 requests per batch, 2048 input / 2 output tokens, and separate Schedule/stream
-budgets. Removal accounting retains its 95s drain budget and checks each owner;
-missing owner fields are ERROR rather than zero.
+budgets. Removal accounting retains its 95s drain budget. NB deliberately keeps
+the legacy Prefill batch-field/default predicate; it cannot establish route-owner
+release. Scheduler/Decode evidence and strict BATCH Prefill fields remain typed.
 
 Combining flows changes construction: add availability is computed only from
 requests issued between one second before the add call and one second after
@@ -99,11 +105,10 @@ restarting an identical short legacy flow; independent acceptance must review
 that adaptation. Cohort completeness, exact topology and explicit consumer
 termination are additional construction checks. Removal and each cycle keep
 independent zero-error checks; the preference 90% floor cannot hide their errors.
-Cycle construction also merges the old traffic-pumping phase and removal flow:
-its zero-error assertion covers the entire combined flow, including pre-removal
-traffic. That wider denominator is an explicit **new assertion**, not an exact
-replacement for the legacy removal-only success scope. The legacy function stays
-available pending acceptance of this stronger construction.
+Cycle probes now complete before the separate removal flow starts, restoring the
+legacy cohort boundary. Remove instead probes while its background flow runs.
+The probe results do not enter either background cohort's zero-error denominator.
+The legacy functions stay available pending real acceptance.
 A blocked later stage is not counted as covered by an earlier passing stage.
 
 Local tests compile and execute both main programs and both skew variants with

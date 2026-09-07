@@ -252,11 +252,14 @@ class LifecycleTests(unittest.TestCase):
                 def teardown(self, ctx, deadline):
                     state["cleaned"] = True
 
-            class Flow(e.ClientRecords):
+            class Flow(e.RecordedRequests if driver_factory else e.ClientRecords):
                 pump_error = None
 
                 def __init__(self, ops, epoch, clock):
-                    super().__init__(epoch)
+                    if driver_factory:
+                        super().__init__(ops, epoch, clock)
+                    else:
+                        super().__init__(epoch)
                     state["flow_count"] += 1
                     self.ordinal = state["flow_count"]
                     flows.append(self)
@@ -265,15 +268,40 @@ class LifecycleTests(unittest.TestCase):
                     state["active"] = True
                     state["active_flow"] = self
                     state["last"] = clock()
+                    if driver_factory:
+                        self.sample()
+                        return
                     record = self.issue(next_rid(), clock)
                     self.update(
                         record,
                         business_finished=not (fail_remove and self.ordinal == 2),
+                        prefill_addr="127.0.0.1:10001",
                         schedule=dict(status="OK"),
-                        stream=dict(status="OK"),
+                        stream=dict(
+                            status="OK",
+                            method=(
+                                "GenerateStreamCall"
+                                if "nonbatch" in profile
+                                else "FetchResponse"
+                            ),
+                        ),
                         consumer_exit_s=clock(),
                         transport_terminal_s=clock(),
                     )
+
+                def sample(self):
+                    previous = state.get("request_source")
+                    state["request_source"] = "flow"
+                    try:
+                        rid = next_rid()
+                        record = self.issue(rid, clock)
+                        self.run(
+                            record,
+                            dict(output_len=2, block_keys=[rid * 100 + 1]),
+                            stream_timeout_s=10,
+                        )
+                    finally:
+                        state["request_source"] = previous
 
                 def stop(self, deadline, cancel=False):
                     state["active"] = False
@@ -283,20 +311,31 @@ class LifecycleTests(unittest.TestCase):
             def http(ops, endpoint, deadline, body=None):
                 if state["active"]:
                     elapsed = clock() - state["last"]
-                    for row in state["engines"].values():
+                    for row in [] if driver_factory else state["engines"].values():
                         if not (
                             no_remove_traffic and state["active_flow"].ordinal == 2
                         ):
                             row["accepted"] += round(elapsed * 10)
                     state["last"] = clock()
-                    if elapsed > 0:
+                    if elapsed > 0 and driver_factory:
+                        for _ in range(max(len(state["engines"]), round(elapsed * 5))):
+                            state["active_flow"].sample()
+                    if elapsed > 0 and not driver_factory:
                         flow = state["active_flow"]
                         record = flow.issue(next_rid(), clock)
                         flow.update(
                             record,
                             business_finished=True,
+                            prefill_addr="127.0.0.1:10001",
                             schedule=dict(status="OK"),
-                            stream=dict(status="OK"),
+                            stream=dict(
+                                status="OK",
+                                method=(
+                                    "GenerateStreamCall"
+                                    if "nonbatch" in profile
+                                    else "FetchResponse"
+                                ),
+                            ),
                             consumer_exit_s=clock(),
                             transport_terminal_s=clock(),
                         )
@@ -358,13 +397,25 @@ class LifecycleTests(unittest.TestCase):
                     state["batches"] += 1
                     names = sorted(state["engines"])
                     name = names[index % len(names)]
-                    state["engines"][name]["accepted"] += 1
+                    if not (
+                        no_remove_traffic
+                        and state.get("active_flow")
+                        and state["active_flow"].ordinal == 2
+                    ):
+                        state["engines"][name]["accepted"] += 1
                 records.update(
                     record,
                     business_finished=not (batch_error and index == 50),
                     prefill_addr=state["engines"][name]["grpc_addr"],
                     schedule=dict(status="OK"),
-                    stream=dict(status="OK", method="FetchResponse"),
+                    stream=dict(
+                        status="OK",
+                        method=(
+                            "GenerateStreamCall"
+                            if "nonbatch" in profile
+                            else "FetchResponse"
+                        ),
+                    ),
                     consumer_exit_s=clock(),
                     transport_terminal_s=clock(),
                 )
@@ -395,6 +446,17 @@ class LifecycleTests(unittest.TestCase):
                 for p in (Path(root) / "artifacts").glob("elastic-batch-*.json")
             ]
             state["plan"] = plan
+            state["flow_records"] = [f.snapshot_records() for f in flows]
+            state["recovery_artifacts"] = [
+                json.loads(p.read_text())
+                for p in (Path(root) / "artifacts").glob(
+                    "elastic-cycle-recovery-*.json"
+                )
+            ]
+            state["probe_artifacts"] = [
+                json.loads(p.read_text())
+                for p in (Path(root) / "artifacts").glob("elastic-added-probe-*.json")
+            ]
         return result, state
 
     def test_normal_and_strict_complete_all_stages_and_four_additions(self):
@@ -402,8 +464,8 @@ class LifecycleTests(unittest.TestCase):
             result, state = self.run_program(variant)
             self.assertEqual(result["status"], "PASS", result)
             self.assertEqual(state["adds"], 4)
-            self.assertEqual(state["batches"], 0)
-            self.assertEqual(sum(len(s["checks"]) for s in result["stages"]), 62)
+            self.assertGreaterEqual(state["batches"], 5)
+            self.assertEqual(sum(len(s["checks"]) for s in result["stages"]), 75)
             self.assertTrue(all(s["status"] == "PASS" for s in result["stages"]))
 
     def test_remove_failure_cannot_be_hidden_by_preference_90_percent_floor(self):

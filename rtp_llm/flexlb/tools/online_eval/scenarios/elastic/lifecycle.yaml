@@ -1060,6 +1060,2274 @@ variants:
     action: teardown
   profiles:
   - window-nonbatch
+- id: normal_single_batch
+  legacy_case_ids:
+  - elastic_add_flow
+  - elastic_remove_flow
+  - elastic_add_remove_cycle
+  - elastic_add_preference
+  profiles:
+  - single-batch
+  requires:
+  - queue
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: initial_topology
+    action: elastic_topology
+    params:
+      role: PREFILL
+      discovered: 2
+      alive: 2
+    timeout_s: 35
+  - id: preference_flow
+    action: elastic_cold_flow
+  - id: ramp
+    action: elastic_pause
+    params:
+      seconds: 1
+  - id: baseline_window
+    action: elastic_timeline
+    params:
+      engines:
+      - prefill-0
+      - prefill-1
+      offsets_s:
+      - 0
+      - 15
+    timeout_s: 25
+  - id: add
+    action: elastic_add
+    params:
+      role: prefill
+  - id: first_traffic
+    action: elastic_accepted_timed
+    params:
+      engine:
+        $ref: stages.add.output.engine
+      baseline: 0
+      window_s: 10
+    timeout_s: 15
+  - id: added_topology
+    action: elastic_topology
+    params:
+      role: PREFILL
+      discovered: 3
+      alive: 3
+      port:
+        $ref: stages.add.output.port
+      present: true
+    timeout_s: 35
+  - id: post_window
+    action: elastic_timeline
+    params:
+      engines:
+      - prefill-0
+      - prefill-1
+      - $ref: stages.add.output.engine
+      offsets_s:
+      - 0
+      - 5
+      - 10
+      - 17
+      - 24
+      - 31
+      - 38
+      - 45
+    timeout_s: 55
+  - id: preference_flow_stop
+    action: elastic_flow_stop
+    params:
+      flow:
+        $ref: stages.preference_flow.output.flow
+    timeout_s: 45
+  - id: preference_protocol
+    action: elastic_lifecycle_flow_protocol
+    params:
+      flow:
+        $ref: stages.preference_flow.output.flow
+      method: FetchResponse
+  - id: add_availability
+    action: elastic_add_availability
+    params:
+      flow:
+        $ref: stages.preference_flow.output.flow
+      mutation:
+        $ref: stages.add.output.mutation
+      received_s:
+        $ref: stages.first_traffic.output.observed_s
+  - id: preference_received
+    action: elastic_window_received
+    params:
+      engine:
+        $ref: stages.add.output.engine
+      before:
+        $ref: stages.post_window.output.first
+      after:
+        $ref: stages.post_window.output.last
+  - id: preference_shares
+    action: elastic_share
+    params:
+      series:
+        $ref: stages.post_window.output.series
+      engine:
+        $ref: stages.add.output.engine
+      max_share: 0.6
+      old_floor: 0.1
+      exclusive: false
+      require_new: false
+  - id: preference_availability
+    action: elastic_flow_assert
+    params:
+      result:
+        $ref: stages.preference_flow_stop.output.result
+      min_success_rate: 0.9
+  - id: remove_flow
+    action: elastic_cold_flow
+  - id: remove_traffic
+    action: elastic_lifecycle_probe
+    params:
+      engine:
+        $ref: stages.add.output.engine
+      window_s: 10
+      method: FetchResponse
+    timeout_s: 60
+  - id: remove
+    action: elastic_remove
+    params:
+      engine:
+        $ref: stages.add.output.engine
+      drain_timeout_ms: 60000
+    timeout_s: 75
+  - id: remove_hold
+    action: elastic_pause
+    params:
+      seconds: 3
+  - id: remove_flow_stop
+    action: elastic_flow_stop
+    params:
+      flow:
+        $ref: stages.remove_flow.output.flow
+    timeout_s: 45
+  - id: remove_protocol
+    action: elastic_lifecycle_flow_protocol
+    params:
+      flow:
+        $ref: stages.remove_flow.output.flow
+      method: FetchResponse
+  - id: removed_topology
+    action: elastic_topology
+    params:
+      role: PREFILL
+      discovered: 2
+      alive: 2
+      port:
+        $ref: stages.add.output.port
+      present: false
+    timeout_s: 35
+  - id: remove_accounting
+    action: elastic_accounting
+    timeout_s: 105
+  - id: remove_zero_errors
+    action: elastic_flow_assert
+    params:
+      result:
+        $ref: stages.remove_flow_stop.output.result
+      min_success_rate: 1
+  - id: cycle1_add
+    action: elastic_add
+    params:
+      role: prefill
+  - id: cycle1_added_topology
+    action: elastic_topology
+    params:
+      role: PREFILL
+      discovered: 3
+      alive: 3
+      port:
+        $ref: stages.cycle1_add.output.port
+      present: true
+    timeout_s: 35
+  - id: cycle1_traffic
+    action: elastic_lifecycle_probe
+    params:
+      engine:
+        $ref: stages.cycle1_add.output.engine
+      window_s: 15
+      method: FetchResponse
+    timeout_s: 60
+  - id: cycle1_flow
+    action: elastic_cold_flow
+  - id: cycle1_ramp
+    action: elastic_pause
+    params:
+      seconds: 0.5
+  - id: cycle1_remove
+    action: elastic_remove
+    params:
+      engine:
+        $ref: stages.cycle1_add.output.engine
+      drain_timeout_ms: 60000
+    timeout_s: 75
+  - id: cycle1_flow_stop
+    action: elastic_flow_stop
+    params:
+      flow:
+        $ref: stages.cycle1_flow.output.flow
+    timeout_s: 45
+  - id: cycle1_protocol
+    action: elastic_lifecycle_flow_protocol
+    params:
+      flow:
+        $ref: stages.cycle1_flow.output.flow
+      method: FetchResponse
+  - id: cycle1_removed_topology
+    action: elastic_topology
+    params:
+      role: PREFILL
+      discovered: 2
+      alive: 2
+      port:
+        $ref: stages.cycle1_add.output.port
+      present: false
+    timeout_s: 35
+  - id: cycle1_zero_errors
+    action: elastic_flow_assert
+    params:
+      result:
+        $ref: stages.cycle1_flow_stop.output.result
+      min_success_rate: 1
+  - id: cycle2_add
+    action: elastic_add
+    params:
+      role: prefill
+  - id: cycle2_added_topology
+    action: elastic_topology
+    params:
+      role: PREFILL
+      discovered: 3
+      alive: 3
+      port:
+        $ref: stages.cycle2_add.output.port
+      present: true
+    timeout_s: 35
+  - id: cycle2_traffic
+    action: elastic_lifecycle_probe
+    params:
+      engine:
+        $ref: stages.cycle2_add.output.engine
+      window_s: 15
+      method: FetchResponse
+    timeout_s: 60
+  - id: cycle2_flow
+    action: elastic_cold_flow
+  - id: cycle2_ramp
+    action: elastic_pause
+    params:
+      seconds: 0.5
+  - id: cycle2_remove
+    action: elastic_remove
+    params:
+      engine:
+        $ref: stages.cycle2_add.output.engine
+      drain_timeout_ms: 60000
+    timeout_s: 75
+  - id: cycle2_flow_stop
+    action: elastic_flow_stop
+    params:
+      flow:
+        $ref: stages.cycle2_flow.output.flow
+    timeout_s: 45
+  - id: cycle2_protocol
+    action: elastic_lifecycle_flow_protocol
+    params:
+      flow:
+        $ref: stages.cycle2_flow.output.flow
+      method: FetchResponse
+  - id: cycle2_removed_topology
+    action: elastic_topology
+    params:
+      role: PREFILL
+      discovered: 2
+      alive: 2
+      port:
+        $ref: stages.cycle2_add.output.port
+      present: false
+    timeout_s: 35
+  - id: cycle2_zero_errors
+    action: elastic_flow_assert
+    params:
+      result:
+        $ref: stages.cycle2_flow_stop.output.result
+      min_success_rate: 1
+  - id: cycle3_add
+    action: elastic_add
+    params:
+      role: prefill
+  - id: cycle3_added_topology
+    action: elastic_topology
+    params:
+      role: PREFILL
+      discovered: 3
+      alive: 3
+      port:
+        $ref: stages.cycle3_add.output.port
+      present: true
+    timeout_s: 35
+  - id: cycle3_traffic
+    action: elastic_lifecycle_probe
+    params:
+      engine:
+        $ref: stages.cycle3_add.output.engine
+      window_s: 15
+      method: FetchResponse
+    timeout_s: 60
+  - id: cycle3_flow
+    action: elastic_cold_flow
+  - id: cycle3_ramp
+    action: elastic_pause
+    params:
+      seconds: 0.5
+  - id: cycle3_remove
+    action: elastic_remove
+    params:
+      engine:
+        $ref: stages.cycle3_add.output.engine
+      drain_timeout_ms: 60000
+    timeout_s: 75
+  - id: cycle3_flow_stop
+    action: elastic_flow_stop
+    params:
+      flow:
+        $ref: stages.cycle3_flow.output.flow
+    timeout_s: 45
+  - id: cycle3_protocol
+    action: elastic_lifecycle_flow_protocol
+    params:
+      flow:
+        $ref: stages.cycle3_flow.output.flow
+      method: FetchResponse
+  - id: cycle3_removed_topology
+    action: elastic_topology
+    params:
+      role: PREFILL
+      discovered: 2
+      alive: 2
+      port:
+        $ref: stages.cycle3_add.output.port
+      present: false
+    timeout_s: 35
+  - id: cycle3_zero_errors
+    action: elastic_flow_assert
+    params:
+      result:
+        $ref: stages.cycle3_flow_stop.output.result
+      min_success_rate: 1
+  - id: recovery
+    action: elastic_cycle_recovery
+    params:
+      method: FetchResponse
+    timeout_s: 65
+  - id: final_topology
+    action: elastic_topology
+    params:
+      role: PREFILL
+      discovered: 2
+      alive: 2
+    timeout_s: 35
+  - id: teardown
+    action: teardown
+- id: strict_single_batch
+  legacy_case_ids:
+  - elastic_add_flow
+  - elastic_remove_flow
+  - elastic_add_remove_cycle
+  - elastic_add_preference
+  profiles:
+  - single-batch
+  requires:
+  - queue
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: initial_topology
+    action: elastic_topology
+    params:
+      role: PREFILL
+      discovered: 2
+      alive: 2
+    timeout_s: 35
+  - id: preference_flow
+    action: elastic_cold_flow
+  - id: ramp
+    action: elastic_pause
+    params:
+      seconds: 1
+  - id: baseline_window
+    action: elastic_timeline
+    params:
+      engines:
+      - prefill-0
+      - prefill-1
+      offsets_s:
+      - 0
+      - 15
+    timeout_s: 25
+  - id: add
+    action: elastic_add
+    params:
+      role: prefill
+  - id: first_traffic
+    action: elastic_accepted_timed
+    params:
+      engine:
+        $ref: stages.add.output.engine
+      baseline: 0
+      window_s: 10
+    timeout_s: 15
+  - id: added_topology
+    action: elastic_topology
+    params:
+      role: PREFILL
+      discovered: 3
+      alive: 3
+      port:
+        $ref: stages.add.output.port
+      present: true
+    timeout_s: 35
+  - id: post_window
+    action: elastic_timeline
+    params:
+      engines:
+      - prefill-0
+      - prefill-1
+      - $ref: stages.add.output.engine
+      offsets_s:
+      - 0
+      - 5
+      - 10
+      - 17
+      - 24
+      - 31
+      - 38
+      - 45
+    timeout_s: 55
+  - id: preference_flow_stop
+    action: elastic_flow_stop
+    params:
+      flow:
+        $ref: stages.preference_flow.output.flow
+    timeout_s: 45
+  - id: preference_protocol
+    action: elastic_lifecycle_flow_protocol
+    params:
+      flow:
+        $ref: stages.preference_flow.output.flow
+      method: FetchResponse
+  - id: add_availability
+    action: elastic_add_availability
+    params:
+      flow:
+        $ref: stages.preference_flow.output.flow
+      mutation:
+        $ref: stages.add.output.mutation
+      received_s:
+        $ref: stages.first_traffic.output.observed_s
+  - id: preference_received
+    action: elastic_window_received
+    params:
+      engine:
+        $ref: stages.add.output.engine
+      before:
+        $ref: stages.post_window.output.first
+      after:
+        $ref: stages.post_window.output.last
+  - id: preference_shares
+    action: elastic_share
+    params:
+      series:
+        $ref: stages.post_window.output.series
+      engine:
+        $ref: stages.add.output.engine
+      max_share: 0.5
+      old_floor: 0.1
+      exclusive: false
+      require_new: false
+  - id: preference_availability
+    action: elastic_flow_assert
+    params:
+      result:
+        $ref: stages.preference_flow_stop.output.result
+      min_success_rate: 0.9
+  - id: remove_flow
+    action: elastic_cold_flow
+  - id: remove_traffic
+    action: elastic_lifecycle_probe
+    params:
+      engine:
+        $ref: stages.add.output.engine
+      window_s: 10
+      method: FetchResponse
+    timeout_s: 60
+  - id: remove
+    action: elastic_remove
+    params:
+      engine:
+        $ref: stages.add.output.engine
+      drain_timeout_ms: 60000
+    timeout_s: 75
+  - id: remove_hold
+    action: elastic_pause
+    params:
+      seconds: 3
+  - id: remove_flow_stop
+    action: elastic_flow_stop
+    params:
+      flow:
+        $ref: stages.remove_flow.output.flow
+    timeout_s: 45
+  - id: remove_protocol
+    action: elastic_lifecycle_flow_protocol
+    params:
+      flow:
+        $ref: stages.remove_flow.output.flow
+      method: FetchResponse
+  - id: removed_topology
+    action: elastic_topology
+    params:
+      role: PREFILL
+      discovered: 2
+      alive: 2
+      port:
+        $ref: stages.add.output.port
+      present: false
+    timeout_s: 35
+  - id: remove_accounting
+    action: elastic_accounting
+    timeout_s: 105
+  - id: remove_zero_errors
+    action: elastic_flow_assert
+    params:
+      result:
+        $ref: stages.remove_flow_stop.output.result
+      min_success_rate: 1
+  - id: cycle1_add
+    action: elastic_add
+    params:
+      role: prefill
+  - id: cycle1_added_topology
+    action: elastic_topology
+    params:
+      role: PREFILL
+      discovered: 3
+      alive: 3
+      port:
+        $ref: stages.cycle1_add.output.port
+      present: true
+    timeout_s: 35
+  - id: cycle1_traffic
+    action: elastic_lifecycle_probe
+    params:
+      engine:
+        $ref: stages.cycle1_add.output.engine
+      window_s: 15
+      method: FetchResponse
+    timeout_s: 60
+  - id: cycle1_flow
+    action: elastic_cold_flow
+  - id: cycle1_ramp
+    action: elastic_pause
+    params:
+      seconds: 0.5
+  - id: cycle1_remove
+    action: elastic_remove
+    params:
+      engine:
+        $ref: stages.cycle1_add.output.engine
+      drain_timeout_ms: 60000
+    timeout_s: 75
+  - id: cycle1_flow_stop
+    action: elastic_flow_stop
+    params:
+      flow:
+        $ref: stages.cycle1_flow.output.flow
+    timeout_s: 45
+  - id: cycle1_protocol
+    action: elastic_lifecycle_flow_protocol
+    params:
+      flow:
+        $ref: stages.cycle1_flow.output.flow
+      method: FetchResponse
+  - id: cycle1_removed_topology
+    action: elastic_topology
+    params:
+      role: PREFILL
+      discovered: 2
+      alive: 2
+      port:
+        $ref: stages.cycle1_add.output.port
+      present: false
+    timeout_s: 35
+  - id: cycle1_zero_errors
+    action: elastic_flow_assert
+    params:
+      result:
+        $ref: stages.cycle1_flow_stop.output.result
+      min_success_rate: 1
+  - id: cycle2_add
+    action: elastic_add
+    params:
+      role: prefill
+  - id: cycle2_added_topology
+    action: elastic_topology
+    params:
+      role: PREFILL
+      discovered: 3
+      alive: 3
+      port:
+        $ref: stages.cycle2_add.output.port
+      present: true
+    timeout_s: 35
+  - id: cycle2_traffic
+    action: elastic_lifecycle_probe
+    params:
+      engine:
+        $ref: stages.cycle2_add.output.engine
+      window_s: 15
+      method: FetchResponse
+    timeout_s: 60
+  - id: cycle2_flow
+    action: elastic_cold_flow
+  - id: cycle2_ramp
+    action: elastic_pause
+    params:
+      seconds: 0.5
+  - id: cycle2_remove
+    action: elastic_remove
+    params:
+      engine:
+        $ref: stages.cycle2_add.output.engine
+      drain_timeout_ms: 60000
+    timeout_s: 75
+  - id: cycle2_flow_stop
+    action: elastic_flow_stop
+    params:
+      flow:
+        $ref: stages.cycle2_flow.output.flow
+    timeout_s: 45
+  - id: cycle2_protocol
+    action: elastic_lifecycle_flow_protocol
+    params:
+      flow:
+        $ref: stages.cycle2_flow.output.flow
+      method: FetchResponse
+  - id: cycle2_removed_topology
+    action: elastic_topology
+    params:
+      role: PREFILL
+      discovered: 2
+      alive: 2
+      port:
+        $ref: stages.cycle2_add.output.port
+      present: false
+    timeout_s: 35
+  - id: cycle2_zero_errors
+    action: elastic_flow_assert
+    params:
+      result:
+        $ref: stages.cycle2_flow_stop.output.result
+      min_success_rate: 1
+  - id: cycle3_add
+    action: elastic_add
+    params:
+      role: prefill
+  - id: cycle3_added_topology
+    action: elastic_topology
+    params:
+      role: PREFILL
+      discovered: 3
+      alive: 3
+      port:
+        $ref: stages.cycle3_add.output.port
+      present: true
+    timeout_s: 35
+  - id: cycle3_traffic
+    action: elastic_lifecycle_probe
+    params:
+      engine:
+        $ref: stages.cycle3_add.output.engine
+      window_s: 15
+      method: FetchResponse
+    timeout_s: 60
+  - id: cycle3_flow
+    action: elastic_cold_flow
+  - id: cycle3_ramp
+    action: elastic_pause
+    params:
+      seconds: 0.5
+  - id: cycle3_remove
+    action: elastic_remove
+    params:
+      engine:
+        $ref: stages.cycle3_add.output.engine
+      drain_timeout_ms: 60000
+    timeout_s: 75
+  - id: cycle3_flow_stop
+    action: elastic_flow_stop
+    params:
+      flow:
+        $ref: stages.cycle3_flow.output.flow
+    timeout_s: 45
+  - id: cycle3_protocol
+    action: elastic_lifecycle_flow_protocol
+    params:
+      flow:
+        $ref: stages.cycle3_flow.output.flow
+      method: FetchResponse
+  - id: cycle3_removed_topology
+    action: elastic_topology
+    params:
+      role: PREFILL
+      discovered: 2
+      alive: 2
+      port:
+        $ref: stages.cycle3_add.output.port
+      present: false
+    timeout_s: 35
+  - id: cycle3_zero_errors
+    action: elastic_flow_assert
+    params:
+      result:
+        $ref: stages.cycle3_flow_stop.output.result
+      min_success_rate: 1
+  - id: recovery
+    action: elastic_cycle_recovery
+    params:
+      method: FetchResponse
+    timeout_s: 65
+  - id: final_topology
+    action: elastic_topology
+    params:
+      role: PREFILL
+      discovered: 2
+      alive: 2
+    timeout_s: 35
+  - id: teardown
+    action: teardown
+- id: normal_single_nonbatch
+  legacy_case_ids:
+  - elastic_add_flow
+  - elastic_remove_flow
+  - elastic_add_remove_cycle
+  - elastic_add_preference
+  profiles:
+  - single-nonbatch
+  requires:
+  - queue
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: initial_topology
+    action: elastic_topology
+    params:
+      role: PREFILL
+      discovered: 2
+      alive: 2
+    timeout_s: 35
+  - id: preference_flow
+    action: elastic_cold_flow
+  - id: ramp
+    action: elastic_pause
+    params:
+      seconds: 1
+  - id: baseline_window
+    action: elastic_timeline
+    params:
+      engines:
+      - prefill-0
+      - prefill-1
+      offsets_s:
+      - 0
+      - 15
+    timeout_s: 25
+  - id: add
+    action: elastic_add
+    params:
+      role: prefill
+  - id: first_traffic
+    action: elastic_accepted_timed
+    params:
+      engine:
+        $ref: stages.add.output.engine
+      baseline: 0
+      window_s: 10
+    timeout_s: 15
+  - id: added_topology
+    action: elastic_topology
+    params:
+      role: PREFILL
+      discovered: 3
+      alive: 3
+      port:
+        $ref: stages.add.output.port
+      present: true
+    timeout_s: 35
+  - id: post_window
+    action: elastic_timeline
+    params:
+      engines:
+      - prefill-0
+      - prefill-1
+      - $ref: stages.add.output.engine
+      offsets_s:
+      - 0
+      - 5
+      - 10
+      - 17
+      - 24
+      - 31
+      - 38
+      - 45
+    timeout_s: 55
+  - id: preference_flow_stop
+    action: elastic_flow_stop
+    params:
+      flow:
+        $ref: stages.preference_flow.output.flow
+    timeout_s: 45
+  - id: preference_protocol
+    action: elastic_lifecycle_flow_protocol
+    params:
+      flow:
+        $ref: stages.preference_flow.output.flow
+      method: GenerateStreamCall
+  - id: add_availability
+    action: elastic_add_availability
+    params:
+      flow:
+        $ref: stages.preference_flow.output.flow
+      mutation:
+        $ref: stages.add.output.mutation
+      received_s:
+        $ref: stages.first_traffic.output.observed_s
+  - id: preference_received
+    action: elastic_window_received
+    params:
+      engine:
+        $ref: stages.add.output.engine
+      before:
+        $ref: stages.post_window.output.first
+      after:
+        $ref: stages.post_window.output.last
+  - id: preference_shares
+    action: elastic_share
+    params:
+      series:
+        $ref: stages.post_window.output.series
+      engine:
+        $ref: stages.add.output.engine
+      max_share: 0.6
+      old_floor: 0.1
+      exclusive: false
+      require_new: false
+  - id: preference_availability
+    action: elastic_flow_assert
+    params:
+      result:
+        $ref: stages.preference_flow_stop.output.result
+      min_success_rate: 0.9
+  - id: remove_flow
+    action: elastic_cold_flow
+  - id: remove_traffic
+    action: elastic_lifecycle_probe
+    params:
+      engine:
+        $ref: stages.add.output.engine
+      window_s: 10
+      method: GenerateStreamCall
+    timeout_s: 60
+  - id: remove
+    action: elastic_remove
+    params:
+      engine:
+        $ref: stages.add.output.engine
+      drain_timeout_ms: 60000
+    timeout_s: 75
+  - id: remove_hold
+    action: elastic_pause
+    params:
+      seconds: 3
+  - id: remove_flow_stop
+    action: elastic_flow_stop
+    params:
+      flow:
+        $ref: stages.remove_flow.output.flow
+    timeout_s: 45
+  - id: remove_protocol
+    action: elastic_lifecycle_flow_protocol
+    params:
+      flow:
+        $ref: stages.remove_flow.output.flow
+      method: GenerateStreamCall
+  - id: removed_topology
+    action: elastic_topology
+    params:
+      role: PREFILL
+      discovered: 2
+      alive: 2
+      port:
+        $ref: stages.add.output.port
+      present: false
+    timeout_s: 35
+  - id: remove_accounting
+    action: elastic_literal_nonbatch_accounting
+    timeout_s: 105
+  - id: remove_zero_errors
+    action: elastic_flow_assert
+    params:
+      result:
+        $ref: stages.remove_flow_stop.output.result
+      min_success_rate: 1
+  - id: cycle1_add
+    action: elastic_add
+    params:
+      role: prefill
+  - id: cycle1_added_topology
+    action: elastic_topology
+    params:
+      role: PREFILL
+      discovered: 3
+      alive: 3
+      port:
+        $ref: stages.cycle1_add.output.port
+      present: true
+    timeout_s: 35
+  - id: cycle1_traffic
+    action: elastic_lifecycle_probe
+    params:
+      engine:
+        $ref: stages.cycle1_add.output.engine
+      window_s: 15
+      method: GenerateStreamCall
+    timeout_s: 60
+  - id: cycle1_flow
+    action: elastic_cold_flow
+  - id: cycle1_ramp
+    action: elastic_pause
+    params:
+      seconds: 0.5
+  - id: cycle1_remove
+    action: elastic_remove
+    params:
+      engine:
+        $ref: stages.cycle1_add.output.engine
+      drain_timeout_ms: 60000
+    timeout_s: 75
+  - id: cycle1_flow_stop
+    action: elastic_flow_stop
+    params:
+      flow:
+        $ref: stages.cycle1_flow.output.flow
+    timeout_s: 45
+  - id: cycle1_protocol
+    action: elastic_lifecycle_flow_protocol
+    params:
+      flow:
+        $ref: stages.cycle1_flow.output.flow
+      method: GenerateStreamCall
+  - id: cycle1_removed_topology
+    action: elastic_topology
+    params:
+      role: PREFILL
+      discovered: 2
+      alive: 2
+      port:
+        $ref: stages.cycle1_add.output.port
+      present: false
+    timeout_s: 35
+  - id: cycle1_zero_errors
+    action: elastic_flow_assert
+    params:
+      result:
+        $ref: stages.cycle1_flow_stop.output.result
+      min_success_rate: 1
+  - id: cycle2_add
+    action: elastic_add
+    params:
+      role: prefill
+  - id: cycle2_added_topology
+    action: elastic_topology
+    params:
+      role: PREFILL
+      discovered: 3
+      alive: 3
+      port:
+        $ref: stages.cycle2_add.output.port
+      present: true
+    timeout_s: 35
+  - id: cycle2_traffic
+    action: elastic_lifecycle_probe
+    params:
+      engine:
+        $ref: stages.cycle2_add.output.engine
+      window_s: 15
+      method: GenerateStreamCall
+    timeout_s: 60
+  - id: cycle2_flow
+    action: elastic_cold_flow
+  - id: cycle2_ramp
+    action: elastic_pause
+    params:
+      seconds: 0.5
+  - id: cycle2_remove
+    action: elastic_remove
+    params:
+      engine:
+        $ref: stages.cycle2_add.output.engine
+      drain_timeout_ms: 60000
+    timeout_s: 75
+  - id: cycle2_flow_stop
+    action: elastic_flow_stop
+    params:
+      flow:
+        $ref: stages.cycle2_flow.output.flow
+    timeout_s: 45
+  - id: cycle2_protocol
+    action: elastic_lifecycle_flow_protocol
+    params:
+      flow:
+        $ref: stages.cycle2_flow.output.flow
+      method: GenerateStreamCall
+  - id: cycle2_removed_topology
+    action: elastic_topology
+    params:
+      role: PREFILL
+      discovered: 2
+      alive: 2
+      port:
+        $ref: stages.cycle2_add.output.port
+      present: false
+    timeout_s: 35
+  - id: cycle2_zero_errors
+    action: elastic_flow_assert
+    params:
+      result:
+        $ref: stages.cycle2_flow_stop.output.result
+      min_success_rate: 1
+  - id: cycle3_add
+    action: elastic_add
+    params:
+      role: prefill
+  - id: cycle3_added_topology
+    action: elastic_topology
+    params:
+      role: PREFILL
+      discovered: 3
+      alive: 3
+      port:
+        $ref: stages.cycle3_add.output.port
+      present: true
+    timeout_s: 35
+  - id: cycle3_traffic
+    action: elastic_lifecycle_probe
+    params:
+      engine:
+        $ref: stages.cycle3_add.output.engine
+      window_s: 15
+      method: GenerateStreamCall
+    timeout_s: 60
+  - id: cycle3_flow
+    action: elastic_cold_flow
+  - id: cycle3_ramp
+    action: elastic_pause
+    params:
+      seconds: 0.5
+  - id: cycle3_remove
+    action: elastic_remove
+    params:
+      engine:
+        $ref: stages.cycle3_add.output.engine
+      drain_timeout_ms: 60000
+    timeout_s: 75
+  - id: cycle3_flow_stop
+    action: elastic_flow_stop
+    params:
+      flow:
+        $ref: stages.cycle3_flow.output.flow
+    timeout_s: 45
+  - id: cycle3_protocol
+    action: elastic_lifecycle_flow_protocol
+    params:
+      flow:
+        $ref: stages.cycle3_flow.output.flow
+      method: GenerateStreamCall
+  - id: cycle3_removed_topology
+    action: elastic_topology
+    params:
+      role: PREFILL
+      discovered: 2
+      alive: 2
+      port:
+        $ref: stages.cycle3_add.output.port
+      present: false
+    timeout_s: 35
+  - id: cycle3_zero_errors
+    action: elastic_flow_assert
+    params:
+      result:
+        $ref: stages.cycle3_flow_stop.output.result
+      min_success_rate: 1
+  - id: recovery
+    action: elastic_cycle_recovery
+    params:
+      method: GenerateStreamCall
+    timeout_s: 65
+  - id: final_topology
+    action: elastic_topology
+    params:
+      role: PREFILL
+      discovered: 2
+      alive: 2
+    timeout_s: 35
+  - id: teardown
+    action: teardown
+- id: strict_single_nonbatch
+  legacy_case_ids:
+  - elastic_add_flow
+  - elastic_remove_flow
+  - elastic_add_remove_cycle
+  - elastic_add_preference
+  profiles:
+  - single-nonbatch
+  requires:
+  - queue
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: initial_topology
+    action: elastic_topology
+    params:
+      role: PREFILL
+      discovered: 2
+      alive: 2
+    timeout_s: 35
+  - id: preference_flow
+    action: elastic_cold_flow
+  - id: ramp
+    action: elastic_pause
+    params:
+      seconds: 1
+  - id: baseline_window
+    action: elastic_timeline
+    params:
+      engines:
+      - prefill-0
+      - prefill-1
+      offsets_s:
+      - 0
+      - 15
+    timeout_s: 25
+  - id: add
+    action: elastic_add
+    params:
+      role: prefill
+  - id: first_traffic
+    action: elastic_accepted_timed
+    params:
+      engine:
+        $ref: stages.add.output.engine
+      baseline: 0
+      window_s: 10
+    timeout_s: 15
+  - id: added_topology
+    action: elastic_topology
+    params:
+      role: PREFILL
+      discovered: 3
+      alive: 3
+      port:
+        $ref: stages.add.output.port
+      present: true
+    timeout_s: 35
+  - id: post_window
+    action: elastic_timeline
+    params:
+      engines:
+      - prefill-0
+      - prefill-1
+      - $ref: stages.add.output.engine
+      offsets_s:
+      - 0
+      - 5
+      - 10
+      - 17
+      - 24
+      - 31
+      - 38
+      - 45
+    timeout_s: 55
+  - id: preference_flow_stop
+    action: elastic_flow_stop
+    params:
+      flow:
+        $ref: stages.preference_flow.output.flow
+    timeout_s: 45
+  - id: preference_protocol
+    action: elastic_lifecycle_flow_protocol
+    params:
+      flow:
+        $ref: stages.preference_flow.output.flow
+      method: GenerateStreamCall
+  - id: add_availability
+    action: elastic_add_availability
+    params:
+      flow:
+        $ref: stages.preference_flow.output.flow
+      mutation:
+        $ref: stages.add.output.mutation
+      received_s:
+        $ref: stages.first_traffic.output.observed_s
+  - id: preference_received
+    action: elastic_window_received
+    params:
+      engine:
+        $ref: stages.add.output.engine
+      before:
+        $ref: stages.post_window.output.first
+      after:
+        $ref: stages.post_window.output.last
+  - id: preference_shares
+    action: elastic_share
+    params:
+      series:
+        $ref: stages.post_window.output.series
+      engine:
+        $ref: stages.add.output.engine
+      max_share: 0.5
+      old_floor: 0.1
+      exclusive: false
+      require_new: false
+  - id: preference_availability
+    action: elastic_flow_assert
+    params:
+      result:
+        $ref: stages.preference_flow_stop.output.result
+      min_success_rate: 0.9
+  - id: remove_flow
+    action: elastic_cold_flow
+  - id: remove_traffic
+    action: elastic_lifecycle_probe
+    params:
+      engine:
+        $ref: stages.add.output.engine
+      window_s: 10
+      method: GenerateStreamCall
+    timeout_s: 60
+  - id: remove
+    action: elastic_remove
+    params:
+      engine:
+        $ref: stages.add.output.engine
+      drain_timeout_ms: 60000
+    timeout_s: 75
+  - id: remove_hold
+    action: elastic_pause
+    params:
+      seconds: 3
+  - id: remove_flow_stop
+    action: elastic_flow_stop
+    params:
+      flow:
+        $ref: stages.remove_flow.output.flow
+    timeout_s: 45
+  - id: remove_protocol
+    action: elastic_lifecycle_flow_protocol
+    params:
+      flow:
+        $ref: stages.remove_flow.output.flow
+      method: GenerateStreamCall
+  - id: removed_topology
+    action: elastic_topology
+    params:
+      role: PREFILL
+      discovered: 2
+      alive: 2
+      port:
+        $ref: stages.add.output.port
+      present: false
+    timeout_s: 35
+  - id: remove_accounting
+    action: elastic_literal_nonbatch_accounting
+    timeout_s: 105
+  - id: remove_zero_errors
+    action: elastic_flow_assert
+    params:
+      result:
+        $ref: stages.remove_flow_stop.output.result
+      min_success_rate: 1
+  - id: cycle1_add
+    action: elastic_add
+    params:
+      role: prefill
+  - id: cycle1_added_topology
+    action: elastic_topology
+    params:
+      role: PREFILL
+      discovered: 3
+      alive: 3
+      port:
+        $ref: stages.cycle1_add.output.port
+      present: true
+    timeout_s: 35
+  - id: cycle1_traffic
+    action: elastic_lifecycle_probe
+    params:
+      engine:
+        $ref: stages.cycle1_add.output.engine
+      window_s: 15
+      method: GenerateStreamCall
+    timeout_s: 60
+  - id: cycle1_flow
+    action: elastic_cold_flow
+  - id: cycle1_ramp
+    action: elastic_pause
+    params:
+      seconds: 0.5
+  - id: cycle1_remove
+    action: elastic_remove
+    params:
+      engine:
+        $ref: stages.cycle1_add.output.engine
+      drain_timeout_ms: 60000
+    timeout_s: 75
+  - id: cycle1_flow_stop
+    action: elastic_flow_stop
+    params:
+      flow:
+        $ref: stages.cycle1_flow.output.flow
+    timeout_s: 45
+  - id: cycle1_protocol
+    action: elastic_lifecycle_flow_protocol
+    params:
+      flow:
+        $ref: stages.cycle1_flow.output.flow
+      method: GenerateStreamCall
+  - id: cycle1_removed_topology
+    action: elastic_topology
+    params:
+      role: PREFILL
+      discovered: 2
+      alive: 2
+      port:
+        $ref: stages.cycle1_add.output.port
+      present: false
+    timeout_s: 35
+  - id: cycle1_zero_errors
+    action: elastic_flow_assert
+    params:
+      result:
+        $ref: stages.cycle1_flow_stop.output.result
+      min_success_rate: 1
+  - id: cycle2_add
+    action: elastic_add
+    params:
+      role: prefill
+  - id: cycle2_added_topology
+    action: elastic_topology
+    params:
+      role: PREFILL
+      discovered: 3
+      alive: 3
+      port:
+        $ref: stages.cycle2_add.output.port
+      present: true
+    timeout_s: 35
+  - id: cycle2_traffic
+    action: elastic_lifecycle_probe
+    params:
+      engine:
+        $ref: stages.cycle2_add.output.engine
+      window_s: 15
+      method: GenerateStreamCall
+    timeout_s: 60
+  - id: cycle2_flow
+    action: elastic_cold_flow
+  - id: cycle2_ramp
+    action: elastic_pause
+    params:
+      seconds: 0.5
+  - id: cycle2_remove
+    action: elastic_remove
+    params:
+      engine:
+        $ref: stages.cycle2_add.output.engine
+      drain_timeout_ms: 60000
+    timeout_s: 75
+  - id: cycle2_flow_stop
+    action: elastic_flow_stop
+    params:
+      flow:
+        $ref: stages.cycle2_flow.output.flow
+    timeout_s: 45
+  - id: cycle2_protocol
+    action: elastic_lifecycle_flow_protocol
+    params:
+      flow:
+        $ref: stages.cycle2_flow.output.flow
+      method: GenerateStreamCall
+  - id: cycle2_removed_topology
+    action: elastic_topology
+    params:
+      role: PREFILL
+      discovered: 2
+      alive: 2
+      port:
+        $ref: stages.cycle2_add.output.port
+      present: false
+    timeout_s: 35
+  - id: cycle2_zero_errors
+    action: elastic_flow_assert
+    params:
+      result:
+        $ref: stages.cycle2_flow_stop.output.result
+      min_success_rate: 1
+  - id: cycle3_add
+    action: elastic_add
+    params:
+      role: prefill
+  - id: cycle3_added_topology
+    action: elastic_topology
+    params:
+      role: PREFILL
+      discovered: 3
+      alive: 3
+      port:
+        $ref: stages.cycle3_add.output.port
+      present: true
+    timeout_s: 35
+  - id: cycle3_traffic
+    action: elastic_lifecycle_probe
+    params:
+      engine:
+        $ref: stages.cycle3_add.output.engine
+      window_s: 15
+      method: GenerateStreamCall
+    timeout_s: 60
+  - id: cycle3_flow
+    action: elastic_cold_flow
+  - id: cycle3_ramp
+    action: elastic_pause
+    params:
+      seconds: 0.5
+  - id: cycle3_remove
+    action: elastic_remove
+    params:
+      engine:
+        $ref: stages.cycle3_add.output.engine
+      drain_timeout_ms: 60000
+    timeout_s: 75
+  - id: cycle3_flow_stop
+    action: elastic_flow_stop
+    params:
+      flow:
+        $ref: stages.cycle3_flow.output.flow
+    timeout_s: 45
+  - id: cycle3_protocol
+    action: elastic_lifecycle_flow_protocol
+    params:
+      flow:
+        $ref: stages.cycle3_flow.output.flow
+      method: GenerateStreamCall
+  - id: cycle3_removed_topology
+    action: elastic_topology
+    params:
+      role: PREFILL
+      discovered: 2
+      alive: 2
+      port:
+        $ref: stages.cycle3_add.output.port
+      present: false
+    timeout_s: 35
+  - id: cycle3_zero_errors
+    action: elastic_flow_assert
+    params:
+      result:
+        $ref: stages.cycle3_flow_stop.output.result
+      min_success_rate: 1
+  - id: recovery
+    action: elastic_cycle_recovery
+    params:
+      method: GenerateStreamCall
+    timeout_s: 65
+  - id: final_topology
+    action: elastic_topology
+    params:
+      role: PREFILL
+      discovered: 2
+      alive: 2
+    timeout_s: 35
+  - id: teardown
+    action: teardown
+- id: normal_window_nonbatch
+  legacy_case_ids:
+  - elastic_add_flow
+  - elastic_remove_flow
+  - elastic_add_remove_cycle
+  - elastic_add_preference
+  profiles:
+  - window-nonbatch
+  requires:
+  - queue
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: initial_topology
+    action: elastic_topology
+    params:
+      role: PREFILL
+      discovered: 2
+      alive: 2
+    timeout_s: 35
+  - id: preference_flow
+    action: elastic_cold_flow
+  - id: ramp
+    action: elastic_pause
+    params:
+      seconds: 1
+  - id: baseline_window
+    action: elastic_timeline
+    params:
+      engines:
+      - prefill-0
+      - prefill-1
+      offsets_s:
+      - 0
+      - 15
+    timeout_s: 25
+  - id: add
+    action: elastic_add
+    params:
+      role: prefill
+  - id: first_traffic
+    action: elastic_accepted_timed
+    params:
+      engine:
+        $ref: stages.add.output.engine
+      baseline: 0
+      window_s: 10
+    timeout_s: 15
+  - id: added_topology
+    action: elastic_topology
+    params:
+      role: PREFILL
+      discovered: 3
+      alive: 3
+      port:
+        $ref: stages.add.output.port
+      present: true
+    timeout_s: 35
+  - id: post_window
+    action: elastic_timeline
+    params:
+      engines:
+      - prefill-0
+      - prefill-1
+      - $ref: stages.add.output.engine
+      offsets_s:
+      - 0
+      - 5
+      - 10
+      - 17
+      - 24
+      - 31
+      - 38
+      - 45
+    timeout_s: 55
+  - id: preference_flow_stop
+    action: elastic_flow_stop
+    params:
+      flow:
+        $ref: stages.preference_flow.output.flow
+    timeout_s: 45
+  - id: preference_protocol
+    action: elastic_lifecycle_flow_protocol
+    params:
+      flow:
+        $ref: stages.preference_flow.output.flow
+      method: GenerateStreamCall
+  - id: add_availability
+    action: elastic_add_availability
+    params:
+      flow:
+        $ref: stages.preference_flow.output.flow
+      mutation:
+        $ref: stages.add.output.mutation
+      received_s:
+        $ref: stages.first_traffic.output.observed_s
+  - id: preference_received
+    action: elastic_window_received
+    params:
+      engine:
+        $ref: stages.add.output.engine
+      before:
+        $ref: stages.post_window.output.first
+      after:
+        $ref: stages.post_window.output.last
+  - id: preference_shares
+    action: elastic_share
+    params:
+      series:
+        $ref: stages.post_window.output.series
+      engine:
+        $ref: stages.add.output.engine
+      max_share: 0.6
+      old_floor: 0.1
+      exclusive: false
+      require_new: false
+  - id: preference_availability
+    action: elastic_flow_assert
+    params:
+      result:
+        $ref: stages.preference_flow_stop.output.result
+      min_success_rate: 0.9
+  - id: remove_flow
+    action: elastic_cold_flow
+  - id: remove_traffic
+    action: elastic_lifecycle_probe
+    params:
+      engine:
+        $ref: stages.add.output.engine
+      window_s: 10
+      method: GenerateStreamCall
+    timeout_s: 60
+  - id: remove
+    action: elastic_remove
+    params:
+      engine:
+        $ref: stages.add.output.engine
+      drain_timeout_ms: 60000
+    timeout_s: 75
+  - id: remove_hold
+    action: elastic_pause
+    params:
+      seconds: 3
+  - id: remove_flow_stop
+    action: elastic_flow_stop
+    params:
+      flow:
+        $ref: stages.remove_flow.output.flow
+    timeout_s: 45
+  - id: remove_protocol
+    action: elastic_lifecycle_flow_protocol
+    params:
+      flow:
+        $ref: stages.remove_flow.output.flow
+      method: GenerateStreamCall
+  - id: removed_topology
+    action: elastic_topology
+    params:
+      role: PREFILL
+      discovered: 2
+      alive: 2
+      port:
+        $ref: stages.add.output.port
+      present: false
+    timeout_s: 35
+  - id: remove_accounting
+    action: elastic_literal_nonbatch_accounting
+    timeout_s: 105
+  - id: remove_zero_errors
+    action: elastic_flow_assert
+    params:
+      result:
+        $ref: stages.remove_flow_stop.output.result
+      min_success_rate: 1
+  - id: cycle1_add
+    action: elastic_add
+    params:
+      role: prefill
+  - id: cycle1_added_topology
+    action: elastic_topology
+    params:
+      role: PREFILL
+      discovered: 3
+      alive: 3
+      port:
+        $ref: stages.cycle1_add.output.port
+      present: true
+    timeout_s: 35
+  - id: cycle1_traffic
+    action: elastic_lifecycle_probe
+    params:
+      engine:
+        $ref: stages.cycle1_add.output.engine
+      window_s: 15
+      method: GenerateStreamCall
+    timeout_s: 60
+  - id: cycle1_flow
+    action: elastic_cold_flow
+  - id: cycle1_ramp
+    action: elastic_pause
+    params:
+      seconds: 0.5
+  - id: cycle1_remove
+    action: elastic_remove
+    params:
+      engine:
+        $ref: stages.cycle1_add.output.engine
+      drain_timeout_ms: 60000
+    timeout_s: 75
+  - id: cycle1_flow_stop
+    action: elastic_flow_stop
+    params:
+      flow:
+        $ref: stages.cycle1_flow.output.flow
+    timeout_s: 45
+  - id: cycle1_protocol
+    action: elastic_lifecycle_flow_protocol
+    params:
+      flow:
+        $ref: stages.cycle1_flow.output.flow
+      method: GenerateStreamCall
+  - id: cycle1_removed_topology
+    action: elastic_topology
+    params:
+      role: PREFILL
+      discovered: 2
+      alive: 2
+      port:
+        $ref: stages.cycle1_add.output.port
+      present: false
+    timeout_s: 35
+  - id: cycle1_zero_errors
+    action: elastic_flow_assert
+    params:
+      result:
+        $ref: stages.cycle1_flow_stop.output.result
+      min_success_rate: 1
+  - id: cycle2_add
+    action: elastic_add
+    params:
+      role: prefill
+  - id: cycle2_added_topology
+    action: elastic_topology
+    params:
+      role: PREFILL
+      discovered: 3
+      alive: 3
+      port:
+        $ref: stages.cycle2_add.output.port
+      present: true
+    timeout_s: 35
+  - id: cycle2_traffic
+    action: elastic_lifecycle_probe
+    params:
+      engine:
+        $ref: stages.cycle2_add.output.engine
+      window_s: 15
+      method: GenerateStreamCall
+    timeout_s: 60
+  - id: cycle2_flow
+    action: elastic_cold_flow
+  - id: cycle2_ramp
+    action: elastic_pause
+    params:
+      seconds: 0.5
+  - id: cycle2_remove
+    action: elastic_remove
+    params:
+      engine:
+        $ref: stages.cycle2_add.output.engine
+      drain_timeout_ms: 60000
+    timeout_s: 75
+  - id: cycle2_flow_stop
+    action: elastic_flow_stop
+    params:
+      flow:
+        $ref: stages.cycle2_flow.output.flow
+    timeout_s: 45
+  - id: cycle2_protocol
+    action: elastic_lifecycle_flow_protocol
+    params:
+      flow:
+        $ref: stages.cycle2_flow.output.flow
+      method: GenerateStreamCall
+  - id: cycle2_removed_topology
+    action: elastic_topology
+    params:
+      role: PREFILL
+      discovered: 2
+      alive: 2
+      port:
+        $ref: stages.cycle2_add.output.port
+      present: false
+    timeout_s: 35
+  - id: cycle2_zero_errors
+    action: elastic_flow_assert
+    params:
+      result:
+        $ref: stages.cycle2_flow_stop.output.result
+      min_success_rate: 1
+  - id: cycle3_add
+    action: elastic_add
+    params:
+      role: prefill
+  - id: cycle3_added_topology
+    action: elastic_topology
+    params:
+      role: PREFILL
+      discovered: 3
+      alive: 3
+      port:
+        $ref: stages.cycle3_add.output.port
+      present: true
+    timeout_s: 35
+  - id: cycle3_traffic
+    action: elastic_lifecycle_probe
+    params:
+      engine:
+        $ref: stages.cycle3_add.output.engine
+      window_s: 15
+      method: GenerateStreamCall
+    timeout_s: 60
+  - id: cycle3_flow
+    action: elastic_cold_flow
+  - id: cycle3_ramp
+    action: elastic_pause
+    params:
+      seconds: 0.5
+  - id: cycle3_remove
+    action: elastic_remove
+    params:
+      engine:
+        $ref: stages.cycle3_add.output.engine
+      drain_timeout_ms: 60000
+    timeout_s: 75
+  - id: cycle3_flow_stop
+    action: elastic_flow_stop
+    params:
+      flow:
+        $ref: stages.cycle3_flow.output.flow
+    timeout_s: 45
+  - id: cycle3_protocol
+    action: elastic_lifecycle_flow_protocol
+    params:
+      flow:
+        $ref: stages.cycle3_flow.output.flow
+      method: GenerateStreamCall
+  - id: cycle3_removed_topology
+    action: elastic_topology
+    params:
+      role: PREFILL
+      discovered: 2
+      alive: 2
+      port:
+        $ref: stages.cycle3_add.output.port
+      present: false
+    timeout_s: 35
+  - id: cycle3_zero_errors
+    action: elastic_flow_assert
+    params:
+      result:
+        $ref: stages.cycle3_flow_stop.output.result
+      min_success_rate: 1
+  - id: recovery
+    action: elastic_cycle_recovery
+    params:
+      method: GenerateStreamCall
+    timeout_s: 65
+  - id: final_topology
+    action: elastic_topology
+    params:
+      role: PREFILL
+      discovered: 2
+      alive: 2
+    timeout_s: 35
+  - id: teardown
+    action: teardown
+- id: strict_window_nonbatch
+  legacy_case_ids:
+  - elastic_add_flow
+  - elastic_remove_flow
+  - elastic_add_remove_cycle
+  - elastic_add_preference
+  profiles:
+  - window-nonbatch
+  requires:
+  - queue
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: initial_topology
+    action: elastic_topology
+    params:
+      role: PREFILL
+      discovered: 2
+      alive: 2
+    timeout_s: 35
+  - id: preference_flow
+    action: elastic_cold_flow
+  - id: ramp
+    action: elastic_pause
+    params:
+      seconds: 1
+  - id: baseline_window
+    action: elastic_timeline
+    params:
+      engines:
+      - prefill-0
+      - prefill-1
+      offsets_s:
+      - 0
+      - 15
+    timeout_s: 25
+  - id: add
+    action: elastic_add
+    params:
+      role: prefill
+  - id: first_traffic
+    action: elastic_accepted_timed
+    params:
+      engine:
+        $ref: stages.add.output.engine
+      baseline: 0
+      window_s: 10
+    timeout_s: 15
+  - id: added_topology
+    action: elastic_topology
+    params:
+      role: PREFILL
+      discovered: 3
+      alive: 3
+      port:
+        $ref: stages.add.output.port
+      present: true
+    timeout_s: 35
+  - id: post_window
+    action: elastic_timeline
+    params:
+      engines:
+      - prefill-0
+      - prefill-1
+      - $ref: stages.add.output.engine
+      offsets_s:
+      - 0
+      - 5
+      - 10
+      - 17
+      - 24
+      - 31
+      - 38
+      - 45
+    timeout_s: 55
+  - id: preference_flow_stop
+    action: elastic_flow_stop
+    params:
+      flow:
+        $ref: stages.preference_flow.output.flow
+    timeout_s: 45
+  - id: preference_protocol
+    action: elastic_lifecycle_flow_protocol
+    params:
+      flow:
+        $ref: stages.preference_flow.output.flow
+      method: GenerateStreamCall
+  - id: add_availability
+    action: elastic_add_availability
+    params:
+      flow:
+        $ref: stages.preference_flow.output.flow
+      mutation:
+        $ref: stages.add.output.mutation
+      received_s:
+        $ref: stages.first_traffic.output.observed_s
+  - id: preference_received
+    action: elastic_window_received
+    params:
+      engine:
+        $ref: stages.add.output.engine
+      before:
+        $ref: stages.post_window.output.first
+      after:
+        $ref: stages.post_window.output.last
+  - id: preference_shares
+    action: elastic_share
+    params:
+      series:
+        $ref: stages.post_window.output.series
+      engine:
+        $ref: stages.add.output.engine
+      max_share: 0.5
+      old_floor: 0.1
+      exclusive: false
+      require_new: false
+  - id: preference_availability
+    action: elastic_flow_assert
+    params:
+      result:
+        $ref: stages.preference_flow_stop.output.result
+      min_success_rate: 0.9
+  - id: remove_flow
+    action: elastic_cold_flow
+  - id: remove_traffic
+    action: elastic_lifecycle_probe
+    params:
+      engine:
+        $ref: stages.add.output.engine
+      window_s: 10
+      method: GenerateStreamCall
+    timeout_s: 60
+  - id: remove
+    action: elastic_remove
+    params:
+      engine:
+        $ref: stages.add.output.engine
+      drain_timeout_ms: 60000
+    timeout_s: 75
+  - id: remove_hold
+    action: elastic_pause
+    params:
+      seconds: 3
+  - id: remove_flow_stop
+    action: elastic_flow_stop
+    params:
+      flow:
+        $ref: stages.remove_flow.output.flow
+    timeout_s: 45
+  - id: remove_protocol
+    action: elastic_lifecycle_flow_protocol
+    params:
+      flow:
+        $ref: stages.remove_flow.output.flow
+      method: GenerateStreamCall
+  - id: removed_topology
+    action: elastic_topology
+    params:
+      role: PREFILL
+      discovered: 2
+      alive: 2
+      port:
+        $ref: stages.add.output.port
+      present: false
+    timeout_s: 35
+  - id: remove_accounting
+    action: elastic_literal_nonbatch_accounting
+    timeout_s: 105
+  - id: remove_zero_errors
+    action: elastic_flow_assert
+    params:
+      result:
+        $ref: stages.remove_flow_stop.output.result
+      min_success_rate: 1
+  - id: cycle1_add
+    action: elastic_add
+    params:
+      role: prefill
+  - id: cycle1_added_topology
+    action: elastic_topology
+    params:
+      role: PREFILL
+      discovered: 3
+      alive: 3
+      port:
+        $ref: stages.cycle1_add.output.port
+      present: true
+    timeout_s: 35
+  - id: cycle1_traffic
+    action: elastic_lifecycle_probe
+    params:
+      engine:
+        $ref: stages.cycle1_add.output.engine
+      window_s: 15
+      method: GenerateStreamCall
+    timeout_s: 60
+  - id: cycle1_flow
+    action: elastic_cold_flow
+  - id: cycle1_ramp
+    action: elastic_pause
+    params:
+      seconds: 0.5
+  - id: cycle1_remove
+    action: elastic_remove
+    params:
+      engine:
+        $ref: stages.cycle1_add.output.engine
+      drain_timeout_ms: 60000
+    timeout_s: 75
+  - id: cycle1_flow_stop
+    action: elastic_flow_stop
+    params:
+      flow:
+        $ref: stages.cycle1_flow.output.flow
+    timeout_s: 45
+  - id: cycle1_protocol
+    action: elastic_lifecycle_flow_protocol
+    params:
+      flow:
+        $ref: stages.cycle1_flow.output.flow
+      method: GenerateStreamCall
+  - id: cycle1_removed_topology
+    action: elastic_topology
+    params:
+      role: PREFILL
+      discovered: 2
+      alive: 2
+      port:
+        $ref: stages.cycle1_add.output.port
+      present: false
+    timeout_s: 35
+  - id: cycle1_zero_errors
+    action: elastic_flow_assert
+    params:
+      result:
+        $ref: stages.cycle1_flow_stop.output.result
+      min_success_rate: 1
+  - id: cycle2_add
+    action: elastic_add
+    params:
+      role: prefill
+  - id: cycle2_added_topology
+    action: elastic_topology
+    params:
+      role: PREFILL
+      discovered: 3
+      alive: 3
+      port:
+        $ref: stages.cycle2_add.output.port
+      present: true
+    timeout_s: 35
+  - id: cycle2_traffic
+    action: elastic_lifecycle_probe
+    params:
+      engine:
+        $ref: stages.cycle2_add.output.engine
+      window_s: 15
+      method: GenerateStreamCall
+    timeout_s: 60
+  - id: cycle2_flow
+    action: elastic_cold_flow
+  - id: cycle2_ramp
+    action: elastic_pause
+    params:
+      seconds: 0.5
+  - id: cycle2_remove
+    action: elastic_remove
+    params:
+      engine:
+        $ref: stages.cycle2_add.output.engine
+      drain_timeout_ms: 60000
+    timeout_s: 75
+  - id: cycle2_flow_stop
+    action: elastic_flow_stop
+    params:
+      flow:
+        $ref: stages.cycle2_flow.output.flow
+    timeout_s: 45
+  - id: cycle2_protocol
+    action: elastic_lifecycle_flow_protocol
+    params:
+      flow:
+        $ref: stages.cycle2_flow.output.flow
+      method: GenerateStreamCall
+  - id: cycle2_removed_topology
+    action: elastic_topology
+    params:
+      role: PREFILL
+      discovered: 2
+      alive: 2
+      port:
+        $ref: stages.cycle2_add.output.port
+      present: false
+    timeout_s: 35
+  - id: cycle2_zero_errors
+    action: elastic_flow_assert
+    params:
+      result:
+        $ref: stages.cycle2_flow_stop.output.result
+      min_success_rate: 1
+  - id: cycle3_add
+    action: elastic_add
+    params:
+      role: prefill
+  - id: cycle3_added_topology
+    action: elastic_topology
+    params:
+      role: PREFILL
+      discovered: 3
+      alive: 3
+      port:
+        $ref: stages.cycle3_add.output.port
+      present: true
+    timeout_s: 35
+  - id: cycle3_traffic
+    action: elastic_lifecycle_probe
+    params:
+      engine:
+        $ref: stages.cycle3_add.output.engine
+      window_s: 15
+      method: GenerateStreamCall
+    timeout_s: 60
+  - id: cycle3_flow
+    action: elastic_cold_flow
+  - id: cycle3_ramp
+    action: elastic_pause
+    params:
+      seconds: 0.5
+  - id: cycle3_remove
+    action: elastic_remove
+    params:
+      engine:
+        $ref: stages.cycle3_add.output.engine
+      drain_timeout_ms: 60000
+    timeout_s: 75
+  - id: cycle3_flow_stop
+    action: elastic_flow_stop
+    params:
+      flow:
+        $ref: stages.cycle3_flow.output.flow
+    timeout_s: 45
+  - id: cycle3_protocol
+    action: elastic_lifecycle_flow_protocol
+    params:
+      flow:
+        $ref: stages.cycle3_flow.output.flow
+      method: GenerateStreamCall
+  - id: cycle3_removed_topology
+    action: elastic_topology
+    params:
+      role: PREFILL
+      discovered: 2
+      alive: 2
+      port:
+        $ref: stages.cycle3_add.output.port
+      present: false
+    timeout_s: 35
+  - id: cycle3_zero_errors
+    action: elastic_flow_assert
+    params:
+      result:
+        $ref: stages.cycle3_flow_stop.output.result
+      min_success_rate: 1
+  - id: recovery
+    action: elastic_cycle_recovery
+    params:
+      method: GenerateStreamCall
+    timeout_s: 65
+  - id: final_topology
+    action: elastic_topology
+    params:
+      role: PREFILL
+      discovered: 2
+      alive: 2
+    timeout_s: 35
+  - id: teardown
+    action: teardown
 stages:
 - id: setup
   action: setup
@@ -1132,6 +3400,12 @@ stages:
     flow:
       $ref: stages.preference_flow.output.flow
   timeout_s: 45
+- id: preference_protocol
+  action: elastic_lifecycle_flow_protocol
+  params:
+    flow:
+      $ref: stages.preference_flow.output.flow
+    method: FetchResponse
 - id: add_availability
   action: elastic_add_availability
   params:
@@ -1167,26 +3441,16 @@ stages:
     result:
       $ref: stages.preference_flow_stop.output.result
     min_success_rate: 0.9
-- id: remove_counter
-  action: elastic_accepted_snapshot
-  params:
-    engine:
-      $ref: stages.add.output.engine
 - id: remove_flow
   action: elastic_cold_flow
 - id: remove_traffic
-  action: elastic_accepted
+  action: elastic_lifecycle_probe
   params:
     engine:
       $ref: stages.add.output.engine
-    baseline:
-      $ref: stages.remove_counter.output.accepted
     window_s: 10
-  timeout_s: 15
-- id: remove_ramp
-  action: elastic_pause
-  params:
-    seconds: 0.5
+    method: FetchResponse
+  timeout_s: 60
 - id: remove
   action: elastic_remove
   params:
@@ -1204,6 +3468,12 @@ stages:
     flow:
       $ref: stages.remove_flow.output.flow
   timeout_s: 45
+- id: remove_protocol
+  action: elastic_lifecycle_flow_protocol
+  params:
+    flow:
+      $ref: stages.remove_flow.output.flow
+    method: FetchResponse
 - id: removed_topology
   action: elastic_topology
   params:
@@ -1237,16 +3507,16 @@ stages:
       $ref: stages.cycle1_add.output.port
     present: true
   timeout_s: 35
-- id: cycle1_flow
-  action: elastic_cold_flow
 - id: cycle1_traffic
-  action: elastic_accepted
+  action: elastic_lifecycle_probe
   params:
     engine:
       $ref: stages.cycle1_add.output.engine
-    baseline: 0
     window_s: 15
-  timeout_s: 20
+    method: FetchResponse
+  timeout_s: 60
+- id: cycle1_flow
+  action: elastic_cold_flow
 - id: cycle1_ramp
   action: elastic_pause
   params:
@@ -1264,6 +3534,12 @@ stages:
     flow:
       $ref: stages.cycle1_flow.output.flow
   timeout_s: 45
+- id: cycle1_protocol
+  action: elastic_lifecycle_flow_protocol
+  params:
+    flow:
+      $ref: stages.cycle1_flow.output.flow
+    method: FetchResponse
 - id: cycle1_removed_topology
   action: elastic_topology
   params:
@@ -1294,16 +3570,16 @@ stages:
       $ref: stages.cycle2_add.output.port
     present: true
   timeout_s: 35
-- id: cycle2_flow
-  action: elastic_cold_flow
 - id: cycle2_traffic
-  action: elastic_accepted
+  action: elastic_lifecycle_probe
   params:
     engine:
       $ref: stages.cycle2_add.output.engine
-    baseline: 0
     window_s: 15
-  timeout_s: 20
+    method: FetchResponse
+  timeout_s: 60
+- id: cycle2_flow
+  action: elastic_cold_flow
 - id: cycle2_ramp
   action: elastic_pause
   params:
@@ -1321,6 +3597,12 @@ stages:
     flow:
       $ref: stages.cycle2_flow.output.flow
   timeout_s: 45
+- id: cycle2_protocol
+  action: elastic_lifecycle_flow_protocol
+  params:
+    flow:
+      $ref: stages.cycle2_flow.output.flow
+    method: FetchResponse
 - id: cycle2_removed_topology
   action: elastic_topology
   params:
@@ -1351,16 +3633,16 @@ stages:
       $ref: stages.cycle3_add.output.port
     present: true
   timeout_s: 35
-- id: cycle3_flow
-  action: elastic_cold_flow
 - id: cycle3_traffic
-  action: elastic_accepted
+  action: elastic_lifecycle_probe
   params:
     engine:
       $ref: stages.cycle3_add.output.engine
-    baseline: 0
     window_s: 15
-  timeout_s: 20
+    method: FetchResponse
+  timeout_s: 60
+- id: cycle3_flow
+  action: elastic_cold_flow
 - id: cycle3_ramp
   action: elastic_pause
   params:
@@ -1378,6 +3660,12 @@ stages:
     flow:
       $ref: stages.cycle3_flow.output.flow
   timeout_s: 45
+- id: cycle3_protocol
+  action: elastic_lifecycle_flow_protocol
+  params:
+    flow:
+      $ref: stages.cycle3_flow.output.flow
+    method: FetchResponse
 - id: cycle3_removed_topology
   action: elastic_topology
   params:
@@ -1395,36 +3683,10 @@ stages:
       $ref: stages.cycle3_flow_stop.output.result
     min_success_rate: 1
 - id: recovery
-  action: request
+  action: elastic_cycle_recovery
   params:
-    count: 1
-    input_len: 2048
-    output_len: 2
-    block_keys:
-    - 7
-    schedule_timeout_s: 30
-    stream_timeout_s: 30
+    method: FetchResponse
   timeout_s: 65
-- id: recovery_done
-  action: wait
-  params:
-    requests:
-      $ref: stages.recovery.output.requests
-  timeout_s: 65
-- id: recovery_completed
-  action: check
-  params:
-    actual:
-      $ref: stages.recovery_done.output.completed
-    op: eq
-    expected: true
-- id: recovery_no_errors
-  action: check
-  params:
-    actual:
-      $ref: stages.recovery_done.output.error_count
-    op: eq
-    expected: 0
 - id: final_topology
   action: elastic_topology
   params:
