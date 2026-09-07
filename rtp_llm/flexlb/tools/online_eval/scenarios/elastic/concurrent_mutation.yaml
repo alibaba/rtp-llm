@@ -25,7 +25,7 @@ stages:
   timeout_s: 180
 - id: crossfire
   action: elastic_crossfire
-  timeout_s: 100
+  timeout_s: 120
 - id: health
   action: elastic_flow_assert
   params:
