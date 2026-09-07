@@ -121,8 +121,12 @@ void BlockTransferDispatcher::shutdown() const {
     per_rank_engine_->shutdown();
 }
 
-void BlockTransferDispatcher::setMetricsReporter(BlockTreeCacheMetricsReporter* metrics_reporter) const {
-    per_rank_engine_->setMetricsReporter(metrics_reporter);
+void BlockTransferDispatcher::setQueueWaitReporter(TransferQueueWaitReporter reporter) const {
+    per_rank_engine_->setQueueWaitReporter(std::move(reporter));
+}
+
+BlockTreeQueueSizes BlockTransferDispatcher::queueSizes() const {
+    return per_rank_engine_->queueSizes();
 }
 
 }  // namespace rtp_llm

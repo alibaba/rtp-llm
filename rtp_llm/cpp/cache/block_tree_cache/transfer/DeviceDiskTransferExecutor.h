@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cstddef>
 #include <memory>
+#include <utility>
 #include <vector>
 
 #include "rtp_llm/cpp/cache/AsyncContext.h"
@@ -13,7 +14,6 @@
 namespace rtp_llm {
 
 class BlockTreeTaskPool;
-class BlockTreeCacheMetricsReporter;
 class DeviceHostTransferExecutor;
 class HostDiskTransferExecutor;
 
@@ -36,8 +36,8 @@ public:
     std::shared_ptr<AsyncContext> executeDeviceToDisk(const TransferDescriptor& descriptor, const GroupSet& group_set);
 
     void cancelPendingTransfers();
-    void setMetricsReporter(BlockTreeCacheMetricsReporter* metrics_reporter) {
-        metrics_reporter_ = metrics_reporter;
+    void setQueueWaitReporter(TransferQueueWaitReporter reporter) {
+        queue_wait_reporter_ = std::move(reporter);
     }
 
 private:
@@ -52,7 +52,7 @@ private:
     size_t                                full_batch_capacity_{0};
     size_t                                swa_batch_capacity_{0};
     std::chrono::milliseconds             queue_wait_timeout_;
-    BlockTreeCacheMetricsReporter*        metrics_reporter_{nullptr};
+    TransferQueueWaitReporter             queue_wait_reporter_;
 };
 
 }  // namespace rtp_llm
