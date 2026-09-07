@@ -1,6 +1,6 @@
 #include "VIPServerSubscriber.h"
 #include "rtp_llm/cpp/utils/Logger.h"
-#ifdef KVCM_INTERNAL
+#if defined(KVCM_INTERNAL) || defined(RECO_INTERNAL)
 #include "autil/EnvUtil.h"
 #include "option.h"
 #include "iphost.h"
@@ -11,7 +11,7 @@ using namespace middleware::vipclient;
 namespace rtp_llm {
 namespace kvcm {
 
-#ifdef KVCM_INTERNAL
+#if defined(KVCM_INTERNAL) || defined(RECO_INTERNAL)
 class VIPServerSubscriber::VIPServerDestructor {
 public:
     ~VIPServerDestructor() {
@@ -35,7 +35,7 @@ private:
 
 #endif
 bool VIPServerSubscriber::init(const std::vector<std::string>& domains) {
-#ifdef KVCM_INTERNAL
+#if defined(KVCM_INTERNAL) || defined(RECO_INTERNAL)
     std::unique_lock<std::mutex> lock(destructor_mutex_);
     if (destructor_ == nullptr) {
         destructor_ = std::make_shared<VIPServerDestructor>();
@@ -44,7 +44,8 @@ bool VIPServerSubscriber::init(const std::vector<std::string>& domains) {
         RTP_LLM_LOG_INFO("VIPServerSubscriber has been inited");
         return true;
     }
-    jmenv_domain_ = autil::EnvUtil::getEnv("KVCM_VIP_JMENV", std::string("jmenv.tbsite.net"));
+    jmenv_domain_ = autil::EnvUtil::getEnv("KVCM_VIP_JMENV",
+                                           autil::EnvUtil::getEnv("RECO_VIP_JMENV", std::string("jmenv.tbsite.net")));
     VipClientApi::CreateApi();
     Option option;
     option.set_failover_path(".");
@@ -66,7 +67,7 @@ bool VIPServerSubscriber::init(const std::vector<std::string>& domains) {
 }
 
 bool VIPServerSubscriber::getAddresses(std::vector<std::string>& addresses) const {
-#ifdef KVCM_INTERNAL
+#if defined(KVCM_INTERNAL) || defined(RECO_INTERNAL)
     addresses.clear();
     for (const auto& domain : domains_) {
         if (domain.empty()) {

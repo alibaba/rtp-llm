@@ -2,6 +2,7 @@ load("//:def.bzl", "cc_test_wrapper", "copts")
 
 cc_test_wrapper(
     name = "client_wrapper_test",
+    testonly = True,
     exec_properties = {"gpu": "A10"},
     srcs = [
         "ClientWrapperTest.cc",
@@ -15,6 +16,7 @@ cc_test_wrapper(
     deps = [
         "//rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm:client",
         "//rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm:subscriber",
+        "//rtp_llm/cpp/cache/block_tree_cache/test:bounded_thread_test_utils",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
     ],

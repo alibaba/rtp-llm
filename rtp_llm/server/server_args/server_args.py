@@ -256,9 +256,11 @@ class EnvArgumentParser(argparse.ArgumentParser):
 
         EnvArgumentParser._env_mappings[action.dest] = full_env_name
         EnvArgumentParser._env_alias_mappings[action.dest] = tuple(
-            f"{self.env_prefix}_{alias.upper().replace('-', '_')}"
-            if self.env_prefix
-            else alias.upper().replace("-", "_")
+            (
+                f"{self.env_prefix}_{alias.upper().replace('-', '_')}"
+                if self.env_prefix
+                else alias.upper().replace("-", "_")
+            )
             for alias in (env_aliases or ())
         )
 
@@ -331,10 +333,14 @@ class EnvArgumentParser(argparse.ArgumentParser):
                     if arg.startswith("--"):
                         # Find the action for this option
                         for action_item in self._actions:
-                            if arg in action_item.option_strings:
+                            if arg.split("=", 1)[0] in action_item.option_strings:
                                 provided_args.add(action_item.dest)
                                 # Check if this action requires a value
-                                if action_item.nargs in (None, "?", 1):
+                                if "=" not in arg and action_item.nargs in (
+                                    None,
+                                    "?",
+                                    1,
+                                ):
                                     # Skip the value if present
                                     if i + 1 < len(args) and not args[i + 1].startswith(
                                         "-"
@@ -350,10 +356,14 @@ class EnvArgumentParser(argparse.ArgumentParser):
                     if arg.startswith("--"):
                         # Find the action for this option
                         for action_item in self._actions:
-                            if arg in action_item.option_strings:
+                            if arg.split("=", 1)[0] in action_item.option_strings:
                                 provided_args.add(action_item.dest)
                                 # Check if this action requires a value
-                                if action_item.nargs in (None, "?", 1):
+                                if "=" not in arg and action_item.nargs in (
+                                    None,
+                                    "?",
+                                    1,
+                                ):
                                     # Skip the value if present
                                     if i + 1 < len(sys.argv) and not sys.argv[
                                         i + 1
@@ -387,9 +397,7 @@ class EnvArgumentParser(argparse.ArgumentParser):
                                     converted_value = action.type(env_value)
                                     setattr(parsed_args, dest, converted_value)
                                 except argparse.ArgumentTypeError as error:
-                                    self.error(
-                                        f"{resolved_env_name} ({dest}): {error}"
-                                    )
+                                    self.error(f"{resolved_env_name} ({dest}): {error}")
                                 except (ValueError, TypeError):
                                     # If conversion fails, skip this value
                                     pass
@@ -580,6 +588,5 @@ def setup_args(args: Optional[Sequence[str]] = None) -> PyEnvConfigs:
         py_env_configs.runtime_config.warm_up,
         py_env_configs.runtime_config.model_warm_up,
     )
-
 
     return py_env_configs

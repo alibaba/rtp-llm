@@ -737,6 +737,27 @@ class KVCacheConfig:
     kvcm_storage_queue_size: int
     kvcm_storage_thread_num: int
     kvcm_vipserver_domain: str
+    # Legacy aliases of the canonical KVCM members.
+    reco_asyncwrapper_queue_size: int
+    reco_asyncwrapper_thread_num: int
+    reco_client_config: str
+    reco_enable_vipserver: bool
+    reco_get_broadcast_timeout: int
+    reco_get_timeout_ms: int
+    reco_instance_group: str
+    reco_instance_id_salt: str
+    reco_meta_channel_call_timeout: int
+    reco_meta_channel_connection_timeout: int
+    reco_meta_channel_retry_time: int
+    reco_model_extra_info: str
+    reco_model_sdk_config: str
+    reco_model_user_data: str
+    reco_put_broadcast_timeout: int
+    reco_put_timeout_ms: int
+    reco_server_address: str
+    reco_storage_queue_size: int
+    reco_storage_thread_num: int
+    reco_vipserver_domain: str
     reserve_block_ratio: int
     reuse_cache: bool
     seq_size_per_block: int

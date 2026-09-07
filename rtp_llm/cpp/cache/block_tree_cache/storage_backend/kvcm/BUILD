@@ -5,6 +5,11 @@ config_setting(
     values = {"copt": "-DKVCM_INTERNAL=1"},
 )
 
+config_setting(
+    name = "RECO_INTERNAL",
+    values = {"copt": "-DRECO_INTERNAL=1"},
+)
+
 cc_library(
     name = "kvcm_storage_backend",
     srcs = ["KVCMStorageBackend.cc"],
@@ -87,6 +92,7 @@ cc_library(
         "@havenask//aios/autil:lock_free",
     ] + select({
         ":KVCM_INTERNAL": ["@vipserver"],
+        ":RECO_INTERNAL": ["@vipserver"],
         "//conditions:default": [],
     }),
 )

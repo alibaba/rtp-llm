@@ -85,6 +85,39 @@ TEST(StorageBackendExecutorTest, HonorsConfiguredWorkerAndQueueCapacity) {
     EXPECT_EQ(completed.load(), 3u);
 }
 
+TEST(StorageBackendExecutorTest, ShutdownDrainsQueuedTasksAndWaitsForConcurrentShutdown) {
+    auto executor = makeStorageBackendExecutor(/*thread_count=*/1, /*queue_size=*/8);
+    ASSERT_TRUE(executor->start());
+    auto               entered = std::make_shared<std::promise<void>>();
+    auto               started = entered->get_future();
+    std::promise<void> release;
+    auto               released  = release.get_future().share();
+    auto               completed = std::make_shared<std::atomic<size_t>>(0);
+    ASSERT_TRUE(executor->submit([entered, released, completed] {
+        entered->set_value();
+        released.wait();
+        completed->fetch_add(1);
+    }));
+    const auto started_status = started.wait_for(std::chrono::seconds(5));
+    EXPECT_EQ(started_status, std::future_status::ready);
+    EXPECT_TRUE(executor->submit([completed] { completed->fetch_add(1); }));
+    EXPECT_TRUE(executor->submit([] { throw std::runtime_error("task failure"); }));
+    EXPECT_TRUE(executor->submit([completed] { completed->fetch_add(1); }));
+
+    BoundedThread<void> first([executor] { executor->shutdown(); });
+    EXPECT_EQ(first.waitFor(std::chrono::milliseconds(50)), std::future_status::timeout);
+    BoundedThread<void> second([executor] { executor->shutdown(); });
+    EXPECT_EQ(second.waitFor(std::chrono::milliseconds(50)), std::future_status::timeout);
+    EXPECT_FALSE(executor->submit([] {}));
+    release.set_value();
+    ASSERT_EQ(first.waitFor(std::chrono::seconds(5)), std::future_status::ready);
+    first.get();
+    ASSERT_EQ(second.waitFor(std::chrono::seconds(5)), std::future_status::ready);
+    second.get();
+    EXPECT_EQ(completed->load(), 3u);
+    EXPECT_FALSE(executor->submit([] {}));
+}
+
 class CoreDumpGuard {
 public:
     CoreDumpGuard(): old_(StaticConfig::user_ft_core_dump_on_exception) {
@@ -438,6 +471,43 @@ TEST(StorageBackendTest, DefaultExecutorRunsOperationsAsynchronously) {
     backend.releaseMatch();
     EXPECT_EQ(future.wait_for(std::chrono::seconds(5)), std::future_status::ready);
     backend.shutdown();
+}
+
+TEST(StorageBackendTest, DefaultExecutorShutdownSettlesQueuedOperationsAndPins) {
+    auto pool  = std::make_shared<TestBlockPool>();
+    auto block = pool->malloc().value();
+    pool->incRef(block);
+    auto executor    = makeStorageBackendExecutor(/*thread_count=*/1, /*queue_size=*/8);
+    auto backend     = std::make_shared<TestBackend>(true, executor);
+    auto completions = std::make_shared<std::atomic<size_t>>(0);
+    backend->blockMatch();
+    ASSERT_TRUE(initBackend(*backend, pool));
+    backend->match(makeRequest(NULL_BLOCK_IDX), [completions](size_t, auto, bool success) {
+        EXPECT_TRUE(success);
+        completions->fetch_add(1);
+    });
+    if (!backend->waitUntilMatchEntered()) {
+        backend->releaseMatch();
+        FAIL() << "match did not occupy the worker";
+    }
+    backend->read(makeRequest(block), nullptr, [completions](bool success) {
+        EXPECT_TRUE(success);
+        completions->fetch_add(1);
+    });
+    EXPECT_TRUE(backend->write(backend->prepareWrite(makeRequest(block))));
+    EXPECT_EQ(pool->refCount(block), 3u);
+
+    BoundedThread<void> shutdown([backend] { backend->shutdown(); });
+    EXPECT_EQ(shutdown.waitFor(std::chrono::milliseconds(50)), std::future_status::timeout);
+    backend->releaseMatch();
+    ASSERT_EQ(shutdown.waitFor(std::chrono::seconds(5)), std::future_status::ready);
+    shutdown.get();
+    EXPECT_TRUE(backend->shutdownCalled());
+    EXPECT_EQ(completions->load(), 2u);
+    EXPECT_EQ(backend->readCalls(), 1u);
+    EXPECT_EQ(backend->writeHandleCount(), 1u);
+    EXPECT_EQ(pool->refCount(block), 1u);
+    pool->decRef(block);
 }
 
 TEST(StorageBackendTest, CustomExecutorControlsScheduling) {

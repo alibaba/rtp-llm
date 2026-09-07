@@ -12,6 +12,116 @@ from rtp_llm.utils.backend_registry import (
 )
 
 
+class RecoConfigCompatibilityTest(TestCase):
+    # Keep the former public configuration surface explicit so a missing alias
+    # cannot disappear from both registration and test discovery.
+    samples = {
+        "enable_vipserver": True,
+        "vipserver_domain": "vip.example",
+        "server_address": "127.0.0.1:1234",
+        "instance_group": "legacy-group",
+        "meta_channel_retry_time": 7,
+        "meta_channel_connection_timeout": 123,
+        "meta_channel_call_timeout": 234,
+        "storage_thread_num": 5,
+        "storage_queue_size": 17,
+        "put_timeout_ms": 345,
+        "get_timeout_ms": 456,
+        "model_sdk_config": '[{"type":"local"}]',
+        "model_user_data": "legacy-data",
+        "model_extra_info": "legacy-extra",
+        "instance_id_salt": "legacy-salt",
+        "asyncwrapper_thread_num": 6,
+        "asyncwrapper_queue_size": 19,
+        "get_broadcast_timeout": 567,
+        "put_broadcast_timeout": 678,
+        "client_config": '{"legacy":{}}',
+    }
+
+    def parse_cache_config(self, args, env, use_sys_argv=False):
+        from rtp_llm.ops import KVCacheConfig
+        from rtp_llm.server.server_args.kv_cache_group_args import (
+            init_kv_cache_group_args,
+        )
+        from rtp_llm.server.server_args.server_args import EnvArgumentParser
+
+        config = KVCacheConfig()
+        parser = EnvArgumentParser()
+        parser.set_root_config(config)
+        init_kv_cache_group_args(parser, config)
+        argv = ["server", *args] if use_sys_argv else ["server"]
+        with patch.dict(os.environ, env, clear=True), patch.object(sys, "argv", argv):
+            parser.parse_args(None if use_sys_argv else args)
+        return config
+
+    def test_legacy_env_and_cli_bind_all_canonical_fields(self):
+        env = {
+            f"RECO_{name.upper()}": str(value) for name, value in self.samples.items()
+        }
+        args = [
+            part
+            for name, value in self.samples.items()
+            for part in (f"--reco_{name}", str(value))
+        ]
+        for config in (
+            self.parse_cache_config(None, env),
+            self.parse_cache_config([], env),
+            self.parse_cache_config(args, {}),
+        ):
+            for name, value in self.samples.items():
+                with self.subTest(name=name):
+                    self.assertEqual(getattr(config, f"kvcm_{name}"), value)
+                    self.assertEqual(getattr(config, f"reco_{name}"), value)
+
+    def test_canonical_env_wins_including_false_zero_and_empty(self):
+        env = {}
+        for name, value in self.samples.items():
+            env[f"RECO_{name.upper()}"] = str(value)
+            env[f"KVCM_{name.upper()}"] = str(type(value)())
+        for args in (None, []):
+            config = self.parse_cache_config(args, env)
+            for name, value in self.samples.items():
+                with self.subTest(name=name, args=args):
+                    self.assertEqual(getattr(config, f"kvcm_{name}"), type(value)())
+
+    def test_both_cli_spellings_override_both_env_spellings(self):
+        env = {
+            f"{prefix}_{name.upper()}": str(type(value)())
+            for prefix in ("RECO", "KVCM")
+            for name, value in self.samples.items()
+        }
+        for prefix in ("reco", "kvcm"):
+            for equals in (False, True):
+                args = []
+                for name, value in self.samples.items():
+                    flag = f"--{prefix}_{name}"
+                    args.extend([f"{flag}={value}"] if equals else [flag, str(value)])
+                for use_sys_argv in (False, True):
+                    config = self.parse_cache_config(args, env, use_sys_argv)
+                    for name, value in self.samples.items():
+                        with self.subTest(
+                            name=name,
+                            prefix=prefix,
+                            equals=equals,
+                            use_sys_argv=use_sys_argv,
+                        ):
+                            self.assertEqual(getattr(config, f"kvcm_{name}"), value)
+
+    def test_properties_share_storage_and_pickle(self):
+        from rtp_llm.ops import KVCacheConfig
+
+        config = KVCacheConfig()
+        for name, value in self.samples.items():
+            setattr(config, f"reco_{name}", value)
+            self.assertEqual(getattr(config, f"kvcm_{name}"), value)
+        restored = pickle.loads(pickle.dumps(config))
+        for name, value in self.samples.items():
+            with self.subTest(name=name):
+                self.assertEqual(getattr(restored, f"reco_{name}"), value)
+                setattr(restored, f"kvcm_{name}", type(value)())
+                self.assertEqual(getattr(restored, f"reco_{name}"), type(value)())
+
+
 class ServerArgsPyEnvConfigsTest(TestCase):
     """Test that environment variables and command line arguments are correctly set to py_env_configs structure."""
 
