@@ -338,12 +338,25 @@ class Qwen3VLNewLoaderRoutingTest(unittest.TestCase):
         QWen3_VL._from_config_json(fallback_config, fallback_json)
         self.assertEqual(fallback_config.config_dtype, "float16")
 
-    def test_config_json_rejects_missing_or_invalid_mrope_sections(self):
+    def test_config_json_uses_official_mrope_fallback_when_missing(self):
         config_json = _model_config_json()
         del config_json["text_config"]["rope_scaling"]
-        with self.assertRaisesRegex(ValueError, "rope_scaling"):
-            QWen3_VL._from_config_json(ModelConfig(), config_json)
 
+        config = ModelConfig()
+        with self.assertLogs(level="WARNING") as captured:
+            QWen3_VL._from_config_json(config, config_json)
+
+        rope_config = config.attn_config.rope_config
+        self.assertEqual(rope_config.index_factor, 3)
+        self.assertEqual(
+            [rope_config.mrope_dim1, rope_config.mrope_dim2, rope_config.mrope_dim3],
+            [24, 20, 20],
+        )
+        self.assertTrue(
+            any("official 128-dim fallback" in line for line in captured.output)
+        )
+
+    def test_config_json_rejects_invalid_mrope_sections(self):
         config_json = _model_config_json()
         config_json["text_config"]["rope_scaling"]["mrope_section"] = [16, 24]
         with self.assertRaisesRegex(ValueError, "three positive integers"):
