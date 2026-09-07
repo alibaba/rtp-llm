@@ -63,15 +63,44 @@ class ObservationRegistryTest(unittest.TestCase):
             ("no_fetch_observation", normal_no_fetch_observation),
         ]:
             with self.subTest(module=module), tempfile.TemporaryDirectory() as tmp:
-                ensure = Mock(return_value=NS(master_http_port=28000))
+                old_env = NS(master_http_port=28000)
+                fresh_env = NS(master_http_port=28001)
+                current = {"env": old_env}
+                calls = []
+                old_spec = EnvSpec(
+                    label="previous_debug_case",
+                    master_env={"FLEXLB_DEBUG_ENABLED": "true"},
+                )
+
+                def teardown():
+                    calls.append("teardown")
+                    current["env"] = None
+
+                def ensure_env(spec):
+                    calls.append("ensure")
+                    # A different label is not a different environment config.
+                    self.assertEqual(spec.fingerprint(), old_spec.fingerprint())
+                    if current["env"] is None:
+                        current["env"] = fresh_env
+                    return current["env"]
+
+                ensure = Mock(side_effect=ensure_env)
                 ops = NS(
                     snapshot=Mock(side_effect=DebugUnavailable("missing mock source"))
                 )
+
+                def engine_ops(env):
+                    calls.append("engine_ops")
+                    self.assertIs(
+                        env, fresh_env if module == "no_fetch_observation" else old_env
+                    )
+                    return ops
+
                 ctx = NS(
                     profile="batch-window",
                     smoke_spec=lambda: EnvSpec(),
-                    env_manager=NS(ensure=ensure, teardown=Mock()),
-                    engine_ops=lambda env: ops,
+                    env_manager=NS(ensure=ensure, teardown=teardown),
+                    engine_ops=engine_ops,
                     case_dir=lambda name: Path(tmp),
                 )
                 client = NS(
@@ -82,6 +111,14 @@ class ObservationRegistryTest(unittest.TestCase):
                 ):
                     with self.assertRaises(CaseExecutionError):
                         fn(ctx)
+                self.assertEqual(
+                    calls,
+                    (
+                        ["teardown", "ensure", "engine_ops"]
+                        if module == "no_fetch_observation"
+                        else ["ensure", "engine_ops"]
+                    ),
+                )
                 self.assertEqual(
                     ensure.call_args.args[0].master_env,
                     {"FLEXLB_DEBUG_ENABLED": "true"},
