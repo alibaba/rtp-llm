@@ -75,6 +75,14 @@ def h20_oss_suites():
     native.test_suite(
         name = "smoke_h20_moe",
         tests = [
+            # Single-request and two-request layouts both require graph replay;
+            # their 32-token golden generations also exercise prompt-KV writes.
+            smoke_test(
+                name="moe_generation_prefill_cuda_graph",
+                task_info="data/model/qwen3_moe/q_r_30b_generation_prefill_cuda_graph.json",
+                smoke_args="--moe_strategy fp8_per_block_no_dp_masked --quantization FP8_PER_BLOCK --warm_up 0 --act_type BF16 --tp_size 1 --dp_size 1 --ep_size 1 --world_size 1 --use_all_gather 1 --use_deepep_moe 0 --reserver_runtime_mem_mb 16005 --seq_size_per_block 64 --test_block_num 1000 --concurrency_limit 2 --max_context_batch_size 2 --reuse_cache 0 --enable_cuda_graph 1 --decode_capture_config '1,2' --generation_prefill_cuda_graph_max_requests 2 --generation_prefill_capture_config '64'",
+                gpu_type=["H20"],
+            ),
             smoke_test(
                 name="moe_masked_fp8_tp2",
                 task_info="data/model/qwen3_moe/q_r_30b_py_masked_without_deepep_tp2.json",
@@ -158,11 +166,10 @@ def h20_oss_suites():
         name = "smoke_h20_dense",
         tests = [
             smoke_test(
-                name="dense_prefill_cuda_graph",
-                task_info="data/model/qwen25/q_r_prefill_cuda_graph.json",
-                smoke_args="--act_type BF16 --warm_up 0 --seq_size_per_block 64 --test_block_num 1000 --concurrency_limit 5 --enable_cuda_graph 1 --decode_capture_config '1' --enable_prefill_cuda_graph 1 --prefill_cuda_graph_max_requests 5 --prefill_cuda_graph_capture_config '64,256'",
+                name="dense_generation_prefill_cuda_graph",
+                task_info="data/model/qwen25/q_r_generation_prefill_cuda_graph.json",
+                smoke_args="--act_type BF16 --warm_up 0 --seq_size_per_block 64 --test_block_num 1000 --concurrency_limit 5 --max_context_batch_size 5 --enable_cuda_graph 1 --decode_capture_config '1' --generation_prefill_cuda_graph_max_requests 5 --generation_prefill_capture_config '64,256'",
                 gpu_type=["H20"],
-                parallel_qr=2,
             ),
             smoke_test(
                 name="dense_fp8kv_cudagraph",

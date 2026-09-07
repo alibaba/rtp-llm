@@ -36,8 +36,10 @@ if device_type == DeviceType.ROCm:
         AiterPrefillImplAsm,
         AiterPrefillImplNonAsm,
         AiterPrefillImplPaged,
+        AiterPrefillImplTriton,
     )
 
+    PREFILL_MHA_IMPS.append(AiterPrefillImplTriton)
     PREFILL_MHA_IMPS.append(AiterPrefillImplPaged)
     PREFILL_MHA_IMPS.append(AiterPrefillImplAsm)
     PREFILL_MHA_IMPS.append(AiterPrefillImplNonAsm)

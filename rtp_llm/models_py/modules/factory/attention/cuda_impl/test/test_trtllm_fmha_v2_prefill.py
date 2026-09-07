@@ -270,9 +270,11 @@ class TestTRTLLMFMHAv2PrefillOpBF16(TRTLLMFMHAv2TestBase):
     def test_prefill_cuda_graph_rope_kv_and_dynamic_batch(self):
         """Gate GQA and packed-MHA prefill graphs on SM90 and SM12x."""
         if self.kv_cache_dtype != KvCacheDataType.BASE:
-            self.skipTest("prefill CUDA graph requires BF16 KV cache")
+            self.skipTest("generation-prefill CUDA graph requires BF16 KV cache")
         if not (is_sm90() or is_sm12x()):
-            self.skipTest("prefill CUDA graph is allowlisted on SM90 and SM12x")
+            self.skipTest(
+                "generation-prefill CUDA graph is allowlisted on SM90 and SM12x"
+            )
 
         for head_num_kv in (2, 8):
             with self.subTest(head_num_kv=head_num_kv):
@@ -334,7 +336,7 @@ class TestTRTLLMFMHAv2PrefillOpBF16(TRTLLMFMHAv2TestBase):
             dtype=attn_configs.dtype,
         )
         graph_impl = FlashInferTRTLLMFMHAv2PrefillImpl(attn_configs, capture_inputs)
-        self.assertTrue(graph_impl.supports_prefill_cuda_graph())
+        self.assertTrue(graph_impl.supports_generation_prefill_cuda_graph())
 
         warmup_stream = torch.cuda.Stream()
         warmup_stream.wait_stream(torch.cuda.current_stream())

@@ -1,18 +1,22 @@
 import logging
 from typing import List
 
-from rtp_llm.ops import HWKernelConfig
+from rtp_llm.ops import HWKernelConfig, RoleType, SpeculativeType, TaskType
 from rtp_llm.server.server_args.util import str2bool
 
-PREFILL_CUDA_GRAPH_MAX_REQUESTS_LIMIT = (
-    HWKernelConfig.prefill_cuda_graph_max_requests_limit
+GENERATION_PREFILL_CUDA_GRAPH_MAX_CAPTURE_TOKENS = (
+    HWKernelConfig.generation_prefill_cuda_graph_max_capture_tokens
 )
-PREFILL_CUDA_GRAPH_MAX_CAPTURE_TOKENS = (
-    HWKernelConfig.prefill_cuda_graph_max_capture_tokens
+GENERATION_PREFILL_CUDA_GRAPH_MAX_CAPTURE_BUCKETS = (
+    HWKernelConfig.generation_prefill_cuda_graph_max_capture_buckets
 )
+GENERATION_PREFILL_CUDA_GRAPH_MAX_REQUESTS_LIMIT = (
+    HWKernelConfig.generation_prefill_cuda_graph_max_requests_limit
+)
+CPP_INT_MAX = (1 << 31) - 1
 
 
-def _bounded_positive_int(value: str, config_name: str, maximum: int) -> int:
+def _positive_int(value: str, config_name: str) -> int:
     import argparse
 
     try:
@@ -25,19 +29,86 @@ def _bounded_positive_int(value: str, config_name: str, maximum: int) -> int:
         raise argparse.ArgumentTypeError(
             f"{config_name} must be a positive integer, got {value}"
         )
-    if parsed > maximum:
+    if parsed >= CPP_INT_MAX:
         raise argparse.ArgumentTypeError(
-            f"{config_name} must not exceed {maximum}, got {parsed}"
+            f"{config_name} must be less than the C++ int maximum {CPP_INT_MAX}, got {parsed}"
         )
     return parsed
 
 
-def _prefill_cuda_graph_max_requests(value: str) -> int:
-    return _bounded_positive_int(
+def _generation_prefill_cuda_graph_max_requests(value: str) -> int:
+    parsed = _positive_int(
         value,
-        "prefill_cuda_graph_max_requests",
-        PREFILL_CUDA_GRAPH_MAX_REQUESTS_LIMIT,
+        "generation_prefill_cuda_graph_max_requests",
     )
+    if parsed > GENERATION_PREFILL_CUDA_GRAPH_MAX_REQUESTS_LIMIT:
+        import argparse
+
+        raise argparse.ArgumentTypeError(
+            "generation_prefill_cuda_graph_max_requests must not exceed the "
+            f"backend limit {GENERATION_PREFILL_CUDA_GRAPH_MAX_REQUESTS_LIMIT}, "
+            f"got {parsed}"
+        )
+    return parsed
+
+
+def validate_hw_kernel_group_args(
+    hw_kernel_config: HWKernelConfig,
+    *,
+    max_context_batch_size: int,
+    concurrency_limit: int,
+    role_type: RoleType,
+    speculative_type: SpeculativeType,
+    task_type: TaskType,
+) -> None:
+    """Validate model-resolved constraints that span multiple option groups.
+
+    This must run only after role and task normalization. In particular,
+    ``VIT_SEPARATION=ROLE`` rewrites the role in ``EngineConfig.create()``, and
+    the final task may be inferred from checkpoint metadata rather than the
+    legacy ``EMBEDDING_MODEL`` switch.
+    """
+    buckets = hw_kernel_config.generation_prefill_capture_token_buckets
+    # A retained child config must not prevent operators from rolling back by
+    # disabling the master switch. The parser above still validates each
+    # option's own syntax/range; only active graphs need cross-option checks.
+    if not hw_kernel_config.enable_cuda_graph or not buckets:
+        return
+
+    # Match the configuration-visible part of the C++ secondary-runner
+    # ownership predicate. Generation runner capacity constraints do not apply
+    # to PD/VIT/frontend processes or non-language wrappers.
+    if role_type != RoleType.PDFUSION or task_type != TaskType.LANGUAGE_MODEL:
+        return
+
+    # NormalEngine rejects an explicitly enabled generation-prefill graph with
+    # speculative execution before warmup and runner creation. Leave that check
+    # to C++, which also knows whether a propose model exists. Returning here
+    # only defers validation; it does not permit the service to start or ignore
+    # the conflicting configuration.
+    if speculative_type != SpeculativeType.NONE:
+        return
+
+    max_requests = hw_kernel_config.generation_prefill_cuda_graph_max_requests
+    reachable_request_capacity = min(max_context_batch_size, concurrency_limit)
+    if max_requests > reachable_request_capacity:
+        raise ValueError(
+            "GENERATION_PREFILL_CUDA_GRAPH_MAX_REQUESTS must not exceed the "
+            "reachable context batch capacity: "
+            f"max_requests={max_requests}, "
+            f"MAX_CONTEXT_BATCH_SIZE={max_context_batch_size}, "
+            f"CONCURRENCY_LIMIT={concurrency_limit}, "
+            f"reachable_capacity={max(0, reachable_request_capacity)}"
+        )
+    max_bucket = max(buckets)
+    last_padded_token_index = (max_requests + 1) * max_bucket - 1
+    if last_padded_token_index > CPP_INT_MAX:
+        raise ValueError(
+            "Generation Prefill CUDA Graph padded token index exceeds int32 "
+            "capacity: "
+            f"max_requests={max_requests}, max_bucket={max_bucket}, "
+            f"last_padded_token_index={last_padded_token_index}"
+        )
 
 
 def init_hw_kernel_group_args(parser, hw_kernel_config):
@@ -65,36 +136,31 @@ def init_hw_kernel_group_args(parser, hw_kernel_config):
     )
 
     hw_kernel_group.add_argument(
-        "--enable_prefill_cuda_graph",
-        env_name="ENABLE_PREFILL_CUDA_GRAPH",
-        bind_to=(hw_kernel_config, "enable_prefill_cuda_graph"),
-        type=str2bool,
-        default=False,
+        "--generation_prefill_cuda_graph_max_requests",
+        env_name="GENERATION_PREFILL_CUDA_GRAPH_MAX_REQUESTS",
+        bind_to=(hw_kernel_config, "generation_prefill_cuda_graph_max_requests"),
+        type=_generation_prefill_cuda_graph_max_requests,
+        default=1,
         help=(
-            "为 graph-safe 的 attention backend 开启 Prefill CUDA Graph。"
-            "需要同时设置 ENABLE_CUDA_GRAPH=1；首版仅支持单卡执行。"
+            "Generation Prefill CUDA Graph 中真实 context sequence row 的最大数量；"
+            "启用时不得超过 MAX_CONTEXT_BATCH_SIZE 与 CONCURRENCY_LIMIT 中的较小值，"
+            f"且后端硬上限为 {GENERATION_PREFILL_CUDA_GRAPH_MAX_REQUESTS_LIMIT}"
         ),
     )
 
     hw_kernel_group.add_argument(
-        "--prefill_cuda_graph_max_requests",
-        env_name="PREFILL_CUDA_GRAPH_MAX_REQUESTS",
-        bind_to=(hw_kernel_config, "prefill_cuda_graph_max_requests"),
-        type=_prefill_cuda_graph_max_requests,
-        default=8,
-        help="Prefill CUDA Graph 中真实 context sequence row 的最大数量",
-    )
-
-    hw_kernel_group.add_argument(
-        "--prefill_cuda_graph_capture_config",
-        env_name="PREFILL_CUDA_GRAPH_CAPTURE_CONFIG",
-        type=_parse_prefill_cuda_graph_capture_config,
+        "--generation_prefill_capture_config",
+        env_name="GENERATION_PREFILL_CAPTURE_CONFIG",
+        type=_parse_generation_prefill_capture_config,
         default=None,
-        bind_to=(hw_kernel_config, "prefill_cuda_graph_capture_seq_lens"),
+        bind_to=(hw_kernel_config, "generation_prefill_capture_token_buckets"),
         help=(
-            "Prefill CUDA Graph capture token buckets. Uses the same file/list/range "
-            "syntax as PREFILL_CAPTURE_CONFIG and is limited to 64 buckets. "
-            "未显式配置时按模型 max_seq_len 自动裁剪内置稀疏 bucket。"
+            "Generation Prefill CUDA Graph capture token buckets. A non-empty value, "
+            "together with ENABLE_CUDA_GRAPH=1, enables this graph role. "
+            "C++ engine initialization rejects combining it with speculative execution "
+            "(including MTP/DSpARK). Uses the same "
+            "file/list/range syntax as PREFILL_CAPTURE_CONFIG and is limited to "
+            f"{GENERATION_PREFILL_CUDA_GRAPH_MAX_CAPTURE_BUCKETS} buckets."
         ),
     )
 
@@ -174,7 +240,7 @@ def init_hw_kernel_group_args(parser, hw_kernel_config):
         "--prefill_capture_config",
         env_name="PREFILL_CAPTURE_CONFIG",
         type=_parse_prefill_capture_config,
-        default="64,128,256,384,512,768,1024",
+        default="160:1",
         bind_to=(hw_kernel_config, "prefill_capture_seq_lens"),
         help=(
             "Prefill CUDA Graph capture sequence lengths configuration. "
@@ -360,6 +426,11 @@ def _parse_prefill_capture_config(
                                 )
                             continue
                         seq_lens.append(seq_len)
+                        if max_buckets is not None and len(seq_lens) > max_buckets:
+                            raise argparse.ArgumentTypeError(
+                                f"{config_name} produced more than {max_buckets} buckets; "
+                                f"maximum is {max_buckets}"
+                            )
             if seq_lens:
                 logging.info(
                     f"Loaded {len(seq_lens)} sequence lengths from {file_path}"
@@ -424,6 +495,10 @@ def _parse_prefill_capture_config(
     try:
         if reject_invalid_buckets:
             raw_values = [item.strip() for item in config.split(",") if item.strip()]
+            if max_buckets is not None and len(raw_values) > max_buckets:
+                raise argparse.ArgumentTypeError(
+                    f"{config_name} produced {len(raw_values)} buckets; maximum is {max_buckets}"
+                )
             values = [int(item) for item in raw_values]
             if not values:
                 raise ValueError(f"{config_name} contains no valid sequence lengths")
@@ -446,12 +521,14 @@ def _parse_prefill_capture_config(
         raise argparse.ArgumentTypeError(str(e))
 
 
-def _parse_prefill_cuda_graph_capture_config(config: str) -> List[int]:
+def _parse_generation_prefill_capture_config(config: str) -> List[int]:
+    if not config or not config.strip():
+        return []
     return _parse_prefill_capture_config(
         config,
-        config_name="prefill_cuda_graph_capture_config",
-        max_buckets=64,
-        max_bucket_value=PREFILL_CUDA_GRAPH_MAX_CAPTURE_TOKENS,
+        config_name="generation_prefill_capture_config",
+        max_buckets=GENERATION_PREFILL_CUDA_GRAPH_MAX_CAPTURE_BUCKETS,
+        max_bucket_value=GENERATION_PREFILL_CUDA_GRAPH_MAX_CAPTURE_TOKENS,
         reject_invalid_buckets=True,
     )
 

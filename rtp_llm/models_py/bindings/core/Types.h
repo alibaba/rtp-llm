@@ -19,8 +19,8 @@ enum class AllocationType {
 };
 
 // Internal representation of the single request-visible
-// `aux_info.prefill_cuda_graph_status` string.
-enum class PrefillCudaGraphStatus : std::uint8_t {
+// `aux_info.generation_prefill_cuda_graph_status` string.
+enum class GenerationPrefillCudaGraphStatus : std::uint8_t {
     NOT_REQUESTED,
     REPLAYED,
     CAPTURE_UNAVAILABLE,
@@ -33,48 +33,45 @@ enum class PrefillCudaGraphStatus : std::uint8_t {
     PD_CACHE_STORE_NOT_SUPPORTED,
     TOKEN_TYPE_INPUT_NOT_SUPPORTED,
     MULTIMODAL_INPUT_NOT_SUPPORTED,
-    SCRATCH_KV_UNAVAILABLE,
     MODEL_NOT_SUPPORTED,
     MOE_CONFIG_NOT_SUPPORTED,
     INPUT_TOKENS_EXCEED_CAPTURE_LIMIT,
     GRAPH_INPUT_SHAPE_MISMATCH,
 };
 
-inline const char* prefillCudaGraphStatusString(PrefillCudaGraphStatus status) {
+inline const char* generationPrefillCudaGraphStatusString(GenerationPrefillCudaGraphStatus status) {
     switch (status) {
-        case PrefillCudaGraphStatus::NOT_REQUESTED:
+        case GenerationPrefillCudaGraphStatus::NOT_REQUESTED:
             return "not_requested";
-        case PrefillCudaGraphStatus::REPLAYED:
+        case GenerationPrefillCudaGraphStatus::REPLAYED:
             return "replayed";
-        case PrefillCudaGraphStatus::CAPTURE_UNAVAILABLE:
+        case GenerationPrefillCudaGraphStatus::CAPTURE_UNAVAILABLE:
             return "capture_unavailable";
-        case PrefillCudaGraphStatus::ATTENTION_BACKEND_UNSUPPORTED:
+        case GenerationPrefillCudaGraphStatus::ATTENTION_BACKEND_UNSUPPORTED:
             return "attention_backend_unsupported";
-        case PrefillCudaGraphStatus::MIXED_PREFILL_DECODE_NOT_SUPPORTED:
+        case GenerationPrefillCudaGraphStatus::MIXED_PREFILL_DECODE_NOT_SUPPORTED:
             return "mixed_prefill_decode_not_supported";
-        case PrefillCudaGraphStatus::INPUT_METADATA_INVALID:
+        case GenerationPrefillCudaGraphStatus::INPUT_METADATA_INVALID:
             return "input_metadata_invalid";
-        case PrefillCudaGraphStatus::REQUEST_COUNT_EXCEED_CAPTURE_LIMIT:
+        case GenerationPrefillCudaGraphStatus::REQUEST_COUNT_EXCEED_CAPTURE_LIMIT:
             return "request_count_exceed_capture_limit";
-        case PrefillCudaGraphStatus::PREFIX_CACHE_NOT_SUPPORTED:
+        case GenerationPrefillCudaGraphStatus::PREFIX_CACHE_NOT_SUPPORTED:
             return "prefix_cache_not_supported";
-        case PrefillCudaGraphStatus::REQUEST_NOT_SUPPORTED:
+        case GenerationPrefillCudaGraphStatus::REQUEST_NOT_SUPPORTED:
             return "request_not_supported";
-        case PrefillCudaGraphStatus::PD_CACHE_STORE_NOT_SUPPORTED:
+        case GenerationPrefillCudaGraphStatus::PD_CACHE_STORE_NOT_SUPPORTED:
             return "pd_cache_store_not_supported";
-        case PrefillCudaGraphStatus::TOKEN_TYPE_INPUT_NOT_SUPPORTED:
+        case GenerationPrefillCudaGraphStatus::TOKEN_TYPE_INPUT_NOT_SUPPORTED:
             return "token_type_input_not_supported";
-        case PrefillCudaGraphStatus::MULTIMODAL_INPUT_NOT_SUPPORTED:
+        case GenerationPrefillCudaGraphStatus::MULTIMODAL_INPUT_NOT_SUPPORTED:
             return "multimodal_input_not_supported";
-        case PrefillCudaGraphStatus::SCRATCH_KV_UNAVAILABLE:
-            return "scratch_kv_unavailable";
-        case PrefillCudaGraphStatus::MODEL_NOT_SUPPORTED:
+        case GenerationPrefillCudaGraphStatus::MODEL_NOT_SUPPORTED:
             return "model_not_supported";
-        case PrefillCudaGraphStatus::MOE_CONFIG_NOT_SUPPORTED:
+        case GenerationPrefillCudaGraphStatus::MOE_CONFIG_NOT_SUPPORTED:
             return "moe_config_not_supported";
-        case PrefillCudaGraphStatus::INPUT_TOKENS_EXCEED_CAPTURE_LIMIT:
+        case GenerationPrefillCudaGraphStatus::INPUT_TOKENS_EXCEED_CAPTURE_LIMIT:
             return "input_tokens_exceed_capture_limit";
-        case PrefillCudaGraphStatus::GRAPH_INPUT_SHAPE_MISMATCH:
+        case GenerationPrefillCudaGraphStatus::GRAPH_INPUT_SHAPE_MISMATCH:
             return "graph_input_shape_mismatch";
     }
     return "unknown";

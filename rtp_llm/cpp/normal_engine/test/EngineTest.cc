@@ -23,16 +23,46 @@ public:
 };
 
 TEST_F(NormalEngineTest, testDecodeWarmupReserveTokensAreConvertedToBlocksAfterAddition) {
-    EXPECT_EQ(
-        NormalEngine::warmUpReservedBlockCount(/*seq_len=*/7, /*reserve_tokens=*/1, /*tokens_per_block=*/8), 1u);
-    EXPECT_EQ(
-        NormalEngine::warmUpReservedBlockCount(/*seq_len=*/8, /*reserve_tokens=*/1, /*tokens_per_block=*/8), 2u);
-    EXPECT_EQ(
-        NormalEngine::warmUpReservedBlockCount(/*seq_len=*/7, /*reserve_tokens=*/9, /*tokens_per_block=*/8), 2u);
-    EXPECT_EQ(
-        NormalEngine::warmUpReservedBlockCount(/*seq_len=*/9, /*reserve_tokens=*/8, /*tokens_per_block=*/8), 3u);
+    EXPECT_EQ(NormalEngine::warmUpReservedBlockCount(/*seq_len=*/7, /*reserve_tokens=*/1, /*tokens_per_block=*/8), 1u);
+    EXPECT_EQ(NormalEngine::warmUpReservedBlockCount(/*seq_len=*/8, /*reserve_tokens=*/1, /*tokens_per_block=*/8), 2u);
+    EXPECT_EQ(NormalEngine::warmUpReservedBlockCount(/*seq_len=*/7, /*reserve_tokens=*/9, /*tokens_per_block=*/8), 2u);
+    EXPECT_EQ(NormalEngine::warmUpReservedBlockCount(/*seq_len=*/9, /*reserve_tokens=*/8, /*tokens_per_block=*/8), 3u);
     EXPECT_ANY_THROW(
         NormalEngine::warmUpReservedBlockCount(/*seq_len=*/1, /*reserve_tokens=*/1, /*tokens_per_block=*/0));
+}
+
+TEST_F(NormalEngineTest, testRejectGenerationPrefillWithSpeculativeBeforeRunnerCreation) {
+    ModelConfig   model_config;
+    RuntimeConfig runtime_config;
+    KVCacheConfig kv_cache_config;
+    auto          params = createEngineInitParams(CustomConfig{}, model_config, runtime_config, kv_cache_config);
+    params.hw_kernel_config.enable_cuda_graph                        = true;
+    params.hw_kernel_config.generation_prefill_capture_token_buckets = {8, 16};
+
+    // Exercise the real constructor, not just the wrapper ownership predicate.
+    // Both the configured execution mode and a supplied propose model must
+    // reject the combination before warmup, KV allocation or runner creation.
+    for (const auto speculative_type : {SP_TYPE_MTP, SP_TYPE_DSPARK, SP_TYPE_NONE}) {
+        for (const bool has_propose_model : {false, true}) {
+            if (speculative_type == SP_TYPE_NONE && !has_propose_model) {
+                continue;
+            }
+            SCOPED_TRACE(::testing::Message() << "speculative_type=" << static_cast<int>(speculative_type)
+                                              << " has_propose_model=" << has_propose_model);
+            params.sp_config.type = speculative_type;
+            auto propose_params =
+                has_propose_model ? std::make_unique<ProposeModelEngineInitParams>(SP_TYPE_MTP, 2) : nullptr;
+            try {
+                NormalEngine engine(params, std::move(propose_params));
+                FAIL() << "explicit generation-prefill/speculative combination must fail initialization";
+            } catch (const std::exception& error) {
+                EXPECT_NE(std::string(error.what())
+                              .find("GENERATION_PREFILL_CAPTURE_CONFIG does not support speculative execution"),
+                          std::string::npos)
+                    << error.what();
+            }
+        }
+    }
 }
 
 TEST_F(NormalEngineTest, testFp8KVCache) {

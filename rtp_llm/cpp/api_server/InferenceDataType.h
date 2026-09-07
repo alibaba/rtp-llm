@@ -101,7 +101,9 @@ public:
         json.Jsonize("speculative_accepted_tokens_per_pos",
                      speculative_accepted_tokens_per_pos,
                      speculative_accepted_tokens_per_pos);
-        json.Jsonize("prefill_cuda_graph_status", prefill_cuda_graph_status, prefill_cuda_graph_status);
+        json.Jsonize("generation_prefill_cuda_graph_status",
+                     generation_prefill_cuda_graph_status,
+                     generation_prefill_cuda_graph_status);
     }
     AuxInfoAdapter() = default;
     AuxInfoAdapter(const AuxInfo& base): AuxInfo(base) {

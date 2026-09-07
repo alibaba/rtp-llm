@@ -238,13 +238,14 @@ class AttentionInputRoutingTest(unittest.TestCase):
             fmha_impl = model.prepare_fmha_impl(
                 inputs,
                 is_cuda_graph=True,
-                cuda_graph_selection_mode="prefill_graph",
+                cuda_graph_selection_mode="generation_prefill_graph",
             )
 
         self.assertEqual(fmha_impl, {"full": inputs_by_tag["full"]})
         factory.assert_called_once()
         self.assertEqual(
-            factory.call_args.kwargs["cuda_graph_selection_mode"], "prefill_graph"
+            factory.call_args.kwargs["cuda_graph_selection_mode"],
+            "generation_prefill_graph",
         )
 
     def test_default_model_prepares_every_tag(self):

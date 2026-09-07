@@ -17,6 +17,7 @@
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_utils.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_base.h"
+#include "rtp_llm/cpp/config/ConfigModules.h"
 
 namespace py = pybind11;
 
@@ -31,7 +32,7 @@ public:
     using std::runtime_error::runtime_error;
 };
 
-class PrefillCudaGraphUnsupportedBackendError: public std::runtime_error {
+class GenerationPrefillCudaGraphUnsupportedBackendError: public std::runtime_error {
 public:
     using std::runtime_error::runtime_error;
 };
@@ -66,9 +67,8 @@ public:
         kv_cache_group_tags_(graph_params.kv_cache_group_tags),
         position_id_len_factor_(graph_params.position_id_len_factor),
         metrics_reporter_(std::move(metrics_reporter)),
-        prefill_cuda_graph_max_requests_(graph_params.prefill_cuda_graph_max_requests),
-        prefill_cuda_graph_pad_token_id_(graph_params.prefill_cuda_graph_pad_token_id),
-        prefill_scratch_kernel_block_ids_(graph_params.prefill_scratch_kernel_block_ids) {
+        generation_prefill_cuda_graph_max_requests_(graph_params.generation_prefill_cuda_graph_max_requests),
+        generation_prefill_cuda_graph_pad_token_id_(graph_params.generation_prefill_cuda_graph_pad_token_id) {
         py::gil_scoped_acquire gil;
         if (!py_instance_ || py_instance_.is_none()) {
             throw std::runtime_error("CudaGraphRunner constructor: Python instance is null or none.");
@@ -86,9 +86,23 @@ public:
         }
         is_prefill_cuda_graph_mode_ = role_ == CudaGraphRole::EMBEDDING_PREFILL
                                       || role_ == CudaGraphRole::MTP_DRAFT_PREFILL
-                                      || role_ == CudaGraphRole::GENERATIVE_PREFILL;
+                                      || role_ == CudaGraphRole::GENERATION_PREFILL;
         is_target_verify_ = role_ == CudaGraphRole::TARGET_VERIFY;
-        for (auto& counter : prefill_cuda_graph_fallback_log_counts_) {
+        if (role_ == CudaGraphRole::GENERATION_PREFILL) {
+            RTP_LLM_CHECK_WITH_INFO(generation_prefill_cuda_graph_max_requests_ > 0
+                                        && generation_prefill_cuda_graph_max_requests_
+                                               <= HWKernelConfig::kGenerationPrefillCudaGraphMaxRequests,
+                                    "generation prefill CUDA graph max_requests must be in [1, %d], got %d",
+                                    HWKernelConfig::kGenerationPrefillCudaGraphMaxRequests,
+                                    generation_prefill_cuda_graph_max_requests_);
+            RTP_LLM_CHECK_WITH_INFO(
+                max_bs_ == static_cast<size_t>(generation_prefill_cuda_graph_max_requests_ + 1),
+                "generation prefill CUDA graph backend batch must include exactly one sentinel row: "
+                "max_bs=%zu max_requests=%d",
+                max_bs_,
+                generation_prefill_cuda_graph_max_requests_);
+        }
+        for (auto& counter : generation_prefill_cuda_graph_fallback_log_counts_) {
             counter.store(0, std::memory_order_relaxed);
         }
         py_attn_pyobj_method_ = py_instance_.attr("prepare_fmha_impl");
@@ -153,9 +167,10 @@ public:
         return capture_session_may_be_dirty_.load(std::memory_order_acquire);
     }
 
-    // Factory methods for test: take GraphParams so callers can reuse the same struct
-    static CudaGraphRunner* createForPrefill(py::object py_instance, GraphParams params);
-    static CudaGraphRunner* createForDecode(py::object py_instance, GraphParams params);
+    // Complete capture with one ownership/error path for every graph role. A
+    // failed dirty capture intentionally retains the runner until process exit;
+    // a clean failure destroys it before propagating the original exception.
+    static CudaGraphRunner* initializeCapture(std::unique_ptr<CudaGraphRunner> runner);
 
 private:
     // Common capture logic for both prefill and decode
@@ -169,8 +184,8 @@ private:
     bool isMtpDraftPrefillCudaGraph() const {
         return role_ == CudaGraphRole::MTP_DRAFT_PREFILL;
     }
-    bool isGenerativePrefillCudaGraph() const {
-        return role_ == CudaGraphRole::GENERATIVE_PREFILL;
+    bool isGenerationPrefillCudaGraph() const {
+        return role_ == CudaGraphRole::GENERATION_PREFILL;
     }
     bool usesFixedCapacityMtpDraftPrefillCudaGraph() const {
         // DSpARK propose/commit now run as construction-time-role decode graphs
@@ -186,7 +201,6 @@ private:
     CaptureMemoryHold createCaptureMemoryHold(PyModelInputs& inputs, int tokens_count);
     void              initKernelInternalMemory();
     py::object        prepareFmhaImpl(const PyModelInputs& inputs, bool is_cuda_graph);
-    void              initPrefillScratchTensors();
     void              logCudaGraphPoolMemory(const char* phase);
     void              setPositionEncoding(torch::Tensor position_encoding) override;
     void              setTokenTypeEmbedding(torch::Tensor token_type_embedding) override;
@@ -242,23 +256,24 @@ private:
     at::TensorOptions                      options_cuda_float_;
     cuda_graph::GraphPoolHandle            shared_graph_pool_{};
 
-    std::vector<std::string>      kv_cache_group_tags_;
-    int                           position_id_len_factor_ = 0;  // 0 = model has no combo_position_ids
+    std::vector<std::string>                   kv_cache_group_tags_;
+    int                                        position_id_len_factor_ = 0;  // 0 = model has no combo_position_ids
     std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter_;
-    int                           prefill_cuda_graph_max_requests_{0};
-    int                           prefill_cuda_graph_pad_token_id_{0};
-    std::vector<std::vector<int>> prefill_scratch_kernel_block_ids_;
-    std::vector<torch::Tensor>    prefill_scratch_kernel_block_ids_host_;
-    std::vector<torch::Tensor>    prefill_scratch_kernel_block_ids_device_;
-    torch::Tensor                 prefill_cuda_graph_padding_offset_host_;
-    mutable std::atomic<uint64_t> combo_position_fallback_count_{0};
-    static constexpr size_t       kPrefillCudaGraphStatusCount =
-        static_cast<size_t>(PrefillCudaGraphStatus::GRAPH_INPUT_SHAPE_MISMATCH) + 1;
-    mutable std::array<std::atomic<uint64_t>, kPrefillCudaGraphStatusCount> prefill_cuda_graph_fallback_log_counts_;
-    mutable std::atomic<uint64_t>                                           prefill_cuda_graph_replay_log_count_{0};
+    int                                        generation_prefill_cuda_graph_max_requests_{0};
+    int                                        generation_prefill_cuda_graph_pad_token_id_{0};
+    torch::Tensor                              generation_prefill_cuda_graph_padding_offset_host_;
+    mutable std::atomic<uint64_t>              combo_position_fallback_count_{0};
+    static constexpr size_t                    kGenerationPrefillCudaGraphStatusCount =
+        static_cast<size_t>(GenerationPrefillCudaGraphStatus::GRAPH_INPUT_SHAPE_MISMATCH) + 1;
+    mutable std::array<std::atomic<uint64_t>, kGenerationPrefillCudaGraphStatusCount>
+                                  generation_prefill_cuda_graph_fallback_log_counts_;
+    mutable std::atomic<uint64_t> generation_prefill_cuda_graph_replay_log_count_{0};
 
-    // event to record forward done
-    torch::Event forward_event_ = cuda_graph::makeGraphEvent();
+    // The preparation event protects asynchronous staging copies. The forward
+    // event additionally protects pinned-host metadata retained by captured
+    // backends until the preceding replay has finished reading it.
+    torch::Event forward_event_         = cuda_graph::makeGraphEvent();
+    torch::Event prepare_staging_event_ = cuda_graph::makeGraphEvent();
 
     std::atomic<bool> prepared_attention_inputs_    = false;
     std::atomic<bool> capture_session_may_be_dirty_ = false;

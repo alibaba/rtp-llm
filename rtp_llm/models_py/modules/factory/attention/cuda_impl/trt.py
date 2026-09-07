@@ -417,7 +417,7 @@ class FlashInferTRTLLMFMHAv2PrefillImpl(FMHAImplBase):
                 self.rope_params.kv_cache_offset, new_kv_cache_offset
             )
 
-    def supports_prefill_cuda_graph(self) -> bool:
+    def supports_generation_prefill_cuda_graph(self) -> bool:
         configs = self.fmha_impl.attn_configs
         return (
             (is_sm90() or is_sm12x())
