@@ -155,3 +155,16 @@ Fixture tests cover all22 actual Schedule requests, two successful consumers,
 twenty actual Schedule rejections and the correct-code/wrong-reason negative
 where PR7 fails independently of P6_terminal. This is not Java evidence and
 does not claim the old classifier gap still exists on a new Java source.
+
+
+### Timeout first-round cleanup is an explicit stronger requirement
+
+Independent review of 0d84faf found an old false-PASS path: after a passing
+first-round PR7, failure of clean1 returned report.finish without recording a
+failing P6, potentially reporting PASS and omitting round two. The new formal
+program makes clean1 a mandatory failing check and requires both rounds for
+PASS. This is a deliberate strengthening of cleanup and two-round completion,
+not exact Boolean equivalence for that old early-return path. The old case
+remains unchanged. Independent static acceptance of the third candidate is
+conditional on this stronger construction and shared clean fix d955; it does
+not constitute Java execution acceptance.
