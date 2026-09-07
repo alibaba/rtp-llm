@@ -573,7 +573,9 @@ else:
         "MEMORY_CACHE_SIZE_MB",
     ])
 
-for key in ("KIMI_K3_ATTENTION_QUANTIZATION", "KIMI_K3_FP8_COLLECTIVE_GEMM"):
+for key in ("KIMI_K3_ATTENTION_QUANTIZATION", "KIMI_K3_FP8_COLLECTIVE_GEMM",
+            "KIMI_K3_MLA_FP8", "KIMI_K3_MLA_FP8_Q_SCALE", "KIMI_K3_MLA_FP8_KV_SCALE",
+            "KIMI_K3_MLA_FP8_DIAGNOSTICS", "RTP_LLM_MTP_ACCEPTANCE_DIAGNOSTICS"):
     if key in os.environ:
         expected[key] = os.environ[key]
 

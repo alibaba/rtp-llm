@@ -322,6 +322,12 @@ void PrefillRpcServer::remoteAllocateResource(PrefillGenerateContext& prefill_co
     alloc_request.set_prefill_attention_tp_size(
         static_cast<int32_t>(maga_init_params_.parallelism_config.get_attn_tp_size()));
     alloc_request.set_prefill_cache_dtype(static_cast<int32_t>(cache_config.dtype));
+    const auto& mla_config = maga_init_params_.model_config_.attn_config;
+    if (mla_config.mla_fp8_compute) {
+        alloc_request.set_prefill_mla_fp8_format(1);
+        alloc_request.set_prefill_mla_fp8_q_scale(mla_config.mla_fp8_q_scale);
+        alloc_request.set_prefill_mla_fp8_kv_scale(mla_config.mla_fp8_kv_scale);
+    }
     for (const auto& spec : cache_config.cache_specs) {
         const auto* linear_spec = dynamic_cast<const LinearKVCacheSpec*>(spec.get());
         if (linear_spec == nullptr) {

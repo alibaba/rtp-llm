@@ -106,3 +106,15 @@ py_binary(
     tags = ["manual", "B300"],
     exec_properties = {'gpu': 'B300'},
 )
+
+py_test(
+    name = "mla_fp8_test",
+    srcs = ["mla_fp8_test.py", "flashmla_forward_test_utils.py", "flashmla_dense_prefill_packed_kv_test.py"],
+    deps = [
+        "//rtp_llm:apache-tvm-ffi",
+        "//rtp_llm:nvidia-cutlass-dsl",
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+    ] + tokenspeed_mla_test_deps(),
+    tags = ["manual", "SM100"],
+    exec_properties = {'gpu': 'SM100'},
+)

@@ -34,6 +34,9 @@ std::string AttentionConfigs::DebugAttentionConfigStr() const {
     oss << "  rope_head_dim: " << rope_head_dim << std::endl;
     oss << "  v_head_dim: " << v_head_dim << std::endl;
     oss << "  mla_prefill_expanded_kv_budget_bytes: " << mla_prefill_expanded_kv_budget_bytes << std::endl;
+    oss << "  mla_fp8_compute: " << mla_fp8_compute << std::endl;
+    oss << "  mla_fp8_q_scale: " << mla_fp8_q_scale << std::endl;
+    oss << "  mla_fp8_kv_scale: " << mla_fp8_kv_scale << std::endl;
     oss << "  softmax_extra_scale: " << softmax_extra_scale << std::endl;
     oss << "  kv_cache_dtype: " << kvCacheDataTypeToString(kv_cache_dtype) << std::endl;
     oss << "  need_rope_kv_cache: " << need_rope_kv_cache << std::endl;

@@ -255,7 +255,10 @@ void populateHybridAttentionGroups(CacheConfig&             config,
                     layers.linear_layers,
                     CacheGroupType::LINEAR,
                     createLinearAttentionSpec(
-                        model_config, parallelism_config, dtype, static_cast<uint32_t>(layers.linear_layers.size())));
+                        model_config,
+                        parallelism_config,
+                        model_config.attn_config.mla_fp8_compute ? model_config.data_type : dtype,
+                        static_cast<uint32_t>(layers.linear_layers.size())));
     }
 }
 

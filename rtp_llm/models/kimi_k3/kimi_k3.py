@@ -1,5 +1,6 @@
 import json
 import logging
+import math
 import os
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Set
@@ -11,7 +12,7 @@ from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.models.base_model import BaseModel
 from rtp_llm.models.kimi_k3.kimi_k3_weight import KimiK3Eagle3Weight, KimiK3Weight
-from rtp_llm.ops import HybridAttentionType
+from rtp_llm.ops import HybridAttentionType, KvCacheDataType
 
 _MLA_PREFILL_EXPANDED_KV_BUDGET_BYTES_ENV = (
     "KIMI_K3_MLA_PREFILL_EXPANDED_KV_BUDGET_BYTES"
@@ -87,6 +88,24 @@ class KimiK3ModelConfig(ModelConfig):
         # Standalone draft checkpoints retain their own BF16 policy.
         enabled = method == "fp8_per_block" and "eagle3" not in self.model_type
         self.k3_attention_quant_config = Fp8BlockWiseQuantConfig() if enabled else None
+        mla_fp8 = os.environ.get("KIMI_K3_MLA_FP8", "0").strip()
+        if mla_fp8 not in ("0", "1"):
+            raise ValueError("KIMI_K3_MLA_FP8 must be 0 or 1")
+        self.attn_config.mla_fp8_compute = mla_fp8 == "1" and "eagle3" not in self.model_type
+        if self.attn_config.mla_fp8_compute:
+            if not self.attn_config.use_mla or self.attn_config.is_sparse:
+                raise ValueError("K3 FP8 MLA requires dense MLA")
+            if self.attn_config.kv_cache_dtype == KvCacheDataType.INT8:
+                raise ValueError("K3 FP8 MLA is incompatible with INT8 cache")
+            self.attn_config.kv_cache_dtype = KvCacheDataType.FP8
+            for field, env in (("mla_fp8_q_scale", "KIMI_K3_MLA_FP8_Q_SCALE"),
+                               ("mla_fp8_kv_scale", "KIMI_K3_MLA_FP8_KV_SCALE")):
+                scale = float(os.environ.get(env, "1"))
+                if not math.isfinite(scale) or not 1e-20 <= scale <= 1e20:
+                    raise ValueError(f"{env} must be a finite positive FP32 scale in [1e-20, 1e20]")
+                setattr(self.attn_config, field, scale)
+            logging.info("K3 MLA FP8: dense_e4m3_v1, Q scale=%s, KV scale=%s; BF16 output",
+                         self.attn_config.mla_fp8_q_scale, self.attn_config.mla_fp8_kv_scale)
         if self.quant_config is not None:
             raise ValueError(
                 "Kimi K3 does not support runtime weight quantization; its "

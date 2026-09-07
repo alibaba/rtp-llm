@@ -367,3 +367,17 @@ cc_test(
     env = {},
     exec_properties = {'gpu':'H20'},
 )
+
+cc_test(
+    name = "mla_fp8_cache_spec_test",
+    srcs = ["MLAFp8CacheSpecTest.cc"],
+    copts = copts(),
+    deps = [
+        "//rtp_llm/cpp/cache:cache_types",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ] + torch_deps() + select({
+        "@//:using_cuda13_x86": [":cuda13_torch_nvshmem"],
+        "//conditions:default": [],
+    }),
+)
