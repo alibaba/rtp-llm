@@ -934,7 +934,20 @@ def _window(ctx, params, deadline):
             steady_base_floor=base - 0.15,
         )
     handle = ctx.register_resource("snapshot", evidence, historical=True)
-    return StageOutput(output={"window": handle})
+    checks = []
+    if phase == "baseline":
+        # Nine hot and one cold family are already warm; actual request counters,
+        # not holder counts, must establish high hit rate before any retirement.
+        checks.append(
+            CheckResult(
+                "high_hit",
+                "PASS" if evidence["hit_rate"] >= 0.9 else "FAIL",
+                actual=evidence["hit_rate"],
+                expected=0.9,
+                evidence=evidence,
+            )
+        )
+    return StageOutput(output={"window": handle}, checks=checks)
 
 
 HANDLERS += [
@@ -949,6 +962,7 @@ HANDLERS += [
         _window_validate,
         _window,
         {"window": "snapshot"},
+        checks=frozenset({"high_hit"}),
     ),
 ]
 
