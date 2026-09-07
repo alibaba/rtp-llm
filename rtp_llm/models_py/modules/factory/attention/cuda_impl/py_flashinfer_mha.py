@@ -164,6 +164,14 @@ class PyFlashinferPrefillPagedAttnOp(object):
         self.prefill_cuda_graph_copy_params = None
         # Pre-allocated buffers for CUDA graph copy path (avoid per-forward allocation)
         self._aligned_q_buf = None
+        # Fixed-size KV indptr for the graph path. FlashInferMlaParams resizes
+        # decode_page_indptr_d to batch_size+1 on every forward, so a replay with a
+        # smaller batch than captured leaves FlashInfer reading past the view.
+        self._kv_indptr_buf = None
+        # Same problem for last_page_len, which FlashInfer consumes together with
+        # the indptr: kv_len = (indptr[1:] - indptr[:-1] - 1) * page_size +
+        # last_page_len, so the two must agree on the captured length.
+        self._kv_last_page_len_buf = None
         # reserve buffer for q cast
         self._aligned_q_cast_buf = None
         self._compact_out_buf = None
@@ -247,11 +255,19 @@ class PyFlashinferPrefillPagedAttnOp(object):
         if self.enable_cuda_graph and self.prefill_wrapper._qo_indptr_buf is None:
             self.prefill_wrapper._use_cuda_graph = True
             self.prefill_wrapper._qo_indptr_buf = qo_indptr
-            self.prefill_wrapper._paged_kv_indptr_buf = (
-                self.fmha_params.decode_page_indptr_d
+            # Hand FlashInfer a buffer we own and keep at the captured size.
+            # decode_page_indptr_d gets resized to batch_size+1 on every forward,
+            # so on a smaller-batch replay FlashInfer -- which still validates
+            # _fixed_batch_size+1 entries -- reads stale memory past the view and
+            # rejects the plan with "kv_indptr[i] - kv_indptr[i-1] should be
+            # non-negative".
+            self._kv_indptr_buf = self.fmha_params.decode_page_indptr_d.clone()
+            self.prefill_wrapper._paged_kv_indptr_buf = self._kv_indptr_buf
+            self._kv_last_page_len_buf = (
+                self.fmha_params.paged_kv_last_page_len_d.clone()
             )
             self.prefill_wrapper._paged_kv_last_page_len_buf = (
-                self.fmha_params.paged_kv_last_page_len_d
+                self._kv_last_page_len_buf
             )
             self.prefill_wrapper._paged_kv_indices_buf = self.fmha_params.page_indice_d
             self.prefill_wrapper._fixed_batch_size = (
@@ -274,6 +290,8 @@ class PyFlashinferPrefillPagedAttnOp(object):
                 )
 
         # Update buffers for subsequent calls if in CUDA graph mode
+        kv_indptr = self.fmha_params.decode_page_indptr_d
+        kv_last_page_len = self.fmha_params.paged_kv_last_page_len_d
         if self.prefill_cuda_graph_copy_params is not None:
             assert attn_inputs.prefill_cuda_graph_copy_params is not None
             assert self.input_lengths is not None
@@ -288,12 +306,32 @@ class PyFlashinferPrefillPagedAttnOp(object):
                 attn_inputs.cu_seqlens_device
             )
             qo_indptr = self.qo_indptr
+            if self._kv_indptr_buf is not None:
+                # Pad beyond the active batch with the final cumulative value:
+                # the padded slots then describe zero-length sequences, which keeps
+                # the array non-decreasing over the whole captured length.
+                live = kv_indptr.size(0)
+                fixed = self._kv_indptr_buf.size(0)
+                self._kv_indptr_buf[:live] = kv_indptr
+                if live < fixed:
+                    self._kv_indptr_buf[live:] = kv_indptr[live - 1]
+                kv_indptr = self._kv_indptr_buf
+                # FlashInfer derives kv_len as
+                #   (indptr[1:] - indptr[:-1] - 1) * page_size + last_page_len
+                # so a padded slot, whose indptr delta is 0, needs last_page_len
+                # equal to page_size to come out as length 0.
+                live_lp = kv_last_page_len.size(0)
+                fixed_lp = self._kv_last_page_len_buf.size(0)
+                self._kv_last_page_len_buf[:live_lp] = kv_last_page_len
+                if live_lp < fixed_lp:
+                    self._kv_last_page_len_buf[live_lp:] = self.page_size
+                kv_last_page_len = self._kv_last_page_len_buf
 
         self.prefill_wrapper.plan(
             qo_indptr,
-            self.fmha_params.decode_page_indptr_d,
+            kv_indptr,
             self.fmha_params.page_indice_d,
-            self.fmha_params.paged_kv_last_page_len_d,
+            kv_last_page_len,
             self.local_head_num,
             self.local_kv_head_num,
             self.head_dim_qk,
