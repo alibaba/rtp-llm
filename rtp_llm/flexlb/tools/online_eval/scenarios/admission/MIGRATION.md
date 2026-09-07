@@ -1,6 +1,6 @@
 # Admission migration checkpoint
 
-Only `admission_queue` is implemented here so far: queue_depth, slo_deadline and master_capacity, each in batch-window and single-batch. The other four families and twelve legacy cases remain pending. Existing cases are retained. This is a local implementation checkpoint, not Java execution evidence or full migration acceptance.
+`admission_queue` is implemented with full-program local fixtures: queue_depth, slo_deadline and master_capacity, each in batch-window and single-batch. `engine_admission_gate` now has four programs/eight profile instances and focused local tests, with full-program external-I/O fixtures, but still needs independent review. The other three families and eight legacy cases remain pending. Existing cases are retained. This is a local implementation checkpoint, not Java execution evidence or full migration acceptance.
 
 The profiles follow the current case declarations, not the older mapping table: both SLO and master-capacity now include single-batch; queue-depth requires the BATCH dispatcher. Queue-depth uses the original default 2P/4D; SLO and master-capacity use dedicated 2P/2D environments. Config overrides preserve each selected profile's decision/dispatcher axes.
 
@@ -17,3 +17,17 @@ Explicit stricter observations: master_clean also requires current full ready to
 Complete compile-to-execute fixtures exercise all six programs and distinguish wrong numeric capacity codes, SLO errors that arrive too early, and consumer cleanup errors from a green run. External Java I/O is explicitly replaced in these fixtures; no real Java success is inferred.
 
 Pending before acceptance: independent legacy-contract review, integration through the core-owned catalog, and scheduled real Java validation. No remote load was started for this checkpoint.
+
+
+## Engine gate programs awaiting independent acceptance
+
+| Legacy case | Variant | Retained predicates / stage.check |
+|---|---|---|
+| engine_prefill_concurrency_gate_park | prefill_concurrency | four separated Schedule calls, all_admitted; park_seen max(prefill_waiting_batches, waiting)>=1 within10s; all_completed=4; park_empty both counters0 within10s; master_clean30s; recovered |
+| engine_decode_hard_gate_unbounded_park | decode_hard_gate | 280 serial Schedule calls,64 output tokens,50ms pacing per25; decode routing cap5000; all_admitted=280;18s peak observation; conditional_park only requires waiting>=1 when running_max>=128; completed_95pct>=266; park_empty15s; master_clean60s; recovered |
+| admission_engine_waiting_batch_cap_reject | prefill_waiting_cap | two occupants under3000ms/max_waiting_batches1; cap_seen>=1 before probe; backpressure_error matches both old tokens and fast_reject<3s; cap reset0 before fourth; occupants_complete=2 and pressure_recovery=1; park_empty10s; master_clean30s; recovered |
+| admission_engine_kv_lack_mem_fast_reject | kv_pool_capacity |17-block P pool; two requests each eight disjoint block keys; pool_full>=16 before probe; lack_mem_error matches all three old strings and fast_reject<3s; occupants_complete=2; pool_recovered available>=8; fresh_succeeded eight-block request; explicit P/D engine_clean; master_clean30s; recovered |
+
+`admission_fire` waits only for each Schedule submission, retains immediate versus deferred consumption explicitly, and applies declared inter-fire spacing. Deferred mode performs no Fetch until `admission_wait`. Core-owned consumer completion checks remain mandatory at wait/cleanup. KV keys come from a separately reserved request-ID seed to make the per-request key sets disjoint; the actual key list remains in request-shape evidence. The seed is not an additional inference request.
+
+Decode's old conditional park contract can pass below the gate, with gate_filled=false explicitly recorded; this does not demonstrate that overflow occurred. Waiting-at-fourth is retained as diagnostic evidence and is not silently upgraded into a new old-contract gate. The core's treatment of unexpected RPC/execution errors is retained; real Java validation is still pending.
