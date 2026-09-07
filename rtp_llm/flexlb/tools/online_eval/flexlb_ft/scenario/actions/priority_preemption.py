@@ -482,7 +482,43 @@ def _comparator_pair(ctx, p, deadline):
     )
 
 
+def _config_reject_params(p, plan):
+    p = _params(
+        p, {"rejected", "environment_absent"}, {"rejected", "environment_absent"}
+    )
+    if not isinstance(p["rejected"], list) or len(p["rejected"]) != 3:
+        raise ValueError("config rejection requires all three actual startup probes")
+    for ref in p["rejected"] + [p["environment_absent"]]:
+        plan.reference(ref, "boolean")
+    return p
+
+
+def _config_reject(ctx, p, deadline):
+    rejected = [ctx.resolve(ref) for ref in p["rejected"]]
+    absent = ctx.resolve(p["environment_absent"])
+    return StageOutput(
+        checks=[
+            CheckResult(
+                "AT1",
+                "PASS" if all(v is True for v in rejected) else "FAIL",
+                actual=rejected,
+                expected=[True] * 3,
+            ),
+            CheckResult(
+                "P6", "PASS" if absent is True else "FAIL", actual=absent, expected=True
+            ),
+        ]
+    )
+
+
 HANDLERS = [
+    StageHandler(
+        "preemption_config_reject",
+        _config_reject_params,
+        _config_reject,
+        {},
+        checks=frozenset({"AT1", "P6"}),
+    ),
     StageHandler(
         "preemption_comparator_pair",
         _comparator_pair_params,
