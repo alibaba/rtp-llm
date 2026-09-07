@@ -1,6 +1,6 @@
 """Case registry + execution context shared by all case categories.
 
-Terminology (unified 2026-09, suite reorg task #85):
+Terminology (unified 2026-09, suite reorg):
 
   * mock engine CASE test (场景测试) — this framework: the
     flexlb_functional_tests.py runner and the flexlb_ft/cases/ category
@@ -39,7 +39,7 @@ class CaseDef:
     profiles apply).  ``requires`` declares semantic capabilities the case
     needs (vocabulary: see harness.PROFILE_CAPS, e.g. ``enqueue_batch``,
     ``generate_stream``); a case runs only under profiles whose capability
-    set is a superset.  ``expected_fail`` (task #101) declares a
+    set is a superset.  ``expected_fail`` declares a
     declared-finding probe — see the field note below and the runner's
     three-way outcome classification.
     """
@@ -50,7 +50,7 @@ class CaseDef:
     profiles: Optional[List[str]] = None  # None = all profiles apply
     requires: Optional[List[str]] = None  # semantic capability requirements
     source: str = ""  # legacy script this was ported from
-    # Declared-finding probe (task #101 expected-fail mechanism): the case's
+    # Declared-finding probe (expected-fail mechanism): the case's
     # assertions state the CORRECT contract while the current master is
     # known not to satisfy it — failing IS the confirmation of the finding.
     # The runner classifies such a case as finding-confirmed (failed as
@@ -150,7 +150,7 @@ class CaseContext:
 # across (category, profile) pairs because every pairwise base distance is
 # < 1M), so a reused master's dedup table stays collision-free across
 # profiles and reruns.  The ten categories map 1:1 onto the ten
-# flexlb_ft/cases/ modules (task #85 reorg; priority joined 2026-09 on
+# flexlb_ft/cases/ modules (category reorg; priority joined 2026-09 on
 # intake3-rebuild — PRIORITY-axis case-layer JSON injection, no profile
 # expansion, hence the compact 12.5k-spacing block below 100k); the
 # pre-reorg families

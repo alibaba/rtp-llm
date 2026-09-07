@@ -1,4 +1,4 @@
-"""flexlb_ft case categories (task #85 reorg): nine scenario modules.
+"""flexlb_ft case categories (category reorg): nine scenario modules.
 
 Each ``cases/<category>.py`` registers its cases into a CATEGORY_CASES
 list (cancel -> CANCEL_CASES, status -> STATUS_CASES, kv -> KV_CASES,

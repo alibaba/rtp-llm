@@ -55,7 +55,7 @@ PROCESS_CONFIG_FILE="${PROCESS_CONFIG_FILE:-${RUN_DIR}/master_config.json}"
 
 # Default load (user-approved 2026-09-02, replay profile): 12P/40D + replay
 # mode (trace-timestamp pacing) + LOOP=1 cyclic refill + duration 120s.
-# REPLAY_SPEED is caller-supplied (the flexlb-mock-engine-test skill
+# REPLAY_SPEED is caller-supplied (the upstream orchestrator
 # auto-calibrates it from the trace to the nominal 650 QPS target); this
 # script never invents a speed. Baseline break (2026-09-02): the mock3
 # uniform-650 default is retired to an explicit opt-in (SEND_MODE=uniform
@@ -110,7 +110,7 @@ MAVEN_PROFILES="${MAVEN_PROFILES:-opensource,!internal}"  # no-op, see NOTE abov
 LIMIT="${LIMIT:-1000}"
 DURATION_S="${DURATION_S:-120}"
 # REPLAY_SPEED: replay pacing multiplier, pure pass-through. The caller is
-# expected to supply it (the skill layer auto-calibrates from the trace:
+# expected to supply it (the orchestrator auto-calibrates from the trace:
 # SPEED = max(1, round(target_qps * valid_span_s / valid_requests)), where
 # valid = ol>0 rows are filtered client-side). The
 # bare 10 fallback below equals the JavaLoadClient built-in default and only
@@ -287,7 +287,7 @@ trap cleanup EXIT
 # Best-effort run output consolidation (runs at most once — CONSOLIDATED
 # sentinel). Called AFTER the client exit code is known and the summary=
 # line is printed: consolidation (notably the per_request gzip pass) can
-# take tens of seconds on large runs while the flexlb-online-eval skill's
+# take tens of seconds on large runs while the orchestrator's
 # timeout window is only DURATION+180s, so the exit code and the summary
 # line must be decided first — a slow machine then reports the correct
 # result instead of a spurious TIMEOUT with a half-written directory.
@@ -349,7 +349,7 @@ consolidate_run_outputs_now() {
   # Runs while the mock cluster and master are still alive (cleanup kills them
   # on EXIT), so the final cluster snapshot is captured from the control plane.
   # Kept in place on purpose: endpoints.json, flexlb_env.txt, flexlb_profile.jfr
-  # and load_client/server_latency.json (aggregate validity input; the skill's
+  # and load_client/server_latency.json (aggregate validity input; the orchestrator's
   # fetch_server_latency also reads it). Phase B: the client no longer writes
   # summary.json / report.md, so they no longer appear in the keep list.
   local trace_file_sha256 trace_file_lines
@@ -839,7 +839,7 @@ sys.stdout.write(render_env(profile, overrides))
 PY
 }
 
-# Legacy STRIP_PREEMPTION=1 call shape (skill scripts) maps onto the
+# Legacy STRIP_PREEMPTION=1 call shape (orchestrator scripts) maps onto the
 # override channel: the strip_preemption flag drops
 # scheduler.ordering.preemption from the RENDERED document (both
 # projections).  The former in-memory JSON edit channel is retired.
@@ -1290,14 +1290,14 @@ echo "jfr=${JFR_FILE}"
 
 # K1: consolidate AFTER the aggregate= / artifact echo above and BEFORE the
 # test_valid verdict below. The consolidation's per_request gzip pass can
-# take tens of seconds on large runs while the flexlb-online-eval skill's
+# take tens of seconds on large runs while the orchestrator's
 # timeout window is only DURATION+180s — printing the aggregate line first
 # guarantees the correct exit code and artifact paths are already visible
 # even if consolidation (or the aggregation below) is slow or interrupted.
 consolidate_run_outputs_now
 
 # Phase B: run-level aggregation now happens inside the run itself (was the
-# skill's post-hoc step). aggregate_canvas_run.py derives every statistic
+# orchestrator's post-hoc step). aggregate_canvas_run.py derives every statistic
 # from the consolidated rows + server_latency + client_env snapshot and
 # writes aggregate.json — the single derived-metrics source. Same
 # best-effort semantics as consolidation: a failure is a WARNING, never a

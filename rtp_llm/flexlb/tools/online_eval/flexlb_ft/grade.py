@@ -1,4 +1,4 @@
-"""Graded assertion infrastructure for result-property test cases (task #61).
+"""Graded assertion infrastructure for result-property test cases.
 
 Balance/affinity cases assert *result properties* (P-series) rather than
 mechanism narratives.  A property is measured once per case (or once per
@@ -22,7 +22,7 @@ loose ⇒ floor bounds, the widest that can still pronounce 不可用.
 Hard invariants (P2 no-starvation, P6 completeness) carry no band: any
 violation is an immediate 不可用 regardless of the run grade.
 
-Expected-fail contract (task #101): the verdict roll-up takes only NORMAL
+Expected-fail contract: the verdict roll-up takes only NORMAL
 cases' achieved grades.  A graded case marked ``expected_fail`` (a
 declared-finding probe, e.g. kv_storm_hot_churn's band failure) reports its
 achieved grade as FINDING EVIDENCE — the runner filters it out before calling
@@ -58,7 +58,7 @@ VERDICT_LABELS = {
 # ---------------------------------------------------------------------------
 # Property band table (single source of truth — cases reference, never
 # re-hardcode).  Initial values calibrated where noted; re-calibrate from
-# observed run data and update the annotation (task #61 discipline).
+# observed run data and update the annotation (calibration discipline).
 #
 # kind:
 #   upper    — measured value must stay <= band (share / ratio / multiplier)
@@ -73,7 +73,7 @@ GRADE_BANDS: Dict[str, dict] = {
     # ~= 0.26% (< 1% mandated false-fail floor); 0.75 corresponds to
     # P(X >= 15) ~= 4.1%, 0.65 to P(X >= 13) ~= 26% (strict tier is a
     # quality bar, not a statistical guarantee).
-    # end-to-end observed (task #61, balance_uniform_serial, 4 profiles x normal):
+    # end-to-end observed (balance_uniform_serial, 4 profiles x normal):
     # plain 0.50-0.70 (13/20..15/20), speed_hetero 0.50 — tiers separate
     # exactly as the binomial model predicts (strict sometimes, normal
     # sometimes, never near loose).
@@ -85,7 +85,7 @@ GRADE_BANDS: Dict[str, dict] = {
     # offered homogeneous traffic is starved).
     "P2": {"kind": "invariant"},
     # P3 token-weighted max-share (client-side Σ input_len per engine / total).
-    # First end-to-end calibration (task #62, balance_len_mixed — bimodal 5-wave, per
+    # First end-to-end calibration (balance_len_mixed — bimodal 5-wave, per
     # wave 2 long @32768..49152 + 6 short @512, all prefills set_perf 3s):
     #   batch-window 0.507, single-nonbatch 0.528, single-batch 0.517,
     #   window-nonbatch 0.502 — all four inside the predicted 0.5 ± 0.02.
@@ -103,7 +103,7 @@ GRADE_BANDS: Dict[str, dict] = {
     },
     # P5 overload-avoidance hot-engine share (fraction of the wave landing
     # on the deliberately overloaded engine; 0 = deterministic avoidance).
-    # end-to-end observed (task #61, balance_overload_avoid_prefill, 4 profiles): 0.0
+    # end-to-end observed (balance_overload_avoid_prefill, 4 profiles): 0.0
     # every run — ledger-priced avoidance is deterministic; the nonzero
     # tiers only tolerate an in-flight straggler racing the injection
     # snapshot.  (Decode-KV caliber uses a case override: delta bands
@@ -118,7 +118,7 @@ GRADE_BANDS: Dict[str, dict] = {
     # P7 short-request protection: TTFT (or, under BATCH dispatch, completion
     # duration — see balance_overload_avoid_prefill) as a multiple of the
     # unloaded baseline.
-    # end-to-end observed (task #61, balance_overload_avoid_prefill): 0.97 (batch-window
+    # end-to-end observed (balance_overload_avoid_prefill): 0.97 (batch-window
     # completion-duration caliber, wave_max 0.152s vs base 0.157s) — with
     # successful avoidance the wave rides the cool engine and the ratio
     # hovers near 1.0; a swallowed request pays the hot engine's ~5s and
@@ -129,7 +129,7 @@ GRADE_BANDS: Dict[str, dict] = {
     },
     # P9 affinity fidelity (fraction of prefix-reuse requests that land on
     # the engine holding the prefix cache).
-    # end-to-end observed (task #61, kv_prefix_stickiness, 4 profiles): 10/10
+    # end-to-end observed (kv_prefix_stickiness, 4 profiles): 10/10
     # hits every run — cache-affinity leader selection is deterministic in
     # the serial single-family form; the lower tiers tolerate tie-window
     # overrides observed historically in concurrent forms.
@@ -143,7 +143,7 @@ GRADE_BANDS: Dict[str, dict] = {
     # holder's share = (29 + k)/41 with k ~ B(12, .5) over the free requests
     # scattered onto it (29 = seed + 28 continuations under perfect P9
     # stickiness), i.e. expected ~0.854 ± 0.042 (1σ).
-    # First measured (task #62, four profiles): 0.805 / 0.902 / 0.902 / 0.829
+    # First measured (four profiles): 0.805 / 0.902 / 0.902 / 0.829
     # (batch-window / single-nonbatch / single-batch / window-nonbatch; the
     # free flow scattered 4/12, 8/12, 8/12, 5/12 onto the holder — all inside
     # 2σ of the binomial model; an extra batch-window run measured 0.878,
@@ -161,14 +161,14 @@ GRADE_BANDS: Dict[str, dict] = {
         "bands": {"strict": 0.88, "normal": 0.93, "loose": 0.96},
     },
     # M3 hit-tier concentration (lower bound on the same-engine share of the
-    # full-hit / half-hit tiers, kv_match_mixed).  Design values (task #62):
+    # full-hit / half-hit tiers, kv_match_mixed).  Design values:
     # the estimate discount (0.7 * hitTokens ms — ~5.0s full-hit, ~2.9s
     # half-hit) dwarfs the tie window (~0.3s), so a correct affinity router
     # concentrates both tiers deterministically; a value near 0.5 is the
     # zero-hit baseline (no affinity signal at all).
-    # First measured (task #62, four profiles): 1.00 / 1.00 on every profile
+    # First measured (four profiles): 1.00 / 1.00 on every profile
     # for BOTH tiers — concentration is fully deterministic (same caliber as
-    # P9's 10/10 in task #61); the lower tiers tolerate tie-window overrides
+    # P9's 10/10 above); the lower tiers tolerate tie-window overrides
     # observed historically in concurrent forms.
     "M3": {
         "kind": "lower",
@@ -526,7 +526,7 @@ def overall_verdict(achieved_per_case: List[str]) -> Optional[str]:
     * any case failed (beyond loose / invariant break) -> unusable (不可用)
     * otherwise (some loose, none failed) -> marginal (边缘)
 
-    Task #101 contract: the caller (the runner) passes ONLY normal cases'
+    Expected-fail contract: the caller (the runner) passes ONLY normal cases'
     achieved grades — expected_fail graded probes are filtered upstream so
     their band failures surface as finding evidence, never as suite
     quality.

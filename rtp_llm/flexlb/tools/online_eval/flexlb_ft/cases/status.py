@@ -32,7 +32,7 @@ zombie keep-alive scenarios (a suppressed-finished request keeps appearing
 RUNNING, which refreshes lastWorkerStatusAtMs and disarms the stale TTL)
 need a short deadline bottom line.
 
-Master-side cleanup observability — two channels (task #103 step 2):
+Master-side cleanup observability — two channels (event-channel observability rework):
   * Counter channel: the master prometheus counters behind
     app.flexlb.inflight.ttl.expired.qps (role=SCHEDULER per-request slot
     sweep / role=PREFILL|DECODE per-endpoint orphan sweep), read via
@@ -94,7 +94,7 @@ contract-level finding probe):
     P1 status_zombie_completed_running  zombie running vs tombstone
     P2 status_zombie_fake_running       permanent-resident inflight probe (expected finding)
 
-Migrated in from the legacy fault families (task #85 category reorg):
+Migrated in from the legacy fault families (category reorg):
 
     status_inflight_ttl_cleanup         stuck inflight → TTL cleanup (S1 port)
     status_fetch_error                  batch FetchResponse fault surfacing
@@ -116,11 +116,11 @@ from ..engine_ops import (
     inject_type_all,
 )
 from ..harness import (
+    OMIT,
     TTL_DRAIN_TIMEOUT_S,
     AssertUtils,
     ConfigOverride,
     EnvSpec,
-    OMIT,
     _accepted,
     default_perf,
     fault_env_perf,
@@ -149,7 +149,7 @@ EVENT_DRIVEN_CLEANUP_S = 10.0
 # 3-strike health demotion + eviction window (fault-family MASTER_EVICT_S
 # precedent).
 MASTER_EVICT_S = 30.0
-# TTL-eviction EVENT window (task #103 step 2): the drain window
+# TTL-eviction EVENT window (event channel): the drain window
 # (TTL_DRAIN_TIMEOUT_S = 95s, ledger-side) plus event margin — the eviction
 # counters are reported by the 60s maintenance sweep
 # (SchedulerRuntime.maintainExpiration) and only then become visible in the
@@ -173,7 +173,7 @@ def case(
 ):
     """Register into STATUS_CASES (category is always "status").
 
-    ``expected_fail=True`` declares a declared-finding probe (task #101):
+    ``expected_fail=True`` declares a declared-finding probe:
     failing confirms the finding, passing resolves it — neither counts
     toward failed_count / the suite verdict / the exit code."""
 
@@ -433,7 +433,7 @@ def _ttl_eviction_events(
 ) -> tuple:
     """wait_for the *role* TTL-eviction counter to advance by >= min_delta.
 
-    Event channel (task #103 step 2): the master reports evictions via
+    Event channel: the master reports evictions via
     app.flexlb.inflight.ttl.expired.qps (prometheus
     flexlb_app_flexlb_inflight_ttl_expired_qps_total) at the 60s
     maintenance-sweep granularity, so the after side POLLS instead of
@@ -511,7 +511,7 @@ def _wait_scheduler_zero(ops, timeout_s: float = TTL_DRAIN_TIMEOUT_S):
     # TTL+margin=60s default lost that race whenever the TTL expiry landed
     # in the sweeper's second half: the case itself false-FAILed on the
     # drain and the surviving residue poisoned the next case on this
-    # shared env (integration-round cascade, task #87).
+    # shared env (integration-round cascade).
     return wait_for(lambda: ops.master_scheduler_inflight() == 0, timeout_s, 2.0)
 
 
@@ -534,7 +534,7 @@ def _stale_inflight_clean(ops, timeout_s: float = TTL_DRAIN_TIMEOUT_S) -> tuple:
 def inflight_ttl_cleanup(ctx: CaseContext):
     """S1 port, suppressed-alive form: the TTL sweep is the ONLY exit.
 
-    Construction (task #107 fix): the legacy kill-engine form never
+    Construction (follow-up fix): the legacy kill-engine form never
     reached the TTL sweep — the 3-strike engine-death verdict fires the
     fence / failure-terminal cleanup path first (Tara's forensics:
     ttl_eviction_delta=0, zero log anchors), so the
@@ -564,7 +564,7 @@ def inflight_ttl_cleanup(ctx: CaseContext):
     population (105s event window); the fleet still serves after the
     release (recovery).
 
-    Profile semantics (v2, task #55): the env pins the legacy fault
+    Profile semantics (v2): the env pins the legacy fault
     axes (PRIORITY + FIXED_WINDOW + BATCH, no queueTimeoutMs — the Java
     default 1h cannot expire these requests before the TTL; formerly
     harness.ttl_spec) — the
@@ -606,7 +606,7 @@ def inflight_ttl_cleanup(ctx: CaseContext):
         ops.set_perf("prefill-0", prefill_fixed_ms=10000.0)
         ops.set_perf("prefill-1", prefill_fixed_ms=10000.0)
 
-        # Event-channel baseline (task #103 step 2), BEFORE any eviction
+        # Event-channel baseline, BEFORE any eviction
         # this case can cause.  Unreachable = environment failure, not a
         # pass reason.
         ttl_before = ops.master_ttl_eviction_counts()
@@ -661,7 +661,7 @@ def inflight_ttl_cleanup(ctx: CaseContext):
         )
         inflight_final = ops.master_scheduler_inflight()
 
-        # task #103 step 2 — event-channel assertion, SEPARATE from the
+        # event-channel assertion, SEPARATE from the
         # drain above: the scheduler-level TTL-eviction counter must
         # have advanced by at least the suppressed population (105s
         # window — the 60s maintenance sweep reports the eviction with
@@ -749,7 +749,7 @@ def status_ack_partial_fail(ctx: CaseContext):
     failure is the finding.  The permanent arm, the isolation and the
     ledger layers pass against the current implementation.
 
-    Expected-fail marking (task #101, MIXED form): the case mixes
+    Expected-fail marking (MIXED form): the case mixes
     should-pass layers (Layer 1 isolation/ledger, Layer 3b permanent)
     with the predicted-fail retry dimension (Layer 3a transient), and the
     expected_fail granularity is whole-case — so the whole case is
@@ -1160,7 +1160,7 @@ def status_ack_empty_no_crash(ctx: CaseContext):
     declared contract-level candidate to FAIL — that failure is the
     finding.  The master itself must stay up (HTTP 200) regardless.
 
-    Expected-fail marking (task #101): the quarantine-forever behaviour
+    Expected-fail marking: the quarantine-forever behaviour
     is the DECLARED finding, so the case is marked expected_fail — a
     failure classifies as finding-confirmed (the finding stands, exit
     0), an unexpected pass as finding-resolved (the fence-TTL drain
@@ -1247,7 +1247,7 @@ def status_prefill_suppress_all(ctx: CaseContext):
             _log_count(env, "event=scheduler_inflight_ttl_eviction"),
             _log_count(env, "event=endpoint_inflight_ttl_eviction"),
         )
-        # Event-channel baseline (task #103 step 2), before any eviction
+        # Event-channel baseline, before any eviction
         # this case can cause.  Unreachable = environment failure.
         ttl_before = ops.master_ttl_eviction_counts()
         if ttl_before is None:
@@ -1430,7 +1430,7 @@ def status_status_no_respond(ctx: CaseContext):
             _log_count(env, "event=scheduler_inflight_ttl_eviction"),
             _log_count(env, "event=endpoint_inflight_ttl_eviction"),
         )
-        # Event-channel baseline (task #103 step 2).  Unreachable =
+        # Event-channel baseline.  Unreachable =
         # environment failure.
         ttl_before = ops.master_ttl_eviction_counts()
         if ttl_before is None:
@@ -1607,7 +1607,7 @@ def status_version_regress(ctx: CaseContext):
             _log_count(env, "event=scheduler_inflight_ttl_eviction"),
             _log_count(env, "event=endpoint_inflight_ttl_eviction"),
         )
-        # Event-channel baseline (task #103 step 2).  Unreachable =
+        # Event-channel baseline.  Unreachable =
         # environment failure.
         ttl_before = ops.master_ttl_eviction_counts()
         if ttl_before is None:
@@ -1782,7 +1782,7 @@ def status_decode_before_prefill(ctx: CaseContext):
     entries do eventually expire (a permanent hang would be a worse,
     separate bug).
 
-    Expected-fail marking (task #101, MIXED form): the case mixes
+    Expected-fail marking (MIXED form): the case mixes
     should-pass dimensions (all-4-successful terminals via the decode
     settle, eventual drain, master health, recovery) with the
     predicted-fail <= 10s event-driven cleanup dimension
@@ -2871,7 +2871,7 @@ def status_zombie_fake_running(ctx: CaseContext):
     current implementation — the failure IS the finding (record the
     resident count and the non-draining ledger as evidence).
 
-    Expected-fail marking (task #101): the permanent-resident ghost
+    Expected-fail marking: the permanent-resident ghost
     behaviour is the DECLARED finding, so the case is marked
     expected_fail — a failure classifies as finding-confirmed (the
     finding stands, exit 0), an unexpected pass as finding-resolved (the
@@ -2955,7 +2955,7 @@ def inject_fetch_error(ctx: CaseContext):
     entry is cleaned by the 30s stale-inflight TTL (verified contract);
     a fresh request succeeds once the injection is cleared.
 
-    Profile semantics (v2, task #55): the fault is checked only at the
+    Profile semantics (v2): the fault is checked only at the
     engine's fetchResponse entry, which exists only under the BATCH
     dispatcher — and the env below pins the legacy fault axes
     (PRIORITY + FIXED_WINDOW + BATCH; formerly harness._fault_spec)

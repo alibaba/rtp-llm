@@ -22,6 +22,11 @@ flattening honest:
     shard=case runs record summary.shard + lanes[].case_names;
   * runner --cases — exact-name selection wins over --category/--filter,
     profile filtering still applies, unknown names exit 2;
+  * --categories empty-set guard — a truthy CSV of only empty entries
+    (",", ",,,", " ") exits loudly in BOTH shard modes before any
+    runner --list subprocess; a valid category that is simply empty
+    under the profile keeps the legacy "none of the requested
+    categories" error;
   * --shard defaults to CASE (single entry point); category stays
     selectable;
   * timing-baseline self-maintenance — every completed run merges its
@@ -579,6 +584,132 @@ class PlanCaseShardTest(unittest.TestCase):
         lanes, weights, err = self._plan(args)
         packed = sorted(n for lane in lanes for n in lane)
         self.assertEqual(["master_a", "status_a", "status_b"], packed)
+
+
+class EmptyCategoriesGuardTest(unittest.TestCase):
+    """--categories that parse to the empty set must fail loudly.
+
+    "--categories ,,,": args.categories is truthy but requested parses
+    empty, so the legacy `if requested and not weights/pairs` guards
+    were bypassed (category mode: N silent empty lanes, exit 0; case
+    mode: `--cases ""` = no filter = every lane runs the FULL set).
+    The early exits fire BEFORE any runner --list subprocess — the
+    subprocess mocks below would raise if the guard leaked past them.
+    """
+
+    def test_category_shard_comma_only_exits_loudly(self):
+        args = argparse.Namespace(parallel=2, profile="batch-window", categories=",")
+        with mock.patch.object(
+            parallel_runner,
+            "family_weights",
+            side_effect=AssertionError("guard must fire before --list"),
+        ):
+            with self.assertRaises(SystemExit) as ctx:
+                parallel_runner._plan(args)
+        self.assertIn("no non-empty entries", str(ctx.exception))
+
+    def test_category_shard_whitespace_only_exits_loudly(self):
+        args = argparse.Namespace(parallel=2, profile="batch-window", categories=" ")
+        with mock.patch.object(
+            parallel_runner,
+            "family_weights",
+            side_effect=AssertionError("guard must fire before --list"),
+        ):
+            with self.assertRaises(SystemExit) as ctx:
+                parallel_runner._plan(args)
+        self.assertIn("no non-empty entries", str(ctx.exception))
+
+    def test_case_shard_commas_only_exits_loudly(self):
+        args = argparse.Namespace(
+            shard="case",
+            parallel=2,
+            profile="batch-window",
+            categories=",,,",
+            timing_json=None,
+        )
+        with mock.patch.object(
+            parallel_runner,
+            "list_case_pairs",
+            side_effect=AssertionError("guard must fire before --list"),
+        ):
+            with self.assertRaises(SystemExit) as ctx:
+                parallel_runner._plan_case_shard(args)
+        self.assertIn("no non-empty entries", str(ctx.exception))
+
+    def test_case_shard_whitespace_only_exits_loudly(self):
+        args = argparse.Namespace(
+            shard="case",
+            parallel=2,
+            profile="batch-window",
+            categories=" ",
+            timing_json=None,
+        )
+        with mock.patch.object(
+            parallel_runner,
+            "list_case_pairs",
+            side_effect=AssertionError("guard must fire before --list"),
+        ):
+            with self.assertRaises(SystemExit) as ctx:
+                parallel_runner._plan_case_shard(args)
+        self.assertIn("no non-empty entries", str(ctx.exception))
+
+    def test_case_shard_mixed_empty_and_valid_keeps_subset(self):
+        # Empty entries are dropped, valid ones kept: "master,," must
+        # not trip the empty-set guard and still bound the case pool.
+        args = argparse.Namespace(
+            shard="case",
+            parallel=2,
+            profile="batch-window",
+            categories="master,,",
+            timing_json=None,
+        )
+        with mock.patch.object(
+            parallel_runner,
+            "list_case_pairs",
+            return_value=[("master_a", "master"), ("kv_a", "kv")],
+        ):
+            with mock.patch.dict(
+                os.environ,
+                {"FLEXLB_FT_TIMING_BASELINE": "/nonexistent/g.json"},
+            ):
+                with contextlib.redirect_stderr(io.StringIO()):
+                    lanes, _ = parallel_runner._plan_case_shard(args)
+        packed = sorted(n for lane in lanes for n in lane)
+        self.assertEqual(["master_a"], packed)
+
+    def test_category_shard_valid_but_empty_profile_keeps_legacy_error(self):
+        # A VALID category with zero cases under the profile keeps the
+        # legacy error, not the new empty-entries message.
+        args = argparse.Namespace(
+            parallel=2, profile="single-nonbatch", categories="elastic"
+        )
+        with mock.patch.object(
+            parallel_runner,
+            "family_weights",
+            return_value={"master": 60.0, "kv": 20.0},
+        ):
+            with self.assertRaises(SystemExit) as ctx:
+                parallel_runner._plan(args)
+        self.assertIn("none of the requested categories", str(ctx.exception))
+        self.assertNotIn("no non-empty entries", str(ctx.exception))
+
+    def test_case_shard_valid_but_empty_profile_keeps_legacy_error(self):
+        args = argparse.Namespace(
+            shard="case",
+            parallel=2,
+            profile="single-nonbatch",
+            categories="elastic",
+            timing_json=None,
+        )
+        with mock.patch.object(
+            parallel_runner,
+            "list_case_pairs",
+            return_value=[("master_a", "master"), ("kv_a", "kv")],
+        ):
+            with self.assertRaises(SystemExit) as ctx:
+                parallel_runner._plan_case_shard(args)
+        self.assertIn("none of the requested categories", str(ctx.exception))
+        self.assertNotIn("no non-empty entries", str(ctx.exception))
 
 
 class AggregateShardSchemaTest(unittest.TestCase):

@@ -1,6 +1,6 @@
 """Balance-category cases: scheduling result properties.
 
-Theme: RESULT-PROPERTY cases (task #61 rework, superseding
+Theme: RESULT-PROPERTY cases (balance rework, superseding
 scheduling_smoke.py S1-S12) — they assert observable outcome properties
 (P-series), not mechanism narratives; every measured property is graded
 against the central band table (grade.GRADE_BANDS) — strict=优异 /
@@ -10,7 +10,7 @@ achieved grade for the run-level verdict (all strict=优异 / all
 no-starvation, P6 completeness) carry no band: violation is unusable at
 every grade.
 
-Case map (task #61/#62 disposition):
+Case map (balance rework / calibration disposition):
 
   balance_uniform_serial        <- S1+S6+S8 merged (P1+P2, two variants:
                                     plain / speed-heterogeneous injection)
@@ -75,7 +75,7 @@ def _decode_names(ops) -> list[str]:
     return [e["name"] for e in snap.get("engines", []) if e.get("role") == "decode"]
 
 
-# -- shared fire-and-forget helpers (S4 hotspot pattern, task #62 shared) --
+# -- shared fire-and-forget helpers (S4 hotspot pattern, cross-case) --
 
 
 def _fire_request(ops, rid: int, fired: list, fired_handles: dict, **kwargs):
@@ -153,15 +153,15 @@ def _drain_fired(ops, fired: list, fired_handles: dict, wait_s: float = 30.0) ->
 
 
 # ===========================================================================
-# Balance cases (result-property graded — task #61/#62 rework of
+# Balance cases (result-property graded — rework of
 # scheduling_smoke.py S1-S12; rid_base family "scheduling" -> "balance"
-# in the task #85 category reorg)
+# in the category reorg)
 # ===========================================================================
 
 
 @case(
     "balance_uniform_serial",
-    source="scheduling_smoke.py S1+S6+S8 (merged, task #61)",
+    source="scheduling_smoke.py S1+S6+S8 (merged)",
 )
 def balance_uniform_serial(ctx: CaseContext):
     """Homogeneous serial traffic spreads evenly across equivalent engines.
@@ -249,7 +249,7 @@ def balance_uniform_serial(ctx: CaseContext):
 
 @case(
     "balance_concurrent_mix",
-    source="scheduling_smoke.py S7 (strengthened, task #61)",
+    source="scheduling_smoke.py S7 (strengthened)",
 )
 def balance_concurrent_mix(ctx: CaseContext):
     """A concurrent mixed burst must not collapse onto a single engine.
@@ -267,7 +267,7 @@ def balance_concurrent_mix(ctx: CaseContext):
     false-failure < 1% at 2 engines / 20 samples) is never widened past
     itself.
 
-    P6 note (intake2 scheduler contract, task #65 intake2-sync): the
+    P6 note (intake2 scheduler contract): the
     RequestScheduler/GroupPolicy architecture fails fast with retryable
     NO_PREFILL_WORKER (8402) once the per-engine inflight-batch admission
     ledger is saturated — dispatcher.maxInflightBatchesPerPrefillWorker
@@ -341,7 +341,7 @@ def balance_concurrent_mix(ctx: CaseContext):
 
 @case(
     "balance_overload_avoid_prefill",
-    source="scheduling_smoke.py S4 + short-request protection (task #61)",
+    source="scheduling_smoke.py S4 + short-request protection",
 )
 def balance_overload_avoid_prefill(ctx: CaseContext):
     """Single-engine prefill overload: traffic diverts AND short requests stay fast.
@@ -620,7 +620,7 @@ def balance_overload_avoid_prefill(ctx: CaseContext):
                 except Exception:
                     pass
         try:
-            # Best-effort residue drain (task #87): a drain-fallback cancel
+            # Best-effort residue drain (integration-round cascade hygiene): a drain-fallback cancel
             # that fails leaves slots settling on the stale-TTL +
             # ExpirationTimer path (worst ~90s) — the legacy 30s window
             # stopped short of it and the residue poisoned later cases on
@@ -633,7 +633,7 @@ def balance_overload_avoid_prefill(ctx: CaseContext):
 
 @case(
     "balance_overload_avoid_decode",
-    source="scheduling_smoke.py S11 (strengthened, task #61)",
+    source="scheduling_smoke.py S11 (strengthened)",
 )
 def balance_overload_avoid_decode(ctx: CaseContext):
     """Decode KV exhaustion: the pressured engine stops taking new work and
@@ -737,7 +737,7 @@ def balance_overload_avoid_decode(ctx: CaseContext):
 
 @case(
     "balance_decode_spread",
-    source="scheduling_smoke.py S3+S10 (merged, task #61)",
+    source="scheduling_smoke.py S3+S10 (merged)",
 )
 def balance_decode_spread(ctx: CaseContext):
     """Decode traffic spreads across the decode fleet at both small and
@@ -751,13 +751,13 @@ def balance_decode_spread(ctx: CaseContext):
     P1 band note (case override, 4-engine caliber): the decode selector is
     KV_USAGE_WEIGHTED_RANDOM, not a uniform draw — weights track per-worker
     KV residue left by earlier cases, so the 2-engine bands do not apply.
-    Calibration (task #61, batch-window, engine-completed deltas): n=10
+    Calibration (batch-window, engine-completed deltas): n=10
     observed max_share 0.40 (dist 1/4/3/2), n=50 observed 0.40 (dist
     20/10/13/7 — the KV-weighted draw routinely puts ~40% on the residue-
     heaviest engine).  Bands kept at n=10: 0.60/0.70/0.80, n=50:
     0.40/0.50/0.60 — the n=50 strict tier sits ON the observed mode (a
     quality bar for weight convergence, not a statistical guarantee);
-    widen from full-suite regression data in task #63 if the
+    widen from full-suite regression data if the
     residue-inheritance across predecessor cases pushes it over.
     """
     ops = ctx.ops()
@@ -825,7 +825,7 @@ def balance_decode_spread(ctx: CaseContext):
 
 @case(
     "balance_len_mixed",
-    source="length-heterogeneity dimension L1 (task #62)",
+    source="length-heterogeneity dimension L1",
 )
 def balance_len_mixed(ctx: CaseContext):
     """Bimodal length mix balances TOKEN footprint, not request count.
@@ -835,7 +835,7 @@ def balance_len_mixed(ctx: CaseContext):
     engines take short work), P6 completeness.
 
     Construction (5 waves, each 2 long + 6 short fire-and-forget):
-      * ONE formula for both sides (task #67): mock execution time and the
+      * ONE formula for both sides: mock execution time and the
         master's ledger prediction share the production DSv4 fit, so a
         long request's ledger entry decays on exactly the clock the mock
         sleeps — the diversion window equals the fitted prefill time;

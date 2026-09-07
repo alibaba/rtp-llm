@@ -205,7 +205,9 @@ SPEED = max(1, round(target_qps × valid_span_s ÷ valid_requests))
 valid requests = trace rows with output length > 0 (zero-output rows are
 skipped client-side). For the shipped `data/online_logs/trace_30min.jsonl`
 (6042 valid requests over a 758.2s span) the 650 nominal-QPS target
-calibrates to 82. Recompute whenever the trace or the target QPS changes.
+calibrates to 82. The calibrated speed is nominal — the measured arrival QPS
+typically deviates by about 1% (trace CDF truncation phase + startup phase).
+Recompute whenever the trace or the target QPS changes.
 
 **Send modes.** `SEND_MODE=replay` (default) paces requests by trace
 timestamps — the real arrival shape; this is the standard profile.
@@ -246,7 +248,8 @@ The on-disk artifacts are always the source of truth.
 
 - `data/online_logs/trace_30min.jsonl`: sanitized replay shape derived from online logs.
 - `data/online_logs/sample_access.json`: sanitized request-shape fixture with pseudonymous token IDs.
-- `data/performance/dsv4_flash_performance.sample.json`: mock latency model.
+- `data/performance/dsv4_flash_performance.fast_ab.json`: mock latency model (batch-scaled decode step pricing; the `PERFORMANCE_FILE` default in `run_online_eval.sh`).
+- `data/performance/dsv4_flash_performance.sm100_dev.json`: alternate mock latency model (fixed-base decode step pricing).
 - `run/<id>/master_config.json`: the per-run `--master-config` envelope,
   rendered by `flexlb_cfg.py` alongside the master env string (the retired
   `data/config/master_fixed_window.json` static template now lives in
@@ -299,8 +302,8 @@ collectors; `SECONDARY_POLL_INTERVAL_S` (default 1) retunes all of them. Set
 `FLEXLB_SECONDARY_POLLERS_ENABLED=0` to disable all four pollers entirely —
 zero observation overhead for A/B comparisons. (The retired Mac-local
 `run_stability_test.sh` / `run_burst_test.sh` lines used to pin this to 0;
-their scenarios are now covered by the `flexlb_ft/` framework and the remote
-skill eval chain.)
+their scenarios are now covered by the `flexlb_ft/` framework and the upstream
+orchestration layer's remote eval chain.)
 
 ### FLEXLB_MONITOR_METRIC_WHITELIST
 
@@ -323,7 +326,7 @@ Kept in place after consolidation:
 - `endpoints.json`, `flexlb_env.txt` — discovery artifacts (also snapshotted into `run_meta.json`)
 - `flexlb_profile.jfr` — JFR recording, untouched
 - `aggregate.json` — run-level derived metrics written by the in-run aggregate step (`aggregate_canvas_run.py`); `summary.test_valid` is the run-validity verdict (`false` → `INVALID PERFORMANCE RUN`, exit 1; a missing or unparsable file is a WARNING only). Phase B: the client no longer writes `load_client/summary.json` / `load_client/report.md`
-- `load_client/server_latency.json` — **kept at the exact legacy path**: the skill's `fetch_server_latency` reads that file
+- `load_client/server_latency.json` — **kept at the exact legacy path**: the orchestrator's `fetch_server_latency` reads that file
 - `flexlb_logs/pv.log` — only populated with `FLEXLB_PV_LOG=on` (see below)
 
 The master's per-request `pv.log` (`pvLogger` in `logback-spring.xml`) is
@@ -335,8 +338,8 @@ failed requests still land in it. `FLEXLB_START_CMD` mode is not covered:
 a user-supplied start command does not get the property injected. Set
 `FLEXLB_PV_LOG=on` to keep the full pv log (a Spring Boot command-line
 property passed to the process under test — no production code change);
-the file then survives consolidation untouched. Note the skill-driven
-path needs `FLEXLB_PV_LOG` added to the skill script's explicit env
+the file then survives consolidation untouched. Note the orchestrator-driven
+path needs `FLEXLB_PV_LOG` added to the orchestrator script's explicit env
 export whitelist before it takes effect there.
 
 `consolidate_run_outputs.py` is idempotent and retro-runnable — it can be
@@ -371,7 +374,7 @@ java -jar rtp_llm/flexlb/flexlb-mock-engine/target/flexlb-mock-engine-1.0.0-SNAP
   --n-prefill 2 \
   --n-decode 4 \
   --base-grpc-port 55151 \
-  --performance rtp_llm/flexlb/tools/online_eval/data/performance/dsv4_flash_performance.sample.json \
+  --performance rtp_llm/flexlb/tools/online_eval/data/performance/dsv4_flash_performance.fast_ab.json \
   --master-config rtp_llm/flexlb/tools/online_eval/run/master_config.json \
   --endpoint-file rtp_llm/flexlb/tools/online_eval/run/endpoints.json \
   --env-file rtp_llm/flexlb/tools/online_eval/run/flexlb_env.txt
@@ -430,7 +433,7 @@ frontend behavior: it calls `FetchResponse` on the selected prefill engine. For
 frontend-sent requests (NON_BATCH dispatcher), it calls `GenerateStreamCall`
 directly on the routed prefill engine.
 
-Migration note (2026-08, task #55): the legacy v1 `--mode batch|direct|queue`
+Migration note (2026-08, v2 profile semantics rework): the legacy v1 `--mode batch|direct|queue`
 axis no longer exists — all three v1 modes mapped to the same v2 configuration,
 so the mode axis was dead. The functional-test runner now selects a scheduling
 profile (`--profile batch-window|single-nonbatch|single-batch|window-nonbatch`:

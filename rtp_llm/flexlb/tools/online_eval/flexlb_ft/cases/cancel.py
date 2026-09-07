@@ -8,7 +8,7 @@ The legacy cancel_smoke.py T1-T6 scripts port 1:1; the anomaly E1
 cancel-path case joins this family because it is the same contract seen
 from the client side of a failed request (cancel_anomaly_path).
 
-Git-session gap analysis additions (2026-09, task #87 cancel-family
+Git-session gap analysis additions (2026-09, cancel-family
 completion; assertions pin the CONTRACT, not the current behaviour —
 cases predicted to fail carry a finding note in their docstring):
 
@@ -19,7 +19,7 @@ cases predicted to fail carry a finding note in their docstring):
     cancel_stream_break_prefill_autonomous  C1: engine-side stream-break cleanup
     cancel_stream_break_decode_autonomous   C2: decode autonomous terminal on break
 
-HA family (2026-09, task #26 — assertions pin the audited production
+HA family (2026-09 — assertions pin the audited production
 ground truth: EngineFenceCoordinator is one-shot and owns no timer; a
 TOMBSTONED ack settles immediately via resumeTombstoned while FAILED /
 exception acks park in awaitAuthoritativeTerminal):
@@ -93,7 +93,7 @@ def case(
 ):
     """Register into CANCEL_CASES (category is always "cancel").
 
-    ``expected_fail=True`` declares a declared-finding probe (task #101):
+    ``expected_fail=True`` declares a declared-finding probe:
     failing confirms the finding, passing resolves it — neither counts
     toward failed_count / the suite verdict / the exit code."""
 
@@ -438,7 +438,7 @@ def cancel_sibling_isolation(ctx: CaseContext):
             responses = list(pool.map(_schedule, rids))
         for i, resp in enumerate(responses):
             if resp.code != 200 or not resp.success:
-                # Drainage discipline (S4 lesson, 2026-08-27 task #63
+                # Drainage discipline (S4 lesson, 2026-08-27
                 # post-mortem): a sibling that was already scheduled must not
                 # be left behind as an unconsumed entry — under BATCH dispatch
                 # the leaked EnqueueBatch result sits in the engine's fetch
@@ -464,7 +464,7 @@ def cancel_sibling_isolation(ctx: CaseContext):
             if resp.enqueued_by_master:
                 input_pb = None
             else:
-                # Shape fidelity (finding-⑥ family, 2026-08-28 task #63
+                # Shape fidelity (finding-⑥ family, 2026-08-28
                 # post-mortem): under NON_BATCH dispatch the direct stream's
                 # GenerateInputPB must carry the SAME output_len the
                 # ScheduleRequest carried.  A default-shape rebuild
@@ -772,7 +772,7 @@ def cancel_phase_timing(ctx: CaseContext):
 # ===========================================================================
 # Cancel-path anomaly case (anomaly_smoke.py E1 — the same contract seen
 # from the client side of a failed request; rid_base family "anomaly" ->
-# "cancel" in the task #85 category reorg)
+# "cancel" in the category reorg)
 # ===========================================================================
 
 
@@ -831,7 +831,7 @@ def cancel_anomaly_path(ctx: CaseContext):
 
 
 # ===========================================================================
-# Git-session gap-analysis cases (task #87): the cancel contract around the
+# Git-session gap-analysis cases: the cancel contract around the
 # deliveryClaimKind boundary.  Assertions pin the CONTRACT behaviour; cases
 # predicted to fail before a parallel mock-engine capability lands carry an
 # explicit finding note (docstring Prediction).
@@ -1490,7 +1490,7 @@ def cancel_stream_break_decode_autonomous(ctx: CaseContext):
 
 
 # ===========================================================================
-# HA cancel family (task #26, 2026-09): the cancel contract across engine
+# HA cancel family (2026-09): the cancel contract across engine
 # restarts, dead-prefill windows, decode retirement and transport-layer
 # faults.  Production ground truth (code-audited):
 #   * the master cancel is ONE-SHOT — EngineFenceCoordinator "never

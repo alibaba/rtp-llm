@@ -95,7 +95,7 @@ def _generate(out: Path, proto_file: Path) -> None:
     except ImportError as exc:
         raise RuntimeError(
             "grpc_tools is required for FlexLB online evaluation. "
-            "Run inside luoli_gpu or install grpcio-tools/protobuf."
+            "Install with: pip install grpcio grpcio-tools protobuf"
         ) from exc
 
     cmd = [

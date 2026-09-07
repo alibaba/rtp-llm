@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """FlexLB mock engine CASE test runner (场景测试).
 
-Terminology (unified 2026-09, suite reorg task #85):
+Terminology (unified 2026-09, suite reorg):
 
   * mock engine CASE test (场景测试) — THIS runner: flexlb_functional_tests.py
     plus the flexlb_ft/cases/ category modules.  Each case boots a small
@@ -29,7 +29,7 @@ in-flight category work — verify the current count with
 batch-window --list shows one fewer cancel row — profile filtering, not
 a missing case.)
 
-Outcome classification (task #101 expected-fail mechanism): every case is
+Outcome classification (expected-fail mechanism): every case is
 normal or a declared-finding probe (``@case(..., expected_fail=True)``).
 
     PASS               normal case passed (contract-pass)
@@ -75,7 +75,7 @@ from flexlb_ft.context import CaseContext, CaseDef
 from flexlb_ft.grade import GRADES, VERDICT_LABELS, GradeReport, overall_verdict
 from flexlb_ft.harness import PROFILE_CAPS, PROFILES, EnvManager
 
-# Task #85 (category reorg): the nine cases/ modules register into their
+# Category reorg: the nine cases/ modules register into their
 # own CATEGORY_CASES lists; the runner concatenates them in the canonical
 # category order below (priority after admission — the 2026-09 intake3-
 # rebuild migration, PRIORITY-axis case-layer JSON injection).
@@ -94,7 +94,7 @@ ALL_CASES: list[CaseDef] = (
 # CLI spelling (kebab-case) -> CaseDef.category (python identifier).
 CATEGORY_ALIASES = {"engine-fault": "engine_fault"}
 
-# ── Three-way outcome classification (task #101 expected-fail) ─────────────
+# ── Three-way outcome classification (expected-fail) ─────────────
 
 STATUS_PASS = "PASS"  # normal case passed (contract-pass)
 STATUS_FAIL = "FAIL"  # normal case failed → exit 1
@@ -106,7 +106,7 @@ STATUS_FINDING_RESOLVED = "FINDING-RESOLVED"
 
 
 def classify_outcome(expected_fail: bool, ok: bool) -> str:
-    """Three-way classification of one case outcome (task #101).
+    """Three-way classification of one case outcome.
 
     Normal cases: PASS / FAIL.  Declared-finding probes (expected_fail —
     contract written per the CORRECT behaviour, current master known not
@@ -273,7 +273,7 @@ def main():
     print(f"{'='*60}\n")
 
     graded_achieved: list[str] = []  # achieved grade per NORMAL graded case
-    # (verdict roll-up — task #101: an expected_fail graded case's achieved
+    # (verdict roll-up — an expected_fail graded case's achieved
     # is finding evidence, not suite quality; see grade.overall_verdict)
 
     for i, case in enumerate(cases, 1):
@@ -294,7 +294,7 @@ def main():
         duration_ms = int((time.monotonic() - t0) * 1000)
         status = classify_outcome(case.expected_fail, ok)
         achieved = report.achieved if report is not None else None
-        # Verdict roll-up takes ONLY normal graded cases (task #101): an
+        # Verdict roll-up takes ONLY normal graded cases: an
         # expected_fail graded case's achieved (e.g. kv_storm_hot_churn's
         # band failure) is finding evidence, not suite quality.
         if report is not None and not case.expected_fail:
@@ -387,7 +387,7 @@ def main():
     print(f"{'='*60}\n")
 
     if args.json:
-        # JSON payload (task #101): summary block first (CI reads the counts
+        # JSON payload: summary block first (CI reads the counts
         # and the exit code without scanning the case rows), then the
         # per-case rows — each row carries expected_fail plus the four-way
         # status (PASS / FAIL / FINDING-CONFIRMED / FINDING-RESOLVED).
@@ -407,7 +407,7 @@ def main():
         Path(args.json).write_text(json.dumps(payload, indent=2, ensure_ascii=False))
         print(f"JSON written to {args.json}")
 
-    # Exit code (task #101): only NORMAL-case failures gate CI.  A pure
+    # Exit code: only NORMAL-case failures gate CI.  A pure
     # finding-confirmed run exits 0 — findings are the suite's product,
     # not an unstable verdict; finding-resolved runs also exit 0 (flagged
     # in the summary / JSON for mark review instead).

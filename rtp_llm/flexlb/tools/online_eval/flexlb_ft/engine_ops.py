@@ -958,7 +958,7 @@ class EngineOps:
 
 
 # ===========================================================================
-# Shared control-plane helpers (suite-reorg task #85)
+# Shared control-plane helpers (suite reorg)
 #
 # Cross-category helpers that used to live in injection_gate_cases.py /
 # status_fault_cases.py (the latter held its own copy while the mock control

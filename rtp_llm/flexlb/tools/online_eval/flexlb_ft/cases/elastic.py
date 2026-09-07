@@ -42,12 +42,12 @@ from typing import Optional
 from ..context import CaseContext, CaseDef, rid_base
 from ..grade import GradeReport
 from ..harness import (
+    OMIT,
     TTL_DRAIN_TIMEOUT_S,
     AssertUtils,
     BalanceSampler,
     ConfigOverride,
     EnvSpec,
-    OMIT,
     _accepted,
     _BackgroundFlow,
     _cleanup_dynamic,
@@ -100,7 +100,7 @@ def _master_http(ops) -> str:
 
 
 # ===========================================================================
-# Elastic cases (migrated from the legacy elastic group, task #85 category
+# Elastic cases (migrated from the legacy elastic group, category
 # reorg — functional taxonomy, NOT fault scenarios)
 # ===========================================================================
 
@@ -218,7 +218,7 @@ def elastic_remove_flow(ctx: CaseContext):
         # (TTL_DRAIN_TIMEOUT_S — covers the 30s stale-inflight TTL plus the
         # 60s ExpirationTimer sweep; the legacy 90s cap sat below the
         # worst-phase settle and let residue poison later cases on this
-        # shared env, task #87).
+        # shared env).
         inflight_ok, inflight_detail = AssertUtils.inflight_clean(
             _master_http(ops), TTL_DRAIN_TIMEOUT_S
         )
@@ -1115,7 +1115,7 @@ ADD_PREF_STEADY_SUBWINDOWS = 5
 # caliber): normal/loose = 60%, the elastic_rebalance parity band, so
 # sustained exclusivity (>60% of the steady traffic on the newcomer)
 # breaks the contract at EVERY grade; strict = 50%, a quality bar for
-# near-uniform convergence.  CALIBRATION PLAN (task #61 discipline):
+# near-uniform convergence.  CALIBRATION PLAN (calibration discipline):
 # first runs record the observed steady share; if it lands far below 60%,
 # tighten the normal/loose tiers accordingly.
 ADD_PREF_SHARE_BANDS = {"strict": 0.50, "normal": 0.60, "loose": 0.60}

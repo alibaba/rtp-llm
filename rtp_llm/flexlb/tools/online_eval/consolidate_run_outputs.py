@@ -38,12 +38,12 @@ Target layout (run root), one JSON + one log per component:
                              total is under PER_REQUEST_PLAIN_LIMIT_BYTES,
                              gzip at GZIP_COMPRESS_LEVEL otherwise)
 
-Kept in place (skill / tooling contract):
+Kept in place (orchestrator / tooling contract):
   endpoints.json, flexlb_env.txt, client_env.json,
   mock_per_engine_timeseries.json.gz (A-split target),
   engine_events.jsonl (flipped to engine_events.jsonl.gz past the same
   size threshold as client_events.jsonl),
-  load_client/server_latency.json (aggregate validity input; the skill's
+  load_client/server_latency.json (aggregate validity input; the orchestrator's
   fetch_server_latency also reads it),
   flexlb_logs/pv.log (only produced with FLEXLB_PV_LOG=on).
 
@@ -109,7 +109,7 @@ PROCESS_USAGE_LINE_RE = re.compile(
 # uniform-mode runs are small; gzip would only add an unpack step for readers).
 PER_REQUEST_PLAIN_LIMIT_BYTES = 10 * 1024 * 1024
 # Level 6 roughly halves gzip wall time vs the default 9 for <5% worse JSONL
-# compression — consolidation must stay well inside the eval skill's
+# compression — consolidation must stay well inside the orchestrator's
 # DURATION+180s overall timeout window even on slow remote hosts.
 GZIP_COMPRESS_LEVEL = 6
 
@@ -746,7 +746,7 @@ def consolidate(
     # client.json (re-run case) so merged-away sources survive.
     client_payload = dict(load_json(run_dir / "client.json"))
     # server_latency.json is kept in place (aggregate validity input; the
-    # skill's fetch_server_latency reads that exact path) but is still
+    # orchestrator's fetch_server_latency reads that exact path) but is still
     # embedded into client.json for single-file readers.
     server_latency = load_json(load_client / "server_latency.json")
     if server_latency:
@@ -795,7 +795,7 @@ def consolidate(
 
     # ---- cleanup of merged sources -----------------------------------------
     # Deletion is bound to successful merges; server_latency.json stays in
-    # place entirely (aggregate validity input + skill
+    # place entirely (aggregate validity input + orchestrator
     # fetch_server_latency contract).
     for name in (
         "master_info_before.json",

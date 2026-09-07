@@ -210,7 +210,7 @@ def admission_queue_depth(ctx: CaseContext):
     unbounded pile-up; after the gate is lifted the occupiers finish and
     a fresh request succeeds with no inflight leak.
 
-    Profile semantics (v2, task #55): the gate is checked only at the
+    Profile semantics (v2): the gate is checked only at the
     engine's EnqueueBatch entry (BATCH dispatcher) — the
     GenerateStreamCall path never consults it — so
     requires=["enqueue_batch"] keeps the case to the BATCH-dispatch
@@ -346,7 +346,7 @@ def admission_slo_deadline(ctx: CaseContext):
 
     Recovery: clear kv_pressure and a fresh request must succeed.
 
-    Profile semantics (v2, task #55): the KV gate + queue deadline apply
+    Profile semantics (v2): the KV gate + queue deadline apply
     to the scheduler queue regardless of the decision/dispatcher axes,
     but _slo_spec pins the legacy fault axes (PRIORITY + FIXED_WINDOW +
     BATCH) via FLEXLB_CONFIG — re-running under another --profile would
@@ -457,7 +457,7 @@ def admission_master_capacity(ctx: CaseContext):
     the outstanding permit).  The master behaviour was always typed; the
     defect was the test's assertion family.
 
-    Profile semantics (v2, task #55): the outstanding-capacity permit is
+    Profile semantics (v2): the outstanding-capacity permit is
     taken on the master submit path for every delivery mode, but
     _capacity_spec pins the legacy fault axes (PRIORITY + FIXED_WINDOW +
     BATCH) via FLEXLB_CONFIG — re-running under another --profile would
@@ -526,7 +526,7 @@ def admission_master_capacity(ctx: CaseContext):
         _, err5 = ops.run_one_request(
             rid5, input_len=512, output_len=2, stream_timeout_s=STREAM_TIMEOUT_S
         )
-        # task #107 fix (#20): the recovery verdict used to swallow err5 —
+        # follow-up fix: the recovery verdict used to swallow err5 —
         # a failed recovery had NO visible cause.  Surface the raw error
         # (resp code + message) inside the detail so the failure is
         # diagnosable from the report alone.
@@ -1877,7 +1877,7 @@ def admission_placement_pool_wait(ctx: CaseContext):
         if not wait_for(a_running, 10.0, 0.1):
             return False, "request A never reached RUNNING on prefill"
 
-        # PRECONDITION (fail loudly, task #107 #18): B must arrive while
+        # PRECONDITION (fail loudly): B must arrive while
         # A REALLY still holds the lease — A running on the engine AND
         # live on the master ledger.  A fast snapshot that observed a
         # stale running fact (A already settled, pending 1 -> 0) would

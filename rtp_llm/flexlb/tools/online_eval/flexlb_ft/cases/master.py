@@ -31,11 +31,11 @@ from ..engine_ops import (
     inject_type_all,
 )
 from ..harness import (
+    OMIT,
     TTL_DRAIN_TIMEOUT_S,
     AssertUtils,
     ConfigOverride,
     EnvSpec,
-    OMIT,
     _cleanup_dynamic,
     _elastic_env,
     _run_batch,
@@ -73,7 +73,7 @@ def case(
 ):
     """Register into MASTER_CASES (category is always "master").
 
-    ``expected_fail=True`` declares a declared-finding probe (task #101):
+    ``expected_fail=True`` declares a declared-finding probe:
     failing confirms the finding, passing resolves it — neither counts
     toward failed_count / the suite verdict / the exit code."""
 
@@ -200,7 +200,7 @@ def master_quota_block(ctx: CaseContext):
     """S3 port: fill the 1-batch inflight quota → stop the only prefill →
     new requests fail (≥50%) → TTL cleanup → start engine → recovery ≥90%.
 
-    Profile semantics (v2, task #55): the quota knob itself
+    Profile semantics (v2): the quota knob itself
     (dispatcher.maxInflightBatchesPerPrefillWorker) exists only under the
     BATCH dispatcher, and _quota_spec pins the legacy fault axes (PRIORITY +
     FIXED_WINDOW + BATCH, maxInflightBatches=1) via config override — the
@@ -342,7 +342,7 @@ def coldstart_burst(ctx: CaseContext):
     Expected to FAIL or pass marginally today — the failure rate and the
     marked-dead sample count are recorded as the baseline for the intake fix.
 
-    Profile semantics (v2, task #55): _coldstart_spec carries NO config
+    Profile semantics (v2): _coldstart_spec carries NO config
     override, so the case would genuinely exercise each profile's config
     (unlike the pinned-spec cases above); it stays scoped to batch-window
     this round as a deliberate scope decision — spreading the intake probe
@@ -415,7 +415,7 @@ def coldstart_burst(ctx: CaseContext):
 
         # Load-balance contract (user-mandated): under the cold-start burst
         # traffic must still spread across the engines.  Same calibration
-        # as the task #61 balance suite (balance_uniform_serial / P1, with
+        # as the balance suite (balance_uniform_serial / P1, with
         # the balance_concurrent_mix relaxed-caliber note): 20 requests over
         # 2 prefills (10-way concurrent), both engines used, no engine above
         # 80% of the *successful* requests — COST_BASED_PREFILL scores the
@@ -426,7 +426,7 @@ def coldstart_burst(ctx: CaseContext):
         # 80% of 20 = 16 requests, i.e. the same "no engine eats the burst"
         # bound as the balance suite's P1 (loose floor 0.85 over the
         # uniform-random calibration; this probe keeps the historical 0.80
-        # as its hard bound — semantics unchanged by the task #61 rework).
+        # as its hard bound — semantics unchanged by the rework).
         addr_map = ops.addr_to_name()
         dist = Counter(addr_map.get(a, a) for a, e in results if e is None and a)
         n_ok = sum(dist.values())
@@ -1382,7 +1382,7 @@ def _prefill_names(ops) -> list[str]:
 
 
 # ===========================================================================
-# Direct-path case (migrated from the legacy injection family, task #85
+# Direct-path case (migrated from the legacy injection family,
 # category reorg — rid_base family "chaos" -> "direct"; folded from
 # the retired one-case direct module into master — the rid_base family
 # stays "direct" so its id block keeps the sub-1M dedup-collision
@@ -1399,7 +1399,7 @@ def inject_generate_error(ctx: CaseContext):
     entry (JavaMockEngineCluster.generateStreamCall: onError before any
     request state is registered).
 
-    Profile semantics (v2, task #55): under the v1 mode axis ALL master
+    Profile semantics (v2): under the v1 mode axis ALL master
     modes delivered via enqueueBatch + FetchResponse (direct-run evidence:
     generate_stream_rpcs=0 while enqueue_rpcs=3 / fetch_response_rpcs=3),
     so the fault was structurally unreachable for master traffic and the

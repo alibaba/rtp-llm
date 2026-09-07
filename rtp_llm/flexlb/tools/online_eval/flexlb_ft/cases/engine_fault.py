@@ -65,11 +65,11 @@ from ..engine_ops import (
     inject_type_all,
 )
 from ..harness import (
+    OMIT,
     TTL_DRAIN_TIMEOUT_S,
     AssertUtils,
     ConfigOverride,
     EnvSpec,
-    OMIT,
     _BackgroundFlow,
     _cleanup_dynamic,
     _elastic_env,
@@ -279,7 +279,7 @@ def engine_down_http_stop_prefill(ctx: CaseContext):
     try:
         _cleanup_dynamic(ops, env)
 
-        # Integration-round cascade hygiene (task #87): residues from the
+        # Integration-round cascade hygiene: residues from the
         # preceding elastic cases on this shared env settle via the
         # stale-TTL + ExpirationTimer path (worst ~90s).  Drain them
         # BEFORE the baseline batch so an earlier case's TTL settle cannot
@@ -343,7 +343,7 @@ def engine_down_http_stop_prefill(ctx: CaseContext):
         master_ok5 = master_up()
         recovery_ok = ok5 >= 19  # ≥95%
 
-        # Drain guard (task #87): the tolerated Phase-3 failures (err2<=2,
+        # Drain guard: the tolerated Phase-3 failures (err2<=2,
         # requests routed onto the stopped engine) settle through the
         # TTL path — wait for the worst-case window so this case does not
         # leak its residue into engine_fault_flap/master_kill on the same
@@ -460,7 +460,7 @@ def engine_flap(ctx: CaseContext):
         ok_batch, _, _ = _run_batch(ops, base, 20)
         recovery_ok = ok_batch >= 19
         # No inflight leak: global drain to zero (covers the 30s TTL plus
-        # the 60s ExpirationTimer sweep — task #87: the legacy 90s cap sat
+        # the 60s ExpirationTimer sweep — the legacy 90s cap sat
         # below the worst-phase settle and let residue poison the next
         # case on this shared env).
         inflight_ok, inflight_detail = AssertUtils.inflight_clean(
@@ -549,7 +549,7 @@ def inject_crash_after(ctx: CaseContext):
     cleanupInflight.  The engine side, which never registered the request
     (and whose memory the crash wiped anyway), must be fully clean.
 
-    Profile semantics (v2, task #55): the fault fires at the engine's
+    Profile semantics (v2): the fault fires at the engine's
     EnqueueBatch entry (BATCH dispatcher only) and _fault_spec pins the
     legacy fault axes (PRIORITY + FIXED_WINDOW + BATCH) via FLEXLB_CONFIG,
     so the declaration stays batch-window — re-running under another
@@ -694,7 +694,7 @@ def inject_enqueue_delay(ctx: CaseContext):
     request still SUCCEEDS (delay, not failure), and latency recovers once
     the injection is cleared.
 
-    Profile semantics (v2, task #55): the deferred runnable is the
+    Profile semantics (v2): the deferred runnable is the
     engine's EnqueueBatch processing, which exists only under the BATCH
     dispatcher — requires=["enqueue_batch"] keeps the case to the
     BATCH-dispatch profiles (batch-window, single-batch).  Unlike the
@@ -728,7 +728,7 @@ def inject_enqueue_delay(ctx: CaseContext):
         recovered_total = time.monotonic() - t2
 
         delta = delayed_total - baseline_total
-        # Integration-round cascade hygiene (task #87): residue from
+        # Integration-round cascade hygiene: residue from
         # earlier cases on this shared env settles via the stale-TTL +
         # ExpirationTimer path (worst ~90s); drain it BEFORE the clean
         # assertion so another case's TTL settle cannot fail this one.
@@ -791,7 +791,7 @@ def inject_generate_delay(ctx: CaseContext):
 
         delta = ttft_delayed - ttft_base
         if enq0:
-            # Integration-round cascade hygiene (task #87): drain earlier
+            # Integration-round cascade hygiene: drain earlier
             # cases' TTL-settling residue before the clean assertion (see
             # inject_enqueue_delay) — best-effort, the 10s assertion below
             # keeps the real leak detection.
@@ -1103,7 +1103,7 @@ def recovery_generation_bump(ctx: CaseContext):
     base = rid_base(ctx, "engine_fault")
     try:
         _cleanup_dynamic(ops, env)
-        # Cascade hygiene (task #87): drain earlier residue on this env.
+        # Cascade hygiene: drain earlier residue on this env.
         AssertUtils.inflight_clean(_master_http(ops), TTL_DRAIN_TIMEOUT_S)
 
         ip = _engine_ip_port(ops, "prefill-0")

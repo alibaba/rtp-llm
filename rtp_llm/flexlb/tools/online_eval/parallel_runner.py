@@ -82,6 +82,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import os
 import subprocess
@@ -221,9 +222,23 @@ def category_case_counts(profile: str) -> dict[str, int]:
         # long name overflows the 40-char column.
         if len(fields) >= 2 and fields[1] in CATEGORY_WEIGHTS:
             counts[fields[1]] = counts.get(fields[1], 0) + 1
+    if not counts:
+        # ZERO valid category rows at all (runner rc was 0): the runner's
+        # registration drifted out of sync with CATEGORY_WEIGHTS, or the
+        # profile is broken — hard failure.
+        raise RuntimeError(
+            f"runner --list produced no category rows for profile {profile!r}"
+        )
     missing = [c for c in CATEGORY_WEIGHTS if c not in counts]
     if missing:
-        raise RuntimeError(f"runner --list produced no rows for: {missing}")
+        # PARTIAL emptiness is legal: profiles legitimately drop whole
+        # families (elastic/status are batch-window-only), so warn + skip
+        # instead of aborting; family_weights scales such a family to 0.
+        print(
+            f"warning: profile {profile!r}: runner --list produced no rows "
+            f"for {missing}; skipping these categories",
+            file=sys.stderr,
+        )
     return counts
 
 
@@ -234,9 +249,21 @@ def list_case_pairs(profile: str) -> list[tuple[str, str]]:
     for fields in _list_rows(profile):
         if len(fields) >= 2 and fields[1] in CATEGORY_WEIGHTS:
             pairs.append((fields[0], fields[1]))
+    if not pairs:
+        # Zero valid category rows at all — registration drift / broken
+        # profile; hard failure (mirrors category_case_counts).
+        raise RuntimeError(
+            f"runner --list produced no category rows for profile {profile!r}"
+        )
     missing = [c for c in CATEGORY_WEIGHTS if c not in {cat for _, cat in pairs}]
     if missing:
-        raise RuntimeError(f"runner --list produced no rows for: {missing}")
+        # Same semantics as category_case_counts: partially empty families
+        # are legal under profile filtering — warn + skip, don't abort.
+        print(
+            f"warning: profile {profile!r}: runner --list produced no rows "
+            f"for {missing}; skipping these categories",
+            file=sys.stderr,
+        )
     return pairs
 
 
@@ -572,15 +599,31 @@ def _plan(
         if args.categories
         else list(CATEGORY_WEIGHTS)
     )
+    if args.categories and not requested:
+        # "--categories ,,," parses to the empty set: weights would then
+        # be {} and the run would silently exit 0 on N empty lanes —
+        # reject before the runner --list subprocess (family_weights).
+        raise SystemExit("error: --categories contained no non-empty entries")
     unknown = [c for c in requested if c not in CATEGORY_WEIGHTS]
     if unknown:
         raise SystemExit(
             f"unknown --categories entries {unknown}; valid: "
             f"{sorted(CATEGORY_WEIGHTS)}"
         )
+    # w > 0: a family with zero live cases under this profile (warned
+    # about in category_case_counts) takes no lane and spawns nothing.
     weights = {
-        cat: w for cat, w in family_weights(args.profile).items() if cat in requested
+        cat: w
+        for cat, w in family_weights(args.profile).items()
+        if cat in requested and w > 0
     }
+    if requested and not weights:
+        # Explicit --categories whose families are ALL empty here: an
+        # empty lane plan would silently do nothing — fail loudly.
+        raise SystemExit(
+            f"error: profile {args.profile!r}: none of the requested "
+            f"categories {sorted(requested)} have any case under this profile"
+        )
     if args.parallel == 1 and set(requested) == set(CATEGORY_WEIGHTS):
         return [["all"]], weights
     return plan_lanes(weights, args.parallel), weights
@@ -603,20 +646,38 @@ def _plan_case_shard(
     lanes — that is the point of the flattening.  Expected-fail probes
     participate as ordinary cases.
     """
-    pairs = list_case_pairs(args.profile)
+    requested: set[str] | None = None
     if args.categories:
         requested = {
             _normalize_category(c.strip())
             for c in args.categories.split(",")
             if c.strip()
         }
+        if not requested:
+            # "--categories ,,," parses to the empty set: the pool filter
+            # below would then hand `--cases ""` to the runner, whose
+            # parser treats an empty value as "no filter" = run
+            # EVERYTHING — reject before the runner --list subprocess.
+            raise SystemExit("error: --categories contained no non-empty entries")
         unknown = sorted(requested - set(CATEGORY_WEIGHTS))
         if unknown:
             raise SystemExit(
                 f"unknown --categories entries {unknown}; valid: "
                 f"{sorted(CATEGORY_WEIGHTS)}"
             )
+    pairs = list_case_pairs(args.profile)
+    if requested:
         pairs = [pc for pc in pairs if pc[1] in requested]
+        if not pairs:
+            # All requested families are empty under this profile.  An
+            # empty lane slice would pass `--cases ""` to the runner,
+            # whose parser treats an empty value as "no filter" = run
+            # EVERYTHING — fail loudly instead.
+            raise SystemExit(
+                f"error: profile {args.profile!r}: none of the requested "
+                f"categories {sorted(requested)} have any case under this "
+                "profile"
+            )
     # Stash for run_lane / _print_plan (lane family breakdown) without
     # changing the (lanes, weights) return contract.
     args.case_pairs = pairs
@@ -831,6 +892,39 @@ def _print_plan(
     print()
 
 
+# Process-lifetime flock holder: _acquire_run_lock stashes the open lock
+# file object here so its fd (and the advisory lock) survives until the
+# interpreter exits — no caller needs the handle afterwards, but an
+# unreferenced file object would be GC'd, closing the fd and dropping the
+# lock mid-run.
+_RUN_LOCK_FILE = None
+
+
+def _acquire_run_lock(out_dir: Path) -> None:
+    """Exclusive lock on <out-dir>/.parallel_runner.lock.
+
+    Two orchestrators sharing one --out-dir overwrite each other's
+    lane*/cases.json and run IDENTICAL port windows (same master/mock
+    bases per lane index) — one real double-run measured 39 false
+    failures.  flock is released by the kernel at process exit; the lock
+    file itself is left behind (harmless).
+    """
+    global _RUN_LOCK_FILE
+    lock_path = out_dir / ".parallel_runner.lock"
+    lock_file = open(lock_path, "w")
+    try:
+        fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        lock_file.close()
+        raise SystemExit(
+            f"error: {lock_path} is held by another parallel_runner "
+            "instance — a second orchestrator on the same --out-dir would "
+            "overwrite lane artifacts and share port windows; rerun with a "
+            "different --out-dir"
+        )
+    _RUN_LOCK_FILE = lock_file
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="FlexLB case-test parallel orchestrator (lane parallelism)"
@@ -951,11 +1045,19 @@ def main() -> int:
     args.out_dir = str(out_dir)
     json_path = Path(args.json) if args.json else out_dir / "aggregate.json"
 
+    # Dry-run stays side-effect-free: no out-dir creation, no lock.  Any
+    # other path grabs the exclusive out-dir lock BEFORE the first child
+    # process — _plan itself launches `runner --list`, and a second
+    # instance planning concurrently into the same out-dir is exactly the
+    # collision the lock guards against (same lane ports, same
+    # lane*/cases.json targets).
+    if not args.dry_run:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        _acquire_run_lock(out_dir)
     lanes, weights = _plan(args)
     _print_plan(lanes, weights, args)
     if args.dry_run:
         return 0
-    out_dir.mkdir(parents=True, exist_ok=True)
     print(f"lanes started: {len(lanes)} runner subprocess trees → {out_dir}")
     t0 = time.monotonic()
     try:

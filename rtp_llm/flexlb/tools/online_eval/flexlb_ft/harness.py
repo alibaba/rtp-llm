@@ -1,6 +1,6 @@
 """FlexLB mock-engine case-test harness.
 
-Terminology (unified 2026-09, suite-reorg task #85): the mock engine
+Terminology (unified 2026-09, suite reorg): the mock engine
 CASE test (场景测试) is this framework — flexlb_functional_tests.py plus
 flexlb_ft/ — while the mock engine STRESS test (压测) is the separate
 online_eval load pipeline.  The legacy "e2e test" / "chaos test" suite
@@ -201,7 +201,7 @@ def default_perf() -> dict:
     execution time and master routing predictions always share one formula.
     The legacy silent ``prefill.fixed_ms`` fallback was removed.
 
-    Decode timing is likewise NOT configured (task #69): the mock prices
+    Decode timing is likewise NOT configured: the mock prices
     decode per STEP with the production DSv4 fit — step_ms = 19.5 +
     0.175 x running, 2.6 tokens/step (MTP acceptance fold) — as the code
     default, aligning throughput/queueing economics with production
@@ -981,7 +981,7 @@ class EnvSpec:
 #   OTEL_TRACE_SKIP_PATTERN — flexlb-api application.yml (spring tracing)
 #   OTEL_EXPORTER_OTLP_ENDPOINT — OpenTelemetry SDK exporter ("none" disables)
 # Every other legacy v1 var previously exported here had zero consumers in
-# the v2 Java code and was removed (task #54 dead-env sweep).
+# the v2 Java code and was removed (dead-env sweep).
 BASE_MASTER_ENV = {
     "OTEL_TRACE_SKIP_PATTERN": ".*",
     "OTEL_EXPORTER_OTLP_ENDPOINT": "none",
@@ -2097,7 +2097,7 @@ class ClientOps:
 # worst-phase alignment the ledger entry survives until ~t+90s after its
 # last touch.  Drain windows shorter than this (the legacy TTL+margin=60s
 # or the 90s caps) let the residue bleed into the NEXT case on the shared
-# env — the integration-round cascade (2026-09-01 task #87: 16 false
+# env — the integration-round cascade (2026-09-01: 16 false
 # FAILs with scheduler=4/8/5 constant residue and an all-zero engine
 # side; every affected case was solo-PASS on a clean env).  Waiting longer
 # is "wait for the settle", NOT a weaker assertion: the target stays
@@ -2713,7 +2713,7 @@ def encode_unique_key(meta: dict) -> str:
 
 
 # ===========================================================================
-# Shared case-level helpers (suite-reorg task #85)
+# Shared case-level helpers (suite reorg)
 #
 # Environment constructors, traffic pumps and topology observers that used
 # to live in chaos_cases.py / injection_gate_cases.py and are shared by
