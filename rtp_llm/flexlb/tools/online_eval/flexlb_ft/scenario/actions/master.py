@@ -430,6 +430,7 @@ def _window_validate(params, plan):
             "route",
             "status",
             "error_kind",
+            "failover",
             "from_offset_s",
             "until_offset_s",
         },
@@ -441,6 +442,8 @@ def _window_validate(params, plan):
             plan.reference(p[key], "number")
     if "route" in p and p["route"] not in {"master", "fallback", "failed"}:
         raise ValueError("invalid window route filter")
+    if "failover" in p and type(p["failover"]) is not bool:
+        raise ValueError("window failover filter must be boolean")
     if "status" in p and p["status"] not in {"ok", "schedule_error"}:
         raise ValueError("unsupported window status filter")
     if "error_kind" in p and p["error_kind"] not in {
@@ -481,6 +484,7 @@ def _window(ctx, params, deadline):
         ("route", "route_path"),
         ("status", "status"),
         ("error_kind", "error_kind"),
+        ("failover", "failover"),
     ):
         if param in params:
             selected = [r for r in selected if r[field] == params[param]]
