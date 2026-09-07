@@ -55,14 +55,20 @@ class _PrefillPagedCudaGraphTestMixin:
         for il in input_lengths:
             cu.append(cu[-1] + il)
 
-        if with_copy_params:
-            inp.cu_seqlens_device = torch.tensor(cu, dtype=torch.int32).pin_memory()
-            inp.cu_kv_seqlens_device = torch.tensor(cu, dtype=torch.int32).pin_memory()
-        else:
-            inp.cu_seqlens_device = torch.tensor(cu, dtype=torch.int32, device="cuda")
-            inp.cu_kv_seqlens_device = torch.tensor(
-                cu, dtype=torch.int32, device="cuda"
-            )
+        # Device, in both cases. These are what FlashInfer keeps as its persistent
+        # graph buffers and dereferences on the device at each replay, and the
+        # field names say _device. The copy-params path does not change that: the
+        # engine pins exactly one tensor, cuda_graph_prefill_batch_size, and
+        # asserts is_pinned() on it (initCaptureAttentionInputsPost) -- these two
+        # it passes as device tensors.
+        #
+        # This branch used to hand over pinned *host* memory whenever
+        # with_copy_params was set, which is what made the kernel read a host
+        # pointer and abort with an illegal memory access. That was a bug in the
+        # test, not in the op: "fixing" the op to copy these onto the device
+        # instead broke the real engine's multi-graph capture path.
+        inp.cu_seqlens_device = torch.tensor(cu, dtype=torch.int32, device="cuda")
+        inp.cu_kv_seqlens_device = torch.tensor(cu, dtype=torch.int32, device="cuda")
 
         max_blocks = max(math.ceil(s / PAGE_SIZE) for s in seq_lengths)
         block_ids = torch.zeros(batch_size, max_blocks, dtype=torch.int32)
