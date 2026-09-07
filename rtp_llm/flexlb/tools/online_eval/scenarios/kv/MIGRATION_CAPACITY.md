@@ -4,8 +4,9 @@ This family migrates four retained legacy cases to explicit stages, with four
 profiles each (16 instances). Source baseline: `9d8576c44bf6dda4191f5d9070c3cc929b7fc5a0`.
 The source cases are `flexlb_ft/cases/kv/kv_<variant>.py`; constants and request
 helpers are in `flexlb_ft/support/kv.py` and `support/requests.py`.
-No legacy case is invoked or deleted. Java execution and independent equivalence
-acceptance are still pending. Local external-IO fixtures are not Java evidence.
+No legacy case is invoked or deleted. Independent static acceptance covers
+`432b85f3577c0c65646652ac01aee15ba6e436c3`; integrated suite verification and Java
+execution remain pending. Local external-IO fixtures are not Java evidence.
 
 ## Integration boundary
 
@@ -75,3 +76,16 @@ fixture issue fixed separately by `258c10b1effa8f777e481076322ed58f753689cb`.
 Raw output is `/tmp/agent4-kv-capacity-scenario-tests.log`. These results do not
 constitute a passing integrated suite: register handlers and retain the FIFO
 fixture fix in the core integration, then rerun once on its fixed commit.
+
+
+## Independent static acceptance
+
+Agent3 independently reviewed fixed commit
+`432b85f3577c0c65646652ac01aee15ba6e436c3` against all four legacy programs,
+the new action handlers, compiled plans and fixture boundaries. The review
+accepted 4 variants / 16 instances / 224 checks with no remaining confirmed
+static blocker. Its isolated source is `/tmp/agent3-kv-capacity-432`; its eight
+capacity tests passed in 2.519s with exit code 0. The review explicitly retained
+the execution differences above and did not claim identical error classification.
+The reviewed test setup merges HANDLERS explicitly. Default catalog integration,
+whole-suite validation and actual Java evidence remain separate outstanding gates.
