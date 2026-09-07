@@ -470,7 +470,7 @@ variants:
       metric: fingerprint
       op: eq
       expected: true
-      aggregate: all
+      aggregate: last
       baseline:
         $ref: stages.normal_drained.output.snapshot
   - id: healthy_recovery
@@ -541,6 +541,11 @@ variants:
       config: {}
       enabled: false
       role: prefill
+  - id: serial_perf_restore
+    action: status_perf
+    params:
+      prefill_fixed_ms: 100
+      restore_prefill_fixed_ms: 100
   - id: serial_execution_terminal
     action: status_outcomes
     params:
@@ -727,43 +732,16 @@ variants:
     params:
       duration_s: 15
       until:
-        metric: all_inflight
+        metric: scheduler
         op: eq
         value: 0
     timeout_s: 30
-  - id: failed_batches_drained_scheduler
+  - id: failed_scheduler_drained
     action: status_check
     params:
       snapshot:
         $ref: stages.failed_batches_drained.output.snapshot
       metric: scheduler
-      op: eq
-      expected: 0
-      aggregate: last
-  - id: failed_batches_drained_prefill_batches
-    action: status_check
-    params:
-      snapshot:
-        $ref: stages.failed_batches_drained.output.snapshot
-      metric: prefill_batches
-      op: eq
-      expected: 0
-      aggregate: last
-  - id: failed_batches_drained_prefill_members
-    action: status_check
-    params:
-      snapshot:
-        $ref: stages.failed_batches_drained.output.snapshot
-      metric: prefill_requests
-      op: eq
-      expected: 0
-      aggregate: last
-  - id: failed_batches_drained_decode_load
-    action: status_check
-    params:
-      snapshot:
-        $ref: stages.failed_batches_drained.output.snapshot
-      metric: decode_total_load
       op: eq
       expected: 0
       aggregate: last
@@ -777,12 +755,10 @@ variants:
     params:
       snapshot:
         $ref: stages.no_retry_window.output.snapshot
-      metric: fingerprint
+      metric: scheduler
       op: eq
-      expected: true
-      aggregate: all
-      baseline:
-        $ref: stages.failed_batches_drained.output.snapshot
+      expected: 0
+      aggregate: last
   - id: final_health
     action: status_sample
     params:

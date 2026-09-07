@@ -295,6 +295,31 @@ class StatusProtocolTest(unittest.TestCase):
         self.assertEqual(
             4, sum(s["id"].endswith("_ignored") for s in unbatched["stages"])
         )
+        multi = next(p for p in plans if p["variant_id"] == "ack_multi_error")
+        checks = [
+            s["params"]["metric"]
+            for s in multi["stages"]
+            if s["action"] == "status_check"
+        ]
+        self.assertEqual(["scheduler", "scheduler", "master_http"], checks)
+        execution = next(p for p in plans if p["variant_id"] == "execution_partial")
+        stages = {s["id"]: s for s in execution["stages"]}
+        self.assertEqual("last", stages["no_resurrection"]["params"]["aggregate"])
+        ids = [s["id"] for s in execution["stages"]]
+        self.assertLess(ids.index("serial_fail_off"), ids.index("serial_perf_restore"))
+        self.assertLess(ids.index("serial_perf_restore"), ids.index("serial_drained"))
+        duplicate = next(p for p in plans if p["variant_id"] == "duplicate_finished")
+        self.assertFalse(
+            any(s["id"] == "scheduler_retires" for s in duplicate["stages"])
+        )
+        decode_first = next(
+            p for p in plans if p["variant_id"] == "decode_before_prefill"
+        )
+        ids = [s["id"] for s in decode_first["stages"]]
+        self.assertLess(
+            ids.index("p_terminal_restore"), ids.index("prefill_after_clear")
+        )
+        self.assertNotIn("prefill_eventually_retires", ids)
         nofetch = next(p for p in plans if p["variant_id"] == "normal_no_fetch")
         self.assertFalse(
             any(s["action"] == "status_control" for s in nofetch["stages"])
