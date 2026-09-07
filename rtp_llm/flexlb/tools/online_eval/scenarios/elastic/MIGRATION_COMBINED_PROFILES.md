@@ -80,5 +80,10 @@ All eight profile/grade configurations are compared in full with the old factory
 fault preset, topology, both cache pools, dynamic discovery, PRIORITY and omitted
 queue timeout. Existing exact topology checks and first-failure blocking remain
 declared strengthening. New handlers aggregate through elastic_lifecycle; no
-shared elastic.py, catalog or Java change is required. Independent review and
-real Java acceptance are pending. Legacy cases and historical results remain.
+shared elastic.py, catalog or Java change is required. Independent static and
+fixture review passed for `870ff40e27466b8e252881ebfc82dccd8806781a`: the reviewer
+independently ran 114 elastic tests in 31.462s and eight added-worker tests in
+0.455s against core4e, verified default-catalog compilation of all eight
+57-stage/75-check variants, and confirmed nine unrelated plans remain unchanged
+with exactly 12 new unique legacy-ID/profile pairs. Real Java acceptance remains
+pending. Legacy cases and historical results remain.
