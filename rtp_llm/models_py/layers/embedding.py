@@ -71,11 +71,25 @@ class VocabParallelEmbedding(RtpModule):
         if self.tp_size == 1:
             return torch.nn.functional.embedding(input_ids, self.weight)
 
-        mask = (input_ids >= self.vocab_start_idx) & (input_ids < self.vocab_end_idx)
+        valid_global_ids = (input_ids >= 0) & (input_ids < self.vocab_size)
+        mask = (
+            valid_global_ids
+            & (input_ids >= self.vocab_start_idx)
+            & (input_ids < self.vocab_end_idx)
+        )
+        # A valid token owned by another rank maps to row zero and is masked
+        # after lookup. An invalid global token maps one past the local table,
+        # deliberately preserving nn.Embedding's fail-fast range semantics
+        # instead of silently reducing an all-zero vector across TP ranks.
+        invalid_local_ids = torch.full_like(input_ids, self.vocab_size_per_partition)
         local_ids = torch.where(
             mask,
             input_ids - self.vocab_start_idx,
-            torch.zeros_like(input_ids),
+            torch.where(
+                valid_global_ids,
+                torch.zeros_like(input_ids),
+                invalid_local_ids,
+            ),
         )
         output = torch.nn.functional.embedding(local_ids, self.weight)
         output = output * mask.unsqueeze(-1)

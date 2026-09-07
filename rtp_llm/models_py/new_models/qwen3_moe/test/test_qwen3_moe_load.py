@@ -453,6 +453,38 @@ class MoEWeightDispatchTest(unittest.TestCase):
                     module_tensor.data_ptr(), runtime_weights[name].data_ptr()
                 )
 
+    def test_tensor_migration_rebuilds_executor_with_current_storage(self):
+        class RejectingRuntimeDevice:
+            def shuffle_moe_weight(self, tensor, data_type, name):
+                raise AssertionError("runtime layout must not be shuffled twice")
+
+        layer = _make_experts(num_experts=1)
+        old_ptrs = (layer.w13.data_ptr(), layer.w2.data_ptr())
+        layer._model_config.exported_device = RejectingRuntimeDevice()
+        layer.fused_moe = mock.sentinel.original_executor
+        replacement = mock.sentinel.rebuilt_executor
+        captured_weights = {}
+        factory = mock.MagicMock()
+
+        def create_fused_moe(adapter, weights):
+            captured_weights.update(weights)
+            return replacement
+
+        factory.create_fused_moe.side_effect = create_fused_moe
+        with mock.patch(
+            "rtp_llm.models_py.layers.moe_experts.FusedMoeFactory",
+            return_value=factory,
+        ):
+            layer.to(dtype=torch.float64)
+
+        self.assertIs(layer.fused_moe, replacement)
+        self.assertEqual(layer.w13.dtype, torch.float64)
+        self.assertEqual(layer.w2.dtype, torch.float64)
+        self.assertNotEqual(layer.w13.data_ptr(), old_ptrs[0])
+        self.assertNotEqual(layer.w2.data_ptr(), old_ptrs[1])
+        self.assertEqual(layer.w13.data_ptr(), captured_weights[W.moe_w1].data_ptr())
+        self.assertEqual(layer.w2.data_ptr(), captured_weights[W.moe_w2].data_ptr())
+
     def test_tp_slices_gate_up_rows_and_down_columns(self):
         weights = _expert_weights(1, 8, 8)
         for rank in range(2):

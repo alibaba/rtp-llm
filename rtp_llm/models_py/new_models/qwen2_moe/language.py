@@ -5,7 +5,9 @@ from typing import Any, Optional
 
 import torch
 import torch.nn as nn
+
 from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
 from rtp_llm.models_py.layers.activation import silu_and_mul
 from rtp_llm.models_py.layers.embedding import ParallelLMHead, VocabParallelEmbedding
 from rtp_llm.models_py.layers.linear import (
@@ -73,8 +75,13 @@ class Qwen2SharedExpert(RtpModule):
             params_dtype=params_dtype,
         )
 
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        return self.down_proj(silu_and_mul(self.gate_up_proj(hidden_states)))
+    def forward(
+        self, hidden_states: torch.Tensor, *, reduce_output: bool = True
+    ) -> torch.Tensor:
+        return self.down_proj(
+            silu_and_mul(self.gate_up_proj(hidden_states)),
+            reduce_output=reduce_output,
+        )
 
 
 class Qwen2MoeBlock(RtpModule):
@@ -99,6 +106,7 @@ class Qwen2MoeBlock(RtpModule):
     ):
         super().__init__()
         self.top_k = top_k
+        self.ffn_tp_size = ffn_tp_size
         self.gate = ColumnParallelLinear(
             input_size=hidden_size,
             output_size=num_experts,
@@ -190,10 +198,24 @@ class Qwen2MoeBlock(RtpModule):
         self.select_topk(router_logits, topk_ids, topk_weights)
         if self.fake_balance_expert is not None:
             self.fake_balance_expert(topk_ids, topk_weights)
-        routed = self.experts(hidden_states, topk_weights, topk_ids)
-        shared = self.shared_expert(hidden_states)
+        fused_router = getattr(self.experts.fused_moe, "router", None)
+        defer_tp_allreduce = bool(
+            self.ffn_tp_size > 1
+            and getattr(fused_router, "supports_skip_tp_allreduce", False)
+            and getattr(fused_router, "tp_collective_size", None) == self.ffn_tp_size
+        )
+        routed = self.experts(
+            hidden_states,
+            topk_weights,
+            topk_ids,
+            skip_tp_allreduce=defer_tp_allreduce,
+        )
+        shared = self.shared_expert(hidden_states, reduce_output=not defer_tp_allreduce)
         shared_gate = torch.sigmoid(self.shared_expert_gate(hidden_states).float())
-        return routed + shared * shared_gate.to(dtype=shared.dtype)
+        output = routed + shared * shared_gate.to(dtype=shared.dtype)
+        if defer_tp_allreduce:
+            output = all_reduce(output, group=Group.TP)
+        return output
 
 
 class Qwen2MoeDecoderLayer(RtpModule):

@@ -122,11 +122,13 @@ void invokeMhaPagedAttnPlan(const at::Tensor& input_lengths,
                             at::Tensor&       page_indice,
                             at::Tensor&       batch_indice,
                             at::Tensor&       positions,
+                            int               input_token_capacity,
                             int               planned_batch_size,
                             cudaStream_t      stream) {
     TORCH_CHECK(input_lengths.defined() && input_lengths.is_cuda() && input_lengths.scalar_type() == at::kInt
-                    && input_lengths.is_contiguous(),
-                "input_lengths must be a contiguous CUDA int32 tensor");
+                    && input_lengths.dim() == 1 && input_lengths.is_contiguous(),
+                "input_lengths must be a contiguous one-dimensional CUDA int32 tensor");
+    TORCH_CHECK(seq_size_per_block > 0, "seq_size_per_block must be positive");
 
     const int32_t input_batch_size = static_cast<int32_t>(input_lengths.size(0));
     if (planned_batch_size < 0) {
@@ -135,6 +137,11 @@ void invokeMhaPagedAttnPlan(const at::Tensor& input_lengths,
     TORCH_CHECK(planned_batch_size >= input_batch_size,
                 "mhaPagedAttnPlan: planned_batch_size ",
                 planned_batch_size,
+                " is smaller than input batch size ",
+                input_batch_size);
+    TORCH_CHECK(input_token_capacity >= input_batch_size,
+                "mhaPagedAttnPlan: input_token_capacity ",
+                input_token_capacity,
                 " is smaller than input batch size ",
                 input_batch_size);
     if (planned_batch_size == 0) {
@@ -152,7 +159,7 @@ void invokeMhaPagedAttnPlan(const at::Tensor& input_lengths,
 
     const int32_t* prefix_ptr = nullptr;
     if (has_prefix) {
-        TORCH_CHECK(prefix_lengths.is_cuda() && prefix_lengths.scalar_type() == at::kInt
+        TORCH_CHECK(prefix_lengths.is_cuda() && prefix_lengths.scalar_type() == at::kInt && prefix_lengths.dim() == 1
                         && prefix_lengths.is_contiguous() && prefix_lengths.size(0) >= input_batch_size,
                     "prefix_lengths must be a contiguous CUDA int32 tensor sized >= input batch size");
         prefix_ptr = prefix_lengths.data_ptr<int32_t>();
@@ -161,7 +168,8 @@ void invokeMhaPagedAttnPlan(const at::Tensor& input_lengths,
     if (!has_prefix) {
         TORCH_CHECK(
             has_seq && sequence_lengths.is_cuda() && sequence_lengths.scalar_type() == at::kInt
-                && sequence_lengths.is_contiguous() && sequence_lengths.size(0) >= input_batch_size,
+                && sequence_lengths.dim() == 1 && sequence_lengths.is_contiguous()
+                && sequence_lengths.size(0) >= input_batch_size,
             "sequence_lengths must be a contiguous CUDA int32 tensor sized >= input batch size when prefix_lengths is empty");
         seq_ptr = sequence_lengths.data_ptr<int32_t>();
     }
@@ -175,18 +183,19 @@ void invokeMhaPagedAttnPlan(const at::Tensor& input_lengths,
     TORCH_CHECK(max_blocks_per_bs > 0, "kv_cache_block_id must contain at least one page-table column");
 
     TORCH_CHECK(paged_kv_last_page_len.is_cuda() && paged_kv_last_page_len.scalar_type() == at::kInt
-                    && paged_kv_last_page_len.numel() >= planned_batch_size,
+                    && paged_kv_last_page_len.is_contiguous() && paged_kv_last_page_len.numel() >= planned_batch_size,
                 "paged_kv_last_page_len buffer too small");
     TORCH_CHECK(decode_page_indptr.is_cuda() && decode_page_indptr.scalar_type() == at::kInt
-                    && decode_page_indptr.numel() >= planned_batch_size + 1,
+                    && decode_page_indptr.is_contiguous() && decode_page_indptr.numel() >= planned_batch_size + 1,
                 "decode_page_indptr buffer too small");
-    TORCH_CHECK(page_indice.is_cuda() && page_indice.scalar_type() == at::kInt
+    TORCH_CHECK(page_indice.is_cuda() && page_indice.scalar_type() == at::kInt && page_indice.is_contiguous()
                     && page_indice.numel() >= static_cast<int64_t>(planned_batch_size) * max_blocks_per_bs,
                 "page_indice buffer too small");
-    TORCH_CHECK(batch_indice.is_cuda() && batch_indice.scalar_type() == at::kInt
-                    && batch_indice.numel() >= input_batch_size,
+    TORCH_CHECK(batch_indice.is_cuda() && batch_indice.scalar_type() == at::kInt && batch_indice.is_contiguous()
+                    && batch_indice.numel() >= input_token_capacity,
                 "batch_indice buffer too small");
-    TORCH_CHECK(positions.is_cuda() && positions.scalar_type() == at::kInt && positions.numel() >= input_batch_size,
+    TORCH_CHECK(positions.is_cuda() && positions.scalar_type() == at::kInt && positions.is_contiguous()
+                    && positions.numel() >= input_token_capacity,
                 "positions buffer too small");
 
     const int threads = ((planned_batch_size + 31) / 32) * 32;  // round up to warp

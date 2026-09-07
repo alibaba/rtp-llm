@@ -4,13 +4,13 @@ from typing import Optional
 from rtp_llm.config.engine_config import EngineConfig
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.py_config_modules import VitConfig
+from rtp_llm.models_py.registry import is_model_registered
 from rtp_llm.multimodal.mm_process_engine import MMProcessEngine
 from rtp_llm.multimodal.multimodal_mixin_register import (
     _multimodal_mixin_factory,
     get_multimodal_mixin_cls,
 )
 from rtp_llm.multimodal.multimodal_mixins import BaseMultiModalMixin
-from rtp_llm.models_py.registry import is_model_registered
 from rtp_llm.ops import TaskType
 from rtp_llm.utils.new_loader import (
     is_new_loader_enabled,
@@ -45,6 +45,7 @@ class MultimodalMixinFactory:
                     ),
                     device_resource_config=engine_config.device_resource_config,
                     parallelism_config=engine_config.parallelism_config,
+                    moe_config=engine_config.moe_config,
                 )
                 if unsupported_reason is not None:
                     use_new_loader = False

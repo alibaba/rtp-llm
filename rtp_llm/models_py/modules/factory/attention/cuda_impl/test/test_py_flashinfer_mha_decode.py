@@ -372,14 +372,34 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
         self.assertEqual(params.positions_h.tolist(), [63, 127])
         self.assertEqual(params.qo_indptr_h.tolist(), [0, 1, 2, 2, 2])
         self.assertEqual(params.decode_page_indptr_h.tolist(), [0, 1, 3, 4, 5])
-        self.assertEqual(
-            params.paged_kv_last_page_len_h.tolist(), [64, 64, 1, 1]
-        )
+        self.assertEqual(params.paged_kv_last_page_len_h.tolist(), [64, 64, 1, 1])
         self.assertEqual(params.kvlen_h.tolist(), [64, 128, 0, 0])
         self.assertEqual(params.page_indice_h.tolist(), [10, 20, 21, 0, 0])
         self.assertEqual(
             params.slot_mapping.cpu().tolist(), [10 * 64 + 63, 21 * 64 + 63]
         )
+
+    def test_device_planner_prefill_padding_metadata(self):
+        params = rtp_llm_ops.FlashInferMlaAttnParams()
+        params.fill_params_mha_device(
+            torch.tensor([3, 4], dtype=torch.int32, device="cuda"),
+            torch.empty(0, dtype=torch.int32, device="cuda"),
+            torch.tensor([2, 1], dtype=torch.int32, device="cuda"),
+            torch.tensor([[10, 11], [20, 21]], dtype=torch.int32, device="cuda"),
+            64,
+            planned_batch_size=4,
+        )
+        torch.cuda.synchronize()
+
+        self.assertEqual(params.batch_indice_d[:3].cpu().tolist(), [0, 0, 1])
+        self.assertEqual(params.positions_d[:3].cpu().tolist(), [3, 4, 4])
+        self.assertEqual(
+            params.decode_page_indptr_d[:5].cpu().tolist(), [0, 1, 2, 3, 4]
+        )
+        self.assertEqual(
+            params.paged_kv_last_page_len_d[:4].cpu().tolist(), [5, 5, 1, 1]
+        )
+        self.assertEqual(params.page_indice_d[:4].cpu().tolist(), [10, 20, 0, 0])
 
     def test_replay_refreshes_plan_metadata(self):
         """Tensor-core replay must refresh FlashInfer plan metadata."""

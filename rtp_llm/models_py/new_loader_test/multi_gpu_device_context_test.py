@@ -2,8 +2,10 @@ import unittest
 from unittest import mock
 
 import torch
+
 from rtp_llm.models_py.layers import activation
 from rtp_llm.models_py.layers.norm import RMSNorm, RMSResNorm
+from rtp_llm.ops.compute_ops import rtp_llm_ops
 
 
 class MultiGpuDeviceContextTest(unittest.TestCase):
@@ -27,8 +29,13 @@ class MultiGpuDeviceContextTest(unittest.TestCase):
         )
         torch.cuda.set_device(self.original_device)
 
-        with mock.patch.object(activation, "_SILU_FUSED_ENABLED", True):
+        with mock.patch.object(
+            activation, "_SILU_FUSED_ENABLED", True
+        ), mock.patch.object(
+            rtp_llm_ops, "silu_and_mul", wraps=rtp_llm_ops.silu_and_mul
+        ) as fused_op:
             output = activation.silu_and_mul(gate_up)
+        fused_op.assert_called_once()
         torch.cuda.synchronize(self.input_device)
 
         gate, up = gate_up.chunk(2, dim=-1)
@@ -49,7 +56,11 @@ class MultiGpuDeviceContextTest(unittest.TestCase):
         ).to(inputs.dtype)
         torch.cuda.set_device(self.original_device)
 
-        output = layer(inputs)
+        with mock.patch.object(
+            rtp_llm_ops, "rmsnorm", wraps=rtp_llm_ops.rmsnorm
+        ) as fused_op:
+            output = layer(inputs)
+        fused_op.assert_called_once()
         torch.cuda.synchronize(self.input_device)
 
         self.assertEqual(torch.cuda.current_device(), self.original_device)
@@ -69,7 +80,13 @@ class MultiGpuDeviceContextTest(unittest.TestCase):
         ).to(hidden_states.dtype)
         torch.cuda.set_device(self.original_device)
 
-        output, residual_out = layer(hidden_states, residual)
+        with mock.patch.object(
+            rtp_llm_ops,
+            "fused_add_rmsnorm",
+            wraps=rtp_llm_ops.fused_add_rmsnorm,
+        ) as fused_op:
+            output, residual_out = layer(hidden_states, residual)
+        fused_op.assert_called_once()
         torch.cuda.synchronize(self.input_device)
 
         self.assertEqual(torch.cuda.current_device(), self.original_device)

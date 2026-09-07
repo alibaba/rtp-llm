@@ -82,6 +82,7 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
                 config.ll_num_max_token,
                 dispatch_tp_size,
                 config.model_config.quant_config,
+                config.model_config,
             )
         )
         deepep_config = DeepepWrapperConfig.from_config_adapter(
