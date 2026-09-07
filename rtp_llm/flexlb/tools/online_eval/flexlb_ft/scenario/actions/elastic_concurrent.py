@@ -65,7 +65,7 @@ def crossfire(ctx, params, deadline):
         finally:
             persist()
 
-    ctx.register_resource("requests", records, cleanup=finish)
+    request_handle = ctx.register_resource("requests", records, cleanup=finish)
 
     def mutate(index):
         try:
@@ -170,7 +170,7 @@ def crossfire(ctx, params, deadline):
         result = completeness(records.snapshot_records())
         handle = ctx.register_resource("snapshot", result, historical=True)
         return StageOutput(
-            output=dict(result=handle),
+            output=dict(result=handle, requests=request_handle),
             checks=[
                 CheckResult("workers_finished", "PASS", actual=4),
                 CheckResult(
@@ -242,12 +242,54 @@ def discovery(ctx, params, deadline):
     )
 
 
+def protocol_validate(params, plan):
+    from .elastic import _validate
+
+    p = _validate(params, plan, {"requests", "method"}, {"requests", "method"})
+    plan.reference(p["requests"], "requests")
+    if p["method"] not in {"FetchResponse", "GenerateStreamCall"}:
+        raise ValueError("crossfire protocol requires a supported stream method")
+    return p
+
+
+def protocol(ctx, params, deadline):
+    deadline.check()
+    rows = ctx.resource(params["requests"], "requests").snapshot_records()
+    admitted = [
+        r for r in rows if r["schedule"]["status"] == "OK" and r["prefill_addr"]
+    ]
+    methods = {str(r["wire_request_id"]): r["stream"]["method"] for r in admitted}
+    # Fetch is the client branch selected by Schedule metadata, not proof
+    # that every request has already been enqueued on the engine.
+    return StageOutput(
+        checks=[
+            CheckResult(
+                "method",
+                (
+                    "PASS"
+                    if methods and all(m == params["method"] for m in methods.values())
+                    else "FAIL"
+                ),
+                actual=methods,
+                expected=params["method"],
+            )
+        ]
+    )
+
+
 HANDLERS = [
+    StageHandler(
+        "elastic_crossfire_protocol",
+        protocol_validate,
+        protocol,
+        {},
+        checks=frozenset({"method"}),
+    ),
     StageHandler(
         "elastic_crossfire",
         validate,
         crossfire,
-        {"result": "snapshot"},
+        {"result": "snapshot", "requests": "requests"},
         checks=frozenset({"workers_finished", "master_http"}),
         max_dynamic_additions=65,
     ),

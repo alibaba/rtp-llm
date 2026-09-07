@@ -8,6 +8,7 @@ import tempfile
 import threading
 import time
 import unittest
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace as NS
 from unittest.mock import patch
@@ -23,12 +24,20 @@ from flexlb_ft.scenario.runtime import execute_instance
 
 
 class ConcurrentTests(unittest.TestCase):
-    def run_program(self, bad_master=False, bad_discovery=False, slow_remove=False):
+    def run_program(
+        self,
+        bad_master=False,
+        bad_discovery=False,
+        slow_remove=False,
+        profile="batch-window",
+        driver_factory=None,
+    ):
         handlers = {h.name: h for h in e.HANDLERS}
-        plan = compile_scenarios(
+        plans = compile_scenarios(
             load_scenarios(ROOT / "scenarios/elastic/concurrent_mutation.yaml"),
             handlers=handlers,
-        )[0]
+        )
+        plan = next(p for p in plans if p["profile"] == profile)
         self.assertEqual(plan["resource_budget"]["max_dynamic_additions"], 65)
         lock = threading.Lock()
         barrier = threading.Barrier(2)
@@ -65,11 +74,14 @@ class ConcurrentTests(unittest.TestCase):
                             )
                     write_file()
                     rid = iter(range(1, 10000))
-                    return NS(discovery_file=file), NS(
+                    ops = NS(
                         next_request_id=lambda: next(rid),
                         mock_http_port=1,
                         master_http_port=2,
                     )
+                    if driver_factory is not None:
+                        ops = driver_factory(ops, environment, state, clock)
+                    return NS(discovery_file=file), ops
 
                 def teardown(self, ctx, deadline):
                     state["cleaned"] = True
@@ -126,11 +138,14 @@ class ConcurrentTests(unittest.TestCase):
                     raise ValueError("HTTP 503")
                 return {}
 
+            consumer_patch = (
+                nullcontext()
+                if driver_factory is not None
+                else patch.object(e.RecordedRequests, "run", run)
+            )
             with patch.object(
                 concurrent, "mutation_http", side_effect=http
-            ), patch.object(e, "_http", side_effect=http), patch.object(
-                e.RecordedRequests, "run", run
-            ), patch.object(
+            ), patch.object(e, "_http", side_effect=http), consumer_patch, patch.object(
                 life, "_master_get", side_effect=master
             ):
                 result = execute_instance(
@@ -148,6 +163,11 @@ class ConcurrentTests(unittest.TestCase):
                     for t in threading.enumerate()
                 )
             )
+            state["plan"] = plan
+            state["request_artifacts"] = {
+                p.name: json.loads(p.read_text())
+                for p in (Path(temp) / "artifacts").glob("elastic-crossfire-*.json")
+            }
             return result, state
 
     def test_mutation_http_preserves_add_remove_budgets(self):

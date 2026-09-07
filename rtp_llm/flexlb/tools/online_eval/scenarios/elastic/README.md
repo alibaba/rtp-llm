@@ -107,6 +107,12 @@ of these new variants. Legacy Python functions remain available.
 
 ## Concurrent mutation
 
+The existing `batch-window/default` instance is preserved. Explicit
+`single_batch`, `single_nonbatch`, and `window_nonbatch` variants now cover the
+other three legacy profiles, with an additional expected-protocol check.
+See [MIGRATION_CONCURRENT_PROFILES.md](MIGRATION_CONCURRENT_PROFILES.md) for
+configuration equivalence, driver fixtures, and the pending acceptance boundary.
+
 `concurrent_mutation.yaml` implements `elastic_concurrent_ops` in the final
 `elastic_concurrent_mutation` family. Four real threads share a candidate pool:
 one Prefill adder, one Decode adder and two independently seeded removers. The
