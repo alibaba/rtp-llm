@@ -34,6 +34,10 @@ public:
 
 class TestLocalRpcServer: public LocalRpcServer {
 public:
+    void setWeightManager(const py::object& manager) {
+        weight_manager_ = manager;
+    }
+
     void setWeightManagerToNone() {
         weight_manager_ = py::none();
     }
@@ -602,11 +606,9 @@ TEST(LocalRpcServerTest, UpdateWeightsRejectsPythonNoneManagerAsUnimplemented) {
     if (!Py_IsInitialized()) {
         Py_Initialize();
     }
-    TestLocalRpcServer server;
-    {
-        py::gil_scoped_acquire acquire;
-        server.setWeightManagerToNone();
-    }
+    py::gil_scoped_acquire acquire;
+    TestLocalRpcServer     server;
+    server.setWeightManagerToNone();
     grpc::ServerContext    context;
     UpdateWeightsRequestPB request;
     EmptyPB                response;
@@ -615,6 +617,71 @@ TEST(LocalRpcServerTest, UpdateWeightsRejectsPythonNoneManagerAsUnimplemented) {
 
     EXPECT_EQ(status.error_code(), grpc::StatusCode::UNIMPLEMENTED);
     EXPECT_THAT(status.error_message(), HasSubstr("supports online weight updates"));
+}
+
+TEST(LocalRpcServerTest, UpdateWeightsValidatesFieldsAndCallsPythonManager) {
+    if (!Py_IsInitialized()) {
+        Py_Initialize();
+    }
+    py::gil_scoped_acquire acquire;
+    TestLocalRpcServer     server;
+    py::dict               captured;
+    auto                   manager = py::module_::import("types").attr("SimpleNamespace")();
+    manager.attr("update") = py::cpp_function([&captured](const py::dict& request) { captured = py::dict(request); });
+    server.setWeightManager(manager);
+
+    grpc::ServerContext    context;
+    UpdateWeightsRequestPB request;
+    EmptyPB                response;
+    request.set_name("checkpoint");
+    request.set_desc("description");
+
+    auto status = server.UpdateWeights(&context, &request, &response);
+    EXPECT_EQ(status.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+
+    request.set_method("reload");
+    status = server.UpdateWeights(&context, &request, &response);
+    EXPECT_TRUE(status.ok());
+    EXPECT_EQ(captured["name"].cast<std::string>(), "checkpoint");
+    EXPECT_EQ(captured["desc"].cast<std::string>(), "description");
+    EXPECT_EQ(captured["method"].cast<std::string>(), "reload");
+}
+
+TEST(LocalRpcServerTest, UpdateWeightsSanitizesLongUnicodePythonException) {
+    if (!Py_IsInitialized()) {
+        Py_Initialize();
+    }
+    py::gil_scoped_acquire acquire;
+    TestLocalRpcServer     server;
+    py::dict               scope;
+    std::string            unicode_message;
+    for (int i = 0; i < 200; ++i) {
+        unicode_message += u8"更新失败";
+    }
+    unicode_message += "\nhidden traceback line";
+    scope["message"] = unicode_message;
+    py::exec(R"(
+class FailingManager:
+    def update(self, request):
+        raise RuntimeError(message)
+)",
+             scope);
+    server.setWeightManager(scope["FailingManager"]());
+
+    grpc::ServerContext    context;
+    UpdateWeightsRequestPB request;
+    EmptyPB                response;
+    request.set_name("checkpoint");
+    request.set_desc("description");
+    request.set_method("reload");
+
+    const auto status = server.UpdateWeights(&context, &request, &response);
+
+    EXPECT_EQ(status.error_code(), grpc::StatusCode::INTERNAL);
+    EXPECT_THAT(status.error_message(), HasSubstr("RuntimeError:"));
+    EXPECT_THAT(status.error_message(), Not(HasSubstr("hidden traceback line")));
+    EXPECT_LE(status.error_message().size(), 512 + std::string("exception from python: ").size());
+    EXPECT_NO_THROW((void)py::str(status.error_message()));
 }
 
 }  // namespace rtp_llm
