@@ -84,16 +84,17 @@ public:
 
     void load(const std::shared_ptr<RequestBlockBuffer>& request_block_buffer,
               CacheStoreLoadDoneCallback                 callback,
-              const std::string&,
+              const std::string& ip,
               uint32_t,
               uint32_t,
               uint32_t = 1000,
               int      = 1,
               int      = 0) override {
         bool ok = true;
+        const auto& source_blocks = peer_stores_.empty() ? stored_blocks_ : peer_stores_.at(ip)->stored_blocks_;
         for (const auto& [key, block] : request_block_buffer->getBlocks()) {
-            auto it = stored_blocks_.find(key);
-            if (it == stored_blocks_.end() || it->second.size() != block->len) {
+            auto it = source_blocks.find(key);
+            if (it == source_blocks.end() || it->second.size() != block->len) {
                 ok = false;
                 continue;
             }
@@ -128,6 +129,7 @@ public:
     }
 
     std::unordered_map<std::string, std::vector<uint8_t>> stored_blocks_;
+    std::unordered_map<std::string, std::shared_ptr<MemoryBackedCacheStore>> peer_stores_;
     std::vector<std::string>                              store_request_keys_;
     std::vector<std::string>                              load_request_keys_;
     std::vector<std::shared_ptr<RequestBlockBuffer>>      store_buffer_requests_;
@@ -1094,6 +1096,216 @@ TEST_F(PdSepKVCacheReleaseTest, testEagleDraftLoadUsesIndependentPhysicalGroup) 
     EXPECT_EQ(actual_destination_addrs, expected_destination_addrs);
 }
 
+TEST_F(PdSepKVCacheReleaseTest, testCpMlaDirectLoadUsesGlobalKeysAndLocalDestinationRows) {
+    ModelConfig model;
+    model.num_layers = 1;
+    model.data_type = DataType::TYPE_FP16;
+    model.attn_config.use_mla = true;
+    model.mla_ops_type = MlaOpsType::AUTO;
+    model.attn_config.kv_lora_rank = 16;
+    model.attn_config.rope_head_dim = 8;
+    model.attn_config.tokens_per_block = 4;
+    KVCacheConfig kv_config;
+    kv_config.seq_size_per_block = 4;
+    kv_config.kernel_seq_size_per_block = 2;
+    kv_config.test_block_num = 64;
+    ParallelismConfig parallelism;
+    parallelism.tp_size = 8;
+    auto make_resource = [](const CacheConfig& config) {
+        auto resource = std::make_shared<BatchKVCacheResource>();
+        resource->resetBatchSize(1);
+        resource->initGroups(config.groupNums(), config.layer_all_num, config.layer_to_group_id,
+                             config.kernelBlocksPerKvBlock(), config.group_types, config.layer_region_to_group_id);
+        return resource;
+    };
+    auto small_input = std::make_shared<GenerateInput>();
+    small_input->input_ids = torch::tensor({1}, torch::kInt32);
+    small_input->generate_config = std::make_shared<GenerateConfig>();
+    auto small_tokens = std::make_shared<CompleteTokenIds>(1, 1, 8, 4);
+    small_tokens->init(small_input);
+    auto fragment_pool = [&](const std::shared_ptr<KVCacheManager>& manager, const CacheConfig& config) {
+        std::vector<BatchKVCacheResourcePtr> guards;
+        for (int i = 0; i < 12; ++i) {
+            auto resource = make_resource(config);
+            EXPECT_TRUE(manager->malloc({resource, small_tokens, 9100 + i, true, false, false}).success);
+            guards.push_back(resource);
+        }
+        for (size_t i = 0; i < guards.size(); i += 2) {
+            manager->free({guards[i], small_tokens});
+            guards[i].reset();
+        }
+        return guards;
+    };
+    auto release_guards = [&](const std::shared_ptr<KVCacheManager>& manager,
+                              const std::vector<BatchKVCacheResourcePtr>& guards) {
+        for (const auto& guard : guards) {
+            if (guard) {
+                manager->free({guard, small_tokens});
+            }
+        }
+    };
+    // A partial final page and suffixes around a CP cycle distinguish global
+    // key ordinals from local block-table positions. All sources are separate
+    // stores: merging their maps would conceal a request to the wrong owner.
+    for (bool source_sharded : {false, true}) {
+        parallelism.role_type = RoleType::PREFILL;
+        parallelism.prefill_cp_config.kv_cache_sharded = source_sharded;
+        const auto source_config = CacheConfigCreator::createConfig(model, parallelism, RuntimeConfig{}, kv_config);
+        auto input = std::make_shared<GenerateInput>();
+        input->input_ids = torch::arange(65, torch::kInt32);
+        input->generate_config = std::make_shared<GenerateConfig>();
+        auto tokens = std::make_shared<CompleteTokenIds>(1, 1, 128, 4);
+        tokens->init(input);
+        std::vector<CacheKeyType> keys;
+        std::vector<std::string> peers;
+        auto transport = std::make_shared<MemoryBackedCacheStore>();
+        for (int rank = 0; rank < 8; ++rank) {
+            parallelism.tp_rank = rank;
+            // These in-process peers have no distributed bootstrap. Keep their
+            // real rank/CP geometry but supply the pool capacity before init.
+            auto source = std::make_shared<KVCacheManager>(source_config, true, nullptr, kv_config, parallelism);
+            source->config_.block_num = source_config.block_num;
+            ASSERT_TRUE(source->init());
+            auto guards = fragment_pool(source, source_config);
+            auto resource = make_resource(source_config);
+            ASSERT_TRUE(source->malloc({resource, tokens, 9022, true, false, false}).success);
+            if (rank == 0) {
+                keys = resource->cacheKeys(0);
+            }
+            ASSERT_EQ(keys, resource->cacheKeys(0));
+            ASSERT_EQ(keys.size(), 17u);
+            const auto& blocks = resource->blocks(0, 0);
+            ASSERT_GE(blocks.size(), 2u);
+            ASSERT_NE(blocks[1], blocks[0] + 1);
+            for (size_t row = 0; row < blocks.size(); ++row) {
+                const size_t global_page = source_sharded ? row * 8 + rank : row;
+                if (global_page >= keys.size()) {
+                    continue;
+                }
+                auto parts = source->convertIndexToBuffer(blocks[row], 0);
+                ASSERT_EQ(parts.size(), 1u);
+                auto bytes = torch::from_blob(parts[0].addr, {static_cast<int64_t>(parts[0].size_bytes)},
+                                             torch::TensorOptions(torch::kUInt8).device(torch::kCUDA));
+                bytes.fill_(32 + global_page);
+            }
+            const auto layout = source->getMainModelCacheLayerLayout();
+            torch_ext::KVCache cache;
+            cache.seq_size_per_block = 4;
+            cache.kernel_seq_size_per_block = 2;
+            cache.use_mla = true;
+            cache.kv_lora_rank = 16;
+            cache.rope_head_dim = 8;
+            cache.layer_group_types = layout.layer_group_types;
+            cache.kv_cache_base_by_layer = layout.layers_to_kv_buffer_ptrs;
+            auto store = std::make_shared<MemoryBackedCacheStore>();
+            torch_ext::PyCacheStoreInputs writer;
+            writer.context_batch_size = 1;
+            writer.request_id = torch::tensor({int64_t{9022}}, torch::kInt64);
+            writer.request_pd_separation = torch::tensor({true}, torch::kBool);
+            writer.tokens_per_block = 4;
+            writer.kv_block_stride_bytes = source_config.kv_block_stride_bytes;
+            writer.kv_scale_stride_bytes = 0;
+            writer.pd_separation = true;
+            writer.mla_kvcache = true;
+            writer.cp_size = source_config.cp_size;
+            writer.cp_rank = source_sharded ? rank : 0;
+            writer.cache_store = store;
+            for (auto key : keys) {
+                writer.cache_keys.push_back(std::to_string(key));
+            }
+            WriteCacheStoreOp(torch::tensor({65}, torch::kInt32), torch::tensor({0}, torch::kInt32),
+                              blockIdsTensor(resource, 0), writer, cache.getLayerCache(0), std::nullopt);
+            size_t published_pages = 0;
+            for (size_t page = 0; page < keys.size(); ++page) {
+                if (source_sharded && page % 8 != rank) {
+                    continue;
+                }
+                const auto key = "kv_" + makeCacheKey(0, std::to_string(keys[page]), 0, KVCacheRegionName::DEFAULT);
+                ASSERT_EQ(store->stored_blocks_.count(key), 1u) << key;
+                EXPECT_EQ(store->stored_blocks_.at(key),
+                          std::vector<uint8_t>(source_config.kv_block_stride_bytes, 32 + page));
+                ++published_pages;
+            }
+            ASSERT_EQ(store->stored_blocks_.size(), published_pages);
+            const auto ip = "127.0.0." + std::to_string(rank + 1);
+            peers.push_back(ip + ":12345:12346");
+            transport->peer_stores_[ip] = store;
+            source->free({resource, tokens});
+            release_guards(source, guards);
+        }
+        for (bool destination_sharded : {false, true}) {
+            parallelism.role_type = RoleType::DECODE;
+            parallelism.decode_cp_kv_cache_sharded = destination_sharded;
+            const auto destination_config =
+                CacheConfigCreator::createConfig(model, parallelism, RuntimeConfig{}, kv_config);
+            for (int rank : {0, 3, 7}) {
+                parallelism.tp_rank = rank;
+                auto destination = std::make_shared<KVCacheManager>(
+                    destination_config, true, nullptr, kv_config, parallelism);
+                destination->config_.block_num = destination_config.block_num;
+                ASSERT_TRUE(destination->init());
+                auto guards = fragment_pool(destination, destination_config);
+                auto resource = make_resource(destination_config);
+                ASSERT_TRUE(destination->malloc({resource, tokens, 9022, true, false, false}).success);
+                EngineInitParams params;
+                params.model_id = 0;
+                params.model_config_ = model;
+                params.parallelism_config = parallelism;
+                DecodeRpcServer server;
+                server.engine_ = std::make_shared<MinimalEngine>(params, destination);
+                server.maga_init_params_ = params;
+                server.resource_.cache_store = transport;
+                server.resource_.workers.resize(8);
+                const auto& blocks = resource->blocks(0, 0);
+                ASSERT_GE(blocks.size(), 2u);
+                ASSERT_NE(blocks[1], blocks[0] + 1);
+                for (const auto& guard : guards) {
+                    if (guard) {
+                        fillDsv4RegionBytes(destination, guard->blocks(0, 0)[0], 0, KVCacheRegionName::DEFAULT, 0xA5);
+                    }
+                }
+                for (int reused_pages : {0, 1, 7, 9, 17}) {
+                    SCOPED_TRACE(::testing::Message() << "P_sharded=" << source_sharded
+                        << " D_sharded=" << destination_sharded << " rank=" << rank << " reused=" << reused_pages);
+                    for (auto block : blocks) {
+                        auto parts = destination->convertIndexToBuffer(block, 0);
+                        auto bytes = torch::from_blob(parts[0].addr, {static_cast<int64_t>(parts[0].size_bytes)},
+                                                     torch::TensorOptions(torch::kUInt8).device(torch::kCUDA));
+                        bytes.fill_(0xEE);
+                    }
+                    grpc::ServerContext context;
+                    const std::string request_key = "cp-full-direct";
+                    DecodeRpcServer::LoadKVCacheContext load(9022, request_key, peers, keys,
+                        resource->groupBlocks(), reused_pages, 5000, 1, 0, &context, source_sharded ? 8 : 1);
+                    const auto request = server.constructRemoteLoadRequestForMla(load, rank, peers);
+                    const std::vector<std::string> selected(request.peer_addrs().begin(), request.peer_addrs().end());
+                    DecodeRpcServer::LoadKVCacheContext worker_load(9022, request_key, selected, keys,
+                        resource->groupBlocks(), reused_pages, 5000, 1, 0, &context, request.prefill_cp_size());
+                    auto status = server.loadCache(worker_load);
+                    ASSERT_TRUE(status.ok()) << status.ToString();
+                    for (size_t row = 0; row < blocks.size(); ++row) {
+                        const size_t global_page = destination_sharded ? row * 8 + rank : row;
+                        const uint8_t expected = global_page < keys.size() && global_page >= reused_pages ?
+                                                     32 + global_page : 0xEE;
+                        auto parts = destination->convertIndexToBuffer(blocks[row], 0);
+                        auto bytes = torch::from_blob(parts[0].addr, {static_cast<int64_t>(parts[0].size_bytes)},
+                                                     torch::TensorOptions(torch::kUInt8).device(torch::kCUDA));
+                        EXPECT_TRUE(bytes.eq(expected).all().item<bool>()) << "global_page=" << global_page;
+                    }
+                    for (const auto& guard : guards) {
+                        if (guard) {
+                            expectDsv4RegionBytes(destination, guard->blocks(0, 0)[0], 0,
+                                                 KVCacheRegionName::DEFAULT, 0xA5);
+                        }
+                    }
+                }
+                destination->free({resource, tokens});
+                release_guards(destination, guards);
+            }
+        }
+    }
+}
+
 TEST_F(PdSepKVCacheReleaseTest, testCpLinearCheckpointPublicationLoadsRequestFrontier) {
     ModelConfig model;
     model.num_layers = 2;
@@ -1135,8 +1347,8 @@ TEST_F(PdSepKVCacheReleaseTest, testCpLinearCheckpointPublicationLoadsRequestFro
             SCOPED_TRACE(::testing::Message() << "source_sharded=" << source_sharded
                                             << " decode_sharded=" << decode_sharded
                                             << " independent=" << independent << " length=" << length);
-            // Real TP8 cache geometry, but one already-selected head peer:
-            // this exercises payload publication/loading, not peer routing.
+            // LINEAR's local row geometry is rank-independent. Publish distinct
+            // head payloads below; this does not execute the per-rank KDA model.
             auto source = std::make_shared<KVCacheManager>(source_config);
             auto destination = std::make_shared<KVCacheManager>(destination_config);
             ASSERT_TRUE(source->init());
@@ -1254,33 +1466,71 @@ TEST_F(PdSepKVCacheReleaseTest, testCpLinearCheckpointPublicationLoadsRequestFro
                           std::vector<uint8_t>(layer.cache_store_segment_sizes[segment], 31 + segment));
             }
 
+            // Bootstrap supplies peers in TP-rank order. Each publishes the
+            // same keys but a different head shard; a merged map would hide
+            // a wrong peer selection even if all byte offsets were correct.
+            auto transport = std::make_shared<MemoryBackedCacheStore>();
+            std::vector<std::string> peers;
+            for (int rank = 0; rank < 8; ++rank) {
+                auto peer_store = rank == 0 ? store : std::make_shared<MemoryBackedCacheStore>();
+                if (rank != 0) {
+                    size_t segment_offset = 0;
+                    for (size_t segment = 0; segment < layer.cache_store_segment_sizes.size(); ++segment) {
+                        const auto size = layer.cache_store_segment_sizes[segment];
+                        source_bytes.narrow(0, segment_offset, size).fill_(31 + segment + 16 * rank);
+                        segment_offset += size;
+                    }
+                    writer.cache_store = peer_store;
+                    writer.cp_rank = source_sharded ? rank : 0;
+                    write();
+                }
+                const auto ip = "127.0.0." + std::to_string(rank + 1);
+                peers.push_back(ip + ":12345:12346");
+                transport->peer_stores_[ip] = peer_store;
+            }
             EngineInitParams params;
             params.model_id = 0;
             params.model_config_.num_layers = 1;  // Only the LINEAR layer is published in this component scenario.
+            params.parallelism_config = parallelism;
             DecodeRpcServer server;
             server.engine_ = std::make_shared<MinimalEngine>(params, destination);
             server.maga_init_params_ = params;
-            server.resource_.cache_store = store;
-            std::vector<std::string> peers = {"127.0.0.1:12345:12346"};
-            grpc::ServerContext server_context;
-            DecodeRpcServer::LoadKVCacheContext load(9021, "cp-linear-frontier", peers, keys,
-                destination_resource->groupBlocks(), 0, 5000, 1, 0, &server_context);
-            auto status = server.loadCache(load);
-            ASSERT_TRUE(status.ok()) << status.ToString();
-            ASSERT_EQ(store->load_buffer_requests_.size(), 1u);
-            EXPECT_EQ(store->load_buffer_requests_[0]->getBlocks().size(), layer.cache_store_segment_sizes.size());
-            for (size_t row = 0; row < destination_blocks.size(); ++row) {
-                if (isNullBlockIdx(destination_blocks[row])) {
-                    continue;
-                }
-                auto bytes = destination_base[destination_blocks[row]].view(torch::kUInt8).flatten();
-                if (row == static_cast<size_t>(destination_row)) {
-                    // Shared pools pad LINEAR rows to the largest group's
-                    // stride. Padding is not state and must not be transferred.
-                    EXPECT_TRUE(torch::equal(bytes.narrow(0, 0, offset), source_bytes.narrow(0, 0, offset)));
-                    EXPECT_TRUE(bytes.narrow(0, offset, bytes.numel() - offset).eq(0).all().item<bool>());
-                } else {
-                    EXPECT_TRUE(bytes.eq(0).all().item<bool>()) << "unexpected write to row " << row;
+            server.resource_.cache_store = transport;
+            server.resource_.workers.resize(8);
+            for (int rank : {0, 3, 7}) {
+                SCOPED_TRACE(::testing::Message() << "head rank=" << rank);
+                server.maga_init_params_.parallelism_config.tp_rank = rank;
+                destination_base.fill_(0);
+                transport->load_buffer_requests_.clear();
+                grpc::ServerContext server_context;
+                const std::string request_key = "cp-linear-frontier";
+                DecodeRpcServer::LoadKVCacheContext load(9021, request_key, peers, keys,
+                    destination_resource->groupBlocks(), 0, 5000, 1, 0, &server_context, source_sharded ? 8 : 1);
+                const auto request = server.constructRemoteLoadRequestForMla(load, rank, peers);
+                const std::vector<std::string> selected(request.peer_addrs().begin(), request.peer_addrs().end());
+                DecodeRpcServer::LoadKVCacheContext worker_load(9021, request_key, selected, keys,
+                    destination_resource->groupBlocks(), 0, 5000, 1, 0, &server_context, request.prefill_cp_size());
+                auto status = server.loadCache(worker_load);
+                ASSERT_TRUE(status.ok()) << status.ToString();
+                ASSERT_EQ(transport->load_buffer_requests_.size(), 1u);
+                EXPECT_EQ(transport->load_buffer_requests_[0]->getBlocks().size(), layer.cache_store_segment_sizes.size());
+                for (size_t row = 0; row < destination_blocks.size(); ++row) {
+                    if (isNullBlockIdx(destination_blocks[row])) {
+                        continue;
+                    }
+                    auto bytes = destination_base[destination_blocks[row]].view(torch::kUInt8).flatten();
+                    if (row == static_cast<size_t>(destination_row)) {
+                        size_t segment_offset = 0;
+                        for (size_t segment = 0; segment < layer.cache_store_segment_sizes.size(); ++segment) {
+                            const auto size = layer.cache_store_segment_sizes[segment];
+                            EXPECT_TRUE(bytes.narrow(0, segment_offset, size).eq(31 + segment + 16 * rank).all().item<bool>());
+                            segment_offset += size;
+                        }
+                        // Pool padding and future checkpoint rows are not state.
+                        EXPECT_TRUE(bytes.narrow(0, offset, bytes.numel() - offset).eq(0).all().item<bool>());
+                    } else {
+                        EXPECT_TRUE(bytes.eq(0).all().item<bool>()) << "unexpected write to row " << row;
+                    }
                 }
             }
             source->free({source_resource, tokens});

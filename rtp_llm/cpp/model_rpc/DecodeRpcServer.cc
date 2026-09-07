@@ -896,6 +896,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
     std::vector<std::shared_ptr<LoadContext>> load_contexts;
     const bool                                is_page_level_rr = load_context.prefill_cp_size > 1
                                   && static_cast<int>(load_context.peer_addrs.size()) == load_context.prefill_cp_size;
+    const auto destination_cp_mapper = cache_manager->cpSlotMapper();
     // Receive-side fan-in.  This is deliberately kept even though the P8->D1
     // sender path is gone: it is still the live path for CP-sharded prefill,
     // where constructRemoteLoadRequest* adds every peer and peer_cnt stays > 1.
@@ -937,16 +938,24 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
         if (group_type == CacheGroupType::FULL) {
             return true;
         }
+        if (group_type == CacheGroupType::LINEAR) {
+            // Checkpoint state is head-sharded, not replicated token KV.
+            return peer_idx == maga_init_params_.parallelism_config.tp_rank;
+        }
         // These DSV4 fixed/SWA pools are CP-sliced inside one logical block on
         // prefill, while decode still owns the full block. Pull every peer
         // slice and place it into the matching destination offset.
         return isCpSlicedFixedRegion(region_name) || peer_idx == 0;
     };
-    auto shouldLoadBlockFromPeer = [&](CacheGroupType group_type, size_t block_pos, int peer_idx) {
+    auto shouldLoadBlockFromPeer = [&](CacheGroupType group_type, size_t cache_key_index, int peer_idx) {
+        if (group_type == CacheGroupType::FULL && (destination_cp_mapper || is_page_level_rr)
+            && cache_key_index < static_cast<size_t>(load_context.reuse_block_size)) {
+            return false;
+        }
         if (!is_page_level_rr || group_type != CacheGroupType::FULL) {
             return true;
         }
-        return (static_cast<int>(block_pos) % load_context.prefill_cp_size) == peer_idx;
+        return (static_cast<int>(cache_key_index) % load_context.prefill_cp_size) == peer_idx;
     };
     auto cpFixedSliceBytes = [&](const CacheConfig& cfg, size_t gid) {
         RTP_LLM_CHECK_WITH_INFO(gid < cfg.cache_specs.size(), "group id out of range for cache_specs: %zu", gid);
@@ -1013,6 +1022,11 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                                      CacheGroupType     group_type,
                                      KVCacheRegionName  region_name,
                                      size_t             gid) {
+        if (group_type == CacheGroupType::FULL && destination_cp_mapper) {
+            // These positions index a local table; reuse is in global P-pages
+            // and must be filtered after converting each position to a key.
+            return blockPositionsForCacheTransfer(block_num, 0, cfg_use_hybrid, group_type);
+        }
         if (group_type == CacheGroupType::LINEAR) {
             // The request frontier selects the checkpoint, not spare rows
             // reserved in the destination block table for later decoding.
@@ -1060,7 +1074,9 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
             return false;
         }
         cache_key_index = block_pos;
-        if (cfg.group_types[gid] == CacheGroupType::LINEAR) {
+        if (cfg.group_types[gid] == CacheGroupType::FULL && destination_cp_mapper) {
+            cache_key_index = block_pos * destination_cp_mapper->cpSize() + destination_cp_mapper->cpRank();
+        } else if (cfg.group_types[gid] == CacheGroupType::LINEAR) {
             cache_key_index = std::min(
                 (block_pos + 1) * cfg.cache_specs[gid]->seq_size_per_block / cfg.seq_size_per_block - 1,
                 cache_key_count - 1);
@@ -1124,9 +1140,6 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                     continue;
                 }
                 for (size_t block_pos : block_pos_list) {
-                    if (!shouldLoadBlockFromPeer(group_type, block_pos, i)) {
-                        continue;
-                    }
                     auto block_id = block_ids[block_pos];
                     if (isNullBlockIdx(block_id)) {
                         continue;
@@ -1138,6 +1151,9 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                                                block_pos,
                                                load_context.cache_keys.size(),
                                                cache_key_index)) {
+                        continue;
+                    }
+                    if (!shouldLoadBlockFromPeer(group_type, cache_key_index, i)) {
                         continue;
                     }
                     auto cache_key = makeCacheKey(
@@ -1280,9 +1296,6 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                                 continue;
                             }
                             for (size_t block_pos : block_pos_list) {
-                                if (!shouldLoadBlockFromPeer(group_type, block_pos, i)) {
-                                    continue;
-                                }
                                 auto block_id = block_ids[block_pos];
                                 if (isNullBlockIdx(block_id)) {
                                     continue;
@@ -1294,6 +1307,9 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                                                            block_pos,
                                                            load_context.cache_keys.size(),
                                                            cache_key_index)) {
+                                    continue;
+                                }
+                                if (!shouldLoadBlockFromPeer(group_type, cache_key_index, i)) {
                                     continue;
                                 }
                                 auto       cache_key      = makeCacheKey(model_id,
