@@ -21,11 +21,17 @@ from test_scenario_backend import Ops
 
 class Backend:
     def __init__(
-        self, reverse=False, missing=False, unfinished=False, expiry_code=None
+        self,
+        reverse=False,
+        missing=False,
+        unfinished=False,
+        expiry_code=None,
+        dispatch_order=None,
     ):
         self.ops = Ops(batch=False)
         self.ops.master_http_port = 1
         self.reverse, self.missing = reverse, missing
+        self.dispatch_order = dispatch_order
         self.ops.last_shapes = []
         self.perf_calls = []
         self.n_prefill = 1
@@ -80,6 +86,11 @@ class Backend:
             str(i): dict(running_ms=(8 - i if self.reverse else i) * 3000)
             for i in range(1, 8)
         }
+        if self.dispatch_order is not None:
+            lifecycle = {
+                str(rid): dict(running_ms=index * 3000)
+                for index, rid in enumerate(self.dispatch_order)
+            }
         if self.missing:
             lifecycle.pop("4")
         return dict(
@@ -295,6 +306,41 @@ class Tests(unittest.TestCase):
             ctx.instance["grade"] = "normal"
             normal = p._expiry(ctx, dict(placeholder="ph", wave="wave"), None)
             self.assertEqual(normal.checks[0].status, "PASS")
+
+    def test_mixed_order_first_parker(self):
+        result, records, backend = self.run_program(
+            variant="order_basic", dispatch_order=[1, 2, 6, 7, 4, 5, 3]
+        )
+        self.assertEqual(result["status"], "PASS", result)
+        self.assertEqual(backend.ops.generate_count, 7)
+        self.assertEqual(
+            [s["priority"] for s in backend.ops.last_shapes],
+            [50, 30, 30, 50, 50, 70, 70],
+        )
+        self.assertTrue(all(r["consumer_completion_verified"] for r in records))
+
+    def test_mixed_order_priority_violation(self):
+        result, _, _ = self.run_program(
+            variant="order_basic", dispatch_order=list(range(1, 8))
+        )
+        self.assertEqual(result["status"], "FAIL", result)
+        order = next(s for s in result["stages"] if s["id"] == "order")
+        self.assertEqual(
+            next(c for c in order["checks"] if c["id"] == "PR2")["status"], "FAIL"
+        )
+
+    def test_mixed_order_same_priority_inversion(self):
+        result, _, _ = self.run_program(
+            variant="order_basic", dispatch_order=[1, 2, 7, 6, 4, 5, 3]
+        )
+        self.assertEqual(result["status"], "FAIL", result)
+        order = next(s for s in result["stages"] if s["id"] == "order")
+        self.assertEqual(
+            next(c for c in order["checks"] if c["id"] == "PR1")["actual"], 0
+        )
+        self.assertEqual(
+            next(c for c in order["checks"] if c["id"] == "PR2")["status"], "FAIL"
+        )
 
 
 if __name__ == "__main__":

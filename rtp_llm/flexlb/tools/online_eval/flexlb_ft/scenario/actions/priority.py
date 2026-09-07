@@ -394,13 +394,7 @@ def _expiry(ctx, p, deadline):
     )
 
 
-def _fifo(ctx, p, deadline):
-    wave = _wave(ctx, p)
-    if not wave.complete:
-        raise ValueError("priority FIFO requires completed cohort observation")
-    rows = wave.records()
-    if len(rows) != len(wave.entries):
-        raise ValueError("priority cohort lost a request record")
+def _dispatch_observation(ctx, rows, deadline):
     raw = _http(ctx.ops, "snapshot", deadline)
     engines = raw.get("engines")
     if not isinstance(engines, list):
@@ -422,6 +416,17 @@ def _fifo(ctx, p, deadline):
             raise ValueError("missing or ambiguous Prefill lifecycle")
         running = _number(matches[0].get("running_ms"), 0, 1e18)
         dispatch.append((running, ranks[rid], rid))
+    return raw, dispatch
+
+
+def _fifo(ctx, p, deadline):
+    wave = _wave(ctx, p)
+    if not wave.complete:
+        raise ValueError("priority FIFO requires completed cohort observation")
+    rows = wave.records()
+    if len(rows) != len(wave.entries):
+        raise ValueError("priority cohort lost a request record")
+    raw, dispatch = _dispatch_observation(ctx, rows, deadline)
     expected = [r["wire_request_id"] for r in rows]
     actual = [r[2] for r in sorted(dispatch)]
     from .elastic import request_success
@@ -445,7 +450,95 @@ def _fifo(ctx, p, deadline):
     )
 
 
+def _order_basic(ctx, p, deadline):
+    from ...grade import GradeReport
+    from .elastic import request_success
+
+    placeholder = _wave(ctx, {"requests": p["placeholder"]})
+    wave = _wave(ctx, {"requests": p["wave"]})
+    if not placeholder.complete or not wave.complete:
+        raise ValueError("priority ordering requires completed cohorts")
+    ph, peers = placeholder.records(), wave.records()
+    if len(ph) != 1 or len(peers) != 6:
+        raise ValueError("basic ordering expects one placeholder and six peers")
+    rows = ph + peers
+    raw, dispatch = _dispatch_observation(ctx, rows, deadline)
+    ordered = [r[2] for r in sorted(dispatch)]
+    peer_ids = [r["wire_request_id"] for r in peers]
+    if len(set(ordered)) != 7:
+        raise ValueError("duplicate request identity in dispatch ordering")
+    priorities = {r["wire_request_id"]: r["request_shape"]["priority"] for r in rows}
+    # Old design_final_pattern compares the wave only; it does not introduce
+    # a new placeholder-first assertion. The first submitted peer is exempt
+    # from priority inversion scoring, but remains inside group-FIFO checks.
+    expected = [peer_ids[0]] + sorted(
+        peer_ids[1:], key=lambda rid: (-priorities[rid], peer_ids.index(rid))
+    )
+    actual = [rid for rid in ordered if rid in peer_ids]
+    shape = actual == expected
+    position = {rid: i for i, rid in enumerate(ordered)}
+    scored = peer_ids[1:]
+    pairs = [
+        (a, b)
+        for i, a in enumerate(scored)
+        for b in scored[i + 1 :]
+        if priorities[a] != priorities[b]
+    ]
+    inversions = sum(
+        (priorities[a] - priorities[b]) * (position[a] - position[b]) > 0
+        for a, b in pairs
+    )
+    ratio = inversions / len(pairs) if pairs else 0.0
+    fifo = all(
+        [position[rid] for rid in peer_ids if priorities[rid] == priority]
+        == sorted(position[rid] for rid in peer_ids if priorities[rid] == priority)
+        for priority in set(priorities.values())
+    )
+    success = all(request_success(r) for r in rows)
+    codes = [
+        entry["response"].code
+        for cohort in (placeholder, wave)
+        for item in cohort.entries
+        for entry in item["batch"].entries
+    ]
+    report = GradeReport(run_grade=ctx.instance.get("grade", "normal"))
+    report.check("PR1", ratio)
+    path = ctx.artifact_dir / f"priority-order-{uuid.uuid4().hex}.json"
+    path.write_text(
+        json.dumps(
+            dict(snapshot=raw, dispatch=dispatch, records=rows, expected=expected),
+            indent=2,
+        )
+        + "\n"
+    )
+    return StageOutput(
+        checks=[
+            CheckResult("PR1", "PASS" if report.passed else "FAIL", actual=ratio),
+            CheckResult(
+                "PR2",
+                "PASS" if shape and fifo else "FAIL",
+                actual=actual,
+                expected=expected,
+            ),
+            CheckResult(
+                "PR6",
+                "PASS" if shape and success and codes == [200] * 7 else "FAIL",
+                actual=codes,
+            ),
+            CheckResult("P6_terminal", "PASS" if success else "FAIL"),
+        ],
+        artifacts=[str(path), str(placeholder.path), str(wave.path)],
+    )
+
+
 HANDLERS = [
+    StageHandler(
+        "priority_order_basic",
+        _expiry_params,
+        _order_basic,
+        {},
+        checks=frozenset({"PR1", "PR2", "PR6", "P6_terminal"}),
+    ),
     StageHandler("priority_settled", _reference, _settled, {}),
     StageHandler(
         "priority_pending",
