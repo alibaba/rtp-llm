@@ -118,6 +118,25 @@ protected:
         rebuildSchedulers(std::move(cfg));
     }
 
+    std::shared_ptr<const CacheTopology> makeSingleMlaTopology() const {
+        auto spec = test::makeResolvedMlaSpec(DataType::TYPE_FP16,
+                                              /*kv_lora_rank=*/1,
+                                              /*rope_head_dim=*/1,
+                                              /*seq_size_per_block=*/1,
+                                              "group0");
+        GroupBase group;
+        group.tag                       = "group0";
+        group.spec                      = spec;
+        group.policy                    = defaultCacheGroupPolicy(CacheGroupType::FULL);
+        group.layer_ids                 = {0};
+        group.block_num                 = 16;
+        group.seq_size_per_block        = 1;
+        group.kernel_seq_size_per_block = 1;
+        group.kv_block_stride_bytes     = spec->block_size_bytes();
+        group.kv_scale_stride_bytes     = spec->scale_block_size_bytes();
+        return CacheTopology::create({std::move(group)}, {{0, {"group0"}}});
+    }
+
     void rebuildSchedulerWithLayerAttnTypes(const std::vector<CacheGroupType>& layer_attn_types, int cp_size = 1) {
         P2PConnectorSchedulerConfig cfg;
         cfg.worker_grpc_addrs = tp_broadcast_addrs_;
@@ -126,12 +145,23 @@ protected:
         for (size_t i = 0; i < layer_attn_types.size(); ++i) {
             layer_group_ids.push_back({static_cast<int>(i)});
         }
-        cfg.topology = test::makeTestCacheTopology(static_cast<int>(layer_attn_types.size()),
-                                                   static_cast<int>(layer_attn_types.size()),
-                                                   layer_group_ids,
-                                                   /*kernel_blocks_per_kv_block=*/1,
-                                                   layer_attn_types);
-        cfg.cp_size  = cp_size;
+        cfg.topology = cp_size > 1 ?
+                           makeSingleMlaTopology() :
+                           test::makeTestCacheTopology(static_cast<int>(layer_attn_types.size()),
+                                                       static_cast<int>(layer_attn_types.size()),
+                                                       layer_group_ids,
+                                                       /*kernel_blocks_per_kv_block=*/1,
+                                                       layer_attn_types);
+        cfg.cp_size = cp_size;
+        if (cp_size > 1) {
+            // Keep the planner-facing ParallelismConfig consistent with the
+            // legacy execution projection above. Production config populates
+            // both from the same Prefill CP settings in KVCacheManager.
+            cfg.parallelism_config.tp_size                                = cp_size;
+            cfg.parallelism_config.prefill_cp_config.method               = CPRotateMethod::PREFILL_CP;
+            cfg.parallelism_config.prefill_cp_config.kv_cache_sharded     = true;
+            cfg.parallelism_config.prefill_cp_config.prefill_cp_size      = cp_size;
+        }
         rebuildSchedulers(std::move(cfg));
     }
 
@@ -205,12 +235,19 @@ TEST_F(P2PConnectorSchedulerTest, HandleRead_ReturnOK_BroadcastSuccess) {
 TEST_F(P2PConnectorSchedulerTest, HandleRead_FiltersLinearLayersByAttentionType) {
     rebuildSchedulerWithLayerAttnTypes({CacheGroupType::FULL, CacheGroupType::LINEAR});
 
+    auto topology = test::makeTestCacheTopology(
+        2, 2, {{0}, {1}}, /*kernel_blocks_per_kv_block=*/1, {CacheGroupType::FULL, CacheGroupType::LINEAR});
     auto resource = std::make_shared<KVCacheResource>();
-    resource->initGroups(test::makeTestCacheTopology(
-        2, 2, {{0}, {1}}, /*kernel_blocks_per_kv_block=*/1, {CacheGroupType::FULL, CacheGroupType::LINEAR}));
+    resource->initGroups(topology);
     resource->mutableBlockIds(0).assign({10, 11, 12, 13});
     resource->mutableBlockIds(1).assign({NULL_BLOCK_IDX, 21, NULL_BLOCK_IDX, 25});
     resource->cacheKeys() = {1000, 1001, 1002, 1003};
+
+    const auto layer_buffers = LayerCacheBufferUtil::convert(*resource, *topology);
+    ASSERT_EQ(layer_buffers.size(), 2);
+    EXPECT_EQ(layer_buffers[0]->blockIdMap().size(), 4);
+    ASSERT_EQ(layer_buffers[1]->blockIdMap().size(), 1);
+    EXPECT_EQ(layer_buffers[1]->getBlockId(1003), 25);
 
     std::vector<std::pair<std::string, uint32_t>> decode_transfer_servers;
     decode_transfer_servers.push_back({"127.0.0.1", 12345});
@@ -220,21 +257,16 @@ TEST_F(P2PConnectorSchedulerTest, HandleRead_FiltersLinearLayersByAttentionType)
             resource, "test_linear_filter", 1009, decode_transfer_servers, currentTimeMs() + 1000);
 
     ASSERT_TRUE(error_info.ok());
-    for (const auto& server : tp_broadcast_servers_) {
-        auto request = server->service()->getLastBroadcastTpRequest();
-        ASSERT_EQ(request.layer_blocks_size(), 2);
-
-        const auto& full_layer = request.layer_blocks(0);
-        EXPECT_EQ(full_layer.layer_id(), 0u);
-        EXPECT_EQ(full_layer.block_ids_size(), 4);
-
-        const auto& linear_layer = request.layer_blocks(1);
-        EXPECT_EQ(linear_layer.layer_id(), 1u);
-        ASSERT_EQ(linear_layer.block_ids_size(), 1);
-        ASSERT_EQ(linear_layer.cache_keys_size(), 1);
-        EXPECT_EQ(linear_layer.block_ids(0), 25u);
-        EXPECT_EQ(linear_layer.cache_keys(0), 1003);
-    }
+    const auto rank0_request = tp_broadcast_servers_[0]->service()->getLastBroadcastTpRequest();
+    const auto rank1_request = tp_broadcast_servers_[1]->service()->getLastBroadcastTpRequest();
+    // Plan-driven Prefill broadcasts routes only. Workers project their local
+    // LayerCacheBuffer from the request resource instead of receiving it here.
+    EXPECT_EQ(rank0_request.layer_blocks_size(), 0);
+    EXPECT_EQ(rank1_request.layer_blocks_size(), 0);
+    ASSERT_EQ(rank0_request.routes_size(), 2);
+    EXPECT_EQ(rank0_request.routes(0).cache_tag(), "group0");
+    EXPECT_EQ(rank0_request.routes(1).cache_tag(), "group1");
+    EXPECT_EQ(rank1_request.routes_size(), 0);
 }
 
 // 测试：broadcast 返回失败（所有响应失败）
@@ -491,8 +523,7 @@ TEST_F(P2PConnectorSchedulerTest, AsyncReadCpSendsEachWorkerItsRoundRobinKeys) {
     rebuildSchedulerWithLayerAttnTypes({CacheGroupType::FULL}, /*cp_size=*/2);
 
     auto resource = std::make_shared<KVCacheResource>();
-    resource->initGroups(
-        test::makeTestCacheTopology(1, 1, {{0}}, /*kernel_blocks_per_kv_block=*/1, {CacheGroupType::FULL}));
+    resource->initGroups(makeSingleMlaTopology());
     resource->mutableBlockIds(0).assign({10, 11});
     resource->cacheKeys() = {100, 101, 102, 103};
     auto meta = createMockMeta(2012, "test_async_read_cp", currentTimeMs() + 5000);
@@ -507,28 +538,31 @@ TEST_F(P2PConnectorSchedulerTest, AsyncReadCpSendsEachWorkerItsRoundRobinKeys) {
 
     const auto rank0_request = tp_broadcast_servers_[0]->service()->getLastBroadcastTpRequest();
     const auto rank1_request = tp_broadcast_servers_[1]->service()->getLastBroadcastTpRequest();
-    ASSERT_EQ(rank0_request.layer_blocks_size(), 1);
-    ASSERT_EQ(rank1_request.layer_blocks_size(), 1);
-    ASSERT_EQ(rank0_request.layer_blocks(0).cache_keys_size(), 2);
-    ASSERT_EQ(rank1_request.layer_blocks(0).cache_keys_size(), 2);
-    EXPECT_EQ(rank0_request.layer_blocks(0).cache_keys(0), 100);
-    EXPECT_EQ(rank0_request.layer_blocks(0).cache_keys(1), 102);
-    EXPECT_EQ(rank1_request.layer_blocks(0).cache_keys(0), 101);
-    EXPECT_EQ(rank1_request.layer_blocks(0).cache_keys(1), 103);
-    ASSERT_EQ(rank0_request.layer_blocks(0).block_ids_size(), 2);
-    ASSERT_EQ(rank1_request.layer_blocks(0).block_ids_size(), 2);
-    EXPECT_EQ(rank0_request.layer_blocks(0).block_ids(0), 10);
-    EXPECT_EQ(rank0_request.layer_blocks(0).block_ids(1), 11);
-    EXPECT_EQ(rank1_request.layer_blocks(0).block_ids(0), 10);
-    EXPECT_EQ(rank1_request.layer_blocks(0).block_ids(1), 11);
+    ASSERT_EQ(rank0_request.routes_size(), 1);
+    ASSERT_EQ(rank1_request.routes_size(), 1);
+    ASSERT_EQ(rank0_request.routes(0).layer_blocks_size(), 1);
+    ASSERT_EQ(rank1_request.routes(0).layer_blocks_size(), 1);
+    const auto& rank0_layer = rank0_request.routes(0).layer_blocks(0);
+    const auto& rank1_layer = rank1_request.routes(0).layer_blocks(0);
+    ASSERT_EQ(rank0_layer.cache_keys_size(), 2);
+    ASSERT_EQ(rank1_layer.cache_keys_size(), 2);
+    EXPECT_EQ(rank0_layer.cache_keys(0), 100);
+    EXPECT_EQ(rank0_layer.cache_keys(1), 102);
+    EXPECT_EQ(rank1_layer.cache_keys(0), 101);
+    EXPECT_EQ(rank1_layer.cache_keys(1), 103);
+    ASSERT_EQ(rank0_layer.block_ids_size(), 2);
+    ASSERT_EQ(rank1_layer.block_ids_size(), 2);
+    EXPECT_EQ(rank0_layer.block_ids(0), 10);
+    EXPECT_EQ(rank0_layer.block_ids(1), 11);
+    EXPECT_EQ(rank1_layer.block_ids(0), 10);
+    EXPECT_EQ(rank1_layer.block_ids(1), 11);
 }
 
 TEST_F(P2PConnectorSchedulerTest, AsyncReadCpRejectsDifferentSourceCpSize) {
     rebuildSchedulerWithLayerAttnTypes({CacheGroupType::FULL}, /*cp_size=*/2);
 
     auto resource = std::make_shared<KVCacheResource>();
-    resource->initGroups(
-        test::makeTestCacheTopology(1, 1, {{0}}, /*kernel_blocks_per_kv_block=*/1, {CacheGroupType::FULL}));
+    resource->initGroups(makeSingleMlaTopology());
     resource->mutableBlockIds(0).assign({10});
     resource->cacheKeys() = {100, 101};
     auto meta = createMockMeta(2013, "test_async_read_cp_mismatch", currentTimeMs() + 5000);
