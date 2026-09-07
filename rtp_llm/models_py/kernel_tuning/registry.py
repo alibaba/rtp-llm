@@ -1,4 +1,5 @@
 import logging
+import os
 from typing import Optional
 
 import torch
@@ -8,9 +9,15 @@ from rtp_llm.models_py.kernel_tuning.types import KernelTuningStatus
 
 _LOGGER = logging.getLogger(__name__)
 
+ROCM_FP8_MOE_DETERMINISTIC_REDUCE_ENV = "RTP_LLM_ROCM_FP8_MOE_DETERMINISTIC_REDUCE"
+
 _PROVIDERS_BY_ARCH = {
     "gfx942": (configure_aiter_fmoe_overlays,),
 }
+
+
+def is_rocm_fp8_moe_deterministic_reduce_enabled() -> bool:
+    return os.environ.get(ROCM_FP8_MOE_DETERMINISTIC_REDUCE_ENV, "0") == "1"
 
 
 def _current_rocm_arch() -> Optional[str]:
@@ -28,6 +35,9 @@ def configure_kernel_tuning(
     arch: Optional[str] = None,
 ) -> tuple[KernelTuningStatus, ...]:
     """Configure registered kernel-tuning providers for the current device."""
+
+    if not is_rocm_fp8_moe_deterministic_reduce_enabled():
+        return ()
 
     resolved_arch = arch if arch is not None else _current_rocm_arch()
     statuses = tuple(

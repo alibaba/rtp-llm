@@ -17,6 +17,10 @@ from typing import Optional
 import aiter
 import torch
 
+from rtp_llm.models_py.kernel_tuning import (
+    ROCM_FP8_MOE_DETERMINISTIC_REDUCE_ENV,
+    is_rocm_fp8_moe_deterministic_reduce_enabled,
+)
 from rtp_llm.models_py.triton_kernels.moe.fixed_order_route_reduce import (
     fixed_order_fp32_route_reduce,
     make_route_local_ids,
@@ -25,9 +29,7 @@ from rtp_llm.models_py.triton_kernels.moe.fixed_order_route_reduce import (
 _LOGGER = logging.getLogger(__name__)
 _LOGGED_MESSAGES: set[str] = set()
 
-_ENABLE_ENV = "RTP_LLM_ROCM_FP8_MOE_DETERMINISTIC_REDUCE"
 _MAX_TOKENS_ENV = "RTP_LLM_ROCM_FP8_MOE_DETERMINISTIC_MAX_TOKENS"
-_GRAPH_ENVS = ("ENABLE_CUDA_GRAPH", "ENABLE_NATIVE_CUDA_GRAPH")
 
 _SUPPORTED_EXPERTS = 256
 _SUPPORTED_HIDDEN_SIZE = 2048
@@ -51,19 +53,6 @@ def _log_once(level: int, key: str, message: str) -> None:
         return
     _LOGGED_MESSAGES.add(key)
     _LOGGER.log(level, message)
-
-
-def _enabled() -> bool:
-    return os.environ.get(_ENABLE_ENV, "0") == "1"
-
-
-def _validate_runtime_mode() -> None:
-    enabled_graph_envs = [name for name in _GRAPH_ENVS if os.environ.get(name) == "1"]
-    if enabled_graph_envs:
-        raise RuntimeError(
-            f"{_ENABLE_ENV}=1 requires CUDA/HIP graph mode to be disabled; "
-            f"set {', '.join(enabled_graph_envs)}=0"
-        )
 
 
 def _max_tokens() -> int:
@@ -230,9 +219,8 @@ def try_deterministic_fp8_moe(
 ) -> Optional[torch.Tensor]:
     """Return deterministic output when enabled/supported, otherwise ``None``."""
 
-    if not _enabled():
+    if not is_rocm_fp8_moe_deterministic_reduce_enabled():
         return None
-    _validate_runtime_mode()
 
     reason = _unsupported_reason(
         hidden_states,
@@ -249,7 +237,8 @@ def try_deterministic_fp8_moe(
         _log_once(
             logging.WARNING,
             f"fallback:{reason}",
-            f"{_ENABLE_ENV}=1 but deterministic ROCm FP8 MoE is falling back: {reason}",
+            f"{ROCM_FP8_MOE_DETERMINISTIC_REDUCE_ENV}=1 but deterministic ROCm "
+            f"FP8 MoE is falling back: {reason}",
         )
         return None
 
