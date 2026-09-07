@@ -429,6 +429,20 @@ def make_env_spec(plan, profile, lease):
     return spec
 
 
+def configure_master_sync_log(spec, artifact_dir, env_epoch):
+    """Choose a private per-setup log directory, with no arbitrary path input."""
+    from pathlib import Path
+
+    if spec.masters or type(env_epoch) is not int or env_epoch < 1:
+        raise ValueError(
+            "private sync log requires one master and a positive environment epoch"
+        )
+    log_dir = Path(artifact_dir).resolve() / f"master-sync-{env_epoch}"
+    log_dir.mkdir(parents=True, exist_ok=False)
+    spec.master_extra_args = [*spec.master_extra_args, f"--flexlb.log.path={log_dir}"]
+    return log_dir / "sync.log"
+
+
 class JavaMockBackend:
     def __init__(self, lease):
         self.lease = lease
@@ -488,8 +502,15 @@ class JavaMockBackend:
                     owner.environments.append(env)
 
         spec = make_env_spec(plan, ctx.instance["profile"], self.lease)
+        sync_log_path = (
+            configure_master_sync_log(spec, ctx.artifact_dir, ctx.env_epoch)
+            if plan.get("master_sync_log", False)
+            else None
+        )
         self.manager = OwnedManager(ctx.artifact_dir / "environment")
         env = self.manager.ensure(spec)
+        env.master_sync_log_path = sync_log_path
+        ctx.master_sync_log_path = sync_log_path
         deadline.check()
         if (
             env.base_grpc_port != self.lease["mock_base"]
@@ -508,6 +529,7 @@ class JavaMockBackend:
                     fingerprint=spec.fingerprint(),
                     lease=self.lease,
                     resolved_config=plan["resolved_config"],
+                    master_sync_log_path=str(sync_log_path) if sync_log_path else None,
                 ),
                 indent=2,
             )
