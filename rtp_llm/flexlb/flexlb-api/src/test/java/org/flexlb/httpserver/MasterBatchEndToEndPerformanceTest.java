@@ -18,6 +18,7 @@ import io.netty.channel.nio.NioEventLoopGroup;
 import org.flexlb.balance.scheduler.DefaultBatchDispatcher;
 import org.flexlb.balance.scheduler.DefaultBatchDispatcherTestFactory;
 import org.flexlb.balance.scheduler.DefaultRouter;
+import org.flexlb.balance.session.SessionPlacementStore;
 import org.flexlb.balance.strategy.CostBasedDecodeStrategy;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.balance.strategy.RandomStrategy;
@@ -217,6 +218,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
     private List<ManagedChannel> masterChannels = List.of();
     private ServerScheduleLatencyRecorder latencyRecorder;
     private ActiveRequestCounter activeRequestCounter;
+    private final SessionPlacementStore sessionPlacementStore = new SessionPlacementStore();
     private static ch.qos.logback.classic.Logger flexlbLogger;
     private static ch.qos.logback.classic.Logger syncLogger;
     private static ch.qos.logback.classic.Logger mockWorkerLogger;
@@ -330,7 +332,8 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                 new CostBasedPrefillStrategy(
                         engineWorkerStatus,
                         cache,
-                        mock(EngineHealthReporter.class));
+                        mock(EngineHealthReporter.class),
+                        sessionPlacementStore);
         ModelMetaConfig modelMeta = mock(
                 ModelMetaConfig.class, withSettings().stubOnly());
         when(modelMeta.requiredRoles()).thenReturn(
@@ -365,7 +368,8 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                 configService,
                 reporter,
                 latencyRecorder,
-                NO_OP_REQUEST_REPORTER);
+                NO_OP_REQUEST_REPORTER,
+                sessionPlacementStore);
 
         int grpcPort;
         try (ServerSocket socket = new ServerSocket(0)) {
@@ -432,7 +436,8 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                 constructorOnlyCacheMetricsReporter,
                 grpcClient,
                 constructorOnlyLoopResources,
-                engineWorkerStatus);
+                engineWorkerStatus,
+                sessionPlacementStore);
     }
 
     @AfterEach

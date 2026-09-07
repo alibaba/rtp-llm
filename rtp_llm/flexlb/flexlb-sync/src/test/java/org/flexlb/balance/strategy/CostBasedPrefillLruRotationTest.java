@@ -2,6 +2,7 @@ package org.flexlb.balance.strategy;
 
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.EndpointRegistry;
+import org.flexlb.balance.session.SessionPlacementStore;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.DispatcherConfig;
@@ -68,7 +69,7 @@ class CostBasedPrefillLruRotationTest {
         when(cache.findMatchingEngines(any(), any(), any())).thenReturn(Map.of());
         strategy = new CostBasedPrefillStrategy(
                 new WorkerDirectory(registry), cache,
-                mock(EngineHealthReporter.class));
+                mock(EngineHealthReporter.class), new SessionPlacementStore());
 
         Request request = new Request();
         request.setSeqLen(1_000L);

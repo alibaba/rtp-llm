@@ -5,9 +5,9 @@ import ch.qos.logback.core.read.ListAppender;
 import io.grpc.stub.StreamObserver;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.nio.NioEventLoopGroup;
-import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol;
@@ -125,7 +125,8 @@ class ScheduleForwardMatrixTest {
                 configService,
                 mock(BatchSchedulerReporter.class),
                 mock(ServerScheduleLatencyRecorder.class),
-                mock(RequestSchedulerReporter.class));
+                mock(RequestSchedulerReporter.class),
+                mock(org.flexlb.balance.session.SessionPlacementStore.class));
 
         pvLogger = (ch.qos.logback.classic.Logger) LoggerFactory.getLogger("pvLogger");
         pvAppender = new ListAppender<>();

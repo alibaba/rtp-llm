@@ -6,6 +6,7 @@ import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.projection.RouteProjection;
+import org.flexlb.balance.session.SessionPlacementStore;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.RoutingConfig;
@@ -43,15 +44,18 @@ public class CostBasedPrefillStrategy {
     private final WorkerDirectory workerDirectory;
     private final CacheAwareService cacheAwareService;
     private final EngineHealthReporter engineHealthReporter;
+    private final SessionPlacementStore sessionPlacementStore;
     private final AtomicLong equalTtftCursor = new AtomicLong();
     private final AtomicLong equalCacheLeaderCursor = new AtomicLong();
 
     public CostBasedPrefillStrategy(WorkerDirectory workerDirectory,
                                     CacheAwareService cacheAwareService,
-                                    EngineHealthReporter engineHealthReporter) {
+                                    EngineHealthReporter engineHealthReporter,
+                                    SessionPlacementStore sessionPlacementStore) {
         this.workerDirectory = workerDirectory;
         this.cacheAwareService = cacheAwareService;
         this.engineHealthReporter = engineHealthReporter;
+        this.sessionPlacementStore = sessionPlacementStore;
     }
 
     public PlacementResult<SelectedRole, RoleType> select(
@@ -99,6 +103,7 @@ public class CostBasedPrefillStrategy {
         final int selectedIndex;
         if (modeledSelection) {
             selectedIndex = selectBestCandidate(
+                    balanceContext,
                     survivors,
                     survivors.minimumProjectedTtftMs,
                     roleType,
@@ -109,6 +114,8 @@ public class CostBasedPrefillStrategy {
             // Existing Engine work has no honest duration. This path never
             // invents a TTFT or passes the candidates through TTFT/cache policy.
             selectedIndex = selectUnmodeledCandidate(survivors);
+            SessionAffinityPolicy.reportDecision(balanceContext, roleType,
+                    engineHealthReporter, SessionAffinityPolicy.Reason.UNMODELED_TTFT);
         }
 
         if (selectedIndex < 0) {
@@ -198,7 +205,8 @@ public class CostBasedPrefillStrategy {
     }
 
     /** Select from candidates that already passed the common hard filters. */
-    private int selectBestCandidate(PrefillCandidateSet survivors,
+    private int selectBestCandidate(BalanceContext context,
+                                      PrefillCandidateSet survivors,
                                       long minProjectedTtftMs,
                                       RoleType roleType,
                                       String group,
@@ -257,6 +265,30 @@ public class CostBasedPrefillStrategy {
                         : minimumHitRateMet ? "OVER_CAP" : "LOW_CACHE_HIT";
             }
         }
+
+        SessionAffinityPolicy.Decision session = preferredCandidates.isEmpty()
+                ? SessionAffinityPolicy.evaluate(context.getRequest(),
+                        config.getRouter().getRoles().getPrefill().getSessionAffinity(),
+                        sessionPlacementStore, survivors.size(), survivors::endpointAddress,
+                        survivors::projectedTtftMs, minProjectedTtftMs)
+                : SessionAffinityPolicy.Decision.none(
+                        SessionAffinityPolicy.Reason.CACHE_AFFINITY_PRECEDENCE);
+        if (session.hasPreference()) {
+            int selected = session.preferredIndex();
+            if (choice.getType()
+                    == RoutingConfig.CandidateChoiceType.LEAST_RECENTLY_USED_IN_POOL) {
+                publishMonotonically(survivors.endpoint(selected).getLastSelectedTime());
+            }
+            if (cacheAffinity != null) {
+                reportCacheAffinityDecision(roleType, survivors.endpoint(selected).getIp(),
+                        "SESSION_OVERRIDE");
+            }
+            SessionAffinityPolicy.reportDecision(context, roleType, engineHealthReporter,
+                    session.reason());
+            return selected;
+        }
+        SessionAffinityPolicy.reportDecision(context, roleType, engineHealthReporter,
+                session.reason());
 
         if (choice.getType()
                 == RoutingConfig.CandidateChoiceType.LEAST_RECENTLY_USED_IN_POOL) {

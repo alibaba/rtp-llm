@@ -1,6 +1,21 @@
 load("//bazel:arch_select.bzl", get_triton_deps = "triton_deps", "internal_deps")
 
 py_test(
+    name = "request_headers_test",
+    srcs = ["request_headers_test.py"],
+    deps = ["//rtp_llm/server:request_headers"],
+)
+
+py_test(
+    name = "master_client_test",
+    srcs = ["master_client_test.py"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/server:server",
+    ],
+)
+
+py_test(
     name = "backend_rpc_server_visitor_test",
     srcs = ["backend_rpc_server_visitor_test.py"],
     deps = [

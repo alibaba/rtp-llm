@@ -29,13 +29,11 @@ from rtp_llm.dash_sc.access_log import DASH_SC_GRPC_ACCESS_LOGGER_NAME
 from rtp_llm.dash_sc.access_record import GrpcAccessRecord
 from rtp_llm.dash_sc.codec import (
     DASH_ERROR_ABORT,
-    DASH_ERROR_ADMISSION_OVERLOADED,
     DASH_ERROR_AUTO_TPM_PREEMPTED,
     DASH_ERROR_BAD_REQUEST,
     DASH_ERROR_CAPACITY,
     DASH_ERROR_INTERNAL,
     DASH_ERROR_INVALID_OUTPUT,
-    DASH_ERROR_RESOURCE_EXHAUSTED,
     DASH_ERROR_TIMEOUT,
     DASH_ERROR_TOO_LONG,
     DASH_ERROR_UNSUPPORTED,
@@ -57,6 +55,9 @@ from rtp_llm.dash_sc.proto import predict_v2_pb2
 from rtp_llm.metrics import AccMetrics
 from rtp_llm.ops import RoleType
 from rtp_llm.server.master_client import MasterClient
+from rtp_llm.cpp.model_rpc.proto.flexlb_schedule_service_pb2 import (
+    SESSION_STATE_ESTABLISHED,
+)
 from rtp_llm.utils.base_model_datatypes import (
     AuxInfo,
     GenerateInput,
@@ -1741,6 +1742,106 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(visitor.enqueue_called, 1)
         self.assertEqual(_gen_ids(chunks[0]), [10, 1, 11])
 
+    async def test_phase2_continues_session_without_replaying_new(self) -> None:
+        id_key = "x-ds-inference-session-id"
+        state_key = "x-ds-inference-session-state"
+        tok = _FakeTokenizer(
+            {
+                "<think>\n": [128821, 198],
+                "</think>\n\n": [128822, 271],
+                "<think>\n\n</think>\n\n": [128821, 271, 128822, 271],
+                "</think>": [128822],
+            }
+        )
+        env_cfg = _GenerateEnvCfg()
+        for session_id, state, expected in (
+            ("session", "new", "established"),
+            ("session", "NEW", "established"),
+            ("session", "established", "established"),
+            ("session", "unknown", "unknown"),
+            ("", "new", "new"),
+            ("invalid id", "new", "new"),
+        ):
+            for from_metadata in (False, True):
+                with self.subTest(
+                    state=state, session_id=session_id, metadata=from_metadata
+                ):
+                    headers = {id_key: session_id, state_key: state}
+                    metadata = list(headers.items()) if from_metadata else []
+                    body_headers = (
+                        {state_key: "unknown"} if from_metadata else dict(headers)
+                    )
+                    original_body_headers = dict(body_headers)
+                    other = OtherParams(
+                        enable_thinking=True, request_headers=body_headers
+                    )
+                    visitor = _MultiStreamVisitor(
+                        [
+                            _FakeAsyncStream(
+                                [
+                                    GenerateOutputs(
+                                        generate_outputs=[
+                                            GenerateOutput(
+                                                output_ids=torch.tensor(
+                                                    [10, 1], dtype=torch.int32
+                                                ),
+                                                finished=False,
+                                                aux_info=AuxInfo(
+                                                    input_len=3, reuse_len=0
+                                                ),
+                                            )
+                                        ]
+                                    )
+                                ]
+                            ),
+                            _FakeAsyncStream(
+                                [
+                                    GenerateOutputs(
+                                        generate_outputs=[
+                                            GenerateOutput(
+                                                output_ids=torch.tensor(
+                                                    [20], dtype=torch.int32
+                                                ),
+                                                finished=True,
+                                                aux_info=AuxInfo(
+                                                    input_len=4, reuse_len=0
+                                                ),
+                                            )
+                                        ]
+                                    )
+                                ]
+                            ),
+                        ]
+                    )
+                    await _drain(
+                        iter_real_model_stream_infer(
+                            self._minimal_request(),
+                            _parsed_input_ids([7, 8, 128821]),
+                            SamplingParams(),
+                            other,
+                            visitor,
+                            rtp_llm_request_id=100,
+                            invocation_metadata=metadata,
+                            echo_prefix_ids=[128821, 198],
+                            tokenizer=tok,
+                            generate_env_config=env_cfg,
+                            think_runtime=build_think_runtime(
+                                tok, env_cfg, "deepseek_v4"
+                            ),
+                            phase2_request_id_factory=lambda: 200,
+                        )
+                    )
+                    self.assertEqual(visitor.enqueue_called, 2)
+                    first, second = visitor.generate_inputs
+                    self.assertEqual(first.headers[state_key], state)
+                    self.assertEqual(second.headers[state_key], expected)
+                    self.assertEqual(second.headers.get(id_key, ""), session_id)
+                    self.assertIsNot(first.headers, second.headers)
+                    self.assertEqual(other.request_headers, original_body_headers)
+                    self.assertEqual(
+                        metadata, list(headers.items()) if from_metadata else []
+                    )
+
     async def test_terminate_token_id_configurable_value(self) -> None:
         """A non-default ``terminate_token_id`` (here 42) drives the same
         truncation + phase-2 prompt rewrite that token id 1 does by default."""
@@ -3160,6 +3261,36 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
             {"user_id": "u2", "x-dashscope-apikeyid": "ak2"},
         )
 
+    async def test_invocation_metadata_overrides_ds_header_attributes(self) -> None:
+        visitor = _FakeVisitor(_FakeAsyncStream([]))
+        servicer = DashScInferenceServicer(backend_visitor=visitor)
+        context = MagicMock()
+        context.invocation_metadata.return_value = (
+            ("user_id", "metadata-user"),
+            ("x-ds-inference-session-id", "metadata-session"),
+        )
+        request = self._valid_infer_request()
+        request.parameters["ds_header_attributes"].string_param = json.dumps(
+            {
+                "user_id": "body-user",
+                "x-ds-inference-session-id": "body-session",
+                "x-ds-inference-session-state": "established",
+            }
+        )
+
+        await _drain(servicer.ModelStreamInfer(_areq_iter([request]), context))
+
+        self.assertIsNotNone(visitor.last_generate_input)
+        self.assertEqual(visitor.last_generate_input.headers["user_id"], "metadata-user")
+        self.assertEqual(
+            visitor.last_generate_input.headers["x-ds-inference-session-id"],
+            "metadata-session",
+        )
+        self.assertEqual(
+            visitor.last_generate_input.headers["x-ds-inference-session-state"],
+            "established",
+        )
+
     async def test_real_mode_uses_ds_header_attributes_for_backend_controls(
         self,
     ) -> None:
@@ -3174,6 +3305,8 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
                 "x-ds-request-priority": "10",
                 "user_id": "u1",
                 "x-dashscope-apikeyid": "ak1",
+                "x-ds-inference-session-id": "isess_v1_grpc",
+                "x-ds-inference-session-state": "established",
             }
         )
         request.parameters["enable_thinking"].bool_param = False
@@ -3191,8 +3324,17 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(generate_config.traffic_reject_priority, 10)
         self.assertEqual(
             visitor.last_generate_input.headers,
-            {"user_id": "u1", "x-dashscope-apikeyid": "ak1"},
+            {
+                "user_id": "u1",
+                "x-dashscope-apikeyid": "ak1",
+                "x-ds-inference-session-id": "isess_v1_grpc",
+                "x-ds-inference-session-state": "established",
+            },
         )
+        hint = MasterClient._extract_session_routing_hint(visitor.last_generate_input)
+        self.assertIsNotNone(hint)
+        self.assertEqual(hint.session_id, "isess_v1_grpc")
+        self.assertEqual(hint.state, SESSION_STATE_ESTABLISHED)
         # qos_priority must NOT be set when x-dashscope-inner-qos-level
         # is absent from the request.
         self.assertIsNone(generate_config.qos_priority)

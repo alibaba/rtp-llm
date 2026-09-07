@@ -28,6 +28,7 @@ public final class RoutingConfig {
         private CandidateChoiceConfig candidateChoice =
                 new CandidateChoiceConfig();
         private CacheAffinityConfig cacheAffinity;
+        private SessionAffinityConfig sessionAffinity;
     }
 
     @Getter
@@ -90,6 +91,17 @@ public final class RoutingConfig {
 
         /** Minimum reusable-prefix percentage required before affinity applies. */
         private double minPrefixHitPercent = 5;
+    }
+
+    @Getter
+    @Setter
+    public static final class SessionAffinityConfig {
+        public static final long MAX_TTL_MS = 60L * 60L * 1000L;
+        public static final long DEFAULT_MAX_ENTRIES = 200_000L;
+
+        private long ttlMs;
+        private long maxExtraTtftMs;
+        private long maxEntries = DEFAULT_MAX_ENTRIES;
     }
 
     @Getter

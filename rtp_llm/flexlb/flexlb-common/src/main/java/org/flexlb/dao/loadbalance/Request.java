@@ -17,6 +17,7 @@ import java.util.concurrent.TimeUnit;
 public class Request {
     public static final long DEFAULT_GENERATE_TIMEOUT_MS =
             TimeUnit.HOURS.toMillis(1L);
+    public static final int SESSION_SCHEMA_VERSION = 1;
 
     @ToString.Exclude
     @JsonProperty("block_cache_keys")
@@ -63,5 +64,17 @@ public class Request {
      */
     @JsonProperty("priority")
     private int priority = 0;
+
+    private int sessionSchemaVersion;
+
+    private String inferenceSessionId = "";
+
+    private SessionState inferenceSessionState = SessionState.UNSPECIFIED;
+
+    public enum SessionState {
+        UNSPECIFIED,
+        NEW,
+        ESTABLISHED
+    }
 
 }
