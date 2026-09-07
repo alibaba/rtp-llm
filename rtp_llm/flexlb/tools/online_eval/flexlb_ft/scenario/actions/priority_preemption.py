@@ -1130,7 +1130,264 @@ def _reservation_final(ctx, p, deadline):
     )
 
 
+def _observability_duplicate(ctx, p, deadline):
+    from ..runtime import StageTimeout
+
+    cohort = _cohort(ctx, p["requests"])
+    rows = cohort.records()
+    if len(rows) != 1 or rows[0]["schedule"]["status"] != "OK":
+        raise ValueError("duplicate probe requires one admitted placeholder")
+    rid = rows[0]["wire_request_id"]
+    evidence = dict(wire_request_id=rid, priority=40, code=None, error=None)
+    holder = {}
+
+    def cleanup(d):
+        call = holder.get("call")
+        if call is not None:
+            call.cancel()
+
+    ctx.add_cleanup("observability-duplicate-client", cleanup)
+    path = (
+        ctx.artifact_dir / f"preemption-observability-duplicate-{uuid.uuid4().hex}.json"
+    )
+    try:
+        limit = min(30.0, deadline.remaining())
+        stub = ctx.ops.schedule_pb2_grpc.FlexlbServiceStub(
+            ctx.ops._channel(ctx.ops.master_target())
+        )
+        evidence["started_s"] = ctx.clock()
+        holder["call"] = stub.Schedule.future(
+            ctx.ops.build_schedule_request(
+                rid, priority=40, input_len=2048, output_len=2
+            ),
+            timeout=limit,
+        )
+        response = holder["call"].result(timeout=limit)
+        evidence["code"] = int(response.code)
+    except StageTimeout:
+        raise
+    except Exception as exc:
+        # The legacy probe records RPC failure then continues the main wave.
+        deadline.check()
+        evidence["error"] = repr(exc)
+    finally:
+        cleanup(deadline)
+        holder.clear()
+        evidence["ended_s"] = ctx.clock()
+        path.write_text(json.dumps(evidence, indent=2) + "\n")
+    return StageOutput({"rejected": evidence["code"] == 8406}, artifacts=[str(path)])
+
+
+def _observability(ctx, p, deadline):
+    from pathlib import Path
+
+    from ...engine_ops import parse_prometheus_samples
+
+    ph_wave, wave = [_cohort(ctx, p[k]) for k in ("placeholder", "wave")]
+    if not ph_wave.complete or not wave.complete:
+        raise ValueError("observability requires drained owned cohorts")
+    ph, rows = ph_wave.records(), wave.records()
+    tags = ["30a", "30b", "50a", "50b", "70a", "70b", "30c", "30d", "90"]
+    if len(ph) != 1 or len(rows) != 9 or len(wave.entries) != 9:
+        raise ValueError("observability cohort size differs from O1")
+    for cohort, priorities in (
+        (ph_wave, [50]),
+        (wave, [30, 30, 50, 50, 70, 70, 30, 30, 90]),
+    ):
+        if [r.get("priority") for r in cohort.p["requests"]] != priorities or any(
+            (r["input_len"], r["output_len"]) != (2048, 2) for r in cohort.p["requests"]
+        ):
+            raise ValueError("observability request shape differs from O1")
+    if [r["tag"] for r in wave.p["requests"]] != tags:
+        raise ValueError("observability tags differ from O1")
+    ph_ok, ph_code = _outcome(ph_wave.entries[0], ph[0])
+    outcomes = [_outcome(e, r) for e, r in zip(wave.entries, rows)]
+    if any(type(code) is not int for code in [ph_code] + [c for _, c in outcomes]):
+        raise ValueError("observability lacks typed terminal evidence")
+    raw = _http(ctx.ops, "snapshot", deadline)
+    engines = raw.get("engines")
+    if not isinstance(engines, list):
+        raise ValueError("missing Prefill lifecycle snapshot")
+    ranks = {
+        r["wire_request_id"]: i
+        for i, r in enumerate(
+            sorted(
+                ph + rows,
+                key=lambda r: (r["schedule"]["ended_s"], r["wire_request_id"]),
+            )
+        )
+    }
+    # Only the completed pair needs dispatch evidence; expired requests need not run.
+    dispatch = []
+    for row in (rows[0], rows[8]):
+        rid = row["wire_request_id"]
+        matches = [
+            e.get("request_lifecycle", {}).get(str(rid))
+            for e in engines
+            if e.get("role") == "prefill"
+        ]
+        matches = [m for m in matches if m is not None]
+        if len(matches) != 1:
+            raise ValueError("missing or ambiguous O1 Prefill lifecycle")
+        dispatch.append(
+            (_number(matches[0].get("running_ms"), 0, 1e18), ranks[rid], rid)
+        )
+    completed = ["ph"] + [tag for tag, (ok, _) in zip(tags, outcomes) if ok]
+    expired = [tag for tag, (_, code) in zip(tags, outcomes) if code == 8511]
+    rejected = [tag for tag, (_, code) in zip(tags, outcomes) if code in (8402, 8510)]
+    client = (
+        ph_ok
+        and completed == ["ph", "30a", "90"]
+        and len(expired) == 7
+        and not rejected
+        and dispatch[0] < dispatch[1]
+    )
+
+    metric = _reservation_metric(ctx, {"labels": {}}, deadline)
+    snapshot = ctx.resource(metric.output["snapshot"], "snapshot")
+    body = snapshot["attempts"][-1]["body"]
+    samples = parse_prometheus_samples(body, "")
+
+    def metric_sum(name, labels):
+        values = [
+            _number(value, 0, 1e18)
+            for metric_name, metric_labels, value in samples
+            if name in metric_name
+            and all(metric_labels.get(k) == v for k, v in labels.items())
+        ]
+        return sum(values) if values else None
+
+    buckets = {
+        str(prio): metric_sum("auto_tpm_request", {"priority": str(prio)})
+        for prio in (30, 50, 70, 90)
+    }
+    latency = metric_sum("auto_tpm_schedule", {"result": "success"})
+    victim = snapshot["value"]
+    metrics_ok = (
+        buckets == {"30": 4.0, "50": 3.0, "70": 2.0, "90": 1.0}
+        and latency is not None
+        and (victim or 0.0) == 0.0
+    )
+    private = getattr(ctx, "master_log_dir", None)
+    if private is None or private != getattr(ctx.env, "master_log_dir", None):
+        raise ValueError("O1 requires this environment's private Master log directory")
+    private = Path(private).resolve()
+    root = ctx.artifact_dir.resolve()
+    if root not in private.parents:
+        raise ValueError("O1 Master log directory lies outside instance artifacts")
+    logs = {}
+
+    def read_log(path):
+        path = Path(path)
+        if root not in path.resolve().parents:
+            raise ValueError("O1 log path escapes owned instance")
+        try:
+            with path.open("rb") as stream:
+                data = stream.read(16 * 1024 * 1024 + 1)
+            if len(data) > 16 * 1024 * 1024:
+                raise ValueError("O1 log exceeds bounded observation size")
+            text = data.decode("utf-8", errors="replace")
+            logs[str(path)] = dict(text=text, missing=False)
+            return text
+        except FileNotFoundError:
+            logs[str(path)] = dict(text="", missing=True)
+            return ""
+
+    master = (
+        read_log(Path(ctx.env.run_dir) / "flexlb_master.log")
+        + "\n"
+        + read_log(private / "flexlb.log")
+    )
+    pv = read_log(private / "pv.log")
+    wanted = {r["wire_request_id"] for r in ph + rows}
+    selected = []
+    for line in pv.splitlines():
+        start = line.find("{")
+        if start < 0:
+            continue
+        try:
+            record = json.loads(line[start:])
+        except ValueError:
+            continue
+        if (
+            isinstance(record, dict)
+            and type(record.get("requestId")) is int
+            and record["requestId"] in wanted
+        ):
+            selected.append(record)
+    selected = selected[-400:]
+    scheduler_log = "[priority-scheduler]" in master
+    pv_field = any("admissionRejectReason" in row for row in selected)
+    evidence = dict(
+        placeholder=ph,
+        wave=rows,
+        outcomes=outcomes,
+        completed=completed,
+        expired=expired,
+        rejected=rejected,
+        raw=raw,
+        dispatch=dispatch,
+        client=client,
+        buckets=buckets,
+        latency_success=latency,
+        victim_total=victim,
+        metrics_ok=metrics_ok,
+        logs=logs,
+        pv_selected=selected,
+        scheduler_log=scheduler_log,
+        pv_field=pv_field,
+    )
+    path = ctx.artifact_dir / f"preemption-observability-{uuid.uuid4().hex}.json"
+    path.write_text(json.dumps(evidence, indent=2) + "\n")
+    return StageOutput(
+        {"client": client, "planes": metrics_ok and scheduler_log and pv_field},
+        artifacts=metric.artifacts + [str(path)],
+    )
+
+
+def _observability_final_params(p, plan):
+    p = _params(p, {"client", "planes", "duplicate"}, {"client", "planes", "duplicate"})
+    for key in p:
+        plan.reference(p[key], "boolean")
+    return p
+
+
+def _observability_final(ctx, p, deadline):
+    client, planes, duplicate = [
+        ctx.resolve(p[k]) for k in ("client", "planes", "duplicate")
+    ]
+    return StageOutput(
+        checks=[
+            CheckResult(key, "PASS" if passed else "FAIL", actual=passed, expected=True)
+            for key, passed in (
+                ("AT8", client and planes),
+                ("P6", client),
+                ("AT6", duplicate and client),
+            )
+        ]
+    )
+
+
 HANDLERS = [
+    StageHandler(
+        "preemption_observability_duplicate",
+        _settled_params,
+        _observability_duplicate,
+        {"rejected": "boolean"},
+    ),
+    StageHandler(
+        "preemption_observability",
+        _same_params,
+        _observability,
+        {"client": "boolean", "planes": "boolean"},
+    ),
+    StageHandler(
+        "preemption_observability_final",
+        _observability_final_params,
+        _observability_final,
+        {},
+        checks=frozenset({"AT8", "P6", "AT6"}),
+    ),
     StageHandler(
         "preemption_reservation_metric",
         _reservation_metric_params,

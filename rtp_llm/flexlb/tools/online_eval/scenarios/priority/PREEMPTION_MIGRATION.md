@@ -485,3 +485,57 @@ The valid absent-series arithmetic and all wave thresholds are unchanged.
 Two additional regressions exercise malformed labels through the real
 metric action and through the complete program: baseline ERROR blocks
 incoming and later waves while retaining the raw metric error artifact.
+
+
+## Observability integrity (O1)
+
+`observability_integrity` ports the executable `atpm_observability_integrity`
+contract on fixed shared 4e2139. Exact O1 is 1P/4D, SINGLE/NON_BATCH,
+PRIORITY, inflight1/waiting8, PREFILL_QUEUED, queueTimeout7000,
+metric_whitelist=flexlb_auto_tpm and master_debug_log=true. The latter
+controls the old single-Master DEBUG loggers; it is not debug_enabled or
+FLEXLB_DEBUG_ENABLED. Actual EnvSpec perf/topology/config/master_env and
+logging flag are compared to `_o1_spec` in the fixture.
+
+Prefill3000/sync1.5, admitted placeholder50/2048/2 and pending6/.1 precede
+a Schedule-only duplicate of the exact placeholder RID: priority40,
+2048/2, RPC30. Code8406 is required only by AT6. No consumer opens for
+that probe; an RPC exception remains recorded and allows the wave to
+continue as before, while stage expiry still propagates. The nine wave
+priorities are30/30/50/50/70/70/30/30/90, gap.15, all2048/2. Schedule90,
+Generate120 and fresh per-request drain35 (wave315) stay unchanged.
+
+Client shape remains exactly ph+30a+90 successful, seven8511, no
+8402/8510, and actual Prefill running_ms/Schedule-settle-rank/RID order
+30a before90. Only the successful pair requires lifecycle dispatch
+records; absent or malformed pair evidence now raises ERROR rather than
+using the old missing-timestamp sentinel. Each original request keeps
+Schedule and actual consumer terminal evidence separately.
+
+Request counter buckets remain30:4/50:3/70:2/90:1. A schedule success
+metric need only be present (zero is legal). Victim total remains the
+executable old `(total or0)==0`; the old docstring's value1 is stale and
+is not the executable assertion. Missing victim series stays explicit
+weak-zero evidence. Metric source validation uses the ninth candidate's
+fixed endpoint/strict victim sample checks; required request/schedule
+metrics retain the old substring/subset parser semantics.
+
+Read only this single Master's stdout and private master-logs/flexlb.log
+and pv.log under instance artifacts; no home-directory fallback. The
+scheduler marker may appear in either owned Master log. Parse prefixed
+PV JSON records, filter exact integer requestId to the ten owned RIDs,
+then retain the last400 matching records. An admissionRejectReason key
+with null value still proves channel availability. Exact RID filtering
+closes the old substring-prefix ambiguity. Missing files make the plane
+false; path ownership errors or reads above16MiB raise ERROR. Raw owned
+log text and selected records are retained in the observation artifact.
+
+Metrics/log/PV failures are scalar until final AT8, so P6 and AT6 retain
+independent verdicts. After mandatory clean30: AT8=client+planes,
+P6=client+clean, AT6=duplicate8406+client+clean. As with the other migrated
+programs, cleanup failure hard-stops instead of the old report's soft
+continuation; it cannot produce PASS. RestoreP100 and owned teardown
+remain registered. Six complete-program fixtures cover positive evidence,
+missing required metric, duplicate accepted without an extra consumer,
+foreign RID prefix, reversed actual dispatch and missing private DEBUG
+marker. No Java or paired acceptance is claimed.

@@ -14,6 +14,7 @@ legacy_case_ids:
 - atpm_preempt_decode_engine_owned
 - atpm_error_code_family
 - atpm_decode_reservation_priority
+- atpm_observability_integrity
 environment:
   backend: java_mock
   n_prefill: 1
@@ -2149,6 +2150,160 @@ variants:
         prefill_fixed_ms: 100
   - id: teardown
     action: teardown
+- id: observability_integrity
+  legacy_case_ids:
+  - atpm_observability_integrity
+  environment_overrides:
+    metric_whitelist: flexlb_auto_tpm
+    master_debug_log: true
+    config_overrides:
+      queue_timeout_ms: 7000
+      preemption:
+        allowed_victim_stages:
+        - PREFILL_QUEUED
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: fleet
+    action: priority_fleet
+  - id: slow
+    action: engine_control
+    params:
+      operation: set_perf
+      targets:
+      - $ref: stages.fleet.output.prefill
+      perf:
+        prefill_fixed_ms: 3000
+  - id: sync
+    action: balance_pause
+    params:
+      seconds: 1.5
+  - id: placeholder
+    action: priority_start
+    timeout_s: 5
+    params:
+      gap_s: 0
+      requests:
+      - tag: placeholder
+        priority: 50
+        input_len: 2048
+        output_len: 2
+  - id: placeholder_settled
+    action: preemption_settled
+    timeout_s: 90
+    params:
+      requests:
+        $ref: stages.placeholder.output.requests
+  - id: placeholder_admitted
+    action: check
+    params:
+      actual:
+        $ref: stages.placeholder_settled.output.admitted
+      op: eq
+      expected: true
+  - id: placeholder_pending
+    action: preemption_pending
+    timeout_s: 6
+    params:
+      target:
+        $ref: stages.fleet.output.prefill
+  - id: duplicate
+    action: preemption_observability_duplicate
+    timeout_s: 35
+    params:
+      requests:
+        $ref: stages.placeholder.output.requests
+  - id: wave
+    action: priority_start
+    timeout_s: 15
+    params:
+      gap_s: 0.15
+      requests:
+      - tag: 30a
+        priority: 30
+        input_len: 2048
+        output_len: 2
+      - tag: 30b
+        priority: 30
+        input_len: 2048
+        output_len: 2
+      - tag: 50a
+        priority: 50
+        input_len: 2048
+        output_len: 2
+      - tag: 50b
+        priority: 50
+        input_len: 2048
+        output_len: 2
+      - tag: 70a
+        priority: 70
+        input_len: 2048
+        output_len: 2
+      - tag: 70b
+        priority: 70
+        input_len: 2048
+        output_len: 2
+      - tag: 30c
+        priority: 30
+        input_len: 2048
+        output_len: 2
+      - tag: 30d
+        priority: 30
+        input_len: 2048
+        output_len: 2
+      - tag: '90'
+        priority: 90
+        input_len: 2048
+        output_len: 2
+  - id: wave_settled
+    action: preemption_settled
+    timeout_s: 90
+    params:
+      requests:
+        $ref: stages.wave.output.requests
+  - id: placeholder_drain
+    action: preemption_wait
+    timeout_s: 35
+    params:
+      requests:
+        $ref: stages.placeholder.output.requests
+  - id: wave_drain
+    action: preemption_wait
+    timeout_s: 315
+    params:
+      requests:
+        $ref: stages.wave.output.requests
+  - id: observe
+    action: preemption_observability
+    params:
+      placeholder:
+        $ref: stages.placeholder.output.requests
+      wave:
+        $ref: stages.wave.output.requests
+  - id: master_clean
+    action: balance_clean
+    timeout_s: 30
+  - id: observability_verdict
+    action: preemption_observability_final
+    params:
+      client:
+        $ref: stages.observe.output.client
+      planes:
+        $ref: stages.observe.output.planes
+      duplicate:
+        $ref: stages.duplicate.output.rejected
+  - id: restore
+    action: engine_control
+    params:
+      operation: set_perf
+      targets:
+      - $ref: stages.fleet.output.prefill
+      perf:
+        prefill_fixed_ms: 100
+  - id: teardown
+    action: teardown
+    timeout_s: 120
 stages:
 - id: setup
   action: setup
