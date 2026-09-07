@@ -150,6 +150,10 @@ public final class RequestScheduler {
         return (int) queued;
     }
 
+    public int getBlockedRequestCount() {
+        return globalQueue == null ? 0 : globalQueue.blockedSize();
+    }
+
     public List<RequestState> snapshotActiveRequests() {
         return requestRegistry.snapshotActiveRequests();
     }
