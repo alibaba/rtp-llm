@@ -149,6 +149,14 @@ class EngineControlTests(unittest.TestCase):
             ec.execute(ctx, params, self.deadline())
         self.assertEqual(http.call_count, 1)
 
+    def test_resolves_each_target_reference_before_control(self):
+        ctx, stored, params, responses = self.run_control("stop")
+        params["targets"] = [{"$ref": "stages.add.output.engine"}]
+        ctx.resolve = lambda value: "p0" if isinstance(value, dict) else value
+        with patch.object(ec, "_http", side_effect=responses):
+            ec.execute(ctx, params, self.deadline())
+        self.assertEqual(stored["evidence"]["targets"], ["p0"])
+
     def test_real_http_receives_remaining_deadline(self):
         response = MagicMock()
         response.__enter__.return_value.read.return_value = b'{"status":"ok"}'
