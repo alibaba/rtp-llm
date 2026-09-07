@@ -1,7 +1,7 @@
 # Priority preemption migration
 
 Owner: agent4. Source baseline: `295af797bd7ed3a842c9cad42b5722c64cd24c9a`.
-This checkpoint implements six complete candidate programs out of fourteen old
+This checkpoint implements seven complete candidate programs out of fourteen old
 contracts. No old case is called or deleted. Independent review, default catalog
 integration and actual Java execution remain pending.
 
@@ -55,9 +55,8 @@ observed order and terminal outcomes are saved as artifacts.
   restores its original blocking dependency. An explicit zero submission gap
   avoids inserting a .15s pause after the standalone placeholder.
 
-## Pending contracts (8)
+## Pending contracts (7)
 
-- atpm_preempt_decode_engine_owned
 - atpm_error_code_family
 - atpm_decode_reservation_priority
 - atpm_observability_integrity
@@ -293,6 +292,57 @@ unexpected third success failing AT1/P6 despite cleanup success, unrelated
 first error failing AT1 while all three probes run, and actual deadline
 remaining TIMEOUT. All process observations in these tests are external-IO
 fixtures; actual Java strict-parser acceptance remains pending.
+
+
+## Seventh candidate: decode_engine_owned
+
+Legacy atpm_preempt_decode_engine_owned now asserts its executable EV2
+baseline, rather than the earlier descriptive claim that decode victims
+are evicted. D1 keeps2P/4D, cap3/wait8, queue60000, PRIORITY/SINGLE/NON_BATCH,
+DECODE_RESERVED+DECODE_ENGINE_OWNED and cancellation ack50/completion1000.
+Its FLEXLB_MONITOR_METRIC_WHITELIST=flexlb_auto_tpm must survive the typed
+environment metric_whitelist interface from fixed shared commit
+d9da0cfde685e72b30224f204431689ce319403f. Both full resolved_config and
+make_env_spec.master_env are compared against the old D1 spec.
+
+P4000 and sync1.5 precede both waves. Each submits four priority30 occupants
+with2048/500 and .15s gaps, settles their Schedule90 calls, and only then
+injects the old fixed6291456 KV pressure into all four Decode owners.
+After sync1.5, an explicit snapshot guard checks all Decode available KV
+are zero before incoming70/2048/2 is submitted. Between waves pressure is
+cleared and another1.5s sync permits the second occupant cohort to route.
+Wave two additionally polls each occupant, sequentially with a fresh20s
+budget and .1s interval, until actual Decode lifecycle says RUNNING.
+Generate120 and fresh35s per-consumer drain remain unchanged.
+
+Reserved PR6 requires no8400/8429 occupant terminals, all four success and
+incoming rejected in{8403,8402,8510,8431}. Owned PR6 requires no8429, all
+non8429 survivors successful and the same incoming reject family. PR10
+conjoins the two original zero-eviction predicates. P6 preserves owned
+incoming rejection and survivor success, with the preceding clean30 gate.
+Both rounds retain clean30. A missing/malformed available-KV counter is
+ERROR rather than the old helper's -1 sentinel, which could falsely prove
+saturation. Pressure cleanup is registered before injection and uses the
+owned environment's captured ops even on partial failure.
+
+The old first clean failure can return report.finish after passing reserved
+PR6 and omit round two; the new mandatory clean gate deliberately closes
+that false-PASS path. Failure of a PR6 check stops later diagnostic work.
+In particular, the old conditional verify_engine_cancelled and AT5 closure
+computation can run only on an already failing EV2 owned-victim path. The
+new fail-fast program does not claim that conditional AT5 band, live Cancel
+ACK or actual eviction coverage; it retains raw failed terminal evidence.
+AT5 has no observation object on any passing old EV2 execution. The live
+victim contracts remain separate pending migrations.
+
+
+Seven focused fixtures cover complete ten-request execution with eight
+verified consumers and two actual Schedule rejections, the exact D1 config
+and startup env, successful incoming failing EV2, one available Decode
+blocking incoming, missing capacity evidence as ERROR, independent20s
+per-request RUNNING windows, parent deadline capping, and malformed
+RUNNING timestamps as ERROR. These are external-IO fixtures over actual
+consumer workers, not Java acceptance.
 
 
 ### Comparator runtime finding and control-flow correction

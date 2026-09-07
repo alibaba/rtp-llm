@@ -507,7 +507,294 @@ def _config_reject(ctx, p, deadline):
     )
 
 
+def _decode_fleet(ctx, p, deadline):
+    raw = _http(ctx.ops, "snapshot", deadline)
+    rows = raw.get("engines")
+    if not isinstance(rows, list):
+        raise ValueError("missing engine fleet")
+    result = {}
+    for role, count in (("prefill", 2), ("decode", 4)):
+        names = [
+            r.get("name")
+            for r in rows
+            if r.get("role") == role and r.get("stopped") is False
+        ]
+        if (
+            len(names) != count
+            or any(not isinstance(n, str) for n in names)
+            or len(set(names)) != count
+        ):
+            raise ValueError(
+                "decode EV2 requires exactly two Prefill and four Decode owners"
+            )
+        _engines(raw, names)
+        result.update({f"{role}{i}": name for i, name in enumerate(names)})
+    path = ctx.artifact_dir / f"preemption-fleet-{uuid.uuid4().hex}.json"
+    path.write_text(json.dumps(raw, indent=2) + "\n")
+    return StageOutput(result, artifacts=[str(path)])
+
+
+def _decode_targets(p, plan, pressure=False):
+    keys = {"targets", "tokens"} if pressure else {"targets"}
+    p = _params(p, keys, keys)
+    if not isinstance(p["targets"], list) or len(p["targets"]) != 4:
+        raise ValueError("four explicit Decode targets required")
+    for ref in p["targets"]:
+        plan.reference(ref, "string")
+    if pressure and (type(p["tokens"]) is not int or p["tokens"] not in (0, 6291456)):
+        raise ValueError("EV2 pressure must be zero or the old mock total6291456")
+    return p
+
+
+def _decode_owners(ctx, p, deadline):
+    names = [ctx.resolve(ref) for ref in p["targets"]]
+    if len(set(names)) != 4:
+        raise ValueError("Decode targets must be distinct")
+    raw = _http(ctx.ops, "snapshot", deadline)
+    owners = _engines(raw, names)
+    if any(r["role"] != "decode" or r["stopped"] is not False for r in owners.values()):
+        raise ValueError("pressure requires four live Decode owners")
+    return names, raw, owners
+
+
+def _decode_pressure(ctx, p, deadline):
+    names, raw, owners = _decode_owners(ctx, p, deadline)
+    path = ctx.artifact_dir / f"preemption-pressure-{uuid.uuid4().hex}.json"
+    evidence = dict(tokens=p["tokens"], before=raw, responses=[])
+    ops = ctx.ops
+
+    def send(name, tokens, limit):
+        response = _http(
+            ops, "set_kv_pressure", limit, dict(engine=name, active_kv_tokens=tokens)
+        )
+        if response.get("status") != "ok" or response.get("engine") != name:
+            raise ValueError("pressure control lacks target acknowledgement")
+        return response
+
+    try:
+        for name in names:
+            if p["tokens"]:
+                ctx.add_cleanup(
+                    f"preemption-pressure-{name}", lambda d, name=name: send(name, 0, d)
+                )
+            evidence["responses"].append(send(name, p["tokens"], deadline))
+    finally:
+        path.write_text(json.dumps(evidence, indent=2) + "\n")
+    return StageOutput(artifacts=[str(path)])
+
+
+def _decode_guard(ctx, p, deadline):
+    names, raw, owners = _decode_owners(ctx, p, deadline)
+    # The legacy helper maps missing counters to -1 and accidentally passes.
+    # A missing owner counter cannot prove saturation in the explicit program.
+    values = {
+        name: _number(owners[name].get("available_kv_tokens"), 0, 1e18)
+        for name in names
+    }
+    passed = all(value <= 0 for value in values.values())
+    path = ctx.artifact_dir / f"preemption-decode-guard-{uuid.uuid4().hex}.json"
+    path.write_text(json.dumps(raw, indent=2) + "\n")
+    return StageOutput(
+        checks=[
+            CheckResult(
+                "all_decode_saturated",
+                "PASS" if passed else "FAIL",
+                actual=values,
+                expected="all<=0",
+            )
+        ],
+        artifacts=[str(path)],
+    )
+
+
+def _decode_running(ctx, p, deadline):
+    wave = _cohort(ctx, p["requests"])
+    rows = wave.records()
+    if len(rows) != 4 or len(wave.entries) != 4:
+        raise ValueError("engine-owned wave requires four actual Schedule records")
+    samples = []
+    path = ctx.artifact_dir / f"preemption-decode-running-{uuid.uuid4().hex}.json"
+    try:
+        for row in rows:
+            limit = Deadline(
+                min(deadline.expires_at, ctx.clock() + 20),
+                ctx.clock,
+                ctx.sleeper,
+                deadline.cancelled,
+            )
+            rid = str(row["wire_request_id"])
+            while True:
+                limit.check()
+                raw = _http(ctx.ops, "snapshot", limit)
+                engines = raw.get("engines")
+                if not isinstance(engines, list):
+                    raise ValueError("missing Decode lifecycle snapshot")
+                samples.append(dict(request_id=rid, time_s=ctx.clock(), raw=raw))
+                matches = [
+                    e.get("request_lifecycle", {}).get(rid, {})
+                    for e in engines
+                    if e.get("role") == "decode"
+                ]
+                running = False
+                for lc in matches:
+                    if not isinstance(lc, dict):
+                        raise ValueError("malformed Decode lifecycle")
+                    if lc.get("end_state") == "running":
+                        running = True
+                    elif lc.get("running_ms") is not None and not lc.get("end_state"):
+                        running |= _number(lc["running_ms"], 0, 1e18) > 0
+                if running:
+                    break
+                limit.sleep(0.1)
+    finally:
+        path.write_text(json.dumps(samples, indent=2) + "\n")
+    return StageOutput(
+        checks=[CheckResult("all_running", "PASS", actual=4, expected=4)],
+        artifacts=[str(path)],
+    )
+
+
+def _decode_half_params(p, plan):
+    p = _params(
+        p, {"occupants", "incoming", "phase"}, {"occupants", "incoming", "phase"}
+    )
+    for key in ("occupants", "incoming"):
+        plan.reference(p[key], "requests")
+    if p["phase"] not in ("reserved", "owned"):
+        raise ValueError("unknown Decode phase")
+    return p
+
+
+def _decode_half(ctx, p, deadline):
+    occupants, incoming = [_cohort(ctx, p[k]) for k in ("occupants", "incoming")]
+    if not occupants.complete or not incoming.complete:
+        raise ValueError("Decode verdict requires drained cohorts")
+    rows, inc = occupants.records(), incoming.records()
+    if (
+        len(rows) != 4
+        or len(inc) != 1
+        or len(occupants.entries) != 4
+        or len(incoming.entries) != 1
+    ):
+        raise ValueError("Decode EV2 requires four occupants plus one incoming")
+    if any(
+        (r.get("priority"), r["input_len"], r["output_len"]) != (30, 2048, 500)
+        for r in occupants.p["requests"]
+    ) or [
+        (r.get("priority"), r["input_len"], r["output_len"])
+        for r in incoming.p["requests"]
+    ] != [
+        (70, 2048, 2)
+    ]:
+        raise ValueError("Decode EV2 cohort differs from old load shape")
+    outcomes = [_outcome(e, r) for e, r in zip(occupants.entries, rows)]
+    incoming_ok, code = _outcome(incoming.entries[0], inc[0])
+    if any(type(c) is not int for _, c in outcomes) or type(code) is not int:
+        raise ValueError("Decode EV2 needs typed terminal evidence")
+    forbidden = (8400, 8429) if p["phase"] == "reserved" else (8429,)
+    zero = all(c not in forbidden for _, c in outcomes)
+    survivors = all(ok for ok, c in outcomes if p["phase"] == "reserved" or c != 8429)
+    rejected = not incoming_ok and code in (8403, 8402, 8510, 8431)
+    passed = zero and survivors and rejected
+    path = ctx.artifact_dir / f"preemption-decode-{uuid.uuid4().hex}.json"
+    path.write_text(
+        json.dumps(
+            dict(
+                phase=p["phase"],
+                occupants=rows,
+                incoming=inc,
+                outcomes=outcomes,
+                incoming_outcome=(incoming_ok, code),
+            ),
+            indent=2,
+        )
+        + "\n"
+    )
+    return StageOutput(
+        dict(zero_eviction=zero, incoming_rejected=rejected, survivors_ok=survivors),
+        checks=[
+            CheckResult(
+                "PR6",
+                "PASS" if passed else "FAIL",
+                actual=dict(
+                    zero_eviction=zero,
+                    survivors_ok=survivors,
+                    incoming_rejected=rejected,
+                ),
+            )
+        ],
+        artifacts=[str(path)],
+    )
+
+
+def _decode_final_params(p, plan):
+    keys = {"reserved_zero", "owned_zero", "incoming_rejected", "survivors_ok"}
+    p = _params(p, keys, keys)
+    for ref in p.values():
+        plan.reference(ref, "boolean")
+    return p
+
+
+def _decode_final(ctx, p, deadline):
+    values = {k: ctx.resolve(v) for k, v in p.items()}
+    pr10 = values["reserved_zero"] is True and values["owned_zero"] is True
+    p6 = values["incoming_rejected"] is True and values["survivors_ok"] is True
+    return StageOutput(
+        checks=[
+            CheckResult("PR10", "PASS" if pr10 else "FAIL", actual=values),
+            CheckResult("P6", "PASS" if p6 else "FAIL", actual=values),
+        ]
+    )
+
+
 HANDLERS = [
+    StageHandler(
+        "preemption_decode_fleet",
+        lambda p, plan: _params(p, (), ()),
+        _decode_fleet,
+        {
+            **{f"prefill{i}": "string" for i in range(2)},
+            **{f"decode{i}": "string" for i in range(4)},
+        },
+    ),
+    StageHandler(
+        "preemption_decode_pressure",
+        lambda p, plan: _decode_targets(p, plan, True),
+        _decode_pressure,
+        {},
+    ),
+    StageHandler(
+        "preemption_decode_guard",
+        _decode_targets,
+        _decode_guard,
+        {},
+        checks=frozenset({"all_decode_saturated"}),
+    ),
+    StageHandler(
+        "preemption_decode_running",
+        _settled_params,
+        _decode_running,
+        {},
+        checks=frozenset({"all_running"}),
+    ),
+    StageHandler(
+        "preemption_decode_half",
+        _decode_half_params,
+        _decode_half,
+        {
+            "zero_eviction": "boolean",
+            "incoming_rejected": "boolean",
+            "survivors_ok": "boolean",
+        },
+        checks=frozenset({"PR6"}),
+    ),
+    StageHandler(
+        "preemption_decode_final",
+        _decode_final_params,
+        _decode_final,
+        {},
+        checks=frozenset({"PR10", "P6"}),
+    ),
     StageHandler(
         "preemption_config_reject",
         _config_reject_params,
