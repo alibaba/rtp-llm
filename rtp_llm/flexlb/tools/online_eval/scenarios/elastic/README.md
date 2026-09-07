@@ -142,6 +142,9 @@ acceptance; real Java mock acceptance of this new family is pending.
 
 `pending_drain.yaml` implements the fourth logical family as two explicit programs:
 `legacy_terminal` (12 stages, 12 checks) and `zero_errors` (13 stages, 15 checks).
+The migration here covers **batch-window only**. The legacy single-batch
+profile is retained and remains unmigrated; an ID mapping does not imply all
+profiles have been migrated or accepted.
 Only the former maps to `elastic_remove_pending_drain`; the stronger variant has
 an empty legacy mapping so it cannot be counted as old-contract acceptance.
 Both use a fresh private 2P/2D fault environment, PRIORITY/FIXED_WINDOW/BATCH,

@@ -388,13 +388,15 @@ def accounting_window(ctx, deadline, budget_s):
 
     class ProbeDeadline:
         def check(self):
-            deadline.check()
-            if ctx.clock() >= start + budget_s:
-                raise TimeoutError("accounting observation budget expired")
+            self.remaining()
 
         def remaining(self):
-            self.check()
-            return min(deadline.remaining(), start + budget_s - ctx.clock())
+            outer_remaining = deadline.remaining()
+            local_remaining = start + budget_s - ctx.clock()
+            remaining = min(outer_remaining, local_remaining)
+            if remaining <= 0:
+                raise TimeoutError("accounting observation budget expired")
+            return remaining
 
     try:
         while True:
@@ -431,15 +433,16 @@ def accounting_window(ctx, deadline, budget_s):
                 dvalues.extend(values)
             if any(type(v) is not int or v < 0 for v in [sched, *pvalues, *dvalues]):
                 raise ValueError("invalid owner-specific inflight counters")
-            within_budget = ctx.clock() - start <= budget_s
+            local_remaining = start + budget_s - ctx.clock()
+            within_budget = local_remaining >= 0
             clean = dict(
                 scheduler=sched == 0 and within_budget,
                 prefill_batches=all(v == 0 for v in pvalues) and within_budget,
                 decode_load=all(v == 0 for v in dvalues) and within_budget,
             )
-            if all(clean.values()) or ctx.clock() - start >= budget_s:
+            if all(clean.values()) or local_remaining <= 0:
                 break
-            deadline.sleep(min(0.5, budget_s - (ctx.clock() - start)))
+            deadline.sleep(min(0.5, local_remaining))
         return StageOutput(
             checks=[
                 CheckResult(k, "PASS" if v else "FAIL", evidence=evidence)
