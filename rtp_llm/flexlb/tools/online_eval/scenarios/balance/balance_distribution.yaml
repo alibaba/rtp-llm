@@ -1,0 +1,771 @@
+schema_version: 1
+id: balance_distribution
+category: balance
+environment:
+  backend: java_mock
+  n_prefill: 2
+  n_decode: 4
+execution:
+  timeout_s: 1800
+  stage_timeout_s: 60
+  cleanup_timeout_s: 120
+variants:
+- id: uniform_serial
+  legacy_case_ids:
+  - balance_uniform_serial
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: fleet
+    action: balance_snapshot
+    timeout_s: 60
+    params:
+      role: prefill
+  - id: plain
+    action: balance_start
+    timeout_s: 60
+    params:
+      count: 20
+  - id: plain_terminal
+    action: balance_wait
+    timeout_s: 120
+    params:
+      requests:
+        $ref: stages.plain.output.requests
+  - id: plain_p6
+    action: balance_check
+    timeout_s: 60
+    params:
+      requests:
+      - $ref: stages.plain.output.requests
+      fleet:
+        $ref: stages.fleet.output.snapshot
+      metric: complete
+      property: P6
+  - id: plain_p1
+    action: balance_check
+    timeout_s: 60
+    params:
+      requests:
+      - $ref: stages.plain.output.requests
+      fleet:
+        $ref: stages.fleet.output.snapshot
+      metric: max_share
+      property: P1
+  - id: plain_p2
+    action: balance_check
+    timeout_s: 60
+    params:
+      requests:
+      - $ref: stages.plain.output.requests
+      fleet:
+        $ref: stages.fleet.output.snapshot
+      metric: workers
+      property: P2
+  - id: slow_second
+    action: engine_control
+    timeout_s: 60
+    params:
+      operation: set_perf
+      targets:
+      - $ref: stages.fleet.output.second
+      perf:
+        prefill_fixed_ms: 200
+  - id: perf_sync
+    action: balance_pause
+    timeout_s: 6.5
+    params:
+      seconds: 1.5
+  - id: speed_hetero
+    action: balance_start
+    timeout_s: 60
+    params:
+      count: 20
+  - id: speed_hetero_terminal
+    action: balance_wait
+    timeout_s: 120
+    params:
+      requests:
+        $ref: stages.speed_hetero.output.requests
+  - id: speed_hetero_p6
+    action: balance_check
+    timeout_s: 60
+    params:
+      requests:
+      - $ref: stages.speed_hetero.output.requests
+      fleet:
+        $ref: stages.fleet.output.snapshot
+      metric: complete
+      property: P6
+  - id: speed_hetero_p1
+    action: balance_check
+    timeout_s: 60
+    params:
+      requests:
+      - $ref: stages.speed_hetero.output.requests
+      fleet:
+        $ref: stages.fleet.output.snapshot
+      metric: max_share
+      property: P1
+  - id: speed_hetero_p2
+    action: balance_check
+    timeout_s: 60
+    params:
+      requests:
+      - $ref: stages.speed_hetero.output.requests
+      fleet:
+        $ref: stages.fleet.output.snapshot
+      metric: workers
+      property: P2
+  - id: restore_speed
+    action: engine_control
+    timeout_s: 60
+    params:
+      operation: set_perf
+      targets:
+      - $ref: stages.fleet.output.second
+      perf:
+        prefill_fixed_ms: 100
+  - id: teardown
+    action: teardown
+    timeout_s: 120
+- id: concurrent_mix
+  legacy_case_ids:
+  - balance_concurrent_mix
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: fleet
+    action: balance_snapshot
+    timeout_s: 60
+    params:
+      role: prefill
+  - id: burst
+    action: balance_start
+    timeout_s: 60
+    params:
+      count: 20
+      concurrency: 20
+  - id: terminal
+    action: balance_wait
+    timeout_s: 120
+    params:
+      requests:
+        $ref: stages.burst.output.requests
+  - id: p6
+    action: balance_check
+    timeout_s: 60
+    params:
+      requests:
+      - $ref: stages.burst.output.requests
+      fleet:
+        $ref: stages.fleet.output.snapshot
+      metric: complete
+      property: P6
+      min_success: 8
+      allow_admission: true
+  - id: p1
+    action: balance_check
+    timeout_s: 60
+    params:
+      requests:
+      - $ref: stages.burst.output.requests
+      fleet:
+        $ref: stages.fleet.output.snapshot
+      metric: max_share
+      property: P1
+      relax: 1
+  - id: p2
+    action: balance_check
+    timeout_s: 60
+    params:
+      requests:
+      - $ref: stages.burst.output.requests
+      fleet:
+        $ref: stages.fleet.output.snapshot
+      metric: workers
+      property: P2
+  - id: teardown
+    action: teardown
+    timeout_s: 120
+- id: decode_spread
+  legacy_case_ids:
+  - balance_decode_spread
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: n10_before
+    action: balance_snapshot
+    timeout_s: 60
+    params:
+      role: decode
+  - id: n10
+    action: balance_start
+    timeout_s: 60
+    params:
+      count: 10
+  - id: n10_terminal
+    action: balance_wait
+    timeout_s: 120
+    params:
+      requests:
+        $ref: stages.n10.output.requests
+  - id: n10_after
+    action: balance_snapshot
+    timeout_s: 60
+    params:
+      role: decode
+  - id: n10_p6
+    action: balance_check
+    timeout_s: 60
+    params:
+      requests:
+      - $ref: stages.n10.output.requests
+      fleet:
+        $ref: stages.n10_before.output.snapshot
+      metric: decode_complete
+      property: P6
+      after:
+        $ref: stages.n10_after.output.snapshot
+  - id: n10_p2
+    action: balance_check
+    timeout_s: 60
+    params:
+      requests:
+      - $ref: stages.n10.output.requests
+      fleet:
+        $ref: stages.n10_before.output.snapshot
+      metric: decode_workers
+      property: P2
+      after:
+        $ref: stages.n10_after.output.snapshot
+      min_workers: 2
+  - id: n10_p1
+    action: balance_check
+    timeout_s: 60
+    params:
+      requests:
+      - $ref: stages.n10.output.requests
+      fleet:
+        $ref: stages.n10_before.output.snapshot
+      metric: decode_share
+      property: P1
+      after:
+        $ref: stages.n10_after.output.snapshot
+      bands:
+        strict: 0.6
+        normal: 0.7
+        loose: 0.8
+  - id: n50_before
+    action: balance_snapshot
+    timeout_s: 60
+    params:
+      role: decode
+  - id: n50
+    action: balance_start
+    timeout_s: 60
+    params:
+      count: 50
+  - id: n50_terminal
+    action: balance_wait
+    timeout_s: 120
+    params:
+      requests:
+        $ref: stages.n50.output.requests
+  - id: n50_after
+    action: balance_snapshot
+    timeout_s: 60
+    params:
+      role: decode
+  - id: n50_p6
+    action: balance_check
+    timeout_s: 60
+    params:
+      requests:
+      - $ref: stages.n50.output.requests
+      fleet:
+        $ref: stages.n50_before.output.snapshot
+      metric: decode_complete
+      property: P6
+      after:
+        $ref: stages.n50_after.output.snapshot
+  - id: n50_p2
+    action: balance_check
+    timeout_s: 60
+    params:
+      requests:
+      - $ref: stages.n50.output.requests
+      fleet:
+        $ref: stages.n50_before.output.snapshot
+      metric: decode_workers
+      property: P2
+      after:
+        $ref: stages.n50_after.output.snapshot
+      min_workers: 3
+  - id: n50_p1
+    action: balance_check
+    timeout_s: 60
+    params:
+      requests:
+      - $ref: stages.n50.output.requests
+      fleet:
+        $ref: stages.n50_before.output.snapshot
+      metric: decode_share
+      property: P1
+      after:
+        $ref: stages.n50_after.output.snapshot
+      bands:
+        strict: 0.4
+        normal: 0.5
+        loose: 0.6
+  - id: teardown
+    action: teardown
+    timeout_s: 120
+- id: length_mixed
+  legacy_case_ids:
+  - balance_len_mixed
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: fleet
+    action: balance_snapshot
+    timeout_s: 60
+    params:
+      role: prefill
+  - id: wave1_long1
+    action: balance_start
+    timeout_s: 60
+    params:
+      input_len: 131072
+      unique_keys: false
+      defer_batch: true
+      stream_timeout_s: 30
+  - id: wave1_long1_pending
+    action: balance_pending
+    timeout_s: 6
+    params:
+      requests:
+        $ref: stages.wave1_long1.output.requests
+      fleet:
+        $ref: stages.fleet.output.snapshot
+  - id: wave1_long2
+    action: balance_start
+    timeout_s: 60
+    params:
+      input_len: 135168
+      unique_keys: false
+      defer_batch: true
+      stream_timeout_s: 30
+  - id: wave1_long2_pending
+    action: balance_pending
+    timeout_s: 6
+    params:
+      requests:
+        $ref: stages.wave1_long2.output.requests
+      fleet:
+        $ref: stages.fleet.output.snapshot
+  - id: wave1_short
+    action: balance_start
+    timeout_s: 60
+    params:
+      count: 6
+      input_len: 512
+      unique_keys: false
+      defer_batch: true
+      stream_timeout_s: 30
+  - id: wave1_long1_terminal
+    action: balance_wait
+    timeout_s: 120
+    params:
+      requests:
+        $ref: stages.wave1_long1.output.requests
+  - id: wave1_long2_terminal
+    action: balance_wait
+    timeout_s: 120
+    params:
+      requests:
+        $ref: stages.wave1_long2.output.requests
+  - id: wave1_short_terminal
+    action: balance_wait
+    timeout_s: 120
+    params:
+      requests:
+        $ref: stages.wave1_short.output.requests
+  - id: wave1_p6
+    action: balance_check
+    timeout_s: 60
+    params:
+      requests:
+      - $ref: stages.wave1_long1.output.requests
+      - $ref: stages.wave1_long2.output.requests
+      - $ref: stages.wave1_short.output.requests
+      fleet:
+        $ref: stages.fleet.output.snapshot
+      metric: complete
+      property: P6
+  - id: wave1_master_clean
+    action: balance_clean
+    timeout_s: 30
+    params: {}
+  - id: wave2_long1
+    action: balance_start
+    timeout_s: 60
+    params:
+      input_len: 139264
+      unique_keys: false
+      defer_batch: true
+      stream_timeout_s: 30
+  - id: wave2_long1_pending
+    action: balance_pending
+    timeout_s: 6
+    params:
+      requests:
+        $ref: stages.wave2_long1.output.requests
+      fleet:
+        $ref: stages.fleet.output.snapshot
+  - id: wave2_long2
+    action: balance_start
+    timeout_s: 60
+    params:
+      input_len: 143360
+      unique_keys: false
+      defer_batch: true
+      stream_timeout_s: 30
+  - id: wave2_long2_pending
+    action: balance_pending
+    timeout_s: 6
+    params:
+      requests:
+        $ref: stages.wave2_long2.output.requests
+      fleet:
+        $ref: stages.fleet.output.snapshot
+  - id: wave2_short
+    action: balance_start
+    timeout_s: 60
+    params:
+      count: 6
+      input_len: 512
+      unique_keys: false
+      defer_batch: true
+      stream_timeout_s: 30
+  - id: wave2_long1_terminal
+    action: balance_wait
+    timeout_s: 120
+    params:
+      requests:
+        $ref: stages.wave2_long1.output.requests
+  - id: wave2_long2_terminal
+    action: balance_wait
+    timeout_s: 120
+    params:
+      requests:
+        $ref: stages.wave2_long2.output.requests
+  - id: wave2_short_terminal
+    action: balance_wait
+    timeout_s: 120
+    params:
+      requests:
+        $ref: stages.wave2_short.output.requests
+  - id: wave2_p6
+    action: balance_check
+    timeout_s: 60
+    params:
+      requests:
+      - $ref: stages.wave2_long1.output.requests
+      - $ref: stages.wave2_long2.output.requests
+      - $ref: stages.wave2_short.output.requests
+      fleet:
+        $ref: stages.fleet.output.snapshot
+      metric: complete
+      property: P6
+  - id: wave2_master_clean
+    action: balance_clean
+    timeout_s: 30
+    params: {}
+  - id: wave3_long1
+    action: balance_start
+    timeout_s: 60
+    params:
+      input_len: 147456
+      unique_keys: false
+      defer_batch: true
+      stream_timeout_s: 30
+  - id: wave3_long1_pending
+    action: balance_pending
+    timeout_s: 6
+    params:
+      requests:
+        $ref: stages.wave3_long1.output.requests
+      fleet:
+        $ref: stages.fleet.output.snapshot
+  - id: wave3_long2
+    action: balance_start
+    timeout_s: 60
+    params:
+      input_len: 131072
+      unique_keys: false
+      defer_batch: true
+      stream_timeout_s: 30
+  - id: wave3_long2_pending
+    action: balance_pending
+    timeout_s: 6
+    params:
+      requests:
+        $ref: stages.wave3_long2.output.requests
+      fleet:
+        $ref: stages.fleet.output.snapshot
+  - id: wave3_short
+    action: balance_start
+    timeout_s: 60
+    params:
+      count: 6
+      input_len: 512
+      unique_keys: false
+      defer_batch: true
+      stream_timeout_s: 30
+  - id: wave3_long1_terminal
+    action: balance_wait
+    timeout_s: 120
+    params:
+      requests:
+        $ref: stages.wave3_long1.output.requests
+  - id: wave3_long2_terminal
+    action: balance_wait
+    timeout_s: 120
+    params:
+      requests:
+        $ref: stages.wave3_long2.output.requests
+  - id: wave3_short_terminal
+    action: balance_wait
+    timeout_s: 120
+    params:
+      requests:
+        $ref: stages.wave3_short.output.requests
+  - id: wave3_p6
+    action: balance_check
+    timeout_s: 60
+    params:
+      requests:
+      - $ref: stages.wave3_long1.output.requests
+      - $ref: stages.wave3_long2.output.requests
+      - $ref: stages.wave3_short.output.requests
+      fleet:
+        $ref: stages.fleet.output.snapshot
+      metric: complete
+      property: P6
+  - id: wave3_master_clean
+    action: balance_clean
+    timeout_s: 30
+    params: {}
+  - id: wave4_long1
+    action: balance_start
+    timeout_s: 60
+    params:
+      input_len: 135168
+      unique_keys: false
+      defer_batch: true
+      stream_timeout_s: 30
+  - id: wave4_long1_pending
+    action: balance_pending
+    timeout_s: 6
+    params:
+      requests:
+        $ref: stages.wave4_long1.output.requests
+      fleet:
+        $ref: stages.fleet.output.snapshot
+  - id: wave4_long2
+    action: balance_start
+    timeout_s: 60
+    params:
+      input_len: 139264
+      unique_keys: false
+      defer_batch: true
+      stream_timeout_s: 30
+  - id: wave4_long2_pending
+    action: balance_pending
+    timeout_s: 6
+    params:
+      requests:
+        $ref: stages.wave4_long2.output.requests
+      fleet:
+        $ref: stages.fleet.output.snapshot
+  - id: wave4_short
+    action: balance_start
+    timeout_s: 60
+    params:
+      count: 6
+      input_len: 512
+      unique_keys: false
+      defer_batch: true
+      stream_timeout_s: 30
+  - id: wave4_long1_terminal
+    action: balance_wait
+    timeout_s: 120
+    params:
+      requests:
+        $ref: stages.wave4_long1.output.requests
+  - id: wave4_long2_terminal
+    action: balance_wait
+    timeout_s: 120
+    params:
+      requests:
+        $ref: stages.wave4_long2.output.requests
+  - id: wave4_short_terminal
+    action: balance_wait
+    timeout_s: 120
+    params:
+      requests:
+        $ref: stages.wave4_short.output.requests
+  - id: wave4_p6
+    action: balance_check
+    timeout_s: 60
+    params:
+      requests:
+      - $ref: stages.wave4_long1.output.requests
+      - $ref: stages.wave4_long2.output.requests
+      - $ref: stages.wave4_short.output.requests
+      fleet:
+        $ref: stages.fleet.output.snapshot
+      metric: complete
+      property: P6
+  - id: wave4_master_clean
+    action: balance_clean
+    timeout_s: 30
+    params: {}
+  - id: wave5_long1
+    action: balance_start
+    timeout_s: 60
+    params:
+      input_len: 143360
+      unique_keys: false
+      defer_batch: true
+      stream_timeout_s: 30
+  - id: wave5_long1_pending
+    action: balance_pending
+    timeout_s: 6
+    params:
+      requests:
+        $ref: stages.wave5_long1.output.requests
+      fleet:
+        $ref: stages.fleet.output.snapshot
+  - id: wave5_long2
+    action: balance_start
+    timeout_s: 60
+    params:
+      input_len: 147456
+      unique_keys: false
+      defer_batch: true
+      stream_timeout_s: 30
+  - id: wave5_long2_pending
+    action: balance_pending
+    timeout_s: 6
+    params:
+      requests:
+        $ref: stages.wave5_long2.output.requests
+      fleet:
+        $ref: stages.fleet.output.snapshot
+  - id: wave5_short
+    action: balance_start
+    timeout_s: 60
+    params:
+      count: 6
+      input_len: 512
+      unique_keys: false
+      defer_batch: true
+      stream_timeout_s: 30
+  - id: wave5_long1_terminal
+    action: balance_wait
+    timeout_s: 120
+    params:
+      requests:
+        $ref: stages.wave5_long1.output.requests
+  - id: wave5_long2_terminal
+    action: balance_wait
+    timeout_s: 120
+    params:
+      requests:
+        $ref: stages.wave5_long2.output.requests
+  - id: wave5_short_terminal
+    action: balance_wait
+    timeout_s: 120
+    params:
+      requests:
+        $ref: stages.wave5_short.output.requests
+  - id: wave5_p6
+    action: balance_check
+    timeout_s: 60
+    params:
+      requests:
+      - $ref: stages.wave5_long1.output.requests
+      - $ref: stages.wave5_long2.output.requests
+      - $ref: stages.wave5_short.output.requests
+      fleet:
+        $ref: stages.fleet.output.snapshot
+      metric: complete
+      property: P6
+  - id: wave5_master_clean
+    action: balance_clean
+    timeout_s: 30
+    params: {}
+  - id: token_p3
+    action: balance_check
+    timeout_s: 60
+    params:
+      requests:
+      - $ref: stages.wave1_long1.output.requests
+      - $ref: stages.wave1_long2.output.requests
+      - $ref: stages.wave1_short.output.requests
+      - $ref: stages.wave2_long1.output.requests
+      - $ref: stages.wave2_long2.output.requests
+      - $ref: stages.wave2_short.output.requests
+      - $ref: stages.wave3_long1.output.requests
+      - $ref: stages.wave3_long2.output.requests
+      - $ref: stages.wave3_short.output.requests
+      - $ref: stages.wave4_long1.output.requests
+      - $ref: stages.wave4_long2.output.requests
+      - $ref: stages.wave4_short.output.requests
+      - $ref: stages.wave5_long1.output.requests
+      - $ref: stages.wave5_long2.output.requests
+      - $ref: stages.wave5_short.output.requests
+      fleet:
+        $ref: stages.fleet.output.snapshot
+      metric: token_share
+      property: P3
+  - id: short_p2
+    action: balance_check
+    timeout_s: 60
+    params:
+      requests:
+      - $ref: stages.wave1_long1.output.requests
+      - $ref: stages.wave1_long2.output.requests
+      - $ref: stages.wave1_short.output.requests
+      - $ref: stages.wave2_long1.output.requests
+      - $ref: stages.wave2_long2.output.requests
+      - $ref: stages.wave2_short.output.requests
+      - $ref: stages.wave3_long1.output.requests
+      - $ref: stages.wave3_long2.output.requests
+      - $ref: stages.wave3_short.output.requests
+      - $ref: stages.wave4_long1.output.requests
+      - $ref: stages.wave4_long2.output.requests
+      - $ref: stages.wave4_short.output.requests
+      - $ref: stages.wave5_long1.output.requests
+      - $ref: stages.wave5_long2.output.requests
+      - $ref: stages.wave5_short.output.requests
+      fleet:
+        $ref: stages.fleet.output.snapshot
+      metric: short_workers
+      property: P2
+  - id: teardown
+    action: teardown
+    timeout_s: 120
+description: Explicit balance stages preserving client landing, token share, Decode
+  deltas and latency contracts.
+legacy_case_ids:
+- balance_uniform_serial
+- balance_concurrent_mix
+- balance_decode_spread
+- balance_len_mixed
