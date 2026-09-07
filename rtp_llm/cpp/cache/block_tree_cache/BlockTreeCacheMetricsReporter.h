@@ -87,8 +87,8 @@ using BlockTreeTransferBytes = std::unordered_map<BlockTreeTransferBytesKey, siz
 
 class BlockTreeCacheMetricsReporter final {
 public:
-    void setMetricsReporter(const std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter);
-    bool enabled() const;
+    BlockTreeCacheMetricsReporter() = default;
+    explicit BlockTreeCacheMetricsReporter(std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter);
 
     std::vector<BlockTreePoolMetricsSnapshot>
     collectPoolMetricsSnapshots(const std::vector<GroupSetPtr>& group_sets) const;
@@ -119,12 +119,12 @@ public:
                                    bool                                   success,
                                    const std::vector<TransferDescriptor>& successful_descriptors,
                                    const std::vector<GroupSetPtr>&        group_sets);
-    int64_t reportBusinessQueueWaitStarted(CacheTransferOperation operation, bool callback) noexcept;
-    void    reportBusinessQueueWaitFinished(CacheTransferOperation operation,
-                                            bool                   callback,
-                                            int64_t                begin_time_us,
-                                            bool                   report_latency = true) noexcept;
-    void    reportTransferQueueWait(Tier source_tier, Tier target_tier, int64_t latency_us) noexcept;
+    void    reportQueueWaitMetric(bool        callback,
+                                  const char* pool_type,
+                                  const char* operation,
+                                  Tier        source_tier,
+                                  Tier        target_tier,
+                                  int64_t     latency_us) const noexcept;
     void    reportStorePublish(Tier target_tier, size_t accepted_blocks, size_t duplicate_blocks) const;
     void    reportQueueBacklog(const BlockTreeQueueSizes& queue_sizes, const char* pool_type) const;
 
@@ -147,12 +147,6 @@ private:
     void accumulateTransferBytes(const std::vector<TransferDescriptor>& descs,
                                  const std::vector<GroupSetPtr>&        group_sets,
                                  BlockTreeTransferBytes&                transfer_bytes) const;
-    void reportQueueWaitMetric(bool        callback,
-                               const char* pool_type,
-                               const char* operation,
-                               Tier        source_tier,
-                               Tier        target_tier,
-                               int64_t     latency_us) const noexcept;
     std::shared_ptr<kmonitor::MetricsReporter>                                     metrics_reporter_;
     std::array<std::array<std::atomic<int64_t>, kDirectionCount>, kOperationCount> transfer_in_flight_{};
 };

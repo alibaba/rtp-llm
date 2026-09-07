@@ -1,6 +1,5 @@
 #pragma once
 
-#include <chrono>
 #include <cstddef>
 #include <memory>
 #include <utility>
@@ -14,45 +13,42 @@
 namespace rtp_llm {
 
 class BlockTreeTaskPool;
+class BlockTreeCacheMetricsReporter;
 class DeviceHostTransferExecutor;
 class HostDiskTransferExecutor;
 
 class DeviceDiskTransferExecutor {
 public:
-    DeviceDiskTransferExecutor(DeviceHostTransferExecutor&     device_host_executor,
-                               HostDiskTransferExecutor&       host_disk_executor,
-                               const std::vector<GroupSetPtr>& group_sets,
-                               size_t                          staging_block_count,
-                               BlockTreeTaskPool&              transfer_task_pool,
-                               std::chrono::milliseconds       queue_wait_timeout);
+    DeviceDiskTransferExecutor(DeviceHostTransferExecutor&                    device_host_executor,
+                               HostDiskTransferExecutor&                      host_disk_executor,
+                               const std::vector<GroupSetPtr>&                group_sets,
+                               size_t                                         staging_block_count,
+                               BlockTreeTaskPool&                             transfer_task_pool,
+                               std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter = nullptr);
     ~DeviceDiskTransferExecutor();
 
     DeviceDiskTransferExecutor(const DeviceDiskTransferExecutor&)            = delete;
     DeviceDiskTransferExecutor& operator=(const DeviceDiskTransferExecutor&) = delete;
 
-    std::shared_ptr<AsyncContext> execute(const std::vector<TransferDescriptor>& descriptors,
-                                          const std::vector<const GroupSet*>&    group_sets);
+    std::shared_ptr<AsyncContext> executeDiskToDevice(TransferTask                        task,
+                                                      const std::vector<const GroupSet*>& group_sets);
 
-    std::shared_ptr<AsyncContext> executeDeviceToDisk(const TransferDescriptor& descriptor, const GroupSet& group_set);
+    std::shared_ptr<AsyncContext> executeDeviceToDisk(TransferTask task, const GroupSet& group_set);
 
     void cancelPendingTransfers();
-    void setQueueWaitReporter(TransferQueueWaitReporter reporter) {
-        queue_wait_reporter_ = std::move(reporter);
-    }
 
 private:
     HostStagingBlockPool* stagingPool(CacheGroupType group_type) const;
     size_t                batchCapacity(CacheGroupType group_type) const;
 
-    DeviceHostTransferExecutor&           device_host_executor_;
-    HostDiskTransferExecutor&             host_disk_executor_;
-    BlockTreeTaskPool&                    transfer_task_pool_;
-    std::unique_ptr<HostStagingBlockPool> full_staging_pool_;
-    std::unique_ptr<HostStagingBlockPool> swa_staging_pool_;
-    size_t                                full_batch_capacity_{0};
-    size_t                                swa_batch_capacity_{0};
-    std::chrono::milliseconds             queue_wait_timeout_;
-    TransferQueueWaitReporter             queue_wait_reporter_;
+    DeviceHostTransferExecutor&                    device_host_executor_;
+    HostDiskTransferExecutor&                      host_disk_executor_;
+    BlockTreeTaskPool&                             transfer_task_pool_;
+    std::unique_ptr<HostStagingBlockPool>          full_staging_pool_;
+    std::unique_ptr<HostStagingBlockPool>          swa_staging_pool_;
+    size_t                                         full_batch_capacity_{0};
+    size_t                                         swa_batch_capacity_{0};
+    std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter_;
 };
 
 }  // namespace rtp_llm

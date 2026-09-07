@@ -8,7 +8,8 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DeviceWatermarkDemotesToHostAndLoads
     ASSERT_NE(manager_, nullptr);
     auto cache = manager_->blockTreeCache();
 
-    auto pausable_engine = std::make_shared<PausableRecordingTransferEngine>(cache->groupSets());
+    auto pausable_engine =
+        std::make_shared<PausableRecordingTransferEngine>(cache->groupSets(), cache->isDiskCacheEnabled());
     BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*cache, pausable_engine);
     transfer_engine_.reset();
 
@@ -280,7 +281,8 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DeviceAndHostWatermarksDemoteToDiskA
     ASSERT_NE(manager_, nullptr);
     auto cache = manager_->blockTreeCache();
 
-    auto pausable_engine = std::make_shared<PausableRecordingTransferEngine>(cache->groupSets());
+    auto pausable_engine =
+        std::make_shared<PausableRecordingTransferEngine>(cache->groupSets(), cache->isDiskCacheEnabled());
     BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*cache, pausable_engine);
     transfer_engine_.reset();
 
@@ -551,7 +553,8 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4HostToDiskWatermarkFailureKeepsHostS
     ASSERT_NE(manager_, nullptr);
     auto cache = manager_->blockTreeCache();
 
-    auto recording_engine = std::make_shared<PausableRecordingTransferEngine>(cache->groupSets());
+    auto recording_engine =
+        std::make_shared<PausableRecordingTransferEngine>(cache->groupSets(), cache->isDiskCacheEnabled());
     BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*cache, recording_engine);
     transfer_engine_.reset();
 
@@ -810,7 +813,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DemotingDeviceHitIsNotReselected) {
     ASSERT_NO_FATAL_FAILURE(initManager(/*device_blocks=*/16));
     ASSERT_NE(manager_, nullptr);
     auto cache  = manager_->blockTreeCache();
-    auto engine = std::make_shared<PausableRecordingTransferEngine>(cache->groupSets());
+    auto engine = std::make_shared<PausableRecordingTransferEngine>(cache->groupSets(), cache->isDiskCacheEnabled());
     BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*cache, engine);
     transfer_engine_.reset();
     const auto initial_device = snapshotDevicePools(manager_);

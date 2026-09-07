@@ -32,12 +32,10 @@ BlockTreeLoader::BlockTreeLoader(BlockTree*                      tree,
     task_pool_(task_pool),
     metrics_reporter_(metrics_reporter),
     mutex_(mutex),
-    disk_timeout_ms_(disk_timeout_ms),
-    host_timeout_ms_(host_timeout_ms),
     enable_device_cache_(enable_device_cache),
     storage_backend_(std::move(storage_backend)),
     settled_(std::move(settled)),
-    load_task_runner_(tree_->groupSets()),
+    load_task_runner_(tree_->groupSets(), host_timeout_ms, disk_timeout_ms),
     load_join_registry_(tree),
     load_context_coordinator_(std::make_shared<LoadContextCoordinator>(
         [this](const std::shared_ptr<LoadAsyncContext>& context) { return commitLoad(context); },
@@ -204,10 +202,8 @@ BlockTreeMatchResult BlockTreeLoader::createMatchResult(std::vector<TreeNode*>& 
         }
     }
 
-    if (metrics_reporter_.enabled()) {
-        result.reuse_time_metrics_snapshots =
-            collectReuseTimeSnapshots(path, result.matched_device_blocks, access_time_us, policy);
-    }
+    result.reuse_time_metrics_snapshots =
+        collectReuseTimeSnapshots(path, result.matched_device_blocks, access_time_us, policy);
     std::vector<TransferDescriptor> pending_load_descs;
     std::vector<bool>               joined_loads;
     for (size_t group_set_id = 0; group_set_id < tree_->groupSets().size(); ++group_set_id) {
@@ -366,29 +362,41 @@ bool BlockTreeLoader::commitLoad(const std::shared_ptr<LoadAsyncContext>& contex
             return false;
         }
         workflow_credit_acquired = true;
-        task->enqueue_time_us = metrics_reporter_.reportBusinessQueueWaitStarted(CacheTransferOperation::LOAD, false);
-        auto on_timeout       = [this, task]() {
-            metrics_reporter_.reportBusinessQueueWaitFinished(
-                CacheTransferOperation::LOAD, false, task->enqueue_time_us);
-            RTP_LLM_LOG_WARNING("load expired in business queue, descriptor_count=%zu", task->load_descs.size());
-            if (!task->context->completeTransfers(task->load_descs.size(), false)) {
-                RTP_LLM_LOG_WARNING("failed to record expired load, descriptor_count=%zu", task->load_descs.size());
+        const int64_t queue_begin = currentTimeUs();
+        auto          on_timeout  = [this, task, queue_begin]() {
+            metrics_reporter_.reportQueueWaitMetric(false,
+                                                    "business",
+                                                    cacheTransferOperationName(CacheTransferOperation::LOAD),
+                                                    Tier::NONE,
+                                                    Tier::NONE,
+                                                    currentTimeUs() - queue_begin);
+            const size_t descriptor_count = task->load_descs.size();
+            RTP_LLM_LOG_WARNING("load expired in business queue, descriptor_count=%zu", descriptor_count);
+            if (!task->context->completeTransfers(descriptor_count, false)) {
+                RTP_LLM_LOG_WARNING("failed to record expired load, descriptor_count=%zu", descriptor_count);
             }
         };
-        const bool uses_disk = std::any_of(task->load_descs.begin(), task->load_descs.end(), [](const auto& desc) {
-            return desc.source_tier == Tier::DISK || desc.target_tier == Tier::DISK;
-        });
+        const TransferTask& queue_task =
+            task->disk_to_device_task.descriptors().empty() ? task->host_to_device_task : task->disk_to_device_task;
+        if (queue_task.expired()) {
+            on_timeout();
+            rollback_guard.dismiss();
+            return true;
+        }
+        const auto deadline = queue_task.deadline();
         if (!task_pool_->submit(
                 BlockTreeTaskClass::LOAD,
-                [this, task]() {
-                    metrics_reporter_.reportBusinessQueueWaitFinished(
-                        CacheTransferOperation::LOAD, false, task->enqueue_time_us);
+                [this, task, queue_begin]() {
+                    metrics_reporter_.reportQueueWaitMetric(false,
+                                                            "business",
+                                                            cacheTransferOperationName(CacheTransferOperation::LOAD),
+                                                            Tier::NONE,
+                                                            Tier::NONE,
+                                                            currentTimeUs() - queue_begin);
                     runLoadTask(task);
                 },
-                std::chrono::milliseconds(uses_disk ? disk_timeout_ms_ : host_timeout_ms_),
+                deadline,
                 std::move(on_timeout))) {
-            metrics_reporter_.reportBusinessQueueWaitFinished(
-                CacheTransferOperation::LOAD, false, task->enqueue_time_us, false);
             return false;
         }
     }
@@ -463,13 +471,13 @@ void BlockTreeLoader::abortLoadLocked(const std::vector<TransferDescriptor>& loa
 
 void BlockTreeLoader::runLoadTask(const LoadTaskRunner::TaskPtr& task) {
     const auto complete = [task](ErrorInfo error) {
-        if (!task->context->completeTransfers(task->load_descs.size(), error.ok())) {
-            RTP_LLM_LOG_WARNING("failed to record load copy completion, descriptor_count=%zu", task->load_descs.size());
+        const size_t descriptor_count = task->load_descs.size();
+        if (!task->context->completeTransfers(descriptor_count, error.ok())) {
+            RTP_LLM_LOG_WARNING("failed to record load copy completion, descriptor_count=%zu", descriptor_count);
         }
     };
     try {
-        load_task_runner_.runTransfer(
-            task, *transfer_dispatcher_, metrics_reporter_, disk_timeout_ms_, host_timeout_ms_, complete);
+        load_task_runner_.runTransfer(task, *transfer_dispatcher_, metrics_reporter_, complete);
     } catch (const std::exception& error) {
         RTP_LLM_LOG_ERROR("load task runner failed with exception: %s", error.what());
         complete(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, error.what()));
@@ -505,12 +513,16 @@ void BlockTreeLoader::scheduleContextSettlement(const LoadTaskRunner::TaskPtr&  
             RTP_LLM_LOG_WARNING("failed to publish load context settlement, context_id=%lu", context->contextId());
         }
     };
-    const int64_t queue_begin = metrics_reporter_.reportBusinessQueueWaitStarted(CacheTransferOperation::LOAD, true);
+    const int64_t queue_begin = currentTimeUs();
     if (!task_pool_->submitCompletion([this, settle, queue_begin]() mutable {
-            metrics_reporter_.reportBusinessQueueWaitFinished(CacheTransferOperation::LOAD, true, queue_begin);
+            metrics_reporter_.reportQueueWaitMetric(true,
+                                                    "business",
+                                                    cacheTransferOperationName(CacheTransferOperation::LOAD),
+                                                    Tier::NONE,
+                                                    Tier::NONE,
+                                                    currentTimeUs() - queue_begin);
             settle();
         })) {
-        metrics_reporter_.reportBusinessQueueWaitFinished(CacheTransferOperation::LOAD, true, queue_begin, false);
         RTP_LLM_LOG_WARNING("load completion queue is closed; settling context inline");
         settle();
     }
@@ -540,8 +552,9 @@ bool BlockTreeLoader::settleLoadLocked(LoadTaskRunner::Task&                    
     bool       state_settled      = false;
     bool       tree_data_mutated  = false;
 
-    for (size_t desc_index = 0; desc_index < task.load_descs.size(); ++desc_index) {
-        const TransferDescriptor& desc      = task.load_descs[desc_index];
+    const auto& descriptors = task.load_descs;
+    for (size_t desc_index = 0; desc_index < descriptors.size(); ++desc_index) {
+        const TransferDescriptor& desc      = descriptors[desc_index];
         const GroupSetPtr&        group_set = tree_->groupSets()[desc.group_set_id];
         MultiNodeResource source_protection{desc.group_set_id, desc.source_tier, {{desc.node, desc.source_blocks}}};
         group_set->unreferenceBlocks(source_protection, BlockTreeRefType::LOAD);

@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <chrono>
 #include <string>
 #include <vector>
 
@@ -53,12 +54,39 @@ TEST(TransferDescriptorTest, NeedsTransferDistinguishesLogicalSettlement) {
 }
 
 TEST(TransferDescriptorTest, TransferValidationIgnoresPathMetadata) {
-    TransferDescriptor desc        = TransferDescriptor::hostToDevice(7, 3, {1, 2});
-    desc.path_index                = 11;
+    TransferDescriptor desc = TransferDescriptor::hostToDevice(7, 3, {1, 2});
+    desc.path_index         = 11;
 
     EXPECT_TRUE(desc.isExecutable());
     EXPECT_EQ(desc.debugString(),
               "TransferDescriptor{group_set_id=7, direction=HOST->DEVICE, source_blocks=[3], target_blocks=[1,2]}");
+}
+
+TEST(TransferTaskTest, ExpiredTaskHasNoRemainingTimeout) {
+    TransferTask task({TransferDescriptor::hostToDevice(0, 3, {1, 2})}, std::chrono::seconds(1));
+    task.deadline_             = TransferTask::Clock::now() - std::chrono::milliseconds(1);
+    const auto parent_deadline = task.deadline_;
+
+    auto subtask = task.subtask({TransferDescriptor::hostToDevice(1, 4, {5, 6})});
+
+    EXPECT_TRUE(task.expired());
+    EXPECT_FALSE(task.remainingTimeout().has_value());
+    EXPECT_TRUE(subtask.expired());
+    EXPECT_EQ(subtask.deadline_, parent_deadline);
+}
+
+TEST(TransferTaskTest, SubtaskPreservesAbsoluteDeadline) {
+    TransferTask task({TransferDescriptor::hostToDevice(0, 3, {1, 2})}, std::chrono::seconds(1));
+    task.deadline_             = TransferTask::Clock::now() + std::chrono::seconds(10) + std::chrono::microseconds(500);
+    const auto parent_deadline = task.deadline_;
+
+    auto subtask = task.subtask({TransferDescriptor::hostToDevice(1, 4, {5, 6})});
+    auto nested  = subtask.subtask({TransferDescriptor::hostToDevice(2, 7, {8, 9})});
+
+    EXPECT_EQ(subtask.deadline_, parent_deadline);
+    EXPECT_EQ(nested.deadline_, parent_deadline);
+    ASSERT_EQ(subtask.descriptors().size(), 1u);
+    EXPECT_EQ(subtask.descriptors().front().group_set_id, 1u);
 }
 
 }  // namespace

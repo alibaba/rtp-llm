@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <cstddef>
 #include <deque>
 #include <functional>
@@ -15,6 +16,8 @@ namespace rtp_llm {
 
 class HostStagingBlockPool {
 public:
+    using Clock = std::chrono::steady_clock;
+
     static constexpr size_t kAlignment = 4096;
 
     class HostStagingBlockLease {
@@ -61,8 +64,8 @@ public:
     std::optional<HostStagingBlockBatch> tryMallocBatch(size_t count);
 
     // Fair, all-or-nothing allocation; existing async waiters are never bypassed.
-    // Invokes callback outside mutex_. A null result means cancellation or an invalid request.
-    void requestBatch(size_t count, BatchReadyCallback callback);
+    // Invokes callback outside mutex_. A null result means expiration, cancellation, or an invalid request.
+    void requestBatch(size_t count, Clock::time_point deadline, BatchReadyCallback callback);
 
     // Shutdown boundary: every queued waiter is notified even if another
     // waiter's callback throws, and no exception escapes a caller's destructor.
@@ -73,12 +76,13 @@ private:
 
     struct BatchWaiter {
         size_t             count{0};
+        Clock::time_point  deadline;
         BatchReadyCallback callback;
     };
 
     struct ReadyBatch {
-        BatchReadyCallback    callback;
-        HostStagingBlockBatch leases;
+        BatchReadyCallback                   callback;
+        std::optional<HostStagingBlockBatch> leases;
     };
 
     HostStagingBlockBatch   allocateBatchLocked(size_t count);
