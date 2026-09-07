@@ -41,10 +41,14 @@ class AffinityTests(unittest.TestCase):
     run_plan = global_test.GlobalKvTests.run_plan
 
     def plans(self):
-        return compile_scenarios(
-            load_scenarios(ROOT / "scenarios/kv/cache_affinity.yaml"),
-            handlers=handlers(),
-        )
+        return [
+            p
+            for p in compile_scenarios(
+                load_scenarios(ROOT / "scenarios/kv/cache_affinity.yaml"),
+                handlers=handlers(),
+            )
+            if not p["variant_id"].startswith("leader_spill_")
+        ]
 
     def test_all_twelve_programs_execute_with_explicit_cohorts(self):
         plans = self.plans()

@@ -428,3 +428,178 @@ HANDLERS = [
         {"requests": "requests", "retried": "boolean"},
     ),
 ]
+
+
+def _phase_observation_validate(params, plan):
+    p = _fields(
+        params,
+        {
+            "saturation",
+            "recovery_windows",
+            "family_keys",
+            "leader",
+            "ready_rate",
+            "phase_snapshots",
+            "families",
+        },
+        {
+            "saturation",
+            "recovery_windows",
+            "family_keys",
+            "leader",
+            "ready_rate",
+            "phase_snapshots",
+            "families",
+        },
+    )
+    _keys(p["family_keys"])
+    _families(p["families"])
+    _engine(p["leader"], plan)
+    if not _finite(p["ready_rate"]) or not 0 <= p["ready_rate"] <= 1:
+        raise ValueError("invalid recovery-ready observation rate")
+    if not isinstance(p["saturation"], list) or not 1 <= len(p["saturation"]) <= 200:
+        raise ValueError("saturation observations must be bounded")
+    if (
+        not isinstance(p["recovery_windows"], list)
+        or not 1 <= len(p["recovery_windows"]) <= 100
+    ):
+        raise ValueError("recovery observation windows must be bounded")
+    for window in p["recovery_windows"]:
+        if not isinstance(window, list) or not 1 <= len(window) <= 100:
+            raise ValueError("recovery observation window is empty or unbounded")
+    for ref in p["saturation"] + [
+        r for window in p["recovery_windows"] for r in window
+    ]:
+        plan.reference(ref, "kv_hit")
+    if not isinstance(p["phase_snapshots"], dict) or set(p["phase_snapshots"]) != {
+        "steer",
+        "baseline",
+        "saturation",
+        "recovery",
+    }:
+        raise ValueError("four explicit phase snapshots are required")
+    for ref in p["phase_snapshots"].values():
+        plan.reference(ref, "kv_snapshot")
+    return p
+
+
+def phase_observation(ctx, params, deadline):
+    deadline.check()
+    saturation = [ctx.resource(ref, "kv_hit") for ref in params["saturation"]]
+    windows = [
+        [ctx.resource(ref, "kv_hit") for ref in window]
+        for window in params["recovery_windows"]
+    ]
+    all_samples = saturation + [sample for window in windows for sample in window]
+    if len({s["record"]["wire_request_id"] for s in all_samples}) != len(all_samples):
+        raise ValueError("phase observations cannot repeat request IDs")
+    leader = _target(ctx, params["leader"])
+    selected = [
+        sample for sample in saturation if sample["keys"] == params["family_keys"]
+    ]
+    if not selected:
+        raise ValueError("saturation contains no observations for the declared family")
+    spill_share = sum(s["landed"] != leader for s in selected) / len(selected)
+    recovery_rates = [sum(s["hit"] for s in window) / len(window) for window in windows]
+    ready = next(
+        (
+            str(i + 1)
+            for i, rate in enumerate(recovery_rates)
+            if rate >= params["ready_rate"]
+        ),
+        f">{len(windows)}",
+    )
+    snapshots = {
+        phase: ctx.resource(ref, "kv_snapshot")
+        for phase, ref in params["phase_snapshots"].items()
+    }
+    if leader not in snapshots["steer"]["engines"]:
+        raise ValueError("spill leader is not present in the steering snapshot")
+    digests = {}
+    for phase, snapshot in snapshots.items():
+        digests[phase] = {}
+        for name, engine in snapshot["engines"].items():
+            cached = set(engine["cache_key_set"])
+            runs = []
+            for family in params["families"]:
+                run = 0
+                for key in family:
+                    if key not in cached:
+                        break
+                    run += 1
+                runs.append(run)
+            digests[phase][name] = runs
+    evidence = dict(
+        saturation=saturation,
+        recovery_windows=windows,
+        recovery_rates=recovery_rates,
+        spill_share=spill_share,
+        recovery_window=ready,
+        phase_snapshots=snapshots,
+        contiguous_digests=digests,
+    )
+    return StageOutput(
+        {"spill_share": spill_share, "recovery_window": ready},
+        artifacts=[_artifact(ctx, "kv-phase-observations", evidence)],
+    )
+
+
+HANDLERS.append(
+    StageHandler(
+        "kv_phase_observation",
+        _phase_observation_validate,
+        phase_observation,
+        {"spill_share": "number", "recovery_window": "string"},
+    )
+)
+
+
+def _completeness_validate(params, plan):
+    p = _fields(params, {"samples", "min_samples"}, {"samples", "min_samples"})
+    if not isinstance(p["samples"], list) or not 1 <= len(p["samples"]) <= 200:
+        raise ValueError("completion check requires bounded explicit observations")
+    for ref in p["samples"]:
+        plan.reference(ref, "kv_hit")
+    if type(p["min_samples"]) is not int or not 1 <= p["min_samples"] <= 200:
+        raise ValueError("completion check requires a positive sample floor")
+    return p
+
+
+def hit_completeness(ctx, params, deadline):
+    deadline.check()
+    samples = [ctx.resource(ref, "kv_hit") for ref in params["samples"]]
+    if len({s["record"]["wire_request_id"] for s in samples}) != len(samples):
+        raise ValueError("completion check cannot count repeated requests")
+    passed = len(samples) >= params["min_samples"] and all(
+        s["success"] for s in samples
+    )
+    evidence = dict(
+        complete=True,
+        sample_count=len(samples),
+        min_samples=params["min_samples"],
+        samples=samples,
+    )
+    return StageOutput(
+        {"complete": passed},
+        [
+            CheckResult(
+                "P6",
+                "PASS" if passed else "FAIL",
+                actual=passed,
+                expected=True,
+                evidence=evidence,
+            )
+        ],
+        [_artifact(ctx, "kv-all-request-completion", evidence)],
+    )
+
+
+HANDLERS.append(
+    StageHandler(
+        "kv_hit_completeness",
+        _completeness_validate,
+        hit_completeness,
+        {"complete": "boolean"},
+        checks=frozenset({"P6"}),
+    )
+)

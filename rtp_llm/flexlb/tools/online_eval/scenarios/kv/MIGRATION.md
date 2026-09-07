@@ -4,8 +4,8 @@
 continuity, eviction propagation and per-engine admission isolation. Each has
 BATCH/NON_BATCH programs across all four profiles (six variants, twelve instances).
 The global-holder family is also implemented below. Affinity has three candidate
-contracts; its leader-saturation finding remains pending. Churn is implemented
-below, while capacity is tracked separately by its owner. All old callables remain retained.
+contracts at its first checkpoint and now also includes the leader-saturation
+finding below. Churn is implemented; capacity is tracked separately by its owner. All old callables remain retained.
 
 | Original operation or assertion | Explicit stage |
 | --- | --- |
@@ -90,11 +90,11 @@ and duplicate/unobserved holder expectations. These model runs are not Java,
 Master cache-index version proof, or permission to remove old callables.
 
 
-## Affinity checkpoint: three of four contracts
+## Affinity first checkpoint: three original contracts
 
 `cache_affinity` currently maps prefix stickiness, hot-prefix tension and mixed
-hit tiers (four variants, twelve profile instances). The supplemental
-`kv_leader_saturation_spill` finding is still pending, so this family is partial.
+hit tiers at the first checkpoint (four variants, twelve profile instances).
+The supplemental leader-saturation program is recorded in the next section.
 
 All three use the original smoke environment (2P/4D, default cache/performance),
 15s serial waits and fixed2s post-seed cache sync. They do not replace that fixed
@@ -162,3 +162,49 @@ candidate stops before pressure when replay_affinity or prime-counter gates
 fail. The overall FAIL verdict is preserved, but later failure diagnostics are
 narrower; execution traces are not claimed to be identical (the stay-wrong
 fixture stops at its third RID).
+
+
+## Leader saturation completes the affinity candidate family
+
+`cache_affinity` now contains all four assigned contracts, six variants and
+sixteen profile instances. The supplemental program keeps 2P/2D with12-block
+P/D pools and two10-key/input10240 families. It explicitly steers A onto P0 and
+B onto P1 using the original3000/100ms controls,1.5s settles and3.5s quiet/8s
+limits, checking the actual landing and full-family construction evidence.
+
+The program then preserves all52 phase requests plus two steering requests:
+
+| Phase | Retained order, sampling and checks |
+| --- | --- |
+| baseline | 3 windows of4 serial A/B/A/B requests,15s stream/wait, pre-request8-contiguous-key hit view,2s after each window; all12 M3 .90/.85/.80 |
+| saturation | P0 slow3000ms and1.5s settle;4 windows of A/A/B/B fired requests, .12s only after positions1..3, none after position4; BATCH Fetch deferred until each window drains,30s per request; all16 M3 .50/.40/.30 |
+| recovery | Restore P0 to100ms, settle1.5s, quiet3.5s within8s;6 windows of4 serial A/B/A/B requests with2s after every window; final2 windows/8 samples M3 .85/.80/.75 |
+| final replication | Last-window any-key holder counts averaged across the two families, P5 1.5/1.75/2.0 and explicit structural cap2 |
+
+The existing declared finding is mapped only to `saturation_hit.M3`, the healthy
+saturation hit-rate contract. `all_phase_requests.P6` covers all52 phase requests,
+including the first four recovery windows that are outside the steady-rate
+denominator. P6, baseline/recovery M3, structural/replication
+checks, timeouts and unavailable evidence do not acquire an exemption. This
+narrows the old whole-callable expected-failure boundary explicitly. It never
+changes the healthy bands to fit the known observation.
+
+End-of-window holder flips, A-family spill share, first recovery window reaching
+.75, and per-phase contiguous-prefix digests remain observations with raw
+samples, not new pass/fail thresholds. Final hit rates use distinct request IDs
+and pre-request key snapshots; all phase requests must have verified terminal
+evidence. The original serial30/15 caller/RPC differences and early-stop
+failure diagnostics remain as documented above. No live-service root cause or
+full real-Java acceptance is inferred from the local model.
+
+Three new tests execute all four delivery/profile programs in healthy and
+saturation-collapse models, check the12/16/8 denominators and12 inter-fire
+pauses, and demonstrate both early and steady recovery failure, missing terminal
+evidence and repeated
+saturation samples cannot be masked by the declared finding.
+
+Global-holder execution differences clarified by independent review: release
+and partial-release now check shared_holders explicitly before eviction. Several
+old end-of-function boolean combinations are stage gates, so a failure stops
+later traffic/diagnostics sooner. Final predicates are not relaxed, but failure
+execution traces and diagnostic coverage are not claimed to be identical.
