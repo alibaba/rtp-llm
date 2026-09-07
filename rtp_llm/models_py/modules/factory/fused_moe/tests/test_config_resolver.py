@@ -4,6 +4,8 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import torch
+
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig, Fp8PerTensorQuantConfig
 from rtp_llm.device.device_type import DeviceType
@@ -11,6 +13,7 @@ from rtp_llm.models_py.distributed.deepep_wrapper import (
     DeepEPMode,
     DeepEPWrapper,
     DeepepWrapperConfig,
+    init_deepep_wrapper,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
@@ -24,7 +27,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.deepep_low_la
 from rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver import (
     MoeConfigResolver,
 )
-from rtp_llm.ops import CPRotateMethod, MoeConfig, ParallelismConfig
+from rtp_llm.ops import CPRotateMethod, MoeConfig, ParallelismConfig, SpeculativeType
 
 
 def create_config_adapter(
@@ -169,7 +172,7 @@ class TestMoeConfigResolver(unittest.TestCase):
         self.assertEqual(unquantized_capacity, 64)
         self.assertEqual(process_capacity, unquantized_capacity)
 
-    def test_deepep_low_latency_capacity_uses_physical_tp_under_cp(self):
+    def test_deepep_low_latency_capacity_matches_dispatch_partition_under_cp(self):
         config = create_config_adapter(
             ep_size=2,
             tp_size=4,
@@ -199,11 +202,57 @@ class TestMoeConfigResolver(unittest.TestCase):
             ),
             patch.object(DeepEPWrapper, "get_instance", return_value=wrapper),
         ):
-            DeepEpLowLatencyRouter(config, FusedMoEQuantConfig())
+            router = DeepEpLowLatencyRouter(config, FusedMoEQuantConfig())
 
         calc_capacity.assert_called_once_with(
             config.ll_num_max_token,
-            4,
+            1,
+            config.model_config.quant_config,
+        )
+        tokens = torch.arange(24).reshape(6, 4)
+        topk_ids = torch.zeros((6, 2), dtype=torch.int64)
+        topk_weights = torch.ones((6, 2))
+        sliced_tokens, sliced_ids, sliced_weights = router._prepare_pre_tp_slice(
+            tokens, topk_ids, topk_weights
+        )
+        self.assertEqual(sliced_tokens.shape[0], 6)
+        self.assertEqual(sliced_ids.shape[0], 6)
+        self.assertEqual(sliced_weights.shape[0], 6)
+
+    def test_process_deepep_capacity_matches_cp_router_partition(self):
+        config = create_config_adapter(
+            ep_size=2,
+            tp_size=4,
+            use_deepep_low_latency=True,
+            cp_enabled=True,
+        )
+        engine_config = SimpleNamespace(
+            parallelism_config=config.parallelism_config,
+            moe_config=config.moe_config,
+            hw_kernel_config=None,
+            runtime_config=SimpleNamespace(max_generate_batch_size=128),
+            sp_config=SimpleNamespace(type=SpeculativeType.NONE),
+        )
+
+        with (
+            patch.object(DeepEPWrapper, "supported", return_value=True),
+            patch.object(
+                DeepepWrapperConfig,
+                "calc_model_low_latency_max_token_per_rank",
+                return_value=128,
+            ) as calc_capacity,
+            patch.object(
+                DeepepWrapperConfig,
+                "from_config_adapter",
+                return_value=object(),
+            ),
+            patch.object(DeepEPWrapper, "create"),
+        ):
+            init_deepep_wrapper(engine_config, config.model_config)
+
+        calc_capacity.assert_called_once_with(
+            128,
+            1,
             config.model_config.quant_config,
         )
 

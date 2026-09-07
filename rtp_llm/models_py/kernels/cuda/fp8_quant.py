@@ -50,8 +50,10 @@ def _validate_native_output(
 def _resolve_compute_op(name: str):
     """Resolve only the CUDA quant op requested by the selected backend."""
     try:
+        ops = importlib.import_module("rtp_llm.ops")
+        ops.ensure_compute_ops_loaded()
         compute_ops = importlib.import_module("librtp_compute_ops.rtp_llm_ops")
-    except ImportError as error:
+    except (ImportError, OSError) as error:
         raise ImportError("RTP FP8 compute ops are unavailable") from error
     op = getattr(compute_ops, name, None)
     if not callable(op):
@@ -209,9 +211,7 @@ def sgl_per_token_group_quant_fp8(
         scale_ue8m0=scale_ue8m0,
     )
     if x.numel() > 0:
-        quant_kernel = (
-            os.environ.get("DSV4_FP8_QUANT_KERNEL", "auto").strip().lower()
-        )
+        quant_kernel = os.environ.get("DSV4_FP8_QUANT_KERNEL", "auto").strip().lower()
 
         def can_use_v2() -> bool:
             if group_size not in (16, 32, 64, 128):
@@ -285,9 +285,7 @@ def scaled_fp8_per_tensor_quant(
         raise ValueError(
             f"FP8 per-tensor quantization requires 2D input, got {input.shape}"
         )
-    _validate_native_quant_input(
-        input, "FP8 per-tensor quantization", allow_empty=True
-    )
+    _validate_native_quant_input(input, "FP8 per-tensor quantization", allow_empty=True)
     vector_width = 16 // input.element_size()
     if input.numel() % vector_width != 0:
         raise ValueError(
@@ -305,9 +303,7 @@ def scaled_fp8_per_tensor_quant(
         scale = torch.zeros(1, device=input.device, dtype=torch.float32)
         if input.numel() > 0:
             with torch.cuda.device(input.device):
-                _resolve_compute_op("per_tensor_quant_fp8")(
-                    input, output, scale, False
-                )
+                _resolve_compute_op("per_tensor_quant_fp8")(input, output, scale, False)
     else:
         if scale.numel() != 1:
             raise ValueError(
@@ -319,25 +315,21 @@ def scaled_fp8_per_tensor_quant(
             raise TypeError("FP8 per-tensor scale must be contiguous float32")
         if input.numel() > 0:
             with torch.cuda.device(input.device):
-                _resolve_compute_op("per_tensor_quant_fp8")(
-                    input, output, scale, True
-                )
+                _resolve_compute_op("per_tensor_quant_fp8")(input, output, scale, True)
     return output, scale
 
 
 def scaled_fp8_per_token_quant(
     input: torch.Tensor,
-    scale: Optional[torch.Tensor] = None,
-    *,
     output: Optional[torch.Tensor] = None,
+    *,
+    scale: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     if input.ndim != 2:
         raise ValueError(
             f"FP8 per-token quantization requires 2D input, got {input.shape}"
         )
-    _validate_native_quant_input(
-        input, "FP8 per-token quantization", allow_empty=True
-    )
+    _validate_native_quant_input(input, "FP8 per-token quantization", allow_empty=True)
     if input.shape[1] == 0:
         raise ValueError("FP8 per-token input width must be positive")
     if input.shape[1] % 8 != 0:

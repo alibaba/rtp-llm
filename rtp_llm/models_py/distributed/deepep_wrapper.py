@@ -48,9 +48,7 @@ except ImportError as _deep_ep_import_err:
             )
 
         def __init_subclass__(cls, **kwargs):
-            raise NotImplementedError(
-                "deep_ep is not available in this build."
-            )
+            raise NotImplementedError("deep_ep is not available in this build.")
 
         @classmethod
         def get_low_latency_rdma_size_hint(cls, *args, **kwargs):
@@ -723,12 +721,13 @@ def init_deepep_wrapper(
         ll_num_max_token = engine_config.runtime_config.max_generate_batch_size
         if engine_config.sp_config.type != SpeculativeType.NONE:
             ll_num_max_token *= engine_config.sp_config.gen_num_per_cycle + 1
-        ll_num_max_token_per_rank = (
-            DeepepWrapperConfig.calc_model_low_latency_max_token_per_rank(
-                ll_num_max_token,
-                engine_config.parallelism_config.tp_size,
-                model_config.quant_config,
-            )
+        ll_num_max_token_per_rank = DeepepWrapperConfig.calc_model_low_latency_max_token_per_rank(
+            ll_num_max_token,
+            # Keep process-wide allocation identical to the router's
+            # prepare() partitioning. Under CP, adapter.tp_size is one and
+            # each rank dispatches its full local token set.
+            deepep_config_adapter.tp_size,
+            model_config.quant_config,
         )
 
     deepep_config = DeepepWrapperConfig.from_config_adapter(

@@ -3,13 +3,14 @@ from typing import Dict, Tuple
 
 import torch
 import torch.nn as nn
+
 from rtp_llm.models_py.module_base import RtpModule
 
 logger = logging.getLogger(__name__)
 _RMSNORM_FUSED_ENABLED = True
 
 
-def _disable_fused_rmsnorm(exc: ImportError) -> None:
+def _disable_fused_rmsnorm(exc: BaseException) -> None:
     global _RMSNORM_FUSED_ENABLED
 
     _RMSNORM_FUSED_ENABLED = False
@@ -20,6 +21,20 @@ def _disable_fused_rmsnorm(exc: ImportError) -> None:
         exc,
         exc_info=(type(exc), exc, exc.__traceback__),
     )
+
+
+def _eager_rms_res_norm(
+    weight: torch.Tensor,
+    hidden_states: torch.Tensor,
+    residual: torch.Tensor,
+    eps: float,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    residual_out = hidden_states + residual
+    input_dtype = residual_out.dtype
+    fp32 = residual_out.float()
+    variance = fp32.pow(2).mean(-1, keepdim=True)
+    normalized = fp32 * torch.rsqrt(variance + eps)
+    return (weight * normalized).to(input_dtype), residual_out
 
 
 class RMSNorm(RtpModule):
@@ -66,7 +81,7 @@ class RMSNorm(RtpModule):
                     from rtp_llm.models_py.modules.base.rocm.norm import (
                         _requires_opus_rmsnorm,
                     )
-                except ImportError as exc:
+                except (ImportError, OSError) as exc:
                     _disable_fused_rmsnorm(exc)
                 else:
                     if _requires_opus_rmsnorm(input_2d):
@@ -79,7 +94,7 @@ class RMSNorm(RtpModule):
             else:
                 try:
                     from rtp_llm.ops.compute_ops import rtp_llm_ops
-                except ImportError as exc:
+                except (ImportError, OSError) as exc:
                     _disable_fused_rmsnorm(exc)
                 else:
                     output = torch.empty_like(input_2d)
@@ -154,55 +169,64 @@ class RMSResNorm(RtpModule):
         if self.weight.dtype != hidden_states.dtype:
             raise TypeError("RMSResNorm weight and inputs must share a dtype")
 
-        if hidden_states.is_cuda:
+        if hidden_states.is_cuda and _RMSNORM_FUSED_ENABLED:
             if getattr(torch.version, "hip", None) is not None:
-                from aiter import (
-                    rmsnorm2d_fwd_with_add,
-                    rmsnorm2d_fwd_with_add_opus,
-                )
-                from rtp_llm.models_py.modules.base.rocm.norm import (
-                    _requires_opus_rmsnorm,
-                )
-
-                output = torch.empty_like(hidden_states)
-                residual_out = torch.empty_like(residual)
-                if _requires_opus_rmsnorm(hidden_states):
-                    rmsnorm2d_fwd_with_add_opus(
-                        output,
-                        hidden_states,
-                        residual,
-                        residual_out,
-                        self.weight.data,
-                        self.eps,
+                try:
+                    from aiter import (
+                        rmsnorm2d_fwd_with_add,
+                        rmsnorm2d_fwd_with_add_opus,
                     )
+                    from rtp_llm.models_py.modules.base.rocm.norm import (
+                        _requires_opus_rmsnorm,
+                    )
+                except (ImportError, OSError) as exc:
+                    _disable_fused_rmsnorm(exc)
                 else:
-                    rmsnorm2d_fwd_with_add(
-                        output,
-                        hidden_states,
-                        residual,
-                        residual_out,
-                        self.weight.data,
-                        self.eps,
-                        0,
-                    )
-                return output, residual_out
+                    output = torch.empty_like(hidden_states)
+                    residual_out = torch.empty_like(residual)
+                    if _requires_opus_rmsnorm(hidden_states):
+                        rmsnorm2d_fwd_with_add_opus(
+                            output,
+                            hidden_states,
+                            residual,
+                            residual_out,
+                            self.weight.data,
+                            self.eps,
+                        )
+                    else:
+                        rmsnorm2d_fwd_with_add(
+                            output,
+                            hidden_states,
+                            residual,
+                            residual_out,
+                            self.weight.data,
+                            self.eps,
+                            0,
+                        )
+                    return output, residual_out
 
-            from rtp_llm.ops.compute_ops import rtp_llm_ops
+            else:
+                try:
+                    from rtp_llm.ops.compute_ops import rtp_llm_ops
+                except (ImportError, OSError) as exc:
+                    _disable_fused_rmsnorm(exc)
+                else:
+                    with torch.cuda.device(hidden_states.device):
+                        stream_id = torch.cuda.current_stream(
+                            hidden_states.device
+                        ).cuda_stream
+                        rtp_llm_ops.fused_add_rmsnorm(
+                            hidden_states,
+                            residual,
+                            self.weight.data,
+                            self.eps,
+                            stream_id,
+                        )
+                    return hidden_states, residual
 
-            with torch.cuda.device(hidden_states.device):
-                stream_id = torch.cuda.current_stream(hidden_states.device).cuda_stream
-                rtp_llm_ops.fused_add_rmsnorm(
-                    hidden_states,
-                    residual,
-                    self.weight.data,
-                    self.eps,
-                    stream_id,
-                )
-            return hidden_states, residual
-
-        residual_out = hidden_states + residual
-        input_dtype = residual_out.dtype
-        fp32 = residual_out.float()
-        variance = fp32.pow(2).mean(-1, keepdim=True)
-        normalized = fp32 * torch.rsqrt(variance + self.eps)
-        return (self.weight * normalized).to(input_dtype), residual_out
+        return _eager_rms_res_norm(
+            self.weight,
+            hidden_states,
+            residual,
+            self.eps,
+        )

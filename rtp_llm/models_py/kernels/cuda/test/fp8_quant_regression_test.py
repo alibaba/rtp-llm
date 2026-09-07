@@ -127,12 +127,20 @@ class Fp8QuantRegressionTest(TestCase):
     def test_per_token_scale_buffer_contract(self):
         input_tensor = torch.ones((2, 128), dtype=torch.bfloat16, device="cuda")
         scale = torch.empty((2, 1), dtype=torch.float32, device="cuda")
-        _, returned_scale = scaled_fp8_per_token_quant(input_tensor, scale)
+        _, returned_scale = scaled_fp8_per_token_quant(input_tensor, scale=scale)
         self.assertEqual(returned_scale.data_ptr(), scale.data_ptr())
 
         invalid_scale = torch.empty_like(input_tensor, dtype=torch.float32)
         with self.assertRaisesRegex(ValueError, "per-token scale must have shape"):
-            scaled_fp8_per_token_quant(input_tensor, invalid_scale)
+            scaled_fp8_per_token_quant(input_tensor, scale=invalid_scale)
+
+    def test_per_token_preserves_positional_output_buffer_contract(self):
+        input_tensor = torch.ones((2, 128), dtype=torch.bfloat16, device="cuda")
+        output = torch.empty_like(input_tensor, dtype=torch.float8_e4m3fn)
+
+        returned_output, _ = scaled_fp8_per_token_quant(input_tensor, output)
+
+        self.assertEqual(returned_output.data_ptr(), output.data_ptr())
 
     def test_transform_scale_moves_cpu_input_to_current_cuda_device(self):
         from deep_gemm import get_mn_major_tma_aligned_packed_ue8m0_tensor

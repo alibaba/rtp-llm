@@ -1215,13 +1215,14 @@ preset_quant_config = {
 def init_quant_config(quantization: str):
     try:
         quant_config_dict = json.loads(quantization)
-        quant_config: QuantizationConfig = QuantizationConfig.from_config(
-            quant_config_dict
-        )
-    except Exception:
+    except json.JSONDecodeError:
         quant_config = preset_quant_config.get(quantization.upper(), None)
         if quant_config is None:
             raise ValueError(
                 f"{quantization.upper()} is not support now, quantization must in {list(preset_quant_config.keys())}"
             )
-    return quant_config
+        return quant_config
+
+    # Once JSON parsing succeeds, preserve precise schema/type errors from the
+    # quantization config instead of misreporting them as an unknown preset.
+    return QuantizationConfig.from_config(quant_config_dict)
