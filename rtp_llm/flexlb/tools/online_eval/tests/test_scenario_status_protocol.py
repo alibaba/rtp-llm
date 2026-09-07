@@ -333,6 +333,13 @@ class StatusProtocolTest(unittest.TestCase):
             )
         )
 
+    def test_legacy_cleanup_does_not_add_a_prefill_member_condition(self):
+        frame = owner_frame()
+        frame["inflight"]["prefill_endpoints"][0]["inflight_requests"] = 3
+        self.assertEqual(0, status.metric(frame, "cleanup_inflight"))
+        self.assertEqual(3, status.metric(frame, "all_inflight"))
+        self.assertEqual(3, status.metric(frame, "prefill_requests"))
+
     def test_debug_source_cannot_omit_a_required_owner(self):
         pages = {"scheduler": {}, "queues": {}}
         for role, endpoint, generation in [
