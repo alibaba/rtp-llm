@@ -67,17 +67,18 @@ from ..engine_ops import (
 from ..harness import (
     TTL_DRAIN_TIMEOUT_S,
     AssertUtils,
+    ConfigOverride,
     EnvSpec,
+    OMIT,
     _BackgroundFlow,
     _cleanup_dynamic,
     _elastic_env,
-    _fault_spec,
     _pump_until_accepted,
     _run_batch,
     _ttft_p50,
     _wait_master_alive,
     _wait_master_topology,
-    fault_env_config,
+    default_perf,
     fault_env_perf,
     http_get_status,
     http_post_json,
@@ -495,6 +496,31 @@ def engine_flap(ctx: CaseContext):
             pass
 
 
+def _fault_spec(ctx: CaseContext) -> EnvSpec:
+    """Env for fault cases whose requests die mid-flight (fetch_error,
+    crash_after): short staleInflightTimeoutMs (30s vs the na130 default
+    300s) so the TTL-cleanup contracts finish within their caps — the
+    master ledger entry of an accepted-but-abandoned request is settled
+    by the stale-inflight TTL, not by an immediate terminal (formerly
+    harness._fault_spec; queueTimeoutMs stays at the functional-profile
+    60s).
+    """
+    return EnvSpec(
+        label=f"inject_fault_{ctx.profile}",
+        n_prefill=2,
+        n_decode=2,
+        perf=default_perf(),
+        master_profile=ctx.profile,
+        config_overrides=ConfigOverride(
+            ordering="priority",
+            decision="fixed_window",
+            dispatcher="batch",
+            queue_timeout_ms=60_000,
+            stale_inflight_ms=30_000,
+        ),
+    )
+
+
 @case(
     "engine_fault_crash_after",
     profiles=["batch-window"],
@@ -877,7 +903,12 @@ def _recovery_spec(ctx: CaseContext, suffix: str = "") -> EnvSpec:
         perf=fault_env_perf(),
         master_profile=ctx.profile,
         discovery="discovery_file",
-        master_env={"FLEXLB_CONFIG": fault_env_config()},
+        config_overrides=ConfigOverride(
+            ordering="priority",
+            decision="fixed_window",
+            dispatcher="batch",
+            queue_timeout_ms=OMIT,
+        ),
         # Route ALL master logback output (application/sync/flexlb/pv) into
         # a per-env directory — the generation/retire observations below read
         # <dir>/sync.log instead of the shared ~/ai-whale/logs.
@@ -894,7 +925,7 @@ def _engine_ip_port(ops, engine_name: str) -> str:
     """Master-facing address of *engine_name* — the ipPort the master logs
     and keys workerStatus entries by.
 
-    With --unique-engine-ips (Java default) every engine
+    With --unique-engine-ips (harness default on Linux) every engine
     advertises a derived 127.x.y.z loopback host, NOT 127.0.0.1, and the
     master keys/logs by that advertised pair — a hardcoded 127.0.0.1
     needle matches nothing in the sync log or the inflight ledger.  The

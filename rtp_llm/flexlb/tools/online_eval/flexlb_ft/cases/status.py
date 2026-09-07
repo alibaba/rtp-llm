@@ -118,17 +118,18 @@ from ..engine_ops import (
 from ..harness import (
     TTL_DRAIN_TIMEOUT_S,
     AssertUtils,
+    ConfigOverride,
     EnvSpec,
+    OMIT,
     _accepted,
-    _fault_spec,
-    build_flexlb_config,
     default_perf,
+    fault_env_perf,
     http_get_status,
 )
 from ..harness import master_decode_requests_sum as _harness_decode_requests_sum
 from ..harness import master_prefill_batches_sum as _harness_prefill_batches_sum
 from ..harness import master_prefill_requests_sum as _harness_prefill_requests_sum
-from ..harness import ttl_spec, wait_for
+from ..harness import wait_for
 
 STATUS_CASES: list[CaseDef] = []
 
@@ -213,15 +214,13 @@ def _status_spec(ctx: CaseContext) -> EnvSpec:
         n_decode=2,
         perf=default_perf(),
         master_profile=ctx.profile,
-        master_env={
-            "FLEXLB_CONFIG": build_flexlb_config(
-                ordering="priority",
-                decision="fixed_window",
-                dispatcher="batch",
-                queue_timeout_ms=int(QUEUE_TIMEOUT_S * 1000),
-                stale_inflight_ms=int(STALE_INFLIGHT_TTL_S * 1000),
-            )
-        },
+        config_overrides=ConfigOverride(
+            ordering="priority",
+            decision="fixed_window",
+            dispatcher="batch",
+            queue_timeout_ms=int(QUEUE_TIMEOUT_S * 1000),
+            stale_inflight_ms=int(STALE_INFLIGHT_TTL_S * 1000),
+        ),
     )
 
 
@@ -565,14 +564,30 @@ def inflight_ttl_cleanup(ctx: CaseContext):
     population (105s event window); the fleet still serves after the
     release (recovery).
 
-    Profile semantics (v2, task #55): ttl_spec pins the legacy fault
-    axes (PRIORITY + FIXED_WINDOW + BATCH) via FLEXLB_CONFIG — the
+    Profile semantics (v2, task #55): the env pins the legacy fault
+    axes (PRIORITY + FIXED_WINDOW + BATCH, no queueTimeoutMs — the Java
+    default 1h cannot expire these requests before the TTL; formerly
+    harness.ttl_spec) — the
     declaration stays batch-window (label honesty + regression
-    efficiency).  fault_env_config sets no queueTimeoutMs, so the Java
-    default (1h) cannot expire these requests before the TTL — the
-    deadline path is not an exit here.
+    efficiency).  The fault-family override sets no queueTimeoutMs, so
+    the deadline path is not an exit here.
     """
-    env = ctx.env_manager.ensure(ttl_spec(ctx))
+    env = ctx.env_manager.ensure(
+        EnvSpec(
+            label=f"fault_ttl_{ctx.profile}",
+            n_prefill=2,
+            n_decode=2,
+            perf=fault_env_perf(),
+            master_profile=ctx.profile,
+            discovery="discovery_file",
+            config_overrides=ConfigOverride(
+                ordering="priority",
+                decision="fixed_window",
+                dispatcher="batch",
+                queue_timeout_ms=OMIT,
+            ),
+        )
+    )
     ops = ctx.engine_ops(env)
     base = rid_base(ctx, "status")
     pnames = _prefill_names(ops)
@@ -2942,14 +2957,32 @@ def inject_fetch_error(ctx: CaseContext):
 
     Profile semantics (v2, task #55): the fault is checked only at the
     engine's fetchResponse entry, which exists only under the BATCH
-    dispatcher — and _fault_spec pins the legacy fault axes
-    (PRIORITY + FIXED_WINDOW + BATCH) via FLEXLB_CONFIG, so re-running
+    dispatcher — and the env below pins the legacy fault axes
+    (PRIORITY + FIXED_WINDOW + BATCH; formerly harness._fault_spec)
+    via the config override layer, so re-running
     under another --profile would execute the identical configuration.
     The declaration stays batch-window (regression efficiency + label
     honesty); a NON_BATCH master-path generate_error variant is
     dedicated-phase material.
     """
-    ops = ctx.engine_ops(ctx.env_manager.ensure(_fault_spec(ctx)))
+    ops = ctx.engine_ops(
+        ctx.env_manager.ensure(
+            EnvSpec(
+                label=f"inject_fault_{ctx.profile}",
+                n_prefill=2,
+                n_decode=2,
+                perf=default_perf(),
+                master_profile=ctx.profile,
+                config_overrides=ConfigOverride(
+                    ordering="priority",
+                    decision="fixed_window",
+                    dispatcher="batch",
+                    queue_timeout_ms=60_000,
+                    stale_inflight_ms=30_000,
+                ),
+            )
+        )
+    )
     base = rid_base(ctx, "status")
     names = _prefill_names(ops)
     if not names:

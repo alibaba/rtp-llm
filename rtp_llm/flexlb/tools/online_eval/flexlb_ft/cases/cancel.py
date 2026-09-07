@@ -66,9 +66,9 @@ from ..engine_ops import (
 from ..harness import (
     TTL_DRAIN_TIMEOUT_S,
     AssertUtils,
+    ConfigOverride,
     EnvSpec,
     default_perf,
-    flexlb_config_for_profile,
     wait_for,
     wait_for_port,
 )
@@ -873,11 +873,7 @@ def cancel_deadline_exempt_inflight(ctx: CaseContext):
         n_decode=4,
         perf=default_perf(),
         master_profile=ctx.profile,
-        master_env={
-            "FLEXLB_CONFIG": flexlb_config_for_profile(
-                ctx.profile, queue_timeout_ms=2_000
-            )
-        },
+        config_overrides=ConfigOverride(queue_timeout_ms=2_000),
     )
     env = ctx.env_manager.ensure(spec)
     ops = ctx.engine_ops(env)
@@ -1137,7 +1133,7 @@ def cancel_preemption_victim(ctx: CaseContext):
     victim stages {PREFILL_QUEUED, DECODE_RESERVED, DECODE_ENGINE_OWNED}
     plus the engineCancellation block (the engine-owned stage REQUIRES
     it — FlexlbConfigValidator rejects the stage set otherwise; see
-    harness._build_preemption_cfg for the schema) and decode
+    flexlb_cfg._build_preemption_cfg for the schema) and decode
     maxEngineRequests=1 so the single decode slot makes the capacity
     contest deterministic.  The victim (priority 30, input_len=512 /
     output_len=200 — long decode) is scheduled first and waits RUNNING
@@ -1178,9 +1174,6 @@ def cancel_preemption_victim(ctx: CaseContext):
     deterministic.  Priority rides the Schedule proto's priority field
     (see _schedule_with_priority).
     """
-    config = json.loads(flexlb_config_for_profile(ctx.profile, ordering="priority"))
-    ordering = config["scheduler"]["ordering"]
-    ordering["defaultPriority"] = 50
     # Victim-stage contract: the victim is polled to RUNNING on the
     # decode engine (= engine-confirmed), so the stage set MUST include
     # DECODE_ENGINE_OWNED — and that stage requires the engineCancellation
@@ -1189,22 +1182,28 @@ def cancel_preemption_victim(ctx: CaseContext):
     # {PREFILL_QUEUED, DECODE_RESERVED} set left the RUNNING victim
     # unreachable by every eviction layer (see the docstring's stage-
     # contract note).
-    ordering["preemption"] = {
-        "allowedVictimStages": [
-            "PREFILL_QUEUED",
-            "DECODE_RESERVED",
-            "DECODE_ENGINE_OWNED",
-        ],
-        "engineCancellation": {"ackTimeoutMs": 50, "completionTimeoutMs": 1000},
-    }
-    config["router"]["roles"]["decode"]["availability"]["maxEngineRequests"] = 1
     spec = EnvSpec(
         label=f"cancel_preempt_{ctx.profile}",
         n_prefill=1,
         n_decode=1,
         perf=default_perf(),
         master_profile=ctx.profile,
-        master_env={"FLEXLB_CONFIG": json.dumps(config, separators=(",", ":"))},
+        config_overrides=ConfigOverride(
+            ordering="priority",
+            default_priority=50,
+            preemption={
+                "allowed_victim_stages": [
+                    "PREFILL_QUEUED",
+                    "DECODE_RESERVED",
+                    "DECODE_ENGINE_OWNED",
+                ],
+                "engine_cancellation": {
+                    "ack_timeout_ms": 50,
+                    "completion_timeout_ms": 1000,
+                },
+            },
+            decode_max_engine_requests=1,
+        ),
     )
     env = ctx.env_manager.ensure(spec)
     ops = ctx.engine_ops(env)
@@ -1619,7 +1618,6 @@ def _ha_env(ctx: CaseContext, label_suffix: str) -> tuple:
         n_decode=1,
         perf=default_perf(),
         master_profile=ctx.profile,
-        master_env={"FLEXLB_CONFIG": flexlb_config_for_profile(ctx.profile)},
     )
     env = ctx.env_manager.ensure(spec)
     return ctx.engine_ops(env), env

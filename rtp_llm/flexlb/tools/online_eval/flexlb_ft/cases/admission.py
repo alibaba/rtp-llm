@@ -141,10 +141,9 @@ from ..engine_ops import (
 )
 from ..harness import (
     AssertUtils,
+    ConfigOverride,
     EnvSpec,
     _ttft_p50,
-    admission_config,
-    build_flexlb_config,
     default_perf,
     http_get_json,
     wait_for,
@@ -323,7 +322,12 @@ def _slo_spec(ctx: CaseContext) -> EnvSpec:
         n_decode=2,
         perf=default_perf(),
         master_profile=ctx.profile,
-        master_env={"FLEXLB_CONFIG": admission_config(queue_timeout_ms=1500)},
+        config_overrides=ConfigOverride(
+            ordering="priority",
+            decision="fixed_window",
+            dispatcher="batch",
+            queue_timeout_ms=1500,
+        ),
     )
 
 
@@ -414,7 +418,13 @@ def _capacity_spec(ctx: CaseContext) -> EnvSpec:
         n_decode=2,
         perf=default_perf(),
         master_profile=ctx.profile,
-        master_env={"FLEXLB_CONFIG": admission_config(max_outstanding=2)},
+        config_overrides=ConfigOverride(
+            ordering="priority",
+            decision="fixed_window",
+            dispatcher="batch",
+            queue_timeout_ms=60_000,
+            max_outstanding=2,
+        ),
     )
 
 
@@ -607,7 +617,12 @@ def _prefill_park_spec(ctx: CaseContext) -> EnvSpec:
         n_decode=2,
         perf=default_perf(),
         master_profile=ctx.profile,
-        master_env={"FLEXLB_CONFIG": admission_config()},
+        config_overrides=ConfigOverride(
+            ordering="priority",
+            decision="fixed_window",
+            dispatcher="batch",
+            queue_timeout_ms=60_000,
+        ),
     )
 
 
@@ -755,15 +770,19 @@ def _decode_park_spec(ctx: CaseContext) -> EnvSpec:
     the only admission edge in play: every fired request is routed and
     delivered, and whatever overflows 128 running slots must park in the
     engine's decodePendingQueue instead of being bounced anywhere."""
-    config = json.loads(admission_config())
-    config["router"]["roles"]["decode"]["availability"]["maxEngineRequests"] = 5000
     return EnvSpec(
         label=f"admit_decode_park_{ctx.profile}",
         n_prefill=2,
         n_decode=1,
         perf=default_perf(),
         master_profile=ctx.profile,
-        master_env={"FLEXLB_CONFIG": json.dumps(config, separators=(",", ":"))},
+        config_overrides=ConfigOverride(
+            ordering="priority",
+            decision="fixed_window",
+            dispatcher="batch",
+            queue_timeout_ms=60_000,
+            decode_max_engine_requests=5000,
+        ),
     )
 
 
@@ -954,17 +973,22 @@ def _incomer_spec(ctx: CaseContext) -> EnvSpec:
     the permit is back in the pool and the incomer acquires it (the old
     completeAcceptanceLimit 8431 reject path is no longer reachable at
     this probe point).  No preemption block is emitted
-    (build_flexlb_config never writes one), so EvictionManager.tryAdmit
+    (the generator never writes one), so EvictionManager.tryAdmit
     is a no-op — the no-preemption complement of
     cancel_preemption_victim."""
-    config = json.loads(admission_config(max_delivered_not_accepted=1))
     return EnvSpec(
         label=f"admit_incomer_{ctx.profile}",
         n_prefill=1,
         n_decode=1,
         perf=default_perf(),
         master_profile=ctx.profile,
-        master_env={"FLEXLB_CONFIG": json.dumps(config, separators=(",", ":"))},
+        config_overrides=ConfigOverride(
+            ordering="priority",
+            decision="fixed_window",
+            dispatcher="batch",
+            queue_timeout_ms=60_000,
+            max_delivered_not_accepted=1,
+        ),
     )
 
 
@@ -1342,12 +1366,13 @@ def _batcher_queue_spec(ctx: CaseContext, queue_timeout_ms: int) -> EnvSpec:
         n_decode=2,
         perf=default_perf(),
         master_profile=ctx.profile,
-        master_env={
-            "FLEXLB_CONFIG": admission_config(
-                queue_timeout_ms=queue_timeout_ms,
-                max_waiting_requests_per_prefill_worker=2,
-            )
-        },
+        config_overrides=ConfigOverride(
+            ordering="priority",
+            decision="fixed_window",
+            dispatcher="batch",
+            queue_timeout_ms=queue_timeout_ms,
+            max_waiting_requests_per_prefill_worker=2,
+        ),
     )
 
 
@@ -1761,16 +1786,14 @@ def _pool_wait_spec(ctx: CaseContext) -> EnvSpec:
         n_decode=2,
         perf=default_perf(),
         master_profile=ctx.profile,
-        master_env={
-            "FLEXLB_CONFIG": build_flexlb_config(
-                ordering="fifo",
-                decision="single",
-                dispatcher="non_batch",
-                queue_timeout_ms=60_000,
-                max_inflight_requests_per_worker=1,
-                max_waiting_requests_per_prefill_worker=2,
-            )
-        },
+        config_overrides=ConfigOverride(
+            ordering="fifo",
+            decision="single",
+            dispatcher="non_batch",
+            queue_timeout_ms=60_000,
+            max_inflight_requests_per_worker=1,
+            max_waiting_requests_per_prefill_worker=2,
+        ),
     )
 
 
@@ -1983,7 +2006,12 @@ def _waiting_cap_spec(ctx: CaseContext) -> EnvSpec:
         n_decode=2,
         perf=default_perf(),
         master_profile=ctx.profile,
-        master_env={"FLEXLB_CONFIG": admission_config()},
+        config_overrides=ConfigOverride(
+            ordering="priority",
+            decision="fixed_window",
+            dispatcher="batch",
+            queue_timeout_ms=60_000,
+        ),
     )
 
 
@@ -2201,7 +2229,12 @@ def _lack_mem_spec(ctx: CaseContext) -> EnvSpec:
         n_decode=2,
         perf=default_perf(),
         master_profile=ctx.profile,
-        master_env={"FLEXLB_CONFIG": admission_config()},
+        config_overrides=ConfigOverride(
+            ordering="priority",
+            decision="fixed_window",
+            dispatcher="batch",
+            queue_timeout_ms=60_000,
+        ),
         prefill_cache_blocks=LACKMEM_POOL_BLOCKS,
     )
 
@@ -2487,15 +2520,13 @@ def _regroup_spec(
         n_decode=2,
         perf=perf,
         master_profile=ctx.profile,
-        master_env={
-            "FLEXLB_CONFIG": build_flexlb_config(
-                ordering="priority",
-                decision="fixed_window",
-                dispatcher="batch",
-                max_collection_wait_ms=100,
-                queue_timeout_ms=60_000,
-            )
-        },
+        config_overrides=ConfigOverride(
+            ordering="priority",
+            decision="fixed_window",
+            dispatcher="batch",
+            max_collection_wait_ms=100,
+            queue_timeout_ms=60_000,
+        ),
     )
 
 

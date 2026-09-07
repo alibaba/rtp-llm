@@ -8,9 +8,9 @@ that branch — the authoritative spec for every choreography and assertion
 below).  Profile strategy per the migration decision: the target keeps
 its four built-in profiles and injects the PRIORITY axis at the CASE
 layer — _prio_config builds SINGLE + NON_BATCH + ordering/preemption
-directly via build_flexlb_config (no priority profile is added to
-PROFILE_SPECS), the cancel_preemption_victim JSON-splice precedent with
-the knobs expressed as native generator parameters.
+as a ConfigOverride layered on the ctx profile (no priority profile is
+added to PROFILE_SPECS), the knobs expressed as native override
+parameters.
 
 Category theme: priority-order fidelity (PR1 band, same-level FIFO,
 three-channel normalization) + the Auto-TPM preemption/degradation
@@ -93,7 +93,15 @@ from ..engine_ops import (
     parse_prometheus_samples,
 )
 from ..grade import GradeReport
-from ..harness import AssertUtils, EnvSpec, build_flexlb_config, default_perf, wait_for
+from ..harness import (
+    AssertUtils,
+    ConfigOverride,
+    EnvSpec,
+    OMIT,
+    default_perf,
+    render_env,
+    wait_for,
+)
 from .admission import MOCK_TOTAL_KV_TOKENS
 
 PRIORITY_CASES: list[CaseDef] = []
@@ -747,45 +755,55 @@ def _prio_config(
     max_inflight: Optional[int] = 1,
     max_waiting: Optional[int] = 8,
     dispatcher: str = "non_batch",
-    max_inflight_batches: int = 4,
-) -> str:
-    """Unified priority-family config (PRIORITY + SINGLE + NON_BATCH base;
-    dispatcher="batch" variant for the live-eviction family, 2026-09).
+    decode_max_engine_requests: Optional[int] = None,
+) -> ConfigOverride:
+    """Unified priority-family override (PRIORITY + SINGLE + NON_BATCH
+    base; dispatcher="batch" variant for the live-eviction family, 2026-09)
+    layered on the ctx profile's base document.
 
     Implementation-period additions over the design's config sketch
     (all verified against the Java code):
 
-    * ``maxInflightRequestsPerPrefillWorker=1`` (build_flexlb_config kwarg
+    * ``maxInflightRequestsPerPrefillWorker=1`` (override field
       max_inflight_requests_per_worker) is what actually creates the
       master-side backlog window — RoutePrefillAdmission.reserveRoute
       leases one in-flight delivery per dispatch, and without the cap
       every request dispatches immediately (no queueing, no observable
       ordering).
     * ``maxWaitingRequestsPerPrefillWorker`` rides the native
-      max_waiting_requests_per_prefill_worker generator parameter on
-      this line (the admission wave-2 passthrough, 2026-09) — on the
-      source branch it had to be spliced via JSON post-processing; the
-      queue-full eviction path needs the tight cap (Java default 1024).
+      max_waiting_requests_per_prefill_worker override field on this
+      line (the admission wave-2 passthrough, 2026-09); the queue-full
+      eviction path needs the tight cap (Java default 1024).
     * ``dispatcher="batch"`` (preemption-stage coverage, 2026-09): boots
       the BATCH dispatcher so the master-owned enqueue path (WorkerBatcher
       queue + the maxWaiting cap feeding AdmissionFallback's preemption
       trigger) is reachable — the live 8400 eviction paths need it; under
-      batch the per-worker inflight cap is meaningless and
-      ``max_inflight_batches`` is the caliber instead.
+      batch the per-worker inflight cap is meaningless.
+    * ``decode_max_engine_requests`` replaces the former JSON-splice
+      helper (_max_engine_requests_1) — the native override knob.
+
+    Legacy-wrapper "key not emitted" semantics carry over as OMIT:
+    queue_timeout_ms=None means the queueTimeoutMs key stays OUT (the
+    Java default 1h — the functional profiles' 60000 must not leak in);
+    max_inflight=None / max_waiting=None likewise drop their keys.
     """
-    return build_flexlb_config(
+    return ConfigOverride(
         ordering=ordering,
         decision="single",
         dispatcher=dispatcher,
         default_priority=default_priority,
         preemption=preemption,
-        queue_timeout_ms=queue_timeout_ms,
-        max_outstanding=max_outstanding if max_outstanding is not None else 5_000,
-        max_inflight_batches=max_inflight_batches,
+        queue_timeout_ms=OMIT if queue_timeout_ms is None else queue_timeout_ms,
+        max_outstanding=max_outstanding,
         max_inflight_requests_per_worker=(
-            None if dispatcher == "batch" else max_inflight
+            None
+            if dispatcher == "batch"
+            else (OMIT if max_inflight is None else max_inflight)
         ),
-        max_waiting_requests_per_prefill_worker=max_waiting,
+        max_waiting_requests_per_prefill_worker=(
+            OMIT if max_waiting is None else max_waiting
+        ),
+        decode_max_engine_requests=decode_max_engine_requests,
     )
 
 
@@ -795,14 +813,14 @@ def _spec(
     *,
     n_prefill: int = 1,
     n_decode: int = 4,
-    config: str,
+    config_overrides: Optional[ConfigOverride] = None,
+    raw_config: Optional[str] = None,
     master_debug_log: bool = False,
     extra_env: Optional[dict] = None,
     decode_cache_blocks: Optional[int] = None,
 ) -> EnvSpec:
-    env = {"FLEXLB_CONFIG": config}
-    if extra_env:
-        env.update(extra_env)
+    # extra_env carries non-config env only (e.g. the auto_tpm metric
+    # whitelist); FLEXLB_CONFIG comes from config_overrides / raw_config.
     # decode_cache_blocks sizes the mock's decode KV pool
     # (totalKvTokens = blocks x blockSize — the reported capacity always
     # tracks the built pool); None keeps the harness default.
@@ -815,7 +833,9 @@ def _spec(
         n_decode=n_decode,
         perf=default_perf(),
         master_profile=ctx.profile,
-        master_env=env,
+        master_env=dict(extra_env) if extra_env else {},
+        config_overrides=config_overrides,
+        raw_config=raw_config,
         master_debug_log=master_debug_log,
         **spec_kwargs,
     )
@@ -823,7 +843,7 @@ def _spec(
 
 def _q1_spec(ctx: CaseContext) -> EnvSpec:
     """ENV-Q1: ordering window env (no preemption, 1P+4D, queue cap 8)."""
-    return _spec(ctx, "prio_q1", config=_prio_config())
+    return _spec(ctx, "prio_q1", config_overrides=_prio_config())
 
 
 def _q2_spec(ctx: CaseContext) -> EnvSpec:
@@ -831,13 +851,13 @@ def _q2_spec(ctx: CaseContext) -> EnvSpec:
     return _spec(
         ctx,
         "atpm_q2",
-        config=_prio_config(preemption=_PREEMPT_PQ, queue_timeout_ms=60_000),
+        config_overrides=_prio_config(preemption=_PREEMPT_PQ, queue_timeout_ms=60_000),
     )
 
 
 def _t1_spec(ctx: CaseContext) -> EnvSpec:
     """ENV-T1: queueTimeout 8s, no preemption (1P+4D)."""
-    return _spec(ctx, "prio_t1", config=_prio_config(queue_timeout_ms=8_000))
+    return _spec(ctx, "prio_t1", config_overrides=_prio_config(queue_timeout_ms=8_000))
 
 
 def _a1_spec(ctx: CaseContext) -> EnvSpec:
@@ -845,7 +865,7 @@ def _a1_spec(ctx: CaseContext) -> EnvSpec:
     return _spec(
         ctx,
         "atpm_a1",
-        config=_prio_config(preemption=_PREEMPT_PQ, queue_timeout_ms=7_000),
+        config_overrides=_prio_config(preemption=_PREEMPT_PQ, queue_timeout_ms=7_000),
     )
 
 
@@ -881,7 +901,7 @@ def _d1_spec(ctx: CaseContext) -> EnvSpec:
         ctx,
         "atpm_d1",
         n_prefill=2,
-        config=_prio_config(
+        config_overrides=_prio_config(
             preemption=_PREEMPT_DECODE, max_inflight=3, queue_timeout_ms=60_000
         ),
         extra_env=_MONITOR_AUTO_TPM_ENV,
@@ -895,18 +915,18 @@ def _c1_spec(ctx: CaseContext) -> EnvSpec:
         "atpm_c1",
         n_prefill=2,
         n_decode=2,
-        config=_prio_config(max_outstanding=2, max_inflight=None, max_waiting=None),
+        config_overrides=_prio_config(max_outstanding=2, max_inflight=None, max_waiting=None),
     )
 
 
 def _n1_spec(ctx: CaseContext) -> EnvSpec:
     """ENV-N1: defaultPriority=30 (1P+4D)."""
-    return _spec(ctx, "prio_n1", config=_prio_config(default_priority=30))
+    return _spec(ctx, "prio_n1", config_overrides=_prio_config(default_priority=30))
 
 
 def _f1_spec(ctx: CaseContext) -> EnvSpec:
     """ENV-F1: FIFO control env (same shape as Q1, ordering=fifo)."""
-    return _spec(ctx, "atpm_f1", config=_prio_config(ordering="fifo"))
+    return _spec(ctx, "atpm_f1", config_overrides=_prio_config(ordering="fifo"))
 
 
 def _o1_spec(ctx: CaseContext) -> EnvSpec:
@@ -932,7 +952,7 @@ def _o1_spec(ctx: CaseContext) -> EnvSpec:
     return _spec(
         ctx,
         "atpm_o1",
-        config=_prio_config(preemption=_PREEMPT_PQ, queue_timeout_ms=7_000),
+        config_overrides=_prio_config(preemption=_PREEMPT_PQ, queue_timeout_ms=7_000),
         master_debug_log=True,
         extra_env=_MONITOR_AUTO_TPM_ENV,
     )
@@ -964,7 +984,7 @@ def _q3_spec(ctx: CaseContext) -> EnvSpec:
     return _spec(
         ctx,
         "prio_q3",
-        config=_prio_config(),
+        config_overrides=_prio_config(),
         extra_env={"FLEXLB_MONITOR_METRIC_WHITELIST": "flexlb_auto_tpm_request_count"},
     )
 
@@ -3471,7 +3491,7 @@ def atpm_error_code_family(ctx: CaseContext):
 )
 def atpm_config_strict_reject(ctx: CaseContext):
     """Strict FLEXLB_CONFIG rejection (AT1): three illegal config variants
-    injected as RAW JSON strings (bypassing build_flexlb_config's Python
+    injected as RAW JSON strings (bypassing the generator's Python
     mirror validation on purpose — the Java strict parser is the system
     under test) must fail MASTER STARTUP.
 
@@ -3507,22 +3527,24 @@ def atpm_config_strict_reject(ctx: CaseContext):
     """
     report = GradeReport(run_grade=ctx.grade)
 
-    cfg1 = json.loads(_prio_config())
+    cfg1 = json.loads(render_env(ctx.profile, _prio_config()))
     cfg1["autoTpmEnabled"] = True
     variants = [("removed_field_autoTpmEnabled", json.dumps(cfg1))]
 
-    cfg2 = json.loads(_prio_config(ordering="fifo"))
+    cfg2 = json.loads(render_env(ctx.profile, _prio_config(ordering="fifo")))
     cfg2["scheduler"]["ordering"]["defaultPriority"] = 50
     variants.append(("fifo_with_defaultPriority", json.dumps(cfg2)))
 
-    cfg3 = json.loads(_prio_config(preemption=_PREEMPT_DECODE))
+    cfg3 = json.loads(
+        render_env(ctx.profile, _prio_config(preemption=_PREEMPT_DECODE))
+    )
     del cfg3["scheduler"]["ordering"]["preemption"]["engineCancellation"]
     variants.append(("owned_without_engineCancellation", json.dumps(cfg3)))
 
     results = []
     try:
         for i, (label, raw_config) in enumerate(variants):
-            spec = _spec(ctx, f"atpm_bad{i}", config=raw_config)
+            spec = _spec(ctx, f"atpm_bad{i}", raw_config=raw_config)
             raised = None
             try:
                 ctx.env_manager.ensure(spec)
@@ -4290,15 +4312,6 @@ def _restore_engines(ops) -> None:
         pass
 
 
-def _max_engine_requests_1(config: str) -> str:
-    """JSON post-processing: decode availability maxEngineRequests=1 (the
-    knob is not a build_flexlb_config generator — cancel.py's
-    cancel_preemption_victim established the splice)."""
-    parsed = json.loads(config)
-    parsed["router"]["roles"]["decode"]["availability"]["maxEngineRequests"] = 1
-    return json.dumps(parsed, separators=(",", ":"))
-
-
 def _pq_live_spec(ctx: CaseContext) -> EnvSpec:
     """ENV for atpm_preempt_prefill_queued_live: BATCH dispatcher +
     PREFILL_QUEUED-only preemption + maxWaiting=2, so the third submitter
@@ -4307,7 +4320,7 @@ def _pq_live_spec(ctx: CaseContext) -> EnvSpec:
     return _spec(
         ctx,
         "atpm_pq_live",
-        config=_prio_config(
+        config_overrides=_prio_config(
             dispatcher="batch",
             preemption=_PREEMPT_PQ,
             max_waiting=2,
@@ -4328,7 +4341,7 @@ def _dr_live_spec(ctx: CaseContext) -> EnvSpec:
         "atpm_dr_live",
         n_decode=1,
         decode_cache_blocks=4,
-        config=_prio_config(
+        config_overrides=_prio_config(
             dispatcher="batch",
             preemption={"allowed_victim_stages": ["PREFILL_QUEUED", "DECODE_RESERVED"]},
             queue_timeout_ms=60_000,
@@ -4345,8 +4358,10 @@ def _nf_spec(ctx: CaseContext) -> EnvSpec:
         ctx,
         "atpm_nf",
         n_decode=1,
-        config=_max_engine_requests_1(
-            _prio_config(preemption=_PREEMPT_ALL_STAGES, queue_timeout_ms=60_000)
+        config_overrides=_prio_config(
+            preemption=_PREEMPT_ALL_STAGES,
+            queue_timeout_ms=60_000,
+            decode_max_engine_requests=1,
         ),
     )
 
@@ -4360,12 +4375,11 @@ def _ts_spec(ctx: CaseContext) -> EnvSpec:
         ctx,
         "atpm_ts",
         n_decode=1,
-        config=_max_engine_requests_1(
-            _prio_config(
-                dispatcher="batch",
-                preemption=_PREEMPT_ALL_STAGES,
-                queue_timeout_ms=60_000,
-            )
+        config_overrides=_prio_config(
+            dispatcher="batch",
+            preemption=_PREEMPT_ALL_STAGES,
+            queue_timeout_ms=60_000,
+            decode_max_engine_requests=1,
         ),
     )
 

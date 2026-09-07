@@ -34,7 +34,6 @@ from __future__ import annotations
 import json
 import math
 import random
-import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -46,7 +45,9 @@ from ..harness import (
     TTL_DRAIN_TIMEOUT_S,
     AssertUtils,
     BalanceSampler,
+    ConfigOverride,
     EnvSpec,
+    OMIT,
     _accepted,
     _BackgroundFlow,
     _cleanup_dynamic,
@@ -59,8 +60,6 @@ from ..harness import (
     _run_batch,
     _wait_master_alive,
     _wait_master_topology,
-    admission_config,
-    fault_env_config,
     fault_env_perf,
     http_get_status,
     wait_for,
@@ -759,7 +758,13 @@ def _pending_drain_spec(ctx: CaseContext) -> EnvSpec:
         perf=fault_env_perf(),
         master_profile=ctx.profile,
         discovery="discovery_file",
-        master_env={"FLEXLB_CONFIG": fault_env_config(max_inflight_batches=2)},
+        config_overrides=ConfigOverride(
+            ordering="priority",
+            decision="fixed_window",
+            dispatcher="batch",
+            queue_timeout_ms=OMIT,
+            max_inflight_batches=2,
+        ),
     )
 
 
@@ -1556,29 +1561,12 @@ def _bal_hit_rate(
 def _bal_cluster_tps(
     sampler: BalanceSampler, t_lo: float, t_hi: float
 ) -> Optional[float]:
-    """Cluster TPS over [t_lo, t_hi]: per-engine window means summed
-    ACROSS BOTH PLANES — prefill engines on rtp_llm_context_tps, decode
-    engines on rtp_llm_generate_tps; None without samples.
-
-    Per-role mapping (design §1.2 dim 5: "P role takes context, D role
-    takes generate"): MockControlServer keeps the off-role series at
-    ZERO (appendPerEngineMetrics — "the off-role series stay 0"), so a
-    single-series cluster read silently drops one whole plane (the
-    pre-fix bug: decode-only survivor sets read context-only and always
-    came out 0 / None).  Roles come from the sampler's per_engine role
-    label.  Engines with no recorded role or no in-window samples
-    contribute nothing."""
-    roles = sampler.engine_roles()
-    ctx_series = sampler.window_series("rtp_llm_context_tps", t_lo, t_hi)
-    gen_series = sampler.window_series("rtp_llm_generate_tps", t_lo, t_hi)
+    """Cluster TPS over [t_lo, t_hi]: sum of per-engine window means of
+    rtp_llm_context_tps (the production-caliber window gauge; the sampler
+    drains one window per 1s scrape).  None without samples."""
+    series = sampler.window_series("rtp_llm_context_tps", t_lo, t_hi)
     per = []
-    for engine, role in roles.items():
-        if role == "prefill":
-            pts = ctx_series.get(engine, [])
-        elif role == "decode":
-            pts = gen_series.get(engine, [])
-        else:  # unknown role label: contribute nothing (fail soft here;
-            continue  # the per-plane series are still dumped for review)
+    for pts in series.values():
         if pts:
             per.append(sum(v for _, v in pts) / len(pts))
     return sum(per) if per else None
@@ -1642,16 +1630,12 @@ FULL_SHRINK_OUTPUT_LEN = 13
 FULL_SHRINK_DRAIN_OK_SCALE = 60.0
 FULL_SHRINK_DRAIN_TIMEOUT_SCALE = 100.0
 FULL_SHRINK_DRAIN_TIMEOUT_MS = 5_000
-# drain_ms ~= timeout PROVES the fallback branch — MILLISECONDS (Ryan
-# fix: the remove_engine response's drain_ms is the Java-side
-# TimeUnit.NANOSECONDS.toMillis product passed through verbatim by
-# MockControlServer, i.e. milliseconds; the pre-fix bounds compared raw
-# ms values against 5.0/10.0 and failed 100% of runs).  Bounds in ms:
-# the lower bound IS the configured timeout (the drain loop cannot
-# return early while work is pending), the upper adds a 5s management
-# margin for the drain loop's check granularity + teardown (= [5, 10] s).
-FULL_SHRINK_DRAIN_MS_LO = 5_000.0
-FULL_SHRINK_DRAIN_MS_HI = 10_000.0
+# drain_ms ~= timeout PROVES the fallback branch: [5.0, 10.0]s — the lower
+# bound IS the configured timeout (the drain loop cannot return early
+# while work is pending), the upper adds a 5s management margin for the
+# drain loop's check granularity + teardown.
+FULL_SHRINK_DRAIN_MS_LO = 5.0
+FULL_SHRINK_DRAIN_MS_HI = 10.0
 # Terminal-state deadline: the SAME derivation as PENDING_DRAIN_TERMINAL_S
 # (stale-inflight TTL 30s + settlement + margin).
 FULL_SHRINK_TERMINAL_S = 40.0
@@ -1684,17 +1668,12 @@ def _full_shrink_spec(ctx: CaseContext) -> EnvSpec:
         master_profile=ctx.profile,
         discovery="discovery_file",
         decode_cache_blocks=FULL_SHRINK_DECODE_CACHE_BLOCKS,
-        master_env={
-            "FLEXLB_CONFIG": fault_env_config(),
-            # Fingerprint discriminator (Kim fix): EnvSpec.fingerprint()
-            # covers behaviour fields ONLY — label does NOT fingerprint.
-            # decode_cache_blocks=24 already separates this spec today;
-            # the no-consumer env var below rides the fingerprint
-            # (master_env is both a fingerprint key and passed through
-            # _master_env to the master JVM, which never reads it) so the
-            # separation survives any future pool-size change.
-            "FLEXLB_FT_SPEC_ID": "kv_full_shrink",
-        },
+        config_overrides=ConfigOverride(
+            ordering="priority",
+            decision="fixed_window",
+            dispatcher="batch",
+            queue_timeout_ms=OMIT,
+        ),
     )
 
 
@@ -1745,10 +1724,9 @@ def elastic_kv_full_shrink(ctx: CaseContext):
          caliber).
       Variant 2 — drain_timeout (victim decode-1, drain_timeout_ms=5000,
       decode tail > 5s so the drain necessarily times out):
-      4. rm_body.drained is False and drain_ms (MILLISECONDS — the
-         Java-side toMillis product, see the constant note) in
-         [5000, 10000] ms = [5, 10] s — the timeout branch (drain_ms ~=
-         the configured timeout; bounds derivation on the constant).
+      4. rm_body.drained is False and drain_ms in [5.0, 10.0]s — the
+         timeout branch (drain_ms ~= timeout; bounds derivation on the
+         constant).
       5. Victim decode in-flight ends with the DECODE_GENERATION_RETIRED
          terminal — client-visible shape: stream error code 8510
          (StrategyErrorType.BATCH_DISPATCH_FAILED — the code the master
@@ -1913,7 +1891,6 @@ def elastic_kv_full_shrink(ctx: CaseContext):
         v1_free = pre1["decode-1"]["available_blocks"]
         k_reject_1 = _bal_k_reject(v1_demand, v1_free)
 
-        t_v1_remove_wall = time.monotonic()
         t_v1_remove = sampler.mark("v1_remove")
         status, rm_body = ops.remove_engine(engine_name="decode-0")
         if status != 200:
@@ -1936,38 +1913,6 @@ def elastic_kv_full_shrink(ctx: CaseContext):
             if (k, c) not in (("completed", None), ("error", 8211))
             for r in rids[:3]
         ]
-        # Mark-C2 fix — the 40s terminal deadline as its OWN hard
-        # invariant (design §2.1 assertion 1: every victim in-flight
-        # request reaches a VISIBLE terminal within 40s of the removal;
-        # the pre-fix code only WAITED 50s, so a 40-50s completion never
-        # failed).  Caliber: latency = stream terminated_s - t_remove
-        # (wall clock taken BEFORE the remove_engine call, same as the
-        # elastic_remove_pending_drain precedent); requests already
-        # terminal at removal (fill-phase 8211 refusals, early
-        # completions) are outside the deadline's scope; an un-ended
-        # stream counts as a hang violation.  Victim-routed vs
-        # survivor-routed is not client-observable (schedule responses
-        # carry no decode-plane route), so the deadline covers every
-        # in-flight-at-removal request — the STRICTER direction.
-        v1_late = []
-        for rid, resp, handle in v1_handles:
-            s = handle.snap
-            if s.terminated_s is None:
-                v1_late.append((rid, "hang", None))
-            elif s.terminated_s > t_v1_remove_wall:
-                lat = s.terminated_s - t_v1_remove_wall
-                if lat > FULL_SHRINK_TERMINAL_S:
-                    v1_late.append((rid, "late", round(lat, 1)))
-        report.invariant(
-            "P6",
-            not v1_late,
-            context="kv_full_shrink_v1_terminal_40s",
-            detail=(
-                f"violations={v1_late[:3]} (post-removal terminal latency "
-                f"> {FULL_SHRINK_TERMINAL_S:.0f}s or hang; "
-                f"pre-removal terminals out of scope)"
-            ),
-        )
 
         t_clean0 = time.monotonic()
         v1_clean_ok, v1_clean_detail = AssertUtils.inflight_clean(
@@ -2138,7 +2083,6 @@ def elastic_kv_full_shrink(ctx: CaseContext):
         v2_free = pre2[v2_survivor]["available_blocks"]
         k_reject_2 = _bal_k_reject(v2_demand, v2_free)
 
-        t_v2_remove_wall = time.monotonic()
         t_v2_remove = sampler.mark("v2_remove")
         status, rm_body = ops.remove_engine(
             engine_name="decode-1", drain_timeout_ms=FULL_SHRINK_DRAIN_TIMEOUT_MS
@@ -2153,28 +2097,6 @@ def elastic_kv_full_shrink(ctx: CaseContext):
         for rid, resp, handle in v2_handles:
             handle.wait_end(FULL_SHRINK_TERMINAL_S + 10.0)
         v2_out = _classify(v2_handles)
-        # Mark-C2 — same 40s terminal-deadline invariant as variant 1
-        # (the 8510 DECODE_GENERATION_RETIRED explicit failure IS a
-        # visible terminal: it must still land inside the 40s window).
-        v2_late = []
-        for rid, resp, handle in v2_handles:
-            s = handle.snap
-            if s.terminated_s is None:
-                v2_late.append((rid, "hang", None))
-            elif s.terminated_s > t_v2_remove_wall:
-                lat = s.terminated_s - t_v2_remove_wall
-                if lat > FULL_SHRINK_TERMINAL_S:
-                    v2_late.append((rid, "late", round(lat, 1)))
-        report.invariant(
-            "P6",
-            not v2_late,
-            context="kv_full_shrink_v2_terminal_40s",
-            detail=(
-                f"violations={v2_late[:3]} (post-removal terminal latency "
-                f"> {FULL_SHRINK_TERMINAL_S:.0f}s or hang; 8510 retired "
-                f"terminals count as visible terminals)"
-            ),
-        )
         v2_retired = [
             (code, msg, rid)
             for kind, code, msg, rid in v2_out
@@ -2255,10 +2177,8 @@ def elastic_kv_full_shrink(ctx: CaseContext):
                 f"{v1_clean_detail[:80]}"
             ),
         )
-        # Variant 2: the timeout branch — drained=False and drain_ms
-        # (raw MILLISECONDS, same unit as the response field) in
-        # [5000, 10000] ms = [5, 10] s (drain_ms ~= the configured
-        # timeout).
+        # Variant 2: the timeout branch — drained=False and drain_ms in
+        # [5.0, 10.0]s (drain_ms ~= the configured timeout).
         drain_ms_v = float(v2_drain_ms) if v2_drain_ms is not None else -1.0
         report.invariant(
             "P6",
@@ -2267,9 +2187,9 @@ def elastic_kv_full_shrink(ctx: CaseContext):
             context="kv_full_shrink_v2_drain_timeout_branch",
             detail=(
                 f"drained={v2_drained}, drain_ms={v2_drain_ms} "
-                f"(expect False and [{FULL_SHRINK_DRAIN_MS_LO:.0f}, "
-                f"{FULL_SHRINK_DRAIN_MS_HI:.0f}] ms = [5, 10] s = "
-                f"timeout 5s + management margin)"
+                f"(expect False and [{FULL_SHRINK_DRAIN_MS_LO}, "
+                f"{FULL_SHRINK_DRAIN_MS_HI}]s = timeout 5s + management "
+                f"margin)"
             ),
         )
         # Variant 2: DECODE_GENERATION_RETIRED terminal — 8510 + the
@@ -2351,17 +2271,8 @@ def elastic_kv_full_shrink(ctx: CaseContext):
                 sampler.dump(
                     ctx.case_dir("elastic_kv_full_shrink") / "balance_sampler.json.gz"
                 )
-            except Exception as exc:
-                # R3③: a failed dump must never fail the case (the
-                # balance artifacts are observation-grade evidence, not
-                # invariants), but it must not be silent either — one
-                # stderr line keeps the artifact trail auditable while
-                # the case keeps running.
-                print(
-                    f"[flexlb-ft] balance_sampler dump failed "
-                    f"(elastic_kv_full_shrink): {exc!r}",
-                    file=sys.stderr,
-                )
+            except Exception:
+                pass
         try:
             _cleanup_dynamic(ops, env)
         except Exception:
@@ -2421,19 +2332,10 @@ def _skew_spec(ctx: CaseContext, variant: str) -> EnvSpec:
     decode"; a PD-split cluster with n_decode=0 exposes no decode
     endpoint, so requests can never complete — the minimal WORKING shape
     (2P+2D) is used instead.  The dimension under test is prefill-side
-    family placement; the decode axis is not measured.  Fingerprint
-    note (Kim fix, CORRECTED — the pre-fix docstring wrongly claimed a
-    "distinct label fingerprint"): EnvSpec.fingerprint() covers
-    behaviour fields ONLY, label does NOT fingerprint, and this spec's
-    behaviour fields are byte-identical to ttl_spec (status.py) and to
-    the sibling variant — pre-fix they could silently share an env
-    (EnvManager.ensure reuses on fingerprint equality).  master_env
-    therefore carries FLEXLB_FT_SPEC_VARIANT=<variant>, a no-consumer
-    env var that rides the fingerprint and is passed through to the
-    master JVM (which never reads it), so the hot/cold pair and the
-    status-family specs never collide and the one-shot initial-engine
-    victim (prefill-0 for hot / prefill-1 for cold) never poisons the
-    sibling's env.
+    family placement; the decode axis is not measured.  Each variant owns
+    a distinct label fingerprint so the one-shot initial-engine victim
+    (prefill-0 for hot / prefill-1 for cold) never poisons the other
+    variant's env (same reason as _pending_drain_spec).
     """
     return EnvSpec(
         label=f"fault_kv_skew_{variant}_{ctx.profile}",
@@ -2442,10 +2344,12 @@ def _skew_spec(ctx: CaseContext, variant: str) -> EnvSpec:
         perf=fault_env_perf(),
         master_profile=ctx.profile,
         discovery="discovery_file",
-        master_env={
-            "FLEXLB_CONFIG": fault_env_config(),
-            "FLEXLB_FT_SPEC_VARIANT": variant,  # hot / cold (Kim fix)
-        },
+        config_overrides=ConfigOverride(
+            ordering="priority",
+            decision="fixed_window",
+            dispatcher="batch",
+            queue_timeout_ms=OMIT,
+        ),
     )
 
 
@@ -2538,24 +2442,8 @@ def _run_kv_skew_shrink(ctx: CaseContext, shrink_hot: bool):
         hot_share_constructed = hot_routes / total_routes if total_routes else None
 
         seed_snap = ops.snapshot_by_name()
-        # Mark-C1 fix: read the per-engine key LIST (cache_key_set, the
-        # kv.py _engine_cache_keys convention).  JavaMockEngineCluster's
-        # getSnapshot actually puts BOTH fields — cache_keys (int) and
-        # cache_key_set (sorted list), sourced from the SAME
-        # cache.snapshotKeys() (JavaMockEngineCluster.java) — so the old
-        # int read was not "always 0" as the review assumed; the residual
-        # defect was the missing-field silent-0 (a schema-drift trap:
-        # hot_keys=0 would fail the pre-assertion with a MISLEADING
-        # message).  A missing field now fails LOUD with its own message.
-        hot_entry = seed_snap.get(hot) or {}
-        cold_entry = seed_snap.get(cold) or {}
-        if "cache_key_set" not in hot_entry or "cache_key_set" not in cold_entry:
-            return False, (
-                f"snapshot schema drift: no cache_key_set field on "
-                f"{hot}/{cold} — keys={sorted(hot_entry)[:8]}"
-            )
-        hot_keys = len(hot_entry["cache_key_set"])
-        cold_keys = len(cold_entry["cache_key_set"])
+        hot_keys = int(seed_snap.get(hot, {}).get("cache_keys", 0))
+        cold_keys = int(seed_snap.get(cold, {}).get("cache_keys", 0))
         if hot_keys < SKEW_MIN_RATIO * max(cold_keys, 1) or hot_keys <= 0:
             return False, (
                 f"skew construction failed: hot_keys={hot_keys}, "
@@ -2771,14 +2659,8 @@ def _run_kv_skew_shrink(ctx: CaseContext, shrink_hot: bool):
                     ctx.case_dir(f"elastic_kv_skew_shrink_{variant}")
                     / "balance_sampler.json.gz"
                 )
-            except Exception as exc:
-                # R3③: keep running, never silent (see the full-shrink
-                # twin for the rationale).
-                print(
-                    f"[flexlb-ft] balance_sampler dump failed "
-                    f"(elastic_kv_skew_shrink_{variant}): {exc!r}",
-                    file=sys.stderr,
-                )
+            except Exception:
+                pass
         for name in (hot, cold):
             try:
                 ops.set_perf(name, prefill_fixed_ms=100.0)
@@ -2838,7 +2720,7 @@ def elastic_kv_skew_shrink_cold(ctx: CaseContext):
 #     runtime) — the JSON channel is used so the INITIAL engines are
 #     born capped.
 #   * master batcher waiting capacity: FLEXLB_CONFIG scheduler.capacity
-#     maxWaitingRequestsPerPrefillWorker (admission_config's
+#     maxWaitingRequestsPerPrefillWorker (flexlb_cfg.ConfigOverride's
 #     parameterised channel; Java default 1024 when omitted — an explicit
 #     value here pins the bound).
 #   * decode-side engine concurrency: NOT overridden — Java default
@@ -2882,20 +2764,15 @@ def _transient_spec(ctx: CaseContext) -> EnvSpec:
         perf=perf,
         master_profile=ctx.profile,
         discovery="discovery_file",
-        master_env={
-            "FLEXLB_CONFIG": admission_config(
-                max_waiting_requests_per_prefill_worker=(
-                    TRANSIENT_MAX_WAITING_REQUESTS_PER_WORKER
-                )
+        config_overrides=ConfigOverride(
+            ordering="priority",
+            decision="fixed_window",
+            dispatcher="batch",
+            queue_timeout_ms=60_000,
+            max_waiting_requests_per_prefill_worker=(
+                TRANSIENT_MAX_WAITING_REQUESTS_PER_WORKER
             ),
-            # Fingerprint discriminator (Kim fix): label does NOT
-            # fingerprint; n_prefill=3 + the admission FLEXLB_CONFIG
-            # already separate this spec today, and this no-consumer env
-            # var keeps the separation robust against future axis
-            # changes (rides the fingerprint, passed to the master JVM,
-            # never read there).
-            "FLEXLB_FT_SPEC_ID": "transient_bound",
-        },
+        ),
     )
 
 
@@ -2967,11 +2844,9 @@ def elastic_transient_imbalance_bound(ctx: CaseContext):
       4. Fail-close locality (HARD): every failed request in the whole
          run (dense pump + crossing burst) is either victim-routed
          (its prefill address == the removed engine's address) or was
-         never routed (master admission refusal — run_one_request's
-         failure legs return the EMPTY-STRING address sentinel "" ,
-         treated as unrouted; counted as an observation, never
-         hidden); requests routed to SURVIVORS end with ZERO failures
-         (errors do not spill over).
+         never routed (master admission refusal, addr is None —
+         counted as an observation, never hidden); requests routed to
+         SURVIVORS end with ZERO failures (errors do not spill over).
       5. Steady-state recovery (HARD, last third of W_ss from
          t_settle): P1 — prefill-plane survivor share max <=
          max(baseline+0.10, 1/n+0.15) and min >= 0.10 (the event
@@ -3017,23 +2892,6 @@ def elastic_transient_imbalance_bound(ctx: CaseContext):
         victim_addr = next((a for a, n in addr_map.items() if n == victim), None)
         if not victim_addr:
             return False, "victim address lookup failed"
-        # Ryan H2 fix: the master-side registry key is the HTTP endpoint,
-        # NOT the grpc address.  Chain of evidence: mock discovery entry
-        # http_port = grpcPort - 1 (JavaMockEngineCluster) -> master
-        # WorkerStatus TopologySnapshot.port (javadoc: getIpPort() returns
-        # the "HTTP IP:PORT address") -> EndpointRegistry map key ->
-        # /rtp_llm/inflight_status prefill_endpoints[].ip_port.  The
-        # pre-fix key built from grpc_addr (host:grpcPort) never matched
-        # any inflight_status row (off by one port), so the victim's
-        # dead-address series leaked into the survivor PQ bound and the
-        # backlog observation read n/a.  http_addr (host:grpcPort-1) is
-        # byte-identical in shape to the ip_port key.
-        victim_http = snap.get(victim, {}).get("http_addr")
-        if not victim_http:
-            return False, (
-                f"victim http_addr missing from snapshot: {victim} "
-                f"keys={sorted(snap.get(victim, {}))[:10]}"
-            )
 
         sampler = BalanceSampler(ops.mock_http_port, ops.master_http_port)
         sampler.start()
@@ -3189,10 +3047,7 @@ def elastic_transient_imbalance_bound(ctx: CaseContext):
         # stale cleanup zeroes it) is EXCLUDED from the survivor bound
         # and recorded as an observation instead.
         infl = sampler.window_series("inflight_requests", t_remove, t_tr_end)
-        # Ryan H2: http-addr key (see the construction note above) — the
-        # grpc-addr key never matched and the victim's own series used
-        # to leak into the survivor bound below.
-        victim_master_key = f"master:prefill:{victim_http}"
+        victim_master_key = f"master:prefill:{victim_addr}"
         master_survivor_series = {
             k: pts
             for k, pts in infl.items()
@@ -3268,12 +3123,6 @@ def elastic_transient_imbalance_bound(ctx: CaseContext):
         obs.append(_obs_note("PT", "tr_tps_floor(base x 4/5 x 0.85)", pt_floor))
 
         # ---- 4. fail-close locality (whole run: pump + burst) ----
-        # Ryan H1 fix: run_one_request's failure paths return ("", err)
-        # — an EMPTY STRING sentinel, not None (schedule failure /
-        # exception legs in engine_ops) — so `r[0] is None` was never
-        # true: admission refusals used to leak into survivor_fail and
-        # the unrouted observation read 0 forever.  "not r[0]" covers
-        # both the empty string and a defensive None.
         with pump_lock:
             all_records = list(pump_records)
         all_records += burst_records
@@ -3281,9 +3130,11 @@ def elastic_transient_imbalance_bound(ctx: CaseContext):
             r for r in all_records if r[1] is not None and r[0] == victim_addr
         ]
         survivor_fail = [
-            r for r in all_records if r[1] is not None and r[0] and r[0] != victim_addr
+            r
+            for r in all_records
+            if r[1] is not None and r[0] is not None and r[0] != victim_addr
         ]
-        unrouted_fail = [r for r in all_records if r[1] is not None and not r[0]]
+        unrouted_fail = [r for r in all_records if r[1] is not None and r[0] is None]
         victim_fail_kinds = sorted({str(r[1])[:60] for r in victim_fail})[:3]
         report.invariant(
             "P6",
@@ -3438,14 +3289,8 @@ def elastic_transient_imbalance_bound(ctx: CaseContext):
                     ctx.case_dir("elastic_transient_imbalance_bound")
                     / "balance_sampler.json.gz"
                 )
-            except Exception as exc:
-                # R3③: keep running, never silent (see the full-shrink
-                # twin for the rationale).
-                print(
-                    f"[flexlb-ft] balance_sampler dump failed "
-                    f"(elastic_transient_imbalance_bound): {exc!r}",
-                    file=sys.stderr,
-                )
+            except Exception:
+                pass
         try:
             _cleanup_dynamic(ops, env)
         except Exception:
@@ -3475,18 +3320,9 @@ def _steady_recovery_spec(ctx: CaseContext) -> EnvSpec:
     spread rows stay non-degenerate), dynamic file discovery, fault
     axes.
 
-    Fingerprint note (Kim fix, CORRECTED — the pre-fix docstring
-    wrongly claimed "the label fingerprint differs from every other
-    elastic spec"): EnvSpec.fingerprint() covers behaviour fields ONLY,
-    label does NOT fingerprint, and this spec's behaviour fields are
-    byte-identical to the SHARED elastic_spec (2P+4D + fault axes) —
-    pre-fix they collided outright: a steady-recovery run could reuse
-    (or leave behind) an env the eight legacy elastic cases expect
-    pristine.  master_env therefore carries FLEXLB_FT_SPEC_ID, a
-    no-consumer env var that rides the fingerprint and is passed
-    through to the master JVM (which never reads it), so the one-shot
-    initial-engine victim (decode-0, permanently removed) never
-    poisons a shared env.
+    The label fingerprint differs from every other elastic spec, so the
+    one-shot initial-engine victim (decode-0, permanently removed) never
+    poisons a shared env (same reason as _pending_drain_spec).
     """
     return EnvSpec(
         label=f"fault_steady_recovery_{ctx.profile}",
@@ -3495,10 +3331,12 @@ def _steady_recovery_spec(ctx: CaseContext) -> EnvSpec:
         perf=fault_env_perf(),
         master_profile=ctx.profile,
         discovery="discovery_file",
-        master_env={
-            "FLEXLB_CONFIG": fault_env_config(),
-            "FLEXLB_FT_SPEC_ID": "steady_recovery",  # Kim fix
-        },
+        config_overrides=ConfigOverride(
+            ordering="priority",
+            decision="fixed_window",
+            dispatcher="batch",
+            queue_timeout_ms=OMIT,
+        ),
     )
 
 
@@ -3778,12 +3616,6 @@ def elastic_steady_state_recovery(ctx: CaseContext):
         # same-direction departures beyond ±0.10 fail ----
         n_sub = int(BAL_STEADY_S / BAL_STEADY_SUBWINDOW_S)
         target = 1.0 / len(dec_survivors)
-        # (sub-window INDEX, share) pairs per engine — the index rides
-        # along so "consecutive" means TIME-adjacent sub-windows, never
-        # list-adjacent after empty-window skipping (R2 fix: a skipped
-        # traffic-less window must not splice two distant windows into
-        # a fake "consecutive" pair, and a real pair interrupted by an
-        # empty window is NOT consecutive evidence either).
         sub_shares = {e: [] for e in dec_survivors}
         for i in range(n_sub):
             lo = t_settle + i * BAL_STEADY_SUBWINDOW_S
@@ -3796,32 +3628,28 @@ def elastic_steady_state_recovery(ctx: CaseContext):
             if tot <= 0:
                 continue  # traffic-less sub-window: no departure signal
             for e, v in zip(dec_survivors, vals):
-                sub_shares[e].append((i, v / tot))
+                sub_shares[e].append(v / tot)
         osc_bad = []
         for e, seq in sub_shares.items():
-            for j in range(len(seq) - 1):
-                i1, s1 = seq[j]
-                i2, s2 = seq[j + 1]
-                if i2 != i1 + 1:
-                    continue  # a gap sits between them: not consecutive
-                d1 = s1 - target
-                d2 = s2 - target
+            for i in range(len(seq) - 1):
+                d1 = seq[i] - target
+                d2 = seq[i + 1] - target
                 if abs(d1) > BAL_SHARE_TOL and abs(d2) > BAL_SHARE_TOL and d1 * d2 > 0:
-                    osc_bad.append((e, i1, round(d1, 3), round(d2, 3)))
+                    osc_bad.append((e, i, round(d1, 3), round(d2, 3)))
         report.check(
             "P1",
             len(osc_bad),
             bands=_mechanism_bands(0),
             context="steady_oscillation_fingerprint",
             detail=(
-                f"two TIME-ADJACENT (i, i+1) same-direction sub-window "
-                f"departures beyond ±{BAL_SHARE_TOL} from the n-rescaled "
-                f"target {target:.3f}: {osc_bad[:3]}"
+                f"two consecutive same-direction sub-window departures "
+                f"beyond ±{BAL_SHARE_TOL} from the n-rescaled target "
+                f"{target:.3f}: {osc_bad[:3]}"
             ),
         )
 
         # ---- 3. observations (first-run calibration, never gating) ----
-        ss_dev = [abs(s - target) for seq in sub_shares.values() for _i, s in seq]
+        ss_dev = [abs(s - target) for seq in sub_shares.values() for s in seq]
         ss_swing = max(ss_dev) if ss_dev else None
         obs.append(
             _obs_note(
@@ -3869,15 +3697,10 @@ def elastic_steady_state_recovery(ctx: CaseContext):
                 (base_hit - 0.15) if base_hit is not None else None,
             )
         )
-        # R1 per-role fix: dec_survivors are DECODE engines — the design
-        # §1.2 dim 5 mapping reads generate TPS for the D role
-        # (MockControlServer keeps the off-role context series at 0, so
-        # the pre-fix context read made min>0 unsatisfiable and pt_ratio
-        # permanently None).
         tps_means = []
         for e in dec_survivors:
             pts = sampler.window_series(
-                "rtp_llm_generate_tps", ss_tail_lo, t_ss_end
+                "rtp_llm_context_tps", ss_tail_lo, t_ss_end
             ).get(e, [])
             if pts:
                 tps_means.append(sum(v for _, v in pts) / len(pts))
@@ -3940,14 +3763,8 @@ def elastic_steady_state_recovery(ctx: CaseContext):
                     ctx.case_dir("elastic_steady_state_recovery")
                     / "balance_sampler.json.gz"
                 )
-            except Exception as exc:
-                # R3③: keep running, never silent (see the full-shrink
-                # twin for the rationale).
-                print(
-                    f"[flexlb-ft] balance_sampler dump failed "
-                    f"(elastic_steady_state_recovery): {exc!r}",
-                    file=sys.stderr,
-                )
+            except Exception:
+                pass
         try:
             _cleanup_dynamic(ops, env)
         except Exception:

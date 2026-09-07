@@ -42,7 +42,7 @@ import urllib.error
 import urllib.request
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -61,8 +61,40 @@ MOCK_JAR = (
     / "flexlb-mock-engine-1.0.0-SNAPSHOT-all.jar"
 )
 API_JAR = FLEXLB_DIR / "flexlb-api" / "target" / "flexlb-api-1.0.0-SNAPSHOT.jar"
-MASTER_CONFIG = TOOL_DIR / "data" / "config" / "master_fixed_window.json"
 TRACE_FILE = TOOL_DIR / "data" / "online_logs" / "trace_30min.jsonl"
+
+# ---------------------------------------------------------------------------
+# FLEXLB_CONFIG SSOT — flexlb_cfg (re-exported)
+# ---------------------------------------------------------------------------
+#
+# flexlb_cfg.py (one directory up, in online_eval/) is the single source
+# of truth for every FLEXLB_CONFIG document this repo produces: the four
+# functional profile axes, the stress-na130 render profile (the retired
+# data/config/master_fixed_window.json), the strict schema-v2 builders
+# and the ConfigOverride layering.  It lives on sys.path in every
+# supported entrypoint (flexlb_functional_tests.py, the tests/, the
+# run_online_eval.sh generator call) — the insert below makes the bare
+# import robust regardless of how flexlb_ft.harness itself was imported.
+#
+# Re-exported for legacy import sites: flexlb_functional_tests.py does
+# ``from flexlb_ft.harness import PROFILE_CAPS, PROFILES`` and cases/*
+# import ConfigOverride / OMIT through ``..harness``.
+if str(TOOL_DIR) not in sys.path:
+    sys.path.insert(0, str(TOOL_DIR))
+
+from flexlb_cfg import (  # noqa: E402
+    OMIT,
+    PROFILE_CAPS,
+    PROFILE_SPECS,
+    PROFILES,
+    STRESS_PROFILE,
+    ConfigOverride,
+    build_flexlb_config,
+    parse_overrides,
+    profile_dispatches_batch,
+    render_env,
+    render_process_config,
+)
 
 MAVEN_PROFILES = "opensource,!internal"
 JAVA_MODULE_OPTS = [
@@ -466,13 +498,52 @@ class ManagedProcess:
 # OWN port group — A: HTTP 18080 / mgmt 18081 / gRPC 18082, B: HTTP 18083 /
 # mgmt 18084 / gRPC 18085.  With consistency disabled the three same-host
 # assumptions (ZK leader id, port stitching, SELF_TARGET) are all inert, so
-# distinct ports are the zero-risk layout; the client separates the two
-# masters by gRPC port.
+# distinct ports are the zero-risk layout and no FLEXLB_ADVERTISED_IP is
+# needed; the client separates the two masters by gRPC port.
 HA_TIER1_MASTER_A_HTTP_PORT = int(
     os.environ.get("FLEXLB_FT_HA_MASTER_A_HTTP_PORT", "18080")
 )
 HA_TIER1_MASTER_B_HTTP_PORT = int(
     os.environ.get("FLEXLB_FT_HA_MASTER_B_HTTP_PORT", "18083")
+)
+
+# Tier-2/3 ZK-activated layout: the SAME port group on DIFFERENT loopback
+# IPs (127.0.0.1:18080..18082 + 127.0.0.2:18080..18082 + FLEXLB_ADVERTISED_IP
+# injected per master).  Required because (verified in the Java code):
+#   * ZookeeperMasterElectService.initializeIpAndPort() sets the ZK
+#     LeaderSelector id to the BARE local IP (no port) — same-IP dual
+#     instances collide and mis-elect (isStillMaster compares bare IPs);
+#   * LBStatusConsistencyService.getMasterHostIpPort() stitches the LOCAL
+#     server.port onto the leader IP — a distinct-port layout would forward
+#     to the wrong port (A_IP:B_port is unreachable);
+#   * FlexlbGrpcForwarder.sameHost() compares bare IPs — same-IP instances
+#     would self-block every forward as SELF_TARGET.
+# Activation additionally needs the production-side prerequisites
+# (an FLEXLB_ADVERTISED_IP consumer in flexlb-sync + a per-address gRPC
+# bind instead of NettyServerBuilder.forPort) which are NOT yet in the
+# code; the harness injects the env/ports per this contract so the layout
+# lights up the moment those land.  Tier-2 forwarding itself is covered by
+# the JUnit layer (master_forward_matrix), not by this harness.
+#
+# RULING (2026-09-02): the same-host distinct-IP layout is DEAD.  The
+# election localIp comes ONLY from InetAddress.getLocalHost() hostname
+# resolution (ZookeeperMasterElectService L106-111 + LBStatusConsistency-
+# Service L52, two independent sites, no env override channel), the gRPC
+# wildcard bind (forPort) cannot start a second same-port instance, and
+# same-IP distinct-port makes SELF_TARGET permanently true, blocking all
+# forwarding; the production-side prerequisites (FLEXLB_ADVERTISED_IP
+# consumer / per-address bind) will NOT land.  Tier-3 moves to a
+# dual-container topology (each container gets its own network stack +
+# hostname -> naturally distinct IPs on the SAME port, faithfully
+# replicating production's one-IP-per-pod model) — phase 2.  The existing
+# 127.0.0.1/.2 wiring below is kept ONLY as the env-injection contract
+# reference (supersedes the "lights up the moment those land" expectation
+# above).
+HA_TIER3_MASTER_HTTP_PORT = int(
+    os.environ.get("FLEXLB_FT_HA_TIER3_MASTER_HTTP_PORT", "18080")
+)
+HA_TIER3_MASTER_B_BIND_IP = os.environ.get(
+    "FLEXLB_FT_HA_TIER3_MASTER_B_BIND_IP", "127.0.0.2"
 )
 
 
@@ -551,19 +622,51 @@ class MasterSpec:
       LBStatusConsistencyService.getMasterHostIpPort() returns null (no
       forwarding, LOCAL_STANDALONE routing) and
       FlexlbGrpcForwarder.sameHost(ip, null) is false (no SELF_TARGET), so
-      distinct ports are the zero-risk layout.
+      distinct ports are the zero-risk layout.  No FLEXLB_ADVERTISED_IP.
+
+    * Tier-2/3 ZK-activated — FLEXLB_SYNC_CONSISTENCY_CONFIG set by the
+      harness (EnvSpec.zk_consistency).  The layout MUST switch to
+      same-port / different-IP (bind_ip 127.0.0.1 vs 127.0.0.2 +
+      FLEXLB_ADVERTISED_IP): the ZK LeaderSelector id is the BARE local IP
+      (ZookeeperMasterElectService.initializeIpAndPort), the forwarded
+      master address stitches the LOCAL server.port onto the leader IP
+      (LBStatusConsistencyService.getMasterHostIpPort) and SELF_TARGET
+      compares bare IPs (FlexlbGrpcForwarder.sameHost) — a distinct-port
+      same-IP pair breaks on all three.  Both instances share ONE
+      HIPPO_ROLE: the ZK lock path is /master_lb_leader/{HIPPO_ROLE}, so
+      the same roleId is what makes them mutual master/follower.
+
+    RULING (2026-09-02): the same-host distinct-IP Tier-3 layout is
+    DEAD — the election localIp comes only from InetAddress.getLocalHost()
+    hostname resolution (ZookeeperMasterElectService L106-111 +
+    LBStatusConsistencyService L52, two independent sites, no env
+    override channel), the gRPC wildcard bind (forPort) cannot start a
+    second same-port instance, and same-IP distinct-port makes
+    SELF_TARGET permanently true, blocking all forwarding; the
+    production-side prerequisites (FLEXLB_ADVERTISED_IP consumer /
+    per-address bind) will NOT land.  Tier-3 moves to a dual-container
+    topology (one network stack + hostname per container -> naturally
+    distinct IPs on the same port, replicating production's
+    one-IP-per-pod) — phase 2.  The 127.0.0.1/.2 wiring is kept only as
+    the env-injection contract reference.
 
     Tier-2 forwarding semantics (four-state matrix, 8511, ForwardGuard)
     are covered by the JUnit layer (master_forward_matrix) — this harness
-    only orchestrates processes/env.
+    only orchestrates processes/env; Tier-3 is deferred to the phase-2
+    dual-container topology per the RULING above.
     """
 
     name: str  # registry key ("A" / "B" — brief p5/p6 scenario notation)
     http_port: int
     management_port: Optional[int] = None  # default http+1
-    # Spring --server.address for this instance (probes and the gRPC
-    # target are built on the same address).
+    # Spring --server.address; Tier-1 stays 127.0.0.1 (distinct ports),
+    # Tier-2/3 uses 127.0.0.1 vs 127.0.0.2 (same ports, distinct IPs).
     bind_ip: str = "127.0.0.1"
+    # FLEXLB_ADVERTISED_IP (Tier-2/3): overrides the ZK-advertised localIp.
+    # Has NO consumer in the flexlb Java code and none will land (see the
+    # RULING in the docstring above) — kept as the env-injection contract
+    # reference for the phase-2 dual-container Tier-3.
+    advertised_ip: Optional[str] = None
     # Default: BOTH instances share spec.label's role (mutual backup).
     hippo_role: Optional[str] = None
     log_dir_name: Optional[str] = None  # default logs_{name} under run_dir
@@ -587,6 +690,7 @@ class MasterSpec:
             "http_port": self.http_port,
             "management_port": self.management(),
             "bind_ip": self.bind_ip,
+            "advertised_ip": self.advertised_ip,
             "hippo_role": self.hippo_role,
             "extra_env": self.extra_env,
             "extra_args": self.extra_args,
@@ -594,7 +698,7 @@ class MasterSpec:
 
 
 # ---------------------------------------------------------------------------
-# ZK helper — cross-agent contract with flexlb-sync (Mark)
+# ZK helper (Tier-2/3) — cross-agent contract with flexlb-sync (Mark)
 # ---------------------------------------------------------------------------
 
 # Contract constants — the SINGLE definition point the harness and the
@@ -618,6 +722,9 @@ class MasterSpec:
 #     carries the actual port.
 #   * exit paths: SIGTERM (used by the harness) and stdin EOF — both
 #     print "ZK_STOPPED" and exit 0.
+#   * macOS caveat: 127.0.0.2 silently drops (SYN retransits 20s+) on
+#     macOS — the Tier-2/3 same-port/distinct-IP layout only works on
+#     Linux loopback (full 127/8 routed); run the ZK-tier cases remotely.
 ZK_LAUNCHER_CLASS = "org.flexlb.consistency.ZkTestingServerLauncher"
 ZK_READY_PREFIX = "ZK_READY"
 ZK_STOPPED_PREFIX = "ZK_STOPPED"
@@ -736,6 +843,18 @@ class ZkHelperOps:
         return [java_bin, "-cp", cp, ZK_LAUNCHER_CLASS, "--port", "0"]
 
 
+def _override_fingerprint(overrides: Optional[ConfigOverride]) -> Optional[dict]:
+    """Stable JSON-serializable snapshot of a ConfigOverride (the OMIT
+    sentinel serializes as its own token) — EnvSpec.fingerprint input."""
+    if overrides is None:
+        return None
+    snapshot: dict = {}
+    for f in fields(overrides):
+        value = getattr(overrides, f.name)
+        snapshot[f.name] = "OMIT" if value is OMIT else value
+    return snapshot
+
+
 @dataclass
 class EnvSpec:
     """Declarative description of a full mock + master environment."""
@@ -745,11 +864,25 @@ class EnvSpec:
     n_decode: int = 4
     mock_heap: str = DEFAULT_MOCK_HEAP
     perf: dict = field(default_factory=default_perf)
-    # Built-in scheduling profile (PROFILES) or "none" (master not started);
-    # the FLEXLB_CONFIG document is generated from the profile axes unless
-    # master_env overrides it (chaos/gate suites bring their own config).
+    # Built-in scheduling profile (PROFILES) or "none" (master not
+    # started); the FLEXLB_CONFIG document is rendered by flexlb_cfg from
+    # the profile axes + config_overrides (or passthrough raw_config).
     master_profile: str = "batch-window"
-    master_env: dict = field(default_factory=dict)  # extra/override env vars
+    # Non-config master env overrides ONLY (e.g. FLEXLB_MONITOR_METRIC_
+    # WHITELIST, FLEXLB_ADVERTISED_IP, FLEXLB_SYNC_CONSISTENCY_CONFIG).
+    # FLEXLB_CONFIG must NOT ride here — the narrowed channel is
+    # config_overrides (generator layering) / raw_config (negative-test
+    # bypass); _master_env rejects a stray FLEXLB_CONFIG key.
+    master_env: dict = field(default_factory=dict)
+    # FLEXLB_CONFIG layer: flexlb_cfg.ConfigOverride applied on top of the
+    # master_profile base document (base < profile < override — see
+    # flexlb_cfg.render_env).  None = the profile document as-is.
+    config_overrides: Optional[ConfigOverride] = None
+    # Raw FLEXLB_CONFIG string — the negative-test channel (atpm
+    # strict-reject variants inject deliberately-illegal documents).
+    # Bypasses the generator entirely; takes precedence over
+    # config_overrides.
+    raw_config: Optional[str] = None
     spring_profile: str = "default"
     master_debug_log: bool = False
     # file (static endpoints.json → env vars, NoOpServiceDiscovery)
@@ -782,8 +915,8 @@ class EnvSpec:
     # single shared master; both masters share the SAME mock cluster and
     # discovery file and poll it independently (brief p1).
     masters: list = field(default_factory=list)  # list[MasterSpec]
-    # ZK consistency opt-in: non-None starts the ZK helper JVM (Mark's
-    # contract — org.flexlb.consistency.ZkTestingServerLauncher, "ZK_READY
+    # Tier-2/3 only: non-None starts the ZK helper JVM (Mark's contract —
+    # org.flexlb.consistency.ZkTestingServerLauncher, "ZK_READY
     # <connectString>" on stdout) BEFORE the masters and injects
     # FLEXLB_SYNC_CONSISTENCY_CONFIG (needConsistency=true, zkHost=<helper
     # connectString>, zkTimeoutMs from this dict) into every master env.
@@ -800,6 +933,11 @@ class EnvSpec:
                 "perf": self.perf,
                 "master_profile": self.master_profile,
                 "master_env": self.master_env,
+                # config axes: overrides serialized field-by-field (OMIT as
+                # its own token) so distinct override specs never collide;
+                # raw_config contributes its exact string.
+                "config_overrides": _override_fingerprint(self.config_overrides),
+                "raw_config": self.raw_config,
                 "discovery": self.discovery,
                 "domain_addrs": self.domain_addrs,
                 "prefill_cache_blocks": self.prefill_cache_blocks,
@@ -818,421 +956,25 @@ class EnvSpec:
 
 
 # ---------------------------------------------------------------------------
-# Scheduling profiles (schema-v2 FLEXLB_CONFIG axes)
+# Scheduling profiles / FLEXLB_CONFIG — owned by flexlb_cfg (SSOT)
 # ---------------------------------------------------------------------------
 #
-# v2 exposes four behaviour axes through the single strict FLEXLB_CONFIG
-# document: scheduler.type / scheduler.ordering.type /
-# scheduler.decision.type / dispatcher.type (see
-# rtp_llm/flexlb/docs/priority-scheduler-delivery-modes.md).  The legacy
-# v1 env vars (DEFAULT_SCHEDULE_MODE / LOAD_BALANCE_STRATEGY / FLEXLB_BATCH_*)
-# have zero consumers in the v2 Java code and are gone; a "profile" is now
-# a named axis combination.
+# The profile axes (PROFILES / PROFILE_SPECS / PROFILE_CAPS), the DSv4
+# prefill fit (DSV4_PREFILL_EXPRESSION), the strict schema-v2 builders
+# (_build_preemption_cfg / _build_ordering_cfg / build_flexlb_config) and
+# the render layer (render_env / render_process_config / ConfigOverride)
+# moved to flexlb_cfg.py — the single source of truth for every
+# FLEXLB_CONFIG document this repo produces — and are re-exported at the
+# top of this module for legacy import sites (flexlb_functional_tests.py
+# imports PROFILES / PROFILE_CAPS from flexlb_ft.harness; cases/* import
+# ConfigOverride / OMIT the same way).
 #
-# Phase-1 profile set (user ruling 2026-08): all QUEUE + FIFO ordering.
-# PRIORITY ordering / DIRECT / preemption / selector variants are left for a
-# dedicated later phase.
-
-PROFILES = (
-    "batch-window",
-    "single-nonbatch",
-    "single-batch",
-    "window-nonbatch",
-)
-
-# decision × dispatcher axes per profile (scheduler is QUEUE, ordering FIFO).
-PROFILE_SPECS = {
-    "batch-window": {"decision": "fixed_window", "dispatcher": "batch"},
-    "single-nonbatch": {"decision": "single", "dispatcher": "non_batch"},
-    "single-batch": {"decision": "single", "dispatcher": "batch"},
-    "window-nonbatch": {"decision": "fixed_window", "dispatcher": "non_batch"},
-}
-
-# Semantic capabilities per profile, used by CaseDef.requires filtering
-# (e.g. requires=["enqueue_batch"] keeps a case to BATCH-dispatch profiles).
-# Capability vocabulary (stable identifiers, extended in later phases):
-#   queue / fifo / fixed_window / single
-#   batch_dispatch / enqueue_batch / fetch_response   — BATCH dispatcher
-#   non_batch_dispatch / frontend_send / generate_stream — NON_BATCH dispatcher
-PROFILE_CAPS = {
-    "batch-window": {
-        "queue",
-        "fifo",
-        "fixed_window",
-        "batch_dispatch",
-        "enqueue_batch",
-        "fetch_response",
-    },
-    "single-nonbatch": {
-        "queue",
-        "fifo",
-        "single",
-        "non_batch_dispatch",
-        "frontend_send",
-        "generate_stream",
-    },
-    "single-batch": {
-        "queue",
-        "fifo",
-        "single",
-        "batch_dispatch",
-        "enqueue_batch",
-        "fetch_response",
-    },
-    "window-nonbatch": {
-        "queue",
-        "fifo",
-        "fixed_window",
-        "non_batch_dispatch",
-        "frontend_send",
-        "generate_stream",
-    },
-}
-
-
-def profile_dispatches_batch(profile: str) -> bool:
-    """True when *profile*'s dispatcher axis is BATCH (master sends via
-    EnqueueBatch; clients consume FetchResponse)."""
-    return PROFILE_SPECS[profile]["dispatcher"] == "batch"
-
-
-# Production DSv4 prefill execution-time fit (the intake3 test-line value
-# formerly carried by the master-side
-# RoutingConfig.FormulaEstimatorConfig.DEFAULT_EXPRESSION constant, which the
-# codex schema migration removed — the Java default is now the inline
-# upstream legacy expression). The harness injects it EXPLICITLY into every
-# generated FLEXLB_CONFIG instead of relying on the Java code default: the
-# production default is the upstream legacy "1 ms/token" sum, which
-# overpredicts a 32k all-miss prefill by ~96x (32.8 s vs the fitted ~342 ms)
-# and would poison every ledger-driven routing decision in these suites.
-DSV4_PREFILL_EXPRESSION = (
-    "max(196, -68.612174288157 + 0.993068319341 * (max(0, 287.3980926717 + 2.30134977837751 *"
-    " batchSize + 0.158123254797307 * sum(hitCacheTokens / 1024.) + 0.575522710053703 *"
-    " sum(computeTokens / 1024.) + 0.0517623430739831 * sum(computeTokens / 1024. * computeTokens /"
-    " 1024.) + 0.0395308136993267 * sum(hitCacheTokens / 1024. * computeTokens / 1024.) +"
-    " 0.0104363634681015 * sum(hitCacheTokens / 1024. * hitCacheTokens / 1024.) + 0.575522710053703 *"
-    " max(sum(computeTokens / 1024.) - 16, 0) + 2.82077211814514 * max(sum(computeTokens / 1024.) -"
-    " 32, 0) - 0.0254671429192862 * max(sum(computeTokens / 1024.) - 64, 0) + 2.15779213792494 *"
-    " max(sum(computeTokens / 1024.) - 96, 0) + 0.247806025472364 * max(sum(hitCacheTokens / 1024.) -"
-    " 32, 0) - 0.444522654549492 * max(sum(hitCacheTokens / 1024.) - 64, 0) - 0.427317020061895 *"
-    " max(sum(hitCacheTokens / 1024.) - 128, 0) + 0.347029077528455 * max(sum(hitCacheTokens / 1024.)"
-    " - 256, 0) - 0.298742307762735 * max(sum(hitCacheTokens / 1024.) - 384, 0) + 2.30134977837751 *"
-    " max(batchSize - 8, 0) - 3.54884859699154 * max(batchSize - 16, 0) - 11.3438560779984 *"
-    " max(batchSize - 24, 0) + 0.879751992138183 * sum(max(computeTokens / 1024. - 2, 0)) +"
-    " 0.636364578079591 * sum(max(computeTokens / 1024. - 4, 0)) - 0.0513345988517118 *"
-    " sum(max(computeTokens / 1024. - 8, 0)) - 0.332584389129357 * sum(max(hitCacheTokens / 1024. -"
-    " 2, 0)) + 0.305819761192588 * sum(max(hitCacheTokens / 1024. - 4, 0)) - 0.287610979974721 *"
-    " sum(max(hitCacheTokens / 1024. - 8, 0)) + 0.191310200712013 * sum(max(hitCacheTokens / 1024. -"
-    " 12, 0)) + 0.0130251644478961 * max(batchSize - 8, 0) * sum(hitCacheTokens / 1024.) +"
-    " 0.00981382840761646 * max(batchSize - 16, 0) * sum(hitCacheTokens / 1024.) - 0.0299132587297009"
-    " * max(batchSize - 24, 0) * sum(hitCacheTokens / 1024.) + 0.0447455122487382 * max(batchSize -"
-    " 8, 0) * sum(computeTokens / 1024.) + 0.0104635312001851 * max(batchSize - 16, 0) *"
-    " sum(computeTokens / 1024.) + 0.0542737877321807 * max(batchSize - 24, 0) * sum(computeTokens /"
-    " 1024.))))"
-)
-
-
-# scheduler.ordering.preemption.allowedVictimStages enum values
-# (flexlb-common VictimStage.java; see _build_preemption_cfg).
-VICTIM_STAGES = ("PREFILL_QUEUED", "DECODE_RESERVED", "DECODE_ENGINE_OWNED")
-
-
-def _build_preemption_cfg(preemption: dict) -> dict:
-    """snake_case preemption spec → strict schema-v2 preemption JSON block.
-
-    Schema (docs/priority-scheduler-delivery-modes.md lines 206-213):
-
-        {
-            "allowedVictimStages": ["PREFILL_QUEUED", ..., "DECODE_ENGINE_OWNED"],
-            "engineCancellation": {        # required iff DECODE_ENGINE_OWNED
-                "ackTimeoutMs": 50,        #     is allowed; rejected
-                "completionTimeoutMs": 1000 #     otherwise
-            },
-        }
-
-    Input keys (snake_case, mirroring the generator's parameter style):
-    ``allowed_victim_stages`` (list of VICTIM_STAGES values) and optional
-    ``engine_cancellation`` ``{"ack_timeout_ms": int, "completion_timeout_ms": int}``.
-    The Java-side cross-field contract (FlexlbConfigValidator.validateQueue)
-    is mirrored here so a malformed block fails fast in Python instead of
-    aborting master startup:
-
-      * allowedVictimStages must be a non-empty subset of VICTIM_STAGES;
-      * engineCancellation is REQUIRED when DECODE_ENGINE_OWNED is allowed
-        and REJECTED otherwise (both timeouts positive integers);
-      * no JSON nulls are ever emitted (ConfigService.rejectJsonNull).
-    """
-    stages = list(preemption.get("allowed_victim_stages") or [])
-    unknown = [s for s in stages if s not in VICTIM_STAGES]
-    if unknown:
-        raise ValueError(
-            f"preemption.allowed_victim_stages: unknown stages {unknown}; "
-            f"valid values: {list(VICTIM_STAGES)}"
-        )
-    if not stages:
-        raise ValueError(
-            "preemption.allowed_victim_stages must be a non-empty subset of "
-            f"{list(VICTIM_STAGES)} when preemption is configured"
-        )
-    cancellation = preemption.get("engine_cancellation")
-    if "DECODE_ENGINE_OWNED" not in stages:
-        if cancellation is not None:
-            raise ValueError(
-                "preemption.engine_cancellation is allowed only when "
-                "DECODE_ENGINE_OWNED is an allowed victim stage"
-            )
-        return {"allowedVictimStages": stages}
-    if cancellation is None:
-        raise ValueError(
-            "preemption.engine_cancellation is required when "
-            "DECODE_ENGINE_OWNED is an allowed victim stage"
-        )
-    ack_ms = cancellation.get("ack_timeout_ms")
-    completion_ms = cancellation.get("completion_timeout_ms")
-    for name, value in (
-        ("ack_timeout_ms", ack_ms),
-        ("completion_timeout_ms", completion_ms),
-    ):
-        if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
-            raise ValueError(
-                f"preemption.engine_cancellation.{name} must be a positive "
-                "integer (ms)"
-            )
-    return {
-        "allowedVictimStages": stages,
-        "engineCancellation": {
-            "ackTimeoutMs": ack_ms,
-            "completionTimeoutMs": completion_ms,
-        },
-    }
-
-
-def _build_ordering_cfg(
-    ordering: str,
-    default_priority: Optional[int],
-    preemption: Optional[dict],
-) -> dict:
-    """scheduler.ordering block (strict schema-v2).
-
-    FIFO carries only ``{"type": "FIFO"}`` — FifoOrderingConfig has no other
-    fields and the strict parser (ConfigService STRICT_MAPPER enables
-    FAIL_ON_UNKNOWN_PROPERTIES) rejects defaultPriority / preemption under
-    it, so passing them with ordering="fifo" raises here instead of failing
-    at master startup.  Under PRIORITY both keys are optional: omitted
-    defaultPriority keeps the Java default (50); an omitted preemption block
-    disables preemption (the designed off-switch, doc line 213).
-    """
-    # B3 (Daniel P3-3): normalize case at the entry — parallel sessions
-    # have been observed passing the legacy uppercase convention
-    # ("FIFO"/"PRIORITY"); a non-str value falls through to the check
-    # below unchanged (same error as before).
-    if isinstance(ordering, str):
-        ordering = ordering.lower()
-    if ordering not in ("fifo", "priority"):
-        raise ValueError(f"ordering must be 'fifo' or 'priority', got {ordering!r}")
-    if ordering == "fifo":
-        if default_priority is not None or preemption is not None:
-            raise ValueError(
-                "default_priority/preemption apply only to ordering='priority' "
-                "(the strict FLEXLB_CONFIG parser rejects them under FIFO)"
-            )
-        return {"type": "FIFO"}
-    if default_priority is not None and not 1 <= default_priority <= 100:
-        raise ValueError(
-            f"default_priority must be in [1, 100], got {default_priority}"
-        )
-    cfg: dict = {"type": "PRIORITY"}
-    if default_priority is not None:
-        cfg["defaultPriority"] = default_priority
-    if preemption is not None:
-        cfg["preemption"] = _build_preemption_cfg(preemption)
-    return cfg
-
-
-def build_flexlb_config(
-    *,
-    ordering: str = "fifo",  # fifo | priority
-    decision: str = "fixed_window",  # fixed_window | single
-    dispatcher: str = "batch",  # batch | non_batch
-    # scheduler.ordering (PRIORITY only — the strict parser rejects these
-    # keys under FIFO; see _build_ordering_cfg):
-    #   scheduler.ordering.defaultPriority (None → keep the Java default 50)
-    default_priority: Optional[int] = None,
-    #   scheduler.ordering.preemption block (None → omit the whole block =
-    #   preemption disabled); snake_case shape: see _build_preemption_cfg
-    preemption: Optional[dict] = None,
-    # scheduler.decision (FIXED_WINDOW only; ignored for SINGLE)
-    max_requests: int = 32,
-    max_collection_wait_ms: int = 10,
-    max_predicted_execution_ms: int = 550,
-    # scheduler knobs (None → omit the key, keep the Java default)
-    queue_timeout_ms: Optional[int] = None,
-    max_outstanding: int = 5_000,
-    stale_inflight_ms: int = 30_000,
-    delivered_not_accepted_timeout_ms: int = 30_000,
-    max_delivered_not_accepted: int = 200,
-    # Admission-family capacity passthrough (admission wave-2 triggers,
-    # 2026-09): None → omit the key, keep the Java default (waiting queue
-    # 1024); only an explicit value reaches FLEXLB_CONFIG.  Harness is a
-    # pipe — no default changes.
-    max_waiting_requests_per_prefill_worker: Optional[int] = None,
-    # RETIRED by the codex strict schema: router.roles.prefill.availability
-    # (with its maxPendingRequests) no longer parses — ConfigServiceTest
-    # rejects prefill.availability, and prefill admission now parks in
-    # placementWaiters via the Blocked path instead of an availability
-    # reject.  Kept as a documented no-op so admission_config callers don't
-    # TypeError; no config key is emitted for any value.
-    prefill_max_pending_requests: Optional[int] = None,
-    # dispatcher knobs
-    max_inflight_batches: int = 4,  # BATCH
-    enqueue_rpc_timeout_ms: Optional[int] = None,  # BATCH; None → Java default 5000
-    max_inflight_requests_per_worker: Optional[
-        int
-    ] = None,  # NON_BATCH; None → unlimited
-    # workerRegistry.health
-    status_rpc_ms: int = 1_000,
-) -> str:
-    """Unified strict schema-v2 FLEXLB_CONFIG generator.
-
-    One template for every environment the framework boots: the four
-    built-in profiles (via :func:`flexlb_config_for_profile`), the fault
-    families (harness.fault_env_config) and the admission-gate cases
-    (harness.admission_config) all delegate here.  The router gets
-    the FORMULA execution-time estimator with the production DSv4 fit
-    injected EXPLICITLY (:data:`DSV4_PREFILL_EXPRESSION`): the online
-    LEARNING estimator only trains from completed EnqueueBatch groups, so a
-    stable prediction cap for FIXED_WINDOW + NON_BATCH requires FORMULA —
-    and the test line must not depend on the Java code default, which is the
-    upstream legacy 1 ms/token expression.
-
-    Priority ordering: *default_priority* maps to
-    ``scheduler.ordering.defaultPriority`` and *preemption* to
-    ``scheduler.ordering.preemption`` — both PRIORITY-only (schema reference:
-    docs/priority-scheduler-delivery-modes.md lines 191-213; Java parsing:
-    PriorityOrderingConfig/PreemptionConfig/EngineCancellationConfig in
-    flexlb-common).  ``ordering="priority"`` with ``preemption=None`` emits
-    no preemption block — preemption disabled by omission.
-    """
-    if decision == "single":
-        decision_cfg: dict = {"type": "SINGLE"}
-    else:
-        decision_cfg = {
-            "type": "FIXED_WINDOW",
-            "maxRequests": max_requests,
-            "maxCollectionWaitMs": max_collection_wait_ms,
-            "maxPredictedExecutionMs": max_predicted_execution_ms,
-        }
-    if dispatcher == "batch":
-        dispatcher_cfg: dict = {
-            "type": "BATCH",
-            "maxInflightBatchesPerPrefillWorker": max_inflight_batches,
-        }
-        if enqueue_rpc_timeout_ms is not None:
-            dispatcher_cfg["enqueueRpcTimeoutMs"] = enqueue_rpc_timeout_ms
-    else:
-        dispatcher_cfg = {"type": "NON_BATCH"}
-        if max_inflight_requests_per_worker is not None:
-            dispatcher_cfg["maxInflightRequestsPerPrefillWorker"] = (
-                max_inflight_requests_per_worker
-            )
-    capacity_cfg: dict = {"maxOutstandingRequestsGlobal": max_outstanding}
-    if max_waiting_requests_per_prefill_worker is not None:
-        capacity_cfg["maxWaitingRequestsPerPrefillWorker"] = (
-            max_waiting_requests_per_prefill_worker
-        )
-    scheduler_cfg: dict = {
-        "type": "QUEUE",
-        "ordering": _build_ordering_cfg(ordering, default_priority, preemption),
-        "decision": decision_cfg,
-        "capacity": capacity_cfg,
-        "lifecycle": {
-            "staleInflightTimeoutMs": stale_inflight_ms,
-            "deliveredNotAcceptedTimeoutMs": delivered_not_accepted_timeout_ms,
-            "maxDeliveredNotAcceptedRequestsGlobal": max_delivered_not_accepted,
-        },
-    }
-    if queue_timeout_ms is not None:
-        scheduler_cfg["queueTimeoutMs"] = queue_timeout_ms
-    return json.dumps(
-        {
-            "schemaVersion": 2,
-            "scheduler": scheduler_cfg,
-            "dispatcher": dispatcher_cfg,
-            "router": {
-                # codex strict schema: RouterConfig carries only groupSelector
-                # + roles — router-level availabilityHysteresisPercent and the
-                # prefill-side availability/selector wrappers are retired
-                # (ConfigServiceTest rejects them on parse).
-                "roles": {
-                    "prefill": {
-                        # Production DSv4 prefill fit injected explicitly
-                        # (see DSV4_PREFILL_EXPRESSION above): the test line
-                        # stays on the production-fit caliber regardless of
-                        # the Java code default.
-                        "executionTimeEstimator": {
-                            "type": "FORMULA",
-                            "expression": DSV4_PREFILL_EXPRESSION,
-                        },
-                        # Candidate choice, flattened from the retired
-                        # selector{type: ESTIMATED_TTFT} wrapper — the codex
-                        # PrefillConfig keeps only executionTimeEstimator /
-                        # candidateChoice / cacheAffinity, so the nested block
-                        # moved up to the prefill level unchanged.
-                        "candidateChoice": {
-                            "type": "RANDOM_WITHIN_TOLERANCE",
-                            "relativeTolerance": 0.1,
-                            "minimumToleranceMs": 20,
-                            "outlierRejection": {
-                                "maxPendingVsAverageMultiplier": 1.5,
-                                "maxProjectedDrainVsAverageMultiplier": 3.0,
-                            },
-                        },
-                        # Bounded cache affinity, aligned with the production
-                        # master template (data/config/master_fixed_window.json):
-                        # a cache leader is preferred while its projected TTFT
-                        # stays within maxExtraTtftMs of the best candidate and
-                        # its reusable prefix covers >= minPrefixHitPercent.
-                        # Without this key the affinity gate is disabled and
-                        # prefix reuse degrades to tie-window randomness.
-                        "cacheAffinity": {
-                            "maxExtraTtftMs": 20,
-                            "minPrefixHitPercent": 20,
-                        },
-                    },
-                    # decode-side availability is still legal in the codex
-                    # schema (DecodeAvailabilityConfig) — kept as-is.
-                    "decode": {"availability": {"maxEngineRequests": 132}},
-                },
-            },
-            "workerRegistry": {
-                "health": {
-                    "statusPollIntervalMs": 20,
-                    "statusRpcTimeoutMs": status_rpc_ms,
-                    "statusStaleAfterMs": max(10_000, status_rpc_ms * 2),
-                }
-            },
-        },
-        separators=(",", ":"),
-    )
-
-
-def flexlb_config_for_profile(profile: str, **overrides) -> str:
-    """FLEXLB_CONFIG for a built-in profile; *overrides* forward to
-    :func:`build_flexlb_config` (e.g. window size / TTL tuning)."""
-    axes = PROFILE_SPECS[profile]
-    kwargs = {
-        "ordering": "fifo",
-        "decision": axes["decision"],
-        "dispatcher": axes["dispatcher"],
-        # Queue deadline for functional profiles: tight enough that the
-        # queue-timeout gate cases can observe expiry without waiting for
-        # the Java default (1h).
-        "queue_timeout_ms": 60_000,
-    }
-    kwargs.update(overrides)
-    return build_flexlb_config(**kwargs)
-
-
+# Profile semantics in one line: four functional case-test profiles
+# (decision x dispatcher axes, scheduler QUEUE + FIFO ordering; values
+# unchanged) plus the stress-na130 render profile — the former
+# data/config/master_fixed_window.json, byte-for-byte identical, now
+# generated.  See the flexlb_cfg module docstring for the full contract
+# (layering, OMIT, axis re-typing, envelope projection).
 # Master env that is actually consumed by the v2 code:
 #   FLEXLB_CONFIG          — set per spec from the profile generator below
 #   HIPPO_ROLE             — flexlb-sync (zookeeper elect / LB status)
@@ -1244,6 +986,29 @@ BASE_MASTER_ENV = {
     "OTEL_TRACE_SKIP_PATTERN": ".*",
     "OTEL_EXPORTER_OTLP_ENDPOINT": "none",
 }
+
+
+def _write_master_config(env: "FlexEnv") -> Path:
+    """Render the SSOT envelope into run_dir/master_config.json.
+
+    Single render, two projections: this file feeds the mock / victim
+    ``--master-config`` argument, while the master env's FLEXLB_CONFIG
+    (see EnvManager._master_env) comes from the same flexlb_cfg render —
+    the two sides can never drift apart.  Replaces the retired checked-in
+    data/config/master_fixed_window.json, which pinned the mock side to
+    the stress-line document regardless of the master's profile.
+    """
+    path = env.run_dir / "master_config.json"
+    spec = env.spec
+    path.write_text(
+        render_process_config(
+            spec.master_profile,
+            spec.config_overrides,
+            raw_config=spec.raw_config,
+        ),
+        encoding="utf-8",
+    )
+    return path
 
 
 class FlexEnv:
@@ -1277,7 +1042,7 @@ class FlexEnv:
         self.masters: dict[str, Optional[ManagedProcess]] = {}
         self.master_specs: dict[str, MasterSpec] = {}
         self.masters_start_count: dict[str, int] = {}
-        # ZK helper: ManagedProcess + connectString.
+        # ZK helper (Tier-2/3): ManagedProcess + advertised connectString.
         self.zk_helper: Optional[ManagedProcess] = None
         self.zk_connect_string: Optional[str] = None
 
@@ -1401,10 +1166,9 @@ class EnvManager:
             if spec.masters:
                 # HA dual-master path (gated on the registry being
                 # non-empty — the single-master legacy branch below is
-                # untouched).  A spec with zk_consistency boots the ZK
-                # helper first so the masters can grab the election lock
-                # at startup; Tier-1 (zk_consistency=None) skips it
-                # entirely.
+                # untouched).  Tier-2/3 boots the ZK helper first so the
+                # masters can grab the election lock at startup; Tier-1
+                # (zk_consistency=None) skips it entirely.
                 if spec.zk_consistency is not None:
                     self.start_zk_helper(env)
                 for mspec in spec.masters:
@@ -1443,6 +1207,10 @@ class EnvManager:
             str(spec.n_decode),
             "--base-grpc-port",
             str(env.base_grpc_port),
+            # macOS lo0 only has 127.0.0.1 (no whole 127/8 routing like Linux),
+            # so the unique-IP advertisement (127.1.0.x) is unreachable there.
+            "--unique-engine-ips",
+            "false" if sys.platform == "darwin" else "true",
             "--event-loop-threads",
             str(spec.event_loop_threads),
             "--completion-threads",
@@ -1450,7 +1218,7 @@ class EnvManager:
             "--performance",
             str(env.perf_file),
             "--master-config",
-            str(MASTER_CONFIG),
+            str(_write_master_config(env)),
             # stdout telemetry (java_mock_stats line every statsIntervalMs):
             # lets the archived mock_engine.log answer "which RPC counters
             # kept moving / stalled" for hang forensics (3c-class issues)
@@ -1506,14 +1274,31 @@ class EnvManager:
         *mspec* is None on the single-master legacy path (byte-identical
         behaviour).  A MasterSpec layers the per-instance keys on top of
         the shared base: HIPPO_ROLE (default = the shared label role, the
-        mutual-backup pairing), FLEXLB_SYNC_CONSISTENCY_CONFIG (ZK
-        consistency, built from the live ZK helper connectString when
-        spec.zk_consistency is set) and the per-instance extra_env.
+        mutual-backup pairing), FLEXLB_ADVERTISED_IP (Tier-2/3),
+        FLEXLB_SYNC_CONSISTENCY_CONFIG (Tier-2/3, built from the live ZK
+        helper connectString) and the per-instance extra_env.
         """
         spec = env.spec
         menv = dict(BASE_MASTER_ENV)
+        if "FLEXLB_CONFIG" in spec.master_env:
+            # Narrowed channel (SSOT migration): master_env is non-config
+            # env only — a stray FLEXLB_CONFIG here would silently fork
+            # away from the flexlb_cfg render that feeds the mock-side
+            # master_config.json envelope.
+            raise ValueError(
+                "EnvSpec.master_env must not carry FLEXLB_CONFIG — use "
+                "config_overrides (flexlb_cfg generator layering) or "
+                "raw_config (negative-test bypass)"
+            )
         if spec.master_profile != "none":
-            menv["FLEXLB_CONFIG"] = flexlb_config_for_profile(spec.master_profile)
+            if spec.raw_config is not None:
+                # Negative-test channel: raw passthrough, generator
+                # bypassed (atpm strict-reject variants).
+                menv["FLEXLB_CONFIG"] = spec.raw_config
+            else:
+                menv["FLEXLB_CONFIG"] = render_env(
+                    spec.master_profile, spec.config_overrides
+                )
         menv["HIPPO_ROLE"] = f"flexlb_ft_{spec.label}"
         if spec.discovery == "file":
             payload = json.loads(env.endpoint_file.read_text(encoding="utf-8"))
@@ -1564,6 +1349,8 @@ class EnvManager:
             # single-master path keeps mspec None and never reaches here).
             if mspec.hippo_role:
                 menv["HIPPO_ROLE"] = mspec.hippo_role
+            if mspec.advertised_ip:
+                menv["FLEXLB_ADVERTISED_IP"] = mspec.advertised_ip
             if spec.zk_consistency is not None:
                 if not env.zk_connect_string:
                     # Fail-closed: a master must never boot with
@@ -1822,6 +1609,12 @@ class EnvManager:
     def _instance_ports_in_use(self, mspec: MasterSpec) -> list[int]:
         """Instance's fixed ports (HTTP / management / gRPC = http+2),
         probed on the instance's OWN bind ip.
+
+        On the Tier-2/3 same-port layout the probe against 127.0.0.2 must
+        not be confused by a sibling instance bound to 127.0.0.1 — distinct
+        addresses coexist, so only a wildcard squatter (e.g. the current
+        NettyServerBuilder.forPort gRPC bind, until the production-side
+        per-address prerequisite lands) reports the port busy on both.
         """
         ports = [mspec.http_port, mspec.management(), mspec.grpc_port()]
         return [p for p in ports if port_in_use(p, mspec.bind_ip)]
@@ -1835,8 +1628,8 @@ class EnvManager:
         ready → engine stable window) with every probe pointed at the
         instance's own bind ip/port, plus the per-instance argv/env keys:
         --server.address, --management.server.address, --flexlb.log.path
-        (per-instance log dir) and FLEXLB_SYNC_CONSISTENCY_CONFIG (when
-        configured) via _master_env(env, mspec).
+        (per-instance log dir), FLEXLB_ADVERTISED_IP and
+        FLEXLB_SYNC_CONSISTENCY_CONFIG via _master_env(env, mspec).
         """
         spec = env.spec
         if not API_JAR.is_file():
@@ -1857,7 +1650,9 @@ class EnvManager:
                 raise RuntimeError(
                     f"master instance '{mspec.name}' ports still busy after "
                     f"{port_wait_s:.0f}s on {mspec.bind_ip} (another master "
-                    f"running?): {busy}"
+                    f"running? the Tier-2/3 same-port layout additionally "
+                    f"needs the production-side per-address gRPC bind "
+                    f"prerequisite): {busy}"
                 )
             self._log(
                 f"master '{mspec.name}' ports {busy} busy on {mspec.bind_ip}; "
@@ -1885,9 +1680,10 @@ class EnvManager:
             f"--server.port={mspec.http_port}",
             f"--management.server.port={mspec.management()}",
             f"--server.address={mspec.bind_ip}",
-            # Management port follows the main bind ip: without it Spring
-            # binds 0.0.0.0, colliding with a sibling instance's management
-            # port even when the main HTTP ports differ.
+            # Management port follows the main bind ip too: without it
+            # Spring binds 0.0.0.0 and the Tier-2/3 same-port pair would
+            # collide on the management port even though the main HTTP
+            # ports coexist on distinct addresses.
             f"--management.server.address={mspec.bind_ip}",
             f"--flexlb.log.path={log_dir}",
             f"--spring.profiles.active={spec.spring_profile}",
@@ -2040,7 +1836,7 @@ class EnvManager:
         self._log(f"SIGCONT master instance '{name}' (pid={mp.pid})")
         mp.unfreeze()
 
-    # -- ZK helper (gated on spec.zk_consistency) --------------------------
+    # -- ZK helper (Tier-2/3, gated on spec.zk_consistency) ----------------
 
     def start_zk_helper(self, env: FlexEnv) -> None:
         """Boot the ZK helper JVM and wait for 'ZK_READY <connectString>'.
@@ -2124,7 +1920,7 @@ class EnvManager:
             "--performance",
             str(perf_file or env.perf_file),
             "--master-config",
-            str(MASTER_CONFIG),
+            str(_write_master_config(env)),
             "--prefill-kv-pool-blocks",
             str(env.spec.prefill_cache_blocks if role == "prefill" else 0),
             "--decode-kv-pool-blocks",
@@ -2452,10 +2248,6 @@ class BalanceSampler:
         self._thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
         self._series: dict = {}
-        # {engine_name: role} from the per_engine "role" label — the
-        # per-role TPS routing key (P -> context_tps, D -> generate_tps,
-        # design §1.2 dim 5; the off-role series stay 0 on the Java side).
-        self._engine_roles: dict = {}
         self._events: dict = {}
         self._t0: Optional[float] = None
 
@@ -2474,10 +2266,6 @@ class BalanceSampler:
             engine = labels.get("engine_name")
             if not engine:
                 continue
-            role = labels.get("role")
-            if role:
-                with self._lock:
-                    self._engine_roles[engine] = role
             self._record(engine, name, t_rel, value)
 
     def _poll_master(self, t_rel: float) -> None:
@@ -2577,44 +2365,17 @@ class BalanceSampler:
                 out[key] = in_win
         return out
 
-    def engine_roles(self) -> dict:
-        """{engine_name: role} snapshot ("prefill" / "decode", from the
-        per_engine role label) — the per-role series-routing key for
-        consumers (context vs generate TPS)."""
-        with self._lock:
-            return dict(self._engine_roles)
-
     def dump(self, path) -> None:
-        """Persist the full store + events + roles + meta as json.gz
-        (case evidence).
-
-        Reliability contract (code-review fix, three properties):
-          1. the payload snapshot is taken under the SAME lock the
-             poller thread takes, with per-series list copies — a daemon
-             thread that outlives stop()'s join can never mutate the
-             dicts mid-serialization;
-          2. atomic publish — write a ``.tmp`` sibling then os.replace
-             onto the final path, so an interrupted dump never leaves a
-             TRUNCATED evidence file behind;
-          3. engine_roles rides along so the per-role TPS routing is
-             reproducible from the artifact alone.
-        """
-        with self._lock:
-            payload = {
-                "sample_s": self.POLL_INTERVAL_S,
-                "events": dict(self._events),
-                "engine_roles": dict(self._engine_roles),
-                "series": {
-                    key: {metric: list(pts) for metric, pts in per.items()}
-                    for key, per in self._series.items()
-                },
-            }
+        """Persist the full store + events + meta as json.gz (case evidence)."""
+        payload = {
+            "sample_s": self.POLL_INTERVAL_S,
+            "events": dict(self._events),
+            "series": self._series,
+        }
         out_path = Path(path)
         out_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = out_path.with_name(out_path.name + ".tmp")
-        with gzip.open(tmp_path, "wt") as f:
+        with gzip.open(out_path, "wt") as f:
             json.dump(payload, f)
-        os.replace(tmp_path, out_path)
 
 
 # ---------------------------------------------------------------------------
@@ -2958,7 +2719,7 @@ def encode_unique_key(meta: dict) -> str:
 # to live in chaos_cases.py / injection_gate_cases.py and are shared by
 # several flexlb_ft/cases/ categories (elastic, master, engine_fault,
 # status, admission).  They depend only on this module (EnvSpec /
-# build_flexlb_config / default_perf / wait_for) plus duck-typed CaseContext
+# ConfigOverride / default_perf / wait_for) plus duck-typed CaseContext
 # / EngineOps arguments (annotated as strings to avoid an import cycle:
 # context.py imports harness.py), so harness.py is their shared home.
 # ===========================================================================
@@ -2969,28 +2730,6 @@ STREAM_TIMEOUT_S = 15.0
 
 PREFILL_DOMAIN = "mock.prefill.hosts.address"
 DECODE_DOMAIN = "mock.decode.hosts.address"
-
-
-def fault_env_config(
-    stale_inflight_ms: int = 30_000,
-    max_inflight_batches: int = 4,
-    status_rpc_ms: int = 1_000,
-) -> str:
-    """Fault-family FLEXLB_CONFIG (QUEUE + PRIORITY + FIXED_WINDOW + BATCH —
-    the legacy fault axes), generated through the unified
-    harness.build_flexlb_config template.
-
-    Shorter staleInflightTimeoutMs (30s vs the na130 default 300s) so the TTL
-    cleanup cases finish within their 90s caps.
-    """
-    return build_flexlb_config(
-        ordering="priority",
-        decision="fixed_window",
-        dispatcher="batch",
-        stale_inflight_ms=stale_inflight_ms,
-        max_inflight_batches=max_inflight_batches,
-        status_rpc_ms=status_rpc_ms,
-    )
 
 
 def fault_env_perf() -> dict:
@@ -3010,127 +2749,27 @@ def fault_env_perf() -> dict:
     return perf
 
 
-def admission_config(
-    queue_timeout_ms: int = 60_000,
-    max_outstanding: int = 5_000,
-    stale_inflight_ms: int = 30_000,
-    max_delivered_not_accepted: Optional[int] = None,
-    max_waiting_requests_per_prefill_worker: Optional[int] = None,
-    prefill_max_pending_requests: Optional[int] = None,
-) -> str:
-    """FLEXLB_CONFIG for the admission-gate cases: the legacy fault axes
-    (QUEUE + PRIORITY + FIXED_WINDOW + BATCH) via the unified
-    harness.build_flexlb_config template, with the admission knobs
-    parameterised.
-
-    The three admission wave-2 capacity triggers are optional passthrough
-    (None → not emitted, keeping the current template values — lifecycle
-    maxDeliveredNotAcceptedRequestsGlobal=200, Java defaults for the other
-    two); only an explicit value overrides:
-
-      * max_waiting_requests_per_prefill_worker — scheduler.capacity
-        (batcher waiting-queue capacity; Java default 1024)
-      * max_delivered_not_accepted — scheduler.lifecycle
-        maxDeliveredNotAcceptedRequestsGlobal (acceptance global limit)
-      * prefill_max_pending_requests — RETIRED no-op (the codex schema
-        removed router.roles.prefill.availability; prefill admission now
-        parks via Blocked placementWaiters): accepted for caller
-        compatibility, emits no config key
-    """
-    kwargs = dict(
-        ordering="priority",
-        decision="fixed_window",
-        dispatcher="batch",
-        queue_timeout_ms=queue_timeout_ms,
-        max_outstanding=max_outstanding,
-        stale_inflight_ms=stale_inflight_ms,
-    )
-    if max_delivered_not_accepted is not None:
-        kwargs["max_delivered_not_accepted"] = max_delivered_not_accepted
-    if max_waiting_requests_per_prefill_worker is not None:
-        kwargs["max_waiting_requests_per_prefill_worker"] = (
-            max_waiting_requests_per_prefill_worker
-        )
-    if prefill_max_pending_requests is not None:
-        kwargs["prefill_max_pending_requests"] = prefill_max_pending_requests
-    return build_flexlb_config(**kwargs)
-
-
-def elastic_spec(ctx: "CaseContext") -> EnvSpec:
-    """Shared elastic/fault env: 2P+4D, dynamic file discovery, TTL=30s."""
-    return EnvSpec(
-        label=f"fault_{ctx.profile}",
-        n_prefill=2,
-        n_decode=4,
-        perf=fault_env_perf(),
-        master_profile=ctx.profile,
-        discovery="discovery_file",
-        master_env={"FLEXLB_CONFIG": fault_env_config()},
-    )
-
-
-def ttl_spec(ctx: "CaseContext") -> EnvSpec:
-    """Inflight-TTL env (S1): 2P+2D, TTL=30s."""
-    return EnvSpec(
-        label=f"fault_ttl_{ctx.profile}",
-        n_prefill=2,
-        n_decode=2,
-        perf=fault_env_perf(),
-        master_profile=ctx.profile,
-        discovery="discovery_file",
-        master_env={"FLEXLB_CONFIG": fault_env_config()},
-    )
-
-
-def quota_spec(ctx: "CaseContext") -> EnvSpec:
-    """Quota-block env (S3): 1P+1D, maxInflightBatches=1 via FLEXLB_CONFIG
-    (dispatcher.maxInflightBatchesPerPrefillWorker — the v1 env var
-    FLEXLB_BATCH_FIXED_MAX_INFLIGHT_BATCHES has no v2 consumer)."""
-    return EnvSpec(
-        label=f"fault_quota_{ctx.profile}",
-        n_prefill=1,
-        n_decode=1,
-        perf=fault_env_perf(),
-        master_profile=ctx.profile,
-        discovery="discovery_file",
-        master_env={"FLEXLB_CONFIG": fault_env_config(max_inflight_batches=1)},
-    )
-
-
-def coldstart_spec(ctx: "CaseContext") -> EnvSpec:
-    """Cold-start probe env: mirrors the default topology (2P+4D, static
-    file discovery, default config) but disables the master stability
-    window so traffic hits the master during the first-connect storm."""
-    return EnvSpec(
-        label=f"fault_coldstart_{ctx.profile}",
-        n_prefill=2,
-        n_decode=4,
-        perf=default_perf(),
-        master_profile=ctx.profile,
-        master_stable_window_s=0.0,
-    )
-
-
-def _fault_spec(ctx: "CaseContext") -> EnvSpec:
-    """Env for fault cases whose requests die mid-flight (fetch_error,
-    crash_after): short staleInflightTimeoutMs (30s vs the na130 default
-    300s) because the VERIFIED contract is that a request already
-    accepted by an engine but whose client stream dies is cleaned by the
-    stale-inflight TTL, not by an immediate terminal (engine-side inflight
-    DOES drain immediately; the master ledger entry lingers).  With the
-    default env's 300s TTL the case would have to wait 5 minutes."""
-    return EnvSpec(
-        label=f"inject_fault_{ctx.profile}",
-        n_prefill=2,
-        n_decode=2,
-        perf=default_perf(),
-        master_profile=ctx.profile,
-        master_env={"FLEXLB_CONFIG": admission_config(stale_inflight_ms=30_000)},
-    )
-
-
 def _elastic_env(ctx: "CaseContext"):
-    env = ctx.env_manager.ensure(elastic_spec(ctx))
+    """Shared elastic/fault env: 2P+4D, dynamic file discovery, flat
+    prefill, legacy fault config axes (PRIORITY + FIXED_WINDOW + BATCH, no
+    queueTimeout — Java default 1h; formerly harness.elastic_spec —
+    config semantics now expressed as a flexlb_cfg.ConfigOverride)."""
+    env = ctx.env_manager.ensure(
+        EnvSpec(
+            label=f"fault_{ctx.profile}",
+            n_prefill=2,
+            n_decode=4,
+            perf=fault_env_perf(),
+            master_profile=ctx.profile,
+            discovery="discovery_file",
+            config_overrides=ConfigOverride(
+                ordering="priority",
+                decision="fixed_window",
+                dispatcher="batch",
+                queue_timeout_ms=OMIT,
+            ),
+        )
+    )
     return env, ctx.engine_ops(env)
 
 
