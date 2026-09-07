@@ -230,7 +230,9 @@ class Gate(nn.Module):
         original_scores = scores
         image_mask = (
             input_ids.reshape(-1) >= self.vocab_size
-            if self.bias_vl is not None and input_ids is not None
+            if self.bias_vl is not None
+            and input_ids is not None
+            and getattr(self, "_has_visual_tokens", False)
             else None
         )
         if self.bias is not None:

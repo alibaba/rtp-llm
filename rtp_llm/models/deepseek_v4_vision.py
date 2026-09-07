@@ -10,6 +10,7 @@ import torch.nn.functional as F
 from PIL import Image, ImageOps
 from torch import nn
 
+from rtp_llm.models.multimodal.multimodal_mixin import BaseVitWeights
 from rtp_llm.utils.multimodal_util import get_bytes_io_from_url, vit_emb_cache_
 
 IMAGE_START, IMAGE_PAD, IMAGE, IMAGE_NEW_LINE, IMAGE_END = range(5)
@@ -400,21 +401,18 @@ class DeepSeekV4VisionEmbedding(nn.Module):
         return outputs
 
 
-class DeepSeekV4VisionWeights:
-    ckpt_prefix = ""
-    ft_prefix = "self.mm_part."
-
+class DeepSeekV4VisionWeights(BaseVitWeights):
     def __init__(self, vision_parts):
-        self.weight_names = []
-        for name, part in vision_parts.items():
-            if isinstance(part, nn.Module):
-                self.weight_names.extend(
-                    f"{name}.{weight_name}" for weight_name in part.state_dict()
-                )
-            elif isinstance(part, nn.Parameter):
-                self.weight_names.append(name)
-            else:
-                raise TypeError(f"unsupported vision weight owner: {type(part)}")
+        super().__init__(vision_parts, with_prefix=True)
+        self.weight_dtypes = {
+            f"vision.{name}.weight": torch.float32
+            for name, module in vision_parts["vision"].named_modules()
+            if isinstance(module, RMSNorm)
+        }
+
+    def _set_weight_prefix(self):
+        self._ckpt_prefix = ""
+        self._ft_prefix = "self.mm_part."
 
 
 __all__ = [

@@ -500,9 +500,7 @@ class DeepSeekV4Weight(DeepSeekV2Weight, BaseMultiModalWeightInfo):
                 data_type=torch.float32,
             ),
         ]
-        return self._get_vit_info(
-            ModelWeightInfo(layer_weights=layer_weights, weights=weights)
-        )
+        return ModelWeightInfo(layer_weights=layer_weights, weights=weights)
 
 
 class DeepSeekV4(DeepSeekV2, MultiModalMixin):
@@ -584,16 +582,6 @@ class DeepSeekV4(DeepSeekV2, MultiModalMixin):
                 "image_pad": self.mm_part.image_pad,
             }
         )
-
-    def _load_mm_weight(self, vit_params, ctype, device):
-        """Load ViT weights while preserving the reference FP32 norm state."""
-        MultiModalMixin._load_mm_weight(self, vit_params, ctype, device)
-
-        from rtp_llm.models.deepseek_v4_vision import RMSNorm
-
-        for module in self.mm_part.modules():
-            if isinstance(module, RMSNorm):
-                module.weight.data = module.weight.data.float()
 
     @staticmethod
     def _from_hf(config: ModelConfig, ckpt_path: str):  # noqa: C901  (acceptably long)

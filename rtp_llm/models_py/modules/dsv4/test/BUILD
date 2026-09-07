@@ -4,6 +4,12 @@ _DSV4_TEST_DEPS = [
 ]
 
 py_test(
+    name = "test_gate_fused",
+    srcs = ["test_gate_fused.py"],
+    deps = _DSV4_TEST_DEPS,
+)
+
+py_test(
     name = "test_cp_context_build",
     srcs = ["test_cp_context_build.py"],
     deps = _DSV4_TEST_DEPS,

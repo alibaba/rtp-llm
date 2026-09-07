@@ -12,9 +12,13 @@ from rtp_llm.models.deepseek_v4_vision import (
     Aligner,
     DeepSeekV4VisionEmbedding,
     DeepSeekV4VisionWeights,
-    RMSNorm,
     build_image_attention_spans,
     build_image_block,
+)
+from rtp_llm.models.multimodal.multimodal_mixin import (
+    BaseMultiModalWeightInfo,
+    BaseVitWeights,
+    MultiModalMixin,
 )
 from rtp_llm.utils.mm_process_engine import MMProcessEngine
 
@@ -55,7 +59,7 @@ class DeepSeekV4VisionTest(TestCase):
         self.assertTrue(torch.isfinite(output).all())
         self.assertEqual(sdpa.call_args.args[0].dim(), 4)
 
-    def test_loader_preserves_fp32_vision_norm_weights(self):
+    def test_loader_preserves_vision_weight_dtypes_and_values(self):
         vision_config = {
             "hidden_size": 8,
             "vision_n_layers": 1,
@@ -79,32 +83,98 @@ class DeepSeekV4VisionTest(TestCase):
             "image_pad": encoder.image_pad,
         }
         vit_weights = DeepSeekV4VisionWeights(parts)
-        loaded = {
-            name: torch.ones_like(
-                dict(encoder.named_parameters())[name], dtype=torch.bfloat16
-            )
-            for name in vit_weights.weight_names
+        parameters = dict(encoder.named_parameters())
+        self.assertEqual(set(vit_weights.weight_names), set(parameters))
+        self.assertEqual(len(vit_weights.weight_names), len(parameters))
+        norm_names = {
+            "vision.blocks.0.norm1.weight",
+            "vision.blocks.0.norm2.weight",
+            "vision.norm.weight",
+        }
+        declarations = BaseMultiModalWeightInfo(vit_weights)._get_vit_info(
+            SimpleNamespace(weights=[])
+        )
+        for weight in declarations.weights:
+            expected_dtype = torch.float32 if weight.name in norm_names else None
+            self.assertEqual(weight.data_type, expected_dtype)
+
+        for norm_source_dtype in (torch.float32, torch.bfloat16):
+            with self.subTest(norm_source_dtype=norm_source_dtype):
+                checkpoint = {
+                    name: torch.full_like(
+                        param,
+                        1.001,
+                        dtype=(
+                            norm_source_dtype if name in norm_names else torch.bfloat16
+                        ),
+                    )
+                    for name, param in parameters.items()
+                }
+                source = SimpleNamespace(
+                    load_tensor=lambda name, dtype: [checkpoint[name].to(dtype)]
+                )
+                loaded = {}
+                for weight in declarations.weights:
+                    loaded.update(
+                        weight._load_raw_tensor(
+                            source,
+                            None,
+                            "cpu",
+                            SimpleNamespace(compute_dtype=torch.bfloat16),
+                        )
+                    )
+                owner = SimpleNamespace(
+                    mm_part=encoder,
+                    weight=SimpleNamespace(get_global_weight_or_none=loaded.get),
+                )
+
+                DeepSeekV4._load_mm_weight(
+                    owner,
+                    SimpleNamespace(vit_weights=vit_weights),
+                    torch.bfloat16,
+                    "cpu",
+                )
+
+                for name, actual in encoder.named_parameters():
+                    expected_dtype = (
+                        torch.float32 if name in norm_names else torch.bfloat16
+                    )
+                    self.assertEqual(actual.dtype, expected_dtype, name)
+                    torch.testing.assert_close(
+                        actual,
+                        checkpoint[name].to(expected_dtype),
+                        rtol=0,
+                        atol=0,
+                        msg=name,
+                    )
+
+    def test_default_vit_weights_keep_compute_dtype(self):
+        encoder = torch.nn.Module()
+        encoder.proj = torch.nn.Linear(2, 2)
+        vit_weights = BaseVitWeights({"proj": encoder.proj}, with_prefix=True)
+        declarations = BaseMultiModalWeightInfo(vit_weights)._get_vit_info(
+            SimpleNamespace(weights=[])
+        )
+        self.assertTrue(
+            all(weight.data_type is None for weight in declarations.weights)
+        )
+        checkpoint = {
+            name: torch.full_like(param, 1.001, dtype=torch.float32)
+            for name, param in encoder.named_parameters()
         }
         owner = SimpleNamespace(
             mm_part=encoder,
-            weight=SimpleNamespace(
-                get_global_weight_or_none=lambda name: loaded.get(name)
-            ),
+            weight=SimpleNamespace(get_global_weight_or_none=checkpoint.get),
         )
 
-        DeepSeekV4._load_mm_weight(
-            owner,
-            SimpleNamespace(vit_weights=vit_weights),
-            torch.bfloat16,
-            "cpu",
+        MultiModalMixin._load_mm_weight(
+            owner, SimpleNamespace(vit_weights=vit_weights), torch.bfloat16, "cpu"
         )
 
-        norm_weights = [
-            module.weight for module in encoder.modules() if isinstance(module, RMSNorm)
-        ]
-        self.assertTrue(norm_weights)
-        self.assertTrue(all(weight.dtype == torch.float32 for weight in norm_weights))
-        self.assertEqual(encoder.vision.patch_embed.proj.weight.dtype, torch.bfloat16)
+        for name, actual in encoder.named_parameters():
+            torch.testing.assert_close(
+                actual, checkpoint[name].to(torch.bfloat16), rtol=0, atol=0
+            )
 
     def test_aligner_layout_matches_unfold(self):
         aligner = Aligner(
