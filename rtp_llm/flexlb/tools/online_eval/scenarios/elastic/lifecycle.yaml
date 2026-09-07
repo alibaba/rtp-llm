@@ -1,0 +1,613 @@
+schema_version: 1
+id: elastic_lifecycle
+description: Ordered scale-out, measured preference and rebalance, graceful removal
+  and three complete cycles.
+category: elastic
+profiles:
+- batch-window
+requires:
+- enqueue_batch
+legacy_case_ids:
+- elastic_add_flow
+- elastic_remove_flow
+- elastic_add_remove_cycle
+- elastic_rebalance
+- elastic_add_preference
+- elastic_kv_skew_shrink_hot
+- elastic_kv_skew_shrink_cold
+estimated_duration_s: 420
+environment:
+  backend: java_mock
+  n_prefill: 2
+  n_decode: 4
+  discovery: discovery_file
+  perf_preset: fault_env
+  config_overrides:
+    ordering: priority
+    queue_timeout_ms:
+      omit: true
+execution:
+  timeout_s: 1800
+  stage_timeout_s: 50
+  cleanup_timeout_s: 120
+variants:
+- id: normal
+  legacy_case_ids:
+  - elastic_add_flow
+  - elastic_remove_flow
+  - elastic_add_remove_cycle
+  - elastic_rebalance
+  - elastic_add_preference
+- id: strict
+  stage_overrides:
+    preference_shares:
+      max_share: 0.5
+  legacy_case_ids:
+  - elastic_add_flow
+  - elastic_remove_flow
+  - elastic_add_remove_cycle
+  - elastic_rebalance
+  - elastic_add_preference
+- id: kv_skew_hot
+  legacy_case_ids:
+  - elastic_kv_skew_shrink_hot
+  environment_overrides:
+    n_decode: 2
+  execution: &id001
+    timeout_s: 600
+    stage_timeout_s: 100
+    cleanup_timeout_s: 120
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: seed
+    action: elastic_seed
+    timeout_s: 120
+  - id: metrics
+    action: elastic_metrics_start
+  - id: flow
+    action: elastic_flow_start
+    params:
+      families:
+        $ref: stages.seed.output.families
+  - id: baseline
+    action: elastic_baseline
+    timeout_s: 30
+    params:
+      observation:
+        $ref: stages.metrics.output.observation
+      phase: baseline
+  - id: scale
+    action: elastic_scale
+    timeout_s: 75
+    params:
+      families:
+        $ref: stages.seed.output.families
+      victim: hot
+      drain_timeout_ms: 60000
+  - id: transient
+    action: elastic_window
+    timeout_s: 30
+    params:
+      observation:
+        $ref: stages.metrics.output.observation
+      baseline:
+        $ref: stages.baseline.output.window
+      scale:
+        $ref: stages.scale.output.scale
+      families:
+        $ref: stages.seed.output.families
+      victim: hot
+      phase: transient
+  - id: steady
+    action: elastic_window
+    timeout_s: 95
+    params:
+      observation:
+        $ref: stages.metrics.output.observation
+      baseline:
+        $ref: stages.baseline.output.window
+      scale:
+        $ref: stages.scale.output.scale
+      families:
+        $ref: stages.seed.output.families
+      victim: hot
+      phase: steady
+  - id: flow_stop
+    action: elastic_flow_stop
+    timeout_s: 95
+    params:
+      flow:
+        $ref: stages.flow.output.flow
+  - id: recovery
+    action: elastic_recovery
+    timeout_s: 90
+  - id: verdict
+    action: elastic_verdict
+    params:
+      baseline:
+        $ref: stages.baseline.output.window
+      transient:
+        $ref: stages.transient.output.window
+      steady:
+        $ref: stages.steady.output.window
+      scale:
+        $ref: stages.scale.output.scale
+      flow_result:
+        $ref: stages.flow_stop.output.result
+      recovery:
+        $ref: stages.recovery.output.requests
+      victim: hot
+  - id: teardown
+    action: teardown
+- id: kv_skew_cold
+  legacy_case_ids:
+  - elastic_kv_skew_shrink_cold
+  environment_overrides:
+    n_decode: 2
+  execution: *id001
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: seed
+    action: elastic_seed
+    timeout_s: 120
+  - id: metrics
+    action: elastic_metrics_start
+  - id: flow
+    action: elastic_flow_start
+    params:
+      families:
+        $ref: stages.seed.output.families
+  - id: baseline
+    action: elastic_baseline
+    timeout_s: 30
+    params:
+      observation:
+        $ref: stages.metrics.output.observation
+      phase: baseline
+  - id: scale
+    action: elastic_scale
+    timeout_s: 75
+    params:
+      families:
+        $ref: stages.seed.output.families
+      victim: cold
+      drain_timeout_ms: 60000
+  - id: transient
+    action: elastic_window
+    timeout_s: 30
+    params:
+      observation:
+        $ref: stages.metrics.output.observation
+      baseline:
+        $ref: stages.baseline.output.window
+      scale:
+        $ref: stages.scale.output.scale
+      families:
+        $ref: stages.seed.output.families
+      victim: cold
+      phase: transient
+  - id: steady
+    action: elastic_window
+    timeout_s: 95
+    params:
+      observation:
+        $ref: stages.metrics.output.observation
+      baseline:
+        $ref: stages.baseline.output.window
+      scale:
+        $ref: stages.scale.output.scale
+      families:
+        $ref: stages.seed.output.families
+      victim: cold
+      phase: steady
+  - id: flow_stop
+    action: elastic_flow_stop
+    timeout_s: 95
+    params:
+      flow:
+        $ref: stages.flow.output.flow
+  - id: recovery
+    action: elastic_recovery
+    timeout_s: 90
+  - id: verdict
+    action: elastic_verdict
+    params:
+      baseline:
+        $ref: stages.baseline.output.window
+      transient:
+        $ref: stages.transient.output.window
+      steady:
+        $ref: stages.steady.output.window
+      scale:
+        $ref: stages.scale.output.scale
+      flow_result:
+        $ref: stages.flow_stop.output.result
+      recovery:
+        $ref: stages.recovery.output.requests
+      victim: cold
+  - id: teardown
+    action: teardown
+stages:
+- id: setup
+  action: setup
+  timeout_s: 180
+- id: initial_topology
+  action: elastic_topology
+  params:
+    role: PREFILL
+    discovered: 2
+    alive: 2
+  timeout_s: 35
+- id: rebalance_baseline
+  action: elastic_batch
+  params:
+    count: 50
+  timeout_s: 240
+- id: preference_flow
+  action: elastic_cold_flow
+- id: ramp
+  action: elastic_pause
+  params:
+    seconds: 1
+- id: baseline_window
+  action: elastic_timeline
+  params:
+    engines:
+    - prefill-0
+    - prefill-1
+    offsets_s:
+    - 0
+    - 15
+  timeout_s: 25
+- id: add
+  action: elastic_add
+  params:
+    role: prefill
+- id: first_traffic
+  action: elastic_accepted_timed
+  params:
+    engine: &id002
+      $ref: stages.add.output.engine
+    baseline: 0
+    window_s: 10
+  timeout_s: 15
+- id: added_topology
+  action: elastic_topology
+  params:
+    role: PREFILL
+    discovered: 3
+    alive: 3
+    port:
+      $ref: stages.add.output.port
+    present: true
+  timeout_s: 35
+- id: post_window
+  action: elastic_timeline
+  params:
+    engines: &id003
+    - prefill-0
+    - prefill-1
+    - *id002
+    offsets_s:
+    - 0
+    - 5
+    - 10
+    - 17
+    - 24
+    - 31
+    - 38
+    - 45
+  timeout_s: 55
+- id: preference_flow_stop
+  action: elastic_flow_stop
+  params:
+    flow:
+      $ref: stages.preference_flow.output.flow
+  timeout_s: 45
+- id: add_availability
+  action: elastic_add_availability
+  params:
+    flow:
+      $ref: stages.preference_flow.output.flow
+    mutation:
+      $ref: stages.add.output.mutation
+    received_s:
+      $ref: stages.first_traffic.output.observed_s
+- id: preference_shares
+  action: elastic_share
+  params:
+    series:
+      $ref: stages.post_window.output.series
+    engine: *id002
+    max_share: 0.6
+    old_floor: 0.1
+    exclusive: false
+    require_new: false
+- id: preference_availability
+  action: elastic_flow_assert
+  params:
+    result:
+      $ref: stages.preference_flow_stop.output.result
+    min_success_rate: 0.9
+- id: rebalance_before
+  action: elastic_timeline
+  params:
+    engines: *id003
+    offsets_s:
+    - 0
+- id: rebalance_after_add
+  action: elastic_batch
+  params:
+    count: 50
+  timeout_s: 240
+- id: rebalance_after
+  action: elastic_timeline
+  params:
+    engines: *id003
+    offsets_s:
+    - 0
+- id: rebalance_share
+  action: elastic_share
+  params:
+    before:
+      $ref: stages.rebalance_before.output.last
+    after:
+      $ref: stages.rebalance_after.output.last
+    engine: *id002
+    max_share: 0.6
+    old_floor: 0
+    exclusive: true
+    require_new: true
+- id: remove_flow
+  action: elastic_cold_flow
+- id: remove_ramp
+  action: elastic_pause
+  params:
+    seconds: 0.5
+- id: remove
+  action: elastic_remove
+  params:
+    engine: *id002
+    drain_timeout_ms: 60000
+  timeout_s: 75
+- id: remove_hold
+  action: elastic_pause
+  params:
+    seconds: 3
+- id: remove_flow_stop
+  action: elastic_flow_stop
+  params:
+    flow:
+      $ref: stages.remove_flow.output.flow
+  timeout_s: 45
+- id: removed_topology
+  action: elastic_topology
+  params:
+    role: PREFILL
+    discovered: 2
+    alive: 2
+    port:
+      $ref: stages.add.output.port
+    present: false
+  timeout_s: 35
+- id: remove_accounting
+  action: elastic_accounting
+  timeout_s: 105
+- id: remove_zero_errors
+  action: elastic_flow_assert
+  params:
+    result:
+      $ref: stages.remove_flow_stop.output.result
+    min_success_rate: 1
+- id: cycle1_add
+  action: elastic_add
+  params:
+    role: prefill
+- id: cycle1_added_topology
+  action: elastic_topology
+  params:
+    role: PREFILL
+    discovered: 3
+    alive: 3
+    port:
+      $ref: stages.cycle1_add.output.port
+    present: true
+  timeout_s: 35
+- id: cycle1_flow
+  action: elastic_cold_flow
+- id: cycle1_traffic
+  action: elastic_accepted
+  params:
+    engine: &id004
+      $ref: stages.cycle1_add.output.engine
+    baseline: 0
+    window_s: 15
+  timeout_s: 20
+- id: cycle1_ramp
+  action: elastic_pause
+  params:
+    seconds: 0.5
+- id: cycle1_remove
+  action: elastic_remove
+  params:
+    engine: *id004
+    drain_timeout_ms: 60000
+  timeout_s: 75
+- id: cycle1_flow_stop
+  action: elastic_flow_stop
+  params:
+    flow:
+      $ref: stages.cycle1_flow.output.flow
+  timeout_s: 45
+- id: cycle1_removed_topology
+  action: elastic_topology
+  params:
+    role: PREFILL
+    discovered: 2
+    alive: 2
+    port:
+      $ref: stages.cycle1_add.output.port
+    present: false
+  timeout_s: 35
+- id: cycle1_zero_errors
+  action: elastic_flow_assert
+  params:
+    result:
+      $ref: stages.cycle1_flow_stop.output.result
+    min_success_rate: 1
+- id: cycle2_add
+  action: elastic_add
+  params:
+    role: prefill
+- id: cycle2_added_topology
+  action: elastic_topology
+  params:
+    role: PREFILL
+    discovered: 3
+    alive: 3
+    port:
+      $ref: stages.cycle2_add.output.port
+    present: true
+  timeout_s: 35
+- id: cycle2_flow
+  action: elastic_cold_flow
+- id: cycle2_traffic
+  action: elastic_accepted
+  params:
+    engine: &id005
+      $ref: stages.cycle2_add.output.engine
+    baseline: 0
+    window_s: 15
+  timeout_s: 20
+- id: cycle2_ramp
+  action: elastic_pause
+  params:
+    seconds: 0.5
+- id: cycle2_remove
+  action: elastic_remove
+  params:
+    engine: *id005
+    drain_timeout_ms: 60000
+  timeout_s: 75
+- id: cycle2_flow_stop
+  action: elastic_flow_stop
+  params:
+    flow:
+      $ref: stages.cycle2_flow.output.flow
+  timeout_s: 45
+- id: cycle2_removed_topology
+  action: elastic_topology
+  params:
+    role: PREFILL
+    discovered: 2
+    alive: 2
+    port:
+      $ref: stages.cycle2_add.output.port
+    present: false
+  timeout_s: 35
+- id: cycle2_zero_errors
+  action: elastic_flow_assert
+  params:
+    result:
+      $ref: stages.cycle2_flow_stop.output.result
+    min_success_rate: 1
+- id: cycle3_add
+  action: elastic_add
+  params:
+    role: prefill
+- id: cycle3_added_topology
+  action: elastic_topology
+  params:
+    role: PREFILL
+    discovered: 3
+    alive: 3
+    port:
+      $ref: stages.cycle3_add.output.port
+    present: true
+  timeout_s: 35
+- id: cycle3_flow
+  action: elastic_cold_flow
+- id: cycle3_traffic
+  action: elastic_accepted
+  params:
+    engine: &id006
+      $ref: stages.cycle3_add.output.engine
+    baseline: 0
+    window_s: 15
+  timeout_s: 20
+- id: cycle3_ramp
+  action: elastic_pause
+  params:
+    seconds: 0.5
+- id: cycle3_remove
+  action: elastic_remove
+  params:
+    engine: *id006
+    drain_timeout_ms: 60000
+  timeout_s: 75
+- id: cycle3_flow_stop
+  action: elastic_flow_stop
+  params:
+    flow:
+      $ref: stages.cycle3_flow.output.flow
+  timeout_s: 45
+- id: cycle3_removed_topology
+  action: elastic_topology
+  params:
+    role: PREFILL
+    discovered: 2
+    alive: 2
+    port:
+      $ref: stages.cycle3_add.output.port
+    present: false
+  timeout_s: 35
+- id: cycle3_zero_errors
+  action: elastic_flow_assert
+  params:
+    result:
+      $ref: stages.cycle3_flow_stop.output.result
+    min_success_rate: 1
+- id: recovery
+  action: request
+  params:
+    count: 1
+    input_len: 2048
+    output_len: 2
+    block_keys:
+    - 7
+    schedule_timeout_s: 30
+    stream_timeout_s: 30
+  timeout_s: 65
+- id: recovery_done
+  action: wait
+  params:
+    requests:
+      $ref: stages.recovery.output.requests
+  timeout_s: 65
+- id: recovery_completed
+  action: check
+  params:
+    actual:
+      $ref: stages.recovery_done.output.completed
+    op: eq
+    expected: true
+- id: recovery_no_errors
+  action: check
+  params:
+    actual:
+      $ref: stages.recovery_done.output.error_count
+    op: eq
+    expected: 0
+- id: final_topology
+  action: elastic_topology
+  params:
+    role: PREFILL
+    discovered: 2
+    alive: 2
+  timeout_s: 35
+- id: teardown
+  action: teardown

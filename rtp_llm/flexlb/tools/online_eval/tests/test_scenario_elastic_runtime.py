@@ -93,9 +93,11 @@ class ElasticRuntimeTests(unittest.TestCase):
         self.assertEqual(result["stages"][2]["checks"][0]["id"], "membership")
 
     def source(self):
-        return yaml.safe_load(
-            (ROOT / "scenarios/elastic/kv_skew_shrink.yaml").read_text()
-        )
+        source = yaml.safe_load((ROOT / "scenarios/elastic/lifecycle.yaml").read_text())
+        source["variants"] = [
+            v for v in source["variants"] if v["id"].startswith("kv_skew_")
+        ]
+        return source
 
     def run_pilot(self, rate=1.0, flow_failed=False):
         clock = Clock()
@@ -259,9 +261,10 @@ class ElasticRuntimeTests(unittest.TestCase):
 
     def test_baseline_cannot_bypass_guard_with_generic_window(self):
         source = self.source()
-        for stage in source["stages"]:
-            if stage["id"] == "baseline":
-                stage["action"] = "elastic_window"
+        for variant in source["variants"]:
+            for stage in variant["stages"]:
+                if stage["id"] == "baseline":
+                    stage["action"] = "elastic_window"
         with self.assertRaisesRegex(ValueError, "requires elastic_baseline"):
             compile_scenarios(
                 [("pilot.yaml", source)], handlers={h.name: h for h in e.HANDLERS}
@@ -269,9 +272,10 @@ class ElasticRuntimeTests(unittest.TestCase):
 
     def test_baseline_action_rejects_post_scale_phase(self):
         source = self.source()
-        for stage in source["stages"]:
-            if stage["id"] == "transient":
-                stage["action"] = "elastic_baseline"
+        for variant in source["variants"]:
+            for stage in variant["stages"]:
+                if stage["id"] == "transient":
+                    stage["action"] = "elastic_baseline"
         with self.assertRaisesRegex(ValueError, "requires phase baseline"):
             compile_scenarios(
                 [("pilot.yaml", source)], handlers={h.name: h for h in e.HANDLERS}
