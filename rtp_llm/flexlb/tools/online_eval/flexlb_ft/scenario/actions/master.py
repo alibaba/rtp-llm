@@ -279,6 +279,109 @@ HANDLERS = [
 ]
 
 
+def _owner_gate_validate(params, plan):
+    p = _target(_params(params, plan, {"target"}))
+    _layout(p, plan)
+    return p
+
+
+def _wrap_topology(ctx, params, deadline):
+    """Legacy instance_alive_full: alive >= configured count, no ledger gate."""
+    expected = {"PREFILL": ctx.env.spec.n_prefill, "DECODE": ctx.env.spec.n_decode}
+    samples = []
+    artifact = ctx.artifact_dir / f"master-topology-{len(ctx.outputs)}.json"
+    try:
+        while True:
+            deadline.check()
+            raw = _master_json(
+                ctx, params["target"], "/rtp_llm/master/info", deadline, True
+            )
+            summary = raw["worker_summary"]
+            counts = {role: summary[role]["alive"] for role in expected}
+            if any(type(v) is not int or v < 0 for v in counts.values()):
+                raise ValueError("invalid alive topology counts")
+            samples.append(dict(time_s=ctx.clock(), alive=counts, raw=raw))
+            if all(counts[role] >= required for role, required in expected.items()):
+                break
+            deadline.sleep(1.0)
+    finally:
+        artifact.write_text(json.dumps(samples, indent=2) + "\n")
+    return StageOutput(
+        {"snapshot": ctx.register_resource("snapshot", samples, historical=True)},
+        [CheckResult("topology", "PASS", actual=counts, expected=expected)],
+        [str(artifact)],
+    )
+
+
+def _wrap_inflight(ctx, params, deadline):
+    """Legacy all-zero owner ledger check, independent of topology readiness."""
+    samples = []
+    artifact = ctx.artifact_dir / f"master-inflight-{len(ctx.outputs)}.json"
+    try:
+        while True:
+            deadline.check()
+            raw = _master_json(
+                ctx, params["target"], "/rtp_llm/inflight_status", deadline
+            )
+            scheduler = raw["scheduler_inflight"]
+            if type(scheduler) is not int or scheduler < 0:
+                raise ValueError("invalid scheduler inflight count")
+            # Keep strict missing-owner validation, but preserve the legacy
+            # inflight_requests OR total_load fallback when BOTH fields exist.
+            loads = _endpoint_loads(raw)
+            decode = []
+            for row in raw["decode_endpoints"]:
+                for field in ("inflight_requests", "total_load"):
+                    if field in row and (type(row[field]) is not int or row[field] < 0):
+                        raise ValueError("invalid decode inflight count")
+                decode.append(
+                    row.get("inflight_requests", 0) or row.get("total_load", 0)
+                )
+            loads["decode"] = decode
+            samples.append(
+                dict(
+                    time_s=ctx.clock(),
+                    scheduler_inflight=scheduler,
+                    endpoint_loads=loads,
+                    raw=raw,
+                )
+            )
+            if scheduler == 0 and not any(
+                value for rows in loads.values() for value in rows
+            ):
+                break
+            deadline.sleep(0.5)
+    finally:
+        artifact.write_text(json.dumps(samples, indent=2) + "\n")
+    return StageOutput(
+        {"snapshot": ctx.register_resource("snapshot", samples, historical=True)},
+        [
+            CheckResult(
+                "inflight", "PASS", actual=samples[-1], expected="all owners zero"
+            )
+        ],
+        [str(artifact)],
+    )
+
+
+HANDLERS += [
+    StageHandler(
+        "master_topology_ready",
+        _owner_gate_validate,
+        _wrap_topology,
+        {"snapshot": "snapshot"},
+        checks=frozenset({"topology"}),
+    ),
+    StageHandler(
+        "master_inflight_clean",
+        _owner_gate_validate,
+        _wrap_inflight,
+        {"snapshot": "snapshot"},
+        checks=frozenset({"inflight"}),
+    ),
+]
+
+
 # HA traffic is an actual Java client subprocess. These stages do not call a
 # legacy case or its ambient HA skip gate.
 def _ha_validate(params, plan):
