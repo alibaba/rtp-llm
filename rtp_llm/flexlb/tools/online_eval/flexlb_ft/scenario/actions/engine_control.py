@@ -98,7 +98,7 @@ def _engines(snapshot, targets):
 
 
 def execute(ctx, params, deadline):
-    targets = ctx.resolve(params["targets"])
+    targets = [ctx.resolve(target) for target in params["targets"]]
     if any(
         not isinstance(name, str) or not ENGINE_NAME.fullmatch(name) for name in targets
     ) or len(set(targets)) != len(targets):
