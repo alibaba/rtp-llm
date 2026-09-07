@@ -10,6 +10,7 @@ import torch
 
 from rtp_llm.ops import KvCacheDataType, compute_ops
 from rtp_llm.ops.compute_ops import LayerKVCache
+from .mla_fp8_kernels import _FP8_DIAGNOSTICS, observe_fp8_input
 
 
 class MlaKVCacheWriteOp:
@@ -24,16 +25,24 @@ class MlaKVCacheWriteOp:
         self,
         kv_cache_dtype: KvCacheDataType,
         clear_page_on_boundary: bool = False,
+        fp8_compute: bool = False,
+        kv_scale: float = 1.0,
     ) -> None:
+        if fp8_compute and kv_cache_dtype != KvCacheDataType.FP8:
+            raise ValueError("FP8 MLA compute requires ordinary FP8 cache")
         self.kv_cache_type = (
             "fp8_ds_mla" if kv_cache_dtype == KvCacheDataType.FP8 else "auto"
         )
+        if fp8_compute:
+            self.kv_cache_type = "fp8"
         # Scale tensor is required for concat_and_cache_mla even in non-FP8 mode.
         # Initialize it directly on the device: torch.tensor(1.0, device="cuda")
         # stages the Python scalar through pageable host memory and synchronizes
         # the current stream on every transient MLA implementation build.
-        self.scale = torch.ones((), dtype=torch.float32, device="cuda")
+        self.scale = torch.full((), kv_scale, dtype=torch.float32, device="cuda")
         self.clear_page_on_boundary = clear_page_on_boundary
+        self.fp8_diagnostics = fp8_compute and _FP8_DIAGNOSTICS
+        self.kv_scale = kv_scale
 
     def forward(
         self,
@@ -52,6 +61,9 @@ class MlaKVCacheWriteOp:
             kv_cache: MLA KV cache with compressed layout
         """
         if kv_cache is not None:
+            if self.fp8_diagnostics:
+                observe_fp8_input(append_ckv_t, self.kv_scale, "cache_latent")
+                observe_fp8_input(key_pe, self.kv_scale, "cache_suffix")
             slot_mapping = (
                 slot_mapping_override
                 if slot_mapping_override is not None

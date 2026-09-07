@@ -14,6 +14,7 @@ namespace rtp_llm {
 struct MLAKVCacheSpec: public KVCacheSpec {
     uint32_t kv_lora_rank;
     uint32_t rope_head_dim;
+    bool fp8_plain = false;
 
     MLAKVCacheSpec() = default;
 
@@ -24,12 +25,15 @@ struct MLAKVCacheSpec: public KVCacheSpec {
         seq_size_per_block = static_cast<uint32_t>(attn_config.tokens_per_block);
         kv_lora_rank       = static_cast<uint32_t>(attn_config.kv_lora_rank);
         rope_head_dim      = static_cast<uint32_t>(attn_config.rope_head_dim);
+        fp8_plain          = attn_config.mla_fp8_compute;
+        RTP_LLM_CHECK_WITH_INFO(!fp8_plain || attn_config.kv_cache_dtype == KvCacheDataType::FP8,
+                                "dense FP8 MLA requires FP8 cache");
     }
 
     size_t block_size() const override {
         auto is_fp8      = (dtype == DataType::TYPE_FP8_E4M3 || dtype == DataType::TYPE_FP8_E8M0);
         auto single_size = local_head_num_kv * (kv_lora_rank + rope_head_dim);
-        if (is_fp8) {
+        if (is_fp8 && !fp8_plain) {
             // First 512 bytes: The "quantized NoPE" part, containing 512 float8_e4m3 values.
             // Next 16 bytes: Scale factors, containing 4 float32 values. The first float32 is the scale for the first
             // 128 float8_e4m3 values, the second for the next 128, and so on. Last 128 bytes: The "RoPE" part,
@@ -89,6 +93,7 @@ struct MLAKVCacheSpec: public KVCacheSpec {
         os << commonDebugString(indent);
         os << indent1 << "kv_lora_rank=" << kv_lora_rank << "\n";
         os << indent1 << "rope_head_dim=" << rope_head_dim << "\n";
+        os << indent1 << "fp8_plain=" << fp8_plain << "\n";
         return os.str();
     }
 };

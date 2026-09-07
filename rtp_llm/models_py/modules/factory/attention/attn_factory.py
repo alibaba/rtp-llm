@@ -55,6 +55,10 @@ def get_mla_impl(
         else DECODE_MLA_IMPS
     )
     for impl in mla_impls:
+        if attn_configs.mla_fp8_compute and impl.__name__ not in (
+            "TokenSpeedMlaDecodeImpl", "MlaFlashMLAPrefillImpl"
+        ):
+            continue
         # Check support before creating instance
         if not impl.support(attn_configs, attn_inputs):
             continue

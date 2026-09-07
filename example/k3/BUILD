@@ -75,3 +75,14 @@ py_binary(
     deps = ["//rtp_llm:rtp_llm_lib"],
     data = ["//:rtp_compute_ops", "//:th_transformer", "//:th_transformer_config"],
 )
+
+py_library(
+    name = "kimi_k3_logits_compare_lib",
+    srcs = ["kimi_k3_logits_compare.py"],
+)
+
+py_test(
+    name = "kimi_k3_logits_compare_test",
+    srcs = ["kimi_k3_logits_compare_test.py"],
+    deps = [":kimi_k3_logits_compare_lib"],
+)

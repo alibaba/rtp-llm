@@ -53,6 +53,12 @@ struct AttentionConfigs {
     // forward. Zero keeps the original unbounded full path.
     size_t mla_prefill_expanded_kv_budget_bytes = 0;
 
+    // Dense FP8 MLA uses ordinary E4M3 latent+RoPE (576 B for K3), not
+    // the existing fp8_ds_mla mixed layout. Scales are fixed dequant factors.
+    bool  mla_fp8_compute  = false;
+    float mla_fp8_q_scale  = 1.0f;
+    float mla_fp8_kv_scale = 1.0f;
+
     // softmax config
     float           softmax_extra_scale = 1.0f;
     KvCacheDataType kv_cache_dtype      = KvCacheDataType::BASE;

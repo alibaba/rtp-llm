@@ -347,6 +347,10 @@ message GenerateRequestPB {
     int32 prefill_cache_dtype = 17;
     int32 prefill_ssm_state_dtype = 18;
     int32 prefill_conv_state_dtype = 19;
+    // 0 preserves legacy layouts; 1 is dense E4M3 latent+RoPE with fixed scales.
+    int32 prefill_mla_fp8_format = 20;
+    float prefill_mla_fp8_q_scale = 21;
+    float prefill_mla_fp8_kv_scale = 22;
 }
 
 // in tp case, decode master broadcast to decode worker

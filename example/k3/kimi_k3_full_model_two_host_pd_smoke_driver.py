@@ -202,6 +202,11 @@ def forwarded_optional_environment(role: str) -> dict[str, str]:
         "RTP_LLM_SKIP_BUILD",
         "KIMI_K3_ATTENTION_QUANTIZATION",
         "KIMI_K3_FP8_COLLECTIVE_GEMM",
+        "KIMI_K3_MLA_FP8",
+        "KIMI_K3_MLA_FP8_Q_SCALE",
+        "KIMI_K3_MLA_FP8_KV_SCALE",
+        "KIMI_K3_MLA_FP8_DIAGNOSTICS",
+        "RTP_LLM_MTP_ACCEPTANCE_DIAGNOSTICS",
         "LOAD_METHOD",
     )
     for name in names:

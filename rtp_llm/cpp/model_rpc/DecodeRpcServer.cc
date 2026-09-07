@@ -123,6 +123,20 @@ void DecodeRpcServer::prepareGenerateContext(DecodeGenerateContext& decode_conte
     decode_context.prefill_conv_state_dtype          = allocate_request.prefill_conv_state_dtype();
 
     const auto& cache_config = engine_->resourceContext().cache_manager->cacheConfig();
+    const auto& mla_config = maga_init_params_.model_config_.attn_config;
+    // A peer configuration mismatch is a request error, not a process invariant.
+    // In particular, FT_CORE_DUMP_ON_EXCEPTION must not turn it into an abort.
+    GRPC_RET_IF_ERROR(decode_context,
+                      allocate_request.prefill_mla_fp8_format() == (mla_config.mla_fp8_compute ? 1 : 0),
+                      grpc::StatusCode::INVALID_ARGUMENT,
+                      "PD MLA FP8 cache format mismatch");
+    if (mla_config.mla_fp8_compute) {
+        GRPC_RET_IF_ERROR(decode_context,
+                          allocate_request.prefill_mla_fp8_q_scale() == mla_config.mla_fp8_q_scale
+                              && allocate_request.prefill_mla_fp8_kv_scale() == mla_config.mla_fp8_kv_scale,
+                          grpc::StatusCode::INVALID_ARGUMENT,
+                          "PD MLA FP8 fixed scale mismatch");
+    }
     if (cache_config.use_mla && hasSegmentedLinearCacheGroup(cache_config)) {
         constexpr uint32_t kK3TotalLinearHeads = 96;
         RTP_LLM_CHECK_WITH_INFO(decode_context.prefill_seq_size_per_block > 0
