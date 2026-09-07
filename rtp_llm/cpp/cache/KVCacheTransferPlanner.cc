@@ -40,6 +40,21 @@ std::vector<size_t> blockPositionsForCacheTransfer(size_t block_num,
     return block_pos_list;
 }
 
+std::vector<size_t> blockPositionsForCacheLoad(size_t destination_block_num,
+                                               size_t source_block_num,
+                                               size_t reuse_block_size,
+                                               bool   use_hybrid,
+                                               bool   transfer_tail_blocks,
+                                               size_t tail_block_count,
+                                               bool   hybrid_full_from_begin) {
+    return blockPositionsForCacheTransfer(std::min(destination_block_num, source_block_num),
+                                          reuse_block_size,
+                                          use_hybrid,
+                                          transfer_tail_blocks,
+                                          tail_block_count,
+                                          hybrid_full_from_begin);
+}
+
 std::string layerTagCacheTransferKey(size_t request_id, size_t layer_id, const std::string& tag) {
     auto key = std::to_string(request_id) + "-" + std::to_string(layer_id);
     if (!tag.empty() && tag != "default") {

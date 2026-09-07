@@ -931,19 +931,24 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
         return group_tokens > 0
                && group_tokens == cfg.seq_size_per_block * static_cast<size_t>(load_context.prefill_cp_size);
     };
-    auto blockPositionsForLoad =
-        [&](size_t block_num, const CacheConfig& cfg, bool cfg_use_hybrid, CacheGroupType group_type, size_t gid) {
+    auto blockPositionsForLoad = [&](size_t             block_num,
+                                     size_t             source_block_num,
+                                     const CacheConfig& cfg,
+                                     bool               cfg_use_hybrid,
+                                     CacheGroupType     group_type,
+                                     size_t             gid) {
             const auto   policy = cfg.policyForGroup(gid);
             const size_t tail_block_count =
                 policy.active_tail_blocks > 0 ? static_cast<size_t>(policy.active_tail_blocks) : 0;
             const bool transfer_tail_blocks = tail_block_count > 0;
             if (!is_page_level_rr || !groupUsesCpSlice(cfg, gid) || load_context.prefill_cp_size <= 1) {
-                return blockPositionsForCacheTransfer(block_num,
-                                                      load_context.reuse_block_size,
-                                                      cfg_use_hybrid,
-                                                      transfer_tail_blocks,
-                                                      tail_block_count,
-                                                      /*hybrid_full_from_begin=*/true);
+                return blockPositionsForCacheLoad(block_num,
+                                                  source_block_num,
+                                                  load_context.reuse_block_size,
+                                                  cfg_use_hybrid,
+                                                  transfer_tail_blocks,
+                                                  tail_block_count,
+                                                  /*hybrid_full_from_begin=*/true);
             }
             if (isCompactFixedBlockTable(cfg, gid)) {
                 return blockPositionsForCacheTransfer(block_num,
@@ -1011,7 +1016,8 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                 size_t      model_id  = maga_init_params_.model_id;
 
                 CacheGroupType group_type = groupType(cache_config, use_hybrid, gid);
-                auto block_pos_list       = blockPositionsForLoad(block_num, cache_config, use_hybrid, group_type, gid);
+                auto block_pos_list = blockPositionsForLoad(
+                    block_num, load_context.cache_keys.size(), cache_config, use_hybrid, group_type, gid);
 
                 if (!shouldLoadGroupFromPeer(cache_config, group_type, gid, i)) {
                     continue;
@@ -1145,8 +1151,12 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                             size_t      model_id  = module_plan.cache_model_id;
 
                             CacheGroupType group_type = groupType(mtp_cache_cfg, mtp_use_hybrid, gid);
-                            auto           block_pos_list =
-                                blockPositionsForLoad(block_num, mtp_cache_cfg, mtp_use_hybrid, group_type, gid);
+                            auto block_pos_list = blockPositionsForLoad(block_num,
+                                                                       load_context.cache_keys.size(),
+                                                                       mtp_cache_cfg,
+                                                                       mtp_use_hybrid,
+                                                                       group_type,
+                                                                       gid);
 
                             if (!shouldLoadGroupFromPeer(mtp_cache_cfg, group_type, gid, i)) {
                                 continue;
