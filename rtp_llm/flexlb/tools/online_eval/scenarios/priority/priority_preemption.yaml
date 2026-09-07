@@ -9,6 +9,7 @@ legacy_case_ids:
 - atpm_preempt_prefill_queued
 - atpm_timeout_attribution
 - atpm_preemption_disabled_zero_eviction
+- atpm_comparator_frozen_weak
 environment:
   backend: java_mock
   n_prefill: 1
@@ -764,6 +765,244 @@ variants:
   environment_overrides:
     config_overrides:
       queue_timeout_ms: 8000
+- id: comparator_frozen_weak
+  legacy_case_ids:
+  - atpm_comparator_frozen_weak
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: fleet
+    action: priority_fleet
+  - id: slow
+    action: engine_control
+    params:
+      operation: set_perf
+      targets:
+      - $ref: stages.fleet.output.prefill
+      perf:
+        prefill_fixed_ms: 3000
+  - id: sync
+    action: balance_pause
+    params:
+      seconds: 1.5
+  - id: r1_placeholder
+    action: priority_start
+    timeout_s: 5
+    params:
+      gap_s: 0
+      requests:
+      - tag: placeholder
+        priority: 30
+        input_len: 2048
+        output_len: 2
+  - id: r1_placeholder_settled
+    action: preemption_settled
+    timeout_s: 90
+    params:
+      requests:
+        $ref: stages.r1_placeholder.output.requests
+  - id: r1_placeholder_admitted
+    action: check
+    params:
+      actual:
+        $ref: stages.r1_placeholder_settled.output.admitted
+      op: eq
+      expected: true
+  - id: r1_placeholder_pending
+    action: preemption_pending
+    timeout_s: 6
+    params:
+      target:
+        $ref: stages.fleet.output.prefill
+  - id: r1_wave
+    action: priority_start
+    timeout_s: 15
+    params:
+      gap_s: 0.15
+      requests:
+      - tag: peer0
+        priority: 30
+        input_len: 2048
+        output_len: 2
+      - tag: peer1
+        priority: 30
+        input_len: 2048
+        output_len: 2
+      - tag: peer2
+        priority: 70
+        input_len: 2048
+        output_len: 2
+      - tag: peer3
+        priority: 70
+        input_len: 2048
+        output_len: 2
+      - tag: peer4
+        priority: 70
+        input_len: 2048
+        output_len: 2
+  - id: r1_wave_settled
+    action: preemption_settled
+    timeout_s: 90
+    params:
+      requests:
+        $ref: stages.r1_wave.output.requests
+  - id: r1_placeholder_drain
+    action: preemption_wait
+    timeout_s: 35
+    params:
+      requests:
+        $ref: stages.r1_placeholder.output.requests
+  - id: r1_wave_drain
+    action: preemption_wait
+    timeout_s: 175
+    params:
+      requests:
+        $ref: stages.r1_wave.output.requests
+  - id: r1_same_priority
+    action: preemption_comparator_half
+    params:
+      placeholder:
+        $ref: stages.r1_placeholder.output.requests
+      wave:
+        $ref: stages.r1_wave.output.requests
+      ordering: priority
+  - id: r1_master_clean
+    action: balance_clean
+    timeout_s: 30
+  - id: fifo_environment
+    action: environment_reconfigure
+    timeout_s: 300
+    params:
+      config_overrides:
+        ordering: fifo
+        decision: single
+        dispatcher: non_batch
+        queue_timeout_ms:
+          omit: true
+        max_inflight_requests_per_worker: 1
+        max_waiting_requests_per_prefill_worker: 8
+  - id: fifo_fleet
+    action: priority_fleet
+  - id: fifo_slow
+    action: engine_control
+    params:
+      operation: set_perf
+      targets:
+      - $ref: stages.fifo_fleet.output.prefill
+      perf:
+        prefill_fixed_ms: 3000
+  - id: fifo_sync
+    action: balance_pause
+    params:
+      seconds: 1.5
+  - id: r2_placeholder
+    action: priority_start
+    timeout_s: 5
+    params:
+      gap_s: 0
+      requests:
+      - tag: placeholder
+        priority: 30
+        input_len: 2048
+        output_len: 2
+  - id: r2_placeholder_settled
+    action: preemption_settled
+    timeout_s: 90
+    params:
+      requests:
+        $ref: stages.r2_placeholder.output.requests
+  - id: r2_placeholder_admitted
+    action: check
+    params:
+      actual:
+        $ref: stages.r2_placeholder_settled.output.admitted
+      op: eq
+      expected: true
+  - id: r2_placeholder_pending
+    action: preemption_pending
+    timeout_s: 6
+    params:
+      target:
+        $ref: stages.fifo_fleet.output.prefill
+  - id: r2_wave
+    action: priority_start
+    timeout_s: 15
+    params:
+      gap_s: 0.15
+      requests:
+      - tag: peer0
+        priority: 30
+        input_len: 2048
+        output_len: 2
+      - tag: peer1
+        priority: 30
+        input_len: 2048
+        output_len: 2
+      - tag: peer2
+        priority: 70
+        input_len: 2048
+        output_len: 2
+      - tag: peer3
+        priority: 70
+        input_len: 2048
+        output_len: 2
+      - tag: peer4
+        priority: 70
+        input_len: 2048
+        output_len: 2
+  - id: r2_wave_settled
+    action: preemption_settled
+    timeout_s: 90
+    params:
+      requests:
+        $ref: stages.r2_wave.output.requests
+  - id: r2_placeholder_drain
+    action: preemption_wait
+    timeout_s: 35
+    params:
+      requests:
+        $ref: stages.r2_placeholder.output.requests
+  - id: r2_wave_drain
+    action: preemption_wait
+    timeout_s: 175
+    params:
+      requests:
+        $ref: stages.r2_wave.output.requests
+  - id: r2_same_priority
+    action: preemption_comparator_half
+    params:
+      placeholder:
+        $ref: stages.r2_placeholder.output.requests
+      wave:
+        $ref: stages.r2_wave.output.requests
+      ordering: fifo
+  - id: r2_master_clean
+    action: balance_clean
+    timeout_s: 30
+  - id: comparator_verdict
+    action: preemption_comparator_pair
+    params:
+      priority_half:
+        $ref: stages.r1_same_priority.output.passed
+      fifo_half:
+        $ref: stages.r2_same_priority.output.passed
+  - id: restore
+    action: engine_control
+    params:
+      operation: set_perf
+      targets:
+      - $ref: stages.fifo_fleet.output.prefill
+      perf:
+        prefill_fixed_ms: 100
+  - id: teardown
+    action: teardown
+    timeout_s: 120
+  environment_overrides:
+    config_overrides:
+      preemption:
+        allowed_victim_stages:
+        - PREFILL_QUEUED
 stages:
 - id: setup
   action: setup

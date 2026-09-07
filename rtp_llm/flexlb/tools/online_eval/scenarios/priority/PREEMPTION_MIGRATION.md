@@ -1,7 +1,7 @@
 # Priority preemption migration
 
 Owner: agent4. Source baseline: `295af797bd7ed3a842c9cad42b5722c64cd24c9a`.
-This checkpoint implements four complete candidate programs out of fourteen old
+This checkpoint implements five complete candidate programs out of fourteen old
 contracts. No old case is called or deleted. Independent review, default catalog
 integration and actual Java execution remain pending.
 
@@ -55,10 +55,9 @@ observed order and terminal outcomes are saved as artifacts.
   restores its original blocking dependency. An explicit zero submission gap
   avoids inserting a .15s pause after the standalone placeholder.
 
-## Pending contracts (10)
+## Pending contracts (9)
 
 - atpm_preempt_decode_engine_owned
-- atpm_comparator_frozen_weak
 - atpm_error_code_family
 - atpm_config_strict_reject
 - atpm_decode_reservation_priority
@@ -229,3 +228,35 @@ fails it, literal trailer2 retains2, CANCELLED is not an engine victim, missing
 metadata is ERROR, and DEADLINE_EXCEEDED is TIMEOUT; an in-band policy test
 retains2-to8429 mapping. These are local external-IO fixtures, not Java runs or
 acceptance of the ten outstanding victim/error-family contracts.
+
+
+## Fifth candidate: comparator_frozen_weak
+
+The old atpm_comparator_frozen_weak runs two independently constructed
+environments: Q2 priority with PREFILL_QUEUED preemption and queue60000, then
+F1 FIFO without preemption and with queueTimeoutMs omitted. Both keep 1P/4D,
+SINGLE/NON_BATCH, cap1/waiting8 and default perf. The full resolved configs
+are compared to the old _q2_spec and _f1_spec, not just selected fields.
+
+Each half sets P3000 and waits1.5, admits ph30 and observes P pending within6s,
+then submits five2048/2 peers [30,30,70,70,70] with .15s gaps. Schedule90,
+Generate120, ph35, five fresh35 drains and clean30 are preserved. Priority
+dispatch is submit indices [0,2,3,4,1]; FIFO is [0,1,2,3,4], using actual
+Prefill running_ms with settlement-rank/ID ties. All twelve consumers and
+both placeholders must succeed. PR9/P6 conjoin both half verdicts and the
+preceding mandatory per-half clean gates. A failing first half prevents
+second-half diagnostics, unlike the old accumulating report.
+
+Shared environment_reconfigure from fixed
+7a1d3aa2f91ba1a3cd46c7b18c4b792ff99608c3 performs complete override replacement
+and owned cleanup before the F1 setup. Its new epoch invalidates live handles;
+the program reacquires the fleet and retains only historical scalar verdicts.
+No runtime hot reload or comparator mutation is claimed: this is the old weak
+construction-time contrast. The environment transition has a 300s stage
+envelope; business polling and consumer budgets are unchanged.
+
+Complete-program fixtures cover both configs, twelve consumer completions,
+FIFO inversion failing the second half, and rejected first placeholder
+preventing the second environment. Fixed7a1 plus these owned files is the
+verification composition; this branch alone lacks the shared environment
+registration/backend. These tests are not Java execution acceptance.

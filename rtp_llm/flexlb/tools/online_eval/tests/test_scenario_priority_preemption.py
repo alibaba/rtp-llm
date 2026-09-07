@@ -28,11 +28,15 @@ class Backend:
         expiry=False,
         reason=0,
         terminals=None,
+        comparator=False,
+        invert_fifo=False,
     ):
         self.ops = Ops(batch=False)
         self.ops.master_http_port = 1
         self.reverse, self.missing = reverse, missing
         self.queued = queued
+        self.comparator, self.invert_fifo = comparator, invert_fifo
+        self.environments = []
         original_future = self.ops.future
 
         def future(req, timeout, metadata=None):
@@ -64,6 +68,7 @@ class Backend:
         self.ops.build_schedule_request = build
 
     def setup(self, ctx, environment, deadline):
+        self.environments.append(environment)
         return NS(), self.ops
 
     def teardown(self, ctx, deadline):
@@ -108,6 +113,13 @@ class Backend:
             lifecycle = {
                 str(rid): dict(running_ms=i * 4000) for i, rid in enumerate(order)
             }
+        if self.comparator:
+            order = [1, 2, 4, 5, 6, 3, 7, 8, 9, 10, 11, 12]
+            if self.invert_fifo:
+                order[8], order[9] = order[9], order[8]
+            lifecycle = {
+                str(rid): dict(running_ms=i * 3000) for i, rid in enumerate(order)
+            }
         return {
             "engines": [
                 dict(
@@ -132,7 +144,7 @@ class PreemptionPrograms(unittest.TestCase):
             load_scenarios(ROOT / "scenarios/priority/priority_preemption.yaml"),
             handlers=registry,
         )
-        self.assertEqual(4, len(plans))
+        self.assertEqual(5, len(plans))
         return next(p for p in plans if p["variant_id"] == variant), registry
 
     def run_program(self, variant="same_priority_zero_eviction", **kwargs):
@@ -366,3 +378,50 @@ class PreemptionPrograms(unittest.TestCase):
         self.assertEqual(expected, plan["environment"]["resolved_config"])
         self.assertNotIn("preemption", expected["scheduler"]["ordering"])
         self.assertEqual(8000, expected["scheduler"]["queueTimeoutMs"])
+
+    def test_comparator_rebuilds_q2_then_f1_and_drains_twelve_consumers(self):
+        from flexlb_ft.harness import render_env
+        from flexlb_ft.support.priority import _f1_spec, _q2_spec
+
+        result, cohorts, backend = self.run_program(
+            variant="comparator_frozen_weak", comparator=True
+        )
+        self.assertEqual("PASS", result["status"], result)
+        self.assertEqual(12, backend.ops.generate_count)
+        self.assertEqual([1, 1, 5, 5], sorted(map(len, cohorts)))
+        self.assertEqual(2, len(backend.environments))
+        for environment, factory in zip(backend.environments, (_q2_spec, _f1_spec)):
+            spec = factory(NS(profile="single-nonbatch"))
+            self.assertEqual(
+                json.loads(render_env(spec.master_profile, spec.config_overrides)),
+                environment["resolved_config"],
+            )
+        self.assertTrue(
+            all(r["consumer_completion_verified"] for wave in cohorts for r in wave)
+        )
+        self.assertTrue(all(c["status"] == "PASS" for c in result["cleanup"]))
+        plan, _ = self.plan("comparator_frozen_weak")
+        stages = {s["id"]: s for s in plan["stages"]}
+        order = list(stages)
+        self.assertLess(order.index("r1_master_clean"), order.index("fifo_environment"))
+        self.assertLess(order.index("fifo_environment"), order.index("fifo_slow"))
+        self.assertEqual(175, stages["r1_wave_drain"]["timeout_s"])
+        self.assertEqual(175, stages["r2_wave_drain"]["timeout_s"])
+
+    def test_comparator_fifo_inversion_fails_second_half(self):
+        result, _, backend = self.run_program(
+            variant="comparator_frozen_weak", comparator=True, invert_fifo=True
+        )
+        self.assertEqual("FAIL", result["status"])
+        self.assertEqual(12, backend.ops.generate_count)
+        stages = {s["id"]: s for s in result["stages"]}
+        self.assertEqual("PASS", stages["r1_same_priority"]["status"])
+        self.assertEqual("FAIL", stages["r2_same_priority"]["status"])
+
+    def test_comparator_rejected_first_placeholder_never_rebuilds_environment(self):
+        result, _, backend = self.run_program(
+            variant="comparator_frozen_weak", comparator=True, rejected=1
+        )
+        self.assertEqual("FAIL", result["status"])
+        self.assertEqual(1, len(backend.environments))
+        self.assertEqual(1, len(backend.shapes))
