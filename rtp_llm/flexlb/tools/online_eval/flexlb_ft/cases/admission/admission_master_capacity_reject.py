@@ -16,15 +16,9 @@ from ...support.admission import (
 
 @case(
     "admission_master_capacity_reject",
+    profiles=["batch-window", "single-batch"],
+    source="gap G11: master outstanding-capacity admission — typed QUEUE_FULL (8502 TooManyRequests) fast reject.  F6 verdict overturned: the reject IS typed (dedicated code + status_name + detail); the legacy assertion family ('outstanding'/'exhaust'/'resource'/'8431') matched zero tokens of the actual response payload.",
     category="admission",
-    profiles=["batch-window"],
-    source=(
-        "gap G11: master outstanding-capacity admission — typed QUEUE_FULL "
-        "(8502 TooManyRequests) fast reject.  F6 verdict overturned: the "
-        "reject IS typed (dedicated code + status_name + detail); the legacy "
-        "assertion family ('outstanding'/'exhaust'/'resource'/'8431') "
-        "matched zero tokens of the actual response payload."
-    ),
 )
 def admission_master_capacity(ctx: CaseContext):
     """Master-side unified admission: with
@@ -44,12 +38,13 @@ def admission_master_capacity(ctx: CaseContext):
     the outstanding permit).  The master behaviour was always typed; the
     defect was the test's assertion family.
 
-    Profile semantics (v2): the outstanding-capacity permit is
-    taken on the master submit path for every delivery mode, but
-    _capacity_spec pins the legacy fault axes (PRIORITY + FIXED_WINDOW +
-    BATCH) via FLEXLB_CONFIG — re-running under another --profile would
-    execute the identical configuration, so the declaration stays
-    batch-window (label honesty + regression efficiency).
+    Profile semantics: the outstanding-capacity permit is taken on
+    the master submit path for every delivery mode.  _capacity_spec is
+    profile-aware (PRIORITY ordering + maxOutstanding=2 on the ctx
+    profile's own axes), so the single-batch lane exercises the same
+    typed 8502 fast-reject contract under the SINGLE decision axis
+    (audit 2026-09, case 3 sb ⚠️ → covered; the sn/wn lanes stay
+    later-phase optional work).
     """
     env = ctx.env_manager.ensure(_capacity_spec(ctx))
     ops = ctx.engine_ops(env)
@@ -75,8 +70,15 @@ def admission_master_capacity(ctx: CaseContext):
                     str(resp.error_message),
                     (time.monotonic() - t0),
                 )
-            # batch-window profile: BATCH dispatch -> FetchResponse stream.
-            handle = ops.start_stream(resp, rid)
+            # Stream open per response: BATCH dispatch -> FetchResponse;
+            # NON_BATCH -> GenerateStreamCall with an input_pb rebuilt from
+            # the SAME shape (start_stream's default-shape fallback would
+            # desync the engine from the master's schedule — the
+            # _fire_tracked pattern).
+            input_pb = None
+            if not resp.enqueued_by_master:
+                input_pb = ops.build_generate_input(rid, input_len=512, output_len=2)
+            handle = ops.start_stream(resp, rid, input_pb=input_pb)
             handle.wait_end(15.0)
             snap = handle.snap
             if snap.error or not snap.completed:
@@ -113,7 +115,7 @@ def admission_master_capacity(ctx: CaseContext):
         _, err5 = ops.run_one_request(
             rid5, input_len=512, output_len=2, stream_timeout_s=STREAM_TIMEOUT_S
         )
-        # follow-up fix: the recovery verdict used to swallow err5 —
+        # task #107 fix (#20): the recovery verdict used to swallow err5 —
         # a failed recovery had NO visible cause.  Surface the raw error
         # (resp code + message) inside the detail so the failure is
         # diagnosable from the report alone.

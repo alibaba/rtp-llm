@@ -12,10 +12,26 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from flexlb_cfg import render_env
 from flexlb_ft.cases import elastic
 from flexlb_ft.harness import _elastic_env
-from flexlb_ft.support import admission, engine_fault, master, status
+from flexlb_ft.support import admission, engine_fault, master, priority, status
 
 
 class CaseProfileSpecsTest(unittest.TestCase):
+    def test_live_preemption_keeps_profile_specific_window(self):
+        for factory in (priority._pq_live_spec, priority._dr_live_spec):
+            for profile in ("batch-window", "single-batch"):
+                spec = factory(SimpleNamespace(profile=profile))
+                config = json.loads(
+                    render_env(spec.master_profile, spec.config_overrides)
+                )
+                decision = config["scheduler"]["decision"]
+                self.assertEqual(config["dispatcher"]["type"], "BATCH")
+                if profile == "batch-window":
+                    self.assertEqual(decision["type"], "FIXED_WINDOW")
+                    self.assertEqual(decision["maxRequests"], 32)
+                    self.assertEqual(decision["maxCollectionWaitMs"], 400)
+                else:
+                    self.assertEqual(decision, {"type": "SINGLE"})
+
     AXES = {
         "batch-window": ("FIXED_WINDOW", "BATCH"),
         "single-nonbatch": ("SINGLE", "NON_BATCH"),

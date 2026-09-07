@@ -654,6 +654,8 @@ _MONITOR_AUTO_TPM_ENV = {"FLEXLB_MONITOR_METRIC_WHITELIST": "flexlb_auto_tpm"}
 def _prio_config(
     *,
     ordering: str = "priority",
+    decision: str = "single",
+    max_collection_wait_ms: Optional[int] = None,
     preemption: Optional[dict] = None,
     default_priority: Optional[int] = None,
     queue_timeout_ms: Optional[int] = None,
@@ -666,6 +668,16 @@ def _prio_config(
     """Unified priority-family override (PRIORITY + SINGLE + NON_BATCH
     base; dispatcher="batch" variant for the live-eviction family, 2026-09)
     layered on the ctx profile's base document.
+
+    ``decision`` (tier2 wave2, audit 2026-09 candidates #16/#17): the
+    decision axis stays SINGLE by default — the historical family base
+    every choreography below was calibrated on.  The live-eviction
+    lanes pass a profile-derived decision so the batch-window lane runs
+    the production-isomorphic FIXED_WINDOW shape
+    (maxRequests=32/maxCollectionWaitMs=400 — master_fixed_window.json);
+    ``max_collection_wait_ms`` only takes effect under FIXED_WINDOW
+    (build_flexlb_config ignores it under SINGLE, so passing it for the
+    single-decision lane is harmless but pointless).
 
     Implementation-period additions over the design's config sketch
     (all verified against the Java code):
@@ -695,7 +707,8 @@ def _prio_config(
     """
     return ConfigOverride(
         ordering=ordering,
-        decision="single",
+        decision=decision,
+        max_collection_wait_ms=max_collection_wait_ms,
         dispatcher=dispatcher,
         default_priority=default_priority,
         preemption=preemption,
@@ -1257,11 +1270,22 @@ def _pq_live_spec(ctx: CaseContext) -> EnvSpec:
     """ENV for atpm_preempt_prefill_queued_live: BATCH dispatcher +
     PREFILL_QUEUED-only preemption + maxWaiting=2, so the third submitter
     (the P70 incoming) overflows the queue into AdmissionFallback's
-    queue-replacement path (1P+4D)."""
+    queue-replacement path (1P+4D).
+
+    Decision axis (tier2 wave2, audit #16): lane-derived — single-batch
+    keeps the original SINGLE live family; the batch-window lane runs
+    FIXED_WINDOW + BATCH + PRIORITY with the production window
+    (maxRequests=32 / maxCollectionWaitMs=400, master_fixed_window.json),
+    the production-isomorphic combination whose live eviction chain had
+    zero coverage (every case's decision was hard-coded single).
+    """
+    prod_shape = ctx.profile == "batch-window"
     return _spec(
         ctx,
         "atpm_pq_live",
         config_overrides=_prio_config(
+            decision=("fixed_window" if prod_shape else "single"),
+            max_collection_wait_ms=(400 if prod_shape else None),
             dispatcher="batch",
             preemption=_PREEMPT_PQ,
             max_waiting=2,
@@ -1276,13 +1300,24 @@ def _dr_live_spec(ctx: CaseContext) -> EnvSpec:
     production-baseline stage set {PREFILL_QUEUED, DECODE_RESERVED} + a
     4-block decode KV pool (4096 tokens at blockSize=1024) on a SINGLE
     decode engine, so the victim's shadow reservation — not a slot
-    deficit — makes the incoming's decode placement fail."""
+    deficit — makes the incoming's decode placement fail.
+
+    Decision axis (tier2 wave2, audit #17): same lane-derived shape as
+    _pq_live_spec — single-batch keeps the SINGLE live family,
+    batch-window runs the production-isomorphic FIXED_WINDOW window
+    (maxRequests=32 / maxCollectionWaitMs=400; the audit note that the
+    400ms collection window's effect on shadow-reservation eviction
+    timing is UNVERIFIED is exactly what the bw smoke run checks).
+    """
+    prod_shape = ctx.profile == "batch-window"
     return _spec(
         ctx,
         "atpm_dr_live",
         n_decode=1,
         decode_cache_blocks=4,
         config_overrides=_prio_config(
+            decision=("fixed_window" if prod_shape else "single"),
+            max_collection_wait_ms=(400 if prod_shape else None),
             dispatcher="batch",
             preemption={"allowed_victim_stages": ["PREFILL_QUEUED", "DECODE_RESERVED"]},
             queue_timeout_ms=60_000,

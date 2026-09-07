@@ -28,9 +28,9 @@ from ...support.priority import (
 
 @case(
     "atpm_preempt_prefill_queued_live",
-    category="priority",
-    profiles=["single-batch"],
+    profiles=["single-batch", "batch-window"],
     source="preemption-stages audit (2026-09) — live PREFILL_QUEUED eviction",
+    category="priority",
 )
 def atpm_preempt_prefill_queued_live(ctx: CaseContext):
     """LIVE PREFILL_QUEUED eviction: a higher-priority incoming replaces a
@@ -43,7 +43,11 @@ def atpm_preempt_prefill_queued_live(ctx: CaseContext):
     puts the queue back in the master (WorkerBatcher + maxWaiting cap →
     AdmissionFallback → EvictionManager.tryAdmitByPrefillEviction).
     preemption={PREFILL_QUEUED} only, maxWaiting=2, 1P+4D, prefill
-    slowed to 4s.
+    slowed to 4s.  Decision axis: SINGLE on the single-batch lane (the
+    original live family); FIXED_WINDOW maxRequests=32/wait 400ms on
+    batch-window (production-isomorphic — audit #16; the 400ms window's
+    timing effect on the queue-overflow choreography is exactly what
+    the bw smoke run verifies).
 
     Choreography: a P50 placeholder dispatches first (occupying the
     engine's single prefill concurrency slot — the dispatch gate holds

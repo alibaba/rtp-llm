@@ -20,22 +20,19 @@ from ...support.admission import (
 
 @case(
     "admission_placement_pool_wait",
-    category="admission",
-    profiles=["single-nonbatch"],
+    profiles=["single-nonbatch", "window-nonbatch"],
     requires=["generate_stream"],
-    source=(
-        "admission wave-2 A4 (verdict §4.1 rebuild): prefill placement "
-        "capacity wait — real backlog via delivery-lease cap 1 + queue "
-        "cap 2, concurrent park sampling, serialized completion "
-        "(name kept for history)"
-    ),
+    source="admission wave-2 A4 (verdict §4.1 rebuild): prefill placement capacity wait — real backlog via delivery-lease cap 1 + queue cap 2, concurrent park sampling, serialized completion (name kept for history)",
+    category="admission",
 )
 def admission_placement_pool_wait(ctx: CaseContext):
     """Prefill placement capacity wait: a REAL backlog construction
     (verdict §4.1; the case name keeps its historical "pool_wait" form
     from the pre-intake3 availability-filter contract).
 
-    Scenario: dedicated 1P+2D env on the SINGLE+NON_BATCH base with
+    Scenario: dedicated 1P+2D env on the NON_BATCH base (single-nonbatch
+    and window-nonbatch lanes — the request-level delivery lease is the
+    same knob on both) with
     dispatcher.maxInflightRequestsPerPrefillWorker=1 and
     scheduler.capacity.maxWaitingRequestsPerPrefillWorker=2, all under
     prefill_fixed_ms=5000.  Request A is fired first; once A is
@@ -99,7 +96,7 @@ def admission_placement_pool_wait(ctx: CaseContext):
         if not wait_for(a_running, 10.0, 0.1):
             return False, "request A never reached RUNNING on prefill"
 
-        # PRECONDITION (fail loudly): B must arrive while
+        # PRECONDITION (fail loudly, task #107 #18): B must arrive while
         # A REALLY still holds the lease — A running on the engine AND
         # live on the master ledger.  A fast snapshot that observed a
         # stale running fact (A already settled, pending 1 -> 0) would

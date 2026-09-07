@@ -42,10 +42,10 @@ class ObservationRegistryTest(unittest.TestCase):
         self.assertEqual(
             counts,
             {
-                "batch-window": 120,
-                "single-nonbatch": 80,
-                "single-batch": 73,
-                "window-nonbatch": 65,
+                "batch-window": 122,
+                "single-nonbatch": 88,
+                "single-batch": 91,
+                "window-nonbatch": 74,
             },
         )
 

@@ -16,13 +16,10 @@ from ...support.admission import (
 
 @case(
     "engine_prefill_concurrency_gate_park",
-    category="admission",
-    profiles=["batch-window"],
+    profiles=["batch-window", "single-batch"],
     requires=["enqueue_batch"],
-    source=(
-        "admission wave-2 W1: engine prefill-concurrency gate "
-        "(maxPrefillConcurrency park — wait condition, no reject)"
-    ),
+    source="admission wave-2 W1: engine prefill-concurrency gate (maxPrefillConcurrency park — wait condition, no reject)",
+    category="admission",
 )
 def engine_prefill_concurrency_gate_park(ctx: CaseContext):
     """Engine prefill-concurrency gate: the gate is a WAIT condition.

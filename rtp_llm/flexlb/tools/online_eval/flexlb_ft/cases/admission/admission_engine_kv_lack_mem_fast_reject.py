@@ -22,15 +22,10 @@ from ...support.admission import (
 
 @case(
     "admission_engine_kv_lack_mem_fast_reject",
-    category="admission",
-    profiles=["batch-window"],
+    profiles=["batch-window", "single-batch"],
     requires=["enqueue_batch"],
-    source=(
-        "admission wave-3 B2: engine prefill KV block-pool gate "
-        "(KV v2 BlockLease admission — 602 LACK_MEM synchronous fast "
-        "reject, the non-waitable engine-side complement of the "
-        "master KV squeeze in admission_slo_queue_deadline)"
-    ),
+    source="admission wave-3 B2: engine prefill KV block-pool gate (KV v2 BlockLease admission — 602 LACK_MEM synchronous fast reject, the non-waitable engine-side complement of the master KV squeeze in admission_slo_queue_deadline)",
+    category="admission",
 )
 def admission_engine_kv_lack_mem_fast_reject(ctx: CaseContext):
     """Engine prefill KV block-pool gate: 602 LACK_MEM fast reject.

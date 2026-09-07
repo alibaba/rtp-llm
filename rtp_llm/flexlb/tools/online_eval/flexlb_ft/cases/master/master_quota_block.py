@@ -11,20 +11,24 @@ from ...support.master import MASTER_EVICT_S, _quota_spec
 
 @case(
     "master_quota_block",
-    category="master",
-    profiles=["batch-window"],
+    requires=["enqueue_batch"],
     source="flexlb_behavior_test.sh S3 (1P+1D quota blocking + TTL recovery)",
+    category="master",
 )
 def master_quota_block(ctx: CaseContext):
     """S3 port: fill the 1-batch inflight quota → stop the only prefill →
     new requests fail (≥50%) → TTL cleanup → start engine → recovery ≥90%.
 
-    Profile semantics (v2): the quota knob itself
+    Profile semantics: the quota knob itself
     (dispatcher.maxInflightBatchesPerPrefillWorker) exists only under the
-    BATCH dispatcher, and _quota_spec layers PRIORITY ordering on the ctx
+    BATCH dispatcher — requires=["enqueue_batch"] keeps the case to the
+    batch-window and single-batch lanes (capability self-documenting;
+    audit 2026-09), and _quota_spec layers PRIORITY ordering on the ctx
     profile's own decision/dispatcher axes with maxInflightBatches=1 via
-    config override (profile-aware since the tier2 spec unpick) — the
-    declaration stays batch-window.
+    config override (profile-aware since the tier2 spec unpick).  The
+    blocked-phase ≥50% failure floor is expected to hold on the
+    single-batch lane too (single prefill down + quota consumed); the
+    failure-shape difference is to be observed on first runs.
     """
     env = ctx.env_manager.ensure(_quota_spec(ctx))
     ops = ctx.engine_ops(env)

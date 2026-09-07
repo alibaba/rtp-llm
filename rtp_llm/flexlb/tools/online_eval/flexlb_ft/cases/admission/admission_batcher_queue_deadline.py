@@ -21,16 +21,10 @@ from ...support.admission import (
 
 @case(
     "admission_batcher_queue_deadline",
-    category="admission",
-    profiles=["batch-window"],
+    profiles=["batch-window", "single-batch"],
     requires=["enqueue_batch"],
-    source=(
-        "admission wave-2 A5: batcher-queue gate deadline — the same "
-        "BATCH_SLO_EXPIRED (8511) terminal as admission_slo_queue_deadline, "
-        "with the trigger source moved from the KV gate to the batcher "
-        "queue capacity gate (same code, different source — the deadline "
-        "classification must stay uniform)"
-    ),
+    source="admission wave-2 A5: batcher-queue gate deadline — the same BATCH_SLO_EXPIRED (8511) terminal as admission_slo_queue_deadline, with the trigger source moved from the KV gate to the batcher queue capacity gate (same code, different source — the deadline classification must stay uniform)",
+    category="admission",
 )
 def admission_batcher_queue_deadline(ctx: CaseContext):
     """Batcher-queue gate under an SLO deadline: park, then typed 8511.

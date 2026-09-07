@@ -16,14 +16,10 @@ from ...support.admission import (
 
 @case(
     "admission_engine_waiting_batch_cap_reject",
-    category="admission",
-    profiles=["batch-window"],
+    profiles=["batch-window", "single-batch"],
     requires=["enqueue_batch"],
-    source=(
-        "admission wave-3 B3: engine prefill waiting-queue cap "
-        "(max_waiting_batches whole-batch backpressure reject — the "
-        "non-waitable complement of W1's unbounded park)"
-    ),
+    source="admission wave-3 B3: engine prefill waiting-queue cap (max_waiting_batches whole-batch backpressure reject — the non-waitable complement of W1's unbounded park)",
+    category="admission",
 )
 def admission_engine_waiting_batch_cap_reject(ctx: CaseContext):
     """Engine waiting-batch cap gate: the cap is NOT a wait condition.
