@@ -348,10 +348,10 @@ class MegaCSARoutingTest(unittest.TestCase):
     def test_flat_token_count_above_limit_keeps_existing_attention_path(self) -> None:
         adapter = MagicMock(wraps=MegaCSAAdapter.__new__(MegaCSAAdapter))
         block = _block_stub(adapter)
-        hidden = torch.zeros(43, 3, 1, 4)
-        metadata = SimpleNamespace(batch_size=43, q_len_per_req=3)
+        hidden = torch.zeros(86, 3, 1, 4)
+        metadata = SimpleNamespace(batch_size=86, q_len_per_req=3)
 
-        block.forward_decode(hidden, metadata, torch.zeros(43, 3))
+        block.forward_decode(hidden, metadata, torch.zeros(86, 3))
 
         adapter.forward_attention_sublayer.assert_not_called()
         block.attn.forward_decode.assert_called_once()
@@ -362,10 +362,10 @@ class MegaCSARoutingTest(unittest.TestCase):
         front.supports.return_value = False
         block = _block_stub(adapter)
         block._mega_front_adapter = front
-        hidden = torch.zeros(43, 3, 1, 4)
-        metadata = SimpleNamespace(batch_size=43, q_len_per_req=3)
+        hidden = torch.zeros(86, 3, 1, 4)
+        metadata = SimpleNamespace(batch_size=86, q_len_per_req=3)
 
-        block.forward_decode(hidden, metadata, torch.zeros(43, 3))
+        block.forward_decode(hidden, metadata, torch.zeros(86, 3))
 
         front.supports.assert_called_once()
         self.assertEqual(
