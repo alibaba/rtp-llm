@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import shutil
 import signal
 import socket
 import subprocess
@@ -84,6 +85,28 @@ def get_gpu_ids():
 get_smoke_gpu_pool = get_gpu_ids
 
 
+_nvidia_smi_path: Optional[str] = None
+_nvidia_smi_resolved = False
+
+
+def _nvidia_smi() -> Optional[str]:
+    """Path to nvidia-smi, or None on machines that do not have it.
+
+    PPU and ROCm workers have no nvidia-smi at all, so a failed query there says
+    nothing about device health -- unlike an NVIDIA box, where a failing query is
+    itself a symptom.
+    """
+    global _nvidia_smi_path, _nvidia_smi_resolved
+    if not _nvidia_smi_resolved:
+        _nvidia_smi_path = shutil.which("nvidia-smi")
+        _nvidia_smi_resolved = True
+        if _nvidia_smi_path is None:
+            logging.info(
+                "nvidia-smi not present; skipping NVIDIA zombie-context checks"
+            )
+    return _nvidia_smi_path
+
+
 class DeviceResource:
     def __init__(self, required_gpu_count: int):
         self.required_gpu_count = required_gpu_count
@@ -156,7 +179,14 @@ class DeviceResource:
         sometimes fails to reclaim after a SIGKILL, leaving contexts that survive
         until a reset), and a device we cannot query at all -- treated as bad, so
         a degraded GPU is skipped rather than handed out repeatedly.
+
+        "Cannot query" only means anything where nvidia-smi exists. On PPU and
+        ROCm workers it never does, and treating that as a zombie rejected all 16
+        PPUs in run 69752178, so no device could be locked and every PPU smoke
+        test failed at the acquisition bound with nothing actually held.
         """
+        if _nvidia_smi() is None:
+            return False
         pids = self._get_gpu_pids(gpu_id)
         if pids is None:
             logging.warning("gpu %s is not queryable; treating as unusable", gpu_id)
@@ -182,7 +212,12 @@ class DeviceResource:
         while time.time() < deadline:
             all_clear = True
             for gpu_id in self.gpu_ids:
-                stale = [p for p in self._get_gpu_pids(gpu_id) if p != my_pid]
+                pids = self._get_gpu_pids(gpu_id)
+                if pids is None:
+                    # Unknowable: no nvidia-smi, or it failed. Nothing to clean up
+                    # and nothing to conclude. Iterating None here used to raise.
+                    continue
+                stale = [p for p in pids if p != my_pid]
                 live_stale = [p for p in stale if self._pid_alive(p)]
 
                 if not stale:
