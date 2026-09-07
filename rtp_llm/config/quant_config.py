@@ -164,15 +164,22 @@ class QuantizationConfig(ABC):
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]):
+        if not isinstance(config, dict):
+            raise ValueError(
+                "quantization config must be a JSON object, "
+                f"got {type(config).__name__}"
+            )
+        method = config.get("method", config.get("quant_algo"))
+        if not isinstance(method, str) or not method.strip():
+            raise ValueError(
+                "quantization config must define a non-empty string "
+                "'method' or 'quant_algo'"
+            )
+        normalized_method = method.strip().upper()
         for _, c in cls._registry.items():
-            if (
-                c.get_method().upper()
-                == config.get("method", config.get("quant_algo")).upper()
-            ):
+            if c.get_method().upper() == normalized_method:
                 return c._from_config(config)
-        raise ValueError(
-            f"config: {config}'s method is not support in {cls._registry.keys()}"
-        )
+        raise ValueError(f"Unsupported quantization method: {method}")
 
     def is_quanted(self) -> bool:
         return self._is_quanted
