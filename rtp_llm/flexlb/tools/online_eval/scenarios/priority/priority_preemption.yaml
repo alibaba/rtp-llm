@@ -20,6 +20,7 @@ legacy_case_ids:
 - atpm_preempt_prefill_queued_live
 - atpm_preempt_decode_reserved_live
 - atpm_preempt_cancel_not_found
+- atpm_preempt_cancel_tombstoned
 environment:
   backend: java_mock
   n_prefill: 1
@@ -3159,6 +3160,198 @@ variants:
         $ref: stages.nf_verdict.output.cancel_seen
       engine_clean:
         $ref: stages.engine_clean.output.passed
+      recovery:
+        $ref: stages.recovery_result.output.passed
+  - id: teardown
+    action: teardown
+- id: cancel_tombstoned
+  profiles:
+  - single-batch
+  - batch-window
+  requires:
+  - enqueue_batch
+  legacy_case_ids:
+  - atpm_preempt_cancel_tombstoned
+  environment_overrides:
+    n_decode: 1
+    config_overrides:
+      dispatcher: batch
+      decision: single
+      max_inflight_requests_per_worker:
+        omit: true
+      decode_max_engine_requests: 1
+      preemption:
+        allowed_victim_stages:
+        - PREFILL_QUEUED
+        - DECODE_RESERVED
+        - DECODE_ENGINE_OWNED
+        engine_cancellation:
+          ack_timeout_ms: 50
+          completion_timeout_ms: 1000
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: victim
+    action: preemption_live_start
+    timeout_s: 5
+    params:
+      gap_s: 0
+      defer_batch: true
+      requests:
+      - tag: victim
+        priority: 30
+        input_len: 512
+        output_len: 5000
+  - id: victim_settled
+    action: preemption_settled
+    timeout_s: 90
+    params:
+      requests:
+        $ref: stages.victim.output.requests
+  - id: victim_admitted
+    action: check
+    params:
+      actual:
+        $ref: stages.victim_settled.output.admitted
+      op: eq
+      expected: true
+  - id: first_output
+    action: preemption_ts_first_output
+    timeout_s: 15
+    params:
+      requests:
+        $ref: stages.victim.output.requests
+  - id: crash_fault
+    action: engine_inject
+    params:
+      type: crash_after
+      targets:
+      - prefill-0
+      options:
+        n: 1
+  - id: restore_guard
+    action: preemption_ts_restore_guard
+  - id: crash_trigger
+    action: preemption_ts_trigger
+    timeout_s: 10
+  - id: prefill_dropped
+    action: preemption_ts_health
+    timeout_s: 45
+    params:
+      state: dropped
+  - id: prefill_restart
+    action: engine_control
+    params:
+      operation: start
+      targets:
+      - prefill-0
+  - id: prefill_restored
+    action: preemption_ts_health
+    timeout_s: 45
+    params:
+      state: restored
+  - id: reconnect
+    action: balance_pause
+    params:
+      seconds: 3
+  - id: victim_cut
+    action: preemption_ts_cut
+    timeout_s: 10
+    params:
+      requests:
+        $ref: stages.victim.output.requests
+  - id: baseline_cancel
+    action: preemption_cancel_census
+  - id: incoming
+    action: preemption_live_start
+    timeout_s: 5
+    params:
+      gap_s: 0
+      defer_batch: true
+      requests:
+      - tag: incoming
+        priority: 70
+        input_len: 512
+        output_len: 2
+  - id: incoming_settled
+    action: preemption_settled
+    timeout_s: 90
+    params:
+      requests:
+        $ref: stages.incoming.output.requests
+  - id: incoming_drain
+    action: preemption_live_drain
+    timeout_s: 50
+    params:
+      requests:
+        $ref: stages.incoming.output.requests
+      tags:
+      - incoming
+  - id: incoming_completed
+    action: preemption_ts_incoming
+    params:
+      requests:
+        $ref: stages.incoming.output.requests
+  - id: cancel_arrival
+    action: preemption_ts_cancel
+    timeout_s: 30
+    params:
+      before:
+        $ref: stages.baseline_cancel.output.snapshot
+  - id: fence_probe
+    action: preemption_ts_fence
+    timeout_s: 15
+    params:
+      requests:
+        $ref: stages.victim.output.requests
+  - id: engine_clean
+    action: preemption_ts_engine_clean
+    timeout_s: 80
+  - id: residue
+    action: preemption_ts_residue
+    timeout_s: 45
+  - id: recovery_prepare
+    action: recovery_prepare
+    params:
+      count: 1
+      concurrency: 1
+      input_len: 2048
+      output_len: 2
+      consume: immediate
+      schedule_timeout_s: 30
+      stream_timeout_s: 30
+      unique_key_count: 1
+      unique_key_start: 1
+      generate_payload: match_schedule
+  - id: recovery_dispatch
+    action: recovery_dispatch
+    params:
+      requests:
+        $ref: stages.recovery_prepare.output.requests
+    timeout_s: 60
+  - id: recovery_result
+    action: preemption_error_recovery
+    params:
+      requests:
+        $ref: stages.recovery_prepare.output.requests
+  - id: ts_final
+    action: preemption_ts_final
+    params:
+      cut:
+        $ref: stages.victim_cut.output.cut
+      incoming:
+        $ref: stages.incoming_completed.output.completed
+      delta_seen:
+        $ref: stages.cancel_arrival.output.delta_seen
+      reached:
+        $ref: stages.cancel_arrival.output.reached
+      fence:
+        $ref: stages.fence_probe.output.passed
+      engine_clean:
+        $ref: stages.engine_clean.output.passed
+      residue:
+        $ref: stages.residue.output.passed
       recovery:
         $ref: stages.recovery_result.output.passed
   - id: teardown

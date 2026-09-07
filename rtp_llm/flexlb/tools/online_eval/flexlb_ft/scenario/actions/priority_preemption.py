@@ -1869,7 +1869,391 @@ def _nf_final(ctx, p, deadline):
     )
 
 
+def _ts_first_output(ctx, p, deadline):
+    wave = _cohort(ctx, p["requests"])
+    rows = wave.records()
+    shapes = wave.p["requests"]
+    if (
+        len(rows) != 1
+        or len(shapes) != 1
+        or (shapes[0].get("priority"), shapes[0]["input_len"], shapes[0]["output_len"])
+        != (30, 512, 5000)
+    ):
+        raise ValueError("tombstoned victim shape differs from old contract")
+    entry = wave.entries[0]["batch"].entries[0]
+    if (
+        entry["record"]["schedule"]["status"] != "OK"
+        or not entry["response"].enqueued_by_master
+    ):
+        raise ValueError("tombstoned victim needs an admitted BATCH route")
+    batch = wave.entries[0]["batch"]
+    batch._start_consumer(entry, min(ctx.instance_deadline_s, ctx.clock() + 60))
+    try:
+        while (
+            batch.snapshot_records()[0].get("stream", {}).get("first_output_s") is None
+        ):
+            deadline.sleep(0.02)
+    finally:
+        wave.persist()
+    return StageOutput(artifacts=[str(wave.path)])
+
+
+def _ts_restore_guard(ctx, p, deadline):
+    owner = "prefill-0"
+    before = _engines(_http(ctx.ops, "snapshot", deadline), [owner])[owner]
+    if before["role"] != "prefill" or before["stopped"]:
+        raise ValueError("tombstoned crash guard needs the original live prefill-0")
+    epoch, env, ops = ctx.env_epoch, ctx.env, ctx.ops
+
+    def restore(limit):
+        if ctx.env_epoch != epoch or ctx.env is not env:
+            raise ValueError("cannot restore a different environment")
+        row = _engines(_http(ops, "snapshot", limit), [owner])[owner]
+        if row["stopped"]:
+            response = _http(ops, "start_engine", limit, dict(engine=owner))
+            if response.get("status") != "ok" or response.get("engine") != owner:
+                raise ValueError("crash cleanup lacks restart acknowledgement")
+
+    ctx.add_cleanup("tombstoned-original-prefill-restore", restore)
+    return StageOutput()
+
+
+def _ts_trigger(ctx, p, deadline):
+    from ..runtime import StageTimeout
+
+    rid = ctx.ops.next_request_id()
+    evidence = dict(
+        request_id=rid, input_len=2048, output_len=10, code=None, error=None
+    )
+    holder = {}
+
+    def cleanup(limit):
+        if holder.get("call") is not None:
+            holder["call"].cancel()
+
+    ctx.add_cleanup("tombstoned-sacrificial-client", cleanup)
+    path = ctx.artifact_dir / f"preemption-ts-trigger-{uuid.uuid4().hex}.json"
+    try:
+        stub = ctx.ops.schedule_pb2_grpc.FlexlbServiceStub(
+            ctx.ops._channel(ctx.ops.master_target())
+        )
+        holder["call"] = stub.Schedule.future(
+            ctx.ops.build_schedule_request(rid, input_len=2048, output_len=10),
+            timeout=min(8, deadline.remaining()),
+        )
+        response = holder["call"].result(timeout=min(8, deadline.remaining()))
+        evidence["code"] = int(response.code)
+    except StageTimeout:
+        raise
+    except Exception as exc:
+        deadline.check()
+        evidence["error"] = repr(exc)
+    finally:
+        cleanup(deadline)
+        holder.clear()
+        path.write_text(json.dumps(evidence, indent=2) + "\n")
+    return StageOutput(artifacts=[str(path)])
+
+
+def _ts_health_params(p, plan):
+    p = _params(p, {"state"}, {"state"})
+    if p["state"] not in ("dropped", "restored"):
+        raise ValueError("invalid crash health transition")
+    return p
+
+
+def _ts_health(ctx, p, deadline):
+    from .status_protocol import _http as status_http
+
+    end = ctx.clock() + 30
+    samples = []
+    matched = False
+    path = ctx.artifact_dir / f"preemption-ts-health-{uuid.uuid4().hex}.json"
+    try:
+        while ctx.clock() < end:
+            _, raw = status_http(ctx, "master", "rtp_llm/info", deadline)
+            alive = _number(
+                raw.get("worker_summary", {}).get("PREFILL", {}).get("alive"),
+                0,
+                1e9,
+                True,
+            )
+            matched = alive <= 0 if p["state"] == "dropped" else alive >= 1
+            samples.append(dict(at_s=ctx.clock(), raw=raw, matched=matched))
+            if matched:
+                break
+            deadline.sleep(min(0.5, max(0, end - ctx.clock())))
+    finally:
+        path.write_text(json.dumps(samples, indent=2) + "\n")
+    return StageOutput(
+        checks=[
+            CheckResult(
+                "health_transition",
+                "PASS" if matched else "FAIL",
+                actual=matched,
+                expected=True,
+            )
+        ],
+        artifacts=[str(path)],
+    )
+
+
+def _ts_cut(ctx, p, deadline):
+    wave = _cohort(ctx, p["requests"])
+    if len(wave.entries) != 1:
+        raise ValueError("cut proof requires one victim")
+    batch = wave.entries[0]["batch"]
+    try:
+        batch._await_consumer(batch.entries[0], deadline)
+    finally:
+        wave.persist()
+    row = batch.snapshot_records()[0]
+    cut = (
+        row.get("business_finished") is False
+        and row.get("cancel", {}).get("requested_s") is None
+    )
+    wave.complete = True
+    path = ctx.artifact_dir / f"preemption-ts-cut-{uuid.uuid4().hex}.json"
+    path.write_text(json.dumps(dict(row=row, cut=cut), indent=2) + "\n")
+    return StageOutput({"cut": cut}, artifacts=[str(wave.path), str(path)])
+
+
+def _ts_incoming(ctx, p, deadline):
+    wave = _cohort(ctx, p["requests"])
+    rows = wave.records()
+    shapes = wave.p["requests"]
+    if (
+        not wave.complete
+        or len(rows) != 1
+        or len(shapes) != 1
+        or (shapes[0].get("priority"), shapes[0]["input_len"], shapes[0]["output_len"])
+        != (70, 512, 2)
+    ):
+        raise ValueError("tombstoned incoming lacks original shape and drain")
+    return StageOutput(
+        {"completed": request_success(rows[0])}, artifacts=[str(wave.path)]
+    )
+
+
+def _ts_cancel_params(p, plan):
+    p = _params(p, {"before"}, {"before"})
+    plan.reference(p["before"], "snapshot")
+    return p
+
+
+def _ts_cancel(ctx, p, deadline):
+    before = ctx.resource(p["before"], "snapshot")
+    if before.get("env_epoch") != ctx.env_epoch:
+        raise ValueError("Cancel baseline belongs to another environment")
+    samples = []
+    reached = False
+    end = ctx.clock() + 15
+    artifacts = []
+    while ctx.clock() < end:
+        result = _cancel_census(ctx, {}, deadline)
+        artifacts.extend(result.artifacts)
+        current = ctx.resource(result.output["snapshot"], "snapshot")
+        if set(current["counts"]) != set(before["counts"]):
+            raise ValueError("Cancel census engine fleet changed")
+        samples.append(current)
+        reached = current["total"] > before["total"]
+        if reached:
+            break
+        deadline.sleep(min(0.5, max(0, end - ctx.clock())))
+    # Preserve the legacy extra sample after wait_for, separate from reached.
+    result = _cancel_census(ctx, {}, deadline)
+    artifacts.extend(result.artifacts)
+    after = ctx.resource(result.output["snapshot"], "snapshot")
+    if set(after["counts"]) != set(before["counts"]):
+        raise ValueError("Cancel census engine fleet changed")
+    delta = after["total"] - before["total"]
+    path = ctx.artifact_dir / f"preemption-ts-cancel-{uuid.uuid4().hex}.json"
+    path.write_text(
+        json.dumps(
+            dict(
+                before=before, polls=samples, after=after, reached=reached, delta=delta
+            ),
+            indent=2,
+        )
+        + "\n"
+    )
+    return StageOutput(
+        {"reached": reached, "delta_seen": delta >= 1},
+        artifacts=artifacts + [str(path)],
+    )
+
+
+def _ts_fence(ctx, p, deadline):
+    from ..runtime import StageTimeout
+
+    wave = _cohort(ctx, p["requests"])
+    if len(wave.entries) != 1:
+        raise ValueError("fence requires one original route")
+    entry = wave.entries[0]["batch"].entries[0]
+    rid = entry["record"]["wire_request_id"]
+    response = entry["response"]
+    if response is None:
+        raise ValueError("fence lacks original Schedule route")
+    target = ctx.ops.prefill_addr(response)
+    if not target:
+        raise ValueError("fence lacks original Prefill address")
+    evidence = dict(request_id=rid, target=target, batch_id=rid * 10 + 1, passed=False)
+    path = ctx.artifact_dir / f"preemption-ts-fence-{uuid.uuid4().hex}.json"
+    try:
+        inp = ctx.ops.build_generate_input(rid, output_len=2)
+        ctx.ops._copy_role_addrs(inp, response)
+        req = ctx.ops.pb2.EnqueueBatchRequestPB(
+            batch_id=rid * 10 + 1,
+            dp_slots=[
+                ctx.ops.pb2.EnqueueBatchDpSlotPB(
+                    dp_rank=0,
+                    requests=[ctx.ops.pb2.EnqueueBatchExternalInputPB(input=inp)],
+                )
+            ],
+            fetch_attach_timeout_ms=30000,
+        )
+        stub = ctx.ops.pb2_grpc.RpcServiceStub(ctx.ops._channel(target))
+        ack = stub.EnqueueBatch(req, timeout=min(10, deadline.remaining()))
+        errors = [
+            dict(request_id=e.request_id, error_code=int(e.error_info.error_code))
+            for e in ack.errors
+        ]
+        passed = (
+            not ack.successes
+            and len(errors) == 1
+            and errors[0] == dict(request_id=rid, error_code=8429)
+        )
+        evidence.update(successes=len(ack.successes), errors=errors, passed=passed)
+    except StageTimeout:
+        raise
+    except Exception as exc:
+        deadline.check()
+        evidence["error"] = repr(exc)
+    finally:
+        path.write_text(json.dumps(evidence, indent=2) + "\n")
+    return StageOutput({"passed": evidence["passed"]}, artifacts=[str(path)])
+
+
+def _ts_residue(ctx, p, deadline):
+    from .status_protocol import _http as status_http
+
+    samples = []
+    first = None
+    second = None
+    end = ctx.clock() + 20
+    path = ctx.artifact_dir / f"preemption-ts-residue-{uuid.uuid4().hex}.json"
+
+    def sample():
+        _, raw = status_http(ctx, "master", "rtp_llm/inflight_status", deadline)
+        count = _number(raw.get("scheduler_inflight"), 0, 1e9, True)
+        samples.append(dict(at_s=ctx.clock(), raw=raw, count=count))
+        return count
+
+    try:
+        while ctx.clock() < end:
+            first = sample()
+            if first <= 1:
+                break
+            deadline.sleep(min(1, max(0, end - ctx.clock())))
+        if first is not None and first <= 1:
+            deadline.sleep(8)
+            second = sample()
+        passed = (
+            first is not None and first <= 1 and second is not None and second <= first
+        )
+    finally:
+        path.write_text(
+            json.dumps(dict(samples=samples, first=first, second=second), indent=2)
+            + "\n"
+        )
+    return StageOutput({"passed": passed}, artifacts=[str(path)])
+
+
+def _ts_final_params(p, plan):
+    keys = {
+        "cut",
+        "incoming",
+        "delta_seen",
+        "reached",
+        "fence",
+        "engine_clean",
+        "residue",
+        "recovery",
+    }
+    p = _params(p, keys, keys)
+    for k in p:
+        plan.reference(p[k], "boolean")
+    return p
+
+
+def _ts_final(ctx, p, deadline):
+    v = {k: ctx.resolve(value) for k, value in p.items()}
+    checks = [
+        ("PR10", v["cut"] and v["incoming"] and v["delta_seen"]),
+        ("PR6", v["fence"] and v["reached"]),
+        ("P6", v["engine_clean"] and v["residue"] and v["recovery"]),
+    ]
+    return StageOutput(
+        checks=[
+            CheckResult(k, "PASS" if passed else "FAIL", actual=passed, expected=True)
+            for k, passed in checks
+        ]
+    )
+
+
 HANDLERS = [
+    StageHandler("preemption_ts_first_output", _settled_params, _ts_first_output, {}),
+    StageHandler(
+        "preemption_ts_restore_guard",
+        lambda p, plan: _params(p, (), ()),
+        _ts_restore_guard,
+        {},
+    ),
+    StageHandler(
+        "preemption_ts_trigger", lambda p, plan: _params(p, (), ()), _ts_trigger, {}
+    ),
+    StageHandler(
+        "preemption_ts_health",
+        _ts_health_params,
+        _ts_health,
+        {},
+        checks=frozenset({"health_transition"}),
+    ),
+    StageHandler("preemption_ts_cut", _settled_params, _ts_cut, {"cut": "boolean"}),
+    StageHandler(
+        "preemption_ts_incoming",
+        _settled_params,
+        _ts_incoming,
+        {"completed": "boolean"},
+    ),
+    StageHandler(
+        "preemption_ts_cancel",
+        _ts_cancel_params,
+        _ts_cancel,
+        {"reached": "boolean", "delta_seen": "boolean"},
+    ),
+    StageHandler(
+        "preemption_ts_fence", _settled_params, _ts_fence, {"passed": "boolean"}
+    ),
+    StageHandler(
+        "preemption_ts_engine_clean",
+        lambda p, plan: _params(p, (), ()),
+        lambda ctx, p, d: _live_engine_clean(ctx, {"seconds": 60}, d),
+        {"passed": "boolean"},
+    ),
+    StageHandler(
+        "preemption_ts_residue",
+        lambda p, plan: _params(p, (), ()),
+        _ts_residue,
+        {"passed": "boolean"},
+    ),
+    StageHandler(
+        "preemption_ts_final",
+        _ts_final_params,
+        _ts_final,
+        {},
+        checks=frozenset({"PR10", "PR6", "P6"}),
+    ),
     StageHandler("preemption_nf_state", _nf_state_params, _nf_state, {}),
     StageHandler(
         "preemption_cancel_census",

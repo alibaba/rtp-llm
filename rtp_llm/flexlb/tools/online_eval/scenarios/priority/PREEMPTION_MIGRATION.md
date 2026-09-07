@@ -1,9 +1,10 @@
 # Priority preemption migration
 
 Owner: agent4. Source baseline: `295af797bd7ed3a842c9cad42b5722c64cd24c9a`.
-This checkpoint implements thirteen complete candidate families out of fourteen old
-contracts. No old case is called or deleted. Independent review, default catalog
-integration and actual Java execution remain pending.
+This checkpoint implements fourteen complete candidate families out of fourteen old
+contracts. No old case is called or deleted. Each candidate keeps separate
+fixed-source review and execution evidence; this checkpoint is not blanket
+Java or old/new paired acceptance.
 
 ## Candidate: same_priority_zero_eviction
 
@@ -55,13 +56,12 @@ observed order and terminal outcomes are saved as artifacts.
   restores its original blocking dependency. An explicit zero submission gap
   avoids inserting a .15s pause after the standalone placeholder.
 
-## Pending contracts (1)
+## Pending candidate implementations (0)
 
-- atpm_preempt_cancel_tombstoned
-
-These require their own actual profile/config axes, typed terminal evidence,
-owner-directed cancellation ACK and resource lifetime checks. They are absent
-from the runnable YAML until their complete programs are implemented.
+All fourteen old contracts now have explicit candidate programs, covering
+seventeen declared profile instances. Review, integration, Java execution
+and old/new paired acceptance remain distinct statuses; inclusion in this
+YAML does not imply those acceptance stages passed.
 
 ## Integration and verification
 
@@ -678,3 +678,80 @@ payloads,8431 versus8403, zero Cancel delta, normal output accompanied by
 engine cancellation evidence, the unchanged three-second finish window
 and cleanup, and missing census map failing before injection. No Java,
 ACK-enum or paired acceptance is claimed.
+
+
+## Cancel TOMBSTONED construction
+
+`cancel_tombstoned` is the final old family,
+`atpm_preempt_cancel_tombstoned`. Its enqueue_batch requirement selects SB
+and BW. Both actual EnvSpecs match `_ts_spec`: 1P/1D default perf,
+PRIORITY+BATCH with SINGLE decision even on the BW profile, inflight
+request cap omitted, waiting8, queue60000, decode maxEngineRequests1,
+all three victim stages with ack50/completion1000. This final checkpoint
+contains14 families/17 profile instances, not17 independent old cases.
+
+Victim30/512/5000 is admitted with Schedule90, then opens Fetch transport60
+and must produce its first output within15s (poll.02). Only then inject
+crash_after n1 into original prefill-0. Register an epoch/owner-bound
+restart guard before issuing the sacrificial Schedule: unset priority,
+2048/10, RPC8. The output10 is the old EngineOps DEFAULT_OUTPUT_LEN,
+not the output2 used by explicit recovery calls. The sacrificial response
+or RPC error is diagnostic, never the crash proof, and it gets no Fetch.
+
+Preserve the two30s/.5 Master health observations (dropped<=0, restored>=1),
+restart the same named/addressed Prefill through typed engine_control,
+then reconnect3. Victim cut observation10 requires an actual exited
+consumer with business_finished=false; a local cancellation cannot supply
+that proof. A separate immutable cut artifact preserves its pre-cleanup
+record. Original transport UNAVAILABLE is not recast as engine8429.
+The restart guard runs before fault cleanup if construction stops with
+the engine down. Stage/invalid-owner failures hard-stop construction and
+still execute cleanup, a stronger boundary than the old best-effort path.
+
+After restart/cut, capture fresh aggregate Cancel census, issue incoming
+70/512/2 (Schedule90), then serial Fetch transport60/observation45. Poll
+Cancel delta for15s/.5 and retain the separate final sample the old case
+performs after wait_for: reached=true and final delta>=1 are different
+facts. The direct late Enqueue goes once to the victim's original Prefill
+route, with the original RID, batch_id=RID*10+1, dp_rank0 and attach30000.
+Its GenerateInput retains the old default input shape (2048) with explicit
+output2. RPC10 must return zero successes and exactly one error for that
+RID with typed code8429. Probe RPC errors remain a false fence predicate,
+allowing the other planes to run; no literal Cancel ACK enum is claimed.
+
+Engine drain remains60/.5. The Master ledger intentionally need not be
+zero: poll scheduler_inflight for20s/1 until<=1, then sample again after8s
+and require no growth. Missing/non-numeric owner evidence is ERROR,
+never default zero. A fresh unset-priority2048/2 recovery with unique
+RID*100+1 and Schedule30/transport60/observation30 completes P6.
+
+Final PR10=cut+incoming success+final Cancel delta>=1;
+PR6=exact8429 fence+Cancel reached; P6=engine clean+bounded non-growing
+residue+recovery. These remain independent. There is no added Master-zero
+gate and no requirement that a crash-cut victim finish business normally.
+Six focused tests (two profile positives, seven complete programs) cover
+original config/payload/defaults, real crash-ended victim and survivor
+consumers, wrong fence code,1->2 ledger growth, normally completed victim,
+reached poll versus later zero delta, and sacrificial RPC failure followed
+by independently observed crash/restart. Existing fifteen compiled plans
+retain identical environment/stages/execution/resource_budget values.
+Fixture crash behavior does not establish live Java memory retirement,
+real TOMBSTONED ACKs, or old/new paired acceptance.
+
+
+## Frozen Java evidence remains separate
+
+The independently audited `a22f0678a2beb479c3da7ff9fa09df9c354f3d19`
+two-case run contains one PASS and one FAIL. `config_strict_reject` passed
+all three actual Master parser-rejection probes after the raw-config
+Master-only fix. Comparator retained priority_half=false/fifo_half=true,
+so PR9 and composite P6 failed even though all12 consumers completed
+normally. The older `0be83d8363b6bec01b0d998d3f1c57d710b35b48`
+FAIL+ERROR evidence is preserved separately. These runs neither cover
+all14 families nor constitute an old/new paired acceptance result.
+
+Final local checkpoint verification: fixed shared
+`4e2139c1398f1ed3039d235d2f736456612fa0f8` plus the owned preemption
+files passed all78 preemption unittest cases in321.827s. The TOMBSTONED
+focused six tests independently within that local work passed in80.179s.
+These are actual Python driver/consumer fixture runs, not Java runs.
