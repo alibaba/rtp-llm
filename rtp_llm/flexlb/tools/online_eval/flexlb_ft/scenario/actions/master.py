@@ -155,6 +155,27 @@ def _ready_validate(params, plan):
     return p
 
 
+def _endpoint_loads(data):
+    loads = {}
+    for side in ("prefill", "decode"):
+        rows = data[side + "_endpoints"]
+        if not isinstance(rows, list) or not rows:
+            raise ValueError("missing endpoint ledger observations")
+        values = []
+        for row in rows:
+            key = "inflight_batches" if side == "prefill" else "total_load"
+            if side == "decode" and "total_load" not in row:
+                key = "inflight_requests"
+            value = row[key]
+            if isinstance(value, list) and side == "prefill":
+                value = len(value)
+            if type(value) is not int or value < 0:
+                raise ValueError("invalid endpoint ledger count")
+            values.append(value)
+        loads[side] = values
+    return loads
+
+
 def _ready(ctx, params, deadline):
     expected = {"PREFILL": ctx.env.spec.n_prefill, "DECODE": ctx.env.spec.n_decode}
     samples = []
@@ -193,7 +214,14 @@ def _ready(ctx, params, deadline):
                 values == (expected[role], expected[role])
                 for role, values in counts.items()
             )
-            clean = not params["inflight_zero"] or count == 0
+            endpoint_loads = (
+                _endpoint_loads(inflight) if params["inflight_zero"] else {}
+            )
+            samples[-1]["endpoint_loads"] = endpoint_loads
+            clean = not params["inflight_zero"] or (
+                count == 0
+                and not any(v for values in endpoint_loads.values() for v in values)
+            )
             if converged and clean:
                 break
             deadline.sleep(0.5)
