@@ -12,6 +12,7 @@ import torch
 from rtp_llm.models_py.modules.dsv4.fp8.decode.mega_csa_weights import (
     FLASH_GEOMETRY,
     HC_MIX,
+    MAX_BATCH,
     PRO_GEOMETRY,
 )
 from rtp_llm.models_py.modules.dsv4.fp8.decode.mega_hca_weights import (
@@ -96,7 +97,7 @@ def _supported_extension():
         "hc_width": HC_MIX,
         "experts": 384 if hidden == 7168 else 256,
         "topk": 6,
-        "max_m": 128,
+        "max_m": MAX_BATCH,
     }
     return extension
 
@@ -224,7 +225,7 @@ class MegaSupportTest(unittest.TestCase):
             "hc_mult": 4,
             "experts": 256,
             "topk": 6,
-            "max_m": 128,
+            "max_m": MAX_BATCH,
         }
         fake_rtp_kernel = SimpleNamespace(dsv4_mega=extension)
         fake_deep_gemm = _module_with_symbols(_REQUIRED_DEEP_GEMM_SYMBOLS)
