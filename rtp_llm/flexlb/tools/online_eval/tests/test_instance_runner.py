@@ -127,6 +127,8 @@ class InstanceRunnerTest(unittest.TestCase):
         return 0
 
     def run_fixture(self, args, spawn=None):
+        for row in self.data["instances"]:
+            row["grade"] = args.grade
         listed = subprocess.CompletedProcess(
             [], 0, stdout=json.dumps(self.data), stderr=""
         )
@@ -139,6 +141,110 @@ class InstanceRunnerTest(unittest.TestCase):
         ):
             rc = runner.run_structured(args, legacy)
         return rc, listing, child
+
+    def test_real_child_compiler_and_runtime_use_selected_grade(self):
+        # The real child CLI/compiler/runtime run in a subprocess. Only Java
+        # process startup is replaced; this is a protocol fixture, not a JVM test.
+        module_root = Path(__file__).resolve().parents[1]
+        self.child.write_text(
+            "import sys\nsys.path.insert(0, "
+            + repr(str(module_root))
+            + ")\n"
+            + """
+from types import SimpleNamespace
+import scenario_runner as child
+import flexlb_ft.scenario.backend as backend
+from flexlb_ft.scenario.contracts import StageHandler, StageOutput, CheckResult
+class FixtureBackend:
+    def __init__(self, lease): pass
+    def setup(self, ctx, environment, deadline): return SimpleNamespace(), None
+    def teardown(self, ctx, deadline): pass
+backend.JavaMockBackend = FixtureBackend
+def validate(params, plan): return params
+def evaluate(ctx, params, deadline):
+    grade = ctx.instance['grade']
+    status = 'FAIL' if grade == 'strict' else 'PASS'
+    return StageOutput({'observed': grade}, [CheckResult('selected', status, actual=grade)])
+child.handlers = lambda: {'grade_probe': StageHandler('grade_probe', validate, evaluate, {'observed': 'string'}, checks=frozenset({'selected'}))}
+raise SystemExit(child.main())
+"""
+        )
+        source = self.root / "scenarios"
+        source.mkdir()
+        (source / "grade.yaml").write_text(
+            """
+schema_version: 1
+id: grade_protocol
+description: Grade protocol fixture with no Java processes
+category: status
+profiles: [batch-window]
+environment: {backend: java_mock, n_prefill: 1, n_decode: 1}
+stages:
+  - {id: setup, action: setup}
+  - {id: probe, action: grade_probe}
+  - {id: cleanup, action: teardown}
+"""
+        )
+        for grade, expected in (("strict", "FAIL"), ("loose", "PASS")):
+            with self.subTest(grade=grade):
+                self.drop_locks()
+                output = self.root / grade
+                args = self.args(grade=grade, parallel=1, out_dir=str(output))
+                args.dry_run = True
+                captured = io.StringIO()
+                with contextlib.redirect_stdout(captured):
+                    self.assertEqual(0, runner.run_structured(args, legacy))
+                manifest = json.loads(
+                    captured.getvalue()[captured.getvalue().index("{") :]
+                )
+                self.assertEqual(grade, manifest["grade"])
+                self.assertEqual(grade, manifest["instances"][0]["grade"])
+                self.drop_locks()
+                args.dry_run = False
+                with contextlib.redirect_stdout(io.StringIO()):
+                    rc = runner.run_structured(args, legacy)
+                self.assertEqual(int(expected == "FAIL"), rc)
+                result = json.loads((output / "aggregate.json").read_text())
+                row = result["instances"][0]
+                self.assertEqual(expected, row["status"])
+                self.assertEqual(grade, row["grade"])
+                self.assertEqual(grade, row["stages"][1]["checks"][0]["actual"])
+
+    def test_same_id_from_wrong_grade_cannot_be_reused_as_success(self):
+        def wrong_grade(command, env, log, **kwargs):
+            self.fixture_child(command, env, log, **kwargs)
+            path = Path(command[command.index("--out-dir") + 1]) / "scenarios.json"
+            data = json.loads(path.read_text())
+            for row in data["instances"]:
+                row["grade"] = "loose"
+            path.write_text(json.dumps(data))
+            return 0
+
+        rc, _, _ = self.run_fixture(self.args(grade="strict"), spawn=wrong_grade)
+        self.assertEqual(1, rc)
+        result = json.loads((self.root / "output/aggregate.json").read_text())
+        self.assertTrue(all(row["status"] == "ERROR" for row in result["instances"]))
+        self.assertTrue(
+            all("grade mismatch" in row["error"] for row in result["instances"])
+        )
+
+    def test_grade_is_identical_for_listing_execution_and_manifest(self):
+        for grade in ("strict", "normal", "loose"):
+            with self.subTest(grade=grade):
+                self.drop_locks()
+                rc, listing, child = self.run_fixture(self.args(grade=grade))
+                self.assertEqual(0, rc)
+                command = listing.call_args.args[0]
+                self.assertEqual(grade, command[command.index("--grade") + 1])
+                for call in child.call_args_list:
+                    command = call.args[0]
+                    self.assertEqual(grade, command[command.index("--grade") + 1])
+                manifest = json.loads((self.root / "output/manifest.json").read_text())
+                aggregate = json.loads(
+                    (self.root / "output/aggregate.json").read_text()
+                )
+                self.assertEqual(grade, manifest["grade"])
+                self.assertEqual(grade, aggregate["summary"]["grade"])
 
     def test_fixture_child_protocol_and_manifest_match_lane_environment(self):
         rc, listing, child = self.run_fixture(self.args())
@@ -317,7 +423,7 @@ class InstanceRunnerTest(unittest.TestCase):
                 self.assertNotIn("--source", command)
                 self.assertNotIn("--instances", command)
             else:
-                self.assertNotIn("--grade", command)
+                self.assertEqual("normal", command[command.index("--grade") + 1])
                 self.assertNotIn("--cases", command)
 
     def test_child_nonzero_exit_cannot_be_hidden_by_pass_rows(self):

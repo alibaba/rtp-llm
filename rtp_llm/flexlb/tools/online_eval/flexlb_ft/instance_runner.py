@@ -107,6 +107,8 @@ def _catalog(args, legacy):
                 str(Path(args.case_dir).resolve()),
                 "--profile",
                 args.profile,
+                "--grade",
+                args.grade,
                 "--list-json",
             ],
             capture_output=True,
@@ -121,7 +123,12 @@ def _catalog(args, legacy):
             payload = json.loads(proc.stdout)
         except ValueError as exc:
             raise InstancePlanError("scenario list did not return JSON") from exc
-        instances.extend(parse_catalog(payload, source="yaml", profile=args.profile))
+        compiled = parse_catalog(payload, source="yaml", profile=args.profile)
+        if any(instance.metadata.get("grade") != args.grade for instance in compiled):
+            raise InstancePlanError(
+                "scenario list grade does not match requested grade"
+            )
+        instances.extend(compiled)
     if args.source == "both":
         rows = [
             {
@@ -129,6 +136,7 @@ def _catalog(args, legacy):
                 "scenario_id": name,
                 "variant_id": "legacy",
                 "profile": args.profile,
+                "grade": args.grade,
                 "category": category,
                 "source": "legacy",
                 "source_path": str(legacy.RUNNER),
@@ -326,6 +334,12 @@ def _read_results(path, group, source):
                 raise ValueError(f"unsupported result status: {row.get('status')!r}")
             if source == "yaml" and row.get("profile") != expected[identity].profile:
                 raise ValueError(f"result profile mismatch: {identity}")
+            if (
+                source == "yaml"
+                and expected[identity].metadata.get("grade") is not None
+            ):
+                if row.get("grade") != expected[identity].metadata["grade"]:
+                    raise ValueError(f"result grade mismatch: {identity}")
             row = dict(row)
             failures = _execution_issues(row) if source == "yaml" else []
             if (row.get("error") or failures) and row["status"] not in {
@@ -396,6 +410,8 @@ def _run_lane(index, lane, lease, args, out, stamp, legacy, children):
                 str(Path(args.case_dir).resolve()),
                 "--profile",
                 args.profile,
+                "--grade",
+                args.grade,
                 "--instances",
                 ",".join(instance.id for instance in group),
                 "--out-dir",
@@ -488,6 +504,7 @@ def _aggregate(lanes, instances, args, elapsed):
             "finding_resolved": counts["FINDING-RESOLVED"],
             "exit_code": rc,
             "profile": args.profile,
+            "grade": args.grade,
             "parallel": len(lanes),
             "wall_time_s": round(elapsed, 3),
         },
@@ -542,6 +559,7 @@ def run_structured(args: argparse.Namespace, legacy) -> int:
             "schema_version": 1,
             "source": args.source,
             "profile": args.profile,
+            "grade": args.grade,
             "port_provenance": args.port_provenance,
             "instances": [instance.metadata for instance in instances],
             "lanes": [

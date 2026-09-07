@@ -127,6 +127,7 @@ def parse_catalog(payload: dict, *, source: str, profile: str) -> list[Instance]
                         "scenario_id",
                         "variant_id",
                         "profile",
+                        "grade",
                         "category",
                         "source",
                         "source_path",

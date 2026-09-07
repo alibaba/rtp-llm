@@ -134,7 +134,7 @@ python3 parallel_runner.py --source yaml --case-dir "$FT_SCENARIOS" \
     --profile batch-window --parallel 2 --out-dir "$FT_YAML_OUT"
 ```
 
-`--instances` 为完整 ID 逗号列表，YAML ID 为 `scenario::variant::profile`，例如仓内 smoke 的 `request_completion::immediate::batch-window`。`--source both` 同时编入两种来源，legacy ID 为 `legacy::<case_name>::<profile>`；它不会自动删掉具有相同旧契约映射的 YAML 实例。`--categories` 与 `--instances` 取交集；未知、空或 profile 排除后的零选择退出 2。结构化模式当前只支持 case 分片，不支持 `--keep`、category 分片或非 normal 的 CLI grade 覆盖，场景自身配置由 compiler 处理。
+`--instances` 为完整 ID 逗号列表，YAML ID 为 `scenario::variant::profile`，例如仓内 smoke 的 `request_completion::immediate::batch-window`。`--source both` 同时编入两种来源，legacy ID 为 `legacy::<case_name>::<profile>`；它不会自动删掉具有相同旧契约映射的 YAML 实例。`--categories` 与 `--instances` 取交集；未知、空或 profile 排除后的零选择退出 2。结构化模式只支持 case 分片，不支持 `--keep` 或 category 分片。`--grade strict|normal|loose`（默认 normal）以同一值传给 YAML 目录编译和执行，manifest 与汇总记录本次档位；需要配套支持 `--grade` 的 scenario_runner。具体检查是否按档位取阈值由场景动作决定，显式阈值不会因父入口透传而自动变成三档。
 
 父入口保持窗口锁 → out-dir 锁 → child 清单 → lane 执行顺序。预算按初始 worker 加累计新增次数计算，当前 Java mock 必须 ≤149，并保留 mock 控制口 -1 和 victim/control 偏移 +149..+151；无界或不支持的预算在启动实例前拒绝。每个 YAML child 收到 `--lease-json`，必须校验实际 env、租约区间及动态新增预算；直接执行 child 不能绕过父层预约。混合模式中的旧 case 仅沿用固定窗口兼容边界，不宣称其动态预算已经静态证明。
 

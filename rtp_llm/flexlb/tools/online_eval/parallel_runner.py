@@ -1446,7 +1446,10 @@ def main() -> int:
         "--profile", default="batch-window", help="passed through to the runner"
     )
     parser.add_argument(
-        "--grade", default="normal", help="passed through to the runner"
+        "--grade",
+        default="normal",
+        choices=("strict", "normal", "loose"),
+        help="passed through to the runner",
     )
     parser.add_argument(
         "--json",
@@ -1532,9 +1535,9 @@ def main() -> int:
     if args.source != "legacy":
         if not args.case_dir:
             parser.error("--source yaml/both requires --case-dir")
-        if args.shard != "case" or args.keep or args.grade != "normal":
+        if args.shard != "case" or args.keep:
             parser.error(
-                "structured instances require --shard case and do not support --keep or CLI --grade overrides"
+                "structured instances require --shard case and do not support --keep"
             )
 
     # Mock stride: CLI --mock-stride over the 500 default.  The verified
