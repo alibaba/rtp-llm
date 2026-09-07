@@ -521,6 +521,7 @@ class BaseModel(object):
             force_cpu_load_weights=self.force_cpu_load_weights,
             device_resource_config=self.device_resource_config,
             parallelism_config=self.parallelism_config,
+            moe_config=self.moe_config,
         )
         if reason is not None:
             return reason
