@@ -1,13 +1,16 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.PlacementResult;
+import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
+import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.eviction.EngineCancelChannel;
 import org.flexlb.balance.scheduler.RequestLifecycleTestSupport.Registered;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
+import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
@@ -346,11 +349,164 @@ class RequestRegistryTest {
                 org.mockito.ArgumentMatchers.anyLong());
     }
 
+    @Test
+    void staleDeliveryUncertaintyFenceRetiresSchedulerOwnership() {
+        ServerStatus prefill = new ServerStatus();
+        prefill.setServerIp("127.0.0.1");
+        prefill.setGrpcPort(8090);
+        Registered registered = registerItem(603L, prefill);
+        DecodeEndpoint.EngineFenceLease fenceLease =
+                mock(DecodeEndpoint.EngineFenceLease.class);
+        when(registered.item().decodeEp().beginEngineFenceProtection(
+                registered.item().decodeReservation())).thenReturn(fenceLease);
+        assertEquals(PlacementResult.Status.SUCCESS,
+                commitRoute(lifecycle, registered, 0, 30_000L));
+        RequestSlot slot = lifecycle.requestSlot("603");
+        RequestSlot.FenceReduction fence;
+        synchronized (slot) {
+            fence = slot.requestDeliveryFence(
+                    "post_delivery_acceptance_timeout");
+            assertEquals(RequestSlot.FenceReduction.Status.START,
+                    fence.status());
+            assertEquals(RequestSlot.FenceReduction.Status.NONE,
+                    slot.applyFenceUpdate(
+                            fence.fence(),
+                            RequestSlot.FenceUpdate.CANCEL_STARTED).status());
+            assertEquals(RequestSlot.FenceReduction.Status.NONE,
+                    slot.applyFenceUpdate(
+                            fence.fence(),
+                            RequestSlot.FenceUpdate.AWAIT_TERMINAL).status());
+        }
+        long ttlMs = 300_000L;
+
+        assertTrue(lifecycle.reduceStale(
+                slot, slot.createdAtMs() + ttlMs + 1L, ttlMs));
+
+        assertEquals(RequestState.Phase.TIMED_OUT,
+                lifecycle.getRequestState("603", 0L).state());
+        verify(fenceLease).close();
+        verify(registered.item().decodeEp(), never())
+                .releaseReservationExact(registered.item().decodeReservation());
+        synchronized (slot) {
+            assertEquals(RequestSlot.FenceReduction.Status.STALE,
+                    slot.applyFenceUpdate(
+                            fence.fence(),
+                            RequestSlot.FenceUpdate.TOMBSTONED).status());
+        }
+    }
+
+    @Test
+    void staleCancellationFencePreservesClientCancellationFirstCause() {
+        ServerStatus prefill = new ServerStatus();
+        prefill.setServerIp("127.0.0.1");
+        prefill.setGrpcPort(8090);
+        Registered registered = registerItem(6031L, prefill);
+        DecodeEndpoint.EngineFenceLease fenceLease =
+                mock(DecodeEndpoint.EngineFenceLease.class);
+        when(registered.item().decodeEp().beginEngineFenceProtection(
+                registered.item().decodeReservation())).thenReturn(fenceLease);
+        when(engineCancelChannel.cancel(
+                org.mockito.ArgumentMatchers.any(),
+                org.mockito.ArgumentMatchers.eq("6031"),
+                org.mockito.ArgumentMatchers.anyLong()))
+                .thenReturn(CompletableFuture.completedFuture(
+                        EngineCancelChannel.CancelAck.NOT_FOUND));
+        RequestLifecycleTestSupport.bind(lifecycle, registered);
+        RequestRegistry.DeliveryClaim claim = lifecycle.tryClaimBatchDelivery(
+                registered.item(), 7031L, () -> true);
+        assertNotNull(claim);
+        lifecycle.complete(claim, DeliveryResult.delivered());
+
+        RequestState requested = lifecycle.cancelRequest(
+                "6031", 7031L, CancelReason.CLIENT_CANCELLED);
+        assertEquals(RequestState.Phase.CANCEL_REQUESTED, requested.state());
+        RequestSlot slot = lifecycle.requestSlot("6031");
+        long ttlMs = 300_000L;
+        long inactiveSince;
+        synchronized (slot) {
+            assertTrue(slot.isLiveGeneration());
+            assertTrue(slot.hasCancellationFirstCause());
+            assertTrue(slot.ownsReclaimableInactiveFence(registered.item()));
+            inactiveSince = slot.lastWorkerStatusAtMs();
+        }
+
+        assertTrue(lifecycle.reduceStale(
+                slot, inactiveSince + ttlMs + 1L, ttlMs));
+
+        assertEquals(RequestState.Phase.CANCELLED,
+                lifecycle.getRequestState("6031", 7031L).state());
+        verify(fenceLease).close();
+        verify(registered.item().decodeEp(), never())
+                .releaseReservationExact(registered.item().decodeReservation());
+    }
+
+    @Test
+    void clientCancellationAcceptsPrefillPriorityTerminalAsAuthoritativeProof() {
+        ServerStatus prefillStatus = new ServerStatus();
+        prefillStatus.setServerIp("127.0.0.1");
+        prefillStatus.setGrpcPort(8090);
+        PrefillEndpoint prefill = mock(PrefillEndpoint.class);
+        DecodeEndpoint decode = mock(DecodeEndpoint.class);
+        DecodeEndpoint.ReservationHandle reservation =
+                new DecodeEndpoint.ReservationHandle(1L, "604", 1L);
+        DecodeEndpoint.EngineFenceLease fenceLease =
+                mock(DecodeEndpoint.EngineFenceLease.class);
+        when(decode.beginEngineFenceProtection(reservation))
+                .thenReturn(fenceLease);
+        BalanceContext context = context(604L);
+        CompletableFuture<Response> future = lifecycle.register(context, 4);
+        Registered registered = new Registered(
+                new ScheduledRequest(
+                        context,
+                        future,
+                        new Response(),
+                        prefillStatus,
+                        null,
+                        prefill,
+                        decode,
+                        reservation,
+                        System.currentTimeMillis()),
+                future);
+        RequestLifecycleTestSupport.bind(lifecycle, registered);
+        RequestRegistry.DeliveryClaim claim = lifecycle.tryClaimBatchDelivery(
+                registered.item(), 704L, () -> true);
+        assertNotNull(claim);
+        lifecycle.complete(claim, DeliveryResult.delivered());
+
+        RequestState requested = lifecycle.cancelRequest(
+                "604", 704L, CancelReason.CLIENT_CANCELLED);
+        assertEquals(RequestState.Phase.CANCEL_REQUESTED, requested.state());
+
+        RequestSlot slot = lifecycle.requestSlot("604");
+        Runnable work;
+        synchronized (slot) {
+            work = lifecycle.materializePostLockActionLocked(
+                    slot,
+                    slot.reducePriorityCanceled(prefill, registered.item()),
+                    null);
+        }
+        lifecycle.runPostLock(work);
+
+        assertEquals(RequestState.Phase.CANCELLED,
+                lifecycle.getRequestState("604", 704L).state());
+        verify(fenceLease).settleAuthoritativeTerminal();
+        verify(fenceLease).close();
+        verify(decode).releaseLocalShadowIfExact(reservation);
+        verify(decode, never()).reconcilePriorityVictimActive(
+                org.mockito.ArgumentMatchers.anyLong(),
+                org.mockito.ArgumentMatchers.any());
+    }
+
     private BalanceContext context(long requestId) {
         return RequestLifecycleTestSupport.context(config, requestId);
     }
 
     private Registered registerItem(long requestId) {
+        return registerItem(requestId, null);
+    }
+
+    private Registered registerItem(
+            long requestId, ServerStatus prefill) {
         BalanceContext context = context(requestId);
         CompletableFuture<Response> future = lifecycle.register(context, 4);
         DecodeEndpoint decode = mock(DecodeEndpoint.class);
@@ -362,7 +518,7 @@ class RequestRegistryTest {
                         context,
                         future,
                         new Response(),
-                        null,
+                        prefill,
                         null,
                         null,
                         decode,

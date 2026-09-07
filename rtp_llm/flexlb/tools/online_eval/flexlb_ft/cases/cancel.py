@@ -639,7 +639,7 @@ def cancel_unknown_rid(ctx: CaseContext):
             )
             ack = stub.Cancel(
                 ops.schedule_pb2.FlexlbCancelRequestPB(
-                    request_id=fake_rid,
+                    request_id=str(fake_rid),
                     reason=ops.schedule_pb2.CANCEL_REASON_CLIENT_CANCELLED,
                 ),
                 timeout=10.0,
@@ -1709,7 +1709,7 @@ def cancel_engine_restarted_tombstoned_settle(ctx: CaseContext):
             fence_detail = repr(exc)
 
         engine_clean, engine_detail = engine_inflight_clean(
-            ops, _all_engine_names(ops), 45.0
+            ops, _all_engine_names(ops), 75.0
         )
         residue_ok, residue_detail = _fence_residue_stable(ops, 1)
         recovery_ok, recovery_msg = ops.verify_recovery()

@@ -371,7 +371,7 @@ class EngineOps:
         )
         keys = block_keys or [request_id * 100 + 1]
         return self.schedule_pb2.FlexlbScheduleRequestPB(
-            request_id=request_id,
+            request_id=str(request_id),
             generate_input=input_pb.SerializeToString(),
             block_cache_keys=keys,
             seq_len=input_len,
@@ -445,8 +445,10 @@ class EngineOps:
     def _copy_role_addrs(self, input_pb, response) -> None:
         del input_pb.generate_config.role_addrs[:]
         for status in response.server_status:
+            role = self.pb2.RoleAddrPB.RoleType.Value(status.role)
             input_pb.generate_config.role_addrs.add(
-                role=status.role,
+                role=role,
+                role_str=status.role,
                 ip=status.server_ip,
                 http_port=status.http_port,
                 grpc_port=status.grpc_port,
@@ -481,7 +483,7 @@ class EngineOps:
             self._channel(self.master_target())
         )
         cancel_request = self.schedule_pb2.FlexlbCancelRequestPB(
-            request_id=request_id,
+            request_id=str(request_id),
             reason=self.schedule_pb2.CANCEL_REASON_CLIENT_CANCELLED,
         )
         if response is not None and response.HasField("lifecycle"):

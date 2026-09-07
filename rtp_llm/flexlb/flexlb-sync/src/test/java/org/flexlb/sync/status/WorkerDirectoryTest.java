@@ -5,6 +5,7 @@ import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.dao.master.WorkerStatusProvider;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.sync.runner.RunnerTestSupport;
 import org.junit.jupiter.api.BeforeEach;
@@ -215,6 +216,24 @@ class WorkerDirectoryTest {
                 workerDirectory.statusSnapshot(RoleType.VIT));
         assertThrows(UnsupportedOperationException.class,
                 () -> workerDirectory.statusSnapshot(RoleType.VIT).clear());
+    }
+
+    @Test
+    void worker_status_provider_returns_discovered_statuses_by_role_and_group() {
+        WorkerStatus matching = status(RoleType.PREFILL, "group1", 8301);
+        WorkerStatus filtered = status(RoleType.PREFILL, "group2", 8302);
+        WorkerStatus otherRole = status(RoleType.DECODE, "group1", 8303);
+        discover(matching);
+        discover(filtered);
+        discover(otherRole);
+
+        WorkerStatusProvider provider = workerDirectory;
+
+        assertEquals(List.of(matching),
+                provider.getWorkerStatuses(RoleType.PREFILL, "group1"));
+        assertEquals(2,
+                provider.getWorkerStatuses(RoleType.PREFILL, null).size());
+        assertTrue(provider.getWorkerStatuses(null, "group1").isEmpty());
     }
 
     private void discover(WorkerStatus status) {

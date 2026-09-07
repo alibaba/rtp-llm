@@ -14,10 +14,42 @@ import org.springframework.http.MediaType;
 import org.springframework.test.web.reactive.server.WebTestClient;
 
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class HttpLoadBalanceServerTest {
+
+    @Test
+    void inflightStatusExposesExactBlockedRequestCount() {
+        RequestScheduler scheduler = mock(RequestScheduler.class);
+        when(scheduler.getInflightSize()).thenReturn(9);
+        when(scheduler.getBlockedRequestCount()).thenReturn(2);
+        HttpLoadBalanceServer server = new HttpLoadBalanceServer(
+                mock(LBStatusConsistencyService.class),
+                mock(ConfigService.class, RETURNS_DEEP_STUBS),
+                scheduler,
+                mock(EndpointRegistry.class),
+                mock(WorkerDirectory.class),
+                mock(MasterEngineSynchronizer.class),
+                new ServerScheduleLatencyRecorder(),
+                mock(FlexlbInstanceAddressService.class),
+                mock(FlexlbLogManager.class));
+        WebTestClient client = WebTestClient
+                .bindToRouterFunction(server.loadBalancePrefill())
+                .build();
+
+        client.get()
+                .uri("/rtp_llm/inflight_status")
+                .accept(MediaType.APPLICATION_JSON)
+                .exchange()
+                .expectStatus().isOk()
+                .expectBody()
+                .jsonPath("$.scheduler_inflight").isEqualTo(9)
+                .jsonPath("$.scheduler_blocked").isEqualTo(2);
+
+        verify(scheduler).getBlockedRequestCount();
+    }
 
     @Test
     void masterInfoUsesCanonicalSchedulerQueueDepth() {

@@ -1,6 +1,7 @@
 package org.flexlb.service.grace;
 
 import org.flexlb.consistency.LBStatusConsistencyService;
+import org.flexlb.listener.ApplicationWarmupState;
 import org.junit.jupiter.api.Test;
 import org.springframework.context.annotation.AnnotationConfigApplicationContext;
 import org.springframework.core.env.Environment;
@@ -30,6 +31,7 @@ class ApplicationLifecycleTest {
             context.refresh();
 
             assertNotNull(context.getBean(ApplicationLifecycle.class));
+            assertNotNull(context.getBean(ApplicationWarmupState.class));
         }
     }
 
@@ -47,8 +49,10 @@ class ApplicationLifecycleTest {
                 0L, 1_000L, 0L);
 
         assertFalse(lifecycle.isHealthy());
+        assertFalse(lifecycle.isWarmupFinished());
         lifecycle.online();
         assertTrue(lifecycle.isHealthy());
+        assertTrue(lifecycle.isWarmupFinished());
         verify(consistency).start();
         verify(reporter).reportWarmerComplete(anyLong());
 

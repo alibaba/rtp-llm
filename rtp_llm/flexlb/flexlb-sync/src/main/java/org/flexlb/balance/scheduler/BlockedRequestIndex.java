@@ -38,6 +38,10 @@ final class BlockedRequestIndex {
         selectorWaiters = new TreeSet<>(order);
     }
 
+    int size() {
+        return membership.size() + selectorWaiters.size();
+    }
+
     boolean isBlocked(GlobalQueueEntry entry) {
         return entry.blockedEndpoint != null || isSelectorBlocked(entry);
     }

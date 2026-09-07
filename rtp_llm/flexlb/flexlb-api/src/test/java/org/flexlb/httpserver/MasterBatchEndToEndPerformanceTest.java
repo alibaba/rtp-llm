@@ -48,6 +48,7 @@ import org.flexlb.service.grace.ActiveRequestCounter;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
+import org.flexlb.service.optimizer.OptimizerClient;
 import org.flexlb.sync.status.WorkerDirectory;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
@@ -222,6 +223,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
     private List<ManagedChannel> masterChannels = List.of();
     private ServerScheduleLatencyRecorder latencyRecorder;
     private ActiveRequestCounter activeRequestCounter;
+    private CacheAwareService cacheAwareService;
     private static ch.qos.logback.classic.Logger flexlbLogger;
     private static ch.qos.logback.classic.Logger syncLogger;
     private static ch.qos.logback.classic.Logger mockWorkerLogger;
@@ -328,13 +330,15 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
 
     @Override
     protected DefaultRouter createRouter() {
-        CacheAwareService cache = mock(CacheAwareService.class);
-        when(cache.findMatchingEngines(any()))
+        cacheAwareService = mock(CacheAwareService.class);
+        when(cacheAwareService.findMatchingEngines(any()))
                 .thenReturn(CacheMatchResult.empty(CacheMatchSource.LOCAL_SYNC));
+        when(cacheAwareService.prepareBlockCacheKeys(any()))
+                .thenReturn(CompletableFuture.completedFuture(null));
         CostBasedPrefillStrategy prefillSelector =
                 new CostBasedPrefillStrategy(
                         engineWorkerStatus,
-                        cache,
+                        cacheAwareService,
                         mock(EngineHealthReporter.class));
         ModelMetaConfig modelMeta = mock(
                 ModelMetaConfig.class, withSettings().stubOnly());
@@ -370,7 +374,9 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                 configService,
                 reporter,
                 latencyRecorder,
-                NO_OP_REQUEST_REPORTER);
+                NO_OP_REQUEST_REPORTER,
+                cacheAwareService,
+                mock(OptimizerClient.class, withSettings().stubOnly()));
 
         int grpcPort;
         try (ServerSocket socket = new ServerSocket(0)) {

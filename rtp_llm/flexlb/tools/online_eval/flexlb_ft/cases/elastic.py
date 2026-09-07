@@ -304,6 +304,9 @@ def elastic_add_remove_cycle(ctx: CaseContext):
                 REMOVE_CONVERGENCE_S,
                 0.1,
             )
+            topology_rm_ok = _wait_master_topology(
+                ops, "PREFILL", p_prefill, MASTER_EVICT_S
+            )
             # File must stay parseable at every round boundary.
             parsable = _discovery_payload(env) is not None
 
@@ -313,6 +316,7 @@ def elastic_add_remove_cycle(ctx: CaseContext):
                 and traffic_ok
                 and flow_zero_fail
                 and file_rm_ok
+                and topology_rm_ok
                 and parsable
             )
             all_ok = all_ok and round_ok
@@ -320,7 +324,8 @@ def elastic_add_remove_cycle(ctx: CaseContext):
                 f"r{round_no}[{name}]: file={file_ok} alive={alive_ok} "
                 f"traffic={traffic_ok} rm={status_rm} "
                 f"flow={f_ok}/{f_total}(zero-fail={f_ok == f_total and f_total > 0}) "
-                f"file_rm={file_rm_ok} parsable={parsable}"
+                f"file_rm={file_rm_ok} topology_rm={topology_rm_ok} "
+                f"parsable={parsable}"
             )
             if not round_ok:
                 break

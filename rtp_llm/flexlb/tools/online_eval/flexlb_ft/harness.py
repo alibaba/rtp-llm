@@ -259,6 +259,16 @@ def http_get_status(url: str, timeout: float = 10.0) -> int:
         return 0
 
 
+def run_master_online_hook(base_url: str) -> None:
+    """Mirror the production sidecar's post-start lifecycle callback."""
+    status = http_get_status(f"{base_url}/hook/after_start", timeout=65.0)
+    if status != 200:
+        raise RuntimeError(
+            f"master online hook failed: GET {base_url}/hook/after_start "
+            f"returned HTTP {status}"
+        )
+
+
 def http_post_json(
     url: str, body: dict, timeout: float = 10.0
 ) -> tuple[int, Optional[dict]]:
@@ -321,10 +331,20 @@ def wait_for(
 
 
 def port_in_use(port: int, host: str = "127.0.0.1") -> bool:
+    connect_host = {"0.0.0.0": "127.0.0.1", "::": "::1"}.get(host, host)
+    try:
+        with socket.create_connection((connect_host, port), timeout=0.2):
+            return True
+    except OSError:
+        pass
+
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
             sock.bind((host, port))
+            # The bind/listen fallback catches reserved ports that are not yet
+            # accepting connections.
+            sock.listen(1)
             return False
         except OSError:
             return True
@@ -1309,11 +1329,17 @@ def flexlb_config_for_profile(profile: str, **overrides) -> str:
 #   HIPPO_ROLE             — flexlb-sync (zookeeper elect / LB status)
 #   OTEL_TRACE_SKIP_PATTERN — flexlb-api application.yml (spring tracing)
 #   OTEL_EXPORTER_OTLP_ENDPOINT — OpenTelemetry SDK exporter ("none" disables)
+#   FLEXLB_MONITOR_PROVIDER / FLEXLB_MONITOR_METRIC_WHITELIST — enable and
+#       expose the business metrics asserted by standalone cases
+#   FLEXLB_LOG_PATH / FLEXLB_APP_LOG_PATH — isolated, writable log directories
+#       for each harness environment (the application default is container-only)
 # Every other legacy v1 var previously exported here had zero consumers in
 # the v2 Java code and was removed (task #54 dead-env sweep).
 BASE_MASTER_ENV = {
     "OTEL_TRACE_SKIP_PATTERN": ".*",
     "OTEL_EXPORTER_OTLP_ENDPOINT": "none",
+    "FLEXLB_MONITOR_PROVIDER": "prometheus",
+    "FLEXLB_MONITOR_METRIC_WHITELIST": "flexlb_app_flexlb_inflight_ttl",
 }
 
 
@@ -1348,6 +1374,8 @@ class FlexEnv:
         self.masters: dict[str, Optional[ManagedProcess]] = {}
         self.master_specs: dict[str, MasterSpec] = {}
         self.masters_start_count: dict[str, int] = {}
+        self.flexlb_log_path = run_dir / "master_logs" / "flexlb.log"
+        self.pv_log_path = run_dir / "master_logs" / "pv.log"
         # ZK helper (Tier-2/3): ManagedProcess + advertised connectString.
         self.zk_helper: Optional[ManagedProcess] = None
         self.zk_connect_string: Optional[str] = None
@@ -1586,6 +1614,29 @@ class EnvManager:
         """
         spec = env.spec
         menv = dict(BASE_MASTER_ENV)
+        default_log_dir = env.run_dir / (
+            (mspec.log_dir_name or f"logs_{mspec.name}")
+            if mspec is not None
+            else "master_logs"
+        )
+        log_dir = Path(
+            spec.master_env.get(
+                "FLEXLB_LOG_PATH",
+                os.environ.get("FLEXLB_LOG_PATH", str(default_log_dir)),
+            )
+        ).expanduser()
+        app_log_dir = Path(
+            spec.master_env.get(
+                "FLEXLB_APP_LOG_PATH",
+                os.environ.get("FLEXLB_APP_LOG_PATH", str(log_dir)),
+            )
+        ).expanduser()
+        log_dir.mkdir(parents=True, exist_ok=True)
+        app_log_dir.mkdir(parents=True, exist_ok=True)
+        menv["FLEXLB_LOG_PATH"] = str(log_dir)
+        menv["FLEXLB_APP_LOG_PATH"] = str(app_log_dir)
+        env.flexlb_log_path = log_dir / "flexlb.log"
+        env.pv_log_path = app_log_dir / "pv.log"
         if spec.master_profile != "none":
             menv["FLEXLB_CONFIG"] = flexlb_config_for_profile(spec.master_profile)
         menv["HIPPO_ROLE"] = f"flexlb_ft_{spec.label}"
@@ -1731,35 +1782,31 @@ class EnvManager:
         # period finding: a config-rejected master leaves ~11 stdout
         # lines with NO strict-parser message.  The full Spring startup
         # and ConfigValidationException stacks land in the logback file
-        # appender at ~/ai-whale/logs/application.log (shared across
-        # every master start in the container), so capture its size now
-        # and append the bytes written by THIS start to the failure
-        # diagnostics.
-        app_log = Path.home() / "ai-whale" / "logs" / "application.log"
+        # appender in this harness environment's writable log directory, so
+        # capture its size now and append the bytes written by THIS start to
+        # the failure diagnostics.
+        master_env = self._master_env(env)
+        app_log = Path(master_env["FLEXLB_APP_LOG_PATH"]) / "application.log"
         try:
             app_log_offset = app_log.stat().st_size
         except OSError:
             app_log_offset = 0
         # Same offset discipline for the flexlbLogger file appender
-        # (~/ai-whale/logs/flexlb.log — shared across every master in the
-        # container): cases read "the bytes THIS master wrote" via
-        # env.flexlb_log_offset (see cases/priority.py _master_log_text).
-        flexlb_log = Path.home() / "ai-whale" / "logs" / "flexlb.log"
+        # Cases read "the bytes THIS master wrote" via flexlb_log_offset.
+        flexlb_log = env.flexlb_log_path
         try:
             env.flexlb_log_offset = flexlb_log.stat().st_size
         except OSError:
             env.flexlb_log_offset = 0
         # A8 (Daniel P2-3): same offset discipline for the pv.log request
-        # journal (~/ai-whale/logs/pv.log — shared across every master in
-        # the container): cases read only THIS master's rows via
-        # env.pv_log_offset (see cases/priority.py _pv_log_tail), with an
-        # additional per-case requestId filter on top.
-        pv_log = Path.home() / "ai-whale" / "logs" / "pv.log"
+        # journal: cases read only this master's rows via pv_log_offset, with
+        # an additional per-case requestId filter on top.
+        pv_log = env.pv_log_path
         try:
             env.pv_log_offset = pv_log.stat().st_size
         except OSError:
             env.pv_log_offset = 0
-        proc = ProcessOps.start(argv, self._master_env(env), env.run_dir / log_name)
+        proc = ProcessOps.start(argv, master_env, env.run_dir / log_name)
         env.master = proc
 
         def _app_log_tail_this_start(lines: int = 60) -> str:
@@ -1789,7 +1836,7 @@ class EnvManager:
         if not master_up:
             app_tail = _app_log_tail_this_start()
             extra = (
-                "\n--- ~/ai-whale/logs/application.log (this start) ---\n" + app_tail
+                f"\n--- {app_log} (this start) ---\n" + app_tail
                 if app_tail
                 else ""
             )
@@ -1800,7 +1847,7 @@ class EnvManager:
         if not proc.alive():
             app_tail = _app_log_tail_this_start()
             extra = (
-                "\n--- ~/ai-whale/logs/application.log (this start) ---\n" + app_tail
+                f"\n--- {app_log} (this start) ---\n" + app_tail
                 if app_tail
                 else ""
             )
@@ -1809,11 +1856,14 @@ class EnvManager:
                 f"{proc.tail_log()}{extra}"
             )
 
+        base_url = f"http://127.0.0.1:{env.master_http_port}"
+        run_master_online_hook(base_url)
+
         def _master_info() -> Optional[dict]:
             # /rtp_llm/master/info is a POST endpoint (GET returns 405);
             # http_post_json returns (status, payload) tuple.
             status, data = http_post_json(
-                f"http://127.0.0.1:{env.master_http_port}/rtp_llm/master/info",
+                f"{base_url}/rtp_llm/master/info",
                 {},
             )
             return data if status == 200 else None
@@ -1825,7 +1875,7 @@ class EnvManager:
         ):
             raise RuntimeError(
                 "master HTTP up but engine sync not ready after 30s "
-                "(check ~/ai-whale/logs/flexlb.log)"
+                f"(check {flexlb_log})"
             )
 
         # Stability window: hold "alive == discovered == spec topology" for
@@ -1872,7 +1922,7 @@ class EnvManager:
                 raise RuntimeError(
                     f"master engines not stable (alive == discovered for "
                     f"{window_s:.0f}s) within 90s — check "
-                    f"~/ai-whale/logs/flexlb.log"
+                    f"{flexlb_log}"
                 )
         self._log(
             f"master up (pid={proc.pid}, profile={spec.master_profile}, log={log_name})"
@@ -2004,6 +2054,7 @@ class EnvManager:
                 f"master instance '{mspec.name}' exited during startup "
                 f"(port conflict?):\n{proc.tail_log()}"
             )
+        run_master_online_hook(base_url)
         if not wait_for(
             lambda: (lambda d: bool(d and d.get("ready")))(_master_info()),
             timeout_s=30,
