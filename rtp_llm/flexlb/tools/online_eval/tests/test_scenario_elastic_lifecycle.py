@@ -90,6 +90,53 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual(result.checks[1].status, "PASS")
         self.assertEqual(result.checks[2].status, "FAIL")
 
+    def test_post_window_requires_fresh_traffic_but_allows_transient_only(self):
+        for increment, expected in [(0, "FAIL"), (1, "PASS")]:
+            samples = [
+                dict(
+                    offset_s=t,
+                    counts=dict(
+                        old0=t * 5, old1=t * 5, new=10 + (increment if t >= 5 else 0)
+                    ),
+                )
+                for t in [0, 5, 10, 17, 24, 31, 38, 45]
+            ]
+            with tempfile.TemporaryDirectory() as root:
+                data = dict(
+                    series=dict(samples=samples), before=samples[0], after=samples[-1]
+                )
+                ctx = NS(
+                    resolve=lambda v: v,
+                    resource=lambda v, *a: data[v],
+                    artifact_dir=Path(root),
+                )
+                share = life.share(
+                    ctx,
+                    dict(
+                        series="series",
+                        engine="new",
+                        max_share=0.6,
+                        old_floor=0.1,
+                        exclusive=False,
+                        require_new=False,
+                    ),
+                    NS(check=lambda: None),
+                )
+                self.assertTrue(all(c.status == "PASS" for c in share.checks))
+                received = life.window_received(
+                    ctx,
+                    dict(before="before", after="after", engine="new"),
+                    NS(check=lambda: None),
+                )
+                self.assertEqual(received.checks[0].status, expected)
+
+    def test_remove_requires_fresh_traffic_despite_historical_accepts(self):
+        result, state = self.run_program(no_remove_traffic=True)
+        rows = {row["id"]: row for row in result["stages"]}
+        self.assertEqual(rows["remove_traffic"]["status"], "FAIL")
+        self.assertEqual(rows["remove"]["status"], "BLOCKED")
+        self.assertTrue(state["cleaned"])
+
     def test_pre_add_successes_do_not_dilute_add_window_failure(self):
         flow = e.ClientRecords(1)
         for timestamp in range(110):
@@ -120,7 +167,13 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual(result.checks[2].actual, 0.8)
         self.assertEqual(result.checks[2].status, "FAIL")
 
-    def run_program(self, variant="normal", fail_remove=False, batch_error=False):
+    def run_program(
+        self,
+        variant="normal",
+        fail_remove=False,
+        batch_error=False,
+        no_remove_traffic=False,
+    ):
         clock = Clock()
         state = dict(
             engines={
@@ -144,8 +197,11 @@ class LifecycleTests(unittest.TestCase):
         handlers = {h.name: h for h in e.HANDLERS}
         plans = compile_scenarios([("lifecycle.yaml", source)], handlers=handlers)
         plan = next(p for p in plans if p["variant_id"] == variant)
-        self.assertEqual(len(plan["stages"]), 59)
-        self.assertEqual(plan["resource_budget"]["max_dynamic_additions"], 4)
+        self.assertEqual(len(plan["stages"]), 10 if variant == "rebalance" else 57)
+        self.assertEqual(
+            plan["resource_budget"]["max_dynamic_additions"],
+            1 if variant == "rebalance" else 4,
+        )
 
         with tempfile.TemporaryDirectory() as root:
             discovery = Path(root) / "discovery.json"
@@ -218,7 +274,10 @@ class LifecycleTests(unittest.TestCase):
                 if state["active"]:
                     elapsed = clock() - state["last"]
                     for row in state["engines"].values():
-                        row["accepted"] += round(elapsed * 10)
+                        if not (
+                            no_remove_traffic and state["active_flow"].ordinal == 2
+                        ):
+                            row["accepted"] += round(elapsed * 10)
                     state["last"] = clock()
                     if elapsed > 0:
                         flow = state["active_flow"]
@@ -322,8 +381,8 @@ class LifecycleTests(unittest.TestCase):
             result, state = self.run_program(variant)
             self.assertEqual(result["status"], "PASS", result)
             self.assertEqual(state["adds"], 4)
-            self.assertEqual(state["batches"], 100)
-            self.assertEqual(sum(len(s["checks"]) for s in result["stages"]), 69)
+            self.assertEqual(state["batches"], 0)
+            self.assertEqual(sum(len(s["checks"]) for s in result["stages"]), 62)
             self.assertTrue(all(s["status"] == "PASS" for s in result["stages"]))
 
     def test_remove_failure_cannot_be_hidden_by_preference_90_percent_floor(self):
@@ -334,8 +393,17 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual(rows["remove_zero_errors"]["status"], "FAIL")
         self.assertEqual(rows["cycle1_add"]["status"], "BLOCKED")
 
+    def test_rebalance_is_immediate_without_preference_warmup(self):
+        result, state = self.run_program("rebalance")
+        self.assertEqual(result["status"], "PASS", result)
+        self.assertEqual(state["flow_count"], 0)
+        self.assertEqual(state["batches"], 100)
+        self.assertEqual(state["adds"], 1)
+        rows = {row["id"]: row for row in result["stages"]}
+        self.assertEqual(rows["rebalance_share"]["status"], "PASS")
+
     def test_rebalance_request_error_fails_independently_of_share(self):
-        result, _ = self.run_program(batch_error=True)
+        result, _ = self.run_program("rebalance", batch_error=True)
         self.assertEqual(result["status"], "FAIL")
         row = next(s for s in result["stages"] if s["id"] == "rebalance_after_add")
         self.assertEqual(

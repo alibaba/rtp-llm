@@ -36,7 +36,6 @@ variants:
   - elastic_add_flow
   - elastic_remove_flow
   - elastic_add_remove_cycle
-  - elastic_rebalance
   - elastic_add_preference
 - id: strict
   stage_overrides:
@@ -46,8 +45,78 @@ variants:
   - elastic_add_flow
   - elastic_remove_flow
   - elastic_add_remove_cycle
-  - elastic_rebalance
   - elastic_add_preference
+- id: rebalance
+  legacy_case_ids:
+  - elastic_rebalance
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: initial_topology
+    action: elastic_topology
+    params:
+      role: PREFILL
+      discovered: 2
+      alive: 2
+    timeout_s: 35
+  - id: rebalance_baseline
+    action: elastic_batch
+    params:
+      count: 50
+    timeout_s: 240
+  - id: add
+    action: elastic_add
+    params:
+      role: prefill
+  - id: added_topology
+    action: elastic_topology
+    params:
+      role: PREFILL
+      discovered: 3
+      alive: 3
+      port:
+        $ref: stages.add.output.port
+      present: true
+    timeout_s: 35
+  - id: rebalance_before
+    action: elastic_timeline
+    params:
+      engines:
+      - prefill-0
+      - prefill-1
+      - $ref: stages.add.output.engine
+      offsets_s:
+      - 0
+  - id: rebalance_after_add
+    action: elastic_batch
+    params:
+      count: 50
+    timeout_s: 240
+  - id: rebalance_after
+    action: elastic_timeline
+    params:
+      engines:
+      - prefill-0
+      - prefill-1
+      - $ref: stages.add.output.engine
+      offsets_s:
+      - 0
+  - id: rebalance_share
+    action: elastic_share
+    params:
+      before:
+        $ref: stages.rebalance_before.output.last
+      after:
+        $ref: stages.rebalance_after.output.last
+      engine:
+        $ref: stages.add.output.engine
+      max_share: 0.6
+      old_floor: 0
+      exclusive: true
+      require_new: true
+  - id: teardown
+    action: teardown
 - id: kv_skew_hot
   legacy_case_ids:
   - elastic_kv_skew_shrink_hot
@@ -242,11 +311,6 @@ stages:
     discovered: 2
     alive: 2
   timeout_s: 35
-- id: rebalance_baseline
-  action: elastic_batch
-  params:
-    count: 50
-  timeout_s: 240
 - id: preference_flow
   action: elastic_cold_flow
 - id: ramp
@@ -288,7 +352,7 @@ stages:
 - id: post_window
   action: elastic_timeline
   params:
-    engines: &id003
+    engines:
     - prefill-0
     - prefill-1
     - *id002
@@ -317,6 +381,14 @@ stages:
       $ref: stages.add.output.mutation
     received_s:
       $ref: stages.first_traffic.output.observed_s
+- id: preference_received
+  action: elastic_window_received
+  params:
+    engine: *id002
+    before:
+      $ref: stages.post_window.output.first
+    after:
+      $ref: stages.post_window.output.last
 - id: preference_shares
   action: elastic_share
   params:
@@ -333,37 +405,20 @@ stages:
     result:
       $ref: stages.preference_flow_stop.output.result
     min_success_rate: 0.9
-- id: rebalance_before
-  action: elastic_timeline
+- id: remove_counter
+  action: elastic_accepted_snapshot
   params:
-    engines: *id003
-    offsets_s:
-    - 0
-- id: rebalance_after_add
-  action: elastic_batch
-  params:
-    count: 50
-  timeout_s: 240
-- id: rebalance_after
-  action: elastic_timeline
-  params:
-    engines: *id003
-    offsets_s:
-    - 0
-- id: rebalance_share
-  action: elastic_share
-  params:
-    before:
-      $ref: stages.rebalance_before.output.last
-    after:
-      $ref: stages.rebalance_after.output.last
     engine: *id002
-    max_share: 0.6
-    old_floor: 0
-    exclusive: true
-    require_new: true
 - id: remove_flow
   action: elastic_cold_flow
+- id: remove_traffic
+  action: elastic_accepted
+  params:
+    engine: *id002
+    baseline:
+      $ref: stages.remove_counter.output.accepted
+    window_s: 10
+  timeout_s: 15
 - id: remove_ramp
   action: elastic_pause
   params:
@@ -422,7 +477,7 @@ stages:
 - id: cycle1_traffic
   action: elastic_accepted
   params:
-    engine: &id004
+    engine: &id003
       $ref: stages.cycle1_add.output.engine
     baseline: 0
     window_s: 15
@@ -434,7 +489,7 @@ stages:
 - id: cycle1_remove
   action: elastic_remove
   params:
-    engine: *id004
+    engine: *id003
     drain_timeout_ms: 60000
   timeout_s: 75
 - id: cycle1_flow_stop
@@ -478,7 +533,7 @@ stages:
 - id: cycle2_traffic
   action: elastic_accepted
   params:
-    engine: &id005
+    engine: &id004
       $ref: stages.cycle2_add.output.engine
     baseline: 0
     window_s: 15
@@ -490,7 +545,7 @@ stages:
 - id: cycle2_remove
   action: elastic_remove
   params:
-    engine: *id005
+    engine: *id004
     drain_timeout_ms: 60000
   timeout_s: 75
 - id: cycle2_flow_stop
@@ -534,7 +589,7 @@ stages:
 - id: cycle3_traffic
   action: elastic_accepted
   params:
-    engine: &id006
+    engine: &id005
       $ref: stages.cycle3_add.output.engine
     baseline: 0
     window_s: 15
@@ -546,7 +601,7 @@ stages:
 - id: cycle3_remove
   action: elastic_remove
   params:
-    engine: *id006
+    engine: *id005
     drain_timeout_ms: 60000
   timeout_s: 75
 - id: cycle3_flow_stop
