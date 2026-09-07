@@ -214,11 +214,25 @@ class BackendRPCServerVisitor:
                             "master returned invalid ViT route",
                         )
                     selected_vit = vit_addrs[0]
-                    selected_status = next(
-                        s
-                        for s in vit_result.result["server_status"]
-                        if s["role"] == "VIT"
-                    )
+                    selected_status = None
+                    for status in (vit_result.result or {}).get("server_status", []):
+                        if not isinstance(status, dict):
+                            continue
+                        role = status.get("role")
+                        role_name = (
+                            role
+                            if isinstance(role, str)
+                            else getattr(role, "name", None)
+                        )
+                        if role_name == RoleType.VIT.name:
+                            selected_status = dict(status)
+                            selected_status["role"] = RoleType.VIT.name
+                            break
+                    if selected_status is None:
+                        raise FtRuntimeException(
+                            ExceptionType.ROUTE_ERROR,
+                            "master returned ViT route without matching server status",
+                        )
                     route_args["selected_vit"] = selected_status
                     metadata = await self.master_client.get_vit_cache_metadata(
                         selected_vit, keys
