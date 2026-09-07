@@ -115,6 +115,7 @@ def environment(value, path, profile):
             "config_overrides",
             "discovery",
             "perf_preset",
+            "prefill_perf",
             "debug_enabled",
             "master_layout",
             "master_stable_window_s",
@@ -141,6 +142,14 @@ def environment(value, path, profile):
     result["master_stable_window_s"] = number(
         value.get("master_stable_window_s", 3), path + ".master_stable_window_s"
     )
+    if "prefill_perf" in value:
+        field = path + ".prefill_perf"
+        required = {"fixed_ms", "scale", "max_batch_tokens", "max_batch_requests"}
+        perf = mapping(value["prefill_perf"], field, required, required)
+        result["prefill_perf"] = {
+            key: number(val, field + "." + key, integer=key.startswith("max_batch_"))
+            for key, val in perf.items()
+        }
     for key in ("n_prefill", "n_decode", "prefill_cache_blocks", "decode_cache_blocks"):
         if key in value:
             result[key] = number(value[key], path + "." + key, minimum=1, integer=True)
@@ -461,6 +470,7 @@ def compile_scenarios(documents, profile=None, handlers=None):
                     "config_overrides",
                     "discovery",
                     "perf_preset",
+                    "prefill_perf",
                     "debug_enabled",
                     "master_layout",
                     "master_stable_window_s",

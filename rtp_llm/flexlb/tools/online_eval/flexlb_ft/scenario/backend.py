@@ -422,6 +422,8 @@ def make_env_spec(plan, profile, lease):
     for key in ("prefill_cache_blocks", "decode_cache_blocks"):
         if key in plan:
             setattr(spec, key, plan[key])
+    if "prefill_perf" in plan:
+        spec.perf["prefill"] = dict(plan["prefill_perf"])
     return spec
 
 
