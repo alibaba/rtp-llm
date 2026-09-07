@@ -11,8 +11,11 @@ from rtp_llm.ops import (
     AttentionConfigs,
     FMHAConfig,
     FMHAType,
+    HybridAttentionConfig,
+    HybridAttentionType,
     KvCacheDataType,
     ParallelismConfig,
+    RoleType,
 )
 from rtp_llm.ops.compute_ops import PyAttentionInputs
 from rtp_llm.utils.model_weight import W
@@ -24,6 +27,56 @@ PREFILL_MLA_IMPS: List[type[MlaImplBase]] = []
 DECODE_MLA_IMPS: List[type[MlaImplBase]] = []
 
 
+def _page_rr_cache_group(
+    inputs: PyAttentionInputs,
+    parallelism: Optional[ParallelismConfig],
+    hybrid: Optional[HybridAttentionConfig],
+) -> Optional[int]:
+    if parallelism is None or parallelism.tp_size <= 1:
+        return None
+    sharded = (
+        parallelism.decode_cp_kv_cache_sharded
+        if parallelism.role_type == RoleType.DECODE
+        else parallelism.prefill_cp_config.kv_cache_sharded
+    )
+    if not sharded:
+        return None
+    if hybrid is not None and hybrid.enable_hybrid_attention:
+        kinds = hybrid.hybrid_attention_types
+        separate_pools = hybrid.enable_independent_kv_cache_pools
+    else:
+        kinds = (HybridAttentionType.NONE,)
+        separate_pools = False
+
+    full_layer_id = None
+    has_swa_pool = False
+    for layer_id, kind in enumerate(kinds):
+        if kind == HybridAttentionType.LINEAR:
+            continue
+        if kind == HybridAttentionType.SLIDING_WINDOW and separate_pools:
+            has_swa_pool = True
+            continue
+        if full_layer_id is None:
+            full_layer_id = layer_id
+    if full_layer_id is None:
+        return None
+    if has_swa_pool:
+        raise ValueError(
+            "one MLA implementation cannot share Page-RR FULL and "
+            "independently allocated SWA cache tables"
+        )
+
+    tables = inputs.kv_cache_kernel_block_id_device_by_group
+    if not tables or len(tables) == 1:
+        return 0
+    layer_map = inputs.kv_cache_layer_to_group_host
+    if layer_map is None or not layer_map.numel():
+        layer_map = inputs.kv_cache_layer_to_group
+    if layer_map is None or layer_map.is_cuda:
+        raise ValueError("Page-RR MLA requires the host layer-to-group map")
+    return int(layer_map[full_layer_id])
+
+
 def get_mla_impl(
     attn_configs: AttentionConfigs,
     weight: ModelWeights,
@@ -33,6 +86,7 @@ def get_mla_impl(
     is_cuda_graph: bool = False,
     max_seq_len: int = 0,
     parallelism_config: Optional[ParallelismConfig] = None,
+    hybrid_attention_config: Optional[HybridAttentionConfig] = None,
 ) -> MlaImplBase:
     # Keep the runtime metadata in sync with the implementation mode.  CUDA
     # graph construction performs ordinary-stream warmup forwards before the
@@ -54,6 +108,28 @@ def get_mla_impl(
         if attn_inputs.is_prefill and not is_target_verify and not is_mtp_draft_update
         else DECODE_MLA_IMPS
     )
+    cache_group_id = None
+    if mla_impls is DECODE_MLA_IMPS:
+        cache_group_id = _page_rr_cache_group(
+            attn_inputs, parallelism_config, hybrid_attention_config
+        )
+    if cache_group_id is not None:
+        from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.page_rr_mla_decode import (
+            PageRRMlaDecodeImpl,
+        )
+
+        return PageRRMlaDecodeImpl(
+            attn_configs,
+            attn_inputs,
+            weight.weights,
+            weight.get_global_weight(W.rope_cos_sin_cache),
+            fmha_config=fmha_config,
+            quant_config=quant_config,
+            max_seq_len=max_seq_len,
+            is_cuda_graph=is_cuda_graph,
+            parallelism_config=parallelism_config,
+            cache_group_id=cache_group_id,
+        )
     for impl in mla_impls:
         if attn_configs.mla_fp8_compute and impl.__name__ not in (
             "TokenSpeedMlaDecodeImpl", "MlaFlashMLAPrefillImpl"
@@ -244,6 +320,11 @@ class AttnImplFactory(object):
         attn_inputs.headwise_config = getattr(model_config, "headwise_config", None)
         key_str = "mla" if attn_configs.use_mla else "mha"
         fmha_impl_method = cls.FMHA_IMPL_REGISTRY[key_str]
+        mla_kwargs = (
+            {"hybrid_attention_config": model_config.hybrid_attention_config}
+            if attn_configs.use_mla
+            else {}
+        )
         instance = fmha_impl_method(
             attn_configs,
             weight,
@@ -254,6 +335,7 @@ class AttnImplFactory(object):
             is_cuda_graph,
             model_config.max_seq_len,
             parallelism_config,
+            **mla_kwargs,
         )
         logging.debug(f"get fmha impl: {type(instance).__name__}")
         return instance

@@ -17,6 +17,16 @@ from rtp_llm.models_py.modules.base.common.kvcache_store import (
 from rtp_llm.ops.compute_ops import KVCache, LayerKVCache, PyAttentionInputs
 
 
+def mla_cache_block_table(
+    inputs: PyAttentionInputs, cache_group_id: Optional[int] = None
+) -> Optional[torch.Tensor]:
+    if cache_group_id is not None:
+        groups = inputs.kv_cache_kernel_block_id_device_by_group
+        if groups:
+            return groups[cache_group_id]
+    return getattr(inputs, "kv_cache_kernel_block_id_device", None)
+
+
 def reshape_paged_kv_cache(
     paged_kv_cache: torch.Tensor,
     num_kv_heads: int,

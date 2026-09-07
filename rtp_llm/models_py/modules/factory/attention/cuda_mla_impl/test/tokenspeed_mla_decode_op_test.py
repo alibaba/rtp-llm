@@ -1,5 +1,6 @@
 """Correctness and CUDA Graph tests for TokenSpeed MLA decode."""
 
+import math
 import os
 from types import SimpleNamespace
 from unittest import TestCase, main, mock, skipUnless
@@ -1129,6 +1130,313 @@ class TokenSpeedMlaDecodeSupportTest(TestCase):
 
         self.assertEqual(decode_op_cls.call_args.kwargs["max_bs"], 2)
         self.assertEqual(decode_op_cls.call_args.kwargs["max_q_len"], 4)
+
+
+@skipUnless(RUN_KERNEL, SKIP_REASON)
+class TokenSpeedPageRrKernelTest(TestCase):
+    def _run_history(self, batch, queries, dtype, pdl, head_major=False):
+        from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.tokenspeed_mla_page_rr import (
+            tokenspeed_mla_page_rr_decode,
+        )
+
+        torch.manual_seed(104)
+        heads, latent, rope, page, width = 96, 512, 64, 128, 4
+        # Preserve allocator padding and latent/RoPE slice strides in the ABI.
+        cache_storage = (
+            torch.randn((16, page, latent + rope + 16), device="cuda", dtype=dtype)
+            * 0.1
+        )
+        kv = cache_storage[..., : latent + rope]
+        q_storage = (
+            torch.randn(
+                (batch, queries, heads, latent + rope + 16), device="cuda", dtype=dtype
+            )
+            * 0.1
+        )
+        query = q_storage[..., : latent + rope]
+        if head_major:
+            # A head-major projection/all-gather can expose the kernel's
+            # [B,Q,H,D] query as a view, without a token-major reorder copy.
+            q_storage = query.permute(2, 0, 1, 3).contiguous()
+            query = q_storage.permute(1, 2, 0, 3)
+        table_storage = torch.full(
+            (batch, width + 3), -1, device="cuda", dtype=torch.int32
+        )
+        table = table_storage[:, :width]
+        table.copy_(
+            torch.tensor(
+                [[7, 2, 11, 0], [3, 9, 1, 6]], device="cuda", dtype=torch.int32
+            ).repeat(batch // 2, 1)
+        )
+        query_block_tables = torch.empty(
+            (batch * queries, width), device="cuda", dtype=torch.int32
+        )
+        query_block_tables.view(batch, queries, width).copy_(table[:, None, :])
+        lengths = torch.tensor(
+            ([0] * queries + list(range(126, 126 + queries))) * (batch // 2),
+            device="cuda",
+            dtype=torch.int32,
+        ).view(batch, queries)
+        workspace = torch.empty(
+            torch.cuda.get_device_properties(0).multi_processor_count
+            * heads
+            * (latent + 1)
+            * 4,
+            device="cuda",
+            dtype=torch.int8,
+        )
+        output_storage = torch.full(
+            (batch * queries * heads * latent + 32,), 17, device="cuda", dtype=dtype
+        )
+        out = output_storage[:-32].view(batch, queries, heads, latent)
+        scale, output_scale = 192**-0.5, -1.25
+
+        def invoke(block_tables=query_block_tables):
+            return tokenspeed_mla_page_rr_decode(
+                query,
+                kv,
+                workspace,
+                latent,
+                rope,
+                block_tables,
+                lengths,
+                width * page,
+                scale,
+                output_scale=output_scale,
+                out=out,
+                enable_pdl=pdl,
+            )
+
+        def check(result):
+            self.assertIs(result[0], out)
+            self.assertEqual(result[1].shape, (batch, queries, heads))
+            for b in range(batch):
+                for q in range(queries):
+                    n = int(lengths[b, q])
+                    keys = kv[table[b].long()].reshape(-1, latent + rope)[:n].float()
+                    scores = query[b, q].float() @ keys.T * scale
+                    expected = (scores.softmax(-1) @ keys[:, :latent]) * output_scale
+                    torch.testing.assert_close(
+                        result[0][b, q].float(), expected, atol=3e-3, rtol=1e-2
+                    )
+                    torch.testing.assert_close(
+                        result[1][b, q],
+                        scores.logsumexp(-1) / math.log(2),
+                        atol=1e-3,
+                        rtol=1e-3,
+                    )
+            self.assertTrue(torch.all(output_storage[-32:] == 17))
+            self.assertTrue(torch.all(table_storage[:, width:] == -1))
+
+        # NaNs make an unwritten empty output observable, rather than allowing
+        # accidental zeroed allocator contents to satisfy the merge identity.
+        with self.assertRaisesRegex(ValueError, "query page tables"):
+            invoke(query_block_tables[:-1])
+        out.fill_(float("nan"))
+        result = invoke()
+        check(result)
+        for _ in range(3):
+            invoke()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            captured = invoke()
+        for replay in range(3):
+            table.copy_(torch.roll(table.clone(), shifts=1, dims=1))
+            query_block_tables.view(batch, queries, width).copy_(table[:, None, :])
+            q_storage.mul_(0.9)
+            if replay == 1:
+                lengths.zero_()
+            else:
+                lengths.add_(1)
+            out.fill_(float("nan"))
+            graph.replay()
+            check(captured)
+
+    def test_shared_pages_mtp_graph_output_contract(self):
+        for dtype in (torch.bfloat16, torch.float16):
+            for pdl in (False, True):
+                with self.subTest(dtype=dtype, pdl=pdl):
+                    self._run_history(2, 7, dtype, pdl)
+
+    def test_shared_pages_without_split_workspace(self):
+        self._run_history(80, 1, torch.bfloat16, False)
+
+    def test_shared_pages_head_major_query_view(self):
+        self._run_history(2, 7, torch.bfloat16, True, head_major=True)
+
+    def test_page_rr_live_metadata_and_native_writer_history(self):
+        from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.page_rr_mla_metadata import (
+            PageRRMlaDecodeMetadata,
+        )
+        from rtp_llm.ops.compute_ops import PyAttentionInputs
+
+        page, kernel_page, cp = 4096, 128, 8
+        latent, rope = 512, 64
+        for mode in ("decode", "verify", "draft_update"):
+            for rank in (0, 1):
+                with self.subTest(mode=mode, rank=rank):
+                    queries = 1 if mode == "decode" else 7
+                    inputs = PyAttentionInputs()
+                    inputs.is_prefill = mode != "decode"
+                    inputs.is_target_verify = mode == "verify"
+                    inputs.is_mtp_draft_update = mode == "draft_update"
+                    inputs.is_cuda_graph = True
+                    inputs.total_tokens = 2 * queries
+                    inputs.input_lengths = torch.full(
+                        (2,), queries, device="cuda", dtype=torch.int32
+                    )
+                    inputs.prefix_lengths = torch.empty_like(inputs.input_lengths)
+                    inputs.sequence_lengths = torch.empty_like(inputs.input_lengths)
+                    inputs.sequence_lengths_plus_1_d = torch.empty_like(
+                        inputs.input_lengths
+                    )
+                    # Kernel tables are views of allocator P-pages, with K-page
+                    # expansion and row padding, not independent invented K ids.
+                    physical = [[3, 1], [4, 2]]
+                    table_storage = torch.full(
+                        (2, 69), -1, device="cuda", dtype=torch.int32
+                    )
+                    inputs.kv_cache_kernel_block_id_device = table_storage[:, :64]
+                    metadata = PageRRMlaDecodeMetadata(page, kernel_page, cp, rank)
+                    cache = torch.randn(
+                        (5 * page // kernel_page, kernel_page, latent + rope),
+                        device="cuda",
+                        dtype=torch.bfloat16,
+                    )
+                    append = torch.randn(
+                        (2 * queries, latent + rope),
+                        device="cuda",
+                        dtype=torch.bfloat16,
+                    )
+                    writer = MlaKVCacheWriteOp(KvCacheDataType.BASE)
+
+                    def prepare(starts, capture=False):
+                        inputs.prefix_lengths.copy_(
+                            torch.tensor(starts, device="cuda", dtype=torch.int32)
+                        )
+                        inputs.sequence_lengths.copy_(inputs.prefix_lengths)
+                        inputs.sequence_lengths_plus_1_d.copy_(
+                            inputs.prefix_lengths + 1
+                        )
+                        if capture and mode == "decode":
+                            # Match CudaGraphRunner's synthetic q1 initialization.
+                            inputs.sequence_lengths_plus_1_d.zero_()
+                        expanded = [
+                            [
+                                p * (page // kernel_page) + k
+                                for p in row
+                                for k in range(page // kernel_page)
+                            ]
+                            for row in physical
+                        ]
+                        inputs.kv_cache_kernel_block_id_device.copy_(
+                            torch.tensor(expanded, device="cuda", dtype=torch.int32)
+                        )
+                        metadata.prepare(
+                            inputs, forbid_realloc=metadata.positions_d is not None
+                        )
+
+                    def write():
+                        writer.forward(
+                            append[:, :latent],
+                            append[:, latent:],
+                            FakeLayerKVCache(cache),
+                            metadata,
+                        )
+
+                    def check(starts, before):
+                        expected_positions, expected_lengths, expected_slots = (
+                            [],
+                            [],
+                            [],
+                        )
+                        expected = before.view(-1, latent + rope)
+                        for b, start in enumerate(starts):
+                            for q in range(queries):
+                                position = start + q
+                                expected_positions.append(position)
+                                # Independent count in global token coordinates;
+                                # do not reuse the producer's interval formula.
+                                expected_lengths.append(
+                                    sum(
+                                        t // page % cp == rank
+                                        for t in range(position + 1)
+                                    )
+                                )
+                                slot = -1
+                                if position // page % cp == rank:
+                                    physical_page = physical[b][position // (page * cp)]
+                                    slot = physical_page * page + position % page
+                                    expected[slot].copy_(append[b * queries + q])
+                                expected_slots.append(slot)
+                        self.assertEqual(
+                            metadata.positions_d.tolist(), expected_positions
+                        )
+                        self.assertEqual(
+                            metadata.local_causal_lens.flatten().tolist(),
+                            expected_lengths,
+                        )
+                        self.assertEqual(metadata.slot_mapping.tolist(), expected_slots)
+                        torch.testing.assert_close(
+                            metadata.query_block_tables,
+                            inputs.kv_cache_kernel_block_id_device.repeat_interleave(
+                                queries, dim=0
+                            ),
+                            atol=0,
+                            rtol=0,
+                        )
+                        torch.testing.assert_close(cache, before, atol=0, rtol=0)
+                        self.assertTrue(torch.all(table_storage[:, 64:] == -1))
+
+                    starts = [32765, 4093]
+                    prepare(starts, capture=True)
+                    pointers = tuple(
+                        t.data_ptr()
+                        for t in (
+                            metadata.positions_d,
+                            metadata.slot_mapping,
+                            metadata.local_causal_lens,
+                            metadata.query_block_tables,
+                        )
+                    )
+                    before = cache.clone()
+                    write()
+                    check(starts, before)
+                    for _ in range(3):
+                        write()
+                    graph = torch.cuda.CUDAGraph()
+                    with torch.cuda.graph(graph):
+                        write()
+                    for starts in ([32768, 4096], [1, 32768], [32767, 4095]):
+                        physical = [list(reversed(row)) for row in physical]
+                        append.mul_(0.9)
+                        prepare(starts)
+                        before = cache.clone()
+                        graph.replay()
+                        check(starts, before)
+                        self.assertEqual(
+                            pointers,
+                            tuple(
+                                t.data_ptr()
+                                for t in (
+                                    metadata.positions_d,
+                                    metadata.slot_mapping,
+                                    metadata.local_causal_lens,
+                                    metadata.query_block_tables,
+                                )
+                            ),
+                        )
+
+                    original_table = inputs.kv_cache_kernel_block_id_device
+                    inputs.kv_cache_kernel_block_id_device = original_table[:, :-1]
+                    try:
+                        with self.assertRaisesRegex(
+                            ValueError, "query page table shape"
+                        ):
+                            metadata.prepare(inputs, forbid_realloc=True)
+                    finally:
+                        inputs.kv_cache_kernel_block_id_device = original_table
+                    metadata.prepare(inputs, forbid_realloc=True)
 
 
 if __name__ == "__main__":

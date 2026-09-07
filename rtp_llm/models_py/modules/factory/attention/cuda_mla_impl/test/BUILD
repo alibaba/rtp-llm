@@ -96,6 +96,22 @@ py_test(
     exec_properties = {'gpu': 'B300'},
 )
 
+py_test(
+    name = "page_rr_mla_decode_test",
+    srcs = ["page_rr_mla_decode_test.py"],
+    timeout = "long",
+    data = ["//rtp_llm/cpp/cuda_graph/tests:test_cuda_graph_runner"],
+    deps = [
+        "//rtp_llm:apache-tvm-ffi",
+        "//rtp_llm:nvidia-cutlass-dsl",
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm/models_py/distributed:collective_torch",
+    ] + tokenspeed_mla_test_deps(),
+    tags = ["manual"],
+    exec_properties = {'gpu': 'SM100', 'gpu_count': '8'},
+)
+
 py_binary(
     name = "flashmla_dense_prefill_packed_kv_benchmark",
     srcs = ["flashmla_dense_prefill_packed_kv_benchmark.py"],
