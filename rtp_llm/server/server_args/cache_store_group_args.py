@@ -226,3 +226,27 @@ def init_cache_store_group_args(parser, cache_store_config):
         default=100,
         help="RDMA 传输 worker 线程池（RdmaTransferServiceWorker）队列深度，默认 100。",
     )
+    cache_store_group.add_argument(
+        "--p2p_rdma_enable_h2d_copy",
+        env_name="P2P_RDMA_ENABLE_H2D_COPY",
+        bind_to=(cache_store_config, "p2p_rdma_enable_h2d_copy"),
+        type=str2bool,
+        default=False,
+        help="P2P RDMA 是否先读入 pinned host staging buffer，再执行 H2D copy。",
+    )
+    cache_store_group.add_argument(
+        "--p2p_rdma_staging_block_count",
+        env_name="P2P_RDMA_STAGING_BLOCK_COUNT",
+        bind_to=(cache_store_config, "p2p_rdma_staging_block_count"),
+        type=int,
+        default=0,
+        help="P2P RDMA H2D staging 槽位数；开启 H2D copy 时必须大于 0。",
+    )
+    cache_store_group.add_argument(
+        "--p2p_rdma_staging_block_size_bytes",
+        env_name="P2P_RDMA_STAGING_BLOCK_SIZE_BYTES",
+        bind_to=(cache_store_config, "p2p_rdma_staging_block_size_bytes"),
+        type=int,
+        default=0,
+        help="单个 P2P RDMA H2D staging 槽位容量，必须为 4096 字节的倍数。",
+    )

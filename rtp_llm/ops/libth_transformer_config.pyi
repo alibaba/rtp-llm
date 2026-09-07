@@ -201,6 +201,9 @@ class CacheStoreConfig:
     cache_store_tcp_worker_queue_size: int
     rdma_transfer_worker_thread_count: int
     rdma_transfer_worker_queue_size: int
+    p2p_rdma_enable_h2d_copy: bool
+    p2p_rdma_staging_block_count: int
+    p2p_rdma_staging_block_size_bytes: int
 
     def __getstate__(self) -> tuple:
         ...

@@ -102,6 +102,11 @@ struct P2PConnectorWorkerConfig {
             cache_store_config.rdma_transfer_worker_thread_count;
         config.transfer_backend_config.rdma_transfer_worker_queue_size =
             cache_store_config.rdma_transfer_worker_queue_size;
+        config.transfer_backend_config.p2p_rdma_enable_h2d_copy = cache_store_config.p2p_rdma_enable_h2d_copy;
+        config.transfer_backend_config.p2p_rdma_staging_block_count =
+            cache_store_config.p2p_rdma_staging_block_count;
+        config.transfer_backend_config.p2p_rdma_staging_block_size_bytes =
+            cache_store_config.p2p_rdma_staging_block_size_bytes;
         config.p2p_layer_cache_buffer_store_timeout_ms = cache_store_config.p2p_layer_cache_buffer_store_timeout_ms;
         config.p2p_read_steal_before_deadline_ms       = cache_store_config.p2p_read_steal_before_deadline_ms;
         config.p2p_read_return_before_deadline_ms      = cache_store_config.p2p_read_return_before_deadline_ms;

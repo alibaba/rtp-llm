@@ -95,7 +95,7 @@ void HostStagingBlockPool::reportAcquireTimeout(std::chrono::steady_clock::time_
         return;
     }
     RTP_LLM_LOG_WARNING("host staging acquire timed out after %ld ms: blocks=%zu total_timeouts=%zu; "
-                        "consider raising staging block count or investigating disk latency",
+                        "consider raising staging block count or investigating downstream I/O latency",
                         waited_ms,
                         block_count_,
                         total);

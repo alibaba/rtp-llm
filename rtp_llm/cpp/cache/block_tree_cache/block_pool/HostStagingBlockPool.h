@@ -58,6 +58,14 @@ public:
 
     std::optional<HostStagingBlockLease> malloc();
 
+    size_t strideBytes() const {
+        return stride_bytes_;
+    }
+
+    bool isPinned() const {
+        return backing_.isPinned();
+    }
+
     // Exponential backoff with deadline; never sleeps while holding mutex_.
     std::optional<HostStagingBlockLease> mallocWithBackoff(std::chrono::milliseconds timeout);
 

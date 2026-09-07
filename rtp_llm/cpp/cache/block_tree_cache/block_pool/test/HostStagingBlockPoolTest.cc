@@ -9,6 +9,8 @@ namespace {
 
 TEST(HostStagingBlockPoolTest, UsesCallerProvidedStride) {
     HostStagingBlockPool pool(1, 65, /*try_pin_memory=*/false);
+    EXPECT_EQ(pool.strideBytes(), 65);
+    EXPECT_FALSE(pool.isPinned());
 
     std::optional<HostStagingBlockPool::HostStagingBlockLease> lease = pool.malloc();
     ASSERT_TRUE(lease.has_value());

@@ -199,7 +199,7 @@ class EngineConfigTest(TestCase):
     def test_cache_store_config_accepts_legacy_20_field_pickle_state(self):
         config = CacheStoreConfig()
         state = config.__getstate__()
-        self.assertEqual(len(state), 26)
+        self.assertEqual(len(state), 29)
 
         # Legacy state before the three p2p deadline fields and three worker
         # queue fields were added: first 18 fields + TCP anet thread/queue.
@@ -227,6 +227,27 @@ class EngineConfigTest(TestCase):
         self.assertEqual(
             restored.rdma_transfer_worker_queue_size,
             defaults.rdma_transfer_worker_queue_size,
+        )
+        self.assertEqual(
+            restored.p2p_rdma_enable_h2d_copy,
+            defaults.p2p_rdma_enable_h2d_copy,
+        )
+
+    def test_cache_store_config_preserves_rdma_h2d_staging_fields(self):
+        config = CacheStoreConfig()
+        config.p2p_rdma_enable_h2d_copy = True
+        config.p2p_rdma_staging_block_count = 8
+        config.p2p_rdma_staging_block_size_bytes = 4 * 1024 * 1024
+
+        restored = CacheStoreConfig()
+        maybe_restored = restored.__setstate__(config.__getstate__())
+        if maybe_restored is not None:
+            restored = maybe_restored
+
+        self.assertTrue(restored.p2p_rdma_enable_h2d_copy)
+        self.assertEqual(restored.p2p_rdma_staging_block_count, 8)
+        self.assertEqual(
+            restored.p2p_rdma_staging_block_size_bytes, 4 * 1024 * 1024
         )
 
 

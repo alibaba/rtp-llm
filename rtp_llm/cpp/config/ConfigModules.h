@@ -361,6 +361,9 @@ struct CacheStoreConfig {
     int     cache_store_tcp_worker_queue_size        = 500;
     int     rdma_transfer_worker_thread_count        = 16;
     int     rdma_transfer_worker_queue_size           = 100;
+    bool    p2p_rdma_enable_h2d_copy                  = false;
+    int     p2p_rdma_staging_block_count              = 0;
+    int64_t p2p_rdma_staging_block_size_bytes         = 0;
 
     std::string to_string() const;
 };
