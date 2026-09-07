@@ -71,6 +71,7 @@ stages:
     count: 10
     concurrency: 10
     request_timeout_s: 12
+    sample_topology: false
 - id: block_verdict
   action: check
   params:

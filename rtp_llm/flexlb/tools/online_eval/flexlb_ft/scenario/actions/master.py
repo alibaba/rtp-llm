@@ -772,6 +772,7 @@ def _batch_validate(params, plan):
                 "request_timeout_s",
                 "sample_after_s",
                 "coldstart",
+                "sample_topology",
             },
         )
     )
@@ -784,9 +785,16 @@ def _batch_validate(params, plan):
         p.setdefault(key, default)
         if type(p[key]) is not int or not minimum <= p[key] <= maximum:
             raise ValueError(f"{key} outside finite batch bounds")
+    p.setdefault("sample_topology", True)
+    if type(p["sample_topology"]) is not bool:
+        raise ValueError("sample_topology must be boolean")
     p.setdefault("coldstart", False)
     if type(p["coldstart"]) is not bool:
         raise ValueError("coldstart must be boolean")
+    if p["coldstart"] and not p["sample_topology"]:
+        raise ValueError("coldstart requires topology sampling")
+    if not p["sample_topology"] and p["sample_after_s"]:
+        raise ValueError("sample_after_s requires topology sampling")
     if (
         p["coldstart"]
         and getattr(plan, "environment", {}).get("master_stable_window_s", 3) != 0
@@ -873,6 +881,8 @@ def _batch(ctx, params, deadline):
     _process(ctx, params["target"])
     if params["coldstart"] and ctx.env.spec.master_stable_window_s != 0:
         raise ValueError("actual environment was warmed before coldstart burst")
+    if params["coldstart"] and not params.get("sample_topology", True):
+        raise ValueError("coldstart requires topology sampling")
     if params["target"] == "single":
         ops = ctx.ops
     else:
@@ -907,19 +917,22 @@ def _batch(ctx, params, deadline):
                 ended = ctx.clock()
                 for future in batch.futures:
                     future.result()
-            info = _master_json(
-                ctx, params["target"], "/rtp_llm/master/info", deadline, True
-            )
-            summary = info["worker_summary"]
-            observed = {}
-            for role in ("PREFILL", "DECODE"):
-                values = {key: summary[role][key] for key in ("discovered", "alive")}
-                if any(
-                    type(value) is not int or value < 0 for value in values.values()
-                ):
-                    raise ValueError("master topology sample has invalid counts")
-                observed[role] = values
-            samples.append(dict(time_s=ctx.clock(), workers=observed))
+            if params.get("sample_topology", True):
+                info = _master_json(
+                    ctx, params["target"], "/rtp_llm/master/info", deadline, True
+                )
+                summary = info["worker_summary"]
+                observed = {}
+                for role in ("PREFILL", "DECODE"):
+                    values = {
+                        key: summary[role][key] for key in ("discovered", "alive")
+                    }
+                    if any(
+                        type(value) is not int or value < 0 for value in values.values()
+                    ):
+                        raise ValueError("master topology sample has invalid counts")
+                    observed[role] = values
+                samples.append(dict(time_s=ctx.clock(), workers=observed))
             if ended is not None and ctx.clock() - ended >= params["sample_after_s"]:
                 break
             deadline.sleep(0.5)
