@@ -5,6 +5,9 @@ from typing import Any, Optional, Tuple
 import flashinfer.page as page
 import torch
 
+from rtp_llm.models_py.triton_kernels.common.paged_kv_cache_write import (
+    write_asymmetric_paged_kv_cache,
+)
 from rtp_llm.ops.compute_ops import LayerKVCache
 
 
@@ -174,12 +177,14 @@ class KVCacheWriteOp:
         kv_page_indices: torch.Tensor,
         kv_page_indptr: torch.Tensor,
     ) -> None:
-        """Write K/V one slot at a time when their head dims differ.
+        """Write asymmetric K/V through one fused Triton launch.
 
         FlashInfer's ``append_paged_kv_cache`` takes K and V through one head dimension,
-        so an asymmetric layer needs an explicit scatter. Position ``p`` lives at slot
-        ``p % page_size`` of the request's ``p // page_size``-th page, which the block
-        table maps to a physical page.
+        so an asymmetric layer needs a separate writer. Position ``p`` lives at slot
+        ``p % page_size`` of the request's ``p // page_size``-th page, which the block table
+        maps to a physical page. The Triton implementation consumes the existing packed
+        token metadata directly and avoids the temporary int64 tensors and advanced-index
+        assignment created by the former PyTorch implementation.
 
         A sliding-window group materializes only the tail of each request's page list and
         leaves NULL_BLOCK_IDX in the older slots. Tokens landing there are diverted to
@@ -190,30 +195,16 @@ class KVCacheWriteOp:
         substitutes it for the same NULL slots, all of which sit outside the window and are
         masked away by window_left.
         """
-        page_size = k_cache.size(2)
-        pos = positions.long()
-        batch_idx = batch_indices.long()
-        page_ids_local = pos // page_size
-        slot_in_page = pos % page_size
-
-        # A page index past the request's own pages would read past its slice of the flat
-        # page list, so clamp the gather index rather than indexing out of bounds; such
-        # tokens are diverted below along with the NULL ones.
-        page_start = kv_page_indptr[batch_idx].long()
-        pages_per_req = (
-            kv_page_indptr[batch_idx + 1] - kv_page_indptr[batch_idx]
-        ).long()
-        gather_idx = torch.clamp(
-            page_start + page_ids_local, max=kv_page_indices.size(0) - 1
+        write_asymmetric_paged_kv_cache(
+            key,
+            value,
+            k_cache,
+            v_cache,
+            batch_indices,
+            positions,
+            kv_page_indices,
+            kv_page_indptr,
         )
-        physical_page = kv_page_indices[gather_idx].long()
-        keep = (page_ids_local < pages_per_req) & (physical_page >= 0)
-        physical_page = torch.where(
-            keep, physical_page, torch.zeros_like(physical_page)
-        )
-
-        k_cache[physical_page, :, slot_in_page, :] = key
-        v_cache[physical_page, :, slot_in_page, :] = value
 
     def _prepare_warmup_cache_indices(
         self, num_tokens: int, device: torch.device
