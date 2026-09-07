@@ -1,0 +1,271 @@
+schema_version: 1
+id: engine_rpc_fault
+description: Explicit baseline, typed delay injection, recovery requests and owner
+  cleanup. Error and no-response contracts remain pending.
+category: engine_fault
+profiles:
+- batch-window
+- single-nonbatch
+- single-batch
+- window-nonbatch
+legacy_case_ids:
+- engine_fault_enqueue_delay
+- engine_fault_generate_delay
+environment:
+  backend: java_mock
+  n_prefill: 2
+  n_decode: 4
+  perf_preset: default
+execution:
+  timeout_s: 300
+  stage_timeout_s: 30
+  cleanup_timeout_s: 120
+variants:
+- id: enqueue_delay_batch
+  profiles:
+  - batch-window
+  - single-batch
+  legacy_case_ids:
+  - engine_fault_enqueue_delay
+  requires:
+  - enqueue_batch
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: baseline
+    action: request
+    params:
+      count: 1
+      input_len: 2048
+      output_len: 10
+      consume: immediate
+  - id: baseline_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.baseline.output.requests
+    timeout_s: 15
+  - id: inject
+    action: engine_inject
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+      type: enqueue_delay
+      options:
+        delay_ms: 1500
+  - id: delayed
+    action: request
+    params:
+      count: 1
+      input_len: 2048
+      output_len: 10
+      consume: immediate
+  - id: delayed_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.delayed.output.requests
+    timeout_s: 15
+  - id: clear
+    action: engine_clear
+    params:
+      fault:
+        $ref: stages.inject.output.fault
+  - id: recovery
+    action: request
+    params:
+      count: 1
+      input_len: 2048
+      output_len: 10
+      consume: immediate
+  - id: recovery_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.recovery.output.requests
+    timeout_s: 15
+  - id: latency
+    action: rpc_latency_check
+    params:
+      baseline:
+        $ref: stages.baseline.output.requests
+      delayed:
+        $ref: stages.delayed.output.requests
+      recovery:
+        $ref: stages.recovery.output.requests
+      metric: request_total
+      min_delta_s: 1.2
+      recovery_slack_s: 1.0
+  - id: scheduler_clean
+    action: master_wait_inflight
+    params:
+      op: eq
+      value: 0
+    timeout_s: 10
+  - id: cleanup
+    action: teardown
+- id: generate_delay_batch
+  profiles:
+  - batch-window
+  - single-batch
+  legacy_case_ids:
+  - engine_fault_generate_delay
+  requires:
+  - enqueue_batch
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: baseline
+    action: request
+    params:
+      count: 1
+      input_len: 2048
+      output_len: 10
+      consume: immediate
+  - id: baseline_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.baseline.output.requests
+    timeout_s: 12
+  - id: inject
+    action: engine_inject
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+      type: generate_delay
+      options:
+        delay_ms: 1500
+  - id: delayed
+    action: request
+    params:
+      count: 1
+      input_len: 2048
+      output_len: 10
+      consume: immediate
+  - id: delayed_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.delayed.output.requests
+    timeout_s: 12
+  - id: clear
+    action: engine_clear
+    params:
+      fault:
+        $ref: stages.inject.output.fault
+  - id: recovery
+    action: request
+    params:
+      count: 1
+      input_len: 2048
+      output_len: 10
+      consume: immediate
+  - id: recovery_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.recovery.output.requests
+    timeout_s: 12
+  - id: latency
+    action: rpc_latency_check
+    params:
+      baseline:
+        $ref: stages.baseline.output.requests
+      delayed:
+        $ref: stages.delayed.output.requests
+      recovery:
+        $ref: stages.recovery.output.requests
+      metric: stream_ttft
+      min_delta_s: 1.2
+      recovery_slack_s: 1.0
+  - id: scheduler_clean
+    action: master_wait_inflight
+    params:
+      op: eq
+      value: 0
+    timeout_s: 10
+  - id: cleanup
+    action: teardown
+- id: generate_delay_nonbatch
+  profiles:
+  - single-nonbatch
+  - window-nonbatch
+  legacy_case_ids:
+  - engine_fault_generate_delay
+  requires: []
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: baseline
+    action: request
+    params:
+      count: 1
+      input_len: 2048
+      output_len: 10
+      consume: immediate
+  - id: baseline_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.baseline.output.requests
+    timeout_s: 12
+  - id: inject
+    action: engine_inject
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+      type: generate_delay
+      options:
+        delay_ms: 1500
+  - id: delayed
+    action: request
+    params:
+      count: 1
+      input_len: 2048
+      output_len: 10
+      consume: immediate
+  - id: delayed_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.delayed.output.requests
+    timeout_s: 12
+  - id: clear
+    action: engine_clear
+    params:
+      fault:
+        $ref: stages.inject.output.fault
+  - id: recovery
+    action: request
+    params:
+      count: 1
+      input_len: 2048
+      output_len: 10
+      consume: immediate
+  - id: recovery_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.recovery.output.requests
+    timeout_s: 12
+  - id: latency
+    action: rpc_latency_check
+    params:
+      baseline:
+        $ref: stages.baseline.output.requests
+      delayed:
+        $ref: stages.delayed.output.requests
+      recovery:
+        $ref: stages.recovery.output.requests
+      metric: stream_ttft
+      min_delta_s: 1.2
+      recovery_slack_s: 1.0
+  - id: cleanup
+    action: teardown
