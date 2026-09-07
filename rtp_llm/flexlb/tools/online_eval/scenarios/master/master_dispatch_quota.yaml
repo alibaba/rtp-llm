@@ -43,6 +43,12 @@ stages:
     count: 4
     output_len: 10
     consume: deferred
+- id: all_fill_admitted
+  action: master_admission_check
+  params:
+    requests:
+      $ref: stages.fill.output.requests
+    count: 4
 - id: quota_held
   action: master_wait_inflight
   params:

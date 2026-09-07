@@ -262,9 +262,9 @@ variants:
     params:
       rows:
         $ref: stages.switch.output.rows
-      metric: target_share
+      metric: target_count
       op: ge
-      expected: 0.01
+      expected: 1
       target: A
   - id: switch_errors
     action: master_client_check
