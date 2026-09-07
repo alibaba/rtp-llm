@@ -747,7 +747,169 @@ def _decode_final(ctx, p, deadline):
     )
 
 
+def _error_segment_params(p, plan):
+    p = _params(
+        p, {"placeholder", "wave", "segment"}, {"placeholder", "wave", "segment"}
+    )
+    for key in ("placeholder", "wave"):
+        plan.reference(p[key], "requests")
+    if p["segment"] not in ("outstanding", "park", "expiry"):
+        raise ValueError("unknown error-family segment")
+    return p
+
+
+def _error_segment(ctx, p, deadline):
+    ph_wave, wave = [_cohort(ctx, p[k]) for k in ("placeholder", "wave")]
+    if not ph_wave.complete or not wave.complete:
+        raise ValueError("error-family verdict requires drained cohorts")
+    ph, rows = ph_wave.records(), wave.records()
+    first = p["segment"] == "outstanding"
+    ph_count, count = (2, 2) if first else (1, 9)
+    if (len(ph), len(ph_wave.entries), len(rows), len(wave.entries)) != (
+        ph_count,
+        ph_count,
+        count,
+        count,
+    ):
+        raise ValueError("error-family cohort size differs from old segment")
+    expected_ph = [50, 50] if first else [70]
+    expected_wave = (
+        [30, 70]
+        if first
+        else ([70] * 8 + [90] if p["segment"] == "park" else [30] * 8 + [90])
+    )
+    for cohort, priorities in ((ph_wave, expected_ph), (wave, expected_wave)):
+        if [r.get("priority") for r in cohort.p["requests"]] != priorities or any(
+            (r["input_len"], r["output_len"]) != (2048, 2) for r in cohort.p["requests"]
+        ):
+            raise ValueError("error-family request shape differs from old segment")
+    ph_out = [_outcome(e, r) for e, r in zip(ph_wave.entries, ph)]
+    outcomes = [_outcome(e, r) for e, r in zip(wave.entries, rows)]
+    all_codes = [c for _, c in ph_out + outcomes]
+    if any(type(c) is not int for c in all_codes):
+        raise ValueError("error-family verdict lacks typed terminal evidence")
+    ph_ok = all(ok for ok, _ in ph_out)
+    evidence = dict(
+        segment=p["segment"],
+        placeholder=ph,
+        wave=rows,
+        placeholder_outcomes=ph_out,
+        outcomes=outcomes,
+    )
+    codes = [c for _, c in outcomes]
+    if first:
+        wall = [
+            _number(r["schedule"]["ended_s"], 0, 1e18)
+            - _number(e.get("submitted_s"), 0, 1e18)
+            for e, r in zip(wave.entries, rows)
+        ]
+        if any(v < 0 for v in wall):
+            raise ValueError("Schedule settlement precedes submission")
+        fast = all(v < 3 for v in wall)
+        isolated = all(c not in (8402, 8403, 8431, 8400, 8429, 8511) for c in all_codes)
+        passed = codes == [8502, 8502] and fast and ph_ok and isolated
+        evidence.update(
+            schedule_wall_s=wall,
+            fast=fast,
+            reasons=[
+                getattr(
+                    e["batch"].entries[0]["response"], "admission_reject_reason", None
+                )
+                for e in wave.entries
+            ],
+        )
+    elif p["segment"] == "park":
+        _, _, _, _, raw, dispatch, actual, _ = _observations(ctx, p, deadline)
+        expected = [rows[i]["wire_request_id"] for i in [0, 8, 1, 2, 3, 4, 5, 6, 7]]
+        isolated = all(c not in (8502, 8403, 8431, 8400, 8429, 8511) for c in all_codes)
+        passed = (
+            codes[-1] == 200
+            and all(c not in (8400, 8429) for c in codes)
+            and actual == expected
+            and all(ok for ok, _ in outcomes)
+            and ph_ok
+            and isolated
+        )
+        evidence.update(raw=raw, dispatch=dispatch, actual=actual, expected=expected)
+    else:
+        isolated = all(c not in (8502, 8403, 8400, 8429) for c in all_codes)
+        passed = (
+            all(c == 8511 for c in codes)
+            and 8400 not in codes[:8]
+            and ph_ok
+            and isolated
+        )
+        evidence["incoming_reason"] = getattr(
+            wave.entries[-1]["batch"].entries[0]["response"],
+            "admission_reject_reason",
+            None,
+        )
+    evidence.update(passed=passed, isolated=isolated)
+    path = ctx.artifact_dir / f"preemption-error-family-{uuid.uuid4().hex}.json"
+    path.write_text(json.dumps(evidence, indent=2) + "\n")
+    return StageOutput({"passed": passed}, artifacts=[str(path)])
+
+
+def _error_recovery(ctx, p, deadline):
+    from .engine_recovery import RecoveryRequests
+
+    cohort = ctx.resource(p["requests"], "requests")
+    if not isinstance(cohort, RecoveryRequests):
+        raise ValueError("error-family recovery requires owned recovery workers")
+    rows = cohort.snapshot_records()
+    if len(rows) != 1:
+        raise ValueError("error-family recovery requires one request")
+    passed = (
+        request_success(rows[0]) and rows[0].get("recovery_observed_success") is True
+    )
+    path = ctx.artifact_dir / f"preemption-error-recovery-{uuid.uuid4().hex}.json"
+    path.write_text(json.dumps(rows, indent=2) + "\n")
+    return StageOutput({"passed": passed}, artifacts=[str(path)])
+
+
+def _error_final_params(p, plan):
+    p = _params(p, {"segments", "recovery"}, {"segments", "recovery"})
+    if not isinstance(p["segments"], list) or len(p["segments"]) != 3:
+        raise ValueError("all three error-family segments required")
+    for ref in p["segments"] + [p["recovery"]]:
+        plan.reference(ref, "boolean")
+    return p
+
+
+def _error_final(ctx, p, deadline):
+    values = dict(
+        segments=[ctx.resolve(v) for v in p["segments"]],
+        recovery=ctx.resolve(p["recovery"]),
+    )
+    passed = all(v is True for v in values["segments"]) and values["recovery"] is True
+    return StageOutput(
+        checks=[
+            CheckResult(k, "PASS" if passed else "FAIL", actual=values)
+            for k in ("AT4", "P6")
+        ]
+    )
+
+
 HANDLERS = [
+    StageHandler(
+        "preemption_error_segment",
+        _error_segment_params,
+        _error_segment,
+        {"passed": "boolean"},
+    ),
+    StageHandler(
+        "preemption_error_recovery",
+        _settled_params,
+        _error_recovery,
+        {"passed": "boolean"},
+    ),
+    StageHandler(
+        "preemption_error_final",
+        _error_final_params,
+        _error_final,
+        {},
+        checks=frozenset({"AT4", "P6"}),
+    ),
     StageHandler(
         "preemption_decode_fleet",
         lambda p, plan: _params(p, (), ()),

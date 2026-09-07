@@ -12,6 +12,7 @@ legacy_case_ids:
 - atpm_comparator_frozen_weak
 - atpm_config_strict_reject
 - atpm_preempt_decode_engine_owned
+- atpm_error_code_family
 environment:
   backend: java_mock
   n_prefill: 1
@@ -1337,6 +1338,440 @@ variants:
       - $ref: stages.fleet.output.prefill1
       perf:
         prefill_fixed_ms: 100
+  - id: teardown
+    action: teardown
+- id: error_code_family
+  legacy_case_ids:
+  - atpm_error_code_family
+  environment_overrides:
+    n_prefill: 2
+    n_decode: 2
+    config_overrides:
+      ordering: priority
+      decision: single
+      dispatcher: non_batch
+      max_outstanding: 2
+      queue_timeout_ms:
+        omit: true
+      max_inflight_requests_per_worker:
+        omit: true
+      max_waiting_requests_per_prefill_worker:
+        omit: true
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: s1_fleet
+    action: balance_snapshot
+    params:
+      role: prefill
+  - id: s1_slow
+    action: engine_control
+    params:
+      operation: set_perf
+      targets:
+      - $ref: stages.s1_fleet.output.first
+      - $ref: stages.s1_fleet.output.second
+      perf:
+        prefill_fixed_ms: 4000
+  - id: s1_sync
+    action: balance_pause
+    params:
+      seconds: 1.5
+  - id: s1_placeholder
+    action: priority_start
+    params:
+      gap_s: 0.15
+      requests:
+      - tag: placeholder0
+        priority: 50
+        input_len: 2048
+        output_len: 2
+      - tag: placeholder1
+        priority: 50
+        input_len: 2048
+        output_len: 2
+    timeout_s: 15
+  - id: s1_placeholder_settled
+    action: preemption_settled
+    params:
+      requests:
+        $ref: stages.s1_placeholder.output.requests
+    timeout_s: 90
+  - id: s1_admitted
+    action: check
+    params:
+      actual:
+        $ref: stages.s1_placeholder_settled.output.admitted
+      op: eq
+      expected: true
+  - id: s1_pending
+    action: preemption_pending
+    params:
+      target:
+        $ref: stages.s1_fleet.output.first
+    timeout_s: 6
+  - id: s1_wave
+    action: priority_start
+    params:
+      gap_s: 0.15
+      requests:
+      - tag: wave0
+        priority: 30
+        input_len: 2048
+        output_len: 2
+      - tag: wave1
+        priority: 70
+        input_len: 2048
+        output_len: 2
+    timeout_s: 15
+  - id: s1_wave_settled
+    action: preemption_settled
+    params:
+      requests:
+        $ref: stages.s1_wave.output.requests
+    timeout_s: 90
+  - id: s1_placeholder_drain
+    action: preemption_wait
+    params:
+      requests:
+        $ref: stages.s1_placeholder.output.requests
+    timeout_s: 70
+  - id: s1_wave_drain
+    action: preemption_wait
+    params:
+      requests:
+        $ref: stages.s1_wave.output.requests
+    timeout_s: 70
+  - id: s1_segment
+    action: preemption_error_segment
+    params:
+      placeholder:
+        $ref: stages.s1_placeholder.output.requests
+      wave:
+        $ref: stages.s1_wave.output.requests
+      segment: outstanding
+  - id: s1_restore
+    action: engine_control
+    params:
+      operation: set_perf
+      targets:
+      - $ref: stages.s1_fleet.output.first
+      - $ref: stages.s1_fleet.output.second
+      perf:
+        prefill_fixed_ms: 100
+  - id: recovery_prepare
+    action: recovery_prepare
+    params:
+      count: 1
+      concurrency: 1
+      input_len: 2048
+      output_len: 2
+      consume: immediate
+      schedule_timeout_s: 30
+      stream_timeout_s: 30
+      unique_key_count: 1
+      unique_key_start: 1
+      generate_payload: match_schedule
+  - id: recovery_dispatch
+    action: recovery_dispatch
+    params:
+      requests:
+        $ref: stages.recovery_prepare.output.requests
+    timeout_s: 60
+  - id: recovery_result
+    action: preemption_error_recovery
+    params:
+      requests:
+        $ref: stages.recovery_prepare.output.requests
+  - id: s1_clean
+    action: balance_clean
+    timeout_s: 30
+  - id: s2_environment
+    action: environment_reconfigure
+    params:
+      config_overrides:
+        ordering: priority
+        decision: single
+        dispatcher: non_batch
+        queue_timeout_ms: 60000
+        max_inflight_requests_per_worker: 1
+        max_waiting_requests_per_prefill_worker: 8
+        preemption:
+          allowed_victim_stages:
+          - PREFILL_QUEUED
+      n_prefill: 1
+      n_decode: 4
+    timeout_s: 300
+  - id: s2_fleet
+    action: priority_fleet
+  - id: s2_slow
+    action: engine_control
+    params:
+      operation: set_perf
+      targets:
+      - $ref: stages.s2_fleet.output.prefill
+      perf:
+        prefill_fixed_ms: 3000
+  - id: s2_sync
+    action: balance_pause
+    params:
+      seconds: 1.5
+  - id: s2_placeholder
+    action: priority_start
+    params:
+      gap_s: 0
+      requests:
+      - tag: placeholder0
+        priority: 70
+        input_len: 2048
+        output_len: 2
+    timeout_s: 15
+  - id: s2_placeholder_settled
+    action: preemption_settled
+    params:
+      requests:
+        $ref: stages.s2_placeholder.output.requests
+    timeout_s: 90
+  - id: s2_admitted
+    action: check
+    params:
+      actual:
+        $ref: stages.s2_placeholder_settled.output.admitted
+      op: eq
+      expected: true
+  - id: s2_pending
+    action: preemption_pending
+    params:
+      target:
+        $ref: stages.s2_fleet.output.prefill
+    timeout_s: 6
+  - id: s2_wave
+    action: priority_start
+    params:
+      gap_s: 0.15
+      requests:
+      - tag: wave0
+        priority: 70
+        input_len: 2048
+        output_len: 2
+      - tag: wave1
+        priority: 70
+        input_len: 2048
+        output_len: 2
+      - tag: wave2
+        priority: 70
+        input_len: 2048
+        output_len: 2
+      - tag: wave3
+        priority: 70
+        input_len: 2048
+        output_len: 2
+      - tag: wave4
+        priority: 70
+        input_len: 2048
+        output_len: 2
+      - tag: wave5
+        priority: 70
+        input_len: 2048
+        output_len: 2
+      - tag: wave6
+        priority: 70
+        input_len: 2048
+        output_len: 2
+      - tag: wave7
+        priority: 70
+        input_len: 2048
+        output_len: 2
+      - tag: wave8
+        priority: 90
+        input_len: 2048
+        output_len: 2
+    timeout_s: 15
+  - id: s2_wave_settled
+    action: preemption_settled
+    params:
+      requests:
+        $ref: stages.s2_wave.output.requests
+    timeout_s: 90
+  - id: s2_placeholder_drain
+    action: preemption_wait
+    params:
+      requests:
+        $ref: stages.s2_placeholder.output.requests
+    timeout_s: 35
+  - id: s2_wave_drain
+    action: preemption_wait
+    params:
+      requests:
+        $ref: stages.s2_wave.output.requests
+    timeout_s: 315
+  - id: s2_segment
+    action: preemption_error_segment
+    params:
+      placeholder:
+        $ref: stages.s2_placeholder.output.requests
+      wave:
+        $ref: stages.s2_wave.output.requests
+      segment: park
+  - id: s2_clean
+    action: balance_clean
+    timeout_s: 30
+  - id: s2_restore
+    action: engine_control
+    params:
+      operation: set_perf
+      targets:
+      - $ref: stages.s2_fleet.output.prefill
+      perf:
+        prefill_fixed_ms: 100
+  - id: s3_environment
+    action: environment_reconfigure
+    params:
+      config_overrides:
+        ordering: priority
+        decision: single
+        dispatcher: non_batch
+        queue_timeout_ms: 7000
+        max_inflight_requests_per_worker: 1
+        max_waiting_requests_per_prefill_worker: 8
+        preemption:
+          allowed_victim_stages:
+          - PREFILL_QUEUED
+      n_prefill: 1
+      n_decode: 4
+    timeout_s: 300
+  - id: s3_fleet
+    action: priority_fleet
+  - id: s3_slow
+    action: engine_control
+    params:
+      operation: set_perf
+      targets:
+      - $ref: stages.s3_fleet.output.prefill
+      perf:
+        prefill_fixed_ms: 10000
+  - id: s3_sync
+    action: balance_pause
+    params:
+      seconds: 1.5
+  - id: s3_placeholder
+    action: priority_start
+    params:
+      gap_s: 0
+      requests:
+      - tag: placeholder0
+        priority: 70
+        input_len: 2048
+        output_len: 2
+    timeout_s: 15
+  - id: s3_placeholder_settled
+    action: preemption_settled
+    params:
+      requests:
+        $ref: stages.s3_placeholder.output.requests
+    timeout_s: 90
+  - id: s3_admitted
+    action: check
+    params:
+      actual:
+        $ref: stages.s3_placeholder_settled.output.admitted
+      op: eq
+      expected: true
+  - id: s3_pending
+    action: preemption_pending
+    params:
+      target:
+        $ref: stages.s3_fleet.output.prefill
+    timeout_s: 6
+  - id: s3_wave
+    action: priority_start
+    params:
+      gap_s: 0.15
+      requests:
+      - tag: wave0
+        priority: 30
+        input_len: 2048
+        output_len: 2
+      - tag: wave1
+        priority: 30
+        input_len: 2048
+        output_len: 2
+      - tag: wave2
+        priority: 30
+        input_len: 2048
+        output_len: 2
+      - tag: wave3
+        priority: 30
+        input_len: 2048
+        output_len: 2
+      - tag: wave4
+        priority: 30
+        input_len: 2048
+        output_len: 2
+      - tag: wave5
+        priority: 30
+        input_len: 2048
+        output_len: 2
+      - tag: wave6
+        priority: 30
+        input_len: 2048
+        output_len: 2
+      - tag: wave7
+        priority: 30
+        input_len: 2048
+        output_len: 2
+      - tag: wave8
+        priority: 90
+        input_len: 2048
+        output_len: 2
+    timeout_s: 15
+  - id: s3_wave_settled
+    action: preemption_settled
+    params:
+      requests:
+        $ref: stages.s3_wave.output.requests
+    timeout_s: 90
+  - id: s3_placeholder_drain
+    action: preemption_wait
+    params:
+      requests:
+        $ref: stages.s3_placeholder.output.requests
+    timeout_s: 35
+  - id: s3_wave_drain
+    action: preemption_wait
+    params:
+      requests:
+        $ref: stages.s3_wave.output.requests
+    timeout_s: 315
+  - id: s3_segment
+    action: preemption_error_segment
+    params:
+      placeholder:
+        $ref: stages.s3_placeholder.output.requests
+      wave:
+        $ref: stages.s3_wave.output.requests
+      segment: expiry
+  - id: s3_clean
+    action: balance_clean
+    timeout_s: 30
+  - id: s3_restore
+    action: engine_control
+    params:
+      operation: set_perf
+      targets:
+      - $ref: stages.s3_fleet.output.prefill
+      perf:
+        prefill_fixed_ms: 100
+  - id: error_family_verdict
+    action: preemption_error_final
+    params:
+      segments:
+      - $ref: stages.s1_segment.output.passed
+      - $ref: stages.s2_segment.output.passed
+      - $ref: stages.s3_segment.output.passed
+      recovery:
+        $ref: stages.recovery_result.output.passed
   - id: teardown
     action: teardown
 stages:
