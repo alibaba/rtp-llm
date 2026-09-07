@@ -395,7 +395,7 @@ def make_env_spec(plan, profile, lease):
     from flexlb_ft.harness import EnvSpec, MasterSpec, default_perf, fault_env_perf
 
     kwargs = {
-        k: OMIT if isinstance(v, dict) else v
+        k: OMIT if v == {"omit": True} else v
         for k, v in plan["config_overrides"].items()
     }
     spec = EnvSpec(

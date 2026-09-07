@@ -341,6 +341,8 @@ def execute_instance(
     result.update(
         status=terminal_status,
         grade=instance.get("grade", "normal"),
+        effective_axes=instance.get("effective_axes"),
+        effective_capabilities=instance.get("effective_capabilities"),
         stages=rows,
         cleanup=cleanup,
         error=primary_error,
