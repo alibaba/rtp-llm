@@ -244,3 +244,27 @@ configuration. Dual-kill and all four freeze instances require new fixed-source
 execution; the existing immediate scheduler retention check is unchanged and
 can still fail. This patch does not claim that the configuration difference
 caused the observed scheduler count drop.
+
+
+## Quota recovery Prefill liveness correction
+
+The corrected45 run passed the former blocked-stage error but reached a new
+ready-stage ERROR: missing endpoint ledger observations. The old
+master_quota_block restarts Prefill, sets normal perf, polls only
+master_alive_count(PREFILL)>=1 for MASTER_EVICT_S=30 at .5s, then waits2s.
+The previous YAML master_ready added Master ready, both roles' full topology
+and empty scheduler/endpoint ledgers, which are not predicates of this step.
+
+The new master_prefill_alive action preserves only the old Prefill liveness
+condition and30/.5 budget. It reads actual Master info, records a temporarily
+absent PREFILL row as unknown rather than zero, and continues polling. It does
+not access inflight_status. Malformed present alive counters or missing
+worker_summary remain explicit ERROR rather than the old helper's coercion or
+unknown sentinel. The existing independent95s scheduler TTL-zero predicate,
+2s settle and20 serial recovery requests at>=90% are unchanged. Tests cover
+absent-then-alive with ready=false and no endpoint ledger, persistent alive0
+timeout, invalid counters and the formal stage boundaries.
+
+The original5aff blocked ERROR and corrected45 ready ERROR are both retained.
+This repair requires a new fixed-source run; passing local tests is not a
+quota Java PASS and does not reinterpret either prior result.
