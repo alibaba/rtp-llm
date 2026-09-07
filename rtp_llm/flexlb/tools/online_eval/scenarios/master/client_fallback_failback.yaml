@@ -1,0 +1,309 @@
+schema_version: 1
+id: client_fallback_failback
+description: Explicit client routing programs for all-master outage and wraparound
+  recovery.
+category: master
+profiles:
+- batch-window
+- single-nonbatch
+- single-batch
+- window-nonbatch
+legacy_case_ids:
+- fallback_direct
+- failback_wraparound
+environment:
+  backend: java_mock
+  n_prefill: 2
+  n_decode: 4
+  master_layout: dual_standalone
+execution:
+  timeout_s: 720
+  stage_timeout_s: 60
+  cleanup_timeout_s: 120
+variants:
+- id: all_masters_down
+  legacy_case_ids:
+  - fallback_direct
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: flow
+    action: master_client_start
+    params:
+      targets:
+      - A
+      - B
+      duration_s: 60
+      fallback: true
+  - id: kill_a_time
+    action: master_mark
+    params:
+      wait_s: 12
+  - id: kill_a
+    action: master_fault
+    params:
+      mode: kill
+      target: A
+  - id: kill_b_time
+    action: master_mark
+    params:
+      wait_s: 0.5
+  - id: kill_b
+    action: master_fault
+    params:
+      mode: kill
+      target: B
+  - id: outage_end
+    action: master_mark
+    params:
+      wait_s: 10
+  - id: finish
+    action: master_client_finish
+    params:
+      client:
+        $ref: stages.flow.output.client
+    timeout_s: 90
+  - id: steady
+    action: master_client_window
+    params:
+      rows:
+        $ref: stages.finish.output.rows
+      until:
+        $ref: stages.kill_a_time.output.epoch_s
+  - id: outage
+    action: master_client_window
+    params:
+      rows:
+        $ref: stages.finish.output.rows
+      from:
+        $ref: stages.kill_b_time.output.epoch_s
+      until:
+        $ref: stages.outage_end.output.epoch_s
+  - id: fallback_rows
+    action: master_client_window
+    params:
+      rows:
+        $ref: stages.finish.output.rows
+      from:
+        $ref: stages.kill_b_time.output.epoch_s
+      until:
+        $ref: stages.outage_end.output.epoch_s
+      route: fallback
+  - id: steady_master
+    action: master_client_check
+    params:
+      rows:
+        $ref: stages.steady.output.rows
+      metric: route_share
+      op: eq
+      expected: 1
+      route: master
+      min_samples: 10
+  - id: fallback_success
+    action: master_client_check
+    params:
+      rows:
+        $ref: stages.fallback_rows.output.rows
+      metric: success_rate
+      op: ge
+      expected: 0.9
+      min_samples: 10
+  - id: fallback_share
+    action: master_client_check
+    params:
+      rows:
+        $ref: stages.outage.output.rows
+      metric: route_share
+      op: ge
+      expected: 0.8
+      route: fallback
+  - id: no_master_during_outage
+    action: master_client_check
+    params:
+      rows:
+        $ref: stages.outage.output.rows
+      metric: route_count
+      op: eq
+      expected: 0
+      route: master
+  - id: outage_errors
+    action: master_client_check
+    params:
+      rows:
+        $ref: stages.outage.output.rows
+      metric: failed_rate_above_one
+      op: le
+      expected: 0.05
+  - id: unique_requests
+    action: master_client_check
+    params:
+      rows:
+        $ref: stages.finish.output.rows
+      metric: duplicate_ids
+      op: eq
+      expected: 0
+  - id: cleanup
+    action: teardown
+- id: wraparound
+  legacy_case_ids:
+  - failback_wraparound
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: flow
+    action: master_client_start
+    params:
+      targets:
+      - A
+      - B
+      duration_s: 150
+  - id: steady
+    action: master_mark
+    params:
+      wait_s: 12
+  - id: kill_a
+    action: master_fault
+    params:
+      mode: kill
+      target: A
+  - id: switched_b
+    action: master_mark
+    params:
+      wait_s: 10
+  - id: restart_a
+    action: master_restore
+    params:
+      fault:
+        $ref: stages.kill_a.output.fault
+    timeout_s: 180
+  - id: ready_a
+    action: master_ready
+    params:
+      target: A
+      inflight_zero: true
+  - id: recovery_a
+    action: master_request_batch
+    params:
+      target: A
+      count: 20
+      concurrency: 1
+    timeout_s: 330
+  - id: recovery_rate
+    action: check
+    params:
+      actual:
+        $ref: stages.recovery_a.output.success_rate
+      op: ge
+      expected: 0.95
+  - id: kill_b_time
+    action: master_mark
+    params:
+      wait_s: 8
+  - id: kill_b
+    action: master_fault
+    params:
+      mode: kill
+      target: B
+  - id: switched_a
+    action: master_mark
+    params:
+      wait_s: 10
+  - id: clean_a
+    action: master_ready
+    params:
+      target: A
+      inflight_zero: true
+  - id: finish
+    action: master_client_finish
+    params:
+      client:
+        $ref: stages.flow.output.client
+    timeout_s: 180
+  - id: switch
+    action: master_client_window
+    params:
+      rows:
+        $ref: stages.finish.output.rows
+      from:
+        $ref: stages.kill_b_time.output.epoch_s
+      until:
+        $ref: stages.switched_a.output.epoch_s
+  - id: straddle
+    action: master_client_window
+    params:
+      rows:
+        $ref: stages.finish.output.rows
+      from:
+        $ref: stages.kill_b_time.output.epoch_s
+      from_offset_s: -10
+      until:
+        $ref: stages.switched_a.output.epoch_s
+  - id: after
+    action: master_client_window
+    params:
+      rows:
+        $ref: stages.finish.output.rows
+      from:
+        $ref: stages.switched_a.output.epoch_s
+  - id: retry_seen
+    action: master_client_check
+    params:
+      rows:
+        $ref: stages.straddle.output.rows
+      metric: failover_count
+      op: ge
+      expected: 1
+  - id: switch_to_a
+    action: master_client_check
+    params:
+      rows:
+        $ref: stages.switch.output.rows
+      metric: target_share
+      op: ge
+      expected: 0.01
+      target: A
+  - id: switch_errors
+    action: master_client_check
+    params:
+      rows:
+        $ref: stages.switch.output.rows
+      metric: failed_rate_above_one
+      op: le
+      expected: 0.05
+  - id: no_business_storm
+    action: master_client_check
+    params:
+      rows:
+        $ref: stages.switch.output.rows
+      metric: business_rate_above_one
+      op: le
+      expected: 0.05
+  - id: after_a
+    action: master_client_check
+    params:
+      rows:
+        $ref: stages.after.output.rows
+      metric: target_share
+      op: ge
+      expected: 0.95
+      target: A
+  - id: after_success
+    action: master_client_check
+    params:
+      rows:
+        $ref: stages.after.output.rows
+      metric: success_rate
+      op: ge
+      expected: 0.9
+  - id: unique_requests
+    action: master_client_check
+    params:
+      rows:
+        $ref: stages.finish.output.rows
+      metric: duplicate_ids
+      op: eq
+      expected: 0
+  - id: cleanup
+    action: teardown
