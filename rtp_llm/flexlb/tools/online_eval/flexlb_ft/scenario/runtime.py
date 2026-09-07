@@ -1,8 +1,10 @@
 """Ordered stages with authentic handles, cooperative deadlines and LIFO cleanup."""
 
 import json
+import signal
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import asdict
 from pathlib import Path
 
@@ -12,6 +14,36 @@ from .contracts import CheckResult, ResourceHandle, StageOutput
 
 class StageTimeout(TimeoutError):
     pass
+
+
+@contextmanager
+def interruptible(deadline, enabled=False):
+    """Main-thread POSIX guard for synchronous backend calls, never a future timeout."""
+    if not enabled:
+        yield
+        return
+    if threading.current_thread() is not threading.main_thread():
+        raise RuntimeError("signal deadline enforcement requires the main thread")
+    previous = signal.getsignal(signal.SIGALRM)
+    previous_timer = signal.getitimer(signal.ITIMER_REAL)
+    entered = time.monotonic()
+
+    def expire(signum, frame):
+        raise StageTimeout("stage wall-clock deadline expired")
+
+    signal.signal(signal.SIGALRM, expire)
+    signal.setitimer(signal.ITIMER_REAL, max(0.001, deadline.remaining()))
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
+        if previous_timer[0] > 0:
+            signal.setitimer(
+                signal.ITIMER_REAL,
+                max(0.001, previous_timer[0] - (time.monotonic() - entered)),
+                previous_timer[1],
+            )
 
 
 class Deadline:
@@ -39,7 +71,9 @@ class Deadline:
 
 
 class RuntimeContext:
-    def __init__(self, instance, backend, artifact_dir, clock, sleeper):
+    def __init__(
+        self, instance, backend, artifact_dir, clock, sleeper, enforce_deadlines=False
+    ):
         self.instance = instance
         self.backend = backend
         self.artifact_dir = Path(artifact_dir)
@@ -50,6 +84,7 @@ class RuntimeContext:
         self._resources = {}
         self._cleanup = []
         self.cleanup_results = []
+        self.enforce_deadlines = enforce_deadlines
 
     def add_cleanup(self, name, callback):
         self._cleanup.append((name, callback))
@@ -92,8 +127,13 @@ class RuntimeContext:
             name, callback = self._cleanup.pop()
             started = self.clock()
             try:
-                deadline.check()
-                callback(deadline)
+                # Even an expired callback gets the opportunity to cancel its
+                # owned calls/processes before checking its remaining join time.
+                if self.clock() < deadline.expires_at:
+                    with interruptible(deadline, self.enforce_deadlines):
+                        callback(deadline)
+                else:
+                    callback(deadline)
                 deadline.check()
                 status, error = "PASS", None
             except Exception as exc:
@@ -192,13 +232,18 @@ def execute_instance(
     artifact_dir=".",
     clock=time.monotonic,
     sleeper=time.sleep,
+    cancelled=None,
+    enforce_deadlines=False,
 ):
     """Execute a compiled plan. Adapters must enforce deadlines in actual work."""
     handlers = dict(handlers or {})
-    ctx = RuntimeContext(instance, backend, artifact_dir, clock, sleeper)
+    ctx = RuntimeContext(
+        instance, backend, artifact_dir, clock, sleeper, enforce_deadlines
+    )
     ctx.artifact_dir.mkdir(parents=True, exist_ok=True)
     started = clock()
     end = started + instance["execution"]["timeout_s"]
+    ctx.instance_deadline_s = end
     rows, finding_failures, finding_passes = [], [], []
     terminal_status, primary_error = "PASS", None
     try:
@@ -218,17 +263,20 @@ def execute_instance(
             if terminal_status != "PASS":
                 rows.append(row)
                 continue
-            deadline = Deadline(min(end, t0 + spec["timeout_s"]), clock, sleeper)
+            deadline = Deadline(
+                min(end, t0 + spec["timeout_s"]), clock, sleeper, cancelled
+            )
             try:
                 deadline.check()
                 action = spec["action"]
-                if action in handlers:
-                    descriptor = handlers[action]
-                    result = descriptor.execute(ctx, spec["params"], deadline)
-                    outputs = descriptor.outputs
-                else:
-                    result = _core_action(action, ctx, spec["params"], deadline)
-                    outputs = OUTPUTS[action]
+                with interruptible(deadline, enforce_deadlines):
+                    if action in handlers:
+                        descriptor = handlers[action]
+                        result = descriptor.execute(ctx, spec["params"], deadline)
+                        outputs = descriptor.outputs
+                    else:
+                        result = _core_action(action, ctx, spec["params"], deadline)
+                        outputs = OUTPUTS[action]
                 deadline.check()
                 _validate_output(ctx, result, outputs, spec.get("check_ids", []))
                 ctx.outputs[spec["id"]] = result.output

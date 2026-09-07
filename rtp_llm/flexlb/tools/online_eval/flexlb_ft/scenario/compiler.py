@@ -101,6 +101,9 @@ def environment(value, path, profile):
             "prefill_cache_blocks",
             "decode_cache_blocks",
             "config_overrides",
+            "discovery",
+            "perf_preset",
+            "debug_enabled",
         },
     )
     if value.get("backend", "java_mock") != "java_mock":
@@ -109,6 +112,17 @@ def environment(value, path, profile):
             "only java_mock is implemented; GPU/multi-host/TP/DP layouts need separate capabilities",
         )
     result = {"backend": "java_mock", "n_prefill": 2, "n_decode": 4}
+    for key, default, allowed in (
+        ("discovery", "file", ("file", "discovery_file")),
+        ("perf_preset", "default", ("default", "fault_env")),
+    ):
+        val = value.get(key, default)
+        if val not in allowed:
+            fail(path + "." + key, f"expected one of {allowed}")
+        result[key] = val
+    if type(value.get("debug_enabled", False)) is not bool:
+        fail(path + ".debug_enabled", "expected boolean")
+    result["debug_enabled"] = value.get("debug_enabled", False)
     for key in ("n_prefill", "n_decode", "prefill_cache_blocks", "decode_cache_blocks"):
         if key in value:
             result[key] = number(value[key], path + "." + key, minimum=1, integer=True)
