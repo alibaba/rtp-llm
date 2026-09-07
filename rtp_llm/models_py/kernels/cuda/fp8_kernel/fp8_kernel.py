@@ -1,6 +1,7 @@
 import functools
 import json
 import logging
+import os
 from functools import lru_cache
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -115,6 +116,7 @@ def sgl_per_token_group_quant_fp8(
     scale_ue8m0: bool = False,
     fuse_silu_and_mul: bool = False,
     masked_m: Optional[torch.Tensor] = None,
+    quant_kernel: Optional[str] = None,
 ):
     assert (
         x.shape[-1] % group_size == 0
@@ -132,7 +134,13 @@ def sgl_per_token_group_quant_fp8(
         scale_ue8m0=scale_ue8m0,
     )
     if x.shape[0] > 0:
-        quant_kernel = os.environ.get("DSV4_FP8_QUANT_KERNEL", "auto").strip().lower()
+        if quant_kernel is None:
+            quant_kernel = os.environ.get("DSV4_FP8_QUANT_KERNEL", "auto").strip().lower()
+        if quant_kernel == "legacy":
+            per_token_group_quant_fp8(
+                x, x_q, x_s, group_size, eps, fp8_min, fp8_max, scale_ue8m0
+            )
+            return x_q, x_s
 
         def can_use_v2() -> bool:
             if group_size not in (16, 32, 64, 128):
@@ -150,11 +158,7 @@ def sgl_per_token_group_quant_fp8(
             # consistently once the quantized matrix has at least ~4M elements.
             return x.numel() >= 4 * 1024 * 1024
 
-        if quant_kernel == "legacy":
-            per_token_group_quant_fp8(
-                x, x_q, x_s, group_size, eps, fp8_min, fp8_max, scale_ue8m0
-            )
-        elif quant_kernel == "v2":
+        if quant_kernel == "v2":
             per_token_group_quant_fp8_v2(
                 x,
                 x_q,
