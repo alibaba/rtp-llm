@@ -65,38 +65,32 @@ class ScrTemplateUtilsTest(unittest.TestCase):
         with mock.patch.dict(os.environ, {"RTP_LLM_ENABLE_SCR": "yes"}, clear=True):
             self.assertFalse(scr.is_scr_enabled())
 
-        with mock.patch.dict(os.environ, {scr.SCR_SHIM_ENABLE_ENV: "yes"}, clear=True):
-            self.assertFalse(scr.is_scr_enabled())
-
         with mock.patch.dict(os.environ, {scr.RTPLLM_ENABLE_SCR_ENV: "yes"}, clear=True):
             self.assertTrue(scr.is_scr_enabled())
-            self.assertNotIn(scr.SCR_SHIM_ENABLE_ENV, os.environ)
 
     def test_unified_switch_does_not_choose_controller_phase(self) -> None:
         with mock.patch.dict(
             os.environ,
             {
                 scr.RTPLLM_ENABLE_SCR_ENV: "1",
-                scr.SCR_SHIM_ENABLE_ENV: "1",
                 scr.SCR_PHASE_ENV: scr.SCR_PHASE_RESTORE,
             },
             clear=True,
         ):
             self.assertTrue(scr.is_scr_enabled())
-            self.assertEqual(os.environ[scr.SCR_SHIM_ENABLE_ENV], "1")
             self.assertEqual(os.environ[scr.SCR_PHASE_ENV], scr.SCR_PHASE_RESTORE)
 
-    def test_external_shim_normal_phase_is_not_imported(self) -> None:
-        env = {
-            scr.RTPLLM_ENABLE_SCR_ENV: "1",
-            scr.SCR_SHIM_ENABLE_ENV: "1",
-            scr.SCR_PHASE_ENV: scr.SCR_PHASE_NORMAL,
-        }
-        with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(
-            scr.os.path, "isdir", return_value=True
-        ), mock.patch.object(scr.importlib, "import_module") as import_module:
-            self.assertIsNone(scr._load_epsilon())
-            import_module.assert_not_called()
+    def test_external_shim_phase_is_checked_after_provider_load(self) -> None:
+        epsilon = SimpleNamespace(_EXTERNAL_DIR="/custom/scr/epsilon")
+        with mock.patch.dict(
+            os.environ,
+            {
+                scr.RTPLLM_ENABLE_SCR_ENV: "1",
+                scr.SCR_PHASE_ENV: scr.SCR_PHASE_NORMAL,
+            },
+            clear=True,
+        ), mock.patch.object(scr.importlib, "import_module", return_value=epsilon):
+            self.assertIs(scr._load_epsilon(), epsilon)
 
     def test_control_plane_operations_are_not_exposed_by_rtp_llm(self) -> None:
         self.assertFalse(hasattr(scr, "start_scr_checkpoint"))
@@ -124,7 +118,7 @@ class ScrTemplateUtilsTest(unittest.TestCase):
     def test_rank_arrives_at_epsilon_barrier_with_explicit_mapping(self) -> None:
         epsilon = _FakeEpsilon()
         with mock.patch.dict(
-            os.environ, {scr.SCR_ENABLE_ENV: "1"}, clear=True
+            os.environ, {scr.RTPLLM_ENABLE_SCR_ENV: "1"}, clear=True
         ), mock.patch.object(
             scr.importlib, "import_module", return_value=epsilon
         ):
@@ -152,7 +146,7 @@ class ScrTemplateUtilsTest(unittest.TestCase):
     def test_rank_barrier_rejects_out_of_range_mapping(self) -> None:
         epsilon = _FakeEpsilon()
         with mock.patch.dict(
-            os.environ, {scr.SCR_ENABLE_ENV: "1"}, clear=True
+            os.environ, {scr.RTPLLM_ENABLE_SCR_ENV: "1"}, clear=True
         ), mock.patch.object(
             scr.importlib, "import_module", return_value=epsilon
         ):
@@ -170,7 +164,7 @@ class ScrTemplateUtilsTest(unittest.TestCase):
             return 0
 
         epsilon.snapstart_checkpoint = legacy_checkpoint
-        with mock.patch.dict(os.environ, {scr.SCR_ENABLE_ENV: "1"}, clear=True), mock.patch.object(
+        with mock.patch.dict(os.environ, {scr.RTPLLM_ENABLE_SCR_ENV: "1"}, clear=True), mock.patch.object(
             scr.importlib, "import_module", return_value=epsilon
         ):
             self.assertEqual(
@@ -187,7 +181,7 @@ class ScrTemplateUtilsTest(unittest.TestCase):
             raise TypeError("native implementation failed")
 
         epsilon.snapstart_checkpoint = broken_checkpoint
-        with mock.patch.dict(os.environ, {scr.SCR_ENABLE_ENV: "1"}, clear=True), mock.patch.object(
+        with mock.patch.dict(os.environ, {scr.RTPLLM_ENABLE_SCR_ENV: "1"}, clear=True), mock.patch.object(
             scr.importlib, "import_module", return_value=epsilon
         ), mock.patch.object(scr.LOGGER, "exception") as log_exception:
             self.assertIsNone(
@@ -228,19 +222,17 @@ class ScrTemplateUtilsTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "must be an integer"):
                 scr.resolve_scr_worker_mapping(local_rank=0)
 
-    def test_backend_mode_keeps_app_gate_and_shim_gate_separate(self) -> None:
+    def test_backend_mode_reports_provider_without_a_second_gate(self) -> None:
         with mock.patch.dict(os.environ, {}, clear=True):
             self.assertEqual(scr.epsilon_backend_mode(), "disabled")
-        with mock.patch.dict(
-            os.environ, {scr.SCR_ENABLE_ENV: "1", scr.SCR_SHIM_ENABLE_ENV: "0"}, clear=True
-        ):
-            self.assertEqual(scr.epsilon_backend_mode(), "wheel-native")
-        with mock.patch.dict(
-            os.environ, {scr.SCR_ENABLE_ENV: "1", scr.SCR_SHIM_ENABLE_ENV: "1"}, clear=True
-        ), mock.patch.object(scr.os.path, "isdir", return_value=True), mock.patch.object(
-            scr.platform, "release", return_value="6.6.1-aarch64"
-        ):
-            self.assertEqual(scr.epsilon_backend_mode(), "external-shim")
+        with mock.patch.dict(os.environ, {scr.RTPLLM_ENABLE_SCR_ENV: "1"}, clear=True):
+            self.assertEqual(scr.epsilon_backend_mode(), "not-loaded")
+
+        native = SimpleNamespace(_EXTERNAL_DIR="")
+        external = SimpleNamespace(_EXTERNAL_DIR="/custom/scr/epsilon")
+        with mock.patch.dict(os.environ, {scr.RTPLLM_ENABLE_SCR_ENV: "1"}, clear=True):
+            self.assertEqual(scr.epsilon_backend_mode(native), "wheel-native")
+            self.assertEqual(scr.epsilon_backend_mode(external), "external-shim")
 
     def test_registers_all_unique_kv_cache_regions_and_scales(self) -> None:
         model = SimpleNamespace()
@@ -257,7 +249,7 @@ class ScrTemplateUtilsTest(unittest.TestCase):
         engine = SimpleNamespace(model=SimpleNamespace(py_model=model))
         epsilon = _FakeEpsilon()
 
-        with mock.patch.dict(os.environ, {scr.SCR_ENABLE_ENV: "1"}, clear=True), mock.patch.object(
+        with mock.patch.dict(os.environ, {scr.RTPLLM_ENABLE_SCR_ENV: "1"}, clear=True), mock.patch.object(
             scr.importlib, "import_module", return_value=epsilon
         ), mock.patch.object(
             scr, "_is_tensor", side_effect=lambda value: isinstance(value, _FakeTensor)
@@ -289,7 +281,7 @@ class ScrTemplateUtilsTest(unittest.TestCase):
         epsilon = _FakeEpsilon()
 
         with mock.patch.dict(
-            os.environ, {scr.SCR_ENABLE_ENV: "1"}, clear=True
+            os.environ, {scr.RTPLLM_ENABLE_SCR_ENV: "1"}, clear=True
         ), mock.patch.object(
             scr.importlib, "import_module", return_value=epsilon
         ), mock.patch.object(
@@ -308,7 +300,7 @@ class ScrTemplateUtilsTest(unittest.TestCase):
         engine = SimpleNamespace(model=SimpleNamespace(py_model=model))
         epsilon = _FakeEpsilon()
         with mock.patch.dict(
-            os.environ, {scr.SCR_ENABLE_ENV: "1"}, clear=True
+            os.environ, {scr.RTPLLM_ENABLE_SCR_ENV: "1"}, clear=True
         ), mock.patch.object(
             scr.importlib, "import_module", return_value=epsilon
         ), mock.patch.object(
@@ -322,7 +314,7 @@ class ScrTemplateUtilsTest(unittest.TestCase):
         engine = SimpleNamespace(model=SimpleNamespace(py_model=model))
         epsilon = _FakeEpsilon(snap_enabled=False)
 
-        with mock.patch.dict(os.environ, {scr.SCR_ENABLE_ENV: "1"}, clear=True), mock.patch.object(
+        with mock.patch.dict(os.environ, {scr.RTPLLM_ENABLE_SCR_ENV: "1"}, clear=True), mock.patch.object(
             scr.importlib, "import_module", return_value=epsilon
         ):
             self.assertFalse(scr.register_for_scr(engine))
@@ -333,7 +325,7 @@ class ScrTemplateUtilsTest(unittest.TestCase):
         model = SimpleNamespace(kv_cache=SimpleNamespace())
         engine = SimpleNamespace(model=SimpleNamespace(py_model=model))
         epsilon = _FakeEpsilon()
-        with mock.patch.dict(os.environ, {scr.SCR_ENABLE_ENV: "1"}, clear=True), mock.patch.object(
+        with mock.patch.dict(os.environ, {scr.RTPLLM_ENABLE_SCR_ENV: "1"}, clear=True), mock.patch.object(
             scr.importlib, "import_module", return_value=epsilon
         ), mock.patch.object(
             scr, "_is_tensor", side_effect=lambda value: isinstance(value, _FakeTensor)
@@ -349,7 +341,7 @@ class ScrTemplateUtilsTest(unittest.TestCase):
             kv_cache=SimpleNamespace(kv_cache_base_by_layer=[[_FakeTensor(1)]])
         )
         engine = SimpleNamespace(model=SimpleNamespace(py_model=model))
-        with mock.patch.dict(os.environ, {scr.SCR_ENABLE_ENV: "1"}, clear=True), mock.patch.object(
+        with mock.patch.dict(os.environ, {scr.RTPLLM_ENABLE_SCR_ENV: "1"}, clear=True), mock.patch.object(
             scr.importlib, "import_module", return_value=epsilon
         ), mock.patch.object(
             scr, "_is_tensor", side_effect=lambda value: isinstance(value, _FakeTensor)
@@ -368,7 +360,7 @@ class ScrTemplateUtilsTest(unittest.TestCase):
         model = SimpleNamespace(kv_cache=SimpleNamespace(kv_cache_base_by_layer=[[tensor]]))
         engine = SimpleNamespace(model=SimpleNamespace(py_model=model))
         callback = mock.Mock()
-        with mock.patch.dict(os.environ, {scr.SCR_ENABLE_ENV: "1"}, clear=True), mock.patch.object(
+        with mock.patch.dict(os.environ, {scr.RTPLLM_ENABLE_SCR_ENV: "1"}, clear=True), mock.patch.object(
             scr.importlib, "import_module", return_value=epsilon
         ), mock.patch.object(
             scr, "_is_tensor", side_effect=lambda value: isinstance(value, _FakeTensor)
@@ -385,7 +377,7 @@ class ScrTemplateUtilsTest(unittest.TestCase):
         engine = SimpleNamespace(model=SimpleNamespace(py_model=model))
         callback = mock.Mock()
         with mock.patch.dict(
-            os.environ, {scr.SCR_ENABLE_ENV: "1"}, clear=True
+            os.environ, {scr.RTPLLM_ENABLE_SCR_ENV: "1"}, clear=True
         ), mock.patch.object(
             scr.importlib, "import_module", return_value=epsilon
         ), mock.patch.object(

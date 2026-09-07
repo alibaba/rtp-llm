@@ -102,6 +102,51 @@ class ScrTemplateUtilsTest(unittest.TestCase):
         log_exception.assert_called_once()
         self.assertIn("snapshot barrier arrival failed", log_exception.call_args.args[0])
 
+    def test_successful_arrival_logs_snapstart_checkpoint_reached(self):
+        epsilon = _EpsilonDouble()
+        with self._enabled(), mock.patch.object(
+            scr, "_load_epsilon", return_value=epsilon
+        ), mock.patch.object(scr.LOGGER, "info") as log_info:
+            self.assertEqual(
+                scr.arrive_scr_checkpoint_barrier(worker_id=0, worker_num=1), 0
+            )
+
+        messages = [call.args[0] for call in log_info.call_args_list]
+        self.assertTrue(any("sCR snapstart checkpoint reached" in message for message in messages))
+
+    def test_fail_closed_timeout_raises_for_active_template_path(self):
+        epsilon = _EpsilonDouble(error=TimeoutError("snapshot barrier timeout"))
+        with self._enabled(), mock.patch.object(
+            scr, "_load_epsilon", return_value=epsilon
+        ):
+            with self.assertRaisesRegex(scr.ScrArrivalError, "barrier arrival failed"):
+                scr.arrive_scr_checkpoint_barrier(
+                    worker_id=0, worker_num=1, fail_closed=True
+                )
+
+    def test_fail_closed_nonzero_result_raises(self):
+        epsilon = _EpsilonDouble(result=17)
+        with self._enabled(), mock.patch.object(
+            scr, "_load_epsilon", return_value=epsilon
+        ):
+            with self.assertRaisesRegex(scr.ScrArrivalError, "barrier arrival failed"):
+                scr.arrive_scr_checkpoint_barrier(
+                    worker_id=0, worker_num=1, fail_closed=True
+                )
+
+    def test_fail_closed_late_success_is_treated_as_timeout(self):
+        epsilon = _EpsilonDouble(result=0)
+        with self._enabled(), mock.patch.object(
+            scr, "_load_epsilon", return_value=epsilon
+        ), mock.patch.object(scr.time, "monotonic", side_effect=[0.0, 2.0, 2.0]):
+            with self.assertRaisesRegex(scr.ScrArrivalError, "exceeded timeout"):
+                scr.arrive_scr_checkpoint_barrier(
+                    worker_id=0,
+                    worker_num=1,
+                    timeout=1,
+                    fail_closed=True,
+                )
+
     def test_timeout_budget_accepts_controller_values_and_rejects_invalid_values(self):
         with mock.patch.dict(
             os.environ,
@@ -250,6 +295,33 @@ class ScrTemplateUtilsTest(unittest.TestCase):
 
         self.assertFalse(thread.is_alive())
         self.assertEqual([item["worker_id"] for item in epsilon.arrivals], [0])
+
+    def test_scr_disabled_arrival_path_does_not_import_or_start_thread(self):
+        with mock.patch.dict(os.environ, {}, clear=True), mock.patch.object(
+            scr, "_load_epsilon"
+        ) as load_epsilon:
+            self.assertIsNone(
+                scr.start_scr_checkpoint_arrival_thread(worker_id=0, worker_num=1)
+            )
+        load_epsilon.assert_not_called()
+
+    def test_template_phase_requires_feature_gate_and_external_phase(self):
+        cases = [
+            ({}, False),
+            ({"RTPLLM_ENABLE_SCR": "1"}, False),
+            ({"SCR_PHASE": "checkpoint"}, False),
+            (
+                {"RTPLLM_ENABLE_SCR": "1", "SCR_PHASE": "checkpoint"},
+                True,
+            ),
+            ({"RTPLLM_ENABLE_SCR": "1", "SCR_PHASE": "restore"}, True),
+            ({"RTPLLM_ENABLE_SCR": "1", "SCR_PHASE": "normal"}, False),
+        ]
+        for environment, expected in cases:
+            with self.subTest(environment=environment), mock.patch.dict(
+                os.environ, environment, clear=True
+            ):
+                self.assertEqual(scr.is_scr_template_phase_active(), expected)
 
 
 if __name__ == "__main__":

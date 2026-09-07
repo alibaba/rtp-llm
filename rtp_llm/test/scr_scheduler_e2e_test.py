@@ -107,7 +107,7 @@ class ScrSchedulerE2ETest(unittest.TestCase):
         with mock.patch.dict(
             os.environ,
             {
-                scr.SCR_ENABLE_ENV: "1",
+                scr.RTPLLM_ENABLE_SCR_ENV: "1",
                 scr.SCR_PHASE_ENV: scr.SCR_PHASE_CHECKPOINT,
                 scr.SCR_GENERATION_ENV: "e2e-generation-1",
             },
@@ -151,7 +151,7 @@ class ScrSchedulerE2ETest(unittest.TestCase):
         with mock.patch.dict(
             os.environ,
             {
-                scr.SCR_ENABLE_ENV: "1",
+                scr.RTPLLM_ENABLE_SCR_ENV: "1",
                 scr.SCR_PHASE_ENV: scr.SCR_PHASE_CHECKPOINT,
                 scr.SCR_GENERATION_ENV: "current-generation",
             },

@@ -12,6 +12,7 @@ from rtp_llm.distribute.distributed_server import DistributedServer, get_world_i
 from rtp_llm.metrics import kmonitor
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.models_py.distributed.collective_torch import init_distributed_environment
+from rtp_llm.ops import TaskType
 from rtp_llm.utils.concurrency_controller import get_global_controller
 
 if TYPE_CHECKING:
@@ -38,7 +39,7 @@ class BackendManager(object):
         self.engine: Optional["BaseEngine"] = None
         self._shutdown_requested = threading.Event()
 
-    def start(self):
+    def start(self, defer_service_start: bool = False):
         """Initialize backend server without entering service loop"""
         self._distributed_server.start(self.py_env_configs)
         # Create EngineConfig from py_env_configs (server/distribute config already adjusted for this rank)
@@ -84,6 +85,12 @@ class BackendManager(object):
             model_config=model_config,
         )
 
+        if defer_service_start and model_config.task_type != TaskType.LANGUAGE_MODEL:
+            raise RuntimeError(
+                "SCR template startup does not support embedding engines yet; "
+                "refusing to start listeners before the arrival barrier"
+            )
+
         # Initialize DeepEP wrapper if MOE model and DeepEP is enabled
         if (
             engine_config.moe_config.use_deepep_moe
@@ -111,11 +118,18 @@ class BackendManager(object):
             vit_config=self.py_env_configs.vit_config,
             merge_lora=self.py_env_configs.lora_config.merge_lora,
             propose_model_config=propose_model_config,
+            defer_service_start=defer_service_start,
         )
         logging.info(
             "engine created successfully: self.engine.task_type=%s",
             self.engine.task_type,
         )
+
+    def start_service(self) -> None:
+        """Release listeners deferred for a pre-service SCR barrier."""
+        start_service = getattr(self.engine, "start_service", None)
+        if start_service is not None:
+            start_service()
 
     def serve_forever(self):
         """Enter service loop to keep the process alive until shutdown is requested"""

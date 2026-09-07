@@ -19,8 +19,8 @@ from rtp_llm.utils.concurrency_controller import (
 )
 from rtp_llm.utils.scr_template_utils import (
     ScrParticipantManifest,
-    is_scr_enabled,
-    start_scr_checkpoint_arrival_thread,
+    arrive_scr_checkpoint_barrier,
+    is_scr_template_phase_active,
 )
 
 setup_logging()
@@ -74,22 +74,27 @@ def start_dash_sc_server(
         set_global_controller(global_controller)
         app = DashScApp(py_env_configs)
 
-        def on_ready() -> None:
-            if scr_manifest is None or not is_scr_enabled():
+        def on_prebind() -> None:
+            if scr_manifest is None or not is_scr_template_phase_active():
                 return
             worker_id = scr_manifest.worker_id("dash_sc", f"{rank_id}:{server_id}")
-            waiter = start_scr_checkpoint_arrival_thread(
+            result = arrive_scr_checkpoint_barrier(
                 worker_id=worker_id,
                 worker_num=scr_manifest.worker_num,
                 generation=scr_manifest.generation or None,
-                name=f"scr-checkpoint-arrival-dash-sc-{rank_id}-{server_id}",
+                fail_closed=True,
             )
-            setattr(app, "_scr_checkpoint_arrival", waiter)
+            logging.info(
+                "sCR DashSc reached prebind arrival worker_id=%d worker_num=%d result=%r",
+                worker_id,
+                scr_manifest.worker_num,
+                result,
+            )
 
         app.start(
             ready_pipe_writer=pipe_writer,
             bind_barrier=bind_barrier,
-            on_ready=on_ready,
+            on_prebind=on_prebind,
         )
     except BaseException as e:
         logging.error(

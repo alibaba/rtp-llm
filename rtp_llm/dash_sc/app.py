@@ -561,8 +561,14 @@ class DashScApp:
         ready_pipe_writer=None,
         bind_barrier=None,
         on_ready: Optional[Callable[[], None]] = None,
+        on_prebind: Optional[Callable[[], None]] = None,
     ) -> None:
         """Start the gRPC server and block on the process service loop.
+
+        ``on_prebind`` runs after local process initialization and the local
+        bind barrier, but before the network listener is created.  It is used
+        by the SCR template path to make the control-plane barrier the last
+        startup gate before serving.
 
         ``on_ready`` runs after ``start_on_loop`` has successfully bound the
         gRPC endpoint, but before this method enters its shutdown wait.  The
@@ -683,6 +689,8 @@ class DashScApp:
                 self.server_config.rank_id,
                 self.server_config.frontend_server_id,
             )
+            if on_prebind is not None:
+                on_prebind()
             logging.info(
                 "[DashScApp] starting gRPC server rank_id=%s server_id=%s port=%s mode=%s",
                 self.server_config.rank_id,

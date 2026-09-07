@@ -76,12 +76,12 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
         return trans_output(res)
 
 
-def vit_start_server(on_ready=None):
-    """Start the VIT RPC server and invoke an optional post-bind hook.
+def vit_start_server(on_ready=None, on_prebind=None):
+    """Start the VIT RPC server with optional pre/post-bind hooks.
 
-    The hook is intentionally lifecycle-only; it lets the outer launcher
-    announce a fully initialized CPU participant without giving this server
-    any controller or dump/restore responsibilities.
+    ``on_prebind`` is called after model initialization but before the socket
+    is bound; this is the SCR template safe point. ``on_ready`` remains a
+    post-bind lifecycle hook for existing callers.
     """
     py_env_configs = setup_args()
     setup_and_configure_server(py_env_configs)
@@ -136,6 +136,8 @@ def vit_start_server(on_ready=None):
         MultimodalRpcServer(MMProcessEngine(model, model.vit_config)), server
     )
     logging.info(f"rpc_server_port: {py_env_configs.server_config.rpc_server_port}")
+    if on_prebind is not None:
+        on_prebind()
     server.add_insecure_port(f"0.0.0.0:{py_env_configs.server_config.rpc_server_port}")
     server.start()
     if on_ready is not None:

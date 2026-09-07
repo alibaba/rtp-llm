@@ -13,10 +13,27 @@ grpc::Status RemoteRpcServer::init(const EngineInitParams&                      
     if (!ret.ok()) {
         return ret;
     }
+    if (defer_cache_store_) {
+        RTP_LLM_LOG_INFO("deferring remote cache-store/network initialization until SCR release");
+    } else {
+        initLocalHostInfo();
+        initLocalPeerInfo();
+        initCacheStore(maga_init_params, propose_params_ptr);
+    }
+    return grpc::Status::OK;
+}
+
+void RemoteRpcServer::startDeferredServices() {
+    if (!defer_cache_store_ || cache_store_) {
+        return;
+    }
+    // Resolve host/peer identity only after the controller releases the
+    // template barrier.  This prevents a restored process from publishing
+    // the source host's identity or binding its cache-store TCP/RDMA ports.
     initLocalHostInfo();
     initLocalPeerInfo();
-    initCacheStore(maga_init_params, propose_params_ptr);
-    return grpc::Status::OK;
+    initCacheStore(maga_init_params_, nullptr);
+    defer_cache_store_ = false;
 }
 
 void RemoteRpcServer::initLocalHostInfo() {

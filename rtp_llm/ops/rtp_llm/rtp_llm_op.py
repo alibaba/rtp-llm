@@ -32,7 +32,7 @@ class RtpLLMOp:
         self.ft_op = CppRtpLLMOp()
         self.token_processor = token_processor
 
-    def start(self):
+    def start(self, defer_service_start: bool = False):
         self.weight = self.model.weight
         logging.info("engine_config: %s", self.engine_config.to_string())
         self.ft_op.init(  # type: ignore
@@ -42,7 +42,12 @@ class RtpLLMOp:
             self.mm_engine,
             self.propose_model,
             self.token_processor,
+            defer_service_start,
         )
+
+    def start_service(self):
+        """Start serving sockets after a control-plane pre-service barrier."""
+        self.ft_op.start_rpc_server()  # type: ignore
 
     def stop(self):
         self.ft_op.stop()  # type: ignore

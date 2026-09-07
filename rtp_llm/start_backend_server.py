@@ -2,6 +2,7 @@ import logging
 import multiprocessing
 import os
 import signal
+import shutil
 import subprocess
 import sys
 import threading
@@ -37,15 +38,16 @@ from rtp_llm.utils.process_manager import (
 )
 from rtp_llm.utils.scr_template_utils import (
     ScrParticipantManifest,
+    arrive_scr_checkpoint_barrier,
     configure_scr_environment,
     is_scr_enabled,
+    is_scr_template_phase_active,
     register_for_scr,
     resolve_scr_worker_mapping,
     SCR_GENERATION_ENV,
     SCR_TIMEOUT_ENV,
     SCR_INACTIVITY_TIMEOUT_ENV,
     SCR_WORKER_NUM_ENV,
-    start_scr_checkpoint_arrival_thread,
 )
 from rtp_llm.utils.util import copy_gemm_config
 
@@ -148,7 +150,7 @@ def _register_scr_resources(backend_manager, py_env_configs):
     before-checkpoint registration hints to Epsilon.
     """
 
-    if not is_scr_enabled() or backend_manager is None:
+    if not is_scr_template_phase_active() or backend_manager is None:
         return None
 
     try:
@@ -209,9 +211,9 @@ def _scr_worker_num(py_env_configs: PyEnvConfigs) -> int:
 
 
 def _start_scr_rank_arrival(backend_manager, py_env_configs, scr_manifest=None, world_rank=None):
-    """Start this CUDA rank's passive Epsilon snapshot-barrier arrival."""
+    """Synchronously announce this CUDA rank's pre-service safe point."""
 
-    if not is_scr_enabled() or backend_manager is None:
+    if not is_scr_template_phase_active() or backend_manager is None:
         return None
     try:
         pc = py_env_configs.parallelism_config
@@ -240,40 +242,47 @@ def _start_scr_rank_arrival(backend_manager, py_env_configs, scr_manifest=None, 
             os.environ.get(SCR_TIMEOUT_ENV, "<default>"),
             os.environ.get(SCR_INACTIVITY_TIMEOUT_ENV, "<default>"),
         )
-        arrival_kwargs = {
-            "worker_id": worker_id,
-            "worker_num": worker_num,
-            "name": f"scr-checkpoint-arrival-rank-{worker_id}",
-        }
-        if scr_manifest is not None and scr_manifest.generation:
-            arrival_kwargs["generation"] = scr_manifest.generation
-        thread = start_scr_checkpoint_arrival_thread(**arrival_kwargs)
-        if thread is not None:
-            # Keep a reference for diagnostics and make the lifecycle explicit;
-            # the daemon itself is deliberately not joined on shutdown.
-            setattr(backend_manager, "_scr_checkpoint_arrival", thread)
-        return thread
+        result = arrive_scr_checkpoint_barrier(
+            worker_id=worker_id,
+            worker_num=worker_num,
+            generation=(scr_manifest.generation if scr_manifest is not None else None),
+            fail_closed=True,
+        )
+        logging.info(
+            "sCR backend rank reached pre-service arrival worker_id=%d worker_num=%d result=%r",
+            worker_id,
+            worker_num,
+            result,
+        )
+        return result
     except Exception:
-        # The optional barrier must not turn a healthy model startup into an
-        # outage. The external controller can still use its fallback path.
+        # Once the external controller has selected a template phase, a
+        # participant that failed to arrive must not bind listeners and create
+        # an incomplete template. SCR-disabled/inactive startup never enters
+        # this branch and remains fail-open.
         logging.exception("failed to start sCR snapshot-barrier arrival")
-        return None
+        raise
 
 
 def _start_scr_manager_arrival(manager, scr_manifest):
-    """Start the manager participant after rank startup has succeeded."""
+    """Synchronously announce the manager's pre-service safe point."""
 
-    if scr_manifest is None or not is_scr_enabled():
+    if scr_manifest is None or not is_scr_template_phase_active():
         return None
     worker_id = scr_manifest.worker_id("backend_manager", "0")
-    waiter = start_scr_checkpoint_arrival_thread(
+    result = arrive_scr_checkpoint_barrier(
         worker_id=worker_id,
         worker_num=scr_manifest.worker_num,
         generation=scr_manifest.generation or None,
-        name="scr-checkpoint-arrival-backend-manager",
+        fail_closed=True,
     )
-    setattr(manager, "_scr_checkpoint_arrival", waiter)
-    return waiter
+    logging.info(
+        "sCR backend manager reached pre-service arrival worker_id=%d worker_num=%d result=%r",
+        worker_id,
+        scr_manifest.worker_num,
+        result,
+    )
+    return result
 
 
 def local_rank_start(
@@ -410,7 +419,13 @@ def local_rank_start(
             # finally block still unmounts FUSE/NFS and hard-exits.
             shutdown_requested = True
             backend_manager.request_shutdown()
-        backend_manager.start()
+        defer_service_start = (
+            scr_manifest is not None and is_scr_template_phase_active()
+        )
+        if defer_service_start:
+            backend_manager.start(defer_service_start=True)
+        else:
+            backend_manager.start()
         # Engine startup overwrites SIGTERM/SIGINT; restore Python handlers so
         # the finally block can stop JIT cache workers on shutdown.
         signal.signal(signal.SIGTERM, signal_handler)
@@ -430,12 +445,19 @@ def local_rank_start(
             "success",
             f"Backend server started successfully on rank {py_env_configs.parallelism_config.local_rank}",
         )
-        # Each CUDA rank announces its safe point independently. The daemon
-        # thread may block in Epsilon until the sidecar/controller progresses,
-        # while the rank remains available to serve traffic.
+        # Each CUDA rank announces its safe point independently and blocks
+        # before entering the service loop.  A template participant must not
+        # serve requests while it is waiting for the controller-driven dump.
         _start_scr_rank_arrival(
             backend_manager, py_env_configs, scr_manifest=scr_manifest, world_rank=world_rank
         )
+        if defer_service_start:
+            # TODO(scr-restore-fixup): Before cross-host serving, add an externally
+            # driven fix-up hook for TCPStore/NCCL, TP IPC and PD/RDMA peers;
+            # apply the same gate to frontend/DashSc HostService/discovery.
+            # Validate generation, log fix-up duration/failures, and wait for
+            # final release before binding listeners; keep SCR-disabled startup unchanged.
+            backend_manager.start_service()
         # Enter service loop to keep the process alive
         logging.info("Entering service loop to keep backend_manager alive")
         backend_manager.serve_forever()
@@ -736,10 +758,11 @@ def multi_rank_start(
 def load_gpu_nic_affinity():
     if os.environ.get("ACCL_NIC_GPU_AFFINITY") != None:
         return True
-    # 检查 /usr/local/bin/run_affinity 是否存在
-    run_affinity_path = "/usr/local/bin/run_affinity"
-    if not os.path.exists(run_affinity_path):
-        logging.info(f"get gpu nic affinity failed, {run_affinity_path} not exist")
+    # Resolve the optional helper from PATH so deployments are not tied to a
+    # particular image layout (for example, /usr/local/bin).
+    run_affinity_path = shutil.which("run_affinity")
+    if run_affinity_path is None:
+        logging.info("get gpu nic affinity failed, run_affinity not found on PATH")
         return False
 
     try:
@@ -798,22 +821,23 @@ def start_backend_server(
     if py_env_configs.vit_config.vit_separation == VitSeparation.VIT_SEPARATION_ROLE:
         from rtp_llm.server.vit_rpc_server import vit_start_server
 
-        def _on_vit_ready():
-            if scr_manifest is None or not is_scr_enabled():
+        def _on_vit_prebind():
+            if scr_manifest is None or not is_scr_template_phase_active():
                 return
-            waiter = start_scr_checkpoint_arrival_thread(
+            result = arrive_scr_checkpoint_barrier(
                 worker_id=scr_manifest.worker_id("backend_vit", "0"),
                 worker_num=scr_manifest.worker_num,
                 generation=scr_manifest.generation or None,
-                name="scr-checkpoint-arrival-backend-vit",
+                fail_closed=True,
             )
             logging.info(
-                "sCR VIT backend arrival started worker_id=%d worker_num=%d",
+                "sCR VIT backend reached pre-service arrival worker_id=%d worker_num=%d result=%r",
                 scr_manifest.worker_id("backend_vit", "0"),
                 scr_manifest.worker_num,
+                result,
             )
 
-        return vit_start_server(on_ready=_on_vit_ready)
+        return vit_start_server(on_prebind=_on_vit_prebind)
 
     py_env_configs.server_config.shutdown_timeout = (
         ProcessManager.sync_shutdown_timeout_env(

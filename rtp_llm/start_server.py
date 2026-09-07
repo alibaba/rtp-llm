@@ -2,7 +2,7 @@ import logging
 import multiprocessing
 import os
 import sys
-import threading
+import tempfile
 import time
 import traceback
 
@@ -26,10 +26,10 @@ from rtp_llm.utils.process_manager import (
 )
 from rtp_llm.utils.scr_template_utils import (
     ScrParticipantManifest,
+    arrive_scr_checkpoint_barrier,
     build_scr_participant_manifest,
     configure_scr_environment,
-    is_scr_enabled,
-    start_scr_checkpoint_arrival_thread,
+    is_scr_template_phase_active,
 )
 from rtp_llm.utils.warmup import configure_warmup
 
@@ -67,8 +67,14 @@ def _scr_local_world_size(py_env_configs: PyEnvConfigs) -> int:
     try:
         value = int(raw)
     except ValueError:
+        if raw.strip():
+            raise ValueError(f"LOCAL_WORLD_SIZE must be an integer, got {raw!r}")
         value = 0
     if value > 0:
+        # Keep the explicit launcher value identical to the backend rank
+        # dispatcher.  The launcher is authoritative even when hardware
+        # visibility is unusual; silently clamping here would make the SCR
+        # manifest disagree with the processes actually spawned.
         return value
     world_size = int(getattr(py_env_configs.parallelism_config, "world_size", 1) or 1)
     try:
@@ -91,14 +97,14 @@ def _build_scr_participant_manifest(
     outside RTP-LLM and owns check/block/dump/restore.
     """
 
-    if not is_scr_enabled():
+    if not is_scr_template_phase_active():
         return None
     participants: list[tuple[str, object]] = [("start_server", "0")]
     backend_enabled = py_env_configs.role_config.role_type != RoleType.FRONTEND
     backend_is_vit = (
         py_env_configs.vit_config.vit_separation == VitSeparation.VIT_SEPARATION_ROLE
     )
-    if backend_is_vit:
+    if backend_enabled and backend_is_vit:
         # The VIT RPC server is a long-lived CPU-side process too.  Keep it in
         # the same passive Epsilon quorum so a CRIU template cannot restore a
         # partially initialized multimodal worker unnoticed.
@@ -284,7 +290,7 @@ def _iter_serving_ranks(py_env_configs: PyEnvConfigs):
     # Use the same hardware-aware value as the SCR participant manifest.  The
     # historical world-size fallback could advertise frontend/Dash participants
     # that are never spawned on a partially visible host.
-    if is_scr_enabled():
+    if is_scr_template_phase_active():
         local_world_size = _scr_local_world_size(py_env_configs)
     else:
         local_world_size = pc.world_size
@@ -422,7 +428,7 @@ def start_frontend_server_impl(
     frontend_processes = []
 
     pc = py_env_configs.parallelism_config
-    if is_scr_enabled():
+    if is_scr_template_phase_active():
         local_world_size = _scr_local_world_size(py_env_configs)
     else:
         local_world_size = pc.world_size
@@ -481,21 +487,23 @@ def _role_is_prefill(py_env_configs: PyEnvConfigs) -> bool:
 
 def _start_parent_scr_arrival(
     scr_manifest: ScrParticipantManifest | None,
-) -> threading.Thread | None:
-    if scr_manifest is None:
+) -> int | None:
+    if scr_manifest is None or not is_scr_template_phase_active():
         return None
-    waiter = start_scr_checkpoint_arrival_thread(
-        worker_id=scr_manifest.worker_id("start_server", "0"),
+    worker_id = scr_manifest.worker_id("start_server", "0")
+    result = arrive_scr_checkpoint_barrier(
+        worker_id=worker_id,
         worker_num=scr_manifest.worker_num,
         generation=scr_manifest.generation or None,
-        name="scr-checkpoint-arrival-start-server",
+        fail_closed=True,
     )
     logging.info(
-        "sCR parent arrival started worker_id=%d worker_num=%d",
-        scr_manifest.worker_id("start_server", "0"),
+        "sCR parent reached pre-service arrival worker_id=%d worker_num=%d result=%r",
+        worker_id,
         scr_manifest.worker_num,
+        result,
     )
-    return waiter
+    return result
 
 
 def _is_startup_real_warmup_entry_rank(py_env_configs: PyEnvConfigs) -> bool:
@@ -541,7 +549,7 @@ def _setup_startup_warmup_health_gate(py_env_configs: PyEnvConfigs):
         return None
 
     gate_file = os.path.join(
-        "/tmp",
+        tempfile.gettempdir(),
         "rtp_llm_startup_warmup_ready_"
         f"{os.getpid()}_{int(py_env_configs.server_config.start_port)}",
     )
@@ -635,9 +643,12 @@ def start_server(py_env_configs: PyEnvConfigs):
                     dash_sc_processes, shutdown_group="frontend"
                 )
 
-        # The parent is also part of the CRIU template.  It participates in
-        # the same passive Epsilon quorum; the control plane still owns all
-        # check/dump/restore operations.
+        # The parent is a CRIU template participant too.  This is a blocking
+        # pre-service gate: all child participants must have reached the same
+        # Epsilon barrier before health checks and listener readiness are
+        # allowed to proceed.  The control plane still owns check/dump/
+        # restore; this call only announces the safe point and waits for its
+        # release.
         _start_parent_scr_arrival(scr_manifest)
 
         # Start parallel health checks and wait for completion

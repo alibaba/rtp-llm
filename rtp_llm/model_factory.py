@@ -223,6 +223,7 @@ class ModelFactory:
         vit_config: Optional[VitConfig] = None,
         merge_lora: bool = False,
         propose_model_config: Optional[ModelConfig] = None,
+        defer_service_start: bool = False,
     ):
         """Create engine from independent config objects, with optional propose model.
 
@@ -283,6 +284,7 @@ class ModelFactory:
             alog_conf_path=alog_conf_path,
             world_info=world_info,
             propose_model=propose_model,
+            defer_service_start=defer_service_start,
         )
         engine.start()
         if propose_model:

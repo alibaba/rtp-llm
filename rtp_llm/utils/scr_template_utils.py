@@ -20,7 +20,6 @@ import importlib
 import inspect
 import logging
 import os
-import platform
 import sys
 import threading
 import time
@@ -35,10 +34,7 @@ LOGGER = logging.getLogger(__name__)
 # and ``SCR_PHASE`` are external control-plane inputs and are never derived or
 # mutated here. Checkpoint versus restore is chosen by the controller/platform.
 RTPLLM_ENABLE_SCR_ENV = "RTPLLM_ENABLE_SCR"
-SCR_ENABLE_ENV = RTPLLM_ENABLE_SCR_ENV
-SCR_SHIM_ENABLE_ENV = "SCR_ENABLE"
 SCR_PHASE_ENV = "SCR_PHASE"
-SCR_EPSILON_DIR = "/etc/scr/epsilon"
 
 SCR_PHASE_CHECKPOINT = "checkpoint"
 SCR_PHASE_RESTORE = "restore"
@@ -126,34 +122,53 @@ def is_scr_enabled() -> bool:
     return configure_scr_environment()
 
 
-def epsilon_backend_mode() -> str:
-    """Return the Epsilon implementation selected on the next import.
+def is_scr_template_phase_active() -> bool:
+    """Return whether external configuration selected a template lifecycle.
 
-    The wheel selects the external SCR shim only when its directory exists,
-    externally supplied ``SCR_ENABLE=1`` is set, and the kernel release does
-    not contain the wheel's ``kangaroo`` marker.
+    The RTP-LLM integration switch alone must not delay normal startup.  Only
+    the externally supplied checkpoint/restore phase enables the synchronous
+    pre-service barrier and deferred listener path.
+    """
+
+    if not is_scr_enabled():
+        return False
+    return os.environ.get(SCR_PHASE_ENV, "").strip().lower() in {
+        SCR_PHASE_CHECKPOINT,
+        SCR_PHASE_RESTORE,
+    }
+
+
+def epsilon_backend_mode(epsilon: Any | None = None) -> str:
+    """Describe a loaded provider without importing it or guessing its path.
+
+    Epsilon owns provider selection. Before import its implementation is
+    unknown; filesystem layout and kernel names are not an RTP-LLM contract.
     """
 
     if not is_scr_enabled():
         return "disabled"
-    if (
-        _flag(os.environ.get(SCR_SHIM_ENABLE_ENV))
-        and os.path.isdir(SCR_EPSILON_DIR)
-        and "kangaroo" not in platform.release()
-    ):
+    if epsilon is None:
+        epsilon = sys.modules.get("epsilon")
+    if epsilon is None:
+        return "not-loaded"
+    if getattr(epsilon, "_EXTERNAL_DIR", ""):
         return "external-shim"
     return "wheel-native"
 
 
 def _external_shim_phase_active() -> bool:
-    """Return whether the externally selected shim may be imported/arrive."""
+    """Apply the controller phase after Epsilon identifies its provider.
 
-    if epsilon_backend_mode() != "external-shim":
-        return True
-    return os.environ.get(SCR_PHASE_ENV, "").strip().lower() in {
-        SCR_PHASE_CHECKPOINT,
-        SCR_PHASE_RESTORE,
-    }
+    RTP-LLM does not add a provider-selection environment variable. Before
+    import, the provider is unknown and the call remains fail-open; once the
+    external shim is loaded, only the controller-supplied phase can activate
+    the SCR operation.
+    """
+
+    mode = epsilon_backend_mode()
+    if mode == "external-shim":
+        return is_scr_template_phase_active()
+    return True
 
 
 def _load_epsilon() -> Any | None:
@@ -167,14 +182,12 @@ def _load_epsilon() -> Any | None:
 
     if not is_scr_enabled():
         return None
-    # The external SCR shim imports libaion at module import time.  Do not
-    # load that process-side runtime during a normal serving phase; the
-    # controller owns phase transitions.  Wheel-native providers may have
-    # different activation semantics, so they are left to their capability
-    # probe below.
+    # Provider import may load native libraries. Do not probe a
+    # deployment-specific directory or kernel name; Epsilon owns provider
+    # selection and activation semantics.
     if not _external_shim_phase_active():
         LOGGER.info(
-            "sCR external shim inactive for phase=%s; skipping Epsilon import",
+            "sCR external phase=%s inactive; skipping Epsilon import",
             os.environ.get(SCR_PHASE_ENV, "<unset>"),
         )
         return None
@@ -187,9 +200,10 @@ def _load_epsilon() -> Any | None:
             else getattr(epsilon, "__file__", "")
         )
         LOGGER.info(
-            "sCR Epsilon loaded wrapper=%s effective_impl=%s",
+            "sCR Epsilon loaded wrapper=%s effective_impl=%s backend_mode=%s",
             getattr(epsilon, "__file__", ""),
             effective_impl,
+            epsilon_backend_mode(epsilon),
         )
         return epsilon
     except Exception as exc:  # pragma: no cover - exact import errors vary by image
@@ -369,6 +383,10 @@ class ScrRegistration:
 
 class EpsilonProtocolError(RuntimeError):
     """Raised when an Epsilon response cannot be classified safely."""
+
+
+class ScrArrivalError(RuntimeError):
+    """Raised when an active template participant cannot reach its barrier."""
 
 
 @dataclass(frozen=True)
@@ -1015,6 +1033,7 @@ def arrive_scr_checkpoint_barrier(
     timeout: int | None = None,
     inactivity_timeout: int | None = None,
     generation: str | None = None,
+    fail_closed: bool = False,
 ) -> int | None:
     """Arrive at Epsilon's rank-local snapshot barrier.
 
@@ -1030,6 +1049,13 @@ def arrive_scr_checkpoint_barrier(
     Calls from different processes are expected to happen concurrently.
     """
 
+    def _raise_if_strict(message: str, cause: BaseException | None = None):
+        if fail_closed:
+            if cause is not None:
+                raise ScrArrivalError(message) from cause
+            raise ScrArrivalError(message)
+        return None
+
     if not is_scr_enabled():
         return None
     if not _external_shim_phase_active():
@@ -1037,7 +1063,7 @@ def arrive_scr_checkpoint_barrier(
             "sCR external shim inactive for phase=%s; skipping arrival",
             os.environ.get(SCR_PHASE_ENV, "<unset>"),
         )
-        return None
+        return _raise_if_strict("sCR arrival requested in an inactive phase")
 
     started = time.monotonic()
     actual_generation = _scr_generation()
@@ -1049,7 +1075,9 @@ def arrive_scr_checkpoint_barrier(
             worker_id,
             worker_num,
         )
-        return None
+        return _raise_if_strict(
+            f"sCR generation mismatch expected={generation} actual={actual_generation}"
+        )
     try:
         default_timeout, default_inactivity = _scr_timeouts()
     except EpsilonProtocolError as exc:
@@ -1058,7 +1086,9 @@ def arrive_scr_checkpoint_barrier(
             _scr_generation(),
             exc,
         )
-        return None
+        return _raise_if_strict(
+            f"sCR timeout configuration conflict: {exc}", exc
+        )
     try:
         resolved_timeout = int(timeout) if timeout is not None else default_timeout
         resolved_inactivity = (
@@ -1092,7 +1122,9 @@ def arrive_scr_checkpoint_barrier(
             _scr_generation(),
             exc,
         )
-        return None
+        return _raise_if_strict(
+            f"invalid explicit sCR timeout configuration: {exc}", exc
+        )
     except (TypeError, ValueError):
         LOGGER.error(
             "invalid explicit sCR timeout configuration timeout=%r "
@@ -1101,7 +1133,7 @@ def arrive_scr_checkpoint_barrier(
             inactivity_timeout,
             _scr_generation(),
         )
-        return None
+        return _raise_if_strict("invalid explicit sCR timeout configuration")
     if resolved_timeout <= 0 or resolved_inactivity <= 0:
         LOGGER.error(
             "invalid sCR timeout configuration timeout=%s inactivity_timeout=%s "
@@ -1110,7 +1142,10 @@ def arrive_scr_checkpoint_barrier(
             resolved_inactivity,
             _scr_generation(),
         )
-        return None
+        return _raise_if_strict(
+            f"invalid sCR timeout configuration timeout={resolved_timeout} "
+            f"inactivity_timeout={resolved_inactivity}"
+        )
 
     try:
         worker_id = int(worker_id)
@@ -1121,26 +1156,30 @@ def arrive_scr_checkpoint_barrier(
             worker_id,
             worker_num,
         )
-        return None
+        return _raise_if_strict(
+            f"invalid sCR worker mapping worker_id={worker_id!r} worker_num={worker_num!r}"
+        )
     if worker_num <= 0 or not 0 <= worker_id < worker_num:
         LOGGER.error(
             "invalid sCR worker mapping (worker_id=%d worker_num=%d)",
             worker_id,
             worker_num,
         )
-        return None
+        return _raise_if_strict(
+            f"invalid sCR worker mapping worker_id={worker_id} worker_num={worker_num}"
+        )
 
     epsilon = _load_epsilon()
     if epsilon is None or not _epsilon_is_active(epsilon):
-        return None
+        return _raise_if_strict("sCR Epsilon provider is unavailable or inactive")
     try:
         adapter = EpsilonAdapter(epsilon)
-    except Exception:
+    except Exception as exc:
         LOGGER.exception("sCR Epsilon capability discovery failed")
-        return None
+        return _raise_if_strict("sCR Epsilon capability discovery failed", exc)
     if not callable(getattr(epsilon, "snapstart_checkpoint", None)):
         LOGGER.warning("sCR active but Epsilon snapshot barrier is unavailable")
-        return None
+        return _raise_if_strict("sCR snapshot barrier API is unavailable")
 
     try:
         LOGGER.info(
@@ -1166,7 +1205,7 @@ def arrive_scr_checkpoint_barrier(
                 worker_id,
                 worker_num,
             )
-            return None
+            return _raise_if_strict("sCR CUDA preparation failed")
         # The external shim invokes its callback synchronously in this same
         # thread. Mark the successful preparation so the compatibility callback
         # does not perform an unnecessary second synchronize.
@@ -1196,8 +1235,10 @@ def arrive_scr_checkpoint_barrier(
                 elapsed_ms,
                 _restore_elapsed_ms(),
             )
+            if fail_closed:
+                raise ScrArrivalError(f"sCR snapshot arrival returned status {result!r}")
         elif elapsed_ms >= resolved_timeout * 1000.0:
-            LOGGER.warning(
+            LOGGER.error(
                 "sCR snapshot arrival exceeded timeout generation=%s phase=%s "
                 "worker_id=%d worker_num=%d elapsed_ms=%.3f timeout_s=%d result=%s "
                 "restore_elapsed_ms=%s",
@@ -1210,10 +1251,18 @@ def arrive_scr_checkpoint_barrier(
                 result,
                 _restore_elapsed_ms(),
             )
+            if fail_closed:
+                raise ScrArrivalError(
+                    "sCR snapshot arrival exceeded timeout "
+                    f"generation={_scr_generation()} worker_id={worker_id} "
+                    f"worker_num={worker_num} elapsed_ms={elapsed_ms:.3f}"
+                )
         else:
             LOGGER.info(
-                "sCR snapshot arrival completed generation=%s phase=%s worker_id=%d "
-                "worker_num=%d result=%s elapsed_ms=%.3f restore_elapsed_ms=%s",
+                "sCR snapstart checkpoint reached pid=%d generation=%s phase=%s "
+                "worker_id=%d worker_num=%d result=%s elapsed_ms=%.3f "
+                "restore_elapsed_ms=%s",
+                os.getpid(),
                 _scr_generation(),
                 os.environ.get(SCR_PHASE_ENV, "<unset>"),
                 worker_id,
@@ -1223,7 +1272,7 @@ def arrive_scr_checkpoint_barrier(
                 _restore_elapsed_ms(),
             )
         return result
-    except Exception:
+    except Exception as exc:
         # The barrier is optional. A timeout or an unavailable sidecar must
         # not take down a serving rank; the control plane can use a fallback.
         LOGGER.exception(
@@ -1238,6 +1287,11 @@ def arrive_scr_checkpoint_barrier(
             resolved_timeout,
             _restore_elapsed_ms(),
         )
+        if fail_closed:
+            raise ScrArrivalError(
+                "sCR snapshot barrier arrival failed "
+                f"generation={_scr_generation()} worker_id={worker_id} worker_num={worker_num}: {exc}"
+            ) from exc
         return None
 
 
@@ -1250,11 +1304,13 @@ def start_scr_checkpoint_arrival_thread(
     generation: str | None = None,
     name: str = "scr-checkpoint-arrival",
 ) -> threading.Thread | None:
-    """Start one daemon thread for this rank's Epsilon barrier arrival.
+    """Compatibility helper for non-startup callers.
 
-    The thread is intentionally rank-local and unjoined. A blocking native
-    wait therefore cannot delay the rank's startup/serving loop, while the
-    external controller remains responsible for the snapshot action.
+    This helper must not be used for a template participant's startup path:
+    the daemon would let the process create listeners or serve while it is
+    waiting at the barrier. Startup code must call
+    :func:`arrive_scr_checkpoint_barrier` synchronously instead. It remains
+    exported only for compatibility with isolated tests/legacy callers.
     """
 
     if not is_scr_enabled():
@@ -1327,25 +1383,10 @@ def _reset_for_test() -> None:
 
 
 __all__ = [
-    "RTPLLM_ENABLE_SCR_ENV",
-    "SCR_ENABLE_ENV",
-    "SCR_PHASE_CHECKPOINT",
-    "SCR_PHASE_ENV",
-    "SCR_PHASE_NORMAL",
-    "SCR_PHASE_RESTORE",
-    "SCR_SHIM_ENABLE_ENV",
-    "SCR_TIMEOUT_ENV",
-    "SCR_INACTIVITY_TIMEOUT_ENV",
-    "SCR_GENERATION_ENV",
-    "SCR_RESTORE_START_TIME_ENV",
-    "DEFAULT_TIMEOUT_SECONDS",
-    "DEFAULT_INACTIVITY_TIMEOUT_SECONDS",
-    "SCR_WORKER_ID_ENV",
-    "SCR_WORKER_NUM_ENV",
-    "SCR_WORKER_OFFSET_ENV",
     "EpsilonAdapter",
     "EpsilonCapabilities",
     "EpsilonProtocolError",
+    "ScrArrivalError",
     "ScrParticipantManifest",
     "ScrRegistration",
     "arrive_scr_checkpoint_barrier",
@@ -1353,7 +1394,7 @@ __all__ = [
     "epsilon_backend_mode",
     "configure_scr_environment",
     "is_scr_enabled",
+    "is_scr_template_phase_active",
     "register_for_scr",
     "resolve_scr_worker_mapping",
-    "start_scr_checkpoint_arrival_thread",
 ]

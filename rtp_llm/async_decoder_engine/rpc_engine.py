@@ -23,6 +23,7 @@ class LanguageCppEngine(BaseEngine):
         engine_config: EngineConfig,
         world_info=None,
         propose_model: Optional[ProposeModel] = None,
+        defer_service_start: bool = False,
     ) -> None:
         """Initialize RPCEngine with model and engine configuration.
 
@@ -49,18 +50,21 @@ class LanguageCppEngine(BaseEngine):
         self.rtp_llm_op_ = RtpLLMOp(
             engine_config, model, self.mm_engine, propose_model, self.token_processor
         )
+        self.defer_service_start = defer_service_start
+        self._service_started = False
 
     @timer_wrapper(description="start async engine")
     @override
     def _start(self) -> None:
         start_time = time.time()
-        self.rtp_llm_op_.start()
+        self.rtp_llm_op_.start(defer_service_start=self.defer_service_start)
         consume_s = time.time() - start_time
         logging.info(f"start rtp_llm_op_ took {consume_s:.2f}s")
 
         # Start HTTP server for language model tasks
         if (
-            self.config.task_type == TaskType.LANGUAGE_MODEL
+            not self.defer_service_start
+            and self.config.task_type == TaskType.LANGUAGE_MODEL
             and self.world_info is not None
         ):
             self.rtp_llm_op_.ft_op.start_http_server(
@@ -69,6 +73,21 @@ class LanguageCppEngine(BaseEngine):
                 self.tokenizer,
                 None,  # chat_renderer is not needed for HTTP server startup
             )
+            self._service_started = True
+
+    def start_service(self) -> None:
+        """Release the deferred backend RPC/HTTP listeners after SCR arrival."""
+        if not self.defer_service_start or self._service_started:
+            return
+        self.rtp_llm_op_.start_service()
+        if self.config.task_type == TaskType.LANGUAGE_MODEL and self.world_info is not None:
+            self.rtp_llm_op_.ft_op.start_http_server(
+                self.model.model_weights_loader,
+                self.world_info,
+                self.tokenizer,
+                None,
+            )
+        self._service_started = True
 
     @override
     def _stop(self) -> None:

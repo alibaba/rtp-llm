@@ -15,6 +15,12 @@ class LocalRpcServiceImpl: public RpcService::Service {
 public:
     LocalRpcServiceImpl() {}
     virtual ~LocalRpcServiceImpl() {}
+    virtual void setDeferServiceStart(bool) {}
+    virtual void startDeferredServices() {
+        if (local_server_) {
+            local_server_->startDeferredServices();
+        }
+    }
     virtual grpc::Status init(const EngineInitParams&                                maga_init_params,
                               py::object                                             mm_process_engine,
                               std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params) {

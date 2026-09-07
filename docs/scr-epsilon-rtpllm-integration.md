@@ -20,6 +20,13 @@
 3. SCR_PHASE 只能是兼容输入和诊断字段，真实生命周期应由 controller/scheduler 和 generation 拥有。
 4. 使用 sidecar 中真实的 controller 路径和真实 checkpoint 路径。现有脚本默认 /usr/local/scr/aion/cuda/scr_controller，并强制 tmpfs；本环境真实路径是 /run/scr/scr_controller 和 ext4 的 SCR_CR_PATH。
 
+本轮代码已完成 active phase 的同步 pre-service gate 和 LanguageCppEngine 的
+listener 两阶段启动；这不代表所有 host-bound 状态都已可跨机器复用。TCPStore/
+NCCL/TP broadcaster、frontend/Dash visitor 构造期的 HostService heartbeat，以及
+EmbeddingCppEngine 的 ARPC/HTTP/gRPC 仍未两阶段化；active template phase 会在创建
+EmbeddingCppEngine 前 fail-closed，不能把 embedding 模板误当成已支持。不能把本轮验证
+结果表述为“完全无状态跨 host 模板”。
+
 ## 2. 实际组件和位置
 
 ### 2.1 RTP-LLM
@@ -39,6 +46,9 @@ rtp_llm/start_server.py
 rtp_llm/start_frontend_server.py
 rtp_llm/start_dash_sc_server.py
 rtp_llm/server/vit_rpc_server.py
+rtp_llm/async_decoder_engine/rpc_engine.py
+rtp_llm/ops/rtp_llm/rtp_llm_op.py
+rtp_llm/cpp/pybind/multi_gpu_gpt/RtpLLMOp.{h,cc}
 rtp_llm/test/scr_scheduler_e2e_test.py
 rtp_llm/utils/test/scr_template_utils_test.py
 ~~~
@@ -95,10 +105,12 @@ worker0 实测存在：
 /etc/scr/hook-flags
 ~~~
 
-external shim 的事实：
+external shim 的事实（由 Epsilon wheel/provider 选择，RTP-LLM 不复制路径判断）：
 
-- 只有 /etc/scr/epsilon 存在、SCR_ENABLE=1、kernel release 不含 kangaroo 时，wheel 才加载 external module。
-- 它检测 /run/scr/socket 或 /run/rund-cr/socket；当前选择 SCR，加载 /etc/scr/shadow/libaion.so。
+- external module 是否启用由 Epsilon wheel 和外部 `SCR_ENABLE`/runtime 配置决定；RTP-LLM
+  不根据固定目录或 kernel 名称猜 provider。
+- 当前镜像实际选择了 SCR runtime，加载了其 Aion/NVIDIA shadow 库；路径和 socket
+  由 runtime/sidecar 契约提供，不是 RTP-LLM 的硬编码接口。
 - is_snapstart_enable() 只判断 SCR_PHASE 是否为 checkpoint 或 restore。
 - register_kv_caches() 展平 Tensor，取 data_ptr 和 nbytes，传入 libaion.so。
 - snapstart_checkpoint() 先执行 before-checkpoint callback，再调用 native barrier。
@@ -363,6 +375,7 @@ sequenceDiagram
   participant E as Epsilon/libaion
   participant CR as CRIU + GPU store
 
+  R->>R: model/KV/NormalEngine prepare; business listener/cache-store not bound
   R->>E: register_kv_caches
   R->>E: before_checkpoint(cuda_synchronize)
   R->>E: snapstart_checkpoint(wait_mode=1, id, num, timeout)
@@ -378,6 +391,9 @@ sequenceDiagram
   Ctrl->>S: restore(path, bypass-cr-path)
   S->>CR: CPU/process restore
   S->>CR: GPU memory restore
+  S-->>E: release arrival after snapshot/restore phase
+  E-->>R: arrival returns
+  R->>R: create listeners/cache-store; health/readiness gate
   CR-->>S: restore complete
   Ctrl->>S: wait-cr-done
   Ctrl->>R: 外部 restore-fixup/release（若平台提供）
@@ -394,12 +410,21 @@ sequenceDiagram
   设置或覆盖它；`RTP_LLM_ENABLE_SCR` 和 `SCR_ENABLE` 都不是 RTP-LLM 的
   第二个业务开关。
 - 不在 RTP-LLM 内设置 SCR_PHASE；phase 由 platform/controller 负责。
+- `RTPLLM_ENABLE_SCR` 单独存在不会改变服务启动时序；只有外部
+  `SCR_PHASE=checkpoint|restore` 才启用同步 pre-service barrier 和延迟 listener。
 - lazy import；只导入 scr_template_utils 不初始化 CUDA。
 - 区分 wheel-native 与 external-shim，并打印 effective implementation。
 - 从主 engine 和可选 draft/MTP/Eagle engine 收集 KV cache Tensor，并按 data pointer 去重。
 - EpsilonAdapter 通过 capability/signature 探测 timeout，避免用有副作用的 trial call。
 - ScrParticipantManifest 生成连续 participant ID 并验证无重复、无缺号。
-- arrival 使用 daemon thread、有限 timeout，不直接阻塞 HTTP/主服务循环。
+- 模板启动路径不使用 daemon arrival thread：backend rank/manager、parent、frontend、DashSc
+  和 VIT 都在进入服务循环或 bind 之前同步调用 arrival。arrival 等待 controller/scheduler
+  release 时，进程不会监听业务端口或接收请求；旧 thread helper 仅保留给兼容测试/非启动调用。
+- backend 的 C++ RPC/HTTP listener 使用两阶段启动：SCR 开启时先完成模型和显存初始化，
+  barrier 释放后才创建 listener；Remote PD cache-store TCP/RDMA 也在 release 后建立；
+  SCR 关闭时走原有单阶段启动路径。
+- active phase 的 arrival/provider/timeout/非零返回错误会 fail-closed，阻止该参与者继续
+  bind/serve；SCR disabled/phase inactive 仍保持 fail-open 的普通启动语义。
 - RTP-LLM 不直接执行 scr_controller dump/restore，控制面边界正确。
 
 ### 5.2 当前风险和建议
@@ -435,9 +460,29 @@ participants:
 
 不能只看 register_after_restore_func 返回 0。
 
-#### D. fail-open 必须上报 health
+#### C.1 预留 restore fix-up 接口（下一步实现）
 
-普通服务可以 fail-open，但 checkpoint 场景中 arrival timeout 必须成为 controller 的 missing-quorum，而不是继续 dump。建议暴露 registered、arrival_started、arrived、timed_out、restored、generation 等状态。
+跨 host restore 需要一个由 sidecar/控制面驱动的窄接口，RTP-LLM 不执行
+`scr_controller` 操作。建议接口只包含：
+
+```text
+prepare_restore_fixup(context) -> READY | FAILED(reason, elapsed_ms)
+final_release()              -> bind listener / health announce
+abort_restore(reason)        -> stop advertising / cold-start fallback
+```
+
+`context` 至少携带 generation、目标 host、rank/world 信息、恢复后的 peer
+endpoint 和 restore 起始时间。实现时重建 TCPStore/process-group/NCCL、TP
+broadcaster/UDS、PD/RDMA channel 以及 HostService/discovery；所有接口必须
+幂等、带 generation 校验和超时日志。当前版本只记录为 TODO，不改变普通启动
+路径，也不把恢复状态藏在新 launcher 的环境变量中。
+
+#### D. active arrival 必须 fail-closed
+
+普通服务路径仍可 fail-open；但 checkpoint/restore active phase 中 arrival timeout、provider
+异常、非法映射或非零返回会抛出并阻止 listener bind，控制面仍需把异常/缺席 participant
+视为 missing quorum。当前 arrival 结果和耗时会写入进程日志；不要把服务已启动误当作
+模板成功。建议后续暴露 registered、arrived、timed_out、restored、generation 等状态。
 
 #### E. generation 必须原子变化
 
@@ -468,17 +513,20 @@ SCR_PHASE normal 或 unset
 推理路径与无 SCR 版本一致
 ~~~
 
+即使部署预置了 `RTPLLM_ENABLE_SCR=1`，只要外部没有选择
+`SCR_PHASE=checkpoint|restore`，也不会进入延迟 listener 的模板启动路径。
+
 checkpoint：
 
 ~~~text
 1. controller 生成 generation 和 participant manifest。
 2. scheduler health/check 正常。
-3. RTP-LLM cache ready 后 register_kv_caches。
-4. 每个 participant 一次 arrival。
-5. check 确认 quorum。
-6. block，停止新请求或切走流量。
-7. dump；scheduler 同时处理 GPU memory 与 CPU/process CRIU。
-8. wait-cr-done，记录 generation、路径和结果。
+3. RTP-LLM 完成模型/显存初始化并 register_kv_caches。
+4. backend C++ listener、frontend/DashSc/VIT listener 均尚未 bind。
+5. 每个 participant 同步 arrival；controller/scheduler 观察 quorum。
+6. controller 执行 check/block，确认无请求状态后 dump；scheduler 同时处理 GPU memory 与 CPU/process CRIU。
+7. wait-cr-done，记录 generation、路径和结果。
+8. controller release 后，RTP-LLM 才创建 listener 并进入 health/ready 流程。
 ~~~
 
 restore：
@@ -527,7 +575,7 @@ restore：
 2. 单容器多 rank：验证 manifest ID 和共同 worker_num。
 3. 故意漏掉一个 rank：确认联合 dump 不执行，并报告 missing quorum。
 4. 隔离目录执行 GPU memory + CPU/CRIU 联合 dump/restore：确认 GPU store 与 `cpu-images/pages/core/pstree` 同时产生，且 `wait-cr-done` 成功。
-5. restore 后对账 cgroup/PID/FD/监听和新环境地址，验证服务可用。
+5. restore 后对账 cgroup/PID/FD；监听端口由 release 后的新启动阶段重新 bind，不复用旧 host 的 listener/channel/IP 状态；验证服务可用。
 6. prefill/decode 分离：分别验证各自 scheduler scope；不把不同 sidecar 合并到一个 Epsilon barrier。
 7. restore 后短请求和长请求各测一次，观察 CUDA context、KV cache 命中和错误。
 
