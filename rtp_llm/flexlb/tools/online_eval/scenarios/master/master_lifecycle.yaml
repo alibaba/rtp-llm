@@ -1,0 +1,76 @@
+schema_version: 1
+id: master_lifecycle
+description: Cold restart of the owned master, clean scheduler state, topology and request recovery.
+category: master
+profiles: [batch-window]
+legacy_case_ids: [master_kill]
+environment:
+  backend: java_mock
+  n_prefill: 2
+  n_decode: 4
+  discovery: discovery_file
+  perf_preset: fault_env
+  config_overrides:
+    ordering: priority
+    queue_timeout_ms: {omit: true}
+execution:
+  timeout_s: 420
+  stage_timeout_s: 60
+  cleanup_timeout_s: 120
+variants:
+  - id: kill_single
+stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: baseline
+    action: request
+    params: {count: 1, output_len: 2}
+  - id: baseline_done
+    action: wait
+    params:
+      requests: {$ref: stages.baseline.output.requests}
+  - id: baseline_complete
+    action: check
+    params:
+      actual: {$ref: stages.baseline_done.output.completed}
+      op: eq
+      expected: true
+  - id: baseline_no_errors
+    action: check
+    params:
+      actual: {$ref: stages.baseline_done.output.error_count}
+      op: eq
+      expected: 0
+  - id: kill
+    action: master_fault
+    params: {mode: kill, target: single}
+  - id: restart
+    action: master_restore
+    timeout_s: 180
+    params:
+      fault: {$ref: stages.kill.output.fault}
+  - id: restored_topology
+    action: master_ready
+    params: {target: single, inflight_zero: true}
+  - id: recovery
+    action: request
+    params: {count: 1, output_len: 2}
+  - id: recovery_done
+    action: wait
+    params:
+      requests: {$ref: stages.recovery.output.requests}
+  - id: recovery_complete
+    action: check
+    params:
+      actual: {$ref: stages.recovery_done.output.completed}
+      op: eq
+      expected: true
+  - id: recovery_no_errors
+    action: check
+    params:
+      actual: {$ref: stages.recovery_done.output.error_count}
+      op: eq
+      expected: 0
+  - id: cleanup
+    action: teardown
