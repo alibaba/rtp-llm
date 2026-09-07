@@ -167,6 +167,46 @@ def _ready_validate(params, plan):
     return p
 
 
+def _prefill_alive_validate(params, plan):
+    p = _target(_params(params, plan, {"target"}))
+    _layout(p, plan)
+    return p
+
+
+def _prefill_alive(ctx, params, deadline):
+    samples = []
+    artifact = ctx.artifact_dir / f"master-prefill-alive-{len(ctx._resources)}.json"
+    try:
+        while True:
+            deadline.check()
+            raw = _master_json(
+                ctx, params["target"], "/rtp_llm/master/info", deadline, True
+            )
+            summary = raw.get("worker_summary")
+            if not isinstance(summary, dict):
+                raise ValueError("missing worker summary")
+            row = summary.get("PREFILL")
+            if row is not None and not isinstance(row, dict):
+                raise ValueError("invalid Prefill alive evidence")
+            # A removed worker may not have reappeared yet. Preserve unknown
+            # separately from an observed zero; neither satisfies alive >= 1.
+            alive = None if row is None else row.get("alive")
+            if row is not None and (
+                not isinstance(row, dict) or type(alive) is not int or alive < 0
+            ):
+                raise ValueError("invalid Prefill alive evidence")
+            samples.append(dict(time_s=ctx.clock(), alive=alive, raw=raw))
+            if alive is not None and alive >= 1:
+                break
+            deadline.sleep(0.5)
+    finally:
+        artifact.write_text(json.dumps(samples, indent=2) + "\n")
+    return StageOutput(
+        checks=[CheckResult("prefill_alive", "PASS", actual=alive, expected=">=1")],
+        artifacts=[str(artifact)],
+    )
+
+
 def _endpoint_loads(data):
     loads = {}
     for side in ("prefill", "decode"):
@@ -256,6 +296,13 @@ def _ready(ctx, params, deadline):
 
 
 HANDLERS = [
+    StageHandler(
+        "master_prefill_alive",
+        _prefill_alive_validate,
+        _prefill_alive,
+        {},
+        checks=frozenset({"prefill_alive"}),
+    ),
     StageHandler(
         "master_fault",
         _fault_validate,
