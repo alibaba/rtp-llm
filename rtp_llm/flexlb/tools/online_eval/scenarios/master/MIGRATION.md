@@ -1,6 +1,6 @@
 # Master migration contract
 
-Status: all five families are implemented. Two exact batch-window lifecycle instances have real Java PASS evidence on fixed integration commit `5affc1c6de64fc8a1bf0d74dc3789d035c9a7307`, independently accepted by agent3. The other 23 profile instances have no real execution claim here. Legacy functions remain intact and are never invoked by these YAML programs. Baseline legacy source: commit `834b5eea2866dea71e3d27adb37f8c8a8b02c160`, `flexlb_ft/cases/master/`. Paths below are relative to `online_eval`.
+Status: all five families are implemented. Fixed 5affc1c6de64fc8a1bf0d74dc3789d035c9a7307 now has original Java results for all 25 instances: 16 PASS, 4 freeze FAIL, 4 wraparound TIMEOUT and 1 quota ERROR. The first two lifecycle PASS results had independent runtime review on that original source; the remaining run is awaiting independent evidence review. These results do not validate later corrections, including dual/freeze configuration inheritance. Legacy functions remain intact and are never invoked by these YAML programs. Baseline legacy source: commit `834b5eea2866dea71e3d27adb37f8c8a8b02c160`, `flexlb_ft/cases/master/`. Paths below are relative to `online_eval`.
 
 Nine legacy cases map to five YAML families, ten variants and 25 profile instances. `all4` means batch-window, single-nonbatch, single-batch, window-nonbatch. `batch` means batch-window only. HA uses actual owned dual standalone masters, without an ambient HA skip gate, ZK forwarding or Tier-3 claims.
 
@@ -218,3 +218,27 @@ remains ERROR rather than the old helper's unknown-value bypass.
 The new formal-loader tests pin these boundaries on all four profiles. Actual
 runtime evidence from the corrected program is still pending; the original
 scheduler 11-to-0 observation cannot by itself identify the mechanism of change.
+
+
+## Lifecycle configuration inheritance correction
+
+The original family placed the single-kill elastic environment's PRIORITY
+ordering and omitted queueTimeoutMs on the family. Empty override dictionaries
+on dual-kill and freeze were deep-merged, so they did not remove those keys.
+Legacy support/ha.py tier1_dual_spec instead uses the profile directly with
+config_overrides=None. The corrected family therefore has empty overrides,
+and only kill_single adds PRIORITY and omitted queueTimeoutMs.
+
+Formal compiler tests compare the complete resolved configuration of all six
+lifecycle instances with the legacy render_env path, including all four freeze
+profiles. single-nonbatch freeze now retains FIFO and queueTimeoutMs=60000;
+kill_single retains its prior elastic configuration. The test imports the old
+HA environment constructor only as an independent test oracle; runtime actions
+do not call old cases or helpers.
+
+The original 5aff run remains recorded as observed, including dual-kill PASS
+and four freeze FAIL results. Those runs do not validate this corrected
+configuration. Dual-kill and all four freeze instances require new fixed-source
+execution; the existing immediate scheduler retention check is unchanged and
+can still fail. This patch does not claim that the configuration difference
+caused the observed scheduler count drop.
