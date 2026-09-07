@@ -2,6 +2,7 @@
 #include <gtest/gtest.h>
 
 #include "rtp_llm/cpp/api_server/GenerateStreamWrapper.h"
+#include "rtp_llm/cpp/api_server/Exception.h"
 
 #include "rtp_llm/cpp/api_server/test/mock/MockEngineBase.h"
 #include "rtp_llm/cpp/api_server/test/mock/MockGenerateStream.h"
@@ -29,7 +30,26 @@ std::shared_ptr<MockGenerateStream> CreateMockGenerateStream() {
     return mock_stream;
 }
 
-class GenerateStreamWrapperTest: public Test {};
+class GenerateStreamWrapperTest: public Test {
+public:
+    void SetUp() override {
+        GptInitParameter params;
+        params.device_resource_config.device_reserve_memory_bytes = 128 * 1024 * 1024;
+        params.device_resource_config.host_reserve_memory_bytes   = 128 * 1024 * 1024;
+        DeviceFactory::initDevices(params);
+    }
+};
+
+TEST_F(GenerateStreamWrapperTest, failedGenerationIsNotSuccessfulCompletion) {
+    auto stream = CreateMockGenerateStream();
+    EXPECT_CALL(*stream, finished()).WillOnce(Return(false));
+    EXPECT_CALL(*stream, nextOutput())
+        .WillOnce(Return(ErrorResult<GenerateOutputs>(ErrorCode::UNKNOWN_ERROR,
+                                                      "generation state validation failed: illegal CSR token")));
+    GenerateStreamWrapper wrapper(nullptr, nullptr);
+    wrapper.stream_ = stream;
+    EXPECT_THROW(wrapper.generateResponse(), HttpApiServerException);
+}
 
 TEST_F(GenerateStreamWrapperTest, generateResponse) {
 

@@ -50,6 +50,12 @@ struct StreamTreeInfo {
         tree_info.csr_state    = csr_state;
         return tree_info;
     }
+    bool isFinishedCsrBeam() const {
+        return csr_snapshot && is_beam_search && !in_tree_mode && csr_state == -1;
+    }
+    int32_t maskState() const {
+        return isFinishedCsrBeam() ? csr_snapshot->terminalMaskState() : csr_state;
+    }
 };
 
 class TreeLogitsProcessor: public BaseLogitsProcessor {

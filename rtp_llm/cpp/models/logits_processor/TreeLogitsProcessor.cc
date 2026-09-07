@@ -30,7 +30,10 @@ void TreeLogitsProcessor::process(const SamplerInputs& inputs, size_t start_idx,
             for (size_t index = 0; index < batch_size; ++index) {
                 const auto& info = tree_infos_[index];
                 RTP_LLM_CHECK(info.csr_snapshot == csr_snapshot);
-                host_states[index] = info.csr_state;
+                // A completed beam stays EOS-only while its siblings decode.
+                // An all -inf row would turn log_softmax into NaNs and poison
+                // the shared beam top-k. Invalid states remain fully masked.
+                host_states[index] = info.maskState();
             }
             device_->copy({*csr_device_states_, *csr_host_states_});
             auto batch_logits = inputs.logits->slice(start_idx, batch_size);
@@ -46,8 +49,9 @@ void TreeLogitsProcessor::process(const SamplerInputs& inputs, size_t start_idx,
         for (size_t index = 0; index < batch_size; ++index) {
             const auto&                      info = tree_infos_[index];
             std::vector<std::vector<size_t>> candidate_token_ids(1);
-            if (info.csr_state >= 0 && static_cast<size_t>(info.csr_state) < csr_snapshot->stateCount()) {
-                for (int32_t edge = row_ptr[info.csr_state]; edge < row_ptr[info.csr_state + 1]; ++edge) {
+            const auto                       mask_state = info.maskState();
+            if (mask_state >= 0 && static_cast<size_t>(mask_state) < csr_snapshot->stateCount()) {
+                for (int32_t edge = row_ptr[mask_state]; edge < row_ptr[mask_state + 1]; ++edge) {
                     candidate_token_ids[0].push_back(static_cast<size_t>(col_idx[edge]));
                 }
             }
@@ -120,6 +124,12 @@ void TreeLogitsProcessor::updateStatus(const rtp_llm::BufferPtr& new_tokens, int
                                         j + offset,
                                         new_tokens->shape()[1]);
                 const auto token      = *(*new_tokens)[i].dataWithOffset<int>(j + offset);
+                if (info.isFinishedCsrBeam()) {
+                    RTP_LLM_CHECK_WITH_INFO(token == info.csr_snapshot->endTokenId(),
+                                            "finished CSR beam may only repeat EOS, got token [%d]",
+                                            token);
+                    continue;
+                }
                 const auto next_state = info.csr_snapshot->transition(info.csr_state, token);
                 RTP_LLM_CHECK_WITH_INFO(next_state != ConstraintTreeCsrSnapshot::INVALID_TRANSITION,
                                         "CSR constraint tree version [%llu] rejected token [%d] at state [%d]",

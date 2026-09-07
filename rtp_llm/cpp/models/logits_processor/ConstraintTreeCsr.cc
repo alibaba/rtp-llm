@@ -239,6 +239,18 @@ ConstraintTreeCsrUpdateResult ConstraintTreeCsrManager::updateFromBinary(const s
         return {ConstraintTreeCsrUpdateCode::INVALID_ARTIFACT, currentVersion(), std::move(error)};
     }
 
+    for (size_t state = 0; state < next->stateCount(); ++state) {
+        const auto begin = next->row_ptr_[state];
+        if (next->row_ptr_[state + 1] == begin + 1 && next->col_idx_[begin] == next->end_token_id_) {
+            next->terminal_mask_state_ = static_cast<int32_t>(state);
+            break;
+        }
+    }
+    if (next->terminal_mask_state_ < 0) {
+        return {
+            ConstraintTreeCsrUpdateCode::INVALID_ARTIFACT, currentVersion(), "CSR trie must have an EOS-only leaf row"};
+    }
+
     if (device != nullptr) {
         try {
             next->device_row_ptr_ = upload(next->row_ptr_, device);

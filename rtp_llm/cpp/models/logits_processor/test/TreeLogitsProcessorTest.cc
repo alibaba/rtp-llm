@@ -429,6 +429,45 @@ TEST_F(TreeLogitsProcessorTest, testWideCsrRootUsesGpuMaskAndPinnedSnapshot) {
     EXPECT_NE(std::string::npos, new_request.getStatus().front().find("csr:v" + std::to_string(next_version)));
 }
 
+TEST_F(TreeLogitsProcessorTest, testFinishedCsrBeamHasOnlyEosAndNoNanProbability) {
+    const int32_t eos     = 63;
+    auto          manager = ConstraintTreeCsrManager::instance();
+    const auto    version = manager->currentVersion() + 1;
+    auto          result  = manager->updateFromBinary(makeCsrArtifact(version,
+                                                            62,
+                                                            eos,
+                                                            3,
+                                                                      {0, 3, 4, 5, 6, 7, 8, 9},
+                                                                      {10, 11, 12, eos, 20, eos, 21, 22, eos},
+                                                                      {1, 2, 4, -1, 3, -1, 5, 6, -1}),
+                                            device_);
+    ASSERT_TRUE(result.ok()) << result.message;
+    auto           snapshot = manager->snapshot();
+    StreamTreeInfo finished(false, 0, 2, true, snapshot);
+    finished.csr_state = -1;
+    StreamTreeInfo active(true, 0, 2, true, snapshot);
+    active.csr_state = 5;
+    TreeLogitsProcessor processor(device_, {finished, active});
+    SamplerDataBuilder  builder;
+    auto                inputs = builder.allocate({2, 64, 2}, {}, {});
+    Buffer2torchTensor(*inputs.logits, false).fill_(1.0f);
+    processor.process(inputs, 0, 2);
+    auto logits = getBufferValues<float>(*inputs.logits);
+    for (int token = 0; token < 64; ++token) {
+        EXPECT_EQ(token == eos ? 1.0f : -INFINITY, logits[token]);
+        EXPECT_EQ(token == 22 ? 1.0f : -INFINITY, logits[64 + token]);
+    }
+    auto probabilities = Buffer2torchTensor(*inputs.logits, false).log_softmax(-1);
+    EXPECT_FALSE(probabilities.isnan().any().item<bool>());
+    const std::vector<int32_t> padded     = {10, eos, eos, 12, 21, 22};
+    auto                       new_tokens = createHostBuffer<int32_t>({2, 3}, padded.data());
+    EXPECT_NO_THROW(processor.updateStatus(new_tokens, 1));
+    // A terminal beam may only repeat EOS; it never re-enters free generation.
+    const std::vector<int32_t> invalid        = {10, eos, eos, 9, 12, 21, 22, eos};
+    auto                       invalid_tokens = createHostBuffer<int32_t>({2, 4}, invalid.data());
+    EXPECT_ANY_THROW(processor.updateStatus(invalid_tokens, 1));
+}
+
 TEST_F(TreeLogitsProcessorTest, testCsrRequestAdmissionIsFailClosedAndSupportsOnlyFixedBeam) {
     GenerateConfig config;
     EXPECT_TRUE(TreeLogitsProcessor::validateCsrRequest(nullptr, config, false).empty());

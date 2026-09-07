@@ -37,8 +37,12 @@ std::pair<MultiSeqsResponse, bool> GenerateStreamWrapper::generateResponse() {
 
     const auto result = stream_->nextOutput();
     if (!result.ok()) {
-        RTP_LLM_LOG_INFO("stream nextOutput failed.");
-        return std::make_pair(MultiSeqsResponse(), true);
+        if (result.status().code() == ErrorCode::FINISHED
+            || result.status().code() == ErrorCode::OUTPUT_QUEUE_IS_EMPTY) {
+            return std::make_pair(MultiSeqsResponse(), true);
+        }
+        // A failed request must not be reported as a successful empty response.
+        throw HttpApiServerException(HttpApiServerException::UNKNOWN_ERROR, result.status().ToString());
     }
     auto outputs = result.value();
 

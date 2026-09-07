@@ -843,14 +843,19 @@ void GenerateStream::update(const StreamUpdateInfo& update_info) {
 
     resizeSubGenerateStatus(update_info.new_tokens->shape()[0]);
 
+    // Validate even the final token before updateOutput can enqueue a response.
+    // A rejected token fails this request closed, not the engine thread.
+    try {
+        updateLogitProcessorStatus(update_info);
+    } catch (const std::exception& e) {
+        setStopWithoutLock(ErrorCode::UNKNOWN_ERROR, std::string("generation state validation failed: ") + e.what());
+        return;
+    }
+
     // TODO(xinfei.sxf) fix this (update_queue)
     updateOutput(update_info);
 
     bool is_done = finishedWithoutLock() || stoppedWithoutLock();
-
-    if (!is_done) {
-        updateLogitProcessorStatus(update_info);
-    }
 
     if (!is_done || reuseCache()) {
         // kv cache blocks must be updated if REUSE_CACHE is on, even the stream is done

@@ -77,6 +77,37 @@ class GenerateStreamTest: public DeviceTestBase {
 protected:
 };
 
+class RejectingLogitsProcessor: public BaseLogitsProcessor {
+public:
+    explicit RejectingLogitsProcessor(DeviceBase* device): BaseLogitsProcessor(device) {}
+    void process(const SamplerInputs&, size_t, size_t) override {}
+    void updateMultiSeqStatus(const std::vector<int>&) override {}
+    void updateStatus(const BufferPtr&, int32_t) override {
+        throw std::runtime_error("rejected constrained token");
+    }
+};
+
+TEST_F(GenerateStreamTest, testInvalidGeneratedTokenNeverReachesOutputQueueOrCrashesWorker) {
+    for (bool final_step : {false, true}) {
+        GptInitParameter params;
+        params.max_seq_len_                    = 128;
+        params.vocab_size_                     = 64;
+        params.special_tokens_.eos_token_id_   = 63;
+        auto input                             = std::make_shared<GenerateInput>();
+        input->need_release_resource           = false;
+        input->input_ids                       = vector2Buffer(std::vector<int>{1, 2});
+        input->generate_config                 = std::make_shared<GenerateConfig>();
+        input->generate_config->max_new_tokens = final_step ? 1 : 10;
+        auto stream = std::make_shared<NormalGenerateStream>(input, params, ResourceContext{}, nullptr);
+        stream->logits_processor_list_.push_back(std::make_shared<RejectingLogitsProcessor>(device_));
+        const std::vector<int32_t> token  = {final_step ? 63 : 3};
+        auto                       output = createHostBuffer<int32_t>({1, 1}, token.data());
+        EXPECT_NO_THROW(stream->update({output, 1}));
+        EXPECT_TRUE(stream->stopped());
+        EXPECT_FALSE(stream->hasOutput());
+    }
+}
+
 TEST_F(GenerateStreamTest, testConstruct) {
     rtp_llm::GptInitParameter params;
     auto                      builder = GenerateStreamBuilder(params);

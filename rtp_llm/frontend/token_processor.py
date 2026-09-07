@@ -71,8 +71,9 @@ class TokenProcessorPerStream:
         return_incremental: bool = False,
     ):
         if not self.has_num_beams:
+            # The C++ adapter supplies a flat token array for each sequence.
             self.ouput_tokens_list[i] = np.concatenate(
-                (self.ouput_tokens_list[i], tokens), axis=1
+                (self.ouput_tokens_list[i], tokens), axis=0
             )
             tokens = self.ouput_tokens_list[i]
         tokens = remove_padding_eos_with_numpy(
@@ -129,7 +130,7 @@ class TokenProcessorPerStream:
                 if not print_stop_words:
                     text = text[:stop_idx]
                 else:
-                    text = text[:stop_idx + stop_len]
+                    text = text[: stop_idx + stop_len]
                 token_buffer = ""
                 finished = True
 
@@ -139,7 +140,9 @@ class TokenProcessorPerStream:
         stop_word_str_slices = get_stop_word_slices(stop_word_str_list)
 
         if return_incremental or not print_stop_words:
-            trunc_text = truncate_response_with_stop_words(text, stop_word_str_slices, True, True)
+            trunc_text = truncate_response_with_stop_words(
+                text, stop_word_str_slices, True, True
+            )
             if return_incremental:
                 token_buffer = text[len(trunc_text) :]
             text = trunc_text

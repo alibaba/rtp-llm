@@ -39,6 +39,11 @@ public:
     size_t rootCandidateCount() const {
         return static_cast<size_t>(row_ptr_[1] - row_ptr_[0]);
     }
+    // An existing leaf row containing only EOS. Finished beams use this row
+    // for EOS padding without adding a new state to the serialized tree.
+    int32_t terminalMaskState() const {
+        return terminal_mask_state_;
+    }
     bool deviceReady() const {
         return device_row_ptr_ != nullptr && device_col_idx_ != nullptr;
     }
@@ -70,6 +75,7 @@ private:
     int32_t              start_token_id_ = -1;
     int32_t              end_token_id_   = -1;
     uint64_t             sid_count_      = 0;
+    int32_t              terminal_mask_state_ = -1;
     std::vector<int32_t> row_ptr_;
     std::vector<int32_t> col_idx_;
     std::vector<int32_t> next_state_;

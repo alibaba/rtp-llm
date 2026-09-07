@@ -2,8 +2,12 @@ import logging
 import logging.config
 import os
 import random
+from types import SimpleNamespace
 from unittest import TestCase, main
 
+import numpy as np
+
+from rtp_llm.frontend.token_processor import TokenProcessor, TokenProcessorPerStream
 from rtp_llm.frontend.tokenizer_factory.tokenizer_utils import (
     DecodingState,
     IncrementDecodingUtils,
@@ -88,6 +92,57 @@ class IncrementalDecodeTest(TestCase):
                     tokenizer, tokens, False
                 )
                 self.assertEqual(base_output, cmp_output)
+
+
+class TokenProcessorPerStreamTest(TestCase):
+    """The C++ HTTP adapter passes one-dimensional int32 arrays per sequence."""
+
+    def make_processor(self, beams=False, size=1):
+        tokenizer = SimpleNamespace(decode=lambda ids: "".join(chr(i) for i in ids))
+        return TokenProcessorPerStream(
+            beams, size, TokenProcessor(tokenizer, SimpleNamespace(eos_token_id=0))
+        )
+
+    def decode(self, processor, tokens, i=0, finished=False, incremental=False):
+        return processor.decode_tokens(
+            i, np.asarray(tokens, dtype=np.int32), finished, False, [], [], incremental
+        )
+
+    def test_first_single_beam_chunk(self):
+        processor = self.make_processor()
+        self.assertEqual(self.decode(processor, [65, 66]), (2, "AB"))
+        self.assertEqual(processor.ouput_tokens_list[0].shape, (2,))
+        self.assertEqual(processor.ouput_tokens_list[0].dtype, np.int32)
+
+    def test_single_beam_accumulates_chunks_and_removes_eos(self):
+        processor = self.make_processor()
+        self.assertEqual(self.decode(processor, [65]), (1, "A"))
+        self.assertEqual(self.decode(processor, [66, 67]), (3, "ABC"))
+        self.assertEqual(self.decode(processor, [0], finished=True), (3, "ABC"))
+
+    def test_single_beam_incremental_text(self):
+        processor = self.make_processor()
+        self.assertEqual(self.decode(processor, [65], incremental=True), (1, "A"))
+        self.assertEqual(self.decode(processor, [66], incremental=True), (2, "B"))
+
+    def test_empty_chunk_preserves_history(self):
+        processor = self.make_processor()
+        self.assertEqual(self.decode(processor, []), (0, ""))
+        self.decode(processor, [65])
+        self.assertEqual(self.decode(processor, []), (1, "A"))
+
+    def test_sequences_have_independent_histories(self):
+        processor = self.make_processor(size=2)
+        self.decode(processor, [65], i=0)
+        self.decode(processor, [66], i=1)
+        self.assertEqual(self.decode(processor, [67], i=0), (2, "AC"))
+        self.assertEqual(self.decode(processor, [68], i=1), (2, "BD"))
+
+    def test_beam_search_replaces_history_instead_of_appending(self):
+        processor = self.make_processor(beams=True)
+        self.assertEqual(self.decode(processor, [65]), (1, "A"))
+        self.assertEqual(self.decode(processor, [66, 67]), (2, "BC"))
+        self.assertEqual(self.decode(processor, [66, 67, 0], finished=True), (2, "BC"))
 
 
 if __name__ == "__main__":
