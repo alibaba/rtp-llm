@@ -196,10 +196,10 @@ std::list<GenerateStreamPtr> FIFOSchedulerBase::selectPrefillPrefix(std::list<Ge
     int64_t                      budget_left = prefill_chunk_size_;
     std::list<GenerateStreamPtr> selected;
 
-    const auto finish_invalid_stream = [&active_streams](auto it, const std::string& reason) {
+    const auto finish_invalid_stream = [&active_streams](auto it, ErrorCode error_code, const std::string& reason) {
         const auto error_msg = "[chunked_prefill] scheduler rejects stream[" + std::to_string((*it)->streamId())
                                + "]: " + reason;
-        (*it)->reportError(ErrorCode::UNKNOWN_ERROR, error_msg);
+        (*it)->reportError(error_code, error_msg);
         (*it)->moveToNext();
         return active_streams.erase(it);
     };
@@ -221,6 +221,7 @@ std::list<GenerateStreamPtr> FIFOSchedulerBase::selectPrefillPrefix(std::list<Ge
 
         if (remaining <= 0 || block_size <= 0 || reuse < 0 || reuse % block_size != 0) {
             it = finish_invalid_stream(it,
+                                       ErrorCode::EXECUTION_EXCEPTION,
                                        "invalid chunk window (rows=" + std::to_string(rows)
                                            + ", reuse=" + std::to_string(reuse) + ", remaining=" + std::to_string(remaining)
                                            + ", block_size=" + std::to_string(block_size) + ")");
@@ -233,7 +234,9 @@ std::list<GenerateStreamPtr> FIFOSchedulerBase::selectPrefillPrefix(std::list<Ge
             if (!selected.empty()) {
                 break;
             }
-            it = finish_invalid_stream(it, "full prefill budget cannot produce a positive aligned grant");
+            it = finish_invalid_stream(it,
+                                       ErrorCode::INVALID_PARAMS,
+                                       "full prefill budget cannot produce a positive aligned grant");
             continue;
         }
 

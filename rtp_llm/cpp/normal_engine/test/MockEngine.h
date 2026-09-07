@@ -68,12 +68,13 @@ struct CustomConfig {
     DataType                                kv_cache_data_type  = DataType::TYPE_FP16;
     std::map<std::string, std::vector<int>> multi_task_prompt_tokens;
     std::vector<int64_t>                    output_vocab_ids;  // non-empty enables output-vocab pruning
-    bool                                    prefill_cp_enabled             = false;
-    bool                                    speculative_enabled            = false;
-    bool                                    warm_up_with_loss              = false;
-    int                                     output_dispatcher_worker_count = 0;
-    bool                                    warm_up                        = false;
-    int                                     prefill_chunk_size             = 0;
+    bool                                       prefill_cp_enabled             = false;
+    bool                                       speculative_enabled            = false;
+    bool                                       warm_up_with_loss              = false;
+    int                                        output_dispatcher_worker_count = 0;
+    bool                                       warm_up                        = false;
+    int                                        prefill_chunk_size             = 0;
+    int64_t                                    max_context_batch_size         = 128;
     std::shared_ptr<std::vector<ForwardShape>> forward_shapes;
 };
 
@@ -99,7 +100,7 @@ rtp_llm::EngineInitParams createEngineInitParams(const CustomConfig&     config,
     kv_cache_config.enable_device_cache                         = config.enable_device_cache;
     kv_cache_config.multi_task_prompt_tokens                    = config.multi_task_prompt_tokens;
     runtime_config.max_generate_batch_size                      = 128;
-    runtime_config.fifo_scheduler_config.max_context_batch_size = 128;
+    runtime_config.fifo_scheduler_config.max_context_batch_size = config.max_context_batch_size;
     runtime_config.fifo_scheduler_config.max_batch_tokens_size  = 4096;
     runtime_config.fifo_scheduler_config.prefill_chunk_size     = config.prefill_chunk_size;
     runtime_config.warm_up                                      = config.warm_up;
