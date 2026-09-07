@@ -128,6 +128,23 @@ def _use_read_from_pool() -> bool:
     return os.environ.get("DSV4_READ_FROM_POOL", "1") != "0"
 
 
+# The SM120 paged-cache prefill path is disabled by default because it cannot
+# currently run at all.  It builds ``cmp_pool_slot_mapping`` and then flattens it
+# to 1-D before ``cmp_map.gather(0, extra_logical)``, but ``extra_logical`` is
+# 2-D ``[T, extra_width]``, and torch.gather requires input and index to have the
+# same number of dimensions -- so it raises "Index tensor must have the same
+# number of dimensions as input tensor" on the first call.  The following
+# ``masked_fill_`` broadcasts a ``[1, extra_width]`` column vector against a
+# ``[T, 1]`` length vector, which shows ``extra_indices`` was meant to come out
+# ``[T, extra_width]``; advanced indexing (``cmp_map[extra_logical]``) gives that
+# and gather does not.  Nothing in the tree tests this path, and until now nothing
+# reached it on SM120 either: every SM120 run used CP with a sharded kv cache,
+# which sets ``swa_byte_sliced`` and skips the branch.  Set
+# ``DSV4_SM120_PAGED_CACHE_PREFILL=1`` to re-enable it once the indexing is fixed.
+def _sm120_paged_cache_prefill_enabled() -> bool:
+    return os.environ.get("DSV4_SM120_PAGED_CACHE_PREFILL", "0") == "1"
+
+
 def _use_cp_cache_hit_raw_q_merge() -> bool:
     # The raw-Q/O/LSE merge implementation is still an experimental validation
     # path: it avoids KV gather communication, but its current index planning is
@@ -4928,6 +4945,7 @@ class AttentionFP8(nn.Module):
         cmp_pool_slot_mapping = None
         if (
             is_sm120(device)
+            and _sm120_paged_cache_prefill_enabled()
             and not swa_byte_sliced
             and isinstance(cmp_reader, LocalPoolReader)
             and swa_slot_mapping is not None
