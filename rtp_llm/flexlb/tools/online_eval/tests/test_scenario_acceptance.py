@@ -59,6 +59,49 @@ def fixture():
 
 
 class ScenarioAcceptanceTest(unittest.TestCase):
+    def test_scalar_comparisons_preserve_core_type_boundaries(self):
+        for actual, expected, op, complete in [
+            (0.5, 1, "le", True),
+            (1, 0.5, "ge", True),
+            ("ready", "ready", "eq", True),
+            ("a", "b", "le", False),
+            (True, 1, "eq", False),
+            (1, True, "eq", False),
+            (float("nan"), 1, "le", False),
+            (1, float("inf"), "le", False),
+            (None, None, "eq", False),
+        ]:
+            with self.subTest(actual=actual, expected=expected, op=op):
+                p, r = fixture()
+                p["stages"][1]["params"] = {"op": op}
+                r["stages"][1]["checks"][0].update(actual=actual, expected=expected)
+                normalized = normalize_results([p], [r])
+                self.assertEqual(
+                    normalized["instances"][0]["checks"][0]["evidence_complete"],
+                    complete,
+                )
+                self.assertEqual(
+                    audit_results(normalize_plans([p]), normalized)["ok"], complete
+                )
+
+    def test_effective_configuration_is_not_inferred_from_profile_name(self):
+        p, _ = fixture()
+        p.update(
+            profile="batch-window",
+            grade="strict",
+            effective_axes={"dispatcher": "NON_BATCH", "scheduler": "SINGLE"},
+            effective_capabilities=["single_scheduler"],
+        )
+        row = normalize_plans([p])["instances"][0]
+        self.assertEqual(row["grade"], "strict")
+        self.assertEqual(row["effective_axes"], p["effective_axes"])
+        self.assertEqual(row["effective_capabilities"], p["effective_capabilities"])
+        p, _ = fixture()
+        row = normalize_plans([p])["instances"][0]
+        self.assertIsNone(row["grade"])
+        self.assertIsNone(row["effective_axes"])
+        self.assertIsNone(row["effective_capabilities"])
+
     def test_core_boolean_comparison_has_typed_evidence(self):
         p, r = fixture()
         inventory = normalize_plans([p])
