@@ -90,6 +90,13 @@ void registerMultimodal(const py::module& m) {
             }));
 }
 
+namespace {
+// Accept states created before B12X and before its CUDA compatibility flag was removed.
+constexpr size_t kLegacyMoeConfigPickleFieldCount   = 12;
+constexpr size_t kMoeConfigPickleFieldCount         = 14;
+constexpr size_t kPreviousMoeConfigPickleFieldCount = 15;
+}  // namespace
+
 PYBIND11_MODULE(libth_transformer_config, m) {
     // Register get_block_cache_keys function
     registerCommon(m);
@@ -846,6 +853,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("ll_num_max_token", &MoeConfig::ll_num_max_token)
         .def_readwrite("moe_strategy", &MoeConfig::moe_strategy)
         .def_readwrite("fp4_moe_op", &MoeConfig::fp4_moe_op)
+        .def_readwrite("b12x_zeroed_energy_limit", &MoeConfig::b12x_zeroed_energy_limit)
         .def("to_string", &MoeConfig::to_string)
         .def(py::pickle(
             [](const MoeConfig& self) {
@@ -860,11 +868,19 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.masked_max_token_num,
                                       self.use_all_gather,
                                       self.ll_num_max_token,
-                                      self.moe_strategy);
+                                      self.moe_strategy,
+                                      self.fp4_moe_op,
+                                      self.b12x_zeroed_energy_limit);
             },
             [](py::tuple t) {
-                if (t.size() != 12)
-                    throw std::runtime_error("Invalid state!");
+                if (t.size() != kLegacyMoeConfigPickleFieldCount && t.size() != kMoeConfigPickleFieldCount
+                    && t.size() != kPreviousMoeConfigPickleFieldCount) {
+                    throw std::runtime_error("MoeConfig unpickle error: expected "
+                                             + std::to_string(kLegacyMoeConfigPickleFieldCount) + " or "
+                                             + std::to_string(kMoeConfigPickleFieldCount) + " or "
+                                             + std::to_string(kPreviousMoeConfigPickleFieldCount) + " fields, got "
+                                             + std::to_string(t.size()) + " (version mismatch?)");
+                }
                 MoeConfig c;
                 try {
                     c.use_deepep_moe             = t[0].cast<bool>();
@@ -879,6 +895,10 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.use_all_gather             = t[9].cast<bool>();
                     c.ll_num_max_token           = t[10].cast<int>();
                     c.moe_strategy               = t[11].cast<std::string>();
+                    if (t.size() == kMoeConfigPickleFieldCount || t.size() == kPreviousMoeConfigPickleFieldCount) {
+                        c.fp4_moe_op               = t[12].cast<std::string>();
+                        c.b12x_zeroed_energy_limit = t[13].cast<double>();
+                    }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("MoeConfig unpickle error: ") + e.what());
                 }
