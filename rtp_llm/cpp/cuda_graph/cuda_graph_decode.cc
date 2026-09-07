@@ -6,12 +6,23 @@ void CudaGraphRunner::replayDecode(int bs) {
 }
 
 std::vector<int> CudaGraphRunner::getDecodeBatchSizesToCapture() {
+    const int alignment = std::max(sequence_parallel_size_, 1);
+    auto normalize = [alignment](std::vector<int> sizes) {
+        for (int& size : sizes) {
+            RTP_LLM_CHECK_WITH_INFO(size > 0, "decode capture batch size must be positive, got %d", size);
+            size = ((size + alignment - 1) / alignment) * alignment;
+        }
+        std::sort(sizes.begin(), sizes.end());
+        sizes.erase(std::unique(sizes.begin(), sizes.end()), sizes.end());
+        return sizes;
+    };
+
     // If decode_capture_batch_sizes_ is provided from Python, use it directly
     if (!decode_capture_batch_sizes_.empty()) {
-        RTP_LLM_LOG_INFO("Using decode capture batch sizes from Python: %zu sizes", decode_capture_batch_sizes_.size());
-        // Sort in ascending order (from small to large)
-        std::sort(decode_capture_batch_sizes_.begin(), decode_capture_batch_sizes_.end());
-        return decode_capture_batch_sizes_;
+        auto capture_bs = normalize(decode_capture_batch_sizes_);
+        RTP_LLM_LOG_INFO("Using %zu physical Decode capture batch sizes aligned to SP%d",
+                         capture_bs.size(), alignment);
+        return capture_bs;
     }
 
     // Otherwise, use default logic
@@ -31,7 +42,7 @@ std::vector<int> CudaGraphRunner::getDecodeBatchSizesToCapture() {
     if (capture_bs[capture_bs.size() - 1] != max_generate_batch_size) {
         capture_bs.push_back(max_generate_batch_size);
     }
-    return capture_bs;
+    return normalize(std::move(capture_bs));
 }
 
 void CudaGraphRunner::captureDecodeOneBatchSize(int bs) {
