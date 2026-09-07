@@ -324,8 +324,6 @@ def _slo_spec(ctx: CaseContext) -> EnvSpec:
         master_profile=ctx.profile,
         config_overrides=ConfigOverride(
             ordering="priority",
-            decision="fixed_window",
-            dispatcher="batch",
             queue_timeout_ms=1500,
         ),
     )
@@ -420,8 +418,6 @@ def _capacity_spec(ctx: CaseContext) -> EnvSpec:
         master_profile=ctx.profile,
         config_overrides=ConfigOverride(
             ordering="priority",
-            decision="fixed_window",
-            dispatcher="batch",
             queue_timeout_ms=60_000,
             max_outstanding=2,
         ),
@@ -619,8 +615,6 @@ def _prefill_park_spec(ctx: CaseContext) -> EnvSpec:
         master_profile=ctx.profile,
         config_overrides=ConfigOverride(
             ordering="priority",
-            decision="fixed_window",
-            dispatcher="batch",
             queue_timeout_ms=60_000,
         ),
     )
@@ -778,8 +772,6 @@ def _decode_park_spec(ctx: CaseContext) -> EnvSpec:
         master_profile=ctx.profile,
         config_overrides=ConfigOverride(
             ordering="priority",
-            decision="fixed_window",
-            dispatcher="batch",
             queue_timeout_ms=60_000,
             decode_max_engine_requests=5000,
         ),
@@ -984,8 +976,6 @@ def _incomer_spec(ctx: CaseContext) -> EnvSpec:
         master_profile=ctx.profile,
         config_overrides=ConfigOverride(
             ordering="priority",
-            decision="fixed_window",
-            dispatcher="batch",
             queue_timeout_ms=60_000,
             max_delivered_not_accepted=1,
         ),
@@ -1349,8 +1339,9 @@ def _await_tracked(fired: list, wait_s: float = 45.0) -> list:
 
 
 def _batcher_queue_spec(ctx: CaseContext, queue_timeout_ms: int) -> EnvSpec:
-    """A5 env: 1 prefill (a single batcher queue), the legacy fault axes
-    (PRIORITY + FIXED_WINDOW + BATCH), with the batcher waiting-queue
+    """A5 env: 1 prefill (a single batcher queue), PRIORITY ordering over
+    the profile's own decision/dispatcher axes (profile-aware since the
+    tier2 spec unpick), with the batcher waiting-queue
     capacity tightened to TWO (scheduler.capacity
     maxWaitingRequestsPerPrefillWorker=2 — the Java default is 1024).
 
@@ -1368,8 +1359,6 @@ def _batcher_queue_spec(ctx: CaseContext, queue_timeout_ms: int) -> EnvSpec:
         master_profile=ctx.profile,
         config_overrides=ConfigOverride(
             ordering="priority",
-            decision="fixed_window",
-            dispatcher="batch",
             queue_timeout_ms=queue_timeout_ms,
             max_waiting_requests_per_prefill_worker=2,
         ),
@@ -1763,7 +1752,8 @@ def admission_batcher_queue_deadline(ctx: CaseContext):
 
 
 def _pool_wait_spec(ctx: CaseContext) -> EnvSpec:
-    """A4 env (verdict §4.1 rebuild): 1P+2D on the SINGLE+NON_BATCH base
+    """A4 env (verdict §4.1 rebuild): 1P+2D on the profile's own
+    SINGLE+NON_BATCH axes (profile-aware since the tier2 spec unpick)
     with the two LIVE capacity knobs — dispatcher
     maxInflightRequestsPerPrefillWorker=1 (RoutePrefillAdmission leases
     one in-flight delivery per dispatch; priority.py's verified backlog
@@ -1788,8 +1778,6 @@ def _pool_wait_spec(ctx: CaseContext) -> EnvSpec:
         master_profile=ctx.profile,
         config_overrides=ConfigOverride(
             ordering="fifo",
-            decision="single",
-            dispatcher="non_batch",
             queue_timeout_ms=60_000,
             max_inflight_requests_per_worker=1,
             max_waiting_requests_per_prefill_worker=2,
@@ -1996,8 +1984,9 @@ def admission_placement_pool_wait(ctx: CaseContext):
 
 def _waiting_cap_spec(ctx: CaseContext) -> EnvSpec:
     """B3 env: 1 prefill (every batch lands on one engine, so the cap
-    pressure is concentrated), the legacy fault axes and default
-    admission knobs — the waiting-queue cap itself is applied at RUNTIME
+    pressure is concentrated), the profile's own axes and default
+    admission knobs (profile-aware since the tier2 spec unpick) — the
+    waiting-queue cap itself is applied at RUNTIME
     via /set_perf max_waiting_batches (ef76751553), so the env shape is
     the plain W1 one."""
     return EnvSpec(
@@ -2008,8 +1997,6 @@ def _waiting_cap_spec(ctx: CaseContext) -> EnvSpec:
         master_profile=ctx.profile,
         config_overrides=ConfigOverride(
             ordering="priority",
-            decision="fixed_window",
-            dispatcher="batch",
             queue_timeout_ms=60_000,
         ),
     )
@@ -2231,8 +2218,6 @@ def _lack_mem_spec(ctx: CaseContext) -> EnvSpec:
         master_profile=ctx.profile,
         config_overrides=ConfigOverride(
             ordering="priority",
-            decision="fixed_window",
-            dispatcher="batch",
             queue_timeout_ms=60_000,
         ),
         prefill_cache_blocks=LACKMEM_POOL_BLOCKS,
@@ -2522,8 +2507,6 @@ def _regroup_spec(
         master_profile=ctx.profile,
         config_overrides=ConfigOverride(
             ordering="priority",
-            decision="fixed_window",
-            dispatcher="batch",
             max_collection_wait_ms=100,
             queue_timeout_ms=60_000,
         ),

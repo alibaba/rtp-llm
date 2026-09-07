@@ -2751,9 +2751,11 @@ def fault_env_perf() -> dict:
 
 def _elastic_env(ctx: "CaseContext"):
     """Shared elastic/fault env: 2P+4D, dynamic file discovery, flat
-    prefill, legacy fault config axes (PRIORITY + FIXED_WINDOW + BATCH, no
-    queueTimeout — Java default 1h; formerly harness.elastic_spec —
-    config semantics now expressed as a flexlb_cfg.ConfigOverride)."""
+    prefill, PRIORITY ordering over the ctx profile's own
+    decision/dispatcher axes (profile-aware since the tier2 spec
+    unpick), no queueTimeout — Java default 1h; formerly
+    harness.elastic_spec — config semantics now expressed as a
+    flexlb_cfg.ConfigOverride."""
     env = ctx.env_manager.ensure(
         EnvSpec(
             label=f"fault_{ctx.profile}",
@@ -2764,8 +2766,6 @@ def _elastic_env(ctx: "CaseContext"):
             discovery="discovery_file",
             config_overrides=ConfigOverride(
                 ordering="priority",
-                decision="fixed_window",
-                dispatcher="batch",
                 queue_timeout_ms=OMIT,
             ),
         )

@@ -200,7 +200,9 @@ def case(
 
 
 def _status_spec(ctx: CaseContext) -> EnvSpec:
-    """Family env: 2P+2D, legacy fault axes, TTL=30s, queueTimeout=10s.
+    """Family env: 2P+2D, PRIORITY ordering over the profile's own
+    decision/dispatcher axes (profile-aware since the tier2 spec
+    unpick), TTL=30s, queueTimeout=10s.
 
     queueTimeoutMs=10s is the zombie keep-alive bottom line: a request
     whose terminal is suppressed but which keeps appearing RUNNING on the
@@ -216,8 +218,6 @@ def _status_spec(ctx: CaseContext) -> EnvSpec:
         master_profile=ctx.profile,
         config_overrides=ConfigOverride(
             ordering="priority",
-            decision="fixed_window",
-            dispatcher="batch",
             queue_timeout_ms=int(QUEUE_TIMEOUT_S * 1000),
             stale_inflight_ms=int(STALE_INFLIGHT_TTL_S * 1000),
         ),
@@ -564,8 +564,9 @@ def inflight_ttl_cleanup(ctx: CaseContext):
     population (105s event window); the fleet still serves after the
     release (recovery).
 
-    Profile semantics (v2, task #55): the env pins the legacy fault
-    axes (PRIORITY + FIXED_WINDOW + BATCH, no queueTimeoutMs — the Java
+    Profile semantics (v2, task #55): PRIORITY ordering over the ctx
+    profile's own decision/dispatcher axes (profile-aware since the
+    tier2 spec unpick), no queueTimeoutMs — the Java
     default 1h cannot expire these requests before the TTL; formerly
     harness.ttl_spec) — the
     declaration stays batch-window (label honesty + regression
@@ -582,8 +583,6 @@ def inflight_ttl_cleanup(ctx: CaseContext):
             discovery="discovery_file",
             config_overrides=ConfigOverride(
                 ordering="priority",
-                decision="fixed_window",
-                dispatcher="batch",
                 queue_timeout_ms=OMIT,
             ),
         )
@@ -2957,11 +2956,11 @@ def inject_fetch_error(ctx: CaseContext):
 
     Profile semantics (v2, task #55): the fault is checked only at the
     engine's fetchResponse entry, which exists only under the BATCH
-    dispatcher — and the env below pins the legacy fault axes
-    (PRIORITY + FIXED_WINDOW + BATCH; formerly harness._fault_spec)
-    via the config override layer, so re-running
-    under another --profile would execute the identical configuration.
-    The declaration stays batch-window (regression efficiency + label
+    dispatcher — and the env below layers PRIORITY ordering on the ctx
+    profile's own decision/dispatcher axes (profile-aware since the
+    tier2 spec unpick; formerly harness._fault_spec)
+    via the config override layer.  The declaration stays batch-window
+    (regression efficiency + label
     honesty); a NON_BATCH master-path generate_error variant is
     dedicated-phase material.
     """
@@ -2975,8 +2974,6 @@ def inject_fetch_error(ctx: CaseContext):
                 master_profile=ctx.profile,
                 config_overrides=ConfigOverride(
                     ordering="priority",
-                    decision="fixed_window",
-                    dispatcher="batch",
                     queue_timeout_ms=60_000,
                     stale_inflight_ms=30_000,
                 ),

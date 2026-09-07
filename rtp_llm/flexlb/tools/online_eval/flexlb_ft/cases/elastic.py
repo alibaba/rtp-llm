@@ -740,7 +740,9 @@ PENDING_DRAIN_STALE_WINDOW_S = 16.0
 
 def _pending_drain_spec(ctx: CaseContext) -> EnvSpec:
     """Dedicated env for the pending-drain case: 2P+2D, dynamic file
-    discovery, legacy fault axes with maxInflightBatchesPerPrefillWorker=2.
+    discovery, PRIORITY ordering over the profile's own
+    decision/dispatcher axes (profile-aware since the tier2 spec
+    unpick) with maxInflightBatchesPerPrefillWorker=2.
 
     Two reasons the case does NOT reuse elastic_spec: (a) 2 inflight
     batches per worker is the production-aligned lease cap, giving exactly
@@ -760,8 +762,6 @@ def _pending_drain_spec(ctx: CaseContext) -> EnvSpec:
         discovery="discovery_file",
         config_overrides=ConfigOverride(
             ordering="priority",
-            decision="fixed_window",
-            dispatcher="batch",
             queue_timeout_ms=OMIT,
             max_inflight_batches=2,
         ),
@@ -1651,7 +1651,9 @@ FULL_SHRINK_DECODE_KV_FAIL_CODE = 8211
 
 def _full_shrink_spec(ctx: CaseContext) -> EnvSpec:
     """Private env for elastic_kv_full_shrink: 2P+2D, 24-block decode
-    pools, dynamic file discovery, legacy fault axes.
+    pools, dynamic file discovery, PRIORITY ordering over the profile's
+    own decision/dispatcher axes (profile-aware since the tier2 spec
+    unpick).
 
     The decode_cache_blocks fingerprint differs from every other spec
     (elastic_spec 3000 / quota / pending-drain), so the one-shot
@@ -1670,8 +1672,6 @@ def _full_shrink_spec(ctx: CaseContext) -> EnvSpec:
         decode_cache_blocks=FULL_SHRINK_DECODE_CACHE_BLOCKS,
         config_overrides=ConfigOverride(
             ordering="priority",
-            decision="fixed_window",
-            dispatcher="batch",
             queue_timeout_ms=OMIT,
         ),
     )
@@ -2326,7 +2326,8 @@ SKEW_PC_REBOUND = 0.5
 
 def _skew_spec(ctx: CaseContext, variant: str) -> EnvSpec:
     """Private env for one KV-skew case: 2P+2D, dynamic file discovery,
-    fault axes.
+    PRIORITY ordering over the profile's own decision/dispatcher axes
+    (profile-aware since the tier2 spec unpick).
 
     DESIGN DEVIATION, recorded per the brief: the design says "2P，无
     decode"; a PD-split cluster with n_decode=0 exposes no decode
@@ -2346,8 +2347,6 @@ def _skew_spec(ctx: CaseContext, variant: str) -> EnvSpec:
         discovery="discovery_file",
         config_overrides=ConfigOverride(
             ordering="priority",
-            decision="fixed_window",
-            dispatcher="batch",
             queue_timeout_ms=OMIT,
         ),
     )
@@ -2745,7 +2744,9 @@ TRANSIENT_BURST_STREAM_TIMEOUT_S = 45.0
 
 def _transient_spec(ctx: CaseContext) -> EnvSpec:
     """Private env for elastic_transient_imbalance_bound: 3P+2D, all
-    capacity axes explicit, dynamic file discovery, fault/admission axes.
+    capacity axes explicit, dynamic file discovery, PRIORITY ordering
+    over the profile's own decision/dispatcher axes (profile-aware
+    since the tier2 spec unpick).
 
     Topology note (construction choice, not a threshold change): the
     design does not fix the role count; 2P would leave ONE prefill
@@ -2766,8 +2767,6 @@ def _transient_spec(ctx: CaseContext) -> EnvSpec:
         discovery="discovery_file",
         config_overrides=ConfigOverride(
             ordering="priority",
-            decision="fixed_window",
-            dispatcher="batch",
             queue_timeout_ms=60_000,
             max_waiting_requests_per_prefill_worker=(
                 TRANSIENT_MAX_WAITING_REQUESTS_PER_WORKER
@@ -3317,8 +3316,9 @@ def _steady_recovery_spec(ctx: CaseContext) -> EnvSpec:
     """Private env for elastic_steady_state_recovery: 2P+4D (the heavier
     role is decode — four pools carry the KV load — so the victim is a
     decode engine, leaving THREE decode survivors so the share /
-    spread rows stay non-degenerate), dynamic file discovery, fault
-    axes.
+    spread rows stay non-degenerate), dynamic file discovery, PRIORITY
+    ordering over the profile's own decision/dispatcher axes
+    (profile-aware since the tier2 spec unpick).
 
     The label fingerprint differs from every other elastic spec, so the
     one-shot initial-engine victim (decode-0, permanently removed) never
@@ -3333,8 +3333,6 @@ def _steady_recovery_spec(ctx: CaseContext) -> EnvSpec:
         discovery="discovery_file",
         config_overrides=ConfigOverride(
             ordering="priority",
-            decision="fixed_window",
-            dispatcher="batch",
             queue_timeout_ms=OMIT,
         ),
     )

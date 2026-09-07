@@ -173,7 +173,8 @@ def _quota_spec(ctx: CaseContext) -> EnvSpec:
     """Quota-block env (S3): 1P+1D, maxInflightBatches=1 via config
     override (dispatcher.maxInflightBatchesPerPrefillWorker — the v1 env
     var FLEXLB_BATCH_FIXED_MAX_INFLIGHT_BATCHES has no v2 consumer;
-    formerly harness.quota_spec)."""
+    formerly harness.quota_spec; decision/dispatcher axes are the ctx
+    profile's own since the tier2 spec unpick)."""
     return EnvSpec(
         label=f"fault_quota_{ctx.profile}",
         n_prefill=1,
@@ -183,8 +184,6 @@ def _quota_spec(ctx: CaseContext) -> EnvSpec:
         discovery="discovery_file",
         config_overrides=ConfigOverride(
             ordering="priority",
-            decision="fixed_window",
-            dispatcher="batch",
             queue_timeout_ms=OMIT,
             max_inflight_batches=1,
         ),
@@ -202,8 +201,9 @@ def master_quota_block(ctx: CaseContext):
 
     Profile semantics (v2, task #55): the quota knob itself
     (dispatcher.maxInflightBatchesPerPrefillWorker) exists only under the
-    BATCH dispatcher, and _quota_spec pins the legacy fault axes (PRIORITY +
-    FIXED_WINDOW + BATCH, maxInflightBatches=1) via config override — the
+    BATCH dispatcher, and _quota_spec layers PRIORITY ordering on the ctx
+    profile's own decision/dispatcher axes with maxInflightBatches=1 via
+    config override (profile-aware since the tier2 spec unpick) — the
     declaration stays batch-window.
     """
     env = ctx.env_manager.ensure(_quota_spec(ctx))
