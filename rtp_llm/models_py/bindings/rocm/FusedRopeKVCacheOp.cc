@@ -260,10 +260,12 @@ static void validateMropePositionIds(const RopeConfig&    rope_config,
                 rope_config.index_factor,
                 ")");
     if (expected_tokens >= 0) {
-        TORCH_CHECK(position_ids.numel() == expected_tokens * rope_config.index_factor,
+        const int64_t required_numel =
+            expected_tokens * static_cast<int64_t>(rope_config.index_factor);
+        TORCH_CHECK(position_ids.numel() >= required_numel,
                     where,
-                    ": combo_position_ids numel mismatch: expected ",
-                    expected_tokens * rope_config.index_factor,
+                    ": combo_position_ids capacity is too small: expected at least ",
+                    required_numel,
                     " for ",
                     expected_tokens,
                     " tokens and index_factor ",
@@ -365,6 +367,12 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
     const int seq_len_with_prefix = seq_len + max_prefix_length;
     validateMropePositionIds(
         attn_configs_.rope_config, params->position_ids, token_num, "FusedRopeKVCachePrefillOp::forward");
+    torch::Tensor active_position_ids = params->position_ids;
+    if (attn_configs_.rope_config.style == RopeStyle::Mrope) {
+        const int64_t active_numel =
+            static_cast<int64_t>(token_num) * attn_configs_.rope_config.index_factor;
+        active_position_ids = params->position_ids.reshape({-1}).narrow(0, 0, active_numel);
+    }
 
     const int  q_output_token_num = (use_paged_fmha && pad_query) ? batch_size * seq_len : token_num;
     const bool paged_fp8          = use_paged_fmha && attn_configs_.kv_cache_dtype == KvCacheDataType::FP8;
@@ -459,8 +467,8 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
     if (params->padding_offset.defined() && params->padding_offset.numel() > 0) {
         padding_offset = params->padding_offset.data_ptr<int>();
     }
-    if (params->position_ids.defined()) {
-        position_ids = params->position_ids.data_ptr<int>();
+    if (active_position_ids.defined()) {
+        position_ids = active_position_ids.data_ptr<int>();
     }
 
     // Prefill intentionally computes RoPE sin/cos inline in double precision
