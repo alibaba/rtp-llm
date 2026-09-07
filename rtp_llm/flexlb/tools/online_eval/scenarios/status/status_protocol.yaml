@@ -70,6 +70,12 @@ variants:
       input_len: 2048
       output_len: 2
       consume: deferred
+  - id: metrics_ready
+    action: status_metrics_ready
+    params:
+      duration_s: 180
+      interval_s: 2
+    timeout_s: 195
   - id: ttl_before
     action: status_sample
     params:
@@ -255,6 +261,12 @@ variants:
   - id: setup
     action: setup
     timeout_s: 180
+  - id: metrics_ready
+    action: status_metrics_ready
+    params:
+      duration_s: 180
+      interval_s: 2
+    timeout_s: 195
   - id: ttl_before
     action: status_sample
     params:
@@ -700,6 +712,12 @@ variants:
       requests:
         $ref: stages.live.output.requests
     timeout_s: 75
+  - id: metrics_ready
+    action: status_metrics_ready
+    params:
+      duration_s: 180
+      interval_s: 2
+    timeout_s: 195
   - id: ttl_before
     action: status_sample
     params:
@@ -920,6 +938,12 @@ variants:
       requests:
         $ref: stages.live.output.requests
     timeout_s: 75
+  - id: metrics_ready
+    action: status_metrics_ready
+    params:
+      duration_s: 180
+      interval_s: 2
+    timeout_s: 195
   - id: ttl_before
     action: status_sample
     params:
@@ -1137,11 +1161,16 @@ variants:
       config: {}
       enabled: false
       role: prefill
+  - id: unknown_terminal_ignored_after_clear
+    action: status_sample
+    params:
+      duration_s: 0
+    timeout_s: 30
   - id: unknown_terminal_ignored
     action: status_check
     params:
       snapshot:
-        $ref: stages.ghost_window.output.snapshot
+        $ref: stages.unknown_terminal_ignored_after_clear.output.snapshot
       metric: fingerprint
       op: eq
       expected: true
@@ -1518,11 +1547,16 @@ variants:
       config: {}
       enabled: false
       role: prefill
+  - id: negative_rid_ignored_after_clear
+    action: status_sample
+    params:
+      duration_s: 0
+    timeout_s: 30
   - id: negative_rid_ignored
     action: status_check
     params:
       snapshot:
-        $ref: stages.negative_rid_window.output.snapshot
+        $ref: stages.negative_rid_ignored_after_clear.output.snapshot
       metric: fingerprint
       op: eq
       expected: true
@@ -1795,11 +1829,16 @@ variants:
       config: {}
       enabled: false
       role: prefill
+  - id: omitted_running_ignored_after_clear
+    action: status_sample
+    params:
+      duration_s: 0
+    timeout_s: 30
   - id: omitted_running_ignored
     action: status_check
     params:
       snapshot:
-        $ref: stages.omitted_running_window.output.snapshot
+        $ref: stages.omitted_running_ignored_after_clear.output.snapshot
       metric: fingerprint
       op: eq
       expected: true
@@ -1844,11 +1883,16 @@ variants:
       config: {}
       enabled: false
       role: prefill
+  - id: omitted_finished_ignored_after_clear
+    action: status_sample
+    params:
+      duration_s: 0
+    timeout_s: 30
   - id: omitted_finished_ignored
     action: status_check
     params:
       snapshot:
-        $ref: stages.omitted_finished_window.output.snapshot
+        $ref: stages.omitted_finished_ignored_after_clear.output.snapshot
       metric: fingerprint
       op: eq
       expected: true
@@ -1893,11 +1937,16 @@ variants:
       config: {}
       enabled: false
       role: prefill
+  - id: zero_running_ignored_after_clear
+    action: status_sample
+    params:
+      duration_s: 0
+    timeout_s: 30
   - id: zero_running_ignored
     action: status_check
     params:
       snapshot:
-        $ref: stages.zero_running_window.output.snapshot
+        $ref: stages.zero_running_ignored_after_clear.output.snapshot
       metric: fingerprint
       op: eq
       expected: true
@@ -1943,11 +1992,16 @@ variants:
       config: {}
       enabled: false
       role: prefill
+  - id: zero_finished_ignored_after_clear
+    action: status_sample
+    params:
+      duration_s: 0
+    timeout_s: 30
   - id: zero_finished_ignored
     action: status_check
     params:
       snapshot:
-        $ref: stages.zero_finished_window.output.snapshot
+        $ref: stages.zero_finished_ignored_after_clear.output.snapshot
       metric: fingerprint
       op: eq
       expected: true
