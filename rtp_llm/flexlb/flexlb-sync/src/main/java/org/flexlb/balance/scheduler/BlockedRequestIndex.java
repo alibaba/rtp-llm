@@ -1,6 +1,7 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.endpoint.WorkerEndpoint;
+import org.flexlb.debug.DebugRows;
 
 import java.util.Comparator;
 import java.util.HashMap;
@@ -36,6 +37,24 @@ final class BlockedRequestIndex {
                         .thenComparing(fifo)
                 : fifo;
         selectorWaiters = new TreeSet<>(order);
+    }
+
+    /** Scalar leaves only; caller holds the owning coordinator lock. */
+    Map<String, Object> debugEntry(GlobalQueueEntry entry) {
+        EndpointWaiters waiters = membership.get(entry);
+        PlacementKey key = entry.blockedKey;
+        return DebugRows.fields(
+                "blocked", isBlocked(entry),
+                "blocker_role", key == null ? null : key.role().name(),
+                "blocker_group", key == null ? null : key.group(),
+                "blocker_endpoint", key == null ? null : key.endpoint(),
+                "blocked_endpoint_generation", entry.blockedEndpoint == null ? null
+                        : Long.toString(entry.blockedEndpoint.getStatus().getGenerationId()),
+                "waiter_count", waiters == null ? null : waiters.entries.size(),
+                "claimant_request_id", waiters == null || waiters.claimant == null ? null
+                        : Long.toString(waiters.claimant.context.getRequestId()),
+                "claimant_queue_sequence", waiters == null || waiters.claimant == null ? null
+                        : Long.toString(waiters.claimant.sequence));
     }
 
     boolean isBlocked(GlobalQueueEntry entry) {
