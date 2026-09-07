@@ -95,7 +95,7 @@ variants:
       fault:
         $ref: stages.long_freeze.output.fault
   - id: after
-    action: master_state
+    action: master_scheduler_state
     params:
       target: B
   - id: post_long_end
@@ -103,10 +103,9 @@ variants:
     params:
       wait_s: 10
   - id: ready_b
-    action: master_ready
+    action: master_topology_state
     params:
       target: B
-      inflight_zero: false
   - id: continuity
     action: master_continuity
     params:
@@ -114,6 +113,8 @@ variants:
         $ref: stages.before.output.state
       after:
         $ref: stages.after.output.state
+      settled:
+        $ref: stages.ready_b.output.state
   - id: finish
     action: master_client_finish
     params:
