@@ -17,6 +17,7 @@ from flexlb_ft.scenario import compile_scenarios
 from flexlb_ft.scenario.actions import elastic as e
 from flexlb_ft.scenario.actions import elastic_balance as balance
 from flexlb_ft.scenario.actions import elastic_concurrent as concurrent
+from flexlb_ft.scenario.actions import engine_control as control
 from flexlb_ft.scenario.loader import load_scenarios
 from flexlb_ft.scenario.runtime import execute_instance
 
@@ -37,7 +38,7 @@ class BalanceTests(unittest.TestCase):
     def run_program(
         self, drift=False, missing=False, high_queue=False, recovery_errors=0
     ):
-        handlers = {h.name: h for h in e.HANDLERS}
+        handlers = {h.name: h for h in e.HANDLERS + control.HANDLERS}
         plans = compile_scenarios(
             load_scenarios(ROOT / "scenarios/elastic/lifecycle.yaml"), handlers=handlers
         )

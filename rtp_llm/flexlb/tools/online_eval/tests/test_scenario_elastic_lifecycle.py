@@ -15,6 +15,7 @@ sys.path.insert(0, str(ROOT))
 from flexlb_ft.scenario import compile_scenarios
 from flexlb_ft.scenario.actions import elastic as e
 from flexlb_ft.scenario.actions import elastic_lifecycle as life
+from flexlb_ft.scenario.actions import engine_control as control
 from flexlb_ft.scenario.loader import load_scenarios
 from flexlb_ft.scenario.runtime import execute_instance
 
@@ -192,7 +193,7 @@ class LifecycleTests(unittest.TestCase):
         )
         lock = threading.Lock()
         flows = []
-        handlers = {h.name: h for h in e.HANDLERS}
+        handlers = {h.name: h for h in e.HANDLERS + control.HANDLERS}
         plans = compile_scenarios(
             load_scenarios(ROOT / "scenarios/elastic/lifecycle.yaml"), handlers=handlers
         )
