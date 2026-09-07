@@ -560,7 +560,7 @@ if role == "prefill":
         "ENABLE_MEMORY_CACHE": "1",
         "MEMORY_CACHE_SIZE_MB": "65536",
     })
-    absent.extend(["RTP_MLA_DECODE_KERNEL", "DECODE_CAPTURE_CONFIG", "MOE_STRATEGY"])
+    absent.extend(["DECODE_CAPTURE_CONFIG", "MOE_STRATEGY"])
 else:
     expected.update({
         "MAX_SEQ_LEN": "1468006",
@@ -572,7 +572,6 @@ else:
         "MEGA_MOE_MAX_TOKENS_PER_RANK": "16",
         "ENABLE_CUDA_GRAPH": "1",
         "DECODE_CAPTURE_CONFIG": "1,2,3,4",
-        "RTP_MLA_DECODE_KERNEL": "tokenspeed_mla",
         "MOE_STRATEGY": "mega_moe_se",
         "RTP_LLM_DEVICE_INPUT": "1",
         "RTP_LLM_DROP_BROAD_SYNC": "1",
@@ -673,7 +672,7 @@ apply_validated_prefill_profile() {
     export ENABLE_CUDA_GRAPH=0
     export ENABLE_MEMORY_CACHE=1
     export MEMORY_CACHE_SIZE_MB=65536
-    unset RTP_MLA_DECODE_KERNEL DECODE_CAPTURE_CONFIG MOE_STRATEGY
+    unset DECODE_CAPTURE_CONFIG MOE_STRATEGY
 }
 
 apply_validated_decode_profile() {
@@ -690,7 +689,6 @@ apply_validated_decode_profile() {
     # The smoke issues four concurrent requests. Capture every possible
     # coalesced Decode batch size instead of aborting above batch size one.
     export DECODE_CAPTURE_CONFIG=1,2,3,4
-    export RTP_MLA_DECODE_KERNEL=tokenspeed_mla
     export MOE_STRATEGY=mega_moe_se
     export RTP_LLM_DEVICE_INPUT=1
     export RTP_LLM_DROP_BROAD_SYNC=1

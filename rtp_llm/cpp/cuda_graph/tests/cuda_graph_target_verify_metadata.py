@@ -338,9 +338,7 @@ class CudaGraphTargetVerifyMetadataTest(unittest.TestCase):
     def test_runner_publishes_rectangular_query_shape(self):
         model = _MetadataProbeModel()
         runner = CudaGraphRunner()
-        with mock.patch.dict(
-            os.environ, {"RTP_MLA_DECODE_KERNEL": "auto"}
-        ), mock.patch.object(
+        with mock.patch.object(
             tokenspeed_mla_impl, "_is_tokenspeed_blackwell", return_value=True
         ), mock.patch.object(
             tokenspeed_mla_impl, "_load_tokenspeed_mla", return_value=True

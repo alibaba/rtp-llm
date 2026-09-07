@@ -1,6 +1,5 @@
 import asyncio
 import math
-import os
 import struct
 import threading
 import zlib
@@ -39,6 +38,7 @@ from rtp_llm.multimodal.multimodal_mixins.kimi_k3.kimi_k3_vit import (
     KimiK3VisionConfig,
     mm_projector_forward,
 )
+from rtp_llm.multimodal.multimodal_util import MMUrlType
 from rtp_llm.models_py.model_desc.kimi_k3 import KimiK3Model
 from rtp_llm.models_py.model_desc.kimi_k3_eagle3 import KimiK3Eagle3Model
 from rtp_llm.models_py.modules.base.common.embedding import EmbeddingTorch
@@ -46,7 +46,6 @@ from rtp_llm.models_py.modules.base.common.multimodal_embedding import (
     MultimodalEmbeddingInjector,
 )
 from rtp_llm.openai.renderers.kimi_k3_renderer import KimiK3Renderer
-from rtp_llm.multimodal.multimodal_util import MMUrlType
 
 
 def _image_bytes(width=8, height=6, mode="RGB", color=(1, 2, 3)):
@@ -939,49 +938,88 @@ class KimiK3MoonViTTest(TestCase):
 
     @skipUnless(torch.cuda.is_available(), "CUDA is required for fused RoPE")
     def test_fused_rope_matches_eager_with_joint_output_buffer(self):
-        seq_len, num_heads, head_dim = 17, 3, 128
+        seq_len, head_dim = 17, 128
         for dtype in (torch.float16, torch.bfloat16):
-            with self.subTest(dtype=dtype):
-                qkv = torch.randn(
-                    seq_len,
-                    3,
-                    num_heads,
-                    head_dim,
-                    device="cuda",
-                    dtype=dtype,
-                )
-                qkv_before = qkv.clone()
-                query, key, _ = torch.unbind(qkv, dim=1)
-                angles = torch.randn(
-                    seq_len,
-                    head_dim // 2,
-                    device="cuda",
-                    dtype=torch.float32,
-                )
-                freqs = torch.polar(torch.ones_like(angles), angles)
+            for num_heads in (3, 12):
+                with self.subTest(dtype=dtype, num_heads=num_heads):
+                    qkv = torch.randn(
+                        seq_len,
+                        3,
+                        num_heads,
+                        head_dim,
+                        device="cuda",
+                        dtype=dtype,
+                    )
+                    qkv_before = qkv.clone()
+                    query, key, _ = torch.unbind(qkv, dim=1)
+                    angles = torch.randn(
+                        seq_len,
+                        head_dim // 2,
+                        device="cuda",
+                        dtype=torch.float32,
+                    )
+                    freqs = torch.polar(torch.ones_like(angles), angles)
 
-                with patch.dict(os.environ, {"KIMI_K3_FUSED_ROPE": "0"}):
-                    expected_query, expected_key = apply_rope(query, key, freqs)
-                    self.assertIsNone(maybe_fused_apply_rope(query, key, freqs))
-                with patch.dict(os.environ, {"KIMI_K3_FUSED_ROPE": "1"}):
+                    with patch(
+                        "rtp_llm.multimodal.multimodal_mixins.kimi_k3."
+                        "kimi_k3_moonvit.maybe_fused_apply_rope",
+                        return_value=None,
+                    ):
+                        expected_query, expected_key = apply_rope(query, key, freqs)
+
                     actual_query, actual_key = apply_rope(query, key, freqs)
 
-                rtol, atol = (
-                    (1e-3, 3e-3) if dtype == torch.float16 else (1e-2, 3e-2)
-                )
-                torch.testing.assert_close(
-                    actual_query, expected_query, rtol=rtol, atol=atol
-                )
-                torch.testing.assert_close(
-                    actual_key, expected_key, rtol=rtol, atol=atol
-                )
-                self.assertTrue(actual_query.is_contiguous())
-                self.assertTrue(actual_key.is_contiguous())
-                self.assertEqual(
-                    actual_query.untyped_storage().data_ptr(),
-                    actual_key.untyped_storage().data_ptr(),
-                )
-                torch.testing.assert_close(qkv, qkv_before, rtol=0, atol=0)
+                    rtol, atol = (
+                        (1e-3, 3e-3)
+                        if dtype == torch.float16
+                        else (1e-2, 3e-2)
+                    )
+                    torch.testing.assert_close(
+                        actual_query, expected_query, rtol=rtol, atol=atol
+                    )
+                    torch.testing.assert_close(
+                        actual_key, expected_key, rtol=rtol, atol=atol
+                    )
+                    self.assertTrue(actual_query.is_contiguous())
+                    self.assertTrue(actual_key.is_contiguous())
+                    self.assertEqual(
+                        actual_query.untyped_storage().data_ptr(),
+                        actual_key.untyped_storage().data_ptr(),
+                    )
+                    torch.testing.assert_close(qkv, qkv_before, rtol=0, atol=0)
+
+    def test_fused_rope_returns_none_for_unsupported_inputs(self):
+        seq_len, num_heads, head_dim = 2, 3, 128
+        qkv = torch.randn(seq_len, 3, num_heads, head_dim, dtype=torch.float16)
+        query, key, _ = torch.unbind(qkv, dim=1)
+        angles = torch.randn(seq_len, head_dim // 2, dtype=torch.float32)
+        freqs = torch.polar(torch.ones_like(angles), angles)
+
+        self.assertIsNone(maybe_fused_apply_rope(query, key, freqs))
+
+    @skipUnless(torch.cuda.is_available(), "CUDA is required for fused RoPE")
+    def test_fused_rope_preserves_frequency_autograd_fallback(self):
+        seq_len, num_heads, head_dim = 2, 3, 128
+        qkv = torch.randn(
+            seq_len, 3, num_heads, head_dim, device="cuda", dtype=torch.float16
+        )
+        query, key, _ = torch.unbind(qkv, dim=1)
+        angles = torch.randn(
+            seq_len,
+            head_dim // 2,
+            device="cuda",
+            dtype=torch.float32,
+            requires_grad=True,
+        )
+        freqs = torch.polar(torch.ones_like(angles), angles)
+
+        self.assertIsNone(maybe_fused_apply_rope(query, key, freqs))
+        query_out, key_out = apply_rope(query, key, freqs)
+        (query_out.float().sum() + key_out.float().sum()).backward()
+        angle_grad = angles.grad
+        self.assertIsNotNone(angle_grad)
+        assert angle_grad is not None
+        self.assertTrue(torch.isfinite(angle_grad).all())
 
     def test_temporal_and_spatial_merge_numerics(self):
         output = tpool_patch_merger(

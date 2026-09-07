@@ -75,7 +75,6 @@ Role-specific high-performance paths:
   KIMI_K3_SHARED_EXPERT_WEIGHT_SHARD     Prefill only; defaults to 1
   MEGA_MOE_MAX_TOKENS_PER_RANK           defaults: Prefill 8192, Decode 1;
                                          raise Decode for concurrent batches
-  RTP_MLA_DECODE_KERNEL                  Decode is fixed to tokenspeed_mla
   ENABLE_CUDA_GRAPH                      fixed to 0 for Prefill; defaults to 1
                                          for Decode
   DECODE_CAPTURE_CONFIG                  Decode only; defaults to 1
@@ -169,9 +168,6 @@ prefill_port="$(endpoint_port "${PREFILL_ENDPOINT}")"
 decode_port="$(endpoint_port "${DECODE_ENDPOINT}")"
 prefill_host="${PREFILL_ENDPOINT%:*}"
 decode_host="${DECODE_ENDPOINT%:*}"
-decode_topology="tp8_ep8"
-[[ "${KIMI_K3_DECODE_TOPOLOGY:-tp8_ep8}" == "tp8_ep8" ]] \
-    || die "only TP8/DP1/EP8 Decode is supported"
 cache_store_rdma_mode="${CACHE_STORE_RDMA_MODE:-0}"
 [[ "${cache_store_rdma_mode}" == "0" || "${cache_store_rdma_mode}" == "1" ]] \
     || die "CACHE_STORE_RDMA_MODE must be 0 or 1"
@@ -239,6 +235,23 @@ max_context_batch_size="${MAX_CONTEXT_BATCH_SIZE:-1}"
 reuse_cache="${REUSE_CACHE:-0}"
 linear_step="${LINEAR_STEP:-1}"
 kimi_k3_kda_pool_blocks="${KIMI_K3_KDA_POOL_BLOCKS:-0}"
+tp_size="${TP_SIZE:-8}"
+dp_size="${DP_SIZE:-1}"
+ep_size="${EP_SIZE:-0}"
+for topology_name in tp_size dp_size; do
+    topology_value="${!topology_name}"
+    [[ "${topology_value}" =~ ^[1-9][0-9]*$ ]] \
+        || die "${topology_name} must resolve to a positive integer, got ${topology_value}"
+done
+[[ "${ep_size}" =~ ^[0-9]+$ ]] \
+    || die "ep_size must resolve to a non-negative integer, got ${ep_size}"
+world_size="${WORLD_SIZE:-$((tp_size * dp_size))}"
+local_world_size="${LOCAL_WORLD_SIZE:-${world_size}}"
+for topology_name in world_size local_world_size; do
+    topology_value="${!topology_name}"
+    [[ "${topology_value}" =~ ^[1-9][0-9]*$ ]] \
+        || die "${topology_name} must resolve to a positive integer, got ${topology_value}"
+done
 if [[ "${role}" == "PREFILL" ]]; then
     default_kv_cache_mem_mb=43000
 else
@@ -262,13 +275,11 @@ if [[ "${role}" == "PREFILL" ]]; then
     decode_capture_config=
     prefill_capture_config="${PREFILL_CAPTURE_CONFIG:-}"
     export KIMI_K3_PREFILL_CHUNK_TOKENS="${KIMI_K3_PREFILL_CHUNK_TOKENS:-65536}"
-    unset RTP_MLA_DECODE_KERNEL
     default_mega_moe_tokens=8192
 else
     enable_cuda_graph="${ENABLE_CUDA_GRAPH:-1}"
     decode_capture_config="${DECODE_CAPTURE_CONFIG:-1}"
     prefill_capture_config=
-    export RTP_MLA_DECODE_KERNEL=tokenspeed_mla
     unset KIMI_K3_PREFILL_CHUNK_TOKENS
     default_mega_moe_tokens=1
 fi
@@ -320,15 +331,11 @@ if [[ "${role}" == "PREFILL" ]]; then
     remote_endpoint="${DECODE_ENDPOINT}"
     start_port="${prefill_port}"
     remote_port="${decode_port}"
-    tp_size=8
-    dp_size=1
 else
     local_endpoint="${DECODE_ENDPOINT}"
     remote_endpoint="${PREFILL_ENDPOINT}"
     start_port="${decode_port}"
     remote_port="${prefill_port}"
-    tp_size=8
-    dp_size=1
 fi
 
 model_service_config="$(
@@ -344,7 +351,6 @@ export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}"
 export PYTHONUNBUFFERED=1
 export PYTHONFAULTHANDLER=1
 export TMPDIR="${runtime_tmpdir}"
-export RTP_LLM_STARTUP_TIMEOUT_S="${RTP_LLM_STARTUP_TIMEOUT_S:-14400}"
 export NCCL_DEBUG="${NCCL_DEBUG:-WARN}"
 export LOG_LEVEL="${LOG_LEVEL:-INFO}"
 export LOG_PATH="${LOG_PATH:-${run_root}/logs/${role,,}}"
@@ -439,11 +445,9 @@ echo "  PD no-proxy:      ${pd_no_proxy_hosts}"
 echo "  checkpoint:      ${CHECKPOINT_PATH}"
 echo "  think start:     ${THINK_START_TAG}"
 echo "  think end:       ${THINK_END_TAG}"
-echo "  topology:        TP${tp_size}/DP${dp_size}/EP8"
-if [[ "${role}" == "DECODE" ]]; then
-    echo "  decode topology: ${decode_topology}"
-    echo "  decode MLA:      ${RTP_MLA_DECODE_KERNEL}"
-fi
+topology_ep="${ep_size}"
+[[ "${topology_ep}" != "0" ]] || topology_ep="auto"
+echo "  topology:        TP${tp_size}/DP${dp_size}/EP${topology_ep} world=${world_size} local=${local_world_size}"
 echo "  load method:     ${LOAD_METHOD}"
 echo "  DeepGEMM JIT:    ${deepgemm_jit_compiler}"
 echo "  concurrency:     generate=${concurrency_limit}, context=${max_context_batch_size}"
@@ -476,9 +480,9 @@ server_args=(
     --role_type "${role}"
     --tp_size "${tp_size}"
     --dp_size "${dp_size}"
-    --ep_size 8
-    --world_size 8
-    --local_world_size 8
+    --ep_size "${ep_size}"
+    --world_size "${world_size}"
+    --local_world_size "${local_world_size}"
     --remote_server_port "${remote_port}"
     --max_seq_len "${max_seq_len}"
     --max_context_batch_size "${max_context_batch_size}"

@@ -79,7 +79,6 @@ py_test(
         "//rtp_llm:nvidia-cutlass-dsl",
         "//rtp_llm/models_py/standalone:py_standalone_testlib",
     ] + tokenspeed_mla_test_deps(),
-    env = {"RTP_MLA_DECODE_KERNEL": "tokenspeed_mla"},
     tags = ["manual"],
     exec_properties = {'gpu': 'SM100'},
 )

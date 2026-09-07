@@ -96,7 +96,7 @@ else:
             TokenSpeedMlaDecodeImpl,
         )
 
-        # Auto prefers TokenSpeed on supported Blackwell GPUs and falls back to
+        # Prefer TokenSpeed on supported Blackwell GPUs and fall back to
         # FlashInfer when the dependency or runtime configuration is unsupported.
         DECODE_MLA_IMPS.append(TokenSpeedMlaDecodeImpl)
         DECODE_MLA_IMPS.append(MlaFlashInferDecodeImpl)

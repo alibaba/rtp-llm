@@ -16,10 +16,8 @@ from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.mla_kv_cache_writ
     MlaKVCacheWriteOp,
 )
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.tokenspeed_mla_impl import (
-    MLA_DECODE_KERNEL_ENV,
     TokenSpeedMlaDecodeImpl,
     TokenSpeedMlaDecodeOp,
-    _get_mla_decode_kernel,
     _load_tokenspeed_mla,
     _TokenSpeedDecodeMetadata,
     tokenspeed_mla_kernel_supported,
@@ -924,106 +922,50 @@ class TokenSpeedMlaDecodeSupportTest(TestCase):
         ):
             self.assertFalse(tokenspeed_mla_kernel_supported(12, 777, 48, 96, q_len=9))
 
-    def test_auto_prefers_tokenspeed_on_supported_blackwell(self):
-        with mock.patch.dict(os.environ):
-            os.environ.pop(MLA_DECODE_KERNEL_ENV, None)
-            with mock.patch(
-                f"{self.module}._is_tokenspeed_blackwell", return_value=True
-            ), mock.patch(
-                f"{self.module}._load_tokenspeed_mla", return_value=True
-            ), mock.patch(
-                f"{self.module}.tokenspeed_mla_kernel_supported", return_value=True
-            ) as capability:
-                self.assertTrue(
-                    TokenSpeedMlaDecodeImpl.support(
-                        self._configs(), self._inputs(prompt_lengths=(8, 8))
-                    )
-                )
-        self.assertEqual(capability.call_args.args[4], 1)
-
-    def test_auto_falls_back_on_other_arch_or_missing_dependency(self):
-        with mock.patch.dict(os.environ):
-            os.environ.pop(MLA_DECODE_KERNEL_ENV, None)
-            with mock.patch(
-                f"{self.module}._is_tokenspeed_blackwell", return_value=False
-            ):
-                self.assertFalse(
-                    TokenSpeedMlaDecodeImpl.support(self._configs(), self._inputs())
-                )
-            with mock.patch(
-                f"{self.module}._is_tokenspeed_blackwell", return_value=True
-            ), mock.patch(f"{self.module}._load_tokenspeed_mla", return_value=False):
-                self.assertFalse(
-                    TokenSpeedMlaDecodeImpl.support(self._configs(), self._inputs())
-                )
-
-    def test_flashinfer_selection_skips_tokenspeed(self):
-        with mock.patch.dict(
-            os.environ, {MLA_DECODE_KERNEL_ENV: "flashinfer"}
-        ), mock.patch(f"{self.module}._load_tokenspeed_mla") as loader:
-            self.assertFalse(
-                TokenSpeedMlaDecodeImpl.support(self._configs(), self._inputs())
-            )
-            loader.assert_not_called()
-
-    def test_selector_rejects_unknown_backend(self):
-        with mock.patch.dict(os.environ, {MLA_DECODE_KERNEL_ENV: "tokenspeed"}):
-            with self.assertRaisesRegex(RuntimeError, "expected one of"):
-                _get_mla_decode_kernel()
-
-    def test_explicit_tokenspeed_is_strict(self):
-        with mock.patch.dict(
-            os.environ, {MLA_DECODE_KERNEL_ENV: "tokenspeed_mla"}
-        ), mock.patch(f"{self.module}._is_tokenspeed_blackwell", return_value=False):
-            with self.assertRaisesRegex(RuntimeError, "requires SM100 or SM103"):
-                TokenSpeedMlaDecodeImpl.support(self._configs(), self._inputs())
-
-        with mock.patch.dict(
-            os.environ, {MLA_DECODE_KERNEL_ENV: "tokenspeed_mla"}
-        ), mock.patch(
-            f"{self.module}._is_tokenspeed_blackwell", return_value=True
-        ), mock.patch(
-            f"{self.module}._load_tokenspeed_mla", return_value=False
-        ):
-            with self.assertRaisesRegex(RuntimeError, "tokenspeed-mla dependency"):
-                TokenSpeedMlaDecodeImpl.support(self._configs(), self._inputs())
-
-    def test_auto_falls_back_when_tokenspeed_rejects_runtime_shape(self):
-        with mock.patch.dict(os.environ):
-            os.environ.pop(MLA_DECODE_KERNEL_ENV, None)
-            with mock.patch(
-                f"{self.module}._is_tokenspeed_blackwell", return_value=True
-            ), mock.patch(
-                f"{self.module}._load_tokenspeed_mla", return_value=True
-            ), mock.patch(
-                f"{self.module}.tokenspeed_mla_kernel_supported",
-                return_value=False,
-            ):
-                self.assertFalse(
-                    TokenSpeedMlaDecodeImpl.support(
-                        self._configs(), self._inputs(prompt_lengths=(9, 9))
-                    )
-                )
-
-    def test_explicit_selection_reports_unsupported_kernel_shape(self):
-        with mock.patch.dict(
-            os.environ, {MLA_DECODE_KERNEL_ENV: "tokenspeed_mla"}
-        ), mock.patch(
+    def test_prefers_tokenspeed_on_supported_blackwell(self):
+        with mock.patch(
             f"{self.module}._is_tokenspeed_blackwell", return_value=True
         ), mock.patch(
             f"{self.module}._load_tokenspeed_mla", return_value=True
         ), mock.patch(
-            f"{self.module}.tokenspeed_mla_kernel_supported", return_value=False
+            f"{self.module}.tokenspeed_mla_kernel_supported", return_value=True
+        ) as capability:
+            self.assertTrue(
+                TokenSpeedMlaDecodeImpl.support(
+                    self._configs(), self._inputs(prompt_lengths=(8, 8))
+                )
+            )
+        self.assertEqual(capability.call_args.args[4], 1)
+
+    def test_falls_back_on_other_arch_or_missing_dependency(self):
+        with mock.patch(f"{self.module}._is_tokenspeed_blackwell", return_value=False):
+            self.assertFalse(
+                TokenSpeedMlaDecodeImpl.support(self._configs(), self._inputs())
+            )
+        with mock.patch(
+            f"{self.module}._is_tokenspeed_blackwell", return_value=True
+        ), mock.patch(f"{self.module}._load_tokenspeed_mla", return_value=False):
+            self.assertFalse(
+                TokenSpeedMlaDecodeImpl.support(self._configs(), self._inputs())
+            )
+
+    def test_falls_back_when_tokenspeed_rejects_runtime_shape(self):
+        with mock.patch(
+            f"{self.module}._is_tokenspeed_blackwell", return_value=True
+        ), mock.patch(
+            f"{self.module}._load_tokenspeed_mla", return_value=True
+        ), mock.patch(
+            f"{self.module}.tokenspeed_mla_kernel_supported",
+            return_value=False,
         ):
-            with self.assertRaisesRegex(RuntimeError, "does not support"):
+            self.assertFalse(
                 TokenSpeedMlaDecodeImpl.support(
                     self._configs(), self._inputs(prompt_lengths=(9, 9))
                 )
+            )
 
     def test_prompt_lengths_do_not_change_decode_query_shape(self):
-        with mock.patch.dict(
-            os.environ, {MLA_DECODE_KERNEL_ENV: "tokenspeed_mla"}
-        ), mock.patch(
+        with mock.patch(
             f"{self.module}._is_tokenspeed_blackwell", return_value=True
         ), mock.patch(
             f"{self.module}._load_tokenspeed_mla", return_value=True
@@ -1038,9 +980,7 @@ class TokenSpeedMlaDecodeSupportTest(TestCase):
         self.assertEqual(capability.call_args.args[4], 1)
 
     def test_mtp_draft_decode_uses_one_query_per_step(self):
-        with mock.patch.dict(
-            os.environ, {MLA_DECODE_KERNEL_ENV: "tokenspeed_mla"}
-        ), mock.patch(
+        with mock.patch(
             f"{self.module}._is_tokenspeed_blackwell", return_value=True
         ), mock.patch(
             f"{self.module}._load_tokenspeed_mla", return_value=True
@@ -1060,9 +1000,7 @@ class TokenSpeedMlaDecodeSupportTest(TestCase):
         self.assertEqual(capability.call_args.args[4], 1)
 
     def test_mtp_target_verify_uses_propose_plus_one_query_tokens(self):
-        with mock.patch.dict(
-            os.environ, {MLA_DECODE_KERNEL_ENV: "tokenspeed_mla"}
-        ), mock.patch(
+        with mock.patch(
             f"{self.module}._is_tokenspeed_blackwell", return_value=True
         ), mock.patch(
             f"{self.module}._load_tokenspeed_mla", return_value=True
@@ -1082,12 +1020,11 @@ class TokenSpeedMlaDecodeSupportTest(TestCase):
         self.assertEqual(capability.call_args.args[4], 4)
 
     def test_prefill_is_never_selected(self):
-        with mock.patch.dict(os.environ, {MLA_DECODE_KERNEL_ENV: "tokenspeed_mla"}):
-            self.assertFalse(
-                TokenSpeedMlaDecodeImpl.support(
-                    self._configs(), self._inputs(is_prefill=True)
-                )
+        self.assertFalse(
+            TokenSpeedMlaDecodeImpl.support(
+                self._configs(), self._inputs(is_prefill=True)
             )
+        )
 
     def test_impl_clears_new_pages_only_for_cuda_graph(self):
         configs = self._configs()

@@ -21,19 +21,6 @@ from rtp_llm.utils.model_weight import W
 from .rope_emb_new import NewMlaRotaryEmbeddingOp
 from .mla_fp8_kernels import quantize_fp8
 
-MLA_DECODE_KERNEL_ENV = "RTP_MLA_DECODE_KERNEL"
-_MLA_DECODE_KERNELS = ("auto", "flashinfer", "tokenspeed_mla")
-
-def _get_mla_decode_kernel() -> str:
-    kernel = os.environ.get(MLA_DECODE_KERNEL_ENV, "auto")
-    if kernel not in _MLA_DECODE_KERNELS:
-        supported = ", ".join(_MLA_DECODE_KERNELS)
-        raise RuntimeError(
-            f"invalid {MLA_DECODE_KERNEL_ENV}={kernel!r}; expected one of: {supported}"
-        )
-    return kernel
-
-
 class _TokenSpeedDecodeMetadata:
     """Stable block-table and sequence-length buffers for TokenSpeed MLA kernels."""
 
@@ -307,22 +294,6 @@ def _get_tokenspeed_workspace(
 
 def _tokenspeed_graph_workspace_q_len(requested_q_len: int) -> int:
     """Return the process-wide fixed CUDA Graph query-length capacity."""
-    override = os.environ.get("RTP_TOKENSPEED_MLA_GRAPH_MAX_Q_LEN")
-    if override is not None:
-        try:
-            configured = int(override)
-        except ValueError as error:
-            raise ValueError(
-                "RTP_TOKENSPEED_MLA_GRAPH_MAX_Q_LEN must be an integer, got "
-                f"{override!r}"
-            ) from error
-        if configured <= 0:
-            raise ValueError(
-                "RTP_TOKENSPEED_MLA_GRAPH_MAX_Q_LEN must be positive, got "
-                f"{configured}"
-            )
-        return max(requested_q_len, configured)
-
     # Target verify scores GEN_NUM_PER_CIRCLE draft tokens plus the current
     # target token.  Reserve that upper bound before the first ordinary-decode
     # graph is captured so the shared pointer never needs to grow afterwards.
@@ -829,20 +800,17 @@ class TokenSpeedMlaDecodeImpl(MlaFlashInferImplBase):
     def support(
         cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
     ) -> bool:
-        selector = _get_mla_decode_kernel()
         is_target_verify = bool(getattr(attn_inputs, "is_target_verify", False))
         is_mtp_draft_update = bool(getattr(attn_inputs, "is_mtp_draft_update", False))
-        if selector == "flashinfer" or (
-            attn_inputs.is_prefill and not is_target_verify and not is_mtp_draft_update
-        ):
+        if attn_inputs.is_prefill and not is_target_verify and not is_mtp_draft_update:
             return False
 
         def unsupported(reason: str) -> bool:
-            if selector == "tokenspeed_mla" or attn_configs.mla_fp8_compute:
+            if attn_configs.mla_fp8_compute:
                 raise RuntimeError(
-                    f"RTP_MLA_DECODE_KERNEL=tokenspeed_mla {reason}"
+                    f"TokenSpeed MLA {reason}"
                 ) from _TOKENSPEED_IMPORT_ERROR
-            logging.info("TokenSpeed MLA auto selection fell back: %s", reason)
+            logging.info("TokenSpeed MLA selection fell back: %s", reason)
             return False
 
         if not attn_configs.use_mla:

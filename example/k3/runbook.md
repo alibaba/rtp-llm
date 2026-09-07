@@ -16,7 +16,6 @@ CHECKPOINT_PATH=/data3/kimi-k3
 TOKENIZER_PATH=/data3/kimi-k3
 PREFILL_ENDPOINT=11.163.39.114:27188
 DECODE_ENDPOINT=11.163.39.115:28188
-KIMI_K3_EXECUTION_MODE=optimized
 SP_TYPE=eagle3
 SP_MODEL_TYPE=kimi_k3_mla_swa_eagle3
 SP_CHECKPOINT_PATH=/mnt/nas1/hf/kimi3_eagle
@@ -24,8 +23,7 @@ GEN_NUM_PER_CIRCLE=3
 KIMI_K3_EAGLE3_AUX_LAYER_IDS=0,44,88
 ```
 
-Never set `KIMI_K3_SKIP_BUILD=1`. Every launch must run the startup script's
-build and validation path.
+Every launch must run the startup script's build and validation path.
 
 ## Prefill launch on 114
 
@@ -40,12 +38,6 @@ nohup env \
   TOKENIZER_PATH=/data3/kimi-k3 \
   PREFILL_ENDPOINT=11.163.39.114:27188 \
   DECODE_ENDPOINT=11.163.39.115:28188 \
-  KIMI_K3_EXECUTION_MODE=optimized \
-  KIMI_K3_KDA_BACKEND=cula \
-  KIMI_K3_KV_CACHE_MEM_MB=4096 \
-  KIMI_K3_RUN_ROOT=/data0/xinfei.sxf/k3-pd-prefill \
-  KIMI_K3_TMPDIR=/data0/xinfei.sxf/k3-pd-prefill-tmp \
-  KIMI_K3_ACCURACY_ALLOW_TOKEN_IDS=1 \
   SP_TYPE=eagle3 \
   SP_MODEL_TYPE=kimi_k3_mla_swa_eagle3 \
   SP_CHECKPOINT_PATH=/mnt/nas1/hf/kimi3_eagle \
@@ -53,12 +45,6 @@ nohup env \
   KIMI_K3_EAGLE3_AUX_LAYER_IDS=0,44,88 \
   bash example/k3/start_kimi_k3_pd.sh prefill \
   > /data0/xinfei.sxf/k3-prefill-launch.log 2>&1 &
-```
-
-The launcher must reject every Prefill backend except `cula`:
-
-```text
-error: Kimi K3 Prefill requires KIMI_K3_KDA_BACKEND=cula; got kernel
 ```
 
 ## Decode launch on 115
@@ -72,14 +58,6 @@ nohup env \
   TOKENIZER_PATH=/data3/kimi-k3 \
   PREFILL_ENDPOINT=11.163.39.114:27188 \
   DECODE_ENDPOINT=11.163.39.115:28188 \
-  KIMI_K3_DECODE_TOPOLOGY=tp8_ep8 \
-  KIMI_K3_EXECUTION_MODE=optimized \
-  KIMI_K3_KDA_BACKEND=kernel \
-  KIMI_K3_TARGET_VERIFY_KDA_BACKEND=kernel \
-  KIMI_K3_KV_CACHE_MEM_MB=2048 \
-  KIMI_K3_RUN_ROOT=/data1/xinfei.sxf/k3-pd-decode \
-  KIMI_K3_TMPDIR=/data1/xinfei.sxf/k3-pd-decode-tmp \
-  KIMI_K3_FLASHINFER_WORKSPACE_BASE=/data1/xinfei.sxf/k3-pd-flashinfer \
   SP_TYPE=eagle3 \
   SP_MODEL_TYPE=kimi_k3_mla_swa_eagle3 \
   SP_CHECKPOINT_PATH=/mnt/nas1/hf/kimi3_eagle \
@@ -87,7 +65,6 @@ nohup env \
   KIMI_K3_EAGLE3_AUX_LAYER_IDS=0,44,88 \
   ENABLE_CUDA_GRAPH=1 \
   DECODE_CAPTURE_CONFIG=1,2,3,4,5,6,7,8 \
-  RTP_MLA_DECODE_KERNEL=flashinfer \
   LOAD_METHOD=fastsafetensors \
   bash example/k3/start_kimi_k3_pd.sh decode \
   > /data1/xinfei.sxf/k3-pd-logs/decode-cudagraph-fastsafetensors.log 2>&1 &

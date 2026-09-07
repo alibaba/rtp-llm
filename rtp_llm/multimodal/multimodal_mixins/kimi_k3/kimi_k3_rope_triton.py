@@ -1,6 +1,5 @@
 """Fused 2D RoPE for Kimi-K3 MoonViT."""
 
-import os
 from typing import Optional, Tuple
 
 import torch
@@ -16,7 +15,6 @@ except ImportError:  # pragma: no cover - depends on the runtime image
     _TRITON_AVAILABLE = False
 
 
-_FUSED_ROPE_ENV = "KIMI_K3_FUSED_ROPE"
 # Best launch geometry for K3 MoonViT's 12-head, 128-dimension attention.
 _GROUP_HEADS = 2
 
@@ -123,6 +121,7 @@ def _is_supported(
         and not freqs_cis.is_conj()
         and not xq.requires_grad
         and not xk.requires_grad
+        and not freqs_cis.requires_grad
     )
 
 
@@ -130,8 +129,6 @@ def maybe_fused_apply_rope(
     xq: torch.Tensor, xk: torch.Tensor, freqs_cis: torch.Tensor
 ) -> Optional[Tuple[torch.Tensor, torch.Tensor]]:
     """Apply fused Q/K RoPE using one allocation for both contiguous outputs."""
-    if os.environ.get(_FUSED_ROPE_ENV, "0") != "1":
-        return None
     if not _is_supported(xq, xk, freqs_cis):
         return None
 
