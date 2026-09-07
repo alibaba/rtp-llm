@@ -110,6 +110,20 @@ class AdmissionTests(unittest.TestCase):
                 ).status,
             )
 
+    def test_depth_error_keeps_old_case_sensitive_matching(self):
+        for text, expected in [
+            ("queue depth limit exceeded", "PASS"),
+            ("QUEUE DEPTH limit exceeded", "FAIL"),
+        ]:
+            verdict = self.check(
+                [self.row(8510, text)],
+                metric="all_error_contains",
+                expected=True,
+                text=["queue depth"],
+                case_sensitive=True,
+            )
+            self.assertEqual(expected, verdict.status)
+
     def test_missing_latency_timestamp_is_error(self):
         row = self.row(8502, "error")
         row["schedule"]["started_s"] = None
@@ -155,6 +169,10 @@ class AdmissionTests(unittest.TestCase):
                 4 if variant == "queue_depth" else 2, plan["environment"]["n_decode"]
             )
             overrides = plan["environment"].get("config_overrides", {})
+            if variant == "queue_depth":
+                stages = {s["id"]: s for s in plan["stages"]}
+                self.assertEqual(10, stages["engine_clean"]["timeout_s"])
+                self.assertTrue(stages["depth_error"]["params"]["case_sensitive"])
             if variant == "slo_deadline":
                 self.assertEqual(1500, overrides["queue_timeout_ms"])
             if variant == "master_capacity":

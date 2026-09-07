@@ -315,12 +315,24 @@ METRICS = {
 def _check_validate(params, plan):
     p = _fields(
         params,
-        {"rows", "metric", "expected", "op", "text", "scope", "min_samples"},
+        {
+            "rows",
+            "metric",
+            "expected",
+            "op",
+            "text",
+            "scope",
+            "min_samples",
+            "case_sensitive",
+        },
         {"rows", "metric", "expected", "op"},
     )
     plan.reference(p["rows"], "admission_rows")
     if p["metric"] not in METRICS or p["op"] not in {"eq", "ge", "le", "lt"}:
         raise ValueError("unsupported admission metric")
+    p.setdefault("case_sensitive", False)
+    if type(p["case_sensitive"]) is not bool:
+        raise ValueError("case_sensitive must be boolean")
     p.setdefault("scope", "all")
     p.setdefault("min_samples", 1)
     if (
@@ -370,16 +382,21 @@ def _check(ctx, params, deadline):
         expected = True
     elif metric in {"all_error_contains", "any_error_contains"}:
         match = all if metric == "all_error_contains" else any
+        normalize = (
+            (lambda value: value) if params.get("case_sensitive", False) else str.lower
+        )
         actual = bool(selected) and all(
             not request_success(r)
             and match(
-                t.lower()
-                in str(
-                    r["schedule"]["error"]
-                    or r["stream"]["error"]
-                    or r["business_error_message"]
-                    or ""
-                ).lower()
+                normalize(t)
+                in normalize(
+                    str(
+                        r["schedule"]["error"]
+                        or r["stream"]["error"]
+                        or r["business_error_message"]
+                        or ""
+                    )
+                )
                 for t in params["text"]
             )
             for r in selected

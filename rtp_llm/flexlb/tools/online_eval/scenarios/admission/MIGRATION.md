@@ -6,7 +6,7 @@ The profiles follow the current case declarations, not the older mapping table: 
 
 | Legacy case | YAML variant | Retained predicates / stage.check |
 |---|---|---|
-| admission_queue_depth_reject | queue_depth | occupants.all_occupied observes each P waiting+running>=1 before probe; depth_error.criterion requires error text containing queue depth; fast_reject.criterion latency<3s; recovered.criterion one successful fresh request; master_clean.inflight; engine_clean.engine_inflight |
+| admission_queue_depth_reject | queue_depth | occupants.all_occupied observes each P waiting+running>=1 before probe; depth_error.criterion preserves case-sensitive queue depth text matching; fast_reject.criterion latency<3s; recovered.criterion one successful fresh request; master_clean.inflight; engine_clean.engine_inflight with explicit10s timeout |
 | admission_slo_queue_deadline | slo_deadline | priority ordering, queue timeout1500ms, kv_pressure6291456 tokens on both P; deadline_error_family.criterion preserves old literal error family; waited.criterion>=1s and bounded_deadline.criterion<=8s; clear and1s poll; recovered.criterion; master_clean.inflight20s |
 | admission_master_capacity_reject | master_capacity | priority ordering, queue timeout60000ms, outstanding cap2; four concurrent requests; at_least_one_reject and at_most_two_rejects; at_least_two_served; no_serving_error; typed_code reads actual response code8502; typed_detail requires TooManyRequests and QUEUE_FULL; reject_fast<3s; fresh recovery; master_clean.inflight30s |
 
