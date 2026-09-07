@@ -83,6 +83,9 @@ class RequestBatch(ClientRecords):
         for _ in range(self.params["count"]):
             deadline.check()
             record = self.issue(self.ops.next_request_id(), self.ctx.clock)
+            with self._lock:
+                record["request_shape"] = dict(self.shape)
+                record["qos_level"] = self.params.get("qos_level")
             entry = dict(
                 record=record,
                 response=None,
@@ -93,7 +96,9 @@ class RequestBatch(ClientRecords):
             self.entries.append(entry)
             rid = record["wire_request_id"]
             try:
-                limit = min(30, deadline.remaining())
+                limit = min(
+                    self.params.get("schedule_timeout_s", 30), deadline.remaining()
+                )
                 self.update(
                     record,
                     schedule=dict(
@@ -103,8 +108,15 @@ class RequestBatch(ClientRecords):
                 stub = self.ops.schedule_pb2_grpc.FlexlbServiceStub(
                     self.ops._channel(self.ops.master_target())
                 )
+                rpc_options = {"timeout": limit}
+                if "qos_level" in self.params:
+                    from ..engine_ops import QOS_LEVEL_HEADER
+
+                    rpc_options["metadata"] = (
+                        (QOS_LEVEL_HEADER, str(self.params["qos_level"])),
+                    )
                 call = stub.Schedule.future(
-                    self.ops.build_schedule_request(rid, **self.shape), timeout=limit
+                    self.ops.build_schedule_request(rid, **self.shape), **rpc_options
                 )
                 entry["call"] = call
                 response = call.result(timeout=limit)
@@ -146,7 +158,11 @@ class RequestBatch(ClientRecords):
 
     @property
     def shape(self):
-        return {key: self.params[key] for key in ("input_len", "output_len")}
+        return {
+            key: self.params[key]
+            for key in ("input_len", "output_len", "block_keys", "priority")
+            if key in self.params
+        }
 
     def _start_consumer(self, entry, end):
         if entry["thread"] is not None or entry["record"]["schedule"]["status"] != "OK":
@@ -166,7 +182,7 @@ class RequestBatch(ClientRecords):
         record, response = entry["record"], entry["response"]
         phase = "stream"
         try:
-            limit = min(60, end - self.ctx.clock())
+            limit = min(self.params.get("stream_timeout_s", 60), end - self.ctx.clock())
             if limit <= 0:
                 raise StageTimeout("stream deadline expired before opening")
             method = (

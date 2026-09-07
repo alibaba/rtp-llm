@@ -57,7 +57,8 @@ class Ops:
         )
         self.pb2 = NS(FetchRequestPB=lambda **kw: kw)
 
-    def future(self, req, timeout):
+    def future(self, req, timeout, metadata=None):
+        self.last_schedule = (req, timeout, metadata)
         response = NS(
             code=200, success=True, error_message="", enqueued_by_master=self.batch
         )
@@ -161,6 +162,50 @@ class BackendTest(unittest.TestCase):
         requests, ctx = self.run_batch("immediate", batch=False)
         self.assertTrue(requests.wait(Deadline(time.monotonic() + 1))["completed"])
         self.assertEqual((ctx.ops.fetch_count, ctx.ops.generate_count), (0, 2))
+        ctx.cleanup(1)
+
+    def test_explicit_prefix_and_priority_reach_both_protocol_builders(self):
+        with tempfile.TemporaryDirectory() as root:
+            ctx = RuntimeContext({}, None, root, time.monotonic, time.sleep)
+            ctx.ops = Ops(batch=False)
+            ctx.ops.build_generate_input = Mock(wraps=ctx.ops.build_generate_input)
+            ctx.instance_deadline_s = time.monotonic() + 2
+            params = dict(
+                count=1,
+                input_len=1024,
+                output_len=2,
+                consume="immediate",
+                block_keys=[42, 43],
+                priority=70,
+                qos_level=30,
+                schedule_timeout_s=0.4,
+                stream_timeout_s=0.5,
+            )
+            requests = RequestBatch(ctx, params)
+            ctx.register_resource("requests", requests, requests.cleanup)
+            requests.submit(Deadline(time.monotonic() + 1))
+            self.assertTrue(requests.wait(Deadline(time.monotonic() + 1))["completed"])
+            request, timeout, metadata = ctx.ops.last_schedule
+            self.assertEqual(request[1]["block_keys"], [42, 43])
+            self.assertEqual(request[1]["priority"], 70)
+            self.assertNotIn("qos_level", request[1])
+            self.assertEqual(metadata, (("x-dashscope-inner-qos-level", "30"),))
+            self.assertLessEqual(timeout, 0.4)
+            self.assertEqual(ctx.ops.build_generate_input.call_args.kwargs, request[1])
+            record = requests.snapshot_records()[0]
+            self.assertEqual(record["request_shape"], request[1])
+            self.assertLessEqual(
+                record["stream"]["deadline_s"] - record["stream"]["started_s"], 0.501
+            )
+            self.assertEqual(ctx.cleanup(1)[0]["status"], "PASS")
+
+    def test_omitted_priority_stays_unset_without_qos_header(self):
+        requests, ctx = self.run_batch("immediate")
+        requests.wait(Deadline(time.monotonic() + 1))
+        request, timeout, metadata = ctx.ops.last_schedule
+        self.assertNotIn("priority", request[1])
+        self.assertIsNone(metadata)
+        self.assertNotIn("priority", requests.snapshot_records()[0]["request_shape"])
         ctx.cleanup(1)
 
     def test_wait_timeout_cleanup_cancels_actual_call_and_joins(self):
