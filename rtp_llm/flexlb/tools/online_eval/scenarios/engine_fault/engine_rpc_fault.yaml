@@ -1,7 +1,7 @@
 schema_version: 1
 id: engine_rpc_fault
-description: Explicit baseline, typed delay injection, recovery requests and owner
-  cleanup. Error and no-response contracts remain pending.
+description: Explicit request baselines, controlled RPC faults, consumer-complete
+  outcomes, recovery and applicable scheduler-owner cleanup.
 category: engine_fault
 profiles:
 - batch-window
@@ -11,6 +11,8 @@ profiles:
 legacy_case_ids:
 - engine_fault_enqueue_delay
 - engine_fault_generate_delay
+- engine_fault_no_respond
+- engine_fault_enqueue_error
 environment:
   backend: java_mock
   n_prefill: 2
@@ -269,3 +271,161 @@ variants:
       recovery_slack_s: 1.0
   - id: cleanup
     action: teardown
+- id: no_respond
+  profiles:
+  - batch-window
+  - single-nonbatch
+  - single-batch
+  - window-nonbatch
+  legacy_case_ids:
+  - engine_fault_no_respond
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: inject
+    action: engine_inject
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+      type: no_respond
+      options: {}
+  - id: probe
+    action: rpc_fault_probe
+    params:
+      input_len: 2048
+      output_len: 10
+      schedule_timeout_s: 30
+      stream_timeout_s: 5
+      expected_rpc_statuses:
+      - UNKNOWN
+      - INTERNAL
+      - UNAVAILABLE
+      - DEADLINE_EXCEEDED
+      require_error_detail: false
+    timeout_s: 45
+  - id: clear
+    action: engine_clear
+    params:
+      fault:
+        $ref: stages.inject.output.fault
+  - id: cancel_failed_delivery
+    action: rpc_probe_cancel
+    params:
+      requests:
+        $ref: stages.probe.output.requests
+  - id: recovery_settle
+    action: balance_pause
+    params:
+      seconds: 3
+  - id: recovery
+    action: request
+    params:
+      count: 1
+      input_len: 2048
+      output_len: 2
+      schedule_timeout_s: 30
+      stream_timeout_s: 30
+  - id: recovery_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.recovery.output.requests
+    timeout_s: 30
+  - id: recovery_success
+    action: check
+    params:
+      actual:
+        $ref: stages.recovery_terminal.output.completed
+      op: eq
+      expected: true
+  - id: owner_clean
+    action: rpc_probe_owner_clean
+    params:
+      requests:
+        $ref: stages.probe.output.requests
+    timeout_s: 95
+  - id: cleanup
+    action: teardown
+  execution:
+    timeout_s: 420
+- id: enqueue_error
+  profiles:
+  - batch-window
+  - single-nonbatch
+  - single-batch
+  - window-nonbatch
+  legacy_case_ids:
+  - engine_fault_enqueue_error
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: inject
+    action: engine_inject
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+      type: enqueue_error
+      options: {}
+  - id: probe
+    action: rpc_fault_probe
+    params:
+      input_len: 2048
+      output_len: 10
+      schedule_timeout_s: 30
+      stream_timeout_s: 10
+      expected_rpc_statuses:
+      - UNKNOWN
+      - INTERNAL
+      - UNAVAILABLE
+      - DEADLINE_EXCEEDED
+      require_error_detail: true
+    timeout_s: 45
+  - id: clear
+    action: engine_clear
+    params:
+      fault:
+        $ref: stages.inject.output.fault
+  - id: cancel_failed_delivery
+    action: rpc_probe_cancel
+    params:
+      requests:
+        $ref: stages.probe.output.requests
+  - id: recovery_settle
+    action: balance_pause
+    params:
+      seconds: 3
+  - id: recovery
+    action: request
+    params:
+      count: 1
+      input_len: 2048
+      output_len: 2
+      schedule_timeout_s: 30
+      stream_timeout_s: 30
+  - id: recovery_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.recovery.output.requests
+    timeout_s: 30
+  - id: recovery_success
+    action: check
+    params:
+      actual:
+        $ref: stages.recovery_terminal.output.completed
+      op: eq
+      expected: true
+  - id: owner_clean
+    action: rpc_probe_owner_clean
+    params:
+      requests:
+        $ref: stages.probe.output.requests
+    timeout_s: 95
+  - id: cleanup
+    action: teardown
+  execution:
+    timeout_s: 420

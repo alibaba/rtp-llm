@@ -77,9 +77,13 @@ class Backend:
 
 class RpcMeasurementTests(unittest.TestCase):
     def plans(self):
-        return compile_scenarios(
-            load_scenarios(ROOT / "scenarios/engine_fault"), handlers=handlers()
-        )
+        return [
+            plan
+            for plan in compile_scenarios(
+                load_scenarios(ROOT / "scenarios/engine_fault"), handlers=handlers()
+            )
+            if "delay" in plan["variant_id"]
+        ]
 
     def run_plan(self, plan, backend):
         with tempfile.TemporaryDirectory() as root, patch.object(
