@@ -1,7 +1,7 @@
 # Priority preemption migration
 
 Owner: agent4. Source baseline: `295af797bd7ed3a842c9cad42b5722c64cd24c9a`.
-This checkpoint implements eight complete candidate programs out of fourteen old
+This checkpoint implements nine complete candidate programs out of fourteen old
 contracts. No old case is called or deleted. Independent review, default catalog
 integration and actual Java execution remain pending.
 
@@ -55,9 +55,8 @@ observed order and terminal outcomes are saved as artifacts.
   restores its original blocking dependency. An explicit zero submission gap
   avoids inserting a .15s pause after the standalone placeholder.
 
-## Pending contracts (6)
+## Pending contracts (5)
 
-- atpm_decode_reservation_priority
 - atpm_observability_integrity
 - atpm_preempt_prefill_queued_live
 - atpm_preempt_decode_reserved_live
@@ -424,3 +423,56 @@ actual3.1s Schedule rejection fails the unchanged3s bound; reason99 remains
 diagnostic and does not add an old-absent predicate. The fixed cdd source
 plus owned preemption files is the verification composition, not bare
 branch execution or Java acceptance.
+
+
+## Ninth candidate: decode_reservation_priority
+
+The old atpm_decode_reservation_priority reuses the exact D1 environment
+from decode_engine_owned, including its metric whitelist. Its executable
+EV2 form contains three waves, each with four occupants and one incoming.
+P4000/sync1.5, .15 occupant submission gaps, Schedule90/Generate120 and
+fresh35 consumer drains are retained. Each wave waits for all four actual
+Decode RUNNING lifecycles, sequential fresh20/.1 with an80s parent cap,
+before injecting6291456 KV pressure into all four Decode owners and
+waiting1.5. Between waves pressure is cleared and sync1.5 permits routing.
+Unlike decode_engine_owned, this old case has no explicit post-injection
+saturation guard; that extra predicate is not copied into this variant.
+
+Wave1 uses four30/2048/500 and incoming70/2048/2. It requires zero8429
+victims, successful survivors, and incoming success or the old EV2 reject
+family{8403,8402,8510,8431}. The victim metric delta is exactly zero for
+labels victim_priority30/incoming_priority70. Wave2 uses four50 and
+incoming50, all other lengths unchanged. It requires zero8400/8429, all
+occupants successful, incoming code in{200,8511,8403,8402,8510,8431}, and
+an unfiltered victim metric delta of zero. Wave3 uses two30/2048/500 and
+two30/16384/500, incoming70/8192/2; zero8400/8429, successful survivors,
+and incoming success or EV2 reject family. It has no metric predicate,
+and8511 is not silently added to its incoming legal set. No kvBucket
+victim preference is claimed observable on this zero-victim EV2 baseline.
+
+Metrics are scraped before injection and after consumer drain for waves1/2
+only, from one fixed management endpoint per environment. The old
+name-substring and label-subset selection is retained. An absent matching
+series in valid Prometheus output remains value=None, separately marked
+missing_series, with the old (after or0)-(before or0) arithmetic. This is
+explicitly weak evidence and does not prove that a zero-valued series was
+exposed. Failed HTTP/invalid exposition/malformed matching samples are ERROR
+instead of becoming old empty-list/zero fallbacks. Raw response attempts
+and selected samples remain in artifacts; finite nonnegative counters are
+required. No home/shared log path is read by this metric observation.
+
+Wave predicates are scalar evidence until final AT7/P6 aggregate; ordinary
+terminal or metric-delta failures still allow later waves to run. Each
+clean30 remains mandatory; stopping after failed cleanup is stronger than
+the old diagnostic continuation (the old AT7 could still be reported
+separately when only clean3 failed). Owned pressure cleanup remains active
+on exceptions and final teardown. This is not live eviction/Java acceptance.
+
+
+Seven focused fixtures cover15 Schedule requests and12 actual completed
+consumer workers, exact D1 configuration/startup env and mixed-size wave3,
+metric delta causing final failure after all waves, explicit sparse-series
+weak-zero arithmetic, unavailable scrape failing before incoming,8511
+rejected in wave3 while legal in wave2, fixed fallback endpoint/label scope,
+and malformed/nonfinite victim samples as ERROR. Full verification uses
+fixed cdd856 plus these owned files. No actual Java result is implied.

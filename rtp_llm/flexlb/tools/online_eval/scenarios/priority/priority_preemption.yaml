@@ -13,6 +13,7 @@ legacy_case_ids:
 - atpm_config_strict_reject
 - atpm_preempt_decode_engine_owned
 - atpm_error_code_family
+- atpm_decode_reservation_priority
 environment:
   backend: java_mock
   n_prefill: 1
@@ -1772,6 +1773,380 @@ variants:
       - $ref: stages.s3_segment.output.passed
       recovery:
         $ref: stages.recovery_result.output.passed
+  - id: teardown
+    action: teardown
+- id: decode_reservation_priority
+  legacy_case_ids:
+  - atpm_decode_reservation_priority
+  environment_overrides:
+    n_prefill: 2
+    n_decode: 4
+    config_overrides:
+      max_inflight_requests_per_worker: 3
+      preemption:
+        allowed_victim_stages:
+        - DECODE_RESERVED
+        - DECODE_ENGINE_OWNED
+        engine_cancellation:
+          ack_timeout_ms: 50
+          completion_timeout_ms: 1000
+    metric_whitelist: flexlb_auto_tpm
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: fleet
+    action: preemption_decode_fleet
+  - id: slow
+    action: engine_control
+    params:
+      operation: set_perf
+      targets:
+      - $ref: stages.fleet.output.prefill0
+      - $ref: stages.fleet.output.prefill1
+      perf:
+        prefill_fixed_ms: 4000
+  - id: sync
+    action: balance_pause
+    params:
+      seconds: 1.5
+  - id: r1_occupants
+    action: priority_start
+    params:
+      gap_s: 0.15
+      requests:
+      - tag: occupant0
+        priority: 30
+        input_len: 2048
+        output_len: 500
+      - tag: occupant1
+        priority: 30
+        input_len: 2048
+        output_len: 500
+      - tag: occupant2
+        priority: 30
+        input_len: 2048
+        output_len: 500
+      - tag: occupant3
+        priority: 30
+        input_len: 2048
+        output_len: 500
+    timeout_s: 15
+  - id: r1_settled
+    action: preemption_settled
+    params:
+      requests:
+        $ref: stages.r1_occupants.output.requests
+    timeout_s: 90
+  - id: r1_running
+    action: preemption_decode_running
+    params:
+      requests:
+        $ref: stages.r1_occupants.output.requests
+    timeout_s: 80
+  - id: r1_baseline
+    action: preemption_reservation_metric
+    params:
+      labels:
+        victim_priority: '30'
+        incoming_priority: '70'
+  - id: r1_pressure
+    action: preemption_decode_pressure
+    params:
+      targets:
+      - $ref: stages.fleet.output.decode0
+      - $ref: stages.fleet.output.decode1
+      - $ref: stages.fleet.output.decode2
+      - $ref: stages.fleet.output.decode3
+      tokens: 6291456
+  - id: r1_pressure_sync
+    action: balance_pause
+    params:
+      seconds: 1.5
+  - id: r1_incoming
+    action: priority_start
+    params:
+      gap_s: 0
+      requests:
+      - tag: incoming
+        priority: 70
+        input_len: 2048
+        output_len: 2
+    timeout_s: 5
+  - id: r1_incoming_settled
+    action: preemption_settled
+    params:
+      requests:
+        $ref: stages.r1_incoming.output.requests
+    timeout_s: 90
+  - id: r1_occupants_drain
+    action: preemption_wait
+    params:
+      requests:
+        $ref: stages.r1_occupants.output.requests
+    timeout_s: 140
+  - id: r1_incoming_drain
+    action: preemption_wait
+    params:
+      requests:
+        $ref: stages.r1_incoming.output.requests
+    timeout_s: 35
+  - id: r1_after
+    action: preemption_reservation_metric
+    params:
+      labels:
+        victim_priority: '30'
+        incoming_priority: '70'
+  - id: r1_verdict
+    action: preemption_reservation_half
+    params:
+      occupants:
+        $ref: stages.r1_occupants.output.requests
+      incoming:
+        $ref: stages.r1_incoming.output.requests
+      wave: lower
+      baseline:
+        $ref: stages.r1_baseline.output.snapshot
+      after:
+        $ref: stages.r1_after.output.snapshot
+  - id: r1_clean
+    action: balance_clean
+    timeout_s: 30
+  - id: r2_release
+    action: preemption_decode_pressure
+    params:
+      targets:
+      - $ref: stages.fleet.output.decode0
+      - $ref: stages.fleet.output.decode1
+      - $ref: stages.fleet.output.decode2
+      - $ref: stages.fleet.output.decode3
+      tokens: 0
+  - id: r2_release_sync
+    action: balance_pause
+    params:
+      seconds: 1.5
+  - id: r2_occupants
+    action: priority_start
+    params:
+      gap_s: 0.15
+      requests:
+      - tag: occupant0
+        priority: 50
+        input_len: 2048
+        output_len: 500
+      - tag: occupant1
+        priority: 50
+        input_len: 2048
+        output_len: 500
+      - tag: occupant2
+        priority: 50
+        input_len: 2048
+        output_len: 500
+      - tag: occupant3
+        priority: 50
+        input_len: 2048
+        output_len: 500
+    timeout_s: 15
+  - id: r2_settled
+    action: preemption_settled
+    params:
+      requests:
+        $ref: stages.r2_occupants.output.requests
+    timeout_s: 90
+  - id: r2_running
+    action: preemption_decode_running
+    params:
+      requests:
+        $ref: stages.r2_occupants.output.requests
+    timeout_s: 80
+  - id: r2_baseline
+    action: preemption_reservation_metric
+    params:
+      labels: {}
+  - id: r2_pressure
+    action: preemption_decode_pressure
+    params:
+      targets:
+      - $ref: stages.fleet.output.decode0
+      - $ref: stages.fleet.output.decode1
+      - $ref: stages.fleet.output.decode2
+      - $ref: stages.fleet.output.decode3
+      tokens: 6291456
+  - id: r2_pressure_sync
+    action: balance_pause
+    params:
+      seconds: 1.5
+  - id: r2_incoming
+    action: priority_start
+    params:
+      gap_s: 0
+      requests:
+      - tag: incoming
+        priority: 50
+        input_len: 2048
+        output_len: 2
+    timeout_s: 5
+  - id: r2_incoming_settled
+    action: preemption_settled
+    params:
+      requests:
+        $ref: stages.r2_incoming.output.requests
+    timeout_s: 90
+  - id: r2_occupants_drain
+    action: preemption_wait
+    params:
+      requests:
+        $ref: stages.r2_occupants.output.requests
+    timeout_s: 140
+  - id: r2_incoming_drain
+    action: preemption_wait
+    params:
+      requests:
+        $ref: stages.r2_incoming.output.requests
+    timeout_s: 35
+  - id: r2_after
+    action: preemption_reservation_metric
+    params:
+      labels: {}
+  - id: r2_verdict
+    action: preemption_reservation_half
+    params:
+      occupants:
+        $ref: stages.r2_occupants.output.requests
+      incoming:
+        $ref: stages.r2_incoming.output.requests
+      wave: same
+      baseline:
+        $ref: stages.r2_baseline.output.snapshot
+      after:
+        $ref: stages.r2_after.output.snapshot
+  - id: r2_clean
+    action: balance_clean
+    timeout_s: 30
+  - id: r3_release
+    action: preemption_decode_pressure
+    params:
+      targets:
+      - $ref: stages.fleet.output.decode0
+      - $ref: stages.fleet.output.decode1
+      - $ref: stages.fleet.output.decode2
+      - $ref: stages.fleet.output.decode3
+      tokens: 0
+  - id: r3_release_sync
+    action: balance_pause
+    params:
+      seconds: 1.5
+  - id: r3_occupants
+    action: priority_start
+    params:
+      gap_s: 0.15
+      requests:
+      - tag: occupant0
+        priority: 30
+        input_len: 2048
+        output_len: 500
+      - tag: occupant1
+        priority: 30
+        input_len: 2048
+        output_len: 500
+      - tag: occupant2
+        priority: 30
+        input_len: 16384
+        output_len: 500
+      - tag: occupant3
+        priority: 30
+        input_len: 16384
+        output_len: 500
+    timeout_s: 15
+  - id: r3_settled
+    action: preemption_settled
+    params:
+      requests:
+        $ref: stages.r3_occupants.output.requests
+    timeout_s: 90
+  - id: r3_running
+    action: preemption_decode_running
+    params:
+      requests:
+        $ref: stages.r3_occupants.output.requests
+    timeout_s: 80
+  - id: r3_pressure
+    action: preemption_decode_pressure
+    params:
+      targets:
+      - $ref: stages.fleet.output.decode0
+      - $ref: stages.fleet.output.decode1
+      - $ref: stages.fleet.output.decode2
+      - $ref: stages.fleet.output.decode3
+      tokens: 6291456
+  - id: r3_pressure_sync
+    action: balance_pause
+    params:
+      seconds: 1.5
+  - id: r3_incoming
+    action: priority_start
+    params:
+      gap_s: 0
+      requests:
+      - tag: incoming
+        priority: 70
+        input_len: 8192
+        output_len: 2
+    timeout_s: 5
+  - id: r3_incoming_settled
+    action: preemption_settled
+    params:
+      requests:
+        $ref: stages.r3_incoming.output.requests
+    timeout_s: 90
+  - id: r3_occupants_drain
+    action: preemption_wait
+    params:
+      requests:
+        $ref: stages.r3_occupants.output.requests
+    timeout_s: 140
+  - id: r3_incoming_drain
+    action: preemption_wait
+    params:
+      requests:
+        $ref: stages.r3_incoming.output.requests
+    timeout_s: 35
+  - id: r3_verdict
+    action: preemption_reservation_half
+    params:
+      occupants:
+        $ref: stages.r3_occupants.output.requests
+      incoming:
+        $ref: stages.r3_incoming.output.requests
+      wave: kvbucket
+  - id: r3_clean
+    action: balance_clean
+    timeout_s: 30
+  - id: reservation_verdict
+    action: preemption_reservation_final
+    params:
+      waves:
+      - $ref: stages.r1_verdict.output.passed
+      - $ref: stages.r2_verdict.output.passed
+      - $ref: stages.r3_verdict.output.passed
+  - id: clear_pressure
+    action: preemption_decode_pressure
+    params:
+      targets:
+      - $ref: stages.fleet.output.decode0
+      - $ref: stages.fleet.output.decode1
+      - $ref: stages.fleet.output.decode2
+      - $ref: stages.fleet.output.decode3
+      tokens: 0
+  - id: restore
+    action: engine_control
+    params:
+      operation: set_perf
+      targets:
+      - $ref: stages.fleet.output.prefill0
+      - $ref: stages.fleet.output.prefill1
+      perf:
+        prefill_fixed_ms: 100
   - id: teardown
     action: teardown
 stages:

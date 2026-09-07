@@ -890,7 +890,221 @@ def _error_final(ctx, p, deadline):
     )
 
 
+def _reservation_metric_params(p, plan):
+    p = _params(p, {"labels"}, {"labels"})
+    if p["labels"] not in ({}, {"victim_priority": "30", "incoming_priority": "70"}):
+        raise ValueError("reservation metric labels must match a legacy wave")
+    return p
+
+
+def _reservation_metric(ctx, p, deadline):
+    from ...engine_ops import parse_prometheus_samples
+    from .status_protocol import _http as metric_http
+
+    source = getattr(ctx, "preemption_victim_metric_source", None)
+    if source is not None and source[0] != ctx.env_epoch:
+        raise ValueError("victim metric source belongs to an old environment")
+    paths = [source[1]] if source else ["actuator/prometheus", "prometheus"]
+    evidence = dict(env_epoch=ctx.env_epoch, labels=p["labels"], attempts=[])
+    path = ctx.artifact_dir / f"preemption-victim-metric-{uuid.uuid4().hex}.json"
+    try:
+        for endpoint in paths:
+            status, body = metric_http(
+                ctx, "metrics", endpoint, deadline, allowed=(200, 404), text=True
+            )
+            evidence["attempts"].append(
+                dict(endpoint=endpoint, status=status, body=body)
+            )
+            if status == 404:
+                continue
+            samples = parse_prometheus_samples(body, "")
+            if not samples:
+                raise ValueError("missing valid Prometheus exposition")
+            # An absent sparse counter remains None; a malformed matching line
+            # must not become an absent counter through the permissive parser.
+            for line in body.splitlines():
+                stripped = line.strip()
+                if (
+                    stripped
+                    and not stripped.startswith("#")
+                    and "auto_tpm_victim" in stripped.split("{", 1)[0].split(" ", 1)[0]
+                    and not parse_prometheus_samples(stripped, "")
+                ):
+                    raise ValueError("malformed victim metric sample")
+            selected = [
+                (name, labels, _number(value, 0, 1e18))
+                for name, labels, value in samples
+                if "auto_tpm_victim" in name
+                and all(labels.get(k) == v for k, v in p["labels"].items())
+            ]
+            value = sum(row[2] for row in selected) if selected else None
+            evidence.update(
+                endpoint=endpoint,
+                selected=selected,
+                value=value,
+                missing_series=not selected,
+                legacy_effective_value=value or 0.0,
+            )
+            ctx.preemption_victim_metric_source = (ctx.env_epoch, endpoint)
+            break
+        else:
+            raise ValueError("no available Prometheus endpoint")
+    except Exception as exc:
+        evidence["error"] = repr(exc)
+        raise
+    finally:
+        path.write_text(json.dumps(evidence, indent=2, allow_nan=False) + "\n")
+    return StageOutput(
+        {"snapshot": ctx.register_resource("snapshot", evidence, historical=True)},
+        artifacts=[str(path)],
+    )
+
+
+def _reservation_half_params(p, plan):
+    p = _params(
+        p,
+        {"occupants", "incoming", "wave", "baseline", "after"},
+        {"occupants", "incoming", "wave"},
+    )
+    for key in ("occupants", "incoming"):
+        plan.reference(p[key], "requests")
+    if p["wave"] not in ("lower", "same", "kvbucket"):
+        raise ValueError("unknown reservation wave")
+    if p["wave"] == "kvbucket":
+        if "baseline" in p or "after" in p:
+            raise ValueError("legacy kvbucket wave has no metric predicate")
+    else:
+        for key in ("baseline", "after"):
+            plan.reference(p.get(key), "snapshot")
+    return p
+
+
+def _reservation_half(ctx, p, deadline):
+    occupants, incoming = [_cohort(ctx, p[k]) for k in ("occupants", "incoming")]
+    rows, inc = occupants.records(), incoming.records()
+    if (
+        not occupants.complete
+        or not incoming.complete
+        or (len(rows), len(occupants.entries), len(inc), len(incoming.entries))
+        != (4, 4, 1, 1)
+    ):
+        raise ValueError("reservation verdict requires drained four-plus-one cohorts")
+    priority = 50 if p["wave"] == "same" else 30
+    lengths = [2048, 2048, 16384, 16384] if p["wave"] == "kvbucket" else [2048] * 4
+    incoming_shape = (
+        (50, 2048, 2)
+        if p["wave"] == "same"
+        else (70, 8192 if p["wave"] == "kvbucket" else 2048, 2)
+    )
+    if [
+        (r.get("priority"), r["input_len"], r["output_len"])
+        for r in occupants.p["requests"]
+    ] != [(priority, n, 500) for n in lengths] or [
+        (r.get("priority"), r["input_len"], r["output_len"])
+        for r in incoming.p["requests"]
+    ] != [
+        incoming_shape
+    ]:
+        raise ValueError("reservation wave differs from old priority/token shape")
+    outcomes = [_outcome(e, r) for e, r in zip(occupants.entries, rows)]
+    incoming_ok, code = _outcome(incoming.entries[0], inc[0])
+    if type(code) is not int or any(type(c) is not int for _, c in outcomes):
+        raise ValueError("reservation verdict needs typed terminals")
+    victim_codes = (8429,) if p["wave"] == "lower" else (8400, 8429)
+    victims = [
+        rows[i]["wire_request_id"]
+        for i, (_, c) in enumerate(outcomes)
+        if c in victim_codes
+    ]
+    survivors = all(ok for ok, c in outcomes if c not in victim_codes)
+    legal = (
+        code in (200, 8511, 8403, 8402, 8510, 8431)
+        if p["wave"] == "same"
+        else incoming_ok or code in (8403, 8402, 8510, 8431)
+    )
+    evidence = dict(
+        wave=p["wave"],
+        occupants=rows,
+        incoming=inc,
+        outcomes=outcomes,
+        incoming_outcome=(incoming_ok, code),
+        victims=victims,
+        survivors_ok=survivors,
+        incoming_legal=legal,
+    )
+    metric_ok = True
+    if p["wave"] != "kvbucket":
+        before, after = [ctx.resource(p[k], "snapshot") for k in ("baseline", "after")]
+        labels = (
+            {}
+            if p["wave"] == "same"
+            else {"victim_priority": "30", "incoming_priority": "70"}
+        )
+        for observation in (before, after):
+            if (
+                observation.get("env_epoch") != ctx.env_epoch
+                or observation.get("labels") != labels
+                or "value" not in observation
+                or observation.get("error")
+            ):
+                raise ValueError("wrong victim metric observation")
+        if before["endpoint"] != after["endpoint"]:
+            raise ValueError("victim metric source changed")
+        delta = (after["value"] or 0.0) - (before["value"] or 0.0)
+        metric_ok = delta == 0.0
+        evidence.update(
+            baseline=before,
+            after=after,
+            victim_delta=delta,
+            missing_series_policy="legacy None-or-zero; not proof of an exposed zero series",
+        )
+    passed = not victims and survivors and legal and metric_ok
+    evidence["passed"] = passed
+    path = ctx.artifact_dir / f"preemption-reservation-{uuid.uuid4().hex}.json"
+    path.write_text(json.dumps(evidence, indent=2, allow_nan=False) + "\n")
+    return StageOutput({"passed": passed}, artifacts=[str(path)])
+
+
+def _reservation_final_params(p, plan):
+    p = _params(p, {"waves"}, {"waves"})
+    if not isinstance(p["waves"], list) or len(p["waves"]) != 3:
+        raise ValueError("all three reservation waves required")
+    for ref in p["waves"]:
+        plan.reference(ref, "boolean")
+    return p
+
+
+def _reservation_final(ctx, p, deadline):
+    values = [ctx.resolve(ref) for ref in p["waves"]]
+    passed = all(v is True for v in values)
+    return StageOutput(
+        checks=[
+            CheckResult(k, "PASS" if passed else "FAIL", actual=values)
+            for k in ("AT7", "P6")
+        ]
+    )
+
+
 HANDLERS = [
+    StageHandler(
+        "preemption_reservation_metric",
+        _reservation_metric_params,
+        _reservation_metric,
+        {"snapshot": "snapshot"},
+    ),
+    StageHandler(
+        "preemption_reservation_half",
+        _reservation_half_params,
+        _reservation_half,
+        {"passed": "boolean"},
+    ),
+    StageHandler(
+        "preemption_reservation_final",
+        _reservation_final_params,
+        _reservation_final,
+        {},
+        checks=frozenset({"AT7", "P6"}),
+    ),
     StageHandler(
         "preemption_error_segment",
         _error_segment_params,
