@@ -161,21 +161,32 @@ std::vector<CacheStoreBlockPair> DecodeRpcServer::buildGroupLoadPlan(const Cache
 
     // Slots of a CP-scaled state/SWA table cover cp_scale logical blocks each
     // (OpaqueKVCacheSpec::seqSizePerBlock), so the ratio is the compaction factor.
-    const size_t cp_scale = (base_seq_size_per_block > 0 && group_seq_size_per_block >= base_seq_size_per_block
-                             && group_seq_size_per_block % base_seq_size_per_block == 0) ?
-                                group_seq_size_per_block / base_seq_size_per_block :
-                                1;
-    const bool   compact  = policy.cp_mapping == CpBlockMappingMode::COMPACT_LAST_RANK && cp_scale > 1;
-    // A compact table is addressed in canonical slots over the full key namespace,
-    // so the planner needs every logical block; a flat table is addressed by
-    // logical position, which a speculative reserve tail may outrun.
-    const size_t total_logical_blocks = compact ? cache_key_count : std::min(local_block_num, cache_key_count);
+    const size_t block_scale = (base_seq_size_per_block > 0 && group_seq_size_per_block >= base_seq_size_per_block
+                                && group_seq_size_per_block % base_seq_size_per_block == 0) ?
+                                   group_seq_size_per_block / base_seq_size_per_block :
+                                   1;
+    const bool compact = policy.cp_mapping == CpBlockMappingMode::COMPACT_LAST_RANK && block_scale > 1;
+    // Compact plans already project canonical slots over the global key namespace.
+    // Flat heterogeneous groups instead map each local block to the endpoint key
+    // of the base-sized key blocks it covers.
+    const size_t key_blocks_per_logical_block = compact ? 1 : block_scale;
+    const size_t group_block_count =
+        (cache_key_count + key_blocks_per_logical_block - 1) / key_blocks_per_logical_block;
+    const size_t total_logical_blocks = compact ? cache_key_count : std::min(local_block_num, group_block_count);
+    const size_t logical_reuse_block_size =
+        compact ? reuse_block_size : reuse_block_size / key_blocks_per_logical_block;
     // Decode owns whole logical blocks of BLOCK_ROUND_ROBIN groups; the per-peer
     // split happens later, per block, so only compact groups are CP-projected here.
-    const int cp_size = compact ? static_cast<int>(cp_scale) : 1;
+    const int cp_size = compact ? static_cast<int>(block_scale) : 1;
 
-    const auto raw_plan = buildCacheStorePlan(
-        policy, total_logical_blocks, reuse_block_size, use_hybrid, /*cp_rank=*/cp_size - 1, cp_size);
+    const auto raw_plan = buildCacheStorePlan(policy,
+                                              total_logical_blocks,
+                                              logical_reuse_block_size,
+                                              use_hybrid,
+                                              /*cp_rank=*/cp_size - 1,
+                                              cp_size,
+                                              key_blocks_per_logical_block,
+                                              cache_key_count);
     plan.reserve(raw_plan.size());
     for (const auto& pair : raw_plan) {
         if (static_cast<size_t>(pair.offset_index) < local_block_num
@@ -994,7 +1005,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                 for (const auto& plan_pair : load_plan) {
                     const size_t block_pos       = static_cast<size_t>(plan_pair.offset_index);
                     const size_t cache_key_index = static_cast<size_t>(plan_pair.key_index);
-                    if (!shouldLoadBlockFromPeer(group_type, cache_key_index, i)) {
+                    if (!shouldLoadBlockFromPeer(group_type, block_pos, i)) {
                         continue;
                     }
                     auto block_id = block_ids[block_pos];
@@ -1127,7 +1138,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                             for (const auto& plan_pair : load_plan) {
                                 const size_t block_pos       = static_cast<size_t>(plan_pair.offset_index);
                                 const size_t cache_key_index = static_cast<size_t>(plan_pair.key_index);
-                                if (!shouldLoadBlockFromPeer(group_type, cache_key_index, i)) {
+                                if (!shouldLoadBlockFromPeer(group_type, block_pos, i)) {
                                     continue;
                                 }
                                 auto block_id = block_ids[block_pos];

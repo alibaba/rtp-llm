@@ -346,6 +346,50 @@ TEST(DecodeRpcServerTest, SuccessfulRequestHasNoPhaseErrorType) {
               nullptr);
 }
 
+TEST(DecodeRpcServerTest, HeterogeneousFullGroupUsesGlobalEndpointKeys) {
+    const auto policy = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    const auto producer_plan = buildCacheStorePlan(policy,
+                                                   /*total_logical_blocks=*/3,
+                                                   /*reuse_block_size=*/0,
+                                                   /*use_hybrid=*/true,
+                                                   /*cp_rank=*/0,
+                                                   /*cp_size=*/1,
+                                                   /*key_blocks_per_logical_block=*/2,
+                                                   /*cache_key_count=*/6);
+    const auto decode_plan = DecodeRpcServer::buildGroupLoadPlan(policy,
+                                                                 /*local_block_num=*/3,
+                                                                 /*cache_key_count=*/6,
+                                                                 /*reuse_block_size=*/0,
+                                                                 /*use_hybrid=*/true,
+                                                                 /*group_seq_size_per_block=*/2,
+                                                                 /*base_seq_size_per_block=*/1);
+
+    EXPECT_EQ(keyOffsetPairs(producer_plan), (KeyOffsetPairs{{1, 0}, {3, 1}, {5, 2}}));
+    EXPECT_EQ(keyOffsetPairs(decode_plan), keyOffsetPairs(producer_plan));
+}
+
+TEST(DecodeRpcServerTest, HeterogeneousPartialBlockUsesLastAvailableKey) {
+    const auto policy = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    const auto producer_plan = buildCacheStorePlan(policy,
+                                                   /*total_logical_blocks=*/3,
+                                                   /*reuse_block_size=*/0,
+                                                   /*use_hybrid=*/true,
+                                                   /*cp_rank=*/0,
+                                                   /*cp_size=*/1,
+                                                   /*key_blocks_per_logical_block=*/2,
+                                                   /*cache_key_count=*/5);
+    const auto decode_plan = DecodeRpcServer::buildGroupLoadPlan(policy,
+                                                                 /*local_block_num=*/3,
+                                                                 /*cache_key_count=*/5,
+                                                                 /*reuse_block_size=*/0,
+                                                                 /*use_hybrid=*/true,
+                                                                 /*group_seq_size_per_block=*/2,
+                                                                 /*base_seq_size_per_block=*/1);
+
+    EXPECT_EQ(keyOffsetPairs(producer_plan), (KeyOffsetPairs{{1, 0}, {3, 1}, {4, 2}}));
+    EXPECT_EQ(keyOffsetPairs(decode_plan), keyOffsetPairs(producer_plan));
+}
+
 TEST(DecodeRpcServerTest, CompactStateGroupLoadsGlobalTailKeysIntoCanonicalSlots) {
     // 11 logical blocks under prefill CP=2 compact into a 6-slot state table:
     // slot j covers logical blocks [2j, 2j+1], so the two active tail slots 4 and
