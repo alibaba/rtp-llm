@@ -652,6 +652,8 @@ TEST(CacheConfigCreatorTest, BasicConfigUsesModelDefaultPhysicalAndKernelBlockSi
 TEST(CacheConfigCreatorTest, DecoupledPhysicalSpecStrideAndKernelViewUsePerGroupBpk) {
     ParallelismConfig pc;
     auto              mc = makeProModelConfig();
+    mc.attn_config.tokens_per_block        = 16384;
+    mc.attn_config.kernel_tokens_per_block = 128;
     KVCacheConfig     kv_cache_config;
     kv_cache_config.seq_size_per_block        = 16384;
     kv_cache_config.kernel_seq_size_per_block = 128;
@@ -1190,6 +1192,8 @@ TEST(CacheConfigTest, DSV4HybridPoolRuntimeConfigAllowsDecoupledPhysicalAndKerne
     runtime_config.fifo_scheduler_config.max_context_batch_size = 1;
 
     auto create_config = [&](int seq_size_per_block, int kernel_seq_size_per_block) {
+        mc.attn_config.tokens_per_block        = seq_size_per_block;
+        mc.attn_config.kernel_tokens_per_block = kernel_seq_size_per_block;
         KVCacheConfig kv_cache_config;
         kv_cache_config.seq_size_per_block        = seq_size_per_block;
         kv_cache_config.kernel_seq_size_per_block = kernel_seq_size_per_block;
@@ -1220,6 +1224,8 @@ TEST(CacheConfigTest, DSV4HybridPoolRuntimeConfigRejectsInvalidKernelShape) {
     runtime_config.fifo_scheduler_config.max_context_batch_size = 1;
 
     auto create_config = [&](int seq_size_per_block, int kernel_seq_size_per_block) {
+        mc.attn_config.tokens_per_block        = seq_size_per_block;
+        mc.attn_config.kernel_tokens_per_block = kernel_seq_size_per_block;
         KVCacheConfig kv_cache_config;
         kv_cache_config.seq_size_per_block        = seq_size_per_block;
         kv_cache_config.kernel_seq_size_per_block = kernel_seq_size_per_block;
@@ -1684,6 +1690,10 @@ TEST(CacheConfigTest, DSV4MtpKeepsProposeLayerInSwaPool) {
     auto propose_model_config                       = makeFlashMtpModelConfig();
     score_model_config.attn_config.kv_cache_dtype   = KvCacheDataType::FP8;
     propose_model_config.attn_config.kv_cache_dtype = KvCacheDataType::FP8;
+    score_model_config.attn_config.tokens_per_block          = 16384;
+    score_model_config.attn_config.kernel_tokens_per_block   = 128;
+    propose_model_config.attn_config.tokens_per_block        = 16384;
+    propose_model_config.attn_config.kernel_tokens_per_block = 128;
 
     ParallelismConfig parallelism_config;
     RuntimeConfig     runtime_config;

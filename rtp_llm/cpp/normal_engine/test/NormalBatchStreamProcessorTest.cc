@@ -504,6 +504,13 @@ TEST_F(NormalBatchStreamProcessorTest, testDeviceStateFastPathWaitsForBlockingLo
     ModelConfig     model_config;
     model_config.max_seq_len = 128;
     model_config.vocab_size  = 128900;
+    model_config.num_layers                   = 1;
+    model_config.data_type                    = DataType::TYPE_FP16;
+    model_config.attn_config.head_num         = 1;
+    model_config.attn_config.kv_head_num      = 1;
+    model_config.attn_config.size_per_head    = 8;
+    model_config.attn_config.tokens_per_block = 8;
+    model_config.kv_cache_spec_descs          = {{KVCacheSpecDesc{"default", KVCacheSpecType::MultiHeadAttention}}};
     RuntimeConfig runtime_config;
 
     std::shared_ptr<GenerateInput> query          = make_shared<GenerateInput>();
@@ -547,6 +554,13 @@ TEST_F(NormalBatchStreamProcessorTest, testDeviceStateFastPathAllowsAsyncLogitsP
     ModelConfig     model_config;
     model_config.max_seq_len = 128;
     model_config.vocab_size  = 128900;
+    model_config.num_layers                   = 1;
+    model_config.data_type                    = DataType::TYPE_FP16;
+    model_config.attn_config.head_num         = 1;
+    model_config.attn_config.kv_head_num      = 1;
+    model_config.attn_config.size_per_head    = 8;
+    model_config.attn_config.tokens_per_block = 8;
+    model_config.kv_cache_spec_descs          = {{KVCacheSpecDesc{"default", KVCacheSpecType::MultiHeadAttention}}};
     RuntimeConfig runtime_config;
 
     std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
