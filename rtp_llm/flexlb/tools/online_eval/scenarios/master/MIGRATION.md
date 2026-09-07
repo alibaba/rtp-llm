@@ -152,7 +152,7 @@ original scanning MCP envelope remains unavailable. This is selected-instance
 runtime acceptance, not full-family acceptance.
 
 
-`RUNTIME_COVERAGE.json` tracks all 25 exact instance IDs separately. The remaining
+`../../migration/master_runtime_coverage.json` tracks all 25 exact instance IDs separately. The remaining
 23 instances are assigned to agent1 in four sequential single-lane profile groups
 (8 batch-window, 5 each other profile), using the same fixed 5aff source. Assignment
 and passing dry-runs are not runtime PASS. Business failures retain their original
