@@ -7,23 +7,24 @@
 #include <torch/extension.h>
 
 #include "rtp_llm/cpp/cache/connector/p2p/LayerBlockConverter.h"
-#include "rtp_llm/cpp/cache/KVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/CoordinatorCacheManager.h"
 #include "rtp_llm/cpp/cache/BlockInfo.h"
 
 namespace rtp_llm {
 
 class LayerBlockConverterImpl: public LayerBlockConverter {
 public:
-    explicit LayerBlockConverterImpl(const std::shared_ptr<KVCacheAllocator>& allocator): allocator_(allocator) {}
+    explicit LayerBlockConverterImpl(const std::shared_ptr<CoordinatorCacheManager>& coordinator_cache_manager):
+        coordinator_cache_manager_(coordinator_cache_manager) {}
 
-    std::vector<BlockInfo> convertIndexToBufferByTag(
+    std::vector<BlockInfo> convertIndexToBuffer(
         int layer_id, const std::string& tag, int block_id, int partition_count, int partition_id) const override {
         return filterValid(
-            allocator_->convertIndexToBufferByTag(layer_id, tag, block_id, partition_count, partition_id));
+            coordinator_cache_manager_->convertIndexToBuffer(layer_id, tag, block_id, partition_count, partition_id));
     }
 
     std::vector<std::pair<BlockInfo, size_t>> getAllBuffers() const override {
-        const auto                                layout = allocator_->allLayerCacheBase();
+        const auto                                layout = coordinator_cache_manager_->allLayerCacheBase();
         std::vector<std::pair<BlockInfo, size_t>> result;
         using BufferKey = std::tuple<uintptr_t, size_t, bool, int32_t, int32_t>;
         std::set<BufferKey> seen;
@@ -73,7 +74,7 @@ private:
         return result;
     }
 
-    std::shared_ptr<KVCacheAllocator> allocator_;
+    std::shared_ptr<CoordinatorCacheManager> coordinator_cache_manager_;
 };
 
 }  // namespace rtp_llm

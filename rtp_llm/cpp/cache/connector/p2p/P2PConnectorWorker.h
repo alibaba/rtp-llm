@@ -1,6 +1,7 @@
 #pragma once
 
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
+#include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorConfig.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorWorkerPrefill.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorWorkerDecode.h"
@@ -21,6 +22,7 @@ namespace rtp_llm {
 class P2PConnectorWorker {
 public:
     P2PConnectorWorker(P2PConnectorWorkerConfig                    config,
+                       const CacheConfig&                          cache_config,
                        const std::shared_ptr<LayerBlockConverter>& layer_block_converter,
                        const kmonitor::MetricsReporterPtr&         metrics_reporter);
     ~P2PConnectorWorker();
@@ -53,6 +55,7 @@ public:
 
 private:
     P2PConnectorWorkerConfig             config_;
+    const CacheConfig                    cache_config_;
     std::shared_ptr<LayerBlockConverter> layer_block_converter_;
     kmonitor::MetricsReporterPtr         metrics_reporter_;
 

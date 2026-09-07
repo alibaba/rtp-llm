@@ -7,6 +7,7 @@ from unittest import TestCase
 from unittest.mock import patch
 
 from rtp_llm.config.engine_config import EngineConfig, setup_pd_sep_config
+from rtp_llm.config.model_config import ModelConfig, build_model_config
 from rtp_llm.config.py_config_modules import PyEnvConfigs, ServerConfig
 from rtp_llm.config.server_config_setup import (
     set_parallelism_config,
@@ -57,6 +58,78 @@ class ServerConfigPortLayoutTest(TestCase):
 
 
 class GenerateConfigTest(TestCase):
+
+    @patch.dict("os.environ", _jit_env(), clear=True)
+    def test_setup_materializes_platform_sequence_block_size_default(self):
+        from rtp_llm.config.server_config_setup import setup_default_args
+
+        for device_path, expected in (
+            (None, 64),
+            ("/dev/kfd", 16),
+            ("/dev/alixpu", 256),
+        ):
+            with self.subTest(device_path=device_path):
+                configs = PyEnvConfigs()
+                configs.model_args.model_type = "fake_model"
+                with patch(
+                    "rtp_llm.config.server_config_setup.os.path.exists",
+                    side_effect=lambda path, selected=device_path: path == selected,
+                ):
+                    setup_default_args(configs)
+                self.assertEqual(
+                    configs.kv_cache_config.seq_size_per_block, expected
+                )
+
+        explicit = PyEnvConfigs()
+        explicit.model_args.model_type = "fake_model"
+        explicit.kv_cache_config.seq_size_per_block = 128
+        with patch(
+            "rtp_llm.config.server_config_setup.os.path.exists", return_value=True
+        ):
+            setup_default_args(explicit)
+        self.assertEqual(explicit.kv_cache_config.seq_size_per_block, 128)
+
+    def _build_block_sizes(
+        self,
+        model_tokens_per_block: int,
+        configured_tokens_per_block: int = 0,
+        configured_kernel_tokens_per_block: int = 0,
+    ):
+        configs = PyEnvConfigs()
+        configs.kv_cache_config.seq_size_per_block = configured_tokens_per_block
+        configs.kv_cache_config.kernel_seq_size_per_block = (
+            configured_kernel_tokens_per_block
+        )
+        model_config = ModelConfig()
+        model_config.attn_config.tokens_per_block = model_tokens_per_block
+
+        build_model_config(
+            model_config,
+            configs.model_args,
+            configs.kv_cache_config,
+            configs.profiling_debug_logging_config,
+        )
+        return (
+            model_config.attn_config.tokens_per_block,
+            model_config.attn_config.kernel_tokens_per_block,
+        )
+
+    def test_build_model_config_copies_sequence_block_sizes(self):
+        cases = (
+            (128, 64, 0, (64, 64)),
+            (128, 256, 0, (256, 256)),
+            (128, 256, 32, (256, 32)),
+        )
+        for model_size, configured_size, kernel_size, expected in cases:
+            with self.subTest(
+                model_size=model_size,
+                configured_size=configured_size,
+                kernel_size=kernel_size,
+            ):
+                self.assertEqual(
+                    self._build_block_sizes(model_size, configured_size, kernel_size),
+                    expected,
+                )
 
     @patch.dict(
         "os.environ",

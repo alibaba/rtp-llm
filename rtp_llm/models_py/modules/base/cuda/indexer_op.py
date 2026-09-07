@@ -7,7 +7,7 @@ from torch import nn
 
 from rtp_llm.models_py.distributed.collective_torch import Group, all_gather, barrier
 from rtp_llm.models_py.kernels.cuda.fp8_kernel import sgl_per_token_group_quant_fp8
-from rtp_llm.ops.compute_ops import KVCache, rtp_llm_ops
+from rtp_llm.ops.compute_ops import LayerKVCache, rtp_llm_ops
 
 # Try to import CUDA dependencies, but don't fail if running on CPU
 try:
@@ -104,6 +104,29 @@ class IndexerOp(nn.Module):
         self.block_size = block_size
         self.scale_fmt = scale_fmt
         self.is_neox_style = is_neox_style
+
+    def _indexer_cache_view(self, kv_cache: LayerKVCache) -> torch.Tensor:
+        entry_elems = self.index_head_dim + self.index_head_dim // self.block_size * 4
+        if kv_cache.seq_size_per_block != self.blocksize:
+            raise RuntimeError(
+                "indexer cache page geometry mismatch: "
+                f"cache page={kv_cache.seq_size_per_block}, kernel page={self.blocksize}"
+            )
+
+        cache = kv_cache.kv_cache_base
+        expected_page_elems = self.blocksize * entry_elems
+        if (
+            cache.dtype != torch.uint8
+            or not cache.is_contiguous()
+            or cache.dim() != 2
+            or cache.size(1) != expected_page_elems
+        ):
+            raise RuntimeError(
+                "indexer cache kernel-page layout mismatch: expected contiguous uint8 "
+                f"[pages, {expected_page_elems}], got dtype={cache.dtype}, "
+                f"shape={tuple(cache.shape)}"
+            )
+        return cache.view(cache.size(0), self.blocksize, entry_elems)
 
     def apply_rope_and_rotate_q_k(
         self,
@@ -225,7 +248,7 @@ class IndexerOp(nn.Module):
     def quant_k_only(
         self,
         key: torch.Tensor,
-        kv_cache: KVCache,
+        kv_cache: LayerKVCache,
         slot_mapping: torch.Tensor,
     ) -> None:
         """
@@ -233,13 +256,13 @@ class IndexerOp(nn.Module):
 
         Args:
             key: Key tensor in BF16/FP16 [num_tokens, index_head_dim]
-            kv_cache: KV cache object with kv_scale_base
+            kv_cache: Opaque indexer cache for the current layer
             slot_mapping: Physical slot indices [num_tokens]
         """
         assert kv_cache is not None, "kv_cache is required"
         rtp_llm_ops.indexer_k_quant_and_cache(
             key,  # Original key in BF16/FP16 [num_tokens, index_head_dim]
-            kv_cache.kv_scale_base,  # [num_blocks, block_size, cache_stride]
+            self._indexer_cache_view(kv_cache),
             slot_mapping,  # [num_tokens] physical slot indices
             self.block_size,  # quantization block size (128)
             self.scale_fmt,  # "ue8m0" for power-of-2 scaling
@@ -249,7 +272,7 @@ class IndexerOp(nn.Module):
         self,
         query: torch.Tensor,
         key: torch.Tensor,
-        kv_cache: KVCache,
+        kv_cache: LayerKVCache,
         slot_mapping: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
@@ -286,7 +309,7 @@ class IndexerOp(nn.Module):
         assert kv_cache is not None, "kv_cache is required"
         rtp_llm_ops.indexer_k_quant_and_cache(
             key,  # Original key in BF16/FP16 [num_tokens, index_head_dim]
-            kv_cache.kv_scale_base,  # [num_blocks, block_size, cache_stride]
+            self._indexer_cache_view(kv_cache),
             slot_mapping,  # [num_tokens] physical slot indices
             self.block_size,  # quantization block size (128)
             self.scale_fmt,  # "ue8m0" for power-of-2 scaling
@@ -298,7 +321,7 @@ class IndexerOp(nn.Module):
         self,
         query: torch.Tensor,
         key: torch.Tensor,
-        kv_cache: KVCache,
+        kv_cache: LayerKVCache,
         slot_mapping: torch.Tensor,
         kv_restore_unpad_indices: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -327,7 +350,7 @@ class IndexerOp(nn.Module):
 
         rtp_llm_ops.indexer_k_quant_and_cache(
             restored_key,
-            kv_cache.kv_scale_base,
+            self._indexer_cache_view(kv_cache),
             slot_mapping,
             self.block_size,
             self.scale_fmt,
@@ -351,7 +374,7 @@ class IndexerOp(nn.Module):
         self,
         q_fp8: torch.Tensor,
         weights: torch.Tensor,
-        kv_cache: KVCache,
+        kv_cache: LayerKVCache,
         fmha_params: Any,
         attention_inputs: Any,
     ) -> torch.Tensor:
@@ -371,7 +394,7 @@ class IndexerOp(nn.Module):
         from rtp_llm.models_py.kernels.cuda.fast_topk import fast_topk_transform_fused
 
         weights = weights.view(-1, self.index_n_heads)
-        kv_cache_fp8 = kv_cache.kv_scale_base
+        kv_cache_fp8 = self._indexer_cache_view(kv_cache)
 
         num_heads_kv = 1
         head_dim_with_sf = (
@@ -379,7 +402,7 @@ class IndexerOp(nn.Module):
         )
         kv_cache_fp8 = kv_cache_fp8.view(
             kv_cache_fp8.shape[0], self.blocksize, num_heads_kv, head_dim_with_sf
-        ).view(dtype=torch.uint8)
+        )
 
         max_seq_len = (
             attention_inputs.kv_cache_kernel_block_id_device.shape[1] * self.blocksize
@@ -423,7 +446,7 @@ class IndexerOp(nn.Module):
         self,
         q_fp8: torch.Tensor,
         weights: torch.Tensor,
-        kv_cache: KVCache,
+        kv_cache: LayerKVCache,
         fmha_params: Any,
         attention_inputs: Any,
     ) -> torch.Tensor:
@@ -459,7 +482,7 @@ class IndexerOp(nn.Module):
         )
 
         rtp_llm_ops.cp_gather_indexer_k_quant_cache(
-            kv_cache.kv_scale_base,  # [num_blocks, block_size, cache_stride]
+            self._indexer_cache_view(kv_cache),
             k_fp8,  # output [num_tokens, index_head_dim]
             k_scale,  # output [num_tokens, scale_size]
             attention_inputs.kv_cache_kernel_block_id_device,  # [batch_size, num_blocks]
@@ -507,7 +530,7 @@ class IndexerOp(nn.Module):
         self,
         q_fp8: torch.Tensor,
         weights: torch.Tensor,
-        kv_cache: KVCache,
+        kv_cache: LayerKVCache,
         fmha_params: Any,
         attention_inputs: Any,
         total_local_ids: torch.Tensor,
@@ -569,7 +592,7 @@ class IndexerOp(nn.Module):
             device=device,
         )
         rtp_llm_ops.cp_gather_indexer_k_quant_cache(
-            kv_cache.kv_scale_base,
+            self._indexer_cache_view(kv_cache),
             k_fp8,
             k_scale,
             attention_inputs.kv_cache_kernel_block_id_device,
@@ -603,9 +626,12 @@ class IndexerOp(nn.Module):
 
         if total_local_ids.size(0) > 0:
             topk = run_part_logits_topk(
-                q0, weights_sq0,
-                precomputed_ks, precomputed_ke,
-                precomputed_lengths, precomputed_topk_off,
+                q0,
+                weights_sq0,
+                precomputed_ks,
+                precomputed_ke,
+                precomputed_lengths,
+                precomputed_topk_off,
             )
         else:
             topk = None

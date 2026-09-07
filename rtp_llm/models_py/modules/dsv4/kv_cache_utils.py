@@ -4,8 +4,8 @@ This module owns two things:
 
 1. The canonical DSV4 cache-group **tags**. The framework KV cache API is
    tag-driven: a cache group is identified by a string tag ("swa_kv",
-   "csa_kv", ...) which is the same string used by ``CacheConfig`` /
-   ``CacheTopology`` on the C++ side, by ``KVCache.get_layer_cache(layer, tag)``
+   "csa_kv", ...) which is the same string used by ``CacheConfig`` ownership
+   on the C++ side, by ``KVCache.get_layer_cache(layer, tag)``
    / ``KVCache.get_seq_size_per_block(tag)``, and as the key of
    ``PyModelInputs.attention_inputs`` when the model owns several groups.
    These constants replace the old int ``attn_type`` ids that mirrored the
@@ -30,7 +30,7 @@ import torch
 # ---------------------------------------------------------------------------
 # Canonical cache-group tags. These are the *consumer* side of the tags that
 # ``rtp_llm/models/dsv4_kv_cache.py`` (``CSA_KV_TAG`` ... ``SWA_KV_TAG``) hands
-# to ``ModelConfig.kv_cache_spec_descs`` and that CacheConfig/CacheTopology then
+# to ``ModelConfig.kv_cache_spec_descs`` and that CacheConfig then
 # publishes as ``KVCache.group_tags``. They are duplicated rather than imported
 # on purpose: ``rtp_llm.models.dsv4_kv_cache`` pulls in ``rtp_llm.ops`` (the
 # compiled .so), while this module must stay importable from kernel-level code
@@ -71,7 +71,11 @@ def kv_tag_for_compress_ratio(ratio: int) -> Optional[str]:
 
 
 def group_tags(kv_cache: Optional[Any]) -> List[str]:
-    """Framework group tags in topology group-id order (``[]`` when absent)."""
+    """Framework cache group tags in canonical sorted order (``[]`` when absent).
+
+    The list is a set of semantic identities; a position in it never identifies a
+    cache group.
+    """
     if kv_cache is None:
         return []
     tags = getattr(kv_cache, "group_tags", None)
@@ -80,11 +84,11 @@ def group_tags(kv_cache: Optional[Any]) -> List[str]:
     return [str(tag) for tag in tags]
 
 
-def as_attention_inputs_by_tag(
+def as_attention_inputs_by_group(
     attention_inputs: Any,
     kv_cache: Optional[Any] = None,
 ) -> Dict[str, Any]:
-    """Normalize ``attention_inputs`` into a ``{tag: PyAttentionInputs}`` dict.
+    """Normalize ``attention_inputs`` into a group-input dict keyed by tag.
 
     ``attention_inputs`` may be
 
@@ -116,7 +120,7 @@ def primary_attention_inputs(
 ) -> Optional[Any]:
     """Return the per-forward inputs carrying the group-invariant fields.
 
-    Every tagged entry is a copy of the same common ``PyAttentionInputs``
+    Every group entry is a copy of the same common ``PyAttentionInputs``
     (``PyWrappedModel::setupKVCacheForAttentionInputs`` clones it per group and
     only overwrites the block-table fields), so any entry is a valid source for
     ``cu_seqlens`` / ``input_lengths`` / ``sequence_lengths`` /
@@ -142,10 +146,10 @@ def primary_attention_inputs(
     return next(iter(attention_inputs.values()))
 
 
-def _block_table_for_tag(tagged_inputs: Any) -> Optional[torch.Tensor]:
-    if tagged_inputs is None:
+def _block_table_for_group(group_inputs: Any) -> Optional[torch.Tensor]:
+    if group_inputs is None:
         return None
-    block_table = getattr(tagged_inputs, "kv_cache_kernel_block_id_device", None)
+    block_table = getattr(group_inputs, "kv_cache_kernel_block_id_device", None)
     if block_table is None or block_table.numel() == 0:
         return None
     return block_table
@@ -157,15 +161,15 @@ def _build_block_tables(
     batch_slice: Optional[slice],
     keep_tags: Optional[Iterable[str]] = None,
 ) -> Optional[Dict[str, torch.Tensor]]:
-    by_tag = as_attention_inputs_by_tag(attention_inputs, kv_cache)
-    if not by_tag:
+    inputs_by_group = as_attention_inputs_by_group(attention_inputs, kv_cache)
+    if not inputs_by_group:
         return None
     wanted = None if keep_tags is None else set(keep_tags)
     block_tables: Dict[str, torch.Tensor] = {}
-    for tag, tagged_inputs in by_tag.items():
+    for tag, group_inputs in inputs_by_group.items():
         if wanted is not None and tag not in wanted:
             continue
-        block_table = _block_table_for_tag(tagged_inputs)
+        block_table = _block_table_for_group(group_inputs)
         if block_table is None:
             continue
         block_tables[tag] = (

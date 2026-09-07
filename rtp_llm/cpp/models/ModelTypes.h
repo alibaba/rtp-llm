@@ -13,6 +13,7 @@
 #include <string>
 #include <utility>
 #include <memory>
+#include <vector>
 
 namespace rtp_llm {
 
@@ -47,11 +48,9 @@ struct GptModelInitParams {
     ConcurrencyConfig                            concurrency_config;
     SpeculativeExecutionConfig                   sp_config;
     DeviceResourceConfig                         device_resource_config;
-    MlaOpsType                                   mla_ops_type            = MlaOpsType::AUTO;
-    int64_t                                      max_seq_len             = 0;
-    int64_t                                      hidden_size             = 0;
-    size_t                                       tokens_per_block        = 0;
-    size_t                                       kernel_tokens_per_block = 0;
+    MlaOpsType                                   mla_ops_type = MlaOpsType::AUTO;
+    int64_t                                      max_seq_len  = 0;
+    int64_t                                      hidden_size  = 0;
     std::shared_ptr<KVCacheManager>              cache_manager;
     // nullopt selects the main-model cache config; otherwise selects this MTP module config.
     std::optional<int> mtp_cache_config_index;
@@ -61,6 +60,13 @@ struct GptModelInitParams {
     // makeFakeSPOutputBuffer (MtpExecutor.cc) and CudaGraphRunner
     // input_hiddens.
     int64_t hc_mult = 1;
+    // Fallback block geometry for cacheless CUDA-graph prefill. Cache-backed
+    // graphs derive the same values from CacheConfig.
+    size_t tokens_per_block        = 0;
+    size_t kernel_tokens_per_block = 0;
+    // Cache routing topology remains available during cacheless prefill warm-up,
+    // where no KVCacheManager or block table exists yet.
+    std::vector<std::string> kv_cache_group_tags;
 };
 
 enum GptModelInputIndex : size_t {

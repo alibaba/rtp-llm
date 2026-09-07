@@ -56,8 +56,8 @@ from rtp_llm.models_py.modules.dsv4.moe.moe_layer import (
 )
 from rtp_llm.models_py.modules.dsv4.prefill.forward import forward_prefill
 from rtp_llm.models_py.modules.dsv4.transformer import V4Args, V4Transformer
-from rtp_llm.utils.warmup import model_warm_up_enabled
 from rtp_llm.ops import RoleType
+from rtp_llm.utils.warmup import model_warm_up_enabled
 
 
 def _materialize_meta_buffers(module: torch.nn.Module, device: str) -> int:
@@ -86,24 +86,14 @@ from rtp_llm.ops.compute_ops import PyModelInitResources, PyModelInputs, PyModel
 
 
 def _is_decode_fmha(fmha_impl: Any) -> bool:
-    """True when ``fmha_impl`` is one of the dsv4 captured decode impls.
-    Imports are lazy so missing FP8 builds don't bring the module down."""
+    """True when ``fmha_impl`` is the DSV4 captured decode implementation."""
     if fmha_impl is None:
         return False
-    from rtp_llm.models_py.modules.dsv4.decode.decode_fmha_impl import (
-        DSv4DecodeFmhaImpl,
+    from rtp_llm.models_py.modules.dsv4.fp8.decode.decode_fmha_impl import (
+        DSv4DecodeFmhaImplFP8,
     )
 
-    decode_types: tuple = (DSv4DecodeFmhaImpl,)
-    try:
-        from rtp_llm.models_py.modules.dsv4.fp8.decode.decode_fmha_impl import (
-            DSv4DecodeFmhaImplFP8,
-        )
-
-        decode_types = (DSv4DecodeFmhaImpl, DSv4DecodeFmhaImplFP8)
-    except ImportError:
-        pass
-    return isinstance(fmha_impl, decode_types)
+    return isinstance(fmha_impl, DSv4DecodeFmhaImplFP8)
 
 
 @dataclass(frozen=True)
@@ -231,8 +221,13 @@ def _args_from_model_config(
     from rtp_llm.ops import KvCacheDataType, RoleType
 
     attn_config = model_config.attn_config
+    if attn_config.kv_cache_dtype != KvCacheDataType.FP8:
+        raise ValueError(
+            "DeepSeek-V4 currently supports only FP8 KV cache; "
+            "enable fp8_kv_cache. "
+            f"kv_cache_dtype={attn_config.kv_cache_dtype}"
+        )
     rope_config = attn_config.rope_config
-    fp8_kv_cache = attn_config.kv_cache_dtype == KvCacheDataType.FP8
     return V4Args(
         vocab_size=model_config.vocab_size,
         dim=model_config.hidden_size,
@@ -281,7 +276,7 @@ def _args_from_model_config(
         # max_seq_len is the safest per-rank upper bound (one long prefill
         # fully on one rank) — the buffer is allocated once and reused.
         max_tokens_per_rank=int(model_config.max_seq_len) or 4096,
-        fp8_kv_cache=fp8_kv_cache,
+        fp8_kv_cache=True,
     )
 
 
@@ -1062,7 +1057,7 @@ class DeepSeekV4Model(GptModelBase):
     def prepare_fmha_impl(
         self, inputs: PyModelInputs, is_cuda_graph: bool = False
     ) -> Any:
-        """Return a ``DSv4DecodeFmhaImpl`` for decode CUDA-graph capture; None otherwise.
+        """Return the FP8 decode FMHA impl for CUDA-graph capture; None otherwise.
 
         Prefill runs eagerly (no graph). Decode uses its own sparse/compressed
         attention; the impl owns persistent metadata buffers updated in place
@@ -1094,27 +1089,12 @@ class DeepSeekV4Model(GptModelBase):
             )
             return None
 
-        if is_target_verify and not self.fp8_kv_cache:
-            # Per REFORMAT_FINAL.md A2: BF16 verify intentionally unsupported
-            # in this scope (BF16 decode attention still has q_len==1
-            # assumptions). The eager path's assert is the load-bearing one;
-            # under cudagraph we just refuse the impl.
-            return None
-
-        if self.fp8_kv_cache:
-            from rtp_llm.models_py.modules.dsv4.fp8.decode.decode_fmha_impl import (
-                DSv4DecodeFmhaImplConfigFP8 as _DecodeFmhaImplConfig,
-            )
-            from rtp_llm.models_py.modules.dsv4.fp8.decode.decode_fmha_impl import (
-                DSv4DecodeFmhaImplFP8 as _DecodeFmhaImpl,
-            )
-        else:
-            from rtp_llm.models_py.modules.dsv4.decode.decode_fmha_impl import (
-                DSv4DecodeFmhaImpl as _DecodeFmhaImpl,
-            )
-            from rtp_llm.models_py.modules.dsv4.decode.decode_fmha_impl import (
-                DSv4DecodeFmhaImplConfig as _DecodeFmhaImplConfig,
-            )
+        from rtp_llm.models_py.modules.dsv4.fp8.decode.decode_fmha_impl import (
+            DSv4DecodeFmhaImplConfigFP8 as _DecodeFmhaImplConfig,
+        )
+        from rtp_llm.models_py.modules.dsv4.fp8.decode.decode_fmha_impl import (
+            DSv4DecodeFmhaImplFP8 as _DecodeFmhaImpl,
+        )
 
         batch_size = (
             int(attn.input_lengths.size(0)) if attn.input_lengths.numel() > 0 else 1
@@ -1132,9 +1112,10 @@ class DeepSeekV4Model(GptModelBase):
         paged_pool_specs = build_paged_pool_specs(
             self.kv_cache, self.v4, max_seq_len=int(self._v4_args.max_seq_len)
         )
-        # Snapshot framework's group ordering — CUDA-graph replay path
-        # inside the impl's ``prepare`` has no live kv_cache, so carry
-        # the list in the config. Position IS the topology group id.
+        # Snapshot the framework's cache tags — the CUDA-graph replay path
+        # inside the impl's ``prepare`` has no live kv_cache, so carry the
+        # list in the config. It is a set of semantic identities in canonical
+        # sorted order; a position in it identifies nothing.
         group_tags_snapshot = (
             [str(tag) for tag in (self.kv_cache.group_tags or [])]
             if self.kv_cache is not None

@@ -1163,11 +1163,10 @@ bool GenerateStream::updateKvCacheBlocks(const torch::Tensor& src_batch_indices)
     std::vector<int> block_src_batch(data, data + src_batch_indices.numel());
     RTP_LLM_CHECK(block_src_batch.size() == currentBatchSize());
 
-    // NOTE: `1` is used here as updateKvCacheBlocks is called after updateOutput,
-    // in which the seqLength has already increased
-    bool is_seq_len_misaligned = seqLength() % seqSizePerBlock() != 1;
-
-    return stream_cache_resource_->updateKVBlock(block_src_batch, is_seq_len_misaligned);
+    // updateKvCacheBlocks is called after updateOutput, so remove the newly
+    // appended token before evaluating each cache group's physical tail.
+    const int previous_seq_len = seqLength() - 1;
+    return stream_cache_resource_->updateKVBlock(block_src_batch, previous_seq_len);
 }
 
 std::optional<ErrorInfo> GenerateStream::updateNormalLogitProcessorStatus(const StreamUpdateInfo& update_info) {

@@ -21,7 +21,7 @@
 
 namespace rtp_llm {
 
-class KVCacheAllocator;
+class CoordinatorCacheManager;
 class RemoteAsyncMatchContext;
 class RemoteConnectorAsyncContext;
 
@@ -34,10 +34,12 @@ public:
                     const SpeculativeExecutionConfig&         sp_config,
                     void*                                     register_buffer_addr,
                     size_t                                    register_buffer_size,
-                    std::shared_ptr<KVCacheAllocator>         allocator,
+                    std::shared_ptr<CoordinatorCacheManager>  coordinator_cache_manager,
                     const kmonitor::MetricsReporterPtr        metrics_reporter = nullptr,
                     const std::map<std::string, std::string>& lora_info_map    = {});
     ~RemoteConnector() override;
+
+    static void validateConfig(const CacheConfig& cache_config);
 
     bool init();
 
@@ -101,13 +103,16 @@ private:
     remote_connector::ClientWrapper::ConfigMap genClientConfig();
     std::pair<std::shared_ptr<RemoteConnectorConfig::LocationSpecInfoMap>,
               std::shared_ptr<RemoteConnectorConfig::LocationSpecGroups>>
-         genLocationSpecInfoMapAndGroups(int64_t tp_size);
-    void printInfo() const;
-    int  SetCudaDeviceOnce() const;
+           genLocationSpecInfoMapAndGroups(int64_t tp_size);
+    void   printInfo() const;
+    int    SetCudaDeviceOnce() const;
+    int    connectorCpSize() const;
+    size_t connectorEntryCount(const KVCacheResource& resource, size_t global_key_blocks) const;
+    size_t globalKeyBlockCount(const KVCacheResource& resource, size_t connector_entries) const;
 
 private:
     struct InitParams {
-        const CacheConfig&                cache_config;
+        const CacheConfig                 cache_config;
         const KVCacheConfig&              kv_cache_config;
         const RuntimeConfig&              runtime_config;
         const ParallelismConfig&          parallelism_config;
@@ -212,6 +217,8 @@ private:
         state_.setState(state);
     }
 
+    // Both counters are global cache-key blocks. `locations_ptr_` remains in
+    // remote connector entry (CP-canonical when projected) coordinates.
     size_t                                       prev_reuse_blocks_num_ = 0;
     size_t                                       matched_block_count_   = 0;
     std::shared_ptr<kv_cache_manager::Locations> locations_ptr_ = std::make_shared<kv_cache_manager::Locations>();

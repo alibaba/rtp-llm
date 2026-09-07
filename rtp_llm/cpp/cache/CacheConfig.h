@@ -7,12 +7,13 @@
 #include <limits>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/cache/KVCacheSpec.h"
-#include "rtp_llm/cpp/cache/CacheTopology.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
@@ -20,97 +21,97 @@
 
 namespace rtp_llm {
 
-// Residency (memory_placement) and budget (charge_to_paged_budget) are independent
-// knobs: CacheConfig::finalizeBlockNums only consults charge_to_paged_budget when it
-// accumulates explicitly_sized_pool_reserve_bytes. A pool that lives on host memory
-// therefore MUST opt out of the paged budget, otherwise its bytes are deducted from
-// the device paged pool it never occupies (silently shrinking the KV cache).
-inline void checkGroupResidencyBudget(const CacheGroupPolicy& policy, const std::string& tag) {
-    RTP_LLM_CHECK_WITH_INFO(
-        !(policy.memory_placement != CacheMemoryPlacement::DEVICE && policy.charge_to_paged_budget),
-        "cache group '%s' is host-resident (memory_placement=%d) but still charges the paged HBM budget; "
-        "host-resident pools must set capacity.charge_to_paged_budget=false",
-        tag.c_str(),
-        static_cast<int>(policy.memory_placement));
-}
+using GroupTag   = std::string;
+using CacheLayer = std::vector<GroupTag>;
+
+struct CacheGroup {
+    std::string                        tag;
+    std::shared_ptr<const KVCacheSpec> spec;
+    CacheGroupPolicy                   policy;
+
+    uint32_t block_num             = 0;
+    uint32_t local_kv_head_num     = 1;
+    size_t   kv_block_stride_bytes = 0;
+    size_t   kv_scale_stride_bytes = 0;
+
+    size_t seqSizePerBlock() const {
+        RTP_LLM_CHECK_WITH_INFO(spec != nullptr, "CacheGroup tag=%s has null spec", tag.c_str());
+        return spec->seq_size_per_block;
+    }
+
+    size_t kernelSeqSizePerBlock() const {
+        RTP_LLM_CHECK_WITH_INFO(spec != nullptr, "CacheGroup tag=%s has null spec", tag.c_str());
+        return spec->kernel_seq_size_per_block;
+    }
+
+    size_t kernelBlocksPerKvBlock() const {
+        const size_t physical = seqSizePerBlock();
+        const size_t kernel   = kernelSeqSizePerBlock();
+        RTP_LLM_CHECK_WITH_INFO(kernel > 0 && physical % kernel == 0,
+                                "group seq_size_per_block(%zu) must be divisible by "
+                                "kernel_seq_size_per_block(%zu), tag=%s",
+                                physical,
+                                kernel,
+                                tag.c_str());
+        return std::max<size_t>(1, physical / kernel);
+    }
+
+    // Boundary block tables use one address per physical block for state/ring
+    // groups; only paged FULL groups expose their kernel-page subdivision.
+    size_t storedKernelBlocksPerKvBlock() const {
+        return policy.group_type == CacheGroupType::FULL ? kernelBlocksPerKvBlock() : 1;
+    }
+
+    uint32_t maxRepresentableBlockNum() const {
+        constexpr uint64_t max_block_idx = static_cast<uint64_t>(std::numeric_limits<int32_t>::max());
+        const uint64_t     ratio         = storedKernelBlocksPerKvBlock();
+        return static_cast<uint32_t>(std::min(max_block_idx, (max_block_idx + 1) / ratio));
+    }
+};
 
 struct CacheConfig {
 private:
-    std::shared_ptr<const CacheTopology> cache_topology;
+    std::vector<CacheGroup>                           groups_;
+    std::vector<CacheLayer>                           layers_;
+    std::unordered_map<std::string, size_t>           tag_to_idx_;
+    std::unordered_map<std::string, std::vector<int>> tag_to_layer_ids_;
+
+    static void validateAndBuildIndex(std::vector<CacheGroup>&                           groups,
+                                      const std::vector<CacheLayer>&                     layers,
+                                      std::unordered_map<std::string, size_t>&           tag_to_idx,
+                                      std::unordered_map<std::string, std::vector<int>>& tag_to_layer_ids);
 
 public:
-    std::vector<int> layer_to_block_stride_bytes;
-    bool             group_block_layout_initialized           = false;
-    bool             use_independent_block_pools              = false;
-    bool             use_typed_cache_regions                  = false;
-    bool             use_opaque_kv_cache_store                = false;
-    bool             disable_decode_first_malloc_device_reuse = false;
+    bool use_typed_cache_regions                  = false;
+    bool use_opaque_kv_cache_store                = false;
+    bool disable_decode_first_malloc_device_reuse = false;
 
-    rtp_llm::DataType dtype         = rtp_llm::DataType::TYPE_INVALID;
-    uint32_t          layer_num     = 0;  // the number of main model layers
-    uint32_t          layer_all_num = 0;  // the number of all layers including mtp modules
-    bool              use_mla       = false;
-    bool              is_sparse     = false;
+    rtp_llm::DataType dtype                   = rtp_llm::DataType::TYPE_INVALID;
+    uint32_t          layer_num               = 0;  // the number of main model layers
+    uint32_t          layer_all_num           = 0;  // the number of all layers including mtp modules
+    bool              use_mla                 = false;
+    bool              enable_hybrid_attention = false;
+    bool              is_sparse               = false;
 
     // Block configuration
-    uint32_t block_num                 = 0;
-    size_t   seq_size_per_block        = 1;
-    size_t   kernel_seq_size_per_block = 0;
+    uint32_t block_num          = 0;
+    size_t   seq_size_per_block = 1;
 
-    size_t seqSizePerBlockForGroup(size_t gid) const {
-        return topology().groupById(gid).seq_size_per_block;
+    // How many kernel blocks fit inside one physical block of a cache group.
+    // Derived and validated, so it stays a method; every plain per-group field is
+    // read directly from the tagged group record via group(tag).
+    size_t kernelBlocksPerKvBlock(std::string_view tag) const {
+        return group(tag).kernelBlocksPerKvBlock();
     }
-
-    size_t kernelSeqSizePerBlockForGroup(size_t gid) const {
-        return topology().groupById(gid).kernel_seq_size_per_block;
-    }
-
-    size_t kernelBlocksPerKvBlockForGroup(size_t gid) const {
-        const auto group_seq    = seqSizePerBlockForGroup(gid);
-        const auto group_kernel = kernelSeqSizePerBlockForGroup(gid);
-        if (group_kernel == 0) {
-            return 1;
-        }
-        RTP_LLM_CHECK_WITH_INFO(
-            group_seq % group_kernel == 0,
-            "group seq_size_per_block(%zu) must be divisible by kernel_seq_size_per_block(%zu), gid=%zu",
-            group_seq,
-            group_kernel,
-            gid);
-        return std::max<size_t>(1, group_seq / group_kernel);
-    }
-
-    // Legacy scalar view: how many kernel blocks fit inside one global physical block.
-    size_t kernelBlocksPerKvBlock() const {
-        if (kernel_seq_size_per_block == 0) {
-            return 1;
-        }
-        RTP_LLM_CHECK_WITH_INFO(seq_size_per_block % kernel_seq_size_per_block == 0,
-                                "seq_size_per_block(%zu) must be divisible by kernel_seq_size_per_block(%zu)",
-                                seq_size_per_block,
-                                kernel_seq_size_per_block);
-        return std::max<size_t>(1, seq_size_per_block / kernel_seq_size_per_block);
-    }
-
-    // Block sizing information
-    // ---- Per-block sizes (all layers) ----
-    size_t kv_block_size_bytes = 0;
-    size_t kv_scale_size_bytes = 0;
-    size_t block_size_bytes    = 0;  // (kv + scales together)
-
-    // ---- Per-block strides (one layer) ----
-    size_t kv_block_stride_bytes = 0;
-    size_t kv_scale_stride_bytes = 0;
 
     // Attention-specific configuration
-    int    linear_step     = 1;  // For Linear attention: keep one cache block every `linear_step` blocks
-    int    group_layer_num = 1;  // Number of layers per group for hybrid attention
-    size_t explicitly_sized_pool_reserve_bytes = 0;
+    int linear_step = 1;  // For Linear attention: keep one cache block every `linear_step` blocks
 
     // mtp-model configurations
     std::vector<std::shared_ptr<CacheConfig>> mtp_sub_configs;
 
-    CacheConfig() {}
+    CacheConfig() = default;
+    CacheConfig(std::vector<CacheGroup> new_groups, std::vector<CacheLayer> new_layers, uint32_t main_layer_num);
 
     static uint32_t
     mtpGlobalLayerId(uint32_t main_layer_num, int module_index, uint32_t module_layer_num, int local_layer_id) {
@@ -126,235 +127,71 @@ public:
     }
 
     int groupNums() const {
-        return cache_topology == nullptr ? 0 : static_cast<int>(cache_topology->groups().size());
+        return static_cast<int>(groups_.size());
     }
 
-    const CacheTopology& topology() const {
-        RTP_LLM_CHECK_WITH_INFO(cache_topology != nullptr, "CacheConfig topology is not initialized");
-        return *cache_topology;
+    const std::vector<CacheGroup>& groups() const {
+        return groups_;
     }
 
-    const std::shared_ptr<const CacheTopology>& topologyPtr() const {
-        RTP_LLM_CHECK_WITH_INFO(cache_topology != nullptr, "CacheConfig topology is not initialized");
-        return cache_topology;
+    const std::vector<CacheLayer>& layers() const {
+        return layers_;
     }
 
-    const GroupBase& group(const std::string& tag) const {
-        return topology().group(tag);
+    const CacheGroup&       group(std::string_view tag) const;
+    const CacheLayer&       groupsForLayer(int layer_id) const;
+    const std::vector<int>& groupLayerIds(std::string_view tag) const;
+    const CacheGroup&       groupForLayer(int layer_id, std::string_view tag) const;
+    const CacheGroup&       soleGroupForLayer(int layer_id) const;
+
+    bool hasSingleGlobalGroup() const {
+        return groups_.size() == 1;
+    }
+    bool hasOneGroupPerLayer() const;
+
+    // Total bytes one logical block of a cache group occupies across all of the
+    // group's layers. Derived, so it stays a method.
+    size_t blockSizeBytes(std::string_view tag) const {
+        const auto& group_config = group(tag);
+        RTP_LLM_CHECK_WITH_INFO(group_config.kv_scale_stride_bytes
+                                    <= std::numeric_limits<size_t>::max() - group_config.kv_block_stride_bytes,
+                                "CacheConfig::blockSizeBytes stride overflow tag=%s",
+                                group_config.tag.c_str());
+        const auto stride_bytes = group_config.kv_block_stride_bytes + group_config.kv_scale_stride_bytes;
+        const auto layer_count  = groupLayerIds(tag).size();
+        RTP_LLM_CHECK_WITH_INFO(
+            layer_count == 0 || stride_bytes <= std::numeric_limits<size_t>::max() / layer_count,
+            "CacheConfig::blockSizeBytes layer multiplication overflow tag=%s layers=%zu stride=%zu",
+            group_config.tag.c_str(),
+            layer_count,
+            stride_bytes);
+        return layer_count * stride_bytes;
     }
 
-    CacheTopology::GroupRefs groupsForLayer(int layer_id) const {
-        return topology().groupsForLayer(layer_id);
+    size_t pagedBlockSizeBytes() const;
+    size_t swaBlockSizeBytes() const;
+    size_t explicitlySizedPoolReserveBytes() const;
+    size_t totalGroupBlockSizeBytes() const;
+
+    uint32_t localKvHeadNum(std::string_view tag) const {
+        const auto& group_config = group(tag);
+        RTP_LLM_CHECK_WITH_INFO(group_config.local_kv_head_num > 0,
+                                "CacheConfig::localKvHeadNum invalid local_kv_head_num=%u tag=%s",
+                                group_config.local_kv_head_num,
+                                group_config.tag.c_str());
+        return group_config.local_kv_head_num;
     }
 
-    const GroupBase& groupForLayer(int layer_id, const std::string& tag) const {
-        return topology().groupForLayer(layer_id, tag);
+    uint32_t explicitIndependentBlocks(std::string_view tag) const {
+        return group(tag).policy.explicit_block_num;
     }
 
-    const GroupBase& soleGroupForLayer(int layer_id) const {
-        return topology().soleGroupForLayer(layer_id);
-    }
-
-    const std::shared_ptr<const KVCacheSpec>& specForGroup(size_t gid) const {
-        return topology().groupById(gid).spec;
-    }
-
-    CacheGroupType typeForGroup(size_t gid) const {
-        return topology().groupById(gid).policy.group_type;
-    }
-
-    const std::string& tagForGroup(size_t gid) const {
-        return topology().groupById(gid).tag;
-    }
-
-    int groupIdForTag(const std::string& tag) const {
-        return static_cast<int>(topology().groupIdForTag(tag));
-    }
-
-    const std::vector<int>& layerIdsForGroup(size_t gid) const {
-        return topology().groupById(gid).layer_ids;
-    }
-
-    std::vector<CacheGroupType> groupTypesSnapshot() const {
-        const auto& snapshot = topology().groupTypesSnapshot();
-        return {snapshot.begin(), snapshot.end()};
-    }
-
-    std::vector<KVCacheSpecType> groupSpecTypesSnapshot() const {
-        const auto& snapshot = topology().groupSpecTypesSnapshot();
-        return {snapshot.begin(), snapshot.end()};
-    }
-
-    std::vector<std::string> groupTagsSnapshot() const {
-        const auto& snapshot = topology().groupTagsSnapshot();
-        return {snapshot.begin(), snapshot.end()};
-    }
-
-    std::vector<CacheGroupPolicy> groupPoliciesSnapshot() const {
-        std::vector<CacheGroupPolicy> policies;
-        policies.reserve(topology().groups().size());
-        for (const auto& group : topology().groups()) {
-            policies.push_back(group.policy);
-        }
-        return policies;
-    }
-
-    std::vector<size_t> groupSeqBlockSizesSnapshot() const {
-        std::vector<size_t> values;
-        values.reserve(topology().groups().size());
-        for (size_t gid = 0; gid < topology().groups().size(); ++gid) {
-            values.push_back(seqSizePerBlockForGroup(gid));
-        }
-        return values;
-    }
-
-    std::vector<size_t> groupKernelSeqBlockSizesSnapshot() const {
-        std::vector<size_t> values;
-        values.reserve(topology().groups().size());
-        for (size_t gid = 0; gid < topology().groups().size(); ++gid) {
-            values.push_back(kernelSeqSizePerBlockForGroup(gid));
-        }
-        return values;
-    }
-
-    std::vector<size_t> groupKernelBlocksPerKvBlockSnapshot() const {
-        std::vector<size_t> values;
-        values.reserve(topology().groups().size());
-        for (size_t gid = 0; gid < topology().groups().size(); ++gid) {
-            values.push_back(kernelBlocksPerKvBlockForGroup(gid));
-        }
-        return values;
-    }
-
-    std::vector<uint32_t> groupBlockNumsSnapshot() const {
-        if (!group_block_layout_initialized) {
-            return {};
-        }
-        std::vector<uint32_t> block_nums;
-        block_nums.reserve(topology().groups().size());
-        for (const auto& group : topology().groups()) {
-            block_nums.push_back(group.block_num);
-        }
-        return block_nums;
-    }
-
-    std::vector<size_t> groupBlockSizeBytesSnapshot() const {
-        std::vector<size_t> result;
-        result.reserve(static_cast<size_t>(groupNums()));
-        for (size_t gid = 0; gid < static_cast<size_t>(groupNums()); ++gid) {
-            result.push_back(blockSizeBytesForGroup(gid));
-        }
-        return result;
-    }
-
-    std::vector<size_t> groupKvBlockStrideBytesSnapshot() const {
-        if (!group_block_layout_initialized) {
-            return {};
-        }
-        std::vector<size_t> strides;
-        strides.reserve(topology().groups().size());
-        for (const auto& group : topology().groups()) {
-            strides.push_back(group.kv_block_stride_bytes);
-        }
-        return strides;
-    }
-
-    std::vector<size_t> groupKvScaleStrideBytesSnapshot() const {
-        if (!group_block_layout_initialized) {
-            return {};
-        }
-        std::vector<size_t> strides;
-        strides.reserve(topology().groups().size());
-        for (const auto& group : topology().groups()) {
-            strides.push_back(group.kv_scale_stride_bytes);
-        }
-        return strides;
-    }
-
-    std::vector<std::vector<int>> layerGroupIdsSnapshot() const {
-        const auto& snapshot = topology().layerGroupIdsSnapshot();
-        return {snapshot.begin(), snapshot.end()};
-    }
-
-    std::vector<std::map<std::string, int>> layerTagToGroupIdSnapshot() const {
-        const auto& snapshot = topology().layerTagToGroupIdSnapshot();
-        return {snapshot.begin(), snapshot.end()};
-    }
-
-    uint32_t blockNumForGroup(size_t gid) const {
-        return topology().groupById(gid).block_num;
-    }
-
-    size_t kvBlockStrideBytesForGroup(size_t gid) const {
-        return topology().groupById(gid).kv_block_stride_bytes;
-    }
-
-    size_t kvScaleStrideBytesForGroup(size_t gid) const {
-        return topology().groupById(gid).kv_scale_stride_bytes;
-    }
-
-    size_t blockSizeBytesForGroup(size_t gid) const {
-        return layerIdsForGroup(gid).size() * (kvBlockStrideBytesForGroup(gid) + kvScaleStrideBytesForGroup(gid));
-    }
-
-    uint32_t localKvHeadNumForGroup(size_t gid) const {
-        const auto& group = topology().groupById(gid);
-        RTP_LLM_CHECK_WITH_INFO(group.local_kv_head_num > 0,
-                                "CacheConfig::localKvHeadNumForGroup invalid local_kv_head_num=%u gid=%zu",
-                                group.local_kv_head_num,
-                                gid);
-        return group.local_kv_head_num;
-    }
-
-    void setGroupPolicies(const std::vector<CacheGroupPolicy>& policies);
-
-    void setGroupBlockLayout(const std::vector<uint32_t>& block_nums,
-                             const std::vector<size_t>&   kv_block_stride_bytes,
-                             const std::vector<size_t>&   kv_scale_stride_bytes);
-
-    std::shared_ptr<CacheConfig>
-    mergeMTPModule(const CacheConfig& propose_config, int module_index, uint32_t main_layer_num);
-
-    uint32_t explicitIndependentBlocks(size_t gid) const {
-        return policyForGroup(gid).explicit_block_num;
-    }
-
-    bool usesExplicitIndependentBlocks(size_t gid) const {
-        return explicitIndependentBlocks(gid) > 0;
-    }
-
-    CacheGroupPolicy policyForGroup(size_t gid) const {
-        return topology().groupById(gid).policy;
-    }
-
-    int groupIdForLayerTag(int layer_id, const std::string& tag) const {
-        topology().groupForLayer(layer_id, tag);
-        return groupIdForTag(tag);
-    }
-
-    int groupIdFor(int layer_id) const {
-        const auto& gids = topology().layerGroupIdsSnapshot().at(static_cast<size_t>(layer_id));
-        RTP_LLM_CHECK_WITH_INFO(gids.size() == 1,
-                                "CacheConfig::groupIdFor requires exactly one cache tag for layer_id=%d, got %zu",
-                                layer_id,
-                                gids.size());
-        return gids.front();
-    }
-
-    const std::vector<int>& groupIdsForLayer(int layer_id) const {
-        const auto& gids = topology().layerGroupIdsSnapshot().at(static_cast<size_t>(layer_id));
-        RTP_LLM_CHECK_WITH_INFO(!gids.empty(), "CacheConfig::groupIdsForLayer missing layer_id=%d", layer_id);
-        return gids;
+    bool usesExplicitIndependentBlocks(std::string_view tag) const {
+        return explicitIndependentBlocks(tag) > 0;
     }
 
     static bool samePolicy(const CacheGroupPolicy& lhs, const CacheGroupPolicy& rhs);
 
-    void        setTopology(std::vector<GroupBase> new_groups, std::vector<LayerBase> new_layers);
-    void        fromGroupedSpecs(const std::vector<KVCacheSpecPtr>&   specs,
-                                 const std::vector<std::vector<int>>& layers_by_group,
-                                 const std::vector<CacheGroupType>&   types,
-                                 const std::vector<std::string>&      tags     = {},
-                                 const std::vector<CacheGroupPolicy>& policies = {});
     void        finalizeBlockNums(uint32_t global_block_num, const RuntimeConfig& runtime_config);
     std::string debugString(size_t indent = 0) const;
 };

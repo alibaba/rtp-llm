@@ -6,9 +6,13 @@
 namespace rtp_llm {
 
 P2PConnectorWorker::P2PConnectorWorker(P2PConnectorWorkerConfig                    config,
+                                       const CacheConfig&                          cache_config,
                                        const std::shared_ptr<LayerBlockConverter>& layer_block_converter,
                                        const kmonitor::MetricsReporterPtr&         metrics_reporter):
-    config_(std::move(config)), layer_block_converter_(layer_block_converter), metrics_reporter_(metrics_reporter) {}
+    config_(std::move(config)),
+    cache_config_(cache_config),
+    layer_block_converter_(layer_block_converter),
+    metrics_reporter_(metrics_reporter) {}
 
 P2PConnectorWorker::~P2PConnectorWorker() = default;
 
@@ -40,7 +44,8 @@ bool P2PConnectorWorker::init(int64_t store_wait_timeout_ms) {
         }
     }
 
-    prefill_ = std::make_unique<P2PConnectorWorkerPrefill>(config_, layer_block_converter_, metrics_reporter_, sender);
+    prefill_ = std::make_unique<P2PConnectorWorkerPrefill>(
+        config_, cache_config_, layer_block_converter_, metrics_reporter_, sender);
     if (!prefill_->init(store_wait_timeout_ms)) {
         RTP_LLM_LOG_ERROR("init failed: prefill init failed");
         return false;

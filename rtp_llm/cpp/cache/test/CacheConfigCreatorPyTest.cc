@@ -10,7 +10,7 @@ void validateBasicConfig(const ModelConfig& model_config) {
     ParallelismConfig parallelism_config;
     parallelism_config.tp_size = 1;
     (void)CacheConfigCreator::createBasicConfig(
-        model_config, parallelism_config, /*is_mtp=*/false, /*gen_num_per_cycle=*/0);
+        model_config, parallelism_config, KVCacheConfig{}, /*gen_num_per_cycle=*/0);
 }
 
 PYBIND11_MODULE(libcache_config_creator_py_test, m) {

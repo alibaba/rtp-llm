@@ -5,9 +5,9 @@ test_copts = [
 ] + copts()
 
 cc_library(
-    name = "mock_allocator_lib",
+    name = "mock_coordinator_cache_manager_lib",
     hdrs = [
-        "MockKVCacheAllocator.h",
+        "MockCoordinatorCacheManager.h",
     ],
     deps = [
         "//rtp_llm/cpp/cache:cache_core",

@@ -5,7 +5,7 @@
 #include <unistd.h>
 #include <limits.h>
 #include <condition_variable>
-#include <unordered_set>
+#include <map>
 #include <c10/core/DeviceGuard.h>
 #include <c10/core/InferenceMode.h>
 
@@ -79,6 +79,18 @@ torch::Tensor pinGrpcTensor(torch::Tensor tensor) {
     }
 }
 
+void appendTaggedGroupBlockIds(BroadcastLoadRequestPB&                request,
+                               const std::map<std::string, BlockIds>& block_ids_by_group) {
+    for (const auto& [tag, block_ids] : block_ids_by_group) {
+        RTP_LLM_CHECK_WITH_INFO(!tag.empty(), "cache group record requires a non-empty tag");
+        auto* tagged_row = request.add_tagged_group_block_ids();
+        tagged_row->set_tag(tag);
+        for (const auto block_id : block_ids.blocks()) {
+            tagged_row->add_block_ids(block_id);
+        }
+    }
+}
+
 }  // namespace
 
 grpc::Status DecodeRpcServer::generateRequestReadFailureStatus(bool cancelled) {
@@ -132,7 +144,7 @@ DecodeRpcServer::makeMTPModuleCacheKey(size_t mtp_base_model_id, const std::stri
     return makeCacheKey(mtp_base_model_id, token_id_str, layer_id);
 }
 
-std::string DecodeRpcServer::makeTaggedRequestKey(int64_t request_id, size_t layer_id, const std::string& tag) {
+std::string DecodeRpcServer::makeRequestKeyForGroup(int64_t request_id, size_t layer_id, const std::string& tag) {
     return std::to_string(request_id) + "-" + std::to_string(layer_id) + "-tag-" + tag;
 }
 
@@ -148,12 +160,12 @@ DecodeRpcServer::makeMTPModuleLoadPlan(const ProposeModelEngineInitParams* propo
 }
 
 std::vector<CacheStoreBlockPair> DecodeRpcServer::buildGroupLoadPlan(const CacheGroupPolicy& policy,
-                                                                    size_t                  local_block_num,
-                                                                    size_t                  cache_key_count,
-                                                                    size_t                  reuse_block_size,
-                                                                    bool                    use_hybrid,
-                                                                    size_t                  group_seq_size_per_block,
-                                                                    size_t                  base_seq_size_per_block) {
+                                                                     size_t                  local_block_num,
+                                                                     size_t                  cache_key_count,
+                                                                     size_t                  reuse_block_size,
+                                                                     bool                    use_hybrid,
+                                                                     size_t                  group_seq_size_per_block,
+                                                                     size_t                  base_seq_size_per_block) {
     std::vector<CacheStoreBlockPair> plan;
     if (local_block_num == 0 || cache_key_count == 0) {
         return plan;
@@ -529,18 +541,7 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequestForMla(
     for (auto& cache_key : load_context.cache_keys) {
         request.add_cache_keys(cache_key);
     }
-    if (!load_context.block_ids_by_group.empty()) {
-        const auto& topology = engine_->resourceContext().cache_manager->cacheConfig().topology();
-        for (size_t group_id = 0; group_id < load_context.block_ids_by_group.size(); ++group_id) {
-            const auto& group_block = load_context.block_ids_by_group[group_id];
-            RTP_LLM_CHECK_WITH_INFO(group_block != nullptr, "null group_block in block_ids_by_group");
-            auto* tagged_row = request.add_tagged_group_block_ids();
-            tagged_row->set_tag(topology.groupById(group_id).tag);
-            for (const auto& block_id : group_block->blocks()) {
-                tagged_row->add_block_ids(block_id);
-            }
-        }
-    }
+    appendTaggedGroupBlockIds(request, load_context.block_ids_by_group);
     request.set_reuse_block_size(load_context.reuse_block_size);
     request.set_timeout_ms(load_context.timeout_ms);
     return request;
@@ -591,19 +592,8 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequest(const LoadKVC
     for (auto& cache_key : load_context.cache_keys) {
         request.add_cache_keys(cache_key);
     }
-    // Prefer per-group block ids if available (hybrid KV cache).
-    if (!load_context.block_ids_by_group.empty()) {
-        const auto& topology = engine_->resourceContext().cache_manager->cacheConfig().topology();
-        for (size_t group_id = 0; group_id < load_context.block_ids_by_group.size(); ++group_id) {
-            const auto& group_block = load_context.block_ids_by_group[group_id];
-            RTP_LLM_CHECK_WITH_INFO(group_block != nullptr, "null group_block in block_ids_by_group");
-            auto* tagged_row = request.add_tagged_group_block_ids();
-            tagged_row->set_tag(topology.groupById(group_id).tag);
-            for (const auto& block_id : group_block->blocks()) {
-                tagged_row->add_block_ids(block_id);
-            }
-        }
-    }
+    // Every cache group record carries its own semantic tag on the wire.
+    appendTaggedGroupBlockIds(request, load_context.block_ids_by_group);
     request.set_reuse_block_size(load_context.reuse_block_size);
     request.set_timeout_ms(load_context.timeout_ms);
     return request;
@@ -611,9 +601,11 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequest(const LoadKVC
 
 ErrorInfo DecodeRpcServer::loadCacheForAllRank(DecodeGenerateContext& decode_context) {
     RTP_LLM_PROFILE_FUNCTION();
-    auto*       generate_stream    = decode_context.getStream().get();
-    auto&       cache_keys         = generate_stream->cacheKeys(0);
-    const auto& block_ids_by_group = generate_stream->kvCachePtr()->groupBlocks(0);
+    auto* generate_stream = decode_context.getStream().get();
+    auto& cache_keys      = generate_stream->cacheKeys(0);
+    // The map keys make outgoing tag records unique. The receiving side verifies
+    // that the complete tag set matches its local CacheConfig.
+    const auto& block_ids_by_group = generate_stream->kvCachePtr()->blocksByGroup(0);
 
     if (resource_.workers.size() % decode_context.peer_addrs.size() != 0
         && decode_context.peer_addrs.size() % resource_.workers.size() != 0) {
@@ -880,23 +872,58 @@ ErrorInfo DecodeRpcServer::loadCacheSyncForTp(DecodeGenerateContext& decode_cont
 
 ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
     RTP_LLM_PROFILE_FUNCTION();
-    AtomicGuard request_guard(onflight_load_cache_requests_);
     const auto& request_key   = load_context.request_key;
     auto        cache_manager = engine_->resourceContext().cache_manager;
     const auto& cache_config  = cache_manager->cacheConfig();
     auto        layer_num     = maga_init_params_.model_config_.num_layers;
 
+    auto geometry_error = validateGroupBlockIdsGeometry(cache_config,
+                                                        load_context.block_ids_by_group,
+                                                        load_context.cache_keys.size(),
+                                                        load_context.reuse_block_size,
+                                                        load_context.prefill_cp_size);
+    if (!geometry_error.ok()) {
+        return geometry_error;
+    }
+    if (engine_->isMTPEagle() && propose_maga_init_params_ && propose_maga_init_params_->mtp_model_params_
+        && !propose_maga_init_params_->mtp_model_params_->empty()) {
+        const auto mtp_load_plan = makeMTPModuleLoadPlan(propose_maga_init_params_);
+        if (mtp_load_plan.empty()) {
+            return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "active MTP module0 is missing");
+        }
+        for (const auto& module_plan : mtp_load_plan) {
+            const auto& mtp_cache_config =
+                cache_manager->getMTPModuleCacheConfig(static_cast<int>(module_plan.module_index));
+            geometry_error = validateGroupBlockIdsGeometry(mtp_cache_config,
+                                                           load_context.block_ids_by_group,
+                                                           load_context.cache_keys.size(),
+                                                           load_context.reuse_block_size,
+                                                           load_context.prefill_cp_size);
+            if (!geometry_error.ok()) {
+                return geometry_error;
+            }
+        }
+    }
+
+    AtomicGuard request_guard(onflight_load_cache_requests_);
+
     const int peer_cnt = static_cast<int>(load_context.peer_addrs.size());
     RTP_LLM_CHECK_WITH_INFO(peer_cnt > 0, "peer_addrs is empty");
 
-    const bool   use_mla             = cache_config.use_mla;
-    const bool   use_hybrid          = cache_config.groupNums() > 1;
-    const bool   use_opaque_kv_store = cache_config.use_opaque_kv_cache_store;
-    const auto&  spec                = cache_config.specForGroup(0);
-    const size_t k_total_bytes       = spec->k_block_size_bytes();
-    const size_t v_total_bytes       = spec->v_block_size_bytes();
+    const bool use_mla             = cache_config.use_mla;
+    const bool use_hybrid          = cache_config.groupNums() > 1;
+    const bool use_opaque_kv_store = cache_config.use_opaque_kv_cache_store;
+    const bool is_page_level_rr    = load_context.prefill_cp_size > 1
+                                  && static_cast<int>(load_context.peer_addrs.size()) == load_context.prefill_cp_size;
 
-    if (!use_mla && !use_opaque_kv_store && peer_cnt > 1) {
+    if (!use_mla && !use_hybrid && !use_opaque_kv_store && !is_page_level_rr && peer_cnt > 1) {
+        RTP_LLM_CHECK_WITH_INFO(cache_config.hasSingleGlobalGroup(),
+                                "asymmetric TP cache load requires exactly one cache group, got %d",
+                                cache_config.groupNums());
+        const auto& spec = cache_config.groups().front().spec;
+        RTP_LLM_CHECK_WITH_INFO(spec != nullptr, "asymmetric TP cache load requires a non-null cache spec");
+        const size_t k_total_bytes = spec->k_block_size_bytes();
+        const size_t v_total_bytes = spec->v_block_size_bytes();
         RTP_LLM_CHECK_WITH_INFO(k_total_bytes % static_cast<size_t>(peer_cnt) == 0,
                                 "k_block bytes[%zu] not divisible by peer_cnt[%d]",
                                 k_total_bytes,
@@ -918,85 +945,89 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
         }
         return debug_infos;
     };
-    const bool is_page_level_rr = load_context.prefill_cp_size > 1
-                                  && static_cast<int>(load_context.peer_addrs.size()) == load_context.prefill_cp_size;
-    auto layerGroupIds = [](const CacheConfig& cfg, bool use_hybrid, size_t layer_id) {
-        std::vector<int> layer_gids;
-        if (use_hybrid) {
-            const auto layer_group_ids = cfg.layerGroupIdsSnapshot();
-            RTP_LLM_CHECK_WITH_INFO(layer_id < layer_group_ids.size(),
-                                    "hybrid cache layer %zu missing layer_to_group_ids, size=%zu",
-                                    layer_id,
-                                    layer_group_ids.size());
-            RTP_LLM_CHECK_WITH_INFO(
-                !layer_group_ids[layer_id].empty(), "hybrid cache layer %zu has empty layer_to_group_ids", layer_id);
-            layer_gids = layer_group_ids[layer_id];
-        } else {
-            layer_gids.push_back(0);
-        }
-        return layer_gids;
+    const auto& block_ids_by_group = load_context.block_ids_by_group;
+    auto        blockIdsForGroup   = [&block_ids_by_group](const std::string& tag) -> const BlockIds& {
+        const auto it = block_ids_by_group.find(tag);
+        RTP_LLM_CHECK_WITH_INFO(
+            it != block_ids_by_group.end(), "load cache has no blocks for cache tag=%s", tag.c_str());
+        return it->second;
     };
-    auto groupType = [](const CacheConfig& cfg, bool use_hybrid, size_t gid) {
-        if (use_hybrid && static_cast<int>(gid) < cfg.groupNums()) {
-            return cfg.typeForGroup(gid);
+    // The single-group plan has exactly one cache group, so "the only group" is
+    // not a positional choice.
+    auto soleGroupTag = [](const CacheConfig& cfg) -> const std::string& {
+        const auto& groups = cfg.groups();
+        RTP_LLM_CHECK_WITH_INFO(cfg.hasSingleGlobalGroup(),
+                                "single-group cache load requires exactly one cache group, got %zu",
+                                groups.size());
+        return groups.front().tag;
+    };
+    auto layerGroupTags = [&soleGroupTag](const CacheConfig& cfg, bool use_hybrid, size_t layer_id) {
+        std::vector<std::string> layer_tags;
+        if (use_hybrid) {
+            const auto& tags = cfg.groupsForLayer(static_cast<int>(layer_id));
+            RTP_LLM_CHECK_WITH_INFO(!tags.empty(), "hybrid cache layer %zu has no cache group tag", layer_id);
+            layer_tags = tags;
+        } else {
+            layer_tags.push_back(soleGroupTag(cfg));
+        }
+        return layer_tags;
+    };
+    auto groupType = [](const CacheConfig& cfg, bool use_hybrid, const std::string& tag) {
+        // A single-group plan keeps upstream's FULL transfer behavior regardless
+        // of the group's own strategy.
+        if (use_hybrid) {
+            return cfg.group(tag).policy.group_type;
         }
         return CacheGroupType::FULL;
     };
-    auto groupTag = [](const CacheConfig& cfg, size_t gid) -> std::string {
-        RTP_LLM_CHECK_WITH_INFO(static_cast<int>(gid) < cfg.groupNums(),
-                                "cache group id out of range: gid=%zu group_num=%d",
-                                gid,
-                                cfg.groupNums());
-        return cfg.tagForGroup(gid);
+    auto cpMapperForConfig = [&](const CacheConfig& cfg) {
+        return CPSlotMapper(
+            load_context.prefill_cp_size - 1, load_context.prefill_cp_size, static_cast<int>(cfg.seq_size_per_block));
     };
-    auto cpMapperForGroup = [&](const CacheConfig& cfg, size_t gid) {
-        return CPSlotMapper(load_context.prefill_cp_size - 1,
-                            load_context.prefill_cp_size,
-                            static_cast<int>(cfg.seqSizePerBlockForGroup(gid)));
-    };
-    auto groupUsesCpSlice = [&](const CacheConfig& cfg, size_t gid) {
-        if (load_context.prefill_cp_size <= 1 || static_cast<int>(gid) >= cfg.groupNums()) {
+    auto groupUsesCpSlice = [&](const CacheConfig& cfg, const std::string& tag) {
+        if (load_context.prefill_cp_size <= 1) {
             return false;
         }
-        return cpMapperForGroup(cfg, gid).layoutForGroup(cfg, gid).slice != CpBlockSliceMode::NONE;
+        return cpMapperForConfig(cfg).layoutForGroup(cfg, tag).slice != CpBlockSliceMode::NONE;
     };
-    auto shouldLoadGroupFromPeer = [&](const CacheConfig& cfg, CacheGroupType group_type, size_t gid, int peer_idx) {
-        if (!is_page_level_rr) {
-            return true;
-        }
-        if (group_type == CacheGroupType::FULL) {
-            return true;
-        }
-        // Some specs are CP-sliced inside one logical block on prefill, while
-        // decode still owns the full block. Pull every peer slice and place it
-        // into the destination offset declared by the spec.
-        return groupUsesCpSlice(cfg, gid) || peer_idx == 0;
-    };
+    auto shouldLoadGroupFromPeer =
+        [&](const CacheConfig& cfg, CacheGroupType group_type, const std::string& tag, int peer_idx) {
+            if (!is_page_level_rr) {
+                return true;
+            }
+            if (group_type == CacheGroupType::FULL) {
+                return true;
+            }
+            // Some specs are CP-sliced inside one logical block on prefill, while
+            // decode still owns the full block. Pull every peer slice and place it
+            // into the destination offset declared by the spec.
+            return groupUsesCpSlice(cfg, tag) || peer_idx == 0;
+        };
     auto shouldLoadBlockFromPeer = [&](CacheGroupType group_type, size_t block_pos, int peer_idx) {
         if (!is_page_level_rr || group_type != CacheGroupType::FULL) {
             return true;
         }
         return (static_cast<int>(block_pos) % load_context.prefill_cp_size) == peer_idx;
     };
-    auto sliceCpDestinationForPeer = [&](std::vector<BlockInfo> parts,
-                                         const CacheConfig&     cfg,
-                                         size_t                 gid,
-                                         int                    peer_idx) {
-        if (!is_page_level_rr || !groupUsesCpSlice(cfg, gid) || load_context.prefill_cp_size <= 1) {
-            return parts;
-        }
-        return cpMapperForGroup(cfg, gid).sliceBlockForPeer(cfg, gid, std::move(parts), static_cast<size_t>(peer_idx));
-    };
+    auto sliceCpDestinationForPeer =
+        [&](std::vector<BlockInfo> parts, const CacheConfig& cfg, const std::string& tag, int peer_idx) {
+            if (!is_page_level_rr || !groupUsesCpSlice(cfg, tag) || load_context.prefill_cp_size <= 1) {
+                return parts;
+            }
+            return cpMapperForConfig(cfg).sliceBlockForPeer(cfg, tag, std::move(parts), static_cast<size_t>(peer_idx));
+        };
     // One projection shared by the main model and MTP, mirroring the producer.
-    auto groupLoadPlan = [&](const CacheConfig& cfg, bool cfg_use_hybrid, size_t gid, size_t local_block_num) {
-        return buildGroupLoadPlan(cfg.policyForGroup(gid),
-                                  local_block_num,
-                                  load_context.cache_keys.size(),
-                                  static_cast<size_t>(std::max<int64_t>(load_context.reuse_block_size, 0)),
-                                  cfg_use_hybrid,
-                                  cfg.seqSizePerBlockForGroup(gid),
-                                  cfg.seq_size_per_block);
-    };
+    auto groupLoadPlan =
+        [&](const CacheConfig& cfg, bool cfg_use_hybrid, const std::string& tag, size_t local_block_num) {
+            const auto& group = cfg.group(tag);
+            return buildGroupLoadPlan(group.policy,
+                                      local_block_num,
+                                      load_context.cache_keys.size(),
+                                      static_cast<size_t>(std::max<int64_t>(load_context.reuse_block_size, 0)),
+                                      cfg_use_hybrid,
+                                      group.seqSizePerBlock(),
+                                      cfg.seq_size_per_block);
+        };
     for (int i = 0; i < load_context.peer_addrs.size(); i++) {
         auto&                                            peer_addr = load_context.peer_addrs[i];
         std::vector<std::shared_ptr<RequestBlockBuffer>> layer_caches;
@@ -1005,30 +1036,22 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
         for (size_t layer_id = 0; layer_id < layer_num; layer_id++) {
             // Some typed-region cache layouts let one logical layer own
             // multiple groups. Iterate every group the layer owns; other
-            // layouts reduce to the legacy one-gid-per-layer behaviour.
-            std::vector<int> layer_gids = layerGroupIds(cache_config, use_hybrid, layer_id);
+            // layouts reduce to the legacy single-group-per-layer behaviour.
+            const std::vector<std::string> layer_tags = layerGroupTags(cache_config, use_hybrid, layer_id);
 
-            for (int gid_int : layer_gids) {
-                const size_t gid         = static_cast<size_t>(gid_int);
-                const auto   tag         = groupTag(cache_config, gid);
-                auto         request_key = makeTaggedRequestKey(load_context.request_id, layer_id, tag);
-                auto         load_layer_cache =
+            for (const auto& tag : layer_tags) {
+                auto request_key = makeRequestKeyForGroup(load_context.request_id, layer_id, tag);
+                auto load_layer_cache =
                     std::make_shared<RequestBlockBuffer>(std::to_string(load_context.request_id), request_key);
 
-                RTP_LLM_CHECK_WITH_INFO(gid < load_context.block_ids_by_group.size(),
-                                        "group id out of range: gid=%zu group_num=%zu",
-                                        gid,
-                                        load_context.block_ids_by_group.size());
-                RTP_LLM_CHECK_WITH_INFO(
-                    load_context.block_ids_by_group[gid] != nullptr, "null group_block: gid=%zu", gid);
-                const auto& block_ids = load_context.block_ids_by_group[gid]->blocks();
+                const auto& block_ids = blockIdsForGroup(tag).blocks();
                 auto        block_num = block_ids.size();
                 size_t      model_id  = maga_init_params_.model_id;
 
-                CacheGroupType group_type = groupType(cache_config, use_hybrid, gid);
-                const auto     load_plan  = groupLoadPlan(cache_config, use_hybrid, gid, block_num);
+                CacheGroupType group_type = groupType(cache_config, use_hybrid, tag);
+                const auto     load_plan  = groupLoadPlan(cache_config, use_hybrid, tag, block_num);
 
-                if (!shouldLoadGroupFromPeer(cache_config, group_type, gid, i)) {
+                if (!shouldLoadGroupFromPeer(cache_config, group_type, tag, i)) {
                     continue;
                 }
                 for (const auto& plan_pair : load_plan) {
@@ -1048,12 +1071,12 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                     const bool             use_whole_kv_block = is_page_level_rr || use_kv_key_prefix;
                     std::vector<BlockInfo> parts;
                     if (use_whole_kv_block) {
-                        parts = cache_manager->convertIndexToBufferByTag(block_id, layer_id, tag);
+                        parts = cache_manager->convertIndexToBuffer(block_id, layer_id, tag);
                     } else {
-                        parts = cache_manager->convertIndexToBufferByTag(block_id, layer_id, tag, peer_cnt, i);
+                        parts = cache_manager->convertIndexToBuffer(block_id, layer_id, tag, peer_cnt, i);
                     }
 
-                    parts            = sliceCpDestinationForPeer(std::move(parts), cache_config, gid, i);
+                    parts            = sliceCpDestinationForPeer(std::move(parts), cache_config, tag, i);
                     auto addBufBlock = [&](const std::string& key, const BlockInfo& block) {
                         RTP_LLM_CHECK_WITH_INFO(block.addr != nullptr, "null block addr for key=%s", key.c_str());
                         RTP_LLM_CHECK_WITH_INFO(block.size_bytes > 0, "zero block size for key=%s", key.c_str());
@@ -1126,7 +1149,8 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                         const bool mtp_use_opaque_kv_store = mtp_cache_cfg.use_opaque_kv_cache_store;
 
                         // Same multi-group iteration as the main path.
-                        std::vector<int> mtp_layer_gids = layerGroupIds(mtp_cache_cfg, mtp_use_hybrid, layer_id);
+                        const std::vector<std::string> mtp_layer_tags =
+                            layerGroupTags(mtp_cache_cfg, mtp_use_hybrid, layer_id);
 
                         const auto global_layer_id = CacheConfig::mtpGlobalLayerId(
                             static_cast<uint32_t>(maga_init_params_.model_config_.num_layers),
@@ -1141,27 +1165,19 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                                                 layer_num,
                                                 layer_id);
 
-                        for (int gid_int : mtp_layer_gids) {
-                            const size_t gid         = static_cast<size_t>(gid_int);
-                            const auto   tag         = groupTag(mtp_cache_cfg, gid);
-                            auto         request_key = makeTaggedRequestKey(load_context.request_id, layer_id, tag);
-                            auto         load_layer_cache = std::make_shared<RequestBlockBuffer>(
+                        for (const auto& tag : mtp_layer_tags) {
+                            auto request_key      = makeRequestKeyForGroup(load_context.request_id, layer_id, tag);
+                            auto load_layer_cache = std::make_shared<RequestBlockBuffer>(
                                 std::to_string(load_context.request_id), request_key);
 
-                            RTP_LLM_CHECK_WITH_INFO(gid < load_context.block_ids_by_group.size(),
-                                                    "mtp group id out of range: gid=%zu group_num=%zu",
-                                                    gid,
-                                                    load_context.block_ids_by_group.size());
-                            RTP_LLM_CHECK_WITH_INFO(
-                                load_context.block_ids_by_group[gid] != nullptr, "null mtp group_block: gid=%zu", gid);
-                            const auto& block_ids = load_context.block_ids_by_group[gid]->blocks();
+                            const auto& block_ids = blockIdsForGroup(tag).blocks();
                             auto        block_num = block_ids.size();
                             size_t      model_id  = module_plan.cache_model_id;
 
-                            CacheGroupType group_type = groupType(mtp_cache_cfg, mtp_use_hybrid, gid);
-                            const auto load_plan = groupLoadPlan(mtp_cache_cfg, mtp_use_hybrid, gid, block_num);
+                            CacheGroupType group_type = groupType(mtp_cache_cfg, mtp_use_hybrid, tag);
+                            const auto     load_plan  = groupLoadPlan(mtp_cache_cfg, mtp_use_hybrid, tag, block_num);
 
-                            if (!shouldLoadGroupFromPeer(mtp_cache_cfg, group_type, gid, i)) {
+                            if (!shouldLoadGroupFromPeer(mtp_cache_cfg, group_type, tag, i)) {
                                 continue;
                             }
                             for (const auto& plan_pair : load_plan) {
@@ -1182,13 +1198,13 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                                 const bool mtp_use_whole_kv_block = is_page_level_rr || mtp_use_kv_key_prefix;
                                 std::vector<BlockInfo> parts;
                                 if (mtp_use_whole_kv_block) {
-                                    parts = cache_manager->convertIndexToBufferByTag(block_id, global_layer_id, tag);
+                                    parts = cache_manager->convertIndexToBuffer(block_id, global_layer_id, tag);
                                 } else {
-                                    parts = cache_manager->convertIndexToBufferByTag(
+                                    parts = cache_manager->convertIndexToBuffer(
                                         block_id, global_layer_id, tag, peer_cnt, i);
                                 }
 
-                                parts            = sliceCpDestinationForPeer(std::move(parts), mtp_cache_cfg, gid, i);
+                                parts            = sliceCpDestinationForPeer(std::move(parts), mtp_cache_cfg, tag, i);
                                 auto addBufBlock = [&](const std::string& key, const BlockInfo& block) {
                                     RTP_LLM_CHECK_WITH_INFO(
                                         block.addr != nullptr, "null block addr for key=%s", key.c_str());
@@ -1308,11 +1324,16 @@ grpc::Status DecodeRpcServer::RemoteLoad(grpc::ServerContext*          server_co
         return grpc::Status::OK;
     }
 
-    std::vector<CacheKeyType> cache_keys(request->cache_keys().begin(), request->cache_keys().end());
-    const auto&               cache_config       = engine_->resourceContext().cache_manager->cacheConfig();
-    const auto&               topology           = cache_config.topology();
-    GroupBlockIds             block_ids_by_group = decodeGroupBlockIds(*request, topology);
-
+    std::vector<CacheKeyType>       cache_keys(request->cache_keys().begin(), request->cache_keys().end());
+    const auto&                     cache_config = engine_->resourceContext().cache_manager->cacheConfig();
+    std::map<std::string, BlockIds> block_ids_by_group;
+    auto                            decode_error = decodeGroupBlockIds(*request, cache_config, block_ids_by_group);
+    if (!decode_error.ok()) {
+        response->mutable_error_info()->set_error_code(transErrorCodeToRPC(decode_error.code()));
+        response->mutable_error_info()->set_error_message(decode_error.ToString());
+        response->set_done_time_us(currentTimeUs());
+        return grpc::Status::OK;
+    }
     std::vector<std::string> peer_addrs(request->peer_addrs().begin(), request->peer_addrs().end());
 
     // TODO(xinfei.sxf) add retry
@@ -1334,21 +1355,116 @@ grpc::Status DecodeRpcServer::RemoteLoad(grpc::ServerContext*          server_co
     return grpc::Status::OK;
 }
 
-GroupBlockIds DecodeRpcServer::decodeGroupBlockIds(const BroadcastLoadRequestPB& request,
-                                                   const CacheTopology&          topology) {
-    GroupBlockIds block_ids_by_group(topology.groups().size());
-    for (const auto& tagged_row : request.tagged_group_block_ids()) {
-        const auto group_id = topology.groupIdForTag(tagged_row.tag());
-        RTP_LLM_CHECK_WITH_INFO(
-            block_ids_by_group[group_id] == nullptr, "duplicate RPC cache tag=%s", tagged_row.tag().c_str());
-        auto holder = std::make_shared<BlockIds>();
-        holder->assign(BlockIndicesType(tagged_row.block_ids().begin(), tagged_row.block_ids().end()));
-        block_ids_by_group[group_id] = std::move(holder);
+ErrorInfo DecodeRpcServer::decodeGroupBlockIds(const BroadcastLoadRequestPB&    request,
+                                               const CacheConfig&               cache_config,
+                                               std::map<std::string, BlockIds>& block_ids_by_group) {
+    block_ids_by_group.clear();
+    if (request.tagged_group_block_ids().empty()) {
+        return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "RPC cache tag rows are empty");
     }
-    RTP_LLM_CHECK_WITH_INFO(
-        std::all_of(block_ids_by_group.begin(), block_ids_by_group.end(), [](const auto& value) { return value; }),
-        "RPC cache tag set does not match local topology");
-    return block_ids_by_group;
+
+    std::map<std::string, BlockIds> decoded;
+    for (const auto& tagged_row : request.tagged_group_block_ids()) {
+        const auto& tag = tagged_row.tag();
+        if (tag.empty()) {
+            return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "RPC cache tag must not be empty");
+        }
+        const auto known_group = std::find_if(cache_config.groups().begin(),
+                                              cache_config.groups().end(),
+                                              [&tag](const CacheGroup& group) { return group.tag == tag; });
+        if (known_group == cache_config.groups().end()) {
+            return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "RPC cache contains unknown/extra tag=" + tag);
+        }
+        if (decoded.find(tag) != decoded.end()) {
+            return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "RPC cache contains duplicate tag=" + tag);
+        }
+
+        const auto&      cache_group = cache_config.group(tag);
+        BlockIds         block_ids(cache_group.storedKernelBlocksPerKvBlock());
+        BlockIndicesType internal_ids;
+        internal_ids.reserve(static_cast<size_t>(tagged_row.block_ids_size()));
+        for (const auto block_id : tagged_row.block_ids()) {
+            internal_ids.push_back(block_id);
+        }
+        block_ids.assign(std::move(internal_ids));
+        decoded.emplace(tag, std::move(block_ids));
+    }
+    if (decoded.size() != cache_config.groups().size()) {
+        const auto missing_group =
+            std::find_if(cache_config.groups().begin(),
+                         cache_config.groups().end(),
+                         [&decoded](const CacheGroup& group) { return decoded.find(group.tag) == decoded.end(); });
+        const std::string missing_tag = missing_group == cache_config.groups().end() ? "<unknown>" : missing_group->tag;
+        return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED,
+                         "RPC cache tag set is missing tag=" + missing_tag + ", rows=" + std::to_string(decoded.size())
+                             + ", groups=" + std::to_string(cache_config.groups().size()));
+    }
+    const auto geometry_error =
+        validateGroupBlockIdsGeometry(cache_config,
+                                      decoded,
+                                      static_cast<size_t>(request.cache_keys_size()),
+                                      request.reuse_block_size(),
+                                      request.prefill_cp_size() > 0 ? request.prefill_cp_size() : 1);
+    if (!geometry_error.ok()) {
+        return geometry_error;
+    }
+    block_ids_by_group = std::move(decoded);
+    return ErrorInfo::OkStatus();
+}
+
+ErrorInfo DecodeRpcServer::validateGroupBlockIdsGeometry(const CacheConfig&                     cache_config,
+                                                         const std::map<std::string, BlockIds>& block_ids_by_group,
+                                                         size_t                                 cache_key_count,
+                                                         int64_t                                reuse_block_size,
+                                                         int32_t                                prefill_cp_size) {
+    const bool   use_hybrid = cache_config.groupNums() > 1;
+    const size_t reuse      = static_cast<size_t>(std::max<int64_t>(reuse_block_size, 0));
+
+    for (const auto& group : cache_config.groups()) {
+        const auto row = block_ids_by_group.find(group.tag);
+        if (row == block_ids_by_group.end()) {
+            return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "RPC cache geometry is missing tag=" + group.tag);
+        }
+
+        const size_t base_span  = cache_config.seq_size_per_block;
+        const size_t group_span = group.seqSizePerBlock();
+        const size_t cp_scale =
+            base_span > 0 && group_span >= base_span && group_span % base_span == 0 ? group_span / base_span : 1;
+        if (group.policy.cp_mapping == CpBlockMappingMode::COMPACT_LAST_RANK && cp_scale > 1
+            && static_cast<size_t>(prefill_cp_size) != cp_scale) {
+            return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED,
+                             "RPC cache CP geometry mismatch: tag=" + group.tag + ", request_prefill_cp_size="
+                                 + std::to_string(prefill_cp_size) + ", local_cp_scale=" + std::to_string(cp_scale));
+        }
+        const bool compact = group.policy.cp_mapping == CpBlockMappingMode::COMPACT_LAST_RANK && cp_scale > 1;
+        // Only compact tables collapse global cache-key positions. Tail policies
+        // retain their global offset even when the plan loads just one/two slots.
+        const size_t theoretical_slots =
+            cache_key_count == 0 ? 0 : (compact ? 1 + (cache_key_count - 1) / cp_scale : cache_key_count);
+        const auto plan = buildGroupLoadPlan(
+            group.policy, theoretical_slots, cache_key_count, reuse, use_hybrid, group_span, base_span);
+        size_t required_slots = 0;
+        for (const auto& pair : plan) {
+            if (pair.offset_index < 0) {
+                return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED,
+                                 "RPC cache load plan contains a negative offset for tag=" + group.tag);
+            }
+            required_slots = std::max(required_slots, static_cast<size_t>(pair.offset_index) + 1);
+        }
+
+        const size_t actual_slots = row->second.blocks().size();
+        if (actual_slots < required_slots) {
+            return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED,
+                             "RPC cache block row too short: tag=" + group.tag + ", actual="
+                                 + std::to_string(actual_slots) + ", required=" + std::to_string(required_slots)
+                                 + ", cache_key_count=" + std::to_string(cache_key_count)
+                                 + ", prefill_cp_size=" + std::to_string(prefill_cp_size)
+                                 + ", policy={type=" + cacheGroupTypeName(group.policy.group_type)
+                                 + ", cp_mapping=" + std::to_string(static_cast<int>(group.policy.cp_mapping))
+                                 + ", active_tail_blocks=" + std::to_string(group.policy.active_tail_blocks) + "}");
+        }
+    }
+    return ErrorInfo::OkStatus();
 }
 
 grpc::Status DecodeRpcServer::allocateResourceFunc(DecodeGenerateContext& decode_context) {

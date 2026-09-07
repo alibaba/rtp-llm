@@ -28,12 +28,6 @@ enum class CacheEvictPolicy : int8_t {
     NONE        = 2,
 };
 
-enum class CacheMemoryPlacement : int8_t {
-    DEVICE      = 0,
-    HOST        = 1,
-    HOST_PINNED = 2,
-};
-
 enum class CpBlockMappingMode : int8_t {
     NONE              = 0,
     BLOCK_ROUND_ROBIN = 1,
@@ -47,17 +41,15 @@ enum class CpBlockSliceMode : int8_t {
 };
 
 struct CacheGroupPolicy {
-    CacheGroupType       group_type             = CacheGroupType::FULL;
-    bool                 enable_prefix_reuse    = true;
-    CacheEvictPolicy     evict_policy           = CacheEvictPolicy::CHAIN;
-    bool                 reservable             = true;
-    uint32_t             explicit_block_num     = 0;
-    bool                 charge_to_paged_budget = false;
-    CacheMemoryPlacement memory_placement       = CacheMemoryPlacement::DEVICE;
-    uint32_t             active_tail_blocks     = 0;
-    bool                 validate_tail_blocks   = true;
-    CpBlockMappingMode   cp_mapping             = CpBlockMappingMode::NONE;
-    CpBlockSliceMode     cp_slice               = CpBlockSliceMode::NONE;
+    CacheGroupType     group_type           = CacheGroupType::FULL;
+    bool               enable_prefix_reuse  = true;
+    CacheEvictPolicy   evict_policy         = CacheEvictPolicy::CHAIN;
+    bool               reservable           = true;
+    uint32_t           explicit_block_num   = 0;
+    uint32_t           active_tail_blocks   = 0;
+    bool               validate_tail_blocks = true;
+    CpBlockMappingMode cp_mapping           = CpBlockMappingMode::NONE;
+    CpBlockSliceMode   cp_slice             = CpBlockSliceMode::NONE;
 };
 
 // One cache-store registration step: pair a cache key from the full logical

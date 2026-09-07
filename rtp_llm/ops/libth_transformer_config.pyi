@@ -629,13 +629,12 @@ class HWKernelConfig:
         ...
 class HybridAttentionConfig:
     enable_hybrid_attention: bool
-    enable_independent_kv_cache_pools: bool
     hybrid_attention_types: list[HybridAttentionType]
     @typing.overload
     def __init__(self) -> None:
         ...
     @typing.overload
-    def __init__(self, enable_hybrid_attention: bool, enable_independent_kv_cache_pools: bool, hybrid_attention_types: list[HybridAttentionType]) -> None:
+    def __init__(self, enable_hybrid_attention: bool, hybrid_attention_types: list[HybridAttentionType]) -> None:
         ...
     def to_string(self) -> str:
         ...
@@ -690,7 +689,6 @@ class KVCacheConfig:
     enable_remote_cache: bool
     dsv4_fixed_pool_blocks: int
     dsv4_hca_state_pool_blocks: int
-    dsv4_fixed_pool_use_memory: bool
     fp8_kv_cache: int
     kv_cache_mem_mb: int
     linear_step: int
@@ -945,11 +943,6 @@ class CacheEvictPolicy:
     INDEPENDENT: typing.ClassVar[CacheEvictPolicy]
     NONE: typing.ClassVar[CacheEvictPolicy]
 
-class CacheMemoryPlacement:
-    DEVICE: typing.ClassVar[CacheMemoryPlacement]
-    HOST: typing.ClassVar[CacheMemoryPlacement]
-    HOST_PINNED: typing.ClassVar[CacheMemoryPlacement]
-
 class CpBlockMappingMode:
     NONE: typing.ClassVar[CpBlockMappingMode]
     BLOCK_ROUND_ROBIN: typing.ClassVar[CpBlockMappingMode]
@@ -978,11 +971,6 @@ class CacheReusePolicyDesc:
 class CacheCapacityPolicyDesc:
     reservable: typing.Any
     explicit_block_num: typing.Any
-    charge_to_paged_budget: typing.Any
-    def __init__(self) -> None: ...
-
-class CacheMemoryPolicyDesc:
-    placement: typing.Any
     def __init__(self) -> None: ...
 
 class CacheTailPolicyDesc:
@@ -993,7 +981,6 @@ class CacheTailPolicyDesc:
 class CacheCpPolicyDesc:
     mapping: typing.Any
     slice: typing.Any
-    scale_seq_size: typing.Any
     align_payload: typing.Any
     prefill_slice_layout: typing.Any
     def __init__(self) -> None: ...
@@ -1008,6 +995,7 @@ class KVCacheSpecDesc:
     entry_count_mode: OpaqueBlockEntryCountMode
     explicit_entry_count: int
     compression_ratio: int
+    kernel_tokens_per_block_alignment: int
     state_ring_overlap: int
     state_ring_include_gen_num_per_cycle: bool
     block_stride_bytes_override: int
@@ -1016,7 +1004,6 @@ class KVCacheSpecDesc:
     group_type: typing.Any
     reuse: typing.Any
     capacity: typing.Any
-    memory: typing.Any
     tail: typing.Any
     cp: typing.Any
     def __init__(self) -> None: ...

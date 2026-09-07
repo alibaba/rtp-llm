@@ -32,6 +32,8 @@ public:
     ~AsyncMatchContext() override = default;
 
 public:
+    // Number of matched global cache-key blocks. CP-canonical entry counts are
+    // connector-internal and must be converted before crossing this interface.
     virtual size_t matchedBlockCount() const = 0;
 };
 

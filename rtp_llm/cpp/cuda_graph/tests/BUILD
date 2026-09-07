@@ -13,6 +13,32 @@ cc_test(
     ] + torch_deps(),
 )
 
+cc_test(
+    name = "strided_copy_validation_test",
+    srcs = ["strided_copy_validation_test.cc"],
+    copts = copts(),
+    tags = ["H20"],
+    exec_properties = {"gpu": "H20"},
+    deps = [
+        "//rtp_llm/cpp/cuda_graph:strided_copy_validation",
+        "@com_google_googletest//:gtest_main",
+    ] + torch_deps(),
+)
+
+cc_test(
+    name = "cache_block_safe_dummy_test",
+    srcs = ["cache_block_safe_dummy_test.cc"],
+    copts = copts(),
+    tags = ["H20"],
+    exec_properties = {"gpu": "H20"},
+    deps = [
+        "//rtp_llm/cpp/cache:block_pool",
+        "//rtp_llm/cpp/cache:kv_cache_specs",
+        "//rtp_llm/cpp/cuda_graph:cuda_graph_hdrs_lib",
+        "@com_google_googletest//:gtest_main",
+    ] + torch_deps(),
+)
+
 cc_library(
     name = "test_cuda_graph_runner_libs",
     srcs = [
@@ -21,6 +47,7 @@ cc_library(
     copts = copts(),
     deps = [
         "//rtp_llm/cpp/cuda_graph:cuda_graph_impl",
+        "//rtp_llm/cpp/cache:kv_cache_specs",
         "//rtp_llm/cpp/pybind:py_utils",
         "//rtp_llm/cpp/pybind:th_compute_lib",
     ] + torch_deps(),
@@ -97,8 +124,8 @@ py_test(
 )
 
 py_test(
-    name = "cuda_graph_tagged_cache_test",
-    srcs = ["cuda_graph_tagged_cache_test.py"],
+    name = "cuda_graph_group_cache_test",
+    srcs = ["cuda_graph_group_cache_test.py"],
     data = [
         ":test_cuda_graph_runner",
         "//:th_transformer",
