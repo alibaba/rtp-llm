@@ -1040,6 +1040,8 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
 #if USING_CUDA
             if (lm_head->kernel.dtype() == torch::kBFloat16) {
                 logits = torch_ext::cublas_gemm_bf16_bf16_fp32(last_hidden.to(torch::kBFloat16), lm_head->kernel);
+            } else if (lm_head->kernel.dtype() == torch::kFloat16) {
+                logits = torch_ext::cublas_gemm_fp16_fp16_fp32(last_hidden.to(torch::kFloat16), lm_head->kernel);
             } else
 #endif
             {
@@ -1099,6 +1101,8 @@ GptModelOutputs PyWrappedModel::forwardPostLayersLastHidden(torch::Tensor hidden
 #if USING_CUDA
         if (lm_head->kernel.dtype() == torch::kBFloat16) {
             logits = torch_ext::cublas_gemm_bf16_bf16_fp32(last_hidden.to(torch::kBFloat16), lm_head->kernel);
+        } else if (lm_head->kernel.dtype() == torch::kFloat16) {
+            logits = torch_ext::cublas_gemm_fp16_fp16_fp32(last_hidden.to(torch::kFloat16), lm_head->kernel);
         } else
 #endif
         {
