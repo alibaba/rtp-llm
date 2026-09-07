@@ -83,7 +83,13 @@ class RequestBatch(ClientRecords):
         for _ in range(self.params["count"]):
             deadline.check()
             record = self.issue(self.ops.next_request_id(), self.ctx.clock)
-            entry = dict(record=record, response=None, call=None, thread=None)
+            entry = dict(
+                record=record,
+                response=None,
+                call=None,
+                thread=None,
+                done=threading.Event(),
+            )
             self.entries.append(entry)
             rid = record["wire_request_id"]
             try:
@@ -212,9 +218,35 @@ class RequestBatch(ClientRecords):
                 record,
                 transport_terminal_s=self.ctx.clock(),
                 consumer_exit_s=self.ctx.clock(),
+                consumer_done=True,
             )
             with self._lock:
                 entry["call"] = None
+            # Published only after all terminal record fields are committed.
+            entry["done"].set()
+
+    def _await_consumer(self, entry, deadline):
+        thread = entry["thread"]
+        if thread is None:
+            return
+        # is_alive()/join alone are not a completion witness when a main-thread
+        # interruption can race with waiting. Wait for the consumer's own signal.
+        while not entry["done"].is_set():
+            entry["done"].wait(min(0.1, deadline.remaining()))
+        thread.join(max(0, deadline.expires_at - self.ctx.clock()))
+        record = entry["record"]
+        if (
+            thread.is_alive()
+            or record.get("consumer_done") is not True
+            or record["consumer_exit_s"] is None
+            or record["transport_terminal_s"] is None
+            or record["stream"]["ended_s"] is None
+            or record["stream"]["status"] is None
+        ):
+            raise RuntimeError(
+                "consumer completion signal lacks terminal exit evidence"
+            )
+        self.update(record, consumer_completion_verified=True)
 
     def wait(self, deadline):
         for entry in self.entries:
@@ -222,9 +254,7 @@ class RequestBatch(ClientRecords):
                 entry, min(deadline.expires_at, self.ctx.instance_deadline_s)
             )
         for entry in self.entries:
-            thread = entry["thread"]
-            while thread is not None and thread.is_alive():
-                thread.join(min(0.1, deadline.remaining()))
+            self._await_consumer(entry, deadline)
         self.persist()
         records = self.snapshot_records()
         for record in records:
@@ -276,13 +306,7 @@ class RequestBatch(ClientRecords):
         self.cancel("cleanup")
         try:
             for entry in self.entries:
-                thread = entry["thread"]
-                if thread is not None and thread.is_alive():
-                    thread.join(max(0, deadline.expires_at - self.ctx.clock()))
-                    if thread.is_alive():
-                        raise StageTimeout(
-                            "request consumer remains alive after cancel and join"
-                        )
+                self._await_consumer(entry, deadline)
             if any(r["cancel"]["error"] for r in self.snapshot_records()):
                 raise RuntimeError("one or more transport cancellations failed")
         finally:
