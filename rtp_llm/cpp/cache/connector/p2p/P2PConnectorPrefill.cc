@@ -361,6 +361,18 @@ bool P2PConnectorPrefill::processReadPerRank(int64_t                            
                                              int64_t                                 deadline_ms,
                                              const P2PConnectorBroadcastTpRequestPB& p2p_request,
                                              FunctionResponsePB&                     response) {
+    const auto release_local_prefill_resource = [this, &unique_key, deadline_ms, &p2p_request]() {
+        if (config_.tp_rank == 0) {
+            return;
+        }
+        const int64_t request_deadline_ms =
+            p2p_request.request_deadline_ms() > 0 ? p2p_request.request_deadline_ms() : deadline_ms;
+        // StartLoad only steals the rank-0 resource entry. Every other Prefill
+        // TP rank must seal its local entry on every terminal HANDLE_READ path.
+        stream_store_->markTerminal(unique_key, request_deadline_ms);
+        stream_store_->clearSideChannelData(unique_key);
+    };
+
     std::vector<std::pair<std::string, uint32_t>> decode_transfer_servers;
     for (const auto& peer_worker : p2p_request.peer_workers()) {
         decode_transfer_servers.emplace_back(peer_worker.ip(), peer_worker.cache_store_port());
@@ -380,6 +392,7 @@ bool P2PConnectorPrefill::processReadPerRank(int64_t                            
                                  "HANDLE_READ route peer_index out of range: " + std::to_string(local.peer_index));
             RTP_LLM_LOG_WARNING("executeHandleRead rejected: %s", error_info.ToString().c_str());
             setP2PResponse(response, error_info);
+            release_local_prefill_resource();
             return false;
         }
         worker_route.dst_ip   = decode_transfer_servers[local.peer_index].first;
@@ -389,17 +402,7 @@ bool P2PConnectorPrefill::processReadPerRank(int64_t                            
 
     ErrorInfo error_info = worker_->sendKVCache(
         request_id, unique_key, deadline_ms, worker_plan, p2p_request.request_deadline_ms());
-    if (config_.tp_rank != 0) {
-        const int64_t request_deadline_ms =
-            p2p_request.request_deadline_ms() > 0 ? p2p_request.request_deadline_ms() : deadline_ms;
-        // StartLoad only steals the rank-0 resource entry. Every other Prefill
-        // TP rank must seal its local entry after the broadcast worker
-        // finishes, or its whole-request Connector reference remains pinned
-        // until store timeout. Rank 0 is finalized by handleRead only after its
-        // side-channel response has been consumed.
-        stream_store_->markTerminal(unique_key, request_deadline_ms);
-        stream_store_->clearSideChannelData(unique_key);
-    }
+    release_local_prefill_resource();
     if (error_info.hasError()) {
         RTP_LLM_LOG_WARNING("executeHandleRead failed, request_id: %ld, unique_key: %s, error: %s",
                             request_id,

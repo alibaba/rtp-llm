@@ -530,6 +530,10 @@ TEST_F(P2PConnectorTest, ExecuteHandleReadFailureStillReleasesLocalPrefillResour
     p2p_request->set_unique_key(unique_key);
     p2p_request->set_deadline_ms(deadline_ms);
     p2p_request->set_request_deadline_ms(deadline_ms);
+    auto* route = p2p_request->add_routes();
+    route->set_route_id(0);
+    route->set_cache_tag("group0");
+    route->set_peer_index(0);
 
     FunctionResponsePB response;
     EXPECT_FALSE(rank1_connector->executeFunction(request, response));
