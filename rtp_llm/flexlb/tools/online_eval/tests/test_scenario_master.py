@@ -103,7 +103,16 @@ class MasterActionsTest(unittest.TestCase):
             },
         )
         with patch.object(
-            master, "_master_json", side_effect=[info, {"scheduler_inflight": 0}]
+            master,
+            "_master_json",
+            side_effect=[
+                info,
+                {
+                    "scheduler_inflight": 0,
+                    "prefill_endpoints": [{"inflight_batches": 0}],
+                    "decode_endpoints": [{"total_load": 0}],
+                },
+            ],
         ):
             result = master._ready(
                 self.ctx, dict(target="single", inflight_zero=True), self.deadline
@@ -125,6 +134,17 @@ class MasterActionsTest(unittest.TestCase):
                         dict(target="single", inflight_zero=True),
                         self.deadline,
                     )
+
+    def test_endpoint_owner_counts_are_not_replaced_by_scheduler_zero(self):
+        data = {
+            "scheduler_inflight": 0,
+            "prefill_endpoints": [{"inflight_batches": 2}],
+            "decode_endpoints": [{"total_load": 3}],
+        }
+        self.assertEqual({"prefill": [2], "decode": [3]}, master._endpoint_loads(data))
+        for rows in ([], [{}], [{"total_load": -1}], [{"total_load": True}]):
+            with self.assertRaises((ValueError, KeyError)):
+                master._endpoint_loads({**data, "decode_endpoints": rows})
 
     def test_strict_parameters_and_typed_prior_fault(self):
         plan = PlanContext("fault", {})
