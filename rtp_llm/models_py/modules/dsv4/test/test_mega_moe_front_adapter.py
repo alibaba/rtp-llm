@@ -1,4 +1,3 @@
-import os
 import unittest
 from types import SimpleNamespace
 from unittest import mock
@@ -8,7 +7,7 @@ import torch
 from rtp_llm.models_py.modules.dsv4.block import Block
 from rtp_llm.models_py.modules.dsv4.moe.mega_front import (
     MegaMoeFrontAdapter,
-    _decode_capture_tokens,
+    _capture_tokens_for_batches,
 )
 
 
@@ -105,7 +104,9 @@ class MegaMoeFrontAdapterTest(unittest.TestCase):
             Block.enable_mega_front(block)
 
         self.assertIs(block._mega_front_adapter, adapter)
-        adapter_cls.assert_called_once_with(block.ffn, "hc", "norm")
+        adapter_cls.assert_called_once_with(
+            block.ffn, "hc", "norm", gen_num_per_cycle=0
+        )
 
     def test_front_is_not_attached_to_non_mega_strategy(self) -> None:
         block = SimpleNamespace(
@@ -164,30 +165,14 @@ class MegaMoeFrontAdapterTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "score_func='sqrtsoftplus'"):
             Block.enable_mega_front(block, required=True)
 
-    def test_capture_tokens_are_sorted_and_filter_unsupported_sizes(self) -> None:
-        with mock.patch.dict(
-            os.environ,
-            {"DECODE_CAPTURE_CONFIG": "8, 1,8,32", "GEN_NUM_PER_CIRCLE": "0"},
-        ):
-            self.assertEqual(_decode_capture_tokens(), (1, 8, 32))
-        with mock.patch.dict(
-            os.environ,
-            {"DECODE_CAPTURE_CONFIG": "8,256", "GEN_NUM_PER_CIRCLE": "0"},
-        ):
-            self.assertEqual(_decode_capture_tokens(), (8,))
+    def test_capture_tokens_expand_framework_batches_for_dspark(self) -> None:
+        self.assertEqual(
+            _capture_tokens_for_batches([8, 16, 32], 3),
+            (8, 16, 24, 32, 48, 64, 96, 128),
+        )
 
-        with mock.patch.dict(
-            os.environ,
-            {"DECODE_CAPTURE_CONFIG": "32,64", "GEN_NUM_PER_CIRCLE": "3"},
-        ):
-            self.assertEqual(_decode_capture_tokens(), (32, 64, 96, 128))
-
-    def test_capture_tokens_include_dspark_and_target_verify(self) -> None:
-        with mock.patch.dict(
-            os.environ,
-            {"DECODE_CAPTURE_CONFIG": "8,16,32", "GEN_NUM_PER_CIRCLE": "3"},
-        ):
-            self.assertEqual(_decode_capture_tokens(), (8, 16, 24, 32, 48, 64, 96, 128))
+    def test_capture_tokens_filter_outside_front_abi(self) -> None:
+        self.assertEqual(_capture_tokens_for_batches([8, 256, 0, -5], 0), (8,))
 
     def test_front_support_is_bounded_by_extension_and_mega_buffer(self) -> None:
         adapter, _ = _fake_adapter()

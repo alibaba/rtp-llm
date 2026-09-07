@@ -10,6 +10,7 @@ import torch
 
 from .mega_csa_weights import (
     GEOMETRY_BY_DIM,
+    HC_MIX,
     HEAD_DIM,
     INDEX_HEAD_DIM,
     INDEX_HEADS,
@@ -95,6 +96,21 @@ _REQUIRED_EXTENSION_PARAMETERS = {
         "output_scale",
     ),
 }
+_MOE_FRONT_PLAN_PARAMETERS = {
+    "run_learned_out": (
+        "router_logits",
+        "norm_eps",
+        "hc_eps",
+        "route_scale",
+        "use_pdl",
+    ),
+    "run_hash_out": (
+        "norm_eps",
+        "hc_eps",
+        "route_scale",
+        "use_pdl",
+    ),
+}
 _DEEP_GEMM_SYMBOLS_BY_COMPONENT = {
     "csa": (
         "get_num_sms",
@@ -142,6 +158,26 @@ def _requirements(
     )
 
 
+def _moe_front_plan_abi_reason(dsv4_mega: Any) -> Optional[str]:
+    plan_type = getattr(dsv4_mega, "Dsv4MoeFrontPlan", None)
+    if not callable(plan_type):
+        return "Dsv4MoeFrontPlan is missing or not callable"
+    for method_name, parameters in _MOE_FRONT_PLAN_PARAMETERS.items():
+        method = getattr(plan_type, method_name, None)
+        if not callable(method):
+            return f"Dsv4MoeFrontPlan.{method_name} is missing or not callable"
+        try:
+            signature = inspect.signature(method)
+        except (TypeError, ValueError):
+            # Some pybind builds do not expose signatures. Presence and
+            # callability still provide a useful ABI check in that case.
+            continue
+        absent = [name for name in parameters if name not in signature.parameters]
+        if absent:
+            return f"Dsv4MoeFrontPlan.{method_name} missing " f"{','.join(absent)}"
+    return None
+
+
 def _runtime_unavailable_reason(
     device: torch.device,
     components: Sequence[str],
@@ -180,8 +216,9 @@ def _runtime_unavailable_reason(
             continue
         try:
             signature = inspect.signature(getattr(dsv4_mega, function_name))
-        except (TypeError, ValueError) as exc:
-            incompatible.append(f"{function_name} has no inspectable signature ({exc})")
+        except (TypeError, ValueError):
+            # pybind11 functions may be callable without an inspectable
+            # signature; do not reject a runtime solely for that limitation.
             continue
         absent = [name for name in parameters if name not in signature.parameters]
         if absent:
@@ -191,6 +228,10 @@ def _runtime_unavailable_reason(
             "rtp-kernel DSV4 Mega ABI is incompatible: " + "; ".join(incompatible),
             None,
         )
+    if "moe_front" in components:
+        reason = _moe_front_plan_abi_reason(dsv4_mega)
+        if reason is not None:
+            return "rtp-kernel DSV4 MoE-front ABI is incompatible: " + reason, None
 
     try:
         import deep_gemm
@@ -266,6 +307,7 @@ def _compiled_geometry_reason(
             "kernel_contract_version": 3,
             "hidden": int(args.dim),
             "hc_mult": int(args.hc_mult),
+            "hc_width": HC_MIX,
             "experts": int(args.n_routed_experts),
             "topk": int(args.n_activated_experts),
             "max_m": MAX_BATCH,

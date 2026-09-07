@@ -31,7 +31,7 @@ mode reads tensors from `mw.global_weights[W.*]` and
 import logging
 import os
 from dataclasses import dataclass
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Sequence, Tuple
 
 import torch
 
@@ -275,6 +275,7 @@ def _args_from_model_config(
         norm_eps=float(model_config.layernorm_eps),
         max_batch_size=max_generate_batch_size,  # from framework, supports concurrent requests
         max_seq_len=int(model_config.max_seq_len) or 4096,
+        gen_num_per_cycle=int(model_config.gen_num_per_cycle),
         # Mega MoE sizes its symm-mem dispatch buffer from this bound.
         # max_seq_len is the safest per-rank upper bound (one long prefill
         # fully on one rank) — the buffer is allocated once and reused.
@@ -478,6 +479,11 @@ class DeepSeekV4Model(GptModelBase):
                 traceback.format_exc(),
             )
             raise
+
+    def prepare_mega_capture_plans(self, capture_batches: Sequence[int]) -> None:
+        """Prepare Mega MoE-front plans for the C++ graph capture buckets."""
+        if self.v4 is not None:
+            self.v4.prepare_mega_capture_plans(capture_batches)
 
     def _resolve_shared_token_capacity(self) -> int:
         if self._is_decode_role:

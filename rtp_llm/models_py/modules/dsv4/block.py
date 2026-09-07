@@ -6,7 +6,7 @@ twice — once for Attention and once for MoE FFN.
 
 import logging
 import os
-from typing import Callable, Dict, Optional, Tuple
+from typing import Callable, Dict, Optional, Sequence, Tuple
 
 import torch
 import torch.nn as nn
@@ -199,7 +199,9 @@ class Block(nn.Module):
 
         self._mega_hca_adapter = MegaHCAAdapter(self, layer_weights, runtime)
 
-    def enable_mega_front(self, *, required: bool = False) -> None:
+    def enable_mega_front(
+        self, *, required: bool = False, gen_num_per_cycle: int = 0
+    ) -> None:
         """Attach the CUDA-extension MoE front to a MegaMoE-SE decode layer."""
         strategy_name = getattr(self.ffn._strategy, "name", "")
         if strategy_name != "mega_se":
@@ -227,8 +229,16 @@ class Block(nn.Module):
         from rtp_llm.models_py.modules.dsv4.moe.mega_front import MegaMoeFrontAdapter
 
         self._mega_front_adapter = MegaMoeFrontAdapter(
-            self.ffn, self.ffn_hc, self.ffn_norm
+            self.ffn,
+            self.ffn_hc,
+            self.ffn_norm,
+            gen_num_per_cycle=gen_num_per_cycle,
         )
+
+    def prepare_mega_capture_plans(self, capture_batches: Sequence[int]) -> None:
+        """Prepare MoE-front plans for the framework's graph capture buckets."""
+        if self._mega_front_adapter is not None:
+            self._mega_front_adapter.prepare_capture_plans(capture_batches)
 
     def _sync_after_first_cp_prefill_attention(self) -> None:
         if self._cp_sync_after_attn_done:
