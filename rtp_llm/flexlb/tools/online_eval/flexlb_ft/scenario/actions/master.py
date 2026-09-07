@@ -602,6 +602,8 @@ def _client_check(ctx, params, deadline):
         if metric == "visible_terminal_share":
             actual = actual / n if n else 0
     elif metric == "wrong_error_code":
+        # Preserve the legacy literal substring predicate, not a typed/exact
+        # code claim. A strict check needs a structured client error-code field.
         actual = sum(str(params["code"]) not in str(r.get("error", "")) for r in rows)
     else:
         actual = sum(r["route_path"] == "failed" for r in rows)

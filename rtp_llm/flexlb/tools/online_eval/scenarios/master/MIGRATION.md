@@ -75,6 +75,7 @@ Each check below is qualified as `stage.check`. Windows use the actual Java clie
 - `master_ready` requires ready=true and both full discovered/alive counts. Where the old predicate checked only a minimum alive count or B readiness, this is stricter. Quota `ready.inflight` additionally checks scheduler/endpoint zero after restart. These extra checks are not presented as legacy-only equivalence.
 - Count predicates such as “at least one switched request” use target_count>=1, not an arbitrary 1% threshold. Failure tolerance is zero for count<=1, otherwise count/N<=0.05, exactly equivalent to the original integer tolerance; empty traffic cannot independently establish success.
 - Freeze scheduler continuity with zero pre-freeze inflight preserves the old conditional contract and records `nonzero_before_observed=false`; it does not prove preservation of a nonzero ledger.
+- `business_code.criterion` preserves the old literal substring test on Java error text. It is not a typed or exact code assertion: text containing `84310` also contains `8431`. A strict typed-code check remains unimplemented and requires an explicit structured Java client field/protocol; it must be added as a separate check, not reported as already covered by this legacy predicate.
 - The raw Java client field guard remains mandatory. Structured port ACK and owned resource handles do not prove engine generation identity. No JavaMock conclusion extends to C++ Engine slots, KV references, GPU memory or an exact global TTL.
 
 ## Local verification
