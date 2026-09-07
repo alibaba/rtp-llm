@@ -32,7 +32,9 @@ bookkeeping against the actual registry and compiled YAML inventory. The audit
 rejects omitted contracts, dropped profiles, duplicate family assignments and
 unreviewed source drift. It also compares candidate IDs, remaining IDs, counts,
 source files and implementation status to compiled programs, and checks that
-static-review metadata names only present candidates at an immutable revision. It reuses the independent acceptance oracle rather than
+static-review metadata names only present candidates and uses full commit-hash
+syntax. This syntax check does not verify that the Git object exists, bind a
+reviewer signature, or compare reviewed blobs with the current candidate source. It reuses the independent acceptance oracle rather than
 changing that oracle to fit current results.
 
 The selected legacy inventory has 371 profile instances (122/86/91/72). These are

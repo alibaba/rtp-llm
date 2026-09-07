@@ -81,7 +81,7 @@ def audit_candidates(families, plans):
                 or len(revision) != 40
                 or any(char not in "0123456789abcdef" for char in revision)
             ):
-                errors.append(f"{fid}: static review needs an immutable full revision")
+                errors.append(f"{fid}: static review needs full commit-hash syntax")
         elif review.get("status") != "pending":
             errors.append(f"{fid}: missing or unsupported static review status")
     return errors, {
