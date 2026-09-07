@@ -188,7 +188,7 @@ class FullTests(unittest.TestCase):
                 )
             self.assertEqual(tuple(c.status for c in result.checks), expected)
 
-    def run_program(self, bad_retirement=False):
+    def run_program(self, bad_retirement=False, stop_drift=False, stop_queue=False):
         handlers = {h.name: h for h in e.HANDLERS + control.HANDLERS}
         plan = next(
             p
@@ -199,7 +199,7 @@ class FullTests(unittest.TestCase):
             if p["variant_id"] == "kv_full_shrink"
         )
         self.assertEqual(plan["environment"]["decode_cache_blocks"], 24)
-        self.assertEqual(len(plan["stages"]), 35)
+        self.assertEqual(len(plan["stages"]), 36)
         self.assertEqual(plan["resource_budget"]["max_dynamic_additions"], 1)
         clock = Clock()
         lock = threading.RLock()
@@ -289,10 +289,24 @@ class FullTests(unittest.TestCase):
                                 continue
                             rows[name] = dict(
                                 role=name.split("-")[0],
-                                mock_engine_completed_total=t * 30,
+                                mock_engine_completed_total=t * 30
+                                + (
+                                    10000
+                                    if stop_drift
+                                    and name == "decode-1"
+                                    and state.get("stop_at") is not None
+                                    and t >= state["stop_at"]
+                                    else 0
+                                ),
                                 mock_engine_cache_blocks=24,
                                 mock_engine_available_blocks=20,
-                                mock_engine_waiting=1,
+                                mock_engine_waiting=(
+                                    3
+                                    if stop_queue
+                                    and state.get("stop_at") is not None
+                                    and t >= state["stop_at"]
+                                    else 1
+                                ),
                                 mock_engine_lack_mem_rejects_total=0,
                                 mock_engine_kv_admission_fails_total=0,
                                 rtp_llm_context_tps=10,
@@ -419,6 +433,19 @@ class FullTests(unittest.TestCase):
                     worker_summary=dict(DECODE=dict(discovered=n, alive=n))
                 )
 
+            original_stop = e.BoundedFlow.stop
+
+            def delayed_stop(flow, deadline, **kwargs):
+                result = original_stop(flow, deadline, **kwargs)
+                if (
+                    state["added"] is not None
+                    and "stop_at" not in state
+                    and (stop_drift or stop_queue)
+                ):
+                    state["stop_at"] = clock() + 1
+                    clock.sleep(2)
+                return result
+
             original_collect = full.collect
 
             def observed_collect(ctx, params, deadline):
@@ -431,9 +458,11 @@ class FullTests(unittest.TestCase):
                 observed_collect,
                 {"result": "snapshot"},
             )
-            with patch.object(e, "ElasticMetrics", Metrics), patch.object(
-                e.RecordedRequests, "run", run
-            ), patch.object(e, "_http", side_effect=http), patch.object(
+            with patch.object(e.BoundedFlow, "stop", delayed_stop), patch.object(
+                e, "ElasticMetrics", Metrics
+            ), patch.object(e.RecordedRequests, "run", run), patch.object(
+                e, "_http", side_effect=http
+            ), patch.object(
                 control, "_http", side_effect=http
             ), patch.object(
                 concurrent, "mutation_http", side_effect=http
@@ -489,6 +518,22 @@ class FullTests(unittest.TestCase):
                 for s in state["fill_shapes"]
             )
         )
+
+    def test_steady_includes_stop_period_completion_drift_and_waiting_peak(self):
+        for option, failed in [
+            ("stop_drift", "share_max"),
+            ("stop_queue", "waiting_peak"),
+        ]:
+            result, state = self.run_program(**{option: True})
+            row = next(s for s in result["stages"] if s["id"] == "steady_bounds")
+            self.assertEqual(row["status"], "FAIL", result)
+            self.assertEqual(
+                next(c for c in row["checks"] if c["id"] == failed)["status"], "FAIL"
+            )
+            self.assertEqual(
+                next(s for s in result["stages"] if s["id"] == "slow_victim")["status"],
+                "BLOCKED",
+            )
 
     def test_timeout_retirement_message_failure_is_not_relabeled(self):
         result, _ = self.run_program(bad_retirement=True)

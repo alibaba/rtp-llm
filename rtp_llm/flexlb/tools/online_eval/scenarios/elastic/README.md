@@ -247,7 +247,7 @@ gaps. This candidate still needs independent review and real Java mock acceptanc
 ## KV-full shrink variant
 
 `elastic_lifecycle::kv_full_shrink::batch-window` preserves both drain branches
-of `elastic_kv_full_shrink` in one ordered 35-stage, 33-check program. Its private
+of `elastic_kv_full_shrink` in one ordered 36-stage, 33-check program. Its private
 2P/2D environment declares `decode_cache_blocks: 24`. Both initial and dynamically
 added Decode workers use that actual pool size; no artificial KV-pressure setter
 is used. The candidate requires the core's explicit cache-pool environment fields.
@@ -272,7 +272,9 @@ The two background windows preserve serial 2048/2/one-key requests followed by a
 500ms pause, Schedule 30s and stream **10s**. They stop for remove/accounting; an
 always-running flow would prevent the zero-inflight measurement. Explicit start
 anchors retain the baseline ramp and the branch-one steady ramp in the old
-measurement ranges. The steady tail begins 40s after its settle anchor.
+measurement ranges. The steady tail begins 40s after its settle anchor. Its final end and samples
+are captured after `steady_stop`, including stop/drain-period completions and
+waiting peaks as in the legacy case; the baseline still ends before its stop.
 
 The candidate intentionally preserves the old literal `/set_perf` order, but
 that order does **not** prove a victim-only 1000x tail. All mock services share

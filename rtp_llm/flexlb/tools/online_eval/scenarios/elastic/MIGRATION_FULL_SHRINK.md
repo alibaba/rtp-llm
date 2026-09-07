@@ -9,7 +9,7 @@ acceptance remains pending. The mock and production scheduler are separate owner
 At this candidate's Java base, `JavaMockEngineCluster.startEngine` passes the
 same `performance` object to every `FastRpcService` (lines 315-318); the service
 constructor assigns it directly (1045), and `getPerformance()` returns it (4774).
-`DynamicEngineManager.addEngine` uses that same object (171-175).
+`DynamicEngineManager.addEngine` uses that same object (163-166).
 `MockControlServer.handleSetPerf` calls `service.getPerformance()` and changes its
 Decode override (378-385). Therefore addressing one worker selects a service but
 does not give that service a separate performance model. Per-worker KV pools,

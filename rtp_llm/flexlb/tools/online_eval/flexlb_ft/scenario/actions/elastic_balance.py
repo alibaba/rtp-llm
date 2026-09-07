@@ -142,6 +142,32 @@ def window(ctx, params, deadline):
     )
 
 
+def finish_window_validate(params, plan):
+    from .elastic import _validate
+
+    p = _validate(params, plan, {"window", "observation"}, {"window", "observation"})
+    plan.reference(p["window"], "snapshot")
+    plan.reference(p["observation"], "observation")
+    return p
+
+
+def finish_window(ctx, params, deadline):
+    """Extend an existing window through a completed flow-stop stage."""
+    deadline.check()
+    previous = ctx.resource(params["window"], "snapshot")
+    metrics = ctx.resource(params["observation"], "observation")
+    end = ctx.clock()
+    if not previous["end_s"] <= end <= previous["start_s"] + 1200:
+        raise ValueError("invalid final balance window end")
+    result = dict(start_s=previous["start_s"], end_s=end, data=metrics.snapshot())
+    path = ctx.artifact_dir / f"elastic-balance-final-window-{time.time_ns()}.json"
+    path.write_text(json.dumps(result, indent=2))
+    return StageOutput(
+        output=dict(window=ctx.register_resource("snapshot", result, historical=True)),
+        artifacts=[str(path)],
+    )
+
+
 def points(window, names, metric, start=None, end=None):
     """Keep missing series, counter resets and sample gaps distinguishable from zero."""
     start = window["start_s"] if start is None else start
@@ -408,6 +434,12 @@ def mark(ctx, params, deadline):
 
 
 HANDLERS = [
+    StageHandler(
+        "elastic_balance_finish_window",
+        finish_window_validate,
+        finish_window,
+        {"window": "snapshot"},
+    ),
     StageHandler("elastic_balance_mark", empty, mark, {"time_s": "number"}),
     StageHandler(
         "elastic_balance_remove",
