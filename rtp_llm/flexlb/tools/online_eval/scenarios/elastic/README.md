@@ -138,14 +138,65 @@ Cleanup cancels request work and waits for mutation workers before tearing down
 the instance-owned environment. The legacy function remains until independent
 acceptance; real Java mock acceptance of this new family is pending.
 
-## Remaining families
+## Pending drain
 
-| Final family | Remaining migration |
+`pending_drain.yaml` implements the fourth logical family as two explicit programs:
+`legacy_terminal` (12 stages, 12 checks) and `zero_errors` (13 stages, 15 checks).
+Only the former maps to `elastic_remove_pending_drain`; the stronger variant has
+an empty legacy mapping so it cannot be counted as old-contract acceptance.
+Both use a fresh private 2P/2D fault environment, PRIORITY/FIXED_WINDOW/BATCH,
+two Prefill batch leases and omitted queue timeout (the Java default remains).
+
+| Legacy contract | Actual stage/check or evidence |
 | --- | --- |
-| `elastic_pending_drain` | Explicit pending construction and cohort ledger, legacy 40s visible terminal, accounting cleanup, new zero-error assertion |
+| Both prefills slow to 8000ms, 1.5s perf synchronization | `slow_both_prefills`, `perf_sync` |
+| Serial Schedule submissions, concurrent stream consumers, 300ms accepted-request spacing | `wave`; at most 14 attempts, target four victim-routed, 1024 input / 2 output / three unique cold keys |
+| At least three victim-routed requests and aggregate pending estimate at least one | `wave.victim_routed`, `.pending_nonempty` |
+| Graceful removal starts the terminal clock | `remove`: 60s server drain, 95s HTTP client cap, captured timestamp immediately before HTTP |
+| Every victim-routed request completes or explicitly fails within 40s | `visible_terminal.victim_visible_terminal` |
+| Accounting returns to zero within 50s after collection | `accounting.scheduler`, `.prefill_batches`, `.decode_load` |
+| Survivor recovery at least 19/20 | `recovery.complete`, `.success_rate`; concurrency 10, 2048 input / 2 output / three cold keys, Schedule 30s and stream 15s |
+| Victim absent from mock services and file; Master sees one alive prefill | `remove.membership`, `topology.discovery`, `.master` |
 
-The later full-shrink, transient-imbalance and steady-recovery contracts still
-remain legacy. Along with the two skew variants now mapped above, these are the
-five additions beyond the original eight elastic cases (13 current legacy
-cases). They must not be deleted to reach the four-family target. Three final
-families have YAML implementations; this is not acceptance of all four.
+`wave.no_completed_interference` is an additional construction guard: the victim's
+engine completion counter must not advance and no victim client stream may have
+terminated before removal. Otherwise completed requests could inflate the old
+`routed - waiting - running` pending estimate. Missing or non-monotonic completion
+counters are ERROR. This remains an aggregate inference, not proof of the exact
+request IDs in the Master's WorkerBatcher queue. Construction and cleanup records
+are stored separately so cleanup cannot overwrite the pre-removal evidence.
+
+All Schedule attempts remain in the client ledger. Rejections and survivor
+outcomes retain their legacy observation scope; they are included in the stronger
+`all_issued_zero_errors` denominator. The old visible-terminal verdict is victim
+only and permits explicit business or transport errors. An empty close, missing
+terminal, collector timeout or collector cancellation cannot satisfy it, even
+when cancellation itself ends the RPC. Fast (<=5s), stale-window (<=16s) and slow
+failure shapes remain observations. `drained=true` never substitutes for either
+client-visible completion or zero errors.
+
+Every issued request owns a consumer and independent done event. Schedule and
+stream budgets remain 30s/60s (90s total per wave request); the wave has a finite
+450s stage budget covering the old maximum 14 serial Schedule attempts. Consumers
+may span subsequent stages as registered resources. Collection retains per-stream
+45s waits, records any cancellation and proves consumer exit; the 100s collection
+budget covers the remaining bounded request lifetimes. Cleanup cancels and waits
+for these consumers before environment teardown. Accounting starts after collection,
+not 50s after removal. The dedicated recovery reuses the bounded cold batch helper;
+rebalance remains exactly 50 requests with a separate 100% success contract.
+
+Local tests use formal loader -> compiler -> runtime, real request-consumer
+threads, and simulated HTTP/gRPC services. They cover legacy explicit-error PASS
+versus zero-error FAIL, Schedule-rejection accounting, false pending caused by
+engine completion, the 40s terminal boundary, empty/cancelled terminals, recovery
+19/20 versus 18/20, and missing owner counters. Real Java mock and independent
+contract acceptance remain pending; legacy code stays available.
+
+## Remaining variants
+
+Full-shrink, transient-imbalance and steady-recovery contracts remain legacy and
+must be folded into the four families. Along with the two skew variants mapped
+above, these are the five additions beyond the original eight elastic cases
+(13 current legacy cases). They must not be deleted to reach the four-family
+target. All four final families now have YAML candidates; this is not complete
+coverage or acceptance of all 13 legacy contracts.

@@ -1,0 +1,161 @@
+schema_version: 1
+id: elastic_pending_drain
+description: Private pending-wave scale-in; legacy visible terminals and an explicit
+  stronger all-issued zero-error variant.
+category: elastic
+profiles:
+- batch-window
+requires:
+- enqueue_batch
+legacy_case_ids:
+- elastic_remove_pending_drain
+estimated_duration_s: 120
+environment:
+  backend: java_mock
+  n_prefill: 2
+  n_decode: 2
+  discovery: discovery_file
+  perf_preset: fault_env
+  config_overrides:
+    ordering: priority
+    queue_timeout_ms:
+      omit: true
+    max_inflight_batches: 2
+execution:
+  timeout_s: 1200
+  stage_timeout_s: 40
+  cleanup_timeout_s: 120
+variants:
+- id: legacy_terminal
+- id: zero_errors
+  legacy_case_ids: []
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: slow_both_prefills
+    action: engine_control
+    params:
+      operation: set_perf
+      targets:
+      - prefill-0
+      - prefill-1
+      perf:
+        prefill_fixed_ms: 8000
+  - id: perf_sync
+    action: elastic_pause
+    params:
+      seconds: 1.5
+  - id: wave
+    action: elastic_pending_wave
+    timeout_s: 450
+  - id: remove
+    action: elastic_pending_remove
+    timeout_s: 110
+  - id: collect
+    action: elastic_pending_collect
+    timeout_s: 100
+    params:
+      requests:
+        $ref: stages.wave.output.requests
+      mutation:
+        $ref: stages.remove.output.mutation
+  - id: accounting
+    action: elastic_pending_accounting
+    timeout_s: 60
+  - id: restore_survivor
+    action: engine_control
+    params:
+      operation: set_perf
+      targets:
+      - prefill-1
+      perf:
+        prefill_fixed_ms: 100
+  - id: recovery
+    action: elastic_pending_recovery
+    timeout_s: 100
+  - id: topology
+    action: elastic_topology
+    timeout_s: 35
+    params:
+      role: PREFILL
+      discovered: 1
+      alive: 1
+      port:
+        $ref: stages.remove.output.port
+      present: false
+  - id: visible_terminal
+    action: elastic_pending_visible
+    params:
+      result:
+        $ref: stages.collect.output.result
+  - id: all_issued_zero_errors
+    action: elastic_flow_assert
+    params:
+      result:
+        $ref: stages.collect.output.summary
+      min_success_rate: 1.0
+  - id: teardown
+    action: teardown
+stages:
+- id: setup
+  action: setup
+  timeout_s: 180
+- id: slow_both_prefills
+  action: engine_control
+  params:
+    operation: set_perf
+    targets:
+    - prefill-0
+    - prefill-1
+    perf:
+      prefill_fixed_ms: 8000
+- id: perf_sync
+  action: elastic_pause
+  params:
+    seconds: 1.5
+- id: wave
+  action: elastic_pending_wave
+  timeout_s: 450
+- id: remove
+  action: elastic_pending_remove
+  timeout_s: 110
+- id: collect
+  action: elastic_pending_collect
+  timeout_s: 100
+  params:
+    requests:
+      $ref: stages.wave.output.requests
+    mutation:
+      $ref: stages.remove.output.mutation
+- id: accounting
+  action: elastic_pending_accounting
+  timeout_s: 60
+- id: restore_survivor
+  action: engine_control
+  params:
+    operation: set_perf
+    targets:
+    - prefill-1
+    perf:
+      prefill_fixed_ms: 100
+- id: recovery
+  action: elastic_pending_recovery
+  timeout_s: 100
+- id: topology
+  action: elastic_topology
+  timeout_s: 35
+  params:
+    role: PREFILL
+    discovered: 1
+    alive: 1
+    port:
+      $ref: stages.remove.output.port
+    present: false
+- id: visible_terminal
+  action: elastic_pending_visible
+  params:
+    result:
+      $ref: stages.collect.output.result
+- id: teardown
+  action: teardown

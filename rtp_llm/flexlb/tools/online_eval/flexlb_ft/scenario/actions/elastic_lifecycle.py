@@ -261,6 +261,10 @@ def batch_validate(params, plan):
 
 
 def batch(ctx, params, deadline):
+    return bounded_batch(ctx, params["count"], deadline)
+
+
+def bounded_batch(ctx, count, deadline, min_success_rate=1.0):
     from .elastic import RecordedRequests, completeness
 
     records = RecordedRequests(ctx.ops, ctx.env_epoch, ctx.clock)
@@ -281,7 +285,11 @@ def batch(ctx, params, deadline):
         rid = record["wire_request_id"]
         records.run(
             record,
-            dict(output_len=2, block_keys=[rid * 100 + j for j in range(3)]),
+            dict(
+                input_len=2048,
+                output_len=2,
+                block_keys=[rid * 100 + j for j in range(3)],
+            ),
             timeout_s=min(45, end - ctx.clock()),
             stream_timeout_s=15,
         )
@@ -290,9 +298,9 @@ def batch(ctx, params, deadline):
         try:
             issued = [
                 records.issue(ctx.ops.next_request_id(), ctx.clock)
-                for _ in range(params["count"])
+                for _ in range(count)
             ]
-            with ThreadPoolExecutor(max_workers=min(10, params["count"])) as pool:
+            with ThreadPoolExecutor(max_workers=min(10, count)) as pool:
                 list(pool.map(run, issued))
         except BaseException as exc:
             error.append(f"{type(exc).__name__}: {exc}")
@@ -336,14 +344,16 @@ def batch(ctx, params, deadline):
                 "complete",
                 (
                     "PASS"
-                    if result["result_complete"] and result["issued"] == params["count"]
+                    if result["result_complete"] and result["issued"] == count
                     else "FAIL"
                 ),
                 evidence=result,
             ),
             CheckResult(
-                "no_errors",
-                "PASS" if result["zero_errors"] else "FAIL",
+                "no_errors" if min_success_rate == 1.0 else "success_rate",
+                "PASS" if result["completed"] / count >= min_success_rate else "FAIL",
+                actual=result["completed"] / count,
+                expected=min_success_rate,
                 evidence=result,
             ),
         ],
@@ -368,12 +378,29 @@ def accounting_validate(params, plan):
 
 
 def accounting(ctx, params, deadline):
+    return accounting_window(ctx, deadline, 95)
+
+
+def accounting_window(ctx, deadline, budget_s):
     start = ctx.clock()
-    evidence = dict(started_s=start, samples=[], budget_s=95)
+    evidence = dict(started_s=start, samples=[], budget_s=budget_s)
     path = ctx.artifact_dir / f"elastic-accounting-{time.time_ns()}.json"
+
+    class ProbeDeadline:
+        def check(self):
+            deadline.check()
+            if ctx.clock() >= start + budget_s:
+                raise TimeoutError("accounting observation budget expired")
+
+        def remaining(self):
+            self.check()
+            return min(deadline.remaining(), start + budget_s - ctx.clock())
+
     try:
         while True:
-            data = _master_get(ctx, "rtp_llm/inflight_status", deadline)
+            if evidence["samples"] and ctx.clock() - start >= budget_s:
+                break
+            data = _master_get(ctx, "rtp_llm/inflight_status", ProbeDeadline())
             evidence["samples"].append(dict(time_s=ctx.clock(), data=data))
             if (
                 not isinstance(data, dict)
@@ -404,14 +431,15 @@ def accounting(ctx, params, deadline):
                 dvalues.extend(values)
             if any(type(v) is not int or v < 0 for v in [sched, *pvalues, *dvalues]):
                 raise ValueError("invalid owner-specific inflight counters")
+            within_budget = ctx.clock() - start <= budget_s
             clean = dict(
-                scheduler=sched == 0,
-                prefill_batches=all(v == 0 for v in pvalues),
-                decode_load=all(v == 0 for v in dvalues),
+                scheduler=sched == 0 and within_budget,
+                prefill_batches=all(v == 0 for v in pvalues) and within_budget,
+                decode_load=all(v == 0 for v in dvalues) and within_budget,
             )
-            if all(clean.values()) or ctx.clock() - start >= 95:
+            if all(clean.values()) or ctx.clock() - start >= budget_s:
                 break
-            deadline.sleep(min(0.5, 95 - (ctx.clock() - start)))
+            deadline.sleep(min(0.5, budget_s - (ctx.clock() - start)))
         return StageOutput(
             checks=[
                 CheckResult(k, "PASS" if v else "FAIL", evidence=evidence)
