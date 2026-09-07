@@ -3,20 +3,13 @@ Adapter to provide a unified interface from individual config objects.
 This allows Router and Executor classes to work with specific config objects.
 """
 
-from typing import TYPE_CHECKING, Optional, Union
+from typing import TYPE_CHECKING, Optional
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.ops import MoeConfig, ParallelismConfig
 
 if TYPE_CHECKING:
     from rtp_llm.config.quant_config import QuantizationConfig
-
-
-class _UnsetQuantConfig:
-    pass
-
-
-_UNSET_QUANT_CONFIG = _UnsetQuantConfig()
 
 
 class MoEConfigAdapter:
@@ -30,11 +23,7 @@ class MoEConfigAdapter:
         model_config: ModelConfig,
         parallelism_config: ParallelismConfig,
         moe_config: Optional[MoeConfig] = None,
-        # Omitted means inherit the model-level config; explicit None means
-        # this layer is intentionally excluded from quantization.
-        quant_config: Union["QuantizationConfig", None, _UnsetQuantConfig] = (
-            _UNSET_QUANT_CONFIG
-        ),
+        quant_config: Optional["QuantizationConfig"] = None,
         enable_cuda_graph: bool = False,
     ):
         if not isinstance(enable_cuda_graph, bool):
@@ -42,11 +31,9 @@ class MoEConfigAdapter:
         self.model_config = model_config
         self.parallelism_config = parallelism_config
         self.moe_config = moe_config if moe_config is not None else MoeConfig()
-        self.quant_config = (
-            model_config.quant_config
-            if quant_config is _UNSET_QUANT_CONFIG
-            else quant_config
-        )
+        # None means that this layer is not quantized. Callers that want
+        # model-level quantization pass model_config.quant_config explicitly.
+        self.quant_config = quant_config
 
         # Provide shortcut access to commonly used attributes
         self.ep_size = parallelism_config.ep_size

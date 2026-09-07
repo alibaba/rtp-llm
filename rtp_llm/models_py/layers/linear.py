@@ -51,7 +51,6 @@ class LinearBase(RtpModule):
         prefix: str = "",
         bias: bool = False,
         params_dtype: torch.dtype = torch.float16,
-        **kwargs,
     ):
         super().__init__()
         _validate_parallel_partition(tp_size, tp_rank, "TP")
@@ -160,7 +159,6 @@ class ColumnParallelLinear(LinearBase):
         bias: bool = False,
         gather_output: bool = False,
         params_dtype: torch.dtype = torch.float16,
-        **kwargs,
     ):
         _validate_parallel_partition(tp_size, tp_rank, "TP")
         if not isinstance(gather_output, bool):
@@ -180,7 +178,6 @@ class ColumnParallelLinear(LinearBase):
             prefix=prefix,
             bias=bias,
             params_dtype=params_dtype,
-            **kwargs,
         )
 
         self.quant_method.create_weights(
@@ -290,7 +287,6 @@ class RowParallelLinear(LinearBase):
         bias: bool = False,
         reduce_output: bool = True,
         params_dtype: torch.dtype = torch.float16,
-        **kwargs,
     ):
         _validate_parallel_partition(tp_size, tp_rank, "TP")
         if not isinstance(reduce_output, bool):
@@ -313,7 +309,6 @@ class RowParallelLinear(LinearBase):
             prefix=prefix,
             bias=bias,
             params_dtype=params_dtype,
-            **kwargs,
         )
 
         self.quant_method.create_weights(
@@ -433,7 +428,6 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         bias: bool = False,
         shard_names: Optional[List[str]] = None,
         params_dtype: torch.dtype = torch.float16,
-        **kwargs,
     ):
         if shard_names:
             self.shard_names = list(shard_names)
@@ -457,7 +451,6 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
             prefix=prefix,
             bias=bias,
             params_dtype=params_dtype,
-            **kwargs,
         )
 
     def load_weights(self, weights: Dict[str, torch.Tensor]):
@@ -837,7 +830,6 @@ class QKVParallelLinear(ColumnParallelLinear):
         prefix: str = "",
         bias: bool = False,
         params_dtype: torch.dtype = torch.float16,
-        **kwargs,
     ):
         _validate_parallel_partition(tp_size, tp_rank, "TP")
         _require_positive_int(hidden_size, "hidden_size")
@@ -882,7 +874,6 @@ class QKVParallelLinear(ColumnParallelLinear):
             prefix=prefix,
             bias=bias,
             params_dtype=params_dtype,
-            **kwargs,
         )
         self.output_size_per_partition = total_output
         self.gather_output = False

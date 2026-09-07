@@ -60,6 +60,19 @@ bool validAllocatorDumpId(const std::string& dump_id) {
     });
 }
 
+std::string truncateUtf8(std::string value, size_t max_bytes) {
+    if (value.size() <= max_bytes) {
+        return value;
+    }
+    size_t end = max_bytes;
+    while (end > 0 && end < value.size()
+           && (static_cast<unsigned char>(value[end]) & 0xC0) == 0x80) {
+        --end;
+    }
+    value.resize(end);
+    return value;
+}
+
 std::string formatRequestLogTag(const std::string& request_key, const RequestInfo& request_info) {
     std::string tag = "request [" + request_key + "]";
     if (!request_info.trace_id.empty()) {
@@ -1011,9 +1024,9 @@ LocalRpcServer::UpdateWeights(grpc::ServerContext* context, const UpdateWeightsR
     try {
         if (!weight_manager_ || weight_manager_.is_none()) {
             const std::string error_msg = "UpdateWeights is unavailable because no weight manager is configured; "
-                                          "restart with --require_weight_update true (recommended) or "
-                                          "--use_new_loader false";
-            RTP_LLM_LOG_ERROR("Reject update weights request from %s: %s", context->peer().c_str(), error_msg.c_str());
+                                          "restart with a loader configuration that supports online weight updates";
+            RTP_LLM_LOG_WARNING(
+                "Reject update weights request from %s: %s", context->peer().c_str(), error_msg.c_str());
             return {grpc::StatusCode::UNIMPLEMENTED, error_msg};
         }
         if (request->name().empty() || request->desc().empty() || request->method().empty()) {
@@ -1027,15 +1040,14 @@ LocalRpcServer::UpdateWeights(grpc::ServerContext* context, const UpdateWeightsR
         return grpc::Status::OK;
     } catch (const py::error_already_set& e) {
         const std::string details = e.what();
-        RTP_LLM_LOG_WARNING("UpdateWeights Python exception: %s", details.c_str());
+        RTP_LLM_LOG_ERROR("UpdateWeights Python exception: %s", details.c_str());
         const auto       newline               = details.find('\n');
         std::string      summary               = details.substr(0, newline);
         constexpr size_t kMaxClientErrorLength = 512;
-        if (summary.size() > kMaxClientErrorLength) {
-            summary.resize(kMaxClientErrorLength);
-        }
+        summary = truncateUtf8(std::move(summary), kMaxClientErrorLength);
         return {grpc::StatusCode::INTERNAL, "exception from python: " + summary};
     } catch (const std::exception& e) {
+        RTP_LLM_LOG_ERROR("UpdateWeights C++ exception: %s", e.what());
         return {grpc::StatusCode::INTERNAL, "exception from C++: " + std::string(e.what())};
     }
 }
