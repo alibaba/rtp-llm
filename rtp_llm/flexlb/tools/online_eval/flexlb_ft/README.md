@@ -21,7 +21,7 @@ JAVA_HOME=<JDK21> ./mvnw -P'opensource,!internal' -pl flexlb-mock-engine,flexlb-
 cd rtp_llm/flexlb/tools/online_eval
 
 python3 parallel_runner.py                    # 全量：默认 4 路 case 级分片（profile=batch-window grade=normal）
-python3 parallel_runner.py --dry-run          # 只打印分片矩阵与端口矩阵，不执行
+python3 parallel_runner.py --dry-run          # 只打印分片矩阵与端口矩阵（含端口窗口预检状态），不执行
 python3 parallel_runner.py --parallel 1       # 串行等价（单进程全量）
 python3 parallel_runner.py --categories kv --parallel 2   # 只跑指定分类
 ```
@@ -32,11 +32,11 @@ python3 parallel_runner.py --categories kv --parallel 2   # 只跑指定分类
 
 | 参数 | 取值 | 说明 |
 | --- | --- | --- |
-| `--parallel` | `1..N` | lane 数（默认 4；1 = 单进程串行等价；上限由 mock stride 推导：默认 2000 → 6 路，`--mock-stride 500` → 21 路）|
+| `--parallel` | `1..N` | lane 数（默认 4；1 = 单进程串行等价；上限由 mock stride 推导：默认 500 → 21 路，`--mock-stride 2000` → 6 路）|
 | `--shard` | `case` / `category` | 分片粒度（默认 `case`：逐例 LPT 摊平，同家族 case 可散到不同路；`category`：按家族装箱，最重家族决定 wall 下限）|
 | `--categories` | 逗号分隔 | 只跑指定分类（连字符/下划线均可）|
 | `--timing-json` | 路径 | 逐例耗时基线（默认自动读 `/tmp/flexlb_ft_timing_baseline.json`，可用 env `FLEXLB_FT_TIMING_BASELINE` 改址）|
-| `--mock-stride` | `≥153` | lane 间 mock 端口步长（默认 2000；实测每路 mock 窗口恒 153 口，500 有 ~3x 余量）|
+| `--mock-stride` | `≥153` | lane 间 mock 端口步长（默认 500；实测每路 mock 窗口恒 153 口，~3x 余量）|
 | `--profile` / `--grade` | — | 透传给 runner（默认 `batch-window` / `normal`）|
 | `--json` / `--out-dir` | 路径 | 聚合 JSON 与 lane 产物目录（默认 `/tmp/flexlb_ft_parallel_<ts>/aggregate.json`）|
 | `--keep` / `--dry-run` | — | 透传给 runner / 只打印计划不执行 |
@@ -72,13 +72,19 @@ python3 flexlb_functional_tests.py --filter cancel_basic --profile single-nonbat
 | 段 | 区间 | 说明 |
 | --- | --- | --- |
 | master 组 | `18080+10i .. 18080+10i+5` | http/mgmt/grpc = +0/+1/+2（单 master、HA Tier-1 A、Tier-3 三选一路径共用组首）；HA Tier-1 B = +3..+5 |
-| mock 窗口 | `55151+S*i .. +151` | 显式 `FLEXLB_FT_MOCK_BASE_GRPC_PORT`，消除并发自动扫描的 bind TOCTOU；实测占用宽度恒为 153 口（http=base-1、engines=base..base+n-1、victim zone=base+149..151） |
+| mock 窗口 | `55151+S*i-1 .. 55151+S*i+151` | 显式 `FLEXLB_FT_MOCK_BASE_GRPC_PORT`，消除并发自动扫描的 bind TOCTOU；实测占用宽度恒为 153 口（http=base-1、engines=base..base+n-1、victim zone=base+149..151） |
 
-- `--parallel` 上限由 mock stride 推导：`base+stride*(N-1)+151 ≤ 65535`（默认 stride 2000 → 6 路；`--mock-stride 500` → 21 路上限，容器实测承载 4–8；stride 下限 153 = 窗口宽度，代码内校验）。
-- 同机与他人共用且对方占用默认段时，用 `FLEXLB_FT_PARALLEL_MASTER_BASE`（master 端口基址，默认 18080）/ `FLEXLB_FT_PARALLEL_MOCK_BASE`（mock 端口基址）整体平移——如 `FLEXLB_FT_PARALLEL_MASTER_BASE=18300` 把 master 组从 18080 段挪开（stride 不变，lane 间仍互斥）。
+- `--parallel` 上限由 mock stride 推导：`base+stride*(N-1)+151 ≤ 65535`（默认 stride 500 → 21 路上限，容器实测承载 4–8；stride 下限 153 = 窗口宽度，代码内校验）。`--parallel 6`（全量典型档，默认 lane 数为 4）的 mock 矩阵覆盖 55150..57802，低于 61000 的压测/租约段；这也是默认 stride 从 2000 收紧到 500 的原因。更多 lane 的默认矩阵会按下述规则整体下移。
+- `FLEXLB_FT_PARALLEL_MASTER_BASE` / `FLEXLB_FT_PARALLEL_MOCK_BASE` 可显式设置 master / mock 基址（默认 18080 / 55151）。例如 `FLEXLB_FT_PARALLEL_MASTER_BASE=18300` 只改变 master 基址；任一基址显式设置就固定整个矩阵，遇占用或锁冲突 fail-fast，永不自动平移。显式矩阵进入 61000 以上压测/租约段时会告警，使用者仍须核对租约。
 - 其余 env（如 `FLEXLB_FT_HA_DUAL_MASTER=1`）原样透传给每条 lane；HA 分组与 mock 段已按 lane 同步分段，无需手工干预。
 
-聚合 `--json` 保持单 runner schema（summary + cases[]），另加：`cases[].lane`、`lanes[]`（各路 category 集合 / exit_codes / wall_s）、`summary.parallel / wall_time_s / serial_case_time_s`（最后一项为逐例耗时之和，是串行 wall 的下界，报告加速比时对标实测串行 35–55 分钟而非它）；case 级分片另记 `summary.shard`（category|case）与 `lanes[].case_names`（各路精确 case 名单，分片矩阵是 run 记录的一部分）。退出码 = 任一 lane runner 非零或存在 FAIL。`--parallel 1` 单 lane 跑全量（case 模式为一次 `--cases` 全列表调用，category 模式走 `--category all` 单进程路径），与直接串行等价，可作编排无回归的冒烟基线。
+**端口窗口预检与自动平移**：编排器取得窗口锁后，以 `0.0.0.0` 对每条 lane 的完整窗口做 bind 预检（master 组 6 口、mock 窗口 153 口，共 159 口）。默认基址遇占用或锁冲突时，整个矩阵向下平移重试，保持 mock 矩阵尾 <61000，并输出告警。显式基址失败时报告端口窗口；已绑定端口的诊断包含 lane、master/mock 侧及端口号。
+
+**窗口锁与输出目录锁**：`/tmp/flexlb_ft_portlocks/.admission.lock` 串行保护窗口登记；登记时按数值区间检查所有已有窗口锁的交集，再取得每 lane 的 `m<lo>_<hi>.lock` 和 `g<lo>_<hi>.lock`。部分重叠、不同 lane 数及 master/mock 跨侧重叠都互斥；不相交的矩阵可以同时运行。登记锁随即释放，窗口锁持有到编排器退出，进程死亡时由内核释放。锁目录为 1777、文件为 666；目录或文件不可访问时拒绝运行。不要删除运行中的锁文件或锁目录。旧版本不参与登记锁，切换版本前须等旧编排器退出；外来进程不遵守这些锁，预检完成后仍可能抢占端口，遗留子进程已绑定的端口由 bind 预检识别。
+
+真实运行的顺序是 **窗口锁及 bind 预检 → out-dir 独占 flock → `_plan()`（含 runner `--list`）→ lane 执行**。同一 `--out-dir` 的第二个实例在规划前被拒绝，不能覆盖第一轮产物；两把锁保护不同资源。`--dry-run` 不创建 out-dir、不取得输出目录锁、不执行 case，但会短暂取得窗口锁、创建锁目录/文件并探测端口，随后释放窗口锁。它显示 FREE/BUSY 和基址来源（default / auto / explicit）；不能视为完全无副作用，也不能视为后续运行的端口预约。
+
+聚合 `--json` 保持单 runner schema（summary + cases[]），另加：`cases[].lane`、`lanes[]`（各路 category 集合 / exit_codes / wall_s）、`summary.parallel / wall_time_s / serial_case_time_s`（最后一项为逐例耗时之和，是串行 wall 的下界，报告加速比时对标实测串行 35–55 分钟而非它）；case 级分片另记 `summary.shard`（category|case）与 `lanes[].case_names`（各路精确 case 名单，分片矩阵是 run 记录的一部分）；summary 另记 `master_base` / `mock_base` / `port_provenance`（当轮实际生效的端口基址与来源，见上文「端口窗口预检与自动平移」）。退出码 = 任一 lane runner 非零或存在 FAIL。`--parallel 1` 单 lane 跑全量（case 模式为一次 `--cases` 全列表调用，category 模式走 `--category all` 单进程路径），与直接串行等价，可作编排无回归的冒烟基线。
 
 实测参考（110 开发机容器——参考环境为 256 核共享 Linux 容器，数字随环境与负载变化；batch-window profile，共享负载）：串行单进程 wall 4918s（98 例快照——计时快照取自套件早期规模，现注册 137 例，串行耗时随套件规模增长，相对加速比仍具参考性）；category 级 4 路 wall 2444s（2.01x）——wall 被最重家族钳制（status 24 例实测 2104s，占串行 43%）；case 级 6 路 wall 941s（5.22x，15.7 分钟，最重路 16 例），8 路（`--mock-stride 500`，mock base 平移避开他人占用段）wall 703s（6.99x，11.7 分钟）——逐例摊平后钳制消除。等价性口径：并行 run 对串行基线逐例对照 + FINDING 集一致；实测 6 路 89/98 一致、9 例翻转全部单向好转（对翻转例同 jar 同 env 定向复跑两轮结果稳定，属快照漂移而非编排回归）；8 路对 6 路 FINDING 集完全相等。
 
