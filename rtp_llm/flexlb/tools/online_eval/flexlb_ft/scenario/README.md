@@ -86,12 +86,22 @@ rejected before process startup.
 
 `environment_reconfigure` replaces the complete typed `config_overrides` for a
 new environment within the same instance and leased ports. Worker counts, layout,
+decision and dispatcher are not inferred from a different profile. Optional
+`n_prefill` and `n_decode` explicitly change the fresh worker population; layout,
 decision and dispatcher stay fixed. It first cleans all existing consumers and
 processes; any failure prevents the next startup and retains failed callbacks
 for final cleanup. A new epoch invalidates old live handles. Earlier scalar
 results and explicitly historical snapshots remain available for comparison.
 This is reconstruction, not runtime configuration reload. Allow at least 30 s
 for intermediate cleanup plus the normal startup budget in the stage timeout.
+The compiler keeps `initial_workers` as the actual first population and adds
+`max_environment_workers` only when a later population is larger. The parent
+reserves that maximum plus cumulative dynamic additions; the child and backend
+both reject insufficient capacity before starting processes. Removed workers do
+not reduce the dynamic-addition budget. Later stage validators see the current
+declared environment, and capability requirements are checked in that epoch.
+Omitted topology/metric fields retain their prior declaration, while
+`config_overrides` remains a complete replacement.
 
 `environment_startup_probe` accepts a valid typed base and one of three bounded
 raw mutations: `removed_auto_tpm`, `fifo_default_priority`, or

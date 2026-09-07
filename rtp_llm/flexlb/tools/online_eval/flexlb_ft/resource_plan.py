@@ -51,25 +51,39 @@ class JavaMockBudget:
 
     initial_workers: int
     dynamic_additions: int
+    max_environment_workers: int | None = None
 
     def __post_init__(self) -> None:
         _integer(self.initial_workers, "initial_workers", 1)
         _integer(self.dynamic_additions, "dynamic_additions", 0)
+        if self.max_environment_workers is not None:
+            _integer(
+                self.max_environment_workers,
+                "max_environment_workers",
+                self.initial_workers,
+            )
         if self.worker_capacity > min(VICTIM_OFFSETS):
             raise ResourcePlanError(
-                f"initial_workers + cumulative dynamic additions = {self.worker_capacity} "
+                f"environment worker bound + cumulative dynamic additions = {self.worker_capacity} "
                 f"exceeds {min(VICTIM_OFFSETS)}; Java mock reserves offsets "
                 f"{VICTIM_OFFSETS} for victim/control ports"
             )
 
     @property
     def worker_capacity(self) -> int:
-        return self.initial_workers + self.dynamic_additions
+        return (
+            self.max_environment_workers or self.initial_workers
+        ) + self.dynamic_additions
 
     def to_manifest(self) -> dict:
         return {
             "backend": "java_mock",
             "initial_workers": self.initial_workers,
+            **(
+                {"max_environment_workers": self.max_environment_workers}
+                if self.max_environment_workers is not None
+                else {}
+            ),
             "dynamic_additions": self.dynamic_additions,
             "worker_capacity": self.worker_capacity,
             "mock_control_offset": MOCK_CONTROL_OFFSET,
@@ -87,17 +101,24 @@ class JavaMockBudget:
             "victim_grpc_offset": VICTIM_OFFSETS[1],
             "reserved_tail_offset": VICTIM_OFFSETS[2],
         }
-        if not isinstance(raw, dict) or set(raw) != set(fixed) | {
-            "initial_workers",
-            "max_dynamic_additions",
-        }:
+        required = set(fixed) | {"initial_workers", "max_dynamic_additions"}
+        if not isinstance(raw, dict) or set(raw) not in (
+            required,
+            required | {"max_environment_workers"},
+        ):
             raise ResourcePlanError("invalid resource_budget v1 fields")
         for name, expected in fixed.items():
             if type(raw[name]) is not type(expected) or raw[name] != expected:
                 raise ResourcePlanError(
                     f"unsupported resource budget {name}={raw[name]!r}"
                 )
-        return cls(raw["initial_workers"], raw["max_dynamic_additions"])
+        if "max_environment_workers" in raw:
+            _integer(raw["max_environment_workers"], "max_environment_workers", 1)
+        return cls(
+            raw["initial_workers"],
+            raw["max_dynamic_additions"],
+            raw.get("max_environment_workers"),
+        )
 
 
 @dataclass(frozen=True)

@@ -94,7 +94,9 @@ class BoundedOps:
                 first = self._lease["mock_base"]
                 last = (
                     first
-                    + self._budget["initial_workers"]
+                    + self._budget.get(
+                        "max_environment_workers", self._budget["initial_workers"]
+                    )
                     + self._budget["max_dynamic_additions"]
                     - 1
                 )
@@ -525,6 +527,16 @@ class JavaMockBackend:
         if ":" in str(ctx.artifact_dir.resolve()):
             raise ValueError(
                 "Java mock artifact path contains the JVM -Xlog colon delimiter"
+            )
+        workers = plan["n_prefill"] + plan["n_decode"]
+        budget = ctx.instance["resource_budget"]
+        bound = budget.get("max_environment_workers", budget["initial_workers"])
+        if (
+            workers > bound
+            or workers + budget["max_dynamic_additions"] > self.lease["worker_capacity"]
+        ):
+            raise ValueError(
+                "environment topology exceeds compiled or leased worker capacity"
             )
         from flexlb_ft.context import CaseContext
         from flexlb_ft.engine_ops import EngineOps

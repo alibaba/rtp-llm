@@ -46,7 +46,14 @@ def _validate(params, plan, probe=False):
     from ..compiler import environment
 
     required = {"config_overrides", "mutation"} if probe else {"config_overrides"}
-    if not isinstance(params, dict) or set(params) != required:
+    allowed = (
+        required if probe else required | {"n_prefill", "n_decode", "metric_whitelist"}
+    )
+    if (
+        not isinstance(params, dict)
+        or set(params) - allowed
+        or not required <= set(params)
+    ):
         raise ValueError(f"{plan.path}: expected {sorted(required)}")
     if probe and params["mutation"] not in MUTATIONS:
         raise ValueError(f"{plan.path}: unknown raw config mutation")
@@ -55,6 +62,9 @@ def _validate(params, plan, probe=False):
         original = environment(plan.environment, plan.path, profile)
         replacement = copy.deepcopy(plan.environment)
         replacement["config_overrides"] = copy.deepcopy(params["config_overrides"])
+        for role in ("n_prefill", "n_decode", "metric_whitelist"):
+            if role in params:
+                replacement[role] = params[role]
         target = environment(replacement, plan.path, profile)
         for axis in ("decision", "dispatcher"):
             if original["effective_axes"][axis] != target["effective_axes"][axis]:
@@ -71,7 +81,9 @@ def _validate(params, plan, probe=False):
     if not compiled:
         raise ValueError("environment replacement needs selected profiles")
     return dict(
-        environments=compiled, **({"mutation": params["mutation"]} if probe else {})
+        environments=compiled,
+        environment=replacement,
+        **({"mutation": params["mutation"]} if probe else {}),
     )
 
 
@@ -150,6 +162,11 @@ HANDLERS = [
         _validate,
         reconfigure,
         {"environment": "environment"},
+        max_environment_workers=lambda params, profile: (
+            params["environments"][profile]["n_prefill"]
+            + params["environments"][profile]["n_decode"]
+        ),
+        next_environment=lambda params: params["environment"],
     ),
     StageHandler(
         "environment_startup_probe",

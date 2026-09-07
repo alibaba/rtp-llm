@@ -93,7 +93,9 @@ class EnvironmentTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             _validate({"config_overrides": {"dispatcher": "batch"}}, self.plan)
         with self.assertRaises(ValueError):
-            _validate({"config_overrides": {}, "n_decode": 10}, self.plan)
+            _validate(
+                {"config_overrides": {}, "master_layout": "dual_standalone"}, self.plan
+            )
 
     def test_consumers_clean_before_replacement_old_handles_stale(self):
         initial = _core_action("setup", self.ctx, {}, self.deadline).output[
@@ -229,7 +231,13 @@ class EnvironmentTest(unittest.TestCase):
             initial = (Path(self.tmp.name) / "environment.json").read_bytes()
             self.ctx.env_epoch = 2
             second = environment(
-                {"config_overrides": {"ordering": "fifo"}}, "test", PROFILE
+                {
+                    "n_prefill": 1,
+                    "n_decode": 4,
+                    "config_overrides": {"ordering": "fifo"},
+                },
+                "test",
+                PROFILE,
             )
             backend.setup(self.ctx, second, self.deadline)
             log_args = [

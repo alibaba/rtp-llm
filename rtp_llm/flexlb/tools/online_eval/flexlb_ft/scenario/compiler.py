@@ -295,6 +295,7 @@ def stages(values, path, default_timeout, handlers, env=None, profiles=()):
         fail(path, "expected nonempty stage list")
     outputs, compiled = {}, []
     setup_seen, torn_down = False, False
+    active_environment = copy.deepcopy(env or {})
     for i, value in enumerate(values):
         loc = f"{path}[{i}]"
         mapping(value, loc, {"id", "action", "timeout_s", "params"}, {"id", "action"})
@@ -323,7 +324,7 @@ def stages(values, path, default_timeout, handlers, env=None, profiles=()):
                 PlanContext(
                     loc + ".params",
                     dict(outputs),
-                    copy.deepcopy(env or {}),
+                    copy.deepcopy(active_environment),
                     tuple(profiles),
                 ),
             )
@@ -422,6 +423,10 @@ def stages(values, path, default_timeout, handlers, env=None, profiles=()):
         outputs[sid] = (
             handlers[action].outputs if action in handlers else OUTPUTS[action]
         )
+        if action in handlers and handlers[action].next_environment is not None:
+            active_environment = copy.deepcopy(
+                handlers[action].next_environment(params)
+            )
     return compiled
 
 
@@ -660,28 +665,53 @@ def compile_scenarios(documents, profile=None, handlers=None, grade="normal"):
             for p in selected:
                 # Validate all declared variants, even when CLI selects a subset.
                 resolved = environment(env, source + f"::{vid}.environment", p)
+                initial_workers = resolved["n_prefill"] + resolved["n_decode"]
+                max_environment_workers = initial_workers
+                for stage in compiled:
+                    if stage["action"] in handlers:
+                        bound = handlers[stage["action"]].max_environment_workers
+                        bound = bound(stage["params"], p) if callable(bound) else bound
+                        max_environment_workers = max(
+                            max_environment_workers,
+                            number(
+                                bound,
+                                source
+                                + f"::{vid}.{stage['id']}.max_environment_workers",
+                                integer=True,
+                            ),
+                        )
                 caps = set(resolved["effective_capabilities"])
-                if action_requires - caps:
+                stage_caps = caps
+                for stage in compiled:
+                    descriptor = handlers.get(stage["action"])
+                    stage_requires = set(variant_requires) | (
+                        set(descriptor.requires) if descriptor else set()
+                    )
+                    if stage_requires - stage_caps:
+                        fail(
+                            source,
+                            f"profile {p} stage {stage['id']} effective environment lacks capabilities {sorted(stage_requires - stage_caps)}",
+                        )
+                    if (
+                        stage["action"] == "request"
+                        and stage["params"]["consume"] == "deferred"
+                        and "enqueue_batch" not in stage_caps
+                    ):
+                        fail(
+                            source,
+                            f"profile {p} stage {stage['id']}: deferred consumption requires enqueue_batch",
+                        )
+                    if descriptor and descriptor.next_environment is not None:
+                        next_env = environment(
+                            descriptor.next_environment(stage["params"]),
+                            source + f"::{vid}.{stage['id']}.environment",
+                            p,
+                        )
+                        stage_caps = set(next_env["effective_capabilities"])
+                if max_environment_workers + additions > 149:
                     fail(
                         source,
-                        f"profile {p} effective environment lacks capabilities {sorted(action_requires - caps)}",
-                    )
-                if (
-                    any(
-                        s["action"] == "request"
-                        and s["params"]["consume"] == "deferred"
-                        for s in compiled
-                    )
-                    and "enqueue_batch" not in caps
-                ):
-                    fail(
-                        source,
-                        f"profile {p}: deferred consumption requires enqueue_batch",
-                    )
-                if resolved["n_prefill"] + resolved["n_decode"] + additions > 149:
-                    fail(
-                        source,
-                        "initial workers plus cumulative additions overlap the reserved victim port range",
+                        "maximum environment workers plus cumulative additions overlap the reserved victim port range",
                     )
                 if profile is not None and p != profile:
                     continue
@@ -707,8 +737,12 @@ def compile_scenarios(documents, profile=None, handlers=None, grade="normal"):
                         "resource_budget": {
                             "backend": "java_mock",
                             "bounded": True,
-                            "initial_workers": resolved["n_prefill"]
-                            + resolved["n_decode"],
+                            "initial_workers": initial_workers,
+                            **(
+                                {"max_environment_workers": max_environment_workers}
+                                if max_environment_workers > initial_workers
+                                else {}
+                            ),
                             "max_dynamic_additions": additions,
                             "mock_control_offset": -1,
                             "victim_control_offset": 149,

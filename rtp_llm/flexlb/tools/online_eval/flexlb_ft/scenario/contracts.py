@@ -24,6 +24,10 @@ class StageHandler:
     requires: frozenset[str] = frozenset()
     checks: frozenset[str] = frozenset()
     max_dynamic_additions: object = 0  # nonnegative int or normalized-params -> int
+    # Maximum fresh worker population requested by this stage (not additions).
+    # Callable receives normalized params and the selected profile.
+    max_environment_workers: object = 0
+    next_environment: object = None  # normalized params -> next raw environment
 
 
 @dataclass(frozen=True)

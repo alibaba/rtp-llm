@@ -50,12 +50,14 @@ def validate_lease(path, budget, environ=None):
         raise ScenarioError("lease intervals invalid or overlap")
     if data["lock_names"] != [f"m{m}_{m+5}.lock", f"g{b-1}_{b+151}.lock"]:
         raise ScenarioError("lease lock names do not match port windows")
+    worker_bound = budget.get("max_environment_workers", budget["initial_workers"])
     if (
         budget["backend"] != "java_mock"
         or budget["bounded"] is not True
         or not 1 <= data["worker_capacity"] <= 149
-        or budget["initial_workers"] + budget["max_dynamic_additions"]
-        > data["worker_capacity"]
+        or type(worker_bound) is not int
+        or worker_bound < budget["initial_workers"]
+        or worker_bound + budget["max_dynamic_additions"] > data["worker_capacity"]
     ):
         raise ScenarioError("instance worker budget exceeds lane capacity")
     return data
