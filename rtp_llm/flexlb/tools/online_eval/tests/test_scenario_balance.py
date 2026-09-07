@@ -356,6 +356,45 @@ class BalanceTests(unittest.TestCase):
             ],
         )
 
+    def test_instance_grade_is_inherited_and_explicit_override_wins(self):
+        clock, backend = Clock(), Backend()
+        ctx = NS(ops=NS(owner=backend), clock=clock, env_epoch=1)
+        deadline = Deadline(200, clock, clock.sleep)
+        with patch.object(b, "_http", backend.http):
+            fleet = b._fleet(ctx, deadline, "prefill")
+        records = ClientRecords(1)
+        for i in range(20):
+            row = records.issue(i + 1, clock)
+            records.update(
+                row,
+                schedule=dict(status="OK"),
+                stream=dict(status="OK"),
+                business_finished=True,
+                prefill_addr=f"prefill-{0 if i < 16 else 1}:1234",
+                consumer_exit_s=clock(),
+                transport_terminal_s=clock(),
+            )
+        records.params = dict(count=20)
+        ctx.resource = lambda value, kind: records if value == "cohort" else fleet
+        ctx.resolve = lambda value: value
+        params = dict(
+            requests=["cohort"],
+            fleet="fleet",
+            metric="max_share",
+            property="P1",
+            relax=0,
+        )
+        with tempfile.TemporaryDirectory() as tmp, patch.object(
+            b, "_http", backend.http
+        ):
+            ctx.artifact_dir = Path(tmp)
+            ctx.instance = dict(grade="normal")
+            self.assertEqual(b._check(ctx, params, deadline).checks[0].status, "FAIL")
+            ctx.instance["grade"] = "loose"
+            self.assertEqual(b._check(ctx, params, deadline).checks[0].status, "PASS")
+            params["grade"] = "strict"
+            self.assertEqual(b._check(ctx, params, deadline).checks[0].status, "FAIL")
+
 
 if __name__ == "__main__":
     unittest.main()

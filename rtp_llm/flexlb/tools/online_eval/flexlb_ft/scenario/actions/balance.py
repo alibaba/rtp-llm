@@ -542,8 +542,7 @@ def _check_validate(params, plan):
         raise ValueError("target metric requires target")
     if p["metric"] == "latency_ratio" and "baseline" not in p:
         raise ValueError("latency ratio requires baseline cohort")
-    p.setdefault("grade", "normal")
-    if p["grade"] not in ("strict", "normal", "loose"):
+    if "grade" in p and p["grade"] not in ("strict", "normal", "loose"):
         raise ValueError("unknown run grade")
     p.setdefault("relax", 0)
     _number(p["relax"], 0, 1, integer=True)
@@ -682,7 +681,9 @@ def _check(ctx, params, deadline):
                     )
                 ],
             )
-    report = GradeReport(run_grade=params["grade"])
+    report = GradeReport(
+        run_grade=params.get("grade", ctx.instance.get("grade", "normal"))
+    )
     if params["property"] in ("P2", "P6"):
         if type(value) is not bool:
             raise ValueError("invariant metric must be boolean")

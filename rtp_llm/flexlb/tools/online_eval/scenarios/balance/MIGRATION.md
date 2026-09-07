@@ -19,11 +19,13 @@ timing, workload lengths, grade overrides and resource references.
 | `balance_overload_avoid_prefill` | `balance_overload_transfer::prefill_pressure` | `baseline_p6.property`, `p6.property`, `p5.property`, `p7.property`. Both P workers slow to 5000 ms, 1.5 s sync, 147456-token seed; poll routed engine pending within 6 s, restore other P to 100 ms then .3 s sync. One completed baseline, five short requests fired sequentially .12 s apart before collecting. P5 hot share denominator is all five issued. P7 uses Schedule-start to stream terminal for BATCH, Schedule-start to first output for NON_BATCH (matching actual old code, not its inaccurate “Schedule-return” prose), max successful wave timing / baseline. Seed drained, perf restored, then owned environment teardown. |
 
 All six old cases apply to all four profiles and have `expected_fail=False`.
-Every variant retains those profile combinations. Grade defaults to `normal`;
-each `balance_check` accepts explicit `grade: strict|normal|loose`, uses the
-existing `GradeReport` band resolver, and persists achieved grades in evidence.
+Every variant retains those profile combinations. Each `balance_check` inherits
+`ctx.instance.grade` (fallback `normal`) unless its explicit
+`grade: strict|normal|loose` parameter overrides it. It uses the existing
+`GradeReport` band resolver and persists achieved grades in evidence.
 There is no separate scenario `--grade` CLI in this frozen core; strict/loose
-selection must currently be an explicit stage parameter/override.
+selection must currently be an explicit stage parameter/override or supplied
+instance field. Parent/child CLI plumbing is a separate framework change.
 
 ## Explicit compatibility boundaries
 
