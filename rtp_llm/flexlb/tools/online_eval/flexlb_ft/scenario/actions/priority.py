@@ -4,6 +4,8 @@ import copy
 import json
 import math
 import threading
+import urllib.error
+import urllib.request
 import uuid
 
 from ..backend import RequestBatch
@@ -83,7 +85,9 @@ def _prefill_perf(ctx, p, deadline):
 
 
 def _wave_params(p, plan):
-    p = _params(p, {"requests", "gap_s", "serial_schedule"}, {"requests"})
+    p = _params(
+        p, {"requests", "gap_s", "serial_schedule", "defer_batch"}, {"requests"}
+    )
     if not isinstance(p["requests"], list) or not 1 <= len(p["requests"]) <= 32:
         raise ValueError("priority cohort must contain 1..32 requests")
     tags = set()
@@ -105,6 +109,9 @@ def _wave_params(p, plan):
     p.setdefault("serial_schedule", False)
     if type(p["serial_schedule"]) is not bool:
         raise ValueError("serial_schedule must be boolean")
+    p.setdefault("defer_batch", False)
+    if type(p["defer_batch"]) is not bool:
+        raise ValueError("defer_batch must be boolean")
     return p
 
 
@@ -123,7 +130,15 @@ class PriorityWave:
             params = {k: v for k, v in shape.items() if k != "tag"}
             params.update(
                 count=1,
-                consume="immediate",
+                consume=(
+                    "deferred"
+                    if self.p.get("defer_batch", False)
+                    and self.ctx.instance["environment"]["resolved_config"][
+                        "dispatcher"
+                    ]["type"]
+                    == "BATCH"
+                    else "immediate"
+                ),
                 schedule_timeout_s=90,
                 stream_timeout_s=120,
             )
@@ -394,7 +409,7 @@ def _expiry(ctx, p, deadline):
     )
 
 
-def _dispatch_observation(ctx, rows, deadline):
+def _dispatch_observation(ctx, rows, deadline, missing_last=False):
     raw = _http(ctx.ops, "snapshot", deadline)
     engines = raw.get("engines")
     if not isinstance(engines, list):
@@ -412,6 +427,11 @@ def _dispatch_observation(ctx, rows, deadline):
             if e.get("role") == "prefill"
         ]
         matches = [m for m in matches if m is not None]
+        if missing_last and (
+            not matches or (len(matches) == 1 and matches[0].get("running_ms") is None)
+        ):
+            dispatch.append((1 << 60, ranks[rid], rid))
+            continue
         if len(matches) != 1:
             raise ValueError("missing or ambiguous Prefill lifecycle")
         running = _number(matches[0].get("running_ms"), 0, 1e18)
@@ -531,7 +551,158 @@ def _order_basic(ctx, p, deadline):
     )
 
 
+def _normalize_wait(ctx, p, deadline):
+    wave = _wave(ctx, p)
+    if ctx.instance["environment"]["resolved_config"]["dispatcher"]["type"] != "BATCH":
+        return _wait(ctx, p, deadline)
+    _settled(ctx, p, deadline)
+    if not wave.p.get("defer_batch"):
+        raise ValueError(
+            "Schedule-only BATCH normalization requires explicit deferred issuance"
+        )
+    if any(r.get("fetch_invocations", 0) for r in wave.records()):
+        raise ValueError("legacy normalization BATCH segment must not Fetch")
+    wave.complete = True
+    wave.persist()
+    return StageOutput(artifacts=[str(wave.path)])
+
+
+def _normalize_params(p, plan):
+    p = _params(
+        p,
+        {"requests", "expected_tags", "batch_admission"},
+        {"requests", "expected_tags"},
+    )
+    _completion_params({"requests": p["requests"]}, plan)
+    expected = p["expected_tags"]
+    if (
+        not isinstance(expected, list)
+        or not 1 <= len(expected) <= 32
+        or any(not isinstance(x, str) for x in expected)
+        or len(set(expected)) != len(expected)
+    ):
+        raise ValueError("normalization expected tags must be unique strings")
+    p.setdefault("batch_admission", False)
+    if type(p["batch_admission"]) is not bool:
+        raise ValueError("batch_admission must be boolean")
+    return p
+
+
+def _normalize_order(ctx, p, deadline):
+    from .elastic import request_success
+
+    rows = []
+    for ref in p["requests"]:
+        wave = _wave(ctx, {"requests": ref})
+        if not wave.complete:
+            raise ValueError("normalization observation requires settled cohort")
+        rows.extend(wave.records())
+    tags = {r["wire_request_id"]: r["tag"] for r in rows}
+    if len(tags) != len(rows) or set(tags.values()) != set(p["expected_tags"]):
+        raise ValueError("normalization request identities missing/duplicated")
+    raw, dispatch = _dispatch_observation(ctx, rows, deadline, missing_last=True)
+    actual = [tags[r[2]] for r in sorted(dispatch)]
+
+    def okay(row):
+        if p["batch_admission"] and row.get("enqueued_by_master"):
+            return (
+                row["schedule"]["status"] == "OK"
+                and row.get("fetch_invocations", 0) == 0
+            )
+        return request_success(row)
+
+    success = all(okay(row) for row in rows)
+    path = ctx.artifact_dir / f"priority-normalize-{uuid.uuid4().hex}.json"
+    path.write_text(
+        json.dumps(dict(raw=raw, rows=rows, dispatch=dispatch), indent=2) + "\n"
+    )
+    return StageOutput(
+        checks=[
+            CheckResult(
+                "PR3",
+                "PASS" if success and actual == p["expected_tags"] else "FAIL",
+                actual=actual,
+                expected=p["expected_tags"],
+            ),
+            CheckResult("P6_terminal", "PASS" if success else "FAIL"),
+        ],
+        artifacts=[str(path)],
+    )
+
+
+def _metric_text(ctx, deadline):
+    from ...engine_ops import MASTER_PROMETHEUS_PATHS
+
+    for path in MASTER_PROMETHEUS_PATHS:
+        try:
+            with urllib.request.urlopen(
+                f"http://127.0.0.1:{ctx.ops.master_management_port}/{path}",
+                timeout=min(5, deadline.remaining()),
+            ) as response:
+                data = response.read(4000001)
+                if len(data) > 4000000:
+                    raise ValueError("metrics response exceeds evidence bound")
+                return data.decode("utf-8", "replace")
+        except (urllib.error.URLError, TimeoutError):
+            deadline.check()
+    return None
+
+
+def _normalization_metrics(ctx, p, deadline):
+    from ...engine_ops import parse_prometheus_samples
+
+    wave = _wave(ctx, p)
+    if not wave.complete:
+        raise ValueError("metrics must follow settled normalization requests")
+    warm = Deadline(min(deadline.expires_at, ctx.clock() + 180), ctx.clock, ctx.sleeper)
+    while _metric_text(ctx, warm) is None:
+        warm.sleep(2)
+    # Preserve the old one-shot availability warmup followed by a fresh scrape;
+    # do not retry until the expected bucket values happen to appear.
+    body = _metric_text(ctx, deadline)
+    if body is None:
+        raise ValueError("missing normalization metric source")
+    samples = parse_prometheus_samples(body, "")
+    buckets = {}
+    for priority in (30, 50, 70):
+        values = [
+            value
+            for name, labels, value in samples
+            if "auto_tpm_request" in name and labels.get("priority") == str(priority)
+        ]
+        for value in values:
+            _number(value, 0, 1e18)
+        buckets[str(priority)] = sum(values) if values else None
+    path = ctx.artifact_dir / f"priority-metrics-{uuid.uuid4().hex}.txt"
+    path.write_text(body)
+    return StageOutput(
+        checks=[
+            CheckResult(
+                "PR3",
+                "PASS" if all(v == 1 for v in buckets.values()) else "FAIL",
+                actual=buckets,
+            )
+        ],
+        artifacts=[str(path), str(wave.path)],
+    )
+
+
 HANDLERS = [
+    StageHandler("priority_normalize_wait", _reference, _normalize_wait, {}),
+    StageHandler(
+        "priority_normalize_order",
+        _normalize_params,
+        _normalize_order,
+        {},
+        checks=frozenset({"PR3", "P6_terminal"}),
+    ),
+    StageHandler(
+        "priority_normalize_metrics",
+        _reference,
+        _normalization_metrics,
+        {},
+        checks=frozenset({"PR3"}),
+    ),
     StageHandler(
         "priority_order_basic",
         _expiry_params,
