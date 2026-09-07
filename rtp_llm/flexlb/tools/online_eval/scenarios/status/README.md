@@ -1,41 +1,49 @@
 # Status protocol migration
 
-This directory is an in-progress migration of `batch_ack_and_execution` (four
-legacy cases) and `status_protocol` (21 legacy cases). The existing Python suite
-remains registered. Compiling a definition does not establish remote correctness
-or complete the 25-contract migration.
+Two explicit YAML programs cover all 25 legacy status cases and the two added
+Master-debug/noFetch cases. Profile declarations are retained: 27 variants expand
+to 51 instances. See [coverage.md](coverage.md) for each old predicate, its named
+checks, observational items, findings and explicit semantic changes.
 
-`batch_ack_and_execution.yaml` names every experiment stage explicitly. ACK
-partial failure retains member accounting, the transient retry policy, permanent
-error isolation, dispatch-count bounds and cleanup. Execution partial failure has
-separate normal and slow-Prefill arms, typed execution terminals, cleanup,
-idempotency and recovery. Multi-error checks each injected code separately. ACK
-drop keeps bounded residue, non-growth after eight seconds, and eventual drain;
-only the drain contract is a finding. A sampling or stage error is never a finding.
+The implementation uses `status_prepare`, `status_dispatch`, `status_control`,
+`status_perf`, `status_sample`, `status_check` and `status_outcomes`. The YAML lists
+every experiment stage and assertion. It never dispatches a legacy case function.
+The shared catalog owner registers the exported `HANDLERS`; this change does not
+edit the global catalog or the 29-scenario inventory.
 
-The adapter exports reusable operations, without calling legacy case functions:
+Prepared IDs are bound before injections. Submission concurrency is bounded and
+uses the core RPC driver. Deferred requests do not Fetch until `wait`. A consumer
+must supply its own done signal and exit record, then be joined; cancelled or
+incomplete records cannot satisfy expected-fault checks. Only explicit typed RPC
+statuses are allowed by a fault cohort. Unknown Python errors and stage deadlines
+remain ERROR/TIMEOUT. Each control mutation installs epoch-scoped cleanup before
+its first HTTP request, and all targets are cleared even after partial failure.
 
-- `status_prepare` freezes request IDs before fault installation.
-- `status_dispatch` submits the finite cohort with bounded concurrency, using the
-  core RPC driver. Deferred mode performs no Fetch until the ordinary `wait`.
-- `status_control` applies a named supported injection and registers owner-scoped
-  cleanup before its first HTTP mutation. Unknown fields, including accidentally
-  ignored camelCase `batchId`/`errorCode`, are rejected.
-- `status_perf` uses an explicit performance setting and explicit restore value.
-- `status_sample` stores raw sources, capture times and environment epoch in a
-  frozen snapshot. Missing fields or failed sources raise an execution error.
-- `status_check` checks one declared metric boundary; `status_outcomes` checks
-  complete per-request outcomes and distinguishes Schedule rejection from typed
-  execution failure. The request count is not a claim about one physical batch.
+Snapshots retain raw owner fields, source timestamps and environment epochs.
+Required source failures are errors, with partial artifacts retained. Decode
+`total_load` and its individual admission layers are read from actual fields;
+missing legacy fields are never silently interpreted as zero. Prefill batches,
+Prefill members, Decode admission and mock engine lifecycle remain distinct owners.
 
-Decode `/inflight_status` exposes `total_load` and layered admission counters,
-not the old `inflight_requests` field. The new `decode_total_load` metric and
-fingerprint use these live fields and reject missing schema. A zero test may
-combine independent owner counts; their raw fields remain separate in evidence.
-The fingerprint includes the Decode layers rather than treating an absent old
-key as zero. Prefill batches and Prefill members remain different metrics.
+Verification so far:
 
-The four ACK variants currently compile, and eight targeted fake tests cover
-prepared-ID binding and deferred Fetch, separate failure phases, missing-owner
-schema, partial injection cleanup, epoch refusal and validation. Remote execution
-and the remaining status variants are still pending.
+- 91 local scenario tests pass, including 11 status-specific tests for prepared
+  cohorts, typed error boundaries, consumer exit evidence, source failures,
+  independent owner metrics, cleanup and the complete legacy/profile mapping.
+- Isolated host-111 Java mock runs used the unchanged 9821d9dc73 Java sources and
+  matching hashed JARs. ACK multi-error, foreign batch ID and debug tombstone
+  passed. noFetch and fetch-error passed on targeted follow-up runs; all cleanup
+  steps passed and owned processes exited.
+- The first noFetch run reported ERROR for an incomplete required debug snapshot.
+  It remains evidence of sampling sensitivity; the later PASS did not relax
+  completeness. The first fetch-error run reported ERROR because its declared RPC
+  allowlist expected INTERNAL. The mock's RuntimeException actually maps to typed
+  gRPC UNKNOWN, now explicitly declared only for that fault.
+- Other variants/profiles are compiled and mapped, not claimed remotely passing.
+  No GPU test, load test, production diagnosis or C++/KV-lifetime test was run.
+
+The adapter requires the shared consumer-exit fix `48a520ddf4` (included in newer
+core `81286a7e7d`) and the variant-program interface `32cc65a1b0`. Integration
+should take only the status-specific commits, not duplicate their core dependency
+cherry-picks. The old Python registry remains available for comparison during
+migration.

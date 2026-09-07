@@ -34,6 +34,10 @@ FAULT_FIELDS = {
 }
 METRICS = {
     "master_http",
+    "scheduler_tombstones",
+    "cohort_prefill_completed",
+    "cohort_fetch_invocations",
+    "cohort_enqueued",
     "scheduler",
     "prefill_batches",
     "prefill_requests",
@@ -41,6 +45,9 @@ METRICS = {
     "all_inflight",
     "fingerprint",
     "accepted",
+    "prefill_accepted",
+    "prefill_enqueue_rpc",
+    "prefill_engine_inflight",
     "enqueue_rpc",
     "fetch_rpc",
     "engine_inflight",
@@ -270,14 +277,20 @@ def execute_control(ctx, params, deadline):
 
 
 def validate_sample(params, plan):
-    p = _validate(params, plan, {"include", "duration_s", "interval_s", "until"})
+    p = _validate(
+        params, plan, {"include", "duration_s", "interval_s", "until", "requests"}
+    )
     p.setdefault("include", ["inflight", "mock"])
     if (
         not isinstance(p["include"], list)
         or not p["include"]
-        or any(v not in {"inflight", "mock", "info", "ttl"} for v in p["include"])
+        or any(
+            v not in {"inflight", "mock", "info", "ttl", "debug"} for v in p["include"]
+        )
     ):
         raise ValueError(f"{plan.path}: invalid source list")
+    if "requests" in p:
+        plan.reference(p["requests"], "requests")
     p["duration_s"] = _number(p.get("duration_s", 0), plan, "duration_s", 0, 180)
     p["interval_s"] = _number(p.get("interval_s", 0.2), plan, "interval_s", 0.05, 5)
     if "until" in p:
@@ -290,6 +303,11 @@ def validate_sample(params, plan):
             "le",
         }:
             raise ValueError(f"{plan.path}: invalid stop condition")
+        if p["until"]["metric"] == "fingerprint":
+            raise ValueError(
+                f"{plan.path}: fingerprint is not a numeric stop condition"
+            )
+        _number(p["until"]["value"], plan, "until.value", 0, 2**63 - 1)
     return p
 
 
@@ -302,6 +320,46 @@ def _count(value):
 
 
 def metric(frame, name):
+    if name == "scheduler_tombstones":
+        from ...debug_client import check_scheduler_tombstone
+
+        total = 0
+        for payload in frame["debug"]:
+            rows = payload["components"]["scheduler"]["rows"]
+            if len(rows) != 1:
+                raise RuntimeError("issued member missing from scheduler debug source")
+            if rows[0]["storage_phase"] == "TOMBSTONE":
+                passed, _ = check_scheduler_tombstone(rows[0])
+                total += bool(passed)
+        return total
+    if name.startswith("cohort_"):
+        records = frame["records"]
+        if not records or any(r.get("issued_s") is None for r in records):
+            raise RuntimeError("cohort source is empty or undispatched")
+        if name == "cohort_fetch_invocations":
+            return sum(_count(r["fetch_invocations"]) for r in records)
+        if name == "cohort_enqueued":
+            return sum(
+                r["schedule"]["status"] == "OK" and r["enqueued_by_master"] is True
+                for r in records
+            )
+        total = 0
+        for r in records:
+            selected = [
+                e
+                for e in frame["mock"].values()
+                if e["grpc_addr"] == r["prefill_addr"]
+                and e["role"].lower() == "prefill"
+            ]
+            if len(selected) != 1:
+                raise RuntimeError("cohort Prefill identity is not uniquely mapped")
+            lifecycle = selected[0]["request_lifecycle"].get(str(r["wire_request_id"]))
+            total += bool(
+                lifecycle
+                and lifecycle.get("end_state") == "completed"
+                and lifecycle.get("end_ms", 0) > 0
+            )
+        return total
     if name == "master_http":
         return frame["master_http_status"]
     if name in {
@@ -359,6 +417,11 @@ def metric(frame, name):
     engines = frame["mock"]
     if not engines:
         raise RuntimeError("missing engine evidence")
+    if name.startswith("prefill_"):
+        engines = {n: e for n, e in engines.items() if e["role"].lower() == "prefill"}
+        if not engines:
+            raise RuntimeError("missing Prefill engine evidence")
+        name = name[len("prefill_") :]
     if name in {"enqueue_rpc", "fetch_rpc"}:
         key = "enqueue_batch" if name == "enqueue_rpc" else "fetch_response"
         return sum(_count(e["rpc_counts"][key]) for e in engines.values())
@@ -372,6 +435,37 @@ def metric(frame, name):
 
 def _frame(ctx, params, deadline):
     frame = {"at": ctx.clock(), "env_epoch": ctx.env_epoch}
+    if "requests" in params:
+        frame["records"] = ctx.resource(
+            params["requests"], "requests"
+        ).snapshot_records()
+    if "debug" in params["include"]:
+        from ...debug_client import DebugClient, DebugUnavailable
+
+        client = DebugClient(f"http://127.0.0.1:{ctx.env.master_http_port}")
+        ids = [r["wire_request_id"] for r in frame.get("records", [])] or [None]
+        frame["debug"] = []
+        for rid in ids:
+            deadline.check()
+            client.timeout_s = min(5, deadline.remaining())
+            capture = client.snapshot(
+                request_id=rid, include="scheduler,queues,prefill,decode,engine"
+            )
+            if capture.payload["status"] != "ok":
+                artifact = _artifact(ctx, "incomplete-debug", capture.payload)
+                raise DebugUnavailable(
+                    f"incomplete required debug source; evidence={artifact}"
+                )
+            for component in capture.payload["components"]:
+                capture.component(component)
+            identity = (ctx.env_epoch, capture.payload["instanceId"])
+            previous = getattr(ctx, "status_debug_identity", identity)
+            if previous[0] == identity[0] and previous != identity:
+                raise DebugUnavailable(
+                    "Master generation changed during status experiment"
+                )
+            ctx.status_debug_identity = identity
+            frame["debug"].append(capture.payload)
     if "inflight" in params["include"]:
         frame["master_http_status"], frame["inflight"] = _http(
             ctx, "master", "rtp_llm/inflight_status", deadline
@@ -413,7 +507,21 @@ def execute_sample(ctx, params, deadline):
         deadline.check()
         if ctx.env_epoch != epoch or ctx.env is not env:
             raise RuntimeError("sampling epoch changed")
-        frame = _frame(ctx, params, deadline)
+        try:
+            frame = _frame(ctx, params, deadline)
+        except Exception as error:
+            _artifact(
+                ctx,
+                "incomplete-samples",
+                {
+                    "env_epoch": epoch,
+                    "started_s": start,
+                    "failed_s": ctx.clock(),
+                    "frames": frames,
+                    "error": f"{type(error).__name__}: {error}",
+                },
+            )
+            raise
         size += len(json.dumps(frame).encode())
         if len(frames) >= 4000 or size > 32 * 1024 * 1024:
             raise RuntimeError("status observation budget exceeded")
@@ -535,6 +643,7 @@ def validate_prepare(params, plan):
             "output_len",
             "consume",
             "stream_timeout_s",
+            "expected_rpc_statuses",
         },
     )
     for key, default, maximum in [
@@ -557,7 +666,50 @@ def validate_prepare(params, plan):
     p["stream_timeout_s"] = _number(
         p.get("stream_timeout_s", 15), plan, "stream_timeout_s", 1, 120
     )
+    statuses = p.setdefault("expected_rpc_statuses", [])
+    if (
+        not isinstance(statuses, list)
+        or len(statuses) != len(set(statuses))
+        or any(
+            v not in {"INTERNAL", "UNAVAILABLE", "DEADLINE_EXCEEDED", "UNKNOWN"}
+            for v in statuses
+        )
+    ):
+        raise ValueError(f"{plan.path}: invalid explicit request RPC status allowlist")
     return p
+
+
+def _terminal_records(records, allowed=()):
+    if not records:
+        raise RuntimeError("empty request evidence")
+    for record in records:
+        if any(
+            record.get(key) is None
+            for key in ("issued_s", "consumer_exit_s", "transport_terminal_s")
+        ):
+            raise RuntimeError("incomplete request terminal evidence")
+        if record.get("cancel", {}).get("requested_s") is not None:
+            raise RuntimeError(
+                "cancelled request cannot satisfy expected-fault contract"
+            )
+        if record["stream"].get("started_s") is not None and (
+            record.get("consumer_done") is not True
+            or record.get("consumer_completion_verified") is not True
+        ):
+            raise RuntimeError("request consumer completion has not been verified")
+        for phase in ("schedule", "stream"):
+            rpc = record[phase]
+            if phase == "stream" and rpc.get("started_s") is None:
+                if record["schedule"]["status"] == "OK":
+                    raise RuntimeError("successful Schedule has no stream terminal")
+                continue
+            if rpc.get("ended_s") is None or rpc.get("status") is None:
+                raise RuntimeError("incomplete RPC terminal evidence")
+            state = rpc["status"]
+            if state not in {"OK", "REJECTED", *allowed}:
+                if state == "DEADLINE_EXCEEDED":
+                    raise TimeoutError("RPC deadline is not a business terminal")
+                raise RuntimeError(f"unavailable request transport evidence: {state}")
 
 
 class StatusRequests:
@@ -578,6 +730,8 @@ class StatusRequests:
         class PreparedRequest(RequestBatch):
             def __init__(child):
                 super().__init__(ctx, dict(params, count=1))
+                child.status_done = threading.Event()
+                child.status_exit_s = None
                 child.prepared = super().issue(ctx.ops.next_request_id(), ctx.clock)
                 child.prepared["planned_s"] = child.prepared["issued_s"]
                 child.prepared["issued_s"] = None
@@ -587,6 +741,13 @@ class StatusRequests:
                 # return the predeclared ID so injections bind before Schedule.
                 child.update(child.prepared, issued_s=clock())
                 return child.prepared
+
+            def _consume(child, entry, end):
+                try:
+                    super()._consume(entry, end)
+                finally:
+                    child.status_exit_s = ctx.clock()
+                    child.status_done.set()
 
             def _start_consumer(child, entry, end):
                 super()._start_consumer(
@@ -613,7 +774,19 @@ class StatusRequests:
                         break
                     child = self.children[self.next_index]
                     self.next_index += 1
-                child.submit(deadline)
+                try:
+                    child.submit(deadline)
+                except Exception as error:
+                    deadline.check()
+                    code_fn = getattr(error, "code", None)
+                    state = (
+                        getattr(code_fn(), "name", None) if callable(code_fn) else None
+                    )
+                    if state not in self.params["expected_rpc_statuses"]:
+                        raise
+                    _terminal_records(
+                        child.snapshot_records(), self.params["expected_rpc_statuses"]
+                    )
         except Exception as error:
             with self.queue_lock:
                 self.errors.append(error)
@@ -660,11 +833,47 @@ class StatusRequests:
         self.join_submission(deadline)
         if self.errors:
             raise self.errors[0]
-        results = [child.wait(deadline) for child in self.children]
+        for child in self.children:
+            try:
+                child.wait(deadline)
+            except (RuntimeError, TimeoutError):
+                # Core wait reports recorded RPC errors. It may only be relaxed
+                # after the stage budget and every independent exit proof pass.
+                deadline.check()
+                if not self.params["expected_rpc_statuses"]:
+                    raise
+                records = child.snapshot_records()
+                if not any(
+                    r[phase]["status"] in self.params["expected_rpc_statuses"]
+                    for r in records
+                    for phase in ("schedule", "stream")
+                ):
+                    raise
+                self._completed_child(child, deadline)
+                _terminal_records(records, self.params["expected_rpc_statuses"])
+            self._completed_child(child, deadline)
+        records = self.snapshot_records()
+        _terminal_records(records, self.params["expected_rpc_statuses"])
+        from .elastic import request_success
+
         return {
-            "completed": bool(results) and all(r["completed"] for r in results),
-            "error_count": sum(r["error_count"] for r in results),
+            "completed": all(request_success(r) for r in records),
+            "error_count": sum(not request_success(r) for r in records),
         }
+
+    def _completed_child(self, child, deadline):
+        for entry in child.entries:
+            thread = entry["thread"]
+            if thread is not None:
+                while not child.status_done.is_set():
+                    deadline.check()
+                    child.status_done.wait(min(0.05, deadline.remaining()))
+                if child.status_exit_s is None:
+                    raise RuntimeError("request consumer exit record missing")
+                thread.join(timeout=deadline.remaining())
+                if thread.is_alive():
+                    raise TimeoutError("request consumer has not exited")
+        deadline.check()
 
     def cancel_server(self, deadline):
         return sum(child.cancel_server(deadline) for child in self.children)
@@ -676,6 +885,7 @@ class StatusRequests:
         for child in self.children:
             try:
                 child.cleanup(deadline)
+                self._completed_child(child, deadline)
             except Exception as error:
                 errors.append(error)
         try:
@@ -721,6 +931,7 @@ def validate_outcomes(params, plan):
             "error_code",
             "failure_phase",
             "slo_or_success",
+            "timeout_or_success",
         },
         {"requests"},
     )
@@ -734,7 +945,10 @@ def validate_outcomes(params, plan):
         raise ValueError(
             f"{plan.path}: ACK/schedule versus execution phase must be explicit"
         )
-    if type(p.get("slo_or_success", False)) is not bool:
+    if any(
+        type(p.get(key, False)) is not bool
+        for key in ("slo_or_success", "timeout_or_success")
+    ):
         raise ValueError(f"{plan.path}: invalid slo_or_success")
     return p
 
@@ -748,14 +962,16 @@ def execute_outcomes(ctx, params, deadline):
         r.get("issued_s") is None or r.get("consumer_exit_s") is None for r in records
     ):
         raise RuntimeError("request outcomes need a nonempty fully observed cohort")
-    # Transport-level source failures cannot become ordinary finding failures.
-    for record in records:
-        for phase in ("schedule", "stream"):
-            state = record[phase]["status"]
-            if state not in (None, "OK", "REJECTED"):
-                if state == "DEADLINE_EXCEEDED":
-                    raise TimeoutError("RPC deadline is not a business terminal")
-                raise RuntimeError(f"unavailable request transport evidence: {state}")
+    cohort = ctx.resource(params["requests"], "requests")
+    allowed = (
+        cohort.params.get("expected_rpc_statuses", [])
+        if isinstance(cohort, StatusRequests)
+        else []
+    )
+    if isinstance(cohort, StatusRequests):
+        for child in cohort.children:
+            cohort._completed_child(child, deadline)
+    _terminal_records(records, allowed)
     failures = [r for r in records if not request_success(r)]
     success = len(records) - len(failures)
     passed = (
@@ -795,20 +1011,44 @@ def execute_outcomes(ctx, params, deadline):
                 for r in failures
             )
         )
-    if params.get("slo_or_success"):
-        # Explicit business SLO terminals only; a client-side timeout is ERROR.
-        passed = passed and all(
-            any(
-                token
-                in (
-                    str(r["schedule"].get("error"))
-                    + " "
-                    + str(r.get("business_error_message"))
-                ).lower()
-                for token in ("slo", "queue timeout", "queue deadline")
+    if params.get("slo_or_success") or params.get("timeout_or_success"):
+
+        def legal_failure(record):
+            text = (
+                str(record["schedule"].get("error"))
+                + " "
+                + str(record["stream"].get("error"))
+                + " "
+                + str(record.get("business_error_code"))
+                + " "
+                + str(record.get("business_error_message"))
+            ).lower()
+            if params.get("timeout_or_success"):
+                # Preserve the old _timeout_typed vocabulary, but only after
+                # completed consumers and explicit transport policy are verified.
+                if record["stream"]["status"] == "OK" and not record.get(
+                    "business_finished"
+                ):
+                    text += " stream did not complete"
+                return any(
+                    token in text
+                    for token in (
+                        "deadline",
+                        "timeout",
+                        "timed out",
+                        "not complete",
+                        "expire",
+                        "exhaust",
+                        "8400",
+                        "8511",
+                        "8431",
+                    )
+                )
+            return any(
+                token in text for token in ("slo", "queue timeout", "queue deadline")
             )
-            for r in failures
-        )
+
+        passed = passed and all(legal_failure(record) for record in failures)
     artifact = _artifact(
         ctx,
         "outcomes",
