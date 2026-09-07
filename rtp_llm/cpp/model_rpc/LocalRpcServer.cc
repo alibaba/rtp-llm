@@ -61,15 +61,16 @@ grpc::Status LocalRpcServer::init(const EngineInitParams&                       
         }
     }
 
-    const auto mm_decision = resolveAndLogMMProcessorKind(
-        maga_init_params.model_config_.mm_model_config.is_multimodal,
-        maga_init_params.vit_config.vit_separation,
-        !mm_process_engine.is_none(),
-        maga_init_params.pd_sep_config.role_type,
-        maga_init_params.parallelism_config.tp_rank,
-        maga_init_params.model_config_.model_type,
-        "LocalRpcServer");
-    const auto mm_kind = mm_decision.kind;
+    const auto mm_decision = resolveAndLogMMProcessorKind(maga_init_params.model_config_.mm_model_config.is_multimodal,
+                                                          maga_init_params.vit_config.vit_separation,
+                                                          !mm_process_engine.is_none(),
+                                                          maga_init_params.pd_sep_config.role_type,
+                                                          maga_init_params.parallelism_config.tp_rank,
+                                                          maga_init_params.model_config_.model_type,
+                                                          "LocalRpcServer",
+                                                          maga_init_params.parallelism_config.pp_rank,
+                                                          maga_init_params.parallelism_config.pp_size);
+    const auto mm_kind     = mm_decision.kind;
     if (!mm_decision.ok()) {
         RTP_LLM_LOG_ERROR("%s", mm_decision.error.c_str());
         return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, mm_decision.error);
@@ -248,8 +249,8 @@ grpc::Status LocalRpcServer::GenerateStreamCall(grpc::ServerContext*            
             // Beam rows are an internal search width; Fusion exposes one primary
             // sequence (the remaining candidates live in beam_responses). Only
             // ordinary multi-return requests aggregate all active rows.
-            const auto returned_sequence_count = stream->hasNumBeams() ? std::max(stream->numReturnSequences(), 1) :
-                                                                            stream->currentBatchSize();
+            const auto returned_sequence_count =
+                stream->hasNumBeams() ? std::max(stream->numReturnSequences(), 1) : stream->currentBatchSize();
             telemetry::setUsageTokenAttributes(*generate_context.trace_span_guard,
                                                (int64_t)stream->inputLength(),
                                                (int64_t)(stream->outputTokenLen() * returned_sequence_count));
