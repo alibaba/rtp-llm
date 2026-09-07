@@ -14,4 +14,6 @@ Actions expose bounded traffic, occupancy evidence, awaiting and individual pred
 
 Explicit stricter observations: master_clean also requires current full ready topology; engine_clean checks every configured prefill and valid leak flags. These additions are not described as old-only equivalence. The SLO error-family check intentionally preserves literal text matching; it is not a typed error-code claim. Only capacity typed_code reads the numeric Schedule response.
 
-Pending before acceptance: full compile-to-execute scenario fixtures, independent legacy-contract review, integration through the core-owned catalog, and scheduled real Java validation. No remote load was started for this checkpoint.
+Complete compile-to-execute fixtures exercise all six programs and distinguish wrong numeric capacity codes, SLO errors that arrive too early, and consumer cleanup errors from a green run. External Java I/O is explicitly replaced in these fixtures; no real Java success is inferred.
+
+Pending before acceptance: independent legacy-contract review, integration through the core-owned catalog, and scheduled real Java validation. No remote load was started for this checkpoint.
