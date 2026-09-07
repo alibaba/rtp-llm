@@ -58,7 +58,6 @@ MOCK_BASE_GRPC_PORT="${MOCK_BASE_GRPC_PORT:-61000}"
 # live in the lib.
 JAVA_MOCK_ENGINE_JAR="${JAVA_MOCK_ENGINE_JAR:-${FLEXLB_DIR}/flexlb-mock-engine/target/flexlb-mock-engine-1.0.0-SNAPSHOT-all.jar}"
 JAVA_LOAD_CLIENT_JAR="${JAVA_LOAD_CLIENT_JAR:-${FLEXLB_DIR}/flexlb-mock-engine/target/flexlb-mock-engine-1.0.0-SNAPSHOT-all.jar}"  # no-op see NOTE above
-JAVA_LOAD_CLIENT_HEAP_SIZE="${JAVA_LOAD_CLIENT_HEAP_SIZE:-16g}"
 JAVA_MOCK_EVENT_LOOP_THREADS="${JAVA_MOCK_EVENT_LOOP_THREADS:-32}"
 JAVA_MOCK_COMPLETION_THREADS="${JAVA_MOCK_COMPLETION_THREADS:-16}"
 # java_mock_stats sampling interval, passed straight to --stats-interval-ms
@@ -68,7 +67,7 @@ JAVA_MOCK_COMPLETION_THREADS="${JAVA_MOCK_COMPLETION_THREADS:-16}"
 # coarse cadence.
 JAVA_MOCK_STATS_INTERVAL_MS="${JAVA_MOCK_STATS_INTERVAL_MS:-1000}"
 # Passed straight to --decode-max-concurrency (single env, no renaming).
-# Default matches the mock engine's DEFAULT_DECODE_MAX_CONCURRENCY (132).
+# Default matches the mock engine's DEFAULT_DECODE_MAX_CONCURRENCY (128).
 # The hard admission gate is unconditional (production semantics): once the
 # cap is reached, excess decode requests park in the engine-side waiting
 # queue (reported as decode_waiting; with report_queued_as_kv_allocated they
@@ -79,6 +78,10 @@ JAVA_MOCK_ENGINE_HEAP_SIZE="${JAVA_MOCK_ENGINE_HEAP_SIZE:-32g}"
 JAVA_MOCK_JVM_XMS="${JAVA_MOCK_JVM_XMS:-${JAVA_MOCK_ENGINE_HEAP_SIZE}}"
 JAVA_MOCK_JVM_XMX="${JAVA_MOCK_JVM_XMX:-${JAVA_MOCK_ENGINE_HEAP_SIZE}}"
 ENDPOINT_READY_TIMEOUT_S="${ENDPOINT_READY_TIMEOUT_S:-120}"
+# Per-role KV pool BLOCK counts, passed straight to
+# --prefill-kv-pool-blocks / --decode-kv-pool-blocks (the env-var names
+# keep the historical "cache blocks" wording; the value has been the
+# total pool block count since KV v2, not a key count).
 PREFILL_CACHE_BLOCKS="${PREFILL_CACHE_BLOCKS:-6000}"
 DECODE_CACHE_BLOCKS="${DECODE_CACHE_BLOCKS:-3000}"
 
@@ -180,6 +183,11 @@ FLEXLB_MONITOR_ENABLED="${FLEXLB_MONITOR_ENABLED:-true}"
 # closed (no flexlb_* series at all); use the bare "flexlb_" prefix to
 # expose everything flexlb_*.
 FLEXLB_MONITOR_METRIC_WHITELIST="${FLEXLB_MONITOR_METRIC_WHITELIST:-flexlb_app_cache_,flexlb_app_flexlb_batcher_queue_size,flexlb_app_flexlb_inflight_max_age_ms,flexlb_app_flexlb_inflight_ttl,flexlb_app_engine_balancing_master_dispatch_reason_total,flexlb_app_engine_balancing_master_batch_size,flexlb_auto_tpm_request_count,flexlb_app_engine_balancing_master_all_qps,flexlb_app_flexlb_scheduler_inflight_size,flexlb_app_flexlb_inflight_batch_count,flexlb_app_flexlb_inflight_request_count,flexlb_auto_tpm_decode_reserved_count,flexlb_auto_tpm_decode_running_count}"
+# HIPPO_ROLE: ZK election role id of the master (lock path
+# /master_lb_leader/{HIPPO_ROLE}); a blank value aborts master startup
+# (ZookeeperMasterElectService / LBStatusConsistencyService). The eval
+# line runs a single master without ZK, so the default is just a
+# non-empty label. This is the ONLY default-assignment site.
 HIPPO_ROLE="${HIPPO_ROLE:-test}"
 
 DEFAULT_FLEXLB_CONFIG='{
@@ -228,7 +236,6 @@ DEFAULT_FLEXLB_CONFIG='{
 }'
 OTEL_TRACE_SKIP_PATTERN="${OTEL_TRACE_SKIP_PATTERN:-.*}"
 OTEL_EXPORTER_OTLP_ENDPOINT="${OTEL_EXPORTER_OTLP_ENDPOINT:-none}"
-HIPPO_ROLE="${HIPPO_ROLE:-flexlb_eval_master}"
 
 # Optional file-based service discovery (dynamic engine add/remove).
 # Empty (default) = disabled: mock engine keeps the env-file (NoOp discovery)
@@ -244,13 +251,6 @@ export FLEXLB_GRPC_EXECUTOR_CORE_SIZE="${FLEXLB_GRPC_EXECUTOR_CORE_SIZE:-128}"
 export FLEXLB_GRPC_EXECUTOR_MAX_SIZE="${FLEXLB_GRPC_EXECUTOR_MAX_SIZE:-128}"
 # FLEXLB_GRPC_EXECUTOR_QUEUE_SIZE: no script default — code default (1000) applies
 # unless the caller exports it explicitly (still forwarded via the environment).
-
-# Batch dispatcher admission gate sizing. No script default — code default
-# (64 threads + 256 queue = 320 permits) applies unless the caller exports
-# them explicitly. Overload benchmarks raise the queue capacity to widen the
-# admission gate (RST mitigation); production keeps the upstream 320.
-# FLEXLB_BATCH_DISPATCH_THREADS="${FLEXLB_BATCH_DISPATCH_THREADS:-}"
-# FLEXLB_BATCH_DISPATCH_QUEUE_CAPACITY="${FLEXLB_BATCH_DISPATCH_QUEUE_CAPACITY:-}"
 
 MOCK_PID=""
 FLEXLB_PID=""
@@ -868,8 +868,8 @@ if [[ "${START_MOCK}" == "1" ]]; then
     --decode-max-concurrency "${JAVA_MOCK_DECODE_MAX_CONCURRENCY}" \
     --performance "${PERFORMANCE_FILE}" \
     --master-config "${PROCESS_CONFIG_FILE}" \
-    --prefill-cache-blocks "${PREFILL_CACHE_BLOCKS}" \
-    --decode-cache-blocks "${DECODE_CACHE_BLOCKS}" \
+    --prefill-kv-pool-blocks "${PREFILL_CACHE_BLOCKS}" \
+    --decode-kv-pool-blocks "${DECODE_CACHE_BLOCKS}" \
     --endpoint-file "${ENDPOINT_FILE}" \
     --env-file "${FLEXLB_ENV_FILE}" \
     "${JAVA_MOCK_DISCOVERY_ARGS[@]}" \
@@ -987,8 +987,6 @@ OVERRIDE_ENV_KEYS=(
   FLEXLB_GRPC_EXECUTOR_CORE_SIZE
   FLEXLB_GRPC_EXECUTOR_MAX_SIZE
   FLEXLB_GRPC_EXECUTOR_QUEUE_SIZE
-  FLEXLB_BATCH_DISPATCH_THREADS
-  FLEXLB_BATCH_DISPATCH_QUEUE_CAPACITY
   FLEXLB_MONITOR_ENABLED
   FLEXLB_MONITOR_METRIC_WHITELIST
 )

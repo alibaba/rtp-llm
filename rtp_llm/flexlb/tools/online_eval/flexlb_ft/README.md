@@ -4,7 +4,15 @@ FlexLB 调度器的场景测试套件：每个用例启动一小片 mock 引擎�
 
 ## 快速开始
 
-前置：先用 maven 构建两个 jar（缺失时启动会直接报错指路）——`flexlb-mock-engine` 的 all-in-one jar 与 `flexlb-api` jar（路径见 `harness.MOCK_JAR` / `harness.API_JAR`）。
+前置：JDK 21+（`JAVA_HOME` 指向它，下文命令写作 `<JDK21>`）。先用 maven 构建两个 jar（缺失时启动会直接报错指路）：
+
+```bash
+cd rtp_llm/flexlb
+JAVA_HOME=<JDK21> ./mvnw -P"opensource,!internal" -pl flexlb-mock-engine -am package -DskipTests
+JAVA_HOME=<JDK21> ./mvnw -P"opensource,!internal" -pl flexlb-api -am package -DskipTests
+```
+
+产物：`flexlb-mock-engine/target/flexlb-mock-engine-1.0.0-SNAPSHOT-all.jar`（mock 引擎与 load client 共用的 all-in-one jar）与 `flexlb-api/target/flexlb-api-1.0.0-SNAPSHOT.jar`（master），即 `harness.MOCK_JAR` / `harness.API_JAR`。profile 组合的含义：`opensource` 是默认激活的 profile；`internal` 只在仓内存在 `internal_source` 目录时自动激活，`!internal` 显式关掉它，防止旁边的内网仓把依赖解析到 internal-only 构件。改动代码后可先做编译验证：`JAVA_HOME=<JDK21> ./mvnw -pl flexlb-mock-engine -am clean test-compile -P '!internal'`。
 
 ```bash
 cd rtp_llm/flexlb/tools/online_eval
@@ -41,7 +49,7 @@ python3 flexlb_functional_tests.py --category kv --json results.json   # 单分�
 python3 flexlb_functional_tests.py --filter cancel_basic --profile single-nonbatch   # 子串过滤
 ```
 
-`--cases` 为精确 case 名逗号列表，仍受 `--profile` 过滤，未知名报错退出（rc=2）。其余 runner 参数（`--run-root` 等）见其 `--help`；全集 **123 例**（9 分类），`--list` 按当前 profile 过滤，默认 batch-window 下 104 例（priority 14 例仅 single-nonbatch、1 例仅 NON_BATCH 投递形态适用；新增的 4 例抢占 live/分支 case 在 single-batch / single-nonbatch 形态下），用例间环境按需复用 / 重建。
+`--cases` 为精确 case 名逗号列表，仍受 `--profile` 过滤，未知名报错退出（rc=2）。其余 runner 参数（`--run-root` 等）见其 `--help`；全集 **136 例**（9 分类），`--list` 按当前 profile 过滤，默认 batch-window 下 116 例（priority 14 例仅 single-nonbatch、1 例仅 NON_BATCH 投递形态适用；新增的 4 例抢占 live/分支 case 在 single-batch / single-nonbatch 形态下），用例间环境按需复用 / 重建。
 
 `--profile` / `--grade` 的取值语义（两个入口通用）：
 
@@ -60,7 +68,7 @@ python3 flexlb_functional_tests.py --filter cancel_basic --profile single-nonbat
 
 | 段 | 区间 | 说明 |
 | --- | --- | --- |
-| master 组 | `18080+10i .. 18080+10i+5` | http/mgmt/grpc = +0/+1/+2（单 master、HA Tier-1 A、Tier-3 三选一路径共用组首）；HA Tier-1 B = +3..+5 |
+| master 组 | `18080+10i .. 18080+10i+5` | http/mgmt/grpc = +0/+1/+2（单 master 与 HA Tier-1 A 二选一路径共用组首）；HA Tier-1 B = +3..+5 |
 | mock 窗口 | `55151+S*i .. +151` | 显式 `FLEXLB_FT_MOCK_BASE_GRPC_PORT`，消除并发自动扫描的 bind TOCTOU；实测占用宽度恒为 153 口（http=base-1、engines=base..base+n-1、victim zone=base+149..151） |
 
 - `--parallel` 上限由 mock stride 推导：`base+stride*(N-1)+151 ≤ 65535`（默认 stride 2000 → 6 路；`--mock-stride 500` → 21 路上限，容器实测承载 4–8；stride 下限 153 = 窗口宽度，代码内校验）。
@@ -71,7 +79,9 @@ python3 flexlb_functional_tests.py --filter cancel_basic --profile single-nonbat
 
 实测参考（110 开发机容器，batch-window profile，共享负载）：串行单进程 wall 4918s（98 例快照）；category 级 4 路 wall 2444s（2.01x）——wall 被最重家族钳制（status 24 例实测 2104s，占串行 43%）；case 级 6 路 wall 941s（5.22x，15.7 分钟，最重路 16 例），8 路（`--mock-stride 500`，mock base 平移避开他人占用段）wall 703s（6.99x，11.7 分钟）——逐例摊平后钳制消除。等价性口径：并行 run 对串行基线逐例对照 + FINDING 集一致；实测 6 路 89/98 一致、9 例翻转全部单向好转（对翻转例同 jar 同 env 定向复跑两轮结果稳定，属快照漂移而非编排回归）；8 路对 6 路 FINDING 集完全相等。
 
-## 测试分类（123 例）
+**proto 缓存隔离（同机多线并行必读）**：harness 首次用到 proto 时会把 `rtp_llm/cpp/model_rpc/proto` 下的 `.proto` 编译到共享缓存目录（默认 `$TMPDIR/flexlb_eval_proto`，env `FLEXLB_EVAL_PROTO_OUT` 改址）。同一台机上另一条测试线（另一份仓或另一会话）几乎同时启动时，两条线会互相覆盖对方的编译产物，典型症状是大面积 `AttributeError: module 'model_rpc_service_pb2' has no attribute 'GenerateConfigPB'` 连坐——这不是套件坏了，是缓存目录撞了。解法：每条线各自设独立的 `FLEXLB_EVAL_PROTO_OUT` 目录。
+
+## 测试分类（136 例）
 
 断言一律写**正确契约**而非当前实现——跑挂即 finding。表内「期望」为一句话摘要，完整断言与构造细节以各用例 docstring 为准。
 
@@ -162,9 +172,9 @@ KV 前缀缓存生命周期契约：per-engine 账本隔离、全局共享块的
 | `balance_decode_spread` | decode 流量 n=10 / n=50 两档采样 | decode 舰队无饥饿；份额分布在校准带内（KV 加权随机） |
 | `balance_len_mixed` | 双峰长度混合（每波 2 长 + 6 短） | 按 token 足迹而非请求数均衡；短请求两引擎都接；全部完成 |
 
-### elastic（8 例 · 固定 batch-window）
+### elastic（13 例 · 固定 batch-window）
 
-文件发现链路（discovery file → master 同步 → 路由）的动态扩缩容契约：拓扑收敛、切换期流量存活、计划内缩容零失败（优雅摘除：先摘路由、等在途排空再下线）。
+文件发现链路（discovery file → master 同步 → 路由）的动态扩缩容契约：拓扑收敛、切换期流量存活、计划内缩容零失败（优雅摘除：先摘路由、等在途排空再下线）；以及缩容混合场景（KV 满 / KV 偏斜 / 突发缩容 / 长窗恢复）下瞬态有界与稳态恢复的均衡契约（均衡指标读法见下文「均衡指标体系」节）。
 
 | 用例 | 场景 | 期望 |
 | --- | --- | --- |
@@ -176,6 +186,11 @@ KV 前缀缓存生命周期契约：per-engine 账本隔离、全局共享块的
 | `elastic_concurrent_ops` | 10 秒双线程并发加 / 删风暴 | master 全程健康；操作计数一致；无拓扑残渣 |
 | `elastic_remove_pending_drain` | 缩容时请求已在 master 队列排队、尚未投递到被删引擎 | 不搁浅：请求在窗口内拿到可见终态；无饥饿 |
 | `elastic_add_preference` | 扩容后 45s 量测窗（前 10s 瞬态 + 35s 稳态） | 瞬态偏爱新引擎允许；稳态新引擎份额 <60%、老引擎 ≥10% |
+| `elastic_kv_full_shrink` | KV 池打满（长 decode 尾真实填池，非注入捷径）后优雅缩容一台 decode，单 case 顺序跑两变体：drain_ok（默认 60s 上限内排空）/ drain_timeout（drain_timeout_ms=5000 强制回退 abrupt） | 前置断言池满（available≈0 且拒绝计数 >0）；drain_ok：drained=true、零失败、40s 内终态、inflight ≤50s 排空；drain_timeout：drained=false 且 drain_ms≈5s，victim 在途以 8510「Decode endpoint generation retired」显式失败收场；两变体幸存者 occupancy ≤0.95、Δ拒绝 ≤K_reject；稳态 share / 队列 / KV spread 回基线容差；TPS 观察项 |
+| `elastic_kv_skew_shrink_hot` | 前缀家族集中于 hot 引擎（≥3× cold，非对称 perf 构造）后缩 hot | 集群命中率跌落 ≤ 期望跌落（hot 家族份额×基线命中率）+0.10；幸存者队列深度 ≤2、occupancy ≤0.95；稳态命中率回升 / 恢复时长为观察项 |
+| `elastic_kv_skew_shrink_cold` | 同构造缩 cold（对照变体） | 命中率跌落 ≤0.10 绝对值；其余同 hot 变体；两变体恢复时长差为观察项 |
+| `elastic_transient_imbalance_bound` | abrupt 缩容 + 高压背景流 + 一次性 burst（队列容量轴全部显式设值：maxWaitingPrefillBatches / maxWaitingRequestsPerPrefillWorker / decodeMaxConcurrency） | 队列峰值不超配置界（引擎侧 waiting / master 侧 inflight / decode 并发三界）；幸存者 occupancy ≤0.95、Δ拒绝 ≤K_reject；fail-close 局部性：失败仅出现在被缩引擎在途集，幸存者路由流零失败；稳态全维度恢复；TPS 谷值观察项 |
+| `elastic_steady_state_recovery` | graceful 缩 1 台 decode，背景流不断，60s 纯观察窗（3s 子窗 ×20） | 末 1/3 各维度回基线容差（share / 队列 depth / KV spread / occupancy ≤0.95）；连续两个子窗同向偏离超容差即 fail（震荡指纹）；swing / exec CV / 命中率 / TPS 为观察项 |
 
 ### engine_fault（13 例 · 9 例固定 batch-window、4 例全 profile）
 
@@ -265,6 +280,12 @@ master 自身进程级故障与冷启动行为，以及双实例 HA 链路（冻
 
 - `DECODE_ENGINE_OWNED` 的 **ENGINE_MAY_HAVE_SEEN** 子相位为已知不可覆盖缺口——连 Java 白盒 PreemptionPhasesE2ETest 都无该相位的 case；黑盒下 cancel 发出与 engine 认领之间的竞态窗口不可控，不硬造（成本 4 的低置信相位，语义上仅影响 coordinator 的 ack 等待起点）。
 - **ACCEPTED_NOT_RUNNING** 子相位在黑盒下同样不可行：该窗口要求请求已进 engine 队列但尚未 RUNNING，而 mock 的 decodeMaxConcurrency=128 无法在稳定时序下打满出队窗口，且 reportQueuedAsKvAllocated 投影需要性能 JSON 注入——构造面不可控，注记跳过。
+
+## 均衡指标体系
+
+均衡类断言（负载分布 / KV 占用 / 队列深度等）不逐点看瞬时值，而是按三段窗口读：**baseline**（事件前 ≥20s 稳态基线）→ **transient**（事件后 2×statusStaleAfterMs 瞬态窗，默认 20s）→ **steady**（自 t_settle 起 ≥60s 纯观察窗，3s 子窗 ×20，恢复性判据读末 1/3）。均衡类 case 运行时会起一个 `BalanceSampler`（`harness.py`）：1s 轮询 mock `/metrics?per_engine=true` 与 master `/rtp_llm/inflight_status`，按引擎名存内存序列，事件时间戳（`mark`）与全部序列在 case 结束时落盘为 `cases/<case>/balance_sampler.json.gz`；case detail 里同步记录事件时间戳与窗口边界。压测线（`online_eval`）侧，`aggregate_canvas_run.py` 的输出另带 `balance_ts_by_engine` 键：queue / kv / exec_ms / tps / hit 五族 per-engine 序列（5s 降采样），窗口语义与 case 侧一致。
+
+均衡维度的 band 键（`grade.py` GRADE_BANDS）：**PQ** 队列深度（upper）、**PK** KV 占用与拒绝（upper）、**PT** TPS 达成率、**PT2** cache 口径增益离散（upper）、**PL** 执行耗时跨引擎 CV（upper）、**PC** KV 命中率（lower）。阈值由机制常量 / 显式配置 / case 构造导出的判据直接 gate 判定（case 内用机制界三档同值覆盖，不用默认档位）；标注「首轮校准」的维度（TPS、exec CV、命中率稳态恢复、swing、恢复时长差等）以**观察项**形式只出值不判定——值、band 键与公式一并写进 case detail，供校准 run 回填后升级为断言。
 
 ## 新增用例
 

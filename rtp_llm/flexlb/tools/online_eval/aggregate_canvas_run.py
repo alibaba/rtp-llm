@@ -2391,6 +2391,130 @@ if _engine_token_run is not None:
     cache_hit_summary["engine_hit_tokens"] = cache_saved_tokens_calc
     cache_hit_summary["engine_input_tokens"] = ok_input_tokens
 
+# ---- 均衡指标体系 v2 per-engine 原始序列透传（balance_ts_by_engine）----
+# 设计 flexlb-balance-metrics-v2-design.md §1.5②：一个新键、不动旧键（旧
+# 消费方零破坏）。五族 per-engine 序列（queue / kv / exec_ms / tps /
+# hit），全部 rel 秒轴 + 5s 降采样（复用 _downsample_5s，52 引擎量级
+# JSON 体积可控）：
+#   queue.p_master_batcher —— master prometheus per-engine 决策时点深度
+#     （与 queue_top_bottom_ts 同源，但导出全引擎序列而非 top/bottom-5）；
+#   queue.p_waiting / d_waiting —— mock 引擎侧 waiting gauge（按 role 拆）；
+#   kv.occupancy —— (cache_blocks−available_blocks)/cache_blocks，两 gauge
+#     同一次 scrape 同拍输出、逐样本同拍对齐计算，分母 0 样本跳过（两
+#     role 均导出——占用对 P/D 都有意义）；
+#   exec_ms.prefill_avg / decode_avg —— P/D role 各自的执行耗时均值
+#     （off-role 序列恒 0，role 内导出才有跨引擎可比性）；
+#   tps.context / with_cache（P role）/ generate（D role）—— 生产口径
+#     TPS 三族 per-engine 序列（mock_tps_ts 集群求和前的形态）；
+#   hit.key_rate —— 累计 counter 对 [t, hits, requested, rate]（点值
+#     rate=hits/requested，requested=0 置 null；只有 prefill 引擎做准入
+#     记账，取 P role）。
+# 旧 run 缺序列 → 对应族空 dict（优雅降级，报告层按族省略）。派生分数
+# （gini/cv/max_share 时序 + 窗口分数）为 P1 层工作，此处只透传原始序列。
+
+
+def _engine_rel_rows(engine_pts, round_nd=2):
+    """{ip: [(epoch_ms, v)]} -> {ip: [[t, v]]}（rel 秒轴 + 5s 降采样）。"""
+    out = {}
+    for ip, pts in engine_pts.items():
+        rows = [[t, round(v, round_nd)] for t, v in rel_axis(_downsample_5s(pts))]
+        if rows:
+            out[ip] = rows
+    return out
+
+
+balance_ts_by_engine = {
+    "source": {
+        "file": "mock_per_engine_timeseries.json.gz",
+        "sample_s": 1,
+        "downsample_s": 5,
+    },
+    "queue": {},
+    "kv": {"occupancy": {}},
+    "exec_ms": {},
+    "tps": {},
+    "hit": {"key_rate": {}},
+}
+
+# queue 族：p_master_batcher（master 决策侧）+ p/d_waiting（引擎侧）。
+balance_ts_by_engine["queue"]["p_master_batcher"] = _engine_rel_rows(
+    batcher_role_series.get("PREFILL") or {}
+)
+for _side, _role_tag in (("p", "prefill"), ("d", "decode")):
+    balance_ts_by_engine["queue"][_side + "_waiting"] = _engine_rel_rows(
+        _ts_role_ip_split(mock_per_engine_ts, "mock_engine_waiting").get(_role_tag)
+        or {}
+    )
+
+# kv.occupancy：三态块池两 gauge 同拍对齐逐样本计算，分母 0 跳过。
+_cache_by_role = _ts_role_ip_split(mock_per_engine_ts, "mock_engine_cache_blocks")
+_avail_by_role = _ts_role_ip_split(mock_per_engine_ts, "mock_engine_available_blocks")
+_occ_by_ip = {}
+for _role, _engines in _cache_by_role.items():
+    for _ip, _tot_pts in _engines.items():
+        _avail_map = dict(_avail_by_role.get(_role, {}).get(_ip) or [])
+        _occ_pts = []
+        for _ts, _tot in _tot_pts:
+            _av = _avail_map.get(_ts)
+            if not _tot or _av is None:
+                continue
+            _occ_pts.append((_ts, (_tot - _av) / _tot))
+        _occ_by_ip[_ip] = _occ_pts
+balance_ts_by_engine["kv"]["occupancy"] = _engine_rel_rows(_occ_by_ip, round_nd=4)
+
+# exec_ms：P role 出 prefill_avg、D role 出 decode_avg。
+balance_ts_by_engine["exec_ms"]["prefill_avg"] = _engine_rel_rows(
+    _ts_role_ip_split(mock_per_engine_ts, "mock_engine_prefill_ms_avg").get("prefill")
+    or {},
+    round_nd=1,
+)
+balance_ts_by_engine["exec_ms"]["decode_avg"] = _engine_rel_rows(
+    _ts_role_ip_split(mock_per_engine_ts, "mock_engine_decode_ms_avg").get("decode")
+    or {},
+    round_nd=1,
+)
+
+# tps 三族：P role 出 context / with_cache，D role 出 generate。
+for _tps_family, _tps_base, _tps_role in (
+    ("context", "rtp_llm_context_tps", "prefill"),
+    ("with_cache", "rtp_llm_context_tps_with_cache", "prefill"),
+    ("generate", "rtp_llm_generate_tps", "decode"),
+):
+    balance_ts_by_engine["tps"][_tps_family] = _engine_rel_rows(
+        _ts_role_ip_split(mock_per_engine_ts, _tps_base).get(_tps_role) or {}
+    )
+
+# hit.key_rate：累计 counter 对同拍对齐，[t, hits, requested, rate]，
+# rate=hits/requested 点值（requested=0 置 None）。
+_hits_p = (
+    _ts_role_ip_split(mock_per_engine_ts, "mock_engine_cache_key_hits_total").get(
+        "prefill"
+    )
+    or {}
+)
+_req_p = (
+    _ts_role_ip_split(mock_per_engine_ts, "mock_engine_cache_keys_requested_total").get(
+        "prefill"
+    )
+    or {}
+)
+_key_rate_rows = {}
+for _ip, _hit_pts in _hits_p.items():
+    _req_map = dict(_req_p.get(_ip) or [])
+    _pair_pts = []
+    for _ts, _hits in _hit_pts:
+        _req = _req_map.get(_ts)
+        if _req is None:
+            continue
+        _pair_pts.append((_ts, (_hits, _req, (_hits / _req) if _req else None)))
+    _rows = [
+        [t, int(round(h)), int(round(r)), None if rate is None else round(rate, 4)]
+        for t, (h, r, rate) in rel_axis(_downsample_5s(_pair_pts))
+    ]
+    if _rows:
+        _key_rate_rows[_ip] = _rows
+balance_ts_by_engine["hit"]["key_rate"] = _key_rate_rows
+
 # ---- token 聚合对账（20260903 移除）：原 validity 项 ----
 # ---- token_reconciliation_ok 与 summary.token_reconciliation 已删 ----
 # 根因：fire-and-forget（FETCH_OUTPUT_STREAM=0）下 client 在 master
@@ -2850,6 +2974,10 @@ out = {
     # 消费——「master 路由 vs engine 执行」双曲线（差值=调度损耗）+
     # 「key 级理论 vs token 级实际」双曲线（差值=命中深度覆盖））。
     "cache_hit_ts": cache_hit_ts,
+    # 均衡指标体系 v2 per-engine 原始序列透传（五族：queue / kv / exec_ms /
+    # tps / hit，见上方 balance_ts_by_engine 计算块注释；报告层 per-engine
+    # 多序列面板与 P1 派生分数消费，旧 run 缺序列按族空 dict 优雅降级）。
+    "balance_ts_by_engine": balance_ts_by_engine,
     "dispatch_reason_ts": dispatch_reason_ts,
     "dispatch_batch_size_ts": dispatch_batch_size_ts,
     "batch_size_final": batch_size_final,

@@ -36,11 +36,11 @@ Timing-baseline self-maintenance: every completed run (any shard mode,
 Isolation contract (why these knobs are enough):
 
   * master ports — FLEXLB_FT_MASTER_HTTP_PORT (http / mgmt=+1 /
-    grpc=+2) and the HA Tier-1 A/B + Tier-3 port groups are ALL
-    env-overridable per runner PROCESS (harness.py reads them at import
-    time), so per-lane values give disjoint port groups.  Lane i owns
-    [18080+10i .. 18089+10i] (Tier-1 A: +0..+2, B: +3..+5; Tier-3 and
-    the single-master path share +0..+2 on distinct bind IPs).
+    grpc=+2) and the HA Tier-1 A/B port groups are ALL env-overridable
+    per runner PROCESS (harness.py reads them at import time), so
+    per-lane values give disjoint port groups.  Lane i owns
+    [18080+10i .. 18089+10i] (Tier-1 A: +0..+2, B: +3..+5; the
+    single-master path shares +0..+2).
   * mock ports — FLEXLB_FT_MOCK_BASE_GRPC_PORT pins the scan base per
     lane (default auto-scan from 55151 has a TOCTOU window when lanes
     scan concurrently).  Lane i owns [base .. base+~152]; stride 2000.
@@ -183,7 +183,6 @@ def lane_env(lane_idx: int, mock_stride: int = MOCK_PORT_STRIDE) -> dict[str, st
         "FLEXLB_FT_MASTER_MANAGEMENT_PORT": str(m + 1),
         "FLEXLB_FT_HA_MASTER_A_HTTP_PORT": str(m),
         "FLEXLB_FT_HA_MASTER_B_HTTP_PORT": str(m + 3),
-        "FLEXLB_FT_HA_TIER3_MASTER_HTTP_PORT": str(m),
         "FLEXLB_FT_MOCK_BASE_GRPC_PORT": str(_mock_base() + mock_stride * lane_idx),
     }
 

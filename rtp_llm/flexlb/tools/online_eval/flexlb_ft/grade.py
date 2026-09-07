@@ -175,6 +175,79 @@ GRADE_BANDS: Dict[str, dict] = {
         "bands": {"strict": 0.8, "normal": 0.7, "loose": 0.6},
     },
     # -----------------------------------------------------------------------
+    # Balance-metrics v2 family (design doc
+    # flexlb-balance-metrics-v2-design.md §1.2 指标总表 / §1.5③ — the
+    # elastic balance cases in cases/elastic.py are the consumers).
+    # Zero-invention discipline: where §1.2 gives a single bound the three
+    # tiers share it; mechanism-derived bounds (drain 60s / stale 10s /
+    # reserveRatio 0.05 / queue-capacity env values) are asserted through
+    # case-level band overrides (the ADD_PREF_SHARE_BANDS precedent),
+    # never through these defaults.  设计值，待首轮校准（P1 校准 run 回填）。
+    # -----------------------------------------------------------------------
+    # PQ queue depth (engine-side mock waiting + master decision view;
+    # absolute depth, not a share — queues sit at zero in steady state so
+    # a share is undefined).  Design §1.2 row 2 — transient: "各族 max
+    # depth ≤ 该族配置容量界（§1.3-4 推导）" (config-derived, case-override
+    # territory); steady: "稳态末 max depth ≤ 2（均值 0 邻域）".
+    # Single design bound → all three tiers 2.
+    "PQ": {
+        "kind": "upper",
+        "bands": {"strict": 2.0, "normal": 2.0, "loose": 2.0},
+    },
+    # PK KV occupancy (occupancy_i = (total − available)/total; the
+    # Δ(lack_mem+admission_fails) ≤ K_reject half of the row is
+    # case-derived and rides case overrides).  Design §1.2 row 3 —
+    # transient: "幸存者 occupancy ≤ 0.95；Δrejects ≤ K_reject（§1.3-4）"
+    # (0.95 = 1 − MockLruBlockCache.DEFAULT_RESERVE_RATIO 0.05); steady:
+    # "occupancy spread ≤ 基线+0.05；available ≥ reserve 线".  Single
+    # design bound → all three tiers 0.95.
+    "PK": {
+        "kind": "upper",
+        "bands": {"strict": 0.95, "normal": 0.95, "loose": 0.95},
+    },
+    # PT TPS achievement dispersion (non-cache caliber; r_i = tps_i/peak_i
+    # with the peak from a saturated calibration run — §1.3-2).  Design
+    # §1.2 row 5 — transient: "集群窗均 TPS ≥ 基线×(n_after/n_before)×0.85";
+    # steady: "max/min(r_i) ≤ 1.5；min r_i ≥ 0.5×mean".  The band carries
+    # the max/min dispersion bound; TPS 峰值需 P1 饱和校准 run，本轮
+    # case 断言降级为观察项.  Single design bound → all three tiers 1.5.
+    "PT": {
+        "kind": "upper",
+        "bands": {"strict": 1.5, "normal": 1.5, "loose": 1.5},
+    },
+    # PT2 cache-caliber gain dispersion (g_i = r_cache_i − r_i, both over
+    # the SAME non-cache peak — §1.3-3; hit gains must not concentrate on
+    # one engine).  Design §1.2 row 6 — transient: "增益 g_i 不集中单台：
+    # max g/min g ≤ 2（观察先行）"; steady: "同左，转 band".  TPS 峰值需
+    # P1 饱和校准 run，本轮 case 断言降级为观察项.  Single design bound
+    # → all three tiers 2.0.
+    "PT2": {
+        "kind": "upper",
+        "bands": {"strict": 2.0, "normal": 2.0, "loose": 2.0},
+    },
+    # PL exec-time cross-engine CV (window mean = count-weighted delta,
+    # §1.2 row 4 — the exec_ms gauges the G1 whitelist now carries).
+    # Transient: "CV ≤ 0.50（首跑校准，设计值）"; steady: "CV ≤
+    # max(基线+0.10, 0.25)" (baseline-relative dynamic form — only the
+    # explicit design bound 0.50 is materialised as tiers; the dynamic
+    # steady form stays with the case layer).  Single design bound → all
+    # three tiers 0.50.
+    "PL": {
+        "kind": "upper",
+        "bands": {"strict": 0.50, "normal": 0.50, "loose": 0.50},
+    },
+    # PC KV key-level cache hit (h_i = Δhits_i/Δrequested_i; cluster hit
+    # recovery curve on elastic events).  Design §1.2 row 7 — transient:
+    # "集群 hit 跌落 ≤ 期望跌落+0.10（§2.2 推导）"; steady: "min h_i ≥
+    # 0.5×基线集群 h；末 1/3 回基线−0.15".  Every design bound here is
+    # baseline-relative; this entry carries the absolute drop bound 0.10
+    # as the PLACEHOLDER floor (集群 hit 率绝对下界) — replace with the
+    # calibrated relative form after the first e2e round.
+    "PC": {
+        "kind": "lower",
+        "bands": {"strict": 0.10, "normal": 0.10, "loose": 0.10},
+    },
+    # -----------------------------------------------------------------------
     # Priority ordering + Auto-TPM family (design doc
     # docs/priority_auto_tpm_test_design.md §3.1/§3.2 — cases/priority.py
     # is the sole consumer).  Three measured bands + fifteen hard

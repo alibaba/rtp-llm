@@ -26,6 +26,7 @@ Only the Python standard library is used apart from ``grpc`` /
 
 from __future__ import annotations
 
+import gzip
 import json
 import os
 import shlex
@@ -465,52 +466,13 @@ class ManagedProcess:
 # OWN port group — A: HTTP 18080 / mgmt 18081 / gRPC 18082, B: HTTP 18083 /
 # mgmt 18084 / gRPC 18085.  With consistency disabled the three same-host
 # assumptions (ZK leader id, port stitching, SELF_TARGET) are all inert, so
-# distinct ports are the zero-risk layout and no FLEXLB_ADVERTISED_IP is
-# needed; the client separates the two masters by gRPC port.
+# distinct ports are the zero-risk layout; the client separates the two
+# masters by gRPC port.
 HA_TIER1_MASTER_A_HTTP_PORT = int(
     os.environ.get("FLEXLB_FT_HA_MASTER_A_HTTP_PORT", "18080")
 )
 HA_TIER1_MASTER_B_HTTP_PORT = int(
     os.environ.get("FLEXLB_FT_HA_MASTER_B_HTTP_PORT", "18083")
-)
-
-# Tier-2/3 ZK-activated layout: the SAME port group on DIFFERENT loopback
-# IPs (127.0.0.1:18080..18082 + 127.0.0.2:18080..18082 + FLEXLB_ADVERTISED_IP
-# injected per master).  Required because (verified in the Java code):
-#   * ZookeeperMasterElectService.initializeIpAndPort() sets the ZK
-#     LeaderSelector id to the BARE local IP (no port) — same-IP dual
-#     instances collide and mis-elect (isStillMaster compares bare IPs);
-#   * LBStatusConsistencyService.getMasterHostIpPort() stitches the LOCAL
-#     server.port onto the leader IP — a distinct-port layout would forward
-#     to the wrong port (A_IP:B_port is unreachable);
-#   * FlexlbGrpcForwarder.sameHost() compares bare IPs — same-IP instances
-#     would self-block every forward as SELF_TARGET.
-# Activation additionally needs the production-side prerequisites
-# (an FLEXLB_ADVERTISED_IP consumer in flexlb-sync + a per-address gRPC
-# bind instead of NettyServerBuilder.forPort) which are NOT yet in the
-# code; the harness injects the env/ports per this contract so the layout
-# lights up the moment those land.  Tier-2 forwarding itself is covered by
-# the JUnit layer (master_forward_matrix), not by this harness.
-#
-# RULING (2026-09-02): the same-host distinct-IP layout is DEAD.  The
-# election localIp comes ONLY from InetAddress.getLocalHost() hostname
-# resolution (ZookeeperMasterElectService L106-111 + LBStatusConsistency-
-# Service L52, two independent sites, no env override channel), the gRPC
-# wildcard bind (forPort) cannot start a second same-port instance, and
-# same-IP distinct-port makes SELF_TARGET permanently true, blocking all
-# forwarding; the production-side prerequisites (FLEXLB_ADVERTISED_IP
-# consumer / per-address bind) will NOT land.  Tier-3 moves to a
-# dual-container topology (each container gets its own network stack +
-# hostname -> naturally distinct IPs on the SAME port, faithfully
-# replicating production's one-IP-per-pod model) — phase 2.  The existing
-# 127.0.0.1/.2 wiring below is kept ONLY as the env-injection contract
-# reference (supersedes the "lights up the moment those land" expectation
-# above).
-HA_TIER3_MASTER_HTTP_PORT = int(
-    os.environ.get("FLEXLB_FT_HA_TIER3_MASTER_HTTP_PORT", "18080")
-)
-HA_TIER3_MASTER_B_BIND_IP = os.environ.get(
-    "FLEXLB_FT_HA_TIER3_MASTER_B_BIND_IP", "127.0.0.2"
 )
 
 
@@ -589,51 +551,19 @@ class MasterSpec:
       LBStatusConsistencyService.getMasterHostIpPort() returns null (no
       forwarding, LOCAL_STANDALONE routing) and
       FlexlbGrpcForwarder.sameHost(ip, null) is false (no SELF_TARGET), so
-      distinct ports are the zero-risk layout.  No FLEXLB_ADVERTISED_IP.
-
-    * Tier-2/3 ZK-activated — FLEXLB_SYNC_CONSISTENCY_CONFIG set by the
-      harness (EnvSpec.zk_consistency).  The layout MUST switch to
-      same-port / different-IP (bind_ip 127.0.0.1 vs 127.0.0.2 +
-      FLEXLB_ADVERTISED_IP): the ZK LeaderSelector id is the BARE local IP
-      (ZookeeperMasterElectService.initializeIpAndPort), the forwarded
-      master address stitches the LOCAL server.port onto the leader IP
-      (LBStatusConsistencyService.getMasterHostIpPort) and SELF_TARGET
-      compares bare IPs (FlexlbGrpcForwarder.sameHost) — a distinct-port
-      same-IP pair breaks on all three.  Both instances share ONE
-      HIPPO_ROLE: the ZK lock path is /master_lb_leader/{HIPPO_ROLE}, so
-      the same roleId is what makes them mutual master/follower.
-
-    RULING (2026-09-02): the same-host distinct-IP Tier-3 layout is
-    DEAD — the election localIp comes only from InetAddress.getLocalHost()
-    hostname resolution (ZookeeperMasterElectService L106-111 +
-    LBStatusConsistencyService L52, two independent sites, no env
-    override channel), the gRPC wildcard bind (forPort) cannot start a
-    second same-port instance, and same-IP distinct-port makes
-    SELF_TARGET permanently true, blocking all forwarding; the
-    production-side prerequisites (FLEXLB_ADVERTISED_IP consumer /
-    per-address bind) will NOT land.  Tier-3 moves to a dual-container
-    topology (one network stack + hostname per container -> naturally
-    distinct IPs on the same port, replicating production's
-    one-IP-per-pod) — phase 2.  The 127.0.0.1/.2 wiring is kept only as
-    the env-injection contract reference.
+      distinct ports are the zero-risk layout.
 
     Tier-2 forwarding semantics (four-state matrix, 8511, ForwardGuard)
     are covered by the JUnit layer (master_forward_matrix) — this harness
-    only orchestrates processes/env; Tier-3 is deferred to the phase-2
-    dual-container topology per the RULING above.
+    only orchestrates processes/env.
     """
 
     name: str  # registry key ("A" / "B" — brief p5/p6 scenario notation)
     http_port: int
     management_port: Optional[int] = None  # default http+1
-    # Spring --server.address; Tier-1 stays 127.0.0.1 (distinct ports),
-    # Tier-2/3 uses 127.0.0.1 vs 127.0.0.2 (same ports, distinct IPs).
+    # Spring --server.address for this instance (probes and the gRPC
+    # target are built on the same address).
     bind_ip: str = "127.0.0.1"
-    # FLEXLB_ADVERTISED_IP (Tier-2/3): overrides the ZK-advertised localIp.
-    # Has NO consumer in the flexlb Java code and none will land (see the
-    # RULING in the docstring above) — kept as the env-injection contract
-    # reference for the phase-2 dual-container Tier-3.
-    advertised_ip: Optional[str] = None
     # Default: BOTH instances share spec.label's role (mutual backup).
     hippo_role: Optional[str] = None
     log_dir_name: Optional[str] = None  # default logs_{name} under run_dir
@@ -657,7 +587,6 @@ class MasterSpec:
             "http_port": self.http_port,
             "management_port": self.management(),
             "bind_ip": self.bind_ip,
-            "advertised_ip": self.advertised_ip,
             "hippo_role": self.hippo_role,
             "extra_env": self.extra_env,
             "extra_args": self.extra_args,
@@ -665,7 +594,7 @@ class MasterSpec:
 
 
 # ---------------------------------------------------------------------------
-# ZK helper (Tier-2/3) — cross-agent contract with flexlb-sync (Mark)
+# ZK helper — cross-agent contract with flexlb-sync (Mark)
 # ---------------------------------------------------------------------------
 
 # Contract constants — the SINGLE definition point the harness and the
@@ -689,9 +618,6 @@ class MasterSpec:
 #     carries the actual port.
 #   * exit paths: SIGTERM (used by the harness) and stdin EOF — both
 #     print "ZK_STOPPED" and exit 0.
-#   * macOS caveat: 127.0.0.2 silently drops (SYN retransits 20s+) on
-#     macOS — the Tier-2/3 same-port/distinct-IP layout only works on
-#     Linux loopback (full 127/8 routed); run the ZK-tier cases remotely.
 ZK_LAUNCHER_CLASS = "org.flexlb.consistency.ZkTestingServerLauncher"
 ZK_READY_PREFIX = "ZK_READY"
 ZK_STOPPED_PREFIX = "ZK_STOPPED"
@@ -832,6 +758,9 @@ class EnvSpec:
     #   → FileServiceDiscovery; /add_engine + /remove_engine keep it in sync)
     discovery: str = "file"
     domain_addrs: dict = field(default_factory=dict)  # {prefill: "a,b", decode: "a,b"}
+    # Per-role KV pool size in BLOCKS — forwarded to the Java mock as
+    # --prefill-kv-pool-blocks / --decode-kv-pool-blocks (NOT a key-count
+    # cap: since KV v2 this is the total block count of the pool).
     prefill_cache_blocks: int = DEFAULT_PREFILL_CACHE_BLOCKS
     decode_cache_blocks: int = DEFAULT_DECODE_CACHE_BLOCKS
     master_extra_args: list = field(default_factory=list)
@@ -853,8 +782,8 @@ class EnvSpec:
     # single shared master; both masters share the SAME mock cluster and
     # discovery file and poll it independently (brief p1).
     masters: list = field(default_factory=list)  # list[MasterSpec]
-    # Tier-2/3 only: non-None starts the ZK helper JVM (Mark's contract —
-    # org.flexlb.consistency.ZkTestingServerLauncher, "ZK_READY
+    # ZK consistency opt-in: non-None starts the ZK helper JVM (Mark's
+    # contract — org.flexlb.consistency.ZkTestingServerLauncher, "ZK_READY
     # <connectString>" on stdout) BEFORE the masters and injects
     # FLEXLB_SYNC_CONSISTENCY_CONFIG (needConsistency=true, zkHost=<helper
     # connectString>, zkTimeoutMs from this dict) into every master env.
@@ -1348,7 +1277,7 @@ class FlexEnv:
         self.masters: dict[str, Optional[ManagedProcess]] = {}
         self.master_specs: dict[str, MasterSpec] = {}
         self.masters_start_count: dict[str, int] = {}
-        # ZK helper (Tier-2/3): ManagedProcess + advertised connectString.
+        # ZK helper: ManagedProcess + connectString.
         self.zk_helper: Optional[ManagedProcess] = None
         self.zk_connect_string: Optional[str] = None
 
@@ -1472,9 +1401,10 @@ class EnvManager:
             if spec.masters:
                 # HA dual-master path (gated on the registry being
                 # non-empty — the single-master legacy branch below is
-                # untouched).  Tier-2/3 boots the ZK helper first so the
-                # masters can grab the election lock at startup; Tier-1
-                # (zk_consistency=None) skips it entirely.
+                # untouched).  A spec with zk_consistency boots the ZK
+                # helper first so the masters can grab the election lock
+                # at startup; Tier-1 (zk_consistency=None) skips it
+                # entirely.
                 if spec.zk_consistency is not None:
                     self.start_zk_helper(env)
                 for mspec in spec.masters:
@@ -1513,10 +1443,6 @@ class EnvManager:
             str(spec.n_decode),
             "--base-grpc-port",
             str(env.base_grpc_port),
-            # macOS lo0 only has 127.0.0.1 (no whole 127/8 routing like Linux),
-            # so the unique-IP advertisement (127.1.0.x) is unreachable there.
-            "--unique-engine-ips",
-            "false" if sys.platform == "darwin" else "true",
             "--event-loop-threads",
             str(spec.event_loop_threads),
             "--completion-threads",
@@ -1531,9 +1457,9 @@ class EnvManager:
             # without any behavioral change to the engine itself.
             "--stats-stdout",
             "true",
-            "--prefill-cache-blocks",
+            "--prefill-kv-pool-blocks",
             str(spec.prefill_cache_blocks),
-            "--decode-cache-blocks",
+            "--decode-kv-pool-blocks",
             str(spec.decode_cache_blocks),
             "--endpoint-file",
             str(env.endpoint_file),
@@ -1580,9 +1506,9 @@ class EnvManager:
         *mspec* is None on the single-master legacy path (byte-identical
         behaviour).  A MasterSpec layers the per-instance keys on top of
         the shared base: HIPPO_ROLE (default = the shared label role, the
-        mutual-backup pairing), FLEXLB_ADVERTISED_IP (Tier-2/3),
-        FLEXLB_SYNC_CONSISTENCY_CONFIG (Tier-2/3, built from the live ZK
-        helper connectString) and the per-instance extra_env.
+        mutual-backup pairing), FLEXLB_SYNC_CONSISTENCY_CONFIG (ZK
+        consistency, built from the live ZK helper connectString when
+        spec.zk_consistency is set) and the per-instance extra_env.
         """
         spec = env.spec
         menv = dict(BASE_MASTER_ENV)
@@ -1638,8 +1564,6 @@ class EnvManager:
             # single-master path keeps mspec None and never reaches here).
             if mspec.hippo_role:
                 menv["HIPPO_ROLE"] = mspec.hippo_role
-            if mspec.advertised_ip:
-                menv["FLEXLB_ADVERTISED_IP"] = mspec.advertised_ip
             if spec.zk_consistency is not None:
                 if not env.zk_connect_string:
                     # Fail-closed: a master must never boot with
@@ -1898,12 +1822,6 @@ class EnvManager:
     def _instance_ports_in_use(self, mspec: MasterSpec) -> list[int]:
         """Instance's fixed ports (HTTP / management / gRPC = http+2),
         probed on the instance's OWN bind ip.
-
-        On the Tier-2/3 same-port layout the probe against 127.0.0.2 must
-        not be confused by a sibling instance bound to 127.0.0.1 — distinct
-        addresses coexist, so only a wildcard squatter (e.g. the current
-        NettyServerBuilder.forPort gRPC bind, until the production-side
-        per-address prerequisite lands) reports the port busy on both.
         """
         ports = [mspec.http_port, mspec.management(), mspec.grpc_port()]
         return [p for p in ports if port_in_use(p, mspec.bind_ip)]
@@ -1917,8 +1835,8 @@ class EnvManager:
         ready → engine stable window) with every probe pointed at the
         instance's own bind ip/port, plus the per-instance argv/env keys:
         --server.address, --management.server.address, --flexlb.log.path
-        (per-instance log dir), FLEXLB_ADVERTISED_IP and
-        FLEXLB_SYNC_CONSISTENCY_CONFIG via _master_env(env, mspec).
+        (per-instance log dir) and FLEXLB_SYNC_CONSISTENCY_CONFIG (when
+        configured) via _master_env(env, mspec).
         """
         spec = env.spec
         if not API_JAR.is_file():
@@ -1939,9 +1857,7 @@ class EnvManager:
                 raise RuntimeError(
                     f"master instance '{mspec.name}' ports still busy after "
                     f"{port_wait_s:.0f}s on {mspec.bind_ip} (another master "
-                    f"running? the Tier-2/3 same-port layout additionally "
-                    f"needs the production-side per-address gRPC bind "
-                    f"prerequisite): {busy}"
+                    f"running?): {busy}"
                 )
             self._log(
                 f"master '{mspec.name}' ports {busy} busy on {mspec.bind_ip}; "
@@ -1969,10 +1885,9 @@ class EnvManager:
             f"--server.port={mspec.http_port}",
             f"--management.server.port={mspec.management()}",
             f"--server.address={mspec.bind_ip}",
-            # Management port follows the main bind ip too: without it
-            # Spring binds 0.0.0.0 and the Tier-2/3 same-port pair would
-            # collide on the management port even though the main HTTP
-            # ports coexist on distinct addresses.
+            # Management port follows the main bind ip: without it Spring
+            # binds 0.0.0.0, colliding with a sibling instance's management
+            # port even when the main HTTP ports differ.
             f"--management.server.address={mspec.bind_ip}",
             f"--flexlb.log.path={log_dir}",
             f"--spring.profiles.active={spec.spring_profile}",
@@ -2125,7 +2040,7 @@ class EnvManager:
         self._log(f"SIGCONT master instance '{name}' (pid={mp.pid})")
         mp.unfreeze()
 
-    # -- ZK helper (Tier-2/3, gated on spec.zk_consistency) ----------------
+    # -- ZK helper (gated on spec.zk_consistency) --------------------------
 
     def start_zk_helper(self, env: FlexEnv) -> None:
         """Boot the ZK helper JVM and wait for 'ZK_READY <connectString>'.
@@ -2210,9 +2125,9 @@ class EnvManager:
             str(perf_file or env.perf_file),
             "--master-config",
             str(MASTER_CONFIG),
-            "--prefill-cache-blocks",
+            "--prefill-kv-pool-blocks",
             str(env.spec.prefill_cache_blocks if role == "prefill" else 0),
-            "--decode-cache-blocks",
+            "--decode-kv-pool-blocks",
             str(env.spec.decode_cache_blocks if role == "decode" else 0),
             "--endpoint-file",
             str(endpoint_file),
@@ -2396,6 +2311,313 @@ TTL_DRAIN_TIMEOUT_S = 95.0
 
 
 # ---------------------------------------------------------------------------
+# BalanceSampler (balance-metrics v2 — design doc
+# flexlb-balance-metrics-v2-design.md §1.5①)
+# ---------------------------------------------------------------------------
+
+# Mock per-engine series the sampler records (Prometheus series names; the
+# emitter is MockControlServer.appendPerEngineMetrics — 6 gauge / 7 counter
+# / 6 exec_ms / 3 TPS families).  The whitelist is a SAMPLER-side concern:
+# the /metrics endpoint exposes the full ~25-per-engine surface and the
+# case-side store keeps only these.  Master inflight_status fields ride the
+# same per-key store under "master:*" keys (see BalanceSampler docstring).
+BALANCE_MOCK_SERIES = (
+    # gauges
+    "mock_engine_running",
+    "mock_engine_waiting",
+    "mock_engine_cache_blocks",
+    "mock_engine_available_blocks",
+    "mock_engine_held_blocks",
+    "mock_engine_referenced_blocks",
+    # cumulative counters
+    "mock_engine_accepted_total",
+    "mock_engine_completed_total",
+    "mock_engine_cancelled_total",
+    "mock_engine_kv_admission_fails_total",
+    "mock_engine_lack_mem_rejects_total",
+    "mock_engine_cache_key_hits_total",
+    "mock_engine_cache_keys_requested_total",
+    # exec_ms family (gauge-style per-window stats)
+    "mock_engine_prefill_ms_avg",
+    "mock_engine_prefill_ms_p99",
+    "mock_engine_prefill_ms_count",
+    "mock_engine_decode_ms_avg",
+    "mock_engine_decode_ms_p99",
+    "mock_engine_decode_ms_count",
+    # production-caliber TPS trio (window = scrape interval)
+    "rtp_llm_context_tps",
+    "rtp_llm_context_tps_with_cache",
+    "rtp_llm_generate_tps",
+)
+
+
+def _http_get_text(url: str, timeout: float = 5.0) -> Optional[str]:
+    """Plain-text GET (None on any failure) — the /metrics scrape channel."""
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as resp:
+            return resp.read().decode("utf-8", "replace")
+    except Exception:
+        return None
+
+
+def _parse_per_engine_lines(body: str) -> list:
+    """Parse a mock /metrics?per_engine=true exposition body into
+    [(metric_name, labels_dict, value)] filtered to BALANCE_MOCK_SERIES.
+
+    Structurally identical to engine_ops.parse_prometheus_samples (same
+    tolerant label-block split, same skip rules), duplicated here because
+    this module cannot import engine_ops — the dependency arrow is one-way
+    (engine_ops imports harness; a reverse import would be a cycle).
+    """
+    samples: list = []
+    for raw in body.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        name_end = len(line)
+        for idx, ch in enumerate(line):
+            if ch == "{" or ch == " ":
+                name_end = idx
+                break
+        name = line[:name_end]
+        if name not in BALANCE_MOCK_SERIES:
+            continue
+        rest = line[name_end:]
+        labels: dict = {}
+        if rest.startswith("{"):
+            close = rest.find("}")
+            if close < 0:
+                continue
+            for pair in rest[1:close].split(","):
+                key, sep, value = pair.partition("=")
+                if sep:
+                    labels[key.strip()] = value.strip().strip('"')
+            rest = rest[close + 1 :]
+        parts = rest.split()
+        if not parts:
+            continue
+        try:
+            v = float(parts[0])
+        except ValueError:
+            continue
+        samples.append((name, labels, v))
+    return samples
+
+
+class BalanceSampler:
+    """Per-engine balance-metrics sampler: a daemon thread polling the mock
+    /metrics?per_engine=true and the master /rtp_llm/inflight_status once
+    per second (design flexlb-balance-metrics-v2-design.md §1.5①).
+
+    Storage is keyed by ENGINE NAME (the per_engine label) for mock series
+    and by "master:scheduler" / "master:prefill:<ip:port>" /
+    "master:decode:<ip:port>" for the master inflight view — one flat
+    ``{key: {metric: [(t_rel_s, v)]}}`` store, so :meth:`window_series`
+    addresses both planes with a single metric name (mock series by their
+    Prometheus name, master rows by their JSON field name:
+    scheduler_inflight / inflight_batches / inflight_requests /
+    inflight_route_requests / master_queued / total_load /
+    confirmed_accepted / confirmed_running).
+
+    Lifecycle: start() → mark(event) at every case milestone (timestamps are
+    seconds relative to the sampling start) → stop() → dump(path) to persist
+    the full store + events as json.gz into the case run directory.  Failed
+    rounds are skipped, never fatal (best-effort sampling, same contract as
+    the G1 poller); an engine that disappears simply stops appending.
+    """
+
+    POLL_INTERVAL_S = 1.0
+
+    # Master inflight_status fields worth recording per endpoint row (the
+    # prefill plane carries the inflight trio, the decode plane the queued /
+    # load quartet — see HttpLoadBalanceServer.inflightStatus).
+    _PREFILL_FIELDS = (
+        "inflight_batches",
+        "inflight_requests",
+        "inflight_route_requests",
+    )
+    _DECODE_FIELDS = (
+        "master_queued",
+        "total_load",
+        "confirmed_accepted",
+        "confirmed_running",
+    )
+
+    def __init__(self, mock_http_port: int, master_http_port: int):
+        self._mock_url = f"http://127.0.0.1:{mock_http_port}/metrics?per_engine=true"
+        self._master_url = (
+            f"http://127.0.0.1:{master_http_port}/rtp_llm/inflight_status"
+        )
+        self._stop_event = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+        self._lock = threading.Lock()
+        self._series: dict = {}
+        # {engine_name: role} from the per_engine "role" label — the
+        # per-role TPS routing key (P -> context_tps, D -> generate_tps,
+        # design §1.2 dim 5; the off-role series stay 0 on the Java side).
+        self._engine_roles: dict = {}
+        self._events: dict = {}
+        self._t0: Optional[float] = None
+
+    # -- polling -----------------------------------------------------------
+
+    def _record(self, key: str, metric: str, t_rel: float, value: float) -> None:
+        with self._lock:
+            per_key = self._series.setdefault(key, {})
+            per_key.setdefault(metric, []).append((t_rel, value))
+
+    def _poll_mock(self, t_rel: float) -> None:
+        body = _http_get_text(self._mock_url, timeout=2.0)
+        if body is None:
+            return
+        for name, labels, value in _parse_per_engine_lines(body):
+            engine = labels.get("engine_name")
+            if not engine:
+                continue
+            role = labels.get("role")
+            if role:
+                with self._lock:
+                    self._engine_roles[engine] = role
+            self._record(engine, name, t_rel, value)
+
+    def _poll_master(self, t_rel: float) -> None:
+        data = http_get_json(self._master_url, timeout=2.0)
+        if not isinstance(data, dict):
+            return
+        sched = data.get("scheduler_inflight")
+        if isinstance(sched, (int, float)):
+            self._record("master:scheduler", "scheduler_inflight", t_rel, float(sched))
+        for ep in data.get("prefill_endpoints", []) or []:
+            key = f"master:prefill:{ep.get('ip_port')}"
+            for field in self._PREFILL_FIELDS:
+                v = ep.get(field)
+                if isinstance(v, list):
+                    v = len(v)
+                if isinstance(v, (int, float)):
+                    self._record(key, field, t_rel, float(v))
+        for ep in data.get("decode_endpoints", []) or []:
+            key = f"master:decode:{ep.get('ip_port')}"
+            for field in self._DECODE_FIELDS:
+                v = ep.get(field)
+                if isinstance(v, (int, float)):
+                    self._record(key, field, t_rel, float(v))
+
+    def _loop(self) -> None:
+        while not self._stop_event.is_set():
+            started = time.monotonic()
+            t_rel = round(started - self._t0, 3)
+            try:
+                self._poll_mock(t_rel)
+            except Exception:
+                pass  # best-effort round; skip
+            try:
+                self._poll_master(t_rel)
+            except Exception:
+                pass
+            remaining = self.POLL_INTERVAL_S - (time.monotonic() - started)
+            if remaining > 0:
+                self._stop_event.wait(remaining)
+
+    # -- lifecycle ---------------------------------------------------------
+
+    def start(self) -> None:
+        self._t0 = time.monotonic()
+        self._thread = threading.Thread(
+            target=self._loop, name="balance-sampler", daemon=True
+        )
+        self._thread.start()
+
+    def stop(self, timeout_s: float = 5.0) -> None:
+        self._stop_event.set()
+        if self._thread is not None:
+            self._thread.join(timeout_s)
+
+    def mark(self, event_name: str) -> float:
+        """Record an event timestamp (seconds relative to the sampling start).
+
+        Returns the recorded timestamp so callers can reuse it as the anchor
+        of their baseline/transient/steady windows (design §1.4).
+        """
+        if self._t0 is None:
+            raise RuntimeError("BalanceSampler.mark() before start()")
+        t_rel = round(time.monotonic() - self._t0, 3)
+        with self._lock:
+            self._events[event_name] = t_rel
+        return t_rel
+
+    def event_time(self, event_name: str) -> Optional[float]:
+        with self._lock:
+            return self._events.get(event_name)
+
+    # -- window extraction ----------------------------------------------------
+
+    def window_series(self, metric: str, t_lo: float, t_hi: float, mode: str = "value"):
+        """Extract one metric over [t_lo, t_hi] (seconds, sampler axis).
+
+        mode="value" (gauge) returns {key: [(t_rel_s, v), ...]} — the
+        in-window sample series per engine, the exact shape
+        AssertUtils.balanced() consumes.  mode="delta" (counter) returns
+        {key: last − first} — the in-window cumulative delta per engine
+        (share/reject accounting: one poll per side means the endpoints
+        bracket the window; a single-sample window yields 0).
+        """
+        out: dict = {}
+        with self._lock:
+            snapshot = {key: dict(per) for key, per in self._series.items()}
+        for key, per_metric in snapshot.items():
+            pts = per_metric.get(metric)
+            if not pts:
+                continue
+            in_win = [(t, v) for t, v in pts if t_lo <= t <= t_hi]
+            if not in_win:
+                continue
+            if mode == "delta":
+                out[key] = in_win[-1][1] - in_win[0][1]
+            else:
+                out[key] = in_win
+        return out
+
+    def engine_roles(self) -> dict:
+        """{engine_name: role} snapshot ("prefill" / "decode", from the
+        per_engine role label) — the per-role series-routing key for
+        consumers (context vs generate TPS)."""
+        with self._lock:
+            return dict(self._engine_roles)
+
+    def dump(self, path) -> None:
+        """Persist the full store + events + roles + meta as json.gz
+        (case evidence).
+
+        Reliability contract (code-review fix, three properties):
+          1. the payload snapshot is taken under the SAME lock the
+             poller thread takes, with per-series list copies — a daemon
+             thread that outlives stop()'s join can never mutate the
+             dicts mid-serialization;
+          2. atomic publish — write a ``.tmp`` sibling then os.replace
+             onto the final path, so an interrupted dump never leaves a
+             TRUNCATED evidence file behind;
+          3. engine_roles rides along so the per-role TPS routing is
+             reproducible from the artifact alone.
+        """
+        with self._lock:
+            payload = {
+                "sample_s": self.POLL_INTERVAL_S,
+                "events": dict(self._events),
+                "engine_roles": dict(self._engine_roles),
+                "series": {
+                    key: {metric: list(pts) for metric, pts in per.items()}
+                    for key, per in self._series.items()
+                },
+            }
+        out_path = Path(path)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = out_path.with_name(out_path.name + ".tmp")
+        with gzip.open(tmp_path, "wt") as f:
+            json.dump(payload, f)
+        os.replace(tmp_path, out_path)
+
+
+# ---------------------------------------------------------------------------
 # AssertUtils
 # ---------------------------------------------------------------------------
 
@@ -2520,6 +2742,102 @@ class AssertUtils:
             f"ttft p50 {base_p50:.1f} → {new_p50:.1f} ms "
             f"({degradation:+.1f}%, limit {threshold_pct:.0f}%)"
         )
+
+    @staticmethod
+    def balanced(
+        report,
+        prop: str,
+        series_by_engine: dict,
+        window: tuple,
+        stat: str,
+        bands,
+        context: str = "",
+    ) -> tuple:
+        """Window-aggregate per-engine series into one statistic, then
+        ``report.check(prop, value, bands=bands, context=context)``
+        (balance-metrics v2 design §1.5③).
+
+        *series_by_engine*: ``{engine: [(t_rel_s, v)]}`` — the value-mode
+        product of :meth:`BalanceSampler.window_series` (any isomorphic
+        mapping works).  *window*: ``(t_lo, t_hi)`` relative to the case
+        event moment; each engine is aggregated to its in-window MEAN
+        first (1s same-tick sampling makes the mean the window
+        representative), then the inter-engine statistic is computed:
+
+          max_share — max_i(v_i) / Σv_i   (request/load share caliber, P1)
+          min       — min_i(v_i)          (starvation floor)
+          cv        — sample stdev / mean across engines (mean 0 → None,
+                      noted in context — CV is undefined there)
+          spread    — max_i(v_i) − min_i  (absolute dispersion, KV occupancy)
+          mean      — mean over engines
+          peak      — max over ALL in-window raw samples (queue depth and
+                      other absolute peaks — taken from the samples, NOT the
+                      per-engine means, so instantaneous spikes survive)
+          cluster   — Σ_i(per-engine mean)  (cluster aggregate: TPS sums,
+                      count-weighted totals; equals the time-mean of the
+                      per-tick cross-engine sum under same-tick sampling)
+
+        A None value (no in-window samples, CV zero-mean, max_share zero
+        denominator) is checked as NaN — every band comparison is False, so
+        the property records FAIL: missing data fails loud, it never passes
+        silently.  Returns ``(passed, value)`` so callers can quote the
+        statistic in their case detail.
+        """
+        t_lo, t_hi = window
+        per_engine: dict = {}
+        all_samples: list = []
+        for engine, pts in series_by_engine.items():
+            in_win = [v for t, v in pts if t_lo <= t <= t_hi]
+            if not in_win:
+                continue
+            per_engine[engine] = sum(in_win) / len(in_win)
+            all_samples.extend(in_win)
+        reason = ""
+        value = None
+        if stat == "peak":
+            value = max(all_samples) if all_samples else None
+            if value is None:
+                reason = "no in-window samples"
+        elif not per_engine:
+            reason = "no in-window samples"
+        elif stat == "cluster":
+            value = sum(per_engine.values())
+        elif stat == "mean":
+            value = sum(per_engine.values()) / len(per_engine)
+        elif stat == "min":
+            value = min(per_engine.values())
+        elif stat == "max_share":
+            total = sum(per_engine.values())
+            if total > 0:
+                value = max(per_engine.values()) / total
+            else:
+                reason = "zero total share denominator"
+        elif stat == "spread":
+            value = max(per_engine.values()) - min(per_engine.values())
+        elif stat == "cv":
+            vals = list(per_engine.values())
+            mean_v = sum(vals) / len(vals)
+            if mean_v == 0:
+                reason = "zero mean — CV undefined"
+            else:
+                var = (
+                    sum((v - mean_v) ** 2 for v in vals) / (len(vals) - 1)
+                    if len(vals) > 1
+                    else 0.0
+                )
+                value = (var**0.5) / mean_v
+        else:
+            raise ValueError(f"unknown stat: {stat}")
+        note = context
+        if value is None:
+            note = (context + "; " if context else "") + (reason or "value unavailable")
+        passed = report.check(
+            prop,
+            value if value is not None else float("nan"),
+            bands=bands,
+            context=note,
+        )
+        return passed, value
 
 
 def master_prefill_batches_sum(ops) -> int:

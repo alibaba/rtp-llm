@@ -287,11 +287,10 @@ public final class JavaMockEngineCluster {
                 ? EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE
                 : EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL;
         // Per-role KV pool sizing (capacity model v2): the pool is sized in
-        // blocks — ceil(totalKvTokens/spb), or the --prefill-cache-blocks/
-        // --decode-cache-blocks override (legacy flags repurposed from
-        // key-count caps to pool-size overrides so the load scripts keep
-        // working unchanged) — and the REPORTED token capacity always equals
-        // the pool actually built (totalBlocks x spb).
+        // blocks — ceil(totalKvTokens/spb), or the --prefill-kv-pool-blocks/
+        // --decode-kv-pool-blocks override — and the REPORTED
+        // token capacity always equals the pool actually built (totalBlocks
+        // x spb).
         long roleTotalKvTokens = roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL
                 ? config.prefillTotalKvTokens : config.decodeTotalKvTokens;
         int blocksOverride = roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL
@@ -305,7 +304,7 @@ public final class JavaMockEngineCluster {
         // (totalBlocks x blockSize), and every reporting surface here
         // (getCacheStatus.totalKvCache / getWorkerStatus.totalKvCache /
         // /snapshot total_kv_tokens) derives from this one value.  Passing
-        // the raw config token number while a --*-cache-blocks override
+        // the raw config token number while a --*-kv-pool-blocks override
         // shrinks the pool left the master computing used = total -
         // available ~= 99.9% on a 4-block decode pool -> every decode
         // engine read as KV-full and the whole KV family structurally
@@ -5602,10 +5601,9 @@ public final class JavaMockEngineCluster {
         int completionThreads = 8;
         /**
          * Block-count pool overrides (capacity model v2): 0 = derive the pool
-         * from the per-role token capacity (ceil(totalKvTokens/spb)). The legacy
-         * flag NAMES are kept (run_online_eval.sh L861-862 / lib_load_client.sh /
-         * harness.py still pass them) but the MEANING changed from "max cache
-         * keys" to "total pool blocks" — a non-zero value overrides derivation.
+         * from the per-role token capacity (ceil(totalKvTokens/spb)). CLI
+         * names: --prefill-kv-pool-blocks / --decode-kv-pool-blocks — a
+         * non-zero value overrides derivation.
          */
         int prefillCacheBlocks = 0;
         int decodeCacheBlocks = 0;
@@ -5676,8 +5674,8 @@ public final class JavaMockEngineCluster {
                     case "--base-grpc-port" -> config.baseGrpcPort = Integer.parseInt(value);
                     case "--event-loop-threads" -> config.eventLoopThreads = Integer.parseInt(value);
                     case "--completion-threads" -> config.completionThreads = Integer.parseInt(value);
-                    case "--prefill-cache-blocks" -> config.prefillCacheBlocks = Integer.parseInt(value);
-                    case "--decode-cache-blocks" -> config.decodeCacheBlocks = Integer.parseInt(value);
+                    case "--prefill-kv-pool-blocks" -> config.prefillCacheBlocks = Integer.parseInt(value);
+                    case "--decode-kv-pool-blocks" -> config.decodeCacheBlocks = Integer.parseInt(value);
                     case "--host" -> config.host = value;
                     case "--prefill-domain" -> config.prefillDomain = value;
                     case "--decode-domain" -> config.decodeDomain = value;

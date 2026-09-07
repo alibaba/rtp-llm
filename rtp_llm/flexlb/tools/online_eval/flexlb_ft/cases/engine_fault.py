@@ -894,7 +894,7 @@ def _engine_ip_port(ops, engine_name: str) -> str:
     """Master-facing address of *engine_name* — the ipPort the master logs
     and keys workerStatus entries by.
 
-    With --unique-engine-ips (harness default on Linux) every engine
+    With --unique-engine-ips (Java default) every engine
     advertises a derived 127.x.y.z loopback host, NOT 127.0.0.1, and the
     master keys/logs by that advertised pair — a hardcoded 127.0.0.1
     needle matches nothing in the sync log or the inflight ledger.  The

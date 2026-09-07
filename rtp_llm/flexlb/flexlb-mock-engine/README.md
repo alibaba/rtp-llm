@@ -327,9 +327,8 @@ reverts to the legacy shared `--host`) instead of all declaring 127.0.0.1, so th
 `engineIp` Prometheus label stays distinct per engine — with a shared host, per-engine gauge
 series (batcher queue / KV / inflight) overwrote each other. The gRPC bind stays wildcard
 (`forPort`), only the advertised address changes (worker status, `DOMAIN_ADDRESS`,
-endpoints.json, `/metrics` `engine_ip` label); Linux routes all of 127.0.0.0/8 to loopback, but
-macOS only reaches 127.0.0.1 by default — disable the flag for local macOS runs that connect
-across engine addresses.
+endpoints.json, `/metrics` `engine_ip` label); the test line runs on remote Linux only, where
+all of 127.0.0.0/8 routes to loopback.
 
 ### Cancel channel
 
@@ -449,11 +448,13 @@ master-side curves are indistinguishable from production:
   / self-routed topologies (no resolvable DECODE in role_addrs) reserve
   nothing; the D engine is located from role_addrs exactly as `startDecode`
   does (mock routing parity: same resolver, same target).
-- **Flag semantics change**: `--prefill-cache-blocks` / `--decode-cache-blocks` have
-  RETIRED their old meaning ("max cached key count") and now override the pool
-  block count (default `0` = derive from token capacity). The 6000/3000 defaults
-  still passed by `run_online_eval.sh` / `lib_load_client.sh` / `harness.py` remain
-  valid — they now size the pools (6,000 blocks = 6,144,000 tokens prefill;
+- **Flag rename + semantics change**: the pool-block overrides are
+  `--prefill-kv-pool-blocks` / `--decode-kv-pool-blocks` (default `0` = derive
+  from token capacity). The old names `--prefill-cache-blocks` /
+  `--decode-cache-blocks` were removed outright — passing either one now fails
+  fast with an unknown-argument error. The 6000/3000 defaults still
+  passed by `run_online_eval.sh` / `lib_load_client.sh` / `harness.py` remain
+  valid — they size the pools (6,000 blocks = 6,144,000 tokens prefill;
   3,000 = 3,072,000 decode) instead of capping key counts.
 - **Surface alignment**: `block_size` in snapshots now reports the actual spb (was
   hardcoded 1024); `/snapshot` and `/metrics` expose `total_kv_tokens`,
@@ -625,25 +626,15 @@ The Python mock engine / Python load client implementations have been
 `flexlb_load_client.py`, `run_single_engine.py`, `test_resolve_decode.py` and
 `tests/test_mock_engine.py`), together with `tools/online_eval/run_batch_smoke_only.sh`
 (a matrix subset with no CI references — its coverage is subsumed by
-`run_online_eval.sh` / `run_matrix_smoke.sh`) and the stale
+`run_online_eval.sh`) and the stale
 `tools/online_eval/BUILD` filegroup that still referenced the deleted Python
 files: nine files in total. The `MOCK_ENGINE_IMPL` / `LOAD_CLIENT_IMPL`
 orchestration switches and their Python branches are gone as well, so the
 Java stack described in this README is the only implementation.
 
-All seven orchestration test scripts have been converted to the Java stack and
-now drive JavaMockEngineCluster / JavaLoadClient through the shared
-`tools/online_eval/lib_load_client.sh` helpers
-(`start_java_mock_cluster` / `wait_mock_cluster_ready` / `mock_http` /
-`stop_java_mock_cluster` / `run_java_load_client`):
-
-- `flexlb_behavior_test.sh`
-- `engine_kill_restart_test.sh`
-- `run_cancel_smoke.sh`
-- `run_matrix_smoke.sh`
-- `master_kill_restart_test.sh`
-- `master_recovery_ttft_test.sh`
-- `engine_disconnect_ttft_test.sh`
+`run_online_eval.sh` drives JavaLoadClient through the shared
+`tools/online_eval/lib_load_client.sh` helper `run_java_load_client`
+(the single source of truth for the JavaLoadClient env-var mapping).
 
 The Python **smoke client family** has been retired and removed (it was
 tooling, not the mock engine): `flexlb_smoke_base.py`,

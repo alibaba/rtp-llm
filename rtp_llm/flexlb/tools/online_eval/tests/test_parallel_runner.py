@@ -149,17 +149,13 @@ class LaneEnvTest(unittest.TestCase):
                 )
 
     def test_single_master_and_ha_tier_ports_share_the_group_head(self):
-        # By design (harness port plan): the single-master path, HA Tier-1 A
-        # and HA Tier-3 all bind the group head — they are three MUTUALLY
+        # By design (harness port plan): the single-master path and HA
+        # Tier-1 A both bind the group head — they are two MUTUALLY
         # EXCLUSIVE env shapes inside one runner process, never concurrent.
         env = parallel_runner.lane_env(2)
         self.assertEqual(
             env["FLEXLB_FT_MASTER_HTTP_PORT"],
             env["FLEXLB_FT_HA_MASTER_A_HTTP_PORT"],
-        )
-        self.assertEqual(
-            env["FLEXLB_FT_MASTER_HTTP_PORT"],
-            env["FLEXLB_FT_HA_TIER3_MASTER_HTTP_PORT"],
         )
         self.assertEqual(
             int(env["FLEXLB_FT_HA_MASTER_B_HTTP_PORT"])
@@ -175,13 +171,12 @@ class LaneEnvTest(unittest.TestCase):
             self.assertEqual(str(m + 1), env["FLEXLB_FT_MASTER_MANAGEMENT_PORT"])
             self.assertEqual(str(m), env["FLEXLB_FT_HA_MASTER_A_HTTP_PORT"])
             self.assertEqual(str(m + 3), env["FLEXLB_FT_HA_MASTER_B_HTTP_PORT"])
-            self.assertEqual(str(m), env["FLEXLB_FT_HA_TIER3_MASTER_HTTP_PORT"])
             self.assertEqual(
                 str(parallel_runner.MOCK_BASE_GRPC_PORT + 2000 * i),
                 env["FLEXLB_FT_MOCK_BASE_GRPC_PORT"],
             )
 
-    def test_overlay_touches_only_the_six_port_keys(self):
+    def test_overlay_touches_only_the_five_port_keys(self):
         # Operator env (e.g. FLEXLB_FT_HA_DUAL_MASTER=1) must pass through
         # untouched — the overlay is exactly the port partition.
         self.assertEqual(
@@ -190,7 +185,6 @@ class LaneEnvTest(unittest.TestCase):
                 "FLEXLB_FT_MASTER_MANAGEMENT_PORT",
                 "FLEXLB_FT_HA_MASTER_A_HTTP_PORT",
                 "FLEXLB_FT_HA_MASTER_B_HTTP_PORT",
-                "FLEXLB_FT_HA_TIER3_MASTER_HTTP_PORT",
                 "FLEXLB_FT_MOCK_BASE_GRPC_PORT",
             },
             set(parallel_runner.lane_env(3)),

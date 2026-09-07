@@ -40,8 +40,9 @@ import urllib.request
 # consumed by aggregate mock_tps_ts and the report-layer 2.3 对账图) and
 # the KV v2 block-pool family (three-state block gauges + admission /
 # reuse / eviction counters; consumed by aggregate kv_blocks_ts_by_role
-# and the report-layer 5. KV 块池面板 — every entry below has a
-# downstream consumer, do not add dead keys).
+# and the report-layer 5. KV 块池面板 — dead-key discipline: every
+# entry below is consumer-backed or explicitly P1-committed, nothing
+# else is admissible).
 MOCK_KEEP_SERIES = {
     "mock_engine_running",
     "mock_engine_waiting",
@@ -62,6 +63,21 @@ MOCK_KEEP_SERIES = {
     # cache_hit_summary and the report-layer cache 命中率面板.
     "mock_engine_cache_key_hits_total",
     "mock_engine_cache_keys_requested_total",
+    # Per-engine exec_ms family (prefill/decode execution-time gauges,
+    # MockControlServer.appendPerEngineMetrics): the avg pair is
+    # consumer-backed (aggregate balance_ts_by_engine.exec_ms passes it
+    # through as the prefill_avg/decode_avg per-engine series); the
+    # p99/count quartet is explicitly P1-committed — the
+    # balance-metrics-v2 P1 derived-score layer (design §1.2 dim 4,
+    # count-weighted differential) rides the same G1 timeline and needs
+    # the count series as its weighting input, so these stay whitelisted
+    # as committed inputs rather than dead keys.
+    "mock_engine_prefill_ms_avg",
+    "mock_engine_prefill_ms_p99",
+    "mock_engine_prefill_ms_count",
+    "mock_engine_decode_ms_avg",
+    "mock_engine_decode_ms_p99",
+    "mock_engine_decode_ms_count",
 }
 
 # G3 C whitelist — every entry is a consumer-backed series (B3 queue curves,

@@ -6,16 +6,9 @@ Shared plumbing for the six HA dual-master cases in cases/master.py
   * Tier-1 dual standalone — two flexlb masters on DISTINCT port groups
     (A: 18080/18081/18082, B: 18083/18084/18085), needConsistency stays
     off, no ZK: each master routes independently and the client's sticky
-    target decides who serves.  Zero production prerequisites.
-  * Tier-3 full-chain ZK — same port group on distinct loopback IPs
-    (127.0.0.1 vs 127.0.0.2) + FLEXLB_ADVERTISED_IP + the ZK helper JVM
-    (FLEXLB_SYNC_CONSISTENCY_CONFIG).  RULING (2026-09-02, harness.py):
-    this same-host distinct-IP layout is DEAD (localIp has no env
-    override, wildcard bind, SELF_TARGET) — Tier-3 moves to the
-    phase-2 dual-container topology; the 127.0.0.1/.2 wiring is kept
-    only as the env-injection contract reference.  Tier-2 forwarding
-    semantics are owned by the JUnit layer (master_forward_matrix),
-    not this harness.
+    target decides who serves.  Zero production prerequisites.  Tier-2
+    forwarding semantics are owned by the JUnit layer
+    (master_forward_matrix), not this harness.
 
 Deferred (documented cut): the eval collector's per-master/per-route
 dimensions — the HA assertion surface is already covered by
@@ -44,8 +37,6 @@ from ..engine_ops import EngineOps
 from ..harness import (
     HA_TIER1_MASTER_A_HTTP_PORT,
     HA_TIER1_MASTER_B_HTTP_PORT,
-    HA_TIER3_MASTER_B_BIND_IP,
-    HA_TIER3_MASTER_HTTP_PORT,
     ClientOps,
     EnvSpec,
     MasterSpec,
@@ -66,22 +57,8 @@ def ha_dual_enabled() -> bool:
     return os.environ.get(HA_DUAL_MASTER_ENV, "").strip() == "1"
 
 
-# Layout selector for the ZK-tier cases (master_ha_failover,
-# failback_wraparound): "tier3" (default — brief p5/p6/p9/p10 attribution)
-# or "tier1" (immediate-smoke fallback: same client-side assertion surface,
-# dual-standalone servers).  Tier-3 needs the production-side prerequisites
-# (see module docstring) — flip to tier1 to validate the harness plumbing
-# and the client failover contract before they land.
-HA_LAYOUT_ENV = "FLEXLB_FT_HA_LAYOUT"
-
-
-def ha_layout() -> str:
-    return os.environ.get(HA_LAYOUT_ENV, "tier3").strip().lower() or "tier3"
-
-
 # ---------------------------------------------------------------------------
-# Dual-master EnvSpec constructors (same registry, different configuration
-# combos — the brief's Tier-1 vs Tier-2/3 split)
+# Dual-master EnvSpec constructors
 # ---------------------------------------------------------------------------
 
 
@@ -105,47 +82,6 @@ def tier1_dual_spec(ctx) -> EnvSpec:
             MasterSpec(name="B", http_port=HA_TIER1_MASTER_B_HTTP_PORT),
         ],
     )
-
-
-def tier3_dual_spec(ctx) -> EnvSpec:
-    """Tier-3: same port group on distinct loopback IPs + ZK helper.
-
-    FLEXLB_ADVERTISED_IP and FLEXLB_SYNC_CONSISTENCY_CONFIG are injected
-    per the cross-agent contract (flexlb-sync owner); both instances share
-    one HIPPO_ROLE (mutual master/follower over /master_lb_leader/{role}).
-    """
-    return EnvSpec(
-        label=f"ha_t3_{ctx.profile}",
-        n_prefill=2,
-        n_decode=4,
-        perf=default_perf(),
-        master_profile=ctx.profile,
-        discovery="file",
-        masters=[
-            MasterSpec(
-                name="A",
-                http_port=HA_TIER3_MASTER_HTTP_PORT,
-                bind_ip="127.0.0.1",
-                advertised_ip="127.0.0.1",
-            ),
-            MasterSpec(
-                name="B",
-                http_port=HA_TIER3_MASTER_HTTP_PORT,
-                bind_ip=HA_TIER3_MASTER_B_BIND_IP,
-                advertised_ip=HA_TIER3_MASTER_B_BIND_IP,
-            ),
-        ],
-        zk_consistency={"zkTimeoutMs": 10_000},
-    )
-
-
-def dual_spec_for_layout(ctx, layout: Optional[str] = None) -> EnvSpec:
-    chosen = (layout or ha_layout()).lower()
-    if chosen in ("tier1", "t1", "1"):
-        return tier1_dual_spec(ctx)
-    if chosen in ("tier3", "t3", "3"):
-        return tier3_dual_spec(ctx)
-    raise ValueError(f"unknown FLEXLB_FT_HA_LAYOUT '{chosen}' (expected tier1|tier3)")
 
 
 # ---------------------------------------------------------------------------

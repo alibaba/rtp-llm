@@ -43,7 +43,6 @@ from ..harness import (
 from .ha_support import (
     HaRows,
     HaTrafficRunner,
-    dual_spec_for_layout,
     ha_dual_enabled,
     ha_gate,
     instance_alive_full,
@@ -826,7 +825,7 @@ def master_freeze(ctx: CaseContext):
     "same-request retry to B once, sticky moves to B",
 )
 def master_ha_failover(ctx: CaseContext):
-    """Tier-2/3 by default (FLEXLB_FT_HA_LAYOUT, tier3), Tier-1 fallback.
+    """Tier-1 dual standalone (two masters on distinct port groups).
 
     Six-step flow (brief p6):
       1. dual masters + client GRPC_TARGETS=A,B, sticky A; 100% served
@@ -843,12 +842,7 @@ def master_ha_failover(ctx: CaseContext):
       6. teardown reclaims everything (sticky stays on B for scenario 4).
 
     Tier-2 forwarding four-state matrix is NOT asserted here — JUnit
-    territory (master_forward_matrix, see the HA group header).  The
-    Tier-3 same-host distinct-IP layout is DEAD per the harness.py
-    RULING (2026-09-02: localIp has no env override, wildcard bind,
-    SELF_TARGET) — Tier-3 moves to the phase-2 dual-container topology;
-    the 127.0.0.1/.2 wiring stays as the env-injection contract
-    reference only.
+    territory (master_forward_matrix, see the HA group header).
 
     Two assertion-face cuts (documented, not lost): the real_master_host
     contract assertion is suspended until the optional p5 fix lands
@@ -860,7 +854,7 @@ def master_ha_failover(ctx: CaseContext):
     gate = ha_gate()
     if gate:
         return gate
-    env = ctx.env_manager.ensure(dual_spec_for_layout(ctx))
+    env = ctx.env_manager.ensure(tier1_dual_spec(ctx))
     mgr = ctx.env_manager
     target_a = mgr.master_instance_target(env, "A")
     target_b = mgr.master_instance_target(env, "B")
@@ -1209,7 +1203,7 @@ def fallback_negative_errorcode(ctx: CaseContext):
     "back to A",
 )
 def failback_wraparound(ctx: CaseContext):
-    """Tier-2/3 by default (FLEXLB_FT_HA_LAYOUT, tier3), Tier-1 fallback.
+    """Tier-1 dual standalone (two masters on distinct port groups).
 
     Flow (brief p10):
       0. rebuild the scenario-2 end state: sticky A -> kill A -> sticky
@@ -1226,19 +1220,18 @@ def failback_wraparound(ctx: CaseContext):
       5. assert-2: symmetric-switch errors ~0 + master_target=A 100% +
          inflight clean + no 8511 storm.
 
-    TODO(Tier-3, brief p10 notes 3/5): explicit failback following the
-    real ZK leader (client re-polls real_master_host after A's
-    re-election) and the pre_stop graceful variant (/hook/pre_stop ->
-    leader handover <=30s + drain <=300s).  Tier-3 activation is NOT
-    the same-host distinct-IP layout — that layout is DEAD per the
-    harness.py RULING (2026-09-02) and moves to the phase-2
-    dual-container topology (one network stack per container); both
-    variants stay out of the wrap-around scope until then.
+    TODO(zk-aware failback, brief p10 notes 3/5): explicit failback
+    following the real ZK leader (client re-polls real_master_host
+    after A's re-election) and the pre_stop graceful variant
+    (/hook/pre_stop -> leader handover <=30s + drain <=300s).  Both
+    variants need ZK-activated dual masters (phase-2 dual-container
+    topology, one network stack per container) and stay out of the
+    wrap-around scope until then.
     """
     gate = ha_gate()
     if gate:
         return gate
-    env = ctx.env_manager.ensure(dual_spec_for_layout(ctx))
+    env = ctx.env_manager.ensure(tier1_dual_spec(ctx))
     mgr = ctx.env_manager
     ops_a = instance_ops(ctx, env, "A")
     target_a = mgr.master_instance_target(env, "A")
@@ -1295,8 +1288,8 @@ def failback_wraparound(ctx: CaseContext):
             if switch.rows
             else True
         )
-        # no 8511 storm: Tier-1 has no 8511 at all; on Tier-2/3 a storm
-        # would surface as a flood of business-error rows in the window.
+        # no 8511 storm: Tier-1 has no 8511 at all; a storm would surface
+        # as a flood of business-error rows in the window.
         storm_bounded = (
             len(switch.error_kind("business")) <= max(1, int(0.05 * len(switch.rows)))
             if switch.rows
