@@ -405,5 +405,24 @@ class TestComputeLocalLastHidden(unittest.TestCase):
         self._run_case(stream_lens=[14], cp_size=2, device="cuda")
 
 
+@unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
+class TestHandleInputsWithPrefix(unittest.TestCase):
+    def test_cp2_rank0_uses_absolute_positions(self):
+        tokens, input_lengths, positions = cp_test.handle_inputs(
+            [101, 102, 103, 104, 105, 106], 8, 0, 2
+        )
+        self.assertEqual(tokens.tolist(), [101, 102, 0, 0])
+        self.assertEqual(input_lengths.tolist(), [4])
+        self.assertEqual(positions.tolist(), [8, 9, 14, 15])
+
+    def test_cp2_rank1_uses_absolute_positions(self):
+        tokens, input_lengths, positions = cp_test.handle_inputs(
+            [101, 102, 103, 104, 105, 106], 8, 1, 2
+        )
+        self.assertEqual(tokens.tolist(), [103, 104, 105, 106])
+        self.assertEqual(input_lengths.tolist(), [4])
+        self.assertEqual(positions.tolist(), [10, 11, 12, 13])
+
+
 if __name__ == "__main__":
     unittest.main()

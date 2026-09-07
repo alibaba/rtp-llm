@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/cache/connector/p2p/plan/KVCacheTransferPlanner.h"
+#include "rtp_llm/cpp/cache/connector/p2p/plan/ShardLayoutFactory.h"
 
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
 
@@ -910,6 +911,47 @@ TEST(PlannerGroupD, D4_MirrorConsistencyAcrossSides) {
         }
     }
     EXPECT_GT(checked, 0);
+}
+
+// 用例 D4b: 线上 factory 必须把角色相关的 CP method 规范化，不能照抄本端配置。
+// Prefill ALL_GATHER 的 attention cache 不按 TP 切 head，而 Decode PREFILL_CP 仍按 TP 切；
+// 两端仅知道对端 TP/CP 分片开关时，也必须独立推导出完全相同的 plan。
+TEST(PlannerGroupD, D4b_FactoryMirrorConsistencyForPrefillCpToDecodeTp) {
+    auto prefill_self = mhaLayout(2, CPRotateMethod::ALL_GATHER, /*sharded=*/false);
+    auto decode_self  = mhaLayout(2, CPRotateMethod::PREFILL_CP, /*sharded=*/false);
+    prefill_self.pc.role_type = RoleType::PREFILL;
+    decode_self.pc.role_type  = RoleType::DECODE;
+
+    const auto prefill_as_seen_by_decode =
+        ShardLayoutFactory::peerOf(decode_self, /*peer_tp_size=*/2, /*peer_kv_cache_sharded=*/false, RoleType::PREFILL);
+    const auto decode_as_seen_by_prefill =
+        ShardLayoutFactory::peerOf(prefill_self, /*peer_tp_size=*/2, /*peer_kv_cache_sharded=*/false, RoleType::DECODE);
+
+    EXPECT_EQ(prefill_as_seen_by_decode.pc.prefill_cp_config.method, CPRotateMethod::ALL_GATHER);
+    EXPECT_EQ(decode_as_seen_by_prefill.pc.prefill_cp_config.method, CPRotateMethod::PREFILL_CP);
+    EXPECT_EQ(prefill_as_seen_by_decode.headShardCount(kFullTag), 1);
+    EXPECT_EQ(decode_as_seen_by_prefill.headShardCount(kFullTag), 2);
+
+    const auto on_decode =
+        KVCacheTransferPlanner::plan(prefill_as_seen_by_decode, decode_self, {kFullTag});
+    const auto on_prefill =
+        KVCacheTransferPlanner::plan(prefill_self, decode_as_seen_by_prefill, {kFullTag});
+    ASSERT_TRUE(on_decode.ok()) << on_decode.error.ToString();
+    ASSERT_TRUE(on_prefill.ok()) << on_prefill.error.ToString();
+    ASSERT_EQ(on_decode.plan.routes.size(), on_prefill.plan.routes.size());
+    EXPECT_EQ(on_decode.plan.digest(), on_prefill.plan.digest());
+    for (size_t i = 0; i < on_decode.plan.routes.size(); ++i) {
+        const auto& x = on_decode.plan.routes[i];
+        const auto& y = on_prefill.plan.routes[i];
+        EXPECT_EQ(x.route_id, y.route_id);
+        EXPECT_EQ(x.src_rank, y.src_rank);
+        EXPECT_EQ(x.dst_rank, y.dst_rank);
+        EXPECT_EQ(x.src_keys, y.src_keys);
+        EXPECT_EQ(x.src_partition, y.src_partition);
+        EXPECT_EQ(x.dst_partition, y.dst_partition);
+        EXPECT_EQ(x.src_slice, y.src_slice);
+        EXPECT_EQ(x.dst_slice, y.dst_slice);
+    }
 }
 
 // 用例 D5: 复制型 group 的选举结构（P5 前置）

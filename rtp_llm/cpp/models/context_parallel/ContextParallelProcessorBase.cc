@@ -81,6 +81,11 @@ void IContextParallelProcessor::handleInputs(GptModelInputs&                    
                             input_padding_length);
         RTP_LLM_CHECK_WITH_INFO(success, "Context parallel planning failed for prefill stream %zu", p);
 
+        const int prefix_length = model_input.prefix_lengths.data_ptr<int32_t>()[p];
+        for (int& index : shuffle_index) {
+            index += prefix_length;
+        }
+
         std::memcpy(input_token_ptr + input_token_idx, chunk_input_token.data(), input_chunk_length * sizeof(int));
         std::memcpy(
             prefill_shuffle_indices_ptr + input_token_idx, shuffle_index.data(), input_chunk_length * sizeof(int));
