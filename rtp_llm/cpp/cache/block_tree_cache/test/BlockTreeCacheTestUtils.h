@@ -103,7 +103,7 @@ public:
                                          TransferCopyAction               action,
                                          std::shared_ptr<CallbackBarrier> barrier = nullptr);
 
-    std::shared_ptr<AsyncContext> submit(const std::vector<TransferDescriptor>& descriptors) override;
+    std::shared_ptr<AsyncContext> execute(TransferTask task) override;
 
     size_t submittedBatchCount() const;
 
@@ -114,10 +114,11 @@ private:
 };
 
 std::unique_ptr<BlockTreeCache>
-makeBlockTreeCacheForTest(std::vector<GroupSetPtr>          group_sets,
-                          BlockTreeCacheConfig              config            = {},
-                          std::shared_ptr<StorageBackend>   storage_backend   = nullptr,
-                          std::shared_ptr<BroadcastManager> broadcast_manager = nullptr);
+makeBlockTreeCacheForTest(std::vector<GroupSetPtr>                   group_sets,
+                          BlockTreeCacheConfig                       config            = {},
+                          std::shared_ptr<StorageBackend>            storage_backend   = nullptr,
+                          std::shared_ptr<BroadcastManager>          broadcast_manager = nullptr,
+                          std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter  = nullptr);
 
 bool insertGroupSetResources(BlockTreeCache&                                   cache,
                              const CacheKeysType&                              cache_keys,
@@ -169,9 +170,10 @@ private:
 class ScriptedPerRankBlockTransferEngine: public PerRankBlockTransferEngine {
 public:
     explicit ScriptedPerRankBlockTransferEngine(const std::vector<GroupSetPtr>& groups,
-                                                bool                            perform_successful_transfers = true);
+                                                bool                            perform_successful_transfers = true,
+                                                bool                            enable_disk_cache            = false);
 
-    std::shared_ptr<AsyncContext> submit(const std::vector<TransferDescriptor>& descriptors) override;
+    std::shared_ptr<AsyncContext> execute(TransferTask task) override;
 
     // Scripts the outcome of upcoming submits. Successful submits delegate to
     // the real engine unless perform_successful_transfers is false.

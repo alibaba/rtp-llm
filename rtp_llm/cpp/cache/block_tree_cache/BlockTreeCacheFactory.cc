@@ -348,12 +348,13 @@ std::string resolveDiskMountPath(const std::string& paths_csv, int64_t local_wor
     return paths[static_cast<size_t>(local_rank)];
 }
 
-BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                cache_config,
-                                       const KVCacheConfig&              kv_cache_config,
-                                       const KVCacheAllocatorPtr&        allocator,
-                                       const ParallelismConfig&          parallelism_config,
-                                       std::shared_ptr<StorageBackend>   storage_backend,
-                                       std::shared_ptr<BroadcastManager> broadcast_manager) {
+BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                         cache_config,
+                                       const KVCacheConfig&                       kv_cache_config,
+                                       const KVCacheAllocatorPtr&                 allocator,
+                                       const ParallelismConfig&                   parallelism_config,
+                                       std::shared_ptr<StorageBackend>            storage_backend,
+                                       std::shared_ptr<BroadcastManager>          broadcast_manager,
+                                       std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter) {
     const auto device_eviction_policy = parseEvictionPolicy(kv_cache_config.device_eviction_policy);
     const auto host_eviction_policy   = parseEvictionPolicy(kv_cache_config.host_eviction_policy);
     const auto disk_eviction_policy   = parseEvictionPolicy(kv_cache_config.disk_eviction_policy);
@@ -588,16 +589,17 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                cache_c
         parallelism_config.tp_rank == 0 && !parallelism_config.ffn_disaggregate_config.is_ffn_service();
     config.full_prefix_scan_interval_ms = owns_mutable_block_tree ? configured_scan_interval_ms : 0;
 
+    auto cache_metrics_reporter = std::make_shared<BlockTreeCacheMetricsReporter>(std::move(metrics_reporter));
     auto per_rank_engine =
         std::make_shared<PerRankBlockTransferEngine>(group_sets,
+                                                     kv_cache_config.enable_disk_cache,
                                                      DeviceHostCopyOptions{},
                                                      config.device_disk_staging_block_count,
                                                      config.max_descriptors_per_transfer_batch,
                                                      config.transfer_worker_count,
                                                      config.max_descriptors_per_non_device_host_transfer_batch,
                                                      config.transfer_queue_max_size,
-                                                     config.host_cache_sync_timeout_ms,
-                                                     config.disk_cache_sync_timeout_ms);
+                                                     cache_metrics_reporter);
     std::shared_ptr<MultiRankBlockTransferEngine> multi_rank_engine;
     if (broadcast_manager != nullptr) {
         multi_rank_engine = std::make_shared<MultiRankBlockTransferEngine>(group_sets, std::move(broadcast_manager));
@@ -607,8 +609,11 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                cache_c
                                                   std::move(multi_rank_engine),
                                                   config.max_descriptors_per_transfer_batch,
                                                   config.max_descriptors_per_non_device_host_transfer_batch);
-    auto task_pool = std::make_unique<BlockTreeTaskPool>(
-        static_cast<size_t>(config.task_pool_size), config.business_queue_max_size, "BlockTreeCacheTaskPool");
+    const size_t business_queue_size = config.business_queue_max_size == 0 ?
+                                           0 :
+                                           config.business_queue_max_size + BlockTreeTaskPool::kLoadReservedSlots;
+    auto         task_pool           = std::make_unique<BlockTreeTaskPool>(
+        static_cast<size_t>(config.task_pool_size), business_queue_size, "BlockTreeCacheTaskPool");
 
     auto tree = std::make_unique<BlockTree>(std::move(group_sets));
 
@@ -616,7 +621,8 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                cache_c
                                                    std::move(config),
                                                    std::move(storage_backend),
                                                    std::move(transfer_dispatcher),
-                                                   std::move(task_pool));
+                                                   std::move(task_pool),
+                                                   std::move(cache_metrics_reporter));
     if (result->isRemoteCacheEnabled()) {
         const std::shared_ptr<const CacheTopology> storage_topology = cache_config.topologyPtr();
         const std::vector<DeviceBlockPoolPtr>      resolver_pools   = group_pools;

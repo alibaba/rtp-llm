@@ -1,9 +1,12 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/HostStagingBlockPool.h"
 
 #include <atomic>
+#include <chrono>
 #include <cstring>
+#include <future>
 #include <optional>
 #include <stdexcept>
+#include <thread>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -54,12 +57,13 @@ TEST(HostStagingBlockPoolTest, BatchWaitersAreStrictFifo) {
     std::vector<int>                                           callback_order;
     std::optional<HostStagingBlockPool::HostStagingBlockBatch> first_leases;
     std::optional<HostStagingBlockPool::HostStagingBlockBatch> second_leases;
-    pool.requestBatch(2, [&](auto result) {
+    const auto deadline = HostStagingBlockPool::Clock::now() + std::chrono::seconds(1);
+    pool.requestBatch(2, deadline, [&](auto result) {
         ASSERT_TRUE(result.has_value());
         callback_order.push_back(2);
         first_leases.emplace(std::move(*result));
     });
-    pool.requestBatch(1, [&](auto result) {
+    pool.requestBatch(1, deadline, [&](auto result) {
         ASSERT_TRUE(result.has_value());
         callback_order.push_back(1);
         second_leases.emplace(std::move(*result));
@@ -76,6 +80,41 @@ TEST(HostStagingBlockPoolTest, BatchWaitersAreStrictFifo) {
     EXPECT_TRUE(second_leases.has_value());
 }
 
+TEST(HostStagingBlockPoolTest, BatchWaiterRemainsPendingUntilRelease) {
+    HostStagingBlockPool pool(1, 4096, /*try_pin_memory=*/false);
+    auto                 held = pool.tryMallocBatch(1);
+    ASSERT_TRUE(held.has_value());
+
+    std::promise<std::optional<HostStagingBlockPool::HostStagingBlockBatch>> result;
+    auto                                                                     future = result.get_future();
+    pool.requestBatch(1, HostStagingBlockPool::Clock::now() + std::chrono::seconds(1), [&result](auto leases) {
+        result.set_value(std::move(leases));
+    });
+
+    EXPECT_EQ(future.wait_for(std::chrono::milliseconds(20)), std::future_status::timeout);
+    held.reset();
+    ASSERT_EQ(future.wait_for(std::chrono::seconds(1)), std::future_status::ready);
+    EXPECT_TRUE(future.get().has_value());
+}
+
+TEST(HostStagingBlockPoolTest, ExpiredBatchWaiterIsDiscardedWhenStagingBecomesAvailable) {
+    HostStagingBlockPool pool(1, 4096, /*try_pin_memory=*/false);
+    auto                 held = pool.tryMallocBatch(1);
+    ASSERT_TRUE(held.has_value());
+
+    std::promise<std::optional<HostStagingBlockPool::HostStagingBlockBatch>> result;
+    auto                                                                     future = result.get_future();
+    pool.requestBatch(1, HostStagingBlockPool::Clock::now() + std::chrono::milliseconds(1), [&result](auto leases) {
+        result.set_value(std::move(leases));
+    });
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    held.reset();
+    ASSERT_EQ(future.wait_for(std::chrono::seconds(1)), std::future_status::ready);
+    EXPECT_FALSE(future.get().has_value());
+    EXPECT_TRUE(pool.tryMallocBatch(1).has_value());
+}
+
 TEST(HostStagingBlockPoolTest, CancelAllCompletesEveryPendingWaiterExactlyOnce) {
     HostStagingBlockPool pool(1, 4096, /*try_pin_memory=*/false);
     auto                 held = pool.tryMallocBatch(1);
@@ -84,7 +123,7 @@ TEST(HostStagingBlockPoolTest, CancelAllCompletesEveryPendingWaiterExactlyOnce) 
     std::atomic<size_t> callback_count{0};
     std::atomic<size_t> cancelled_count{0};
     for (size_t waiter = 0; waiter < 2; ++waiter) {
-        pool.requestBatch(1, [&](auto result) {
+        pool.requestBatch(1, HostStagingBlockPool::Clock::now() + std::chrono::seconds(30), [&](auto result) {
             callback_count.fetch_add(1);
             if (!result.has_value()) {
                 cancelled_count.fetch_add(1);
@@ -109,12 +148,12 @@ TEST(HostStagingBlockPoolTest, ThrowingCancelCallbackDoesNotSuppressLaterWaiters
 
     std::atomic<size_t> throwing_callback_count{0};
     std::atomic<size_t> later_callback_count{0};
-    pool.requestBatch(1, [&](auto result) {
+    pool.requestBatch(1, HostStagingBlockPool::Clock::now() + std::chrono::seconds(30), [&](auto result) {
         EXPECT_FALSE(result.has_value());
         throwing_callback_count.fetch_add(1);
         throw std::runtime_error("expected cancellation callback failure");
     });
-    pool.requestBatch(1, [&](auto result) {
+    pool.requestBatch(1, HostStagingBlockPool::Clock::now() + std::chrono::seconds(30), [&](auto result) {
         EXPECT_FALSE(result.has_value());
         later_callback_count.fetch_add(1);
     });

@@ -15,16 +15,18 @@
 
 namespace rtp_llm {
 
-BlockTreeCache::BlockTreeCache(std::unique_ptr<BlockTree>               tree,
-                               BlockTreeCacheConfig                     config,
-                               std::shared_ptr<StorageBackend>          storage_backend,
-                               std::unique_ptr<BlockTransferDispatcher> transfer_dispatcher,
-                               std::unique_ptr<BlockTreeTaskPool>       task_pool):
+BlockTreeCache::BlockTreeCache(std::unique_ptr<BlockTree>                     tree,
+                               BlockTreeCacheConfig                           config,
+                               std::shared_ptr<StorageBackend>                storage_backend,
+                               std::unique_ptr<BlockTransferDispatcher>       transfer_dispatcher,
+                               std::unique_ptr<BlockTreeTaskPool>             task_pool,
+                               std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter):
     config_(std::move(config)),
     tree_(std::move(tree)),
     storage_backend_(std::move(storage_backend)),
     transfer_dispatcher_(std::move(transfer_dispatcher)),
     task_pool_(std::move(task_pool)),
+    metrics_reporter_(std::move(metrics_reporter)),
     evictor_(
         tree_.get(),
         config_.device_eviction_policy,
@@ -32,7 +34,7 @@ BlockTreeCache::BlockTreeCache(std::unique_ptr<BlockTree>               tree,
         config_.disk_eviction_policy,
         transfer_dispatcher_.get(),
         task_pool_.get(),
-        metrics_reporter_,
+        *metrics_reporter_,
         mutex_,
         config_.host_cache_sync_timeout_ms,
         config_.disk_cache_sync_timeout_ms,
@@ -46,7 +48,7 @@ BlockTreeCache::BlockTreeCache(std::unique_ptr<BlockTree>               tree,
             evictor_,
             transfer_dispatcher_.get(),
             task_pool_.get(),
-            metrics_reporter_,
+            *metrics_reporter_,
             mutex_,
             config_.disk_cache_sync_timeout_ms,
             config_.host_cache_sync_timeout_ms,
@@ -59,7 +61,7 @@ BlockTreeCache::BlockTreeCache(std::unique_ptr<BlockTree>               tree,
             evictor_,
             transfer_dispatcher_.get(),
             task_pool_.get(),
-            metrics_reporter_,
+            *metrics_reporter_,
             mutex_,
             config_.host_cache_sync_timeout_ms,
             config_.disk_cache_sync_timeout_ms,
@@ -131,19 +133,8 @@ BlockTreeCache::~BlockTreeCache() {
     RTP_LLM_LOG_INFO("destroyed");
 }
 
-void BlockTreeCache::setMetricsReporter(const std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter) {
-    metrics_reporter_.setMetricsReporter(metrics_reporter);
-    TransferQueueWaitReporter queue_wait_reporter;
-    if (metrics_reporter != nullptr) {
-        queue_wait_reporter = [this](Tier source_tier, Tier target_tier, int64_t latency_us) {
-            metrics_reporter_.reportTransferQueueWait(source_tier, target_tier, latency_us);
-        };
-    }
-    transfer_dispatcher_->setQueueWaitReporter(std::move(queue_wait_reporter));
-}
-
-bool BlockTreeCache::executeTransfer(const std::vector<TransferDescriptor>& descriptors) {
-    auto context = transfer_dispatcher_->executePerRank(descriptors);
+bool BlockTreeCache::executeTransfer(TransferTask task) {
+    auto context = transfer_dispatcher_->executePerRank(std::move(task));
     context->waitDone();
     if (!context->success()) {
         RTP_LLM_LOG_WARNING("per-rank block transfer failed: %s", context->errorInfo().ToString().c_str());
@@ -158,7 +149,7 @@ BlockTreeMatchResult BlockTreeCache::match(const CacheKeysType& cache_keys, cons
         std::lock_guard<std::mutex> lock(mutex_);
         result = loader_.matchLocked(cache_keys, policy);
     }
-    metrics_reporter_.reportCacheReuseTimeMetrics(result.reuse_time_metrics_snapshots);
+    metrics_reporter_->reportCacheReuseTimeMetrics(result.reuse_time_metrics_snapshots);
     return result;
 }
 
@@ -209,13 +200,13 @@ int BlockTreeCache::evictForGroup(size_t group_id, size_t num_blocks) {
         reclaimed                 = current_free > initial_free ? current_free - initial_free : 0;
     }
     if (eviction_triggered) {
-        metrics_reporter_.reportEvictionTriggered(Tier::DEVICE, group_set->groupType(), /*force_drop=*/true);
+        metrics_reporter_->reportEvictionTriggered(Tier::DEVICE, group_set->groupType(), /*force_drop=*/true);
     }
-    metrics_reporter_.reportEvictionBlocks(Tier::DEVICE,
-                                           group_set->groupType(),
-                                           /*force_drop=*/true,
-                                           num_blocks,
-                                           std::min(reclaimed, num_blocks));
+    metrics_reporter_->reportEvictionBlocks(Tier::DEVICE,
+                                            group_set->groupType(),
+                                            /*force_drop=*/true,
+                                            num_blocks,
+                                            std::min(reclaimed, num_blocks));
     RTP_LLM_LOG_DEBUG("group_id=%zu group_set[%zu] reclaimed %zu/%zu device blocks",
                       group_id,
                       location->group_set_id,
@@ -242,18 +233,18 @@ CacheStats BlockTreeCache::getStats() const {
 
 std::vector<BlockTreePoolMetricsSnapshot> BlockTreeCache::poolMetricsSnapshots() const {
     std::lock_guard<std::mutex> lock(mutex_);
-    return metrics_reporter_.collectPoolMetricsSnapshots(tree_->groupSets());
+    return metrics_reporter_->collectPoolMetricsSnapshots(tree_->groupSets());
 }
 
 void BlockTreeCache::reportMetrics() const {
     std::vector<BlockTreeEvictableMetricsSnapshot> snapshots;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        snapshots = metrics_reporter_.collectEvictableMetricsSnapshots(tree_->groupSets(), evictor_);
+        snapshots = metrics_reporter_->collectEvictableMetricsSnapshots(tree_->groupSets(), evictor_);
     }
-    metrics_reporter_.reportEvictableCandidateCount(snapshots);
-    metrics_reporter_.reportQueueBacklog(task_pool_->queueSizes(), "business");
-    metrics_reporter_.reportQueueBacklog(transfer_dispatcher_->queueSizes(), "transfer");
+    metrics_reporter_->reportEvictableCandidateCount(snapshots);
+    metrics_reporter_->reportQueueBacklog(task_pool_->queueSizes(), "business");
+    metrics_reporter_->reportQueueBacklog(transfer_dispatcher_->queueSizes(), "transfer");
 }
 
 BlockTreeKeySnapshot BlockTreeCache::getKeySnapshot(size_t limit) const {
