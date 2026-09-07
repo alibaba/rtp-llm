@@ -830,16 +830,15 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         }
         if (device_props_.enable_prefill_cp && has_context_request) {
             attention_inputs_.context_parallel_info = cp_params;
+            if (attention_inputs_.cache_store_inputs.has_value()) {
+                attention_inputs_.cache_store_inputs->input_lengths_host = cp_params.prefill_actual_input_lengths_cpu;
+            }
             for (auto& [tag, tagged_inputs] : attention_inputs_by_tag_) {
                 tagged_inputs.context_parallel_info = cp_params;
+                if (tagged_inputs.cache_store_inputs.has_value()) {
+                    tagged_inputs.cache_store_inputs->input_lengths_host = cp_params.prefill_actual_input_lengths_cpu;
+                }
             }
-        }
-
-        if (device_props_.enable_prefill_cp && has_context_request
-            && attention_inputs_.cache_store_inputs.has_value()) {
-            // ContextParallelProcessor rewrites input_lengths to the rank-local
-            // chunk; cache-store planning must keep the full pre-sharding lengths.
-            attention_inputs_.cache_store_inputs->input_lengths_host = cp_params.prefill_actual_input_lengths_cpu;
         }
         const bool has_cache_store_work = !inputs.warmup && inputs.pd_separation;
         CacheStoreWriteCycleGuard cache_store_write_cycle(
