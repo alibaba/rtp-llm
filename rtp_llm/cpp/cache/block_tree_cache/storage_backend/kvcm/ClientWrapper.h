@@ -63,12 +63,13 @@ private:
     // reinit if address_snapshot_ change
     bool
     reinit(const std::string& unique_id, ConfigMap::iterator& config_iter, MetaClientMap::iterator& meta_client_iter);
-    bool tryReinit(const std::string& unique_id);
-    bool checkError(kv_cache_manager::ClientErrorCode ec);
-    void requestReinit();
-    void reinitWorkerLoop() noexcept;
-    bool reinitAllMetaClients();
-    bool waitForRetry(int sleep_time_ms);
+    bool                                          tryReinit(const std::string& unique_id);
+    std::shared_ptr<kv_cache_manager::MetaClient> getMetaClient(const std::string& unique_id);
+    bool                                          checkError(kv_cache_manager::ClientErrorCode ec);
+    void                                          requestReinit();
+    void                                          reinitWorkerLoop() noexcept;
+    bool                                          reinitAllMetaClients();
+    bool                                          waitForRetry(int sleep_time_ms);
 
     kv_cache_manager::InitParams init_params_;
     // InitParams carries a pointer, so retain the descriptor for every later
@@ -78,7 +79,10 @@ private:
     ConfigMap                config_map_;
     MetaClientMap            meta_client_map_;
     std::vector<std::string> address_snapshot_;
-    std::shared_mutex        reinit_mutex_;
+    // rr_mutex_ protects registry structure/lifecycle; reinit_mutex_ protects
+    // VIP config updates and metadata pointer publication/snapshot acquisition.
+    // Acquire in that order and retain the snapshot across each RPC.
+    std::shared_mutex reinit_mutex_;
 
     // for re-registration
     std::shared_mutex rr_mutex_;
