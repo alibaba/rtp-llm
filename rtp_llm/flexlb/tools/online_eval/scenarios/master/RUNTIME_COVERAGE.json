@@ -1,0 +1,187 @@
+{
+  "schema_version": 1,
+  "family_count": 5,
+  "variant_count": 10,
+  "instance_count": 25,
+  "source_commit": "5affc1c6de64fc8a1bf0d74dc3789d035c9a7307",
+  "execution_owner": "agent1",
+  "review_owner": "agent3",
+  "case_owner": "agent4",
+  "parallel_lanes": 1,
+  "rule": "Business FAIL preserves predicates and raw evidence. Environment or cleanup failure pauses later groups. Unexecuted instances are not complete.",
+  "instances": [
+    {
+      "id": "client_fallback_failback::all_masters_down::batch-window",
+      "runtime_status": "NOT_RUN",
+      "independent_acceptance": "pending",
+      "execution_group": "batch-window",
+      "dry_run_evidence": "/tmp/agent4-master-remaining-plans/batch-window.json"
+    },
+    {
+      "id": "client_fallback_failback::all_masters_down::single-batch",
+      "runtime_status": "NOT_RUN",
+      "independent_acceptance": "pending",
+      "execution_group": "single-batch",
+      "dry_run_evidence": "/tmp/agent4-master-remaining-plans/single-batch.json"
+    },
+    {
+      "id": "client_fallback_failback::all_masters_down::single-nonbatch",
+      "runtime_status": "NOT_RUN",
+      "independent_acceptance": "pending",
+      "execution_group": "single-nonbatch",
+      "dry_run_evidence": "/tmp/agent4-master-remaining-plans/single-nonbatch.json"
+    },
+    {
+      "id": "client_fallback_failback::all_masters_down::window-nonbatch",
+      "runtime_status": "NOT_RUN",
+      "independent_acceptance": "pending",
+      "execution_group": "window-nonbatch",
+      "dry_run_evidence": "/tmp/agent4-master-remaining-plans/window-nonbatch.json"
+    },
+    {
+      "id": "client_fallback_failback::direct_generate_error::batch-window",
+      "runtime_status": "NOT_RUN",
+      "independent_acceptance": "pending",
+      "execution_group": "batch-window",
+      "dry_run_evidence": "/tmp/agent4-master-remaining-plans/batch-window.json"
+    },
+    {
+      "id": "client_fallback_failback::direct_generate_error::single-batch",
+      "runtime_status": "NOT_RUN",
+      "independent_acceptance": "pending",
+      "execution_group": "single-batch",
+      "dry_run_evidence": "/tmp/agent4-master-remaining-plans/single-batch.json"
+    },
+    {
+      "id": "client_fallback_failback::direct_generate_error::single-nonbatch",
+      "runtime_status": "NOT_RUN",
+      "independent_acceptance": "pending",
+      "execution_group": "single-nonbatch",
+      "dry_run_evidence": "/tmp/agent4-master-remaining-plans/single-nonbatch.json"
+    },
+    {
+      "id": "client_fallback_failback::direct_generate_error::window-nonbatch",
+      "runtime_status": "NOT_RUN",
+      "independent_acceptance": "pending",
+      "execution_group": "window-nonbatch",
+      "dry_run_evidence": "/tmp/agent4-master-remaining-plans/window-nonbatch.json"
+    },
+    {
+      "id": "client_fallback_failback::negative_errorcode::batch-window",
+      "runtime_status": "NOT_RUN",
+      "independent_acceptance": "pending",
+      "execution_group": "batch-window",
+      "dry_run_evidence": "/tmp/agent4-master-remaining-plans/batch-window.json"
+    },
+    {
+      "id": "client_fallback_failback::wraparound::batch-window",
+      "runtime_status": "NOT_RUN",
+      "independent_acceptance": "pending",
+      "execution_group": "batch-window",
+      "dry_run_evidence": "/tmp/agent4-master-remaining-plans/batch-window.json"
+    },
+    {
+      "id": "client_fallback_failback::wraparound::single-batch",
+      "runtime_status": "NOT_RUN",
+      "independent_acceptance": "pending",
+      "execution_group": "single-batch",
+      "dry_run_evidence": "/tmp/agent4-master-remaining-plans/single-batch.json"
+    },
+    {
+      "id": "client_fallback_failback::wraparound::single-nonbatch",
+      "runtime_status": "NOT_RUN",
+      "independent_acceptance": "pending",
+      "execution_group": "single-nonbatch",
+      "dry_run_evidence": "/tmp/agent4-master-remaining-plans/single-nonbatch.json"
+    },
+    {
+      "id": "client_fallback_failback::wraparound::window-nonbatch",
+      "runtime_status": "NOT_RUN",
+      "independent_acceptance": "pending",
+      "execution_group": "window-nonbatch",
+      "dry_run_evidence": "/tmp/agent4-master-remaining-plans/window-nonbatch.json"
+    },
+    {
+      "id": "master_coldstart::burst_twenty::batch-window",
+      "runtime_status": "NOT_RUN",
+      "independent_acceptance": "pending",
+      "execution_group": "batch-window",
+      "dry_run_evidence": "/tmp/agent4-master-remaining-plans/batch-window.json"
+    },
+    {
+      "id": "master_coldstart::burst_twenty::single-batch",
+      "runtime_status": "NOT_RUN",
+      "independent_acceptance": "pending",
+      "execution_group": "single-batch",
+      "dry_run_evidence": "/tmp/agent4-master-remaining-plans/single-batch.json"
+    },
+    {
+      "id": "master_coldstart::burst_twenty::single-nonbatch",
+      "runtime_status": "NOT_RUN",
+      "independent_acceptance": "pending",
+      "execution_group": "single-nonbatch",
+      "dry_run_evidence": "/tmp/agent4-master-remaining-plans/single-nonbatch.json"
+    },
+    {
+      "id": "master_coldstart::burst_twenty::window-nonbatch",
+      "runtime_status": "NOT_RUN",
+      "independent_acceptance": "pending",
+      "execution_group": "window-nonbatch",
+      "dry_run_evidence": "/tmp/agent4-master-remaining-plans/window-nonbatch.json"
+    },
+    {
+      "id": "master_dispatch_quota::single_prefill_ttl::batch-window",
+      "runtime_status": "NOT_RUN",
+      "independent_acceptance": "pending",
+      "execution_group": "batch-window",
+      "dry_run_evidence": "/tmp/agent4-master-remaining-plans/batch-window.json"
+    },
+    {
+      "id": "master_ha_failover::standalone_a_to_b::batch-window",
+      "runtime_status": "NOT_RUN",
+      "independent_acceptance": "pending",
+      "execution_group": "batch-window",
+      "dry_run_evidence": "/tmp/agent4-master-remaining-plans/batch-window.json"
+    },
+    {
+      "id": "master_lifecycle::freeze_short_long::batch-window",
+      "runtime_status": "NOT_RUN",
+      "independent_acceptance": "pending",
+      "execution_group": "batch-window",
+      "dry_run_evidence": "/tmp/agent4-master-remaining-plans/batch-window.json"
+    },
+    {
+      "id": "master_lifecycle::freeze_short_long::single-batch",
+      "runtime_status": "NOT_RUN",
+      "independent_acceptance": "pending",
+      "execution_group": "single-batch",
+      "dry_run_evidence": "/tmp/agent4-master-remaining-plans/single-batch.json"
+    },
+    {
+      "id": "master_lifecycle::freeze_short_long::single-nonbatch",
+      "runtime_status": "NOT_RUN",
+      "independent_acceptance": "pending",
+      "execution_group": "single-nonbatch",
+      "dry_run_evidence": "/tmp/agent4-master-remaining-plans/single-nonbatch.json"
+    },
+    {
+      "id": "master_lifecycle::freeze_short_long::window-nonbatch",
+      "runtime_status": "NOT_RUN",
+      "independent_acceptance": "pending",
+      "execution_group": "window-nonbatch",
+      "dry_run_evidence": "/tmp/agent4-master-remaining-plans/window-nonbatch.json"
+    },
+    {
+      "id": "master_lifecycle::kill_dual_b_to_a::batch-window",
+      "runtime_status": "PASS",
+      "independent_acceptance": "accepted",
+      "evidence_root": "/tmp/agent1-yaml-evidence/master5aff"
+    },
+    {
+      "id": "master_lifecycle::kill_single::batch-window",
+      "runtime_status": "PASS",
+      "independent_acceptance": "accepted",
+      "evidence_root": "/tmp/agent1-yaml-evidence/master5aff"
+    }
+  ]
+}
