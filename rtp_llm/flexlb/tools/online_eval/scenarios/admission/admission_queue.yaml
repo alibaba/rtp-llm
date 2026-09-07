@@ -74,6 +74,7 @@ variants:
       op: eq
       text:
       - queue depth
+      case_sensitive: true
   - id: fast_reject
     action: admission_check
     params:
@@ -123,6 +124,7 @@ variants:
     timeout_s: 30
   - id: engine_clean
     action: master_direct_clean
+    timeout_s: 10
   - id: normal_perf
     action: engine_control
     params:
