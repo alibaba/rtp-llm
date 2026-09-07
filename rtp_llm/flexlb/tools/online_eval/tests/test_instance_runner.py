@@ -227,7 +227,77 @@ class InstanceRunnerTest(unittest.TestCase):
             path.write_text(json.dumps({"schema_version": 1, "instances": [payload]}))
             result = runner._read_results(path, rows, "yaml")
             self.assertEqual("ERROR", result[0]["status"])
-            self.assertIn("no executed checks", result[0]["error"])
+            self.assertTrue(result[0]["error"])
+
+    def test_nested_execution_errors_cannot_be_hidden_by_green_rows(self):
+        group = parse_catalog(self.data, source="yaml", profile="batch-window")[:1]
+        path = self.root / "nested.json"
+        base = {
+            **group[0].metadata,
+            "status": "PASS",
+            "error": None,
+            "stages": [
+                {
+                    "id": "verify",
+                    "status": "PASS",
+                    "checks": [{"id": "ok", "status": "PASS"}],
+                }
+            ],
+            "cleanup": [],
+        }
+        mutations = []
+        for status in ("FAIL", "ERROR", "TIMEOUT", "BLOCKED", "UNKNOWN", None):
+            payload = copy.deepcopy(base)
+            payload["cleanup"] = [
+                {"id": "environment", "status": status, "error": None}
+            ]
+            mutations.append(payload)
+        for status in ("ERROR", "TIMEOUT", "UNKNOWN", "FAIL"):
+            payload = copy.deepcopy(base)
+            payload["stages"][0]["checks"].append({"id": "bad", "status": status})
+            mutations.append(payload)
+        for payload in mutations:
+            with self.subTest(payload=payload):
+                path.write_text(
+                    json.dumps({"schema_version": 1, "instances": [payload]})
+                )
+                rows = runner._read_results(path, group, "yaml")
+                aggregate = runner._aggregate(
+                    [{"lane": 0, "instances": rows, "segments": [{"exit_code": 0}]}],
+                    group,
+                    self.args(),
+                    1,
+                )
+                self.assertEqual("ERROR", rows[0]["status"])
+                self.assertEqual(1, aggregate["summary"]["exit_code"])
+
+    def test_only_matching_normal_fail_checks_can_be_findings(self):
+        group = parse_catalog(self.data, source="yaml", profile="batch-window")[:1]
+        path = self.root / "finding.json"
+        payload = {
+            **group[0].metadata,
+            "status": "FINDING-CONFIRMED",
+            "cleanup": [],
+            "stages": [
+                {
+                    "id": "verify",
+                    "status": "FAIL",
+                    "checks": [{"id": "known", "status": "FAIL"}],
+                }
+            ],
+            "finding_confirmed": ["verify.known"],
+        }
+        path.write_text(json.dumps({"schema_version": 1, "instances": [payload]}))
+        self.assertEqual(
+            "FINDING-CONFIRMED", runner._read_results(path, group, "yaml")[0]["status"]
+        )
+        for bad in ("ERROR", "TIMEOUT"):
+            broken = copy.deepcopy(payload)
+            broken["stages"][0]["checks"].append({"id": "bad", "status": bad})
+            path.write_text(json.dumps({"schema_version": 1, "instances": [broken]}))
+            self.assertEqual(
+                "ERROR", runner._read_results(path, group, "yaml")[0]["status"]
+            )
 
     def test_both_routes_only_supported_arguments_to_each_child(self):
         with mock.patch.object(

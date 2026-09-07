@@ -234,6 +234,66 @@ def _error(instance, message):
     }
 
 
+def _execution_issues(row):
+    """Validate nested evidence before accepting a child's success classification."""
+    issues = []
+    stages, cleanup = row.get("stages", []), row.get("cleanup", [])
+    if not isinstance(stages, list) or not isinstance(cleanup, list):
+        return ["stages and cleanup must be arrays"]
+    for item in cleanup:
+        if (
+            not isinstance(item, dict)
+            or item.get("status") != "PASS"
+            or item.get("error")
+        ):
+            issues.append("cleanup did not complete successfully")
+    failed_checks = set()
+    green = row["status"] in {"PASS", "FINDING-CONFIRMED", "FINDING-RESOLVED"}
+    for stage in stages:
+        if not isinstance(stage, dict):
+            issues.append("stage must be an object")
+            continue
+        status = stage.get("status")
+        if status not in {"PASS", "FAIL", "BLOCKED", "SKIP"} or stage.get("error"):
+            issues.append("stage has an execution error or unknown status")
+        checks = stage.get("checks", [])
+        if not isinstance(checks, list):
+            issues.append("stage checks must be an array")
+            continue
+        failures = []
+        for check in checks:
+            if (
+                not isinstance(check, dict)
+                or check.get("status") not in {"PASS", "FAIL"}
+                or check.get("error")
+            ):
+                issues.append("check has an execution error or unknown status")
+                continue
+            if check["status"] == "FAIL":
+                failures.append(check)
+                failed_checks.add(f"{stage.get('id')}.{check.get('id')}")
+        if status == "PASS" and failures:
+            issues.append("PASS stage contains a failed check")
+        if status in {"BLOCKED", "SKIP"} and (checks or green):
+            issues.append("unexecuted stage contradicts successful instance")
+        if green and status == "FAIL" and not failures:
+            issues.append("failed stage has no failed check evidence")
+    if row["status"] in {"PASS", "FINDING-RESOLVED"} and failed_checks:
+        issues.append("successful instance contains failed checks")
+    if row["status"] == "FINDING-CONFIRMED":
+        confirmed = row.get("finding_confirmed", [])
+        if (
+            not isinstance(confirmed, list)
+            or any(not isinstance(x, str) for x in confirmed)
+            or not failed_checks
+            or set(confirmed) != failed_checks
+        ):
+            issues.append(
+                "finding classification does not match explicit failed checks"
+            )
+    return issues
+
+
 def _read_results(path, group, source):
     """Missing, duplicated, unexpected or malformed rows cannot become a green run."""
     expected = {instance.id: instance for instance in group}
@@ -267,13 +327,7 @@ def _read_results(path, group, source):
             if source == "yaml" and row.get("profile") != expected[identity].profile:
                 raise ValueError(f"result profile mismatch: {identity}")
             row = dict(row)
-            failures = [
-                item
-                for key in ("stages", "cleanup")
-                for item in row.get(key, [])
-                if isinstance(item, dict)
-                and (item.get("error") or item.get("status") in {"ERROR", "TIMEOUT"})
-            ]
+            failures = _execution_issues(row) if source == "yaml" else []
             if (row.get("error") or failures) and row["status"] not in {
                 "ERROR",
                 "TIMEOUT",
@@ -282,6 +336,7 @@ def _read_results(path, group, source):
                 row["status"] = "ERROR"
                 row["error"] = (
                     row.get("error")
+                    or "; ".join(failures)
                     or "stage/cleanup error cannot be classified as a finding"
                 )
             if source == "yaml" and row["status"] in {
