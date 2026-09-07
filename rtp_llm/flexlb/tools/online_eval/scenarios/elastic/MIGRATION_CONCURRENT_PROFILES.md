@@ -45,6 +45,10 @@ opposite protocol even when streams succeed, and failure of the unchanged health
 floor on business errors. These fixtures establish Python construction behavior;
 they are not real Java scheduling or throughput acceptance.
 
-Independent review and real Java acceptance of these new profile variants are
-pending. Legacy Python cases remain available. This closes three candidate
-profile pairs, not the remaining 18 pairs or the overall 371-profile target.
+Independent static and fixture review passed for candidate
+`1f750ae3d141f4e00ec4c4b73b6700ed0157085b`: the reviewer independently ran all
+99 elastic tests against core4e in 20.723s, compared the unchanged BW plan with
+its parent, and checked the three new profile configurations and driver paths.
+Real Java acceptance remains pending; legacy Python cases remain available.
+This signs three candidate profile pairs, not the overall 371-profile target.
+Remaining pair counts follow the coordinator's current inventory.
