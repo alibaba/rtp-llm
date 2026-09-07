@@ -1,3 +1,4 @@
+import os
 import unittest
 from unittest import mock
 
@@ -11,10 +12,21 @@ class KernelTuningRegistryTest(unittest.TestCase):
         provider = mock.Mock(return_value=status)
         with mock.patch.dict(
             registry._PROVIDERS_BY_ARCH, {"gfx942": (provider,)}, clear=True
+        ), mock.patch.dict(
+            os.environ,
+            {registry.ROCM_FP8_MOE_DETERMINISTIC_REDUCE_ENV: "1"},
         ):
             self.assertEqual(registry.configure_kernel_tuning("gfx942"), (status,))
             self.assertEqual(registry.configure_kernel_tuning("gfx950"), ())
         provider.assert_called_once_with()
+
+    def test_providers_are_not_called_when_feature_is_disabled(self):
+        provider = mock.Mock()
+        with mock.patch.dict(
+            registry._PROVIDERS_BY_ARCH, {"gfx942": (provider,)}, clear=True
+        ), mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(registry.configure_kernel_tuning("gfx942"), ())
+        provider.assert_not_called()
 
     def test_current_arch_uses_rocm_device_properties(self):
         properties = mock.Mock(gcnArchName="gfx942:sramecc+:xnack-")

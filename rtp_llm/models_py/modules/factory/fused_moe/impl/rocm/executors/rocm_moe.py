@@ -6,6 +6,7 @@ import torch
 from aiter.fused_moe import fused_moe
 
 from rtp_llm.device.device_impl import is_gfx950
+from rtp_llm.models_py.kernel_tuning import is_rocm_fp8_moe_deterministic_reduce_enabled
 from rtp_llm.models_py.kernel_tuning.aiter import (
     AiterFmoeWorkloadSignature,
     require_aiter_fmoe_tuning,
@@ -25,14 +26,10 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.type import ExecutorType
 from rtp_llm.models_py.modules.factory.fused_moe.impl.rocm._utils import (
     get_rocm_fp8_dtype,
 )
-from rtp_llm.models_py.modules.factory.fused_moe.impl.rocm.executors.deterministic_fp8_moe import (
-    try_deterministic_fp8_moe,
-)
 from rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver import (
     MoeConfigResolver,
 )
 from rtp_llm.utils.model_weight import W
-
 
 _MOE_ACTIVATION_TYPES = {
     "gelu": aiter.ActivationType.Gelu,
@@ -43,7 +40,7 @@ _MOE_ACTIVATION_TYPES = {
 }
 
 
-def _moe_activation_type(activation: Any) -> aiter.ActivationType:
+def _normalized_moe_activation_type(activation: Any) -> aiter.ActivationType:
     # ModelConfig canonicalizes activation strings to an RTP ActivationType
     # enum. Normalize both that representation and the raw strings accepted by
     # fused_moe so the tuning signature describes the activation actually sent
@@ -57,6 +54,14 @@ def _moe_activation_type(activation: Any) -> aiter.ActivationType:
             f"Unsupported AITER FMoE activation: {activation!r} "
             f"(normalized as {activation_name!r})"
         ) from error
+
+
+def _moe_activation_type(activation: Any) -> aiter.ActivationType:
+    if not is_rocm_fp8_moe_deterministic_reduce_enabled():
+        if activation in ("silu", "SiGLU"):
+            return aiter.ActivationType.Silu
+        return aiter.ActivationType.Gelu
+    return _normalized_moe_activation_type(activation)
 
 
 def _aiter_fmoe_workload_signature(
@@ -249,26 +254,27 @@ class RocmExpertsFp8PerChannel(FusedMoeExpertExecutor):
         self.w2 = weights[W.moe_w2]
         self.w1_scale = weights[W.moe_s1]
         self.w2_scale = weights[W.moe_s2]
-        self._configured_activation_type = _moe_activation_type(
-            config.activation_type
-        )
-
-        require_aiter_fmoe_tuning(
-            _aiter_fmoe_workload_signature(
-                self.w1,
-                self.w2,
-                config.moe_k,
-                self._configured_activation_type,
-                config.model_config.compute_dtype,
+        self._stability_enabled = is_rocm_fp8_moe_deterministic_reduce_enabled()
+        if self._stability_enabled:
+            self._configured_activation_type = _normalized_moe_activation_type(
+                config.activation_type
             )
-        )
+            require_aiter_fmoe_tuning(
+                _aiter_fmoe_workload_signature(
+                    self.w1,
+                    self.w2,
+                    config.moe_k,
+                    self._configured_activation_type,
+                    config.model_config.compute_dtype,
+                )
+            )
 
-        # ROCmDevice.shuffle_moe_weight always converts MoE weights to the
-        # layout consumed by AITER's preshuffle_on kernels.  Tensor attributes
-        # can be dropped while the loaded tensors are registered on the model,
-        # so restore the layout marker at the executor boundary.
-        self.w1.is_shuffled = True
-        self.w2.is_shuffled = True
+            # ROCmDevice.shuffle_moe_weight always converts MoE weights to the
+            # layout consumed by AITER's preshuffle_on kernels. Tensor attributes
+            # can be dropped while the loaded tensors are registered on the model,
+            # so restore the layout marker only for the opt-in deterministic path.
+            self.w1.is_shuffled = True
+            self.w2.is_shuffled = True
 
         self.expert_mask = build_ep_expert_mask(
             self.num_experts, self.ep_rank, self.ep_size, self.w1
@@ -298,7 +304,10 @@ class RocmExpertsFp8PerChannel(FusedMoeExpertExecutor):
         assert payload.expert_tokens_meta is not None
 
         activation_type = _moe_activation_type(activation)
-        if activation_type != self._configured_activation_type:
+        if (
+            self._stability_enabled
+            and activation_type != self._configured_activation_type
+        ):
             raise ValueError(
                 "MoE activation mismatch: ModelConfig resolved to "
                 f"{self._configured_activation_type}, but execute() received "
@@ -336,18 +345,23 @@ class RocmExpertsFp8PerChannel(FusedMoeExpertExecutor):
             hidden_states = hidden_states * topk_weights.to(hidden_states.dtype)
             topk_weights = torch.ones_like(topk_weights, dtype=torch.float32)
 
-        activation_type = _moe_activation_type(activation)
-        output = try_deterministic_fp8_moe(
-            hidden_states=hidden_states,
-            w1=self.w1,
-            w2=self.w2,
-            topk_weights=topk_weights,
-            topk_ids=topk_ids,
-            w1_scale=self.w1_scale,
-            w2_scale=self.w2_scale,
-            activation=activation_type,
-            expert_mask=effective_expert_mask,
-        )
+        output = None
+        if self._stability_enabled:
+            from rtp_llm.models_py.modules.factory.fused_moe.impl.rocm.executors.deterministic_fp8_moe import (
+                try_deterministic_fp8_moe,
+            )
+
+            output = try_deterministic_fp8_moe(
+                hidden_states=hidden_states,
+                w1=self.w1,
+                w2=self.w2,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                w1_scale=self.w1_scale,
+                w2_scale=self.w2_scale,
+                activation=activation_type,
+                expert_mask=effective_expert_mask,
+            )
         if output is None:
             output = fused_moe(
                 hidden_states,

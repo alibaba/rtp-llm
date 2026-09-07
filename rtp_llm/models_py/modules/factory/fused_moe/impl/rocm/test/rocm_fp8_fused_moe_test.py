@@ -14,12 +14,17 @@ from unittest.mock import patch
 
 import torch
 
+from rtp_llm.models_py.kernel_tuning.aiter import configure_aiter_fmoe_overlays
+
+_AITER_TUNING_STATUS = configure_aiter_fmoe_overlays()
+
 try:
     import aiter
     from aiter.ops.shuffle import shuffle_weight  # noqa: F401
 
     from rtp_llm.config.model_config import ModelConfig
     from rtp_llm.device.device_impl import RocmImpl
+    from rtp_llm.models_py.kernel_tuning import ROCM_FP8_MOE_DETERMINISTIC_REDUCE_ENV
     from rtp_llm.models_py.kernel_tuning.aiter import is_affected_aiter_fmoe_signature
     from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
         MoEConfigAdapter,
@@ -34,11 +39,11 @@ try:
     from rtp_llm.models_py.modules.factory.fused_moe.impl.rocm._utils import (
         get_rocm_fp8_dtype,
     )
+    from rtp_llm.models_py.modules.factory.fused_moe.impl.rocm.executors import (
+        deterministic_fp8_moe,
+    )
     from rtp_llm.models_py.modules.factory.fused_moe.impl.rocm.executors.deepep_normal_fused_moe_executor import (
         torch_moe_ref,
-    )
-    from rtp_llm.models_py.modules.factory.fused_moe.impl.rocm.executors.deterministic_fp8_moe import (
-        _validate_runtime_mode,
     )
     from rtp_llm.models_py.modules.factory.fused_moe.impl.rocm.executors.rocm_moe import (
         RocmExpertsFp8PerBlock,
@@ -130,23 +135,25 @@ class DeterministicFp8MoeConfigTest(unittest.TestCase):
     @unittest.skipIf(
         _IMPORT_ERROR is not None, f"ROCm imports unavailable: {_IMPORT_ERROR}"
     )
-    def test_cuda_graph_conflict_fails_fast(self):
+    def test_cuda_graph_does_not_block_opt_in_path(self):
         with patch.dict(
             os.environ,
-            {"ENABLE_CUDA_GRAPH": "1", "ENABLE_NATIVE_CUDA_GRAPH": "0"},
+            {
+                ROCM_FP8_MOE_DETERMINISTIC_REDUCE_ENV: "1",
+                "ENABLE_CUDA_GRAPH": "1",
+                "ENABLE_NATIVE_CUDA_GRAPH": "1",
+            },
+            clear=True,
+        ), patch.object(
+            deterministic_fp8_moe,
+            "_unsupported_reason",
+            return_value="test fallback",
         ):
-            with self.assertRaisesRegex(RuntimeError, "requires CUDA/HIP graph"):
-                _validate_runtime_mode()
-
-    @unittest.skipIf(
-        _IMPORT_ERROR is not None, f"ROCm imports unavailable: {_IMPORT_ERROR}"
-    )
-    def test_graph_disabled_is_supported(self):
-        with patch.dict(
-            os.environ,
-            {"ENABLE_CUDA_GRAPH": "0", "ENABLE_NATIVE_CUDA_GRAPH": "0"},
-        ):
-            _validate_runtime_mode()
+            self.assertIsNone(
+                deterministic_fp8_moe.try_deterministic_fp8_moe(
+                    None, None, None, None, None, None, None, None, None
+                )
+            )
 
 
 def _per_channel_quant_fp8(w: torch.Tensor, fp8_dtype: torch.dtype):
@@ -250,6 +257,12 @@ class _Fp8MoeBaseTest(unittest.TestCase):
         torch.set_default_device(self.device)
         torch.manual_seed(42)
         self.fp8_dtype = get_rocm_fp8_dtype()
+        self._feature_env = patch.dict(
+            os.environ,
+            {ROCM_FP8_MOE_DETERMINISTIC_REDUCE_ENV: "0"},
+        )
+        self._feature_env.start()
+        self.addCleanup(self._feature_env.stop)
 
     def _build_payload(self, M, K, E, top_k):
         hidden_states = (
@@ -290,17 +303,24 @@ class RocmExpertsFp8PerChannelTest(_Fp8MoeBaseTest):
             silu_config.activation_type,
             swiglu_config.activation_type,
         )
-        for activation in silu_aliases:
-            with self.subTest(activation=activation):
-                self.assertEqual(
-                    _moe_activation_type(activation), aiter.ActivationType.Silu
-                )
+        with patch.dict(
+            os.environ,
+            {ROCM_FP8_MOE_DETERMINISTIC_REDUCE_ENV: "1"},
+        ):
+            for activation in silu_aliases:
+                with self.subTest(activation=activation):
+                    self.assertEqual(
+                        _moe_activation_type(activation), aiter.ActivationType.Silu
+                    )
 
-        self.assertEqual(
-            _moe_activation_type("gelu"), aiter.ActivationType.Gelu
-        )
-        with self.assertRaisesRegex(ValueError, "Unsupported AITER FMoE activation"):
-            _moe_activation_type("unknown")
+            self.assertEqual(_moe_activation_type("gelu"), aiter.ActivationType.Gelu)
+            with self.assertRaisesRegex(
+                ValueError, "Unsupported AITER FMoE activation"
+            ):
+                _moe_activation_type("unknown")
+
+    def test_feature_disabled_keeps_legacy_activation_mapping(self):
+        self.assertEqual(_moe_activation_type("swiglu"), aiter.ActivationType.Gelu)
 
     def _run(self, apply_router_weight_on_input: bool):
         payload = self._build_payload(self.M, self.K, self.E, self.TOP_K)
@@ -379,7 +399,12 @@ class RocmExpertsFp8PerChannelTest(_Fp8MoeBaseTest):
         # PR #882 review #7 specifically called out this newly-enabled path.
         self._run(apply_router_weight_on_input=True)
 
+    @patch.dict(
+        os.environ,
+        {ROCM_FP8_MOE_DETERMINISTIC_REDUCE_ENV: "1"},
+    )
     def test_small_token_tuned_shape_with_loader_postprocess(self):
+        self.assertTrue(_AITER_TUNING_STATUS.applied, _AITER_TUNING_STATUS)
         hidden, local_inter, experts, top_k = 2048, 128, 256, 8
         runtime_device = RocmImpl.__new__(RocmImpl)
 
