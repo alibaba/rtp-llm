@@ -444,6 +444,7 @@
         "elastic_add_flow",
         "elastic_add_preference",
         "elastic_add_remove_cycle",
+        "elastic_kv_full_shrink",
         "elastic_kv_skew_shrink_cold",
         "elastic_kv_skew_shrink_hot",
         "elastic_rebalance",
@@ -451,14 +452,13 @@
         "elastic_steady_state_recovery"
       ],
       "pending_contracts": [
-        "elastic_kv_full_shrink",
         "elastic_transient_imbalance_bound"
       ],
       "candidate_counts": {
         "logical_scenarios": 1,
-        "variants": 6,
-        "instances": 6,
-        "checks": 173
+        "variants": 7,
+        "instances": 7,
+        "checks": 206
       },
       "source_files": [
         "scenarios/elastic/lifecycle.yaml"
@@ -466,8 +466,9 @@
       "replacement_status": "retain_legacy_pending_paired_evidence",
       "static_review": {
         "status": "passed_at_revision",
-        "revision": "84e6250228bf1777980590a779d07b4706a6b300",
+        "revision": "c879d43dbb29ab6945a3b91b50189cf9a5ebd4c2",
         "reviewed_contracts": [
+          "elastic_kv_full_shrink",
           "elastic_steady_state_recovery"
         ],
         "unreviewed_candidate_contracts": [
