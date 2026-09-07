@@ -101,7 +101,13 @@ cc_test_wrapper(
         "//conditions:default": [],
     }),
     copts = test_copts,
+    # A select needs its own CUDA branch: with only the rocm branch present, CUDA
+    # falls through to "//conditions:default": {} -- empty exec_properties, which
+    # is not a GPU request at all. The test then lands on a CPU-only worker and
+    # dies with "libnvidia-ml.so.1: cannot open shared object file" (exit 127),
+    # as it did in run 69714248.
     exec_properties = select({
+        "@//:using_cuda": {"gpu": "A10"},
         "@//:using_rocm": {"gpu": "MI308X-ROCM7"},
         "//conditions:default": {},
     }),
