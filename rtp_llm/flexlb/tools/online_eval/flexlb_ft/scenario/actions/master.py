@@ -493,6 +493,7 @@ HA_METRICS = {
     "sample_count",
     "success_rate",
     "target_share",
+    "target_count",
     "route_share",
     "route_count",
     "failover_count",
@@ -534,6 +535,7 @@ def _client_check_validate(params, plan):
         raise ValueError("client check must require actual samples")
     required = {
         "target_share": "target",
+        "target_count": "target",
         "route_share": "route",
         "route_count": "route",
         "error_kind_count": "error_kind",
@@ -568,9 +570,10 @@ def _client_check(ctx, params, deadline):
         actual = n
     elif metric == "success_rate":
         actual = sum(r["status"] == "ok" for r in rows) / n if n else 0
-    elif metric == "target_share":
+    elif metric in {"target_share", "target_count"}:
         target = ctx.backend.manager.master_instance_target(ctx.env, params["target"])
-        actual = sum(r["master_target"] == target for r in rows) / n if n else 0
+        count = sum(r["master_target"] == target for r in rows)
+        actual = count / n if metric == "target_share" and n else count
     elif metric in {"route_share", "route_count"}:
         count = sum(r["route_path"] == params["route"] for r in rows)
         actual = count / n if metric == "route_share" and n else count
@@ -1261,5 +1264,43 @@ HANDLERS.append(
         _short,
         {"passed": "boolean"},
         checks=frozenset({"short_hang"}),
+    )
+)
+
+
+def _admission_validate(params, plan):
+    p = _params(params, plan, {"requests", "count"}, {"requests", "count"})
+    plan.reference(p["requests"], "requests")
+    if type(p["count"]) is not int or not 1 <= p["count"] <= 100:
+        raise ValueError("admission count must be a positive bounded integer")
+    return p
+
+
+def _admission(ctx, params, deadline):
+    deadline.check()
+    records = ctx.resource(params["requests"], "requests").snapshot_records()
+    admitted = sum(row["schedule"]["status"] == "OK" for row in records)
+    passed = len(records) == params["count"] and admitted == params["count"]
+    return StageOutput(
+        {"admitted": admitted},
+        [
+            CheckResult(
+                "all_admitted",
+                "PASS" if passed else "FAIL",
+                actual=admitted,
+                expected=params["count"],
+                evidence={"records": records},
+            )
+        ],
+    )
+
+
+HANDLERS.append(
+    StageHandler(
+        "master_admission_check",
+        _admission_validate,
+        _admission,
+        {"admitted": "number"},
+        checks=frozenset({"all_admitted"}),
     )
 )

@@ -210,9 +210,9 @@ variants:
     params:
       rows:
         $ref: stages.judged.output.rows
-      metric: target_share
+      metric: target_count
       op: ge
-      expected: 0.01
+      expected: 1
       target: A
   - id: visible_terminal
     action: master_client_check

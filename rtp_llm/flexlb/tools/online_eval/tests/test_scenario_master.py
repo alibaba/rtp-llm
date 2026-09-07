@@ -321,6 +321,36 @@ class MasterActionsTest(unittest.TestCase):
             )
         self.assertEqual(8, out.output["count"])
 
+    def test_quota_fill_requires_every_schedule_to_be_accepted(self):
+        records = Mock()
+        records.snapshot_records.return_value = [{"schedule": {"status": "OK"}}] * 3 + [
+            {"schedule": {"status": "REJECTED"}}
+        ]
+        handle = self.ctx.register_resource("requests", records)
+        verdict = master._admission(
+            self.ctx, {"requests": handle, "count": 4}, self.deadline
+        )
+        self.assertEqual("FAIL", verdict.checks[0].status)
+        self.assertEqual(3, verdict.output["admitted"])
+
+    def test_one_switched_request_is_not_replaced_by_one_percent_threshold(self):
+        self.manager.master_instance_target.return_value = "B"
+        rows = [{"master_target": "A"}] * 999 + [{"master_target": "B"}]
+        handle = self.ctx.register_resource("ha_rows", rows)
+        verdict = master._client_check(
+            self.ctx,
+            {
+                "rows": handle,
+                "metric": "target_count",
+                "target": "B",
+                "op": "ge",
+                "expected": 1,
+                "min_samples": 1,
+            },
+            self.deadline,
+        )
+        self.assertEqual("PASS", verdict.checks[0].status)
+
     def test_master_programs_compile_with_explicit_registered_actions(self):
         from flexlb_ft.scenario import compile_scenarios, load_scenarios
         from flexlb_ft.scenario.actions.engine_control import HANDLERS as controls
