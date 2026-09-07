@@ -99,6 +99,15 @@ def _fp8_prefill_fast_topk_enabled(logits: torch.Tensor | None = None) -> bool:
     return os.environ.get("DSV4_PREFILL_FAST_TOPK", "1") != "0"
 
 
+# M6-lite (Sep 7 night): the in-binary radix-select topk_v3 (decode path
+# today) also serves the prefill contract — K in {512,1024,2048}, request-local
+# indices, self-padded -1 (verified on a garbage-filled buffer). Offline race
+# (bench/p2_m6lite_topk_race.py, rows=1024 T=32768 K=512): bit-exact selection
+# 1024/1024 rows, 2.53x vs dsv4_top_k_per_row_prefill. DSV4_PREFILL_TOPK_V3=1
+# arms; the incumbent stays the default.
+_PREFILL_TOPK_V3 = os.environ.get("DSV4_PREFILL_TOPK_V3", "0") == "1"
+
+
 def _fp8_prefill_topk_force_radix_sort() -> bool:
     return os.environ.get("DSV4_PREFILL_TOPK_FORCE_RADIX", "1") != "0"
 
@@ -181,6 +190,20 @@ def _run_prefill_topk(
         rtp_llm_ops.fast_topk_v2_variable(
             logits, out, lengths, row_starts.contiguous(), int(topk)
         )
+        if _fp8_prefill_topk_canonicalize():
+            _canonicalize_prefill_topk_out(out)
+        return
+
+    # M6-lite: in-binary radix topk_v3 before the incumbent fallback (see the
+    # flag comment above). _run_topk_v3 returns False for unsupported K or
+    # when DSV4_TOPK_V3=0, falling through to the incumbent unchanged.
+    if _PREFILL_TOPK_V3 and _run_topk_v3(
+        logits,
+        (row_ends - row_starts).contiguous(),
+        out,
+        int(topk),
+        int(logits.size(1)),
+    ):
         if _fp8_prefill_topk_canonicalize():
             _canonicalize_prefill_topk_out(out)
         return
