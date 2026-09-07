@@ -11,6 +11,7 @@ from pathlib import Path
 
 from flexlb_ft.scenario import ScenarioError, compile_scenarios, load_scenarios
 from flexlb_ft.scenario.catalog import handlers
+from flexlb_ft.scenario.compiler import plan_counts
 from flexlb_ft.scenario.lease import validate_lease
 
 LIST_FIELDS = (
@@ -43,7 +44,7 @@ def inventory(plans):
             key: plan["execution"][key] for key in ("timeout_s", "cleanup_timeout_s")
         }
         rows.append(row)
-    return dict(schema_version=1, instances=rows)
+    return dict(schema_version=1, counts=plan_counts(plans), instances=rows)
 
 
 def select(plans, exact_ids):

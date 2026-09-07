@@ -114,6 +114,9 @@ class ChildTest(unittest.TestCase):
                     mock=None,
                 )
             ]
+            backend.remember_processes(backend.environments[0])
+            # A restart/kill helper can clear this slot before final teardown.
+            backend.environments[0].master = None
             with tempfile.TemporaryDirectory() as tmp:
                 ctx = RuntimeContext({}, backend, tmp, time.monotonic, time.sleep)
                 backend.teardown(ctx, Deadline(time.monotonic() + 3))
