@@ -49,6 +49,7 @@
           "admission_queue_depth_reject",
           "admission_slo_queue_deadline"
         ],
+        "unreviewed_candidate_contracts": [],
         "scope": "old predicates and declared differences; local fixtures only, not complete Java execution"
       },
       "candidate_scenario_ids": [
@@ -89,6 +90,7 @@
           "admission_batcher_queue_deadline",
           "admission_placement_pool_wait"
         ],
+        "unreviewed_candidate_contracts": [],
         "scope": "old predicates and declared differences; local fixtures only, not complete Java execution"
       },
       "candidate_scenario_ids": [
@@ -132,6 +134,7 @@
           "engine_decode_hard_gate_unbounded_park",
           "engine_prefill_concurrency_gate_park"
         ],
+        "unreviewed_candidate_contracts": [],
         "scope": "old predicates and declared differences; local fixtures only, not complete Java execution"
       },
       "candidate_scenario_ids": [
@@ -175,6 +178,7 @@
           "engine_prefill_token_budget_split",
           "engine_prefill_token_budget_split_fifo"
         ],
+        "unreviewed_candidate_contracts": [],
         "scope": "old predicates and declared differences; local fixtures only, not complete Java execution"
       },
       "candidate_scenario_ids": [
@@ -209,6 +213,7 @@
         "reviewed_contracts": [
           "admission_priority_incomer_reject"
         ],
+        "unreviewed_candidate_contracts": [],
         "scope": "old predicates and declared differences; local fixtures only, not complete Java execution"
       },
       "candidate_scenario_ids": [
@@ -252,6 +257,7 @@
           "balance_len_mixed",
           "balance_uniform_serial"
         ],
+        "unreviewed_candidate_contracts": [],
         "scope": "old predicates and declared differences; local fixtures only, not complete Java execution"
       },
       "candidate_scenario_ids": [
@@ -289,6 +295,7 @@
           "balance_overload_avoid_decode",
           "balance_overload_avoid_prefill"
         ],
+        "unreviewed_candidate_contracts": [],
         "scope": "old predicates and declared differences; local fixtures only, not complete Java execution"
       },
       "candidate_scenario_ids": [
@@ -356,6 +363,7 @@
           "cancel_stream_break_prefill_autonomous",
           "cancel_unknown_rid"
         ],
+        "unreviewed_candidate_contracts": [],
         "scope": "old predicates and declared differences; local fixtures only, not complete Java execution"
       },
       "candidate_scenario_ids": [
@@ -408,6 +416,7 @@
           "cancel_transport_failure_one_shot",
           "cancel_unexpected_status_await_terminal"
         ],
+        "unreviewed_candidate_contracts": [],
         "scope": "old predicates and declared differences; local fixtures only, not complete Java execution"
       },
       "candidate_scenario_ids": [
@@ -432,34 +441,34 @@
         "elastic_steady_state_recovery"
       ],
       "candidate_contracts": [
-        "elastic_kv_skew_shrink_cold",
-        "elastic_kv_skew_shrink_hot"
-      ],
-      "pending_contracts": [
         "elastic_add_flow",
         "elastic_add_preference",
         "elastic_add_remove_cycle",
-        "elastic_kv_full_shrink",
+        "elastic_kv_skew_shrink_cold",
+        "elastic_kv_skew_shrink_hot",
         "elastic_rebalance",
-        "elastic_remove_flow",
+        "elastic_remove_flow"
+      ],
+      "pending_contracts": [
+        "elastic_kv_full_shrink",
         "elastic_steady_state_recovery",
         "elastic_transient_imbalance_bound"
       ],
       "candidate_counts": {
         "logical_scenarios": 1,
-        "variants": 2,
-        "instances": 2,
-        "checks": 20
+        "variants": 5,
+        "instances": 5,
+        "checks": 158
       },
       "source_files": [
-        "scenarios/elastic/kv_skew_shrink.yaml"
+        "scenarios/elastic/lifecycle.yaml"
       ],
       "replacement_status": "retain_legacy_pending_paired_evidence",
       "static_review": {
         "status": "pending"
       },
       "candidate_scenario_ids": [
-        "elastic_kv_skew_shrink"
+        "elastic_lifecycle"
       ]
     },
     {
@@ -656,6 +665,7 @@
           "kv_pe_evict_zero_match",
           "kv_pe_prefix_continuity"
         ],
+        "unreviewed_candidate_contracts": [],
         "scope": "old predicates and declared differences; local fixtures only, not complete Java execution"
       },
       "candidate_scenario_ids": [
@@ -693,7 +703,17 @@
       ],
       "replacement_status": "retain_legacy_pending_paired_evidence",
       "static_review": {
-        "status": "pending"
+        "status": "passed_at_revision",
+        "revision": "fa16aa3307262d132408ccad253417bf3103a227",
+        "reviewed_contracts": [
+          "kv_g_engine_down_cleanup",
+          "kv_g_full_release_no_ghost",
+          "kv_g_partial_release_redirect",
+          "kv_g_shared_block_both_match",
+          "kv_g_sync_convergence"
+        ],
+        "unreviewed_candidate_contracts": [],
+        "scope": "old predicates and declared differences; local fixtures only, not complete Java execution"
       },
       "candidate_scenario_ids": [
         "cache_global_holders"
@@ -703,7 +723,7 @@
       "id": "cache_affinity",
       "category": "kv",
       "owner": "agent2",
-      "implementation_status": "candidate_partial",
+      "implementation_status": "candidate_complete",
       "legacy_case_ids": [
         "kv_prefix_stickiness",
         "kv_hot_prefix_tension",
@@ -712,17 +732,16 @@
       ],
       "candidate_contracts": [
         "kv_hot_prefix_tension",
+        "kv_leader_saturation_spill",
         "kv_match_mixed",
         "kv_prefix_stickiness"
       ],
-      "pending_contracts": [
-        "kv_leader_saturation_spill"
-      ],
+      "pending_contracts": [],
       "candidate_counts": {
         "logical_scenarios": 1,
-        "variants": 4,
-        "instances": 12,
-        "checks": 72
+        "variants": 6,
+        "instances": 16,
+        "checks": 124
       },
       "source_files": [
         "scenarios/kv/cache_affinity.yaml"
@@ -736,6 +755,9 @@
           "kv_match_mixed",
           "kv_prefix_stickiness"
         ],
+        "unreviewed_candidate_contracts": [
+          "kv_leader_saturation_spill"
+        ],
         "scope": "old predicates and declared differences; local fixtures only, not complete Java execution"
       },
       "candidate_scenario_ids": [
@@ -746,32 +768,45 @@
       "id": "cache_capacity_recovery",
       "category": "kv",
       "owner": "agent4",
-      "implementation_status": "planned",
+      "implementation_status": "candidate_complete",
       "legacy_case_ids": [
         "kv_capacity_conflict_overflow",
         "kv_decode_capacity_park",
         "kv_pool_saturation_evict_reject_recover",
         "kv_decode_pool_exhaustion_terminal"
       ],
-      "candidate_contracts": [],
-      "pending_contracts": [
+      "candidate_contracts": [
         "kv_capacity_conflict_overflow",
         "kv_decode_capacity_park",
         "kv_decode_pool_exhaustion_terminal",
         "kv_pool_saturation_evict_reject_recover"
       ],
+      "pending_contracts": [],
       "candidate_counts": {
-        "logical_scenarios": 0,
-        "variants": 0,
-        "instances": 0,
-        "checks": 0
+        "logical_scenarios": 1,
+        "variants": 4,
+        "instances": 16,
+        "checks": 224
       },
-      "source_files": [],
+      "source_files": [
+        "scenarios/kv/cache_capacity_recovery.yaml"
+      ],
       "replacement_status": "retain_legacy_pending_paired_evidence",
       "static_review": {
-        "status": "pending"
+        "status": "passed_at_revision",
+        "revision": "432b85f3577c0c65646652ac01aee15ba6e436c3",
+        "reviewed_contracts": [
+          "kv_capacity_conflict_overflow",
+          "kv_decode_capacity_park",
+          "kv_decode_pool_exhaustion_terminal",
+          "kv_pool_saturation_evict_reject_recover"
+        ],
+        "unreviewed_candidate_contracts": [],
+        "scope": "old predicates and declared differences; local fixtures only, not complete Java execution"
       },
-      "candidate_scenario_ids": []
+      "candidate_scenario_ids": [
+        "cache_capacity_recovery"
+      ]
     },
     {
       "id": "cache_churn",
@@ -804,6 +839,7 @@
           "kv_lru_eviction_affinity",
           "kv_storm_hot_churn"
         ],
+        "unreviewed_candidate_contracts": [],
         "scope": "old predicates and declared differences; local fixtures only, not complete Java execution"
       },
       "candidate_scenario_ids": [
@@ -1084,6 +1120,7 @@
           "status_ack_partial_fail",
           "status_batch_async_partial_fail"
         ],
+        "unreviewed_candidate_contracts": [],
         "scope": "old predicates and declared differences; local fixtures only, not complete Java execution"
       },
       "candidate_scenario_ids": [
@@ -1184,6 +1221,7 @@
           "status_zombie_completed_running",
           "status_zombie_fake_running"
         ],
+        "unreviewed_candidate_contracts": [],
         "scope": "old predicates and declared differences; local fixtures only, not complete Java execution"
       },
       "candidate_scenario_ids": [
