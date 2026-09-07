@@ -6,6 +6,8 @@ from typing import List, Optional
 import psutil
 import torch
 
+from rtp_llm.config.moe_config import Fp4MoeOp, resolve_fp4_moe_op
+from rtp_llm.device.b12x_fp4 import prepare_b12x_blockscale
 from rtp_llm.device.device_base import DeviceBase, MemInfo
 from rtp_llm.ops.compute_ops import (
     preprocess_gemm_weight_by_key,
@@ -13,6 +15,96 @@ from rtp_llm.ops.compute_ops import (
 )
 from rtp_llm.utils.model_weight import W
 from rtp_llm.utils.swizzle_utils import should_swizzle_linear_attn_ba, swizzle_tensor
+
+
+def prepare_static_weights_for_fp4_moe(
+    fp4_moe_op: str,
+    kernel_name: str,
+    _scale_name: str,
+    kernel: torch.Tensor,
+    scale: torch.Tensor,
+    cache_permute_indices: Optional[dict[torch.Size, torch.Tensor]] = None,
+    *,
+    scale_2: Optional[torch.Tensor] = None,
+    scale_2_pair: Optional[torch.Tensor] = None,
+    input_scale: Optional[torch.Tensor] = None,
+    b12x_zeroed_energy_limit: Optional[float] = None,
+):
+    """Prepare an FP4 MoE weight pair for a concrete executor layout."""
+    if kernel_name not in (W.moe_w1, W.moe_w2):
+        return kernel, scale
+
+    try:
+        op = Fp4MoeOp(fp4_moe_op)
+    except ValueError as error:
+        raise ValueError(f"invalid fp4_moe_op {fp4_moe_op!r}") from error
+    if op is Fp4MoeOp.AUTO:
+        raise ValueError(
+            "fp4_moe_op='auto' must be resolved before FP4 MoE weight preparation"
+        )
+
+    if op is Fp4MoeOp.CUTEDSL:
+        # cutedsl moe needs gate+up format for w13.
+        if kernel_name == W.moe_w1:
+            kernel = torch.cat(
+                [
+                    kernel[:, kernel.shape[1] // 2 :, :],
+                    kernel[:, : kernel.shape[1] // 2, :],
+                ],
+                dim=1,
+            )
+            scale = torch.cat(
+                [
+                    scale[:, scale.shape[1] // 2 :, :],
+                    scale[:, : scale.shape[1] // 2, :],
+                ],
+                dim=1,
+            )
+        return kernel, CudaImpl.swizzle_blockscale(scale)
+
+    if op is Fp4MoeOp.B12X:
+        if b12x_zeroed_energy_limit is None:
+            raise ValueError(
+                "b12x_zeroed_energy_limit must be provided for B12X weight "
+                "preparation"
+            )
+        # The SM120 kernel is up-first: SwiGLU applies silu to the second
+        # (gate) half and multiplies the first (up) half. The loader already
+        # produces [up; gate]. Complete every scale transformation here so the
+        # executor receives a kernel-ready, read-only weight dictionary.
+        swizzled_scale = CudaImpl.swizzle_blockscale(scale)
+        prepared_scale = prepare_b12x_blockscale(
+            "w1" if kernel_name == W.moe_w1 else "w2",
+            kernel,
+            swizzled_scale,
+            (
+                scale_2_pair
+                if kernel_name == W.moe_w1 and scale_2_pair is not None
+                else scale_2
+            ),
+            input_scale,
+            b12x_zeroed_energy_limit,
+        )
+        return kernel, prepared_scale
+
+    if cache_permute_indices is None:
+        raise ValueError("trtllm FP4 MoE weight preparation requires a cache")
+    from flashinfer.fused_moe.core import (
+        _maybe_get_cached_w3_w1_permute_indices,
+        get_w2_permute_indices_with_cache,
+    )
+
+    return CudaImpl.prepare_static_weights_for_trtllm_fp4_moe(
+        kernel,
+        scale,
+        [*kernel.shape[:-1], kernel.shape[-1] * 2],
+        (
+            _maybe_get_cached_w3_w1_permute_indices
+            if kernel_name == W.moe_w1
+            else get_w2_permute_indices_with_cache
+        ),
+        cache_permute_indices,
+    )
 
 
 def is_gfx950(arch_fallback: Optional[str] = None) -> bool:
@@ -357,13 +449,10 @@ class CudaImpl(GpuImpl):
             logging.warn(f"no nvml found: " + str(e))
 
         self._cache_permute_indices: dict[torch.Size, torch.Tensor] = {}
-        if self.py_env_configs.moe_config.fp4_moe_op == "auto":
-            self.py_env_configs.moe_config.fp4_moe_op = "trtllm"
-            if (
-                self.py_env_configs.moe_config.use_deepep_moe
-                and self.py_env_configs.moe_config.use_deepep_low_latency
-            ):
-                self.py_env_configs.moe_config.fp4_moe_op = "cutedsl"
+        self.py_env_configs.moe_config.fp4_moe_op = resolve_fp4_moe_op(
+            self.py_env_configs.moe_config,
+            is_sm12x=self.arch // 10 == 12,
+        )
 
     def _get_mem_info(self) -> MemInfo:
         import pynvml
@@ -482,8 +571,17 @@ class CudaImpl(GpuImpl):
     def swizzle_blockscale(scale: torch.Tensor):
         """
         Swizzle the scale tensor into a blockwise interleaved format for NVFP4 quantization.
+
+        Pure byte movement (pad + blockwise interleave), so both of the 1-byte
+        carriers the FP4 block scales travel in are accepted: float8_e4m3fn as
+        produced by the weight loader, and the raw uint8 view returned by
+        flashinfer's fp4_quantize. The output keeps the input dtype.
+        Accepts [M, K] or [B, M, K] and returns the same rank.
         """
-        assert scale.dtype == torch.float8_e4m3fn
+        assert scale.dtype in (
+            torch.float8_e4m3fn,
+            torch.uint8,
+        ), f"unexpected block scale dtype {scale.dtype}"
         # Pad and blockwise interleave weight_scale
         scale_ndim = scale.ndim
         if scale.ndim == 2:
@@ -493,14 +591,16 @@ class CudaImpl(GpuImpl):
         round_up_multiple = lambda x, m: (x + m - 1) // m * m
         M_padded = round_up_multiple(M, 128)
         K_padded = round_up_multiple(K, 4)
-        padded_scale = torch.zeros((B, M_padded, K_padded), dtype=scale.dtype)
+        padded_scale = torch.zeros(
+            (B, M_padded, K_padded), dtype=scale.dtype, device=scale.device
+        )
         padded_scale[:B, :M, :K] = scale
         batches, rows, cols = padded_scale.shape
         assert rows % 128 == 0
         assert cols % 4 == 0
         padded_scale = padded_scale.reshape(batches, rows // 128, 4, 32, cols // 4, 4)
         swizzled_scale = padded_scale.permute((0, 1, 4, 3, 2, 5))
-        swizzled_scale = swizzled_scale.contiguous().cuda()
+        swizzled_scale = swizzled_scale.contiguous()
         return (
             swizzled_scale.reshape(M_padded, K_padded)
             if scale_ndim == 2
@@ -525,63 +625,9 @@ class CudaImpl(GpuImpl):
                 .view(torch.float8_e4m3fn)
             )
         else:
-            # Pad and blockwise interleave weight_scales
-            scales = weight_scale
-            scale_ndim = scales.ndim
-            if scale_ndim == 2:
-                scales = scales.unsqueeze(0)
-            assert scales.ndim == 3
-            B, M, K = scales.shape
-            round_up_multiple = lambda x, m: (x + m - 1) // m * m
-            M_padded = round_up_multiple(M, 128)
-            K_padded = round_up_multiple(K, 4)
-            padded_scales = torch.zeros((B, M_padded, K_padded), dtype=scales.dtype)
-            padded_scales[:B, :M, :K] = scales
-            batches, rows, cols = padded_scales.shape
-            assert rows % 128 == 0
-            assert cols % 4 == 0
-            padded_scales = padded_scales.reshape(
-                batches, rows // 128, 4, 32, cols // 4, 4
-            )
-            padded_scales = padded_scales.permute((0, 1, 4, 3, 2, 5))
-            padded_scales = padded_scales.contiguous().cuda()
-            padded_scales = (
-                padded_scales.reshape(M_padded, K_padded)
-                if scale_ndim == 2
-                else padded_scales.reshape(B, M_padded, K_padded)
-            )
             processed_weight = weight
-            processed_weight_scale = padded_scales
+            processed_weight_scale = CudaImpl.swizzle_blockscale(weight_scale)
         return [processed_weight, processed_weight_scale]
-
-    @staticmethod
-    def swizzle_blockscale(scale: torch.Tensor):
-        """
-        Swizzle the scale tensor into a blockwise interleaved format for NVFP4 quantization.
-        """
-        assert scale.dtype == torch.float8_e4m3fn
-        # Pad and blockwise interleave weight_scale
-        scale_ndim = scale.ndim
-        if scale.ndim == 2:
-            scale = scale.unsqueeze(0)
-        assert scale.ndim == 3
-        B, M, K = scale.shape
-        round_up_multiple = lambda x, m: (x + m - 1) // m * m
-        M_padded = round_up_multiple(M, 128)
-        K_padded = round_up_multiple(K, 4)
-        padded_scale = torch.zeros((B, M_padded, K_padded), dtype=scale.dtype)
-        padded_scale[:B, :M, :K] = scale
-        batches, rows, cols = padded_scale.shape
-        assert rows % 128 == 0
-        assert cols % 4 == 0
-        padded_scale = padded_scale.reshape(batches, rows // 128, 4, 32, cols // 4, 4)
-        swizzled_scale = padded_scale.permute((0, 1, 4, 3, 2, 5))
-        swizzled_scale = swizzled_scale.contiguous().cuda()
-        return (
-            swizzled_scale.reshape(M_padded, K_padded)
-            if scale_ndim == 2
-            else swizzled_scale.reshape(B, M_padded, K_padded)
-        )
 
     @staticmethod
     def prepare_static_weights_for_trtllm_fp4_moe(
@@ -642,48 +688,24 @@ class CudaImpl(GpuImpl):
         scale_name: str,
         kernel: torch.Tensor,
         scale: torch.Tensor,
+        *,
+        scale_2: Optional[torch.Tensor] = None,
+        scale_2_pair: Optional[torch.Tensor] = None,
+        input_scale: Optional[torch.Tensor] = None,
     ):
-        if kernel_name not in [W.moe_w2, W.moe_w1]:
-            return kernel, scale
-
-        if self.py_env_configs.moe_config.fp4_moe_op == "cutedsl":
-            # cutedsl moe needs gate+up format for w13
-            if kernel_name == W.moe_w1:
-                kernel = torch.cat(
-                    [
-                        kernel[:, kernel.shape[1] // 2 :, :],
-                        kernel[:, : kernel.shape[1] // 2, :],
-                    ],
-                    dim=1,
-                )
-                scale = torch.cat(
-                    [
-                        scale[:, scale.shape[1] // 2 :, :],
-                        scale[:, : scale.shape[1] // 2, :],
-                    ],
-                    dim=1,
-                )
-            swizzled_scale = self.swizzle_blockscale(scale)
-            return kernel, swizzled_scale
-
-        if self.py_env_configs.moe_config.fp4_moe_op != "trtllm":
-            return kernel, scale
-
-        from flashinfer.fused_moe.core import (
-            _maybe_get_cached_w3_w1_permute_indices,
-            get_w2_permute_indices_with_cache,
-        )
-
-        return CudaImpl.prepare_static_weights_for_trtllm_fp4_moe(
+        return prepare_static_weights_for_fp4_moe(
+            self.py_env_configs.moe_config.fp4_moe_op,
+            kernel_name,
+            scale_name,
             kernel,
             scale,
-            [*kernel.shape[:-1], kernel.shape[-1] * 2],
-            (
-                _maybe_get_cached_w3_w1_permute_indices
-                if kernel_name == W.moe_w1
-                else get_w2_permute_indices_with_cache
-            ),
             self._cache_permute_indices,
+            scale_2=scale_2,
+            scale_2_pair=scale_2_pair,
+            input_scale=input_scale,
+            b12x_zeroed_energy_limit=(
+                self.py_env_configs.moe_config.b12x_zeroed_energy_limit
+            ),
         )
 
 
@@ -917,6 +939,7 @@ class RocmImpl(GpuImpl):
                     "Quark MXFP4 MoE scale shuffle requires gfx950 (MI355)."
                 )
             from aiter.utility.fp4_utils import e8m0_shuffle
+
             if x_.dim() == 3:
                 s0, s1, _ = x_.shape
                 x_ = e8m0_shuffle(x_.contiguous().view(s0 * s1, -1)).view(s0, s1, -1)
