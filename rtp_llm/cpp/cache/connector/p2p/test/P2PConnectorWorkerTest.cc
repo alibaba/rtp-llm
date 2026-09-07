@@ -1712,13 +1712,14 @@ TEST_F(P2PConnectorWorkerTest, SendKVCache_FallbackTimeout_FailsFastWithGenerate
     computed_buffers_ = prefill_->getComputedBuffersStore();
 
     int64_t request_id = 6004;
-    auto    resource   = createKVCacheResource(0, 2);
 
     // 模拟 prefill 前向计算：writeByLayer 存入 layers
     // INT64_MAX 表示请求无业务 deadline → buffer deadline 退回到 now + store_wait_timeout (50ms)
     const int64_t no_deadline = std::numeric_limits<int64_t>::max();
-    prefill_->writeByLayer(0, resource, request_id, nullptr, no_deadline);
-    prefill_->writeByLayer(1, resource, request_id, nullptr, no_deadline);
+    auto          resource0   = createKVCacheResource(0, 2);
+    auto          resource1   = createKVCacheResource(1, 2);
+    prefill_->writeByLayer(0, resource0, request_id, nullptr, no_deadline);
+    prefill_->writeByLayer(1, resource1, request_id, nullptr, no_deadline);
 
     // 等待 StoreWaitContextChecker 将 layers 移入 computed_buffers_
     // （event=nullptr 表示立即就绪，checker 每次 loopCheckProc 会处理）
