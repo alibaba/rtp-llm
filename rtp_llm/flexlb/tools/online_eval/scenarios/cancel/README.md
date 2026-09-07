@@ -1,8 +1,8 @@
 # Cancellation migration checkpoint
 
-This is an incomplete first checkpoint: four of 19 old cancel cases are mapped.
-`cancel_lifecycle` currently has seven explicit variants and 16 profile instances.
-The remaining lifecycle cases and `cancel_fence_settlement` are still being built;
+This is an incomplete first checkpoint: 11 of 19 old cancel cases are mapped.
+`cancel_lifecycle` currently has 18 explicit variants and 38 profile instances.
+The remaining preemption case and `cancel_fence_settlement` are still being built;
 compilation is not remote correctness evidence.
 
 Baseline is core `7120c1ff19446f694cbd99c5c9c5545bbd11e0c2`, with the status owner
@@ -33,6 +33,18 @@ exit evidence is not empty success. Stream consumers must supply a done signal,
 terminal fields and independently verified exit. Allowed cancellation transport
 statuses are explicit; untyped errors are not accepted as cancellation evidence.
 
-Six focused local tests cover manual stream opening, unknown-ID RPC routing, missing
+Ten focused local tests cover manual stream opening, unknown-ID RPC routing, missing
 routes, late and incomplete receipts, verified exits and the profile-specific
 programs. No remote run has been made for this checkpoint.
+
+Second checkpoint adds sibling isolation, phase timing, anomaly, deadline exemption,
+Schedule RPC drop and both autonomous stream-break cases. Explicit client-only
+observation windows do not perform HTTP calls that could move the cancellation
+phase. Schedule.future cancellation is identified as Python grpc.FutureCancelledError
+and verified against the owned call, separate from gRPC wire CANCELLED.
+
+The sibling group submits three independently shaped requests concurrently, caps
+aggregate concurrency at 16 and rejects repeated cohort handles before dispatch.
+The deadline case keeps its 45-second completion bound and clears enqueue_delay
+after the recovery request, matching the old fault lifetime. BATCH-only five-second
+receipt bounds and 95-second closing drain windows remain separate contracts.
