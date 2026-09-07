@@ -30,7 +30,9 @@ contracts are assigned explicitly to existing families, never silently dropped.
 Run `python3 migration/audit_manifest.py --out PATH` from `online_eval` to verify
 bookkeeping against the actual registry and compiled YAML inventory. The audit
 rejects omitted contracts, dropped profiles, duplicate family assignments and
-unreviewed source drift. It reuses the independent acceptance oracle rather than
+unreviewed source drift. It also compares candidate IDs, remaining IDs, counts,
+source files and implementation status to compiled programs, and checks that
+static-review metadata names only present candidates at an immutable revision. It reuses the independent acceptance oracle rather than
 changing that oracle to fit current results.
 
 The selected legacy inventory has 371 profile instances (122/86/91/72). These are
@@ -41,8 +43,8 @@ that each old function contains one assertion. Original assertions still need
 stage/check decomposition and paired configuration, threshold, sample-window and
 execution evidence before replacement.
 
-Current ownership: admission and master belong to agent4; balance and priority
-to agent6; cancellation, status and engine recovery to agent5; elastic to agent1;
+Current ownership: admission, master and priority preemption belong to agent4;
+balance and priority queue to agent6; cancellation, status and engine recovery to agent5; elastic to agent1;
 KV capacity to agent4; other KV families and RPC faults to agent2. Core catalog, compiler and this ledger are integrated by agent2
 from the owners' fixed commits. The shared checkout is not used for these edits.
 The inventory includes core execution fixtures and pilots; its runnable-definition

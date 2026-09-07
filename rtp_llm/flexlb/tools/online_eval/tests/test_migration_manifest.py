@@ -42,6 +42,41 @@ class MigrationManifestTest(unittest.TestCase):
         families[1]["legacy_case_ids"].append(families[0]["legacy_case_ids"][0])
         self.assertFalse(audit(*inputs)["ok"])
 
+    def test_candidate_progress_cannot_overstate_program_coverage(self):
+        for field, value in (
+            ("implementation_status", "planned"),
+            ("candidate_contracts", []),
+            ("pending_contracts", ["invented"]),
+            ("candidate_counts", {"instances": 999}),
+            ("source_files", ["scenarios/missing.yaml"]),
+            ("candidate_scenario_ids", ["invented"]),
+        ):
+            with self.subTest(field=field):
+                inputs = copy.deepcopy(self.inputs)
+                row = next(
+                    r for r in inputs[1]["definitions"] if r["candidate_contracts"]
+                )
+                row[field] = value
+                report = audit(*inputs)
+                self.assertFalse(report["ok"])
+                self.assertTrue(any(field in error for error in report["errors"]))
+
+    def test_static_review_does_not_cover_new_or_absent_candidates(self):
+        for field, value in (
+            ("reviewed_contracts", ["invented"]),
+            ("unreviewed_candidate_contracts", ["invented"]),
+            ("revision", "mutable-branch"),
+        ):
+            with self.subTest(field=field):
+                inputs = copy.deepcopy(self.inputs)
+                row = next(
+                    r
+                    for r in inputs[1]["definitions"]
+                    if r["static_review"]["status"] == "passed_at_revision"
+                )
+                row["static_review"][field] = value
+                self.assertFalse(audit(*inputs)["ok"])
+
     def test_unreviewed_migration_cannot_drop_legacy_invocation(self):
         inputs = copy.deepcopy(self.inputs)
         row = next(iter(inputs[2]["legacy_cases"].values()))

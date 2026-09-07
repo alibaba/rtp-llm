@@ -1058,7 +1058,7 @@
     {
       "id": "priority_preemption",
       "category": "priority",
-      "owner": "agent6",
+      "owner": "agent4",
       "implementation_status": "planned",
       "legacy_case_ids": [
         "atpm_preempt_prefill_queued",

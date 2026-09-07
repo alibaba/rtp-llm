@@ -3,6 +3,7 @@
 import argparse
 import json
 import sys
+from collections import Counter
 from pathlib import Path
 
 import yaml
@@ -16,6 +17,78 @@ from flexlb_ft.scenario.catalog import handlers
 from flexlb_ft.scenario.compiler import plan_counts
 from flexlb_ft.scenario_acceptance import normalize_plans
 from flexlb_functional_tests import ALL_CASES
+
+
+def audit_candidates(families, plans):
+    """Check progress claims against programs, never infer static equivalence."""
+    errors, covered_all, statuses = [], set(), Counter()
+    for family in families:
+        fid, assigned = family["id"], set(family["legacy_case_ids"])
+        selected = [p for p in plans if assigned.intersection(p["legacy_case_ids"])]
+        covered = {lid for p in selected for lid in p["legacy_case_ids"]}
+        covered_all.update(covered & assigned)
+        if covered - assigned:
+            errors.append(f"{fid}: candidate program crosses target family ownership")
+        state = (
+            ("candidate_complete" if covered == assigned else "candidate_partial")
+            if selected
+            else "planned"
+        )
+        statuses[state] += 1
+        expected = {
+            "implementation_status": state,
+            "candidate_contracts": sorted(covered),
+            "pending_contracts": sorted(assigned - covered),
+            "candidate_scenario_ids": sorted({p["scenario_id"] for p in selected}),
+            "candidate_counts": plan_counts(selected),
+        }
+        try:
+            expected["source_files"] = sorted(
+                {
+                    str(Path(p["source_path"]).resolve().relative_to(TOOLS))
+                    for p in selected
+                }
+            )
+        except ValueError:
+            errors.append(f"{fid}: candidate source is outside the audited tools tree")
+        for field, value in expected.items():
+            if family.get(field) != value:
+                errors.append(
+                    f"{fid}: {field} differs from compiled candidate inventory"
+                )
+        review = family.get("static_review", {})
+        if review.get("status") == "passed_at_revision":
+            reviewed = review.get("reviewed_contracts", [])
+            if (
+                not isinstance(reviewed, list)
+                or not reviewed
+                or not all(isinstance(lid, str) for lid in reviewed)
+                or len(set(reviewed)) != len(reviewed)
+                or not set(reviewed) <= covered
+            ):
+                errors.append(
+                    f"{fid}: static review includes duplicate or absent candidates"
+                )
+            elif review.get("unreviewed_candidate_contracts") != sorted(
+                covered - set(reviewed)
+            ):
+                errors.append(
+                    f"{fid}: unreviewed candidates do not match reviewed scope"
+                )
+            revision = review.get("revision", "")
+            if (
+                not isinstance(revision, str)
+                or len(revision) != 40
+                or any(char not in "0123456789abcdef" for char in revision)
+            ):
+                errors.append(f"{fid}: static review needs an immutable full revision")
+        elif review.get("status") != "pending":
+            errors.append(f"{fid}: missing or unsupported static review status")
+    return errors, {
+        "candidate_contracts": len(covered_all),
+        "target_families_by_implementation_status": dict(statuses),
+        "scope": "Candidate existence only; static signatures and runtime acceptance remain separate.",
+    }
 
 
 def audit(baseline, targets, coverage, plans, current):
@@ -52,6 +125,10 @@ def audit(baseline, targets, coverage, plans, current):
                 errors.append(f"{lid}: category changed")
     if set(assignments) != set(frozen):
         errors.append("target families omit or invent contracts")
+    candidate_errors, candidate_progress = audit_candidates(
+        targets["definitions"], plans
+    )
+    errors.extend(candidate_errors)
     inventory = normalize_plans(plans)
     normalized = []
     for lid, old in frozen.items():
@@ -128,6 +205,7 @@ def audit(baseline, targets, coverage, plans, current):
         current_contracts=len(frozen),
         supplemental_contracts=len(targets["supplemental_contracts"]),
     )
+    report["candidate_progress"] = candidate_progress
     report["yaml_counts"] = plan_counts(plans)
     report["legacy_instances"] = sum(
         len(row["profiles"]) for row in baseline["legacy_cases"]
