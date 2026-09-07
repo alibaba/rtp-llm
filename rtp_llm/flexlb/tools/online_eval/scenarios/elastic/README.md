@@ -202,13 +202,21 @@ contract acceptance remain pending; legacy code stays available.
 15-check program. It uses a private 2P/4D environment, PRIORITY/FIXED_WINDOW/BATCH
 and omitted queue timeout. The legacy fingerprint-only environment marker is not
 needed for the scenario runtime's instance-owned environment. This candidate is
-batch-window only; other legacy profiles remain unmigrated.
+batch-window only, matching this particular legacy case's only declared profile.
+The single-batch gap described for pending drain does not apply to this case.
 
 The serial pump preserves 2048 input / 2 output / one unique cold key, Schedule
 30s and stream 30s, followed by a 200ms pause. It runs through a 20s baseline,
 graceful removal of `decode-0` (60s drain / 95s HTTP), 20s transient wait,
 convergence to three Decode workers, a pure 60s steady window and 20-request
 recovery. Inflight-clean is not a settle prerequisite while this pump is running.
+`settled_topology` is an explicit **new assertion**: the old case recorded the
+post-remove `alive_ok` result in its detail but did not combine it into the
+returned verdict; even `alive_ok=false` could continue into W_ss and pass. The
+new program requires exactly three discovered/alive Decode workers and victim
+absence before W_ss. Snapshot membership and discovery checks are also stronger
+than that legacy diagnostic. These construction guards are not claimed as exact
+old-contract equivalence.
 The recorded pump success rate remains an observation; request consumer completion
 and cleanup are still required. Stopping the pump is explicit before final verdict.
 
