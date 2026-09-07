@@ -1,0 +1,37 @@
+schema_version: 1
+id: elastic_concurrent_mutation
+description: Four concurrent add/remove workers and serial health probes, followed by quiescent discovery validation.
+category: elastic
+profiles: [batch-window]
+requires: [enqueue_batch]
+legacy_case_ids: [elastic_concurrent_ops]
+estimated_duration_s: 90
+environment:
+  backend: java_mock
+  n_prefill: 2
+  n_decode: 4
+  discovery: discovery_file
+  perf_preset: fault_env
+  config_overrides:
+    ordering: priority
+    queue_timeout_ms: {omit: true}
+execution:
+  timeout_s: 360
+  stage_timeout_s: 30
+  cleanup_timeout_s: 120
+stages:
+- id: setup
+  action: setup
+  timeout_s: 180
+- id: crossfire
+  action: elastic_crossfire
+  timeout_s: 100
+- id: health
+  action: elastic_flow_assert
+  params:
+    result: {$ref: stages.crossfire.output.result}
+    min_success_rate: 0.5
+- id: discovery
+  action: elastic_discovery_consistency
+- id: teardown
+  action: teardown
