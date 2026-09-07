@@ -433,6 +433,49 @@ def metric(frame, name):
     return sum(_count(e[key]) for e in engines.values())
 
 
+def _debug_directory(capture, n_prefill, n_decode):
+    from ...debug_client import DebugUnavailable
+
+    payload = capture.payload
+    if payload["endpointDirectoryTruncated"]:
+        raise DebugUnavailable("required debug endpoint directory is truncated")
+    capture.component("scheduler")
+    capture.component("queues")
+    owners = {}
+    for role, count in (
+        ("prefill", n_prefill),
+        ("decode", n_decode),
+        ("engine", n_prefill + n_decode),
+    ):
+        pages = [
+            (key, capture.component(key))
+            for key in payload["components"]
+            if key.startswith(role + "/")
+        ]
+        if len(pages) != count:
+            raise DebugUnavailable(f"required {role} directory is incomplete")
+        mapped = {}
+        for key, page in pages:
+            metadata = page["metadata"]
+            endpoint, generation = metadata.get("endpoint"), metadata.get(
+                "endpoint_generation"
+            )
+            if (
+                not endpoint
+                or not generation
+                or key != f"{role}/{generation}"
+                or endpoint in mapped
+            ):
+                raise DebugUnavailable("invalid or duplicate debug owner identity")
+            mapped[endpoint] = generation
+        owners[role] = mapped
+    if set(owners["prefill"]) & set(owners["decode"]) or owners["engine"] != dict(
+        owners["prefill"], **owners["decode"]
+    ):
+        raise DebugUnavailable("debug owner and engine directories do not match")
+    return owners
+
+
 def _frame(ctx, params, deadline):
     frame = {"at": ctx.clock(), "env_epoch": ctx.env_epoch}
     if "requests" in params:
@@ -456,6 +499,19 @@ def _frame(ctx, params, deadline):
                 raise DebugUnavailable(
                     f"incomplete required debug source; evidence={artifact}"
                 )
+            directory = _debug_directory(
+                capture,
+                ctx.instance["environment"]["n_prefill"],
+                ctx.instance["environment"]["n_decode"],
+            )
+            prior_directory = getattr(
+                ctx, "status_debug_directory", (ctx.env_epoch, directory)
+            )
+            if prior_directory[0] == ctx.env_epoch and prior_directory[1] != directory:
+                raise DebugUnavailable(
+                    "debug endpoint generation changed during the experiment"
+                )
+            ctx.status_debug_directory = (ctx.env_epoch, directory)
             for component in capture.payload["components"]:
                 capture.component(component)
             identity = (ctx.env_epoch, capture.payload["instanceId"])
