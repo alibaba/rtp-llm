@@ -21,6 +21,18 @@ CATEGORIES = {
     "admission",
     "priority",
 }
+
+
+def plan_counts(plans):
+    """Counts describe the selected declaration set, never successful execution."""
+    return {
+        "logical_scenarios": len({p["scenario_id"] for p in plans}),
+        "variants": len({(p["scenario_id"], p["variant_id"]) for p in plans}),
+        "instances": len(plans),
+        "checks": sum(len(s["check_ids"]) for p in plans for s in p["stages"]),
+    }
+
+
 ID = re.compile(r"[a-z][a-z0-9_]*\Z")
 # A deliberately bounded first compilation vocabulary. Other actions require an
 # adapter and result contract before their names can be accepted by compilation.
@@ -104,6 +116,8 @@ def environment(value, path, profile):
             "discovery",
             "perf_preset",
             "debug_enabled",
+            "master_layout",
+            "master_stable_window_s",
         },
     )
     if value.get("backend", "java_mock") != "java_mock":
@@ -115,6 +129,7 @@ def environment(value, path, profile):
     for key, default, allowed in (
         ("discovery", "file", ("file", "discovery_file")),
         ("perf_preset", "default", ("default", "fault_env")),
+        ("master_layout", "single", ("single", "dual_standalone")),
     ):
         val = value.get(key, default)
         if val not in allowed:
@@ -123,6 +138,9 @@ def environment(value, path, profile):
     if type(value.get("debug_enabled", False)) is not bool:
         fail(path + ".debug_enabled", "expected boolean")
     result["debug_enabled"] = value.get("debug_enabled", False)
+    result["master_stable_window_s"] = number(
+        value.get("master_stable_window_s", 3), path + ".master_stable_window_s"
+    )
     for key in ("n_prefill", "n_decode", "prefill_cache_blocks", "decode_cache_blocks"):
         if key in value:
             result[key] = number(value[key], path + "." + key, minimum=1, integer=True)
@@ -170,7 +188,7 @@ def reference(value, path, outputs, expected=None):
     return kind
 
 
-def stages(values, path, default_timeout, handlers):
+def stages(values, path, default_timeout, handlers, env=None, profiles=()):
     if not isinstance(values, list) or not values:
         fail(path, "expected nonempty stage list")
     outputs, compiled = {}, []
@@ -199,7 +217,13 @@ def stages(values, path, default_timeout, handlers):
         if action in handlers:
             descriptor = handlers[action]
             params = descriptor.validate(
-                params, PlanContext(loc + ".params", dict(outputs))
+                params,
+                PlanContext(
+                    loc + ".params",
+                    dict(outputs),
+                    copy.deepcopy(env or {}),
+                    tuple(profiles),
+                ),
             )
             if not isinstance(params, dict):
                 fail(loc, "adapter validate must return a mapping")
@@ -284,7 +308,6 @@ def compile_scenarios(documents, profile=None, handlers=None):
                 "description",
                 "category",
                 "environment",
-                "stages",
             },
         )
         if type(doc["schema_version"]) is not int or doc["schema_version"] != 1:
@@ -345,7 +368,17 @@ def compile_scenarios(documents, profile=None, handlers=None):
             mapping(
                 variant,
                 loc,
-                {"id", "profiles", "environment_overrides", "stage_overrides"},
+                {
+                    "id",
+                    "profiles",
+                    "environment_overrides",
+                    "stage_overrides",
+                    "stages",
+                    "execution",
+                    "requires",
+                    "findings",
+                    "legacy_case_ids",
+                },
                 {"id"},
             )
             vid = identifier(variant["id"], loc + ".id")
@@ -357,6 +390,23 @@ def compile_scenarios(documents, profile=None, handlers=None):
             )
             if not selected:
                 fail(loc + ".profiles", "must not be empty")
+            variant_budgets = dict(budgets)
+            for key, value in mapping(
+                variant.get("execution", {}), loc + ".execution", set(budgets)
+            ).items():
+                variant_budgets[key] = number(
+                    value, loc + ".execution." + key, minimum=0.001
+                )
+            variant_requires = set(requires) | set(
+                names(
+                    variant.get("requires", []),
+                    loc + ".requires",
+                    set().union(*PROFILE_CAPS.values()),
+                )
+            )
+            variant_legacy = names(
+                variant.get("legacy_case_ids", legacy), loc + ".legacy_case_ids", legacy
+            )
             env = copy.deepcopy(doc["environment"])
             if not isinstance(env, dict):
                 fail(source + ".environment", "expected mapping")
@@ -369,6 +419,11 @@ def compile_scenarios(documents, profile=None, handlers=None):
                     "prefill_cache_blocks",
                     "decode_cache_blocks",
                     "config_overrides",
+                    "discovery",
+                    "perf_preset",
+                    "debug_enabled",
+                    "master_layout",
+                    "master_stable_window_s",
                 },
             )
             for key, value in patch.items():
@@ -380,7 +435,12 @@ def compile_scenarios(documents, profile=None, handlers=None):
                     env[key] = {**env.get(key, {}), **copy.deepcopy(value)}
                 else:
                     env[key] = copy.deepcopy(value)
-            steps = copy.deepcopy(doc["stages"])
+            if "stages" in variant and "stage_overrides" in variant:
+                fail(
+                    loc,
+                    "explicit variant stages and stage_overrides are mutually exclusive",
+                )
+            steps = copy.deepcopy(variant.get("stages", doc.get("stages")))
             if not isinstance(steps, list):
                 fail(source + ".stages", "expected stage list")
             patches = mapping(
@@ -405,10 +465,15 @@ def compile_scenarios(documents, profile=None, handlers=None):
                         fail(loc, "stage overrides replace named params only")
                     step["params"] = {**step.get("params", {}), **copy.deepcopy(patch)}
             compiled = stages(
-                steps, source + f"::{vid}.stages", budgets["stage_timeout_s"], handlers
+                steps,
+                source + f"::{vid}.stages",
+                variant_budgets["stage_timeout_s"],
+                handlers,
+                env,
+                selected,
             )
             check_ids = set()
-            action_requires = set(requires)
+            action_requires = set(variant_requires)
             additions = 0
             for stage in compiled:
                 action = stage["action"]
@@ -432,7 +497,7 @@ def compile_scenarios(documents, profile=None, handlers=None):
             if not check_ids:
                 fail(source + f"::{vid}", "scenario must declare at least one check")
             findings = names(
-                doc.get("findings", []),
+                variant.get("findings", doc.get("findings", [])),
                 source + ".findings",
                 check_ids,
             )
@@ -477,7 +542,7 @@ def compile_scenarios(documents, profile=None, handlers=None):
                         "source": "yaml",
                         "source_path": source,
                         "tags": list(tags),
-                        "legacy_case_ids": list(legacy),
+                        "legacy_case_ids": list(variant_legacy),
                         "estimated_duration_s": estimate,
                         "resource_budget": {
                             "backend": "java_mock",
@@ -491,7 +556,7 @@ def compile_scenarios(documents, profile=None, handlers=None):
                             "reserved_tail_offset": 151,
                         },
                         "environment": resolved,
-                        "execution": dict(budgets),
+                        "execution": dict(variant_budgets),
                         "stages": copy.deepcopy(compiled),
                         "findings": list(findings),
                     }

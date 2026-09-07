@@ -349,28 +349,93 @@ class RequestBatch(ClientRecords):
         return issued
 
 
+def make_env_spec(plan, profile, lease):
+    """Controlled environment rendering; no JVM is started by this function."""
+    from flexlb_cfg import OMIT, ConfigOverride
+    from flexlb_ft.harness import EnvSpec, MasterSpec, default_perf, fault_env_perf
+
+    kwargs = {
+        k: OMIT if isinstance(v, dict) else v
+        for k, v in plan["config_overrides"].items()
+    }
+    spec = EnvSpec(
+        label="scenario",
+        n_prefill=plan["n_prefill"],
+        n_decode=plan["n_decode"],
+        master_profile=profile,
+        config_overrides=ConfigOverride(**kwargs),
+        discovery=plan["discovery"],
+        master_stable_window_s=plan.get("master_stable_window_s", 3),
+        masters=(
+            [
+                MasterSpec(name="A", http_port=lease["master_base"]),
+                MasterSpec(name="B", http_port=lease["master_base"] + 3),
+            ]
+            if plan.get("master_layout", "single") == "dual_standalone"
+            else []
+        ),
+        perf=(
+            fault_env_perf() if plan["perf_preset"] == "fault_env" else default_perf()
+        ),
+        master_env=({"FLEXLB_DEBUG_ENABLED": "true"} if plan["debug_enabled"] else {}),
+    )
+    for key in ("prefill_cache_blocks", "decode_cache_blocks"):
+        if key in plan:
+            setattr(spec, key, plan[key])
+    return spec
+
+
 class JavaMockBackend:
     def __init__(self, lease):
         self.lease = lease
         self.manager = self.raw_ops = None
         self.environments = []
+        self.owned_processes = {}
+
+    def remember_processes(self, env):
+        for mp in [
+            env.mock,
+            env.master,
+            env.zk_helper,
+            *env.masters.values(),
+            *env.victims.values(),
+            *env.load_clients,
+        ]:
+            if mp is not None:
+                self.owned_processes[mp.pid] = mp
 
     def setup(self, ctx, plan, deadline):
         if ":" in str(ctx.artifact_dir.resolve()):
             raise ValueError(
                 "Java mock artifact path contains the JVM -Xlog colon delimiter"
             )
-        from flexlb_cfg import OMIT, ConfigOverride
         from flexlb_ft.context import CaseContext
         from flexlb_ft.engine_ops import EngineOps
-        from flexlb_ft.harness import EnvManager, EnvSpec, default_perf, fault_env_perf
+        from flexlb_ft.harness import EnvManager
 
         owner = self
 
         class OwnedManager(EnvManager):
             def _start_mock(self, env):
                 owner.environments.append(env)
-                return super()._start_mock(env)
+                try:
+                    return super()._start_mock(env)
+                finally:
+                    owner.remember_processes(env)
+
+            def start_master(self, env, *args, **kwargs):
+                owner.remember_processes(env)
+                try:
+                    return super().start_master(env, *args, **kwargs)
+                finally:
+                    owner.remember_processes(env)
+
+            def start_master_instance(self, env, *args, **kwargs):
+                owner.remember_processes(env)
+                try:
+                    return super().start_master_instance(env, *args, **kwargs)
+                finally:
+                    owner.remember_processes(env)
 
             def _stop_env_processes(self, env):
                 # The executor registered cleanup before setup. Retain partial
@@ -378,29 +443,7 @@ class JavaMockBackend:
                 if env not in owner.environments:
                     owner.environments.append(env)
 
-        kwargs = {
-            k: OMIT if isinstance(v, dict) else v
-            for k, v in plan["config_overrides"].items()
-        }
-        spec = EnvSpec(
-            label="scenario",
-            n_prefill=plan["n_prefill"],
-            n_decode=plan["n_decode"],
-            master_profile=ctx.instance["profile"],
-            config_overrides=ConfigOverride(**kwargs),
-            discovery=plan["discovery"],
-            perf=(
-                fault_env_perf()
-                if plan["perf_preset"] == "fault_env"
-                else default_perf()
-            ),
-            master_env=(
-                {"FLEXLB_DEBUG_ENABLED": "true"} if plan["debug_enabled"] else {}
-            ),
-        )
-        for key in ("prefill_cache_blocks", "decode_cache_blocks"):
-            if key in plan:
-                setattr(spec, key, plan[key])
+        spec = make_env_spec(plan, ctx.instance["profile"], self.lease)
         self.manager = OwnedManager(ctx.artifact_dir / "environment")
         env = self.manager.ensure(spec)
         deadline.check()
@@ -444,9 +487,11 @@ class JavaMockBackend:
         return requests.cancel_server(deadline)
 
     def teardown(self, ctx, deadline):
+        if ctx.case_context is not None:
+            ctx.case_context.close()
         if self.raw_ops is not None:
             self.raw_ops.close()
-        processes = []
+        processes = list(self.owned_processes.values())
         for env in self.environments:
             processes.extend(env.load_clients)
             processes.extend(env.victims.values())

@@ -6,6 +6,7 @@ import sys
 
 from . import ScenarioError, compile_scenarios, load_scenarios
 from .catalog import handlers
+from .compiler import plan_counts
 
 
 def main(argv=None):
@@ -24,7 +25,12 @@ def main(argv=None):
         return 2
     print(
         json.dumps(
-            {"schema_version": 1, "mode": "compile", "instances": plans},
+            {
+                "schema_version": 1,
+                "mode": "compile",
+                "counts": plan_counts(plans),
+                "instances": plans,
+            },
             indent=2,
             ensure_ascii=False,
         )
