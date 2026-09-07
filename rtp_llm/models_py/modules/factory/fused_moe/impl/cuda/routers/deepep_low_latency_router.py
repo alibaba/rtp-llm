@@ -71,10 +71,14 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
 
         # DeepEpLowLatency-specific initialization
         self._num_experts = config.expert_num
+        # DeepEP owns one process-wide buffer. Size it with the physical TP
+        # topology used by init_deepep_wrapper rather than the logical
+        # attention TP view, which becomes one under CP.
+        physical_tp_size = config.parallelism_config.tp_size
         self._ll_num_max_token_per_rank = (
             DeepepWrapperConfig.calc_model_low_latency_max_token_per_rank(
                 config.ll_num_max_token,
-                config.tp_size,
+                physical_tp_size,
                 config.model_config.quant_config,
             )
         )
