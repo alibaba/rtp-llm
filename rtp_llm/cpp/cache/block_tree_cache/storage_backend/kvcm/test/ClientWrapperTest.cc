@@ -12,6 +12,7 @@
 
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/ClientWrapper.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/test/MockKVCMClient.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/test/BoundedThreadTestUtils.h"
 
 namespace rtp_llm::kvcm {
 namespace {
@@ -383,6 +384,112 @@ TEST(ClientWrapperTest, RecreatesMetadataClientWhenVipAddressChanges) {
     wrapper.shutdown();
     EXPECT_EQ(*destruction_count, 1);
 }
+
+class MetadataClientLifetimeTest: public ::testing::TestWithParam<std::string> {};
+
+TEST_P(MetadataClientLifetimeTest, VipRefreshRetainsInFlightClient) {
+    using block_tree_cache_test::BoundedThread;
+    class TrackedMetaClient: public kv_cache_manager::MockMetaClient {
+    public:
+        explicit TrackedMetaClient(std::shared_ptr<std::atomic<int>> destroyed): destroyed_(std::move(destroyed)) {}
+        ~TrackedMetaClient() override {
+            destroyed_->fetch_add(1);
+        }
+
+    private:
+        std::shared_ptr<std::atomic<int>> destroyed_;
+    };
+
+    auto               destroyed  = std::make_shared<std::atomic<int>>(0);
+    auto               old_client = std::make_unique<TrackedMetaClient>(destroyed);
+    auto               new_client = std::make_unique<kv_cache_manager::MockMetaClient>();
+    auto               factory    = std::make_unique<MockClientFactory>();
+    auto               subscriber = std::make_unique<MockSubscriber>();
+    auto               refresh    = std::make_shared<std::atomic<bool>>(false);
+    auto               entered    = std::make_shared<std::promise<void>>();
+    auto               ready      = entered->get_future();
+    std::promise<void> release;
+    auto               released = release.get_future().share();
+    auto               hold     = [entered, released] {
+        entered->set_value();
+        released.wait();
+    };
+    static const std::string storage_config = R"({"sdk_backend_configs":[]})";
+    EXPECT_CALL(*old_client, GetStorageConfig()).WillOnce(ReturnRef(storage_config));
+    if (GetParam() == "match") {
+        EXPECT_CALL(*old_client, MatchLocation(_, _, _, _, _, _, _)).WillOnce(Invoke([hold](const auto&...) {
+            hold();
+            return std::make_pair(kv_cache_manager::ClientErrorCode::ER_OK, kv_cache_manager::Locations{});
+        }));
+    } else if (GetParam() == "start_write") {
+        EXPECT_CALL(*old_client, StartWrite(_, _, _, _, _)).WillOnce(Invoke([hold](const auto&...) {
+            hold();
+            return std::make_pair(kv_cache_manager::ClientErrorCode::ER_OK, kv_cache_manager::WriteLocation{});
+        }));
+    } else {
+        EXPECT_CALL(*old_client, FinishWrite(_, _, _, _)).WillOnce(Invoke([hold](const auto&...) {
+            hold();
+            return kv_cache_manager::ClientErrorCode::ER_OK;
+        }));
+    }
+    EXPECT_CALL(*new_client, FinishWrite(_, _, _, _)).WillOnce(Return(kv_cache_manager::ClientErrorCode::ER_OK));
+    EXPECT_CALL(*subscriber, init(std::vector<std::string>{"vip"})).WillOnce(Return(true));
+    EXPECT_CALL(*subscriber, getAddresses(_)).WillRepeatedly(Invoke([refresh](auto& addresses) {
+        addresses = {refresh->load() ? "new_address" : "old_address"};
+        return true;
+    }));
+    EXPECT_CALL(*factory, createSubscriber(true)).WillOnce(Invoke([&subscriber](bool) {
+        return std::move(subscriber);
+    }));
+    EXPECT_CALL(*factory, createMetaClient(_, _))
+        .WillOnce(Invoke([&old_client](const auto&, const auto&) { return std::move(old_client); }))
+        .WillOnce(Invoke([&new_client](const auto&, const auto&) { return std::move(new_client); }));
+    EXPECT_CALL(*factory, createTransferClient(_, _)).WillOnce(Invoke([](const auto&, const auto&) {
+        return std::make_unique<kv_cache_manager::MockTransferClient>(std::make_shared<int>(0));
+    }));
+    auto wrapper = std::make_shared<ClientWrapper>(std::move(factory));
+    ASSERT_TRUE(
+        wrapper->init({{"", makeConfig(true, "vip")}}, {kv_cache_manager::RoleType::HYBRID, nullptr, "tp0_Ffull"}));
+    BoundedThread<bool> call([wrapper, operation = GetParam()] {
+        if (operation == "match") {
+            return wrapper
+                ->match("",
+                        "match",
+                        kv_cache_manager::QueryType::QT_PREFIX_MATCH,
+                        {1},
+                        kv_cache_manager::BlockMaskOffset{0},
+                        {})
+                .first;
+        }
+        if (operation == "start_write") {
+            return wrapper->getWriteLocation("", "start", {1}, {}, {}, 10).first;
+        }
+        return wrapper->finishWrite("", "finish", "session", {}, {});
+    });
+    const auto          status = ready.wait_for(std::chrono::seconds(5));
+    if (status != std::future_status::ready) {
+        release.set_value();
+        FAIL() << "metadata RPC did not enter the old client";
+    }
+    refresh->store(true);
+    BoundedThread<bool> refreshed([wrapper] { return wrapper->finishWrite("", "refresh", "session", {}, {}); });
+    const auto          refreshed_status = refreshed.waitFor(std::chrono::seconds(5));
+    EXPECT_EQ(refreshed_status, std::future_status::ready);
+    EXPECT_EQ(destroyed->load(), 0) << "old client destroyed while the RPC was still executing";
+    release.set_value();
+    ASSERT_EQ(refreshed.waitFor(std::chrono::seconds(5)), std::future_status::ready);
+    EXPECT_TRUE(refreshed.get());
+    ASSERT_EQ(call.waitFor(std::chrono::seconds(5)), std::future_status::ready);
+    EXPECT_TRUE(call.get());
+    EXPECT_EQ(destroyed->load(), 1);
+    wrapper->shutdown();
+    EXPECT_FALSE(wrapper->finishWrite("", "stopped", "session", {}, {}));
+}
+
+INSTANTIATE_TEST_SUITE_P(MetadataCalls,
+                         MetadataClientLifetimeTest,
+                         ::testing::Values("match", "start_write", "finish_write"),
+                         [](const ::testing::TestParamInfo<std::string>& info) { return info.param; });
 
 TEST(ClientWrapperTest, VipRefreshFailureDoesNotCallStaleMetadataClient) {
     auto  factory           = std::make_unique<MockClientFactory>();

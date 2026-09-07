@@ -332,7 +332,9 @@ def init_kv_cache_group_args(parser, kv_cache_config):
     # KVCM storage backend configuration arguments
     kv_cache_group.add_argument(
         "--kvcm_enable_vipserver",
+        "--reco_enable_vipserver",
         env_name="KVCM_ENABLE_VIPSERVER",
+        env_aliases=("RECO_ENABLE_VIPSERVER",),
         bind_to=(kv_cache_config, "kvcm_enable_vipserver"),
         type=str2bool,
         default=False,
@@ -340,7 +342,9 @@ def init_kv_cache_group_args(parser, kv_cache_config):
     )
     kv_cache_group.add_argument(
         "--kvcm_vipserver_domain",
+        "--reco_vipserver_domain",
         env_name="KVCM_VIPSERVER_DOMAIN",
+        env_aliases=("RECO_VIPSERVER_DOMAIN",),
         bind_to=(kv_cache_config, "kvcm_vipserver_domain"),
         type=str,
         default="",
@@ -348,7 +352,9 @@ def init_kv_cache_group_args(parser, kv_cache_config):
     )
     kv_cache_group.add_argument(
         "--kvcm_server_address",
+        "--reco_server_address",
         env_name="KVCM_SERVER_ADDRESS",
+        env_aliases=("RECO_SERVER_ADDRESS",),
         bind_to=(kv_cache_config, "kvcm_server_address"),
         type=str,
         default="",
@@ -356,7 +362,9 @@ def init_kv_cache_group_args(parser, kv_cache_config):
     )
     kv_cache_group.add_argument(
         "--kvcm_instance_group",
+        "--reco_instance_group",
         env_name="KVCM_INSTANCE_GROUP",
+        env_aliases=("RECO_INSTANCE_GROUP",),
         bind_to=(kv_cache_config, "kvcm_instance_group"),
         type=str,
         default="default",
@@ -364,7 +372,9 @@ def init_kv_cache_group_args(parser, kv_cache_config):
     )
     kv_cache_group.add_argument(
         "--kvcm_meta_channel_retry_time",
+        "--reco_meta_channel_retry_time",
         env_name="KVCM_META_CHANNEL_RETRY_TIME",
+        env_aliases=("RECO_META_CHANNEL_RETRY_TIME",),
         bind_to=(kv_cache_config, "kvcm_meta_channel_retry_time"),
         type=int,
         default=3,
@@ -372,7 +382,9 @@ def init_kv_cache_group_args(parser, kv_cache_config):
     )
     kv_cache_group.add_argument(
         "--kvcm_meta_channel_connection_timeout",
+        "--reco_meta_channel_connection_timeout",
         env_name="KVCM_META_CHANNEL_CONNECTION_TIMEOUT",
+        env_aliases=("RECO_META_CHANNEL_CONNECTION_TIMEOUT",),
         bind_to=(kv_cache_config, "kvcm_meta_channel_connection_timeout"),
         type=int,
         default=6000,
@@ -380,7 +392,9 @@ def init_kv_cache_group_args(parser, kv_cache_config):
     )
     kv_cache_group.add_argument(
         "--kvcm_meta_channel_call_timeout",
+        "--reco_meta_channel_call_timeout",
         env_name="KVCM_META_CHANNEL_CALL_TIMEOUT",
+        env_aliases=("RECO_META_CHANNEL_CALL_TIMEOUT",),
         bind_to=(kv_cache_config, "kvcm_meta_channel_call_timeout"),
         type=int,
         default=1500,
@@ -388,7 +402,9 @@ def init_kv_cache_group_args(parser, kv_cache_config):
     )
     kv_cache_group.add_argument(
         "--kvcm_storage_thread_num",
+        "--reco_storage_thread_num",
         env_name="KVCM_STORAGE_THREAD_NUM",
+        env_aliases=("RECO_STORAGE_THREAD_NUM",),
         bind_to=(kv_cache_config, "kvcm_storage_thread_num"),
         type=int,
         default=4,
@@ -396,7 +412,9 @@ def init_kv_cache_group_args(parser, kv_cache_config):
     )
     kv_cache_group.add_argument(
         "--kvcm_storage_queue_size",
+        "--reco_storage_queue_size",
         env_name="KVCM_STORAGE_QUEUE_SIZE",
+        env_aliases=("RECO_STORAGE_QUEUE_SIZE",),
         bind_to=(kv_cache_config, "kvcm_storage_queue_size"),
         type=int,
         default=2000,
@@ -404,7 +422,9 @@ def init_kv_cache_group_args(parser, kv_cache_config):
     )
     kv_cache_group.add_argument(
         "--kvcm_put_timeout_ms",
+        "--reco_put_timeout_ms",
         env_name="KVCM_PUT_TIMEOUT_MS",
+        env_aliases=("RECO_PUT_TIMEOUT_MS",),
         bind_to=(kv_cache_config, "kvcm_put_timeout_ms"),
         type=int,
         default=12000,
@@ -412,7 +432,9 @@ def init_kv_cache_group_args(parser, kv_cache_config):
     )
     kv_cache_group.add_argument(
         "--kvcm_get_timeout_ms",
+        "--reco_get_timeout_ms",
         env_name="KVCM_GET_TIMEOUT_MS",
+        env_aliases=("RECO_GET_TIMEOUT_MS",),
         bind_to=(kv_cache_config, "kvcm_get_timeout_ms"),
         type=int,
         default=12000,
@@ -420,7 +442,9 @@ def init_kv_cache_group_args(parser, kv_cache_config):
     )
     kv_cache_group.add_argument(
         "--kvcm_model_sdk_config",
+        "--reco_model_sdk_config",
         env_name="KVCM_MODEL_SDK_CONFIG",
+        env_aliases=("RECO_MODEL_SDK_CONFIG",),
         bind_to=(kv_cache_config, "kvcm_model_sdk_config"),
         type=str,
         default='[{"type":"local","sdk_log_level":"DEBUG"}]',
@@ -428,7 +452,9 @@ def init_kv_cache_group_args(parser, kv_cache_config):
     )
     kv_cache_group.add_argument(
         "--kvcm_model_user_data",
+        "--reco_model_user_data",
         env_name="KVCM_MODEL_USER_DATA",
+        env_aliases=("RECO_MODEL_USER_DATA",),
         bind_to=(kv_cache_config, "kvcm_model_user_data"),
         type=str,
         default="",
@@ -436,7 +462,9 @@ def init_kv_cache_group_args(parser, kv_cache_config):
     )
     kv_cache_group.add_argument(
         "--kvcm_model_extra_info",
+        "--reco_model_extra_info",
         env_name="KVCM_MODEL_EXTRA_INFO",
+        env_aliases=("RECO_MODEL_EXTRA_INFO",),
         bind_to=(kv_cache_config, "kvcm_model_extra_info"),
         type=str,
         default="",
@@ -444,7 +472,9 @@ def init_kv_cache_group_args(parser, kv_cache_config):
     )
     kv_cache_group.add_argument(
         "--kvcm_instance_id_salt",
+        "--reco_instance_id_salt",
         env_name="KVCM_INSTANCE_ID_SALT",
+        env_aliases=("RECO_INSTANCE_ID_SALT",),
         bind_to=(kv_cache_config, "kvcm_instance_id_salt"),
         type=str,
         default="",
@@ -452,7 +482,9 @@ def init_kv_cache_group_args(parser, kv_cache_config):
     )
     kv_cache_group.add_argument(
         "--kvcm_asyncwrapper_thread_num",
+        "--reco_asyncwrapper_thread_num",
         env_name="KVCM_ASYNCWRAPPER_THREAD_NUM",
+        env_aliases=("RECO_ASYNCWRAPPER_THREAD_NUM",),
         bind_to=(kv_cache_config, "kvcm_asyncwrapper_thread_num"),
         type=int,
         default=16,
@@ -460,7 +492,9 @@ def init_kv_cache_group_args(parser, kv_cache_config):
     )
     kv_cache_group.add_argument(
         "--kvcm_asyncwrapper_queue_size",
+        "--reco_asyncwrapper_queue_size",
         env_name="KVCM_ASYNCWRAPPER_QUEUE_SIZE",
+        env_aliases=("RECO_ASYNCWRAPPER_QUEUE_SIZE",),
         bind_to=(kv_cache_config, "kvcm_asyncwrapper_queue_size"),
         type=int,
         default=1000,
@@ -468,7 +502,9 @@ def init_kv_cache_group_args(parser, kv_cache_config):
     )
     kv_cache_group.add_argument(
         "--kvcm_get_broadcast_timeout",
+        "--reco_get_broadcast_timeout",
         env_name="KVCM_GET_BROADCAST_TIMEOUT",
+        env_aliases=("RECO_GET_BROADCAST_TIMEOUT",),
         bind_to=(kv_cache_config, "kvcm_get_broadcast_timeout"),
         type=int,
         default=15000,
@@ -476,7 +512,9 @@ def init_kv_cache_group_args(parser, kv_cache_config):
     )
     kv_cache_group.add_argument(
         "--kvcm_put_broadcast_timeout",
+        "--reco_put_broadcast_timeout",
         env_name="KVCM_PUT_BROADCAST_TIMEOUT",
+        env_aliases=("RECO_PUT_BROADCAST_TIMEOUT",),
         bind_to=(kv_cache_config, "kvcm_put_broadcast_timeout"),
         type=int,
         default=15000,
@@ -484,7 +522,9 @@ def init_kv_cache_group_args(parser, kv_cache_config):
     )
     kv_cache_group.add_argument(
         "--kvcm_client_config",
+        "--reco_client_config",
         env_name="KVCM_CLIENT_CONFIG",
+        env_aliases=("RECO_CLIENT_CONFIG",),
         bind_to=(kv_cache_config, "kvcm_client_config"),
         type=str,
         default="",
