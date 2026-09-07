@@ -1288,10 +1288,10 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 changed = true;
             }
         }
+        // Plain WorkerStatus FINISHED is ordered by calibration. Retain TTL
+        // state only when an ambiguity owner must fence delayed status.
         if (!decodeRequests.containsKey(requestId)
-                && ((proof.owner == AuthoritativeTerminalOwner.WORKER_STATUS
-                        && exactState)
-                    || proof.owner == AuthoritativeTerminalOwner.ENGINE_FENCE
+                && (proof.owner == AuthoritativeTerminalOwner.ENGINE_FENCE
                     || proof.owner
                         == AuthoritativeTerminalOwner.DISPATCH_REJECTION
                     || exactProtection)) {
@@ -2547,6 +2547,8 @@ public class DecodeEndpoint extends WorkerEndpoint {
         for (WorkerStatus.TaskObservation task
                 : finishedTasks.values()) {
             String requestId = task.requestId();
+            boolean conflictingActive =
+                    engine.runningTaskList().containsKey(requestId);
             DecodeRequestState current = requestState(requestId);
             if (current != null && current.settledAtMs != 0L) {
                 continue;
@@ -2583,6 +2585,13 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 settleAuthoritativeTerminalLocked(proof, now);
             } else {
                 settleUntrackedWorkerTerminalLocked(requestId);
+            }
+            // A single WorkerStatus response cannot truthfully make the same
+            // request both terminal and active. The terminal wins this round;
+            // retain a short fence so the conflicting ACTIVE cannot reappear
+            // as an untracked engine request after its completion cursor moves.
+            if (conflictingActive && !decodeRequests.containsKey(requestId)) {
+                rememberSettledLocked(requestId, now);
             }
         }
 

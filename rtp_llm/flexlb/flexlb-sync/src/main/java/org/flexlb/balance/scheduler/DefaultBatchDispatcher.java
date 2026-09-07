@@ -7,6 +7,7 @@ import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.util.NamedThreadFactory;
 import org.flexlb.balance.delivery.CapacityBoundary;
+import org.flexlb.balance.delivery.DeliveryRejection;
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.projection.RouteProjection;
@@ -29,6 +30,7 @@ import javax.annotation.PreDestroy;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -59,6 +61,8 @@ public class DefaultBatchDispatcher {
 
     private static final String METRIC_PREFIX = "flexlb.";
     private static final long EXECUTOR_KEEP_ALIVE_SECONDS = 60L;
+    private static final long ACK_RETRY_INITIAL_DELAY_MS = 50L;
+    private static final long ACK_RETRY_MAX_DELAY_MS = 500L;
     private static final RouteProjection.AdmissionBlockSemantics
             CAPACITY_BLOCK_SEMANTICS =
             new RouteProjection.AdmissionBlockSemantics(
@@ -366,7 +370,10 @@ public class DefaultBatchDispatcher {
         } catch (Throwable unexpectedFailure) {
             Logger.error("Unexpected dispatch failure batch_id={} rpc_invocation_started={}",
                     task.batchId(), attempt.rpcInvocationStarted, unexpectedFailure);
-            if (attempt.rpcInvocationStarted) {
+            if (attempt.completion != null) {
+                attempt.completion.completeAll(
+                        task.items(), DeliveryResult.uncertain(unexpectedFailure));
+            } else if (attempt.rpcInvocationStarted) {
                 // Once invocation starts, cleanup is unsafe even if the
                 // exception escaped an otherwise defensive post-send path.
                 markUncertain(task.items(), task.batchId(),
@@ -440,49 +447,72 @@ public class DefaultBatchDispatcher {
         // Increment while this dispatch still owns its admission permit. That
         // prevents shutdown from observing both zero pending completions and
         // all permits returned before the completion observer is registered.
+        DispatchCompletion completion = new DispatchCompletion(task);
         pendingCompletions.incrementAndGet();
+        attempt.completion = completion;
+        observeRpc(
+                completion,
+                items,
+                rpcFuture,
+                0,
+                prefillIp,
+                prefillGrpcPort);
+    }
+
+    private void observeRpc(
+            DispatchCompletion completion,
+            List<ScheduledRequest> items,
+            CompletableFuture<EngineRpcService.EnqueueBatchResponsePB> rpcFuture,
+            int retryAttempt,
+            String prefillIp,
+            int prefillGrpcPort) {
         try {
-            CompletableFuture<Void> completionObserver = rpcFuture.handleAsync(
-                    (response, ex) -> {
-                        try {
-                            if (ex != null) {
-                                Throwable cause = unwrapCompletionFailure(ex);
-                                Logger.debug("EnqueueBatch failed batchId: {}, entrypoint: {}:{}, err: {}",
-                                        batchId, prefillIp, prefillGrpcPort, cause.getMessage());
-                                // Once the asynchronous RPC is invoked, no
-                                // transport status proves the server did not
-                                // accept the request. Reconcile every transport
-                                // failure through the Engine-side request-id fence.
-                                markUncertain(items, batchId, cause, observer);
-                            } else if (response == null) {
-                                markUncertain(items, batchId, new RuntimeException(
-                                        "EnqueueBatch returned null response"), observer);
-                            } else {
-                                handleResponse(batchId, items, response, observer);
-                            }
-                        } catch (Throwable completionFailure) {
-                            // This callback is unconditionally post-invocation. Never
-                            // let an unexpected response-processing failure fall back
-                            // to definite failure/cleanup.
-                            markUncertain(items, batchId, completionFailure, observer);
-                        }
-                        return null;
-                    }, completionExecutor);
-            completionObserver.whenComplete((ignored, observerFailure) -> {
+            rpcFuture.handleAsync((response, failure) -> {
                 try {
-                    if (observerFailure != null) {
-                        markUncertain(items, batchId,
-                                unwrapCompletionFailure(observerFailure), observer);
+                    if (failure != null) {
+                        Throwable cause = unwrapCompletionFailure(failure);
+                        Logger.debug(
+                                "EnqueueBatch failed batchId: {}, entrypoint: {}:{}, err: {}",
+                                completion.task.batchId(),
+                                prefillIp,
+                                prefillGrpcPort,
+                                cause.getMessage());
+                        // A transport outcome cannot prove non-delivery, so it
+                        // is fenced and is never submitted again.
+                        completion.completeAll(
+                                items, DeliveryResult.uncertain(cause));
+                    } else if (response == null) {
+                        completion.completeAll(
+                                items,
+                                DeliveryResult.uncertain(new RuntimeException(
+                                        "EnqueueBatch returned null response")));
+                    } else {
+                        handleResponse(
+                                completion,
+                                items,
+                                response,
+                                retryAttempt);
                     }
-                } finally {
-                    finishCompletion();
+                } catch (Throwable completionFailure) {
+                    // This path is post-invocation. Complete only identities
+                    // which have not already received an exact callback.
+                    completion.completeAll(
+                            items,
+                            DeliveryResult.uncertain(completionFailure));
                 }
+                return null;
+            }, completionExecutor).exceptionally(observerFailure -> {
+                completion.completeAll(
+                        items,
+                        DeliveryResult.uncertain(
+                                unwrapCompletionFailure(observerFailure)));
+                return null;
             });
         } catch (Throwable registrationFailure) {
-            finishCompletion();
             // Callback registration is post-invocation. The RPC may already
             // be in flight even though no completion observer was installed.
-            markUncertain(items, batchId, registrationFailure, observer);
+            completion.completeAll(
+                    items, DeliveryResult.uncertain(registrationFailure));
         }
     }
 
@@ -540,15 +570,18 @@ public class DefaultBatchDispatcher {
 
     // ==================== Response parsing ====================
 
-    private void handleResponse(long batchId, List<ScheduledRequest> items,
-                                EngineRpcService.EnqueueBatchResponsePB response,
-                                BiConsumer<ScheduledRequest,
-                                        DeliveryResult> observer) {
+    private void handleResponse(
+            DispatchCompletion completion,
+            List<ScheduledRequest> items,
+            EngineRpcService.EnqueueBatchResponsePB response,
+            int retryAttempt) {
+        long batchId = completion.task.batchId();
         if (response.getBatchId() != batchId) {
             RuntimeException mismatch = new RuntimeException(
                     "EnqueueBatch batch_id mismatch: expected " + batchId
                             + " but got " + response.getBatchId());
-            markUncertain(items, batchId, mismatch, observer);
+            completion.completeAll(
+                    items, DeliveryResult.uncertain(mismatch));
             return;
         }
         Set<String> expectedIds = new HashSet<>();
@@ -597,54 +630,200 @@ public class DefaultBatchDispatcher {
             }
         }
         if (!protocolViolations.isEmpty()) {
-            markUncertain(
+            completion.completeAll(
                     items,
-                    batchId,
-                    new RuntimeException(
+                    DeliveryResult.uncertain(new RuntimeException(
                             "Malformed EnqueueBatch response: "
-                                    + String.join("; ", protocolViolations)),
-                    observer);
+                                    + String.join("; ", protocolViolations))));
             return;
         }
 
+        List<RetryMember> retryable = new ArrayList<>();
+        long nowMs = System.currentTimeMillis();
         for (ScheduledRequest item : items) {
-            try {
-                if (successIds.contains(item.requestId())) {
-                    observer.accept(
-                            item,
-                            DeliveryResult.delivered());
-                } else if (errorByRequestId.containsKey(item.requestId())) {
-                    EngineRpcService.EnqueueBatchErrorPB error = errorByRequestId.get(item.requestId());
-                    long errorCode = error.hasErrorInfo()
-                            ? error.getErrorInfo().getErrorCode()
-                            : 0L;
-                    String errorMessage = error.hasErrorInfo()
-                            ? error.getErrorInfo().getErrorMessage()
-                            : "missing error_info";
-                    observer.accept(
-                            item,
-                            DeliveryResult.failed(
-                                    new RuntimeException(
-                                            "EnqueueBatch rejected request "
-                                                    + item.requestId()
-                                                    + " error_code=" + errorCode
-                                                    + ": " + errorMessage)));
-                } else {
-                    observer.accept(
-                            item,
-                            DeliveryResult.uncertain(
-                                    new RuntimeException(
-                                            "EnqueueBatch missing ack for request "
-                                                    + item.requestId())));
-                }
-            } catch (Throwable callbackFailure) {
-                // The callback may already have committed this item's state
-                // before throwing. Never issue a second, contradictory
-                // callback for it, and never let it reclassify earlier items.
-                Logger.error("EnqueueBatch item callback failed request_id={} batch_id={}",
-                        item.requestId(), batchId, callbackFailure);
+            if (successIds.contains(item.requestId())) {
+                completion.complete(
+                        item, DeliveryResult.delivered());
+                continue;
+            }
+            EngineRpcService.EnqueueBatchErrorPB error =
+                    errorByRequestId.get(item.requestId());
+            long errorCode = error.hasErrorInfo()
+                    ? error.getErrorInfo().getErrorCode()
+                    : 0L;
+            String errorMessage = error.hasErrorInfo()
+                    ? error.getErrorInfo().getErrorMessage()
+                    : "missing error_info";
+            DeliveryRejection rejection = new DeliveryRejection(
+                    item.requestId(), errorCode, errorMessage);
+            if (!rejection.retryable()) {
+                completion.complete(
+                        item, DeliveryResult.failed(rejection));
+            } else if (item.requestExpired(nowMs)) {
+                completion.complete(
+                        item,
+                        DeliveryResult.retryDeadlineExceeded(rejection));
+            } else {
+                retryable.add(new RetryMember(item, rejection));
             }
         }
+        if (!retryable.isEmpty()) {
+            scheduleRetry(completion, retryable, retryAttempt + 1);
+        }
+    }
+
+    private void scheduleRetry(
+            DispatchCompletion completion,
+            List<RetryMember> members,
+            int retryAttempt) {
+        long nowMs = System.currentTimeMillis();
+        long earliestDeadlineMs = Long.MAX_VALUE;
+        for (RetryMember member : members) {
+            earliestDeadlineMs = Math.min(
+                    earliestDeadlineMs, member.item().expiresAtMs());
+        }
+        long remainingMs = Math.max(0L, earliestDeadlineMs - nowMs);
+        long delayMs = Math.min(
+                acknowledgementRetryDelayMs(retryAttempt), remainingMs);
+        Logger.debug(
+                "Scheduling explicit EnqueueBatch ACK retry batch_id={} retry_attempt={} member_count={} delay_ms={}",
+                completion.task.batchId(),
+                retryAttempt,
+                members.size(),
+                delayMs);
+        try {
+            CompletableFuture.runAsync(
+                    () -> invokeRetry(completion, members, retryAttempt),
+                    CompletableFuture.delayedExecutor(
+                            delayMs,
+                            TimeUnit.MILLISECONDS,
+                            completionExecutor))
+                    .exceptionally(schedulingFailure -> {
+                        completion.completeAll(
+                                retryItems(members),
+                                DeliveryResult.failed(unwrapCompletionFailure(
+                                        schedulingFailure)));
+                        return null;
+                    });
+        } catch (Throwable schedulingFailure) {
+            completion.completeAll(
+                    retryItems(members),
+                    DeliveryResult.failed(schedulingFailure));
+        }
+    }
+
+    private void invokeRetry(
+            DispatchCompletion completion,
+            List<RetryMember> members,
+            int retryAttempt) {
+        long nowMs = System.currentTimeMillis();
+        List<RetryMember> eligible = new ArrayList<>(members.size());
+        for (RetryMember member : members) {
+            if (!completion.isPending(member.item())) {
+                continue;
+            }
+            if (member.item().requestExpired(nowMs)) {
+                completion.complete(
+                        member.item(),
+                        DeliveryResult.retryDeadlineExceeded(
+                                member.rejection()));
+            } else {
+                eligible.add(member);
+            }
+        }
+        if (eligible.isEmpty()) {
+            return;
+        }
+
+        List<ScheduledRequest> items = retryItems(eligible);
+        EngineRpcService.EnqueueBatchRequestPB request;
+        try {
+            request = buildBatchRequest(
+                    completion.task.batchId(), items);
+        } catch (Throwable buildFailure) {
+            completion.completeAll(
+                    items, DeliveryResult.failed(buildFailure));
+            return;
+        }
+
+        PrefillEndpoint prefill = completion.task.prefillEndpoint();
+        String prefillIp;
+        int prefillGrpcPort;
+        long rpcTimeoutMs;
+        try {
+            prefillIp = prefill.getIp();
+            prefillGrpcPort = prefill.getGrpcPort();
+            rpcTimeoutMs = retryRpcTimeoutMs(items, nowMs);
+        } catch (Throwable preparationFailure) {
+            completion.completeAll(
+                    items, DeliveryResult.failed(preparationFailure));
+            return;
+        }
+
+        Logger.debug(
+                "Retrying explicit EnqueueBatch ACK rejections batch_id={} retry_attempt={} member_count={} request_ids={}",
+                completion.task.batchId(),
+                retryAttempt,
+                items.size(),
+                items.stream().map(ScheduledRequest::requestId).toList());
+        CompletableFuture<EngineRpcService.EnqueueBatchResponsePB> rpcFuture;
+        try {
+            long dispatchedNanos = System.nanoTime();
+            for (ScheduledRequest item : items) {
+                item.ctx().setBatchDispatchedNanos(dispatchedNanos);
+            }
+            rpcFuture = grpcClient.batchEnqueueAsync(
+                    prefillIp,
+                    prefillGrpcPort,
+                    request,
+                    rpcTimeoutMs);
+        } catch (Throwable invocationFailure) {
+            completion.completeAll(
+                    items, DeliveryResult.uncertain(invocationFailure));
+            return;
+        }
+        if (rpcFuture == null) {
+            completion.completeAll(
+                    items,
+                    DeliveryResult.uncertain(new RuntimeException(
+                            "EnqueueBatch retry returned null future after invocation")));
+            return;
+        }
+        observeRpc(
+                completion,
+                items,
+                rpcFuture,
+                retryAttempt,
+                prefillIp,
+                prefillGrpcPort);
+    }
+
+    private long retryRpcTimeoutMs(
+            List<ScheduledRequest> items,
+            long nowMs) {
+        long remainingMs = Long.MAX_VALUE;
+        for (ScheduledRequest item : items) {
+            remainingMs = Math.min(
+                    remainingMs,
+                    Math.max(1L, item.expiresAtMs() - nowMs));
+        }
+        return Math.max(
+                1L,
+                Math.min(
+                        activeBatchConfig().getEnqueueRpcTimeoutMs(),
+                        remainingMs));
+    }
+
+    private static long acknowledgementRetryDelayMs(int retryAttempt) {
+        int shift = Math.min(Math.max(0, retryAttempt - 1), 4);
+        return Math.min(
+                ACK_RETRY_MAX_DELAY_MS,
+                ACK_RETRY_INITIAL_DELAY_MS << shift);
+    }
+
+    private static List<ScheduledRequest> retryItems(
+            List<RetryMember> members) {
+        return members.stream().map(RetryMember::item).toList();
     }
 
     // ==================== gRPC request building ====================
@@ -822,8 +1001,75 @@ public class DefaultBatchDispatcher {
                 itemDetail);
     }
 
+    /** One logical delivery chain spanning the first RPC and all ACK retries. */
+    private final class DispatchCompletion {
+        private final DispatchTask task;
+        private final IdentityHashMap<ScheduledRequest, Boolean> pending =
+                new IdentityHashMap<>();
+        private boolean finished;
+
+        private DispatchCompletion(DispatchTask task) {
+            this.task = task;
+            for (ScheduledRequest item : task.items()) {
+                if (pending.put(item, Boolean.TRUE) != null) {
+                    throw new IllegalArgumentException(
+                            "duplicate batch delivery identity");
+                }
+            }
+        }
+
+        private boolean isPending(ScheduledRequest item) {
+            synchronized (this) {
+                return pending.containsKey(item);
+            }
+        }
+
+        private void completeAll(
+                List<ScheduledRequest> items,
+                DeliveryResult result) {
+            for (ScheduledRequest item : items) {
+                complete(item, result);
+            }
+        }
+
+        private void complete(
+                ScheduledRequest item,
+                DeliveryResult result) {
+            boolean finishAfterCallback;
+            synchronized (this) {
+                if (finished || pending.remove(item) == null) {
+                    return;
+                }
+                finishAfterCallback = pending.isEmpty();
+                if (finishAfterCallback) {
+                    finished = true;
+                }
+            }
+            try {
+                task.observer().accept(item, result);
+            } catch (Throwable callbackFailure) {
+                Logger.error(
+                        "EnqueueBatch item callback failed request_id={} batch_id={} status={}",
+                        item.requestId(),
+                        task.batchId(),
+                        result.status(),
+                        callbackFailure);
+            } finally {
+                if (finishAfterCallback) {
+                    finishCompletion();
+                }
+            }
+        }
+    }
+
+    private record RetryMember(
+            ScheduledRequest item,
+            DeliveryRejection rejection) {
+    }
+
     /** Per-dispatch phase marker used only by the executor thread. */
-    private static final class DispatchAttempt {
+    private final class DispatchAttempt {
         private boolean rpcInvocationStarted;
+        private DispatchCompletion completion;
     }
 }

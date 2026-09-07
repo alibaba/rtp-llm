@@ -832,6 +832,11 @@ public final class JavaMockEngineCluster {
          * is fixed by the batch that entered it. The tick consumes this value
          * for exec accounting, so booked time always matches elapsed time. */
         private long pendingStepDelayMs = 0;
+        /** Monotonic target of the pending step (decodeQueueLock-guarded).
+         * Consecutive targets advance from the previous boundary so the configured
+         * delay remains the boundary-to-boundary decode time even when the shared
+         * executor wakes a timer slightly late. */
+        private long pendingStepDeadlineNanos = 0;
 
         /** One decode stream occupying a running slot in the per-step loop. */
         private static final class DecodeStream {
@@ -3554,6 +3559,8 @@ public final class JavaMockEngineCluster {
             synchronized (decodeQueueLock) {
                 decodeStepScheduled = false;
                 if (shuttingDown || decodeRunning.isEmpty()) {
+                    pendingStepDelayMs = 0;
+                    pendingStepDeadlineNanos = 0;
                     return;
                 }
                 // Consume the duration locked in when this step was ARMED: the
@@ -3634,11 +3641,27 @@ public final class JavaMockEngineCluster {
          * while streams are running and stops naturally when the engine idles.
          */
         private void scheduleDecodeStepLocked() {
-            if (decodeStepScheduled || decodeRunning.isEmpty() || shuttingDown) {
+            if (decodeStepScheduled) {
+                return;
+            }
+            if (decodeRunning.isEmpty() || shuttingDown) {
+                pendingStepDelayMs = 0;
+                pendingStepDeadlineNanos = 0;
                 return;
             }
             long delayMs = performance.decodeStepDelayMs(decodeRunning.size());
             pendingStepDelayMs = delayMs; // lock in this step's price at arm time
+            long nowNanos = System.nanoTime();
+            long stepDelayNanos = TimeUnit.MILLISECONDS.toNanos(delayMs);
+            long targetNanos = pendingStepDeadlineNanos == 0
+                    ? nowNanos + stepDelayNanos
+                    : pendingStepDeadlineNanos + stepDelayNanos;
+            long scheduleDelayNanos = targetNanos - nowNanos;
+            if (scheduleDelayNanos < 0) {
+                targetNanos = nowNanos;
+                scheduleDelayNanos = 0;
+            }
+            pendingStepDeadlineNanos = targetNanos;
             decodeStepScheduled = true;
             // Crash fence: a tick armed before a crash_after must not advance
             // the wiped engine — the late callback drops out on epoch mismatch.
@@ -3647,7 +3670,7 @@ public final class JavaMockEngineCluster {
                 if (crashEpoch.get() == epoch) {
                     runDecodeStep();
                 }
-            }, delayMs, TimeUnit.MILLISECONDS);
+            }, scheduleDelayNanos, TimeUnit.NANOSECONDS);
         }
 
         /**
@@ -4650,6 +4673,7 @@ public final class JavaMockEngineCluster {
                 decodeRunning.clear();
                 decodeStepScheduled = false;
                 pendingStepDelayMs = 0;
+                pendingStepDeadlineNanos = 0;
             }
             // Un-acked completion backlog dies too: finished-but-unreported
             // work is lost, the master's poller will never see it again.

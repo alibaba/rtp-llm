@@ -25,6 +25,15 @@ public record DeliveryResult(Status status, Throwable cause) {
         return new DeliveryResult(Status.TIMED_OUT, cause);
     }
 
+    /** A definite member rejection remained retryable until its request deadline. */
+    public static DeliveryResult retryDeadlineExceeded(
+            DeliveryRejection rejection) {
+        if (rejection == null) {
+            throw new IllegalArgumentException("delivery rejection is required");
+        }
+        return timedOut(rejection.atRetryDeadline());
+    }
+
     public static DeliveryResult uncertain(Throwable cause) {
         return new DeliveryResult(Status.UNCERTAIN, cause);
     }

@@ -415,13 +415,18 @@ any of these valid modes. Role algorithms themselves are fixed.
    status or cancellation proof. Cleanup paths are idempotent.
 7. The absolute request expiration remains unchanged through queueing,
    preemption, delivery, and reconciliation.
-8. Placement does not produce a capacity-free intermediate state. Publication
+8. An explicit per-member `EnqueueBatch` rejection with code `13` retries only
+   that rejected member under the original logical batch ID until its absolute
+   request expiration. Successful members publish exactly once. Permanent
+   rejection codes fail immediately, while transport errors remain ambiguous,
+   are never resubmitted, and retain the delivery fence.
+9. Placement does not produce a capacity-free intermediate state. Publication
    reserves the ordered frontier independently for each
    exact Prefill endpoint and records the selected Decode generation. When
    placement-time capacity is unavailable, the request remains queued with its
    original FIFO/priority key and parks on that endpoint; a suffix member may
    bypass only when its route does not use the parked endpoint.
-9. NON_BATCH deliberately acquires the exact Decode engine-facing permit at
+10. NON_BATCH deliberately acquires the exact Decode engine-facing permit at
    delivery, after Prefill queueing, so a long Prefill backlog cannot consume
    idle Decode execution capacity. The shared acceptance cap is acquired at the
    same delivery boundary and wakes waiters on release. Permit failure waits on that same Decode
@@ -429,7 +434,7 @@ any of these valid modes. Role algorithms themselves are fixed.
    permit never returns to queued ownership. Preemptive Decode admission instead
    reserves its exact capacity in the placement transaction because a typed
    capacity miss is required to plan victims on that same endpoint.
-10. For `QUEUE + BATCH`, admission atomically owns both one captured
+11. For `QUEUE + BATCH`, admission atomically owns both one captured
     `maxInflightBatchesPerPrefillWorker` slot and one task already accepted by
     the bounded local dispatcher. Before the admitted members leave `ACTIVE`,
     they enter callback-owned Prefill load accounting. Load snapshots remain
@@ -439,20 +444,20 @@ any of these valid modes. Role algorithms themselves are fixed.
     The endpoint slot remains owned through transport-unknown and protected
     survivor states, and batch settlement signals the exact blocked resource.
     DIRECT requests remain in the separate request-keyed ledger.
-11. A callback exception is terminal for every member it did not transfer. The
+12. A callback exception is terminal for every member it did not transfer. The
     callback is never retried and no member returns to the active queue.
-12. Batch-load publication is established before `ACTIVE` removal. A typed
+13. Batch-load publication is established before `ACTIVE` removal. A typed
     publication failure terminalizes the reserved prefix exactly once. The first
     unreserved terminal boundary is consumed by the same rule as the normal
     path: `AdmissionFailed` is removed and reported with its own cause,
     `OwnershipLost` is removed without a second terminal callback, and only
     `CapacityUnavailable` remains `ACTIVE`.
-13. Collection, worker-shape, and prediction waits are versioned condition
+14. Collection, worker-shape, and prediction waits are versioned condition
     waits. WorkerStatus changes publish the scheduling-input generation;
     online learning publishes it only when a new predictor generation is
     installed. A signal that arrives before the worker begins waiting changes
     the captured generation, so it cannot be lost.
-14. Expiration and permanent token-shape rejection claim one `ACTIVE` item by
+15. Expiration and permanent token-shape rejection claim one `ACTIVE` item by
     removing it under the queue lock, then invoke one item-scoped terminal
     reducer outside the lock. A terminal observer failure is logged and cannot
     stop or drain unrelated requests on that worker.

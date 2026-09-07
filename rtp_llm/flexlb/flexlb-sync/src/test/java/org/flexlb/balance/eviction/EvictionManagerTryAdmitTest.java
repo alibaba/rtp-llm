@@ -1,23 +1,37 @@
 package org.flexlb.balance.eviction;
 
+import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
+import org.flexlb.balance.scheduler.AdmissionMutation;
 import org.flexlb.balance.scheduler.QueueRouteAdmission;
 import org.flexlb.balance.scheduler.RequestRegistry;
+import org.flexlb.config.EngineCancellationConfig;
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.config.PreemptionConfig;
+import org.flexlb.config.QueueOrderingConfig;
 import org.flexlb.config.SchedulerConfig;
+import org.flexlb.config.VictimStage;
 import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
+import org.flexlb.enums.DecodeTaskPhase;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
+import java.util.EnumSet;
+import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
@@ -165,6 +179,57 @@ class EvictionManagerTryAdmitTest {
         assertZeroSideEffect();
     }
 
+    @Test
+    @DisplayName("An infeasible atomic Decode begin returns ownership to the global queue")
+    void infeasibleDecodeBeginDeclinesWithoutCompletingIncoming() {
+        DecodeEndpoint decodeEndpoint = mock(DecodeEndpoint.class);
+        DecodeEndpoint.DecodeRoutingView routing =
+                mock(DecodeEndpoint.DecodeRoutingView.class);
+        DecodeEndpoint.DecodeRequestView victim =
+                new DecodeEndpoint.DecodeRequestView(
+                        "11", 30, 128L, 128L,
+                        DecodeTaskPhase.RUNNING,
+                        true, 101L, false, false);
+        when(routing.realKvAvailable()).thenReturn(0L);
+        when(routing.totalKv()).thenReturn(1_000L);
+        when(routing.engineLoad()).thenReturn(1);
+        when(decodeEndpoint.layeredAdmissionView()).thenReturn(
+                new DecodeEndpoint.LayeredAdmissionView(
+                        routing, Map.of(), List.of(victim), 0, 0));
+        when(decodeEndpoint.ipPort()).thenReturn("decode-a");
+        when(cancelChannel.isSupported(decodeEndpoint)).thenReturn(true);
+
+        FlexlbConfig config = priorityDecodeConfig();
+        BalanceContext context = mock(BalanceContext.class);
+        Request request = new Request();
+        request.setRequestId("20");
+        request.setSeqLen(64L);
+        request.setPriority(70);
+        when(context.getRequestId()).thenReturn("20");
+        when(context.getRequest()).thenReturn(request);
+        when(context.getPriority()).thenReturn(70);
+        when(context.getConfig()).thenReturn(config);
+        when(context.requestExpired(anyLong())).thenReturn(false);
+
+        CompletableFuture<Response> future = new CompletableFuture<>();
+        AdmissionMutation mutation = mock(AdmissionMutation.class);
+        when(requests.claimAdmissionMutation("20", future))
+                .thenReturn(mutation);
+        DecodePreemptionCoordinator.PreemptionResult declined =
+                new DecodePreemptionCoordinator.PreemptionResult(
+                        false, false, "begin_infeasible");
+        when(preemptionCoordinator.preempt(any()))
+                .thenReturn(DecodePreemptionCoordinator.PreemptionExecution
+                        .declined(declined));
+
+        assertFalse(manager.tryAdmit(
+                context, future, admission, decodeEndpoint));
+        assertFalse(future.isDone());
+        verify(mutation).close();
+        verify(admission, never()).close();
+        verify(preemptionCoordinator).preempt(any());
+    }
+
     // ─── Helpers ────────────────────────────────────────────────────────
 
     private static BalanceContext ctx(int priority) {
@@ -173,5 +238,17 @@ class EvictionManagerTryAdmitTest {
         when(ctx.requestExpired(anyLong())).thenReturn(false);
         when(ctx.getConfig()).thenReturn(new FlexlbConfig());
         return ctx;
+    }
+
+    private static FlexlbConfig priorityDecodeConfig() {
+        FlexlbConfig config = new FlexlbConfig();
+        QueueOrderingConfig ordering = QueueOrderingConfig.priority();
+        PreemptionConfig preemption = new PreemptionConfig();
+        preemption.setAllowedVictimStages(
+                EnumSet.of(VictimStage.DECODE_ENGINE_OWNED));
+        preemption.setEngineCancellation(new EngineCancellationConfig());
+        ordering.setPreemption(preemption);
+        config.queueScheduler().setOrdering(ordering);
+        return config;
     }
 }

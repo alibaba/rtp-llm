@@ -7,11 +7,9 @@ settle request slots and refresh their stale-inflight activity clock
 now - lastWorkerStatusAtMs > staleInflightTimeoutMs).  This category
 injects faults into exactly that channel (mock /inject "status_*" /
 "enqueue_ack_*" types) and pins the CORRECT master contract, NOT the
-current behaviour: assertions state what a correct master MUST do, and
-cases the current implementation cannot satisfy are expected to FAIL —
-that failure is the finding (status_zombie_fake_running is the declared
-P2 probe; the fence-TTL drain of status_ack_empty_no_crash is a second
-structural candidate per the verified quarantine semantics).
+current behaviour: assertions state what a correct master MUST do.  Former
+finding probes become ordinary regression cases once their product fixes
+land; this file currently has no expected-fail registrations.
 
 Injection interface (mock side, parallel implementation; field names per
 the agreed spec — do not invent alternatives):
@@ -64,11 +62,15 @@ TTL_EVENT_WINDOW_S, never sample once.  An unreachable prometheus endpoint
 (ops.master_ttl_eviction_counts() is None) is an environment failure the
 cases fail on, never a pass reason.
 
-Case index (P0 = release-blocking contract, P1 = robustness, P2 = declared
-contract-level finding probe):
+Case index (P0 = release-blocking contract, P1 = robustness, P2 = extended
+contract probe):
 
     P0 status_ack_partial_fail          k-of-batch ack failure isolates
-                                       + ledger release + retry matrix
+                                       + prompt ledger release
+    P0 status_ack_partial_fail_permanent
+                                       permanent 8431 fails fast, no retry
+    P0 status_ack_partial_fail_transient_retry
+                                       transient code 13 retries to queue SLO
     P0 status_batch_async_partial_fail  in-batch execution-phase partial
                                        failure: typed terminal + mixed-batch
                                        lease closure
@@ -92,7 +94,7 @@ contract-level finding probe):
     P1 status_cursor_regress            completion cursor rewind idempotent
     P1 status_finished_then_running     terminal must not be resurrected
     P1 status_zombie_completed_running  zombie running vs tombstone
-    P2 status_zombie_fake_running       permanent-resident inflight probe (expected finding)
+    P2 status_zombie_fake_running       persistent ghost cleanup regression
 
 Migrated in from the legacy fault families (task #85 category reorg):
 
@@ -105,6 +107,7 @@ from __future__ import annotations
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Barrier
 from typing import Optional
 
 from ..context import CaseContext, CaseDef, rid_base
@@ -139,6 +142,10 @@ LONG_STREAM_TIMEOUT_S = 45.0
 STALE_INFLIGHT_TTL_S = 30.0
 TTL_MARGIN_S = 30.0
 QUEUE_TIMEOUT_S = 10.0
+# Longer than the dispatcher's maximum 500ms ACK retry backoff.  Permanent
+# rejection cases hold the counter observation through this window so a late
+# retry cannot slip past the assertion.
+ACK_NO_RETRY_OBSERVATION_S = 1.25
 # Event-driven prefill-cleanup window (decode-before-prefill contract):
 # once the decode terminal has settled the request, the prefill ledger
 # entry for the same member must be released by the settle path itself,
@@ -265,10 +272,7 @@ def _timeout_typed(err) -> bool:
             "timed out",
             "not complete",
             "expire",
-            "exhaust",
-            "8400",
             "8511",
-            "8431",
         )
     )
 
@@ -694,182 +698,370 @@ def inflight_ttl_cleanup(ctx: CaseContext):
 
 
 # ===========================================================================
-# P0 — enqueue-ack fault shapes (3 cases)
+# P0 — enqueue-ack fault shapes
 # ===========================================================================
+
+
+def _ack_partial_spec(ctx: CaseContext) -> EnvSpec:
+    """One slow prefill and a wide collection window for exact 4-member ACKs."""
+    perf = default_perf()
+    perf["prefill"] = {"fixed_ms": 3000.0, "scale": 1.0}
+    return EnvSpec(
+        label=f"status_ack_partial_{ctx.profile}",
+        n_prefill=1,
+        n_decode=2,
+        perf=perf,
+        master_profile=ctx.profile,
+        master_env={
+            "FLEXLB_CONFIG": build_flexlb_config(
+                ordering="priority",
+                decision="fixed_window",
+                dispatcher="batch",
+                max_requests=4,
+                max_collection_wait_ms=300,
+                max_predicted_execution_ms=5000,
+                queue_timeout_ms=int(QUEUE_TIMEOUT_S * 1000),
+                stale_inflight_ms=int(STALE_INFLIGHT_TTL_S * 1000),
+            )
+        },
+    )
+
+
+def _ack_partial_wave(ops, base: int, names: list[str], code: int) -> dict:
+    """Submit four Schedule RPCs together and retain every member outcome."""
+    rids = [ops.next_request_id(base) for _ in range(4)]
+    ready = Barrier(len(rids) + 1)
+    rpc_before = _enqueue_rpc_count(ops, names)
+    accepted_before = _accepted(ops, names[0])
+
+    def schedule_member(rid: int) -> dict:
+        ready.wait(timeout=5.0)
+        started = time.monotonic()
+        try:
+            response = ops.schedule(rid, output_len=2)
+        except Exception as exc:
+            return {
+                "rid": rid,
+                "ok": False,
+                "response": None,
+                "response_code": None,
+                "error": repr(exc),
+                "elapsed_s": time.monotonic() - started,
+                "started_s": started,
+            }
+        ok = response.code == 200 and response.success
+        return {
+            "rid": rid,
+            "ok": ok,
+            "response": response if ok else None,
+            "response_code": int(response.code),
+            "error": None if ok else str(response.error_message),
+            "elapsed_s": time.monotonic() - started,
+            "started_s": started,
+        }
+
+    inject_type_all(ops, names, "enqueue_ack_partial_fail", k=1)
+    inject_type_all(ops, names, "enqueue_ack_error_code", code=code)
+    try:
+        with ThreadPoolExecutor(max_workers=len(rids)) as pool:
+            futures = [pool.submit(schedule_member, rid) for rid in rids]
+            ready.wait(timeout=5.0)
+            results = [future.result(timeout=35.0) for future in futures]
+    finally:
+        clear_type_all(ops, names, "enqueue_ack_partial_fail")
+        clear_type_all(ops, names, "enqueue_ack_error_code")
+
+    # Hold permanent rejections beyond the implementation's maximum retry
+    # backoff.  A wrong delayed retry must be visible in rpc_delta.
+    time.sleep(ACK_NO_RETRY_OBSERVATION_S if code != 13 else 0.5)
+    starts = [item["started_s"] for item in results]
+    return {
+        "rids": rids,
+        "results": results,
+        "successes": [item for item in results if item["ok"]],
+        "failures": [item for item in results if not item["ok"]],
+        "rpc_delta": _enqueue_rpc_count(ops, names) - rpc_before,
+        "accepted_delta": _accepted(ops, names[0]) - accepted_before,
+        "submit_spread_ms": (max(starts) - min(starts)) * 1000.0,
+    }
+
+
+def _start_ack_survivor_streams(ops, successes: list[dict]) -> tuple[list, list]:
+    handles = []
+    errors = []
+    for item in successes:
+        try:
+            handles.append(
+                (item["rid"], ops.start_stream(item["response"], item["rid"]))
+            )
+        except Exception as exc:
+            errors.append((item["rid"], repr(exc)))
+    return handles, errors
+
+
+def _finish_ack_survivor_streams(handles: list, timeout_s: float = 15.0) -> list:
+    outcomes = []
+    for rid, handle in handles:
+        ended = handle.wait_end(timeout_s)
+        completed = ended and handle.snap.completed and not handle.snap.error
+        outcomes.append(
+            (
+                rid,
+                completed,
+                None if completed else handle.snap.error or "stream did not complete",
+            )
+        )
+    return outcomes
+
+
+def _ack_failure_details(failures: list[dict]) -> list[str]:
+    return [
+        f"rid={item['rid']} response_code={item['response_code']} "
+        f"elapsed={item['elapsed_s']:.3f}s error={item['error']}"
+        for item in failures
+    ]
 
 
 @case(
     "status_ack_partial_fail",
-    profiles=["batch-window"],  # _status_spec pins the legacy fault axes
+    profiles=["batch-window"],
     source="P0 status fault family: enqueue_ack_partial_fail(k=1) on a 4-request batch",
-    expected_fail=True,  # MIXED form (see docstring) — whole-case probe
 )
 def status_ack_partial_fail(ctx: CaseContext):
-    """Scenario: a 4-request enqueue batch lands on prefills whose ack marks
-    k=1 members failed — first with the default transient-class code 13,
-    then with a permanent-class code 8431 (enqueue_ack_partial_fail +
-    enqueue_ack_error_code co-injected; the mock executes every member
-    either way, only the ACK lies).
+    """One exact 4-member ACK loses one member without harming survivors.
 
-    Behaviour: the mock answers EnqueueBatch with a partial failure — the
-    k members carry a terminal error, the rest are acknowledged.
-
-    Expectation (contract), three layers:
-    1. Isolation + ledger release: the k members receive a TERMINAL error
-       while the remaining members STILL SUCCEED; the failed members leave
-       the master's prefill member ledger PROMPTLY (the ledger peak across
-       the execution window never exceeds the surviving member count — 3
-       for a single 4-member batch) and the ledger drains (inflight_clean).
-    2. Retry dispatch shape (observation): IF a failed member is retried,
-       the retry must surface as NEW EnqueueBatch RPCs — a fresh dispatch
-       entry, never silently folded back into the original batch.  The
-       engine snapshot exposes no batch-composition field, so the
-       new-dispatch dimension is observed via the EnqueueBatch RPC-count
-       delta and reported in the detail line.
-    3. Retry policy matrix: a TRANSIENT code (13) with SLO budget left
-       (scheduler.queueTimeoutMs=10s) MUST be retried to success or to an
-       SLO-shaped terminal (deadline/timeout class — never the raw
-       injected error surfaced straight through); a PERMANENT code (8431)
-       must terminate FAST (1-2 failed members carrying 8431, >= 2
-       survivors) with no retry RPCs beyond the original batch dispatch.
-
-    PREDICTED FINDING (retry policy missing): the current master turns
-    EngineRejectedException into an immediate terminal for EVERY error
-    code, so the transient arm's failed members surface the raw injected
-    error — the transient_ok assertion is EXPECTED TO FAIL and that
-    failure is the finding.  The permanent arm, the isolation and the
-    ledger layers pass against the current implementation.
-
-    Expected-fail marking (task #101, MIXED form): the case mixes
-    should-pass layers (Layer 1 isolation/ledger, Layer 3b permanent)
-    with the predicted-fail retry dimension (Layer 3a transient), and the
-    expected_fail granularity is whole-case — so the whole case is
-    marked expected_fail: its expected failure classifies as
-    finding-confirmed (the retry-policy finding stands), its unexpected
-    pass as finding-resolved (the retry policy landed).  CAVEAT: a
-    Layer-1/3b regression ALSO shows up as finding-confirmed — read the
-    detail flags (hang_free / drained_a / permanent_fast) to tell a
-    regression apart from the declared finding; the predicted-fail arm's
-    own verdict stays visible as transient_ok=<bool> in the detail.
-
-    Grade: P0 (isolation/ledger) + P2 retry-policy probe."""
-    ops = ctx.engine_ops(ctx.env_manager.ensure(_status_spec(ctx)))
+    This ordinary P0 case owns the construction and isolation contract:
+    four concurrent Schedule calls must become one EnqueueBatch RPC, exactly
+    one permanent 8431 member must fail, the other three streams must
+    complete, and the failed member must leave the prompt ledger while those
+    survivors are still executing. The separate transient probe owns retry
+    policy independently so it cannot hide a construction or isolation
+    regression.
+    """
+    ops = ctx.engine_ops(ctx.env_manager.ensure(_ack_partial_spec(ctx)))
     base = rid_base(ctx, "status")
     names = _prefill_names(ops)
-    if not names:
-        return False, "no prefill engines found"
-
-    def _rpc_now() -> int:
-        return _enqueue_rpc_count(ops, names)
+    if len(names) != 1:
+        return False, f"construction requires exactly one prefill, found {names}"
 
     try:
-        # ── Layer 1: isolation + prompt ledger release (default code 13).
-        # Fire-and-forget so the ledger is sampled WHILE the surviving
-        # members still execute: the failed members get their terminal
-        # from the ack itself and must leave the prefill member ledger
-        # immediately — a hung member pushes the peak to the full batch
-        # size (4) while the surviving shape is 3 (fewer when the 4
-        # requests split into 2 batches, one failed member each).
-        rpc_a0 = _rpc_now()
-        inject_type_all(ops, names, "enqueue_ack_partial_fail", k=1)
-        try:
-            rids, sched_err = _fire_and_forget(ops, base, 4)
-            if sched_err:
-                return False, f"layer1 schedule failed: {sched_err}"
-            samples: list[int] = []
-            deadline = time.monotonic() + 8.0
-            while time.monotonic() < deadline:
-                samples.append(_prefill_requests_sum(ops))
-                if len(samples) >= 5 and all(v == 0 for v in samples[-5:]):
-                    break
-                time.sleep(0.2)
-            ledger_peak = max(samples) if samples else -1
-            hang_free = ledger_peak <= 3
-            # Soft observation (detail only): the surviving-member shape
-            # (a 3-member batch ledger) was actually caught on screen.
-            member_shape_seen = 3 in samples
-        finally:
-            clear_type_all(ops, names, "enqueue_ack_partial_fail")
-        rpc_a1 = _rpc_now()
-        # Layer-2 observation: with no master-side retry the dispatch count
-        # stays at the original batch count (1-2 RPCs for 4 requests); a
-        # retry re-dispatches and shows up as NEW EnqueueBatch RPCs.
-        retry_rpc_layer1 = rpc_a1 - rpc_a0
-        drained_a, drained_a_detail = AssertUtils.inflight_clean(
-            _master_http(ops), 30.0
+        wave = _ack_partial_wave(ops, base, names, code=8431)
+        failures = wave["failures"]
+        code_ok = len(failures) == 1 and "error_code=8431" in str(
+            failures[0]["error"]
+        )
+        constructed = (
+            len(wave["results"]) == 4
+            and len(wave["successes"]) == 3
+            and len(failures) == 1
+            and wave["rpc_delta"] == 1
+            and wave["accepted_delta"] == 3
+            and code_ok
         )
 
-        # ── Layer 3a: transient arm (code 13) — retry-policy contract.
-        # enqueue_ack_error_code only takes effect when co-injected with
-        # enqueue_ack_partial_fail k>0 (mock applyEnqueueAckFaults gate).
-        rpc_b0 = _rpc_now()
-        inject_type_all(ops, names, "enqueue_ack_partial_fail", k=1)
-        inject_type_all(ops, names, "enqueue_ack_error_code", code=13)
-        try:
-            errs_t = _run_requests(ops, base, 4, concurrency=4)
-        finally:
-            clear_type_all(ops, names, "enqueue_ack_partial_fail")
-            clear_type_all(ops, names, "enqueue_ack_error_code")
-        time.sleep(3.0)  # late-retry observation window
-        rpc_b1 = _rpc_now()
-        failed_t = [e for e in errs_t if e is not None]
-        # Contract: with SLO budget left a transient code must end in
-        # success or an SLO-shaped terminal — the legal_terminal caliber
-        # used by the suppress family.  A raw injected-error passthrough
-        # is the missing-retry finding.
-        transient_ok = all(e is None or _timeout_typed(e) for e in errs_t)
-        transient_raw_leak = sorted(
-            {str(e)[:70] for e in failed_t if not _timeout_typed(e)}
-        )[:3]
-        transient_rpc = rpc_b1 - rpc_b0
-
-        # ── Layer 3b: permanent arm (code 8431) — fast terminal, no retry.
-        rpc_c0 = _rpc_now()
-        inject_type_all(ops, names, "enqueue_ack_partial_fail", k=1)
-        inject_type_all(ops, names, "enqueue_ack_error_code", code=8431)
-        try:
-            errs_p = _run_requests(ops, base, 4, concurrency=4)
-        finally:
-            clear_type_all(ops, names, "enqueue_ack_partial_fail")
-            clear_type_all(ops, names, "enqueue_ack_error_code")
-        rpc_c1 = _rpc_now()
-        failed_p = [e for e in errs_p if e is not None]
-        ok_p = len(errs_p) - len(failed_p)
-        permanent_fast = (
-            1 <= len(failed_p) <= 2
-            and ok_p >= 2
-            and all("8431" in str(e) for e in failed_p)
+        handles, stream_start_errors = _start_ack_survivor_streams(
+            ops, wave["successes"]
         )
-        # No retry RPCs beyond the original batch dispatch (4 requests
-        # form 1-2 batches → 1-2 EnqueueBatch RPCs; a retry adds more).
-        permanent_no_retry = 1 <= (rpc_c1 - rpc_c0) <= 2
-        permanent_rpc = rpc_c1 - rpc_c0
-
+        ledger_samples = []
+        release_latency_ms = None
+        release_started = time.monotonic()
+        deadline = release_started + 1.5
+        while time.monotonic() < deadline:
+            value = _prefill_requests_sum(ops)
+            ledger_samples.append(value)
+            if value == 3:
+                release_latency_ms = (time.monotonic() - release_started) * 1000.0
+                break
+            time.sleep(0.05)
+        prompt_released = release_latency_ms is not None
+        survivor_outcomes = _finish_ack_survivor_streams(handles)
+        survivor_isolated = (
+            not stream_start_errors
+            and len(survivor_outcomes) == 3
+            and all(completed for _, completed, _ in survivor_outcomes)
+        )
         inflight_ok, inflight_detail = AssertUtils.inflight_clean(
             _master_http(ops), 30.0
         )
         master_ok = _master_ok(ops)
 
         passed = (
-            hang_free
-            and drained_a
-            and transient_ok  # PREDICTED FINDING arm (missing retry)
-            and permanent_fast
-            and permanent_no_retry
+            constructed
+            and prompt_released
+            and survivor_isolated
             and inflight_ok
             and master_ok
         )
         return passed, (
-            f"ledger_hang_free={hang_free} (peak={ledger_peak}, "
-            f"member_shape_3_seen={member_shape_seen}), "
-            f"layer1_drained={drained_a}({drained_a_detail}), "
-            f"retry_rpc(layer1_obs)={retry_rpc_layer1}, "
-            f"transient_ok={transient_ok} (failed={len(failed_t)}, "
-            f"raw_leak={transient_raw_leak}, rpc_delta={transient_rpc}), "
-            f"permanent_fast={permanent_fast} "
-            f"(failed={len(failed_p)}, ok={ok_p}), "
-            f"permanent_no_retry={permanent_no_retry} "
-            f"(rpc_delta={permanent_rpc}), "
+            f"constructed_1batch_4members={constructed} "
+            f"(rpc_delta={wave['rpc_delta']}, accepted_delta="
+            f"{wave['accepted_delta']}, successes={len(wave['successes'])}, "
+            f"failures={_ack_failure_details(failures)}, "
+            f"submit_spread_ms={wave['submit_spread_ms']:.1f}), "
+            f"prompt_member_released={prompt_released} "
+            f"(latency_ms={release_latency_ms}, samples={ledger_samples[:8]}), "
+            f"survivor_isolation={survivor_isolated} "
+            f"(start_errors={stream_start_errors}, outcomes={survivor_outcomes}), "
+            f"inflight_clean={inflight_ok}({inflight_detail}), "
+            f"master_200={master_ok}"
+        )
+    except Exception as exc:
+        return False, f"exception: {exc!r}"
+    finally:
+        clear_type_all(ops, names, "enqueue_ack_partial_fail")
+        clear_type_all(ops, names, "enqueue_ack_error_code")
+
+
+@case(
+    "status_ack_partial_fail_transient_retry",
+    profiles=["batch-window"],
+    source=(
+        "P0 status fault family: transient code 13 must retry as a "
+        "fresh EnqueueBatch dispatch"
+    ),
+)
+def status_ack_partial_fail_transient_retry(ctx: CaseContext):
+    """A transient partial ACK must retry instead of leaking raw code 13.
+
+    The fault remains armed on the sole prefill, so a correct implementation
+    retries to the 10-second queue SLO and returns a timeout-shaped terminal.
+    The ordinary status_ack_partial_fail case separately guards construction
+    and survivor isolation; this case owns the retry-to-deadline contract.
+    """
+    ops = ctx.engine_ops(ctx.env_manager.ensure(_ack_partial_spec(ctx)))
+    base = rid_base(ctx, "status")
+    names = _prefill_names(ops)
+    if len(names) != 1:
+        return False, f"construction requires exactly one prefill, found {names}"
+
+    try:
+        wave = _ack_partial_wave(ops, base, names, code=13)
+        handles, stream_start_errors = _start_ack_survivor_streams(
+            ops, wave["successes"]
+        )
+        survivor_outcomes = _finish_ack_survivor_streams(handles)
+        failures = wave["failures"]
+        construction_guard = (
+            len(wave["results"]) == 4
+            and len(wave["successes"]) == 3
+            and len(failures) == 1
+            and wave["accepted_delta"] == 3
+        )
+        survivors_ok = (
+            not stream_start_errors
+            and len(survivor_outcomes) == len(wave["successes"])
+            and all(completed for _, completed, _ in survivor_outcomes)
+        )
+        retry_dispatched = wave["rpc_delta"] >= 2
+        raw_code_13 = [
+            item
+            for item in failures
+            if "error_code=13" in str(item["error"])
+            or "enqueue_ack_partial_fail" in str(item["error"])
+        ]
+        deadline_terminal = (
+            len(failures) == 1
+            and failures[0]["response_code"] == 8511
+            and QUEUE_TIMEOUT_S - 2.0
+            <= failures[0]["elapsed_s"]
+            <= QUEUE_TIMEOUT_S + 5.0
+            and _timeout_typed(failures[0]["error"])
+        )
+        inflight_ok, inflight_detail = AssertUtils.inflight_clean(
+            _master_http(ops), 30.0
+        )
+        master_ok = _master_ok(ops)
+
+        passed = (
+            construction_guard
+            and survivors_ok
+            and retry_dispatched
+            and not raw_code_13
+            and deadline_terminal
+            and inflight_ok
+            and master_ok
+        )
+        return passed, (
+            f"construction_guard={construction_guard} "
+            f"(accepted_delta={wave['accepted_delta']}, "
+            f"successes={len(wave['successes'])}, failures={len(failures)}), "
+            f"retry_dispatched={retry_dispatched} "
+            f"(enqueue_rpc_delta={wave['rpc_delta']}), "
+            f"raw_code_13_leaked={bool(raw_code_13)}, "
+            f"terminal_exact_8511_at_deadline={deadline_terminal}, "
+            f"failure_details={_ack_failure_details(failures)}, "
+            f"survivors_ok={survivors_ok} (outcomes={survivor_outcomes}), "
+            f"inflight_clean={inflight_ok}({inflight_detail}), "
+            f"master_200={master_ok}"
+        )
+    except Exception as exc:
+        return False, f"exception: {exc!r}"
+    finally:
+        clear_type_all(ops, names, "enqueue_ack_partial_fail")
+        clear_type_all(ops, names, "enqueue_ack_error_code")
+
+
+@case(
+    "status_ack_partial_fail_permanent",
+    profiles=["batch-window"],
+    source=(
+        "P0 status fault family: permanent 8431 partial ACK terminates one "
+        "member without retrying or harming survivors"
+    ),
+)
+def status_ack_partial_fail_permanent(ctx: CaseContext):
+    """A permanent 8431 partial ACK fails one member fast and never retries."""
+    ops = ctx.engine_ops(ctx.env_manager.ensure(_ack_partial_spec(ctx)))
+    base = rid_base(ctx, "status")
+    names = _prefill_names(ops)
+    if len(names) != 1:
+        return False, f"construction requires exactly one prefill, found {names}"
+
+    try:
+        wave = _ack_partial_wave(ops, base, names, code=8431)
+        failures = wave["failures"]
+        permanent_typed_fast = (
+            len(failures) == 1
+            and "error_code=8431" in str(failures[0]["error"])
+            and failures[0]["elapsed_s"] <= 3.0
+        )
+        constructed = (
+            len(wave["results"]) == 4
+            and len(wave["successes"]) == 3
+            and len(failures) == 1
+            and wave["accepted_delta"] == 3
+        )
+        no_retry = wave["rpc_delta"] == 1
+        handles, stream_start_errors = _start_ack_survivor_streams(
+            ops, wave["successes"]
+        )
+        survivor_outcomes = _finish_ack_survivor_streams(handles)
+        survivors_ok = (
+            not stream_start_errors
+            and len(survivor_outcomes) == 3
+            and all(completed for _, completed, _ in survivor_outcomes)
+        )
+        inflight_ok, inflight_detail = AssertUtils.inflight_clean(
+            _master_http(ops), 30.0
+        )
+        master_ok = _master_ok(ops)
+
+        passed = (
+            constructed
+            and permanent_typed_fast
+            and no_retry
+            and survivors_ok
+            and inflight_ok
+            and master_ok
+        )
+        return passed, (
+            f"constructed_1batch_4members={constructed} "
+            f"(accepted_delta={wave['accepted_delta']}, "
+            f"successes={len(wave['successes'])}), "
+            f"permanent_8431_fast={permanent_typed_fast} "
+            f"(failures={_ack_failure_details(failures)}), "
+            f"no_retry={no_retry} (enqueue_rpc_delta={wave['rpc_delta']}), "
+            f"survivors_ok={survivors_ok} (outcomes={survivor_outcomes}), "
             f"inflight_clean={inflight_ok}({inflight_detail}), "
             f"master_200={master_ok}"
         )
@@ -1132,7 +1324,6 @@ def status_ack_multi_error(ctx: CaseContext):
     "status_ack_empty_no_crash",
     profiles=["batch-window"],
     source="P0 status fault family: enqueue_ack_drop — empty ack (dispatch-uncertain)",
-    expected_fail=True,
 )
 def status_ack_empty_no_crash(ctx: CaseContext):
     """Scenario: the prefill drops the whole enqueue ack
@@ -1145,17 +1336,10 @@ def status_ack_empty_no_crash(ctx: CaseContext):
     Expectation (contract): the fence residue stays BOUNDED and
     non-growing (reuse _fence_residue_stable), AND the quarantined entries
     are ultimately clearable — the scheduler inflight must drain to zero
-    within TTL+margin.  NOTE: the verified current behaviour parks
-    uncertain-fence entries in quarantine forever (cleanupInflight skips
-    engineFence entries from the stale TTL), so the drain assertion is a
-    declared contract-level candidate to FAIL — that failure is the
-    finding.  The master itself must stay up (HTTP 200) regardless.
-
-    Expected-fail marking (task #101): the quarantine-forever behaviour
-    is the DECLARED finding, so the case is marked expected_fail — a
-    failure classifies as finding-confirmed (the finding stands, exit
-    0), an unexpected pass as finding-resolved (the fence-TTL drain
-    landed; review the mark).
+    within TTL+margin.  The master itself must stay up (HTTP 200)
+    throughout.  This was previously a declared finding; the request-slot
+    tombstone/TTL cleanup now makes the uncertain fence clearable, so the
+    contract is enforced as an ordinary regression case.
 
     Grade: P0."""
     ops = ctx.engine_ops(ctx.env_manager.ensure(_status_spec(ctx)))
@@ -1742,7 +1926,6 @@ def status_decode_suppress_finished(ctx: CaseContext):
     "status_decode_before_prefill",
     profiles=["batch-window"],
     source="P1 status fault family: status_suppress_rids(full batch) on prefills, decodes normal",
-    expected_fail=True,  # MIXED form (see docstring) — whole-case probe
 )
 def status_decode_before_prefill(ctx: CaseContext):
     """Scenario (finished arm of the decode-before-prefill matrix): the
@@ -1762,32 +1945,13 @@ def status_decode_before_prefill(ctx: CaseContext):
     finished, so no TTL wait is justified); master stays HTTP 200 (no
     crash from the cross-role settle).
 
-    PREDICTED FINDING (cleanup linkage missing): in the current BATCH
-    dispatch the decode terminal's counterpart cleanup only runs on the
-    ROUTE_DECISION path (RequestRegistry.workerStatusCounterpartCleanup
-    → exactPrefillCounterpartCleanup); a batch-delivered decode terminal
-    does NOT release the prefill accounting, whose only exit is
-    PrefillState.evictExpiredBatches (30s stale TTL + 60s sweep).  The
-    event-driven assertion is EXPECTED TO FAIL and that failure is the
-    finding; the TTL fallback observation below then documents that the
-    entries do eventually expire (a permanent hang would be a worse,
-    separate bug).
+    Regression contract: counterpart cleanup applies to both
+    ROUTE_DECISION and BATCH_ENQUEUE delivery claims.  It uses the exact
+    ScheduledRequest identity, so a stale decode terminal cannot release a
+    replacement generation that reused the same request id.  The TTL fallback
+    observation below remains diagnostic only; it is not accepted as a pass.
 
-    Expected-fail marking (task #101, MIXED form): the case mixes
-    should-pass dimensions (all-4-successful terminals via the decode
-    settle, eventual drain, master health, recovery) with the
-    predicted-fail <= 10s event-driven cleanup dimension
-    (p_batches_fast), and the expected_fail granularity is whole-case —
-    so the whole case is marked expected_fail: its expected failure
-    classifies as finding-confirmed (the cleanup-linkage finding
-    stands), its unexpected pass as finding-resolved (the counterpart
-    cleanup landed on the batch path).  CAVEAT: a regression in the
-    should-pass dimensions ALSO shows up as finding-confirmed — read the
-    detail flags (requests_succeeded_via_decode_terminal /
-    ttl_fallback_drained / master_200) to tell a regression apart from
-    the declared finding.
-
-    Grade: P1 (+ P2 cleanup-linkage probe)."""
+    Grade: P1."""
     env = ctx.env_manager.ensure(_status_spec(ctx))
     ops = ctx.engine_ops(env)
     base = rid_base(ctx, "status")
@@ -2845,39 +3009,29 @@ def status_zombie_completed_running(ctx: CaseContext):
 
 
 # ===========================================================================
-# P2 — declared contract-level finding probe (1 case)
+# P2 — persistent ghost cleanup (1 case)
 # ===========================================================================
 
 
 @case(
     "status_zombie_fake_running",
     profiles=["batch-window"],
-    source="P2 status fault family (DECLARED FINDING PROBE): persistent fake RUNNING for N ghost rids, >= 2x TTL",
-    expected_fail=True,
+    source="P2 status fault family: persistent fake RUNNING for N ghost rids, >= 2x TTL",
 )
 def status_zombie_fake_running(ctx: CaseContext):
     """Scenario: the engine PERSISTENTLY reports RUNNING facts for several
     request ids the master has never seen (status_fake_task, ghost rids,
     held for >= 2x the stale TTL).
 
-    Behaviour: every status poll re-delivers the ghost ACTIVE facts.  On
-    the current implementation each report refreshes the entry's activity
-    clock (lastWorkerStatusAtMs), so the stale TTL can NEVER fire — the
-    expected failure mode is permanently-resident inflight entries
-    (ConfirmedTask-style) that survive the whole observation window.
+    Behaviour: every status poll re-delivers the ghost ACTIVE facts while
+    the injection remains armed.
 
     Expectation (contract — this is the probe): the master must NOT retain
     inflight entries that cannot be cleared.  Concretely: after the
     injection is cleared (the ghost reports stop), the scheduler inflight
-    MUST drain to zero within TTL(30s)+margin.  EXPECTED TO FAIL on the
-    current implementation — the failure IS the finding (record the
-    resident count and the non-draining ledger as evidence).
-
-    Expected-fail marking (task #101): the permanent-resident ghost
-    behaviour is the DECLARED finding, so the case is marked
-    expected_fail — a failure classifies as finding-confirmed (the
-    finding stands, exit 0), an unexpected pass as finding-resolved (the
-    activity-clock refresh landed; review the mark).
+    MUST drain to zero within TTL(30s)+margin.  The request-slot
+    tombstone/TTL cleanup fixes the former permanent-residency finding, so
+    this is now an ordinary regression contract.
 
     Grade: P2 (contract-level finding probe)."""
     env = ctx.env_manager.ensure(_status_spec(ctx))
@@ -2931,8 +3085,8 @@ def status_zombie_fake_running(ctx: CaseContext):
             f"bounded={bounded} <= {sched_before + n_ghosts}), "
             f"drained_after_clear={drained} (final={final}), "
             f"master_200=(during={master_ok_during}, after={master_ok}), "
-            f"ghost_rids={n_ghosts} — expected finding: persistent "
-            f"activity-clock refresh keeps ghost entries resident"
+            f"ghost_rids={n_ghosts}; persistent reports may refresh activity, "
+            f"but entries must drain after the injection clears"
         )
     except Exception as exc:
         return False, f"exception: {exc!r}"
