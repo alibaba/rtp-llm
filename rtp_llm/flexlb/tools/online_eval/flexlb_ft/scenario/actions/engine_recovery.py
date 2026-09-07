@@ -1133,6 +1133,9 @@ def execute_consume(ctx, params, deadline):
                         row["cancellations"].append(
                             {"owner": owner, "rpc_status": state}
                         )
+                        # EngineOps.cancel stops when Master Cancel raises;
+                        # do not add a worker cancellation absent in the old path.
+                        break
                 # Exit proof is mandatory even when the old observation timed out.
                 child.cancel("post_observation_transport_cleanup")
                 child._await_consumer(entry, deadline)
