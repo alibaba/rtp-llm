@@ -241,3 +241,5 @@ Checks: `fresh_accepted_zero.contract`, `fresh_fetch_zero.contract`, `prefill_co
 - Normal noFetch has a fresh backend instance, no injection, no wait/Fetch on its original cohort, a two-second post-completion observation and a different recovery request. Owner rows are observations, not a universal zero-owner assertion. No GPU, C++ onflight, connector KV or exact 600-second lifetime is tested.
 
 The four variants that read TTL metrics retain the old 180-second cold-exporter readiness gate as an explicit `metrics_ready` stage, with recorded attempts and actuator/prometheus → prometheus fallback. Later event observations use the selected epoch-bound source; a failed readiness deadline cannot become a zero counter.
+
+Debug observation also verifies scheduler/queue presence and the complete declared Prefill/Decode/engine directory, with matching endpoint generation identities. Iterating only the pages a server happened to return is insufficient evidence of complete owner coverage.

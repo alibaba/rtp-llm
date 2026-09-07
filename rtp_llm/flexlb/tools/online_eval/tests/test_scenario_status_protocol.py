@@ -308,6 +308,26 @@ class StatusProtocolTest(unittest.TestCase):
             )
         )
 
+    def test_debug_source_cannot_omit_a_required_owner(self):
+        pages = {"scheduler": {}, "queues": {}}
+        for role, endpoint, generation in [
+            ("prefill", "p", "1"),
+            ("decode", "d", "2"),
+            ("engine", "p", "1"),
+            ("engine", "d", "2"),
+        ]:
+            pages[f"{role}/{generation}"] = {
+                "metadata": {"endpoint": endpoint, "endpoint_generation": generation}
+            }
+        capture = NS(
+            payload={"endpointDirectoryTruncated": False, "components": pages},
+            component=lambda name: pages[name],
+        )
+        status._debug_directory(capture, 1, 1)
+        del pages["engine/2"]
+        with self.assertRaisesRegex(RuntimeError, "incomplete"):
+            status._debug_directory(capture, 1, 1)
+
     def test_fingerprint_baseline_stability_is_rejected(self):
         plan = PlanContext(
             "test",
