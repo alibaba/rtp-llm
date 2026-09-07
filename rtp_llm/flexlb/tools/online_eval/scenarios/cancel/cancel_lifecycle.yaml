@@ -1,6 +1,6 @@
 schema_version: 1
 id: cancel_lifecycle
-description: Explicit cancellation triggers and old lifecycle predicates; 11 of 12 lifecycle mappings.
+description: Twelve cancellation lifecycle contracts with explicit client, Master and engine boundaries.
 category: cancel
 profiles:
 - batch-window
@@ -25,6 +25,7 @@ legacy_case_ids:
 - cancel_deadline_exempt_inflight
 - cancel_idempotent
 - cancel_phase_timing
+- cancel_preemption_victim
 - cancel_schedule_drop_delivered
 - cancel_sibling_isolation
 - cancel_stream_break_decode_autonomous
@@ -3031,3 +3032,500 @@ variants:
   - window-nonbatch
   requires:
   - generate_stream
+- id: preemption_victim_batch
+  legacy_case_ids:
+  - cancel_preemption_victim
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: victim
+    action: cancel_prepare
+    params:
+      count: 1
+      concurrency: 1
+      input_len: 512
+      output_len: 200
+      priority: 30
+      unique_block_keys: true
+  - id: victim_dispatch
+    action: cancel_dispatch
+    params:
+      requests:
+        $ref: stages.victim.output.requests
+    timeout_s: 60
+  - id: victim_running
+    action: cancel_observe
+    params:
+      duration_s: 10
+      requests:
+        $ref: stages.victim.output.requests
+      until:
+        metric: decode_running
+        op: eq
+        value: 1
+      include:
+      - mock
+    timeout_s: 30
+  - id: victim_engine_owned
+    action: cancel_check
+    params:
+      snapshot:
+        $ref: stages.victim_running.output.snapshot
+      metric: decode_running
+      expected: 1
+      op: eq
+  - id: cancel_baseline
+    action: cancel_observe
+    params:
+      duration_s: 0
+    timeout_s: 30
+  - id: high
+    action: cancel_prepare
+    params:
+      count: 1
+      concurrency: 1
+      input_len: 512
+      output_len: 2
+      priority: 70
+      unique_block_keys: true
+      consume: manual
+      schedule_timeout_s: 30
+  - id: preemptor_arrival
+    action: cancel_begin
+    params:
+      requests:
+        $ref: stages.high.output.requests
+    timeout_s: 40
+  - id: victim_terminal_window
+    action: cancel_observe
+    params:
+      duration_s: 20
+      requests:
+        $ref: stages.victim.output.requests
+      until:
+        metric: stream_ended
+        op: eq
+        value: 1
+      include:
+      - client_records
+    timeout_s: 35
+  - id: victim_terminal_ended
+    action: cancel_check
+    params:
+      snapshot:
+        $ref: stages.victim_terminal_window.output.snapshot
+      metric: stream_ended
+      expected: 1
+      op: eq
+  - id: victim_typed_engine_preemption
+    action: cancel_check
+    params:
+      snapshot:
+        $ref: stages.victim_terminal_window.output.snapshot
+      metric: typed_preempted
+      expected: 1
+      op: eq
+  - id: high_open
+    action: cancel_open
+    params:
+      requests:
+        $ref: stages.high.output.requests
+    timeout_s: 40
+  - id: high_completion_window
+    action: cancel_observe
+    params:
+      duration_s: 30
+      requests:
+        $ref: stages.high.output.requests
+      until:
+        metric: stream_ended
+        op: eq
+        value: 1
+      include:
+      - client_records
+    timeout_s: 45
+  - id: high_completion_ended
+    action: cancel_check
+    params:
+      snapshot:
+        $ref: stages.high_completion_window.output.snapshot
+      metric: stream_ended
+      expected: 1
+      op: eq
+  - id: high_completed
+    action: cancel_check
+    params:
+      snapshot:
+        $ref: stages.high_completion_window.output.snapshot
+      metric: success
+      expected: 1
+      op: eq
+  - id: preemption_state
+    action: cancel_observe
+    params:
+      duration_s: 0
+      requests:
+        $ref: stages.victim.output.requests
+    timeout_s: 30
+  - id: victim_engine_cancelled
+    action: cancel_check
+    params:
+      snapshot:
+        $ref: stages.preemption_state.output.snapshot
+      metric: engine_cancelled
+      expected: 1
+      op: eq
+  - id: weak_cancel_was_forwarded
+    action: cancel_check
+    params:
+      snapshot:
+        $ref: stages.preemption_state.output.snapshot
+      metric: cancel_rpc_count
+      expected: 1
+      op: ge
+      baseline:
+        $ref: stages.cancel_baseline.output.snapshot
+  - id: master_drain
+    action: cancel_observe
+    params:
+      duration_s: 15
+      until:
+        metric: cleanup_inflight
+        op: eq
+        value: 0
+    timeout_s: 30
+  - id: master_drain_scheduler
+    action: cancel_check
+    params:
+      snapshot:
+        $ref: stages.master_drain.output.snapshot
+      metric: scheduler
+      expected: 0
+      op: eq
+  - id: master_drain_prefill_batches
+    action: cancel_check
+    params:
+      snapshot:
+        $ref: stages.master_drain.output.snapshot
+      metric: prefill_batches
+      expected: 0
+      op: eq
+  - id: master_drain_decode_load
+    action: cancel_check
+    params:
+      snapshot:
+        $ref: stages.master_drain.output.snapshot
+      metric: decode_total_load
+      expected: 0
+      op: eq
+  - id: engine_drain
+    action: cancel_observe
+    params:
+      duration_s: 15
+      until:
+        metric: engine_clean_total
+        op: eq
+        value: 0
+    timeout_s: 30
+  - id: engine_drain_inflight
+    action: cancel_check
+    params:
+      snapshot:
+        $ref: stages.engine_drain.output.snapshot
+      metric: engine_inflight
+      expected: 0
+      op: eq
+  - id: engine_drain_leaks
+    action: cancel_check
+    params:
+      snapshot:
+        $ref: stages.engine_drain.output.snapshot
+      metric: engine_leaks
+      expected: 0
+      op: eq
+  - id: recovery
+    action: cancel_prepare
+    params:
+      count: 1
+      concurrency: 1
+      output_len: 2
+  - id: recovery_dispatch
+    action: cancel_dispatch
+    params:
+      requests:
+        $ref: stages.recovery.output.requests
+    timeout_s: 60
+  - id: recovery_window
+    action: cancel_observe
+    params:
+      duration_s: 30
+      requests:
+        $ref: stages.recovery.output.requests
+      until:
+        metric: success
+        op: eq
+        value: 1
+      include:
+      - client_records
+    timeout_s: 45
+  - id: recovery_succeeds
+    action: cancel_check
+    params:
+      snapshot:
+        $ref: stages.recovery_window.output.snapshot
+      metric: success
+      expected: 1
+      op: eq
+  - id: cleanup
+    action: teardown
+  profiles:
+  - batch-window
+  - single-batch
+  environment_overrides:
+    n_prefill: 1
+    n_decode: 1
+    config_overrides:
+      ordering: priority
+      default_priority: 50
+      preemption:
+        allowed_victim_stages:
+        - PREFILL_QUEUED
+        - DECODE_RESERVED
+        - DECODE_ENGINE_OWNED
+        engine_cancellation:
+          ack_timeout_ms: 50
+          completion_timeout_ms: 1000
+      decode_max_engine_requests: 1
+- id: preemption_victim_nonbatch
+  legacy_case_ids:
+  - cancel_preemption_victim
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: victim
+    action: cancel_prepare
+    params:
+      count: 1
+      concurrency: 1
+      input_len: 512
+      output_len: 200
+      priority: 30
+      unique_block_keys: true
+  - id: victim_dispatch
+    action: cancel_dispatch
+    params:
+      requests:
+        $ref: stages.victim.output.requests
+    timeout_s: 60
+  - id: victim_running
+    action: cancel_observe
+    params:
+      duration_s: 10
+      requests:
+        $ref: stages.victim.output.requests
+      until:
+        metric: decode_running
+        op: eq
+        value: 1
+      include:
+      - mock
+    timeout_s: 30
+  - id: victim_engine_owned
+    action: cancel_check
+    params:
+      snapshot:
+        $ref: stages.victim_running.output.snapshot
+      metric: decode_running
+      expected: 1
+      op: eq
+  - id: cancel_baseline
+    action: cancel_observe
+    params:
+      duration_s: 0
+    timeout_s: 30
+  - id: high
+    action: cancel_prepare
+    params:
+      count: 1
+      concurrency: 1
+      input_len: 512
+      output_len: 2
+      priority: 70
+      unique_block_keys: true
+      consume: manual
+      schedule_timeout_s: 30
+  - id: preemptor_arrival
+    action: cancel_begin
+    params:
+      requests:
+        $ref: stages.high.output.requests
+    timeout_s: 40
+  - id: victim_terminal_window
+    action: cancel_observe
+    params:
+      duration_s: 20
+      requests:
+        $ref: stages.victim.output.requests
+      until:
+        metric: stream_ended
+        op: eq
+        value: 1
+      include:
+      - client_records
+    timeout_s: 35
+  - id: victim_terminal_ended
+    action: cancel_check
+    params:
+      snapshot:
+        $ref: stages.victim_terminal_window.output.snapshot
+      metric: stream_ended
+      expected: 1
+      op: eq
+  - id: victim_typed_engine_preemption
+    action: cancel_check
+    params:
+      snapshot:
+        $ref: stages.victim_terminal_window.output.snapshot
+      metric: typed_preempted
+      expected: 1
+      op: eq
+  - id: high_open
+    action: cancel_open
+    params:
+      requests:
+        $ref: stages.high.output.requests
+    timeout_s: 40
+  - id: high_completion_window
+    action: cancel_observe
+    params:
+      duration_s: 30
+      requests:
+        $ref: stages.high.output.requests
+      until:
+        metric: stream_ended
+        op: eq
+        value: 1
+      include:
+      - client_records
+    timeout_s: 45
+  - id: high_completion_ended
+    action: cancel_check
+    params:
+      snapshot:
+        $ref: stages.high_completion_window.output.snapshot
+      metric: stream_ended
+      expected: 1
+      op: eq
+  - id: high_completed
+    action: cancel_check
+    params:
+      snapshot:
+        $ref: stages.high_completion_window.output.snapshot
+      metric: success
+      expected: 1
+      op: eq
+  - id: preemption_state
+    action: cancel_observe
+    params:
+      duration_s: 0
+      requests:
+        $ref: stages.victim.output.requests
+    timeout_s: 30
+  - id: victim_engine_cancelled
+    action: cancel_check
+    params:
+      snapshot:
+        $ref: stages.preemption_state.output.snapshot
+      metric: engine_cancelled
+      expected: 1
+      op: eq
+  - id: weak_cancel_was_forwarded
+    action: cancel_check
+    params:
+      snapshot:
+        $ref: stages.preemption_state.output.snapshot
+      metric: cancel_rpc_count
+      expected: 1
+      op: ge
+      baseline:
+        $ref: stages.cancel_baseline.output.snapshot
+  - id: engine_drain
+    action: cancel_observe
+    params:
+      duration_s: 15
+      until:
+        metric: engine_clean_total
+        op: eq
+        value: 0
+    timeout_s: 30
+  - id: engine_drain_inflight
+    action: cancel_check
+    params:
+      snapshot:
+        $ref: stages.engine_drain.output.snapshot
+      metric: engine_inflight
+      expected: 0
+      op: eq
+  - id: engine_drain_leaks
+    action: cancel_check
+    params:
+      snapshot:
+        $ref: stages.engine_drain.output.snapshot
+      metric: engine_leaks
+      expected: 0
+      op: eq
+  - id: recovery
+    action: cancel_prepare
+    params:
+      count: 1
+      concurrency: 1
+      output_len: 2
+  - id: recovery_dispatch
+    action: cancel_dispatch
+    params:
+      requests:
+        $ref: stages.recovery.output.requests
+    timeout_s: 60
+  - id: recovery_window
+    action: cancel_observe
+    params:
+      duration_s: 30
+      requests:
+        $ref: stages.recovery.output.requests
+      until:
+        metric: success
+        op: eq
+        value: 1
+      include:
+      - client_records
+    timeout_s: 45
+  - id: recovery_succeeds
+    action: cancel_check
+    params:
+      snapshot:
+        $ref: stages.recovery_window.output.snapshot
+      metric: success
+      expected: 1
+      op: eq
+  - id: cleanup
+    action: teardown
+  profiles:
+  - single-nonbatch
+  - window-nonbatch
+  environment_overrides:
+    n_prefill: 1
+    n_decode: 1
+    config_overrides:
+      ordering: priority
+      default_priority: 50
+      preemption:
+        allowed_victim_stages:
+        - PREFILL_QUEUED
+        - DECODE_RESERVED
+        - DECODE_ENGINE_OWNED
+        engine_cancellation:
+          ack_timeout_ms: 50
+          completion_timeout_ms: 1000
+      decode_max_engine_requests: 1
