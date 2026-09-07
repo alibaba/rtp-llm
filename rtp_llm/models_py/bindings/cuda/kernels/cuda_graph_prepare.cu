@@ -2,7 +2,11 @@
 
 #include <algorithm>
 #include <c10/util/Exception.h>
+#if USING_ROCM
+#include <hip/hip_runtime.h>
+#else
 #include <cuda_runtime.h>
+#endif
 
 namespace rtp_llm {
 
@@ -68,7 +72,7 @@ __global__ void prepareFlashInferDecodeParamsKernel(const int32_t* sequence_leng
 
 }  // namespace
 
-void invokeCudaGraphPrepareFill(CudaGraphPrepareFillParams params, cudaStream_t stream) {
+void invokeCudaGraphPrepareFill(CudaGraphPrepareFillParams params, CudaGraphPrepareStream stream) {
     TORCH_CHECK(params.region_count >= 0 && params.region_count <= kMaxCudaGraphPrepareFillRegions,
                 "invalid cuda graph prepare fill region count: ",
                 params.region_count);
@@ -84,8 +88,13 @@ void invokeCudaGraphPrepareFill(CudaGraphPrepareFillParams params, cudaStream_t 
     constexpr int block_size = 256;
     const int     blocks     = static_cast<int>(std::min<int64_t>((total_count + block_size - 1) / block_size, 1024));
     cudaGraphPrepareFillKernel<<<blocks, block_size, 0, stream>>>(params);
+#if USING_ROCM
+    const auto result = hipGetLastError();
+    TORCH_CHECK(result == hipSuccess, "cuda graph prepare fill kernel failed: ", hipGetErrorString(result));
+#else
     const auto result = cudaGetLastError();
     TORCH_CHECK(result == cudaSuccess, "cuda graph prepare fill kernel failed: ", cudaGetErrorString(result));
+#endif
 }
 
 void invokePrepareFlashInferDecodeParams(const int32_t* sequence_lengths_plus_1,
@@ -100,7 +109,7 @@ void invokePrepareFlashInferDecodeParams(const int32_t* sequence_lengths_plus_1,
                                          int32_t        batch_size,
                                          int32_t        max_blocks_per_batch,
                                          int32_t        seq_size_per_block,
-                                         cudaStream_t   stream) {
+                                         CudaGraphPrepareStream stream) {
     TORCH_CHECK(sequence_lengths_plus_1 != nullptr, "sequence_lengths_plus_1 is null");
     TORCH_CHECK(block_ids != nullptr, "block_ids is null");
     TORCH_CHECK(batch_indice != nullptr && page_indice != nullptr && decode_page_indptr != nullptr
@@ -122,9 +131,16 @@ void invokePrepareFlashInferDecodeParams(const int32_t* sequence_lengths_plus_1,
                                                              batch_size,
                                                              max_blocks_per_batch,
                                                              seq_size_per_block);
+#if USING_ROCM
+    const auto result = hipGetLastError();
+    TORCH_CHECK(result == hipSuccess,
+                "FlashInfer decode CUDA graph prepare kernel failed: ",
+                hipGetErrorString(result));
+#else
     const auto result = cudaGetLastError();
     TORCH_CHECK(
         result == cudaSuccess, "FlashInfer decode CUDA graph prepare kernel failed: ", cudaGetErrorString(result));
+#endif
 }
 
 }  // namespace rtp_llm
