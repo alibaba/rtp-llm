@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import copy
 import json
+import math
+import subprocess
+import time
 import urllib.request
 from dataclasses import dataclass
 
@@ -25,6 +28,12 @@ def _target(params):
     if params["target"] not in ("single", "A", "B"):
         raise ValueError("master target must be single, A, or B")
     return params
+
+
+def _layout(params, plan):
+    layout = getattr(plan, "environment", {}).get("master_layout", "single")
+    if (params["target"] == "single") != (layout == "single"):
+        raise ValueError("master target does not match the compiled master layout")
 
 
 def _process(ctx, target):
@@ -65,6 +74,7 @@ def _fault_validate(params, plan):
     p = _target(_params(params, plan, {"target", "mode"}, {"mode"}))
     if p["mode"] not in ("kill", "freeze"):
         raise ValueError("master fault mode must be kill or freeze")
+    _layout(p, plan)
     return p
 
 
@@ -152,6 +162,7 @@ def _ready_validate(params, plan):
     p.setdefault("inflight_zero", True)
     if type(p["inflight_zero"]) is not bool:
         raise ValueError("inflight_zero must be boolean")
+    _layout(p, plan)
     return p
 
 
@@ -265,3 +276,615 @@ HANDLERS = [
         checks=frozenset({"topology", "inflight"}),
     ),
 ]
+
+
+# HA traffic is an actual Java client subprocess. These stages do not call a
+# legacy case or its ambient HA skip gate.
+def _ha_validate(params, plan):
+    p = _params(params, plan, {"targets", "duration_s", "timeout_ms", "fallback"})
+    environment = getattr(plan, "environment", {})
+    if environment.get("master_layout", "single") != "dual_standalone":
+        raise ValueError("HA traffic requires compiled dual_standalone environment")
+    p.setdefault("targets", ["A", "B"])
+    if p["targets"] not in (["A", "B"], ["B", "A"]):
+        raise ValueError("HA targets must explicitly order A and B")
+    for key, default, lower, upper in (
+        ("duration_s", 60, 1, 180),
+        ("timeout_ms", 30000, 100, 30000),
+    ):
+        p.setdefault(key, default)
+        if type(p[key]) is not int or not lower <= p[key] <= upper:
+            raise ValueError(f"{key} is outside the bounded HA range")
+    p.setdefault("fallback", False)
+    if type(p["fallback"]) is not bool:
+        raise ValueError("fallback must be boolean")
+    return p
+
+
+class OwnedHaClient:
+    def __init__(self, flow):
+        self.flow = flow
+
+    def cleanup(self, deadline):
+        process = self.flow.proc
+        if process is not None:
+            if process.alive():
+                process.proc.terminate()
+                try:
+                    process.proc.wait(timeout=min(2, deadline.remaining()))
+                except subprocess.TimeoutExpired:
+                    process.proc.kill()
+            process.proc.wait(timeout=deadline.remaining())
+
+    def finish(self, deadline):
+        if self.flow.proc is None:
+            raise RuntimeError("HA client was not started")
+        rc = self.flow.proc.proc.wait(timeout=deadline.remaining())
+        if rc != 0:
+            raise RuntimeError(f"HA client exit code {rc}")
+        path = self.flow.out_dir / "client_events.jsonl"
+        rows = [
+            json.loads(line) for line in path.read_text().splitlines() if line.strip()
+        ]
+        if not rows:
+            raise ValueError("HA client produced no request evidence")
+        for row in rows:
+            if not isinstance(row, dict) or not {
+                "rid",
+                "route_path",
+                "master_target",
+                "failover",
+                "error_kind",
+                "status",
+            } <= set(row):
+                raise ValueError("HA client evidence lacks required route fields")
+            if (
+                row["route_path"] not in {"master", "fallback", "failed"}
+                or type(row["failover"]) is not bool
+            ):
+                raise ValueError("invalid HA route evidence")
+            timestamp = row.get("send_start_epoch_ms")
+            if timestamp is None:
+                timestamp = row.get("wall_clock_ts")
+            if (
+                type(timestamp) not in (int, float)
+                or not math.isfinite(timestamp)
+                or timestamp <= 0
+            ):
+                raise ValueError("HA request has no valid issue timestamp")
+        return rows, path
+
+
+def _ha_start(ctx, params, deadline):
+    from ...support.ha import HaTrafficRunner
+
+    for target in params["targets"]:
+        _process(ctx, target)
+    targets = [
+        ctx.backend.manager.master_instance_target(ctx.env, target)
+        for target in params["targets"]
+    ]
+    directory = ctx.artifact_dir / f"ha-client-{len(ctx._resources)}"
+    directory.mkdir(parents=True, exist_ok=True)
+    flow = HaTrafficRunner(
+        ctx.case_context,
+        ctx.env,
+        directory,
+        "traffic",
+        targets,
+        duration_s=params["duration_s"],
+        timeout_ms=params["timeout_ms"],
+        enable_fallback=params["fallback"],
+    )
+    flow._overrides["FETCH_OUTPUT_STREAM"] = "true"
+    flow._overrides["ENABLE_FALLBACK"] = str(params["fallback"]).lower()
+    owned = OwnedHaClient(flow)
+    handle = ctx.register_resource("ha_client", owned, owned.cleanup)
+    deadline.check()
+    flow.start()
+    deadline.check()
+    return StageOutput({"client": handle})
+
+
+def _ha_finish_validate(params, plan):
+    p = _params(params, plan, {"client"}, {"client"})
+    plan.reference(p["client"], "ha_client")
+    return p
+
+
+def _ha_finish(ctx, params, deadline):
+    client = ctx.resource(params["client"], "ha_client")
+    rows, path = client.finish(deadline)
+    return StageOutput(
+        {"rows": ctx.register_resource("ha_rows", rows, historical=True)},
+        artifacts=[str(path)],
+    )
+
+
+def _mark_validate(params, plan):
+    p = _params(params, plan, {"wait_s"})
+    p.setdefault("wait_s", 0)
+    if (
+        type(p["wait_s"]) not in (int, float)
+        or not math.isfinite(p["wait_s"])
+        or not 0 <= p["wait_s"] <= 180
+    ):
+        raise ValueError("wait_s must be finite in [0,180]")
+    return p
+
+
+def _mark(ctx, params, deadline):
+    deadline.sleep(params["wait_s"])
+    return StageOutput({"epoch_s": time.time()})
+
+
+def _window_validate(params, plan):
+    p = _params(
+        params,
+        plan,
+        {"rows", "from", "until", "route", "from_offset_s", "until_offset_s"},
+        {"rows"},
+    )
+    plan.reference(p["rows"], "ha_rows")
+    for key in ("from", "until"):
+        if key in p:
+            plan.reference(p[key], "number")
+    if "route" in p and p["route"] not in {"master", "fallback", "failed"}:
+        raise ValueError("invalid window route filter")
+    for field in ("from_offset_s", "until_offset_s"):
+        if field in p:
+            if (
+                field.split("_")[0] not in p
+                or type(p[field]) not in (int, float)
+                or not math.isfinite(p[field])
+            ):
+                raise ValueError(
+                    "window offset requires finite offset and boundary reference"
+                )
+    return p
+
+
+def _window(ctx, params, deadline):
+    from ...support.ha import rows_between
+
+    deadline.check()
+    rows = ctx.resource(params["rows"], "ha_rows")
+    lower = ctx.resolve(params["from"]) if "from" in params else None
+    upper = ctx.resolve(params["until"]) if "until" in params else None
+    if lower is not None:
+        lower += params.get("from_offset_s", 0)
+    if upper is not None:
+        upper += params.get("until_offset_s", 0)
+    if lower is not None and upper is not None and lower >= upper:
+        raise ValueError("HA observation window is empty or inverted")
+    selected = rows_between(rows, lower, upper)
+    if "route" in params:
+        selected = [r for r in selected if r["route_path"] == params["route"]]
+    return StageOutput(
+        {"rows": ctx.register_resource("ha_rows", selected, historical=True)}
+    )
+
+
+HA_METRICS = {
+    "sample_count",
+    "success_rate",
+    "target_share",
+    "route_share",
+    "route_count",
+    "failover_count",
+    "duplicate_ids",
+    "error_kind_count",
+    "wrong_error_code",
+    "failed_count",
+    "failed_rate_above_one",
+    "business_rate_above_one",
+    "visible_terminal_count",
+}
+
+
+def _client_check_validate(params, plan):
+    p = _params(
+        params,
+        plan,
+        {
+            "rows",
+            "metric",
+            "op",
+            "expected",
+            "target",
+            "route",
+            "error_kind",
+            "code",
+            "min_samples",
+        },
+        {"rows", "metric", "op", "expected"},
+    )
+    plan.reference(p["rows"], "ha_rows")
+    if p["metric"] not in HA_METRICS or p["op"] not in {"eq", "ge", "le"}:
+        raise ValueError("unknown client metric/comparison")
+    if type(p["expected"]) not in (int, float) or not math.isfinite(p["expected"]):
+        raise ValueError("client comparison needs finite numeric expected value")
+    p.setdefault("min_samples", 1)
+    if type(p["min_samples"]) is not int or p["min_samples"] < 1:
+        raise ValueError("client check must require actual samples")
+    required = {
+        "target_share": "target",
+        "route_share": "route",
+        "route_count": "route",
+        "error_kind_count": "error_kind",
+        "wrong_error_code": "code",
+    }.get(p["metric"])
+    if required and required not in p:
+        raise ValueError(f"{p['metric']} requires {required}")
+    if "target" in p and p["target"] not in ("A", "B"):
+        raise ValueError("client target must be A or B")
+    if "route" in p and p["route"] not in {"master", "fallback", "failed"}:
+        raise ValueError("invalid expected route")
+    if "error_kind" in p and p["error_kind"] not in {
+        "none",
+        "transport",
+        "business",
+        "deadline",
+    }:
+        raise ValueError("invalid expected error kind")
+    if "code" in p and (type(p["code"]) is not int or p["code"] <= 0):
+        raise ValueError("error code must be positive integer")
+    return p
+
+
+def _client_check(ctx, params, deadline):
+    from collections import Counter
+
+    deadline.check()
+    rows = ctx.resource(params["rows"], "ha_rows")
+    n = len(rows)
+    metric = params["metric"]
+    if metric == "sample_count":
+        actual = n
+    elif metric == "success_rate":
+        actual = sum(r["status"] == "ok" for r in rows) / n if n else 0
+    elif metric == "target_share":
+        target = ctx.backend.manager.master_instance_target(ctx.env, params["target"])
+        actual = sum(r["master_target"] == target for r in rows) / n if n else 0
+    elif metric in {"route_share", "route_count"}:
+        count = sum(r["route_path"] == params["route"] for r in rows)
+        actual = count / n if metric == "route_share" and n else count
+    elif metric == "failover_count":
+        actual = sum(r["failover"] is True for r in rows)
+    elif metric == "duplicate_ids":
+        actual = sum(count > 1 for count in Counter(r["rid"] for r in rows).values())
+    elif metric == "error_kind_count":
+        actual = sum(r["error_kind"] == params["error_kind"] for r in rows)
+    elif metric in {"failed_rate_above_one", "business_rate_above_one"}:
+        count = sum(
+            (
+                r["route_path"] == "failed"
+                if metric == "failed_rate_above_one"
+                else r["error_kind"] == "business"
+            )
+            for r in rows
+        )
+        actual = count / n if count > 1 and n else 0
+    elif metric == "visible_terminal_count":
+        actual = sum(
+            r["status"] == "ok"
+            or r["error_kind"] in {"deadline", "transport", "business"}
+            for r in rows
+        )
+    elif metric == "wrong_error_code":
+        actual = sum(str(params["code"]) not in str(r.get("error", "")) for r in rows)
+    else:
+        actual = sum(r["route_path"] == "failed" for r in rows)
+    expected = params["expected"]
+    comparison = (
+        actual == expected
+        if params["op"] == "eq"
+        else actual >= expected if params["op"] == "ge" else actual <= expected
+    )
+    passed = n >= params["min_samples"] and comparison
+    return StageOutput(
+        {"actual": actual},
+        [
+            CheckResult(
+                "criterion",
+                "PASS" if passed else "FAIL",
+                actual=actual,
+                expected=expected,
+                evidence={
+                    "metric": metric,
+                    "sample_count": n,
+                    "min_samples": params["min_samples"],
+                },
+            )
+        ],
+    )
+
+
+HANDLERS += [
+    StageHandler(
+        "master_client_start", _ha_validate, _ha_start, {"client": "ha_client"}
+    ),
+    StageHandler(
+        "master_client_finish", _ha_finish_validate, _ha_finish, {"rows": "ha_rows"}
+    ),
+    StageHandler("master_mark", _mark_validate, _mark, {"epoch_s": "number"}),
+    StageHandler(
+        "master_client_window", _window_validate, _window, {"rows": "ha_rows"}
+    ),
+    StageHandler(
+        "master_client_check",
+        _client_check_validate,
+        _client_check,
+        {"actual": "number"},
+        checks=frozenset({"criterion"}),
+    ),
+]
+
+
+def _batch_validate(params, plan):
+    p = _target(
+        _params(
+            params,
+            plan,
+            {
+                "target",
+                "count",
+                "concurrency",
+                "request_timeout_s",
+                "sample_after_s",
+                "coldstart",
+            },
+        )
+    )
+    for key, default, minimum, maximum in (
+        ("count", 20, 1, 100),
+        ("concurrency", 10, 1, 10),
+        ("request_timeout_s", 15, 1, 30),
+        ("sample_after_s", 0, 0, 10),
+    ):
+        p.setdefault(key, default)
+        if type(p[key]) is not int or not minimum <= p[key] <= maximum:
+            raise ValueError(f"{key} outside finite batch bounds")
+    p.setdefault("coldstart", False)
+    if type(p["coldstart"]) is not bool:
+        raise ValueError("coldstart must be boolean")
+    if (
+        p["coldstart"]
+        and getattr(plan, "environment", {}).get("master_stable_window_s", 3) != 0
+    ):
+        raise ValueError("coldstart requires zero master stability window")
+    _layout(p, plan)
+    return p
+
+
+class FiniteMasterBatch:
+    def __init__(self, records, concurrency):
+        from concurrent.futures import ThreadPoolExecutor
+
+        self.records = records
+        self.pool = ThreadPoolExecutor(max_workers=concurrency)
+        self.futures = []
+
+    def cleanup(self, deadline):
+        from concurrent.futures import wait
+
+        self.records.cancel_active("master_batch_cleanup")
+        self.pool.shutdown(wait=False, cancel_futures=True)
+        _, unfinished = wait(self.futures, timeout=deadline.remaining())
+        if unfinished:
+            raise TimeoutError(
+                "master batch consumers did not stop after RPC cancellation"
+            )
+
+
+def _batch(ctx, params, deadline):
+    from .elastic import RecordedRequests, request_success
+
+    _process(ctx, params["target"])
+    if params["coldstart"] and ctx.env.spec.master_stable_window_s != 0:
+        raise ValueError("actual environment was warmed before coldstart burst")
+    if params["target"] == "single":
+        ops = ctx.ops
+    else:
+        from ...engine_ops import EngineOps
+
+        spec = ctx.env.master_specs[params["target"]]
+        ops = EngineOps(spec.bind_ip, spec.http_port, ctx.env.mock_http_port)
+        ctx.add_cleanup("master_batch_channels", lambda d: ops.close())
+    records = RecordedRequests(ops, ctx.env_epoch, ctx.clock)
+    batch = FiniteMasterBatch(records, params["concurrency"])
+    handle = ctx.register_resource("requests", records, batch.cleanup, historical=True)
+    artifact = ctx.artifact_dir / f"master-batch-{handle['id']}.json"
+    samples = []
+    try:
+        for _ in range(params["count"]):
+            deadline.check()
+            row = records.issue(ops.next_request_id(), ctx.clock)
+            batch.futures.append(
+                batch.pool.submit(
+                    records.run,
+                    row,
+                    dict(
+                        input_len=2048,
+                        output_len=2,
+                        block_keys=[row["wire_request_id"] * 100 + 1],
+                    ),
+                    min(params["request_timeout_s"], deadline.remaining()),
+                )
+            )
+        ended = None
+        while True:
+            deadline.check()
+            if all(future.done() for future in batch.futures) and ended is None:
+                ended = ctx.clock()
+                for future in batch.futures:
+                    future.result()
+            info = _master_json(
+                ctx, params["target"], "/rtp_llm/master/info", deadline, True
+            )
+            summary = info["worker_summary"]
+            observed = {}
+            for role in ("PREFILL", "DECODE"):
+                values = {key: summary[role][key] for key in ("discovered", "alive")}
+                if any(
+                    type(value) is not int or value < 0 for value in values.values()
+                ):
+                    raise ValueError("master topology sample has invalid counts")
+                observed[role] = values
+            samples.append(dict(time_s=ctx.clock(), workers=observed))
+            if ended is not None and ctx.clock() - ended >= params["sample_after_s"]:
+                break
+            deadline.sleep(0.5)
+        batch.pool.shutdown(wait=False)
+    finally:
+        artifact.write_text(
+            json.dumps(
+                dict(records=records.snapshot_records(), topology=samples), indent=2
+            )
+            + "\n"
+        )
+    rows = records.snapshot_records()
+    successes = [r for r in rows if request_success(r)]
+    value = dict(
+        records=rows,
+        topology=samples,
+        coldstart=params["coldstart"],
+        success_rate=len(successes) / len(rows),
+        expected_prefill=ctx.env.spec.n_prefill,
+        expected_decode=ctx.env.spec.n_decode,
+    )
+    return StageOutput(
+        {
+            "requests": handle,
+            "snapshot": ctx.register_resource("snapshot", value, historical=True),
+            "success_rate": value["success_rate"],
+        },
+        artifacts=[str(artifact)],
+    )
+
+
+def _cold_check_validate(params, plan):
+    p = _params(params, plan, {"snapshot"}, {"snapshot"})
+    plan.reference(p["snapshot"], "snapshot")
+    return p
+
+
+def _cold_check(ctx, params, deadline):
+    from collections import Counter
+
+    from .elastic import request_success
+
+    deadline.check()
+    value = ctx.resource(params["snapshot"], "snapshot")
+    if (
+        value["coldstart"] is not True
+        or not value["topology"]
+        or len(value["records"]) != 20
+    ):
+        raise ValueError(
+            "coldstart verdict requires its actual twenty-request sampled burst"
+        )
+    final = value["topology"][-1]["workers"]
+    dist = Counter(
+        r["prefill_addr"]
+        for r in value["records"]
+        if request_success(r) and r["prefill_addr"]
+    )
+    total = sum(dist.values())
+    share = max(dist.values()) / total if total else 1
+    topology = all(
+        final[role]["alive"] == final[role]["discovered"] == value[key]
+        for role, key in (
+            ("PREFILL", "expected_prefill"),
+            ("DECODE", "expected_decode"),
+        )
+    )
+    return StageOutput(
+        {"success_rate": value["success_rate"]},
+        [
+            CheckResult(
+                "success",
+                "PASS" if value["success_rate"] >= 0.8 else "FAIL",
+                actual=value["success_rate"],
+                expected=0.8,
+            ),
+            CheckResult("topology", "PASS" if topology else "FAIL", actual=final),
+            CheckResult(
+                "balance",
+                "PASS" if len(dist) >= 2 and share <= 0.8 else "FAIL",
+                actual={"distribution": dict(dist), "max_share": share},
+                expected="two prefills used, maximum share <= 0.8",
+            ),
+        ],
+    )
+
+
+HANDLERS += [
+    StageHandler(
+        "master_request_batch",
+        _batch_validate,
+        _batch,
+        {"requests": "requests", "snapshot": "snapshot", "success_rate": "number"},
+    ),
+    StageHandler(
+        "master_coldstart_check",
+        _cold_check_validate,
+        _cold_check,
+        {"success_rate": "number"},
+        checks=frozenset({"success", "topology", "balance"}),
+    ),
+]
+
+
+def _inflight_validate(params, plan):
+    p = _target(_params(params, plan, {"target", "op", "value"}, {"op", "value"}))
+    if p["op"] not in {"eq", "ge"} or type(p["value"]) is not int or p["value"] < 0:
+        raise ValueError(
+            "scheduler inflight condition must be eq/ge nonnegative integer"
+        )
+    _layout(p, plan)
+    return p
+
+
+def _inflight(ctx, params, deadline):
+    samples = []
+    path = ctx.artifact_dir / f"scheduler-inflight-{len(ctx._resources)}.json"
+    try:
+        while True:
+            deadline.check()
+            data = _master_json(
+                ctx, params["target"], "/rtp_llm/inflight_status", deadline
+            )
+            count = data["scheduler_inflight"]
+            if type(count) is not int or count < 0:
+                raise ValueError("missing or invalid scheduler inflight observation")
+            samples.append(dict(time_s=ctx.clock(), count=count))
+            if (
+                count == params["value"]
+                if params["op"] == "eq"
+                else count >= params["value"]
+            ):
+                break
+            deadline.sleep(0.5)
+    finally:
+        path.write_text(json.dumps(samples, indent=2) + "\n")
+    return StageOutput(
+        {"count": count},
+        [
+            CheckResult(
+                "scheduler_inflight", "PASS", actual=count, expected=params["value"]
+            )
+        ],
+        [str(path)],
+    )
+
+
+HANDLERS.append(
+    StageHandler(
+        "master_wait_inflight",
+        _inflight_validate,
+        _inflight,
+        {"count": "integer"},
+        checks=frozenset({"scheduler_inflight"}),
+    )
+)

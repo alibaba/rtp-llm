@@ -1,0 +1,155 @@
+schema_version: 1
+id: master_ha_failover
+description: 'Actual dual standalone masters: sticky A to B through same-request failover,
+  with per-request route evidence.'
+category: master
+profiles:
+- batch-window
+legacy_case_ids:
+- master_ha_failover
+environment:
+  backend: java_mock
+  n_prefill: 2
+  n_decode: 4
+  master_layout: dual_standalone
+execution:
+  timeout_s: 480
+  stage_timeout_s: 60
+  cleanup_timeout_s: 120
+variants:
+- id: standalone_a_to_b
+stages:
+- id: setup
+  action: setup
+  timeout_s: 180
+- id: flow
+  action: master_client_start
+  params:
+    targets:
+    - A
+    - B
+    duration_s: 60
+- id: lookback
+  action: master_mark
+  params:
+    wait_s: 2
+- id: kill_time
+  action: master_mark
+  params:
+    wait_s: 10
+- id: kill_a
+  action: master_fault
+  params:
+    mode: kill
+    target: A
+- id: switched
+  action: master_mark
+  params:
+    wait_s: 10
+- id: b_ready
+  action: master_ready
+  params:
+    target: B
+    inflight_zero: false
+- id: finish
+  action: master_client_finish
+  params:
+    client:
+      $ref: stages.flow.output.client
+  timeout_s: 90
+- id: steady
+  action: master_client_window
+  params:
+    rows:
+      $ref: stages.finish.output.rows
+    until:
+      $ref: stages.kill_time.output.epoch_s
+- id: switch
+  action: master_client_window
+  params:
+    rows:
+      $ref: stages.finish.output.rows
+    from:
+      $ref: stages.kill_time.output.epoch_s
+    until:
+      $ref: stages.switched.output.epoch_s
+- id: straddle
+  action: master_client_window
+  params:
+    rows:
+      $ref: stages.finish.output.rows
+    from:
+      $ref: stages.lookback.output.epoch_s
+    until:
+      $ref: stages.switched.output.epoch_s
+- id: after
+  action: master_client_window
+  params:
+    rows:
+      $ref: stages.finish.output.rows
+    from:
+      $ref: stages.switched.output.epoch_s
+- id: steady_a
+  action: master_client_check
+  params:
+    rows:
+      $ref: stages.steady.output.rows
+    metric: target_share
+    op: eq
+    expected: 1
+    target: A
+    min_samples: 10
+- id: failover_seen
+  action: master_client_check
+  params:
+    rows:
+      $ref: stages.straddle.output.rows
+    metric: failover_count
+    op: ge
+    expected: 1
+- id: switch_to_b
+  action: master_client_check
+  params:
+    rows:
+      $ref: stages.switch.output.rows
+    metric: target_share
+    op: ge
+    expected: 0.01
+    target: B
+- id: switch_errors
+  action: master_client_check
+  params:
+    rows:
+      $ref: stages.switch.output.rows
+    metric: failed_rate_above_one
+    op: le
+    expected: 0.05
+- id: after_b
+  action: master_client_check
+  params:
+    rows:
+      $ref: stages.after.output.rows
+    metric: target_share
+    op: ge
+    expected: 0.95
+    target: B
+    min_samples: 20
+- id: after_success
+  action: master_client_check
+  params:
+    rows:
+      $ref: stages.after.output.rows
+    metric: success_rate
+    op: ge
+    expected: 0.9
+    min_samples: 20
+- id: unique_requests
+  action: master_client_check
+  params:
+    rows:
+      $ref: stages.finish.output.rows
+    metric: duplicate_ids
+    op: eq
+    expected: 0
+- id: cleanup
+  action: teardown
