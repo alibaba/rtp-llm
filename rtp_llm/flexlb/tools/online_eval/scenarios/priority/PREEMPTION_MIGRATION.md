@@ -1,7 +1,7 @@
 # Priority preemption migration
 
 Owner: agent4. Source baseline: `295af797bd7ed3a842c9cad42b5722c64cd24c9a`.
-This checkpoint implements one complete candidate program out of fourteen old
+This checkpoint implements two complete candidate programs out of fourteen old
 contracts. No old case is called or deleted. Independent review, default catalog
 integration and actual Java execution remain pending.
 
@@ -55,9 +55,8 @@ observed order and terminal outcomes are saved as artifacts.
   restores its original blocking dependency. An explicit zero submission gap
   avoids inserting a .15s pause after the standalone placeholder.
 
-## Pending contracts (13)
+## Pending contracts (12)
 
-- atpm_preempt_prefill_queued
 - atpm_preempt_decode_engine_owned
 - atpm_preemption_disabled_zero_eviction
 - atpm_timeout_attribution
@@ -89,3 +88,42 @@ only external IO faked. It covers complete ten-request execution, inverted
 engine dispatch, missing lifecycle evidence, a yielded incoming, a rejected
 placeholder blocking the wave, and compiled configuration/budget/order checks.
 Local fixtures are not Java PASS or complete fourteen-contract acceptance.
+
+## Second candidate: prefill_queued
+
+Legacy `atpm_preempt_prefill_queued` is preserved as one single-nonbatch
+program with two dependent rounds under the same Q2 environment. Round one
+has a priority-50 placeholder and peers 30a,30b,40a,40b,30c,30d,30e,30f,70;
+round two has a priority-70 placeholder and eight 70 peers plus incoming 90.
+All twenty requests retain 2048/2 shape. Each round explicitly waits for the
+placeholder Schedule admission and P pending >=1, submits peers with .15s
+gaps, settles every Schedule, then drains placeholder before the nine peers.
+Each round retains its own 30s Master clean gate before proceeding.
+
+The observed dispatch contract remains first submitter, then descending
+priority with submit-order ties. Round-one PR10 requires shape, no wave
+8400/8429 and placeholder success; PR5 requires shape/no eviction; PR6
+requires shape/all nine success; PR4 requires all these together. Round-two
+PR10 additionally includes the placeholder in zero-eviction checks and
+requires shape/all nine/placeholder success. Each P6_terminal checks shape
+and both cohorts' success, conjoined with that round's Master clean.
+Raw engine dispatch and both cohorts' outcomes are retained separately for
+each round. This is the old EV-1-FIXED pull-model contract; it does not claim
+that eviction actually happened or that BATCH victim selection was tested.
+The 1200s whole-instance envelope accommodates two independently bounded
+rounds; Schedule90, Generate120, each-consumer35 and clean30 are unchanged.
+
+Complete-program tests add twenty actual consumer workers, an engine-order
+inversion blocking round two, and a rejected second placeholder blocking
+its nine peers. These remain external-IO fixtures, not Java execution.
+
+## Shared cleanup dependency
+
+Independent review found that the original base's balance_clean incorrectly
+accepted Decode {inflight_requests: 0, total_load: 7}. Both candidates require
+the owner fix d955a8434b9c1458e1eadb76f90734eda47b1c23 (core pick 0482),
+which validates all present counters then preserves the legacy OR fallback.
+The first candidate 2a664 was independently accepted only together with this
+fix; bare 2a664 is not equivalent for P6. The shared owner has independent
+0/7 TIMEOUT and missing-fields ERROR evidence. No local duplicate cleaner is
+introduced by the preemption implementation.

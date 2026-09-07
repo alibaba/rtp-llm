@@ -95,13 +95,13 @@ def _outcome(entry, row):
     return False, 8429 if code == 2 else code
 
 
-def _same_priority(ctx, p, deadline):
+def _observations(ctx, p, deadline):
     placeholder, wave = [_cohort(ctx, p[key]) for key in ("placeholder", "wave")]
     if not placeholder.complete or not wave.complete:
         raise ValueError("preemption verdict requires drained owned cohorts")
     ph, rows = placeholder.records(), wave.records()
     if len(ph) != 1 or len(rows) != 9 or len(wave.entries) != 9:
-        raise ValueError("same-priority program needs placeholder plus nine peers")
+        raise ValueError("preemption program needs placeholder plus nine peers")
     ordered = sorted(
         ph + rows, key=lambda r: (r["schedule"]["ended_s"], r["wire_request_id"])
     )
@@ -124,8 +124,13 @@ def _same_priority(ctx, p, deadline):
         running = _number(matches[0].get("running_ms"), 0, 1e18)
         dispatch.append((running, ranks[rid], rid))
     actual = [r[2] for r in sorted(dispatch)]
-    expected = [r["wire_request_id"] for r in rows]
     outcomes = [_outcome(e, r) for e, r in zip(wave.entries, rows)]
+    return placeholder, wave, ph, rows, raw, dispatch, actual, outcomes
+
+
+def _same_priority(ctx, p, deadline):
+    _, _, ph, rows, raw, dispatch, actual, outcomes = _observations(ctx, p, deadline)
+    expected = [r["wire_request_id"] for r in rows]
     zero_eviction = all(code not in (8400, 8429) for _, code in outcomes)
     all_ok = all(ok for ok, _ in outcomes)
     shape = actual == expected
@@ -165,7 +170,107 @@ def _same_priority(ctx, p, deadline):
     return StageOutput(checks=checks, artifacts=[str(path)])
 
 
+def _queued_params(p, plan):
+    p = _params(p, {"placeholder", "wave", "round"}, {"placeholder", "wave", "round"})
+    for key in ("placeholder", "wave"):
+        plan.reference(p[key], "requests")
+    _number(p["round"], 1, 2, True)
+    return p
+
+
+def _queued_first_params(p, plan):
+    p = _queued_params(p, plan)
+    if p["round"] != 1:
+        raise ValueError("first queued action requires round one")
+    return p
+
+
+def _queued_second_params(p, plan):
+    p = _queued_params(p, plan)
+    if p["round"] != 2:
+        raise ValueError("second queued action requires round two")
+    return p
+
+
+def _queued(ctx, p, deadline):
+    placeholder, wave, ph, rows, raw, dispatch, actual, outcomes = _observations(
+        ctx, p, deadline
+    )
+    priorities = [r["priority"] for r in wave.p["requests"]]
+    required = (
+        [30, 30, 40, 40, 30, 30, 30, 30, 70] if p["round"] == 1 else [70] * 8 + [90]
+    )
+    if priorities != required or placeholder.p["requests"][0]["priority"] != (
+        50 if p["round"] == 1 else 70
+    ):
+        raise ValueError("queued preemption cohort differs from legacy round")
+    indices = [0] + sorted(range(1, 9), key=lambda i: (-priorities[i], i))
+    expected = [rows[i]["wire_request_id"] for i in indices]
+    ph_ok, ph_code = _outcome(placeholder.entries[0], ph[0])
+    zero = all(code not in (8400, 8429) for _, code in outcomes)
+    if p["round"] == 2:
+        zero = zero and ph_code not in (8400, 8429)
+    shape, all_ok = actual == expected, all(ok for ok, _ in outcomes)
+    if p["round"] == 1:
+        predicates = dict(
+            PR10=shape and zero and ph_ok,
+            PR5=zero and shape,
+            PR6=all_ok and shape,
+            PR4=zero and ph_ok and shape and all_ok,
+        )
+    else:
+        predicates = dict(PR10=zero and shape and all_ok and ph_ok)
+    predicates["P6_terminal"] = shape and all_ok and ph_ok
+    evidence = dict(
+        round=p["round"],
+        shape=shape,
+        all_ok=all_ok,
+        placeholder_ok=ph_ok,
+        zero_eviction=zero,
+        dispatch=actual,
+    )
+    path = ctx.artifact_dir / f"preemption-queued-{uuid.uuid4().hex}.json"
+    path.write_text(
+        json.dumps(
+            dict(
+                placeholder=ph,
+                wave=rows,
+                snapshot=raw,
+                dispatch=dispatch,
+                outcomes=outcomes,
+                placeholder_outcome=[ph_ok, ph_code],
+                expected=expected,
+            ),
+            indent=2,
+        )
+        + "\n"
+    )
+    return StageOutput(
+        checks=[
+            CheckResult(
+                key, "PASS" if ok else "FAIL", actual=evidence, expected=expected
+            )
+            for key, ok in predicates.items()
+        ],
+        artifacts=[str(path)],
+    )
+
+
 HANDLERS = [
+    StageHandler(
+        "preemption_queued_first",
+        _queued_first_params,
+        _queued,
+        {},
+        checks=frozenset({"PR10", "PR5", "PR6", "PR4", "P6_terminal"}),
+    ),
+    StageHandler(
+        "preemption_queued_second",
+        _queued_second_params,
+        _queued,
+        {},
+        checks=frozenset({"PR10", "P6_terminal"}),
+    ),
     StageHandler(
         "preemption_settled", _settled_params, _settled, {"admitted": "boolean"}
     ),

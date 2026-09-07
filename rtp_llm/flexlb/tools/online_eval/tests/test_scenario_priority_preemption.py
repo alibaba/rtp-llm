@@ -19,10 +19,11 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class Backend:
-    def __init__(self, reverse=False, missing=False, rejected=None):
+    def __init__(self, reverse=False, missing=False, rejected=None, queued=False):
         self.ops = Ops(batch=False)
         self.ops.master_http_port = 1
         self.reverse, self.missing = reverse, missing
+        self.queued = queued
         original_future = self.ops.future
 
         def future(req, timeout, metadata=None):
@@ -61,6 +62,34 @@ class Backend:
         }
         if self.missing:
             lifecycle.pop("6")
+        if self.queued:
+            order = [
+                1,
+                2,
+                10,
+                4,
+                5,
+                3,
+                6,
+                7,
+                8,
+                9,
+                11,
+                12,
+                20,
+                13,
+                14,
+                15,
+                16,
+                17,
+                18,
+                19,
+            ]
+            if self.reverse:
+                order[2], order[3] = order[3], order[2]
+            lifecycle = {
+                str(rid): dict(running_ms=i * 4000) for i, rid in enumerate(order)
+            }
         return {
             "engines": [
                 dict(
@@ -78,18 +107,18 @@ class Backend:
 
 
 class PreemptionPrograms(unittest.TestCase):
-    def plan(self):
+    def plan(self, variant="same_priority_zero_eviction"):
         registry = handlers()
         registry.update({h.name: h for h in preempt.HANDLERS})
         plans = compile_scenarios(
             load_scenarios(ROOT / "scenarios/priority/priority_preemption.yaml"),
             handlers=registry,
         )
-        self.assertEqual(1, len(plans))
-        return plans[0], registry
+        self.assertEqual(2, len(plans))
+        return next(p for p in plans if p["variant_id"] == variant), registry
 
-    def run_program(self, **kwargs):
-        plan, registry = self.plan()
+    def run_program(self, variant="same_priority_zero_eviction", **kwargs):
+        plan, registry = self.plan(variant)
         backend = Backend(**kwargs)
         with tempfile.TemporaryDirectory() as tmp, patch.object(
             priority, "_http", backend.http
@@ -191,3 +220,47 @@ class PreemptionPrograms(unittest.TestCase):
                 "status"
             ],
         )
+
+    def test_queued_two_rounds_preserve_twenty_consumers(self):
+        result, cohorts, backend = self.run_program(
+            variant="prefill_queued", queued=True
+        )
+        self.assertEqual("PASS", result["status"], result)
+        self.assertEqual(20, backend.ops.generate_count)
+        self.assertEqual([1, 1, 9, 9], sorted(map(len, cohorts)))
+        self.assertTrue(
+            all(r["consumer_completion_verified"] for wave in cohorts for r in wave)
+        )
+        self.assertTrue(all(c["status"] == "PASS" for c in result["cleanup"]))
+        plan, _ = self.plan("prefill_queued")
+        stages = {s["id"]: s for s in plan["stages"]}
+        order = list(stages)
+        self.assertLess(order.index("r1_master_clean"), order.index("r2_placeholder"))
+        for n in (1, 2):
+            self.assertEqual(30, stages[f"r{n}_master_clean"]["timeout_s"])
+            self.assertEqual(90, stages[f"r{n}_wave_settled"]["timeout_s"])
+            self.assertEqual(35, stages[f"r{n}_placeholder_drain"]["timeout_s"])
+            self.assertEqual(315, stages[f"r{n}_wave_drain"]["timeout_s"])
+            self.assertLess(
+                order.index(f"r{n}_wave_settled"),
+                order.index(f"r{n}_placeholder_drain"),
+            )
+
+    def test_queued_priority_inversion_blocks_second_round(self):
+        result, _, backend = self.run_program(
+            variant="prefill_queued", queued=True, reverse=True
+        )
+        self.assertEqual("FAIL", result["status"])
+        self.assertEqual(10, backend.ops.generate_count)
+        checks = next(s for s in result["stages"] if s["id"] == "r1_same_priority")[
+            "checks"
+        ]
+        self.assertTrue(all(c["status"] == "FAIL" for c in checks))
+
+    def test_queued_second_placeholder_rejection_blocks_second_wave(self):
+        result, _, backend = self.run_program(
+            variant="prefill_queued", queued=True, rejected=11
+        )
+        self.assertEqual("FAIL", result["status"])
+        self.assertEqual(11, len(backend.shapes))
+        self.assertEqual(10, backend.ops.generate_count)
