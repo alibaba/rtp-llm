@@ -1,0 +1,376 @@
+schema_version: 1
+id: engine_fault_recovery
+description: Explicit generation, recovery and per-owner state contracts; first two of nine legacy mappings.
+category: engine_fault
+profiles:
+- batch-window
+- single-nonbatch
+- single-batch
+- window-nonbatch
+environment:
+  backend: java_mock
+  n_prefill: 2
+  n_decode: 2
+  discovery: discovery_file
+  perf_preset: fault_env
+  master_sync_log: true
+  config_overrides:
+    ordering: priority
+    queue_timeout_ms:
+      omit: true
+execution:
+  timeout_s: 900
+  stage_timeout_s: 120
+  cleanup_timeout_s: 120
+legacy_case_ids:
+- engine_fault_recovery_generation_bump
+- engine_fault_status_gap_no_bump
+variants:
+- id: generation_bump
+  legacy_case_ids:
+  - engine_fault_recovery_generation_bump
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: prior_drain_observed
+    action: recovery_observe
+    params:
+      duration_s: 95
+      until:
+        metric: cleanup_inflight
+        op: eq
+        value: 0
+    timeout_s: 110
+  - id: target
+    action: recovery_select
+    params:
+      targets:
+      - prefill-0
+  - id: log_mark
+    action: recovery_log_mark
+    params:
+      selection:
+        $ref: stages.target.output.selection
+  - id: generation_before
+    action: recovery_observe
+    params:
+      duration_s: 0
+      selection:
+        $ref: stages.target.output.selection
+      log:
+        $ref: stages.log_mark.output.snapshot
+      include:
+      - log
+    timeout_s: 30
+  - id: baseline
+    action: recovery_prepare
+    params:
+      count: 6
+      concurrency: 6
+      unique_key_count: 3
+  - id: baseline_dispatch
+    action: recovery_dispatch
+    params:
+      requests:
+        $ref: stages.baseline.output.requests
+    timeout_s: 120
+  - id: baseline_state
+    action: recovery_observe
+    params:
+      duration_s: 0
+      requests:
+        $ref: stages.baseline.output.requests
+      include:
+      - client_records
+    timeout_s: 30
+  - id: baseline_succeeds
+    action: recovery_check
+    params:
+      snapshot:
+        $ref: stages.baseline_state.output.snapshot
+      metric: success
+      op: eq
+      expected: 6
+  - id: outage
+    action: engine_control
+    params:
+      operation: stop
+      targets:
+      - prefill-0
+  - id: retirement
+    action: recovery_observe
+    params:
+      duration_s: 30
+      until:
+        metric: retired
+        op: ge
+        value: 1
+      log:
+        $ref: stages.log_mark.output.snapshot
+      include:
+      - log
+    timeout_s: 45
+  - id: transport_retired
+    action: recovery_check
+    params:
+      snapshot:
+        $ref: stages.retirement.output.snapshot
+      metric: retired
+      op: ge
+      expected: 1
+  - id: restart
+    action: engine_control
+    params:
+      operation: start
+      targets:
+      - prefill-0
+  - id: alive_restored
+    action: recovery_observe
+    params:
+      duration_s: 30
+      until:
+        metric: alive_prefill
+        op: ge
+        value: 2
+      include:
+      - info
+    timeout_s: 45
+  - id: alive_back
+    action: recovery_check
+    params:
+      snapshot:
+        $ref: stages.alive_restored.output.snapshot
+      metric: alive_prefill
+      op: ge
+      expected: 2
+  - id: reconnect
+    action: recovery_pause
+    params:
+      duration_s: 3
+    timeout_s: 30
+  - id: recovered_generation
+    action: recovery_observe
+    params:
+      duration_s: 0
+      selection:
+        $ref: stages.target.output.selection
+      log:
+        $ref: stages.log_mark.output.snapshot
+      include:
+      - log
+      - inflight
+    timeout_s: 30
+  - id: generation_is_new
+    action: recovery_check
+    params:
+      snapshot:
+        $ref: stages.recovered_generation.output.snapshot
+      metric: created
+      op: ge
+      expected: 1
+      baseline:
+        $ref: stages.generation_before.output.snapshot
+  - id: recovered_prefill_batch_ledger_zero
+    action: recovery_check
+    params:
+      snapshot:
+        $ref: stages.recovered_generation.output.snapshot
+      metric: target_prefill_batches
+      op: eq
+      expected: 0
+  - id: recovered_prefill_member_ledger_zero
+    action: recovery_check
+    params:
+      snapshot:
+        $ref: stages.recovered_generation.output.snapshot
+      metric: target_prefill_requests
+      op: eq
+      expected: 0
+  - id: recovery
+    action: recovery_prepare
+    params:
+      count: 1
+      concurrency: 1
+      stream_timeout_s: 30
+  - id: recovery_dispatch
+    action: recovery_dispatch
+    params:
+      requests:
+        $ref: stages.recovery.output.requests
+    timeout_s: 120
+  - id: recovery_state
+    action: recovery_observe
+    params:
+      duration_s: 0
+      requests:
+        $ref: stages.recovery.output.requests
+      include:
+      - client_records
+    timeout_s: 30
+  - id: recovery_succeeds
+    action: recovery_check
+    params:
+      snapshot:
+        $ref: stages.recovery_state.output.snapshot
+      metric: success
+      op: eq
+      expected: 1
+  - id: cleanup
+    action: teardown
+- id: status_gap_no_bump
+  legacy_case_ids:
+  - engine_fault_status_gap_no_bump
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: prior_drain_observed
+    action: recovery_observe
+    params:
+      duration_s: 95
+      until:
+        metric: cleanup_inflight
+        op: eq
+        value: 0
+    timeout_s: 110
+  - id: target
+    action: recovery_select
+    params:
+      targets:
+      - prefill-0
+  - id: log_mark
+    action: recovery_log_mark
+    params:
+      selection:
+        $ref: stages.target.output.selection
+  - id: generation_before
+    action: recovery_observe
+    params:
+      duration_s: 0
+      selection:
+        $ref: stages.target.output.selection
+      log:
+        $ref: stages.log_mark.output.snapshot
+      include:
+      - log
+    timeout_s: 30
+  - id: baseline
+    action: recovery_prepare
+    params:
+      count: 4
+      concurrency: 4
+      unique_key_count: 3
+  - id: baseline_dispatch
+    action: recovery_dispatch
+    params:
+      requests:
+        $ref: stages.baseline.output.requests
+    timeout_s: 120
+  - id: baseline_state
+    action: recovery_observe
+    params:
+      duration_s: 0
+      requests:
+        $ref: stages.baseline.output.requests
+      include:
+      - client_records
+    timeout_s: 30
+  - id: baseline_succeeds
+    action: recovery_check
+    params:
+      snapshot:
+        $ref: stages.baseline_state.output.snapshot
+      metric: success
+      op: eq
+      expected: 4
+  - id: short_gap
+    action: status_control
+    params:
+      fault: status_no_respond
+      selection: first
+  - id: two_poll_ticks
+    action: recovery_pause
+    params:
+      duration_s: 0.045
+    timeout_s: 30
+  - id: resume_status
+    action: status_control
+    params:
+      fault: status_no_respond
+      selection: first
+      enabled: false
+  - id: hung_rpc_deadline_and_resume
+    action: recovery_pause
+    params:
+      duration_s: 2
+    timeout_s: 30
+  - id: post_gap_generation
+    action: recovery_observe
+    params:
+      duration_s: 0
+      selection:
+        $ref: stages.target.output.selection
+      log:
+        $ref: stages.log_mark.output.snapshot
+      include:
+      - log
+      - info
+    timeout_s: 30
+  - id: no_new_generation
+    action: recovery_check
+    params:
+      snapshot:
+        $ref: stages.post_gap_generation.output.snapshot
+      metric: created
+      op: le
+      expected: 0
+      baseline:
+        $ref: stages.generation_before.output.snapshot
+  - id: discovered_intact
+    action: recovery_check
+    params:
+      snapshot:
+        $ref: stages.post_gap_generation.output.snapshot
+      metric: discovered_prefill
+      op: eq
+      expected: 2
+  - id: alive_intact
+    action: recovery_check
+    params:
+      snapshot:
+        $ref: stages.post_gap_generation.output.snapshot
+      metric: alive_prefill
+      op: eq
+      expected: 2
+  - id: post_gap
+    action: recovery_prepare
+    params:
+      count: 4
+      concurrency: 4
+      unique_key_count: 3
+  - id: post_gap_dispatch
+    action: recovery_dispatch
+    params:
+      requests:
+        $ref: stages.post_gap.output.requests
+    timeout_s: 120
+  - id: post_gap_state
+    action: recovery_observe
+    params:
+      duration_s: 0
+      requests:
+        $ref: stages.post_gap.output.requests
+      include:
+      - client_records
+    timeout_s: 30
+  - id: post_gap_succeeds
+    action: recovery_check
+    params:
+      snapshot:
+        $ref: stages.post_gap_state.output.snapshot
+      metric: success
+      op: eq
+      expected: 4
+  - id: cleanup
+    action: teardown
