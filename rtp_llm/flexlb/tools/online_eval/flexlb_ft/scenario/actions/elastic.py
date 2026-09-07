@@ -265,6 +265,7 @@ class BoundedFlow(RecordedRequests):
         self.families = copy.deepcopy(families)
         self.interval_s, self.max_inflight = interval_s, max_inflight
         self._stop = threading.Event()
+        self.done = threading.Event()
         self.thread = threading.Thread(
             target=self._pump, name="elastic-recorded-flow", daemon=True
         )
@@ -294,18 +295,27 @@ class BoundedFlow(RecordedRequests):
                     self._stop.wait(self.interval_s)
         except Exception as exc:
             self.pump_error = repr(exc)
+        finally:
+            # Executor shutdown has completed and all worker records are final.
+            self.done.set()
 
     def stop(self, deadline, cancel=False):
         self._stop.set()
         if cancel:
             self.cancel_active()
         if self.thread.ident is not None:
-            self.thread.join(max(0, deadline.remaining()))
-            if self.thread.is_alive():
+            try:
+                if not self.done.wait(max(0, deadline.remaining())):
+                    raise TimeoutError("flow completion event did not arrive")
+            except TimeoutError:
                 self.cancel_active("drain_deadline")
-                raise TimeoutError(
-                    "flow drain budget expired; requests cancelled, not completed"
-                )
+                raise
+            records = self.snapshot_records()
+            if any(
+                r["consumer_exit_s"] is None or r["transport_terminal_s"] is None
+                for r in records
+            ):
+                raise RuntimeError("flow completed without final consumer records")
         return completeness(self.snapshot_records())
 
 
@@ -677,11 +687,21 @@ class ElasticMetrics:
         self.end = ctx.clock() + max_duration_s
         self.samples, self.errors = [], []
         self._lock, self._stop = threading.Lock(), threading.Event()
+        self.done = threading.Event()
         self.thread = threading.Thread(
             target=self._run, daemon=True, name="elastic-metrics"
         )
 
     def _run(self):
+        try:
+            self._sample_loop()
+        except Exception as exc:
+            with self._lock:
+                self.errors.append(dict(time_s=self.ctx.clock(), error=repr(exc)))
+        finally:
+            self.done.set()
+
+    def _sample_loop(self):
         while not self._stop.is_set():
             now = self.ctx.clock()
             if now >= self.end:
@@ -716,12 +736,16 @@ class ElasticMetrics:
 
     def stop(self, deadline):
         self._stop.set()
-        if self.thread.ident is not None:
-            self.thread.join(max(0, deadline.remaining()))
-            if self.thread.is_alive():
-                raise TimeoutError("metrics thread did not stop within cleanup budget")
-        path = self.ctx.artifact_dir / "elastic-metrics.json"
-        path.write_text(json.dumps(self.snapshot(), indent=2))
+        try:
+            if self.thread.ident is not None and not self.done.wait(
+                max(0, deadline.remaining())
+            ):
+                raise TimeoutError("metrics completion event did not arrive")
+        finally:
+            path = self.ctx.artifact_dir / "elastic-metrics.json"
+            evidence = self.snapshot()
+            evidence["complete"] = self.done.is_set() or self.thread.ident is None
+            path.write_text(json.dumps(evidence, indent=2))
         if self.errors:
             raise ValueError(f"metric acquisition errors: {self.errors}")
 

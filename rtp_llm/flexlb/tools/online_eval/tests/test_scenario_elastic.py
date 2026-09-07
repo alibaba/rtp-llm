@@ -352,3 +352,37 @@ class ElasticFlowTests(unittest.TestCase):
         finally:
             release.set()
             flow.stop(Deadline(2), cancel=True)
+
+
+class ElasticCompletionTests(unittest.TestCase):
+    def test_flow_false_is_alive_is_not_completion_evidence(self):
+        flow = e.BoundedFlow(NS(), 1, [[1]])
+        flow.thread = NS(ident=1, is_alive=lambda: False)
+        with self.assertRaises(TimeoutError):
+            flow.stop(Deadline(0.001))
+
+    def test_flow_done_without_record_terminal_is_error(self):
+        flow = e.BoundedFlow(NS(), 1, [[1]])
+        flow.thread = NS(ident=1, is_alive=lambda: False)
+        flow.issue(1, time.monotonic)
+        flow.done.set()
+        with self.assertRaisesRegex(RuntimeError, "without final consumer"):
+            flow.stop(Deadline(1))
+
+    def test_metrics_requires_done_and_persists_incomplete_evidence(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as root:
+            ctx = NS(clock=time.monotonic, env_epoch=1, artifact_dir=Path(root))
+            metrics = e.ElasticMetrics(ctx)
+            metrics.thread = NS(ident=1, is_alive=lambda: False)
+            with self.assertRaises(TimeoutError):
+                metrics.stop(Deadline(0.001))
+            import json
+
+            evidence = json.loads((Path(root) / "elastic-metrics.json").read_text())
+            self.assertFalse(evidence["complete"])
+            metrics.done.set()
+            metrics.stop(Deadline(1))
+            evidence = json.loads((Path(root) / "elastic-metrics.json").read_text())
+            self.assertTrue(evidence["complete"])
