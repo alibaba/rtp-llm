@@ -208,6 +208,33 @@ class BackendTest(unittest.TestCase):
         self.assertNotIn("priority", requests.snapshot_records()[0]["request_shape"])
         ctx.cleanup(1)
 
+    def test_generated_shape_is_recorded_after_request_identity_exists(self):
+        class Generated(RequestBatch):
+            @property
+            def shape(self):
+                result = super().shape
+                if self.entries:
+                    result["block_keys"] = [
+                        self.entries[-1]["record"]["wire_request_id"] * 100
+                    ]
+                return result
+
+        with tempfile.TemporaryDirectory() as root:
+            ctx = RuntimeContext({}, None, root, time.monotonic, time.sleep)
+            ctx.ops = Ops()
+            ctx.instance_deadline_s = time.monotonic() + 2
+            batch = Generated(
+                ctx, dict(count=1, input_len=10, output_len=2, consume="immediate")
+            )
+            ctx.register_resource("requests", batch, batch.cleanup)
+            batch.submit(Deadline(time.monotonic() + 1))
+            batch.wait(Deadline(time.monotonic() + 1))
+            self.assertEqual(
+                batch.snapshot_records()[0]["request_shape"],
+                ctx.ops.last_schedule[0][1],
+            )
+            self.assertEqual(ctx.cleanup(1)[0]["status"], "PASS")
+
     def test_wait_timeout_cleanup_cancels_actual_call_and_joins(self):
         requests, ctx = self.run_batch("immediate", hanging=True)
         with self.assertRaises(StageTimeout):

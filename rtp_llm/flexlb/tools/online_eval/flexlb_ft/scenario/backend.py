@@ -83,9 +83,6 @@ class RequestBatch(ClientRecords):
         for _ in range(self.params["count"]):
             deadline.check()
             record = self.issue(self.ops.next_request_id(), self.ctx.clock)
-            with self._lock:
-                record["request_shape"] = dict(self.shape)
-                record["qos_level"] = self.params.get("qos_level")
             entry = dict(
                 record=record,
                 response=None,
@@ -94,6 +91,9 @@ class RequestBatch(ClientRecords):
                 done=threading.Event(),
             )
             self.entries.append(entry)
+            with self._lock:
+                record["request_shape"] = dict(self.shape)
+                record["qos_level"] = self.params.get("qos_level")
             rid = record["wire_request_id"]
             try:
                 limit = min(
