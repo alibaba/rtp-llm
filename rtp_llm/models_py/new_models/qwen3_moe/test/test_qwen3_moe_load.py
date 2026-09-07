@@ -1244,21 +1244,21 @@ class MoEQuantizedDispatchTest(unittest.TestCase):
 
 
 class MoeRuntimeConfigTest(unittest.TestCase):
-    def test_adapter_distinguishes_inherited_and_explicit_none_quant_config(self):
+    def test_adapter_keeps_omitted_and_explicit_none_unquantized(self):
         source_quant = types.SimpleNamespace(get_method=lambda: "FP8")
         model_config = _runtime_model_config(2, source_quant)
         parallelism = _parallelism()
         moe_config = _moe_config()
 
-        inherited = MoEConfigAdapter(model_config, parallelism, moe_config)
-        ignored = MoEConfigAdapter(
+        omitted = MoEConfigAdapter(model_config, parallelism, moe_config)
+        explicit_none = MoEConfigAdapter(
             model_config, parallelism, moe_config, quant_config=None
         )
 
-        self.assertIs(inherited.quant_config, source_quant)
-        self.assertTrue(MoeConfigResolver.has_quantization(inherited))
-        self.assertIsNone(ignored.quant_config)
-        self.assertFalse(MoeConfigResolver.has_quantization(ignored))
+        self.assertIsNone(omitted.quant_config)
+        self.assertFalse(MoeConfigResolver.has_quantization(omitted))
+        self.assertIsNone(explicit_none.quant_config)
+        self.assertFalse(MoeConfigResolver.has_quantization(explicit_none))
 
 
 class Qwen3MoeModelTest(unittest.TestCase):
