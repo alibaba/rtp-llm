@@ -51,7 +51,7 @@ def _fleet(ctx, p, deadline):
 
 
 def _wave_params(p, plan):
-    p = _params(p, {"requests", "gap_s"}, {"requests"})
+    p = _params(p, {"requests", "gap_s", "serial_schedule"}, {"requests"})
     if not isinstance(p["requests"], list) or not 1 <= len(p["requests"]) <= 32:
         raise ValueError("priority cohort must contain 1..32 requests")
     tags = set()
@@ -70,6 +70,9 @@ def _wave_params(p, plan):
             _number(row[field], 1, 1000000, True)
     p.setdefault("gap_s", 0.15)
     _number(p["gap_s"], 0, 2)
+    p.setdefault("serial_schedule", False)
+    if type(p["serial_schedule"]) is not bool:
+        raise ValueError("serial_schedule must be boolean")
     return p
 
 
@@ -107,6 +110,10 @@ class PriorityWave:
                 target=self._submit, args=(item, end), daemon=True
             )
             item["thread"].start()
+            if self.p.get("serial_schedule", False):
+                self._join(item, deadline)
+                if item["error"] is not None:
+                    raise item["error"]
             deadline.sleep(self.p["gap_s"])
 
     def _submit(self, item, end):
@@ -195,6 +202,56 @@ def _wait(ctx, p, deadline):
     return StageOutput(artifacts=[str(wave.path)])
 
 
+def _completion_params(p, plan):
+    p = _params(p, {"requests"}, {"requests"})
+    if not isinstance(p["requests"], list) or not 1 <= len(p["requests"]) <= 4:
+        raise ValueError("completion requires 1..4 cohorts")
+    for ref in p["requests"]:
+        plan.reference(ref, "requests")
+    return p
+
+
+def _completion(ctx, p, deadline):
+    from .elastic import request_success
+
+    records = []
+    for ref in p["requests"]:
+        wave = _wave(ctx, {"requests": ref})
+        if not wave.complete:
+            raise ValueError("completion check requires settled cohort")
+        rows = wave.records()
+        if len(rows) != len(wave.p["requests"]):
+            raise ValueError("completion cohort lost a request record")
+        records.extend(rows)
+    ids = [r["wire_request_id"] for r in records]
+    if len(set(ids)) != len(ids):
+        raise ValueError("duplicate priority request identity")
+    groups = {}
+    for row in records:
+        priority = str(row["request_shape"].get("priority", "unset"))
+        group = groups.setdefault(
+            priority, {"issued": 0, "completed": 0, "latencies_s": []}
+        )
+        group["issued"] += 1
+        group["completed"] += int(request_success(row))
+        start, end = row["schedule"]["started_s"], row["transport_terminal_s"]
+        if start is not None and end is not None:
+            group["latencies_s"].append(end - start)
+    return StageOutput(
+        checks=[
+            CheckResult(
+                "P6",
+                (
+                    "PASS"
+                    if records and all(request_success(r) for r in records)
+                    else "FAIL"
+                ),
+                actual=groups,
+            )
+        ]
+    )
+
+
 def _fifo(ctx, p, deadline):
     wave = _wave(ctx, p)
     if not wave.complete:
@@ -250,6 +307,13 @@ HANDLERS = [
     StageHandler("priority_fleet", _empty, _fleet, {"prefill": "string"}),
     StageHandler("priority_start", _wave_params, _start, {"requests": "requests"}),
     StageHandler("priority_wait", _reference, _wait, {}),
+    StageHandler(
+        "priority_completion",
+        _completion_params,
+        _completion,
+        {},
+        checks=frozenset({"P6"}),
+    ),
     StageHandler(
         "priority_fifo", _reference, _fifo, {}, checks=frozenset({"PR2", "P6_terminal"})
     ),
