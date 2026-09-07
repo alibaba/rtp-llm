@@ -1,15 +1,45 @@
 """Explicit variant programs and bounded, declared master layouts."""
 
 import copy
+import tempfile
 import unittest
+from pathlib import Path
 
 from flexlb_ft.scenario import ScenarioError, compile_scenarios
-from flexlb_ft.scenario.backend import make_env_spec
+from flexlb_ft.scenario.backend import configure_master_sync_log, make_env_spec
 from flexlb_ft.scenario.contracts import StageHandler
 from test_scenario_compile import scenario
 
 
 class VariantProgramsTest(unittest.TestCase):
+    def test_sync_log_is_private_per_epoch_and_does_not_create_fake_evidence(self):
+        doc = scenario()
+        doc["variants"] = [
+            dict(id="logged", environment_overrides=dict(master_sync_log=True))
+        ]
+        plan = compile_scenarios([("logged.yaml", doc)], "batch-window")[0]
+        self.assertTrue(plan["environment"]["master_sync_log"])
+        spec = make_env_spec(
+            plan["environment"], plan["profile"], dict(master_base=28000)
+        )
+        with tempfile.TemporaryDirectory() as root:
+            path = configure_master_sync_log(spec, root, 1)
+            self.assertEqual(path, Path(root).resolve() / "master-sync-1" / "sync.log")
+            self.assertEqual(
+                spec.master_extra_args, [f"--flexlb.log.path={path.parent}"]
+            )
+            self.assertFalse(path.exists())
+            with self.assertRaises(FileExistsError):
+                configure_master_sync_log(spec, root, 1)
+        for value in (1, "true", dict(path="/tmp/shared")):
+            doc["environment"]["master_sync_log"] = value
+            doc["variants"] = [dict(id="bad")]
+            with self.assertRaises(ScenarioError):
+                compile_scenarios([("bad.yaml", doc)])
+        doc["environment"].update(master_sync_log=True, master_layout="dual_standalone")
+        with self.assertRaises(ScenarioError):
+            compile_scenarios([("dual.yaml", doc)])
+
     def test_startup_prefill_budget_preserves_disabled_zero_and_variant_values(self):
         from flexlb_ft.harness import default_perf
 

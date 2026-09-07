@@ -154,6 +154,7 @@ def environment(value, path, profile):
             "debug_enabled",
             "master_layout",
             "master_stable_window_s",
+            "master_sync_log",
         },
     )
     if value.get("backend", "java_mock") != "java_mock":
@@ -174,6 +175,14 @@ def environment(value, path, profile):
     if type(value.get("debug_enabled", False)) is not bool:
         fail(path + ".debug_enabled", "expected boolean")
     result["debug_enabled"] = value.get("debug_enabled", False)
+    if type(value.get("master_sync_log", False)) is not bool:
+        fail(path + ".master_sync_log", "expected boolean")
+    result["master_sync_log"] = value.get("master_sync_log", False)
+    if result["master_sync_log"] and result["master_layout"] != "single":
+        fail(
+            path + ".master_sync_log",
+            "isolated sync log currently requires single master",
+        )
     result["master_stable_window_s"] = number(
         value.get("master_stable_window_s", 3), path + ".master_stable_window_s"
     )
@@ -556,6 +565,7 @@ def compile_scenarios(documents, profile=None, handlers=None, grade="normal"):
                     "debug_enabled",
                     "master_layout",
                     "master_stable_window_s",
+                    "master_sync_log",
                 },
             )
             for key, value in patch.items():
