@@ -256,7 +256,81 @@ def _queued(ctx, p, deadline):
     )
 
 
+def _expiry(ctx, p, deadline):
+    placeholder, wave = [_cohort(ctx, p[key]) for key in ("placeholder", "wave")]
+    if not placeholder.complete or not wave.complete:
+        raise ValueError("expiry verdict requires drained cohorts")
+    ph, rows = placeholder.records(), wave.records()
+    expected_priorities = [30] * 8 + [70] + ([90, 90] if p["round"] == 1 else [])
+    if len(ph) != 1 or len(rows) != len(expected_priorities):
+        raise ValueError("expiry cohort size differs from legacy round")
+    if [r["priority"] for r in wave.p["requests"]] != expected_priorities:
+        raise ValueError("expiry cohort priorities differ from legacy round")
+    if placeholder.p["requests"][0]["priority"] != (90 if p["round"] == 1 else 70):
+        raise ValueError("expiry placeholder priority differs from legacy round")
+    outcomes = [_outcome(e, r) for e, r in zip(wave.entries, rows)]
+    reasons = []
+    for entry in wave.entries:
+        response = entry["batch"].entries[0]["response"]
+        if response is None:
+            raise ValueError("expiry requires actual Schedule response evidence")
+        reasons.append(
+            _number(
+                getattr(response, "admission_reject_reason", None), 0, 2**31 - 1, True
+            )
+        )
+    ph_ok, ph_code = _outcome(placeholder.entries[0], ph[0])
+    victims = [rows[i]["wire_request_id"] for i in range(8) if outcomes[i][1] == 8400]
+    expired = all(code == 8511 for _, code in outcomes)
+    unspecified = all(reason == 0 for reason in reasons)
+    incoming = rows[8]["schedule"]
+    wall_ms = (incoming["ended_s"] - incoming["started_s"]) * 1000
+    evidence = dict(
+        expired=expired,
+        reasons=reasons,
+        victims8400=victims,
+        placeholder_ok=ph_ok,
+        incoming_schedule_wall_ms=wall_ms,
+    )
+    path = ctx.artifact_dir / f"preemption-expiry-{uuid.uuid4().hex}.json"
+    path.write_text(
+        json.dumps(
+            dict(
+                placeholder=ph,
+                wave=rows,
+                outcomes=outcomes,
+                placeholder_outcome=[ph_ok, ph_code],
+                evidence=evidence,
+            ),
+            indent=2,
+        )
+        + "\n"
+    )
+    return StageOutput(
+        checks=[
+            CheckResult(
+                "PR7",
+                "PASS" if expired and unspecified and not victims and ph_ok else "FAIL",
+                actual=evidence,
+            ),
+            CheckResult(
+                "P6_terminal",
+                "PASS" if ph_ok and not victims else "FAIL",
+                actual=evidence,
+            ),
+        ],
+        artifacts=[str(path)],
+    )
+
+
 HANDLERS = [
+    StageHandler(
+        "preemption_expiry",
+        _queued_params,
+        _expiry,
+        {},
+        checks=frozenset({"PR7", "P6_terminal"}),
+    ),
     StageHandler(
         "preemption_queued_first",
         _queued_first_params,
