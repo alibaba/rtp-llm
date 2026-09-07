@@ -188,6 +188,11 @@ py_test(
     ],
     timeout = 'short',
     shard_count = 1,
+    # manual: both cases carry @unittest.skip("Temporarily disabled test case")
+    # (concurrency_limit_test.py:166, :204), so this reports OK (skipped=2) and
+    # passes having tested nothing -- while reserving a GPU. Drop the two skips
+    # to bring it back; until then it should not look like a passing gate.
+    tags = ["manual"],
     exec_properties = {'gpu':'A10'},
 )
 

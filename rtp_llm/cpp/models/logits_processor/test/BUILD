@@ -100,6 +100,12 @@ cc_test(
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
+    # manual: the only case here is TEST(..., DISABLED_DeepSeekFlashDecodeB35P3),
+    # so gtest reports "Running 0 tests from 0 test suites" and the target passes
+    # having measured nothing -- while still reserving a GPU. The ut jobs ask for
+    # the ... wildcard and filter -manual, so this removes it from CI without
+    # deleting it: run the benchmark on demand by explicit label.
+    tags = ["manual"],
     exec_properties = {'gpu':'A10'},
 )
 
