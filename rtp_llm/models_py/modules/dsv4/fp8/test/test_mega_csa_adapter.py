@@ -117,7 +117,9 @@ class MegaCSARoutingTest(unittest.TestCase):
         for layer in layers:
             layer.enable_mega_csa.assert_called_once()
             layer.enable_mega_hca.assert_called_once()
-            layer.enable_mega_front.assert_called_once_with(required=False)
+            layer.enable_mega_front.assert_called_once_with(
+                required=False, gen_num_per_cycle=0
+            )
 
     def test_auto_mega_keeps_non_se_front_optional_for_ep(self) -> None:
         layer = torch.nn.Module()
@@ -137,7 +139,9 @@ class MegaCSARoutingTest(unittest.TestCase):
             transformer = self._make_transformer(args, [layer])
 
         self.assertTrue(transformer._mega_decode_enabled)
-        layer.enable_mega_front.assert_called_once_with(required=False)
+        layer.enable_mega_front.assert_called_once_with(
+            required=False, gen_num_per_cycle=0
+        )
 
     def test_explicit_zero_disables_default_mega_path(self) -> None:
         layer = torch.nn.Module()
@@ -270,7 +274,9 @@ class MegaCSARoutingTest(unittest.TestCase):
         layer.enable_mega_hca.assert_called_once_with(
             transformer._mega_csa_runtime, model_weights.weights[0]
         )
-        layer.enable_mega_front.assert_called_once_with(required=False)
+        layer.enable_mega_front.assert_called_once_with(
+            required=False, gen_num_per_cycle=0
+        )
 
     def test_decode_q_len_one_uses_complete_mega_sublayer(self) -> None:
         adapter = MagicMock()

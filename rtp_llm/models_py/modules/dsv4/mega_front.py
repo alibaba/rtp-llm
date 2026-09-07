@@ -3,69 +3,48 @@
 from __future__ import annotations
 
 import logging
-import os
 from functools import reduce
 from operator import mul
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Sequence
 
 import torch
 
 from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
+from rtp_llm.models_py.modules.dsv4.fp8.decode.mega_csa_weights import (
+    HC,
+    HC_MIX,
+    MAX_BATCH,
+)
 
 if TYPE_CHECKING:
     from .moe_layer import MoE
 
 
-_CAPACITY_M = 128
-_HC_MULT = 4
-_HC_WIDTH = 24
 _TOPK = 6
 
 
-def _decode_capture_tokens() -> tuple[int, ...]:
-    raw = os.environ.get("DECODE_CAPTURE_CONFIG", "")
-    capture_batches: set[int] = set()
-    for item in raw.split(","):
-        item = item.strip()
-        if not item:
-            continue
-        try:
-            value = int(item)
-        except ValueError as exc:
-            raise RuntimeError(
-                f"invalid DECODE_CAPTURE_CONFIG item {item!r} for DSV4 MoE front"
-            ) from exc
-        if value < 1:
-            raise RuntimeError(
-                f"DSV4 MoE front requires positive capture batches, got {value}"
-            )
-        capture_batches.add(value)
-
-    raw_gamma = os.environ.get(
-        "GEN_NUM_PER_CIRCLE", os.environ.get("GEN_NUM_PER_CYCLE", "0")
-    ).strip()
-    try:
-        gamma = int(raw_gamma or "0")
-    except ValueError as exc:
-        raise RuntimeError(
-            f"invalid MTP generation width {raw_gamma!r} for DSV4 MoE front"
-        ) from exc
+def _capture_tokens_for_batches(
+    capture_batches: Sequence[int], gen_num_per_cycle: int
+) -> tuple[int, ...]:
+    """Expand framework-selected graph batches into MoE-front token widths."""
+    gamma = int(gen_num_per_cycle)
     if gamma < 0:
-        raise RuntimeError(f"DSV4 MoE front requires non-negative gamma, got {gamma}")
+        raise ValueError(f"DSV4 MoE front requires non-negative gamma, got {gamma}")
 
-    # One service can capture ordinary decode (B), DSpARK draft (B*gamma), and
-    # target verification (B*(gamma+1)). TMA plans bind their input address, so
-    # all three token counts must exist before any of those graphs are captured.
+    # The framework has already parsed and validated capture_batches. This
+    # helper only adds the DSpARK/target widths required by the front ABI.
     multipliers = {1}
     if gamma > 0:
         multipliers.update((gamma, gamma + 1))
     values = {
-        batch * multiplier for batch in capture_batches for multiplier in multipliers
+        int(batch) * multiplier
+        for batch in capture_batches
+        if int(batch) > 0
+        for multiplier in multipliers
     }
-    # A capture bucket above the front ABI limit is still a valid ordinary
-    # decode shape.  Leave it to Block.supports() to select the generic path;
-    # only create native plans for token counts the front can actually run.
-    return tuple(sorted(value for value in values if value <= _CAPACITY_M))
+    # A graph bucket above the front ABI limit remains valid for the ordinary
+    # path; Block.supports() selects that path instead of the native front.
+    return tuple(sorted(value for value in values if 0 < value <= MAX_BATCH))
 
 
 class MegaMoeFrontAdapter:
@@ -78,7 +57,14 @@ class MegaMoeFrontAdapter:
     symmetric buffer; no RTP gate/quant/pack kernel runs on this path.
     """
 
-    def __init__(self, moe: "MoE", ffn_hc, ffn_norm) -> None:
+    def __init__(
+        self,
+        moe: "MoE",
+        ffn_hc,
+        ffn_norm,
+        *,
+        gen_num_per_cycle: int = 0,
+    ) -> None:
         from rtp_kernel import dsv4_mega
 
         strategy = moe._strategy
@@ -99,11 +85,11 @@ class MegaMoeFrontAdapter:
         geometry = dsv4_mega.geometry_moe_front(self.dim)
         expected = {
             "hidden": self.dim,
-            "hc_mult": _HC_MULT,
-            "hc_width": _HC_WIDTH,
+            "hc_mult": HC,
+            "hc_width": HC_MIX,
             "experts": int(moe.n_routed_experts),
             "topk": int(moe.n_activated_experts),
-            "max_m": _CAPACITY_M,
+            "max_m": MAX_BATCH,
         }
         mismatches = {
             name: (geometry.get(name), value)
@@ -123,36 +109,34 @@ class MegaMoeFrontAdapter:
         device = self.gate.weight.device
         if device.type != "cuda":
             raise RuntimeError(f"DSV4 MoE front requires CUDA weights, got {device}")
-        if tuple(ffn_hc.fn.shape) != (_HC_WIDTH, _HC_MULT * self.dim):
+        if tuple(ffn_hc.fn.shape) != (HC_MIX, HC * self.dim):
             raise RuntimeError(
                 f"DSV4 MoE-front hc_fn shape mismatch: {tuple(ffn_hc.fn.shape)}"
             )
 
         self.hidden = torch.empty(
-            (_CAPACITY_M, _HC_MULT, self.dim),
+            (MAX_BATCH, HC, self.dim),
             dtype=torch.bfloat16,
             device=device,
         )
         self.collapsed = torch.empty(
-            (_CAPACITY_M, self.dim), dtype=torch.bfloat16, device=device
+            (MAX_BATCH, self.dim), dtype=torch.bfloat16, device=device
         )
         self.collapse_ssq = torch.empty(
-            (_CAPACITY_M,), dtype=torch.float32, device=device
+            (MAX_BATCH,), dtype=torch.float32, device=device
         )
         self.normalized_mix = torch.empty(
-            (_CAPACITY_M, _HC_WIDTH), dtype=torch.float32, device=device
+            (MAX_BATCH, HC_MIX), dtype=torch.float32, device=device
         )
         self.normalized = torch.empty_like(self.collapsed)
         self.router_logits = torch.empty(
-            (_CAPACITY_M, int(moe.n_routed_experts)),
+            (MAX_BATCH, int(moe.n_routed_experts)),
             dtype=torch.float32,
             device=device,
         )
-        self.post = torch.empty(
-            (_CAPACITY_M, _HC_MULT), dtype=torch.float32, device=device
-        )
+        self.post = torch.empty((MAX_BATCH, HC), dtype=torch.float32, device=device)
         self.comb = torch.empty(
-            (_CAPACITY_M, _HC_MULT, _HC_MULT),
+            (MAX_BATCH, HC, HC),
             dtype=torch.float32,
             device=device,
         )
@@ -172,9 +156,7 @@ class MegaMoeFrontAdapter:
         self.input_ids = None
         self.tid2eid = None
         if self.gate.hash:
-            self.input_ids = torch.empty(
-                (_CAPACITY_M,), dtype=torch.int64, device=device
-            )
+            self.input_ids = torch.empty((MAX_BATCH,), dtype=torch.int64, device=device)
             self.tid2eid = self.gate.tid2eid.to(torch.int32).contiguous()
         else:
             if self.gate.bias is None:
@@ -182,25 +164,28 @@ class MegaMoeFrontAdapter:
             self.correction_bias = self.gate.bias.to(torch.float32).contiguous()
 
         self._plans: dict[int, object] = {}
-        capture_tokens = _decode_capture_tokens()
-        if not capture_tokens:
-            logging.warning(
-                "[DSV4 MoE front] DECODE_CAPTURE_CONFIG is empty; plans will "
-                "be created lazily for eager decode"
-            )
-        for tokens in capture_tokens:
-            self._plans[tokens] = self._create_plan(tokens)
+        self._gen_num_per_cycle = int(gen_num_per_cycle)
 
         if self.layer_id == 0:
             logging.info(
-                "[DSV4 MoE front] enabled: geometry=%s capture_tokens=%s "
+                "[DSV4 MoE front] enabled: geometry=%s gen_num_per_cycle=%d "
                 "strategy=mega_se",
                 geometry,
-                list(capture_tokens),
+                self._gen_num_per_cycle,
             )
 
     def _create_plan(self, tokens: int):
         return self._dsv4_mega.Dsv4MoeFrontPlan(self.hidden, self.hc_fn, int(tokens))
+
+    def prepare_capture_plans(self, capture_batches: Sequence[int]) -> tuple[int, ...]:
+        """Create plans for the framework's final CUDA Graph capture buckets."""
+        capture_tokens = _capture_tokens_for_batches(
+            capture_batches, self._gen_num_per_cycle
+        )
+        for tokens in capture_tokens:
+            if tokens not in self._plans:
+                self._plans[tokens] = self._create_plan(tokens)
+        return capture_tokens
 
     def _plan_for(self, tokens: int):
         plan = self._plans.get(tokens)
@@ -209,7 +194,7 @@ class MegaMoeFrontAdapter:
         if torch.cuda.is_current_stream_capturing():
             raise RuntimeError(
                 f"DSV4 MoE-front plan for {tokens} tokens was not created before "
-                "CUDA graph capture; include this batch in DECODE_CAPTURE_CONFIG"
+                "CUDA graph capture; prepare plans from the Graph capture range"
             )
         plan = self._create_plan(tokens)
         self._plans[tokens] = plan
@@ -222,7 +207,7 @@ class MegaMoeFrontAdapter:
             return False
         tokens = reduce(mul, (int(value) for value in residual.shape[:-2]), 1)
         mega_capacity = int(self.strategy._mega_buf.num_max_tokens_per_rank)
-        return 0 <= tokens <= min(_CAPACITY_M, mega_capacity)
+        return 0 <= tokens <= min(MAX_BATCH, mega_capacity)
 
     def forward(
         self, residual: torch.Tensor, input_ids: torch.Tensor
@@ -230,15 +215,15 @@ class MegaMoeFrontAdapter:
         leading = tuple(int(value) for value in residual.shape[:-2])
         tokens = reduce(mul, leading, 1)
         buf = self.strategy._mega_buf
-        capacity = min(_CAPACITY_M, int(buf.num_max_tokens_per_rank))
+        capacity = min(MAX_BATCH, int(buf.num_max_tokens_per_rank))
         if tokens < 0 or tokens > capacity:
             raise RuntimeError(
                 f"DSV4 MoE front supports 0..{capacity} decode tokens, got {tokens}"
             )
-        if tuple(residual.shape[-2:]) != (_HC_MULT, self.dim):
+        if tuple(residual.shape[-2:]) != (HC, self.dim):
             raise RuntimeError(
                 "DSV4 MoE-front residual shape mismatch: "
-                f"got {tuple(residual.shape)}, expected [...,{_HC_MULT},{self.dim}]"
+                f"got {tuple(residual.shape)}, expected [...,{HC},{self.dim}]"
             )
         if not residual.is_contiguous() or not input_ids.is_contiguous():
             raise RuntimeError(
@@ -259,13 +244,13 @@ class MegaMoeFrontAdapter:
             return (
                 y.view(*leading, self.dim),
                 self.normalized[:0].view(*leading, self.dim),
-                self.post[:0].view(*leading, _HC_MULT, 1),
-                self.comb[:0].view(*leading, _HC_MULT, _HC_MULT),
+                self.post[:0].view(*leading, HC, 1),
+                self.comb[:0].view(*leading, HC, HC),
             )
 
         # The plan's TMA descriptor is bound to self.hidden. This is the only
         # staging operation; all following front outputs land in final buffers.
-        self.hidden[:tokens].copy_(residual.view(tokens, _HC_MULT, self.dim))
+        self.hidden[:tokens].copy_(residual.view(tokens, HC, self.dim))
         plan = self._plan_for(tokens)
         block_m = int(self.strategy._block_m(tokens))
 
@@ -330,8 +315,8 @@ class MegaMoeFrontAdapter:
         return (
             y.view(*leading, self.dim),
             self.normalized[:tokens].view(*leading, self.dim),
-            self.post[:tokens].view(*leading, _HC_MULT, 1),
-            self.comb[:tokens].view(*leading, _HC_MULT, _HC_MULT),
+            self.post[:tokens].view(*leading, HC, 1),
+            self.comb[:tokens].view(*leading, HC, HC),
         )
 
 

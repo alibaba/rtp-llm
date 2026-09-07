@@ -111,7 +111,9 @@ class MegaHCARoutingTest(unittest.TestCase):
         layer.enable_mega_csa.assert_called_once_with(
             transformer._mega_csa_runtime, model_weights.weights[0]
         )
-        layer.enable_mega_front.assert_called_once_with(required=True)
+        layer.enable_mega_front.assert_called_once_with(
+            required=True, gen_num_per_cycle=0
+        )
 
     def test_decode_q_len_one_uses_complete_hca_sublayer(self) -> None:
         adapter = MagicMock()
