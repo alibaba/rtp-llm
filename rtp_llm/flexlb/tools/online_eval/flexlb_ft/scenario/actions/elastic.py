@@ -1577,3 +1577,9 @@ HANDLERS.append(
         checks=frozenset({"drained", "PC", "PQ", "PK", "P6", "P2"}),
     )
 )
+
+# Kept in a separate module so lifecycle measurement does not expand the
+# cache-shrink implementation. Registration still belongs to the core catalog.
+from .elastic_lifecycle import HANDLERS as LIFECYCLE_HANDLERS
+
+HANDLERS += LIFECYCLE_HANDLERS

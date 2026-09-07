@@ -1,0 +1,362 @@
+"""Run the complete ordered YAML using simulated external services."""
+
+import copy
+import json
+import sys
+import tempfile
+import threading
+import unittest
+from pathlib import Path
+from types import SimpleNamespace as NS
+from unittest.mock import patch
+
+import yaml
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from flexlb_ft.scenario import compile_scenarios
+from flexlb_ft.scenario.actions import elastic as e
+from flexlb_ft.scenario.actions import elastic_lifecycle as life
+from flexlb_ft.scenario.runtime import execute_instance
+
+
+class Clock:
+    def __init__(self):
+        self.now = 0.0
+
+    def __call__(self):
+        return self.now
+
+    def sleep(self, seconds):
+        if seconds < 0:
+            raise AssertionError("negative sleep")
+        self.now += seconds
+
+
+class LifecycleTests(unittest.TestCase):
+    def test_share_thresholds_preserve_inclusive_preference_and_exclusive_rebalance(
+        self,
+    ):
+        before = dict(counts=dict(old0=0, old1=0, new=0))
+        after = dict(counts=dict(old0=20, old1=20, new=60))
+        for ceiling, exclusive, expected in [
+            (0.6, False, "PASS"),
+            (0.5, False, "FAIL"),
+            (0.6, True, "FAIL"),
+        ]:
+            with tempfile.TemporaryDirectory() as root:
+                ctx = NS(
+                    resolve=lambda v: v,
+                    resource=lambda v, *a: before if v == "before" else after,
+                    artifact_dir=Path(root),
+                )
+                result = life.share(
+                    ctx,
+                    dict(
+                        before="before",
+                        after="after",
+                        engine="new",
+                        max_share=ceiling,
+                        old_floor=0.1,
+                        exclusive=exclusive,
+                        require_new=True,
+                    ),
+                    NS(check=lambda: None),
+                )
+            self.assertEqual(result.checks[1].status, expected)
+
+    def test_old_worker_starvation_is_independent_of_newcomer_ceiling(self):
+        before = dict(counts=dict(old0=0, old1=0, new=0))
+        after = dict(counts=dict(old0=5, old1=85, new=10))
+        with tempfile.TemporaryDirectory() as root:
+            ctx = NS(
+                resolve=lambda v: v,
+                resource=lambda v, *a: before if v == "before" else after,
+                artifact_dir=Path(root),
+            )
+            result = life.share(
+                ctx,
+                dict(
+                    before="before",
+                    after="after",
+                    engine="new",
+                    max_share=0.6,
+                    old_floor=0.1,
+                    exclusive=False,
+                    require_new=False,
+                ),
+                NS(check=lambda: None),
+            )
+        self.assertEqual(result.checks[1].status, "PASS")
+        self.assertEqual(result.checks[2].status, "FAIL")
+
+    def test_pre_add_successes_do_not_dilute_add_window_failure(self):
+        flow = e.ClientRecords(1)
+        for timestamp in range(110):
+            record = flow.issue(timestamp, lambda: timestamp)
+            flow.update(
+                record,
+                business_finished=timestamp < 108,
+                schedule=dict(status="OK"),
+                stream=dict(status="OK"),
+                consumer_exit_s=110,
+                transport_terminal_s=110,
+            )
+        with tempfile.TemporaryDirectory() as root:
+            ctx = NS(
+                clock=lambda: 120,
+                resolve=lambda x: x,
+                resource=lambda value, *a: (
+                    flow if value == "flow" else dict(started_s=101)
+                ),
+                artifact_dir=Path(root),
+            )
+            result = life.add_availability(
+                ctx,
+                dict(flow="flow", mutation="mutation", received_s=109),
+                NS(check=lambda: None),
+            )
+        self.assertEqual(result.checks[0].actual, 10)
+        self.assertEqual(result.checks[2].actual, 0.8)
+        self.assertEqual(result.checks[2].status, "FAIL")
+
+    def run_program(self, variant="normal", fail_remove=False, batch_error=False):
+        clock = Clock()
+        state = dict(
+            engines={
+                "prefill-0": dict(
+                    role="prefill", grpc_addr="127.0.0.1:10001", accepted=0
+                ),
+                "prefill-1": dict(
+                    role="prefill", grpc_addr="127.0.0.1:10003", accepted=0
+                ),
+            },
+            active=False,
+            last=0.0,
+            adds=0,
+            batches=0,
+            next_rid=1,
+            flow_count=0,
+        )
+        lock = threading.Lock()
+        flows = []
+        source = yaml.safe_load((ROOT / "scenarios/elastic/lifecycle.yaml").read_text())
+        handlers = {h.name: h for h in e.HANDLERS}
+        plans = compile_scenarios([("lifecycle.yaml", source)], handlers=handlers)
+        plan = next(p for p in plans if p["variant_id"] == variant)
+        self.assertEqual(len(plan["stages"]), 59)
+        self.assertEqual(plan["resource_budget"]["max_dynamic_additions"], 4)
+
+        with tempfile.TemporaryDirectory() as root:
+            discovery = Path(root) / "discovery.json"
+
+            def sync_file():
+                discovery.write_text(
+                    json.dumps(
+                        {
+                            "mock.prefill.hosts.address": [
+                                row["grpc_addr"].rsplit(":", 1)[0]
+                                + ":"
+                                + str(int(row["grpc_addr"].rsplit(":", 1)[1]) - 1)
+                                for row in state["engines"].values()
+                            ]
+                        }
+                    )
+                )
+
+            def next_rid():
+                with lock:
+                    rid = state["next_rid"]
+                    state["next_rid"] += 1
+                    return rid
+
+            class Backend:
+                def setup(self, ctx, environment, deadline):
+                    sync_file()
+                    return NS(discovery_file=discovery), NS(
+                        master_http_port=1, next_request_id=next_rid
+                    )
+
+                def start_requests(self, ctx, params, deadline):
+                    return ctx.register_resource("requests", object())
+
+                def wait_requests(self, ctx, resource, deadline):
+                    return dict(completed=True, error_count=0)
+
+                def teardown(self, ctx, deadline):
+                    state["cleaned"] = True
+
+            class Flow(e.ClientRecords):
+                pump_error = None
+
+                def __init__(self, ops, epoch, clock):
+                    super().__init__(epoch)
+                    state["flow_count"] += 1
+                    self.ordinal = state["flow_count"]
+                    flows.append(self)
+
+                def start(self):
+                    state["active"] = True
+                    state["active_flow"] = self
+                    state["last"] = clock()
+                    record = self.issue(next_rid(), clock)
+                    self.update(
+                        record,
+                        business_finished=not (fail_remove and self.ordinal == 2),
+                        schedule=dict(status="OK"),
+                        stream=dict(status="OK"),
+                        consumer_exit_s=clock(),
+                        transport_terminal_s=clock(),
+                    )
+
+                def stop(self, deadline, cancel=False):
+                    state["active"] = False
+                    self.stopped = True
+                    return e.completeness(self.snapshot_records())
+
+            def http(ops, endpoint, deadline, body=None):
+                if state["active"]:
+                    elapsed = clock() - state["last"]
+                    for row in state["engines"].values():
+                        row["accepted"] += round(elapsed * 10)
+                    state["last"] = clock()
+                    if elapsed > 0:
+                        flow = state["active_flow"]
+                        record = flow.issue(next_rid(), clock)
+                        flow.update(
+                            record,
+                            business_finished=True,
+                            schedule=dict(status="OK"),
+                            stream=dict(status="OK"),
+                            consumer_exit_s=clock(),
+                            transport_terminal_s=clock(),
+                        )
+                if endpoint == "snapshot":
+                    return dict(
+                        engines=[
+                            dict(name=name, **copy.deepcopy(row))
+                            for name, row in state["engines"].items()
+                        ]
+                    )
+                if endpoint == "add_engine":
+                    state["adds"] += 1
+                    name = f"prefill-{state['adds']+1}"
+                    port = 10003 + 2 * state["adds"]
+                    state["engines"][name] = dict(
+                        role="prefill", grpc_addr=f"127.0.0.1:{port}", accepted=0
+                    )
+                    sync_file()
+                    return dict(
+                        status="ok",
+                        action="added",
+                        engine=name,
+                        port=port,
+                        http_port=port - 1,
+                    )
+                if endpoint == "remove_engine":
+                    name = body["engine"]
+                    row = state["engines"].pop(name)
+                    sync_file()
+                    return dict(
+                        status="ok",
+                        action="removed",
+                        engine=name,
+                        port=int(row["grpc_addr"].rsplit(":", 1)[1]),
+                        mode="graceful",
+                        drained=True,
+                    )
+                raise AssertionError(endpoint)
+
+            def master(*args, **kwargs):
+                n = len(state["engines"])
+                return 200, dict(
+                    worker_summary={"PREFILL": dict(discovered=n, alive=n)}
+                )
+
+            def accounting(*args, **kwargs):
+                return dict(
+                    scheduler_inflight=0,
+                    prefill_endpoints=[
+                        dict(inflight_batches=0) for _ in state["engines"]
+                    ],
+                    decode_endpoints=[dict(total_load=0) for _ in range(4)],
+                )
+
+            def run_record(records, record, shape, **kwargs):
+                with lock:
+                    index = state["batches"]
+                    state["batches"] += 1
+                    names = sorted(state["engines"])
+                    name = names[index % len(names)]
+                    state["engines"][name]["accepted"] += 1
+                records.update(
+                    record,
+                    business_finished=not (batch_error and index == 50),
+                    schedule=dict(status="OK"),
+                    stream=dict(status="OK"),
+                    consumer_exit_s=clock(),
+                    transport_terminal_s=clock(),
+                )
+
+            with patch.object(e, "_http", side_effect=http), patch.object(
+                e, "ColdFlow", Flow
+            ), patch.object(e.RecordedRequests, "run", run_record), patch.object(
+                life, "_master_get", side_effect=accounting
+            ), patch(
+                "flexlb_ft.harness.http_post_json", side_effect=master
+            ):
+                result = execute_instance(
+                    plan,
+                    Backend(),
+                    handlers=handlers,
+                    artifact_dir=Path(root) / "artifacts",
+                    clock=clock,
+                    sleeper=clock.sleep,
+                )
+            self.assertTrue(state["cleaned"])
+            self.assertTrue(all(flow.stopped for flow in flows))
+        return result, state
+
+    def test_normal_and_strict_complete_all_stages_and_four_additions(self):
+        for variant in ("normal", "strict"):
+            result, state = self.run_program(variant)
+            self.assertEqual(result["status"], "PASS", result)
+            self.assertEqual(state["adds"], 4)
+            self.assertEqual(state["batches"], 100)
+            self.assertEqual(sum(len(s["checks"]) for s in result["stages"]), 69)
+            self.assertTrue(all(s["status"] == "PASS" for s in result["stages"]))
+
+    def test_remove_failure_cannot_be_hidden_by_preference_90_percent_floor(self):
+        result, state = self.run_program(fail_remove=True)
+        self.assertEqual(result["status"], "FAIL")
+        rows = {s["id"]: s for s in result["stages"]}
+        self.assertEqual(rows["preference_availability"]["status"], "PASS")
+        self.assertEqual(rows["remove_zero_errors"]["status"], "FAIL")
+        self.assertEqual(rows["cycle1_add"]["status"], "BLOCKED")
+
+    def test_rebalance_request_error_fails_independently_of_share(self):
+        result, _ = self.run_program(batch_error=True)
+        self.assertEqual(result["status"], "FAIL")
+        row = next(s for s in result["stages"] if s["id"] == "rebalance_after_add")
+        self.assertEqual(
+            {c["id"]: c["status"] for c in row["checks"]},
+            {"complete": "PASS", "no_errors": "FAIL"},
+        )
+
+    def test_missing_decode_owner_field_is_error(self):
+        with tempfile.TemporaryDirectory() as root:
+            ctx = NS(clock=lambda: 0, artifact_dir=Path(root))
+            deadline = NS(check=lambda: None, remaining=lambda: 100)
+            with patch.object(
+                life,
+                "_master_get",
+                return_value=dict(
+                    scheduler_inflight=0,
+                    prefill_endpoints=[dict(inflight_batches=0)],
+                    decode_endpoints=[{}],
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    ValueError, "decode inflight_requests/total_load"
+                ):
+                    life.accounting(ctx, {}, deadline)
