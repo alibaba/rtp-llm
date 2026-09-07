@@ -4,6 +4,7 @@ import json
 import uuid
 
 from ..contracts import CheckResult, StageHandler, StageOutput
+from ..runtime import Deadline
 from .elastic import request_success
 from .engine_control import _engines, _http
 from .priority import PriorityWave, _number, _params
@@ -88,11 +89,57 @@ def _outcome(entry, row):
     response = entry["batch"].entries[0]["response"]
     if response is not None and (response.code != 200 or not response.success):
         return False, int(response.code)
-    # This first program requires every wave peer to succeed. Any stream
-    # failure fails all_ok regardless of its code; full raw trailer policy is
-    # reserved for the later victim-terminal programs, not claimed here.
+    stream = row.get("stream", {})
+    if stream.get("status") != "OK":
+        return False, _typed_stream_code(row)
+    # Legacy maps the in-band enum only. A typed trailer's literal 2 stays 2.
     code = row.get("business_error_code")
     return False, 8429 if code == 2 else code
+
+
+def _typed_stream_code(row):
+    stream = row.get("stream", {})
+    # Legacy client transport cancellation is not an engine terminal, even
+    # when metadata is attached. Preserve transport and raw bytes separately.
+    if stream.get("status") in (None, "OK", "CANCELLED"):
+        return None
+    code = stream.get("trailer_error_code")
+    parsed = stream.get("error_trailer", {}).get("status") == "parsed"
+    return code if parsed and type(code) is int else None
+
+
+def _terminal_wait(ctx, p, deadline):
+    wave = _cohort(ctx, p["requests"])
+    for entry in wave.entries:
+        wave._join(entry, deadline)
+    for entry in wave.entries:
+        if entry["error"] is not None:
+            raise entry["error"]
+        per_request = Deadline(
+            min(deadline.expires_at, ctx.clock() + 35), ctx.clock, ctx.sleeper
+        )
+        try:
+            entry["batch"].wait(per_request)
+        except RuntimeError:
+            # Permit only a fully consumed, actual typed server error to reach
+            # this scenario's verdict. Stage/RPC deadlines still propagate.
+            per_request.check()
+            rows = entry["batch"].snapshot_records()
+            if len(rows) != 1:
+                raise
+            row = rows[0]
+            if not (
+                row["schedule"]["status"] == "OK"
+                and row.get("consumer_completion_verified") is True
+                and row.get("consumer_done") is True
+                and row.get("consumer_exit_s") is not None
+                and row.get("transport_terminal_s") is not None
+                and _typed_stream_code(row) is not None
+            ):
+                raise
+    wave.complete = True
+    wave.persist()
+    return StageOutput(artifacts=[str(wave.path)])
 
 
 def _observations(ctx, p, deadline):
@@ -364,6 +411,7 @@ def _disabled(ctx, p, deadline):
 
 
 HANDLERS = [
+    StageHandler("preemption_wait", _settled_params, _terminal_wait, {}),
     StageHandler(
         "preemption_disabled",
         _queued_params,
