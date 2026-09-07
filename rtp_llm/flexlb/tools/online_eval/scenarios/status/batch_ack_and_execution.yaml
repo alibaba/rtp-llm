@@ -1,0 +1,889 @@
+schema_version: 1
+description: Preserve separate ACK, member-execution, cleanup and recovery boundaries.
+category: status
+profiles:
+- batch-window
+tags:
+- protocol
+- migration
+environment:
+  backend: java_mock
+  n_prefill: 2
+  n_decode: 2
+  config_overrides:
+    ordering: priority
+    queue_timeout_ms: 10000
+    stale_inflight_ms: 30000
+execution:
+  timeout_s: 600
+  stage_timeout_s: 120
+  cleanup_timeout_s: 120
+id: batch_ack_and_execution
+legacy_case_ids:
+- status_ack_partial_fail
+- status_batch_async_partial_fail
+- status_ack_multi_error
+- status_ack_empty_no_crash
+variants:
+- id: ack_partial
+  legacy_case_ids:
+  - status_ack_partial_fail
+  findings:
+  - transient_policy.contract
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: ledger_cohort
+    action: status_prepare
+    params:
+      count: 4
+      concurrency: 4
+      input_len: 2048
+      output_len: 2
+      consume: deferred
+  - id: ledger_before
+    action: status_sample
+    params:
+      duration_s: 0
+    timeout_s: 30
+  - id: partial_on
+    action: status_control
+    params:
+      fault: enqueue_ack_partial_fail
+      config:
+        k: 1
+      enabled: true
+      role: prefill
+  - id: ledger_dispatch
+    action: status_dispatch
+    params:
+      requests:
+        $ref: stages.ledger_cohort.output.requests
+    timeout_s: 75
+  - id: ledger_window
+    action: status_sample
+    params:
+      duration_s: 8
+    timeout_s: 30
+  - id: failed_member_released_promptly
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.ledger_window.output.snapshot
+      metric: prefill_requests
+      op: le
+      expected: 3
+      aggregate: max
+  - id: nonempty_engine_acceptance
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.ledger_window.output.snapshot
+      metric: accepted
+      op: ge
+      expected: 4
+      aggregate: last
+      baseline:
+        $ref: stages.ledger_before.output.snapshot
+  - id: partial_off
+    action: status_control
+    params:
+      fault: enqueue_ack_partial_fail
+      config: {}
+      enabled: false
+      role: prefill
+  - id: ledger_drained
+    action: status_sample
+    params:
+      duration_s: 30
+      until:
+        metric: all_inflight
+        op: eq
+        value: 0
+    timeout_s: 45
+  - id: ledger_drained_scheduler
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.ledger_drained.output.snapshot
+      metric: scheduler
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: ledger_drained_prefill_batches
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.ledger_drained.output.snapshot
+      metric: prefill_batches
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: ledger_drained_prefill_members
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.ledger_drained.output.snapshot
+      metric: prefill_requests
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: ledger_drained_decode_load
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.ledger_drained.output.snapshot
+      metric: decode_total_load
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: transient_cohort
+    action: status_prepare
+    params:
+      count: 4
+      concurrency: 4
+      input_len: 2048
+      output_len: 2
+      consume: immediate
+  - id: transient_before
+    action: status_sample
+    params:
+      duration_s: 0
+    timeout_s: 30
+  - id: transient_partial_on
+    action: status_control
+    params:
+      fault: enqueue_ack_partial_fail
+      config:
+        k: 1
+      enabled: true
+      role: prefill
+  - id: transient_code_on
+    action: status_control
+    params:
+      fault: enqueue_ack_error_code
+      config:
+        code: 13
+      enabled: true
+      role: prefill
+  - id: transient_dispatch
+    action: status_dispatch
+    params:
+      requests:
+        $ref: stages.transient_cohort.output.requests
+    timeout_s: 75
+  - id: transient_wait
+    action: wait
+    params:
+      requests:
+        $ref: stages.transient_cohort.output.requests
+    timeout_s: 75
+  - id: transient_partial_off
+    action: status_control
+    params:
+      fault: enqueue_ack_partial_fail
+      config: {}
+      enabled: false
+      role: prefill
+  - id: transient_code_off
+    action: status_control
+    params:
+      fault: enqueue_ack_error_code
+      config: {}
+      enabled: false
+      role: prefill
+  - id: transient_policy
+    action: status_outcomes
+    params:
+      requests:
+        $ref: stages.transient_cohort.output.requests
+      slo_or_success: true
+  - id: transient_retry_window
+    action: status_sample
+    params:
+      duration_s: 3
+    timeout_s: 30
+  - id: permanent_cohort
+    action: status_prepare
+    params:
+      count: 4
+      concurrency: 4
+      input_len: 2048
+      output_len: 2
+      consume: immediate
+  - id: permanent_before
+    action: status_sample
+    params:
+      duration_s: 0
+    timeout_s: 30
+  - id: permanent_partial_on
+    action: status_control
+    params:
+      fault: enqueue_ack_partial_fail
+      config:
+        k: 1
+      enabled: true
+      role: prefill
+  - id: permanent_code_on
+    action: status_control
+    params:
+      fault: enqueue_ack_error_code
+      config:
+        code: 8431
+      enabled: true
+      role: prefill
+  - id: permanent_dispatch
+    action: status_dispatch
+    params:
+      requests:
+        $ref: stages.permanent_cohort.output.requests
+    timeout_s: 75
+  - id: permanent_wait
+    action: wait
+    params:
+      requests:
+        $ref: stages.permanent_cohort.output.requests
+    timeout_s: 75
+  - id: permanent_partial_off
+    action: status_control
+    params:
+      fault: enqueue_ack_partial_fail
+      config: {}
+      enabled: false
+      role: prefill
+  - id: permanent_code_off
+    action: status_control
+    params:
+      fault: enqueue_ack_error_code
+      config: {}
+      enabled: false
+      role: prefill
+  - id: permanent_member_isolation
+    action: status_outcomes
+    params:
+      requests:
+        $ref: stages.permanent_cohort.output.requests
+      success_min: 2
+      failure_min: 1
+      failure_max: 2
+      error_code: 8431
+      failure_phase: schedule
+  - id: permanent_after
+    action: status_sample
+    params:
+      duration_s: 0
+    timeout_s: 30
+  - id: permanent_dispatch_nonempty
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.permanent_after.output.snapshot
+      metric: enqueue_rpc
+      op: ge
+      expected: 1
+      aggregate: last
+      baseline:
+        $ref: stages.permanent_before.output.snapshot
+  - id: permanent_no_retry
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.permanent_after.output.snapshot
+      metric: enqueue_rpc
+      op: le
+      expected: 2
+      aggregate: last
+      baseline:
+        $ref: stages.permanent_before.output.snapshot
+  - id: final_drained
+    action: status_sample
+    params:
+      duration_s: 30
+      until:
+        metric: all_inflight
+        op: eq
+        value: 0
+    timeout_s: 45
+  - id: final_drained_scheduler
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.final_drained.output.snapshot
+      metric: scheduler
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: final_drained_prefill_batches
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.final_drained.output.snapshot
+      metric: prefill_batches
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: final_drained_prefill_members
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.final_drained.output.snapshot
+      metric: prefill_requests
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: final_drained_decode_load
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.final_drained.output.snapshot
+      metric: decode_total_load
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: final_health
+    action: status_sample
+    params:
+      duration_s: 0
+    timeout_s: 30
+  - id: master_http_200
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.final_health.output.snapshot
+      metric: master_http
+      op: eq
+      expected: 200
+      aggregate: last
+  - id: cleanup
+    action: teardown
+- id: execution_partial
+  legacy_case_ids:
+  - status_batch_async_partial_fail
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: normal_cohort
+    action: status_prepare
+    params:
+      count: 4
+      concurrency: 4
+      input_len: 2048
+      output_len: 2
+      consume: immediate
+  - id: normal_fail_on
+    action: status_control
+    params:
+      fault: prefill_async_partial_fail
+      config:
+        k: 1
+        code: 8500
+      enabled: true
+      role: prefill
+  - id: normal_dispatch
+    action: status_dispatch
+    params:
+      requests:
+        $ref: stages.normal_cohort.output.requests
+    timeout_s: 75
+  - id: normal_wait
+    action: wait
+    params:
+      requests:
+        $ref: stages.normal_cohort.output.requests
+    timeout_s: 75
+  - id: normal_fail_off
+    action: status_control
+    params:
+      fault: prefill_async_partial_fail
+      config: {}
+      enabled: false
+      role: prefill
+  - id: normal_execution_terminal
+    action: status_outcomes
+    params:
+      requests:
+        $ref: stages.normal_cohort.output.requests
+      success_min: 2
+      failure_min: 1
+      failure_max: 2
+      error_code: 8500
+      failure_phase: execution
+  - id: normal_drained
+    action: status_sample
+    params:
+      duration_s: 120
+      until:
+        metric: all_inflight
+        op: eq
+        value: 0
+    timeout_s: 135
+  - id: normal_drained_scheduler
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.normal_drained.output.snapshot
+      metric: scheduler
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: normal_drained_prefill_batches
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.normal_drained.output.snapshot
+      metric: prefill_batches
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: normal_drained_prefill_members
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.normal_drained.output.snapshot
+      metric: prefill_requests
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: normal_drained_decode_load
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.normal_drained.output.snapshot
+      metric: decode_total_load
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: late_terminal_window
+    action: status_sample
+    params:
+      duration_s: 3
+    timeout_s: 30
+  - id: no_resurrection
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.late_terminal_window.output.snapshot
+      metric: fingerprint
+      op: eq
+      expected: true
+      aggregate: all
+      baseline:
+        $ref: stages.normal_drained.output.snapshot
+  - id: healthy_recovery
+    action: status_prepare
+    params:
+      count: 4
+      concurrency: 4
+      input_len: 2048
+      output_len: 2
+      consume: immediate
+  - id: healthy_recovery_dispatch
+    action: status_dispatch
+    params:
+      requests:
+        $ref: stages.healthy_recovery.output.requests
+    timeout_s: 75
+  - id: healthy_recovery_wait
+    action: wait
+    params:
+      requests:
+        $ref: stages.healthy_recovery.output.requests
+    timeout_s: 75
+  - id: healthy_recovery_success
+    action: status_outcomes
+    params:
+      requests:
+        $ref: stages.healthy_recovery.output.requests
+      success_min: 4
+      failure_max: 0
+  - id: serial_perf
+    action: status_perf
+    params:
+      prefill_fixed_ms: 3000
+      restore_prefill_fixed_ms: 100
+  - id: serial_cohort
+    action: status_prepare
+    params:
+      count: 4
+      concurrency: 4
+      input_len: 2048
+      output_len: 2
+      consume: immediate
+  - id: serial_fail_on
+    action: status_control
+    params:
+      fault: prefill_async_partial_fail
+      config:
+        k: 1
+        code: 8500
+      enabled: true
+      role: prefill
+  - id: serial_dispatch
+    action: status_dispatch
+    params:
+      requests:
+        $ref: stages.serial_cohort.output.requests
+    timeout_s: 75
+  - id: serial_wait
+    action: wait
+    params:
+      requests:
+        $ref: stages.serial_cohort.output.requests
+    timeout_s: 75
+  - id: serial_fail_off
+    action: status_control
+    params:
+      fault: prefill_async_partial_fail
+      config: {}
+      enabled: false
+      role: prefill
+  - id: serial_execution_terminal
+    action: status_outcomes
+    params:
+      requests:
+        $ref: stages.serial_cohort.output.requests
+      success_min: 2
+      failure_min: 1
+      failure_max: 2
+      error_code: 8500
+      failure_phase: execution
+  - id: serial_drained
+    action: status_sample
+    params:
+      duration_s: 120
+      until:
+        metric: all_inflight
+        op: eq
+        value: 0
+    timeout_s: 135
+  - id: serial_drained_scheduler
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.serial_drained.output.snapshot
+      metric: scheduler
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: serial_drained_prefill_batches
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.serial_drained.output.snapshot
+      metric: prefill_batches
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: serial_drained_prefill_members
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.serial_drained.output.snapshot
+      metric: prefill_requests
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: serial_drained_decode_load
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.serial_drained.output.snapshot
+      metric: decode_total_load
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: final_health
+    action: status_sample
+    params:
+      duration_s: 0
+    timeout_s: 30
+  - id: master_http_200
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.final_health.output.snapshot
+      metric: master_http
+      op: eq
+      expected: 200
+      aggregate: last
+  - id: cleanup
+    action: teardown
+- id: ack_multi_error
+  legacy_case_ids:
+  - status_ack_multi_error
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: code_8431_cohort
+    action: status_prepare
+    params:
+      count: 2
+      concurrency: 2
+      input_len: 2048
+      output_len: 2
+      consume: immediate
+  - id: code_8431_on
+    action: status_control
+    params:
+      fault: enqueue_ack_error_code
+      config:
+        code: 8431
+      enabled: true
+      role: prefill
+  - id: code_8431_dispatch
+    action: status_dispatch
+    params:
+      requests:
+        $ref: stages.code_8431_cohort.output.requests
+    timeout_s: 75
+  - id: code_8431_wait
+    action: wait
+    params:
+      requests:
+        $ref: stages.code_8431_cohort.output.requests
+    timeout_s: 75
+  - id: code_8431_off
+    action: status_control
+    params:
+      fault: enqueue_ack_error_code
+      config: {}
+      enabled: false
+      role: prefill
+  - id: code_8431_passthrough
+    action: status_outcomes
+    params:
+      requests:
+        $ref: stages.code_8431_cohort.output.requests
+      failure_min: 2
+      failure_max: 2
+      error_code: 8431
+      failure_phase: schedule
+  - id: code_8510_cohort
+    action: status_prepare
+    params:
+      count: 2
+      concurrency: 2
+      input_len: 2048
+      output_len: 2
+      consume: immediate
+  - id: code_8510_on
+    action: status_control
+    params:
+      fault: enqueue_ack_error_code
+      config:
+        code: 8510
+      enabled: true
+      role: prefill
+  - id: code_8510_dispatch
+    action: status_dispatch
+    params:
+      requests:
+        $ref: stages.code_8510_cohort.output.requests
+    timeout_s: 75
+  - id: code_8510_wait
+    action: wait
+    params:
+      requests:
+        $ref: stages.code_8510_cohort.output.requests
+    timeout_s: 75
+  - id: code_8510_off
+    action: status_control
+    params:
+      fault: enqueue_ack_error_code
+      config: {}
+      enabled: false
+      role: prefill
+  - id: code_8510_passthrough
+    action: status_outcomes
+    params:
+      requests:
+        $ref: stages.code_8510_cohort.output.requests
+      failure_min: 2
+      failure_max: 2
+      error_code: 8510
+      failure_phase: schedule
+  - id: failed_batches_drained
+    action: status_sample
+    params:
+      duration_s: 15
+      until:
+        metric: all_inflight
+        op: eq
+        value: 0
+    timeout_s: 30
+  - id: failed_batches_drained_scheduler
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.failed_batches_drained.output.snapshot
+      metric: scheduler
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: failed_batches_drained_prefill_batches
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.failed_batches_drained.output.snapshot
+      metric: prefill_batches
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: failed_batches_drained_prefill_members
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.failed_batches_drained.output.snapshot
+      metric: prefill_requests
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: failed_batches_drained_decode_load
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.failed_batches_drained.output.snapshot
+      metric: decode_total_load
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: no_retry_window
+    action: status_sample
+    params:
+      duration_s: 3
+    timeout_s: 30
+  - id: no_resurrection
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.no_retry_window.output.snapshot
+      metric: fingerprint
+      op: eq
+      expected: true
+      aggregate: all
+      baseline:
+        $ref: stages.failed_batches_drained.output.snapshot
+  - id: final_health
+    action: status_sample
+    params:
+      duration_s: 0
+    timeout_s: 30
+  - id: master_http_200
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.final_health.output.snapshot
+      metric: master_http
+      op: eq
+      expected: 200
+      aggregate: last
+  - id: cleanup
+    action: teardown
+- id: ack_drop
+  legacy_case_ids:
+  - status_ack_empty_no_crash
+  findings:
+  - quarantine_eventually_drains.contract
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: uncertain_cohort
+    action: status_prepare
+    params:
+      count: 4
+      concurrency: 4
+      input_len: 2048
+      output_len: 2
+      consume: immediate
+  - id: drop_on
+    action: status_control
+    params:
+      fault: enqueue_ack_drop
+      config: {}
+      enabled: true
+      role: prefill
+  - id: uncertain_dispatch
+    action: status_dispatch
+    params:
+      requests:
+        $ref: stages.uncertain_cohort.output.requests
+    timeout_s: 75
+  - id: drop_off
+    action: status_control
+    params:
+      fault: enqueue_ack_drop
+      config: {}
+      enabled: false
+      role: prefill
+  - id: fence_bound
+    action: status_sample
+    params:
+      duration_s: 20
+      until:
+        metric: scheduler
+        op: le
+        value: 4
+    timeout_s: 35
+  - id: fence_residue_bounded
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.fence_bound.output.snapshot
+      metric: scheduler
+      op: le
+      expected: 4
+      aggregate: last
+  - id: fence_window
+    action: status_sample
+    params:
+      duration_s: 8
+    timeout_s: 30
+  - id: fence_residue_non_growing
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.fence_window.output.snapshot
+      metric: scheduler
+      op: le
+      expected: 0
+      aggregate: last
+      baseline:
+        $ref: stages.fence_bound.output.snapshot
+  - id: ttl_window
+    action: status_sample
+    params:
+      duration_s: 95
+      until:
+        metric: scheduler
+        op: eq
+        value: 0
+    timeout_s: 110
+  - id: quarantine_eventually_drains
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.ttl_window.output.snapshot
+      metric: scheduler
+      op: eq
+      expected: 0
+      aggregate: last
+  - id: final_health
+    action: status_sample
+    params:
+      duration_s: 0
+    timeout_s: 30
+  - id: master_http_200
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.final_health.output.snapshot
+      metric: master_http
+      op: eq
+      expected: 200
+      aggregate: last
+  - id: cleanup
+    action: teardown
