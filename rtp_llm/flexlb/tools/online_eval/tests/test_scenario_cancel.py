@@ -361,6 +361,24 @@ class CancelTest(unittest.TestCase):
                         if s["id"] == "engine_drain"
                     ),
                 )
+            if plan["variant_id"].startswith("sibling_isolation_"):
+                ordered = [s["id"] for s in plan["stages"]]
+                self.assertLess(
+                    ordered.index("dispatch_siblings"), ordered.index("a_open")
+                )
+                self.assertLess(
+                    ordered.index("c_open"), ordered.index("a_first_window")
+                )
+                self.assertLess(
+                    ordered.index("recovery_succeeds"), ordered.index("b_state")
+                )
+                self.assertTrue(
+                    all(
+                        s["params"]["consume"] == "manual"
+                        for s in plan["stages"]
+                        if s["id"] in {"a", "b", "c"}
+                    )
+                )
             if plan["variant_id"] == "basic_batch":
                 self.assertIn("engine_receives_cancel_within_five", ids)
             if plan["variant_id"] == "basic_nonbatch":

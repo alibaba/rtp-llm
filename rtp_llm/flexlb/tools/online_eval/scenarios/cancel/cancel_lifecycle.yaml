@@ -1235,18 +1235,21 @@ variants:
       count: 1
       concurrency: 1
       output_len: 10
+      consume: manual
   - id: b
     action: cancel_prepare
     params:
       count: 1
       concurrency: 1
       output_len: 500
+      consume: manual
   - id: c
     action: cancel_prepare
     params:
       count: 1
       concurrency: 1
       output_len: 10
+      consume: manual
   - id: dispatch_siblings
     action: cancel_dispatch_group
     params:
@@ -1255,6 +1258,24 @@ variants:
       - $ref: stages.b.output.requests
       - $ref: stages.c.output.requests
     timeout_s: 60
+  - id: a_open
+    action: cancel_open
+    params:
+      requests:
+        $ref: stages.a.output.requests
+    timeout_s: 30
+  - id: b_open
+    action: cancel_open
+    params:
+      requests:
+        $ref: stages.b.output.requests
+    timeout_s: 30
+  - id: c_open
+    action: cancel_open
+    params:
+      requests:
+        $ref: stages.c.output.requests
+    timeout_s: 30
   - id: a_first_window
     action: cancel_observe
     params:
@@ -1400,29 +1421,6 @@ variants:
       metric: business_finished
       expected: 1
       op: eq
-  - id: b_state
-    action: cancel_observe
-    params:
-      duration_s: 0
-      requests:
-        $ref: stages.b.output.requests
-    timeout_s: 30
-  - id: b_not_completed
-    action: cancel_check
-    params:
-      snapshot:
-        $ref: stages.b_state.output.snapshot
-      metric: business_finished
-      expected: 0
-      op: eq
-  - id: b_engine_cancelled
-    action: cancel_check
-    params:
-      snapshot:
-        $ref: stages.b_state.output.snapshot
-      metric: engine_cancelled
-      expected: 1
-      op: eq
   - id: recovery
     action: cancel_prepare
     params:
@@ -1454,6 +1452,29 @@ variants:
       snapshot:
         $ref: stages.recovery_window.output.snapshot
       metric: success
+      expected: 1
+      op: eq
+  - id: b_state
+    action: cancel_observe
+    params:
+      duration_s: 0
+      requests:
+        $ref: stages.b.output.requests
+    timeout_s: 30
+  - id: b_not_completed
+    action: cancel_check
+    params:
+      snapshot:
+        $ref: stages.b_state.output.snapshot
+      metric: business_finished
+      expected: 0
+      op: eq
+  - id: b_engine_cancelled
+    action: cancel_check
+    params:
+      snapshot:
+        $ref: stages.b_state.output.snapshot
+      metric: engine_cancelled
       expected: 1
       op: eq
   - id: closing_drain
@@ -2008,18 +2029,21 @@ variants:
       count: 1
       concurrency: 1
       output_len: 10
+      consume: manual
   - id: b
     action: cancel_prepare
     params:
       count: 1
       concurrency: 1
       output_len: 500
+      consume: manual
   - id: c
     action: cancel_prepare
     params:
       count: 1
       concurrency: 1
       output_len: 10
+      consume: manual
   - id: dispatch_siblings
     action: cancel_dispatch_group
     params:
@@ -2028,6 +2052,24 @@ variants:
       - $ref: stages.b.output.requests
       - $ref: stages.c.output.requests
     timeout_s: 60
+  - id: a_open
+    action: cancel_open
+    params:
+      requests:
+        $ref: stages.a.output.requests
+    timeout_s: 30
+  - id: b_open
+    action: cancel_open
+    params:
+      requests:
+        $ref: stages.b.output.requests
+    timeout_s: 30
+  - id: c_open
+    action: cancel_open
+    params:
+      requests:
+        $ref: stages.c.output.requests
+    timeout_s: 30
   - id: a_first_window
     action: cancel_observe
     params:
@@ -2163,29 +2205,6 @@ variants:
       metric: business_finished
       expected: 1
       op: eq
-  - id: b_state
-    action: cancel_observe
-    params:
-      duration_s: 0
-      requests:
-        $ref: stages.b.output.requests
-    timeout_s: 30
-  - id: b_not_completed
-    action: cancel_check
-    params:
-      snapshot:
-        $ref: stages.b_state.output.snapshot
-      metric: business_finished
-      expected: 0
-      op: eq
-  - id: b_engine_cancelled
-    action: cancel_check
-    params:
-      snapshot:
-        $ref: stages.b_state.output.snapshot
-      metric: engine_cancelled
-      expected: 1
-      op: eq
   - id: recovery
     action: cancel_prepare
     params:
@@ -2217,6 +2236,29 @@ variants:
       snapshot:
         $ref: stages.recovery_window.output.snapshot
       metric: success
+      expected: 1
+      op: eq
+  - id: b_state
+    action: cancel_observe
+    params:
+      duration_s: 0
+      requests:
+        $ref: stages.b.output.requests
+    timeout_s: 30
+  - id: b_not_completed
+    action: cancel_check
+    params:
+      snapshot:
+        $ref: stages.b_state.output.snapshot
+      metric: business_finished
+      expected: 0
+      op: eq
+  - id: b_engine_cancelled
+    action: cancel_check
+    params:
+      snapshot:
+        $ref: stages.b_state.output.snapshot
+      metric: engine_cancelled
       expected: 1
       op: eq
   - id: cleanup
