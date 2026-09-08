@@ -157,6 +157,7 @@ def h20_oss_suites():
     native.test_suite(
         name = "smoke_h20_dense",
         tests = [
+            ":input_embedding_rpc_test",
             smoke_test(
                 name="dense_fp8kv_cudagraph",
                 task_info="data/model/qwen25/q_r_new_model_py_fp8_kv_cache_cudagraph.json",
