@@ -61,7 +61,7 @@ public class BalanceContext {
     /** Null when the request body did not declare a Content-Length. */
     private Long requestBodyBytes;
 
-    /** Serialized protobuf message size, excluding gRPC framing and compression. */
+    /** Serialized protobuf bytes, excluding gRPC framing and compression; used by payload metrics. */
     private Long requestMessageBytes;
 
     /** Per-request accumulator written by sequential processing stages and read after their completion. */

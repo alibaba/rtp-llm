@@ -111,8 +111,7 @@ Spring `server.port`，再回退 JVM `-Dserver.port` 和默认 7001（假定所�
 1. `HttpLoadBalanceServer.processScheduledRequest`：启用一致性且非 master →
    `forwardRequestToMaster()` 把原始请求代理到 `http://master:port/rtp_llm/schedule`；
    **master 为空/不可达/超时时降级为本地路由**（`fallbackToLocalRouting`，上报
-   `MASTER_NULL`/`TIMEOUT`/`CONNECT_FAILED`）。所有响应都携带 `realMasterHost` 供客户端
-   感知真正的 master。
+   `MASTER_NULL`/`TIMEOUT`/`CONNECT_FAILED`）。`/rtp_llm/master/info` 响应携带 `real_master_host` 供客户端心跳识别 Master；
 2. `FlexlbControlServer`：cache-match failover 操作非 master 时转发给 master（master 不可用
    返回 503）。
 

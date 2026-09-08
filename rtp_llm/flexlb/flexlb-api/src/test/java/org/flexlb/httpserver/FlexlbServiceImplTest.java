@@ -46,6 +46,7 @@ import java.util.function.BiConsumer;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -186,14 +187,21 @@ class FlexlbServiceImplTest {
         var json = new com.fasterxml.jackson.databind.ObjectMapper()
                 .readTree(pvAppender.list.getFirst().getFormattedMessage());
         assertEquals("10.0.0.1", json.path("response").path("server_status").get(0).path("server_ip").asText());
-        assertEquals(2, json.path("inputIdsCount").asInt());
-        assertEquals(request.getSerializedSize(), json.path("requestMessageBytes").asInt());
+        assertEquals(2, json.path("seqLen").asInt());
+        assertFalse(json.has("inputIdsCount"));
+        assertFalse(json.has("requestMessageBytes"));
         assertTrue(json.path("totalUs").asLong() >= 1_000L);
         assertTrue(json.path("arrivalMs").asLong() >= 100L);
         assertFalse(json.has("reqParseUs"));
         assertFalse(json.has("requestBodyBytes"));
         assertFalse(json.has("admissionRejectReason"));
         assertFalse(json.path("response").has("admission_reject_reason"));
+        ArgumentCaptor<BalanceContext> payloadContext = ArgumentCaptor.forClass(BalanceContext.class);
+        verify(engineHealthReporter).reportRequestPayload(payloadContext.capture());
+        assertEquals((long) request.getSerializedSize(), payloadContext.getValue().getRequestMessageBytes());
+        assertEquals(2L, payloadContext.getValue().getInputIdsCount());
+        assertNull(FlexlbScheduleProtocol.FlexlbScheduleResponsePB.getDescriptor()
+                .findFieldByName("real_master_host"));
         verify(cacheAwareService).updateFromRoutedRequest(any(), any());
         verify(observer).onCompleted();
     }
@@ -214,6 +222,7 @@ class FlexlbServiceImplTest {
             assertPvContains("\"code\":" + StrategyErrorType.BATCH_SLO_EXPIRED.getErrorCode());
             verifyNoInteractions(observer);
             verify(requestToken, times(1)).close();
+            verify(engineHealthReporter).reportRequestPayload(any());
         } finally {
             timer.shutdownNow();
         }
@@ -222,6 +231,10 @@ class FlexlbServiceImplTest {
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     void invalidIdentityStillWritesEntryFailurePv(boolean observerThrows) {
+        doThrow(new IllegalStateException("completion monitor unavailable")).when(serverLatencyRecorder)
+                .recordCompletion(any(), anyLong());
+        doThrow(new IllegalStateException("payload monitor unavailable")).when(engineHealthReporter)
+                .reportRequestPayload(any());
         StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer = mock(StreamObserver.class);
         RuntimeException deliveryError = new IllegalStateException("observer closed");
         if (observerThrows) {
@@ -247,6 +260,7 @@ class FlexlbServiceImplTest {
         verify(serverLatencyRecorder).recordCompletion(context.capture(), anyLong());
         assertEquals(2L, context.getValue().getInputIdsCount());
         assertEquals((long) request.getSerializedSize(), context.getValue().getRequestMessageBytes());
+        verify(engineHealthReporter).reportRequestPayload(context.getValue());
         assertTrue(context.getValue().getRequestArrivalDelayMs() >= 100);
         assertEquals(1, pvAppender.list.size());
         assertPvContains("\"scheduleOrigin\":\"ENTRY_ERROR\"");
@@ -469,7 +483,7 @@ class FlexlbServiceImplTest {
         verifyNoInteractions(observer);
         verify(requestToken, times(1)).close();
         assertEquals(1, pvAppender.list.size());
-        assertPvContains("\"hashUs\":34");
+        assertFalse(pvAppender.list.getFirst().getFormattedMessage().contains("\"hashUs\""));
         assertPvContains("\"requestState\":\"REQUEST_STATE_CANCELLED\"");
     }
 
@@ -499,10 +513,13 @@ class FlexlbServiceImplTest {
         when(routeService.route(any())).thenReturn(CompletableFuture.completedFuture(new Response()));
         Mockito.doThrow(new IllegalStateException("monitor unavailable")).when(serverLatencyRecorder)
                 .recordCompletion(any(), anyLong());
+        doThrow(new IllegalStateException("payload monitor unavailable")).when(engineHealthReporter)
+                .reportRequestPayload(any());
         StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer = mock(StreamObserver.class);
         service.schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
                 .setRequestId("monitor-failure").addInputIds(1).build(), observer);
         verify(observer).onCompleted();
+        verify(engineHealthReporter, times(1)).reportRequestPayload(any());
         verify(requestToken, times(1)).close();
         assertEquals(1, pvAppender.list.size());
     }
@@ -830,7 +847,7 @@ class FlexlbServiceImplTest {
         assertPvContains("\"code\":8511");
         assertPvContains("\"scheduleOrigin\":\"FORWARD_FAILED\"");
         assertPvContains("\"requestExpiresAtMs\":");
-        assertPvContains("\"realMasterHost\":\"10.0.0.2:7001\"");
+        assertFalse(pvAppender.list.getFirst().getFormattedMessage().contains("realMasterHost"));
     }
 
     @Test

@@ -101,6 +101,7 @@ import static org.flexlb.constant.MetricConstant.PREFILL_SELECTED_ESTIMATED_TTFT
 import static org.flexlb.constant.MetricConstant.PREFILL_SELECTED_EXECUTION_TIME_MS;
 import static org.flexlb.constant.MetricConstant.REQUEST_BODY_BYTES;
 import static org.flexlb.constant.MetricConstant.REQUEST_INPUT_IDS_COUNT;
+import static org.flexlb.constant.MetricConstant.REQUEST_MESSAGE_BYTES;
 import static org.flexlb.constant.MetricConstant.REQUEST_NETWORK_DELAY_MS;
 import static org.flexlb.constant.MetricConstant.ZK_MASTER_EVENT;
 import static org.flexlb.constant.MetricConstant.ZK_MASTER_NODE;
@@ -232,6 +233,7 @@ public class EngineHealthReporter {
         this.monitor.register(REQUEST_NETWORK_DELAY_MS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         this.monitor.register(GRPC_SERVER_PROCESS_MS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         this.monitor.register(REQUEST_INPUT_IDS_COUNT, FlexMetricType.GAUGE, FlexStatisticsType.SUMMARY);
+        this.monitor.register(REQUEST_MESSAGE_BYTES, FlexMetricType.GAUGE, FlexStatisticsType.SUMMARY);
         this.monitor.register(REQUEST_BODY_BYTES, FlexMetricType.GAUGE, FlexStatisticsType.SUMMARY);
         this.monitor.register(FORWARD_TO_MASTER_RESULT, FlexMetricType.QPS, FlexPriorityType.PRECISE);
     }
@@ -631,6 +633,9 @@ public class EngineHealthReporter {
                 "success", String.valueOf(ctx.isSuccess()));
         if (ctx.getInputIdsCount() != null) {
             monitor.report(REQUEST_INPUT_IDS_COUNT, metricTags, ctx.getInputIdsCount());
+        }
+        if (ctx.getRequestMessageBytes() != null) {
+            monitor.report(REQUEST_MESSAGE_BYTES, metricTags, ctx.getRequestMessageBytes());
         }
         if (ctx.getRequestBodyBytes() != null) {
             monitor.report(REQUEST_BODY_BYTES, metricTags, ctx.getRequestBodyBytes());

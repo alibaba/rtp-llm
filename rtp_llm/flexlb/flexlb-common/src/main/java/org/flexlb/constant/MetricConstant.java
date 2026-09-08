@@ -563,6 +563,9 @@ public class MetricConstant {
     /** Number of input token IDs observed at the request boundary. */
     public static final String REQUEST_INPUT_IDS_COUNT = "app.request.input.ids.count";
 
+    /** Protobuf message size excluding gRPC framing and compression. */
+    public static final String REQUEST_MESSAGE_BYTES = "app.request.message.bytes";
+
     /** Request payload size from Content-Length when available. */
     public static final String REQUEST_BODY_BYTES = "app.request.body.bytes";
 

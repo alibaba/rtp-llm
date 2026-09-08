@@ -2508,7 +2508,6 @@ public class RequestRegistry {
         response.setSuccess(src.isSuccess());
         response.setCode(src.getCode());
         response.setErrorMessage(src.getErrorMessage());
-        response.setRealMasterHost(src.getRealMasterHost());
         response.setQueueLength(src.getQueueLength());
         response.setEnqueuedByMaster(src.isEnqueuedByMaster());
         response.setAdmissionRejectReason(src.getAdmissionRejectReason());

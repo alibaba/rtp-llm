@@ -94,7 +94,8 @@ message FlexlbScheduleResponsePB {
     int32 code = 2;
     string error_message = 3;
     repeated FlexlbServerStatusPB server_status = 4;
-    string real_master_host = 5;
+    reserved 5;
+    reserved "real_master_host";
     int32 queue_length = 6;
     bool enqueued_by_master = 7;
     RequestLifecyclePB lifecycle = 8;

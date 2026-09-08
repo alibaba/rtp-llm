@@ -195,11 +195,10 @@ class ScheduleForwardMatrixTest {
 
         service.schedule(request(90_002L), observer);
 
-        // Terminal 8511, success=false, master host surfaced for observability.
+        // Ambiguous forwarding returns terminal 8511 with success=false.
         FlexlbScheduleProtocol.FlexlbScheduleResponsePB response = capturedResponse(observer);
         assertFalse(response.getSuccess());
         assertEquals(TERMINAL_FORWARD_CODE, response.getCode());
-        assertEquals(DEAD_MASTER, response.getRealMasterHost());
         assertEquals(8511, TERMINAL_FORWARD_CODE);
 
         // Ambiguity reconciliation: ownership handed to the cancel reducer.
@@ -249,7 +248,6 @@ class ScheduleForwardMatrixTest {
                         .setSuccess(true)
                         .setCode(200)
                         .setEnqueuedByMaster(true)
-                        .setRealMasterHost(LIVE_MASTER)
                         .build();
         when(grpcForwarder.forwardScheduleToMaster(any())).thenReturn(
                 CompletableFuture.completedFuture(

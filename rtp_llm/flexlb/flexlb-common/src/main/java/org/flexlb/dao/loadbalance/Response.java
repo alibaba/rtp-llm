@@ -23,9 +23,6 @@ public class Response {
     @JsonProperty("error_message")
     private String errorMessage;
 
-    @JsonProperty("real_master_host")
-    private String realMasterHost;
-
     @JsonProperty("queue_length")
     private Integer queueLength;
 
