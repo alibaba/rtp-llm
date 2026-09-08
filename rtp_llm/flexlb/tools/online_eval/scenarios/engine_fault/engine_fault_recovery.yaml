@@ -925,13 +925,13 @@ variants:
       duration_s: 0.4
     timeout_s: 30
   - id: stop_flow
-    action: elastic_flow_stop
+    action: recovery_flow_stop
     params:
       flow:
         $ref: stages.background_flow.output.flow
-    timeout_s: 20
+    timeout_s: 50
   - id: flow_availability
-    action: elastic_flow_assert
+    action: recovery_flow_assert
     params:
       result:
         $ref: stages.stop_flow.output.result

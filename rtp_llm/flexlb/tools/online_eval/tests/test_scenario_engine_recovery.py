@@ -458,6 +458,220 @@ class RecoveryTest(unittest.TestCase):
     def test_complete_down_phases_program(self):
         self.run_program("down_phases", "correct", "PASS")
 
+    def test_flap_stop_allows_pending_rpc_budget_before_proving_worker_exit(self):
+        from flexlb_ft.scenario.actions.elastic import ColdFlow
+
+        registry = handlers()
+        registry.update({h.name: h for h in recovery.HANDLERS})
+        path = (
+            Path(__file__).resolve().parents[1]
+            / "scenarios/engine_fault/engine_fault_recovery.yaml"
+        )
+        plans = [
+            p
+            for p in compile_scenarios(load_scenarios(path), handlers=registry)
+            if p["variant_id"] == "flap"
+        ]
+        caps = {
+            next(st["timeout_s"] for st in p["stages"] if st["id"] == "stop_flow")
+            for p in plans
+        }
+        self.assertEqual({50}, caps)
+        # Real pump thread and cancellation/exit, with a 100x wall-clock scale:
+        # Schedule consumes 28 logical seconds and stream consumes six more.
+        # Only waiting and fake RPC latency are scaled; production request
+        # limits remain Schedule30/stream10 and their real code paths execute.
+        scale = 100
+
+        class ScaledWaitDeadline(Deadline):
+            def remaining(self):
+                return super().remaining() / scale
+
+        for cap in (20, next(iter(caps))):
+            with self.subTest(stop_cap=cap):
+                origin = time.monotonic()
+                clock = lambda: (time.monotonic() - origin) * scale
+                entered, released, cancelled = (
+                    threading.Event(),
+                    threading.Event(),
+                    threading.Event(),
+                )
+                ops = Ops()
+                rpc_caps = []
+
+                def future(req, timeout, metadata=None):
+                    rpc_caps.append(timeout)
+                    timer = threading.Timer(0.28, released.set)
+                    timer.start()
+                    entered.set()
+
+                    def result():
+                        if not released.wait(1):
+                            raise RuntimeError("fixture release was lost")
+                        timer.cancel()
+                        if cancelled.is_set():
+                            raise RuntimeError("cancelled pending Schedule")
+                        return NS(code=200, success=True, enqueued_by_master=True)
+
+                    def cancel():
+                        cancelled.set()
+                        released.set()
+                        return True
+
+                    return NS(result=result, cancel=cancel)
+
+                ops.schedule_pb2_grpc.FlexlbServiceStub = lambda channel: NS(
+                    Schedule=NS(future=future)
+                )
+
+                class DelayedStream:
+                    def __iter__(self):
+                        cancelled.wait(0.06)
+                        if cancelled.is_set():
+                            raise RuntimeError("cancelled stream")
+                        yield NS(
+                            HasField=lambda field: False,
+                            flatten_output=NS(finished=[True]),
+                        )
+
+                    def cancel(self):
+                        cancelled.set()
+                        return True
+
+                def fetch(req, timeout):
+                    rpc_caps.append(timeout)
+                    return DelayedStream()
+
+                ops.fetch = fetch
+                flow = ColdFlow(ops, 1, clock=clock)
+                if cap == 50:
+                    real_done = flow.done
+                    flow.done = NS(
+                        wait=lambda seconds: real_done.wait(seconds / scale),
+                        set=real_done.set,
+                        is_set=real_done.is_set,
+                    )
+                flow.start()
+                try:
+                    self.assertTrue(entered.wait(1))
+                    limit = ScaledWaitDeadline(clock() + cap, clock)
+                    if cap == 20:
+                        with self.assertRaises(TimeoutError):
+                            flow.stop(limit)
+                        self.assertTrue(cancelled.is_set())
+                    else:
+                        with tempfile.TemporaryDirectory() as root:
+                            ctx = RuntimeContext({}, None, root, clock, time.sleep)
+                            ctx.env_epoch = 1
+                            handle = ctx.register_resource("flow", flow)
+                            output = recovery.execute_flow_stop(
+                                ctx, {"flow": handle}, Deadline(clock() + cap, clock)
+                            )
+                            evidence = ctx.resource(output.output["result"], "snapshot")
+                            self.assertEqual(0, evidence["observed_total"])
+                            self.assertIsNone(
+                                evidence["frozen_records"][0]["consumer_exit_s"]
+                            )
+                            result = evidence["final"]
+                            self.assertTrue(result["result_complete"])
+                            self.assertEqual(1, result["completed"])
+                        self.assertFalse(cancelled.is_set())
+                        self.assertAlmostEqual(10, rpc_caps[1], delta=0.1)
+                    self.assertAlmostEqual(30, rpc_caps[0], delta=0.1)
+                finally:
+                    flow.stop(Deadline(clock() + 200, clock), cancel=True)
+                self.assertTrue(flow.done.is_set())
+                self.assertTrue(
+                    all(
+                        r["consumer_exit_s"] is not None
+                        and r["transport_terminal_s"] is not None
+                        for r in flow.snapshot_records()
+                    )
+                )
+
+    def test_flap_freezes_business_counters_before_late_success_or_failure(self):
+        from flexlb_ft.scenario.actions.elastic import ClientRecords, completeness
+
+        for early_successes, early_failures, late_success, expected in (
+            (0, 1, True, "FAIL"),
+            (1, 1, False, "PASS"),
+            (0, 0, True, "FAIL"),
+        ):
+            with self.subTest(
+                early=(early_successes, early_failures), late=late_success
+            ):
+                clock = Clock()
+                ledger = ClientRecords(1)
+
+                def finish(record, success):
+                    ledger.update(
+                        record,
+                        business_finished=success,
+                        schedule={"status": "OK"},
+                        stream={"status": "OK"},
+                        transport_terminal_s=clock(),
+                        consumer_exit_s=clock(),
+                    )
+
+                for success in [True] * early_successes + [False] * early_failures:
+                    finish(
+                        ledger.issue(len(ledger.snapshot_records()) + 1, clock), success
+                    )
+                pending = ledger.issue(99, clock)
+                stop_event = threading.Event()
+                waits = []
+
+                def wait(seconds):
+                    self.assertTrue(stop_event.is_set())
+                    waits.append(seconds)
+                    clock.sleep(seconds)
+                    return False
+
+                def stop(deadline):
+                    self.assertEqual(20, clock())
+                    clock.sleep(14)
+                    deadline.check()
+                    finish(pending, late_success)
+                    return completeness(ledger.snapshot_records())
+
+                flow = NS(
+                    _stop=stop_event,
+                    done=NS(wait=wait),
+                    stop=stop,
+                    snapshot_records=ledger.snapshot_records,
+                    pump_error=None,
+                )
+                with tempfile.TemporaryDirectory() as root:
+                    ctx = RuntimeContext({}, None, root, clock, clock.sleep)
+                    ctx.env_epoch = 1
+                    handle = ctx.register_resource("flow", flow)
+                    output = recovery.execute_flow_stop(
+                        ctx, {"flow": handle}, Deadline(50, clock)
+                    )
+                    result = ctx.resource(output.output["result"], "snapshot")
+                    verdict = recovery.execute_flow_assert(
+                        ctx,
+                        {
+                            "result": output.output["result"],
+                            "min_success_rate": 0.5,
+                        },
+                        Deadline(50, clock),
+                    )
+                    checks = {c.id: c for c in verdict.checks}
+                    self.assertEqual(expected, checks["success_rate"].status)
+                    self.assertEqual("PASS", checks["complete"].status)
+                    self.assertEqual(early_successes, result["observed_ok"])
+                    self.assertEqual(
+                        early_successes + early_failures, result["observed_total"]
+                    )
+                    self.assertEqual(
+                        early_successes + early_failures + 1, result["final"]["issued"]
+                    )
+                    self.assertIsNone(result["frozen_records"][-1]["consumer_exit_s"])
+                    self.assertEqual(34, result["records"][-1]["consumer_exit_s"])
+                    self.assertEqual([20], waits)
+                    self.assertTrue(Path(output.artifacts[0]).exists())
+
     def test_complete_flap_program(self):
         self.run_program("flap", "correct", "PASS")
 

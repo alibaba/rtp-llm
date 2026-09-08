@@ -154,3 +154,25 @@ Legacy: `engine_fault_recovery_no_resurrect`.
 Legacy: `engine_fault_status_gap_long_retire`.
 
 `long_gap_retires`, `prefill_alive_back`, `long_gap_creates_generation`, `master_drain_scheduler`, `master_drain_prefill_batches`, `master_drain_decode_load`, `recovery_succeeds`
+
+## Flap stop execution allowance
+
+Legacy `_BackgroundFlow._loop` increments total/ok only after a request returns.
+`stop()` stops issuance, joins for up to20 seconds, and immediately returns those
+counters, even if the worker remains alive. The flap case freezes that ratio.
+
+`recovery_flow_stop` preserves this soft20 observation window (or early worker
+completion), freezes returned-request total/ok, and then uses the rest of its50
+second stage only to prove all issued requests have terminal/consumer-exit
+records. `recovery_flow_assert` uses frozen total/ok for the >=50% availability
+check and the final all-issued ledger for the separate complete check. Artifacts
+retain both snapshots, both counter sets and the observation timestamps. Late
+successes and failures remain in the final ledger but cannot alter the ratio.
+This corrects the migration's previous use of final all-issued availability;
+stronger worker-exit proof remains an explicit migration difference.
+
+Schedule30/stream10 limits, serial issuance cadence, six flap cycles, subsequent
+topology window and Master95 cleanup window remain unchanged. The original
+full385 batch04 stage TIMEOUT is retained: its still-valid Schedule was cancelled
+by stop20, and no evidence establishes how it would otherwise have completed.
+No Java rerun is claimed by the local fixture tests.

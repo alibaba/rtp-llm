@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
 from ..contracts import CheckResult, StageHandler, StageOutput
-from . import cancel
+from . import cancel, elastic
 from . import status_protocol as status
 from .engine_control import ENGINE_NAME
 
@@ -1422,5 +1423,99 @@ HANDLERS += [
         execute_residue,
         {},
         checks=frozenset({"bounded", "non_growing"}),
+    ),
+]
+
+
+def execute_flow_stop(ctx, params, deadline):
+    """Freeze legacy join20 counters before independently proving all exits."""
+    flow = ctx.resource(params["flow"], "flow")
+    started = ctx.clock()
+    flow._stop.set()
+    # Unlike BoundedFlow.stop, reaching the observation cap must not cancel a
+    # still-valid RPC. A real pump completion can end this soft wait early.
+    flow.done.wait(min(20, deadline.remaining()))
+    frozen_at = ctx.clock()
+    frozen = flow.snapshot_records()
+    returned = [r for r in frozen if r["consumer_exit_s"] is not None]
+    observed = elastic.completeness(returned)
+    result = dict(
+        observation_started_s=started,
+        observation_frozen_s=frozen_at,
+        observation_cap_s=20,
+        observed_total=observed["issued"],
+        observed_ok=observed["completed"],
+        frozen_records=frozen,
+        exit_verified=False,
+    )
+    # Keep the frozen business evidence even when the later exit proof times out.
+    path = status._artifact(ctx, "recovery-flow-stop", result)
+    try:
+        final = flow.stop(deadline)
+        if flow.pump_error:
+            raise RuntimeError(flow.pump_error)
+        result["exit_verified"] = True
+    finally:
+        result["records"] = flow.snapshot_records()
+        result["final"] = elastic.completeness(result["records"])
+        Path(path).write_text(json.dumps(result, indent=2, allow_nan=False))
+    evidence = ctx.register_resource("snapshot", result, historical=True)
+    return StageOutput(
+        output={
+            "complete": final["result_complete"],
+            "issued": final["issued"],
+            "result": evidence,
+        },
+        artifacts=[path],
+    )
+
+
+def execute_flow_assert(ctx, params, deadline):
+    deadline.check()
+    result = ctx.resource(params["result"], "snapshot")
+    total, ok = result["observed_total"], result["observed_ok"]
+    final = result["final"]
+    if type(total) is not int or type(ok) is not int or not 0 <= ok <= total:
+        raise ValueError("invalid frozen flow counters")
+    if (
+        type(final.get("result_complete")) is not bool
+        or result.get("exit_verified") is not True
+    ):
+        raise ValueError("missing final flow exit accounting")
+    rate = ok / total if total else 0
+    return StageOutput(
+        checks=[
+            CheckResult(
+                "nonempty", "PASS" if total else "FAIL", actual=total, expected=">0"
+            ),
+            CheckResult(
+                "complete",
+                "PASS" if final["result_complete"] else "FAIL",
+                evidence=final,
+            ),
+            CheckResult(
+                "success_rate",
+                "PASS" if total and rate >= params["min_success_rate"] else "FAIL",
+                actual=rate,
+                expected=params["min_success_rate"],
+                evidence=result,
+            ),
+        ]
+    )
+
+
+HANDLERS += [
+    StageHandler(
+        "recovery_flow_stop",
+        elastic._flow_stop_validate,
+        execute_flow_stop,
+        {"complete": "boolean", "issued": "integer", "result": "snapshot"},
+    ),
+    StageHandler(
+        "recovery_flow_assert",
+        elastic._flow_assert_validate,
+        execute_flow_assert,
+        {},
+        checks=frozenset({"nonempty", "complete", "success_rate"}),
     ),
 ]
