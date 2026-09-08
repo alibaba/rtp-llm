@@ -176,7 +176,7 @@ DeviceBlockPoolPtr makeTestDevicePool(size_t usable_blocks, const std::string& n
     config->physical_block_count    = physical_blocks;
     config->total_size_bytes        = layout.total_size_bytes;
     config->memory_layouts          = {layout};
-    config->use_cuda_malloc_backing = false;
+    config->use_cuda_malloc_backing = true;
 
     auto pool = std::make_shared<DeviceBlockPool>(config);
     if (!pool->init()) {
@@ -318,7 +318,7 @@ public:
 
 private:
     std::shared_ptr<kmonitor::MetricsReporter> kmonitor_metrics_reporter_;
-    BlockTreeCacheMetricsReporter              metrics_reporter_;
+    BlockTreeCacheMetricsReporter              metrics_reporter_{nullptr};
     std::shared_ptr<ScriptedTransferEngine>    transfer_engine_;
     std::unique_ptr<BlockTransferDispatcher>   transfer_dispatcher_;
     std::mutex                                 mutex_;
@@ -442,7 +442,7 @@ TEST(BlockTreeEvictorAsyncTest, PendingTransferDoesNotOccupyBusinessWorker) {
     ASSERT_TRUE(task_pool.start());
     auto                          deferred_engine = std::make_shared<DeferredEvictionTransferEngine>(groups);
     BlockTransferDispatcher       dispatcher(deferred_engine);
-    BlockTreeCacheMetricsReporter metrics_reporter;
+    BlockTreeCacheMetricsReporter metrics_reporter{nullptr};
     std::mutex                    cache_mutex;
     size_t                        settled_count = 0;
     BlockTreeEvictor              evictor(
@@ -650,7 +650,7 @@ public:
     std::shared_ptr<DeferredEvictionTransferEngine>      transfer_engine_;
     std::unique_ptr<BlockTransferDispatcher>             transfer_dispatcher_;
     std::shared_ptr<kmonitor::MetricsReporter>           kmonitor_metrics_reporter_;
-    BlockTreeCacheMetricsReporter                        metrics_reporter_;
+    BlockTreeCacheMetricsReporter                        metrics_reporter_{nullptr};
     std::mutex                                           cache_mutex_;
     std::unique_ptr<BlockTreeEvictor>                    evictor_;
 
@@ -787,7 +787,7 @@ void verifyMixedDetachedBatchSettlement(bool transfer_success) {
     ASSERT_TRUE(task_pool.start());
     auto                               transfer_engine = std::make_shared<DeferredEvictionTransferEngine>(groups);
     BlockTransferDispatcher            dispatcher(transfer_engine);
-    BlockTreeCacheMetricsReporter      metrics_reporter;
+    BlockTreeCacheMetricsReporter      metrics_reporter{nullptr};
     std::mutex                         cache_mutex;
     std::mutex                         settled_mutex;
     std::vector<std::pair<bool, bool>> settled_events;
@@ -1486,8 +1486,8 @@ TEST_F(BlockTreeEvictorTest, DirectDeviceDropsConvergePastTransferBatchLimit) {
     ASSERT_NE(host_pool, nullptr);
     resetGroup(host_pool);
 
-    BlockTreeTaskPool     task_pool(/*thread_count=*/1, /*queue_size=*/4, "direct_device_watermark_convergence");
-    const auto            metrics_reporter = evictor_runtime_.metricsReporter();
+    BlockTreeTaskPool task_pool(/*thread_count=*/1, /*queue_size=*/4, "direct_device_watermark_convergence");
+    const auto        metrics_reporter = evictor_runtime_.metricsReporter();
     ASSERT_TRUE(task_pool.start());
     evictor_ = evictor_runtime_.make(
         tree_.get(),
