@@ -333,8 +333,14 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
     }
 
     torch::Tensor all_hidden_states;
+    int64_t       shared_all_hidden_states_length = 0;
     if (stream->needReturnHiddenStates()) {
         all_hidden_states = model_output.all_hidden_states.narrow(0, token_offset, token_size);
+        if (stream->isContextStream()) {
+            // Prefill may execute N copies of the same prompt. Keep legacy output
+            // intact and describe only its first input row for the shared field.
+            shared_all_hidden_states_length = token_size / cur_batch_size;
+        }
     }
 
     auto         new_tokens     = new_tokens_all.narrow(0, batch_idx_out, next_batch_size);
@@ -419,7 +425,8 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
                                  std::move(prompt_logits_output),
                                  std::move(error_info),
                                  stream->isContextStream() ? model_output.generation_prefill_cuda_graph_status :
-                                                             GenerationPrefillCudaGraphStatus::NOT_REQUESTED};
+                                                             GenerationPrefillCudaGraphStatus::NOT_REQUESTED,
+                                 shared_all_hidden_states_length};
     stream->update(update_info);
 }
 

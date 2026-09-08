@@ -370,6 +370,74 @@ TEST_F(NormalBatchStreamProcessorTest, testDeviceStateFastPathAllowsAsyncLogitsP
     stream->decPendingAsyncBookkeepingAndMaybeRelease();
 }
 
+TEST_F(NormalBatchStreamProcessorTest, SharedPromptHiddenRowsFollowInputBatchAndMixedTokenOffsets) {
+    ResourceContext resource_context;
+    ModelConfig     model_config;
+    model_config.max_seq_len = 32;
+    model_config.vocab_size  = 32;
+    model_config.num_layers  = 1;
+    RuntimeConfig                runtime_config;
+    std::list<GenerateStreamPtr> streams;
+    const std::vector<int>       lengths{2, 3, 4, 5};
+    const std::vector<int>       input_rows{1, 2, 3, 1};
+    const std::vector<int>       output_rows{1, 2, 3, 2};
+    for (size_t i = 0; i < lengths.size(); ++i) {
+        auto input                                       = std::make_shared<GenerateInput>();
+        input->input_ids                                 = torch::arange(1, lengths[i] + 1, torch::kInt32);
+        input->generate_config                           = std::make_shared<GenerateConfig>();
+        input->generate_config->max_new_tokens           = 1;
+        input->generate_config->return_all_hidden_states = true;
+        input->generate_config->aux_info                 = false;
+        if (i == 3) {
+            input->generate_config->variable_num_beams = {2};
+        } else {
+            input->generate_config->num_return_sequences = input_rows[i];
+        }
+        auto stream =
+            std::make_shared<NormalGenerateStream>(input, model_config, runtime_config, resource_context, nullptr);
+        stream->generate_status_->status = StreamState::RUNNING;
+        ASSERT_EQ(stream->currentBatchSize(), input_rows[i]);
+        ASSERT_EQ(stream->nextBatchSize(), output_rows[i]);
+        stream->step();
+        streams.push_back(stream);
+    }
+    StreamGroups               groups(streams);
+    NormalBatchStreamProcessor processor(
+        model_config, PDSepConfig{}, ProfilingDebugLoggingConfig{}, CacheConfig{}, false);
+    MergedOutput merged;
+    // 2*1 + 3*2 + 4*3 + 5*1 rows; distinguish every row so a wrong stream
+    // offset or division by output-beam count cannot accidentally pass.
+    const auto states                     = torch::arange(50, torch::kFloat32).reshape({25, 2});
+    merged.model_output.all_hidden_states = states.to(torch::kCUDA);
+    merged.sampler_output.token_ids       = torch::full({8, 6}, 9, torch::kInt32);
+    for (int row = 6; row < 8; ++row) {
+        merged.sampler_output.token_ids[row].narrow(0, 0, 5).copy_(torch::arange(1, 6, torch::kInt32));
+    }
+    merged.sampler_output.beam_index    = torch::tensor({0, 0, 0, 0, 0, 0, 0, 0}, torch::kInt32);
+    merged.sampler_output.cum_log_probs = torch::zeros({8});
+    ASSERT_TRUE(processor.dispatch(groups, merged).ok());
+    int    offset = 0;
+    size_t index  = 0;
+    for (const auto& stream : streams) {
+        ASSERT_FALSE(stream->hasError()) << stream->statusInfo().ToString();
+        ASSERT_TRUE(stream->hasOutput());
+        auto result = stream->nextOutput();
+        ASSERT_TRUE(result.ok());
+        ASSERT_EQ(result.value().generate_outputs.size(), output_rows[index]);
+        for (const auto& output : result.value().generate_outputs) {
+            ASSERT_TRUE(output.all_hidden_states.has_value());
+            EXPECT_EQ(output.shared_all_hidden_states_length, lengths[index]);
+            // Legacy output remains the entire N*L slice for this stream.
+            EXPECT_TRUE(
+                torch::equal(*output.all_hidden_states, states.narrow(0, offset, lengths[index] * input_rows[index])));
+            EXPECT_TRUE(torch::equal(output.all_hidden_states->narrow(0, 0, output.shared_all_hidden_states_length),
+                                     states.narrow(0, offset, lengths[index])));
+        }
+        offset += lengths[index] * input_rows[index];
+        ++index;
+    }
+}
+
 TEST_F(NormalBatchStreamProcessorTest, testSoftmaxProbs) {
     ResourceContext resource_context;
     ModelConfig     model_config;

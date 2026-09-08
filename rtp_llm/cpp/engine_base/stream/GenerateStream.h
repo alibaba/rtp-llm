@@ -48,6 +48,8 @@ struct StreamUpdateInfo {
     std::optional<ErrorInfo>          error_info;
     GenerationPrefillCudaGraphStatus  generation_prefill_cuda_graph_status{
         GenerationPrefillCudaGraphStatus::NOT_REQUESTED};
+    // Executed prompt rows for one input row; independent of sampled output count.
+    int64_t shared_all_hidden_states_length = 0;
 };
 
 struct StreamSpecUpdateInfo {
@@ -928,7 +930,9 @@ protected:
     torch::Tensor                            softmax_probs_;
     torch::Tensor                            loss_;
     torch::Tensor                            last_hidden_states_;
-    int                                      loss_index_ = 0;
+    torch::Tensor                            all_hidden_states_;
+    int64_t                                  shared_all_hidden_states_length_ = 0;
+    int                                      loss_index_                      = 0;
     std::shared_ptr<std::mutex>              mutex_;
     std::shared_ptr<std::condition_variable> consumer_cv_;
 
