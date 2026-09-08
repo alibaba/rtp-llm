@@ -9,6 +9,7 @@ py_library(
         "pynccl_cp.py",
         "rocm_rccl.py",
         "symm_mem.py",
+        "tp_token_shard.py",
     ],
     deps = [
         "//rtp_llm:torch",

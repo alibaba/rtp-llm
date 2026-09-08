@@ -33,7 +33,9 @@ if _TRITON_AVAILABLE:
     ):
         """Expand selected complete groups and append the live raw tail."""
 
-        row = tl.program_id(0)
+        # T=1M and expanded top-k=2051 exceed signed 32-bit element offsets.
+        # Widen before multiplying either input or output row stride.
+        row = tl.program_id(0).to(tl.int64)
         tile = tl.program_id(1)
         cols = tile * BLOCK_COLS + tl.arange(0, BLOCK_COLS)
         mask = cols < output_width

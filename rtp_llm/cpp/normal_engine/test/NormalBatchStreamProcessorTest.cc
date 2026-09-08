@@ -325,6 +325,113 @@ TEST_F(NormalBatchStreamProcessorTest, testDeviceStateFastPathAllowsAsyncLogitsP
     stream->decPendingAsyncBookkeepingAndMaybeRelease();
 }
 
+TEST_F(NormalBatchStreamProcessorTest, testBatchedNormalPublishFirstMixedReorderAndLifetime) {
+    auto model_config        = makeLogprobsModelConfig(128);
+    model_config.max_seq_len = 128;
+    auto make_stream         = [&]() {
+        auto stream = makeLogprobsStream(model_config, false, 0, 64, true);
+        stream->setIsContextStream(false);
+        return stream;
+    };
+    auto             a = make_stream();
+    auto             b = make_stream();
+    auto             c = make_stream();
+    EngineInitParams params;
+    params.model_config_ = model_config;
+    params.py_model      = py::none();
+    NormalExecutor executor(params, nullptr, true);
+    auto           publish = [&](std::list<GenerateStreamPtr> streams, const std::vector<int32_t>& tokens) {
+        StreamGroups  groups(streams);
+        SamplerOutput output;
+        output.token_ids = torch::tensor(tokens, torch::kInt32).reshape({(int64_t)tokens.size(), 1});
+        executor.publishNormalDeviceState(groups, output);
+    };
+    publish({a, b, c}, {10, 20, 30});
+    auto first = a->getNormalAsyncDeviceState();  // Keep an async consumer alive.
+    ASSERT_TRUE(first.hasBatchedState());
+    EXPECT_EQ(toVec<int32_t>(first.batched_next_seq_lens_gpu), (std::vector<int32_t>{2, 2, 2}));
+    EXPECT_EQ(first.batched_next_seq_lens_gpu.unsafeGetTensorImpl(),
+              b->getNormalAsyncDeviceState().batched_next_seq_lens_gpu.unsafeGetTensorImpl());
+    publish({c, a}, {31, 11});  // Shrink and reorder: old publishing indices differ.
+    EXPECT_EQ(toVec<int32_t>(c->getNormalAsyncDeviceState().lastTokenView()), (std::vector<int32_t>{31}));
+    EXPECT_EQ(toVec<int32_t>(a->getNormalAsyncDeviceState().nextSeqLenView()), (std::vector<int32_t>{3}));
+    EXPECT_EQ(toVec<int32_t>(first.batched_last_sample_tokens_gpu), (std::vector<int32_t>{10, 20, 30}));
+    EXPECT_EQ(toVec<int32_t>(first.batched_next_seq_lens_gpu), (std::vector<int32_t>{2, 2, 2}));
+    auto       d        = make_stream();
+    auto       e        = make_stream();
+    const auto cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    d->setNormalAsyncDeviceState(GenerateStream::NormalAsyncDeviceState{
+        .last_sample_token_gpu = torch::full({1}, 45, cuda_i32),
+        .next_seq_len_gpu      = torch::full({1}, 55, cuda_i32),
+        .last_real_seq_len     = 54,
+        .next_real_seq_len     = 55,
+    });
+    publish({a, d, e}, {12, 46, 60});  // Batched + standalone + first-step fallback.
+    EXPECT_EQ(toVec<int32_t>(a->getNormalAsyncDeviceState().batched_next_seq_lens_gpu),
+              (std::vector<int32_t>{4, 56, 2}));
+    EXPECT_EQ(d->getNormalAsyncDeviceState().next_real_seq_len, 56);
+    publish({a, d, e}, {13, 47, 61});  // Stable batch fast path.
+    EXPECT_EQ(toVec<int32_t>(a->getNormalAsyncDeviceState().batched_next_seq_lens_gpu),
+              (std::vector<int32_t>{5, 57, 3}));
+    std::list<GenerateStreamPtr> streams{a, d, e};
+    StreamGroups                 groups(streams);
+    executor.publishNormalDeviceState(groups, SamplerOutput{});
+    EXPECT_FALSE(a->getNormalAsyncDeviceState().hasDeviceState());
+    EXPECT_FALSE(d->getNormalAsyncDeviceState().hasDeviceState());
+    EXPECT_EQ(toVec<int32_t>(first.batched_last_sample_tokens_gpu), (std::vector<int32_t>{10, 20, 30}));
+}
+
+TEST_F(NormalBatchStreamProcessorTest, testBatchedNormalGatherStableShrunkReorderedAndStandalone) {
+    auto model_config        = makeLogprobsModelConfig(128);
+    model_config.max_seq_len = 128;
+    auto processor           = makeLogprobsProcessor(model_config);
+    auto make_stream         = [&]() {
+        auto                 stream = makeLogprobsStream(model_config, false, 0, 64, true);
+        BatchKVCacheResource blocks;
+        blocks.resetBatchSize(1);
+        blocks.initGroups(1, 1, {0});
+        blocks.setBatchBlocks(0, 0, {1, 2});
+        stream->setKVCache(blocks);
+        stream->setIsContextStream(false);
+        return stream;
+    };
+    auto    a       = make_stream();
+    auto    b       = make_stream();
+    auto    c       = make_stream();
+    auto    tokens  = torch::tensor({10, 20, 30}, torch::kInt32).to(torch::kCUDA);
+    auto    lengths = torch::tensor({11, 22, 33}, torch::kInt32).to(torch::kCUDA);
+    int64_t index   = 0;
+    for (auto& stream : std::vector<GenerateStreamPtr>{a, b, c}) {
+        GenerateStream::NormalAsyncDeviceState state;
+        state.batched_last_sample_tokens_gpu = tokens;
+        state.batched_next_seq_lens_gpu      = lengths;
+        state.device_batch_index             = index++;
+        stream->setNormalAsyncDeviceState(state);
+    }
+    auto gather = [&](std::list<GenerateStreamPtr> streams,
+                      std::vector<int32_t>         expected_tokens,
+                      std::vector<int32_t>         expected_lengths,
+                      bool                         shared) {
+        StreamGroups groups(streams);
+        TensorHolder holder;
+        auto         result = processor->gatherModelInput(groups, holder);
+        ASSERT_TRUE(result.ok()) << result.status();
+        EXPECT_EQ(toVec<int32_t>(result->combo_tokens), expected_tokens);
+        EXPECT_EQ(toVec<int32_t>(result->sequence_lengths), expected_lengths);
+        if (shared) {
+            EXPECT_EQ(result->combo_tokens.data_ptr(), tokens.data_ptr());
+        }
+    };
+    gather({a, b, c}, {10, 20, 30}, {10, 21, 32}, true);
+    gather({c, a}, {30, 10}, {32, 10}, false);
+    b->setNormalAsyncDeviceState(GenerateStream::NormalAsyncDeviceState{
+        .last_sample_token_gpu = torch::tensor({40}, torch::kInt32).to(torch::kCUDA),
+        .next_seq_len_gpu      = torch::tensor({44}, torch::kInt32).to(torch::kCUDA),
+    });
+    gather({b, c, a}, {40, 30, 10}, {43, 32, 10}, false);
+    gather({b}, {40}, {43}, false);
+}
+
 TEST_F(NormalBatchStreamProcessorTest, testSoftmaxProbs) {
     ResourceContext resource_context;
     ModelConfig     model_config;

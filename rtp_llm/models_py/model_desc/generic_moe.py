@@ -2,11 +2,13 @@ import os
 from typing import Any, Dict, Optional
 
 import torch
-from torch import nn
-
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
-from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
+from rtp_llm.models_py.distributed.collective_torch import Group, all_gather, all_reduce
+from rtp_llm.models_py.distributed.tp_token_shard import (
+    gather_routed_tokens,
+    slice_routed_tokens,
+)
 from rtp_llm.models_py.model_desc.block_map import select_block_map_for_layer
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules import (
@@ -36,6 +38,7 @@ from rtp_llm.ops import HWKernelConfig, MoeConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import KVCache, LayerKVCache, PyModelInputs, PyModelOutputs
 from rtp_llm.utils.dsa_indexing import dsa_layer_has_indexer, dsa_layer_skips_topk
 from rtp_llm.utils.model_weight import W
+from torch import nn
 
 try:
     from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_gemm_linear import (
@@ -142,6 +145,20 @@ class GenericMoeLayer(nn.Module):
         self.add_shared_expert = config.moe_style == 2
         self.ffn_tp_size = parallelism_config.get_ffn_tp_size()
         self.ep_size = parallelism_config.ep_size
+        # CP already supplies disjoint tokens. The ordinary GLM TP path supplies
+        # replicated tokens to EP, so shard only the routed branch after routing.
+        # Keeping the router's original M preserves its GEMM/top-k numerics.
+        self.routed_tp_size = (
+            parallelism_config.get_attn_tp_size()
+            if config.model_type == "glm5_3_flash"
+            and moe_config.moe_strategy == "mega_moe"
+            and self.ep_size > 1
+            and not cp_prefill_enabled
+            and not is_decode_role
+            and os.environ.get("GLM53_MOE_TP_TOKEN_SHARD", "1") == "1"
+            else 1
+        )
+        self.routed_tp_rank = parallelism_config.tp_rank
         shared_expert_gate_weight = weights.get(W.shared_expert_gate, None)
         is_ep_mode = self.ep_size > 1
         use_ep_shared_allreduce_at_init = (
@@ -287,6 +304,8 @@ class GenericMoeLayer(nn.Module):
         clone.add_shared_expert = self.add_shared_expert
         clone.ffn_tp_size = self.ffn_tp_size
         clone.ep_size = self.ep_size
+        clone.routed_tp_size = self.routed_tp_size
+        clone.routed_tp_rank = self.routed_tp_rank
         clone.shared_expert = self.shared_expert
         clone.shared_expert_gate = self.shared_expert_gate
         clone.sigmoid_gate_scale_add = self.sigmoid_gate_scale_add
@@ -377,12 +396,29 @@ class GenericMoeLayer(nn.Module):
             and self._use_mega_moe_fused_shared
         )
 
+        routed_hidden, routed_weights, routed_ids = (
+            hidden_states,
+            topk_weights,
+            topk_ids,
+        )
+        if self.routed_tp_size > 1:
+            routed_hidden, routed_weights, routed_ids, _ = slice_routed_tokens(
+                hidden_states,
+                topk_weights,
+                topk_ids,
+                self.routed_tp_rank,
+                self.routed_tp_size,
+            )
         experts_output = self.fused_moe(
-            hidden_states=hidden_states,
-            topk_weights=topk_weights,
-            topk_ids=topk_ids,
+            hidden_states=routed_hidden,
+            topk_weights=routed_weights,
+            topk_ids=routed_ids,
             activation="SiGLU",
         )
+        if self.routed_tp_size > 1:
+            experts_output = gather_routed_tokens(
+                experts_output, num_tokens, lambda x: all_gather(x, group=Group.TP)
+            )
         if use_mega_moe_fused_shared:
             return experts_output
         if self.shared_expert is not None:

@@ -704,6 +704,44 @@ public:
         // scheduler can drive incrKVBlock without racing the async worker.
         // -1 = unset (first iter / cleared).
         int next_real_seq_len = -1;
+        // Immutable batch tensors own the storage across async publication and
+        // stream removal. The index follows the publishing batch, not a later
+        // scheduler order. Standalone fields remain valid for first-step/PD state.
+        torch::Tensor batched_last_sample_tokens_gpu;
+        torch::Tensor batched_next_seq_lens_gpu;
+        int64_t       device_batch_index = -1;
+
+        static bool isDeviceVector(const torch::Tensor& tensor, int64_t index) {
+            return index >= 0 && tensor.defined() && tensor.is_cuda() && tensor.scalar_type() == torch::kInt32
+                   && tensor.dim() == 1 && index < tensor.size(0);
+        }
+        bool hasStandaloneState() const {
+            return isDeviceVector(last_sample_token_gpu, 0) && last_sample_token_gpu.numel() == 1
+                   && isDeviceVector(next_seq_len_gpu, 0) && next_seq_len_gpu.numel() == 1;
+        }
+        bool hasBatchedState() const {
+            return isDeviceVector(batched_last_sample_tokens_gpu, device_batch_index)
+                   && isDeviceVector(batched_next_seq_lens_gpu, device_batch_index);
+        }
+        bool hasDeviceState() const {
+            return hasStandaloneState() || hasBatchedState();
+        }
+        bool hasNextSeqLen() const {
+            return (isDeviceVector(next_seq_len_gpu, 0) && next_seq_len_gpu.numel() == 1)
+                   || isDeviceVector(batched_next_seq_lens_gpu, device_batch_index);
+        }
+        torch::Tensor nextSeqLenView() const {
+            if (isDeviceVector(next_seq_len_gpu, 0) && next_seq_len_gpu.numel() == 1) {
+                return next_seq_len_gpu;
+            }
+            return batched_next_seq_lens_gpu.narrow(0, device_batch_index, 1);
+        }
+        torch::Tensor lastTokenView() const {
+            if (isDeviceVector(last_sample_token_gpu, 0) && last_sample_token_gpu.numel() == 1) {
+                return last_sample_token_gpu;
+            }
+            return batched_last_sample_tokens_gpu.narrow(0, device_batch_index, 1);
+        }
     };
 
     uint64_t setNormalAsyncDeviceState(NormalAsyncDeviceState state) {

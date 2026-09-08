@@ -184,6 +184,21 @@ class SparseMlaOp(object):
         ) * _FLASHMLA_TOPK_ALIGNMENT
         self.indexer_top_k = top_k if indexer_top_k is None else indexer_top_k
         self.indexer_group_size = indexer_group_size
+        self.bf16_q_chunk_rows = int(
+            os.environ.get("GLM53_SPARSE_MLA_BF16_Q_CHUNK", "4096")
+        )
+        self.bf16_backend = os.environ.get("GLM53_SPARSE_MLA_BF16_BACKEND", "auto")
+        if self.bf16_q_chunk_rows <= 0:
+            raise ValueError("GLM53_SPARSE_MLA_BF16_Q_CHUNK must be positive")
+        if self.bf16_backend not in (
+            "auto",
+            "flashmla",
+            "tilelang",
+            "flashinfer",
+        ):
+            raise ValueError(
+                "GLM53_SPARSE_MLA_BF16_BACKEND must be auto|tilelang|flashinfer|flashmla"
+            )
         self.kernel_num_heads = next(
             (
                 supported_heads
@@ -313,24 +328,93 @@ class SparseMlaOp(object):
         kv: torch.Tensor,
         global_indices: torch.Tensor,
     ) -> torch.Tensor:
-        """Run sparse attention after padding TP-local heads for FlashMLA."""
+        """Use real local heads, or bound FlashMLA's padded Q/output workspace."""
         local_heads = int(q.shape[1])
         if local_heads != self.num_heads:
             raise ValueError(
                 f"query head count {local_heads} does not match configured "
                 f"local head count {self.num_heads}"
             )
-        if self.kernel_num_heads != local_heads:
-            q_padded = q.new_zeros(q.shape[0], self.kernel_num_heads, q.shape[2])
-            q_padded[:, :local_heads].copy_(q)
-            q = q_padded
-
-        global_indices = _pad_flashmla_topk(global_indices, self.kernel_top_k)
-        out, _, _ = flash_mla_sparse_fwd(
-            q, kv, global_indices, self.scale, d_v=self.kv_lora_rank
+        small_head = (
+            q.is_cuda
+            and local_heads == 8
+            and self.kv_lora_rank == 512
+            and self.qk_rope_head_dim == 0
+            and q.shape[-1] == 512
+            and q.dtype == kv.dtype == torch.bfloat16
         )
-        if self.kernel_num_heads != local_heads:
-            out = out.narrow(1, 0, local_heads).contiguous()
+        if self.bf16_backend in ("tilelang", "flashinfer") and not small_head:
+            raise ValueError(
+                "small-head backends require BF16 NoPE MLA with 8 heads and latent dim 512"
+            )
+        selected_backend = self.bf16_backend
+        if small_head and selected_backend == "auto":
+            from rtp_llm.models_py.triton_kernels.sparse_mla.flashinfer_bf16_small_head import (
+                flashinfer_sparse_supported,
+            )
+
+            selected_backend = (
+                "flashinfer" if flashinfer_sparse_supported(q.device) else "flashmla"
+            )
+        if small_head and selected_backend in ("tilelang", "flashinfer"):
+            if selected_backend == "tilelang":
+                from rtp_llm.models_py.triton_kernels.sparse_mla.sglang_bf16_small_head import (
+                    tilelang_sparse_fwd,
+                )
+
+                backend = tilelang_sparse_fwd
+            else:
+                from rtp_llm.models_py.triton_kernels.sparse_mla.flashinfer_bf16_small_head import (
+                    flashinfer_sparse_fwd,
+                )
+
+                backend = flashinfer_sparse_fwd
+            tokens = int(q.shape[0])
+            if tokens <= self.bf16_q_chunk_rows:
+                indices = global_indices[:, :, : self.top_k]
+                if selected_backend == "tilelang":
+                    indices = _pad_flashmla_topk(
+                        indices, ((self.top_k + 63) // 64) * 64
+                    )
+                return backend(q, kv, indices, self.scale)
+            out = torch.empty_like(q, memory_format=torch.contiguous_format)
+            for begin in range(0, tokens, self.bf16_q_chunk_rows):
+                end = min(begin + self.bf16_q_chunk_rows, tokens)
+                indices = global_indices[begin:end, :, : self.top_k]
+                if selected_backend == "tilelang":
+                    indices = _pad_flashmla_topk(
+                        indices, ((self.top_k + 63) // 64) * 64
+                    )
+                out[begin:end].copy_(backend(q[begin:end], kv, indices, self.scale))
+            return out
+
+        tokens = int(q.shape[0])
+        if local_heads == self.kernel_num_heads and tokens <= self.bf16_q_chunk_rows:
+            out, _, _ = flash_mla_sparse_fwd(
+                q,
+                kv,
+                _pad_flashmla_topk(global_indices, self.kernel_top_k),
+                self.scale,
+                d_v=self.kv_lora_rank,
+            )
+            return out
+        out = q.new_empty((tokens, local_heads, self.kv_lora_rank))
+        for begin in range(0, tokens, self.bf16_q_chunk_rows):
+            end = min(begin + self.bf16_q_chunk_rows, tokens)
+            q_chunk = q[begin:end]
+            if local_heads != self.kernel_num_heads:
+                padded = q.new_zeros((end - begin, self.kernel_num_heads, q.shape[2]))
+                padded[:, :local_heads].copy_(q_chunk)
+                q_chunk = padded
+                del padded
+            indices_chunk = _pad_flashmla_topk(
+                global_indices[begin:end], self.kernel_top_k
+            )
+            chunk_out, _, _ = flash_mla_sparse_fwd(
+                q_chunk, kv, indices_chunk, self.scale, d_v=self.kv_lora_rank
+            )
+            out[begin:end].copy_(chunk_out[:, :local_heads])
+            del q_chunk, indices_chunk, chunk_out
         return out
 
 

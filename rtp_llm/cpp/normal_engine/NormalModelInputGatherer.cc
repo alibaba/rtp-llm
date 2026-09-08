@@ -463,9 +463,7 @@ absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&     
     if (use_normal_device_state) {
         for (const auto& stream : stream_groups.decodeStreams()) {
             const auto& state = stream->getNormalAsyncDeviceState();
-            if (stream->currentBatchSize() != 1 || !state.last_sample_token_gpu.defined()
-                || !state.last_sample_token_gpu.is_cuda() || !state.next_seq_len_gpu.defined()
-                || !state.next_seq_len_gpu.is_cuda()) {
+            if (stream->currentBatchSize() != 1 || !state.hasDeviceState()) {
                 use_normal_device_state = false;
                 break;
             }
@@ -473,10 +471,38 @@ absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&     
     }
     std::vector<torch::Tensor> normal_combo_tokens_gpu;
     std::vector<torch::Tensor> normal_sequence_lengths_gpu;
+    torch::Tensor              shared_batched_tokens_gpu;
+    torch::Tensor              shared_batched_next_seq_lens_gpu;
+    bool                       can_reuse_batched_state = use_normal_device_state;
     if (use_normal_device_state) {
         normal_combo_tokens_gpu.reserve(stream_groups.totalDecodeBatchSize());
         normal_sequence_lengths_gpu.reserve(stream_groups.totalDecodeBatchSize());
+
+        int64_t device_batch_index = 0;
+        for (const auto& stream : stream_groups.decodeStreams()) {
+            const auto& state = stream->getNormalAsyncDeviceState();
+            if (!state.hasBatchedState() || state.device_batch_index != device_batch_index
+                || state.batched_last_sample_tokens_gpu.size(0)
+                       != static_cast<int64_t>(stream_groups.totalDecodeBatchSize())
+                || state.batched_next_seq_lens_gpu.size(0)
+                       != static_cast<int64_t>(stream_groups.totalDecodeBatchSize())) {
+                can_reuse_batched_state = false;
+                break;
+            }
+            if (!shared_batched_tokens_gpu.defined()) {
+                shared_batched_tokens_gpu        = state.batched_last_sample_tokens_gpu;
+                shared_batched_next_seq_lens_gpu = state.batched_next_seq_lens_gpu;
+            } else if (shared_batched_tokens_gpu.unsafeGetTensorImpl()
+                           != state.batched_last_sample_tokens_gpu.unsafeGetTensorImpl()
+                       || shared_batched_next_seq_lens_gpu.unsafeGetTensorImpl()
+                              != state.batched_next_seq_lens_gpu.unsafeGetTensorImpl()) {
+                can_reuse_batched_state = false;
+                break;
+            }
+            device_batch_index += 1;
+        }
     }
+
     for (const auto& stream : stream_groups.decodeStreams()) {
         model_input.need_all_logits        = model_input.need_all_logits || stream->calculateLoss();
         model_input.need_all_hidden_states = model_input.need_all_hidden_states || stream->needReturnHiddenStates();
@@ -488,8 +514,12 @@ absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&     
             model_input.trace_ids.push_back(stream->traceId());
             if (use_normal_device_state) {
                 const auto& state = stream->getNormalAsyncDeviceState();
-                checkRuntimeCudaDevice(state.last_sample_token_gpu, "normal async last_sample_token_gpu");
-                checkRuntimeCudaDevice(state.next_seq_len_gpu, "normal async next_seq_len_gpu");
+                checkRuntimeCudaDevice(state.hasStandaloneState() ? state.last_sample_token_gpu :
+                                                                    state.batched_last_sample_tokens_gpu,
+                                       "normal async sample tokens");
+                checkRuntimeCudaDevice(state.hasStandaloneState() ? state.next_seq_len_gpu :
+                                                                    state.batched_next_seq_lens_gpu,
+                                       "normal async next sequence lengths");
                 static std::atomic<int> debug_log_budget{200};
                 if (asyncDebugEnabled() && stream->hasPendingAsyncBookkeeping()
                     && debug_log_budget.fetch_sub(1, std::memory_order_relaxed) > 0) {
@@ -503,8 +533,10 @@ absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&     
                                         stream->curBlocksNum(),
                                         ctx.batch_idx);
                 }
-                normal_combo_tokens_gpu.push_back(state.last_sample_token_gpu.reshape({1}));
-                normal_sequence_lengths_gpu.push_back((state.next_seq_len_gpu - 1).to(torch::kInt32).reshape({1}));
+                if (!can_reuse_batched_state) {
+                    normal_combo_tokens_gpu.push_back(state.lastTokenView());
+                    normal_sequence_lengths_gpu.push_back(state.nextSeqLenView());
+                }
                 ctx.input_lengths[ctx.batch_idx] = stream->inputLength();
             } else {
                 auto currentTokens = stream->currentExecuteTokens(i);
@@ -531,8 +563,19 @@ absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&     
     }
 
     if (use_normal_device_state) {
-        model_input.combo_tokens     = torch::cat(normal_combo_tokens_gpu, 0).to(runtimeCudaI32Options());
-        model_input.sequence_lengths = torch::cat(normal_sequence_lengths_gpu, 0).to(runtimeCudaI32Options());
+        // Reordered/shrunk/mixed batches concatenate views in the new stream
+        // order. Stable batches reuse the owned tensors without per-stream ATen
+        // views or copies. Arithmetic is performed once after assembly.
+        auto tokens                  = can_reuse_batched_state ?
+                                           shared_batched_tokens_gpu :
+                                           (normal_combo_tokens_gpu.size() == 1 ? normal_combo_tokens_gpu.front() :
+                                                                                  torch::cat(normal_combo_tokens_gpu, 0));
+        auto next_lengths            = can_reuse_batched_state ?
+                                           shared_batched_next_seq_lens_gpu :
+                                           (normal_sequence_lengths_gpu.size() == 1 ? normal_sequence_lengths_gpu.front() :
+                                                                                      torch::cat(normal_sequence_lengths_gpu, 0));
+        model_input.combo_tokens     = tokens.to(runtimeCudaI32Options());
+        model_input.sequence_lengths = next_lengths.to(runtimeCudaI32Options()) - 1;
     }
     return absl::OkStatus();
 }

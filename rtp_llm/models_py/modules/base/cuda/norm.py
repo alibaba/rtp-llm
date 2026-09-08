@@ -2,8 +2,6 @@ from typing import Optional, Tuple
 
 import flashinfer
 import torch
-from torch import nn
-
 from rtp_llm.models_py.modules.base.common.norm import (
     BaseAddBiasResLayerNorm,
     BaseNorm,
@@ -13,6 +11,7 @@ from rtp_llm.models_py.triton_kernels.common.fused_qk_rmsnorm import (
     fused_qk_rmsnorm_triton,
 )
 from rtp_llm.ops.compute_ops import rtp_llm_ops
+from torch import nn
 
 
 class RMSNorm(BaseNorm):
@@ -25,9 +24,31 @@ class RMSNorm(BaseNorm):
         stream_id = torch.cuda.current_stream().cuda_stream
         if output is None:
             output = torch.empty_like(hidden_states)
-        rtp_llm_ops.rmsnorm(
-            output, hidden_states, self.weight.data, self.variance_epsilon, stream_id
-        )
+        # The linked FlashInfer kernel multiplies row and stride in uint32.
+        # GLM TP Prefill reaches 2**32 elements at 8 * 128K * 4096; a
+        # larger batch silently leaves its tail unwritten without this bound.
+        # The C++ binding requires contiguous input and uses hidden_size as
+        # the row stride for both input and output.
+        num_tokens, hidden_size = hidden_states.shape
+        rows_per_launch = (1 << 32) // hidden_size
+        if num_tokens <= rows_per_launch:
+            rtp_llm_ops.rmsnorm(
+                output,
+                hidden_states,
+                self.weight.data,
+                self.variance_epsilon,
+                stream_id,
+            )
+        else:
+            for start in range(0, num_tokens, rows_per_launch):
+                end = min(start + rows_per_launch, num_tokens)
+                rtp_llm_ops.rmsnorm(
+                    output[start:end],
+                    hidden_states[start:end],
+                    self.weight.data,
+                    self.variance_epsilon,
+                    stream_id,
+                )
         return output
 
 

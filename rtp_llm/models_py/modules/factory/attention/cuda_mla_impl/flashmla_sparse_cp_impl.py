@@ -1114,10 +1114,10 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         Active sequence CP owns all 64 query heads and can use FlashMLA
         directly. Pure TP8 owns eight heads per rank; FlashMLA sparse prefill
         only instantiates 64/128 heads, so gathering Q would make every rank
-        repeat the complete 64-head computation. GLM-5.3-Flash's NoPE absorbed
-        Q and latent KV both have width 512, which matches the existing DSV4
-        TileLang sparse-MQA kernel. It pads eight heads to 16 internally, but
-        computes and returns only this rank's real head shard.
+        repeat the complete 64-head computation. GLM's BF16 NoPE H8 path uses
+        the bounded sparse dispatch, selecting TRTLLM-GEN when supported.
+        The existing DSV4 TileLang path remains the automatic fallback on
+        older environments and retains the real local head shard.
         """
         if self.sequence_parallel or self.attn_tp_size <= 1:
             return self._forward_sparse(q, kv, global_indices)
@@ -1138,6 +1138,22 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
                 "TP-sharded sparse MLA expects indices [T, 1, K], got "
                 f"{tuple(global_indices.shape)}"
             )
+
+        # Page-RR cache storage restores a flat BF16 pool before attention.
+        # Reuse the same H8 dispatch/chunk contract as the non-sharded path;
+        # sequence CP and unsupported legacy devices retain their existing path.
+        if (
+            q.is_cuda
+            and self.num_heads == 8
+            and self.kv_lora_rank == 512
+            and q.dtype == kv.dtype == torch.bfloat16
+        ):
+            from rtp_llm.models_py.triton_kernels.sparse_mla.flashinfer_bf16_small_head import (
+                flashinfer_sparse_supported,
+            )
+
+            if self.bf16_backend != "auto" or flashinfer_sparse_supported(q.device):
+                return self._forward_sparse(q, kv, global_indices)
 
         from rtp_llm.models_py.modules.dsv4 import tilelang_kernels
 

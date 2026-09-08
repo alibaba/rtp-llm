@@ -147,3 +147,28 @@ py_test(
     tags = ["manual"],
     exec_properties = {'gpu': 'H20'},
 )
+
+py_test(
+    name = "small_head_sparse_mla_test",
+    srcs = ["small_head_sparse_mla_test.py"],
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+    tags = ["manual"],
+    timeout = "long",
+)
+
+py_test(
+    name = "small_head_sparse_mla_dispatch_test",
+    srcs = ["small_head_sparse_mla_dispatch_test.py", "small_head_sparse_mla_test.py"],
+    main = "small_head_sparse_mla_dispatch_test.py",
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+    tags = ["manual"],
+    timeout = "long",
+)
+
+py_test(
+    name = "indexer_large_offsets_test",
+    srcs = ["indexer_large_offsets_test.py"],
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+    tags = ["manual"],
+    timeout = "long",
+)

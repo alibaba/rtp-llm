@@ -528,7 +528,7 @@ class SparseMlaOpTest(TestCase):
         )
         pooled = torch.arange(512, dtype=torch.int32, device="cuda")
 
-        for num_heads in (16, 64):
+        for num_heads in (8, 16, 64):
             for is_prefill in (True, False):
                 with self.subTest(
                     num_heads=num_heads,

@@ -43,6 +43,7 @@ py_library(
 py_library(
     name = "sparse_mla",
     srcs = glob(["sparse_mla/*.py"]),
+    data = ["sparse_mla/SGLANG_LICENSE"],
     visibility = ["//visibility:public"]
 )
 
