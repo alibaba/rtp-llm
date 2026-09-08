@@ -183,9 +183,10 @@ uint8_t dsv4PdPattern(int layer_id, int gid, size_t block_pos) {
 }
 
 // Block positions a group actually transfers on the PD prefill->decode path.
-// Both sides derive the plan from the group policy: runtimeWriteCacheStore via
-// buildCacheStorePlan and DecodeRpcServer::loadCache via
-// blockPositionsForCacheTransfer, and the two agree for cp_size == 1.
+// Both sides derive the plan from the group policy through buildCacheStorePlan:
+// runtimeWriteCacheStore directly, DecodeRpcServer::loadCache via
+// DecodeRpcServer::buildGroupLoadPlan. This helper mirrors that plan for
+// cp_size == 1, where it reduces to blockPositionsForCacheTransfer.
 std::vector<size_t>
 dsv4TransferPositions(const CacheConfig& config, int gid, size_t block_num, size_t reuse_block_size) {
     const auto policy = config.policyForGroup(static_cast<size_t>(gid));

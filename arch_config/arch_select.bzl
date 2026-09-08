@@ -8,6 +8,7 @@ load("@pip_gpu_rocm_torch//:requirements.bzl", requirement_gpu_rocm="requirement
 load("@rtp_llm//bazel:defs.bzl", "copy_so")
 
 def copy_all_so():
+    copy_so("@rtp_llm//:mm_rdma_exporter")
     copy_so("@rtp_llm//:th_transformer")
     copy_so("@rtp_llm//:th_transformer_config")
     copy_so("@rtp_llm//:th_grammar_tokenizer_info")
@@ -53,6 +54,14 @@ def cache_store_deps():
     native.alias(
         name = "cache_store_arch_select_impl",
         actual = "@rtp_llm//rtp_llm/cpp/disaggregate/cache_store:cache_store_base_impl"
+    )
+
+def rdma_transport_deps():
+    # Open-source builds expose the same factory API but have no RDMA provider.
+    native.alias(
+        name = "rdma_transport_arch_select_impl",
+        actual = "@rtp_llm//rtp_llm/cpp/rdma_transport:rdma_transport_no_impl",
+        visibility = ["//visibility:public"],
     )
 
 def transfer_rdma_deps():

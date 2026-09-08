@@ -1,5 +1,6 @@
 load("@arch_config//:arch_select.bzl", "cache_store_deps")
 load("@arch_config//:arch_select.bzl", "torch_deps")
+load("//bazel:arch_select.bzl", "no_block_copy_link_deps")
 
 cache_store_deps()
 
@@ -71,11 +72,12 @@ cc_library(
         ":cache_store_interface",
         "//rtp_llm/cpp/disaggregate/cache_store/proto:cache_store_service_cc_proto",
         "//rtp_llm/cpp/utils:device_pin",
+        "//rtp_llm/models_py/bindings:no_block_copy_hdr",
         "//:rtp_compute_ops",
         ":arpc_dep",
         "//rtp_llm/cpp/utils:profiling_scope",
         "//rtp_llm/cpp/utils:time_util",
-    ],
+    ] + no_block_copy_link_deps(),
     visibility=['//visibility:public'],
     alwayslink = True,
 )

@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import socket
+import subprocess
 from typing import Optional
 
 import torch
@@ -16,6 +17,8 @@ from rtp_llm.ops import (
     SpeculativeType,
 )
 from rtp_llm.utils.fuser import fetch_remote_file_to_local
+
+RUN_AFFINITY_TIMEOUT_SEC = 10
 
 
 def auto_configure_deepep(
@@ -519,6 +522,68 @@ def fetch_model_files_to_local(py_env_configs: PyEnvConfigs):
         f"extra_data_path: {vit_config.local_extra_data_path}, "
         f"phy2log_path: {model_args.phy2log_path}"
     )
+
+
+def load_gpu_nic_affinity() -> bool:
+    if os.environ.get("ACCL_NIC_GPU_AFFINITY") is not None:
+        return True
+
+    run_affinity_path = "/usr/local/bin/run_affinity"
+    if not os.path.exists(run_affinity_path):
+        logging.info("get gpu nic affinity failed, %s not exist", run_affinity_path)
+        return False
+
+    try:
+        subprocess.run(
+            [run_affinity_path],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=RUN_AFFINITY_TIMEOUT_SEC,
+        )
+    except subprocess.TimeoutExpired:
+        logging.warning(
+            "get gpu nic affinity timed out after %ss while running %s; continue without affinity",
+            RUN_AFFINITY_TIMEOUT_SEC,
+            run_affinity_path,
+        )
+        return False
+    except (subprocess.CalledProcessError, OSError) as e:
+        logging.warning(
+            "get gpu nic affinity failed, run %s failed, exception is %s",
+            run_affinity_path,
+            e,
+        )
+        return False
+    except Exception as e:
+        logging.warning(
+            "get gpu nic affinity failed unexpectedly while running %s: %s",
+            run_affinity_path,
+            e,
+        )
+        return False
+
+    json_path = "npu_nic_affinity.json"
+    if not os.path.exists(json_path):
+        logging.info("get gpu nic affinity failed, %s does not exist", json_path)
+        return False
+
+    try:
+        with open(json_path) as affinity_file:
+            content = affinity_file.read().strip()
+        os.environ["ACCL_NIC_GPU_AFFINITY"] = content
+        logging.info(
+            "get gpu nic affinity success, set env ACCL_NIC_GPU_AFFINITY to %s",
+            content,
+        )
+        return True
+    except Exception as e:
+        logging.info(
+            "get gpu nic affinity failed, load %s failed, exception is %s",
+            json_path,
+            e,
+        )
+        return False
 
 
 def setup_cuda_device_and_accl_env(local_rank: int) -> None:

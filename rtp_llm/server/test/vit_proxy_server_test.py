@@ -11,8 +11,10 @@ from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     CacheStatusPB,
     CacheVersionPB,
+    MMRdmaSlotPB,
     MultimodalInputsPB,
     MultimodalOutputPB,
+    ReleaseLeasePB,
     StatusVersionPB,
     WorkerStatusPB,
 )
@@ -26,6 +28,7 @@ from rtp_llm.multimodal.mm_scheduler import (
     MMSchedulerRequestTooLargeError,
     MMSchedulerTimeoutError,
 )
+from rtp_llm.multimodal.transport.proxy_router import MMOutputProxyRouter
 from rtp_llm.server.vit_proxy_server import (
     DEFAULT_PROXY_RPC_TIMEOUT_SECONDS,
     STATUS_CHECK_TIMEOUT_SEC,
@@ -242,6 +245,13 @@ class RpcTimeoutTest(TestCase):
             _resolve_rpc_timeout_seconds(request, 123.0),
             3.5 + VIT_WORKER_RPC_TIMEOUT_MARGIN_SECONDS,
         )
+
+    def test_mixed_explicit_and_unset_timeout_keeps_default_budget(self):
+        request = MultimodalInputsPB()
+        request.multimodal_inputs.add().mm_preprocess_config.mm_timeout_ms = 2000
+        request.multimodal_inputs.add().mm_preprocess_config.mm_timeout_ms = -1
+
+        self.assertEqual(_resolve_rpc_timeout_seconds(request, 123.0), 123.0)
 
     @patch("rtp_llm.server.vit_proxy_server.time.monotonic", return_value=100.0)
     def test_caller_deadline_still_caps_forwarding_margin(self, _):
@@ -1037,6 +1047,179 @@ class RuntimeExceptionStatusTest(TestCase):
 
                 self.assertEqual(context.code, expected_status)
                 self.assertTrue(context.details.startswith(f"[{expected_type.name}]"))
+
+
+def _rdma_slot(lease_id: str) -> MMRdmaSlotPB:
+    slot = MMRdmaSlotPB()
+    slot.rdma_descriptor.lease_id = lease_id
+    return slot
+
+
+class MMOutputProxyRouterTest(TestCase):
+    @patch("rtp_llm.server.vit_proxy_server.kmonitor.report")
+    def test_release_is_forwarded_to_workers_that_created_handles(self, _mock_report):
+        load_balancer = MagicMock()
+        load_balancer.worker_addresses = ["worker-a", "worker-b"]
+        load_balancer.get_worker.side_effect = ["worker-a", "worker-b"]
+        connection_pool = MagicMock()
+        stub_a = MagicMock()
+        stub_b = MagicMock()
+        connection_pool.get_stub.side_effect = lambda address: {
+            "worker-a": stub_a,
+            "worker-b": stub_b,
+        }[address]
+        stub_a.RemoteMultimodalEmbedding.return_value = MultimodalOutputPB(
+            output_rdma_slots=[_rdma_slot("handle-a")]
+        )
+        response_b = MultimodalOutputPB()
+        response_b.output_rdma_slots.add().CopyFrom(_rdma_slot("handle-b-1"))
+        response_b.output_rdma_slots.add().CopyFrom(_rdma_slot("handle-b-2"))
+        stub_b.RemoteMultimodalEmbedding.return_value = response_b
+
+        servicer = VitProxyRpcServer(load_balancer, connection_pool)
+        servicer.RemoteMultimodalEmbedding(MultimodalInputsPB(), FakeContext())
+        servicer.RemoteMultimodalEmbedding(MultimodalInputsPB(), FakeContext())
+        servicer.ReleaseRdmaLease(
+            ReleaseLeasePB(lease_id=["handle-a", "handle-b-1", "handle-b-2"]),
+            FakeContext(),
+        )
+
+        request_a = stub_a.ReleaseRdmaLease.call_args.args[0]
+        request_b = stub_b.ReleaseRdmaLease.call_args.args[0]
+        self.assertEqual(list(request_a.lease_id), ["handle-a"])
+        self.assertEqual(list(request_b.lease_id), ["handle-b-1", "handle-b-2"])
+        self.assertGreater(stub_a.ReleaseRdmaLease.call_args.kwargs["timeout"], 0)
+        self.assertLessEqual(stub_a.ReleaseRdmaLease.call_args.kwargs["timeout"], 1.0)
+        self.assertGreater(stub_b.ReleaseRdmaLease.call_args.kwargs["timeout"], 0)
+        self.assertLessEqual(stub_b.ReleaseRdmaLease.call_args.kwargs["timeout"], 1.0)
+
+    @patch("rtp_llm.multimodal.transport.proxy_router.kmonitor.report")
+    def test_handle_collision_is_fail_closed(self, report):
+        connection_pool = MagicMock()
+        router = MMOutputProxyRouter(connection_pool)
+        response = MultimodalOutputPB(output_rdma_slots=[_rdma_slot("same")])
+
+        router.record_receipt("worker-a", response)
+        router.record_receipt("worker-b", response)
+        router.release(ReleaseLeasePB(lease_id=["same"]), FakeContext([1.0]))
+
+        connection_pool.get_stub.assert_not_called()
+        reasons = [call.args[2].get("reason") for call in report.call_args_list if len(call.args) > 2]
+        self.assertIn("rdma_handle_collision", reasons)
+        self.assertIn("release_handle_collision", reasons)
+
+    @patch("rtp_llm.multimodal.transport.proxy_router.kmonitor.report")
+    def test_release_deadline_exhaustion_skips_workers(self, report):
+        connection_pool = MagicMock()
+        router = MMOutputProxyRouter(connection_pool)
+        router.record_receipt(
+            "worker", MultimodalOutputPB(output_rdma_slots=[_rdma_slot("handle")])
+        )
+
+        router.release(ReleaseLeasePB(lease_id=["handle"]), FakeContext([0.0]))
+
+        connection_pool.get_stub.assert_not_called()
+        reasons = [call.args[2].get("reason") for call in report.call_args_list if len(call.args) > 2]
+        self.assertIn("release_deadline_exhausted", reasons)
+
+    def test_unknown_expired_and_repeated_handles_are_idempotent(self):
+        connection_pool = MagicMock()
+        router = MMOutputProxyRouter(connection_pool)
+        router._handle_routes["expired"] = ("worker-a", 0.0, 1)
+        router._handle_generations["expired"] = 1
+
+        with patch(
+            "rtp_llm.multimodal.transport.proxy_router.time.monotonic",
+            return_value=1000.0,
+        ):
+            request = ReleaseLeasePB(lease_id=["unknown", "expired"])
+            router.release(request, MagicMock())
+            router.release(request, MagicMock())
+
+        connection_pool.get_stub.assert_not_called()
+
+    def test_one_worker_failure_does_not_prevent_other_release(self):
+        connection_pool = MagicMock()
+        stub_b = MagicMock()
+
+        def get_stub(address):
+            if address == "worker-a":
+                raise RuntimeError("worker-a unavailable")
+            return stub_b
+
+        connection_pool.get_stub.side_effect = get_stub
+        router = MMOutputProxyRouter(connection_pool)
+        router.record_receipt(
+            "worker-a",
+            MultimodalOutputPB(output_rdma_slots=[_rdma_slot("handle-a")]),
+        )
+        router.record_receipt(
+            "worker-b",
+            MultimodalOutputPB(output_rdma_slots=[_rdma_slot("handle-b")]),
+        )
+
+        router.release(
+            ReleaseLeasePB(lease_id=["handle-a", "handle-b"]), MagicMock()
+        )
+
+        forwarded = stub_b.ReleaseRdmaLease.call_args.args[0]
+        self.assertEqual(list(forwarded.lease_id), ["handle-b"])
+        self.assertIn("handle-a", router._handle_routes)
+        self.assertNotIn("handle-b", router._handle_routes)
+
+    def test_duplicate_handles_are_forwarded_once(self):
+        connection_pool = MagicMock()
+        stub = MagicMock()
+        connection_pool.get_stub.return_value = stub
+        router = MMOutputProxyRouter(connection_pool)
+        router.record_receipt(
+            "worker",
+            MultimodalOutputPB(output_rdma_slots=[_rdma_slot("handle")]),
+        )
+
+        router.release(
+            ReleaseLeasePB(lease_id=["handle", "handle", "handle"]),
+            FakeContext([1.0]),
+        )
+
+        request = stub.ReleaseRdmaLease.call_args.args[0]
+        self.assertEqual(list(request.lease_id), ["handle"])
+        self.assertEqual(stub.ReleaseRdmaLease.call_count, 1)
+
+    def test_concurrent_release_atomically_claims_route(self):
+        entered = threading.Event()
+        unblock = threading.Event()
+
+        class BlockingStub:
+            def __init__(self):
+                self.calls = 0
+
+            def ReleaseRdmaLease(self, request, timeout):
+                self.calls += 1
+                entered.set()
+                unblock.wait(timeout=1.0)
+
+        stub = BlockingStub()
+        connection_pool = MagicMock()
+        connection_pool.get_stub.return_value = stub
+        router = MMOutputProxyRouter(connection_pool)
+        router.record_receipt(
+            "worker",
+            MultimodalOutputPB(output_rdma_slots=[_rdma_slot("handle")]),
+        )
+        request = ReleaseLeasePB(lease_id=["handle"])
+        first = threading.Thread(
+            target=router.release, args=(request, FakeContext([1.0]))
+        )
+        first.start()
+        self.assertTrue(entered.wait(timeout=1.0))
+
+        router.release(request, FakeContext([1.0]))
+        unblock.set()
+        first.join(timeout=1.0)
+
+        self.assertFalse(first.is_alive())
+        self.assertEqual(stub.calls, 1)
 
 
 if __name__ == "__main__":

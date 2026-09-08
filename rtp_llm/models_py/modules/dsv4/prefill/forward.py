@@ -714,22 +714,35 @@ def forward_prefill(
     #    (the field the dev branch called ``position_ids``; it is only populated
     #    when the model declares a position-id length factor, so the synthesize
     #    branch below stays the live path for DSV4).
+    # CP prefill (and RTP_LLM_DEVICE_INPUT) leave the host mirror empty: the CP
+    # processor republishes input_lengths to CUDA before buildPyAttentionInputs
+    # runs, so only the device cu_seqlens gets filled.
     cu_seqlens = attn.cu_seqlens
+    if cu_seqlens is None or cu_seqlens.numel() < 2:
+        cu_seqlens = attn.cu_seqlens_device
+    if cu_seqlens is None or cu_seqlens.numel() < 2:
+        # Without at least [start, end] the batch_size fallback at :440 would
+        # treat every token as one request and silently mis-bound attention.
+        def _desc(t):
+            return "None" if t is None else f"{tuple(t.shape)}@{t.device}"
+
+        raise RuntimeError(
+            "DSV4 prefill: no usable cu_seqlens — "
+            f"cu_seqlens={_desc(attn.cu_seqlens)}, "
+            f"cu_seqlens_device={_desc(attn.cu_seqlens_device)}"
+        )
+    if cu_seqlens.is_cuda:
+        # Downstream shape logic (dsv4/block.py) gates the dense-layout fast path
+        # on cu_seqlens being host-resident; a CUDA tensor there silently degrades
+        # max_S to T_total and over-allocates the padded buffer by a factor of B.
+        cu_seqlens = cu_seqlens.cpu()
     positions = getattr(attn, "combo_position_ids", None)
     # warmup / cudagraph capture path doesn't populate combo_position_ids —
-    # synthesize from (prefix_lengths, input_lengths). Prefer ``_d`` (GPU)
-    # variants when available: during cudagraph capture, the host-side
-    # ``input_lengths`` / ``prefix_lengths`` are pinned int32 CPU tensors,
-    # but a dtype-converting ``.to(device=..., dtype=int64)`` on a pinned
-    # tensor produces an unpinned intermediate which capture rejects.
+    # synthesize from (prefix_lengths, input_lengths).
     if positions is None or positions.numel() == 0:
-        il_d = attn.input_lengths
-        pl_d = attn.prefix_lengths
-        input_lens = il_d if il_d.numel() > 0 else attn.input_lengths
-        prefix_lens = pl_d if pl_d.numel() > 0 else attn.prefix_lengths
         positions = _build_positions_from_lengths(
-            input_lens,
-            prefix_lens,
+            attn.input_lengths,
+            attn.prefix_lengths,
             input_ids.device,
             total_tokens=int(input_ids.numel()),
         )

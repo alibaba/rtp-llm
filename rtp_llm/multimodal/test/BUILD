@@ -87,3 +87,31 @@ py_test(
         "//rtp_llm:testlib",
     ],
 )
+
+py_test(
+    name = "mm_output_transport_test",
+    srcs = [
+        "mm_output_transport_test.py",
+    ],
+    deps = [
+        "//rtp_llm:testlib",
+    ],
+)
+
+# This target covers the production shared-library and Python/C++ config boundary.
+# The real Barex multi-GPU export -> read -> release smoke lives in internal_source.
+py_test(
+    name = "mm_rdma_exporter_library_test",
+    srcs = [
+        "mm_rdma_exporter_library_test.py",
+    ],
+    data = [
+        "//rtp_llm/libs:libmm_rdma_exporter_so",
+        "//rtp_llm/libs:librtp_compute_ops_so",
+        "//rtp_llm/libs:libth_transformer_config_so",
+    ],
+    deps = [
+        "//rtp_llm:config_ops",
+    ],
+    exec_properties = {'gpu':'A10'},
+)

@@ -44,6 +44,30 @@ GroupBase makeRpcGroup(std::string tag, std::vector<int> layer_ids) {
     return group;
 }
 
+// Tokens per logical (cache-key sized) block, and the CP-scaled tokens per block
+// of a compacted fixed/state group under prefill CP=2 (cp.scale_seq_size).
+constexpr size_t kBaseSeqSizePerBlock    = 64;
+constexpr size_t kCompactSeqSizePerBlock = kBaseSeqSizePerBlock * 2;
+
+CacheGroupPolicy makeCompactStatePolicy(uint32_t active_tail_blocks) {
+    auto policy               = defaultCacheGroupPolicy(CacheGroupType::SWA);
+    policy.active_tail_blocks = active_tail_blocks;
+    policy.cp_slice           = CpBlockSliceMode::PAYLOAD_BYTES;
+    EXPECT_EQ(policy.cp_mapping, CpBlockMappingMode::COMPACT_LAST_RANK);
+    return policy;
+}
+
+using KeyOffsetPairs = std::vector<std::pair<int, int>>;
+
+KeyOffsetPairs keyOffsetPairs(const std::vector<CacheStoreBlockPair>& plan) {
+    KeyOffsetPairs pairs;
+    pairs.reserve(plan.size());
+    for (const auto& pair : plan) {
+        pairs.emplace_back(pair.key_index, pair.offset_index);
+    }
+    return pairs;
+}
+
 }  // namespace
 
 TEST(ModelRpcProtoTest, GroupedCacheFieldsPreserveLegacyNumbers) {
@@ -320,6 +344,159 @@ TEST(DecodeRpcServerTest, SuccessfulRequestHasNoPhaseErrorType) {
                                               ErrorInfo(ErrorCode::LOAD_CACHE_TIMEOUT, "ignored"),
                                               grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED, "ignored")),
               nullptr);
+}
+
+TEST(DecodeRpcServerTest, CompactStateGroupLoadsGlobalTailKeysIntoCanonicalSlots) {
+    // 11 logical blocks under prefill CP=2 compact into a 6-slot state table:
+    // slot j covers logical blocks [2j, 2j+1], so the two active tail slots 4 and
+    // 5 must be filled from the *global* cache keys 9 and 10 - not from keys 4
+    // and 5, which is what indexing the compacted table with logical positions
+    // (or the table length with the logical key count) would produce.
+    const auto plan = DecodeRpcServer::buildGroupLoadPlan(makeCompactStatePolicy(/*active_tail_blocks=*/2),
+                                                          /*local_block_num=*/6,
+                                                          /*cache_key_count=*/11,
+                                                          /*reuse_block_size=*/0,
+                                                          /*use_hybrid=*/true,
+                                                          kCompactSeqSizePerBlock,
+                                                          kBaseSeqSizePerBlock);
+
+    EXPECT_EQ(keyOffsetPairs(plan), (KeyOffsetPairs{{9, 4}, {10, 5}}));
+}
+
+TEST(DecodeRpcServerTest, CompactStateGroupLoadPlanMatchesProducerStorePlan) {
+    // The consumer must project exactly like the producer: same (key, offset)
+    // pairs, or the decode reads a key the prefill never registered.
+    const auto policy = makeCompactStatePolicy(/*active_tail_blocks=*/2);
+    const auto decode_plan = DecodeRpcServer::buildGroupLoadPlan(policy,
+                                                                 /*local_block_num=*/6,
+                                                                 /*cache_key_count=*/11,
+                                                                 /*reuse_block_size=*/0,
+                                                                 /*use_hybrid=*/true,
+                                                                 kCompactSeqSizePerBlock,
+                                                                 kBaseSeqSizePerBlock);
+    const auto producer_plan = buildCacheStorePlan(policy,
+                                                   /*total_logical_blocks=*/11,
+                                                   /*reuse_block_size=*/0,
+                                                   /*use_hybrid=*/true,
+                                                   /*cp_rank=*/1,
+                                                   /*cp_size=*/2);
+
+    EXPECT_EQ(keyOffsetPairs(decode_plan), keyOffsetPairs(producer_plan));
+}
+
+TEST(DecodeRpcServerTest, CompactStateGroupIgnoresSpeculativeReserveTailSlots) {
+    // MTP reserve slots make the positional table longer than the canonical slots
+    // the sequence actually backs. The destinations must stay 4 and 5; picking the
+    // tail of the table would target the reserve slot 6 and duplicate key 10.
+    const auto plan = DecodeRpcServer::buildGroupLoadPlan(makeCompactStatePolicy(/*active_tail_blocks=*/2),
+                                                          /*local_block_num=*/7,
+                                                          /*cache_key_count=*/11,
+                                                          /*reuse_block_size=*/0,
+                                                          /*use_hybrid=*/true,
+                                                          kCompactSeqSizePerBlock,
+                                                          kBaseSeqSizePerBlock);
+
+    EXPECT_EQ(keyOffsetPairs(plan), (KeyOffsetPairs{{9, 4}, {10, 5}}));
+}
+
+TEST(DecodeRpcServerTest, CompactOneTailGroupLoadsOnlyTheLastCanonicalSlot) {
+    // hca_state declares active_tail_blocks=1; explicit_block_num only sizes its
+    // pool and must not widen the per-request projection.
+    auto policy               = makeCompactStatePolicy(/*active_tail_blocks=*/1);
+    policy.explicit_block_num = 256;
+
+    const auto plan = DecodeRpcServer::buildGroupLoadPlan(policy,
+                                                          /*local_block_num=*/6,
+                                                          /*cache_key_count=*/11,
+                                                          /*reuse_block_size=*/0,
+                                                          /*use_hybrid=*/true,
+                                                          kCompactSeqSizePerBlock,
+                                                          kBaseSeqSizePerBlock);
+
+    EXPECT_EQ(keyOffsetPairs(plan), (KeyOffsetPairs{{10, 5}}));
+}
+
+TEST(DecodeRpcServerTest, CompactStateGroupWithSingleLogicalBlockLoadsKeyZero) {
+    const auto plan = DecodeRpcServer::buildGroupLoadPlan(makeCompactStatePolicy(/*active_tail_blocks=*/2),
+                                                          /*local_block_num=*/1,
+                                                          /*cache_key_count=*/1,
+                                                          /*reuse_block_size=*/0,
+                                                          /*use_hybrid=*/true,
+                                                          kCompactSeqSizePerBlock,
+                                                          kBaseSeqSizePerBlock);
+
+    EXPECT_EQ(keyOffsetPairs(plan), (KeyOffsetPairs{{0, 0}}));
+}
+
+TEST(DecodeRpcServerTest, UnscaledSwaGroupKeepsLogicalTailPositions) {
+    // A COMPACT_LAST_RANK policy on a group whose block still covers one logical
+    // block has a flat table: the tail slots are logical positions 3 and 4.
+    const auto plan = DecodeRpcServer::buildGroupLoadPlan(makeCompactStatePolicy(/*active_tail_blocks=*/2),
+                                                          /*local_block_num=*/5,
+                                                          /*cache_key_count=*/5,
+                                                          /*reuse_block_size=*/0,
+                                                          /*use_hybrid=*/true,
+                                                          kBaseSeqSizePerBlock,
+                                                          kBaseSeqSizePerBlock);
+
+    EXPECT_EQ(keyOffsetPairs(plan), (KeyOffsetPairs{{3, 3}, {4, 4}}));
+}
+
+TEST(DecodeRpcServerTest, TailGroupReserveSlotsDoNotStarveTheLoad) {
+    // The last sequence-backed slot is 2; a reserve slot 3 must not shift the
+    // one-block tail window past the stored cache keys and drop the load.
+    auto policy               = defaultCacheGroupPolicy(CacheGroupType::LINEAR);
+    policy.active_tail_blocks = 1;
+    ASSERT_EQ(policy.cp_mapping, CpBlockMappingMode::NONE);
+
+    const auto plan = DecodeRpcServer::buildGroupLoadPlan(policy,
+                                                          /*local_block_num=*/4,
+                                                          /*cache_key_count=*/3,
+                                                          /*reuse_block_size=*/0,
+                                                          /*use_hybrid=*/true,
+                                                          kBaseSeqSizePerBlock,
+                                                          kBaseSeqSizePerBlock);
+
+    EXPECT_EQ(keyOffsetPairs(plan), (KeyOffsetPairs{{2, 2}}));
+}
+
+TEST(DecodeRpcServerTest, FullGroupKeepsWholeLogicalBlocksAfterReuse) {
+    // Decode owns whole logical blocks of a BLOCK_ROUND_ROBIN group: the plan must
+    // not shard it (the per-peer split happens later, per block), and reused
+    // blocks are skipped.
+    const auto policy = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    ASSERT_EQ(policy.cp_mapping, CpBlockMappingMode::BLOCK_ROUND_ROBIN);
+
+    const auto plan = DecodeRpcServer::buildGroupLoadPlan(policy,
+                                                          /*local_block_num=*/5,
+                                                          /*cache_key_count=*/4,
+                                                          /*reuse_block_size=*/2,
+                                                          /*use_hybrid=*/false,
+                                                          kBaseSeqSizePerBlock,
+                                                          kBaseSeqSizePerBlock);
+
+    EXPECT_EQ(keyOffsetPairs(plan), (KeyOffsetPairs{{2, 2}, {3, 3}}));
+}
+
+TEST(DecodeRpcServerTest, EmptyTableOrMissingCacheKeysYieldNoLoad) {
+    const auto policy = makeCompactStatePolicy(/*active_tail_blocks=*/2);
+
+    EXPECT_TRUE(DecodeRpcServer::buildGroupLoadPlan(policy,
+                                                    /*local_block_num=*/0,
+                                                    /*cache_key_count=*/11,
+                                                    /*reuse_block_size=*/0,
+                                                    /*use_hybrid=*/true,
+                                                    kCompactSeqSizePerBlock,
+                                                    kBaseSeqSizePerBlock)
+                    .empty());
+    EXPECT_TRUE(DecodeRpcServer::buildGroupLoadPlan(policy,
+                                                    /*local_block_num=*/6,
+                                                    /*cache_key_count=*/0,
+                                                    /*reuse_block_size=*/0,
+                                                    /*use_hybrid=*/true,
+                                                    kCompactSeqSizePerBlock,
+                                                    kBaseSeqSizePerBlock)
+                    .empty());
 }
 
 }  // namespace rtp_llm

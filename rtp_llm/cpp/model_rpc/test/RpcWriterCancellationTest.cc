@@ -6,6 +6,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <thread>
 #include <utility>
 
 #include "opentelemetry/exporters/memory/in_memory_span_data.h"
@@ -214,6 +215,13 @@ TEST(RpcWriterCancellationTest, DecodeFirstReadCancellationReturnsCancelled) {
     ASSERT_NE(stream, nullptr);
 
     EXPECT_TRUE(service.waitUntilEntered(std::chrono::seconds(5)));
+    // waitUntilEntered fires before the fake delegates to the real handler, and
+    // RemoteGenerate runs CHECK_REQUEST_CANCELLED before prepareGenerateContext.
+    // Cancelling right away lets the handler short-circuit without ever
+    // attempting the read this test is about. Once past that gate the handler
+    // parks in Read forever (the client sends nothing), so a settle window makes
+    // the read-failure path the only one the cancel can hit.
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
     client_context.TryCancel();
 
     const auto client_status = stream->Finish();

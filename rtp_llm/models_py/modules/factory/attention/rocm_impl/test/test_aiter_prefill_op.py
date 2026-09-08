@@ -695,7 +695,7 @@ class TestUpdatePrefillParamsForCudaGraph(unittest.TestCase):
             max_seqlen_k=0,
             token_q_num=0,
             token_kv_num=0,
-            kv_cache_block_id_device=None,
+            kv_cache_block_id_device=torch.zeros(batch_size, 4, dtype=torch.int32),
             prefill_seqlen_k_int32=torch.zeros(batch_size, dtype=torch.int32),
         )
         stub = AiterPrefillImplPaged.__new__(AiterPrefillImplPaged)
@@ -824,18 +824,19 @@ class TestUpdatePrefillParamsForCudaGraph(unittest.TestCase):
         with self.assertRaises(ValueError):
             self._call_update(stub, inputs)
 
-    def test_replay_query_length_above_capture_capacity_raises(self):
-        stub = self._make_stub(batch_size=2)
-        stub.fmha_params.graph_query_length = 4
-        stub.fmha_params.graph_token_q_capacity = 8
-        inputs = self._make_attn_inputs(
-            [5, 0], prefix_lengths=torch.tensor([100, 100], dtype=torch.int32)
-        )
-
-        with self.assertRaisesRegex(
-            ValueError, "query length exceeds capture capacity"
+    def test_replay_capacity_raises(self):
+        for attr, capacity, lengths, prefix, error in (
+            ("graph_query_length", 4, [5, 0], [100, 100], "query length"),
+            ("graph_token_q_capacity", 8, [5, 5], [0, 0], "token count"),
+            ("graph_max_seqlen_k", 512, [1, 0], [600, 0], "kv length"),
         ):
-            self._call_update(stub, inputs)
+            stub = self._make_stub(2)
+            setattr(stub.fmha_params, attr, capacity)
+            inputs = self._make_attn_inputs(
+                lengths, prefix_lengths=torch.tensor(prefix, dtype=torch.int32)
+            )
+            with self.assertRaisesRegex(ValueError, f"{error} exceeds capture"):
+                self._call_update(stub, inputs)
 
 
 @unittest.skipUnless(_OPS_IMPORTABLE, "Requires AiterPrefillImplPaged module")
@@ -865,6 +866,7 @@ class TestAiterPrefillImplPagedCudaGraphDispatch(unittest.TestCase):
 
         cfg = SimpleNamespace(
             need_rope_kv_cache=need_rope_kv_cache,
+            head_num=8,
             kv_head_num=1,
             size_per_head=8,
             kernel_tokens_per_block=16,
@@ -894,30 +896,20 @@ class TestAiterPrefillImplPagedCudaGraphDispatch(unittest.TestCase):
             observed_pad_query,
         )
 
-    def test_cuda_graph_prepares_only_selected_backend_workspace(self):
-        cases = [([4, 1], "triton"), ([5, 1], "batch")]
-        for input_lengths, expected_backend in cases:
+    def test_cuda_graph_supports_only_triton_backend(self):
+        for input_lengths, expected_backend in (([4, 1], "triton"), ([5, 1], "batch")):
             with self.subTest(expected_backend=expected_backend):
-                (
-                    impl,
-                    batch_impl,
-                    triton_impl,
-                    batch_params,
-                    triton_params,
-                    _,
-                ) = self._make_impl_with_mocked_prepare(input_lengths, True)
-
+                impl, batch_impl, triton_impl, *_ = self._make_impl_with_mocked_prepare(
+                    input_lengths, True
+                )
                 self.assertEqual(impl.backend, expected_backend)
-                if expected_backend == "triton":
-                    triton_impl.prepare.assert_called_once_with(impl.attn_inputs)
-                    batch_impl.prepare.assert_not_called()
-                    self.assertIs(impl.triton_fmha_params, triton_params)
-                    self.assertIsNone(impl.fmha_params)
-                else:
-                    batch_impl.prepare.assert_called_once_with(impl.attn_inputs)
-                    triton_impl.prepare.assert_not_called()
-                    self.assertIs(impl.fmha_params, batch_params)
-                    self.assertIsNone(impl.triton_fmha_params)
+                self.assertEqual(
+                    impl.support_cuda_graph(), expected_backend == "triton"
+                )
+                selected = triton_impl if expected_backend == "triton" else batch_impl
+                rejected = batch_impl if expected_backend == "triton" else triton_impl
+                selected.prepare.assert_called_once_with(impl.attn_inputs)
+                rejected.prepare.assert_not_called()
 
     def test_eager_prepares_only_selected_backend_during_construction(self):
         impl, batch_impl, triton_impl, _, triton_params, _ = (
@@ -1134,8 +1126,28 @@ class TestAiterPrefillAttnOpTritonCudaGraphWorkspace(unittest.TestCase):
         self.assertEqual(fmha_params.compact_indices.shape, (8,))
         self.assertEqual(fmha_params.graph_query_length, 4)
         self.assertEqual(fmha_params.graph_token_q_capacity, 8)
+        self.assertEqual(fmha_params.graph_max_seqlen_k, 256)
         self.assertFalse(hasattr(fmha_params, "kv_scale"))
         self.assertFalse(hasattr(op, "_graph_output"))
+
+    def test_paged_graph_block_table_buffer_keeps_capture_address(self):
+        from types import SimpleNamespace
+
+        op = AiterPrefillAttnOpPaged(_make_attn_configs(4, 2, 8))
+        params = SimpleNamespace(
+            cu_seqlens_q=torch.zeros(3, dtype=torch.int32),
+            cu_seqlens_k=torch.zeros(3, dtype=torch.int32),
+            kv_cache_block_id_device=torch.zeros(2, 2, dtype=torch.int32),
+        )
+        infer_device = f"{AiterPrefillAttnOpPaged.__module__}._infer_cuda_graph_device"
+        with patch(infer_device, return_value=torch.device("cpu")):
+            op.prepare_cuda_graph(params, SimpleNamespace())
+            captured = op.sanitized_bt_buf
+            op.prepare_cuda_graph(params, SimpleNamespace())
+            self.assertIs(op.sanitized_bt_buf, captured)
+            params.kv_cache_block_id_device = torch.zeros(2, 3, dtype=torch.int32)
+            with self.assertRaisesRegex(ValueError, "recapture required"):
+                op.prepare_cuda_graph(params, SimpleNamespace())
 
     def test_forward_uses_prepared_graph_workspace_without_allocation(self):
         from types import SimpleNamespace
@@ -1196,6 +1208,7 @@ class TestAiterPrefillAttnOpTritonCudaGraphWorkspace(unittest.TestCase):
         cfg = _make_attn_configs(head_num=4, head_num_kv=2, head_dim=8)
         op = AiterPrefillAttnOpTriton(cfg)
         device = torch.device("cuda")
+        captured_block_ids = torch.full((3, 2), -1, dtype=torch.int32, device=device)
         fmha_params = SimpleNamespace(
             cu_seqlens_q=torch.zeros(4, dtype=torch.int32, device=device),
             cu_seqlens_k=torch.zeros(4, dtype=torch.int32, device=device),
@@ -1203,6 +1216,7 @@ class TestAiterPrefillAttnOpTritonCudaGraphWorkspace(unittest.TestCase):
                 (3,), -1, dtype=torch.int32, device=device
             ),
             compact_indices=torch.full((6,), -1, dtype=torch.int32, device=device),
+            kv_cache_block_id_device=captured_block_ids,
             graph_device=device,
             token_q_num=6,
             max_seqlen_q=2,
@@ -1230,9 +1244,8 @@ class TestAiterPrefillAttnOpTritonCudaGraphWorkspace(unittest.TestCase):
         self.assertEqual(fmha_params.max_seqlen_k, 7)
         self.assertEqual(fmha_params.token_q_num, 3)
         self.assertEqual(fmha_params.token_kv_num, 21)
-        self.assertEqual(
-            fmha_params.kv_cache_block_id_device.data_ptr(), block_ids.data_ptr()
-        )
+        self.assertIs(fmha_params.kv_cache_block_id_device, captured_block_ids)
+        torch.testing.assert_close(captured_block_ids, block_ids)
         self.assertEqual(fmha_params.compact_indices.cpu().tolist(), [0, 1, 3, 0, 0, 0])
 
     def test_triton_paged_attention_requires_caller_scale_when_kv_scale_base_exists(
@@ -1478,6 +1491,10 @@ class TestAiterPrefillTritonCudaGraphNumerics(unittest.TestCase):
                 ):
                     self._run_replay_case(kv_cache_dtype, replay_lengths)
 
+    def test_fp8_page32_writer_reader(self):
+        self.TOKENS_PER_BLOCK = 32
+        self._run_replay_case(KvCacheDataType.FP8, self.REPLAY_LENGTH_CASES[0])
+
 
 @unittest.skipUnless(_OPS_IMPORTABLE, "Requires AiterPrefillAttnOp module")
 class TestCompactGatherReshape(unittest.TestCase):
@@ -1509,7 +1526,7 @@ class TestCompactGatherReshape(unittest.TestCase):
         )
         if kv_cache_dtype is not None:
             cfg.kv_cache_dtype = kv_cache_dtype
-        return AiterPrefillAttnOp(cfg, v1_kv_layout=True)
+        return AiterPrefillAttnOp(cfg, linear_v=True)
 
     def _make_kv_cache_5d(self, num_blocks, hk, ps, hd, dtype=torch.float16):
         """Create a 5D KV cache: [num_blocks, 2, hk, ps, hd]."""
@@ -1560,16 +1577,15 @@ class TestCompactGatherReshape(unittest.TestCase):
         # for CK speculative prefetch safety (no dedup since torch.unique removed).
         self.assertEqual(k_compact.shape[0], orig_indices.numel() + 1)
 
-    def test_kv_cache_dtype_controls_compact_mode(self):
-        cases = [
-            (KvCacheDataType.BASE, torch.float16, True),
-            (KvCacheDataType.FP8, torch.float8_e4m3fn, False),
-        ]
-        for kv_cache_dtype, expected_torch_dtype, expected_use_compact in cases:
+    def test_kv_cache_dtype_preserves_linear_contract(self):
+        for kv_cache_dtype, expected_torch_dtype in (
+            (KvCacheDataType.BASE, torch.float16),
+            (KvCacheDataType.FP8, torch.float8_e4m3fn),
+        ):
             with self.subTest(kv_cache_dtype=kv_cache_dtype):
                 op = self._make_op(kv_cache_dtype=kv_cache_dtype)
                 self.assertEqual(op.kv_cache_torch_dtype, expected_torch_dtype)
-                self.assertEqual(op.use_compact, expected_use_compact)
+                self.assertTrue(op.linear_v)
 
     # ---- 5D cache path ----------------------------------------------------
 
@@ -1590,18 +1606,7 @@ class TestCompactGatherReshape(unittest.TestCase):
         op = self._make_op()
         kv = self._make_kv_cache_5d(16, 4, 16, 128)
         bt = torch.tensor([[0, 0, 1], [0, 2, 2]], dtype=torch.int32)
-        block_indices, compact_bt, k_buf, v_buf = self._make_compact_bufs(
-            bt, 4, 16, 128
-        )
-        k_compact, v_compact = op._gather_and_reshape_kv_compact(
-            kv, block_indices, k_buf, v_buf
-        )
-        k_full, _ = op._reshape_kv_cache_vectorized(kv)
-        orig_indices = bt.reshape(-1).to(torch.int64)
-        torch.testing.assert_close(
-            k_compact[compact_bt.reshape(-1).to(torch.int64)], k_full[orig_indices]
-        )
-        self.assertEqual(k_compact.shape[0], bt.numel() + 1)
+        self._assert_compact_equiv(op, kv, bt)
 
     def test_5d_non_contiguous_blocks(self):
         """Block indices are sparse across a large pool."""
@@ -1628,18 +1633,7 @@ class TestCompactGatherReshape(unittest.TestCase):
         op = self._make_op()
         kv = self._make_kv_cache_2d(16, 4, 16, 128)
         bt = torch.tensor([[0, 0, 1], [0, 2, 2]], dtype=torch.int32)
-        block_indices, compact_bt, k_buf, v_buf = self._make_compact_bufs(
-            bt, 4, 16, 128
-        )
-        k_compact, v_compact = op._gather_and_reshape_kv_compact(
-            kv, block_indices, k_buf, v_buf
-        )
-        k_full, _ = op._reshape_kv_cache_vectorized(kv)
-        orig_indices = bt.reshape(-1).to(torch.int64)
-        torch.testing.assert_close(
-            k_compact[compact_bt.reshape(-1).to(torch.int64)], k_full[orig_indices]
-        )
-        self.assertEqual(k_compact.shape[0], bt.numel() + 1)
+        self._assert_compact_equiv(op, kv, bt)
 
     def test_2d_oversized_stride_truncates_to_prefix(self):
         op = self._make_op()
@@ -1716,7 +1710,7 @@ class TestCompactGatherReshape(unittest.TestCase):
         ):
             op._forward_paged(q, kv_cache, fmha_params)
 
-        self.assertFalse(op.use_compact)
+        self.assertTrue(op.linear_v)
         self.assertEqual(full_reshape.call_count, 1)
 
     # ---- block table sanitization ------------------------------------------
@@ -2658,7 +2652,7 @@ class TestAiterPrefillImplMropePositionIds(unittest.TestCase):
         self._check_mrope_matches_reference(AiterPrefillImplNonAsm)
 
 
-@unittest.skipUnless(_is_rocm() and _OPS_IMPORTABLE, "Requires ROCm attention wrappers")
+@unittest.skipUnless(_OPS_IMPORTABLE, "Requires ROCm attention wrappers")
 class TestVLayoutContract(unittest.TestCase):
     def _make_case(self, head_dim: int, page: int):
         config = _make_attn_configs(8, 2, head_dim, page)
@@ -2666,6 +2660,8 @@ class TestVLayoutContract(unittest.TestCase):
         config.dtype = torch.bfloat16
         inputs = PyAttentionInputs()
         inputs.is_prefill = True
+        inputs.prefix_lengths = torch.ones(1, dtype=torch.int32)
+        inputs.kv_cache_kernel_block_id = torch.ones(1, 1, dtype=torch.int32)
         return config, inputs
 
     def _decode_flags(self, aiter: bool, asm: bool, triton: bool):
@@ -2673,63 +2669,63 @@ class TestVLayoutContract(unittest.TestCase):
         flags.use_aiter_pa, flags.use_asm_pa, flags.use_triton_pa = aiter, asm, triton
         return flags
 
-    def test_invalid_geometry(self):
-        for head, page, dtype, error in (
-            (100, 32, KvCacheDataType.BASE, "V geometry"),
-            (128, 8, KvCacheDataType.FP8, "width=16"),
-            (128, 12, KvCacheDataType.BASE, "V geometry"),
+    def test_backend_flag_layout_contract(self):
+        for head, page, dtype, flags, error in (
+            (100, 32, KvCacheDataType.BASE, FMHAConfig(), "invalid V geometry"),
+            (128, 8, KvCacheDataType.FP8, FMHAConfig(), "invalid V geometry"),
+            (
+                128,
+                16,
+                KvCacheDataType.BASE,
+                self._decode_flags(False, False, False),
+                "every ROCm",
+            ),
+            (
+                256,
+                32,
+                KvCacheDataType.BASE,
+                self._decode_flags(True, True, False),
+                "layout mismatch",
+            ),
         ):
+            config, inputs = self._make_case(head, page)
+            inputs.is_prefill = False
+            config.kv_cache_dtype = dtype
             with self.subTest(head=head, page=page, dtype=dtype):
-                config, inputs = self._make_case(head, page)
-                config.kv_cache_dtype = dtype
                 with self.assertRaisesRegex(ValueError, error):
-                    validate_v_layout(config, inputs, FMHAConfig())
+                    validate_v_layout(config, inputs, flags)
 
-    def test_factory_rejects_layout_mismatch(self):
-        config, inputs = self._make_case(256, 16)
+        config, inputs = self._make_case(256, 32)
         inputs.is_prefill = False
-        flags = self._decode_flags(aiter=True, asm=True, triton=False)
-        with self.assertRaisesRegex(ValueError, "layout mismatch"):
-            attn_factory.get_fmha_impl(config, None, inputs, fmha_config=flags)
-
-    def test_layout_mismatch_accepted_when_page_equals_width(self):
-        config, inputs = self._make_case(256, 8)
-        inputs.is_prefill = False
-        validate_v_layout(
-            config, inputs, self._decode_flags(aiter=False, asm=True, triton=False)
+        config.kv_cache_dtype = KvCacheDataType.FP8
+        self.assertTrue(
+            validate_v_layout(config, inputs, self._decode_flags(True, False, True))
         )
 
-    def test_fp8_no_asm_requires_page_equals_width(self):
-        config, inputs = self._make_case(128, 32)
-        config.kv_cache_dtype, inputs.is_prefill = KvCacheDataType.FP8, False
-        flags = self._decode_flags(aiter=True, asm=False, triton=False)
-        with self.assertRaisesRegex(ValueError, "layout mismatch"):
-            validate_v_layout(config, inputs, flags)
-        config.kernel_tokens_per_block = 16
-        validate_v_layout(config, inputs, flags)
-
-    def test_constructor_fallback_is_strict_only_with_layout_validator(self):
+    def test_constructor_failure_fallback_respects_fatal_device_faults(self):
         class BrokenImpl:
             accepts_fmha_config = False
+            error = torch.cuda.OutOfMemoryError("out of memory")
             support = support_parallelism_config = staticmethod(lambda *_: True)
 
             def __init__(self, *_):
-                raise RuntimeError("constructor failed")
+                raise type(self).error
 
         class WorkingImpl(BrokenImpl):
             def __init__(self, *_):
                 pass
 
-        _, inputs = self._make_case(128, 16)
+        config, inputs = self._make_case(128, 16)
+        config.need_rope_kv_cache = False
         inputs.is_prefill = False
         with patch.object(attn_factory, "DECODE_MHA_IMPS", [BrokenImpl, WorkingImpl]):
-            with patch.object(attn_factory, "VALIDATE_FMHA_CONFIG", None):
-                with self.assertLogs(level="WARNING"):
-                    impl = attn_factory.get_fmha_impl(AttentionConfigs(), None, inputs)
-                self.assertIsInstance(impl, WorkingImpl)
-            with patch.object(attn_factory, "VALIDATE_FMHA_CONFIG", lambda *_: True):
-                with self.assertRaisesRegex(RuntimeError, "constructor failed"):
-                    attn_factory.get_fmha_impl(AttentionConfigs(), None, inputs)
+            with self.assertLogs(level="WARNING"):
+                impl = attn_factory.get_fmha_impl(config, None, inputs)
+            self.assertIsInstance(impl, WorkingImpl)
+
+            BrokenImpl.error = RuntimeError("HIP error: illegal memory access")
+            with self.assertRaisesRegex(RuntimeError, "illegal memory access"):
+                attn_factory.get_fmha_impl(config, None, inputs)
 
 
 if __name__ == "__main__":

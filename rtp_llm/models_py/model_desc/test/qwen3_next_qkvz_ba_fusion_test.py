@@ -212,11 +212,21 @@ class TestQwen3NextQkvzBaFusion(unittest.TestCase):
 
     def test_bf16_path_takes_fusion(self) -> None:
         """When linear_attn_qkvz_s is None (BF16), fusion is enabled."""
+        from rtp_llm.utils.model_weight import W
+
         module = self._build_module()
         self.assertTrue(module._qkvz_ba_fused, "BF16 path must enable fusion")
         self.assertIsNotNone(module.in_proj_fused)
         self.assertIsNone(module.in_proj_qkvz)
         self.assertIsNone(module.in_proj_ba)
+
+        weight = module.weights[W.linear_attn_norm_w]
+        x = torch.randn(2, 128, dtype=torch.bfloat16, device=self.device)
+        gate = torch.ones_like(x)
+        weight.fill_(1)
+        output = module.norm(x, gate)
+        weight.fill_(2)
+        torch.testing.assert_close(module.norm(x, gate), output * 2)
 
     def test_rocm_swizzle_unaligned_bf16_uses_two_gemms(self) -> None:
         """A swizzled qkvz plus raw BA must never become one WithSwizzle GEMM."""

@@ -294,6 +294,11 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
                                             pickAlloc(GptModelInputDeviceBit::kDeviceBitLmOutputIndexes));
         if (combo_position_ids_size) {
             inputs.combo_position_ids = allocBuf(rtp_llm::DataType::TYPE_INT32, {combo_position_ids_size});
+        } else {
+            // An in-place CP remap from the previous forward leaves a rank-local
+            // vector here; the root publishing none means this pass has no position
+            // ids, so the stale one must not survive on non-root ranks.
+            inputs.combo_position_ids = torch::Tensor();
         }
         if (hidden_states_size) {
             // DSpARK prefill seeding makes last_hidden_states' row count
