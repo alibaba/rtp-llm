@@ -44,13 +44,14 @@ def _hooked_indexer(self, hidden_states, q_c, q_view, kv_cache, fmha_impl):
     return topk
 
 
-try:
-    _cls._run_sparse_indexer = _hooked_indexer
-    logging.warning(
-        f"[v32_offload_hook] installed on {_cls.__name__}, mode={vo.MODE} verify={vo.VERIFY}"
-    )
-except Exception:
-    logging.exception("[v32_offload_hook] install failed; running vanilla")
+if vo.MODE == "shadow":
+    try:
+        _cls._run_sparse_indexer = _hooked_indexer
+        logging.warning(
+            f"[v32_offload_hook] installed on {_cls.__name__}, mode={vo.MODE} verify={vo.VERIFY}"
+        )
+    except Exception:
+        logging.exception("[v32_offload_hook] install failed; running vanilla")
 
 
 # ---- P-B1: verify python-recomputed indexer top-k vs kernel (V32_VERIFY_TOPK=1)
@@ -89,10 +90,10 @@ if _os.environ.get("V32_VERIFY_TOPK", "0") == "1":
     _tk_stats = {"calls": 0, "reqs": 0, "min_norelu": 1.0, "min_relu": 1.0}
     _last_key = {}
 
-    def _hooked_quant_qk(self, query, key, kv_cache, slot_mapping):
+    def _hooked_quant_qk(self, query, key, kv_cache, slot_mapping, *args, **kwargs):
         _last_key["key"] = key.detach()
         _last_key["slots"] = slot_mapping
-        return _orig_quant_qk(self, query, key, kv_cache, slot_mapping)
+        return _orig_quant_qk(self, query, key, kv_cache, slot_mapping, *args, **kwargs)
 
     _iop.IndexerOp.quant_q_k = _hooked_quant_qk
 
@@ -310,10 +311,11 @@ if vo.MODE == "capacity" and _os_env_install():
 
     _hb = {"orig": 0.0, "proc": 0.0, "fwd": 0.0, "n": 0}
     _tp = {"prof": None, "state": 0}
+    _TORCH_PROF_ENABLED = _os.environ.get("V32_TORCH_PROF", "0") == "1"
 
     def _prof_tick():
         # env V32_TORCH_PROF=1: profile steps [3050*1+0 .. +3*61] once, dump top kernels
-        if _os.environ.get("V32_TORCH_PROF", "0") != "1" or _tp["state"] > 1:
+        if not _TORCH_PROF_ENABLED or _tp["state"] > 1:
             return
         n = _hb["n"]
         if _tp["state"] == 0 and n >= 3050:
@@ -336,9 +338,15 @@ if vo.MODE == "capacity" and _os_env_install():
                 logging.warning("[v32_prof] " + line)
             _tp["state"] = 2
 
-    _SANITIZE_KVLEN = _os.environ.get("V32_SANITIZE_KVLEN", "0") == "1"
-
     _HOOK_LEVEL = int(_os.environ.get("V32_HOOK_LEVEL", "2"))
+    _SKIP_PROCESS = _os.environ.get("V32_SKIP_PROCESS", "0") == "1"
+    if vc.LOSSLESS and (_HOOK_LEVEL != 2 or _SKIP_PROCESS):
+        raise RuntimeError(
+            "lossless mode requires V32_HOOK_LEVEL=2 and V32_SKIP_PROCESS=0"
+        )
+    _HAS_NATIVE_FAST = hasattr(vc, "process_layer_native_fast")
+    _HAS_BATCH_FAST = hasattr(vc, "begin_batch_step")
+    _BATCH_GATE = getattr(vc, "_batch_gate", None)
 
     def _cap_topk(self, q_fp8, weights, kv_cache, fmha_params, attention_inputs):
         if _HOOK_LEVEL == 0:  # pure passthrough
@@ -352,57 +360,80 @@ if vo.MODE == "capacity" and _os_env_install():
             _kbt = getattr(attention_inputs, "kv_cache_kernel_block_id_device", None)
             _kvl = fmha_params.kvlen_d
             return out
+        if _HAS_BATCH_FAST:
+            layer_id = int(kv_cache.layer_id)
+            native_only = (
+                vc.begin_batch_step(kv_cache, attention_inputs, _MIN_SEQ)
+                if layer_id == 0
+                else _BATCH_GATE["native_only"]
+            )
+            if native_only:
+                return _orig_tp_c(
+                    self, q_fp8, weights, kv_cache, fmha_params, attention_inputs
+                )
         _prof_tick()
         t0 = _t.perf_counter()
-        out = None
-        try:
-            out = vc.pre_topk(
-                self, q_fp8, weights, kv_cache, fmha_params, attention_inputs
-            )
-        except Exception:
-            logging.exception("[v32_capacity] pre_topk error — native wave")
-            out = None
-        if out is None:
-            saved = rows = None
-            if _SANITIZE_KVLEN:
-                try:
-                    rows = vc.offloaded_rows_hint(None)
-                    if rows is not None and rows.numel():
-                        kvl = fmha_params.kvlen_d
-                        saved = kvl.index_select(0, rows)
-                        kvl.index_fill_(
-                            0, rows, 1
-                        )  # native indexer skips the dead scan
-                except Exception:
-                    saved = rows = None
-            out = _orig_tp_c(
-                self, q_fp8, weights, kv_cache, fmha_params, attention_inputs
-            )
-            if saved is not None:
-                fmha_params.kvlen_d.index_copy_(0, rows, saved)
+        if layer_id == 0:
+            try:
+                vc.pre_topk(  # layer-0 step bookkeeping only; scoring is native
+                    self, q_fp8, weights, kv_cache, fmha_params, attention_inputs
+                )
+            except Exception as error:
+                if _HAS_BATCH_FAST and vc.degrade_resident_batch_to_native(
+                    attention_inputs, _MIN_SEQ, error
+                ):
+                    logging.exception(
+                        "[v32_capacity] resident bookkeeping error; current batch uses native path"
+                    )
+                    return _orig_tp_c(
+                        self, q_fp8, weights, kv_cache, fmha_params, attention_inputs
+                    )
+                logging.exception(
+                    "[v32_capacity] managed bookkeeping error; refusing unsafe native fallback"
+                )
+                raise
+        out = _orig_tp_c(self, q_fp8, weights, kv_cache, fmha_params, attention_inputs)
         _hb["orig"] += _t.perf_counter() - t0
+        if _SKIP_PROCESS:
+            return out
         try:
             kbt = getattr(attention_inputs, "kv_cache_kernel_block_id_device", None)
-            if out is not None and kbt is not None and out.shape[0] == kbt.shape[0]:
-                t0 = _t.perf_counter()
-                vc.process_layer(
-                    self,
-                    q_fp8,
-                    weights,
-                    kv_cache,
-                    kbt,
-                    fmha_params.kvlen_d,
-                    out,
-                    _MIN_SEQ,
+            if out is None or kbt is None or out.shape[0] != kbt.shape[0]:
+                if bool(getattr(attention_inputs, "is_prefill", False)):
+                    return out
+                raise RuntimeError(
+                    "lossless decode shape mismatch: "
+                    f"topk={None if out is None else tuple(out.shape)} "
+                    f"kbt={None if kbt is None else tuple(kbt.shape)}"
                 )
-                _hb["proc"] += _t.perf_counter() - t0
+            if _HAS_NATIVE_FAST and vc.process_layer_native_fast(
+                kv_cache, kbt, out, _MIN_SEQ
+            ):
                 _hb["n"] += 1
-                if _hb["n"] % 3050 == 0:
-                    logging.warning(
-                        f"[v32_hb] hook-boundary(s)={ {k: round(v,2) for k,v in _hb.items()} }"
-                    )
+                _hb["fast"] = _hb.get("fast", 0) + 1
+                return out
+            t0 = _t.perf_counter()
+            vc.process_layer(
+                self,
+                q_fp8,
+                weights,
+                kv_cache,
+                kbt,
+                fmha_params.kvlen_d,
+                out,
+                _MIN_SEQ,
+            )
+            _hb["proc"] += _t.perf_counter() - t0
+            _hb["n"] += 1
+            if _hb["n"] % 3050 == 0:
+                logging.warning(
+                    f"[v32_hb] hook-boundary(s)={ {k: round(v,2) for k,v in _hb.items()} }"
+                )
         except Exception:
-            logging.exception("[v32_capacity] indexer hook error")
+            logging.exception(
+                "[v32_capacity] managed indexer hook error; refusing unsafe native fallback"
+            )
+            raise
         return out
 
     # C++ writes served indices back into kernel_topk in-place; the native
@@ -413,7 +444,7 @@ if vo.MODE == "capacity" and _os_env_install():
     )
 
     # staging-ring admission: bind the engine's admission mirror exports so
-    # v32_capacity can adopt engine-produced host/idxp buffers at first serve.
+    # v32_capacity can adopt the engine-produced host main-KV buffer at first serve.
     try:
         import os.path as _osp
 

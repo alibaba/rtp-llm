@@ -7,6 +7,7 @@
 #include <c10/cuda/CUDAGuard.h>
 #include <cuda_runtime.h>
 #include <cuda_fp8.h>
+#include <algorithm>
 #include <atomic>
 #include <condition_variable>
 #include <deque>
@@ -18,6 +19,17 @@
 
 namespace {
 constexpr int BS = 64;
+
+// Shared per-device counters; defined further down next to the lossy state.
+static unsigned long long* cnts_for(int device);
+}  // namespace
+
+// Opt-in event timing (defined further down); lets the PCIe gather be reported
+// apart from launch overhead. File scope so the launch sites can call it.
+bool v32_kt_begin(cudaStream_t stream);
+void v32_kt_end(cudaStream_t stream, int which);
+
+namespace {
 
 __global__ void build_indices_kernel(const int* __restrict__ sel,
                                      const int* __restrict__ bt,
@@ -91,70 +103,6 @@ __global__ void append_tok_kernel(unsigned char* __restrict__ idxp,
         dst[off * 128 + t] = src[off * 128 + t];
     else if (t < 132)
         dst[BS * 128 + off * 4 + (t - 128)] = src[BS * 128 + off * 4 + (t - 128)];
-}
-
-// single-wave pool: copy every row's current token indexer-K main->side pool.
-// expected[r] = bookkept block0 identity; mismatch sets ok[r]=0 (tripwire, no write).
-__global__ void batch_append_kernel(unsigned char* __restrict__ pool,
-                                    const unsigned char* __restrict__ src_pool,
-                                    const int* __restrict__ kbt,
-                                    const int* __restrict__ ibt,
-                                    const int* __restrict__ kvlen,
-                                    const int* __restrict__ expected,
-                                    int* __restrict__ ok,
-                                    int  B,
-                                    int  kbt_w,
-                                    int  ibt_w,
-                                    long src_stride) {
-    int r = blockIdx.x;
-    if (r >= B)
-        return;
-    if (kbt[r * kbt_w] != expected[r]) {
-        if (threadIdx.x == 0)
-            ok[r] = 0;
-        return;
-    }
-    int pos = kvlen[r] - 1;
-    if (pos < 0 || pos / BS >= ibt_w)
-        return;
-    int sb = kbt[r * kbt_w + pos / BS];
-    int db = ibt[r * ibt_w + pos / BS];
-    if (sb <= 0 || db < 0)
-        return;
-    const unsigned char* s   = src_pool + (size_t)sb * src_stride;
-    unsigned char*       d   = pool + (size_t)db * (132 * BS);
-    int                  off = pos % BS;
-    int                  t   = threadIdx.x;
-    if (t < 128)
-        d[off * 128 + t] = s[off * 128 + t];
-    else if (t < 132)
-        d[BS * 128 + off * 4 + (t - 128)] = s[BS * 128 + off * 4 + (t - 128)];
-}
-
-// single-wave pool: bulk copy positions [lo, upto) of one row (admission/backfill).
-__global__ void bulk_admit_kernel(unsigned char* __restrict__ pool,
-                                  const unsigned char* __restrict__ src_pool,
-                                  const int* __restrict__ kbt_row,
-                                  const int* __restrict__ ibt_row,
-                                  int  lo,
-                                  int  upto,
-                                  int  ibt_w,
-                                  long src_stride) {
-    int pos = lo + blockIdx.x;
-    if (pos >= upto || pos / BS >= ibt_w)
-        return;
-    int sb = kbt_row[pos / BS];
-    int db = ibt_row[pos / BS];
-    if (sb <= 0 || db < 0)
-        return;
-    const unsigned char* s   = src_pool + (size_t)sb * src_stride;
-    unsigned char*       d   = pool + (size_t)db * (132 * BS);
-    int                  off = pos % BS;
-    int                  t   = threadIdx.x;
-    if (t < 128)
-        d[off * 128 + t] = s[off * 128 + t];
-    else if (t < 132)
-        d[BS * 128 + off * 4 + (t - 128)] = s[BS * 128 + off * 4 + (t - 128)];
 }
 
 // scatter fetched rows into staging slots chosen by LRU (victims precomputed)
@@ -524,57 +472,6 @@ void ctx_serve_wb(int64_t       req_key,
         ktr.narrow(0, k, kw - k).fill_(-1);
 }
 
-// single-wave pool maintenance. kbt/ibt/kvlen/expected int32; ok int32 [B]
-// (device; caller drains it asynchronously).
-void ctx_batch_append(torch::Tensor pool_l,
-                      torch::Tensor src_pool_u8,
-                      torch::Tensor kbt,
-                      torch::Tensor ibt,
-                      torch::Tensor kvlen,
-                      torch::Tensor expected,
-                      torch::Tensor ok) {
-    TORCH_CHECK(kbt.scalar_type() == torch::kInt32 && ibt.scalar_type() == torch::kInt32
-                    && kvlen.scalar_type() == torch::kInt32,
-                "int32 expected");
-    int  B      = (int)ibt.size(0);
-    auto stream = at::cuda::getCurrentCUDAStream();
-    batch_append_kernel<<<B, 132, 0, stream>>>(reinterpret_cast<unsigned char*>(pool_l.data_ptr()),
-                                               reinterpret_cast<const unsigned char*>(src_pool_u8.data_ptr()),
-                                               kbt.data_ptr<int>(),
-                                               ibt.data_ptr<int>(),
-                                               kvlen.data_ptr<int>(),
-                                               expected.data_ptr<int>(),
-                                               ok.data_ptr<int>(),
-                                               B,
-                                               (int)kbt.size(1),
-                                               (int)ibt.size(1),
-                                               (long)src_pool_u8.size(1));
-    TORCH_CHECK(cudaGetLastError() == cudaSuccess, "batch_append launch failed");
-}
-
-void ctx_bulk_admit(torch::Tensor pool_l,
-                    torch::Tensor src_pool_u8,
-                    torch::Tensor kbt,
-                    int64_t       row_i,
-                    torch::Tensor ibt_row,
-                    int64_t       lo,
-                    int64_t       upto) {
-    if (upto <= lo)
-        return;
-    auto kbt_row = kbt.select(0, row_i).to(torch::kInt32).contiguous();
-    auto stream  = at::cuda::getCurrentCUDAStream();
-    bulk_admit_kernel<<<(unsigned)(upto - lo), 132, 0, stream>>>(
-        reinterpret_cast<unsigned char*>(pool_l.data_ptr()),
-        reinterpret_cast<const unsigned char*>(src_pool_u8.data_ptr()),
-        kbt_row.data_ptr<int>(),
-        ibt_row.data_ptr<int>(),
-        (int)lo,
-        (int)upto,
-        (int)ibt_row.size(0),
-        (long)src_pool_u8.size(1));
-    TORCH_CHECK(cudaGetLastError() == cudaSuccess, "bulk_admit launch failed");
-}
-
 std::vector<int64_t> ctx_debug(int64_t req_key, int64_t layer) {
     auto it = g_ctx->stores.find(key_of(req_key, layer));
     TORCH_CHECK(it != g_ctx->stores.end());
@@ -763,22 +660,37 @@ constexpr int LOSSY_MISS_CAP = 512;
 
 __global__ void lossy_mask_kernel(int* __restrict__ ktr,                  // [kw] logical sel, in/out
                                   const int* __restrict__ bt,             // engine kbt row
-                                  const int* __restrict__ map_pos,        // [mw] logical block -> staging table pos
+                                  int* __restrict__ map_pos,              // [mw] logical block -> staging table pos
+                                  const int* __restrict__ alias_lb,       // [n_alias] blocks to update
+                                  const int* __restrict__ alias_val,      // [n_alias] new table pos (0 = retire)
                                   int* __restrict__ miss,                 // pinned [2+CAP]: tag, count, blocks
-                                  unsigned long long* __restrict__ cnts,  // pinned [4]: tail,pool,miss,serves
+                                  unsigned long long* __restrict__ cnts,  // device [4]: tail,pool,miss,serves
                                   int kw,
                                   int w,
                                   int mw,
                                   int hist,
                                   int tag,
-                                  int diag) {  // diag: count only, leave ktr untouched
+                                  int n_alias,
+                                  int stg_lo,  // staging table positions [stg_lo, stg_hi]:
+                                  int stg_hi,  // still non-zero in bt, but python owns them
+                                  int diag,
+                                  int want_miss) {  // 0: no consumer, skip the host export
     __shared__ int s_cnt[3];
     __shared__ int s_n;
+    // Publishing and retiring aliases here rather than in a separate launch keeps
+    // the update ordered ahead of the remap for free: one block, one barrier.
+    for (int i = threadIdx.x; i < n_alias; i += blockDim.x) {
+        int b = alias_lb[i];
+        if (b >= 0 && b < mw)
+            map_pos[b] = alias_val[i];
+    }
     if (threadIdx.x < 3)
         s_cnt[threadIdx.x] = 0;
     if (threadIdx.x == 0)
         s_n = 0;
     __syncthreads();
+    int c0 = 0, c1 = 0, c2 = 0;  // tallied per thread; a shared atomic per
+                                 // selection would serialise ~1800 of them
     for (int i = threadIdx.x; i < kw; i += blockDim.x) {
         int p = ktr[i];
         if (p < 0)
@@ -789,29 +701,46 @@ __global__ void lossy_mask_kernel(int* __restrict__ ktr,                  // [kw
             continue;
         }
         int j = p / BS;
-        if (j < w && bt[j] > 0) {
-            atomicAdd(&s_cnt[0], 1);
+        // A staging position's bt entry is still non-zero, but its contents are
+        // the hot pool, not this logical block: it is not resident.
+        if (j < w && bt[j] > 0 && !(j >= stg_lo && j <= stg_hi)) {
+            ++c0;
             continue;
         }
         int mp = (j < mw) ? map_pos[j] : 0;
         if (mp > 0) {
             if (!diag)
                 ktr[i] = mp * BS + (p % BS);
-            atomicAdd(&s_cnt[1], 1);
+            ++c1;
             continue;
         }
         if (!diag)
             ktr[i] = -1;
-        atomicAdd(&s_cnt[2], 1);
-        int slot = atomicAdd(&s_n, 1);
-        if (slot < LOSSY_MISS_CAP)
-            miss[2 + slot] = j;
+        ++c2;
+        if (want_miss) {
+            int slot = atomicAdd(&s_n, 1);
+            if (slot < LOSSY_MISS_CAP)
+                miss[2 + slot] = j;
+        }
+    }
+#pragma unroll
+    for (int off = 16; off > 0; off >>= 1) {
+        c0 += __shfl_down_sync(0xffffffffu, c0, off);
+        c1 += __shfl_down_sync(0xffffffffu, c1, off);
+        c2 += __shfl_down_sync(0xffffffffu, c2, off);
+    }
+    if ((threadIdx.x & 31) == 0) {
+        atomicAdd(&s_cnt[0], c0);
+        atomicAdd(&s_cnt[1], c1);
+        atomicAdd(&s_cnt[2], c2);
     }
     __syncthreads();
     if (threadIdx.x == 0) {
-        miss[1] = s_n < LOSSY_MISS_CAP ? s_n : LOSSY_MISS_CAP;
-        __threadfence_system();  // entries+count visible before the tag flips
-        miss[0] = tag;
+        if (want_miss) {
+            miss[1] = s_n < LOSSY_MISS_CAP ? s_n : LOSSY_MISS_CAP;
+            __threadfence_system();  // entries+count visible before the tag flips
+            miss[0] = tag;
+        }
         atomicAdd(&cnts[0], (unsigned long long)s_cnt[0]);
         atomicAdd(&cnts[1], (unsigned long long)s_cnt[1]);
         atomicAdd(&cnts[2], (unsigned long long)s_cnt[2]);
@@ -819,48 +748,180 @@ __global__ void lossy_mask_kernel(int* __restrict__ ktr,                  // [kw
     }
 }
 
-// apply n alias updates: map_pos[lb[i]] = val[i]  (lb/val live in pinned mem)
-__global__ void
-lossy_alias_kernel(int* __restrict__ map_pos, const int* __restrict__ lb, const int* __restrict__ val, int n, int mw) {
-    int i = threadIdx.x;
-    if (i < n) {
-        int b = lb[i];
-        if (b >= 0 && b < mw)
-            map_pos[b] = val[i];
+// Whole-block gather from the pinned host mirror (device-addressable under UVA)
+// into pool slots: one launch replaces the per-block cudaMemcpyAsync loop, which
+// at 8 blocks x 61 layers was ~500 CUDA calls per decode step of pure launch tax.
+// vec_per_blk counts 16B units in one block (BS * row_w * 2B / 16).
+__global__ void lossy_fetch_blocks_kernel(int4* __restrict__ pool,
+                                          const int4* __restrict__ host_mirror,
+                                          const int* __restrict__ src_blk,
+                                          const int* __restrict__ dst_blk,
+                                          int m,
+                                          int vec_per_blk) {
+    const long total = (long)m * vec_per_blk;
+    for (long t = (long)blockIdx.x * blockDim.x + threadIdx.x; t < total; t += (long)gridDim.x * blockDim.x) {
+        const int  i                               = (int)(t / vec_per_blk);
+        const long off                             = t - (long)i * vec_per_blk;
+        pool[(long)dst_blk[i] * vec_per_blk + off] = host_mirror[(long)src_blk[i] * vec_per_blk + off];
+    }
+}
+
+// ---- Scheme C (lossless): instead of dropping non-resident selections, hand
+// each one a scratch token slot inside the request's staging blocks and remap it
+// there. Slot k lives at staging table position jpos[k / BS], offset k % BS, so
+// the native convert-to-global reaches it through the unchanged engine table -
+// same trick as the lossy hot pool, but at token rather than block granularity.
+// Capacity is S*BS slots (32*64 = 2048), which covers a full top-2048 row.
+// Multi-block: with one block this ran on a single SM while the rest of the GPU
+// idled. The slot counter therefore has to be a device atomic, and it needs to be
+// zero on entry - so need_n holds two slots and each call zeroes the one the next
+// call will use. Same stream, so the previous call's fetch has already read it.
+__global__ void lossless_mask_kernel(int* __restrict__ ktr,                  // [kw] logical sel, in/out
+                                     const int* __restrict__ bt,             // engine kbt row
+                                     const int* __restrict__ jpos,           // [S] staging table positions
+                                     int* __restrict__ need_tok,             // [S*BS] out: wanted global token
+                                     int* __restrict__ need_n,               // [2] ping-pong wanted count
+                                     unsigned long long* __restrict__ cnts,  // tail,fetch,overflow,serves
+                                     int kw,
+                                     int w,
+                                     int S,
+                                     int stg_lo,  // staging positions hold scratch, not
+                                     int stg_hi,  // the logical block bt still names
+                                     int hist,
+                                     int parity,
+                                     int mode) {  // 0/1 remap misses; 2 drop misses (attribution only)
+    if (blockIdx.x == 0 && threadIdx.x == 0)
+        need_n[1 - parity] = 0;  // hand the next call a zeroed counter
+    const int cap = S * BS;
+    int       c0 = 0, c1 = 0, c2 = 0;  // per-thread; reduced through the warp below
+    for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < kw; i += blockDim.x * gridDim.x) {
+        int p = ktr[i];
+        if (p < 0)
+            continue;
+        if (p >= hist) {
+            ktr[i] = -1;
+            continue;
+        }
+        int j = p / BS;
+        // A staging position's bt entry is still non-zero, but it holds scratch:
+        // treat it as offloaded so it gets fetched rather than read stale.
+        if (j < w && bt[j] > 0 && !(j >= stg_lo && j <= stg_hi)) {
+            ++c0;
+            continue;
+        }
+        if (mode == 2) {
+            ktr[i] = -1;
+            ++c2;
+            continue;
+        }
+        int k = atomicAdd(&need_n[parity], 1);  // slot identity, not reducible
+        if (k < cap) {
+            need_tok[k] = p;
+            ktr[i]      = jpos[k / BS] * BS + (k % BS);
+            ++c1;
+        } else {
+            ktr[i] = -1;  // scratch exhausted: degrade to lossy rather than read garbage
+            ++c2;
+        }
+    }
+#pragma unroll
+    for (int off = 16; off > 0; off >>= 1) {
+        c0 += __shfl_down_sync(0xffffffffu, c0, off);
+        c1 += __shfl_down_sync(0xffffffffu, c1, off);
+        c2 += __shfl_down_sync(0xffffffffu, c2, off);
+    }
+    if ((threadIdx.x & 31) == 0) {
+        atomicAdd(&cnts[0], (unsigned long long)c0);
+        atomicAdd(&cnts[1], (unsigned long long)c1);
+        atomicAdd(&cnts[2], (unsigned long long)c2);
+    }
+    if (blockIdx.x == 0 && threadIdx.x == 0)
+        atomicAdd(&cnts[3], 1ull);
+}
+
+// Token-granular companion to lossless_mask_kernel: pull exactly the wanted
+// tokens out of the pinned host mirror into their scratch slots. Runs on the
+// compute stream right after the mask so attention is guaranteed to see real
+// data - that ordering is what makes scheme C synchronous, and its cost is
+// precisely the price of lossless offload we want to measure.
+__global__ void lossless_fetch_kernel(int4* __restrict__ pool,
+                                      const int4* __restrict__ host_mirror,
+                                      const int* __restrict__ need_tok,
+                                      const int* __restrict__ need_n,
+                                      const int* __restrict__ sb,  // [S] physical staging block ids
+                                      int cap,
+                                      int vec_per_row,
+                                      int parity) {
+    int n = need_n[parity];
+    if (n > cap)
+        n = cap;
+    const long total = (long)n * vec_per_row;
+    for (long t = (long)blockIdx.x * blockDim.x + threadIdx.x; t < total; t += (long)gridDim.x * blockDim.x) {
+        const int  k                  = (int)(t / vec_per_row);
+        const long off                = t - (long)k * vec_per_row;
+        const long dst                = (long)sb[k / BS] * BS + (k % BS);
+        pool[dst * vec_per_row + off] = host_mirror[(long)need_tok[k] * vec_per_row + off];
     }
 }
 
 struct LossyState {
-    torch::Tensor    map_pos;          // gpu int32 [mw]
-    torch::Tensor    miss_hdr;         // pinned int32 [2+CAP]
-    torch::Tensor    pin_vals;         // pinned int32 [4*S]: old_lb | zeros | new_lb | new_pos
-    torch::Tensor    kv_cur, kv_prev;  // host mirror refs (prev keeps in-flight src alive)
+    torch::Tensor    map_pos;           // gpu int32 [mw]
+    torch::Tensor    miss_hdr;          // pinned int32 [2+CAP]
+    torch::Tensor    pin_vals;          // pinned int32 [4*S]: alias lb list | alias val list
+    torch::Tensor    pin_blk;           // pinned int32 [2*S]: src host blocks | dst pool blocks
+    torch::Tensor    jpos_dev, sb_dev;  // gpu int32 [S] (scheme C remap needs them on device)
+    torch::Tensor    need_tok, need_n;  // gpu int32 [S*BS] / [1] (scheme C wanted tokens)
+    torch::Tensor    kv_cur, kv_prev;   // host mirror refs (prev keeps in-flight src alive)
     std::vector<int> jpos, sb, occupant;
+    // aliases whose block copy is still in flight; published once ev_copy fires
+    std::vector<int> inflight_lb, inflight_pos;
     int              ring         = 0;
     int              consumed_tag = 0;
-    cudaEvent_t      ev           = nullptr;
+    unsigned         serve_seq    = 0;        // alternates the ping-pong counter slot
+    int              stg_lo       = 1;        // table positions python owns as staging
+    int              stg_hi       = 0;        // (inclusive; hi<lo means none)
+    cudaEvent_t      ev_copy      = nullptr;  // copy stream: prefetch landed
+    cudaEvent_t      ev_clear     = nullptr;  // compute stream: eviction visible
     int              device       = 0;
-    bool             ev_recorded  = false;  // event valid for cudaEventQuery
-    bool             ev_pending   = false;  // recorded but not yet waited on
+    bool             copy_live    = false;  // ev_copy holds an un-reaped prefetch
+    bool             alias_live   = false;  // ev_clear guards pin_vals reuse
     ~LossyState() {
-        if (ev)
-            cudaEventDestroy(ev);
+        if (ev_copy)
+            cudaEventDestroy(ev_copy);
+        if (ev_clear)
+            cudaEventDestroy(ev_clear);
     }
 };
 std::unordered_map<int64_t, std::shared_ptr<LossyState>> g_lossy;
 std::mutex                                               g_lossy_mu;
-torch::Tensor                                            g_lossy_cnts;  // pinned int64 [4]
+// Counters live in device memory: atomicAdd into pinned host memory would make
+// the compute stream wait on a PCIe round trip once per counter per layer.
+// [0..3] tail/pool-or-fetch/miss/serves, [4] admit tokens requested,
+// [5] admit tokens silently skipped (sentinel source or invalid destination)
+std::unordered_map<int, torch::Tensor> g_cnts;  // device -> int64 [6]
 const int g_lossy_diag = std::getenv("V32_LOSSY_DIAG") ? atoi(std::getenv("V32_LOSSY_DIAG")) : 0;
+
+static unsigned long long* cnts_for(int device) {
+    auto& t = g_cnts[device];
+    if (!t.defined()) {
+        c10::cuda::CUDAGuard guard(device);
+        t = torch::zeros({6}, torch::TensorOptions().dtype(torch::kInt64).device(torch::Device(torch::kCUDA, device)));
+    }
+    return reinterpret_cast<unsigned long long*>(t.data_ptr<int64_t>());
+}
 }  // namespace
 
-void ctx_lossy_register(int64_t       req_key,
-                        int64_t       layer,
-                        torch::Tensor jpos_cpu,  // cpu int32 [S] table positions of staging blocks
-                        torch::Tensor sb_cpu,    // cpu int32 [S] physical staging block ids
-                        int64_t       mw,        // map width (>= offloaded block count)
-                        int64_t       device) {
+void ctx_lossy_register(int64_t                      req_key,
+                        int64_t                      layer,
+                        torch::Tensor                jpos_cpu,  // cpu int32 [S] table positions of staging blocks
+                        torch::Tensor                sb_cpu,    // cpu int32 [S] physical staging block ids
+                        int64_t                      mw,        // map width (>= offloaded block count)
+                        int64_t                      device,
+                        c10::optional<torch::Tensor> kv_host) {
     ctx_init();
     auto st = std::make_shared<LossyState>();
+    if (kv_host.has_value())
+        st->kv_cur = *kv_host;
     auto jp = jpos_cpu.to(torch::kInt32).contiguous();
     auto sc = sb_cpu.to(torch::kInt32).contiguous();
     int  S  = (int)jp.size(0);
@@ -868,16 +929,25 @@ void ctx_lossy_register(int64_t       req_key,
     st->jpos.assign(jp.data_ptr<int>(), jp.data_ptr<int>() + S);
     st->sb.assign(sc.data_ptr<int>(), sc.data_ptr<int>() + S);
     st->occupant.assign(S, -1);
+    // The engine leaves these table entries pointing at real blocks while handing
+    // their contents to python, so residency tests must exclude them.
+    st->stg_lo               = *std::min_element(st->jpos.begin(), st->jpos.end());
+    st->stg_hi               = *std::max_element(st->jpos.begin(), st->jpos.end());
     auto                 dev = torch::Device(torch::kCUDA, (int)device);
     c10::cuda::CUDAGuard guard((int)device);
     st->device   = (int)device;
     st->map_pos  = torch::zeros({mw}, torch::TensorOptions().dtype(torch::kInt32).device(dev));
     st->miss_hdr = torch::zeros({2 + LOSSY_MISS_CAP}, torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true));
     st->pin_vals = torch::zeros({4 * S}, torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true));
-    cudaEventCreateWithFlags(&st->ev, cudaEventDisableTiming);
+    st->pin_blk  = torch::zeros({2 * S}, torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true));
+    st->jpos_dev = jp.to(dev);
+    st->sb_dev   = sc.to(dev);
+    st->need_tok = torch::zeros({S * BS}, torch::TensorOptions().dtype(torch::kInt32).device(dev));
+    st->need_n   = torch::zeros({2}, torch::TensorOptions().dtype(torch::kInt32).device(dev));
+    cudaEventCreateWithFlags(&st->ev_copy, cudaEventDisableTiming);
+    cudaEventCreateWithFlags(&st->ev_clear, cudaEventDisableTiming);
     std::lock_guard<std::mutex> lk(g_lossy_mu);
-    if (!g_lossy_cnts.defined())
-        g_lossy_cnts = torch::zeros({4}, torch::TensorOptions().dtype(torch::kInt64).pinned_memory(true));
+    cnts_for((int)device);  // allocate off the hot path
     g_lossy[key_of(req_key, layer)] = st;
 }
 
@@ -912,101 +982,413 @@ void ctx_lossy_serve(int64_t       req_key,
         st->kv_prev = st->kv_cur;  // keep old pinned buffer alive across in-flight copies
         st->kv_cur  = kv_host;
     }
-    const int mw  = (int)st->map_pos.size(0);
-    int*      hdr = st->miss_hdr.data_ptr<int>();
-    int       tag = hdr[0];
-    if (prefetch_cap > 0 && tag > st->consumed_tag && (!st->ev_recorded || cudaEventQuery(st->ev) == cudaSuccess)) {
+    const int mw      = (int)st->map_pos.size(0);
+    const int S       = (int)st->jpos.size();
+    int*      hdr     = st->miss_hdr.data_ptr<int>();
+    int*      pv      = st->pin_vals.data_ptr<int>();  // [0,2S) lb list, [2S,4S) val list
+    int       n_alias = 0;
+
+    // pin_vals is read asynchronously by the alias kernel; ev_clear is recorded
+    // right after that kernel, so an incomplete ev_clear means the previous batch
+    // is still being read. Deferring a step is harmless - the block simply stays
+    // a miss for one more step - and it keeps the buffer race-free without a sync.
+    const bool alias_buf_free = !st->alias_live || cudaEventQuery(st->ev_clear) == cudaSuccess;
+    if (alias_buf_free)
+        st->alias_live = false;
+
+    // (1) publish aliases whose block copy has landed. Polling the copy event on
+    // the host costs nothing on the compute stream; the publish itself is ordered
+    // before this step's mask kernel, so a remap can only ever name real data.
+    if (alias_buf_free && st->copy_live && cudaEventQuery(st->ev_copy) == cudaSuccess) {
+        st->copy_live = false;
+        for (size_t i = 0; i < st->inflight_lb.size(); ++i) {
+            pv[n_alias]         = st->inflight_lb[i];
+            pv[2 * S + n_alias] = st->inflight_pos[i];
+            ++n_alias;
+        }
+        st->inflight_lb.clear();
+        st->inflight_pos.clear();
+    }
+
+    // (2) consume the last landed miss batch and pick victims. Only one prefetch
+    // batch per (request, layer) is ever in flight, which is also what guarantees
+    // the alias buffer above has been fully consumed before we rewrite it.
+    int n_want = 0;
+    // 8 blocks/layer/step already moves 36 MB per decode step, so this ceiling is
+    // generous; it exists so the plan can live on the stack.
+    constexpr int MAX_PREFETCH = 64;
+    int           want[MAX_PREFETCH], dst_sb[MAX_PREFETCH];
+    const int     max_want = (int)std::min<int64_t>(std::min<int64_t>(prefetch_cap, S), MAX_PREFETCH);
+    const int     tag      = hdr[0];
+    if (prefetch_cap > 0 && alias_buf_free && !st->copy_live && tag > st->consumed_tag) {
         st->consumed_tag = tag;
         int n            = hdr[1];
         if (n > LOSSY_MISS_CAP)
             n = LOSSY_MISS_CAP;
-        const size_t     row_bytes = (size_t)main_pool_flat.size(1) * main_pool_flat.element_size();
-        const size_t     blk_bytes = (size_t)BS * row_bytes;
-        const int64_t    host_rows = st->kv_cur.defined() ? st->kv_cur.size(0) : 0;
-        const int64_t    pool_rows = main_pool_flat.size(0);
-        std::vector<int> want;
-        for (int i = 0; i < n && (int64_t)want.size() < prefetch_cap; ++i) {
-            int lb = hdr[2 + i];
+        const int64_t host_rows = st->kv_cur.defined() ? st->kv_cur.size(0) : 0;
+        const int64_t pool_rows = main_pool_flat.size(0);
+        for (int i = 0; i < n && n_want < max_want; ++i) {
+            const int lb = hdr[2 + i];
             if (lb < 0 || lb >= mw || (int64_t)(lb + 1) * BS > host_rows)
                 continue;
             bool dup = false;
-            for (int v : want)
-                if (v == lb)
-                    dup = true;
+            for (int v = 0; v < n_want && !dup; ++v)
+                dup = want[v] == lb;
             for (int occ : st->occupant)
                 if (occ == lb)
                     dup = true;
             if (dup)
                 continue;
-            want.push_back(lb);
-        }
-        if (!want.empty()) {
-            const int        S         = (int)st->jpos.size();
-            const int        m         = (int)want.size();
-            int*             pv        = st->pin_vals.data_ptr<int>();
-            char*            pool_base = reinterpret_cast<char*>(main_pool_flat.data_ptr());
-            char*            host_base = reinterpret_cast<char*>(st->kv_cur.data_ptr());
-            std::vector<int> dst_sb(m);
-            for (int i = 0; i < m; ++i) {
-                int s           = st->ring;
-                st->ring        = (st->ring + 1) % S;
-                pv[i]           = st->occupant[s];  // clear old alias (-1 guarded in kernel)
-                pv[S + i]       = 0;
-                pv[2 * S + i]   = want[i];
-                pv[3 * S + i]   = st->jpos[s];
-                dst_sb[i]       = st->sb[s];
-                st->occupant[s] = want[i];
-            }
-            DevCopy&                    dc = dev_copy(st->device);
-            std::lock_guard<std::mutex> lk(dc.mu);
-            int*                        mp = st->map_pos.data_ptr<int>();
-            lossy_alias_kernel<<<1, m, 0, dc.stream>>>(mp, pv, pv + S, m, mw);
-            for (int i = 0; i < m; ++i) {
-                if ((int64_t)(dst_sb[i] + 1) * BS > pool_rows)
-                    continue;
-                cudaMemcpyAsync(pool_base + (size_t)dst_sb[i] * blk_bytes,
-                                host_base + (size_t)want[i] * blk_bytes,
-                                blk_bytes,
-                                cudaMemcpyHostToDevice,
-                                dc.stream);
-            }
-            lossy_alias_kernel<<<1, m, 0, dc.stream>>>(mp, pv + 2 * S, pv + 3 * S, m, mw);
-            cudaEventRecord(st->ev, dc.stream);
-            st->ev_recorded = true;
-            st->ev_pending  = true;
+            const int s = st->ring;
+            if ((int64_t)(st->sb[s] + 1) * BS > pool_rows)
+                continue;  // staging slot outside this layer's pool
+            st->ring            = (st->ring + 1) % S;
+            pv[n_alias]         = st->occupant[s];  // retire the outgoing alias
+            pv[2 * S + n_alias] = 0;
+            ++n_alias;
+            st->occupant[s] = lb;
+            st->inflight_lb.push_back(lb);
+            st->inflight_pos.push_back(st->jpos[s]);
+            dst_sb[n_want] = st->sb[s];
+            want[n_want]   = lb;
+            ++n_want;
         }
     }
-    if (st->ev_pending) {
-        cudaStreamWaitEvent(stream, st->ev, 0);
-        st->ev_pending = false;
-    }
-    auto bt_row = kbt_all.select(0, row_i);
-    auto ktr    = kernel_topk_all.select(0, row_i).reshape({-1});
-    TORCH_CHECK(bt_row.scalar_type() == torch::kInt32 && ktr.scalar_type() == torch::kInt32, "int32 expected");
-    TORCH_CHECK(bt_row.is_contiguous() && ktr.is_contiguous(), "contiguous rows expected");
-    lossy_mask_kernel<<<1, 1024, 0, stream>>>(ktr.data_ptr<int>(),
-                                              bt_row.data_ptr<int>(),
+
+    // (3) the mask kernel applies both the publishes and the retirements as its
+    // first act, so no separate alias launch is needed; ev_clear is recorded after
+    // it and is what the copy stream waits on.
+    TORCH_CHECK(kbt_all.scalar_type() == torch::kInt32 && kernel_topk_all.scalar_type() == torch::kInt32,
+                "int32 expected");
+    TORCH_CHECK(kbt_all.is_contiguous() && kernel_topk_all.is_contiguous(), "contiguous base tensors expected");
+    TORCH_CHECK(row_i >= 0 && row_i < kbt_all.size(0) && row_i < kernel_topk_all.size(0), "row out of range");
+    const int w       = (int)kbt_all.size(1);
+    const int kw      = (int)(kernel_topk_all.numel() / kernel_topk_all.size(0));
+    int*      bt_ptr  = kbt_all.data_ptr<int>() + row_i * (int64_t)w;
+    int*      ktr_ptr = kernel_topk_all.data_ptr<int>() + row_i * (int64_t)kw;
+    lossy_mask_kernel<<<1, 1024, 0, stream>>>(ktr_ptr,
+                                              bt_ptr,
                                               st->map_pos.data_ptr<int>(),
+                                              pv,
+                                              pv + 2 * S,
                                               hdr,
-                                              reinterpret_cast<unsigned long long*>(g_lossy_cnts.data_ptr<int64_t>()),
-                                              (int)ktr.size(0),
-                                              (int)bt_row.size(0),
+                                              cnts_for(st->device),
+                                              kw,
+                                              w,
                                               mw,
                                               (int)kvlen,
                                               (int)step,
-                                              g_lossy_diag);
-    TORCH_CHECK(cudaGetLastError() == cudaSuccess, "lossy_mask launch failed");
+                                              n_alias,
+                                              st->stg_lo,
+                                              st->stg_hi,
+                                              g_lossy_diag,
+                                              prefetch_cap > 0 ? 1 : 0);
+    if (n_alias > 0) {
+        cudaEventRecord(st->ev_clear, stream);
+        st->alias_live = true;
+    }
+
+    // (4) issue the prefetch. The copy stream waits for the retirement to be
+    // visible, so it can never clobber a slot the compute stream may still alias;
+    // the compute stream itself waits for nothing.
+    if (n_want > 0) {
+        const size_t row_bytes = (size_t)main_pool_flat.size(1) * main_pool_flat.element_size();
+        TORCH_CHECK(row_bytes % 16 == 0, "lossy prefetch needs 16B-aligned rows");
+        const int vec_per_blk = (int)((size_t)BS * row_bytes / 16);
+        int*      pb          = st->pin_blk.data_ptr<int>();
+        for (int i = 0; i < n_want; ++i) {
+            pb[i]     = want[i];
+            pb[S + i] = dst_sb[i];
+        }
+        DevCopy&                    dc = dev_copy(st->device);
+        std::lock_guard<std::mutex> lk(dc.mu);
+        cudaStreamWaitEvent(dc.stream, st->ev_clear, 0);
+        const long total   = (long)n_want * vec_per_blk;
+        const int  threads = 256;
+        int        blocks  = (int)((total + threads - 1) / threads);
+        if (blocks > 1024)
+            blocks = 1024;
+        lossy_fetch_blocks_kernel<<<blocks, threads, 0, dc.stream>>>(
+            reinterpret_cast<int4*>(main_pool_flat.data_ptr()),
+            reinterpret_cast<const int4*>(st->kv_cur.data_ptr()),
+            pb,
+            pb + S,
+            n_want,
+            vec_per_blk);
+        cudaEventRecord(st->ev_copy, dc.stream);
+        st->copy_live = true;
+    }
+}
+
+// Opt-in CUDA-event timing for the three device-side pieces we add, so the actual
+// PCIe gather can be reported separately from launch overhead and from the mask.
+// Timing forces a sync per call, so it is only for attribution runs.
+namespace {
+struct KTime {
+    cudaEvent_t a = nullptr, b = nullptr;
+    double      mask = 0, fetch = 0, append = 0;
+    long        n_mask = 0, n_fetch = 0, n_append = 0;
+    bool        on = false;
+};
+KTime      g_kt;
+const long g_ktime_budget = std::getenv("V32_KTIME") ? atol(std::getenv("V32_KTIME")) : 0;
+
+// returns true if this call should be timed; caller must then call kt_end
+bool v32_kt_begin_impl(cudaStream_t stream) {
+    if (g_ktime_budget <= 0 || g_kt.n_mask + g_kt.n_fetch + g_kt.n_append >= 3 * g_ktime_budget)
+        return false;
+    if (!g_kt.a) {
+        cudaEventCreate(&g_kt.a);
+        cudaEventCreate(&g_kt.b);
+    }
+    cudaEventRecord(g_kt.a, stream);
+    return true;
+}
+
+void v32_kt_end_impl(cudaStream_t stream, double* acc, long* cnt) {
+    cudaEventRecord(g_kt.b, stream);
+    cudaEventSynchronize(g_kt.b);
+    float ms = 0.f;
+    cudaEventElapsedTime(&ms, g_kt.a, g_kt.b);
+    *acc += ms;
+    ++*cnt;
+}
+}  // namespace
+
+bool v32_kt_begin(cudaStream_t stream) {
+    return v32_kt_begin_impl(stream);
+}
+
+void v32_kt_end(cudaStream_t stream, int which) {
+    if (which == 0)
+        v32_kt_end_impl(stream, &g_kt.mask, &g_kt.n_mask);
+    else if (which == 1)
+        v32_kt_end_impl(stream, &g_kt.fetch, &g_kt.n_fetch);
+    else
+        v32_kt_end_impl(stream, &g_kt.append, &g_kt.n_append);
+}
+
+std::vector<double> ctx_ktimings() {
+    return {g_kt.mask, (double)g_kt.n_mask, g_kt.fetch, (double)g_kt.n_fetch, g_kt.append, (double)g_kt.n_append};
+}
+
+// Measures the floor serve is built on: device guard plus one empty launch on the
+// compute stream, and nothing else. The gap between this and a real serve is what
+// remains to be optimised.
+__global__ void probe_empty_kernel() {}
+
+void ctx_probe_launch(int64_t device) {
+    c10::cuda::CUDAGuard guard((int)device);
+    probe_empty_kernel<<<1, 1024, 0, at::cuda::getCurrentCUDAStream()>>>();
+}
+
+void ctx_lossy_reset_counters() {
+    std::lock_guard<std::mutex> lk(g_lossy_mu);
+    for (auto& kv : g_cnts)
+        if (kv.second.defined())
+            kv.second.zero_();
 }
 
 std::vector<int64_t> ctx_lossy_counters() {
-    if (!g_lossy_cnts.defined())
-        return {0, 0, 0, 0};
-    auto* p = g_lossy_cnts.data_ptr<int64_t>();
-    return {p[0], p[1], p[2], p[3]};
+    std::lock_guard<std::mutex> lk(g_lossy_mu);
+    std::vector<int64_t>        acc{0, 0, 0, 0, 0, 0};
+    for (auto& kv : g_cnts) {
+        if (!kv.second.defined())
+            continue;
+        auto  host = kv.second.to(torch::kCPU);
+        auto* p    = host.data_ptr<int64_t>();
+        for (int i = 0; i < 6; ++i)
+            acc[i] += p[i];
+    }
+    return acc;
+}
+
+// ---- Scheme C entry: lossless offload. Attention receives exactly the
+// baseline's top-k; every non-resident selection is remapped into a scratch
+// token slot and gathered from the pinned host mirror on the compute stream
+// before attention runs. No hot pool, no aliases, no miss export to the host -
+// the only cost is the gather sitting on the critical path, which is the number
+// this scheme exists to measure. Counters become tail / fetched / overflow /
+// serves, where a non-zero overflow means the scratch ran out and the step
+// silently degraded to lossy.
+// Shared core of scheme C, operating on an already-resolved state: the steady
+// state calls this once per layer and must not pay a second map lookup. The pool
+// may arrive flat [slots,576] or in its native [blocks,64,576] shape; only the
+// row width (last dim) and base pointer matter.
+static void lossless_serve_impl(LossyState&          st,
+                                const torch::Tensor& kbt_all,
+                                const torch::Tensor& kernel_topk_all,
+                                int64_t              row_i,
+                                const torch::Tensor& pool,
+                                int64_t              kvlen,
+                                int64_t              mode) {
+    c10::cuda::CUDAGuard guard(st.device);
+    auto                 stream    = at::cuda::getCurrentCUDAStream();
+    const int64_t        row_elems = pool.size(-1);
+    const size_t         row_bytes = (size_t)row_elems * pool.element_size();
+    TORCH_CHECK(row_bytes % 16 == 0, "lossless fetch needs 16B-aligned rows");
+    TORCH_CHECK(pool.is_contiguous(), "pool must be contiguous");
+    TORCH_CHECK(row_elems == st.kv_cur.size(1), "mirror row width mismatch");
+    const int S   = (int)st.jpos.size();
+    const int cap = S * BS;
+
+    TORCH_CHECK(kbt_all.scalar_type() == torch::kInt32 && kernel_topk_all.scalar_type() == torch::kInt32,
+                "int32 expected");
+    TORCH_CHECK(kbt_all.is_contiguous() && kernel_topk_all.is_contiguous(), "contiguous base tensors expected");
+    TORCH_CHECK(row_i >= 0 && row_i < kbt_all.size(0) && row_i < kernel_topk_all.size(0), "row out of range");
+    const int w       = (int)kbt_all.size(1);
+    const int kw      = (int)(kernel_topk_all.numel() / kernel_topk_all.size(0));
+    int*      bt_ptr  = kbt_all.data_ptr<int>() + row_i * (int64_t)w;
+    int*      ktr_ptr = kernel_topk_all.data_ptr<int>() + row_i * (int64_t)kw;
+
+    // kw is 2048 selections; 8x256 gives one per thread across 8 SMs instead of
+    // crowding a single one.
+    const int  parity   = (int)(st.serve_seq++ & 1);
+    const int  m_thr    = 256;
+    const int  m_blocks = (kw + m_thr - 1) / m_thr;
+    const bool kt_m     = v32_kt_begin(stream);
+    lossless_mask_kernel<<<m_blocks, m_thr, 0, stream>>>(ktr_ptr,
+                                                         bt_ptr,
+                                                         st.jpos_dev.data_ptr<int>(),
+                                                         st.need_tok.data_ptr<int>(),
+                                                         st.need_n.data_ptr<int>(),
+                                                         cnts_for(st.device),
+                                                         kw,
+                                                         w,
+                                                         S,
+                                                         st.stg_lo,
+                                                         st.stg_hi,
+                                                         (int)kvlen,
+                                                         parity,
+                                                         (int)mode);
+    if (kt_m)
+        v32_kt_end(stream, 0);
+
+    // The gather is PCIe-bound, not compute-bound: it wants several loads in flight
+    // per thread and a small SM footprint so it does not crowd attention. One int4
+    // per thread across 256 blocks did the opposite.
+    const int vec_per_row = (int)(row_bytes / 16);
+    const int threads     = 256;
+    int       blocks      = (int)(((long)cap * vec_per_row + threads - 1) / threads);
+    if (blocks > 48)
+        blocks = 48;
+    if (mode == 0) {
+        const bool kt_f = v32_kt_begin(stream);
+        lossless_fetch_kernel<<<blocks, threads, 0, stream>>>(reinterpret_cast<int4*>(pool.data_ptr()),
+                                                              reinterpret_cast<const int4*>(st.kv_cur.data_ptr()),
+                                                              st.need_tok.data_ptr<int>(),
+                                                              st.need_n.data_ptr<int>(),
+                                                              st.sb_dev.data_ptr<int>(),
+                                                              cap,
+                                                              vec_per_row,
+                                                              parity);
+        if (kt_f)
+            v32_kt_end(stream, 1);
+    }
+}
+
+void ctx_lossless_serve(int64_t       req_key,
+                        int64_t       layer,
+                        torch::Tensor kv_host,  // pinned bf16 [cap,576] mirror
+                        torch::Tensor kbt_all,
+                        torch::Tensor kernel_topk_all,
+                        int64_t       row_i,
+                        torch::Tensor main_pool_flat,  // [slots,576] bf16 (this layer)
+                        int64_t       kvlen,
+                        int64_t       mode) {
+    TORCH_CHECK(mode >= 0 && mode <= 2, "lossless attribution mode must be 0..2");
+    std::shared_ptr<LossyState> st;
+    {
+        std::lock_guard<std::mutex> lk(g_lossy_mu);
+        auto                        it = g_lossy.find(key_of(req_key, layer));
+        TORCH_CHECK(it != g_lossy.end(), "lossy state missing");
+        st = it->second;
+    }
+    if (!st->kv_cur.defined() || st->kv_cur.data_ptr() != kv_host.data_ptr()) {
+        st->kv_prev = st->kv_cur;
+        st->kv_cur  = kv_host;
+    }
+    lossless_serve_impl(*st, kbt_all, kernel_topk_all, row_i, main_pool_flat, kvlen, mode);
+}
+
+bool ctx_lossless_try_serve(int64_t       req_key,
+                            int64_t       layer,
+                            torch::Tensor kbt_all,
+                            torch::Tensor kernel_topk_all,
+                            int64_t       row_i,
+                            torch::Tensor main_pool_flat,
+                            int64_t       kvlen,
+                            int64_t       mode) {
+    std::shared_ptr<LossyState> st;
+    {
+        std::lock_guard<std::mutex> lk(g_lossy_mu);
+        auto                        it = g_lossy.find(key_of(req_key, layer));
+        if (it == g_lossy.end() || !it->second->kv_cur.defined())
+            return false;
+        st = it->second;
+    }
+    lossless_serve_impl(*st, kbt_all, kernel_topk_all, row_i, main_pool_flat, kvlen, mode);
+    return true;
+}
+
+// ---- Step-armed fast path. Python arms the plan once per decode step (layer 0)
+// after its request-level checks; every layer then makes one 4-argument call that
+// reads the armed plan and a per-layer cached state pointer. This removes the
+// per-layer python dict/plan work and the map lookup that made the first fast
+// path recover only 0.1ms of the measured 1.4ms.
+namespace {
+struct FastStep {
+    int64_t                                  step  = -1;  // python _step this plan is valid for
+    int64_t                                  key   = 0;
+    int32_t                                  row_i = 0;
+    int32_t                                  kvlen = 0;
+    int32_t                                  mode  = 0;
+    std::vector<std::shared_ptr<LossyState>> layers;  // lazily resolved per layer
+};
+FastStep g_fast_step;
+}  // namespace
+
+void ctx_step_plan(int64_t step, int64_t key, int64_t row_i, int64_t kvlen, int64_t mode, int64_t max_layers) {
+    TORCH_CHECK(mode >= 0 && mode <= 2, "lossless attribution mode must be 0..2");
+    TORCH_CHECK(max_layers > 0 && max_layers <= 4096, "bad layer count");
+    auto& fs = g_fast_step;
+    if (fs.key != key || (int64_t)fs.layers.size() != max_layers) {
+        // new request (or first arm): drop cached states so a recycled block-0 key
+        // can never serve from the previous request's mirror
+        fs.layers.assign((size_t)max_layers, nullptr);
+        fs.key = key;
+    }
+    fs.step  = step;
+    fs.row_i = (int32_t)row_i;
+    fs.kvlen = (int32_t)kvlen;
+    fs.mode  = (int32_t)mode;
+}
+
+bool ctx_step_serve(
+    int64_t step, int64_t layer, torch::Tensor kbt_all, torch::Tensor kernel_topk_all, torch::Tensor pool) {
+    auto& fs = g_fast_step;
+    if (fs.step != step || layer < 0 || (size_t)layer >= fs.layers.size())
+        return false;
+    auto& slot = fs.layers[(size_t)layer];
+    if (!slot) {
+        std::lock_guard<std::mutex> lk(g_lossy_mu);
+        auto                        it = g_lossy.find(key_of(fs.key, layer));
+        if (it == g_lossy.end() || !it->second->kv_cur.defined())
+            return false;  // not registered yet: python slow path owns this layer
+        slot = it->second;
+    }
+    lossless_serve_impl(*slot, kbt_all, kernel_topk_all, fs.row_i, pool, fs.kvlen, fs.mode);
+    return true;
 }
 
 void ctx_lossy_release(int64_t req_key) {
     std::lock_guard<std::mutex> lk(g_lossy_mu);
+    if (g_fast_step.key == req_key) {
+        // the armed plan and its cached states alias this request; disarm before
+        // the map entries go away so a stale step can never serve freed mirrors
+        g_fast_step.step = -1;
+        g_fast_step.layers.assign(g_fast_step.layers.size(), nullptr);
+    }
     for (int l = 0; l < 128; ++l)
         g_lossy.erase(key_of(req_key, l));
 }
@@ -1018,8 +1400,12 @@ void ctx_lossy_release(int64_t req_key) {
 typedef int (*v32_adm_lookup_fn)(
     int64_t, int32_t, void**, int64_t*, int64_t*, void**, int64_t*, int64_t*, int64_t*, int32_t*);
 typedef void (*v32_adm_release_fn)(int64_t);
-static v32_adm_lookup_fn  g_adm_lookup  = nullptr;
-static v32_adm_release_fn g_adm_release = nullptr;
+typedef int64_t (*v32_adm_generation_fn)(int64_t);
+typedef void (*v32_adm_release_generation_fn)(int64_t, int64_t);
+static v32_adm_lookup_fn             g_adm_lookup             = nullptr;
+static v32_adm_release_fn            g_adm_release            = nullptr;
+static v32_adm_generation_fn         g_adm_generation         = nullptr;
+static v32_adm_release_generation_fn g_adm_release_generation = nullptr;
 
 bool ctx_admission_open(const std::string& engine_so_path) {
     void* h = dlopen(engine_so_path.c_str(), RTLD_LAZY | RTLD_NOLOAD);
@@ -1027,14 +1413,16 @@ bool ctx_admission_open(const std::string& engine_so_path) {
         h = dlopen(engine_so_path.c_str(), RTLD_LAZY);
     if (!h)
         return false;
-    g_adm_lookup  = (v32_adm_lookup_fn)dlsym(h, "rtp_v32_admission_lookup");
-    g_adm_release = (v32_adm_release_fn)dlsym(h, "rtp_v32_admission_release");
+    g_adm_lookup             = (v32_adm_lookup_fn)dlsym(h, "rtp_v32_admission_lookup");
+    g_adm_release            = (v32_adm_release_fn)dlsym(h, "rtp_v32_admission_release");
+    g_adm_generation         = (v32_adm_generation_fn)dlsym(h, "rtp_v32_admission_generation");
+    g_adm_release_generation = (v32_adm_release_generation_fn)dlsym(h, "rtp_v32_admission_release_generation");
     return g_adm_lookup != nullptr && g_adm_release != nullptr;
 }
 
-// Returns (kv_host [cap,576] bf16, idxp [nb,64,132] u8 cuda, durable_tokens)
-// or None. Tensors alias engine memory: valid until the engine releases the
-// request (stream end / purge), same staleness contract as the block table.
+// Returns (kv_host [cap,576] bf16, None, durable_tokens, generation) or None.
+// The second tuple slot is retained for compatibility with the retired indexer
+// shadow buffer. The tensor aliases engine-owned memory.
 py::object ctx_adopt(int64_t req_key, int64_t layer) {
     if (!g_adm_lookup)
         return py::none();
@@ -1044,17 +1432,22 @@ py::object ctx_adopt(int64_t req_key, int64_t layer) {
     int32_t dev = 0;
     if (!g_adm_lookup(req_key, (int32_t)layer, &host_kv, &cap_tokens, &kv_bpt, &idxp, &nb_cap, &idx_bb, &durable, &dev))
         return py::none();
-    if (kv_bpt != 1152 || idx_bb != BS * 132)
-        return py::none();  // layout tripwire
+    if (host_kv == nullptr || kv_bpt != 1152)
+        return py::none();  // main-KV layout tripwire
     auto kv = torch::from_blob(host_kv, {cap_tokens, 576}, torch::TensorOptions().dtype(torch::kBFloat16));
-    auto ip = torch::from_blob(
-        idxp, {nb_cap, BS, 132}, torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA, dev));
-    return py::make_tuple(kv, ip, durable);
+    return py::make_tuple(kv, py::none(), durable, nb_cap);
 }
 
-void ctx_admission_release(int64_t req_key) {
-    if (g_adm_release)
+int64_t ctx_admission_generation(int64_t req_key) {
+    return g_adm_generation ? g_adm_generation(req_key) : -1;
+}
+
+void ctx_admission_release(int64_t req_key, int64_t generation) {
+    if (generation >= 0 && g_adm_release_generation) {
+        g_adm_release_generation(req_key, generation);
+    } else if (g_adm_release) {
         g_adm_release(req_key);
+    }
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
@@ -1078,14 +1471,28 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("ctx_serve", &ctx_serve, py::call_guard<py::gil_scoped_release>());
     m.def("ctx_append_tok", &ctx_append_tok, py::call_guard<py::gil_scoped_release>());
     m.def("ctx_serve_wb", &ctx_serve_wb, py::call_guard<py::gil_scoped_release>());
-    m.def("ctx_batch_append", &ctx_batch_append, py::call_guard<py::gil_scoped_release>());
-    m.def("ctx_bulk_admit", &ctx_bulk_admit, py::call_guard<py::gil_scoped_release>());
     m.def("ctx_admission_open", &ctx_admission_open);
     m.def("ctx_adopt", &ctx_adopt);
-    m.def("ctx_admission_release", &ctx_admission_release);
-    m.def("ctx_lossy_register", &ctx_lossy_register);
+    m.def("ctx_admission_generation", &ctx_admission_generation);
+    m.def("ctx_admission_release", &ctx_admission_release, py::arg("req_key"), py::arg("generation") = -1);
+    m.def("ctx_lossy_register",
+          &ctx_lossy_register,
+          py::arg("req_key"),
+          py::arg("layer"),
+          py::arg("jpos_cpu"),
+          py::arg("sb_cpu"),
+          py::arg("mw"),
+          py::arg("device"),
+          py::arg("kv_host") = c10::nullopt);
     m.def("ctx_lossy_has", &ctx_lossy_has);
     m.def("ctx_lossy_serve", &ctx_lossy_serve, py::call_guard<py::gil_scoped_release>());
+    m.def("ctx_lossless_serve", &ctx_lossless_serve, py::call_guard<py::gil_scoped_release>());
+    m.def("ctx_lossless_try_serve", &ctx_lossless_try_serve, py::call_guard<py::gil_scoped_release>());
+    m.def("ctx_step_plan", &ctx_step_plan);
+    m.def("ctx_step_serve", &ctx_step_serve, py::call_guard<py::gil_scoped_release>());
     m.def("ctx_lossy_counters", &ctx_lossy_counters);
+    m.def("ctx_lossy_reset_counters", &ctx_lossy_reset_counters);
+    m.def("ctx_probe_launch", &ctx_probe_launch, py::call_guard<py::gil_scoped_release>());
+    m.def("ctx_ktimings", &ctx_ktimings);
     m.def("ctx_lossy_release", &ctx_lossy_release);
 }
