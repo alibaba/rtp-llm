@@ -5,6 +5,8 @@
 #include <algorithm>
 #include <utility>
 
+#include "autil/EnvUtil.h"
+
 #include <ATen/Generator.h>
 #if defined(USING_CUDA) || defined(USING_ROCM)
 #include <ATen/cuda/CUDAGeneratorImpl.h>
@@ -202,6 +204,13 @@ PPExecutor::PPExecutor(const EngineInitParams&                params,
 
     enable_detail_log_ = params.profiling_debug_logging_config.enable_detail_log;
     RTP_LLM_LOG_INFO("enable_detail_log_ = %d, tp_rank_ = %d", enable_detail_log_, parallelism_config_.tp_rank);
+    round_device_sync_ = autil::EnvUtil::getEnv<int64_t>("RTP_LLM_PP_ROUND_DEVICE_SYNC", static_cast<int64_t>(1)) != 0;
+    round_fwd_event_sync_ =
+        autil::EnvUtil::getEnv<int64_t>("RTP_LLM_PP_ROUND_FWD_EVENT_SYNC", static_cast<int64_t>(1)) != 0;
+    RTP_LLM_LOG_INFO("PPExecutor per-round sync: device_sync=%d fwd_event_sync=%d "
+                     "(RTP_LLM_PP_ROUND_DEVICE_SYNC / RTP_LLM_PP_ROUND_FWD_EVENT_SYNC)",
+                     static_cast<int>(round_device_sync_),
+                     static_cast<int>(round_fwd_event_sync_));
     if (params.profiling_debug_logging_config.enable_model_inputs_log) {
         model_inputs_logger_ =
             std::make_shared<ModelInputsLogger>(params.parallelism_config.world_rank,
@@ -683,14 +692,34 @@ absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t 
             expert_balancer_->stepForward(*model_, collector);
         }
 
-        auto forward_done = cuda_graph::makeGraphEvent();
-        forward_done.record(cuda_graph::graphGetCurrentStream());
-        forward_done.synchronize();
+        // Blocking the host here until the main stream drains is what keeps the
+        // executor from running a round ahead: the activation send below is
+        // posted only after this round's GPU work has finished. The send does
+        // not need that -- execISend enqueues NCCL on the same stream, so it is
+        // already ordered after the forward's kernels, and NcclPPCommTicket
+        // holds a reference to the tensor so its storage outlives the in-flight
+        // send. RTP_LLM_PP_ROUND_FWD_EVENT_SYNC=0 drops the host wait.
+        if (round_fwd_event_sync_) {
+            auto forward_done = cuda_graph::makeGraphEvent();
+            forward_done.record(cuda_graph::graphGetCurrentStream());
+            forward_done.synchronize();
+        }
         // fastgen: with chunks back-to-back, side-stream work (DSV4 state-pool
         // writes, cache writes) must be visible before this round hands the
         // stream back to the scheduler for the next chunk. Serialized rounds
         // hid this window; the pipeline fill exposes it.
-        cudaDeviceSynchronize();
+        //
+        // A device-wide host barrier is the blunt form of that requirement: it
+        // drains EVERY stream on the device, so no side-stream overlap survives
+        // into the next round and nothing for round k+1 (not even the activation
+        // receive) can be posted until the whole device is idle. It also predates
+        // the dispatch-snapshot fix that made overlapped chunking token-exact, so
+        // it may have been masking that bug rather than a separate hazard.
+        // RTP_LLM_PP_ROUND_DEVICE_SYNC=0 keeps only the main-stream event sync
+        // above, which is what PPExecutor did before fastgen.
+        if (round_device_sync_) {
+            cudaDeviceSynchronize();
+        }
 
         if (!isLastStage()) {
             asyncSendTensors(output_tensors, inflight.activation_sends);
