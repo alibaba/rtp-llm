@@ -7,65 +7,15 @@
             "query": {
                 "messages": [
                     {
-                        "role": "system",
-                        "content": "$prompt:m2",
-                        "partial": false
-                    },
-                    {
                         "role": "user",
-                        "content": "$prompt:s6",
+                        "content": "$prompt:s1",
                         "partial": false
-                    }
-                ],
-                "tools": [
-                    {
-                        "type": "function",
-                        "function": {
-                            "name": "fcst_result_white_box",
-                            "description": "销量预测白盒，能够分析某货品到某仓库的销量预测白盒化信息。具体输出内容为\"reason\"（归因结果）、\"fcst_sls\"（预测销量）和 \"his_sls\"（历史销量）。",
-                            "parameters": {
-                                "type": "object",
-                                "properties": {
-                                    "code": {
-                                        "description": "服务code",
-                                        "type": "string"
-                                    },
-                                    "params": {
-                                        "description": "服务入参",
-                                        "type": "object",
-                                        "properties": {
-                                            "store_code": {
-                                                "description": "仓code",
-                                                "type": "string"
-                                            },
-                                            "po_id": {
-                                                "description": "采购单ID",
-                                                "type": "string"
-                                            },
-                                            "sc_item_id": {
-                                                "description": "货品id",
-                                                "type": "string"
-                                            }
-                                        },
-                                        "required": [
-                                            "sc_item_id",
-                                            "po_id",
-                                            "store_code"
-                                        ]
-                                    }
-                                },
-                                "required": [
-                                    "code",
-                                    "params"
-                                ]
-                            }
-                        }
                     }
                 ],
                 "stream": false,
                 "extra_configs": {
                     "top_k": 1,
-                    "max_new_tokens": 24,
+                    "max_new_tokens": 5,
                     "chat_template_kwargs": {
                         "enable_thinking": false
                     }
@@ -81,26 +31,26 @@
                         "index": 0,
                         "message": {
                             "role": "assistant",
-                            "content": "我理解您的需求，但目前我无法提供与新高考相关的内容，因为我的功能主要集中在数据分析和预测"
+                            "content": "The **CAP Theorem**"
                         },
                         "finish_reason": "length"
                     }
                 ],
                 "usage": {
-                    "prompt_tokens": 497,
-                    "total_tokens": 521,
-                    "completion_tokens": 24,
+                    "prompt_tokens": 18,
+                    "total_tokens": 23,
+                    "completion_tokens": 5,
                     "completion_tokens_details": null,
                     "prompt_tokens_details": null
                 },
                 "debug_info": null,
                 "aux_info": {
                     "cost_time": 1649.197,
-                    "iter_count": 24,
+                    "iter_count": 5,
                     "prefix_len": 0,
-                    "input_len": 497,
-                    "output_len": 24,
-                    "step_output_len": 24,
+                    "input_len": 18,
+                    "output_len": 5,
+                    "step_output_len": 5,
                     "first_token_cost_time": 1494.837,
                     "wait_time": 0.205,
                     "pd_sep": false,
@@ -130,65 +80,15 @@
             "query": {
                 "messages": [
                     {
-                        "role": "system",
-                        "content": "$prompt:m2",
-                        "partial": false
-                    },
-                    {
                         "role": "user",
-                        "content": "$prompt:s6",
+                        "content": "$prompt:s1",
                         "partial": false
-                    }
-                ],
-                "tools": [
-                    {
-                        "type": "function",
-                        "function": {
-                            "name": "fcst_result_white_box",
-                            "description": "销量预测白盒，能够分析某货品到某仓库的销量预测白盒化信息。具体输出内容为\"reason\"（归因结果）、\"fcst_sls\"（预测销量）和 \"his_sls\"（历史销量）。",
-                            "parameters": {
-                                "type": "object",
-                                "properties": {
-                                    "code": {
-                                        "description": "服务code",
-                                        "type": "string"
-                                    },
-                                    "params": {
-                                        "description": "服务入参",
-                                        "type": "object",
-                                        "properties": {
-                                            "store_code": {
-                                                "description": "仓code",
-                                                "type": "string"
-                                            },
-                                            "po_id": {
-                                                "description": "采购单ID",
-                                                "type": "string"
-                                            },
-                                            "sc_item_id": {
-                                                "description": "货品id",
-                                                "type": "string"
-                                            }
-                                        },
-                                        "required": [
-                                            "sc_item_id",
-                                            "po_id",
-                                            "store_code"
-                                        ]
-                                    }
-                                },
-                                "required": [
-                                    "code",
-                                    "params"
-                                ]
-                            }
-                        }
                     }
                 ],
                 "stream": true,
                 "extra_configs": {
                     "top_k": 1,
-                    "max_new_tokens": 24,
+                    "max_new_tokens": 5,
                     "chat_template_kwargs": {
                         "enable_thinking": false
                     }
@@ -204,15 +104,15 @@
                         "index": 0,
                         "delta": {
                             "role": "assistant",
-                            "content": "我理解您的需求，但目前我无法提供与新高考相关的内容，因为我的功能主要集中在数据分析和预测"
+                            "content": "The **CAP Theorem**"
                         },
                         "finish_reason": "length"
                     }
                 ],
                 "usage": {
-                    "prompt_tokens": 497,
-                    "total_tokens": 521,
-                    "completion_tokens": 24,
+                    "prompt_tokens": 18,
+                    "total_tokens": 23,
+                    "completion_tokens": 5,
                     "completion_tokens_details": null,
                     "prompt_tokens_details": null
                 },
