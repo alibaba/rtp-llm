@@ -35,8 +35,8 @@ public class Request {
     private long localStandbyBlockSize;
 
     @ToString.Exclude
-    @JsonProperty("input_ids")
-    private int[] inputIds;
+    @JsonProperty(value = "input_ids", access = JsonProperty.Access.WRITE_ONLY)
+    private TokenIds inputIds;
 
     @JsonProperty("block_size")
     private long blockSize;
@@ -82,5 +82,19 @@ public class Request {
      */
     @JsonProperty("priority")
     private int priority = 0;
+
+    @JsonIgnore
+    public void setInputIds(TokenIds inputIds) {
+        this.inputIds = inputIds;
+    }
+
+    @JsonProperty(value = "input_ids", access = JsonProperty.Access.WRITE_ONLY)
+    public void setInputIds(int[] inputIds) {
+        this.inputIds = inputIds == null ? null : TokenIds.wrap(inputIds);
+    }
+
+    public void clearInputIds() {
+        this.inputIds = null;
+    }
 
 }

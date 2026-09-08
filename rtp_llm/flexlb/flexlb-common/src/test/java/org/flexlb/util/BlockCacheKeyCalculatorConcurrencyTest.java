@@ -1,5 +1,6 @@
 package org.flexlb.util;
 
+import org.flexlb.dao.loadbalance.TokenIds;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
@@ -29,7 +30,7 @@ class BlockCacheKeyCalculatorConcurrencyTest {
             int firstTokenId = variant * 100_000;
             int[] inputIds = IntStream.range(firstTokenId, firstTokenId + TOKEN_COUNT).toArray();
             inputs.add(inputIds);
-            expectedResults.add(BlockCacheKeyCalculator.calculate(inputIds, BLOCK_SIZE));
+            expectedResults.add(BlockCacheKeyCalculator.calculate(TokenIds.wrap(inputIds), BLOCK_SIZE, 0));
         }
 
         ExecutorService executor = Executors.newFixedThreadPool(THREAD_COUNT);
@@ -40,7 +41,7 @@ class BlockCacheKeyCalculatorConcurrencyTest {
                 int inputIndex = requestIndex % INPUT_VARIANT_COUNT;
                 futures.add(executor.submit(() -> {
                     startGate.await();
-                    return BlockCacheKeyCalculator.calculate(inputs.get(inputIndex), BLOCK_SIZE);
+                    return BlockCacheKeyCalculator.calculate(TokenIds.wrap(inputs.get(inputIndex)), BLOCK_SIZE, 0);
                 }));
             }
 

@@ -6,6 +6,7 @@ import org.flexlb.config.CacheMatchConfiguration;
 import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
+import org.flexlb.dao.loadbalance.TokenIds;
 import org.flexlb.dao.route.KvcmConfig;
 import org.flexlb.dao.route.ServiceRoute;
 import org.flexlb.metric.FlexMonitor;
@@ -127,9 +128,10 @@ class RequestBlockHashServiceTest {
         Request request = new Request();
         int[] inputIds = new int[]{1, 2, 3, 4};
         request.setInputIds(inputIds);
+        TokenIds tokenIds = request.getInputIds();
         BalanceContext context = contextFor(request);
         when(configResolver.resolve()).thenReturn(new BlockHashConfig(2192, 1));
-        when(executor.calculate(inputIds, 2192, 1))
+        when(executor.calculate(tokenIds, 2192, 1))
                 .thenReturn(Mono.just(new BlockHashCalculationResult(
                         List.of(11L, 22L), 12, 34)));
 
@@ -142,7 +144,7 @@ class RequestBlockHashServiceTest {
         assertNull(request.getInputIds());
         assertEquals(12, context.getBlockHashQueueWaitTimeUs());
         assertEquals(34, context.getBlockHashExecutionTimeUs());
-        verify(localStandbyHashService).submit(request, inputIds, 4096, 1);
+        verify(localStandbyHashService).submit(request, tokenIds, 4096, 1);
     }
 
     @Test
@@ -155,10 +157,11 @@ class RequestBlockHashServiceTest {
         Request request = new Request();
         int[] inputIds = new int[]{1, 2, 3, 4};
         request.setInputIds(inputIds);
+        TokenIds tokenIds = request.getInputIds();
         List<Long> calculatedKeys = List.of(11L, 22L);
         List<Long> cacheableKeys = List.of(11L);
         when(configResolver.resolve()).thenReturn(new BlockHashConfig(2192, 1));
-        when(executor.calculate(inputIds, 2192, 1))
+        when(executor.calculate(tokenIds, 2192, 1))
                 .thenReturn(Mono.just(new BlockHashCalculationResult(
                         calculatedKeys, 12, 34)));
         when(executor.cacheablePrefix(calculatedKeys, inputIds.length, 2192, 1))
@@ -172,7 +175,7 @@ class RequestBlockHashServiceTest {
         assertEquals(2192, request.getLocalStandbyBlockSize());
         verify(localStandbyHashService, never()).submit(
                 org.mockito.ArgumentMatchers.any(),
-                org.mockito.ArgumentMatchers.any(),
+                org.mockito.ArgumentMatchers.any(TokenIds.class),
                 org.mockito.ArgumentMatchers.anyLong(),
                 org.mockito.ArgumentMatchers.anyInt());
     }

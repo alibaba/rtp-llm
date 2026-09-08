@@ -5,6 +5,7 @@ import org.flexlb.config.CacheMatchConfiguration;
 import org.flexlb.config.LocalStandbyConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
+import org.flexlb.dao.loadbalance.TokenIds;
 import org.springframework.stereotype.Component;
 import reactor.core.publisher.Mono;
 
@@ -52,8 +53,8 @@ public class RequestBlockHashService {
             return prepareProvidedBlockCacheKeys(request, blockCacheKeys);
         }
 
-        int[] inputIds = request.getInputIds();
-        if (inputIds == null || inputIds.length == 0) {
+        TokenIds inputIds = request.getInputIds();
+        if (inputIds == null || inputIds.size() == 0) {
             return Mono.error(new IllegalArgumentException(
                     "block_cache_keys and input_ids must not both be empty"));
         }
@@ -89,19 +90,18 @@ public class RequestBlockHashService {
                         request.setLocalStandbyCacheableBlockCacheKeys(
                                 blockHashExecutor.cacheablePrefix(
                                         result.blockCacheKeys(),
-                                        inputIds.length,
+                                        inputIds.size(),
                                         blockSize,
                                         hashConfig.lookaheadTokens()));
                     }
-                    request.setInputIds(null);
+                    request.clearInputIds();
                     context.recordBlockHashTiming(
                             result.queueWaitTimeUs(), result.executionTimeUs());
                 })
                 .then();
     }
 
-    private Mono<Void> prepareProvidedBlockCacheKeys(
-            Request request, List<Long> blockCacheKeys) {
+    private Mono<Void> prepareProvidedBlockCacheKeys(Request request, List<Long> blockCacheKeys) {
         long requestBlockSize = request.getBlockSize();
         if (requestBlockSize <= 0) {
             return Mono.error(new IllegalArgumentException(
@@ -112,7 +112,7 @@ public class RequestBlockHashService {
             request.setLocalStandbyBlockCacheKeys(blockCacheKeys);
             request.setLocalStandbyCacheableBlockCacheKeys(blockCacheKeys);
         }
-        request.setInputIds(null);
+        request.clearInputIds();
         return Mono.empty();
     }
 }
