@@ -12,10 +12,12 @@ import org.flexlb.balance.strategy.LoadBalanceStrategyFactory;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.ModelMetaConfig;
+import org.flexlb.config.TrafficPolicyConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.BatchScheduleRequest;
 import org.flexlb.dao.loadbalance.BatchScheduleResponse;
 import org.flexlb.dao.loadbalance.BatchScheduleTarget;
+import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.RoutingResult;
 import org.flexlb.dao.loadbalance.ServerStatus;
@@ -32,8 +34,11 @@ import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
 import java.util.EnumMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
 import java.util.concurrent.TimeUnit;
 
 import static org.flexlb.dao.loadbalance.StrategyErrorType.NO_AVAILABLE_WORKER;
@@ -55,6 +60,7 @@ public class DefaultRouter implements Router {
     private final LoadBalanceStrategyEnum batchStrategyType;
     private final int batchScheduleMaxCount;
     private final ModelMetaConfig modelMetaConfig;
+    private final FlexlbConfig loadBalanceConfig;
     private final boolean embeddingEngine;
     private final RateLimitedWarn noWorkerWarn = new RateLimitedWarn(1, TimeUnit.SECONDS);
 
@@ -68,6 +74,7 @@ public class DefaultRouter implements Router {
         this.modelMetaConfig = modelMetaConfig;
 
         FlexlbConfig config = configService.loadBalanceConfig();
+        this.loadBalanceConfig = config;
         this.embeddingEngine = config.getEngineType() == EngineType.EMBEDDING;
         this.loadBalanceStrategyMap = new EnumMap<>(RoleType.class);
         for (RoleType roleType : RoleType.values()) {
@@ -114,7 +121,13 @@ public class DefaultRouter implements Router {
             return Response.error(NO_AVAILABLE_WORKER, noWorkerDetail());
         }
 
-        RoutingResult routingResult = routeByRoleType(context, roleTypes);
+        GroupRoutingResolution groupResolution = resolveGroupRouting(context);
+        if (!groupResolution.success()) {
+            return Response.error(StrategyErrorType.INVALID_REQUEST, groupResolution.errorMessage());
+        }
+
+        RoutingResult routingResult = routeByRoleType(
+                context, roleTypes, groupResolution.decision());
         if (routingResult.success()) {
             return buildSuccessResponse(routingResult.serverStatusList());
         }
@@ -139,6 +152,16 @@ public class DefaultRouter implements Router {
             return BatchScheduleResponse.error(
                     StrategyErrorType.INVALID_REQUEST,
                     "batch_schedule must request at least one of assign_be or assign_fe");
+        }
+
+        TrafficPolicyConfig trafficPolicy = loadBalanceConfig.getTrafficPolicy();
+        if (request.isAssignBe()
+                && trafficPolicy != null
+                && trafficPolicy.hasActiveRoutingRules()) {
+            return BatchScheduleResponse.error(
+                    StrategyErrorType.INVALID_REQUEST,
+                    "batch_schedule assign_be is unavailable while traffic policy routing is "
+                            + "active; defer backend placement to request-aware /schedule");
         }
 
         if (!request.isAssignBe()) {
@@ -226,10 +249,85 @@ public class DefaultRouter implements Router {
         return null;
     }
 
+    private GroupRoutingResolution resolveGroupRouting(BalanceContext context) {
+        FlexlbConfig effectiveConfig = context.getConfig() != null
+                ? context.getConfig() : loadBalanceConfig;
+        TrafficPolicyConfig policy = effectiveConfig == null
+                ? null : effectiveConfig.getTrafficPolicy();
+        if (!context.isAggregateDemand()
+                || policy == null
+                || !policy.hasActiveRoutingRules()) {
+            return GroupRoutingResolution.success(groupRoutingPolicy.route(context));
+        }
+
+        List<Long> seqLens = context.getBatchSeqLens();
+        List<Long> requestIds = context.getBatchRequestIds();
+        if (seqLens == null || seqLens.isEmpty()
+                || requestIds == null || requestIds.size() != seqLens.size()) {
+            return GroupRoutingResolution.failure(
+                    "aggregate traffic-policy routing requires aligned per-item lengths and request IDs");
+        }
+
+        long totalSeqLen = 0L;
+        Set<Long> uniqueRequestIds = new HashSet<>(requestIds.size());
+        for (int i = 0; i < seqLens.size(); i++) {
+            Long seqLen = seqLens.get(i);
+            Long requestId = requestIds.get(i);
+            if (seqLen == null || seqLen < 0L || seqLen > Long.MAX_VALUE - totalSeqLen
+                    || requestId == null || !uniqueRequestIds.add(requestId)) {
+                return GroupRoutingResolution.failure(
+                        "aggregate traffic-policy routing received invalid per-item metadata");
+            }
+            totalSeqLen += seqLen;
+        }
+        if (requestIds.getFirst() != context.getRequestId()
+                || totalSeqLen != context.getRequest().getSeqLen()) {
+            return GroupRoutingResolution.failure(
+                    "aggregate traffic-policy routing metadata does not match aggregate demand");
+        }
+
+        String selectedGroup = null;
+        boolean first = true;
+        for (int i = 0; i < seqLens.size(); i++) {
+            Request memberRequest = copyForTrafficPolicy(
+                    context.getRequest(), requestIds.get(i), seqLens.get(i));
+            String memberGroup = policy.resolveTargetGroup(memberRequest).orElse(null);
+            if (first) {
+                selectedGroup = memberGroup;
+                first = false;
+            } else if (!Objects.equals(selectedGroup, memberGroup)) {
+                return GroupRoutingResolution.failure(
+                        "aggregate batch spans multiple traffic-policy groups; use per-item scheduling");
+            }
+        }
+
+        GroupRoutingDecision decision = StringUtils.isBlank(selectedGroup)
+                ? GroupRoutingDecision.none()
+                : GroupRoutingDecision.of(selectedGroup, "trafficPolicy");
+        return GroupRoutingResolution.success(decision);
+    }
+
+    private static Request copyForTrafficPolicy(Request source, long requestId, long seqLen) {
+        Request copy = new Request();
+        copy.setBlockCacheKeys(source.getBlockCacheKeys());
+        copy.setSeqLen(seqLen);
+        copy.setCacheKeyBlockSize(source.getCacheKeyBlockSize());
+        copy.setRequestId(requestId);
+        copy.setGenerateTimeout(source.getGenerateTimeout());
+        copy.setRequestTimeMs(source.getRequestTimeMs());
+        copy.setApiKey(source.getApiKey());
+        copy.setMaxNewTokens(source.getMaxNewTokens());
+        copy.setNumBeams(source.getNumBeams());
+        copy.setForceDisableSpRun(source.isForceDisableSpRun());
+        copy.setModel(source.getModel());
+        copy.setPriority(source.getPriority());
+        return copy;
+    }
+
     private RoutingResult routeByRoleType(
-            BalanceContext context, List<RoleType> roleTypes) {
+            BalanceContext context, List<RoleType> roleTypes,
+            GroupRoutingDecision groupDecision) {
         List<ServerStatus> serverStatusList = new ArrayList<>();
-        GroupRoutingDecision groupDecision = groupRoutingPolicy.route(context);
         String policyGroup = groupDecision.group();
         String group = policyGroup;
         if (groupDecision.hasGroup()) {
@@ -260,6 +358,18 @@ public class DefaultRouter implements Router {
             }
         }
         return RoutingResult.success(serverStatusList);
+    }
+
+    private record GroupRoutingResolution(
+            boolean success, GroupRoutingDecision decision, String errorMessage) {
+
+        private static GroupRoutingResolution success(GroupRoutingDecision decision) {
+            return new GroupRoutingResolution(true, decision, null);
+        }
+
+        private static GroupRoutingResolution failure(String errorMessage) {
+            return new GroupRoutingResolution(false, GroupRoutingDecision.none(), errorMessage);
+        }
     }
 
     private LoadBalanceStrategy getLoadBalanceStrategy(RoleType roleType) {

@@ -8,6 +8,7 @@ import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.enums.ScheduleModeEnum;
 import org.flexlb.util.Prioritized;
 
+import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -34,11 +35,23 @@ public class BalanceContext implements Prioritized {
     private volatile ScheduleModeEnum scheduleMode = ScheduleModeEnum.BATCH;
 
     /**
-     * True when a BATCH deployment deliberately routes without generate_input to reserve one
-     * whole Python BatchGenerateCall. Its maxNewTokens is already aggregate demand and must not
-     * be clamped as though it represented one request.
+     * True when {@code seqLen} and {@code maxNewTokens} describe the aggregate demand of one
+     * Python BatchGenerateCall. This explicit wire-level classification is independent of whether
+     * {@code generate_input} is present and of the deployment's BATCH, DIRECT, or QUEUE mode.
      */
-    private boolean placementOnly;
+    private boolean aggregateDemand;
+
+    /**
+     * Per-item prompt lengths for {@link #aggregateDemand}. Empty means the caller predates
+     * shape-aware placement and scheduling must retain the aggregate fallback.
+     */
+    private List<Long> batchSeqLens = List.of();
+
+    /**
+     * Request ids positionally aligned with {@link #batchSeqLens}. The first id is the aggregate
+     * reservation key. Empty means the caller predates member-aware placement accounting.
+     */
+    private List<Long> batchRequestIds = List.of();
 
     //======================== Queue ========================//
 

@@ -3,10 +3,13 @@ package org.flexlb.dispatcher;
 import com.alibaba.fastjson2.JSONObject;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.flexlb.config.FlexlbConfig;
+import org.flexlb.config.TrafficPolicyConfig;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.core.io.buffer.DataBufferLimitException;
@@ -174,6 +177,33 @@ class BatchHandlerContractTest {
     }
 
     @Test
+    void promptBatchWithTopLevelListAdapterNameFallsThroughToPassthrough() {
+        BatchEndpointSpec spec = BatchEndpointSpec.BY_PATH.get("/batch_infer");
+        stubBody("{\"prompt_batch\":[\"a\",\"b\"],"
+                + "\"adapter_name\":[\"lora0\",\"lora1\"]}");
+        ServerResponse passthroughResponse = stubPassthroughResponse();
+
+        ServerResponse out = handler.handle(serverRequest, spec).block();
+
+        assertSame(passthroughResponse, out,
+                "FE promotes top-level adapter_name, so it must retain whole-batch alignment");
+        verifyNoInteractions(fanoutService, batchScheduleClient);
+    }
+
+    @Test
+    void streamingPromptBatchFallsThroughToPassthrough() {
+        BatchEndpointSpec spec = BatchEndpointSpec.BY_PATH.get("/");
+        stubBody("{\"prompt_batch\":[\"a\",\"b\"],\"yield_generator\":true}");
+        ServerResponse passthroughResponse = stubPassthroughResponse();
+
+        ServerResponse out = handler.handle(serverRequest, spec).block();
+
+        assertSame(passthroughResponse, out,
+                "SSE responses cannot be buffered and JSON-merged by the fanout path");
+        verifyNoInteractions(fanoutService, batchScheduleClient);
+    }
+
+    @Test
     void stringListEmbeddingsInputStillSplits() {
         BatchEndpointSpec spec = BatchEndpointSpec.BY_PATH.get("/v1/embeddings");
         stubBody("{\"model\":\"m\",\"input\":[\"a\",\"b\",\"c\"]}");
@@ -336,6 +366,35 @@ class BatchHandlerContractTest {
     }
 
     @Test
+    void activeTrafficPolicyDefersBackendPlacementToFrontendRouting() {
+        org.mockito.Mockito.when(cfg.isPreAssignBe()).thenReturn(true);
+        FlexlbConfig loadBalanceConfig = new FlexlbConfig();
+        TrafficPolicyConfig trafficPolicy = new TrafficPolicyConfig();
+        trafficPolicy.setDefaultGroup("tenant-a");
+        loadBalanceConfig.setTrafficPolicy(trafficPolicy);
+        handler = new BatchHandler(fanoutService, cfg, batchScheduleClient, passthroughClient,
+                DispatcherTestSupport.noopMetrics(), 1000,
+                cfg.getMaxAggregateRequestBytes(), loadBalanceConfig);
+        BatchEndpointSpec spec = BatchEndpointSpec.BY_PATH.get("/batch_infer");
+        stubBody("{\"prompt_batch\":[\"a\",\"b\"]}");
+        when(batchScheduleClient.requestTargets(anyInt(), eq(false), eq(true)))
+                .thenReturn(Mono.just(List.of()));
+        when(fanoutService.dispatchChunks(anyString(), anyList(), anyList(), any(), any(), any()))
+                .thenReturn(Mono.just(List.of(SubBatchResult.failed(2, 0, "fe_http_500"))));
+
+        handler.handle(serverRequest, spec).block();
+
+        verify(batchScheduleClient).requestTargets(anyInt(), eq(false), eq(true));
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<JSONObject>> chunks = ArgumentCaptor.forClass(List.class);
+        verify(fanoutService).dispatchChunks(
+                eq("/batch_infer"), chunks.capture(), anyList(), eq(spec), any(), any());
+        assertTrue(chunks.getValue().stream().allMatch(chunk -> !chunk
+                        .getJSONObject("generate_config").getBooleanValue("force_batch")),
+                "traffic-policy chunks must use FE's per-item request-aware routing path");
+    }
+
+    @Test
     void nonObjectBodyIsRejectedWith400WithoutTouchingFe() {
         BatchEndpointSpec spec = BatchEndpointSpec.BY_PATH.get("/batch_infer");
         stubBody("[1,2,3]");
@@ -366,6 +425,33 @@ class BatchHandlerContractTest {
         BatchEndpointSpec spec = BatchEndpointSpec.BY_PATH.get("/batch_infer");
         stubBody("{\"prompt_batch\":[\"a\"],\"generate_config\":{"
                 + "\"role_addrs\":[{\"role\":\"PDFUSION\",\"ip\":\"1.2.3.4\"}]}}");
+
+        ServerResponse out = handler.handle(serverRequest, spec).block();
+
+        assertEquals(HttpStatus.BAD_REQUEST, out.statusCode());
+        assertTrue(parseBody(out).get("message").asText().contains("role_addrs"));
+        verifyNoInteractions(fanoutService, batchScheduleClient, passthroughClient);
+    }
+
+    @Test
+    void topLevelCallerRoleAddrsIsRejectedBeforeScheduling() {
+        BatchEndpointSpec spec = BatchEndpointSpec.BY_PATH.get("/");
+        stubBody("{\"prompt_batch\":[\"a\"],\"role_addrs\":[{"
+                + "\"role\":\"PDFUSION\",\"ip\":\"1.2.3.4\"}]}");
+
+        ServerResponse out = handler.handle(serverRequest, spec).block();
+
+        assertEquals(HttpStatus.BAD_REQUEST, out.statusCode());
+        assertTrue(parseBody(out).get("message").asText().contains("role_addrs"));
+        verifyNoInteractions(fanoutService, batchScheduleClient, passthroughClient);
+    }
+
+    @Test
+    void legacyGenerationConfigRoleAddrsIsRejectedBeforePassthrough() {
+        BatchEndpointSpec spec = BatchEndpointSpec.BY_PATH.get("/");
+        stubBody("{\"prompt_batch\":[\"a\"],\"stream\":true,"
+                + "\"generation_config\":{\"role_addrs\":[{"
+                + "\"role\":\"PDFUSION\",\"ip\":\"1.2.3.4\"}]}}");
 
         ServerResponse out = handler.handle(serverRequest, spec).block();
 

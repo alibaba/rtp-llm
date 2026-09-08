@@ -3,6 +3,7 @@ package org.flexlb.balance.scheduler;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.util.Prioritized;
@@ -52,6 +53,19 @@ public final class BatchItem implements Prioritized {
         this.prefillEp = prefillEp;
         this.decodeEp = decodeEp;
         this.enqueuedAtMs = enqueuedAtMs;
+    }
+
+    /**
+     * Build the minimal member view needed by a placement-only aggregate reservation.
+     * No payload, future, or endpoint reference is retained on this compatibility path.
+     */
+    public static BatchItem placementReservation(long requestId, long seqLen) {
+        Request request = new Request();
+        request.setRequestId(requestId);
+        request.setSeqLen(seqLen);
+        BalanceContext context = new BalanceContext();
+        context.setRequest(request);
+        return new BatchItem(context, null, null, null, null, null, null, 0L);
     }
 
     // -- accessors --

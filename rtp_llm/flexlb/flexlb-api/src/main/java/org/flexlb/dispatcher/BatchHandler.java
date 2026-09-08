@@ -3,6 +3,8 @@ package org.flexlb.dispatcher;
 import com.alibaba.fastjson2.JSONArray;
 import com.alibaba.fastjson2.JSONObject;
 import org.flexlb.config.ConfigService;
+import org.flexlb.config.FlexlbConfig;
+import org.flexlb.config.TrafficPolicyConfig;
 import org.flexlb.dao.loadbalance.BatchScheduleTarget;
 import org.flexlb.dao.pv.DispatchPvLogData;
 import org.flexlb.util.Logger;
@@ -46,6 +48,7 @@ public class BatchHandler {
     private final PassthroughClient passthroughClient;
     private final DispatcherMetricsReporter metricsReporter;
     private final boolean preAssignBe;
+    private final FlexlbConfig loadBalanceConfig;
     private final FeAllocationMode feAllocationMode;
     private final int maxChunkCount;
     private final long maxAggregateRequestBytes;
@@ -58,8 +61,20 @@ public class BatchHandler {
                         DispatcherMetricsReporter metricsReporter,
                         ConfigService configService) {
         this(fanoutService, cfg, batchScheduleClient, passthroughClient, metricsReporter,
-                configService.loadBalanceConfig().getBatchScheduleMaxCount(),
+                configService.loadBalanceConfig(),
                 cfg.getMaxAggregateRequestBytes());
+    }
+
+    private BatchHandler(FanoutService fanoutService,
+                         DispatchConfig cfg,
+                         BatchScheduleClient batchScheduleClient,
+                         PassthroughClient passthroughClient,
+                         DispatcherMetricsReporter metricsReporter,
+                         FlexlbConfig loadBalanceConfig,
+                         long maxAggregateRequestBytes) {
+        this(fanoutService, cfg, batchScheduleClient, passthroughClient, metricsReporter,
+                loadBalanceConfig.getBatchScheduleMaxCount(), maxAggregateRequestBytes,
+                loadBalanceConfig);
     }
 
     /** Package-private convenience for focused tests; mirrors the production default. */
@@ -69,7 +84,7 @@ public class BatchHandler {
                  PassthroughClient passthroughClient,
                  DispatcherMetricsReporter metricsReporter) {
         this(fanoutService, cfg, batchScheduleClient, passthroughClient, metricsReporter,
-                1000, cfg.getMaxAggregateRequestBytes());
+                1000, cfg.getMaxAggregateRequestBytes(), null);
     }
 
     BatchHandler(FanoutService fanoutService,
@@ -79,7 +94,7 @@ public class BatchHandler {
                  DispatcherMetricsReporter metricsReporter,
                  int maxChunkCount) {
         this(fanoutService, cfg, batchScheduleClient, passthroughClient, metricsReporter,
-                maxChunkCount, cfg.getMaxAggregateRequestBytes());
+                maxChunkCount, cfg.getMaxAggregateRequestBytes(), null);
     }
 
     BatchHandler(FanoutService fanoutService,
@@ -89,6 +104,18 @@ public class BatchHandler {
                  DispatcherMetricsReporter metricsReporter,
                  int maxChunkCount,
                  long maxAggregateRequestBytes) {
+        this(fanoutService, cfg, batchScheduleClient, passthroughClient, metricsReporter,
+                maxChunkCount, maxAggregateRequestBytes, null);
+    }
+
+    BatchHandler(FanoutService fanoutService,
+                 DispatchConfig cfg,
+                 BatchScheduleClient batchScheduleClient,
+                 PassthroughClient passthroughClient,
+                 DispatcherMetricsReporter metricsReporter,
+                 int maxChunkCount,
+                 long maxAggregateRequestBytes,
+                 FlexlbConfig loadBalanceConfig) {
         this.fanoutService = fanoutService;
         this.subBatch = cfg.getSubBatchSpec();
         this.splitPolicy = subBatch.mode().name().toLowerCase() + ":" + subBatch.value();
@@ -96,6 +123,7 @@ public class BatchHandler {
         this.passthroughClient = passthroughClient;
         this.metricsReporter = metricsReporter;
         this.preAssignBe = cfg.isPreAssignBe();
+        this.loadBalanceConfig = loadBalanceConfig;
         this.feAllocationMode = cfg.getFeAllocation() == null
                 ? FeAllocationMode.MASTER
                 : FeAllocationMode.parse(cfg.getFeAllocation());
@@ -156,10 +184,13 @@ public class BatchHandler {
                         "batch produces " + chunkCount + " sub-batches; maximum is "
                                 + maxChunkCount + " (BATCH_SCHEDULE_MAX_COUNT)");
             }
-            return Mono.fromCallable(() -> prepareBatch(body, arr, chunkCount, spec, pv))
+            boolean trafficPolicyActive = hasActiveTrafficPolicy();
+            boolean atomicBatchAllowed = !trafficPolicyActive;
+            return Mono.fromCallable(() -> prepareBatch(
+                            body, arr, chunkCount, spec, pv, atomicBatchAllowed))
                     .subscribeOn(Schedulers.parallel())
                     .flatMap(prepared -> {
-                        boolean assignBe = preAssignBe && spec.isPreAssignable();
+                        boolean assignBe = shouldPreAssignBe(spec, trafficPolicyActive);
                         boolean assignFe = feAllocationMode == FeAllocationMode.MASTER;
                         return resolveTargets(prepared.chunkBodies().size(), assignBe, assignFe)
                                 .flatMap(targets -> {
@@ -249,18 +280,32 @@ public class BatchHandler {
     }
 
     private PreparedBatch prepareBatch(JSONObject body, JSONArray arr, int chunkCount,
-                                       BatchEndpointSpec spec, DispatchPvLogData pv) {
+                                       BatchEndpointSpec spec, DispatchPvLogData pv,
+                                       boolean atomicBatchAllowed) {
         long projectedBytes = BatchChunkAssembler.projectedOutboundBytes(
-                body, arr, chunkCount, spec);
+                body, arr, chunkCount, spec, atomicBatchAllowed);
         if (projectedBytes > maxAggregateRequestBytes) {
             throw new AggregateRequestTooLargeException(maxAggregateRequestBytes);
         }
         List<JSONArray> chunks = BatchChunkAssembler.split(arr, subBatch);
         recordChunkShape(pv, chunks);
         List<JSONObject> chunkBodies = BatchChunkAssembler.buildChunkBodies(
-                body, chunks, spec.getRequestArrayField());
+                body, chunks, spec.getRequestArrayField(), atomicBatchAllowed);
         spec.prepareChunkBodies(body, chunkBodies);
         return new PreparedBatch(chunkBodies);
+    }
+
+    private boolean shouldPreAssignBe(BatchEndpointSpec spec, boolean trafficPolicyActive) {
+        if (!preAssignBe || !spec.isPreAssignable()) {
+            return false;
+        }
+        return !trafficPolicyActive;
+    }
+
+    private boolean hasActiveTrafficPolicy() {
+        TrafficPolicyConfig policy = loadBalanceConfig == null
+                ? null : loadBalanceConfig.getTrafficPolicy();
+        return policy != null && policy.hasActiveRoutingRules();
     }
 
     private record PreparedBatch(List<JSONObject> chunkBodies) {}

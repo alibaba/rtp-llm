@@ -43,12 +43,14 @@ class ShortestTTFTStrategyTest {
     private FlexlbBatchScheduler batchScheduler;
     private EndpointRegistry endpointRegistry;
     private ShortestTTFTStrategy strategy;
+    private FlexlbConfig endpointConfig;
 
     @BeforeEach
     void setUp() {
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().clear();
         ConfigService configService = Mockito.mock(ConfigService.class);
-        Mockito.when(configService.loadBalanceConfig()).thenReturn(new FlexlbConfig());
+        endpointConfig = new FlexlbConfig();
+        Mockito.when(configService.loadBalanceConfig()).thenReturn(endpointConfig);
         cacheAwareService = Mockito.mock(CacheAwareService.class);
         resourceMeasureFactory = Mockito.mock(ResourceMeasureFactory.class);
         engineHealthReporter = Mockito.mock(EngineHealthReporter.class);
@@ -108,6 +110,25 @@ class ShortestTTFTStrategyTest {
                 "the first placement reservation must move the next request to the idle worker");
         assertEquals(1, endpointRegistry.getPrefill(
                 first.getServerIp() + ":" + first.getHttpPort()).getInflightBatchCount());
+    }
+
+    @Test
+    void aggregateDirectReservationTracksEveryMember() {
+        Map<String, WorkerStatus> prefillMap =
+                EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
+        prefillMap.put("10.0.0.1:8080", createWorker("10.0.0.1", 0));
+        BalanceContext context = buildContext(400, 21L);
+        context.setScheduleMode(ScheduleModeEnum.DIRECT);
+        context.setAggregateDemand(true);
+        context.setBatchSeqLens(List.of(100L, 300L));
+        context.setBatchRequestIds(List.of(21L, 22L));
+
+        ServerStatus result = strategy.select(context, RoleType.PREFILL, null);
+
+        assertTrue(result.isSuccess());
+        PrefillEndpoint endpoint = endpointRegistry.getPrefill("10.0.0.1:8080");
+        assertEquals(1, endpoint.getInflightBatchCount());
+        assertEquals(2, endpoint.realPendingCount());
     }
 
     @Test
@@ -171,6 +192,26 @@ class ShortestTTFTStrategyTest {
 
         assertTrue(result.isSuccess());
         assertEquals("10.0.0.2", result.getServerIp());
+    }
+
+    @Test
+    void aggregatePlacementUsesPerItemShapeForNonlinearFormula() {
+        endpointConfig.setCostFormula("sum(computeTokens^2)");
+        Map<String, WorkerStatus> prefillMap =
+                EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
+        prefillMap.put("10.0.0.1:8080", createWorker("10.0.0.1", 0));
+
+        BalanceContext context = buildContext(1_000, 3L);
+        context.setAggregateDemand(true);
+        context.setBatchSeqLens(List.of(
+                100L, 100L, 100L, 100L, 100L,
+                100L, 100L, 100L, 100L, 100L));
+
+        ServerStatus result = strategy.select(context, RoleType.PREFILL, null);
+
+        assertTrue(result.isSuccess());
+        assertEquals(100_000L, result.getPrefillTime(),
+                "TTFT must evaluate the real batch shape, not one synthetic request");
     }
 
     @Test

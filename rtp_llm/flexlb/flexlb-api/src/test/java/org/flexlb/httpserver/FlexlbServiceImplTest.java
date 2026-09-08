@@ -5,6 +5,9 @@ import ch.qos.logback.core.read.ListAppender;
 import io.grpc.stub.StreamObserver;
 import org.flexlb.balance.scheduler.RequestLifecycleSnapshot;
 import org.flexlb.balance.scheduler.RequestLifecycleState;
+import org.flexlb.config.ConfigService;
+import org.flexlb.config.FlexlbConfig;
+import org.flexlb.config.PrioritySloPolicy;
 import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.AdmissionRejectReason;
@@ -17,19 +20,26 @@ import org.flexlb.service.grace.ActiveRequestCounter;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.service.monitor.PrioritySchedulerReporter;
-import org.flexlb.config.ConfigService;
-import org.flexlb.config.FlexlbConfig;
-import org.flexlb.config.PrioritySloPolicy;
-import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.slf4j.LoggerFactory;
+
+import java.util.List;
 import java.util.concurrent.CompletableFuture;
 
-import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.Mockito.*;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 class FlexlbServiceImplTest {
 
@@ -371,6 +381,30 @@ class FlexlbServiceImplTest {
         assertEquals(100L, capturedRequest.getBlockCacheKeys().get(0));
         assertEquals(200L, capturedRequest.getBlockCacheKeys().get(1));
         assertEquals(2048L, capturedRequest.getSeqLen());
+    }
+
+    @Test
+    void testSchedule_buildContextPreservesExplicitAggregateDemand() {
+        when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(false);
+        Response response = new Response();
+        response.setSuccess(true);
+        ArgumentCaptor<BalanceContext> ctxCaptor = ArgumentCaptor.forClass(BalanceContext.class);
+        when(routeService.route(ctxCaptor.capture()))
+                .thenReturn(CompletableFuture.completedFuture(response));
+
+        service.schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                .setRequestId(100_001L)
+                .setAggregateDemand(true)
+                .addBatchSeqLens(100L)
+                .addBatchSeqLens(300L)
+                .addBatchRequestIds(100_001L)
+                .addBatchRequestIds(100_002L)
+                .build(), mock(StreamObserver.class));
+
+        assertTrue(ctxCaptor.getValue().isAggregateDemand());
+        assertEquals(List.of(100L, 300L), ctxCaptor.getValue().getBatchSeqLens());
+        assertEquals(List.of(100_001L, 100_002L),
+                ctxCaptor.getValue().getBatchRequestIds());
     }
 
     @Test

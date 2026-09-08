@@ -28,6 +28,27 @@ public class TrafficPolicyConfig {
     @JsonProperty("rules")
     private List<TrafficPolicyRule> rules = new ArrayList<>();
 
+    /**
+     * Whether this policy can route any request to a configured worker group.
+     *
+     * <p>This is intentionally independent of a particular request. Callers that must choose a
+     * routing mechanism before tokenization (for example dispatcher backend pre-assignment) cannot
+     * evaluate sequence-length rules faithfully, so the presence of any effective rule requires
+     * deferring placement to the normal request-aware scheduler.
+     */
+    public boolean hasActiveRoutingRules() {
+        if (!enabled) {
+            return false;
+        }
+        if (hasSelectableTarget(defaultGroup, defaultTargetGroups)) {
+            return true;
+        }
+        return rules != null && rules.stream()
+                .anyMatch(rule -> rule != null
+                        && rule.hasMatcher()
+                        && hasSelectableTarget(rule.targetGroup, rule.targetGroups));
+    }
+
     public Optional<String> resolveTargetGroup(Request request) {
         if (!enabled || request == null) {
             return Optional.empty();
@@ -118,6 +139,17 @@ public class TrafficPolicyConfig {
             return Optional.of(targetGroup);
         }
         return chooseWeightedGroup(targetGroups, request, salt);
+    }
+
+    private static boolean hasSelectableTarget(String targetGroup,
+                                               List<TrafficTargetGroup> targetGroups) {
+        if (StringUtils.isNotBlank(targetGroup)) {
+            return true;
+        }
+        return targetGroups != null && targetGroups.stream()
+                .anyMatch(target -> target != null
+                        && StringUtils.isNotBlank(target.getGroup())
+                        && target.getWeight() > 0);
     }
 
     private static Optional<String> chooseWeightedGroup(List<TrafficTargetGroup> targetGroups,

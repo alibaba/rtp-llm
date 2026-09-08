@@ -1,8 +1,8 @@
 package org.flexlb.balance.strategy;
 
-import java.util.List;
-
 import org.flexlb.balance.scheduler.BatchItem;
+
+import java.util.List;
 
 /**
  * Prefill-time predictor contract.
@@ -36,6 +36,14 @@ public interface PrefillTimePredictor {
     double predictBatchMs(List<BatchItem> items);
 
     /**
+     * Payload-free batch prediction adapter. Implementations may override this to avoid rebuilding
+     * legacy {@link BatchItem} views on hot placement paths.
+     */
+    default double predictBatchMs(PrefillBatchFeatures features) {
+        return predictBatchMs(features == null ? List.of() : features.toBatchItems());
+    }
+
+    /**
      * Estimate prefill time for a batch of requests without consulting or
      * populating any internal cache.
      *
@@ -47,6 +55,12 @@ public interface PrefillTimePredictor {
      * @return predicted time in milliseconds (0 for an empty batch)
      */
     double predictBatchMsUncached(List<BatchItem> items);
+
+    /** Payload-free counterpart of {@link #predictBatchMsUncached(List)}. */
+    default double predictBatchMsUncached(PrefillBatchFeatures features) {
+        return predictBatchMsUncached(
+                features == null ? List.of() : features.toBatchItems());
+    }
 
     /**
      * Learn from a completed batch's actual execution time.

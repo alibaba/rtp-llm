@@ -4,14 +4,28 @@ import logging
 import os
 import time
 from dataclasses import replace
-from typing import TYPE_CHECKING, AsyncGenerator, Callable, List, Optional, Set
+from typing import (
+    TYPE_CHECKING,
+    AsyncGenerator,
+    Callable,
+    List,
+    NamedTuple,
+    Optional,
+    Sequence,
+    Set,
+)
 
 import torch
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import RoleAddr, RoleType
 from rtp_llm.config.model_config import ModelConfig as PyModelConfig
-from rtp_llm.cpp.model_rpc.model_rpc_client import ModelRpcClient, trans_input
+from rtp_llm.config.response_format_compiler import validate_engine_ready
+from rtp_llm.cpp.model_rpc.model_rpc_client import (
+    BatchRpcNotStartedError,
+    ModelRpcClient,
+    trans_input,
+)
 from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
 from rtp_llm.ops import SpeculativeExecutionConfig, VitSeparation, get_block_cache_keys
@@ -37,6 +51,18 @@ if TYPE_CHECKING:
     from rtp_llm.config.py_config_modules import PyEnvConfigs
 
 route_logger = logging.getLogger("route_logger")
+
+_PROTO_INT64_MIN = -(1 << 63)
+_PROTO_INT64_MAX = (1 << 63) - 1
+_PROTO_INT32_MAX = (1 << 31) - 1
+
+
+class _BatchPlacementHints(NamedTuple):
+    prompt_tokens: int
+    output_tokens: int
+    timeout_ms: int
+    seq_lens: tuple[int, ...]
+    request_ids: tuple[int, ...]
 
 
 def get_role_names(role_addrs: List[RoleAddr]) -> Set[str]:
@@ -248,6 +274,8 @@ class BackendRPCServerVisitor:
         *,
         max_new_tokens_hint: Optional[int] = None,
         generate_timeout_hint: Optional[int] = None,
+        batch_seq_lens_hint: Optional[Sequence[int]] = None,
+        batch_request_ids_hint: Optional[Sequence[int]] = None,
     ) -> Optional[FlexlbResponse]:
         """
         Resolve role addrs from FlexLB master (and slave on connection failure).
@@ -257,6 +285,8 @@ class BackendRPCServerVisitor:
         one routing call stands in for a whole batch.
         placement_only omits generate_input so routing reserves load without enqueueing one item.
         max_new_tokens_hint and generate_timeout_hint carry the remaining aggregate demand.
+        batch_seq_lens_hint preserves its per-item shape for nonlinear prefill predictors.
+        batch_request_ids_hint aligns those items with Engine completion reports.
         """
         if placement_only:
             # One placement represents multiple independent prompts. Using the first member's
@@ -296,7 +326,13 @@ class BackendRPCServerVisitor:
                 route_kwargs["max_new_tokens_hint"] = max_new_tokens_hint
             if generate_timeout_hint is not None:
                 route_kwargs["generate_timeout_hint"] = generate_timeout_hint
-            route_result = await self.master_client.get_backend_role_addrs(**route_kwargs)
+            if placement_only:
+                route_kwargs["aggregate_demand"] = True
+                route_kwargs["batch_seq_lens"] = batch_seq_lens_hint or ()
+                route_kwargs["batch_request_ids"] = batch_request_ids_hint or ()
+            route_result = await self.master_client.get_backend_role_addrs(
+                **route_kwargs
+            )
         except BaseException as e:
             exception_json = format_exception(e)
             kmonitor.report(
@@ -399,6 +435,8 @@ class BackendRPCServerVisitor:
         *,
         max_new_tokens_hint: Optional[int] = None,
         generate_timeout_hint: Optional[int] = None,
+        batch_seq_lens_hint: Optional[Sequence[int]] = None,
+        batch_request_ids_hint: Optional[Sequence[int]] = None,
     ):
         # PD node selection span: master routing is a real RPC round-trip that
         # directly delays TTFT. Child of the HTTP SERVER span (same contextvars
@@ -460,6 +498,8 @@ class BackendRPCServerVisitor:
                             placement_only
                             or max_new_tokens_hint is not None
                             or generate_timeout_hint is not None
+                            or batch_seq_lens_hint is not None
+                            or batch_request_ids_hint is not None
                         ):
                             master_route_result = await self.get_master_route_addrs(
                                 input,
@@ -467,6 +507,8 @@ class BackendRPCServerVisitor:
                                 placement_only,
                                 max_new_tokens_hint=max_new_tokens_hint,
                                 generate_timeout_hint=generate_timeout_hint,
+                                batch_seq_lens_hint=batch_seq_lens_hint,
+                                batch_request_ids_hint=batch_request_ids_hint,
                             )
                         else:
                             # Preserve compatibility with test/deployment overrides that implement
@@ -762,6 +804,12 @@ class BackendRPCServerVisitor:
     async def batch_enqueue(self, inputs: list[GenerateInput]) -> list[GenerateOutputs]:
         for input in inputs:
             self.fill_request_info(input)
+            # Placement has a remote accounting side effect: the master reserves every
+            # batch member on the selected worker. Validate the complete engine-facing
+            # configuration before asking for that reservation, while retaining
+            # trans_input's validation as the final RPC-boundary defence.
+            input.generate_config.validate()
+            validate_engine_ready(input.generate_config)
             self._validate_input(input)
             self.check_sp_supported(input)
             self.check_prefill_cp_supported(input)
@@ -796,9 +844,11 @@ class BackendRPCServerVisitor:
                 # worker that just absorbed N inputs.
                 await self.route_ips(
                     inputs[0],
-                    seq_len_hint=placement_hints[0],
-                    max_new_tokens_hint=placement_hints[1],
-                    generate_timeout_hint=placement_hints[2],
+                    seq_len_hint=placement_hints.prompt_tokens,
+                    max_new_tokens_hint=placement_hints.output_tokens,
+                    generate_timeout_hint=placement_hints.timeout_ms,
+                    batch_seq_lens_hint=placement_hints.seq_lens,
+                    batch_request_ids_hint=placement_hints.request_ids,
                     placement_only=True,
                 )
                 for inp in inputs[1:]:
@@ -817,16 +867,35 @@ class BackendRPCServerVisitor:
                 raise
 
             failed_target = self.model_rpc_client._role_addr_target(inputs[0])
+            rpc_deadline = error.rpc_deadline
+            route_timeout = None
+            if rpc_deadline is not None:
+                route_timeout = rpc_deadline - asyncio.get_running_loop().time()
+                if route_timeout <= 0:
+                    raise
             for inp in inputs:
                 inp.generate_config.role_addrs = []
                 inp.enqueued_by_master = False
-            await self.route_ips(
+            route_call = self.route_ips(
                 inputs[0],
-                seq_len_hint=placement_hints[0],
-                max_new_tokens_hint=placement_hints[1],
-                generate_timeout_hint=placement_hints[2],
+                seq_len_hint=placement_hints.prompt_tokens,
+                max_new_tokens_hint=placement_hints.output_tokens,
+                generate_timeout_hint=placement_hints.timeout_ms,
+                batch_seq_lens_hint=placement_hints.seq_lens,
+                batch_request_ids_hint=placement_hints.request_ids,
                 placement_only=True,
             )
+            try:
+                if route_timeout is None:
+                    await route_call
+                else:
+                    await asyncio.wait_for(route_call, timeout=route_timeout)
+            except asyncio.TimeoutError as timeout_error:
+                raise BatchRpcNotStartedError(
+                    ExceptionType.CONNECT_TIMEOUT,
+                    "batch RPC deadline expired during replacement routing",
+                    rpc_deadline=rpc_deadline,
+                ) from timeout_error
             for inp in inputs[1:]:
                 inp.generate_config.role_addrs = copy.deepcopy(
                     inputs[0].generate_config.role_addrs
@@ -843,13 +912,17 @@ class BackendRPCServerVisitor:
                 failed_target,
                 replacement,
             )
-            return await self.model_rpc_client.batch_enqueue(inputs)
+            return await self.model_rpc_client.batch_enqueue(
+                inputs, rpc_deadline=rpc_deadline
+            )
 
     @staticmethod
-    def _batch_placement_hints(inputs: list[GenerateInput]) -> tuple[int, int, int]:
+    def _batch_placement_hints(
+        inputs: list[GenerateInput],
+    ) -> _BatchPlacementHints:
         """Return order-independent prompt/output/deadline demand for one batch placement."""
         if not inputs:
-            return 0, 0, 0
+            return _BatchPlacementHints(0, 0, 0, (), ())
 
         routing_identity = {
             (
@@ -866,7 +939,28 @@ class BackendRPCServerVisitor:
                 "one batch placement requires homogeneous routing metadata",
             )
 
-        prompt_tokens = sum(max(0, int(inp.prompt_length)) for inp in inputs)
+        seq_lens = tuple(max(0, int(inp.prompt_length)) for inp in inputs)
+        try:
+            request_ids = tuple(int(inp.request_id) for inp in inputs)
+        except (TypeError, ValueError, OverflowError) as error:
+            raise FtRuntimeException(
+                ExceptionType.INVALID_PARAMS,
+                "batch request IDs must be unique signed 64-bit integers",
+            ) from error
+        if len(set(request_ids)) != len(request_ids) or any(
+            request_id < _PROTO_INT64_MIN or request_id > _PROTO_INT64_MAX
+            for request_id in request_ids
+        ):
+            raise FtRuntimeException(
+                ExceptionType.INVALID_PARAMS,
+                "batch request IDs must be unique signed 64-bit integers",
+            )
+        prompt_tokens = sum(seq_lens)
+        if prompt_tokens > _PROTO_INT64_MAX:
+            raise FtRuntimeException(
+                ExceptionType.INVALID_PARAMS,
+                "batch prompt reservation exceeds the FlexLB protocol limit",
+            )
         output_tokens = 0
         timeouts = []
         for inp in inputs:
@@ -888,23 +982,25 @@ class BackendRPCServerVisitor:
             if timeout_ms > 0:
                 timeouts.append(int(timeout_ms))
 
-        if output_tokens > 2_147_483_647:
+        if output_tokens > _PROTO_INT32_MAX:
             raise FtRuntimeException(
                 ExceptionType.INVALID_PARAMS,
                 "batch output reservation exceeds the FlexLB protocol limit",
             )
-        return prompt_tokens, output_tokens, min(timeouts, default=0)
+        return _BatchPlacementHints(
+            prompt_tokens,
+            output_tokens,
+            min(timeouts, default=0),
+            seq_lens,
+            request_ids,
+        )
 
     @staticmethod
     def _is_confirmed_not_executed_batch_error(error: BaseException) -> bool:
-        if not isinstance(error, FtRuntimeException):
-            return False
-        return error.exception_type in {
-            ExceptionType.GET_HOST_FAILED,
-            ExceptionType.GET_CONNECTION_FAILED,
-            ExceptionType.CONNECT_FAILED,
-            ExceptionType.CONNECT_TIMEOUT,
-        }
+        # CONNECT_* is intentionally insufficient: gRPC maps established-call keepalive and
+        # transport failures into the same public taxonomy. Only ModelRpcClient's readiness
+        # barrier can prove BatchGenerateCall was never invoked.
+        return isinstance(error, BatchRpcNotStartedError)
 
     def is_backend_service_ready(self, refresh: bool = False) -> bool:
         roles: List[RoleAddr] = self.host_service.get_backend_role_addrs(

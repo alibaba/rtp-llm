@@ -11,10 +11,11 @@ import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
-import org.springframework.http.HttpHeaders;
-import org.springframework.http.HttpStatus;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.core.io.buffer.DataBuffer;
 import org.springframework.core.io.buffer.DefaultDataBufferFactory;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpStatus;
 import org.springframework.web.reactive.function.client.ClientResponse;
 import org.springframework.web.reactive.function.client.WebClient;
 import reactor.core.publisher.Flux;
@@ -29,6 +30,15 @@ class FeClientTest {
 
     private MockWebServer server;
     private ConnectionProvider connectionProvider;
+
+    @Test
+    void productionConstructorIsExplicitlyAutowired() throws Exception {
+        Assertions.assertTrue(FeClient.class
+                .getConstructor(WebClient.Builder.class, ConnectionProvider.class,
+                        DispatchConfig.class)
+                .isAnnotationPresent(Autowired.class),
+                "test-only overload requires an explicit production injection constructor");
+    }
 
     @BeforeEach
     void start() throws Exception {

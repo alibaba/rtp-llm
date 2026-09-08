@@ -13,6 +13,7 @@ import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.LoadBalanceStrategyEnum;
 import org.flexlb.enums.ResourceMeasureIndicatorEnum;
+import org.flexlb.enums.ScheduleModeEnum;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.sync.status.EngineWorkerStatus;
 import org.flexlb.util.CommonUtils;
@@ -20,7 +21,6 @@ import org.flexlb.util.Logger;
 import org.springframework.stereotype.Component;
 
 import java.util.Arrays;
-import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ThreadLocalRandom;
@@ -121,7 +121,8 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
         long bestCacheHit = survivors.cacheHit(selectedIndex);
         reportCacheHitMetrics(roleType, bestCacheHit, seqLen);
 
-        return buildServerStatus(best, roleType, requestId, minScore, config, bestCacheHit);
+        return buildServerStatus(best, roleType, requestId, minScore,
+                balanceContext, bestCacheHit);
     }
 
     private record EndpointFilterResult(CandidateSet endpoints, Map<String, Integer> rejections) {}
@@ -210,7 +211,8 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
         int eligibleSize = eligible.size();
         CandidateSet feasible = eligible;
         Map<String, Integer> rejections = new java.util.HashMap<>();
-        FormulaEstimateMemo formulaEstimateMemo = new FormulaEstimateMemo(seqLen);
+        FormulaEstimateMemo formulaEstimateMemo = new FormulaEstimateMemo(
+                seqLen, PrefillBatchFeatures.fromAggregateDemand(balanceContext));
         long sumWaitMs = 0;
         long sumPendingCount = 0;
 
@@ -348,15 +350,20 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
         private static final int MAX_CACHE_HITS = 16;
 
         private final long seqLen;
+        private final PrefillBatchFeatures batchFeatures;
         private String formulaKey;
         private long[] estimates;
         private int estimateCount;
 
-        private FormulaEstimateMemo(long seqLen) {
+        private FormulaEstimateMemo(long seqLen, PrefillBatchFeatures batchFeatures) {
             this.seqLen = seqLen;
+            this.batchFeatures = batchFeatures;
         }
 
         private long estimate(PrefillTimePredictor predictor, long cacheHit) {
+            if (batchFeatures != null) {
+                return (long) predictor.predictBatchMs(batchFeatures);
+            }
             if (!(predictor instanceof FormulaPredictor formulaPredictor)) {
                 return predictor.estimateMs(seqLen, cacheHit);
             }
@@ -411,11 +418,12 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
     }
 
     private ServerStatus buildServerStatus(PrefillEndpoint ep, RoleType roleType, long requestId, long score,
-                                            FlexlbConfig config, long bestCacheHit) {
+                                            BalanceContext balanceContext, long bestCacheHit) {
         // Non-batch path: reserve prefill inflight for load-aware scoring.
         // Batch path uses FlexlbBatchScheduler.commitBatch() instead — skip here to avoid double-counting.
-        if (isNonBatchPath(config)) {
-            ep.commitBatch(requestId, score, Collections.emptyList());
+        if (isNonBatchPath(balanceContext)) {
+            ep.commitBatch(requestId, score,
+                    PrefillBatchFeatures.aggregateReservationItems(balanceContext));
         }
 
         // Populate DebugInfo so BatchItem.hitCache() can read hitCacheLen for batch metrics
@@ -437,11 +445,12 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
     }
 
     /**
-     * Whether batch dispatching is globally disabled.
-     * <p>When batch mode is active, FlexlbBatchScheduler handles all inflight tracking;
-     * placeholders are only needed when the schedule mode is not BATCH.
+     * Whether this request is using a non-batch path. RouteService may deliberately fall back
+     * from a deployment-level BATCH default to DIRECT for placement-only calls; consulting the
+     * immutable global config here would skip their reservation and repeatedly select a stale
+     * low-load endpoint.
      */
-    private static boolean isNonBatchPath(FlexlbConfig config) {
-        return !config.isBatchPath();
+    private static boolean isNonBatchPath(BalanceContext context) {
+        return context.getScheduleMode() != ScheduleModeEnum.BATCH;
     }
 }

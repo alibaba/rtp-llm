@@ -21,7 +21,14 @@ mode is logged; changing it requires restarting/redeploying the dispatcher.
 
 Backend (BE) pre-assignment is a separate optimization. `dispatch.pre-assign-be` defaults to
 `false` for rolling-upgrade safety and should be enabled only after all FEs can deserialize the
-HTTP `role_addrs` payload. It never changes the configured FE source.
+HTTP `role_addrs` payload. It is automatically disabled while an effective traffic-group policy
+is active, because dispatcher placement happens before FE tokenization and cannot evaluate every
+request-aware rule faithfully. Prompt chunks also carry `force_batch=false` in that state, making
+both FE prompt-batch endpoints route each tokenized item independently. The master defensively
+checks any direct aggregate request against its per-item lengths and request ids: a uniform group
+is accepted, while missing metadata or a batch spanning multiple groups is rejected instead of
+silently routing by the aggregate length. None of these safeguards changes the configured FE
+source.
 
 ## Allocation matrix
 
@@ -54,6 +61,8 @@ handler can then stamp `fe_url` onto those placeholders. Consequently FE-only fa
 available while the BE table is warming and in multi-role deployments.
 
 A request with both flags false is invalid; the dispatcher avoids issuing it.
+Direct requests with `assign_be=true` are also rejected while traffic-group routing is active;
+the dispatcher converts its own request to FE-only allocation before reaching that guard.
 
 ## Master mode flow
 

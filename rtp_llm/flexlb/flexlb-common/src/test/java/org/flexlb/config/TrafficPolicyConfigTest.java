@@ -5,6 +5,7 @@ import org.flexlb.util.JsonUtils;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class TrafficPolicyConfigTest {
@@ -122,5 +123,35 @@ class TrafficPolicyConfigTest {
         request.setSeqLen(128);
 
         assertEquals("default-b", config.resolveTargetGroup(request).orElseThrow());
+    }
+
+    @Test
+    void should_report_only_effective_enabled_routing_rules_as_active() {
+        TrafficPolicyConfig empty = new TrafficPolicyConfig();
+        assertFalse(empty.hasActiveRoutingRules(),
+                "the default empty policy must not disable dispatcher pre-assignment");
+
+        TrafficPolicyConfig disabled = JsonUtils.toObject("""
+                {"enabled":false,"default_group":"tenant-a"}
+                """, TrafficPolicyConfig.class);
+        assertFalse(disabled.hasActiveRoutingRules());
+
+        TrafficPolicyConfig invalidTargets = JsonUtils.toObject("""
+                {
+                  "default_target_groups":[{"group":"", "weight":10}],
+                  "rules":[{"api_keys":["key-a"],"target_groups":[{"group":"x","weight":0}]}]
+                }
+                """, TrafficPolicyConfig.class);
+        assertFalse(invalidTargets.hasActiveRoutingRules());
+
+        TrafficPolicyConfig apiKeyRule = JsonUtils.toObject("""
+                {"rules":[{"api_keys":["key-a"],"target_group":"tenant-a"}]}
+                """, TrafficPolicyConfig.class);
+        assertTrue(apiKeyRule.hasActiveRoutingRules());
+
+        TrafficPolicyConfig lengthRule = JsonUtils.toObject("""
+                {"rules":[{"min_seq_len":4096,"target_group":"long-context"}]}
+                """, TrafficPolicyConfig.class);
+        assertTrue(lengthRule.hasActiveRoutingRules());
     }
 }

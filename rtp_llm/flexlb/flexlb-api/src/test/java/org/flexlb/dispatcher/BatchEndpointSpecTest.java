@@ -36,10 +36,10 @@ class BatchEndpointSpecTest {
     void allSpecRowsHaveExpectedFieldTuples() {
         assertRow("/", "prompt_batch", "response_batch",
                 BatchEndpointSpec.FailedItemFactory.NULL,
-                false, false, false, false, false, true, false);
+                false, false, false, true, false, true, false);
         assertRow("/batch_infer", "prompt_batch", "response_batch",
                 BatchEndpointSpec.FailedItemFactory.NULL,
-                false, false, false, false, false, true, false);
+                false, false, false, true, false, true, false);
         assertRow("/v1/batch/chat/completions", "requests", "responses",
                 BatchEndpointSpec.FailedItemFactory.OPENAI_ERROR,
                 false, false, false, true, false, false, false);
@@ -125,15 +125,68 @@ class BatchEndpointSpecTest {
     }
 
     @Test
+    void promptBatchWithLegacyListAdapterNameRequiresWholeBody() {
+        BatchEndpointSpec spec = BatchEndpointSpec.BY_PATH.get("/");
+        JSONObject body = JSONObject.of("prompt_batch", new String[]{"a", "b"},
+                "generation_config", JSONObject.of(
+                        "adapter_name", new String[]{"lora0", "lora1"}));
+
+        assertTrue(spec.requiresWholeBody(body));
+    }
+
+    @Test
+    void promptBatchUsesTopLevelAdapterNamePrecedence() {
+        BatchEndpointSpec spec = BatchEndpointSpec.BY_PATH.get("/");
+        JSONObject nestedScalar = JSONObject.of("adapter_name", "nested-lora");
+        JSONObject topLevelList = JSONObject.of("prompt_batch", new String[]{"a", "b"},
+                "generate_config", nestedScalar,
+                "adapter_name", new String[]{"lora0", "lora1"});
+        assertTrue(spec.requiresWholeBody(topLevelList));
+
+        // RequestExtractor applies top-level config after nested config. An explicit null therefore
+        // disables the nested adapter instead of exposing its list to positional validation.
+        JSONObject topLevelNull = JSONObject.of("prompt_batch", new String[]{"a", "b"},
+                "generate_config", JSONObject.of(
+                        "adapter_name", new String[]{"lora0", "lora1"}));
+        topLevelNull.put("adapter_name", null);
+        assertFalse(spec.requiresWholeBody(topLevelNull));
+    }
+
+    @Test
+    void streamingPromptBatchFormsRequireWholeBody() {
+        BatchEndpointSpec spec = BatchEndpointSpec.BY_PATH.get("/");
+
+        assertTrue(spec.requiresWholeBody(JSONObject.of(
+                "prompt_batch", new String[]{"a"}, "stream", true)));
+        assertTrue(spec.requiresWholeBody(JSONObject.of(
+                "prompt_batch", new String[]{"a"}, "yield_generator", true)));
+        assertTrue(spec.requiresWholeBody(JSONObject.of(
+                "prompt_batch", new String[]{"a"}, "generation_config",
+                JSONObject.of("yield_generator", true))));
+        assertTrue(spec.requiresWholeBody(JSONObject.of(
+                "prompt_batch", new String[]{"a"}, "generate_config",
+                JSONObject.of("is_streaming", true))));
+
+        assertFalse(spec.requiresWholeBody(JSONObject.of(
+                "prompt_batch", new String[]{"a"}, "stream", false,
+                "generate_config", JSONObject.of("yield_generator", false))));
+    }
+
+    @Test
     void promptBatchWithoutAlignedCompanionsSplits() {
         BatchEndpointSpec spec = BatchEndpointSpec.BY_PATH.get("/batch_infer");
         JSONObject plain = JSONObject.of("prompt_batch", new String[]{"a", "b"});
         assertFalse(spec.requiresWholeBody(plain));
+    }
 
-        // A scalar adapter_name applies to the whole batch — no alignment, safe to split.
+    @Test
+    void promptBatchWithScalarAdapterNameRequiresWholeBody() {
+        BatchEndpointSpec spec = BatchEndpointSpec.BY_PATH.get("/batch_infer");
+        // FE only accepts a scalar adapter for one input. Splitting could otherwise turn an
+        // invalid multi-prompt request into independently valid requests.
         JSONObject scalarAdapter = JSONObject.of("prompt_batch", new String[]{"a", "b"},
                 "generate_config", JSONObject.of("adapter_name", "lora"));
-        assertFalse(spec.requiresWholeBody(scalarAdapter));
+        assertTrue(spec.requiresWholeBody(scalarAdapter));
     }
 
     @Test

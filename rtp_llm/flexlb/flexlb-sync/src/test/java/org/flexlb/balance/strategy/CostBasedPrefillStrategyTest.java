@@ -17,6 +17,7 @@ import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.enums.ScheduleModeEnum;
 import org.flexlb.enums.TaskPhase;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
@@ -48,13 +49,15 @@ class CostBasedPrefillStrategyTest {
     private FlexlbBatchScheduler batchScheduler;
     private EndpointRegistry endpointRegistry;
     private CostBasedPrefillStrategy strategy;
+    private FlexlbConfig endpointConfig;
 
     @BeforeEach
     void setUp() {
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().clear();
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPdFusionStatusMap().clear();
         ConfigService configService = Mockito.mock(ConfigService.class);
-        Mockito.when(configService.loadBalanceConfig()).thenReturn(new FlexlbConfig());
+        endpointConfig = new FlexlbConfig();
+        Mockito.when(configService.loadBalanceConfig()).thenReturn(endpointConfig);
         cacheAwareService = Mockito.mock(CacheAwareService.class);
         resourceMeasureFactory = Mockito.mock(ResourceMeasureFactory.class);
         engineHealthReporter = Mockito.mock(EngineHealthReporter.class);
@@ -316,6 +319,126 @@ class CostBasedPrefillStrategyTest {
 
         assertTrue(result.isSuccess());
         assertEquals("10.0.0.2", result.getServerIp());
+    }
+
+    @Test
+    void effectiveDirectModeReservesPrefillLoadWhenDeploymentDefaultsToBatch() {
+        Map<String, WorkerStatus> prefillMap =
+                EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
+        prefillMap.put("10.0.0.1:8080", createWorker("10.0.0.1", 0));
+        BalanceContext context = buildContext(2_000, 71L);
+        context.setScheduleMode(ScheduleModeEnum.DIRECT);
+
+        ServerStatus result = strategy.select(context, RoleType.PREFILL, null);
+
+        assertTrue(result.isSuccess());
+        PrefillEndpoint endpoint = (PrefillEndpoint) endpointRegistry.get(
+                RoleType.PREFILL, "10.0.0.1:8080");
+        assertEquals(1, endpoint.getInflightBatchCount(),
+                "placement-only BATCH fallback must reserve prefill load immediately");
+    }
+
+    @Test
+    void effectiveBatchModeLeavesPrefillReservationToBatchScheduler() {
+        Map<String, WorkerStatus> prefillMap =
+                EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
+        prefillMap.put("10.0.0.1:8080", createWorker("10.0.0.1", 0));
+        BalanceContext context = buildContext(2_000, 72L);
+        context.setScheduleMode(ScheduleModeEnum.BATCH);
+
+        ServerStatus result = strategy.select(context, RoleType.PREFILL, null);
+
+        assertTrue(result.isSuccess());
+        PrefillEndpoint endpoint = (PrefillEndpoint) endpointRegistry.get(
+                RoleType.PREFILL, "10.0.0.1:8080");
+        assertEquals(0, endpoint.getInflightBatchCount(),
+                "the batch scheduler owns reservations for an effective BATCH request");
+    }
+
+    @Test
+    void aggregatePlacementUsesPerItemShapeForNonlinearFormula() {
+        endpointConfig.setCostFormula("sum(computeTokens^2)");
+        endpointConfig.setFlexlbBatchFixedWaitMs(0L);
+        Map<String, WorkerStatus> prefillMap =
+                EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
+        prefillMap.put("10.0.0.1:8080", createWorker("10.0.0.1", 0));
+
+        FlexlbConfig requestConfig = new FlexlbConfig();
+        requestConfig.setCostSloMs(2_000_000L);
+        BalanceContext context = buildContext(1_000, 73L, requestConfig);
+        context.setAggregateDemand(true);
+        context.setBatchSeqLens(List.of(
+                100L, 100L, 100L, 100L, 100L,
+                100L, 100L, 100L, 100L, 100L));
+
+        ServerStatus result = strategy.select(context, RoleType.PREFILL, null);
+
+        assertTrue(result.isSuccess());
+        assertEquals(100_000L, result.getPrefillTime(),
+                "sum of per-item squares must not collapse into square of the aggregate");
+    }
+
+    @Test
+    void aggregateDirectReservationReconcilesMembersIndividually() {
+        Map<String, WorkerStatus> prefillMap =
+                EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
+        prefillMap.put("10.0.0.1:8080", createWorker("10.0.0.1", 0));
+        BalanceContext context = buildContext(400, 75L);
+        context.setScheduleMode(ScheduleModeEnum.DIRECT);
+        context.setAggregateDemand(true);
+        context.setBatchSeqLens(List.of(100L, 300L));
+        context.setBatchRequestIds(List.of(75L, 76L));
+
+        ServerStatus result = strategy.select(context, RoleType.PREFILL, null);
+
+        assertTrue(result.isSuccess());
+        PrefillEndpoint endpoint = endpointRegistry.getPrefill("10.0.0.1:8080");
+        assertEquals(2, endpoint.realPendingCount());
+
+        WorkerStatusResponse firstFinished = new WorkerStatusResponse();
+        TaskInfo first = new TaskInfo();
+        first.setRequestId(75L);
+        first.setBatchId(-1L);
+        first.setErrorCode(0L);
+        firstFinished.setFinishedTaskInfo(Map.of("75", first));
+        firstFinished.setRunningTaskInfo(Map.of());
+        endpoint.onWorkerStatusUpdate(endpoint.getStatus(), firstFinished);
+
+        assertEquals(1, endpoint.getInflightBatchCount());
+        assertEquals(1, endpoint.realPendingCount(),
+                "finishing the first request must retain its queued sibling");
+
+        WorkerStatusResponse secondFinished = new WorkerStatusResponse();
+        TaskInfo second = new TaskInfo();
+        second.setRequestId(76L);
+        second.setBatchId(-1L);
+        second.setErrorCode(0L);
+        secondFinished.setFinishedTaskInfo(Map.of("76", second));
+        secondFinished.setRunningTaskInfo(Map.of());
+        endpoint.onWorkerStatusUpdate(endpoint.getStatus(), secondFinished);
+
+        assertEquals(0, endpoint.getInflightBatchCount());
+        assertEquals(0, endpoint.realPendingCount());
+    }
+
+    @Test
+    void invalidAggregateShapeFallsBackToLegacyAggregateEstimate() {
+        endpointConfig.setCostFormula("sum(computeTokens^2)");
+        endpointConfig.setFlexlbBatchFixedWaitMs(0L);
+        Map<String, WorkerStatus> prefillMap =
+                EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
+        prefillMap.put("10.0.0.1:8080", createWorker("10.0.0.1", 0));
+
+        FlexlbConfig requestConfig = new FlexlbConfig();
+        requestConfig.setCostSloMs(2_000_000L);
+        BalanceContext context = buildContext(1_000, 74L, requestConfig);
+        context.setAggregateDemand(true);
+        context.setBatchSeqLens(List.of(100L));
+
+        ServerStatus result = strategy.select(context, RoleType.PREFILL, null);
+
+        assertTrue(result.isSuccess());
+        assertEquals(1_000_000L, result.getPrefillTime());
     }
 
     @Test

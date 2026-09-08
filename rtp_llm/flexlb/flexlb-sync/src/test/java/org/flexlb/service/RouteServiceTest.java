@@ -18,8 +18,10 @@ import reactor.core.publisher.Mono;
 
 import java.util.concurrent.atomic.AtomicReference;
 
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.any;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.never;
@@ -105,6 +107,52 @@ class RouteServiceTest {
         verify(defaultRouter).route(balanceContext);
         verify(balanceContext).setResponse(response);
         verify(recentCacheKeyTraceReporter, never()).report(any(BalanceContext.class));
+    }
+
+    @Test
+    void missingGenerateInputKeepsSingleRequestReservationInDirectAndQueueModes() {
+        Response response = successResponse();
+        BalanceContext directContext = new BalanceContext();
+        BalanceContext queueContext = new BalanceContext();
+        when(flexlbConfig.getDefaultScheduleModeEnum())
+                .thenReturn(ScheduleModeEnum.DIRECT, ScheduleModeEnum.QUEUE);
+        when(defaultRouter.route(directContext)).thenReturn(response);
+        when(queueManager.tryRouteAsync(queueContext)).thenReturn(Mono.just(response));
+
+        routeService.route(directContext).join();
+        routeService.route(queueContext).join();
+
+        assertFalse(directContext.isAggregateDemand(),
+                "an omitted payload alone does not make a request aggregate");
+        assertFalse(queueContext.isAggregateDemand(),
+                "an omitted payload alone does not make a request aggregate");
+    }
+
+    @Test
+    void explicitAggregateDemandIsPreservedInDirectMode() {
+        Response response = successResponse();
+        BalanceContext context = new BalanceContext();
+        context.setAggregateDemand(true);
+        when(flexlbConfig.getDefaultScheduleModeEnum()).thenReturn(ScheduleModeEnum.DIRECT);
+        when(defaultRouter.route(context)).thenReturn(response);
+
+        routeService.route(context).join();
+
+        assertTrue(context.isAggregateDemand());
+    }
+
+    @Test
+    void missingGenerateInputFallsBackFromBatchWithoutInferringAggregateDemand() {
+        Response response = successResponse();
+        BalanceContext context = new BalanceContext();
+        when(flexlbConfig.getDefaultScheduleModeEnum()).thenReturn(ScheduleModeEnum.BATCH);
+        when(defaultRouter.route(context)).thenReturn(response);
+
+        routeService.route(context).join();
+
+        assertSame(ScheduleModeEnum.DIRECT, context.getScheduleMode());
+        assertFalse(context.isAggregateDemand());
+        verify(flexlbBatchScheduler, never()).submit(any(BalanceContext.class));
     }
 
     @Test

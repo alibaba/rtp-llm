@@ -12,12 +12,14 @@ import io.netty.handler.codec.http.DefaultLastHttpContent;
 import io.netty.handler.codec.http.FullHttpRequest;
 import io.netty.handler.codec.http.HttpResponseStatus;
 import io.netty.handler.codec.http.HttpVersion;
+import org.flexlb.config.ConfigService;
 import org.flexlb.exception.EngineAbnormalDisconnectException;
 import org.flexlb.exception.FlexLBException;
 import org.flexlb.exception.HttpErrorResponseException;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
 import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Schedulers;
 
@@ -55,6 +57,14 @@ class GeneralHttpNettyServiceTest {
 
     /** When set, {@code connect()} hands back this promise instead of an already-succeeded one. */
     private ChannelPromise pendingConnect;
+
+    @Test
+    void productionConstructorIsExplicitlyAutowired() throws Exception {
+        assertTrue(GeneralHttpNettyService.class
+                .getConstructor(HttpNettyClientHandler.class, ConfigService.class)
+                .isAnnotationPresent(Autowired.class),
+                "test-only overloads require an explicit production injection constructor");
+    }
 
     @BeforeEach
     void setUp() {

@@ -108,6 +108,56 @@ class BatchChunkAssemblerTest {
     }
 
     @Test
+    void buildChunkBodiesNormalizesLegacyGenerationConfigWithoutLosingSettings() {
+        JSONObject legacy = JSONObject.of(
+                "max_new_tokens", 37,
+                "temperature", 0.25,
+                "adapter_name", "qa-lora");
+        JSONObject envelope = JSONObject.of(
+                "prompt_batch", JSONArray.of("a", "b"),
+                "generation_config", legacy);
+
+        List<JSONObject> bodies = BatchChunkAssembler.buildChunkBodies(
+                envelope, List.of(JSONArray.of("a"), JSONArray.of("b")), "prompt_batch");
+
+        for (JSONObject body : bodies) {
+            assertFalse(body.containsKey("generation_config"));
+            JSONObject gc = body.getJSONObject("generate_config");
+            assertEquals(37, gc.getIntValue("max_new_tokens"));
+            assertEquals(0.25, gc.getDoubleValue("temperature"));
+            assertEquals("qa-lora", gc.getString("adapter_name"));
+            assertTrue(gc.getBooleanValue("force_batch"));
+        }
+        assertFalse(legacy.containsKey("force_batch"),
+                "normalization must not mutate the caller's config object");
+    }
+
+    @Test
+    void buildChunkBodiesStripsTopLevelRoleAddrsAsDefenseInDepth() {
+        JSONObject envelope = JSONObject.of(
+                "prompt_batch", JSONArray.of("a"),
+                "role_addrs", JSONArray.of(JSONObject.of("ip", "1.2.3.4")));
+
+        JSONObject body = BatchChunkAssembler.buildChunkBodies(
+                envelope, List.of(JSONArray.of("a")), "prompt_batch").getFirst();
+
+        assertFalse(body.containsKey("role_addrs"));
+        assertTrue(envelope.containsKey("role_addrs"));
+    }
+
+    @Test
+    void validateGenerateConfigRejectsEveryCallerRoutingSpelling() {
+        assertTrue(BatchChunkAssembler.validateGenerateConfig(
+                JSONObject.of("role_addrs", new JSONArray())).contains("role_addrs"));
+        assertTrue(BatchChunkAssembler.validateGenerateConfig(JSONObject.of(
+                "generation_config", JSONObject.of("role_addrs", new JSONArray())))
+                .contains("role_addrs"));
+        assertEquals("generation_config must be a JSON object",
+                BatchChunkAssembler.validateGenerateConfig(
+                        JSONObject.of("generation_config", "invalid")));
+    }
+
+    @Test
     void buildChunkBodiesStampsForceBatchOnlyForPromptBatchEndpoints() {
         JSONObject envelope = new JSONObject();
         envelope.put("input", JSONArray.of("a", "b"));
@@ -143,6 +193,23 @@ class BatchChunkAssemblerTest {
         body.put("generate_config", gc);
         BatchChunkAssembler.injectForceBatch(body);
         assertEquals(false, body.getJSONObject("generate_config").getBoolean("force_batch"));
+    }
+
+    @Test
+    void policyFallbackOverridesAndRemovesTopLevelForceBatch() {
+        JSONObject envelope = JSONObject.of(
+                "prompt_batch", JSONArray.of("a", "b"),
+                "force_batch", true,
+                "generate_config", JSONObject.of("temperature", 0.5));
+
+        JSONObject body = BatchChunkAssembler.buildChunkBodies(
+                envelope, List.of(JSONArray.of("a")), "prompt_batch", false).getFirst();
+
+        assertFalse(body.containsKey("force_batch"),
+                "top-level GenerateConfig fields override nested fields in RequestExtractor");
+        assertFalse(body.getJSONObject("generate_config").getBooleanValue("force_batch"));
+        assertTrue(envelope.getBooleanValue("force_batch"),
+                "policy fallback must not mutate the caller envelope");
     }
 
     @Test

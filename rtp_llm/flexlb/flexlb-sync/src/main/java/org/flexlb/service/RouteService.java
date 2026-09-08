@@ -52,14 +52,13 @@ public class RouteService {
 
         ScheduleModeEnum mode = flexlbConfig.getDefaultScheduleModeEnum();
         balanceContext.setScheduleMode(mode);
+        boolean hasGenerateInput = hasValidGenerateInput(balanceContext);
 
         CompletableFuture<Response> resultFuture;
         switch (mode) {
             case BATCH -> {
-                boolean validGenerateInput = hasValidGenerateInput(balanceContext);
-                if (flexlbBatchScheduler == null || !validGenerateInput) {
+                if (flexlbBatchScheduler == null || !hasGenerateInput) {
                     Logger.debug("BATCH mode cannot process this request, falling back to DIRECT");
-                    balanceContext.setPlacementOnly(!validGenerateInput);
                     balanceContext.setScheduleMode(ScheduleModeEnum.DIRECT);
                     resultFuture = routeDirect(balanceContext);
                 } else {

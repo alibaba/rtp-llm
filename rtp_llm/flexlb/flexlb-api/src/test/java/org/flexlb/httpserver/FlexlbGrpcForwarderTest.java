@@ -17,12 +17,24 @@ import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
 import java.lang.reflect.Field;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Executor;
 
-import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.Mockito.*;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.when;
 
 class FlexlbGrpcForwarderTest {
 
@@ -213,10 +225,15 @@ class FlexlbGrpcForwarderTest {
                         .setRequestId(10L)
                         .setSeqLen(4096)
                         .setForwardHop(1)
+                        .setAggregateDemand(true)
+                        .addBatchSeqLens(1024)
+                        .addBatchSeqLens(3072)
+                        .addBatchRequestIds(10L)
+                        .addBatchRequestIds(11L)
                         .build();
 
         // Model an older FlexLB binary whose descriptor only knows fields 1
-        // and 4. Protobuf must retain field 15 in UnknownFieldSet when that
+        // and 4. Protobuf must retain fields 15-18 in UnknownFieldSet when that
         // process parses and reserializes the request during a rolling upgrade.
         DescriptorProtos.DescriptorProto oldMessage =
                 DescriptorProtos.DescriptorProto.newBuilder()
@@ -244,12 +261,18 @@ class FlexlbGrpcForwarderTest {
                 newRequest.toByteArray());
 
         assertTrue(oldRelay.getUnknownFields().hasField(15));
+        assertTrue(oldRelay.getUnknownFields().hasField(16));
+        assertTrue(oldRelay.getUnknownFields().hasField(17));
+        assertTrue(oldRelay.getUnknownFields().hasField(18));
         FlexlbScheduleProtocol.FlexlbScheduleRequestPB reparsed =
                 FlexlbScheduleProtocol.FlexlbScheduleRequestPB.parseFrom(
                         oldRelay.toByteArray());
         assertEquals(10L, reparsed.getRequestId());
         assertEquals(4096L, reparsed.getSeqLen());
         assertEquals(1, reparsed.getForwardHop());
+        assertTrue(reparsed.getAggregateDemand());
+        assertEquals(List.of(1024L, 3072L), reparsed.getBatchSeqLensList());
+        assertEquals(List.of(10L, 11L), reparsed.getBatchRequestIdsList());
     }
 
     @Test

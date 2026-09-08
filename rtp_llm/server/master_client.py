@@ -4,7 +4,7 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Sequence
 
 import grpc
 import grpc.aio
@@ -269,6 +269,9 @@ class MasterClient:
         *,
         max_new_tokens_hint: Optional[int] = None,
         generate_timeout_hint: Optional[int] = None,
+        aggregate_demand: bool = False,
+        batch_seq_lens: Optional[Sequence[int]] = None,
+        batch_request_ids: Optional[Sequence[int]] = None,
     ) -> FlexlbResponse:
         """
         Resolve backend role addrs from FlexLB scheduler (master, then slave on connection failure).
@@ -280,6 +283,10 @@ class MasterClient:
         its aggregate prompt length so the master's load accounting sees the true weight.
         max_new_tokens_hint and generate_timeout_hint likewise override the single input's
         values when one placement represents the full batch.
+        aggregate_demand tells the master those hints are batch totals, rather than an ordinary
+        single-request placement that happens to omit generate_input.
+        batch_seq_lens preserves the per-item prompt shape for nonlinear prefill prediction.
+        batch_request_ids identifies those items for request-granular completion accounting.
         """
         master_addr = self.host_service.get_master_addr() if self.host_service else None
         if not master_addr:
@@ -307,11 +314,7 @@ class MasterClient:
         request_pb = FlexlbScheduleRequestPB(
             request_id=request_id,
             block_cache_keys=block_cache_keys,
-            seq_len=(
-                seq_len_hint
-                if seq_len_hint is not None
-                else input.prompt_length
-            ),
+            seq_len=(seq_len_hint if seq_len_hint is not None else input.prompt_length),
             generate_timeout=ttft_timeout_ms,
             request_time_ms=int(time.time() * 1000),
             max_new_tokens=(
@@ -325,6 +328,9 @@ class MasterClient:
             api_key=api_key,
             cache_key_block_size=cache_key_block_size,
             priority=priority,
+            aggregate_demand=aggregate_demand,
+            batch_seq_lens=batch_seq_lens or (),
+            batch_request_ids=batch_request_ids or (),
         )
         if input_pb is not None:
             request_pb.generate_input = input_pb.SerializeToString()

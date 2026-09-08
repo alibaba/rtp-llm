@@ -13,8 +13,9 @@ import java.util.List;
  * Pure-function helpers for chunk assembly on the dispatcher batch path. Splits the request
  * array per {@link SubBatchSpec}, builds the per-chunk request body (shallow copy of the
  * envelope with the chunk slice swapped in and a fresh {@code generate_config} per chunk),
- * stamps {@code generate_config.force_batch} (only on the {@code prompt_batch} generation
- * endpoints) and any pre-resolved BE targets.
+ * normalizes the legacy {@code generation_config} alias before stamping
+ * {@code generate_config.force_batch} (only on the {@code prompt_batch} generation endpoints)
+ * and any pre-resolved BE targets.
  *
  * <p>Per-chunk isolation strategy: every chunk gets a shallow-copy of the top-level envelope
  * (so {@code model} and other non-mutated fields share references) and a per-chunk copy of
@@ -67,11 +68,22 @@ public final class BatchChunkAssembler {
      */
     public static long projectedOutboundBytes(JSONObject envelope, JSONArray requestArray,
                                               int chunkCount, BatchEndpointSpec spec) {
+        return projectedOutboundBytes(envelope, requestArray, chunkCount, spec, true);
+    }
+
+    /**
+     * Policy-aware variant whose template exactly matches the force-batch value sent by the
+     * production handler.
+     */
+    public static long projectedOutboundBytes(JSONObject envelope, JSONArray requestArray,
+                                              int chunkCount, BatchEndpointSpec spec,
+                                              boolean atomicBatchAllowed) {
         if (chunkCount < 1) {
             return 0;
         }
         List<JSONObject> templateBodies = buildChunkBodies(
-                envelope, List.of(new JSONArray()), spec.getRequestArrayField());
+                envelope, List.of(new JSONArray()), spec.getRequestArrayField(),
+                atomicBatchAllowed);
         spec.prepareChunkBodies(envelope, templateBodies);
         JSONWriter.Feature[] features = spec.isFanoutWriteNulls()
                 ? new JSONWriter.Feature[] {JSONWriter.Feature.WriteNulls}
@@ -156,8 +168,8 @@ public final class BatchChunkAssembler {
 
     /**
      * Builds per-chunk request bodies. Each is a <em>shallow</em> copy of {@code envelope} with
-     * the {@code requestArrayField} replaced by the chunk slice and {@code generate_config}
-     * replaced by a per-chunk copy of the source {@code generate_config}, then
+     * the {@code requestArrayField} replaced by the chunk slice and the effective generation
+     * config replaced by a per-chunk copy, then
      * {@code force_batch} stamped per {@link #injectForceBatch} contract. {@code force_batch}
      * is only stamped on the {@code prompt_batch} generation endpoints (root {@code /} and
      * {@code /batch_infer}); it is an rtp_llm generation {@code generate_config} flag with no
@@ -165,27 +177,60 @@ public final class BatchChunkAssembler {
      * {@code generate_config} of their own.
      *
      * <p>{@code generate_config} is copied per chunk because it's the one sub-tree that per-chunk
-     * writes ({@code force_batch}, dispatcher-owned {@code role_addrs}) mutate. A shallow {@code new
-     * JSONObject(sourceGc)} isolates the top-level scalars that get written, and the reserved
-     * caller {@code role_addrs} field is removed. Every other top-level envelope field is either
-     * replaced wholesale ({@code requestArrayField}) or never written per chunk ({@code model},
-     * etc.), so sharing references is safe and cheap.
+     * writes ({@code force_batch}, dispatcher-owned {@code role_addrs}) mutate. The legacy
+     * {@code generation_config} alias is normalized to that canonical name on generation chunks;
+     * otherwise injecting an empty canonical object would make FE ignore every caller setting in
+     * the alias. A shallow {@code new JSONObject(sourceGc)} isolates the top-level scalars that get
+     * written, and reserved caller routing fields are removed. Every other top-level envelope
+     * field is either replaced wholesale ({@code requestArrayField}) or never written per chunk
+     * ({@code model}, etc.), so sharing references is safe and cheap.
      */
     public static List<JSONObject> buildChunkBodies(JSONObject envelope, List<JSONArray> chunks,
                                                     String requestArrayField) {
-        JSONObject sourceGc = envelope.getJSONObject("generate_config");
+        return buildChunkBodies(envelope, chunks, requestArrayField, true);
+    }
+
+    /**
+     * Builds chunk bodies while allowing the caller to disable atomic backend batching. Active
+     * traffic policies require per-item routing because one chunk can legitimately span multiple
+     * worker groups; in that case {@code force_batch=false} overrides any caller value.
+     */
+    public static List<JSONObject> buildChunkBodies(JSONObject envelope, List<JSONArray> chunks,
+                                                    String requestArrayField,
+                                                    boolean atomicBatchAllowed) {
         boolean stampForceBatch = BatchEndpointSpec.PROMPT_BATCH_FIELD.equals(requestArrayField);
+        String sourceGcKey = effectiveGenerateConfigKey(envelope);
+        JSONObject sourceGc = sourceGcKey == null
+                ? null : (JSONObject) envelope.get(sourceGcKey);
         List<JSONObject> chunkBodies = new ArrayList<>(chunks.size());
         for (JSONArray chunk : chunks) {
             JSONObject copy = new JSONObject(envelope);
             copy.put(requestArrayField, chunk);
+            // Defense in depth: HTTP handlers reject this before assembly, but pure helper users
+            // must not accidentally forward a top-level routing override either.
+            copy.remove("role_addrs");
             if (sourceGc != null) {
                 JSONObject gc = new JSONObject(sourceGc);
                 gc.remove("role_addrs");
-                copy.put("generate_config", gc);
+                copy.put(sourceGcKey, gc);
             }
             if (stampForceBatch) {
-                injectForceBatch(copy);
+                if ("generation_config".equals(sourceGcKey)) {
+                    copy.put("generate_config", copy.remove("generation_config"));
+                } else {
+                    // FE gives generate_config precedence when both spellings are present. Drop
+                    // the ignored alias so each chunk has one unambiguous mutable config object.
+                    copy.remove("generation_config");
+                }
+                if (atomicBatchAllowed) {
+                    injectForceBatch(copy);
+                } else {
+                    // RequestExtractor applies top-level GenerateConfig fields after the nested
+                    // object, so leaving a caller's top-level force_batch=true would undo this
+                    // policy-required fallback.
+                    copy.remove("force_batch");
+                    ensureGenerateConfig(copy).put("force_batch", false);
+                }
             }
             chunkBodies.add(copy);
         }
@@ -255,17 +300,37 @@ public final class BatchChunkAssembler {
         return roleAddrs;
     }
 
-    /** Validates the generate-config shape shared by production and dry-run handlers. */
+    /**
+     * Validates every generation-config spelling FE accepts, shared by production and dry-run
+     * handlers. FE also promotes GenerateConfig fields found at the request root after parsing the
+     * nested object, so top-level {@code role_addrs} must be reserved too.
+     */
     public static String validateGenerateConfig(JSONObject body) {
-        Object value = body.get("generate_config");
-        if (value == null) {
-            return null;
+        if (body.containsKey("role_addrs")) {
+            return "top-level role_addrs is reserved for dispatcher pre-assignment";
         }
-        if (!(value instanceof JSONObject gc)) {
-            return "generate_config must be a JSON object";
+        for (String key : List.of("generate_config", "generation_config")) {
+            if (!body.containsKey(key)) {
+                continue;
+            }
+            Object value = body.get(key);
+            if (!(value instanceof JSONObject gc)) {
+                return key + " must be a JSON object";
+            }
+            if (gc.containsKey("role_addrs")) {
+                return key + ".role_addrs is reserved for dispatcher pre-assignment";
+            }
         }
-        if (gc.containsKey("role_addrs")) {
-            return "generate_config.role_addrs is reserved for dispatcher pre-assignment";
+        return null;
+    }
+
+    /** Canonical config wins exactly as it does in FE; otherwise use the legacy alias. */
+    private static String effectiveGenerateConfigKey(JSONObject body) {
+        if (body.get("generate_config") instanceof JSONObject) {
+            return "generate_config";
+        }
+        if (body.get("generation_config") instanceof JSONObject) {
+            return "generation_config";
         }
         return null;
     }

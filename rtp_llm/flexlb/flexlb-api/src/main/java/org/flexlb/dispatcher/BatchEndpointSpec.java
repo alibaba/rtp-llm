@@ -5,6 +5,7 @@ import com.alibaba.fastjson2.JSONObject;
 import lombok.Builder;
 import lombok.Value;
 
+import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Function;
@@ -127,11 +128,13 @@ public class BatchEndpointSpec {
      *
      * <p>Only the {@code prompt_batch} endpoints (root {@code /} and {@code /batch_infer}) carry
      * such companions. FE's root {@code /} handler validates top-level {@code images}/{@code
-     * urls} (each a {@code list[list]} indexed by prompt) and a list-form {@code
-     * generate_config.adapter_name} against the prompt count
+     * urls} (each a {@code list[list]} indexed by prompt) and {@code adapter_name} (accepted at
+     * the request root or inside either generation-config spelling) against the prompt count
      * ({@code request_extractor._get_urls} / {@code _get_adapter}). A split chunk would carry the
      * full-length companion against a shorter prompt slice, so FE would reject every chunk.
-     * Forwarding the intact body to one FE keeps such requests correct, at the cost of fanout.
+     * Streaming forms are likewise forwarded whole because fanout buffers and JSON-decodes each
+     * child response while FE returns SSE. Forwarding the intact body to one FE keeps such requests
+     * correct, at the cost of fanout.
      */
     public boolean requiresWholeBody(JSONObject body) {
         if (!PROMPT_BATCH_FIELD.equals(requestArrayField)) {
@@ -140,13 +143,70 @@ public class BatchEndpointSpec {
         if (body.get("images") != null || body.get("urls") != null) {
             return true;
         }
-        if (!(body.get("generate_config") instanceof JSONObject gc)) {
+        if (requestsStreaming(body)) {
+            return true;
+        }
+        // FE promotes recognized top-level config fields after reading nested config, so an
+        // explicitly present top-level value wins even when it is JSON null. Preserve that exact
+        // precedence: splitting a list would misalign it, while splitting a scalar could turn an
+        // invalid multi-prompt request into several valid single-prompt requests.
+        return effectiveAdapterName(body) != null;
+    }
+
+    /** Mirrors the raw-request streaming forms accepted by FE before config normalization. */
+    private static boolean requestsStreaming(JSONObject body) {
+        if (jsonTruthy(body.get("stream"))
+                || jsonTruthy(body.get("yield_generator"))
+                || jsonTruthy(body.get("is_streaming"))) {
+            return true;
+        }
+        for (String key : List.of("generate_config", "generation_config")) {
+            if (body.get(key) instanceof JSONObject gc
+                    && (jsonTruthy(gc.get("yield_generator"))
+                    || jsonTruthy(gc.get("is_streaming")))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static JSONObject effectiveGenerateConfig(JSONObject body) {
+        if (body.get("generate_config") instanceof JSONObject gc) {
+            return gc;
+        }
+        return body.get("generation_config") instanceof JSONObject gc ? gc : null;
+    }
+
+    /** Mirrors FE's top-level-over-nested config precedence for {@code adapter_name}. */
+    private static Object effectiveAdapterName(JSONObject body) {
+        if (body.containsKey("adapter_name")) {
+            return body.get("adapter_name");
+        }
+        JSONObject gc = effectiveGenerateConfig(body);
+        return gc == null ? null : gc.get("adapter_name");
+    }
+
+    /** JSON values use the same truthiness rules as FE's Python request checks. */
+    private static boolean jsonTruthy(Object value) {
+        if (value == null) {
             return false;
         }
-        // A scalar (String) adapter_name applies to the whole batch and is safe to split; a
-        // list-form adapter_name is one entry per prompt and FE rejects a length mismatch.
-        Object adapter = gc.get("adapter_name");
-        return adapter != null && !(adapter instanceof String);
+        if (value instanceof Boolean bool) {
+            return bool;
+        }
+        if (value instanceof Number number) {
+            return number.doubleValue() != 0.0;
+        }
+        if (value instanceof CharSequence chars) {
+            return !chars.isEmpty();
+        }
+        if (value instanceof Collection<?> collection) {
+            return !collection.isEmpty();
+        }
+        if (value instanceof Map<?, ?> map) {
+            return !map.isEmpty();
+        }
+        return true;
     }
 
     /**
@@ -213,12 +273,14 @@ public class BatchEndpointSpec {
                     .path("/")
                     .requestArrayField(PROMPT_BATCH_FIELD).responseArrayField("response_batch")
                     .failedItemFactory(FailedItemFactory.NULL)
+                    .fanoutWriteNulls(true)
                     .preAssignable(true)
                     .build(),
             BatchEndpointSpec.builder()
                     .path("/batch_infer")
                     .requestArrayField(PROMPT_BATCH_FIELD).responseArrayField("response_batch")
                     .failedItemFactory(FailedItemFactory.NULL)
+                    .fanoutWriteNulls(true)
                     .preAssignable(true)
                     .build(),
             BatchEndpointSpec.builder()

@@ -24,7 +24,6 @@ import org.flexlb.util.Logger;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
@@ -107,7 +106,9 @@ public class ShortestTTFTStrategy implements LoadBalanceStrategy {
         Map<String, Integer> cacheMatchResults = getCacheMatchResults(balanceContext, roleType, group);
 
         // Score all eligible endpoints by TTFT
-        List<ScoredEndpoint> scoredEndpoints = scoreEndpoints(eligible, cacheMatchResults, seqLen);
+        List<ScoredEndpoint> scoredEndpoints = scoreEndpoints(
+                eligible, cacheMatchResults, seqLen,
+                PrefillBatchFeatures.fromAggregateDemand(balanceContext));
         if (scoredEndpoints.isEmpty()) {
             Logger.debug("ShortestTTFT select failed: no scored endpoints, request_id={}", requestId);
             return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
@@ -199,11 +200,13 @@ public class ShortestTTFTStrategy implements LoadBalanceStrategy {
      * @param endpoints eligible endpoint list
      * @param cacheMatchResults cache match results from {@link CacheAwareService}
      * @param seqLen request sequence length
+     * @param batchFeatures per-item aggregate shape, or null for legacy single/aggregate scoring
      * @return list of scored endpoints
      */
     private List<ScoredEndpoint> scoreEndpoints(List<PrefillEndpoint> endpoints,
                                                 Map<String, Integer> cacheMatchResults,
-                                                long seqLen) {
+                                                long seqLen,
+                                                PrefillBatchFeatures batchFeatures) {
         List<ScoredEndpoint> result = new ArrayList<>(endpoints.size());
         for (PrefillEndpoint ep : endpoints) {
             PrefillTimePredictor predictor = ep.getPredictor();
@@ -212,7 +215,9 @@ public class ShortestTTFTStrategy implements LoadBalanceStrategy {
                 continue;
             }
             long cacheHit = calculateCacheHit(ep, cacheMatchResults, seqLen);
-            long prefillMs = predictor.estimateMs(seqLen, cacheHit);
+            long prefillMs = batchFeatures != null
+                    ? (long) predictor.predictBatchMs(batchFeatures)
+                    : predictor.estimateMs(seqLen, cacheHit);
             long queueMs = ep.realWaitTimeMs();
             long ttft = prefillMs + queueMs;
             Logger.debug("ShortestTTFT score - ip: {}, hitCache: {}, prefillMs: {}, queueMs: {}, ttft: {}",
@@ -324,7 +329,8 @@ public class ShortestTTFTStrategy implements LoadBalanceStrategy {
         // Non-batch path: reserve prefill inflight for load-aware scoring.
         // Batch path uses FlexlbBatchScheduler.commitBatch() instead — skip here to avoid double-counting.
         if (isNonBatchPath(balanceContext)) {
-            ep.commitBatch(requestId, ttft, Collections.emptyList());
+            ep.commitBatch(requestId, ttft,
+                    PrefillBatchFeatures.aggregateReservationItems(balanceContext));
         }
 
         // Populate DebugInfo so BatchItem.hitCache() can read hitCacheLen for batch metrics

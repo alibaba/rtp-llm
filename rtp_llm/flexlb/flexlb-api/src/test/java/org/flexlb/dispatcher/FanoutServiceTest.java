@@ -384,9 +384,9 @@ class FanoutServiceTest {
     }
 
     @Test
-    void fanoutWriteNullsControlsNullPreservationInChunkPayload() {
-        // /v1/embeddings sets fanoutWriteNulls=true so a user-supplied explicit null reaches FE
-        // byte-for-byte; /batch_infer sets it false and drops the null (the common-wire-shape win).
+    void schemaSensitiveFanoutPreservesNullsInChunkPayload() {
+        // Every built-in endpoint preserves explicit nulls. For generation this is load-bearing:
+        // top-level config fields override nested config, even when the override is null.
         FeClient feClient = mock(FeClient.class);
         ArgumentCaptor<byte[]> payload = ArgumentCaptor.forClass(byte[].class);
         when(feClient.postBytes(anyString(), anyString(), payload.capture(), any(), any(), any()))
@@ -403,11 +403,14 @@ class FanoutServiceTest {
 
         JSONObject promptBody = new JSONObject();
         promptBody.put("prompt_batch", JSONArray.of("a"));
-        promptBody.put("user", null);
+        promptBody.put("generate_config", JSONObject.of(
+                "adapter_name", new String[]{"nested-lora"}));
+        promptBody.put("adapter_name", null);
         svc.dispatchChunks("/batch_infer", List.of(promptBody), List.of("http://a"),
                 BATCH_INFER, new HttpHeaders(), null).block();
-        assertFalse(new String(payload.getValue(), StandardCharsets.UTF_8).contains("\"user\""),
-                "fanoutWriteNulls=false must drop the explicit null");
+        assertTrue(new String(payload.getValue(), StandardCharsets.UTF_8)
+                        .contains("\"adapter_name\":null"),
+                "the top-level null override must reach FE instead of exposing the nested list");
     }
 
     @Test

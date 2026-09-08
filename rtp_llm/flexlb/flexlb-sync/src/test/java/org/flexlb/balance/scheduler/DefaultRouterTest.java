@@ -9,6 +9,7 @@ import org.flexlb.balance.strategy.LoadBalanceStrategyFactory;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.ModelMetaConfig;
+import org.flexlb.config.TrafficPolicyConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.BatchScheduleRequest;
 import org.flexlb.dao.loadbalance.BatchScheduleResponse;
@@ -41,6 +42,7 @@ import static org.mockito.Mockito.anyLong;
 import static org.mockito.Mockito.eq;
 import static org.mockito.Mockito.isNull;
 import static org.mockito.Mockito.lenient;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -307,6 +309,82 @@ class DefaultRouterTest {
     }
 
     @Test
+    void aggregateTrafficPolicyUsesIndividualPromptLengths() {
+        TrafficPolicyConfig trafficPolicy = new TrafficPolicyConfig();
+        TrafficPolicyConfig.TrafficPolicyRule shortPrompt =
+                new TrafficPolicyConfig.TrafficPolicyRule();
+        shortPrompt.setMaxSeqLen(1024L);
+        shortPrompt.setTargetGroup("short");
+        trafficPolicy.setRules(List.of(shortPrompt));
+        trafficPolicy.setDefaultGroup("long");
+        when(loadBalanceConfig.getTrafficPolicy()).thenReturn(trafficPolicy);
+
+        org.flexlb.dao.master.WorkerStatus worker = new org.flexlb.dao.master.WorkerStatus();
+        worker.setIp("192.168.1.3");
+        worker.setPort(8082);
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPdFusionStatusMap()
+                .put("192.168.1.3:8082", worker);
+
+        ServerStatus selected = new ServerStatus();
+        selected.setSuccess(true);
+        selected.setRole(RoleType.PDFUSION);
+        when(fusionStrategy.select(any(BalanceContext.class), eq(RoleType.PDFUSION), eq("short")))
+                .thenReturn(selected);
+
+        Request aggregateRequest = new Request();
+        aggregateRequest.setRequestId(700L);
+        aggregateRequest.setSeqLen(1200L);
+        BalanceContext aggregate = new BalanceContext();
+        aggregate.setConfig(loadBalanceConfig);
+        aggregate.setRequest(aggregateRequest);
+        aggregate.setAggregateDemand(true);
+        aggregate.setBatchSeqLens(List.of(600L, 600L));
+        aggregate.setBatchRequestIds(List.of(700L, 10_700L));
+
+        Response response = defaultRouter.route(aggregate);
+
+        assertTrue(response.isSuccess());
+        verify(fusionStrategy).select(
+                any(BalanceContext.class), eq(RoleType.PDFUSION), eq("short"));
+    }
+
+    @Test
+    void aggregateTrafficPolicyRejectsMembersFromDifferentGroups() {
+        TrafficPolicyConfig trafficPolicy = new TrafficPolicyConfig();
+        TrafficPolicyConfig.TrafficPolicyRule shortPrompt =
+                new TrafficPolicyConfig.TrafficPolicyRule();
+        shortPrompt.setMaxSeqLen(1024L);
+        shortPrompt.setTargetGroup("short");
+        trafficPolicy.setRules(List.of(shortPrompt));
+        trafficPolicy.setDefaultGroup("long");
+        when(loadBalanceConfig.getTrafficPolicy()).thenReturn(trafficPolicy);
+
+        org.flexlb.dao.master.WorkerStatus worker = new org.flexlb.dao.master.WorkerStatus();
+        worker.setIp("192.168.1.3");
+        worker.setPort(8082);
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPdFusionStatusMap()
+                .put("192.168.1.3:8082", worker);
+
+        Request aggregateRequest = new Request();
+        aggregateRequest.setRequestId(700L);
+        aggregateRequest.setSeqLen(1800L);
+        BalanceContext aggregate = new BalanceContext();
+        aggregate.setConfig(loadBalanceConfig);
+        aggregate.setRequest(aggregateRequest);
+        aggregate.setAggregateDemand(true);
+        aggregate.setBatchSeqLens(List.of(600L, 1200L));
+        aggregate.setBatchRequestIds(List.of(700L, 10_700L));
+
+        Response response = defaultRouter.route(aggregate);
+
+        assertFalse(response.isSuccess());
+        assertEquals(StrategyErrorType.INVALID_REQUEST.getErrorCode(), response.getCode());
+        assertTrue(response.getErrorMessage().contains("multiple traffic-policy groups"));
+        verify(fusionStrategy, never()).select(
+                any(BalanceContext.class), eq(RoleType.PDFUSION), any());
+    }
+
+    @Test
     void should_batch_schedule_success_when_single_role_registered_and_strategy_supports_batch() {
         // Setup - single role with one dummy worker so getRoleTypeList returns 1 role
         org.flexlb.dao.master.WorkerStatus dummy = new org.flexlb.dao.master.WorkerStatus();
@@ -336,6 +414,35 @@ class DefaultRouterTest {
                             + "a second master round-trip; works for any single-role cluster "
                             + "(PDFUSION, PREFILL-only, DECODE-only, VIT) — not just PDFUSION");
         }
+    }
+
+    @Test
+    void should_reject_backend_preassignment_when_traffic_policy_is_active() {
+        TrafficPolicyConfig trafficPolicy = new TrafficPolicyConfig();
+        trafficPolicy.setDefaultGroup("tenant-a");
+        when(loadBalanceConfig.getTrafficPolicy()).thenReturn(trafficPolicy);
+
+        org.flexlb.dao.master.WorkerStatus dummy = new org.flexlb.dao.master.WorkerStatus();
+        dummy.setIp("192.168.1.10");
+        dummy.setPort(8080);
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPdFusionStatusMap()
+                .put("192.168.1.10:8080", dummy);
+
+        ScriptedBatchLoadBalancer scripted = new ScriptedBatchLoadBalancer(List.of(
+                target("192.168.1.10", 8080),
+                target("192.168.1.11", 8080)));
+        replaceBatchLoadBalancer(scripted);
+
+        BatchScheduleRequest batchRequest = new BatchScheduleRequest();
+        batchRequest.setBatchCount(2);
+
+        BatchScheduleResponse response = defaultRouter.batchSchedule(batchRequest);
+
+        assertFalse(response.isSuccess());
+        assertEquals(StrategyErrorType.INVALID_REQUEST.getErrorCode(), response.getCode());
+        assertTrue(response.getErrorMessage().contains("traffic policy"));
+        assertEquals(0, scripted.selectBatchCalls,
+                "an unscoped batch selection must never cross traffic-policy groups");
     }
 
     @Test

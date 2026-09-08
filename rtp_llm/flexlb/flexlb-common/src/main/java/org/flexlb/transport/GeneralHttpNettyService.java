@@ -24,6 +24,7 @@ import org.flexlb.exception.FlexLBException;
 import org.flexlb.exception.HttpErrorResponseException;
 import org.flexlb.util.JsonUtils;
 import org.flexlb.util.NettyUtils;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.FluxSink;
@@ -57,6 +58,7 @@ public class GeneralHttpNettyService {
     private final ThreadPoolExecutor httpRequestExecutor;
     private final long maxResponseBytes;
 
+    @Autowired
     public GeneralHttpNettyService(HttpNettyClientHandler nettyClient, ConfigService configService) {
         this.nettyClient = nettyClient;
         this.maxResponseBytes = DEFAULT_MAX_RESPONSE_BYTES;

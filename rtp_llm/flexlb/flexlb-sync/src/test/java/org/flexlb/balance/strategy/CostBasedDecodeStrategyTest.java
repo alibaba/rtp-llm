@@ -134,7 +134,7 @@ class CostBasedDecodeStrategyTest {
     }
 
     @Test
-    void placementOnlyUsesAlreadyAggregatedOutputDemandWithoutSingleRequestCap() {
+    void aggregateDemandUsesAlreadyAggregatedOutputWithoutSingleRequestCap() {
         Map<String, WorkerStatus> decodeMap =
                 EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap();
         WorkerStatus worker = createWorkerStatus("127.0.0.1");
@@ -157,7 +157,7 @@ class CostBasedDecodeStrategyTest {
         context.setRequest(request);
         context.setConfig(configService.loadBalanceConfig());
         context.setScheduleMode(ScheduleModeEnum.DIRECT);
-        context.setPlacementOnly(true);
+        context.setAggregateDemand(true);
 
         ServerStatus status = strategy.select(context, RoleType.DECODE, null);
 

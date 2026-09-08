@@ -64,26 +64,36 @@ public class FormulaPredictor implements PrefillTimePredictor {
 
     @Override
     public double predictBatchMs(List<BatchItem> items) {
-        if (items.isEmpty()) {
+        return predictBatchMs(PrefillBatchFeatures.from(items));
+    }
+
+    @Override
+    public double predictBatchMs(PrefillBatchFeatures features) {
+        if (features == null || features.items().isEmpty()) {
             return 0.0;
         }
-        long key = computeCacheKey(items);
+        long key = computeCacheKey(features);
         Double cached = resultCache.get(key);
         if (cached != null) {
             return cached;
         }
-        double result = predictBatchMsUncached(items);
+        double result = predictBatchMsUncached(features);
         resultCache.put(key, result);
         return result;
     }
 
     @Override
     public double predictBatchMsUncached(List<BatchItem> items) {
-        if (items.isEmpty()) {
+        return predictBatchMsUncached(PrefillBatchFeatures.from(items));
+    }
+
+    @Override
+    public double predictBatchMsUncached(PrefillBatchFeatures features) {
+        if (features == null || features.items().isEmpty()) {
             return 0.0;
         }
         PrefillTimeVariableBindings.EvaluationVariables vars =
-                PrefillTimeVariableBindings.batchVariables(items);
+                PrefillTimeVariableBindings.batchVariables(features);
         return (double) formula.evaluate(vars.topLevelVars(), vars.itemVars());
     }
 
@@ -93,9 +103,9 @@ public class FormulaPredictor implements PrefillTimePredictor {
      * only inputs that affect the formula result (via {@code inputTokens},
      * {@code hitCacheTokens}, {@code computeTokens}, batch totals/maxima, and {@code batchSize}).
      */
-    private long computeCacheKey(List<BatchItem> items) {
-        long hash = items.size();
-        for (BatchItem item : items) {
+    private long computeCacheKey(PrefillBatchFeatures features) {
+        long hash = features.batchSize();
+        for (PrefillBatchFeatures.Item item : features.items()) {
             hash = hash * 31 + item.seqLen();
             hash = hash * 31 + item.hitCache();
         }

@@ -4,6 +4,8 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.flexlb.config.FlexlbConfig;
+import org.flexlb.config.TrafficPolicyConfig;
 import org.flexlb.dao.loadbalance.BatchScheduleTarget;
 import org.flexlb.dao.route.RoleType;
 import org.junit.jupiter.api.Nested;
@@ -281,6 +283,28 @@ class DispatcherInspectionHandlerTest {
                         "force_batch still injected — that's independent of preAssign");
             }
             verify(client, never()).requestTargets(anyInt(), eq(true), eq(false));
+        }
+
+        @Test
+        void activeTrafficPolicyShowsPerItemRoutingAndDisablesPreAssignment() {
+            BatchScheduleClient client = mock(BatchScheduleClient.class);
+            DispatchConfig cfg = config("size:2");
+            cfg.setPreAssignBe(true);
+            FlexlbConfig loadBalanceConfig = new FlexlbConfig();
+            TrafficPolicyConfig trafficPolicy = new TrafficPolicyConfig();
+            trafficPolicy.setDefaultGroup("tenant-a");
+            loadBalanceConfig.setTrafficPolicy(trafficPolicy);
+            DispatcherInspectionHandler handler = new DispatcherInspectionHandler(
+                    cfg, refresher(), mock(FeHealthChecker.class), client,
+                    1000, loadBalanceConfig);
+
+            ObjectNode out = invokeDryRun(handler, "true", List.of("a", "b"));
+
+            assertFalse(out.get("preAssignEffective").asBoolean());
+            for (JsonNode chunk : out.get("chunks")) {
+                assertFalse(chunk.get("generate_config").get("force_batch").asBoolean());
+            }
+            verifyNoInteractions(client);
         }
 
         @Test

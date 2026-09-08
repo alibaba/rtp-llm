@@ -1,15 +1,16 @@
 package org.flexlb.dispatcher;
 
 import io.netty.channel.ChannelOption;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.core.io.buffer.DataBuffer;
+import org.springframework.core.io.buffer.DataBufferLimitException;
+import org.springframework.core.io.buffer.DataBufferUtils;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.client.reactive.ReactorClientHttpConnector;
-import org.springframework.core.io.buffer.DataBuffer;
-import org.springframework.core.io.buffer.DataBufferLimitException;
-import org.springframework.core.io.buffer.DataBufferUtils;
 import org.springframework.stereotype.Component;
 import org.springframework.web.reactive.function.BodyExtractors;
 import org.springframework.web.reactive.function.client.ExchangeStrategies;
@@ -33,10 +34,9 @@ import java.util.concurrent.atomic.AtomicInteger;
 public class FeClient {
 
     /**
-     * Max in-memory size for a single FE sub-batch response. Per-chunk, not aggregate — the
-     * dispatcher's final response to the client is N chunks × this value (bounded by heap, not
-     * a config). 16MB covers extreme "long generation × large batch" workloads with margin while
-     * staying well below typical 8-16GB heap allocations even under peak concurrency.
+     * Hard in-memory ceiling for one FE sub-batch response. The parent fanout additionally passes
+     * every child a reservation from the configurable shared aggregate budget, so the retained
+     * total is bounded by both {@code N * MAX_RESPONSE_BYTES} and that request-level limit.
      */
     static final int MAX_RESPONSE_BYTES = 16 * 1024 * 1024;
 
@@ -54,6 +54,7 @@ public class FeClient {
     private static final int URI_CACHE_MAX = 2048;
     private final Map<String, URI> uriCache = new ConcurrentHashMap<>();
 
+    @Autowired
     public FeClient(WebClient.Builder builder,
                     @Qualifier("dispatcherFeConnectionProvider") ConnectionProvider provider,
                     DispatchConfig cfg) {

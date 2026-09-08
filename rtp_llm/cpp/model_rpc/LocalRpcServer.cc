@@ -1,5 +1,6 @@
 #include <memory>
 #include <chrono>
+#include <exception>
 #include <c10/core/InferenceMode.h>
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
@@ -41,6 +42,81 @@ std::string formatRequestLogTag(const std::string& request_key, const RequestInf
     return tag;
 }
 
+// BatchGenerateCall does not use GenerateContext, whose setStream/stopStream pair normally
+// publishes worker lifecycle deltas. Keep the same contract for every batch member so master-side
+// reservations are released as each stream completes. The guard also cancels and publishes any
+// still-registered stream if an unexpected exception aborts the RPC midway through the batch.
+class BatchStreamRuntimeGuard {
+public:
+    BatchStreamRuntimeGuard(std::shared_ptr<RpcServerRuntimeMeta> meta, const std::vector<GenerateStreamPtr>& streams):
+        meta_(std::move(meta)) {
+        RTP_LLM_CHECK_WITH_INFO(meta_ != nullptr, "batch stream runtime metadata is not initialized");
+        entries_.reserve(streams.size());
+        try {
+            for (const auto& stream : streams) {
+                RTP_LLM_CHECK_WITH_INFO(stream != nullptr, "enqueueMultiple returned a null stream");
+                const auto input = stream->generateInput();
+                RTP_LLM_CHECK_WITH_INFO(input != nullptr, "batch stream has no generate input");
+                entries_.push_back(Entry{input->request_id, stream, false});
+                meta_->enqueue(input->request_id, stream);
+                entries_.back().active = true;
+            }
+        } catch (...) {
+            cancelAndFinishRemaining();
+            throw;
+        }
+    }
+
+    BatchStreamRuntimeGuard(const BatchStreamRuntimeGuard&)            = delete;
+    BatchStreamRuntimeGuard& operator=(const BatchStreamRuntimeGuard&) = delete;
+
+    ~BatchStreamRuntimeGuard() {
+        cancelAndFinishRemaining();
+    }
+
+    void finish(size_t index) {
+        RTP_LLM_CHECK_WITH_INFO(index < entries_.size(), "batch stream runtime index out of range");
+        auto& entry = entries_[index];
+        if (!entry.active) {
+            return;
+        }
+        meta_->dequeue(entry.request_id, entry.stream);
+        entry.active = false;
+    }
+
+private:
+    struct Entry {
+        int64_t           request_id;
+        GenerateStreamPtr stream;
+        bool              active;
+    };
+
+    void cancelAndFinishRemaining() noexcept {
+        for (size_t i = 0; i < entries_.size(); ++i) {
+            auto& entry = entries_[i];
+            if (!entry.active) {
+                continue;
+            }
+            try {
+                if (entry.stream->getStatus() != StreamState::FINISHED && !entry.stream->hasError()) {
+                    entry.stream->reportError(ErrorCode::CANCELLED, "batch RPC aborted before stream completion");
+                }
+                finish(i);
+            } catch (const std::exception& error) {
+                RTP_LLM_LOG_ERROR(
+                    "failed to finalize batch stream runtime request [%ld]: %s", entry.request_id, error.what());
+            } catch (...) {
+                RTP_LLM_LOG_ERROR("failed to finalize batch stream runtime request [%ld]: unknown error",
+                                  entry.request_id);
+            }
+        }
+    }
+
+private:
+    std::shared_ptr<RpcServerRuntimeMeta> meta_;
+    std::vector<Entry>                    entries_;
+};
+
 }  // namespace
 
 grpc::Status LocalRpcServer::init(const EngineInitParams&                       maga_init_params,
@@ -61,15 +137,14 @@ grpc::Status LocalRpcServer::init(const EngineInitParams&                       
         }
     }
 
-    const auto mm_decision = resolveAndLogMMProcessorKind(
-        maga_init_params.model_config_.mm_model_config.is_multimodal,
-        maga_init_params.vit_config.vit_separation,
-        !mm_process_engine.is_none(),
-        maga_init_params.pd_sep_config.role_type,
-        maga_init_params.parallelism_config.tp_rank,
-        maga_init_params.model_config_.model_type,
-        "LocalRpcServer");
-    const auto mm_kind = mm_decision.kind;
+    const auto mm_decision = resolveAndLogMMProcessorKind(maga_init_params.model_config_.mm_model_config.is_multimodal,
+                                                          maga_init_params.vit_config.vit_separation,
+                                                          !mm_process_engine.is_none(),
+                                                          maga_init_params.pd_sep_config.role_type,
+                                                          maga_init_params.parallelism_config.tp_rank,
+                                                          maga_init_params.model_config_.model_type,
+                                                          "LocalRpcServer");
+    const auto mm_kind     = mm_decision.kind;
     if (!mm_decision.ok()) {
         RTP_LLM_LOG_ERROR("%s", mm_decision.error.c_str());
         return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, mm_decision.error);
@@ -248,8 +323,8 @@ grpc::Status LocalRpcServer::GenerateStreamCall(grpc::ServerContext*            
             // Beam rows are an internal search width; Fusion exposes one primary
             // sequence (the remaining candidates live in beam_responses). Only
             // ordinary multi-return requests aggregate all active rows.
-            const auto returned_sequence_count = stream->hasNumBeams() ? std::max(stream->numReturnSequences(), 1) :
-                                                                            stream->currentBatchSize();
+            const auto returned_sequence_count =
+                stream->hasNumBeams() ? std::max(stream->numReturnSequences(), 1) : stream->currentBatchSize();
             telemetry::setUsageTokenAttributes(*generate_context.trace_span_guard,
                                                (int64_t)stream->inputLength(),
                                                (int64_t)(stream->outputTokenLen() * returned_sequence_count));
@@ -329,7 +404,8 @@ grpc::Status LocalRpcServer::BatchGenerateCall(grpc::ServerContext*        conte
     // enqueueMultiple contract: the returned stream vector is 1:1 with `inputs` (same size, same
     // order). Streams that failed checkInputLength carry an error reported via reportError() and
     // surface it through collectStreamOutput → nextOutput → ErrorInfo path below.
-    auto streams = engine_->enqueueMultiple(inputs).second;
+    auto                    streams = engine_->enqueueMultiple(inputs).second;
+    BatchStreamRuntimeGuard stream_runtime(meta_, streams);
 
     // collectStreamOutput is currently SERIAL: streams[0] must finish before streams[1] is drained.
     // For batch decode this is bounded (all streams advance together), but TODO: parallelize for
@@ -339,6 +415,7 @@ grpc::Status LocalRpcServer::BatchGenerateCall(grpc::ServerContext*        conte
 
         GenerateOutputs last_outputs;
         auto            err = collectStreamOutput(context, streams[i], inputs[i], last_outputs);
+        stream_runtime.finish(i);
         if (!err.ok()) {
             auto* err_pb = result->mutable_error_info();
             err_pb->set_error_code(err.code() == ErrorCode::CANCELLED ? ErrorCodePB::CANCELLED :

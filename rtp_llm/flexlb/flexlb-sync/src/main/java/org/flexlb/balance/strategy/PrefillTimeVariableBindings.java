@@ -48,13 +48,17 @@ final class PrefillTimeVariableBindings {
     }
 
     static EvaluationVariables batchVariables(List<BatchItem> items) {
+        return batchVariables(PrefillBatchFeatures.from(items));
+    }
+
+    static EvaluationVariables batchVariables(PrefillBatchFeatures features) {
         BindingContext ctx = BINDING_CTX.get();
         ctx.reset();
         long totalInputTokens = 0L;
         long totalHitCacheTokens = 0L;
         long maxInputTokens = 0L;
         long maxComputeTokens = 0L;
-        for (BatchItem item : items) {
+        for (PrefillBatchFeatures.Item item : features.items()) {
             double[] itemArray = ctx.acquireArray();
             fillRequestVars(itemArray, item.seqLen(), item.hitCache());
             ctx.itemVars.add(itemArray);
@@ -67,7 +71,7 @@ final class PrefillTimeVariableBindings {
             maxInputTokens = Math.max(maxInputTokens, inputTokens);
             maxComputeTokens = Math.max(maxComputeTokens, computeTokens);
         }
-        ctx.topLevelVars[PrefillTimeFormula.IDX_BATCH_SIZE] = items.size();
+        ctx.topLevelVars[PrefillTimeFormula.IDX_BATCH_SIZE] = features.batchSize();
         fillBatchVars(ctx.topLevelVars, totalInputTokens, totalHitCacheTokens,
                 maxInputTokens, maxComputeTokens);
         return new EvaluationVariables(ctx.topLevelVars, ctx.itemVars);

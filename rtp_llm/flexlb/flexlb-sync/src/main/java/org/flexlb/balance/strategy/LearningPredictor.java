@@ -81,14 +81,20 @@ public class LearningPredictor implements PrefillTimePredictor {
 
     @Override
     public double predictBatchMs(List<BatchItem> items) {
+        return predictBatchMs(PrefillBatchFeatures.from(items));
+    }
+
+    @Override
+    public double predictBatchMs(PrefillBatchFeatures features) {
         if (logger.isDebugEnabled()) {
             logger.debug("t: {}, learn predictor predictBatchMs: {}, items count: {}",
-                    this.t, formulaStringParam(this.weightsRef.get()), items.size());
+                    this.t, formulaStringParam(this.weightsRef.get()),
+                    features != null ? features.batchSize() : 0);
         }
-        if (items.isEmpty()) {
+        if (features == null || features.items().isEmpty()) {
             return 0;
         }
-        double[] inputs = this.collectInput(items);
+        double[] inputs = this.collectInput(features);
         double[] weights = this.weightsRef.get();
         double linear = calcLinear(inputs, weights);
         double[] values = new double[5];
@@ -100,6 +106,11 @@ public class LearningPredictor implements PrefillTimePredictor {
     public double predictBatchMsUncached(List<BatchItem> items) {
         // LearningPredictor has no cache — delegate directly.
         return predictBatchMs(items);
+    }
+
+    @Override
+    public double predictBatchMsUncached(PrefillBatchFeatures features) {
+        return predictBatchMs(features);
     }
 
     private double calcLinear(double[] inputs, double[] weights) {

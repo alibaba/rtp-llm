@@ -36,7 +36,10 @@ import torch
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import GenerateConfig, RoleType
 from rtp_llm.config.log_config import setup_logging
-from rtp_llm.cpp.model_rpc.model_rpc_client import ModelRpcClient
+from rtp_llm.cpp.model_rpc.model_rpc_client import (
+    BatchRpcNotStartedError,
+    ModelRpcClient,
+)
 from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
 from rtp_llm.utils.base_model_datatypes import GenerateInput, RequestInfo
 
@@ -89,6 +92,8 @@ class BatchEnqueueRoutingTest(TestCase):
             max_new_tokens_hint=None,
             generate_timeout_hint=None,
             placement_only=False,
+            batch_seq_lens_hint=None,
+            batch_request_ids_hint=None,
         ):
             inp.generate_config.role_addrs = [
                 master_rotation[len(route_calls) % len(master_rotation)]
@@ -100,6 +105,8 @@ class BatchEnqueueRoutingTest(TestCase):
                     max_new_tokens_hint,
                     generate_timeout_hint,
                     placement_only,
+                    batch_seq_lens_hint,
+                    batch_request_ids_hint,
                 )
             )
 
@@ -114,6 +121,10 @@ class BatchEnqueueRoutingTest(TestCase):
 
     @staticmethod
     def _input(request_id, role_addrs=()):
+        generate_config = GenerateConfig(max_new_tokens=16)
+        # Tests intentionally use lightweight address doubles, so assign after Pydantic
+        # construction while keeping the production GenerateConfig validation path real.
+        generate_config.role_addrs = list(role_addrs)
         return SimpleNamespace(
             request_id=request_id,
             prompt_length=8,
@@ -121,9 +132,7 @@ class BatchEnqueueRoutingTest(TestCase):
             # it, so the stub must have the same defaults and mutability as production.
             request_info=RequestInfo(),
             headers={},
-            generate_config=SimpleNamespace(
-                role_addrs=list(role_addrs), max_new_tokens=16, trace_id=None
-            ),
+            generate_config=generate_config,
         )
 
     def test_round_robin_master_cannot_scatter_a_batch_across_backends(self):
@@ -141,6 +150,8 @@ class BatchEnqueueRoutingTest(TestCase):
         # the master accounts one request's load while N inputs land on the worker.
         self.assertEqual(sum(inp.prompt_length for inp in inputs), route_calls[0][1])
         self.assertEqual(64, route_calls[0][2])
+        self.assertEqual((8, 8, 8, 8), route_calls[0][5])
+        self.assertEqual((0, 1, 2, 3), route_calls[0][6])
         self.assertTrue(
             route_calls[0][4],
             "batch routing must request placement only, never enqueue the first item",
@@ -201,19 +212,35 @@ class BatchEnqueueRoutingTest(TestCase):
         self.assertEqual([], route_calls)
         self.assertNotIn("inputs", sent)
 
+    def test_duplicate_request_ids_are_rejected_before_remote_work(self):
+        visitor, route_calls, sent = self._visitor([self._addr("10.0.0.1")])
+
+        with self.assertRaises(FtRuntimeException) as raised:
+            asyncio.run(visitor.batch_enqueue([self._input(7), self._input(7)]))
+
+        self.assertEqual(ExceptionType.INVALID_PARAMS, raised.exception.exception_type)
+        self.assertEqual([], route_calls)
+        self.assertNotIn("inputs", sent)
+
     def test_confirmed_connection_failure_replaces_preassigned_target_once(self):
         replacement = self._addr("10.0.0.9")
         visitor, route_calls, _ = self._visitor([replacement])
         failed = self._addr("10.0.0.7")
         inputs = [self._input(0, [failed]), self._input(1, [failed])]
         calls = []
+        replacement_deadline = []
 
-        async def fail_then_succeed(batch):
+        async def fail_then_succeed(batch, *, rpc_deadline=None):
             calls.append(visitor.model_rpc_client._select_batch_address(batch))
             if len(calls) == 1:
-                raise FtRuntimeException(
-                    ExceptionType.CONNECT_FAILED, "connection refused before dispatch"
+                deadline = asyncio.get_running_loop().time() + 1.0
+                replacement_deadline.append(deadline)
+                raise BatchRpcNotStartedError(
+                    ExceptionType.CONNECT_FAILED,
+                    "connection refused before dispatch",
+                    rpc_deadline=deadline,
                 )
+            replacement_deadline.append(rpc_deadline)
             return []
 
         visitor.model_rpc_client.batch_enqueue = fail_then_succeed
@@ -221,8 +248,97 @@ class BatchEnqueueRoutingTest(TestCase):
         asyncio.run(visitor.batch_enqueue(inputs))
 
         self.assertEqual(["10.0.0.7:8089", "10.0.0.9:8089"], calls)
+        self.assertEqual(
+            replacement_deadline[0],
+            replacement_deadline[1],
+            "the replacement attempt must reuse the first attempt's absolute deadline",
+        )
         self.assertEqual(1, len(route_calls), "reroute is bounded to one replacement")
         self.assertTrue(all(not inp.enqueued_by_master for inp in inputs))
+
+    def test_exhausted_batch_deadline_skips_replacement_routing(self):
+        visitor, route_calls, _ = self._visitor([self._addr("10.0.0.9")])
+        failed = self._addr("10.0.0.7")
+        inputs = [self._input(0, [failed]), self._input(1, [failed])]
+        calls = []
+
+        async def fail_after_deadline(batch, *, rpc_deadline=None):
+            calls.append(batch)
+            raise BatchRpcNotStartedError(
+                ExceptionType.CONNECT_TIMEOUT,
+                "connection deadline expired",
+                rpc_deadline=asyncio.get_running_loop().time() - 1.0,
+            )
+
+        visitor.model_rpc_client.batch_enqueue = fail_after_deadline
+
+        with self.assertRaises(BatchRpcNotStartedError):
+            asyncio.run(visitor.batch_enqueue(inputs))
+
+        self.assertEqual(1, len(calls))
+        self.assertEqual([], route_calls)
+        self.assertTrue(
+            all(inp.generate_config.role_addrs == [failed] for inp in inputs),
+            "an expired attempt must not mutate assignments it cannot replace",
+        )
+
+    def test_replacement_routing_is_bounded_by_remaining_batch_deadline(self):
+        visitor, _, _ = self._visitor([self._addr("10.0.0.9")])
+        failed = self._addr("10.0.0.7")
+        inputs = [self._input(0, [failed]), self._input(1, [failed])]
+        calls = []
+
+        async def fail_before_dispatch(batch, *, rpc_deadline=None):
+            calls.append(batch)
+            raise BatchRpcNotStartedError(
+                ExceptionType.CONNECT_FAILED,
+                "connection refused before dispatch",
+                rpc_deadline=asyncio.get_running_loop().time() + 0.05,
+            )
+
+        async def slow_replacement_route(*args, **kwargs):
+            await asyncio.sleep(60)
+
+        visitor.model_rpc_client.batch_enqueue = fail_before_dispatch
+        visitor.route_ips = slow_replacement_route
+
+        with self.assertRaises(BatchRpcNotStartedError) as raised:
+            asyncio.run(visitor.batch_enqueue(inputs))
+
+        self.assertEqual(ExceptionType.CONNECT_TIMEOUT, raised.exception.exception_type)
+        self.assertIn("replacement routing", str(raised.exception))
+        self.assertEqual(1, len(calls), "an expired route must never dispatch again")
+
+    def test_translated_connection_errors_without_start_proof_are_never_retried(self):
+        # A keepalive timeout or generic UNAVAILABLE after invocation can be translated into the
+        # same CONNECT_* taxonomy as an initial dial failure. Only BatchRpcNotStartedError proves
+        # that BatchGenerateCall was never invoked.
+        for exception_type in (
+            ExceptionType.GET_HOST_FAILED,
+            ExceptionType.GET_CONNECTION_FAILED,
+            ExceptionType.CONNECT_FAILED,
+            ExceptionType.CONNECT_TIMEOUT,
+        ):
+            with self.subTest(exception_type=exception_type):
+                visitor, route_calls, _ = self._visitor([self._addr("10.0.0.9")])
+                inputs = [
+                    self._input(0, [self._addr("10.0.0.7")]),
+                    self._input(1, [self._addr("10.0.0.7")]),
+                ]
+
+                async def ambiguous(_batch):
+                    raise FtRuntimeException(
+                        exception_type, "transport failed after invocation"
+                    )
+
+                visitor.model_rpc_client.batch_enqueue = ambiguous
+
+                with self.assertRaises(FtRuntimeException):
+                    asyncio.run(visitor.batch_enqueue(inputs))
+
+                self.assertEqual(
+                    [], route_calls, "ambiguous execution must preserve at-most-once"
+                )
 
     def test_uncertain_connection_reset_is_never_retried(self):
         visitor, route_calls, _ = self._visitor([self._addr("10.0.0.9")])
@@ -240,7 +356,9 @@ class BatchEnqueueRoutingTest(TestCase):
         with self.assertRaises(FtRuntimeException):
             asyncio.run(visitor.batch_enqueue(inputs))
 
-        self.assertEqual([], route_calls, "uncertain execution must preserve at-most-once")
+        self.assertEqual(
+            [], route_calls, "uncertain execution must preserve at-most-once"
+        )
 
     def test_dispatcher_pre_assigned_chunk_never_touches_the_master(self):
         visitor, route_calls, sent = self._visitor([self._addr("10.0.0.9")])
@@ -320,6 +438,23 @@ class BatchEnqueueRoutingTest(TestCase):
 
         self.assertEqual(
             0, len(route_calls), "validation must fail before the master is contacted"
+        )
+        self.assertNotIn(
+            "inputs", sent, "a rejected batch must never reach the model rpc client"
+        )
+
+    def test_invalid_generate_config_is_rejected_before_master_reservation(self):
+        visitor, route_calls, sent = self._visitor([self._addr("10.0.0.1")])
+        bad = self._input(0)
+        # Pydantic accepts the union member; GenerateConfig.validate is the RPC-level
+        # semantic guard that rejects negative sampling limits.
+        bad.generate_config.top_k = -1
+
+        with self.assertRaises(FtRuntimeException):
+            asyncio.run(visitor.batch_enqueue([bad, self._input(1)]))
+
+        self.assertEqual(
+            [], route_calls, "invalid configuration must not reserve master-side load"
         )
         self.assertNotIn(
             "inputs", sent, "a rejected batch must never reach the model rpc client"
@@ -459,9 +594,18 @@ class RouteIpsSeqLenHintTest(TestCase):
             request_id,
             input_pb=None,
             seq_len_hint=None,
+            *,
+            max_new_tokens_hint=None,
+            generate_timeout_hint=None,
+            aggregate_demand=False,
+            batch_seq_lens=None,
+            batch_request_ids=None,
         ):
             seen["seq_len_hint"] = seq_len_hint
             seen["input_pb"] = input_pb
+            seen["aggregate_demand"] = aggregate_demand
+            seen["batch_seq_lens"] = batch_seq_lens
+            seen["batch_request_ids"] = batch_request_ids
             return SimpleNamespace(
                 is_ok=True,
                 role_addrs=[
@@ -514,9 +658,20 @@ class RouteIpsSeqLenHintTest(TestCase):
 
         # Keep the pre-existing third positional argument contract: new aggregate-hint
         # parameters are keyword-only and cannot silently reinterpret this boolean.
-        asyncio.run(visitor.route_ips(request, 210, True))
+        asyncio.run(
+            visitor.route_ips(
+                request,
+                210,
+                True,
+                batch_seq_lens_hint=(100, 110),
+                batch_request_ids_hint=(1, 2),
+            )
+        )
 
         self.assertIsNone(seen["input_pb"])
+        self.assertTrue(seen["aggregate_demand"])
+        self.assertEqual((100, 110), seen["batch_seq_lens"])
+        self.assertEqual((1, 2), seen["batch_request_ids"])
         self.assertFalse(request.enqueued_by_master)
 
 

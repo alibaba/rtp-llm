@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -43,6 +44,15 @@ public:
         return collectStreamOutput(nullptr, stream, nullptr, last_outputs);
     }
 
+    void setBatchRuntime(std::shared_ptr<EngineBase> engine, std::shared_ptr<RpcServerRuntimeMeta> meta) {
+        engine_ = std::move(engine);
+        meta_   = std::move(meta);
+    }
+
+    EngineScheduleInfo scheduleInfo(int64_t latest_finished_version = -1) {
+        return meta_->getEngineScheduleInfo(latest_finished_version);
+    }
+
     std::future<void> cancellationChecked() {
         return cancellation_checked_.get_future();
     }
@@ -58,6 +68,43 @@ protected:
 private:
     mutable std::once_flag     cancellation_check_once_;
     mutable std::promise<void> cancellation_checked_;
+};
+
+class FixedBatchEngine: public EngineBase {
+public:
+    explicit FixedBatchEngine(std::vector<GenerateStreamPtr> streams):
+        EngineBase(EngineInitParams()), streams_(std::move(streams)) {}
+
+    std::shared_ptr<GenerateStream> enqueue(const std::shared_ptr<GenerateInput>&) override {
+        return nullptr;
+    }
+
+    void enqueue(std::shared_ptr<GenerateStream>&) override {}
+
+    std::pair<std::vector<bool>, std::vector<GenerateStreamPtr>>
+    enqueueMultiple(const std::vector<std::shared_ptr<GenerateInput>>& inputs) override {
+        EXPECT_EQ(inputs.size(), streams_.size());
+        for (size_t i = 0; i < std::min(inputs.size(), streams_.size()); ++i) {
+            EXPECT_EQ(inputs[i]->request_id, streams_[i]->generateInput()->request_id);
+            EXPECT_EQ(inputs[i]->group_id, streams_[i]->generateInput()->group_id);
+        }
+        return {std::vector<bool>(streams_.size(), true), streams_};
+    }
+
+    absl::Status stop() override {
+        return absl::OkStatus();
+    }
+
+    absl::StatusOr<GenerateStreamPtr> preRun(const std::shared_ptr<GenerateInput>&, preRunMode) override {
+        return absl::UnimplementedError("not used by LocalRpcServer batch tests");
+    }
+
+    KVCacheInfo getCacheStatusInfo(int64_t, bool) override {
+        return {};
+    }
+
+private:
+    std::vector<GenerateStreamPtr> streams_;
 };
 
 class RecordingWriter: public LocalRpcServer::WriterInterface {
@@ -87,10 +134,12 @@ enum class WakeReason {
     TIMEOUT
 };
 
-std::shared_ptr<MockGenerateStream> createMockStream() {
+std::shared_ptr<MockGenerateStream> createMockStream(int64_t request_id = 0, int64_t group_id = -1) {
     auto input             = std::make_shared<GenerateInput>();
     input->generate_config = std::make_shared<GenerateConfig>();
     input->input_ids       = torch::tensor({1, 2, 3}, torch::kInt32);
+    input->request_id      = request_id;
+    input->group_id        = group_id;
 
     ModelConfig model_config;
     model_config.max_seq_len = 3;
@@ -262,6 +311,67 @@ TEST(LocalRpcServerTest, PollWritesFinalLocalOutputBeforeRemoteHandoff) {
     EXPECT_EQ(stream->getStatus(), StreamState::RUNNING);
     EXPECT_FALSE(normal_stream->stream_cache_resource_->isResourceReleased());
     EXPECT_FALSE(normal_stream->hasOutput());
+}
+
+TEST(LocalRpcServerTest, BatchGeneratePublishesEveryMemberLifecycle) {
+    constexpr int64_t  batch_id = 900;
+    TestLocalRpcServer server;
+    auto               first  = createMockStream(101, batch_id);
+    auto               second = createMockStream(102, batch_id);
+    auto               meta   = std::make_shared<RpcServerRuntimeMeta>();
+    server.setBatchRuntime(std::make_shared<FixedBatchEngine>(std::vector<GenerateStreamPtr>{first, second}), meta);
+
+    EXPECT_CALL(*first, nextOutput(_))
+        .WillOnce(InvokeWithoutArgs([&server] {
+            const auto info = server.scheduleInfo();
+            EXPECT_EQ(info.running_task_info_list.size(), 2);
+            EXPECT_TRUE(info.finished_task_info_list.empty());
+            GenerateOutputs outputs;
+            outputs.request_id = 101;
+            return ErrorResult<GenerateOutputs>(std::move(outputs));
+        }))
+        .WillOnce(InvokeWithoutArgs([] { return wakeResult(WakeReason::FINISHED); }));
+    EXPECT_CALL(*second, nextOutput(_))
+        .WillOnce(InvokeWithoutArgs([&server, batch_id] {
+            const auto info = server.scheduleInfo();
+            EXPECT_EQ(info.running_task_info_list.size(), 1);
+            EXPECT_EQ(info.finished_task_info_list.size(), 1);
+            if (!info.finished_task_info_list.empty()) {
+                EXPECT_EQ(info.finished_task_info_list[0].request_id, 101);
+                EXPECT_EQ(info.finished_task_info_list[0].batch_id, batch_id);
+            }
+            GenerateOutputs outputs;
+            outputs.request_id = 102;
+            return ErrorResult<GenerateOutputs>(std::move(outputs));
+        }))
+        .WillOnce(InvokeWithoutArgs([] { return wakeResult(WakeReason::FINISHED); }));
+
+    BatchGenerateInputPB request;
+    for (const auto request_id : {101, 102}) {
+        auto* input = request.add_inputs();
+        input->set_request_id(request_id);
+        input->add_token_ids(1);
+        input->mutable_group_id()->set_value(batch_id);
+        auto* config = input->mutable_generate_config();
+        config->set_max_new_tokens(1);
+        config->set_num_beams(1);
+        config->set_num_return_sequences(1);
+    }
+    BatchGenerateOutputsPB response;
+
+    const auto status = server.BatchGenerateCall(nullptr, &request, &response);
+
+    EXPECT_TRUE(status.ok());
+    EXPECT_EQ(response.results_size(), 2);
+    EXPECT_TRUE(response.results(0).has_final_output());
+    EXPECT_TRUE(response.results(1).has_final_output());
+    const auto info = server.scheduleInfo();
+    EXPECT_TRUE(info.running_task_info_list.empty());
+    ASSERT_EQ(info.finished_task_info_list.size(), 2);
+    EXPECT_EQ(info.finished_task_info_list[0].request_id, 101);
+    EXPECT_EQ(info.finished_task_info_list[0].batch_id, batch_id);
+    EXPECT_EQ(info.finished_task_info_list[1].request_id, 102);
+    EXPECT_EQ(info.finished_task_info_list[1].batch_id, batch_id);
 }
 
 }  // namespace rtp_llm

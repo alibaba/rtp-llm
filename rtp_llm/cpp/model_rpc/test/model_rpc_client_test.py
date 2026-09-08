@@ -51,6 +51,7 @@ from rtp_llm.config.generate_config import (
 from rtp_llm.config.log_config import setup_logging
 from rtp_llm.config.response_format_compiler import ReasoningFormat
 from rtp_llm.cpp.model_rpc.model_rpc_client import (
+    BatchRpcNotStartedError,
     ModelRpcClient,
     StreamState,
     _engine_reported_finished,
@@ -72,8 +73,9 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     RoleAddrPB,
     TensorPB,
 )
-from rtp_llm.telemetry import CURRENT_TRACE_STATE, tracing
+from rtp_llm.telemetry import CURRENT_TRACE_STATE
 from rtp_llm.telemetry import attributes as trace_attrs
+from rtp_llm.telemetry import tracing
 from rtp_llm.utils.base_model_datatypes import (
     GenerateInput,
     GenerateOutputs,
@@ -292,6 +294,14 @@ class ModelRpcClientTest(TestCase):
 
                 self.assertEqual(config.model_dump(), config_before_rpc)
                 self.assertEqual(input_pb.generate_config.thinking_mode, proto_mode)
+
+    def test_trans_input_encodes_none_timeout_as_zero_without_mutating_config(self):
+        config = GenerateConfig(timeout_ms=None)
+
+        input_pb = trans_input(self._make_generate_input(config))
+
+        self.assertIsNone(config.timeout_ms)
+        self.assertEqual(0, input_pb.generate_config.timeout_ms)
 
     def test_trans_input_writes_typed_grammar_fields_consistently(self):
         grammar_fields = ("json_schema", "regex", "ebnf", "structural_tag")
@@ -1947,15 +1957,22 @@ class BatchEnqueueDecodeSemanticsTest(TestCase):
     """
 
     @staticmethod
-    def _client():
+    def _client(channel_ready_error=None, channel_ready_delay=0.0):
         client = ModelRpcClient.__new__(ModelRpcClient)
         client._addresses = ["10.0.0.1:8089"]
         client._decode_entrance = False
         client._max_rpc_timeout_ms = 30000
 
+        class _Channel:
+            async def channel_ready(self):
+                if channel_ready_delay:
+                    await asyncio.sleep(channel_ready_delay)
+                if channel_ready_error is not None:
+                    raise channel_ready_error
+
         class _Pool:
             async def get(self, addr):
-                return object()
+                return _Channel()
 
         client._channel_pool = _Pool()
         return client
@@ -2003,11 +2020,20 @@ class BatchEnqueueDecodeSemanticsTest(TestCase):
         seen=None,
         seen_call=None,
         seen_metadata=None,
+        rpc_deadline_offset=None,
     ):
         def spy_trans_output(input_py, final_output, stream_state):
             if seen is not None:
                 seen.append(input_py)
             return ("OUT", input_py.request_id)
+
+        async def invoke():
+            kwargs = {}
+            if rpc_deadline_offset is not None:
+                kwargs["rpc_deadline"] = (
+                    asyncio.get_running_loop().time() + rpc_deadline_offset
+                )
+            return await client.batch_enqueue(inputs, **kwargs)
 
         with patch(
             "rtp_llm.cpp.model_rpc.model_rpc_client.RpcServiceStub",
@@ -2024,7 +2050,7 @@ class BatchEnqueueDecodeSemanticsTest(TestCase):
             "rtp_llm.cpp.model_rpc.model_rpc_client.trans_output",
             new=spy_trans_output,
         ):
-            return asyncio.run(client.batch_enqueue(inputs))
+            return asyncio.run(invoke())
 
     def test_empty_batch_short_circuits_without_touching_the_stub(self):
         # error would fire if the stub were reached; an empty batch must not reach it.
@@ -2088,8 +2114,36 @@ class BatchEnqueueDecodeSemanticsTest(TestCase):
                 return "backend unavailable"
 
         # grpc.RpcError must not leak raw; batch_enqueue funnels it through _handle_grpc_error.
-        with self.assertRaises(FtRuntimeException):
+        with self.assertRaises(FtRuntimeException) as ctx:
             self._run(self._client(), [self._input(0)], error=_FakeRpcError())
+        self.assertNotIsInstance(ctx.exception, BatchRpcNotStartedError)
+
+    def test_channel_readiness_failure_is_marked_not_started(self):
+        seen_call = []
+
+        with self.assertRaises(BatchRpcNotStartedError) as ctx:
+            self._run(
+                self._client(RuntimeError("dial failed")),
+                [self._input(0)],
+                response=BatchGenerateOutputsPB(),
+                seen_call=seen_call,
+            )
+
+        self.assertEqual(ExceptionType.CONNECT_FAILED, ctx.exception.exception_type)
+        self.assertIsNotNone(ctx.exception.rpc_deadline)
+        self.assertEqual(
+            [], seen_call, "the unary RPC must not be invoked before readiness"
+        )
+
+    def test_channel_readiness_timeout_is_marked_not_started(self):
+        with self.assertRaises(BatchRpcNotStartedError) as ctx:
+            self._run(
+                self._client(asyncio.TimeoutError()),
+                [self._input(0)],
+                response=BatchGenerateOutputsPB(),
+            )
+
+        self.assertEqual(ExceptionType.CONNECT_TIMEOUT, ctx.exception.exception_type)
 
     def test_grpc_error_without_trailing_metadata_keeps_original_cause(self):
         class _FakeRpcError(grpc.RpcError):
@@ -2128,7 +2182,24 @@ class BatchEnqueueDecodeSemanticsTest(TestCase):
             [30000, 1000],
             [item.generate_config.timeout_ms for item in batch_pb.inputs],
         )
-        self.assertEqual(30.0, rpc_timeout)
+        self.assertGreater(rpc_timeout, 0)
+        self.assertLessEqual(rpc_timeout, 30.0)
+        self.assertTrue(has_timeout_kwarg)
+
+    def test_batch_timeout_accepts_none_without_mutating_input(self):
+        response = BatchGenerateOutputsPB()
+        response.results.add().final_output.SetInParent()
+        item = self._input(0)
+        item.generate_config.timeout_ms = None
+        seen_call = []
+
+        self._run(self._client(), [item], response=response, seen_call=seen_call)
+
+        self.assertIsNone(item.generate_config.timeout_ms)
+        batch_pb, rpc_timeout, has_timeout_kwarg = seen_call[0]
+        self.assertEqual(30000, batch_pb.inputs[0].generate_config.timeout_ms)
+        self.assertGreater(rpc_timeout, 0)
+        self.assertLessEqual(rpc_timeout, 30.0)
         self.assertTrue(has_timeout_kwarg)
 
     def test_nonpositive_batch_timeout_is_unbounded_when_server_default_is_disabled(
@@ -2171,7 +2242,7 @@ class BatchEnqueueDecodeSemanticsTest(TestCase):
         self.assertIsNone(rpc_timeout)
         self.assertFalse(has_timeout_kwarg)
 
-    def test_finite_batch_timeout_preserves_millisecond_precision(self):
+    def test_finite_batch_timeout_preserves_per_item_millisecond_precision(self):
         client = self._client()
         first = self._input(0)
         first.generate_config.timeout_ms = 1001
@@ -2189,8 +2260,54 @@ class BatchEnqueueDecodeSemanticsTest(TestCase):
             [1001, 1003],
             [item.generate_config.timeout_ms for item in batch_pb.inputs],
         )
-        self.assertEqual(1.003, rpc_timeout)
+        self.assertGreater(rpc_timeout, 0)
+        self.assertLessEqual(rpc_timeout, 1.003)
         self.assertTrue(has_timeout_kwarg)
+
+    def test_channel_readiness_time_is_deducted_from_shared_batch_deadline(self):
+        item = self._input(0)
+        item.generate_config.timeout_ms = 1000
+        response = BatchGenerateOutputsPB()
+        response.results.add().final_output.SetInParent()
+        seen_call = []
+
+        self._run(
+            self._client(channel_ready_delay=0.1),
+            [item],
+            response=response,
+            seen_call=seen_call,
+        )
+
+        _, rpc_timeout, _ = seen_call[0]
+        self.assertGreater(rpc_timeout, 0)
+        self.assertLess(
+            rpc_timeout,
+            0.95,
+            "the unary call must receive only the deadline left after readiness",
+        )
+
+    def test_replacement_attempt_cannot_reset_an_existing_batch_deadline(self):
+        item = self._input(0)
+        item.generate_config.timeout_ms = 1000
+        response = BatchGenerateOutputsPB()
+        response.results.add().final_output.SetInParent()
+        seen_call = []
+
+        self._run(
+            self._client(channel_ready_delay=0.1),
+            [item],
+            response=response,
+            seen_call=seen_call,
+            rpc_deadline_offset=0.5,
+        )
+
+        _, rpc_timeout, _ = seen_call[0]
+        self.assertGreater(rpc_timeout, 0)
+        self.assertLess(
+            rpc_timeout,
+            0.45,
+            "a replacement must receive the old budget, not a fresh one-second timeout",
+        )
 
     def test_batch_item_error_preserves_typed_rpc_error_code(self):
         resp = BatchGenerateOutputsPB()

@@ -3,6 +3,8 @@ package org.flexlb.dispatcher;
 import com.alibaba.fastjson2.JSONArray;
 import com.alibaba.fastjson2.JSONObject;
 import org.flexlb.config.ConfigService;
+import org.flexlb.config.FlexlbConfig;
+import org.flexlb.config.TrafficPolicyConfig;
 import org.flexlb.dao.loadbalance.BatchScheduleTarget;
 import org.flexlb.util.Logger;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -28,9 +30,9 @@ import java.util.List;
  *       returns the resulting sub-batch bodies as JSON instead of fanning out. Side-effect-free
  *       by default: BE resolution is skipped, so no master traffic and no RR-cursor movement.
  *       Only an explicit {@code ?pre_assign=true} calls {@link BatchScheduleClient} for real BE
- *       resolution — which <em>does</em> advance master's batch RR cursor exactly like a
- *       production request, so use it only when you need the production wire shape and can
- *       accept perturbing live distribution.</li>
+ *       resolution when traffic-policy routing is inactive — which <em>does</em> advance master's
+ *       batch RR cursor exactly like a production request, so use it only when you need the
+ *       production wire shape and can accept perturbing live distribution.</li>
  * </ul>
  *
  * <p>Both endpoints share the dispatcher's enable gate ({@code dispatch.fe-pool-service-id}).
@@ -46,6 +48,7 @@ public class DispatcherInspectionHandler {
     private final DispatcherFePoolRefresher refresher;
     private final FeHealthChecker healthChecker;
     private final BatchScheduleClient batchScheduleClient;
+    private final FlexlbConfig loadBalanceConfig;
     private final int maxChunkCount;
     private final long maxResponseBytes;
 
@@ -56,7 +59,16 @@ public class DispatcherInspectionHandler {
                                        BatchScheduleClient batchScheduleClient,
                                        ConfigService configService) {
         this(cfg, refresher, healthChecker, batchScheduleClient,
-                configService.loadBalanceConfig().getBatchScheduleMaxCount());
+                configService.loadBalanceConfig());
+    }
+
+    private DispatcherInspectionHandler(DispatchConfig cfg,
+                                        DispatcherFePoolRefresher refresher,
+                                        FeHealthChecker healthChecker,
+                                        BatchScheduleClient batchScheduleClient,
+                                        FlexlbConfig loadBalanceConfig) {
+        this(cfg, refresher, healthChecker, batchScheduleClient,
+                loadBalanceConfig.getBatchScheduleMaxCount(), loadBalanceConfig);
     }
 
     /** Package-private convenience for focused tests; mirrors the production default. */
@@ -72,6 +84,15 @@ public class DispatcherInspectionHandler {
                                 FeHealthChecker healthChecker,
                                 BatchScheduleClient batchScheduleClient,
                                 int maxChunkCount) {
+        this(cfg, refresher, healthChecker, batchScheduleClient, maxChunkCount, null);
+    }
+
+    DispatcherInspectionHandler(DispatchConfig cfg,
+                                DispatcherFePoolRefresher refresher,
+                                FeHealthChecker healthChecker,
+                                BatchScheduleClient batchScheduleClient,
+                                int maxChunkCount,
+                                FlexlbConfig loadBalanceConfig) {
         if (maxChunkCount < 1) {
             throw new IllegalArgumentException("maxChunkCount must be >= 1, got " + maxChunkCount);
         }
@@ -79,6 +100,7 @@ public class DispatcherInspectionHandler {
         this.refresher = refresher;
         this.healthChecker = healthChecker;
         this.batchScheduleClient = batchScheduleClient;
+        this.loadBalanceConfig = loadBalanceConfig;
         this.maxChunkCount = maxChunkCount;
         this.maxResponseBytes = cfg.getMaxDryRunResponseBytes();
     }
@@ -113,7 +135,8 @@ public class DispatcherInspectionHandler {
             return badRequest("unknown batch endpoint path: " + fePath
                     + ", registered: " + BatchEndpointSpec.BY_PATH.keySet());
         }
-        boolean effectivePreAssign = resolvePreAssign(request);
+        boolean atomicBatchAllowed = !hasActiveTrafficPolicy();
+        boolean effectivePreAssign = resolvePreAssign(request) && atomicBatchAllowed;
         return request.bodyToMono(byte[].class).defaultIfEmpty(new byte[0]).flatMap(bytes -> {
             JSONObject body = BatchBodyParser.parseObject(bytes);
             if (body == null) {
@@ -142,10 +165,12 @@ public class DispatcherInspectionHandler {
             // Reject request-controlled envelope amplification before target resolution (which can
             // advance master's BE cursor) and before allocating any chunk arrays/bodies.
             if (projectedResponseBytes(
-                    spec, body, arr, chunkCount, effectivePreAssign, List.of()) > maxResponseBytes) {
+                    spec, body, arr, chunkCount, effectivePreAssign, List.of(),
+                    atomicBatchAllowed) > maxResponseBytes) {
                 return responseTooLarge();
             }
-            return buildDryRunResponse(spec, body, arr, chunkCount, effectivePreAssign);
+            return buildDryRunResponse(
+                    spec, body, arr, chunkCount, effectivePreAssign, atomicBatchAllowed);
         }).onErrorResume(this::handleDryRunException);
     }
 
@@ -171,6 +196,7 @@ public class DispatcherInspectionHandler {
      * real traffic. A diagnostic must not do that unless the caller explicitly asks — hence the
      * default is {@code false} regardless of {@link DispatchConfig#isPreAssignBe()}, and only an
      * explicit {@code ?pre_assign=true} opts into the production-accurate (state-advancing) run.
+     * Active traffic-policy routing still disables it, matching the production handler.
      */
     private boolean resolvePreAssign(ServerRequest request) {
         return request.queryParam("pre_assign")
@@ -178,9 +204,16 @@ public class DispatcherInspectionHandler {
                 .orElse(false);
     }
 
+    private boolean hasActiveTrafficPolicy() {
+        TrafficPolicyConfig policy = loadBalanceConfig == null
+                ? null : loadBalanceConfig.getTrafficPolicy();
+        return policy != null && policy.hasActiveRoutingRules();
+    }
+
     private Mono<ServerResponse> buildDryRunResponse(BatchEndpointSpec spec, JSONObject envelope,
                                                      JSONArray arr, int chunkCount,
-                                                     boolean effectivePreAssign) {
+                                                     boolean effectivePreAssign,
+                                                     boolean atomicBatchAllowed) {
         boolean shouldResolveTargets = effectivePreAssign && spec.isPreAssignable() && chunkCount > 0;
         Mono<List<BatchScheduleTarget>> targetsMono = shouldResolveTargets
                 // A dry-run only renders BE role_addrs. Never consume the FE cursor for a request
@@ -192,13 +225,14 @@ public class DispatcherInspectionHandler {
             // length-bounded by the wire type. Account for them before materializing repeated
             // envelopes as well; the final serialization check remains the authoritative backstop.
             if (!targets.isEmpty() && projectedResponseBytes(
-                    spec, envelope, arr, chunkCount, effectivePreAssign, targets)
+                    spec, envelope, arr, chunkCount, effectivePreAssign, targets,
+                    atomicBatchAllowed)
                     > maxResponseBytes) {
                 return responseTooLarge();
             }
             List<JSONArray> chunks = BatchChunkAssembler.split(arr, cfg.getSubBatchSpec());
             List<JSONObject> chunkBodies = BatchChunkAssembler.buildChunkBodies(
-                    envelope, chunks, spec.getRequestArrayField());
+                    envelope, chunks, spec.getRequestArrayField(), atomicBatchAllowed);
             spec.prepareChunkBodies(envelope, chunkBodies);
             BatchChunkAssembler.stampPreAssignedBe(chunkBodies, targets);
             JSONArray chunksOut = new JSONArray();
@@ -221,7 +255,8 @@ public class DispatcherInspectionHandler {
      */
     private long projectedResponseBytes(BatchEndpointSpec spec, JSONObject envelope,
                                         JSONArray arr, int chunkCount, boolean effectivePreAssign,
-                                        List<BatchScheduleTarget> targets) {
+                                        List<BatchScheduleTarget> targets,
+                                        boolean atomicBatchAllowed) {
         JSONObject skeleton = dryRunEnvelope(
                 spec, arr.size(), chunkCount, effectivePreAssign, targets, new JSONArray());
         long projected = BatchBodyParser.serialize(skeleton).length;
@@ -229,7 +264,8 @@ public class DispatcherInspectionHandler {
             return projected;
         }
         List<JSONObject> templateBodies = BatchChunkAssembler.buildChunkBodies(
-                envelope, List.of(new JSONArray()), spec.getRequestArrayField());
+                envelope, List.of(new JSONArray()), spec.getRequestArrayField(),
+                atomicBatchAllowed);
         spec.prepareChunkBodies(envelope, templateBodies);
         long templateBytes = BatchBodyParser.serialize(templateBodies.get(0)).length;
         long itemBytes = BatchBodyParser.serialize(arr).length;

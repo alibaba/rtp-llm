@@ -50,7 +50,29 @@ from rtp_llm.utils.grpc_util import (
 
 RPC_CLEANUP_TIMEOUT_SECONDS = 0.1
 RPC_SETTLE_TIMEOUT_SECONDS = 5.0
+BATCH_RPC_CONNECT_TIMEOUT_SECONDS = 5.0
 JsonableOption = Optional[Union[str, Dict[str, Any], bool]]
+
+
+class BatchRpcNotStartedError(FtRuntimeException):
+    """A batch connection failed before ``BatchGenerateCall`` was invoked.
+
+    This marker is deliberately narrower than the public CONNECT_* taxonomy: a gRPC
+    UNAVAILABLE may arrive after the backend started work, so its translated exception type alone
+    is never sufficient evidence for an at-most-once-safe reroute.
+    """
+
+    def __init__(
+        self,
+        exception_type: ExceptionType,
+        message: str,
+        *,
+        rpc_deadline: Optional[float] = None,
+    ):
+        super().__init__(exception_type, message)
+        # Event-loop time is process-local by design: this marker is consumed synchronously by
+        # BackendRPCServerVisitor when it performs the one at-most-once-safe replacement attempt.
+        self.rpc_deadline = rpc_deadline
 
 
 def _selected_pd_separation(
@@ -547,7 +569,10 @@ def trans_input(input_py: GenerateInput):
         input_py.generate_config.normalized_hidden_states
     )
     generate_config_pb.is_streaming = input_py.generate_config.is_streaming
-    generate_config_pb.timeout_ms = input_py.generate_config.timeout_ms
+    # proto3 scalar fields cannot represent None. Keep the Python-side
+    # "unspecified" value immutable and encode it as the existing zero/default
+    # sentinel for both streaming and batch RPC paths.
+    generate_config_pb.timeout_ms = input_py.generate_config.timeout_ms or 0
     if input_py.generate_config.sp_advice_prompt_token_ids:
         generate_config_pb.sp_advice_prompt_token_ids.extend(
             input_py.generate_config.sp_advice_prompt_token_ids
@@ -890,6 +915,52 @@ class ModelRpcClient(object):
         if self._max_rpc_timeout_ms > 0:
             return self._max_rpc_timeout_ms
         return None
+
+    async def _get_ready_batch_channel(
+        self, target_address: str, rpc_deadline: Optional[float]
+    ):
+        """Establish connectivity before the unary batch call can leave this process.
+
+        A successful readiness barrier is not a promise that the subsequent RPC will succeed; it
+        only gives the caller a precise boundary. Failures on this side of the boundary are safe to
+        reroute, while every error after ``BatchGenerateCall`` is invoked remains terminal because
+        the backend may already have executed the batch.
+        """
+        connect_timeout = BATCH_RPC_CONNECT_TIMEOUT_SECONDS
+        if rpc_deadline is not None:
+            remaining_timeout = rpc_deadline - asyncio.get_running_loop().time()
+            if remaining_timeout <= 0:
+                raise BatchRpcNotStartedError(
+                    ExceptionType.CONNECT_TIMEOUT,
+                    "batch RPC deadline expired before connection",
+                    rpc_deadline=rpc_deadline,
+                )
+            connect_timeout = min(connect_timeout, remaining_timeout)
+        try:
+            channel = await self._channel_pool.get(target_address)
+            await asyncio.wait_for(channel.channel_ready(), timeout=connect_timeout)
+            return channel
+        except asyncio.TimeoutError as error:
+            logging.error(
+                "batch RPC connection to [%s] timed out before dispatch",
+                target_address,
+            )
+            raise BatchRpcNotStartedError(
+                ExceptionType.CONNECT_TIMEOUT,
+                "batch RPC connection timed out before dispatch",
+                rpc_deadline=rpc_deadline,
+            ) from error
+        except Exception as error:
+            logging.error(
+                "batch RPC connection to [%s] failed before dispatch: %s",
+                target_address,
+                error,
+            )
+            raise BatchRpcNotStartedError(
+                ExceptionType.CONNECT_FAILED,
+                "batch RPC connection failed before dispatch",
+                rpc_deadline=rpc_deadline,
+            ) from error
 
     def _handle_grpc_error(
         self, e: grpc.RpcError, request_desc: str, target_address: str = ""
@@ -1292,7 +1363,12 @@ class ModelRpcClient(object):
             name = "P2P_CONNECTOR_WORKER_READ_CANCELLED"
         return ExceptionType.__members__.get(name, ExceptionType.UNKNOWN_ERROR)
 
-    async def batch_enqueue(self, inputs: list[GenerateInput]) -> list[GenerateOutputs]:
+    async def batch_enqueue(
+        self,
+        inputs: list[GenerateInput],
+        *,
+        rpc_deadline: Optional[float] = None,
+    ) -> list[GenerateOutputs]:
         """Send one chunk as a single BatchGenerateCall and return one output per input, in order.
 
         Error semantics are chunk-level all-or-nothing. The C++ BatchGenerateCall returns a
@@ -1306,7 +1382,8 @@ class ModelRpcClient(object):
         Turning this into per-item partial return is a larger change that must also teach both
         consumers to represent a single failed item. ``BatchEnqueueDecodeSemanticsTest`` locks
         this behavior (raise-on-first-error, ``inputs[i]`` <-> ``results[i]`` alignment, and
-        ``grpc.RpcError`` translation).
+        ``grpc.RpcError`` translation). ``rpc_deadline`` is the process-local monotonic deadline
+        carried into the one safe replacement attempt; a fresh call leaves it unset.
         """
         if not inputs:
             return []
@@ -1354,11 +1431,29 @@ class ModelRpcClient(object):
         rpc_completed = False
 
         try:
-            channel = await self._channel_pool.get(target_address)
+            fresh_deadline = (
+                None
+                if grpc_timeout_seconds is None
+                else asyncio.get_running_loop().time() + grpc_timeout_seconds
+            )
+            if fresh_deadline is not None:
+                rpc_deadline = (
+                    fresh_deadline
+                    if rpc_deadline is None
+                    else min(rpc_deadline, fresh_deadline)
+                )
+            channel = await self._get_ready_batch_channel(target_address, rpc_deadline)
             stub = RpcServiceStub(channel)
             grpc_kwargs = {}
-            if grpc_timeout_seconds is not None:
-                grpc_kwargs["timeout"] = grpc_timeout_seconds
+            if rpc_deadline is not None:
+                remaining_timeout = rpc_deadline - asyncio.get_running_loop().time()
+                if remaining_timeout <= 0:
+                    raise BatchRpcNotStartedError(
+                        ExceptionType.CONNECT_TIMEOUT,
+                        "batch RPC deadline expired before dispatch",
+                        rpc_deadline=rpc_deadline,
+                    )
+                grpc_kwargs["timeout"] = remaining_timeout
             if trace_metadata:
                 grpc_kwargs["metadata"] = trace_metadata
             response = await stub.BatchGenerateCall(batch_input_pb, **grpc_kwargs)

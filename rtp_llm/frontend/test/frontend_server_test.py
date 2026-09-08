@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 import torch
 from pydantic import BaseModel
 
+from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import GenerateConfig, RoleAddr
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.cpp.model_rpc.model_rpc_client import (
@@ -14,9 +15,13 @@ from rtp_llm.cpp.model_rpc.model_rpc_client import (
     _selected_pd_separation,
 )
 from rtp_llm.frontend.frontend_server import FrontendServer
+from rtp_llm.frontend.frontend_worker import BatchPipelineResponse, FrontendWorker
 from rtp_llm.openai.api_datatype import ChatCompletionRequest, FinisheReason
 from rtp_llm.ops import RoleType
-from rtp_llm.utils.base_model_datatypes import GenerateInput
+from rtp_llm.pipeline.pipeline import Pipeline
+from rtp_llm.structure.request_constants import request_id_field_name
+from rtp_llm.structure.request_extractor import Request, RequestExtractor
+from rtp_llm.utils.base_model_datatypes import GenerateInput, GenerateOutputs
 from rtp_llm.utils.complete_response_async_generator import (
     CompleteResponseAsyncGenerator,
 )
@@ -25,6 +30,10 @@ from rtp_llm.utils.concurrency_controller import init_controller, set_global_con
 
 class FakePipelinResponse(BaseModel):
     res: str
+
+
+class FakeBatchResponse(BaseModel):
+    response_batch: list[Any] = []
 
 
 class FakeFrontendWorker(object):
@@ -39,9 +48,14 @@ class FakeFrontendWorker(object):
     def __init__(self):
         self.backend_rpc_server_visitor = self.FakeBackendRpcServerVisitor()
         self.close_called = False
+        self.batch_calls = []
 
     async def close(self):
         self.close_called = True
+
+    async def batch_infer(self, **kwargs: Any):
+        self.batch_calls.append(kwargs)
+        return FakeBatchResponse()
 
     def inference(self, prompt: str, *args: Any, **kwargs: Any):
         response_generator = self._inference(prompt, *args, **kwargs)
@@ -57,6 +71,223 @@ class FakeFrontendWorker(object):
 
     def is_streaming(self, *args: Any, **kwargs: Any):
         return False
+
+
+class ForceBatchFrontendWorkerTest(TestCase):
+    @staticmethod
+    def _request(force_batch: bool, is_streaming: bool = False) -> Request:
+        configs = [
+            GenerateConfig(force_batch=force_batch),
+            GenerateConfig(force_batch=force_batch),
+        ]
+        return Request(
+            request_id=700,
+            batch_infer=True,
+            input_texts=["first", "second"],
+            input_urls=[[], []],
+            generate_configs=configs,
+            is_streaming=is_streaming,
+        )
+
+    def test_request_extractor_preserves_nested_force_batch(self):
+        request, _ = RequestExtractor(GenerateConfig()).extract_request(
+            {
+                request_id_field_name: 700,
+                "prompt_batch": ["first", "second"],
+                "generate_config": {"force_batch": True},
+            }
+        )
+
+        self.assertTrue(all(config.force_batch for config in request.generate_configs))
+
+    def test_dedicated_batch_endpoint_reuses_topology_aware_inference(self):
+        worker = FrontendWorker.__new__(FrontendWorker)
+        expected = BatchPipelineResponse(response_batch=[])
+
+        async def generate():
+            yield expected
+
+        # Stub below the public inference entry point so this test exercises the real
+        # RequestExtractor contract, including its internal request-ID field name.
+        worker._inference = MagicMock(return_value=generate())
+
+        result = asyncio.run(
+            worker.batch_infer(
+                ["first", "second"],
+                700,
+                {},
+                headers={"x-request-id": "trace-me"},
+            )
+        )
+
+        self.assertIs(expected, result)
+        request = worker._inference.call_args.args[0]
+        self.assertEqual(700, request.request_id)
+        self.assertTrue(all(config.force_batch for config in request.generate_configs))
+        self.assertFalse(request.is_streaming)
+        self.assertEqual(
+            {"x-request-id": "trace-me"}, worker._inference.call_args.kwargs["headers"]
+        )
+
+    def test_dedicated_batch_endpoint_preserves_force_batch_opt_out(self):
+        worker = FrontendWorker.__new__(FrontendWorker)
+
+        async def generate():
+            yield BatchPipelineResponse(response_batch=[])
+
+        worker._inference = MagicMock(return_value=generate())
+
+        asyncio.run(worker.batch_infer(["first"], 700, {"force_batch": False}))
+
+        request = worker._inference.call_args.args[0]
+        self.assertFalse(request.generate_configs[0].force_batch)
+
+    def test_force_batch_selects_single_batch_generator(self):
+        worker = FrontendWorker.__new__(FrontendWorker)
+        worker.backend_rpc_server_visitor = MagicMock()
+        worker.backend_rpc_server_visitor.pd_sep_config.role_type = RoleType.PDFUSION
+        worker.backend_rpc_server_visitor.backend_role_list = []
+        batch_generator = object()
+        worker._yield_batch_generate = MagicMock(return_value=batch_generator)
+
+        selected = worker._inference(self._request(True), headers={"x-request-id": "r"})
+
+        self.assertIs(batch_generator, selected)
+        worker._yield_batch_generate.assert_called_once()
+
+    def test_explicit_false_keeps_legacy_per_item_generators(self):
+        worker = FrontendWorker.__new__(FrontendWorker)
+        worker._yield_batch_generate = MagicMock()
+        worker._yield_generate = MagicMock(side_effect=[object(), object()])
+        legacy_generator = object()
+        worker._parallel_batch_async_generators = MagicMock(
+            return_value=legacy_generator
+        )
+
+        selected = worker._inference(self._request(False))
+
+        self.assertIs(legacy_generator, selected)
+        worker._yield_batch_generate.assert_not_called()
+        self.assertEqual(2, worker._yield_generate.call_count)
+
+    def test_force_batch_keeps_per_item_rpc_for_prefill_decode_handoff(self):
+        worker = FrontendWorker.__new__(FrontendWorker)
+        worker.backend_rpc_server_visitor = MagicMock()
+        worker.backend_rpc_server_visitor.pd_sep_config.role_type = RoleType.FRONTEND
+        worker.backend_rpc_server_visitor.backend_role_list = [
+            RoleType.PREFILL,
+            RoleType.DECODE,
+        ]
+        worker._yield_batch_generate = MagicMock()
+        worker._yield_generate = MagicMock(side_effect=[object(), object()])
+        legacy_generator = object()
+        worker._parallel_batch_async_generators = MagicMock(
+            return_value=legacy_generator
+        )
+
+        selected = worker._inference(self._request(True))
+
+        self.assertIs(legacy_generator, selected)
+        worker._yield_batch_generate.assert_not_called()
+        self.assertEqual(2, worker._yield_generate.call_count)
+
+    def test_force_batch_keeps_per_item_rpc_when_frontend_topology_is_unknown(self):
+        worker = FrontendWorker.__new__(FrontendWorker)
+        worker.backend_rpc_server_visitor = MagicMock()
+        worker.backend_rpc_server_visitor.pd_sep_config.role_type = RoleType.FRONTEND
+        worker.backend_rpc_server_visitor.backend_role_list = []
+        worker._yield_batch_generate = MagicMock()
+        worker._yield_generate = MagicMock(side_effect=[object(), object()])
+        legacy_generator = object()
+        worker._parallel_batch_async_generators = MagicMock(
+            return_value=legacy_generator
+        )
+
+        selected = worker._inference(self._request(True))
+
+        self.assertIs(legacy_generator, selected)
+        worker._yield_batch_generate.assert_not_called()
+        self.assertEqual(2, worker._yield_generate.call_count)
+
+    def test_force_batch_keeps_per_item_rpc_for_preassigned_pd_roles(self):
+        worker = FrontendWorker.__new__(FrontendWorker)
+        worker.backend_rpc_server_visitor = MagicMock()
+        worker.backend_rpc_server_visitor.pd_sep_config.role_type = RoleType.FRONTEND
+        worker.backend_rpc_server_visitor.backend_role_list = [RoleType.PDFUSION]
+        worker._yield_batch_generate = MagicMock()
+        worker._yield_generate = MagicMock(side_effect=[object(), object()])
+        legacy_generator = object()
+        worker._parallel_batch_async_generators = MagicMock(
+            return_value=legacy_generator
+        )
+        request = self._request(True)
+        for config in request.generate_configs:
+            config.role_addrs = [
+                RoleAddr(role=RoleType.PREFILL, ip="p", http_port=1, grpc_port=2),
+                RoleAddr(role=RoleType.DECODE, ip="d", http_port=3, grpc_port=4),
+            ]
+
+        selected = worker._inference(request)
+
+        self.assertIs(legacy_generator, selected)
+        worker._yield_batch_generate.assert_not_called()
+        self.assertEqual(2, worker._yield_generate.call_count)
+
+    def test_force_batch_rejects_streaming(self):
+        worker = FrontendWorker.__new__(FrontendWorker)
+
+        with self.assertRaises(FtRuntimeException) as raised:
+            worker._inference(self._request(True, is_streaming=True))
+
+        self.assertEqual(
+            ExceptionType.UNSUPPORTED_OPERATION, raised.exception.exception_type
+        )
+
+    def test_prepared_batch_invokes_backend_once_with_group_identity(self):
+        pipeline = Pipeline.__new__(Pipeline)
+
+        class Tokenizer:
+            @staticmethod
+            def encode(prompt):
+                return [len(prompt), 1]
+
+        class Backend:
+            def __init__(self):
+                self.calls = []
+
+            async def batch_enqueue(self, inputs):
+                self.calls.append(inputs)
+                return [GenerateOutputs(), GenerateOutputs()]
+
+        pipeline.tokenizer = Tokenizer()
+        pipeline.backend_rpc_server_visitor = Backend()
+        pipeline.decode_non_incremental_tokens = MagicMock(
+            side_effect=[(["one"], [1], []), (["two"], [1], [])]
+        )
+        configs = [GenerateConfig(aux_info=False), GenerateConfig(aux_info=False)]
+
+        responses = asyncio.run(
+            pipeline.batch_infer_prepared(
+                prompts=["first", "second"],
+                request_ids=[700, 10_700],
+                generate_configs=configs,
+                headers={"X-Request-ID": "trace-me", "ignored": "value"},
+                group_id=700,
+            )
+        )
+
+        self.assertEqual(2, len(responses))
+        self.assertEqual(1, len(pipeline.backend_rpc_server_visitor.calls))
+        inputs = pipeline.backend_rpc_server_visitor.calls[0]
+        self.assertEqual([700, 10_700], [item.request_id for item in inputs])
+        self.assertEqual([2, 2], [item.group_size for item in inputs])
+        self.assertEqual([700, 700], [item.group_id for item in inputs])
+        self.assertEqual(
+            [{"x-request-id": "trace-me"}, {"x-request-id": "trace-me"}],
+            [item.headers for item in inputs],
+        )
+        self.assertIs(configs[0], inputs[0].generate_config)
+        self.assertIs(configs[1], inputs[1].generate_config)
 
 
 class FakeRawRequest(object):
@@ -108,6 +339,30 @@ class FrontendServerTest(TestCase):
         )
         self.assertEqual(
             res.body.decode("utf-8"), '{"res":"hello"}', res.body.decode("utf-8")
+        )
+
+    def test_batch_infer_propagates_routing_headers(self):
+        response = asyncio.run(
+            self.frontend_server.batch_infer(
+                {"prompt_batch": ["hello"], "generate_config": {}},
+                FakeRawRequest(
+                    {
+                        "X-Request-ID": "trace-me",
+                        "X-DashScope-Inner-QoS-Level": "70",
+                        "ignored": "secret",
+                    }
+                ),
+            )
+        )
+
+        self.assertEqual(b'{"response_batch":[]}', response.body)
+        call = self.frontend_server._frontend_worker.batch_calls[-1]
+        self.assertEqual(
+            {
+                "x-request-id": "trace-me",
+                "x-dashscope-inner-qos-level": "70",
+            },
+            call["headers"],
         )
 
     def test_response_chunk_event_is_streaming_only(self):

@@ -2,6 +2,7 @@ package org.flexlb.balance.strategy;
 
 import org.apache.commons.collections4.CollectionUtils;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
+import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.resource.DecodeResourceMeasure;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
 import org.flexlb.config.ConfigService;
@@ -10,7 +11,6 @@ import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
-import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.LoadBalanceStrategyEnum;
 import org.flexlb.enums.ResourceMeasureIndicatorEnum;
@@ -47,7 +47,7 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
         long seqLen = request.getSeqLen();
         long maxNewTokens = request.getMaxNewTokens();
         FlexlbConfig config = balanceContext.getConfig();
-        long outputReservation = balanceContext.isPlacementOnly()
+        long outputReservation = balanceContext.isAggregateDemand()
                 ? Math.max(0, maxNewTokens)
                 : config.effectiveMaxNewTokensForReservation(maxNewTokens);
         long expectedKvTokens = seqLen + outputReservation;

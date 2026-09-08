@@ -547,10 +547,14 @@ class FrontendServer(object):
             assert self._frontend_worker is not None
             prompts = req.get("prompt_batch", [])
             generate_config = req.get("generate_config", {})
+            request_headers = extract_request_headers(
+                getattr(raw_request, "headers", None)
+            )
             result = await self._frontend_worker.batch_infer(
                 prompts=prompts,
                 request_id=request_id,
                 generate_config=generate_config,
+                headers=request_headers,
             )
             return ORJSONResponse(content=result.model_dump(exclude_none=True))
         finally:

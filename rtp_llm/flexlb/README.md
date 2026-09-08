@@ -168,7 +168,7 @@ export MODEL_SERVICE_CONFIG='{
 }'
 ```
 
-Traffic routing is two-layered: `TRAFFIC_POLICY_CONFIG` selects the target `group`, then each role's load balancing strategy selects the final prefill/decode host inside that group. You can also set `TRAFFIC_POLICY_CONFIG_FILE` to a JSON file path. Standalone traffic policy config takes priority over `trafficPolicy` embedded in `FLEXLB_CONFIG`, and you can replace the active policy at runtime with `POST /rtp_llm/update_traffic_policy`.
+Traffic routing is two-layered: `TRAFFIC_POLICY_CONFIG` selects the target `group`, then each role's load balancing strategy selects the final prefill/decode host inside that group. You can also set `TRAFFIC_POLICY_CONFIG_FILE` to a JSON file path. Standalone traffic policy config takes priority over `trafficPolicy` embedded in `FLEXLB_CONFIG`, and you can replace the active policy at runtime with `POST /rtp_llm/update_traffic_policy`. Dispatcher prompt batches automatically use per-item FE scheduling while a policy is active, so length-based and weighted rules are evaluated against each prompt rather than an aggregate token count.
 
 Set `decodeConcurrencyLimit` to a positive number to cap each decode worker's in-flight requests. FlexLB counts reported waiting/running tasks plus local in-transit selections, deduplicated by request id. When a decode worker reaches the limit, it is not considered serviceable; values <= 0 disable this FlexLB-side limit.
 
@@ -189,7 +189,8 @@ export DISPATCH_CONFIG='{
 `feAllocation=master` (default) coordinates FE assignment through the elected master's single
 cursor. `local` is the availability mode and uses each dispatcher's health-filtered local pool.
 `preAssignBe` defaults to `false` for rolling-upgrade safety; enable it only after every FE can
-deserialize dispatcher-provided `role_addrs`. Registered dispatcher batch paths reject
+deserialize dispatcher-provided `role_addrs`. An active traffic-group policy disables this
+optimization so token-length and tenant rules remain request-aware at FE. Registered dispatcher batch paths reject
 caller-supplied `generate_config.role_addrs` at their HTTP boundary because dispatcher placement
 is authoritative, including when the request shape would otherwise be forwarded whole. The two
 byte limits cap the retained fanout response and diagnostic dry-run response per request.
