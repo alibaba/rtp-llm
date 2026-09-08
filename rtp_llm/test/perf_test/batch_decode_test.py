@@ -19,11 +19,17 @@ from rtp_llm.test.perf_test.dataset import extract_arg
 from rtp_llm.test.perf_test.distribution_runner import DistributionRunner
 from rtp_llm.test.perf_test.grid_runner import GridRunner
 from rtp_llm.test.perf_test.perf_config import (
+    _apply_engine_env,
+    _apply_run_overrides,
+    _engine_arg_argv,
+    _parse_name_value,
     parse_args,
     prepare_config,
     resolve_perf_engine_paths,
 )
 from rtp_llm.test.perf_test.perf_utils import (
+    _is_sensitive_name,
+    _redact_argv,
     collect_timeline_files,
     filter_bs_by_kvcache,
     print_config_table,
@@ -34,6 +40,15 @@ from rtp_llm.test.perf_test.server import EngineServer
 from rtp_llm.test.perf_test.test_util import create_query
 from rtp_llm.test.perf_test.tps_runner import TpsBinarySearchRunner
 from rtp_llm.test.utils.coredump_util import summarize_and_cleanup_coredumps
+
+__all__ = [
+    "_engine_arg_argv",
+    "_parse_name_value",
+    "_redact_argv",
+    "main",
+    "parse_args",
+    "run_single",
+]
 
 # ---------------------------------------------------------------------------
 #  Backward-compatible wrapper (used by external callers)
@@ -198,9 +213,147 @@ def _effective_grid_max_seq_len(
 
 def _explicit_batch_size_list(args: argparse.Namespace) -> Optional[List[int]]:
     """--batch_size as given on the command line, or None when it was defaulted."""
-    if not any(a.startswith("--batch_size") for a in sys.argv[1:]):
+    batch_size_explicit = getattr(
+        args,
+        "batch_size_explicit",
+        any(a.startswith("--batch_size") for a in sys.argv[1:]),
+    )
+    if not batch_size_explicit:
         return None
     return [int(x) for x in args.batch_size.split(",")]
+
+
+_PERFORMANCE_ENV_NAMES = {
+    "ACT_TYPE",
+    "CACHE_CONFIG",
+    "CACHE_STORE_TYPE",
+    "CHECKPOINT_PATH",
+    "CONCURRENCY_LIMIT",
+    "CP_ROTATE_METHOD",
+    "DEVICE_NAME",
+    "DEVICE_RESERVE_MEMORY_BYTES",
+    "DP_SIZE",
+    "DSV4_CHUNK_TOKENS",
+    "DSV4_FIXED_POOL_BLOCKS",
+    "ENABLE_CUDA_GRAPH",
+    "EP_SIZE",
+    "FP8_KV_CACHE",
+    "GEN_NUM_PER_CYCLE",
+    "INT8_MODE",
+    "KV_CACHE_MEM_BYTES",
+    "KV_CACHE_MEM_MB",
+    "LOAD_METHOD",
+    "LOCAL_WORLD_SIZE",
+    "MAX_BATCH_SIZE",
+    "MAX_BATCH_TOKENS_SIZE",
+    "MAX_CONTEXT_BATCH_SIZE",
+    "MAX_SEQ_LEN",
+    "MODEL_TYPE",
+    "PREFILL_CP_KV_CACHE_SHARDED",
+    "QUANTIZATION",
+    "RESERVER_RUNTIME_MEM_MB",
+    "SEQ_SIZE_PER_BLOCK",
+    "SP_ACT_TYPE",
+    "SP_CHECKPOINT_PATH",
+    "SP_MODEL_TYPE",
+    "SP_TYPE",
+    "TOKENIZER_PATH",
+    "TP_SIZE",
+    "USE_DEEPEP_LOW_LATENCY",
+    "USE_DEEPEP_MOE",
+    "WORLD_SIZE",
+}
+_PERFORMANCE_ENV_PREFIXES = (
+    "CACHE_",
+    "CUDA_",
+    "DEEP_EP_",
+    "DG_JIT_",
+    "DSV4_",
+    "ENABLE_",
+    "FP8_",
+    "GEN_TIMELINE_",
+    "INT8_",
+    "KV_CACHE_",
+    "LOAD_",
+    "MODEL_",
+    "MOE_",
+    "NCCL_",
+    "PERF_",
+    "PREFILL_",
+    "QUANTIZATION_",
+    "RTP_LLM_",
+    "SP_",
+    "TORCH_",
+    "USE_DEEP",
+)
+
+
+def _is_performance_runtime_name(name: str, explicit_names: set[str]) -> bool:
+    return (
+        name in explicit_names
+        or name in _PERFORMANCE_ENV_NAMES
+        or name.startswith(_PERFORMANCE_ENV_PREFIXES)
+    )
+
+
+def _fingerprint_engine_env(names: List[str]) -> Dict[str, str]:
+    """Capture effective engine/perf environment without collecting credentials."""
+    explicit_names = set(names)
+    relevant_names = {
+        name
+        for name in os.environ
+        if _is_performance_runtime_name(name, explicit_names)
+        and not _is_sensitive_name(name)
+    }
+    return {name: os.environ[name] for name in sorted(relevant_names)}
+
+
+def _effective_performance_config(
+    engine_args: List[str],
+    engine_env_names: List[str],
+    cli_overrides: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Dict[str, str]]:
+    """Resolve effective runtime values with CLI taking precedence over env."""
+    values = _fingerprint_engine_env(engine_env_names)
+    explicit_names = set(engine_env_names)
+    sources = {
+        name: "engine_env" if name in explicit_names else "environment"
+        for name in values
+    }
+    index = 0
+    while index < len(engine_args):
+        argument = engine_args[index]
+        index += 1
+        if not argument.startswith("--"):
+            continue
+        option = argument[2:]
+        if "=" in option:
+            option, value = option.split("=", 1)
+        elif index < len(engine_args) and not engine_args[index].startswith("--"):
+            value = engine_args[index]
+            index += 1
+        else:
+            value = "1"
+        name = option.replace("-", "_").upper()
+        if not _is_performance_runtime_name(name, explicit_names):
+            continue
+        if _is_sensitive_name(name):
+            values.pop(name, None)
+            sources.pop(name, None)
+            continue
+        values[name] = str(value)
+        sources[name] = "cli"
+
+    for name, value in (cli_overrides or {}).items():
+        normalized = name.replace("-", "_").upper()
+        if _is_sensitive_name(normalized):
+            continue
+        values[normalized] = str(value)
+        sources[normalized] = "cli"
+    return {
+        "values": dict(sorted(values.items())),
+        "sources": dict(sorted(sources.items())),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -312,6 +465,9 @@ def main() -> str:
     setup_logging()
 
     args, remaining = parse_args()
+    engine_env_names = _apply_engine_env(args.engine_env)
+    _apply_run_overrides(args)
+    remaining.extend(_engine_arg_argv(args.engine_arg))
     remaining = resolve_perf_engine_paths(remaining)
     # batch_decode_test always needs BatchDecodeScheduler
     if extract_arg(remaining, "use_batch_decode_scheduler") is None:
@@ -321,7 +477,7 @@ def main() -> str:
     EngineServer.propagate_engine_env(remaining)
 
     logging.info(f"Result directory: {args.result_dir}")
-    logging.info(f"Engine args forwarded to server: {remaining}")
+    logging.info(f"Engine args forwarded to server: {_redact_argv(remaining)}")
 
     if args.cache_grid_json:
         if args.partial != 2:
@@ -350,6 +506,9 @@ def main() -> str:
                 )
         max_input_len = max(int(case["input_len"]) for case in cases)
         max_batch_size = max(int(case["batch_size"]) for case in cases)
+        effective_max_seq_len = max(
+            max_input_len + args.decode_test_length, args.max_seq_len
+        )
         tokenizer_path = (
             extract_arg(remaining, "tokenizer_path")
             or extract_arg(remaining, "checkpoint_path")
@@ -359,13 +518,29 @@ def main() -> str:
             raise ValueError(
                 "cache-grid mode requires --tokenizer_path or --checkpoint_path"
             )
+        effective_runtime_config = _effective_performance_config(
+            remaining,
+            engine_env_names,
+            {
+                "DP_SIZE": args.dp_size,
+                "MAX_SEQ_LEN": effective_max_seq_len,
+                "CONCURRENCY_LIMIT": max_batch_size,
+            },
+        )
+        write_test_info(
+            args,
+            remaining,
+            engine_env_names,
+            status="running",
+            effective_max_seq_len=effective_max_seq_len,
+            service_concurrency_limit=max_batch_size,
+            effective_runtime_config=effective_runtime_config,
+        )
 
         server = EngineServer(args, remaining)
         try:
             server.start(
-                max_seq_len=max(
-                    max_input_len + args.decode_test_length, args.max_seq_len
-                ),
+                max_seq_len=effective_max_seq_len,
                 max_concurrency=max_batch_size,
                 use_batch_decode_scheduler=True,
             )
@@ -382,9 +557,32 @@ def main() -> str:
                 request_timeout=args.cache_request_timeout,
                 measure_runs=args.cache_measure_runs,
                 cache_commit_tail_tokens=args.cache_commit_tail_tokens,
+                run_config={
+                    "model_type": extract_arg(remaining, "model_type")
+                    or os.environ.get("MODEL_TYPE"),
+                    "checkpoint_path": extract_arg(remaining, "checkpoint_path")
+                    or os.environ.get("CHECKPOINT_PATH"),
+                    "tokenizer_path": tokenizer_path,
+                    "requested_max_seq_len": int(args.max_seq_len),
+                    "effective_max_seq_len": effective_max_seq_len,
+                    "requested_concurrency_limit": int(args.concurrency_limit),
+                    "service_concurrency_limit": max_batch_size,
+                    "dp_size": int(args.dp_size),
+                    "engine_args": _redact_argv(remaining),
+                    "engine_env": _fingerprint_engine_env(engine_env_names),
+                    "effective_runtime_config": effective_runtime_config,
+                },
             ).run()
             collect_timeline_files(args.result_dir)
-            write_test_info(args, remaining)
+            write_test_info(
+                args,
+                remaining,
+                engine_env_names,
+                status="completed",
+                effective_max_seq_len=effective_max_seq_len,
+                service_concurrency_limit=max_batch_size,
+                effective_runtime_config=effective_runtime_config,
+            )
         finally:
             server.stop()
             summarize_and_cleanup_coredumps(args.result_dir)
@@ -394,6 +592,24 @@ def main() -> str:
     config = prepare_config(args, remaining)
     if not config.is_distribution:
         config.max_seq_len = _effective_grid_max_seq_len(args, config.input_len_list)
+    effective_runtime_config = _effective_performance_config(
+        remaining,
+        engine_env_names,
+        {
+            "DP_SIZE": args.dp_size,
+            "MAX_SEQ_LEN": config.max_seq_len,
+            "CONCURRENCY_LIMIT": config.max_concurrency,
+        },
+    )
+    write_test_info(
+        args,
+        remaining,
+        engine_env_names,
+        status="running",
+        effective_max_seq_len=config.max_seq_len,
+        service_concurrency_limit=config.max_concurrency,
+        effective_runtime_config=effective_runtime_config,
+    )
 
     # Phase 2: Serve
     server = EngineServer(args, remaining)
@@ -439,7 +655,15 @@ def main() -> str:
         # Cleanup
         collect_timeline_files(args.result_dir)
         server.stop()
-        write_test_info(args, remaining)
+        write_test_info(
+            args,
+            remaining,
+            engine_env_names,
+            status="completed",
+            effective_max_seq_len=config.max_seq_len,
+            service_concurrency_limit=config.max_concurrency,
+            effective_runtime_config=effective_runtime_config,
+        )
 
         if args.partial != 2:
             from rtp_llm.test.perf_test.visualization import plot_decode_results

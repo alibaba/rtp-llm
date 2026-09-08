@@ -31,7 +31,7 @@ TEST(TorchCudaOomTest, RejectsUnrelatedExceptionsContainingGenericOomWords) {
     EXPECT_FALSE(isTorchCudaOom(std::runtime_error("CUDA illegal memory access")));
 }
 
-TEST(TorchCudaOomTest, RetriesRecognizedOomExactlyOnce) {
+TEST(TorchCudaOomTest, RetriesRecognizedOomOnlyWithSupportedCacheRecovery) {
     int operation_calls = 0;
     int retry_callbacks = 0;
 
@@ -44,8 +44,15 @@ TEST(TorchCudaOomTest, RetriesRecognizedOomExactlyOnce) {
             [&](const std::exception&) { ++retry_callbacks; }),
         std::runtime_error);
 
+#if USING_CUDA
+    EXPECT_TRUE(torchGpuOomRecoveryRetrySupported());
     EXPECT_EQ(operation_calls, 2);
     EXPECT_EQ(retry_callbacks, 1);
+#else
+    EXPECT_FALSE(torchGpuOomRecoveryRetrySupported());
+    EXPECT_EQ(operation_calls, 1);
+    EXPECT_EQ(retry_callbacks, 0);
+#endif
 }
 
 TEST(TorchCudaOomTest, DoesNotRetryUnrelatedFailure) {
@@ -65,21 +72,26 @@ TEST(TorchCudaOomTest, DoesNotRetryUnrelatedFailure) {
     EXPECT_EQ(retry_callbacks, 0);
 }
 
-TEST(TorchCudaOomTest, ReturnsAfterOneSuccessfulRetry) {
+TEST(TorchCudaOomTest, SuccessfulRecoveryIsCudaOnly) {
     int operation_calls = 0;
     int retry_callbacks = 0;
+    auto operation       = [&]() {
+        ++operation_calls;
+        if (operation_calls == 1) {
+            throw std::runtime_error("cudaErrorMemoryAllocation");
+        }
+    };
+    auto before_retry = [&](const std::exception&) { ++retry_callbacks; };
 
-    retryOnceOnTorchCudaOom(
-        [&]() {
-            ++operation_calls;
-            if (operation_calls == 1) {
-                throw std::runtime_error("cudaErrorMemoryAllocation");
-            }
-        },
-        [&](const std::exception&) { ++retry_callbacks; });
-
+#if USING_CUDA
+    EXPECT_NO_THROW(retryOnceOnTorchCudaOom(operation, before_retry));
     EXPECT_EQ(operation_calls, 2);
     EXPECT_EQ(retry_callbacks, 1);
+#else
+    EXPECT_THROW(retryOnceOnTorchCudaOom(operation, before_retry), std::runtime_error);
+    EXPECT_EQ(operation_calls, 1);
+    EXPECT_EQ(retry_callbacks, 0);
+#endif
 }
 
 }  // namespace

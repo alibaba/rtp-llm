@@ -16,6 +16,7 @@ pool failures are raised and never cached.
 
 from __future__ import annotations
 
+import faulthandler
 import functools
 import json
 import logging
@@ -61,6 +62,23 @@ class _GrammarCheckResult(NamedTuple):
     cacheable: bool = False
 
 
+def _rebuild_dup_fd(dup_fd: Any) -> Any:
+    return dup_fd
+
+
+class _DeferredDupFd:
+    """Create DupFd only while multiprocessing owns process serialization."""
+
+    def __init__(self, fd: int) -> None:
+        self._fd = fd
+
+    def __reduce__(self) -> tuple[Any, tuple[Any]]:
+        # Calling DupFd before Process.start() registers an extra descriptor with
+        # resource_sharer, which has no public cancellation API if startup fails.
+        # During spawn serialization it instead uses Popen's child-owned fd wrapper.
+        return _rebuild_dup_fd, (DupFd(self._fd),)
+
+
 # Per-thread request id for log correlation (dashserving is thread-per-request): validate_*
 # stashes it here, the logging calls read it. Kept off the method args so it never becomes
 # part of the lru_cache key.
@@ -90,6 +108,40 @@ def _is_resource_exhaustion(error: BaseException) -> bool:
     )
 
 
+# Keep this list synchronized with isExplicitGrammarParseError() in
+# rtp_llm/cpp/engine_base/grammar/XGrammarBackend.cc.
+_DETERMINISTIC_GRAMMAR_ERROR_MARKERS = (
+    "invalid json",
+    "json parse",
+    "json parsing error",
+    "failed to parse json",
+    "json syntax error",
+    "json lexer error",
+    "invalid regex",
+    "regex parse",
+    "regex parsing error",
+    "failed to parse regex",
+    "regex syntax error",
+    "regex lexer error",
+    "invalid ebnf",
+    "ebnf parse",
+    "ebnf parsing error",
+    "ebnf lexer error",
+    "failed to parse ebnf",
+    "ebnf syntax error",
+    "invalid grammar",
+    "grammar parse",
+    "grammar parsing error",
+    "grammar lexer error",
+    "grammar syntax error",
+    "invalid structural tag",
+    "structural tag parse",
+    "structural tag parsing error",
+    "structural tag syntax error",
+    "structural tag lexer error",
+)
+
+
 def _is_deterministic_grammar_error(error: BaseException) -> bool:
     if isinstance(error, (json.JSONDecodeError, ValueError, TypeError)):
         return True
@@ -99,25 +151,7 @@ def _is_deterministic_grammar_error(error: BaseException) -> bool:
         subject in error_name for subject in ("json", "regex", "grammar", "structural")
     ):
         return True
-    return any(
-        marker in message
-        for marker in (
-            "invalid json",
-            "json parse",
-            "failed to parse json",
-            "invalid regex",
-            "regex parse",
-            "failed to parse regex",
-            "invalid ebnf",
-            "ebnf parse",
-            "failed to parse ebnf",
-            "invalid grammar",
-            "grammar parse",
-            "parser error",
-            "invalid structural tag",
-            "structural tag parse",
-        )
-    )
+    return any(marker in message for marker in _DETERMINISTIC_GRAMMAR_ERROR_MARKERS)
 
 
 def _compile_exception_reply(error: Exception) -> tuple[_WorkerStatus, bool, str]:
@@ -153,6 +187,27 @@ def _describe_worker_exit(process: Any) -> str:
     return _format_worker_exitcode(exitcode)
 
 
+def _terminate_and_join_process(process: Any) -> None:
+    """Stop a worker and reap it, escalating to kill when termination stalls."""
+    if process is None:
+        return
+    try:
+        if process.is_alive():
+            process.terminate()
+    except Exception:
+        pass
+    try:
+        process.join(timeout=1.0)
+    except Exception:
+        pass
+    try:
+        if process.is_alive():
+            process.kill()
+            process.join(timeout=1.0)
+    except Exception:
+        pass
+
+
 def _read_worker_fault_trace(fault_file: BinaryIO | None) -> str:
     if fault_file is None:
         return ""
@@ -175,6 +230,11 @@ def _with_worker_fault_trace(message: str, fault_trace: str) -> str:
     if not fault_trace:
         return message
     return f"{message}\nworker fatal traceback:\n{fault_trace}"
+
+
+def _enable_worker_faulthandler(fault_file: BinaryIO) -> None:
+    """Route fatal Python signal diagnostics into the sandbox fault file."""
+    faulthandler.enable(file=fault_file, all_threads=True)
 
 
 class GrammarCheckUnavailable(RuntimeError):
@@ -725,16 +785,7 @@ class GrammarValidator:
                 conn.close()
             except Exception:
                 pass
-        if proc is not None:
-            try:
-                if proc.is_alive():
-                    proc.terminate()
-                    proc.join(timeout=1.0)
-                    if proc.is_alive():
-                        proc.kill()
-                proc.join(timeout=1.0)  # a segfaulted worker joins instantly
-            except Exception:
-                pass
+        _terminate_and_join_process(proc)
         if fault_file is not None:
             try:
                 fault_file.close()
@@ -779,6 +830,7 @@ class GrammarValidator:
         """
         proc = None
         parent_conn = None
+        child_conn = None
         fault_file: BinaryIO | None = None
         try:
             parent_conn, child_conn = self._mp.Pipe()
@@ -793,13 +845,14 @@ class GrammarValidator:
                     self._worker_grammar_config,
                     self._worker_admission_config,
                     self._worker_memory_limit_bytes,
-                    DupFd(fault_file.fileno()),
+                    _DeferredDupFd(fault_file.fileno()),
                 ),
                 name="grammar-sandbox-worker",
                 daemon=True,
             )
             proc.start()
             child_conn.close()  # parent keeps only its end -> sees EOF when worker dies
+            child_conn = None
             if not parent_conn.poll(self._compile_timeout_s):
                 raise TimeoutError("worker readiness handshake timed out")
             handshake = parent_conn.recv()
@@ -822,6 +875,13 @@ class GrammarValidator:
         except Exception as e:
             with self._pool_lock:
                 self._spawning -= 1
+            for conn in (parent_conn, child_conn):
+                if conn is not None:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+            _terminate_and_join_process(proc)
             exit_detail = _describe_worker_exit(proc) if proc is not None else ""
             fault_trace = _read_worker_fault_trace(fault_file)
             detail = f"; {exit_detail}" if exit_detail else ""
@@ -832,16 +892,6 @@ class GrammarValidator:
                     fault_trace,
                 )
             )
-            if parent_conn is not None:
-                try:
-                    parent_conn.close()
-                except Exception:
-                    pass
-            if proc is not None:
-                try:
-                    proc.terminate()
-                except Exception:
-                    pass
             if fault_file is not None:
                 try:
                     fault_file.close()
@@ -1086,6 +1136,7 @@ def _spawned_sandbox_worker(
         _configure_xgrammar_sandbox_core_dump_for_current_process()
         fault_file = os.fdopen(fault_trace_fd.detach(), "wb", buffering=0)
         os.dup2(fault_file.fileno(), 2)
+        _enable_worker_faulthandler(fault_file)
         # Do not call GrammarValidator.__init__ here: the public validator always owns a
         # sandbox pool, while a worker only needs its local compiler and request loop.
         validator = GrammarValidator.__new__(GrammarValidator)
@@ -1103,6 +1154,7 @@ def _spawned_sandbox_worker(
         finally:
             conn.close()
             if fault_file is not None:
+                faulthandler.disable()
                 fault_file.close()
         return
 
@@ -1110,4 +1162,5 @@ def _spawned_sandbox_worker(
         validator._worker_loop(conn)
     finally:
         conn.close()
+        faulthandler.disable()
         fault_file.close()

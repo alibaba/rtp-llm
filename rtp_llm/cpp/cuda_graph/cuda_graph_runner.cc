@@ -1145,21 +1145,36 @@ void CudaGraphRunner::initCapture() {
 }
 
 void CudaGraphRunner::replayGraph(int key) {
-    retryOnceOnTorchCudaOom(
-        [&]() { graph_instances_[key].graph_.replay(); },
-        [&](const std::exception& exception) {
-            RTP_LLM_LOG_WARNING("[GPU Graph Replay] OOM, empty torch cache and retry once: key=%d mode=%s "
-                                "target_verify=%d error=%s",
+    try {
+        retryOnceOnTorchCudaOom(
+            [&]() { graph_instances_[key].graph_.replay(); },
+            [&](const std::exception& exception) {
+                RTP_LLM_LOG_WARNING("[GPU Graph Replay] OOM, empty torch cache and retry once: key=%d mode=%s "
+                                    "target_verify=%d error=%s",
+                                    key,
+                                    is_prefill_cuda_graph_mode_ ? "prefill" : "decode",
+                                    is_target_verify_,
+                                    exception.what());
+                if (metrics_reporter_) {
+                    metrics_reporter_->report(
+                        1, "rtp_llm_cuda_graph_replay_oom_retry_qps", kmonitor::MetricType::QPS, nullptr, true);
+                }
+                cuda_graph::graphEmptyCache();
+            });
+    } catch (const std::exception& exception) {
+        (void)exception;
+#if USING_ROCM
+        if (isTorchCudaOom(exception)) {
+            RTP_LLM_LOG_WARNING("[GPU Graph Replay] OOM, allocator cache recovery is unavailable on ROCm; "
+                                "not retrying: key=%d mode=%s target_verify=%d error=%s",
                                 key,
                                 is_prefill_cuda_graph_mode_ ? "prefill" : "decode",
                                 is_target_verify_,
                                 exception.what());
-            if (metrics_reporter_) {
-                metrics_reporter_->report(
-                    1, "rtp_llm_cuda_graph_replay_oom_retry_qps", kmonitor::MetricType::QPS, nullptr, true);
-            }
-            cuda_graph::graphEmptyCache();
-        });
+        }
+#endif
+        throw;
+    }
 }
 
 void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {

@@ -12,6 +12,10 @@ import logging
 import time
 from typing import Any, Optional, Sequence
 
+from rtp_llm.server.server_args.repetition_detection_group_args import (
+    MAX_OUTPUT_REPETITION_PERIOD,
+)
+
 _LOGGER = logging.getLogger(__name__)
 
 # Whether the native tracker ``.so`` is packaged and what it exports are
@@ -98,6 +102,14 @@ class OutputRepetitionConfig:
     non_contiguous_min_span: int = 32
     non_contiguous_min_occurrences: int = 3
     non_contiguous_max_span: int = 256
+
+    def __post_init__(self) -> None:
+        if self.max_period > MAX_OUTPUT_REPETITION_PERIOD:
+            raise ValueError(
+                "output repetition max_period must be at most "
+                f"{MAX_OUTPUT_REPETITION_PERIOD}, got {self.max_period}"
+            )
+        object.__setattr__(self, "max_period", max(1, self.max_period))
 
 
 @dataclasses.dataclass(frozen=True)

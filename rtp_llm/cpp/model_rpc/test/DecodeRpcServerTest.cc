@@ -1,5 +1,8 @@
 #include <gtest/gtest.h>
 
+#include <chrono>
+#include <thread>
+
 #include "rtp_llm/cpp/model_rpc/DecodeRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
@@ -80,6 +83,36 @@ std::shared_ptr<NormalGenerateStream> makeGenerateStream(int seq_length) {
 }
 
 }  // namespace
+
+TEST(DecodeRpcServerTest, TimeoutLearnedAfterConstructionKeepsAbsoluteDeadline) {
+    DecodeRpcContext              rpc_context{nullptr};
+    kmonitor::MetricsReporterPtr metrics_reporter;
+    DecodeGenerateContext         context(rpc_context, /*timeout_ms=*/0, nullptr, metrics_reporter, nullptr);
+
+    EXPECT_FALSE(context.request_deadline.has_value());
+    EXPECT_FALSE(context.requestDeadlineExceeded());
+
+    context.setRequestTimeoutMs(1000);
+    ASSERT_TRUE(context.request_deadline.has_value());
+    const auto absolute_deadline = *context.request_deadline;
+    EXPECT_GT(absolute_deadline, std::chrono::system_clock::now());
+    EXPECT_EQ(context.request_timeout_ms, 1000);
+
+    context.setRequestTimeoutMs(1000);
+    EXPECT_EQ(context.request_deadline, absolute_deadline) << "reapplying a timeout must not extend its budget";
+
+    context.setRequestTimeoutMs(1);
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    EXPECT_TRUE(context.requestDeadlineExceeded());
+
+    context.setRequestTimeoutMs(0);
+    EXPECT_FALSE(context.request_deadline.has_value());
+    EXPECT_FALSE(context.requestDeadlineExceeded());
+
+    context.setRequestTimeoutMs(-1);
+    EXPECT_FALSE(context.request_deadline.has_value());
+    EXPECT_FALSE(context.requestDeadlineExceeded());
+}
 
 TEST(ModelRpcProtoTest, GroupedCacheFieldsPreserveLegacyNumbers) {
     const auto* broadcast = BroadcastLoadRequestPB::descriptor();

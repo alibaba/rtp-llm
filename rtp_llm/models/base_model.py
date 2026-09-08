@@ -254,6 +254,12 @@ class BaseModel(object):
         raise NotImplementedError()
 
     @classmethod
+    def _apply_kv_cache_config(
+        cls, model_config: ModelConfig, kv_cache_config: KVCacheConfig
+    ) -> None:
+        """Optionally apply parsed KV-cache settings before the legacy hook."""
+
+    @classmethod
     def _post_build_model_config(cls, model_config: ModelConfig) -> None:
         if model_config.kv_cache_spec_descs:
             return

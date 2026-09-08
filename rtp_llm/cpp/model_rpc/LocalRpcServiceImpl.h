@@ -105,15 +105,15 @@ public:
         return local_server_->StartProfileInternal(context, request, response);
     }
 
-    ::grpc::Status DumpTorchAllocator(::grpc::ServerContext*        context,
-                                      const EmptyPB*                request,
-                                      TorchAllocatorDumpResponsePB* response) override {
+    ::grpc::Status DumpTorchAllocator(::grpc::ServerContext*             context,
+                                      const TorchAllocatorDumpRequestPB* request,
+                                      TorchAllocatorDumpResponsePB*      response) override {
         return local_server_->DumpTorchAllocator(context, request, response);
     }
 
-    ::grpc::Status DumpTorchAllocatorInternal(::grpc::ServerContext*      context,
-                                              const EmptyPB*              request,
-                                              TorchAllocatorDumpResultPB* response) override {
+    ::grpc::Status DumpTorchAllocatorInternal(::grpc::ServerContext*             context,
+                                              const TorchAllocatorDumpRequestPB* request,
+                                              TorchAllocatorDumpResultPB*        response) override {
         return local_server_->DumpTorchAllocatorInternal(context, request, response);
     }
 

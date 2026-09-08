@@ -29,12 +29,25 @@ void GenerateContext::setRetryable(bool retryable) {
     retryable_ = retryable;
 }
 
+void GenerateContext::setRequestTimeoutMs(int64_t timeout_ms) {
+    request_timeout_ms = timeout_ms;
+    if (timeout_ms > 0) {
+        request_deadline = request_begin_time_ + std::chrono::milliseconds(timeout_ms);
+    } else {
+        request_deadline.reset();
+    }
+}
+
 bool GenerateContext::cancelled() const {
     return error_status.error_code() == grpc::StatusCode::CANCELLED;
 }
 
 bool GenerateContext::isRequestCancelled() const {
     return server_context && server_context->IsCancelled();
+}
+
+bool GenerateContext::requestDeadlineExceeded() const {
+    return request_deadline.has_value() && std::chrono::system_clock::now() >= *request_deadline;
 }
 
 int64_t GenerateContext::executeTimeMs() {

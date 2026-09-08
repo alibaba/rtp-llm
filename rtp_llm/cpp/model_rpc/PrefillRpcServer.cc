@@ -30,22 +30,6 @@ namespace rtp_llm {
 namespace {
 
 constexpr auto kDecodeChannelReadyTimeoutCap = std::chrono::milliseconds(15000);
-constexpr auto kDecodeChannelReadyTimeoutMin = std::chrono::milliseconds(100);
-
-// Bound the decode-channel readiness wait by the request's remaining budget so a
-// nearly-expired request cannot block for the full cap. request_timeout_ms <= 0
-// means "no request deadline", in which case the cap applies unchanged.
-std::chrono::milliseconds resolveDecodeChannelReadyTimeout(int64_t request_timeout_ms, int64_t request_begin_time_us) {
-    if (request_timeout_ms <= 0) {
-        return kDecodeChannelReadyTimeoutCap;
-    }
-    const int64_t elapsed_ms   = (currentTimeUs() - request_begin_time_us) / 1000;
-    const int64_t remaining_ms = request_timeout_ms - elapsed_ms;
-    if (remaining_ms <= kDecodeChannelReadyTimeoutMin.count()) {
-        return kDecodeChannelReadyTimeoutMin;
-    }
-    return std::chrono::milliseconds(std::min<int64_t>(remaining_ms, kDecodeChannelReadyTimeoutCap.count()));
-}
 
 bool envValueIsTrue(const char* value) {
     return value != nullptr
@@ -120,6 +104,13 @@ void logPrefillFailureTrace(const char* event, PrefillGenerateContext& prefill_c
 }  // namespace
 
 PrefillRpcServer::~PrefillRpcServer() = default;
+
+std::chrono::system_clock::time_point
+PrefillRpcServer::decodeChannelReadyDeadline(const PrefillGenerateContext& prefill_context) {
+    const auto capped_deadline = std::chrono::system_clock::now() + kDecodeChannelReadyTimeoutCap;
+    return prefill_context.request_deadline.has_value() ? std::min(*prefill_context.request_deadline, capped_deadline) :
+                                                          capped_deadline;
+}
 
 #define CLIENT_GRPC_RET_IF_ERROR(prefill_context, state, error_code_value)                                             \
     if (!(state)) {                                                                                                    \
@@ -275,14 +266,28 @@ void PrefillRpcServer::getRpcConnection(PrefillGenerateContext& prefill_context)
         return;
     }
     auto decode_addr = host->ip + ":" + std::to_string(host->rpc_port);
-    auto ready_timeout        = resolveDecodeChannelReadyTimeout(prefill_context.request_timeout_ms,
-                                                          prefill_context.request_begin_time_us);
-    auto connect_status = resource_.rpc_pool.getReadyConnection(decode_addr, ready_timeout);
+    if (prefill_context.isRequestCancelled()) {
+        setContextError(prefill_context, ErrorInfo(ErrorCode::CANCELLED, "request is cancelled"));
+        return;
+    }
+    if (prefill_context.requestDeadlineExceeded()) {
+        setContextError(prefill_context, ErrorInfo(ErrorCode::GENERATE_TIMEOUT, "request deadline exhausted"));
+        return;
+    }
+    const auto ready_deadline = decodeChannelReadyDeadline(prefill_context);
+    auto       connect_status = resource_.rpc_pool.getReadyConnection(
+        decode_addr, ready_deadline, [&prefill_context]() { return prefill_context.isRequestCancelled(); });
     if (!connect_status.ok()) {
-        setContextError(prefill_context,
-                        ErrorInfo(ErrorCode::GET_CONNECTION_FAILED,
-                                  "get ready grpc connection for decode addr " + decode_addr
-                                      + " failed: " + connect_status.status().ToString()));
+        if (prefill_context.isRequestCancelled()) {
+            setContextError(prefill_context, ErrorInfo(ErrorCode::CANCELLED, "request is cancelled"));
+        } else if (prefill_context.requestDeadlineExceeded()) {
+            setContextError(prefill_context, ErrorInfo(ErrorCode::GENERATE_TIMEOUT, "request deadline exhausted"));
+        } else {
+            setContextError(prefill_context,
+                            ErrorInfo(ErrorCode::GET_CONNECTION_FAILED,
+                                      "get ready grpc connection for decode addr " + decode_addr
+                                          + " failed: " + connect_status.status().ToString()));
+        }
         prefill_context.decode_addr = decode_addr;
         logPrefillFailureTrace("get_rpc_connection_failed", prefill_context);
         return;
@@ -366,6 +371,14 @@ GenerateRequestPB PrefillRpcServer::buildAllocateRequest(PrefillGenerateContext&
 void PrefillRpcServer::remoteAllocateResource(PrefillGenerateContext& prefill_context) {
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%ld] start to remote allocate resource", prefill_context.request_id);
+    if (prefill_context.isRequestCancelled()) {
+        setContextError(prefill_context, ErrorInfo(ErrorCode::CANCELLED, "request is cancelled"));
+        return;
+    }
+    if (prefill_context.requestDeadlineExceeded()) {
+        setContextError(prefill_context, ErrorInfo(ErrorCode::GENERATE_TIMEOUT, "request deadline exhausted"));
+        return;
+    }
     auto client_context = std::make_shared<ClientContext>();
     // P->D CLIENT span: each retry rebuilds ClientContext and opens a NEW
     // physical RemoteGenerate bidi stream (stub->RemoteGenerate
@@ -397,12 +410,11 @@ void PrefillRpcServer::remoteAllocateResource(PrefillGenerateContext& prefill_co
             telemetry::injectSpanToClientContext(client_context.get(), client_span);
         }
     }
-    auto    request_timeout_ms = prefill_context.request_timeout_ms;
-    auto    max_rpc_timeout_ms = maga_init_params_.pd_sep_config.max_rpc_timeout_ms;
-    int64_t final_timeout_ms   = request_timeout_ms > 0 ? request_timeout_ms : max_rpc_timeout_ms;
-    if (final_timeout_ms > 0) {
-        auto deadline = std::chrono::system_clock::now() + std::chrono::milliseconds(final_timeout_ms);
-        client_context->set_deadline(deadline);
+    const auto max_rpc_timeout_ms = maga_init_params_.pd_sep_config.max_rpc_timeout_ms;
+    if (prefill_context.request_deadline.has_value()) {
+        client_context->set_deadline(*prefill_context.request_deadline);
+    } else if (max_rpc_timeout_ms > 0) {
+        client_context->set_deadline(std::chrono::system_clock::now() + std::chrono::milliseconds(max_rpc_timeout_ms));
     }
     std::atomic_store(&prefill_context.client_context, client_context);
     // Close the publish-before-cancel window: either requestPriorityPreempt()
@@ -410,7 +422,7 @@ void PrefillRpcServer::remoteAllocateResource(PrefillGenerateContext& prefill_co
     if (prefill_context.cancel_state->load(std::memory_order_seq_cst)) {
         client_context->TryCancel();
     }
-    // final_timeout_ms <= 0: skip set_deadline; gRPC treats it as no deadline.
+    // With neither a request deadline nor max RPC timeout, gRPC keeps no deadline.
     prefill_context.client_stream =
         std::move(prefill_context.grpc_connection.stub->RemoteGenerate(client_context.get()));
     auto&             client_stream = prefill_context.client_stream;

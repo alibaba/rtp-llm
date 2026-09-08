@@ -195,14 +195,16 @@ class GrpcClientWrapper:
             logging.error(f"Start profile failed: {e}")
             return {"error": f"Failed to start profile: {str(e)}"}
 
-    async def dump_torch_allocator(self) -> Dict[str, Any]:
-        """Trigger one allocator dump in every backend process across DP/TP."""
+    async def dump_torch_allocator(self, req: Dict[str, Any]) -> Dict[str, Any]:
+        """Trigger an authenticated allocator dump across every DP/TP backend."""
+        request = pb2.TorchAllocatorDumpRequestPB(
+            auth_token=str(req.get("auth_token", "")),
+            dump_id=str(req.get("dump_id", "")),
+        )
 
         async def send_to_address(address: str):
             await self._ensure_dp_connection(address)
-            return await self._dp_stubs[address].DumpTorchAllocator(
-                pb2.EmptyPB(), timeout=90
-            )
+            return await self._dp_stubs[address].DumpTorchAllocator(request, timeout=90)
 
         addresses = self.dp_addresses
         responses = await asyncio.gather(
@@ -219,6 +221,20 @@ class GrpcClientWrapper:
             if not response.results:
                 errors.append(f"{address}: backend returned no allocator dump results")
                 continue
+            mismatched_result = next(
+                (
+                    result
+                    for result in response.results
+                    if result.dump_id != request.dump_id
+                ),
+                None,
+            )
+            if mismatched_result is not None:
+                errors.append(
+                    f"{address}/world_rank={mismatched_result.world_rank}: "
+                    "allocator dump response id mismatch"
+                )
+                continue
             for result in response.results:
                 result_dict = {
                     "world_rank": result.world_rank,
@@ -227,6 +243,7 @@ class GrpcClientWrapper:
                     "local_rank": result.local_rank,
                     "pid": result.pid,
                     "success": result.success,
+                    "dump_id": result.dump_id,
                     "file_path": result.file_path,
                     "error": result.error,
                     "dp_address": address,
@@ -307,7 +324,7 @@ class GrpcClientWrapper:
             elif uri == "start_profile":
                 return await self.start_profile(req)
             elif uri == "dump_torch_allocator":
-                return await self.dump_torch_allocator()
+                return await self.dump_torch_allocator(req)
             elif uri == "update_eplb_config":
                 return await self.update_eplb_config(req)
             elif uri == "update_scheduler_info":

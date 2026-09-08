@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import importlib.util
+import os
 import types
 from contextlib import contextmanager
+from pathlib import Path
 from unittest import TestCase, main
 from unittest.mock import patch
 
 import rtp_llm.dash_sc.repetition_monitor as repetition_monitor
 from rtp_llm.dash_sc.repetition_monitor import (
+    MAX_OUTPUT_REPETITION_PERIOD,
     NativeModuleStatus,
     OutputRepetitionConfig,
     RequestRepetitionMonitor,
@@ -64,6 +68,28 @@ def _fresh_native_status():
     return _native_status(None)
 
 
+def _load_bazel_packaged_native_module():
+    runfiles_root = Path(os.environ["TEST_SRCDIR"])
+    workspace = os.environ["TEST_WORKSPACE"]
+    extension_path = (
+        runfiles_root
+        / workspace
+        / "rtp_llm/cpp/repetition/libonline_repetition_tracker.so"
+    )
+    if not extension_path.is_file():
+        raise FileNotFoundError(
+            f"packaged repetition tracker not found: {extension_path}"
+        )
+    spec = importlib.util.spec_from_file_location(
+        "libonline_repetition_tracker", extension_path
+    )
+    if spec is None or spec.loader is None:
+        raise ImportError(f"cannot load repetition tracker from {extension_path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module, extension_path
+
+
 class NativeAvailabilityTest(TestCase):
     """Native availability is resolved once and reused, not probed per request."""
 
@@ -100,8 +126,52 @@ class NativeAvailabilityTest(TestCase):
         self.assertIn("OnlineRepetitionTracker", status.error)
         self.assertEqual(len(logs.output), 1)
 
+    def test_packaged_native_tracker_streams_across_chunks(self) -> None:
+        native, extension_path = _load_bazel_packaged_native_module()
+        self.assertEqual(Path(native.__file__), extension_path)
+        self.assertEqual(native.MAX_PERIOD, MAX_OUTPUT_REPETITION_PERIOD)
+
+        config = native.OnlineRepetitionConfig()
+        config.min_repeats = 3
+        config.min_duplicate_tokens = 8
+        config.max_period = MAX_OUTPUT_REPETITION_PERIOD
+        tracker = native.OnlineRepetitionTracker(config)
+        tracker.update_many([42] * 5)
+        tracker.update_many([42] * 5)
+        tracker.finalize()
+        result = tracker.result
+
+        self.assertEqual(tracker.token_count, 10)
+        for field in (
+            "hit",
+            "repeat_unit_size",
+            "repeat_count",
+            "partial_tail_tokens",
+            "covered_token_count",
+            "duplicate_token_count",
+            "start_index",
+            "end_index",
+            "first_detect_index",
+            "non_contiguous",
+            "occurrence_count",
+        ):
+            with self.subTest(field=field):
+                self.assertTrue(hasattr(result, field))
+        self.assertTrue(result.hit)
+        self.assertEqual(result.repeat_unit_size, 1)
+        self.assertEqual(result.covered_token_count, 10)
+        self.assertEqual(result.duplicate_token_count, 9)
+
 
 class RepetitionMonitorTest(TestCase):
+    def test_output_config_max_period_boundaries(self) -> None:
+        self.assertEqual(OutputRepetitionConfig(max_period=0).max_period, 1)
+        self.assertEqual(OutputRepetitionConfig(max_period=-7).max_period, 1)
+        config = OutputRepetitionConfig(max_period=MAX_OUTPUT_REPETITION_PERIOD)
+        self.assertEqual(config.max_period, MAX_OUTPUT_REPETITION_PERIOD)
+        with self.assertRaisesRegex(ValueError, "max_period must be at most"):
+            OutputRepetitionConfig(max_period=MAX_OUTPUT_REPETITION_PERIOD + 1)
+
     def test_streaming_output_repetition_detects_same_token_run(self) -> None:
         config = RequestRepetitionMonitorConfig(
             output_config=OutputRepetitionConfig(

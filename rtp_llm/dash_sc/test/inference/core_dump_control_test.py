@@ -48,6 +48,16 @@ def _crash_with_stderr_capture(conn: Any, fault_trace_fd: Any, probe_dir: str) -
         os.kill(os.getpid(), signal.SIGSEGV)
 
 
+def _cleanup_process(process: Any) -> None:
+    process.join(timeout=10)
+    if process.is_alive():
+        process.terminate()
+        process.join(timeout=10)
+    if process.is_alive():
+        process.kill()
+        process.join(timeout=10)
+
+
 class CoreDumpControlTest(unittest.TestCase):
     def _configured_dumpable(self, core_dump_env: str) -> int:
         context = multiprocessing.get_context("spawn")
@@ -57,12 +67,16 @@ class CoreDumpControlTest(unittest.TestCase):
         )
         process.start()
         child_conn.close()
-        dumpable = parent_conn.recv()
-        parent_conn.close()
-        process.join(timeout=10)
-        self.assertFalse(process.is_alive())
-        self.assertEqual(process.exitcode, 0)
-        return dumpable
+        try:
+            self.assertTrue(parent_conn.poll(10), "child did not report dumpability")
+            dumpable = parent_conn.recv()
+            process.join(timeout=10)
+            self.assertFalse(process.is_alive())
+            self.assertEqual(process.exitcode, 0)
+            return dumpable
+        finally:
+            parent_conn.close()
+            _cleanup_process(process)
 
     def test_environment_controls_worker_dumpability(self) -> None:
         self.assertEqual(self._configured_dumpable("0"), 0)
@@ -79,15 +93,21 @@ class CoreDumpControlTest(unittest.TestCase):
                 )
                 process.start()
                 child_conn.close()
-                self.assertTrue(parent_conn.poll(10))
-                self.assertEqual(parent_conn.recv(), 0)
-                parent_conn.close()
-                process.join(timeout=10)
-
-                self.assertFalse(process.is_alive())
-                self.assertEqual(process.exitcode, -signal.SIGSEGV)
-                fault_file.seek(0)
-                fault_trace = fault_file.read().decode("utf-8", errors="replace")
+                try:
+                    self.assertTrue(
+                        parent_conn.poll(10), "child did not report dumpability"
+                    )
+                    self.assertEqual(parent_conn.recv(), 0)
+                    process.join(timeout=10)
+                    self.assertFalse(process.is_alive())
+                    self.assertEqual(process.exitcode, -signal.SIGSEGV)
+                    fault_file.seek(0)
+                    fault_trace = fault_file.read().decode(
+                        "utf-8", errors="replace"
+                    )
+                finally:
+                    parent_conn.close()
+                    _cleanup_process(process)
             self.assertIn("native stderr trace marker", fault_trace)
             self.assertEqual(list(Path(probe_dir).glob("core*")), [])
 

@@ -176,7 +176,8 @@ void CacheStoreAsyncWriter::submit(std::function<void()> task) {
     }
 }
 
-CacheStoreAsyncWriter::StoreCompletionCallback CacheStoreAsyncWriter::registerStoreCompletion() {
+CacheStoreAsyncWriter::StoreCompletionCallback
+CacheStoreAsyncWriter::registerStoreCompletion(std::shared_ptr<KVCacheResource> publication_lease) {
     std::shared_ptr<StoreCompletionState> completion_state;
     {
         std::lock_guard<std::mutex> lock(state_mutex_);
@@ -185,15 +186,14 @@ CacheStoreAsyncWriter::StoreCompletionCallback CacheStoreAsyncWriter::registerSt
                                 "Call init() first.");
         completion_state = active_store_completion_state_;
     }
-    return registerStoreCompletionOn(completion_state);
+    return registerStoreCompletionOn(completion_state, std::move(publication_lease));
 }
 
-CacheStoreAsyncWriter::StoreCompletionCallback
-CacheStoreAsyncWriter::registerStoreCompletionOn(const std::shared_ptr<StoreCompletionState>& completion_state) {
-    RTP_LLM_CHECK_WITH_INFO(completion_state != nullptr,
-                            "CacheStoreAsyncWriter: missing store completion state while RUNNING");
-
-    auto completion_token = std::make_shared<StoreCompletionToken>(completion_state);
+CacheStoreAsyncWriter::StoreCompletionCallback CacheStoreAsyncWriter::makeStoreCompletionCallback(
+    const std::shared_ptr<StoreCompletionState>& completion_state,
+    std::shared_ptr<KVCacheResource>              publication_lease) {
+    auto completion_token =
+        std::make_shared<StoreCompletionToken>(completion_state, std::move(publication_lease));
     StoreCompletionCallback completion = [completion_token](std::exception_ptr exception) {
         if (completion_token->completed.exchange(true, std::memory_order_acq_rel)) {
             RTP_LLM_LOG_WARNING("CacheStoreAsyncWriter: duplicate store completion ignored");
@@ -201,32 +201,49 @@ CacheStoreAsyncWriter::registerStoreCompletionOn(const std::shared_ptr<StoreComp
         }
         const auto& completion_state = completion_token->state;
         bool        notify_waiter    = false;
-        {
+        bool        late_completion = false;
+        if (completion_state) {
             std::lock_guard<std::mutex> lock(completion_state->mutex);
-            if (completion_state->terminal) {
-                RTP_LLM_LOG_WARNING("CacheStoreAsyncWriter: late store completion ignored after cycle termination");
-                return;
+            late_completion = completion_state->terminal;
+            if (!late_completion) {
+                if (exception && !completion_state->stored_exception) {
+                    completion_state->stored_exception = std::move(exception);
+                }
+                RTP_LLM_CHECK_WITH_INFO(completion_state->pending_count > 0,
+                                        "CacheStoreAsyncWriter: store completion counter underflow");
+                --completion_state->pending_count;
+                notify_waiter = completion_state->pending_count == 0;
             }
-            if (exception && !completion_state->stored_exception) {
-                completion_state->stored_exception = std::move(exception);
-            }
-            RTP_LLM_CHECK_WITH_INFO(completion_state->pending_count > 0,
-                                    "CacheStoreAsyncWriter: store completion counter underflow");
-            --completion_state->pending_count;
-            notify_waiter = completion_state->pending_count == 0;
+        }
+        // Tracked-cycle timeout/cancellation terminates only the foreground wait,
+        // and ordinary cycles intentionally do not wait for publication. In both
+        // cases the allocator lease survives until this underlying store really
+        // completes, preventing reuse while it still reads the old KV contents.
+        completion_token->publication_lease.reset();
+        if (late_completion) {
+            RTP_LLM_LOG_WARNING("CacheStoreAsyncWriter: late store completion ignored after cycle termination");
+            return;
         }
         if (notify_waiter) {
             completion_state->cv.notify_one();
         }
     };
 
-    {
+    if (completion_state) {
         std::lock_guard<std::mutex> lock(completion_state->mutex);
         if (!completion_state->terminal) {
             ++completion_state->pending_count;
         }
     }
     return completion;
+}
+
+CacheStoreAsyncWriter::StoreCompletionCallback CacheStoreAsyncWriter::registerStoreCompletionOn(
+    const std::shared_ptr<StoreCompletionState>& completion_state,
+    std::shared_ptr<KVCacheResource>              publication_lease) {
+    RTP_LLM_CHECK_WITH_INFO(completion_state != nullptr,
+                            "CacheStoreAsyncWriter: missing store completion state while RUNNING");
+    return makeStoreCompletionCallback(completion_state, std::move(publication_lease));
 }
 
 void CacheStoreAsyncWriter::finishSubmissions() {
@@ -392,11 +409,24 @@ void CacheStoreAsyncWriter::write(const torch_ext::PyCacheStoreInputs& cache_sto
         std::lock_guard<std::mutex> lock(state_mutex_);
         RTP_LLM_CHECK_WITH_INFO(state_ == State::RUNNING,
                                 "CacheStoreAsyncWriter::write() called when not RUNNING. Call init() first.");
-        if (auto completion_state = active_store_completion_state_) {
-            register_store_completion = [completion_state]() {
-                return registerStoreCompletionOn(completion_state);
-            };
-        }
+        auto completion_state = active_store_completion_state_;
+        register_store_completion = [completion_state, cache_manager = cache_manager_, cache_config](
+                                        const std::vector<int64_t>& cache_keys,
+                                        const std::vector<int32_t>& block_ids,
+                                        size_t                      group_id) {
+            std::shared_ptr<KVCacheResource> publication_lease;
+            if (cache_manager->initialized()) {
+                KVCacheResource lease_resource;
+                lease_resource.initGroups(cache_config->topologyPtr());
+                lease_resource.setCacheKeys(cache_keys);
+                lease_resource.mutableBlockIds(group_id).assign(block_ids);
+                publication_lease =
+                    cache_manager->incrKVCacheRef(lease_resource, cache_keys, /*is_connector=*/true);
+                RTP_LLM_CHECK_WITH_INFO(
+                    publication_lease != nullptr, "failed to retain %zu cache-store block(s)", block_ids.size());
+            }
+            return makeStoreCompletionCallback(completion_state, std::move(publication_lease));
+        };
     }
     // Create the event on the main thread to avoid event-record contention in worker threads.
     auto event = runtimeCreateEvent();

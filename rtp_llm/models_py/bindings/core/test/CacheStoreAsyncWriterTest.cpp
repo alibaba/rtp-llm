@@ -7,10 +7,13 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
+#include "rtp_llm/cpp/cache/SingleTypeKVCacheAllocator.h"
+#include "rtp_llm/cpp/disaggregate/cache_store/CacheStore.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
 #include "rtp_llm/models_py/bindings/core/CacheStoreAsyncWriter.h"
 
@@ -86,25 +89,39 @@ private:
 
 class CacheStoreAsyncWriterTest: public ::testing::Test {};
 
-static CacheConfig makeWriterTestCacheConfig(const std::string& tag, size_t kv_stride) {
+static CacheConfig
+makeWriterTestCacheConfig(const std::string& tag, size_t kv_stride, uint32_t block_num = 1) {
     CacheConfig config;
+    config.dtype                     = DataType::TYPE_BF16;
     config.layer_num                 = 1;
     config.layer_all_num             = 1;
-    config.block_num                 = 1;
+    config.block_num                 = block_num;
     config.seq_size_per_block        = 1;
     config.kernel_seq_size_per_block = 1;
     config.kv_block_stride_bytes     = kv_stride;
 
-    auto spec                = std::make_shared<MHAKVCacheSpec>();
-    spec->tag                = tag;
-    spec->seq_size_per_block = 1;
+    AttentionConfigs attn_config;
+    attn_config.kv_head_num   = 1;
+    attn_config.size_per_head = static_cast<int>(kv_stride / (2 * getTypeSize(config.dtype)));
+    ParallelismConfig parallelism_config;
+    parallelism_config.tp_size = 1;
+    KVCacheSpecDesc desc;
+    desc.tag        = tag;
+    desc.cache_type = KVCacheSpecType::MultiHeadAttention;
+    desc.dtype      = config.dtype;
+    SpecBuildContext ctx;
+    ctx.dtype              = config.dtype;
+    ctx.seq_size_per_block = 1;
+    ctx.attn_config        = &attn_config;
+    ctx.parallelism_config = &parallelism_config;
+    auto spec              = SpecBuilder::build(desc, ctx);
 
     GroupBase group;
     group.tag                       = tag;
     group.spec                      = spec;
     group.policy                    = defaultCacheGroupPolicy(CacheGroupType::FULL);
     group.layer_ids                 = {0};
-    group.block_num                 = 1;
+    group.block_num                 = block_num;
     group.seq_size_per_block        = 1;
     group.kernel_seq_size_per_block = 1;
     group.kv_block_stride_bytes     = kv_stride;
@@ -112,6 +129,90 @@ static CacheConfig makeWriterTestCacheConfig(const std::string& tag, size_t kv_s
     config.setTopology({std::move(group)}, {{0, {tag}}});
     return config;
 }
+
+class DelayedCacheStore: public CacheStore {
+public:
+    void store(const std::shared_ptr<RequestBlockBuffer>& buffer, CacheStoreStoreDoneCallback callback) override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        buffer_   = buffer;
+        callback_ = std::move(callback);
+    }
+
+    bool hasPendingStore() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return static_cast<bool>(callback_);
+    }
+
+    bool completeStore() {
+        CacheStoreStoreDoneCallback callback;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            callback = std::move(callback_);
+            buffer_.reset();
+        }
+        if (!callback) {
+            return false;
+        }
+        callback(true, CacheStoreErrorCode::None);
+        return true;
+    }
+
+    void load(const std::shared_ptr<RequestBlockBuffer>&,
+              CacheStoreLoadDoneCallback callback,
+              const std::string&,
+              uint32_t,
+              uint32_t,
+              uint32_t,
+              int,
+              int) override {
+        callback(true, CacheStoreErrorCode::None);
+    }
+
+    std::shared_ptr<LoadContext> loadBuffers(const std::vector<std::shared_ptr<RequestBlockBuffer>>&,
+                                             const std::string&,
+                                             uint32_t,
+                                             uint32_t,
+                                             int64_t,
+                                             LoadContext::CheckCancelFunc,
+                                             int,
+                                             int) override {
+        return nullptr;
+    }
+
+    std::shared_ptr<StoreContext> storeBuffers(const std::vector<std::shared_ptr<RequestBlockBuffer>>&,
+                                               int64_t) override {
+        return nullptr;
+    }
+
+    std::shared_ptr<RemoteStoreTask>
+    submitRemoteStoreTask(const std::shared_ptr<RemoteStoreRequest>&,
+                          const std::shared_ptr<CacheStoreRemoteStoreMetricsCollector>&,
+                          RemoteStoreTask::CheckCancelFunc) override {
+        return nullptr;
+    }
+
+    void releaseRemoteStoreTask(const std::shared_ptr<RemoteStoreTask>&) override {}
+
+    bool regUserBuffers(const std::vector<std::shared_ptr<BlockBuffer>>&) override {
+        return true;
+    }
+
+    std::shared_ptr<BlockBuffer> findUserBuffer(const std::string&) override {
+        return nullptr;
+    }
+
+    const std::shared_ptr<MemoryUtil>& getMemoryUtil() const override {
+        return null_memory_util_;
+    }
+
+    void debugInfo() override {}
+
+private:
+    mutable std::mutex                  mutex_;
+    std::shared_ptr<RequestBlockBuffer> buffer_;
+    CacheStoreStoreDoneCallback         callback_;
+    std::shared_ptr<MemoryUtil>         null_memory_util_;
+};
 
 TEST_F(CacheStoreAsyncWriterTest, InitAndWaitBasic) {
     CacheStoreAsyncWriter writer;
@@ -344,6 +445,72 @@ TEST_F(CacheStoreAsyncWriterTest, LatePublicationCallbackAfterTimeoutIsIgnored) 
     EXPECT_THROW(writer.waitStoreCompletions(), std::runtime_error);
     EXPECT_NO_THROW(complete(nullptr));
     EXPECT_NO_THROW(complete(std::make_exception_ptr(std::runtime_error("duplicate late failure"))));
+}
+
+TEST_F(CacheStoreAsyncWriterTest, TimeoutRetainsAllocatorBlockUntilLatePublicationCompletes) {
+    auto config    = makeWriterTestCacheConfig("default", /*kv_stride=*/16, /*block_num=*/2);
+    auto allocator = std::make_shared<SingleTypeKVCacheAllocator>(config, AllocationType::HOST);
+    ASSERT_TRUE(allocator->init());
+    const auto initial_free_blocks = allocator->freeBlocksNum();
+    ASSERT_GT(initial_free_blocks, 0u);
+
+    KVCacheResource resource;
+    resource.initGroups(config.topologyPtr());
+    resource.setCacheKeys({42});
+    resource.mutableBlockIds(0).assign({1});
+    auto publication_lease = allocator->incrKVCacheRef(resource, {42}, /*is_connector=*/true);
+    ASSERT_NE(publication_lease, nullptr);
+    ASSERT_EQ(allocator->freeBlocksNum() + 1, initial_free_blocks);
+
+    CacheStoreAsyncWriter writer(
+        /*device_id=*/-1, nullptr, /*cache_model_id=*/0, std::nullopt, std::chrono::milliseconds(20));
+    writer.init(/*track_store_completions=*/true);
+    auto complete = writer.registerStoreCompletion(std::move(publication_lease));
+    writer.finishSubmissions();
+
+    EXPECT_THROW(writer.waitStoreCompletions(), std::runtime_error);
+    EXPECT_EQ(allocator->freeBlocksNum() + 1, initial_free_blocks)
+        << "the timed-out store can still publish the old key, so its block must not be reusable";
+
+    complete(nullptr);
+    EXPECT_EQ(allocator->freeBlocksNum(), initial_free_blocks);
+}
+
+TEST_F(CacheStoreAsyncWriterTest, OrdinaryWriteRetainsAllocatorBlockUntilStoreCallback) {
+    auto config        = makeWriterTestCacheConfig("default", /*kv_stride=*/16, /*block_num=*/3);
+    auto cache_manager = std::make_shared<KVCacheManager>(config, /*warmup=*/false);
+    ASSERT_TRUE(cache_manager->init());
+    auto cache_store = std::make_shared<DelayedCacheStore>();
+    cache_manager->setCacheStore(cache_store);
+
+    torch_ext::PyCacheStoreInputs inputs;
+    inputs.input_lengths_host    = torch::tensor({1}, torch::kInt32);
+    inputs.prefix_lengths_host   = torch::tensor({0}, torch::kInt32);
+    inputs.host_kv_cache_offset  = torch::tensor({1}, torch::kInt32).reshape({1, 1});
+    inputs.request_id            = torch::tensor({int64_t{42}}, torch::kInt64);
+    inputs.request_pd_separation = torch::tensor({true}, torch::kBool);
+    inputs.cache_keys            = torch::tensor({int64_t{7001}}, torch::kInt64).reshape({1, 1});
+
+    auto                    layout = cache_manager->getMainModelCacheLayerLayout();
+    torch_ext::LayerKVCache layer_cache;
+    layer_cache.kv_cache_base      = layout.at("default", 0).kv_addr;
+    layer_cache.seq_size_per_block = 1;
+    layer_cache.layer_id           = 0;
+    layer_cache.group_id           = 0;
+    layer_cache.tag                = "default";
+
+    const auto initial_free_blocks = cache_manager->freeBlocksNum();
+    CacheStoreAsyncWriter writer(/*device_id=*/-1, cache_manager, /*cache_model_id=*/0);
+    writer.init(/*track_store_completions=*/false);
+    writer.write(inputs, layer_cache);
+    writer.waitAllDone();
+
+    ASSERT_TRUE(cache_store->hasPendingStore());
+    EXPECT_EQ(cache_manager->freeBlocksNum() + 1, initial_free_blocks)
+        << "ordinary forward completion must not release an in-flight store's KV block";
+
+    ASSERT_TRUE(cache_store->completeStore());
+    EXPECT_EQ(cache_manager->freeBlocksNum(), initial_free_blocks);
 }
 
 TEST_F(CacheStoreAsyncWriterTest, PublicationCancellationFailsWaitAndReleasesCycle) {

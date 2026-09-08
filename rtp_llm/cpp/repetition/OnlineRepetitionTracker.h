@@ -7,6 +7,9 @@
 
 namespace rtp_llm {
 
+// Bounds the two period-indexed int vectors to about 128 KiB per tracker.
+inline constexpr int kMaxOnlineRepetitionPeriod = 16 * 1024;
+
 struct OnlineRepetitionConfig {
     int min_repeats = 3;
     int min_duplicate_tokens = 32;

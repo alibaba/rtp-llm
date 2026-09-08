@@ -100,6 +100,9 @@ message FlexlbCancelRequestPB {
     int64 request_id = 1;
     int64 batch_id = 2;
     CancelReasonPB reason = 3;
+    // Same single-hop guard as Schedule. A follower sets this to one before
+    // forwarding; another follower must return an error instead of relaying.
+    int32 forward_hop = 4;
 }
 
 message FlexlbCancelResponsePB {

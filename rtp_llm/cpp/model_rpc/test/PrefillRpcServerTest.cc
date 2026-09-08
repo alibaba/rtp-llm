@@ -137,8 +137,8 @@ public:
     grpc::Status runWithRetry(PrefillGenerateContext&                             context,
                               const std::function<void(PrefillGenerateContext&)>& operation,
                               int                                                 max_retries      = 3,
-                              int64_t                                             retry_timeout_ms = 0) {
-        constexpr int64_t retry_interval_ms = 0;
+                              int64_t                                             retry_timeout_ms = 0,
+                              int64_t                                             retry_interval_ms = 0) {
         EXECUTE_WITH_RETRY(operation, context, max_retries, retry_timeout_ms, retry_interval_ms);
         return context.error_status;
     }
@@ -154,6 +154,23 @@ public:
     void prepareGenerateInputForTest(PrefillGenerateContext& context) {
         prepareGenerateInput(context);
     }
+
+    void remoteAllocateResourceForTest(PrefillGenerateContext& context) {
+        remoteAllocateResource(context);
+    }
+
+    void setContextErrorForTest(PrefillGenerateContext& context, const ErrorInfo& error_info) {
+        setContextError(context, error_info);
+    }
+
+    std::chrono::system_clock::time_point
+    decodeChannelReadyDeadlineForTest(const PrefillGenerateContext& context) const {
+        return decodeChannelReadyDeadline(context);
+    }
+
+    void setMaxRpcTimeoutForTest(int64_t timeout_ms) {
+        maga_init_params_.pd_sep_config.max_rpc_timeout_ms = timeout_ms;
+    }
 };
 
 class PrefillRpcServerTest: public DeviceTestBase {
@@ -166,10 +183,10 @@ protected:
         return input;
     }
 
-    std::unique_ptr<PrefillGenerateContext> makeContext(GenerateInputPB* request) {
+    std::unique_ptr<PrefillGenerateContext> makeContext(GenerateInputPB* request, int64_t timeout_ms = 0) {
         rpc_context_ = RPCContext{request, nullptr};
         return std::make_unique<PrefillGenerateContext>(
-            &resource_, rpc_context_, 0, &server_context_, metrics_reporter_, nullptr);
+            &resource_, rpc_context_, timeout_ms, &server_context_, metrics_reporter_, nullptr);
     }
 
 protected:
@@ -207,6 +224,125 @@ TEST_F(PrefillRpcServerTest, prepareAllocateResourceRetriesDecodeWithoutRepeatin
     EXPECT_TRUE(context->multimodalProcessed());
     EXPECT_TRUE(context->tokenIdsExpanded());
     EXPECT_TRUE(context->closeGrpcStream().ok());
+}
+
+TEST_F(PrefillRpcServerTest, decodeReadinessUsesSubHundredMillisecondRemainingBudget) {
+    GenerateInputPB request;
+    request.set_request_id(2);
+    auto context = makeContext(&request, /*timeout_ms=*/40);
+
+    TestPrefillRpcServer server;
+    const auto           before   = std::chrono::system_clock::now();
+    const auto           deadline = server.decodeChannelReadyDeadlineForTest(*context);
+    const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - before).count();
+
+    EXPECT_GT(remaining, 0);
+    EXPECT_LE(remaining, 40);
+    EXPECT_LT(remaining, 100);
+    ASSERT_TRUE(context->request_deadline.has_value());
+    EXPECT_EQ(deadline, *context->request_deadline);
+}
+
+TEST_F(PrefillRpcServerTest, downstreamRetriesReuseOriginalAbsoluteDeadline) {
+    TestDecodeRpcServer decode_server(/*fail_first_allocate=*/true);
+    ASSERT_TRUE(decode_server.start());
+
+    GenerateInputPB request;
+    request.set_request_id(3);
+    auto context = makeContext(&request, /*timeout_ms=*/1000);
+    auto connection = resource_.rpc_pool.getReadyConnection(
+        "127.0.0.1:" + std::to_string(decode_server.listenPort()), std::chrono::seconds(1));
+    ASSERT_TRUE(connection.ok()) << connection.status();
+    context->grpc_connection = *connection;
+
+    TestPrefillRpcServer server;
+    server.setProcessIdForTest("prefill-client");
+    server.remoteAllocateResourceForTest(*context);
+    ASSERT_TRUE(context->hasError());
+    ASSERT_NE(context->client_context, nullptr);
+    const auto first_deadline = context->client_context->deadline();
+
+    context->reset();
+    server.remoteAllocateResourceForTest(*context);
+    ASSERT_FALSE(context->hasError());
+    ASSERT_NE(context->client_context, nullptr);
+    const auto second_deadline = context->client_context->deadline();
+
+    ASSERT_TRUE(context->request_deadline.has_value());
+    EXPECT_EQ(first_deadline, *context->request_deadline);
+    EXPECT_EQ(second_deadline, *context->request_deadline);
+    EXPECT_EQ(decode_server.allocateCount(), 2);
+    EXPECT_TRUE(context->closeGrpcStream().ok());
+}
+
+TEST_F(PrefillRpcServerTest, downstreamWithoutRequestDeadlineKeepsMaxRpcTimeout) {
+    TestDecodeRpcServer decode_server(/*fail_first_allocate=*/false);
+    ASSERT_TRUE(decode_server.start());
+
+    GenerateInputPB request;
+    request.set_request_id(4);
+    auto context = makeContext(&request);
+    auto connection = resource_.rpc_pool.getReadyConnection(
+        "127.0.0.1:" + std::to_string(decode_server.listenPort()), std::chrono::seconds(1));
+    ASSERT_TRUE(connection.ok()) << connection.status();
+    context->grpc_connection = *connection;
+
+    TestPrefillRpcServer server;
+    server.setProcessIdForTest("prefill-client");
+    server.setMaxRpcTimeoutForTest(250);
+    const auto before = std::chrono::system_clock::now();
+    server.remoteAllocateResourceForTest(*context);
+    ASSERT_FALSE(context->hasError());
+    ASSERT_NE(context->client_context, nullptr);
+    const auto timeout_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(context->client_context->deadline() - before).count();
+
+    EXPECT_GE(timeout_ms, 150);
+    EXPECT_LE(timeout_ms, 300);
+    EXPECT_TRUE(context->closeGrpcStream().ok());
+}
+
+TEST_F(PrefillRpcServerTest, exhaustedOrCancelledRequestStartsNoDownstreamRpc) {
+    GenerateInputPB request;
+    request.set_request_id(5);
+
+    TestPrefillRpcServer server;
+    auto expired = makeContext(&request, /*timeout_ms=*/1000);
+    expired->request_deadline = std::chrono::system_clock::now() - std::chrono::milliseconds(1);
+    server.remoteAllocateResourceForTest(*expired);
+    EXPECT_EQ(expired->error_info.code(), ErrorCode::GENERATE_TIMEOUT);
+    EXPECT_EQ(expired->client_context, nullptr);
+
+    auto cancelled = makeContext(&request, /*timeout_ms=*/1000);
+    cancelled->cancel_state->store(true);
+    server.remoteAllocateResourceForTest(*cancelled);
+    EXPECT_EQ(cancelled->error_info.code(), ErrorCode::CANCELLED);
+    EXPECT_EQ(cancelled->client_context, nullptr);
+}
+
+TEST_F(PrefillRpcServerTest, retrySleepStopsAtAbsoluteRequestDeadline) {
+    GenerateInputPB request;
+    request.set_request_id(6);
+    auto context = makeContext(&request, /*timeout_ms=*/30);
+
+    TestPrefillRpcServer server;
+    int                  attempts = 0;
+    auto operation = [&attempts, &server](PrefillGenerateContext& retry_context) {
+        ++attempts;
+        server.setContextErrorForTest(
+            retry_context, ErrorInfo(ErrorCode::GET_CONNECTION_FAILED, "retryable failure"));
+    };
+
+    const auto begin = std::chrono::steady_clock::now();
+    auto       status = server.runWithRetry(
+        *context, operation, /*max_retries=*/10, /*retry_timeout_ms=*/0, /*retry_interval_ms=*/200);
+    const auto elapsed_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - begin).count();
+
+    EXPECT_EQ(attempts, 1);
+    EXPECT_EQ(context->error_info.code(), ErrorCode::GENERATE_TIMEOUT);
+    EXPECT_FALSE(status.ok());
+    EXPECT_LT(elapsed_ms, 150);
 }
 
 TEST_F(PrefillRpcServerTest, mergeMultimodalLengthsUsesPrefillMetadata) {

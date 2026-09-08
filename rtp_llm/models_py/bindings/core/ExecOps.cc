@@ -344,6 +344,8 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
         const int64_t request_id     = request_ids[context_index];
         auto          event          = pre_created_event ? pre_created_event : runtimeCreateEvent();
         auto          request_blocks = std::make_shared<RequestBlockBuffer>(std::to_string(request_id), event);
+        std::vector<int64_t> publication_lease_keys;
+        std::vector<int32_t> publication_lease_blocks;
         RTP_LLM_LOG_DEBUG("write cache store, request id is %ld, blocks num is %zu",
                           static_cast<long>(request_id),
                           total_logical_blocks);
@@ -379,6 +381,9 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
                     block_id);
                 return;
             }
+            publication_lease_keys.push_back(
+                cache_keys[static_cast<int64_t>(batch_id)][static_cast<int64_t>(key_index)]);
+            publication_lease_blocks.push_back(block_id);
 
             if (cp_size > 1 && group.policy.cp_slice != CpBlockSliceMode::NONE) {
                 RTP_LLM_CHECK_WITH_INFO(cp_rank >= 0 && cp_rank < cp_size,
@@ -467,7 +472,9 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
         if (request_blocks->getBlocksCount() > 0) {
             CacheStoreCompletionCallback store_completion;
             if (register_store_completion) {
-                store_completion = register_store_completion();
+                store_completion = register_store_completion(publication_lease_keys,
+                                                              publication_lease_blocks,
+                                                              cache_config.groupIdForTag(layer_kv.tag));
             }
             auto store_callback = [layer_id = layer_kv.layer_id,
                                    cache_model_id,

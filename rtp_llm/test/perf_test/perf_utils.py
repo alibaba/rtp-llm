@@ -6,8 +6,9 @@ import json
 import logging
 import os
 import shutil
+import sys
 import time
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import requests
 
@@ -86,18 +87,119 @@ def collect_timeline_files(result_dir: str) -> None:
         logging.info("No timeline files found in %s", result_dir)
 
 
-def write_test_info(args: argparse.Namespace, remaining_args: List[str]) -> None:
-    """Persist test configuration to result_dir for downstream consumers."""
+def _is_sensitive_name(name: str) -> bool:
+    """Identify credential fields without hiding semantic token-count settings."""
+    normalized = name.lstrip("-").lower().replace("-", "_")
+    return (
+        any(
+            marker in normalized
+            for marker in (
+                "password",
+                "passwd",
+                "secret",
+                "access_key",
+                "api_key",
+                "apikey",
+                "credential",
+                "private_key",
+                "sso_empid_hash",
+                "authorization",
+            )
+        )
+        or normalized == "token"
+        or normalized.endswith("_token")
+    )
+
+
+def _redact_argv(argv: List[str]) -> List[str]:
+    redacted: List[str] = []
+    redact_next = False
+    assignment_value_next = False
+    for item in argv:
+        if redact_next:
+            redacted.append("***")
+            redact_next = False
+            continue
+        if assignment_value_next:
+            embedded_key = item.split("=", 1)[0]
+            redacted.append(
+                embedded_key + "=***"
+                if "=" in item and _is_sensitive_name(embedded_key)
+                else item
+            )
+            assignment_value_next = False
+            continue
+
+        key = item.split("=", 1)[0].lstrip("-").lower()
+        embedded_key = ""
+        if key in ("engine_arg", "engine_env"):
+            if "=" in item:
+                embedded_key = item.split("=", 1)[1].split("=", 1)[0].lower()
+            else:
+                redacted.append(item)
+                assignment_value_next = True
+                continue
+        sensitive = _is_sensitive_name(key) or (
+            bool(embedded_key) and _is_sensitive_name(embedded_key)
+        )
+        if sensitive:
+            if "=" in item:
+                redacted.append(item.split("=", 1)[0] + "=***")
+            else:
+                redacted.append(item)
+                redact_next = True
+        else:
+            redacted.append(item)
+    return redacted
+
+
+def write_test_info(
+    args: argparse.Namespace,
+    remaining_args: List[str],
+    engine_env_names: Optional[List[str]] = None,
+    status: str = "completed",
+    effective_max_seq_len: Optional[int] = None,
+    service_concurrency_limit: Optional[int] = None,
+    effective_runtime_config: Optional[Dict[str, Dict[str, str]]] = None,
+) -> None:
+    """Persist a reproducible, credential-safe test configuration."""
     from rtp_llm.test.perf_test.dataset import extract_arg
 
+    model_type = extract_arg(remaining_args, "model_type") or os.environ.get(
+        "MODEL_TYPE"
+    )
+    checkpoint_path = extract_arg(remaining_args, "checkpoint_path") or os.environ.get(
+        "CHECKPOINT_PATH"
+    )
+    tokenizer_path = extract_arg(remaining_args, "tokenizer_path") or os.environ.get(
+        "TOKENIZER_PATH"
+    )
+    requested_max_seq_len = int(args.max_seq_len)
+    service_max_seq_len = int(
+        effective_max_seq_len
+        if effective_max_seq_len is not None
+        else requested_max_seq_len
+    )
+    requested_concurrency_limit = int(args.concurrency_limit)
+    actual_concurrency_limit = int(
+        service_concurrency_limit
+        if service_concurrency_limit is not None
+        else requested_concurrency_limit
+    )
     info = {
-        "model_type": os.environ.get("MODEL_TYPE"),
-        "checkpoint_path": os.environ.get("CHECKPOINT_PATH"),
-        "tokenizer_path": os.environ.get("TOKENIZER_PATH"),
+        "schema_version": 5,
+        "status": status,
+        "model_type": model_type,
+        "checkpoint_path": checkpoint_path,
+        "tokenizer_path": tokenizer_path,
         "tp_size": extract_arg(remaining_args, "tp_size", "1"),
         "dp_size": args.dp_size,
-        "max_seq_len": args.max_seq_len,
-        "concurrency_limit": args.concurrency_limit,
+        "max_seq_len": service_max_seq_len,
+        "requested_max_seq_len": requested_max_seq_len,
+        "effective_max_seq_len": service_max_seq_len,
+        "concurrency_limit": requested_concurrency_limit,
+        "requested_concurrency_limit": requested_concurrency_limit,
+        "service_concurrency_limit": actual_concurrency_limit,
         "decode_test_length": args.decode_test_length,
         "cache_grid_json": args.cache_grid_json or None,
         "cache_measure_runs": (
@@ -109,11 +211,24 @@ def write_test_info(args: argparse.Namespace, remaining_args: List[str]) -> None
         "cache_commit_tail_tokens": (
             args.cache_commit_tail_tokens if args.cache_grid_json else None
         ),
+        "partial": args.partial,
+        "warmup_runs": int(os.environ.get("PERF_FORMAL_WARMUP_RUNS", "1")),
+        "measure_runs": int(
+            os.environ.get("PERF_MEASURE_RUNS", str(getattr(args, "num_measures", 1)))
+        ),
+        "profile_runs": int(os.environ.get("PERF_PROFILE_RUNS", "1")),
         "dataset_name": args.dataset_name or None,
         "dataset_path": args.dataset_path or args.dataset or None,
+        "engine_args": _redact_argv(remaining_args),
+        "engine_env_names": sorted(engine_env_names or []),
+        "effective_runtime_config": effective_runtime_config or {
+            "values": {},
+            "sources": {},
+        },
+        "argv": _redact_argv(sys.argv),
     }
     path = os.path.join(args.result_dir, "test_info.json")
-    with open(path, "w") as f:
+    with open(path, "w", encoding="utf-8") as f:
         json.dump(info, f, indent=2)
     logging.info(f"Wrote test info to {path}")
 

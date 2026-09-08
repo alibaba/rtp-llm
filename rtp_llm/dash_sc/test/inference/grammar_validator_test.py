@@ -1,22 +1,41 @@
 from __future__ import annotations
 
 import io
+import multiprocessing
+import os
 import queue
 import signal
+import tempfile
 import threading
 import unittest
 from collections import OrderedDict
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
+from rtp_llm.dash_sc.inference import grammar_validator as grammar_validator_module
+from rtp_llm.dash_sc.inference.core_dump_control import (
+    _XGRAMMAR_SANDBOX_CORE_DUMP_ENV,
+    _configure_xgrammar_sandbox_core_dump_for_current_process,
+)
 from rtp_llm.dash_sc.inference.grammar_validator import (
     GrammarCheckUnavailable,
     GrammarValidator,
     _compile_exception_reply,
+    _DeferredDupFd,
+    _enable_worker_faulthandler,
     _format_worker_exitcode,
     _GrammarCheckResult,
     _is_resource_exhaustion,
     _WorkerStatus,
 )
+
+
+def _crash_with_faulthandler(fault_trace_fd) -> None:
+    os.environ[_XGRAMMAR_SANDBOX_CORE_DUMP_ENV] = "0"
+    _configure_xgrammar_sandbox_core_dump_for_current_process()
+    with os.fdopen(fault_trace_fd.detach(), "wb", buffering=0) as fault_file:
+        os.dup2(fault_file.fileno(), 2)
+        _enable_worker_faulthandler(fault_file)
+        os.kill(os.getpid(), signal.SIGSEGV)
 
 
 class CompileExceptionReplyTest(unittest.TestCase):
@@ -28,24 +47,64 @@ class CompileExceptionReplyTest(unittest.TestCase):
             self.assertTrue(retire_after_reply)
             self.assertTrue(message)
 
-    def test_deterministic_error_is_invalid_and_keeps_worker(self) -> None:
-        for error in (
-            ValueError("invalid json schema"),
-            RuntimeError("grammar parser error at byte 4"),
-        ):
-            self.assertFalse(_is_resource_exhaustion(error))
-            status, retire_after_reply, message = _compile_exception_reply(error)
-            self.assertIs(status, _WorkerStatus.INVALID)
-            self.assertFalse(retire_after_reply)
-            self.assertTrue(message)
+    def test_typed_deterministic_error_is_invalid_and_keeps_worker(self) -> None:
+        error = ValueError("invalid json schema")
+        self.assertFalse(_is_resource_exhaustion(error))
+        status, retire_after_reply, message = _compile_exception_reply(error)
+        self.assertIs(status, _WorkerStatus.INVALID)
+        self.assertFalse(retire_after_reply)
+        self.assertTrue(message)
+
+    def test_cpp_runtime_error_markers_are_invalid_and_keep_worker(self) -> None:
+        messages = (
+            "invalid json document",
+            "json parse failed",
+            "json parsing error at byte 4",
+            "failed to parse json schema",
+            "invalid regex pattern",
+            "regex parse failed",
+            "regex parsing error at byte 4",
+            "failed to parse regex",
+            "invalid ebnf grammar",
+            "ebnf parse failed",
+            "ebnf parsing error at byte 4",
+            "ebnf lexer error at byte 4",
+            "failed to parse ebnf",
+            "invalid grammar",
+            "grammar parse failed",
+            "grammar parsing error at byte 4",
+            "grammar lexer error at byte 4",
+            "invalid structural tag",
+            "structural tag parse failed",
+            "structural tag parsing error at byte 4",
+            "structural tag syntax error at byte 4",
+            "grammar parser error at byte 4",
+            "regex lexer error at byte 4",
+        )
+        for message in messages:
+            with self.subTest(message=message):
+                status, retire_after_reply, reply = _compile_exception_reply(
+                    RuntimeError(message)
+                )
+                self.assertIs(status, _WorkerStatus.INVALID)
+                self.assertFalse(retire_after_reply)
+                self.assertEqual(reply, message)
 
     def test_generic_runtime_error_is_unavailable_and_retires_worker(self) -> None:
-        status, retire_after_reply, message = _compile_exception_reply(
-            RuntimeError("thread creation failed")
+        messages = (
+            "thread creation failed",
+            "unexpected token: syntax error",
+            "parser error",
+            "token lexer error at byte 4",
         )
-        self.assertIs(status, _WorkerStatus.UNAVAILABLE)
-        self.assertTrue(retire_after_reply)
-        self.assertEqual(message, "thread creation failed")
+        for message in messages:
+            with self.subTest(message=message):
+                status, retire_after_reply, reply = _compile_exception_reply(
+                    RuntimeError(message)
+                )
+                self.assertIs(status, _WorkerStatus.UNAVAILABLE)
+                self.assertTrue(retire_after_reply)
+                self.assertEqual(reply, message)
 
     def test_exit_code_format_includes_signal_name(self) -> None:
         self.assertEqual(
@@ -54,6 +113,40 @@ class CompileExceptionReplyTest(unittest.TestCase):
         )
         self.assertEqual(_format_worker_exitcode(7), "exited with code 7")
         self.assertEqual(_format_worker_exitcode(None), "exit status unavailable")
+
+    def test_fault_trace_dupfd_is_created_only_during_serialization(self) -> None:
+        deferred_fd = _DeferredDupFd(17)
+        transferred_fd = object()
+        with patch.object(
+            grammar_validator_module, "DupFd", return_value=transferred_fd
+        ) as dup_fd:
+            dup_fd.assert_not_called()
+            rebuild, args = deferred_fd.__reduce__()
+
+        dup_fd.assert_called_once_with(17)
+        self.assertIs(rebuild(*args), transferred_fd)
+
+    def test_spawned_fatal_signal_writes_real_python_traceback(self) -> None:
+        context = multiprocessing.get_context("spawn")
+        with tempfile.TemporaryFile(mode="w+b") as fault_file:
+            process = context.Process(
+                target=_crash_with_faulthandler,
+                args=(_DeferredDupFd(fault_file.fileno()),),
+            )
+            process.start()
+            try:
+                process.join(timeout=10)
+                self.assertFalse(process.is_alive())
+                self.assertEqual(process.exitcode, -signal.SIGSEGV)
+                fault_file.seek(0)
+                fault_trace = fault_file.read().decode("utf-8", errors="replace")
+            finally:
+                if process.is_alive():
+                    process.terminate()
+                process.join(timeout=10)
+
+        self.assertIn("Fatal Python error: Segmentation fault", fault_trace)
+        self.assertIn("_crash_with_faulthandler", fault_trace)
 
 
 class GrammarValidatorTest(unittest.TestCase):
@@ -106,6 +199,38 @@ class GrammarValidatorTest(unittest.TestCase):
         crash_logs = "\n".join(logs.output)
         self.assertIn("worker fatal traceback", crash_logs)
         self.assertIn("xgrammar native stack trace", crash_logs)
+
+    def test_worker_startup_timeout_terminates_kills_and_joins(self) -> None:
+        self.validator._mp = MagicMock()
+        self.validator._worker_tokenizer_info_json = "{}"
+        self.validator._worker_grammar_config = MagicMock()
+        self.validator._worker_admission_config = MagicMock()
+        self.validator._worker_memory_limit_bytes = 0
+        self.validator._compile_timeout_s = 0
+        self.validator._pool_lock = threading.Lock()
+        self.validator._spawning = 1
+
+        parent_conn = MagicMock()
+        parent_conn.poll.return_value = False
+        child_conn = MagicMock()
+        process = MagicMock()
+        process.is_alive.side_effect = (True, True)
+        process.exitcode = None
+        self.validator._mp.Pipe.return_value = (parent_conn, child_conn)
+        self.validator._mp.Process.return_value = process
+
+        with self.assertLogs(
+            "rtp_llm.dash_sc.inference.grammar_validator", level="WARNING"
+        ):
+            self.validator._spawn_one()
+
+        process.start.assert_called_once_with()
+        process.terminate.assert_called_once_with()
+        process.kill.assert_called_once_with()
+        self.assertGreaterEqual(process.join.call_count, 2)
+        parent_conn.close.assert_called_once_with()
+        child_conn.close.assert_called_once_with()
+        self.assertEqual(self.validator._spawning, 0)
 
     def test_only_worker_verdicts_enter_result_cache(self) -> None:
         self.validator._result_cache_max_entries = 4

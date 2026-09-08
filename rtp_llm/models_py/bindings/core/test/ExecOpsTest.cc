@@ -578,7 +578,9 @@ TEST_F(ExecOpsTest, testWriteCacheStoreCallbackFailureReachesPublicationWait) {
                                           /*cp_rank=*/0,
                                           /*cp_size=*/1,
                                           nullptr,
-                                          [&writer]() { return writer.registerStoreCompletion(); }));
+                                          [&writer](const std::vector<int64_t>&,
+                                                    const std::vector<int32_t>&,
+                                                    size_t) { return writer.registerStoreCompletion(); }));
     writer.finishSubmissions();
     EXPECT_THROW(writer.waitStoreCompletions(), std::runtime_error);
 }
@@ -612,7 +614,9 @@ TEST_F(ExecOpsTest, testWriteCacheStoreSynchronousThrowCompletesTokenExactlyOnce
                                         /*cp_rank=*/0,
                                         /*cp_size=*/1,
                                         nullptr,
-                                        [&writer]() { return writer.registerStoreCompletion(); }),
+                                        [&writer](const std::vector<int64_t>&,
+                                                    const std::vector<int32_t>&,
+                                                    size_t) { return writer.registerStoreCompletion(); }),
                  std::runtime_error);
     writer.finishSubmissions();
     EXPECT_THROW(writer.waitStoreCompletions(), std::runtime_error);
@@ -648,7 +652,9 @@ TEST_F(ExecOpsTest, testWriteCacheStoreDuplicateCallbackDoesNotUnderflow) {
                                           /*cp_rank=*/0,
                                           /*cp_size=*/1,
                                           nullptr,
-                                          [&writer]() { return writer.registerStoreCompletion(); }));
+                                          [&writer](const std::vector<int64_t>&,
+                                                    const std::vector<int32_t>&,
+                                                    size_t) { return writer.registerStoreCompletion(); }));
     writer.finishSubmissions();
     EXPECT_NO_THROW(writer.waitStoreCompletions());
 }
@@ -682,7 +688,9 @@ TEST_F(ExecOpsTest, testWriteCacheStoreZeroSelectedBlocksRegistersNoCompletion) 
                                           /*cp_rank=*/0,
                                           /*cp_size=*/1,
                                           nullptr,
-                                          [&writer]() { return writer.registerStoreCompletion(); }));
+                                          [&writer](const std::vector<int64_t>&,
+                                                    const std::vector<int32_t>&,
+                                                    size_t) { return writer.registerStoreCompletion(); }));
     writer.finishSubmissions();
     EXPECT_NO_THROW(writer.waitStoreCompletions());
     EXPECT_TRUE(cache_store->records.empty());
@@ -717,7 +725,9 @@ TEST_F(ExecOpsTest, testWriteCacheStoreTrackedPublicationWithoutCacheStoreThrows
                                             /*cp_rank=*/0,
                                             /*cp_size=*/1,
                                             nullptr,
-                                            [&writer]() { return writer.registerStoreCompletion(); }));
+                                            [&writer](const std::vector<int64_t>&,
+                                                    const std::vector<int32_t>&,
+                                                    size_t) { return writer.registerStoreCompletion(); }));
     writer.finishSubmissions();
     EXPECT_NO_THROW(writer.waitStoreCompletions());
 }

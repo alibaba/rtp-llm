@@ -7,14 +7,18 @@ dumps are repeatable and serialized.
 """
 
 # pyright: reportPrivateUsage=false
+import fcntl
 import logging
 import os
 import pickle
+import re
+import tempfile
 import threading
 import time
 import traceback
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Dict, Optional, TextIO
+from typing import AbstractSet, Any, Dict, Iterator, Optional, TextIO
 
 import torch
 
@@ -30,6 +34,16 @@ _RECORD_ENV = "RTP_OOM_RECORD"
 _LOG_DIR_ENV = "LOG_PATH"
 _OUT_DIR = "logs"
 _MAX_TRACE_ENTRIES = 500_000
+_DUMP_MAX_COUNT_ENV = "RTP_OOM_DUMP_MAX_COUNT"
+_DUMP_MAX_AGE_SECONDS_ENV = "RTP_OOM_DUMP_MAX_AGE_SECONDS"
+_DUMP_MAX_BYTES_ENV = "RTP_OOM_DUMP_MAX_BYTES"
+_DEFAULT_DUMP_MAX_COUNT = 8
+_DEFAULT_DUMP_MAX_AGE_SECONDS = 24 * 60 * 60
+_DEFAULT_DUMP_MAX_BYTES = 2 * 1024**3
+_RETENTION_LOCK_FILE = ".oom_allocator_retention.lock"
+_IN_PROGRESS_PREFIX = ".oom_allocator_in_progress_"
+_SAFE_COMPONENT = re.compile(r"[^A-Za-z0-9_.-]+")
+_CORRELATION_GROUP = re.compile(r"_cid([A-Za-z0-9-]+)_r")
 
 _BLOCK_USAGE = {
     "active_allocated": "ACTIVE_ALLOCATED",
@@ -52,12 +66,219 @@ def _out_dir() -> Path:
     return path
 
 
-def _suffix(tag: str, device: int, dump_id: int) -> str:
-    world_rank = os.environ.get("WORLD_RANK", os.environ.get("RANK", "0"))
-    server_id = os.environ.get("FRONTEND_SERVER_ID", "0")
-    return (
-        f"{tag}_r{world_rank}_s{server_id}_d{device}_pid{os.getpid()}_n{dump_id:06d}"
+def _sanitize_filename_component(value: Any, fallback: str = "unknown") -> str:
+    sanitized = _SAFE_COMPONENT.sub("_", str(value))
+    sanitized = re.sub(r"\.{2,}", "_", sanitized).strip(".")[:96]
+    return sanitized or fallback
+
+
+def _sanitize_correlation_id(value: Any) -> str:
+    sanitized = re.sub(r"[^A-Za-z0-9-]+", "-", str(value)).strip("-")[:64]
+    return sanitized or "unknown"
+
+
+def _suffix(
+    tag: str,
+    device: int,
+    sequence: int,
+    dump_correlation_id: Optional[str] = None,
+) -> str:
+    world_rank = _sanitize_filename_component(
+        os.environ.get("WORLD_RANK", os.environ.get("RANK", "0"))
     )
+    server_id = _sanitize_filename_component(os.environ.get("FRONTEND_SERVER_ID", "0"))
+    safe_tag = _sanitize_filename_component(tag)
+    safe_device = _sanitize_filename_component(device)
+    correlation = (
+        f"_cid{_sanitize_correlation_id(dump_correlation_id)}"
+        if dump_correlation_id
+        else ""
+    )
+    return (
+        f"{safe_tag}{correlation}_r{world_rank}_s{server_id}_d{safe_device}"
+        f"_pid{os.getpid()}_n{sequence:06d}"
+    )
+
+
+@contextmanager
+def _retention_lock(output_dir: Path) -> Iterator[None]:
+    lock_path = output_dir / _RETENTION_LOCK_FILE
+    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+
+
+def _positive_retention_limit(name: str, default: int) -> int:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    try:
+        parsed = int(value)
+        if parsed <= 0:
+            raise ValueError("must be positive")
+        return parsed
+    except ValueError:
+        _LOG.warning("[OOM_DUMP] ignoring invalid %s=%r", name, value)
+        return default
+
+
+def _group_key_from_suffix(suffix: str) -> str:
+    correlations = _CORRELATION_GROUP.findall(suffix)
+    return f"correlation:{correlations[-1]}" if correlations else suffix
+
+
+def _dump_group_key(path: Path) -> Optional[str]:
+    name = path.name
+    if name.startswith("oom_allocator_snapshot_") and name.endswith(".pickle"):
+        suffix = name[len("oom_allocator_snapshot_") : -len(".pickle")]
+    elif name.startswith("oom_allocator_") and name.endswith(".log"):
+        suffix = name[len("oom_allocator_") : -len(".log")]
+    else:
+        return None
+    return _group_key_from_suffix(suffix)
+
+
+def _active_dump_group_keys(
+    output_dir: Path, current_time: float, stale_after_seconds: int
+) -> set[str]:
+    """Return live publication groups and remove expired crash markers.
+
+    Publishers hold an exclusive advisory lock on their marker for the entire
+    atomic write. An unlocked marker is retained briefly to tolerate startup
+    races, then removed once it is older than the configured dump age.
+    """
+    active = set()
+    try:
+        markers = list(output_dir.glob(f"{_IN_PROGRESS_PREFIX}*"))
+    except OSError as error:
+        _LOG.warning("[OOM_DUMP] failed to list in-progress markers: %s", error)
+        return active
+
+    for marker in markers:
+        group_key = _group_key_from_suffix(marker.name[len(_IN_PROGRESS_PREFIX) :])
+        fd: Optional[int] = None
+        marker_locked = False
+        try:
+            fd = os.open(marker, os.O_RDWR)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                marker_locked = True
+            except BlockingIOError:
+                active.add(group_key)
+                continue
+
+            marker_age = max(0.0, current_time - os.fstat(fd).st_mtime)
+            if marker_age > stale_after_seconds:
+                marker.unlink(missing_ok=True)
+            else:
+                active.add(group_key)
+        except FileNotFoundError:
+            continue
+        except OSError as error:
+            active.add(group_key)
+            _LOG.warning(
+                "[OOM_DUMP] failed to inspect in-progress marker %s: %s",
+                marker,
+                error,
+            )
+        finally:
+            if fd is not None:
+                if marker_locked:
+                    try:
+                        fcntl.flock(fd, fcntl.LOCK_UN)
+                    except OSError as error:
+                        _LOG.warning(
+                            "[OOM_DUMP] failed to unlock in-progress marker %s: %s",
+                            marker,
+                            error,
+                        )
+                try:
+                    os.close(fd)
+                except OSError as error:
+                    _LOG.warning(
+                        "[OOM_DUMP] failed to close in-progress marker %s: %s",
+                        marker,
+                        error,
+                    )
+    return active
+
+
+def _prune_dump_files(
+    output_dir: Path,
+    now: Optional[float] = None,
+    protected_group_keys: AbstractSet[str] = frozenset(),
+) -> None:
+    """Apply retention while the caller holds thread and interprocess locks."""
+    max_count = _positive_retention_limit(_DUMP_MAX_COUNT_ENV, _DEFAULT_DUMP_MAX_COUNT)
+    max_age_seconds = _positive_retention_limit(
+        _DUMP_MAX_AGE_SECONDS_ENV, _DEFAULT_DUMP_MAX_AGE_SECONDS
+    )
+    max_bytes = _positive_retention_limit(_DUMP_MAX_BYTES_ENV, _DEFAULT_DUMP_MAX_BYTES)
+    current_time = time.time() if now is None else now
+    protected = set(protected_group_keys) | _active_dump_group_keys(
+        output_dir, current_time, max_age_seconds
+    )
+
+    groups: Dict[str, list[tuple[Path, int, float]]] = {}
+    try:
+        candidates = list(output_dir.glob("oom_allocator_*"))
+    except OSError as error:
+        _LOG.warning("[OOM_DUMP] failed to list retained dumps: %s", error)
+        return
+
+    for path in candidates:
+        group_key = _dump_group_key(path)
+        if group_key is None:
+            continue
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        groups.setdefault(group_key, []).append((path, stat.st_size, stat.st_mtime))
+
+    def remove_group(group_key: str) -> int:
+        removed_bytes = 0
+        for path, size, _ in groups.pop(group_key, []):
+            try:
+                path.unlink()
+                removed_bytes += size
+            except FileNotFoundError:
+                removed_bytes += size
+            except OSError as error:
+                _LOG.warning("[OOM_DUMP] failed to prune %s: %s", path, error)
+        return removed_bytes
+
+    for group_key, files in list(groups.items()):
+        if (
+            group_key not in protected
+            and current_time - max(item[2] for item in files) > max_age_seconds
+        ):
+            remove_group(group_key)
+
+    def removable_groups() -> list[str]:
+        return sorted(
+            (group_key for group_key in groups if group_key not in protected),
+            key=lambda group_key: max(item[2] for item in groups[group_key]),
+        )
+
+    while len(groups) > max_count:
+        candidates_to_remove = removable_groups()
+        if not candidates_to_remove:
+            break
+        remove_group(candidates_to_remove[0])
+
+    retained_bytes = sum(size for files in groups.values() for _, size, _ in files)
+    while retained_bytes > max_bytes:
+        candidates_to_remove = removable_groups()
+        if not candidates_to_remove:
+            break
+        retained_bytes -= remove_group(candidates_to_remove[0])
 
 
 def _human_bytes(value: Optional[int]) -> str:
@@ -218,21 +439,42 @@ def dump_oom_diagnostics(
     exception: Optional[str] = None,
     cpp_backtrace: Optional[str] = None,
     reuse_observer_dump: bool = False,
+    dump_correlation_id: Optional[str] = None,
 ) -> Optional[str]:
     """Write a repeatable allocator dump without allowing failures to escape."""
     global _dump_counter
 
     if reuse_observer_dump:
         with _install_lock:
-            if _last_observer_dump is not None:
+            if _last_observer_dump is not None and Path(_last_observer_dump).exists():
                 return _last_observer_dump
 
     with _dump_lock:
-        dump_id = _dump_counter
+        sequence = _dump_counter
         _dump_counter += 1
+        output_dir: Optional[Path] = None
+        marker_path: Optional[Path] = None
+        marker_fd: Optional[int] = None
+        temporary_paths: list[Path] = []
+        correlation_id = (
+            _sanitize_correlation_id(dump_correlation_id)
+            if dump_correlation_id
+            else None
+        )
         try:
+            output_dir = _out_dir()
             if device is None:
                 device = torch.cuda.current_device()
+            suffix = _suffix(tag, device, sequence, correlation_id)
+            group_key = _group_key_from_suffix(suffix)
+            pending_marker_path = output_dir / f"{_IN_PROGRESS_PREFIX}{suffix}"
+            with _retention_lock(output_dir):
+                _prune_dump_files(output_dir, protected_group_keys={group_key})
+                marker_fd = os.open(
+                    pending_marker_path, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600
+                )
+                marker_path = pending_marker_path
+                fcntl.flock(marker_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
             devices = list(range(torch.cuda.device_count()))
             if device not in devices:
@@ -245,8 +487,12 @@ def dump_oom_diagnostics(
                 current_free = device_free if current_device == device else None
                 current_total = device_total if current_device == device else None
                 try:
-                    queried_free, queried_total = torch.cuda.mem_get_info(current_device)
-                    current_free = queried_free if current_free is None else current_free
+                    queried_free, queried_total = torch.cuda.mem_get_info(
+                        current_device
+                    )
+                    current_free = (
+                        queried_free if current_free is None else current_free
+                    )
                     current_total = (
                         queried_total if current_total is None else current_total
                     )
@@ -294,14 +540,22 @@ def dump_oom_diagnostics(
                     "[OOM_DUMP] failed to collect allocator blocks: %s", error
                 )
 
-            suffix = _suffix(tag, device, dump_id)
-            output_dir = _out_dir()
             snapshot_path = output_dir / f"oom_allocator_snapshot_{suffix}.pickle"
             snapshot_value = "disabled; set RTP_OOM_RECORD=1 before startup"
             if _enabled() and allocator_snapshot is not None:
                 try:
-                    with snapshot_path.open("wb") as snapshot_file:
+                    with tempfile.NamedTemporaryFile(
+                        mode="wb",
+                        prefix=f".{snapshot_path.name}.",
+                        suffix=".tmp",
+                        dir=output_dir,
+                        delete=False,
+                    ) as snapshot_file:
+                        snapshot_tmp_path = Path(snapshot_file.name)
+                        temporary_paths.append(snapshot_tmp_path)
                         pickle.dump(allocator_snapshot, snapshot_file)
+                    os.replace(snapshot_tmp_path, snapshot_path)
+                    temporary_paths.remove(snapshot_tmp_path)
                     snapshot_value = str(snapshot_path)
                 except Exception as error:  # noqa: BLE001
                     _LOG.exception(
@@ -310,12 +564,22 @@ def dump_oom_diagnostics(
                     snapshot_value = f"failed: {error}"
 
             output_path = output_dir / f"oom_allocator_{suffix}.log"
-            with output_path.open("w", encoding="utf-8") as output:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                prefix=f".{output_path.name}.",
+                suffix=".tmp",
+                dir=output_dir,
+                delete=False,
+                encoding="utf-8",
+            ) as output:
+                output_tmp_path = Path(output.name)
+                temporary_paths.append(output_tmp_path)
                 output.write("=" * 120 + "\n")
                 output.write("RTP-LLM TORCH GPU ALLOCATOR DIAGNOSTICS\n")
                 output.write("=" * 120 + "\n")
                 output.write(f"tag={tag}\n")
-                output.write(f"dump_id={dump_id}\n")
+                output.write(f"dump_sequence={sequence}\n")
+                output.write(f"dump_id={correlation_id or '<automatic>'}\n")
                 output.write(f"primary_device={device}\n")
                 output.write(f"logical_devices={devices}\n")
                 output.write(
@@ -375,14 +639,22 @@ def dump_oom_diagnostics(
                     "\n[DIAGNOSTIC PYTHON STACK - NOT THE ORIGINAL GPU EXCEPTION STACK]\n"
                 )
                 output.write("".join(traceback.format_stack()))
+            os.replace(output_tmp_path, output_path)
+            temporary_paths.remove(output_tmp_path)
+
+            with _retention_lock(output_dir):
+                marker_path.unlink(missing_ok=True)
+                marker_path = None
+                _prune_dump_files(output_dir, protected_group_keys={group_key})
 
             segment_count, block_count = _snapshot_counts(allocator_snapshot)
             _LOG.error(
-                "[OOM_DUMP] tag=%s id=%d device=%d pid=%d exception=%s file=%s snapshot=%s "
-                "allocator_segments=%d allocator_blocks=%d\n"
+                "[OOM_DUMP] tag=%s dump_id=%s sequence=%d device=%d pid=%d exception=%s "
+                "file=%s snapshot=%s allocator_segments=%d allocator_blocks=%d\n"
                 "[OOM_DUMP] torch allocator summary:\n%s",
                 tag,
-                dump_id,
+                correlation_id or "<automatic>",
+                sequence,
                 device,
                 os.getpid(),
                 exception or "<not provided>",
@@ -395,9 +667,44 @@ def dump_oom_diagnostics(
             return str(output_path)
         except Exception as error:  # noqa: BLE001
             _LOG.exception(
-                "[OOM_DUMP] diagnostic collection failed for tag=%s: %s", tag, error
+                "[OOM_DUMP] diagnostic collection failed for tag=%s dump_id=%s: %s",
+                tag,
+                correlation_id or "<automatic>",
+                error,
             )
             return None
+        finally:
+            for temporary_path in temporary_paths:
+                try:
+                    temporary_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            if output_dir is not None and marker_path is not None:
+                try:
+                    with _retention_lock(output_dir):
+                        marker_path.unlink(missing_ok=True)
+                        _prune_dump_files(output_dir)
+                except OSError as cleanup_error:
+                    _LOG.warning(
+                        "[OOM_DUMP] failed to clear in-progress marker %s: %s",
+                        marker_path,
+                        cleanup_error,
+                    )
+            if marker_fd is not None:
+                try:
+                    fcntl.flock(marker_fd, fcntl.LOCK_UN)
+                except OSError as cleanup_error:
+                    _LOG.warning(
+                        "[OOM_DUMP] failed to unlock in-progress marker: %s",
+                        cleanup_error,
+                    )
+                try:
+                    os.close(marker_fd)
+                except OSError as cleanup_error:
+                    _LOG.warning(
+                        "[OOM_DUMP] failed to close in-progress marker: %s",
+                        cleanup_error,
+                    )
 
 
 def _oom_observer(

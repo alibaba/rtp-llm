@@ -8,9 +8,12 @@
 
 #include <memory>
 #include <atomic>
+#include <cstddef>
+#include <cstdint>
 #include <exception>
 #include <functional>
 #include <mutex>
+#include <vector>
 
 #if USING_ROCM
 #include <hip/hip_runtime.h>
@@ -27,8 +30,9 @@ namespace rtp_llm {
 class CacheConfig;
 class CacheStore;
 
-using CacheStoreCompletionCallback  = std::function<void(std::exception_ptr)>;
-using CacheStoreCompletionRegistrar = std::function<CacheStoreCompletionCallback()>;
+using CacheStoreCompletionCallback = std::function<void(std::exception_ptr)>;
+using CacheStoreCompletionRegistrar = std::function<CacheStoreCompletionCallback(
+    const std::vector<int64_t>&, const std::vector<int32_t>&, size_t)>;
 
 // ===================================================================
 // Runtime lifecycle

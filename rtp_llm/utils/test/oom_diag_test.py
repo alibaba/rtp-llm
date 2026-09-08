@@ -69,7 +69,17 @@ class OomDiagUnitTest(unittest.TestCase):
         self.tmp = tempfile.mkdtemp(prefix="oom_diag_test_")
         self.saved_record = os.environ.get(oom_diag._RECORD_ENV)
         self.saved_log_dir = os.environ.get(oom_diag._LOG_DIR_ENV)
+        self.saved_retention = {
+            name: os.environ.get(name)
+            for name in (
+                oom_diag._DUMP_MAX_COUNT_ENV,
+                oom_diag._DUMP_MAX_AGE_SECONDS_ENV,
+                oom_diag._DUMP_MAX_BYTES_ENV,
+            )
+        }
         os.environ.pop(oom_diag._RECORD_ENV, None)
+        for name in self.saved_retention:
+            os.environ.pop(name, None)
         os.environ[oom_diag._LOG_DIR_ENV] = self.tmp
         _reset_module_state()
 
@@ -82,6 +92,11 @@ class OomDiagUnitTest(unittest.TestCase):
             os.environ.pop(oom_diag._LOG_DIR_ENV, None)
         else:
             os.environ[oom_diag._LOG_DIR_ENV] = self.saved_log_dir
+        for name, value in self.saved_retention.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
         _reset_module_state()
         shutil.rmtree(self.tmp, ignore_errors=True)
 
@@ -167,9 +182,7 @@ class OomDiagUnitTest(unittest.TestCase):
             reused_path = oom_diag.dump_oom_diagnostics(
                 tag="fatal_gpu_oom", device=2, reuse_observer_dump=True
             )
-            manual_path = oom_diag.dump_oom_diagnostics(
-                tag="allocator_dump", device=2
-            )
+            manual_path = oom_diag.dump_oom_diagnostics(tag="allocator_dump", device=2)
 
         self.assertEqual(reused_path, first_path)
         self.assertNotEqual(manual_path, first_path)
@@ -185,6 +198,123 @@ class OomDiagUnitTest(unittest.TestCase):
         self.assertIsNotNone(second)
         self.assertTrue(first.endswith("_n000000.log"))
         self.assertTrue(second.endswith("_n000001.log"))
+
+    def test_dump_correlation_id_is_in_filename_and_log(self) -> None:
+        patches = self._cuda_diagnostics()
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
+            output_path = oom_diag.dump_oom_diagnostics(
+                tag="allocator_dump",
+                device=2,
+                dump_correlation_id="opaque-id-123",
+            )
+
+        self.assertIsNotNone(output_path)
+        self.assertIn("_cidopaque-id-123_", output_path)
+        self.assertIn("dump_id=opaque-id-123", open(output_path).read())
+
+    def test_suffix_sanitizes_every_external_component(self) -> None:
+        with mock.patch.dict(
+            os.environ,
+            {"WORLD_RANK": "../../rank", "FRONTEND_SERVER_ID": "../server"},
+        ):
+            suffix = oom_diag._suffix(
+                "../tag/name", -1, 3, dump_correlation_id="../../dump/id"
+            )
+
+        self.assertNotIn("/", suffix)
+        self.assertNotIn("..", suffix)
+        self.assertIn("_ciddump-id_", suffix)
+
+    def test_retention_enforces_age_count_and_bytes_for_dump_groups(self) -> None:
+        output_dir = oom_diag._out_dir()
+
+        def write_group(suffix: str, modified_at: float, sizes: tuple[int, ...]):
+            paths = []
+            for index, size in enumerate(sizes):
+                prefix = "oom_allocator_" if index == 0 else "oom_allocator_snapshot_"
+                extension = ".log" if index == 0 else ".pickle"
+                path = output_dir / f"{prefix}{suffix}{extension}"
+                path.write_bytes(b"x" * size)
+                os.utime(path, (modified_at, modified_at))
+                paths.append(path)
+            return paths
+
+        os.environ[oom_diag._DUMP_MAX_COUNT_ENV] = "2"
+        os.environ[oom_diag._DUMP_MAX_AGE_SECONDS_ENV] = "100"
+        os.environ[oom_diag._DUMP_MAX_BYTES_ENV] = "10"
+        expired = write_group("expired", 800.0, (1, 1))
+        oldest_retained = write_group("oldest", 920.0, (4, 4))
+        over_byte_budget = write_group("middle", 950.0, (8,))
+        newest = write_group("newest", 980.0, (8,))
+
+        with oom_diag._dump_lock, oom_diag._retention_lock(output_dir):
+            oom_diag._prune_dump_files(output_dir, now=1000.0)
+
+        for path in expired + oldest_retained + over_byte_budget:
+            self.assertFalse(path.exists())
+        self.assertTrue(newest[0].exists())
+
+    def test_retention_counts_correlated_fanout_as_one_group(self) -> None:
+        output_dir = oom_diag._out_dir()
+        old = output_dir / "oom_allocator_old.log"
+        old.write_bytes(b"old")
+        os.utime(old, (100.0, 100.0))
+        fanout = []
+        for rank in range(4):
+            path = output_dir / (
+                "oom_allocator_allocator_dump_cidrequest-1_"
+                f"r{rank}_s0_d0_pid{rank}_n000000.log"
+            )
+            path.write_bytes(b"new")
+            os.utime(path, (200.0 + rank, 200.0 + rank))
+            fanout.append(path)
+        os.environ[oom_diag._DUMP_MAX_COUNT_ENV] = "1"
+
+        with oom_diag._dump_lock, oom_diag._retention_lock(output_dir):
+            oom_diag._prune_dump_files(output_dir, now=250.0)
+
+        self.assertFalse(old.exists())
+        self.assertTrue(all(path.exists() for path in fanout))
+
+    def test_retention_does_not_prune_active_locked_publication(self) -> None:
+        output_dir = oom_diag._out_dir()
+        suffix = "allocator_dump_cidactive-1_r0_s0_d0_pid1_n000000"
+        artifact = output_dir / f"oom_allocator_{suffix}.log"
+        marker = output_dir / f"{oom_diag._IN_PROGRESS_PREFIX}{suffix}"
+        artifact.write_bytes(b"too large")
+        marker_fd = os.open(marker, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600)
+        oom_diag.fcntl.flock(marker_fd, oom_diag.fcntl.LOCK_EX | oom_diag.fcntl.LOCK_NB)
+        os.utime(artifact, (1.0, 1.0))
+        os.utime(marker, (1.0, 1.0))
+        os.environ[oom_diag._DUMP_MAX_AGE_SECONDS_ENV] = "10"
+        os.environ[oom_diag._DUMP_MAX_BYTES_ENV] = "1"
+
+        try:
+            with oom_diag._dump_lock, oom_diag._retention_lock(output_dir):
+                oom_diag._prune_dump_files(output_dir, now=100.0)
+        finally:
+            oom_diag.fcntl.flock(marker_fd, oom_diag.fcntl.LOCK_UN)
+            os.close(marker_fd)
+
+        self.assertTrue(marker.exists())
+        self.assertTrue(artifact.exists())
+
+    def test_retention_removes_stale_crash_marker_and_artifacts(self) -> None:
+        output_dir = oom_diag._out_dir()
+        suffix = "allocator_dump_cidstale-1_r0_s0_d0_pid1_n000000"
+        artifact = output_dir / f"oom_allocator_{suffix}.log"
+        marker = output_dir / f"{oom_diag._IN_PROGRESS_PREFIX}{suffix}"
+        artifact.write_bytes(b"stale")
+        marker.touch()
+        os.utime(artifact, (1.0, 1.0))
+        os.utime(marker, (1.0, 1.0))
+        os.environ[oom_diag._DUMP_MAX_AGE_SECONDS_ENV] = "10"
+
+        with oom_diag._dump_lock, oom_diag._retention_lock(output_dir):
+            oom_diag._prune_dump_files(output_dir, now=100.0)
+
+        self.assertFalse(marker.exists())
+        self.assertFalse(artifact.exists())
 
     def test_concurrent_dumps_are_serialized(self) -> None:
         active = 0
@@ -241,7 +371,9 @@ class OomDiagUnitTest(unittest.TestCase):
         ), mock.patch.object(
             torch.cuda.memory, "_snapshot", return_value={}
         ), mock.patch.object(
-            oom_diag.Path, "open", side_effect=OSError("dump file failed")
+            oom_diag.tempfile,
+            "NamedTemporaryFile",
+            side_effect=OSError("dump file failed"),
         ), self.assertLogs(
             oom_diag._LOG, level="ERROR"
         ) as logs:

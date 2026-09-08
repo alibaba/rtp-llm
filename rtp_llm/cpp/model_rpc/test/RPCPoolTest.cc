@@ -4,6 +4,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <memory>
@@ -143,6 +144,27 @@ TEST(RPCPoolTest, ReadyPreflightBoundsUnreadyChannelAndEvictsItsGeneration) {
     auto replacement = pool.getConnection(blackhole.address());
     ASSERT_TRUE(replacement.ok()) << replacement.status();
     EXPECT_NE(replacement->channel, original->channel);
+}
+
+TEST(RPCPoolTest, ReadyPreflightCancellationStopsWaitBeforeDeadline) {
+    TcpBlackhole      blackhole;
+    RPCPool           pool;
+    std::atomic<bool> cancelled{false};
+    std::thread cancel_thread([&cancelled]() {
+        std::this_thread::sleep_for(30ms);
+        cancelled.store(true, std::memory_order_release);
+    });
+
+    const auto begin  = std::chrono::steady_clock::now();
+    auto       result = pool.getReadyConnection(blackhole.address(),
+                                          std::chrono::system_clock::now() + 2s,
+                                          [&cancelled]() { return cancelled.load(std::memory_order_acquire); });
+    const auto elapsed_ms = elapsedMs(begin);
+    cancel_thread.join();
+
+    EXPECT_FALSE(result.ok());
+    EXPECT_EQ(result.status().code(), absl::StatusCode::kCancelled);
+    EXPECT_LT(elapsed_ms, 500);
 }
 
 TEST(RPCPoolTest, ReadyPreflightReusesReadyChannel) {

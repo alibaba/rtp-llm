@@ -545,7 +545,7 @@ TEST(XGrammarBackendTest, ExplicitSyntaxRuntimeFailuresAreDeterministicAndCached
         "Regex parsing error at position 4",
         "EBNF lexer error at line 2",
         "grammar parser error at byte 4",
-        "unexpected token: syntax error",
+        "structural tag syntax error at byte 4",
     };
 
     for (const auto& message : messages) {
@@ -562,6 +562,30 @@ TEST(XGrammarBackendTest, ExplicitSyntaxRuntimeFailuresAreDeterministicAndCached
         EXPECT_EQ(backend->compileNow(key).status.code(), absl::StatusCode::kInvalidArgument);
         EXPECT_EQ(attempts.load(std::memory_order_relaxed), 1);
         EXPECT_EQ(backend->stats().invalid_cache_size, 1);
+    }
+}
+
+TEST(XGrammarBackendTest, UnqualifiedSyntaxRuntimeFailuresAreTransientAndNotCached) {
+    const std::vector<std::string> messages = {
+        "unexpected token: syntax error",
+        "parser error",
+        "token lexer error at byte 4",
+    };
+
+    for (const auto& message : messages) {
+        SCOPED_TRACE(message);
+        auto             backend = makeBackend();
+        std::atomic<int> attempts{0};
+        backend->setCompileFnForTest([&](const GrammarKeyCpp&) -> GrammarCompileResult {
+            attempts.fetch_add(1, std::memory_order_relaxed);
+            throw std::runtime_error(message);
+        });
+
+        const GrammarKeyCpp key{"regex", message};
+        EXPECT_EQ(backend->compileNow(key).status.code(), absl::StatusCode::kUnknown);
+        EXPECT_EQ(backend->compileNow(key).status.code(), absl::StatusCode::kUnknown);
+        EXPECT_EQ(attempts.load(std::memory_order_relaxed), 2);
+        EXPECT_EQ(backend->stats().invalid_cache_size, 0);
     }
 }
 

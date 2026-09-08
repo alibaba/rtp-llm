@@ -1,4 +1,19 @@
+import argparse
+
 from rtp_llm.server.server_args.util import str2bool
+
+# Two native int arrays are sized by max_period. This cap keeps their combined
+# allocation at about 128 KiB per request while allowing long-period detection.
+MAX_OUTPUT_REPETITION_PERIOD = 16_384
+
+
+def _output_repetition_max_period(value: str) -> int:
+    period = max(1, int(value))
+    if period > MAX_OUTPUT_REPETITION_PERIOD:
+        raise argparse.ArgumentTypeError(
+            f"must be at most {MAX_OUTPUT_REPETITION_PERIOD}"
+        )
+    return period
 
 
 def init_repetition_detection_group_args(parser, repetition_detection_config):
@@ -29,8 +44,10 @@ def init_repetition_detection_group_args(parser, repetition_detection_config):
         "--output_repetition_max_period",
         env_name="RTP_LLM_OUTPUT_REPETITION_MAX_PERIOD",
         bind_to=(repetition_detection_config, "output_repetition_max_period"),
-        type=int,
+        type=_output_repetition_max_period,
         default=512,
+        help="Maximum exact repetition period; capped at "
+        f"{MAX_OUTPUT_REPETITION_PERIOD} to bound per-request native state.",
     )
     group.add_argument(
         "--noncontig_repeat_min_span_tokens",

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <cstdint>
 #include <map>
 #include <memory>
@@ -65,7 +66,9 @@ private:
     grpc::Status      syncPrefix(PrefillGenerateContext& prefill_context);
     ErrorInfo         waitStreamBeforeRun(std::shared_ptr<GenerateStream> stream);
     void              prepareGenerateInput(PrefillGenerateContext& prefill_context);
-    void              getRpcConnection(PrefillGenerateContext& prefill_context);
+    static std::chrono::system_clock::time_point
+    decodeChannelReadyDeadline(const PrefillGenerateContext& prefill_context);
+    void getRpcConnection(PrefillGenerateContext& prefill_context);
     void              multimodalProcess(PrefillGenerateContext& prefill_context);
     void              remoteAllocateResource(PrefillGenerateContext& prefill_context);
     GenerateRequestPB buildAllocateRequest(PrefillGenerateContext& prefill_context);

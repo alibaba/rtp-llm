@@ -3,6 +3,7 @@
 #include <cstdlib>
 #include <iostream>
 #include <random>
+#include <stdexcept>
 #include <vector>
 
 #define RTP_EXPECT(expr)                                                                            \
@@ -156,6 +157,28 @@ void testNonContiguousRepeatedSpan() {
     RTP_EXPECT(result.duplicate_token_count == 64);
 }
 
+void testMaxPeriodBoundaries() {
+    OnlineRepetitionConfig config = testConfig();
+    config.max_period = 0;
+    const auto normalized = detectOnlineRepetitionMax({42, 42, 42}, config);
+    RTP_EXPECT(normalized.hit);
+    RTP_EXPECT(normalized.repeat_unit_size == 1);
+
+    config.max_period = kMaxOnlineRepetitionPeriod;
+    OnlineRepetitionTracker tracker(config);
+    RTP_EXPECT(tracker.tokenCount() == 0);
+
+    config.max_period = kMaxOnlineRepetitionPeriod + 1;
+    bool rejected = false;
+    try {
+        OnlineRepetitionTracker oversized(config);
+        (void)oversized;
+    } catch (const std::invalid_argument&) {
+        rejected = true;
+    }
+    RTP_EXPECT(rejected);
+}
+
 }  // namespace
 }  // namespace rtp_llm
 
@@ -168,6 +191,7 @@ int main() {
     rtp_llm::testLongSameToken();
     rtp_llm::testRandomNoHit();
     rtp_llm::testNonContiguousRepeatedSpan();
+    rtp_llm::testMaxPeriodBoundaries();
     std::cout << "OnlineRepetitionTracker tests passed\n";
     return 0;
 }

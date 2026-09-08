@@ -12,14 +12,15 @@ all measured reuse lengths exactly match the requested cache length.
 * observed reuse is constant and exactly matches the request; and
 * the selected batch size is fixed (the DSV4 Pro configuration uses 1).
 
-The exported expression intentionally uses only the variables and operators
-accepted by the FlexLB prefill evaluator: ``tokens``, ``hitCacheTokens``,
-numbers, ``+``, ``-``, ``*``, ``/`` and parentheses.  It does not emit
-``sum()``, ``max()``, ``batchSize``, ``computeTokens`` or Python syntax.
+The exported expression uses FlexLB's request-scoped ``inputTokens`` and
+``hitCacheTokens`` variables inside ``sum(...)``.  Each fitted BS=1 feature is
+therefore evaluated independently for every request and summed, preserving the
+observed single-request fit while remaining mathematically defined for any
+scheduler batch size.
 
-New runner output uses client HTTP wall time with ``max_new_tokens=1`` as
-TTFT.  The server's ``first_token_cost_time`` is retained for diagnostics and
-is used only as a backward-compatible fallback for legacy inputs.
+Production fitting uses the runner's complete per-request client HTTP wall
+measurements with ``max_new_tokens=1`` as TTFT.  Aggregate or legacy timing
+fields without the corresponding successful run evidence are not auditable.
 
 The report keeps the fit and the production gate separate: a formula can be
 useful for analysis while still failing a tail-error gate.
@@ -34,16 +35,17 @@ import math
 import pathlib
 import statistics
 from dataclasses import dataclass
-from typing import Any, Iterable, Sequence
+from typing import Any, Sequence
 
 FEATURE_NAMES = (
-    "1",
-    "tokens / 1024.0",
-    "hitCacheTokens / 1024.0",
-    "(tokens / 1024.0) * (tokens / 1024.0)",
-    "(tokens / 1024.0) * (hitCacheTokens / 1024.0)",
-    "(hitCacheTokens / 1024.0) * (hitCacheTokens / 1024.0)",
+    "sum(1)",
+    "sum(inputTokens / 1024.0)",
+    "sum(hitCacheTokens / 1024.0)",
+    "sum((inputTokens / 1024.0) * (inputTokens / 1024.0))",
+    "sum((inputTokens / 1024.0) * (hitCacheTokens / 1024.0))",
+    "sum((hitCacheTokens / 1024.0) * (hitCacheTokens / 1024.0))",
 )
+DSV4_FORMULA_BATCH_SIZE = 1
 
 
 @dataclass(frozen=True)
@@ -54,6 +56,7 @@ class Observation:
     target_ms: float
     source: str
     requested_cache_len: int | None = None
+    production_audited: bool = True
 
     @property
     def compute_len(self) -> int:
@@ -77,86 +80,174 @@ def _integer(value: Any) -> int | None:
     return int(number)
 
 
+def _first_nonblank(item: dict[str, Any], *keys: str) -> Any:
+    for key in keys:
+        value = item.get(key)
+        if value is not None and not (isinstance(value, str) and not value.strip()):
+            return value
+    return None
+
+
+def _require_batch_size_one(batch_size: int) -> None:
+    if batch_size != DSV4_FORMULA_BATCH_SIZE:
+        raise ValueError(
+            "DeepSeek-V4 prefill formula fitting requires --batch-size=1; "
+            f"got {batch_size}"
+        )
+
+
 def _status_ok(item: dict[str, Any]) -> bool:
-    status = str(item.get("status", "")).lower()
-    # Fail closed. A completed HTTP forward is not a valid cache-performance
-    # sample when the runner marked its reuse contract invalid.
-    return not status or status in {
-        "ok",
-        "success",
-        "passed",
-    }
+    return item.get("status") == "ok"
 
 
 def _median_run_time(
-    item: dict[str, Any]
+    item: dict[str, Any], requested_cache_len: int | None = None
 ) -> tuple[float | None, int | None, str | None]:
-    runs = item.get("runs")
-    if not isinstance(runs, list) or not runs:
-        return None, None, "missing_runs"
-    expected_runs = _integer(item.get("measure_runs")) or 3
+    """Validate all evidence used by cache-grid resume, fitting, and charts."""
+    if not isinstance(item, dict) or item.get("status") != "ok":
+        return None, None, "status_not_ok"
+    expected_runs = _integer(item.get("measure_runs"))
     success_runs = _integer(item.get("success_runs"))
-    if success_runs != expected_runs or len(runs) != expected_runs:
+    runs = item.get("runs")
+    if expected_runs is None or expected_runs <= 0:
+        return None, None, "missing_measure_runs"
+    if (
+        success_runs != expected_runs
+        or not isinstance(runs, list)
+        or len(runs) != expected_runs
+    ):
         return None, None, "incomplete_runs"
-    values: list[float] = []
+    if item.get("reuse_exact") is not True:
+        return None, None, "reuse_not_proven"
+    if item.get("shape_exact") is not True:
+        return None, None, "shape_not_proven"
+    if item.get("timing_valid") is not True:
+        return None, None, "timing_not_proven"
+
     input_len = _integer(item.get("input_len"))
-    requested_cache_len = _integer(item.get("cache_len_requested")) or 0
-    if item.get("reuse_exact") is False:
-        return None, None, "reuse_not_exact"
+    if requested_cache_len is None:
+        requested_cache_len = _integer(
+            _first_nonblank(item, "cache_len_requested", "cache_len")
+        )
+    if requested_cache_len is None:
+        return None, None, "missing_requested_cache_len"
+    if requested_cache_len > 0:
+        seed = item.get("seed")
+        if not isinstance(seed, dict) or seed.get("success") is not True:
+            return None, None, "missing_successful_cache_seed"
+
     observed = item.get("cache_len_observed")
-    observed_values = (
-        [_integer(value) for value in observed] if isinstance(observed, list) else []
-    )
-    observed_values = [value for value in observed_values if value is not None]
-    if not observed_values:
-        observed_values = [
-            _integer(run.get("reuse_len")) for run in runs if isinstance(run, dict)
-        ]
-        observed_values = [value for value in observed_values if value is not None]
-    if len(observed_values) != expected_runs or len(set(observed_values)) != 1:
+    if not isinstance(observed, list) or len(observed) != expected_runs:
+        return None, None, "missing_observed_reuse"
+    observed_values = [_integer(value) for value in observed]
+    if any(value is None for value in observed_values) or len(
+        set(observed_values)
+    ) != 1:
         return None, None, "observed_reuse_not_constant"
     cache_len = observed_values[0]
+    assert cache_len is not None
     if cache_len < 0 or input_len is None or cache_len >= input_len:
         return None, None, "invalid_observed_geometry"
     if cache_len != requested_cache_len:
         return None, None, "requested_reuse_mismatch"
-    for run in runs:
+
+    recorded_latencies = item.get("ttft_ms")
+    if (
+        not isinstance(recorded_latencies, list)
+        or len(recorded_latencies) != expected_runs
+    ):
+        return None, None, "missing_run_timings"
+    recorded_values = [_finite(value) for value in recorded_latencies]
+    if any(value is None or value <= 0 for value in recorded_values):
+        return None, None, "invalid_recorded_timing"
+
+    run_values: list[float] = []
+    for index, run in enumerate(runs):
         if not isinstance(run, dict) or run.get("success") is not True:
             return None, None, "run_failed"
-        run_input = _integer(run.get("input_len"))
-        output_len = _integer(run.get("output_len"))
-        reuse_len = _integer(run.get("reuse_len"))
-        latency = _finite(
-            run.get(
-                "ttft_ms",
-                run.get("client_wall_time_ms", run.get("prefill_time_ms")),
-            )
-        )
-        if run_input != input_len or output_len != 1:
+        if (
+            _integer(run.get("input_len")) != input_len
+            or _integer(run.get("output_len")) != 1
+        ):
             return None, None, "request_shape_mismatch"
-        if reuse_len != cache_len:
+        if _integer(run.get("reuse_len")) != cache_len:
             return None, None, "reuse_mismatch"
-        if latency is None or latency <= 0:
+        latency = _finite(run.get("ttft_ms"))
+        recorded = recorded_values[index]
+        if (
+            latency is None
+            or latency <= 0
+            or recorded is None
+            or not math.isclose(latency, recorded, rel_tol=1e-12, abs_tol=1e-9)
+        ):
             return None, None, "invalid_latency"
-        values.append(latency)
-    return statistics.median(values), cache_len, None
+        run_values.append(latency)
+
+    expected_median = statistics.median(run_values)
+    expected_average = statistics.fmean(run_values)
+    median = _finite(item.get("median_ttft_ms"))
+    average = _finite(item.get("avg_ttft_ms"))
+    if (
+        median is None
+        or average is None
+        or not math.isclose(median, expected_median, rel_tol=1e-12, abs_tol=1e-9)
+        or not math.isclose(average, expected_average, rel_tol=1e-12, abs_tol=1e-9)
+    ):
+        return None, None, "aggregate_timing_mismatch"
+    return expected_median, cache_len, None
 
 
-def _iter_json_metrics(path: pathlib.Path) -> Iterable[tuple[int, dict[str, Any]]]:
+def _fingerprint_config_sha256(config: Any) -> str | None:
+    if not isinstance(config, dict) or not config:
+        return None
+    canonical = json.dumps(
+        config, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def _load_json_metrics(
+    path: pathlib.Path,
+) -> tuple[list[Any], dict[str, Any]]:
     data = json.loads(path.read_text(encoding="utf-8"))
-    metrics = (
-        data.get("metrics", data.get("results", [])) if isinstance(data, dict) else []
-    )
+    if not isinstance(data, dict):
+        raise ValueError(f"{path}: expected a JSON object containing metrics[]")
+    metrics = data.get("metrics")
     if not isinstance(metrics, list):
         raise ValueError(f"{path}: expected a JSON object containing metrics[]")
-    for index, item in enumerate(metrics):
-        if isinstance(item, dict):
-            yield index, item
+
+    run_fingerprint = data.get("run_fingerprint")
+    fingerprint_config = data.get("fingerprint_config")
+    computed_fingerprint = _fingerprint_config_sha256(fingerprint_config)
+    total_cases = _integer(data.get("total_cases"))
+    completed_cases = _integer(data.get("completed_cases"))
+    provenance_checks = {
+        "explicit_complete": data.get("complete") is True,
+        "runner_mode": data.get("mode") == "prefix_cache_grid",
+        "schema_version": (_integer(data.get("schema_version")) or 0) >= 2,
+        "run_fingerprint": isinstance(run_fingerprint, str)
+        and bool(run_fingerprint.strip()),
+        "fingerprint_config": computed_fingerprint is not None,
+        "fingerprint_sha256": computed_fingerprint is not None
+        and run_fingerprint == computed_fingerprint,
+        "case_counts": total_cases is not None
+        and total_cases > 0
+        and completed_cases == total_cases
+        and len(metrics) == total_cases,
+    }
+    provenance = {
+        "production_audited": all(provenance_checks.values()),
+        "provenance_checks": provenance_checks,
+        "run_fingerprint": run_fingerprint,
+        "computed_run_fingerprint": computed_fingerprint,
+    }
+    return metrics, provenance
 
 
 def load_observations(
     paths: Sequence[pathlib.Path], *, batch_size: int = 1
 ) -> tuple[list[Observation], dict[str, Any]]:
+    _require_batch_size_one(batch_size)
     observations: list[Observation] = []
     rejected: dict[str, int] = {}
     input_files: list[dict[str, Any]] = []
@@ -166,14 +257,14 @@ def load_observations(
                 rows = list(csv.DictReader(stream))
             source_count = len(rows)
             for index, item in enumerate(rows, 2):
-                batch = _integer(item.get("batch_size")) or 1
+                raw_batch = _first_nonblank(item, "batch_size")
+                batch = 1 if raw_batch is None else _integer(raw_batch)
                 if batch != batch_size:
                     rejected["batch_size"] = rejected.get("batch_size", 0) + 1
                     continue
                 input_len = _integer(item.get("input_len"))
-                cache_len = (
-                    _integer(item.get("cache_len_requested", item.get("cache_len")))
-                    or 0
+                cache_len = _integer(
+                    _first_nonblank(item, "cache_len_requested", "cache_len")
                 )
                 target = _finite(
                     item.get(
@@ -194,6 +285,7 @@ def load_observations(
                 )
                 if (
                     input_len is None
+                    or cache_len is None
                     or cache_len < 0
                     or cache_len >= input_len
                     or target is None
@@ -211,25 +303,38 @@ def load_observations(
                         target,
                         f"{path.name}:{index}",
                         cache_len,
+                        production_audited=False,
                     )
                 )
             input_files.append(
-                {"path": str(path), "rows": source_count, "format": "csv"}
+                {
+                    "path": str(path),
+                    "rows": source_count,
+                    "format": "csv",
+                    "production_audited": False,
+                }
             )
             continue
 
-        source_count = 0
-        for index, item in _iter_json_metrics(path):
-            source_count += 1
+        metrics, source_provenance = _load_json_metrics(path)
+        source_count = len(metrics)
+        source_valid_count = 0
+        source_metric_fingerprints_match = True
+        for index, item in enumerate(metrics):
+            if not isinstance(item, dict):
+                rejected["invalid_metric"] = rejected.get("invalid_metric", 0) + 1
+                continue
             if not _status_ok(item):
                 rejected["status"] = rejected.get("status", 0) + 1
                 continue
-            batch = _integer(item.get("batch_size")) or 1
+            batch = _integer(item.get("batch_size"))
             if batch != batch_size:
                 rejected["batch_size"] = rejected.get("batch_size", 0) + 1
                 continue
             input_len = _integer(item.get("input_len"))
-            cache_len = _integer(item.get("cache_len_requested"))
+            cache_len = _integer(
+                _first_nonblank(item, "cache_len_requested", "cache_len")
+            )
             if (
                 input_len is None
                 or cache_len is None
@@ -238,13 +343,20 @@ def load_observations(
             ):
                 rejected["invalid_geometry"] = rejected.get("invalid_geometry", 0) + 1
                 continue
-            target, observed_cache_len, reason = _median_run_time(item)
+            target, observed_cache_len, reason = _median_run_time(item, cache_len)
             if target is None:
                 rejected[reason or "invalid_run"] = (
                     rejected.get(reason or "invalid_run", 0) + 1
                 )
                 continue
             assert observed_cache_len is not None
+            metric_fingerprint_matches = (
+                isinstance(item.get("run_fingerprint"), str)
+                and item.get("run_fingerprint")
+                == source_provenance["run_fingerprint"]
+            )
+            source_valid_count += 1
+            source_metric_fingerprints_match &= metric_fingerprint_matches
             observations.append(
                 Observation(
                     batch,
@@ -253,14 +365,38 @@ def load_observations(
                     target,
                     f"{path.name}:metrics[{index}]",
                     cache_len,
+                    production_audited=bool(
+                        source_provenance["production_audited"]
+                        and metric_fingerprint_matches
+                    ),
                 )
             )
-        input_files.append({"path": str(path), "rows": source_count, "format": "json"})
+        source_provenance["valid_rows"] = source_valid_count
+        source_provenance["all_metrics_valid"] = source_valid_count == source_count
+        source_provenance["all_metric_fingerprints_match"] = (
+            source_metric_fingerprints_match
+        )
+        source_provenance["production_audited"] = bool(
+            source_provenance["production_audited"]
+            and source_provenance["all_metrics_valid"]
+            and source_metric_fingerprints_match
+        )
+        input_files.append(
+            {
+                "path": str(path),
+                "rows": source_count,
+                "format": "json",
+                **source_provenance,
+            }
+        )
 
     observations.sort(
         key=lambda row: (row.batch_size, row.input_len, row.cache_len, row.source)
     )
     raw_observation_count = len(observations)
+    raw_unaudited_observation_count = sum(
+        not row.production_audited for row in observations
+    )
     grouped: dict[tuple[int, int, int], list[Observation]] = {}
     for row in observations:
         grouped.setdefault((row.batch_size, row.input_len, row.cache_len), []).append(
@@ -274,15 +410,25 @@ def load_observations(
             statistics.median(item.target_ms for item in values),
             values[0].source,
             values[0].requested_cache_len,
+            production_audited=all(item.production_audited for item in values),
         )
         for key, values in sorted(grouped.items())
     ]
     unique = {(row.batch_size, row.input_len, row.cache_len) for row in observations}
+    unaudited_observation_count = sum(
+        not row.production_audited for row in observations
+    )
     audit = {
         "input_files": input_files,
         "raw_metric_count": sum(int(item["rows"]) for item in input_files),
         "raw_valid_observation_count": raw_observation_count,
+        "raw_unaudited_observation_count": raw_unaudited_observation_count,
         "valid_observation_count": len(observations),
+        "unaudited_observation_count": unaudited_observation_count,
+        "production_audit_passed": bool(observations)
+        and unaudited_observation_count == 0
+        and bool(input_files)
+        and all(item.get("production_audited") is True for item in input_files),
         "collapsed_duplicate_geometry_count": raw_observation_count - len(observations),
         "unique_geometry_count": len(unique),
         "rejected_counts": rejected,
@@ -556,14 +702,15 @@ def run_fit(args: argparse.Namespace) -> int:
         "objective": (
             "mean_absolute_error" if args.objective == "mae" else "mean_squared_error"
         ),
-        "target": (
-            "median of successful client TTFT runs; falls back to "
-            "server prefill_time_ms only for legacy input"
-        ),
+        "target": "median of complete successful client TTFT runs",
         "formula": formula,
         "formula_compatibility": {
-            "variables": ["tokens", "hitCacheTokens"],
-            "operators": ["+", "-", "*", "/", "(", ")"],
+            "parser": "org.flexlb.balance.prediction.PrefillTimeFormula",
+            "variables": ["inputTokens", "hitCacheTokens"],
+            "scope": "sum_of_per_request_bs1_fit_for_arbitrary_scheduler_batches",
+            "training_batch_size": DSV4_FORMULA_BATCH_SIZE,
+            "batch_semantics": "sum(each request's fitted latency features)",
+            "operators": ["+", "-", "*", "/", "(", ")", "sum"],
             "unsupported_constructs_used": [],
         },
         "coefficients": [
@@ -574,7 +721,8 @@ def run_fit(args: argparse.Namespace) -> int:
         "split_counts": {name: len(group) for name, group in splits.items()},
         "metrics": metrics,
         "production_acceptance": bool(
-            len(rows) >= args.min_valid_rows
+            audit["production_audit_passed"]
+            and len(rows) >= args.min_valid_rows
             and len(splits["test"]) > 0
             and metrics["test"]["mape_pct"] is not None
             and metrics["test"]["mape_pct"] <= args.max_mape_pct
@@ -584,10 +732,10 @@ def run_fit(args: argparse.Namespace) -> int:
             and metrics["test"]["max_ape_pct"] <= args.max_max_ape_pct
         ),
         "production_note": (
-            "Only rows whose requested and observed reuse match exactly are "
-            "included. Failed requests and invalid_reuse rows are excluded. "
-            "Validate the latency measurement contract, tail error, and "
-            "deployment range before production use."
+            "CSV observations are unaudited and may be fitted for analysis, "
+            "but cannot pass production acceptance. Production requires a complete "
+            "fingerprinted runner JSON source and explicit BS=1 rows with successful "
+            "shape-valid runs, matching requested/observed reuse, and valid timings."
         ),
     }
     (output / "fit_report.json").write_text(
@@ -604,13 +752,14 @@ def run_validate(args: argparse.Namespace) -> int:
     rows, audit = load_observations(
         [pathlib.Path(value) for value in args.inputs], batch_size=args.batch_size
     )
-    report = {"model": "DeepSeek-V4-Pro", "audit": audit, "valid": bool(rows)}
+    valid = bool(rows) and audit["production_audit_passed"]
+    report = {"model": "DeepSeek-V4-Pro", "audit": audit, "valid": valid}
     if args.report:
         pathlib.Path(args.report).write_text(
             json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
         )
     print(json.dumps(report, ensure_ascii=False))
-    return 0 if rows else 2
+    return 0 if valid else 2
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -619,7 +768,13 @@ def build_parser() -> argparse.ArgumentParser:
     fit = sub.add_parser("fit", help="fit from successful DSV4 measurements")
     fit.add_argument("--inputs", nargs="+", required=True)
     fit.add_argument("--output-dir", required=True)
-    fit.add_argument("--batch-size", type=int, default=1)
+    fit.add_argument(
+        "--batch-size",
+        type=int,
+        choices=(DSV4_FORMULA_BATCH_SIZE,),
+        default=DSV4_FORMULA_BATCH_SIZE,
+        help="Fixed at 1 because this formula is trained for single-request prefill",
+    )
     fit.add_argument("--min-valid-rows", type=int, default=30)
     fit.add_argument("--max-mape-pct", type=float, default=5.0)
     fit.add_argument("--max-p95-ape-pct", type=float, default=10.0)
@@ -634,7 +789,13 @@ def build_parser() -> argparse.ArgumentParser:
     fit.set_defaults(func=run_fit)
     validate = sub.add_parser("validate-inputs", help="audit valid/invalid DSV4 rows")
     validate.add_argument("--inputs", nargs="+", required=True)
-    validate.add_argument("--batch-size", type=int, default=1)
+    validate.add_argument(
+        "--batch-size",
+        type=int,
+        choices=(DSV4_FORMULA_BATCH_SIZE,),
+        default=DSV4_FORMULA_BATCH_SIZE,
+        help="Fixed at 1 because this formula is trained for single-request prefill",
+    )
     validate.add_argument("--report")
     validate.set_defaults(func=run_validate)
     return parser

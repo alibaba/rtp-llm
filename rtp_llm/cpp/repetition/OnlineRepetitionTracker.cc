@@ -1,6 +1,8 @@
 #include "rtp_llm/cpp/repetition/OnlineRepetitionTracker.h"
 
 #include <algorithm>
+#include <stdexcept>
+#include <string>
 #include <tuple>
 
 namespace rtp_llm {
@@ -11,6 +13,10 @@ OnlineRepetitionConfig normalizeConfig(OnlineRepetitionConfig config) {
     config.min_repeats = std::max(3, config.min_repeats);
     config.min_duplicate_tokens = std::max(0, config.min_duplicate_tokens);
     config.max_period = std::max(1, config.max_period);
+    if (config.max_period > kMaxOnlineRepetitionPeriod) {
+        throw std::invalid_argument("online repetition max_period must be at most "
+                                    + std::to_string(kMaxOnlineRepetitionPeriod));
+    }
     config.non_contiguous_min_span = std::max(8, config.non_contiguous_min_span);
     config.non_contiguous_min_occurrences = std::max(2, config.non_contiguous_min_occurrences);
     config.non_contiguous_max_span = std::max(config.non_contiguous_min_span, config.non_contiguous_max_span);

@@ -12,15 +12,14 @@ import io.netty.channel.EventLoopGroup;
 import io.netty.channel.nio.NioEventLoopGroup;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
-import org.flexlb.config.PrioritySloPolicy;
 import org.flexlb.consistency.LBStatusConsistencyService;
-import org.flexlb.schedule.grpc.FlexlbServiceGrpc;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol;
+import org.flexlb.schedule.grpc.FlexlbServiceGrpc;
 import org.flexlb.service.RouteService;
 import org.flexlb.service.grace.ActiveRequestCounter;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
-import org.flexlb.service.monitor.PrioritySchedulerReporter;
+import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
@@ -182,10 +181,7 @@ class FlexlbForwardHopGuardNettyTest {
                     configService,
                     mock(BatchSchedulerReporter.class),
                     mock(ServerScheduleLatencyRecorder.class),
-                    new PrioritySloPolicy(
-                            PrioritySloPolicy.DEFAULT_SLO_LENGTH_BUCKETS,
-                            PrioritySloPolicy.DEFAULT_PRIORITY_SLO_MULTIPLIERS),
-                    mock(PrioritySchedulerReporter.class));
+                    mock(RequestSchedulerReporter.class));
 
             serverExecutor = new ThreadPoolExecutor(
                     4, 4, 0L, TimeUnit.MILLISECONDS,

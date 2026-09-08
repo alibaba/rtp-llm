@@ -1,13 +1,24 @@
 import argparse
+import csv
+import hashlib
 import json
+import os
+import re
+import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 from rtp_llm.test.perf_test.batch_decode_test import (
     _effective_grid_max_seq_len,
+    _effective_performance_config,
+    _engine_arg_argv,
+    _fingerprint_engine_env,
     _load_cache_grid_cases,
+    _parse_name_value,
+    _redact_argv,
+    main,
     parse_args,
 )
 from rtp_llm.test.perf_test.cache_grid_runner import (
@@ -15,6 +26,22 @@ from rtp_llm.test.perf_test.cache_grid_runner import (
     PrefixPromptFactory,
     _post_prefill,
 )
+from rtp_llm.test.perf_test.deepseek_v4_prefill_formula_fit import (
+    FEATURE_NAMES,
+    build_parser as build_formula_parser,
+    formula_text,
+    load_observations,
+    run_fit,
+)
+from rtp_llm.test.perf_test.generate_prefill_3d_chart import (
+    load_rows,
+    render_cold_miss_2d,
+)
+from rtp_llm.test.perf_test.perf_config import (
+    _apply_engine_env,
+    _apply_run_overrides,
+)
+from rtp_llm.test.perf_test.perf_utils import write_test_info
 
 
 class _WhitespaceTokenizer:
@@ -177,6 +204,813 @@ class BatchDecodeTest(unittest.TestCase):
         self.assertTrue(rows[0]["reuse_exact"])
         self.assertTrue(rows[0]["timing_valid"])
         self.assertEqual(rows[0]["median_ttft_ms"], 11.0)
+
+    @staticmethod
+    def _checkpoint_record(runner, case, status):
+        record = {
+            "case_key": runner.case_key(case),
+            "case_id": case["case_id"],
+            "batch_size": case["batch_size"],
+            "input_len": case["input_len"],
+            "cache_len_requested": case["cache_len"],
+            "measure_runs": runner.measure_runs,
+            "cache_commit_tail_tokens": runner.cache_commit_tail_tokens,
+            "run_fingerprint": runner.run_fingerprint,
+            "status": status,
+        }
+        if status == "ok":
+            latency = 5.0
+            record.update(
+                {
+                    "success_runs": runner.measure_runs,
+                    "cache_len_observed": [case["cache_len"]] * runner.measure_runs,
+                    "reuse_exact": True,
+                    "shape_exact": True,
+                    "timing_valid": True,
+                    "ttft_ms": [latency] * runner.measure_runs,
+                    "median_ttft_ms": latency,
+                    "avg_ttft_ms": latency,
+                    "seed": {"success": True} if case["cache_len"] else {},
+                    "runs": [
+                        {
+                            "success": True,
+                            "input_len": case["input_len"],
+                            "output_len": 1,
+                            "reuse_len": case["cache_len"],
+                            "ttft_ms": latency,
+                        }
+                        for _ in range(runner.measure_runs)
+                    ],
+                }
+            )
+        return record
+
+    @staticmethod
+    def _valid_audited_metric(input_len=16, cache_len=8):
+        latency = 12.0
+        return {
+            "status": "ok",
+            "batch_size": 1,
+            "input_len": input_len,
+            "cache_len_requested": cache_len,
+            "cache_len_observed": [cache_len],
+            "reuse_exact": True,
+            "shape_exact": True,
+            "timing_valid": True,
+            "measure_runs": 1,
+            "success_runs": 1,
+            "seed": {"success": True} if cache_len else {},
+            "ttft_ms": [latency],
+            "median_ttft_ms": latency,
+            "avg_ttft_ms": latency,
+            "runs": [
+                {
+                    "success": True,
+                    "input_len": input_len,
+                    "output_len": 1,
+                    "reuse_len": cache_len,
+                    "ttft_ms": latency,
+                }
+            ],
+        }
+
+    @staticmethod
+    def _audited_payload(metrics, *, complete=True):
+        fingerprint_config = {"test": True}
+        fingerprint = hashlib.sha256(
+            json.dumps(
+                fingerprint_config,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+            ).encode("utf-8")
+        ).hexdigest()
+        records = [
+            {**metric, "run_fingerprint": fingerprint} for metric in metrics
+        ]
+        return {
+            "schema_version": 2,
+            "mode": "prefix_cache_grid",
+            "run_fingerprint": fingerprint,
+            "fingerprint_config": fingerprint_config,
+            "complete": complete,
+            "total_cases": len(records),
+            "completed_cases": len(records) if complete else 0,
+            "metrics": records,
+        }
+
+    @patch("rtp_llm.test.perf_test.cache_grid_runner._post_prefill")
+    def test_cache_grid_resume_reuses_only_successful_matching_records(self, post):
+        cases = [
+            {"case_id": 1, "batch_size": 1, "input_len": 8, "cache_len": 0},
+            {"case_id": 2, "batch_size": 1, "input_len": 12, "cache_len": 0},
+        ]
+        post.return_value = {
+            "success": True,
+            "input_len": 12,
+            "output_len": 1,
+            "reuse_len": 0,
+            "ttft_ms": 7.0,
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            initial = CacheGridRunner(
+                12345,
+                _WhitespaceTokenizer(),
+                cases,
+                tmp,
+                measure_runs=1,
+                cache_commit_tail_tokens=4,
+                run_config={"model": "same"},
+            )
+            successful = self._checkpoint_record(initial, cases[0], "ok")
+            failed = self._checkpoint_record(initial, cases[1], "failed")
+            initial._results = {
+                successful["case_key"]: successful,
+                failed["case_key"]: failed,
+            }
+            initial._save()
+
+            resumed = CacheGridRunner(
+                12345,
+                _WhitespaceTokenizer(),
+                cases,
+                tmp,
+                measure_runs=1,
+                cache_commit_tail_tokens=4,
+                run_config={"model": "same"},
+            )
+            rows = resumed.run()
+            checkpoint = json.loads(
+                (Path(tmp) / "cache_grid_results.json").read_text()
+            )
+
+        post.assert_called_once()
+        self.assertEqual({row["status"] for row in rows}, {"ok"})
+        self.assertTrue(checkpoint["complete"])
+        self.assertEqual(checkpoint["completed_cases"], 2)
+
+    @patch("rtp_llm.test.perf_test.cache_grid_runner._post_prefill")
+    def test_cache_grid_resume_reruns_stale_fingerprint(self, post):
+        case = {"case_id": 1, "batch_size": 1, "input_len": 8, "cache_len": 0}
+        post.return_value = {
+            "success": True,
+            "input_len": 8,
+            "output_len": 1,
+            "reuse_len": 0,
+            "ttft_ms": 5.0,
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            initial = CacheGridRunner(
+                12345,
+                _WhitespaceTokenizer(),
+                [case],
+                tmp,
+                measure_runs=1,
+                cache_commit_tail_tokens=4,
+                run_config={"model": "old"},
+            )
+            record = self._checkpoint_record(initial, case, "ok")
+            initial._results = {record["case_key"]: record}
+            initial._save(complete=True)
+
+            resumed = CacheGridRunner(
+                12345,
+                _WhitespaceTokenizer(),
+                [case],
+                tmp,
+                measure_runs=1,
+                cache_commit_tail_tokens=4,
+                run_config={"model": "new"},
+            )
+            resumed.run()
+
+        post.assert_called_once()
+        self.assertNotEqual(initial.run_fingerprint, resumed.run_fingerprint)
+
+    @patch("rtp_llm.test.perf_test.cache_grid_runner._post_prefill")
+    def test_cache_grid_resume_reruns_empty_ok_record(self, post):
+        case = {"case_id": 1, "batch_size": 1, "input_len": 8, "cache_len": 0}
+        post.return_value = {
+            "success": True,
+            "input_len": 8,
+            "output_len": 1,
+            "reuse_len": 0,
+            "ttft_ms": 5.0,
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            initial = CacheGridRunner(
+                12345,
+                _WhitespaceTokenizer(),
+                [case],
+                tmp,
+                measure_runs=1,
+                cache_commit_tail_tokens=4,
+            )
+            empty_ok = {
+                key: value
+                for key, value in self._checkpoint_record(initial, case, "ok").items()
+                if key
+                not in {
+                    "success_runs",
+                    "cache_len_observed",
+                    "reuse_exact",
+                    "shape_exact",
+                    "timing_valid",
+                    "ttft_ms",
+                    "median_ttft_ms",
+                    "avg_ttft_ms",
+                    "runs",
+                }
+            }
+            initial._results = {empty_ok["case_key"]: empty_ok}
+            initial._save(complete=True)
+
+            resumed = CacheGridRunner(
+                12345,
+                _WhitespaceTokenizer(),
+                [case],
+                tmp,
+                measure_runs=1,
+                cache_commit_tail_tokens=4,
+            )
+            rows = resumed.run()
+
+        post.assert_called_once()
+        self.assertEqual(rows[0]["status"], "ok")
+        self.assertEqual(rows[0]["success_runs"], 1)
+
+    def test_cache_grid_resume_and_audit_share_strict_metric_validation(self):
+        case = {"case_id": 1, "batch_size": 1, "input_len": 8, "cache_len": 4}
+        with tempfile.TemporaryDirectory() as tmp:
+            runner = CacheGridRunner(
+                12345,
+                _WhitespaceTokenizer(),
+                [case],
+                tmp,
+                measure_runs=1,
+                cache_commit_tail_tokens=4,
+            )
+            valid = self._checkpoint_record(runner, case, "ok")
+            self.assertTrue(runner._is_reusable_record(valid))
+
+            mutations = {
+                "missing_seed": lambda record: record.pop("seed"),
+                "incomplete_ttft": lambda record: record.update({"ttft_ms": []}),
+                "per_run_ttft_mismatch": lambda record: record["runs"][0].update(
+                    {"ttft_ms": 6.0}
+                ),
+                "median_mismatch": lambda record: record.update(
+                    {"median_ttft_ms": 6.0}
+                ),
+                "average_mismatch": lambda record: record.update({"avg_ttft_ms": 6.0}),
+            }
+            for name, mutate in mutations.items():
+                with self.subTest(name=name):
+                    record = json.loads(json.dumps(valid))
+                    mutate(record)
+                    self.assertFalse(runner._is_reusable_record(record))
+                    payload = self._audited_payload([record])
+                    payload["metrics"][0]["run_fingerprint"] = payload[
+                        "run_fingerprint"
+                    ]
+                    path = Path(tmp) / f"{name}.json"
+                    path.write_text(json.dumps(payload), encoding="utf-8")
+                    observations, audit = load_observations([path])
+                    self.assertEqual(observations, [])
+                    self.assertFalse(audit["production_audit_passed"])
+                    with self.assertRaisesRegex(ValueError, r"metrics\[0\]"):
+                        load_rows(path, batch_size=1)
+
+    def test_cache_grid_fingerprint_canonicalizes_cases_and_env_values(self):
+        cases = [
+            {"case_id": 2, "batch_size": 1, "input_len": 12, "cache_len": 0},
+            {"case_id": 1, "batch_size": 1, "input_len": 8, "cache_len": 0},
+        ]
+        with tempfile.TemporaryDirectory() as first_tmp, tempfile.TemporaryDirectory() as second_tmp:
+            first = CacheGridRunner(
+                12345,
+                _WhitespaceTokenizer(),
+                cases,
+                first_tmp,
+                measure_runs=1,
+                cache_commit_tail_tokens=4,
+                run_config={"engine_env": {"DSV4_MODE": "enabled"}},
+            )
+            reordered = CacheGridRunner(
+                12345,
+                _WhitespaceTokenizer(),
+                list(reversed(cases)),
+                second_tmp,
+                measure_runs=1,
+                cache_commit_tail_tokens=4,
+                run_config={"engine_env": {"DSV4_MODE": "enabled"}},
+            )
+            changed_env = CacheGridRunner(
+                12345,
+                _WhitespaceTokenizer(),
+                cases,
+                second_tmp,
+                measure_runs=1,
+                cache_commit_tail_tokens=4,
+                run_config={"engine_env": {"DSV4_MODE": "disabled"}},
+            )
+            lower_token_limit = CacheGridRunner(
+                12345,
+                _WhitespaceTokenizer(),
+                cases,
+                second_tmp,
+                measure_runs=1,
+                cache_commit_tail_tokens=4,
+                run_config={
+                    "engine_args": _redact_argv(
+                        ["--max_batch_tokens_size", "65536"]
+                    )
+                },
+            )
+            higher_token_limit = CacheGridRunner(
+                12345,
+                _WhitespaceTokenizer(),
+                cases,
+                second_tmp,
+                measure_runs=1,
+                cache_commit_tail_tokens=4,
+                run_config={
+                    "engine_args": _redact_argv(
+                        ["--max_batch_tokens_size", "131072"]
+                    )
+                },
+            )
+
+        self.assertEqual(first.run_fingerprint, reordered.run_fingerprint)
+        self.assertNotEqual(first.run_fingerprint, changed_env.run_fingerprint)
+        self.assertNotEqual(
+            lower_token_limit.run_fingerprint, higher_token_limit.run_fingerprint
+        )
+
+    def test_fingerprint_engine_env_includes_inherited_runtime_without_secrets(self):
+        inherited = {
+            "TP_SIZE": "4",
+            "EP_SIZE": "8",
+            "MAX_BATCH_SIZE": "32",
+            "MAX_BATCH_TOKENS_SIZE": "131072",
+            "SEQ_SIZE_PER_BLOCK": "256",
+            "DSV4_CHUNK_TOKENS": "8192",
+            "FP8_KV_CACHE": "1",
+            "MODEL_TYPE": "deepseek_v4",
+            "OSS_ACCESS_KEY_ID": "secret-value",
+        }
+        with patch.dict(os.environ, inherited, clear=True):
+            settings = _fingerprint_engine_env(["OSS_ACCESS_KEY_ID"])
+
+        for name, value in inherited.items():
+            if name != "OSS_ACCESS_KEY_ID":
+                self.assertEqual(settings[name], value)
+        self.assertNotIn("OSS_ACCESS_KEY_ID", settings)
+        self.assertNotIn("secret-value", json.dumps(settings))
+
+    def test_effective_runtime_config_prefers_cli_over_engine_env(self):
+        with patch.dict(
+            os.environ,
+            {
+                "TP_SIZE": "4",
+                "EP_SIZE": "2",
+                "MAX_BATCH_SIZE": "32",
+                "DSV4_CHUNK_TOKENS": "8192",
+                "AUTH_TOKEN": "secret-value",
+            },
+            clear=True,
+        ):
+            names = _apply_engine_env(
+                ["TP_SIZE=8", "EP_SIZE=8", "AUTH_TOKEN=override-secret"]
+            )
+            config = _effective_performance_config(
+                ["--tp_size", "16", "--max_batch_size=64"],
+                names,
+                {"MAX_SEQ_LEN": 1048576},
+            )
+
+        self.assertEqual(config["values"]["TP_SIZE"], "16")
+        self.assertEqual(config["sources"]["TP_SIZE"], "cli")
+        self.assertEqual(config["values"]["EP_SIZE"], "8")
+        self.assertEqual(config["sources"]["EP_SIZE"], "engine_env")
+        self.assertEqual(config["values"]["MAX_BATCH_SIZE"], "64")
+        self.assertEqual(config["values"]["MAX_SEQ_LEN"], "1048576")
+        self.assertNotIn("AUTH_TOKEN", config["values"])
+        self.assertNotIn("secret-value", json.dumps(config))
+        self.assertNotIn("override-secret", json.dumps(config))
+
+    def test_engine_arg_shorthand_is_forwarded(self):
+        self.assertEqual(
+            _engine_arg_argv(["tp_size=8", "fp8_kv_cache=1"]),
+            ["--tp_size", "8", "--fp8_kv_cache", "1"],
+        )
+
+    def test_name_value_rejects_missing_separator(self):
+        with self.assertRaises(ValueError):
+            _parse_name_value("tp_size", "--engine_arg")
+
+    def test_parse_args_exposes_runtime_overrides(self):
+        args, remaining = parse_args(
+            [
+                "--engine_arg=tp_size=8",
+                "--engine_arg=fp8_kv_cache=1",
+                "--engine_env=FP8_KV_CACHE=1",
+                "--warmup_runs=2",
+                "--measure_runs=3",
+                "--profile_runs=0",
+                "--model_type=example_model",
+            ]
+        )
+        self.assertEqual(args.engine_arg, ["tp_size=8", "fp8_kv_cache=1"])
+        self.assertEqual(args.engine_env, ["FP8_KV_CACHE=1"])
+        self.assertEqual(args.warmup_runs, 2)
+        self.assertEqual(args.measure_runs, 3)
+        self.assertEqual(args.profile_runs, 0)
+        self.assertIn("--model_type=example_model", remaining)
+
+    def test_engine_env_and_run_overrides_use_environment_contract(self):
+        args, _ = parse_args(
+            ["--warmup_runs=2", "--measure_runs=3", "--profile_runs=0"]
+        )
+        with patch.dict(os.environ, {"EXISTING": "bazel"}, clear=True):
+            names = _apply_engine_env(
+                ["EXISTING=generic", "NEW_ENGINE_SETTING=enabled"]
+            )
+            _apply_run_overrides(args)
+            self.assertEqual(names, ["EXISTING", "NEW_ENGINE_SETTING"])
+            self.assertEqual(os.environ["EXISTING"], "generic")
+            self.assertEqual(os.environ["NEW_ENGINE_SETTING"], "enabled")
+            self.assertEqual(os.environ["PERF_FORMAL_WARMUP_RUNS"], "2")
+            self.assertEqual(os.environ["PERF_MEASURE_RUNS"], "3")
+            self.assertEqual(os.environ["PERF_PROFILE_RUNS"], "0")
+
+    def test_run_override_rejects_negative_values(self):
+        args, _ = parse_args(["--measure_runs=-1"])
+        with self.assertRaisesRegex(ValueError, "--measure_runs must be >= 0"):
+            _apply_run_overrides(args)
+
+    def test_redact_argv_hides_secrets_but_keeps_token_count_arguments(self):
+        self.assertEqual(
+            _redact_argv(
+                [
+                    "--engine_env=OSS_ACCESS_KEY_ID=secret",
+                    "--engine_env",
+                    "AUTH_TOKEN=second-secret",
+                    "--engine_arg=tp_size=8",
+                    "--engine_arg",
+                    "max_batch_tokens_size=262144",
+                    "--max_batch_tokens_size=131072",
+                    "--engine_arg=max_context_tokens=1048576",
+                    "--tokenizer_path=/models/tokenizer",
+                    "--api_key",
+                    "another-secret",
+                ]
+            ),
+            [
+                "--engine_env=***",
+                "--engine_env",
+                "AUTH_TOKEN=***",
+                "--engine_arg=tp_size=8",
+                "--engine_arg",
+                "max_batch_tokens_size=262144",
+                "--max_batch_tokens_size=131072",
+                "--engine_arg=max_context_tokens=1048576",
+                "--tokenizer_path=/models/tokenizer",
+                "--api_key",
+                "***",
+            ],
+        )
+
+    def test_write_test_info_records_redacted_schema(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            args, _ = parse_args(
+                [
+                    f"--result_dir={tmp}",
+                    "--warmup_runs=2",
+                    "--measure_runs=3",
+                    "--profile_runs=0",
+                ]
+            )
+            remaining = [
+                "--model_type",
+                "example_model",
+                "--checkpoint_path",
+                "/models/example",
+                "--api_key",
+                "secret-value",
+            ]
+            argv = [
+                "batch_decode_test.py",
+                "--engine_env=OSS_ACCESS_KEY_ID=secret-value",
+            ]
+            with patch.dict(os.environ, {}, clear=True), patch.object(
+                sys, "argv", argv
+            ):
+                _apply_run_overrides(args)
+                write_test_info(
+                    args,
+                    remaining,
+                    ["OSS_ACCESS_KEY_ID"],
+                    status="running",
+                    effective_max_seq_len=65566,
+                    service_concurrency_limit=1,
+                    effective_runtime_config={
+                        "values": {"TP_SIZE": "8"},
+                        "sources": {"TP_SIZE": "cli"},
+                    },
+                )
+            info = json.loads((Path(tmp) / "test_info.json").read_text())
+
+        self.assertEqual(info["schema_version"], 5)
+        self.assertEqual(info["status"], "running")
+        self.assertEqual(info["model_type"], "example_model")
+        self.assertEqual(info["requested_max_seq_len"], args.max_seq_len)
+        self.assertEqual(info["effective_max_seq_len"], 65566)
+        self.assertEqual(info["max_seq_len"], 65566)
+        self.assertEqual(info["concurrency_limit"], args.concurrency_limit)
+        self.assertEqual(info["requested_concurrency_limit"], args.concurrency_limit)
+        self.assertEqual(info["service_concurrency_limit"], 1)
+        self.assertEqual(info["warmup_runs"], 2)
+        self.assertEqual(info["measure_runs"], 3)
+        self.assertEqual(info["profile_runs"], 0)
+        self.assertEqual(info["engine_env_names"], ["OSS_ACCESS_KEY_ID"])
+        self.assertEqual(info["effective_runtime_config"]["values"]["TP_SIZE"], "8")
+        self.assertEqual(info["engine_args"][-1], "***")
+        self.assertEqual(info["argv"][-1], "--engine_env=***")
+        self.assertNotIn("secret-value", json.dumps(info))
+
+    def test_main_writes_running_before_start_and_completed_after_success(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            args, remaining = parse_args(
+                [
+                    f"--result_dir={tmp}",
+                    "--batch_size=1",
+                    "--input_len=8",
+                    "--partial=2",
+                    "--model_type=example_model",
+                ]
+            )
+            config = MagicMock(
+                is_distribution=False,
+                input_len_list=[8],
+                all_seq_lens=[8],
+                max_seq_len=18,
+                max_concurrency=1,
+            )
+            events = []
+            server = MagicMock(port=12345)
+            server.start.side_effect = lambda **kwargs: events.append(
+                ("start", kwargs["max_seq_len"])
+            )
+
+            def record_status(*unused_args, **kwargs):
+                events.append(
+                    (kwargs["status"], kwargs.get("effective_max_seq_len"))
+                )
+
+            with patch(
+                "rtp_llm.config.log_config.setup_logging"
+            ), patch(
+                "rtp_llm.test.perf_test.batch_decode_test.parse_args",
+                return_value=(args, remaining),
+            ), patch(
+                "rtp_llm.test.perf_test.batch_decode_test.resolve_perf_engine_paths",
+                side_effect=lambda values: values,
+            ), patch(
+                "rtp_llm.test.perf_test.batch_decode_test.prepare_config",
+                return_value=config,
+            ), patch(
+                "rtp_llm.test.perf_test.batch_decode_test.EngineServer",
+                return_value=server,
+            ), patch(
+                "rtp_llm.test.perf_test.batch_decode_test.write_test_info",
+                side_effect=record_status,
+            ), patch(
+                "rtp_llm.test.perf_test.batch_decode_test.query_engine_status",
+                return_value={},
+            ), patch(
+                "rtp_llm.test.perf_test.batch_decode_test.print_config_table"
+            ), patch(
+                "rtp_llm.test.perf_test.batch_decode_test.create_query",
+                return_value={8: "query"},
+            ), patch(
+                "rtp_llm.test.perf_test.batch_decode_test._run_prefill"
+            ), patch(
+                "rtp_llm.test.perf_test.batch_decode_test.collect_timeline_files"
+            ), patch(
+                "rtp_llm.test.perf_test.batch_decode_test.summarize_and_cleanup_coredumps"
+            ):
+                main()
+
+        self.assertEqual(
+            [event[0] for event in events], ["running", "start", "completed"]
+        )
+        self.assertEqual(events[0][1], events[1][1])
+        self.assertEqual(events[1][1], events[2][1])
+
+    def test_generated_formula_sums_supported_per_item_features(self):
+        formula = formula_text([1.0] * len(FEATURE_NAMES))
+        self.assertEqual(
+            formula,
+            "1 * sum(1) + 1 * sum(inputTokens / 1024.0)"
+            " + 1 * sum(hitCacheTokens / 1024.0)"
+            " + 1 * sum((inputTokens / 1024.0) * (inputTokens / 1024.0))"
+            " + 1 * sum((inputTokens / 1024.0) * (hitCacheTokens / 1024.0))"
+            " + 1 * sum((hitCacheTokens / 1024.0) * (hitCacheTokens / 1024.0))",
+        )
+        self.assertNotIn("totalInputTokens", formula)
+        self.assertNotIn("totalHitCacheTokens", formula)
+        self.assertEqual(formula.count("sum("), len(FEATURE_NAMES))
+
+    def test_dsv4_formula_flow_rejects_non_one_batch_size(self):
+        with self.assertRaisesRegex(ValueError, "requires --batch-size=1"):
+            load_observations([], batch_size=2)
+        with self.assertRaises(SystemExit):
+            build_formula_parser().parse_args(
+                [
+                    "fit",
+                    "--inputs",
+                    "measurements.json",
+                    "--output-dir",
+                    "fit",
+                    "--batch-size",
+                    "2",
+                ]
+            )
+
+    def test_blank_requested_cache_len_falls_back_to_cache_len(self):
+        metric = self._valid_audited_metric()
+        metric.update({"cache_len_requested": " ", "cache_len": 8})
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "measurements.json"
+            path.write_text(
+                json.dumps(self._audited_payload([metric])), encoding="utf-8"
+            )
+            observations, audit = load_observations([path])
+            chart_rows = load_rows(path, batch_size=1)
+
+        self.assertTrue(audit["production_audit_passed"])
+        self.assertEqual(audit["valid_observation_count"], 1)
+        self.assertEqual(observations[0].cache_len, 8)
+        self.assertEqual(chart_rows[0]["cache"], 8)
+
+    def test_missing_requested_cache_len_is_rejected_cleanly(self):
+        metric = self._valid_audited_metric(cache_len=0)
+        metric["cache_len_requested"] = ""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "measurements.json"
+            path.write_text(
+                json.dumps(self._audited_payload([metric])), encoding="utf-8"
+            )
+            observations, audit = load_observations([path])
+            with self.assertRaisesRegex(ValueError, r"metrics\[0\].*geometry"):
+                load_rows(path, batch_size=1)
+
+        self.assertEqual(observations, [])
+        self.assertEqual(audit["rejected_counts"], {"invalid_geometry": 1})
+
+    def test_json_audit_and_chart_fail_closed_on_missing_run_evidence(self):
+        cases = []
+
+        missing_status = self._valid_audited_metric(cache_len=0)
+        missing_status.pop("status")
+        cases.append(("missing_status", self._audited_payload([missing_status]), 0))
+
+        missing_batch = self._valid_audited_metric(cache_len=0)
+        missing_batch.pop("batch_size")
+        cases.append(("missing_batch", self._audited_payload([missing_batch]), 0))
+
+        incomplete_runs = self._valid_audited_metric(cache_len=0)
+        incomplete_runs["success_runs"] = 0
+        cases.append(("incomplete_runs", self._audited_payload([incomplete_runs]), 0))
+
+        incomplete_file = self._audited_payload(
+            [self._valid_audited_metric(cache_len=0)], complete=False
+        )
+        cases.append(("incomplete_file", incomplete_file, 1))
+
+        missing_fingerprint = self._audited_payload(
+            [self._valid_audited_metric(cache_len=0)]
+        )
+        missing_fingerprint.pop("run_fingerprint")
+        cases.append(("missing_fingerprint", missing_fingerprint, 1))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            for name, payload, analysis_rows in cases:
+                with self.subTest(name=name):
+                    path = Path(tmp) / f"{name}.json"
+                    path.write_text(json.dumps(payload), encoding="utf-8")
+                    observations, audit = load_observations([path])
+                    self.assertEqual(len(observations), analysis_rows)
+                    self.assertFalse(audit["production_audit_passed"])
+                    with self.assertRaisesRegex(ValueError, str(path)):
+                        load_rows(path, batch_size=1)
+
+    def test_json_audit_recomputes_fingerprint_config_sha256(self):
+        payload = self._audited_payload([self._valid_audited_metric(cache_len=0)])
+        payload["fingerprint_config"]["tampered"] = True
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "tampered.json"
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            observations, audit = load_observations([path])
+
+            self.assertEqual(len(observations), 1)
+            self.assertFalse(audit["production_audit_passed"])
+            checks = audit["input_files"][0]["provenance_checks"]
+            self.assertFalse(checks["fingerprint_sha256"])
+            with self.assertRaisesRegex(ValueError, "fingerprint_sha256"):
+                load_rows(path, batch_size=1)
+
+    def test_chart_rejects_entire_file_when_one_metric_is_invalid(self):
+        valid = self._valid_audited_metric(input_len=16, cache_len=0)
+        invalid = self._valid_audited_metric(input_len=24, cache_len=0)
+        invalid["runs"][0]["ttft_ms"] = 13.0
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "mixed.json"
+            path.write_text(
+                json.dumps(self._audited_payload([valid, invalid])), encoding="utf-8"
+            )
+            with self.assertRaisesRegex(ValueError, r"metrics\[1\].*invalid_latency"):
+                load_rows(path, batch_size=1)
+
+    def test_chart_rejects_unaudited_csv_timings(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "predictions.csv"
+            path.write_text(
+                "batch_size,input_len,cache_len,target_ms\n1,4096,0,12.5\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "runner JSON"):
+                load_rows(path, batch_size=1)
+
+    def test_csv_fit_is_usable_but_never_production_accepted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            csv_path = Path(tmp) / "observations.csv"
+            with csv_path.open("w", newline="", encoding="utf-8") as stream:
+                writer = csv.DictWriter(
+                    stream,
+                    fieldnames=(
+                        "batch_size",
+                        "input_len",
+                        "cache_len",
+                        "avg_ttft_ms",
+                    ),
+                )
+                writer.writeheader()
+                for index in range(40):
+                    input_len = 2048 + index * 1024
+                    cache_len = (index % 5) * 256
+                    writer.writerow(
+                        {
+                            "batch_size": 1,
+                            "input_len": input_len,
+                            "cache_len": cache_len,
+                            "avg_ttft_ms": 50.0
+                            + input_len / 1024.0
+                            - cache_len / 2048.0,
+                        }
+                    )
+            output_dir = Path(tmp) / "fit"
+            result = run_fit(
+                argparse.Namespace(
+                    inputs=[str(csv_path)],
+                    output_dir=str(output_dir),
+                    batch_size=1,
+                    min_valid_rows=6,
+                    max_mape_pct=1_000_000.0,
+                    max_p95_ape_pct=1_000_000.0,
+                    max_max_ape_pct=1_000_000.0,
+                    objective="mae",
+                    allow_insufficient_data=False,
+                )
+            )
+            report = json.loads((output_dir / "fit_report.json").read_text())
+
+        self.assertEqual(result, 3)
+        self.assertGreater(report["audit"]["unaudited_observation_count"], 0)
+        self.assertFalse(report["audit"]["production_audit_passed"])
+        self.assertFalse(report["production_acceptance"])
+        self.assertIsNotNone(report["formula"])
+
+    def test_cold_chart_handles_long_sequences_without_inset_rows(self):
+        rows = [
+            {"input": 200_000.0, "cache": 0.0, "compute": 200_000.0, "rt": 25.0},
+            {"input": 300_000.0, "cache": 0.0, "compute": 300_000.0, "rt": 40.0},
+        ]
+        svg = render_cold_miss_2d(rows, Path("long-only.json"), batch_size=1)
+
+        self.assertIn("<svg", svg)
+        self.assertIn("短序列区间无样本，未绘制插图", svg)
+        self.assertNotIn("放大：0–", svg)
+        self.assertIn("300K cold：40.0 ms", svg)
+        self.assertIn("最长冷点（300K）：40.0 ms", svg)
+        self.assertNotIn("1M cold", svg)
+        x_tick_positions = re.findall(
+            r'<text x="([0-9.]+)" y="854.0" text-anchor="middle" class="tick">',
+            svg,
+        )
+        self.assertEqual(len(x_tick_positions), 7)
+        self.assertEqual(len(set(x_tick_positions)), 7)
 
 
 if __name__ == "__main__":

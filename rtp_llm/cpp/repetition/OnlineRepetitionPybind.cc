@@ -9,6 +9,8 @@ namespace py = pybind11;
 PYBIND11_MODULE(libonline_repetition_tracker, m) {
     using namespace rtp_llm;
 
+    m.attr("MAX_PERIOD") = kMaxOnlineRepetitionPeriod;
+
     py::class_<OnlineRepetitionConfig>(m, "OnlineRepetitionConfig")
         .def(py::init<>())
         .def_readwrite("min_repeats", &OnlineRepetitionConfig::min_repeats)

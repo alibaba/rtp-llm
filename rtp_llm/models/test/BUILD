@@ -9,5 +9,5 @@ py_test(
     name = "deepseek_v4_dspark_commit_only_test",
     srcs = ["deepseek_v4_dspark_commit_only_test.py"],
     deps = ["//rtp_llm:testlib"],
-    exec_properties = {"gpu": "H20"},
+    exec_properties = {"gpu": "A10"},
 )

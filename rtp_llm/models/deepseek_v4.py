@@ -31,6 +31,7 @@ from typing import List
 
 import torch
 
+from rtp_llm.config.kv_cache_config import KVCacheConfig
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.model_loader.attn_weight import AttnAtomicWeight, AttnConfig
@@ -76,31 +77,22 @@ def _is_prefill_role(role_type: object) -> bool:
     return str(role_type).upper().rsplit(".", 1)[-1] == "PREFILL"
 
 
-def _dsv4_fixed_pool_use_host_memory() -> bool:
-    """Read ``--dsv4_fixed_pool_use_memory`` / ``DSV4_FIXED_POOL_USE_MEMORY``.
-
-    ``_post_build_model_config`` only receives ``model_config``, and
-    ``KVCacheConfig`` is not reachable from it, so the env channel that backs
-    the flag (``env_name="DSV4_FIXED_POOL_USE_MEMORY"`` in
-    ``rtp_llm/server/server_args/kv_cache_group_args.py``) is read directly.
-    A CLI-only ``--dsv4_fixed_pool_use_memory`` is therefore not observed here;
-    plumbing ``kv_cache_config`` into the hook would close that gap.
-    """
+def _dsv4_fixed_pool_use_host_memory(
+    kv_cache_config: KVCacheConfig | None = None,
+) -> bool:
+    """Resolve DSV4 fixed-pool placement from parsed config or the legacy env."""
+    if kv_cache_config is not None:
+        return bool(kv_cache_config.dsv4_fixed_pool_use_memory)
     raw = os.environ.get("DSV4_FIXED_POOL_USE_MEMORY")
     if raw is None:
         return False
     return raw.strip().lower() in _TRUTHY_ENV_VALUES
 
 
-def _dsv4_env_pool_blocks(env_name: str) -> int:
-    """Read a non-negative DSV4 fixed-pool block override from the environment.
-
-    Same env-channel rationale as ``_dsv4_fixed_pool_use_host_memory``:
-    ``KVCacheConfig`` is not reachable from ``_post_build_model_config``, so the
-    ``env_name`` that backs ``--dsv4_fixed_pool_blocks`` /
-    ``--dsv4_hca_state_pool_blocks`` is read directly. Returns 0 (meaning
-    "derive from linear_step") when unset or not a valid non-negative int.
-    """
+def _dsv4_pool_blocks(config_value: int | None, env_name: str) -> int:
+    """Resolve a positive block override while retaining direct-env callers."""
+    if config_value is not None:
+        return config_value if config_value > 0 else 0
     raw = os.environ.get(env_name)
     if raw is None:
         return 0
@@ -559,13 +551,23 @@ class DeepSeekV4(DeepSeekV2):
         return config
 
     @classmethod
-    def _post_build_model_config(cls, model_config: ModelConfig) -> None:
-        """Declare the seven-pool DSv4 cache topology.
+    def _apply_kv_cache_config(
+        cls, model_config: ModelConfig, kv_cache_config: KVCacheConfig
+    ) -> None:
+        cls._build_dsv4_kv_cache_config(model_config, kv_cache_config)
 
-        Runs after ``build_model_config``, so the CLI-derived
-        ``attn_config.tokens_per_block`` is already in place and can be
-        promoted here without being clobbered.
-        """
+    @classmethod
+    def _post_build_model_config(cls, model_config: ModelConfig) -> None:
+        """Preserve direct callers that configure DSV4 through environment variables."""
+        cls._build_dsv4_kv_cache_config(model_config, None)
+
+    @classmethod
+    def _build_dsv4_kv_cache_config(
+        cls,
+        model_config: ModelConfig,
+        kv_cache_config: KVCacheConfig | None,
+    ) -> None:
+        """Declare the seven-pool DSV4 cache topology after runtime config parsing."""
         if model_config.kv_cache_spec_descs:
             return
 
@@ -600,13 +602,20 @@ class DeepSeekV4(DeepSeekV2):
             fp8_kv=attn_config.kv_cache_dtype == KvCacheDataType.FP8,
             head_dim=int(attn_config.size_per_head),
             indexer_head_dim=int(attn_config.indexer_head_dim),
-            fixed_pool_use_host_memory=_dsv4_fixed_pool_use_host_memory(),
+            fixed_pool_use_host_memory=_dsv4_fixed_pool_use_host_memory(
+                kv_cache_config
+            ),
         )
 
         # Apply operator-supplied fixed-pool block counts. Must run before the
         # descs list is consumed downstream (the pybind getter returns a copy, so
         # mutating a read-back list would be a no-op).
-        fixed_pool_blocks = _dsv4_env_pool_blocks("DSV4_FIXED_POOL_BLOCKS")
+        fixed_pool_blocks = _dsv4_pool_blocks(
+            None
+            if kv_cache_config is None
+            else kv_cache_config.dsv4_fixed_pool_blocks,
+            "DSV4_FIXED_POOL_BLOCKS",
+        )
         if fixed_pool_blocks > 0:
             for tag in DSV4_FIXED_POOL_TAGS:
                 apply_dsv4_explicit_pool_blocks(
@@ -618,7 +627,12 @@ class DeepSeekV4(DeepSeekV2):
                 fixed_pool_blocks,
             )
         # HCA_STATE takes a dedicated override that wins over the shared value.
-        hca_state_pool_blocks = _dsv4_env_pool_blocks("DSV4_HCA_STATE_POOL_BLOCKS")
+        hca_state_pool_blocks = _dsv4_pool_blocks(
+            None
+            if kv_cache_config is None
+            else kv_cache_config.dsv4_hca_state_pool_blocks,
+            "DSV4_HCA_STATE_POOL_BLOCKS",
+        )
         if hca_state_pool_blocks > 0:
             apply_dsv4_explicit_pool_blocks(
                 model_config.kv_cache_spec_descs, HCA_STATE_TAG, hca_state_pool_blocks

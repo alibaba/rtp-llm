@@ -11,15 +11,18 @@ the server's auxiliary timing remains available as a separate diagnostic.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
 import statistics
 import time
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Tuple
 
 import requests
+
+from rtp_llm.test.perf_test.deepseek_v4_prefill_formula_fit import _median_run_time
 
 
 def _encode(tokenizer: Any, text: str) -> List[int]:
@@ -213,6 +216,8 @@ def _post_prefill(
 class CacheGridRunner:
     """Run and checkpoint a total-seq × prefix-cache grid."""
 
+    CHECKPOINT_SCHEMA_VERSION = 2
+
     def __init__(
         self,
         port: int,
@@ -224,6 +229,7 @@ class CacheGridRunner:
         measure_runs: int = 3,
         checkpoint_every: int = 1,
         cache_commit_tail_tokens: int = 4096,
+        run_config: Mapping[str, Any] | None = None,
     ):
         self.port = port
         self.factory = PrefixPromptFactory(tokenizer)
@@ -241,25 +247,100 @@ class CacheGridRunner:
         self.checkpoint_every = max(1, checkpoint_every)
         self.cache_commit_tail_tokens = cache_commit_tail_tokens
         self.result_path = self.result_dir / "cache_grid_results.json"
+        tokenizer_identity = {
+            "class": f"{type(tokenizer).__module__}.{type(tokenizer).__qualname__}",
+            "name_or_path": getattr(tokenizer, "name_or_path", None),
+        }
+        normalized_cases = sorted(
+            (
+                {
+                    "case_id": int(case["case_id"]),
+                    "batch_size": int(case.get("batch_size", 1)),
+                    "input_len": int(case["input_len"]),
+                    "cache_len": int(case["cache_len"]),
+                }
+                for case in self.cases
+            ),
+            key=lambda case: (
+                case["batch_size"],
+                case["input_len"],
+                case["cache_len"],
+                case["case_id"],
+            ),
+        )
+        implementation_sha256 = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+        self.fingerprint_config = {
+            "checkpoint_schema_version": self.CHECKPOINT_SCHEMA_VERSION,
+            "implementation_sha256": implementation_sha256,
+            "tokenizer": tokenizer_identity,
+            "cases": normalized_cases,
+            "request_timeout": self.request_timeout,
+            "measure_runs": self.measure_runs,
+            "cache_commit_tail_tokens": self.cache_commit_tail_tokens,
+            "run_config": dict(run_config or {}),
+        }
+        canonical_config = json.dumps(
+            self.fingerprint_config,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        ).encode("utf-8")
+        self.run_fingerprint = hashlib.sha256(canonical_config).hexdigest()
+        self._cases_by_key = {self.case_key(case): case for case in self.cases}
         self._results: Dict[str, Dict[str, Any]] = {}
         if self.result_path.exists():
             with self.result_path.open(encoding="utf-8") as f:
                 payload = json.load(f)
-            self._results = {
-                str(x["case_key"]): x for x in payload.get("metrics", [])
-            }
+            if payload.get("run_fingerprint") == self.run_fingerprint:
+                for record in payload.get("metrics", []):
+                    if self._is_reusable_record(record):
+                        self._results[str(record["case_key"])] = record
+            else:
+                logging.info("cache grid: checkpoint fingerprint changed; rerunning all cases")
 
     @staticmethod
     def case_key(case: Dict[str, int]) -> str:
         return f"bs{case['batch_size']}_seq{case['input_len']}_cache{case['cache_len']}"
 
+    def _is_reusable_record(self, record: Any) -> bool:
+        if not isinstance(record, dict):
+            return False
+        key = str(record.get("case_key", ""))
+        case = self._cases_by_key.get(key)
+        if case is None or record.get("run_fingerprint") != self.run_fingerprint:
+            return False
+        try:
+            requested_cache_len = int(record.get("cache_len_requested", -1))
+            metadata_matches = bool(
+                int(record.get("case_id", -1)) == int(case["case_id"])
+                and int(record.get("batch_size", -1))
+                == int(case.get("batch_size", 1))
+                and int(record.get("input_len", -1)) == int(case["input_len"])
+                and requested_cache_len == int(case["cache_len"])
+                and int(record.get("measure_runs", -1)) == self.measure_runs
+                and int(record.get("cache_commit_tail_tokens", -1))
+                == self.cache_commit_tail_tokens
+            )
+        except (TypeError, ValueError):
+            return False
+        if not metadata_matches:
+            return False
+        _, observed_cache_len, reason = _median_run_time(record, requested_cache_len)
+        return reason is None and observed_cache_len == requested_cache_len
+
     def _save(self, *, complete: bool = False) -> None:
+        successful_cases = sum(
+            self._is_reusable_record(record) for record in self._results.values()
+        )
         payload = {
-            "schema_version": 1,
+            "schema_version": self.CHECKPOINT_SCHEMA_VERSION,
             "mode": "prefix_cache_grid",
-            "complete": complete,
+            "run_fingerprint": self.run_fingerprint,
+            "fingerprint_config": self.fingerprint_config,
+            "complete": complete and successful_cases == len(self.cases),
             "total_cases": len(self.cases),
-            "completed_cases": len(self._results),
+            "completed_cases": successful_cases,
+            "recorded_cases": len(self._results),
             "metrics": list(self._results.values()),
         }
         tmp = self.result_path.with_suffix(".json.tmp")
@@ -398,10 +479,13 @@ class CacheGridRunner:
                     "batch_size": batch_size,
                     "input_len": total_len,
                     "cache_len_requested": cache_len,
+                    "measure_runs": self.measure_runs,
+                    "cache_commit_tail_tokens": self.cache_commit_tail_tokens,
                     "status": "error",
                     "error": repr(exc),
                     "elapsed_s": time.time() - started,
                 }
+            metric["run_fingerprint"] = self.run_fingerprint
             self._results[key] = metric
             if idx % self.checkpoint_every == 0:
                 self._save()

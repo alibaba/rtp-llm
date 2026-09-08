@@ -23,113 +23,74 @@ from collections import defaultdict
 from statistics import median
 from typing import Any
 
-
-def _number(value: Any) -> float | None:
-    try:
-        value = float(value)
-    except (TypeError, ValueError):
-        return None
-    return value if value == value and abs(value) != float("inf") else None
-
-
-def _run_rt(run: dict[str, Any]) -> float | None:
-    for key in (
-        "ttft_ms",
-        "client_wall_time_ms",
-        "prefill_time_ms",
-        "prefill_ms",
-        "avg_prefill_time",
-        "first_token_time_ms",
-    ):
-        value = _number(run.get(key))
-        if value is not None:
-            return value
-    return None
+from rtp_llm.test.perf_test.deepseek_v4_prefill_formula_fit import (
+    DSV4_FORMULA_BATCH_SIZE,
+    _first_nonblank,
+    _integer,
+    _load_json_metrics,
+    _median_run_time,
+    _status_ok,
+)
 
 
 def load_rows(path: pathlib.Path, batch_size: int) -> list[dict[str, float]]:
-    """Load DSV4 grid JSON or a compatible predictions CSV."""
-    rows: list[dict[str, float]] = []
+    """Load a production-audited DSV4 cache-grid file or fail it atomically."""
+    if batch_size != DSV4_FORMULA_BATCH_SIZE:
+        raise ValueError(
+            f"{path}: DSV4 chart generation requires batch_size="
+            f"{DSV4_FORMULA_BATCH_SIZE}, got {batch_size}"
+        )
     if path.suffix.lower() == ".csv":
-        with path.open(newline="", encoding="utf-8") as handle:
-            for item in csv.DictReader(handle):
-                if int(float(item.get("batch_size", 1))) != batch_size:
-                    continue
-                inp = _number(item.get("input_len"))
-                cache = _number(item.get("cache_len", item.get("target_cache_len")))
-                rt = _number(item.get("target_ms", item.get("avg_prefill_time")))
-                if (
-                    inp is not None
-                    and cache is not None
-                    and rt is not None
-                    and 0 <= cache <= inp
-                ):
-                    rows.append(
-                        {"compute": inp - cache, "cache": cache, "rt": rt, "input": inp}
-                    )
-        return rows
+        raise ValueError(
+            f"{path}: chart input must be runner JSON with complete audit evidence"
+        )
 
-    data = json.loads(path.read_text(encoding="utf-8"))
-    metrics = data.get("metrics", data.get("results", []))
-    for item in metrics:
-        # GridRunner records failed requests and cache-seed mismatches in the
-        # same JSON as successful measurements.  Never plot those as if they
-        # were DSV4 observations; they would create a visually plausible but
-        # invalid cache surface.
-        status = str(item.get("status", "")).lower()
-        if status and status not in {
-            "ok",
-            "success",
-            "passed",
-        }:
-            continue
-        if item.get("reuse_exact") is False:
-            continue
-        if item.get("success_runs") is not None:
-            try:
-                if int(item.get("success_runs")) != int(item.get("measure_runs", 3)):
-                    continue
-            except (TypeError, ValueError):
-                continue
-        if int(item.get("batch_size", 1)) != batch_size:
-            continue
-        inp = _number(item.get("input_len", item.get("seq_len")))
-        requested_cache = _number(
-            item.get(
-                "target_cache_len",
-                item.get("cache_len_requested", item.get("cache_len")),
-            )
+    metrics, provenance = _load_json_metrics(path)
+    if provenance["production_audited"] is not True:
+        failed = sorted(
+            name
+            for name, passed in provenance["provenance_checks"].items()
+            if not passed
         )
-        observed = item.get("cache_len_observed")
-        observed_values = (
-            [_number(value) for value in observed] if isinstance(observed, list) else []
+        raise ValueError(f"{path}: JSON provenance audit failed: {', '.join(failed)}")
+
+    rows: list[dict[str, float]] = []
+    for index, item in enumerate(metrics):
+        location = f"{path}: metrics[{index}]"
+        if not isinstance(item, dict):
+            raise ValueError(f"{location}: expected an object")
+        if not _status_ok(item):
+            raise ValueError(f"{location}: status must be 'ok'")
+        if _integer(item.get("batch_size")) != batch_size:
+            raise ValueError(f"{location}: batch_size must be {batch_size}")
+        if (
+            not isinstance(item.get("run_fingerprint"), str)
+            or item.get("run_fingerprint") != provenance["run_fingerprint"]
+        ):
+            raise ValueError(f"{location}: run_fingerprint mismatch")
+        input_len = _integer(item.get("input_len"))
+        requested_cache = _integer(
+            _first_nonblank(item, "cache_len_requested", "cache_len")
         )
-        observed_values = [value for value in observed_values if value is not None]
-        if not observed_values and isinstance(item.get("runs"), list):
-            observed_values = [
-                _number(run.get("reuse_len"))
-                for run in item["runs"]
-                if isinstance(run, dict)
-            ]
-            observed_values = [value for value in observed_values if value is not None]
-        if not observed_values or len(set(observed_values)) != 1:
-            continue
-        cache = observed_values[0]
-        rt = _number(
-            item.get("avg_prefill_time", item.get("target_ms", item.get("ttft_ms")))
+        if (
+            input_len is None
+            or requested_cache is None
+            or requested_cache < 0
+            or requested_cache >= input_len
+        ):
+            raise ValueError(f"{location}: invalid input/cache geometry")
+        rt, observed_cache, reason = _median_run_time(item, requested_cache)
+        if rt is None or observed_cache is None:
+            raise ValueError(f"{location}: invalid measurement evidence: {reason}")
+        rows.append(
+            {
+                "compute": float(input_len - observed_cache),
+                "cache": float(observed_cache),
+                "rt": rt,
+                "input": float(input_len),
+            }
         )
-        if rt is None and isinstance(item.get("runs"), list):
-            values = [_run_rt(run) for run in item["runs"] if isinstance(run, dict)]
-            values = [value for value in values if value is not None]
-            if values:
-                rt = median(values)
-        if requested_cache is None:
-            requested_cache = 0
-        if inp is None or cache is None or rt is None or cache < 0 or cache >= inp:
-            continue
-        if cache != requested_cache:
-            continue
-        rows.append({"compute": inp - cache, "cache": cache, "rt": rt, "input": inp})
+
     # Keep one deterministic point per exact requested geometry.
     grouped: defaultdict[tuple[float, float, float], list[dict[str, float]]] = (
         defaultdict(list)
@@ -147,10 +108,17 @@ def esc(value: object) -> str:
 
 
 def fmt_tokens(value: float) -> str:
-    if value >= 1_000_000:
-        return "1M"
-    if value >= 1000:
-        return f"{value / 1000:.0f}K"
+    def scaled(number: float, suffix: str) -> str:
+        decimals = 2 if number < 10 else 1 if number < 100 else 0
+        text = f"{number:.{decimals}f}"
+        if "." in text:
+            text = text.rstrip("0").rstrip(".")
+        return text + suffix
+
+    if abs(value) >= 1_000_000:
+        return scaled(value / 1_000_000, "M")
+    if abs(value) >= 1000:
+        return scaled(value / 1000, "K")
     return f"{value:.0f}"
 
 
@@ -351,20 +319,20 @@ def render(rows: list[dict[str, float]], source: pathlib.Path, batch_size: int) 
         f'<text x="{project(0,0,.58)[0]-70:.1f}" y="{project(0,0,.58)[1]:.1f}" text-anchor="middle" transform="rotate(-90 {project(0,0,.58)[0]-70:.1f},{project(0,0,.58)[1]:.1f})" class="axis">compute tokens (Z)</text>',
     ]
 
-    one_m = next(
+    long_cold = next(
         (row for row in rows if row["input"] >= 1_048_575 and row["cache"] == 0), None
     )
-    if one_m is not None:
-        x, y = project(one_m["rt"] / xscale, 0, one_m["compute"] / zscale)
+    if long_cold is not None:
+        x, y = project(long_cold["rt"] / xscale, 0, long_cold["compute"] / zscale)
         out.append(line((x, y), (x + 110, y - 70), "#b42318", 2, "5 4"))
         out.append(
             f'<rect x="{x+105:.1f}" y="{y-115:.1f}" width="330" height="78" rx="10" fill="#fff7ed" stroke="#b42318" stroke-width="2"/>'
         )
         out.append(
-            f'<text x="{x+125:.1f}" y="{y-82:.1f}" class="body" fill="#991b1b">1M cold (BS={batch_size}, cache=0)</text>'
+            f'<text x="{x+125:.1f}" y="{y-82:.1f}" class="body" fill="#991b1b">{fmt_tokens(long_cold["input"])} cold (BS={batch_size}, cache=0)</text>'
         )
         out.append(
-            f'<text x="{x+125:.1f}" y="{y-53:.1f}" class="body" fill="#991b1b">TTFT = {one_m["rt"]:.1f} ms</text>'
+            f'<text x="{x+125:.1f}" y="{y-53:.1f}" class="body" fill="#991b1b">TTFT = {long_cold["rt"]:.1f} ms</text>'
         )
 
     px, py, pw, ph = 1450, 145, 690, 760
@@ -374,7 +342,7 @@ def render(rows: list[dict[str, float]], source: pathlib.Path, batch_size: int) 
     out.append(f'<text x="{px+30}" y="{py+45}" class="paneltitle">Exact dataset</text>')
     details = [
         f"all rows in source = {len(data_metrics(source)):,}",
-        f"plotted batch={batch_size} = {len(rows):,} (every row)",
+        f"plotted audited batch={batch_size} = {len(rows):,} (every audited row)",
         f"seq/input range = {min(r['input'] for r in rows):,.0f} .. {max(r['input'] for r in rows):,.0f}",
         f"TTFT range = {min(r['rt'] for r in rows):.1f} .. {xmax:.1f} ms",
         "uniform colour; coordinates are X/Y/Z only",
@@ -430,7 +398,7 @@ def render_cold_miss_2d(
     """Render the cache-miss sequence-length trend as a readable 2-D SVG.
 
     Only rows whose observed cache is zero are included.  The main chart uses
-    a linear token axis so the 1M boundary is honest; an inset expands the
+    a linear token axis over the actual dataset extent; an inset expands the
     short-sequence region that would otherwise be compressed near the origin.
     """
     cold = sorted((row for row in rows if row["cache"] == 0), key=lambda row: row["input"])
@@ -482,17 +450,20 @@ def render_cold_miss_2d(
 .paneltitle{{font-size:23px;font-weight:700}} .body{{font-size:17px;fill:#334155}}
 .note{{font-size:15px;fill:#64748b}}</style>
 <text x="70" y="55" class="title">DeepSeek-V4-Pro：Cache miss 的 seq_len–RT 趋势</text>
-<text x="70" y="88" class="sub">BS={batch_size} · observed cache_len=0 · 每个 seq_len 使用三次成功测量的中位 prefill RT / TTFT</text>'''
+<text x="70" y="88" class="sub">BS={batch_size} · observed cache_len=0 · 每个 seq_len 使用完整成功测量的中位 prefill RT / TTFT</text>'''
     ]
     out.append(line(x0, y1, x1, y1, "#0f172a", 2))
     out.append(line(x0, y0, x0, y1, "#0f172a", 2))
-    for tick in (0, 64 * 1024, 128 * 1024, 256 * 1024, 384 * 1024, 512 * 1024, 768 * 1024, 1024 * 1024):
-        x = sx(min(tick, xmax))
+    # Scale ticks to the actual dataset extent. Clamping a fixed 1M tick list
+    # onto a shorter long-only dataset stacks several labels at the right edge.
+    for index in range(7):
+        tick = xmax * index / 6
+        x = sx(tick)
         out.append(line(x, y1, x, y1 + 9, "#0f172a", 1.3))
         out.append(
             f'<text x="{x:.1f}" y="{y1 + 34:.1f}" text-anchor="middle" class="tick">{esc_text(fmt_tokens(tick))}</text>'
         )
-        if x < x1 - 1:
+        if index not in (0, 6):
             out.append(line(x, y0, x, y1, "#e2e8f0", 1, "5 7"))
     for index in range(7):
         value = ymax * index / 6
@@ -513,55 +484,79 @@ def render_cold_miss_2d(
         f'<text x="42" y="{(y0 + y1) / 2:.1f}" text-anchor="middle" transform="rotate(-90 42 {(y0 + y1) / 2:.1f})" class="axis">中位 prefill RT / TTFT（ms）</text>',
     ]
 
-    # Inset for the short-sequence region, where a full 1M linear axis hides
-    # useful detail.  It is a zoom of the same points, not a second dataset.
+    # Inset for the short-sequence region, where the full-range linear axis
+    # hides useful detail. It is a zoom of the same points, not a second dataset.
     inset_x, inset_y, inset_w, inset_h = 980.0, 225.0, 400.0, 260.0
     inset_xmax = min(131_072.0, xmax)
     inset_rows = [row for row in cold if row["input"] <= inset_xmax]
-    inset_ymin = min(row["rt"] for row in inset_rows)
-    inset_ymax = max(row["rt"] for row in inset_rows) * 1.08
-    inset_left = inset_x + 45.0
-    inset_right = inset_x + inset_w - 15.0
-    inset_top = inset_y + 45.0
-    inset_bottom = inset_y + inset_h - 35.0
+    if inset_rows:
+        inset_ymin = min(row["rt"] for row in inset_rows)
+        inset_ymax = max(row["rt"] for row in inset_rows) * 1.08
+        inset_left = inset_x + 45.0
+        inset_right = inset_x + inset_w - 15.0
+        inset_top = inset_y + 45.0
+        inset_bottom = inset_y + inset_h - 35.0
 
-    def ix(value: float) -> float:
-        return inset_left + value / max(inset_xmax, 1.0) * (inset_right - inset_left)
+        def ix(value: float) -> float:
+            return inset_left + value / max(inset_xmax, 1.0) * (
+                inset_right - inset_left
+            )
 
-    def iy(value: float) -> float:
-        return inset_bottom - (value - inset_ymin) / max(inset_ymax - inset_ymin, 1.0) * (inset_bottom - inset_top)
+        def iy(value: float) -> float:
+            return inset_bottom - (value - inset_ymin) / max(
+                inset_ymax - inset_ymin, 1.0
+            ) * (inset_bottom - inset_top)
 
-    out.append(
-        f'<rect x="{inset_x:.1f}" y="{inset_y:.1f}" width="{inset_w:.1f}" height="{inset_h:.1f}" rx="10" fill="#f8fafc" stroke="#64748b" stroke-width="1.5"/>'
-    )
-    out.append(
-        f'<text x="{inset_x + 15:.1f}" y="{inset_y + 28:.1f}" class="body" font-weight="700">放大：0–{fmt_tokens(inset_xmax)} tokens</text>'
-    )
-    out.append(line(inset_left, inset_bottom, inset_right, inset_bottom, "#334155", 1.2))
-    out.append(line(inset_left, inset_top, inset_left, inset_bottom, "#334155", 1.2))
-    inset_points = [(ix(row["input"]), iy(row["rt"])) for row in inset_rows]
-    out.append(
-        '<polyline points="'
-        + " ".join(f"{x:.1f},{y:.1f}" for x, y in inset_points)
-        + '" fill="none" stroke="#2563eb" stroke-width="2"/>'
-    )
-    out.extend(
-        f'<circle cx="{x:.1f}" cy="{y:.1f}" r="2.2" fill="#2563eb" fill-opacity=".75"/>'
-        for x, y in inset_points
-    )
-    out.append(
-        f'<text x="{inset_x + inset_w / 2:.1f}" y="{inset_y + inset_h - 8:.1f}" text-anchor="middle" class="tick">seq_len</text>'
-    )
-    out.append(
-        f'<text x="{inset_x + 34:.1f}" y="{inset_y + inset_h / 2:.1f}" text-anchor="middle" transform="rotate(-90 {inset_x + 34:.1f} {inset_y + inset_h / 2:.1f})" class="tick">RT</text>'
-    )
+        out.append(
+            f'<rect x="{inset_x:.1f}" y="{inset_y:.1f}" width="{inset_w:.1f}" height="{inset_h:.1f}" rx="10" fill="#f8fafc" stroke="#64748b" stroke-width="1.5"/>'
+        )
+        out.append(
+            f'<text x="{inset_x + 15:.1f}" y="{inset_y + 28:.1f}" class="body" font-weight="700">放大：0–{fmt_tokens(inset_xmax)} tokens</text>'
+        )
+        out.append(
+            line(
+                inset_left,
+                inset_bottom,
+                inset_right,
+                inset_bottom,
+                "#334155",
+                1.2,
+            )
+        )
+        out.append(
+            line(
+                inset_left,
+                inset_top,
+                inset_left,
+                inset_bottom,
+                "#334155",
+                1.2,
+            )
+        )
+        inset_points = [(ix(row["input"]), iy(row["rt"])) for row in inset_rows]
+        out.append(
+            '<polyline points="'
+            + " ".join(f"{x:.1f},{y:.1f}" for x, y in inset_points)
+            + '" fill="none" stroke="#2563eb" stroke-width="2"/>'
+        )
+        out.extend(
+            f'<circle cx="{x:.1f}" cy="{y:.1f}" r="2.2" fill="#2563eb" fill-opacity=".75"/>'
+            for x, y in inset_points
+        )
+        out.append(
+            f'<text x="{inset_x + inset_w / 2:.1f}" y="{inset_y + inset_h - 8:.1f}" text-anchor="middle" class="tick">seq_len</text>'
+        )
+        out.append(
+            f'<text x="{inset_x + 34:.1f}" y="{inset_y + inset_h / 2:.1f}" text-anchor="middle" transform="rotate(-90 {inset_x + 34:.1f} {inset_y + inset_h / 2:.1f})" class="tick">RT</text>'
+        )
 
-    one_m = max(cold, key=lambda row: row["input"])
+    longest = max(cold, key=lambda row: row["input"])
+    longest_label = fmt_tokens(longest["input"])
     out.append(
-        f'<line x1="{sx(one_m["input"]):.1f}" y1="{sy(one_m["rt"]):.1f}" x2="{x1 - 22:.1f}" y2="{sy(one_m["rt"]) - 44:.1f}" stroke="#b42318" stroke-width="1.8" stroke-dasharray="5 4"/>'
+        f'<line x1="{sx(longest["input"]):.1f}" y1="{sy(longest["rt"]):.1f}" x2="{x1 - 22:.1f}" y2="{sy(longest["rt"]) - 44:.1f}" stroke="#b42318" stroke-width="1.8" stroke-dasharray="5 4"/>'
     )
     out.append(
-        f'<text x="{x1 - 15:.1f}" y="{sy(one_m["rt"]) - 52:.1f}" text-anchor="end" class="body" fill="#991b1b" font-weight="700">1M cold：{one_m["rt"]:.1f} ms</text>'
+        f'<text x="{x1 - 15:.1f}" y="{sy(longest["rt"]) - 52:.1f}" text-anchor="end" class="body" fill="#991b1b" font-weight="700">{longest_label} cold：{longest["rt"]:.1f} ms</text>'
     )
 
     panel_x, panel_y, panel_w, panel_h = 1490.0, 150.0, 275.0, 670.0
@@ -577,12 +572,16 @@ def render_cold_miss_2d(
         f"seq 范围：{fmt_tokens(min(row['input'] for row in cold))}–{fmt_tokens(xmax)}",
         f"RT 中位数：{median_rt:.1f} ms",
         f"RT P95：{p95_rt:.1f} ms",
-        f"1M 冷点：{one_m['rt']:.1f} ms",
+        f"最长冷点（{longest_label}）：{longest['rt']:.1f} ms",
         "",
         "每个圆点 = 一个 seq_len",
         "蓝线 = 按 seq_len 排序",
-        "右上插图 = 放大短序列",
-        "RT 取三次成功测量中位数",
+        (
+            "右上插图 = 放大短序列"
+            if inset_rows
+            else "短序列区间无样本，未绘制插图"
+        ),
+        "RT 取全部完整成功测量中位数",
     ]
     for index, value in enumerate(details):
         out.append(
@@ -667,7 +666,7 @@ def render_clean(
 .paneltitle{{font-size:23px;font-weight:700}} .body{{font-size:17px;fill:#334155}}
 .note{{font-size:15px;fill:#64748b}} .legend{{font-size:16px;fill:#334155}}</style>
 <text x="1100" y="52" text-anchor="middle" class="title">DeepSeek-V4-Pro：三轴等距投影</text>
-<text x="1100" y="85" text-anchor="middle" class="sub">X = TTFT / prefill RT (ms) · Y = observed cached tokens · Z = compute tokens · all {len(rows):,} geometries shown</text>"""
+<text x="1100" y="85" text-anchor="middle" class="sub">X = TTFT / prefill RT (ms) · Y = observed cached tokens · Z = compute tokens · all {len(rows):,} audited geometries shown</text>"""
     ]
 
     # Ground plane and a sparse grid keep the perspective legible.
@@ -823,20 +822,22 @@ def render_clean(
         f'<text x="{project(0,0,.57)[0]-62:.1f}" y="{project(0,0,.57)[1]:.1f}" text-anchor="middle" transform="rotate(-90 {project(0,0,.57)[0]-62:.1f},{project(0,0,.57)[1]:.1f})" class="axis">compute tokens (Z)</text>',
     ]
 
-    one_m = next(
+    long_cold = next(
         (row for row in rows if row["input"] >= 1_048_575 and row["cache"] == 0), None
     )
-    if one_m is not None:
-        px, py = project(one_m["rt"] / xscale, 0, one_m["compute"] / zscale)
+    if long_cold is not None:
+        px, py = project(
+            long_cold["rt"] / xscale, 0, long_cold["compute"] / zscale
+        )
         out.append(line((px, py), (px + 125, py - 70), "#b42318", 2, "5 4"))
         out.append(
             f'<rect x="{px+120:.1f}" y="{py-114:.1f}" width="315" height="76" rx="10" fill="#fff7ed" stroke="#b42318" stroke-width="2"/>'
         )
         out.append(
-            f'<text x="{px+140:.1f}" y="{py-82:.1f}" class="body" fill="#991b1b">1M cold (cache=0)</text>'
+            f'<text x="{px+140:.1f}" y="{py-82:.1f}" class="body" fill="#991b1b">{fmt_tokens(long_cold["input"])} cold (cache=0)</text>'
         )
         out.append(
-            f'<text x="{px+140:.1f}" y="{py-53:.1f}" class="body" fill="#991b1b">TTFT = {one_m["rt"]:.1f} ms</text>'
+            f'<text x="{px+140:.1f}" y="{py-53:.1f}" class="body" fill="#991b1b">TTFT = {long_cold["rt"]:.1f} ms</text>'
         )
 
     px, py, pw, ph = 1450, 145, 690, 790

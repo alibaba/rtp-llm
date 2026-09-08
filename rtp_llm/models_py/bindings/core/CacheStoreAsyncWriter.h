@@ -21,6 +21,7 @@ namespace rtp_llm {
 class CacheConfig;
 class CacheStore;
 class KVCacheManager;
+class KVCacheResource;
 
 // Offloads writeCacheStore CPU-heavy work to a background thread pool so the
 // main thread can keep launching CUDA kernels without stalling. A cycle is
@@ -39,7 +40,7 @@ public:
     ~CacheStoreAsyncWriter() override;
 
     void init(bool track_store_completions = false);
-    StoreCompletionCallback registerStoreCompletion();
+    StoreCompletionCallback registerStoreCompletion(std::shared_ptr<KVCacheResource> publication_lease = nullptr);
     void                    finishSubmissions();
     void                    waitStoreCompletions();
     void                    cancelStoreCompletions(std::exception_ptr exception);
@@ -79,9 +80,12 @@ private:
     };
 
     struct StoreCompletionToken {
-        explicit StoreCompletionToken(std::shared_ptr<StoreCompletionState> state): state(std::move(state)) {}
+        StoreCompletionToken(std::shared_ptr<StoreCompletionState> state,
+                             std::shared_ptr<KVCacheResource>      publication_lease):
+            state(std::move(state)), publication_lease(std::move(publication_lease)) {}
 
         std::shared_ptr<StoreCompletionState> state;
+        std::shared_ptr<KVCacheResource>      publication_lease;
         std::atomic<bool>                     completed{false};
     };
 
@@ -89,7 +93,11 @@ private:
                                           std::exception_ptr                            exception);
 
     static StoreCompletionCallback
-    registerStoreCompletionOn(const std::shared_ptr<StoreCompletionState>& completion_state);
+    makeStoreCompletionCallback(const std::shared_ptr<StoreCompletionState>& completion_state,
+                                std::shared_ptr<KVCacheResource>              publication_lease);
+    static StoreCompletionCallback
+    registerStoreCompletionOn(const std::shared_ptr<StoreCompletionState>& completion_state,
+                              std::shared_ptr<KVCacheResource>              publication_lease = nullptr);
 
     autil::ThreadPoolBasePtr                    thread_pool_;
     std::atomic<int64_t>                        pending_count_{0};

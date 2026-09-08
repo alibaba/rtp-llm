@@ -82,7 +82,8 @@ void logAllocatorSummary(int detail_device) noexcept {
 std::string dumpDiagnostics(int                   detail_device,
                             const char*           tag,
                             const std::exception* exception,
-                            bool                  reuse_observer_dump) noexcept {
+                            bool                  reuse_observer_dump,
+                            const std::string&    dump_id) noexcept {
     logAllocatorSummary(detail_device);
     try {
         const std::string exception_message = exception ? exception->what() : "";
@@ -99,7 +100,8 @@ std::string dumpDiagnostics(int                   detail_device,
                                                              py::arg("device")              = detail_device,
                                                              py::arg("exception")           = exception_message,
                                                              py::arg("cpp_backtrace")       = cpp_backtrace,
-                                                             py::arg("reuse_observer_dump") = reuse_observer_dump);
+                                                             py::arg("reuse_observer_dump") = reuse_observer_dump,
+                                                             py::arg("dump_correlation_id") = dump_id);
         if (output_path.is_none()) {
             return {};
         }
@@ -129,12 +131,20 @@ bool isTorchCudaOom(const std::exception& exception) noexcept {
     }
 }
 
-std::string dumpTorchCudaOomDiagnostics(int detail_device) noexcept {
-    return dumpDiagnostics(detail_device, "allocator_dump", nullptr, false);
+bool torchGpuOomRecoveryRetrySupported() noexcept {
+#if USING_CUDA
+    return true;
+#else
+    return false;
+#endif
+}
+
+std::string dumpTorchCudaOomDiagnostics(int detail_device, const std::string& dump_id) noexcept {
+    return dumpDiagnostics(detail_device, "allocator_dump", nullptr, false, dump_id);
 }
 
 void dumpFatalTorchCudaOomDiagnostics(int detail_device, const std::exception& exception) noexcept {
-    (void)dumpDiagnostics(detail_device, "fatal_gpu_oom", &exception, true);
+    (void)dumpDiagnostics(detail_device, "fatal_gpu_oom", &exception, true, "");
 }
 
 }  // namespace rtp_llm

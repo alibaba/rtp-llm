@@ -59,7 +59,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--master-config",
         default=None,
-        help="Master config JSON (read PREFILL_TIME_FORMULA for the mock engine)",
+        help="Master config JSON (read the FLEXLB_CONFIG prefill estimator expression)",
     )
     parser.add_argument("--prefill-cache-blocks", type=int, default=6000)
     parser.add_argument("--decode-cache-blocks", type=int, default=3000)
