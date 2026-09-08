@@ -338,10 +338,12 @@ CKAttnPtr FusedRopeKVCachePrefillOpBase::prepare(torch_ext::PyAttentionInputs at
         }
         attn_params->position_ids = attn_params->position_ids.contiguous();
     }
-    validateMropePositionIds(attn_configs_.rope_config,
-                             attn_params->position_ids,
-                             attn_inputs.input_lengths.sum().item<int64_t>(),
-                             "FusedRopeKVCachePrefillOp::prepare");
+    if (attn_configs_.rope_config.style == RopeStyle::Mrope) {
+        validateMropePositionIds(attn_configs_.rope_config,
+                                 attn_params->position_ids,
+                                 attn_inputs.input_lengths.sum().item<int64_t>(),
+                                 "FusedRopeKVCachePrefillOp::prepare");
+    }
 
     int max_prefix_length = 0;
     if (has_prefix && attn_params->prefix_lengths.defined() && attn_params->prefix_lengths.numel() > 0) {
