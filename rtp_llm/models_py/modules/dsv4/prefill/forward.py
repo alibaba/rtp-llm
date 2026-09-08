@@ -164,6 +164,20 @@ _FWD_STATS_MAX = int(os.environ.get("DSV4_FWD_STATS_MAX", "0") or 0)
 _FWD_STATS_ROWS: list = []
 _FWD_STATS_N = [0]
 
+# GPU wall time per forward, bracketed by a CUDA event pair and drained lazily
+# with the non-blocking Event.query() on later forwards (the same trick the CP
+# gather stats use) so measuring does not serialise the thing being measured.
+#
+# Needed because pH2/pH3/pH4 showed that removing BOTH per-round host barriers in
+# PPExecutor changes nothing, which leaves one question CPU wall cannot answer and
+# CUPTI perturbs: is the ~126 ms/round stage cost inside forward_layers, or
+# outside it in the PP activation transfer (67.1 MB/round) and tpSync?
+_FWD_GPU = _env_flag("DSV4_FWD_GPU")
+if _FWD_GPU:
+    _FWD_STATS = True
+_FWD_GPU_PENDING: list = []
+_FWD_GPU_ROWS: list = []
+
 # Allocator counters that only move on a real driver call. A per-forward union
 # buffer that the caching allocator recycles leaves all three at zero; one that
 # does not is paying cudaMalloc/cudaFree (a cudaFree is a device sync).
@@ -181,6 +195,45 @@ def _fwd_stats_snap() -> Optional[tuple]:
     return tuple(int(ms.get(k, 0)) for k in _FWD_STATS_MEM_KEYS)
 
 
+def _fwd_gpu_drain(force: bool = False) -> None:
+    """Pop completed event pairs and report their GPU wall time.
+
+    ``Event.query()`` is non-blocking, so this never waits on the GPU; pairs
+    still in flight stay queued for a later forward. ``force`` synchronises the
+    tail event first and is only for the atexit flush.
+    """
+    while _FWD_GPU_PENDING:
+        n_tokens, cp_size, _ev0, ev1 = _FWD_GPU_PENDING[0]
+        if force:
+            ev1.synchronize()
+        elif not ev1.query():
+            return
+        _FWD_GPU_PENDING.pop(0)
+        gpu_ms = None
+        try:
+            gpu_ms = float(_ev0.elapsed_time(ev1))
+        except RuntimeError:
+            gpu_ms = None
+        if gpu_ms is None:
+            continue
+        _FWD_GPU_ROWS.append((n_tokens, cp_size, gpu_ms))
+        import sys
+
+        print(
+            "[FWDTG] rank=%d T=%d cp=%d gpu_ms=%.2f"
+            % (
+                torch.distributed.get_rank()
+                if torch.distributed.is_initialized()
+                else -1,
+                n_tokens,
+                cp_size,
+                gpu_ms,
+            ),
+            file=sys.stderr,
+            flush=True,
+        )
+
+
 def _fwd_stats_report_row(
     *,
     n_tokens: int,
@@ -188,11 +241,17 @@ def _fwd_stats_report_row(
     marks: Dict[str, float],
     mem_before: Optional[tuple],
     mem_after: Optional[tuple],
+    ev0=None,
 ) -> None:
     """Emit one ``[FWDT]`` line of per-phase CPU wall times (ms)."""
     _FWD_STATS_N[0] += 1
     if _FWD_STATS_MAX and _FWD_STATS_N[0] > _FWD_STATS_MAX:
         return
+    if _FWD_GPU and ev0 is not None:
+        ev1 = torch.cuda.Event(enable_timing=True)
+        ev1.record()
+        _FWD_GPU_PENDING.append((n_tokens, cp_size, ev0, ev1))
+        _fwd_gpu_drain()
     order = ("cpctx", "pos", "embed", "meta", "loop", "tail")
     parts = []
     prev = marks.get("entry")
@@ -235,6 +294,8 @@ def _fwd_stats_report_row(
 
 
 def _fwd_stats_flush() -> None:
+    if _FWD_GPU:
+        _fwd_gpu_drain(force=True)
     if not _FWD_STATS or not _FWD_STATS_ROWS:
         return
     import sys
@@ -257,6 +318,17 @@ def _fwd_stats_flush() -> None:
             file=sys.stderr,
             flush=True,
         )
+    if _FWD_GPU_ROWS:
+        gpu_by_shape: Dict[tuple, list] = {}
+        for n_tokens, cp_size, gpu_ms in _FWD_GPU_ROWS:
+            gpu_by_shape.setdefault((n_tokens, cp_size), []).append(gpu_ms)
+        for (n_tokens, cp_size), vals in sorted(gpu_by_shape.items()):
+            print(
+                "[FWDTG] T=%d cp=%d calls=%d mean_gpu=%.2f ms sum_gpu=%.1f ms"
+                % (n_tokens, cp_size, len(vals), sum(vals) / len(vals), sum(vals)),
+                file=sys.stderr,
+                flush=True,
+            )
 
 
 if _FWD_STATS:
@@ -522,9 +594,13 @@ def forward_layers(
     """
     _fs_marks: Optional[Dict[str, float]] = None
     _fs_mem0 = None
+    _fs_ev0 = None
     if _FWD_STATS:
         _fs_marks = {"entry": time.perf_counter()}
         _fs_mem0 = _fwd_stats_snap()
+    if _FWD_GPU:
+        _fs_ev0 = torch.cuda.Event(enable_timing=True)
+        _fs_ev0.record()
     _fs_prof = None
     if _FWD_PROFILE and _fwd_profile_rank_ok() and int(input_ids.size(0)) >= 1024:
         _FWD_PROFILE_CT[0] += 1
@@ -869,6 +945,7 @@ def forward_layers(
                 marks=_fs_marks,
                 mem_before=_fs_mem0,
                 mem_after=_fwd_stats_snap(),
+                ev0=_fs_ev0,
             )
         return h  # [T, hc, dim]
 
@@ -964,6 +1041,7 @@ def forward_layers(
             marks=_fs_marks,
             mem_before=_fs_mem0,
             mem_after=_fwd_stats_snap(),
+            ev0=_fs_ev0,
         )
     return h  # [T, dim]
 
