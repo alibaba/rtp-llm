@@ -1801,6 +1801,46 @@ def cp_actual_owned_kv_lens(
     )
 
 
+def cp_actual_owned_kv_len_scalar(
+    total_kv_len: int, cp_size: int, block_size: int, cp_rank: int
+) -> int:
+    """Scalar form of :func:`cp_actual_owned_kv_lens`, in plain Python ints.
+
+    ``cp_actual_owned_kv_lens`` is monotone non-decreasing in
+    ``per_req_total_kv_lens``: for ``T1 <= T2`` the block counts satisfy
+    ``tb1 <= tb2`` hence ``n_owned1 <= n_owned2``, and either
+
+    * ``n_owned1 == n_owned2`` — the last owned block index is the same and
+      ``last_blk_size = min(block_size, T - idx*block_size)`` is non-decreasing
+      in ``T``, or
+    * ``n_owned1 < n_owned2`` — then
+      ``f(T1) <= (n1-1)*bs + bs = n1*bs <= (n2-1)*bs <= f(T2)``.
+
+    So ``max_b f(T[b]) == f(max_b T[b])``, which lets a per-layer caller get the
+    batch maximum from one host int instead of paying a blocking D2H on the
+    device tensor — and a D2H sync costs more than its round trip, because it
+    drains the launch pipeline and the GPU idles during the refill.
+    """
+    if cp_size <= 0:
+        raise ValueError(f"cp_size must be positive, got {cp_size}")
+    if block_size <= 0:
+        raise ValueError(f"block_size must be positive, got {block_size}")
+    if cp_rank < 0 or cp_rank >= cp_size:
+        raise ValueError(f"cp_rank({cp_rank}) out of range [0, {cp_size})")
+
+    T = int(total_kv_len)
+    if T <= 0:
+        return 0
+    total_blocks = (T + block_size - 1) // block_size
+    raw = total_blocks - cp_rank
+    if raw <= 0:
+        return 0
+    n_owned = (raw + cp_size - 1) // cp_size
+    last_blk_idx = (n_owned - 1) * cp_size + cp_rank
+    last_blk_size = min(block_size, max(T - last_blk_idx * block_size, 0))
+    return (n_owned - 1) * block_size + last_blk_size
+
+
 def cp_should_gather(cp_ctx: Optional[CPContext], start_pos: int) -> bool:
     """Prefill-only gate: gather runs iff a CPContext is bound.
 

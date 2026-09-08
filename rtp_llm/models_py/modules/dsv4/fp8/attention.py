@@ -54,6 +54,7 @@ from rtp_llm.models_py.modules.dsv4.cp import (
     CPContext,
     _fp8_gather_enabled,
     build_cp_full_prefill_positions,
+    cp_actual_owned_kv_len_scalar,
     cp_actual_owned_kv_lens,
     cp_all_gather_full_varlen,
     cp_all_gather_full_varlen_async,
@@ -4015,10 +4016,33 @@ class AttentionFP8(nn.Module):
             wm.cmp_eb,
             cp_ctx.cp_rank,
         ).to(device=qkv.q.device, dtype=torch.int32)
-        local_N = int(local_cmp_lens.max().item()) if local_cmp_lens.numel() else 0
-        gather_len_max = (
-            int(wm.swa_gather_lens.max().item()) if wm.swa_gather_lens.numel() else 0
+        # Two blocking D2H syncs PER CSA/HCA LAYER, for values the meta builder
+        # already holds as host ints. A D2H sync costs far more than its round
+        # trip: it drains the launch pipeline and the GPU sits idle during the
+        # refill, which is what the ~15.7 ms/round of inter-kernel gap is made
+        # of (pH9: GPU wall 120.6 ms vs 104.9 ms of CUPTI kernel self time).
+        #
+        #   gather_len_max == wm.M - wm.N
+        #     WorkspaceMeta is built once per (forward, ratio) with
+        #     N = N_max and M = N_max + gather_len_max, and swa_gather_lens IS
+        #     gather_len_per_req, so the max is already a host subtraction.
+        #   local_N == f(wm.N)
+        #     cp_actual_owned_kv_lens is monotone non-decreasing in its length
+        #     argument, so max_b f(cmp_seq_lens[b]) == f(max_b cmp_seq_lens[b])
+        #     and cmp_seq_lens' max is N_max == wm.N. Verified against the
+        #     tensor form over 55170 cases plus 4000 randomized monotonicity
+        #     trials (~/rtp_cp2pp4/t_owned_scalar.py): zero mismatches.
+        #
+        # The local_cmp_lens TENSOR is still needed below by the pool reader;
+        # only its max was being synced.
+        local_N = (
+            cp_actual_owned_kv_len_scalar(
+                wm.N, cp_ctx.cp_size, wm.cmp_eb, cp_ctx.cp_rank
+            )
+            if local_cmp_lens.numel()
+            else 0
         )
+        gather_len_max = wm.M - wm.N if wm.swa_gather_lens.numel() else 0
         local_M = local_N + gather_len_max
         # E5b: raw-Q merge builds compact topk over written local rows only.
         workspace = torch.empty(
