@@ -472,6 +472,7 @@ def validate_whole_chunk_prefill(
     tp_size: int,
     ep_size: int,
     page_size: Optional[int],
+    allow_multimodal: bool = False,
 ) -> None:
     """Reject unsupported whole-chunk modes before any cache mutation."""
 
@@ -505,9 +506,12 @@ def validate_whole_chunk_prefill(
             "whole-model K3 Prefill does not support framework Prefill CP"
         )
     multimodal = inputs.multimodal_inputs
-    if multimodal.multimodal_features or (
-        multimodal.mm_features_locs_host is not None
-        and multimodal.mm_features_locs_host.numel()
+    if not allow_multimodal and (
+        multimodal.multimodal_features
+        or (
+            multimodal.mm_features_locs_host is not None
+            and multimodal.mm_features_locs_host.numel()
+        )
     ):
         raise RuntimeError("whole-model K3 Prefill does not support multimodal input")
 
@@ -628,6 +632,7 @@ def build_chunk_model_inputs(
     attention_inputs: PyAttentionInputs,
     *,
     round_plan: KimiK3ChunkRound,
+    multimodal_inputs: Any = None,
 ) -> PyModelInputs:
     chunk = PyModelInputs()
     chunk.input_ids = torch.cat(
@@ -642,6 +647,28 @@ def build_chunk_model_inputs(
         round_plan=round_plan,
         device=input_ids.device,
     )
+    if multimodal_inputs is not None and multimodal_inputs.multimodal_features:
+        features = multimodal_inputs.multimodal_features
+        locs = multimodal_inputs.mm_features_locs_host
+        if locs is None or locs.numel() != len(features):
+            raise ValueError(
+                "K3 chunk multimodal feature locations must match features"
+            )
+        sliced_features, sliced_locs = [], []
+        packed_start = 0
+        for item in round_plan.slices:
+            for feature, loc in zip(features, locs.tolist()):
+                start = max(item.source_start, loc)
+                end = min(item.source_end, loc + feature.size(0))
+                if end > start:
+                    sliced_features.append(feature.narrow(0, start - loc, end - start))
+                    sliced_locs.append(packed_start + start - item.source_start)
+            packed_start += item.new_length
+        mm = chunk.multimodal_inputs
+        mm.multimodal_features = sliced_features
+        mm.mm_features_locs_host = torch.tensor(sliced_locs, dtype=torch.int32)
+        mm.mm_features_locs = mm.mm_features_locs_host.to(input_ids.device)
+        chunk.multimodal_inputs = mm
     return chunk
 
 

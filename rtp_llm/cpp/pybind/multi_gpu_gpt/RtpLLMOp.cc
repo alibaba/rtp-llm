@@ -58,7 +58,10 @@ prepareMTPEngineInitParams(size_t model_id, py::object propose_model, const Engi
     auto       py_layers_weights_vec = convertPyObjectToVec(py_layers_weights);
     size_t     model_num             = py_layers_weights_vec.size();
     size_t     gen_num_per_cycle     = base_params.sp_config.gen_num_per_cycle;
-    if (gen_num_per_cycle > 1 && py_layers_weights_vec.size() == 1) {
+    const bool single_k3_mtp = base_params.sp_config.isKimiK3Mtp();
+    RTP_LLM_CHECK_WITH_INFO(!single_k3_mtp || py_layers_weights_vec.size() == 1,
+                           "K3 MTP requires exactly one recurrent layer");
+    if (!single_k3_mtp && gen_num_per_cycle > 1 && py_layers_weights_vec.size() == 1) {
         RTP_LLM_LOG_WARNING("duplicate py_layers_weights_vec from 1 to sp_config.gen_num_per_cycle: %ld",
                             gen_num_per_cycle);
         for (size_t i = 1; i < gen_num_per_cycle; i++) {
@@ -66,13 +69,13 @@ prepareMTPEngineInitParams(size_t model_id, py::object propose_model, const Engi
         }
         model_num = gen_num_per_cycle;
     }
-    if (gen_num_per_cycle != py_layers_weights_vec.size()) {
+    if (!single_k3_mtp && gen_num_per_cycle != py_layers_weights_vec.size()) {
         RTP_LLM_LOG_WARNING("sp_config.gen_num_per_cycle: %ld  != py_layers_weights_vec.size(): %ld",
                             gen_num_per_cycle,
                             py_layers_weights_vec.size());
         model_num = std::min(model_num, size_t(gen_num_per_cycle));
     }
-    if (sp_type == SP_TYPE_EAGLE || sp_type == SP_TYPE_EAGLE3) {
+    if (single_k3_mtp || sp_type == SP_TYPE_EAGLE || sp_type == SP_TYPE_EAGLE3) {
         model_num = 1;
     }
 
@@ -302,7 +305,7 @@ std::unique_ptr<ProposeModelEngineInitParams> RtpLLMOp::initProposeModel(py::obj
             model_id_++;
         } else if (sp_type == SP_TYPE_MTP || sp_type == SP_TYPE_EAGLE || sp_type == SP_TYPE_EAGLE3) {
             params = prepareMTPEngineInitParams(model_id_, propose_model, base_params);
-            if (sp_type == SP_TYPE_MTP) {
+            if (sp_type == SP_TYPE_MTP && !base_params.sp_config.isKimiK3Mtp()) {
                 size_t gen_num_per_cycle = base_params.sp_config.gen_num_per_cycle;
                 model_id_ += gen_num_per_cycle;
             } else {

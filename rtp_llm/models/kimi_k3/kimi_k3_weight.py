@@ -28,6 +28,7 @@ from rtp_llm.model_loader.model_weight_info import (
 )
 from rtp_llm.model_loader.weight_module import (
     AtomicWeight,
+    CompositeWeight,
     CustomAtomicWeight,
     WeightModule,
 )
@@ -848,6 +849,93 @@ class KimiK3Weight(ModelDeployWeightInfo):
         return ModelWeightInfo(
             weights=self._global_weights(), layer_weights=layer_weights
         )
+
+
+class KimiK3MtpWeight(KimiK3Weight):
+    """Map the checkpoint MTP layer to runtime local layer zero."""
+    _COMMON_LAYER_SUFFIXES = (
+        "input_layernorm.weight",
+        "post_attention_layernorm.weight",
+        "enorm.weight",
+        "hnorm.weight",
+        "eh_proj.weight",
+    )
+    IGNORED_SUFFIXES = (
+        "self_attention_res_norm.weight",
+        "self_attention_res_proj.weight",
+        "mlp_res_norm.weight",
+        "mlp_res_proj.weight",
+    )
+
+    @classmethod
+    def global_checkpoint_tensor_names(cls):
+        return tuple(
+            cls.LAYER_PREFIX + name
+            for name in (
+                "embed_tokens.weight",
+                "shared_head.head.weight",
+                "shared_head.norm.weight",
+            )
+        )
+
+    @classmethod
+    def expected_checkpoint_tensor_names(cls, model_config):
+        source = model_config.k3_runtime_config.mtp_source_layer
+        if source is None:
+            raise ValueError("K3 MTP source layer is missing from model config")
+        for name in cls.global_checkpoint_tensor_names():
+            yield name.replace("{i}", str(source))
+        runtime_prefix = cls.LAYER_PREFIX.format(i=0)
+        source_prefix = cls.LAYER_PREFIX.format(i=source)
+        for name in super().checkpoint_tensor_names_for_layer(model_config, 0):
+            yield name.replace(runtime_prefix, source_prefix, 1)
+
+    @classmethod
+    def checkpoint_tensor_patterns(cls, model_config):
+        source = model_config.k3_runtime_config.mtp_source_layer
+        if source is None:
+            raise ValueError("K3 MTP source layer is missing from model config")
+        return {
+            name.replace("{i}", str(source))
+            for name in super().checkpoint_tensor_patterns(model_config)
+        }
+
+    def _get_weight_info(self):
+        info = super()._get_weight_info()
+        source_layer = self.model_config.k3_runtime_config.mtp_source_layer
+        if source_layer is None:
+            raise ValueError("K3 MTP source layer is missing from model config")
+        # Materialize checkpoint names before the generic loader substitutes
+        # runtime layer IDs. Each manifest is newly constructed for this model.
+        pending = list(info.weights)
+        for layer in info.layer_weights:
+            pending.extend(layer)
+        while pending:
+            weight = pending.pop()
+            if isinstance(weight, CompositeWeight):
+                pending.extend(weight.sub_weights.values())
+            else:
+                for checkpoint in weight.weights:
+                    checkpoint.name = checkpoint.name.replace("{i}", str(source_layer))
+        return info
+
+    def _global_weights(self):
+        return [
+            AtomicWeight(name, [CkptWeightInfo(checkpoint, identity)])
+            for name, checkpoint in zip(
+                (W.embedding, W.lm_head, W.final_ln_gamma),
+                self.global_checkpoint_tensor_names(),
+            )
+        ]
+
+    def _common_layer_weights(self):
+        return [
+            self._custom(W.pre_ln_gamma, "input_layernorm.weight"),
+            self._custom(W.post_ln_gamma, "post_attention_layernorm.weight"),
+            self._custom("kimi_k3.mtp.enorm", "enorm.weight"),
+            self._custom("kimi_k3.mtp.hnorm", "hnorm.weight"),
+            self._linear("kimi_k3.mtp.eh_proj", "eh_proj.weight"),
+        ]
 
 
 class KimiK3Eagle3Weight(KimiK3Weight):

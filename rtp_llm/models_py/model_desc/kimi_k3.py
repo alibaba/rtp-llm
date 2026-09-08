@@ -451,7 +451,7 @@ class KimiK3Model(GptModelBase):
 
         super().initialize(init_resource)
         self._is_decode_role = bool(init_resource.is_decode_role)
-        if self._is_decode_role and os.environ.get("SP_TYPE", "").lower() == "eagle3":
+        if self._is_decode_role and os.environ.get("SP_TYPE", "").lower() in ("eagle3", "mtp"):
             tokens_per_batch = max(int(self.config.gen_num_per_cycle) + 1, 1)
             graph_batch_capacity = int(
                 getattr(init_resource, "max_decode_graph_batch_size", 1)
@@ -466,7 +466,7 @@ class KimiK3Model(GptModelBase):
             ):
                 self._mtp_hidden_buffer = self.embedding_weight.new_empty(
                     token_capacity,
-                    3 * int(self.config.hidden_size),
+                    (1 if os.environ.get("SP_TYPE", "").lower() == "mtp" else 3) * int(self.config.hidden_size),
                 )
                 logging.info(
                     "[K3_EAGLE3] allocated Decode hidden buffer shape=%s",
@@ -612,11 +612,11 @@ class KimiK3Model(GptModelBase):
             raise RuntimeError("nested Kimi K3 whole-chunk Prefill is not supported")
         self._whole_chunk_prefill_active = True
         try:
-            if os.environ.get("SP_TYPE", "").lower() != "eagle3":
+            if os.environ.get("SP_TYPE", "").lower() not in ("eagle3", "mtp"):
                 return
             tp_size = int(self.parallelism_config.get_attn_tp_size())
             token_capacity = ((int(chunk_tokens) + tp_size - 1) // tp_size) * tp_size
-            hidden_width = 3 * int(self.config.hidden_size)
+            hidden_width = (1 if os.environ.get("SP_TYPE", "").lower() == "mtp" else 3) * int(self.config.hidden_size)
             self._prefill_mtp_hidden_workspace = self.embedding_weight.new_empty(
                 token_capacity,
                 hidden_width,
@@ -855,6 +855,7 @@ class KimiK3Model(GptModelBase):
             chunk_tokens,
             tp_size=int(self.parallelism_config.get_attn_tp_size()),
             ep_size=int(self.parallelism_config.ep_size),
+            allow_multimodal=os.environ.get("SP_TYPE", "").lower() == "mtp",
             page_size=(
                 int(self.kv_cache.seq_size_per_block)
                 if self.kv_cache is not None
@@ -941,6 +942,7 @@ class KimiK3Model(GptModelBase):
                 input_ids,
                 attention_inputs,
                 round_plan=round_plan,
+                multimodal_inputs=inputs.multimodal_inputs,
             )
             chunk_attention = chunk_inputs.attention_inputs
             prepare_round_fmha(fmha_impl, chunk_attention)
@@ -1279,7 +1281,31 @@ class KimiK3Model(GptModelBase):
                         )
                     ),
                 )
-        hidden_states = self.norm(hidden_states, block_residual)
+        mtp_enabled = os.environ.get("SP_TYPE", "").lower() == "mtp" and not bool(
+            getattr(inputs, "force_disable_sp_run", False)
+        )
+        if mtp_enabled:
+            # vLLM K3 returns output AttnRes before final RMSNorm to its drafter.
+            recurrent = self.norm.attention_residual(hidden_states, block_residual)
+            hidden_states = self.norm.final_norm(recurrent)
+            if prefill_sp and getattr(self, "_whole_chunk_prefill_active", False):
+                self._all_gather_whole_chunk_mtp_hidden(
+                    recurrent, prefill_sp_layout.logical_tokens
+                )
+            else:
+                if prefill_sp:
+                    recurrent = all_gather_trim(
+                        recurrent, prefill_sp_layout.logical_tokens, group=Group.TP
+                    )
+                self._write_mtp_hidden_buffer(
+                    recurrent,
+                    is_cuda_graph=bool(
+                        getattr(attention_inputs, "is_cuda_graph", False)
+                    )
+                    or (input_ids.is_cuda and torch.cuda.is_current_stream_capturing()),
+                )
+        else:
+            hidden_states = self.norm(hidden_states, block_residual)
         if prefill_sp:
             assert prefill_sp_layout is not None
             hidden_states = all_gather_trim(

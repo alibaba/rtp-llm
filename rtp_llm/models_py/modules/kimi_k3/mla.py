@@ -48,13 +48,14 @@ class KimiK3MLA(MlaAttention):
         parallelism_config: ParallelismConfig,
         weights: Dict[str, torch.Tensor],
         layer_idx: int = -1,
+        latent_norm_eps: float = _MLA_LATENT_NORM_EPS,
     ) -> None:
         super().__init__(
             config.attn_config,
             parallelism_config,
             weights,
             layer_idx,
-            _MLA_LATENT_NORM_EPS,
+            latent_norm_eps,
             getattr(config, "k3_attention_quant_config", None) or config.quant_config,
         )
         # The framework RMSNorm consumes dense rows. The previous K3 wrapper
@@ -72,10 +73,9 @@ class KimiK3MLA(MlaAttention):
         self.kv_lora_rank = int(config.attn_config.kv_lora_rank)
         self.suffix_dim = int(config.attn_config.rope_head_dim)
         self.value_dim = int(config.attn_config.v_head_dim)
-        # The source K3 MLA constructs q_a/kv_a KimiRMSNorm without passing
-        # config.rms_norm_eps, so both intentionally use the module default
-        # 1e-6.  Other decoder norms continue to use config.rms_norm_eps
-        # (1e-5 for the real checkpoint).
+        # Preserve the legacy target's HF latent-norm default (1e-6).
+        # The independent MTP model explicitly passes config.rms_norm_eps
+        # (1e-5 for this checkpoint), matching vLLM 0.28.0.
         runtime = config.k3_runtime_config
         if not runtime.mla_use_nope:
             raise ValueError(
@@ -103,8 +103,8 @@ class KimiK3MLA(MlaAttention):
         self._packed_qkv_gate_w = weights[W.mla_fusedqkrope_w]
         # These are only the two small MLA latent norms; decoder-wide norms keep
         # the framework kernel.
-        self.q_a_layernorm = RMSNorm(self._q_a_norm, _MLA_LATENT_NORM_EPS)
-        self.kv_a_layernorm = RMSNorm(self._kv_a_norm, _MLA_LATENT_NORM_EPS)
+        self.q_a_layernorm = RMSNorm(self._q_a_norm, latent_norm_eps)
+        self.kv_a_layernorm = RMSNorm(self._kv_a_norm, latent_norm_eps)
         self._sp_active_for_forward = False
         self._sp_padded_for_forward = False
         self._sp_prefill_input_is_sharded = False

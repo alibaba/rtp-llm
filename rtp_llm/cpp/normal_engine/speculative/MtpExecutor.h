@@ -262,6 +262,10 @@ private:
     TensorHolder buffer_holder_;
 
     bool     warm_up_;
+    void restoreKimiMtpMediaTokens(GptModelInputs& inputs) const;
+
+    bool     kimi_k3_mtp_ = false;
+    int64_t  kimi_k3_media_token_id_ = -1;
     RoleType role_type_;
 
     // True when any KV-cache group is CacheGroupType::LINEAR (RWKV / Mamba /
