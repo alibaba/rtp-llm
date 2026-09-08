@@ -12,7 +12,7 @@ from unittest.mock import MagicMock
 
 import torch
 
-from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
+from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig, ModelOptFp4Config
 from rtp_llm.model_loader.attn_weight import AttnAtomicWeight
 from rtp_llm.model_loader.ffn_weight import (
     MoeAtomicWeight,
@@ -22,7 +22,17 @@ from rtp_llm.model_loader.ffn_weight import (
 )
 from rtp_llm.model_loader.per_block_fp8_quant_weight import V4PerBlockFp8Weight
 from rtp_llm.model_loader.tensor_source import StackSplitTensorSource, TensorSource
-from rtp_llm.utils.model_weight import CkptWeightInfo, W, concat_0, identity
+from rtp_llm.model_loader.weight_module import WeightModule
+from rtp_llm.utils.model_weight import (
+    CkptWeightInfo,
+    W,
+    concat_0,
+    identity,
+    replace_weight_suffix,
+    stack_moe_w1_fused,
+    stack_moe_w1_s2_fused,
+    stack_moe_w1_s2_fused_max,
+)
 
 
 class FakeTensorSource(TensorSource):
@@ -214,6 +224,241 @@ class TestBuildSplitConfig(unittest.TestCase):
         self.assertIn(f"layers.1.moe.{W.moe_w1}.1.1", split_config)
 
 
+class TestStackedModelOptFp4Scale(unittest.TestCase):
+    def test_fused_gate_up_derives_and_reorders_all_quantized_inputs(self):
+        for num_experts in (3, 4):
+            for mixed_attention in (False, True):
+                with self.subTest(
+                    num_experts=num_experts, mixed_attention=mixed_attention
+                ):
+                    ckpt_key = "model.layers.{i}.mlp.experts.gate_up_proj"
+                    source_weight = MoeAtomicWeight(
+                        name=W.moe_w1,
+                        weights=[CkptWeightInfo(ckpt_key)],
+                        config=MoeConfig(expert_num=num_experts),
+                        stacked_ckpt_keys=True,
+                    )
+                    wrapped = WeightModule.create(
+                        source_weight,
+                        ModelOptFp4Config(
+                            bits=4,
+                            group_size=16,
+                            is_quanted=True,
+                            mixed_attention=mixed_attention,
+                        ),
+                    )
+
+                    expected_names = {
+                        W.moe_w1: ".weight",
+                        W.moe_s1: ".weight_scale",
+                        W.moe_w1_s2: ".weight_scale_2",
+                        W.moe_w1_s2_pair: ".weight_scale_2",
+                        W.moe_w1_i_s: ".input_scale",
+                    }
+                    components = {
+                        component.name: component
+                        for component in (
+                            wrapped.kernel,
+                            wrapped.scale,
+                            wrapped.scale_2,
+                            wrapped.scale_2_pair,
+                            wrapped.input_scale,
+                        )
+                    }
+                    for name, suffix in expected_names.items():
+                        component = components[name]
+                        self.assertEqual(
+                            component.weights[0].name,
+                            replace_weight_suffix(ckpt_key, suffix),
+                        )
+                        self.assertTrue(component.stacked_ckpt_keys)
+
+                    self.assertIs(wrapped.kernel.process_fun, stack_moe_w1_fused)
+                    self.assertIs(wrapped.scale.process_fun, stack_moe_w1_fused)
+                    self.assertIs(
+                        wrapped.scale_2.process_fun, stack_moe_w1_s2_fused_max
+                    )
+                    self.assertIs(
+                        wrapped.scale_2_pair.process_fun, stack_moe_w1_s2_fused
+                    )
+                    self.assertIs(
+                        wrapped.input_scale.process_fun, stack_moe_w1_s2_fused_max
+                    )
+
+                    kernel = torch.arange(
+                        num_experts * 4 * 3, dtype=torch.uint8
+                    ).reshape(num_experts, 4, 3)
+                    block_scale = torch.arange(
+                        1, num_experts * 4 * 3 + 1, dtype=torch.float32
+                    ).reshape(num_experts, 4, 3)
+                    scale_2 = torch.tensor(
+                        [[10.0 * i + 1.0, 10.0 * i + 2.0] for i in range(num_experts)]
+                    )
+                    input_scale = scale_2 + 100.0
+
+                    load_config = MagicMock()
+                    load_config.moe_pure_tp_preshard = False
+                    load_config.compute_dtype = torch.bfloat16
+                    load_config.get_selected_experts.return_value = list(
+                        range(num_experts)
+                    )
+
+                    def load(component, tensor):
+                        source_key = component.weights[0].tensor_name(0)
+                        return component._load_raw_tensor(
+                            FakeTensorSource({source_key: tensor}),
+                            layer_id=0,
+                            device="cpu",
+                            load_config=load_config,
+                        )[component.name]
+
+                    loaded_kernel = load(wrapped.kernel, kernel)
+                    expected_kernel = torch.cat([kernel[:, 2:], kernel[:, :2]], dim=1)
+                    torch.testing.assert_close(loaded_kernel, expected_kernel)
+
+                    loaded_scale = load(wrapped.scale, block_scale)
+                    expected_scale = torch.cat(
+                        [block_scale[:, 2:], block_scale[:, :2]], dim=1
+                    ).to(loaded_scale.dtype)
+                    torch.testing.assert_close(
+                        loaded_scale.to(torch.float32), expected_scale.to(torch.float32)
+                    )
+
+                    expected_scalar = scale_2.max(dim=1).values
+                    torch.testing.assert_close(
+                        load(wrapped.scale_2, scale_2), expected_scalar
+                    )
+                    torch.testing.assert_close(
+                        load(wrapped.input_scale, input_scale),
+                        input_scale.max(dim=1).values,
+                    )
+                    torch.testing.assert_close(
+                        load(wrapped.scale_2_pair, scale_2),
+                        scale_2.flip(1),
+                    )
+
+    def test_fused_scalar_outer_scales_create_pairs(self):
+        """Scalar ModelOpt outer scales are duplicated for [up, gate]."""
+        num_experts = 3
+        ckpt_key = "model.layers.{i}.mlp.experts.gate_up_proj"
+        source_weight = MoeAtomicWeight(
+            name=W.moe_w1,
+            weights=[CkptWeightInfo(ckpt_key)],
+            config=MoeConfig(expert_num=num_experts),
+            stacked_ckpt_keys=True,
+        )
+        load_config = MagicMock()
+        load_config.moe_pure_tp_preshard = False
+        load_config.compute_dtype = torch.bfloat16
+        load_config.get_selected_experts.return_value = list(range(num_experts))
+
+        for mixed_attention in (False, True):
+            wrapped = WeightModule.create(
+                source_weight,
+                ModelOptFp4Config(
+                    bits=4,
+                    group_size=16,
+                    is_quanted=True,
+                    mixed_attention=mixed_attention,
+                ),
+            )
+            for source_scale in (
+                torch.tensor([1.0, 2.0, 3.0]),
+                torch.tensor([[1.0], [2.0], [3.0]]),
+            ):
+                with self.subTest(
+                    mixed_attention=mixed_attention,
+                    scale_shape=tuple(source_scale.shape),
+                ):
+                    source_key = wrapped.scale_2_pair.weights[0].tensor_name(0)
+                    loaded = wrapped.scale_2_pair._load_raw_tensor(
+                        FakeTensorSource({source_key: source_scale}),
+                        layer_id=0,
+                        device="cpu",
+                        load_config=load_config,
+                    )[W.moe_w1_s2_pair]
+                    expected = source_scale.reshape(num_experts, -1)[:, :1].expand(
+                        num_experts, 2
+                    )
+                    torch.testing.assert_close(loaded, expected)
+
+    def test_stacked_w2_without_weight_suffix_loads_all_quant_inputs(self):
+        """Stacked W2 checkpoints may omit `.weight` on the base tensor name."""
+        num_experts = 3
+        ckpt_key = "model.layers.{i}.mlp.experts.down_proj"
+        source_weight = MoeAtomicWeight(
+            name=W.moe_w2,
+            weights=[CkptWeightInfo(ckpt_key)],
+            config=MoeConfig(expert_num=num_experts),
+            stacked_ckpt_keys=True,
+        )
+        load_config = MagicMock()
+        load_config.moe_pure_tp_preshard = False
+        load_config.compute_dtype = torch.bfloat16
+        load_config.get_selected_experts.return_value = list(range(num_experts))
+
+        for mixed_attention in (False, True):
+            with self.subTest(mixed_attention=mixed_attention):
+                wrapped = WeightModule.create(
+                    source_weight,
+                    ModelOptFp4Config(
+                        bits=4,
+                        group_size=16,
+                        is_quanted=True,
+                        mixed_attention=mixed_attention,
+                    ),
+                )
+                components = {
+                    component.name: component
+                    for component in (
+                        wrapped.kernel,
+                        wrapped.scale,
+                        wrapped.scale_2,
+                        wrapped.input_scale,
+                    )
+                }
+                expected_suffixes = {
+                    W.moe_w2: ".weight",
+                    W.moe_s2: ".weight_scale",
+                    W.moe_w2_s2: ".weight_scale_2",
+                    W.moe_w2_i_s: ".input_scale",
+                }
+                for name, suffix in expected_suffixes.items():
+                    self.assertEqual(
+                        components[name].weights[0].name,
+                        replace_weight_suffix(ckpt_key, suffix),
+                    )
+
+                resolved_base = ckpt_key.format(i="0")
+                tensors = {
+                    replace_weight_suffix(resolved_base, ".weight"): torch.arange(
+                        num_experts * 4 * 3, dtype=torch.uint8
+                    ).reshape(num_experts, 4, 3),
+                    replace_weight_suffix(resolved_base, ".weight_scale"): torch.arange(
+                        1, num_experts * 4 * 3 + 1, dtype=torch.float32
+                    ).reshape(num_experts, 4, 3),
+                    replace_weight_suffix(
+                        resolved_base, ".weight_scale_2"
+                    ): torch.arange(1, num_experts + 1, dtype=torch.float32),
+                    replace_weight_suffix(resolved_base, ".input_scale"): torch.arange(
+                        11, num_experts + 11, dtype=torch.float32
+                    ),
+                }
+
+                for component in components.values():
+                    source_key = component.weights[0].tensor_name(0)
+                    loaded = component._load_raw_tensor(
+                        FakeTensorSource({source_key: tensors[source_key]}),
+                        layer_id=0,
+                        device="cpu",
+                        load_config=load_config,
+                    )[component.name]
+                    expected = tensors[source_key].to(loaded.dtype)
+                    torch.testing.assert_close(
+                        loaded.to(torch.float32), expected.to(torch.float32)
+                    )
+
+
 def _make_moe_weight(config, w1_ckpt, w2_ckpt, stacked):
     """Helper: create a MoeWeight with w1 + w2 sub_weights."""
     moe_w1 = MoeAtomicWeight(
@@ -252,7 +497,9 @@ class TestBuildStackedKeyConfig(unittest.TestCase):
         result = ModelLoader._build_stacked_key_config([wi])
         self.assertIn("model.layers.0.moe.w1", result)
         self.assertIn("model.layers.0.moe.w2", result)
-        template = result["model.layers.0.moe.w1"]
+        templates = result["model.layers.0.moe.w1"]
+        self.assertEqual(len(templates), 1)
+        template = templates[0]
         self.assertIn("{expert_id}", template)
         formatted = template.format(expert_id=2)
         self.assertIn("2", formatted)
@@ -296,6 +543,35 @@ class TestBuildStackedKeyConfig(unittest.TestCase):
 
         result = ModelLoader._build_stacked_key_config([wi])
         self.assertEqual(len(result), 0)
+
+    def test_stacked_config_keeps_all_weight_templates(self):
+        from rtp_llm.model_loader.loader import ModelLoader
+
+        config = MoeConfig(expert_num=2)
+        moe_weight = _make_moe_weight(
+            config,
+            [CkptWeightInfo("model.layers.{i}.moe.w1")],
+            [CkptWeightInfo("model.layers.{i}.moe.w2")],
+            stacked=True,
+        )
+        wi = MagicMock(weight=moe_weight, layer_id=0)
+        result = ModelLoader._build_stacked_key_config([wi])
+        self.assertIn("model.layers.0.moe.w1", result)
+        self.assertIn("model.layers.0.moe.w2", result)
+
+
+class TestFastsafetensorsVersionGate(unittest.TestCase):
+    def test_accepts_cuda12_and_cuda13_locked_versions(self):
+        from rtp_llm.model_loader.loader import _is_supported_fastsafetensors_version
+
+        self.assertTrue(_is_supported_fastsafetensors_version("0.1.19rc5"))
+        self.assertTrue(_is_supported_fastsafetensors_version("0.1.20+ali"))
+
+    def test_rejects_unknown_version_lines(self):
+        from rtp_llm.model_loader.loader import _is_supported_fastsafetensors_version
+
+        self.assertFalse(_is_supported_fastsafetensors_version("0.1.18"))
+        self.assertFalse(_is_supported_fastsafetensors_version("0.1.200"))
 
 
 class TestIterStackedMoeWeights(unittest.TestCase):

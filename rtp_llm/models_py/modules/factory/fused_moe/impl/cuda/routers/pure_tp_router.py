@@ -261,7 +261,9 @@ class PureTpRouterFp4PerGroup(PureTpRouterBase):
         config: MoEConfigAdapter,
         quant_config: FusedMoEQuantConfig,
     ):
-        super().__init__(config, quant_config, do_recompute_topk=True)
+        # Expert ids are already global when EP is disabled. Recomputing the
+        # top-k counts on a single-GPU path only adds a kernel launch.
+        super().__init__(config, quant_config, do_recompute_topk=config.ep_size > 1)
 
     @classmethod
     def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:

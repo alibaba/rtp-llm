@@ -4,6 +4,7 @@ from typing import Any
 
 import torch
 
+from rtp_llm.config.moe_config import MoeStrategyName
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
@@ -21,7 +22,10 @@ class CudaFp8PerTensorEpLowLatencyStrategy(MoeStrategy):
 
     @classmethod
     def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
-        checker.check(config.moe_strategy == "fp8_per_tensor_ep_low_latency" or config.moe_strategy == "auto")
+        checker.check(
+            config.moe_strategy == MoeStrategyName.FP8_PER_TENSOR_EP_LOW_LATENCY.value
+            or config.moe_strategy == MoeStrategyName.AUTO.value
+        )
 
     def get_attributes(self) -> StrategyAttributes:
         from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.cutlass_moe import (
@@ -47,7 +51,10 @@ class CudaFp8PerTensorEpNormalStrategy(MoeStrategy):
 
     @classmethod
     def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
-        checker.check(config.moe_strategy == "fp8_per_tensor_ep_normal" or config.moe_strategy == "auto")
+        checker.check(
+            config.moe_strategy == MoeStrategyName.FP8_PER_TENSOR_EP_NORMAL.value
+            or config.moe_strategy == MoeStrategyName.AUTO.value
+        )
 
     def get_attributes(self) -> StrategyAttributes:
         from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.cutlass_moe import (
@@ -73,7 +80,10 @@ class CudaFp8PerTensorNoDPStrategy(MoeStrategy):
 
     @classmethod
     def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
-        checker.check(config.moe_strategy == "fp8_per_tensor_no_dp" or config.moe_strategy == "auto")
+        checker.check(
+            config.moe_strategy == MoeStrategyName.FP8_PER_TENSOR_NO_DP.value
+            or config.moe_strategy == MoeStrategyName.AUTO.value
+        )
 
     def get_attributes(self) -> StrategyAttributes:
         from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.cutlass_moe import (
