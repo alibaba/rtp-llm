@@ -1405,7 +1405,7 @@ if _PREFILL_CAPTURE and not globals().get("_PREFILL_CAPTURE_PATCHED", False):
             return _orig_forward(self, inputs, fmha_impl)
         st = _p4_state.get(sig)
         if st is None:
-            _p4_state[sig] = {"n": 1, "ptrs": ptrs}
+            _p4_state[sig] = {"n": 1, "ptrs": ptrs, "sig": sig}
             print("[P4CAP] call#1 signature tensors=%d" % len(sig), flush=True)
             return _orig_forward(self, inputs, fmha_impl)
         st["n"] += 1
@@ -1414,7 +1414,23 @@ if _PREFILL_CAPTURE and not globals().get("_PREFILL_CAPTURE_PATCHED", False):
                 print("[P4CAP] call#2 ptrs STABLE -> capturing on #3", flush=True)
             else:
                 st["unstable"] = True
-                print("[P4CAP] call#2 ptrs UNSTABLE (per-request allocs) -> eager only", flush=True)
+                # v2: inventory for the copy-in design — which tensors move,
+                # their shapes/dtypes, and old->new ptrs (capped dump).
+                p1 = dict(st["ptrs"])
+                shape_of = dict(st["sig"])
+                moved = [p for p, q in ptrs if p1.get(p) != q]
+                print(
+                    "[P4CAP] call#2 ptrs UNSTABLE: %d/%d moved"
+                    % (len(moved), len(ptrs)),
+                    flush=True,
+                )
+                for path in moved[:40]:
+                    sh = shape_of.get(path, ("?",))
+                    print(
+                        "[P4CAP]   moved %s %s %x->%x"
+                        % (path, sh, p1.get(path, 0), dict(ptrs).get(path, 0)),
+                        flush=True,
+                    )
             return _orig_forward(self, inputs, fmha_impl)
         if st.get("dead") or st.get("unstable"):
             return _orig_forward(self, inputs, fmha_impl)
