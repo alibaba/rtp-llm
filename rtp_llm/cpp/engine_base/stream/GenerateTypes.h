@@ -158,8 +158,10 @@ public:
     AuxInfo       aux_info;
     ErrorInfo     error_info;
 
-    std::optional<torch::Tensor>      hidden_states;
-    std::optional<torch::Tensor>      all_hidden_states;
+    std::optional<torch::Tensor> hidden_states;
+    std::optional<torch::Tensor> all_hidden_states;
+    // Internal metadata for the shared wire field; legacy states stay untouched.
+    int64_t                           shared_all_hidden_states_length = 0;
     std::optional<torch::Tensor>      logits;
     std::optional<torch::Tensor>      loss;
     std::optional<PromptLogitsOutput> prompt_logits;
