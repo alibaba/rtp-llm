@@ -78,7 +78,6 @@ class GenerateConfigTest(TestCase):
             "DISK_CACHE_SYNC_TIMEOUT_MS": "12345",
             "DISK_CACHE_STAGING_BLOCK_COUNT": "8",
             "ENABLE_HOST_CACHE": "1",
-            "ENABLE_HOST_CACHE_PINNED": "0",
             "HOST_CACHE_SIZE_MB": "2048",
             "HOST_CACHE_SYNC_TIMEOUT_MS": "6789",
             "BLOCK_TREE_FULL_PREFIX_SCAN_INTERVAL_MS": "30000",
@@ -105,7 +104,6 @@ class GenerateConfigTest(TestCase):
         self.assertEqual(config.disk_cache_sync_timeout_ms, 12345)
         self.assertEqual(config.disk_cache_staging_block_count, 8)
         self.assertTrue(config.enable_host_cache)
-        self.assertFalse(config.enable_host_cache_pinned)
         self.assertEqual(config.host_cache_size_mb, 2048)
         self.assertEqual(config.host_cache_sync_timeout_ms, 6789)
         self.assertEqual(config.block_tree_full_prefix_scan_interval_ms, 30000)
@@ -123,7 +121,6 @@ class GenerateConfigTest(TestCase):
         config = PyEnvConfigs().kv_cache_config
 
         self.assertFalse(config.enable_host_cache)
-        self.assertTrue(config.enable_host_cache_pinned)
         self.assertEqual(config.disk_cache_staging_block_count, 4)
         self.assertEqual(config.device_eviction_policy, "lru")
         self.assertEqual(config.host_eviction_policy, "lru")
@@ -205,7 +202,6 @@ class GenerateConfigTest(TestCase):
         config = KVCacheConfig()
         config.disk_cache_staging_block_count = 8
         config.enable_disk_cache = False
-        config.enable_host_cache_pinned = False
         config.device_eviction_policy = "fifo"
         config.host_eviction_policy = "lfu"
         config.disk_eviction_policy = "lru"
@@ -227,13 +223,12 @@ class GenerateConfigTest(TestCase):
         config.write_cache_sync = True
 
         state = config.__getstate__()
-        self.assertEqual(len(state), 67)
-        self.assertEqual(state[:2], ("KVCacheConfig", 3))
+        self.assertEqual(len(state), 66)
+        self.assertEqual(state[:2], ("KVCacheConfig", 4))
 
         restored = pickle.loads(pickle.dumps(config))
         self.assertEqual(restored.disk_cache_staging_block_count, 8)
         self.assertFalse(restored.enable_disk_cache)
-        self.assertFalse(restored.enable_host_cache_pinned)
         self.assertEqual(restored.device_eviction_policy, "fifo")
         self.assertEqual(restored.host_eviction_policy, "lfu")
         self.assertEqual(restored.disk_eviction_policy, "lru")
@@ -263,7 +258,11 @@ class GenerateConfigTest(TestCase):
             value.__setstate__(pickle_state)
             return value
 
-        source_extended_state = (state[0], 1, *state[2:-1])
+        legacy_state = (state[0], 3, *state[2:20], False, *state[20:])
+        restored_legacy = restore(legacy_state)
+        self.assertEqual(restored_legacy.__getstate__(), state)
+
+        source_extended_state = (state[0], 1, *legacy_state[2:-1])
         restored_source_extended = restore(source_extended_state)
         self.assertEqual(restored_source_extended.block_tree_transfer_worker_count, 7)
         self.assertEqual(
@@ -271,7 +270,7 @@ class GenerateConfigTest(TestCase):
         )
         self.assertFalse(restored_source_extended.write_cache_sync)
 
-        write_sync_state = (state[0], 2, *state[2:57], state[-1])
+        write_sync_state = (state[0], 2, *legacy_state[2:57], state[-1])
         restored_write_sync = restore(write_sync_state)
         default_config = KVCacheConfig()
         self.assertEqual(

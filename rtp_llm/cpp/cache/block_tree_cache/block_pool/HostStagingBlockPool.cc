@@ -8,20 +8,19 @@
 
 namespace rtp_llm {
 
-HostStagingBlockPool::HostStagingBlockPool(size_t block_count, size_t stride_bytes, bool try_pin_memory):
+HostStagingBlockPool::HostStagingBlockPool(size_t block_count, size_t stride_bytes):
     block_count_(block_count),
     stride_bytes_(stride_bytes),
-    backing_(block_count_ * stride_bytes_, kAlignment, try_pin_memory, "host staging block pool") {
+    backing_(block_count_ * stride_bytes_, kAlignment, "host staging block pool") {
     const size_t total_bytes = block_count_ * stride_bytes_;
     free_id_list_.reserve(block_count_);
     for (size_t block_id = 0; block_id < block_count_; ++block_id) {
         free_id_list_.push_back(block_id);
     }
-    RTP_LLM_LOG_INFO("host staging block pool ready: blocks=%zu stride=%zu total_bytes=%zu pinned=%d",
+    RTP_LLM_LOG_INFO("host staging block pool ready: blocks=%zu stride=%zu total_bytes=%zu",
                      block_count_,
                      stride_bytes_,
-                     total_bytes,
-                     static_cast<int>(backing_.isPinned()));
+                     total_bytes);
 }
 
 std::optional<HostStagingBlockPool::HostStagingBlockBatch> HostStagingBlockPool::tryMallocBatch(size_t count) {

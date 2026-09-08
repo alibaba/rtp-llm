@@ -41,8 +41,6 @@ TransferOptions TransferOptions::parse(int& argc, char**& argv) {
             opts.copy_strategy = next();
         else if (key == "min-measured-seconds")
             opts.min_measured_seconds = parseUnsigned(key, next);
-        else if (key == "host-memory")
-            opts.host_memory = next();
         else if (key == "disk-path")
             opts.disk_path = next();
         else if (key == "disk-io-mode")
@@ -77,7 +75,6 @@ void TransferOptions::printHelp() {
         << "  --transfer-descriptor-batch-size=N  Descriptors per engine submit (0 = concurrency)\n"
         << "  --copy-strategy=STRATEGY     auto | batch | staged-sm (default: auto)\n"
         << "  --min-measured-seconds=N     Measured phase duration floor; pilot run scales op count (default: 30)\n"
-        << "  --host-memory=TYPE           pinned | pageable (default: pinned)\n"
         << "  --disk-path=PATH             Disk directory for disk transfers\n"
         << "  --disk-io-mode=MODE          direct | buffered (default: direct)\n"
         << "  --disk-access-pattern=PAT    sequential | random (default: sequential)\n"

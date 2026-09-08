@@ -90,14 +90,13 @@ TreeNode* insertedNode(const BlockTreeInsertResult& result) {
     return result.inserted_nodes.back();
 }
 
-std::shared_ptr<HostBlockPool> makePageableHostPool(size_t usable_blocks) {
+std::shared_ptr<HostBlockPool> makePinnedHostPool(size_t usable_blocks) {
     auto config                  = std::make_shared<HostBlockPoolConfig>();
     config->pool_type            = BlockPoolType::HOST;
     config->pool_name            = "block_tree_evictor_test_host";
     config->physical_block_count = usable_blocks + 1;
     config->payload_bytes        = 64;
     config->stride_bytes         = 4096;
-    config->enable_pinned        = false;
     config->alignment            = 4096;
 
     auto pool = std::make_shared<HostBlockPool>(config);
@@ -209,11 +208,11 @@ std::vector<GroupSetPtr> makeCascadeGroups() {
     auto swa_device_pool    = makeTestDevicePool(2, "cascade_policy_swa");
     auto linear_device_pool = makeTestDevicePool(2, "cascade_policy_linear");
     auto full               = std::make_shared<FullGroupSet>(
-        std::vector<DeviceBlockPoolPtr>{full_device_pool}, makePageableHostPool(4), nullptr);
+        std::vector<DeviceBlockPoolPtr>{full_device_pool}, makePinnedHostPool(4), nullptr);
     auto swa = std::make_shared<SWAGroupSet>(
-        2, 1, std::vector<DeviceBlockPoolPtr>{swa_device_pool}, makePageableHostPool(4), nullptr);
+        2, 1, std::vector<DeviceBlockPoolPtr>{swa_device_pool}, makePinnedHostPool(4), nullptr);
     auto linear = std::make_shared<LinearGroupSet>(
-        std::vector<DeviceBlockPoolPtr>{linear_device_pool}, makePageableHostPool(4), nullptr);
+        std::vector<DeviceBlockPoolPtr>{linear_device_pool}, makePinnedHostPool(4), nullptr);
     auto full_policy                  = defaultCacheGroupPolicy(CacheGroupType::FULL);
     auto swa_policy                   = defaultCacheGroupPolicy(CacheGroupType::SWA);
     auto linear_policy                = defaultCacheGroupPolicy(CacheGroupType::LINEAR);
@@ -431,7 +430,7 @@ public:
 
 TEST(BlockTreeEvictorAsyncTest, PendingTransferDoesNotOccupyBusinessWorker) {
     auto device_pool = makeTestDevicePool(1, "async_eviction_device");
-    auto host_pool   = makePageableHostPool(1);
+    auto host_pool   = makePinnedHostPool(1);
     ASSERT_NE(device_pool, nullptr);
     ASSERT_NE(host_pool, nullptr);
     auto group = std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{device_pool}, host_pool, nullptr);
@@ -516,7 +515,7 @@ public:
         const std::string test_name = test_info->name();
         device_pools_               = {makeTestDevicePool(4, test_name + "_device_0"),
                                        makeTestDevicePool(4, test_name + "_device_1")};
-        host_pools_                 = {makePageableHostPool(4), makePageableHostPool(4)};
+        host_pools_                 = {makePinnedHostPool(4), makePinnedHostPool(4)};
         disk_pools_ = {makeTestDiskPool(4, test_name + "_disk_0"), makeTestDiskPool(4, test_name + "_disk_1")};
         if (device_pools_[0] == nullptr || device_pools_[1] == nullptr || host_pools_[0] == nullptr
             || host_pools_[1] == nullptr || disk_pools_[0] == nullptr || disk_pools_[1] == nullptr) {
@@ -773,7 +772,7 @@ TEST(BlockTreeEvictorAsyncTest, ForceDropDetachesTwoGroupSetsBeforeLateCompletio
 void verifyMixedDetachedBatchSettlement(bool transfer_success) {
     const std::string suffix      = transfer_success ? "success" : "failure";
     auto              device_pool = makeTestDevicePool(3, "mixed_batch_settlement_" + suffix + "_device");
-    auto              host_pool   = makePageableHostPool(3);
+    auto              host_pool   = makePinnedHostPool(3);
     auto              disk_pool   = makeTestDiskPool(3, "mixed_batch_settlement_" + suffix + "_disk");
     ASSERT_NE(device_pool, nullptr);
     ASSERT_NE(host_pool, nullptr);
@@ -958,7 +957,7 @@ public:
             makeTestDevicePool(2, "cascade_environment_linear"),
         };
         for (size_t group_set_id = 0; group_set_id < device_pools.size(); ++group_set_id) {
-            auto host = makePageableHostPool(2);
+            auto host = makePinnedHostPool(2);
             auto disk = makeTestDiskPool(2, "block_tree_evictor_cascade_" + std::to_string(group_set_id));
             if (host == nullptr || disk == nullptr) {
                 return false;
@@ -1134,7 +1133,7 @@ protected:
 };
 
 TEST_F(BlockTreeEvictorTest, PendingReleasesFollowAsyncTaskSourcePools) {
-    auto host_pool = makePageableHostPool(2);
+    auto host_pool = makePinnedHostPool(2);
     auto disk_pool = makeTestDiskPool(2, "pending_release_task_disk");
     ASSERT_NE(host_pool, nullptr);
     ASSERT_NE(disk_pool, nullptr);
@@ -1262,7 +1261,7 @@ TEST_F(BlockTreeEvictorTest, CompleteEvictRejectsNonDemotingResource) {
 }
 
 TEST_F(BlockTreeEvictorTest, RunEvictionTaskReleasesPendingSourceBeforeSettledCallback) {
-    auto host_pool = makePageableHostPool(1);
+    auto host_pool = makePinnedHostPool(1);
     ASSERT_NE(host_pool, nullptr);
     resetGroup(host_pool);
     BlockTreeTaskPool task_pool(/*thread_count=*/1, /*queue_size=*/1, "eviction_settlement_order");
@@ -1391,7 +1390,7 @@ TEST_F(BlockTreeEvictorTest, WatermarkRequiredBlocksQpsClearsWhenNextCheckHasNoD
 TEST_F(BlockTreeEvictorTest, DeviceHostWatermarkCapsBatchByRemainingRequiredCount) {
     device_pool_ = makeTestDevicePool(10, "configured_device_host_watermark_batch");
     ASSERT_NE(device_pool_, nullptr);
-    auto host_pool = makePageableHostPool(4);
+    auto host_pool = makePinnedHostPool(4);
     ASSERT_NE(host_pool, nullptr);
     resetGroup(host_pool);
 
@@ -1432,7 +1431,7 @@ TEST_F(BlockTreeEvictorTest, DeviceHostWatermarkCapsBatchByRemainingRequiredCoun
 }
 
 TEST_F(BlockTreeEvictorTest, DeviceHostWatermarkSubmitsOneLogicalBatchCappedByTransferLimit) {
-    auto host_pool = makePageableHostPool(4);
+    auto host_pool = makePinnedHostPool(4);
     ASSERT_NE(host_pool, nullptr);
     resetGroup(host_pool);
     BlockTreeTaskPool task_pool(/*thread_count=*/1, /*queue_size=*/4, "device_host_watermark_batch");
@@ -1483,7 +1482,7 @@ TEST_F(BlockTreeEvictorTest, DeviceHostWatermarkSubmitsOneLogicalBatchCappedByTr
 TEST_F(BlockTreeEvictorTest, DirectDeviceDropsConvergePastTransferBatchLimit) {
     device_pool_ = makeTestDevicePool(20, "direct_device_watermark_convergence");
     ASSERT_NE(device_pool_, nullptr);
-    auto host_pool = makePageableHostPool(18);
+    auto host_pool = makePinnedHostPool(18);
     ASSERT_NE(host_pool, nullptr);
     resetGroup(host_pool);
 
@@ -1559,7 +1558,7 @@ TEST_F(BlockTreeEvictorTest, DirectDeviceDropsConvergePastTransferBatchLimit) {
 TEST_F(BlockTreeEvictorTest, DeviceWatermarkStaysTriggeredAcrossBatchesUntilLow) {
     device_pool_ = makeTestDevicePool(10, "persistent_device_watermark");
     ASSERT_NE(device_pool_, nullptr);
-    auto host_pool = makePageableHostPool(4);
+    auto host_pool = makePinnedHostPool(4);
     ASSERT_NE(host_pool, nullptr);
     resetGroup(host_pool);
 
@@ -1622,7 +1621,7 @@ TEST_F(BlockTreeEvictorTest, DeviceWatermarkStaysTriggeredAcrossBatchesUntilLow)
 }
 
 TEST_F(BlockTreeEvictorTest, HostDiskWatermarkConvergesAcrossBoundedBatches) {
-    auto host_pool = makePageableHostPool(100);
+    auto host_pool = makePinnedHostPool(100);
     auto disk_pool = makeTestDiskPool(32, "host_disk_watermark_batch");
     ASSERT_NE(host_pool, nullptr);
     ASSERT_NE(disk_pool, nullptr);
@@ -1780,7 +1779,7 @@ TEST_F(BlockTreeEvictorTest, BatchDropReportsZeroScheduledBlocksWhenPhysicalBloc
 }
 
 TEST_F(BlockTreeEvictorTest, BatchAdmissionRejectionRollsBackEveryPlannedDescriptor) {
-    auto host_pool = makePageableHostPool(2);
+    auto host_pool = makePinnedHostPool(2);
     ASSERT_NE(host_pool, nullptr);
     resetGroup(host_pool);
     BlockTreeTaskPool task_pool(/*thread_count=*/1, /*queue_size=*/4, "batch_admission_rejection");
@@ -1826,7 +1825,7 @@ TEST_F(BlockTreeEvictorTest, BatchAdmissionRejectionRollsBackEveryPlannedDescrip
 }
 
 TEST_F(BlockTreeEvictorTest, BatchQueueTimeoutRollsBackEveryPlannedDescriptorOnce) {
-    auto host_pool = makePageableHostPool(2);
+    auto host_pool = makePinnedHostPool(2);
     ASSERT_NE(host_pool, nullptr);
     resetGroup(host_pool);
     BlockTreeTaskPool task_pool(/*thread_count=*/1, /*queue_size=*/4, "batch_queue_timeout");
@@ -1900,7 +1899,7 @@ TEST_F(BlockTreeEvictorTest, BatchQueueTimeoutRollsBackEveryPlannedDescriptorOnc
 }
 
 TEST_F(BlockTreeEvictorTest, BatchTargetExhaustionLeavesEntirePlannedBatchUnchanged) {
-    auto host_pool = makePageableHostPool(1);
+    auto host_pool = makePinnedHostPool(1);
     ASSERT_NE(host_pool, nullptr);
     resetGroup(host_pool);
     BlockTreeTaskPool task_pool(/*thread_count=*/1, /*queue_size=*/4, "batch_target_exhaustion");
@@ -2101,7 +2100,7 @@ TEST(BlockTreeEvictorCascadeTest, CascadedFullPruneRemovesEveryTierFromClosureRo
 
 TEST(BlockTreeEvictorCascadeTest, StopsAtLogicallyMatchableParent) {
     auto device_pool = makeTestDevicePool(1, "upward_cascade_matchable_device");
-    auto host_pool   = makePageableHostPool(2);
+    auto host_pool   = makePinnedHostPool(2);
     auto disk_pool   = makeTestDiskPool(2, "upward_cascade_matchable_disk");
     ASSERT_NE(device_pool, nullptr);
     ASSERT_NE(host_pool, nullptr);
@@ -2133,7 +2132,7 @@ TEST(BlockTreeEvictorCascadeTest, StopsAtLogicallyMatchableParent) {
 }
 
 TEST(BlockTreeEvictorCascadeTest, StopsAtParentWithAnotherEmptyChild) {
-    auto host_pool = makePageableHostPool(3);
+    auto host_pool = makePinnedHostPool(3);
     auto disk_pool = makeTestDiskPool(3, "upward_cascade_branch_disk");
     ASSERT_NE(host_pool, nullptr);
     ASSERT_NE(disk_pool, nullptr);
@@ -2175,7 +2174,7 @@ TEST(BlockTreeEvictorCascadeTest, StopsAtParentWithAnotherEmptyChild) {
 
 TEST(BlockTreeEvictorCascadeTest, DemotionPrepareLeavesAncestorUnchanged) {
     auto device_pool = makeTestDevicePool(1, "upward_cascade_exhausted_device");
-    auto host_pool   = makePageableHostPool(2);
+    auto host_pool   = makePinnedHostPool(2);
     auto disk_pool   = makeTestDiskPool(1, "upward_cascade_exhausted_disk");
     ASSERT_NE(device_pool, nullptr);
     ASSERT_NE(host_pool, nullptr);
@@ -2212,7 +2211,7 @@ TEST(BlockTreeEvictorCascadeTest, DemotionPrepareLeavesAncestorUnchanged) {
 
 TEST(BlockTreeEvictorCascadeTest, ForceDropRemovesUnmatchableParentChain) {
     auto device_pool = makeTestDevicePool(1, "upward_cascade_drop_device");
-    auto host_pool   = makePageableHostPool(2);
+    auto host_pool   = makePinnedHostPool(2);
     ASSERT_NE(device_pool, nullptr);
     ASSERT_NE(host_pool, nullptr);
     auto group = std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{device_pool}, host_pool, nullptr);
@@ -2242,7 +2241,7 @@ TEST(BlockTreeEvictorCascadeTest, ForceDropRemovesUnmatchableParentChain) {
 }
 
 TEST(BlockTreeEvictorCascadeTest, PruneCascadesAncestorResourcesFromTheirActualTiers) {
-    auto host_pool = makePageableHostPool(1);
+    auto host_pool = makePinnedHostPool(1);
     auto disk_pool = makeTestDiskPool(1, "upward_cascade_mixed_tier_prune");
     ASSERT_NE(host_pool, nullptr);
     ASSERT_NE(disk_pool, nullptr);
@@ -2299,7 +2298,7 @@ TEST_F(BlockTreeEvictorTest, TierEntryRefreshesLastAccessTime) {
 }
 
 TEST_F(BlockTreeEvictorTest, SuspendAndAdmitCandidateTrackTransferState) {
-    auto host_pool = makePageableHostPool(1);
+    auto host_pool = makePinnedHostPool(1);
     auto disk_pool = makeTestDiskPool(1, "block_tree_evictor_is_evictable");
     ASSERT_NE(host_pool, nullptr);
     ASSERT_NE(disk_pool, nullptr);
@@ -2385,7 +2384,7 @@ TEST_F(BlockTreeEvictorTest, DropLockedDropsSelectedVictim) {
 }
 
 TEST_F(BlockTreeEvictorTest, DeviceDropUsesExistingHostWhenDiskPoolIsFull) {
-    auto host_pool = makePageableHostPool(1);
+    auto host_pool = makePinnedHostPool(1);
     auto disk_pool = makeTestDiskPool(1, "device_drop_existing_host_disk");
     ASSERT_NE(host_pool, nullptr);
     ASSERT_NE(disk_pool, nullptr);
@@ -2434,7 +2433,7 @@ TEST_F(BlockTreeEvictorTest, DeviceDropUsesExistingHostWhenDiskPoolIsFull) {
 }
 
 TEST_F(BlockTreeEvictorTest, DeviceDropUsesExistingDiskWhenHostPoolIsFull) {
-    auto host_pool = makePageableHostPool(1);
+    auto host_pool = makePinnedHostPool(1);
     auto disk_pool = makeTestDiskPool(1, "device_drop_existing_disk_host");
     ASSERT_NE(host_pool, nullptr);
     ASSERT_NE(disk_pool, nullptr);
@@ -2474,7 +2473,7 @@ TEST_F(BlockTreeEvictorTest, DeviceDropUsesExistingDiskWhenHostPoolIsFull) {
 }
 
 TEST_F(BlockTreeEvictorTest, LowerTierAdoptionPreservesTopCandidateMetadata) {
-    auto host_pool = makePageableHostPool(1);
+    auto host_pool = makePinnedHostPool(1);
     ASSERT_NE(host_pool, nullptr);
     resetGroup(host_pool);
 
@@ -2509,7 +2508,7 @@ TEST_F(BlockTreeEvictorTest, LowerTierAdoptionPreservesTopCandidateMetadata) {
 }
 
 TEST_F(BlockTreeEvictorTest, HigherTierAdoptionMovesTheSoleCandidate) {
-    auto host_pool = makePageableHostPool(1);
+    auto host_pool = makePinnedHostPool(1);
     ASSERT_NE(host_pool, nullptr);
     resetGroup(host_pool);
 
@@ -2581,7 +2580,7 @@ TEST_F(BlockTreeEvictorTest, ChooseVictimUsesNearestEnabledTargetTier) {
 }
 
 TEST_F(BlockTreeEvictorTest, ChooseVictimSkipsDeviceParentOfLoadingChildUnlessForceDropping) {
-    auto host_pool = makePageableHostPool(1);
+    auto host_pool = makePinnedHostPool(1);
     ASSERT_NE(host_pool, nullptr);
     resetGroup(host_pool);
 
@@ -2621,7 +2620,7 @@ TEST_F(BlockTreeEvictorTest, ChooseVictimSkipsDeviceParentOfLoadingChildUnlessFo
 }
 
 TEST_F(BlockTreeEvictorTest, ChooseVictimReturnsEmptyWhenAllDeviceCandidatesAreSkipped) {
-    auto host_pool = makePageableHostPool(1);
+    auto host_pool = makePinnedHostPool(1);
     ASSERT_NE(host_pool, nullptr);
     resetGroup(host_pool);
 
@@ -2738,7 +2737,7 @@ TEST_F(BlockTreeEvictorTest, ExistingGroupFillAdmitsChildAndRemovesFullParentCan
 }
 
 TEST_F(BlockTreeEvictorTest, ExtraTreeReferencesKeepCandidateEligible) {
-    auto host_pool = makePageableHostPool(1);
+    auto host_pool = makePinnedHostPool(1);
     ASSERT_NE(host_pool, nullptr);
     resetGroup(host_pool);
 
@@ -2779,7 +2778,7 @@ TEST_F(BlockTreeEvictorTest, ExtraTreeReferencesKeepCandidateEligible) {
 }
 
 TEST_F(BlockTreeEvictorTest, ChooseVictimAllowsNewLoadReferenceWithoutSideEffects) {
-    auto host_pool = makePageableHostPool(1);
+    auto host_pool = makePinnedHostPool(1);
     auto disk_pool = makeTestDiskPool(1, "block_tree_evictor_pin");
     ASSERT_NE(host_pool, nullptr);
     ASSERT_NE(disk_pool, nullptr);
@@ -2816,7 +2815,7 @@ TEST_F(BlockTreeEvictorTest, ChooseVictimAllowsNewLoadReferenceWithoutSideEffect
 }
 
 TEST_F(BlockTreeEvictorTest, ChooseVictimPreservesLoadOwner) {
-    auto host_pool = makePageableHostPool(1);
+    auto host_pool = makePinnedHostPool(1);
     auto disk_pool = makeTestDiskPool(1, "block_tree_evictor_load");
     ASSERT_NE(host_pool, nullptr);
     ASSERT_NE(disk_pool, nullptr);
@@ -2845,7 +2844,7 @@ TEST_F(BlockTreeEvictorTest, ChooseVictimPreservesLoadOwner) {
 }
 
 TEST_F(BlockTreeEvictorTest, ChooseVictimPreservesExistingDemotionOwnerAndTarget) {
-    auto host_pool = makePageableHostPool(1);
+    auto host_pool = makePinnedHostPool(1);
     auto disk_pool = makeTestDiskPool(1, "block_tree_evictor_demotion");
     ASSERT_NE(host_pool, nullptr);
     ASSERT_NE(disk_pool, nullptr);
@@ -2891,7 +2890,7 @@ TEST_F(BlockTreeEvictorTest, ChooseVictimPreservesExistingDemotionOwnerAndTarget
 }
 
 TEST_F(BlockTreeEvictorTest, ChooseVictimRejectsSourceTierChangedByLoad) {
-    auto host_pool = makePageableHostPool(1);
+    auto host_pool = makePinnedHostPool(1);
     auto disk_pool = makeTestDiskPool(1, "block_tree_evictor_tier_change");
     ASSERT_NE(host_pool, nullptr);
     ASSERT_NE(disk_pool, nullptr);
@@ -2930,7 +2929,7 @@ TEST_F(BlockTreeEvictorTest, ChooseVictimRejectsSourceTierChangedByLoad) {
 }
 
 TEST_F(BlockTreeEvictorTest, ChooseVictimSkipsFullNodeThatBecameNonLeaf) {
-    auto host_pool = makePageableHostPool(2);
+    auto host_pool = makePinnedHostPool(2);
     auto disk_pool = makeTestDiskPool(1, "block_tree_evictor_topology");
     ASSERT_NE(host_pool, nullptr);
     ASSERT_NE(disk_pool, nullptr);
@@ -2970,7 +2969,7 @@ TEST_F(BlockTreeEvictorTest, ChooseVictimSkipsFullNodeThatBecameNonLeaf) {
 }
 
 TEST_F(BlockTreeEvictorTest, LoadingStateExcludesAndIdleStateReadmitsSource) {
-    auto host_pool = makePageableHostPool(1);
+    auto host_pool = makePinnedHostPool(1);
     ASSERT_NE(host_pool, nullptr);
     resetGroup(host_pool);
     const BlockIdxType source = group_->allocateSingleBlock(Tier::HOST, BlockTreeRefType::CACHE);
@@ -2991,7 +2990,7 @@ TEST_F(BlockTreeEvictorTest, LoadingStateExcludesAndIdleStateReadmitsSource) {
 }
 
 TEST_F(BlockTreeEvictorTest, LoadSuccessAdmitsOnlyStableDeviceResource) {
-    auto host_pool = makePageableHostPool(1);
+    auto host_pool = makePinnedHostPool(1);
     ASSERT_NE(host_pool, nullptr);
     resetGroup(host_pool);
     const BlockIdxType source = group_->allocateSingleBlock(Tier::HOST, BlockTreeRefType::CACHE);
@@ -3038,7 +3037,7 @@ TEST_F(BlockTreeEvictorTest, BatchSettlementRemovesDescriptorsSharingAnAncestor)
 }
 
 TEST_F(BlockTreeEvictorTest, DemotionExcludesSourceAndRollbackOrSuccessRestoresOneTier) {
-    auto host_pool = makePageableHostPool(1);
+    auto host_pool = makePinnedHostPool(1);
     ASSERT_NE(host_pool, nullptr);
     resetGroup(host_pool);
 
@@ -3099,7 +3098,7 @@ TEST_F(BlockTreeEvictorTest, DemotionExcludesSourceAndRollbackOrSuccessRestoresO
 }
 
 TEST_F(BlockTreeEvictorTest, ChooseVictimKeepsCandidateUntilTaskActivation) {
-    auto host_pool = makePageableHostPool(1);
+    auto host_pool = makePinnedHostPool(1);
     ASSERT_NE(host_pool, nullptr);
     resetGroup(host_pool);
 
@@ -3131,7 +3130,7 @@ TEST_F(BlockTreeEvictorTest, ChooseVictimKeepsCandidateUntilTaskActivation) {
 }
 
 TEST_F(BlockTreeEvictorTest, PrimaryTargetExhaustionLeavesSourceAndCandidateUnchanged) {
-    auto host_pool = makePageableHostPool(1);
+    auto host_pool = makePinnedHostPool(1);
     ASSERT_NE(host_pool, nullptr);
     resetGroup(host_pool);
 
@@ -3263,7 +3262,7 @@ TEST(BlockTreeEvictorCascadeTest, PrimarySuccessPublishesOnlyPrimary) {
 
 TEST(BlockTreeEvictorStatsTest, AggregatesCandidatesAcrossGroupsAndTiers) {
     auto device_pool = makeTestDevicePool(1, "block_tree_evictor_stats_device");
-    auto host_pool   = makePageableHostPool(1);
+    auto host_pool   = makePinnedHostPool(1);
     auto disk_pool   = makeTestDiskPool(1, "block_tree_evictor_stats_disk");
     ASSERT_NE(device_pool, nullptr);
     ASSERT_NE(host_pool, nullptr);

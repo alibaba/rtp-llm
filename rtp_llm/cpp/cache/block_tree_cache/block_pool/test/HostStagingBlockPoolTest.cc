@@ -15,7 +15,7 @@ namespace rtp_llm {
 namespace {
 
 TEST(HostStagingBlockPoolTest, UsesCallerProvidedStride) {
-    HostStagingBlockPool pool(1, 65, /*try_pin_memory=*/false);
+    HostStagingBlockPool pool(1, 65);
 
     auto leases = pool.tryMallocBatch(1);
     ASSERT_TRUE(leases.has_value());
@@ -23,13 +23,15 @@ TEST(HostStagingBlockPoolTest, UsesCallerProvidedStride) {
     EXPECT_EQ(view.capacity_bytes, 65u);
 }
 
-TEST(HostStagingBlockPoolTest, PageableBackingServesLeasesWhenPinningDisabled) {
-    HostStagingBlockPool pool(1, 4096, /*try_pin_memory=*/false);
+TEST(HostStagingBlockPoolTest, PinnedBackingServesLeases) {
+    HostStagingBlockPool pool(1, 4096);
 
     auto lease = pool.tryMallocBatch(1);
     ASSERT_TRUE(lease.has_value());
     const auto view = (*lease)[0].blockBuffer(64);
     ASSERT_NE(view.base, nullptr);
+    const auto tensor = torch::from_blob(view.base, {64}, torch::TensorOptions().dtype(torch::kUInt8));
+    EXPECT_TRUE(tensor.is_pinned());
     EXPECT_EQ(view.payload_bytes, 64u);
     EXPECT_EQ(view.capacity_bytes, 4096u);
     std::memset(view.base, 0xAB, view.payload_bytes);
@@ -40,7 +42,7 @@ TEST(HostStagingBlockPoolTest, PageableBackingServesLeasesWhenPinningDisabled) {
 }
 
 TEST(HostStagingBlockPoolTest, BatchAllocationIsAtomic) {
-    HostStagingBlockPool pool(2, 4096, /*try_pin_memory=*/false);
+    HostStagingBlockPool pool(2, 4096);
 
     EXPECT_FALSE(pool.tryMallocBatch(3).has_value());
     auto leases = pool.tryMallocBatch(2);
@@ -50,7 +52,7 @@ TEST(HostStagingBlockPoolTest, BatchAllocationIsAtomic) {
 }
 
 TEST(HostStagingBlockPoolTest, BatchWaitersAreStrictFifo) {
-    HostStagingBlockPool pool(2, 4096, /*try_pin_memory=*/false);
+    HostStagingBlockPool pool(2, 4096);
     auto                 held = pool.tryMallocBatch(1);
     ASSERT_TRUE(held.has_value());
 
@@ -81,7 +83,7 @@ TEST(HostStagingBlockPoolTest, BatchWaitersAreStrictFifo) {
 }
 
 TEST(HostStagingBlockPoolTest, BatchWaiterRemainsPendingUntilRelease) {
-    HostStagingBlockPool pool(1, 4096, /*try_pin_memory=*/false);
+    HostStagingBlockPool pool(1, 4096);
     auto                 held = pool.tryMallocBatch(1);
     ASSERT_TRUE(held.has_value());
 
@@ -98,7 +100,7 @@ TEST(HostStagingBlockPoolTest, BatchWaiterRemainsPendingUntilRelease) {
 }
 
 TEST(HostStagingBlockPoolTest, ExpiredBatchWaiterIsDiscardedWhenStagingBecomesAvailable) {
-    HostStagingBlockPool pool(1, 4096, /*try_pin_memory=*/false);
+    HostStagingBlockPool pool(1, 4096);
     auto                 held = pool.tryMallocBatch(1);
     ASSERT_TRUE(held.has_value());
 
@@ -116,7 +118,7 @@ TEST(HostStagingBlockPoolTest, ExpiredBatchWaiterIsDiscardedWhenStagingBecomesAv
 }
 
 TEST(HostStagingBlockPoolTest, CancelAllCompletesEveryPendingWaiterExactlyOnce) {
-    HostStagingBlockPool pool(1, 4096, /*try_pin_memory=*/false);
+    HostStagingBlockPool pool(1, 4096);
     auto                 held = pool.tryMallocBatch(1);
     ASSERT_TRUE(held.has_value());
 
@@ -142,7 +144,7 @@ TEST(HostStagingBlockPoolTest, CancelAllCompletesEveryPendingWaiterExactlyOnce) 
 }
 
 TEST(HostStagingBlockPoolTest, ThrowingCancelCallbackDoesNotSuppressLaterWaiters) {
-    HostStagingBlockPool pool(1, 4096, /*try_pin_memory=*/false);
+    HostStagingBlockPool pool(1, 4096);
     auto                 held = pool.tryMallocBatch(1);
     ASSERT_TRUE(held.has_value());
 

@@ -147,7 +147,6 @@ std::string KVCacheConfig::to_string() const {
         << "use_block_cache: " << use_block_cache << "\n"
         << "enable_device_cache: " << enable_device_cache << "\n"
         << "enable_host_cache: " << enable_host_cache << "\n"
-        << "enable_host_cache_pinned: " << enable_host_cache_pinned << "\n"
         << "enable_disk_cache: " << enable_disk_cache << "\n"
         << "enable_remote_cache: " << enable_remote_cache << "\n"
         << "write_cache_sync: " << write_cache_sync << "\n"

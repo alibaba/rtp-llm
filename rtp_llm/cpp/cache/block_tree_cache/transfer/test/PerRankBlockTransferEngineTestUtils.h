@@ -39,7 +39,7 @@ DeviceBlockPoolPtr makeTestDevicePool(const std::vector<std::pair<size_t, size_t
                                       size_t                                        usable_count,
                                       const std::string&                            pool_name);
 
-std::shared_ptr<HostBlockPool> makeHostPool(size_t payload_bytes, size_t usable_count, bool enable_pinned);
+std::shared_ptr<HostBlockPool> makeHostPool(size_t payload_bytes, size_t usable_count);
 
 class TempDirGuard {
 public:

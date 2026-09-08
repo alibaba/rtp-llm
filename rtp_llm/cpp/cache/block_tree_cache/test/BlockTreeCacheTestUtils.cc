@@ -87,7 +87,7 @@ size_t ControlledPerRankBlockTransferEngine::submittedBatchCount() const {
 }
 
 std::shared_ptr<HostBlockPool> makeHostPool(size_t payload_bytes, size_t usable_count) {
-    return block_transfer_engine_test::makeHostPool(payload_bytes, usable_count, /*enable_pinned=*/true);
+    return block_transfer_engine_test::makeHostPool(payload_bytes, usable_count);
 }
 
 DiskBlockIOStatus MemoryDiskBlockIO::openAndPreallocate(const std::string&, size_t bytes, bool) {

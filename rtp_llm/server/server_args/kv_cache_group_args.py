@@ -129,14 +129,6 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         help="Host KVCache 开关。开启时必须通过 HOST_CACHE_SIZE_MB 设置容量",
     )
     kv_cache_group.add_argument(
-        "--enable_host_cache_pinned",
-        env_name="ENABLE_HOST_CACHE_PINNED",
-        bind_to=(kv_cache_config, "enable_host_cache_pinned"),
-        type=str2bool,
-        default=True,
-        help="Host KVCache 是否使用 pinned memory。",
-    )
-    kv_cache_group.add_argument(
         "--enable_disk_cache",
         "--enable_memory_cache_disk",
         env_name="ENABLE_DISK_CACHE",

@@ -37,10 +37,8 @@ public:
     static std::shared_ptr<DeviceBlockPool>
     createDevicePool(size_t layer_stride_bytes, size_t layer_num, size_t usable_count, const std::string& pool_name);
 
-    static std::shared_ptr<HostBlockPool> createHostPool(size_t             payload_bytes,
-                                                         size_t             usable_count,
-                                                         bool               enable_pinned,
-                                                         const std::string& pool_name = "benchmark_host");
+    static std::shared_ptr<HostBlockPool>
+    createHostPool(size_t payload_bytes, size_t usable_count, const std::string& pool_name = "benchmark_host");
 
     static std::shared_ptr<BlockTreeDiskBlockPool> createDiskPool(size_t             payload_bytes,
                                                                   size_t             usable_count,

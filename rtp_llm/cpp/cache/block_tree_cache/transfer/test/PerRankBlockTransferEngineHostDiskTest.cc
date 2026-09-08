@@ -130,7 +130,7 @@ protected:
     void SetUp() override {
         host_block_size_ = 384;
 
-        host_pool_ = makeHostPool(host_block_size_, 4, false);
+        host_pool_ = makeHostPool(host_block_size_, 4);
         disk_pool_ = makeDiskPool(host_block_size_, 7, temp_dir_.path);
 
         group_set_ = makeHostDiskGroup(0, host_pool_, disk_pool_, host_block_size_);
@@ -246,7 +246,7 @@ TEST_F(PerRankBlockTransferEngineHostDiskTest, HostDiskExecutorReportsTaskPoolSu
 TEST_F(PerRankBlockTransferEngineHostDiskTest, MaxBatchSizeSplitsOneLogicalBatch) {
     auto  owned_io  = std::make_unique<RecordingBatchDiskBlockIO>();
     auto* io        = owned_io.get();
-    auto  host_pool = makeHostPool(host_block_size_, 8, false);
+    auto  host_pool = makeHostPool(host_block_size_, 8);
     auto  disk_pool = makeDiskPool(host_block_size_, 8, temp_dir_.path, std::move(owned_io), "split_batch");
     auto  group     = makeHostDiskGroup(0, host_pool, disk_pool, host_block_size_);
     auto  engine    = std::make_shared<PerRankBlockTransferEngine>(
@@ -267,7 +267,7 @@ TEST_F(PerRankBlockTransferEngineHostDiskTest, MaxBatchSizeSplitsOneLogicalBatch
 TEST_F(PerRankBlockTransferEngineHostDiskTest, DefaultBatchSizeSupportsSixteenDescriptors) {
     auto  owned_io  = std::make_unique<RecordingBatchDiskBlockIO>();
     auto* io        = owned_io.get();
-    auto  host_pool = makeHostPool(host_block_size_, 17, false);
+    auto  host_pool = makeHostPool(host_block_size_, 17);
     auto  disk_pool = makeDiskPool(host_block_size_, 17, temp_dir_.path, std::move(owned_io), "default_batch");
     auto  group     = makeHostDiskGroup(0, host_pool, disk_pool, host_block_size_);
     auto  engine    = makeEngine({group});
@@ -287,7 +287,7 @@ TEST_F(PerRankBlockTransferEngineHostDiskTest, DefaultBatchSizeSupportsSixteenDe
 TEST_F(PerRankBlockTransferEngineHostDiskTest, SameDirectionHostToDiskTasksMayUseSharedWorkers) {
     auto       owned_io  = std::make_unique<BlockingBatchDiskBlockIO>(BlockingBatchDiskBlockIO::Operation::WRITE);
     auto*      io        = owned_io.get();
-    auto       host_pool = makeHostPool(host_block_size_, 3, false);
+    auto       host_pool = makeHostPool(host_block_size_, 3);
     auto       disk_pool = makeDiskPool(host_block_size_, 2, temp_dir_.path, std::move(owned_io), "serialized_write");
     auto       group     = makeHostDiskGroup(0, host_pool, disk_pool, host_block_size_);
     auto       engine    = makeEngine({group});
@@ -310,7 +310,7 @@ TEST_F(PerRankBlockTransferEngineHostDiskTest, SameDirectionHostToDiskTasksMayUs
 TEST_F(PerRankBlockTransferEngineHostDiskTest, SameDirectionDiskToHostTasksMayUseSharedWorkers) {
     auto       owned_io   = std::make_unique<BlockingBatchDiskBlockIO>(BlockingBatchDiskBlockIO::Operation::READ);
     auto*      io         = owned_io.get();
-    auto       host_pool  = makeHostPool(host_block_size_, 3, false);
+    auto       host_pool  = makeHostPool(host_block_size_, 3);
     auto       disk_pool  = makeDiskPool(host_block_size_, 2, temp_dir_.path, std::move(owned_io), "shared_read");
     auto       group      = makeHostDiskGroup(0, host_pool, disk_pool, host_block_size_);
     auto       engine     = makeEngine({group});

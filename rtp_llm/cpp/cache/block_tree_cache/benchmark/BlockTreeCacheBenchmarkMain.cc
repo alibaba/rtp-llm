@@ -35,8 +35,6 @@ void validateTransferOptions(const TransferOptions& options) {
         || options.device_disk_staging_block_count == 0) {
         throw std::runtime_error("transfer count, concurrency and duration options must be positive");
     }
-    if (options.host_memory != "pinned" && options.host_memory != "pageable")
-        throw std::runtime_error("--host-memory must be pinned or pageable");
     if (options.disk_io_mode != "direct" && options.disk_io_mode != "buffered")
         throw std::runtime_error("--disk-io-mode must be direct or buffered");
     if (options.disk_access_pattern != "sequential" && options.disk_access_pattern != "random")

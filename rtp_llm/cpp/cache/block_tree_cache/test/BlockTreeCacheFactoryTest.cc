@@ -796,7 +796,6 @@ TEST_F(BlockTreeCacheFactoryTest, PerRankBlockTransferEnginePreservesNonContiguo
     KVCacheConfig kv_cache_config;
     kv_cache_config.enable_host_cache        = true;
     kv_cache_config.host_cache_size_mb       = 1;
-    kv_cache_config.enable_host_cache_pinned = false;
     auto cache                               = createBlockTreeCache(config, kv_cache_config, allocator);
     ASSERT_NE(cache, nullptr);
     EXPECT_DOUBLE_EQ(cache->config().watermark_host.low_ratio, 0.90);
@@ -815,7 +814,9 @@ TEST_F(BlockTreeCacheFactoryTest, PerRankBlockTransferEnginePreservesNonContiguo
     ASSERT_NE(group_set_it, cache->groupSets().end());
     const auto& group_set = *group_set_it;
     ASSERT_NE(group_set->hostPool(), nullptr);
-    EXPECT_FALSE(group_set->hostPool()->isPinned());
+    const auto host_tensor =
+        torch::from_blob(group_set->hostPool()->blockBuffer(1).addr, {1}, torch::TensorOptions().dtype(torch::kUInt8));
+    EXPECT_TRUE(host_tensor.is_pinned());
     ASSERT_EQ(group_set->devicePools().size(), 1u);
 
     const auto device_blocks = full_group->blockPool()->malloc(1);

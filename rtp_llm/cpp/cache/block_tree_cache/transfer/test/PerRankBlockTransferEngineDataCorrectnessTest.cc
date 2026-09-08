@@ -185,7 +185,7 @@ struct TransferFixture {
         auto topology = makeTestTopology({makeTestGroupBase(std::move(policy), {0, 1}, kKvBytes, kScaleBytes)});
         device_pool =
             makeTestDevicePool({{kKvBytes, kScaleBytes}, {kKvBytes, kScaleBytes}}, usable_count, name + "_device");
-        host_pool = makeHostPool(kPayloadBytes, usable_count, true);
+        host_pool = makeHostPool(kPayloadBytes, usable_count);
         disk_pool = makeDiskPool(kPayloadBytes, usable_count, temp_dir.path, nullptr, name + "_disk");
         group_set = makeTestGroupSet(0, std::move(topology), {0}, {device_pool}, host_pool, disk_pool);
         engine    = std::make_shared<PerRankBlockTransferEngine>(std::vector<GroupSetPtr>{group_set}, true);

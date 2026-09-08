@@ -70,17 +70,14 @@ DeviceBlockPoolPtr BenchmarkFixture::createDevicePool(size_t             layer_s
     return pool;
 }
 
-std::shared_ptr<HostBlockPool> BenchmarkFixture::createHostPool(size_t             payload_bytes,
-                                                                size_t             usable_count,
-                                                                bool               enable_pinned,
-                                                                const std::string& pool_name) {
+std::shared_ptr<HostBlockPool>
+BenchmarkFixture::createHostPool(size_t payload_bytes, size_t usable_count, const std::string& pool_name) {
     auto config                  = std::make_shared<HostBlockPoolConfig>();
     config->pool_type            = BlockPoolType::HOST;
     config->pool_name            = pool_name;
     config->physical_block_count = usable_count + 1;
     config->payload_bytes        = payload_bytes;
     config->stride_bytes         = alignUp(payload_bytes, kPoolAlignment);
-    config->enable_pinned        = enable_pinned;
     config->alignment            = kPoolAlignment;
 
     auto pool = std::make_shared<HostBlockPool>(config);
