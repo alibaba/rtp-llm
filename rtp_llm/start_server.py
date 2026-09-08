@@ -2,7 +2,7 @@ import logging
 import multiprocessing
 import os
 import sys
-import threading
+import tempfile
 import time
 import traceback
 
@@ -27,10 +27,10 @@ from rtp_llm.utils.process_manager import (
 )
 from rtp_llm.utils.scr_template_utils import (
     ScrParticipantManifest,
+    arrive_scr_checkpoint_barrier,
     build_scr_participant_manifest,
     configure_scr_environment,
-    is_scr_enabled,
-    start_scr_checkpoint_thread,
+    is_scr_template_phase_active,
 )
 from rtp_llm.utils.warmup import configure_warmup
 
@@ -55,27 +55,34 @@ STARTUP_REAL_WARMUP_TOKEN_ID = 100
 
 
 def _scr_local_world_size(py_env_configs: PyEnvConfigs) -> int:
-    """Derive rank count from launcher configuration without probing CUDA.
+    """Resolve the process count used by the SCR manifest and rank launcher.
 
-    Calling ``torch.cuda.device_count()`` from the coordinator can initialize
-    the driver (and has caused a process abort in restricted containers).  The
-    launcher already exposes ``LOCAL_WORLD_SIZE``/``CUDA_VISIBLE_DEVICES``;
-    otherwise the configured world size is the intended local scope.
+    An explicit launcher value is authoritative.  Without it, use the number
+    of visible CUDA devices (or one CPU process), capped by the configured
+    world size.  This keeps the frozen participant manifest aligned with the
+    ranks actually started on a partially visible host.
     """
 
-    raw = os.environ.get("LOCAL_WORLD_SIZE")
-    if raw is not None:
-        try:
-            return max(1, int(raw))
-        except ValueError:
-            logging.warning("invalid LOCAL_WORLD_SIZE=%r; deriving SCR scope", raw)
+    raw = os.environ.get("LOCAL_WORLD_SIZE", "")
+    try:
+        value = int(raw)
+    except ValueError:
+        if raw.strip():
+            raise ValueError(f"LOCAL_WORLD_SIZE must be an integer, got {raw!r}")
+        value = 0
+    if value > 0:
+        return value
+
     world_size = max(1, int(py_env_configs.parallelism_config.world_size))
-    visible = os.environ.get("CUDA_VISIBLE_DEVICES")
-    if visible is not None and visible.strip():
-        devices = [item for item in visible.split(",") if item.strip()]
-        if devices:
-            return max(1, min(len(devices), world_size))
-    return world_size
+    try:
+        import torch
+
+        device_count = int(torch.cuda.device_count())
+    except Exception:
+        device_count = 0
+    if device_count <= 0:
+        return 1
+    return max(1, min(device_count, world_size))
 
 
 def _build_scr_participant_manifest(
@@ -83,7 +90,10 @@ def _build_scr_participant_manifest(
 ) -> ScrParticipantManifest | None:
     """Freeze one Epsilon quorum for the complete RTP-LLM process tree."""
 
-    if not is_scr_enabled():
+    # A feature-enabled normal serving process must not enter a template
+    # rendezvous or advertise participants before the controller selects a
+    # checkpoint/restore phase.
+    if not is_scr_template_phase_active():
         return None
 
     participants: list[tuple[str, object]] = [("start_server", "0")]
@@ -105,8 +115,9 @@ def _build_scr_participant_manifest(
             _scr_local_world_size(py_env_configs) if manager_separate else 1
         )
     elif backend_enabled:
-        # VIT separation owns a standalone server and does not create a rank
-        # worker that participates in this model's Epsilon quorum.
+        # VIT separation owns one standalone backend process; include that
+        # process directly instead of synthesizing rank workers for it.
+        participants.append(("backend_vit", "0"))
         backend_rank_count = 0
     if manager_separate:
         participants.append(("backend_manager", "0"))
@@ -287,16 +298,17 @@ def _iter_serving_ranks(py_env_configs: PyEnvConfigs):
     any tp_rank==0 rank.
     """
     pc = py_env_configs.parallelism_config
-    local_world_size = pc.world_size
-    if "LOCAL_WORLD_SIZE" in os.environ:
-        logging.info(
-            f"multi rank starts with local world size specified in env: {os.environ['LOCAL_WORLD_SIZE']}"
-        )
-        local_world_size = int(os.environ["LOCAL_WORLD_SIZE"])
+    if is_scr_template_phase_active():
+        local_world_size = _scr_local_world_size(py_env_configs)
     else:
-        logging.info(
-            f"multi rank starts with default local world size: {local_world_size}, world size = {pc.world_size}"
-        )
+        local_world_size = pc.world_size
+        if "LOCAL_WORLD_SIZE" in os.environ:
+            local_world_size = int(os.environ["LOCAL_WORLD_SIZE"])
+    logging.info(
+        "serving process local world size=%s world size=%s",
+        local_world_size,
+        pc.world_size,
+    )
     for rank in range(local_world_size):
         if rank == 0 or (pc.world_rank + rank) % pc.tp_size == 0:
             yield rank
@@ -327,11 +339,9 @@ def start_dash_sc_server_impl(
     if not worker_specs:
         return dash_sc_processes
 
-    # Keep the local barrier only for legacy/direct callers.  Under the
-    # unified manifest Epsilon itself is the sole cross-process barrier.
-    bind_barrier = (
-        None if scr_manifest is not None else multiprocessing.Barrier(len(worker_specs))
-    )
+    # The Epsilon barrier coordinates the complete process tree; this local
+    # barrier still coordinates DashSc listener binding among sibling workers.
+    bind_barrier = multiprocessing.Barrier(len(worker_specs))
     for rank, server_id in worker_specs:
         pipe_reader, pipe_writer = multiprocessing.Pipe(duplex=False)
         logging.info(
@@ -428,16 +438,17 @@ def start_frontend_server_impl(
     frontend_processes = []
 
     pc = py_env_configs.parallelism_config
-    local_world_size = pc.world_size
-    if "LOCAL_WORLD_SIZE" in os.environ:
-        logging.info(
-            f"multi rank starts with local world size specified in env: {os.environ['LOCAL_WORLD_SIZE']}"
-        )
-        local_world_size = int(os.environ["LOCAL_WORLD_SIZE"])
+    if is_scr_template_phase_active():
+        local_world_size = _scr_local_world_size(py_env_configs)
     else:
-        logging.info(
-            f"multi rank starts with default local world size: {local_world_size}, world size = {pc.world_size}"
-        )
+        local_world_size = pc.world_size
+        if "LOCAL_WORLD_SIZE" in os.environ:
+            local_world_size = int(os.environ["LOCAL_WORLD_SIZE"])
+    logging.info(
+        "frontend process local world size=%s world size=%s",
+        local_world_size,
+        pc.world_size,
+    )
 
     # To reduce the number of frontend servers, we only start those with tp_rank=0;
     # however, since k8s needs to check machine heartbeat, rank 0 on each machine also needs to be started.
@@ -527,7 +538,7 @@ def _setup_startup_warmup_health_gate(py_env_configs: PyEnvConfigs):
         return None
 
     gate_file = os.path.join(
-        "/tmp",
+        tempfile.gettempdir(),
         "rtp_llm_startup_warmup_ready_"
         f"{os.getpid()}_{int(py_env_configs.server_config.start_port)}",
     )
@@ -556,25 +567,32 @@ def _mark_startup_warmup_health_gate_ready(gate_file):
         raise
 
 
-def _start_parent_scr_waiter(
+def _start_parent_scr_arrival(
     scr_manifest: ScrParticipantManifest | None,
-) -> threading.Thread | None:
-    """Enter the same Epsilon quorum as every spawned process.
+) -> int | None:
+    """Synchronously enter the same Epsilon quorum as every spawned process.
 
-    The parent has no listener to defer, so its waiter is daemonized after all
-    children have been spawned.  It must still count as a participant: the
-    external controller dumps the complete process tree as one restore unit.
+    The parent has no listener to defer.  Waiting synchronously prevents the
+    parent from running health checks and marking the service ready before the
+    controller has captured the complete process tree.
     """
 
-    if scr_manifest is None:
+    if scr_manifest is None or not is_scr_template_phase_active():
         return None
-    return start_scr_checkpoint_thread(
-        manager=None,
-        engine=None,
-        worker_id=scr_manifest.worker_id("start_server", "0"),
+    worker_id = scr_manifest.worker_id("start_server", "0")
+    result = arrive_scr_checkpoint_barrier(
+        worker_id=worker_id,
         worker_num=scr_manifest.worker_num,
-        name="scr-checkpoint-waiter-start-server",
+        generation=scr_manifest.generation or None,
+        fail_closed=True,
     )
+    logging.info(
+        "sCR parent reached pre-service arrival worker_id=%d worker_num=%d result=%r",
+        worker_id,
+        scr_manifest.worker_num,
+        result,
+    )
+    return result
 
 
 def main():
@@ -644,7 +662,7 @@ def start_server(py_env_configs: PyEnvConfigs):
 
         # All actual children now have stable identities.  The parent joins
         # the same Epsilon wait_mode=1 quorum; no local UDS/barrier is needed.
-        _start_parent_scr_waiter(scr_manifest)
+        _start_parent_scr_arrival(scr_manifest)
 
         # Start parallel health checks and wait for completion
         if not process_manager.run_health_checks():

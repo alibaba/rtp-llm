@@ -40,6 +40,10 @@ from rtp_llm.dash_sc.inference.core_dump_control import (
     _configure_xgrammar_sandbox_core_dump_for_current_process,
 )
 from rtp_llm.ops import GrammarConfig
+from rtp_llm.utils.scr_template_lifecycle import (
+    get_template_lifecycle,
+    template_phase_active,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -219,27 +223,78 @@ class GrammarValidator:
         # grammar so duplicate requests share the leader's compile result.
         self._inflight_lock = threading.Lock()
         self._inflight: dict[tuple[str, str], Future[_GrammarCheckResult]] = {}
+        self._template_paused = False
+        self._template_hook_name = f"grammar-validator:{id(self)}"
         self._live = 0
         self._spawning = 0
         self._coordinator_running = False
         self._mp = multiprocessing.get_context("spawn")
         self._idle = queue.Queue()
-        # Sandbox workers impose RLIMIT_AS; capturing them after CUDA initialization
-        # prevents their address space from being restored. Validation still lazily
-        # creates the pool on the first request after restore.
-        if (
-            os.environ.get("SCR_ENABLE") == "1"
-            and os.environ.get("SCR_PHASE") == "checkpoint"
-        ):
-            logger.info(
-                "SCR checkpoint: defer grammar sandbox pool until first validation"
-            )
-        else:
+        get_template_lifecycle().register(self._template_hook_name, self)
+        # Sandbox workers impose RLIMIT_AS; capturing them during a template
+        # lifecycle would make child processes part of the snapshot.  The first
+        # validation after release creates the pool.
+        if not template_phase_active():
             self._ensure_pool()  # warm workers in the background
 
         worker_limit_mb = max(0, self._worker_memory_limit_bytes // 1024 // 1024)
         msg = f"GrammarValidator mode=sandbox compile_backend=on queue_timeout_s={self._queue_timeout_s:g} compile_timeout_s={self._compile_timeout_s:g} compiler_threads={self._compile_threads} compiler_cache_bytes={self._cache_limit_bytes} result_cache_max_entries={self._result_cache_max_entries} pool={self._pool_target} worker_memory_limit_mb={worker_limit_mb}"
         logger.debug(msg)
+
+    def prepare_for_template(self, generation: str) -> None:
+        """Stop admission and tear down sandbox children before SCR arrival."""
+        with self._inflight_lock:
+            if self._inflight:
+                raise GrammarCheckUnavailable(
+                    "grammar validation has in-flight requests at template barrier"
+                )
+        self._template_paused = True
+        with self._pool_lock:
+            self._pool_target_before_template = self._pool_target
+            self._pool_target = 0
+            self._coordinator_running = False
+        while True:
+            try:
+                proc, conn, fault_file = self._idle.get_nowait()
+            except queue.Empty:
+                break
+            try:
+                conn.close()
+            except Exception:
+                pass
+            try:
+                if proc.is_alive():
+                    proc.terminate()
+                proc.join(timeout=1)
+            except Exception:
+                pass
+            try:
+                fault_file.close()
+            except Exception:
+                pass
+        with self._pool_lock:
+            self._live = 0
+            self._spawning = 0
+        logger.info("grammar sandbox paused for template generation=%s", generation)
+
+    def restore_fixup(self, generation: str) -> None:
+        del generation
+
+    def release_template(self, generation: str) -> None:
+        self._template_paused = False
+        with self._pool_lock:
+            self._pool_target = getattr(
+                self, "_pool_target_before_template", self._pool_target
+            )
+        logger.info("grammar sandbox released for template generation=%s", generation)
+
+    def abort_template(self, generation: str) -> None:
+        self._template_paused = False
+        with self._pool_lock:
+            self._pool_target = getattr(
+                self, "_pool_target_before_template", self._pool_target
+            )
+        self._ensure_pool()
 
     # -- public entry points (shape checks first, then maybe compile) ------- #
 
@@ -292,6 +347,8 @@ class GrammarValidator:
         """Memoized full admission result for ``spec``. Once grammar validation is enabled, an
         unavailable check rejects the request instead of letting a risky grammar reach the engine.
         """
+        if getattr(self, "_template_paused", False):
+            raise GrammarCheckUnavailable("grammar validation paused for template barrier")
         logger.debug(
             _with_request_id(
                 f"GrammarValidator: start sandbox check grammar kind={kind}"
