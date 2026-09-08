@@ -117,7 +117,7 @@ class DecodeEndpointLayeredViewTest {
 
         endpoint.reportAdmissionMetrics(reporter);
 
-        String endpointKey = "10.0.0.1:8080";
+        String endpointKey = "10.0.0.1:8080@0";
         org.mockito.Mockito.verify(reporter)
                 .reportDecodeReservedCount(endpointKey, 1);
         org.mockito.Mockito.verify(reporter)

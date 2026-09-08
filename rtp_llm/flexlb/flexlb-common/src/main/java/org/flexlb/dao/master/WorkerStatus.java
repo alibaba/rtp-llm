@@ -52,7 +52,10 @@ public class WorkerStatus {
             int port,
             int grpcPort,
             String site,
-            String deploymentName) {
+            String deploymentName,
+            String physicalGroupKey,
+            int engineIndex,
+            int multiEngineNum) {
 
         public TopologySnapshot(
                 String group,
@@ -60,7 +63,8 @@ public class WorkerStatus {
                 int port,
                 int grpcPort,
                 String site) {
-            this(group, ip, port, grpcPort, site, null);
+            this(group, ip, port, grpcPort, site, null,
+                    defaultPhysicalGroupKey(group, ip, port), 0, 1);
         }
     }
 
@@ -294,6 +298,8 @@ public class WorkerStatus {
 
     private final AtomicReference<TopologySnapshot> topology;
 
+    private final WorkerIdentity workerIdentity;
+
     private final AtomicReference<CommittedWorkerStatus> committedStatus;
 
     private final AtomicReference<PollHealth> pollHealth;
@@ -341,6 +347,8 @@ public class WorkerStatus {
             TopologySnapshot initialTopology,
             EngineObservation initialStatus) {
         topology = new AtomicReference<>(initialTopology);
+        workerIdentity = new WorkerIdentity(
+                initialTopology.ip(), initialTopology.port(), initialTopology.engineIndex());
         committedStatus = new AtomicReference<>(new CommittedWorkerStatus(
                 initialStatus,
                 new AppliedStatusCursor(-1L, -1L)));
@@ -369,15 +377,52 @@ public class WorkerStatus {
             int grpcPort,
             String site,
             String deploymentName) {
+        return createDiscovered(
+                role, group, ip, port, grpcPort, site, deploymentName, 0, 1);
+    }
+
+    public static WorkerStatus createDiscovered(
+            RoleType role,
+            String group,
+            String ip,
+            int port,
+            int grpcPort,
+            String site,
+            String deploymentName,
+            int engineIndex,
+            int multiEngineNum) {
+        return createDiscovered(
+                role, group, ip, port, grpcPort, site, deploymentName,
+                engineIndex, multiEngineNum,
+                defaultPhysicalGroupKey(group, ip, port));
+    }
+
+    public static WorkerStatus createDiscovered(
+            RoleType role,
+            String group,
+            String ip,
+            int port,
+            int grpcPort,
+            String site,
+            String deploymentName,
+            int engineIndex,
+            int multiEngineNum,
+            String physicalGroupKey) {
         Objects.requireNonNull(role, "role");
         Objects.requireNonNull(ip, "ip");
         if (port <= 0 || grpcPort <= 0) {
             throw new IllegalArgumentException(
                     "worker ports must be positive");
         }
+        if (engineIndex < 0 || multiEngineNum <= 0 || engineIndex >= multiEngineNum) {
+            throw new IllegalArgumentException("invalid logical worker index");
+        }
         return new WorkerStatus(
                 new TopologySnapshot(
-                        group, ip, port, grpcPort, site, deploymentName),
+                        group, ip, port, grpcPort, site, deploymentName,
+                        normalizePhysicalGroupKey(
+                                physicalGroupKey, group, ip, port),
+                        engineIndex, multiEngineNum),
                 new EngineObservation(
                         role,
                         null,
@@ -393,6 +438,19 @@ public class WorkerStatus {
                         0L,
                         0L,
                         0L));
+    }
+
+    private static String defaultPhysicalGroupKey(
+            String group, String ip, int port) {
+        return normalizePhysicalGroupKey(null, group, ip, port);
+    }
+
+    private static String normalizePhysicalGroupKey(
+            String physicalGroupKey, String group, String ip, int port) {
+        if (physicalGroupKey != null && !physicalGroupKey.isBlank()) {
+            return physicalGroupKey;
+        }
+        return "|" + (group == null ? "" : group) + "|" + ip + ":" + port;
     }
 
     @JsonIgnore
@@ -620,7 +678,10 @@ public class WorkerStatus {
                 current.port(),
                 current.grpcPort(),
                 site,
-                deploymentName));
+                deploymentName,
+                current.physicalGroupKey(),
+                current.engineIndex(),
+                current.multiEngineNum()));
     }
 
     public RoleType getRole() {
@@ -645,6 +706,10 @@ public class WorkerStatus {
 
     public String getDeploymentName() {
         return topology.get().deploymentName();
+    }
+
+    public String getPhysicalGroupKey() {
+        return topology.get().physicalGroupKey();
     }
 
     public String getSite() {
@@ -789,11 +854,31 @@ public class WorkerStatus {
 
     /** Get the HTTP IP:PORT address. */
     public String getIpPort() {
-        TopologySnapshot current = topology.get();
-        if (current.ip() == null) {
-            return null;
-        }
-        return current.ip() + ":" + current.port();
+        return workerIdentity.getPhysicalIpPort();
+    }
+
+    public WorkerIdentity getWorkerIdentity() {
+        return workerIdentity;
+    }
+
+    public String getPhysicalIpPort() {
+        return workerIdentity.getPhysicalIpPort();
+    }
+
+    public String getLogicalIpPort() {
+        return workerIdentity.getLogicalIpPort();
+    }
+
+    public String getIpIndex() {
+        return workerIdentity.getIpIndex();
+    }
+
+    public int getEngineIndex() {
+        return workerIdentity.getEngineIndex();
+    }
+
+    public int getMultiEngineNum() {
+        return topology.get().multiEngineNum();
     }
 
     private static Map<String, TaskObservation> freezeTaskMap(

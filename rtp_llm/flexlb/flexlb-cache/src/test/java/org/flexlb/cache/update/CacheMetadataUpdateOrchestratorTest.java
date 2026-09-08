@@ -53,7 +53,7 @@ class CacheMetadataUpdateOrchestratorTest {
         WorkerCacheUpdateResult result = orchestrator().updateFromWorkerStatus(workerStatus);
 
         assertFalse(result.isSuccess());
-        assertEquals("127.0.0.1:8080", result.getEngineIpPort());
+        assertEquals("127.0.0.1:8080@0", result.getLogicalIpPort());
         verifyNoInteractions(localSyncProvider);
     }
 

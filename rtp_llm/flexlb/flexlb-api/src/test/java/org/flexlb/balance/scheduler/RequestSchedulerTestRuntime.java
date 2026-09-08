@@ -162,11 +162,11 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
         Objects.requireNonNull(observation, "observation");
         RoleType role = observation.role();
         WorkerEndpoint endpoint = registry.get(
-                role, status.getIpPort(), status);
+                role, status.getLogicalIpPort(), status);
         if (endpoint == null) {
             throw new IllegalStateException(
                     "status generation has no published endpoint: "
-                            + status.getIpPort() + "#" + status.getGenerationId());
+                            + status.getLogicalIpPort() + "#" + status.getGenerationId());
         }
 
         Runnable projection;
@@ -213,7 +213,7 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
                 if (status == null) {
                     continue;
                 }
-                String address = status.getServerIp() + ":" + status.getHttpPort();
+                String address = status.getLogicalIpPort();
                 WorkerEndpoint.GenerationPin pin = registry.capture(
                         status.getRole(), address);
                 if (pin == null) {

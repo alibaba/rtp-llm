@@ -10,7 +10,6 @@ import org.flexlb.service.grpc.EngineGrpcService;
 import org.flexlb.service.grpc.EngineStatusConverter;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.sync.status.WorkerDirectory;
-import org.flexlb.util.CommonUtils;
 import org.flexlb.util.IdUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -57,8 +56,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
                                   CacheAwareService cacheAwareService,
                                   Executor callbackExecutor) {
         this.ipPort = ipPort;
-        String[] split = ipPort.split(":");
-        this.ip = split[0];
+        this.ip = workerStatus.getIp();
         this.workerStatusPort = workerStatusPort;
         this.modelName = modelName;
         this.workerStatus = workerStatus;
@@ -86,15 +84,14 @@ public class GrpcWorkerStatusRunner implements Runnable {
                                   long syncRequestTimeoutMs,
                                   CacheAwareService cacheAwareService,
                                   Executor callbackExecutor) {
-        this(modelName, ipPort, defaultWorkerStatusPort(ipPort), site, roleType,
+        this(modelName, ipPort, defaultWorkerStatusPort(workerStatus), site, roleType,
                 ignoredGroup, workerStatus, pollLease, workerDirectory,
                 engineHealthReporter, engineGrpcService, syncRequestTimeoutMs,
                 cacheAwareService, callbackExecutor);
     }
 
-    private static int defaultWorkerStatusPort(String ipPort) {
-        String[] split = ipPort.split(":");
-        return CommonUtils.toGrpcPort(Integer.parseInt(split[1]));
+    private static int defaultWorkerStatusPort(WorkerStatus workerStatus) {
+        return workerStatus.getGrpcPort();
     }
 
     @Override
@@ -157,7 +154,8 @@ public class GrpcWorkerStatusRunner implements Runnable {
             if (observation == null) {
                 logger.debug("query engine worker status via gRPC, response body is null");
                 engineHealthReporter.reportStatusCheckerFail(
-                        modelName, BalanceStatusEnum.RESPONSE_NULL, roleType);
+                        modelName, BalanceStatusEnum.RESPONSE_NULL,
+                        workerStatus.getLogicalIpPort(), roleType);
                 return;
             }
             if (!workerDirectory.isCurrentStatus(
@@ -302,7 +300,8 @@ public class GrpcWorkerStatusRunner implements Runnable {
             logger.error("Worker status response handling failed after callback for {}",
                     ipPort, e);
             engineHealthReporter.reportStatusCheckerFail(
-                    modelName, BalanceStatusEnum.UNKNOWN_ERROR, roleType);
+                    modelName, BalanceStatusEnum.UNKNOWN_ERROR,
+                    workerStatus.getLogicalIpPort(), roleType);
         }
     }
 
@@ -384,7 +383,8 @@ public class GrpcWorkerStatusRunner implements Runnable {
             WorkerEndpoint endpoint) {
         try {
             engineHealthReporter.reportStatusCheckRemoteInfo(
-                    modelName, observation.role().name(), startTime);
+                    modelName, workerStatus.getLogicalIpPort(),
+                    observation.role().name(), startTime);
             engineHealthReporter.reportStatusCheckerSuccess(
                     modelName,
                     workerStatus,
@@ -434,10 +434,12 @@ public class GrpcWorkerStatusRunner implements Runnable {
         if (ex.getMessage() != null && ex.getMessage().toLowerCase().contains(DEADLINE_EXCEEDED_MESSAGE.toLowerCase())) {
             logger.debug("gRPC worker status check timeout, msg={}, ipPort: {}, rt: {}", ex.getMessage(), ipPort, System.nanoTime() / 1000 - createTimeUs);
             engineHealthReporter.reportStatusCheckerFail(
-                    modelName, BalanceStatusEnum.WORKER_STATUS_GRPC_TIMEOUT, roleType);
+                    modelName, BalanceStatusEnum.WORKER_STATUS_GRPC_TIMEOUT,
+                    workerStatus.getLogicalIpPort(), roleType);
         } else {
             engineHealthReporter.reportStatusCheckerFail(
-                    modelName, BalanceStatusEnum.WORKER_SERVICE_UNAVAILABLE, roleType);
+                    modelName, BalanceStatusEnum.WORKER_SERVICE_UNAVAILABLE,
+                    workerStatus.getLogicalIpPort(), roleType);
         }
     }
 

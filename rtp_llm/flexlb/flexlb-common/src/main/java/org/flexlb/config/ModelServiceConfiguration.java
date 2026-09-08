@@ -19,6 +19,7 @@ import org.springframework.context.annotation.Configuration;
 public class ModelServiceConfiguration {
 
     private static final String MODEL_SERVICE_CONFIG = "MODEL_SERVICE_CONFIG";
+    private static final int MAX_TCP_PORT = 65_535;
 
     @Bean
     public ModelMetaConfig modelMetaConfig(ConfigService configService, RoutingServiceDiscovery serviceDiscovery) {
@@ -49,11 +50,42 @@ public class ModelServiceConfiguration {
             throw new IllegalArgumentException("MODEL_SERVICE_CONFIG must contain at least one role endpoint");
         }
         for (Endpoint endpoint : endpoints) {
+            validateEngineEndpointConfiguration(endpoint);
             serviceDiscovery.validate(endpoint);
         }
 
         validateKvcm(serviceRoute.getKvcm(), serviceDiscovery);
         validateOptimizer(serviceRoute.getOptimizer(), serviceDiscovery);
+    }
+
+    private void validateEngineEndpointConfiguration(Endpoint endpoint) {
+        int multiEngineNum = endpoint.getMultiEngineNum();
+        if (multiEngineNum < 1) {
+            throw new IllegalArgumentException(
+                    "MODEL_SERVICE_CONFIG endpoint multi_engine_num must be greater than zero: "
+                            + endpoint.getAddress());
+        }
+        Integer workerStatusPort = endpoint.getWorkerStatusPort();
+        if (workerStatusPort != null && (workerStatusPort < 1 || workerStatusPort > MAX_TCP_PORT)) {
+            throw new IllegalArgumentException(
+                    "MODEL_SERVICE_CONFIG endpoint worker_status_port must be between 1 and "
+                            + MAX_TCP_PORT + ": "
+                            + endpoint.getAddress());
+        }
+        if (multiEngineNum == 1) {
+            return;
+        }
+        if (workerStatusPort == null) {
+            throw new IllegalArgumentException(
+                    "MODEL_SERVICE_CONFIG endpoint worker_status_port must be configured "
+                            + "when multi_engine_num is greater than one: " + endpoint.getAddress());
+        }
+        if ((long) workerStatusPort + multiEngineNum - 1 > MAX_TCP_PORT) {
+            throw new IllegalArgumentException(
+                    "MODEL_SERVICE_CONFIG endpoint worker_status_port range exceeds "
+                            + MAX_TCP_PORT + ": "
+                            + endpoint.getAddress());
+        }
     }
 
     private void validateKvcm(KvcmConfig kvcm, RoutingServiceDiscovery serviceDiscovery) {

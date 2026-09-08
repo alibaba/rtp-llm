@@ -464,20 +464,30 @@ public class EngineHealthReporter {
         monitor.report(CACHE_STATUS_CHECK_FAIL, metricTags, 1.0);
     }
 
+    public void reportCacheStatusCheckerFail(String modelName,
+                                             WorkerStatus workerStatus,
+                                             BalanceStatusEnum errorEnum) {
+        FlexMetricTags metricTags = FlexMetricTags.of(
+                "model", modelName,
+                "engineIp", workerStatus.getLogicalIpPort(),
+                "code", String.valueOf(errorEnum.getCode()),
+                "role", workerStatus.getRole().getCode());
+        monitor.report(CACHE_STATUS_CHECK_FAIL, metricTags, 1.0);
+    }
+
     public void reportStatusCheckerSuccess(String modelName,
                                            WorkerStatus workerStatus,
                                            WorkerEndpoint ep,
                                            int runningTaskInfoSize,
                                            int finishedTaskListSize) {
 
-        WorkerStatus.TopologySnapshot topology = workerStatus.topologySnapshot();
         WorkerStatus.EngineObservation status =
                 workerStatus.committedEngineObservation();
         WorkerStatus.PollHealth pollHealth = workerStatus.pollHealth();
 
         FlexMetricTags metricTags = FlexMetricTags.of(
                 "model", modelName,
-                "engineIp", topology.ip(),
+                "engineIp", workerStatus.getLogicalIpPort(),
                 "role", status.role().name());
 
         Long availableConcurrency = status.availableConcurrency();
@@ -503,14 +513,13 @@ public class EngineHealthReporter {
             String modelName,
             WorkerStatus workerStatus,
             long successfulPollIntervalUs) {
-        WorkerStatus.TopologySnapshot topology = workerStatus.topologySnapshot();
         WorkerStatus.EngineObservation status =
                 workerStatus.committedEngineObservation();
         CacheStatus cacheStatus = workerStatus.getCacheStatus();
         if (successfulPollIntervalUs > 0L) {
             FlexMetricTags metricTags = FlexMetricTags.of(
                     "model", modelName,
-                    "engineIp", topology.ip(),
+                    "engineIp", workerStatus.getLogicalIpPort(),
                     "role", status.role().name());
             monitor.report(
                     CACHE_STATUS_CHECK_SUCCESS_PERIOD,
@@ -525,7 +534,7 @@ public class EngineHealthReporter {
                     "role", status.role().name());
             FlexMetricTags engineMetricTags = FlexMetricTags.of(
                     "model", modelName,
-                    "engineIp", topology.ip(),
+                    "engineIp", workerStatus.getLogicalIpPort(),
                     "role", status.role().name());
             monitor.report(CACHE_BLOCK_SIZE, roleMetricTags, blockSize);
             reportLocalStandbyBlockSize(engineMetricTags, blockSize);
@@ -538,7 +547,7 @@ public class EngineHealthReporter {
 
         FlexMetricTags kvCacheMetricTags = FlexMetricTags.of(
                 "model", modelName,
-                "engineIp", topology.ip(),
+                "engineIp", workerStatus.getLogicalIpPort(),
                 "role", status.role().name());
 
         monitor.report(CACHE_USED_KV_CACHE_TOKENS, kvCacheMetricTags, usedKvCacheTokens);
@@ -588,7 +597,7 @@ public class EngineHealthReporter {
                     FlexMetricTags serverSelectionTags = FlexMetricTags.of(
                             "role", serverStatus.getRole().name(),
                             "strategy", strategyName(ctx, serverStatus.getRole()),
-                            "engineIp", serverStatus.getServerIp(),
+                            "engineIp", serverStatus.getLogicalIpPort(),
                             "success", String.valueOf(isSuccess),
                             "code", String.valueOf(code)
                     );
@@ -680,8 +689,9 @@ public class EngineHealthReporter {
         monitor.report(org.flexlb.constant.MetricConstant.ENGINE_BALANCING_EVENT_LOOP_GROUP_INFO, FlexMetricTags.of(metricMap), totalPendingTask);
     }
 
-    public void reportCacheHitMetrics(RoleType roleType, long hitTokens, double hitRatio) {
-        cacheMetricsReporter.reportCacheHitMetrics(roleType, hitTokens, hitRatio);
+    public void reportCacheHitMetrics(
+            RoleType roleType, String ipIndex, long hitTokens, double hitRatio) {
+        cacheMetricsReporter.reportCacheHitMetrics(roleType, ipIndex, hitTokens, hitRatio);
     }
 
     /**

@@ -19,6 +19,7 @@ import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
+import org.springframework.context.annotation.AnnotationConfigApplicationContext;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -37,6 +38,20 @@ class CostBasedDecodeStrategyTest {
     void setUp() {
         configService = new ConfigService();
         decodeStatuses = new HashMap<>();
+    }
+
+    @Test
+    void springWiresProductionWorkerDirectoryConstructor() {
+        try (AnnotationConfigApplicationContext context =
+                     new AnnotationConfigApplicationContext()) {
+            context.registerBean(WorkerDirectory.class,
+                    () -> Mockito.mock(WorkerDirectory.class));
+            context.register(CostBasedDecodeStrategy.class);
+            context.refresh();
+
+            Assertions.assertNotNull(
+                    context.getBean(CostBasedDecodeStrategy.class));
+        }
     }
 
     WorkerStatus createWorkerStatus(String ip) {
@@ -72,7 +87,14 @@ class CostBasedDecodeStrategyTest {
     }
 
     private CostBasedDecodeStrategy availableStrategy(EndpointRegistry registry) {
-        return new CostBasedDecodeStrategy(new WorkerDirectory(registry));
+        WorkerDirectory directory = new WorkerDirectory(registry);
+        for (String address : registry.endpointAddressSnapshot(RoleType.DECODE)) {
+            WorkerStatus status = registry.get(RoleType.DECODE, address)
+                    .getStatus();
+            directory.currentOrDiscover(
+                    RoleType.DECODE, status.getLogicalIpPort(), () -> status);
+        }
+        return new CostBasedDecodeStrategy(directory);
     }
 
     private BalanceContext context(long sequenceLength, long requestId) {
@@ -127,6 +149,8 @@ class CostBasedDecodeStrategyTest {
         Mockito.when(racing.captureDecodeGeneration(stale)).thenReturn(null);
         Mockito.when(racing.captureDecodeGeneration(replacement))
                 .thenReturn(replacementPin);
+        Mockito.when(racing.isPhysicalGroupHealthy(Mockito.any()))
+                .thenReturn(true);
 
         PlacementResult<SelectedRole, RoleType> result =
                 new CostBasedDecodeStrategy(racing).select(
@@ -173,6 +197,29 @@ class CostBasedDecodeStrategyTest {
 
         Assertions.assertTrue(status.isSuccess());
         Assertions.assertEquals("127.0.0.1", status.getServerIp());
+    }
+
+    @Test
+    void selectedMultiEngineDecodePreservesLogicalIdentity() {
+        WorkerStatus first = WorkerStatus.createDiscovered(
+                RoleType.DECODE, "group-a", "127.0.0.1", 8080, 9090,
+                "test-site", null, 0, 2);
+        WorkerStatus second = WorkerStatus.createDiscovered(
+                RoleType.DECODE, "group-a", "127.0.0.1", 8080, 9090,
+                "test-site", null, 1, 2);
+        setKv(first, 10_000L, 10_000L);
+        setKv(second, 10_000L, 10_000L);
+        decodeStatuses.put(first.getLogicalIpPort(), first);
+        decodeStatuses.put(second.getLogicalIpPort(), second);
+
+        ServerStatus status = selectStatus(
+                availableStrategy(decodeRegistry()),
+                context(1_000L, 1_001L), RoleType.DECODE, "group-a");
+
+        Assertions.assertNotNull(status);
+        Assertions.assertNotNull(status.getEngineIndex());
+        Assertions.assertEquals("127.0.0.1:8080@" + status.getEngineIndex(),
+                status.getLogicalIpPort());
     }
 
     @Test
@@ -233,6 +280,8 @@ class CostBasedDecodeStrategyTest {
                 .thenAnswer(invocation -> actual.captureDecodeGeneration(
                         invocation.getArgument(
                                 0, DecodeEndpoint.DecodeRoutingView.class)));
+        Mockito.when(fullFleet.isPhysicalGroupHealthy(Mockito.any()))
+                .thenReturn(true);
         CostBasedDecodeStrategy costBasedDecodeStrategy =
                 new CostBasedDecodeStrategy(fullFleet);
         BalanceContext balanceContext = context(1, 10_000L);

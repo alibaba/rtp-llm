@@ -2535,6 +2535,9 @@ public class RequestRegistry {
         status.setHttpPort(src.getHttpPort());
         status.setGrpcPort(src.getGrpcPort());
         status.setDpRank(src.getDpRank());
+        status.setSelectedEngineIndex(
+                src.getRoutingEngineIndex(),
+                src.getRoutingMultiEngineNum());
         status.setPrefillTime(src.getPrefillTime());
         status.setGroup(src.getGroup());
         status.setDebugInfo(copyOf(src.getDebugInfo()));

@@ -81,9 +81,7 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
         ScheduledRequest head = candidates.get(0);
 
         CapacityBoundary.Attempt<BatchTransaction> groupAttempt =
-                requests.prepareIfOwned(head, () -> prepareAdmission(head))
-                        .orElseGet(() -> BatchDeliveryStrategy
-                                .<BatchTransaction>ownershipLost());
+                prepareHeadAdmission(head);
         if (!groupAttempt.accepted()) {
             return BatchTransaction.blocked(
                     this,
@@ -191,6 +189,23 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
         } catch (Throwable failure) {
             return failed(failure);
         }
+    }
+
+    private CapacityBoundary.Attempt<BatchTransaction> prepareHeadAdmission(
+            ScheduledRequest head) {
+        if (requests.prepareIfOwned(head, () -> Boolean.TRUE).isEmpty()) {
+            return ownershipLost();
+        }
+        CapacityBoundary.Attempt<BatchTransaction> attempt =
+                prepareAdmission(head);
+        if (!attempt.accepted()) {
+            return attempt;
+        }
+        if (requests.prepareIfOwned(head, () -> Boolean.TRUE).isPresent()) {
+            return attempt;
+        }
+        Throwable cleanup = close(attempt.value());
+        return cleanup == null ? ownershipLost() : failed(cleanup);
     }
 
     @Override

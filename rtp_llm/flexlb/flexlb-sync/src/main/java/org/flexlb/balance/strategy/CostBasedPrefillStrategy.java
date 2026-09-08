@@ -129,7 +129,8 @@ public class CostBasedPrefillStrategy {
                 workerDirectory.captureEndpoint(
                         roleType,
                         survivors.endpointAddress(selectedIndex));
-        if (selectedPin == null || selectedPin.endpoint() != best) {
+        if (selectedPin == null || selectedPin.endpoint() != best
+                || !workerDirectory.isPhysicalGroupHealthy(best)) {
             if (selectedPin != null) {
                 selectedPin.close();
             }
@@ -156,7 +157,8 @@ public class CostBasedPrefillStrategy {
                 config,
                 selectedTtft,
                 selectedPrefillMs);
-        reportCacheHitMetrics(roleType, bestCacheHit, seqLen);
+        reportCacheHitMetrics(
+                roleType, best.getStatus().getLogicalIpPort(), bestCacheHit, seqLen);
         reportRoutingCacheMatchMetrics(
                 roleType,
                 survivors.routingCacheMatchTokens(selectedIndex),
@@ -279,7 +281,7 @@ public class CostBasedPrefillStrategy {
 
         if (selectedIndex >= 0 && cacheAffinity != null) {
             reportCacheAffinityDecision(
-                    roleType, survivors.endpoint(selectedIndex).getIp(),
+                    roleType, survivors.endpoint(selectedIndex).getStatus().getLogicalIpPort(),
                     affinityReason);
             if (Logger.isDebugEnabled()) {
                 Logger.debug(
@@ -336,7 +338,7 @@ public class CostBasedPrefillStrategy {
                     ? "CACHE_LEADER"
                     : affinityReason;
             reportCacheAffinityDecision(
-                    roleType, candidates.endpoint(selectedIndex).getIp(), reason);
+                    roleType, candidates.endpoint(selectedIndex).getStatus().getLogicalIpPort(), reason);
             if (Logger.isDebugEnabled()) {
                 Logger.debug(
                         "Prefill LRU cache-affinity decision - role: {}, group: {}, "
@@ -554,7 +556,7 @@ public class CostBasedPrefillStrategy {
             String endpointAddress = routingEntry.address();
             CacheTokenMatch cacheMatch =
                     calculateCacheMatch(
-                            ep, endpointAddress, cacheMatchResult, request, config);
+                            ep, cacheMatchResult, request, config);
             long cacheHit = cacheMatch.effectiveHitTokens();
             long routingCacheMatchTokens = cacheMatch.routingHitTokens();
             RouteProjection.Inputs projectionInputs =
@@ -825,7 +827,6 @@ public class CostBasedPrefillStrategy {
 
     private CacheTokenMatch calculateCacheMatch(
             PrefillEndpoint ep,
-            String endpointAddress,
             CacheMatchResult cacheMatchResult,
             Request request,
             FlexlbConfig config) {
@@ -836,7 +837,7 @@ public class CostBasedPrefillStrategy {
         if (seqLen <= 0L) {
             return CacheTokenMatch.NONE;
         }
-        HostCacheMatch match = cacheMatchResult.hostMatch(endpointAddress);
+        HostCacheMatch match = cacheMatchResult.hostMatch(ep.getStatus());
         if (match == null) {
             return CacheTokenMatch.NONE;
         }
@@ -878,9 +879,10 @@ public class CostBasedPrefillStrategy {
         return new CacheTokenMatch(effectiveHit, routingHit);
     }
 
-    private void reportCacheHitMetrics(RoleType roleType, long hitCacheTokens, long seqLen) {
+    private void reportCacheHitMetrics(
+            RoleType roleType, String ipIndex, long hitCacheTokens, long seqLen) {
         double hitRate = seqLen > 0 ? hitCacheTokens / (double) seqLen : 0.0;
-        engineHealthReporter.reportCacheHitMetrics(roleType, hitCacheTokens, hitRate);
+        engineHealthReporter.reportCacheHitMetrics(roleType, ipIndex, hitCacheTokens, hitRate);
     }
 
     /**
@@ -901,7 +903,7 @@ public class CostBasedPrefillStrategy {
         try {
             engineHealthReporter.reportPrefillSelectedEstimates(
                     roleType,
-                    endpoint.getIp(),
+                    endpoint.getStatus().getLogicalIpPort(),
                     deliveryMode,
                     projectedTtftMs.getAsLong(),
                     executionTimeMs);
@@ -961,6 +963,8 @@ public class CostBasedPrefillStrategy {
             result.setDpRank(status.dpRank());
             result.setDebugInfo(debugInfo);
             result.setSuccess(true);
+            result.setSelectedEngineIndex(
+                    topology.engineIndex(), topology.multiEngineNum());
             WorkerEndpoint.GenerationPin ownedPin = selectedPin;
             selectedPin = null;
             return SelectedRole.prefill(

@@ -47,6 +47,9 @@ public final class RandomStrategy {
                 continue;
             }
             try {
+                if (!workerDirectory.isPhysicalGroupHealthy(pin.endpoint())) {
+                    continue;
+                }
                 WorkerStatus status = pin.endpoint().getStatus();
                 WorkerStatus.TopologySnapshot topology =
                         status.topologySnapshot();
@@ -89,6 +92,8 @@ public final class RandomStrategy {
             result.setHttpPort(topology.port());
             result.setGrpcPort(CommonUtils.toGrpcPort(topology.port()));
             result.setDpRank(engine.dpRank());
+            result.setSelectedEngineIndex(
+                    topology.engineIndex(), topology.multiEngineNum());
 
             WorkerEndpoint.GenerationPin owned = pin;
             pin = null;
