@@ -43,6 +43,20 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
         return ExecutorType.DEEPGEMM_MASKED
 
     @classmethod
+    def required_deep_gemm_symbols(cls, config: MoEConfigAdapter) -> tuple[str, ...]:
+        from rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver import (
+            MoeConfigResolver,
+        )
+
+        quant_method = MoeConfigResolver().get_quant_method(config)
+        grouped_symbol = (
+            "m_grouped_fp8_gemm_nt_masked"
+            if quant_method == "FP8_PER_BLOCK"
+            else "m_grouped_bf16_gemm_nt_masked"
+        )
+        return ("get_num_sms", "set_num_sms", grouped_symbol)
+
+    @classmethod
     def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
         """Check if DeepGemmMaskedExecutor can handle the configuration"""
         from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import has_deep_gemm
@@ -51,7 +65,7 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
         )
 
         resolver = MoeConfigResolver()
-        checker.check(has_deep_gemm())
+        checker.check(has_deep_gemm(cls.required_deep_gemm_symbols(config)))
         checker.check(resolver.is_bf16(config))
         quant_method = resolver.get_quant_method(config)
         checker.check(quant_method in [None, "FP8_PER_BLOCK"])

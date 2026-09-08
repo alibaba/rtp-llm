@@ -33,6 +33,8 @@ __all__ = [
 ]
 
 _deep_gemm_impl_new_map = {
+    "get_num_sms": "get_num_sms",
+    "set_num_sms": "set_num_sms",
     "fp8_gemm_nt": "fp8_gemm_nt",
     "m_grouped_fp8_gemm_nt_contiguous": "m_grouped_fp8_gemm_nt_contiguous",
     "m_grouped_fp8_gemm_nt_masked": "m_grouped_fp8_gemm_nt_masked",
@@ -50,6 +52,8 @@ _deep_gemm_impl_new_map = {
 }
 
 _deep_gemm_impl_old_map = {
+    "get_num_sms": "get_num_sms",
+    "set_num_sms": "set_num_sms",
     "fp8_gemm_nt": "fp8_gemm_nt",
     "m_grouped_fp8_gemm_nt_contiguous": "m_grouped_fp8_gemm_nt_contiguous",
     "m_grouped_fp8_gemm_nt_masked": "fp8_m_grouped_gemm_nt_masked",
@@ -67,6 +71,8 @@ _deep_gemm_impl_old_map = {
 }
 
 
+_get_num_sms_impl: Callable[..., Any] | None = None
+_set_num_sms_impl: Callable[..., Any] | None = None
 _fp8_gemm_nt_impl: Callable[..., Any] | None = None
 _m_grouped_fp8_gemm_nt_contiguous_impl: Callable[..., Any] | None = None
 _m_grouped_fp8_gemm_nt_masked_impl: Callable[..., Any] | None = None
@@ -85,9 +91,24 @@ _runtime_probe_error: Optional[str] = None
 
 
 @functools.cache
-def has_deep_gemm() -> bool:
-    """Whether the optional `deep_gemm` package is available."""
-    return has_module("deep_gemm")
+def has_deep_gemm(required_symbols: Tuple[str, ...] = ()) -> bool:
+    """Whether DeepGEMM exports every callable needed by one execution path."""
+    if not has_module("deep_gemm"):
+        return False
+    if not required_symbols:
+        return True
+    try:
+        _lazy_init_deep_gemm(list(required_symbols))
+    except (ImportError, OSError, RuntimeError, AttributeError) as error:
+        logger.warning(
+            "DeepGEMM backend is missing required symbols %s: %s",
+            required_symbols,
+            error,
+        )
+        return False
+    return all(
+        callable(globals().get(f"_{symbol}_impl")) for symbol in required_symbols
+    )
 
 
 def is_deep_gemm_runtime_available(
@@ -134,21 +155,18 @@ def is_deep_gemm_e8m0_used() -> bool:
 @contextmanager
 def configure_deep_gemm_num_sms(num_sms: int) -> Generator[None, None, None]:
     """Configure the number of sms for deep gemm."""
-    if not has_deep_gemm():
-        raise RuntimeError(
-            "DeepGEMM is not available. Please install the `deep_gemm` package to enable DeepGEMM kernels."
-        )
-    import deep_gemm
+    get_num_sms = _ensure_impl("get_num_sms")
+    set_num_sms = _ensure_impl("set_num_sms")
 
     # get original num sms
-    original_num_sms = deep_gemm.get_num_sms()
+    original_num_sms = get_num_sms()
     # set num sms
-    deep_gemm.set_num_sms(num_sms)
+    set_num_sms(num_sms)
     try:
         yield
     finally:
         # restore original num sms
-        deep_gemm.set_num_sms(original_num_sms)
+        set_num_sms(original_num_sms)
 
 
 def _missing_deep_gemm() -> NoReturn:
@@ -160,6 +178,7 @@ def _missing_deep_gemm() -> NoReturn:
 
 def _lazy_init_deep_gemm(symbols: List[str]) -> None:
     """Import deep_gemm and resolve symbols on first use."""
+    global _get_num_sms_impl, _set_num_sms_impl
     global _fp8_gemm_nt_impl, _m_grouped_fp8_gemm_nt_contiguous_impl, _m_grouped_fp8_gemm_nt_masked_impl
     global _bf16_gemm_nt_impl, _m_grouped_bf16_gemm_nt_contiguous_impl, _m_grouped_bf16_gemm_nt_masked_impl
     global _fp8_fp4_gemm_nt_impl, _m_grouped_fp8_fp4_gemm_nt_contiguous_impl, _m_grouped_fp8_fp4_gemm_nt_masked_impl

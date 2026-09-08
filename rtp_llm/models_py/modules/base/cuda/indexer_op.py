@@ -3,7 +3,7 @@
 import importlib
 from functools import lru_cache
 from types import ModuleType
-from typing import Any, Optional, Tuple
+from typing import Any, Optional, Sequence, Tuple
 
 import torch
 from torch import nn
@@ -11,6 +11,15 @@ from torch import nn
 from rtp_llm.models_py.distributed.collective_torch import Group, all_gather, barrier
 from rtp_llm.models_py.kernels.cuda.fp8_kernel import sgl_per_token_group_quant_fp8
 from rtp_llm.ops.compute_ops import KVCache, rtp_llm_ops
+
+
+_DEEP_GEMM_REQUIRED_SYMBOLS = (
+    "get_num_sms",
+    "get_paged_mqa_logits_metadata",
+    "fp8_paged_mqa_logits",
+    "fp8_mqa_logits",
+)
+_FLASHINFER_ROPE_REQUIRED_SYMBOLS = ("_apply_rope_pos_ids_cos_sin_cache",)
 
 
 @lru_cache(maxsize=1)
@@ -31,6 +40,32 @@ def _resolve_flashinfer_rope() -> ModuleType:
         raise ImportError(
             "DeepSeek indexer RoPE requires the optional flashinfer backend"
         ) from exc
+
+
+def _require_callable_symbols(
+    module: ModuleType, module_name: str, symbols: Sequence[str]
+) -> None:
+    missing = [
+        symbol for symbol in symbols if not callable(getattr(module, symbol, None))
+    ]
+    if missing:
+        raise RuntimeError(
+            f"DeepSeek indexer {module_name} backend is missing required callable "
+            f"symbols: {', '.join(missing)}"
+        )
+
+
+@lru_cache(maxsize=1)
+def validate_indexer_runtime_dependencies() -> None:
+    """Resolve every optional backend symbol used by the CUDA DSA indexer."""
+    deep_gemm = _resolve_deep_gemm()
+    _require_callable_symbols(deep_gemm, "deep_gemm", _DEEP_GEMM_REQUIRED_SYMBOLS)
+    flashinfer_rope = _resolve_flashinfer_rope()
+    _require_callable_symbols(
+        flashinfer_rope,
+        "flashinfer.rope",
+        _FLASHINFER_ROPE_REQUIRED_SYMBOLS,
+    )
 
 
 def _unpack_ue8m0_scale(sf_packed: torch.Tensor) -> torch.Tensor:
@@ -78,6 +113,10 @@ class IndexerOp(nn.Module):
     Indexer operations for DeepSeek-V3.2 DSA mechanism.
     Provides low-level operations for quantization and TopK computation.
     """
+
+    @staticmethod
+    def validate_runtime_dependencies() -> None:
+        validate_indexer_runtime_dependencies()
 
     def __init__(
         self,

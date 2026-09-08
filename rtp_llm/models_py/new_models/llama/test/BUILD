@@ -2,6 +2,7 @@ py_test(
     name = "test_llama_load",
     exec_properties = {"gpu": "H20"},
     srcs = ["test_llama_load.py"],
+    tags = ["H20"],
     deps = [
         "//rtp_llm:safetensors",
         "//rtp_llm:torch",
