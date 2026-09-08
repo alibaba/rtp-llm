@@ -566,6 +566,11 @@ class SparseMlaFp8CPOpTest(TestCase):
         topk1 = torch.index_select(topk_indices, 0, q1_idx_t).contiguous()
         # CP forward expects single topk tensor aligned with total_local_ids (q0 then q1)
         topk_cat = torch.cat([topk0, topk1], dim=0)
+        scatter_out = torch.empty(
+            (total_q_len, num_heads, kv_lora_rank),
+            dtype=q.dtype,
+            device=device,
+        )
         with patch(
             "rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_sparse_cp_impl.all_gather",
             side_effect=_identity_all_gather,
@@ -578,10 +583,12 @@ class SparseMlaFp8CPOpTest(TestCase):
                 batch_indice_d,
                 kv_cache,
                 layer_id=0,
+                scatter_out=scatter_out,
             )
         torch.cuda.synchronize()
 
         self.assertEqual(out_cp.shape, (total_q_len, num_heads, kv_lora_rank))
+        self.assertEqual(out_cp.data_ptr(), scatter_out.data_ptr())
 
         kv_cache_flat = kv_cache_base.view(-1, 1, kv_cache_base.size(-1))
         if kv_cache_flat.ndim == 3:

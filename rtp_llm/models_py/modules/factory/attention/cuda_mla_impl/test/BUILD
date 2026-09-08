@@ -1,5 +1,13 @@
 # only can run in cu129 so mark as manual
 py_test(
+    name = "glm53_prefill_workspace_test",
+    srcs = ["glm53_prefill_workspace_test.py"],
+    deps = [
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+    ],
+)
+
+py_test(
     name = "sparse_mla_op_test",
     srcs = ["sparse_mla_op_test.py"],
     deps = [

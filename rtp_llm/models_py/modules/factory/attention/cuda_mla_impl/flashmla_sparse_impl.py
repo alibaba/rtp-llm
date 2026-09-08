@@ -668,7 +668,12 @@ class SparseMlaImpl(MlaImplBase):
 
     # -- BMMs ----------------------------------------------------------------
 
-    def _apply_input_bmm(self, q: torch.Tensor, layer_id: int) -> torch.Tensor:
+    def _apply_input_bmm(
+        self,
+        q: torch.Tensor,
+        layer_id: int,
+        out: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         """Project q_nope @ W_kc to kv_lora_rank, assemble [T, H, kv_lora_rank|rope].
 
         q_pe is a strided view from torch.split — calling .contiguous() here would
@@ -678,13 +683,31 @@ class SparseMlaImpl(MlaImplBase):
             -1, self.num_heads, self.nope_head_dim + self.rope_head_dim
         ).split([self.nope_head_dim, self.rope_head_dim], dim=-1)
 
-        q_transformed = torch.empty(
+        expected_shape = (
             q_nope.shape[0],
             self.num_heads,
             self.kv_lora_rank + self.rope_head_dim,
-            dtype=q.dtype,
-            device=q.device,
         )
+        if out is None:
+            q_transformed = torch.empty(
+                expected_shape,
+                dtype=q.dtype,
+                device=q.device,
+            )
+        elif (
+            tuple(out.shape) != expected_shape
+            or out.dtype != q.dtype
+            or out.device != q.device
+            or not out.is_contiguous()
+        ):
+            raise ValueError(
+                "SparseMLA input BMM out must be contiguous and match q: "
+                f"expected shape/dtype/device={expected_shape}/{q.dtype}/{q.device}, "
+                f"got {tuple(out.shape)}/{out.dtype}/{out.device}, "
+                f"contiguous={out.is_contiguous()}"
+            )
+        else:
+            q_transformed = out
         strided_slice_copy_(q_transformed, q_pe, self.kv_lora_rank)
 
         if q_nope.shape[0] > 0:

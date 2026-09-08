@@ -87,6 +87,7 @@ def triton_kv_scatter(
     src: torch.Tensor,  # [N, H, D]
     ids: torch.Tensor,  # [N], indices into [0, total_q)
     total_q: int,
+    out: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Equivalent to:
     out = torch.zeros(total_q, *src.shape[1:], dtype=src.dtype, device=src.device)
@@ -101,7 +102,21 @@ def triton_kv_scatter(
     src_c = src.contiguous()
     ids_i64 = ids if ids.dtype == torch.int64 else ids.to(torch.int64)
 
-    out = torch.empty((total_q, H, D), dtype=src.dtype, device=src.device)
+    expected_shape = (total_q, H, D)
+    if out is None:
+        out = torch.empty(expected_shape, dtype=src.dtype, device=src.device)
+    elif (
+        tuple(out.shape) != expected_shape
+        or out.dtype != src.dtype
+        or out.device != src.device
+        or not out.is_contiguous()
+    ):
+        raise ValueError(
+            "triton_kv_scatter out must be a contiguous tensor matching src: "
+            f"expected shape/dtype/device={expected_shape}/{src.dtype}/{src.device}, "
+            f"got {tuple(out.shape)}/{out.dtype}/{out.device}, "
+            f"contiguous={out.is_contiguous()}"
+        )
     gen, rev = _next_gen(total_q, src.device)
 
     _populate_rev_kernel[(triton.cdiv(N, 1024),)](

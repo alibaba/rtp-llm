@@ -52,6 +52,7 @@ from .flashmla_sparse_impl import (
     _GatherWorkspace,
     _topk_2d,
 )
+from .glm53_prefill_workspace import Glm53PrefillWorkspace
 
 
 def _total_local_ids_are_identity(
@@ -782,6 +783,7 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         batch_indice_d: torch.Tensor,
         kv_cache=None,
         layer_id: int = 0,
+        scatter_out: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """CP prefill: all-gather → restore → write to kv_cache → attend on q tokens
         owned by this rank (q[total_local_ids]). Returns [total_q_len, H, kv_lora_rank]
@@ -838,7 +840,7 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
 
         if use_identity_q:
             return out0
-        out = triton_kv_scatter(out0, self.total_local_ids, q.size(0))
+        out = triton_kv_scatter(out0, self.total_local_ids, q.size(0), out=scatter_out)
         return out
 
     def _allocate_fused_kv(self) -> torch.Tensor:
@@ -1072,6 +1074,11 @@ class SparseMlaCpImpl(SparseMlaImpl):
         # this before the first plan(). Re-assign here so any post-construction
         # code that swaps fmha_impl still sees the owner granularity.
         self.fmha_impl.kv_owner_tokens_per_block = self._kv_owner_tokens_per_block
+        self._glm53_prefill_workspace: Optional[Glm53PrefillWorkspace] = None
+
+    def enable_glm53_prefill_workspace(self) -> None:
+        """Enable GLM5.3's per-forward attention workspace manager."""
+        self._glm53_prefill_workspace = Glm53PrefillWorkspace()
 
     def prepare(
         self, attn_inputs: PyAttentionInputs, forbid_realloc: bool = False
@@ -1213,6 +1220,27 @@ class SparseMlaCpImpl(SparseMlaImpl):
         layer_id: int,
         topk_indices: Optional[torch.Tensor],
     ) -> torch.Tensor:
+        workspace = self._glm53_prefill_workspace
+        try:
+            return self._forward_impl(
+                q, compressed_kv, k_pe, kv_cache, layer_id, topk_indices
+            )
+        finally:
+            # GLM's large MoE follows attention in every layer. Return the slot
+            # here so MoE can reuse it; keeping it across layers would raise the
+            # non-attention peak. This also covers OOM/kernel exception paths.
+            if workspace is not None:
+                workspace.release()
+
+    def _forward_impl(
+        self,
+        q: torch.Tensor,
+        compressed_kv: torch.Tensor,
+        k_pe: torch.Tensor,
+        kv_cache: Optional[KVCache],
+        layer_id: int,
+        topk_indices: Optional[torch.Tensor],
+    ) -> torch.Tensor:
         """CP sparse MLA forward. q: [total_q_len, H, qk_head_dim]; topk_indices
         is request-local. Returns [total_q_len, H, nope_head_dim]."""
         assert kv_cache is not None
@@ -1229,7 +1257,22 @@ class SparseMlaCpImpl(SparseMlaImpl):
                 precomputed_pos_ids=self.fmha_impl.full_rope_pos_ids,
             )
 
-        q_transformed = self._apply_input_bmm(q, layer_id)
+        workspace = self._glm53_prefill_workspace
+        q_transform_out = None
+        scatter_out = None
+        if workspace is not None:
+            q_transform_out = workspace.q_transformed(
+                q.size(0),
+                self.num_heads,
+                self.kv_lora_rank + self.rope_head_dim,
+                dtype=q.dtype,
+                device=q.device,
+            )
+            scatter_out = workspace.scatter_output(
+                q.size(0), self.num_heads, self.kv_lora_rank
+            )
+
+        q_transformed = self._apply_input_bmm(q, layer_id, out=q_transform_out)
         attn_output = self.fmha_impl.forward(
             q_transformed,
             compressed_kv,
@@ -1238,7 +1281,9 @@ class SparseMlaCpImpl(SparseMlaImpl):
             self.fmha_params.batch_indice_d,
             kv_cache,
             layer_id=layer_id,
+            scatter_out=scatter_out,
         )
         if attn_output is None:
             return None
-        return self._apply_output_bmm(attn_output, layer_id)
+        output = self._apply_output_bmm(attn_output, layer_id)
+        return output
