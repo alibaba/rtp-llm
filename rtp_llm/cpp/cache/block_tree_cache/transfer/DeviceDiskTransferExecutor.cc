@@ -88,10 +88,6 @@ DeviceDiskTransferExecutor::DeviceDiskTransferExecutor(DeviceHostTransferExecuto
     swa_staging_pool_  = std::make_unique<HostStagingBlockPool>(swa_batch_capacity_, swa_stride);
 }
 
-DeviceDiskTransferExecutor::~DeviceDiskTransferExecutor() {
-    cancelPendingTransfers();
-}
-
 void DeviceDiskTransferExecutor::cancelPendingTransfers() {
     full_staging_pool_->cancelAllBatchWaiters();
     swa_staging_pool_->cancelAllBatchWaiters();

@@ -6,6 +6,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstring>
+#include <future>
 #include <memory>
 #include <mutex>
 #include <numeric>
@@ -58,7 +59,7 @@ makeDevicePool(const std::vector<DeviceLayerBufferSpec>& specs, size_t usable_co
     config->pool_type               = BlockPoolType::DEVICE;
     config->pool_name               = pool_name;
     config->physical_block_count    = physical_block_count;
-    config->use_cuda_malloc_backing = false;
+    config->use_cuda_malloc_backing = true;
 
     size_t offset = 0;
     for (const auto& spec : specs) {
@@ -1098,7 +1099,7 @@ TEST(PerRankBlockTransferEngineIntegrationTest, DiskToDeviceReturnsPendingContex
     auto             device_block  = poolMalloc(*device_pool);
     auto             disk_block    = poolMalloc(*disk_pool);
     auto             group  = makeDeviceHostGroup(0, {device_pool}, nullptr, {makeGroupBase({0}, 64, 16)}, disk_pool);
-    auto                  engine = makeEngine({group}, {}, true);
+    auto             engine = makeEngine({group}, {}, true);
     [[maybe_unused]] auto release_guard = std::shared_ptr<void>(nullptr, [io](void*) { io->release(); });
     std::vector<uint8_t>  disk_data(disk_pool->strideBytes(), 0x5A);
     ASSERT_EQ(disk_pool->write(disk_block, disk_data.data(), disk_data.size()), BlockIOStatus::OK);
@@ -1244,54 +1245,66 @@ TEST(PerRankBlockTransferEngineIntegrationTest, DeviceDiskWaitingForStagingDoesN
     EXPECT_TRUE(device_to_disk->success());
 }
 
-TEST(PerRankBlockTransferEngineIntegrationTest, ShutdownCancelsPendingStagingTransfersWithinBound) {
+TEST(PerRankBlockTransferEngineIntegrationTest, DestructionCancelsStagingWaitersAndDrainsActiveTransfers) {
     ASSERT_TRUE(torch::cuda::is_available()) << "CUDA not available, cannot run GPU tests";
-    TempDirGuard     temp_dir("per_rank_staging_shutdown");
+    auto             temp_dir      = std::make_shared<TempDirGuard>("per_rank_staging_destruction");
     constexpr size_t payload_bytes = 80;
-    auto             disk_pool =
-        makeDiskPool(payload_bytes, 4, temp_dir.path, std::make_unique<StatusDiskBlockIO>(DiskBlockIOStatus::OK));
-    auto device_pool = makeDevicePool({{64, 16}}, 4, "per_rank_staging_shutdown_device");
-    auto group =
+    auto             owned_io      = std::make_unique<BlockingDiskBlockIO>(BlockingDiskBlockIO::BlockOn::READ);
+    auto*            blocking_io   = owned_io.get();
+    auto             disk_pool     = makeDiskPool(payload_bytes, 4, temp_dir->path, std::move(owned_io));
+    auto             device_pool   = makeDevicePool({{64, 16}}, 4, "per_rank_staging_destruction_device");
+    auto             group =
         makeDeviceHostGroup(0, {device_pool}, nullptr, {makeGroupBase(CacheGroupType::FULL, {0}, 64, 16)}, disk_pool);
     auto engine = std::make_shared<PerRankBlockTransferEngine>(
         std::vector<GroupSetPtr>{group}, true, DeviceHostCopyOptions{}, 2, 64, 1);
 
-    auto held_staging = engine->device_disk_executor_->full_staging_pool_->tryMallocBatch(1);
-    ASSERT_TRUE(held_staging.has_value());
+    auto       active_transfer = engine->execute(makeTransferTask({makeDescriptor(
+        Tier::DISK, Tier::DEVICE, {poolMalloc(*device_pool)}, NULL_BLOCK_IDX, poolMalloc(*disk_pool), 0)}));
+    const bool io_blocked      = blocking_io->waitUntilBlocked(std::chrono::seconds(5));
+    if (!io_blocked) {
+        blocking_io->release();
+    }
+    ASSERT_TRUE(io_blocked);
 
     auto disk_to_device = engine->execute(makeTransferTask({makeDescriptor(
         Tier::DISK, Tier::DEVICE, {poolMalloc(*device_pool)}, NULL_BLOCK_IDX, poolMalloc(*disk_pool), 0)}));
     auto device_to_disk = engine->execute(makeTransferTask({makeDescriptor(
         Tier::DEVICE, Tier::DISK, {poolMalloc(*device_pool)}, NULL_BLOCK_IDX, poolMalloc(*disk_pool), 0)}));
-    ASSERT_FALSE(disk_to_device->done());
-    ASSERT_FALSE(device_to_disk->done());
+    EXPECT_FALSE(disk_to_device->done());
+    EXPECT_FALSE(device_to_disk->done());
 
     auto disk_to_device_completions = std::make_shared<std::atomic<size_t>>(0);
     auto device_to_disk_completions = std::make_shared<std::atomic<size_t>>(0);
-    disk_to_device->onDone([disk_to_device_completions](ErrorInfo) { disk_to_device_completions->fetch_add(1); });
-    device_to_disk->onDone([device_to_disk_completions](ErrorInfo) { device_to_disk_completions->fetch_add(1); });
+    auto load_cancelled             = std::make_shared<std::promise<void>>();
+    auto store_cancelled            = std::make_shared<std::promise<void>>();
+    auto load_cancelled_future      = load_cancelled->get_future();
+    auto store_cancelled_future     = store_cancelled->get_future();
+    disk_to_device->onDone([disk_to_device_completions, load_cancelled](ErrorInfo) {
+        if (disk_to_device_completions->fetch_add(1) == 0) {
+            load_cancelled->set_value();
+        }
+    });
+    device_to_disk->onDone([device_to_disk_completions, store_cancelled](ErrorInfo) {
+        if (device_to_disk_completions->fetch_add(1) == 0) {
+            store_cancelled->set_value();
+        }
+    });
 
-    BoundedThread<void> shutdown([engine]() { engine->shutdown(); });
-    if (shutdown.waitFor(std::chrono::seconds(5)) != std::future_status::ready) {
-        held_staging.reset();
-        ADD_FAILURE() << "transfer-engine shutdown exceeded five seconds";
-        return;
-    }
-    ASSERT_NO_THROW(shutdown.get());
+    BoundedThread<void> destruction([engine = std::move(engine), temp_dir]() mutable { engine.reset(); });
+    EXPECT_EQ(load_cancelled_future.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    EXPECT_EQ(store_cancelled_future.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    EXPECT_EQ(destruction.waitFor(std::chrono::milliseconds(50)), std::future_status::timeout);
+    blocking_io->release();
+    ASSERT_EQ(destruction.waitFor(std::chrono::seconds(5)), std::future_status::ready);
+    ASSERT_NO_THROW(destruction.get());
+    EXPECT_TRUE(active_transfer->done());
+    EXPECT_TRUE(active_transfer->success());
     EXPECT_TRUE(disk_to_device->done());
     EXPECT_FALSE(disk_to_device->success());
     EXPECT_TRUE(device_to_disk->done());
     EXPECT_FALSE(device_to_disk->success());
     EXPECT_EQ(disk_to_device_completions->load(), 1u);
     EXPECT_EQ(device_to_disk_completions->load(), 1u);
-
-    engine->cancelPendingStagingTransfers();
-    engine->shutdown();
-    EXPECT_EQ(disk_to_device_completions->load(), 1u);
-    EXPECT_EQ(device_to_disk_completions->load(), 1u);
-
-    held_staging.reset();
-    engine.reset();
 }
 
 TEST(PerRankBlockTransferEngineIntegrationTest, DiskDeviceFullAndSwaStagingMayOverlapWithSharedWorkers) {
