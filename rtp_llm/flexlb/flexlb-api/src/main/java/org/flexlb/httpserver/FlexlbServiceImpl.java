@@ -656,7 +656,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
             if (ctx.getResponse() != null && ctx.getResponse().getServerStatus() != null) {
                 for (ServerStatus ss : ctx.getResponse().getServerStatus()) {
                     if (ss.getRole() == RoleType.PREFILL) {
-                        prefillIp = ss.getServerIp() != null ? ss.getServerIp() : "";
+                        prefillIp = ss.getMetricIpPort() != null ? ss.getMetricIpPort() : "";
                         break;
                     }
                 }
@@ -954,14 +954,18 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
 
         if (response.getServerStatus() != null) {
             for (ServerStatus ss : response.getServerStatus()) {
-                builder.addServerStatus(FlexlbScheduleProtocol.FlexlbServerStatusPB.newBuilder()
-                        .setRole(ss.getRole().getCode())
-                        .setServerIp(ss.getServerIp() != null ? ss.getServerIp() : "")
-                        .setHttpPort(ss.getHttpPort())
-                        .setGrpcPort(ss.getGrpcPort())
-                        .setGroup(ss.getGroup() != null ? ss.getGroup() : "")
-                        .setWorkerGeneration(ss.getWorkerGeneration())
-                        .build());
+                FlexlbScheduleProtocol.FlexlbServerStatusPB.Builder status =
+                        FlexlbScheduleProtocol.FlexlbServerStatusPB.newBuilder()
+                                .setRole(ss.getRole().getCode())
+                                .setServerIp(ss.getServerIp() != null ? ss.getServerIp() : "")
+                                .setHttpPort(ss.getHttpPort())
+                                .setGrpcPort(ss.getGrpcPort())
+                                .setGroup(ss.getGroup() != null ? ss.getGroup() : "")
+                                .setWorkerGeneration(ss.getWorkerGeneration());
+                if (ss.getEngineIndex() != null) {
+                    status.setEngineIndex(ss.getEngineIndex());
+                }
+                builder.addServerStatus(status.build());
             }
         }
         return builder.build();

@@ -109,7 +109,7 @@ class DecodeEndpointAdmissionTest {
         }
         exactEndpoint.release(speculative, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
         verify(availability).capacityChanged(
-                RoleType.DECODE, null, "10.0.0.1:8080");
+                RoleType.DECODE, null, "10.0.0.1:8080@0");
 
         DecodeEndpoint.ReservationHandle published;
         try (WorkerEndpoint.GenerationPin pin =
@@ -119,7 +119,7 @@ class DecodeEndpointAdmissionTest {
         }
         exactEndpoint.release(published, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
         verify(availability, times(2)).capacityChanged(
-                RoleType.DECODE, null, "10.0.0.1:8080");
+                RoleType.DECODE, null, "10.0.0.1:8080@0");
     }
 
     @Test
