@@ -11,7 +11,6 @@ namespace {
 std::shared_ptr<HostBlockPoolConfig> makeConfig(size_t physical_block_count = 4,
                                                 size_t payload_bytes        = 1024,
                                                 size_t stride_bytes         = 4096,
-                                                bool   enable_pinned        = false,
                                                 size_t alignment            = 4096) {
     auto config                  = std::make_shared<HostBlockPoolConfig>();
     config->pool_type            = BlockPoolType::HOST;
@@ -19,7 +18,6 @@ std::shared_ptr<HostBlockPoolConfig> makeConfig(size_t physical_block_count = 4,
     config->physical_block_count = physical_block_count;
     config->payload_bytes        = payload_bytes;
     config->stride_bytes         = stride_bytes;
-    config->enable_pinned        = enable_pinned;
     config->alignment            = alignment;
     return config;
 }
@@ -31,7 +29,6 @@ TEST(HostBlockPoolTest, InitAllocatesHostBuffersAndSkipsBlockZero) {
     HostBlockPool pool(config);
 
     ASSERT_TRUE(pool.init());
-    EXPECT_FALSE(pool.isPinned());
     EXPECT_EQ(pool.totalBlocksNum(), 3u);
     EXPECT_EQ(pool.payloadBytes(), 1024u);
     EXPECT_EQ(pool.strideBytes(), 4096u);
@@ -43,11 +40,10 @@ TEST(HostBlockPoolTest, InitAllocatesHostBuffersAndSkipsBlockZero) {
 }
 
 TEST(HostBlockPoolTest, InitWithDontDumpKeepsBufferUsable) {
-    // Pageable path: madvise(MADV_DONTDUMP) must not corrupt or unmap the backing.
+    // madvise(MADV_DONTDUMP) must not corrupt or unmap the backing.
     auto          config = makeConfig(/*physical_block_count=*/4,
                              /*payload_bytes=*/64,
-                             /*stride_bytes=*/4096,
-                             /*enable_pinned=*/false);
+                             /*stride_bytes=*/4096);
     HostBlockPool pool(config);
     ASSERT_TRUE(pool.init());
 
@@ -98,16 +94,15 @@ TEST(HostBlockPoolTest, BlockBufferAcceptsValidUnallocatedBlock) {
     EXPECT_NE(buffer.addr, nullptr);
 }
 
-TEST(HostBlockPoolTest, PinnedFallbackDoesNotFailInit) {
+TEST(HostBlockPoolTest, InitAllocatesPinnedMemory) {
     auto          config = makeConfig(/*physical_block_count=*/4,
                              /*payload_bytes=*/1024,
-                             /*stride_bytes=*/4096,
-                             /*enable_pinned=*/true);
+                             /*stride_bytes=*/4096);
     HostBlockPool pool(config);
 
-    // Whether or not this host actually supports CUDA pinned memory, init() must
-    // succeed and isPinned() must truthfully reflect the resulting backing tensor.
     ASSERT_TRUE(pool.init());
+    const auto tensor = torch::from_blob(pool.blockBuffer(1).addr, {1}, torch::TensorOptions().dtype(torch::kUInt8));
+    EXPECT_TRUE(tensor.is_pinned());
 
     auto block = pool.malloc();
     ASSERT_TRUE(block.has_value());
@@ -116,15 +111,12 @@ TEST(HostBlockPoolTest, PinnedFallbackDoesNotFailInit) {
 }
 
 TEST(HostBlockPoolTest, HostBufferMemoryIsUsableAndDistinct) {
-    // Deterministic pageable path (enable_pinned=false) with small blocks.
     auto          config = makeConfig(/*physical_block_count=*/4,
                              /*payload_bytes=*/64,
                              /*stride_bytes=*/256,
-                             /*enable_pinned=*/false,
                              /*alignment=*/64);
     HostBlockPool pool(config);
     ASSERT_TRUE(pool.init());
-    EXPECT_FALSE(pool.isPinned());
 
     auto block_a = pool.malloc();
     auto block_b = pool.malloc();

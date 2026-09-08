@@ -61,7 +61,6 @@ deepseek_v4_pro_fp8_tp1_cp1.json
   --transfer-concurrency 8 \
   --transfer-descriptor-batch-size 8 \
   --copy-strategy batch \
-  --host-memory pinned \
   --min-measured-seconds 5
 ```
 
@@ -101,7 +100,6 @@ nsys profile \
     --transfer-concurrency 8 \
     --transfer-descriptor-batch-size 8 \
     --copy-strategy batch \
-    --host-memory pinned \
     --min-measured-seconds 5
 ```
 
@@ -173,7 +171,6 @@ nsys profile \
     --transfer-concurrency 8 \
     --transfer-descriptor-batch-size 8 \
     --copy-strategy batch \
-    --host-memory pinned \
     --min-measured-seconds 5
 ```
 
@@ -209,7 +206,6 @@ sudo "$NSYS_BIN" profile \
     --transfer-concurrency 8 \
     --transfer-descriptor-batch-size 8 \
     --copy-strategy batch \
-    --host-memory pinned \
     --min-measured-seconds 5
 
 sudo chown "$(id -u):$(id -g)" "$METRICS_PREFIX.nsys-rep"

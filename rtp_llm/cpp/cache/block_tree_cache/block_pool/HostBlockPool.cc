@@ -91,26 +91,21 @@ bool HostBlockPool::init() {
 
     // block 0's slot is allocated as backing but is never handed out by malloc().
     const size_t total_bytes = cfg.physical_block_count * cfg.stride_bytes;
-    backing_.emplace(total_bytes, cfg.alignment, cfg.enable_pinned, cfg.pool_name);
+    backing_.emplace(total_bytes, cfg.alignment, cfg.pool_name);
     markHostBlockPoolDontDump(cfg.pool_name.c_str(), backing_->data(), total_bytes);
     static constexpr double kBytesPerMB = 1024.0 * 1024.0;
     RTP_LLM_LOG_INFO("backing selected: pool_name=%s payload_bytes=%zu stride_bytes=%zu "
-                     "physical_block_count=%zu total_size=%zu bytes total_size_mb=%.2f is_pinned=%d ptr=%p",
+                     "physical_block_count=%zu total_size=%zu bytes total_size_mb=%.2f ptr=%p",
                      cfg.pool_name.c_str(),
                      cfg.payload_bytes,
                      cfg.stride_bytes,
                      cfg.physical_block_count,
                      total_bytes,
                      static_cast<double>(total_bytes) / kBytesPerMB,
-                     backing_->isPinned(),
                      backing_->data());
 
     markInitialized();
     return true;
-}
-
-bool HostBlockPool::isPinned() const {
-    return backing_.has_value() && backing_->isPinned();
 }
 
 HostBlockBuffer HostBlockPool::blockBuffer(BlockIdxType block) const {
@@ -136,7 +131,7 @@ size_t HostBlockPool::blockSizeBytes() const {
 std::string HostBlockPool::debugString() const {
     std::ostringstream oss;
     oss << "HostBlockPool{" << IBlockPool::debugString() << ", payload_bytes=" << payloadBytes()
-        << ", stride_bytes=" << strideBytes() << ", pinned=" << isPinned() << "}";
+        << ", stride_bytes=" << strideBytes() << "}";
     return oss.str();
 }
 

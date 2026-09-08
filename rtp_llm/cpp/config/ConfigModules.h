@@ -196,7 +196,6 @@ struct KVCacheConfig {
     int         use_block_cache              = -1;  // -1 means not set, use Optional<int> equivalent
     bool        enable_device_cache          = true;
     bool        enable_host_cache            = false;
-    bool        enable_host_cache_pinned     = true;
     bool        enable_disk_cache            = false;
     bool        enable_remote_cache          = false;
     bool        write_cache_sync             = false;
