@@ -7,11 +7,22 @@ void CudaGraphRunner::replayDecode(int bs) {
 }
 
 std::vector<int> CudaGraphRunner::getDecodeBatchSizesToCapture() {
+    RTP_LLM_CHECK_WITH_INFO(max_bs_ > 0, "decode CUDA graph max batch size must be positive, got %zu", max_bs_);
+
     // If decode_capture_batch_sizes_ is provided from Python, use it directly
     if (!decode_capture_batch_sizes_.empty()) {
         RTP_LLM_LOG_INFO("Using decode capture batch sizes from Python: %zu sizes", decode_capture_batch_sizes_.size());
+        for (const int batch_size : decode_capture_batch_sizes_) {
+            RTP_LLM_CHECK_WITH_INFO(batch_size > 0 && static_cast<size_t>(batch_size) <= max_bs_,
+                                    "decode CUDA graph capture batch size must be in [1, %zu], got %d",
+                                    max_bs_,
+                                    batch_size);
+        }
         // Sort in ascending order (from small to large)
         std::sort(decode_capture_batch_sizes_.begin(), decode_capture_batch_sizes_.end());
+        decode_capture_batch_sizes_.erase(
+            std::unique(decode_capture_batch_sizes_.begin(), decode_capture_batch_sizes_.end()),
+            decode_capture_batch_sizes_.end());
         return decode_capture_batch_sizes_;
     }
 

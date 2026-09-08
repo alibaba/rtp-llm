@@ -45,6 +45,13 @@ cc_library(
 )
 
 cc_library(
+    name = "memory_status",
+    hdrs = ["MemoryStatus.h"],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "profiling_scope",
     hdrs = [
         "ProfilingScope.h",

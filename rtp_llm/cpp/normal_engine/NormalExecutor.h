@@ -30,7 +30,8 @@ public:
                             int                                    propose_model_index = 0,
                             MlaOpsType                             mla_ops_type        = MlaOpsType::AUTO,
                             std::function<void()>                  profile_step_start  = nullptr,
-                            std::function<void()>                  profile_step_finish = nullptr);
+                            std::function<void()>                  profile_step_finish = nullptr,
+                            bool                                   allow_cuda_graph    = true);
     ~NormalExecutor();
     absl::Status process(const std::list<GenerateStreamPtr>& streams, int64_t schedule_time_us = 0) override;
     void         reportMetrics(const StreamGroups&                        stream_groups,
@@ -52,6 +53,9 @@ public:
     static ModelFactory test_model_factory;
 
     bool updateEplbConfig(const EPLBConfig& config) override;
+    size_t cudaGraphMemoryBytes() const {
+        return model_ ? model_->cudaGraphMemoryBytes() : 0;
+    }
 
 protected:
     // Stream-async dispatch gate. Reuses the same env var as MtpExecutor so a

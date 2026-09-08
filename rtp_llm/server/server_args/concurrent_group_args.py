@@ -1,4 +1,20 @@
+import argparse
+
 from rtp_llm.server.server_args.util import str2bool
+
+
+def _positive_concurrency_limit(value):
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        raise argparse.ArgumentTypeError(
+            f"must be an integer in [1, 2147483647], got {value!r}"
+        )
+    if not 1 <= parsed <= 2**31 - 1:
+        raise argparse.ArgumentTypeError(
+            f"must be an integer in [1, 2147483647], got {value!r}"
+        )
+    return parsed
 
 
 def init_concurrent_group_args(parser, concurrency_config):
@@ -18,7 +34,7 @@ def init_concurrent_group_args(parser, concurrency_config):
         "--concurrency_limit",
         env_name="CONCURRENCY_LIMIT",
         bind_to=(concurrency_config, 'concurrency_limit'),
-        type=int,
+        type=_positive_concurrency_limit,
         default=32,
         help="设置系统允许的最大并发请求数量。",
     )

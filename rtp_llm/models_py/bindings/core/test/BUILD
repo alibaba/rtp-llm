@@ -52,6 +52,14 @@ cc_test(
     exec_properties = {'gpu':'A10'},
 )
 
+cc_test(
+    name = "trace_memory_ops_test",
+    srcs = ["TraceMemoryOpsTest.cc"],
+    deps = exec_ops_test_deps,
+    copts = test_copts,
+    exec_properties = {"gpu": "H20"},
+)
+
 # Exercise the CPU fallback without initializing or allocating a GPU.
 cc_test(
     name = "packed_mask_logits_cpu_fallback_test",

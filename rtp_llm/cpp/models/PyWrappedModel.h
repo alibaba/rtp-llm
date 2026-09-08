@@ -73,6 +73,9 @@ public:
     torch::Tensor   getMtpTargetHiddenStates(int64_t num_tokens) override;
     torch::Tensor   getMtpLastHiddenStates(int64_t num_tokens) override;
     bool            hasMtpTargetHiddenBuffer() const override;
+    size_t          cudaGraphMemoryBytes() const override {
+        return graph_runner_ ? graph_runner_->cudaGraphMemoryBytes() : 0;
+    }
     void            prepareAttentionInputs(const GptModelInputs& inputs) override;
     void            prepareAttentionInputs(const GptModelInputs& inputs, bool skip_forward_event_sync);
     void            updateKVCacheKernelBlockId(const GptModelInputs& inputs) override;
@@ -286,7 +289,10 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
             graph_params.input_hidden_size = static_cast<size_t>(width);
         }
         graph_params.model_data_type            = dtype;
-        graph_params.max_context_batch_size     = params.concurrency_config.concurrency_limit;
+        RTP_LLM_CHECK_WITH_INFO(params.concurrency_config.concurrency_limit >= 1,
+                                "CUDA graph max batch size must be positive, got %d",
+                                params.concurrency_config.concurrency_limit);
+        graph_params.max_context_batch_size = static_cast<size_t>(params.concurrency_config.concurrency_limit);
         graph_params.prefill_capture_seq_lens   = params.hw_kernel_config.prefill_capture_seq_lens;
         graph_params.decode_capture_batch_sizes = params.hw_kernel_config.decode_capture_batch_sizes;
         if (params.kv_cache_layer_layout.has_value()) {

@@ -149,6 +149,21 @@ def h20_oss_suites():
                 },
                 gpu_type=["H20"],
             ),
+            # End-to-end coverage for measured runtime-memory sizing. Startup must complete
+            # automatic KV allocation on both PD roles before the golden request can succeed.
+            smoke_test(
+                name="forward_warmup_pd",
+                task_info="data/model/qwen3_moe/q_r_30b_py_tp2.json",
+                envs={
+                    "prefill": [],
+                    "decode": [],
+                },
+                smoke_args={
+                    "prefill": "--checkpoint_path /mnt/nas1/hf/Qwen3-30B-A3B-Instruct-2507-FP8 --act_type BF16 --cache_store_rdma_mode 0 --use_local 1 --role_type PREFILL --tp_size 2 --ep_size 2 --world_size 2 --max_seq_len 32768 --max_context_batch_size 2 --concurrency_limit 32 --warm_up 1 --runtime_mem_safety_ratio 0.10 --use_deepep_moe 1 --use_deepep_low_latency 0 --load_method scratch",
+                    "decode": "--checkpoint_path /mnt/nas1/hf/Qwen3-30B-A3B-Instruct-2507-FP8 --act_type BF16 --cache_store_rdma_mode 0 --use_local 1 --role_type DECODE --tp_size 2 --ep_size 2 --world_size 2 --max_seq_len 32768 --max_context_batch_size 2 --concurrency_limit 32 --warm_up 1 --runtime_mem_safety_ratio 0.10 --enable_cuda_graph 1 --decode_capture_config 1,8,16 --use_deepep_moe 1 --use_deepep_low_latency 1 --load_method scratch",
+                },
+                gpu_type=["H20"],
+            ),
         ],
     )
 

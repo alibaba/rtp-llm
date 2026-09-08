@@ -61,7 +61,8 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
                                int                                    propose_model_index,
                                MlaOpsType                             mla_ops_type,
                                std::function<void()>                  profile_step_start,
-                               std::function<void()>                  profile_step_finish):
+                               std::function<void()>                  profile_step_finish,
+                               bool                                   allow_cuda_graph):
     Executor(),
     cache_manager_(cache_manager),
     warm_up_(warm_up),
@@ -153,7 +154,8 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
     }
     if (!params.py_model.is_none()) {
         RTP_LLM_LOG_INFO("init executor with python model");
-        model_.reset(new PyWrappedModel(model_init_params, params.py_model));
+        model_.reset(new PyWrappedModel(
+            model_init_params, params.py_model, false, false, DSparkModelRole::NONE, allow_cuda_graph));
     } else if (test_model_factory) {
         RTP_LLM_LOG_INFO("init executor with test model factory");
         model_ = test_model_factory(model_init_params);

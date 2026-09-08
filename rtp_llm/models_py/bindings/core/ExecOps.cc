@@ -51,6 +51,7 @@ void             multiMergeCopy(const MultiMergeCopyParams& params);
 #include <cuda_runtime.h>
 #include <cuda_profiler_api.h>
 #include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDACachingAllocator.h>
 #include "rtp_llm/models_py/bindings/cuda/cuda_host_utils.h"
 #elif USING_ROCM
 #include <hip/hip_runtime.h>
@@ -530,17 +531,27 @@ void cudaProfilerEnd() {
 // Status queries
 // ============================================================
 
+namespace {
+static bool g_trace_memory = false;
+}  // namespace
+
 ExecStatus getGpuExecStatus() {
     MemoryStatus mem;
-    size_t       total_bytes = 0;
 #if USING_CUDA
-    auto error = cudaMemGetInfo(&mem.free_bytes, &total_bytes);
+    auto error = cudaMemGetInfo(&mem.free_bytes, &mem.total_bytes);
     RTP_LLM_CHECK(error == cudaSuccess);
 #elif USING_ROCM
-    hipMemGetInfo(&mem.free_bytes, &total_bytes);
+    ROCM_CHECK(hipMemGetInfo(&mem.free_bytes, &mem.total_bytes));
 #endif
-    mem.used_bytes      = total_bytes - mem.free_bytes;
+    mem.used_bytes      = mem.total_bytes - mem.free_bytes;
     mem.available_bytes = mem.free_bytes;
+#if USING_CUDA
+    if (isTraceMemory()) {
+        const auto& stats = c10::cuda::CUDACachingAllocator::getDeviceStats(at::cuda::current_device());
+        mem.allocated_bytes            = static_cast<size_t>(stats.allocated_bytes[0].current);
+        mem.torch_allocated_peak_bytes = static_cast<size_t>(stats.allocated_bytes[0].peak);
+    }
+#endif
     ExecStatus status;
     status.device_memory_status = mem;
     return status;
@@ -550,11 +561,17 @@ torch::Device getTorchCudaDevice() {
     return torch::Device(torch::kCUDA);
 }
 
-namespace {
-static bool g_trace_memory = false;
+bool isTraceMemory() {
+    return g_trace_memory;
 }
 
 void setTraceMemory(bool trace_memory) {
+#if USING_CUDA
+    if (trace_memory) {
+        c10::cuda::CUDACachingAllocator::emptyCache();
+        c10::cuda::CUDACachingAllocator::resetPeakStats(at::cuda::current_device());
+    }
+#endif
     g_trace_memory = trace_memory;
 }
 
@@ -641,7 +658,7 @@ void clearCommOpsUnlocked() {
 }  // anonymous namespace
 
 void execBroadcast(const BroadcastParams& params) {
-    py::function           fn;
+    py::function fn;
     py::gil_scoped_acquire gil;
     {
         std::lock_guard<std::mutex> lock(g_comm_mutex);
@@ -687,7 +704,7 @@ bool isCpuTpBroadcasterInitialized() {
 }
 
 AllReduceOutput execAllReduce(const AllReduceParams& params) {
-    py::function           fn;
+    py::function fn;
     py::gil_scoped_acquire gil;
     {
         std::lock_guard<std::mutex> lock(g_comm_mutex);
@@ -705,7 +722,7 @@ AllReduceOutput execAllReduce(const AllReduceParams& params) {
 }
 
 void execAllGather(const AllGatherParams& params) {
-    py::function           fn;
+    py::function fn;
     py::gil_scoped_acquire gil;
     {
         std::lock_guard<std::mutex> lock(g_comm_mutex);

@@ -479,6 +479,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("fp8_kv_cache", &KVCacheConfig::fp8_kv_cache)
         .def_readwrite("ssm_state_dtype", &KVCacheConfig::ssm_state_dtype)
         .def_readwrite("kv_cache_mem_mb", &KVCacheConfig::kv_cache_mem_mb)
+        .def_readwrite("runtime_mem_safety_ratio", &KVCacheConfig::runtime_mem_safety_ratio)
         .def_readwrite("seq_size_per_block", &KVCacheConfig::seq_size_per_block)
         .def_readwrite("kernel_seq_size_per_block", &KVCacheConfig::kernel_seq_size_per_block)
         .def_readwrite("test_block_num", &KVCacheConfig::test_block_num)
@@ -580,10 +581,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.load_cache_retry_times,
                                       self.dsv4_fixed_pool_blocks,
                                       self.dsv4_hca_state_pool_blocks,
-                                      self.dsv4_fixed_pool_use_memory);
+                                      self.dsv4_fixed_pool_use_memory,
+                                      self.runtime_mem_safety_ratio);
             },
             [](py::tuple t) {
-                if (t.size() != 43 && t.size() != 54 && t.size() != 57)
+                if (t.size() != 43 && t.size() != 54 && t.size() != 57 && t.size() != 58)
                     throw std::runtime_error("Invalid state!");
                 KVCacheConfig c;
                 try {
@@ -644,10 +646,12 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                         c.load_cache_retry_times                  = t[53].cast<int>();
                     }
                     if (t.size() >= 57) {
-                        // DSV4 fixed-pool knobs.
                         c.dsv4_fixed_pool_blocks     = t[54].cast<uint32_t>();
                         c.dsv4_hca_state_pool_blocks = t[55].cast<uint32_t>();
                         c.dsv4_fixed_pool_use_memory = t[56].cast<bool>();
+                    }
+                    if (t.size() == 58) {
+                        c.runtime_mem_safety_ratio = t[57].cast<double>();
                     }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("KVCacheConfig unpickle error: ") + e.what());

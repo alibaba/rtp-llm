@@ -8,6 +8,7 @@
 #include "rtp_llm/cpp/engine_base/schedulers/PDFusionRatioScheduler.h"
 #include "rtp_llm/cpp/engine_base/schedulers/BatchDecodeScheduler.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
+#include "rtp_llm/cpp/cache/WarmUpResultAssembly.h"
 #include "rtp_llm/cpp/engine_base/system_prompt/SystemPromptConstructor.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
@@ -20,6 +21,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <list>
 #include <memory>
 #include <thread>
@@ -83,6 +85,66 @@ bool shouldRefreshCacheStatusSnapshot(RoleType role_type, const std::list<Genera
         return stream && !stream->isFakeStream() && stream->isContextStream();
     });
 }
+
+#if USING_CUDA
+// Starts tracing on construction and, on every exit path including a throwing preRun, destroys
+// the warmup executor before closing the trace phase.
+class WarmupTraceScope {
+public:
+    explicit WarmupTraceScope(std::unique_ptr<Executor>& executor): executor_(executor) {
+        rtp_llm::setTraceMemory(true);
+        // Sampled after setTraceMemory on purpose: that call runs emptyCache() and snapshots the
+        // growth baselines, so free memory here is the same steady state (weights only) the growth
+        // deltas are measured against. Sampling before it would include loader-cached free blocks
+        // the warmup is free to reuse, overstating the pool relative to the growth.
+        pre_warmup_available_bytes_ = getGpuExecStatus().device_memory_status.available_bytes;
+    }
+
+    ~WarmupTraceScope() {
+        executor_.reset();
+        rtp_llm::setTraceMemory(false);
+    }
+
+    // Releases the traced executor and samples memory again while the trace window is still open.
+    // Two consumers: the raw post-teardown readings, logged to show what the warmup left behind,
+    // and available_bytes, which is the sizing base for the paths that discard the measurement.
+    // Sampling after setTraceMemory(false) would not work: closing the phase makes isTraceMemory()
+    // false, so getGpuExecStatus() no longer fills the traced growth fields and they read back as 0.
+    MemoryStatus teardownAndSample() {
+        executor_.reset();
+        cudaDeviceSynchronize();
+        c10::cuda::CUDACachingAllocator::emptyCache();
+        return getGpuExecStatus().device_memory_status;
+    }
+
+    // Free memory at the trace baseline: weights loaded, warmup has allocated nothing.
+    size_t preWarmupAvailableBytes() const {
+        return pre_warmup_available_bytes_;
+    }
+
+    WarmupTraceScope(const WarmupTraceScope&)            = delete;
+    WarmupTraceScope& operator=(const WarmupTraceScope&) = delete;
+
+private:
+    std::unique_ptr<Executor>& executor_;
+    size_t                     pre_warmup_available_bytes_ = 0;
+};
+
+WarmUpResult makeWarmUpResult(size_t              pre_warmup_available_bytes,
+                              const MemoryStatus& post_teardown_status,
+                              bool                measurement_trusted,
+                              const char*         phase) {
+    WarmUpResult result;
+    try {
+        result = assembleWarmUpResult(pre_warmup_available_bytes, post_teardown_status, measurement_trusted);
+    } catch (const std::exception& e) {
+        RTP_LLM_FAIL("%s %s", phase, e.what());
+    }
+
+    return result;
+}
+#endif
+
 }  // anonymous namespace
 
 NormalEngine::NormalEngine(const EngineInitParams&                       params,
@@ -147,7 +209,10 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
 
     std::optional<WarmUpResult> warm_up_result = std::nullopt;
 #if USING_CUDA
-    if (runtime_config.warm_up && (!model_config_.mm_model_config.is_multimodal)
+    const bool is_warmup_role = pd_sep_config.role_type == RoleType::PREFILL
+                                || pd_sep_config.role_type == RoleType::DECODE
+                                || pd_sep_config.role_type == RoleType::PDFUSION;
+    if (runtime_config.warm_up && is_warmup_role && (!model_config_.mm_model_config.is_multimodal)
         && !ffn_disaggregate_config.enable_ffn_disaggregate) {
         // warm up
         RTP_LLM_LOG_INFO("warm up (max_context_batch_size %d, max_seq_len %d calculate_loss %d) query begin",
@@ -155,12 +220,15 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
                          model_config_.max_seq_len,
                          int(runtime_config.warm_up_with_loss));
         warm_up_result = warmUp(params);
-        RTP_LLM_LOG_INFO(
-            "warm up done, max runtime used memory: %ld bytes (%ld MiB), device reserved memory: %ld bytes (%ld MiB)",
-            warm_up_result->max_used_memory,
-            warm_up_result->max_used_memory / 1024 / 1024,
-            warm_up_result->device_reserved_bytes,
-            warm_up_result->device_reserved_bytes / 1024 / 1024);
+        RTP_LLM_LOG_INFO("warm up done, measured runtime memory: %ld bytes (%ld MiB), "
+                         "cuda graph memory: %ld bytes (%ld MiB), "
+                         "device reserved memory: %ld bytes (%ld MiB)",
+                         warm_up_result->measured_total_growth_bytes,
+                         warm_up_result->measured_total_growth_bytes / 1024 / 1024,
+                         warm_up_result->cuda_graph_memory_bytes,
+                         warm_up_result->cuda_graph_memory_bytes / 1024 / 1024,
+                         warm_up_result->device_reserved_bytes,
+                         warm_up_result->device_reserved_bytes / 1024 / 1024);
     } else {
         RTP_LLM_LOG_INFO("skip warm up.");
     }
@@ -279,6 +347,9 @@ int64_t NormalEngine::getLastScheduleTime() {
 }
 
 WarmUpResult NormalEngine::warmUp(const EngineInitParams& params) {
+    // Baseline dispatch order preserved: the batch-decode-scheduler branch takes precedence over
+    // the role mapping. PDFUSION maps to prefillWarmUp like before the warmup feature; its
+    // measurement is discarded by the constructor gate (forward measurement trust is false).
     if (runtime_config.use_batch_decode_scheduler) {
         if (runtime_config.batch_decode_scheduler_config.batch_decode_scheduler_warmup_type == 0) {
             return decodeWarmUp(params);
@@ -334,19 +405,90 @@ WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
     RTP_LLM_FAIL("prefillWarmUp is not supported on non-CUDA platforms");
     return {};
 #else
-    auto fake_input                                   = makeFakeInput(getWarmUpInputLength());
-    fake_input->generate_config->num_return_sequences = runtime_config.fifo_scheduler_config.max_context_batch_size;
+    // Reject negatives before the cast: this is an int64_t knob, and a C-style cast to size_t
+    // would turn -1 into SIZE_MAX, which surfaces later as an unrelated overflow error. Name the
+    // knob instead, like checkedMiBToBytes does.
+    const int64_t configured_context_batch = runtime_config.fifo_scheduler_config.max_context_batch_size;
+    RTP_LLM_CHECK_WITH_INFO(configured_context_batch >= 0,
+                            "max_context_batch_size must be non-negative, got %ld",
+                            configured_context_batch);
+    // Pre-feature shape, deliberately unchanged: one sequence per max_context_batch_size, each at
+    // the framework warmup input length. getWarmUpInputLength() owns that length -- it derives it
+    // from max_seq_len and the speculative reserve_step, and rejects max_seq_len <= 1.
+    const size_t num_seqs       = (size_t)configured_context_batch;
+    const size_t tokens_per_seq = getWarmUpInputLength();
+    RTP_LLM_CHECK_WITH_INFO(tokens_per_seq == 0 || num_seqs <= std::numeric_limits<size_t>::max() / tokens_per_seq,
+                            "prefill warmup actual input token count overflow");
+    const size_t actual_input_tokens = num_seqs * tokens_per_seq;
+
+    // getWarmUpInputLength() already rejects max_seq_len <= 1, so what is left to catch here is
+    // max_context_batch_size == 0, which would make this a zero-sequence forward.
+    RTP_LLM_CHECK_WITH_INFO(actual_input_tokens > 0,
+                            "prefill warmup would run a zero-token forward (num_seqs=%ld); "
+                            "max_context_batch_size must be at least 1",
+                            (long)num_seqs);
+
+    auto fake_input                                   = makeFakeInput(tokens_per_seq);
+    fake_input->generate_config->num_return_sequences = num_seqs;
     fake_input->generate_config->calculate_loss       = int(runtime_config.warm_up_with_loss);
-    rtp_llm::setTraceMemory(true);
-    executor_.reset(new NormalExecutor(params, nullptr, true, false, 0, mla_ops_type_));
-    THROW_IF_STATUSOR_ERROR(preRun(fake_input, preRunMode::prefill_warm_up));
-    const auto max_consumed = getGpuExecStatus().device_memory_status.max_consumed_bytes;
-    rtp_llm::setTraceMemory(false);
-    (void)executor_.reset(nullptr);
-    cudaDeviceSynchronize();
-    c10::cuda::CUDACachingAllocator::emptyCache();
-    const auto device_status = getGpuExecStatus();
-    return WarmUpResult({device_status.device_memory_status.available_bytes, max_consumed});
+
+    std::shared_ptr<KVCacheManager> profiling_cache_manager;
+    std::shared_ptr<KVCacheManager> saved_cache_manager;
+    if (propose_params_) {
+        KVCacheConfig profiling_kv_cache_config = kv_cache_config;
+        profiling_kv_cache_config.test_block_num = 1;
+        auto profiling_cache_config = CacheConfigCreator::createSpConfig(
+            model_config_,
+            propose_params_->getEngineInitParams().model_config_,
+            parallelism_config,
+            runtime_config,
+            profiling_kv_cache_config,
+            sp_config,
+            std::nullopt,
+            isMTPEagle(),
+            isEagle());
+        profiling_cache_manager = make_shared<KVCacheManager>(profiling_cache_config,
+                                                               false,
+                                                               nullptr,
+                                                               kv_cache_config,
+                                                               parallelism_config,
+                                                               runtime_config,
+                                                               sp_config,
+                                                               pd_sep_config,
+                                                               cache_store_config);
+        RTP_LLM_CHECK_WITH_INFO(profiling_cache_manager->init(), "init prefill profiling KV cache failed");
+        saved_cache_manager = resource_context_.cache_manager;
+        resource_context_.cache_manager = profiling_cache_manager;
+    }
+    MemoryStatus post_teardown_status;
+    size_t       pre_warmup_available = 0;
+    {
+        WarmupTraceScope trace_scope(executor_);
+        if (propose_params_) {
+            executor_.reset(new MtpExecutor(params,
+                                             propose_params_,
+                                             profiling_cache_manager,
+                                             mla_ops_type_,
+                                             kv_cache_group_num_,
+                                             true,
+                                             false));
+        } else {
+            executor_.reset(new NormalExecutor(params, nullptr, true, false, 0, mla_ops_type_));
+        }
+        THROW_IF_STATUSOR_ERROR(preRun(fake_input, preRunMode::prefill_warm_up));
+        post_teardown_status = trace_scope.teardownAndSample();
+        pre_warmup_available = trace_scope.preWarmupAvailableBytes();
+    }
+    if (propose_params_) {
+        executor_.reset();
+        resource_context_.cache_manager = saved_cache_manager;
+        profiling_cache_manager.reset();
+    }
+    return makeWarmUpResult(pre_warmup_available,
+                            post_teardown_status,
+                            pd_sep_config.role_type == RoleType::PREFILL
+                                || pd_sep_config.role_type == RoleType::DECODE,
+                            "PREFILL_WARMUP");
 #endif
 }
 
@@ -355,10 +497,11 @@ WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
     RTP_LLM_FAIL("decodeWarmUp is not supported on non-CUDA platforms");
     return {};
 #else
-    auto fake_input                                   = makeFakeInput(getWarmUpInputLength());
-    fake_input->generate_config->num_return_sequences = runtime_config.max_generate_batch_size;
+    const size_t num_return_sequences                 = (size_t)runtime_config.max_generate_batch_size;
+    const size_t kv_seq_len                           = getWarmUpInputLength();
+    auto         fake_input                           = makeFakeInput(kv_seq_len);
+    fake_input->generate_config->num_return_sequences = num_return_sequences;
     fake_input->generate_config->calculate_loss       = int(runtime_config.warm_up_with_loss);
-    rtp_llm::setTraceMemory(true);
 
     // Do NOT override seq_size_per_block here. createBasicConfig already
     // returns the correct value: model_config.attn_config.tokens_per_block
@@ -368,9 +511,41 @@ WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
     // value when the user passed --seq_size_per_block < 256.
     const int cache_gen_num_per_cycle =
         sp_config.type != SP_TYPE_NONE ? static_cast<int>(sp_config.gen_num_per_cycle) : 0;
-    auto cache_config = CacheConfigCreator::createBasicConfig(
-        model_config_, parallelism_config, false, cache_gen_num_per_cycle);
-    cache_config.block_num = 5;
+    CacheConfig config_seed;
+    if (propose_params_) {
+        KVCacheConfig profiling_kv_cache_config = kv_cache_config;
+        profiling_kv_cache_config.test_block_num = 1;
+        config_seed = CacheConfigCreator::createSpConfig(model_config_,
+                                                         propose_params_->getEngineInitParams().model_config_,
+                                                         parallelism_config,
+                                                         runtime_config,
+                                                         profiling_kv_cache_config,
+                                                         sp_config,
+                                                         std::nullopt,
+                                                         isMTPEagle(),
+                                                         isEagle());
+    } else {
+        config_seed = CacheConfigCreator::createBasicConfig(model_config_,
+                                                            parallelism_config,
+                                                            false,
+                                                            cache_gen_num_per_cycle);
+    }
+    const auto&   configured_capture_batch_sizes = params.hw_kernel_config.decode_capture_batch_sizes;
+    const int64_t max_num_requests               = std::max<int64_t>(0, runtime_config.max_generate_batch_size);
+    const int64_t max_capture_batch_size =
+        configured_capture_batch_sizes.empty() ?
+            max_num_requests :
+            std::max<int64_t>(
+                0, *std::max_element(configured_capture_batch_sizes.begin(), configured_capture_batch_sizes.end()));
+    // Match vLLM's minimal profiling KV cache: one block per capturable request,
+    // bounded by both the request limit and the largest CUDA Graph batch.
+    const size_t temporary_block_num =
+        static_cast<size_t>(std::max<int64_t>(1, std::min(max_num_requests, max_capture_batch_size)));
+    RTP_LLM_CHECK_WITH_INFO(temporary_block_num <= std::numeric_limits<uint32_t>::max(),
+                            "decode warmup temporary block num is too large: %zu",
+                            temporary_block_num);
+    config_seed.block_num = static_cast<uint32_t>(temporary_block_num);
+    auto cache_config = std::move(config_seed);
     // createBasicConfig's SingleConfigCreator / HybridConfigCreator paths can
     // leave kernel_seq_size_per_block at 0 (only the real createConfig path
     // runs setupKernelSeqSize). PyWrappedModel asserts kernel_tokens_per_block
@@ -380,20 +555,100 @@ WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
     }
     ParallelismConfig temp_parallelism_config;
     RuntimeConfig     temp_runtime_config;
-    auto              cache_manager = make_shared<KVCacheManager>(
-        cache_config, true, nullptr, KVCacheConfig{}, temp_parallelism_config, temp_runtime_config);
+
+    // The temporary profiling KV pool must not reduce the pool available to the final cache.
+    // Clear loader leftovers and save the sizing base before allocating that temporary pool. The
+    // forward trace starts below, after the pool exists, so its peak delta excludes the pool too.
+    cudaDeviceSynchronize();
+    c10::cuda::CUDACachingAllocator::emptyCache();
+    const size_t sizing_base_available = getGpuExecStatus().device_memory_status.available_bytes;
+
+    // Preserve the explicitly sized profiling cache so its configured capacity
+    // remains stable across ordinary-runtime and CUDA Graph profiling.
+    auto cache_manager = make_shared<KVCacheManager>(
+        cache_config,
+        false,
+        nullptr,
+        kv_cache_config,
+        parallelism_config,
+        runtime_config,
+        sp_config,
+        pd_sep_config,
+        cache_store_config);
+    RTP_LLM_CHECK_WITH_INFO(cache_manager->cacheConfig().block_num == temporary_block_num,
+                            "decode profiling KV cache block num changed: expected=%zu, actual=%u",
+                            temporary_block_num,
+                            cache_manager->cacheConfig().block_num);
     if (!cache_manager->init()) {
         RTP_LLM_FAIL("init kv cache manager failed in decodeWarmUp");
     }
-    executor_.reset(new NormalExecutor(params, cache_manager, true, false, 0, mla_ops_type_));
-    THROW_IF_STATUSOR_ERROR(preRun(fake_input, preRunMode::decode_warm_up));
-    const auto max_consumed = getGpuExecStatus().device_memory_status.max_consumed_bytes;
-    rtp_llm::setTraceMemory(false);
-    (void)executor_.reset(nullptr);
+
+    MemoryStatus post_teardown_status;
+    size_t       pre_warmup_available = 0;
+    {
+        // Profile the production decode forward without capture so its Torch peak does not absorb
+        // only part of the graph pool. CUDA graph memory is measured independently below.
+        WarmupTraceScope trace_scope(executor_);
+        if (propose_params_) {
+            executor_.reset(new MtpExecutor(params,
+                                             propose_params_,
+                                             cache_manager,
+                                             mla_ops_type_,
+                                             kv_cache_group_num_,
+                                             true,
+                                             false));
+        } else {
+            executor_.reset(new NormalExecutor(params,
+                                               cache_manager,
+                                               true,
+                                               false,
+                                               0,
+                                               mla_ops_type_,
+                                               nullptr,
+                                               nullptr,
+                                               false));
+        }
+        THROW_IF_STATUSOR_ERROR(preRun(fake_input, preRunMode::decode_warm_up));
+        post_teardown_status = trace_scope.teardownAndSample();
+        pre_warmup_available = trace_scope.preWarmupAvailableBytes();
+    }
+    auto result = makeWarmUpResult(pre_warmup_available,
+                                   post_teardown_status,
+                                   pd_sep_config.role_type == RoleType::PREFILL
+                                       || pd_sep_config.role_type == RoleType::DECODE,
+                                   "DECODE_WARMUP");
+
+    if (params.hw_kernel_config.enable_cuda_graph) {
+        // Capture the full configured graph set against the same minimal KV layout as the formal
+        // executor. CudaGraphRunner measures the device-free delta across this capture phase.
+        std::unique_ptr<Executor> graph_profile_executor;
+        if (propose_params_) {
+            graph_profile_executor = std::make_unique<MtpExecutor>(params,
+                                                                    propose_params_,
+                                                                    cache_manager,
+                                                                    mla_ops_type_,
+                                                                    kv_cache_group_num_,
+                                                                    true,
+                                                                    true);
+        } else {
+            graph_profile_executor =
+                std::make_unique<NormalExecutor>(params, cache_manager, true, false, 0, mla_ops_type_);
+        }
+        result.cuda_graph_memory_bytes = graph_profile_executor->cudaGraphMemoryBytes();
+        RTP_LLM_CHECK_WITH_INFO(result.cuda_graph_memory_bytes > 0,
+                                "decode CUDA graph capture reported zero device memory growth");
+        result.cuda_graph_measurement_trusted = result.forward_measurement_trusted;
+        graph_profile_executor.reset();
+        cudaDeviceSynchronize();
+        c10::cuda::CUDACachingAllocator::emptyCache();
+    }
+
+    cache_manager.reset();
     cudaDeviceSynchronize();
     c10::cuda::CUDACachingAllocator::emptyCache();
-    const auto device_status = getGpuExecStatus();
-    return WarmUpResult({device_status.device_memory_status.available_bytes, max_consumed});
+    result.available_bytes_pre_warmup = sizing_base_available;
+    result.device_reserved_bytes      = getGpuExecStatus().device_memory_status.available_bytes;
+    return result;
 #endif
 }
 

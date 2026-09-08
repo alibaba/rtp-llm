@@ -535,7 +535,8 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                          const std::shared_ptr<KVCacheManager>&         cache_manager,
                          MlaOpsType                                     mla_ops_type,
                          int32_t                                        kv_cache_group_num,
-                         bool                                           warm_up):
+                         bool                                           warm_up,
+                         bool                                           allow_cuda_graph):
     Executor(),
     cache_manager_(cache_manager),
     metrics_reporter_(params.metrics_reporter),
@@ -672,7 +673,7 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
 
     if (!params.py_model.is_none()) {
         RTP_LLM_LOG_INFO("init executor with python model");
-        model_.reset(new PyWrappedModel(model_init_params, params.py_model, false, true));
+        model_.reset(new PyWrappedModel(model_init_params, params.py_model, false, true, DSparkModelRole::NONE, allow_cuda_graph));
     }
 
     // when warmup, cache manager maybe nullptr
@@ -716,7 +717,7 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                 mtp_params->model_config_.hc_mult});
         if (!params.py_sp_model.is_none()) {
             RTP_LLM_LOG_INFO("[speculative decoding] using py model");
-            const bool enable_cuda_graph = params.hw_kernel_config.enable_cuda_graph;
+            const bool enable_cuda_graph = params.hw_kernel_config.enable_cuda_graph && allow_cuda_graph;
             // A DSpARK PREFILL worker only seeds the draft feature KV through
             // the ordinary CP-capable prefill path and never runs the
             // fixed-width decode proposal or tail commit. Capturing those
@@ -726,9 +727,9 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
             draft_model_.reset(new PyWrappedModel(model_params,
                                                   params.py_sp_model,
                                                   false,
-                                                  false,
-                                                  is_dspark_ ? DSparkModelRole::PROPOSE : DSparkModelRole::NONE,
-                                                  draft_graph_allowed));
+                                       false,
+                                       is_dspark_ ? DSparkModelRole::PROPOSE : DSparkModelRole::NONE,
+                                       draft_graph_allowed && allow_cuda_graph));
             // dspark use DSparkModelRole to call commit func, and token_per_bs is different
             // so another model is required
             if (enable_cuda_graph || is_dspark_) {
@@ -741,7 +742,7 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                        !is_dspark_,
                                        false,
                                        is_dspark_ ? DSparkModelRole::COMMIT : DSparkModelRole::NONE,
-                                       draft_graph_allowed));
+                                       draft_graph_allowed && allow_cuda_graph));
             }
         }
         break;  // NOTE: only support one mtp model now
@@ -2178,6 +2179,17 @@ absl::Status MtpExecutor::process(const std::list<GenerateStreamPtr>& streams, i
     }
 
     return absl::OkStatus();
+}
+
+size_t MtpExecutor::cudaGraphMemoryBytes() const {
+    size_t bytes = model_ ? model_->cudaGraphMemoryBytes() : 0;
+    if (draft_model_) {
+        bytes += draft_model_->cudaGraphMemoryBytes();
+    }
+    if (sp_prefill_draft_model_) {
+        bytes += sp_prefill_draft_model_->cudaGraphMemoryBytes();
+    }
+    return bytes;
 }
 
 bool MtpExecutor::updateEplbConfig(const EPLBConfig& config) {
