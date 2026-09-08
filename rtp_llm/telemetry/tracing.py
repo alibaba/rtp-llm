@@ -269,9 +269,9 @@ def resolve_region_env() -> None:
 
     Must run in the top-level launcher BEFORE child processes spawn: the C++
     backend reads OTEL_EXPORTER_OTLP_TRACES_* strictly from its inherited
-    environment (TelemetryRuntime::init), and both runtimes read POD_IP for
-    host.ip. Disabled tracing is a pure no-op. Idempotent (only fills unset
-    keys) and fail-open.
+    environment (TelemetryRuntime::init), and both runtimes read POD_IP for the
+    rtp_llm.pod_ip resource attribute. Disabled tracing is a pure no-op.
+    Idempotent (only fills unset keys) and fail-open.
     """
     if not _env_bool("RTP_LLM_OTEL_TRACE_ENABLE", False):
         return
@@ -502,20 +502,37 @@ def _init_with_exporter_locked(exporter: Any, role: str, tp_rank: int) -> bool:
     # Unitrace topology shows each role as its own component; an explicit
     # RTP_LLM_OTEL_SERVICE_NAME still overrides globally.
     service_name = os.environ.get("RTP_LLM_OTEL_SERVICE_NAME") or f"rtp_llm_{role}"
+    # Resolved once so service.instance.id, host.name and host.ip can never
+    # disagree about which host this process runs on.
+    hostname = socket.gethostname()
+    pid = os.getpid()
     resource_attributes = {
         "service.name": service_name,
-        "service.instance.id": f"{socket.gethostname()}-{os.getpid()}",
-        "process.pid": os.getpid(),
+        # "unknown" fallback mirrors the C++ runtime: the instance id must never
+        # degrade into a bare "-<pid>".
+        "service.instance.id": f"{hostname or 'unknown'}-{pid}",
+        "process.pid": pid,
         "rtp_llm.role": role,
+        # Fixed marker the platform's GenAI statistics match on. It names the
+        # instrumentation contract being followed, not a library we link.
+        "gen_ai.instrumentation.sdk.name": "loongsuite-genai-utils",
         # rtp_llm.tp_rank is intentionally NOT a resource attribute: the
         # rank0-only gate makes it constantly 0 on every exported span (zero
         # information). tp_rank stays an init_telemetry() gate parameter only.
     }
-    # Aligned with the C++ runtime: host.ip only from a real POD_IP, never
-    # faked from hostname-pid.
+    # Aligned with the C++ runtime: host.ip carries "{hostname}-{pid}", not an IP.
+    # The platform's per-instance request/error/latency panels key off host.ip,
+    # and a pod IP is not process-unique -- frontend and backend share one pod --
+    # so an IP-valued host.ip merges them into a single bucket. The real address
+    # stays reported under rtp_llm.pod_ip. Neither host key is synthesized when
+    # the hostname is unknown: "unknown-<pid>" would pollute exactly the
+    # aggregation these fields exist to serve.
+    if hostname:
+        resource_attributes["host.name"] = hostname
+        resource_attributes["host.ip"] = f"{hostname}-{pid}"
     pod_ip = os.environ.get("POD_IP", "")
     if pod_ip:
-        resource_attributes["host.ip"] = pod_ip
+        resource_attributes["rtp_llm.pod_ip"] = pod_ip
     resource = Resource.create(resource_attributes)
     root_sampler = TraceIdRatioBased(
         _env_ratio("RTP_LLM_OTEL_TRACE_SAMPLER_RATIO", 1.0)

@@ -85,6 +85,12 @@ public:
     static bool           isActive();
     static TelemetryState state();
 
+    // Engine identity behind the gen_ai.engine.index phase span attribute. Only
+    // meaningful while ACTIVE; returns 0 otherwise, which is indistinguishable
+    // from a genuine rank 0 and is why callers must gate on isActive() first
+    // (every phase span factory already does).
+    static int64_t worldRank();
+
     // Returns tracer when ACTIVE, otherwise a no-op tracer. Never null.
     static opentelemetry::nostd::shared_ptr<opentelemetry::trace::Tracer> tracer();
 

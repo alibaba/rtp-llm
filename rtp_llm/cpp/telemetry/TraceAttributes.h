@@ -3,8 +3,9 @@
 // Centralized C++ span attribute registry, mirroring the Python-side schema in
 // rtp_llm/telemetry/attributes.py; keep the two in sync. Grouping follows the
 // same three-layer annotation: OTel official candidate / ARMS-Unitrace extension
-// / rtp_llm.* internal. Resource attributes such as host.ip and service.name are
-// process identity and are intentionally not listed here.
+// / rtp_llm.* internal. Resource attributes such as host.ip, host.name and
+// service.name are process identity, are written once in TelemetryRuntime.cc and
+// are intentionally not listed here.
 
 namespace rtp_llm {
 namespace telemetry {
@@ -20,6 +21,24 @@ inline constexpr const char* kAttrGenAiUsageOutputTokens     = "gen_ai.usage.out
 inline constexpr const char* kAttrGenAiUsagePromptTokens     = "gen_ai.usage.prompt_tokens";
 inline constexpr const char* kAttrGenAiUsageCompletionTokens = "gen_ai.usage.completion_tokens";
 inline constexpr const char* kAttrGenAiUsageTotalTokens      = "gen_ai.usage.total_tokens";
+
+// GenAI engine identity on synthesized phase spans, consumed by the platform's
+// per-engine aggregation view. The value is rtp_llm.world_rank alone: within one
+// deployment the world rank is already globally unique across DP groups, so
+// pairing it with dp_rank would only add a second spelling of the same identity.
+// Written as an integer, matching the reference implementation, so the platform
+// can aggregate on it numerically.
+inline constexpr const char* kAttrGenAiEngineIndex = "gen_ai.engine.index";
+// PD topology role of the phase that this span measures. Only the compute
+// phases carry it: `wait` is pure queueing and `load_cache` is a transfer
+// window, neither of which produces or consumes tokens, so tagging them would
+// attribute PD semantics to spans that have none. A non-separated (fusion)
+// deployment reports "none" rather than omitting the key, which keeps "this
+// engine is not PD-separated" distinguishable from "this engine did not report".
+inline constexpr const char* kAttrGenAiPdRole   = "gen_ai.pd_role";
+inline constexpr const char* kValPdRoleProducer = "producer";
+inline constexpr const char* kValPdRoleConsumer = "consumer";
+inline constexpr const char* kValPdRoleNone     = "none";
 
 // RPC semantic convention attributes for real gRPC boundary spans. Keep the
 // legacy rpc.system key for the published platform contract; migration to

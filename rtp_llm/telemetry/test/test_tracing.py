@@ -424,7 +424,7 @@ class TestScopeVersion(TracingTestCase):
 
 
 class TestResource(TracingTestCase):
-    """Parity with the C++ runtime: host.ip only from POD_IP."""
+    """Parity with the C++ runtime: host.ip is hostname-pid, pod IP is separate."""
 
     def setUp(self):
         super().setUp()
@@ -439,17 +439,52 @@ class TestResource(TracingTestCase):
         assert len(spans) == 1
         return spans[0].resource.attributes
 
-    def test_host_ip_from_pod_ip(self):
+    def test_pod_ip_lands_on_rtp_llm_pod_ip(self):
         os.environ["POD_IP"] = "10.1.2.3"
         exporter = _start_in_memory_runtime()
         attributes = self._finished_resource_attributes(exporter)
-        assert attributes.get("host.ip") == "10.1.2.3"
+        assert attributes.get("rtp_llm.pod_ip") == "10.1.2.3"
+        # The pod address must never leak back into host.ip: the platform's
+        # per-instance panels key off host.ip and a pod IP is not process-unique.
+        assert attributes.get("host.ip") != "10.1.2.3"
         assert attributes.get("rtp_llm.role") == "test"
 
-    def test_host_ip_absent_without_pod_ip(self):
+    def test_rtp_llm_pod_ip_absent_without_pod_ip(self):
         exporter = _start_in_memory_runtime()
         attributes = self._finished_resource_attributes(exporter)
+        assert "rtp_llm.pod_ip" not in attributes
+        # host.ip no longer depends on POD_IP, so it stays present.
+        assert attributes.get("host.ip", "").endswith(f"-{os.getpid()}")
+
+    def test_host_identity_is_hostname_and_hostname_pid(self):
+        with mock.patch.object(socket, "gethostname", return_value="probe-host"):
+            exporter = _start_in_memory_runtime()
+            attributes = self._finished_resource_attributes(exporter)
+        assert attributes.get("host.name") == "probe-host"
+        assert attributes.get("host.ip") == f"probe-host-{os.getpid()}"
+        assert attributes.get("service.instance.id") == f"probe-host-{os.getpid()}"
+
+    def test_host_keys_skipped_when_hostname_unknown(self):
+        # "unknown-<pid>" would pollute exactly the per-instance aggregation the
+        # host keys exist to serve, so neither is synthesized. The instance id
+        # keeps its fallback so it is never absent.
+        with mock.patch.object(socket, "gethostname", return_value=""):
+            exporter = _start_in_memory_runtime()
+            attributes = self._finished_resource_attributes(exporter)
         assert "host.ip" not in attributes
+        assert "host.name" not in attributes
+        assert attributes.get("service.instance.id") == f"unknown-{os.getpid()}"
+
+    def test_instrumentation_sdk_name_is_always_present(self):
+        # Fixed marker the platform's GenAI statistics match on; unconditional so
+        # it cannot depend on host or pod information being available.
+        with mock.patch.object(socket, "gethostname", return_value=""):
+            exporter = _start_in_memory_runtime()
+            attributes = self._finished_resource_attributes(exporter)
+        assert (
+            attributes.get("gen_ai.instrumentation.sdk.name")
+            == "loongsuite-genai-utils"
+        )
 
     def test_resolve_region_env_preserves_existing_pod_ip(self):
         os.environ["POD_IP"] = "10.1.2.3"
@@ -519,7 +554,9 @@ class TestResource(TracingTestCase):
         tracing.resolve_region_env()
         exporter = _start_in_memory_runtime()
         attributes = self._finished_resource_attributes(exporter)
-        assert attributes.get("host.ip") == "10.4.5.6"
+        # The POD_IP derivation chain still reaches the exported resource; it now
+        # lands on rtp_llm.pod_ip instead of host.ip.
+        assert attributes.get("rtp_llm.pod_ip") == "10.4.5.6"
 
     def test_service_name_derived_from_role(self):
         # no env override -> "rtp_llm_" + role (role-split components)
