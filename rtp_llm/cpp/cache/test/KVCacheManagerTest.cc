@@ -1,8 +1,10 @@
 #include <gtest/gtest.h>
 
 #include <chrono>
+#include <cstdint>
 #include <cstdlib>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <algorithm>
 #include <limits>
@@ -1078,6 +1080,297 @@ TEST_F(KVCacheManagerTest, TieredHostCacheIsOwnedOnlyByBlockTreeCache) {
     EXPECT_TRUE(manager->blockTreeCache()->isHostCacheEnabled());
     ASSERT_EQ(manager->blockTreeCache()->groupSets().size(), 1u);
     EXPECT_NE(manager->blockTreeCache()->groupSets().front()->hostPool(), nullptr);
+}
+
+// Gate workflow submission, but keep the real asynchronous GPU/host copies.
+// This models several scheduler LOADING_CACHE requests overlapping watermark
+// eviction without relying on copy duration or concurrent scheduler threads.
+class GatedPayloadTransferEngine: public block_tree_cache_test::ScriptedPerRankBlockTransferEngine {
+public:
+    using ScriptedPerRankBlockTransferEngine::ScriptedPerRankBlockTransferEngine;
+
+    void arm(const std::shared_ptr<block_tree_cache_test::CallbackBarrier>& barrier) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        barrier_ = barrier;
+    }
+
+    std::shared_ptr<AsyncContext> execute(TransferTask task) override {
+        std::shared_ptr<block_tree_cache_test::CallbackBarrier> barrier;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            barrier = barrier_;
+        }
+        if (barrier) {
+            barrier->enterAndWait();
+        }
+        return ScriptedPerRankBlockTransferEngine::execute(std::move(task));
+    }
+
+private:
+    std::mutex                                              mutex_;
+    std::shared_ptr<block_tree_cache_test::CallbackBarrier> barrier_;
+};
+
+class KVCachePayloadTest: public KVCacheManagerTest {
+protected:
+    struct Request {
+        BatchKVCacheResourcePtr resource;
+        CompleteTokenIdsPtr     tokens;
+        CacheKeysType           keys;
+        int                     pattern_id;
+    };
+
+    Request request(int pattern_id, int blocks = 3) {
+        auto      input        = std::make_shared<GenerateInput>();
+        const int seq_len      = (blocks - 1) * 8 + 1;
+        input->input_ids       = torch::arange(pattern_id * 1000, pattern_id * 1000 + seq_len, torch::kInt32);
+        input->generate_config = std::make_shared<GenerateConfig>();
+        auto tokens            = std::make_shared<CompleteTokenIds>(1, 1, seq_len + 16, 8);
+        tokens->init(input);
+        return {makeDSV4BatchResource(manager_->cacheConfig()), tokens, {}, pattern_id};
+    }
+
+    // Pattern varies within K/V, scales, layers, blocks and requests. Comparing
+    // raw bytes also catches scale corruption that float tolerances could hide.
+    torch::Tensor payload(int pattern_id, int block, int layer, bool scale) const {
+        const auto&  config = manager_->cacheConfig();
+        const size_t bytes  = scale ? config.kv_scale_stride_bytes : config.kv_block_stride_bytes;
+        auto         host   = torch::empty({static_cast<int64_t>(bytes)}, torch::kUInt8);
+        // Keep tuple identity in 32 bits: an additive uint8_t seed can make
+        // entire regions identical after wrapping, hiding cross-region copies.
+        uint32_t state = (static_cast<uint32_t>(pattern_id) << 16) | (static_cast<uint32_t>(block) << 8)
+                         | (static_cast<uint32_t>(layer) << 1) | static_cast<uint32_t>(scale);
+        for (size_t i = 0; i < bytes; ++i) {
+            // Fixed-seed xorshift32: deterministic, with no test RNG state.
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            host.data_ptr<uint8_t>()[i] = static_cast<uint8_t>(state);
+        }
+        return host;
+    }
+
+    void devicePayload(const Request& req, bool write, int block_count) {
+        ASSERT_GE(req.resource->blocksNum(0, 0), block_count);
+        for (int block = 0; block < block_count; ++block) {
+            for (int layer = 0; layer < 3; ++layer) {
+                const auto addr = manager_->convertIndexToAddr(req.resource->blocks(0, 0)[block], layer);
+                for (bool scale : {false, true}) {
+                    SCOPED_TRACE(::testing::Message() << "request=" << req.pattern_id << " block=" << block
+                                                      << " layer=" << layer << " scale=" << scale);
+                    auto  expected = payload(req.pattern_id, block, layer, scale);
+                    void* ptr      = scale ? addr.kv_scale_addr : addr.kv_addr;
+                    ASSERT_NE(ptr, nullptr);
+                    auto device = torch::from_blob(
+                        ptr, expected.sizes(), torch::TensorOptions(torch::kUInt8).device(torch::kCUDA));
+                    if (write) {
+                        device.copy_(expected);
+                    } else {
+                        auto host = device.cpu();
+                        ASSERT_TRUE(torch::equal(host, expected));
+                    }
+                }
+            }
+        }
+        runtimeSyncAndCheck();
+    }
+
+    void seed(Request& req) {
+        MallocInfo info{req.resource, req.tokens};
+        info.enable_cache_lookup = false;
+        const auto result        = manager_->malloc(info);
+        ASSERT_TRUE(result.success);
+        ASSERT_EQ(result.async_context, nullptr);
+        ASSERT_NO_FATAL_FAILURE(devicePayload(req, /*write=*/true, 3));
+        ASSERT_NO_FATAL_FAILURE(devicePayload(req, /*write=*/false, 3));
+        req.keys = req.resource->cacheKeys(0);
+        req.keys.resize(2);  // Only the two complete blocks are reusable.
+        manager_->insertIntoCache(InsertInfo{req.resource, req.tokens, false});
+        manager_->free(FreeInfo{req.resource, req.tokens});
+    }
+
+    void hostPayload(const Request& req) {
+        auto                        cache = manager_->blockTreeCache();
+        std::lock_guard<std::mutex> lock(cache->mutex_);
+        const auto                  path = cache->tree()->findNode(req.keys);
+        ASSERT_EQ(path.size(), 2u);
+        for (size_t block = 0; block < path.size(); ++block) {
+            const auto& resource = path[block]->group_set_resources[0];
+            ASSERT_EQ(resource.transfer_state, GroupSetTransferState::IDLE);
+            ASSERT_FALSE(resource.hasTier(Tier::DEVICE));
+            ASSERT_TRUE(resource.hasTier(Tier::HOST));
+            const auto buffer = cache->groupSets()[0]->hostPool()->blockBuffer(resource.host_block);
+            size_t     offset = 0;
+            for (int layer = 0; layer < 3; ++layer) {
+                for (bool scale : {false, true}) {
+                    SCOPED_TRACE(::testing::Message() << "host request=" << req.pattern_id << " block=" << block
+                                                      << " layer=" << layer << " scale=" << scale);
+                    auto expected = payload(req.pattern_id, block, layer, scale);
+                    ASSERT_LE(offset + expected.nbytes(), buffer.payload_bytes);
+                    auto actual =
+                        torch::from_blob(static_cast<uint8_t*>(buffer.addr) + offset, expected.sizes(), torch::kUInt8);
+                    ASSERT_TRUE(torch::equal(actual, expected));
+                    offset += expected.nbytes();
+                }
+            }
+            EXPECT_EQ(offset, buffer.payload_bytes);
+        }
+    }
+
+    void demote() {
+        auto cache = manager_->blockTreeCache();
+        // Capacity is 16: a positive ratio below 1/16 targets zero used
+        // blocks. Pending loads are ineligible; completed live requests keep
+        // their device references even if the tree's copy is demoted again.
+        BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, 0.01);
+        BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
+    }
+
+    void roundTrip(bool concurrent) {
+        auto          config = makeSimpleMhaCacheConfig(3, 17, 8, DataType::TYPE_INT8, 2, 64);
+        KVCacheConfig options;
+        options.enable_host_cache          = true;
+        options.reuse_cache                = true;
+        options.host_cache_size_mb         = 4;
+        options.host_cache_sync_timeout_ms = 30000;
+        manager_                           = std::make_shared<KVCacheManager>(config, false, nullptr, options);
+        ASSERT_TRUE(manager_->init());
+        for (bool scale : {false, true}) {
+            // Regression for the old 8-bit additive pattern's exact collision.
+            ASSERT_FALSE(torch::equal(payload(4, 0, 2, scale), payload(1, 1, 0, scale)));
+        }
+        auto cache = manager_->blockTreeCache();
+        ASSERT_EQ(cache->groupSets().size(), 1u);
+        auto engine = std::make_shared<GatedPayloadTransferEngine>(cache->groupSets());
+        ASSERT_NO_FATAL_FAILURE(BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*cache, engine));
+        BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, 0.0);
+        BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::HOST, 0.0);
+
+        auto a = request(1);
+        auto b = request(2);
+        ASSERT_NO_FATAL_FAILURE(seed(a));
+        ASSERT_NO_FATAL_FAILURE(seed(b));
+        demote();
+        BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
+        BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, 0.0);
+        ASSERT_NO_FATAL_FAILURE(hostPayload(a));
+        ASSERT_NO_FATAL_FAILURE(hostPayload(b));
+        ASSERT_EQ(manager_->freeBlocksNum(), 16u);
+
+        // Reallocate and overwrite EVERY usable device slot. The round-trip
+        // cannot pass by reading old GPU bytes even if load-back is a no-op.
+        auto       poison = request(9, 16);
+        MallocInfo poison_info{poison.resource, poison.tokens};
+        poison_info.enable_cache_lookup = false;
+        ASSERT_TRUE(manager_->malloc(poison_info).success);
+        ASSERT_EQ(manager_->freeBlocksNum(), 0u);
+        ASSERT_NO_FATAL_FAILURE(devicePayload(poison, /*write=*/true, 16));
+        manager_->free(FreeInfo{poison.resource, poison.tokens});
+
+        auto c = request(3);
+        auto d = request(4);
+        if (concurrent) {
+            ASSERT_NO_FATAL_FAILURE(seed(c));
+            ASSERT_NO_FATAL_FAILURE(seed(d));
+        }
+
+        auto barrier = std::make_shared<block_tree_cache_test::CallbackBarrier>();
+        // Must release before manager destruction, including fatal assertions.
+        struct ReleaseBarrier {
+            std::shared_ptr<block_tree_cache_test::CallbackBarrier> barrier;
+            ~ReleaseBarrier() {
+                barrier->release();
+            }
+        } release_barrier{barrier};
+        if (concurrent) {
+            engine->arm(barrier);
+        }
+
+        // Match the scheduler's initial-allocation lane: admit both requests
+        // before polling either load context. No incremental async malloc.
+        auto       load_a   = request(1);
+        auto       load_b   = request(2);
+        const auto result_a = manager_->malloc(MallocInfo{load_a.resource, load_a.tokens});
+        const auto result_b = manager_->malloc(MallocInfo{load_b.resource, load_b.tokens});
+        ASSERT_TRUE(result_a.success);
+        ASSERT_TRUE(result_b.success);
+        ASSERT_NE(result_a.async_context, nullptr);
+        ASSERT_NE(result_b.async_context, nullptr);
+        if (concurrent) {
+            demote();
+            // Two separate load tasks plus at least one eviction task must
+            // reach the gate concurrently, not merely finish in one run.
+            ASSERT_TRUE(barrier->waitUntilEnteredFor(3, std::chrono::seconds(10)));
+            EXPECT_FALSE(result_a.async_context->done());
+            EXPECT_FALSE(result_b.async_context->done());
+            std::lock_guard<std::mutex> lock(cache->mutex_);
+            for (const auto* req : {&a, &b, &c, &d}) {
+                const auto path = cache->tree()->findNode(req->keys);
+                ASSERT_EQ(path.size(), 2u);
+                for (size_t block = 0; block < path.size(); ++block) {
+                    // FULL eviction starts at the leaf; its completion makes
+                    // the parent eligible for the next watermark pass.
+                    const auto expected = req->pattern_id <= 2 ? GroupSetTransferState::LOADING :
+                                          block == 1           ? GroupSetTransferState::DEMOTING :
+                                                                 GroupSetTransferState::IDLE;
+                    EXPECT_EQ(path[block]->group_set_resources[0].transfer_state, expected);
+                }
+            }
+        }
+        barrier->release();
+        for (const auto& context : {result_a.async_context, result_b.async_context}) {
+            context->waitDone();
+            ASSERT_TRUE(context->done());
+            ASSERT_TRUE(context->success()) << context->errorInfo().ToString();
+        }
+        BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
+        BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, 0.0);
+        // The last partial block is new inference space; only the two complete
+        // blocks are loaded and must match the original bytes.
+        for (const auto* req : {&load_a, &load_b}) {
+            ASSERT_EQ(req->resource->blocksNum(0, 0), 3);
+            ASSERT_NO_FATAL_FAILURE(devicePayload(*req, /*write=*/false, 2));
+        }
+        if (concurrent) {
+            // Completion re-admits A/B to the eviction heap. The low watermark
+            // demotes their tree copies again, but the live requests above must
+            // still see the original GPU bytes through their request references.
+            ASSERT_NO_FATAL_FAILURE(hostPayload(a));
+            ASSERT_NO_FATAL_FAILURE(hostPayload(b));
+            ASSERT_NO_FATAL_FAILURE(hostPayload(c));
+            ASSERT_NO_FATAL_FAILURE(hostPayload(d));
+        }
+        EXPECT_EQ(manager_->freeBlocksNum(), 10u);  // Two live three-block requests.
+        size_t d2h = 0;
+        size_t h2d = 0;
+        for (const auto& desc : engine->descriptors()) {
+            if (desc.source_tier == Tier::DEVICE && desc.target_tier == Tier::HOST) {
+                ++d2h;
+            } else if (desc.source_tier == Tier::HOST && desc.target_tier == Tier::DEVICE) {
+                ++h2d;
+            } else {
+                ADD_FAILURE() << "unexpected transfer direction";
+            }
+        }
+        EXPECT_EQ(d2h, concurrent ? 12u : 4u);  // Initial A/B, then C/D and re-demoted A/B.
+        EXPECT_EQ(h2d, 4u);
+        manager_->free(FreeInfo{load_a.resource, load_a.tokens});
+        manager_->free(FreeInfo{load_b.resource, load_b.tokens});
+        BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache, 100, Tier::DEVICE);
+        BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache, 100, Tier::HOST);
+        EXPECT_EQ(manager_->freeBlocksNum(), 16u);
+        EXPECT_EQ(cache->groupSets()[0]->hostPool()->usedBlocksNum(), 0u);
+    }
+
+    std::shared_ptr<KVCacheManager> manager_;
+};
+
+TEST_F(KVCachePayloadTest, WriteEvictLoadBackPreservesEveryKVAndScaleByte) {
+    roundTrip(/*concurrent=*/false);
+}
+
+TEST_F(KVCachePayloadTest, ConcurrentEvictionAndTwoLoadBacksPreserveEveryKVAndScaleByte) {
+    roundTrip(/*concurrent=*/true);
 }
 
 TEST_F(KVCacheManagerTest, ExecuteFunctionReportsFailedCodeForEmptyMemoryRequest) {
