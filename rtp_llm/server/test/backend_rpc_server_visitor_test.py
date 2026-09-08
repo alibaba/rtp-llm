@@ -2,21 +2,27 @@ import asyncio
 import unittest
 from dataclasses import dataclass, field
 from types import SimpleNamespace
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
+
+import torch
 
 from rtp_llm.config.exceptions import (
     AdmissionRejectReason,
     ExceptionType,
     FtRuntimeException,
 )
-from rtp_llm.config.generate_config import RoleAddr, RoleType
+from rtp_llm.config.generate_config import GenerateConfig, RoleAddr, RoleType
 from rtp_llm.server.backend_rpc_server_visitor import (
     BackendRPCServerVisitor,
+    disable_token_only_reuse_for_input_embeddings,
     get_role_names,
 )
 from rtp_llm.server.cache_key_routing import route_cache_keys_for_page_rr
+from rtp_llm.server.host_service import HostService, HostServiceArgs
 from rtp_llm.server.master_client import FlexlbResponse
+from rtp_llm.server.recent_cache_key_window import RecentCacheKeyWindow
 from rtp_llm.telemetry import attributes as trace_attrs
+from rtp_llm.utils.base_model_datatypes import GenerateInput, InputEmbeddings
 
 
 class _FakeTokenIds:
@@ -765,6 +771,362 @@ class BackendRPCServerVisitorRetryTest(unittest.IsolatedAsyncioTestCase):
             ExceptionType.PRIORITY_PREEMPTED,
         )
         self.assertEqual(client.attempts, 2)
+
+
+def make_generate_input(input_embeddings=None):
+    return GenerateInput(
+        request_id=123,
+        token_ids=torch.tensor([1, 2, 3, 4], dtype=torch.int32),
+        mm_inputs=[],
+        generate_config=GenerateConfig(max_new_tokens=1),
+        input_embeddings=input_embeddings,
+    )
+
+
+class BackendRPCServerVisitorTest(unittest.IsolatedAsyncioTestCase):
+    def make_visitor(self):
+        visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
+        visitor.source_role = "frontend"
+        visitor.source_ip = "127.0.0.1"
+        visitor._page_rr_route_cache_keys = False
+        visitor._page_rr_cp_size = 1
+        visitor._prefill_cp_active = False
+        visitor.recent_cache_key_window = RecentCacheKeyWindow()
+        return visitor
+
+    async def test_master_route_uses_token_cache_keys_without_input_embeddings(self):
+        visitor = self.make_visitor()
+        visitor.seq_size_per_block = 2
+        visitor.master_client = Mock()
+        visitor.master_client.get_backend_role_addrs = AsyncMock(
+            return_value=FlexlbResponse.ok(
+                [
+                    RoleAddr(
+                        role=RoleType.PREFILL,
+                        ip="127.0.0.1",
+                        http_port=1,
+                        grpc_port=2,
+                    )
+                ]
+            )
+        )
+        input = make_generate_input()
+
+        await visitor.get_master_route_addrs(input)
+
+        kwargs = visitor.master_client.get_backend_role_addrs.call_args.kwargs
+        self.assertGreater(len(kwargs["block_cache_keys"]), 0)
+
+    def make_domain_visitor(self, roles=None):
+        visitor = self.make_visitor()
+        visitor.master_config = SimpleNamespace(master_queue_reject_threshold=10)
+        visitor.pd_sep_config = SimpleNamespace(role_type=RoleType.FRONTEND)
+        visitor.host_service = Mock()
+        visitor.host_service.get_queue_length.return_value = 0
+        visitor.host_service.get_master_addr.return_value = "batch-master:9000"
+        visitor.host_service.get_backend_role_addrs.return_value = roles or []
+        visitor.backend_role_list = [RoleType.PDFUSION]
+        visitor.master_client = Mock()
+        visitor.master_client.get_backend_role_addrs = AsyncMock()
+        return visitor
+
+    def custom_input(self):
+        return make_generate_input(InputEmbeddings([torch.zeros(1, 8)], [1]))
+
+    async def test_embeddings_select_one_topology_with_real_host_service(self):
+        p = RoleAddr(
+            role=RoleType.PREFILL, ip="127.0.0.1", http_port=9100, grpc_port=9101
+        )
+        d = RoleAddr(
+            role=RoleType.DECODE, ip="127.0.0.1", http_port=9200, grpc_port=9201
+        )
+        f = RoleAddr(
+            role=RoleType.PDFUSION, ip="127.0.0.1", http_port=9300, grpc_port=9301
+        )
+        cases = [
+            ([p, d], RoleType.PDFUSION, [p, d]),
+            (
+                [p],
+                RoleType.PDFUSION,
+                [
+                    p,
+                    RoleAddr(
+                        role=RoleType.DECODE,
+                        ip="127.0.0.1",
+                        http_port=8200,
+                        grpc_port=8201,
+                    ),
+                ],
+            ),
+            ([f], RoleType.DECODE, [f]),
+            ([p, d, f], RoleType.PDFUSION, [p, d]),
+            (
+                [],
+                RoleType.PDFUSION,
+                [
+                    RoleAddr(
+                        role=RoleType.DECODE,
+                        ip="127.0.0.1",
+                        http_port=8200,
+                        grpc_port=8201,
+                    ),
+                    RoleAddr(
+                        role=RoleType.PREFILL,
+                        ip="127.0.0.1",
+                        http_port=8100,
+                        grpc_port=8101,
+                    ),
+                ],
+            ),
+        ]
+        for explicit, unavailable, expected in cases:
+            with self.subTest(explicit=explicit, unavailable=unavailable):
+                visitor = self.make_domain_visitor()
+                visitor.pd_sep_config = SimpleNamespace(
+                    role_type=RoleType.FRONTEND, to_string=lambda: "FRONTEND"
+                )
+                args = HostServiceArgs(
+                    pdfusion_domain="127.0.0.1:8000",
+                    prefill_domain="127.0.0.1:8100",
+                    decode_domain="127.0.0.1:8200",
+                    use_local=True,
+                )
+                visitor.host_service = HostService(args)
+                visitor.backend_role_list = visitor.get_backend_role_list(
+                    visitor.pd_sep_config, args
+                )
+                request = self.custom_input()
+                request.generate_config.role_addrs = list(explicit)
+                with patch.object(
+                    visitor.host_service,
+                    "get_master_addr",
+                    return_value="batch-master:9000",
+                ), patch.object(
+                    visitor.host_service.role_vip_map[unavailable],
+                    "get_host",
+                    return_value=None,
+                ), patch(
+                    "rtp_llm.server.backend_rpc_server_visitor.kmonitor"
+                ):
+                    await visitor.route_ips(request)
+                self.assertCountEqual(request.generate_config.role_addrs, expected)
+                self.assertFalse(request.enqueued_by_master)
+                visitor.master_client.get_backend_role_addrs.assert_not_called()
+
+    async def test_embeddings_topology_selection_keeps_required_auxiliary_roles(self):
+        from rtp_llm.ops import VitSeparation
+
+        visitor = self.make_domain_visitor()
+        visitor.pd_sep_config = SimpleNamespace(
+            role_type=RoleType.FRONTEND, to_string=lambda: "FRONTEND"
+        )
+        args = HostServiceArgs(
+            pdfusion_domain="127.0.0.1:8000",
+            prefill_domain="127.0.0.1:8100",
+            decode_domain="127.0.0.1:8200",
+            vit_domain="127.0.0.1:8300",
+            use_local=True,
+        )
+        visitor.host_service = HostService(args)
+        visitor.backend_role_list = visitor.get_backend_role_list(
+            visitor.pd_sep_config, args, VitSeparation.VIT_SEPARATION_REMOTE
+        )
+        request = self.custom_input()
+        request.generate_config.role_addrs = [
+            RoleAddr(
+                role=RoleType.PDFUSION, ip="127.0.0.1", http_port=9300, grpc_port=9301
+            )
+        ]
+        with patch("rtp_llm.server.backend_rpc_server_visitor.kmonitor"):
+            await visitor.route_ips(request)
+        self.assertEqual(
+            {addr.role for addr in request.generate_config.role_addrs},
+            {RoleType.PDFUSION, RoleType.VIT},
+        )
+
+    async def test_embeddings_bypass_batch_master_and_control_plane_serialization(self):
+        address = RoleAddr(
+            role=RoleType.PDFUSION, ip="127.0.0.1", http_port=9000, grpc_port=9001
+        )
+        visitor = self.make_domain_visitor([address])
+        for rows in (1, 2047, 2048, 2049):
+            with self.subTest(rows=rows):
+                request = make_generate_input(
+                    InputEmbeddings(
+                        [torch.zeros(rows, 4096, dtype=torch.bfloat16)], [1]
+                    )
+                )
+                request.token_ids = torch.zeros(rows + 2, dtype=torch.int32)
+                with patch(
+                    "rtp_llm.server.backend_rpc_server_visitor.trans_input"
+                ) as serialize:
+                    await visitor.route_ips(request)
+                serialize.assert_not_called()
+                visitor.master_client.get_backend_role_addrs.assert_not_called()
+                self.assertEqual(request.generate_config.role_addrs, [address])
+                self.assertFalse(request.enqueued_by_master)
+
+    async def test_embeddings_do_not_enter_master_even_when_called_directly(self):
+        visitor = self.make_domain_visitor()
+        with self.assertRaisesRegex(FtRuntimeException, "backend domain routing"):
+            await visitor.get_master_route_addrs(self.custom_input())
+        visitor.master_client.get_backend_role_addrs.assert_not_called()
+
+    async def test_embeddings_retain_cached_queue_rejection(self):
+        visitor = self.make_domain_visitor()
+        visitor.host_service.get_queue_length.return_value = 11
+        with self.assertRaises(FtRuntimeException) as error:
+            await visitor.route_ips(self.custom_input())
+        self.assertEqual(
+            error.exception.exception_type, ExceptionType.TRAFFIC_LIMIT_ERROR
+        )
+        visitor.host_service.get_backend_role_addrs.assert_not_called()
+        visitor.master_client.get_backend_role_addrs.assert_not_called()
+
+    async def test_embeddings_reject_missing_or_incomplete_backend_roles(self):
+        prefill = RoleAddr(
+            role=RoleType.PREFILL, ip="127.0.0.1", http_port=9000, grpc_port=9001
+        )
+        invalid = RoleAddr(role=RoleType.PDFUSION, ip="", http_port=0, grpc_port=0)
+        valid = RoleAddr(
+            role=RoleType.PDFUSION, ip="127.0.0.1", http_port=9000, grpc_port=9001
+        )
+        bad_first = RoleAddr(
+            role=RoleType.PDFUSION, ip="127.0.0.1", http_port=0, grpc_port=0
+        )
+        for addresses in ([], [prefill], [invalid], [bad_first, valid]):
+            with self.subTest(addresses=addresses):
+                visitor = self.make_domain_visitor(addresses)
+                with self.assertRaises(FtRuntimeException) as error:
+                    await visitor.route_ips(self.custom_input())
+                self.assertEqual(
+                    error.exception.exception_type, ExceptionType.ROUTE_ERROR
+                )
+                visitor.master_client.get_backend_role_addrs.assert_not_called()
+
+    async def test_embeddings_preserve_explicit_roles_and_fill_missing_decode(self):
+        prefill = RoleAddr(
+            role=RoleType.PREFILL, ip="127.0.0.1", http_port=9000, grpc_port=9001
+        )
+        decode = RoleAddr(
+            role=RoleType.DECODE, ip="127.0.0.1", http_port=9001, grpc_port=9002
+        )
+        visitor = self.make_domain_visitor([decode])
+        visitor.backend_role_list = [RoleType.PREFILL, RoleType.DECODE]
+        request = self.custom_input()
+        request.generate_config.role_addrs = [prefill]
+        await visitor.route_ips(request)
+        self.assertEqual(request.generate_config.role_addrs, [prefill, decode])
+        visitor.host_service.get_backend_role_addrs.assert_called_once_with(
+            [RoleType.DECODE]
+        )
+        visitor.master_client.get_backend_role_addrs.assert_not_called()
+
+    async def test_embeddings_reject_stale_master_enqueue_flag(self):
+        visitor = self.make_domain_visitor()
+        request = self.custom_input()
+        request.enqueued_by_master = True
+        request.generate_config.role_addrs = [
+            RoleAddr(
+                role=RoleType.PDFUSION, ip="127.0.0.1", http_port=9000, grpc_port=9001
+            )
+        ]
+        with self.assertRaisesRegex(FtRuntimeException, "cannot fetch"):
+            await visitor.route_ips(request)
+        visitor.host_service.get_backend_role_addrs.assert_not_called()
+
+    async def test_embeddings_propagate_domain_cancellation(self):
+        visitor = self.make_domain_visitor()
+        visitor.get_domain_route_addrs = AsyncMock(side_effect=asyncio.CancelledError)
+        with self.assertRaises(asyncio.CancelledError):
+            await visitor.route_ips(self.custom_input())
+        visitor.master_client.get_backend_role_addrs.assert_not_called()
+
+    async def test_enqueue_disables_token_only_reuse_with_input_embeddings(self):
+        visitor = self.make_visitor()
+        visitor.max_seq_len = 16
+        visitor.sp_config = None
+        visitor.host_service = Mock(service_available=False)
+        visitor.model_rpc_client = Mock()
+
+        async def stream():
+            yield "result"
+
+        visitor.model_rpc_client.enqueue = Mock(return_value=stream())
+        input = make_generate_input(
+            InputEmbeddings(
+                embeddings=[torch.zeros((1, 8), dtype=torch.float32)],
+                embedding_locs=[1],
+            )
+        )
+
+        self.assertTrue(input.generate_config.reuse_cache)
+        output = await visitor.enqueue(input)
+
+        self.assertEqual([item async for item in output], ["result"])
+        self.assertFalse(input.generate_config.reuse_cache)
+        self.assertFalse(input.generate_config.enable_device_cache)
+        self.assertFalse(input.generate_config.enable_memory_cache)
+        self.assertFalse(input.generate_config.enable_remote_cache)
+
+    def test_check_sp_supported_rejects_input_embeddings(self):
+        visitor = self.make_visitor()
+        visitor.sp_config = Mock(model_type="mtp")
+        input = make_generate_input(
+            InputEmbeddings(
+                embeddings=[torch.zeros((1, 8), dtype=torch.float32)],
+                embedding_locs=[1],
+            )
+        )
+
+        for disabled in (False, True):
+            with self.subTest(force_disable_sp_run=disabled):
+                input.generate_config.force_disable_sp_run = disabled
+                with self.assertRaisesRegex(
+                    FtRuntimeException, "unsupported by speculative"
+                ) as error:
+                    visitor.check_sp_supported(input)
+                self.assertEqual(
+                    error.exception.exception_type, ExceptionType.UNSUPPORTED_OPERATION
+                )
+
+    async def test_batch_enqueue_disables_token_only_reuse_with_input_embeddings(self):
+        visitor = self.make_visitor()
+        visitor.max_seq_len = 16
+        visitor.sp_config = None
+        visitor.host_service = Mock(service_available=False)
+        visitor.model_rpc_client = Mock()
+        visitor.model_rpc_client.batch_enqueue = AsyncMock(return_value=[])
+        text_input = make_generate_input()
+        embedding_input = make_generate_input(
+            InputEmbeddings(
+                embeddings=[torch.zeros((1, 8), dtype=torch.float32)],
+                embedding_locs=[1],
+            )
+        )
+
+        await visitor.batch_enqueue([text_input, embedding_input])
+
+        self.assertTrue(text_input.generate_config.reuse_cache)
+        self.assertFalse(embedding_input.generate_config.reuse_cache)
+        self.assertFalse(embedding_input.generate_config.enable_device_cache)
+        self.assertFalse(embedding_input.generate_config.enable_memory_cache)
+        self.assertFalse(embedding_input.generate_config.enable_remote_cache)
+
+    def test_empty_input_embeddings_keeps_reuse_flags(self):
+        input = make_generate_input(
+            InputEmbeddings(
+                embeddings=[],
+                embedding_locs=[],
+            )
+        )
+
+        disable_token_only_reuse_for_input_embeddings(input)
+
+        self.assertTrue(input.generate_config.reuse_cache)
+        self.assertTrue(input.generate_config.enable_device_cache)
+        self.assertTrue(input.generate_config.enable_memory_cache)
+        self.assertTrue(input.generate_config.enable_remote_cache)
 
 
 if __name__ == "__main__":
