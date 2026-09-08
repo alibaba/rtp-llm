@@ -22,6 +22,7 @@ from rtp_llm.utils.concurrency_controller import get_global_controller
 from rtp_llm.utils.fuser import _nfs_manager
 
 USAGE_HEADER = "USAGE"
+BACKEND_STORE_FAILURE_TIMEOUT_S = 600.0
 
 
 class BackendManager(object):
@@ -140,17 +141,38 @@ class BackendManager(object):
         gc.collect()
         gc.freeze()
         logging.info("BackendManager entering serve_forever loop")
+        failure_since = None
+        next_error_log = 0.0
         while not self._shutdown_requested.is_set():
             peer_shutdown_requested = False
+            poll_started = time.monotonic()
             try:
                 peer_shutdown_requested = (
                     self._distributed_server.is_backend_shutdown_requested()
                 )
             except Exception:
-                # A transient/broken coordination store must not escape the
-                # service loop and bypass stop(). Local ProcessManager signals
-                # remain the fallback shutdown trigger.
-                logging.exception("failed to poll job-wide backend shutdown request")
+                now = time.monotonic()
+                if failure_since is None:
+                    failure_since = poll_started
+                if now - failure_since >= BACKEND_STORE_FAILURE_TIMEOUT_S:
+                    logging.error(
+                        "BACKEND_FATAL_FAILURE: coordination store unavailable for "
+                        "%.1fs; exiting rank for supervisor recovery",
+                        now - failure_since,
+                        exc_info=True,
+                    )
+                    # Let ProcessManager detect a dead rank and reclaim peers.
+                    # Do not unwind through stop()/communication cleanup, which
+                    # can hang or clear callbacks while the engine is still alive.
+                    os._exit(1)
+                if now >= next_error_log:
+                    logging.exception(
+                        "failed to poll job-wide backend shutdown request"
+                    )
+                    next_error_log = now + 5.0
+            else:
+                failure_since = None
+                next_error_log = 0.0
             if peer_shutdown_requested:
                 logging.info("job-wide backend shutdown requested by a peer rank")
                 self._mark_not_serving()
