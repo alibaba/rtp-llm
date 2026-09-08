@@ -77,9 +77,8 @@ public class EngineStatusConverter {
     }
 
     /** Convert one protobuf response directly into the immutable status boundary. */
-    public static StatusObservation convertToStatusObservation(
-            WorkerStatus owner,
-            EngineRpcService.WorkerStatusPB workerStatusPB) {
+    public static StatusObservation convertToStatusObservation(WorkerStatus owner,
+                                                               EngineRpcService.WorkerStatusPB workerStatusPB) {
         Map<String, TaskObservation> runningTasks = convertTasks(
                 workerStatusPB.getRunningTaskInfoList());
         Map<String, TaskObservation> finishedTasks = convertTasks(
@@ -95,6 +94,7 @@ public class EngineStatusConverter {
                 workerStatusPB.getDpSize(),
                 workerStatusPB.getTpSize(),
                 workerStatusPB.getDpRank(),
+                workerStatusPB.getBlockSize(),
                 workerStatusPB.getBlockHashLookaheadTokens(),
                 workerStatusPB.getCacheMatchRollbackBlocks(),
                 convertKvCacheGroupMode(workerStatusPB.getKvCacheGroupMode()),

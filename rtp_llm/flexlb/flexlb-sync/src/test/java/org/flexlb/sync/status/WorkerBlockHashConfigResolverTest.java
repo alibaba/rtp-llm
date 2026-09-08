@@ -4,8 +4,9 @@ import org.flexlb.cache.domain.BlockHashConfig;
 import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusProvider;
-import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.service.grpc.EngineStatusConverter;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -17,6 +18,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class WorkerBlockHashConfigResolverTest {
@@ -112,6 +114,26 @@ class WorkerBlockHashConfigResolverTest {
         assertThrows(IllegalStateException.class, resolver::resolve);
     }
 
+    @Test
+    void resolvesPbConfigWithoutCachePolling() {
+        WorkerStatus worker = worker(RoleType.PDFUSION, 1152, 0);
+        statusMap(RoleType.PDFUSION).put("worker", worker);
+
+        assertNull(worker.getCacheStatus());
+        assertEquals(config(1152, 0), resolver.resolve());
+    }
+
+    @Test
+    void ignoresIndependentCacheStatusWhenResolvingHashConfig() {
+        WorkerStatus worker = worker(RoleType.PDFUSION, 1152, 2);
+        CacheStatus cacheStatus = new CacheStatus();
+        cacheStatus.setBlockSize(64);
+        worker.publishCacheStatus(cacheStatus);
+        statusMap(RoleType.PDFUSION).put("worker", worker);
+
+        assertEquals(config(1152, 2), resolver.resolve());
+    }
+
     private Collection<WorkerStatus> getWorkerStatuses(RoleType roleType, String group) {
         Map<String, WorkerStatus> statuses = workerStatuses.get(roleType);
         return statuses == null ? List.of() : statuses.values();
@@ -135,26 +157,21 @@ class WorkerBlockHashConfigResolverTest {
         return worker(roleType, blockSize, lookaheadTokens, true);
     }
 
-    private WorkerStatus worker(
-            RoleType roleType, long blockSize, int lookaheadTokens, boolean alive) {
+    private WorkerStatus worker(RoleType roleType, long blockSize, int lookaheadTokens, boolean alive) {
         int port = nextPort++;
-        CacheStatus cacheStatus = new CacheStatus();
-        cacheStatus.setBlockSize(blockSize);
         WorkerStatus workerStatus = WorkerStatus.createDiscovered(
                 roleType, null, "127.0.0.1", port, port + 1, "test-site");
-        workerStatus.publishCacheStatus(cacheStatus);
-        WorkerStatusResponse response = new WorkerStatusResponse();
-        response.setRole(roleType);
-        response.setAlive(alive);
-        response.setStatusVersion(1L);
-        response.setLatestFinishedVersion(0L);
-        response.setRunningTaskInfo(Map.of());
-        response.setFinishedTaskInfo(Map.of());
-        response.setBlockHashLookaheadTokens(lookaheadTokens);
+        EngineRpcService.WorkerStatusPB response = EngineRpcService.WorkerStatusPB.newBuilder()
+                .setRole(roleType.name())
+                .setAlive(alive)
+                .setStatusVersion(1L)
+                .setBlockSize(blockSize)
+                .setBlockHashLookaheadTokens(lookaheadTokens)
+                .build();
         workerStatus.lock.lock();
         try {
             WorkerStatus.PreparedStatus prepared = workerStatus.prepareNewStatus(
-                    workerStatus.freezeStatusResponse(response));
+                    EngineStatusConverter.convertToStatusObservation(workerStatus, response));
             workerStatus.publishPreparedStatus(prepared);
             workerStatus.recordSuccessfulPoll(alive);
         } finally {
