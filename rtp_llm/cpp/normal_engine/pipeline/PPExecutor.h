@@ -67,10 +67,14 @@ private:
     struct InflightBatch {
         bool         skip_run = true;
         StreamGroups stream_groups;
-        int64_t      schedule_time_us = 0;
-        PPTickets    plan_sends;
-        PPTickets    activation_sends;
-        PPTickets    execution_result_sends;
+        // Dispatch-time per-stream geometry, parallel to stream_groups.allStreams().
+        // Consumed with the round's execution result, by which time the live
+        // stream state has moved on.
+        std::vector<PPStreamRoundSnapshot> round_snapshot;
+        int64_t                            schedule_time_us = 0;
+        PPTickets                          plan_sends;
+        PPTickets                          activation_sends;
+        PPTickets                          execution_result_sends;
 
         void reset();
     };

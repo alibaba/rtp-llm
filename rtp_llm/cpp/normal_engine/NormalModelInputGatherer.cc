@@ -516,10 +516,23 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
 
             if (ctx.need_cal_position_id) {
                 auto context_pos_ids = stream->generateContextPositionIds();
-                int  reuse_offset    = stream->reuseLength() * config_.position_id_len_factor;
-                memcpy(ctx.combo_position_ids + ctx.token_idx * config_.position_id_len_factor,
-                       context_pos_ids.data_ptr<int>() + reuse_offset,
-                       (context_pos_ids.numel() - reuse_offset) * sizeof(int));
+                // prefixLength(), not reuseLength(): under chunked prefill this
+                // round covers [prefixLength, prefixLength + contextLength), and
+                // the generated range spans the whole input. Copying all of it
+                // overruns the destination row, which is sized for this round.
+                const int64_t factor     = config_.position_id_len_factor;
+                const int64_t src_offset = static_cast<int64_t>(stream->prefixLength()) * factor;
+                const int64_t copy_count = static_cast<int64_t>(input_tokens.size()) * factor;
+                RTP_LLM_CHECK_WITH_INFO(src_offset >= 0 && copy_count >= 0
+                                            && src_offset + copy_count <= context_pos_ids.numel(),
+                                        "stream [%ld] position ids out of range: offset=%ld count=%ld numel=%ld",
+                                        stream->streamId(),
+                                        static_cast<long>(src_offset),
+                                        static_cast<long>(copy_count),
+                                        static_cast<long>(context_pos_ids.numel()));
+                memcpy(ctx.combo_position_ids + ctx.token_idx * factor,
+                       context_pos_ids.data_ptr<int>() + src_offset,
+                       copy_count * sizeof(int));
             }
 
             copyKvCacheBlocksToModelInput(

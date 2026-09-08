@@ -47,6 +47,11 @@ struct StreamUpdateInfo {
     // prompt scoring
     std::optional<PromptLogitsOutput> prompt_logits;
     std::optional<ErrorInfo>          error_info;
+    // Set by the PP result path when the round carried a non-final fastgen
+    // chunk. Decided at dispatch, not here: the chunk cursors keep advancing
+    // while the round is in flight, so by result time the stream can no longer
+    // tell which chunk this update belongs to.
+    bool                              intermediate_chunk = false;
 };
 
 struct StreamSpecUpdateInfo {

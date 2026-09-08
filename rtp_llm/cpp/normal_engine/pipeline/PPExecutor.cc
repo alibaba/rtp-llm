@@ -66,6 +66,7 @@ static int64_t getProcessorEosTokenId(const ModelConfig& model_config) {
 void PPExecutor::InflightBatch::reset() {
     skip_run         = true;
     stream_groups    = StreamGroups();
+    round_snapshot.clear();
     schedule_time_us = 0;
 }
 
@@ -170,7 +171,7 @@ void PPExecutor::waitAll(PPTickets& tickets) {
 
 absl::Status PPExecutor::processExecutionResult(InflightBatch& batch) {
     auto result = pp_serialization::deserializeExecutionResult(receiveObject());
-    return batch_stream_processor_->dispatchExecutionResult(batch.stream_groups, result);
+    return batch_stream_processor_->dispatchExecutionResult(batch.stream_groups, result, batch.round_snapshot);
 }
 
 PPExecutor::PPExecutor(const EngineInitParams&                params,
@@ -606,6 +607,17 @@ absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t 
     if (isFirstStage() && isStageRoot()) {
         inflight.stream_groups    = std::move(scheduled_stream_groups);
         inflight.schedule_time_us = schedule_time_us;
+        // Snapshot this round's geometry while the cursors still describe it.
+        // The result is consumed up to pp_size rounds later, by which point a
+        // fastgen stream has advanced that many chunks: intermediate_chunk in
+        // particular must be decided here, because once the final chunk has
+        // been dispatched every still-pending intermediate chunk would read as
+        // final and append its mid-prompt token to the stream.
+        for (const auto& stream : inflight.stream_groups.allStreams()) {
+            inflight.round_snapshot.push_back({static_cast<int64_t>(stream->currentBatchSize()),
+                                               static_cast<int64_t>(stream->currentExecuteTokenSize()),
+                                               stream->isContextStream() && stream->isChunkStream()});
+        }
     }
 
     /** 4. send the plan to next stage  */

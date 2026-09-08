@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 
+#include "autil/EnvUtil.h"
 #include "autil/TimeUtility.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -11,6 +12,19 @@
 using namespace std;
 
 namespace rtp_llm {
+
+namespace {
+
+/** Fastgen chunks allowed in flight per context stream. pp_size fills the
+ * pipeline; 1 serializes, one chunk per pipeline round-trip. Overridable so
+ * overlap depth can be bisected without a rebuild.
+ */
+int64_t resolvePPChunkOverlapCap(int64_t pp_size) {
+    const auto override_cap = autil::EnvUtil::getEnv<int64_t>("RTP_LLM_PP_CHUNK_OVERLAP", static_cast<int64_t>(0));
+    return override_cap > 0 ? override_cap : std::max<int64_t>(pp_size, 1);
+}
+
+}  // namespace
 
 PPScheduler::PPScheduler(const RuntimeConfig&                   runtime_config,
                          const ModelConfig&                     model_config,
@@ -28,7 +42,11 @@ PPScheduler::PPScheduler(const RuntimeConfig&                   runtime_config,
                       metrics_reporter),
     max_batch_tokens_without_cache_(static_cast<size_t>(
         std::max<int64_t>(runtime_config.fifo_scheduler_config.max_batch_tokens_without_cache, 0))),
-    pp_overlap_cap_(std::max<int64_t>(parallelism_config.pp_size, 1)) {}
+    pp_overlap_cap_(resolvePPChunkOverlapCap(parallelism_config.pp_size)) {
+    RTP_LLM_LOG_INFO("PPScheduler fastgen chunk overlap cap=%ld (pp_size=%ld)",
+                     static_cast<long>(pp_overlap_cap_),
+                     static_cast<long>(parallelism_config.pp_size));
+}
 
 PPScheduler::~PPScheduler() {
     (void)stop();

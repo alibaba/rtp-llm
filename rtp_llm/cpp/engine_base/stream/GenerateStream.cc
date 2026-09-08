@@ -1197,10 +1197,12 @@ void GenerateStream::updateFromPP(const StreamUpdateInfo& update_info) {
     if (reportUpdateErrorWithoutLock(update_info.error_info)) {
         return;
     }
-    if (isChunkStream()) {
+    if (update_info.intermediate_chunk) {
         // Non-final chunk of a fastgen context stream: the pipeline round must
         // not append tokens or flip is_context_stream_ — the context continues
-        // into the next chunk. The final chunk (cursor at max) falls through.
+        // into the next chunk. The flag comes from the dispatch-time snapshot;
+        // reading isChunkStream() here is wrong under overlap because the
+        // cursors have already advanced past this chunk.
         return;
     }
     *is_context_stream_ = false;
