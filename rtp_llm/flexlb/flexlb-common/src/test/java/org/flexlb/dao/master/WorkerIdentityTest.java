@@ -28,6 +28,14 @@ class WorkerIdentityTest {
     }
 
     @Test
+    void choosesMetricAddressByLogicalWorkerCount() {
+        WorkerIdentity identity = new WorkerIdentity("10.0.0.8", 8080, 1);
+
+        assertEquals("10.0.0.8:8080", identity.getMetricIpPort(1));
+        assertEquals("10.0.0.8:8080@1", identity.getMetricIpPort(2));
+    }
+
+    @Test
     void equalsAndHashCodeCompareAllIdentityFields() {
         WorkerIdentity identity = new WorkerIdentity("10.0.0.8", 8080, 1);
 
