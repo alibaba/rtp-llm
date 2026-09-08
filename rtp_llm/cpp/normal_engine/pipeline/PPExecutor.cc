@@ -33,6 +33,23 @@ namespace rtp_llm {
 
 PPExecutor::ModelFactory PPExecutor::test_model_factory = nullptr;
 
+namespace {
+
+std::string head8Hex(const void* data, int64_t numel) {
+    static const char* kHex = "0123456789abcdef";
+    const auto*        p    = static_cast<const uint8_t*>(data);
+    const auto         n    = std::min<int64_t>(numel, 8);
+    std::string        out;
+    out.reserve(static_cast<size_t>(n) * 2);
+    for (int64_t i = 0; i < n; ++i) {
+        out.push_back(kHex[p[i] >> 4]);
+        out.push_back(kHex[p[i] & 0xF]);
+    }
+    return out;
+}
+
+}  // namespace
+
 static int64_t getProcessorEosTokenId(const ModelConfig& model_config) {
     const auto  eos_token_id     = model_config.special_tokens.eos_token_id;
     const auto& output_vocab_ids = model_config.output_vocab_ids;
@@ -54,6 +71,14 @@ void PPExecutor::InflightBatch::reset() {
 
 void PPExecutor::sendObject(const torch::Tensor& object, PPTickets& tickets) {
     auto object_size = torch::tensor({object.numel()}, torch::kInt64);
+    if (obj_log_active_) {
+        RTP_LLM_LOG_INFO("[PPOBJ] rank=%lld send seq=%ld obj_bytes=%lld head=%s",
+                         static_cast<long long>(parallelism_config_.world_rank),
+                         static_cast<long>(send_seq_),
+                         static_cast<long long>(object.numel()),
+                         head8Hex(object.data_ptr(), object.numel()).c_str());
+    }
+    send_seq_ += 2;
     tickets.push_back(transport_->asyncSend(object_size));
     tickets.push_back(transport_->asyncSend(object));
 }
@@ -63,9 +88,18 @@ torch::Tensor PPExecutor::receiveObject() {
     auto size_receive = transport_->asyncReceive(object_size);
     size_receive->wait();
 
-    auto object         = torch::empty({object_size.item<int64_t>()}, torch::TensorOptions().dtype(torch::kUInt8));
-    auto object_receive = transport_->asyncReceive(object);
+    const auto nbytes         = object_size.item<int64_t>();
+    auto       object         = torch::empty({nbytes}, torch::TensorOptions().dtype(torch::kUInt8));
+    auto       object_receive = transport_->asyncReceive(object);
     object_receive->wait();
+    if (obj_log_active_) {
+        RTP_LLM_LOG_INFO("[PPOBJ] rank=%lld recv seq=%ld obj_bytes=%lld head=%s",
+                         static_cast<long long>(parallelism_config_.world_rank),
+                         static_cast<long>(recv_seq_),
+                         static_cast<long long>(nbytes),
+                         head8Hex(object.data_ptr(), object.numel()).c_str());
+    }
+    recv_seq_ += 2;
     return object;
 }
 
@@ -83,15 +117,28 @@ void PPExecutor::asyncSendExecutionResult(const PPExecutionResult& result, PPTic
 
 void PPExecutor::asyncSendTensors(const PPIntermediateTensors& tensors, PPTickets& tickets) {
     sendObject(pp_serialization::serializeTensorsMetadata(tensors), tickets);
+    int64_t nonempty_sends = 0;
     for (const auto& tensor_entry : tensors.tensors) {
         if (tensor_entry.second.numel() != 0) {
             tickets.push_back(transport_->asyncSend(tensor_entry.second));
+            ++nonempty_sends;
         }
+    }
+    if (obj_log_active_) {
+        RTP_LLM_LOG_INFO("[PPTENS] rank=%lld send meta_entries=%ld nonempty=%ld",
+                         static_cast<long long>(parallelism_config_.world_rank),
+                         static_cast<long>(tensors.tensors.size()),
+                         static_cast<long>(nonempty_sends));
     }
 }
 
 PPIntermediateTensors PPExecutor::receiveTensors(PPTickets& tickets) {
     auto tensors = pp_serialization::deserializeTensorsMetadata(receiveObject());
+    if (obj_log_active_) {
+        RTP_LLM_LOG_INFO("[PPTENS] rank=%lld recv meta_entries=%ld",
+                         static_cast<long long>(parallelism_config_.world_rank),
+                         static_cast<long>(tensors.tensors.size()));
+    }
     for (auto& tensor_entry : tensors.tensors) {
         if (tensor_entry.second.numel() != 0) {
             tickets.push_back(transport_->asyncReceive(tensor_entry.second));
@@ -480,6 +527,17 @@ absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t 
                                                                     && !schedule_output.streams.empty());
     RTP_LLM_PROFILE_FUNCTION();
 
+    const auto step = step_count_++;
+    if (step < 256) {
+        RTP_LLM_LOG_INFO("[PPSTEP] rank=%lld step=%ld first=%d last=%d root=%d streams=%ld",
+                         static_cast<long long>(parallelism_config_.world_rank),
+                         static_cast<long>(step),
+                         isFirstStage() ? 1 : 0,
+                         isLastStage() ? 1 : 0,
+                         isStageRoot() ? 1 : 0,
+                         static_cast<long>(schedule_output.streams.size()));
+    }
+
     /** 1. recv the plan from the previous stage */
     PPExecutionPlan plan;
     StreamGroups    scheduled_stream_groups;
@@ -508,6 +566,15 @@ absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t 
     waitAll(inflight.execution_result_sends);
     inflight.reset();
     inflight.skip_run = plan.model_input.skip_run;
+    obj_log_active_   = step < 256 || !inflight.skip_run || inflight.skip_run != last_step_skip_run_;
+    last_step_skip_run_ = inflight.skip_run;
+    if (obj_log_active_) {
+        RTP_LLM_LOG_INFO("[PPSTEP] rank=%lld step=%ld skip_run=%d slot=%ld",
+                         static_cast<long long>(parallelism_config_.world_rank),
+                         static_cast<long>(step),
+                         inflight.skip_run ? 1 : 0,
+                         static_cast<long>(current_slot_));
+    }
     if (isFirstStage() && isStageRoot()) {
         inflight.stream_groups    = std::move(scheduled_stream_groups);
         inflight.schedule_time_us = schedule_time_us;

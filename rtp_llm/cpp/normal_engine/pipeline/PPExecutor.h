@@ -129,6 +129,13 @@ private:
     TensorHolder                               buffer_holder_;
     std::unordered_map<int64_t, SamplingState> sampling_states_;
     size_t                                     current_slot_ = 0;
+    // Temporary #34 diagnostics: per-transport object-stream counters so a sender's
+    // send log can be diffed pair-wise against the peer's receive log after an abort.
+    int64_t                                    send_seq_           = 0;
+    int64_t                                    recv_seq_           = 0;
+    int64_t                                    step_count_         = 0;
+    bool                                       obj_log_active_     = true;
+    bool                                       last_step_skip_run_ = true;
 };
 
 }  // namespace rtp_llm
