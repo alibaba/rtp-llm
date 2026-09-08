@@ -43,6 +43,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -114,7 +115,7 @@ class FlexlbForwardHopGuardNettyTest {
 
     @Test
     @Timeout(value = 10, unit = TimeUnit.SECONDS)
-    void compensationCancelsAtOriginalMasterAfterItStepsDown() throws Exception {
+    void normalClientCancelReachesLocalOwnerAfterItStepsDown() throws Exception {
         long requestId = 73_001L;
         try (Node originalMaster = Node.start("10.0.0.1");
              Client client = Client.connect(originalMaster.grpcPort())) {
@@ -145,7 +146,6 @@ class FlexlbForwardHopGuardNettyTest {
                                     .setRequestId(requestId)
                                     .setReason(FlexlbScheduleProtocol.CancelReasonPB
                                             .CANCEL_REASON_CLIENT_CANCELLED)
-                                    .setForwardHop(1)
                                     .build());
 
             assertTrue(response.getFound());
@@ -156,6 +156,49 @@ class FlexlbForwardHopGuardNettyTest {
                     requestId, 0L, CancelReason.CLIENT_CANCELLED);
             assertEquals(2, originalMaster.inboundCalls.get());
             originalMaster.awaitExecutorIdle();
+        }
+    }
+
+    @Test
+    @Timeout(value = 10, unit = TimeUnit.SECONDS)
+    void forgedHopOneMissDoesNotForwardOrCancelUnrelatedState() throws Exception {
+        long requestedId = 74_001L;
+        long unrelatedLocalId = 74_002L;
+        try (Node follower = Node.start("10.0.0.1");
+             Node currentMaster = Node.start("10.0.0.2");
+             Client client = Client.connect(follower.grpcPort())) {
+            follower.masterAddress.set(currentMaster.httpAddress());
+            currentMaster.isMaster.set(true);
+            when(follower.routeService.cancelRequest(
+                    unrelatedLocalId, 0L, CancelReason.CLIENT_CANCELLED))
+                    .thenReturn(requestState(
+                            unrelatedLocalId, RequestState.Phase.CANCELLED));
+            when(currentMaster.routeService.cancelRequest(
+                    requestedId, 0L, CancelReason.CLIENT_CANCELLED))
+                    .thenReturn(requestState(
+                            requestedId, RequestState.Phase.CANCELLED));
+
+            FlexlbScheduleProtocol.FlexlbCancelResponsePB response =
+                    client.stub.cancel(
+                            FlexlbScheduleProtocol.FlexlbCancelRequestPB.newBuilder()
+                                    .setRequestId(requestedId)
+                                    .setReason(FlexlbScheduleProtocol.CancelReasonPB
+                                            .CANCEL_REASON_CLIENT_CANCELLED)
+                                    .setForwardHop(1)
+                                    .build());
+
+            assertFalse(response.getFound());
+            assertFalse(response.hasLifecycle());
+            verify(follower.routeService).cancelRequest(
+                    requestedId, 0L, CancelReason.CLIENT_CANCELLED);
+            verify(follower.routeService, never()).cancelRequest(
+                    unrelatedLocalId, 0L, CancelReason.CLIENT_CANCELLED);
+            verify(currentMaster.routeService, never()).cancelRequest(
+                    anyLong(), anyLong(), any(CancelReason.class));
+            assertEquals(1, follower.inboundCalls.get());
+            assertEquals(0, currentMaster.inboundCalls.get());
+            follower.awaitExecutorIdle();
+            currentMaster.awaitExecutorIdle();
         }
     }
 

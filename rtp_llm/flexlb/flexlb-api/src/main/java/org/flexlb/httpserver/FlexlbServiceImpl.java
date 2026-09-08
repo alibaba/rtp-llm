@@ -398,8 +398,11 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
     }
 
     /**
-     * Ask the scheduling Master to reduce one request generation into its
-     * cancellation lifecycle.
+     * Reduce one request generation into its cancellation lifecycle.
+     *
+     * <p>Every node first checks its local lifecycle ownership. A found response
+     * is authoritative even after leadership changes. Only a hop-zero miss on a
+     * follower may be forwarded to the current Master.</p>
      *
      * <p>A found response always carries the reducer's authoritative snapshot:
      * {@code CANCEL_REQUESTED} means accepted but still awaiting engine proof;
@@ -410,32 +413,30 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
     @Override
     public void cancel(FlexlbScheduleProtocol.FlexlbCancelRequestPB request,
                        StreamObserver<FlexlbScheduleProtocol.FlexlbCancelResponsePB> responseObserver) {
-        // A one-hop Cancel targets the node that accepted the corresponding
-        // Schedule. That node remains the lifecycle owner even if it has since
-        // lost leadership, so the request must terminate here rather than
-        // follow the new election view.
-        boolean addressedLifecycleOwner = request.getForwardHop() == 1;
-        if (addressedLifecycleOwner || !shouldForwardToMaster()) {
-            FlexlbScheduleProtocol.FlexlbCancelResponsePB response;
+        FlexlbScheduleProtocol.FlexlbCancelResponsePB localResponse;
+        try {
+            localResponse = cancelLocally(request);
+        } catch (Exception error) {
+            Logger.error("FlexlbService.cancel error, request_id={}",
+                    request.getRequestId(), error);
             try {
-                response = cancelLocally(request);
-            } catch (Exception error) {
-                Logger.error("FlexlbService.cancel error, request_id={}",
-                        request.getRequestId(), error);
-                try {
-                    failCancel(
-                            Status.INTERNAL
-                                    .withDescription("Cancellation reducer failed")
-                                    .withCause(error),
-                            responseObserver);
-                } catch (Exception completionError) {
-                    Logger.warn("FlexlbService.cancel error completion failed, request_id={}",
-                            request.getRequestId(), completionError);
-                }
-                return;
+                failCancel(
+                        Status.INTERNAL
+                                .withDescription("Cancellation reducer failed")
+                                .withCause(error),
+                        responseObserver);
+            } catch (Exception completionError) {
+                Logger.warn("FlexlbService.cancel error completion failed, request_id={}",
+                        request.getRequestId(), completionError);
             }
+            return;
+        }
+
+        if (localResponse.getFound()
+                || request.getForwardHop() != 0
+                || !shouldForwardToMaster()) {
             try {
-                completeCancel(response, responseObserver);
+                completeCancel(localResponse, responseObserver);
             } catch (Exception completionError) {
                 Logger.warn("FlexlbService.cancel response completion error, request_id={}",
                         request.getRequestId(), completionError);
@@ -448,6 +449,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
             grpcForwarder.forwardCancelToMaster(request).whenComplete(
                     (forwardResult, forwardError) -> handleCancelForwardCompletion(
                             request,
+                            localResponse,
                             responseObserver,
                             completionClaimed,
                             forwardResult,
@@ -463,6 +465,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
 
     private void handleCancelForwardCompletion(
             FlexlbScheduleProtocol.FlexlbCancelRequestPB request,
+            FlexlbScheduleProtocol.FlexlbCancelResponsePB localResponse,
             StreamObserver<FlexlbScheduleProtocol.FlexlbCancelResponsePB> responseObserver,
             AtomicBoolean completionClaimed,
             FlexlbGrpcForwarder.CancelForwardResult forwardResult,
@@ -489,7 +492,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
                 // No Master address was selected and no RPC was attempted.
                 completeCancelOnce(
                         request.getRequestId(),
-                        cancelLocally(request),
+                        localResponse,
                         responseObserver,
                         completionClaimed);
                 return;

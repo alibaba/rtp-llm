@@ -26,7 +26,6 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -165,12 +164,12 @@ class FlexlbServiceCancelTest {
 
         verify(observer, times(1)).onNext(masterResponse);
         verify(observer, times(1)).onCompleted();
-        verify(routeService, never()).cancelRequest(
-                anyLong(), anyLong(), any(CancelReason.class));
+        verify(routeService).cancelRequest(
+                104L, 0L, CancelReason.CLIENT_CANCELLED);
     }
 
     @Test
-    void attemptedForwardFailureNeverFallsBackLocally() {
+    void attemptedForwardFailureNeverRetriesLocally() {
         when(consistencyService.isNeedConsistency()).thenReturn(true);
         when(consistencyService.isMaster()).thenReturn(false);
         when(forwarder.forwardCancelToMaster(any())).thenReturn(
@@ -192,20 +191,17 @@ class FlexlbServiceCancelTest {
         assertEquals(Status.Code.UNAVAILABLE,
                 Status.fromThrowable(error.getValue()).getCode());
         verify(observer, never()).onNext(any());
-        verify(routeService, never()).cancelRequest(
-                anyLong(), anyLong(), any(CancelReason.class));
+        verify(routeService, times(1)).cancelRequest(
+                105L, 0L, CancelReason.CLIENT_CANCELLED);
     }
 
     @Test
-    void noSelectedMasterFallsBackBeforeAnyRpcWasAttempted() {
+    void noSelectedMasterReturnsInitialLocalMissWithoutRetry() {
         when(consistencyService.isNeedConsistency()).thenReturn(true);
         when(consistencyService.isMaster()).thenReturn(false);
         when(forwarder.forwardCancelToMaster(any())).thenReturn(
                 CompletableFuture.completedFuture(
                         FlexlbGrpcForwarder.CancelForwardResult.noMaster()));
-        when(routeService.cancelRequest(
-                106L, 0, CancelReason.CLIENT_CANCELLED))
-                .thenReturn(snapshot(106L, RequestState.Phase.CANCELLED, 0));
         StreamObserver<FlexlbScheduleProtocol.FlexlbCancelResponsePB> observer =
                 mock(StreamObserver.class);
 
@@ -215,10 +211,15 @@ class FlexlbServiceCancelTest {
                 FlexlbScheduleProtocol.CancelReasonPB
                         .CANCEL_REASON_CLIENT_CANCELLED), observer);
 
-        verify(routeService).cancelRequest(
+        verify(routeService, times(1)).cancelRequest(
                 106L, 0, CancelReason.CLIENT_CANCELLED);
-        verify(observer).onNext(any());
+        org.mockito.ArgumentCaptor<FlexlbScheduleProtocol.FlexlbCancelResponsePB> response =
+                org.mockito.ArgumentCaptor.forClass(
+                        FlexlbScheduleProtocol.FlexlbCancelResponsePB.class);
+        verify(observer).onNext(response.capture());
         verify(observer).onCompleted();
+        assertFalse(response.getValue().getFound());
+        assertFalse(response.getValue().hasLifecycle());
     }
 
     @Test
