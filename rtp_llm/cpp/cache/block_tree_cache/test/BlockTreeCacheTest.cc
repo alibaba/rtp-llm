@@ -1376,10 +1376,19 @@ TEST(BlockTreeCacheFinalizationTest, CopyExceptionSettlesPendingReleasesBeforeTa
 
     BlockTreeCacheTestPeer::setTierWatermarkForTest(*environment->cache, Tier::DEVICE, 0.01);
     BlockTreeCacheTestPeer::runMaintenanceForTest(*environment->cache);
-    barrier->waitUntilEntered();
+    // Maintenance schedules one transfer per group set. Wait for all of
+    // those asynchronous submissions before checking that another maintenance
+    // pass adds none; the first arrival alone is not a stable baseline.
+    const bool all_entered = barrier->waitUntilEnteredFor(environment->groups.size(), std::chrono::seconds(5));
+    if (!all_entered) {
+        BlockTreeCacheTestPeer::setTierWatermarkForTest(*environment->cache, Tier::DEVICE, 0.0);
+        barrier->release();
+    }
+    ASSERT_TRUE(all_entered);
 
     EXPECT_GT(BlockTreeCacheTestPeer::pendingEvictionReleasesForTest(*environment->cache), 0u);
     const size_t submit_count = per_rank_transfer_engine->submittedBatchCount();
+    EXPECT_EQ(submit_count, environment->groups.size());
     BlockTreeCacheTestPeer::runMaintenanceForTest(*environment->cache);
     EXPECT_EQ(per_rank_transfer_engine->submittedBatchCount(), submit_count);
     BlockTreeCacheTestPeer::setTierWatermarkForTest(*environment->cache, Tier::DEVICE, 0.0);

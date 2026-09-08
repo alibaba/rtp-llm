@@ -304,6 +304,10 @@ std::vector<BlockInfo> resolveStorageBuffers(const CacheTopology&               
     const auto  layer = std::find(group.layer_ids.begin(), group.layer_ids.end(), layer_id);
     RTP_LLM_CHECK_WITH_INFO(
         layer != group.layer_ids.end(), "layer_id=%d does not belong to storage group_id=%d", layer_id, group_id);
+    // Pools are laid out in group-local layer order, including shared hybrid
+    // pools. This is the same model-global -> pool-layer mapping used by
+    // KVCacheGroup::convertIndexToBuffer; model layer IDs cannot be passed
+    // directly to these physical pools.
     auto buffers = group_pools[static_cast<size_t>(group_id)]->convertIndexToBuffer(
         static_cast<int>(std::distance(group.layer_ids.begin(), layer)), block_id);
     RTP_LLM_CHECK_WITH_INFO(!buffers.empty(), "storage group_id=%d returned no block buffers", group_id);

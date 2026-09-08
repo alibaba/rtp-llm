@@ -542,6 +542,9 @@ public:
     ~CountingStorageBackend() override {
         shutdown();
     }
+    std::vector<BlockInfo> resolve(int layer, int group, int block) const {
+        return convertIndexToBuffer(layer, group, block);
+    }
     size_t matchCalls() const {
         return match_calls_;
     }
@@ -627,6 +630,40 @@ TEST_F(BlockTreeCacheFactoryTest, SingleTypeBindsExistingTargetGroupAndPool) {
 
     ASSERT_EQ(allocator->cacheGroups().size(), 1u);
     expectTargetGroupsBoundById(cache, allocator);
+}
+
+TEST_F(BlockTreeCacheFactoryTest, RemoteResolverMatchesAllocatorForNonContiguousGlobalLayers) {
+    for (bool independent : {false, true}) {
+        SCOPED_TRACE(independent);
+        const auto                        config = makeHybridConfig(independent);
+        std::shared_ptr<KVCacheAllocator> allocator;
+        if (independent) {
+            allocator = initAllocator<HybridPoolKVCacheAllocator>(config);
+        } else {
+            allocator = initAllocator<HybridTypeKVCacheAllocator>(config);
+        }
+        auto          backend = std::make_shared<CountingStorageBackend>();
+        KVCacheConfig kv_cache_config;
+        kv_cache_config.enable_remote_cache = true;
+        auto cache = createBlockTreeCache(config, kv_cache_config, allocator, ParallelismConfig{}, backend);
+        ASSERT_NE(cache, nullptr);
+        for (size_t group_id = 0; group_id < config.topology().groups().size(); ++group_id) {
+            const auto& group  = config.topology().groupById(group_id);
+            const auto& pool   = allocator->cacheGroups()[group_id]->blockPool();
+            const auto  blocks = pool->malloc(1);
+            ASSERT_TRUE(blocks.has_value());
+            pool->incRef(*blocks);
+            for (int layer_id : group.layer_ids) {
+                const auto expected = allocator->convertIndexToBufferByTag(layer_id, group.tag, blocks->front());
+                const auto actual   = backend->resolve(layer_id, group_id, blocks->front());
+                ASSERT_FALSE(expected.empty());
+                ASSERT_FALSE(actual.empty());
+                EXPECT_EQ(actual.front().addr, expected.front().addr) << layer_id;
+                EXPECT_EQ(actual.front().size_bytes, group.kv_block_stride_bytes);
+            }
+            pool->decRef(*blocks);
+        }
+    }
 }
 
 TEST_F(BlockTreeCacheFactoryTest, RemoteBackendResolverDoesNotKeepAttachedCacheAndAllocatorAlive) {
