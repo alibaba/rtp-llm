@@ -7,6 +7,7 @@ import org.flexlb.cache.domain.LocalStandbyHashResult;
 import org.flexlb.config.CacheMatchConfiguration;
 import org.flexlb.config.LocalStandbyConfig;
 import org.flexlb.dao.loadbalance.Request;
+import org.flexlb.dao.loadbalance.TokenIds;
 import org.flexlb.enums.FlexMetricType;
 import org.flexlb.enums.FlexPriorityType;
 import org.flexlb.metric.FlexMetricTags;
@@ -89,7 +90,10 @@ public class LocalStandbyHashService {
         monitor.register(LOCAL_STANDBY_HASH_THREAD_POOL_INFO, FlexMetricType.GAUGE);
     }
 
-    public CompletableFuture<LocalStandbyHashResult> submit(Request request, int[] inputIds, long blockSize, int lookaheadTokens) {
+    public CompletableFuture<LocalStandbyHashResult> submit(Request request,
+                                                            TokenIds inputIds,
+                                                            long blockSize,
+                                                            int lookaheadTokens) {
         if (!enabled) {
             return CompletableFuture.completedFuture(LocalStandbyHashResult.empty());
         }
@@ -144,15 +148,19 @@ public class LocalStandbyHashService {
         return CompletableFuture.completedFuture(LocalStandbyHashResult.empty());
     }
 
-    private void calculate(Request request, int[] inputIds, long blockSize, int lookaheadTokens,
-                           long submittedAt, CompletableFuture<LocalStandbyHashResult> task) {
+    private void calculate(Request request,
+                           TokenIds inputIds,
+                           long blockSize,
+                           int lookaheadTokens,
+                           long submittedAt,
+                           CompletableFuture<LocalStandbyHashResult> task) {
         long startedAt = System.nanoTime();
         monitor.report(LOCAL_STANDBY_HASH_QUEUE_WAIT_TIME_US, (startedAt - submittedAt) / 1_000.0);
         try {
             List<Long> keys = blockHashStrategy.calculate(inputIds, blockSize, lookaheadTokens);
             request.setLocalStandbyCacheableBlockCacheKeys(
                     blockHashStrategy.cacheablePrefix(
-                            keys, inputIds.length, blockSize, lookaheadTokens));
+                            keys, inputIds.size(), blockSize, lookaheadTokens));
             complete(request, task, new LocalStandbyHashResult(keys, blockSize));
             monitor.report(LOCAL_STANDBY_HASH_RESULT, SUCCESS_TAGS, 1.0);
         } catch (RuntimeException e) {

@@ -2,6 +2,7 @@ package org.flexlb.cache.hash;
 
 import io.micrometer.core.instrument.util.NamedThreadFactory;
 import org.flexlb.cache.domain.BlockHashCalculationResult;
+import org.flexlb.dao.loadbalance.TokenIds;
 import org.flexlb.enums.FlexMetricType;
 import org.flexlb.enums.FlexPriorityType;
 import org.flexlb.metric.FlexMetricTags;
@@ -84,11 +85,7 @@ public class BlockHashExecutor {
         monitor.register(BLOCK_HASH_THREAD_POOL_INFO, FlexMetricType.GAUGE);
     }
 
-    public Mono<BlockHashCalculationResult> calculate(int[] inputIds, long blockSize) {
-        return calculate(inputIds, blockSize, 0);
-    }
-
-    public Mono<BlockHashCalculationResult> calculate(int[] inputIds, long blockSize, int lookaheadTokens) {
+    public Mono<BlockHashCalculationResult> calculate(TokenIds inputIds, long blockSize, int lookaheadTokens) {
         return submitTimed(() -> blockHashStrategy.calculate(inputIds, blockSize, lookaheadTokens))
                 .map(result -> new BlockHashCalculationResult(
                         result.value(),
@@ -100,10 +97,6 @@ public class BlockHashExecutor {
             List<Long> blockCacheKeys, int inputTokenCount, long blockSize, int lookaheadTokens) {
         return blockHashStrategy.cacheablePrefix(
                 blockCacheKeys, inputTokenCount, blockSize, lookaheadTokens);
-    }
-
-    <T> Mono<T> submit(Callable<T> task) {
-        return submitTimed(task).map(TimedTaskResult::value);
     }
 
     private <T> Mono<TimedTaskResult<T>> submitTimed(Callable<T> task) {
