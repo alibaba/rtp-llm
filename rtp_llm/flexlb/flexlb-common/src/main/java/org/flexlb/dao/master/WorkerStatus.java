@@ -53,6 +53,7 @@ public class WorkerStatus {
             int grpcPort,
             String site,
             String deploymentName,
+            String physicalGroupKey,
             int engineIndex,
             int multiEngineNum) {
 
@@ -62,7 +63,8 @@ public class WorkerStatus {
                 int port,
                 int grpcPort,
                 String site) {
-            this(group, ip, port, grpcPort, site, null, 0, 1);
+            this(group, ip, port, grpcPort, site, null,
+                    defaultPhysicalGroupKey(group, ip, port), 0, 1);
         }
     }
 
@@ -388,6 +390,23 @@ public class WorkerStatus {
             String deploymentName,
             int engineIndex,
             int multiEngineNum) {
+        return createDiscovered(
+                role, group, ip, port, grpcPort, site, deploymentName,
+                engineIndex, multiEngineNum,
+                defaultPhysicalGroupKey(group, ip, port));
+    }
+
+    public static WorkerStatus createDiscovered(
+            RoleType role,
+            String group,
+            String ip,
+            int port,
+            int grpcPort,
+            String site,
+            String deploymentName,
+            int engineIndex,
+            int multiEngineNum,
+            String physicalGroupKey) {
         Objects.requireNonNull(role, "role");
         Objects.requireNonNull(ip, "ip");
         if (port <= 0 || grpcPort <= 0) {
@@ -400,6 +419,8 @@ public class WorkerStatus {
         return new WorkerStatus(
                 new TopologySnapshot(
                         group, ip, port, grpcPort, site, deploymentName,
+                        normalizePhysicalGroupKey(
+                                physicalGroupKey, group, ip, port),
                         engineIndex, multiEngineNum),
                 new EngineObservation(
                         role,
@@ -416,6 +437,19 @@ public class WorkerStatus {
                         0L,
                         0L,
                         0L));
+    }
+
+    private static String defaultPhysicalGroupKey(
+            String group, String ip, int port) {
+        return normalizePhysicalGroupKey(null, group, ip, port);
+    }
+
+    private static String normalizePhysicalGroupKey(
+            String physicalGroupKey, String group, String ip, int port) {
+        if (physicalGroupKey != null && !physicalGroupKey.isBlank()) {
+            return physicalGroupKey;
+        }
+        return "|" + (group == null ? "" : group) + "|" + ip + ":" + port;
     }
 
     @JsonIgnore
@@ -644,6 +678,7 @@ public class WorkerStatus {
                 current.grpcPort(),
                 site,
                 deploymentName,
+                current.physicalGroupKey(),
                 current.engineIndex(),
                 current.multiEngineNum()));
     }
@@ -670,6 +705,10 @@ public class WorkerStatus {
 
     public String getDeploymentName() {
         return topology.get().deploymentName();
+    }
+
+    public String getPhysicalGroupKey() {
+        return topology.get().physicalGroupKey();
     }
 
     public String getSite() {

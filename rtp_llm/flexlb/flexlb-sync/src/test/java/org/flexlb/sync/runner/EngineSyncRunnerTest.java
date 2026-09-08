@@ -498,6 +498,7 @@ class EngineSyncRunnerTest {
         assertNotNull(status);
         assertEquals(1, status.getEngineIndex());
         assertEquals(2, status.getMultiEngineNum());
+        assertEquals(host.getPhysicalGroupKey(), status.getPhysicalGroupKey());
         ArgumentCaptor<Runnable> submittedTasks = ArgumentCaptor.forClass(Runnable.class);
         verify(statusCheckExecutor, times(2)).submit(submittedTasks.capture());
         submittedTasks.getAllValues().get(0).run();

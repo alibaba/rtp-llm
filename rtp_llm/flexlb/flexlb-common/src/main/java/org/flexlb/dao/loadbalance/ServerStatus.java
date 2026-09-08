@@ -50,6 +50,10 @@ public class ServerStatus {
     private int routingEngineIndex;
 
     @JsonIgnore
+    @Setter(AccessLevel.NONE)
+    private int routingMultiEngineNum = 1;
+
+    @JsonIgnore
     @Getter(AccessLevel.NONE)
     @Setter(AccessLevel.NONE)
     @EqualsAndHashCode.Exclude
@@ -97,8 +101,15 @@ public class ServerStatus {
                     "selected engine index must be in [0, multiEngineNum)");
         }
         routingEngineIndex = selectedEngineIndex;
+        routingMultiEngineNum = multiEngineNum;
         engineIndex = multiEngineNum > 1 ? selectedEngineIndex : null;
         refreshWorkerIdentity();
+    }
+
+    /** Returns the logical worker count used to derive the schedule response. */
+    @JsonIgnore
+    public int getRoutingMultiEngineNum() {
+        return routingMultiEngineNum;
     }
 
     /**

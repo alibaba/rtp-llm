@@ -49,6 +49,7 @@ import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -580,44 +581,53 @@ class TransientCapacityQueueContractTest {
 
         try (Fixture fixture = new Fixture(null, config)) {
             fixture.submission.blockPreparation();
-            CompletableFuture<Response> waiting =
-                    fixture.runtime.scheduler().submit(
-                            fixture.context(501L, 50, 128_000L));
-            assertTrue(fixture.submission.awaitPreparation(
-                    2, TimeUnit.SECONDS));
+            try {
+                CompletableFuture<Response> waiting =
+                        fixture.runtime.scheduler().submit(
+                                fixture.context(501L, 50, 128_000L));
+                assertTrue(fixture.submission.awaitPreparation(
+                        2, TimeUnit.SECONDS));
+                assertSame(fixture.decodeStatus,
+                        fixture.runtime.endpointRegistry().get(
+                                RoleType.DECODE,
+                                fixture.decodeStatus.getLogicalIpPort())
+                                .getStatus());
 
-            fixture.runtime.applyStatus(
-                    fixture.decodeStatus,
-                    statusResponse(RoleType.DECODE, 2L, true));
-            WorkerStatus spareStatus = initializedStatus(
-                    RoleType.DECODE, "127.0.0.2", 18_082);
-            DecodeEndpoint spareEndpoint = (DecodeEndpoint)
-                    publishEndpoint(
-                            fixture.runtime.endpointRegistry(),
-                            RoleType.DECODE,
-                            "127.0.0.2:18082",
-                            spareStatus);
+                fixture.runtime.applyStatus(
+                        fixture.decodeStatus,
+                        statusResponse(RoleType.DECODE, 2L, true));
+                WorkerStatus spareStatus = initializedStatus(
+                        RoleType.DECODE, "127.0.0.2", 18_082);
+                DecodeEndpoint spareEndpoint = (DecodeEndpoint)
+                        publishEndpoint(
+                                fixture.runtime.endpointRegistry(),
+                                RoleType.DECODE,
+                                "127.0.0.2:18082",
+                                spareStatus);
 
-            fixture.submission.unblockPreparation();
+                fixture.submission.unblockPreparation();
 
-            assertFalse(fixture.submission.awaitCommands(
-                    1, 200, TimeUnit.MILLISECONDS));
-            assertFalse(waiting.isDone(),
-                    "the committed route waits for its exact Decode capacity");
-            assertEquals(0, spareEndpoint.routingView().engineLoad(),
-                    "a committed route must not switch to a newly idle Decode");
+                assertFalse(fixture.submission.awaitCommands(
+                        1, 200, TimeUnit.MILLISECONDS));
+                assertFalse(waiting.isDone(),
+                        "the committed route waits for its exact Decode capacity");
+                assertEquals(0, spareEndpoint.routingView().engineLoad(),
+                        "a committed route must not switch to a newly idle Decode");
 
-            fixture.runtime.applyStatus(
-                    fixture.decodeStatus,
-                    statusResponse(RoleType.DECODE, 3L, false));
+                fixture.runtime.applyStatus(
+                        fixture.decodeStatus,
+                        statusResponse(RoleType.DECODE, 3L, false));
 
-            Response response = waiting.get(2, TimeUnit.SECONDS);
-            assertTrue(response.isSuccess());
-            assertEquals("127.0.0.1:18081", decodeAddress(response));
-            assertEquals(List.of("127.0.0.1:18081"),
-                    fixture.submission.decodeAddresses());
-            assertEquals(0, spareEndpoint.routingView().engineLoad(),
-                    "a committed route must not switch to a newly idle Decode");
+                Response response = waiting.get(2, TimeUnit.SECONDS);
+                assertTrue(response.isSuccess());
+                assertEquals("127.0.0.1:18081", decodeAddress(response));
+                assertEquals(List.of("127.0.0.1:18081"),
+                        fixture.submission.decodeAddresses());
+                assertEquals(0, spareEndpoint.routingView().engineLoad(),
+                        "a committed route must not switch to a newly idle Decode");
+            } finally {
+                fixture.submission.unblockPreparation();
+            }
         }
     }
 
@@ -1316,15 +1326,17 @@ class TransientCapacityQueueContractTest {
     private static WorkerEndpoint publishEndpoint(
             EndpointRegistry registry,
             RoleType role,
-            String address,
+            String physicalAddress,
             WorkerStatus status) {
+        assertEquals(physicalAddress, status.getPhysicalIpPort());
         WorkerStatusResponse response = statusResponse(role, 1L, false);
         status.lock.lock();
         try {
             WorkerStatus.PreparedStatus prepared = status.prepareNewStatus(
                     status.freezeStatusResponse(response));
             WorkerEndpoint endpoint = registry
-                    .publishPreparedEndpoint(address, status, prepared)
+                    .publishPreparedEndpoint(
+                            status.getLogicalIpPort(), status, prepared)
                     .endpoint();
             status.recordSuccessfulPoll(true);
             return endpoint;
@@ -1431,7 +1443,8 @@ class TransientCapacityQueueContractTest {
                 new CopyOnWriteArrayList<>();
         private final Semaphore commandSignals = new Semaphore(0);
         private final Semaphore preparationSignals = new Semaphore(0);
-        private final Semaphore preparationReleases = new Semaphore(0);
+        private final CountDownLatch preparationReleases =
+                new CountDownLatch(1);
         private final AtomicBoolean holdCompletions = new AtomicBoolean();
         private final AtomicBoolean blockPreparation = new AtomicBoolean();
 
@@ -1440,7 +1453,18 @@ class TransientCapacityQueueContractTest {
                 tryPrepareSubmission() {
             if (blockPreparation.get()) {
                 preparationSignals.release();
-                preparationReleases.acquireUninterruptibly();
+                boolean interrupted = false;
+                while (true) {
+                    try {
+                        preparationReleases.await();
+                        break;
+                    } catch (InterruptedException interruption) {
+                        interrupted = true;
+                    }
+                }
+                if (interrupted) {
+                    Thread.currentThread().interrupt();
+                }
             }
             return CapacityBoundary.Attempt.accepted(
                     new BatchDeliveryStrategy.PreparedSubmission() {
@@ -1504,7 +1528,7 @@ class TransientCapacityQueueContractTest {
 
         private void unblockPreparation() {
             blockPreparation.set(false);
-            preparationReleases.release();
+            preparationReleases.countDown();
         }
 
         private void holdCompletions() {

@@ -72,7 +72,14 @@ class CostBasedDecodeStrategyTest {
     }
 
     private CostBasedDecodeStrategy availableStrategy(EndpointRegistry registry) {
-        return new CostBasedDecodeStrategy(new WorkerDirectory(registry));
+        WorkerDirectory directory = new WorkerDirectory(registry);
+        for (String address : registry.endpointAddressSnapshot(RoleType.DECODE)) {
+            WorkerStatus status = registry.get(RoleType.DECODE, address)
+                    .getStatus();
+            directory.currentOrDiscover(
+                    RoleType.DECODE, status.getLogicalIpPort(), () -> status);
+        }
+        return new CostBasedDecodeStrategy(directory);
     }
 
     private BalanceContext context(long sequenceLength, long requestId) {
@@ -176,6 +183,29 @@ class CostBasedDecodeStrategyTest {
 
         Assertions.assertTrue(status.isSuccess());
         Assertions.assertEquals("127.0.0.1", status.getServerIp());
+    }
+
+    @Test
+    void selectedMultiEngineDecodePreservesLogicalIdentity() {
+        WorkerStatus first = WorkerStatus.createDiscovered(
+                RoleType.DECODE, "group-a", "127.0.0.1", 8080, 9090,
+                "test-site", null, 0, 2);
+        WorkerStatus second = WorkerStatus.createDiscovered(
+                RoleType.DECODE, "group-a", "127.0.0.1", 8080, 9090,
+                "test-site", null, 1, 2);
+        setKv(first, 10_000L, 10_000L);
+        setKv(second, 10_000L, 10_000L);
+        decodeStatuses.put(first.getLogicalIpPort(), first);
+        decodeStatuses.put(second.getLogicalIpPort(), second);
+
+        ServerStatus status = selectStatus(
+                availableStrategy(decodeRegistry()),
+                context(1_000L, 1_001L), RoleType.DECODE, "group-a");
+
+        Assertions.assertNotNull(status);
+        Assertions.assertNotNull(status.getEngineIndex());
+        Assertions.assertEquals("127.0.0.1:8080@" + status.getEngineIndex(),
+                status.getLogicalIpPort());
     }
 
     @Test

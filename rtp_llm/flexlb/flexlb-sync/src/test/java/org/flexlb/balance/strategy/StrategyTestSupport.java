@@ -99,7 +99,11 @@ final class StrategyTestSupport {
                 source.getIp(),
                 source.getPort(),
                 source.getGrpcPort(),
-                source.getSite());
+                source.getSite(),
+                source.getDeploymentName(),
+                source.getEngineIndex(),
+                source.getMultiEngineNum(),
+                source.getPhysicalGroupKey());
         WorkerStatus.StatusObservation observation =
                 status.bindStatusObservation(
                         source.committedEngineObservation(),

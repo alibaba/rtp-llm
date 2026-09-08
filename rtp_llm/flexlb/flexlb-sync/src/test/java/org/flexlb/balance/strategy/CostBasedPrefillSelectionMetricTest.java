@@ -14,6 +14,7 @@ import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.cache.HostCacheMatch;
 import org.flexlb.dao.loadbalance.Request;
+import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.EngineHealthReporter;
@@ -123,6 +124,54 @@ class CostBasedPrefillSelectionMetricTest {
         try (SelectedRole selected = select()) {
             assertTrue(selected.serverStatus().isSuccess());
             assertEquals("10.0.0.1", selected.serverStatus().getServerIp());
+        }
+    }
+
+    @Test
+    void selectedMultiEnginePrefillPreservesLogicalIdentity() {
+        ConfigService localConfigService = mock(ConfigService.class);
+        when(localConfigService.loadBalanceConfig()).thenReturn(config);
+        EndpointRegistry localRegistry = StrategyTestSupport.endpointRegistry(
+                localConfigService);
+        try {
+            WorkerStatus first = WorkerStatus.createDiscovered(
+                    RoleType.PREFILL, null, "10.0.0.8", 8080, 8081,
+                    "test-site", null, 0, 2);
+            WorkerStatus second = WorkerStatus.createDiscovered(
+                    RoleType.PREFILL, null, "10.0.0.8", 8080, 8081,
+                    "test-site", null, 1, 2);
+            StrategyTestSupport.publish(first, StrategyTestSupport.response(
+                    RoleType.PREFILL, true, 1_000_000L, 1_000_000L, 1L));
+            StrategyTestSupport.publish(second, StrategyTestSupport.response(
+                    RoleType.PREFILL, true, 1_000_000L, 1_000_000L, 1L));
+            StrategyTestSupport.publishEndpoint(localRegistry,
+                    RoleType.PREFILL, first.getLogicalIpPort(), first);
+            StrategyTestSupport.publishEndpoint(localRegistry,
+                    RoleType.PREFILL, second.getLogicalIpPort(), second);
+            WorkerDirectory directory = new WorkerDirectory(localRegistry);
+            for (String address : localRegistry.endpointAddressSnapshot(
+                    RoleType.PREFILL)) {
+                WorkerStatus endpointStatus = localRegistry.get(
+                        RoleType.PREFILL, address).getStatus();
+                directory.currentOrDiscover(
+                        RoleType.PREFILL, address, () -> endpointStatus);
+            }
+            CostBasedPrefillStrategy localStrategy =
+                    new CostBasedPrefillStrategy(directory, cache, reporter);
+
+            PlacementResult<SelectedRole, RoleType> result = localStrategy.select(
+                    context, RoleType.PREFILL, null);
+
+            assertEquals(PlacementResult.Status.SUCCESS, result.status());
+            try (SelectedRole selected = result.value()) {
+                ServerStatus selectedStatus = selected.serverStatus();
+                assertTrue(selectedStatus.getEngineIndex() != null);
+                assertEquals("10.0.0.8:8080@"
+                                + selectedStatus.getEngineIndex(),
+                        selectedStatus.getLogicalIpPort());
+            }
+        } finally {
+            localRegistry.close();
         }
     }
 

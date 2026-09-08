@@ -963,6 +963,8 @@ public class CostBasedPrefillStrategy {
             result.setDpRank(status.dpRank());
             result.setDebugInfo(debugInfo);
             result.setSuccess(true);
+            result.setSelectedEngineIndex(
+                    topology.engineIndex(), topology.multiEngineNum());
             WorkerEndpoint.GenerationPin ownedPin = selectedPin;
             selectedPin = null;
             return SelectedRole.prefill(

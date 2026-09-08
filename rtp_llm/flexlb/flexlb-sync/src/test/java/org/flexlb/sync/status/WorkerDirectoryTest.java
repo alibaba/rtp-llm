@@ -14,6 +14,7 @@ import org.mockito.Mockito;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -204,6 +205,41 @@ class WorkerDirectoryTest {
 
         assertTrue(workerDirectory.prefillRoutingSnapshot(RoleType.PREFILL)
                 .isEmpty());
+    }
+
+    @Test
+    void physicalGroupHealthUsesEndpointAndGroupOwnership() {
+        WorkerStatus completeFirst = WorkerStatus.createDiscovered(
+                RoleType.PREFILL, "group-a", "127.0.0.1", 8080, 8081,
+                "site", null, 0, 2, "endpoint-a|group-a|127.0.0.1:8080");
+        WorkerStatus completeSecond = WorkerStatus.createDiscovered(
+                RoleType.PREFILL, "group-a", "127.0.0.1", 8080, 8081,
+                "site", null, 1, 2, "endpoint-a|group-a|127.0.0.1:8080");
+        WorkerStatus incompleteSibling = WorkerStatus.createDiscovered(
+                RoleType.PREFILL, "group-b", "127.0.0.1", 8080, 8081,
+                "site", null, 2, 3, "endpoint-b|group-b|127.0.0.1:8080");
+        discover(completeFirst);
+        discover(completeSecond);
+        discover(incompleteSibling);
+        RunnerTestSupport.publishEndpoint(registry,
+                RoleType.PREFILL, completeFirst.getLogicalIpPort(),
+                completeFirst);
+        RunnerTestSupport.publishEndpoint(registry,
+                RoleType.PREFILL, completeSecond.getLogicalIpPort(),
+                completeSecond);
+        RunnerTestSupport.publishEndpoint(registry,
+                RoleType.PREFILL, incompleteSibling.getLogicalIpPort(),
+                incompleteSibling);
+
+        List<String> routable = workerDirectory.endpointAddresses(
+                RoleType.PREFILL, "group-a");
+
+        assertEquals(2, routable.size());
+        assertEquals(Set.of(
+                completeFirst.getLogicalIpPort(),
+                completeSecond.getLogicalIpPort()), Set.copyOf(routable));
+        assertTrue(workerDirectory.endpointAddresses(
+                RoleType.PREFILL, "group-b").isEmpty());
     }
 
     private void assertRoleEndpoint(RoleType role, int port) {

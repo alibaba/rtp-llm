@@ -12,6 +12,7 @@ import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
 import java.util.EnumMap;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -241,10 +242,12 @@ public final class WorkerDirectory implements WorkerStatusProvider {
         if (addresses.isEmpty()) {
             return addresses;
         }
+        Map<String, Boolean> physicalHealth =
+                physicalGroupHealthSnapshot(role);
         List<String> routable = new ArrayList<>(addresses.size());
         for (String address : addresses) {
             WorkerEndpoint endpoint = endpointRegistry.get(role, address);
-            if (isPhysicalGroupHealthy(endpoint)) {
+            if (isPhysicalGroupHealthy(endpoint, physicalHealth)) {
                 routable.add(address);
             }
         }
@@ -263,10 +266,12 @@ public final class WorkerDirectory implements WorkerStatusProvider {
         if (entries.isEmpty()) {
             return entries;
         }
+        Map<String, Boolean> physicalHealth =
+                physicalGroupHealthSnapshot(role);
         List<EndpointRegistry.PrefillRoutingEntry> routable =
                 new ArrayList<>(entries.size());
         for (EndpointRegistry.PrefillRoutingEntry entry : entries) {
-            if (isPhysicalGroupHealthy(entry.endpoint())) {
+            if (isPhysicalGroupHealthy(entry.endpoint(), physicalHealth)) {
                 routable.add(entry);
             }
         }
@@ -291,13 +296,15 @@ public final class WorkerDirectory implements WorkerStatusProvider {
         if (snapshots.isEmpty()) {
             return snapshots;
         }
+        Map<String, Boolean> physicalHealth =
+                physicalGroupHealthSnapshot(RoleType.DECODE);
         ArrayList<DecodeEndpoint.DecodeRoutingView> matching =
                 new ArrayList<>(snapshots.size());
         for (int index = 0; index < snapshots.size(); index++) {
             DecodeEndpoint.DecodeRoutingView snapshot = snapshots.get(index);
             WorkerEndpoint endpoint = endpointRegistry.get(
                     RoleType.DECODE, snapshot.address());
-            if (isPhysicalGroupHealthy(endpoint)
+            if (isPhysicalGroupHealthy(endpoint, physicalHealth)
                     && (group == null
                     || group.equals(snapshot.topology().group()))) {
                 matching.add(snapshot);
@@ -314,39 +321,8 @@ public final class WorkerDirectory implements WorkerStatusProvider {
      */
     public boolean isPhysicalGroupHealthy(WorkerEndpoint endpoint) {
         WorkerStatus worker = endpoint == null ? null : endpoint.getStatus();
-        if (worker == null || !worker.isAlive()) {
-            return false;
-        }
-        int expected = worker.getMultiEngineNum();
-        if (expected == 1) {
-            return true;
-        }
-        if (expected < 1) {
-            return false;
-        }
-
-        boolean[] observedIndexes = new boolean[expected];
-        int count = 0;
-        Map<String, WorkerStatus> statuses = statusesByRole.get(worker.getRole());
-        for (Map.Entry<String, WorkerStatus> entry : statuses.entrySet()) {
-            WorkerStatus sibling = entry.getValue();
-            if (!worker.getPhysicalIpPort().equals(sibling.getPhysicalIpPort())) {
-                continue;
-            }
-            int engineIndex = sibling.getEngineIndex();
-            if (sibling.getMultiEngineNum() != expected
-                    || engineIndex < 0
-                    || engineIndex >= expected
-                    || observedIndexes[engineIndex]
-                    || !sibling.isAlive()
-                    || endpointRegistry.get(
-                    worker.getRole(), entry.getKey(), sibling) == null) {
-                return false;
-            }
-            observedIndexes[engineIndex] = true;
-            count++;
-        }
-        return count == expected;
+        return worker != null && isPhysicalGroupHealthy(
+                endpoint, physicalGroupHealthSnapshot(worker.getRole()));
     }
 
     /** Pin the exact generation represented by a Decode routing snapshot. */
@@ -361,12 +337,14 @@ public final class WorkerDirectory implements WorkerStatusProvider {
         List<WorkerEndpoint.GenerationPin> captured = endpointRegistry.capture(role);
         List<WorkerEndpoint.GenerationPin> matching =
                 new ArrayList<>(captured.size());
+        Map<String, Boolean> physicalHealth =
+                physicalGroupHealthSnapshot(role);
         try {
             for (int index = 0; index < captured.size(); index++) {
                 WorkerEndpoint.GenerationPin pin = captured.get(index);
                 WorkerStatus.TopologySnapshot topology =
                         pin.endpoint().getStatus().topologySnapshot();
-                if (!isPhysicalGroupHealthy(pin.endpoint())
+                if (!isPhysicalGroupHealthy(pin.endpoint(), physicalHealth)
                         || group != null && !group.equals(topology.group())) {
                     pin.close();
                     captured.set(index, null);
@@ -402,6 +380,72 @@ public final class WorkerDirectory implements WorkerStatusProvider {
             if (pin != null) {
                 pin.close();
             }
+        }
+    }
+
+    private boolean isPhysicalGroupHealthy(
+            WorkerEndpoint endpoint, Map<String, Boolean> physicalHealth) {
+        WorkerStatus worker = endpoint == null ? null : endpoint.getStatus();
+        return worker != null && worker.isAlive()
+                && (worker.getMultiEngineNum() == 1
+                || physicalHealth.getOrDefault(
+                        worker.getPhysicalGroupKey(), false));
+    }
+
+    private Map<String, Boolean> physicalGroupHealthSnapshot(RoleType role) {
+        if (role == null) {
+            return Map.of();
+        }
+        Map<String, WorkerStatus> statuses = statusesByRole.get(role);
+        if (statuses.isEmpty()) {
+            return Map.of();
+        }
+        Map<String, PhysicalGroupHealth> groups = new HashMap<>();
+        for (Map.Entry<String, WorkerStatus> entry : statuses.entrySet()) {
+            WorkerStatus sibling = entry.getValue();
+            groups.computeIfAbsent(
+                    sibling.getPhysicalGroupKey(), ignored ->
+                            new PhysicalGroupHealth())
+                    .observe(
+                            sibling,
+                            endpointRegistry.get(role, entry.getKey(), sibling)
+                                    != null);
+        }
+        Map<String, Boolean> health = new HashMap<>(groups.size());
+        for (Map.Entry<String, PhysicalGroupHealth> entry : groups.entrySet()) {
+            health.put(entry.getKey(), entry.getValue().healthy());
+        }
+        return health;
+    }
+
+    private static final class PhysicalGroupHealth {
+        private int expected = -1;
+        private boolean[] observedIndexes;
+        private int observedCount;
+        private boolean invalid;
+
+        private void observe(WorkerStatus worker, boolean endpointPublished) {
+            int engineCount = worker.getMultiEngineNum();
+            int engineIndex = worker.getEngineIndex();
+            if (expected == -1) {
+                expected = engineCount;
+                observedIndexes = new boolean[Math.max(0, engineCount)];
+            }
+            if (engineCount != expected
+                    || engineIndex < 0
+                    || engineIndex >= expected
+                    || !worker.isAlive()
+                    || !endpointPublished
+                    || observedIndexes[engineIndex]) {
+                invalid = true;
+                return;
+            }
+            observedIndexes[engineIndex] = true;
+            observedCount++;
+        }
+
+        private boolean healthy() {
+            return !invalid && expected > 0 && observedCount == expected;
         }
     }
 }
