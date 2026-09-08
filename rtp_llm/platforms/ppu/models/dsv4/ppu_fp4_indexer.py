@@ -1,20 +1,26 @@
-"""PPU Prefill FP4 Indexer, retaining RTP's instance and pool lifecycle."""
+"""PPU FP4 Indexer, retaining RTP's instance and pool lifecycle."""
 
 import torch
 import torch.nn.functional as F
 from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
 from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
-from rtp_llm.models_py.modules.dsv4.fp8.compressor import CompressorFP8
+from rtp_llm.models_py.modules.dsv4.fp8.compressor import (
+    CompressorFP8,
+    _linear_bf16_bf16_fp32,
+)
 from rtp_llm.models_py.modules.dsv4.fp8.indexer import IndexerFP8
 from rtp_llm.utils.model_weight import W
 
 from ...kernels.cuda.ppu_fp4_indexer import (
     compress4,
+    compress4_decode,
     norm_rope_store,
+    paged_score,
     quantize_q,
     topk_bf16,
+    topk_decode,
 )
-from ...kernels.ppu_fp4_indexer_cache import build_plans, gather_k
+from ...kernels.ppu_fp4_indexer_cache import build_decode_plan, build_plans, gather_k
 from .ppu_rope_attention import PpuRopeAttention
 
 
@@ -71,8 +77,33 @@ class PpuFP4Compressor(CompressorFP8):
                 self._kv_eb,
             )
 
-    def forward_decode_vectorized(self, *args, **kwargs):
-        raise ValueError("FP4 Indexer decode is not qualified")
+    def forward_decode_vectorized(self, x, start_pos, meta=None, position_ids=None):
+        if x.ndim != 3 or x.shape[1] != 1:
+            raise ValueError("FP4 Decode compressor requires one token per request")
+        if meta is None or meta.positions.numel() != x.shape[0]:
+            raise ValueError("FP4 Decode compressor requires step-level metadata")
+        if self._state_pool_3d is None or self._kv_pool_view is None:
+            raise RuntimeError("FP4 Decode compressor pools were not bound")
+        if not x.shape[0]:
+            return
+        fused = _linear_bf16_bf16_fp32(
+            x, self._wkv_wgate_fused, platform_provider=self._platform_provider
+        ).reshape(x.shape[0], 512)
+        plan, slots = build_decode_plan(
+            meta, self._state_block_table, self._state_eb, self._state_tokens_per_block
+        )
+        compressed = compress4_decode(self._state_pool_3d, fused, self.ape, plan)
+        norm_rope_store(
+            compressed,
+            plan,
+            self.norm.weight,
+            self.norm_eps,
+            torch.view_as_real(self.freqs_cis).flatten(-2),
+            slots,
+            self._kv_pool_view,
+            self._kv_eb,
+            is_decode=True,
+        )
 
 
 class PpuFP4Indexer(IndexerFP8):
@@ -194,8 +225,67 @@ class PpuFP4Indexer(IndexerFP8):
         finally:
             self._clear_nested_pool()
 
-    def forward_decode_vectorized(self, *args, **kwargs):
-        raise ValueError("FP4 Indexer decode is not qualified")
+    def forward_decode_vectorized(
+        self, x, qr, start_pos, out_topk_buffer, position_ids=None, compressor_meta=None
+    ):
+        if x.ndim != 3 or x.shape[1] != 1:
+            raise ValueError("FP4 Indexer Decode requires one token per request")
+        if compressor_meta is None:
+            raise ValueError(
+                "FP4 Indexer Decode requires step-level compressor metadata"
+            )
+        if self._cp_ctx is not None and self._cp_ctx.cp_size > 1:
+            raise ValueError("FP4 Indexer CP is not qualified")
+        if self._kv_pool_view is None or self._kv_block_table is None:
+            raise RuntimeError("FP4 Indexer Decode pools were not bound")
+        bsz = x.shape[0]
+        if compressor_meta.positions.numel() != bsz:
+            raise ValueError("FP4 Indexer Decode metadata row counts differ")
+        if not bsz:
+            return out_topk_buffer
+        self.compressor.freqs_cis = self.freqs_cis
+        self._propagate_pool_to_nested()
+        try:
+            self.compressor.forward_decode_vectorized(
+                x, start_pos, meta=compressor_meta, position_ids=position_ids
+            )
+            q = (
+                self._compute_indexer_q(qr, None, apply_rope=False)
+                .reshape(bsz, self.n_heads, 128)
+                .contiguous()
+            )
+            weights = F.linear(x.reshape(bsz, -1), self.weights_proj)
+            q, qs, weights = quantize_q(
+                q,
+                weights,
+                self.weight_scale,
+                torch.view_as_real(self.freqs_cis).flatten(-2),
+                compressor_meta.positions,
+            )
+            lengths = compressor_meta.compressed_lens_per_token
+            if lengths is None:
+                lengths = (compressor_meta.positions + 1) // self.compress_ratio
+            lengths = lengths.reshape(bsz, 1).to(torch.int32).contiguous()
+            table = self._kv_block_table[:bsz].to(torch.int32).contiguous()
+            capacity = table.shape[1] * self._kv_eb
+            width = max(32, min(capacity, self._kv_cache_t or capacity))
+            logits = paged_score(
+                q.reshape(bsz, 1, self.n_heads, 64),
+                qs.reshape(bsz, 1, self.n_heads),
+                weights,
+                self._kv_pool_view,
+                table,
+                lengths,
+                width,
+            )
+            topk_decode(
+                logits.reshape(bsz, width),
+                lengths.reshape(bsz),
+                out_topk_buffer.reshape(bsz, self.index_topk),
+            )
+            return out_topk_buffer
+        finally:
+            self._clear_nested_pool()
 
 
 class PpuFP4Attention(PpuRopeAttention):

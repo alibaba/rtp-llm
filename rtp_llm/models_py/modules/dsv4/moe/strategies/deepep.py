@@ -106,61 +106,13 @@ class DeepEPStrategy(RoutedExpertsStrategy):
             self._local.setup_weights(layer_weights)
             return
 
-        # M890P checkpoints keep routed experts as packed MXFP4. Preserve the
-        # native payloads and prepare E8M0 checkpoint scales once, then execute
-        # all local experts with two grouped GEMMs instead of 3*E small GEMMs.
-        # The opt-in is deliberately strict: other storage geometries continue
-        # to use LocalLoopStrategy and cannot silently enter this platform path.
-        from rtp_llm.utils.model_weight import W
-
-        w1 = layer_weights.pop(W.v4_routed_w1_w)
-        s1 = layer_weights.pop(W.v4_routed_w1_s)
-        w2 = layer_weights.pop(W.v4_routed_w2_w)
-        s2 = layer_weights.pop(W.v4_routed_w2_s)
-        w3 = layer_weights.pop(W.v4_routed_w3_w)
-        s3 = layer_weights.pop(W.v4_routed_w3_s)
-        cfg = self.cfg
-        expected_w1 = (cfg.n_local_experts, cfg.moe_inter_dim, cfg.dim // 2)
-        expected_w2 = (cfg.n_local_experts, cfg.dim, cfg.moe_inter_dim // 2)
-        if tuple(w1.shape) != expected_w1 or tuple(w3.shape) != expected_w1:
-            raise ValueError(
-                f"PPU grouped-FP4 w1/w3 must have shape {expected_w1}, got "
-                f"{tuple(w1.shape)}/{tuple(w3.shape)}"
-            )
-        if tuple(w2.shape) != expected_w2:
-            raise ValueError(
-                f"PPU grouped-FP4 w2 must have shape {expected_w2}, got {tuple(w2.shape)}"
-            )
-        e8m0_dtype = getattr(torch, "float8_e8m0fnu", None)
-        if any(w.dtype not in (torch.int8, torch.uint8) for w in (w1, w2, w3)):
-            raise TypeError("PPU grouped-FP4 requires packed int8/uint8 routed weights")
-        if e8m0_dtype is None or any(s.dtype != e8m0_dtype for s in (s1, s2, s3)):
-            raise TypeError("PPU grouped-FP4 requires float8_e8m0fnu checkpoint scales")
-        if not w1.is_cuda or torch.cuda.get_device_name(w1.device) != "ZW-M890P":
-            raise RuntimeError("DSV4_PPU_GROUPED_FP4=1 requires ZW-M890P weights")
-
-        from rtp_llm.platforms.ppu.kernels.ppu_mxfp4 import (
-            prepare_fp4_weight_scale_mxfp4,
+        from rtp_llm.platforms.ppu.models.dsv4.ppu_deepep_fp4 import (
+            prepare_routed_mxfp4_weights,
         )
 
-        self.register_buffer(
-            "_ppu_w13",
-            torch.cat((w1, w3), dim=1).view(torch.uint8).contiguous(),
-            persistent=False,
-        )
-        self.register_buffer(
-            "_ppu_s13",
-            prepare_fp4_weight_scale_mxfp4(torch.cat((s1, s3), dim=1).contiguous()),
-            persistent=False,
-        )
-        self.register_buffer(
-            "_ppu_w2", w2.view(torch.uint8).contiguous(), persistent=False
-        )
-        self.register_buffer(
-            "_ppu_s2",
-            prepare_fp4_weight_scale_mxfp4(s2.contiguous()),
-            persistent=False,
-        )
+        weights = prepare_routed_mxfp4_weights(self.cfg, layer_weights)
+        for name, value in zip(("_ppu_w13", "_ppu_s13", "_ppu_w2", "_ppu_s2"), weights):
+            self.register_buffer(name, value, persistent=False)
         self._ppu_grouped_fp4 = True
 
     def _forward_ppu_grouped_fp4(
@@ -301,90 +253,10 @@ class DeepEPStrategy(RoutedExpertsStrategy):
         expert_x,
         expert_num_tokens: torch.Tensor,
     ) -> torch.Tensor:
-        """Run grouped MXFP4 experts on DeepEP LL's compact payload."""
-        import deep_gemm
-        from rtp_llm.models_py.modules.dsv4.moe.expert import require_silu_mul_split
-        from rtp_llm.platforms.ppu.kernels.ppu_mxfp4 import downcast_to_mxfp4
+        """Compatibility entry point using full-slot PPU masked execution."""
+        from rtp_llm.platforms.ppu.kernels.ppu_mxfp4_masked import mxfp4_experts_masked
 
         cfg = self.cfg
-        packed_dispatch = isinstance(expert_x, tuple)
-        if packed_dispatch:
-            if len(expert_x) != 2:
-                raise ValueError("DeepEP LL MXFP4 dispatch must return data and scales")
-            packed_x, packed_scale = expert_x
-            if packed_x.dim() != 3 or packed_scale.dim() != 3:
-                raise ValueError("DeepEP LL MXFP4 tensors must both be rank 3")
-            E, ll_capacity, packed_D = packed_x.shape
-            D = packed_D * 2
-            device = packed_x.device
-        else:
-            if not isinstance(expert_x, torch.Tensor) or expert_x.dim() != 3:
-                raise ValueError(
-                    "DeepEP LL input must be BF16 [E, M, D] or an MXFP4 tuple"
-                )
-            E, ll_capacity, D = expert_x.shape
-            device = expert_x.device
-        if (E, D) != (cfg.n_local_experts, cfg.dim):
-            raise ValueError(
-                f"grouped-FP4 packed input must be "
-                f"[{cfg.n_local_experts}, M, {cfg.dim}], got E={E}, M={ll_capacity}, D={D}"
-            )
-        compute_capacity = int(os.environ.get("DSV4_PPU_GROUPED_FP4_CAPACITY", "128"))
-        if (
-            compute_capacity <= 0
-            or compute_capacity > ll_capacity
-            or (E * compute_capacity) % 128
-        ):
-            raise ValueError(
-                "grouped-FP4 compute capacity must be positive, no larger than "
-                "the DeepEP LL slot, and E*capacity divisible by 128"
-            )
-        inter = cfg.moe_inter_dim
-        total = E * compute_capacity
-        if expert_num_tokens.numel() != E:
-            raise ValueError(
-                f"grouped-FP4 expert counts must have {E} elements, "
-                f"got {expert_num_tokens.numel()}"
-            )
-        safe_counts = (
-            expert_num_tokens.clamp(min=0, max=compute_capacity)
-            .to(torch.int32)
-            .contiguous()
-        )
-        # DeepEP LL reserves ``max_tokens_per_rank * ep_size`` rows per expert
-        # for a theoretical all-to-one route.  Quantizing that entire slot
-        # would erase the LL communication win.  The production grouped-MXFP4
-        # path already uses a conservative fixed expert capacity (128 by
-        # default, >8x the measured B80 mean); copy just that prefix into a
-        # compact graph-stable tensor and keep the original LL-shaped output
-        # for combine.
-        if packed_dispatch:
-            x_fp4_grouped = packed_x[:, :compute_capacity, :].contiguous()
-            # DeepEP exposes logical [E, LL_M, K/64] scales with mn-major
-            # stride. Compact the physical [E, K/64, M] storage, then restore
-            # the same logical view with the smaller M stride.
-            x_scale_grouped = (
-                packed_scale.permute(0, 2, 1)[:, :, :compute_capacity]
-                .contiguous()
-                .permute(0, 2, 1)
-            )
-        else:
-            compact_x = expert_x[:, :compute_capacity, :].contiguous()
-            flat_x = compact_x.view(total, D)
-            x_fp4, x_scale = downcast_to_mxfp4(flat_x)
-            x_fp4_grouped = x_fp4.view(E, compute_capacity, -1)
-            x_scale_grouped = x_scale.as_strided(
-                (E, compute_capacity, x_scale.size(1)),
-                (compute_capacity, 1, total),
-            )
-            x_scale_grouped = (
-                x_scale_grouped.permute(0, 2, 1).contiguous().permute(0, 2, 1)
-            )
-        gate_up_grouped = torch.empty(
-            (E, compute_capacity, 2 * inter),
-            dtype=torch.bfloat16,
-            device=device,
-        )
         expected_m = max(
             1,
             (
@@ -394,47 +266,14 @@ class DeepEPStrategy(RoutedExpertsStrategy):
             )
             // cfg.n_routed_experts,
         )
-        deep_gemm.m_grouped_gemm_fp4_fp4_bf16_nt_masked(
-            (x_fp4_grouped, x_scale_grouped),
+        return mxfp4_experts_masked(
+            expert_x,
             (self._ppu_w13, self._ppu_s13),
-            None,
-            gate_up_grouped,
-            safe_counts,
-            expected_m,
-        )
-        gate_up = gate_up_grouped.view(total, 2 * inter)
-        hidden = (
-            require_silu_mul_split()(
-                gate_up[:, :inter].float().contiguous(),
-                gate_up[:, inter:].float().contiguous(),
-                clamp_limit=cfg.swiglu_limit,
-            )
-            .to(torch.bfloat16)
-            .contiguous()
-        )
-        hidden_fp4, hidden_scale = downcast_to_mxfp4(hidden)
-        hidden_fp4_grouped = hidden_fp4.view(E, compute_capacity, -1)
-        hidden_scale_grouped = hidden_scale.as_strided(
-            (E, compute_capacity, hidden_scale.size(1)),
-            (compute_capacity, 1, total),
-        )
-        hidden_scale_grouped = (
-            hidden_scale_grouped.permute(0, 2, 1).contiguous().permute(0, 2, 1)
-        )
-        compact_down = torch.empty(
-            (E, compute_capacity, D),
-            dtype=torch.bfloat16,
-            device=device,
-        )
-        deep_gemm.m_grouped_gemm_fp4_fp4_bf16_nt_masked(
-            (hidden_fp4_grouped, hidden_scale_grouped),
             (self._ppu_w2, self._ppu_s2),
-            None,
-            compact_down,
-            safe_counts,
-            expected_m,
+            expert_num_tokens,
+            expected_m=expected_m,
+            swiglu_limit=cfg.swiglu_limit if cfg.swiglu_limit > 0 else None,
         )
-        return compact_down
 
     def _forward_ppu_grouped_fp4_low_latency(
         self,
@@ -443,44 +282,33 @@ class DeepEPStrategy(RoutedExpertsStrategy):
         indices: torch.Tensor,
         wrapper,
     ) -> torch.Tensor:
-        """DeepEP LL packed dispatch → grouped MXFP4 experts → combine."""
-        dispatch_args = {
-            "x": x.contiguous(),
-            "topk_idx": indices.to(torch.int64).contiguous(),
-            "num_max_dispatch_tokens_per_rank": wrapper.ll_num_max_token_per_rank,
-            "num_experts": self.cfg.n_routed_experts,
-            "use_fp8": False,
-            "use_mxfp4": True,
-            "mxfp4_scale_row_major": False,
-            "quant_size": 32,
-            "async_finish": False,
-            "return_recv_hook": False,
-        }
-        expert_x, expert_num_tokens, handle, _, _ = wrapper.buffer.low_latency_dispatch(
-            **dispatch_args
+        """Legacy opt-in delegates to the public platform's full-slot adapter."""
+        from rtp_llm.platforms.ppu.modules.fused_moe.mxfp4_low_latency import (
+            low_latency_mxfp4_moe,
         )
-        if not isinstance(expert_x, tuple) or len(expert_x) != 2:
-            raise RuntimeError("DeepEP LL MXFP4 dispatch must return (data, scale)")
-        compact_expert_y = self._compute_ppu_grouped_fp4_packed(
-            expert_x, expert_num_tokens
+
+        cfg = self.cfg
+        expected_m = max(
+            1,
+            (
+                cfg.max_tokens_per_rank * cfg.ep_size * cfg.n_activated_experts
+                + cfg.n_routed_experts
+                - 1
+            )
+            // cfg.n_routed_experts,
         )
-        # The LL RDMA buffer already owns the required full slot geometry.  Do
-        # not allocate another [E, ll_capacity, D] tensor (768 MiB for V4 at
-        # gamma3); copy only the compact valid prefix into the next combine
-        # buffer and let the handle's receive counts delimit the rows consumed.
-        expert_y = wrapper.buffer.get_next_low_latency_combine_buffer(handle)
-        expert_y[:, : compact_expert_y.size(1), :].copy_(compact_expert_y)
-        combine_args = {
-            "x": expert_y,
-            "topk_idx": dispatch_args["topk_idx"],
-            "topk_weights": weights.contiguous(),
-            "handle": handle,
-            "zero_copy": True,
-            "async_finish": False,
-            "return_recv_hook": False,
-        }
-        combined_x, _, _ = wrapper.buffer.low_latency_combine(**combine_args)
-        return combined_x.float()
+        return low_latency_mxfp4_moe(
+            wrapper.buffer,
+            x,
+            weights,
+            indices,
+            (self._ppu_w13, self._ppu_s13),
+            (self._ppu_w2, self._ppu_s2),
+            num_experts=cfg.n_routed_experts,
+            max_dispatch_tokens=wrapper.ll_num_max_token_per_rank,
+            expected_m=expected_m,
+            swiglu_limit=cfg.swiglu_limit if cfg.swiglu_limit > 0 else None,
+        )
 
     @staticmethod
     def _pad_topk_for_deepep(

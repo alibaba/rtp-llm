@@ -87,6 +87,72 @@ def build_plans(meta, state_bt, state_entries, state_tokens, seq_start):
 
 
 @triton.jit
+def _decode_plans(
+    POS,
+    REQ,
+    STATE_SLOTS,
+    KV_SLOTS,
+    BT,
+    PLAN,
+    OUT,
+    N: tl.constexpr,
+    BT_STRIDE: tl.constexpr,
+    MAX_BLOCKS: tl.constexpr,
+    TOKENS_PER_BLOCK: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    i = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    live = i < N
+    pos = tl.load(POS + i, live, 0).to(tl.int32)
+    req = tl.load(REQ + i, live, 0).to(tl.int32)
+    write = tl.load(STATE_SLOTS + i, live, -1).to(tl.int32)
+    slots = tl.load(KV_SLOTS + i, live, -1).to(tl.int32)
+    seq = pos + 1
+    active = live & (write >= 0) & (pos >= 0)
+    tl.store(PLAN + i * 4, tl.where(active, seq, 1), live)
+    tl.store(PLAN + i * 4 + 1, tl.where(active, write, -1), live)
+    for part in tl.static_range(2):
+        window = seq - 8 + part * 4
+        block = window // TOKENS_PER_BLOCK
+        need = active & (seq % 4 == 0) & (window >= 0) & (block < MAX_BLOCKS)
+        physical = tl.load(BT + req * BT_STRIDE + block, need, 0).to(tl.int32)
+        page = physical * 2 + (window % 8) // 4
+        tl.store(PLAN + i * 4 + 2 + part, tl.where(need, page, 0), live)
+    tl.store(OUT + i, tl.where(active, slots, -1), live)
+
+
+def build_decode_plan(meta, state_bt, state_entries, state_tokens):
+    """Map one token per request onto the native eight-row C4 ring."""
+    n = meta.positions.numel()
+    if state_entries != 8 or state_tokens % 8:
+        raise ValueError("FP4 Decode requires an eight-row native state ring")
+    if (
+        meta.b_idx.numel() != n
+        or meta.state_slots.numel() != n
+        or meta.kv_slots.numel() != n
+    ):
+        raise ValueError("FP4 Decode metadata row counts differ")
+    plan = torch.empty((n, 4), dtype=torch.int32, device=meta.positions.device)
+    slots = torch.empty(n, dtype=torch.int32, device=meta.positions.device)
+    if n:
+        _decode_plans[(triton.cdiv(n, 128),)](
+            meta.positions,
+            meta.b_idx,
+            meta.state_slots,
+            meta.kv_slots,
+            state_bt,
+            plan,
+            slots,
+            n,
+            state_bt.stride(0),
+            state_bt.shape[1],
+            state_tokens,
+            128,
+        )
+    return plan.view(torch.uint8), slots
+
+
+@triton.jit
 def _gather(
     CACHE,
     BT,

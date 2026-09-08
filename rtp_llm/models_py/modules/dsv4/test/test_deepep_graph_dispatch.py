@@ -4,7 +4,6 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
-
 from rtp_llm.models_py.distributed.deepep_wrapper import DeepEPMode, DeepEPWrapper
 from rtp_llm.models_py.modules.dsv4.moe.strategies.base import MoeCfg
 from rtp_llm.models_py.modules.dsv4.moe.strategies.deepep import (
@@ -158,23 +157,17 @@ class DeepEPGraphDispatchTest(unittest.TestCase):
 
     def test_grouped_fp4_eager_capacity_grows_without_truncation(self) -> None:
         self.assertEqual(
-            _select_ppu_grouped_fp4_capacity(
-                128, [17, 129, 7], 32, fixed_shape=False
-            ),
+            _select_ppu_grouped_fp4_capacity(128, [17, 129, 7], 32, fixed_shape=False),
             132,
         )
         self.assertEqual(
-            _select_ppu_grouped_fp4_capacity(
-                128, [512, 1], 32, fixed_shape=False
-            ),
+            _select_ppu_grouped_fp4_capacity(128, [512, 1], 32, fixed_shape=False),
             512,
         )
 
     def test_grouped_fp4_graph_capacity_stays_fixed(self) -> None:
         self.assertEqual(
-            _select_ppu_grouped_fp4_capacity(
-                128, [1024], 32, fixed_shape=True
-            ),
+            _select_ppu_grouped_fp4_capacity(128, [1024], 32, fixed_shape=True),
             128,
         )
 
@@ -182,7 +175,7 @@ class DeepEPGraphDispatchTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "CPU expert counts"):
             _select_ppu_grouped_fp4_capacity(128, [], 32, fixed_shape=False)
 
-    def test_low_latency_uses_padded_topk_and_packed_compute(self) -> None:
+    def test_low_latency_delegates_to_public_full_slot_adapter(self) -> None:
         buffer = _FakeLowLatencyBuffer()
         DeepEPWrapper._instance = SimpleNamespace(
             mode=DeepEPMode.LOW_LATENCY,
@@ -192,39 +185,42 @@ class DeepEPGraphDispatchTest(unittest.TestCase):
         )
         strategy = _strategy(max_tokens_per_rank=4)
         strategy._ppu_grouped_fp4 = True
-        packed_y = torch.ones(32, 128, 4, dtype=torch.bfloat16)
-        with patch.object(
-            strategy, "_compute_ppu_grouped_fp4_packed", return_value=packed_y
-        ) as compute:
+        for name in ("_ppu_w13", "_ppu_s13", "_ppu_w2", "_ppu_s2"):
+            setattr(strategy, name, torch.empty(0))
+        expected = torch.full((1, 4), 3, dtype=torch.float32)
+        # The public platform owns dispatch/compute/combine and full-slot
+        # alias handling, exercised by test_mxfp4_masked on a real PPU.
+        # This CPU test verifies the legacy strategy's forwarding contract.
+        with patch(
+            "rtp_llm.platforms.ppu.modules.fused_moe.mxfp4_low_latency.low_latency_mxfp4_moe",
+            return_value=expected,
+        ) as execute:
             out = strategy(self.x, self.weights, self.indices)
 
-        self.assertEqual(tuple(out.shape), (1, 4))
-        self.assertEqual(out.dtype, torch.float32)
-        self.assertEqual(buffer.dispatch_args["num_max_dispatch_tokens_per_rank"], 4)
-        self.assertFalse(buffer.dispatch_args["use_fp8"])
-        self.assertTrue(buffer.dispatch_args["use_mxfp4"])
-        self.assertFalse(buffer.dispatch_args["mxfp4_scale_row_major"])
-        self.assertEqual(buffer.dispatch_args["quant_size"], 32)
-        self.assertEqual(tuple(buffer.dispatch_args["topk_idx"].shape), (1, 8))
-        self.assertTrue(
-            torch.equal(
-                buffer.dispatch_args["topk_idx"][:, 6:],
-                torch.full((1, 2), -1, dtype=torch.int64),
-            )
+        self.assertIs(out, expected)
+        execute.assert_called_once()
+        args, kwargs = execute.call_args
+        self.assertIs(args[0], buffer)
+        self.assertIs(args[1], self.x)
+        self.assertEqual(tuple(args[2].shape), (1, 8))
+        self.assertEqual(tuple(args[3].shape), (1, 8))
+        self.assertTrue(torch.equal(args[2][:, :6], self.weights))
+        self.assertTrue(torch.equal(args[3][:, :6], self.indices))
+        self.assertTrue(torch.equal(args[2][:, 6:], torch.zeros(1, 2)))
+        self.assertTrue(torch.equal(args[3][:, 6:], torch.full((1, 2), -1)))
+        self.assertIs(args[4][0], strategy._ppu_w13)
+        self.assertIs(args[4][1], strategy._ppu_s13)
+        self.assertIs(args[5][0], strategy._ppu_w2)
+        self.assertIs(args[5][1], strategy._ppu_s2)
+        self.assertEqual(
+            kwargs,
+            {
+                "num_experts": 256,
+                "max_dispatch_tokens": 4,
+                "expected_m": 1,
+                "swiglu_limit": 1.0,
+            },
         )
-        self.assertEqual(tuple(buffer.combine_args["topk_weights"].shape), (1, 8))
-        self.assertTrue(
-            torch.equal(
-                buffer.combine_args["topk_weights"][:, 6:],
-                torch.zeros(1, 2, dtype=torch.float32),
-            )
-        )
-        self.assertEqual(buffer.combine_args["handle"], "handle")
-        self.assertIs(buffer.combine_args["x"], buffer.combine_buffer)
-        self.assertTrue(buffer.combine_args["zero_copy"])
-        self.assertTrue(torch.equal(buffer.combine_buffer, packed_y))
-        self.assertNotIn("opt_level", buffer.combine_args)
-        compute.assert_called_once()
 
     def test_low_latency_fails_closed_without_grouped_fp4(self) -> None:
         DeepEPWrapper._instance = SimpleNamespace(

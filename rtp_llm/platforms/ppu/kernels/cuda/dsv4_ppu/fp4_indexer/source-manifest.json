@@ -13,5 +13,8 @@
   "include/sgl_kernel/tile.cuh": "3702d86f89e98b3a726b1e7afd1a8cf251bedbad6899bb97eab1f8ac6f5db677",
   "csrc/deepseek_v4/fused_norm_rope_v2.cuh": "4b559a85ac579f6b4945d0180ccedd96450e3690774d586c17dd21bf43f653cb",
   "include/sgl_kernel/deepseek_v4/fp8_utils.cuh": "811b3c3ebe55566ed0c7ad255a698a481a0bd025089946b1ef8603c96f888a58",
-  "csrc/deepseek_v4/main_norm_rope.cuh": "3250d52fbc6ed5f46353c3d3550fbbb8c8fdb7bbb5637047e24033d3ac32f193"
+  "csrc/deepseek_v4/main_norm_rope.cuh": "3250d52fbc6ed5f46353c3d3550fbbb8c8fdb7bbb5637047e24033d3ac32f193",
+  "csrc/deepseek_v4/topk_v1.cuh": "3e5a87c4aabb23c807a448d7e2760a6ec7609260e97befc5e3107fcb9f400362",
+  "csrc/elementwise/silu_and_mul_masked_post_quant_mxfp4.cuh": "093f2e2cfd2a63a8bb495760a8ce83a847635355fd0093fa506bc02d6a6995f5",
+  "include/sgl_kernel/runtime.cuh": "7ed0f8ae9cac6a125d1e435e3ab628115a7f3179c64f308536c38db37a418542"
 }
