@@ -7,8 +7,11 @@ py_test (
     name = "per_token_group_quant_8bit_test",
     srcs = ["per_token_group_quant_8bit_test.py"],
     deps = py_test_deps,
-    tags = ["open_skip", "H20"],
-    exec_properties = {'gpu':'H20'},
+    # Not sm90-bound: the op under test has an sm86 cubin, but the in-test Triton
+    # reference stores fp8e4nv, which Triton only allows at capability >= 89.
+    # A10 (sm86) would hard-fail, so this runs on L20 (sm89) instead of H20.
+    tags = ["open_skip", "L20"],
+    exec_properties = {'gpu':'L20'},
 )
 
 py_test (
@@ -31,16 +34,20 @@ py_test (
     name = "per_tensor_scaled_fp8_quant_test",
     srcs = ["per_tensor_scaled_fp8_quant_test.py"],
     deps = py_test_deps,
-    tags = ["open_skip", "H20"],
-    exec_properties = {'gpu':'H20'},
+    # Verified on sm86: bit-exact (torch.equal) vs the torch float8_e4m3fn
+    # reference across 18 shapes, 0 skips. Our AOT cubins cover sm86.
+    tags = ["open_skip"],
+    exec_properties = {'gpu':'A10'},
 )
 
 py_test (
     name = "per_token_scaled_fp8_quant_test",
     srcs = ["per_token_scaled_fp8_quant_test.py"],
     deps = py_test_deps,
-    tags = ["open_skip", "H20"],
-    exec_properties = {'gpu':'H20'},
+    # Verified on sm86: bit-exact (torch.equal) vs the torch float8_e4m3fn
+    # reference across 18 shapes, 0 skips.
+    tags = ["open_skip"],
+    exec_properties = {'gpu':'A10'},
 )
 
 py_test (

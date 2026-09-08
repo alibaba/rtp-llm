@@ -168,7 +168,7 @@ cc_test(
     copts = test_copts,
     deps = block_cache_test_deps,
     env = {},
-    exec_properties = {'gpu':'H20'},
+    exec_properties = {'gpu':'A10'},
 )
 
 cc_test(
@@ -180,7 +180,7 @@ cc_test(
     copts = test_copts,
     deps = block_cache_test_deps,
     env = {},
-    exec_properties = {'gpu':'H20'},
+    exec_properties = {'gpu':'A10'},
 )
 
 cc_test(
@@ -209,7 +209,7 @@ cc_test(
         ":block_pool_test_helper",
     ],
     env = {},
-    exec_properties = {'gpu':'H20'},
+    exec_properties = {'gpu':'A10'},
 )
 
 cc_test(
@@ -221,7 +221,7 @@ cc_test(
     copts = test_copts,
     deps = test_deps,
     env = {},
-    exec_properties = {'gpu':'H20'},
+    exec_properties = {'gpu':'A10'},
 )
 
 cc_test(
@@ -235,7 +235,7 @@ cc_test(
         ":block_pool_test_helper",
     ],
     env = {},
-    exec_properties = {'gpu':'H20'},
+    exec_properties = {'gpu':'A10'},
 )
 
 cc_test(
@@ -250,7 +250,7 @@ cc_test(
         "//rtp_llm/cpp/cache/test/mock:mock_allocator_lib",
     ],
     env = {},
-    exec_properties = {'gpu':'H20'},
+    exec_properties = {'gpu':'A10'},
 )
 
 cc_test(
@@ -267,7 +267,7 @@ cc_test(
         "//rtp_llm/cpp/cache/connector/memory:memory_connector",
     ],
     env = {},
-    exec_properties = {'gpu':'H20'},
+    exec_properties = {'gpu':'A10'},
 )
 
 cc_test(
@@ -283,7 +283,7 @@ cc_test(
         "//rtp_llm/cpp/cache/connector/memory:memory_connector",
     ],
     env = {},
-    exec_properties = {'gpu':'H20'},
+    exec_properties = {'gpu':'A10'},
 )
 
 cc_test(
@@ -297,7 +297,7 @@ cc_test(
         ":block_pool_test_helper",
     ],
     env = {},
-    exec_properties = {'gpu':'H20'},
+    exec_properties = {'gpu':'A10'},
 )
 
 cc_test(
@@ -311,7 +311,7 @@ cc_test(
         ":block_pool_test_helper",
     ],
     env = {},
-    exec_properties = {'gpu':'H20'},
+    exec_properties = {'gpu':'A10'},
 )
 
 cc_test(
@@ -325,7 +325,7 @@ cc_test(
         ":block_pool_test_helper",
     ],
     env = {},
-    exec_properties = {'gpu':'H20'},
+    exec_properties = {'gpu':'A10'},
 )
 
 cc_test(
@@ -339,7 +339,7 @@ cc_test(
         ":block_pool_test_helper",
     ],
     env = {},
-    exec_properties = {'gpu':'H20'},
+    exec_properties = {'gpu':'A10'},
 )
 
 cc_test(
@@ -353,7 +353,7 @@ cc_test(
         ":block_pool_test_helper",
     ],
     env = {},
-    exec_properties = {'gpu':'H20'},
+    exec_properties = {'gpu':'A10'},
 )
 
 cc_test(
@@ -371,7 +371,7 @@ cc_test(
     env = {
         "RTP_LLM_PIN_HOST_BLOCK_POOL": "0",
     },
-    exec_properties = {'gpu':'H20'},
+    exec_properties = {'gpu':'A10'},
 )
 
 cc_test(
@@ -387,7 +387,7 @@ cc_test(
         "//rtp_llm/cpp/cache/connector/p2p:layer_block_converter",
     ],
     env = {},
-    exec_properties = {'gpu':'H20'},
+    exec_properties = {'gpu':'A10'},
 )
 
 cc_test(
@@ -399,5 +399,5 @@ cc_test(
     copts = test_copts,
     deps = test_deps,
     env = {},
-    exec_properties = {'gpu':'H20'},
+    exec_properties = {'gpu':'A10'},
 )

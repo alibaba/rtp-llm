@@ -14,7 +14,6 @@ cc_test(
         "main.cc",
     ],
     copts = test_copts,
-    exec_properties = {'gpu':'H20'},
     deps = [
         "//rtp_llm/cpp/cache/connector/p2p/transfer/tcp:tcp_task_context",
         "//rtp_llm/cpp/cache/connector/p2p/transfer:basic_types",
@@ -25,6 +24,7 @@ cc_test(
         "@havenask//aios/autil:log",
         "@com_google_googletest//:gtest",
     ] + device_impl_target() + torch_deps(),
+    exec_properties = {'gpu':'A10'},
 )
 
 cc_test(
@@ -34,7 +34,6 @@ cc_test(
         "main.cc",
     ],
     copts = test_copts,
-    exec_properties = {'gpu':'H20'},
     deps = [
         "//rtp_llm/cpp/cache/connector/p2p/transfer/tcp:tcp_transfer_service",
         "//rtp_llm/cpp/cache/connector/p2p/transfer:basic_types",
@@ -45,6 +44,7 @@ cc_test(
         "@havenask//aios/autil:log",
         "@com_google_googletest//:gtest",
     ] + device_impl_target() + torch_deps(),
+    exec_properties = {'gpu':'A10'},
 )
 
 cc_test(
@@ -54,7 +54,6 @@ cc_test(
         "main.cc",
     ],
     copts = test_copts,
-    exec_properties = {'gpu':'H20'},
     deps = [
         "//rtp_llm/cpp/cache/connector/p2p/transfer/tcp:tcp_backend",
         "//rtp_llm/cpp/cache/connector/p2p/transfer:basic_types",
@@ -65,4 +64,5 @@ cc_test(
         "@havenask//aios/autil:log",
         "@com_google_googletest//:gtest",
     ] + device_impl_target() + torch_deps(),
+    exec_properties = {'gpu':'A10'},
 )

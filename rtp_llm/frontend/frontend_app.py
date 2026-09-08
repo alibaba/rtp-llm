@@ -3,6 +3,7 @@ import gc
 import json
 import logging
 import os
+import queue
 import signal
 import socket
 import threading
@@ -94,6 +95,71 @@ class GracefulShutdownServer(Server):
         self._pre_stop_timer: Optional[threading.Timer] = None
         self._shutdown_requested = False
         self._shutdown_timeout_budget = self.config.timeout_graceful_shutdown
+        # Signal handlers run on the main thread, so anything they touch can be
+        # re-entered mid-update. Two concrete hazards here, and buffering the
+        # logging is not enough to cover either:
+        #
+        #  - FrontendShutdownManager guards its state with a plain threading.Lock
+        #    and takes it in try_begin_request/finish_request, i.e. on every
+        #    request. A signal landing inside that window, whose handler then
+        #    calls start_unavailable or active_request_count, deadlocks the
+        #    process on a non-reentrant lock it already holds.
+        #  - That manager also logs while holding the lock, so the handler can
+        #    re-enter the stderr writer and raise
+        #    "reentrant call inside <_io.BufferedWriter ...>", which escapes the
+        #    handler and takes the shutdown path with it.
+        #
+        # So the handlers do no work at all: they hand the signal to this queue
+        # and return. SimpleQueue.put is documented as reentrant-safe and usable
+        # from a signal handler; everything else runs on the worker below, off
+        # the handler, where locks and logging are ordinary operations.
+        self._signal_events: "queue.SimpleQueue" = queue.SimpleQueue()
+        self._signal_worker = threading.Thread(
+            target=self._dispatch_signal_events,
+            name="frontend-signal-dispatch",
+            daemon=True,
+        )
+        self._signal_worker.start()
+
+    @staticmethod
+    def _signal_name(sig: int) -> str:
+        try:
+            return signal.Signals(sig).name
+        except ValueError:
+            return str(sig)
+
+    def _dispatch_signal_events(self) -> None:
+        while True:
+            kind, sig, frame = self._signal_events.get()
+            try:
+                if kind == "barrier":
+                    sig.set()
+                    continue
+                sig_name = self._signal_name(sig)
+                if kind == "exit":
+                    if not self._defer_sigterm_for_pre_stop_drain(sig, frame, sig_name):
+                        self._begin_shutdown(sig, frame, sig_name)
+                else:
+                    self.shutdown_manager.start_unavailable(f"signal {sig_name}")
+                    if not self._schedule_shutdown_after_pre_stop(sig, frame, sig_name):
+                        self._begin_shutdown(sig, frame, sig_name)
+            except Exception:
+                # Never let the dispatcher die: a lost signal means a frontend
+                # that ignores SIGTERM.
+                logging.exception("Frontend signal dispatch failed for %s", sig)
+
+    def wait_for_signal_dispatch(self, timeout: float = 5.0) -> bool:
+        """Block until every signal handed over before this call was dispatched.
+
+        The queue is FIFO with a single consumer, so a barrier that has been
+        processed proves everything enqueued ahead of it was processed too. That
+        is what makes it sound to assert a *negative* post-condition after
+        signalling -- polling the positive one would let the negative pass while
+        the dispatcher simply had not run yet.
+        """
+        done = threading.Event()
+        self._signal_events.put(("barrier", done, None))
+        return done.wait(timeout)
 
     def install_pre_stop_drain_signal_handler(self) -> None:
         pre_stop_signal = getattr(signal, "SIGUSR1", None)
@@ -108,29 +174,13 @@ class GracefulShutdownServer(Server):
             )
 
     def handle_pre_stop_drain_signal(self, sig: int, frame) -> None:
-        try:
-            sig_name = signal.Signals(sig).name
-        except ValueError:
-            sig_name = str(sig)
-        self.shutdown_manager.start_unavailable(f"signal {sig_name}")
-        logging.info(
-            "Frontend entering pre-stop unavailable state before uvicorn shutdown: "
-            "signal=%s, active_requests=%s",
-            sig_name,
-            self.shutdown_manager.active_request_count(),
-        )
-        if not self._schedule_shutdown_after_pre_stop(sig, frame, sig_name):
-            self._begin_shutdown(sig, frame, sig_name)
+        # Signal-handler context: hand off and return. See set_server.
+        self._signal_events.put(("pre_stop", sig, frame))
 
     @override
     def handle_exit(self, sig: int, frame) -> None:
-        try:
-            sig_name = signal.Signals(sig).name
-        except ValueError:
-            sig_name = str(sig)
-        if self._defer_sigterm_for_pre_stop_drain(sig, frame, sig_name):
-            return
-        self._begin_shutdown(sig, frame, sig_name)
+        # Signal-handler context: hand off and return. See set_server.
+        self._signal_events.put(("exit", sig, frame))
 
     def _defer_sigterm_for_pre_stop_drain(self, sig: int, frame, sig_name: str) -> bool:
         if sig != signal.SIGTERM:

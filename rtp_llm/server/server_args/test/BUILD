@@ -11,5 +11,5 @@ py_test(
         "//rtp_llm:testlib",
         "//rtp_llm:utils",
     ],
-    exec_properties = {'gpu':'H20'},
+    exec_properties = {'gpu':'A10'},
 )
