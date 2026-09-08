@@ -254,6 +254,9 @@ class DSv4DecodeAttnMetadataFP8:
     compressed_topk_length_by_ratio: Dict[int, torch.Tensor] = field(
         default_factory=dict
     )  # ratio -> [B] int32
+    # Optional per-step RoPE rows, keyed by the source table's object identity.
+    # The metadata implementation retains the source tables and output storage.
+    rope_freqs_by_source: Dict[int, torch.Tensor] = field(default_factory=dict)
 
 
 def get_or_build_sched_meta(

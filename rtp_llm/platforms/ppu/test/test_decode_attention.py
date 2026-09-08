@@ -85,10 +85,14 @@ class TensorCache:
     def get_kernel_seq_size_per_block(self, tag):
         return self.specs[tag][1]
 
-    def inputs(self, positions, active):
+    def inputs(self, positions, active, *, stable=False):
+        if stable and not hasattr(self, "_input_tables"):
+            self._input_tables = {
+                tag: torch.empty_like(table) for tag, table in self.tables.items()
+            }
         result = {}
         for tag, table in self.tables.items():
-            table = table.clone()
+            table = self._input_tables[tag].copy_(table) if stable else table.clone()
             table[active:].fill_(-1)
             result[tag] = SimpleNamespace(
                 sequence_lengths=positions,
@@ -307,13 +311,20 @@ def bf16_ulp_distance(a, b):
 class DecodeAttentionTest(unittest.TestCase):
     @torch.inference_mode()
     def test_checkpoint_attention_graph_and_state(self):
+        self._check_checkpoint_attention(shared_rope=False)
+
+    @torch.inference_mode()
+    def test_checkpoint_attention_with_shared_rope(self):
+        self._check_checkpoint_attention(shared_rope=True)
+
+    def _check_checkpoint_attention(self, *, shared_rope):
         torch.manual_seed(890412)
         batches = tuple(
             int(n)
             for n in os.environ.get("RTP_PPU_ATTN_BATCHES", "1,3,8,32,128").split(",")
         )
         reports = []
-        overlap = os.environ.get("RTP_PPU_ATTN_OVERLAP", "0") == "1"
+        overlap = shared_rope or os.environ.get("RTP_PPU_ATTN_OVERLAP", "0") == "1"
         for layer in (0, 2, 3):
             attn, hashes = load_attention(
                 Path(os.environ["RTP_PPU_DSV4_CHECKPOINT"]),
@@ -321,6 +332,10 @@ class DecodeAttentionTest(unittest.TestCase):
                 max(batches),
                 overlap,
                 execution_options={
+                    "DSV4_PPU_DECODE_METADATA": (
+                        "graph_fused" if shared_rope else "eager"
+                    ),
+                    "DSV4_PPU_DECODE_ROPE": "shared" if shared_rope else "layer",
                     "DSV4_PPU_DECODE_QKV": os.environ.get(
                         "RTP_PPU_ATTN_QKV", "separate"
                     ),
@@ -356,8 +371,12 @@ class DecodeAttentionTest(unittest.TestCase):
                         paged_pool_specs=cache.specs,
                         group_tags=cache.group_tags,
                     )
-                    tagged = cache.inputs(positions, batch)
-                    impl = DSv4DecodeFmhaImplFP8(config, torch.device("cuda"), tagged)
+                    tagged = cache.inputs(positions, batch, stable=shared_rope)
+                    impl = attn._platform_provider.build_decode_metadata(
+                        DSv4DecodeFmhaImplFP8, config, torch.device("cuda"), tagged
+                    )
+                    if shared_rope:
+                        self.assertEqual(len(impl.metadata.rope_freqs_by_source), 1)
                     stream = torch.cuda.Stream()
                     stream.wait_stream(torch.cuda.current_stream())
                     with torch.cuda.stream(stream):
@@ -424,8 +443,19 @@ class DecodeAttentionTest(unittest.TestCase):
                         positions.fill_(position)
                         positions[active:].zero_()
                         inputs.normal_()
-                        tagged = cache.inputs(positions, active)
+                        tagged = cache.inputs(positions, active, stable=shared_rope)
                         impl.prepare_cuda_graph(tagged)
+                        if shared_rope:
+                            self.assertTrue(
+                                torch.equal(
+                                    impl.metadata.rope_freqs_by_source[
+                                        id(attn.freqs_cis)
+                                    ],
+                                    attn.freqs_cis.index_select(
+                                        0, impl.metadata.position_ids_long
+                                    ),
+                                )
+                            )
                         eager = DSv4DecodeFmhaImplFP8(
                             config, torch.device("cuda"), tagged
                         )

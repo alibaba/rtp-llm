@@ -1,5 +1,7 @@
 """Explicit TP1/DP8/EP8 Decode candidate using engine-owned communication."""
 
+import weakref
+
 import torch
 
 from rtp_llm.models_py.modules.dsv4.platform_provider import Dsv4ProviderCapability
@@ -61,6 +63,18 @@ class PpuDecodeProvider(PpuModuleProvider):
             raise ValueError(
                 "PPU Decode metadata mode must be eager, graph or graph_fused"
             )
+        self._rope_mode = self.execution_options.get("DSV4_PPU_DECODE_ROPE", "layer")
+        if self._rope_mode not in ("layer", "shared"):
+            raise ValueError("PPU Decode RoPE must be layer or shared")
+        if self._rope_mode == "shared" and (
+            self._metadata_mode == "eager"
+            or self.execution_options.get("DSV4_PPU_DECODE_ATTN_MODE", "sequential")
+            != "overlap"
+        ):
+            raise ValueError(
+                "Shared PPU Decode RoPE requires metadata Graph and Attention overlap"
+            )
+        self._decode_attention_refs = []
         self._shared_schedule = self.execution_options.get(
             "DSV4_PPU_DECODE_SHARED_SCHEDULE", "after_route"
         )
@@ -85,8 +99,25 @@ class PpuDecodeProvider(PpuModuleProvider):
 
         if default_factory is not DSv4DecodeFmhaImplFP8:
             raise ValueError("PPU metadata Graph requires the FP8 Decode factory")
+        tables = {}
+        if self._rope_mode == "shared":
+            for reference in self._decode_attention_refs:
+                attention = reference()
+                if attention is None:
+                    raise RuntimeError(
+                        "Decode Attention was released before metadata construction"
+                    )
+                table = attention.freqs_cis
+                tables[id(table)] = table
+            if not tables:
+                raise ValueError(
+                    "Shared RoPE requires constructed Decode Attention layers"
+                )
         return PpuDecodeMetadataGraph(
-            *args, fused_state_slots=self._metadata_mode == "graph_fused", **kwargs
+            *args,
+            fused_state_slots=self._metadata_mode == "graph_fused",
+            shared_rope_tables=tuple(tables.values()),
+            **kwargs,
         )
 
     def build_fp8_linear(self, default_factory, *args, **kwargs):
@@ -109,7 +140,7 @@ class PpuDecodeProvider(PpuModuleProvider):
         mode = self.execution_options.get("DSV4_PPU_DECODE_ATTN_MODE", "sequential")
         if mode not in ("sequential", "overlap"):
             raise ValueError("PPU Decode attention mode must be sequential or overlap")
-        return super().build_attention(
+        attention = super().build_attention(
             default_factory,
             *args,
             decode_stream_pool=self.stream_pool if mode == "overlap" else None,
@@ -117,6 +148,11 @@ class PpuDecodeProvider(PpuModuleProvider):
             decode_indexer_mode=self._indexer_schedule,
             **kwargs,
         )
+        if self._rope_mode == "shared":
+            # Resolve each table after model materialization/reset_rope_cache.
+            # Weak references avoid adding a provider <-> layer ownership cycle.
+            self._decode_attention_refs.append(weakref.ref(attention))
+        return attention
 
     def build_shared_expert_executor(self, **kwargs):
         from .ppu_shared_expert import PpuSharedExpertExecutor

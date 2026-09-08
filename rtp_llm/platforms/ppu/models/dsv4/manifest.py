@@ -190,6 +190,19 @@ def supports_ppu_fp4_decode(selection, request):
             "requires eager, graph or graph_fused Decode metadata",
         ),
         (
+            options.get("DSV4_PPU_DECODE_ROPE", "layer") in ("layer", "shared")
+            and (
+                options.get("DSV4_PPU_DECODE_ROPE", "layer") != "shared"
+                or (
+                    options.get("DSV4_PPU_DECODE_METADATA", "eager")
+                    in ("graph", "graph_fused")
+                    and options.get("DSV4_PPU_DECODE_ATTN_MODE", "sequential")
+                    == "overlap"
+                )
+            ),
+            "requires layer RoPE or shared RoPE with metadata Graph and Attention overlap",
+        ),
+        (
             options.get("DSV4_PPU_DECODE_SHARED_SCHEDULE", "after_route")
             in ("after_route", "before_route")
             and (

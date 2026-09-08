@@ -269,6 +269,33 @@ class Dsv4PlanTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "No compatible"):
             unsupported.prepare([request_for("model", unsupported.selection)])
 
+    def test_decode_shared_rope_preserves_rank_protocol(self):
+        options = {
+            "DSV4_PPU_SGLANG_MOE": "1",
+            "DSV4_PPU_DECODE_METADATA": "graph_fused",
+            "DSV4_PPU_DECODE_ATTN_MODE": "overlap",
+            "DSV4_PPU_DECODE_ROPE": "shared",
+        }
+        digests = set()
+        for rank in range(8):
+            ctx = self.decode_context(rank, execution_options=options)
+            digests.add(ctx.prepare([request_for("model", ctx.selection)]))
+        self.assertEqual(len(digests), 1)
+        baseline = self.decode_context(
+            execution_options={**options, "DSV4_PPU_DECODE_ROPE": "layer"}
+        )
+        self.assertNotIn(
+            baseline.prepare([request_for("model", baseline.selection)]), digests
+        )
+        for change in (
+            {"DSV4_PPU_DECODE_ROPE": "unknown"},
+            {"DSV4_PPU_DECODE_METADATA": "eager"},
+            {"DSV4_PPU_DECODE_ATTN_MODE": "sequential"},
+        ):
+            ctx = self.decode_context(execution_options={**options, **change})
+            with self.assertRaisesRegex(ValueError, "No compatible"):
+                ctx.prepare([request_for("model", ctx.selection)])
+
     def test_decode_fp8_v2_preserves_rank_protocol(self):
         digests = set()
         for rank in range(8):

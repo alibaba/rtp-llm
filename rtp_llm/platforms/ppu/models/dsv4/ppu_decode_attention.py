@@ -24,7 +24,16 @@ def decode_attention_overlap(attn, x, metadata, streams):
     start_pos = metadata.start_pos[:bsz]
     position_ids = metadata.position_ids[:bsz]
     attn._ensure_freqs_cis_bound()
-    freqs = decode_select_freqs(attn, position_ids)
+    shared_freqs = getattr(metadata, "rope_freqs_by_source", {})
+    if shared_freqs:
+        try:
+            freqs = shared_freqs[id(attn.freqs_cis)][:bsz]
+        except KeyError as error:
+            raise RuntimeError(
+                "Decode RoPE source changed; rebuild the metadata Graph"
+            ) from error
+    else:
+        freqs = decode_select_freqs(attn, position_ids)
     current = torch.cuda.current_stream(x.device)
     capturing = torch.cuda.is_current_stream_capturing()
     active = [streams["kv"]]

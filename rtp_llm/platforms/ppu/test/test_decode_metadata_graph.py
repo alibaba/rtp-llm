@@ -14,6 +14,65 @@ from rtp_llm.platforms.ppu.models.dsv4.ppu_decode_provider import PpuDecodeProvi
 
 
 class MetadataFactoryTest(unittest.TestCase):
+    def test_shared_rope_options_and_late_materialization(self):
+        from rtp_llm.models_py.modules.dsv4.fp8.decode.decode_fmha_impl import (
+            DSv4DecodeFmhaImplFP8,
+        )
+
+        options = {
+            "DSV4_PPU_DECODE_METADATA": "graph_fused",
+            "DSV4_PPU_DECODE_ATTN_MODE": "overlap",
+            "DSV4_PPU_DECODE_ROPE": "shared",
+        }
+        for change in (
+            {"DSV4_PPU_DECODE_ROPE": "unknown"},
+            {"DSV4_PPU_DECODE_METADATA": "eager"},
+            {"DSV4_PPU_DECODE_ATTN_MODE": "sequential"},
+        ):
+            with self.assertRaisesRegex(ValueError, "RoPE"):
+                PpuDecodeProvider({**options, **change})
+        provider = PpuDecodeProvider(options)
+        options["DSV4_PPU_DECODE_ROPE"] = "layer"
+        with self.assertRaisesRegex(ValueError, "constructed"):
+            provider.build_decode_metadata(DSv4DecodeFmhaImplFP8)
+
+        class Attention:
+            def __init__(self, **kwargs):
+                self.freqs_cis = torch.zeros((8, 2), dtype=torch.complex64)
+
+        first = provider.build_attention(Attention)
+        second = provider.build_attention(Attention)
+        # Model materialization can replace the constructor's CPU table.
+        table = torch.ones((8, 2), dtype=torch.complex64)
+        first.freqs_cis = second.freqs_cis = table
+        with patch(
+            "rtp_llm.platforms.ppu.models.dsv4.ppu_decode_metadata.PpuDecodeMetadataGraph"
+        ) as factory:
+            provider.build_decode_metadata(DSv4DecodeFmhaImplFP8)
+            tables = factory.call_args.kwargs["shared_rope_tables"]
+            self.assertEqual(len(tables), 1)
+            self.assertIs(tables[0], table)
+        del first, second
+        with self.assertRaisesRegex(RuntimeError, "released"):
+            provider.build_decode_metadata(DSv4DecodeFmhaImplFP8)
+
+    def test_shared_rope_rejects_a_replaced_attention_source(self):
+        from rtp_llm.platforms.ppu.models.dsv4.ppu_decode_attention import (
+            decode_attention_overlap,
+        )
+
+        old = torch.ones((8, 2), dtype=torch.complex64)
+        attention = SimpleNamespace(
+            freqs_cis=old.clone(), _ensure_freqs_cis_bound=lambda: None
+        )
+        metadata = SimpleNamespace(
+            start_pos=torch.zeros(1, dtype=torch.int32),
+            position_ids=torch.zeros(1, dtype=torch.int32),
+            rope_freqs_by_source={id(old): old[:1]},
+        )
+        with self.assertRaisesRegex(RuntimeError, "RoPE source changed"):
+            decode_attention_overlap(attention, torch.zeros((1, 1, 4)), metadata, {})
+
     def test_default_and_explicit_factory_contract(self):
         value = object()
         for provider in (DefaultDsv4PlatformProvider(), PpuDecodeProvider({})):
@@ -54,7 +113,11 @@ class MetadataGraphTest(unittest.TestCase):
     def test_actual_model_factory_and_fused_metadata(self):
         self._check_model_metadata("graph_fused")
 
-    def _check_model_metadata(self, mode):
+    @torch.inference_mode()
+    def test_shared_rope_dynamic_positions_and_batch_ownership(self):
+        self._check_model_metadata("graph_fused", shared_rope=True)
+
+    def _check_model_metadata(self, mode, shared_rope=False):
         from rtp_llm.models_py.model_desc.deepseek_v4_model import DeepSeekV4Model
         from rtp_llm.models_py.modules.dsv4.fp8.decode.decode_fmha_impl import (
             DSv4DecodeFmhaImplFP8,
@@ -91,6 +154,13 @@ class MetadataGraphTest(unittest.TestCase):
             ),
         }
         torch.manual_seed(890931)
+        rope_tables = []
+        if shared_rope:
+            rope_tables = [
+                torch.randn((16384, 32), device="cuda", dtype=torch.complex64),
+                torch.randn((16384, 64), device="cuda", dtype=torch.complex64)[:, ::2],
+            ]
+        previous_batches = []
         for batch in (1, 3, 8, 32, 128):
             positions = torch.zeros(batch, dtype=torch.int32, pin_memory=True)
             inputs = {
@@ -107,8 +177,24 @@ class MetadataGraphTest(unittest.TestCase):
                 for tag, (_, _, count) in specs.items()
             }
             options = {"DSV4_PPU_DECODE_METADATA": mode}
+            if shared_rope:
+                options.update(
+                    DSV4_PPU_DECODE_ROPE="shared",
+                    DSV4_PPU_DECODE_ATTN_MODE="overlap",
+                )
             provider = PpuDecodeProvider(options)
             options["DSV4_PPU_DECODE_METADATA"] = "eager"
+            attention_owners = []
+            if shared_rope:
+
+                class Attention:
+                    def __init__(self, freqs_cis, **kwargs):
+                        self.freqs_cis = freqs_cis
+
+                attention_owners = [
+                    provider.build_attention(Attention, freqs_cis=table)
+                    for table in (*rope_tables, rope_tables[0])
+                ]
             model = SimpleNamespace(
                 _platform_provider=provider,
                 kv_cache=SimpleNamespace(group_tags=list(specs)),
@@ -201,6 +287,45 @@ class MetadataGraphTest(unittest.TestCase):
                     self.assertTrue(
                         torch.equal(actual[name], expected), (batch, position, name)
                     )
+                for table in rope_tables:
+                    name = "/rope_freqs_by_source/" + str(id(table))
+                    self.assertEqual(actual[name].data_ptr(), pointers[name])
+                    self.assertTrue(
+                        torch.equal(
+                            actual[name],
+                            table.index_select(0, reference.metadata.position_ids_long),
+                        ),
+                        (batch, position, "shared RoPE"),
+                    )
+            if shared_rope:
+                self.assertEqual(len(candidate.metadata.rope_freqs_by_source), 2)
+                for previous, saved in previous_batches:
+                    for key, value in saved.items():
+                        prior = previous.metadata.rope_freqs_by_source[key]
+                        self.assertNotEqual(
+                            prior.data_ptr(),
+                            candidate.metadata.rope_freqs_by_source[key].data_ptr(),
+                        )
+                        self.assertTrue(torch.equal(prior, value))
+                previous_batches.append(
+                    (
+                        candidate,
+                        {
+                            key: value.clone()
+                            for key, value in candidate.metadata.rope_freqs_by_source.items()
+                        },
+                    )
+                )
+                key = id(rope_tables[0])
+                original_rows = candidate.metadata.rope_freqs_by_source[key]
+                candidate.metadata.rope_freqs_by_source[key] = original_rows.clone()
+                with self.assertRaisesRegex(ValueError, "RoPE table or output storage"):
+                    candidate.prepare_cuda_graph(inputs)
+                candidate.metadata.rope_freqs_by_source[key] = original_rows
+                rope_tables[0].transpose_(0, 1)
+                with self.assertRaisesRegex(ValueError, "RoPE table or output storage"):
+                    candidate.prepare_cuda_graph(inputs)
+                rope_tables[0].transpose_(0, 1)
             # Replacing a table with an equal-valued allocation must fail before
             # replay can keep reading its stale captured address.
             original = inputs[SWA_KV].kv_cache_kernel_block_id_device
