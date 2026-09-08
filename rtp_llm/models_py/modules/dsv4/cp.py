@@ -930,6 +930,139 @@ def cp_all_gather_full_varlen(
     return full.view((cp_ctx.seq_len_full,) + trailing)
 
 
+@dataclass
+class CPVarlenGatherHandle:
+    """In-flight varlen CP all-gather from :func:`cp_all_gather_full_varlen_async`."""
+
+    cp_ctx: CPContext
+    gathered: torch.Tensor
+    work: Any
+    stream: Any
+    completion_event: Any
+    local_2d: torch.Tensor
+    trailing: tuple
+    profile_name: str
+
+
+def cp_all_gather_full_varlen_async(
+    local_flat: torch.Tensor,
+    cp_ctx: CPContext,
+    *,
+    stream: Optional[Any] = None,
+    profile_name: Optional[str] = None,
+) -> CPVarlenGatherHandle:
+    """Start :func:`cp_all_gather_full_varlen` on ``stream``; drain with
+    :func:`cp_wait_gather_full_varlen`.
+
+    The synchronous varlen gather holds the MAIN stream for the whole NCCL
+    all-gather — Step 16 measured 0.33-0.59 ms per call x 11 layers x 8 chunks
+    = 29-52 ms of exposed main-stream time per 32K request, the largest single
+    CP item. Every consumer of the result funnels through
+    ``AttentionFP8._ensure_prefill_kv_full``, so the wait can be deferred to
+    there and the main stream runs the compressor / indexer projections (and,
+    under ``DSV4_PREFILL_CP_OVERLAP``, enqueues their own NCCL) while this one
+    is in flight.
+
+    Deliberately NOT workspace-backed, unlike the compressor gathers: the
+    synchronous path already allocates ``gathered`` fresh
+    (``_cp_all_gather_into_empty``) precisely because ``kv_full`` stays live
+    across Q materialization and would alias the union's ``prefill_q`` slice.
+    Keeping that allocation makes this memory-neutral and needs no third role in
+    the ``PrefillWorkspace`` union.
+    """
+    profile_name = profile_name or f"{_DEFAULT_CP_PROFILE_NAME}.varlen_async"
+    assert local_flat.dim() >= 1
+    assert (
+        local_flat.size(0) == cp_ctx.chunk_length
+    ), f"local_flat.size(0)={local_flat.size(0)} != chunk_length={cp_ctx.chunk_length}"
+    trailing = local_flat.shape[1:]
+    local_2d = local_flat.reshape(cp_ctx.chunk_length, -1).contiguous()
+    if not local_2d.is_cuda:
+        raise RuntimeError("cp_all_gather_full_varlen_async requires a CUDA tensor")
+    if not torch.distributed.is_initialized():
+        raise RuntimeError(
+            "cp_all_gather_full_varlen_async requires initialized torch.distributed"
+        )
+    process_group = collective_torch._get_group(Group.TP)
+    world_size = torch.distributed.get_world_size(process_group)
+    if world_size != cp_ctx.cp_size:
+        raise RuntimeError(
+            f"CP varlen gather world_size({world_size}) != cp_ctx.cp_size({cp_ctx.cp_size})"
+        )
+
+    current_stream = torch.cuda.current_stream(local_2d.device)
+    gather_stream = stream if stream is not None else current_stream
+    if stream is not None:
+        gather_stream.wait_stream(current_stream)
+    # Both tensors are allocated on ``current_stream`` but written by the NCCL
+    # kernel on ``gather_stream``: the ``wait_stream`` edge above orders the
+    # access, ``record_stream`` is what stops the caching allocator recycling
+    # either storage before NCCL finishes.
+    local_2d.record_stream(gather_stream)
+    gathered = torch.empty(
+        [world_size * local_2d.size(0)] + list(local_2d.shape[1:]),
+        device=local_2d.device,
+        dtype=local_2d.dtype,
+    )
+    gathered.record_stream(gather_stream)
+    with torch.cuda.stream(gather_stream):
+        with record_function_range(f"{profile_name}.launch"):
+            work = torch.distributed.all_gather_into_tensor(
+                gathered,
+                local_2d,
+                group=process_group,
+                async_op=True,
+            )
+            completion_event = torch.cuda.Event()
+            completion_event.record(gather_stream)
+    return CPVarlenGatherHandle(
+        cp_ctx=cp_ctx,
+        gathered=gathered,
+        work=work,
+        stream=gather_stream,
+        completion_event=completion_event,
+        local_2d=local_2d,
+        trailing=trailing,
+        profile_name=profile_name,
+    )
+
+
+def cp_wait_gather_full_varlen(handle: CPVarlenGatherHandle) -> torch.Tensor:
+    """Drain :func:`cp_all_gather_full_varlen_async` -> ``[seq_len_full, *F]``."""
+    if not isinstance(handle, CPVarlenGatherHandle):
+        raise TypeError(
+            f"cp_wait_gather_full_varlen expected CPVarlenGatherHandle, got {type(handle)!r}"
+        )
+    cp_ctx = handle.cp_ctx
+    current_stream = torch.cuda.current_stream(handle.gathered.device)
+    if _CP_GATHER_STATS:
+        # Events on the CURRENT stream bracket wait + restore, which is exactly
+        # the stall this gather exposes to compute (Work.wait() only enqueues a
+        # stream dependency, so host timers cannot see it).
+        _cp_gather_stats_drain()
+        ev0 = torch.cuda.Event(enable_timing=True)
+        ev1 = torch.cuda.Event(enable_timing=True)
+        ev2 = torch.cuda.Event(enable_timing=True)
+        ev0.record(current_stream)
+        with record_function_range(f"{handle.profile_name}.wait_host"):
+            current_stream.wait_event(handle.completion_event)
+            handle.work.wait()
+        ev1.record(current_stream)
+    else:
+        with record_function_range(f"{handle.profile_name}.wait_host"):
+            current_stream.wait_event(handle.completion_event)
+            handle.work.wait()
+    with record_function_range(f"{handle.profile_name}.restore"):
+        full = _cp_restore_gathered_full_2d(handle.gathered, cp_ctx)
+    if _CP_GATHER_STATS:
+        ev2.record(current_stream)
+        nbytes = handle.gathered.numel() * handle.gathered.element_size()
+        _cp_gather_record(
+            _cp_gather_kind(f"{handle.profile_name}.async_wait"), ev0, ev1, ev2, nbytes
+        )
+    return full.view((cp_ctx.seq_len_full,) + handle.trailing)
+
+
 # ---------------------------------------------------------------------------
 # Lever 2 (Sep 2): fp8-compressed varlen AllGather. The CP attention gathers
 # (q / kv) are uniformly payload-bound on this box (NCCL over host SHM;

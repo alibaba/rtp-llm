@@ -52,12 +52,15 @@ from rtp_llm.models_py.modules.dsv4.chunk_env import dsv4_chunk_tokens_from_env
 from rtp_llm.models_py.modules.dsv4.cp import (
     _CP_ROLE_MAIN,
     CPContext,
+    _fp8_gather_enabled,
     build_cp_full_prefill_positions,
     cp_actual_owned_kv_lens,
     cp_all_gather_full_varlen,
+    cp_all_gather_full_varlen_async,
     cp_all_gather_full_varlen_fp8,
     cp_freqs_cis_local,
     cp_padded_local_kv_lens,
+    cp_wait_gather_full_varlen,
 )
 from rtp_llm.models_py.modules.dsv4.fp8._cp_attention_merge import merge_lse_output
 from rtp_llm.models_py.modules.dsv4.fp8._cp_attention_shard import (
@@ -190,6 +193,14 @@ def _prefill_cp_overlap_enabled() -> bool:
 
 def _prefill_cp_async_workspace_reads_enabled() -> bool:
     return os.environ.get("DSV4_PREFILL_CP_ASYNC_WORKSPACE_READS", "1") != "0"
+
+
+# Start the current-layer SWA ``kv_full`` all-gather on the shared CP
+# communication stream instead of holding the main stream for it, and drain it
+# in ``_ensure_prefill_kv_full``. Off by default: it changes when the NCCL op is
+# enqueued relative to the compressor gathers that share that stream.
+def _cp_swa_kv_async_enabled() -> bool:
+    return os.environ.get("DSV4_CP_SWA_KV_ASYNC", "0") == "1"
 
 
 _CP_POST_GATHER_STREAMS: Dict[int, torch.cuda.Stream] = {}
@@ -894,10 +905,20 @@ class PrefillQKV(NamedTuple):
 
     ``qr`` is fed to the indexer (CSA layers); ``q`` is the dense Q.
     ``kv_full`` is the all-gathered KV under CP; equals ``kv`` otherwise.
-    Current-layer SWA KV all-gather intentionally stays synchronous: it is not
-    part of the prefill overlap feature because the resulting tensor remains
-    live across Q materialization. The CP-aware sequence length lives on
-    ``PrefillMeta.seqlen_full``.
+
+    The current-layer SWA KV all-gather used to be unconditionally synchronous.
+    Under ``DSV4_CP_SWA_KV_ASYNC=1`` it is instead started on the shared CP
+    communication stream and carried as ``kv_full_handle`` with ``kv_full`` left
+    ``None``: every consumer funnels through
+    :meth:`AttentionFP8._ensure_prefill_kv_full`, so the wait can be deferred to
+    there and the main stream runs the compressor / indexer projections (and
+    enqueues their own NCCL) while this gather is in flight. Step 16 measured the
+    synchronous form holding the main stream 0.33-0.59 ms x 11 layers x 8 chunks
+    = 29-52 ms per request. The gathered buffer is still a fresh allocation, not
+    a ``PrefillWorkspace`` role, because it remains live across Q materialization
+    and would alias the union's ``prefill_q`` slice.
+
+    The CP-aware sequence length lives on ``PrefillMeta.seqlen_full``.
 
     ``q`` starts ``None``: its ``q_lora_b`` + RoPE are DEFERRED to
     :meth:`AttentionFP8._materialize_prefill_q` (called just before the
@@ -908,7 +929,8 @@ class PrefillQKV(NamedTuple):
 
     qr: torch.Tensor
     q: Optional[torch.Tensor]
-    kv_full: torch.Tensor
+    kv_full: Optional[torch.Tensor]
+    kv_full_handle: Optional[Any] = None
 
 
 class AttentionFP8(nn.Module):
@@ -5466,29 +5488,46 @@ class AttentionFP8(nn.Module):
 
         qr = compute_qr()
         kv = compute_kv()
+        kv_full_handle = None
         if common.cp_on:
-            with record_function_range("dsv4.fp8.attn.qkv.cp_gather_varlen"):
+            kv_flat = kv.reshape(kv.size(0) * kv.size(1), *kv.shape[2:])
+            kv_profile_name = (
+                f"dsv4.cp.all_gather.L{self.layer_id:02d}.swa_kv_full.varlen"
+            )
+            if _cp_swa_kv_async_enabled() and not _fp8_gather_enabled("kv"):
+                # Deferred to _ensure_prefill_kv_full: the main stream runs the
+                # compressor / indexer projections (and enqueues their own NCCL
+                # on this same stream) while this all-gather is in flight.
                 with record_function_range(
-                    "dsv4.fp8.attn.swa_kv_full.cp_gather_varlen"
+                    "dsv4.fp8.attn.swa_kv_full.cp_gather_varlen_async"
                 ):
-                    kv_flat = kv.reshape(kv.size(0) * kv.size(1), *kv.shape[2:])
-                    kv_full_flat = cp_all_gather_full_varlen_fp8(
+                    kv_full_handle = cp_all_gather_full_varlen_async(
                         kv_flat,
                         common.cp_ctx,
-                        kind="kv",
-                        profile_name=(
-                            f"dsv4.cp.all_gather.L{self.layer_id:02d}."
-                            "swa_kv_full.varlen"
-                        ),
+                        stream=self._get_cp_gather_stream(kv_flat.device),
+                        profile_name=kv_profile_name,
                     )
-                    kv_full = kv_full_flat.unsqueeze(0)
+                kv_full = None
+            else:
+                with record_function_range("dsv4.fp8.attn.qkv.cp_gather_varlen"):
+                    with record_function_range(
+                        "dsv4.fp8.attn.swa_kv_full.cp_gather_varlen"
+                    ):
+                        kv_full_flat = cp_all_gather_full_varlen_fp8(
+                            kv_flat,
+                            common.cp_ctx,
+                            kind="kv",
+                            profile_name=kv_profile_name,
+                        )
+                        kv_full = kv_full_flat.unsqueeze(0)
         else:
             kv_full = kv
 
         return PrefillQKV(
             qr=qr.squeeze(0),
             q=None,  # deferred to _materialize_prefill_q
-            kv_full=kv_full.squeeze(0),
+            kv_full=None if kv_full is None else kv_full.squeeze(0),
+            kv_full_handle=kv_full_handle,
         )
 
     def _materialize_prefill_q(
@@ -5524,6 +5563,11 @@ class AttentionFP8(nn.Module):
     def _ensure_prefill_kv_full(
         self, qkv: PrefillQKV, common: PrefillMeta
     ) -> PrefillQKV:
+        if qkv.kv_full_handle is not None:
+            qkv = qkv._replace(
+                kv_full=cp_wait_gather_full_varlen(qkv.kv_full_handle),
+                kv_full_handle=None,
+            )
         assert qkv.kv_full is not None, "PrefillQKV must carry materialized kv_full"
         return qkv
 
