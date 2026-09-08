@@ -36,7 +36,6 @@ from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
 
 import torch
-
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
@@ -511,12 +510,13 @@ class DeepSeekV4Model(GptModelBase):
             ctx = self.module_build_context
             if ctx is not None:
                 metadata = ctx.selection.model_metadata
-                if bool(init_resource.is_decode_role) or bool(
-                    init_resource.is_speculative
-                ):
-                    raise ValueError(
-                        "Prefill module binding cannot initialize decode/speculative resources"
-                    )
+                from rtp_llm.models_py.pluggable.dsv4_specs import validate_runtime_role
+
+                validate_runtime_role(
+                    metadata,
+                    is_decode_role=init_resource.is_decode_role,
+                    is_speculative=init_resource.is_speculative,
+                )
                 if bool(self._v4_args.fp8_kv_cache) != metadata["fp8_kv_cache"]:
                     raise ValueError("KV dtype differs from the module preflight")
                 from rtp_llm.models_py.pluggable.dsv4_resources import (
@@ -833,7 +833,6 @@ class DeepSeekV4Model(GptModelBase):
             # same (H, D, ratio, T) but with mask. We compile both APPLY_MASK
             # variants here.
             import torch as _torch
-
             from rtp_llm.models_py.modules.dsv4._indexer_score_triton import (
                 v4_indexer_score as _v4_idx,
             )
@@ -1029,9 +1028,12 @@ class DeepSeekV4Model(GptModelBase):
                 )
                 _dense_shapes = _collect_dsv4_dense_gemm_shapes(self)
                 _dense_gemm_prefill_chunk_size = 0
-                if not self._is_decode_role and chunked_moe_enabled(self._execution_options):
+                if not self._is_decode_role and chunked_moe_enabled(
+                    self._execution_options
+                ):
                     _dense_gemm_prefill_chunk_size = max(
-                        int(moe_chunk_tokens_from_env(options=self._execution_options)), 0
+                        int(moe_chunk_tokens_from_env(options=self._execution_options)),
+                        0,
                     )
                 _prefill_cp_config = getattr(
                     self.parallelism_config, "prefill_cp_config", None

@@ -7,9 +7,12 @@ from rtp_llm.models_py.modules.dsv4.hc.tilelang_impl import TileLangHCUnit
 
 
 class PpuHCUnit(TileLangHCUnit):
-    def __init__(self, *args, options, tp_size=1, tp_rank=0, **kwargs):
+    def __init__(
+        self, *args, options, tp_size=1, tp_rank=0, allow_graph=False, **kwargs
+    ):
         super().__init__(*args, **kwargs)
         self.tp_size, self.tp_rank = tp_size, tp_rank
+        self._allow_graph = allow_graph
         self._backend = options.get(
             "DSV4_MHC_PRE_GEMM_BACKEND", "deepgemm_deterministic"
         )
@@ -17,6 +20,8 @@ class PpuHCUnit(TileLangHCUnit):
             raise ValueError(
                 "PPU module HC requires an explicitly supported prenorm backend"
             )
+        if allow_graph and (tp_size != 1 or self._backend != "deepgemm_deterministic"):
+            raise ValueError("PPU HC Graph requires TP1 and deterministic prenorm")
         if (
             options.get("DSV4_MHC_POST_BACKEND", "tilelang") != "tilelang"
             or options.get("DSV4_MHC_POST_PDL", "0") != "0"
@@ -53,8 +58,15 @@ class PpuHCUnit(TileLangHCUnit):
         sinkhorn_iters,
         hc_mult,
     ):
-        if torch.cuda.is_current_stream_capturing():
-            raise RuntimeError("PPU module HC is currently eager Prefill only")
+        if torch.cuda.is_current_stream_capturing() and not self._allow_graph:
+            raise RuntimeError("This PPU HC instance does not allow Graph capture")
+        if residual.numel() == 0:
+            leading = residual.shape[:-2]
+            return (
+                residual.new_empty((*leading, self.dim)),
+                residual.new_empty((*leading, hc_mult, 1), dtype=torch.float32),
+                residual.new_empty((*leading, hc_mult, hc_mult), dtype=torch.float32),
+            )
         post, comb, layer_input = self._pre_kernel(
             residual,
             fn,
@@ -71,4 +83,6 @@ class PpuHCUnit(TileLangHCUnit):
         return layer_input, post, comb
 
     def _post_operator(self, x, residual, post, comb, *, hc_mult, out=None):
+        if residual.numel() == 0:
+            return residual if out is None else out
         return self._post_kernel(x, residual, post, comb, out=out, enable_pdl=False)

@@ -19,6 +19,18 @@ def build_block(*, build_ctx, request, **kwargs):
     return baseline.build_block(build_ctx=build_ctx, request=request, **kwargs)
 
 
+def build_decode_model(*, build_ctx, request, **kwargs):
+    from .ppu_decode_provider import PpuDecodeProvider
+
+    provider = PpuDecodeProvider(
+        build_ctx.selection.model_metadata["execution_options"]
+    )
+    provider.require_device_name(build_ctx.selection.platform.device_name)
+    return baseline.build_model(
+        build_ctx=build_ctx, request=request, platform_provider=provider, **kwargs
+    )
+
+
 def build_attention(*, build_ctx, request, **kwargs):
     return baseline.build_attention(build_ctx=build_ctx, request=request, **kwargs)
 

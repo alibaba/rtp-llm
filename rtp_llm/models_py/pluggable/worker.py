@@ -32,6 +32,20 @@ def execution_options_snapshot(environ):
     }
 
 
+def validate_parallelism(pc):
+    """The startup store covers the whole world before any DeepEP group exists."""
+    tp, dp, ep, pp, world = (
+        int(getattr(pc, name))
+        for name in ("tp_size", "dp_size", "ep_size", "pp_size", "world_size")
+    )
+    tp_group = world == tp and dp == 1
+    decode_ep_group = tp == 1 and dp == ep == world and pc.role_type.name == "DECODE"
+    if min(tp, dp, ep, pp, world) < 1 or pp != 1 or not (tp_group or decode_ep_group):
+        raise ValueError(
+            "Module startup requires a homogeneous TP group or TP1 Decode DP/EP world"
+        )
+
+
 def prepare_worker_model_context(
     model_config, engine_config, distributed_server, *, timeout_s
 ):
@@ -41,14 +55,7 @@ def prepare_worker_model_context(
     if model_config.model_type != "deepseek_v4":
         raise ValueError("Module dispatch has no lifecycle integration for this model")
     pc = engine_config.parallelism_config
-    if (
-        int(pc.world_size) != int(pc.tp_size)
-        or int(pc.dp_size) != 1
-        or int(pc.pp_size) != 1
-    ):
-        raise ValueError(
-            "Module startup protocol currently requires one homogeneous TP group"
-        )
+    validate_parallelism(pc)
     platform = PlatformContext.detect(
         local_rank=int(pc.local_rank),
         requested=config.platform,
@@ -98,6 +105,19 @@ def prepare_worker_model_context(
         "max_seq_len": int(model_config.max_seq_len),
         "checkpoint_config": checkpoint_config,
         "hw_kernel_config": engine_config.hw_kernel_config.to_string(),
+        "moe_communication": {
+            "enabled": bool(engine_config.moe_config.use_deepep_moe),
+            "low_latency": bool(engine_config.moe_config.use_deepep_low_latency),
+            "internode": bool(engine_config.moe_config.use_deepep_internode),
+            "all_gather": bool(engine_config.moe_config.use_all_gather),
+            "num_sms": int(engine_config.moe_config.deep_ep_num_sm),
+            "max_generate_batch_size": int(
+                engine_config.runtime_config.max_generate_batch_size
+            ),
+            "ffn_disaggregate": bool(
+                getattr(pc.ffn_disaggregate_config, "enable_ffn_disaggregate", False)
+            ),
+        },
         # Capture the current legacy options once for cross-rank comparison.
         # As each module migrates, its builder consumes this immutable snapshot.
         "execution_options": execution_options_snapshot(os.environ),

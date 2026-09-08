@@ -30,3 +30,21 @@ py_test(
     deps = ["//rtp_llm/models_py:models", "//rtp_llm:torch"],
     tags = ["manual", "gpu", "ppu"],
 )
+
+py_test(
+    name = "decode_hc_test",
+    srcs = ["ppu/test/test_decode_hc.py"],
+    main = "ppu/test/test_decode_hc.py",
+    data = [":platform_sources"],
+    deps = ["//rtp_llm/models_py:models", "//rtp_llm:torch"],
+    tags = ["manual", "gpu", "ppu"],
+)
+
+py_test(
+    name = "mxfp4_deepep_test",
+    srcs = ["ppu/test/test_mxfp4_deepep.py"],
+    main = "ppu/test/test_mxfp4_deepep.py",
+    data = [":platform_sources"],
+    deps = ["//rtp_llm/models_py:models", "//rtp_llm:torch"],
+    tags = ["manual", "gpu", "ppu"],
+)

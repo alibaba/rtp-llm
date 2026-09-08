@@ -3,6 +3,7 @@ import json
 import subprocess
 import sys
 import unittest
+from types import SimpleNamespace
 
 from rtp_llm.config.module_dispatch_config import ModuleDispatchConfig
 from rtp_llm.device.device_type import DeviceType
@@ -55,6 +56,105 @@ def explicit_config():
 
 
 class Dsv4PlanTest(unittest.TestCase):
+    def decode_context(self, rank=0, **changed):
+        values = dict(
+            tp_size=1,
+            dp_size=8,
+            ep_size=8,
+            world_size=8,
+            role="DECODE",
+            cuda_graph=True,
+            indexer_cache_mode="fp4",
+            execution_options={"DSV4_PPU_SGLANG_MOE": "1"},
+            moe_communication={
+                "enabled": True,
+                "low_latency": True,
+                "all_gather": False,
+                "ffn_disaggregate": False,
+                "max_generate_batch_size": 128,
+            },
+        )
+        values.update(changed)
+        config = ModuleDispatchConfig(
+            mode="auto",
+            platform="ppu",
+            impl_overrides=tuple(
+                ("rtp.dsv4." + kind, f"ppu.dsv4.{kind}.fp4_decode.v1")
+                for kind in CONTRACTS
+            ),
+        )
+        return ModuleBuildContext(
+            get_module_registry(), selection(rank, **values), config, world_size=8
+        )
+
+    def test_decode_plan_covers_ep_world_before_runtime_imports(self):
+        from rtp_llm.models_py.pluggable.worker import validate_parallelism
+
+        pc = SimpleNamespace(
+            tp_size=1,
+            dp_size=8,
+            ep_size=8,
+            pp_size=1,
+            world_size=8,
+            role_type=SimpleNamespace(name="DECODE"),
+        )
+        validate_parallelism(pc)
+        digests = set()
+        for rank in range(8):
+            ctx = self.decode_context(rank)
+            digests.add(ctx.prepare([request_for("model", ctx.selection)]))
+            self.assertEqual(len(ctx.bindings), 130)
+            self.assertTrue(
+                all(
+                    b.request.required_capabilities == frozenset({"decode"})
+                    for b in ctx.bindings
+                )
+            )
+            self.assertTrue(
+                all(not b.implementation.auto_selectable for b in ctx.bindings)
+            )
+        self.assertEqual(len(digests), 1)
+        pc.ep_size = 4
+        with self.assertRaises(ValueError):
+            validate_parallelism(pc)
+
+    def test_decode_rejects_mismatched_runtime_and_communication(self):
+        from rtp_llm.models_py.pluggable.dsv4_specs import validate_runtime_role
+
+        ctx = self.decode_context()
+        validate_runtime_role(
+            ctx.selection.model_metadata, is_decode_role=True, is_speculative=False
+        )
+        with self.assertRaisesRegex(ValueError, "Runtime Decode role"):
+            validate_runtime_role(
+                ctx.selection.model_metadata, is_decode_role=False, is_speculative=False
+            )
+        with self.assertRaisesRegex(ValueError, "Runtime speculation"):
+            validate_runtime_role(
+                ctx.selection.model_metadata, is_decode_role=True, is_speculative=True
+            )
+        for changed in (
+            {"tp_size": 4},
+            {"ep_size": 4},
+            {"dp_size": 4},
+            {"role": "PDFUSION"},
+            {"speculative": True},
+            {"cp_enabled": True},
+            {"reuse_cache": True},
+            {"moe_communication": {}},
+            {"indexer_cache_mode": "fp8"},
+            {
+                "execution_options": {
+                    "DSV4_PPU_SGLANG_MOE": "1",
+                    "DSV4_MHC_PRE_GEMM_BACKEND": "deepgemm",
+                }
+            },
+        ):
+            with self.subTest(changed=changed):
+                ctx = self.decode_context(**changed)
+                with self.assertRaisesRegex(ValueError, "No compatible"):
+                    ctx.prepare([request_for("model", ctx.selection)])
+
     def test_fp4_requires_consistent_explicit_state_contracts(self):
         from rtp_llm.models_py.pluggable.dsv4_specs import STATE_FORMAT_FP4
 

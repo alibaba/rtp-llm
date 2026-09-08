@@ -126,9 +126,19 @@ def request_for(kind, selection, layer_id=None):
             if selection.model_metadata.get("indexer_cache_mode") == "fp4"
             else STATE_FORMAT
         ),
-        required_capabilities={"prefill"},
+        required_capabilities={
+            "decode" if selection.model_metadata.get("role") == "DECODE" else "prefill"
+        },
         metadata=metadata,
     )
+
+
+def validate_runtime_role(metadata, *, is_decode_role, is_speculative):
+    """Check actual delayed-init resources against the preflight role."""
+    if bool(is_decode_role) != (metadata.get("role") == "DECODE"):
+        raise ValueError("Runtime Decode role differs from the module preflight")
+    if bool(is_speculative) or bool(metadata.get("speculative")):
+        raise ValueError("Runtime speculation is not supported by this module contract")
 
 
 def describe_model(selection, request):

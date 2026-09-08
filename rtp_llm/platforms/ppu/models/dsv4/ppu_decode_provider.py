@@ -1,0 +1,32 @@
+"""Explicit TP1/DP8/EP8 Decode candidate using engine-owned communication."""
+
+from .ppu_module_provider import PpuModuleProvider
+
+
+class PpuDecodeProvider(PpuModuleProvider):
+    name = "m890p-dsv4-fp4-decode-candidate"
+    indexer_mode = "FP4"
+
+    def build_moe(self, default_factory, *args, **kwargs):
+        from .ppu_deepep_fp4 import PpuDeepEPFP4Strategy
+
+        if (
+            kwargs.get("tp_size") != 1
+            or kwargs.get("ep_size") != 8
+            or not kwargs.get("is_decode_role")
+        ):
+            raise ValueError("PPU Decode MoE requires the TP1/EP8 Decode role")
+        return default_factory(
+            *args,
+            platform_provider=self,
+            execution_options=self.execution_options,
+            strategy_type=PpuDeepEPFP4Strategy,
+            **kwargs,
+        )
+
+    def build_hc_unit(self, *args, **kwargs):
+        from .ppu_hc import PpuHCUnit
+
+        return PpuHCUnit(
+            *args, options=self.execution_options, allow_graph=True, **kwargs
+        )
