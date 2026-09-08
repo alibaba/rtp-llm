@@ -197,16 +197,15 @@ struct KVCacheConfig {
     int         seq_size_per_block        = 64;
     int         kernel_seq_size_per_block = 0;
     int         test_block_num            = 0;
-    int         use_block_cache              = -1;  // -1 means not set, use Optional<int> equivalent
-    bool        enable_device_cache          = true;
-    bool        enable_host_cache            = false;
-    bool        enable_disk_cache            = false;
-    bool        enable_remote_cache          = false;
-    bool        write_cache_sync             = false;
-    std::string device_eviction_policy       = "lru";
-    std::string host_eviction_policy         = "lru";
-    std::string disk_eviction_policy         = "fifo";
-    int64_t     device_cache_min_free_blocks = 0;
+    int         use_block_cache           = -1;  // -1 means not set, use Optional<int> equivalent
+    bool        enable_device_cache       = true;
+    bool        enable_host_cache         = false;
+    bool        enable_disk_cache         = false;
+    bool        enable_remote_cache       = false;
+    bool        write_cache_sync          = false;
+    std::string device_eviction_policy    = "lru";
+    std::string host_eviction_policy      = "lru";
+    std::string disk_eviction_policy      = "fifo";
 
     // DSV4 fixed-allocation pool block count. 0 means the fixed regions
     // (INDEXER_STATE / CSA_STATE / HCA_STATE / SWA_KV) use the normal
