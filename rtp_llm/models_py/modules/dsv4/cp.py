@@ -366,8 +366,18 @@ def build_cp_context_for_forward(
     global position, so the rule lives in exactly one place.
     """
     position_offset: Union[int, torch.Tensor] = 0
+    position_offset_cpu: Optional[torch.Tensor] = None
     if prefix_lengths is not None and int(prefix_lengths.numel()) > 0:
         position_offset = prefix_lengths.to(device=device, dtype=torch.long)
+        # prefix_lengths arrives from the input gatherer as a pinned HOST tensor
+        # (PP requires device-input mode off), so this copy is free -- while every
+        # scalar build_cp_context derives from the device copy is a blocking D2H.
+        # It runs once per forward, i.e. once per chunk per rank.
+        position_offset_cpu = (
+            prefix_lengths.to(torch.long)
+            if not prefix_lengths.is_cuda
+            else prefix_lengths.detach().to("cpu", torch.long)
+        )
     return build_cp_context(
         cp_info,
         cp_size,
@@ -375,6 +385,7 @@ def build_cp_context_for_forward(
         num_tokens,
         device,
         position_offset=position_offset,
+        position_offset_cpu=position_offset_cpu,
         kv_cache_sharded=kv_cache_sharded,
     )
 
@@ -386,6 +397,7 @@ def build_cp_context(
     chunk_length: int,
     device: torch.device,
     position_offset: Union[int, torch.Tensor] = 0,
+    position_offset_cpu: Optional[torch.Tensor] = None,
     kv_cache_sharded: bool = False,
 ) -> CPContext:
     """Compute the per-forward derived CPContext from framework metadata."""
@@ -417,11 +429,21 @@ def build_cp_context(
             [zero, torch.cumsum(input_lengths_global, dim=0).to(torch.int32)]
         ).contiguous()
 
+    # Host int64 mirror of the per-request real lengths. actual_input_lengths_cpu
+    # is already a CPU tensor, so this is free -- and every scalar derived from it
+    # below would otherwise be a blocking D2H off input_lengths_global.
+    input_lengths_cpu: Optional[torch.Tensor] = None
+    if actual_input_lengths_cpu is not None and actual_input_lengths_cpu.numel() > 0:
+        input_lengths_cpu = actual_input_lengths_cpu.detach().to(torch.long).contiguous()
+
     chunk_lengths_obj = getattr(cp_info, "prefill_cp_chunk_lengths", None)
-    if chunk_lengths_obj is not None and chunk_lengths_obj.numel() > 0:
-        chunk_lengths = [int(v) for v in chunk_lengths_obj.detach().cpu().tolist()]
-    elif input_lengths_global is not None and input_lengths_global.numel() == 1:
+    if input_lengths_global is not None and input_lengths_global.numel() == 1:
+        # Single request: the assert below forces sum(chunk_lengths) ==
+        # chunk_length, so with B==1 the only possible value is chunk_length
+        # itself. Take it from the shape and skip the per-forward D2H.
         chunk_lengths = [chunk_length]
+    elif chunk_lengths_obj is not None and chunk_lengths_obj.numel() > 0:
+        chunk_lengths = [int(v) for v in chunk_lengths_obj.detach().cpu().tolist()]
     else:
         # Test/legacy fallback: a single stream with the caller-provided
         # aggregate rank-local chunk length.
@@ -460,8 +482,25 @@ def build_cp_context(
     ), f"prefix_lengths has {prefix_lengths.numel()} entries, expected at least {B}"
     prefix_lengths = prefix_lengths[:B].contiguous()
 
+    # Host mirror of the finalized prefix lengths, for the scalars derived below.
+    # position_offset_cpu is free when the caller held a pinned host tensor (the
+    # normal PP path); the device read is only a fallback for callers that pass a
+    # CUDA position_offset with no host copy.
+    if position_offset_cpu is not None and int(position_offset_cpu.numel()) > 0:
+        prefix_lengths_cpu = position_offset_cpu.to(torch.long)
+        if prefix_lengths_cpu.numel() == 1 and B > 1:
+            prefix_lengths_cpu = prefix_lengths_cpu.expand(B).contiguous()
+        prefix_lengths_cpu = prefix_lengths_cpu[:B].contiguous()
+    else:
+        prefix_lengths_cpu = prefix_lengths.detach().to("cpu", torch.long).contiguous()
+
     if input_lengths_global is not None:
         real_lengths = input_lengths_global.to(device=device, dtype=torch.long)
+        real_lengths_cpu = (
+            input_lengths_cpu
+            if input_lengths_cpu is not None
+            else real_lengths.detach().to("cpu", torch.long)
+        )
     else:
         # No actual lengths means no padding information beyond the mask.
         # For the single-stream fallback this collapses to seq_len_full below.
@@ -470,6 +509,7 @@ def build_cp_context(
             dtype=torch.long,
             device=device,
         )
+        real_lengths_cpu = real_lengths.detach().to("cpu", torch.long)
 
     # C++ ZigZagProcessor applies the zigzag plan independently per prefill
     # stream/request, then concatenates the rank-local chunks.  Generate the
@@ -490,8 +530,8 @@ def build_cp_context(
         req_relative = torch.cat(
             [even_padded - padded_seq_offset, odd_padded - padded_seq_offset]
         )
-        if req_id < int(real_lengths.numel()):
-            max_real_pos = max(int(real_lengths[req_id].item()) - 1, 0)
+        if req_id < int(real_lengths_cpu.numel()):
+            max_real_pos = max(int(real_lengths_cpu[req_id]) - 1, 0)
         else:
             max_real_pos = max(padded_len - 1, 0)
         per_req_positions.append(req_relative.clamp_max(max_real_pos))
@@ -508,7 +548,7 @@ def build_cp_context(
     local_is_real = padding_mask[relative_positions] == 1  # [chunk_length] bool
     unpad_restore_is_prefix = False
     if input_lengths_global is not None:
-        seq_len_full = int(input_lengths_global.to(torch.long).sum().item())
+        seq_len_full = int(real_lengths_cpu.sum())
     else:
         seq_len_full = int((padding_mask == 1).sum().item())
 
@@ -528,9 +568,11 @@ def build_cp_context(
         seq_len_full = int(unpad_restore.shape[0])
     prefix_per_token = prefix_lengths.gather(0, req_id_per_token.to(torch.long))
     global_positions = (prefix_per_token + local_positions).contiguous()
-    prefix_length = int(prefix_lengths[0].item()) if prefix_lengths.numel() > 0 else 0
+    prefix_length = (
+        int(prefix_lengths_cpu[0]) if prefix_lengths_cpu.numel() > 0 else 0
+    )
     if input_lengths_global is not None:
-        seq_len_total = int((prefix_lengths + real_lengths[:B]).max().item())
+        seq_len_total = int((prefix_lengths_cpu + real_lengths_cpu[:B]).max())
     else:
         seq_len_total = prefix_length + seq_len_full
 
@@ -797,6 +839,11 @@ def _cp_gather_stats_drain(force: bool = False) -> None:
         if not (force or ev2.query()):
             keep.append((name, ev0, ev1, ev2, nbytes))
             continue
+        if force:
+            # elapsed_time raises "Both events must be completed" otherwise. Only
+            # the forced (report/atexit) path pays this; the normal path uses the
+            # non-blocking query() above so measuring never serializes a gather.
+            ev2.synchronize()
         total = ev0.elapsed_time(ev2)
         if ev1 is not None:
             launch = ev0.elapsed_time(ev1)
