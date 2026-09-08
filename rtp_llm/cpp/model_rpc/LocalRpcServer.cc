@@ -50,7 +50,7 @@ grpc::Status LocalRpcServer::init(const EngineInitParams&                       
     metrics_reporter_ = maga_init_params.metrics_reporter;
     RTP_LLM_LOG_INFO("LocalRpcServer aux_string %s", maga_init_params_.misc_config.aux_string.c_str());
     propose_maga_init_params_ = propose_params.get();
-    if (maga_init_params_.parallelism_config.tp_rank == 0
+    if (!defer_tp_broadcaster_ && maga_init_params_.parallelism_config.tp_rank == 0
         && !maga_init_params_.runtime_config.worker_grpc_addrs.empty()) {
         tp_broadcaster_ = std::make_shared<BroadcastManager>(maga_init_params_.runtime_config.worker_grpc_addrs);
         if (!tp_broadcaster_->init()) {
@@ -81,6 +81,27 @@ grpc::Status LocalRpcServer::init(const EngineInitParams&                       
     }
 
     return grpc::Status::OK;
+}
+
+void LocalRpcServer::updateRuntimeEndpoints(const RuntimeConfig& runtime_config) {
+    if (!defer_tp_broadcaster_) {
+        RTP_LLM_FAIL("runtime endpoints can only be updated before deferred services start");
+    }
+    maga_init_params_.runtime_config.worker_addrs = runtime_config.worker_addrs;
+    maga_init_params_.runtime_config.worker_grpc_addrs = runtime_config.worker_grpc_addrs;
+}
+
+void LocalRpcServer::startDeferredServices() {
+    if (!defer_tp_broadcaster_ || tp_broadcaster_ || maga_init_params_.parallelism_config.tp_rank != 0
+        || maga_init_params_.runtime_config.worker_grpc_addrs.empty()) {
+        return;
+    }
+    tp_broadcaster_ = std::make_shared<BroadcastManager>(maga_init_params_.runtime_config.worker_grpc_addrs);
+    if (!tp_broadcaster_->init()) {
+        RTP_LLM_LOG_WARNING("failed to init deferred tp broadcaster");
+        tp_broadcaster_.reset();
+    }
+    defer_tp_broadcaster_ = false;
 }
 
 grpc::Status LocalRpcServer::serializeErrorMsg(const string& request_key, ErrorInfo error_info) {

@@ -1512,6 +1512,10 @@ private:
 
 bool initKmonitorFactory();
 void stopKmonitorFactory();
+// Template lifecycle hooks. They pause the existing MetricsSystem in place so
+// metric sources remain registered across a checkpoint/restore barrier.
+bool pauseKmonitorForScr();
+bool resumeKmonitorAfterScr();
 
 void setHippoTags(kmonitor::MetricsConfig& config);
 

@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/multimodal_processor/MultimodalTypes.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/pybind/multi_gpu_gpt/RtpLLMOp.h"
+#include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/pybind/multi_gpu_gpt/RtpEmbeddingOp.h"
 #include "rtp_llm/cpp/pybind/multi_gpu_gpt/XGrammarBootstrap.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
@@ -55,6 +56,8 @@ PYBIND11_MODULE(libth_transformer, m) {
     registerMultimodalInput(m);
     registerRtpEmbeddingOp(m);
     registerEmbeddingOutput(m);
+    m.def("pause_kmonitor_for_scr", &pauseKmonitorForScr);
+    m.def("resume_kmonitor_after_scr", &resumeKmonitorAfterScr);
 }
 
 }  // namespace rtp_llm

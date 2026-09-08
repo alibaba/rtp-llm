@@ -24,6 +24,7 @@ grpc::Status RemoteRpcServer::init(const EngineInitParams&                      
 }
 
 void RemoteRpcServer::startDeferredServices() {
+    LocalRpcServer::startDeferredServices();
     if (!defer_cache_store_ || cache_store_) {
         return;
     }

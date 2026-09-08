@@ -237,6 +237,17 @@ void RtpLLMOp::startRPCServer() {
     }
 }
 
+void RtpLLMOp::updateRuntimeEndpoints(py::object runtime_config) {
+    RTP_LLM_CHECK_WITH_INFO(rpc_server_deferred_ && deferred_init_params_ != nullptr,
+                            "runtime endpoints can only be updated before deferred RPC start");
+    auto config = runtime_config.cast<RuntimeConfig>();
+    deferred_init_params_->runtime_config.worker_addrs = config.worker_addrs;
+    deferred_init_params_->runtime_config.worker_grpc_addrs = config.worker_grpc_addrs;
+    if (model_rpc_service_) {
+        model_rpc_service_->updateRuntimeEndpoints(config);
+    }
+}
+
 EngineInitParams RtpLLMOp::initModel(py::object model, py::object engine_config, py::object vit_config) {
     try {
         // Get model_config from model
@@ -601,6 +612,7 @@ void registerRtpLLMOp(const py::module& m) {
              py::arg("token_processor"),
              py::arg("defer_service_start") = false)
         .def("start_rpc_server", &RtpLLMOp::startRPCServer)
+        .def("update_runtime_endpoints", &RtpLLMOp::updateRuntimeEndpoints)
         .def("start_http_server",
              &RtpLLMOp::startHttpServer,
              py::arg("model_weights_loader"),

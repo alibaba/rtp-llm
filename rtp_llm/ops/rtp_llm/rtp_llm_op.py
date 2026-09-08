@@ -49,5 +49,9 @@ class RtpLLMOp:
         """Start serving sockets after a control-plane pre-service barrier."""
         self.ft_op.start_rpc_server()  # type: ignore
 
+    def update_runtime_endpoints(self, runtime_config):
+        """Update deferred RPC/cache peer endpoints after template restore."""
+        self.ft_op.update_runtime_endpoints(runtime_config)  # type: ignore
+
     def stop(self):
         self.ft_op.stop()  # type: ignore

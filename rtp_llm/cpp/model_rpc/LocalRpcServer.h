@@ -33,7 +33,9 @@ public:
                               py::object                                             mm_process_engine,
                               std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params);
 
-    virtual void startDeferredServices() {}
+    virtual void startDeferredServices();
+    virtual void updateRuntimeEndpoints(const RuntimeConfig& runtime_config);
+    void setDeferServiceStart(bool defer) { defer_tp_broadcaster_ = defer; }
 
     grpc::Status
     GetWorkerStatus(grpc::ServerContext* context, const ::StatusVersionPB* request, ::WorkerStatusPB* response);
@@ -130,6 +132,7 @@ protected:
     std::shared_ptr<RpcServerRuntimeMeta> meta_;
     py::object                            weight_manager_;
     std::shared_ptr<BroadcastManager>     tp_broadcaster_;
+    bool                                  defer_tp_broadcaster_{false};
 };
 
 }  // namespace rtp_llm

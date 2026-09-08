@@ -26,6 +26,7 @@ public:
               py::object token_processor,
               bool      defer_service_start = false);
     void startRPCServer();
+    void updateRuntimeEndpoints(py::object runtime_config);
     void stop();
     void
     startHttpServer(py::object model_weights_loader, py::object world_info, py::object tokenizer, py::object render);

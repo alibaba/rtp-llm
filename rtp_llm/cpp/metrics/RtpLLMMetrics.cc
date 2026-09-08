@@ -2,6 +2,8 @@
 #include "autil/EnvUtil.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "kmonitor/client/KMonitorFactory.h"
+#include "kmonitor/client/KMonitorWorker.h"
+#include "kmonitor/client/core/MetricsSystem.h"
 #include "rtp_llm/cpp/metrics/KmonParam.h"
 
 namespace rtp_llm {
@@ -1184,6 +1186,31 @@ bool initKmonitorFactory() {
 
 void stopKmonitorFactory() {
     kmonitor::KMonitorFactory::Shutdown();
+}
+
+bool pauseKmonitorForScr() {
+    if (!kmonitor::KMonitorFactory::IsStarted()) {
+        return false;
+    }
+    auto* worker = kmonitor::KMonitorFactory::GetWorker();
+    if (worker == nullptr || worker->getMetricsSystem() == nullptr
+        || !worker->getMetricsSystem()->Started()) {
+        return false;
+    }
+    worker->getMetricsSystem()->Stop();
+    return true;
+}
+
+bool resumeKmonitorAfterScr() {
+    auto* worker = kmonitor::KMonitorFactory::GetWorker();
+    if (worker == nullptr || worker->getMetricsSystem() == nullptr) {
+        return false;
+    }
+    if (worker->getMetricsSystem()->Started()) {
+        return true;
+    }
+    worker->getMetricsSystem()->Init(worker->GetConfig());
+    return worker->getMetricsSystem()->Started();
 }
 
 void setHippoTags(kmonitor::MetricsConfig& config) {

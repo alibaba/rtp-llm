@@ -4,7 +4,7 @@ import typing
 
 import torch
 
-__all__: list[str] = ['EmbeddingCppOutput', 'MultimodalInput', 'RtpEmbeddingOp', 'RtpLLMOp', 'TypedOutput', 'build_xgrammar_tokenizer_info_json']
+__all__: list[str] = ['EmbeddingCppOutput', 'MultimodalInput', 'RtpEmbeddingOp', 'RtpLLMOp', 'TypedOutput', 'build_xgrammar_tokenizer_info_json', 'pause_kmonitor_for_scr', 'resume_kmonitor_after_scr']
 class EmbeddingCppOutput:
     output: TypedOutput
     def __init__(self) -> None:
@@ -56,4 +56,8 @@ class TypedOutput:
     def t(self, arg1: torch.Tensor) -> None:
         ...
 def build_xgrammar_tokenizer_info_json(vocab: dict[str, int], backend_tokenizer_str: str, vocab_size: int, stop_token_ids: list[int]) -> str:
+    ...
+def pause_kmonitor_for_scr() -> bool:
+    ...
+def resume_kmonitor_after_scr() -> bool:
     ...
