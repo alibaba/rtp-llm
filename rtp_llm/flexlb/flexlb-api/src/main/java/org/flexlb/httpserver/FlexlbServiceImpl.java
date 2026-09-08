@@ -802,7 +802,9 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
                              FlexlbScheduleProtocol.FlexlbScheduleResponsePB response,
                              ScheduleOrigin origin) {
         logPvRecord(ctx, response.getCode(),
-                response.getSuccess() ? null : response.getAdmissionRejectReason().name(),
+                response.getSuccess() || response.getAdmissionRejectReason()
+                        == FlexlbScheduleProtocol.ScheduleFailureReasonPB.SCHEDULE_FAILURE_REASON_UNSPECIFIED
+                        ? null : response.getAdmissionRejectReason().name(),
                 origin, response.getLifecycle(), response.getRealMasterHost());
     }
 

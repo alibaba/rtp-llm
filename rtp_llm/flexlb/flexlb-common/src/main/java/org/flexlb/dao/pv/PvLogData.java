@@ -82,6 +82,21 @@ public class PvLogData {
         this.batchId = batchId;
         this.requestState = requestState;
         this.realMasterHost = realMasterHost;
+        if (this.response != null) {
+            Response source = this.response;
+            Response terminal = new Response();
+            terminal.setServerStatus(source.getServerStatus());
+            terminal.setWorkerSummary(source.getWorkerSummary());
+            terminal.setQueueLength(source.getQueueLength());
+            terminal.setEnqueuedByMaster(source.isEnqueuedByMaster());
+            terminal.setReady(source.isReady());
+            terminal.setSuccess(this.success);
+            terminal.setCode(code);
+            terminal.setErrorMessage(this.error);
+            terminal.setRealMasterHost(realMasterHost);
+            terminal.setAdmissionRejectReason(admissionRejectReason == null ? null : source.getAdmissionRejectReason());
+            this.response = terminal;
+        }
     }
 
     private void populateCommonFields(BalanceContext ctx) {

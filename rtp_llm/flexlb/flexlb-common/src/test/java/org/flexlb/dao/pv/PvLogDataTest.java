@@ -18,6 +18,25 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class PvLogDataTest {
 
     @Test
+    void terminalResponseUsesFinalOutcomeWithoutMutatingRoutingResponse() throws Exception {
+        BalanceContext context = new BalanceContext();
+        Response routed = Response.error(org.flexlb.dao.loadbalance.StrategyErrorType.REQUEST_CANCELLED);
+        context.setResponse(routed);
+        context.setSuccess(false);
+        context.setErrorMessage("Schedule RPC deadline exceeded");
+        int deadlineCode = org.flexlb.dao.loadbalance.StrategyErrorType.BATCH_SLO_EXPIRED.getErrorCode();
+        PvLogData data = new PvLogData(context, deadlineCode, null, "LOCAL_MASTER", 0,
+                "REQUEST_STATE_TIMED_OUT", "", System.currentTimeMillis());
+        var json = new com.fasterxml.jackson.databind.ObjectMapper().readTree(JsonUtils.toStringOrEmpty(data));
+        assertEquals(json.path("code"), json.path("response").path("code"));
+        assertEquals(json.path("error"), json.path("response").path("error_message"));
+        assertFalse(json.path("response").path("success").asBoolean());
+        assertFalse(json.has("admissionRejectReason"));
+        assertFalse(json.path("response").has("admission_reject_reason"));
+        assertEquals(org.flexlb.dao.loadbalance.StrategyErrorType.REQUEST_CANCELLED.getErrorCode(), routed.getCode());
+    }
+
+    @Test
     void omitsRoutingDecisionWhenSnapshotIsAbsent() {
         Request request = new Request();
         request.setRequestId("1001");

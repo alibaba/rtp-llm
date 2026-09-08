@@ -193,6 +193,7 @@ class FlexlbServiceImplTest {
         assertFalse(json.has("reqParseUs"));
         assertFalse(json.has("requestBodyBytes"));
         assertFalse(json.has("admissionRejectReason"));
+        assertFalse(json.path("response").has("admission_reject_reason"));
         verify(cacheAwareService).updateFromRoutedRequest(any(), any());
         verify(observer).onCompleted();
     }
