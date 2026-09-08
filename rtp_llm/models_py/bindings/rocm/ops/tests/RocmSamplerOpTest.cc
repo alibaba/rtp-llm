@@ -98,6 +98,31 @@ torch::Tensor jointTopKTopPReference(int64_t top_k, float top_p) {
     return filtered / filtered.sum();
 }
 
+TEST(RocmSamplerOpTest, PinnedInputsRemainValidAcrossQueuedForwards) {
+    Sampler                    sampler(SamplerInitParams{2, true});
+    std::vector<SamplerInputs> inputs;
+    for (int step = 0; step < 8; ++step) {
+        auto input      = makeSamplerInputs(2, 1, 1.0f, 1234);
+        input.token_ids = torch::full({2, 3}, step, torch::TensorOptions(torch::kInt32).pinned_memory(true));
+        input.step      = 2;
+        input.temperature.fill_(0.7f);
+        input.cum_log_probs = torch::Tensor();
+        input.all_probs     = torch::Tensor();
+        inputs.push_back(std::move(input));
+    }
+    std::vector<SamplerOutput> outputs;
+    for (auto& input : inputs) {
+        outputs.push_back(sampler.forward(input));
+        // Release caller-owned staging before the copy necessarily completes.
+        input = SamplerInputs{};
+    }
+    for (int step = 0; step < outputs.size(); ++step) {
+        auto tokens = outputs[step].token_ids.cpu();
+        EXPECT_TRUE(tokens.slice(1, 0, 2).eq(step).all().item<bool>());
+        EXPECT_TRUE(tokens.select(1, 2).eq(7).all().item<bool>());
+    }
+}
+
 TEST(RocmSamplerOpTest, ProductionSamplerCoversAllDispatchesAndReusesSlots) {
     Sampler sampler(SamplerInitParams{/*max_batch_size=*/16, /*fixed_max_batch_size=*/true});
     const std::vector<std::pair<int32_t, float>> dispatches = {

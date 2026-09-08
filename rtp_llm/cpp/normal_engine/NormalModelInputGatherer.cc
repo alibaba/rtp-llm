@@ -491,7 +491,7 @@ absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&     
     const char* device_input_env        = std::getenv("RTP_LLM_DEVICE_INPUT");
     bool        use_normal_device_state = device_input_env != nullptr && std::string(device_input_env) == "1"
                                    && stream_groups.totalContextBatchSize() == 0
-                                   && stream_groups.totalDecodeBatchSize() > 0 && !ctx.need_cal_position_id;
+                                   && stream_groups.totalDecodeBatchSize() > 0;
     if (use_normal_device_state) {
         for (const auto& stream : stream_groups.decodeStreams()) {
             const auto& state = stream->getNormalAsyncDeviceState();
@@ -538,6 +538,13 @@ absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&     
                 normal_combo_tokens_gpu.push_back(state.last_sample_token_gpu.reshape({1}));
                 normal_sequence_lengths_gpu.push_back((state.next_seq_len_gpu - 1).to(torch::kInt32).reshape({1}));
                 ctx.input_lengths[ctx.batch_idx] = stream->inputLength();
+                if (ctx.need_cal_position_id) {
+                    // Host bookkeeping may still be one token behind. Use the
+                    // same published step as the device token and KV position.
+                    stream->generateNextPositionId(ctx.combo_position_ids
+                                                       + ctx.batch_idx * config_.position_id_len_factor,
+                                                   state.next_real_seq_len);
+                }
             } else {
                 auto currentTokens = stream->currentExecuteTokens(i);
                 RETURN_IF_STATUS_ERROR(validateEmbeddingIdRanges(

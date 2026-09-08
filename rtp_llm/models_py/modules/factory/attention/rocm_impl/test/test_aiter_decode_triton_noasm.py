@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import math
 import unittest
+from types import SimpleNamespace
 
 import torch
 
@@ -20,6 +21,7 @@ try:
         AiterDecodeAttnOpTriton,
         AiterDecodeImplNonAsm,
         AiterDecodeImplTriton,
+        FMHAParams,
     )
     from rtp_llm.ops import AttentionConfigs, FMHAConfig, KvCacheDataType
     from rtp_llm.ops.compute_ops import (
@@ -129,6 +131,47 @@ def physical_value_for_triton(semantic_value: torch.Tensor) -> torch.Tensor:
 @unittest.skipUnless(torch.cuda.is_available() and _IS_ROCM_BUILD, "Requires ROCm GPU")
 @unittest.skipUnless(_ROCM_IMPORTS_AVAILABLE, "Requires ROCm attention modules")
 class AiterDecodeLayoutParityTest(unittest.TestCase):
+    def test_graph_replay_reads_device_lengths_with_stale_host_mirrors(self):
+        inputs = make_inputs(torch.device("cuda"))
+        inputs.sequence_lengths = torch.tensor([100, 100], dtype=torch.int32)
+        inputs.input_lengths = torch.ones(2, dtype=torch.int32)
+        inputs.sequence_lengths_plus_1_device = torch.tensor(
+            [101, 1], dtype=torch.int32, device="cuda"
+        )
+        impl = AiterDecodeImplNonAsm.__new__(AiterDecodeImplNonAsm)
+        impl.fmha_params = FMHAParams(inputs, is_prefill=False, graph_max_seq_len=40960)
+        rope_lengths = torch.empty_like(impl.fmha_params.seq_lens)
+        impl.rope_params = SimpleNamespace(
+            update_kv_cache_offset=lambda table: None,
+            update_decode_lengths=lambda lengths: rope_lengths.copy_(lengths - 1),
+        )
+        address = impl.fmha_params.seq_lens.data_ptr()
+        output = torch.empty_like(impl.fmha_params.seq_lens)
+        rope_output = torch.empty_like(rope_lengths)
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            impl.prepare_cuda_graph(inputs)
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph, stream=stream):
+                output.copy_(impl.fmha_params.seq_lens)
+                rope_output.copy_(rope_lengths)
+            # Model several queued steps and a rounded-up batch slot. Host
+            # mirrors deliberately stay at capture-time values throughout.
+            for lengths in ([102, 1], [103, 79], [104, 1]):
+                inputs.sequence_lengths_plus_1_device.copy_(
+                    torch.tensor(lengths, dtype=torch.int32, device="cuda")
+                )
+                impl.prepare_cuda_graph(inputs)
+                graph.replay()
+                self.assertEqual(output.cpu().tolist(), lengths)
+                self.assertEqual(
+                    rope_output.cpu().tolist(), [length - 1 for length in lengths]
+                )
+                self.assertEqual(impl.fmha_params.seq_lens.data_ptr(), address)
+                self.assertEqual(impl.fmha_params.max_seq_len, 40960)
+        torch.cuda.current_stream().wait_stream(stream)
+
     @staticmethod
     def _relative_l2(actual: torch.Tensor, reference: torch.Tensor) -> float:
         reference = reference.float().flatten()

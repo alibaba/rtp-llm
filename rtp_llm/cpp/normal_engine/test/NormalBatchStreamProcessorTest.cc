@@ -7,6 +7,7 @@
 #define private public
 #define protected public
 #include "autil/LockFreeThreadPool.h"
+#include "autil/EnvUtil.h"
 #include "rtp_llm/cpp/normal_engine/NormalBatchStreamProcessor.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/normal_engine/NormalExecutor.h"
@@ -304,6 +305,54 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
         EXPECT_TRUE(merge_input_status.ok());
         auto& model_input = merge_input_status.value();
         EXPECT_FALSE(model_input.attention_mask.defined());
+    }
+}
+
+TEST_F(NormalBatchStreamProcessorTest, testAsyncMropeGatherUsesPublishedTokenAndPosition) {
+    autil::EnvGuard device_input("RTP_LLM_DEVICE_INPUT", "1");
+    ResourceContext resource_context;
+    ModelConfig     model_config;
+    model_config.max_seq_len                           = 128;
+    model_config.vocab_size                            = 128;
+    model_config.num_layers                            = 1;
+    model_config.mm_model_config.mm_position_ids_style = PositionIdsStyle::MROPE;
+    model_config.attn_config.rope_config.index_factor  = 3;
+    CacheConfig cache_config;
+    initFullCacheConfig(cache_config, 1);
+    RuntimeConfig runtime_config;
+    auto          query    = make_shared<GenerateInput>();
+    query->input_ids       = hostIntBuffer({1, 2, 3});
+    query->generate_config = make_shared<GenerateConfig>();
+    auto stream = make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+    stream->context_position_ids_ = hostIntBuffer({0, 0, 0, 3, 5, 7, 8, 10, 12});
+    stream->setIsContextStream(false);
+    stream->generate_status_->status = StreamState::RUNNING;
+    BatchKVCacheResource resource;
+    resource.resetBatchSize(1);
+    resource.initGroups(cache_config.topologyPtr());
+    resource.setBatchBlocks(0, 0, {1, 2, 3, 4});
+    stream->setKVCache(resource);
+    NormalBatchStreamProcessor processor(
+        model_config, PDSepConfig{}, ProfilingDebugLoggingConfig{}, cache_config, false);
+    const auto device_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    // Deliberately leave host tokens/length behind, as an unfinished dispatch
+    // worker would. Both token ids and all three mRoPE axes must use this step.
+    for (int next_length : {5, 6}) {
+        stream->setNormalAsyncDeviceState(GenerateStream::NormalAsyncDeviceState{
+            .last_sample_token_gpu = torch::full({1}, 42 + next_length, device_i32),
+            .next_seq_len_gpu      = torch::full({1}, next_length, device_i32),
+            .last_real_seq_len     = next_length - 1,
+            .next_real_seq_len     = next_length,
+        });
+        StreamGroups groups({stream});
+        TensorHolder holder;
+        auto         result = processor.gatherModelInput(groups, holder);
+        ASSERT_TRUE(result.ok()) << result.status();
+        EXPECT_TRUE(result->combo_tokens.is_cuda());
+        EXPECT_EQ(toVec<int32_t>(result->combo_tokens), (vector<int32_t>{42 + next_length}));
+        EXPECT_EQ(toVec<int32_t>(result->sequence_lengths), (vector<int32_t>{next_length - 1}));
+        EXPECT_EQ(toVec<int32_t>(result->combo_position_ids), (vector<int32_t>(3, 12 + next_length - 3)));
+        EXPECT_EQ(stream->seqLength(), 3);
     }
 }
 

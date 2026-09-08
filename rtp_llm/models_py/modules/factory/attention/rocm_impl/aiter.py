@@ -2088,15 +2088,26 @@ class AiterPrefillImplPaged(FMHAImplBase):
 class AiterDecodeImplBase(FMHAImplBase):
     fmha_params: Any
     rope_params: Any
+    # The graph runner may skip refreshing host mirrors only when every
+    # selected implementation explicitly supports device-only preparation.
+    supports_device_metadata_replay = True
 
     def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs):
         # Replay path must reuse capture-time FMHA params object to keep graph memory stable.
-        self.fmha_params.fillParams(
-            attn_inputs.sequence_lengths,
-            attn_inputs.input_lengths,
-            attn_inputs.kv_cache_kernel_block_id,
-            attn_inputs.kv_cache_kernel_block_id_device,
-        )
+        lengths = attn_inputs.sequence_lengths_plus_1_device
+        if lengths is not None and lengths.is_cuda:
+            # Preserve capture-time addresses for both FMHA and RoPE/KV writes.
+            # Host mirrors can lag behind when output dispatch is asynchronous.
+            self.fmha_params.seq_lens.copy_(lengths)
+            self.rope_params.update_decode_lengths(lengths)
+        else:
+            self.fmha_params.fillParams(
+                attn_inputs.sequence_lengths,
+                attn_inputs.input_lengths,
+                attn_inputs.kv_cache_kernel_block_id,
+                attn_inputs.kv_cache_kernel_block_id_device,
+            )
+            self.rope_params.update_decode_lengths(self.fmha_params.seq_lens)
         if attn_inputs.kv_cache_kernel_block_id_device is not None:
             update_kv_cache_offset = getattr(
                 self.rope_params, "update_kv_cache_offset", None

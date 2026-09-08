@@ -377,6 +377,7 @@ public:
     torch::Tensor generateContextPositionIds();
 
     void generateNextPositionId(int32_t* now_pos);
+    void generateNextPositionId(int32_t* now_pos, int sequence_length);
 
     torch::Tensor getContextPositionIds() const {
         return context_position_ids_.has_value() ? context_position_ids_.value() : torch::Tensor();
