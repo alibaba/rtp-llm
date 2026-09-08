@@ -703,7 +703,7 @@ class KimiK3CollectiveGemmUnitTest(unittest.TestCase):
         torch.testing.assert_close(partial, torch.mm(x, weight), rtol=0, atol=0)
         torch.testing.assert_close(actual, partial[:1], rtol=0, atol=0)
 
-    def test_latent_moe_drops_invalid_rows_before_ep_and_zeroes_output(self) -> None:
+    def test_latent_moe_routes_invalid_rows_to_zero_weight_expert_zero(self) -> None:
         if not torch.cuda.is_available():
             self.skipTest("CUDA is required")
 
@@ -813,7 +813,11 @@ class KimiK3CollectiveGemmUnitTest(unittest.TestCase):
             torch.count_nonzero(captured["routing_weights"][1]).item(),
             0,
         )
-        self.assertEqual(torch.count_nonzero(output[1]).item(), 0)
+        # Padding is kept numerically independent by its reserved block-0 cache
+        # mapping and is trimmed before sampling. MegaMoE still receives the
+        # physical row, so only its routed contribution is neutralized here;
+        # the shared expert output is intentionally not masked in modeling.
+        self.assertGreater(torch.count_nonzero(output[1]).item(), 0)
 
     def test_decoder_delegates_cuda_prefill_shard_to_attention(self) -> None:
         if not torch.cuda.is_available():

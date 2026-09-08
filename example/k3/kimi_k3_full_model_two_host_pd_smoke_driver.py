@@ -151,6 +151,8 @@ def parse_args() -> argparse.Namespace:
         "decode_repo_root",
         "prefill_checkpoint_path",
         "decode_checkpoint_path",
+        "prefill_sp_checkpoint_path",
+        "decode_sp_checkpoint_path",
         "prefill_endpoint",
         "decode_endpoint",
         "run_id",
@@ -158,11 +160,6 @@ def parse_args() -> argparse.Namespace:
     missing = [name for name in required if not getattr(args, name)]
     if missing:
         parser.error("missing required settings: " + ", ".join(missing))
-    if args.prefill_sp_checkpoint_path or args.decode_sp_checkpoint_path:
-        parser.error(
-            "Projection-KTP ordinary Decode requires Prefill/Decode "
-            "SP_CHECKPOINT_PATH to be unset"
-        )
     if not re.fullmatch(r"[A-Za-z0-9._-]+", args.run_id):
         parser.error(
             "--run-id may contain only letters, digits, dot, underscore and dash"
@@ -244,11 +241,17 @@ def role_launch_parts(
     checkpoint = (
         args.prefill_checkpoint_path if is_prefill else args.decode_checkpoint_path
     )
+    sp_checkpoint = (
+        args.prefill_sp_checkpoint_path
+        if is_prefill
+        else args.decode_sp_checkpoint_path
+    )
     runtime = (
         args.prefill_container_runtime if is_prefill else args.decode_container_runtime
     )
     role_environment = {
         "CHECKPOINT_PATH": checkpoint,
+        "SP_CHECKPOINT_PATH": sp_checkpoint,
         "PREFILL_ENDPOINT": args.prefill_endpoint,
         "DECODE_ENDPOINT": args.decode_endpoint,
         "SMOKE_RUN_ID": args.run_id,

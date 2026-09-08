@@ -258,7 +258,10 @@ class KimiK3KDA(nn.Module):
     ]:
         """Run and unpack the loader-provided Q/K/V/G/F_A/beta projection."""
 
-        if self.ktp_size > 1:
+        # Some projection-contract tests intentionally construct the module via
+        # ``__new__``. Preserve the historical TP path unless KTP was explicitly
+        # initialized by the real constructor.
+        if getattr(self, "ktp_size", 1) > 1:
             if prefill_sp_layout is not None:
                 raise RuntimeError("Projection KTP cannot run the Prefill SP path")
             result = project_kda_inputs_ktp(

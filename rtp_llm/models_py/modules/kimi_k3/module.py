@@ -164,40 +164,30 @@ class KimiK3KDA(nn.Module):
         self.kda_fused_w = fused_projection
 
         fused_conv = weights[W.linear_attn_conv1d_w].squeeze(1)
-        if fused_conv.shape[0] != 3 * self.projection_size:
-            raise ValueError(
-                "fused KDA conv channels "
-                f"{fused_conv.shape[0]} != 3*{self.projection_size}"
-            )
 
         self.prefill_executor: Optional[KimiK3KDAPrefill]
         self.decode_executor: Optional[KimiK3KDADecode]
-        if self._role_type in (RoleType.PREFILL, RoleType.PDFUSION):
-            self.prefill_executor = KimiK3KDAPrefill(
-                weights=weights,
-                cache=self.cache,
-                local_heads=self.local_heads,
-                head_dim=self.head_dim,
-                projection_size=self.projection_size,
-                gate_lower_bound=self.gate_lower_bound,
-                fused_conv=fused_conv,
-            )
-        else:
-            self.prefill_executor = None
 
-        if self._role_type in (RoleType.DECODE, RoleType.PDFUSION):
-            self.decode_executor = KimiK3KDADecode(
-                weights=weights,
-                cache=self.cache,
-                local_heads=self.local_heads,
-                head_dim=self.head_dim,
-                projection_size=self.projection_size,
-                history_size=self.history_size,
-                gate_lower_bound=self.gate_lower_bound,
-                fused_conv=fused_conv,
-            )
-        else:
-            self.decode_executor = None
+        self.prefill_executor = KimiK3KDAPrefill(
+            weights=weights,
+            cache=self.cache,
+            local_heads=self.local_heads,
+            head_dim=self.head_dim,
+            projection_size=self.projection_size,
+            gate_lower_bound=self.gate_lower_bound,
+            fused_conv=fused_conv,
+        )
+
+        self.decode_executor = KimiK3KDADecode(
+            weights=weights,
+            cache=self.cache,
+            local_heads=self.local_heads,
+            head_dim=self.head_dim,
+            projection_size=self.projection_size,
+            history_size=self.history_size,
+            gate_lower_bound=self.gate_lower_bound,
+            fused_conv=fused_conv,
+        )
 
     def _project_fused_kda_inputs(
         self,

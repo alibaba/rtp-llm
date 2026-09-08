@@ -30,7 +30,7 @@ class ForwardedOptionalEnvironmentTest(unittest.TestCase):
 
 
 class KimiK3FullModelTwoHostPdSmokeDriverTest(unittest.TestCase):
-    def test_parse_args_accepts_ordinary_decode_without_sp_checkpoint(self):
+    def test_parse_args_requires_both_eagle3_checkpoints(self):
         argv = [
             "driver",
             "--prefill-ssh-target",
@@ -45,6 +45,10 @@ class KimiK3FullModelTwoHostPdSmokeDriverTest(unittest.TestCase):
             "/prefill/checkpoint",
             "--decode-checkpoint-path",
             "/decode/checkpoint",
+            "--prefill-sp-checkpoint-path",
+            "/prefill/eagle3",
+            "--decode-sp-checkpoint-path",
+            "/decode/eagle3",
             "--prefill-endpoint",
             "10.0.0.1:27188",
             "--decode-endpoint",
@@ -54,10 +58,10 @@ class KimiK3FullModelTwoHostPdSmokeDriverTest(unittest.TestCase):
         ]
         with mock.patch.object(sys, "argv", argv), mock.patch.dict(os.environ, {}, clear=True):
             args = driver.parse_args()
-        self.assertIsNone(args.prefill_sp_checkpoint_path)
-        self.assertIsNone(args.decode_sp_checkpoint_path)
+        self.assertEqual(args.prefill_sp_checkpoint_path, "/prefill/eagle3")
+        self.assertEqual(args.decode_sp_checkpoint_path, "/decode/eagle3")
 
-    def test_parse_args_rejects_sp_checkpoint(self):
+    def test_parse_args_rejects_missing_decode_sp_checkpoint(self):
         argv = [
             "driver",
             "--prefill-ssh-target",
@@ -85,12 +89,14 @@ class KimiK3FullModelTwoHostPdSmokeDriverTest(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 driver.parse_args()
 
-    def test_role_command_does_not_export_sp_checkpoint(self):
+    def test_role_command_exports_role_local_sp_checkpoint(self):
         args = argparse.Namespace(
             prefill_repo_root="/prefill/repo",
             decode_repo_root="/decode/repo",
             prefill_checkpoint_path="/prefill/checkpoint",
             decode_checkpoint_path="/decode/checkpoint",
+            prefill_sp_checkpoint_path="/prefill/eagle3",
+            decode_sp_checkpoint_path="/decode/eagle3",
             prefill_endpoint="10.0.0.1:27188",
             decode_endpoint="10.0.0.2:28188",
             run_id="projection-ktp",
@@ -102,7 +108,7 @@ class KimiK3FullModelTwoHostPdSmokeDriverTest(unittest.TestCase):
         )
         with mock.patch.dict(os.environ, {}, clear=True):
             _, _, _, command = driver.role_launch_parts(args, "decode")
-        self.assertFalse(any(part.startswith("SP_CHECKPOINT_PATH=") for part in command))
+        self.assertIn("SP_CHECKPOINT_PATH=/decode/eagle3", command)
 
     def test_role_command_forwards_core_dump_diagnostic_override(self):
         args = argparse.Namespace(
@@ -110,6 +116,8 @@ class KimiK3FullModelTwoHostPdSmokeDriverTest(unittest.TestCase):
             decode_repo_root="/decode/repo",
             prefill_checkpoint_path="/prefill/checkpoint",
             decode_checkpoint_path="/decode/checkpoint",
+            prefill_sp_checkpoint_path="/prefill/eagle3",
+            decode_sp_checkpoint_path="/decode/eagle3",
             prefill_endpoint="10.0.0.1:27188",
             decode_endpoint="10.0.0.2:28188",
             run_id="projection-ktp",
@@ -133,6 +141,8 @@ class KimiK3FullModelTwoHostPdSmokeDriverTest(unittest.TestCase):
             decode_repo_root="/decode/repo",
             prefill_checkpoint_path="/prefill/checkpoint",
             decode_checkpoint_path="/decode/checkpoint",
+            prefill_sp_checkpoint_path="/prefill/eagle3",
+            decode_sp_checkpoint_path="/decode/eagle3",
             prefill_endpoint="10.0.0.1:27188",
             decode_endpoint="10.0.0.2:28188",
             run_id="projection-ktp",
@@ -192,6 +202,8 @@ class KimiK3FullModelTwoHostPdSmokeDriverTest(unittest.TestCase):
             decode_repo_root="/decode/repo",
             prefill_checkpoint_path="/prefill/checkpoint",
             decode_checkpoint_path="/decode/checkpoint",
+            prefill_sp_checkpoint_path="/prefill/eagle3",
+            decode_sp_checkpoint_path="/decode/eagle3",
             prefill_endpoint="10.0.0.1:27188",
             decode_endpoint="10.0.0.2:28188",
             run_id="projection-ktp",

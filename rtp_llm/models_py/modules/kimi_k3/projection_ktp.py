@@ -50,6 +50,8 @@ class KtpStepPlan:
     common_graph_bucket: int
     use_cuda_graph: bool
     all_idle: bool
+    forward_mode: int
+    tokens_per_batch: int
 
 
 def normalize_capture_buckets(values: Iterable[int]) -> tuple[int, ...]:
@@ -109,6 +111,37 @@ def _pad_dim0(tensor: torch.Tensor, rows: int, value: int = 0) -> torch.Tensor:
     return _pad_dim(tensor, rows, dim=0, value=value)
 
 
+def _pad_token_values(
+    tensor: torch.Tensor,
+    logical_tokens: int,
+    physical_tokens: int,
+    value: int = 0,
+) -> torch.Tensor:
+    """Pad flattened per-token metadata using the validated MTP contract."""
+
+    if tensor is None or not tensor.numel() or logical_tokens == physical_tokens:
+        return tensor
+    if logical_tokens <= 0 or tensor.numel() % logical_tokens:
+        raise ValueError(
+            "token metadata cannot be padded: "
+            f"numel={tensor.numel()} logical_tokens={logical_tokens}"
+        )
+    values_per_token = tensor.numel() // logical_tokens
+    return _pad_dim0(
+        tensor.reshape(-1), physical_tokens * values_per_token, value
+    )
+
+
+def _pad_optional_token_attr(
+    obj, name: str, logical_tokens: int, physical_tokens: int, value: int = 0
+) -> None:
+    if obj is None:
+        return
+    tensor = getattr(obj, name, None)
+    if tensor is not None:
+        setattr(obj, name, _pad_token_values(tensor, logical_tokens, physical_tokens, value))
+
+
 def _pad_optional_tensor_attr(obj, name: str, rows: int, value: int = 0) -> None:
     """Pad a bound Tensor attribute without assigning ``None`` back to pybind.
 
@@ -118,7 +151,7 @@ def _pad_optional_tensor_attr(obj, name: str, rows: int, value: int = 0) -> None
     unchanged ``None`` value back would raise before the model forward starts.
     """
 
-    tensor = getattr(obj, name)
+    tensor = getattr(obj, name, None)
     if tensor is not None:
         setattr(obj, name, _pad_dim0(tensor, rows, value))
 
@@ -140,8 +173,32 @@ def _pad_block_table_attr(obj, name: str, rows: int) -> None:
     setattr(obj, name, _pad_dim(tensor, rows, dim=batch_dim, value=0))
 
 
+def _pad_cumulative_lengths(
+    tensor: torch.Tensor,
+    request_rows: int,
+    physical_batch: int,
+    token_width: int,
+) -> torch.Tensor:
+    """Preserve real cumulative lengths and append scratch-request entries."""
+
+    if tensor is None or not tensor.numel() or physical_batch == request_rows:
+        return tensor
+    if tensor.numel() != request_rows + 1:
+        raise ValueError(
+            "KTP cumulative lengths must have requests + 1 entries, got "
+            f"{tensor.numel()} for {request_rows} requests"
+        )
+    tail = tensor[-1] + torch.arange(
+        1,
+        physical_batch - request_rows + 1,
+        dtype=tensor.dtype,
+        device=tensor.device,
+    ) * token_width
+    return torch.cat((tensor, tail), dim=0)
+
+
 def pad_ktp_decode_inputs(inputs, plan: KtpStepPlan, *, ktp_rank: int) -> None:
-    """Pad one rank's ordinary Decode inputs to the group physical batch."""
+    """Pad one rank's Decode request slots and token rows to a common shape."""
 
     attention = inputs.attention_inputs
     current = int(attention.input_lengths.shape[0])
@@ -157,9 +214,41 @@ def pad_ktp_decode_inputs(inputs, plan: KtpStepPlan, *, ktp_rank: int) -> None:
             f"KTP physical batch {physical} is smaller than local batch {current}"
         )
 
-    inputs.input_ids = _pad_dim0(inputs.input_ids.reshape(-1), physical, 0)
-    attention.input_lengths = _pad_dim0(attention.input_lengths, physical, 1)
-    _pad_optional_tensor_attr(attention, "input_lengths_host", physical, 1)
+    token_width = int(plan.tokens_per_batch)
+    physical_tokens = physical * token_width
+    current_tokens = current * token_width
+    if inputs.input_ids.numel() != current_tokens:
+        raise RuntimeError(
+            "Projection KTP input token rows do not match request metadata: "
+            f"tokens={inputs.input_ids.numel()} expected={current_tokens}"
+        )
+    inputs.input_ids = _pad_dim0(inputs.input_ids.reshape(-1), physical_tokens, 0)
+    input_hiddens = getattr(inputs, "input_hiddens", None)
+    if input_hiddens is not None and input_hiddens.numel():
+        inputs.input_hiddens = _pad_dim0(input_hiddens, physical_tokens, 0)
+    combo_position_ids = getattr(inputs, "combo_position_ids", None)
+    if combo_position_ids is not None and combo_position_ids.numel():
+        inputs.combo_position_ids = _pad_token_values(combo_position_ids, current_tokens, physical_tokens, 0)
+        if getattr(attention, "combo_position_ids", None) is not None:
+            attention.combo_position_ids = inputs.combo_position_ids
+    embedding_inputs = getattr(inputs, "embedding_inputs", None)
+    _pad_optional_token_attr(
+        embedding_inputs, "combo_tokens_type_ids", current_tokens, physical_tokens, 0
+    )
+    _pad_optional_token_attr(
+        embedding_inputs, "text_tokens_mask", current_tokens, physical_tokens, 1
+    )
+    bert_inputs = getattr(inputs, "bert_embedding_inputs", None)
+    _pad_optional_token_attr(
+        bert_inputs, "combo_position_ids", current_tokens, physical_tokens, 0
+    )
+    _pad_optional_token_attr(
+        bert_inputs, "combo_tokens_type_ids", current_tokens, physical_tokens, 0
+    )
+    attention.input_lengths = _pad_dim0(attention.input_lengths, physical, token_width)
+    _pad_optional_tensor_attr(attention, "input_lengths_host", physical, token_width)
+    _pad_optional_tensor_attr(attention, "prefix_lengths", physical, 0)
+    _pad_optional_tensor_attr(attention, "prefix_lengths_host", physical, 0)
     attention.sequence_lengths = _pad_dim0(attention.sequence_lengths, physical, 0)
     _pad_optional_tensor_attr(attention, "sequence_lengths_host", physical, 0)
     _pad_optional_tensor_attr(attention, "sequence_lengths_plus_1_d", physical, 1)
@@ -183,10 +272,10 @@ def pad_ktp_decode_inputs(inputs, plan: KtpStepPlan, *, ktp_rank: int) -> None:
     device = attention.input_lengths.device
     cu_seqlens = torch.arange(
         physical + 1, dtype=torch.int32, device=device
-    )
+    ) * token_width
     attention.cu_seqlens = cu_seqlens
     attention.decode_cu_seqlens_d = cu_seqlens
-    host_cu = torch.arange(physical + 1, dtype=torch.int32, device="cpu")
+    host_cu = torch.arange(physical + 1, dtype=torch.int32, device="cpu") * token_width
     if (
         attention.cu_seqlens_host is not None
         and attention.cu_seqlens_host.numel()
@@ -197,19 +286,22 @@ def pad_ktp_decode_inputs(inputs, plan: KtpStepPlan, *, ktp_rank: int) -> None:
     # decode_cu_seqlens_host is a read-only pybind view and is normally
     # undefined; decode_cu_seqlens_d is the runtime metadata consumed by K3.
     if attention.cu_kv_seqlens is not None and attention.cu_kv_seqlens.numel():
-        attention.cu_kv_seqlens = cu_seqlens
-    attention.total_tokens = physical
-    _pad_optional_tensor_attr(attention, "padding_offset", physical, 0)
+        attention.cu_kv_seqlens = _pad_cumulative_lengths(
+            attention.cu_kv_seqlens, current, physical, token_width
+        )
+    attention.total_tokens = physical_tokens
+    _pad_optional_tensor_attr(attention, "padding_offset", physical_tokens, 0)
     local_real_batch = plan.valid_batch_sizes[ktp_rank]
     attention.is_s_padded = physical != local_real_batch
 
-    mask = torch.zeros(physical, dtype=torch.int32, device=device)
-    mask[:local_real_batch] = 1
+    local_real_tokens = local_real_batch * token_width
+    mask = torch.zeros(physical_tokens, dtype=torch.int32, device=device)
+    mask[:local_real_tokens] = 1
     inputs.ktp_valid_batch_sizes = torch.tensor(
         plan.valid_batch_sizes, dtype=torch.int32, device=device
     )
     inputs.ktp_valid_row_mask = mask
-    inputs.ktp_local_real_batch = local_real_batch
+    inputs.ktp_local_real_batch = local_real_tokens
     inputs.ktp_common_physical_batch = physical
     inputs.ktp_common_graph_bucket = plan.common_graph_bucket
     inputs.ktp_use_cuda_graph = plan.use_cuda_graph
@@ -222,7 +314,7 @@ def build_ktp_step_plan(
 ) -> KtpStepPlan:
     """Build one deterministic plan from rank-ordered KTP metadata.
 
-    Each row is ``[local_real_batch, graph_eligible, forward_mode]``.
+    Each row is ``[local_real_batch, graph_eligible, forward_mode, token_width]``.
     This pure helper is deliberately separated from the collective so topology,
     bucket and fallback behaviour can be exhaustively unit tested.
     """
@@ -230,14 +322,17 @@ def build_ktp_step_plan(
     if not metadata:
         raise ValueError("KTP metadata must contain at least one rank")
     rows = tuple(tuple(int(value) for value in row) for row in metadata)
-    if any(len(row) != 3 for row in rows):
-        raise ValueError(f"KTP metadata rows must have width 3, got {rows}")
+    if any(len(row) != 4 for row in rows):
+        raise ValueError(f"KTP metadata rows must have width 4, got {rows}")
     batches = tuple(row[0] for row in rows)
     if any(batch < 0 for batch in batches):
         raise ValueError(f"KTP local batch sizes must be non-negative, got {batches}")
     modes = {row[2] for row in rows}
     if len(modes) != 1:
         raise RuntimeError(f"KTP ranks disagree on forward mode: {rows}")
+    token_widths = {row[3] for row in rows}
+    if len(token_widths) != 1 or next(iter(token_widths)) <= 0:
+        raise RuntimeError(f"KTP ranks disagree on positive token width: {rows}")
 
     global_max = max(batches)
     all_idle = global_max == 0
@@ -256,6 +351,8 @@ def build_ktp_step_plan(
         common_graph_bucket=graph_bucket if use_graph else 0,
         use_cuda_graph=use_graph,
         all_idle=all_idle,
+        forward_mode=next(iter(modes)),
+        tokens_per_batch=next(iter(token_widths)),
     )
 
 
@@ -265,16 +362,19 @@ def coordinate_ktp_step(
     graph_eligible: bool,
     forward_mode: KtpForwardMode,
     capture_buckets: Iterable[int],
+    tokens_per_batch: int,
     device: torch.device,
     ktp_size: int,
 ) -> KtpStepPlan:
     """AllGather fixed-width metadata and perform exactly one D2H transfer."""
 
-    local = [int(local_real_batch), int(graph_eligible), int(forward_mode)]
+    local = [
+        int(local_real_batch), int(graph_eligible), int(forward_mode), int(tokens_per_batch)
+    ]
     if ktp_size <= 1:
         return build_ktp_step_plan([local], capture_buckets)
     metadata_d = torch.tensor([local], dtype=torch.int32, device=device)
-    gathered_d = all_gather(metadata_d, group=Group.KTP).reshape(ktp_size, 3)
+    gathered_d = all_gather(metadata_d, group=Group.KTP).reshape(ktp_size, 4)
     # The coordinator is outside CUDA Graph.  One compact D2H is intentional:
     # all subsequent planning is host-only and identical on every rank.
     metadata_h = gathered_d.cpu()

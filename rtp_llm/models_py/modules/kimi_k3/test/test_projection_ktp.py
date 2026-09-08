@@ -31,7 +31,7 @@ class KtpStepPlanTest(unittest.TestCase):
             input_ids=torch.tensor([3], dtype=torch.int32),
             attention_inputs=attention,
         )
-        plan = build_ktp_step_plan([[0, 1, 0], [2, 1, 0]], [2])
+        plan = build_ktp_step_plan([[0, 1, 0, 1], [2, 1, 0, 1]], [2])
 
         pad_ktp_decode_inputs(inputs, plan, ktp_rank=0)
 
@@ -53,7 +53,7 @@ class KtpStepPlanTest(unittest.TestCase):
             input_ids=torch.tensor([3], dtype=torch.int32),
             attention_inputs=attention,
         )
-        plan = build_ktp_step_plan([[1, 1, 0], [2, 1, 0]], [2])
+        plan = build_ktp_step_plan([[1, 1, 0, 1], [2, 1, 0, 1]], [2])
 
         pad_ktp_decode_inputs(inputs, plan, ktp_rank=0)
 
@@ -86,7 +86,7 @@ class KtpStepPlanTest(unittest.TestCase):
             input_ids=torch.tensor([3], dtype=torch.int32),
             attention_inputs=attention,
         )
-        plan = build_ktp_step_plan([[1, 1, 0], [3, 1, 0]], [4])
+        plan = build_ktp_step_plan([[1, 1, 0, 1], [3, 1, 0, 1]], [4])
         pad_ktp_decode_inputs(inputs, plan, ktp_rank=0)
         self.assertEqual(inputs.ktp_valid_row_mask.tolist(), [1, 0, 0, 0])
         self.assertEqual(
@@ -101,7 +101,7 @@ class KtpStepPlanTest(unittest.TestCase):
 
     def test_selects_first_common_bucket(self):
         plan = build_ktp_step_plan(
-            [[1, 1, 0], [7, 1, 0], [0, 1, 0]], [1, 2, 4, 8, 16]
+            [[1, 1, 0, 1], [7, 1, 0, 1], [0, 1, 0, 1]], [1, 2, 4, 8, 16]
         )
         self.assertEqual(plan.valid_batch_sizes, (1, 7, 0))
         self.assertEqual(plan.global_max_batch, 7)
@@ -110,24 +110,71 @@ class KtpStepPlanTest(unittest.TestCase):
         self.assertTrue(plan.use_cuda_graph)
 
     def test_one_ineligible_rank_forces_common_eager(self):
-        plan = build_ktp_step_plan([[2, 1, 0], [5, 0, 0]], [8])
+        plan = build_ktp_step_plan([[2, 1, 0, 1], [5, 0, 0, 1]], [8])
         self.assertFalse(plan.use_cuda_graph)
         self.assertEqual(plan.common_graph_bucket, 0)
         self.assertEqual(plan.common_physical_batch, 5)
 
     def test_missing_bucket_forces_common_eager(self):
-        plan = build_ktp_step_plan([[9, 1, 0], [3, 1, 0]], [1, 4, 8])
+        plan = build_ktp_step_plan([[9, 1, 0, 1], [3, 1, 0, 1]], [1, 4, 8])
         self.assertFalse(plan.use_cuda_graph)
         self.assertEqual(plan.common_physical_batch, 9)
 
     def test_all_idle_skips_step(self):
-        plan = build_ktp_step_plan([[0, 1, 0], [0, 1, 0]], [1, 2])
+        plan = build_ktp_step_plan([[0, 1, 0, 1], [0, 1, 0, 1]], [1, 2])
         self.assertTrue(plan.all_idle)
         self.assertEqual(plan.common_physical_batch, 0)
 
     def test_forward_mode_mismatch_fails(self):
         with self.assertRaisesRegex(RuntimeError, "forward mode"):
-            build_ktp_step_plan([[1, 1, 0], [1, 1, 1]], [1])
+            build_ktp_step_plan([[1, 1, 0, 1], [1, 1, 1, 1]], [1])
+
+    def test_token_width_mismatch_fails(self):
+        with self.assertRaisesRegex(RuntimeError, "token width"):
+            build_ktp_step_plan([[1, 1, 2, 4], [1, 1, 2, 3]], [1])
+
+    def test_target_verify_padding_separates_request_and_token_shapes(self):
+        attention = SimpleNamespace(
+            input_lengths=torch.tensor([4], dtype=torch.int32),
+            input_lengths_host=torch.tensor([4], dtype=torch.int32),
+            prefix_lengths=torch.tensor([7], dtype=torch.int32),
+            prefix_lengths_host=torch.tensor([7], dtype=torch.int32),
+            sequence_lengths=torch.tensor([7], dtype=torch.int32),
+            sequence_lengths_host=torch.tensor([7], dtype=torch.int32),
+            sequence_lengths_plus_1_d=torch.tensor([8], dtype=torch.int32),
+            kv_cache_kernel_block_id_device=torch.tensor([[9]], dtype=torch.int32),
+            kv_cache_kernel_block_id_host=torch.tensor([[9]], dtype=torch.int32),
+            kv_cache_block_id_device=None,
+            kv_cache_block_id_host=None,
+            kv_cache_kernel_block_id_device_by_group=[],
+            kv_cache_kernel_block_id_host_by_group=[],
+            kv_cache_block_id_host_by_group=[],
+            cu_seqlens_host=torch.tensor([0, 4], dtype=torch.int32),
+            cu_kv_seqlens=torch.tensor([0, 11], dtype=torch.int32),
+            padding_offset=torch.arange(4, dtype=torch.int32),
+        )
+        inputs = SimpleNamespace(
+            input_ids=torch.arange(4, dtype=torch.int32),
+            input_hiddens=torch.ones(4, 3),
+            combo_position_ids=torch.arange(4, dtype=torch.int32),
+            attention_inputs=attention,
+        )
+        plan = build_ktp_step_plan([[1, 1, 2, 4], [2, 1, 2, 4]], [2])
+
+        pad_ktp_decode_inputs(inputs, plan, ktp_rank=0)
+
+        self.assertEqual(inputs.input_ids.numel(), 8)
+        self.assertEqual(tuple(inputs.input_hiddens.shape), (8, 3))
+        self.assertEqual(attention.input_lengths.tolist(), [4, 4])
+        self.assertEqual(attention.cu_seqlens.tolist(), [0, 4, 8])
+        self.assertEqual(attention.cu_kv_seqlens.tolist(), [0, 11, 15])
+        self.assertEqual(attention.total_tokens, 8)
+        self.assertEqual(
+            inputs.ktp_valid_row_mask.tolist(),
+            [1, 1, 1, 1, 0, 0, 0, 0],
+        )
+        self.assertEqual(inputs.ktp_local_real_batch, 4)
+        self.assertEqual(inputs.ktp_common_physical_batch, 2)
 
 
 class KtpProjectionLayoutTest(unittest.TestCase):

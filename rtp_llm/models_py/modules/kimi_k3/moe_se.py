@@ -420,13 +420,6 @@ class KimiK3LatentMoESE(KimiK3LatentMoE):
             self.weights[K3W.MOE_ROUTED_UP],
         )
         output = routed_output + shared_output
-        if valid_token_count is not None and valid_token_count < hidden_states.shape[0]:
-            output = output.clone()
-            output[valid_token_count:] = 0
-        if valid_token_mask is not None:
-            output = output * valid_token_mask.to(
-                device=output.device, dtype=output.dtype
-            ).unsqueeze(-1)
         return output
 
 

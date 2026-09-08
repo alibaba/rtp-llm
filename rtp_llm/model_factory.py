@@ -25,7 +25,12 @@ from rtp_llm.config.py_config_modules import (
     VitConfig,
 )
 from rtp_llm.model_factory_register import _model_factory, ensure_model_registered
-from rtp_llm.ops import ProfilingDebugLoggingConfig, SpeculativeType, VitSeparation
+from rtp_llm.ops import (
+    ParallelismConfig,
+    ProfilingDebugLoggingConfig,
+    SpeculativeType,
+    VitSeparation,
+)
 from rtp_llm.utils.util import check_with_info
 
 
@@ -100,6 +105,39 @@ class ModelFactory:
         return model
 
     @staticmethod
+    def _propose_parallelism_config(
+        parallelism_config: ParallelismConfig,
+    ) -> ParallelismConfig:
+        """Copy target parallelism while keeping the draft model out of KTP."""
+
+        result = ParallelismConfig()
+        for name in (
+            "tp_size",
+            "ep_size",
+            "dp_size",
+            "pp_size",
+            "world_size",
+            "world_rank",
+            "local_world_size",
+            "local_rank",
+            "ffn_sp_size",
+            "tp_rank",
+            "ep_rank",
+            "dp_rank",
+            "ffn_tp_size",
+            "ffn_tp_rank",
+            "enable_sp",
+            "use_ub_comm",
+            "role_type",
+            "ffn_disaggregate_config",
+            "prefill_cp_config",
+        ):
+            setattr(result, name, getattr(parallelism_config, name))
+        result.ktp_size = 1
+        result.ktp_rank = 0
+        return result
+
+    @staticmethod
     def get_sp_model(
         model_config: ModelConfig,
         propose_model_config: Optional[ModelConfig],
@@ -152,9 +190,12 @@ class ModelFactory:
             propose_model_config.max_seq_len = model_config.max_seq_len
             propose_model_config.gen_num_per_cycle = model_config.gen_num_per_cycle
 
+            propose_parallelism_config = ModelFactory._propose_parallelism_config(
+                engine_config.parallelism_config
+            )
             gpt_model = model_cls.from_config(
                 model_config=propose_model_config,
-                parallelism_config=engine_config.parallelism_config,
+                parallelism_config=propose_parallelism_config,
                 hw_kernel_config=engine_config.hw_kernel_config,
                 kv_cache_config=engine_config.kv_cache_config,
                 fmha_config=engine_config.fmha_config,

@@ -14,6 +14,8 @@
 #    DECODE_REPO_ROOT=/data0/user/RTP-LLM/github-opensource \
 #    PREFILL_CHECKPOINT_PATH=/data3/user/Kimi-K3 \
 #    DECODE_CHECKPOINT_PATH=/data0/user/Kimi-K3 \
+#    PREFILL_SP_CHECKPOINT_PATH=/data3/user/Kimi-K3-Eagle3 \
+#    DECODE_SP_CHECKPOINT_PATH=/data0/user/Kimi-K3-Eagle3 \
 #    PREFILL_ENDPOINT=xx.xx.xx.xx:27188 \
 #    DECODE_ENDPOINT=xx.xx.xx.xx:28188 \
 #    SMOKE_RUN_ID=my-run \
@@ -53,8 +55,8 @@
 # answers and cache metadata, then reports PASS/FAIL back to Decode. Both
 # commands therefore have a meaningful exit status and clean only their own
 # process group.
-# Projection-KTP phase one supports ordinary Decode only. MTP/Eagle3 is
-# intentionally absent and startup must fail if it leaks in from the caller.
+# The target model uses Projection-KTP while the Eagle3 draft remains KTP1.
+# Both ordinary Decode and Target Verify participate in synchronized graph waves.
 
 set -Eeuo pipefail
 ulimit -c 0
@@ -69,6 +71,7 @@ usage() {
     cat >&2 <<'EOF'
 Usage (run inside lhc_GPU as the normal user):
   CHECKPOINT_PATH=/local/path/to/Kimi-K3 \
+  SP_CHECKPOINT_PATH=/local/path/to/Kimi-K3-Eagle3 \
   PREFILL_ENDPOINT=prefill-host:27188 \
   DECODE_ENDPOINT=decode-host:28188 \
   SMOKE_RUN_ID=my-run \
@@ -78,8 +81,9 @@ The two roles may start concurrently. Prefill waits for both the Decode model
 and result channel. The default result channel is DECODE host at DECODE port +
 100; override SMOKE_RESULT_ENDPOINT on both hosts when that port is unavailable.
 
-The validated BF16 1M model/runtime profile is fixed by this smoke and uses
-Prefill TP8/EP8 plus Decode DP8/KTP8/EP8 with ordinary Decode only.
+The validated profile uses Prefill TP8/EP8 plus Decode DP8/KTP8/EP8. Weight FP8
+and MLA FP8 are enabled by default, and Eagle3 is mandatory. The target model
+uses KTP8; the draft model remains KTP1.
 
 Merge-gate accuracy validation must use SMOKE_SUITE=all. SMOKE_SUITE=flow is
 only a four-layer RDMA connectivity/multi-round preflight and does not satisfy
@@ -95,6 +99,8 @@ Important optional variables:
   SMOKE_IDENTITY_MAX_TOKENS defaults to 256 for the reasoning identity case
   SMOKE_SINGLE_EXACT_MAX_TOKENS
                             defaults to 128 for exact-cache seed/hit answers
+  SMOKE_MTP_CHUNK_MAX_TOKENS
+                            defaults to 128 for MTP chunk-Prefill coverage
   SMOKE_RDMA_PREWARM_ATTEMPTS
                             defaults to 3 bounded batch-sized prewarm attempts
   SMOKE_RDMA_PREWARM_TIMEOUT_S
@@ -114,7 +120,8 @@ Important optional variables:
                                   check without semantic-answer assertions
                             all: identity, single miss/hit, partial hit,
                                  concurrent all-miss/all-hit, mixed hit+miss
-                                 batches and >64K single/batched chunk cases
+                                 batches, MTP acceptance after chunk Prefill,
+                                 and >64K single/batched chunk cases
   SMOKE_EXPECTED_LAYERS     checkpoint layer count; defaults to 93. Set to 4
                             only for the required four-layer RDMA flow smoke.
   SMOKE_BLOCK_SIZE          physical cache page size; defaults to 4096
@@ -131,6 +138,15 @@ Important optional variables:
   SMOKE_LINEAR_STEP         KDA materialization step; defaults to 1
   SMOKE_CHUNKWISE_RDMA      1 (default) enables Layer x Chunk publication;
                             0 retains compute-all-then-transfer behavior
+  KIMI_K3_ATTENTION_QUANTIZATION
+                            fp8_per_block (default) or none for target weights
+  KIMI_K3_MLA_FP8           1 (default) or 0 for target MLA FP8
+  KIMI_K3_MLA_FP8_Q_SCALE   fixed Q scale; defaults to 1
+  KIMI_K3_MLA_FP8_KV_SCALE  fixed cache scale; defaults to 1
+  KIMI_K3_FP8_COLLECTIVE_GEMM
+                            1 (default) enables FP8 collective GEMM
+  KIMI_K3_MLA_PREFILL_EXPANDED_KV_BUDGET_BYTES
+                            defaults to 4294967296 (4 GiB) per rank
   RTP_LLM_SERVER_BINARY     use an existing Bazel launcher
   RTP_LLM_SKIP_BUILD=1      skip the CUDA13/SM10x build in the launcher
 EOF
@@ -195,8 +211,21 @@ esac
     || die "missing checkpoint config.json"
 [[ -f "${checkpoint_real}/model.safetensors.index.json" ]] \
     || die "missing checkpoint model.safetensors.index.json"
-[[ -z "${SP_TYPE:-}" && -z "${SP_CHECKPOINT_PATH:-}" ]] \
-    || die "Projection-KTP smoke requires MTP/Eagle3 to be unset"
+sp_checkpoint_real="$(realpath -e "${SP_CHECKPOINT_PATH:?SP_CHECKPOINT_PATH is required}")" \
+    || die "Eagle3 checkpoint does not exist: ${SP_CHECKPOINT_PATH}"
+case "${sp_checkpoint_real}" in
+    /data[0-9]*/* | /data/* | /ssd/*) ;;
+    *) die "Eagle3 checkpoint must be on a local data disk: ${sp_checkpoint_real}" ;;
+esac
+sp_checkpoint_fs="$(findmnt -T "${sp_checkpoint_real}" -n -o FSTYPE)"
+sp_checkpoint_source="$(findmnt -T "${sp_checkpoint_real}" -n -o SOURCE)"
+case "${sp_checkpoint_fs}:${sp_checkpoint_source}" in
+    nfs*:* | cifs:* | smb*:* | fuse.*:* | *[Nn][Aa][Ss]*)
+        die "network/NAS Eagle3 checkpoint is forbidden: ${sp_checkpoint_fs}:${sp_checkpoint_source}"
+        ;;
+esac
+[[ -f "${sp_checkpoint_real}/config.json" ]] \
+    || die "missing Eagle3 checkpoint config.json"
 smoke_expected_layers="${SMOKE_EXPECTED_LAYERS:-93}"
 [[ "${smoke_expected_layers}" =~ ^[1-9][0-9]*$ ]] \
     || die "SMOKE_EXPECTED_LAYERS must be a positive integer"
@@ -227,6 +256,13 @@ if expected_layers not in layer_counts:
     )
 print(f"checkpoint layers={expected_layers}")
 PY
+case "${smoke_expected_layers}" in
+    93) smoke_eagle3_aux_layer_ids=0,44,88 ;;
+    4) smoke_eagle3_aux_layer_ids=0,1,3 ;;
+    *)
+        die "no validated Eagle3 aux-layer profile for ${smoke_expected_layers} target layers"
+        ;;
+esac
 
 artifact_root="${SMOKE_ARTIFACT_ROOT:-/tmp/kimi-k3-two-host-pd-smoke}"
 role_dir="${artifact_root}/${SMOKE_RUN_ID}/${role}"
@@ -477,6 +513,21 @@ verify_projection_ktp_decode_log() {
     done
 }
 
+verify_fp8_log() {
+    local engine_log="${role_dir}/runtime/logs/${role}-engine.log"
+    local rank_logs=("${role_dir}/runtime/logs/${role}"-rank-*.log)
+    if [[ ! -e "${rank_logs[0]}" ]]; then
+        rank_logs=()
+    fi
+    local logs=("${service_log}" "${engine_log}" "${rank_logs[@]}")
+    local evidence_file="${role_dir}/fp8-runtime-evidence.log"
+    : >"${evidence_file}"
+    grep -Eh "K3_FP8_WEIGHT" "${logs[@]}" | head -20 >>"${evidence_file}" \
+        || die "${role} logs have no K3 FP8 weight execution evidence"
+    grep -Eh "K3 MLA FP8: dense_e4m3_v1" "${logs[@]}" | head -5 >>"${evidence_file}" \
+        || die "${role} logs have no MLA FP8 runtime evidence"
+}
+
 verify_role_environment() {
     local env_file="${role_dir}/service.env"
     # Never dump the full process environment: it can contain unrelated
@@ -491,6 +542,8 @@ verify_role_environment() {
         "${smoke_decode_kv_cache_mem_mb}" \
         "${smoke_linear_step}" \
         "${smoke_chunkwise_rdma}" \
+        "${sp_checkpoint_real}" \
+        "${smoke_eagle3_aux_layer_ids}" \
         "${smoke_accl_use_nics}" \
         "${FT_CORE_DUMP_ON_EXCEPTION}" <<'PY'
 import os
@@ -507,6 +560,8 @@ import sys
     decode_kv_cache_mem_mb,
     linear_step,
     chunkwise_rdma,
+    sp_checkpoint_path,
+    eagle3_aux_layer_ids,
     accl_use_nics,
     core_dump_on_exception,
 ) = sys.argv[1:]
@@ -535,17 +590,14 @@ expected = {
     "FLASHINFER_CUDA_ARCH_LIST": "10.3a",
     "DEEPGEMM_JIT_COMPILER": "auto",
     "FT_CORE_DUMP_ON_EXCEPTION": core_dump_on_exception,
+    "SP_TYPE": "eagle3",
+    "SP_MODEL_TYPE": "kimi_k3_mla_swa_eagle3",
+    "SP_CHECKPOINT_PATH": sp_checkpoint_path,
+    "SP_ACT_TYPE": "BF16",
+    "GEN_NUM_PER_CIRCLE": "3",
+    "KIMI_K3_EAGLE3_AUX_LAYER_IDS": eagle3_aux_layer_ids,
 }
-absent = [
-    "CUDA_LAUNCH_BLOCKING",
-    "large_segment_size_mb",
-    "SP_TYPE",
-    "SP_MODEL_TYPE",
-    "SP_CHECKPOINT_PATH",
-    "SP_ACT_TYPE",
-    "GEN_NUM_PER_CIRCLE",
-    "KIMI_K3_EAGLE3_AUX_LAYER_IDS",
-]
+absent = ["CUDA_LAUNCH_BLOCKING", "large_segment_size_mb"]
 if accl_use_nics:
     expected["ACCL_USE_NICS"] = accl_use_nics
 else:
@@ -593,7 +645,8 @@ else:
 
 for key in ("KIMI_K3_ATTENTION_QUANTIZATION", "KIMI_K3_FP8_COLLECTIVE_GEMM",
             "KIMI_K3_MLA_FP8", "KIMI_K3_MLA_FP8_Q_SCALE", "KIMI_K3_MLA_FP8_KV_SCALE",
-            "KIMI_K3_MLA_FP8_DIAGNOSTICS"):
+            "KIMI_K3_MLA_PREFILL_EXPANDED_KV_BUDGET_BYTES",
+            "KIMI_K3_MLA_FP8_DIAGNOSTICS", "RTP_LLM_MTP_ACCEPTANCE_DIAGNOSTICS"):
     if key in os.environ:
         expected[key] = os.environ[key]
 
@@ -610,9 +663,8 @@ pathlib.Path(output).write_text("\n".join(lines) + "\n", encoding="utf-8")
 PY
 }
 
-# Operator versions are supplied by the Bazel server target. Keep the exact
-# validated BF16 1M runtime profile here instead of relying on the caller's
-# shell or on the generic launcher's conservative defaults.
+# Operator versions are supplied by the Bazel server target. Precision defaults
+# apply only to this smoke; explicit overrides remain available for comparisons.
 apply_validated_common_profile() {
     local run_hash
     run_hash="$(printf '%s' "${SMOKE_RUN_ID}" | sha256sum)"
@@ -621,6 +673,12 @@ apply_validated_common_profile() {
     export TOKENIZER_PATH="${checkpoint_real}"
     export PREFILL_ENDPOINT DECODE_ENDPOINT
     export LOAD_METHOD=fastsafetensors
+    export KIMI_K3_ATTENTION_QUANTIZATION="${KIMI_K3_ATTENTION_QUANTIZATION:-fp8_per_block}"
+    export KIMI_K3_MLA_FP8="${KIMI_K3_MLA_FP8:-1}"
+    export KIMI_K3_MLA_FP8_Q_SCALE="${KIMI_K3_MLA_FP8_Q_SCALE:-1}"
+    export KIMI_K3_MLA_FP8_KV_SCALE="${KIMI_K3_MLA_FP8_KV_SCALE:-1}"
+    export KIMI_K3_FP8_COLLECTIVE_GEMM="${KIMI_K3_FP8_COLLECTIVE_GEMM:-1}"
+    export KIMI_K3_MLA_PREFILL_EXPANDED_KV_BUDGET_BYTES="${KIMI_K3_MLA_PREFILL_EXPANDED_KV_BUDGET_BYTES:-4294967296}"
     export SEQ_SIZE_PER_BLOCK="${smoke_block_size}"
     export KERNEL_SEQ_SIZE_PER_BLOCK="${smoke_kernel_block_size}"
     export CONCURRENCY_LIMIT=32
@@ -644,8 +702,12 @@ apply_validated_common_profile() {
     export FT_CORE_DUMP_ON_EXCEPTION="${FT_CORE_DUMP_ON_EXCEPTION:-1}"
     [[ "${FT_CORE_DUMP_ON_EXCEPTION}" =~ ^[01]$ ]] \
         || die "FT_CORE_DUMP_ON_EXCEPTION must be 0 or 1"
-    unset SP_TYPE SP_MODEL_TYPE SP_CHECKPOINT_PATH SP_ACT_TYPE
-    unset GEN_NUM_PER_CIRCLE KIMI_K3_EAGLE3_AUX_LAYER_IDS
+    export SP_TYPE=eagle3
+    export SP_MODEL_TYPE=kimi_k3_mla_swa_eagle3
+    export SP_CHECKPOINT_PATH="${sp_checkpoint_real}"
+    export SP_ACT_TYPE=BF16
+    export GEN_NUM_PER_CIRCLE=3
+    export KIMI_K3_EAGLE3_AUX_LAYER_IDS="${smoke_eagle3_aux_layer_ids}"
     export RTP_LLM_SERVICE_ID="kimi-k3-full-pd-${SMOKE_RUN_ID}"
     # Keep TP Unix-domain sockets below Linux's 107-byte path limit even when
     # the externally visible run ID is descriptive and long.
@@ -705,7 +767,7 @@ fi
 
 echo "[${role}] artifacts=${role_dir}"
 echo "[${role}] checkpoint=${checkpoint_real} (${checkpoint_fs}:${checkpoint_source})"
-echo "[${role}] projection_ktp=dp8_ktp8_ep8 mtp=disabled"
+echo "[${role}] projection_ktp=dp8_ktp8_ep8 eagle3=${sp_checkpoint_real} target_ktp=8 draft_ktp=1"
 echo "[${role}] endpoints prefill=${PREFILL_ENDPOINT} decode=${DECODE_ENDPOINT}"
 
 setsid "${launcher}" "${role}" >"${service_log}" 2>&1 &
@@ -716,6 +778,7 @@ local_port="${prefill_port}"
 [[ "${role}" == "prefill" ]] || local_port="${decode_port}"
 wait_for_health 127.0.0.1 "${local_port}"
 verify_fastsafetensors_log
+verify_fp8_log
 verify_rdma_log
 verify_role_environment
 
@@ -791,13 +854,15 @@ fi
 # also checks local Prefill health before every sequential/concurrent stage.
 wait_for_health "${decode_host}" "${decode_port}"
 wait_for_result_listener
-max_tokens="${SMOKE_MAX_TOKENS:-128}"
+max_tokens="${SMOKE_MAX_TOKENS:-256}"
 identity_max_tokens="${SMOKE_IDENTITY_MAX_TOKENS:-256}"
 single_exact_max_tokens="${SMOKE_SINGLE_EXACT_MAX_TOKENS:-128}"
+mtp_chunk_max_tokens="${SMOKE_MTP_CHUNK_MAX_TOKENS:-128}"
 for token_budget in \
     "${max_tokens}" \
     "${identity_max_tokens}" \
-    "${single_exact_max_tokens}"; do
+    "${single_exact_max_tokens}" \
+    "${mtp_chunk_max_tokens}"; do
     [[ "${token_budget}" =~ ^[1-9][0-9]*$ ]] \
         || die "smoke output token budgets must be positive integers"
 done
@@ -806,6 +871,10 @@ case "${smoke_suite}" in
     flow | all) ;;
     *) die "SMOKE_SUITE must be flow or all" ;;
 esac
+mtp_case_args=()
+if [[ "${smoke_suite}" == "all" ]]; then
+    mtp_case_args+=(--require-mtp)
+fi
 
 decode_role_addrs=()
 if [[ -n "${SMOKE_DECODE_ROLE_ADDRS:-}" ]]; then
@@ -841,6 +910,8 @@ python3 "${case_runner}" \
     --max-tokens "${max_tokens}" \
     --identity-max-tokens "${identity_max_tokens}" \
     --single-exact-max-tokens "${single_exact_max_tokens}" \
+    --mtp-chunk-max-tokens "${mtp_chunk_max_tokens}" \
+    "${mtp_case_args[@]}" \
     --rdma-prewarm-attempts "${smoke_rdma_prewarm_attempts}" \
     --rdma-prewarm-timeout "${smoke_rdma_prewarm_timeout_s}" \
     --rdma-prewarm-backoff-s "${smoke_rdma_prewarm_backoff_s}" \

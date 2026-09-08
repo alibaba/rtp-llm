@@ -938,13 +938,6 @@ class KimiK3LatentMoE(nn.Module):
         routed_output = torch.matmul(routed_output, self.weights[K3W.MOE_ROUTED_UP])
         shared_output = self._shared_expert_forward(hidden_states)
         output = routed_output + shared_output
-        if valid_token_count is not None and valid_token_count < hidden_states.shape[0]:
-            output = output.clone()
-            output[valid_token_count:] = 0
-        if valid_token_mask is not None:
-            output = output * valid_token_mask.to(
-                device=output.device, dtype=output.dtype
-            ).unsqueeze(-1)
         return output
 
 

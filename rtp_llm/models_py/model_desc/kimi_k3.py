@@ -327,10 +327,6 @@ class KimiK3DecoderLayer(nn.Module):
                 sequence_parallel=sequence_parallel,
                 prefill_sp_layout=prefill_sp_layout,
             )
-        if attn_meta.valid_token_mask is not None:
-            attention_output = attention_output * attn_meta.valid_token_mask.to(
-                dtype=attention_output.dtype
-            ).unsqueeze(-1)
         if decode_sp:
             if prefix_sum is not None:
                 prefix_sum, local_valid_tokens = shard_tokens_with_padding(
@@ -380,10 +376,6 @@ class KimiK3DecoderLayer(nn.Module):
                 valid_token_count=local_valid_tokens,
             )
         output = prefix_sum + mlp_output
-        if attn_meta.valid_token_mask is not None:
-            output = output * attn_meta.valid_token_mask.to(
-                dtype=output.dtype
-            ).unsqueeze(-1)
         if decode_sp:
             output = all_gather_trim(output, logical_tokens, group=Group.TP)
         return KimiK3DecoderOutput(output, block_residual)
@@ -493,12 +485,13 @@ class KimiK3Model(GptModelBase):
                     "Projection KTP requires TP=1 and DP=KTP=EP=world; "
                     f"got TP/DP/KTP/EP/world={topology}"
                 )
-            if init_resource.is_speculative or os.environ.get("SP_TYPE", "").lower() in (
-                "eagle3",
-                "eagle",
-            ):
+            sp_type = os.environ.get("SP_TYPE", "").lower()
+            if init_resource.is_speculative or sp_type not in ("", "eagle3"):
                 raise RuntimeError(
-                    "Projection KTP does not support MTP/Eagle3 in this phase"
+                    "Projection KTP supports ordinary Decode or Eagle3 target "
+                    "verification; the speculative model itself must use KTP1, "
+                    f"got SP_TYPE={sp_type!r} "
+                    f"is_speculative={init_resource.is_speculative}"
                 )
             configured = tuple(int(value) for value in init_resource.decode_capture_batch_sizes)
             self._ktp_capture_buckets = (
@@ -624,7 +617,7 @@ class KimiK3Model(GptModelBase):
         cuda_graph_enabled: bool,
         is_fake_stream: bool,
     ) -> PyModelInputs:
-        """Synchronize one ordinary Decode wave before graph selection."""
+        """Synchronize one Decode or Eagle3 target-verify wave."""
 
         ktp_size = int(getattr(self.parallelism_config, "ktp_size", 1))
         if ktp_size <= 1:
@@ -638,20 +631,31 @@ class KimiK3Model(GptModelBase):
             forward_mode = KtpForwardMode.PREFILL
         else:
             forward_mode = KtpForwardMode.DECODE
-        local_real_batch = 0 if is_fake_stream else int(attention.input_lengths.shape[0])
+        request_rows = int(attention.input_lengths.shape[0])
+        token_rows = int(inputs.input_ids.numel())
+        if request_rows <= 0 or token_rows % request_rows:
+            raise RuntimeError(
+                "Projection KTP requires a uniform positive token width per request; "
+                f"requests={request_rows} tokens={token_rows}"
+            )
+        tokens_per_batch = token_rows // request_rows
+        local_real_batch = 0 if is_fake_stream else request_rows
         plan = coordinate_ktp_step(
             local_real_batch=local_real_batch,
             graph_eligible=bool(
-                cuda_graph_enabled and forward_mode == KtpForwardMode.DECODE
+                cuda_graph_enabled
+                and forward_mode
+                in (KtpForwardMode.DECODE, KtpForwardMode.TARGET_VERIFY)
             ),
             forward_mode=forward_mode,
+            tokens_per_batch=tokens_per_batch,
             capture_buckets=self._ktp_capture_buckets,
             device=attention.input_lengths.device,
             ktp_size=ktp_size,
         )
-        if forward_mode != KtpForwardMode.DECODE:
+        if forward_mode not in (KtpForwardMode.DECODE, KtpForwardMode.TARGET_VERIFY):
             raise RuntimeError(
-                "Projection KTP supports ordinary Decode only; "
+                "Projection KTP supports ordinary Decode and Eagle3 target verify only; "
                 f"forward_mode={forward_mode.name}"
             )
         pad_ktp_decode_inputs(
@@ -665,15 +669,19 @@ class KimiK3Model(GptModelBase):
             plan.common_graph_bucket,
             plan.use_cuda_graph,
             plan.all_idle,
+            plan.forward_mode,
+            plan.tokens_per_batch,
         )
         if signature != self._ktp_last_step_signature:
             logging.info(
                 "[K3_PROJECTION_KTP_STEP] valid=%s max=%d physical=%d graph_key=%d "
-                "mode=%s all_idle=%s",
+                "forward_mode=%s tokens_per_batch=%d mode=%s all_idle=%s",
                 plan.valid_batch_sizes,
                 plan.global_max_batch,
                 inputs.ktp_common_physical_batch,
                 plan.common_graph_bucket,
+                KtpForwardMode(plan.forward_mode).name,
+                plan.tokens_per_batch,
                 "cuda_graph" if plan.use_cuda_graph else "eager",
                 plan.all_idle,
             )
@@ -1260,9 +1268,6 @@ class KimiK3Model(GptModelBase):
                     "Projection-KTP valid-row mask does not match hidden rows: "
                     f"mask={valid_token_mask.numel()} hidden={hidden_states.shape[0]}"
                 )
-            hidden_states = hidden_states * valid_token_mask.to(
-                dtype=hidden_states.dtype
-            ).unsqueeze(-1)
         else:
             valid_token_mask = None
         if prefill_sp:
@@ -1447,10 +1452,6 @@ class KimiK3Model(GptModelBase):
                     ),
                 )
         hidden_states = self.norm(hidden_states, block_residual)
-        if valid_token_mask is not None:
-            hidden_states = hidden_states * valid_token_mask.to(
-                dtype=hidden_states.dtype
-            ).unsqueeze(-1)
         if prefill_sp:
             assert prefill_sp_layout is not None
             hidden_states = all_gather_trim(

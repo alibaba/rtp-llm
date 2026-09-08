@@ -617,9 +617,15 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs& inputs, CudaGraphSt
             RTP_LLM_PROFILE_SCOPE("cuda_graph.forward(replayDecode)");
             replayDecode(state.current_real_graph_bs);
         }
+        const int64_t output_rows =
+            inputs.ktp_common_physical_batch > 0 ? inputs.ktp_local_real_batch : state.seq_len_sum;
+        RTP_LLM_CHECK_WITH_INFO(output_rows >= 0 && output_rows <= state.seq_len_sum,
+                                "invalid Projection-KTP output rows: local_real_batch=%ld physical_rows=%d",
+                                output_rows,
+                                state.seq_len_sum);
         outputs.hidden_states =
             graph_instances_[state.current_real_graph_bs].mem_hold_.decoder_layer_hidden_states_.slice(
-                0, 0, state.seq_len_sum);
+                0, 0, output_rows);
     }
     // record forward done event
     forward_event_.record(cuda_graph::graphGetCurrentStream());
@@ -782,7 +788,7 @@ void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_
     inputs.attention_inputs.is_mtp_draft_update = is_mtp_draft_update_;
     inputs.attention_inputs.is_prefill       = is_prefill_cuda_graph_mode_ || num_tokens_per_bs_ > 1;
     inputs.attention_inputs.total_tokens     = max_bs * num_tokens_per_bs;
-    inputs.ktp_valid_row_mask = torch::ones({int(max_bs_)}, options_cuda_int32_);
+    inputs.ktp_valid_row_mask = torch::ones({int(max_num_token_)}, options_cuda_int32_);
 
     // input_ids [tokens_nums] = [batch_size * num_tokens_per_bs]
     inputs.input_ids = torch::zeros({max_num_token_}, options_cuda_int32_);
@@ -1137,14 +1143,14 @@ void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size
     inputs.attention_inputs.is_mtp_draft_update = is_mtp_draft_update_;
     inputs.attention_inputs.is_cuda_graph    = true;
     inputs.attention_inputs.total_tokens     = seq_len_or_tokens;
-    inputs.ktp_local_real_batch              = batch_size;
+    inputs.ktp_local_real_batch              = seq_len_or_tokens;
     inputs.ktp_common_physical_batch         = batch_size;
     inputs.ktp_common_graph_bucket           = batch_size;
     inputs.ktp_use_cuda_graph                = true;
     inputs.ktp_all_idle                      = false;
     if (capture_mem_hold_.py_model_inputs_.ktp_valid_row_mask.defined()) {
-        inputs.ktp_valid_row_mask =
-            capture_mem_hold_.py_model_inputs_.ktp_valid_row_mask.slice(0, 0, batch_size);
+        inputs.ktp_valid_row_mask = capture_mem_hold_.py_model_inputs_.ktp_valid_row_mask.slice(
+            0, 0, seq_len_or_tokens);
     }
     // Draft prefill cudagraph mode (num_tokens_per_bs_ > 1 and
     // is_prefill_cuda_graph_mode_) must keep input_ids / input_hiddens at
