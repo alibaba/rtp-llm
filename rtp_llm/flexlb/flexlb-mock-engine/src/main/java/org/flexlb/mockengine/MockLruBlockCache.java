@@ -243,21 +243,22 @@ final class MockLruBlockCache {
             hitKeys = new ArrayList<>(hitKeys.subList(0, totalBlocksDemand));
         }
         int netNew = totalBlocksDemand - hitKeys.size();
-        int avail = availableBlocks();
-        if (netNew > avail || avail - netNew < reserveBlocks()) {
-            return new AllocationOutcome(null, failureFamily(netNew));
-        }
         // Pin the reused blocks FIRST: each reference moves the key out of the
-        // evictable pure-LRU set, so the LRU-tail eviction below can never
-        // sacrifice a block this request is about to reuse.
+        // evictable pure-LRU set, so the capacity gate and eviction sweep see
+        // the same availability that the admitted request will consume.
         for (Long key : hitKeys) {
             blocks.put(key, blocks.get(key) + 1);
+        }
+        int avail = availableBlocks();
+        if (netNew > 0 && (netNew > avail || avail - netNew < reserveBlocks())) {
+            dereference(hitKeys);
+            return new AllocationOutcome(null, failureFamily(totalBlocksDemand));
         }
         // Free-first allocation for the net-new part (same coupling as
         // acquire: eviction trades prefix reuse for capacity).
         while (freeBlocks() < netNew) {
             if (!evictOne()) {
-                break;
+                throw new IllegalStateException("capacity gate admitted without enough evictable blocks");
             }
         }
         heldBlocks += netNew;

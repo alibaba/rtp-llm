@@ -2,18 +2,17 @@
 """compare_ab.py — A/B differential regression gate for online_eval runs.
 
 Compares two run aggregates (run A = baseline, run B = candidate) metric by
-metric and classifies every metric into one of three decision tiers:
+metric and classifies every metric into one of four decision tiers:
 
-  Tier 1  significant + critical    — regression gate trips (exit 1):
-                                      invariant violations / SLA monotone
-                                      regressions that a human MUST review.
-  Tier 2  significant + secondary   — large relative deltas that are
-                                      small-baseline artifacts / single-sample
-                                      outliers / shape counters; reported,
-                                      ignored by default (no gate).
-  Tier 3  critical + unchanged      — critical metrics proven NOT regressed
-                                      (delta inside significance thresholds
-                                      or inside the small-baseline guard).
+  Tier 1  significant critical regression — regression gate trips (exit 1):
+                                             invariant violations / SLA monotone
+                                             regressions that a human MUST review.
+  Tier 2  significant + secondary          — large relative deltas that are
+                                             small-baseline artifacts / single-sample
+                                             outliers / shape counters; reported,
+                                             ignored by default (no gate).
+  Tier 3  critical + not regressed         — unchanged/noisy critical metrics and
+                                             significant improvements.
   Tier 4  informational             — reported, never judged.
 
 Significance is a TWO-condition test (both must hold):
@@ -25,12 +24,12 @@ relative deltas (route_submit_mean: abs ~1ms), and tiny gini values from
 producing "+14%" out of 0.007 absolute noise.
 
 Tier assignment:
-  critical  + significant              -> Tier 1
+  critical  + significant regression   -> Tier 1
   secondary + relative-significant     -> Tier 2 (either condition alone
                                            already lands here — the whole
                                            point of Tier 2 is to absorb
                                            relative-only false alarms)
-  critical  + not significant          -> Tier 3
+  critical  + not regressed            -> Tier 3
   informational                        -> Tier 4
 Exit codes: 0 = gate passed (Tier 1 empty); 1 = gate tripped; 2 = precheck
 failure (not the same experiment — trace/params mismatch, unreadable inputs).
@@ -242,9 +241,9 @@ PRECHECK_PARAM_KEYS = [
     ("duration_s", "duration_s", "duration_s", False),
 ]
 
-TIER1_TITLE = "显著且关键（必须人工审）"
+TIER1_TITLE = "显著关键回归（必须人工审）"
 TIER2_TITLE = "显著但次关键（小基数/单点噪声，默认忽略）"
-TIER3_TITLE = "关键但未见显著变化（证明未劣化）"
+TIER3_TITLE = "关键且未劣化（含显著改善）"
 TIER4_TITLE = "信息类"
 
 
@@ -659,29 +658,39 @@ def _collect_balance_batch(agg_a, agg_b, out):
 
 
 def compute_diff(metric, noise_floor_pct):
-    """Fills abs_diff / rel_diff_pct / rel_significant / abs_significant /
-    significant / tier / note onto the metric dict (in place)."""
-    crit, cat, _direction = CRITICALITY.get(metric["name"], (INFO, "ratio", "neutral"))
+    """Fills diff, significance, regression direction, tier, and note in place."""
+    crit, cat, direction = CRITICALITY.get(
+        metric["name"], (INFO, "ratio", "neutral")
+    )
     metric["criticality"], metric["category"] = crit, cat
+    metric["directionality"] = direction
     a, b = metric["a"], metric["b"]
     metric["abs_diff"] = None
     metric["rel_diff_pct"] = None
 
-    if isinstance(a, bool) or isinstance(b, bool) or cat == "bool":
+    if cat == "bool":
+        comparable = isinstance(a, bool) and isinstance(b, bool)
+        metric["comparable"] = comparable
         metric["rel_significant"] = metric["abs_significant"] = metric[
             "significant"
-        ] = (a != b)
-        metric["abs_diff"] = None if a == b else "bool-mismatch"
+        ] = comparable and a != b
+        metric["abs_diff"] = "bool-mismatch" if comparable and a != b else None
+        metric["significant_regression"] = _is_significant_regression(
+            metric, direction
+        )
         _assign_tier(metric)
         return
 
     if not _is_numeric_pair(a, b):
+        metric["comparable"] = False
         metric["rel_significant"] = metric["abs_significant"] = metric[
             "significant"
         ] = False
+        metric["significant_regression"] = False
         _assign_tier(metric)
         return
 
+    metric["comparable"] = True
     abs_diff = b - a  # positive => candidate (B) higher than baseline (A)
     metric["abs_diff"] = abs_diff
     if a == b:
@@ -705,11 +714,28 @@ def compute_diff(metric, noise_floor_pct):
     metric["rel_significant"] = rel_ok
     metric["abs_significant"] = abs_ok
     metric["significant"] = bool(rel_ok and abs_ok)
+    metric["significant_regression"] = _is_significant_regression(metric, direction)
     _assign_tier(metric)
 
 
+def _is_significant_regression(metric, direction):
+    if not metric["significant"]:
+        return False
+    if direction == "neutral":
+        return True
+    a, b = metric["a"], metric["b"]
+    if direction == "better":
+        return b < a
+    return b > a
+
+
 def _is_numeric_pair(a, b):
-    return isinstance(a, (int, float)) and isinstance(b, (int, float))
+    return (
+        isinstance(a, (int, float))
+        and not isinstance(a, bool)
+        and isinstance(b, (int, float))
+        and not isinstance(b, bool)
+    )
 
 
 def _rel_guard_ok(cat, rel, a, b, eff_thr):
@@ -742,7 +768,7 @@ def _abs_guard_ok(cat, abs_diff, a, b, noise_floor_pct, ctx):
 
 def _assign_tier(metric):
     if metric["criticality"] == CRIT:
-        metric["tier"] = 1 if metric["significant"] else 3
+        metric["tier"] = 1 if metric["significant_regression"] else 3
     elif metric["criticality"] == SEC:
         # relative-significant alone lands in Tier 2 — that tier exists to
         # absorb exactly those relative-only small-baseline alarms.
@@ -755,7 +781,11 @@ def _assign_tier(metric):
 
 
 def _note(metric):
+    if not metric["comparable"]:
+        return "[不可比较]"
     if metric["tier"] != 2:
+        if metric["tier"] == 3 and metric["significant"]:
+            return "[显著改善]"
         if (
             metric["tier"] == 3
             and metric["rel_significant"]
@@ -866,6 +896,8 @@ def fmt_abs(metric):
 
 
 def fmt_rel(metric):
+    if not metric["comparable"]:
+        return "N/A"
     r = metric["rel_diff_pct"]
     if r is None:
         return "∞" if metric["a"] != metric["b"] else "0"
@@ -899,10 +931,11 @@ def render_stdout(payload):
             abs_part = f" (abs {abs_s})" if abs_s else ""
             note = f"  {m['note']}" if m["note"] else ""
             dirn = _direction_label(m)
-            # Tier 3 hides the arrow by design (spec format): the section
-            # header already asserts "not regressed"; an arrow would read as
-            # a contradiction. Full direction stays in the JSON output.
-            dir_part = f"  {dirn}" if dirn and tier != 3 else ""
+            dir_part = (
+                f"  {dirn}"
+                if dirn and (tier != 3 or m["significant"])
+                else ""
+            )
             if tier == 3 and not note:
                 note = "  ✓ 噪声内"
             lines.append(
@@ -915,11 +948,11 @@ def render_stdout(payload):
     if gate["passed"]:
         gate_text = "PASS (exit 0)"
     else:
-        gate_text = "TRIPPED (exit 1) — 显著且关键区非空，必须人工审"
+        gate_text = "TRIPPED (exit 1) — 显著关键回归区非空，必须人工审"
     lines.append(
-        f"判定: 显著且关键 {summary['significant_critical']} 项 | "
+        f"判定: 显著关键回归 {summary['significant_critical_regressions']} 项 | "
         f"显著但次关键 {summary['significant_secondary']} 项 | "
-        f"关键未劣化 {summary['critical_unchanged']} 项 | "
+        f"关键未劣化 {summary['critical_not_regressed']} 项 | "
         f"信息类 {summary['info']} 项"
     )
     lines.append(f"回归门: {gate_text}")
@@ -1011,9 +1044,9 @@ def render_html(payload):
         sections="\n".join(sections),
         gate_cls="gate-pass" if passed else "gate-trip",
         gate_text=(
-            "PASS — 显著且关键区为空"
+            "PASS — 显著关键回归区为空"
             if passed
-            else "TRIPPED — 显著且关键区非空，必须人工审"
+            else "TRIPPED — 显著关键回归区非空，必须人工审"
         ),
     )
 
@@ -1024,6 +1057,7 @@ def build_payload(
     tiers = {1: [], 2: [], 3: [], 4: []}
     for m in metrics:
         tiers[m["tier"]].append(m)
+    critical_metrics = [m for m in metrics if m["criticality"] == CRIT]
     passed = not tiers[1]
     return {
         "tool": "compare_ab",
@@ -1034,9 +1068,19 @@ def build_payload(
         "steady_window": window,
         "noise_floor": noise_floor,
         "classification_summary": {
-            "significant_critical": len(tiers[1]),
+            "significant_critical_regressions": len(tiers[1]),
+            "significant_critical": sum(
+                1 for m in critical_metrics if m["significant"]
+            ),
             "significant_secondary": len(tiers[2]),
-            "critical_unchanged": len(tiers[3]),
+            "critical_not_regressed": sum(
+                1
+                for m in critical_metrics
+                if m["comparable"] and not m["significant_regression"]
+            ),
+            "critical_unchanged": sum(
+                1 for m in critical_metrics if not m["significant"]
+            ),
             "info": len(tiers[4]),
         },
         "gate": {"passed": passed, "exit_code": 0 if passed else 1},
@@ -1057,9 +1101,12 @@ def metrics_to_json(payload):
             "rel_diff_pct": m["rel_diff_pct"],
             "category": m["category"],
             "criticality": m["criticality"],
+            "directionality": m["directionality"],
+            "comparable": m["comparable"],
             "rel_significant": m["rel_significant"],
             "abs_significant": m["abs_significant"],
             "significant": m["significant"],
+            "significant_regression": m["significant_regression"],
             "tier": m["tier"],
             "note": m.get("note", ""),
             "direction": _direction_label(m),
@@ -1080,8 +1127,8 @@ def metrics_to_json(payload):
 def parse_args(argv=None):
     ap = argparse.ArgumentParser(
         description="A/B differential regression gate: every metric compared, "
-        "three-tier classification (significant+critical / "
-        "significant+secondary / critical+unchanged)."
+        "four-tier classification (critical regression / significant secondary / "
+        "critical not regressed / informational)."
     )
     ap.add_argument(
         "--run-a", required=True, help="baseline run dir or aggregate.json path"

@@ -10,6 +10,7 @@ import org.junit.jupiter.api.io.TempDir;
 import java.nio.file.Path;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -17,6 +18,7 @@ import java.util.concurrent.TimeUnit;
 import static org.flexlb.mockengine.MockEngineTestSupport.batch;
 import static org.flexlb.mockengine.MockEngineTestSupport.enqueue;
 import static org.flexlb.mockengine.MockEngineTestSupport.input;
+import static org.flexlb.mockengine.MockEngineTestSupport.inputWithDecode;
 import static org.flexlb.mockengine.MockEngineTestSupport.slot;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -107,6 +109,51 @@ class PrefillWaitingQueueCapTest {
         assertEquals(0, prefill.getRunningCount());
         assertEquals(5, prefill.getCompletedCount());
         assertFalse(prefill.isLeakDetected());
+    }
+
+    @Test
+    void queueRejectionReleasesPrefillAndDecodeReservations() throws Exception {
+        CountDownLatch blockersStarted = new CountDownLatch(4);
+        CountDownLatch releaseScheduler = new CountDownLatch(1);
+        for (int i = 0; i < 4; i++) {
+            scheduler.execute(() -> {
+                blockersStarted.countDown();
+                try {
+                    releaseScheduler.await();
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            });
+        }
+        assertTrue(blockersStarted.await(1, TimeUnit.SECONDS));
+
+        try {
+            MockPerformanceModel model = model("1", 1);
+            JavaMockEngineCluster.FastRpcService prefill = startPrefill(model);
+            JavaMockEngineCluster.FastRpcService decode = MockEngineTestSupport.decodeService(
+                    model, BASE_PORT + 1, services, scheduler, 1);
+
+            for (int i = 1; i <= 2; i++) {
+                EngineRpcService.EnqueueBatchResponsePB response = enqueue(
+                        prefill,
+                        batch(1500 + i, slot(0, inputWithDecode(i, 10, BASE_PORT + 1))));
+                assertEquals(1, response.getSuccessesCount());
+            }
+            long prefillOccupiedBefore = prefill.getOccupiedKvTokens();
+            long decodeOccupiedBefore = decode.getOccupiedKvTokens();
+            long decodeAvailableBefore = decode.getAvailableKvTokens();
+
+            EngineRpcService.EnqueueBatchResponsePB rejected = enqueue(
+                    prefill,
+                    batch(1503, slot(0, inputWithDecode(3, 10, BASE_PORT + 1))));
+
+            assertEquals(1, rejected.getErrorsCount());
+            assertEquals(prefillOccupiedBefore, prefill.getOccupiedKvTokens());
+            assertEquals(decodeOccupiedBefore, decode.getOccupiedKvTokens());
+            assertEquals(decodeAvailableBefore, decode.getAvailableKvTokens());
+        } finally {
+            releaseScheduler.countDown();
+        }
     }
 
     // ──────────── Test 2: queue drains and accepts again after rejection ────────────

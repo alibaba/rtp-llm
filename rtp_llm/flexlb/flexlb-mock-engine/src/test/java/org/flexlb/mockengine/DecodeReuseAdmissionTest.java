@@ -109,29 +109,57 @@ class DecodeReuseAdmissionTest {
     }
 
     @Test
-    void acquireWithReuseGatesOnNetDemandNotTotalDemand() {
+    void acquireWithReuseGatesOnNetDemandAfterPinningHits() {
         MockLruBlockCache cache = new MockLruBlockCache(10, 0.0);
-        // One in-flight request pins 5 blocks: held=5, available=5, free=0.
-        assertNotNull(cache.acquire(5, List.of(100L, 101L, 102L, 103L, 104L)));
-        // The remaining 5 blocks park a 5-key prefix in the LRU.
         assertTrue(cache.admit(List.of(1L, 2L, 3L, 4L, 5L)));
+        MockLruBlockCache.BlockLease owner =
+                cache.acquireWithReuse(5, List.of(1L, 2L, 3L, 4L, 5L));
+        assertNotNull(owner);
         assertEquals(5, cache.availableBlocks());
 
-        // totalDemand=6 with all 5 LRU keys hit → netNew=1 ≤ 5 → admits. The
-        // OLD total-demand gate (need ≤ available) would compare 6 > 5 and
-        // reject — overstating decode pool pressure exactly the way the
-        // production net-demand gate does not.
         MockLruBlockCache.BlockLease lease =
                 cache.acquireWithReuse(6, List.of(1L, 2L, 3L, 4L, 5L, 6L));
         assertNotNull(lease,
-                "the gate must evaluate the NET demand, not the total demand");
+                "already-referenced hits consume no additional availability");
         assertEquals(5, lease.hitKeys.size());
         assertEquals(1, lease.nakedBlocks);
+        assertEquals(4, cache.availableBlocks());
+        assertEquals(4, cache.freeBlocks());
 
-        // The pre-reuse prefill-flavoured gate on the same total (6 > 5)
-        // rejects — the two calibers genuinely differ.
         assertNull(cache.acquire(6, List.of(1L, 2L, 3L, 4L, 5L, 6L)),
                 "prefill-side acquire keeps its total-demand gate");
+    }
+
+    @Test
+    void acquireWithReuseRejectsWhenPinningPureLruExhaustsCapacity() {
+        MockLruBlockCache cache = new MockLruBlockCache(10, 0.0);
+        assertNotNull(cache.acquire(5, List.of(100L, 101L, 102L, 103L, 104L)));
+        assertTrue(cache.admit(List.of(1L, 2L, 3L, 4L, 5L)));
+        assertEquals(5, cache.availableBlocks());
+
+        MockLruBlockCache.BlockLease lease =
+                cache.acquireWithReuse(6, List.of(1L, 2L, 3L, 4L, 5L, 6L));
+
+        assertNull(lease, "pinning five pure-LRU hits leaves no room for the net-new block");
+        assertEquals(5, cache.heldBlocks());
+        assertEquals(0, cache.referencedKeyBlocks(), "rejected admission must roll back hit pins");
+        assertEquals(5, cache.availableBlocks());
+        assertEquals(0, cache.freeBlocks());
+    }
+
+    @Test
+    void fullyReusedAdmissionSkipsReserveGateWhenNoAllocationIsNeeded() {
+        MockLruBlockCache cache = new MockLruBlockCache(10);
+        assertNotNull(cache.acquire(1, List.of(100L)));
+        assertTrue(cache.admit(List.of(1L, 2L, 3L, 4L, 5L, 6L, 7L, 8L, 9L)));
+
+        MockLruBlockCache.BlockLease lease =
+                cache.acquireWithReuse(9, List.of(1L, 2L, 3L, 4L, 5L, 6L, 7L, 8L, 9L));
+
+        assertNotNull(lease, "zero net-new blocks must not be rejected by the reserve gate");
+        assertEquals(9, lease.hitKeys.size());
+        assertEquals(0, lease.nakedBlocks);
+        assertEquals(0, cache.availableBlocks());
     }
 
     @Test

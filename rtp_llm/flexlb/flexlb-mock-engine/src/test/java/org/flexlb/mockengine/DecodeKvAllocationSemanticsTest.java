@@ -306,6 +306,12 @@ class DecodeKvAllocationSemanticsTest {
                 "a failed attempt yields no lease");
 
         cache.release(pin);
+        assertTrue(cache.admit(List.of(1L, 2L, 3L, 4L, 5L)));
+        assertEquals(MockLruBlockCache.AllocationFailure.PERMANENT,
+                cache.acquireWithReuseDetailed(11, List.of(1L, 2L, 3L, 4L, 5L)).failure(),
+                "reuse lowers current allocation but not the full-footprint permanent check");
+        assertEquals(0, cache.referencedKeyBlocks(),
+                "a rejected reused admission must roll back its pins");
         assertEquals(MockLruBlockCache.AllocationFailure.PERMANENT,
                 cache.acquireDetailed(11, List.of()).failure(),
                 "PERMANENT holds even on the recovered pool — the request never fits");

@@ -1287,8 +1287,10 @@ public final class JavaMockEngineCluster {
                         String message = String.format(
                                 "prefill waiting queue full (backpressure): waiting=%d cap=%d",
                                 prefillPendingQueueSize(), performance.maxWaitingPrefillBatches());
-                        for (EngineRpcService.EnqueueBatchExternalInputPB input : slot.getRequestsList()) {
-                            long requestId = input.getInput().getRequestId();
+                        for (MockPerformanceModel.RequestShape shape : shapes) {
+                            long requestId = shape.input().getRequestId();
+                            releaseBlockLease(requestId);
+                            releaseReservedDecode(requestId);
                             responseQueues.remove(requestId);
                             requestStates.put(requestId, "rejected");
                             response.addErrorsBuilder()
@@ -3090,6 +3092,9 @@ public final class JavaMockEngineCluster {
                     if (!asyncFail && !alreadyCancelled && !faultConfig.isNoRespond()) {
                         decodeStarted = startDecode(shape, member.batchId());
                     }
+                    if (!decodeStarted) {
+                        releaseReservedDecode(requestId);
+                    }
                     if (decodeStarted) {
                         // Emit a first-token frame (finished=false) so the
                         // client stream loop records firstFrameNanos at prefill
@@ -3161,16 +3166,8 @@ public final class JavaMockEngineCluster {
                         // Cancelled member: blocks return to the pool directly
                         // (no LRU handover — a cancelled request leaves no cache).
                         // asyncFail member: identical physical semantics — a
-                        // failed request leaves no KV cache (production stream
-                        // error paths free the lease) and its D-side decode
-                        // reservation returns too (the failure never hands
-                        // off to decode).
+                        // failed request leaves no KV cache.
                         releaseBlockLease(requestId);
-                        // P-enqueue decode-KV pre-alignment (20260903): the
-                        // cancelled member's D-side reservation goes back too
-                        // (idempotent against the cancel branch's release —
-                        // the reservation-owner map remove wins exactly once).
-                        releaseReservedDecode(requestId);
                     } else if (admitBlockLease(requestId, shape)) {
                         cacheVersion.incrementAndGet();
                     }

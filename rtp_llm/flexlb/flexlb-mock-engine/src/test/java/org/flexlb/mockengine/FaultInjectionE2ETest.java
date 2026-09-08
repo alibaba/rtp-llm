@@ -194,6 +194,8 @@ class FaultInjectionE2ETest {
                 BASE_PORT + 50, 1, 1, "5", 1.0, false, DecisionPolicyConfig.single())) {
             arm(h);
             JavaMockEngineCluster.FastRpcService prefill = h.prefillEngines.get(0);
+            JavaMockEngineCluster.FastRpcService decode = h.decodeEngines.get(0);
+            long decodeAvailableBefore = decode.getAvailableKvTokens();
             prefill.setFaultConfig(FaultInjectionConfig.builder()
                     .noRespond(true)
                     .build());
@@ -211,6 +213,10 @@ class FaultInjectionE2ETest {
             // 引擎内部状态照常排空、不泄漏、不影响后续恢复
             AutoTpmE2EHarness.await(() -> prefill.getRunningCount() == 0, 5_000,
                     "noRespond engine still settles its internal accounting");
+            assertEquals(0L, decode.getOccupiedKvTokens(),
+                    "suppressed decode handoff must release its reserved KV lease");
+            assertEquals(decodeAvailableBefore, decode.getAvailableKvTokens(),
+                    "decode KV availability must return to its pre-request value");
             prefill.clearFaultConfig();
             Response recovered = submitTo(h, 0, 9603);
             assertTrue(recovered.isSuccess(), "engine recovers after clearing the fault");
