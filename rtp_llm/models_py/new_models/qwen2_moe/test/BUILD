@@ -2,6 +2,7 @@ py_test(
     name = "test_qwen2_moe_load",
     exec_properties = {"gpu": "H20"},
     srcs = ["test_qwen2_moe_load.py"],
+    tags = ["H20"],
     deps = [
         "//rtp_llm:config",
         "//rtp_llm:torch",
