@@ -122,7 +122,7 @@ void invokeMhaPagedAttnPlan(const at::Tensor& input_lengths,
                             at::Tensor&       page_indice,
                             at::Tensor&       batch_indice,
                             at::Tensor&       positions,
-                            int               input_token_capacity,
+                            int               input_token_count,
                             int               planned_batch_size,
                             cudaStream_t      stream) {
     TORCH_CHECK(input_lengths.defined() && input_lengths.is_cuda() && input_lengths.scalar_type() == at::kInt
@@ -139,11 +139,6 @@ void invokeMhaPagedAttnPlan(const at::Tensor& input_lengths,
                 planned_batch_size,
                 " is smaller than input batch size ",
                 input_batch_size);
-    TORCH_CHECK(input_token_capacity >= input_batch_size,
-                "mhaPagedAttnPlan: input_token_capacity ",
-                input_token_capacity,
-                " is smaller than input batch size ",
-                input_batch_size);
     if (planned_batch_size == 0) {
         return;
     }
@@ -156,6 +151,15 @@ void invokeMhaPagedAttnPlan(const at::Tensor& input_lengths,
     const bool has_prefix = prefix_lengths.defined() && prefix_lengths.numel() > 0;
     const bool has_seq    = sequence_lengths.defined() && sequence_lengths.numel() > 0;
     TORCH_CHECK(has_prefix || has_seq, "mhaPagedAttnPlan: need either prefix_lengths or sequence_lengths");
+    TORCH_CHECK(
+        input_token_count >= 0, "mhaPagedAttnPlan: input_token_count must be non-negative, got ", input_token_count);
+    if (!has_prefix) {
+        TORCH_CHECK(input_token_count == input_batch_size,
+                    "mhaPagedAttnPlan: decode input_token_count must equal input batch size ",
+                    input_batch_size,
+                    ", got ",
+                    input_token_count);
+    }
 
     const int32_t* prefix_ptr = nullptr;
     if (has_prefix) {
@@ -192,10 +196,10 @@ void invokeMhaPagedAttnPlan(const at::Tensor& input_lengths,
                     && page_indice.numel() >= static_cast<int64_t>(planned_batch_size) * max_blocks_per_bs,
                 "page_indice buffer too small");
     TORCH_CHECK(batch_indice.is_cuda() && batch_indice.scalar_type() == at::kInt && batch_indice.is_contiguous()
-                    && batch_indice.numel() >= input_token_capacity,
+                    && batch_indice.numel() >= input_token_count,
                 "batch_indice buffer too small");
     TORCH_CHECK(positions.is_cuda() && positions.scalar_type() == at::kInt && positions.is_contiguous()
-                    && positions.numel() >= input_token_capacity,
+                    && positions.numel() >= input_token_count,
                 "positions buffer too small");
 
     const int threads = ((planned_batch_size + 31) / 32) * 32;  // round up to warp

@@ -320,6 +320,7 @@ class PyFlashinferPrefillPagedAttnOp(object):
                 self.page_size,
                 forbid_realloc,
                 planned_batch_size,
+                input_token_count=attn_inputs.total_tokens,
             )
         else:
             self.fmha_params.fill_params(
@@ -1273,6 +1274,7 @@ class PyFlashinferDecodeAttnOp(object):
                 ),
                 self.seq_size_per_block,
                 forbid_realloc=forbid_realloc,
+                input_token_count=attn_inputs.input_lengths.numel(),
             )
         else:
             block_id_host = attn_inputs.kv_cache_kernel_block_id

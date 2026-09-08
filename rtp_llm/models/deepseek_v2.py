@@ -544,6 +544,24 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
 
 
 class DeepSeekV2(BaseModel):
+    def _new_loader_unsupported_reason(
+        self, *, skip_python_model: bool = False
+    ) -> Optional[str]:
+        reason = super()._new_loader_unsupported_reason(
+            skip_python_model=skip_python_model
+        )
+        if reason is not None:
+            return reason
+        if (
+            self.model_config.attn_config.use_mla
+            and self.model_config.mla_ops_type == MlaOpsType.MHA
+        ):
+            return (
+                "DeepSeek NewLoader does not support the legacy expanded-MHA "
+                "fallback for an MLA checkpoint"
+            )
+        return None
+
     @classmethod
     def _create_config(cls, ckpt_path: str):
         config = ModelConfig()
