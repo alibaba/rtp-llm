@@ -14,6 +14,7 @@ import java.util.List;
 import java.util.Set;
 
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -76,6 +77,22 @@ class KvCacheManagerTest {
 
         verify(engineLocalView).removeAllCacheBlockOfEngine("10.0.0.1:8080@0");
         verify(globalCacheIndex).removeAllCacheBlockOfEngine("10.0.0.1:8080@0");
+    }
+
+    @Test
+    void directRetirementRemovesTheLogicalToPhysicalMapping() {
+        String logicalIpPort = "10.0.0.1:8080@0";
+        when(engineLocalView.calculateDiff(logicalIpPort, Set.of()))
+                .thenReturn(DiffResult.empty(logicalIpPort));
+        kvCacheManager.updateEngineCache(
+                new WorkerIdentity("10.0.0.1", 8080, 0), "PREFILL", Set.of());
+
+        kvCacheManager.removeEngineCache(logicalIpPort);
+        when(engineLocalView.getAllEngineIpPorts()).thenReturn(Set.of(logicalIpPort));
+        kvCacheManager.removeStaleEngineCaches(List.of("10.0.0.1:8080"));
+
+        verify(engineLocalView, times(2)).removeAllCacheBlockOfEngine(logicalIpPort);
+        verify(globalCacheIndex, times(2)).removeAllCacheBlockOfEngine(logicalIpPort);
     }
 
     @Test

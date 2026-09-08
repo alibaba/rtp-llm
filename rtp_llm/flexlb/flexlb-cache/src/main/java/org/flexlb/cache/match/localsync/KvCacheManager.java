@@ -164,6 +164,7 @@ public class KvCacheManager implements EngineCacheInvalidator {
         }
         engineLocalView.removeAllCacheBlockOfEngine(engineIpPort);
         globalCacheIndex.removeAllCacheBlockOfEngine(engineIpPort);
+        physicalIpPortByLogicalIpPort.remove(engineIpPort);
         cacheMetricsReporter.reportGlobalCacheMetrics(
                 globalCacheIndex.totalBlocks(),
                 globalCacheIndex.totalMappings());
