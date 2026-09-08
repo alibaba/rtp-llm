@@ -547,13 +547,13 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
 
     def test_replay_updates_page_tables(self):
         """Page table buffers must reflect the replay inputs, not capture inputs."""
-        import math
-
         config = self._create_config(seq_size_per_block=64)
         capture_bs = 4
         capture_seq_lens = [64, 128, 256, 512]
         active_bs = 2
-        run_seq_lens = [100, 200, 256, 512]
+        # Preserve four capture slots while making the tail slots genuinely
+        # inactive. They must retain safe dummy planner metadata.
+        run_seq_lens = [100, 200] + [0] * (capture_bs - active_bs)
 
         capture_inputs = self._create_cuda_graph_inputs(
             capture_bs,
@@ -572,30 +572,34 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
         )
         attn_op.prepare_for_cuda_graph_replay(run_inputs)
 
-        # Verify page_indptr matches run_seq_lens
-        page_indptr = fmha_params.decode_page_indptr_h.tolist()
-        expected_blocks = [math.ceil(s / 64) for s in run_seq_lens[:active_bs]]
-        expected_indptr = [0]
-        for nb in expected_blocks:
-            expected_indptr.append(expected_indptr[-1] + nb)
+        expected_indptr = [0, 2, 6, 7, 8]
+        expected_last_page_lens = [36, 8, 1, 1]
+        expected_page_indices = [0, 1, 2, 3, 4, 5, 0, 0]
+        self.assertEqual(fmha_params.decode_page_indptr_h.tolist(), expected_indptr)
+        self.assertEqual(
+            fmha_params.paged_kv_last_page_len_h.tolist(),
+            expected_last_page_lens,
+        )
+        self.assertEqual(fmha_params.page_indice_h.tolist(), expected_page_indices)
+        self.assertEqual(fmha_params.kvlen_h.tolist(), [100, 200, 0, 0])
+        self.assertEqual(fmha_params.qo_indptr_h.tolist(), [0, 1, 2, 2, 2])
+        self.assertEqual(fmha_params.batch_indice_h.tolist(), [0, 1])
+        self.assertEqual(fmha_params.positions_h.tolist(), [99, 199])
 
-        for i in range(active_bs + 1):
-            self.assertEqual(
-                page_indptr[i],
-                expected_indptr[i],
-                f"page_indptr[{i}] mismatch: expected {expected_indptr[i]}, got {page_indptr[i]}",
-            )
-
-        # Verify last_page_len
-        last_page_len = fmha_params.paged_kv_last_page_len_h.tolist()
-        for i, seq_len in enumerate(run_seq_lens[:active_bs]):
-            expected = seq_len % 64 or 64
-            self.assertEqual(
-                last_page_len[i],
-                expected,
-                f"last_page_len[{i}] mismatch: expected {expected}, got {last_page_len[i]}",
-            )
-        expected_last_page_lens = [s % 64 or 64 for s in run_seq_lens[:active_bs]]
+        torch.cuda.synchronize()
+        self.assertEqual(
+            fmha_params.decode_page_indptr_d.cpu().tolist(), expected_indptr
+        )
+        self.assertEqual(
+            fmha_params.paged_kv_last_page_len_d.cpu().tolist(),
+            expected_last_page_lens,
+        )
+        self.assertEqual(
+            fmha_params.page_indice_d.cpu().tolist(), expected_page_indices
+        )
+        self.assertEqual(fmha_params.qo_indptr_d.cpu().tolist(), [0, 1, 2, 2, 2])
+        self.assertEqual(fmha_params.batch_indice_d.cpu().tolist(), [0, 1])
+        self.assertEqual(fmha_params.positions_d.cpu().tolist(), [99, 199])
         logging.info(
             f"Page table update OK: indptr={expected_indptr}, "
             f"last_page_len={expected_last_page_lens}"

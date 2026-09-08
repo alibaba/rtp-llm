@@ -345,6 +345,34 @@ class TestCudaFp8PerBlockNoDPStrategy(unittest.TestCase):
         config.enable_cuda_graph = True
         self.assertFalse(strategy.can_handle(config))
 
+    @patch(
+        "rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.deepgemm_hybrid_executor.get_sm",
+        return_value=(9, 0),
+    )
+    @patch(
+        "rtp_llm.models_py.kernels.cuda.deepgemm_wrapper.has_deep_gemm",
+        return_value=False,
+    )
+    def test_rejects_backend_missing_required_executor_symbols(
+        self, mock_has_deep_gemm: Any, _mock_get_sm: Any
+    ) -> None:
+        config = create_moe_config_adapter(
+            model_config=create_model_config_with_fp8_block_quant(),
+            parallelism_config=create_parallelism_config(),
+            moe_config=create_moe_config(use_all_gather=True),
+            enable_cuda_graph=False,
+        )
+
+        self.assertFalse(CudaFp8PerBlockNoDPStrategy().can_handle(config))
+        mock_has_deep_gemm.assert_called_once_with(
+            (
+                "get_num_sms",
+                "set_num_sms",
+                "m_grouped_fp8_gemm_nt_masked",
+                "m_grouped_fp8_gemm_nt_contiguous",
+            )
+        )
+
     def test_priority(self) -> None:
         """Test priority"""
         strategy = CudaFp8PerBlockNoDPStrategy()

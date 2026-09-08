@@ -26,6 +26,14 @@ class DeepGemmMaskedExecutorV2(DeepGemmHybridExecutor):
         return ExecutorType.DEEPGEMM_MASKED
 
     @classmethod
+    def required_deep_gemm_symbols(cls, config: MoEConfigAdapter) -> tuple[str, ...]:
+        return (
+            "get_num_sms",
+            "set_num_sms",
+            "m_grouped_fp8_gemm_nt_masked",
+        )
+
+    @classmethod
     def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
         """Check if DeepGemmMaskedExecutorV2 can handle the configuration"""
         from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import has_deep_gemm
@@ -37,7 +45,7 @@ class DeepGemmMaskedExecutorV2(DeepGemmHybridExecutor):
         quant_method = resolver.get_quant_method(config)
         checker.check(quant_method == "FP8_PER_BLOCK")
         checker.check(resolver.is_bf16(config))
-        checker.check(has_deep_gemm())
+        checker.check(has_deep_gemm(cls.required_deep_gemm_symbols(config)))
         checker.check(get_sm()[0] >= 9)
 
     def __init__(
