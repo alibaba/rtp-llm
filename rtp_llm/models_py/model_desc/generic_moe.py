@@ -131,9 +131,14 @@ class GenericMoeLayer(nn.Module):
 
         # Get quant_config from model_config
         quant_config = config.quant_config
-        self.gate = LinearFactory.create_linear_from_weights(
-            weights, W.moe_gate, None, None, quant_config, hw_kernel_config
-        )
+        if config.model_type == "glm5_3_flash":
+            from rtp_llm.models_py.modules.glm53_router import Glm53FP32Router
+
+            self.gate = Glm53FP32Router(weights[W.moe_gate])
+        else:
+            self.gate = LinearFactory.create_linear_from_weights(
+                weights, W.moe_gate, None, None, quant_config, hw_kernel_config
+            )
         self.select_topk = SelectTopk(config=config)
         if moe_config.fake_balance_expert:
             self.fake_balance_expert = FakeBalanceExpert(
@@ -154,7 +159,7 @@ class GenericMoeLayer(nn.Module):
         self.routed_tp_size = (
             parallelism_config.get_attn_tp_size()
             if config.model_type == "glm5_3_flash"
-            and moe_config.moe_strategy == "mega_moe"
+            and moe_config.moe_strategy in ("mega_moe", "mega_moe_fp8")
             and self.ep_size > 1
             and not cp_prefill_enabled
             and not is_decode_role
@@ -400,12 +405,8 @@ class GenericMoeLayer(nn.Module):
                 self.gate, hidden_states, self.gate_chunk_rows
             )
         else:
-            router_logits = self.gate(
-                hidden_states
-            )  # fuse kernel: nvjet_tst_64x8_64x16_2x4_h_bz_NNT (bf16 nn.Linear router, every layer)
-        router_logits_fp32 = (
-            router_logits.float()
-        )  # fuse kernel: at::native::unrolled_elementwise_kernel<direct_copy_kernel_cuda> (bf16 -> fp32 cast)
+            router_logits = self.gate(hidden_states)
+        router_logits_fp32 = router_logits.float()
 
         topk_weights = torch.empty(
             (num_tokens, self.top_k),

@@ -102,6 +102,13 @@ def _test_config():
 
 
 class Glm53FlashConfigTest(unittest.TestCase):
+    def test_fp4_moe_is_rejected_for_fp8_checkpoint(self):
+        loader = object.__new__(Glm53FlashWeight)
+        for strategy in ("mega_moe", "mega_moe_se", "mega_moe_fused"):
+            with mock.patch.dict(os.environ, MOE_STRATEGY=strategy):
+                with self.assertRaisesRegex(ValueError, "publishes FP8 experts"):
+                    loader._get_weight_info()
+
     def test_hybrid_block_map_selects_host_and_device_group_together(self):
         kernel_device = [torch.tensor([10]), torch.tensor([20])]
         kernel_host = [torch.tensor([11]), torch.tensor([21])]
@@ -267,6 +274,7 @@ class Glm53FlashConfigTest(unittest.TestCase):
         decode.head_k_dim = 2
         decode.head_v_dim = 2
         decode.gate_lower_bound = -5.0
+        decode.decode_low_warps = False
         decode.alog = torch.zeros(1)
         decode.dt_bias = torch.zeros(2)
         decode._get_bs_from_attention_input = mock.Mock(return_value=(1, 1))
@@ -763,6 +771,17 @@ class Glm53FlashConfigTest(unittest.TestCase):
         self.assertIn(prefix + "hc_ffn_scale", checkpoint_names)
         self.assertEqual(len(checkpoint_names), 21)
         self.assertTrue(all(weight.quantization_disabled for weight in kda_weights))
+        self.assertEqual(
+            next(w for w in kda_weights if w.name == W.linear_attn_conv1d_w).data_type,
+            torch.float32,
+        )
+
+        router = AtomicWeight(
+            W.moe_gate, [CkptWeightInfo("model.layers.{i}.mlp.gate.weight")]
+        )
+        manifest._prefix_checkpoint_names(router)
+        self.assertEqual(router.data_type, torch.float32)
+        self.assertTrue(router.quantization_disabled)
 
         manifest._prefix_checkpoint_names(weights[0])
         checkpoint_names = {

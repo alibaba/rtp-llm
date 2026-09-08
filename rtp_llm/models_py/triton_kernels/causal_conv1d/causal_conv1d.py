@@ -172,6 +172,12 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
     BLOCK_N: tl.constexpr,
     SEQ_SIZE_PER_BLOCK: tl.constexpr,
 ):
+    # Keep the activation and cache tensors in their storage dtype. FP32
+    # weights require FP32 history registers in every branch, including the
+    # first cached chunk and the loop-carried columns.
+    history_dtype: tl.constexpr = (
+        tl.float32 if w_ptr.dtype.element_ty == tl.float32 else x_ptr.dtype.element_ty
+    )
     conv_states_ptr = initial_states_ptr
     stride_conv_state_seq = stride_istate_seq
     stride_conv_state_dim = stride_istate_dim
@@ -229,39 +235,39 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
             mask_w = idx_feats < dim
             if KERNEL_WIDTH == 2:
                 conv_states_ptrs = prior_tokens  # [BLOCK_N]
-                col0 = tl.load(conv_states_ptrs, mask_w, 0.0)
+                col0 = tl.load(conv_states_ptrs, mask_w, 0.0).to(history_dtype)
             if KERNEL_WIDTH == 3:
                 conv_states_ptrs = prior_tokens  # [BLOCK_N]
-                col1 = tl.load(conv_states_ptrs, mask_w, 0.0)
+                col1 = tl.load(conv_states_ptrs, mask_w, 0.0).to(history_dtype)
                 conv_states_ptrs = prior_tokens - 1 * stride_conv_state_tok  # [BLOCK_N]
-                col0 = tl.load(conv_states_ptrs, mask_w, 0.0)
+                col0 = tl.load(conv_states_ptrs, mask_w, 0.0).to(history_dtype)
             if KERNEL_WIDTH == 4:
                 conv_states_ptrs = prior_tokens  # [BLOCK_N]
-                col2 = tl.load(conv_states_ptrs, mask_w, 0.0)
+                col2 = tl.load(conv_states_ptrs, mask_w, 0.0).to(history_dtype)
                 conv_states_ptrs = prior_tokens - 1 * stride_conv_state_tok  # [BLOCK_N]
-                col1 = tl.load(conv_states_ptrs, mask_w, 0.0)
+                col1 = tl.load(conv_states_ptrs, mask_w, 0.0).to(history_dtype)
                 conv_states_ptrs = prior_tokens - 2 * stride_conv_state_tok  # [BLOCK_N]
-                col0 = tl.load(conv_states_ptrs, mask_w, 0.0)
+                col0 = tl.load(conv_states_ptrs, mask_w, 0.0).to(history_dtype)
             if KERNEL_WIDTH == 5:
                 conv_states_ptrs = prior_tokens  # [BLOCK_N]
-                col3 = tl.load(conv_states_ptrs, mask_w, 0.0)
+                col3 = tl.load(conv_states_ptrs, mask_w, 0.0).to(history_dtype)
                 conv_states_ptrs = prior_tokens - 1 * stride_conv_state_tok  # [BLOCK_N]
-                col2 = tl.load(conv_states_ptrs, mask_w, 0.0)
+                col2 = tl.load(conv_states_ptrs, mask_w, 0.0).to(history_dtype)
                 conv_states_ptrs = prior_tokens - 2 * stride_conv_state_tok  # [BLOCK_N]
-                col1 = tl.load(conv_states_ptrs, mask_w, 0.0)
+                col1 = tl.load(conv_states_ptrs, mask_w, 0.0).to(history_dtype)
                 conv_states_ptrs = prior_tokens - 3 * stride_conv_state_tok  # [BLOCK_N]
-                col0 = tl.load(conv_states_ptrs, mask_w, 0.0)
+                col0 = tl.load(conv_states_ptrs, mask_w, 0.0).to(history_dtype)
         else:
             # prior-tokens are zeros
             if KERNEL_WIDTH >= 2:  # STRATEGY1
                 # first chunk and does not have prior-token, so just set to 0
-                col0 = tl.zeros((BLOCK_N,), dtype=x_ptr.dtype.element_ty)
+                col0 = tl.zeros((BLOCK_N,), dtype=history_dtype)
             if KERNEL_WIDTH >= 3:  # STRATEGY1
-                col1 = tl.zeros((BLOCK_N,), dtype=x_ptr.dtype.element_ty)
+                col1 = tl.zeros((BLOCK_N,), dtype=history_dtype)
             if KERNEL_WIDTH >= 4:  # STRATEGY1
-                col2 = tl.zeros((BLOCK_N,), dtype=x_ptr.dtype.element_ty)
+                col2 = tl.zeros((BLOCK_N,), dtype=history_dtype)
             if KERNEL_WIDTH >= 5:  # STRATEGY1
-                col3 = tl.zeros((BLOCK_N,), dtype=x_ptr.dtype.element_ty)
+                col3 = tl.zeros((BLOCK_N,), dtype=history_dtype)
 
     else:  # chunk_offset > 0
         # read prior-token data from `x`
@@ -269,29 +275,49 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
         mask_w = idx_feats < dim
         if KERNEL_WIDTH == 2:
             conv_states_ptrs = prior_tokens  # [BLOCK_N]
-            col0 = tl.load(conv_states_ptrs, mask_w, 0.0, cache_modifier=".ca")
+            col0 = tl.load(conv_states_ptrs, mask_w, 0.0, cache_modifier=".ca").to(
+                history_dtype
+            )
         if KERNEL_WIDTH == 3:
             conv_states_ptrs = prior_tokens  # [BLOCK_N]
-            col1 = tl.load(conv_states_ptrs, mask_w, 0.0, cache_modifier=".ca")
+            col1 = tl.load(conv_states_ptrs, mask_w, 0.0, cache_modifier=".ca").to(
+                history_dtype
+            )
             conv_states_ptrs = prior_tokens - 1 * stride_x_token  # [BLOCK_N]
-            col0 = tl.load(conv_states_ptrs, mask_w, 0.0, cache_modifier=".ca")
+            col0 = tl.load(conv_states_ptrs, mask_w, 0.0, cache_modifier=".ca").to(
+                history_dtype
+            )
         if KERNEL_WIDTH == 4:
             conv_states_ptrs = prior_tokens  # [BLOCK_N]
-            col2 = tl.load(conv_states_ptrs, mask_w, 0.0, cache_modifier=".ca")
+            col2 = tl.load(conv_states_ptrs, mask_w, 0.0, cache_modifier=".ca").to(
+                history_dtype
+            )
             conv_states_ptrs = prior_tokens - 1 * stride_x_token  # [BLOCK_N]
-            col1 = tl.load(conv_states_ptrs, mask_w, 0.0, cache_modifier=".ca")
+            col1 = tl.load(conv_states_ptrs, mask_w, 0.0, cache_modifier=".ca").to(
+                history_dtype
+            )
             conv_states_ptrs = prior_tokens - 2 * stride_x_token  # [BLOCK_N]
-            col0 = tl.load(conv_states_ptrs, mask_w, 0.0, cache_modifier=".ca")
+            col0 = tl.load(conv_states_ptrs, mask_w, 0.0, cache_modifier=".ca").to(
+                history_dtype
+            )
         if KERNEL_WIDTH == 5:
             # ruff: noqa: F841
             conv_states_ptrs = prior_tokens  # [BLOCK_N]
-            col3 = tl.load(conv_states_ptrs, mask_w, 0.0, cache_modifier=".ca")
+            col3 = tl.load(conv_states_ptrs, mask_w, 0.0, cache_modifier=".ca").to(
+                history_dtype
+            )
             conv_states_ptrs = prior_tokens - 1 * stride_x_token  # [BLOCK_N]
-            col2 = tl.load(conv_states_ptrs, mask_w, 0.0, cache_modifier=".ca")
+            col2 = tl.load(conv_states_ptrs, mask_w, 0.0, cache_modifier=".ca").to(
+                history_dtype
+            )
             conv_states_ptrs = prior_tokens - 2 * stride_x_token  # [BLOCK_N]
-            col1 = tl.load(conv_states_ptrs, mask_w, 0.0, cache_modifier=".ca")
+            col1 = tl.load(conv_states_ptrs, mask_w, 0.0, cache_modifier=".ca").to(
+                history_dtype
+            )
             conv_states_ptrs = prior_tokens - 3 * stride_x_token  # [BLOCK_N]
-            col0 = tl.load(conv_states_ptrs, mask_w, 0.0, cache_modifier=".ca")
+            col0 = tl.load(conv_states_ptrs, mask_w, 0.0, cache_modifier=".ca").to(
+                history_dtype
+            )
 
     if HAS_BIAS:
         bias = bias_ptr + idx_feats
@@ -329,7 +355,7 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
                 if j == 1:  # KERNEL_WIDTH-1:
                     matrix_w = w_col1
                     x_ptrs_1d = x_base_1d + idx_token * stride_x_token  # [BLOCK_N]
-                    matrix_x = tl.load(x_ptrs_1d, mask=mask_x_1d)
+                    matrix_x = tl.load(x_ptrs_1d, mask=mask_x_1d).to(history_dtype)
             elif KERNEL_WIDTH == 3:
                 if j == 1:
                     matrix_w = w_col1
@@ -337,7 +363,7 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
                 elif j == 2:
                     matrix_w = w_col2
                     x_ptrs_1d = x_base_1d + idx_token * stride_x_token  # [BLOCK_N]
-                    matrix_x = tl.load(x_ptrs_1d, mask=mask_x_1d)
+                    matrix_x = tl.load(x_ptrs_1d, mask=mask_x_1d).to(history_dtype)
             elif KERNEL_WIDTH == 4:
                 if j == 1:
                     matrix_w = w_col1
@@ -348,7 +374,7 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
                 elif j == 3:
                     matrix_w = w_col3
                     x_ptrs_1d = x_base_1d + idx_token * stride_x_token  # [BLOCK_N]
-                    matrix_x = tl.load(x_ptrs_1d, mask=mask_x_1d)
+                    matrix_x = tl.load(x_ptrs_1d, mask=mask_x_1d).to(history_dtype)
 
             acc += matrix_x * matrix_w  # [BLOCK_N]
 
@@ -544,7 +570,11 @@ def causal_conv1d_fn(
 
     # Store original dtype to cast back at the end
     original_x_dtype = x.dtype
-    x = x.to(weight.dtype)
+    # FP32 convolution weights promote the arithmetic inside the kernel.
+    # Casting the whole prefill activation/output to FP32 wastes memory and
+    # makes cached BF16 history disagree with uncached history registers.
+    if weight.dtype != torch.float32:
+        x = x.to(weight.dtype)
     out = torch.empty_like(x)
 
     # Prepare metadata if not provided

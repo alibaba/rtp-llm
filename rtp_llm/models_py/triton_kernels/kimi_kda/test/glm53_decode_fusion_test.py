@@ -1,6 +1,7 @@
 """GLM Decode fusion preserves paged cache updates and bounded FP32 recurrence."""
 
 import unittest
+from itertools import product
 
 import torch
 from rtp_llm.models_py.triton_kernels.causal_conv1d import causal_conv1d_update
@@ -19,7 +20,9 @@ class Glm53DecodeFusionTest(unittest.TestCase):
     def test_convolution_pages_strides_and_dtypes(self):
         torch.manual_seed(9301)
         for batch in (1, 7, 16, 48, 64):
-            for dtype in (torch.bfloat16, torch.float32):
+            for dtype, weight_dtype in product(
+                (torch.bfloat16, torch.float32), repeat=2
+            ):
                 channels = 3 * 64 * 128
                 pages = batch * 2 + 1
                 x = (
@@ -28,7 +31,7 @@ class Glm53DecodeFusionTest(unittest.TestCase):
                 )
                 weight = (
                     torch.randn(channels, 4, device="cuda", dtype=torch.bfloat16) * 0.25
-                )
+                ).to(weight_dtype)
                 # A padded physical-page stride catches accidental dense-cache addressing.
                 storage = (
                     torch.randn(pages, 3 * channels + 64, device="cuda", dtype=dtype)
@@ -71,7 +74,7 @@ class Glm53DecodeFusionTest(unittest.TestCase):
         torch.manual_seed(9302)
         batch, channels = 7, 3 * 128
         x = torch.randn(batch, channels, device="cuda", dtype=torch.bfloat16)
-        weight = torch.randn(channels, 4, device="cuda", dtype=torch.bfloat16)
+        weight = torch.randn(channels, 4, device="cuda", dtype=torch.bfloat16).float()
         state = torch.randn(20, 3, channels, device="cuda", dtype=torch.bfloat16)
         initial = state.clone()
         table = torch.arange(1, batch + 1, device="cuda", dtype=torch.int32).view(

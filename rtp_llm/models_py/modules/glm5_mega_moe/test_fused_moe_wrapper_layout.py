@@ -59,6 +59,29 @@ def _parallelism(role_type=None):
 
 
 class MegaMoeWrapperLayoutTest(unittest.TestCase):
+    def test_logical_chunk_budget_does_not_use_buffer_padding(self):
+        wrapper = object.__new__(mega_moe_wrapper.MegaMoeWrapper)
+        torch.nn.Module.__init__(wrapper)
+        wrapper.mega_moe = SimpleNamespace(
+            cfg=SimpleNamespace(max_tokens_per_rank=3),
+            _mega_buf=SimpleNamespace(num_max_tokens_per_rank=8),
+        )
+        calls = []
+        temporary = torch.empty(8, 4)
+
+        def forward(x, gates, ids):
+            calls.append(x.shape[0])
+            y = temporary[: x.shape[0]]
+            y.copy_(x + gates[:, :1] + ids[:, :1])
+            return y
+
+        x = torch.arange(28, dtype=torch.float32).reshape(7, 4)
+        gates = torch.arange(7, dtype=torch.float32)[:, None]
+        ids = torch.arange(7, dtype=torch.int64)[:, None]
+        actual = wrapper._forward_chunked(x, gates, ids, forward)
+        torch.testing.assert_close(actual, x + gates + ids, rtol=0, atol=0)
+        self.assertEqual(calls, [3, 3, 1])
+
     def test_bf16_stacked_moe_w1_is_rejected(self):
         config = _config(hidden_size=8, inter=4)
         up = torch.full((2, 4, 8), 3, dtype=torch.bfloat16)

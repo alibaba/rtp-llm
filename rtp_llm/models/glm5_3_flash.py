@@ -44,6 +44,7 @@ _UNQUANTIZED_WEIGHT_NAMES = {
     W.linear_attn_norm_w,
     W.linear_attn_dt_b_kda,
     W.linear_attn_alog,
+    W.moe_gate,
     W.mla_kv_b_w,
     W.mla_kc,
     W.mla_vc,
@@ -456,6 +457,7 @@ class Glm53FlashWeight(DeepSeekV2Weight):
                 ],
                 _merge_conv1d,
                 config,
+                data_type=torch.float32,
             ),
             LinearAttnAtomicWeight(
                 W.linear_attn_norm_w,
@@ -504,6 +506,10 @@ class Glm53FlashWeight(DeepSeekV2Weight):
     def _prefix_checkpoint_names(weight: WeightModule) -> None:
         if weight.name in _UNQUANTIZED_WEIGHT_NAMES:
             weight.quantization_disabled = True
+        if weight.name == W.moe_gate:
+            # The checkpoint stores BF16 router weights; GLM computes the
+            # projection itself in FP32, before sigmoid and expert selection.
+            weight.data_type = torch.float32
         for checkpoint_weight in getattr(weight, "weights", []):
             if checkpoint_weight.name.startswith(
                 "model."
@@ -518,6 +524,16 @@ class Glm53FlashWeight(DeepSeekV2Weight):
                 Glm53FlashWeight._prefix_checkpoint_names(sub_weight)
 
     def _get_weight_info(self) -> ModelWeightInfo:
+        if os.environ.get("MOE_STRATEGY") in (
+            "mega_moe",
+            "mega_moe_se",
+            "mega_moe_fused",
+        ):
+            raise ValueError(
+                "GLM-5.3-Flash publishes FP8 experts; FP4 MegaMoE strategies "
+                "requantize those weights. Use MOE_STRATEGY=mega_moe_fp8 and "
+                "--moe_strategy mega_moe_fp8."
+            )
         weight_info = super()._get_weight_info()
         for weight in weight_info.weights:
             self._prefix_checkpoint_names(weight)

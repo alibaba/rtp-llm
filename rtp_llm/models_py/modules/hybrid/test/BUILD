@@ -1,5 +1,13 @@
 test_envs = {}
 
+py_test(
+    name = "glm53_precision_contract_test",
+    srcs = ["glm53_precision_contract_test.py"],
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+    tags = ["manual"],
+    exec_properties = {"gpu": "L20D_DEV", "gpu_count": "1"},
+)
+
 flashinfer_test_envs = {
     "FLASHINFER_JIT_VERBOSE": "1",  # Enable verbose JIT compilation logs
 }

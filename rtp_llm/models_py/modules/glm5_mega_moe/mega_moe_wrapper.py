@@ -144,6 +144,17 @@ class MegaMoeWrapper(nn.Module):
             )
             max_tokens_per_rank = resolved
 
+        if (
+            getattr(config, "model_type", "") == "glm5_3_flash"
+            and getattr(moe_config, "moe_strategy", None) == "mega_moe_fp8"
+        ):
+            # The pinned FP8 kernel's BLOCK_M=224 specialization corrupts
+            # repeated outputs on SM103. Keep the validated <=192 path.
+            # For GLM EP8/top8/288 experts this bounds each call to 2880
+            # tokens; the total request and TP token sharding are unchanged.
+            safe_tokens = 640 * n_routed_experts // (ep_size * n_activated_experts)
+            max_tokens_per_rank = min(max_tokens_per_rank, safe_tokens)
+
         self.mega_moe = self._get_mega_moe_cls().from_params(
             layer_id=layer_idx,
             dim=dim,
@@ -214,6 +225,10 @@ class MegaMoeWrapper(nn.Module):
             or 0
         )
         tokens = int(hidden_states.size(0))
+        # DeepGEMM rounds symmetric-buffer storage up. That physical padding
+        # must not enlarge the logical execution budget (including FP8's
+        # validated specialization limit).
+        capacity = min(capacity, self.mega_moe.cfg.max_tokens_per_rank)
         if capacity <= 0 or tokens <= capacity:
             return forward_fn(hidden_states, topk_weights, topk_ids)
 

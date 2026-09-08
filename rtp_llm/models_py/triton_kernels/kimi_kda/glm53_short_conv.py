@@ -66,11 +66,11 @@ def glm53_kda_short_conv_decode(x, w, s, bm, lens, page):
         raise ValueError("GLM KDA convolution requires contiguous [batch, 3*channels]")
     if (
         x.dtype != torch.bfloat16
-        or w.dtype != torch.bfloat16
+        or w.dtype not in (torch.bfloat16, torch.float32)
         or s.dtype not in (torch.bfloat16, torch.float32)
     ):
         raise ValueError(
-            "GLM KDA convolution requires BF16 input/weights and BF16 or FP32 history"
+            "GLM KDA convolution requires BF16 input and BF16 or FP32 weights/history"
         )
     b, n = x.shape
     c = n // 3
