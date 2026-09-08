@@ -47,6 +47,12 @@ from rtp_llm.dash_sc.codec import (
     LLMFinishReason,
     SamplingParams,
 )
+from rtp_llm.dash_sc.inference.grammar_validator import (
+    GrammarCheckOverloaded,
+    GrammarCheckTimeout,
+    GrammarCheckUnavailable,
+    GrammarCompilationError,
+)
 from rtp_llm.dash_sc.inference.servicer import (
     DashScInferenceServicer,
     _build_mm_inputs_from_request,
@@ -2594,6 +2600,34 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
             aux_info=AuxInfo(input_len=1, reuse_len=0),
         )
         return _FakeVisitor(_FakeAsyncStream([GenerateOutputs(generate_outputs=[out])]))
+
+    async def test_grammar_failures_map_to_typed_admission_statuses(self) -> None:
+        cases = (
+            (GrammarCompilationError("invalid"), DASH_ERROR_BAD_REQUEST),
+            (GrammarCheckOverloaded("busy"), DASH_ERROR_ADMISSION_OVERLOADED),
+            (GrammarCheckTimeout("slow"), DASH_ERROR_TIMEOUT),
+            (GrammarCheckUnavailable("down"), DASH_ERROR_CAPACITY),
+        )
+        for error, expected_status in cases:
+            with self.subTest(error=type(error).__name__):
+                validator = MagicMock()
+                validator.validate_response_format.side_effect = error
+                servicer = DashScInferenceServicer(
+                    backend_visitor=self._terminal_visitor(),
+                    grammar_validator=validator,
+                )
+                sampling = MagicMock(
+                    structural_tag=None,
+                    response_format={"type": "json_object"},
+                    json_format=False,
+                )
+
+                status, message = await servicer._validate_request_grammar(
+                    sampling, "grammar-status-test"
+                )
+
+                self.assertEqual(status, expected_status)
+                self.assertIn(str(error), message)
 
     async def test_model_stream_infer_passes_multimodal_payload_to_backend(
         self,

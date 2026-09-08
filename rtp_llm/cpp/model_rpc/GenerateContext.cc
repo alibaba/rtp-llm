@@ -38,6 +38,14 @@ void GenerateContext::setRequestTimeoutMs(int64_t timeout_ms) {
     }
 }
 
+void GenerateContext::setRetryTimeoutMs(int64_t timeout_ms) {
+    if (timeout_ms > 0) {
+        retry_deadline = std::chrono::system_clock::now() + std::chrono::milliseconds(timeout_ms);
+    } else {
+        retry_deadline.reset();
+    }
+}
+
 bool GenerateContext::cancelled() const {
     return error_status.error_code() == grpc::StatusCode::CANCELLED;
 }

@@ -132,6 +132,7 @@ private:
                                                     int                                    seq_size_per_block,
                                                     bool                                   use_independent_block_pools);
     static grpc::Status        generateRequestReadFailureStatus(bool cancelled);
+    static ErrorInfo           cacheLoadClientError(int64_t request_id, ErrorCode error_code);
     // Classifies error.type for the synthesized Decode phase spans. Static and
     // side-effect free so the classification itself is unit testable.
     static const char* phaseErrorType(bool                         request_ok,

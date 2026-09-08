@@ -178,7 +178,7 @@ class ScheduleForwardMatrixTest {
                 CompletableFuture.completedFuture(
                         FlexlbGrpcForwarder.MasterForwardResult.failed(
                                 "UNAVAILABLE", DEAD_MASTER)));
-        when(grpcForwarder.forwardCancelToMaster(any())).thenReturn(
+        when(grpcForwarder.forwardCompensatingCancelToMaster(any(), any())).thenReturn(
                 CompletableFuture.completedFuture(
                         FlexlbGrpcForwarder.CancelForwardResult.noMaster()));
 
@@ -224,7 +224,8 @@ class ScheduleForwardMatrixTest {
         service.schedule(request(90_003L), observer);
 
         verify(grpcForwarder, times(1)).forwardScheduleToMaster(any());
-        verify(grpcForwarder, never()).forwardCancelToMaster(any());
+        verify(grpcForwarder, never())
+                .forwardCompensatingCancelToMaster(any(), any());
         verify(routeService, times(1)).route(any());
         assertSuccessfulResponse(observer);
         assertSinglePvContains("\"scheduleOrigin\":\"LOCAL_FALLBACK\"");
@@ -259,7 +260,8 @@ class ScheduleForwardMatrixTest {
         verify(observer, times(1)).onCompleted();
         verify(observer, never()).onError(any());
         verify(routeService, never()).route(any());
-        verify(grpcForwarder, never()).forwardCancelToMaster(any());
+        verify(grpcForwarder, never())
+                .forwardCompensatingCancelToMaster(any(), any());
         verify(requestToken, times(1)).close();
 
         // The forwarding node writes no PV record: no local scheduling trace.
@@ -304,7 +306,8 @@ class ScheduleForwardMatrixTest {
 
         service.schedule(request(90_006L), observer);
 
-        verify(grpcForwarder, never()).forwardCancelToMaster(any());
+        verify(grpcForwarder, never())
+                .forwardCompensatingCancelToMaster(any(), any());
         verify(routeService, never()).route(any());
         FlexlbScheduleProtocol.FlexlbScheduleResponsePB response = capturedResponse(observer);
         assertFalse(response.getSuccess());
@@ -473,7 +476,8 @@ class ScheduleForwardMatrixTest {
         org.mockito.ArgumentCaptor<FlexlbScheduleProtocol.FlexlbCancelRequestPB> captor =
                 org.mockito.ArgumentCaptor.forClass(
                         FlexlbScheduleProtocol.FlexlbCancelRequestPB.class);
-        verify(grpcForwarder, times(1)).forwardCancelToMaster(captor.capture());
+        verify(grpcForwarder, times(1)).forwardCompensatingCancelToMaster(
+                captor.capture(), org.mockito.ArgumentMatchers.eq(DEAD_MASTER));
         return captor.getValue();
     }
 

@@ -206,6 +206,19 @@ def _fingerprint_config_sha256(config: Any) -> str | None:
     return hashlib.sha256(canonical).hexdigest()
 
 
+def _normalized_run_signature_sha256(config: Any) -> str | None:
+    """Hash stable runtime provenance while excluding only this shard's cases."""
+    if not isinstance(config, dict) or not config:
+        return None
+    normalized = {key: value for key, value in config.items() if key != "cases"}
+    if not normalized:
+        return None
+    canonical = json.dumps(
+        normalized, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
 def _load_json_metrics(
     path: pathlib.Path,
 ) -> tuple[list[Any], dict[str, Any]]:
@@ -219,6 +232,7 @@ def _load_json_metrics(
     run_fingerprint = data.get("run_fingerprint")
     fingerprint_config = data.get("fingerprint_config")
     computed_fingerprint = _fingerprint_config_sha256(fingerprint_config)
+    normalized_run_signature = _normalized_run_signature_sha256(fingerprint_config)
     total_cases = _integer(data.get("total_cases"))
     completed_cases = _integer(data.get("completed_cases"))
     provenance_checks = {
@@ -230,6 +244,7 @@ def _load_json_metrics(
         "fingerprint_config": computed_fingerprint is not None,
         "fingerprint_sha256": computed_fingerprint is not None
         and run_fingerprint == computed_fingerprint,
+        "normalized_run_signature": normalized_run_signature is not None,
         "case_counts": total_cases is not None
         and total_cases > 0
         and completed_cases == total_cases
@@ -240,6 +255,7 @@ def _load_json_metrics(
         "provenance_checks": provenance_checks,
         "run_fingerprint": run_fingerprint,
         "computed_run_fingerprint": computed_fingerprint,
+        "normalized_run_signature": normalized_run_signature,
     }
     return metrics, provenance
 
@@ -251,6 +267,8 @@ def load_observations(
     observations: list[Observation] = []
     rejected: dict[str, int] = {}
     input_files: list[dict[str, Any]] = []
+    normalized_run_signature: str | None = None
+    normalized_run_signature_source: pathlib.Path | None = None
     for path in paths:
         if path.suffix.lower() == ".csv":
             with path.open(newline="", encoding="utf-8") as stream:
@@ -317,6 +335,19 @@ def load_observations(
             continue
 
         metrics, source_provenance = _load_json_metrics(path)
+        source_signature = source_provenance.get("normalized_run_signature")
+        fingerprint_valid = source_provenance["provenance_checks"].get(
+            "fingerprint_sha256"
+        )
+        if isinstance(source_signature, str) and fingerprint_valid:
+            if normalized_run_signature is None:
+                normalized_run_signature = source_signature
+                normalized_run_signature_source = path
+            elif source_signature != normalized_run_signature:
+                raise ValueError(
+                    f"{path}: incompatible runtime configuration; normalized run "
+                    f"signature differs from {normalized_run_signature_source}"
+                )
         source_count = len(metrics)
         source_valid_count = 0
         source_metric_fingerprints_match = True
@@ -433,6 +464,7 @@ def load_observations(
         "unique_geometry_count": len(unique),
         "rejected_counts": rejected,
         "selected_batch_size": batch_size,
+        "normalized_run_signature": normalized_run_signature,
         "seq_len_range": [
             min((x.input_len for x in observations), default=None),
             max((x.input_len for x in observations), default=None),

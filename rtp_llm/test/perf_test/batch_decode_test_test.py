@@ -18,6 +18,7 @@ from rtp_llm.test.perf_test.batch_decode_test import (
     _load_cache_grid_cases,
     _parse_name_value,
     _redact_argv,
+    _require_cache_grid_success,
     main,
     parse_args,
 )
@@ -205,6 +206,69 @@ class BatchDecodeTest(unittest.TestCase):
         self.assertTrue(rows[0]["timing_valid"])
         self.assertEqual(rows[0]["median_ttft_ms"], 11.0)
 
+    @patch("rtp_llm.test.perf_test.cache_grid_runner._post_prefill")
+    def test_cache_grid_persists_partial_failure_and_fails_command(self, post):
+        cases = [
+            {"case_id": 1, "batch_size": 1, "input_len": 8, "cache_len": 0},
+            {"case_id": 2, "batch_size": 1, "input_len": 12, "cache_len": 0},
+        ]
+        post.side_effect = [
+            {
+                "success": True,
+                "input_len": 8,
+                "output_len": 1,
+                "reuse_len": 0,
+                "ttft_ms": 5.0,
+            },
+            {"success": False, "error": "request failed"},
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            rows = CacheGridRunner(
+                12345,
+                _WhitespaceTokenizer(),
+                cases,
+                tmp,
+                measure_runs=1,
+                cache_commit_tail_tokens=4,
+            ).run()
+            checkpoint = json.loads(
+                (Path(tmp) / "cache_grid_results.json").read_text()
+            )
+
+        self.assertEqual([row["status"] for row in rows], ["ok", "failed"])
+        self.assertEqual(checkpoint["recorded_cases"], 2)
+        self.assertEqual(checkpoint["completed_cases"], 1)
+        self.assertFalse(checkpoint["complete"])
+        with self.assertRaisesRegex(RuntimeError, r"failed 1/2 cases.*failed=1"):
+            _require_cache_grid_success(rows)
+
+    @patch("rtp_llm.test.perf_test.cache_grid_runner._post_prefill")
+    def test_cache_grid_persists_total_failure_and_fails_command(self, post):
+        cases = [
+            {"case_id": 1, "batch_size": 1, "input_len": 8, "cache_len": 0},
+            {"case_id": 2, "batch_size": 1, "input_len": 12, "cache_len": 0},
+        ]
+        post.return_value = {"success": False, "error": "request failed"}
+        with tempfile.TemporaryDirectory() as tmp:
+            rows = CacheGridRunner(
+                12345,
+                _WhitespaceTokenizer(),
+                cases,
+                tmp,
+                measure_runs=1,
+                cache_commit_tail_tokens=4,
+            ).run()
+            checkpoint = json.loads(
+                (Path(tmp) / "cache_grid_results.json").read_text()
+            )
+
+        self.assertEqual([row["status"] for row in rows], ["failed", "failed"])
+        self.assertEqual(checkpoint["recorded_cases"], 2)
+        self.assertEqual(checkpoint["completed_cases"], 0)
+        self.assertFalse(checkpoint["complete"])
+        with self.assertRaisesRegex(RuntimeError, r"failed 2/2 cases.*failed=2"):
+            _require_cache_grid_success(rows)
+
     @staticmethod
     def _checkpoint_record(runner, case, status):
         record = {
@@ -275,8 +339,8 @@ class BatchDecodeTest(unittest.TestCase):
         }
 
     @staticmethod
-    def _audited_payload(metrics, *, complete=True):
-        fingerprint_config = {"test": True}
+    def _audited_payload(metrics, *, complete=True, fingerprint_config=None):
+        fingerprint_config = fingerprint_config or {"test": True}
         fingerprint = hashlib.sha256(
             json.dumps(
                 fingerprint_config,
@@ -568,6 +632,22 @@ class BatchDecodeTest(unittest.TestCase):
         self.assertNotIn("OSS_ACCESS_KEY_ID", settings)
         self.assertNotIn("secret-value", json.dumps(settings))
 
+    def test_fingerprint_hashes_unknown_and_credential_bearing_env_values(self):
+        inherited = {
+            "MODEL_TYPE": "https://user:password@example.test/model",
+            "DSV4_EXPERIMENT_ENDPOINT": "https://host/path?token=secret-value",
+            "CUSTOM_RUNTIME_SETTING": "otherwise-benign-value",
+        }
+        with patch.dict(os.environ, inherited, clear=True):
+            settings = _fingerprint_engine_env(["CUSTOM_RUNTIME_SETTING"])
+
+        serialized = json.dumps(settings)
+        self.assertEqual(set(settings), set(inherited))
+        self.assertTrue(all(value.startswith("sha256:") for value in settings.values()))
+        self.assertNotIn("password", serialized)
+        self.assertNotIn("secret-value", serialized)
+        self.assertNotIn("otherwise-benign-value", serialized)
+
     def test_effective_runtime_config_prefers_cli_over_engine_env(self):
         with patch.dict(
             os.environ,
@@ -681,6 +761,27 @@ class BatchDecodeTest(unittest.TestCase):
             ],
         )
 
+    def test_redact_argv_hashes_unknown_and_benign_named_credential_values(self):
+        redacted = _redact_argv(
+            [
+                "--checkpoint_path=https://user:password@example.test/model",
+                "--custom_transport",
+                "Server=db;User Id=alice;Password=secret-value",
+                "--engine_env=BENIGN_ENDPOINT=https://host/path?signature=signed-value",
+                "--tp_size=8",
+            ]
+        )
+        serialized = json.dumps(redacted)
+
+        self.assertEqual(redacted[-1], "--tp_size=8")
+        self.assertRegex(redacted[0], r"^--checkpoint_path=sha256:[0-9a-f]{64}$")
+        self.assertRegex(redacted[2], r"^sha256:[0-9a-f]{64}$")
+        self.assertRegex(
+            redacted[3], r"^--engine_env=BENIGN_ENDPOINT=sha256:[0-9a-f]{64}$"
+        )
+        for secret in ("password", "alice", "secret-value", "signed-value"):
+            self.assertNotIn(secret, serialized)
+
     def test_write_test_info_records_redacted_schema(self):
         with tempfile.TemporaryDirectory() as tmp:
             args, _ = parse_args(
@@ -738,6 +839,137 @@ class BatchDecodeTest(unittest.TestCase):
         self.assertEqual(info["engine_args"][-1], "***")
         self.assertEqual(info["argv"][-1], "--engine_env=***")
         self.assertNotIn("secret-value", json.dumps(info))
+
+    def test_write_test_info_sanitizes_credentials_under_benign_field_names(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            args, _ = parse_args(
+                [
+                    f"--result_dir={tmp}",
+                    "--dataset_path=https://host/data?token=dataset-secret",
+                ]
+            )
+            remaining = [
+                "--model_type",
+                "https://user:model-secret@example.test/model",
+                "--checkpoint_path",
+                "Server=db;User Id=alice;Password=checkpoint-secret",
+            ]
+            with patch.dict(os.environ, {}, clear=True), patch.object(
+                sys, "argv", ["batch_decode_test.py"]
+            ):
+                write_test_info(
+                    args,
+                    remaining,
+                    effective_runtime_config={
+                        "values": {
+                            "MODEL_TYPE": "https://host/model?signature=runtime-secret",
+                            "CUSTOM_ENDPOINT": "plain-but-unknown",
+                        },
+                        "sources": {
+                            "MODEL_TYPE": "cli",
+                            "CUSTOM_ENDPOINT": "engine_env",
+                        },
+                    },
+                )
+            info = json.loads((Path(tmp) / "test_info.json").read_text())
+
+        serialized = json.dumps(info)
+        self.assertTrue(info["model_type"].startswith("sha256:"))
+        self.assertTrue(info["checkpoint_path"].startswith("sha256:"))
+        self.assertTrue(info["dataset_path"].startswith("sha256:"))
+        self.assertTrue(
+            info["effective_runtime_config"]["values"]["MODEL_TYPE"].startswith(
+                "sha256:"
+            )
+        )
+        self.assertTrue(
+            info["effective_runtime_config"]["values"]["CUSTOM_ENDPOINT"].startswith(
+                "sha256:"
+            )
+        )
+        for secret in (
+            "dataset-secret",
+            "model-secret",
+            "checkpoint-secret",
+            "runtime-secret",
+            "plain-but-unknown",
+        ):
+            self.assertNotIn(secret, serialized)
+
+    def test_cache_grid_main_marks_partial_and_total_failures(self):
+        for result_statuses in (("ok", "failed"), ("error", "failed")):
+            with self.subTest(
+                result_statuses=result_statuses
+            ), tempfile.TemporaryDirectory() as tmp:
+                grid_path = Path(tmp) / "grid.json"
+                grid_path.write_text(
+                    json.dumps(
+                        {
+                            "cases": [
+                                {
+                                    "case_id": index,
+                                    "batch_size": 1,
+                                    "input_len": 8 + index,
+                                    "cache_len": 0,
+                                }
+                                for index in range(len(result_statuses))
+                            ]
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                args, remaining = parse_args(
+                    [
+                        f"--result_dir={tmp}",
+                        f"--cache_grid_json={grid_path}",
+                        "--partial=2",
+                        "--checkpoint_path=/models/example",
+                    ]
+                )
+                server = MagicMock(port=12345)
+                runner = MagicMock()
+                runner.run.return_value = [
+                    {"status": status} for status in result_statuses
+                ]
+                statuses = []
+                transformers_module = MagicMock()
+                transformers_module.AutoTokenizer.from_pretrained.return_value = (
+                    _WhitespaceTokenizer()
+                )
+
+                with patch.dict(
+                    sys.modules, {"transformers": transformers_module}
+                ), patch(
+                    "rtp_llm.config.log_config.setup_logging"
+                ), patch(
+                    "rtp_llm.test.perf_test.batch_decode_test.parse_args",
+                    return_value=(args, remaining),
+                ), patch(
+                    "rtp_llm.test.perf_test.batch_decode_test."
+                    "resolve_perf_engine_paths",
+                    side_effect=lambda values: values,
+                ), patch(
+                    "rtp_llm.test.perf_test.batch_decode_test.EngineServer"
+                ) as engine_server, patch(
+                    "rtp_llm.test.perf_test.batch_decode_test.CacheGridRunner",
+                    return_value=runner,
+                ), patch(
+                    "rtp_llm.test.perf_test.batch_decode_test.write_test_info",
+                    side_effect=lambda *unused, **kwargs: statuses.append(
+                        kwargs["status"]
+                    ),
+                ), patch(
+                    "rtp_llm.test.perf_test.batch_decode_test.collect_timeline_files"
+                ), patch(
+                    "rtp_llm.test.perf_test.batch_decode_test."
+                    "summarize_and_cleanup_coredumps"
+                ):
+                    engine_server.return_value = server
+                    with self.assertRaisesRegex(RuntimeError, "cache grid failed"):
+                        main()
+
+                self.assertEqual(statuses, ["running", "failed"])
+                server.stop.assert_called_once()
 
     def test_main_writes_running_before_start_and_completed_after_success(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -920,6 +1152,93 @@ class BatchDecodeTest(unittest.TestCase):
             self.assertFalse(checks["fingerprint_sha256"])
             with self.assertRaisesRegex(ValueError, "fingerprint_sha256"):
                 load_rows(path, batch_size=1)
+
+    def test_multi_input_fit_accepts_shards_with_only_case_list_differences(self):
+        common_runtime = {
+            "checkpoint_schema_version": 2,
+            "implementation_sha256": "same-code",
+            "tokenizer": {"class": "Tokenizer", "name_or_path": "/model"},
+            "measure_runs": 1,
+            "run_config": {"effective_runtime_config": {"TP_SIZE": "8"}},
+        }
+        first_config = {
+            **common_runtime,
+            "cases": [
+                {"case_id": 1, "batch_size": 1, "input_len": 16, "cache_len": 0}
+            ],
+        }
+        second_config = {
+            **common_runtime,
+            "cases": [
+                {"case_id": 2, "batch_size": 1, "input_len": 24, "cache_len": 0}
+            ],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            first = Path(tmp) / "shard-1.json"
+            second = Path(tmp) / "shard-2.json"
+            first.write_text(
+                json.dumps(
+                    self._audited_payload(
+                        [self._valid_audited_metric(input_len=16, cache_len=0)],
+                        fingerprint_config=first_config,
+                    )
+                ),
+                encoding="utf-8",
+            )
+            second.write_text(
+                json.dumps(
+                    self._audited_payload(
+                        [self._valid_audited_metric(input_len=24, cache_len=0)],
+                        fingerprint_config=second_config,
+                    )
+                ),
+                encoding="utf-8",
+            )
+            observations, audit = load_observations([first, second])
+
+        self.assertEqual(len(observations), 2)
+        self.assertTrue(audit["production_audit_passed"])
+        self.assertIsNotNone(audit["normalized_run_signature"])
+        self.assertEqual(
+            audit["input_files"][0]["normalized_run_signature"],
+            audit["input_files"][1]["normalized_run_signature"],
+        )
+
+    def test_multi_input_fit_rejects_incompatible_runtime_configs(self):
+        base_config = {
+            "checkpoint_schema_version": 2,
+            "implementation_sha256": "same-code",
+            "tokenizer": {"class": "Tokenizer", "name_or_path": "/model"},
+            "cases": [],
+            "measure_runs": 1,
+        }
+        first_config = {**base_config, "run_config": {"tp_size": 4}}
+        second_config = {**base_config, "run_config": {"tp_size": 8}}
+        with tempfile.TemporaryDirectory() as tmp:
+            first = Path(tmp) / "tp4.json"
+            second = Path(tmp) / "tp8.json"
+            first.write_text(
+                json.dumps(
+                    self._audited_payload(
+                        [self._valid_audited_metric(input_len=16, cache_len=0)],
+                        fingerprint_config=first_config,
+                    )
+                ),
+                encoding="utf-8",
+            )
+            second.write_text(
+                json.dumps(
+                    self._audited_payload(
+                        [self._valid_audited_metric(input_len=24, cache_len=0)],
+                        fingerprint_config=second_config,
+                    )
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                ValueError, "incompatible runtime configuration"
+            ):
+                load_observations([first, second])
 
     def test_chart_rejects_entire_file_when_one_metric_is_invalid(self):
         valid = self._valid_audited_metric(input_len=16, cache_len=0)

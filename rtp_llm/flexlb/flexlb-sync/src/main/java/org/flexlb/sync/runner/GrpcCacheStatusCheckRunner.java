@@ -95,7 +95,7 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
         try {
             logger.debug("GrpcCacheStatusCheckRunner run for {}", ipPort);
             long prefillCacheStatusCheckInterval =
-                    DynamicCacheIntervalService.getCurrentIntervalMs();
+                    cacheIntervalService.getCurrentIntervalMs();
             long roundInterval = prefillCacheStatusCheckInterval / syncEngineStatusInterval;
             roundInterval = Math.max(roundInterval, 1);
 
@@ -241,7 +241,7 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
                 cacheStatus.getAvailableKvCache(),
                 cacheStatus.getTotalKvCache(),
                 (System.nanoTime() / 1000) - startTime,
-                DynamicCacheIntervalService.getCurrentIntervalMs());
+                cacheIntervalService.getCurrentIntervalMs());
     }
 
     private WorkerCacheUpdateResult updateLocalKvCache() {

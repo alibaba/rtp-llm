@@ -304,13 +304,16 @@ def select_strategy(
                 # In particular, do not let the new default SE preference
                 # override the existing whole-family disable switch.
                 se_requested = False
-            if se_requested and not se_is_explicit and forced is not None and strict:
+            if se_requested and not se_is_explicit and (
+                fused_requested or (forced is not None and strict)
+            ):
+                # An explicit legacy-fused or named strategy request takes
+                # precedence over the automatic (unset) SE preference.
                 se_requested = False
             if se_requested and fused_requested:
                 raise RuntimeError(
-                    "DSV4_USE_MEGA_MOE_SE (enabled by default) conflicts with "
-                    "DSV4_USE_MEGA_MOE_FUSED=1; set "
-                    "DSV4_USE_MEGA_MOE_SE=0 to select the legacy fused path."
+                    "DSV4_USE_MEGA_MOE_SE=1 conflicts with "
+                    "DSV4_USE_MEGA_MOE_FUSED=1; select exactly one Mega variant."
                 )
             if se_requested:
                 if forced not in (None, "mega", "mega_se"):
@@ -345,8 +348,8 @@ def select_strategy(
                         )
                         _MEGA_SE_AUTO_FALLBACK_WARNED = True
 
-            # The legacy fused implementation is strict and only becomes
-            # reachable after an explicit SE opt-out.
+            # The explicit legacy-fused opt-in overrides the automatic SE
+            # preference, but not an explicit DSV4_USE_MEGA_MOE_SE=1 request.
             if fused_requested:
                 if forced not in (None, "mega", "mega_fused"):
                     raise RuntimeError(

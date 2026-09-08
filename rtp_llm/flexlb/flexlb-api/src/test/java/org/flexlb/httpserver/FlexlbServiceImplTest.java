@@ -466,13 +466,14 @@ class FlexlbServiceImplTest {
         CompletableFuture<FlexlbGrpcForwarder.MasterForwardResult> pendingForward =
                 new CompletableFuture<>();
         when(grpcForwarder.forwardScheduleToMaster(any())).thenReturn(pendingForward);
-        when(grpcForwarder.forwardCancelToMaster(any())).thenAnswer(invocation -> {
-            // The schedule RPC inherited the cancelled inbound Context. Its
-            // reconciliation must not inherit that cancellation as well.
-            assertFalse(Context.current().isCancelled());
-            return CompletableFuture.completedFuture(
-                    FlexlbGrpcForwarder.CancelForwardResult.noMaster());
-        });
+        when(grpcForwarder.forwardCompensatingCancelToMaster(any(), any()))
+                .thenAnswer(invocation -> {
+                    // The schedule RPC inherited the cancelled inbound Context. Its
+                    // reconciliation must not inherit that cancellation as well.
+                    assertFalse(Context.current().isCancelled());
+                    return CompletableFuture.completedFuture(
+                            FlexlbGrpcForwarder.CancelForwardResult.noMaster());
+                });
 
         FlexlbScheduleProtocol.FlexlbScheduleRequestPB request =
                 FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
@@ -493,7 +494,8 @@ class FlexlbServiceImplTest {
         ArgumentCaptor<FlexlbScheduleProtocol.FlexlbCancelRequestPB> cancel =
                 ArgumentCaptor.forClass(
                         FlexlbScheduleProtocol.FlexlbCancelRequestPB.class);
-        verify(grpcForwarder).forwardCancelToMaster(cancel.capture());
+        verify(grpcForwarder).forwardCompensatingCancelToMaster(
+                cancel.capture(), org.mockito.ArgumentMatchers.eq("10.0.0.2:7001"));
         assertEquals(request.getRequestId(), cancel.getValue().getRequestId());
         assertEquals(
                 FlexlbScheduleProtocol.CancelReasonPB.CANCEL_REASON_CLIENT_CANCELLED,
@@ -525,7 +527,8 @@ class FlexlbServiceImplTest {
                 .setRequestId(12_349L)
                 .build(), mock(StreamObserver.class));
 
-        verify(grpcForwarder, never()).forwardCancelToMaster(any());
+        verify(grpcForwarder, never())
+                .forwardCompensatingCancelToMaster(any(), any());
         verify(routeService, never()).route(any());
     }
 

@@ -30,6 +30,7 @@ from rtp_llm.test.perf_test.perf_config import (
 from rtp_llm.test.perf_test.perf_utils import (
     _is_sensitive_name,
     _redact_argv,
+    _sanitize_provenance_value,
     collect_timeline_files,
     filter_bs_by_kvcache,
     print_config_table,
@@ -211,6 +212,22 @@ def _effective_grid_max_seq_len(
     return max(needed_seq_len, args.max_seq_len)
 
 
+def _require_cache_grid_success(metrics: List[Dict[str, Any]]) -> None:
+    """Fail the command after the runner has checkpointed every non-ok case."""
+    failed = [metric for metric in metrics if metric.get("status") != "ok"]
+    if not failed:
+        return
+    counts: Dict[str, int] = {}
+    for metric in failed:
+        status = str(metric.get("status", "missing"))
+        counts[status] = counts.get(status, 0) + 1
+    summary = ", ".join(f"{status}={count}" for status, count in sorted(counts.items()))
+    raise RuntimeError(
+        f"cache grid failed {len(failed)}/{len(metrics)} cases ({summary}); "
+        "see cache_grid_results.json"
+    )
+
+
 def _explicit_batch_size_list(args: argparse.Namespace) -> Optional[List[int]]:
     """--batch_size as given on the command line, or None when it was defaulted."""
     batch_size_explicit = getattr(
@@ -297,7 +314,7 @@ def _is_performance_runtime_name(name: str, explicit_names: set[str]) -> bool:
 
 
 def _fingerprint_engine_env(names: List[str]) -> Dict[str, str]:
-    """Capture effective engine/perf environment without collecting credentials."""
+    """Capture runtime env with plaintext limited to the reviewed safe allowlist."""
     explicit_names = set(names)
     relevant_names = {
         name
@@ -305,7 +322,16 @@ def _fingerprint_engine_env(names: List[str]) -> Dict[str, str]:
         if _is_performance_runtime_name(name, explicit_names)
         and not _is_sensitive_name(name)
     }
-    return {name: os.environ[name] for name in sorted(relevant_names)}
+    return {
+        name: str(
+            _sanitize_provenance_value(
+                name,
+                os.environ[name],
+                allow_plaintext=name in _PERFORMANCE_ENV_NAMES,
+            )
+        )
+        for name in sorted(relevant_names)
+    }
 
 
 def _effective_performance_config(
@@ -341,14 +367,26 @@ def _effective_performance_config(
             values.pop(name, None)
             sources.pop(name, None)
             continue
-        values[name] = str(value)
+        values[name] = str(
+            _sanitize_provenance_value(
+                name,
+                value,
+                allow_plaintext=name in _PERFORMANCE_ENV_NAMES,
+            )
+        )
         sources[name] = "cli"
 
     for name, value in (cli_overrides or {}).items():
         normalized = name.replace("-", "_").upper()
         if _is_sensitive_name(normalized):
             continue
-        values[normalized] = str(value)
+        values[normalized] = str(
+            _sanitize_provenance_value(
+                normalized,
+                value,
+                allow_plaintext=normalized in _PERFORMANCE_ENV_NAMES,
+            )
+        )
         sources[normalized] = "cli"
     return {
         "values": dict(sorted(values.items())),
@@ -549,7 +587,7 @@ def main() -> str:
             tokenizer = AutoTokenizer.from_pretrained(
                 tokenizer_path, trust_remote_code=True
             )
-            CacheGridRunner(
+            metrics = CacheGridRunner(
                 server.port,
                 tokenizer,
                 cases,
@@ -558,11 +596,21 @@ def main() -> str:
                 measure_runs=args.cache_measure_runs,
                 cache_commit_tail_tokens=args.cache_commit_tail_tokens,
                 run_config={
-                    "model_type": extract_arg(remaining, "model_type")
-                    or os.environ.get("MODEL_TYPE"),
-                    "checkpoint_path": extract_arg(remaining, "checkpoint_path")
-                    or os.environ.get("CHECKPOINT_PATH"),
-                    "tokenizer_path": tokenizer_path,
+                    "model_type": _sanitize_provenance_value(
+                        "model_type",
+                        extract_arg(remaining, "model_type")
+                        or os.environ.get("MODEL_TYPE"),
+                        allow_plaintext=True,
+                    ),
+                    "checkpoint_path": _sanitize_provenance_value(
+                        "checkpoint_path",
+                        extract_arg(remaining, "checkpoint_path")
+                        or os.environ.get("CHECKPOINT_PATH"),
+                        allow_plaintext=True,
+                    ),
+                    "tokenizer_path": _sanitize_provenance_value(
+                        "tokenizer_path", tokenizer_path, allow_plaintext=True
+                    ),
                     "requested_max_seq_len": int(args.max_seq_len),
                     "effective_max_seq_len": effective_max_seq_len,
                     "requested_concurrency_limit": int(args.concurrency_limit),
@@ -574,15 +622,17 @@ def main() -> str:
                 },
             ).run()
             collect_timeline_files(args.result_dir)
+            failed = any(metric.get("status") != "ok" for metric in metrics)
             write_test_info(
                 args,
                 remaining,
                 engine_env_names,
-                status="completed",
+                status="failed" if failed else "completed",
                 effective_max_seq_len=effective_max_seq_len,
                 service_concurrency_limit=max_batch_size,
                 effective_runtime_config=effective_runtime_config,
             )
+            _require_cache_grid_success(metrics)
         finally:
             server.stop()
             summarize_and_cleanup_coredumps(args.result_dir)

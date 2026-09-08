@@ -17,9 +17,12 @@ from rtp_llm.dash_sc.inference.core_dump_control import (
     _configure_xgrammar_sandbox_core_dump_for_current_process,
 )
 from rtp_llm.dash_sc.inference.grammar_validator import (
+    GrammarCheckOverloaded,
+    GrammarCheckTimeout,
     GrammarCheckUnavailable,
     GrammarValidator,
     _compile_exception_reply,
+    _CRASH_CIRCUIT_MAX_ENTRIES,
     _DeferredDupFd,
     _enable_worker_faulthandler,
     _format_worker_exitcode,
@@ -39,11 +42,11 @@ def _crash_with_faulthandler(fault_trace_fd) -> None:
 
 
 class CompileExceptionReplyTest(unittest.TestCase):
-    def test_resource_exhaustion_is_unavailable_and_retires_worker(self) -> None:
+    def test_resource_exhaustion_is_overloaded_and_retires_worker(self) -> None:
         for error in (MemoryError("out of memory"), RuntimeError("std::bad_alloc")):
             self.assertTrue(_is_resource_exhaustion(error))
             status, retire_after_reply, message = _compile_exception_reply(error)
-            self.assertIs(status, _WorkerStatus.UNAVAILABLE)
+            self.assertIs(status, _WorkerStatus.OVERLOADED)
             self.assertTrue(retire_after_reply)
             self.assertTrue(message)
 
@@ -153,6 +156,12 @@ class GrammarValidatorTest(unittest.TestCase):
     def setUp(self) -> None:
         self.validator = GrammarValidator.__new__(GrammarValidator)
         self.validator._check_grammar = MagicMock(return_value=True)
+        self.validator._closed = False
+        self.validator._crash_circuit_lock = threading.Lock()
+        self.validator._crash_circuit = OrderedDict()
+        self.validator._pool_lock = threading.Lock()
+        self.validator._live = 1
+        self.validator._last_spawn_error = ""
 
     def test_json_object_allows_object_or_array(self) -> None:
         self.assertTrue(
@@ -199,6 +208,78 @@ class GrammarValidatorTest(unittest.TestCase):
         crash_logs = "\n".join(logs.output)
         self.assertIn("worker fatal traceback", crash_logs)
         self.assertIn("xgrammar native stack trace", crash_logs)
+        self.assertIn(("ebnf", 'root ::= "x"'), self.validator._crash_circuit)
+
+    def test_crash_circuit_is_keyed_bounded_and_expires(self) -> None:
+        with patch.object(grammar_validator_module.time, "monotonic", return_value=100.0):
+            for index in range(_CRASH_CIRCUIT_MAX_ENTRIES + 1):
+                self.validator._record_native_crash(("ebnf", f"root ::= {index}"))
+
+        self.assertEqual(len(self.validator._crash_circuit), _CRASH_CIRCUIT_MAX_ENTRIES)
+        self.assertNotIn(("ebnf", "root ::= 0"), self.validator._crash_circuit)
+        active_key = ("ebnf", "root ::= 1")
+        with patch.object(grammar_validator_module.time, "monotonic", return_value=109.0):
+            with self.assertRaises(GrammarCheckUnavailable):
+                self.validator._raise_if_crash_circuit_open(active_key)
+            self.validator._raise_if_crash_circuit_open(("ebnf", "different"))
+        with patch.object(grammar_validator_module.time, "monotonic", return_value=110.0):
+            self.validator._raise_if_crash_circuit_open(active_key)
+        self.assertNotIn(active_key, self.validator._crash_circuit)
+
+    def test_retryable_worker_outcomes_have_distinct_types(self) -> None:
+        process = MagicMock()
+        process.is_alive.return_value = True
+        connection = MagicMock()
+        connection.poll.return_value = True
+        fault_file = io.BytesIO()
+        self.validator._queue_timeout_s = 1.0
+        self.validator._compile_timeout_s = 1.0
+        self.validator._idle = queue.Queue()
+        self.validator._ensure_pool = MagicMock()
+        self.validator._retire = MagicMock()
+
+        connection.recv.return_value = (
+            _WorkerStatus.OVERLOADED,
+            True,
+            "out of memory",
+        )
+        self.validator._idle.put((process, connection, fault_file))
+        with self.assertRaises(GrammarCheckOverloaded):
+            self.validator._compile_in_worker("ebnf", 'root ::= "overload"')
+
+        timeout_connection = MagicMock()
+        timeout_connection.poll.return_value = False
+        self.validator._idle.put((process, timeout_connection, io.BytesIO()))
+        with self.assertRaises(GrammarCheckTimeout):
+            self.validator._compile_in_worker("ebnf", 'root ::= "timeout"')
+
+        self.validator._queue_timeout_s = 0.001
+        with self.assertRaises(GrammarCheckOverloaded):
+            self.validator._compile_in_worker("ebnf", 'root ::= "queue-full"')
+
+        self.validator._live = 0
+        self.validator._last_spawn_error = "cannot spawn"
+        with self.assertRaises(GrammarCheckUnavailable) as unavailable:
+            self.validator._compile_in_worker("ebnf", 'root ::= "pool-down"')
+        self.assertNotIsInstance(unavailable.exception, GrammarCheckOverloaded)
+
+    def test_spawn_failure_does_not_block_a_healthy_worker(self) -> None:
+        self.validator._queue_timeout_s = 1.0
+        self.validator._compile_timeout_s = 1.0
+        self.validator._idle = queue.Queue()
+        self.validator._ensure_pool = MagicMock()
+        self.validator._last_spawn_error = "replacement failed"
+
+        process = MagicMock()
+        process.is_alive.return_value = True
+        connection = MagicMock()
+        connection.poll.return_value = True
+        connection.recv.return_value = (_WorkerStatus.VALID, False, "")
+        worker = (process, connection, io.BytesIO())
+        self.validator._idle.put(worker)
+
+        self.assertTrue(self.validator._compile_in_worker("ebnf", 'root ::= "ok"'))
+        self.assertIs(self.validator._idle.get_nowait(), worker)
 
     def test_worker_startup_timeout_terminates_kills_and_joins(self) -> None:
         self.validator._mp = MagicMock()
@@ -207,8 +288,10 @@ class GrammarValidatorTest(unittest.TestCase):
         self.validator._worker_admission_config = MagicMock()
         self.validator._worker_memory_limit_bytes = 0
         self.validator._compile_timeout_s = 0
-        self.validator._pool_lock = threading.Lock()
         self.validator._spawning = 1
+        self.validator._replacement_failures = 0
+        self.validator._replacement_not_before = 0.0
+        self.validator._last_spawn_error = ""
 
         parent_conn = MagicMock()
         parent_conn.poll.return_value = False
@@ -222,7 +305,7 @@ class GrammarValidatorTest(unittest.TestCase):
         with self.assertLogs(
             "rtp_llm.dash_sc.inference.grammar_validator", level="WARNING"
         ):
-            self.validator._spawn_one()
+            self.assertFalse(self.validator._spawn_one())
 
         process.start.assert_called_once_with()
         process.terminate.assert_called_once_with()
@@ -231,6 +314,58 @@ class GrammarValidatorTest(unittest.TestCase):
         parent_conn.close.assert_called_once_with()
         child_conn.close.assert_called_once_with()
         self.assertEqual(self.validator._spawning, 0)
+        self.assertEqual(self.validator._replacement_failures, 1)
+        self.assertGreater(self.validator._replacement_not_before, 0.0)
+        self.assertIn("readiness handshake timed out", self.validator._last_spawn_error)
+
+    def test_replacement_backoff_uses_one_timer(self) -> None:
+        self.validator._pool_target = 2
+        self.validator._live = 1
+        self.validator._spawning = 0
+        self.validator._coordinator_running = False
+        self.validator._replacement_timer = None
+        self.validator._replacement_not_before = 105.0
+
+        timer = MagicMock()
+        with patch.object(
+            grammar_validator_module.time, "monotonic", return_value=100.0
+        ), patch.object(
+            grammar_validator_module.threading, "Timer", return_value=timer
+        ) as timer_factory:
+            self.validator._ensure_pool()
+            self.validator._ensure_pool()
+
+        timer_factory.assert_called_once_with(
+            5.0, self.validator._replacement_timer_fired
+        )
+        timer.start.assert_called_once_with()
+        self.assertEqual(self.validator._live, 1)
+        self.assertEqual(self.validator._spawning, 0)
+
+    def test_close_is_idempotent_and_stops_idle_workers(self) -> None:
+        self.validator._close_lock = threading.Lock()
+        self.validator._idle = queue.Queue()
+        self.validator._pool_target = 1
+        self.validator._spawning = 0
+        self.validator._coordinator_running = False
+        self.validator._coordinator_thread = None
+        self.validator._compile_timeout_s = 1.0
+        self.validator._replacement_timer = MagicMock()
+
+        process = MagicMock()
+        process.is_alive.return_value = False
+        connection = MagicMock()
+        fault_file = MagicMock()
+        self.validator._idle.put((process, connection, fault_file))
+
+        self.validator.close()
+        self.validator.close()
+
+        connection.close.assert_called_once_with()
+        fault_file.close.assert_called_once_with()
+        self.assertTrue(self.validator._closed)
+        self.assertEqual(self.validator._pool_target, 0)
+        self.assertEqual(self.validator._live, 0)
 
     def test_only_worker_verdicts_enter_result_cache(self) -> None:
         self.validator._result_cache_max_entries = 4

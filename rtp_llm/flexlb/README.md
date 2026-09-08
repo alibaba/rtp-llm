@@ -128,7 +128,6 @@ export FLEXLB_CONFIG='{
     "enqueueRpcTimeoutMs": 5000
   },
   "router": {
-    "availabilityHysteresisPercent": 15,
     "groupSelector": {
       "defaultTargets": [
         {"group": "default-group", "weight": 1}
@@ -145,19 +144,17 @@ export FLEXLB_CONFIG='{
     },
     "roles": {
       "prefill": {
-        "availability": {
-          "maxPendingRequests": 64
+        "executionTimeEstimator": {
+          "type": "FORMULA",
+          "expression": "sum(computeTokens) + 0.3*sum(hitCacheTokens)"
         },
-        "selector": {
-          "type": "ESTIMATED_TTFT",
-          "candidateChoice": {
-            "type": "RANDOM_WITHIN_TOLERANCE",
-            "relativeTolerance": 0.1,
-            "minimumToleranceMs": 20,
-            "outlierRejection": {
-              "maxPendingVsAverageMultiplier": 3.0,
-              "maxProjectedDrainVsAverageMultiplier": 3.0
-            }
+        "candidateChoice": {
+          "type": "RANDOM_WITHIN_TOLERANCE",
+          "relativeTolerance": 0.1,
+          "minimumToleranceMs": 20,
+          "outlierRejection": {
+            "maxPendingVsAverageMultiplier": 3.0,
+            "maxProjectedDrainVsAverageMultiplier": 3.0
           }
         },
         "cacheAffinity": {
@@ -173,17 +170,12 @@ export FLEXLB_CONFIG='{
         "kvReservation": {
           "maxOutputTokensForEstimate": 1000
         },
-        "selector": {
-          "type": "KV_USAGE_WEIGHTED_RANDOM",
-          "decayPerToken": 0.001,
-          "outlierRejection": {
-            "maxEngineLoadVsAverageMultiplier": 3.0,
-            "maxKvUsedVsAverageMultiplier": 3.0
-          }
+        "decayPerToken": 0.001,
+        "loadDecayPerRequest": 1.0,
+        "outlierRejection": {
+          "maxEngineLoadVsAverageMultiplier": 3.0,
+          "maxKvUsedVsAverageMultiplier": 3.0
         }
-      },
-      "vit": {
-        "selector": {"type": "RANDOM"}
       }
     }
   },
@@ -290,18 +282,27 @@ decision-group limits live only under `scheduler.decision`, waiting-queue limits
 live only under `scheduler.capacity`, and `dispatcher` contains only delivery and
 delivery-backpressure settings. Omitting `scheduler.decision` uses
 `FIXED_WINDOW`; select `SINGLE` explicitly when that behavior is required.
-An explicitly declared `schemaVersion: 1` is migrated once at startup before
-binding to the schema-v2 runtime model. A v1 `NON_BATCH` queue with no decision
-becomes `SINGLE`; a v1 `BATCH` queue with no decision becomes `FIXED_WINDOW`,
-and its `maxRequests`, `maxCollectionWaitMs`, and
-`maxWaitingRequestsPerPrefillWorker` fields move to their v2 owners. Existing
-`scheduler.decision` and `scheduler.capacity` fields remain authoritative after
-the shadowed legacy values pass their original v1 validation. An active
-`earlyDispatchPredictedExecutionMs` is rejected because its equality boundary
-cannot be represented exactly by `maxPredictedExecutionMs`. A v1 explicit
-`maxPredictedExecutionMs` is rejected for the same reason: equality did not
-trigger immediate dispatch under v1 but does under v2. Omitting `schemaVersion`
-means v2; other explicit versions are rejected.
+
+The online loader accepts only schema v2. Convert v1 documents offline with
+`org.flexlb.config.FlexlbConfigMigration` (its `main` method reads v1 JSON from
+standard input, writes v2 JSON to standard output, and reports behavior changes
+to standard error), review the output, and deploy the resulting v2 document. A
+v1 `NON_BATCH` queue with no decision becomes `SINGLE`; a v1 `BATCH` queue with
+no decision becomes `FIXED_WINDOW`. Its `maxRequests`, `maxCollectionWaitMs`,
+`earlyDispatchPredictedExecutionMs`, and
+`maxWaitingRequestsPerPrefillWorker` fields move to their v2 owners. The
+prediction threshold keeps its inclusive equality boundary during conversion.
+Fields that were not part of v1, including an explicit v1
+`maxPredictedExecutionMs`, are rejected rather than guessed. Omitting
+`schemaVersion` means v2; every explicit version other than 2 is rejected by the
+online loader.
+
+Former field-level FlexLB environment variables are not compatibility aliases.
+Their presence aborts startup with migration guidance instead of silently using
+v2 defaults; move those values into `FLEXLB_CONFIG`. Replace the removed
+`FLEXLB_MONITOR_MODE` with `FLEXLB_MONITOR_METRIC_WHITELIST`: use the default
+whitelist for the former `critical-only` behavior or the bare `flexlb_` prefix
+for the former `all` behavior.
 
 Production-style examples migrated from the former field-level environment variables:
 
@@ -309,7 +310,7 @@ Production-style examples migrated from the former field-level environment varia
 - [QUEUE + PRIORITY + BATCH](docs/config-examples/flexlb-queue-priority-batch.json)
 
 DIRECT uses the same role routing configuration as QUEUE. For example, a compact
-DIRECT configuration with explicit random prefill/decode selection is:
+DIRECT configuration that selects only the best projected Prefill candidate is:
 
 ```bash
 export FLEXLB_CONFIG='{
@@ -318,35 +319,42 @@ export FLEXLB_CONFIG='{
   "dispatcher": {"type": "NON_BATCH"},
   "router": {
     "roles": {
-      "prefill": {"selector": {"type": "RANDOM"}},
-      "decode": {"selector": {"type": "RANDOM"}},
-      "vit": {"selector": {"type": "RANDOM"}}
+      "prefill": {
+        "candidateChoice": {
+          "type": "BEST_ONLY",
+          "outlierRejection": {
+            "maxPendingVsAverageMultiplier": 3.0,
+            "maxProjectedDrainVsAverageMultiplier": 3.0
+          }
+        }
+      }
     }
   }
 }'
 ```
 
-PREFILL and PDFUSION share the prefill selector. Prefill selector types are
-`RANDOM` and `ESTIMATED_TTFT`; the latter supports `BEST_ONLY`,
-`RANDOM_WITHIN_TOLERANCE`, or `LEAST_RECENTLY_USED_IN_POOL` candidate choice.
-The candidate pool for `LEAST_RECENTLY_USED_IN_POOL` is tagged as either
+PREFILL and PDFUSION share the Prefill routing policy. Execution-time estimator
+types are `FORMULA` and `LEARNING`. Candidate choice is tagged as `BEST_ONLY`,
+`RANDOM_WITHIN_TOLERANCE`, or `LEAST_RECENTLY_USED_IN_POOL`. The candidate pool
+for `LEAST_RECENTLY_USED_IN_POOL` is tagged as either
 `{"type":"RATIO","ratio":0.3,"minimumWorkers":1}` or
-`{"type":"FIXED","workers":2}`. Decode selector types are `RANDOM` and
-`KV_USAGE_WEIGHTED_RANDOM`; VIT currently supports `RANDOM`.
+`{"type":"FIXED","workers":2}`. Fields belonging to another estimator,
+candidate-choice, or pool variant are rejected.
 
-`ESTIMATED_TTFT` is a deterministic frozen-snapshot projection, not a promise
-about future wall-clock latency. It inserts the incoming request using the live
-FIFO/PRIORITY order, reuses the production decision-group planner, overlaps
-collection deadlines with already committed work, and assumes no later arrivals,
-cancellations, predictor revisions, or resource changes. An exact admission block
-observed on the current head is represented as a structured blocked state. The
-model does not invent a release time for delivery capacity that is currently
-unobservable; otherwise its service timeline is conditional on later admission.
+Projected Prefill TTFT is a deterministic frozen-snapshot projection, not a
+promise about future wall-clock latency. It inserts the incoming request using
+the live FIFO/PRIORITY order, reuses the production decision-group planner,
+overlaps collection deadlines with already committed work, and assumes no later
+arrivals, cancellations, predictor revisions, or resource changes. An exact
+admission block observed on the current head is represented as a structured
+blocked state. The model does not invent a release time for delivery capacity
+that is currently unobservable; otherwise its service timeline is conditional
+on later admission.
 
-Cache affinity is enabled by including `router.roles.prefill.cacheAffinity` and is
-valid only with `ESTIMATED_TTFT`. A cache leader is preferred only when its
-endpoint-specific reusable prefix meets `minPrefixHitPercent` and its frozen
-projected TTFT is no more than `maxExtraTtftMs` above the best candidate. The
+Cache affinity is enabled by including `router.roles.prefill.cacheAffinity`. A
+cache leader is preferred only when its endpoint-specific reusable prefix meets
+`minPrefixHitPercent` and its frozen projected TTFT is no more than
+`maxExtraTtftMs` above the best candidate. The
 percentage uses predictor-effective reusable tokens (the final cache block remains
 compute work), not the raw routing-prefix match. Omit the object to disable it.
 Decode admission is controlled by the optional positive
@@ -408,10 +416,10 @@ Authorization: Bearer <token>
 - **FlexLB behavior**: one strict JSON document in `FLEXLB_CONFIG`.
 - **Prefill execution formula**:
   `router.roles.prefill.executionTimeEstimator.expression` when estimator type is
-  `FORMULA`. Omitting the estimator applies the code default: the production
-  DSv4 prefill fit (`RoutingConfig.FormulaEstimatorConfig.DEFAULT_EXPRESSION`).
+  `FORMULA`. Omitting the estimator applies the code default:
+  `sum(computeTokens) + 0.3*sum(hitCacheTokens)`.
 - **Routing strategy parameters**: the tagged selector objects under
-  `router.roles.prefill`, `router.roles.decode`, and `router.roles.vit`.
+  `router.roles.prefill` and `router.roles.decode`.
 - **Traffic group selection**: `router.groupSelector` inside the same document.
 - **Backend topology**: `MODEL_SERVICE_CONFIG`.
 - **ZooKeeper consistency**: `FLEXLB_SYNC_CONSISTENCY_CONFIG`.

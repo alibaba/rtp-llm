@@ -23,6 +23,7 @@ from typing import Any, Dict, Iterable, List, Mapping, Tuple
 import requests
 
 from rtp_llm.test.perf_test.deepseek_v4_prefill_formula_fit import _median_run_time
+from rtp_llm.test.perf_test.perf_utils import _sanitize_provenance_value
 
 
 def _encode(tokenizer: Any, text: str) -> List[int]:
@@ -249,7 +250,11 @@ class CacheGridRunner:
         self.result_path = self.result_dir / "cache_grid_results.json"
         tokenizer_identity = {
             "class": f"{type(tokenizer).__module__}.{type(tokenizer).__qualname__}",
-            "name_or_path": getattr(tokenizer, "name_or_path", None),
+            "name_or_path": _sanitize_provenance_value(
+                "tokenizer_path",
+                getattr(tokenizer, "name_or_path", None),
+                allow_plaintext=True,
+            ),
         }
         normalized_cases = sorted(
             (

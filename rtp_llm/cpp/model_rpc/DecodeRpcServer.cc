@@ -88,6 +88,10 @@ grpc::Status DecodeRpcServer::generateRequestReadFailureStatus(bool cancelled) {
     return grpc::Status(grpc::StatusCode::INTERNAL, "poll generate request failed");
 }
 
+ErrorInfo DecodeRpcServer::cacheLoadClientError(int64_t request_id, ErrorCode error_code) {
+    return ErrorInfo(error_code, "cache load failed; correlation_id=" + std::to_string(request_id));
+}
+
 const char* DecodeRpcServer::phaseErrorType(bool                         request_ok,
                                             DecodeStatInfo::ExecuteStage stage,
                                             const ErrorInfo&             error_info,
@@ -386,7 +390,9 @@ void DecodeRpcServer::allocateResource(DecodeGenerateContext& decode_context) {
         }
         error_msg = "request: [" + decode_context.request_key + "] " + error_msg;
         RTP_LLM_LOG_ERROR(error_msg);
-        decode_context.error_status = grpc::Status(grpc::StatusCode::RESOURCE_EXHAUSTED, error_msg);
+        decode_context.error_info = ErrorInfo(stream_error.code(), error_msg);
+        decode_context.error_status =
+            serializeErrorMsg(decode_context.request_key, decode_context.request_info, decode_context.error_info);
         return;
     }
 
@@ -454,11 +460,14 @@ void DecodeRpcServer::loadCacheFromPrefill(DecodeGenerateContext& decode_context
         decode_context, grpc_stream->Write(load_response), grpc::StatusCode::INTERNAL, "send load response failed");
     if (!error_info.ok()) {
         // loadCacheFromPrefill is not retried (not wrapped by EXECUTE_WITH_RETRY), so this is a final
-        // failure point: report to FlexLB immediately.
+        // failure point: report to FlexLB immediately. Keep full downstream/topology details in server-side
+        // reporting, but return only the domain code and request correlation id across the client boundary.
         reportEarlyFinishTask(decode_context,
                               static_cast<int64_t>(error_info.code()),
                               "decode load cache from prefill failed: " + error_info.ToString());
-        decode_context.error_status = grpc::Status(transErrorCodeToGrpc(error_info.code()), error_info.ToString());
+        const auto client_error = cacheLoadClientError(decode_context.request_id, error_info.code());
+        decode_context.error_status =
+            serializeErrorMsg(decode_context.request_key, decode_context.request_info, client_error);
         return;
     }
     RTP_LLM_LOG_DEBUG("request [%s] load cache from prefill done", decode_context.request_key.c_str());

@@ -42,6 +42,59 @@ final class FlexlbConfigValidator {
                         "maxInflightRequestsPerPrefillWorker");
             }
         }
+
+        JsonNode prefill = document.path("router").path("roles").path("prefill");
+        if (prefill.isObject()) {
+            validateEstimatorShape(prefill.path("executionTimeEstimator"));
+            validateCandidateChoiceShape(prefill.path("candidateChoice"));
+        }
+    }
+
+    private static void validateEstimatorShape(JsonNode estimator) {
+        if (!estimator.isObject()) {
+            return;
+        }
+        String type = estimator.path("type").asText("FORMULA");
+        if ("FORMULA".equals(type)) {
+            rejectFieldsExcept(estimator,
+                    "router.roles.prefill.executionTimeEstimator", "type", "expression");
+        } else if ("LEARNING".equals(type)) {
+            rejectFieldsExcept(estimator,
+                    "router.roles.prefill.executionTimeEstimator", "type");
+        }
+    }
+
+    private static void validateCandidateChoiceShape(JsonNode choice) {
+        if (!choice.isObject()) {
+            return;
+        }
+        String type = choice.path("type").asText("RANDOM_WITHIN_TOLERANCE");
+        if ("BEST_ONLY".equals(type)) {
+            rejectFieldsExcept(choice, "router.roles.prefill.candidateChoice",
+                    "type", "outlierRejection");
+        } else if ("RANDOM_WITHIN_TOLERANCE".equals(type)) {
+            rejectFieldsExcept(choice, "router.roles.prefill.candidateChoice",
+                    "type", "relativeTolerance", "minimumToleranceMs",
+                    "outlierRejection");
+        } else if ("LEAST_RECENTLY_USED_IN_POOL".equals(type)) {
+            rejectFieldsExcept(choice, "router.roles.prefill.candidateChoice",
+                    "type", "pool");
+            validateCandidatePoolShape(choice.path("pool"));
+        }
+    }
+
+    private static void validateCandidatePoolShape(JsonNode pool) {
+        if (!pool.isObject()) {
+            return;
+        }
+        String type = pool.path("type").asText("RATIO");
+        if ("RATIO".equals(type)) {
+            rejectFieldsExcept(pool, "router.roles.prefill.candidateChoice.pool",
+                    "type", "ratio", "minimumWorkers");
+        } else if ("FIXED".equals(type)) {
+            rejectFieldsExcept(pool, "router.roles.prefill.candidateChoice.pool",
+                    "type", "workers");
+        }
     }
 
     private static void validateOrderingShape(JsonNode ordering) {

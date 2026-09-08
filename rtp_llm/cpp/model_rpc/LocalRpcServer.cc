@@ -23,7 +23,21 @@ using namespace std;
 namespace rtp_llm {
 
 namespace {
-constexpr int64_t kRpcOutputWaitTimeoutMs = 500;
+constexpr int64_t kRpcOutputWaitTimeoutMs        = 500;
+constexpr size_t  kAllocatorDumpReplayHistoryMax = 1024;
+
+std::string endpointHost(std::string endpoint) {
+    const auto scheme_separator = endpoint.find(':');
+    if (endpoint.compare(0, scheme_separator, "ipv4") == 0 || endpoint.compare(0, scheme_separator, "ipv6") == 0) {
+        endpoint.erase(0, scheme_separator + 1);
+    }
+    if (!endpoint.empty() && endpoint.front() == '[') {
+        const auto closing_bracket = endpoint.find(']');
+        return closing_bracket == std::string::npos ? std::string() : endpoint.substr(1, closing_bracket - 1);
+    }
+    const auto port_separator = endpoint.rfind(':');
+    return port_separator == std::string::npos ? endpoint : endpoint.substr(0, port_separator);
+}
 
 bool constantTimeEquals(const std::string& lhs, const std::string& rhs) {
     size_t       difference = lhs.size() ^ rhs.size();
@@ -80,9 +94,13 @@ grpc::Status LocalRpcServer::init(const EngineInitParams&                       
     torch_allocator_dump_cooldown_seconds_ = 60.0;
     {
         std::lock_guard<std::mutex> lock(torch_allocator_dump_mutex_);
-        torch_allocator_dump_in_progress_   = false;
-        torch_allocator_dump_has_completed_ = false;
+        torch_allocator_dump_in_progress_              = false;
+        torch_allocator_dump_has_completed_            = false;
+        torch_allocator_dump_active_started_by_public_ = false;
+        torch_allocator_dump_active_internal_started_  = false;
+        torch_allocator_dump_active_id_.clear();
         torch_allocator_dump_ids_.clear();
+        torch_allocator_dump_id_order_.clear();
     }
     if (!maga_init_params_.server_config.is_none()) {
         const auto& server_config = maga_init_params_.server_config;
@@ -689,8 +707,42 @@ grpc::Status LocalRpcServer::authorizeTorchAllocatorDump(const TorchAllocatorDum
     return grpc::Status::OK;
 }
 
-grpc::Status LocalRpcServer::beginTorchAllocatorDump(const std::string& dump_id) {
+grpc::Status LocalRpcServer::authorizeTorchAllocatorDumpInternal(grpc::ServerContext*               context,
+                                                                 const TorchAllocatorDumpRequestPB& request) const {
+    const auto authorization = authorizeTorchAllocatorDump(request);
+    if (!authorization.ok()) {
+        return authorization;
+    }
+    if (maga_init_params_.parallelism_config.tp_size <= 1 || !isTorchAllocatorDumpInternalPeer(context)) {
+        return grpc::Status(grpc::StatusCode::PERMISSION_DENIED, "allocator dump internal fanout denied");
+    }
+    return grpc::Status::OK;
+}
+
+bool LocalRpcServer::isTorchAllocatorDumpInternalPeer(grpc::ServerContext* context) const {
+    if (context == nullptr) {
+        return false;
+    }
+    const auto peer_host = endpointHost(context->peer());
+    if (peer_host.empty()) {
+        return false;
+    }
+    return std::any_of(maga_init_params_.runtime_config.worker_grpc_addrs.begin(),
+                       maga_init_params_.runtime_config.worker_grpc_addrs.end(),
+                       [&peer_host](const std::string& worker_addr) { return endpointHost(worker_addr) == peer_host; });
+}
+
+grpc::Status
+LocalRpcServer::beginTorchAllocatorDump(const std::string& dump_id, bool internal_fanout, bool* owns_admission) {
     std::lock_guard<std::mutex> lock(torch_allocator_dump_mutex_);
+    if (owns_admission != nullptr) {
+        *owns_admission = false;
+    }
+    if (internal_fanout && torch_allocator_dump_in_progress_ && torch_allocator_dump_active_started_by_public_
+        && !torch_allocator_dump_active_internal_started_ && torch_allocator_dump_active_id_ == dump_id) {
+        torch_allocator_dump_active_internal_started_ = true;
+        return grpc::Status::OK;
+    }
     if (torch_allocator_dump_ids_.count(dump_id) != 0) {
         return grpc::Status(grpc::StatusCode::ALREADY_EXISTS, "allocator dump id has already been used");
     }
@@ -705,15 +757,29 @@ grpc::Status LocalRpcServer::beginTorchAllocatorDump(const std::string& dump_id)
             return grpc::Status(grpc::StatusCode::RESOURCE_EXHAUSTED, "allocator dump cooldown active");
         }
     }
+    if (torch_allocator_dump_id_order_.size() == kAllocatorDumpReplayHistoryMax) {
+        torch_allocator_dump_ids_.erase(torch_allocator_dump_id_order_.front());
+        torch_allocator_dump_id_order_.pop_front();
+    }
     torch_allocator_dump_ids_.insert(dump_id);
-    torch_allocator_dump_in_progress_ = true;
+    torch_allocator_dump_id_order_.push_back(dump_id);
+    torch_allocator_dump_in_progress_              = true;
+    torch_allocator_dump_active_started_by_public_ = !internal_fanout;
+    torch_allocator_dump_active_internal_started_  = false;
+    torch_allocator_dump_active_id_                = dump_id;
+    if (owns_admission != nullptr) {
+        *owns_admission = true;
+    }
     return grpc::Status::OK;
 }
 
 void LocalRpcServer::finishTorchAllocatorDump() {
     std::lock_guard<std::mutex> lock(torch_allocator_dump_mutex_);
-    torch_allocator_dump_in_progress_       = false;
-    torch_allocator_dump_has_completed_     = true;
+    torch_allocator_dump_in_progress_              = false;
+    torch_allocator_dump_has_completed_            = true;
+    torch_allocator_dump_active_started_by_public_ = false;
+    torch_allocator_dump_active_internal_started_  = false;
+    torch_allocator_dump_active_id_.clear();
     torch_allocator_dump_last_completed_at_ = std::chrono::steady_clock::now();
 }
 
@@ -822,15 +888,30 @@ grpc::Status LocalRpcServer::DumpTorchAllocatorInternal(grpc::ServerContext*    
                                                         const TorchAllocatorDumpRequestPB* request,
                                                         TorchAllocatorDumpResultPB*        response) {
     response->Clear();
-    const auto authorization = authorizeTorchAllocatorDump(*request);
+    const auto authorization = authorizeTorchAllocatorDumpInternal(context, *request);
     if (!authorization.ok()) {
         RTP_LLM_LOG_WARNING("rejected dump_torch_allocator_internal from %s", context->peer().c_str());
         return authorization;
     }
+    bool       owns_admission = false;
+    const auto admission      = beginTorchAllocatorDump(request->dump_id(), /*internal_fanout=*/true, &owns_admission);
+    if (!admission.ok()) {
+        return admission;
+    }
     RTP_LLM_LOG_INFO(
         "dump_torch_allocator_internal from %s dump_id=%s", context->peer().c_str(), request->dump_id().c_str());
-    response->CopyFrom(dumpTorchAllocatorOnCurrentProcess(request->dump_id()));
-    return grpc::Status::OK;
+    try {
+        response->CopyFrom(dumpTorchAllocatorOnCurrentProcess(request->dump_id()));
+        if (owns_admission) {
+            finishTorchAllocatorDump();
+        }
+        return grpc::Status::OK;
+    } catch (...) {
+        if (owns_admission) {
+            finishTorchAllocatorDump();
+        }
+        throw;
+    }
 }
 
 grpc::Status

@@ -106,10 +106,30 @@ void logPrefillFailureTrace(const char* event, PrefillGenerateContext& prefill_c
 PrefillRpcServer::~PrefillRpcServer() = default;
 
 std::chrono::system_clock::time_point
-PrefillRpcServer::decodeChannelReadyDeadline(const PrefillGenerateContext& prefill_context) {
-    const auto capped_deadline = std::chrono::system_clock::now() + kDecodeChannelReadyTimeoutCap;
-    return prefill_context.request_deadline.has_value() ? std::min(*prefill_context.request_deadline, capped_deadline) :
-                                                          capped_deadline;
+PrefillRpcServer::decodeChannelReadyDeadline(const PrefillGenerateContext& prefill_context,
+                                             int64_t                       max_rpc_timeout_ms) {
+    const auto now      = std::chrono::system_clock::now();
+    auto       deadline = now + kDecodeChannelReadyTimeoutCap;
+    if (prefill_context.request_deadline.has_value()) {
+        deadline = std::min(deadline, *prefill_context.request_deadline);
+    }
+    if (prefill_context.retry_deadline.has_value()) {
+        deadline = std::min(deadline, *prefill_context.retry_deadline);
+    }
+    if (max_rpc_timeout_ms > 0) {
+        deadline = std::min(deadline, now + std::chrono::milliseconds(max_rpc_timeout_ms));
+    }
+    return deadline;
+}
+
+std::optional<ErrorInfo> PrefillRpcServer::parseDownstreamError(const grpc::Status& status) {
+    ErrorDetailsPB details;
+    if (status.error_details().empty() || !details.ParseFromString(status.error_details())
+        || details.error_code() == static_cast<int64_t>(ErrorCode::NONE_ERROR)) {
+        return std::nullopt;
+    }
+    const auto message = details.error_message().empty() ? status.error_message() : details.error_message();
+    return ErrorInfo(static_cast<ErrorCode>(details.error_code()), message);
 }
 
 #define CLIENT_GRPC_RET_IF_ERROR(prefill_context, state, error_code_value)                                             \
@@ -152,9 +172,15 @@ PrefillRpcServer::decodeChannelReadyDeadline(const PrefillGenerateContext& prefi
                 new_error_code = ErrorCode::KEEP_ALIVE_TIMEOUT;                                                        \
                 prefill_context.closeGrpcConnection();                                                                 \
             }                                                                                                          \
-            new_error_msg += error_msg;                                                                                \
-            if (status.error_code() == grpc::StatusCode::RESOURCE_EXHAUSTED) {                                         \
-                new_error_code = ErrorCode::DECODE_MALLOC_FAILED;                                                      \
+            const auto downstream_error = PrefillRpcServer::parseDownstreamError(status);                              \
+            if (downstream_error.has_value()) {                                                                        \
+                new_error_code = downstream_error->code();                                                             \
+                new_error_msg  = downstream_error->ToString();                                                         \
+            } else {                                                                                                   \
+                new_error_msg += error_msg;                                                                            \
+                if (status.error_code() == grpc::StatusCode::RESOURCE_EXHAUSTED) {                                     \
+                    new_error_code = ErrorCode::DECODE_MALLOC_FAILED;                                                  \
+                }                                                                                                      \
             }                                                                                                          \
         } else {                                                                                                       \
             if (prefill_context.client_stream) {                                                                       \
@@ -274,8 +300,9 @@ void PrefillRpcServer::getRpcConnection(PrefillGenerateContext& prefill_context)
         setContextError(prefill_context, ErrorInfo(ErrorCode::GENERATE_TIMEOUT, "request deadline exhausted"));
         return;
     }
-    const auto ready_deadline = decodeChannelReadyDeadline(prefill_context);
-    auto       connect_status = resource_.rpc_pool.getReadyConnection(
+    const auto ready_deadline =
+        decodeChannelReadyDeadline(prefill_context, maga_init_params_.pd_sep_config.max_rpc_timeout_ms);
+    auto connect_status = resource_.rpc_pool.getReadyConnection(
         decode_addr, ready_deadline, [&prefill_context]() { return prefill_context.isRequestCancelled(); });
     if (!connect_status.ok()) {
         if (prefill_context.isRequestCancelled()) {

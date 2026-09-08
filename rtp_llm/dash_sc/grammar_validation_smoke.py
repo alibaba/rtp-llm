@@ -23,7 +23,6 @@ import argparse
 import asyncio
 import json
 import logging
-import queue
 import statistics
 import sys
 import time
@@ -546,24 +545,6 @@ def _dash_error(
     return error
 
 
-def _stop_validator_workers(validator: GrammarValidator) -> None:
-    validator._pool_target = 0
-    deadline = time.monotonic() + validator._compile_timeout_s + 1.0
-    while validator._coordinator_running or validator._spawning:
-        if time.monotonic() >= deadline:
-            break
-        time.sleep(0.01)
-    while True:
-        try:
-            proc, conn = validator._idle.get_nowait()
-        except queue.Empty:
-            break
-        conn.close()
-        if proc.is_alive():
-            proc.terminate()
-        proc.join(timeout=1.0)
-
-
 async def _run(args: argparse.Namespace) -> int:
     tokenizer_path = args.tokenizer_path or args.ckpt_path
     tokenizer = TokenizerFactory.create(
@@ -807,7 +788,7 @@ async def _run(args: argparse.Namespace) -> int:
     finally:
         await channel.close()
         await server.stop(grace=0)
-        _stop_validator_workers(validator)
+        validator.close()
 
 
 def _parse_args() -> argparse.Namespace:

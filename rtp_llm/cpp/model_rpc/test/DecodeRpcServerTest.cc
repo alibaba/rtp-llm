@@ -85,9 +85,9 @@ std::shared_ptr<NormalGenerateStream> makeGenerateStream(int seq_length) {
 }  // namespace
 
 TEST(DecodeRpcServerTest, TimeoutLearnedAfterConstructionKeepsAbsoluteDeadline) {
-    DecodeRpcContext              rpc_context{nullptr};
+    DecodeRpcContext             rpc_context{nullptr};
     kmonitor::MetricsReporterPtr metrics_reporter;
-    DecodeGenerateContext         context(rpc_context, /*timeout_ms=*/0, nullptr, metrics_reporter, nullptr);
+    DecodeGenerateContext        context(rpc_context, /*timeout_ms=*/0, nullptr, metrics_reporter, nullptr);
 
     EXPECT_FALSE(context.request_deadline.has_value());
     EXPECT_FALSE(context.requestDeadlineExceeded());
@@ -408,6 +408,28 @@ TEST(DecodeRpcServerTest, NonCancelledGenerateRequestReadPreservesFailure) {
 
     EXPECT_EQ(status.error_code(), grpc::StatusCode::INTERNAL);
     EXPECT_EQ(status.error_message(), "poll generate request failed");
+}
+
+TEST(DecodeRpcServerTest, CacheLoadClientErrorPreservesCodeWithoutTopologyDetails) {
+    const auto client_error =
+        DecodeRpcServer::cacheLoadClientError(/*request_id=*/12345, ErrorCode::CACHE_STORE_LOAD_CONNECT_FAILED);
+
+    EXPECT_EQ(client_error.code(), ErrorCode::CACHE_STORE_LOAD_CONNECT_FAILED);
+    EXPECT_EQ(client_error.ToString(), "cache load failed; correlation_id=12345");
+    EXPECT_EQ(client_error.ToString().find("10.0.0.8:1234"), std::string::npos);
+    EXPECT_EQ(client_error.ToString().find("rdma"), std::string::npos);
+}
+
+TEST(DecodeRpcServerTest, SerializedAllocationErrorCarriesGrammarDomainCode) {
+    DecodeRpcServer server;
+    const auto      status = server.serializeErrorMsg(
+        "request", RequestInfo{}, ErrorInfo(ErrorCode::GRAMMAR_COMPILE_OVERLOADED, "grammar queue full"));
+
+    ErrorDetailsPB details;
+    ASSERT_TRUE(details.ParseFromString(status.error_details()));
+    EXPECT_EQ(status.error_code(), grpc::StatusCode::RESOURCE_EXHAUSTED);
+    EXPECT_EQ(details.error_code(), static_cast<int64_t>(ErrorCode::GRAMMAR_COMPILE_OVERLOADED));
+    EXPECT_NE(details.error_message().find("grammar queue full"), std::string::npos);
 }
 
 TEST(DecodeRpcServerTest, CacheLoadTimeoutClassifiedAsDependencyFailure) {

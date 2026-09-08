@@ -242,14 +242,24 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
             // The Schedule forward inherited the caller's cancelled Context.
             // Start reconciliation from ROOT or the Cancel RPC would be
             // cancelled before it could reach the lifecycle-owning Master.
-            Context.ROOT.call(() -> {
-                grpcForwarder.forwardCancelToMaster(cancelRequest);
-                return null;
-            });
+            Context.ROOT.call(() -> grpcForwarder.forwardCompensatingCancelToMaster(
+                    cancelRequest, forwardResult.masterHost()))
+                    .whenComplete((cancelResult, cancelError) -> {
+                        if (cancelError != null) {
+                            Logger.warn(
+                                    "FlexlbService.schedule cancellation reconciliation failed, request_id={} master={}",
+                                    request.getRequestId(), forwardResult.masterHost(), cancelError);
+                        } else if (cancelResult == null || cancelResult.response() == null) {
+                            Logger.warn(
+                                    "FlexlbService.schedule cancellation reconciliation incomplete, request_id={} master={} failure={}",
+                                    request.getRequestId(), forwardResult.masterHost(),
+                                    cancelResult == null ? "MISSING_RESULT" : cancelResult.failure());
+                        }
+                    });
         } catch (Exception error) {
             Logger.warn(
-                    "FlexlbService.schedule cancellation reconciliation failed to start, request_id={}",
-                    request.getRequestId(), error);
+                    "FlexlbService.schedule cancellation reconciliation failed to start, request_id={} master={}",
+                    request.getRequestId(), forwardResult.masterHost(), error);
         }
     }
 

@@ -1928,15 +1928,23 @@ TEST_F(KVCacheMemoryConnectorTest, asyncMatch_ReturnNull_WhenNoPrefixMatched) {
     EXPECT_EQ(match_ctx, nullptr);
 }
 
-TEST_F(KVCacheMemoryConnectorTest, asyncMatch_IncludesAlignedLastKey) {
+TEST_F(KVCacheMemoryConnectorTest, asyncRead_AlignedFullHitStillLoadsLastPage) {
     CacheKeysType                          cache_keys{71101, 71102, 71103};
     std::vector<std::vector<BlockIdxType>> lbs_vec{{1, 2, 3}, {4, 5, 6}, {7, 8, 9}, {10, 11, 12}};
     auto                                   res = makeCacheResource(cache_keys, lbs_vec);
     putItemsToCache(cache_keys, memoryCacheBlockBytes());
 
-    auto match_ctx = connector_->asyncMatch(res, std::make_shared<TestReadMeta>(true));
+    auto meta      = std::make_shared<TestReadMeta>(true);
+    auto match_ctx = connector_->asyncMatch(res, meta);
     ASSERT_NE(match_ctx, nullptr);
-    EXPECT_EQ(match_ctx->matchedBlockCount(), cache_keys.size());
+    ASSERT_EQ(match_ctx->matchedBlockCount(), cache_keys.size());
+
+    auto read_ctx = connector_->asyncRead(
+        res, meta, match_ctx, /*start_read_block_index=*/0, static_cast<int>(match_ctx->matchedBlockCount()));
+    ASSERT_NE(read_ctx, nullptr);
+    ASSERT_TRUE(waitUntilDone(read_ctx));
+    ASSERT_TRUE(read_ctx->success());
+    EXPECT_EQ(res->memoryReuseBlockNum(), cache_keys.size());
 }
 
 TEST_F(KVCacheMemoryConnectorTest, asyncMatch_ExcludesPartialLastKey) {

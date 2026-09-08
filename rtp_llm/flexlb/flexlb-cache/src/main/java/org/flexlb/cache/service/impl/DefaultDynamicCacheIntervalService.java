@@ -6,6 +6,7 @@ import org.flexlb.config.ConfigService;
 import org.flexlb.config.WorkerRegistryConfig;
 import org.springframework.stereotype.Service;
 
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 /**
@@ -18,14 +19,15 @@ import java.util.concurrent.locks.ReentrantReadWriteLock;
 @Slf4j
 public class DefaultDynamicCacheIntervalService implements DynamicCacheIntervalService {
 
-    private final int targetDiffSize;
-    private final long minIntervalMs;
-    private final long maxIntervalMs;
-
-    // Rolling average configuration
+    private static final long DEFAULT_INTERVAL_MS = 100L;
     private static final int ROLLING_WINDOW_SIZE = 30;
     private static final double DAMPENING_FACTOR = 0.3;
     private static final double ADJUSTMENT_THRESHOLD = 0.1;
+
+    private final int targetDiffSize;
+    private final long minIntervalMs;
+    private final long maxIntervalMs;
+    private final AtomicLong currentIntervalMs;
 
     // Thread-safe state management
     private final ReentrantReadWriteLock lock = new ReentrantReadWriteLock();
@@ -42,16 +44,22 @@ public class DefaultDynamicCacheIntervalService implements DynamicCacheIntervalS
         this.targetDiffSize = config.getTargetDiffSize();
         this.minIntervalMs = config.getMinRefreshIntervalMs();
         this.maxIntervalMs = config.getMaxRefreshIntervalMs();
+        this.currentIntervalMs = new AtomicLong(
+                Math.max(minIntervalMs, Math.min(maxIntervalMs, DEFAULT_INTERVAL_MS)));
 
-        log.info("DefaultDynamicIntervalManager initialized - target:{}, min:{}ms, max:{}ms",
-            targetDiffSize, minIntervalMs, maxIntervalMs);
+        log.info("DefaultDynamicIntervalManager initialized - target:{}, min:{}ms, max:{}ms, current:{}ms",
+                targetDiffSize, minIntervalMs, maxIntervalMs, currentIntervalMs.get());
     }
 
     @Override
     public void updateDiffStatistics(int diffSize) {
-
         updateRollingAverage(diffSize);
         adjustIntervalIfNeeded();
+    }
+
+    @Override
+    public long getCurrentIntervalMs() {
+        return currentIntervalMs.get();
     }
 
     /**

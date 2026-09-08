@@ -405,25 +405,38 @@ class StrategySelectTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "requires ep_size > 1"):
                 select_strategy(_cfg(ep_size=1), forced=forced, strict=strict)
 
-    def test_default_or_explicit_mega_moe_se_and_old_fused_conflict(self):
-        for se_value in (None, "1"):
-            with self.subTest(se_value=se_value), _env(
-                DSV4_USE_MEGA_MOE_SE=se_value,
-                DSV4_USE_MEGA_MOE_FUSED="1",
-            ):
-                forced, strict = _resolve_forced(None)
-                with self.assertRaises(RuntimeError) as cm:
-                    select_strategy(_cfg(ep_size=2), forced=forced, strict=strict)
-            self.assertIn("set DSV4_USE_MEGA_MOE_SE=0", str(cm.exception))
-
-    def test_explicit_se_zero_allows_old_fused(self):
+    def test_explicit_mega_moe_se_and_old_fused_conflict(self):
         with _env(
-            DSV4_USE_MEGA_MOE_SE="0",
+            DSV4_USE_MEGA_MOE_SE="1",
             DSV4_USE_MEGA_MOE_FUSED="1",
-        ), mock.patch.object(
-            MegaMoEFusedStrategy, "can_handle", return_value=True
         ):
-            self.assertIs(select_strategy(_cfg(ep_size=2)), MegaMoEFusedStrategy)
+            forced, strict = _resolve_forced(None)
+            with self.assertRaises(RuntimeError) as cm:
+                select_strategy(_cfg(ep_size=2), forced=forced, strict=strict)
+        self.assertIn("select exactly one Mega variant", str(cm.exception))
+
+    def test_unset_or_disabled_se_allows_explicit_old_fused(self):
+        for se_value in (None, "0"):
+            for mega_value in (None, "1"):
+                with self.subTest(
+                    se_value=se_value, mega_value=mega_value
+                ), _env(
+                    DSV4_USE_MEGA_MOE=mega_value,
+                    DSV4_USE_MEGA_MOE_SE=se_value,
+                    DSV4_USE_MEGA_MOE_FUSED="1",
+                ), mock.patch.object(
+                    MegaMoEFusedStrategy, "can_handle", return_value=True
+                ), mock.patch.object(
+                    MegaMoEStrategySE, "can_handle"
+                ) as se_can_handle:
+                    forced, strict = _resolve_forced(None)
+                    self.assertIs(
+                        select_strategy(
+                            _cfg(ep_size=2), forced=forced, strict=strict
+                        ),
+                        MegaMoEFusedStrategy,
+                    )
+                se_can_handle.assert_not_called()
 
     def test_family_disable_rejects_old_fused(self):
         for ep_size in (1, 2):

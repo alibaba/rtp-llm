@@ -41,6 +41,7 @@ public:
     bool                                     shouldRetry() const;
     void                                     setRetryable(bool retryable);
     void                                     setRequestTimeoutMs(int64_t request_timeout_ms);
+    void                                     setRetryTimeoutMs(int64_t retry_timeout_ms);
     bool                                     cancelled() const;
     virtual bool                             isRequestCancelled() const;
     bool                                     requestDeadlineExceeded() const;
@@ -61,6 +62,7 @@ public:
     bool                                  finished              = false;
     int64_t                               request_begin_time_us = 0;
     RequestDeadline                       request_deadline;
+    RequestDeadline                       retry_deadline;
     ErrorInfo                             error_info;
     grpc::Status                          error_status = grpc::Status::OK;
     RequestInfo                           request_info;
@@ -74,9 +76,9 @@ public:
     std::unique_ptr<telemetry::GrpcStatusSpanGuard> trace_span_guard;
 
 protected:
-    std::shared_ptr<GenerateStream>             stream_;
-    bool                                        retryable_ = true;
-    std::chrono::system_clock::time_point       request_begin_time_;
+    std::shared_ptr<GenerateStream>       stream_;
+    bool                                  retryable_ = true;
+    std::chrono::system_clock::time_point request_begin_time_;
 
 protected:
     void stopStream();
@@ -123,7 +125,8 @@ protected:
 // for prefill or decode retry
 #define EXECUTE_WITH_RETRY(func, generate_context, max_retries, retry_timeout_ms, retry_interval_ms)                   \
     int64_t begin_time_us = currentTimeUs();                                                                           \
-    auto    stage         = generate_context.stat_info.saveStage();                                                    \
+    generate_context.setRetryTimeoutMs(retry_timeout_ms);                                                              \
+    auto stage = generate_context.stat_info.saveStage();                                                               \
     for (int attempt = 0; attempt <= max_retries; ++attempt) {                                                         \
         generate_context.reset();                                                                                      \
         CHECK_REQUEST_STOP(generate_context)                                                                           \

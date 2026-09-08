@@ -138,6 +138,32 @@ public class FlexlbGrpcForwarder {
             FlexlbScheduleProtocol.FlexlbCancelRequestPB request) {
         ForwardGuard guard = applyForwardGuard(
                 request.getRequestId(), request.getForwardHop(), ForwardOperation.CANCEL);
+        return forwardCancel(request, guard, null);
+    }
+
+    public CompletionStage<CancelForwardResult> forwardCompensatingCancelToMaster(
+            FlexlbScheduleProtocol.FlexlbCancelRequestPB request,
+            String originalMasterHostIpPort) {
+        long timeoutMs = configService.loadBalanceConfig().getInternalRuntime()
+                .getMasterForwardRpcTimeoutMs();
+        return forwardCompensatingCancelToMaster(
+                request, originalMasterHostIpPort, timeoutMs);
+    }
+
+    CompletionStage<CancelForwardResult> forwardCompensatingCancelToMaster(
+            FlexlbScheduleProtocol.FlexlbCancelRequestPB request,
+            String originalMasterHostIpPort,
+            long timeoutMs) {
+        ForwardGuard guard = applyForwardGuard(
+                request.getRequestId(), request.getForwardHop(),
+                ForwardOperation.CANCEL, originalMasterHostIpPort);
+        return forwardCancel(request, guard, Math.max(1L, timeoutMs));
+    }
+
+    private CompletionStage<CancelForwardResult> forwardCancel(
+            FlexlbScheduleProtocol.FlexlbCancelRequestPB request,
+            ForwardGuard guard,
+            Long deadlineMs) {
         if (guard.blocked()) {
             return CompletableFuture.completedFuture(CancelForwardResult.failed(
                     guard.blockReason().failureCode(),
@@ -145,7 +171,7 @@ public class FlexlbGrpcForwarder {
         }
 
         String masterHostIpPort = guard.masterHostIpPort();
-        if (masterHostIpPort == null) {
+        if (masterHostIpPort == null || masterHostIpPort.isBlank()) {
             Logger.debug("Master unavailable for cancellation forward");
             reportForwardResult("LOCAL", "MASTER_NULL");
             return CompletableFuture.completedFuture(CancelForwardResult.noMaster());
@@ -156,10 +182,12 @@ public class FlexlbGrpcForwarder {
                 request.toBuilder().setForwardHop(guard.nextHop()).build();
         ListenableFuture<FlexlbScheduleProtocol.FlexlbCancelResponsePB> rpcFuture;
         try {
-            // As with Schedule, the future stub inherits the inbound gRPC
-            // Context deadline and cancellation.
-            rpcFuture = FlexlbServiceGrpc.newFutureStub(masterChannel(masterHostIpPort))
-                    .cancel(forwardedRequest);
+            FlexlbServiceGrpc.FlexlbServiceFutureStub stub =
+                    FlexlbServiceGrpc.newFutureStub(masterChannel(masterHostIpPort));
+            if (deadlineMs != null) {
+                stub = stub.withDeadlineAfter(deadlineMs, TimeUnit.MILLISECONDS);
+            }
+            rpcFuture = stub.cancel(forwardedRequest);
         } catch (RuntimeException error) {
             return CompletableFuture.completedFuture(cancelForwardFailure(
                     request.getRequestId(), guard, error));
@@ -173,6 +201,7 @@ public class FlexlbGrpcForwarder {
                         public void onSuccess(
                                 FlexlbScheduleProtocol.FlexlbCancelResponsePB response) {
                             if (response == null) {
+                                reportForwardResult(masterIp, "CANCEL_MISSING_RESPONSE");
                                 result.complete(CancelForwardResult.failed(
                                         "MISSING_RESPONSE", masterHostIpPort));
                                 return;
@@ -372,8 +401,16 @@ public class FlexlbGrpcForwarder {
             long requestId,
             int encodedHop,
             ForwardOperation operation) {
+        return applyForwardGuard(requestId, encodedHop, operation,
+                lbStatusConsistencyService.getMasterHostIpPort());
+    }
+
+    private ForwardGuard applyForwardGuard(
+            long requestId,
+            int encodedHop,
+            ForwardOperation operation,
+            String masterHostIpPort) {
         long incomingHop = Integer.toUnsignedLong(encodedHop);
-        String masterHostIpPort = lbStatusConsistencyService.getMasterHostIpPort();
         String localIp = lbStatusConsistencyService.getLocalHostIp();
         ForwardBlockReason blockReason = incomingHop >= MAX_FORWARD_HOPS
                 ? ForwardBlockReason.HOP_LIMIT

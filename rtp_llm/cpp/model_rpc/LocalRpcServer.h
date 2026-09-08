@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <deque>
 #include <iostream>
 #include <memory>
 #include <mutex>
@@ -133,13 +134,17 @@ protected:
                                      const std::shared_ptr<GenerateInput>& input,
                                      GenerateOutputs&                      last_outputs);
     grpc::Status authorizeTorchAllocatorDump(const TorchAllocatorDumpRequestPB& request) const;
-    grpc::Status beginTorchAllocatorDump(const std::string& dump_id);
-    void         finishTorchAllocatorDump();
-    grpc::Status executeAdmittedTorchAllocatorDump(const TorchAllocatorDumpRequestPB& request,
-                                                   TorchAllocatorDumpResponsePB*      response);
-    grpc::Status aggregateTorchAllocatorDumpResults(const std::string&                             dump_id,
-                                                    const std::vector<TorchAllocatorDumpResultPB>& results,
-                                                    TorchAllocatorDumpResponsePB*                  response) const;
+    grpc::Status authorizeTorchAllocatorDumpInternal(grpc::ServerContext*               context,
+                                                     const TorchAllocatorDumpRequestPB& request) const;
+    virtual bool isTorchAllocatorDumpInternalPeer(grpc::ServerContext* context) const;
+    grpc::Status
+    beginTorchAllocatorDump(const std::string& dump_id, bool internal_fanout = false, bool* owns_admission = nullptr);
+    void                               finishTorchAllocatorDump();
+    grpc::Status                       executeAdmittedTorchAllocatorDump(const TorchAllocatorDumpRequestPB& request,
+                                                                         TorchAllocatorDumpResponsePB*      response);
+    grpc::Status                       aggregateTorchAllocatorDumpResults(const std::string&                             dump_id,
+                                                                          const std::vector<TorchAllocatorDumpResultPB>& results,
+                                                                          TorchAllocatorDumpResponsePB*                  response) const;
     virtual TorchAllocatorDumpResultPB dumpTorchAllocatorOnCurrentProcess(const std::string& dump_id);
 
 protected:
@@ -158,8 +163,12 @@ protected:
     std::mutex                            torch_allocator_dump_mutex_;
     bool                                  torch_allocator_dump_in_progress_{false};
     bool                                  torch_allocator_dump_has_completed_{false};
+    bool                                  torch_allocator_dump_active_started_by_public_{false};
+    bool                                  torch_allocator_dump_active_internal_started_{false};
+    std::string                           torch_allocator_dump_active_id_;
     std::chrono::steady_clock::time_point torch_allocator_dump_last_completed_at_;
     std::unordered_set<std::string>       torch_allocator_dump_ids_;
+    std::deque<std::string>               torch_allocator_dump_id_order_;
 };
 
 }  // namespace rtp_llm

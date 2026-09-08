@@ -2,7 +2,11 @@ package org.flexlb.config;
 
 import org.junit.jupiter.api.Test;
 
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -48,6 +52,48 @@ class ConfigServiceTest {
                 () -> ConfigService.parse("{\"schemaVersion\":1}"));
 
         assertTrue(failure.getMessage().contains("schemaVersion"));
+    }
+
+    @Test
+    void removed_legacy_environment_fails_fast_with_migration_guidance() {
+        ConfigValidationException failure = assertThrows(
+                ConfigValidationException.class,
+                () -> new ConfigService(Map.of(
+                        ConfigService.FLEXLB_CONFIG_ENV, "{}",
+                        "CACHE_STATUS_MAX_INTERVAL_MS", "100",
+                        "DEFAULT_SCHEDULE_MODE", "QUEUE",
+                        "FLEXLB_MONITOR_MODE", "all")));
+
+        assertTrue(failure.getMessage().contains("CACHE_STATUS_MAX_INTERVAL_MS"));
+        assertTrue(failure.getMessage().contains("DEFAULT_SCHEDULE_MODE"));
+        assertTrue(failure.getMessage().contains("FLEXLB_MONITOR_MODE"));
+        assertTrue(failure.getMessage().contains("schemaVersion 2"));
+        assertTrue(failure.getMessage().contains("FLEXLB_MONITOR_METRIC_WHITELIST"));
+    }
+
+    @Test
+    void supported_monitor_environment_is_not_treated_as_legacy() {
+        FlexlbConfig config = new ConfigService(Map.of(
+                "FLEXLB_MONITOR_METRIC_WHITELIST", "flexlb_"))
+                .loadBalanceConfig();
+
+        assertEquals(FlexlbConfig.CURRENT_SCHEMA_VERSION, config.getSchemaVersion());
+    }
+
+    @Test
+    void readme_flexlb_config_examples_parse_strictly() throws Exception {
+        Path readme = Path.of(System.getProperty("maven.multiModuleProjectDirectory"),
+                "README.md");
+        String content = Files.readString(readme);
+        Matcher examples = Pattern.compile(
+                "export FLEXLB_CONFIG='(\\{.*?})'", Pattern.DOTALL)
+                .matcher(content);
+        int parsed = 0;
+        while (examples.find()) {
+            ConfigService.parse(examples.group(1));
+            parsed++;
+        }
+        assertEquals(2, parsed, "README FLEXLB_CONFIG example count changed");
     }
 
     @Test
@@ -233,6 +279,49 @@ class ConfigServiceTest {
                 """));
         assertTrue(removedHysteresis.getMessage()
                 .contains("availabilityHysteresisPercent"));
+    }
+
+    @Test
+    void rejects_inactive_routing_variant_fields() {
+        for (String document : new String[]{
+                """
+                {"router":{"roles":{"prefill":{"executionTimeEstimator":{
+                  "type":"LEARNING","expression":"sum(computeTokens)"
+                }}}}}
+                """,
+                """
+                {"router":{"roles":{"prefill":{"candidateChoice":{
+                  "type":"BEST_ONLY","relativeTolerance":0.1
+                }}}}}
+                """,
+                """
+                {"router":{"roles":{"prefill":{"candidateChoice":{
+                  "type":"RANDOM_WITHIN_TOLERANCE","pool":{"type":"RATIO"}
+                }}}}}
+                """,
+                """
+                {"router":{"roles":{"prefill":{"candidateChoice":{
+                  "type":"LEAST_RECENTLY_USED_IN_POOL","minimumToleranceMs":20,
+                  "pool":{"type":"RATIO"}
+                }}}}}
+                """,
+                """
+                {"router":{"roles":{"prefill":{"candidateChoice":{
+                  "type":"LEAST_RECENTLY_USED_IN_POOL",
+                  "pool":{"type":"RATIO","workers":2}
+                }}}}}
+                """,
+                """
+                {"router":{"roles":{"prefill":{"candidateChoice":{
+                  "type":"LEAST_RECENTLY_USED_IN_POOL",
+                  "pool":{"type":"FIXED","ratio":0.5,"minimumWorkers":1}
+                }}}}}
+                """}) {
+            ConfigValidationException failure = assertThrows(
+                    ConfigValidationException.class,
+                    () -> ConfigService.parse(document), document);
+            assertTrue(failure.getMessage().contains("active mode"), document);
+        }
     }
 
     @Test

@@ -79,6 +79,8 @@ from rtp_llm.dash_sc.grpc_metrics import (
     report_frontend_rpc_done,
 )
 from rtp_llm.dash_sc.inference.grammar_validator import (
+    GrammarCheckOverloaded,
+    GrammarCheckTimeout,
     GrammarCheckUnavailable,
     GrammarCompilationError,
     GrammarValidator,
@@ -1509,11 +1511,12 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                 return None
         except GrammarCompilationError as e:
             return DASH_ERROR_BAD_REQUEST, str(e)
+        except GrammarCheckOverloaded as e:
+            return DASH_ERROR_ADMISSION_OVERLOADED, f"grammar validation overloaded: {e}"
+        except GrammarCheckTimeout as e:
+            return DASH_ERROR_TIMEOUT, f"grammar validation timed out: {e}"
         except GrammarCheckUnavailable as e:
-            return (
-                DASH_ERROR_BAD_REQUEST,
-                f"grammar validation or compilation failed: {e}",
-            )
+            return DASH_ERROR_CAPACITY, f"grammar validation unavailable: {e}"
 
         if ok:
             return None
