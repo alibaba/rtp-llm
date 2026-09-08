@@ -1,5 +1,8 @@
 """CUDA-specific indexer operations for DeepSeek-V3.2 DSA mechanism."""
 
+import importlib
+from functools import lru_cache
+from types import ModuleType
 from typing import Any, Optional, Tuple
 
 import torch
@@ -9,18 +12,25 @@ from rtp_llm.models_py.distributed.collective_torch import Group, all_gather, ba
 from rtp_llm.models_py.kernels.cuda.fp8_kernel import sgl_per_token_group_quant_fp8
 from rtp_llm.ops.compute_ops import KVCache, rtp_llm_ops
 
-# Try to import CUDA dependencies, but don't fail if running on CPU
-try:
-    import deep_gemm
-except Exception as e:
-    print(f"Warning: Failed to import deep_gemm (likely running on CPU): {e}")
-    deep_gemm = None
 
-try:
-    import flashinfer.rope as rope
-except Exception as e:
-    print(f"Warning: Failed to import flashinfer.rope (likely running on CPU): {e}")
-    rope = None
+@lru_cache(maxsize=1)
+def _resolve_deep_gemm() -> ModuleType:
+    try:
+        return importlib.import_module("deep_gemm")
+    except (ImportError, OSError) as exc:
+        raise ImportError(
+            "DeepSeek indexer requires the optional deep_gemm backend"
+        ) from exc
+
+
+@lru_cache(maxsize=1)
+def _resolve_flashinfer_rope() -> ModuleType:
+    try:
+        return importlib.import_module("flashinfer.rope")
+    except (ImportError, OSError) as exc:
+        raise ImportError(
+            "DeepSeek indexer RoPE requires the optional flashinfer backend"
+        ) from exc
 
 
 def _unpack_ue8m0_scale(sf_packed: torch.Tensor) -> torch.Tensor:
@@ -99,11 +109,41 @@ class IndexerOp(nn.Module):
         self.index_head_dim = index_head_dim
         self.index_topk = index_topk
         self.rope_head_dim = rope_head_dim
-        self.cos_sin_cache = cos_sin_cache
+        self.register_buffer("cos_sin_cache", None, persistent=False)
+        if cos_sin_cache is not None:
+            self.bind_rope_cache(cos_sin_cache)
         self.blocksize = blocksize
         self.block_size = block_size
         self.scale_fmt = scale_fmt
         self.is_neox_style = is_neox_style
+
+    def bind_rope_cache(self, cos_sin_cache: torch.Tensor) -> None:
+        """Bind the canonical FP32 RoPE cache tracked by the owning model."""
+        if not isinstance(cos_sin_cache, torch.Tensor):
+            raise TypeError("IndexerOp cos_sin_cache must be a torch.Tensor")
+        if cos_sin_cache.dtype != torch.float32:
+            raise TypeError(
+                "IndexerOp cos_sin_cache must use torch.float32, got "
+                f"{cos_sin_cache.dtype}"
+            )
+        self.cos_sin_cache = cos_sin_cache
+
+    def _apply(self, fn, recurse: bool = True):
+        source_cos_sin_cache = self.cos_sin_cache
+        result = super()._apply(fn, recurse)
+        if (
+            source_cos_sin_cache is not None
+            and self.cos_sin_cache is not None
+            and self.cos_sin_cache.dtype != torch.float32
+        ):
+            # RoPE kernels require an FP32 cache. Module.to(dtype=...) should
+            # still migrate its device, but must not silently lower precision
+            # or round the original FP32 values through the requested dtype.
+            self.cos_sin_cache = source_cos_sin_cache.to(
+                device=self.cos_sin_cache.device,
+                dtype=torch.float32,
+            )
+        return result
 
     def apply_rope_and_rotate_q_k(
         self,
@@ -127,13 +167,14 @@ class IndexerOp(nn.Module):
         k_pe = k[:, : self.index_head_dim - self.rope_head_dim]
 
         # Apply RoPE (same as vllm indexer rope)
-        if self.cos_sin_cache is not None:
-            rope._apply_rope_pos_ids_cos_sin_cache(
+        cos_sin_cache = self.cos_sin_cache
+        if cos_sin_cache is not None:
+            _resolve_flashinfer_rope()._apply_rope_pos_ids_cos_sin_cache(
                 q=q_pe,
                 k=k_pe.unsqueeze(1),
                 q_rope=q_pe,
                 k_rope=k_pe.unsqueeze(1),
-                cos_sin_cache=self.cos_sin_cache,
+                cos_sin_cache=cos_sin_cache,
                 pos_ids=positions,
                 interleave=not self.is_neox_style,
             )
@@ -171,13 +212,14 @@ class IndexerOp(nn.Module):
         q_pe = q[:, :, : self.index_head_dim - self.rope_head_dim]
         k_pe = k[:, : self.index_head_dim - self.rope_head_dim]
 
-        if self.cos_sin_cache is not None and full_rope_pos_ids is not None:
-            rope._apply_rope_pos_ids_cos_sin_cache(
+        cos_sin_cache = self.cos_sin_cache
+        if cos_sin_cache is not None and full_rope_pos_ids is not None:
+            _resolve_flashinfer_rope()._apply_rope_pos_ids_cos_sin_cache(
                 q=q_pe,
                 k=k_pe.unsqueeze(1),
                 q_rope=q_pe,
                 k_rope=k_pe.unsqueeze(1),
-                cos_sin_cache=self.cos_sin_cache,
+                cos_sin_cache=cos_sin_cache,
                 pos_ids=full_rope_pos_ids,
                 interleave=not self.is_neox_style,
             )
@@ -206,13 +248,14 @@ class IndexerOp(nn.Module):
         k_pe = k[:, : self.index_head_dim - self.rope_head_dim]
 
         # Apply RoPE (same as vllm indexer rope)
-        if self.cos_sin_cache is not None:
-            rope._apply_rope_pos_ids_cos_sin_cache(
+        cos_sin_cache = self.cos_sin_cache
+        if cos_sin_cache is not None:
+            _resolve_flashinfer_rope()._apply_rope_pos_ids_cos_sin_cache(
                 q=k_pe.unsqueeze(1),
                 k=k_pe.unsqueeze(1),
                 q_rope=k_pe.unsqueeze(1),
                 k_rope=k_pe.unsqueeze(1),
-                cos_sin_cache=self.cos_sin_cache,
+                cos_sin_cache=cos_sin_cache,
                 pos_ids=positions,
                 interleave=not self.is_neox_style,
             )
@@ -385,6 +428,7 @@ class IndexerOp(nn.Module):
             attention_inputs.kv_cache_kernel_block_id_device.shape[1] * self.blocksize
         )
 
+        deep_gemm = _resolve_deep_gemm()
         schedule_metadata = deep_gemm.get_paged_mqa_logits_metadata(
             fmha_params.kvlen_d,
             self.blocksize,
@@ -474,7 +518,7 @@ class IndexerOp(nn.Module):
             fmha_params.ks is not None and fmha_params.ke is not None
         ), "ks/ke must be prepared in prefill"
 
-        logits = deep_gemm.fp8_mqa_logits(
+        logits = _resolve_deep_gemm().fp8_mqa_logits(
             q_fp8,
             kv_fp8,
             weights,
@@ -585,7 +629,7 @@ class IndexerOp(nn.Module):
             lengths: torch.Tensor,
             topk_off: torch.Tensor,
         ) -> torch.Tensor:
-            logits_p = deep_gemm.fp8_mqa_logits(
+            logits_p = _resolve_deep_gemm().fp8_mqa_logits(
                 q_part,
                 kv_fp8_full,
                 weights_part,
@@ -603,9 +647,12 @@ class IndexerOp(nn.Module):
 
         if total_local_ids.size(0) > 0:
             topk = run_part_logits_topk(
-                q0, weights_sq0,
-                precomputed_ks, precomputed_ke,
-                precomputed_lengths, precomputed_topk_off,
+                q0,
+                weights_sq0,
+                precomputed_ks,
+                precomputed_ke,
+                precomputed_lengths,
+                precomputed_topk_off,
             )
         else:
             topk = None

@@ -17,8 +17,8 @@ inline std::string validateInterleavedMropeConfig(
         return "rope dim exceeds size_per_head: rope dim=" + std::to_string(rope_dim)
                + ", size_per_head=" + std::to_string(size_per_head);
     }
-    if (mrope_dim1 < 0 || mrope_dim2 < 0 || mrope_dim3 < 0) {
-        return "sections must be non-negative";
+    if (mrope_dim1 <= 0 || mrope_dim2 <= 0 || mrope_dim3 <= 0) {
+        return "sections must be positive";
     }
 
     const int64_t section_sum =

@@ -161,6 +161,18 @@ cc_library(
 )
 
 cc_library(
+    name = "block_pool_config",
+    hdrs = [
+        "BlockPoolConfig.h",
+        "BlockPoolConfigHelper.h",
+        "MemoryLayoutConfig.h",
+    ],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+    deps = [":cache_types"],
+)
+
+cc_library(
     name = "block_pool",
     srcs = [
         "BlockCache.cc",
@@ -171,16 +183,14 @@ cc_library(
     hdrs = [
         "BlockCache.h",
         "BlockPool.h",
-        "BlockPoolConfig.h",
-        "BlockPoolConfigHelper.h",
         "BlockRefCounter.h",
         "MemoryLayoutStrategy.h",
-        "MemoryLayoutConfig.h",
         "SharedBlockCache.h",
     ],
     copts = copts(),
     visibility = ["//visibility:public"],
     deps = [
+        ":block_pool_config",
         ":cache_types",
         "//rtp_llm/cpp/disaggregate/cache_store:cache_store_interface",
         "//rtp_llm/cpp/utils:kv_cache_utils",

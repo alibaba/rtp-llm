@@ -78,6 +78,8 @@ class ModelConfig(CppModelConfig):
         "phy2log_path",
         "lora_infos",
         "headwise_config",
+        "use_new_loader",
+        "require_weight_update",
     }
 
     # Known C++ ModelConfig members (from ModelConfig.h)
@@ -565,6 +567,11 @@ class ModelConfig(CppModelConfig):
         self.render_config: Optional[Any] = None  # RenderConfig for renderer factory
         self.mm_related_params = VitParameters()
         self.quant_config = None
+        # None selects the model registry default; bool is an explicit override.
+        self.use_new_loader: Optional[bool] = None
+        # None means the deployment has not declared whether UpdateWeights is
+        # required.  Automatic NewLoader routing requires an explicit choice.
+        self.require_weight_update: Optional[bool] = None
 
     def apply_override_args(self, json_model_override_args: str) -> None:
         """Apply model override arguments to ModelConfig.
@@ -868,6 +875,8 @@ def build_model_config(
     model_config.ckpt_path = model_args.ckpt_path
     model_config.tokenizer_path = model_args.tokenizer_path
     model_config.model_type = model_args.model_type
+    model_config.use_new_loader = model_args.use_new_loader
+    model_config.require_weight_update = model_args.require_weight_update
     if vit_config:
         model_config.extra_data_path = vit_config.extra_data_path
         model_config.local_extra_data_path = vit_config.local_extra_data_path
