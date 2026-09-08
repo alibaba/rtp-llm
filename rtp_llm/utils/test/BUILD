@@ -9,6 +9,12 @@ filegroup(
 )
 
 py_test(
+    name = "kimi_k3_mtp_checkpoint_test",
+    srcs = ["kimi_k3_mtp_checkpoint_test.py", "//rtp_llm:utils/kimi_k3_mtp_checkpoint.py"],
+    timeout = "short",
+)
+
+py_test(
     name = "ckpt_database_test",
     srcs = [
         "ckpt_database_test.py",

@@ -51,6 +51,19 @@ class StartKimiK3PdTest(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             return result.stdout
 
+    def test_configurable_parallelism_reaches_launcher(self):
+        for tp in (1, 2, 4, 8):
+            for role in ("prefill", "decode"):
+                with self.subTest(tp=tp, role=role):
+                    output = self.run_dry_run(role, KIMI_K3_TP_SIZE=str(tp), KIMI_K3_EP_SIZE=str(tp))
+                    self.assertIn(f"TP{tp}/DP1/EP{tp}", output)
+                    self.assertIn(f"--tp_size {tp}", output)
+                    self.assertIn(f"--ep_size {tp}", output)
+                    self.assertIn(f"--world_size {tp}", output)
+                    self.assertIn(f"--local_world_size {tp}", output)
+                    if role == "prefill":
+                        self.assertIn(f"shard={int(tp % 2 == 0)}", output)
+
     def test_defaults_to_complete_k3_think_boundary_for_both_roles(self) -> None:
         for role in ("prefill", "decode"):
             with self.subTest(role=role):

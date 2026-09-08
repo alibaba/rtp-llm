@@ -171,25 +171,30 @@ class KimiK3Fp8WeightTest(unittest.TestCase):
                 workspace._barrier = Mock()
                 self.assertTrue(rs.configure_gemm_reduce_scatter(group, "cuda:0", fp8=True, **kwargs))
 
-    def test_attention_config_does_not_enable_draft_or_global_quantization(self):
+    def test_attention_config_enables_mtp_but_not_eagle3_or_global_quantization(self):
         from rtp_llm.config.model_config import ModelConfig
         from rtp_llm.models.kimi_k3.kimi_k3 import KimiK3ModelConfig
 
-        for model_type in ("kimi_k3", "kimi_k3_mla_swa_eagle3"):
+        for model_type in ("kimi_k3", "kimi_k3_mtp", "kimi_k3_mla_swa_eagle3"):
             config = KimiK3ModelConfig()
             config.model_type = model_type
             config.data_type = "bf16"
+            config.attn_config.use_mla = True
             config.quant_config = None
             with patch.dict(
-                os.environ, {"KIMI_K3_ATTENTION_QUANTIZATION": "fp8_per_block"}
+                os.environ, {"KIMI_K3_ATTENTION_QUANTIZATION": "fp8_per_block", "KIMI_K3_MLA_FP8": "1"}
             ):
                 with patch.object(
                     ModelConfig, "init_precision_config", return_value=None
                 ):
                     config.init_precision_config(None, None)
             self.assertIsNone(config.quant_config)
+            self.assertEqual(config.attn_config.mla_fp8_compute, "eagle3" not in model_type)
+            if "eagle3" not in model_type:
+                from rtp_llm.ops import KvCacheDataType
+                self.assertEqual(config.attn_config.kv_cache_dtype, KvCacheDataType.FP8)
             self.assertEqual(
-                config.k3_attention_quant_config is not None, model_type == "kimi_k3"
+                config.k3_attention_quant_config is not None, "eagle3" not in model_type
             )
 
     def test_reference_mode_ignores_workspace_created_by_bf16_draft(self):

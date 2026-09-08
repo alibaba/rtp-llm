@@ -57,7 +57,7 @@
 # answers and cache metadata, then reports PASS/FAIL back to Decode. Both
 # commands therefore have a meaningful exit status and clean only their own
 # process group.
-# The full-model profile always enables Kimi K3 Eagle3 MTP on both roles. The
+# The full-model profile enables the selected K3 draft mode on both roles. The
 # role-local draft checkpoint is mandatory; there is no non-MTP fallback.
 
 set -Eeuo pipefail
@@ -84,7 +84,8 @@ and result channel. The default result channel is DECODE host at DECODE port +
 
 Weight FP8 and MLA FP8 are enabled by default. Set attention quantization to
 none and MLA FP8 to 0 for BF16; use the same precision and scales on both roles.
-The smoke always uses Eagle3 MTP. See example/k3/FP8_MLA.md for FP8 examples.
+EAGLE3 remains the default draft; SP_TYPE=mtp selects independent K3 MTP.
+See example/k3/FP8_MLA.md for FP8 examples.
 
 Merge-gate accuracy validation must use SMOKE_SUITE=all. SMOKE_SUITE=flow is
 only a four-layer RDMA connectivity/multi-round preflight and does not satisfy
@@ -160,8 +161,16 @@ role="${1,,}"
 
 : "${PREFILL_ENDPOINT:?PREFILL_ENDPOINT is required}"
 : "${DECODE_ENDPOINT:?DECODE_ENDPOINT is required}"
-CHECKPOINT_PATH="${CHECKPOINT_PATH:-/ssd/2/kimi-k3}"
+CHECKPOINT_PATH="${CHECKPOINT_PATH:?CHECKPOINT_PATH is required}"
 SMOKE_RUN_ID="${SMOKE_RUN_ID:-manual}"
+smoke_sp_type="${SP_TYPE:-eagle3}"
+case "${smoke_sp_type}" in
+    eagle3) smoke_sp_model_type=kimi_k3_mla_swa_eagle3 ;;
+    mtp) smoke_sp_model_type=kimi_k3_mtp ;;
+    *) die "this smoke requires SP_TYPE=eagle3 or mtp" ;;
+esac
+[[ -z "${SP_MODEL_TYPE:-}" || "${SP_MODEL_TYPE}" == "${smoke_sp_model_type}" ]] \
+    || die "SP_MODEL_TYPE does not match SP_TYPE=${smoke_sp_type}"
 [[ "${SMOKE_RUN_ID}" =~ ^[A-Za-z0-9._-]+$ ]] \
     || die "SMOKE_RUN_ID may contain only letters, digits, dot, underscore and dash"
 
@@ -206,20 +215,20 @@ esac
 [[ -f "${checkpoint_real}/model.safetensors.index.json" ]] \
     || die "missing checkpoint model.safetensors.index.json"
 sp_checkpoint_real="$(realpath -e "${SP_CHECKPOINT_PATH:?SP_CHECKPOINT_PATH is required}")" \
-    || die "Eagle3 checkpoint does not exist: ${SP_CHECKPOINT_PATH}"
+    || die "draft checkpoint does not exist: ${SP_CHECKPOINT_PATH}"
 case "${sp_checkpoint_real}" in
     /data[0-9]*/* | /data/* | /ssd/*) ;;
-    *) die "Eagle3 checkpoint must be on a local data disk: ${sp_checkpoint_real}" ;;
+    *) die "draft checkpoint must be on a local data disk: ${sp_checkpoint_real}" ;;
 esac
 sp_checkpoint_fs="$(findmnt -T "${sp_checkpoint_real}" -n -o FSTYPE)"
 sp_checkpoint_source="$(findmnt -T "${sp_checkpoint_real}" -n -o SOURCE)"
 case "${sp_checkpoint_fs}:${sp_checkpoint_source}" in
     nfs*:* | cifs:* | smb*:* | fuse.*:* | *[Nn][Aa][Ss]*)
-        die "network/NAS Eagle3 checkpoint is forbidden: ${sp_checkpoint_fs}:${sp_checkpoint_source}"
+        die "network/NAS draft checkpoint is forbidden: ${sp_checkpoint_fs}:${sp_checkpoint_source}"
         ;;
 esac
 [[ -f "${sp_checkpoint_real}/config.json" ]] \
-    || die "missing Eagle3 checkpoint config.json"
+    || die "missing draft checkpoint config.json"
 smoke_expected_layers="${SMOKE_EXPECTED_LAYERS:-93}"
 [[ "${smoke_expected_layers}" =~ ^[1-9][0-9]*$ ]] \
     || die "SMOKE_EXPECTED_LAYERS must be a positive integer"
@@ -250,13 +259,19 @@ if expected_layers not in layer_counts:
     )
 print(f"checkpoint layers={expected_layers}")
 PY
-case "${smoke_expected_layers}" in
-    93) smoke_eagle3_aux_layer_ids=0,44,88 ;;
-    4) smoke_eagle3_aux_layer_ids=0,1,3 ;;
-    *)
-        die "no validated Eagle3 aux-layer profile for ${smoke_expected_layers} target layers"
-        ;;
-esac
+smoke_eagle3_aux_layer_ids=""
+if [[ "${smoke_sp_type}" == eagle3 ]]; then
+    smoke_eagle3_aux_layer_ids="${KIMI_K3_EAGLE3_AUX_LAYER_IDS:-}"
+    if [[ -z "${smoke_eagle3_aux_layer_ids}" ]]; then
+        case "${smoke_expected_layers}" in
+            93) smoke_eagle3_aux_layer_ids=0,44,88 ;;
+            4) smoke_eagle3_aux_layer_ids=0,1,3 ;;
+            *)
+                die "no validated Eagle3 aux-layer profile for ${smoke_expected_layers} target layers"
+                ;;
+        esac
+    fi
+fi
 
 artifact_root="${SMOKE_ARTIFACT_ROOT:-/tmp/kimi-k3-two-host-pd-smoke}"
 role_dir="${artifact_root}/${SMOKE_RUN_ID}/${role}"
@@ -279,6 +294,14 @@ done
 smoke_block_size="${SMOKE_BLOCK_SIZE:-4096}"
 smoke_kernel_block_size="${SMOKE_KERNEL_BLOCK_SIZE:-128}"
 smoke_chunk_tokens="${SMOKE_CHUNK_TOKENS:-65536}"
+smoke_tp_size="${KIMI_K3_TP_SIZE:-8}"
+smoke_ep_size="${KIMI_K3_EP_SIZE:-${smoke_tp_size}}"
+[[ "${smoke_tp_size}" =~ ^[1-9][0-9]*$ && "${smoke_ep_size}" == "${smoke_tp_size}" ]] \
+    || die "this K3 MegaMoE smoke requires positive TP == EP"
+smoke_proposal_tokens="${GEN_NUM_PER_CIRCLE:-3}"
+[[ "${smoke_proposal_tokens}" =~ ^[1-9][0-9]*$ ]] \
+    || die "GEN_NUM_PER_CIRCLE must be positive"
+smoke_shared_expert_shard=$((smoke_tp_size % 2 == 0))
 smoke_linear_step="${SMOKE_LINEAR_STEP:-1}"
 smoke_chunkwise_rdma="${SMOKE_CHUNKWISE_RDMA:-1}"
 smoke_rdma_prewarm_attempts="${SMOKE_RDMA_PREWARM_ATTEMPTS:-3}"
@@ -294,6 +317,7 @@ for size_value in \
     [[ "${size_value}" =~ ^[1-9][0-9]*$ ]] \
         || die "smoke block/chunk/linear settings must be positive integers"
 done
+smoke_mega_tokens=$(( (smoke_chunk_tokens + smoke_tp_size - 1) / smoke_tp_size ))
 ((smoke_block_size % 64 == 0)) \
     || die "SMOKE_BLOCK_SIZE must be divisible by the cuLA checkpoint step 64"
 [[ "${smoke_chunkwise_rdma}" == "0" || "${smoke_chunkwise_rdma}" == "1" ]] \
@@ -434,6 +458,17 @@ verify_fastsafetensors_log() {
 verify_rdma_log() {
     local engine_log="${role_dir}/runtime/work/${role}/logs/engine.log"
     local evidence_file="${role_dir}/rdma-evidence.txt"
+    local deadline=$((SECONDS + startup_timeout))
+    # Rank zero's HTTP health can precede the other ranks' cache transports.
+    # Sending a request then races their listeners and poisons retry state.
+    until python3 "${repo_root}/example/k3/kimi_k3_rdma_readiness.py" "${engine_log}" --ranks "${smoke_tp_size}"; do
+        if ! kill -0 "${service_pid}" 2>/dev/null; then
+            die "${role} service exited before all ${smoke_tp_size} RDMA ranks were ready"
+        fi
+        ((SECONDS < deadline)) || die "timed out waiting for all ${smoke_tp_size} RDMA ranks"
+        sleep 2
+    done
+    grep -E 'rdma messager init success' "${engine_log}" >"${role_dir}/rdma-all-ranks-ready.txt"
     grep -E 'rdma listen port is .*rdma_mode is \[1\]' "${engine_log}" \
         >"${evidence_file}" \
         || die "startup log has no positive Barex RDMA evidence"
@@ -491,7 +526,11 @@ verify_role_environment() {
         "${smoke_chunkwise_rdma}" \
         "${sp_checkpoint_real}" \
         "${smoke_eagle3_aux_layer_ids}" \
-        "${smoke_accl_use_nics}" <<'PY'
+        "${smoke_accl_use_nics}" \
+        "${smoke_sp_type}" \
+        "${smoke_sp_model_type}" \
+        "${smoke_tp_size}" \
+        "${smoke_proposal_tokens}" <<'PY'
 import os
 import pathlib
 import sys
@@ -508,6 +547,10 @@ import sys
     sp_checkpoint_path,
     eagle3_aux_layer_ids,
     accl_use_nics,
+    sp_type,
+    sp_model_type,
+    tp_size,
+    proposal_tokens,
 ) = sys.argv[1:]
 entries = pathlib.Path(f"/proc/{pid}/environ").read_bytes().split(b"\0")
 env = {}
@@ -533,14 +576,19 @@ expected = {
     "FLASHINFER_CUDA_ARCH_LIST": "10.3a",
     "DEEPGEMM_JIT_COMPILER": "auto",
     "FT_CORE_DUMP_ON_EXCEPTION": "1",
-    "SP_TYPE": "eagle3",
-    "SP_MODEL_TYPE": "kimi_k3_mla_swa_eagle3",
+    "SP_TYPE": sp_type,
+    "SP_MODEL_TYPE": sp_model_type,
     "SP_CHECKPOINT_PATH": sp_checkpoint_path,
     "SP_ACT_TYPE": "BF16",
-    "GEN_NUM_PER_CIRCLE": "3",
-    "KIMI_K3_EAGLE3_AUX_LAYER_IDS": eagle3_aux_layer_ids,
+    "GEN_NUM_PER_CIRCLE": proposal_tokens,
+    "KIMI_K3_TP_SIZE": tp_size,
+    "KIMI_K3_EP_SIZE": tp_size,
 }
 absent = ["CUDA_LAUNCH_BLOCKING", "large_segment_size_mb"]
+if sp_type == "eagle3":
+    expected["KIMI_K3_EAGLE3_AUX_LAYER_IDS"] = eagle3_aux_layer_ids
+else:
+    absent.append("KIMI_K3_EAGLE3_AUX_LAYER_IDS")
 if accl_use_nics:
     expected["ACCL_USE_NICS"] = accl_use_nics
 else:
@@ -553,8 +601,8 @@ if role == "prefill":
         "REUSE_CACHE": "1",
         "KIMI_K3_KDA_POOL_BLOCKS": "0",
         "RESERVER_RUNTIME_MEM_MB": "15000",
-        "MEGA_MOE_MAX_TOKENS_PER_RANK": "8192",
-        "KIMI_K3_SHARED_EXPERT_WEIGHT_SHARD": "1",
+        "MEGA_MOE_MAX_TOKENS_PER_RANK": str((int(chunk_tokens) + int(tp_size) - 1) // int(tp_size)),
+        "KIMI_K3_SHARED_EXPERT_WEIGHT_SHARD": str(int(int(tp_size) % 2 == 0)),
         "KIMI_K3_PREFILL_CHUNK_TOKENS": chunk_tokens,
         "ENABLE_CUDA_GRAPH": "0",
         "ENABLE_MEMORY_CACHE": "1",
@@ -642,12 +690,18 @@ apply_validated_common_profile() {
     export FLASHINFER_CUDA_ARCH_LIST=10.3a
     export DEEPGEMM_JIT_COMPILER=auto
     export FT_CORE_DUMP_ON_EXCEPTION=1
-    export SP_TYPE=eagle3
-    export SP_MODEL_TYPE=kimi_k3_mla_swa_eagle3
+    export SP_TYPE="${smoke_sp_type}"
+    export SP_MODEL_TYPE="${smoke_sp_model_type}"
     export SP_CHECKPOINT_PATH="${sp_checkpoint_real}"
     export SP_ACT_TYPE=BF16
-    export GEN_NUM_PER_CIRCLE=3
-    export KIMI_K3_EAGLE3_AUX_LAYER_IDS="${smoke_eagle3_aux_layer_ids}"
+    export GEN_NUM_PER_CIRCLE="${smoke_proposal_tokens}"
+    export KIMI_K3_TP_SIZE="${smoke_tp_size}"
+    export KIMI_K3_EP_SIZE="${smoke_ep_size}"
+    if [[ "${smoke_sp_type}" == eagle3 ]]; then
+        export KIMI_K3_EAGLE3_AUX_LAYER_IDS="${smoke_eagle3_aux_layer_ids}"
+    else
+        unset KIMI_K3_EAGLE3_AUX_LAYER_IDS
+    fi
     export RTP_LLM_SERVICE_ID="kimi-k3-full-pd-${SMOKE_RUN_ID}"
     # Keep TP Unix-domain sockets below Linux's 107-byte path limit even when
     # the externally visible run ID is descriptive and long.
@@ -667,8 +721,8 @@ apply_validated_prefill_profile() {
     export REUSE_CACHE=1
     export KIMI_K3_KDA_POOL_BLOCKS=0
     export RESERVER_RUNTIME_MEM_MB=15000
-    export MEGA_MOE_MAX_TOKENS_PER_RANK=8192
-    export KIMI_K3_SHARED_EXPERT_WEIGHT_SHARD=1
+    export MEGA_MOE_MAX_TOKENS_PER_RANK="${smoke_mega_tokens}"
+    export KIMI_K3_SHARED_EXPERT_WEIGHT_SHARD="${smoke_shared_expert_shard}"
     export KIMI_K3_PREFILL_CHUNK_TOKENS="${smoke_chunk_tokens}"
     export ENABLE_CUDA_GRAPH=0
     export ENABLE_MEMORY_CACHE=1
@@ -706,7 +760,7 @@ fi
 
 echo "[${role}] artifacts=${role_dir}"
 echo "[${role}] checkpoint=${checkpoint_real} (${checkpoint_fs}:${checkpoint_source})"
-echo "[${role}] eagle3_checkpoint=${sp_checkpoint_real} (${sp_checkpoint_fs}:${sp_checkpoint_source})"
+echo "[${role}] draft_checkpoint=${sp_checkpoint_real} (${sp_checkpoint_fs}:${sp_checkpoint_source})"
 echo "[${role}] endpoints prefill=${PREFILL_ENDPOINT} decode=${DECODE_ENDPOINT}"
 
 setsid "${launcher}" "${role}" >"${service_log}" 2>&1 &
@@ -809,7 +863,7 @@ case "${smoke_suite}" in
     *) die "SMOKE_SUITE must be flow or all" ;;
 esac
 
-python3 "${case_runner}" \
+python3 -u "${case_runner}" \
     --base-url "http://127.0.0.1:${prefill_port}" \
     --decode-health-url "http://${decode_host}:${decode_port}/health" \
     --output "${accuracy_file}" \
