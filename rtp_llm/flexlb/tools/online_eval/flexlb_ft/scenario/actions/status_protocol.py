@@ -320,6 +320,28 @@ def _count(value):
     return value
 
 
+def _alive_count(info, role):
+    summary = info["worker_summary"]
+    if isinstance(summary, dict) and role in summary:
+        return _count(summary[role]["alive"])
+    # HttpLoadBalanceServer.buildWorkerSummary omits roles whose directory
+    # is empty and returns null when every role is absent. This is a sparse
+    # successful response, not permission to turn unavailable data into zero.
+    if info.get("success") is not True or info.get("code") != 200:
+        raise RuntimeError("absent role lacks a successful Master info response")
+    if summary is None:
+        return 0
+    if not isinstance(summary, dict):
+        raise RuntimeError("Master worker_summary is not a role map")
+    for key, entry in summary.items():
+        if not isinstance(key, str) or not key or not isinstance(entry, dict):
+            raise RuntimeError("malformed Master worker role summary")
+        discovered, alive = _count(entry["discovered"]), _count(entry["alive"])
+        if alive > discovered:
+            raise RuntimeError("Master alive count exceeds discovered count")
+    return 0
+
+
 def metric(frame, name):
     if name == "scheduler_tombstones":
         from ...debug_client import check_scheduler_tombstone
@@ -416,7 +438,7 @@ def metric(frame, name):
         values["fingerprint"] = [scheduler, p, d]
         return values[name]
     if name.startswith("alive_"):
-        return _count(frame["info"]["worker_summary"][name[6:].upper()]["alive"])
+        return _alive_count(frame["info"], name[6:].upper())
     if name.startswith("ttl_"):
         return frame["ttl"][name[4:]]
     engines = frame["mock"]

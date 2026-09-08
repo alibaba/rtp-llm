@@ -263,3 +263,21 @@ ConfigOverride representations are compared as full rendered config. Mutating
 any of queue timeout, perf preset or discovery back to the generic base is
 rejected. This is local configuration evidence, not a Java execution or retroactive
 acceptance of earlier runs. No old FAIL/ERROR result is changed.
+
+## Sparse Master role summaries
+
+A successful `/rtp_llm/master/info` omits a role when its worker directory is
+empty (`HttpLoadBalanceServer.buildWorkerSummary`), and explicitly returns null
+for an entirely empty summary. Alive observations now interpret that documented
+sparse response as zero for the absent role. Missing `worker_summary`, failed or
+untyped response envelopes, malformed role maps, missing counters inside a present
+role and invalid counts remain ERROR. Raw responses are retained unchanged.
+
+This fixes framework decoding in the two batch-02 restart observations at frozen
+3e16092e4ee28df35a0f950dd91424820d21e767; it does not rewrite their original
+PREFILL KeyError results or claim a successful rerun of their subsequent fences.
+
+The old `master_alive_count` returned -1 for an absent role. The new value is
+0 only for a verified sparse successful response: crash-drop `<=0` and restart
+`>=1` preserve their old truth values. Unknown/unavailable old -1 results are
+not adopted as proof of a drop.

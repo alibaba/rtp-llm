@@ -68,6 +68,64 @@ class StatusProtocolTest(unittest.TestCase):
         with self.assertRaises(KeyError):
             status.metric(frame, "decode_total_load")
 
+    def test_sparse_successful_master_summary_proves_absent_role_only(self):
+        # Exact relevant fields from the preserved full385 batch-02 HTTP
+        # response for instance-6863b441...; the original result stays ERROR.
+        info = {
+            "success": True,
+            "code": 200,
+            "ready": False,
+            "worker_summary": {
+                "DECODE": {"discovered": 1, "alive": 1, "maxQueueTokens": 0}
+            },
+        }
+        original = copy.deepcopy(info)
+        self.assertEqual(0, status.metric({"info": info}, "alive_prefill"))
+        self.assertEqual(1, status.metric({"info": info}, "alive_decode"))
+        self.assertEqual(original, info)
+        restored = copy.deepcopy(info)
+        restored["worker_summary"]["PREFILL"] = {"discovered": 1, "alive": 1}
+        self.assertEqual(1, status.metric({"info": restored}, "alive_prefill"))
+        # The producer explicitly emits null for an entirely empty directory.
+        self.assertEqual(
+            0,
+            status.metric(
+                {"info": {"success": True, "code": 200, "worker_summary": None}},
+                "alive_prefill",
+            ),
+        )
+
+    def test_missing_or_malformed_master_evidence_is_not_absent_role_zero(self):
+        bad = [
+            None,
+            {},
+            {"success": True, "code": 200},
+            {"worker_summary": {}},
+            {"success": False, "code": 500, "worker_summary": {}},
+            {"success": True, "code": 200, "worker_summary": []},
+            {"success": True, "code": 200, "worker_summary": {"DECODE": {}}},
+            {
+                "success": True,
+                "code": 200,
+                "worker_summary": {"PREFILL": {"discovered": 0}},
+            },
+            {
+                "success": True,
+                "code": 200,
+                "worker_summary": {"DECODE": {"discovered": 1, "alive": True}},
+            },
+            {
+                "success": True,
+                "code": 200,
+                "worker_summary": {"DECODE": {"discovered": 0, "alive": 1}},
+            },
+        ]
+        for info in bad:
+            with self.subTest(info=info), self.assertRaises(
+                (KeyError, TypeError, RuntimeError, ValueError)
+            ):
+                status.metric({"info": info}, "alive_prefill")
+
     def test_unknown_fault_fields_and_channels_rejected_before_io(self):
         for params in [
             {"fault": "status_fake_task", "config": {"batchId": 1}},
