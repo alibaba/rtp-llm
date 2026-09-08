@@ -3,7 +3,9 @@
 #include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
+#include <functional>
 #include <memory>
+#include <utility>
 
 namespace rtp_llm {
 
@@ -72,10 +74,13 @@ private:
 
 class CacheStoreServerLoadMetricsCollector {
 public:
+    using ReportCallback = std::function<void(const RtpLLMCacheStoreLoadServerMetricsCollector&)>;
+
     CacheStoreServerLoadMetricsCollector(const kmonitor::MetricsReporterPtr& reporter,
                                          int64_t                             block_count,
                                          int64_t                             block_size,
-                                         int64_t                             request_send_cost_us);
+                                         int64_t                             request_send_cost_us,
+                                         ReportCallback                      report_callback = {});
     ~CacheStoreServerLoadMetricsCollector();
 
 public:
@@ -91,6 +96,7 @@ public:
 private:
     kmonitor::MetricsReporterPtr               reporter_;
     RtpLLMCacheStoreLoadServerMetricsCollector collector_;
+    ReportCallback                             report_callback_;
     int64_t                                    start_time_us_           = 0;
     int64_t                                    all_block_ready_time_us_ = 0;
     int64_t                                    end_time_us_             = 0;

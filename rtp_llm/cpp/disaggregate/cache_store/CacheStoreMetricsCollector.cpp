@@ -48,10 +48,11 @@ CacheStoreClientLoadMetricsCollector::~CacheStoreClientLoadMetricsCollector() {
 }
 
 CacheStoreServerLoadMetricsCollector::CacheStoreServerLoadMetricsCollector(const kmonitor::MetricsReporterPtr& reporter,
-                                                                           int64_t block_count,
-                                                                           int64_t total_block_size,
-                                                                           int64_t request_send_cost_us):
-    reporter_(reporter), start_time_us_(currentTimeUs()) {
+                                                                           int64_t        block_count,
+                                                                           int64_t        total_block_size,
+                                                                           int64_t        request_send_cost_us,
+                                                                           ReportCallback report_callback):
+    reporter_(reporter), report_callback_(std::move(report_callback)), start_time_us_(currentTimeUs()) {
     collector_.block_count          = block_count;
     collector_.total_block_size     = total_block_size;
     collector_.request_send_cost_us = request_send_cost_us;
@@ -62,7 +63,9 @@ CacheStoreServerLoadMetricsCollector::~CacheStoreServerLoadMetricsCollector() {
     collector_.all_block_ready_latency_us = subZeroOrAbove(all_block_ready_time_us_, start_time_us_);
     collector_.transfer_gap_latency_us    = subZeroOrAbove(end_time_us_, all_block_ready_time_us_);
 
-    if (reporter_ != nullptr) {
+    if (report_callback_) {
+        report_callback_(collector_);
+    } else if (reporter_ != nullptr) {
         reporter_->report<RtpLLMCacheStoreMetrics, RtpLLMCacheStoreLoadServerMetricsCollector>(nullptr, &collector_);
     }
 }
