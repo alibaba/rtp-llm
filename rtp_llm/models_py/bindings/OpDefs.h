@@ -297,6 +297,15 @@ struct PyAttentionInputs {
     // cu_seqlens_device lives on CUDA device; cu_seqlens is its pinned-memory CPU mirror
     // used for CUDA graph replay (write host -> async copy to device, avoiding GPU-side fills).
     torch::Tensor cu_seqlens;
+    // Host metadata for BERT two-pass user-profile attention.
+    torch::Tensor uqi_b_starts;
+    torch::Tensor uqi_b_lens;
+    torch::Tensor uqi_seg_indptr;
+    torch::Tensor uqi_b_indptr;
+    torch::Tensor uqi_perm;
+    torch::Tensor uqi_inv_perm;
+    torch::Tensor uqi_b_rows;
+
     torch::Tensor cu_seqlens_device;
     torch::Tensor cu_kv_seqlens_device;  // device only (no host mirror needed)
     torch::Tensor decode_cu_seqlens;
