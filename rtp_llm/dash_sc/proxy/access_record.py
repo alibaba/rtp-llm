@@ -198,6 +198,9 @@ class ForwardAccessRecord:
     upstream_request_id_key: Optional[str] = None
     # Parsed request / response statistics.
     input_len: Optional[int] = None
+    # Full token sequences are retained only for frontend (struct) logging.
+    input_ids: Optional[list[int]] = None
+    generated_ids: list[int] = dataclasses.field(default_factory=list)
     generate_config: Optional[dict[str, Any]] = None
     output_len: int = 0
     first_token_frame_len: int = 0
@@ -240,7 +243,7 @@ class ForwardAccessRecord:
     _pending_backend_stats: list = dataclasses.field(default_factory=list)
 
     def capture_request(self, request) -> None:
-        """Capture stable request statistics without retaining raw payloads."""
+        """Capture request statistics and frontend input token ids."""
         if request is None:
             return
         if self.first_request_ts is None:
@@ -258,6 +261,8 @@ class ForwardAccessRecord:
                 ids = None
             if ids is not None:
                 self.input_len = len(ids)
+                if not self.raw_mode:
+                    self.input_ids = list(ids)
         if self.generate_config is None:
             try:
                 ds_attrs = parse_ds_header_attributes(request)
@@ -341,6 +346,21 @@ class ForwardAccessRecord:
         if now is None:
             now = time.time()
         self._capture_error_message(resp, now)
+        infer = getattr(resp, "infer_response", None)
+        if not self.raw_mode and infer is not None:
+            for i, out in enumerate(infer.outputs):
+                if out.name != "generated_ids" or i >= len(infer.raw_output_contents):
+                    continue
+                declared = _declared_element_count(out.shape)
+                # Empty tensors may contain an EOS compatibility filler. It is
+                # not a generated token (DASH_SC_PACK_EOS_FOR_EMPTY_GENERATED_IDS).
+                if declared == 0:
+                    continue
+                raw = infer.raw_output_contents[i]
+                if not raw:
+                    continue
+                ids = unpack_int_tensor_flat(out.datatype, raw)
+                self.generated_ids.extend(ids[:declared] if declared > 0 else ids)
         if self._pending_backend_stats:
             stats = self._pending_backend_stats.pop(0)
             self._accumulate_client_frame(stats, now)
@@ -418,7 +438,7 @@ class ForwardAccessRecord:
             self.backend_first_resp_ts, self.first_resp_ts
         )
         finish_to_close_ms = duration_ms(self.terminal_ts, end_ts)
-        return {
+        record = {
             "schema_version": 1,
             "log_type": "access",
             "event": "rpc_completed",
@@ -486,6 +506,14 @@ class ForwardAccessRecord:
             "max_tokens_per_frame": self.max_tokens_per_frame,
             "generate_config": self.generate_config,
         }
+        if not self.raw_mode:
+            record.update(
+                {
+                    "input_ids": self.input_ids,
+                    "generated_ids": self.generated_ids or None,
+                }
+            )
+        return record
 
     def attach_to_context(self, context) -> bool:
         try:
