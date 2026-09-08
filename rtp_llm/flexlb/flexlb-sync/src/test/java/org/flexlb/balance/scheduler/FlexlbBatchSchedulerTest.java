@@ -964,6 +964,15 @@ class FlexlbBatchSchedulerTest {
         }
         long batchId = sentBatches.getLast().getBatchId();
 
+        // sentBatches fills inside the enqueue stub, i.e. before the failed-ack
+        // callback has routed the item into dispatch reconciliation on the
+        // scheduler thread. Until entry.dispatchReconciliation is set, a Prefill
+        // errorCode-500 terminal is handled as an ordinary terminal and would
+        // complete the future early. The reconciliation path issues the Cancel
+        // below, so a non-zero cancelCalls is a deterministic signal that the
+        // fence is up; wait for it instead of racing the callback.
+        awaitCondition(() -> cancelCalls.get() >= 1);
+
         scheduler.onWorkerStatusUpdate(prefillFinished(
                 309, batchId, 0, PriorityPreemptionProgress.NONE));
         scheduler.onWorkerStatusUpdate(prefillFinished(
