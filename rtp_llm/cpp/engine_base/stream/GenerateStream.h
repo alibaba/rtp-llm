@@ -234,6 +234,26 @@ public:
     int64_t prefillMemoryReuseLen() const;
 
     bool                 isContextStream() const;
+    bool                 isChunkStream() const;
+    bool                 enableFastGen() const {
+        return enable_fast_gen_;
+    }
+    // Outstanding fastgen chunk results (dispatch/consume pairing on the
+    // first-stage root). Gates chunked re-scheduling: the final chunk must
+    // never re-dispatch before its result finishes the stream.
+    int  ppOutstandingResults() const {
+        return pp_outstanding_results_;
+    }
+    void ppChunkDispatched() {
+        ++pp_outstanding_results_;
+    }
+    void ppResultReturned() {
+        --pp_outstanding_results_;
+    }
+    absl::StatusOr<int>  acquireCapacity(int token_capacity);
+    absl::StatusOr<int>  acquireNextChunk();
+    int                  currentChunkLen() const;
+    void                 resetChunkLen(int chunk_len, int max_chunk_len);
     const torch::Tensor& cumLogProbs() const;
 
     torch::Tensor                     completeTokenIds();
@@ -801,6 +821,16 @@ protected:
     int64_t                               load_done_to_running_us_     = 0;
     std::shared_ptr<StreamCacheResource>  stream_cache_resource_;
     std::shared_ptr<bool>                 is_context_stream_;
+    // fastgen three-cursor chunked prefill: [last_chunk_len_, current_chunk_len_)
+    // is the token window of the chunk being computed; max_chunk_len_ is the
+    // full sequence. prefixLength()/contextLength() read these so each
+    // scheduling round presents one chunk as the context.
+    bool enable_fast_gen_   = false;
+    int  fast_gen_chunk_len_ = 0;
+    int  current_chunk_len_ = 0;
+    int  last_chunk_len_    = 0;
+    int  max_chunk_len_     = 0;
+    int  pp_outstanding_results_ = 0;
     size_t                                iter_count_           = 0;
     size_t                                sp_iter_count_        = 0;
     size_t                                last_output_pos_      = 0;

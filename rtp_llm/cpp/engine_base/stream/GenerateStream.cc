@@ -107,6 +107,10 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
 
     last_output_pos_ = seqLength();
 
+    enable_fast_gen_   = runtime_config.fifo_scheduler_config.enable_fast_gen;
+    fast_gen_chunk_len_ = runtime_config.fifo_scheduler_config.fast_gen_max_context_len;
+    max_chunk_len_      = seqLength();
+
     cum_log_probs_ = torch::zeros({(int64_t)init_batch_size}, torch::kFloat32);
 
     is_context_stream_  = std::make_shared<bool>();
@@ -466,11 +470,17 @@ int GenerateStream::seqSizePerBlock() const {
 
 int GenerateStream::contextLength() const {
     int begin_pos = prefixLength();
-    int end_pos   = seqLength();
+    int end_pos   = isChunkStream() ? currentChunkLen() : seqLength();
     return end_pos - begin_pos;
 }
 
 int GenerateStream::prefixLength() const {
+    // Exactly two sources (the deleted enable_partial_fallback added a third,
+    // which was the historic fastgen defect): a mid-chunked sequence continues
+    // from the previous chunk's end, everything else reuses from reuse_length_.
+    if (last_chunk_len_) {
+        return last_chunk_len_;
+    }
     return reuse_length_;
 }
 
@@ -557,6 +567,48 @@ void GenerateStream::incLastOutputPos() {
 
 bool GenerateStream::isContextStream() const {
     return *is_context_stream_;
+}
+
+bool GenerateStream::isChunkStream() const {
+    return enable_fast_gen_ && current_chunk_len_ < max_chunk_len_;
+}
+
+absl::StatusOr<int> GenerateStream::acquireCapacity(int token_capacity) {
+    if (token_capacity <= 0) {
+        return absl::InternalError("token_capacity is <= 0");
+    }
+    if (isChunkStream()) {
+        if (current_chunk_len_ == 0) {
+            current_chunk_len_ = reuse_length_;
+        }
+        auto remaining_token = max_chunk_len_ - current_chunk_len_;
+        last_chunk_len_      = current_chunk_len_;
+        if (token_capacity > remaining_token) {
+            current_chunk_len_ = max_chunk_len_;
+            return remaining_token;
+        } else {
+            current_chunk_len_ += token_capacity;
+            return token_capacity;
+        }
+    } else if (!isContextStream()) {
+        return 1;
+    }
+    RTP_LLM_CHECK(false);
+    return absl::InternalError("unexpected call");
+}
+
+absl::StatusOr<int> GenerateStream::acquireNextChunk() {
+    return acquireCapacity(fast_gen_chunk_len_);
+}
+
+int GenerateStream::currentChunkLen() const {
+    return current_chunk_len_;
+}
+
+void GenerateStream::resetChunkLen(int chunk_len, int max_chunk_len) {
+    last_chunk_len_    = 0;
+    current_chunk_len_ = chunk_len;
+    max_chunk_len_     = max_chunk_len;
 }
 
 const torch::Tensor& GenerateStream::cumLogProbs() const {
@@ -1142,10 +1194,16 @@ void GenerateStream::updateFromPP(const StreamUpdateInfo& update_info) {
     RTP_LLM_PROFILE_FUNCTION();
     std::lock_guard<std::mutex> lock(*mutex_);
     RTP_LLM_LOG_DEBUG("stream [%s] update from PP", streamLogTag().c_str());
-    *is_context_stream_ = false;
     if (reportUpdateErrorWithoutLock(update_info.error_info)) {
         return;
     }
+    if (isChunkStream()) {
+        // Non-final chunk of a fastgen context stream: the pipeline round must
+        // not append tokens or flip is_context_stream_ — the context continues
+        // into the next chunk. The final chunk (cursor at max) falls through.
+        return;
+    }
+    *is_context_stream_ = false;
     if ((hasErrorWithoutLock() || isFinished()) && !update_info.force_update_info) {
         return;
     }

@@ -120,6 +120,20 @@ void PPExecutor::asyncSendTensors(const PPIntermediateTensors& tensors, PPTicket
     int64_t nonempty_sends = 0;
     for (const auto& tensor_entry : tensors.tensors) {
         if (tensor_entry.second.numel() != 0) {
+            if (obj_log_active_) {
+                const auto& t     = tensor_entry.second;
+                auto        cheap = t.flatten().slice(0, 0, std::min<int64_t>(t.numel(), 256)).to(torch::kCPU);
+                int64_t     h     = 1469598103934665603LL;
+                const auto* p     = static_cast<const int16_t*>(cheap.data_ptr());
+                for (int64_t i = 0; i < cheap.numel() / 2; ++i) {
+                    h = (h ^ static_cast<int64_t>(p[i])) * 1099511628211LL;
+                }
+                RTP_LLM_LOG_INFO("[PPTENS] rank=%lld send key=%s numel=%ld head_hash=%lx",
+                                 static_cast<long long>(parallelism_config_.world_rank),
+                                 tensor_entry.first.c_str(),
+                                 static_cast<long>(t.numel()),
+                                 static_cast<unsigned long>(h));
+            }
             tickets.push_back(transport_->asyncSend(tensor_entry.second));
             ++nonempty_sends;
         }
@@ -324,6 +338,20 @@ absl::StatusOr<PPExecutionPlan> PPExecutor::buildPlan(const StreamGroups&       
     RETURN_IF_STATUS_OR_ERROR(model_input_status);
     plan.model_input          = std::move(model_input_status.value());
     plan.model_input.skip_run = stream_groups.empty();
+
+    static const bool kLogWindow = std::getenv("RTP_LLM_LOG_TPSYNC") != nullptr;
+    if (kLogWindow && !plan.model_input.skip_run) {
+        const auto& s = *(stream_groups.allStreams().front());
+        RTP_LLM_LOG_INFO("[WINDOW] rank=%lld req=%ld tokens=%ld input_len=%d prefix=%d ctx=%d chunk_cur=%d chunking=%d",
+                         static_cast<long long>(parallelism_config_.world_rank),
+                         s.streamId(),
+                         plan.model_input.combo_tokens.size(0),
+                         s.inputLength(),
+                         s.prefixLength(),
+                         s.contextLength(),
+                         s.currentChunkLen(),
+                         s.isChunkStream() ? 1 : 0);
+    }
 
     if (!plan.model_input.skip_run) {
         plan.sampling_plan = batch_stream_processor_->gatherSamplingPlan(stream_groups);
@@ -594,6 +622,25 @@ absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t 
         if (!isFirstStage()) {
             input_tensors = receiveTensors(tensor_receives);
             waitAll(tensor_receives);
+            if (obj_log_active_) {
+                for (const auto& tensor_entry : input_tensors.tensors) {
+                    if (tensor_entry.second.numel() == 0) {
+                        continue;
+                    }
+                    const auto& t     = tensor_entry.second;
+                    auto cheap        = t.flatten().slice(0, 0, std::min<int64_t>(t.numel(), 256)).to(torch::kCPU);
+                    int64_t h         = 1469598103934665603LL;
+                    const auto* p     = static_cast<const int16_t*>(cheap.data_ptr());
+                    for (int64_t i = 0; i < cheap.numel() / 2; ++i) {
+                        h = (h ^ static_cast<int64_t>(p[i])) * 1099511628211LL;
+                    }
+                    RTP_LLM_LOG_INFO("[PPTENS] rank=%lld recv key=%s numel=%ld head_hash=%lx",
+                                     static_cast<long long>(parallelism_config_.world_rank),
+                                     tensor_entry.first.c_str(),
+                                     static_cast<long>(t.numel()),
+                                     static_cast<unsigned long>(h));
+                }
+            }
         }
 
         if (profile_step_start_) {
@@ -627,9 +674,25 @@ absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t 
         auto forward_done = cuda_graph::makeGraphEvent();
         forward_done.record(cuda_graph::graphGetCurrentStream());
         forward_done.synchronize();
+        // fastgen: with chunks back-to-back, side-stream work (DSV4 state-pool
+        // writes, cache writes) must be visible before this round hands the
+        // stream back to the scheduler for the next chunk. Serialized rounds
+        // hid this window; the pipeline fill exposes it.
+        cudaDeviceSynchronize();
 
         if (!isLastStage()) {
             asyncSendTensors(output_tensors, inflight.activation_sends);
+            // fastgen S3: release fastgen context streams as soon as the chunk
+            // has left stage 0 so the pipeline fills. Re-scheduling is gated by
+            // pp_outstanding_results_ in PPScheduler (the final chunk must not
+            // re-dispatch before its result finishes the stream).
+            if (isFirstStage() && isStageRoot()) {
+                for (const auto& stream : inflight.stream_groups.allStreams()) {
+                    if (stream->enableFastGen() && stream->isContextStream()) {
+                        stream->clearPPInflight();
+                    }
+                }
+            }
         } else if (isStageRoot()) {
             auto sampler_inputs_status = makeSamplerInputs(plan.sampling_plan, plan.output_config, model_output.logits);
             RETURN_IF_STATUS_OR_ERROR(sampler_inputs_status);

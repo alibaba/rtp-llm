@@ -388,7 +388,9 @@ PDFusionSchedulerMode parsePDFusionSchedulerMode(const std::string& mode) {
 
 std::string FIFOSchedulerConfig::to_string() const {
     std::ostringstream oss;
-    oss << "max_context_batch_size: " << max_context_batch_size << "\n"
+    oss << "enable_fast_gen: " << enable_fast_gen << "\n"
+        << "fast_gen_max_context_len: " << fast_gen_max_context_len << "\n"
+        << "max_context_batch_size: " << max_context_batch_size << "\n"
         << "max_batch_tokens_size: " << max_batch_tokens_size << "\n"
         << "pdfusion_scheduler_mode: " << pdfusion_scheduler_mode << "\n"
         << "decode_prefill_ratio: " << decode_prefill_ratio << "\n"

@@ -27,7 +27,8 @@ PPScheduler::PPScheduler(const RuntimeConfig&                   runtime_config,
                       cache_manager,
                       metrics_reporter),
     max_batch_tokens_without_cache_(static_cast<size_t>(
-        std::max<int64_t>(runtime_config.fifo_scheduler_config.max_batch_tokens_without_cache, 0))) {}
+        std::max<int64_t>(runtime_config.fifo_scheduler_config.max_batch_tokens_without_cache, 0))),
+    pp_overlap_cap_(std::max<int64_t>(parallelism_config.pp_size, 1)) {}
 
 PPScheduler::~PPScheduler() {
     (void)stop();
@@ -48,6 +49,19 @@ list<GenerateStreamPtr> PPScheduler::evaluateRunningStreams() {
         if (stream->isPPInflight()) {
             ++it;
             continue;
+        }
+        if (stream->enableFastGen() && stream->isContextStream()) {
+            // fastgen: gate re-scheduling on outstanding chunk results. With a
+            // pending next chunk, allow up to pp_size chunks in flight; once
+            // the cursor is at max the final chunk is in flight (or about to
+            // be) and the stream must not be re-scheduled until its result
+            // finishes it — otherwise the final window re-dispatches every
+            // round and the duplicate forwards corrupt the run.
+            const auto outstanding = stream->ppOutstandingResults();
+            if (stream->isChunkStream() ? outstanding >= pp_overlap_cap_ : outstanding > 0) {
+                ++it;
+                continue;
+            }
         }
 
         const auto new_state = stream->moveToNext();
@@ -276,6 +290,21 @@ absl::StatusOr<ScheduleOutput> PPScheduler::schedule() {
     running_streams_.splice(running_streams_.end(), new_streams_);
 
     for (const auto& stream : scheduled_streams) {
+        // fastgen: advance the three-cursor window once per scheduled round so
+        // gatherModelInput presents this round's chunk. The final chunk needs
+        // no acquire (cursor already at max; isChunkStream() false).
+        if (stream->enableFastGen() && stream->isContextStream()) {
+            if (stream->isChunkStream()) {
+                const auto acquired = stream->acquireNextChunk();
+                if (!acquired.ok()) {
+                    RTP_LLM_LOG_ERROR("stream [%ld] acquireNextChunk failed: %s",
+                                      stream->streamId(),
+                                      acquired.status().ToString().c_str());
+                    stream->reportEvent(StreamEvents::Error, ErrorCode::UNKNOWN_ERROR, "acquireNextChunk failed");
+                }
+            }
+            stream->ppChunkDispatched();
+        }
         stream->setPPInflight();
     }
 

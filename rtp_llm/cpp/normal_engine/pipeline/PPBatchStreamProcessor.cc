@@ -346,6 +346,9 @@ absl::Status PPBatchStreamProcessor::dispatchExecutionResult(const StreamGroups&
             collectStreamSamplerError(result.processor_errors, result.sample_success, batch_idx, stream_batch_size);
         dispatchSingleStream(
             stream, result, stream_idx, batch_idx, stream_batch_size, token_offset, loss_offset, std::move(error_info));
+        if (stream->enableFastGen() && stream->isContextStream()) {
+            stream->ppResultReturned();
+        }
         stream->clearPPInflight();
         ++stream_idx;
         batch_idx += stream_batch_size;

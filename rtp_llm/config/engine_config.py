@@ -329,6 +329,14 @@ def finalize_scheduler_config(
         max_seq_len: Maximum sequence length from model config
     """
 
+    # fastgen: derive the global chunk from the historical --fast_gen_context_budget
+    # knob (bound to fast_gen_max_context_len, default -1 = unset -> 1024, the
+    # deleted implementation's default).
+    if fifo_scheduler_config.fast_gen_max_context_len == -1:
+        fifo_scheduler_config.fast_gen_max_context_len = 1024
+    if fifo_scheduler_config.enable_fast_gen:
+        logging.info(f"fast_gen_max_context_len: {fifo_scheduler_config.fast_gen_max_context_len}")
+
     # Set max_batch_tokens_size if not set from py_runtime_config
     if fifo_scheduler_config.max_batch_tokens_size == 0:
         fifo_scheduler_config.max_batch_tokens_size = (

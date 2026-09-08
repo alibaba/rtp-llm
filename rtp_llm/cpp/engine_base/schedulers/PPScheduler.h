@@ -66,6 +66,9 @@ private:
     size_t prefillTokenCostWithoutCache(const GenerateStreamPtr& stream) const;
 
     const size_t         max_batch_tokens_without_cache_ = 0;
+    // fastgen chunked-prefill overlap depth: how many chunk results may be
+    // outstanding before the stream stops being re-scheduled.
+    const int64_t        pp_overlap_cap_ = 1;
     std::vector<int64_t> finished_request_ids_;
 };
 

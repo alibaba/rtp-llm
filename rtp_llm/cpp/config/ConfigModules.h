@@ -391,6 +391,11 @@ enum class PDFusionSchedulerMode {
 PDFusionSchedulerMode parsePDFusionSchedulerMode(const std::string& mode);
 
 struct FIFOSchedulerConfig {
+    // fastgen (three-cursor chunked prefill): each scheduling round admits at
+    // most fast_gen_max_context_len context tokens per stream, so a long
+    // prompt is computed as successive chunks.
+    bool    enable_fast_gen          = false;
+    int64_t fast_gen_max_context_len = 0;
     int64_t max_context_batch_size = 1;
     int64_t max_batch_tokens_size  = 0;
     // PDFUSION scheduler mode. Supported values:
