@@ -82,8 +82,7 @@ class ConfigServiceTest {
 
     @Test
     void readme_flexlb_config_examples_parse_strictly() throws Exception {
-        Path readme = Path.of(System.getProperty("maven.multiModuleProjectDirectory"),
-                "README.md");
+        Path readme = Path.of("README.md");
         String content = Files.readString(readme);
         Matcher examples = Pattern.compile(
                 "export FLEXLB_CONFIG='(\\{.*?})'", Pattern.DOTALL)
