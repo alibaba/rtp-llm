@@ -190,7 +190,7 @@ def init_vit_group_args(parser, vit_config):
         bind_to=(vit_config, "mm_preprocess_max_workers"),
         type=int,
         default=4,
-        help="多模态预处理时最大线程数量",
+        help="多模态预处理并发数：后端进程池大小，以及前端图片预检线程数和单请求批大小；必须大于0",
     )
     vit_group.add_argument(
         "--biencoder_preprocess",

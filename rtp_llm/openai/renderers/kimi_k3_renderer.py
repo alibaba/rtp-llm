@@ -9,12 +9,13 @@ from typing_extensions import override
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import GenerateConfig
-from rtp_llm.config.kimi_k3_request_contract import (
+from rtp_llm.models.kimi_k3.kimi_k3_request_contract import (
     apply_kimi_k3_request_contract,
     validate_kimi_k3_tool_history,
 )
 from rtp_llm.multimodal.multimodal_mixins.kimi_k3.kimi_k3_image_processor import (
     KimiK3VisionProcessor,
+    load_kimi_k3_media_config,
     preflight_kimi_k3_images,
     preflight_kimi_k3_images_async,
 )
@@ -38,7 +39,6 @@ from rtp_llm.openai.renderers.custom_renderer import (
 )
 from rtp_llm.ops import MultimodalInput
 from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
-
 
 _GRAMMAR_RESPONSE_FORMAT_TYPES = {
     "json_object",
@@ -119,7 +119,11 @@ class KimiK3Renderer(CustomChatRenderer):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self._image_processor = KimiK3VisionProcessor()
+        self._image_processor = KimiK3VisionProcessor(
+            load_kimi_k3_media_config(
+                self.ckpt_path or self.model_config.checkpoint_path
+            )
+        )
         self.add_extra_stop_words(["<|end_of_msg|>"])
 
     _TOOLS_OPEN = "<|open|>tools<|sep|>"
@@ -565,9 +569,10 @@ class KimiK3Renderer(CustomChatRenderer):
                 response_format = json.loads(response_format)
             except ValueError:
                 return True
-        return not isinstance(response_format, dict) or response_format.get(
-            "type"
-        ) in _GRAMMAR_RESPONSE_FORMAT_TYPES
+        return (
+            not isinstance(response_format, dict)
+            or response_format.get("type") in _GRAMMAR_RESPONSE_FORMAT_TYPES
+        )
 
     @classmethod
     def _grammar_constraint_fields(cls, config: GenerateConfig) -> List[str]:
@@ -711,9 +716,7 @@ class KimiK3Renderer(CustomChatRenderer):
         validate_kimi_k3_tool_history(request.messages)
         request_dict = self._request_dict(request)
         messages, mm_input = self._collect_and_rewrite(request_dict["messages"])
-        tensors, metadata = preflight_kimi_k3_images(
-            mm_input.urls, self.vit_config.download_headers
-        )
+        tensors, metadata = preflight_kimi_k3_images(mm_input.urls, self.vit_config)
         return self._render_preflighted(
             request,
             request_dict,
@@ -724,14 +727,12 @@ class KimiK3Renderer(CustomChatRenderer):
         )
 
     @override
-    async def render_chat_async(
-        self, request: ChatCompletionRequest
-    ) -> RenderedInputs:
+    async def render_chat_async(self, request: ChatCompletionRequest) -> RenderedInputs:
         validate_kimi_k3_tool_history(request.messages)
         request_dict = self._request_dict(request)
         messages, mm_input = self._collect_and_rewrite(request_dict["messages"])
         tensors, metadata = await preflight_kimi_k3_images_async(
-            mm_input.urls, self.vit_config.download_headers
+            mm_input.urls, self.vit_config
         )
         return self._render_preflighted(
             request,
@@ -783,7 +784,9 @@ class KimiK3Renderer(CustomChatRenderer):
                 structural_tag, ensure_ascii=False, separators=(",", ":")
             )
 
-        if generate_config.in_think_mode and self._grammar_constraint_fields(generate_config):
+        if generate_config.in_think_mode and self._grammar_constraint_fields(
+            generate_config
+        ):
             boundary_ids = self.tokenizer.encode(
                 self._THINK_TO_RESPONSE, add_special_tokens=False
             )

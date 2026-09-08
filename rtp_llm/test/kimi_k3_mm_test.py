@@ -1,9 +1,12 @@
 import asyncio
+import json
 import math
 import struct
+import tempfile
 import threading
 import zlib
 from io import BytesIO
+from pathlib import Path
 from types import SimpleNamespace
 from unittest import TestCase, main, skipUnless
 from unittest.mock import patch
@@ -14,18 +17,17 @@ import torch.nn as nn
 import torch.nn.functional as F
 from PIL import Image
 
-from rtp_llm.openai.api_datatype import ChatCompletionRequest
 import rtp_llm.multimodal.multimodal_mixins.kimi_k3.kimi_k3_image_processor as kimi_k3_image_processor
 import rtp_llm.multimodal.multimodal_mixins.kimi_k3.kimi_k3_vit as kimi_k3_vit
+from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.multimodal.multimodal_mixins.kimi_k3.kimi_k3_image_processor import (
-    K3_MAX_IMAGE_FILE_SIZE_KB,
-    K3_MAX_IMAGE_PIXELS,
     KimiK3VisionProcessor,
     _navit_resize_image,
+    load_kimi_k3_media_config,
 )
 from rtp_llm.multimodal.multimodal_mixins.kimi_k3.kimi_k3_moonvit import (
-    MoonViT3dPretrainedModel,
     MoonVision3dPatchEmbed,
+    MoonViT3dPretrainedModel,
     apply_rope,
     tpool_patch_merger,
 )
@@ -39,37 +41,28 @@ from rtp_llm.multimodal.multimodal_mixins.kimi_k3.kimi_k3_vit import (
     mm_projector_forward,
 )
 from rtp_llm.multimodal.multimodal_util import MMUrlType
-from rtp_llm.models_py.model_desc.kimi_k3 import KimiK3Model
-from rtp_llm.models_py.model_desc.kimi_k3_eagle3 import KimiK3Eagle3Model
-from rtp_llm.models_py.modules.base.common.embedding import EmbeddingTorch
-from rtp_llm.models_py.modules.base.common.multimodal_embedding import (
-    MultimodalEmbeddingInjector,
-)
+from rtp_llm.openai.api_datatype import ChatCompletionRequest
 from rtp_llm.openai.renderers.kimi_k3_renderer import KimiK3Renderer
+
+
+def _vit_config(**overrides):
+    config = VitConfig()
+    for name, value in overrides.items():
+        setattr(config, name, value)
+    return config
+
+
+def _media_proc_cfg(**overrides):
+    path = Path(__file__).parent / "testdata/kimi_k3/preprocessor_config.json"
+    cfg = json.loads(path.read_text())["media_proc_cfg"]
+    cfg.update(overrides)
+    return cfg
 
 
 def _image_bytes(width=8, height=6, mode="RGB", color=(1, 2, 3)):
     data = BytesIO()
     Image.new(mode, (width, height), color).save(data, format="PNG")
     return data.getvalue()
-
-
-def _png_with_declared_size(width, height):
-    """PNG whose IHDR declares a size PIL reads without decoding any pixel."""
-
-    def chunk(tag, body):
-        return (
-            struct.pack(">I", len(body))
-            + tag
-            + body
-            + struct.pack(">I", zlib.crc32(tag + body))
-        )
-
-    return (
-        b"\x89PNG\r\n\x1a\n"
-        + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
-        + chunk(b"IDAT", zlib.compress(b"\x00"))
-    )
 
 
 def _mm_input(tensor, url=""):
@@ -104,7 +97,7 @@ def _tiny_vision_config(**overrides):
 
 class KimiK3VisionProcessorTest(TestCase):
     def setUp(self):
-        self.processor = KimiK3VisionProcessor()
+        self.processor = KimiK3VisionProcessor(_media_proc_cfg())
 
     @staticmethod
     def media(image):
@@ -146,7 +139,7 @@ class KimiK3VisionProcessorTest(TestCase):
         outputs = {}
         for stage in ("after_resize", "before_resize"):
             processor = KimiK3VisionProcessor(
-                {"transparent_bg_fill_stage": stage, "in_patch_limit": 64}
+                _media_proc_cfg(transparent_bg_fill_stage=stage, in_patch_limit=64)
             )
             outputs[stage] = processor.preprocess(self.media(image)).pixel_values
 
@@ -156,7 +149,9 @@ class KimiK3VisionProcessorTest(TestCase):
 
     def test_invalid_transparent_bg_fill_stage_is_rejected(self):
         with self.assertRaises(ValueError):
-            KimiK3VisionProcessor({"transparent_bg_fill_stage": "at_the_end"})
+            KimiK3VisionProcessor(
+                _media_proc_cfg(transparent_bg_fill_stage="at_the_end")
+            )
 
     def test_multiple_images_keep_input_order(self):
         medias = [
@@ -198,9 +193,11 @@ class KimiK3VisionProcessorTest(TestCase):
                     expected,
                 )
 
+
 class KimiK3PreprocessInputTest(TestCase):
     def setUp(self):
-        self.vit_config = SimpleNamespace(download_headers='{"X-Test": "value"}')
+        self.vit_config = VitConfig()
+        self.vit_config.download_headers = '{"X-Test": "value"}'
 
     def test_tensor_bytes_are_decoded(self):
         raw = _image_bytes()
@@ -213,22 +210,19 @@ class KimiK3PreprocessInputTest(TestCase):
         self.assertEqual(image.size, (8, 6))
         self.assertEqual(image.mode, "RGB")
 
-    def test_oversized_pixel_count_is_rejected_before_decode(self):
-        # A 54-byte file: under PIL's own 89 MP default, so without the guard
-        # image.copy() succeeds and allocates 201 MB of pixels.
-        raw = _png_with_declared_size(8192, 8192)
-        tensor = torch.frombuffer(bytearray(raw), dtype=torch.uint8)
-        with self.assertRaisesRegex(ValueError, "pixel count"):
-            KimiK3ImageEmbedding.preprocess_input([_mm_input(tensor)], self.vit_config)
-        # A stock 48 MP phone photo must stay under the limit.
-        self.assertLess(8000 * 6000, K3_MAX_IMAGE_PIXELS)
+    def test_pillow_decompression_bomb_guard_is_preserved(self):
+        tensor = torch.frombuffer(bytearray(_image_bytes()), dtype=torch.uint8)
+        with patch.object(Image, "MAX_IMAGE_PIXELS", 1):
+            with self.assertRaises(Image.DecompressionBombError):
+                KimiK3ImageEmbedding.preprocess_input(
+                    [_mm_input(tensor)], self.vit_config
+                )
 
     def test_oversized_tensor_is_rejected_before_any_copy(self):
         # A direct model RPC call skips the renderer preflight, so this is the only
         # place the shared per-image byte cap can still catch the payload.
-        oversized = torch.empty(
-            K3_MAX_IMAGE_FILE_SIZE_KB * 1024 + 1, dtype=torch.uint8
-        )
+        self.vit_config.mm_image_max_file_size_kb = 1
+        oversized = torch.empty(1025, dtype=torch.uint8)
         with patch.object(
             kimi_k3_vit, "BytesIO", side_effect=AssertionError("copied before check")
         ) as no_copy:
@@ -250,6 +244,7 @@ class KimiK3PreprocessInputTest(TestCase):
                     )
 
     def test_url_download_uses_configured_headers(self):
+        self.vit_config.mm_image_max_file_size_kb = 17
         raw = _image_bytes()
         empty = torch.empty(0, dtype=torch.uint8)
         with patch.object(
@@ -266,7 +261,7 @@ class KimiK3PreprocessInputTest(TestCase):
         download.assert_called_once_with(
             "https://example.com/image.png",
             self.vit_config.download_headers,
-            max_file_size_kb=K3_MAX_IMAGE_FILE_SIZE_KB,
+            max_file_size_kb=17,
         )
 
     def test_embedding_holds_mm_lock(self):
@@ -332,11 +327,17 @@ class KimiK3MultimodalEmbeddingTest(TestCase):
     HASH_IDS = (2140422385, -1781747402)
 
     def setUp(self):
+        from rtp_llm.models_py.model_desc.kimi_k3 import KimiK3Model
+        from rtp_llm.models_py.modules.base.common.embedding import EmbeddingTorch
+        from rtp_llm.models_py.modules.base.common.multimodal_embedding import (
+            MultimodalEmbeddingInjector,
+        )
+
         self.model = KimiK3Model.__new__(KimiK3Model)
         nn.Module.__init__(self.model)
-        self.model.embedding_weight = torch.arange(
-            24, dtype=torch.float32
-        ).reshape(8, 3)
+        self.model.embedding_weight = torch.arange(24, dtype=torch.float32).reshape(
+            8, 3
+        )
         self.model.embed_tokens = EmbeddingTorch(self.model.embedding_weight)
         self.model.multimodal_embedding_injector = MultimodalEmbeddingInjector()
 
@@ -389,6 +390,12 @@ class KimiK3Eagle3MultimodalEmbeddingTest(TestCase):
     IMAGE_B = torch.tensor([[3000.0, 3001.0, 3002.0], [4000.0, 4001.0, 4002.0]])
 
     def setUp(self):
+        from rtp_llm.models_py.model_desc.kimi_k3_eagle3 import KimiK3Eagle3Model
+        from rtp_llm.models_py.modules.base.common.embedding import EmbeddingTorch
+        from rtp_llm.models_py.modules.base.common.multimodal_embedding import (
+            MultimodalEmbeddingInjector,
+        )
+
         self.embedding_weight = torch.arange(64 * 3, dtype=torch.float32).reshape(64, 3)
         self.model = KimiK3Eagle3Model.__new__(KimiK3Eagle3Model)
         nn.Module.__init__(self.model)
@@ -423,9 +430,7 @@ class KimiK3Eagle3MultimodalEmbeddingTest(TestCase):
     def test_draft_prefill_drops_the_row_shifted_out_of_the_window(self):
         # Target [hash_0, hash_1, 11] starts with the image, so the shift pushes
         # row 0 before token 0: it has no draft slot and must be dropped.
-        output = self._embed(
-            [-102, 11, 12, 13], [self.IMAGE_A], [0], cu_seqlens=[0, 4]
-        )
+        output = self._embed([-102, 11, 12, 13], [self.IMAGE_A], [0], cu_seqlens=[0, 4])
 
         self.assertTrue(torch.equal(output[0], self.IMAGE_A[1]))
         self.assertTrue(torch.equal(output[1], self.embedding_weight[11]))
@@ -466,20 +471,73 @@ class KimiK3MediaPreflightTest(TestCase):
             return_value=BytesIO(raw),
         ):
             with self.assertRaisesRegex(ValueError, "could not be decoded"):
-                kimi_k3_image_processor.preflight_kimi_k3_images(["image"])
+                kimi_k3_image_processor.preflight_kimi_k3_images(["image"], VitConfig())
 
-    def test_preflight_rejects_oversized_pixel_count(self):
-        raw = _image_bytes()
+    def test_high_resolution_scan_is_decoded_then_resized_to_patch_budget(self):
+        # Real 138 MP grayscale PNG, built a row at a time to avoid retaining
+        # another full decoded image in the test. This is the online case shape.
+        width, height = 10017, 13824
+        compressor = zlib.compressobj()
+        row = b"\x00" + b"\x80" * width
+        compressed = b"".join(compressor.compress(row) for _ in range(height))
+        compressed += compressor.flush()
+
+        def chunk(tag, data):
+            return (
+                struct.pack(">I", len(data))
+                + tag
+                + data
+                + struct.pack(">I", zlib.crc32(tag + data))
+            )
+
+        raw = (
+            b"\x89PNG\r\n\x1a\n"
+            + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 0, 0, 0, 0))
+            + chunk(b"IDAT", compressed)
+            + chunk(b"IEND", b"")
+        )
         with patch(
             "rtp_llm.multimodal.multimodal_util.get_bytes_io_from_url",
             return_value=BytesIO(raw),
-        ), patch.object(
-            kimi_k3_image_processor,
-            "K3_MAX_IMAGE_PIXELS",
-            1,
         ):
-            with self.assertRaisesRegex(ValueError, "pixel count"):
-                kimi_k3_image_processor.preflight_kimi_k3_images(["image"])
+            tensors, sizes = kimi_k3_image_processor.preflight_kimi_k3_images(
+                ["scan"], VitConfig()
+            )
+        self.assertEqual(sizes, [(width, height)])
+        decoded = KimiK3ImageEmbedding.preprocess_input(
+            [_mm_input(tensors[0])], VitConfig()
+        )
+        try:
+            self.assertEqual(decoded.size, (width, height))
+            processor = KimiK3VisionProcessor(_media_proc_cfg())
+            resize = processor._resize_config(decoded)
+            self.assertLess(resize["new_width"], width)
+            self.assertLess(resize["new_height"], height)
+            self.assertLessEqual(
+                max(resize["new_width"], resize["new_height"]), 512 * 14
+            )
+        finally:
+            decoded.close()
+
+    def test_preflight_has_no_separate_aggregate_pixel_cap(self):
+        with patch.object(
+            kimi_k3_image_processor,
+            "_preflight_kimi_k3_image",
+            return_value=(torch.zeros(1, dtype=torch.uint8), (5000, 15000)),
+        ):
+            tensors, sizes = kimi_k3_image_processor.preflight_kimi_k3_images(
+                ["scan"] * 5, VitConfig()
+            )
+        self.assertEqual(len(tensors), 5)
+        self.assertEqual(len(sizes), 5)
+
+    def test_preflight_preserves_pillow_decompression_bomb_guard(self):
+        with patch(
+            "rtp_llm.multimodal.multimodal_util.get_bytes_io_from_url",
+            return_value=BytesIO(_image_bytes()),
+        ), patch.object(Image, "MAX_IMAGE_PIXELS", 1):
+            with self.assertRaisesRegex(ValueError, "could not be decoded"):
+                kimi_k3_image_processor.preflight_kimi_k3_images(["image"], VitConfig())
 
     def test_shared_preflight_reuses_downloaded_bytes_and_reports_sizes(self):
         raw = _image_bytes(
@@ -496,7 +554,7 @@ class KimiK3MediaPreflightTest(TestCase):
             return_value=BytesIO(raw),
         ) as download:
             tensors, sizes = kimi_k3_image_processor.preflight_kimi_k3_images(
-                [url], download_headers
+                [url], _vit_config(download_headers=download_headers)
             )
 
         self.assertEqual(sizes, [(31, 17)])
@@ -504,7 +562,7 @@ class KimiK3MediaPreflightTest(TestCase):
         download.assert_called_once_with(
             url,
             download_headers,
-            max_file_size_kb=K3_MAX_IMAGE_FILE_SIZE_KB,
+            max_file_size_kb=VitConfig.DEFAULT_MM_IMAGE_MAX_FILE_SIZE_KB,
         )
 
     def test_preflight_does_not_read_or_seek_shared_cached_stream(self):
@@ -524,7 +582,7 @@ class KimiK3MediaPreflightTest(TestCase):
             return_value=shared,
         ) as download:
             tensors, sizes = kimi_k3_image_processor.preflight_kimi_k3_images(
-                [url, url]
+                [url, url], VitConfig()
             )
 
         self.assertEqual(sizes, [(19, 13), (19, 13)])
@@ -537,11 +595,10 @@ class KimiK3MediaPreflightTest(TestCase):
 class KimiK3RendererTest(TestCase):
     def setUp(self):
         self.renderer = KimiK3Renderer.__new__(KimiK3Renderer)
-        self.renderer.vit_config = SimpleNamespace(
-            download_headers='{"Authorization": "Bearer test"}',
-        )
+        self.renderer.vit_config = VitConfig()
+        self.renderer.vit_config.download_headers = '{"Authorization": "Bearer test"}'
         self.renderer.max_seq_len = 0
-        self.renderer._image_processor = KimiK3VisionProcessor()
+        self.renderer._image_processor = KimiK3VisionProcessor(_media_proc_cfg())
 
     def test_video_url_is_rejected_as_k3(self):
         request = _media_request("video_url", "http://example.com/video.mp4")
@@ -595,6 +652,7 @@ class KimiK3RendererTest(TestCase):
             self.assertEqual(kwargs["image_prompts"], [])
 
     def test_preflight_reuses_bytes_and_injects_real_size_prompt(self):
+        self.renderer.vit_config.mm_image_max_file_size_kb = 19
         raw = _image_bytes(
             width=31,
             height=17,
@@ -620,7 +678,7 @@ class KimiK3RendererTest(TestCase):
         download.assert_called_once_with(
             "http://example.com/transparent.png",
             self.renderer.vit_config.download_headers,
-            max_file_size_kb=K3_MAX_IMAGE_FILE_SIZE_KB,
+            max_file_size_kb=19,
         )
         # This tokenizer stub encodes the template output byte-by-byte, so the token
         # ids carry the prompt the real image size was injected into.
@@ -638,7 +696,7 @@ class KimiK3RendererTest(TestCase):
         main_thread = threading.get_ident()
         worker_threads = []
 
-        def preflight(url, download_headers):
+        def preflight(url, config):
             worker_threads.append(threading.get_ident())
             barrier.wait(timeout=2)
             return torch.tensor([len(url)], dtype=torch.uint8), (8, 6)
@@ -672,7 +730,7 @@ class KimiK3RendererTest(TestCase):
         ) as preflight:
             preflight.return_value = (torch.zeros(1, dtype=torch.uint8), (8, 6))
             tensors, sizes = kimi_k3_image_processor.preflight_kimi_k3_images(
-                urls
+                urls, VitConfig()
             )
 
         self.assertEqual(len(tensors), len(urls))
@@ -686,23 +744,14 @@ class KimiK3RendererTest(TestCase):
         ) as preflight:
             preflight.return_value = (torch.zeros(1, dtype=torch.uint8), (8, 6))
             tensors, sizes = asyncio.run(
-                kimi_k3_image_processor.preflight_kimi_k3_images_async(urls)
+                kimi_k3_image_processor.preflight_kimi_k3_images_async(
+                    urls, VitConfig()
+                )
             )
 
         self.assertEqual(len(tensors), len(urls))
         self.assertEqual(len(sizes), len(urls))
         self.assertEqual(preflight.call_count, len(urls))
-
-    def test_preflight_rejects_total_image_bytes(self):
-        with patch.object(
-            kimi_k3_image_processor, "K3_MAX_TOTAL_IMAGE_BYTES", 1
-        ), patch.object(
-            kimi_k3_image_processor,
-            "_preflight_kimi_k3_image",
-            return_value=(torch.zeros(2, dtype=torch.uint8), (8, 6)),
-        ):
-            with self.assertRaisesRegex(ValueError, "image bytes"):
-                kimi_k3_image_processor.preflight_kimi_k3_images(["image"])
 
     def test_render_rejects_expanded_visual_tokens_over_context(self):
         self.renderer.max_seq_len = 1
@@ -711,6 +760,92 @@ class KimiK3RendererTest(TestCase):
 
 
 class KimiK3VisionConfigWiringTest(TestCase):
+    def setUp(self):
+        self.checkpoint = tempfile.TemporaryDirectory()
+        self.addCleanup(self.checkpoint.cleanup)
+        self.media_cfg = _media_proc_cfg(in_patch_limit=64, patch_limit_on_one_side=16)
+        Path(self.checkpoint.name, "preprocessor_config.json").write_text(
+            json.dumps({"media_proc_cfg": self.media_cfg})
+        )
+
+    def test_renderer_and_vit_use_checkpoint_preprocessing(self):
+        from rtp_llm.openai.renderers.custom_renderer import CustomChatRenderer
+
+        def init_renderer(renderer, *args, **kwargs):
+            renderer.ckpt_path = self.checkpoint.name
+
+        with patch.object(CustomChatRenderer, "__init__", init_renderer), patch.object(
+            KimiK3Renderer, "add_extra_stop_words"
+        ):
+            renderer = KimiK3Renderer()
+        vision_cfg = dict(_tiny_vision_config().__dict__)
+        embedding = KimiK3ImageEmbedding(
+            SimpleNamespace(
+                config={
+                    "vision_config": vision_cfg,
+                    "media_proc_cfg": load_kimi_k3_media_config(self.checkpoint.name),
+                }
+            )
+        )
+        image = Image.new("RGB", (225, 223))
+        media = {"type": "image", "image": image}
+        self.assertEqual(renderer._image_processor.media_proc_cfg, self.media_cfg)
+        self.assertEqual(embedding.image_processor.media_proc_cfg, self.media_cfg)
+        processed = embedding.image_processor.preprocess(media)
+        tokens = renderer._image_processor.media_tokens_calculator(media)
+        self.assertNotEqual(tokens, 72)  # The old hardcoded configuration.
+        self.assertEqual(tokens, int(processed.grid_thws.prod()) // 4)
+        features = embedding.image_embedding([image])
+        self.assertEqual(features[0].shape[0], tokens)
+
+    def test_loads_checkpoint_media_configuration(self):
+        self.assertEqual(
+            load_kimi_k3_media_config(self.checkpoint.name), self.media_cfg
+        )
+
+    def test_patch_size_and_merger_are_checkpoint_driven(self):
+        cfg = _media_proc_cfg(patch_size=8, merge_kernel_size=1, in_patch_limit=64)
+        vision = _tiny_vision_config(patch_size=8, merge_kernel_size=1)
+        embedding = KimiK3ImageEmbedding(
+            SimpleNamespace(
+                config={"vision_config": vars(vision), "media_proc_cfg": cfg}
+            )
+        )
+        image = Image.new("RGB", (31, 29))
+        processed = embedding.image_processor.preprocess({"image": image})
+        self.assertEqual(tuple(processed.pixel_values.shape), (16, 3, 8, 8))
+        tokens = embedding.image_processor.media_tokens_calculator({"image": image})
+        self.assertEqual(tokens, 16)
+        self.assertEqual(embedding.image_embedding([image])[0].shape[0], tokens)
+
+    def test_media_config_is_an_independent_copy(self):
+        processor = KimiK3VisionProcessor(self.media_cfg)
+        self.media_cfg["image_mean"][0] = 99
+        self.media_cfg["transparent_bg_config"]["chessboard_white_value"] = 0
+        self.assertEqual(processor.media_proc_cfg["image_mean"][0], 0.5)
+        self.assertEqual(
+            processor.media_proc_cfg["transparent_bg_config"]["chessboard_white_value"],
+            255,
+        )
+
+    def test_normalization_and_all_background_patterns_follow_config(self):
+        image = Image.new("RGBA", (28, 28), (12, 24, 36, 0))
+        for pattern, pixel in (("black", 0), ("white", 255), ("gray", 128)):
+            cfg = _media_proc_cfg(
+                image_mean=[0.1, 0.2, 0.3],
+                image_std=[0.5, 0.25, 1.0],
+                transparent_bg_config={"pattern": pattern},
+            )
+            processor = KimiK3VisionProcessor(cfg)
+            actual = processor.preprocess({"image": image}).pixel_values[0, :, 0, 0]
+            expected = (np.full(3, pixel / 255) - cfg["image_mean"]) / cfg["image_std"]
+            np.testing.assert_allclose(actual.numpy(), expected, atol=1e-6)
+        processor = KimiK3VisionProcessor(_media_proc_cfg(transparent_bg_config=None))
+        actual = processor.preprocess({"image": image}).pixel_values[0, :, 0, 0]
+        np.testing.assert_allclose(
+            actual.numpy(), np.array([12, 24, 36]) / 127.5 - 1, atol=1e-6
+        )
+
     def test_load_vision_config_propagates_multimodal_fields(self):
         from rtp_llm.config.model_config import ModelConfig
         from rtp_llm.models.kimi_k3.kimi_k3 import KimiK3
@@ -718,13 +853,18 @@ class KimiK3VisionConfigWiringTest(TestCase):
         checkpoint_config = {
             "vision_config": {
                 "merge_kernel_size": 2,
+                "patch_size": 14,
                 "vt_hidden_size": 1024,
                 "_name_or_path": "ignored",
             },
             "media_placeholder_token_id": 42,
         }
         config = ModelConfig()
+        config.ckpt_path = self.checkpoint.name
         KimiK3._load_vision_config(config, checkpoint_config)
+        self.assertEqual(
+            config.mm_related_params.config["media_proc_cfg"], self.media_cfg
+        )
 
         self.assertTrue(config.mm_model_config.is_multimodal)
         self.assertEqual(config.mm_model_config.mm_sep_tokens, [[42]])
@@ -733,7 +873,7 @@ class KimiK3VisionConfigWiringTest(TestCase):
         )
         self.assertEqual(
             config.mm_related_params.config["vision_config"],
-            {"merge_kernel_size": 2, "vt_hidden_size": 1024},
+            {"merge_kernel_size": 2, "patch_size": 14, "vt_hidden_size": 1024},
         )
 
     def test_checkpoint_without_vision_config_stays_text_only(self):
@@ -770,20 +910,16 @@ class KimiK3MoonViTTest(TestCase):
 
         rope = rope.unsqueeze(1)
         query = torch.view_as_real(
-            torch.view_as_complex(query.float().view(*query.shape[:-1], -1, 2))
-            * rope
+            torch.view_as_complex(query.float().view(*query.shape[:-1], -1, 2)) * rope
         ).flatten(-2)
         key = torch.view_as_real(
-            torch.view_as_complex(key.float().view(*key.shape[:-1], -1, 2))
-            * rope
+            torch.view_as_complex(key.float().view(*key.shape[:-1], -1, 2)) * rope
         ).flatten(-2)
 
         query = query.transpose(0, 1)
         key = key.transpose(0, 1)
         value = value.transpose(0, 1)
-        scores = torch.matmul(query, key.transpose(-2, -1)) / math.sqrt(
-            block.head_dim
-        )
+        scores = torch.matmul(query, key.transpose(-2, -1)) / math.sqrt(block.head_dim)
         attention = torch.matmul(torch.softmax(scores, dim=-1), value)
         attention = attention.transpose(0, 1).reshape(hidden.shape[0], -1)
         hidden = hidden + F.linear(attention, block.wo.weight)
@@ -851,12 +987,8 @@ class KimiK3MoonViTTest(TestCase):
         self.assertIsNone(block.mlp.fc1.bias)
         self.assertIsNone(model.patch_embed.proj.bias)
 
-        first_image = torch.linspace(-1.0, 1.0, 4 * 3 * 14 * 14).reshape(
-            4, 3, 14, 14
-        )
-        second_image = torch.linspace(1.0, -0.5, 8 * 3 * 14 * 14).reshape(
-            8, 3, 14, 14
-        )
+        first_image = torch.linspace(-1.0, 1.0, 4 * 3 * 14 * 14).reshape(4, 3, 14, 14)
+        second_image = torch.linspace(1.0, -0.5, 8 * 3 * 14 * 14).reshape(8, 3, 14, 14)
         first_grid = torch.tensor([[1, 2, 2]], dtype=torch.int64)
         second_grid = torch.tensor([[1, 2, 4]], dtype=torch.int64)
         output = model(first_image, first_grid)
@@ -881,9 +1013,7 @@ class KimiK3MoonViTTest(TestCase):
             init_pos_emb_time=1,
         )
         patch_embed = MoonVision3dPatchEmbed(config)
-        position_weight = (
-            torch.arange(16, dtype=torch.float32).reshape(2, 2, 4) / 10
-        )
+        position_weight = torch.arange(16, dtype=torch.float32).reshape(2, 2, 4) / 10
         with torch.no_grad():
             patch_embed.proj.weight.fill_(1)
             patch_embed.pos_emb.weight.copy_(position_weight)
@@ -892,15 +1022,10 @@ class KimiK3MoonViTTest(TestCase):
         pixel_values = torch.stack(
             [torch.full((1, 2, 2), float(value)) for value in range(1, 5)]
         )
-        output = patch_embed(
-            pixel_values, torch.tensor([[1, 2, 2]], dtype=torch.int64)
-        )
-        expected = (
-            torch.arange(4, 17, 4, dtype=torch.float32)
-            .unsqueeze(1)
-            .repeat(1, 4)
-            + position_weight.flatten(end_dim=1)
-        )
+        output = patch_embed(pixel_values, torch.tensor([[1, 2, 2]], dtype=torch.int64))
+        expected = torch.arange(4, 17, 4, dtype=torch.float32).unsqueeze(1).repeat(
+            1, 4
+        ) + position_weight.flatten(end_dim=1)
         torch.testing.assert_close(output, expected)
 
     def test_block_numerics(self):
@@ -926,9 +1051,7 @@ class KimiK3MoonViTTest(TestCase):
                 [2.0, -2.0, 1.0, -1.0],
             ]
         )
-        rope_angles = torch.tensor(
-            [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0]]
-        )
+        rope_angles = torch.tensor([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0]])
         rope = torch.polar(torch.ones_like(rope_angles), rope_angles)
         cu_seqlens = torch.tensor([0, 4], dtype=torch.int32)
 
@@ -970,9 +1093,7 @@ class KimiK3MoonViTTest(TestCase):
                     actual_query, actual_key = apply_rope(query, key, freqs)
 
                     rtol, atol = (
-                        (1e-3, 3e-3)
-                        if dtype == torch.float16
-                        else (1e-2, 3e-2)
+                        (1e-3, 3e-3) if dtype == torch.float16 else (1e-2, 3e-2)
                     )
                     torch.testing.assert_close(
                         actual_query, expected_query, rtol=rtol, atol=atol

@@ -20,6 +20,7 @@ import torch
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import RoleAddr
+from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.dash_sc.access_log import DASH_SC_GRPC_ACCESS_LOGGER_NAME
 from rtp_llm.dash_sc.access_record import GrpcAccessRecord
 from rtp_llm.dash_sc.codec import (
@@ -573,8 +574,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         )
 
         with patch(
-            "rtp_llm.dash_sc.inference.servicer."
-            "parse_multimodal_parts_from_request",
+            "rtp_llm.dash_sc.inference.servicer." "parse_multimodal_parts_from_request",
             return_value=[part],
         ), patch(
             "rtp_llm.multimodal.multimodal_util.get_bytes_io_from_url",
@@ -2010,11 +2010,14 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         visitor = _FakeVisitor(
             _FakeAsyncStream([GenerateOutputs(generate_outputs=[out])])
         )
+        vit_config = VitConfig()
+        vit_config.download_headers = '{"Authorization":"test"}'
+        vit_config.mm_image_max_file_size_kb = 17
         servicer = DashScInferenceServicer(
             backend_visitor=visitor,
             tokenizer=_KimiTokenizer(),
             model_type="kimi_k3",
-            mm_download_headers='{"Authorization":"test"}',
+            vit_config=vit_config,
         )
         req = predict_v2_pb2.ModelInferRequest()
         req.id = "kimi-k3-mm"
@@ -2070,7 +2073,8 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(mm_input.tensor.tolist(), [1, 2, 3])
         self.assertEqual(mm_input.mm_preprocess_config.min_pixels, 50176)
         preflight.assert_called_once_with(
-            "https://example.com/image.jpg", '{"Authorization":"test"}'
+            "https://example.com/image.jpg",
+            vit_config,
         )
 
     async def test_timeout_request_sets_dashscope_partial_response_metadata(

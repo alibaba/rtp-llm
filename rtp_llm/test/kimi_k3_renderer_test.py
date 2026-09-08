@@ -6,7 +6,8 @@ from unittest.mock import Mock
 
 from rtp_llm.config.exceptions import FtRuntimeException
 from rtp_llm.config.generate_config import GenerateConfig
-from rtp_llm.config.kimi_k3_request_contract import (
+from rtp_llm.config.py_config_modules import VitConfig
+from rtp_llm.models.kimi_k3.kimi_k3_request_contract import (
     validate_kimi_k3_tool_history,
 )
 from rtp_llm.openai.api_datatype import ChatCompletionRequest, ChatMessage, UsageInfo
@@ -275,7 +276,7 @@ class KimiK3RendererTest(unittest.TestCase):
         renderer = KimiK3Renderer.__new__(KimiK3Renderer)
         renderer.tokenizer = Tokenizer()
         renderer.max_seq_len = 0
-        renderer.vit_config = Mock(download_headers="")
+        renderer.vit_config = VitConfig()
 
         rendered = renderer.render_chat(request)
 

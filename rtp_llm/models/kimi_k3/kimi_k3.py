@@ -12,6 +12,9 @@ from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.models.base_model import BaseModel
 from rtp_llm.models.kimi_k3.kimi_k3_weight import KimiK3Eagle3Weight, KimiK3MtpWeight, KimiK3Weight
+from rtp_llm.multimodal.multimodal_mixins.kimi_k3.kimi_k3_image_processor import (
+    load_kimi_k3_media_config,
+)
 from rtp_llm.ops import HybridAttentionType, KvCacheDataType
 
 _MLA_PREFILL_EXPANDED_KV_BUDGET_BYTES_ENV = (
@@ -92,21 +95,30 @@ class KimiK3ModelConfig(ModelConfig):
         mla_fp8 = os.environ.get("KIMI_K3_MLA_FP8", "0").strip()
         if mla_fp8 not in ("0", "1"):
             raise ValueError("KIMI_K3_MLA_FP8 must be 0 or 1")
-        self.attn_config.mla_fp8_compute = mla_fp8 == "1" and "eagle3" not in self.model_type
+        self.attn_config.mla_fp8_compute = (
+            mla_fp8 == "1" and "eagle3" not in self.model_type
+        )
         if self.attn_config.mla_fp8_compute:
             if not self.attn_config.use_mla or self.attn_config.is_sparse:
                 raise ValueError("K3 FP8 MLA requires dense MLA")
             if self.attn_config.kv_cache_dtype == KvCacheDataType.INT8:
                 raise ValueError("K3 FP8 MLA is incompatible with INT8 cache")
             self.attn_config.kv_cache_dtype = KvCacheDataType.FP8
-            for field, env in (("mla_fp8_q_scale", "KIMI_K3_MLA_FP8_Q_SCALE"),
-                               ("mla_fp8_kv_scale", "KIMI_K3_MLA_FP8_KV_SCALE")):
+            for field, env in (
+                ("mla_fp8_q_scale", "KIMI_K3_MLA_FP8_Q_SCALE"),
+                ("mla_fp8_kv_scale", "KIMI_K3_MLA_FP8_KV_SCALE"),
+            ):
                 scale = float(os.environ.get(env, "1"))
                 if not math.isfinite(scale) or not 1e-20 <= scale <= 1e20:
-                    raise ValueError(f"{env} must be a finite positive FP32 scale in [1e-20, 1e20]")
+                    raise ValueError(
+                        f"{env} must be a finite positive FP32 scale in [1e-20, 1e20]"
+                    )
                 setattr(self.attn_config, field, scale)
-            logging.info("K3 MLA FP8: dense_e4m3_v1, Q scale=%s, KV scale=%s; BF16 output",
-                         self.attn_config.mla_fp8_q_scale, self.attn_config.mla_fp8_kv_scale)
+            logging.info(
+                "K3 MLA FP8: dense_e4m3_v1, Q scale=%s, KV scale=%s; BF16 output",
+                self.attn_config.mla_fp8_q_scale,
+                self.attn_config.mla_fp8_kv_scale,
+            )
         if self.quant_config is not None:
             raise ValueError(
                 "Kimi K3 does not support runtime weight quantization; its "
@@ -142,7 +154,10 @@ class KimiK3(BaseModel):
 
         config.mm_model_config.is_multimodal = True
         config.mm_model_config.mm_sep_tokens = [[media_token_id]]
-        config.mm_related_params.config = {"vision_config": vision_config}
+        config.mm_related_params.config = {
+            "vision_config": vision_config,
+            "media_proc_cfg": load_kimi_k3_media_config(config.ckpt_path),
+        }
         config.mm_related_params.special_token_ids.update(
             {"image_token_index": media_token_id}
         )

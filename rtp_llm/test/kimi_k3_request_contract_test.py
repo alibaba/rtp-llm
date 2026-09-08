@@ -2,7 +2,7 @@ import unittest
 from types import SimpleNamespace
 
 from rtp_llm.config.exceptions import FtRuntimeException
-from rtp_llm.config.kimi_k3_request_contract import (
+from rtp_llm.models.kimi_k3.kimi_k3_request_contract import (
     apply_kimi_k3_request_contract,
 )
 

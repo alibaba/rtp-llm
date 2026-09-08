@@ -383,6 +383,19 @@ py_test(
 py_test(
     name="kimi_k3_mm_test",
     srcs=["kimi_k3_mm_test.py"],
+    data=["testdata/kimi_k3/preprocessor_config.json"],
     deps=["//rtp_llm:testlib"],
     exec_properties={"gpu": "H20"},
+)
+
+py_test(
+    name = "kimi_k3_media_preflight_test",
+    srcs = ["kimi_k3_media_preflight_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+py_test(
+    name = "kimi_k3_request_contract_test",
+    srcs = ["kimi_k3_request_contract_test.py"],
+    deps = ["//rtp_llm:testlib"],
 )

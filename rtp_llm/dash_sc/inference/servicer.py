@@ -27,7 +27,7 @@ from rtp_llm.config.exceptions import (
     FtRuntimeException,
 )
 from rtp_llm.config.generate_config import GenerateConfig
-from rtp_llm.config.kimi_k3_request_contract import apply_kimi_k3_request_contract
+from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.dash_sc.access_log import emit_access_log, emit_query_log
 from rtp_llm.dash_sc.access_record import GrpcAccessRecord, to_optional_int
 from rtp_llm.dash_sc.codec import (
@@ -61,6 +61,9 @@ from rtp_llm.dash_sc.proto import predict_v2_pb2, predict_v2_pb2_grpc
 from rtp_llm.dash_sc.repetition_monitor import RequestRepetitionMonitorConfig
 from rtp_llm.frontend.request_id_generator import generate_request_id
 from rtp_llm.metrics import AccMetrics, kmonitor
+from rtp_llm.models.kimi_k3.kimi_k3_request_contract import (
+    apply_kimi_k3_request_contract,
+)
 from rtp_llm.multimodal.multimodal_mixins.kimi_k3.kimi_k3_image_processor import (
     KimiK3VisionProcessor,
     preflight_kimi_k3_images_async,
@@ -163,7 +166,7 @@ async def _prepare_multimodal_request(
     *,
     tokenizer: Any,
     is_kimi_k3: bool = False,
-    download_headers: str = "",
+    vit_config: Optional[VitConfig] = None,
 ) -> tuple[list[int], list]:
     """Expand K3 chat-template placeholders and build backend multimodal inputs."""
     mm_parts = parse_multimodal_parts_from_request(request)
@@ -210,7 +213,7 @@ async def _prepare_multimodal_request(
 
     try:
         tensors, sizes = await preflight_kimi_k3_images_async(
-            urls, download_headers
+            urls, vit_config or VitConfig()
         )
     except ValueError as error:
         raise FtRuntimeException(
@@ -667,7 +670,7 @@ async def iter_real_model_stream_infer(
     access_agg: Any = None,
     mm_inputs: Optional[list] = None,
     is_kimi_k3: bool = False,
-    mm_download_headers: str = "",
+    vit_config: Optional[VitConfig] = None,
     yield_access_stats: bool = False,
 ) -> AsyncIterator[predict_v2_pb2.ModelStreamInferResponse]:
     """Run enqueue on ``backend_visitor`` and yield one proto per chunk as the backend streams.
@@ -718,7 +721,7 @@ async def iter_real_model_stream_infer(
                 input_ids_list,
                 tokenizer=tokenizer,
                 is_kimi_k3=is_kimi_k3,
-                download_headers=mm_download_headers,
+                vit_config=vit_config,
             )
         generate_config = sampling.to_generate_config(other=other)
         generate_config.trace_id = trace_str
@@ -1322,7 +1325,7 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
         generate_env_config: Any = None,
         think_runtime: Optional[_ThinkRuntime] = None,
         model_type: Optional[str] = None,
-        mm_download_headers: str = "",
+        vit_config: Optional[VitConfig] = None,
         rank_id: Optional[int] = None,
         repetition_monitor_config: Optional[RequestRepetitionMonitorConfig] = None,
     ):
@@ -1341,7 +1344,7 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
         self._is_kimi_k3 = (
             str(model_type or "").replace("-", "_").lower() == "kimi_k3"
         )
-        self._mm_download_headers = mm_download_headers
+        self._vit_config = vit_config or VitConfig()
         # Empty runtime is a safe default — phase-2 disabled, all dashllm limit
         # params null. Production callers (``DashScApp``) pre-build via
         # ``build_think_runtime`` so the per-request hot path is allocation-free.
@@ -1579,7 +1582,7 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                         phase2_request_id_factory=self._next_rtp_llm_request_id,
                         access_agg=record,
                         is_kimi_k3=self._is_kimi_k3,
-                        mm_download_headers=self._mm_download_headers,
+                        vit_config=self._vit_config,
                         yield_access_stats=True,
                     ):
                         (
