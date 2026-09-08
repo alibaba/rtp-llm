@@ -31,16 +31,17 @@ py_test(
     ] + [":triton", ":torch"],
     visibility = ["//visibility:public"],
     tags = ["H20"],
-    # Held on H20 because its sm86 behaviour is not understood, not because it
-    # needs sm90. On sm86 TestEpScatter1PoisonRegression raised
-    # "CUDA error: an illegal memory access" in 2 of 3 runs and passed once in
-    # isolation; no H20 baseline exists in any CI log, so neither "regression"
-    # nor "fine" is supportable yet.
+    # The crash source is gone: test_old_kernel_reads_poison is now opt-in behind
+    # RTP_LLM_EP_SCATTER_POISON_DIAG. It asserted nothing and only printed a
+    # mismatch count, yet drove a knowingly racy kernel 100 times, and when that
+    # raised an illegal memory access the poisoned CUDA context took every sibling
+    # test down with it -- which is what made this target order-dependent (2 of 3
+    # sm86 runs failed, passing when run alone). test_new_kernel_immune_to_poison
+    # is the real gate and still runs by default.
     #
-    # Worth knowing before touching it: test_old_kernel_reads_poison
-    # deliberately drives a kernel known to be buggy (256 experts x 100 rounds),
-    # and an IMA poisons the CUDA context for every test after it in the same
-    # process. That makes the whole target order-dependent regardless of GPU.
-    # Root-cause that first; pin it afterwards.
+    # Still pinned to H20, where it passes today, because the first test to fail on
+    # sm86 was never isolated -- it could have been the 200-round stress case in
+    # TestEpScatter1Correctness rather than the poison class. Candidate for A10 once
+    # someone confirms a clean sm86 run with the diagnostic gated.
     exec_properties = {'gpu':'H20'},
 )
