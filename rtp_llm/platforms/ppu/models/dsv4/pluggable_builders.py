@@ -1,0 +1,54 @@
+"""PPU construction entrypoints; selected after the worker protocol barrier."""
+
+from rtp_llm.models_py.pluggable import dsv4_builders as baseline
+
+
+def build_model(*, build_ctx, request, **kwargs):
+    from .ppu_module_provider import PpuModuleProvider
+
+    provider = PpuModuleProvider(
+        build_ctx.selection.model_metadata["execution_options"]
+    )
+    provider.require_device_name(build_ctx.selection.platform.device_name)
+    return baseline.build_model(
+        build_ctx=build_ctx, request=request, platform_provider=provider, **kwargs
+    )
+
+
+def build_block(*, build_ctx, request, **kwargs):
+    return baseline.build_block(build_ctx=build_ctx, request=request, **kwargs)
+
+
+def build_attention(*, build_ctx, request, **kwargs):
+    return baseline.build_attention(build_ctx=build_ctx, request=request, **kwargs)
+
+
+def build_moe(*, build_ctx, request, **kwargs):
+    return baseline.build_moe(build_ctx=build_ctx, request=request, **kwargs)
+
+
+def build_moe_tp(*, build_ctx, request, **kwargs):
+    from .ppu_tp_moe import PpuTPMoE
+
+    baseline.validate_arguments(build_ctx, request, kwargs)
+    return PpuTPMoE(tp_rank=build_ctx.selection.platform.local_rank, **kwargs)
+
+
+def build_attention_inverse_rope(*, build_ctx, request, platform_provider, **kwargs):
+    from .ppu_rope_attention import PpuRopeAttention
+
+    baseline.validate_arguments(build_ctx, request, kwargs)
+    if platform_provider is None:
+        raise ValueError("PPU attention requires an instance-owned operator adapter")
+    return platform_provider.build_attention(PpuRopeAttention, **kwargs)
+
+
+def build_attention_fp4(*, build_ctx, request, platform_provider, **kwargs):
+    from .ppu_fp4_indexer import PpuFP4Attention
+
+    baseline.validate_arguments(build_ctx, request, kwargs)
+    if platform_provider is None:
+        raise ValueError(
+            "PPU FP4 attention requires an instance-owned operator adapter"
+        )
+    return platform_provider.build_attention(PpuFP4Attention, **kwargs)

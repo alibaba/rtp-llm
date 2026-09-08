@@ -18,6 +18,9 @@ def get_module_registry():
 
             registry = ModuleRegistry()
             register_modules(registry)
+            from rtp_llm.platforms import register_modules as register_platforms
+
+            register_platforms(registry)
             entry = "models_py.pluggable_register"
             if import_optional_internal_source_entrypoint(entry):
                 importlib.import_module(

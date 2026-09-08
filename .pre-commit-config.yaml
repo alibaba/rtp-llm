@@ -28,4 +28,5 @@ repos:
         types_or: [c++, c, cuda]
         exclude: ^rtp_llm/cpp/cutlass/
 
-exclude: ^rtp_llm/ops|^3rdparty
+# Vendored SGLang headers are checked byte-for-byte by source-manifest.json.
+exclude: ^rtp_llm/ops|^3rdparty|^rtp_llm/platforms/ppu/kernels/cuda/dsv4_ppu/

@@ -1,3 +1,4 @@
+load("@pip_ppu_torch//:requirements.bzl", requirement_ppu="requirement")
 # to wrapper target relate with different system config
 load("@pip_cpu_torch//:requirements.bzl", requirement_cpu="requirement")
 load("@pip_arm_torch//:requirements.bzl", requirement_arm="requirement")
@@ -26,10 +27,12 @@ _DSV4_PLATFORM_ONLY = ["xgrammar"]
 def requirement(names):
     for name in names:
         cuda13_x86_deps = [] if name in _CUDA13_DEFERRED else [requirement_gpu_cuda13(name)]
+        ppu_deps = [] if name in ["xgrammar", "rtp-kernel", "fastsafetensors", "flashinfer-cubin", "flashinfer-jit-cache", "nvidia-cutlass-dsl", "tilelang"] else [requirement_ppu(name)]
         if name in _DSV4_PLATFORM_ONLY:
             native.py_library(
                 name = name,
                 deps = select({
+                    "@rtp_llm//:using_ppu": ppu_deps,
                     "@rtp_llm//:using_cuda13_x86": cuda13_x86_deps,
                     "@rtp_llm//:using_cuda12_9_x86": [requirement_gpu_cuda12_9(name)],
                     "//conditions:default": [],
@@ -40,6 +43,7 @@ def requirement(names):
         native.py_library(
             name = name,
             deps = select({
+                "@rtp_llm//:using_ppu": ppu_deps,
                 "@rtp_llm//:cuda_pre_12_9": [requirement_gpu_cuda12(name)],
                 "@rtp_llm//:using_cuda13_x86": cuda13_x86_deps,
                 "@rtp_llm//:using_cuda12_9_x86": [requirement_gpu_cuda12_9(name)],
@@ -90,6 +94,7 @@ def subscribe_deps():
 
 def whl_deps():
     return select({
+        "@rtp_llm//:using_ppu": ['torch@http://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/ppu_sdk/v2.1.0_cu130/torch-2.9.0%2Bv0.1.0.ppu2.1.0.oe-cp310-cp310-linux_x86_64.whl', 'torchvision@http://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/ppu_sdk/v2.1.0_cu130/torchvision-0.24.0%2Bv0.1.0.ppu2.1.0.ce-cp310-cp310-linux_x86_64.whl', 'triton@http://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/ppu_sdk/v2.1.0_cu130/triton-3.6.0%2Bv0.2.0.ppu2.1.0.oe-cp310-cp310-linux_x86_64.whl', 'flash_attn@http://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/ppu_sdk/v2.1.0_cu130/flash_attn-2.8.2%2Bv0.1.0.ppu2.1.0.oe-cp310-cp310-linux_x86_64.whl', 'flash_attn_3@http://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/ppu_sdk/v2.1.0_cu130/flash_attn_3-2.8.2%2Bv0.1.0.ppu2.1.0.oe-cp310-cp310-linux_x86_64.whl', 'flash_mla@http://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/ppu_sdk/v2.1.0_cu130/flash_mla-2.0.0%2Bv0.1.0.ppu2.1.0.oe-cp310-cp310-linux_x86_64.whl', 'flashinfer-python@http://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/ppu_sdk/v2.1.0_cu130/flashinfer_python-0.6.8.post1-py3-none-any.whl', 'deep_gemm@http://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/ppu_sdk/v2.1.0_cu130/deep_gemm-1.0.0%2Bppu2.1.0.post1.dev000.g164e851bd-cp310-cp310-linux_x86_64.whl', 'deep_ep@http://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/ppu_sdk/v2.1.0_cu130/deep_ep-1.0.0%2Bv0.2.0.ppu2.1.0.oe-cp310-cp310-linux_x86_64.whl', 'fast-hadamard-transform@http://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/ppu_sdk/v2.1.0_cu130/fast_hadamard_transform-1.1.0.post2%2Bv0.1.0.ppu2.1.0.ce-cp310-cp310-linux_x86_64.whl', 'fast-safetensors@http://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/c2/yuanyuxing.yyx/dist/ppu/fast_safetensors-0.7.3%2Btorch2.1.2.cu121-cp310-cp310-linux_x86_64.whl', 'mkl==2021.1.1'],
         "@rtp_llm//:using_cuda13_x86": [
             "torch@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/0430/torch-2.11.0%2Bcu130-cp310-cp310-manylinux_2_28_x86_64.whl",
             "torchvision@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/0430/torchvision-0.26.0%2Bcu130-cp310-cp310-manylinux_2_28_x86_64.whl",
@@ -123,6 +128,7 @@ def platform_deps():
 
 def torch_deps():
     deps = select({
+        "@rtp_llm//:using_ppu": ["@torch_2.9_py310_ppu//:torch_api", "@torch_2.9_py310_ppu//:torch", "@torch_2.9_py310_ppu//:torch_libs"],
         "@rtp_llm//:using_rocm": [
             "@torch_rocm//:torch_api",
             "@torch_rocm//:torch",
@@ -160,6 +166,7 @@ def flashinfer_deps():
     native.alias(
         name = "flashinfer",
         actual = select({
+            "@rtp_llm//:using_ppu": "@flashinfer_ppu//:flashinfer",
             "@rtp_llm//:using_cuda13_x86": "@flashinfer_cpp_cu13//:flashinfer",
             "//conditions:default": "@flashinfer_cpp//:flashinfer",
         })
@@ -168,7 +175,7 @@ def flashinfer_deps():
 def flashmla_deps():
     native.alias(
         name = "flashmla",
-        actual = "@flashmla//:flashmla"
+        actual = select({"@rtp_llm//:using_ppu": "@flashmla_ppu//:flashmla", "//conditions:default": "@flashmla//:flashmla"})
     )
 
 def deep_ep_py_deps():
@@ -188,6 +195,7 @@ def cuda_register():
 
 def triton_deps(names):
     return select({
+        "@rtp_llm//:using_ppu": [requirement_ppu(name) for name in names],
         "//conditions:default": [],
     })
 
@@ -206,6 +214,7 @@ def jit_deps():
 
 def select_py_bindings():
     return select({
+        "@rtp_llm//:using_ppu": ["@rtp_llm//rtp_llm/models_py/bindings/ppu:ppu_bindings_register"],
         "@rtp_llm//:using_cuda12": [
             "@rtp_llm//rtp_llm/models_py/bindings/cuda:cuda_bindings_register"
         ],
@@ -220,6 +229,7 @@ def select_py_bindings():
 def no_block_copy_link_deps():
     """Deps for the cc_library that defines execNoBlockCopy / warmupNoBlockCopy (per device)."""
     return select({
+        "@rtp_llm//:using_ppu": ["@rtp_llm//rtp_llm/models_py/bindings/ppu:no_block_copy"],
         "@rtp_llm//:using_cuda12": [
             "@rtp_llm//rtp_llm/models_py/bindings/cuda:no_block_copy",
         ],

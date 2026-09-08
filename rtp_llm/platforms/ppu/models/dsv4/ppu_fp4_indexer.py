@@ -1,0 +1,203 @@
+"""PPU Prefill FP4 Indexer, retaining RTP's instance and pool lifecycle."""
+
+import torch
+import torch.nn.functional as F
+from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
+from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
+from rtp_llm.models_py.modules.dsv4.fp8.compressor import CompressorFP8
+from rtp_llm.models_py.modules.dsv4.fp8.indexer import IndexerFP8
+from rtp_llm.utils.model_weight import W
+
+from ...kernels.cuda.ppu_fp4_indexer import (
+    compress4,
+    norm_rope_store,
+    quantize_q,
+    topk_bf16,
+)
+from ...kernels.ppu_fp4_indexer_cache import build_plans, gather_k
+from .ppu_rope_attention import PpuRopeAttention
+
+
+class PpuFP4Compressor(CompressorFP8):
+    def __init__(self, *args, compressor_weights, **kwargs):
+        super().__init__(*args, compressor_weights=compressor_weights, **kwargs)
+        if (self.head_dim, self.rope_head_dim, self.compress_ratio) != (128, 64, 4):
+            raise ValueError("FP4 Indexer compressor requires head128/rope64/C4")
+        self._pool_entry_bytes = 68
+        self.norm.weight = torch.nn.Parameter(
+            compressor_weights["norm"].float().contiguous(), requires_grad=False
+        )
+        # SG reorders overlap/current APE rows once after loading, privately.
+        self.ape = torch.nn.Parameter(
+            torch.cat(self.ape.chunk(2, dim=-1), dim=0).contiguous(),
+            requires_grad=False,
+        )
+
+    def _launch(self, kv_flat, score_flat, meta, seq_start=None):
+        if self._state_pool_3d is None or self._kv_pool_view is None:
+            return
+        if self._cp_ctx is not None and self._cp_ctx.cp_size > 1:
+            raise ValueError("FP4 Indexer CP is not qualified")
+        n = kv_flat.shape[0]
+        if not n:
+            return
+        # Parent projection supplies two views of one contiguous FP32 [N,512].
+        if (
+            kv_flat.stride() != (512, 1)
+            or score_flat.stride() != (512, 1)
+            or score_flat.data_ptr() != kv_flat.data_ptr() + 256 * 4
+        ):
+            raise ValueError("FP4 compressor requires the fused KV/score projection")
+        fused = kv_flat.as_strided((n, 512), (512, 1))
+        c, w, slots = build_plans(
+            meta,
+            self._state_block_table,
+            self._state_eb,
+            self._state_tokens_per_block,
+            seq_start,
+        )
+        with record_function_range("dsv4.ppu.fp4.indexer.compress"):
+            compressed = compress4(self._state_pool_3d, fused, self.ape, c, w)
+        freqs = torch.view_as_real(self.freqs_cis).flatten(-2)
+        with record_function_range("dsv4.ppu.fp4.indexer.norm_rope_store"):
+            norm_rope_store(
+                compressed,
+                c,
+                self.norm.weight,
+                self.norm_eps,
+                freqs,
+                slots,
+                self._kv_pool_view,
+                self._kv_eb,
+            )
+
+    def forward_decode_vectorized(self, *args, **kwargs):
+        raise ValueError("FP4 Indexer decode is not qualified")
+
+
+class PpuFP4Indexer(IndexerFP8):
+    CACHE_ENTRY_BYTES = 68
+
+    def __init__(self, *args, layer_weights, **kwargs):
+        super().__init__(
+            *args,
+            layer_weights=layer_weights,
+            compressor_factory=PpuFP4Compressor,
+            **kwargs,
+        )
+        import deep_gemm
+
+        if not callable(getattr(deep_gemm, "fp8_fp4_mqa_logits", None)):
+            raise RuntimeError("PPU DeepGEMM FP4 MQA is required")
+        self._score = deep_gemm.fp8_fp4_mqa_logits
+        self.weights_proj = (
+            layer_weights[W.v4_indexer_weights_proj_w].to(torch.bfloat16).contiguous()
+        )
+        self.weight_scale = self.softmax_scale * self.n_heads**-0.5
+
+    def forward(
+        self,
+        x,
+        qr,
+        attention_inputs,
+        *,
+        workspace,
+        cp_gather_stream=None,
+        post_gather_stream=None,
+    ):
+        meta = attention_inputs
+        if self._cp_ctx is not None and self._cp_ctx.cp_size > 1:
+            raise ValueError("FP4 Indexer CP is not qualified")
+        if (
+            self._kv_pool_view is None
+            or self._kv_block_table is None
+            or self._kv_eb <= 0
+        ):
+            return torch.empty((*x.shape[:-1], 0), device=x.device, dtype=torch.int32)
+        self.compressor.freqs_cis = self.freqs_cis
+        self._propagate_pool_to_nested()
+        try:
+            with record_function_range("dsv4.ppu.fp4.indexer.q_projection"):
+                q = (
+                    self._compute_indexer_q(qr, meta.freqs_cis_slice, apply_rope=False)
+                    .reshape(meta.M, self.n_heads, 128)
+                    .contiguous()
+                )
+            self.compressor(
+                x, meta.sp_int, meta=meta.compressor_meta, workspace=workspace
+            )
+            if meta.T == 0:
+                return torch.empty(
+                    (*x.shape[:-1], 0), device=x.device, dtype=torch.int32
+                )
+            with record_function_range("dsv4.ppu.fp4.indexer.weights_quant_q"):
+                weights = F.linear(x.reshape(meta.M, -1), self.weights_proj)
+                q, qs, weights = quantize_q(
+                    q,
+                    weights,
+                    self.weight_scale,
+                    torch.view_as_real(self.freqs_cis).flatten(-2),
+                    meta.compressor_meta.positions,
+                )
+            with record_function_range("dsv4.ppu.fp4.indexer.gather_k"):
+                k, ks = gather_k(
+                    self._kv_pool_view,
+                    meta.block_table_i32,
+                    meta.cu_kv_seqlens,
+                    meta.T,
+                    self._kv_eb,
+                )
+            out = torch.empty(
+                (meta.M, self.index_topk), device=x.device, dtype=torch.int32
+            )
+            chunk = self._prefill_score_chunk_rows or meta.M
+            for start in range(0, meta.M, chunk):
+                end = min(meta.M, start + chunk)
+                with record_function_range("dsv4.ppu.fp4.indexer.score"):
+                    logits = self._score(
+                        (q[start:end], qs[start:end]),
+                        (k, ks),
+                        weights[start:end],
+                        meta.ks[start:end],
+                        meta.ke[start:end],
+                        clean_logits=False,
+                        logits_dtype=torch.bfloat16,
+                    )
+                label = getattr(self.compressor, "_profile_label", "")
+                if (
+                    _rt.LEVEL >= 2
+                    and label.startswith("L")
+                    and label[1:3].isdigit()
+                    and _rt.should_record_layer(int(label[1:3]))
+                ):
+                    for suffix, tensor in (
+                        ("q", q[start:end]),
+                        ("q_scale", qs[start:end]),
+                        ("w", weights[start:end]),
+                        ("k", k),
+                        ("k_scale", ks),
+                        ("ks", meta.ks[start:end]),
+                        ("ke", meta.ke[start:end]),
+                        ("logits", logits),
+                    ):
+                        _rt.record_if_level(
+                            2,
+                            f"{label.replace('.', '_')}_score_{start}_{suffix}",
+                            tensor,
+                        )
+                with record_function_range("dsv4.ppu.fp4.indexer.topk"):
+                    topk_bf16(
+                        logits, meta.ks[start:end], meta.ke[start:end], out[start:end]
+                    )
+                del logits
+            return out.view(*x.shape[:-1], self.index_topk)
+        finally:
+            self._clear_nested_pool()
+
+    def forward_decode_vectorized(self, *args, **kwargs):
+        raise ValueError("FP4 Indexer decode is not qualified")
+
+
+class PpuFP4Attention(PpuRopeAttention):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, indexer_factory=PpuFP4Indexer, **kwargs)

@@ -54,6 +54,7 @@ py_library(
     data = [
         ":cutlass_moe_config",
         ":rocm_fp8_ptpc_hipb_solutions",
+        "//rtp_llm/platforms:platform_sources",
     ],
     deps = [
         ":utils",

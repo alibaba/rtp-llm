@@ -157,6 +157,7 @@ _JIT_CACHE_SRCS = [
 
 py_library(
     name = "utils",
+    data = ["//rtp_llm/platforms:platform_sources"],
     srcs = glob([
         "utils/**/*.py",
     ], exclude = _JIT_CACHE_SRCS + [

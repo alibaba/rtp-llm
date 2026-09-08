@@ -1,0 +1,17 @@
+{
+  "csrc/deepseek_v4/topk_prefill_bf16.cuh": "2e25fd0af1cbc1247bf1dc267f9a6769b8699d16758cade1d39d83988ce02624",
+  "include/sgl_kernel/warp.cuh": "3254a491733811043f923423ea7eefec2d2697311bb520a0553ef3cdb177db57",
+  "include/sgl_kernel/utils.cuh": "6dcb47c69906cb32e1d014db21b459ff27e11408ad81449f6fdc5b86eac14582",
+  "include/sgl_kernel/utils.h": "d0e4bf235e004b2cc61924b377f57e876ae6988bfadc61c6f0422306f4f17aac",
+  "include/sgl_kernel/source_location.h": "cd43da52aa20deafdffb0973bed1b101f634c728362aeef06959f0f5700f4973",
+  "include/sgl_kernel/math.cuh": "7679e20835c478de20826d9d5266bbf41c22099275ed01f44909a856eca25da1",
+  "include/sgl_kernel/type.cuh": "f70277be81e61c2737875067a0d91f7ca2c7e2f806be1353319273c55a93e6a5",
+  "include/sgl_kernel/vec.cuh": "eba7c4cc8ca2e778fcaf37edb309682b46be3f99a3a4933abf848fad9ad1c880",
+  "include/sgl_kernel/tensor.h": "b417f6ac51acd6f21a56b00338a4007781b237c4145dd37e87cd8dbb76060479",
+  "csrc/deepseek_v4/c4_v2.cuh": "c0cba89531db057edb7e4d1ceb8d4bfdff5251e622b8edcb772401220a96bc91",
+  "include/sgl_kernel/deepseek_v4/compress_v2.cuh": "a3d2a13e2ffa149ee5ef8cc4d787bd52f9057cd6e2f0017d4c846b40db4bcf92",
+  "include/sgl_kernel/tile.cuh": "3702d86f89e98b3a726b1e7afd1a8cf251bedbad6899bb97eab1f8ac6f5db677",
+  "csrc/deepseek_v4/fused_norm_rope_v2.cuh": "4b559a85ac579f6b4945d0180ccedd96450e3690774d586c17dd21bf43f653cb",
+  "include/sgl_kernel/deepseek_v4/fp8_utils.cuh": "811b3c3ebe55566ed0c7ad255a698a481a0bd025089946b1ef8603c96f888a58",
+  "csrc/deepseek_v4/main_norm_rope.cuh": "3250d52fbc6ed5f46353c3d3550fbbb8c8fdb7bbb5637047e24033d3ac32f193"
+}

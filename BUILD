@@ -130,7 +130,13 @@ config_setting(
 
 config_setting(
     name = "using_ppu",
-    define_values = {"use_ppu": "true"},
+    define_values = {
+        "use_ppu": "true",
+        "using_cuda": "true",
+        "using_cuda12_9_x86": "false",
+        "using_cuda12_arm": "false",
+        "using_cuda13_x86": "false",
+    },
 )
 
 config_setting(

@@ -139,7 +139,7 @@ class DeepEPStrategy(RoutedExpertsStrategy):
         if not w1.is_cuda or torch.cuda.get_device_name(w1.device) != "ZW-M890P":
             raise RuntimeError("DSV4_PPU_GROUPED_FP4=1 requires ZW-M890P weights")
 
-        from internal_source.rtp_llm.models_py.kernels.ppu_mxfp4 import (
+        from rtp_llm.platforms.ppu.kernels.ppu_mxfp4 import (
             prepare_fp4_weight_scale_mxfp4,
         )
 
@@ -157,7 +157,8 @@ class DeepEPStrategy(RoutedExpertsStrategy):
             "_ppu_w2", w2.view(torch.uint8).contiguous(), persistent=False
         )
         self.register_buffer(
-            "_ppu_s2", prepare_fp4_weight_scale_mxfp4(s2.contiguous()),
+            "_ppu_s2",
+            prepare_fp4_weight_scale_mxfp4(s2.contiguous()),
             persistent=False,
         )
         self._ppu_grouped_fp4 = True
@@ -171,16 +172,13 @@ class DeepEPStrategy(RoutedExpertsStrategy):
     ) -> torch.Tensor:
         """Fixed-capacity, CUDA-graph-safe grouped MXFP4 local expert compute."""
         import deep_gemm
-
-        from internal_source.rtp_llm.models_py.kernels.ppu_mxfp4 import (
-            downcast_to_mxfp4,
-        )
         from rtp_llm.models_py.modules.dsv4.moe.expert import require_silu_mul_split
         from rtp_llm.models_py.triton_kernels.moe.ep_kernels import (
             ep_gather,
             ep_scatter_v2,
             recompute_topk_ids_sum_expert_count,
         )
+        from rtp_llm.platforms.ppu.kernels.ppu_mxfp4 import downcast_to_mxfp4
 
         cfg = self.cfg
         M, D = recv_x.shape
@@ -233,9 +231,7 @@ class DeepEPStrategy(RoutedExpertsStrategy):
         # block. Materialize the expert-major physical layout while retaining
         # the logical [E, M, K/64] mn-major view required by DeepGEMM.
         scatter_scale_grouped = (
-            scatter_scale_grouped.permute(0, 2, 1)
-            .contiguous()
-            .permute(0, 2, 1)
+            scatter_scale_grouped.permute(0, 2, 1).contiguous().permute(0, 2, 1)
         )
         gate_up_grouped = torch.empty(
             (E, capacity, 2 * inter),
@@ -245,9 +241,7 @@ class DeepEPStrategy(RoutedExpertsStrategy):
         expected_m = max(
             1,
             (
-                cfg.max_tokens_per_rank
-                * cfg.ep_size
-                * cfg.n_activated_experts
+                cfg.max_tokens_per_rank * cfg.ep_size * cfg.n_activated_experts
                 + cfg.n_routed_experts
                 - 1
             )
@@ -262,11 +256,15 @@ class DeepEPStrategy(RoutedExpertsStrategy):
             expected_m,
         )
         gate_up = gate_up_grouped.view(total, 2 * inter)
-        hidden = require_silu_mul_split()(
-            gate_up[:, :inter].float().contiguous(),
-            gate_up[:, inter:].float().contiguous(),
-            clamp_limit=cfg.swiglu_limit,
-        ).to(torch.bfloat16).contiguous()
+        hidden = (
+            require_silu_mul_split()(
+                gate_up[:, :inter].float().contiguous(),
+                gate_up[:, inter:].float().contiguous(),
+                clamp_limit=cfg.swiglu_limit,
+            )
+            .to(torch.bfloat16)
+            .contiguous()
+        )
         hidden_fp4, hidden_scale = downcast_to_mxfp4(hidden)
         hidden_fp4_grouped = hidden_fp4.view(E, capacity, -1)
         hidden_scale_grouped = hidden_scale.as_strided(
@@ -274,9 +272,7 @@ class DeepEPStrategy(RoutedExpertsStrategy):
             (capacity, 1, total),
         )
         hidden_scale_grouped = (
-            hidden_scale_grouped.permute(0, 2, 1)
-            .contiguous()
-            .permute(0, 2, 1)
+            hidden_scale_grouped.permute(0, 2, 1).contiguous().permute(0, 2, 1)
         )
         down_grouped = torch.empty(
             (E, capacity, D), dtype=torch.bfloat16, device=recv_x.device
@@ -307,11 +303,8 @@ class DeepEPStrategy(RoutedExpertsStrategy):
     ) -> torch.Tensor:
         """Run grouped MXFP4 experts on DeepEP LL's compact payload."""
         import deep_gemm
-
-        from internal_source.rtp_llm.models_py.kernels.ppu_mxfp4 import (
-            downcast_to_mxfp4,
-        )
         from rtp_llm.models_py.modules.dsv4.moe.expert import require_silu_mul_split
+        from rtp_llm.platforms.ppu.kernels.ppu_mxfp4 import downcast_to_mxfp4
 
         cfg = self.cfg
         packed_dispatch = isinstance(expert_x, tuple)
@@ -336,9 +329,7 @@ class DeepEPStrategy(RoutedExpertsStrategy):
                 f"grouped-FP4 packed input must be "
                 f"[{cfg.n_local_experts}, M, {cfg.dim}], got E={E}, M={ll_capacity}, D={D}"
             )
-        compute_capacity = int(
-            os.environ.get("DSV4_PPU_GROUPED_FP4_CAPACITY", "128")
-        )
+        compute_capacity = int(os.environ.get("DSV4_PPU_GROUPED_FP4_CAPACITY", "128"))
         if (
             compute_capacity <= 0
             or compute_capacity > ll_capacity
@@ -397,9 +388,7 @@ class DeepEPStrategy(RoutedExpertsStrategy):
         expected_m = max(
             1,
             (
-                cfg.max_tokens_per_rank
-                * cfg.ep_size
-                * cfg.n_activated_experts
+                cfg.max_tokens_per_rank * cfg.ep_size * cfg.n_activated_experts
                 + cfg.n_routed_experts
                 - 1
             )
@@ -414,11 +403,15 @@ class DeepEPStrategy(RoutedExpertsStrategy):
             expected_m,
         )
         gate_up = gate_up_grouped.view(total, 2 * inter)
-        hidden = require_silu_mul_split()(
-            gate_up[:, :inter].float().contiguous(),
-            gate_up[:, inter:].float().contiguous(),
-            clamp_limit=cfg.swiglu_limit,
-        ).to(torch.bfloat16).contiguous()
+        hidden = (
+            require_silu_mul_split()(
+                gate_up[:, :inter].float().contiguous(),
+                gate_up[:, inter:].float().contiguous(),
+                clamp_limit=cfg.swiglu_limit,
+            )
+            .to(torch.bfloat16)
+            .contiguous()
+        )
         hidden_fp4, hidden_scale = downcast_to_mxfp4(hidden)
         hidden_fp4_grouped = hidden_fp4.view(E, compute_capacity, -1)
         hidden_scale_grouped = hidden_scale.as_strided(
@@ -426,9 +419,7 @@ class DeepEPStrategy(RoutedExpertsStrategy):
             (compute_capacity, 1, total),
         )
         hidden_scale_grouped = (
-            hidden_scale_grouped.permute(0, 2, 1)
-            .contiguous()
-            .permute(0, 2, 1)
+            hidden_scale_grouped.permute(0, 2, 1).contiguous().permute(0, 2, 1)
         )
         compact_down = torch.empty(
             (E, compute_capacity, D),
@@ -465,8 +456,8 @@ class DeepEPStrategy(RoutedExpertsStrategy):
             "async_finish": False,
             "return_recv_hook": False,
         }
-        expert_x, expert_num_tokens, handle, _, _ = (
-            wrapper.buffer.low_latency_dispatch(**dispatch_args)
+        expert_x, expert_num_tokens, handle, _, _ = wrapper.buffer.low_latency_dispatch(
+            **dispatch_args
         )
         if not isinstance(expert_x, tuple) or len(expert_x) != 2:
             raise RuntimeError("DeepEP LL MXFP4 dispatch must return (data, scale)")
@@ -520,7 +511,7 @@ class DeepEPStrategy(RoutedExpertsStrategy):
 
     def forward(
         self,
-        x: torch.Tensor,        # [N, D] local rank's tokens (BF16)
+        x: torch.Tensor,  # [N, D] local rank's tokens (BF16)
         weights: torch.Tensor,  # [N, k] fp32
         indices: torch.Tensor,  # [N, k] int64 global expert IDs
     ) -> torch.Tensor:
@@ -603,9 +594,11 @@ class DeepEPStrategy(RoutedExpertsStrategy):
             # must use the common startup budget rather than this rank's x.
             # Otherwise a rank captured at batch 1 reserves 8 rows although
             # the EP group can send it 9, which deadlocks ACCL-EP replay.
-            num_worst_tokens=(int(cfg.max_tokens_per_rank) * cfg.ep_size)
-            if (graph_warmup or capturing)
-            else 0,
+            num_worst_tokens=(
+                (int(cfg.max_tokens_per_rank) * cfg.ep_size)
+                if (graph_warmup or capturing)
+                else 0
+            ),
         )
 
         # 3. Local per-expert compute. ACCL-EP's dispatch returns
