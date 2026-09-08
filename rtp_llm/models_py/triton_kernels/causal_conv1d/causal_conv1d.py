@@ -33,6 +33,59 @@ class CausalConv1dMetadata:
     total: int
 
 
+@triton.jit
+def _prepare_causal_conv1d_graph_metadata_kernel(
+    query_start_loc,
+    batch_ptr,
+    token_chunk_offset_ptr,
+    batch_size: tl.constexpr,
+    block_m: tl.constexpr,
+    pad_slot_id: tl.constexpr,
+):
+    slot = tl.program_id(0)
+    selected_batch = pad_slot_id
+    selected_chunk = pad_slot_id
+    chunk_start = 0
+    for batch_idx in range(batch_size):
+        sequence_start = tl.load(query_start_loc + batch_idx)
+        sequence_end = tl.load(query_start_loc + batch_idx + 1)
+        chunk_count = (sequence_end - sequence_start + block_m - 1) // block_m
+        is_selected = (slot >= chunk_start) & (slot < chunk_start + chunk_count)
+        selected_batch = tl.where(is_selected, batch_idx, selected_batch)
+        selected_chunk = tl.where(is_selected, slot - chunk_start, selected_chunk)
+        chunk_start += chunk_count
+    tl.store(batch_ptr + slot, selected_batch)
+    tl.store(token_chunk_offset_ptr + slot, selected_chunk)
+
+
+def prepare_causal_conv1d_graph_metadata(
+    query_start_loc: torch.Tensor,
+    device: torch.device,
+    token_capacity: int,
+    metadata: Optional[CausalConv1dMetadata] = None,
+) -> CausalConv1dMetadata:
+    batch_size = query_start_loc.numel() - 1
+    total = triton.cdiv(token_capacity, BLOCK_M) + batch_size
+    if metadata is None:
+        metadata = CausalConv1dMetadata(
+            batch_ptr=torch.empty(total, dtype=torch.int32, device=device),
+            token_chunk_offset_ptr=torch.empty(total, dtype=torch.int32, device=device),
+            total=total,
+        )
+    elif metadata.total != total:
+        raise ValueError("causal conv1d graph metadata capacity changed")
+
+    _prepare_causal_conv1d_graph_metadata_kernel[(total,)](
+        query_start_loc,
+        metadata.batch_ptr,
+        metadata.token_chunk_offset_ptr,
+        batch_size=batch_size,
+        block_m=BLOCK_M,
+        pad_slot_id=PAD_SLOT_ID,
+    )
+    return metadata
+
+
 def prepare_causal_conv1d_metadata(
     query_start_loc: torch.Tensor,
     device: torch.device,
@@ -148,7 +201,6 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
     # single-sequence id
     idx_seq = tl.load(batch_ptr + tl.program_id(0))
     chunk_offset = tl.load(token_chunk_offset_ptr + tl.program_id(0)).to(tl.int64)
-    prefix_length = tl.load(prefix_lengths_ptr + idx_seq).to(tl.int32)
 
     # BLOCK_N elements along the feature-dimension (channel)
     idx_feats = tl.program_id(1) * BLOCK_N + tl.arange(0, BLOCK_N)
@@ -156,6 +208,7 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
     if idx_seq == pad_slot_id:
         return
 
+    prefix_length = tl.load(prefix_lengths_ptr + idx_seq).to(tl.int32)
     sequence_start_index = tl.load(query_start_loc_ptr + idx_seq).to(tl.int64)
     sequence_end_index = tl.load(query_start_loc_ptr + idx_seq + 1).to(tl.int64)
     # find the actual sequence length

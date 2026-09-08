@@ -71,6 +71,8 @@ struct GptModelInitParams {
     // input_hiddens.
     int64_t                                    hc_mult = 1;
     std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter;
+    // Mori EP configuration (lazy HIP graph capacity gating, low-latency limits).
+    MoeConfig moe_config;
 };
 
 enum GptModelInputIndex : size_t {

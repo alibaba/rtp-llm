@@ -4,6 +4,7 @@
 #include <atomic>
 #include <exception>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <stdexcept>
 #include <unordered_map>
@@ -48,6 +49,7 @@ public:
         is_prefill_cuda_graph_mode_(graph_params.is_prefill_cuda_graph_mode),
         is_target_verify_(graph_params.is_target_verify),
         role_(graph_params.role),
+        lazy_capture_(graph_params.lazy_capture),
         capture_stream_(cuda_graph::graphGetStreamFromPool(true)),
         enable_cuda_graph_debug_mode_(graph_params.enable_cuda_graph_debug_mode),
         num_tokens_per_bs_(graph_params.num_tokens_per_bs),
@@ -58,6 +60,7 @@ public:
         input_hidden_size_(graph_params.input_hidden_size),
         hc_mult_(static_cast<int>(graph_params.hc_mult)),
         sp_steps_(graph_params.sp_steps),
+        mori_max_tokens_(graph_params.mori_max_tokens),
         prefill_capture_seq_lens_(graph_params.prefill_capture_seq_lens),
         decode_capture_batch_sizes_(graph_params.decode_capture_batch_sizes),
         position_encoding_(graph_params.position_encoding),
@@ -88,6 +91,9 @@ public:
                                       || role_ == CudaGraphRole::MTP_DRAFT_PREFILL
                                       || role_ == CudaGraphRole::GENERATION_PREFILL;
         is_target_verify_ = role_ == CudaGraphRole::TARGET_VERIFY;
+        const bool lazy_role_supported = role_ == CudaGraphRole::DECODE || role_ == CudaGraphRole::TARGET_VERIFY
+                                         || role_ == CudaGraphRole::GENERATION_PREFILL;
+        lazy_capture_ = lazy_capture_ && lazy_role_supported;
         if (role_ == CudaGraphRole::GENERATION_PREFILL) {
             RTP_LLM_CHECK_WITH_INFO(generation_prefill_cuda_graph_max_requests_ > 0
                                         && generation_prefill_cuda_graph_max_requests_
@@ -145,25 +151,27 @@ public:
         py_instance_.release();
         RTP_LLM_LOG_INFO("Release CudaGraphRunner Successfully");
     }
-    void           captureDecode();
-    void           capturePrefill();
-    void           captureDecodeOneBatchSize(int bs);
-    void           capturePrefillOneSeqLen(int seq_len);
-    void           prepareInputs(const PyModelInputs& inputs, CudaGraphState& state);
-    void           prepareInputData(const PyModelInputs& inputs, CudaGraphState& state);
-    void           prepareAttentionInputs(const PyModelInputs& inputs,
-                                          CudaGraphState&      state,
-                                          bool                 skip_forward_event_sync = false) override;
-    void           updateKVCacheKernelBlockId(const PyModelInputs& inputs, CudaGraphState& state) override;
-    bool           canRun(const PyModelInputs& inputs,
-                          CudaGraphState&      state,
-                          CudaGraphCheckMode   mode = CudaGraphCheckMode::FORWARD) override;
-    void           replayGraph(int key);
-    void           replayDecode(int bs);
-    void           replayPrefill(int seq_len);
-    int            getCurrentRealGraphSize(const CudaGraphState& state) const;
-    PyModelOutputs forward(const PyModelInputs& inputs, CudaGraphState& state) override;
-    void           initCapture() override;
+    void             captureDecode();
+    void             capturePrefill();
+    void             captureDecodeOneBatchSize(int bs);
+    void             capturePrefillOneSeqLen(int seq_len);
+    void             prepareInputs(const PyModelInputs& inputs, CudaGraphState& state);
+    void             prepareInputData(const PyModelInputs& inputs, CudaGraphState& state);
+    void             prepareAttentionInputs(const PyModelInputs& inputs,
+                                            CudaGraphState&      state,
+                                            bool                 skip_forward_event_sync = false) override;
+    void             updateKVCacheKernelBlockId(const PyModelInputs& inputs, CudaGraphState& state) override;
+    bool             canRun(const PyModelInputs& inputs,
+                            CudaGraphState&      state,
+                            CudaGraphCheckMode   mode = CudaGraphCheckMode::FORWARD) override;
+    GraphRunDecision plan(const PyModelInputs& inputs, CudaGraphState& state) override;
+    bool             captureCurrentBucket(const CudaGraphState& state) override;
+    void             replayGraph(int key);
+    void             replayDecode(int bs);
+    void             replayPrefill(int seq_len);
+    int              getCurrentRealGraphSize(const CudaGraphState& state) const;
+    PyModelOutputs   forward(const PyModelInputs& inputs, CudaGraphState& state) override;
+    void             initCapture() override;
 
     bool captureSessionMayBeDirty() const override {
         return capture_session_may_be_dirty_.load(std::memory_order_acquire);
@@ -179,15 +187,29 @@ private:
     void captureOneGraphInstance(int key, const char* key_type);
     // Common replay and sync check logic
     void replayAndSyncCheck(int key, const char* key_type);
+    // Lazy-capture helpers (used when lazy_capture_ is true).
+    // initLazyStorage allocates the shared backing storage + output once, without capturing.
+    void initLazyStorage();
+    bool captureBucketLazy(int key);
+    bool synchronizeCaptureSuccess(bool local_success);
+    void buildBucketInstance(int key);
+    // Lazy buckets are built after real requests have already written into the shared backing
+    // storage. Synthetic capture must never inherit those block IDs, otherwise it writes garbage
+    // KV/conv/SSM state into blocks that the allocator has since handed to another request.
+    void resetSharedCaptureStorage();
 
+    bool isPrefillCudaGraph() const {
+        return role_ == CudaGraphRole::EMBEDDING_PREFILL || role_ == CudaGraphRole::MTP_DRAFT_PREFILL
+               || role_ == CudaGraphRole::GENERATION_PREFILL;
+    }
+    bool isGenerationPrefillCudaGraph() const {
+        return role_ == CudaGraphRole::GENERATION_PREFILL;
+    }
     bool isEmbeddingStylePrefillCudaGraph() const {
         return role_ == CudaGraphRole::EMBEDDING_PREFILL;
     }
     bool isMtpDraftPrefillCudaGraph() const {
         return role_ == CudaGraphRole::MTP_DRAFT_PREFILL;
-    }
-    bool isGenerationPrefillCudaGraph() const {
-        return role_ == CudaGraphRole::GENERATION_PREFILL;
     }
     bool usesFixedCapacityMtpDraftPrefillCudaGraph() const {
         // DSpARK propose/commit now run as construction-time-role decode graphs
@@ -230,6 +252,7 @@ private:
     bool                    is_prefill_cuda_graph_mode_{false};
     bool                    is_target_verify_{false};
     CudaGraphRole           role_{CudaGraphRole::AUTO};
+    bool                    lazy_capture_{false};
     cuda_graph::GraphStream capture_stream_;
     bool                    enable_cuda_graph_debug_mode_{false};
     size_t                  max_bs_{1};
@@ -242,13 +265,31 @@ private:
     size_t                  input_hidden_size_{0};
     int                     hc_mult_{1};
     int                     sp_steps_{0};
+    int                     mori_max_tokens_{0};
     std::vector<int>        capture_range_;
     std::vector<int>        prefill_capture_seq_lens_;    // Pre-configured sequence lengths from Python
     std::vector<int>        decode_capture_batch_sizes_;  // Pre-configured batch sizes from Python
+    // Per-bucket lifecycle for lazy capture. A bucket transitions
+    // Uncaptured -> CaptureAfterEager -> Capturing -> Ready on success, or -> Failed.
+    // Failed/Disabled buckets are served eagerly forever (no automatic retry).
+    enum class BucketState {
+        Uncaptured,
+        CaptureAfterEager,
+        Capturing,
+        Ready,
+        Failed,
+        Disabled,
+    };
+    std::unordered_map<int, BucketState> bucket_states_;
+    std::mutex                           bucket_states_mutex_;
+    bool                                 lazy_storage_ready_{false};
     // capture seqLen -> GraphInstance (prefill)
     // batch_size -> GraphInstance (decode)
     std::unordered_map<int, GraphInstance> graph_instances_;
     CaptureMemoryHold                      capture_mem_hold_;
+    torch::Tensor                          zero_input_ids_;
+    torch::Tensor                          zero_input_hiddens_;
+    torch::Tensor                          prefill_padding_offset_host_;
     torch::Tensor                          position_encoding_;
     torch::Tensor                          token_type_embedding_;
     float                                  input_embedding_scalar_;

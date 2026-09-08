@@ -31,6 +31,7 @@ public:
         params.enable_cuda_graph            = true;
         params.enable_cuda_graph_debug_mode = true;
         params.is_prefill_cuda_graph_mode   = true;
+        params.role                         = CudaGraphRole::EMBEDDING_PREFILL;
         params.max_seq_len                  = static_cast<int>(max_seq_len);
         params.tokens_per_block             = static_cast<int>(tokens_per_block);
         params.kernel_tokens_per_block      = static_cast<int>(kernel_tokens_per_block);
@@ -48,7 +49,8 @@ public:
         if (token_type_embedding.has_value()) {
             params.token_type_embedding = std::move(*token_type_embedding);
         }
-        runner_ = CudaGraphRunner::initializeCapture(std::make_unique<CudaGraphRunner>(params, std::move(py_instance)));
+        runner_.reset(
+            CudaGraphRunner::initializeCapture(std::make_unique<CudaGraphRunner>(params, std::move(py_instance))));
     }
 
     void init_generation_prefill(py::object                   py_instance,
@@ -61,7 +63,9 @@ public:
                                  std::vector<std::string>     group_tags,
                                  int64_t                      position_id_len_factor,
                                  std::optional<torch::Tensor> position_encoding,
-                                 std::optional<torch::Tensor> token_type_embedding) {
+                                 std::optional<torch::Tensor> token_type_embedding,
+                                 bool                         lazy_capture,
+                                 int64_t                      mori_max_tokens) {
         reset_runner();
         GraphParams params;
         params.enable_cuda_graph                          = true;
@@ -80,13 +84,16 @@ public:
         params.generation_prefill_cuda_graph_max_requests = static_cast<int>(max_requests);
         params.generation_prefill_cuda_graph_pad_token_id = 0;
         params.position_id_len_factor                     = static_cast<int>(position_id_len_factor);
+        params.lazy_capture                               = lazy_capture;
+        params.mori_max_tokens                            = static_cast<int>(mori_max_tokens);
         if (position_encoding.has_value()) {
             params.position_encoding = std::move(*position_encoding);
         }
         if (token_type_embedding.has_value()) {
             params.token_type_embedding = std::move(*token_type_embedding);
         }
-        runner_ = CudaGraphRunner::initializeCapture(std::make_unique<CudaGraphRunner>(params, std::move(py_instance)));
+        runner_.reset(
+            CudaGraphRunner::initializeCapture(std::make_unique<CudaGraphRunner>(params, std::move(py_instance))));
     }
 
     void init_decode(py::object               py_instance,
@@ -98,12 +105,14 @@ public:
                      std::vector<std::string> group_tags,
                      bool                     is_target_verify,
                      int64_t                  num_tokens_per_bs,
-                     int64_t                  position_id_len_factor) {
+                     int64_t                  position_id_len_factor,
+                     bool                     lazy_capture) {
         reset_runner();
         GraphParams params;
         params.enable_cuda_graph            = true;
         params.enable_cuda_graph_debug_mode = false;
         params.is_prefill_cuda_graph_mode   = false;
+        params.lazy_capture                 = lazy_capture;
         params.max_seq_len                  = static_cast<int>(max_seq_len);
         params.tokens_per_block             = static_cast<int>(tokens_per_block);
         params.kernel_tokens_per_block      = static_cast<int>(kernel_tokens_per_block);
@@ -115,9 +124,11 @@ public:
         params.decode_capture_batch_sizes   = std::move(decode_capture_batch_sizes);
         params.kv_cache_group_tags          = std::move(group_tags);
         params.is_target_verify             = is_target_verify;
-        params.position_id_len_factor       = static_cast<int>(position_id_len_factor);
+        params.role = is_target_verify ? CudaGraphRole::TARGET_VERIFY : CudaGraphRole::DECODE;
+        params.position_id_len_factor = static_cast<int>(position_id_len_factor);
 
-        runner_ = CudaGraphRunner::initializeCapture(std::make_unique<CudaGraphRunner>(params, std::move(py_instance)));
+        runner_.reset(
+            CudaGraphRunner::initializeCapture(std::make_unique<CudaGraphRunner>(params, std::move(py_instance))));
     }
 
     bool canRun(torch_ext::PyModelInputs& inputs) {
@@ -133,8 +144,8 @@ public:
     }
 
     bool prepare(torch_ext::PyModelInputs& inputs, bool skip_forward_event_sync) {
-        // Match PyWrappedModel::prepareAttentionInputs exactly: token data is
-        // and BERT IDs are supplied only by the later forward call.
+        // Match PyWrappedModel::prepareAttentionInputs exactly: token data and
+        // BERT IDs are supplied only by the later forward call.
         auto prepare_inputs                  = inputs;
         prepare_inputs.input_ids             = torch::Tensor();
         prepare_inputs.input_hiddens         = torch::Tensor();
@@ -157,6 +168,25 @@ public:
 
     void makeInputIdsScalar(torch_ext::PyModelInputs& inputs) {
         inputs.input_ids = torch::ones({}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+    }
+
+    std::string plan(torch_ext::PyModelInputs& inputs) {
+        if (runner_ == nullptr) {
+            return "Eager";
+        }
+        switch (runner_->plan(inputs, state_)) {
+            case GraphRunDecision::Replay:
+                return "Replay";
+            case GraphRunDecision::CaptureAfterEager:
+                return "CaptureAfterEager";
+            case GraphRunDecision::Eager:
+            default:
+                return "Eager";
+        }
+    }
+
+    bool captureCurrentBucket() {
+        return runner_ != nullptr && runner_->captureCurrentBucket(state_);
     }
 
     torch_ext::PyModelOutputs forward(torch_ext::PyModelInputs& inputs) {
@@ -185,6 +215,10 @@ public:
         return generationPrefillCudaGraphStatusString(state_.generation_prefill_status);
     }
 
+    void close() {
+        reset_runner();
+    }
+
     ~CudaGraphTestRunner() {
         reset_runner();
     }
@@ -197,14 +231,11 @@ private:
     }
 
     void reset_runner() {
-        if (runner_ != nullptr) {
-            delete runner_;
-            runner_ = nullptr;
-        }
+        runner_.reset();
     }
 
-    CudaGraphRunner* runner_ = nullptr;
-    CudaGraphState   state_{};
+    std::unique_ptr<CudaGraphRunner> runner_;
+    CudaGraphState                  state_{};
 };
 
 }  // namespace rtp_llm
@@ -234,10 +265,11 @@ PYBIND11_MODULE(libtest_cuda_graph_runner, m) {
              py::arg("tokens_per_block"),
              py::arg("kernel_tokens_per_block"),
              py::arg("decode_capture_batch_sizes"),
-             py::arg("group_tags")        = std::vector<std::string>{},
-             py::arg("is_target_verify")  = false,
-             py::arg("num_tokens_per_bs") = 1,
-             py::arg("position_id_len_factor") = 0)
+             py::arg("group_tags")              = std::vector<std::string>{},
+             py::arg("is_target_verify")        = false,
+             py::arg("num_tokens_per_bs")       = 1,
+             py::arg("position_id_len_factor")  = 0,
+             py::arg("lazy_capture")            = false)
         .def("init_generation_prefill",
              &CudaGraphTestRunner::init_generation_prefill,
              py::arg("py_instance"),
@@ -250,16 +282,21 @@ PYBIND11_MODULE(libtest_cuda_graph_runner, m) {
              py::arg("group_tags")             = std::vector<std::string>{},
              py::arg("position_id_len_factor") = 0,
              py::arg("position_encoding")      = py::none(),
-             py::arg("token_type_embedding")   = py::none())
+             py::arg("token_type_embedding")   = py::none(),
+             py::arg("lazy_capture")           = false,
+             py::arg("mori_max_tokens")        = 0)
         .def("canRun", &CudaGraphTestRunner::canRun)
         .def("canPrepare", &CudaGraphTestRunner::canPrepare)
         .def("clear_input_ids", &CudaGraphTestRunner::clearInputIds)
         .def("make_input_lengths_scalar", &CudaGraphTestRunner::makeInputLengthsScalar)
         .def("make_input_ids_scalar", &CudaGraphTestRunner::makeInputIdsScalar)
         .def("prepare", &CudaGraphTestRunner::prepare, py::arg("inputs"), py::arg("skip_forward_event_sync") = false)
+        .def("plan", &CudaGraphTestRunner::plan)
+        .def("captureCurrentBucket", &CudaGraphTestRunner::captureCurrentBucket)
         .def("forward", &CudaGraphTestRunner::forward)
         .def("prepareAttentionInputs", &CudaGraphTestRunner::prepareAttentionInputs)
         .def("getGenerationPrefillStatus", &CudaGraphTestRunner::getGenerationPrefillStatus)
         .def("getCurrentRealGraphSize", &CudaGraphTestRunner::getCurrentRealGraphSize)
-        .def("captureSessionMayBeDirty", &CudaGraphTestRunner::captureSessionMayBeDirty);
+        .def("captureSessionMayBeDirty", &CudaGraphTestRunner::captureSessionMayBeDirty)
+        .def("close", &CudaGraphTestRunner::close);
 }

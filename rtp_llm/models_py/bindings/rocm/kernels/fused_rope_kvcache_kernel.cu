@@ -190,9 +190,12 @@ __global__ void add_fusedQKV_bias_transpose_prefill_kernel_v1(T*                
     using QuantizedEltType = __nv_fp8_e4m3;
     using QuantizedVecType = typename Vec_t<T>::QuantizedType;
 #endif
-    constexpr int vec_size         = Vec_t<T>::size;
-    using Vec_t                    = typename Vec_t<T>::Type;
-    const int token_idx            = blockIdx.x;
+    constexpr int vec_size = Vec_t<T>::size;
+    using Vec_t            = typename Vec_t<T>::Type;
+    const int token_idx    = blockIdx.x;
+    if (cu_seqlens != nullptr && token_idx >= cu_seqlens[batch_size]) {
+        return;
+    }
     const int token_padding_offset = padding_offset == nullptr ? 0 : padding_offset[token_idx];
     const int tgt_token_idx        = token_idx + token_padding_offset;
 
@@ -815,19 +818,12 @@ __global__ void add_fusedQKV_bias_transpose_prefill_kernel(T*                   
     using QuantizedEltType = __hip_fp8_e4m3_fnuz;
     using QuantizedVecType = __hip_fp8x2_e4m3_fnuz;
 
-    constexpr int vec_size         = Vec_t<T>::size;
-    using Vec_t                    = typename Vec_t<T>::Type;
-    const int token_idx            = blockIdx.x;
-
-    if constexpr (PAD_QUERY) {
-        // CUDA Graph replay keeps the capture-time launch grid, while cu_seqlens
-        // is refreshed with the live token count. Ignore graph-capacity tail
-        // blocks before they use the shorter replay lengths for padded indexing.
-        if (token_idx >= cu_seqlens[batch_size]) {
-            return;
-        }
+    constexpr int vec_size = Vec_t<T>::size;
+    using Vec_t            = typename Vec_t<T>::Type;
+    const int token_idx    = blockIdx.x;
+    if (cu_seqlens != nullptr && token_idx >= cu_seqlens[batch_size]) {
+        return;
     }
-
     const int token_padding_offset = padding_offset == nullptr ? 0 : padding_offset[token_idx];
     const int tgt_token_idx        = token_idx + token_padding_offset;
 
@@ -1217,7 +1213,7 @@ __global__ void add_fusedQKV_bias_transpose_decode_kernel_v1(T*                 
 
     // refer to the implementation of hipify decode attention
     // input_lengths is indexed by sequence (batch_idx), not head index (blockIdx.y).
-    const int  position_id = get_rope_position_id(rope_config, position_ids, token_idx, tidx);
+    const int position_id = get_rope_position_id(rope_config, position_ids, token_idx, tidx);
 
     const int input_len = (input_lengths == nullptr) ? 0 : input_lengths[batch_idx];
     const int timestep  = tlength;
@@ -1377,7 +1373,7 @@ __global__ void add_fusedQKV_bias_transpose_decode_kernel(T*                    
 
     // refer to the implementation of hipify decode attention
     // input_lengths is indexed by sequence (batch_idx), not head index (blockIdx.y).
-    const int  position_id = get_rope_position_id(rope_config, position_ids, token_idx, tidx);
+    const int position_id = get_rope_position_id(rope_config, position_ids, token_idx, tidx);
 
     const int input_len = (input_lengths == nullptr) ? 0 : input_lengths[batch_idx];
     const int timestep  = tlength;
