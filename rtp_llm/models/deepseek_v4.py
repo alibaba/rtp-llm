@@ -596,7 +596,7 @@ class DeepSeekV4(DeepSeekV2):
         # and falls back to a single homogeneous pool.
         hybrid_config.enable_independent_kv_cache_pools = True
 
-        model_config.kv_cache_spec_descs = build_dsv4_kv_cache_spec_descs(
+        descs = build_dsv4_kv_cache_spec_descs(
             layer_num=layer_num,
             layer_compress_ratios=list(attn_config.layer_compress_ratios),
             fp8_kv=attn_config.kv_cache_dtype == KvCacheDataType.FP8,
@@ -607,9 +607,6 @@ class DeepSeekV4(DeepSeekV2):
             ),
         )
 
-        # Apply operator-supplied fixed-pool block counts. Must run before the
-        # descs list is consumed downstream (the pybind getter returns a copy, so
-        # mutating a read-back list would be a no-op).
         fixed_pool_blocks = _dsv4_pool_blocks(
             None
             if kv_cache_config is None
@@ -618,9 +615,7 @@ class DeepSeekV4(DeepSeekV2):
         )
         if fixed_pool_blocks > 0:
             for tag in DSV4_FIXED_POOL_TAGS:
-                apply_dsv4_explicit_pool_blocks(
-                    model_config.kv_cache_spec_descs, tag, fixed_pool_blocks
-                )
+                apply_dsv4_explicit_pool_blocks(descs, tag, fixed_pool_blocks)
             logging.info(
                 "DeepSeek-V4 pinned fixed pools %s to %d blocks",
                 DSV4_FIXED_POOL_TAGS,
@@ -635,12 +630,14 @@ class DeepSeekV4(DeepSeekV2):
         )
         if hca_state_pool_blocks > 0:
             apply_dsv4_explicit_pool_blocks(
-                model_config.kv_cache_spec_descs, HCA_STATE_TAG, hca_state_pool_blocks
+                descs, HCA_STATE_TAG, hca_state_pool_blocks
             )
             logging.info(
                 "DeepSeek-V4 pinned HCA_STATE pool to %d blocks",
                 hca_state_pool_blocks,
             )
+
+        model_config.kv_cache_spec_descs = descs
 
     def _create_python_model(self):
         from rtp_llm.models_py.model_desc.deepseek_v4_model import DeepSeekV4Model
