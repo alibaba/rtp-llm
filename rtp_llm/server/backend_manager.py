@@ -151,7 +151,7 @@ class BackendManager(object):
             distributed_server=self._distributed_server,
         )
         phase = os.environ.get("SCR_PHASE", "").strip().lower()
-        role_type = self.py_env_configs.pd_sep_config.role_type
+        role_type = self.py_env_configs.role_config.role_type
         pd_role = str(getattr(role_type, "name", role_type)).lower() in {
             "prefill",
             "decode",

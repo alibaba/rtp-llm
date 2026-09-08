@@ -159,7 +159,7 @@ class _BackendVisitorTemplateHook:
             self.configs.distribute_config,
             self.configs.parallelism_config,
         )
-        role = getattr(self.configs.pd_sep_config, "role_type", "")
+        role = self.configs.role_config.role_type
         role_name = str(getattr(role, "name", role)).lower()
         world_info = resolve_world_info(
             current,
