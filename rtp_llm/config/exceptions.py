@@ -189,4 +189,8 @@ class FtRuntimeException(Exception):
         super().__init__(self.message)
 
     def __reduce__(self):
-        return self.__class__, (self.exception_type, self.message)
+        return self.__class__, (
+            self.exception_type,
+            self.message,
+            self.admission_reject_reason,
+        )
