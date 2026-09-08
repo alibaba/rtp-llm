@@ -42,4 +42,8 @@ public final class WorkerIdentity {
                 ? null
                 : physicalIpPort + LOGICAL_WORKER_ENGINE_INDEX_SEPARATOR + engineIndex;
     }
+
+    public String getMetricIpPort(int multiEngineNum) {
+        return multiEngineNum == 1 ? physicalIpPort : logicalIpPort;
+    }
 }
