@@ -87,12 +87,21 @@ class RankLayout:
         return self._dp_size * self._tp_size
 
     def coord_of(self, world_rank: int) -> Coord:
+        """Validated: raises ValueError when world_rank is outside the lattice."""
         world_rank = int(world_rank)
         if world_rank < 0 or world_rank >= self.world_size():
             raise ValueError(
                 f"world_rank {world_rank} out of range [0, {self.world_size()}) "
                 f"for layout {self}"
             )
+        return self.coord_of_unchecked(world_rank)
+
+    def coord_of_unchecked(self, world_rank: int) -> Coord:
+        """No range check: ranks outside the lattice yield out-of-bounds
+        coordinates (legacy-compatible semantics for worlds whose process
+        count exceeds pp*dp*tp, e.g. FFN-disaggregate replica/service ranks).
+        Only for callsites that legitimately see such ranks."""
+        world_rank = int(world_rank)
         tp = world_rank % self._tp_size
         dp = (world_rank // self._tp_size) % self._dp_size
         pp = world_rank // (self._dp_size * self._tp_size)

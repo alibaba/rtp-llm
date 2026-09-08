@@ -91,6 +91,27 @@ class RankLayoutCoordTest(unittest.TestCase):
                     msg=f"layout={layout}, rank={r}",
                 )
 
+    def test_coord_of_unchecked_matches_coord_of_in_lattice_exhaustive(self):
+        for pp_size, dp_size, tp_size in _SWEEP:
+            layout = RankLayout(pp_size=pp_size, dp_size=dp_size, tp_size=tp_size)
+            for r in range(layout.world_size()):
+                self.assertEqual(layout.coord_of_unchecked(r), layout.coord_of(r))
+
+    def test_coord_of_unchecked_matches_legacy_outside_lattice(self):
+        # FFN-disaggregate shape: process count exceeds pp*dp*tp.
+        for pp_size, dp_size, tp_size in _SWEEP:
+            layout = RankLayout(pp_size=pp_size, dp_size=dp_size, tp_size=tp_size)
+            for r in range(layout.world_size(), layout.world_size() + 4):
+                coord = layout.coord_of_unchecked(r)
+                legacy_pp, legacy_dp, legacy_tp = _legacy_coord(
+                    r, pp_size, dp_size, tp_size
+                )
+                self.assertEqual(
+                    (coord.pp, coord.dp, coord.tp),
+                    (legacy_pp, legacy_dp, legacy_tp),
+                    msg=f"layout={layout}, rank={r}",
+                )
+
     def test_world_rank_of_layout_order(self):
         # world_rank = pp * (dp * tp) + dp * tp + tp: PP outermost, TP innermost.
         layout = RankLayout(pp_size=2, dp_size=3, tp_size=4)

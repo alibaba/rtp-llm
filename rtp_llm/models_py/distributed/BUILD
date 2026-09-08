@@ -17,6 +17,7 @@ py_library(
         "symm_mem.py",
     ],
     deps = [
+        ":rank_layout",
         "//rtp_llm:torch",
     ],
     visibility = ["//visibility:public"],
