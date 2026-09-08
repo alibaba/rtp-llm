@@ -324,10 +324,31 @@ class PerTokenGroupQuantTest(TestCase):
             column_major_scales=column_major_scales,
             scale_tma_aligned=scale_tma_aligned,
         )
-        print(f"x_q_triton = {x_q_triton}")
-        print(f"x_s_triton = {x_s_triton}")
-        print(f"x_q_sglang = {x_q_sglang}")
-        print(f"x_s_sglang = {x_s_sglang}")
+        # Compare, do not just print. This target runs on L20 rather than A10
+        # precisely so the Triton reference above can execute (it stores fp8e4nv,
+        # which Triton only permits at capability >= 89), and printing both
+        # results meant the reference cost a GPU slot while gating nothing -- the
+        # two could disagree completely and the test would still pass.
+        #
+        # Quantized values are compared exactly: both paths round the same fp16
+        # input to the same fp8 grid with the same per-group scale, so any
+        # difference is a real disagreement rather than accumulated error. The
+        # scales are compared with a tolerance because they come from a division
+        # by the group amax, which the two implementations may order differently.
+        torch.testing.assert_close(
+            x_q_sglang.to(torch.float32),
+            x_q_triton.to(torch.float32),
+            rtol=0,
+            atol=0,
+            msg=lambda m: f"quantized values differ from the Triton reference: {m}",
+        )
+        torch.testing.assert_close(
+            x_s_sglang.to(torch.float32),
+            x_s_triton.to(torch.float32),
+            rtol=1e-6,
+            atol=1e-8,
+            msg=lambda m: f"scales differ from the Triton reference: {m}",
+        )
 
     def test_per_token_group_quant(self):
         for params in itertools.product(

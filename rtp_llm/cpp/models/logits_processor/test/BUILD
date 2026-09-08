@@ -88,8 +88,13 @@ cc_test(
 )
 
 # The benchmark is gated behind the DISABLED_ gtest prefix; run it explicitly
-# with --test_arg=--gtest_also_run_disabled_tests. Keeping the target in the
-# default test graph preserves compile coverage for the runner API.
+# with --test_arg=--gtest_also_run_disabled_tests.
+#
+# It is tagged manual below, so it is NOT in the default test graph: with only a
+# DISABLED_ case it ran zero tests, reported a pass, and reserved a GPU to do it.
+# manual also drops it from "..." expansion at build time, so compile coverage
+# for the runner API is kept by naming this target explicitly in the compile
+# stage's BAZEL_BUILD_TEST_TARGET rather than by leaving it testable.
 cc_test(
     name = "spec_logits_verify_runner_perf_test",
     srcs = [

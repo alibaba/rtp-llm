@@ -82,11 +82,22 @@ def resolve_local_dataset() -> str | None:
     if not staged:
         return None
     root = os.path.abspath(staged)
-    # tau2 reads DATA_DIR/tau2/domains and DATA_DIR/tau2/user_simulator, so an
-    # existing-but-empty directory must not be treated as a hit.
-    if not os.path.isdir(os.path.join(root, "tau2", "domains")):
+    # Both subdirectories are required, and for different reasons: tau2 loads the
+    # task sets and policies from tau2/domains, and reads the simulation
+    # guidelines from tau2/user_simulator only once a conversation starts. A stage
+    # carrying just one of them would pass a domains-only check here and then fail
+    # mid-benchmark. This is the same contract Tau2BenchComparer._is_tau2_data_root
+    # enforces; the two must agree or the harness and this script disagree about
+    # what "staged" means.
+    missing = [
+        sub
+        for sub in ("domains", "user_simulator")
+        if not os.path.isdir(os.path.join(root, "tau2", sub))
+    ]
+    if missing:
         print(
-            f"[WARN] {TAU2_BENCH_DATA_DIR_ENV}={staged} has no tau2/domains, "
+            f"[WARN] {TAU2_BENCH_DATA_DIR_ENV}={staged} is missing "
+            f"{', '.join('tau2/' + m for m in missing)}, "
             f"falling back to downloading the dataset"
         )
         return None
@@ -242,6 +253,11 @@ def main() -> None:
     args = parse_args()
     api_base = f"http://{args.host}:{args.port}/v1"
 
+    # Before preflight, which imports tau2: tau2 resolves its data root from
+    # TAU2_DATA_DIR at import time, so resolving after the import would leave it
+    # pinned to the default and silently ignore the staged data.
+    local_dataset = resolve_local_dataset()
+
     if not args.skip_preflight:
         preflight(api_base, args.model)
 
@@ -278,7 +294,6 @@ def main() -> None:
 
     # local_path 覆盖 BenchmarkMeta.dataset_id(evalscope/api/benchmark/meta.py),
     # 于是 Tau2BenchAdapter.load() 走 os.path.exists 分支,不碰 modelscope。
-    local_dataset = resolve_local_dataset()
     if local_dataset:
         dataset_args["tau2_bench"]["local_path"] = local_dataset
         print(f"[INFO] 使用本地 tau2 数据集: {local_dataset}(不访问 modelscope)")

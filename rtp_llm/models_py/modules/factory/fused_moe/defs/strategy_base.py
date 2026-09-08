@@ -69,6 +69,13 @@ class MoeStrategy(ABC):
             )
             return False
 
+        # Imports resolved, so any reason recorded by an earlier call is stale.
+        # get_attributes() does not depend on config, so a strategy that raised
+        # once should keep raising and this should not be reachable -- clear it
+        # anyway rather than let a persistent instance carry a reason that is no
+        # longer true into an unrelated failure message.
+        self.skip_reason = None
+
         router_cls = attrs.get_router_class()
         executor_cls = attrs.get_executor_class()
 

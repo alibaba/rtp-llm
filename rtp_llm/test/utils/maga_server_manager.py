@@ -1,4 +1,5 @@
 import json
+import collections
 import logging
 import os
 import random
@@ -360,6 +361,44 @@ class MagaServerManager(object):
     # CI log. Head is kept for load-time errors, tail for shutdown state.
     _FULL_DUMP_MAX_LINES = 4000
 
+    def _scan_log_bounded(self, path: str, tail_lines: int, head_lines: int):
+        """One streaming pass, memory bounded by the caps rather than file size.
+
+        readlines() over the whole file defeated the point of the caps below: an
+        engine log can reach gigabytes, and the process doing the diagnosing would
+        die of memory exhaustion before any truncation applied, losing exactly the
+        diagnostic this function exists to print.
+
+        Returns (head, tail, total, blocks): the first head_lines, the last
+        tail_lines, the true line count, and at most the last 3 traceback blocks.
+        """
+        head = []
+        tail = collections.deque(maxlen=max(tail_lines, 1))
+        blocks = collections.deque(maxlen=3)
+        cur = []
+        total = 0
+        with open(path, "r") as fh:
+            for line in fh:
+                total += 1
+                if len(head) < head_lines:
+                    head.append(line)
+                tail.append(line)
+                # Same block rule as _traceback_blocks, applied streaming: a
+                # header opens a block, indented frames continue it, and the first
+                # non-indented line closes it.
+                if "Traceback (most recent call last)" in line:
+                    if cur:
+                        blocks.append("".join(cur))
+                    cur = [line]
+                elif cur:
+                    cur.append(line)
+                    if not (line.startswith((" ", "\t")) or line.strip() == ""):
+                        blocks.append("".join(cur))
+                        cur = []
+        if cur:
+            blocks.append("".join(cur))
+        return head, list(tail), total, list(blocks)
+
     @staticmethod
     def _traceback_blocks(lines: List[str]) -> List[str]:
         """Pull out complete Python traceback blocks, newest last.
@@ -402,9 +441,15 @@ class MagaServerManager(object):
             if not os.path.exists(self._log_file):
                 logging.warning(f"Log file {self._log_file} does not exist")
                 return
-            with open(self._log_file, "r") as f:
-                all_lines = f.readlines()
-            if not all_lines:
+            if max_lines > 0:
+                want_head, want_tail = 0, max_lines
+            else:
+                want_head = self._FULL_DUMP_MAX_LINES // 2
+                want_tail = self._FULL_DUMP_MAX_LINES - want_head
+            head, tail, total, blocks = self._scan_log_bounded(
+                self._log_file, want_tail, want_head
+            )
+            if total == 0:
                 logging.warning(f"Log file {self._log_file} is empty")
                 return
 
@@ -412,37 +457,31 @@ class MagaServerManager(object):
             logging.warning(f"Server process log ({self._log_file}):")
             logging.warning("=" * 80)
 
-            # Root cause first, so truncation downstream cannot hide it.
-            blocks = self._traceback_blocks(all_lines)
+            # Root cause first, so truncation downstream cannot hide it, and
+            # chunked like everything else: a traceback emitted as a single record
+            # is exactly what a CI log-size cap eats, which is the failure this
+            # reordering existed to avoid.
             if blocks:
                 logging.warning(
-                    f"--- root cause candidates: {len(blocks)} traceback(s), "
-                    f"showing last {min(len(blocks), 3)} ---"
+                    f"--- root cause candidates: showing last {len(blocks)} "
+                    f"traceback(s) ---"
                 )
-                for block in blocks[-3:]:
-                    logging.warning(block)
+                for block in blocks:
+                    self._emit_chunked(block.splitlines(keepends=True))
                     logging.warning("-" * 40)
 
             if max_lines > 0:
-                body = all_lines[-max_lines:]
-                if len(all_lines) > max_lines:
-                    logging.warning(
-                        f"... ({len(all_lines) - max_lines} lines truncated)"
-                    )
-            elif len(all_lines) > self._FULL_DUMP_MAX_LINES:
-                head = self._FULL_DUMP_MAX_LINES // 2
-                tail = self._FULL_DUMP_MAX_LINES - head
-                logging.warning(f"--- first {head} lines ---")
-                self._emit_chunked(all_lines[:head])
+                if total > max_lines:
+                    logging.warning(f"... ({total - max_lines} lines truncated)")
+            elif total > self._FULL_DUMP_MAX_LINES:
+                logging.warning(f"--- first {len(head)} lines ---")
+                self._emit_chunked(head)
                 logging.warning(
-                    f"... ({len(all_lines) - self._FULL_DUMP_MAX_LINES} lines omitted) ..."
+                    f"... ({total - self._FULL_DUMP_MAX_LINES} lines omitted) ..."
                 )
-                logging.warning(f"--- last {tail} lines ---")
-                body = all_lines[-tail:]
-            else:
-                body = all_lines
+                logging.warning(f"--- last {len(tail)} lines ---")
 
-            self._emit_chunked(body)
+            self._emit_chunked(tail)
             logging.warning("=" * 80)
         except Exception as e:
             logging.warning(f"Failed to read log file {self._log_file}: {e}")
