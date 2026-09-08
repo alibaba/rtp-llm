@@ -4,7 +4,11 @@ import torch
 from torch import nn
 
 from rtp_llm.device.device_type import DeviceType, get_device_type
-from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
+from rtp_llm.models_py.distributed.collective_torch import (
+    Group,
+    all_reduce,
+    reduce_scatter_padded,
+)
 from rtp_llm.models_py.modules import RMSNorm
 from rtp_llm.models_py.modules.factory import LinearFactory
 from rtp_llm.models_py.modules.factory.attention.attn_factory import MlaImplBase
@@ -223,6 +227,7 @@ class MlaAttention(nn.Module):
         force_reuse_topk_indices: bool = False,
         return_topk: bool = False,
         global_kv_cache: Optional[KVCache] = None,
+        reduce_scatter_output: bool = False,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, Optional[torch.Tensor]]]:
         input_shape = hidden_states.shape[:-1]
         q_c = None
@@ -332,7 +337,11 @@ class MlaAttention(nn.Module):
             )
         attn_output = self.o_proj(attn_output)
         if self.parallelism_config.get_attn_tp_size() > 1:
-            attn_output = all_reduce(attn_output, group=Group.TP)
+            attn_output = (
+                reduce_scatter_padded(attn_output, Group.TP)
+                if reduce_scatter_output
+                else all_reduce(attn_output, group=Group.TP)
+            )
         if return_topk:
             return attn_output, topk_indices
         return attn_output

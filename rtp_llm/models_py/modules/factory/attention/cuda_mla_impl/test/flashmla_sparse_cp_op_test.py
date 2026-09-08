@@ -314,7 +314,7 @@ class SparseMlaFp8CPOpTest(TestCase):
             ],
         )
 
-    def test_bf16_cache_uses_sparse_fwd(self):
+    def test_bf16_cache_uses_sparse_dispatch(self):
         from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_sparse_cp_impl import (
             SparseMlaFp8CPOp,
         )
@@ -338,17 +338,14 @@ class SparseMlaFp8CPOpTest(TestCase):
         )
         expected = torch.empty_like(q)
 
-        def _sparse_fwd(q_arg, kv_arg, indices_arg, scale_arg, d_v):
+        def _sparse_fwd(q_arg, kv_arg, indices_arg):
             self.assertIs(q_arg, q)
             self.assertEqual(tuple(kv_arg.shape), (48, 1, 8))
             self.assertEqual(tuple(indices_arg.shape), (2, 1, 4))
-            self.assertEqual(scale_arg, op.scale)
-            self.assertEqual(d_v, op.kv_lora_rank)
-            return expected, None, None
+            return expected
 
-        with patch(
-            "rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_sparse_cp_impl.flash_mla_sparse_fwd",
-            side_effect=_sparse_fwd,
+        with patch.object(
+            op, "_forward_sparse_prefill", side_effect=_sparse_fwd
         ), patch(
             "rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_sparse_cp_impl.flash_mla_with_kvcache"
         ) as paged_fwd:
@@ -364,6 +361,7 @@ class SparseMlaFp8CPOpTest(TestCase):
 
         device = self.device
         op = object.__new__(SparseMlaFp8CPOp)
+        op.sequence_parallel = True
         op.kv_restore_unpad_indices = torch.arange(2, dtype=torch.long, device=device)
         op.kv_cache_write_op = SimpleNamespace(forward=lambda *_args, **_kwargs: None)
         op.write_cache_store_impl = None

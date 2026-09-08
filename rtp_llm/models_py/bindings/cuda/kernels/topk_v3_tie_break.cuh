@@ -413,6 +413,10 @@ SGL_DEVICE void stable_exact_boundary_scan_topk(
     const uint32_t exact_above = smem->counter;
     const uint32_t exact_equal = smem->counter_final;
     const uint32_t need_equal = remaining_topk - exact_above;
+    // All warps must snapshot the count before thread 0 reuses it for
+    // emission. Otherwise later warps can observe zero and overwrite the
+    // strictly-greater outputs when they emit the threshold-score ties.
+    __syncthreads();
 
     if (tx == 0) {
         smem->counter = 0;

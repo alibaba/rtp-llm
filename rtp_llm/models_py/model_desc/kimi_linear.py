@@ -6,6 +6,7 @@ Hybrid architecture:
   - MoE FFN with sigmoid routing (layer 1+), Dense FFN (layer 0)
 """
 
+import copy
 import logging
 import os
 from typing import Any, Dict, Optional
@@ -16,11 +17,28 @@ from torch import nn
 import rtp_llm.ops.compute_ops as compute_ops
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
-from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
+from rtp_llm.models.glm53_prefill_parallel import (
+    MlaCPParallelismView,
+    mla_cp_enabled,
+    sequence_parallel_enabled,
+)
+from rtp_llm.models_py.distributed.collective_torch import (
+    Group,
+    all_gather_trim,
+    all_reduce,
+    reduce_scatter_padded,
+)
+from rtp_llm.models_py.distributed.sequence_parallel import (
+    TokenShardLayout,
+    shard_tokens,
+    token_shard_layout,
+)
+from rtp_llm.models_py.distributed.zigzag_token_layout import ZigzagTokenLayout
 from rtp_llm.models_py.model_desc.block_map import select_block_map_for_layer
 from rtp_llm.models_py.model_desc.generic_moe import DecodeLayerOutput, GenericMoeLayer
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules import (
+    AttnImplFactory,
     DenseMLP,
     Embedding,
     FMHAImplBase,
@@ -92,6 +110,8 @@ class KimiLinearMetadata(object):
         self.kda_checkpoint_states: Optional[torch.Tensor] = None
         self.kda_cu_seqlens_host: Optional[torch.Tensor] = None
         self.kda_checkpoint_page_size = 0
+        self.token_shard: Optional[TokenShardLayout] = None
+        self.mla_cp_layout: Optional[ZigzagTokenLayout] = None
 
     def get_prefill_conv1d_meta(self) -> Optional[CausalConv1dMetadata]:
         return self.prefill_conv1d_meta
@@ -868,7 +888,11 @@ class KimiLinearKDA(nn.Module):
         attn_output = self.out_proj(attn_output)
 
         if self.parallelism_config.get_attn_tp_size() > 1:
-            attn_output = all_reduce(attn_output, group=Group.TP)
+            attn_output = (
+                reduce_scatter_padded(attn_output, Group.TP)
+                if attn_meta.token_shard is not None
+                else all_reduce(attn_output, group=Group.TP)
+            )
 
         return attn_output
 
@@ -913,7 +937,11 @@ class KimiLinearDecoderLayer(nn.Module):
             # Full MLA attention layer
             self.self_attn = MlaAttention(
                 config.attn_config,
-                parallelism_config,
+                (
+                    MlaCPParallelismView(parallelism_config)
+                    if mla_cp_enabled(config.model_type, parallelism_config.role_type)
+                    else parallelism_config
+                ),
                 weights,
                 layer_idx,
                 config.layernorm_eps,
@@ -1033,6 +1061,15 @@ class KimiLinearDecoderLayer(nn.Module):
         attn_meta: KimiLinearMetadata,
         global_kv_cache: Optional[KVCache],
     ) -> DecodeLayerOutput:
+        if attn_meta.token_shard is not None:
+            return self._forward_hc_sequence_parallel(
+                hidden_states,
+                fmha_impl,
+                kv_cache,
+                attention_inputs,
+                attn_meta,
+                global_kv_cache,
+            )
         residual = hidden_states
         hidden_states, post, comb = self.attn_hc.pre(residual)
         hidden_states = self.input_layernorm(hidden_states)
@@ -1059,6 +1096,66 @@ class KimiLinearDecoderLayer(nn.Module):
         hidden_states, post, comb = self.ffn_hc.pre(residual)
         hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states = self.mlp(hidden_states)
+        hidden_states = self.ffn_hc.post(hidden_states, residual, post, comb)
+        return DecodeLayerOutput(hidden_states, hidden_states)
+
+    def _forward_hc_sequence_parallel(
+        self,
+        hidden_states,
+        fmha_impl,
+        kv_cache,
+        attention_inputs,
+        attn_meta,
+        global_kv_cache,
+    ) -> DecodeLayerOutput:
+        layout = attn_meta.token_shard
+        cp_layout = attn_meta.mla_cp_layout
+        residual = hidden_states
+        hidden_states, post, comb = self.attn_hc.pre(residual)
+        hidden_states = self.input_layernorm(hidden_states)
+        if self.layer_type == HybridAttentionType.LINEAR:
+            hidden_states = all_gather_trim(
+                hidden_states, layout.logical_tokens, Group.TP
+            )
+            hidden_states = self.self_attn(
+                hidden_states=hidden_states,
+                fmha_impl=fmha_impl,
+                kv_cache=kv_cache,
+                attention_inputs=attention_inputs,
+                attn_meta=attn_meta,
+            )
+        elif cp_layout is not None:
+            hidden_states = cp_layout.sp_to_cp(hidden_states)
+            hidden_states = self.self_attn(
+                hidden_states=hidden_states,
+                fmha_impl=fmha_impl,
+                kv_cache=kv_cache,
+                global_kv_cache=global_kv_cache,
+            )
+            hidden_states = cp_layout.cp_to_sp(hidden_states)
+        else:
+            hidden_states = all_gather_trim(
+                hidden_states, layout.logical_tokens, Group.TP
+            )
+            hidden_states = self.self_attn(
+                hidden_states=hidden_states,
+                fmha_impl=fmha_impl,
+                kv_cache=kv_cache,
+                global_kv_cache=global_kv_cache,
+                reduce_scatter_output=True,
+            )
+        hidden_states = self.attn_hc.post(hidden_states, residual, post, comb)
+        residual = hidden_states
+        hidden_states, post, comb = self.ffn_hc.pre(residual)
+        hidden_states = self.post_attention_layernorm(hidden_states)
+        if isinstance(self.mlp, GenericMoeLayer):
+            hidden_states = self.mlp(hidden_states, sequence_parallel_layout=layout)
+        else:
+            hidden_states = all_gather_trim(
+                hidden_states, layout.logical_tokens, Group.TP
+            )
+            hidden_states = self.mlp(hidden_states, skip_allreduce=True)
+            hidden_states = reduce_scatter_padded(hidden_states, Group.TP)
         hidden_states = self.ffn_hc.post(hidden_states, residual, post, comb)
         return DecodeLayerOutput(hidden_states, hidden_states)
 
@@ -1141,6 +1238,19 @@ class KimiLinearModel(GptModelBase):
             py_hw_kernel_config=py_hw_kernel_config,
             device_resource_config=device_resource_config,
         )
+        self.prefill_sequence_parallel = sequence_parallel_enabled(
+            model_config.model_type, parallelism_config
+        )
+        self.prefill_mla_cp = mla_cp_enabled(
+            model_config.model_type, parallelism_config.role_type
+        )
+        if self.prefill_sequence_parallel and model_config.hc_mult <= 1:
+            raise ValueError("GLM53 Prefill sequence parallel requires mHC")
+        self.mla_parallelism = (
+            MlaCPParallelismView(parallelism_config)
+            if self.prefill_mla_cp
+            else parallelism_config
+        )
         self.embed_tokens = Embedding(
             model_config, parallelism_config, weights.get_global_weight(W.embedding)
         )
@@ -1198,6 +1308,38 @@ class KimiLinearModel(GptModelBase):
         bind_indexer_block_table_group_ids(self.layers, self.kv_cache)
         return True
 
+    def prepare_fmha_impl(self, inputs: PyModelInputs, is_cuda_graph: bool = False):
+        if not self.prefill_mla_cp:
+            return super().prepare_fmha_impl(inputs, is_cuda_graph)
+        attn_inputs = inputs.attention_inputs
+        if not attn_inputs.is_prefill or attn_inputs.is_target_verify or is_cuda_graph:
+            raise ValueError("GLM53 dedicated MLA CP supports ordinary Prefill only")
+        q_lens = attn_inputs.input_lengths.cpu().tolist()
+        layout = token_shard_layout(
+            sum(q_lens),
+            self.parallelism_config.tp_size,
+            self.parallelism_config.tp_rank,
+        )
+        cp_layout = ZigzagTokenLayout(
+            q_lens,
+            layout,
+            self.parallelism_config.tp_size,
+            self.parallelism_config.tp_rank,
+            inputs.input_ids.device,
+        )
+        cp_inputs = copy.copy(attn_inputs)
+        cp_inputs.context_parallel_info = cp_layout.context_parallel_info()
+        fmha = AttnImplFactory.get_fmha_impl(
+            self.config,
+            self.mla_parallelism,
+            self.weight,
+            cp_inputs,
+            self.fmha_config,
+            is_cuda_graph,
+        )
+        fmha.glm53_cp_layout = cp_layout
+        return fmha
+
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
         input_ids: torch.Tensor = inputs.input_ids
         multimodal_embedding_injector = getattr(
@@ -1244,6 +1386,21 @@ class KimiLinearModel(GptModelBase):
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(inputs)
 
+        if (
+            self.prefill_sequence_parallel
+            and attention_inputs.is_prefill
+            and not is_target_verify
+        ):
+            attn_meta.token_shard = token_shard_layout(
+                hidden_states.shape[0],
+                self.parallelism_config.tp_size,
+                self.parallelism_config.tp_rank,
+            )
+            if self.prefill_mla_cp:
+                attn_meta.mla_cp_layout = fmha_impl.glm53_cp_layout
+            hidden_states = shard_tokens(hidden_states, attn_meta.token_shard)
+        del inputs_embeds
+
         typed_aux_cache_store = create_write_cache_store_impl(
             attention_inputs, self.kv_cache
         )
@@ -1267,6 +1424,8 @@ class KimiLinearModel(GptModelBase):
         deferred_post = deferred_comb = None
         for i, decoder_layer in enumerate(self.layers):
             select_block_map_for_layer(attention_inputs, i)
+            if attn_meta.mla_cp_layout is not None:
+                select_block_map_for_layer(fmha_impl.attn_inputs, i)
             layer_kv_cache = self.kv_cache.get_layer_cache(i) if self.kv_cache else None
             if use_deferred_mhc:
                 hidden_states, residual, deferred_post, deferred_comb = (
@@ -1309,4 +1468,8 @@ class KimiLinearModel(GptModelBase):
         else:
             hidden_states, _ = self.norm(hidden_states, residual)
 
+        if attn_meta.token_shard is not None:
+            hidden_states = all_gather_trim(
+                hidden_states, attn_meta.token_shard.logical_tokens, Group.TP
+            )
         return PyModelOutputs(hidden_states, fmha_impl.fmha_params)

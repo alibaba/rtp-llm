@@ -58,6 +58,7 @@ def _make_indexer_stub(*, bind_pool: bool, device: torch.device) -> IndexerFP8:
     # Construct a minimal nested compressor mock — we only assert against
     # the four methods the overlap path touches.
     ind.compressor = SimpleNamespace(
+        kpool_mode=False,
         freqs_cis=None,
         start_prefill=MagicMock(name="compressor.start_prefill"),
         finish_prefill=MagicMock(name="compressor.finish_prefill"),
@@ -65,6 +66,8 @@ def _make_indexer_stub(*, bind_pool: bool, device: torch.device) -> IndexerFP8:
         set_pool_context=MagicMock(name="compressor.set_pool_context"),
         clear_pool_context=MagicMock(name="compressor.clear_pool_context"),
     )
+    ind.prefill_topk_backend = "legacy"
+    ind.max_seq_len = 8192
     ind.index_topk = 4
     ind.n_heads = 32
     ind.head_dim = INDEXER_HEAD_DIM
@@ -392,7 +395,7 @@ class IndexerFP8OverlapEntryPointsTest(unittest.TestCase):
 
         compute_q_calls = []
 
-        def fake_compute_q(qr_in, freqs):
+        def fake_compute_q(qr_in, freqs, *, apply_rope=True):
             compute_q_calls.append((qr_in, freqs))
             return torch.zeros(
                 2, ind.n_heads, ind.head_dim, dtype=torch.bfloat16, device=self.device

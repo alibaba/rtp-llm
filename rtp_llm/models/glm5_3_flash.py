@@ -8,6 +8,7 @@ import torch
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_factory_register import register_model
+from rtp_llm.model_loader.attn_weight import MlaAttnAtomicWeight
 from rtp_llm.model_loader.linear_attn_weight import (
     LinearAttnAtomicWeight,
     LinearAttnConfig,
@@ -20,6 +21,7 @@ from rtp_llm.model_loader.weight_module import (
 )
 from rtp_llm.models.base_model import BaseModel
 from rtp_llm.models.deepseek_v2 import DeepSeekV2Weight
+from rtp_llm.models.glm53_prefill_parallel import mla_cp_enabled
 from rtp_llm.ops import DataType, HybridAttentionType
 from rtp_llm.utils.model_weight import (
     CkptWeightInfo,
@@ -323,18 +325,10 @@ def parse_glm53_flash_config(
                 "processor_config": processor_config,
                 "swiglu_limit": config.swiglu_limit,
                 "vision_special_token_ids": {
-                    "image_start": int(
-                        config_json.get("image_start_token_id", 154830)
-                    ),
-                    "image_end": int(
-                        config_json.get("image_end_token_id", 154831)
-                    ),
-                    "video_start": int(
-                        config_json.get("video_start_token_id", 154832)
-                    ),
-                    "video_end": int(
-                        config_json.get("video_end_token_id", 154833)
-                    ),
+                    "image_start": int(config_json.get("image_start_token_id", 154830)),
+                    "image_end": int(config_json.get("image_end_token_id", 154831)),
+                    "video_start": int(config_json.get("video_start_token_id", 154832)),
+                    "video_end": int(config_json.get("video_end_token_id", 154833)),
                 },
             }
         )
@@ -398,6 +392,13 @@ class Glm53FlashWeight(DeepSeekV2Weight):
             weights.extend(self._get_hf_ffn_layer_weight_info(layer_id))
         else:
             weights = super()._get_hf_layer_weight_info(layer_id)
+            if mla_cp_enabled(self.model_config.model_type, self.role_type):
+                for weight in weights:
+                    if (
+                        isinstance(weight, MlaAttnAtomicWeight)
+                        and weight.config is not None
+                    ):
+                        weight.config.replicate_for_prefill_cp = True
             weights.extend(_glm53_indexer_compressor_weight_info())
         weights.extend(self._get_hc_weight_info())
         return weights

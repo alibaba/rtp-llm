@@ -10,6 +10,8 @@ py_library(
         "rocm_rccl.py",
         "symm_mem.py",
         "tp_token_shard.py",
+        "sequence_parallel.py",
+        "zigzag_token_layout.py",
     ],
     deps = [
         "//rtp_llm:torch",

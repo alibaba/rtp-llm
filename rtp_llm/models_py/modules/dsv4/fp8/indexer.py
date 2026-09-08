@@ -164,12 +164,29 @@ def _run_prefill_topk(
     out: torch.Tensor,
     topk: int,
     compress_ratio: int,
+    backend: str = "legacy",
 ) -> None:
     # Every backend may leave padded lanes untouched. Initialize the full
     # destination so invalid compressed indices can never escape as stale data.
     out.fill_(-1)
     if _fp8_prefill_topk_use_torch():
         _run_prefill_topk_torch(logits, row_starts, row_ends, out, topk)
+        return
+
+    if backend == "topk_v3_tie_break":
+        rtp_llm_ops.topk_v3_tie_break(
+            logits,
+            row_starts,
+            row_ends,
+            out,
+            int(topk),
+            # The model's static attention max_seq_len can still be 32K when
+            # the engine accepts 128K. Use the materialized K width as a safe
+            # dispatch bound; row_starts/row_ends retain request-local causal
+            # limits without truncating valid compressed keys.
+            logits.shape[1],
+        )
+        _canonicalize_prefill_topk_output(out)
         return
 
     # ``logits`` is over compressed K tokens. Convert back to input-token
@@ -313,6 +330,8 @@ class IndexerFP8(PoolBackedModule):
         compressor_pre_norm_weight: Optional[torch.Tensor] = None,
         compressor_pre_norm_bias: Optional[torch.Tensor] = None,
         rotate_q: bool = False,
+        prefill_topk_backend: str = "legacy",
+        decode_topk_backend: str = "dsv4_persistent",
     ):
         """``layer_weights`` is the framework's per-layer dict
         (``ModelWeights.weights[layer_id]``), keyed by ``W.v4_*`` enum.
@@ -342,6 +361,18 @@ class IndexerFP8(PoolBackedModule):
         self.softmax_scale = self.head_dim**-0.5
         self.compress_ratio = compress_ratio
         self.rotate_q = bool(rotate_q)
+        if prefill_topk_backend not in ("legacy", "topk_v3_tie_break"):
+            raise ValueError(
+                f"Unsupported Prefill TopK backend: {prefill_topk_backend}"
+            )
+        if decode_topk_backend not in ("dsv4_persistent", "topk_v3"):
+            raise ValueError(f"Unsupported Decode TopK backend: {decode_topk_backend}")
+        self.prefill_topk_backend = prefill_topk_backend
+        self._decode_topk_op = (
+            rtp_llm_ops.topk_v3
+            if decode_topk_backend == "topk_v3"
+            else rtp_llm_ops.dsv4_persistent_topk
+        )
 
         from rtp_llm.models_py.modules.dsv4.fp8.attention import _v4_fp8_linear
         from rtp_llm.utils.model_weight import W
@@ -691,7 +722,7 @@ class IndexerFP8(PoolBackedModule):
             out_topk_2d = out_topk_buffer.view(bsz * q_len, K)
             out_topk_buffer.fill_(-1)
             if K_eff > 0 and K in (512, 1024, 2048) and _persistent_topk_enabled():
-                rtp_llm_ops.dsv4_persistent_topk(
+                self._decode_topk_op(
                     score_2d,
                     lengths_i32,
                     out_topk_2d,
@@ -1198,6 +1229,7 @@ class IndexerFP8(PoolBackedModule):
                         out_buf[row_start:row_end],
                         K,
                         self.compress_ratio,
+                        backend=self.prefill_topk_backend,
                     )
                 del logits
 
@@ -1391,6 +1423,7 @@ class IndexerFP8(PoolBackedModule):
                         out_buf[row_start:row_end],
                         K,
                         self.compress_ratio,
+                        backend=self.prefill_topk_backend,
                     )
                 del logits
 

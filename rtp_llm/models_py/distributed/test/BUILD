@@ -66,3 +66,18 @@ py_test(
         "//rtp_llm/models_py/distributed:collective_torch",
     ],
 )
+
+py_test(
+    name = "glm53_prefill_parallel_test",
+    srcs = ["glm53_prefill_parallel_test.py"],
+    deps = ["//rtp_llm:testlib", "//rtp_llm/models_py/distributed:collective_torch"],
+    timeout = "long",
+)
+
+py_test(
+    name = "glm53_mhc_topk_test",
+    srcs = ["glm53_mhc_topk_test.py"],
+    deps = ["//rtp_llm:testlib", "//rtp_llm/models_py:modules", "//rtp_llm/models_py/distributed:collective_torch"],
+    tags = ["L20A_DEV"],
+    timeout = "long",
+)

@@ -2,6 +2,8 @@ import os
 from typing import Any, Dict, Optional
 
 import torch
+from torch import nn
+
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.distributed.collective_torch import Group, all_gather, all_reduce
@@ -38,7 +40,6 @@ from rtp_llm.ops import HWKernelConfig, MoeConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import KVCache, LayerKVCache, PyModelInputs, PyModelOutputs
 from rtp_llm.utils.dsa_indexing import dsa_layer_has_indexer, dsa_layer_skips_topk
 from rtp_llm.utils.model_weight import W
-from torch import nn
 
 try:
     from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_gemm_linear import (
@@ -332,7 +333,24 @@ class GenericMoeLayer(nn.Module):
         hidden_states: torch.Tensor,
         x_fp8: "Optional[torch.Tensor]" = None,
         x_scale: "Optional[torch.Tensor]" = None,
+        sequence_parallel_layout=None,
     ) -> torch.Tensor:
+        if sequence_parallel_layout is not None:
+            from rtp_llm.models_py.distributed.collective_torch import all_gather_trim
+
+            if self.routed_tp_size <= 1 or self.ep_size <= 1:
+                raise ValueError(
+                    "sequence-parallel MoE requires routed TP token sharding and EP"
+                )
+            if x_fp8 is not None or x_scale is not None:
+                raise ValueError(
+                    "sequence-parallel MoE expects unquantized local tokens"
+                )
+            # Preserve the full router GEMM shape and near-tie routing decisions.
+            # The gathered input is also consumed by the TP shared expert.
+            hidden_states = all_gather_trim(
+                hidden_states, sequence_parallel_layout.logical_tokens, Group.TP
+            )
         num_tokens, _ = hidden_states.shape
         if self.gate_chunk_rows > 0 and num_tokens > 0:
             router_logits = fixed_m_linear(
@@ -415,7 +433,7 @@ class GenericMoeLayer(nn.Module):
             topk_ids=routed_ids,
             activation="SiGLU",
         )
-        if self.routed_tp_size > 1:
+        if self.routed_tp_size > 1 and sequence_parallel_layout is None:
             experts_output = gather_routed_tokens(
                 experts_output, num_tokens, lambda x: all_gather(x, group=Group.TP)
             )
@@ -439,7 +457,18 @@ class GenericMoeLayer(nn.Module):
                     shared_expert_output = (
                         torch.sigmoid(gate_output) * shared_expert_output
                     )
-                shared_expert_output = all_reduce(shared_expert_output, group=Group.TP)
+                if sequence_parallel_layout is not None:
+                    from rtp_llm.models_py.distributed.collective_torch import (
+                        reduce_scatter_padded,
+                    )
+
+                    shared_expert_output = reduce_scatter_padded(
+                        shared_expert_output, Group.TP
+                    )
+                else:
+                    shared_expert_output = all_reduce(
+                        shared_expert_output, group=Group.TP
+                    )
                 experts_output = experts_output + shared_expert_output
             else:
                 if self.shared_expert_gate is not None:

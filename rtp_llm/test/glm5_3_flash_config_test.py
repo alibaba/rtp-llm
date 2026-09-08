@@ -117,7 +117,9 @@ class Glm53FlashConfigTest(unittest.TestCase):
         )
 
         self.assertEqual(select_block_map_for_layer(attention_inputs, 0), 1)
-        self.assertIs(attention_inputs.kv_cache_kernel_block_id_device, kernel_device[1])
+        self.assertIs(
+            attention_inputs.kv_cache_kernel_block_id_device, kernel_device[1]
+        )
         self.assertIs(attention_inputs.kv_cache_kernel_block_id_host, kernel_host[1])
         self.assertIs(attention_inputs.kv_cache_block_id_host, physical_host[1])
 
@@ -183,9 +185,7 @@ class Glm53FlashConfigTest(unittest.TestCase):
             [CkptWeightInfo("model.layers.45.self_attn.kv_b_proj.weight")],
         )
 
-        Glm5MtpWeight._prefix_checkpoint_names(
-            layer_weight, "model.language_model."
-        )
+        Glm5MtpWeight._prefix_checkpoint_names(layer_weight, "model.language_model.")
         Glm5MtpWeight._prefix_checkpoint_names(lm_head, "model.language_model.")
         Glm5MtpWeight._prefix_checkpoint_names(
             unquantized_weight, "model.language_model."
@@ -228,6 +228,7 @@ class Glm53FlashConfigTest(unittest.TestCase):
         prefill.alog = torch.zeros(1)
         prefill.dt_bias = torch.zeros(2)
         prefill._get_ssm_states = mock.Mock(return_value=None)
+        prefill._backend = mock.Mock(return_value="triton")
         attention_inputs = SimpleNamespace(
             input_lengths=torch.tensor([1], dtype=torch.int32),
             cu_seqlens=torch.tensor([0, 1], dtype=torch.int32),
@@ -250,6 +251,7 @@ class Glm53FlashConfigTest(unittest.TestCase):
                 None,
                 64,
                 attention_inputs,
+                kimi_linear.KimiLinearMetadata(),
             )
 
         self.assertTrue(chunk.call_args.kwargs["safe_gate"])
@@ -324,6 +326,7 @@ class Glm53FlashConfigTest(unittest.TestCase):
 
     def test_glm_mla_uses_indexer_specific_norm_epsilon(self):
         config = SimpleNamespace(
+            model_type="glm5_3_flash",
             hybrid_attention_config=SimpleNamespace(
                 hybrid_attention_types=[HybridAttentionType.NONE]
             ),
@@ -334,7 +337,7 @@ class Glm53FlashConfigTest(unittest.TestCase):
             activation_type="SiLU",
             hc_mult=1,
         )
-        parallelism = SimpleNamespace()
+        parallelism = SimpleNamespace(role_type=None)
         weights = {
             W.pre_ln_gamma: torch.ones(1),
             W.post_ln_gamma: torch.ones(1),
@@ -459,9 +462,7 @@ class Glm53FlashConfigTest(unittest.TestCase):
         ):
             config = parse_glm53_flash_config(config_json, "/model")
         self.assertTrue(config.mm_model_config.is_multimodal)
-        self.assertEqual(
-            config.mm_model_config.mm_sep_tokens, [[11, 12], [13, 14]]
-        )
+        self.assertEqual(config.mm_model_config.mm_sep_tokens, [[11, 12], [13, 14]])
         self.assertEqual(
             config.mm_related_params.special_tokens["default_mm_token"],
             "<|begin_of_image|><|image|><|end_of_image|>",
@@ -499,6 +500,7 @@ class Glm53FlashConfigTest(unittest.TestCase):
 
     def test_sparse_mla_receives_global_weights(self):
         config = SimpleNamespace(
+            model_type="glm5_3_flash",
             hybrid_attention_config=SimpleNamespace(
                 hybrid_attention_types=[HybridAttentionType.NONE]
             ),
@@ -520,7 +522,7 @@ class Glm53FlashConfigTest(unittest.TestCase):
         ):
             kimi_linear.KimiLinearDecoderLayer(
                 config,
-                object(),
+                SimpleNamespace(role_type=None),
                 layer_weights,
                 global_weights,
                 0,
@@ -671,6 +673,9 @@ class Glm53FlashConfigTest(unittest.TestCase):
         model.embed_tokens = mock.Mock(return_value=torch.ones(2, 3))
         model.layers = nn.ModuleList()
         model.hc_enabled = True
+        model.enable_kda_reuse_fusion = False
+        model.prefill_sequence_parallel = False
+        model.prefill_mla_cp = False
         model.norm = mock.Mock(side_effect=lambda hidden: hidden)
         model.kv_cache = None
         inputs = SimpleNamespace(

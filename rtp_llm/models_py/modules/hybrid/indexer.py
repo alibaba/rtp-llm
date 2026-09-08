@@ -9,8 +9,8 @@ from rtp_llm.device.device_type import DeviceType, get_device_type
 from rtp_llm.models_py.modules import IndexerOp, LayerNorm
 from rtp_llm.models_py.modules.factory import LinearFactory
 from rtp_llm.models_py.modules.hybrid.indexer_compressor import (
-    fp32_state_pool_view,
     fp8_pool_view,
+    fp32_state_pool_view,
 )
 from rtp_llm.ops import AttentionConfigs, HWKernelConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import KVCache, KVCacheRegionName
@@ -198,6 +198,12 @@ class Indexer(nn.Module):
                 compressor_pre_norm_weight=weights[W.mla_indexer_k_norm_w],
                 compressor_pre_norm_bias=weights[W.mla_indexer_k_norm_b],
                 rotate_q=True,
+                prefill_topk_backend=os.environ.get(
+                    "GLM53_PREFILL_INDEXER_TOPK_BACKEND", "topk_v3_tie_break"
+                ),
+                decode_topk_backend=os.environ.get(
+                    "GLM53_DECODE_INDEXER_TOPK_BACKEND", "topk_v3"
+                ),
             )
             return
 
@@ -353,9 +359,7 @@ class Indexer(nn.Module):
                         raise RuntimeError(
                             "GLM-5.3-Flash compressed prefill CP requires cp_params"
                         )
-                    cp_info = getattr(
-                        attention_inputs, "context_parallel_info", None
-                    )
+                    cp_info = getattr(attention_inputs, "context_parallel_info", None)
                     if cp_info is None:
                         raise RuntimeError(
                             "GLM-5.3-Flash compressed prefill CP requires "

@@ -1,10 +1,11 @@
-from typing import Any, Callable, List, Optional, Union, Dict
+from typing import Any, Callable, Dict, List, Optional, Union
 
 import torch
 from pydantic import BaseModel
+
 from rtp_llm.model_loader.load_config import LoadConfig
 from rtp_llm.model_loader.weight_module import AtomicWeight
-from rtp_llm.utils.model_weight import CkptWeightInfo, identity, W
+from rtp_llm.utils.model_weight import CkptWeightInfo, W, identity
 
 
 class AttnConfig(BaseModel):
@@ -38,6 +39,7 @@ class MlaConfig(BaseModel):
     v_head_dim: int = -1
     use_mla: bool = False
     q_use_lora: bool = False
+    replicate_for_prefill_cp: bool = False
 
 
 class MlaAttnAtomicWeight(AtomicWeight):
@@ -53,6 +55,15 @@ class MlaAttnAtomicWeight(AtomicWeight):
     ):
         self.config = config
         super().__init__(name, weights, process_fun, data_type, *args, **kwargs)
+
+    def _split(self, tensor, load_config: LoadConfig):
+        # FP8 kernel and scale atomic weights inherit this same MlaConfig.
+        # Only an explicitly selected model/role sets this flag; KDA and FFN
+        # continue using their original TP split configuration.
+        if self.config is not None and self.config.replicate_for_prefill_cp:
+            raw = tensor if isinstance(tensor, torch.Tensor) else tensor[self.name]
+            return {self.name: raw.clone(memory_format=torch.contiguous_format)}
+        return super()._split(tensor, load_config)
 
     @property
     def head_num(self) -> int:
