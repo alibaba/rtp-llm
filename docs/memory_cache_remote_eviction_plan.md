@@ -521,6 +521,9 @@ struct RemoteWriteInput {
     CacheKeysType         cache_keys;
     std::shared_ptr<Meta> meta;
 
+    // Memory→Remote允许meta->tokens()为空；block身份由cache_keys确定。
+    // 公共控制面不得依赖tokens重新计算或校验cache key。
+
     // 保证底层 Device/Host buffer 在整个 Remote 写期间有效。
     std::shared_ptr<void> buffer_lease;
 
@@ -555,7 +558,7 @@ std::shared_ptr<AsyncContext> RemoteConnector::asyncWriteMemory(
     const std::shared_ptr<MemoryEvictionLease>& lease) {
     RemoteWriteInput input;
     input.cache_keys   = extractCacheKeys(victims);
-    input.meta         = meta;
+    input.meta         = makeRemoteWriteMeta(meta, /* token_ids = */ {});
     input.buffer_lease = lease;
     input.build_buffers = makeMemoryBufferProvider(victims, lease);
     return asyncWriteCommon(std::move(input));
@@ -576,6 +579,14 @@ RemoteConnector::asyncWriteCommon(RemoteWriteInput input);
 - 避免为已存在的 block 构造无用 buffer。
 - `locations[j]` 与 `buffers[j]` 更容易保持严格对齐。
 - Device 和 Memory 入口都只负责地址生成，不复制 Remote 写入协议逻辑。
+
+Memory→Remote 调用的额外接口约束：
+
+- `Meta::tokens()` / `token_ids` 允许为空。
+- `cache_keys` 是 block 身份、顺序以及 `block_mask` 对齐的唯一依据。
+- `getWriteLocation()`、`genWriteRequest()` 和公共写入流程不得从 token IDs 重新生成 cache keys。
+- token IDs 为空不代表没有 blocks；是否为空写由 `cache_keys.empty()` 判断。
+- 不得把触发本次 Device→Memory 淘汰请求的 token IDs 填到历史 Memory victims 上。
 
 ### 8.3 抽取公共控制面
 
@@ -1028,32 +1039,30 @@ Task A 完成后的顺序必须是：
 
 ## 13. Remote metadata 问题
 
-现有 Remote 写入依赖：
+Memory→Remote 调用 RemoteConnector 时，token IDs 允许为空。控制面需要的字段为：
 
 ```text
 unique_id
 trace_id
 cache keys
-tokens
 location spec group names
 ```
 
-但 Memory victim 可能属于历史请求，当前 Device eviction plan 的 `Meta::tokens()` 不一定对应它。因此编码前必须确认 KVCM 的 `getWriteLocation()` 是否要求原始 token 序列。
+`unique_id`、`trace_id` 等请求级字段继续用于追踪和幂等控制；block 的内容身份由显式 `cache_keys` 表达。`Meta::tokens()` 不是 Memory→Remote 写入的必要字段，可以传空数组。
 
-优先方案是增加按 cache key 写入的 KVCM 接口：
+RemoteConnector 必须提供按 cache key 写入的语义：
 
 ```cpp
 getWriteLocationByCacheKeys(...)
 ```
 
-如果 KVCM 暂时无法支持，则 Memory cache item 需要保存足够的 Remote metadata，例如：
+如果复用现有 `getWriteLocation()` 接口，则需保证其接收显式 `cache_keys`，并允许：
 
 ```cpp
-std::vector<int64_t> block_tokens;
-std::string          unique_id;
+meta->tokens().empty() == true;
 ```
 
-不得直接用当前请求的 token metadata 写历史 victim。
+Memory cache item 不需要额外保存 `block_tokens`。尤其不得直接用当前请求的 token metadata 填充历史 victim，否则会制造 cache key 与 tokens 不一致的伪 metadata。
 
 ## 14. 配置开关
 
@@ -1339,7 +1348,7 @@ remote_cache_memory_eviction_failure
 
 ## 20. 关键风险
 
-1. **历史 victim 的 Meta 不匹配**：Memory victim 可能不属于当前请求，不能直接复用当前 `Meta::tokens()`。
+1. **空 token IDs 被误判为空写**：Memory→Remote 允许 `Meta::tokens()` 为空，代码必须以显式 `cache_keys` 判断是否存在待写 blocks。
 2. **CPU buffer 生命周期**：KVCM 真正结束读取前不能释放或覆盖 host block。
 3. **IOV 布局不一致**：Memory 和 Device 路径的层顺序、idx_K 顺序和大小必须完全相同。
 4. **并发空间竞争**：Task A 释放的空间可能被其他写任务抢走，因此 Task B 必须保留直接淘汰兜底。
