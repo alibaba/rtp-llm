@@ -654,7 +654,9 @@ TEST(LocalRpcServerTest, UpdateWeightsSanitizesLongUnicodePythonException) {
     py::gil_scoped_acquire acquire;
     TestLocalRpcServer     server;
     py::dict               scope;
-    std::string            unicode_message;
+    // Offset the repeated three-byte code points so a byte-wise 512-byte
+    // truncation would split a UTF-8 sequence and fail the validity check.
+    std::string unicode_message = "x";
     for (int i = 0; i < 200; ++i) {
         unicode_message += u8"更新失败";
     }

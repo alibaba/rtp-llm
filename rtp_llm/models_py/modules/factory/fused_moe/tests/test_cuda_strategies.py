@@ -9,6 +9,7 @@ from rtp_llm.config.quant_config import (
     CompressedW8A8Int8PerChannelQuantConfig,
     Fp8BlockWiseQuantConfig,
     Fp8DynamicPerTensorQuantConfig,
+    Fp8PerTensorCompressedQuantConfig,
     MXFp4QuarkQuantConfig,
     W4a8Int4PerChannelQuantConfig,
 )
@@ -65,6 +66,16 @@ def create_model_config_with_fp8_per_tensor_quant() -> ModelConfig:
     """Create ModelConfig with FP8 per-tensor quantization"""
     model_config = ModelConfig()
     model_config.quant_config = Fp8DynamicPerTensorQuantConfig()
+    return model_config
+
+
+def create_model_config_with_fp8_per_tensor_compressed_quant() -> ModelConfig:
+    """Create compressed-tensors FP8 per-tensor quantization config."""
+    model_config = ModelConfig()
+    model_config.quant_config = Fp8PerTensorCompressedQuantConfig(
+        is_quanted=True,
+        dynamic=True,
+    )
     return model_config
 
 
@@ -213,19 +224,26 @@ class TestRocmEpStrategyQuantFiltering(unittest.TestCase):
     """Unsupported quant methods must leave ROCm EP candidate probing cleanly."""
 
     def test_unsupported_quant_methods_return_false(self) -> None:
-        for quant_config in (
-            CompressedW8A8Int8PerChannelQuantConfig(),
-            MXFp4QuarkQuantConfig(),
+        with patch.object(
+            RocmEpNormalStrategy,
+            "get_attributes",
+            side_effect=AssertionError(
+                "unsupported quantization must be rejected before backend resolution"
+            ),
         ):
-            with self.subTest(quant_method=quant_config.get_method()):
-                model_config = ModelConfig()
-                model_config.quant_config = quant_config
-                config = create_moe_config_adapter(
-                    model_config=model_config,
-                    parallelism_config=create_parallelism_config(),
-                    moe_config=create_moe_config(),
-                )
-                self.assertFalse(RocmEpNormalStrategy().can_handle(config))
+            for quant_config in (
+                CompressedW8A8Int8PerChannelQuantConfig(),
+                MXFp4QuarkQuantConfig(),
+            ):
+                with self.subTest(quant_method=quant_config.get_method()):
+                    model_config = ModelConfig()
+                    model_config.quant_config = quant_config
+                    config = create_moe_config_adapter(
+                        model_config=model_config,
+                        parallelism_config=create_parallelism_config(),
+                        moe_config=create_moe_config(),
+                    )
+                    self.assertFalse(RocmEpNormalStrategy().can_handle(config))
 
 
 class TestCudaNoQuantSingleGpuStrategy(unittest.TestCase):
@@ -563,7 +581,7 @@ class TestCudaFp8PerTensorNoDPStrategy(unittest.TestCase):
     def test_can_handle_fp8_per_tensor_compressed(self) -> None:
         """Test FP8_PER_TENSOR_COMPRESSED case"""
         config = create_moe_config_adapter(
-            model_config=create_model_config_with_fp8_per_tensor_quant(),
+            model_config=create_model_config_with_fp8_per_tensor_compressed_quant(),
             parallelism_config=create_parallelism_config(
                 ep_size=1, tp_size=1, dp_size=1
             ),

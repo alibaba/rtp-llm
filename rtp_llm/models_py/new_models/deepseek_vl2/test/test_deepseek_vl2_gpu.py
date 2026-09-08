@@ -2,7 +2,6 @@ import gc
 import unittest
 
 import torch
-
 from rtp_llm.models_py.new_models.deepseek_vl2.test.test_deepseek_vl2_load import (
     _load_language,
     _vision_config,
@@ -10,8 +9,15 @@ from rtp_llm.models_py.new_models.deepseek_vl2.test.test_deepseek_vl2_load impor
 from rtp_llm.models_py.new_models.deepseek_vl2.vision import DeepSeekVLV2VisionModel
 
 
-@unittest.skipUnless(torch.cuda.is_available(), "requires a CUDA or ROCm GPU")
 class DeepSeekVLV2GpuTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        if not torch.cuda.is_available():
+            raise RuntimeError(
+                "DeepSeekVLV2GpuTest requires the accelerator assigned by CI"
+            )
+
     def test_mla_load_and_real_siglip_forward(self):
         model_path = None
         model = None

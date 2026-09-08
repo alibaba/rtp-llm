@@ -48,6 +48,7 @@ py_test(
         "TestCudaFp8PerTensorNoDPStrategy.test_can_handle_fp8_per_tensor_compressed",
         "TestCudaFp8PerTensorNoDPStrategy.test_can_handle_fp8_dynamic_per_tensor",
         "TestCudaW4a8Int4PerChannelNoDPStrategy.test_can_handle_w4a8_int4_per_channel",
+        "TestRocmEpStrategyQuantFiltering",
     ],
     deps = [
         "//rtp_llm:testlib",

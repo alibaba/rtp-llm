@@ -3,8 +3,6 @@ import unittest
 from unittest.mock import patch
 
 import torch
-from safetensors.torch import save_file
-
 from rtp_llm.models_py.model_loader import NewLoaderConfig
 from rtp_llm.models_py.new_models.qwen3_vl.vision import (
     Qwen3VisionRotaryEmbedding,
@@ -12,6 +10,7 @@ from rtp_llm.models_py.new_models.qwen3_vl.vision import (
     _resolve_flash_attn_varlen,
     load_qwen3_vl_vision,
 )
+from safetensors.torch import save_file
 
 
 def _vision_config():
@@ -95,10 +94,15 @@ def _reference_interpolated_position_embeddings(visual, grid_values):
 
 
 class Qwen3VLVisionGpuTest(unittest.TestCase):
-    def test_rotary_uses_runtime_device_numerics_after_cpu_construction(self):
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
         if not torch.cuda.is_available():
-            self.skipTest("A CUDA or ROCm accelerator is required")
+            raise RuntimeError(
+                "Qwen3VLVisionGpuTest requires the accelerator assigned by CI"
+            )
 
+    def test_rotary_uses_runtime_device_numerics_after_cpu_construction(self):
         cpu_constructed = Qwen3VisionRotaryEmbedding(32).to("cuda:0")
         with torch.device("cuda:0"):
             device_constructed = Qwen3VisionRotaryEmbedding(32)
@@ -108,9 +112,6 @@ class Qwen3VLVisionGpuTest(unittest.TestCase):
         self.assertTrue(torch.equal(actual, expected))
 
     def test_bf16_position_interpolation_matches_reference_addition_order(self):
-        if not torch.cuda.is_available():
-            self.skipTest("A CUDA or ROCm accelerator is required")
-
         torch.manual_seed(29)
         visual = (
             Qwen3VLForVisionEmbedding(
@@ -135,8 +136,6 @@ class Qwen3VLVisionGpuTest(unittest.TestCase):
         self.assertFalse(torch.equal(reduction_order, expected))
 
     def test_real_newloader_gpu_forward_matches_cpu_reference(self):
-        if not torch.cuda.is_available():
-            self.skipTest("A CUDA or ROCm accelerator is required")
         if torch.version.hip is None:
             self.assertIsNotNone(_resolve_flash_attn_varlen())
 
@@ -187,9 +186,6 @@ class Qwen3VLVisionGpuTest(unittest.TestCase):
         )
 
     def test_fp32_accelerator_forward_uses_sdpa_fallback(self):
-        if not torch.cuda.is_available():
-            self.skipTest("A CUDA or ROCm accelerator is required")
-
         config = _vision_config()
         model = (
             Qwen3VLForVisionEmbedding(
