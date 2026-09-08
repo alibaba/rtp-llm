@@ -299,6 +299,7 @@ def forward_layers(
     input_ids: torch.Tensor,  # [T_total]
     attn_metadata: Any,  # DSv4DecodeAttnMetadata
     prepare_hidden_fn: Optional[Any] = None,
+    numerical_status=None,
 ) -> torch.Tensor:
     """qwen3-style decode per-layer loop. Same body shape as the prefill
     helper (:func:`rtp_llm.models_py.modules.dsv4.prefill.forward.forward_layers`)
@@ -322,7 +323,7 @@ def forward_layers(
             _rt_on = False
 
     if prepare_hidden_fn is None:
-        h = v4.embed(input_ids).view(B, q_len, -1)  # [B, q_len, dim]
+        h = v4._embed(input_ids).view(B, q_len, -1)  # [B, q_len, dim]
         if _rt_on:
             _rt.record("decode_embed_out", h)
         h = h.unsqueeze(2).repeat(1, 1, v4.hc_mult, 1)  # [B, q_len, hc, dim]
@@ -332,7 +333,7 @@ def forward_layers(
         _rt.record("decode_embed_hc_expanded", h)
     capture_ids = frozenset(v4.capture_aux_hidden_layer_ids)
     for layer_idx, layer in enumerate(v4.layers):
-        h = layer.forward_decode(h, attn_metadata, input_ids, kv_cache=kv_cache)
+        h = layer.forward_decode(h, attn_metadata, input_ids, kv_cache=kv_cache, numerical_status=numerical_status)
         if layer_idx in capture_ids:
             v4.capture_aux_hidden(layer_idx, h)
         if _rt_on:
@@ -354,7 +355,7 @@ def forward_layers(
         _rt.record("decode_hc_reduced", h)
     # Framework RMSNorm wants 2D — collapse [B, q_len, dim] then view back.
     bsz, q_len, dim_ = h.shape
-    h = v4.norm(h.reshape(bsz * q_len, dim_)).view(bsz, q_len, dim_)
+    h = v4._norm(h.reshape(bsz * q_len, dim_)).view(bsz, q_len, -1)
     if _rt_on:
         _rt.record("decode_final_norm", h)
         step = getattr(v4, "_dbg_step", 0)
@@ -382,6 +383,7 @@ def forward_decode(
     inputs: Any,  # PyModelInputs
     fmha_impl: Any = None,  # Optional[DSv4DecodeFmhaImpl]
     prepare_hidden_fn: Optional[Any] = None,
+    numerical_status=None,
 ) -> Any:  # PyModelOutputs
     """Batched decode arm — full orchestration used by
     ``DeepSeekV4Model.forward`` dispatcher.
@@ -473,6 +475,7 @@ def forward_decode(
         input_ids,
         meta,
         prepare_hidden_fn=prepare_hidden_fn,
+        numerical_status=numerical_status,
     )  # [B, q_len, dim]
     hidden = h.reshape(B * q_len, v4_args.dim)  # packed [T_total, dim]
     if _fwd_dbg.enabled():

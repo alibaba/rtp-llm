@@ -87,7 +87,8 @@ def _make_dispatch_layer(compress_ratio: int, seq: list) -> AttentionFP8:
         side_effect=lambda x, p: seq.append("common") or None
     )
     layer._prefill_compute_qkv = MagicMock(  # type: ignore[assignment]
-        side_effect=lambda x, c: seq.append("qkv") or _make_qkv()
+        side_effect=lambda x, c, shared_input_quant=None: seq.append("qkv")
+        or _make_qkv()
     )
     layer._ensure_prefill_kv_full = MagicMock(  # type: ignore[assignment]
         side_effect=lambda qkv, c: seq.append("ensure") or qkv

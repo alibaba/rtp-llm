@@ -27,6 +27,25 @@ cuda_deps = [
     "@local_config_cuda//cuda:cudart",
 ]
 
+# Apache-2.0 PPU AOT port from SGLang v0.5.14_release. This target is
+# reachable only through the @//:using_ppu select in cuda_bindings.
+cc_library(
+    name = "ppu_silu_mul_mxfp4",
+    srcs = ["ppu_silu_mul_mxfp4.cu"],
+    hdrs = ["ppu_silu_mul_mxfp4.h"],
+    data = ["ppu_silu_mul_mxfp4.NOTICE"],
+    deps = [
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ],
+    copts = cuda_copts(),
+    target_compatible_with = select({
+        "@//:using_ppu": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    visibility = ["//visibility:public"],
+)
+
 cc_library(
     name = "cuda_utils_common",
     hdrs = [
@@ -107,11 +126,15 @@ cc_library(
     name = "cuda_quantization",
     srcs = [
         "per_token_group_quant_8bit.cu",
+        "per_token_group_quant_8bit_checked.cu",
         "per_token_group_quant_8bit_v2.cu",
+        "per_token_group_quant_8bit_v2_checked.cu",
     ],
     hdrs = [
         "per_token_group_quant_8bit.h",
+        "per_token_group_quant_8bit_checked.h",
         "per_token_group_quant_8bit_v2.h",
+        "per_token_group_quant_8bit_v2_checked.h",
     ],
     deps = [
         "//rtp_llm/models_py/bindings/cuda:cuda_host_utils",

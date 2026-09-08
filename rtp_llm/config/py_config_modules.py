@@ -619,6 +619,9 @@ class GrammarAdmissionConfig:
 
 class PyEnvConfigs:
     def __init__(self):
+        from rtp_llm.config.module_dispatch_config import ModuleDispatchConfig
+
+        self.module_dispatch = ModuleDispatchConfig()
         self.server_config: ServerConfig = ServerConfig()
         self.profiling_debug_logging_config: ProfilingDebugLoggingConfig = (
             ProfilingDebugLoggingConfig()

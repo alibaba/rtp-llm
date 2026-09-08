@@ -23,6 +23,7 @@ enum class ErrorCode {
     GRAMMAR_VOCAB_EXCEEDS_MODEL_VOCAB = 611,
     GRAMMAR_EOS_OUT_OF_VOCAB          = 612,
     GRAMMAR_VERIFY_EXCEPTION          = 613,
+    NUMERICAL_NONFINITE               = 614,
 
     // multimodal error
     MM_LONG_PROMPT_ERROR   = 901,
@@ -142,6 +143,8 @@ inline std::string ErrorCodeToString(ErrorCode code) {
             return "GRAMMAR_EOS_OUT_OF_VOCAB";
         case ErrorCode::GRAMMAR_VERIFY_EXCEPTION:
             return "GRAMMAR_VERIFY_EXCEPTION";
+        case ErrorCode::NUMERICAL_NONFINITE:
+            return "NUMERICAL_NONFINITE";
         case ErrorCode::GET_HOST_FAILED:
             return "GET_HOST_FAILED";
         case ErrorCode::GET_CONNECTION_FAILED:

@@ -84,6 +84,9 @@ def mhc_pre_big_fuse(
     mhc_post_mult_value: float,
     sinkhorn_repeat: int,
     n_splits: int = 16,
+    *,
+    backend: str | None = None,
+    prenorm_gemm=None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     assert residual.dtype == torch.bfloat16
     assert fn.dtype == torch.float32
@@ -107,12 +110,13 @@ def mhc_pre_big_fuse(
     num_tokens = residual_flat.shape[0]
     fn_flat = fn
 
-    backend = _requested_backend()
+    backend = _requested_backend() if backend is None else backend
+    deepgemm_backend = backend in ("deepgemm", "deepgemm_deterministic")
     block_k = 64
     block_m = 64
     n_splits = (
         _compute_num_split(block_k, mhc_hidden_size, _ceil_div(num_tokens, block_m))
-        if backend in ("deepgemm", "tilelang_splitk")
+        if deepgemm_backend or backend == "tilelang_splitk"
         else 1
     )
 
@@ -126,20 +130,40 @@ def mhc_pre_big_fuse(
         num_tokens, hidden_size, dtype=torch.bfloat16, device=residual.device
     )
 
+    # The PPU DeepGEMM implementation performs its split-K reduction inside
+    # HcPrenormGemm and writes a single reduced plane. Its current ABI accepts
+    # [1, M, N] / [1, M], unlike the old exposed-partials caller contract.
+    output_splits = 1 if deepgemm_backend or backend == "tilelang_single" else n_splits
     gemm_out_mul = torch.empty(
-        n_splits, num_tokens, mhc_mult3, dtype=torch.float32, device=residual.device
+        output_splits,
+        num_tokens,
+        mhc_mult3,
+        dtype=torch.float32,
+        device=residual.device,
     )
     gemm_out_sqrsum = torch.empty(
-        n_splits, num_tokens, dtype=torch.float32, device=residual.device
+        output_splits, num_tokens, dtype=torch.float32, device=residual.device
     )
-    if backend == "deepgemm":
-        _run_deepgemm_splitk_gemm(
+    if deepgemm_backend:
+        if prenorm_gemm is not None:
+            run_gemm = prenorm_gemm
+        elif backend == "deepgemm_deterministic":
+            from rtp_llm.models_py.modules.dsv4.platform_provider import (
+                run_dsv4_hc_prenorm,
+            )
+
+            run_gemm = run_dsv4_hc_prenorm
+        else:
+            run_gemm = _run_deepgemm_splitk_gemm
+        run_gemm(
             residual_flat.view(num_tokens, mhc_hidden_size),
             fn_flat,
             gemm_out_mul,
             gemm_out_sqrsum,
             n_splits,
         )
+        # Both implementations return one reduced plane.
+        n_splits = 1
     elif backend == "tilelang_single":
         n_splits = _run_tilelang_single_gemm(
             residual_flat,
@@ -159,7 +183,8 @@ def mhc_pre_big_fuse(
     else:
         raise ValueError(
             "Unsupported DSV4_MHC_PRE_GEMM_BACKEND="
-            f"{backend!r}; expected deepgemm, tilelang_splitk, or tilelang_single."
+            f"{backend!r}; expected deepgemm, deepgemm_deterministic, "
+            "tilelang_splitk, or tilelang_single."
         )
 
     _mhc_pre_big_fuse(
@@ -171,6 +196,11 @@ def mhc_pre_big_fuse(
         sinkhorn_repeat,
         n_splits=n_splits,
         mhc_mult=mhc_mult,
+        # The deterministic reduction needs no BF16 canonicalization. Keep
+        # these small vectors in FP32, matching SGLang's HC/Sinkhorn semantics.
+        # Retain the legacy atomic backend's behavior for explicit A/B runs.
+        stabilize_mixes=backend == "deepgemm",
+        stabilize_comb=backend == "deepgemm",
     )(
         gemm_out_mul,
         gemm_out_sqrsum,

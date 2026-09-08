@@ -29,6 +29,7 @@ mode reads tensors from `mw.global_weights[W.*]` and
 `mw.weights[layer_id][W.v4_*]` (W tag enum, no string keys).
 """
 
+import json
 import logging
 import os
 from dataclasses import dataclass
@@ -54,10 +55,15 @@ from rtp_llm.models_py.modules.dsv4.moe.moe_layer import (
     moe_chunk_tokens_from_env,
     resolve_moe_max_tokens_per_rank,
 )
+from rtp_llm.models_py.modules.dsv4.platform_provider import (
+    Dsv4ProviderCapability,
+    resolve_dsv4_platform_provider,
+)
 from rtp_llm.models_py.modules.dsv4.prefill.forward import forward_prefill
+from rtp_llm.models_py.modules.dsv4.prefill_workspace import tp_local_prefill_q_dim
 from rtp_llm.models_py.modules.dsv4.transformer import V4Args, V4Transformer
-from rtp_llm.utils.warmup import model_warm_up_enabled
 from rtp_llm.ops import RoleType
+from rtp_llm.utils.warmup import model_warm_up_enabled
 
 
 def _materialize_meta_buffers(module: torch.nn.Module, device: str) -> int:
@@ -303,7 +309,27 @@ class DeepSeekV4Model(GptModelBase):
         fmha_config=None,
         py_hw_kernel_config=None,
         device_resource_config=None,
+        module_build_context=None,
+        platform_provider=None,
     ):
+        self.module_build_context = module_build_context
+        from types import MappingProxyType
+
+        self._execution_options = (
+            None
+            if module_build_context is None
+            else MappingProxyType(
+                module_build_context.selection.model_metadata["execution_options"]
+            )
+        )
+        if platform_provider is None:
+            from rtp_llm.utils.backend_registry import run_backend_registrations
+
+            run_backend_registrations("dsv4")
+            platform_provider = resolve_dsv4_platform_provider(
+                {Dsv4ProviderCapability.BLOCK, Dsv4ProviderCapability.TRANSFORMER}
+            )
+        self._platform_provider = platform_provider
         super().__init__(
             model_config,
             parallelism_config,
@@ -471,9 +497,53 @@ class DeepSeekV4Model(GptModelBase):
                 self._profile_path,
             )
 
+    def get_execution_capabilities(self):
+        capabilities = {"graph_requires_kv_cache_layout": True}
+        if self.module_build_context is not None:
+            capabilities.update(
+                module_build_complete=self.module_build_context.state == "closed",
+                module_protocol_digest=self.module_build_context.protocol_digest,
+            )
+        return capabilities
+
     def initialize(self, init_resource: PyModelInitResources) -> bool:
         try:
-            return self._initialize_impl(init_resource)
+            ctx = self.module_build_context
+            if ctx is not None:
+                metadata = ctx.selection.model_metadata
+                if bool(init_resource.is_decode_role) or bool(
+                    init_resource.is_speculative
+                ):
+                    raise ValueError(
+                        "Prefill module binding cannot initialize decode/speculative resources"
+                    )
+                if bool(self._v4_args.fp8_kv_cache) != metadata["fp8_kv_cache"]:
+                    raise ValueError("KV dtype differs from the module preflight")
+                from rtp_llm.models_py.pluggable.dsv4_resources import (
+                    validate_bound_cache,
+                )
+
+                resource_record = validate_bound_cache(
+                    init_resource.kv_cache,
+                    metadata,
+                    device=torch.device("cuda", ctx.selection.platform.local_rank),
+                )
+                logging.info(
+                    "module_dispatch resources: %s",
+                    json.dumps(
+                        {
+                            "model_instance_id": ctx.model_instance_id,
+                            "protocol_digest": ctx.protocol_digest,
+                            **resource_record,
+                        },
+                        sort_keys=True,
+                    ),
+                )
+            result = self._initialize_impl(init_resource)
+            if result and ctx is not None:
+                ctx.validate_built_tree(self, root_path="v4")
+                ctx.close()
+            return result
         except BaseException as e:
             import traceback
 
@@ -495,6 +565,7 @@ class DeepSeekV4Model(GptModelBase):
                 is_decode_role=True,
                 is_speculative=self._is_speculative,
                 gen_num_per_cycle=self._gen_num_per_cycle,
+                options=getattr(self, "_execution_options", None),
             )
         cp_size = int(self._prefill_cp_size)
         if cp_size > 1:
@@ -509,6 +580,14 @@ class DeepSeekV4Model(GptModelBase):
 
     def _resolve_prefill_q_token_capacity(self) -> int:
         return self._resolve_shared_token_capacity()
+
+    def _resolve_prefill_q_dim(self) -> int:
+        """Return the TP-local dense-Q width backed by the prefill workspace."""
+        return tp_local_prefill_q_dim(
+            self._v4_args.n_heads,
+            self._v4_args.head_dim,
+            self._v4_args.tp_size,
+        )
 
     def _resolve_mtp_last_hidden_token_capacity(self) -> Optional[int]:
         return None
@@ -547,7 +626,10 @@ class DeepSeekV4Model(GptModelBase):
         assert self.v4 is not None
         mtp_hidden = None
         mtp_last_hidden_capacity = None
-        if Dsv4SharedRuntimeBufferStore.mtp_hidden_requested():
+        if (
+            self.module_build_context is None
+            and Dsv4SharedRuntimeBufferStore.mtp_hidden_requested()
+        ):
             # MTP rows are the pre-hc residual (hc_mult*dim); DSpARK rows are
             # the captured aux features (len(capture_ids)*dim). Target and
             # draft carry the same capture ids in their configs, so both
@@ -572,7 +654,13 @@ class DeepSeekV4Model(GptModelBase):
         # lifetime. CP gather/restore region is sized only when CP is active.
         cp_size = int(self._prefill_cp_size)
         q_rows = int(self._resolve_prefill_q_token_capacity())
-        q_dim = int(self._v4_args.n_heads) * int(self._v4_args.head_dim)
+        # Attention Q is row-sharded by heads under tensor parallelism.  The
+        # workspace backs the local ``wq_b`` output, so sizing it with the
+        # global head count makes ``_materialize_prefill_q`` try to reinterpret
+        # a TP-size-larger buffer as the local Q tensor (for TP8: 32768 vs
+        # 4096 elements per token).  Keep TP1 unchanged and fail loudly on an
+        # invalid head partition.
+        q_dim = self._resolve_prefill_q_dim()
         if cp_size > 1:
             full_rows = q_rows * cp_size
             main_w, idx_w = self._resolve_prefill_ws_gather_widths()
@@ -582,11 +670,22 @@ class DeepSeekV4Model(GptModelBase):
             idx_w = 0
         self.v4._bind_prefill_workspace_dims(q_rows, q_dim, full_rows, main_w, idx_w)
 
-        self._shared_runtime_buffers = Dsv4SharedRuntimeBufferStore.get_or_create(
-            device=device,
-            dtype=torch.bfloat16,
-            mtp_hidden=mtp_hidden,
-        )
+        if self.module_build_context is None:
+            self._shared_runtime_buffers = Dsv4SharedRuntimeBufferStore.get_or_create(
+                device=device,
+                dtype=torch.bfloat16,
+                mtp_hidden=mtp_hidden,
+            )
+        elif self._shared_runtime_buffers is None:
+            # This explicit Prefill contract does not share state with an MTP
+            # model. A process-global subscriber would retain an unrelated
+            # model's weights after its owner is destroyed.
+            self._shared_runtime_buffers = Dsv4SharedRuntimeBufferStore(
+                device=device,
+                dtype=torch.bfloat16,
+                mtp_hidden_enabled=False,
+                mtp_hidden=None,
+            )
         self._shared_runtime_buffers.bind(self.v4)
 
         if mtp_last_hidden_capacity is not None:
@@ -620,19 +719,22 @@ class DeepSeekV4Model(GptModelBase):
             is_decode_role=self._is_decode_role,
             is_speculative=self._is_speculative,
             gen_num_per_cycle=self._gen_num_per_cycle,
+            options=self._execution_options,
         )
         if runtime_resolved_max_tokens_per_rank != self._v4_args.max_tokens_per_rank:
             chunk_tokens_env_for_log = (
                 DSV4_CHUNK_TOKENS_ENV
-                if dsv4_global_chunk_tokens_configured()
+                if dsv4_global_chunk_tokens_configured(self._execution_options)
                 else "DSV4_MOE_CHUNK_TOKENS"
             )
             chunk_tokens_for_log = -1
             if not self._is_decode_role and (
-                dsv4_global_chunk_tokens_configured()
-                or os.environ.get("DSV4_MOE_CHUNK_PREFILL", "1") != "0"
+                dsv4_global_chunk_tokens_configured(self._execution_options)
+                or chunked_moe_enabled(self._execution_options)
             ):
-                chunk_tokens_for_log = moe_chunk_tokens_from_env()
+                chunk_tokens_for_log = moe_chunk_tokens_from_env(
+                    options=self._execution_options
+                )
             logging.info(
                 "[DeepSeekV4Model] runtime MoE token budget: "
                 "max_tokens_per_rank %d -> %d (%s=%d, role=%s, "
@@ -667,7 +769,17 @@ class DeepSeekV4Model(GptModelBase):
         torch.set_default_dtype(torch.bfloat16)
         try:
             with torch.device("meta"):
-                self.v4 = V4Transformer(self._v4_args, mw=self.weight)
+                self.v4 = self._platform_provider.build_transformer(
+                    V4Transformer,
+                    self._v4_args,
+                    self.weight,
+                    platform_provider=self._platform_provider,
+                    **(
+                        {"module_build_context": self.module_build_context}
+                        if self.module_build_context is not None
+                        else {}
+                    ),
+                )
         finally:
             torch.set_default_dtype(prev_dtype)
         if self._captures_aux_hidden:
@@ -917,9 +1029,9 @@ class DeepSeekV4Model(GptModelBase):
                 )
                 _dense_shapes = _collect_dsv4_dense_gemm_shapes(self)
                 _dense_gemm_prefill_chunk_size = 0
-                if not self._is_decode_role and chunked_moe_enabled():
+                if not self._is_decode_role and chunked_moe_enabled(self._execution_options):
                     _dense_gemm_prefill_chunk_size = max(
-                        int(moe_chunk_tokens_from_env()), 0
+                        int(moe_chunk_tokens_from_env(options=self._execution_options)), 0
                     )
                 _prefill_cp_config = getattr(
                     self.parallelism_config, "prefill_cp_config", None
@@ -1251,6 +1363,12 @@ class DeepSeekV4Model(GptModelBase):
             raise RuntimeError(
                 "DeepSeekV4Model.forward: PyModelInputs carries no attention inputs"
             )
+        if self.module_build_context is not None and (
+            not attn.is_prefill
+            or _is_decode_fmha(fmha_impl)
+            or bool(getattr(attn, "is_target_verify", False))
+        ):
+            raise RuntimeError("Selected module contract supports Prefill only")
 
         # Subclass-overridable hidden-state preparation hooks.  When a
         # subclass (e.g. ``DeepSeekV4MtpModel``) overrides
@@ -1283,6 +1401,7 @@ class DeepSeekV4Model(GptModelBase):
                 inputs,
                 fmha_impl,
                 prepare_hidden_fn=prep_decode,
+                numerical_status=inputs.numerical_status,
             )
         elif attn.is_prefill:
             return forward_prefill(
@@ -1291,6 +1410,7 @@ class DeepSeekV4Model(GptModelBase):
                 self.parallelism_config,
                 inputs,
                 prepare_hidden_fn=prep_prefill,
+                numerical_status=inputs.numerical_status,
             )
         else:
             return forward_decode(
@@ -1300,4 +1420,5 @@ class DeepSeekV4Model(GptModelBase):
                 inputs,
                 fmha_impl,
                 prepare_hidden_fn=prep_decode,
+                numerical_status=inputs.numerical_status,
             )

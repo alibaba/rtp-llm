@@ -40,6 +40,13 @@ def _hca_dense_width(max_seq_len: int) -> int:
     return ((max_seq_len // 128) + 63) // 64 * 64
 
 
+def _model1_pool(num_blocks: int, block_size: int) -> torch.Tensor:
+    """Test-owned T13 physical backing with a 576-byte-aligned block stride."""
+    stride0 = ((block_size * 584 + 575) // 576) * 576
+    backing = torch.zeros(num_blocks * stride0, dtype=torch.uint8)
+    return backing.as_strided((num_blocks, block_size, 584), (stride0, 584, 1))
+
+
 class DecodeTopkLengthEagerTest(unittest.TestCase):
     """build_decode_metadata_fp8 (eager path) length values."""
 
@@ -365,31 +372,37 @@ class DecodeTopkLengthPlumbingTest(unittest.TestCase):
 
         B, q_len = 3, 1
         q = torch.zeros(B, q_len, 2, HEAD_DIM, dtype=torch.bfloat16)
-        swa_pool = torch.zeros(2, 128, 584, dtype=torch.uint8)
-        cmp_pool = torch.zeros(2, 64, 584, dtype=torch.uint8)
+        swa_pool = _model1_pool(2, 128)
         swa_idx = torch.full((B, q_len, WINDOW), -1, dtype=torch.int32)
-        cmp_idx = torch.full((B, q_len, 8192), -1, dtype=torch.int32)
         topk_len = torch.tensor([128, 128, 51], dtype=torch.int32)
         extra_len = torch.tensor([128, 3, 0], dtype=torch.int32)
 
-        calls = self._with_fake_flash_mla(
-            lambda op, _calls: attn_fp8_dual_paged(
-                q=q,
-                swa_pool_3d=swa_pool,
-                cmp_pool_3d=cmp_pool,
-                attn_sink=torch.zeros(2, dtype=torch.float32),
-                swa_topk_3d=swa_idx,
-                cmp_topk_3d=cmp_idx,
-                swa_block_table=torch.zeros(B, 4, dtype=torch.int32),
-                sched_meta=object(),
-                fp8_op=op,
-                topk_length=topk_len,
-                extra_topk_length=extra_len,
-            )
-        )
-        self.assertEqual(len(calls), 1)
-        self.assertTrue(torch.equal(calls[0]["topk_length"], topk_len))
-        self.assertTrue(torch.equal(calls[0]["extra_topk_length"], extra_len))
+        # C4 accepts both production widths. HCA derives a much wider dense
+        # capture width from max_seq_len while retaining its two-entry page.
+        for page, width in ((64, 512), (64, 1024), (2, 8192)):
+            with self.subTest(page=page, width=width):
+                cmp_pool = _model1_pool(2, page)
+                cmp_idx = torch.full((B, q_len, width), -1, dtype=torch.int32)
+                calls = self._with_fake_flash_mla(
+                    lambda op, _calls: attn_fp8_dual_paged(
+                        q=q,
+                        swa_pool_3d=swa_pool,
+                        cmp_pool_3d=cmp_pool,
+                        attn_sink=torch.zeros(2, dtype=torch.float32),
+                        swa_topk_3d=swa_idx,
+                        cmp_topk_3d=cmp_idx,
+                        swa_block_table=torch.zeros(B, 4, dtype=torch.int32),
+                        sched_meta=object(),
+                        fp8_op=op,
+                        topk_length=topk_len,
+                        extra_topk_length=extra_len,
+                    )
+                )
+                self.assertEqual(len(calls), 1)
+                self.assertTrue(torch.equal(calls[0]["topk_length"], topk_len))
+                self.assertTrue(
+                    torch.equal(calls[0]["extra_topk_length"], extra_len)
+                )
 
     def test_swa_paged_forwards_topk_length(self) -> None:
         from rtp_llm.models_py.modules.dsv4.fp8.decode.attention_kernels import (
@@ -398,7 +411,7 @@ class DecodeTopkLengthPlumbingTest(unittest.TestCase):
 
         B, q_len = 2, 1
         q = torch.zeros(B, q_len, 2, HEAD_DIM, dtype=torch.bfloat16)
-        swa_pool = torch.zeros(2, 128, 584, dtype=torch.uint8)
+        swa_pool = _model1_pool(2, 128)
         swa_idx = torch.full((B, q_len, WINDOW), -1, dtype=torch.int32)
         topk_len = torch.tensor([128, 51], dtype=torch.int32)
 

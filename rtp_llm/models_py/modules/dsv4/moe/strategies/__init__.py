@@ -16,6 +16,10 @@ priority order, and it is load-bearing: ``deepep`` transitively imports
 before ``deepep``/``local_loop`` or the EP=1 auto-pick would register (and pick)
 ``local_loop`` ahead of ``grouped_fp4``. Alphabetical isort reordering breaks
 this — see ``test_ep1_with_grouped_kernel_picks_grouped``.
+
+The PPU strategy is registered before both grouped implementations. Its
+``can_handle`` probe is strict to TP4/EP1 on ZW-M890P with the required vendor
+symbol, so this ordering cannot redirect a generic CUDA topology.
 """
 
 from .base import (
@@ -30,6 +34,9 @@ from .base import (
 from .mega import MegaMoEStrategy  # noqa: F401  ep_size>1 + SM100 + dist
 from .mega_se import MegaMoEStrategySE  # noqa: F401  explicit fused-SE opt-in
 from .mega_fused import MegaMoEFusedStrategy  # noqa: F401  ep_size>1 + fused opt-in
+from rtp_llm.utils.backend_registry import run_backend_registrations
+
+run_backend_registrations("dsv4_moe_strategy")
 from .grouped_fp4 import (  # noqa: F401  ep_size==1 + kernel
     GroupedFP4Strategy,
     _has_fp8_fp4_grouped_kernel,

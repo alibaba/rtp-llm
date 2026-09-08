@@ -37,6 +37,8 @@ public:
 
 public:
     torch::Tensor         logits;         // shape: [batch_size, vocab_size]
+    torch::Tensor         numerical_failure_mask; // shape: [batch_size], dtype: bool
+    std::shared_ptr<void> numerical_failure_lease;
     mutable torch::Tensor token_ids;      // shape: [batch_size, max_length]
     torch::Tensor         input_lengths;  // shape: [batch_size]
     // shape: [decoder_batch_size]
@@ -75,6 +77,8 @@ public:
     torch::Tensor                         all_probs;
     torch::Tensor                         beam_index;
     torch::Tensor                         success;
+    torch::Tensor                         numerical_failure_mask;
+    std::shared_ptr<void>                 numerical_failure_lease;
     std::vector<std::optional<ErrorInfo>> processor_errors;
     // The draft distribution is a one-hot at token_ids and need not be
     // materialized as [batch, speculative_steps, vocab].

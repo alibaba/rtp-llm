@@ -326,9 +326,16 @@ def _fused_phase2b_pool_slot_mapping_kernel(
     if HAS_SWA:
         bis_swa_raw = abs_pos // SWA_TOKENS_PER_BLOCK
         in_blk_swa = abs_pos % SWA_E
-        bis_swa = tl.maximum(tl.minimum(bis_swa_raw, SWA_BT_STRIDE - 1), 0)
-        bid_swa = tl.load(bt_swa_ptr + r * SWA_BT_STRIDE + bis_swa).to(tl.int64)
-        slot_swa = tl.where(bid_swa <= 0, -1, bid_swa * SWA_E + in_blk_swa)
+        valid_row_swa = (abs_pos >= 0) & (bis_swa_raw < SWA_BT_STRIDE)
+        bis_swa = tl.where(valid_row_swa, bis_swa_raw, 0)
+        bid_swa = tl.load(
+            bt_swa_ptr + r * SWA_BT_STRIDE + bis_swa,
+            mask=valid_row_swa,
+            other=0,
+        ).to(tl.int64)
+        slot_swa = tl.where(
+            valid_row_swa & (bid_swa > 0), bid_swa * SWA_E + in_blk_swa, -1
+        )
         tl.store(slot_swa_ptr + out_idx, slot_swa)
 
     # ---------- CSA: ratio=4, boundary tokens only ----------
@@ -341,9 +348,15 @@ def _fused_phase2b_pool_slot_mapping_kernel(
     if HAS_CSA:
         bis_csa_raw = safe_4 // CSA_TOKENS_PER_BLOCK
         in_blk_csa = safe_4 % CSA_E
-        bis_csa = tl.maximum(tl.minimum(bis_csa_raw, CSA_BT_STRIDE - 1), 0)
-        bid_csa = tl.load(bt_csa_ptr + r * CSA_BT_STRIDE + bis_csa).to(tl.int64)
-        skip_csa = skip_4 | (bid_csa <= 0)
+        valid_row_csa = bis_csa_raw < CSA_BT_STRIDE
+        load_csa = (~skip_4) & valid_row_csa
+        bis_csa = tl.where(load_csa, bis_csa_raw, 0)
+        bid_csa = tl.load(
+            bt_csa_ptr + r * CSA_BT_STRIDE + bis_csa,
+            mask=load_csa,
+            other=0,
+        ).to(tl.int64)
+        skip_csa = (~load_csa) | (bid_csa <= 0)
         slot_csa = tl.where(skip_csa, -1, bid_csa * CSA_E + in_blk_csa)
         tl.store(slot_csa_ptr + out_idx, slot_csa)
 
@@ -351,9 +364,15 @@ def _fused_phase2b_pool_slot_mapping_kernel(
     if HAS_IDX:
         bis_idx_raw = safe_4 // IDX_TOKENS_PER_BLOCK
         in_blk_idx = safe_4 % IDX_E
-        bis_idx = tl.maximum(tl.minimum(bis_idx_raw, IDX_BT_STRIDE - 1), 0)
-        bid_idx = tl.load(bt_idx_ptr + r * IDX_BT_STRIDE + bis_idx).to(tl.int64)
-        skip_idx = skip_4 | (bid_idx <= 0)
+        valid_row_idx = bis_idx_raw < IDX_BT_STRIDE
+        load_idx = (~skip_4) & valid_row_idx
+        bis_idx = tl.where(load_idx, bis_idx_raw, 0)
+        bid_idx = tl.load(
+            bt_idx_ptr + r * IDX_BT_STRIDE + bis_idx,
+            mask=load_idx,
+            other=0,
+        ).to(tl.int64)
+        skip_idx = (~load_idx) | (bid_idx <= 0)
         slot_idx = tl.where(skip_idx, -1, bid_idx * IDX_E + in_blk_idx)
         tl.store(slot_idx_ptr + out_idx, slot_idx)
 
@@ -365,9 +384,15 @@ def _fused_phase2b_pool_slot_mapping_kernel(
         safe_128 = tl.where(skip_128, 0, cmp_idx_128)
         bis_hca_raw = safe_128 // HCA_TOKENS_PER_BLOCK
         in_blk_hca = safe_128 % HCA_E
-        bis_hca = tl.maximum(tl.minimum(bis_hca_raw, HCA_BT_STRIDE - 1), 0)
-        bid_hca = tl.load(bt_hca_ptr + r * HCA_BT_STRIDE + bis_hca).to(tl.int64)
-        skip_hca = skip_128 | (bid_hca <= 0)
+        valid_row_hca = bis_hca_raw < HCA_BT_STRIDE
+        load_hca = (~skip_128) & valid_row_hca
+        bis_hca = tl.where(load_hca, bis_hca_raw, 0)
+        bid_hca = tl.load(
+            bt_hca_ptr + r * HCA_BT_STRIDE + bis_hca,
+            mask=load_hca,
+            other=0,
+        ).to(tl.int64)
+        skip_hca = (~load_hca) | (bid_hca <= 0)
         slot_hca = tl.where(skip_hca, -1, bid_hca * HCA_E + in_blk_hca)
         tl.store(slot_hca_ptr + out_idx, slot_hca)
 
@@ -388,11 +413,6 @@ def fused_phase2b_pool_slot_mapping(
     Writes pool_write_slot_mappings[:bs*q_len] for present pools.
     Absent pools are compile-time eliminated via constexpr flags.
     """
-    assert start_pos.is_cuda, (
-        "fused_phase2b_pool_slot_mapping requires CUDA tensors, "
-        f"got start_pos on {start_pos.device}"
-    )
-
     from rtp_llm.models_py.modules.dsv4.kv_cache_utils import (
         CSA_KV,
         HCA_KV,
@@ -400,7 +420,32 @@ def fused_phase2b_pool_slot_mapping(
         SWA_KV,
     )
 
-    q_len = meta.q_len_per_req
+    q_len = int(meta.q_len_per_req)
+    bs = int(bs)
+    if bs <= 0 or q_len <= 0:
+        raise ValueError(f"invalid fused slot shape: bs={bs}, q_len={q_len}")
+    if (
+        not start_pos.is_cuda
+        or start_pos.dtype != torch.int32
+        or start_pos.dim() != 1
+        or not start_pos.is_contiguous()
+        or start_pos.numel() < bs
+    ):
+        raise ValueError(
+            "fused slot start_pos must be contiguous CUDA int32 [>=bs], "
+            f"got shape={tuple(start_pos.shape)}, dtype={start_pos.dtype}, "
+            f"device={start_pos.device}, contiguous={start_pos.is_contiguous()}, bs={bs}"
+        )
+
+    supported_tags = (SWA_KV, CSA_KV, INDEXER_KV, HCA_KV)
+    for tag in supported_tags:
+        has_table = tag in meta.pool_block_tables
+        has_output = tag in meta.pool_write_slot_mappings
+        if has_table != has_output:
+            raise ValueError(
+                "fused slot pool requires both block table and output buffer: "
+                f"tag={tag}, has_table={has_table}, has_output={has_output}"
+            )
 
     has_swa = (
         SWA_KV in meta.pool_block_tables and SWA_KV in meta.pool_write_slot_mappings
@@ -419,29 +464,100 @@ def fused_phase2b_pool_slot_mapping(
     if not (has_swa or has_csa or has_idx or has_hca):
         return
 
-    # For absent pools, pass the SWA buffer as a dummy (kernel won't touch it)
-    bt_swa = meta.pool_block_tables.get(
-        SWA_KV, meta.pool_block_tables.get(next(iter(meta.pool_block_tables)))
-    )
+    present = {
+        SWA_KV: has_swa,
+        CSA_KV: has_csa,
+        INDEXER_KV: has_idx,
+        HCA_KV: has_hca,
+    }
+    required_output_elems = bs * q_len
+    entries_by_tag: dict[str, int] = {}
+    raw_tokens_by_tag: dict[str, int] = {}
+
+    def _geometry_value(values: Any, tag: str, field: str) -> int:
+        try:
+            value = values[tag]
+        except (KeyError, TypeError) as error:
+            raise ValueError(
+                f"fused slot pool geometry is missing {field}: tag={tag}"
+            ) from error
+        try:
+            return int(value)
+        except (TypeError, ValueError) as error:
+            raise ValueError(
+                "fused slot pool geometry must be integer-convertible: "
+                f"tag={tag}, field={field}, value={value!r}"
+            ) from error
+
+    for tag, is_present in present.items():
+        if not is_present:
+            continue
+        block_table = meta.pool_block_tables[tag]
+        output = meta.pool_write_slot_mappings[tag]
+        if (
+            block_table.dim() != 2
+            or block_table.shape[0] < bs
+            or block_table.shape[1] <= 0
+            or block_table.dtype != torch.int32
+            or block_table.device != start_pos.device
+            or block_table.stride(1) != 1
+            or block_table.stride(0) != block_table.shape[1]
+        ):
+            raise ValueError(
+                "fused slot block table must be row-major CUDA int32 [>=bs, >0]: "
+                f"tag={tag}, shape={tuple(block_table.shape)}, "
+                f"strides={tuple(block_table.stride())}, dtype={block_table.dtype}, "
+                f"device={block_table.device}, expected_device={start_pos.device}"
+            )
+        if (
+            output.dim() != 1
+            or output.numel() < required_output_elems
+            or output.dtype != torch.int64
+            or output.device != start_pos.device
+            or not output.is_contiguous()
+        ):
+            raise ValueError(
+                "fused slot output must be contiguous CUDA int64 [>=bs*q_len]: "
+                f"tag={tag}, shape={tuple(output.shape)}, dtype={output.dtype}, "
+                f"device={output.device}, contiguous={output.is_contiguous()}, "
+                f"required={required_output_elems}"
+            )
+        entries = _geometry_value(
+            paged_pool_entries_per_block, tag, "entries_per_block"
+        )
+        raw_tokens = _geometry_value(
+            paged_pool_tokens_per_block, tag, "tokens_per_block"
+        )
+        if entries <= 0 or raw_tokens <= 0:
+            raise ValueError(
+                "fused slot pool geometry must be positive: "
+                f"tag={tag}, entries={entries}, raw_tokens={raw_tokens}"
+            )
+        entries_by_tag[tag] = entries
+        raw_tokens_by_tag[tag] = raw_tokens
+
+    # For absent pools, pass the first present pool as a dummy; constexpr flags
+    # guarantee the kernel never dereferences or stores through those arguments.
+    first_tag = next(tag for tag in supported_tags if present[tag])
+    dummy_bt = meta.pool_block_tables[first_tag]
+    dummy_slot = meta.pool_write_slot_mappings[first_tag]
+    bt_swa = meta.pool_block_tables.get(SWA_KV, dummy_bt)
     bt_csa = meta.pool_block_tables.get(CSA_KV, bt_swa)
     bt_idx = meta.pool_block_tables.get(INDEXER_KV, bt_swa)
     bt_hca = meta.pool_block_tables.get(HCA_KV, bt_swa)
 
-    slot_swa = meta.pool_write_slot_mappings.get(
-        SWA_KV,
-        meta.pool_write_slot_mappings.get(next(iter(meta.pool_write_slot_mappings))),
-    )
+    slot_swa = meta.pool_write_slot_mappings.get(SWA_KV, dummy_slot)
     slot_csa = meta.pool_write_slot_mappings.get(CSA_KV, slot_swa)
     slot_idx = meta.pool_write_slot_mappings.get(INDEXER_KV, slot_swa)
     slot_hca = meta.pool_write_slot_mappings.get(HCA_KV, slot_swa)
 
-    swa_e = int(paged_pool_entries_per_block[SWA_KV]) if has_swa else 1
-    csa_e = int(paged_pool_entries_per_block[CSA_KV]) if has_csa else 1
-    idx_e = int(paged_pool_entries_per_block[INDEXER_KV]) if has_idx else 1
-    hca_e = int(paged_pool_entries_per_block[HCA_KV]) if has_hca else 1
+    swa_e = entries_by_tag[SWA_KV] if has_swa else 1
+    csa_e = entries_by_tag[CSA_KV] if has_csa else 1
+    idx_e = entries_by_tag[INDEXER_KV] if has_idx else 1
+    hca_e = entries_by_tag[HCA_KV] if has_hca else 1
 
     def _raw_tokens(tag: str) -> int:
-        return int(paged_pool_tokens_per_block[tag])
+        return raw_tokens_by_tag[tag]
 
     def _compressed_tokens(raw_tokens_per_block: int, ratio: int) -> int:
         if raw_tokens_per_block % ratio != 0:

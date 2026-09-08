@@ -10,16 +10,40 @@ from typing import Callable, Dict, Optional, Tuple
 
 import torch
 import torch.nn as nn
-
 from rtp_llm.models_py.modules import RMSNorm
 from rtp_llm.models_py.modules.dsv4.fp8.attention import AttentionFP8
 from rtp_llm.models_py.modules.dsv4.hc import build_hc_unit
 from rtp_llm.models_py.modules.dsv4.moe import MoE
+from rtp_llm.models_py.modules.dsv4.platform_provider import (
+    DefaultDsv4PlatformProvider,
+    Dsv4AttentionLayout,
+    Dsv4PlatformProvider,
+    Dsv4ProviderCapability,
+    resolve_dsv4_attention_layout,
+)
+from rtp_llm.models_py.modules.dsv4.tp_norm import tp_rms_norm
 
 _PrefillFastHCImpls = Tuple[Callable, Callable, Callable, Callable]
 
 
-def _prefill_fast_norm(norm: nn.Module, x: torch.Tensor) -> torch.Tensor:
+def _supports_numerical_status(fn: Callable) -> bool:
+    """Return whether a callable explicitly opts into the status ABI."""
+
+    if bool(getattr(fn, "supports_numerical_status", False)):
+        return True
+    owner = getattr(fn, "__self__", None)
+    return bool(getattr(owner, "supports_numerical_status", False))
+
+
+def _prefill_fast_norm(
+    norm: nn.Module,
+    x: torch.Tensor,
+    *,
+    tp_size: int = 1,
+    tp_rank: int = 0,
+) -> torch.Tensor:
+    if tp_size > 1:
+        return tp_rms_norm(norm, x, tp_size=tp_size, tp_rank=tp_rank)
     if (
         isinstance(norm, RMSNorm)
         and norm.__class__.__module__ == "rtp_llm.models_py.modules.base.cuda.norm"
@@ -73,13 +97,23 @@ class Block(nn.Module):
         max_tokens_per_rank: int = 8192,
         is_decode_role: bool = False,
         fp8_kv_cache: bool = False,
+        platform_provider: Optional[Dsv4PlatformProvider] = None,
+        module_build_context=None,
     ):
         super().__init__()
         self.layer_id = layer_id
+        self.tp_size = int(tp_size)
+        self.tp_rank = int(tp_rank)
         self.fp8_kv_cache = fp8_kv_cache
+        self._platform_provider = platform_provider
+        self._attention_layout = resolve_dsv4_attention_layout(
+            platform_provider
+            if platform_provider is not None
+            else DefaultDsv4PlatformProvider()
+        )
 
         attn_cls = AttentionFP8
-        self.attn = attn_cls(
+        attn_kwargs = dict(
             layer_id=layer_id,
             dim=dim,
             n_heads=n_heads,
@@ -106,8 +140,23 @@ class Block(nn.Module):
             tp_size=tp_size,
             tp_rank=tp_rank,
         )
+        if module_build_context is not None:
+            from rtp_llm.models_py.pluggable.dsv4_specs import request_for
+
+            self.attn = module_build_context.factory.build(
+                request_for("attention", module_build_context.selection, layer_id),
+                platform_provider=platform_provider,
+                **attn_kwargs,
+            )
+        else:
+            self.attn = (
+                platform_provider.build_attention(attn_cls, **attn_kwargs)
+                if platform_provider is not None
+                and Dsv4ProviderCapability.ATTENTION in platform_provider.capabilities
+                else attn_cls(**attn_kwargs)
+            )
         self._cp_sync_after_attn_done = False
-        self.ffn = MoE(
+        moe_kwargs = dict(
             layer_id=layer_id,
             dim=dim,
             moe_inter_dim=moe_inter_dim,
@@ -120,11 +169,26 @@ class Block(nn.Module):
             n_hash_layers=n_hash_layers,
             vocab_size=vocab_size,
             layer_weights=layer_weights,
+            tp_size=tp_size,
             ep_size=ep_size,
             ep_rank=ep_rank,
             max_tokens_per_rank=max_tokens_per_rank,
             is_decode_role=is_decode_role,
         )
+        if module_build_context is not None:
+            self.ffn = module_build_context.factory.build(
+                request_for("moe", module_build_context.selection, layer_id),
+                platform_provider=platform_provider,
+                **moe_kwargs,
+            )
+        else:
+            self.ffn = (
+                platform_provider.build_moe(MoE, **moe_kwargs)
+                if platform_provider is not None
+                and Dsv4ProviderCapability.MOE in platform_provider.capabilities
+                else MoE(**moe_kwargs)
+            )
+
         # Framework loader already casts norms to bf16 (compute_dtype) and
         # hc_* tensors to fp32 (descriptor data_type); pass refs straight
         # into ``RMSNorm`` at construction time.  Norms here see 2D inputs
@@ -146,6 +210,9 @@ class Block(nn.Module):
             hc_eps=hc_eps,
             layer_id=layer_id,
             name="attn",
+            tp_size=tp_size,
+            tp_rank=tp_rank,
+            platform_provider=self._platform_provider,
         )
         self.ffn_hc = build_hc_unit(
             layer_weights[W.v4_hc_ffn_fn],
@@ -158,8 +225,21 @@ class Block(nn.Module):
             hc_eps=hc_eps,
             layer_id=layer_id,
             name="ffn",
+            tp_size=tp_size,
+            tp_rank=tp_rank,
+            platform_provider=self._platform_provider,
         )
         self._prefill_fast_hc_impls_cached = self._resolve_prefill_fast_hc_impls()
+
+    def _call_attention(self, fn, *args, numerical_status=None, **kwargs):
+        if numerical_status is not None and _supports_numerical_status(fn):
+            kwargs["numerical_status"] = numerical_status
+        return fn(*args, **kwargs)
+
+    def _call_moe(self, *args, numerical_status=None, **kwargs):
+        if numerical_status is not None and _supports_numerical_status(self.ffn):
+            kwargs["numerical_status"] = numerical_status
+        return self.ffn(*args, **kwargs)
 
     def _sync_after_first_cp_prefill_attention(self) -> None:
         if self._cp_sync_after_attn_done:
@@ -216,7 +296,7 @@ class Block(nn.Module):
         return impls
 
     def prefill_fast_callable(self):
-        if not isinstance(self.attn, AttentionFP8):
+        if getattr(self.attn, "prefill_fast_protocol", None) != "dsv4.fp8-attention.v1":
             return None
         # ``prefill.forward_layers`` caches this private callable only after the
         # layer has passed the production FP8 support matrix. Keep the public
@@ -227,7 +307,12 @@ class Block(nn.Module):
         attn_hc_pre, _, _, _ = self._prefill_fast_hc_impls()
         residual = x
         x_pre, post, comb = attn_hc_pre(x)
-        x_pre = _prefill_fast_norm(self.attn_norm, x_pre)
+        x_pre = _prefill_fast_norm(
+            self.attn_norm,
+            x_pre,
+            tp_size=self.tp_size,
+            tp_rank=self.tp_rank,
+        )
         return residual, x_pre, post, comb
 
     def prefill_fast_attn_body(
@@ -261,7 +346,12 @@ class Block(nn.Module):
         _, ffn_hc_pre, _, _ = self._prefill_fast_hc_impls()
         residual = x
         x_pre, post, comb = ffn_hc_pre(x)
-        x_pre = _prefill_fast_norm(self.ffn_norm, x_pre)
+        x_pre = _prefill_fast_norm(
+            self.ffn_norm,
+            x_pre,
+            tp_size=self.tp_size,
+            tp_rank=self.tp_rank,
+        )
         return residual, x_pre, post, comb
 
     def prefill_fast_ffn_body(
@@ -286,6 +376,7 @@ class Block(nn.Module):
         input_ids: torch.Tensor,  # [B, 1]
         kv_cache=None,
         attn_fn=None,
+        numerical_status=None,
     ) -> torch.Tensor:
         """Decode-only block forward — mirrors prefill ``forward`` but
         delegates attention to ``Attention.forward_decode``. Prefill
@@ -308,13 +399,24 @@ class Block(nn.Module):
         # Framework RMSNorm wants 2D — collapse [B, q_len, dim] → [B*q_len, dim]
         # and view back; attention.forward_decode wants the original 3D shape.
         bsz, q_len, dim_ = x_pre.shape
-        x_pre = self.attn_norm(x_pre.reshape(bsz * q_len, dim_)).view(bsz, q_len, dim_)
+        x_pre = tp_rms_norm(
+            self.attn_norm,
+            x_pre.reshape(bsz * q_len, dim_),
+            tp_size=self.tp_size,
+            tp_rank=self.tp_rank,
+        ).view(bsz, q_len, dim_)
         if _dbg_layer:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_decode_attn_in", x_pre)
         if attn_fn is not None:
             attn_out = attn_fn(x_pre)
         else:
-            attn_out = self.attn.forward_decode(x_pre, attn_metadata, kv_cache=kv_cache)
+            attn_out = self._call_attention(
+                self.attn.forward_decode,
+                x_pre,
+                attn_metadata,
+                kv_cache=kv_cache,
+                numerical_status=numerical_status,
+            )
         if _dbg_layer:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_decode_attn_out", attn_out)
         x = self.attn_hc.post(attn_out, residual, post, comb)
@@ -328,10 +430,15 @@ class Block(nn.Module):
             dbg_tag=f"L{self.layer_id:02d}_decode_ffn_hc_pre" if _dbg_layer else None,
         )
         bsz, q_len, dim_ = x_pre.shape
-        x_pre = self.ffn_norm(x_pre.reshape(bsz * q_len, dim_)).view(bsz, q_len, dim_)
+        x_pre = tp_rms_norm(
+            self.ffn_norm,
+            x_pre.reshape(bsz * q_len, dim_),
+            tp_size=self.tp_size,
+            tp_rank=self.tp_rank,
+        ).view(bsz, q_len, dim_)
         if _dbg_layer:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_decode_ffn_in", x_pre)
-        ffn_out = self.ffn(x_pre, input_ids)
+        ffn_out = self._call_moe(x_pre, input_ids, numerical_status=numerical_status)
         if _dbg_layer:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_decode_ffn_out", ffn_out)
         x = self.ffn_hc.post(ffn_out, residual, post, comb)
@@ -345,6 +452,7 @@ class Block(nn.Module):
         cu_seqlens: torch.Tensor,  # [B+1] int64
         kv_cache=None,
         block_tables_by_type=None,
+        numerical_status=None,
     ) -> torch.Tensor:
         """Prefill fast path for the FP8 production path.
 
@@ -363,6 +471,7 @@ class Block(nn.Module):
                 cu_seqlens,
                 kv_cache=kv_cache,
                 block_tables_by_type=block_tables_by_type,
+                numerical_status=numerical_status,
             )
         return fast_call(
             x,
@@ -371,6 +480,7 @@ class Block(nn.Module):
             cu_seqlens,
             kv_cache=kv_cache,
             block_tables_by_type=block_tables_by_type,
+            numerical_status=numerical_status,
         )
 
     def _forward_prefill_fast_fp8(
@@ -381,6 +491,7 @@ class Block(nn.Module):
         cu_seqlens: torch.Tensor,
         kv_cache=None,
         block_tables_by_type=None,
+        numerical_status=None,
     ) -> torch.Tensor:
         """Validated FP8 prefill fast body.
 
@@ -401,7 +512,7 @@ class Block(nn.Module):
 
         residual = x
         x_pre, post, comb = attn_hc_pre(x)
-        if self.attn.can_fuse_prefill_attn_norm_input_quant(
+        if self.tp_size == 1 and self.attn.can_fuse_prefill_attn_norm_input_quant(
             x_pre, self.attn_norm.weight.data
         ):
             x_pre, shared_input_quant = self.attn.prefill_fused_attn_norm_input_quant(
@@ -409,28 +520,42 @@ class Block(nn.Module):
                 self.attn_norm.weight.data,
                 self.attn_norm.variance_epsilon,
             )
-            attn_out = self.attn.forward_with_shared_input_quant(
+            attn_out = self._call_attention(
+                self.attn.forward_with_shared_input_quant,
                 x_pre,
                 positions,
                 shared_input_quant,
                 kv_cache=kv_cache,
                 block_tables_by_type=block_tables_by_type,
+                numerical_status=numerical_status,
             )
         else:
-            x_pre = _prefill_fast_norm(self.attn_norm, x_pre)
-            attn_out = self.attn(
+            x_pre = _prefill_fast_norm(
+                self.attn_norm,
+                x_pre,
+                tp_size=self.tp_size,
+                tp_rank=self.tp_rank,
+            )
+            attn_out = self._call_attention(
+                self.attn,
                 x_pre,
                 positions,
                 kv_cache=kv_cache,
                 block_tables_by_type=block_tables_by_type,
+                numerical_status=numerical_status,
             )
         x = attn_hc_post(attn_out, residual, post, comb)
         self._sync_after_first_cp_prefill_attention()
 
         residual = x
         x_pre, post, comb = ffn_hc_pre(x)
-        x_pre = _prefill_fast_norm(self.ffn_norm, x_pre)
-        ffn_out = self.ffn(x_pre, input_ids)
+        x_pre = _prefill_fast_norm(
+            self.ffn_norm,
+            x_pre,
+            tp_size=self.tp_size,
+            tp_rank=self.tp_rank,
+        )
+        ffn_out = self._call_moe(x_pre, input_ids, numerical_status=numerical_status)
         return ffn_hc_post(ffn_out, residual, post, comb)
 
     def forward(
@@ -441,6 +566,7 @@ class Block(nn.Module):
         cu_seqlens: torch.Tensor,  # [B+1] int64
         kv_cache=None,
         block_tables_by_type=None,
+        numerical_status=None,
     ) -> torch.Tensor:
         """Flat per-block forward — accepts ``[T, hc, dim]`` hidden and 1D
         ``input_ids`` / ``positions`` / ``cu_seqlens``, matching the vLLM
@@ -480,7 +606,9 @@ class Block(nn.Module):
             x,
             dbg_tag=f"L{self.layer_id:02d}_attn_hc_pre" if _dbg_layer else None,
         )  # [T, dim], [T, hc, 1], [T, hc, hc]
-        x_pre = self.attn_norm(x_pre)  # [T, dim]
+        x_pre = tp_rms_norm(
+            self.attn_norm, x_pre, tp_size=self.tp_size, tp_rank=self.tp_rank
+        )  # [T, dim]
         if _dbg_layer:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_attn_in", x_pre)
             if dbg_pos_mask is not None:
@@ -494,12 +622,14 @@ class Block(nn.Module):
         # no padding / per-request scalars. The runtime kv-cache dtype flag can
         # be false while this branch still constructs AttentionFP8, so dispatch
         # on the module type instead of only the cache config.
-        if isinstance(self.attn, AttentionFP8):
-            attn_out = self.attn(
+        if self._attention_layout == Dsv4AttentionLayout.FLAT:
+            attn_out = self._call_attention(
+                self.attn,
                 x_pre,  # [T, dim]
                 positions,  # [T] int64 absolute positions
                 kv_cache=kv_cache,
                 block_tables_by_type=block_tables_by_type,
+                numerical_status=numerical_status,
             )  # [T, dim]
         else:
             # Present flat [T, dim] as [B, S, dim] for Attention.  The common
@@ -542,12 +672,14 @@ class Block(nn.Module):
                 )
                 x_padded[b_idx, s_idx] = x_pre
 
-            attn_out_padded = self.attn(
+            attn_out_padded = self._call_attention(
+                self.attn,
                 x_padded,  # [B, max_S, dim]
                 start_pos_per_req,
                 sequence_lengths=seqlens,
                 kv_cache=kv_cache,
                 block_tables_by_type=block_tables_by_type,
+                numerical_status=numerical_status,
             )  # [B, max_S, dim]
             if dense_layout:
                 attn_out = attn_out_padded.reshape(T, D)
@@ -578,7 +710,9 @@ class Block(nn.Module):
             x,
             dbg_tag=f"L{self.layer_id:02d}_ffn_hc_pre" if _dbg_layer else None,
         )  # [T, dim], ...
-        x_pre = self.ffn_norm(x_pre)  # [T, dim]
+        x_pre = tp_rms_norm(
+            self.ffn_norm, x_pre, tp_size=self.tp_size, tp_rank=self.tp_rank
+        )  # [T, dim]
         if _dbg_layer:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_ffn_in", x_pre)
             if dbg_pos_mask is not None:
@@ -595,7 +729,9 @@ class Block(nn.Module):
         if _dbg_layer and dbg_pos_mask is not None:
             setattr(self.ffn, "_dbg_positions", dbg_positions)
         try:
-            ffn_out = self.ffn(x_pre, ffn_in_ids)  # [T, dim]
+            ffn_out = self._call_moe(
+                x_pre, ffn_in_ids, numerical_status=numerical_status
+            )  # [T, dim]
         finally:
             if _dbg_layer and hasattr(self.ffn, "_dbg_positions"):
                 setattr(self.ffn, "_dbg_positions", None)

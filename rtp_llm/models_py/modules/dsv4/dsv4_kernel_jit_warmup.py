@@ -874,11 +874,16 @@ def _collect_dsv4_dense_gemm_shapes(model: Any) -> Dict[tuple[str, int, int], di
 
 
 def _collect_dsv4_mhc_prenorm_shapes(model: Any) -> Dict[tuple[int, int], dict]:
-    """Collect mHC DeepGEMM prenorm GEMM shapes from live TileLang HC units."""
+    """Collect mHC DeepGEMM prenorm GEMM shapes from live HC units."""
 
     shapes: Dict[tuple[int, int], dict] = {}
+    unit_classes = {"TileLangHCUnit", "HybridHCUnit"}
+    requested_backend = os.environ.get("DSV4_MHC_PRE_GEMM_BACKEND", "").strip().lower()
+    if requested_backend in {"deepgemm", "dg"}:
+        unit_classes.add("FallbackHCUnit")
     for module_name, module in model.named_modules():
-        if module.__class__.__name__ != "TileLangHCUnit":
+        class_name = module.__class__.__name__
+        if class_name not in unit_classes:
             continue
         fn = getattr(module, "fn", None)
         if not isinstance(fn, torch.Tensor) or fn.dim() != 2:
@@ -905,6 +910,7 @@ def _collect_dsv4_mhc_prenorm_shapes(model: Any) -> Dict[tuple[int, int], dict]:
                 "hc_sinkhorn_iters": int(
                     getattr(module, "hc_sinkhorn_iters", 20) or 20
                 ),
+                "projection_only": class_name == "FallbackHCUnit",
             }
 
     logging.info(
@@ -1680,14 +1686,16 @@ def warmup_mhc_prenorm_gemm_jit(
     num_sms = _get_deep_gemm_num_sms(device)
     shape_keys = tuple(sorted(shapes.keys()))
     if deepgemm_enabled:
-        specs_by_shape = {
-            key: _generate_mhc_prenorm_warmup_specs(
+        specs_by_shape = {}
+        for key in shape_keys:
+            specs = _generate_mhc_prenorm_warmup_specs(
                 max_m=int(max_m),
                 k_value=int(key[1]),
                 num_sms=num_sms,
             )
-            for key in shape_keys
-        }
+            if bool(shapes[key].get("projection_only", False)):
+                specs = tuple((1, m_value) for _, m_value in specs)
+            specs_by_shape[key] = specs
     else:
         specs_by_shape = {key: ((1, 1),) for key in shape_keys if int(max_m) > 0}
     specs_by_shape = {key: specs for key, specs in specs_by_shape.items() if specs}
@@ -1739,19 +1747,20 @@ def warmup_mhc_prenorm_gemm_jit(
                         ),
                         device=device,
                     )
-                    _run_tilelang_warmup_launch_with_retry(
-                        "DSV4 mHC TileLangFuse",
-                        f"shape={key} num_splits={num_splits} m={m_value}",
-                        partial(
-                            _launch_dummy_mhc_pre_big_fuse,
-                            key=key,
-                            info=info,
-                            m_value=m_value,
-                            num_splits=num_splits,
+                    if not bool(info.get("projection_only", False)):
+                        _run_tilelang_warmup_launch_with_retry(
+                            "DSV4 mHC TileLangFuse",
+                            f"shape={key} num_splits={num_splits} m={m_value}",
+                            partial(
+                                _launch_dummy_mhc_pre_big_fuse,
+                                key=key,
+                                info=info,
+                                m_value=m_value,
+                                num_splits=num_splits,
+                                device=device,
+                            ),
                             device=device,
-                        ),
-                        device=device,
-                    )
+                        )
                 else:
                     _run_tilelang_warmup_launch_with_retry(
                         "DSV4 mHC TileLangPre",
@@ -2115,10 +2124,11 @@ def _launch_dummy_mhc_prenorm_gemm(
 
     n_value, k_value = key
     x = torch.zeros((m_value, k_value), dtype=torch.bfloat16, device=device)
-    out = torch.empty(
-        (num_splits, m_value, n_value), dtype=torch.float32, device=device
-    )
-    sqrsum = torch.empty((num_splits, m_value), dtype=torch.float32, device=device)
+    # PPU DeepGEMM reduces split-K internally and exposes one output plane.
+    # The PPU ABI accumulates into these buffers. Match the runtime and frozen
+    # SGLang path: stale allocator contents must never enter the reduction.
+    out = torch.zeros((1, m_value, n_value), dtype=torch.float32, device=device)
+    sqrsum = torch.zeros((1, m_value), dtype=torch.float32, device=device)
     tf32_hc_prenorm_gemm(x, info["fn"], out, sqrsum, int(num_splits))
     del x, out, sqrsum
 
@@ -2146,12 +2156,11 @@ def _launch_dummy_mhc_pre_big_fuse(
     hc_eps = float(info.get("hc_eps", 1.0e-6))
     sinkhorn_iters = int(info.get("hc_sinkhorn_iters", 20) or 20)
 
+    # The preceding PPU DeepGEMM kernel has already reduced split-K.
     gemm_out_mul = torch.zeros(
-        (num_splits, m_value, n_value), dtype=torch.float32, device=device
+        (1, m_value, n_value), dtype=torch.float32, device=device
     )
-    gemm_out_sqrsum = torch.ones(
-        (num_splits, m_value), dtype=torch.float32, device=device
-    )
+    gemm_out_sqrsum = torch.ones((1, m_value), dtype=torch.float32, device=device)
     scale = info.get("scale")
     if not isinstance(scale, torch.Tensor) or tuple(scale.shape) != (3,):
         scale = torch.ones((3,), dtype=torch.float32, device=device)
@@ -2179,7 +2188,7 @@ def _launch_dummy_mhc_pre_big_fuse(
         hc_eps,
         2.0,
         sinkhorn_iters,
-        n_splits=int(num_splits),
+        n_splits=1,
         mhc_mult=mhc_mult,
     )(
         gemm_out_mul,

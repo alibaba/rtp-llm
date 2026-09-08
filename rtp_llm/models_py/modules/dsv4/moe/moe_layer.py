@@ -24,7 +24,6 @@ from typing import Dict, Optional
 
 import torch
 import torch.nn as nn
-
 from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
 from rtp_llm.models_py.modules.dsv4.chunk_env import (
     DEFAULT_DSV4_CHUNK_TOKENS,
@@ -42,6 +41,22 @@ from .strategies.base import MoeCfg, _resolve_forced, select_strategy
 
 _FINAL_OUT_CACHE: dict[tuple, torch.Tensor] = {}
 _CHUNKED_MOE_LOGGED = False
+_POST_W2_ROUTE_WEIGHT_CONTRACT = "post_w2_normalized_then_scale_v1"
+logger = logging.getLogger(__name__)
+
+
+def _all_reduce_routed_tp(routed: torch.Tensor) -> torch.Tensor:
+    """Sum a TP-sharded routed result, failing closed without collectives."""
+    if not torch.distributed.is_available() or not torch.distributed.is_initialized():
+        raise RuntimeError(
+            "TP-sharded DSV4 routed experts require initialized "
+            "torch.distributed collectives"
+        )
+
+    from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
+
+    return all_reduce(routed, Group.TP)
+
 
 # Default per-rank MoE prefill chunk size for DeepSeek-V4-Flash long-context
 # serving.  With 1M context and CP=4, a rank can see up to 262144 local tokens.
@@ -53,18 +68,22 @@ _CHUNKED_MOE_LOGGED = False
 DEFAULT_MOE_CHUNK_TOKENS = DEFAULT_DSV4_CHUNK_TOKENS
 
 
-def chunked_moe_enabled() -> bool:
-    if dsv4_global_chunk_tokens_configured():
-        return moe_chunk_tokens_from_env() > 0
-    return os.environ.get("DSV4_MOE_CHUNK_PREFILL", "1") != "0"
+def chunked_moe_enabled(options=None) -> bool:
+    if dsv4_global_chunk_tokens_configured(options):
+        return moe_chunk_tokens_from_env(options=options) > 0
+    values = os.environ if options is None else options
+    return values.get("DSV4_MOE_CHUNK_PREFILL", "1") != "0"
 
 
-def moe_chunk_tokens_from_env(default: int = DEFAULT_MOE_CHUNK_TOKENS) -> int:
-    min_value = 0 if dsv4_global_chunk_tokens_configured() else 1
+def moe_chunk_tokens_from_env(
+    default: int = DEFAULT_MOE_CHUNK_TOKENS, *, options=None
+) -> int:
+    min_value = 0 if dsv4_global_chunk_tokens_configured(options) else 1
     return dsv4_chunk_tokens_from_env(
         "DSV4_MOE_CHUNK_TOKENS",
         default,
         min_value=min_value,
+        options=options,
     )
 
 
@@ -98,6 +117,7 @@ def resolve_moe_max_tokens_per_rank(
     is_decode_role: bool = False,
     is_speculative: bool = False,
     gen_num_per_cycle: int = 0,
+    options=None,
 ) -> int:
     max_generate_batch_size = int(max_generate_batch_size)
     assert (
@@ -115,8 +135,8 @@ def resolve_moe_max_tokens_per_rank(
         cp_bound = max(cp_padded_tokens_per_rank_bound(max_seq_len, cp_size), 4096)
         budget = min(budget, cp_bound)
 
-    if chunked_moe_enabled():
-        return min(budget, moe_chunk_tokens_from_env())
+    if chunked_moe_enabled(options):
+        return min(budget, moe_chunk_tokens_from_env(options=options))
     return budget
 
 
@@ -144,6 +164,12 @@ class MoE(nn.Module):
     DeepEPStrategy or MegaMoEStrategy handles the cross-rank dispatch.
     """
 
+    # Defaults keep hand-built test doubles and all pre-contract strategies on
+    # the legacy Gate-scaled route-weight path. Real strategy construction
+    # only opts in through an explicit class declaration.
+    _post_w2_route_weight_contract = False
+    _routed_tp_size = 1
+
     def __init__(
         self,
         layer_id: int,
@@ -158,11 +184,16 @@ class MoE(nn.Module):
         n_hash_layers: int,
         vocab_size: int,
         layer_weights: Optional[Dict] = None,
+        tp_size: int = 1,
         ep_size: int = 1,
         ep_rank: int = 0,
         max_tokens_per_rank: int = 8192,
         is_decode_role: bool = False,
         strategy: Optional[str] = None,
+        platform_provider=None,
+        strategy_type=None,
+        strategy_kwargs=None,
+        execution_options=None,
     ):
         """``layer_weights`` is the framework's per-layer dict
         (``ModelWeights.weights[layer_id]``) keyed by ``W.v4_*`` enum.
@@ -171,10 +202,22 @@ class MoE(nn.Module):
         ``[E_local, ...]``) directly into mega-moe / grouped-fp4 / per-expert
         paths via the chosen strategy."""
         super().__init__()
+        from types import MappingProxyType
+
+        self._execution_options = (
+            None
+            if execution_options is None
+            else MappingProxyType(dict(execution_options))
+        )
         assert layer_weights is not None, (
             "MoE requires layer_weights (descriptor path); legacy "
             "weights/prefix dict path was removed."
         )
+        from rtp_llm.models_py.modules.dsv4.platform_provider import (
+            resolve_dsv4_operator_provider,
+        )
+
+        self._platform_provider = resolve_dsv4_operator_provider(platform_provider)
         self.layer_id = layer_id
         self.dim = dim
         self.n_routed_experts = n_routed_experts
@@ -205,6 +248,7 @@ class MoE(nn.Module):
             n_hash_layers,
             vocab_size,
             layer_weights=layer_weights,
+            platform_provider=self._platform_provider,
         )
         assert n_shared_experts == 1, "V4 always has exactly 1 shared expert"
 
@@ -222,9 +266,27 @@ class MoE(nn.Module):
             local_expert_start=self.local_expert_start,
             local_expert_end=self.local_expert_end,
             max_tokens_per_rank=max_tokens_per_rank,
+            tp_size=tp_size,
         )
-        forced, strict = _resolve_forced(strategy)
-        strategy_cls = select_strategy(cfg, forced=forced, strict=strict)
+        if strategy_type is None:
+            forced, strict = _resolve_forced(strategy)
+            strategy_cls = select_strategy(cfg, forced=forced, strict=strict)
+        else:
+            if strategy is not None:
+                raise ValueError(
+                    "strategy name cannot be combined with a bound strategy type"
+                )
+            forced, strict = None, True
+            strategy_cls = strategy_type
+        declared_route_contract = vars(strategy_cls).get("route_weight_contract")
+        if declared_route_contract not in (None, _POST_W2_ROUTE_WEIGHT_CONTRACT):
+            raise RuntimeError(
+                f"Unsupported {strategy_cls.__name__}.route_weight_contract="
+                f"{declared_route_contract!r}"
+            )
+        self._post_w2_route_weight_contract = (
+            declared_route_contract == _POST_W2_ROUTE_WEIGHT_CONTRACT
+        )
         # Strategies that fold the shared expert into their routed kernel
         # (MegaMoEFusedStrategy / MegaMoEStrategySE) own the shared-expert
         # weights themselves and produce ``routed + shared`` directly; the
@@ -245,11 +307,18 @@ class MoE(nn.Module):
                 "w2_w": layer_weights[W.v4_shared_w2_w],
                 "w2_s": layer_weights[W.v4_shared_w2_s],
             }
-            self.shared_experts = W13SharedExpert(
+            shared_builder = getattr(
+                self._platform_provider, "build_shared_expert", None
+            )
+            shared_factory = (
+                W13SharedExpert if shared_builder is None else shared_builder
+            )
+            self.shared_experts = shared_factory(
                 dim,
                 moe_inter_dim,
                 expert_weights=shared_w,
                 swiglu_limit=swiglu_limit,
+                platform_provider=self._platform_provider,
             )
             self._shared_executor = get_shared_expert_executor(
                 max_tokens_per_rank=max_tokens_per_rank,
@@ -263,13 +332,76 @@ class MoE(nn.Module):
         # Register strategy as a child nn.Module so its child weights
         # (e.g. LocalLoopStrategy.experts ModuleList) propagate through
         # ``MoE.to(device)``.
-        self._strategy = strategy_cls(cfg)
-        self._gate_pack_static = os.environ.get(
+        self._strategy = strategy_cls(cfg, **(strategy_kwargs or {}))
+        runtime_rank = os.environ.get(
+            "WORLD_RANK",
+            os.environ.get("RANK", os.environ.get("LOCAL_RANK", "unknown")),
+        )
+        logger.info(
+            "DSV4_MOE_FINAL_STRATEGY env_strategy=%r env_use_mega=%r "
+            "env_use_mega_se=%r env_use_grouped_fp4=%r ctor=%r resolved=%r "
+            "strict=%s selected_name=%s selected_class=%s layer=%d rank=%s "
+            "tp=%d ep=%d ep_rank=%d",
+            os.environ.get("DSV4_MOE_STRATEGY"),
+            os.environ.get("DSV4_USE_MEGA_MOE"),
+            os.environ.get("DSV4_USE_MEGA_MOE_SE"),
+            os.environ.get("DSV4_USE_GROUPED_FP4"),
+            strategy,
+            forced,
+            strict,
+            getattr(strategy_cls, "name", "unknown"),
+            f"{strategy_cls.__module__}.{strategy_cls.__name__}",
+            layer_id,
+            runtime_rank,
+            tp_size,
+            ep_size,
+            ep_rank,
+        )
+        values = (
+            os.environ if self._execution_options is None else self._execution_options
+        )
+        self._gate_pack_static = values.get(
             "MOEDBG", "0"
         ) == "0" and self._strategy.can_use_gate_pack_static(self.gate)
+        if self._post_w2_route_weight_contract and self._gate_pack_static:
+            raise RuntimeError(
+                "post-W2 route weighting does not support fused gate-pack"
+            )
         self._strategy._gate_pack_warmup_enabled = self._gate_pack_static
         self._strategy._gate_pack_route_scale = float(self.gate.route_scale)
         self._strategy.setup_weights(layer_weights)
+        if self._post_w2_route_weight_contract:
+            # setup_weights derives this from the bound tensor geometry, so a
+            # full expert remains TP-neutral while a presharded intermediate
+            # is reduced before the replicated shared-expert add.
+            self._routed_tp_size = int(self._strategy.routed_tp_size)
+            if self._routed_tp_size < 1:
+                raise ValueError(
+                    f"routed_tp_size must be positive, got {self._routed_tp_size}"
+                )
+            if self._routed_includes_shared:
+                raise RuntimeError(
+                    "post-W2 route weighting requires standalone shared expert"
+                )
+
+    def _route(self, x: torch.Tensor, input_ids: torch.Tensor):
+        """Run Gate under the selected strategy's explicit weight contract."""
+        if self._post_w2_route_weight_contract:
+            return self.gate(x, input_ids, include_route_scale=False)
+        return self.gate(x, input_ids)
+
+    def _finish_routed(self, routed: torch.Tensor) -> torch.Tensor:
+        """Apply route scale, then TP reduction, before any shared add."""
+        if not self._post_w2_route_weight_contract:
+            return routed
+
+        routed = routed.float() * float(self.gate.route_scale)
+        tp_size = int(self._routed_tp_size)
+        if tp_size < 1:
+            raise RuntimeError(f"routed_tp_size must be positive, got {tp_size}")
+        if tp_size > 1:
+            routed = _all_reduce_routed_tp(routed)
+        return routed
 
     def _should_chunk(self, tokens: int) -> bool:
         max_tokens = int(self.max_tokens_per_rank)
@@ -287,7 +419,7 @@ class MoE(nn.Module):
                     "MoE token budget."
                 )
             return False
-        if not chunked_moe_enabled():
+        if not chunked_moe_enabled(self._execution_options):
             return False
         return tokens > max_tokens
 
@@ -327,7 +459,7 @@ class MoE(nn.Module):
             return
 
         with record_function_range("dsv4.moe.gate"):
-            weights, indices = self.gate(x, input_ids)
+            weights, indices = self._route(x, input_ids)
 
         if self._routed_includes_shared:
             # Fused strategy returns ``routed + shared`` directly.
@@ -341,6 +473,7 @@ class MoE(nn.Module):
         try:
             with record_function_range("dsv4.moe.routed_experts"):
                 routed = self._strategy(x, weights, indices)
+                routed = self._finish_routed(routed)
         except Exception:
             with record_function_range("dsv4.moe.shared_expert_finish"):
                 self._shared_executor.finish()
@@ -468,7 +601,7 @@ class MoE(nn.Module):
             if _dbg:
                 self.gate._dbg_prefix = f"L{self.layer_id:02d}_moe_gate"
             try:
-                weights, indices = self.gate(x, input_ids_flat)
+                weights, indices = self._route(x, input_ids_flat)
             finally:
                 if _dbg:
                     self.gate._dbg_prefix = None
@@ -516,6 +649,7 @@ class MoE(nn.Module):
         try:
             with record_function_range("dsv4.moe.routed_experts"):
                 y = self._strategy(x, weights, indices)
+                y = self._finish_routed(y)
         except Exception:
             with record_function_range("dsv4.moe.shared_expert_finish"):
                 self._shared_executor.finish()

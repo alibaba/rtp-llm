@@ -30,7 +30,6 @@ import os
 from typing import List
 
 import torch
-
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.model_loader.attn_weight import AttnAtomicWeight, AttnConfig
@@ -235,6 +234,7 @@ class DeepSeekV4Weight(DeepSeekV2Weight):
                 norm_name,
                 [CkptWeightInfo(self._key(f"{ckpt_prefix}.norm.weight"), identity)],
                 identity,
+                data_type=torch.float32 if inner else None,
             ),
             AtomicWeight(
                 ape_name,
@@ -374,6 +374,7 @@ class DeepSeekV4Weight(DeepSeekV2Weight):
                     stack_,
                     config=moe_cfg,
                     data_type=torch.int8,
+                    enable_pure_tp_preshard=True,
                 )
             )
             out.append(
@@ -388,6 +389,7 @@ class DeepSeekV4Weight(DeepSeekV2Weight):
                     stack_,
                     config=moe_cfg,
                     data_type=torch.float8_e8m0fnu,
+                    enable_pure_tp_preshard=True,
                 )
             )
         return out
@@ -530,7 +532,9 @@ class DeepSeekV4(DeepSeekV2):
         return config
 
     @classmethod
-    def _post_build_model_config(cls, model_config: ModelConfig) -> None:
+    def _post_build_model_config(
+        cls, model_config: ModelConfig, *, indexer_cache_mode=None
+    ) -> None:
         """Declare the seven-pool DSv4 cache topology.
 
         Runs after ``build_model_config``, so the CLI-derived
@@ -539,6 +543,23 @@ class DeepSeekV4(DeepSeekV2):
         """
         if model_config.kv_cache_spec_descs:
             return
+
+        from rtp_llm.models.dsv4_kv_cache import Dsv4IndexerCacheMode
+
+        if indexer_cache_mode is None:
+            from rtp_llm.models_py.modules.dsv4.platform_provider import (
+                resolve_dsv4_platform_provider,
+            )
+            from rtp_llm.utils.backend_registry import run_backend_registrations
+
+            run_backend_registrations("dsv4")
+            provider = resolve_dsv4_platform_provider(())
+            indexer_mode = getattr(provider, "indexer_mode", None)
+            indexer_cache_mode = (
+                Dsv4IndexerCacheMode(indexer_mode.lower())
+                if indexer_mode is not None
+                else Dsv4IndexerCacheMode.FOLLOW_KV
+            )
 
         attn_config = model_config.attn_config
         layer_num = int(model_config.num_layers)
@@ -572,9 +593,26 @@ class DeepSeekV4(DeepSeekV2):
             head_dim=int(attn_config.size_per_head),
             indexer_head_dim=int(attn_config.indexer_head_dim),
             fixed_pool_use_host_memory=_dsv4_fixed_pool_use_host_memory(),
+            indexer_cache_mode=indexer_cache_mode,
         )
 
     def _create_python_model(self):
+        if self.module_build_context is not None:
+            from rtp_llm.models_py.pluggable.dsv4_specs import request_for
+
+            ctx = self.module_build_context
+            self.py_model = ctx.factory.build(
+                request_for("model", ctx.selection),
+                model_config=self.model_config,
+                parallelism_config=self.parallelism_config,
+                weights=self.weight,
+                moe_config=self.moe_config,
+                max_generate_batch_size=self.max_generate_batch_size,
+                fmha_config=self.fmha_config,
+                py_hw_kernel_config=self.hw_kernel_config,
+                device_resource_config=self.device_resource_config,
+            )
+            return
         from rtp_llm.models_py.model_desc.deepseek_v4_model import DeepSeekV4Model
 
         self.py_model = DeepSeekV4Model(

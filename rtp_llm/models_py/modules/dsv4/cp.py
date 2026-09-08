@@ -27,6 +27,7 @@ stashed on each module via ``_cp_ctx`` before ``forward`` runs.  A
 single-rank path unchanged.
 """
 
+import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional, Tuple, Union
 
@@ -43,6 +44,9 @@ if TYPE_CHECKING:
     from rtp_llm.models_py.modules.dsv4.prefill_workspace import PrefillWorkspace
 
 _DEFAULT_CP_PROFILE_NAME = "dsv4.cp.all_gather"
+_FORCE_FRESH_NONPREFIX_RESTORE = (
+    os.environ.get("DSV4_CP_FORCE_FRESH_NONPREFIX_RESTORE", "0") == "1"
+)
 
 
 # CP gather roles — which workspace buffer backs a given compressor gather.
@@ -582,7 +586,7 @@ def _cp_restore_gathered_full_2d(
     if cp_ctx.unpad_restore_is_prefix:
         full = gathered[: cp_ctx.seq_len_full]  # [seq_len_full, H], view
     else:
-        if out is not None:
+        if out is not None and not _FORCE_FRESH_NONPREFIX_RESTORE:
             expected_shape = (cp_ctx.seq_len_full, gathered.size(1))
             if tuple(out.shape) != expected_shape:
                 raise ValueError(

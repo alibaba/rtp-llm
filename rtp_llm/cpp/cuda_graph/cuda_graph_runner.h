@@ -40,7 +40,8 @@ public:
         decode_capture_batch_sizes_(graph_params.decode_capture_batch_sizes),
         model_data_type_(graph_params.model_data_type),
         kv_cache_group_tags_(graph_params.kv_cache_group_tags),
-        position_id_len_factor_(graph_params.position_id_len_factor) {
+        position_id_len_factor_(graph_params.position_id_len_factor),
+        numerical_status_scope_(graph_params.numerical_status_scope) {
         py::gil_scoped_acquire gil;
         if (!py_instance_ || py_instance_.is_none()) {
             throw std::runtime_error("CudaGraphRunner constructor: Python instance is null or none.");
@@ -89,6 +90,7 @@ public:
     void           replayGraph(int key);
     void           replayDecode(int bs);
     void           replayPrefill(int seq_len);
+    void           recordNumericalStatusSourceFence(const CudaGraphState& state);
     int            getCurrentRealGraphBs(const CudaGraphState& state) const;
     PyModelOutputs forward(const PyModelInputs& inputs, CudaGraphState& state) override;
     void           initCapture() override;
@@ -121,6 +123,8 @@ private:
     void prepareCaptureInputs(PyModelInputs& inputs, int batch_size, int seq_len_or_tokens);
     // Common memory hold creation logic
     CaptureMemoryHold createCaptureMemoryHold(PyModelInputs& inputs, int tokens_count);
+    void                 initializeNumericalStatus(PyModelInputs& inputs, int64_t capacity) const;
+    void                 waitNumericalStatusSourceFence(GraphInstance& instance);
     void              initKernelInternalMemory();
     void              logCudaGraphPoolMemory(const char* phase);
     void              setPositionEncoding(torch::Tensor position_encoding) override;
@@ -159,6 +163,7 @@ private:
     size_t                  input_hidden_size_{0};
     int                     hc_mult_{1};
     int                     sp_steps_{0};
+    NumericalStatusScope    numerical_status_scope_{NumericalStatusScope::NONE};
     std::vector<int>        capture_range_;
     std::vector<int>        prefill_capture_seq_lens_;    // Pre-configured sequence lengths from Python
     std::vector<int>        decode_capture_batch_sizes_;  // Pre-configured batch sizes from Python

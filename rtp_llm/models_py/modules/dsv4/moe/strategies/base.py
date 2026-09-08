@@ -56,6 +56,7 @@ class MoeCfg:
     local_expert_start: int
     local_expert_end: int
     max_tokens_per_rank: int
+    tp_size: int = 1
 
 
 class RoutedExpertsStrategy(nn.Module):
@@ -293,6 +294,8 @@ def select_strategy(
                         "mega",
                         "mega_fused",
                         "mega_se",
+                    ) and not (
+                        cls.name == "deepep" and _platform_allows_deepep_moe()
                     ):
                         raise RuntimeError(
                             "DSV4 EP MoE requires MegaMoEStrategy. "
@@ -320,6 +323,12 @@ def select_strategy(
             )
         if mega_cls.can_handle(cfg):
             return mega_cls
+        if _platform_allows_deepep_moe():
+            deepep_cls = next(
+                (c for c in _STRATEGY_PRIORITY if c.name == "deepep"), None
+            )
+            if deepep_cls is not None and deepep_cls.can_handle(cfg):
+                return deepep_cls
         from rtp_llm.models_py.modules.dsv4.moe.mega_buf import (
             _mega_moe_disabled_or_unavailable_reason,
         )
@@ -337,4 +346,18 @@ def select_strategy(
     raise RuntimeError(
         f"No MoE strategy can handle cfg (layer_id={cfg.layer_id}, "
         f"ep_size={cfg.ep_size})"
+    )
+
+
+def _platform_allows_deepep_moe() -> bool:
+    """Require an explicit platform capability before enabling DSV4 DeepEP."""
+
+    from rtp_llm.models_py.modules.dsv4.platform_provider import (
+        Dsv4ProviderCapability,
+        get_dsv4_platform_provider_capabilities,
+    )
+
+    return (
+        Dsv4ProviderCapability.DEEPEP_MOE
+        in get_dsv4_platform_provider_capabilities()
     )

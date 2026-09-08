@@ -308,6 +308,12 @@ _PURE_TP_LAYOUTS = {
     (W.moe_w1, mw.stack_moe_w1, 2): (0, (0,), False, mw.sp_moe_w1),
     (W.moe_s1, mw.stack_moe_w1, 2): (0, (0,), False, mw.sp_moe_w1),
     (W.moe_w1, mw.transpose_stack_moe_w1, 1): (0, (1, 0), True, mw.sp_moe_w1),
+    (W.v4_routed_w1_w, mw.stack_, 1): (0, (0,), False, mw.sp_v4_moe_out),
+    (W.v4_routed_w1_s, mw.stack_, 1): (0, (0,), False, mw.sp_v4_moe_out),
+    (W.v4_routed_w3_w, mw.stack_, 1): (0, (0,), False, mw.sp_v4_moe_out),
+    (W.v4_routed_w3_s, mw.stack_, 1): (0, (0,), False, mw.sp_v4_moe_out),
+    (W.v4_routed_w2_w, mw.stack_, 1): (1, (0,), False, mw.sp_moe_neg1),
+    (W.v4_routed_w2_s, mw.stack_, 1): (1, (0,), False, mw.sp_moe_neg1),
 }
 
 

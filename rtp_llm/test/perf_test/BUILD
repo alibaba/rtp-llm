@@ -7,6 +7,15 @@ exports_files([
     "test_entry.py",
 ])
 
+# Stdlib-only client contract tests; they start only a local mock HTTP server.
+py_test(
+    name = "dsv4_prefill_alignment_test",
+    srcs = [
+        "dsv4_prefill_alignment.py",
+        "dsv4_prefill_alignment_test.py",
+    ],
+)
+
 py_library(
     name = "perf_test_lib",
     srcs = [

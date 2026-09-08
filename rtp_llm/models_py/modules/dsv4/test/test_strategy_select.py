@@ -151,6 +151,18 @@ class StrategySelectTest(unittest.TestCase):
         self.assertIn("requires MegaMoEStrategy", str(cm.exception))
         self.assertIn("fallback to DeepEP/LocalLoop is disabled", str(cm.exception))
 
+    def test_ep8_verified_platform_falls_back_to_deepep(self):
+        with mock.patch.object(
+            MegaMoEStrategy, "can_handle", return_value=False
+        ), mock.patch.object(
+            DeepEPStrategy, "can_handle", return_value=True
+        ), mock.patch(
+            "rtp_llm.models_py.modules.dsv4.moe.strategies.base."
+            "_platform_allows_deepep_moe",
+            return_value=True,
+        ):
+            self.assertIs(select_strategy(_cfg(ep_size=8)), DeepEPStrategy)
+
     # --- forced override ---------------------------------------------------
 
     def test_forced_known_and_capable_returns_it(self):
@@ -173,6 +185,19 @@ class StrategySelectTest(unittest.TestCase):
                 select_strategy(_cfg(ep_size=4), forced="deepep")
         self.assertIn("requires MegaMoEStrategy", str(cm.exception))
         self.assertIn("bypass Mega", str(cm.exception))
+
+    def test_verified_platform_can_force_deepep(self):
+        with mock.patch.object(
+            DeepEPStrategy, "can_handle", return_value=True
+        ), mock.patch(
+            "rtp_llm.models_py.modules.dsv4.moe.strategies.base."
+            "_platform_allows_deepep_moe",
+            return_value=True,
+        ):
+            self.assertIs(
+                select_strategy(_cfg(ep_size=8), forced="deepep"),
+                DeepEPStrategy,
+            )
 
     def test_forced_unknown_raises(self):
         with self.assertRaises(RuntimeError) as cm:

@@ -44,6 +44,19 @@ from typing import Any, Dict, List, Optional, Tuple
 import torch
 
 
+# FlashMLA's rich ABI has exactly three scheduler buckets.  Keep these
+# values local to this platform adapter: importing the model/provider registration
+# layer here would make the metadata builder non-standalone.
+RICH_SWA_BUCKET = None
+RICH_CSA_BUCKET = "csa_kv"
+RICH_HCA_BUCKET = "hca_kv"
+RICH_SCHED_BUCKETS = (RICH_SWA_BUCKET, RICH_CSA_BUCKET, RICH_HCA_BUCKET)
+RICH_SWA_PAGE = 128
+RICH_CSA_PAGE = 64
+RICH_HCA_PAGE = 2
+RICH_SWA_INDEX_WIDTH = 128
+RICH_CSA_INDEX_WIDTH = 512
+RICH_HCA_INDEX_WIDTH = 64
 @dataclass
 class DSv4DecodeAttnMetadataFP8:
     """Metadata produced once per decode step, consumed by every layer.
@@ -196,7 +209,7 @@ class DSv4DecodeAttnMetadataFP8:
     # pool is bound.
     hca_cmp_global_slots: Optional[torch.Tensor] = None
 
-    # FlashMLA ``sched_meta`` cache — per-(batch_size, extra_attn_type).
+    # FlashMLA ``sched_meta`` cache — per-(batch_size, q_len, extra type, width).
     # Mirrors vLLM's ``swa_metadata.tile_sched_{swaonly,c4a,c128a}`` pattern:
     # the planner is called once per (mode, B) combination and the returned
     # ``sched_meta`` is reused across all layers of the same type in a decode
@@ -214,7 +227,9 @@ class DSv4DecodeAttnMetadataFP8:
     # pools have different page_block_size → separate cache keys.
     # ``extra_at`` is the cache tag of the compressed pool
     # (``CSA_KV`` / ``HCA_KV``) or ``None`` for single-pool SWA-only.
-    sched_meta_cache: Dict[Tuple[int, Optional[str]], Any] = field(default_factory=dict)
+    sched_meta_cache: Dict[Tuple[int, int, int, Optional[str], int], Any] = field(
+        default_factory=dict
+    )
 
     # opt_flash_mla: graph-stable per-request effective lengths fed to FlashMLA
     # sparse decode as ``topk_length`` / ``extra_topk_length``. Derived from the
@@ -248,6 +263,7 @@ def get_or_build_sched_meta(
     num_heads: int,
     topk: int,
     extra_attn_type: Optional[str] = None,
+    extra_index_width: Optional[int] = None,
 ) -> Any:
     """Lazy-build + cache FlashMLA ``sched_meta`` on the metadata object.
 
@@ -256,7 +272,7 @@ def get_or_build_sched_meta(
     ``DeepseekSparseSWAMetadataBuilder.build_tile_scheduler`` design —
     sched_meta lives on the per-step metadata object.
 
-    Cache key is ``(batch_size, extra_attn_type)``:
+    Cache key is ``(batch_size, q_len, topk, extra_attn_type, extra_index_width)``:
       * The FlashMLA wheel bakes ``config.b`` (batch size) and
         ``config.extra_page_block_size`` (extra_k_cache page size) into the
         sched_meta on the first ``flash_mla_with_kvcache`` call and asserts
@@ -267,8 +283,9 @@ def get_or_build_sched_meta(
       * CSA_KV and HCA_KV pools have different ``page_block_size``, so
         they MUST use separate sched_meta instances.
 
-    Within one (B, extra_attn_type) bucket ``q_len / num_heads / topk`` are
-    process-constants.
+    Only the three rich-ABI buckets (SWA-only, CSA, HCA) are accepted.  A
+    caller using a new geometry must add an explicit bucket instead of
+    silently reusing a scheduler with incompatible tile geometry.
 
     CUDA-graph + opt_flash_mla (effective ``topk_length``): FlashMLA builds its
     tile schedule (``tile_scheduler_metadata`` / ``num_splits``) lazily on the
@@ -302,7 +319,32 @@ def get_or_build_sched_meta(
     if getattr(metadata, "_sched_meta_capturing", False) != capturing:
         metadata._sched_meta_capturing = capturing
 
-    key = (batch_size, extra_attn_type)
+    if extra_attn_type not in RICH_SCHED_BUCKETS:
+        raise ValueError(
+            f"unsupported FlashMLA rich scheduler bucket: {extra_attn_type!r}"
+        )
+    if int(q_len) < 1:
+        raise ValueError(f"FlashMLA rich q_len must be positive: {q_len}")
+    if int(topk) <= 0 or int(topk) % 64:
+        raise ValueError(
+            "FlashMLA scheduler primary width must be positive and "
+            f"64-aligned: {topk}"
+        )
+
+    if extra_attn_type is None:
+        if extra_index_width not in (None, 0):
+            raise ValueError("SWA-only scheduler cannot carry extra index width")
+    elif extra_index_width is None or int(extra_index_width) <= 0:
+        raise ValueError("dual scheduler requires a positive extra index width")
+    elif extra_attn_type == RICH_CSA_BUCKET and int(extra_index_width) not in (
+        512,
+        1024,
+    ):
+        raise ValueError("CSA scheduler extra index width must be 512 or 1024")
+    elif extra_attn_type == RICH_HCA_BUCKET and int(extra_index_width) % 64:
+        raise ValueError("HCA scheduler extra index width must be 64-byte aligned")
+
+    key = (batch_size, q_len, int(topk), extra_attn_type, int(extra_index_width or 0))
     sched_meta = metadata.sched_meta_cache.get(key)
     if sched_meta is None:
         sched_meta, _ = get_mla_metadata(

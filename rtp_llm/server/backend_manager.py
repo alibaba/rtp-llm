@@ -78,12 +78,31 @@ class BackendManager(object):
             render_config=self.py_env_configs.render_config,
             eplb_config=self.py_env_configs.eplb_config,
             vit_config=self.py_env_configs.vit_config,
+            module_dispatch_config=engine_config.module_dispatch,
         )
         # Let engine_config finalize based on model_config (e.g. scheduler config)
         ModelFactory.update_engine_config_from_model_config(
             engine_config=engine_config,
             model_config=model_config,
         )
+
+        if engine_config.module_dispatch.mode != "legacy":
+            from rtp_llm.models_py.pluggable.worker import prepare_worker_model_context
+
+            engine_config.module_build_context = prepare_worker_model_context(
+                model_config,
+                engine_config,
+                self._distributed_server,
+                timeout_s=self.py_env_configs.distribute_config.dist_comm_timeout
+                or 300,
+            )
+
+        if model_config.model_type == "deepseek_v4":
+            from rtp_llm.models_py.modules.dsv4.prefill.communication import (
+                maybe_warmup_ppu_tp_communication,
+            )
+
+            maybe_warmup_ppu_tp_communication(engine_config.parallelism_config)
 
         # Initialize DeepEP/MoriEP wrapper if MOE model and EP is enabled
         if (

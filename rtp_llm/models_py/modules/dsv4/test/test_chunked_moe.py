@@ -4,7 +4,7 @@ import os
 import sys
 import types
 import unittest
-from types import SimpleNamespace
+from types import MappingProxyType, SimpleNamespace
 from unittest import mock
 
 import torch
@@ -140,6 +140,7 @@ def _fake_moe(dim: int, cap: int, is_decode_role: bool = False) -> MoE:
     moe.dim = dim
     moe.max_tokens_per_rank = cap
     moe._is_decode_role = is_decode_role
+    moe._execution_options = None
     moe._routed_includes_shared = False
     moe.gate = _FakeGate()
     moe.shared_experts = nn.Identity()
@@ -150,6 +151,38 @@ def _fake_moe(dim: int, cap: int, is_decode_role: bool = False) -> MoE:
 
 
 class ChunkedMoETest(unittest.TestCase):
+    def test_explicit_moe_chunk_policy_survives_environment_changes(self):
+        moe = _fake_moe(dim=4, cap=4)
+        moe._execution_options = MappingProxyType({"DSV4_MOE_CHUNK_PREFILL": "1"})
+        x = torch.arange(32, dtype=torch.float32).reshape(8, 4)
+        ids = torch.arange(8)
+        for enabled in ("0", "1"):
+            with mock.patch.dict(
+                os.environ,
+                {"DSV4_MOE_CHUNK_PREFILL": enabled, "DSV4_CHUNK_TOKENS": "0"},
+            ):
+                out = moe(x, ids)
+            torch.testing.assert_close(out, x * 3 + 1)
+        self.assertEqual(moe.gate.token_chunks, [4, 4, 4, 4])
+
+    def test_explicit_budget_does_not_reread_process_chunk_options(self):
+        first = MappingProxyType({"DSV4_CHUNK_TOKENS": "3"})
+        second = MappingProxyType({"DSV4_MOE_CHUNK_PREFILL": "0"})
+        kwargs = dict(
+            max_seq_len=64,
+            current_max_tokens_per_rank=64,
+            cp_size=1,
+            max_generate_batch_size=1,
+        )
+        with mock.patch.dict(os.environ, {"DSV4_CHUNK_TOKENS": "1"}):
+            self.assertEqual(
+                resolve_moe_max_tokens_per_rank(**kwargs, options=first), 3
+            )
+            self.assertEqual(
+                resolve_moe_max_tokens_per_rank(**kwargs, options=second), 64
+            )
+            self.assertEqual(resolve_moe_max_tokens_per_rank(**kwargs), 1)
+
     def setUp(self) -> None:
         self.env = mock.patch.dict(
             os.environ,

@@ -7,6 +7,7 @@
 #include "rtp_llm/cpp/models/eplb/stats/ExpertStats.h"
 #include "rtp_llm/models_py/bindings/ParamsBase.h"
 #include "rtp_llm/models_py/bindings/core/TensorHolder.h"
+#include "rtp_llm/models_py/bindings/NumericalStatus.h"
 #include <cstddef>
 #include <optional>
 #include <string>
@@ -113,6 +114,7 @@ struct GptModelOutputs {
     torch::Tensor softmax_result;
 
     std::vector<torch::Tensor> moe_gating;
+    NumericalStatusView        numerical_status;
 };
 
 struct CopyParams {

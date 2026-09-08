@@ -531,6 +531,42 @@ def test_cp_full_prefill_positions_preserve_request_ids() -> None:
     assert torch.equal(cu_seq, torch.tensor([0, 8, 22], dtype=torch.long))
 
 
+def test_b_gt_1_fresh_nonprefix_restore_matches_workspace_out() -> None:
+    """The diagnostic fresh-output A/B must preserve restore row ordering."""
+    actual = torch.tensor([6, 10], dtype=torch.int32)
+    cp_size = 2
+    chunk_lengths = [4, 6]
+    ctx = build_cp_context(
+        _CpInfo(
+            _padding_mask_multi(chunk_lengths, actual.tolist(), cp_size),
+            _zigzag_restore_multi(chunk_lengths, cp_size),
+            actual,
+            torch.tensor(chunk_lengths, dtype=torch.int32),
+        ),
+        cp_size=cp_size,
+        cp_rank=0,
+        chunk_length=sum(chunk_lengths),
+        device=torch.device("cpu"),
+    )
+    gathered = torch.arange(
+        cp_size * sum(chunk_lengths) * 3, dtype=torch.float32
+    ).view(cp_size * sum(chunk_lengths), 3)
+    out = torch.empty((int(actual.sum().item()), 3), dtype=gathered.dtype)
+
+    old_force = _CP._FORCE_FRESH_NONPREFIX_RESTORE
+    try:
+        _CP._FORCE_FRESH_NONPREFIX_RESTORE = False
+        workspace_result = _CP._cp_restore_gathered_full_2d(gathered, ctx, out=out)
+        assert workspace_result.data_ptr() == out.data_ptr()
+
+        _CP._FORCE_FRESH_NONPREFIX_RESTORE = True
+        fresh_result = _CP._cp_restore_gathered_full_2d(gathered, ctx, out=out)
+        assert fresh_result.data_ptr() != out.data_ptr()
+        assert torch.equal(fresh_result, workspace_result)
+    finally:
+        _CP._FORCE_FRESH_NONPREFIX_RESTORE = old_force
+
+
 if __name__ == "__main__":
     test_cp1_noop_collapses_to_local()
     test_cp2_zigzag_two_ranks_cover_full_sequence()
@@ -543,4 +579,5 @@ if __name__ == "__main__":
     test_b_gt_1_positions_match_cpp_per_stream_zigzag()
     test_b_gt_1_global_positions_are_per_request_not_padded_concat()
     test_cp_full_prefill_positions_preserve_request_ids()
+    test_b_gt_1_fresh_nonprefix_restore_matches_workspace_out()
     print("OK")

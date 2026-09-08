@@ -13,13 +13,13 @@ from abc import ABC, abstractmethod
 
 import torch
 import torch.nn as nn
-
 from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
 
 from .warmup_sync import cuda_graph_warmup_forward_enabled
 
-
-_SHARED_EXPERT_WORKSPACE_CACHE: dict[tuple, dict[str, torch.Tensor | int | torch.device]] = {}
+_SHARED_EXPERT_WORKSPACE_CACHE: dict[
+    tuple, dict[str, torch.Tensor | int | torch.device]
+] = {}
 _SHARED_EXPERT_STREAM_CACHE: dict[int, torch.cuda.Stream] = {}
 
 
@@ -77,7 +77,9 @@ def _get_shared_expert_stream(
 
 
 def _find_module_cuda_device(module: nn.Module) -> torch.device | None:
-    for tensor in list(module.parameters(recurse=True)) + list(module.buffers(recurse=True)):
+    for tensor in list(module.parameters(recurse=True)) + list(
+        module.buffers(recurse=True)
+    ):
         if tensor.is_cuda:
             return tensor.device
 
@@ -102,6 +104,7 @@ class W13SharedExpert(nn.Module):
         inter_dim: int,
         expert_weights: dict[str, torch.Tensor],
         swiglu_limit: float = 0.0,
+        platform_provider=None,
     ) -> None:
         super().__init__()
         from rtp_llm.models_py.modules.dsv4.utils import _v4_fp8_linear
@@ -115,8 +118,12 @@ class W13SharedExpert(nn.Module):
                 "shared w13 weight shape mismatch: "
                 f"got {tuple(w13_w.shape)}, expected {(2 * inter_dim, dim)}"
             )
-        self.w13 = _v4_fp8_linear(w13_w, w13_s)
-        self.w2 = _v4_fp8_linear(expert_weights["w2_w"], expert_weights["w2_s"])
+        self.w13 = _v4_fp8_linear(w13_w, w13_s, platform_provider=platform_provider)
+        self.w2 = _v4_fp8_linear(
+            expert_weights["w2_w"],
+            expert_weights["w2_s"],
+            platform_provider=platform_provider,
+        )
         self.swiglu_limit = swiglu_limit
 
     def _apply_layer(self, layer: nn.Module, x: torch.Tensor) -> torch.Tensor:
@@ -186,10 +193,22 @@ class FusedSharedExpertFastPath:
         return weight, scale
 
     @staticmethod
+    def _has_linear_parts(linear: nn.Module) -> bool:
+        return isinstance(getattr(linear, "weight", None), torch.Tensor) and isinstance(
+            getattr(linear, "weight_scales", None), torch.Tensor
+        )
+
+    @staticmethod
     def can_run(shared_experts: nn.Module, x: torch.Tensor) -> bool:
         if not (x.is_cuda and x.dtype == torch.bfloat16 and x.dim() == 2):
             return False
-        return all(hasattr(shared_experts, name) for name in ("w13", "w2"))
+        return all(
+            hasattr(shared_experts, name)
+            and FusedSharedExpertFastPath._has_linear_parts(
+                getattr(shared_experts, name)
+            )
+            for name in ("w13", "w2")
+        )
 
     @classmethod
     def has_merged_w13(cls, shared_experts: nn.Module) -> bool:
@@ -235,6 +254,16 @@ class FusedSharedExpertFastPath:
         """Validate the loader-prepared merged w13; no runtime concatenation."""
         if not hasattr(shared_experts, "w13"):
             raise RuntimeError("DSV4 shared expert requires loader-prepared w13")
+        # Platform linears such as M890P PpuFp8Linear own their quantization
+        # and GEMM ABI and expose ``weight_scale`` rather than the CUDA
+        # factory's packed ``weight_scales``.  They must use Expert.forward,
+        # not this CUDA/Triton fused workspace path.
+        if not all(
+            hasattr(shared_experts, name)
+            and self._has_linear_parts(getattr(shared_experts, name))
+            for name in ("w13", "w2")
+        ):
+            return
         w13_w, w13_s = self._linear_parts(shared_experts.w13)
         if w13_w.dim() != 2:
             raise RuntimeError(f"shared w13 weight must be 2D, got {w13_w.dim()}D")
@@ -281,7 +310,9 @@ class FusedSharedExpertFastPath:
         if self.dim is None:
             self.dim = D
         if D != self.dim:
-            raise RuntimeError(f"shared expert dim mismatch: got {D}, expected {self.dim}")
+            raise RuntimeError(
+                f"shared expert dim mismatch: got {D}, expected {self.dim}"
+            )
         if self.inter_dim is None:
             w13, _ = self._linear_parts(self._shared.w13)  # type: ignore[attr-defined]
             self.inter_dim = w13.shape[0] // 2
@@ -317,7 +348,9 @@ class FusedSharedExpertFastPath:
             dtype=torch.float8_e4m3fn,
             device=x.device,
         )
-        self._x_scale_storage = self._scale_storage((D // 128 + 3) // 4, capacity, x.device)
+        self._x_scale_storage = self._scale_storage(
+            (D // 128 + 3) // 4, capacity, x.device
+        )
         self._gate_up_bf16 = torch.empty(
             (capacity, 2 * inter),
             dtype=torch.bfloat16,
@@ -376,9 +409,10 @@ class FusedSharedExpertFastPath:
         if T == 0:
             return out
 
+        from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import fp8_gemm_nt
+
         from ._shared_expert_triton import quant_bf16_fp8_packed_ue8m0
         from ._silu_mul_fp8_quant_triton import silu_mul_fp8_quant_packed
-        from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import fp8_gemm_nt
 
         quant_bf16_fp8_packed_ue8m0(x, x_fp8, x_scale, group_size=128, eps=1.0e-4)
         w13 = self._linear_parts(shared_experts.w13)
@@ -514,7 +548,11 @@ def _run_shared_expert(
         raise RuntimeError(
             "DSV4_MOE_STRICT_FUSED=1 forbids generic Expert.forward shared path"
         )
-    return shared_experts(x).float()
+    shared = shared_experts(x)
+    if getattr(shared_experts, "preserve_output_dtype", False):
+        # fused_moe_epilogue converts BF16 to FP32 in registers before adding.
+        return shared
+    return shared.float()
 
 
 def get_shared_expert_executor(

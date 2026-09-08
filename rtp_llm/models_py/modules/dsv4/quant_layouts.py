@@ -22,7 +22,7 @@ FP4_BLOCK = 32
 FP8_BLOCK = 128
 
 
-def prepare_fp4_weight_scale_for_deepgemm(
+def _prepare_fp4_weight_scale_cuda(
     scale: torch.Tensor,
     mn: int,
     k: int,
@@ -55,6 +55,27 @@ def prepare_fp4_weight_scale_for_deepgemm(
         )
     return deep_gemm.transform_sf_into_required_layout(
         scale_fp32, mn, k, (1, FP4_BLOCK), num_groups
+    )
+
+
+def prepare_fp4_weight_scale_for_deepgemm(
+    scale: torch.Tensor,
+    mn: int,
+    k: int,
+    num_groups: Optional[int] = None,
+) -> torch.Tensor:
+    """Prepare FP4 weight scales through the active platform provider."""
+
+    from rtp_llm.models_py.modules.dsv4.platform_provider import (
+        prepare_dsv4_fp4_weight_scale,
+    )
+
+    return prepare_dsv4_fp4_weight_scale(
+        _prepare_fp4_weight_scale_cuda,
+        scale,
+        mn,
+        k,
+        num_groups,
     )
 
 

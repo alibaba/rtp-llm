@@ -21,6 +21,8 @@ def _mhc_pre_big_fuse(
     sinkhorn_repeat: int,
     n_splits: int = 16,
     mhc_mult: int = 4,
+    stabilize_mixes: bool = False,
+    stabilize_comb: bool = False,
 ):
     num_tokens = T.dynamic("num_tokens")
     mhc_mult3 = mhc_mult * (2 + mhc_mult)
@@ -55,7 +57,22 @@ def _mhc_pre_big_fuse(
                     for i_split in T.serial(n_splits):
                         mixes[j] += gemm_out_mul[i_split, pid, j]
                     mixes[j] *= rms[0]
+                    if stabilize_mixes:
+                        # DeepGEMM's internal split-K reduction can move the
+                        # normalized projection by a few FP32 ULPs between
+                        # graph replays. Canonicalize the small mixer vector
+                        # at the model's BF16 activation boundary before PRE,
+                        # POST, and Sinkhorn consume it.
+                        mixes[j] = T.cast(
+                            T.cast(mixes[j], T.bfloat16), T.float32
+                        )
                 T.copy(mixes, mixes_shared, disable_tma=True)
+
+            # Warp 0 publishes the normalized projection to shared memory;
+            # the other warps consume it for PRE mixing. Make that handoff
+            # explicit so a faster producer backend (DeepGEMM) cannot expose
+            # stale shared values during CUDA Graph replay.
+            T.sync_threads()
 
             if T.get_thread_binding() < 32:
                 ##################################################################
@@ -74,6 +91,12 @@ def _mhc_pre_big_fuse(
                         mixes_shared[j * mhc_mult + k + mhc_mult * 2] * mhc_scale[2]
                         + mhc_base[j * mhc_mult + k + mhc_mult * 2]
                     )
+                    if stabilize_comb:
+                        # DeepGEMM split-K reductions vary by a few FP32 ULPs
+                        # across graph replays. Sinkhorn can amplify those
+                        # differences, so canonicalize only its 4x4 logits at
+                        # the model's BF16 activation boundary.
+                        cm[j, k] = T.cast(T.cast(cm[j, k], T.bfloat16), T.float32)
 
                 ##################################################################
                 # _mhc_sinkhorn_fwd

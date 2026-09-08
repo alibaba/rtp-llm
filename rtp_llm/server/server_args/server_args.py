@@ -40,6 +40,9 @@ from rtp_llm.server.server_args.model_group_args import init_model_group_args
 from rtp_llm.server.server_args.model_specific_group_args import (
     init_model_specific_group_args,
 )
+from rtp_llm.server.server_args.module_dispatch_group_args import (
+    init_module_dispatch_group_args,
+)
 from rtp_llm.server.server_args.moe_group_args import init_moe_group_args
 from rtp_llm.server.server_args.parallel_group_args import init_parallel_group_args
 from rtp_llm.server.server_args.pd_separation_group_args import (
@@ -516,6 +519,7 @@ def init_all_group_args(
     init_speculative_decoding_group_args(parser, py_env_configs.sp_config)
     init_vit_group_args(parser, py_env_configs.vit_config)
     init_jit_group_args(parser, py_env_configs.jit_config)
+    init_module_dispatch_group_args(parser, py_env_configs)
     init_pd_separation_group_args(parser, py_env_configs.pd_separation_config)
     init_model_grpc_group_args(parser, py_env_configs.grpc_config)
     init_dash_sc_grpc_group_args(parser, py_env_configs.dash_sc_grpc_config)
@@ -553,6 +557,5 @@ def setup_args(args: Optional[Sequence[str]] = None) -> PyEnvConfigs:
         py_env_configs.runtime_config.warm_up,
         py_env_configs.runtime_config.model_warm_up,
     )
-
 
     return py_env_configs

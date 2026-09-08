@@ -14,7 +14,6 @@ from typing import (
 )
 
 import torch
-
 from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.config.grammar_tokenizer_info import build_grammar_tokenizer_info_json
 from rtp_llm.config.kv_cache_config import KVCacheConfig
@@ -132,6 +131,7 @@ class BaseModel(object):
         self.tokenizer: Optional[BaseTokenizer] = None
         self.custom_module: Optional[CustomModule] = None
         self.py_model = None
+        self.module_build_context = None
         self.default_generate_config: GenerateConfig = GenerateConfig()
         self.load_tokenizer()
         self._finalize_output_vocab_config()
@@ -305,6 +305,7 @@ class BaseModel(object):
         moe_pure_tp_preshard: bool = False,
         weight_alias_owner: Optional["BaseModel"] = None,
         weight_alias_names: Sequence[str] = (),
+        module_build_context=None,
     ) -> "BaseModel":
         """Create model from independent configuration objects.
 
@@ -342,6 +343,16 @@ class BaseModel(object):
             )
         model._weight_alias_owner = weight_alias_owner
         model._weight_alias_names = tuple(weight_alias_names)
+        if module_build_context is not None:
+            if skip_python_model:
+                raise ValueError(
+                    "Offline weight loading must not receive a module build context"
+                )
+            if module_build_context.state != "verified":
+                raise ValueError(
+                    "Model loading requires a verified module build context"
+                )
+            model.module_build_context = module_build_context
 
         import os
 
