@@ -1,35 +1,7 @@
 # SCR / Epsilon / RTP-LLM 集成调研与端到端 dump/restore 方案
 
-## Template lifecycle and cross-host endpoint contract
-
-All template participants use one process-local lifecycle around the Epsilon
-arrival: `prepare_for_template -> arrival -> restore_fixup -> release_template`.
-Normal startup and SCR-enabled non-template phases do not enter this lifecycle.
-Grammar sandbox workers and Python/native monitoring are quiesced through hooks;
-deferred RPC, TP broadcaster and PD cache-store services are started only after
-endpoint fixup succeeds.
-
-For restore on another host, the controller must publish a JSON endpoint manifest
-through `RTP_LLM_SCR_ENDPOINT_MANIFEST`. The value may be a file path or inline
-JSON. The manifest must include `generation`, `num_nodes`, and one `members` row
-per logical rank with `world_rank`, `local_rank`, `ip`/`host`, and `server_port`.
-For restore it must also contain `transport: {"ready": true}` after the platform
-has rebuilt TCPStore/NCCL/RDMA for the target host.
-RTP-LLM validates generation and rank continuity, updates frontend/Dash/backend
-RPC peers, worker and gRPC endpoints before deferred services start, and rejects
-a multi-node restore when the manifest is absent. PD Prefill/Decode roles also
-require the manifest even when each role has only one local rank. Single-Pod
-local communication may use `RTP_LLM_SCR_LOCAL_COMM=1`, but that mode is never
-used for cross-host PD.
-
-The manifest fixes application peers; it is not a promise that a restored NCCL
-process group, TCPStore, RDMA QP, or CUDA context can migrate between hosts.
-Those resources must be rebuilt by the platform's restore provider before the
-RTP-LLM release barrier. If the provider cannot recreate them, the participant
-must fail closed and cold-start rather than advertise a restored service.
-
-> 调研对象：e01-cn-xp54kwggb06-a0002 上的 serina.wzq.dev.new.worker0 与 serina.wzq.dev.new.scr-scheduler。
-> 调研时间：2026-09-06（Asia/Shanghai）。
+> 调研对象：e01-cn-xp54kwggb06-a0002 上的 serina.wzq.dev.new.worker0 与 serina.wzq.dev.new.scr-scheduler。  
+> 调研时间：2026-09-06（Asia/Shanghai）。  
 > 第三方 SCR/Epsilon 没有源代码，本文把可执行文件帮助、日志、Python shim、挂载、历史命令和 RTP-LLM 工作树结合起来，区分实测事实和基于行为的推断。
 
 ## 1. 结论先行
@@ -47,13 +19,6 @@ must fail closed and cold-start rather than advertise a restored service.
 2. 把 restore 后 KV cache 重新发现/重新注册做成正式协议。当前 external shim 的 register_after_restore_func 是 no-op，返回 0 不代表 callback 真正执行。
 3. SCR_PHASE 只能是兼容输入和诊断字段，真实生命周期应由 controller/scheduler 和 generation 拥有。
 4. 使用 sidecar 中真实的 controller 路径和真实 checkpoint 路径。现有脚本默认 /usr/local/scr/aion/cuda/scr_controller，并强制 tmpfs；本环境真实路径是 /run/scr/scr_controller 和 ext4 的 SCR_CR_PATH。
-
-本轮代码已完成 active phase 的同步 pre-service gate 和 LanguageCppEngine 的
-listener 两阶段启动；这不代表所有 host-bound 状态都已可跨机器复用。TCPStore/
-NCCL/TP broadcaster、frontend/Dash 构造期的 HostService heartbeat，以及
-EmbeddingCppEngine 的 ARPC/HTTP/gRPC 仍未两阶段化；active template phase 会在创建
-EmbeddingCppEngine 前 fail-closed，不能把 embedding 模板误当成已支持。不能把本轮验证
-结果表述为“完全无状态跨 host 模板”。
 
 ## 2. 实际组件和位置
 
@@ -74,9 +39,6 @@ rtp_llm/start_server.py
 rtp_llm/start_frontend_server.py
 rtp_llm/start_dash_sc_server.py
 rtp_llm/server/vit_rpc_server.py
-rtp_llm/async_decoder_engine/rpc_engine.py
-rtp_llm/ops/rtp_llm/rtp_llm_op.py
-rtp_llm/cpp/pybind/multi_gpu_gpt/RtpLLMOp.{h,cc}
 rtp_llm/test/scr_scheduler_e2e_test.py
 rtp_llm/utils/test/scr_template_utils_test.py
 ~~~
@@ -133,12 +95,10 @@ worker0 实测存在：
 /etc/scr/hook-flags
 ~~~
 
-external shim 的事实（由 Epsilon wheel/provider 选择，RTP-LLM 不复制路径判断）：
+external shim 的事实：
 
-- external module 是否启用由 Epsilon wheel 和外部 `SCR_ENABLE`/runtime 配置决定；RTP-LLM
-  不根据固定目录或 kernel 名称猜 provider。
-- 当前镜像实际选择了 SCR runtime，加载了其 Aion/NVIDIA shadow 库；路径和 socket
-  由 runtime/sidecar 契约提供，不是 RTP-LLM 的硬编码接口。
+- 只有 /etc/scr/epsilon 存在、SCR_ENABLE=1、kernel release 不含 kangaroo 时，wheel 才加载 external module。
+- 它检测 /run/scr/socket 或 /run/rund-cr/socket；当前选择 SCR，加载 /etc/scr/shadow/libaion.so。
 - is_snapstart_enable() 只判断 SCR_PHASE 是否为 checkpoint 或 restore。
 - register_kv_caches() 展平 Tensor，取 data_ptr 和 nbytes，传入 libaion.so。
 - snapstart_checkpoint() 先执行 before-checkpoint callback，再调用 native barrier。
@@ -264,7 +224,7 @@ scheduler help 对相关参数的描述：
 - crc-check：是否对 device memory 做 CRC32 校验。
 - pre-cuinit-bypass-cr：bypass 模式下 restore 时是否在 scheduler 启动阶段调用 cuinit。
 
-## 3. 历史命令和联合 dump/restore 验收场景
+## 3. 历史命令和两种测试场景
 
 sidecar 的 /root/.bash_history 保存了之前的测试命令。已找到的 controller 流程：
 
@@ -291,7 +251,30 @@ bash -c /home/start_scheduler.sh > start_scheduler.log 2>&1 &
 tail -f /run/scr/log/scheduler.log
 ~~~
 
-### 3.1 唯一支持路径：GPU memory + CPU/CRIU 联合 dump/restore
+### 3.1 GPU-only 场景
+
+scheduler.log 中反复出现：
+
+~~~text
+persist_type: GuestFile
+bypass_dump_restore: true
+bypass_restore_v2: false
+bounce_buffer: true
+epsilon_mode: Disable
+crc_check: true
+~~~
+
+同时出现 Run bypass dump restore、copy with bounce buffer、get finish count 等日志。/run/app_template_source/gpu-images 目录存在但当前为空，说明 GPU-only 测试使用过专用目录但 image 当前没有保留。
+
+GPU-only 的数据流：
+
+~~~text
+RTP-LLM/Epsilon 注册显存地址
+ -> scheduler 保存/恢复 GPU memory
+ -> 不要求 cpu-images、rootfs.tar 或进程树 CRIU image
+~~~
+
+### 3.2 GPU + CPU CRIU 场景
 
 当前 SCR_CR_PATH 是 ext4 目录：
 
@@ -299,7 +282,7 @@ tail -f /run/scr/log/scheduler.log
 /run/app_template_source/serina.wzq.dev.new.manual
 ~~~
 
-它包含（历史检查点目录中的证据）：
+它包含：
 
 ~~~text
 cpu-images/
@@ -321,16 +304,14 @@ persist scheduler blocking file to .../state/blocking
 SchedulerApi::WaitCRDone Done
 ~~~
 
-这条联合路径是本文唯一支持和验收的路径：
+因此两条链路应分开理解：
 
-| 联合路径阶段 | GPU memory | CPU/process state | 必须具备的证据 |
+| 场景 | GPU memory | CPU/process state | 典型证据 |
 |---|---|---|---|
-| dump | scheduler 持久化已注册显存 | controller/scheduler 触发 CRIU | `dump` 成功、`cpu-images`/`pstree`/`pages`/`core`、GPU store inventory |
-| restore | scheduler 恢复显存 | controller/scheduler 恢复进程树 | `wait-cr-done` 成功、目标 PID/cgroup 对账、服务恢复和最小请求成功 |
+| GPU-only | scheduler bypass/GuestFile/copy with bounce buffer | 不做 CRIU | gpu-images、bypass 日志、无 cpu-images |
+| GPU + CPU CRIU | 同时由 scheduler 保存显存 | controller/scheduler 触发 CRIU | cpu-images、rootfs.tar、pages/core/pstree、WaitCRDone |
 
-`bypass_dump_restore` 只描述 scheduler 的 GPU memory backend/path，不是 CRIU 开关；其值不能单独证明或否定 CPU/process CRIU。GPU-only（只保存显存、不带 CPU/CRIU 进程树）的历史路径不在本方案支持范围，也不能作为模板或扩容验收。
-
-本文的历史日志和目录检查只证明曾经观察到上述文件/日志，不代表本轮执行过真实 dump/restore。只有同一次受控运行同时具备 GPU store、CPU CRIU inventory、`wait-cr-done` 和恢复后服务证据，才能标记联合路径成功。
+bypass_dump_restore=true 仍然可以和 CPU CRIU 同时存在：它描述的是 scheduler 的 GPU memory 后端，不是“整个 checkpoint 流程跳过 CRIU”。
 
 ## 4. 组件交互和数据流
 
@@ -366,9 +347,7 @@ flowchart LR
   S -->|release/result| A
 ~~~
 
-worker0、worker1 观测到 ttrpc/log.sock 共享 endpoint；这不能单独证明 native
-barrier 的 scheduler scope。worker_num 和是否合并 manifest 必须以
-controller/scheduler 契约为准。
+worker0、worker1 的 ttrpc/log.sock inode 实测一致，说明它们在同一个 scheduler socket scope 下；这意味着 worker_num 必须覆盖该 scope 内全部 participant。
 
 ### 4.2 Python import 和 native library 选择
 
@@ -403,7 +382,6 @@ sequenceDiagram
   participant E as Epsilon/libaion
   participant CR as CRIU + GPU store
 
-  R->>R: model/KV/NormalEngine prepare; business listener/cache-store not bound
   R->>E: register_kv_caches
   R->>E: before_checkpoint(cuda_synchronize)
   R->>E: snapstart_checkpoint(wait_mode=1, id, num, timeout)
@@ -419,40 +397,24 @@ sequenceDiagram
   Ctrl->>S: restore(path, bypass-cr-path)
   S->>CR: CPU/process restore
   S->>CR: GPU memory restore
-  S-->>E: release arrival after snapshot/restore phase
-  E-->>R: arrival returns
-  R->>R: create listeners/cache-store; health/readiness gate
   CR-->>S: restore complete
   Ctrl->>S: wait-cr-done
-  Ctrl->>R: 外部 restore-fixup/release（若平台提供）
-  R->>R: health/readiness validation
-  Note over R,E: 当前 external shim 的 after-restore callback 是 no-op；不宣称自动 re-register
+  R->>R: validate generation/CUDA/cache
+  R->>E: re-register KV cache
 ~~~
 
 ## 5. RTP-LLM 当前接入审查
 
 ### 5.1 已做对的地方
 
-- RTP-LLM 自己的唯一 feature gate 是 `RTPLLM_ENABLE_SCR`，默认关闭。
-  Epsilon/SCR runtime 的 `SCR_ENABLE` 由外部控制面/容器环境提供，代码不
-  设置或覆盖它；`RTP_LLM_ENABLE_SCR` 和 `SCR_ENABLE` 都不是 RTP-LLM 的
-  第二个业务开关。
+- 统一 feature gate：RTPLLM_ENABLE_SCR/RTP_LLM_ENABLE_SCR，默认关闭。
 - 不在 RTP-LLM 内设置 SCR_PHASE；phase 由 platform/controller 负责。
-- `RTPLLM_ENABLE_SCR` 单独存在不会改变服务启动时序；只有外部
-  `SCR_PHASE=checkpoint|restore` 才启用同步 pre-service barrier 和延迟 listener。
 - lazy import；只导入 scr_template_utils 不初始化 CUDA。
 - 区分 wheel-native 与 external-shim，并打印 effective implementation。
 - 从主 engine 和可选 draft/MTP/Eagle engine 收集 KV cache Tensor，并按 data pointer 去重。
 - EpsilonAdapter 通过 capability/signature 探测 timeout，避免用有副作用的 trial call。
 - ScrParticipantManifest 生成连续 participant ID 并验证无重复、无缺号。
-- 模板启动路径不使用 daemon arrival thread：backend rank/manager、parent、frontend、DashSc
-  和 VIT 都在进入服务循环或 bind 之前同步调用 arrival。arrival 等待 controller/scheduler
-  release 时，进程不会监听业务端口或接收请求；旧 thread helper 仅保留给兼容测试/非启动调用。
-- backend 的 C++ RPC/HTTP listener 使用两阶段启动：SCR 开启时先完成模型和显存初始化，
-  barrier 释放后才创建 listener；Remote PD cache-store TCP/RDMA 也在 release 后建立；
-  SCR 关闭时走原有单阶段启动路径。
-- active phase 的 arrival/provider/timeout/非零返回错误会 fail-closed，阻止该参与者继续
-  bind/serve；SCR disabled/phase inactive 仍保持 fail-open 的普通启动语义。
+- arrival 使用 daemon thread、有限 timeout，不直接阻塞 HTTP/主服务循环。
 - RTP-LLM 不直接执行 scr_controller dump/restore，控制面边界正确。
 
 ### 5.2 当前风险和建议
@@ -475,49 +437,27 @@ participants:
   backend_vit:0       # 只有 VIT separation 启用时加入
 ~~~
 
-如果每个容器各自有 scheduler scope，worker_num 是容器 scope 内的 participant 数；即使多个容器观察到共享 ttrpc endpoint，也不能据此合并 manifest，只有 controller/scheduler 契约明确证明共享 scope 时才允许使用跨容器全局 manifest。
+如果每个容器各自有 scheduler scope，worker_num 是容器 scope 内的 participant 数；如果多个容器共享 ttrpc，则必须使用跨容器全局 manifest。
 
-#### C. after-restore 由平台契约决定
+#### C. after-restore 必须显式补齐
 
-当前 external shim 的 after-restore API 是 no-op。restore 完成后的 fix-up 由平台/控制面负责；是否需要 RTP-LLM 重新发现并 re-register，必须由真实 round-trip 和 provider 契约决定，当前代码不保证：
+当前 external shim 的 after-restore API 是 no-op。restore 完成后应：
 
-1. controller/platform 更新 generation/release。
-2. platform 或 RTP-LLM（仅在 provider 契约支持时）校验 CUDA context 和 model wrapper。
-3. 必要时重新发现 KV cache Tensor 并再次 register_kv_caches。
-4. health ready 后由控制面恢复流量。
+1. controller 更新 generation/release。
+2. RTP-LLM 校验 CUDA context 和 model wrapper。
+3. 重新发现 KV cache Tensor。
+4. 再次 register_kv_caches。
+5. health ready 后恢复流量。
 
 不能只看 register_after_restore_func 返回 0。
 
-#### C.1 restore fix-up 接口与传输层边界
+#### D. fail-open 必须上报 health
 
-跨 host restore 需要一个由 sidecar/控制面驱动的窄接口，RTP-LLM 不执行
-`scr_controller` 操作。建议接口只包含：
-
-```text
-prepare_restore_fixup(context) -> READY | FAILED(reason, elapsed_ms)
-final_release()              -> bind listener / health announce
-abort_restore(reason)        -> stop advertising / cold-start fallback
-```
-
-`context` 至少携带 generation、目标 host、rank/world 信息、恢复后的 peer
-endpoint 和 restore 起始时间。应用层 endpoint manifest 和本地 lifecycle hook
-已经落地；TCPStore/process-group/NCCL、TP broadcaster/UDS、PD/RDMA channel
-以及 HostService/discovery 的重建仍由平台 restore provider 完成。所有接口必须
-幂等、带 generation 校验和超时日志；普通启动路径不改变，恢复状态也不藏在新
-launcher 的环境变量中。
-
-#### D. active arrival 必须 fail-closed
-
-普通服务路径仍可 fail-open；但 checkpoint/restore active phase 中 arrival timeout、provider
-异常、非法映射或非零返回会抛出并阻止 listener bind，控制面仍需把异常/缺席 participant
-视为 missing quorum。当前 arrival 结果和耗时会写入进程日志；不要把服务已启动误当作
-模板成功。建议后续暴露 registered、arrived、timed_out、restored、generation 等状态。
+普通服务可以 fail-open，但 checkpoint 场景中 arrival timeout 必须成为 controller 的 missing-quorum，而不是继续 dump。建议暴露 registered、arrival_started、arrived、timed_out、restored、generation 等状态。
 
 #### E. generation 必须原子变化
 
-RTP-LLM 已支持 generation 环境变量和 mismatch 日志。generation 不进入当前
-Epsilon ABI，因此这里只能做可选的本地校验和诊断；旧 arrival 的 fencing 必须由
-controller/scheduler session 完成，不能由 RTP-LLM 的字符串比较替代。
+RTP-LLM 已支持 generation 环境变量和 mismatch 日志。controller 每轮 dump/restore 前应原子更新 generation；generation 变化后旧 arrival 结果必须失效。
 
 #### F. timeout 变量需要唯一入口
 
@@ -529,33 +469,30 @@ RTP-LLM 支持多个 timeout alias，而 shim 原生读取 SCR_TIMEOUT。部署�
 |---|---|---|
 | controller/supervisor | generation、phase、block/release、调用 dump/restore、quorum | 不写死 Python rank 细节 |
 | scheduler/Epsilon/libaion | participant barrier、GPU store、native IPC、CRIU/RunD 协作 | 不理解业务请求 |
-| RTP-LLM | cache 注册、CUDA sync、arrival、health 和状态日志 | 不调用 controller dump/restore；不保证 restore re-register |
+| RTP-LLM | cache 注册、CUDA sync、arrival、restore re-register、health | 不调用 controller dump/restore |
 
-正常启动（唯一业务开关关闭）：
+正常启动：
 
 ~~~text
 RTPLLM_ENABLE_SCR unset/false
-（代码不会因 SCR_ENABLE 单独存在而启用）
+SCR_ENABLE unset/false
 SCR_PHASE normal 或 unset
 不启动 Epsilon arrival thread
 不注册 KV cache 到 libaion
 推理路径与无 SCR 版本一致
 ~~~
 
-即使部署预置了 `RTPLLM_ENABLE_SCR=1`，只要外部没有选择
-`SCR_PHASE=checkpoint|restore`，也不会进入延迟 listener 的模板启动路径。
-
 checkpoint：
 
 ~~~text
 1. controller 生成 generation 和 participant manifest。
 2. scheduler health/check 正常。
-3. RTP-LLM 完成模型/显存初始化并 register_kv_caches。
-4. backend C++ listener、frontend/DashSc/VIT listener 均尚未 bind。
-5. 每个 participant 同步 arrival；controller/scheduler 观察 quorum。
-6. controller 执行 check/block，确认无请求状态后 dump；scheduler 同时处理 GPU memory 与 CPU/process CRIU。
-7. wait-cr-done，记录 generation、路径和结果。
-8. controller release 后，RTP-LLM 才创建 listener 并进入 health/ready 流程。
+3. RTP-LLM cache ready 后 register_kv_caches。
+4. 每个 participant 一次 arrival。
+5. check 确认 quorum。
+6. block，停止新请求或切走流量。
+7. dump；scheduler 同时处理 GPU memory 与 CPU/process CRIU。
+8. wait-cr-done，记录 generation、路径和结果。
 ~~~
 
 restore：
@@ -591,21 +528,21 @@ restore：
 - dump 前解析 check JSON，只有 errno=0 且 checkpoint_ready=true 才执行。
 - dump/restore 后统一 wait-cr-done，并支持 SCR_WAIT_TIMEOUT。
 - 写入 /run/scr/log/scr-e2e.log。
-- 提供只读 status；脚本不启动/停止 scheduler，也不修改 SCR_PHASE。任何 dry-run、status 或命令帮助输出都不是 dump/restore 成功证据。
-- roundtrip 只允许用于隔离的 GPU memory + CPU/CRIU 联合路径；执行前必须确认会覆盖当前 checkpoint 数据，并在执行后收集 GPU store 与 CRIU inventory。
+- 提供 status 和 dry-run，不启动/停止 scheduler，也不修改 SCR_PHASE。
+- roundtrip 默认只做 dump 完成后等待，再 restore；真正执行前必须确认会覆盖当前 checkpoint 数据。
 
 当前目录包含 cpu-images、state/blocking、record.json 和约 178GB rootfs.tar；运行 dump 可能覆盖/更新这些数据，不能在生产 checkpoint 目录盲跑。
 
-历史记录中曾准备过 `/opt/scr-tools/` 脚本并观察到 `scr_controller check` 返回 `errno=0`、`checkpoint_ready=false`；这些只读检查和 dry-run 不是实时联合 dump/restore，也没有产生本轮成功证据。因此不能据此宣称脚本已完成真实部署或 GPU-only/CPU+CRIU round-trip。
+本次已将脚本部署到 `serina.wzq.dev.new.scr-scheduler` 的 `/opt/scr-tools/`，并完成 `bash -n`、`status`、GPU-only dump dry-run、CPU+CRIU dump dry-run、CPU+CRIU restore dry-run 和 GPU-only roundtrip dry-run。部署时实测 `scr_controller check` 返回 `errno=0` 但 `checkpoint_ready=false`，因此没有执行真实 dump/restore。
 
 ## 8. 测试顺序
 
-1. SCR 关闭：确认无 arrival thread、无 libaion 依赖、普通请求延迟不回退。
+1. 单卡单 rank：注册、before callback、arrival、GPU-only dump/restore、re-register。
 2. 单容器多 rank：验证 manifest ID 和共同 worker_num。
-3. 故意漏掉一个 rank：确认联合 dump 不执行，并报告 missing quorum。
-4. 隔离目录执行 GPU memory + CPU/CRIU 联合 dump/restore：确认 GPU store 与 `cpu-images/pages/core/pstree` 同时产生，且 `wait-cr-done` 成功。
-5. restore 后对账 cgroup/PID/FD；监听端口由 release 后的新启动阶段重新 bind，不复用旧 host 的 listener/channel/IP 状态；验证服务可用。
-6. prefill/decode 分离：分别验证各自 scheduler scope；不把不同 sidecar 合并到一个 Epsilon barrier。
+3. prefill/decode 分离：验证是否应分开 scheduler scope。
+4. 故意漏掉一个 rank：确认不 dump，并报告 missing quorum。
+5. CPU+GPU CRIU：确认 cpu-images/pages/core/pstree 产生，restore 后服务可用。
+6. SCR 关闭：确认无 arrival thread、无 libaion 依赖、普通请求延迟不回退。
 7. restore 后短请求和长请求各测一次，观察 CUDA context、KV cache 命中和错误。
 
 必须保留的日志字段：
