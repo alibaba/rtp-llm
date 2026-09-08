@@ -1,11 +1,57 @@
-from typing import List, Sequence
+from typing import List, Optional, Sequence
 
 import torch
 from torch import nn
 
-
 # Keep this layout contract aligned with cpp/multimodal_processor/MultimodalInputUtils.h.
 # Python consumes the flattened C++ representation after transport.
+
+
+def embedding_location_values(locations: "torch.Tensor | Sequence[int]") -> List[int]:
+    """Read host offsets without moving an already-host integer tensor."""
+    if isinstance(locations, torch.Tensor):
+        if locations.device.type != "cpu" or locations.dtype not in (
+            torch.int32,
+            torch.int64,
+        ):
+            locations = locations.to(device="cpu", dtype=torch.long)
+        return locations.reshape(-1).tolist()
+    return list(locations)
+
+
+def copy_embedding_span(
+    embeddings: torch.Tensor, feature: torch.Tensor, loc: int
+) -> None:
+    """Copy a validated span; callers own shape, range and dtype policy checks."""
+    target = embeddings.narrow(0, loc, feature.size(0))
+    if feature.device != target.device:
+        feature = feature.to(device=target.device, dtype=target.dtype)
+    target.copy_(feature)
+
+
+def _normalize_multimodal_locs(
+    multimodal_locs: Optional["torch.Tensor | Sequence[int]"],
+    expected_count: int,
+    value_name: str,
+) -> List[int]:
+    if multimodal_locs is None:
+        raise ValueError(f"multimodal_locs must be provided with {value_name}")
+
+    if isinstance(multimodal_locs, torch.Tensor):
+        actual_count = multimodal_locs.numel()
+        locs = embedding_location_values(multimodal_locs)
+    else:
+        actual_count = len(multimodal_locs)
+        locs = list(multimodal_locs)
+
+    if actual_count != expected_count:
+        raise ValueError(
+            f"multimodal_locs has {actual_count} entries "
+            f"but {expected_count} {value_name} were provided"
+        )
+    return locs
+
+
 def reshape_extra_input_to_deepstack(
     extra_input: Sequence[torch.Tensor],
     multimodal_features: Sequence[torch.Tensor],
@@ -33,23 +79,19 @@ class MultimodalEmbeddingInjector(nn.Module):
         self,
         embeddings: torch.Tensor,
         multimodal_features: Sequence[torch.Tensor],
-        multimodal_locs: torch.Tensor,
+        multimodal_locs: Optional[torch.Tensor],
     ) -> torch.Tensor:
         if not multimodal_features:
             return embeddings
 
-        if multimodal_locs.numel() != len(multimodal_features):
-            raise ValueError(
-                f"multimodal_locs has {multimodal_locs.numel()} entries "
-                f"but {len(multimodal_features)} features were provided"
-            )
+        locs = _normalize_multimodal_locs(
+            multimodal_locs, len(multimodal_features), "features"
+        )
 
         if embeddings.dim() != 2:
             raise ValueError(
                 "embeddings must be a 2D tensor of shape [tokens, hidden_size]"
             )
-
-        locs = multimodal_locs.to(device="cpu", dtype=torch.long).view(-1).tolist()
 
         hidden_size = embeddings.size(-1)
         for idx, (feature, loc) in enumerate(zip(multimodal_features, locs)):
@@ -68,9 +110,6 @@ class MultimodalEmbeddingInjector(nn.Module):
                     f"feature[{idx}] is {feature.dtype}"
                 )
 
-            if feature.device != embeddings.device:
-                feature = feature.to(embeddings.device)
-
             if loc < 0:
                 raise ValueError(f"feature[{idx}] loc must be non-negative, got {loc}")
 
@@ -81,7 +120,7 @@ class MultimodalEmbeddingInjector(nn.Module):
                     f"within embeddings of length {embeddings.size(0)}"
                 )
 
-            embeddings.narrow(0, loc, length).copy_(feature.contiguous())
+            copy_embedding_span(embeddings, feature, loc)
 
         return embeddings
 
@@ -93,26 +132,17 @@ class MultimodalDeepstackInjector(nn.Module):
         self,
         hidden: torch.Tensor,
         mm_deepstack_embeds: Sequence[torch.Tensor],
-        multimodal_locs: "torch.Tensor | Sequence[int]",
+        multimodal_locs: Optional["torch.Tensor | Sequence[int]"],
         layer_id: int,
     ) -> torch.Tensor:
         if not mm_deepstack_embeds or layer_id < 0:
             return hidden
 
-        if isinstance(multimodal_locs, torch.Tensor):
-            if multimodal_locs.numel() != len(mm_deepstack_embeds):
-                raise ValueError(
-                    f"multimodal_locs has {multimodal_locs.numel()} entries "
-                    f"but {len(mm_deepstack_embeds)} deepstack tensors were provided"
-                )
-            locs = multimodal_locs.to(device="cpu", dtype=torch.long).view(-1).tolist()
-        else:
-            if len(multimodal_locs) != len(mm_deepstack_embeds):
-                raise ValueError(
-                    f"multimodal_locs has {len(multimodal_locs)} entries "
-                    f"but {len(mm_deepstack_embeds)} deepstack tensors were provided"
-                )
-            locs = multimodal_locs
+        locs = _normalize_multimodal_locs(
+            multimodal_locs,
+            len(mm_deepstack_embeds),
+            "deepstack tensors",
+        )
         hidden_size = hidden.size(-1)
 
         for idx, (stack, loc) in enumerate(zip(mm_deepstack_embeds, locs)):

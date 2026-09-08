@@ -221,14 +221,16 @@ public:
     int    seqLength() const;
     // NOTE: In generatestream, set seq len must use setSeqLength api, we need to save start_check_seq_length_
     // for checking EOS and stop words
-    void    setSeqLength(int seq_length);
-    int     seqSizePerBlock() const;
-    int     contextLength() const;
-    int     prefixLength() const;
-    int     reuseLength() const;
-    int     initialReuseLength() const;
-    size_t  maxTokenNum() const;
-    void    setReuseLength(int reuse_length);
+    void   setSeqLength(int seq_length);
+    int    seqSizePerBlock() const;
+    int    contextLength() const;
+    int    prefixLength() const;
+    int    reuseLength() const;
+    int    initialReuseLength() const;
+    size_t maxTokenNum() const;
+    void   setReuseLength(int reuse_length);
+    // A verified P/D transfer already incorporates prompt embeddings; keep the current phase.
+    void    setHandoffReuseLength(int reuse_length);
     void    setLocalReuseLength(int length);
     void    setDeviceReuseLength(int length);
     void    setRemoteReuseLength(int length);
@@ -269,6 +271,10 @@ public:
     bool                       hasMultimodalExtraInput() const;
     int                        multimodalFeaturesLength() const;
     torch::Tensor              multimodalLocations() const;
+
+    bool                              hasInputEmbeddings() const;
+    const std::vector<torch::Tensor>& inputEmbeddings() const;
+    const std::vector<int32_t>&       inputEmbeddingsLocs() const;
 
     int64_t getTimeoutMs() const;
     void    recordWaitLatency();
@@ -724,19 +730,19 @@ public:
     }
 
     bool reuseCache() const {
-        return generate_input_->generate_config->reuse_cache;
+        return !hasInputEmbeddings() && generate_input_->generate_config->reuse_cache;
     }
 
     bool enableDeviceCache() const {
-        return generate_input_->generate_config->enable_device_cache;
+        return !hasInputEmbeddings() && generate_input_->generate_config->enable_device_cache;
     }
 
     bool enableMemoryCache() const {
-        return generate_input_->generate_config->enable_memory_cache;
+        return !hasInputEmbeddings() && generate_input_->generate_config->enable_memory_cache;
     }
 
     bool enableRemoteCache() const {
-        return generate_input_->generate_config->enable_remote_cache;
+        return !hasInputEmbeddings() && generate_input_->generate_config->enable_remote_cache;
     }
 
     int64_t deadlineMs() const {

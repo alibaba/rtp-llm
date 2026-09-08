@@ -53,6 +53,14 @@ py_test(
 )
 
 py_test(
+    name = "input_embeddings_reject_test",
+    srcs = ["input_embeddings_reject_test.py"],
+    deps = [
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+    ],
+)
+
+py_test(
     name = "qwen3_next_qkvz_ba_fusion_test",
     srcs = ["qwen3_next_qkvz_ba_fusion_test.py"],
     deps = [
@@ -80,4 +88,15 @@ py_test(
     env = {"GPU_COUNT": "1"},
     tags = ["rocm"],
     exec_properties = {'gpu': 'MI308X-ROCM7', 'gpu_count': '1'},
+)
+
+py_test(
+    name = "dsv4_input_embeddings_reject_test",
+    srcs = ["dsv4_input_embeddings_reject_test.py"],
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+    target_compatible_with = select({
+        "@//:using_cuda13_x86": [],
+        "@//:using_cuda13_arm": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
 )

@@ -25,6 +25,8 @@ from rtp_llm.utils.model_weight import W
 class Qwen3VLMoeModel(GptModelBase):
     """Qwen3VL MoE model"""
 
+    supports_input_embeddings = True
+
     def __init__(
         self,
         model_config: ModelConfig,
@@ -96,6 +98,7 @@ class Qwen3VLMoeModel(GptModelBase):
         inputs_embeds = self.embed_tokens(
             input_ids, position_ids, token_type_ids, text_tokens_mask
         )
+        inputs_embeds = self.apply_input_embeddings(inputs_embeds, inputs)
         hidden_states = self.multimodal_embedding_injector(
             inputs_embeds, mm_features, mm_feature_locs
         )

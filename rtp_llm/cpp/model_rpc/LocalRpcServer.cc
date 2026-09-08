@@ -4,6 +4,7 @@
 #include <memory>
 #include <unistd.h>
 #include <c10/core/InferenceMode.h>
+#include <pybind11/pybind11.h>
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
@@ -239,8 +240,42 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*             c
     return grpc::Status::OK;
 }
 
+InputEmbeddingsRuntimePolicy LocalRpcServer::inputEmbeddingsRuntimePolicy() const {
+    const auto& params = maga_init_params_;
+    const auto  type   = params.sp_config.type;
+    return {params.model_config_.hidden_size,
+            params.model_supports_input_embeddings,
+            params.parallelism_config.tp_size,
+            params.parallelism_config.prefill_cp_config.is_enabled(),
+            (engine_ && engine_->isMTPEagle()) || type == SP_TYPE_MTP || type == SP_TYPE_EAGLE
+                || type == SP_TYPE_DSPARK,
+            params.ffn_disaggregate_config.enable_ffn_disaggregate};
+}
+
+ErrorInfo LocalRpcServer::validateInputRuntimeSupport(const GenerateInput& input, bool force_token_range) const {
+    // MM token expansion/remapping performs the final range check. The normal
+    // engine checks the expanded sequence again at its enqueue boundary.
+    const bool check_token_range = force_token_range || !input.multimodal_inputs || input.multimodal_inputs->empty();
+    const bool has_embeddings    = input.input_embeddings && !input.input_embeddings->empty();
+    const auto policy            = has_embeddings ? inputEmbeddingsRuntimePolicy() : InputEmbeddingsRuntimePolicy{};
+    const auto status            = validateInputEmbeddingsForRequest(input, policy, check_token_range);
+    return status.ok() ? ErrorInfo::OkStatus() : ErrorInfo(ErrorCode::INVALID_PARAMS, status.ToString());
+}
+
+std::shared_ptr<GenerateInput> LocalRpcServer::convertGenerateInput(const GenerateInputPB* input) {
+    return QueryConverter::transQuery(input);
+}
+
 ErrorInfo LocalRpcServer::prepareInput(const GenerateInputPB& input_pb, std::shared_ptr<GenerateInput>& output) {
-    output = QueryConverter::transQuery(&input_pb);
+    try {
+        output = convertGenerateInput(&input_pb);
+    } catch (const std::exception& e) {
+        return QueryConverter::requestParsingError(e);
+    }
+    auto support_res = validateInputRuntimeSupport(*output);
+    if (!support_res.ok()) {
+        return support_res;
+    }
     if (mm_processor_ != nullptr && output->multimodal_inputs) {
         RTP_LLM_PROFILE_SCOPE("rpc.mm_update_features");
         auto mm_res = mm_processor_->updateMultimodalFeatures(output);
@@ -390,9 +425,10 @@ grpc::Status LocalRpcServer::BatchGenerateCall(grpc::ServerContext*        conte
                 auto* err_pb = result->mutable_error_info();
                 err_pb->set_error_code(ErrorCodePB::UNKNOWN_ERROR);
                 if (j == i) {
-                    err_pb->set_error_message("multimodal processing failed: " + err.ToString());
+                    err_pb->set_error_message("request preparation failed: " + err.ToString());
                 } else {
-                    err_pb->set_error_message("batch aborted due to multimodal failure at index " + std::to_string(i));
+                    err_pb->set_error_message("batch aborted due to request preparation failure at index "
+                                              + std::to_string(i));
                 }
             }
             return grpc::Status::OK;
@@ -462,6 +498,7 @@ grpc::Status LocalRpcServer::GetWorkerStatus(grpc::ServerContext*   context,
         latest_finished_version,
         maga_init_params_.pd_sep_config.role_type);
 
+    response->set_supports_input_embeddings(validateInputEmbeddingsRuntimeSupport(inputEmbeddingsRuntimePolicy()).ok());
     WorkerStatusInfo status_info              = getWorkerStatusInfo(latest_finished_version);
     int64_t          request_after_ws_time_us = currentTimeUs();
     RTP_LLM_LOG_DEBUG("getWorkerStatusInfo took %ld us", request_after_ws_time_us - request_begin_time_us);

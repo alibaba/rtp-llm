@@ -337,6 +337,8 @@ def _args_from_model_config(
 class DeepSeekV4Model(GptModelBase):
     """Framework-facing model: owns a V4Transformer, feeds framework IO into it."""
 
+    supports_input_embeddings = False
+
     # Whether this model captures aux hidden features for DSpARK. The draft
     # carries the capture ids too (for the shared-buffer row-width
     # derivation) but never captures; DeepSeekV4DSparkModel overrides this.
@@ -1306,6 +1308,8 @@ class DeepSeekV4Model(GptModelBase):
         the PyWrappedModel with cache_manager==nullptr); only the prefill
         path needs to tolerate this — warmup never enters decode.
         """
+        self._reject_input_embeddings(inputs)
+
         if self.kv_cache is None:
             # Warmup-only PyWrappedModel: NormalExecutor builds it with
             # cache_manager==nullptr, so init_resources carries no kv_cache.

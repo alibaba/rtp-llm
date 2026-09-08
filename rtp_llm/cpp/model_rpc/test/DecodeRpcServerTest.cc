@@ -4,6 +4,7 @@
 #include <thread>
 
 #include "rtp_llm/cpp/model_rpc/DecodeRpcServer.h"
+#include "rtp_llm/cpp/model_rpc/RemoteRpcServiceImpl.h"
 #include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
@@ -209,6 +210,23 @@ TEST(DecodeRpcServerTest, CompletedHandoffPublishesOnlyReusablePromptBlocks) {
     EXPECT_EQ(stream->localReuseLength(), 2304);
 }
 
+TEST(DecodeRpcServerTest, CompletedHandoffKeepsEmbeddingPrefixWithoutChangingPhase) {
+    auto stream                  = makeGenerateStream(/*seq_length=*/513);
+    auto input                   = stream->generateInput();
+    input->input_embeddings      = std::vector<torch::Tensor>{torch::ones({1, 8})};
+    input->input_embeddings_locs = std::vector<int32_t>{4};
+    ASSERT_TRUE(stream->isContextStream());
+    stream->setReuseLength(256);
+    ASSERT_EQ(stream->reuseLength(), 4);
+    EXPECT_EQ(DecodeRpcServer::markLoadedCacheReuse(
+                  stream, {ErrorInfo::OkStatus(), /*loaded_cache_block_count=*/2}, 256, true),
+              512);
+    EXPECT_TRUE(stream->isContextStream());
+    EXPECT_EQ(stream->reuseLength(), 512);
+    EXPECT_EQ(stream->initialReuseLength(), 512);
+    EXPECT_EQ(stream->localReuseLength(), 512);
+}
+
 TEST(DecodeRpcServerTest, FailedOrSharedPoolHandoffDoesNotPublishReuse) {
     auto stream = makeGenerateStream(/*seq_length=*/513);
 
@@ -275,7 +293,7 @@ TEST(DecodeRpcServerTest, CPShardedMlaLoadRequestReadsFromEveryPrefillPeer) {
 
 TEST(DecodeRpcServerTest, TaggedBlockRowsResolveByLocalTagOrder) {
     auto                   topology = CacheTopology::create({makeRpcGroup("linear", {0}), makeRpcGroup("full", {1})},
-                                          {{0, {"linear"}}, {1, {"full"}}});
+                                                            {{0, {"linear"}}, {1, {"full"}}});
     BroadcastLoadRequestPB request;
     auto*                  full = request.add_tagged_group_block_ids();
     full->set_tag("full");
@@ -696,6 +714,120 @@ TEST(DecodeRpcServerTest, EmptyTableOrMissingCacheKeysYieldNoLoad) {
                                                     kCompactSeqSizePerBlock,
                                                     kBaseSeqSizePerBlock)
                     .empty());
+}
+
+TEST(DecodeRpcServerTest, InputEmbeddingCapabilityRejectedBeforeStreamOrKvAllocation) {
+    for (int mode = 0; mode < 3; ++mode) {
+        DecodeRpcServer server;
+        server.maga_init_params_.model_config_.hidden_size       = 1;
+        server.maga_init_params_.model_supports_input_embeddings = true;
+        if (mode == 0)
+            server.maga_init_params_.parallelism_config.tp_size = 2;
+        if (mode == 1)
+            server.maga_init_params_.sp_config.type = SP_TYPE_MTP;
+        if (mode == 2)
+            server.maga_init_params_.ffn_disaggregate_config.enable_ffn_disaggregate = true;
+        DecodeRpcContext      rpc_context{nullptr};
+        DecodeGenerateContext context(rpc_context, 1000, nullptr, server.metrics_reporter_, server.meta_);
+        auto*                 input = context.allocate_request.mutable_input();
+        input->add_token_ids(1);
+        auto* tensor = input->mutable_input_embeddings()->add_embeddings();
+        tensor->set_data_type(TensorPB::FP32);
+        tensor->add_shape(1);
+        tensor->add_shape(1);
+        const float value = 1;
+        tensor->set_fp32_data(&value, sizeof(value));
+        input->mutable_input_embeddings()->add_embedding_locs(0);
+        // No engine is installed: reaching makeStream would fail this test.
+        server.allocateResource(context);
+        EXPECT_EQ(context.error_status.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+        EXPECT_EQ(context.error_info.code(), ErrorCode::INVALID_PARAMS);
+        EXPECT_FALSE(context.shouldRetry());
+        EXPECT_EQ(context.getStream(), nullptr);
+    }
+}
+
+TEST(DecodeRpcServerTest, ExpandedMultimodalInputEmbeddingRangeRejectedBeforeAllocation) {
+    DecodeRpcServer server;
+    server.maga_init_params_.model_config_.hidden_size       = 1;
+    server.maga_init_params_.model_supports_input_embeddings = true;
+    DecodeRpcContext      rpc_context{nullptr};
+    DecodeGenerateContext context(rpc_context, 1000, nullptr, server.metrics_reporter_, server.meta_);
+    auto*                 input = context.allocate_request.mutable_input();
+    input->add_token_ids(1);
+    // MM descriptors remain in AllocateRequest after Prefill expanded the IDs.
+    input->add_multimodal_inputs()->set_multimodal_url("test-image");
+    auto* tensor = input->mutable_input_embeddings()->add_embeddings();
+    tensor->set_data_type(TensorPB::FP32);
+    tensor->add_shape(1);
+    tensor->add_shape(1);
+    const float value = 1;
+    tensor->set_fp32_data(&value, sizeof(value));
+    input->mutable_input_embeddings()->add_embedding_locs(2);
+    // No engine is installed: the fully expanded range must be rejected before makeStream.
+    server.allocateResource(context);
+    EXPECT_EQ(context.error_status.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+    EXPECT_NE(context.error_status.error_message().find("out of range"), std::string::npos);
+    EXPECT_EQ(context.getStream(), nullptr);
+}
+
+TEST(DecodeRpcServerTest, EmbeddingRemoteHandlerReportsDeterministicErrorsOnceWithoutRetryOrAllocation) {
+    for (const bool malformed : {true, false}) {
+        test::TestLogCapture log_capture(malformed ? "decode_embedding_parse_error" : "decode_embedding_runtime_error");
+        RemoteRpcServiceImpl service;
+        service.decode_server_                                          = std::make_shared<DecodeRpcServer>();
+        auto& decode                                                    = *service.decode_server_;
+        decode.meta_                                                    = std::make_shared<RpcServerRuntimeMeta>();
+        decode.maga_init_params_.model_config_.hidden_size              = 1;
+        decode.maga_init_params_.model_supports_input_embeddings        = false;
+        decode.maga_init_params_.pd_sep_config.decode_retry_times       = 3;
+        decode.maga_init_params_.pd_sep_config.decode_retry_timeout_ms  = 5000;
+        decode.maga_init_params_.pd_sep_config.decode_retry_interval_ms = 0;
+        // No engine: either failure must precede makeStream/KV allocation.
+        grpc::ServerBuilder builder;
+        int                 port = 0;
+        builder.AddListeningPort("127.0.0.1:0", grpc::InsecureServerCredentials(), &port);
+        builder.RegisterService(&service);
+        auto server = builder.BuildAndStart();
+        ASSERT_NE(server, nullptr);
+        auto channel = grpc::CreateChannel("127.0.0.1:" + std::to_string(port), grpc::InsecureChannelCredentials());
+        auto stub    = RpcService::NewStub(channel);
+        grpc::ClientContext client_context;
+        client_context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(10));
+        auto              stream = stub->RemoteGenerateWithInputEmbeddings(&client_context);
+        GenerateRequestPB request;
+        request.set_stage(RemoteStage::ALLOCATE);
+        request.set_request_id(42);
+        auto* input = request.mutable_input();
+        input->set_request_id(42);
+        input->add_token_ids(1);
+        auto* tensor = input->mutable_input_embeddings()->add_embeddings();
+        tensor->set_data_type(TensorPB::FP32);
+        tensor->add_shape(1);
+        tensor->add_shape(1);
+        const float value = 1.0f;
+        tensor->set_fp32_data(&value, sizeof(value));
+        if (!malformed) {
+            input->mutable_input_embeddings()->add_embedding_locs(0);
+        }
+        ASSERT_TRUE(stream->Write(request));
+        stream->WritesDone();
+        GenerateOutputsPB output;
+        EXPECT_FALSE(stream->Read(&output));
+        const auto status = stream->Finish();
+        EXPECT_EQ(status.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+        EXPECT_NE(status.error_message().find(malformed ? "count" : "loaded model"), std::string::npos);
+        // The handler's retry count is observable in its final failure log.
+        EXPECT_NE(log_capture.content().find("allocate resource failed after retry 1 times"), std::string::npos);
+        const auto info = decode.meta_->getEngineScheduleInfo(0);
+        EXPECT_TRUE(info.running_task_info_list.empty());
+        ASSERT_EQ(info.finished_task_info_list.size(), 1);
+        EXPECT_EQ(info.finished_task_info_list[0].request_id, 42);
+        EXPECT_EQ(info.finished_task_info_list[0].error_code, static_cast<int64_t>(ErrorCode::INVALID_PARAMS));
+        EXPECT_NE(info.finished_task_info_list[0].error_message.find(malformed ? "count" : "loaded model"),
+                  std::string::npos);
+        server->Shutdown();
+    }
 }
 
 }  // namespace rtp_llm

@@ -14,6 +14,7 @@
 #include "rtp_llm/cpp/utils/AtomicUtil.h"
 #include "rtp_llm/cpp/engine_base/EngineBase.h"
 #include "rtp_llm/cpp/engine_base/EngineInitParams.h"
+#include "rtp_llm/cpp/engine_base/stream/InputEmbeddingsUtils.h"
 #include "rtp_llm/cpp/engine_base/ProposeModelEngineInitParams.h"
 #include "rtp_llm/cpp/engine_base/WorkerStatusInfo.h"
 #include "rtp_llm/cpp/cache/Types.h"
@@ -128,6 +129,9 @@ protected:
                                   std::shared_ptr<GenerateStream>& stream);
 
     // Shared helpers for single and batch paths
+    InputEmbeddingsRuntimePolicy inputEmbeddingsRuntimePolicy() const;
+    ErrorInfo validateInputRuntimeSupport(const GenerateInput& input, bool force_token_range = false) const;
+    virtual std::shared_ptr<GenerateInput> convertGenerateInput(const GenerateInputPB* input);
     ErrorInfo    prepareInput(const GenerateInputPB& input_pb, std::shared_ptr<GenerateInput>& output);
     ErrorInfo    collectStreamOutput(grpc::ServerContext*                  context,
                                      std::shared_ptr<GenerateStream>&      stream,

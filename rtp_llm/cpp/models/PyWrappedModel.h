@@ -61,10 +61,10 @@ public:
     // py_instance is `py_model` indeedly.
     PyWrappedModel(const GptModelInitParams& params,
                    py::object                py_instance,
-                   bool                      is_prefill_cuda_graph_mode  = false,
-                   bool                      use_spec_decoding           = false,
-                   DSparkModelRole           dspark_model_role           = DSparkModelRole::NONE,
-                   bool                      allow_cuda_graph            = true,
+                   bool                      is_prefill_cuda_graph_mode   = false,
+                   bool                      use_spec_decoding            = false,
+                   DSparkModelRole           dspark_model_role            = DSparkModelRole::NONE,
+                   bool                      allow_cuda_graph             = true,
                    bool                      track_cache_store_completion = false);
     ~PyWrappedModel();
 
@@ -78,6 +78,7 @@ public:
     void            prepareAttentionInputs(const GptModelInputs& inputs, bool skip_forward_event_sync);
     void            updateKVCacheKernelBlockId(const GptModelInputs& inputs) override;
     std::string     waitCacheStorePublication() override;
+    static void rejectContextParallelInputEmbeddings(const ExecProperties& device_props, const GptModelInputs& inputs);
 
 private:
     std::optional<PyCacheStoreInputs> prepareWriteCacheParams(const GptModelInputs& inputs);

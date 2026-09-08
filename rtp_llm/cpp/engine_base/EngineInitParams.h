@@ -72,6 +72,13 @@ struct EngineInitParams {
         py_eplb(py_eplb),
         py_sp_model(py_sp_model),
         weight_manager(weight_manager) {
+        // Read the instantiated model's explicit capability once while Python is alive.
+        // Missing declarations fail closed; model names are not a capability registry.
+        if (py_model && !py_model.is_none()) {
+            py::gil_scoped_acquire gil;
+            model_supports_input_embeddings = py::hasattr(py_model, "supports_input_embeddings")
+                                              && py_model.attr("supports_input_embeddings").cast<bool>();
+        }
         StaticConfig::user_ft_core_dump_on_exception = profiling_debug_logging_config.ft_core_dump_on_exception;
         StaticConfig::user_disable_pdl               = misc_config.disable_pdl;
         // default 1 minute and 1000
@@ -86,6 +93,7 @@ struct EngineInitParams {
         showDebugInfo();
     }
 
+    bool                         model_supports_input_embeddings = false;
     size_t                       model_id;
     ModelConfig                  model_config_;
     ParallelismConfig            parallelism_config;

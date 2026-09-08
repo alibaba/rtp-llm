@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/models/ModelTypes.h"
+#include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/models_py/bindings/core/torch_utils/TypeConvert.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
@@ -13,7 +14,7 @@ namespace rtp_llm {
 
 GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs) {
     GptModelInputShapeHints shape_hints{};
-    shape_hints[GptModelInputIndex::comboTokens] = inputs.combo_tokens.defined() ? inputs.combo_tokens.numel() : 0;
+    shape_hints[GptModelInputIndex::comboTokens]  = inputs.combo_tokens.defined() ? inputs.combo_tokens.numel() : 0;
     shape_hints[GptModelInputIndex::inputLengths] = inputs.input_lengths.defined() ? inputs.input_lengths.numel() : 0;
     shape_hints[GptModelInputIndex::sequenceLengths] =
         inputs.sequence_lengths.defined() ? inputs.sequence_lengths.numel() : 0;
@@ -71,6 +72,8 @@ GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs) {
     shape_hints[GptModelInputIndex::gptModelRequestLength] =
         inputs.request_id.defined() ? inputs.request_id.numel() : 0;
     shape_hints[GptModelInputIndex::isFakeStream] = inputs.is_fake_stream;
+    shape_hints[GptModelInputIndex::inputEmbeddingsRejected] =
+        inputs.input_embeddings.has_value() && !inputs.input_embeddings->empty() ? 1 : 0;
     shape_hints[GptModelInputIndex::mtpHiddenStatesRows] =
         inputs.last_hidden_states.defined() ? inputs.last_hidden_states.size(0) : 0;
 
@@ -146,6 +149,10 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     // execBroadcastCpu's fallback path keeps the NCCL+cudaSyncAndCheck
     // contract for cross-node TP.
     execBroadcastCpu({{shape_hints_t}, 0});
+    RTP_LLM_CHECK_WITH_INFO(shape_hints_ptr[GptModelInputIndex::inputEmbeddingsRejected] == 0,
+                            "input_embeddings is not supported with tp_size > 1 (got tp_size=%ld); "
+                            "send the request to a TP=1 deployment or omit input_embeddings.",
+                            (long)parallelism_config.tp_size);
 
     // multimodal features shape broadcast
     torch::Tensor mm_features_shape_t;
@@ -195,11 +202,11 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         cudaSyncAndCheck();
     }
 
-    const auto max_kernel_blocks = checkedHint(GptModelInputIndex::maxKernelBlocksPerBatch, "maxKernelBlocksPerBatch");
-    const auto max_blocks        = checkedHint(GptModelInputIndex::maxBlocksPerBatch, "maxBlocksPerBatch");
-    const auto cache_keys_width  = checkedHint(GptModelInputIndex::cacheKeysWidth, "cacheKeysWidth");
-    const auto kv_cache_group_num      = checkedHint(GptModelInputIndex::kvCacheGroupNum, "kvCacheGroupNum");
-    const auto group_types_len         = checkedHint(GptModelInputIndex::kvCacheGroupTypesLen, "kvCacheGroupTypesLen");
+    const auto max_kernel_blocks  = checkedHint(GptModelInputIndex::maxKernelBlocksPerBatch, "maxKernelBlocksPerBatch");
+    const auto max_blocks         = checkedHint(GptModelInputIndex::maxBlocksPerBatch, "maxBlocksPerBatch");
+    const auto cache_keys_width   = checkedHint(GptModelInputIndex::cacheKeysWidth, "cacheKeysWidth");
+    const auto kv_cache_group_num = checkedHint(GptModelInputIndex::kvCacheGroupNum, "kvCacheGroupNum");
+    const auto group_types_len    = checkedHint(GptModelInputIndex::kvCacheGroupTypesLen, "kvCacheGroupTypesLen");
     const auto combo_position_ids_size = checkedHint(GptModelInputIndex::comboPositionIds, "comboPositionIds");
     const auto text_tokens_mask_size   = checkedHint(GptModelInputIndex::textTokensMask, "textTokensMask");
     const auto mm_features_locs_size   = checkedHint(GptModelInputIndex::mmFeaturesLocs, "mmFeaturesLocs");
@@ -265,12 +272,10 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
             // RTP_LLM_DEVICE_INPUT publishes it to CUDA. Follow the root bitmap so the packed-buffer
             // classification below stays identical across ranks (otherwise pack/unpack drifts
             // off-by-tensor and non-root unpacks garbage).
-            inputs.kv_cache_kernel_block_id =
-                allocBuf(rtp_llm::DataType::TYPE_INT32,
-                         {kv_cache_group_num,
-                          checkedHint(GptModelInputIndex::inputLengths, "inputLengths"),
-                          max_kernel_blocks},
-                         pickAlloc(GptModelInputDeviceBit::kDeviceBitKernelBlockId));
+            inputs.kv_cache_kernel_block_id = allocBuf(
+                rtp_llm::DataType::TYPE_INT32,
+                {kv_cache_group_num, checkedHint(GptModelInputIndex::inputLengths, "inputLengths"), max_kernel_blocks},
+                pickAlloc(GptModelInputDeviceBit::kDeviceBitKernelBlockId));
             inputs.kv_cache_update_mapping =
                 allocBuf(rtp_llm::DataType::TYPE_INT32,
                          {checkedHint(GptModelInputIndex::kvCacheUpdateCopyNum, "kvCacheUpdateCopyNum"), 3});
