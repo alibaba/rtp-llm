@@ -16,7 +16,7 @@ def init_grammar_group_args(parser, grammar_config, grammar_admission_config):
         env_name="CONSTRAINED_JSON_DISABLE_ANY_WHITESPACE",
         bind_to=(grammar_config, "constrained_json_disable_any_whitespace"),
         type=str2bool,
-        default=False,
+        default=True,
         help="Disable xgrammar any-whitespace mode for JSON schema constraints",
     )
     grammar_group.add_argument(

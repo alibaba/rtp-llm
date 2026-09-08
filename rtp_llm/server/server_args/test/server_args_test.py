@@ -95,6 +95,11 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(py_env_configs.jit_config.jit_cache_setup_timeout_s, 60)
         self.assertTrue(py_env_configs.jit_config.manage_jit_cache)
 
+        # Verify grammar_config defaults to deterministic JSON whitespace.
+        self.assertTrue(
+            py_env_configs.grammar_config.constrained_json_disable_any_whitespace
+        )
+
     def test_cmd_args_set_to_py_env_configs(self):
         """Test that command line arguments are correctly set to py_env_configs."""
         sys.argv = [
