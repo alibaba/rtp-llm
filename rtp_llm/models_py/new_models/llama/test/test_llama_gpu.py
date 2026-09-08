@@ -3,7 +3,6 @@ import unittest
 
 import torch
 import torch.nn.functional as F
-
 from rtp_llm.models_py.model_loader import NewLoaderConfig, NewModelLoader
 from rtp_llm.models_py.new_models.llama import LlamaForCausalLM
 from rtp_llm.models_py.quant_methods import QuantizationConfig
@@ -11,7 +10,12 @@ from rtp_llm.ops.compute_ops import PyModelInputs
 
 
 class LlamaGpuTest(unittest.TestCase):
-    @unittest.skipUnless(torch.cuda.is_available(), "requires a CUDA or ROCm GPU")
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        if not torch.cuda.is_available():
+            raise RuntimeError("LlamaGpuTest requires the accelerator assigned by CI")
+
     def test_bf16_decoder_forward_matches_torch_reference(self):
         dtype = torch.bfloat16
         config = types.SimpleNamespace(

@@ -4,6 +4,8 @@ This module provides a unified interface for DeepEP initialization and managemen
 combining the functionality of the previous DeepEPInitializer and DeepEPWrapper classes.
 """
 
+from __future__ import annotations
+
 import gc
 import logging
 import os
@@ -11,7 +13,7 @@ import platform
 import threading
 from dataclasses import dataclass
 from enum import IntEnum, auto
-from typing import Optional, Tuple
+from typing import TYPE_CHECKING, Optional, Tuple
 
 import torch
 from torch.distributed import ProcessGroup
@@ -53,18 +55,18 @@ except ImportError as _deep_ep_import_err:
     DeepEPBuffer = _DeepEPUnavailable  # type: ignore[assignment,misc]
     DeepEPConfig = _DeepEPUnavailable  # type: ignore[assignment,misc]
 
-from rtp_llm.config.engine_config import EngineConfig
-from rtp_llm.config.model_config import ModelConfig
-from rtp_llm.config.quant_config import QuantizationConfig
-from rtp_llm.device.device_type import DeviceType, get_device_type
-from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
-    MoEConfigAdapter,
+from rtp_llm.models_py.quantization_exclusion import (
+    collect_quantization_exclusions,
+    is_module_ignored,
 )
-from rtp_llm.models_py.quant_methods.base import (
-    QuantizationConfig as RuntimeQuantizationConfig,
-)
-from rtp_llm.models_py.utils.arch import is_sm10x
-from rtp_llm.ops import SpeculativeType
+
+if TYPE_CHECKING:
+    from rtp_llm.config.engine_config import EngineConfig
+    from rtp_llm.config.model_config import ModelConfig
+    from rtp_llm.config.quant_config import QuantizationConfig
+    from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
+        MoEConfigAdapter,
+    )
 
 __all__ = [
     "DeepepWrapperConfig",
@@ -80,12 +82,16 @@ __all__ = [
 
 def use_accl_ep() -> bool:
     """Check if ACCL EP should be used based on device type."""
+    from rtp_llm.device.device_type import DeviceType, get_device_type
+
     device_type = get_device_type()
     return not device_type == DeviceType.ROCm
 
 
 def allow_mnnvl() -> bool:
     """Check if MNNVL is allowed based on architecture and GPU capability."""
+    from rtp_llm.models_py.utils.arch import is_sm10x
+
     return "aarch64" in platform.machine() and is_sm10x()
 
 
@@ -280,25 +286,19 @@ class DeepepWrapperConfig:
         capacity = DeepepWrapperConfig.calc_low_latency_max_token_per_rank(
             ll_num_max_token, tp_size, quant_config
         )
-        exclusions_exist = bool(
-            quant_config is not None
-            and (quant_config.ignored_layers or quant_config.exclude_modules)
-        )
+        exclusion_patterns = collect_quantization_exclusions(quant_config)
+        exclusions_exist = bool(exclusion_patterns)
         has_unquantized_moe_layer = exclusions_exist and model_config is None
         if exclusions_exist and model_config is not None:
-            runtime_quant = RuntimeQuantizationConfig(
-                quant_config.get_runtime_method_key(),
-                source_config=quant_config,
-            )
             moe_layer_indices = list(getattr(model_config, "moe_layer_index", ()))
             if not moe_layer_indices and model_config.expert_num > 0:
                 moe_layer_indices = list(range(model_config.num_layers))
             projections = ("gate_proj", "up_proj", "down_proj")
             for layer_idx in moe_layer_indices:
                 prefix = f"layers.{layer_idx}.mlp.experts"
-                root_ignored = runtime_quant.is_layer_ignored(prefix)
+                root_ignored = is_module_ignored(prefix, exclusion_patterns)
                 projection_ignored = [
-                    runtime_quant.is_layer_ignored(f"{prefix}.{projection}")
+                    is_module_ignored(f"{prefix}.{projection}", exclusion_patterns)
                     for projection in projections
                 ]
                 if root_ignored or all(projection_ignored):
@@ -719,6 +719,11 @@ def init_deepep_wrapper(
     Returns:
         None
     """
+
+    from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
+        MoEConfigAdapter,
+    )
+    from rtp_llm.ops import SpeculativeType
 
     if not DeepEPWrapper.supported():
         logging.warning(

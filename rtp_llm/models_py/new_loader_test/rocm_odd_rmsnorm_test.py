@@ -2,15 +2,18 @@ import unittest
 from unittest import mock
 
 import torch
-
 from rtp_llm.models_py.layers.norm import RMSNorm, RMSResNorm
 
 
-@unittest.skipUnless(
-    torch.cuda.is_available() and torch.version.hip is not None,
-    "requires ROCm",
-)
 class RocmOddRmsNormTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        if not torch.cuda.is_available() or torch.version.hip is None:
+            raise RuntimeError(
+                "RocmOddRmsNormTest requires the ROCm accelerator assigned by CI"
+            )
+
     def test_rmsnorm_odd_hidden_sizes_use_opus_and_match_reference(self):
         import aiter
 

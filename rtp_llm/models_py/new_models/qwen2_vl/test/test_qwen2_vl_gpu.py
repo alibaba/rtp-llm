@@ -3,13 +3,12 @@ import unittest
 from unittest import mock
 
 import torch
-from safetensors.torch import save_file
-
 from rtp_llm.models_py.model_loader import NewLoaderConfig
 from rtp_llm.models_py.new_models.qwen2_vl.vision import (
     Qwen2VLForVisionEmbedding,
     load_qwen2_vl_vision,
 )
+from safetensors.torch import save_file
 
 
 def _vision_config():
@@ -28,10 +27,15 @@ def _vision_config():
 
 
 class Qwen2VLVisionGpuTest(unittest.TestCase):
-    def test_real_newloader_fp16_sdpa_fallback_matches_cpu_reference(self):
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
         if not torch.cuda.is_available():
-            self.skipTest("A CUDA or ROCm accelerator is required")
+            raise RuntimeError(
+                "Qwen2VLVisionGpuTest requires the accelerator assigned by CI"
+            )
 
+    def test_real_newloader_fp16_sdpa_fallback_matches_cpu_reference(self):
         torch.manual_seed(11)
         config = _vision_config()
         source = Qwen2VLForVisionEmbedding(
@@ -71,9 +75,6 @@ class Qwen2VLVisionGpuTest(unittest.TestCase):
         torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)
 
     def test_fp32_accelerator_forward_uses_sdpa_fallback(self):
-        if not torch.cuda.is_available():
-            self.skipTest("A CUDA or ROCm accelerator is required")
-
         config = _vision_config()
         model = Qwen2VLForVisionEmbedding(
             {"model_type": "qwen2_vl_vision", "vision_config": config},

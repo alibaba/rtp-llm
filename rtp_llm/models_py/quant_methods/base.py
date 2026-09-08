@@ -1,9 +1,13 @@
-import fnmatch
-import re
 from abc import ABC, abstractmethod
 from typing import Any, Dict, Iterable, List, Optional, Tuple, Type
 
 import torch
+from rtp_llm.models_py.quantization_exclusion import (
+    canonical_module_parts,
+    collect_quantization_exclusions,
+    is_module_ignored,
+    normalize_module_patterns,
+)
 
 
 class QuantizeMethodBase(ABC):
@@ -193,39 +197,11 @@ class QuantizationConfig:
 
     @staticmethod
     def _normalize_ignored(values: Iterable[str]) -> List[str]:
-        if isinstance(values, str):
-            values = [values]
-        try:
-            candidates = list(values)
-        except TypeError as exc:
-            raise TypeError("ignored_layers must be an iterable of strings") from exc
-        result = []
-        for value in candidates:
-            if not isinstance(value, str):
-                raise TypeError("ignored layer patterns must be strings")
-            value = value.strip()
-            if value and value not in result:
-                result.append(value)
-        return result
+        return normalize_module_patterns(values)
 
     @classmethod
     def _source_ignored_layers(cls, source_config: Any) -> List[str]:
-        if source_config is None:
-            return []
-        result = []
-        for name in (
-            "ignore_patterns",
-            "ignored_layers",
-            "ignore",
-            "exclude_modules",
-            "modules_to_not_convert",
-        ):
-            value = getattr(source_config, name, None)
-            if callable(value):
-                value = value()
-            if value:
-                result.extend(cls._normalize_ignored(value))
-        return result
+        return collect_quantization_exclusions(source_config)
 
     @staticmethod
     def _activation_dynamic(source_config: Any) -> bool:
@@ -275,41 +251,10 @@ class QuantizationConfig:
 
     @staticmethod
     def _canonical_parts(path: str) -> List[str]:
-        parts = [part for part in path.split(".") if part]
-        while parts and parts[0] in ("model", "language_model"):
-            parts.pop(0)
-        return parts
+        return canonical_module_parts(path)
 
     def is_layer_ignored(self, prefix: str) -> bool:
-        if not prefix or not self.ignored_layers:
-            return False
-        prefix_parts = self._canonical_parts(prefix)
-        canonical_prefix = ".".join(prefix_parts)
-        for pattern in self.ignored_layers:
-            canonical_pattern = ".".join(self._canonical_parts(pattern))
-            if pattern.startswith("re:"):
-                if re.search(pattern[3:], prefix) or re.search(
-                    pattern[3:], canonical_prefix
-                ):
-                    return True
-            elif "{i}" in canonical_pattern:
-                expression = re.escape(canonical_pattern).replace(
-                    re.escape("{i}"), r"\d+"
-                )
-                if re.fullmatch(rf"{expression}(?:\..+)?", canonical_prefix):
-                    return True
-            elif "*" in canonical_pattern or "?" in canonical_pattern:
-                if fnmatch.fnmatch(
-                    canonical_prefix, canonical_pattern
-                ) or fnmatch.fnmatch(canonical_prefix, f"{canonical_pattern}.*"):
-                    return True
-            else:
-                pattern_parts = self._canonical_parts(pattern)
-                if len(pattern_parts) == 1 and pattern_parts[0] in prefix_parts:
-                    return True
-                if prefix_parts[: len(pattern_parts)] == pattern_parts:
-                    return True
-        return False
+        return is_module_ignored(prefix, self.ignored_layers)
 
     def get_quant_method(self, layer, prefix: str = "") -> QuantizeMethodBase:
         if self.ignored_layers and not prefix:
