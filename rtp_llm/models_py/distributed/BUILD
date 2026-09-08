@@ -20,6 +20,7 @@ py_library(
     srcs = ["deepep_wrapper.py"],
     deps = [
         "//rtp_llm:torch",
+        "//rtp_llm/models_py:quantization_exclusion",
     ] + select({
         "@//:using_cuda12":["deep_ep_py"],
         "//conditions:default": [],

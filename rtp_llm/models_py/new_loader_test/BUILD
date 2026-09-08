@@ -10,6 +10,14 @@ py_test(
 )
 
 py_test(
+    name = "quantization_exclusion_test",
+    srcs = ["quantization_exclusion_test.py"],
+    deps = [
+        "//rtp_llm/models_py:quantization_exclusion",
+    ],
+)
+
+py_test(
     name = "foundation_gpu_test",
     srcs = ["foundation_gpu_test.py"],
     exec_properties = {

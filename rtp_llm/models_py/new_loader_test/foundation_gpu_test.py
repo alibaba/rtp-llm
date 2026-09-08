@@ -6,13 +6,13 @@ from unittest import mock
 
 import torch
 import torch.nn as nn
-from safetensors.torch import save_file
-
+from rtp_llm.models_py.distributed.collective_torch import Group
 from rtp_llm.models_py.layers import activation
 from rtp_llm.models_py.layers.embedding import VocabParallelEmbedding
 from rtp_llm.models_py.model_loader import NewLoaderConfig, NewModelLoader
 from rtp_llm.models_py.module_base import RtpModule
 from rtp_llm.models_py.registry import register_model
+from safetensors.torch import save_file
 
 
 class _GpuModel(RtpModule):
@@ -58,29 +58,52 @@ register_model("foundation_gpu_alias_model")(_GpuAliasModel)
 
 class FoundationGpuTest(unittest.TestCase):
     @staticmethod
-    def _tp_embedding():
+    def _tp_embedding(tp_rank):
         embedding = VocabParallelEmbedding(
             vocab_size=8,
             embedding_dim=2,
             tp_size=2,
-            tp_rank=0,
+            tp_rank=tp_rank,
             params_dtype=torch.float32,
         )
-        embedding.weight.data.copy_(torch.arange(8, dtype=torch.float32).view(4, 2))
+        embedding.weight.data.copy_(
+            torch.arange(8, dtype=torch.float32).view(4, 2) + tp_rank * 100
+        )
         return embedding
 
     def test_tp_embedding_preserves_local_and_remote_tokens(self):
-        embedding = self._tp_embedding()
-        with mock.patch(
-            "rtp_llm.models_py.layers.embedding.all_reduce",
-            side_effect=lambda tensor, **_: tensor,
+        rank0 = self._tp_embedding(0)
+        rank1 = self._tp_embedding(1)
+        input_ids = torch.tensor([1, 6])
+
+        def local_output(embedding):
+            with mock.patch(
+                "rtp_llm.models_py.layers.embedding.all_reduce",
+                side_effect=lambda tensor, **_: tensor,
+            ):
+                return embedding(input_ids)
+
+        rank0_partial = local_output(rank0)
+        rank1_partial = local_output(rank1)
+        expected = rank0_partial + rank1_partial
+        torch.testing.assert_close(expected[0], rank0.weight[1])
+        torch.testing.assert_close(expected[1], rank1.weight[2])
+
+        for embedding, remote_partial in (
+            (rank0, rank1_partial),
+            (rank1, rank0_partial),
         ):
-            output = embedding(torch.tensor([1, 6]))
-        torch.testing.assert_close(output[0], embedding.weight[1])
-        torch.testing.assert_close(output[1], torch.zeros(2))
+            with mock.patch(
+                "rtp_llm.models_py.layers.embedding.all_reduce",
+                side_effect=lambda tensor, **_: tensor + remote_partial,
+            ) as all_reduce:
+                output = embedding(input_ids)
+            all_reduce.assert_called_once()
+            self.assertIs(all_reduce.call_args.kwargs["group"], Group.TP)
+            torch.testing.assert_close(output, expected)
 
     def test_tp_embedding_rejects_global_out_of_range_tokens(self):
-        embedding = self._tp_embedding()
+        embedding = self._tp_embedding(0)
         with mock.patch(
             "rtp_llm.models_py.layers.embedding.all_reduce",
             side_effect=lambda tensor, **_: tensor,

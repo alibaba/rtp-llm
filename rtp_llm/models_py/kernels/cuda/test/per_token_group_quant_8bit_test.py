@@ -5,14 +5,13 @@ from unittest import SkipTest, TestCase, main
 import torch
 import triton
 import triton.language as tl
-from torch import dtype as _dtype
-from torch.profiler import ProfilerActivity, profile, record_function
-
 from rtp_llm.models_py.utils.arch import is_hip
 from rtp_llm.ops.compute_ops import (
     per_token_group_quant_fp8,
     per_token_group_quant_int8,
 )
+from torch import dtype as _dtype
+from torch.profiler import ProfilerActivity, profile, record_function
 
 _is_hip = is_hip()
 
@@ -278,7 +277,7 @@ class PerTokenGroupQuantTest(TestCase):
     NUM_TOKENS = [127]
     HIDDEN_DIMS = [256]
     GROUP_SIZES = [8]
-    DST_DTYPES = [fp8_type_]
+    DST_DTYPES = [torch.int8, fp8_type_]
     COLUMN_MAJOR_SCALES = [False]
     SCALE_TMA_ALIGNED = [False]
 
@@ -377,6 +376,40 @@ class PerTokenGroupQuantTest(TestCase):
                 scale_tma_aligned=params[5],
             ):
                 self._run_quant_test(*params)
+
+    def test_int8_zero_negative_saturation_and_scale_shape(self):
+        x = torch.tensor(
+            [
+                [0.0] * 8,
+                [-1000.0, 1000.0, -1.0, 1.0, 0.0, 0.0, 0.0, 0.0],
+            ],
+            dtype=torch.float16,
+            device="cuda",
+        )
+        triton_q, triton_scale = triton_per_token_group_quant_8bit(
+            x,
+            group_size=8,
+            eps=1e-10,
+            dtype=torch.int8,
+            column_major_scales=False,
+            scale_tma_aligned=False,
+        )
+        native_q, native_scale = sglang_per_token_group_quant_8bit(
+            x,
+            group_size=8,
+            eps=1e-10,
+            dtype=torch.int8,
+            column_major_scales=False,
+            scale_tma_aligned=False,
+        )
+
+        self.assertEqual(triton_scale.shape, (2, 1))
+        self.assertEqual(native_scale.shape, (2, 1))
+        self.assertTrue(torch.equal(triton_q[0], torch.zeros_like(triton_q[0])))
+        self.assertEqual(triton_q[1, 0].item(), torch.iinfo(torch.int8).min + 1)
+        self.assertEqual(triton_q[1, 1].item(), torch.iinfo(torch.int8).max)
+        torch.testing.assert_close(triton_scale, native_scale, rtol=1e-5, atol=1e-7)
+        self.assertTrue(torch.equal(triton_q, native_q))
 
 
 if __name__ == "__main__":
