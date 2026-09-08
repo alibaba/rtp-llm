@@ -14,12 +14,69 @@ CUDA->CPU sync illegal during stream capture).
 
 import os
 import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Optional, Tuple
 
 import torch
 
 FP4_BLOCK = 32
 FP8_BLOCK = 128
+
+
+def _deep_gemm_process_rank() -> int:
+    """Return a stable process rank for rank-local DeepGEMM JIT scratch."""
+
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        return int(torch.distributed.get_rank())
+    for env_name in ("RANK", "LOCAL_RANK"):
+        try:
+            return int(os.environ[env_name])
+        except (KeyError, ValueError):
+            pass
+    return os.getpid()
+
+
+def _deep_gemm_rank_nvcc_tmpdir(rank: Optional[int] = None) -> str:
+    """Return a stable per-rank temp directory for DeepGEMM's nvcc JIT."""
+
+    base_dir = (
+        os.environ.get("DSV4_MEGA_MOE_NVCC_TMPDIR")
+        or os.environ.get("DG_JIT_CACHE_DIR")
+        or os.environ.get("TRITON_CACHE_DIR")
+        or "/tmp"
+    )
+    process_rank = _deep_gemm_process_rank() if rank is None else int(rank)
+    return os.path.join(
+        base_dir,
+        "rtp_llm_dsv4_mega_moe_nvcc",
+        f"rank_{process_rank}",
+    )
+
+
+@contextmanager
+def _activate_deep_gemm_rank_nvcc_tmpdir() -> Iterator[str]:
+    """Isolate nvcc scratch so one rank cannot remove another rank's files."""
+
+    previous_tmpdir = os.environ.get("TMPDIR")
+    tmpdir = _deep_gemm_rank_nvcc_tmpdir()
+    try:
+        os.makedirs(tmpdir, exist_ok=True)
+    except OSError:
+        tmpdir = os.path.join(
+            "/tmp",
+            "rtp_llm_dsv4_mega_moe_nvcc",
+            f"rank_{_deep_gemm_process_rank()}",
+        )
+        os.makedirs(tmpdir, exist_ok=True)
+    os.environ["TMPDIR"] = tmpdir
+    try:
+        yield tmpdir
+    finally:
+        if previous_tmpdir is None:
+            os.environ.pop("TMPDIR", None)
+        else:
+            os.environ["TMPDIR"] = previous_tmpdir
 
 
 def prepare_fp4_weight_scale_for_deepgemm(
@@ -49,13 +106,14 @@ def prepare_fp4_weight_scale_for_deepgemm(
     import deep_gemm
 
     scale_fp32 = scale.float()
-    if num_groups is None:
+    with _activate_deep_gemm_rank_nvcc_tmpdir():
+        if num_groups is None:
+            return deep_gemm.transform_sf_into_required_layout(
+                scale_fp32, mn, k, (1, FP4_BLOCK)
+            )
         return deep_gemm.transform_sf_into_required_layout(
-            scale_fp32, mn, k, (1, FP4_BLOCK)
+            scale_fp32, mn, k, (1, FP4_BLOCK), num_groups
         )
-    return deep_gemm.transform_sf_into_required_layout(
-        scale_fp32, mn, k, (1, FP4_BLOCK), num_groups
-    )
 
 
 def _per_token_cast_to_fp8_packed_ue8m0(

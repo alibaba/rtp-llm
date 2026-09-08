@@ -868,7 +868,10 @@ void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& inputs, bool s
                                           attention_inputs_,
                                           torch_ext::BertEmbeddingInputs()});
 
-    if (enable_cuda_graph_ && graph_runner_->canRun(py_model_inputs, graph_state_)) {
+    // Projection-KTP must coordinate and pad every rank before selecting a
+    // common graph key.  Defer graph preparation to forward(), where the
+    // rank-synchronized PyModelInputs are available.
+    if (ktp_size_ <= 1 && enable_cuda_graph_ && graph_runner_->canRun(py_model_inputs, graph_state_)) {
         RTP_LLM_PROFILE_SCOPE("py_model.prepareAttentionInputs(cuda_graph_prepare)");
         graph_runner_->prepareAttentionInputs(py_model_inputs, graph_state_, skip_forward_event_sync);
     }
@@ -999,6 +1002,24 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
                                                               attention_inputs_,
                                                               bert_embedding_inputs});
         py_model_inputs.force_disable_sp_run = inputs.force_disable_sp_run;
+        if (ktp_size_ > 1) {
+            py::gil_scoped_acquire gil;
+            RTP_LLM_CHECK_WITH_INFO(py::hasattr(py_model_, "coordinate_ktp_step"),
+                                    "Projection-KTP model must implement coordinate_ktp_step");
+            py_model_inputs = py_model_
+                                  .attr("coordinate_ktp_step")(
+                                      py_model_inputs, enable_cuda_graph_, inputs.is_fake_stream)
+                                  .cast<PyModelInputs>();
+            RTP_LLM_CHECK_WITH_INFO(
+                py_model_inputs.ktp_common_physical_batch > 0,
+                "Projection-KTP coordinator returned no common physical batch");
+            if (py_model_inputs.ktp_all_idle) {
+                GptModelOutputs skipped;
+                skipped.skip_run = true;
+                RTP_LLM_LOG_DEBUG("[K3_PROJECTION_KTP_STEP] all ranks idle; skip model forward");
+                return skipped;
+            }
+        }
         PyModelOutputs py_model_outputs;
         torch::Tensor  hidden_states;
 

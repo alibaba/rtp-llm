@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 #include <pybind11/embed.h>
 #include <pybind11/pybind11.h>
@@ -147,6 +148,7 @@ private:
     // capture seqLen -> GraphInstance (prefill)
     // batch_size -> GraphInstance (decode)
     std::unordered_map<int, GraphInstance> graph_instances_;
+    std::unordered_set<int>                ktp_replay_keys_logged_;
     CaptureMemoryHold                      capture_mem_hold_;
     torch::Tensor                          position_encoding_;
     torch::Tensor                          token_type_embedding_;

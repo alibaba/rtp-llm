@@ -89,6 +89,12 @@ prepareMTPEngineInitParams(size_t model_id, py::object propose_model, const Engi
     ModelConfig temp_model_config = model_config;
     temp_model_config.num_layers  = 1;
 
+    // Projection-KTP belongs to the score model. The speculative model keeps
+    // the same DP/EP/world ranks but must not enter score-model KTP collectives.
+    ParallelismConfig propose_parallelism_config = base_params.parallelism_config;
+    propose_parallelism_config.ktp_size           = 1;
+    propose_parallelism_config.ktp_rank           = 0;
+
     for (int i = 0; i < model_num; i++) {
         auto     layer_weigths = py_layers_weights_vec[i];
         py::list tmp;
@@ -96,7 +102,7 @@ prepareMTPEngineInitParams(size_t model_id, py::object propose_model, const Engi
         auto gpt_weight = convert.createGptWeights(tmp, py_global_weights);
         mtp_params->push_back(std::move(std::make_unique<EngineInitParams>(model_id,
                                                                            temp_model_config,
-                                                                           base_params.parallelism_config,
+                                                                           propose_parallelism_config,
                                                                            base_params.runtime_config,
                                                                            base_params.pd_sep_config,
                                                                            base_params.concurrency_config,

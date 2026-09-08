@@ -65,8 +65,10 @@ bool cacheStatusSnapshotEnabled() {
     return env != nullptr && std::strcmp(env, "1") == 0;
 }
 
-bool shouldRefreshCacheStatusSnapshot(RoleType role_type, const std::list<GenerateStreamPtr>& streams) {
-    if (!cacheStatusSnapshotEnabled() || (role_type != RoleType::PREFILL && role_type != RoleType::PDFUSION)) {
+bool shouldRefreshCacheStatusSnapshot(bool                                cache_status_snapshot_enabled,
+                                      RoleType                            role_type,
+                                      const std::list<GenerateStreamPtr>& streams) {
+    if (!cache_status_snapshot_enabled || (role_type != RoleType::PREFILL && role_type != RoleType::PDFUSION)) {
         return false;
     }
     return std::any_of(streams.begin(), streams.end(), [](const GenerateStreamPtr& stream) {
@@ -91,6 +93,7 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
     sp_config(params.sp_config),
     metrics_reporter_(params.metrics_reporter),
     propose_params_(std::move(propose_params)),
+    cache_status_snapshot_enabled_(cacheStatusSnapshotEnabled()),
     step_profiler_(params.profiling_debug_logging_config.torch_cuda_profiler_dir,
                    params.parallelism_config.dp_rank * params.parallelism_config.tp_size
                        + params.parallelism_config.tp_rank) {
@@ -101,6 +104,7 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
         reserve_step_ = 0;
     }
     RTP_LLM_LOG_INFO("normal engine speculative reserve_step is %d", reserve_step_);
+    RTP_LLM_LOG_INFO("normal engine cache status snapshot enabled is %d", cache_status_snapshot_enabled_);
 #if !USING_CUDA
     // On ROCm, this constructor runs on a gRPC handler thread that defaults to
     // GPU 0. Set the correct device so all GPU allocations (KV cache, etc.) go
@@ -583,8 +587,12 @@ absl::Status NormalEngine::step() {
     }
     {
         RTP_LLM_PROFILE_SCOPE_DYNAMIC("engine.normal.execute(stream_size=%zu)", streams.size());
+        // getenv/setenv are not safe to race.  Python service initialization
+        // mutates the process environment while the TP engine loop is already
+        // running, so this hot path must only consume the constructor snapshot.
         const bool refresh_cache_status_snapshot =
-            resource_context_.cache_manager && shouldRefreshCacheStatusSnapshot(pd_sep_config.role_type, streams);
+            resource_context_.cache_manager
+            && shouldRefreshCacheStatusSnapshot(cache_status_snapshot_enabled_, pd_sep_config.role_type, streams);
         status = executor_->process(streams, tps_schedule_time_us);
         if (status.ok() && refresh_cache_status_snapshot) {
             RTP_LLM_PROFILE_SCOPE("engine.normal.refresh_cache_status_snapshot");

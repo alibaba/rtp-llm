@@ -239,6 +239,26 @@ def set_parallelism_config(
             == parallelism_config.tp_size * parallelism_config.dp_size
         ), f"ep_size must be equal to 1 or tp_size * dp_size, got ep_size={parallelism_config.ep_size}, tp_size={parallelism_config.tp_size}, dp_size={parallelism_config.dp_size}"
 
+    ktp_size = int(parallelism_config.ktp_size)
+    assert ktp_size in (1, 8, 16), (
+        f"ktp_size must be one of 1, 8, 16, got {ktp_size}"
+    )
+    if ktp_size > 1:
+        assert parallelism_config.tp_size == 1, (
+            "Projection KTP Decode requires attention tp_size=1, got "
+            f"{parallelism_config.tp_size}"
+        )
+        assert (
+            parallelism_config.dp_size
+            == parallelism_config.ep_size
+            == ktp_size
+            == parallelism_config.world_size
+        ), (
+            "Projection KTP Decode requires DP=EP=KTP=world_size, got "
+            f"DP={parallelism_config.dp_size}, EP={parallelism_config.ep_size}, "
+            f"KTP={ktp_size}, world={parallelism_config.world_size}"
+        )
+
     ffn_tp_size = parallelism_config.tp_size // parallelism_config.ffn_sp_size
     parallelism_config.ffn_tp_size = ffn_tp_size
     parallelism_config.enable_sp = parallelism_config.ffn_sp_size > 1
@@ -250,6 +270,7 @@ def set_parallelism_config(
     parallelism_config.tp_rank = (
         parallelism_config.world_rank % parallelism_config.tp_size
     )
+    parallelism_config.ktp_rank = parallelism_config.world_rank % ktp_size
     parallelism_config.dp_rank = (
         parallelism_config.world_rank // parallelism_config.tp_size
     )

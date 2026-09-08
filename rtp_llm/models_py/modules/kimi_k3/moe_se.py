@@ -373,11 +373,23 @@ class KimiK3LatentMoESE(KimiK3LatentMoE):
         *,
         sequence_parallel: bool = False,
         valid_token_count: Optional[int] = None,
+        valid_token_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         sp_active = (
             sequence_parallel and self.attn_tp_size > 1 and hidden_states.is_cuda
         )
         expert_ids, routing_weights = self._route(hidden_states)
+        if valid_token_mask is not None:
+            if valid_token_mask.ndim != 1 or valid_token_mask.numel() != hidden_states.shape[0]:
+                raise ValueError(
+                    "valid_token_mask must contain one entry per local token: "
+                    f"mask={tuple(valid_token_mask.shape)}, rows={hidden_states.shape[0]}"
+                )
+            valid = valid_token_mask.to(device=hidden_states.device, dtype=torch.bool)
+            expert_ids = torch.where(valid.unsqueeze(-1), expert_ids, 0)
+            routing_weights = routing_weights * valid.to(
+                routing_weights.dtype
+            ).unsqueeze(-1)
         if valid_token_count is not None:
             if valid_token_count < 0 or valid_token_count > hidden_states.shape[0]:
                 raise ValueError(
@@ -408,9 +420,6 @@ class KimiK3LatentMoESE(KimiK3LatentMoE):
             self.weights[K3W.MOE_ROUTED_UP],
         )
         output = routed_output + shared_output
-        if valid_token_count is not None and valid_token_count < hidden_states.shape[0]:
-            output = output.clone()
-            output[valid_token_count:] = 0
         return output
 
 

@@ -53,6 +53,7 @@ std::string PrefillCPConfig::to_string() const {
 std::string ParallelismConfig::to_string() const {
     std::ostringstream oss;
     oss << "tp_size: " << tp_size << "\n"
+        << "ktp_size: " << ktp_size << "\n"
         << "ep_size: " << ep_size << "\n"
         << "dp_size: " << dp_size << "\n"
         << "world_size: " << world_size << "\n"
@@ -62,6 +63,7 @@ std::string ParallelismConfig::to_string() const {
         << "local_rank: " << local_rank << "\n"
         << "ffn_sp_size: " << ffn_sp_size << "\n"
         << "tp_rank: " << tp_rank << "\n"
+        << "ktp_rank: " << ktp_rank << "\n"
         << "ep_rank: " << ep_rank << "\n"
         << "dp_rank: " << dp_rank << "\n"
         << "ffn_tp_size: " << ffn_tp_size << "\n"

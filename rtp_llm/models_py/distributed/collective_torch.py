@@ -25,6 +25,9 @@ class Group(Enum):
 
     DP = "DP"
     TP = "TP"
+    KTP = "KTP"
+    KTP_CONTROL = "KTP_CONTROL"
+    EP = "EP"
     DP_AND_TP = "DP_AND_TP"
 
 
@@ -107,6 +110,9 @@ def _normalize_parallelism_ranks(parallelism_config: ParallelismConfig) -> None:
             )
         parallelism_config.tp_rank = tp_rank
         parallelism_config.dp_rank = dp_rank
+    ktp_size = int(getattr(parallelism_config, "ktp_size", 1))
+    if ktp_size > 0:
+        parallelism_config.ktp_rank = parallelism_config.world_rank % ktp_size
 
 
 def init_distributed_environment(
@@ -205,7 +211,7 @@ def init_distributed_environment(
         f"[rank: {world_rank}] Created DP_AND_TP group {torch.distributed.group.WORLD} with ranks: {list(range(world_size))}"
     )
 
-    # Create DP and TP groups
+    # Create DP, TP, and projection-only KTP groups.
     _create_process_groups(parallelism_config, backend, timedelta(days=36500))
     _parallelism_config = parallelism_config
     _initialized = True
@@ -213,6 +219,36 @@ def init_distributed_environment(
     if rocm_rccl is not None and parallelism_config.tp_size > 1:
         rocm_rccl.prepare_comm_if_needed(parallelism_config, _get_group(Group.TP))
     init_user_buffers_environment(parallelism_config)
+
+
+def _requires_dedicated_ep_group(
+    *, world_size: int, local_world_size: int, ep_size: int
+) -> bool:
+    """Return whether full-world EP needs its own multi-host communicator.
+
+    Single-host K3 uses symmetric-memory MegaMoE and does not execute the NCCL
+    EP fallback. The fallback is only valid when EP spans the full world, so
+    creating a communicator for any other layout would hide a topology error.
+    """
+
+    if world_size <= 0 or ep_size <= 0:
+        raise ValueError(
+            "world_size and ep_size must be positive: "
+            f"world={world_size}, EP={ep_size}"
+        )
+    if ep_size <= 1:
+        return False
+    if local_world_size <= 0:
+        raise ValueError(
+            "local_world_size must be positive when EP is enabled: "
+            f"local_world={local_world_size}"
+        )
+    if world_size % local_world_size:
+        raise ValueError(
+            "world_size must be divisible by local_world_size: "
+            f"world={world_size}, local_world={local_world_size}"
+        )
+    return ep_size == world_size and world_size > local_world_size
 
 
 def _create_process_groups(
@@ -233,6 +269,95 @@ def _create_process_groups(
     world_size = parallelism_config.world_size
     tp_size = parallelism_config.tp_size
     dp_size = parallelism_config.dp_size
+    ktp_size = int(getattr(parallelism_config, "ktp_size", 1))
+    ep_size = int(getattr(parallelism_config, "ep_size", 1))
+    local_world_size = int(
+        getattr(parallelism_config, "local_world_size", world_size)
+    )
+    use_dedicated_ep = _requires_dedicated_ep_group(
+        world_size=world_size,
+        local_world_size=local_world_size,
+        ep_size=ep_size,
+    )
+
+    if ktp_size > 1:
+        if ktp_size != world_size:
+            raise ValueError(
+                "Projection KTP currently requires ktp_size == world_size, got "
+                f"KTP={ktp_size}, world={world_size}"
+            )
+        # Deliberately create a dedicated communicator even though the rank set
+        # equals WORLD.  KTP collectives must not alias attention TP ordering or
+        # communicator state.
+        ktp_ranks = list(range(world_size))
+        ktp_group = torch.distributed.new_group(
+            ranks=ktp_ranks,
+            backend=backend,
+            timeout=timedelta(days=36500),
+        )
+        _group_map[Group.KTP] = ktp_group
+        logging.info(
+            "[rank: %s] Created dedicated KTP group with ranks: %s",
+            world_rank,
+            ktp_ranks,
+        )
+        # CUDA Graph capture uses the KTP communicator for both projection
+        # collectives and the multi-host EP fallback.  Keep graph-external
+        # lifecycle synchronization off that communicator: a NCCL barrier
+        # issued after multiple captured graphs can spin forever even when all
+        # ranks reached the same Python callsite, because the captured NCCL
+        # operation sequence is not a safe control-plane rendezvous.
+        ktp_control_group = torch.distributed.new_group(
+            ranks=ktp_ranks,
+            backend="gloo",
+            timeout=timedelta(days=36500),
+        )
+        _group_map[Group.KTP_CONTROL] = ktp_control_group
+        logging.info(
+            "[rank: %s] Created dedicated Gloo KTP control group with ranks: %s",
+            world_rank,
+            ktp_ranks,
+        )
+        torch.distributed.barrier(group=ktp_control_group)
+
+    if use_dedicated_ep:
+        if ktp_size > 1:
+            # Projection-KTP and the multi-host EP fallback execute in one
+            # strictly ordered Decode forward and cover the same full-world
+            # rank set.  A single CUDA Graph containing two full-world NCCL
+            # communicators can deadlock on its first replay even when every
+            # rank captured the same operation order.  Reuse the dedicated
+            # KTP communicator for EP so the graph has one collective launch
+            # sequence.  WORLD remains independent for graph-external control
+            # barriers and request-step coordination.
+            if ktp_size != world_size:
+                raise ValueError(
+                    "multi-host K3 EP can share Projection-KTP only when "
+                    f"KTP == world size, got KTP={ktp_size}, world={world_size}"
+                )
+            _group_map[Group.EP] = _group_map[Group.KTP]
+            logging.info(
+                "[rank: %s] Reusing dedicated KTP communicator for "
+                "multi-host EP ranks: %s",
+                world_rank,
+                list(range(world_size)),
+            )
+        else:
+            # Non-KTP multi-host K3 EP still needs a communicator distinct
+            # from WORLD, which also carries lifecycle/control traffic.
+            ep_ranks = list(range(world_size))
+            ep_group = torch.distributed.new_group(
+                ranks=ep_ranks,
+                backend=backend,
+                timeout=timedelta(days=36500),
+            )
+            _group_map[Group.EP] = ep_group
+            logging.info(
+                "[rank: %s] Created dedicated multi-host EP group with ranks: %s",
+                world_rank,
+                ep_ranks,
+            )
+            torch.distributed.barrier()
 
     if dp_size > 1 and world_size != dp_size:
         # Create all DP groups - all ranks must participate in creating all DP groups
@@ -627,7 +752,9 @@ def _get_group(group: Group) -> torch.distributed.ProcessGroup:
     tp_size = _parallelism_config.tp_size
     dp_size = _parallelism_config.dp_size
     world_size = _parallelism_config.world_size
-    if group == Group.DP and dp_size > 1 and world_size != dp_size:
+    if group in (Group.KTP, Group.KTP_CONTROL, Group.EP):
+        group_key = group
+    elif group == Group.DP and dp_size > 1 and world_size != dp_size:
         tp_rank = torch.distributed.get_rank() % tp_size
         group_key = Group.DP.name + str(tp_rank)
     elif group == Group.TP and tp_size > 1 and world_size != tp_size:
@@ -772,6 +899,29 @@ def all_gather(tensor: torch.Tensor, group: Group) -> torch.Tensor:
     # return torch.cat(tensor_list, dim=0)
 
 
+def all_to_all_single(tensor: torch.Tensor, group: Group) -> torch.Tensor:
+    """Exchange equal contiguous dim-0 chunks across ``group``.
+
+    Projection KTP lays its input out as ``[destination, rows, payload]``.
+    The returned tensor is ordered by source rank and can therefore be viewed
+    as ``[source, rows, payload]`` by the destination DP owner.
+    """
+
+    process_group = _get_group(group)
+    world_size = torch.distributed.get_world_size(process_group)
+    if world_size <= 1:
+        return tensor
+    if tensor.ndim == 0 or tensor.shape[0] % world_size:
+        raise ValueError(
+            "all_to_all_single requires dim0 divisible by group size: "
+            f"shape={tuple(tensor.shape)}, world_size={world_size}"
+        )
+    send = tensor.contiguous()
+    output = torch.empty_like(send)
+    torch.distributed.all_to_all_single(output, send, group=process_group)
+    return output
+
+
 def all_gather_into(
     tensor: torch.Tensor,
     output: torch.Tensor,
@@ -897,6 +1047,7 @@ __all__ = [
     "all_gather",
     "all_gather_into",
     "all_gather_trim",
+    "all_to_all_single",
     "reduce_scatter",
     "reduce_scatter_padded",
     "barrier",
