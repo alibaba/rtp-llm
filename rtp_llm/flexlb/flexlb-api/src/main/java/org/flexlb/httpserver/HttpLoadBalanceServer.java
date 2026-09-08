@@ -12,6 +12,7 @@ import org.flexlb.dao.loadbalance.LogLevelUpdateRequest;
 import org.flexlb.dao.loadbalance.QueueSnapshotResponse;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
+import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.domain.consistency.MasterChangeNotifyReq;
@@ -256,12 +257,22 @@ public class HttpLoadBalanceServer {
             List<Map<String, Object>> prefillList = new ArrayList<>();
             for (Map.Entry<String, PrefillEndpoint> entry
                     : endpointRegistry.snapshotPrefillEndpoints().entrySet()) {
+                PrefillEndpoint endpoint = entry.getValue();
+                WorkerStatus.CacheIndexSnapshot cacheIndex =
+                        endpoint.getStatus().cacheIndexSnapshot();
+                CacheStatus cacheStatus = cacheIndex.cacheStatus();
                 Map<String, Object> ep = new LinkedHashMap<>();
                 ep.put("ip_port", entry.getKey());
-                ep.put("inflight_batches", entry.getValue().getInflightBatchCount());
-                ep.put("inflight_requests", entry.getValue().getLocallyOwnedRequestCount());
+                ep.put("inflight_batches", endpoint.getInflightBatchCount());
+                ep.put("inflight_requests", endpoint.getLocallyOwnedRequestCount());
                 ep.put("inflight_route_requests",
-                        entry.getValue().getIndividuallyTrackedRequestCount());
+                        endpoint.getIndividuallyTrackedRequestCount());
+                ep.put("cache_version",
+                        cacheStatus == null ? -1L : cacheStatus.getVersion());
+                ep.put("cache_indexed", cacheIndex.indexInitialized());
+                ep.put("cache_indexed_version", cacheIndex.indexedVersion());
+                ep.put("cache_key_size",
+                        cacheStatus == null ? 0 : cacheStatus.getCacheKeySize());
                 prefillList.add(ep);
             }
             result.put("prefill_endpoints", prefillList);

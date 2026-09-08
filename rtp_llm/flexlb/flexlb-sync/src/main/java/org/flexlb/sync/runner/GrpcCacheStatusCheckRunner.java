@@ -16,7 +16,6 @@ import org.flexlb.util.IdUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.util.Optional;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.Executor;
 import java.util.concurrent.atomic.LongAdder;
@@ -195,7 +194,11 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
                         // Keep the generation lock through this in-memory index
                         // update so retirement cannot publish a replacement or
                         // clear the address between validation and publication.
-                        updateLocalKvCache();
+                        WorkerCacheUpdateResult updateResult = updateLocalKvCache();
+                        if (updateResult != null && updateResult.isSuccess()) {
+                            workerStatus.publishCacheIndexedVersion(
+                                    newCacheStatus.getVersion());
+                        }
                     }
                     logCacheStatusUpdate(newCacheStatus, startTime);
                 }
@@ -220,10 +223,20 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
         if (debug) {
             return true;
         }
-        CacheStatus currentCacheStatus = workerStatus.getCacheStatus();
-        if (currentCacheStatus != null && newCacheStatus.getVersion() <= currentCacheStatus.getVersion()) {
+        WorkerStatus.CacheIndexSnapshot current =
+                workerStatus.cacheIndexSnapshot();
+        CacheStatus currentCacheStatus = current.cacheStatus();
+        if (currentCacheStatus == null) {
+            return true;
+        }
+        long currentVersion = currentCacheStatus.getVersion();
+        long responseVersion = newCacheStatus.getVersion();
+        boolean responseAlreadyIndexed = current.indexInitialized()
+                && current.indexedVersion() == responseVersion;
+        if (responseVersion < currentVersion
+                || responseVersion == currentVersion && responseAlreadyIndexed) {
             logger.debug("gRPC Cache Status - {}, role:{}, version not updated, current: {}, response: {}",
-                    ipPort, roleType.name(), currentCacheStatus.getVersion(), newCacheStatus.getVersion());
+                    ipPort, roleType.name(), currentVersion, responseVersion);
             return false;
         }
         return true;
@@ -316,9 +329,11 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
     }
 
     private long getCurrentCacheVersion() {
-        return debug ? -1L : Optional.ofNullable(workerStatus)
-                .map(WorkerStatus::getCacheStatus)
-                .map(CacheStatus::getVersion)
-                .orElse(-1L);
+        if (debug) {
+            return -1L;
+        }
+        WorkerStatus.CacheIndexSnapshot snapshot =
+                workerStatus.cacheIndexSnapshot();
+        return snapshot.indexInitialized() ? snapshot.indexedVersion() : -1L;
     }
 }

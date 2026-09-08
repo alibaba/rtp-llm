@@ -152,6 +152,12 @@ public class WorkerStatus {
         }
     }
 
+    public record CacheIndexSnapshot(
+            CacheStatus cacheStatus,
+            boolean indexInitialized,
+            long indexedVersion) {
+    }
+
     /** One deeply frozen RPC observation shared by every status reducer. */
     public static final class StatusObservation {
         private final WorkerStatus owner;
@@ -248,7 +254,8 @@ public class WorkerStatus {
     private final AtomicReference<PollHealth> pollHealth;
 
     /** Cache polling is independent from worker-status polling. */
-    private final AtomicReference<CacheStatus> cacheStatus = new AtomicReference<>();
+    private final AtomicReference<CacheIndexSnapshot> cacheIndexSnapshot =
+            new AtomicReference<>(new CacheIndexSnapshot(null, false, -1L));
     private final AtomicLong cacheLastUpdateTime = new AtomicLong(-1L);
 
     private final AtomicReference<PollLease> statusPollLease =
@@ -588,11 +595,36 @@ public class WorkerStatus {
     }
 
     public CacheStatus getCacheStatus() {
-        return cacheStatus.get();
+        return cacheIndexSnapshot.get().cacheStatus();
+    }
+
+    public CacheIndexSnapshot cacheIndexSnapshot() {
+        return cacheIndexSnapshot.get();
     }
 
     public void publishCacheStatus(CacheStatus cacheStatus) {
-        this.cacheStatus.set(Objects.requireNonNull(cacheStatus, "cacheStatus"));
+        requireGenerationLock();
+        requireActiveGeneration();
+        CacheStatus next = Objects.requireNonNull(cacheStatus, "cacheStatus");
+        cacheIndexSnapshot.updateAndGet(current -> new CacheIndexSnapshot(
+                next, current.indexInitialized(), current.indexedVersion()));
+    }
+
+    public long getCacheIndexedVersion() {
+        return cacheIndexSnapshot.get().indexedVersion();
+    }
+
+    public void publishCacheIndexedVersion(long version) {
+        requireGenerationLock();
+        requireActiveGeneration();
+        CacheIndexSnapshot current = cacheIndexSnapshot.get();
+        if (current.cacheStatus() == null
+                || current.cacheStatus().getVersion() != version) {
+            throw new IllegalStateException(
+                    "indexed cache version must match current cache status");
+        }
+        cacheIndexSnapshot.set(new CacheIndexSnapshot(
+                current.cacheStatus(), true, version));
     }
 
     public long recordSuccessfulCachePoll() {
