@@ -66,7 +66,9 @@ system or create the configured sink.
 
 The upstream template lifecycle releases both reporters after the Epsilon
 barrier and restore fixup; its abort path also resumes prepared reporters.
-Both reporters then activate their external transport. They reread the Hippo
+The main parent participates through the same lifecycle wrapper as its children,
+so its deferred Python reporter is also released. Both reporters then activate
+their external transport. They reread the Hippo
 runtime environment and rebuild the sink and identity tags so a restored process
 does not report with the seed Pod's host or container IP. Python also replaces
 stale runtime tags when rendering data points that were registered before the

@@ -16,6 +16,38 @@ from rtp_llm.ops import RoleType, VitSeparation
 
 
 class BackendScrIntegrationTest(unittest.TestCase):
+    def test_parent_arrival_runs_template_lifecycle_hooks(self):
+        from rtp_llm.utils import scr_template_utils as scr
+        from rtp_llm.utils.scr_template_lifecycle import CallbackHook, TemplateLifecycle
+
+        order = []
+        lifecycle = TemplateLifecycle()
+        lifecycle.register(
+            "parent-reporter",
+            CallbackHook(
+                prepare=lambda generation: order.append("prepare"),
+                fixup=lambda generation: order.append("fixup"),
+                release=lambda generation: order.append("release"),
+            ),
+        )
+        manifest = SimpleNamespace(
+            worker_id=lambda role, instance: 0,
+            worker_num=1,
+            generation="parent-generation",
+        )
+        with mock.patch.dict(
+            os.environ,
+            {"RTPLLM_ENABLE_SCR": "1", "SCR_PHASE": "checkpoint"},
+        ), mock.patch.object(
+            scr, "get_template_lifecycle", return_value=lifecycle
+        ), mock.patch.object(
+            scr, "arrive_scr_checkpoint_barrier",
+            side_effect=lambda **kwargs: order.append("barrier") or 0,
+        ):
+            self.assertEqual(launcher._start_parent_scr_arrival(manifest), 0)
+        self.assertEqual(order, ["prepare", "barrier", "fixup", "release"])
+        self.assertFalse(lifecycle.active)
+
     def _config(self, local_rank=1, world_rank=5):
         return SimpleNamespace(
             parallelism_config=SimpleNamespace(
