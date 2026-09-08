@@ -331,6 +331,14 @@ TEST_F(NormalBatchStreamProcessorTest, testAsyncMropeGatherUsesPublishedTokenAnd
         auto         result = processor.gatherModelInput(groups, holder);
         ASSERT_TRUE(result.ok()) << result.status();
         EXPECT_TRUE(result->combo_tokens.is_cuda());
+#if USING_CUDA
+        EXPECT_TRUE(result->sequence_lengths.is_cpu());
+        EXPECT_TRUE(result->sequence_lengths.is_pinned());
+        EXPECT_TRUE(result->input_lengths.is_cpu());
+        EXPECT_TRUE(result->kv_cache_kernel_block_id.is_cpu());
+#else
+        EXPECT_TRUE(result->sequence_lengths.is_cuda());
+#endif
         EXPECT_EQ(toVec<int32_t>(result->combo_tokens), (vector<int32_t>{42 + next_length}));
         EXPECT_EQ(toVec<int32_t>(result->sequence_lengths), (vector<int32_t>{next_length - 1}));
         EXPECT_EQ(toVec<int32_t>(result->combo_position_ids), (vector<int32_t>(3, 12 + next_length - 3)));

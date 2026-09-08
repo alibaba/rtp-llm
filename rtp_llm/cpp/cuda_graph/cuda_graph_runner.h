@@ -183,6 +183,10 @@ private:
     // event to record forward done
     torch::Event forward_event_ = cuda_graph::makeGraphEvent();
 
+    // Host plan/capture buffers may be reused once their staging copies finish,
+    // without waiting for the model graph that consumes the device copies.
+    torch::Event prepare_copy_event_ = cuda_graph::makeGraphEvent();
+
     std::atomic<bool> prepared_attention_inputs_ = false;
 };
 

@@ -285,6 +285,10 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
         RTP_LLM_PROFILE_SCOPE("cuda_graph.prepareAttentionInputs(wait_forward_event)");
         forward_event_.synchronize();
     }
+    if (!device_metadata_replay_) {
+        RTP_LLM_PROFILE_SCOPE("cuda_graph.prepareAttentionInputs(wait_prepare_copies)");
+        prepare_copy_event_.synchronize();
+    }
     prepared_attention_inputs_.store(true, std::memory_order_release);
 
     const size_t graph_idx =
@@ -690,6 +694,7 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
         }
         py::gil_scoped_acquire gil;
         callPrepareCudaGraph(attn_pyobj, py_model_inputs_);
+        prepare_copy_event_.record(cuda_graph::graphGetCurrentStream());
     }
 }
 

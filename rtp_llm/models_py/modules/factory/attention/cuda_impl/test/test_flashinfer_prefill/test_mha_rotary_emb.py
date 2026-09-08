@@ -2,6 +2,7 @@
 
 import math
 import unittest
+from types import SimpleNamespace
 from typing import Tuple
 
 import torch
@@ -16,6 +17,9 @@ from rtp_llm.models_py.modules.factory.attention.cuda_impl.flashinfer_rotary_emb
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.kv_cache_write_op import (
     KVCacheWriteOp,
 )
+from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
+    supports_scalar_prefill_rope,
+)
 from rtp_llm.ops import AttentionConfigs, RopeStyle
 from rtp_llm.ops.compute_ops import (
     FusedRopeKVCachePrefillOpQOut,
@@ -24,6 +28,40 @@ from rtp_llm.ops.compute_ops import (
     get_typemeta,
     init_exec_ctx,
 )
+
+
+class TestScalarPrefillRopeSupport(unittest.TestCase):
+    def setUp(self):
+        self.config = SimpleNamespace(
+            rope_config=SimpleNamespace(style=RopeStyle.Mrope)
+        )
+        self.inputs = SimpleNamespace(
+            is_cuda_graph=False,
+            input_lengths=torch.tensor([2, 3], dtype=torch.int32),
+            prefix_lengths=torch.tensor([5, 0], dtype=torch.int32),
+            combo_position_ids=torch.tensor([5, 6, 0, 1, 2], dtype=torch.int32)
+            .unsqueeze(1)
+            .repeat(1, 3),
+        )
+
+    def test_text_axes_and_reused_prefix(self):
+        self.assertTrue(supports_scalar_prefill_rope(self.config, self.inputs))
+
+    def test_multimodal_axes_are_rejected(self):
+        self.inputs.combo_position_ids[2, 1] += 1
+        self.assertFalse(supports_scalar_prefill_rope(self.config, self.inputs))
+
+    def test_equal_but_offset_axes_are_rejected(self):
+        self.inputs.combo_position_ids += 1
+        self.assertFalse(supports_scalar_prefill_rope(self.config, self.inputs))
+
+    def test_graph_cannot_reuse_a_value_dependent_decision(self):
+        self.inputs.is_cuda_graph = True
+        self.assertFalse(supports_scalar_prefill_rope(self.config, self.inputs))
+
+    def test_missing_positions_are_rejected(self):
+        self.inputs.combo_position_ids = None
+        self.assertFalse(supports_scalar_prefill_rope(self.config, self.inputs))
 
 
 class RopeParams:

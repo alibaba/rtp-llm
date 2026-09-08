@@ -125,6 +125,34 @@ def attn_kv_dtype(attn_configs: AttentionConfigs) -> torch.dtype:
     return attn_configs.dtype
 
 
+def supports_scalar_prefill_rope(
+    attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
+) -> bool:
+    """Scalar RoPE also handles text MRoPE when every axis has scalar positions."""
+    if attn_configs.rope_config.style != RopeStyle.Mrope:
+        return True
+    # Do not silently apply scalar RoPE to image/video axes or graph replays
+    # whose position values can change after this host-side validation.
+    if attn_inputs.is_cuda_graph:
+        return False
+    positions = attn_inputs.combo_position_ids
+    if positions is None or positions.numel() == 0:
+        return False
+    lengths = _host_i32(attn_inputs.input_lengths).to(torch.int64)
+    prefixes = _host_i32(attn_inputs.prefix_lengths).to(torch.int64)
+    if lengths.numel() != prefixes.numel():
+        return False
+    count = int(lengths.sum())
+    if positions.numel() != count * 3:
+        return False
+    starts = lengths.cumsum(0) - lengths
+    scalar_positions = torch.arange(count) + torch.repeat_interleave(
+        prefixes - starts, lengths
+    )
+    axes = positions.cpu().reshape(count, 3)
+    return torch.equal(axes, scalar_positions[:, None].expand(-1, 3))
+
+
 def attn_q_dtype(attn_configs: AttentionConfigs) -> torch.dtype:
     # FA3 FP8 (Hopper wgmma) requires Q/KV in the same FP8 dtype and is
     # SM90-only with head_dim 64/128/256;
@@ -879,7 +907,7 @@ class PyFlashinferPagedPrefillImpl(PyFlashinferPrefillImplBase):
         return (
             not is_sm10x()
             and PyFlashinferPrefillPagedAttnOp.support(attn_inputs)
-            and attn_configs.rope_config.style != RopeStyle.Mrope
+            and supports_scalar_prefill_rope(attn_configs, attn_inputs)
         )
 
     def support_cuda_graph(self) -> bool:
@@ -1081,7 +1109,14 @@ class PyFlashinferDecodeAttnOp(object):
             # Tensor-core decode plans from host mirrors in both eager and graph
             # modes; only replay decides whether another plan call is required.
             page_indptr = self.fmha_params.decode_page_indptr_h
-            page_indice = self.fmha_params.page_indice_h
+            # Graph indices already alias the device buffer updated by
+            # fill_params. Passing host indices makes FlashInfer's graph plan
+            # perform a blocking H2D copy, serializing the previous replay.
+            page_indice = (
+                self.fmha_params.page_indice_d
+                if self.enable_cuda_graph
+                else self.fmha_params.page_indice_h
+            )
             last_page_len = self.fmha_params.paged_kv_last_page_len_h
             plan_kwargs = {"non_blocking": True}
         elif use_cuda_core_graph_plan_cache:

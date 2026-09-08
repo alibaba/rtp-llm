@@ -193,8 +193,7 @@ void gatherMultimodalInputsForContextBatch(const GenerateStreamPtr&    stream,
                 sliceMultimodalExtraInput(mm_extra_input[i], mm_feature, token_offset, feature_len);
             if (!current_extra_input.is_cuda()) {
                 host_holder.hold_host(current_extra_input);
-                gathered_mm_extra_input.emplace_back(
-                    current_extra_input.to(torch::kCUDA, /*non_blocking=*/true));
+                gathered_mm_extra_input.emplace_back(current_extra_input.to(torch::kCUDA, /*non_blocking=*/true));
             } else {
                 gathered_mm_extra_input.emplace_back(std::move(current_extra_input));
             }
@@ -256,17 +255,16 @@ torch::Tensor buildLmOutputIndexesOnHost(const GptModelInputs& model_input, cons
     const auto total_batch_size         = static_cast<int64_t>(stream_groups.totalModelBatchSize());
     const auto total_decode_batch_size  = static_cast<int64_t>(stream_groups.totalDecodeBatchSize());
     const auto total_context_batch_size = total_batch_size - total_decode_batch_size;
-    auto       indexes =
-        torch::empty({total_batch_size}, torch::TensorOptions(torch::kInt32).pinned_memory(true));
-    auto* dst = indexes.data_ptr<int32_t>();
+    auto       indexes = torch::empty({total_batch_size}, torch::TensorOptions(torch::kInt32).pinned_memory(true));
+    auto*      dst     = indexes.data_ptr<int32_t>();
     for (int64_t i = 0; i < total_decode_batch_size; ++i) {
         dst[i] = static_cast<int32_t>(i);
     }
     if (total_context_batch_size > 0) {
-        auto input_lengths = model_input.input_lengths.is_cuda() ? model_input.input_lengths.cpu().contiguous() :
-                                                                  model_input.input_lengths.contiguous();
-        const auto* lengths = input_lengths.data_ptr<int32_t>();
-        int32_t     offset  = static_cast<int32_t>(total_decode_batch_size);
+        auto        input_lengths = model_input.input_lengths.is_cuda() ? model_input.input_lengths.cpu().contiguous() :
+                                                                          model_input.input_lengths.contiguous();
+        const auto* lengths       = input_lengths.data_ptr<int32_t>();
+        int32_t     offset        = static_cast<int32_t>(total_decode_batch_size);
         for (int64_t i = 0; i < total_context_batch_size; ++i) {
             offset += lengths[total_decode_batch_size + i];
             dst[total_decode_batch_size + i] = offset - 1;
@@ -291,16 +289,20 @@ torch::Tensor publishInt32ToCuda(const torch::Tensor& tensor, TensorHolder& host
 }
 
 void publishModelInputCoreTensorsToCuda(GptModelInputs& model_input, TensorHolder& host_holder) {
-    // TODO(async): stream state is still gathered through CPU pointers above.
-    // Publish only device tensors at the model boundary.
+    // Tokens follow the sampler on the execution stream. CUDA FlashInfer still
+    // plans from host lengths/block tables; PyWrappedModel stages device copies
+    // separately. Moving those host snapshots to CUDA here would force a D2H
+    // wait for the previous forward in every graph preparation.
     RTP_LLM_PROFILE_SCOPE("normal_engine.model_input_gatherer.publish_core_tensors_to_cuda");
-    model_input.combo_tokens     = publishInt32ToCuda(model_input.combo_tokens, host_holder);
+    model_input.combo_tokens = publishInt32ToCuda(model_input.combo_tokens, host_holder);
+#if !USING_CUDA
     model_input.input_lengths    = publishInt32ToCuda(model_input.input_lengths, host_holder);
     model_input.sequence_lengths = publishInt32ToCuda(model_input.sequence_lengths, host_holder);
     model_input.prefix_lengths   = publishInt32ToCuda(model_input.prefix_lengths, host_holder);
     // Migrate the 3-D KV kernel block id tensor with one H2D, replacing the
     // former per-group tensorHoldHostAndToCuda copies in PyWrappedModel.
     model_input.kv_cache_kernel_block_id = publishInt32ToCuda(model_input.kv_cache_kernel_block_id, host_holder);
+#endif
 }
 
 }  // anonymous namespace
@@ -385,8 +387,8 @@ absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&     
     RTP_LLM_PROFILE_SCOPE("normal_engine.model_input_gatherer.process_decode_streams");
     auto ctx = createGatherContext(config_, model_input, stream_groups, GatherContextMode::DECODE);
 
-    const char* device_input_env = std::getenv("RTP_LLM_DEVICE_INPUT");
-    bool use_normal_device_state = device_input_env != nullptr && std::string(device_input_env) == "1"
+    const char* device_input_env        = std::getenv("RTP_LLM_DEVICE_INPUT");
+    bool        use_normal_device_state = device_input_env != nullptr && std::string(device_input_env) == "1"
                                    && stream_groups.totalContextBatchSize() == 0
                                    && stream_groups.totalDecodeBatchSize() > 0;
     if (use_normal_device_state) {
@@ -433,7 +435,13 @@ absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&     
                                         ctx.batch_idx);
                 }
                 normal_combo_tokens_gpu.push_back(state.last_sample_token_gpu.reshape({1}));
+#if USING_CUDA
+                // The published snapshot advances with the device token, unlike
+                // seqLength(), which the dispatch worker may not have updated.
+                ctx.sequence_lengths[ctx.batch_idx] = state.next_real_seq_len - 1;
+#else
                 normal_sequence_lengths_gpu.push_back((state.next_seq_len_gpu - 1).to(torch::kInt32).reshape({1}));
+#endif
                 ctx.input_lengths[ctx.batch_idx] = stream->inputLength();
                 if (ctx.need_cal_position_id) {
                     // Host bookkeeping may still be one token behind. Use the
@@ -467,8 +475,10 @@ absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&     
     }
 
     if (use_normal_device_state) {
-        model_input.combo_tokens     = torch::cat(normal_combo_tokens_gpu, 0).to(torch::kInt32);
+        model_input.combo_tokens = torch::cat(normal_combo_tokens_gpu, 0).to(torch::kInt32);
+#if !USING_CUDA
         model_input.sequence_lengths = torch::cat(normal_sequence_lengths_gpu, 0).to(torch::kInt32);
+#endif
     }
     return absl::OkStatus();
 }
@@ -479,10 +489,10 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
     RTP_LLM_PROFILE_SCOPE("normal_engine.model_input_gatherer.process_context_streams");
     std::vector<torch::Tensor> gathered_mm_features;
     std::vector<torch::Tensor> gathered_mm_extra_input;
-    const auto context_batch_size = static_cast<int64_t>(stream_groups.totalContextBatchSize());
-    auto prefix_lengths_host =
+    const auto                 context_batch_size = static_cast<int64_t>(stream_groups.totalContextBatchSize());
+    auto                       prefix_lengths_host =
         torch::empty({context_batch_size}, torch::TensorOptions(torch::kInt32).pinned_memory(true));
-    auto ctx = createGatherContext(config_, model_input, stream_groups, GatherContextMode::CONTEXT);
+    auto ctx                = createGatherContext(config_, model_input, stream_groups, GatherContextMode::CONTEXT);
     ctx.prefix_lengths_host = prefix_lengths_host.data_ptr<int32_t>();
 
     for (const auto& stream : stream_groups.contextStreams()) {

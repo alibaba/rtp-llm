@@ -7,7 +7,7 @@ from unittest import mock
 
 import torch
 from attention_ref import compute_flashinfer_decode_reference
-from base_attention_test import BaseAttentionTest
+from base_attention_test import BaseAttentionTest, compare_tensors
 
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
     PyFlashinferDecodeAttnOp,
@@ -552,9 +552,9 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
                 attn_inputs.kv_cache_kernel_block_id[batch_idx, :page_count].tolist()
             )
         reference = compute_flashinfer_decode_reference(
-            q[:active_batch_size],
-            k_cache,
-            v_cache,
+            q[:active_batch_size].to(attn_op.q_dtype).to(q.dtype),
+            k_cache.to(q.dtype),
+            v_cache.to(q.dtype),
             sequence_lengths,
             block_id_list,
             seq_size_per_block,
@@ -615,7 +615,10 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
             self.assertEqual(plan_mock.call_count, 1)
             capture_call = plan_mock.call_args
             self.assertFalse(capture_call.args[0].is_cuda)
-            self.assertFalse(capture_call.args[1].is_cuda)
+            self.assertTrue(capture_call.args[1].is_cuda)
+            self.assertEqual(
+                capture_call.args[1].data_ptr(), fmha_params.page_indice_d.data_ptr()
+            )
             self.assertFalse(capture_call.args[2].is_cuda)
             self.assertTrue(capture_call.kwargs["non_blocking"])
             self.assertTrue(hasattr(attn_op.decode_wrapper, "_qo_indptr_buf"))
@@ -653,6 +656,29 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
             self.assertEqual(plan_mock.call_count, 2)
 
         self.assertEqual(attn_op.decode_wrapper._fixed_batch_size, capture_bs)
+
+    def test_tensor_core_replay_does_not_wait_for_previous_graph(self):
+        config = self._create_config()
+        inputs = self._create_cuda_graph_inputs(
+            2, [100, 200], config.seq_size_per_block
+        )
+        attn_op = PyFlashinferDecodeAttnOp(config.attn_configs, inputs)
+        self.assertTrue(attn_op.use_tensor_core)
+        attn_op.set_params(rtp_llm_ops.FlashInferMlaAttnParams())
+        attn_op.prepare(inputs)
+        attn_op.prepare_for_cuda_graph_replay(inputs)
+        torch.cuda.synchronize()
+
+        # A blocking host-index copy in FlashInfer.plan used to wait for all
+        # earlier work on this stream, preventing cross-step graph submission.
+        previous_forward = torch.cuda.Event()
+        torch.cuda._sleep(200_000_000)
+        previous_forward.record()
+        try:
+            attn_op.prepare_for_cuda_graph_replay(inputs)
+            self.assertFalse(previous_forward.query())
+        finally:
+            torch.cuda.synchronize()
 
     def test_cuda_core_replay_replans_only_on_page_topology_change(self):
         """CUDA-core replay caches only topology and refreshes graph buffers."""
@@ -767,6 +793,7 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
                 config.seq_size_per_block,
                 local_kv_head_num,
                 config.size_per_head,
+                dtype=self.cache_dtype(config.attn_configs),
             )
             skipped_replan_output = attn_op.forward(q, kv_cache, fmha_params)
             self._assert_active_output_matches_reference(
@@ -855,6 +882,7 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
             config.seq_size_per_block,
             local_kv_head_num,
             config.size_per_head,
+            dtype=self.cache_dtype(config.attn_configs),
         )
 
         with mock.patch.object(

@@ -342,7 +342,7 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         // Metrics and KV release stay on the main thread; dispatch_output_us
         // now measures launch cost, while worker time is in async_runner.thread.
         executor_collector.dispatch_output_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
-        int64_t tps_execute_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - schedule_time_us;
+        int64_t tps_execute_time_us           = autil::TimeUtility::currentTimeInMicroSeconds() - schedule_time_us;
         if (tps_execute_time_us <= 0) {
             tps_execute_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - process_start_time_us;
         }
@@ -364,7 +364,7 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         }
         auto result                           = batch_stream_processor_->dispatch(stream_groups, merge_outputs);
         executor_collector.dispatch_output_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
-        int64_t tps_execute_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - schedule_time_us;
+        int64_t tps_execute_time_us           = autil::TimeUtility::currentTimeInMicroSeconds() - schedule_time_us;
         if (tps_execute_time_us <= 0) {
             tps_execute_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - process_start_time_us;
         }
@@ -474,10 +474,14 @@ void NormalExecutor::ensureModelInputsOnCuda(GptModelInputs& model_input, const 
     };
 
     to_cuda(model_input.combo_tokens, "combo_tokens");
+#if !USING_CUDA
+    // CUDA attention planning consumes host metadata. Preserve its published
+    // snapshot across TP sync; PyWrappedModel owns the separate device copies.
     to_cuda(model_input.input_lengths, "input_lengths");
     to_cuda(model_input.sequence_lengths, "sequence_lengths");
     to_cuda(model_input.prefix_lengths, "prefix_lengths");
     to_cuda(model_input.sequence_lengths_plus_1, "sequence_lengths_plus_1");
+#endif
     to_cuda(model_input.lm_output_indexes, "lm_output_indexes");
     checkModelInputsOnCuda(model_input, tag);
 }
@@ -498,10 +502,12 @@ void NormalExecutor::checkModelInputsOnCuda(const GptModelInputs& model_input, c
                                 tensor.numel());
     };
     check(model_input.combo_tokens, "combo_tokens");
+#if !USING_CUDA
     check(model_input.input_lengths, "input_lengths");
     check(model_input.sequence_lengths, "sequence_lengths");
     check(model_input.prefix_lengths, "prefix_lengths");
     check(model_input.sequence_lengths_plus_1, "sequence_lengths_plus_1");
+#endif
     check(model_input.lm_output_indexes, "lm_output_indexes");
 }
 
