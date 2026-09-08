@@ -23,6 +23,55 @@ except Exception as e:
     rope = None
 
 
+_IDX_POOL_3D_CACHE = {}
+
+
+def _indexer_pool_3d(kv_cache, pool):
+    """Normalize the engine OPAQUE_KV pool [blocks, block_bytes] to the legacy
+    kv_scale_base geometry [blocks, tokens_per_block, entry_bytes] the indexer
+    kernels expect. Cached per backing storage: the pool never moves and hot
+    paths hit this 61x per step."""
+    if pool.dim() != 2:
+        return pool
+    key = (pool.data_ptr(), pool.size(0), pool.size(1))
+    v = _IDX_POOL_3D_CACHE.get(key)
+    if v is None:
+        spb = int(getattr(kv_cache, "indexer_seq_size_per_block", 0)) or 64
+        v = pool.view(pool.size(0), spb, -1)
+        _IDX_POOL_3D_CACHE[key] = v
+    return v
+
+
+def _indexer_write_dest(kv_cache, slot_mapping, indexer_slot_mapping):
+    """Destination (pool, slots) for indexer-K writes.
+
+    With the decoupled dsa_indexer_k pool the write must go through the
+    companion's own slot mapping; after main-KV prefix offload the legacy scale
+    region's blocks are freed, so silently falling back would write/read freed
+    memory - the exact bug class the decoupling removes. Hence: declared pool
+    without its slot mapping is a hard error, not a preference.
+    """
+    pool = getattr(kv_cache, "indexer_cache_base", None)
+    if pool is not None and pool.numel() > 0:
+        assert (
+            indexer_slot_mapping is not None and indexer_slot_mapping.numel() > 0
+        ), "independent indexer pool declared but indexer_slot_mapping is missing"
+        return _indexer_pool_3d(kv_cache, pool), indexer_slot_mapping
+    return kv_cache.kv_scale_base, slot_mapping
+
+
+def _indexer_score_src(kv_cache, attention_inputs):
+    """Source (pool, block_table) for indexer scoring, same contract as writes."""
+    pool = getattr(kv_cache, "indexer_cache_base", None)
+    if pool is not None and pool.numel() > 0:
+        table = getattr(attention_inputs, "indexer_cache_kernel_block_id_device", None)
+        assert (
+            table is not None and table.numel() > 0
+        ), "independent indexer pool declared but its kernel block table is missing"
+        return _indexer_pool_3d(kv_cache, pool), table
+    return kv_cache.kv_scale_base, attention_inputs.kv_cache_kernel_block_id_device
+
+
 def _unpack_ue8m0_scale(sf_packed: torch.Tensor) -> torch.Tensor:
     """
     Unpack UE8M0 scale format.
@@ -227,6 +276,7 @@ class IndexerOp(nn.Module):
         key: torch.Tensor,
         kv_cache: KVCache,
         slot_mapping: torch.Tensor,
+        indexer_slot_mapping: Optional[torch.Tensor] = None,
     ) -> None:
         """
         Quantize and cache only the key tensor (fast path for decode).
@@ -235,12 +285,16 @@ class IndexerOp(nn.Module):
             key: Key tensor in BF16/FP16 [num_tokens, index_head_dim]
             kv_cache: KV cache object with kv_scale_base
             slot_mapping: Physical slot indices [num_tokens]
+            indexer_slot_mapping: Slots into the independent indexer pool, when declared
         """
         assert kv_cache is not None, "kv_cache is required"
+        dest_pool, dest_slots = _indexer_write_dest(
+            kv_cache, slot_mapping, indexer_slot_mapping
+        )
         rtp_llm_ops.indexer_k_quant_and_cache(
             key,  # Original key in BF16/FP16 [num_tokens, index_head_dim]
-            kv_cache.kv_scale_base,  # [num_blocks, block_size, cache_stride]
-            slot_mapping,  # [num_tokens] physical slot indices
+            dest_pool,  # [num_blocks, block_size, cache_stride]
+            dest_slots,  # [num_tokens] physical slot indices
             self.block_size,  # quantization block size (128)
             self.scale_fmt,  # "ue8m0" for power-of-2 scaling
         )
@@ -251,6 +305,7 @@ class IndexerOp(nn.Module):
         key: torch.Tensor,
         kv_cache: KVCache,
         slot_mapping: torch.Tensor,
+        indexer_slot_mapping: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Quantize query and key tensors, and cache the key.
@@ -284,10 +339,13 @@ class IndexerOp(nn.Module):
 
         # Cache key
         assert kv_cache is not None, "kv_cache is required"
+        dest_pool, dest_slots = _indexer_write_dest(
+            kv_cache, slot_mapping, indexer_slot_mapping
+        )
         rtp_llm_ops.indexer_k_quant_and_cache(
             key,  # Original key in BF16/FP16 [num_tokens, index_head_dim]
-            kv_cache.kv_scale_base,  # [num_blocks, block_size, cache_stride]
-            slot_mapping,  # [num_tokens] physical slot indices
+            dest_pool,  # [num_blocks, block_size, cache_stride]
+            dest_slots,  # [num_tokens] physical slot indices
             self.block_size,  # quantization block size (128)
             self.scale_fmt,  # "ue8m0" for power-of-2 scaling
         )
@@ -301,6 +359,7 @@ class IndexerOp(nn.Module):
         kv_cache: KVCache,
         slot_mapping: torch.Tensor,
         kv_restore_unpad_indices: torch.Tensor,
+        indexer_slot_mapping: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Context-parallel variant: all-gather only K from all CP ranks, restore to logical
@@ -325,10 +384,13 @@ class IndexerOp(nn.Module):
         gathered_key = gathered_key.reshape(-1, key.size(-1))
         restored_key = gathered_key[kv_restore_unpad_indices]  # element wise
 
+        dest_pool, dest_slots = _indexer_write_dest(
+            kv_cache, slot_mapping, indexer_slot_mapping
+        )
         rtp_llm_ops.indexer_k_quant_and_cache(
             restored_key,
-            kv_cache.kv_scale_base,
-            slot_mapping,
+            dest_pool,
+            dest_slots,
             self.block_size,
             self.scale_fmt,
         )
@@ -371,7 +433,10 @@ class IndexerOp(nn.Module):
         from rtp_llm.models_py.kernels.cuda.fast_topk import fast_topk_transform_fused
 
         weights = weights.view(-1, self.index_n_heads)
-        kv_cache_fp8 = kv_cache.kv_scale_base
+        # Independent indexer pool when declared; legacy scale region otherwise.
+        # After main-KV offload only the companion pool still holds every token's
+        # indexer-K, so scoring must follow the same source as the writes.
+        kv_cache_fp8, block_table = _indexer_score_src(kv_cache, attention_inputs)
 
         num_heads_kv = 1
         head_dim_with_sf = (
@@ -381,9 +446,7 @@ class IndexerOp(nn.Module):
             kv_cache_fp8.shape[0], self.blocksize, num_heads_kv, head_dim_with_sf
         ).view(dtype=torch.uint8)
 
-        max_seq_len = (
-            attention_inputs.kv_cache_kernel_block_id_device.shape[1] * self.blocksize
-        )
+        max_seq_len = block_table.shape[1] * self.blocksize
 
         schedule_metadata = deep_gemm.get_paged_mqa_logits_metadata(
             fmha_params.kvlen_d,
@@ -396,7 +459,7 @@ class IndexerOp(nn.Module):
             kv_cache_fp8.view(dtype=torch.uint8),
             weights,
             fmha_params.kvlen_d,
-            attention_inputs.kv_cache_kernel_block_id_device,
+            block_table,
             schedule_metadata,
             max_seq_len,
             clean_logits=False,
@@ -458,11 +521,12 @@ class IndexerOp(nn.Module):
             device=q_fp8.device,
         )
 
+        src_pool, src_table = _indexer_score_src(kv_cache, attention_inputs)
         rtp_llm_ops.cp_gather_indexer_k_quant_cache(
-            kv_cache.kv_scale_base,  # [num_blocks, block_size, cache_stride]
+            src_pool,  # [num_blocks, block_size, cache_stride]
             k_fp8,  # output [num_tokens, index_head_dim]
             k_scale,  # output [num_tokens, scale_size]
-            attention_inputs.kv_cache_kernel_block_id_device,  # [batch_size, num_blocks]
+            src_table,  # [batch_size, num_blocks]
             attention_inputs.cu_kv_seqlens_device,
         )
 
@@ -568,11 +632,12 @@ class IndexerOp(nn.Module):
             dtype=torch.uint8,
             device=device,
         )
+        cp_src_pool, cp_src_table = _indexer_score_src(kv_cache, attention_inputs)
         rtp_llm_ops.cp_gather_indexer_k_quant_cache(
-            kv_cache.kv_scale_base,
+            cp_src_pool,
             k_fp8,
             k_scale,
-            attention_inputs.kv_cache_kernel_block_id_device,
+            cp_src_table,
             cu_kv_seqlens_global,
         )
         kv_fp8_full = (k_fp8, k_scale.view(torch.float32))
@@ -603,9 +668,12 @@ class IndexerOp(nn.Module):
 
         if total_local_ids.size(0) > 0:
             topk = run_part_logits_topk(
-                q0, weights_sq0,
-                precomputed_ks, precomputed_ke,
-                precomputed_lengths, precomputed_topk_off,
+                q0,
+                weights_sq0,
+                precomputed_ks,
+                precomputed_ke,
+                precomputed_lengths,
+                precomputed_topk_off,
             )
         else:
             topk = None

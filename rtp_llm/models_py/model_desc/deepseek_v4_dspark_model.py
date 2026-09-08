@@ -591,21 +591,17 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         block_table = self._swa_block_table(attention_inputs, batch_size)
         tokens_per_block = int(require_pool_tokens_per_block(self.kv_cache, tag=SWA_KV))
         write_cache_store_impl = create_write_cache_store_impl(
-            primary_attention_inputs(attention_inputs, self.kv_cache), self.kv_cache
+            as_attention_inputs_by_tag(attention_inputs, self.kv_cache)[SWA_KV],
+            self.kv_cache,
         )
         gathered_req_ids: Optional[torch.Tensor] = None
         gathered_positions: Optional[torch.Tensor] = None
         if commit_ctx is not None:
             # Proj-then-gather: the row map is gathered once here; each
             # layer's projected KV is gathered inside _commit_layer_features.
-            from rtp_llm.models_py.distributed.collective_torch import (
-                Group,
-                all_gather,
-            )
+            from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
 
-            gathered_req_ids = all_gather(
-                context_req_ids.contiguous(), group=Group.TP
-            )
+            gathered_req_ids = all_gather(context_req_ids.contiguous(), group=Group.TP)
             gathered_positions = all_gather(
                 context_positions.contiguous(), group=Group.TP
             )
@@ -628,7 +624,7 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
             # the committed rows, so proposal rows never enter the store's
             # block plan.
             if write_cache_store_impl is not None:
-                write_cache_store_impl(self.kv_cache.get_layer_cache_groups(layer_idx))
+                write_cache_store_impl(self.kv_cache.get_layer_cache(layer_idx, SWA_KV))
 
     def _forward_dspark_attention(
         self,
@@ -828,7 +824,9 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         gamma = self._gen_num_per_cycle
         phase = getattr(inputs, "dspark_call_phase", DSparkCallPhase.NONE)
         if phase == DSparkCallPhase.NONE:
-            raise RuntimeError("DSpark forward requires an explicit proposal/commit phase")
+            raise RuntimeError(
+                "DSpark forward requires an explicit proposal/commit phase"
+            )
         is_commit = phase == DSparkCallPhase.COMMIT
 
         # PyWrappedModel warmup intentionally has no KVCache.  Produce stable

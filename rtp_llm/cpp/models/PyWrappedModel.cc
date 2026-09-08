@@ -413,6 +413,23 @@ PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs& py_
         RTP_LLM_CHECK_WITH_INFO(inserted, "duplicate attention input tag=%s", group_tags[group_id].c_str());
     }
 
+    // Sparse V3.2 pair: dsa_indexer_k is an auxiliary cache, not a standalone
+    // attention group. The default entry carries its kernel table for compute,
+    // while the full tag map remains visible so cache-store writes pair each
+    // pool with its own physical block table.
+    static const std::string kDsaIndexerTag = "dsa_indexer_k";
+    if (group_count == 2) {
+        auto idx_it = by_tag.find(kDsaIndexerTag);
+        if (idx_it != by_tag.end()) {
+            const std::string& main_tag               = group_tags[0] == kDsaIndexerTag ? group_tags[1] : group_tags[0];
+            auto&              main_inputs            = by_tag.at(main_tag);
+            main_inputs.indexer_cache_kernel_block_id = idx_it->second.kv_cache_kernel_block_id;
+            main_inputs.indexer_cache_kernel_block_id_device = idx_it->second.kv_cache_kernel_block_id_device;
+            py_attn_inputs                                   = main_inputs;
+            return by_tag;
+        }
+    }
+
     // A single global group keeps the direct fast path. Multiple groups are
     // exposed only through the outer tag mapping.
     py_attn_inputs = by_tag.at(group_tags.front());
@@ -732,15 +749,15 @@ void PyWrappedModel::updateKVCacheKernelBlockId(const GptModelInputs& inputs) {
     fusedCopy(d2d_copies_);
 
     if (enable_cuda_graph_) {
-        auto empty           = torch::Tensor();
-        auto py_model_inputs = PyModelInputs({empty,
-                                              empty,
-                                              empty,
-                                              torch_ext::PyEmbeddingInputs(),
-                                              torch_ext::PyMultimodalInputs(),
-                                              attention_inputs_,
-                                              attention_inputs_by_tag_,
-                                              torch_ext::BertEmbeddingInputs()});
+        auto empty                        = torch::Tensor();
+        auto py_model_inputs              = PyModelInputs({empty,
+                                                           empty,
+                                                           empty,
+                                                           torch_ext::PyEmbeddingInputs(),
+                                                           torch_ext::PyMultimodalInputs(),
+                                                           attention_inputs_,
+                                                           attention_inputs_by_tag_,
+                                                           torch_ext::BertEmbeddingInputs()});
         py_model_inputs.dspark_call_phase = inputs.dspark_call_phase;
         if (graph_runner_->canRun(py_model_inputs, graph_state_)) {
             graph_runner_->updateKVCacheKernelBlockId(py_model_inputs, graph_state_);
@@ -820,14 +837,14 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         const bool                has_cache_store_work = !inputs.warmup && inputs.pd_separation;
         CacheStoreWriteCycleGuard cache_store_write_cycle(cache_store_async_writer_, has_cache_store_work);
 
-        auto           py_model_inputs = PyModelInputs({token_ids,
-                                                        input_hiddens,
-                                                        combo_position_ids,
-                                                        embedding_inputs,
-                                                        multimodal_inputs,
-                                                        attention_inputs_,
-                                                        attention_inputs_by_tag_,
-                                                        bert_embedding_inputs});
+        auto py_model_inputs              = PyModelInputs({token_ids,
+                                                           input_hiddens,
+                                                           combo_position_ids,
+                                                           embedding_inputs,
+                                                           multimodal_inputs,
+                                                           attention_inputs_,
+                                                           attention_inputs_by_tag_,
+                                                           bert_embedding_inputs});
         py_model_inputs.dspark_call_phase = inputs.dspark_call_phase;
         PyModelOutputs py_model_outputs;
         torch::Tensor  hidden_states;
@@ -1213,11 +1230,10 @@ PyWrappedModel::splitInputsIntoMicroBatches(const GptModelInputs& inputs, const 
     size_t                      prefill_batch_idx      = 0;
     // TODO(async): micro-batch token slicing still computes CPU scalar sums.
     // Convert explicitly and keep all sliced GptModelInputs device-resident.
-    const auto input_lengths_host = inputs.input_lengths.defined() && inputs.input_lengths.is_cuda() ?
-                                        inputs.input_lengths.cpu().pin_memory() :
-                                        inputs.input_lengths;
-    const auto* input_lengths_ptr =
-        input_lengths_host.defined() ? input_lengths_host.data_ptr<int32_t>() : nullptr;
+    const auto  input_lengths_host = inputs.input_lengths.defined() && inputs.input_lengths.is_cuda() ?
+                                         inputs.input_lengths.cpu().pin_memory() :
+                                         inputs.input_lengths;
+    const auto* input_lengths_ptr  = input_lengths_host.defined() ? input_lengths_host.data_ptr<int32_t>() : nullptr;
 
     if (!micro_batch_plan.enable) {
         RTP_LLM_LOG_DEBUG("micro batch disable when enable is false, use fake");

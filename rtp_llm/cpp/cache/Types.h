@@ -1,10 +1,11 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
-#include <cstdint>
 
 #include "rtp_llm/cpp/cache/BlockInfo.h"
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
@@ -78,8 +79,15 @@ struct MallocInfo {
     // staging-ring admission uses it to cap the first malloc at the resident
     // window (block0 + staging + tail + ring) instead of the full prefix.
     int init_seq_len_override = -1;
+    // HybridPool admission may target each independent group differently: cap
+    // main KV while allocating the complete indexer history. Missing tags keep
+    // the normal sequence length.
+    std::unordered_map<std::string, int> init_seq_len_by_tag;
 
-    int incrSeqLen() const;
+    int  incrSeqLen() const;
+    bool hasInitSeqLenForTag(const std::string& tag) const;
+    int  initSeqLenForTag(const std::string& tag, int fallback) const;
+    int  reserveStepForTag(const std::string& tag, int fallback) const;
 };
 
 // Separates "the pools are momentarily full, retry later" from "this request can never fit".

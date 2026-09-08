@@ -126,7 +126,9 @@ class Indexer(nn.Module):
         if self._prefill_cp_enabled():
             assert cp_params is not None
             query, key = self.indexer_op.apply_rope_and_rotate_q_k_cp(
-                q, k, cp_params.full_rope_pos_ids,
+                q,
+                k,
+                cp_params.full_rope_pos_ids,
             )
         else:
             positions = flashmla_params.positions_d
@@ -143,6 +145,40 @@ class Indexer(nn.Module):
         k = self.k_norm(k)
         return self.indexer_op.apply_rope_and_rotate_k(k, flashmla_params.positions_d)
 
+    def _indexer_slot_mapping(
+        self,
+        kv_cache: KVCache,
+        fmha_params: Any,
+        attention_inputs: Any,
+    ) -> Optional[torch.Tensor]:
+        mapping = getattr(fmha_params, "indexer_slot_mapping", None)
+        if mapping is not None and mapping.numel() > 0:
+            return mapping
+        pool = getattr(kv_cache, "indexer_cache_base", None)
+        if pool is None or pool.numel() == 0:
+            return None
+        table = getattr(attention_inputs, "indexer_cache_kernel_block_id_device", None)
+        positions = getattr(fmha_params, "positions_d", None)
+        batch_indices = getattr(fmha_params, "batch_indice_d", None)
+        if (
+            table is None
+            or table.numel() == 0
+            or positions is None
+            or batch_indices is None
+            or positions.numel() != batch_indices.numel()
+        ):
+            raise RuntimeError(
+                "independent indexer pool cannot derive its slot mapping"
+            )
+        block_size = int(getattr(kv_cache, "indexer_seq_size_per_block", 0))
+        if block_size <= 0:
+            raise RuntimeError("independent indexer pool has invalid block size")
+        logical_blocks = torch.div(positions, block_size, rounding_mode="floor")
+        physical_blocks = table[
+            batch_indices.to(torch.long), logical_blocks.to(torch.long)
+        ].to(torch.long)
+        return physical_blocks * block_size + torch.remainder(positions, block_size)
+
     def _quantize_q_k(
         self,
         query: torch.Tensor,
@@ -152,6 +188,9 @@ class Indexer(nn.Module):
         attention_inputs: Any,
         cp_params: Optional[Any],
     ) -> Tuple[torch.Tensor, torch.Tensor]:
+        indexer_slot_mapping = self._indexer_slot_mapping(
+            kv_cache, fmha_params, attention_inputs
+        )
         if self._is_sparse_prefill_cp(attention_inputs):
             assert cp_params is not None
             return self.indexer_op.quant_q_k_cp(
@@ -160,8 +199,15 @@ class Indexer(nn.Module):
                 kv_cache,
                 fmha_params.slot_mapping,
                 cp_params.kv_restore_unpad_indices,
+                indexer_slot_mapping=indexer_slot_mapping,
             )
-        return self.indexer_op.quant_q_k(query, key, kv_cache, fmha_params.slot_mapping)
+        return self.indexer_op.quant_q_k(
+            query,
+            key,
+            kv_cache,
+            fmha_params.slot_mapping,
+            indexer_slot_mapping=indexer_slot_mapping,
+        )
 
     def _compute_topk(
         self,
@@ -208,7 +254,14 @@ class Indexer(nn.Module):
     ) -> torch.Tensor:
         if use_fast_path:
             key = self._get_k_bf16(hidden_states, fmha_params)
-            self.indexer_op.quant_k_only(key, kv_cache, fmha_params.slot_mapping)
+            self.indexer_op.quant_k_only(
+                key,
+                kv_cache,
+                fmha_params.slot_mapping,
+                indexer_slot_mapping=self._indexer_slot_mapping(
+                    kv_cache, fmha_params, attention_inputs
+                ),
+            )
             return None
 
         if self._is_sparse_prefill_cp(attention_inputs):

@@ -372,6 +372,7 @@ void PrefillRpcServer::remoteAllocateResource(PrefillGenerateContext& prefill_co
 
 void PrefillRpcServer::enqueueRequest(PrefillGenerateContext& prefill_context) {
     RTP_LLM_PROFILE_FUNCTION();
+    prefill_context.prefill_queue_begin_time_us = currentTimeUs();
     RTP_LLM_LOG_DEBUG("request [%ld] trans query", prefill_context.request_id);
     RTP_LLM_LOG_DEBUG("request [%ld] trans to stream success", prefill_context.request_id);
     auto stream = engine_->enqueue(prefill_context.generate_input);
@@ -382,9 +383,11 @@ void PrefillRpcServer::enqueueRequest(PrefillGenerateContext& prefill_context) {
 void PrefillRpcServer::remoteLoadCacheStart(PrefillGenerateContext& prefill_context) {
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%ld] remote load cache", prefill_context.request_id);
-    auto start_time_us = currentTimeUs();
-    auto wait_result   = waitStreamBeforeRun(prefill_context.getStream());
-    prefill_context.stat_info.remote_load_cache_wait_stream_rt_us += currentTimeUs() - start_time_us;
+    auto start_time_us                    = currentTimeUs();
+    auto wait_result                      = waitStreamBeforeRun(prefill_context.getStream());
+    prefill_context.prefill_admit_time_us = currentTimeUs();
+    prefill_context.stat_info.remote_load_cache_wait_stream_rt_us +=
+        prefill_context.prefill_admit_time_us - start_time_us;
     if (wait_result.hasError()) {
         setContextError(prefill_context, wait_result);
         logPrefillFailureTrace("wait_stream_before_run_failed", prefill_context);
@@ -395,7 +398,8 @@ void PrefillRpcServer::remoteLoadCacheStart(PrefillGenerateContext& prefill_cont
     load_request.set_client_id(process_id_);
     load_request.set_request_id(prefill_context.request_id);
     load_request.set_start_time(currentTimeUs());
-    start_time_us = currentTimeUs();
+    prefill_context.handoff_begin_time_us = currentTimeUs();
+    start_time_us                         = prefill_context.handoff_begin_time_us;
     CLIENT_GRPC_RET_IF_ERROR(
         prefill_context, prefill_context.client_stream->Write(load_request), ErrorCode::REMOTE_LOAD_KV_CACHE_FAILED);
     prefill_context.stat_info.remote_load_cache_write_request_rt_us += currentTimeUs() - start_time_us;
@@ -432,6 +436,7 @@ void PrefillRpcServer::pollLocalOutput(PrefillGenerateContext& prefill_context) 
         logPrefillFailureTrace("poll_local_output_failed", prefill_context);
         return;
     }
+    prefill_context.prefill_compute_done_time_us = currentTimeUs();
     RTP_LLM_LOG_DEBUG("request [%ld] poll local output end", prefill_context.request_id);
 
     auto stream = prefill_context.getStream();
@@ -448,7 +453,8 @@ void PrefillRpcServer::remoteLoadCacheEnd(PrefillGenerateContext& prefill_contex
     GenerateOutputsPB load_response;
     CLIENT_GRPC_RET_IF_ERROR(
         prefill_context, prefill_context.client_stream->Read(&load_response), ErrorCode::REMOTE_LOAD_KV_CACHE_FAILED);
-    auto error_code = transRPCErrorCode(load_response.error_info().error_code());
+    prefill_context.handoff_end_time_us = currentTimeUs();
+    auto error_code                     = transRPCErrorCode(load_response.error_info().error_code());
 
     // Decode has finished loading cache, now safe to release KV cache blocks.
     // This is called after cache store transfer is complete.
@@ -531,7 +537,6 @@ void PrefillRpcServer::pollRemoteOutput(PrefillGenerateContext& prefill_context)
     const auto multimodal_lengths =
         prefill_context.generate_input ? prefill_context.generate_input->multimodalLengths() : std::map<int, int>{};
 
-    auto first_token_rt_us = prefill_context.getStream()->getTimeInfo().first_token_rt_us;
     while (prefill_context.client_stream->Read(&response)) {
         if (prefill_context.isRequestCancelled()) {
             RTP_LLM_LOG_WARNING("request [%ld] cancel by user", request_id);
@@ -554,10 +559,36 @@ void PrefillRpcServer::pollRemoteOutput(PrefillGenerateContext& prefill_context)
             auto decode_remote_reuse_len = response.flatten_output().aux_info(i).remote_reuse_len();
             auto decode_memory_reuse_len = response.flatten_output().aux_info(i).memory_reuse_len();
 
-            response.mutable_flatten_output()->mutable_aux_info(i)->set_first_token_cost_time_us(first_token_rt_us);
-            response.mutable_flatten_output()->mutable_aux_info(i)->set_cost_time_us(cost_time_us);
+            auto* aux = response.mutable_flatten_output()->mutable_aux_info(i);
+            aux->set_cost_time_us(cost_time_us);
 
-            response.mutable_flatten_output()->mutable_aux_info(i)->set_total_reuse_len(prefill_total_reuse_len);
+            auto* pd = aux->mutable_pd_latency();
+            pd->set_schema_version(2);
+            if (prefill_context.prefill_admit_time_us > prefill_context.prefill_queue_begin_time_us) {
+                pd->set_prefill_queue_us(prefill_context.prefill_admit_time_us
+                                         - prefill_context.prefill_queue_begin_time_us);
+            }
+            if (prefill_context.prefill_compute_done_time_us > prefill_context.prefill_admit_time_us) {
+                pd->set_prefill_compute_wall_us(prefill_context.prefill_compute_done_time_us
+                                                - prefill_context.prefill_admit_time_us);
+            }
+            if (prefill_context.handoff_end_time_us > prefill_context.handoff_begin_time_us) {
+                pd->set_handoff_total_us(prefill_context.handoff_end_time_us - prefill_context.handoff_begin_time_us);
+            }
+            if (prefill_context.handoff_end_time_us > prefill_context.prefill_compute_done_time_us) {
+                pd->set_handoff_blocking_tail_us(prefill_context.handoff_end_time_us
+                                                 - prefill_context.prefill_compute_done_time_us);
+            }
+            pd->set_prefill_worker_id(process_id_);
+            pd->set_decode_worker_addr(prefill_context.decode_addr);
+            if (!prefill_context.prefill_worker_cache_store_addrs.empty()) {
+                pd->set_prefill_worker_addr(prefill_context.prefill_worker_cache_store_addrs.front());
+            }
+            if (pd->transport_path().empty()) {
+                pd->set_transport_path(maga_init_params_.pd_sep_config.cache_store_rdma_mode ? "GDR_DIRECT" : "TCP");
+            }
+
+            aux->set_total_reuse_len(prefill_total_reuse_len);
             response.mutable_flatten_output()->mutable_aux_info(i)->set_local_reuse_len(prefill_local_reuse_len);
             response.mutable_flatten_output()->mutable_aux_info(i)->set_remote_reuse_len(prefill_remote_reuse_len);
             response.mutable_flatten_output()->mutable_aux_info(i)->set_memory_reuse_len(prefill_memory_reuse_len);

@@ -51,6 +51,8 @@ public:
     void         free(const FreeInfo& free_info);
     // Release an explicit list of physical blocks (decode offload path).
     void freeBlockList(const BlockIndicesType& blocks);
+    // Tag-aware variant: frees only the named cache group (tag ignored by single-pool allocators).
+    void freeBlockListByTag(const std::string& tag, const BlockIndicesType& blocks);
     void insertIntoCache(const InsertInfo& insert_info);
 
     int

@@ -431,6 +431,45 @@ void SparseMlaParams::fillParams(torch_ext::PyAttentionInputs attn_inputs,
                                         seq_size_per_block,
                                         forbid_realloc);
 
+    // Independent DSA indexer-K pool (sparse V3.2 decoupling): indexer writes go
+    // to the companion pool, so their slots must be derived from the companion
+    // table. The declaration guarantees the companion uses the same
+    // tokens-per-block as the main group. Runs once per step; buffers are not yet
+    // graph-persistent, so CUDA graph mode is refused instead of silently broken.
+    indexer_slot_mapping = torch::Tensor();
+    if (attn_inputs.indexer_cache_kernel_block_id.defined() && attn_inputs.indexer_cache_kernel_block_id.numel() > 0
+        && slot_mapping.defined() && slot_mapping.numel() > 0) {
+        RTP_LLM_CHECK_WITH_INFO(!attn_inputs.is_cuda_graph,
+                                "indexer companion pool has no graph-persistent slot buffers yet");
+        auto          idx_table  = toHostContiguousI32(attn_inputs.indexer_cache_kernel_block_id);
+        const int64_t max_blocks = idx_table.size(1);
+        const int64_t n_tokens   = slot_mapping.numel();
+        auto          table_ptr  = idx_table.data_ptr<int32_t>();
+        auto          batch_ptr  = batch_indice_h.data_ptr<int32_t>();
+        auto          pos_ptr    = positions_h.data_ptr<int32_t>();
+        auto          host = torch::empty({n_tokens}, torch::TensorOptions().dtype(torch::kInt64).pinned_memory(true));
+        auto          host_ptr = host.data_ptr<int64_t>();
+        for (int64_t i = 0; i < n_tokens; ++i) {
+            const int32_t batch_id     = batch_ptr[i];
+            const int32_t position     = pos_ptr[i];
+            const int32_t block_index  = position / seq_size_per_block;
+            const int32_t block_offset = position % seq_size_per_block;
+            RTP_LLM_CHECK_WITH_INFO(
+                block_index < max_blocks, "indexer table too narrow: block %d >= %ld", block_index, (long)max_blocks);
+            const int32_t block_number = table_ptr[batch_id * max_blocks + block_index];
+            host_ptr[i]                = static_cast<int64_t>(block_number) * seq_size_per_block + block_offset;
+        }
+        auto dev = torch::empty({n_tokens}, torch::TensorOptions().dtype(torch::kInt64).device(torch::kCUDA));
+        cudaMemcpyAsync(dev.data_ptr(),
+                        host.data_ptr(),
+                        static_cast<size_t>(n_tokens) * sizeof(int64_t),
+                        cudaMemcpyHostToDevice,
+                        GET_CURRENT_STREAM());
+        // keep the pinned source alive until the async copy is consumed this step
+        indexer_slot_mapping_host_keepalive_ = host;
+        indexer_slot_mapping                 = dev;
+    }
+
     // Step 2: Fill IndexerParams-specific parameters
     bool is_prefill = attn_inputs.is_prefill;
     int  batch_size = is_prefill ? input_lengths_host.size(0) : sequence_lengths_host.size(0);
@@ -514,6 +553,9 @@ void registerPySparseMlaParams(pybind11::module& m) {
         .def_readonly("topk_indices_offset", &SparseMlaParams::topk_indices_offset)
         .def_readonly("ks", &SparseMlaParams::ks)
         .def_readonly("ke", &SparseMlaParams::ke)
+        .def_readonly("indexer_slot_mapping",
+                      &SparseMlaParams::indexer_slot_mapping,
+                      "Slot mapping into the independent DSA indexer-K pool (undefined unless declared)")
         .def_readwrite("schedule_metadata", &SparseMlaParams::schedule_metadata)
         .def(
             "fill_cp_plan_params",

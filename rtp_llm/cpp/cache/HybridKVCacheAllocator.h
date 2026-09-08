@@ -18,6 +18,7 @@ public:
                            int64_t                            reserve_block_ratio = 0);
 
     void free(const FreeInfo& free_info) override;
+    void freeBlockListByTag(const std::string& tag, const BlockIndicesType& blocks) override;
     void insertIntoCache(const InsertInfo& insert_info) override;
 
     std::shared_ptr<KVCacheResource> incrKVCacheRef(const KVCacheResource& kvcache_resource,

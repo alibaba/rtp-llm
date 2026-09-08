@@ -29,7 +29,7 @@ RoleType checkedRoleType(int value, const char* field_name) {
 }
 
 RoleType checkedRoleString(const std::string& value) {
-    std::string role = value;
+    std::string       role   = value;
     const std::string prefix = "RoleType.";
     if (role.rfind(prefix, 0) == 0) {
         role = role.substr(prefix.size());
@@ -54,7 +54,7 @@ RoleType checkedRoleString(const std::string& value) {
 
 RoleType transRoleAddrType(const RoleAddrPB& role_addr) {
     std::optional<RoleType> resolved;
-    auto merge = [&resolved](RoleType candidate, const char* source) {
+    auto                    merge = [&resolved](RoleType candidate, const char* source) {
         RTP_LLM_CHECK_WITH_INFO(!resolved.has_value() || *resolved == candidate,
                                 "conflicting RoleAddrPB role from %s: resolved=%d candidate=%d",
                                 source,
@@ -508,6 +508,30 @@ void QueryConverter::transResponse(GenerateOutputsPB*     outputs,
             aux_info->set_decode_remote_reuse_len(response.aux_info.decode_remote_reuse_len);
             aux_info->set_decode_memory_reuse_len(response.aux_info.decode_memory_reuse_len);
             aux_info->set_aux_string(aux_string);
+            const auto& pd = response.aux_info.pd_latency;
+            if (pd.schema_version > 0) {
+                auto* pb = aux_info->mutable_pd_latency();
+                pb->set_schema_version(pd.schema_version);
+                pb->set_prefill_queue_us(pd.prefill_queue_us);
+                pb->set_prefill_compute_wall_us(pd.prefill_compute_wall_us);
+                pb->set_handoff_total_us(pd.handoff_total_us);
+                pb->set_handoff_blocking_tail_us(pd.handoff_blocking_tail_us);
+                pb->set_decode_kv_load_us(pd.decode_kv_load_us);
+                pb->set_decode_queue_us(pd.decode_queue_us);
+                pb->set_decode_service_us(pd.decode_service_us);
+                pb->set_prefill_worker_id(pd.prefill_worker_id);
+                pb->set_decode_worker_id(pd.decode_worker_id);
+                pb->set_kv_bytes(pd.kv_bytes);
+                pb->set_kv_blocks(pd.kv_blocks);
+                pb->set_transport_path(pd.transport_path);
+                pb->set_prefill_worker_addr(pd.prefill_worker_addr);
+                pb->set_decode_worker_addr(pd.decode_worker_addr);
+                pb->set_admission_prepare_us(pd.admission_prepare_us);
+                pb->set_admission_prepare_wait_us(pd.admission_prepare_wait_us);
+                pb->set_decode_normal_load_us(pd.decode_normal_load_us);
+                pb->set_decode_ring_load_us(pd.decode_ring_load_us);
+                pb->set_decode_first_token_us(pd.decode_first_token_us);
+            }
             auto* mm_map = aux_info->mutable_multimodal_lengths();
             for (const auto& [key, value] : response.aux_info.multimodal_lengths) {
                 (*mm_map)[key] = value;

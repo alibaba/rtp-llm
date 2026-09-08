@@ -672,13 +672,16 @@ MallocStatus HybridPoolKVCacheAllocator::evaluateInitCapacity(const MallocInfo& 
 
     MallocStatus status = MallocStatus::NONE;
     for (int gid = 0; gid < static_cast<int>(kv_cache_groups_.size()); ++gid) {
-        const size_t group_index = static_cast<size_t>(gid);
-        const int    group_common_seq =
-            cpEffectiveSeqLenForReserve(cp_mapper, config_, group_index, raw_common_seq_len);
-        const int  group_seq_len = cpEffectiveSeqLenForReserve(cp_mapper, config_, group_index, raw_seq_len);
+        const size_t group_index      = static_cast<size_t>(gid);
+        const auto&  tag              = config_.tagForGroup(group_index);
+        const int    group_common_seq = cpEffectiveSeqLenForReserve(
+            cp_mapper, config_, group_index, malloc_info.initSeqLenForTag(tag, raw_common_seq_len));
+        const int group_seq_len = cpEffectiveSeqLenForReserve(
+            cp_mapper, config_, group_index, malloc_info.initSeqLenForTag(tag, raw_seq_len));
+        const int  group_reserve_step     = malloc_info.reserveStepForTag(tag, reserve_step);
         const int  group_reuse_blocks_len = reuse_enabled ? malloc_info.batch_kv_cache_resource->blocksNum(0, gid) : 0;
         const auto need                   = kv_cache_groups_[group_index]->getNeedBlocks(
-            group_common_seq, group_seq_len, reserve_step, group_reuse_blocks_len, reuse_enabled);
+            group_common_seq, group_seq_len, group_reserve_step, group_reuse_blocks_len, reuse_enabled);
         const int need_blocks = need.common_blocks + batch_size * need.extra_blocks;
         if (need_blocks <= 0) {
             continue;
@@ -790,7 +793,10 @@ void HybridPoolKVCacheAllocator::logMallocFailure(const MallocInfo& malloc_info,
     for (int gid = 0; gid < static_cast<int>(kv_cache_groups_.size()); ++gid) {
         const size_t group_index   = static_cast<size_t>(gid);
         const auto   group_type    = config_.typeForGroup(group_index);
-        const int    group_seq_len = cpEffectiveSeqLenForReserve(cp_mapper, config_, group_index, planning_raw_seq_len);
+        const auto&  tag           = config_.tagForGroup(group_index);
+        const int    group_seq_len = cpEffectiveSeqLenForReserve(
+            cp_mapper, config_, group_index, malloc_info.initSeqLenForTag(tag, planning_raw_seq_len));
+        const int group_reserve_step = malloc_info.reserveStepForTag(tag, reserve_step);
 
         int    need_blocks          = 0;
         int    need_slots           = 0;
@@ -802,7 +808,7 @@ void HybridPoolKVCacheAllocator::logMallocFailure(const MallocInfo& malloc_info,
             current_valid_blocks += static_cast<size_t>(std::count_if(
                 blocks.begin(), blocks.end(), [](auto block) { return !isNullBlockIdx(block) && block > 0; }));
             need_slots += kv_cache_groups_[group_index]->needBlocksNum(
-                group_seq_len, static_cast<int>(blocks.size()), reserve_step);
+                group_seq_len, static_cast<int>(blocks.size()), group_reserve_step);
         }
         if (incremental) {
             // Dense groups materialize every logical slot. Sparse groups
@@ -815,10 +821,11 @@ void HybridPoolKVCacheAllocator::logMallocFailure(const MallocInfo& malloc_info,
             need_blocks = 0;
             need_slots  = 0;
         } else {
-            const int  group_common_len = cpEffectiveSeqLenForReserve(cp_mapper, config_, group_index, raw_common_len);
+            const int group_common_len = cpEffectiveSeqLenForReserve(
+                cp_mapper, config_, group_index, malloc_info.initSeqLenForTag(tag, raw_common_len));
             const int  reuse_blocks_len = malloc_info.reuse_cache ? resource->blocksNum(0, gid) : 0;
             const auto need             = kv_cache_groups_[group_index]->getNeedBlocks(
-                group_common_len, group_seq_len, reserve_step, reuse_blocks_len, malloc_info.reuse_cache);
+                group_common_len, group_seq_len, group_reserve_step, reuse_blocks_len, malloc_info.reuse_cache);
             need_blocks = need.common_blocks + batch_size * need.extra_blocks;
         }
         if (gid == failed_group && failed_need_blocks >= 0) {
@@ -828,9 +835,8 @@ void HybridPoolKVCacheAllocator::logMallocFailure(const MallocInfo& malloc_info,
         const auto&  pool      = group_block_pools_[group_index];
         const size_t available = pool->availableBlocksNum();
         const size_t group_reserve =
-            reserve_admission ?
-                reserveBlocksForPool(group_index, reserve_blocks, total_reservable_available_blocks) :
-                0;
+            reserve_admission ? reserveBlocksForPool(group_index, reserve_blocks, total_reservable_available_blocks) :
+                                0;
         const long long required_available = need_blocks < 0 ? -1 : static_cast<long long>(need_blocks + group_reserve);
         const long long shortfall =
             required_available < 0 ? -1 : std::max(required_available - static_cast<long long>(available), 0LL);

@@ -2,6 +2,7 @@
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/CacheStoreDevicePin.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/MemoryUtil.h"
+#include <cstring>
 #include <torch/torch.h>
 #include "rtp_llm/cpp/disaggregate/cache_store/CacheStoreUtil.h"
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -58,10 +59,13 @@ void TcpCacheStoreLoadServiceClosure::Run() {
             return;
         }
 
-        auto dst_tensor = torch::from_blob(
-            unload_block->addr.get(),
-            {(int64_t)unload_block->len},
-            torch::TensorOptions().dtype(torch::kUInt8).device(unload_block->gpu_mem ? torch::kCUDA : torch::kCPU));
+        if (!unload_block->gpu_mem) {
+            std::memcpy(unload_block->addr.get(), block.content().data(), unload_block->len);
+            continue;
+        }
+        auto dst_tensor = torch::from_blob(unload_block->addr.get(),
+                                           {(int64_t)unload_block->len},
+                                           torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
         auto src_tensor = torch::from_blob(const_cast<char*>(block.content().data()),
                                            {(int64_t)block.len()},
                                            torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU));

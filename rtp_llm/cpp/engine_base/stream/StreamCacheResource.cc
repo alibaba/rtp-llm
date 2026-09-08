@@ -13,6 +13,8 @@
 #include "rtp_llm/cpp/config/RoleTypes.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/cpp/model_rpc/TensorPbConvert.h"
+#include <algorithm>
+#include <string_view>
 #include <thread>
 #include <torch/extension.h>
 
@@ -21,6 +23,25 @@ using namespace std;
 namespace rtp_llm {
 
 namespace {
+
+constexpr std::string_view kDefaultCacheTag = "default";
+constexpr std::string_view kDsaIndexerTag   = "dsa_indexer_k";
+
+bool hasTag(const CacheConfig& config, std::string_view tag) {
+    const auto& tags = config.topology().groupTagsSnapshot();
+    return std::find(tags.begin(), tags.end(), tag) != tags.end();
+}
+
+bool isDsaDualGroupCache(const CacheConfig& config) {
+    if (config.groupNums() != 2 || !hasTag(config, kDefaultCacheTag) || !hasTag(config, kDsaIndexerTag)) {
+        return false;
+    }
+    const auto default_gid = static_cast<size_t>(config.groupIdForTag(std::string(kDefaultCacheTag)));
+    const auto indexer_gid = static_cast<size_t>(config.groupIdForTag(std::string(kDsaIndexerTag)));
+    return config.typeForGroup(default_gid) == CacheGroupType::FULL
+           && config.typeForGroup(indexer_gid) == CacheGroupType::FULL
+           && config.seqSizePerBlockForGroup(default_gid) == config.seqSizePerBlockForGroup(indexer_gid);
+}
 
 std::shared_ptr<const CacheTopology> warmupCacheTopology() {
     static const auto topology = []() {
@@ -277,6 +298,10 @@ void StreamCacheResource::init(int batch_size) {
                               warmupCacheTopology();
     batch_kv_cache_resource_->initGroups(topology);
     resource_released_ = false;
+    prefix_offloaded_  = false;
+    admission_capped_  = false;
+    admission_block0_  = 0;
+    admission_ring_.clear();
 }
 
 void StreamCacheResource::releaseResource() {
@@ -344,7 +369,8 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
     RTP_LLM_CHECK(nums == total_blocks);
 
     if (total_blocks > 0) {
-        if (reuseCache() && !stream_->hasErrorWithoutLock() && stream_->getStatus() == StreamState::FINISHED) {
+        if (reuseCache() && !prefix_offloaded_ && !stream_->hasErrorWithoutLock()
+            && stream_->getStatus() == StreamState::FINISHED) {
             RTP_LLM_LOG_DEBUG(
                 "tryReleaseKVBlock: stream=%ld, storing cache, curBlocksNum=%d", stream_->streamId(), total_blocks);
             // save cache to gpu
@@ -441,22 +467,26 @@ absl::Status StreamCacheResource::initKVBlock() {
         const char* env = std::getenv("RTP_KV_OFFLOAD_MIN_SEQ");
         return env ? atoi(env) : 0;
     }();
+    const auto& cache_config  = resource_context_.cache_manager->cacheConfig();
+    const bool  dsa_dual_pool = isDsaDualGroupCache(cache_config);
+    const auto& cp_mapper     = resource_context_.cache_manager->cpSlotMapper();
+    const bool  cp_active     = cp_mapper && cp_mapper->isSharded();
+
     int admit_total_blocks = 0;
     if (kAdmitRingBlocks > 0 && kAdmitKeepBlocks > 0 && is_decode_role && is_first_malloc
-        && batch_kv_cache_resource_->batchSize() == 1 && resource_context_.cache_manager->cacheConfig().groupNums() == 1
-        && resource_context_.cache_manager->cacheConfig().use_mla
-        && resource_context_.cache_manager->cacheConfig().mtp_sub_configs.empty()
-        && stream_->seqLength() >= kAdmitMinSeq) {
+        && batch_kv_cache_resource_->batchSize() == 1 && dsa_dual_pool && cache_config.use_mla
+        && cache_config.mtp_sub_configs.empty() && !cp_active && stream_->seqLength() >= kAdmitMinSeq) {
         const int spb      = seqSizePerBlock();
         const int total    = (stream_->seqLength() + spb - 1) / spb;
         const int resident = 1 + kAdmitStagingBlocks + kAdmitKeepBlocks;
         // +1: keep at least one 0 sentinel in the middle so the python hook's
         // offload detection (khead[1+STG]==0) holds.
         if (total > resident + kAdmitRingBlocks + 1) {
-            admit_total_blocks                = total;
-            malloc_info.reuse_cache           = false;
-            malloc_info.enable_device_cache   = false;
-            malloc_info.init_seq_len_override = (resident + kAdmitRingBlocks) * spb;
+            admit_total_blocks                                             = total;
+            malloc_info.reuse_cache                                        = false;
+            malloc_info.enable_device_cache                                = false;
+            malloc_info.init_seq_len_by_tag[std::string(kDefaultCacheTag)] = (resident + kAdmitRingBlocks) * spb;
+            malloc_info.init_seq_len_by_tag[std::string(kDsaIndexerTag)]   = total * spb;
         }
     }
 
@@ -482,7 +512,8 @@ absl::Status StreamCacheResource::initKVBlock() {
     }
 
     if (admit_total_blocks > 0) {
-        auto&      ids    = batch_kv_cache_resource_->mutableBlockIds(0, 0);
+        auto&      ids    = dsa_dual_pool ? batch_kv_cache_resource_->mutableBlockIds(0, kDefaultCacheTag) :
+                                            batch_kv_cache_resource_->mutableBlockIds(0, 0);
         const auto blocks = ids.blocks();  // copy: [block0, staging..., tail..., ring...]
         const int  got    = static_cast<int>(blocks.size());
         const int  head   = 1 + kAdmitStagingBlocks;
@@ -496,6 +527,17 @@ absl::Status StreamCacheResource::initKVBlock() {
                               admit_total_blocks);
             return absl::InternalError("admission capped malloc geometry unexpected");
         }
+        if (dsa_dual_pool) {
+            const auto& indexer_blocks = batch_kv_cache_resource_->blocks(0, kDsaIndexerTag);
+            if (static_cast<int>(indexer_blocks.size()) != admit_total_blocks
+                || std::any_of(indexer_blocks.begin(), indexer_blocks.end(), [](auto block) { return block <= 0; })) {
+                RTP_LLM_LOG_ERROR("stream [%ld] admission indexer geometry unexpected: got=%zu total=%d",
+                                  stream_->streamId(),
+                                  indexer_blocks.size(),
+                                  admit_total_blocks);
+                return absl::InternalError("admission indexer pool is not dense");
+            }
+        }
         admission_ring_.assign(blocks.end() - kAdmitRingBlocks, blocks.end());
         BlockIndicesType table(admit_total_blocks, 0);
         for (int j = 0; j < head; ++j) {
@@ -508,13 +550,34 @@ absl::Status StreamCacheResource::initKVBlock() {
         admission_block0_ = blocks[0];
         admission_capped_ = true;
         prefix_offloaded_ = true;  // admission is already the target shape: skip the post-hoc shrink
-        RTP_LLM_LOG_INFO("stream [%ld] admission capped: total=%d resident=%d(+%d tail extra) ring=%d block0=%ld",
+
+        const auto probe = resource_context_.cache_manager->convertIndexToBufferByTag(
+            static_cast<int>(admission_block0_), 0, std::string(kDefaultCacheTag));
+        RTP_LLM_CHECK_WITH_INFO(probe.size() == 1, "admission default group must contain exactly one main-KV buffer");
+        cudaPointerAttributes pool_attr{};
+        RTP_LLM_CHECK_WITH_INFO(cudaPointerGetAttributes(&pool_attr, probe[0].addr) == cudaSuccess
+                                    && pool_attr.type == cudaMemoryTypeDevice,
+                                "admission default buffer is not CUDA device memory");
+        const int     block_tokens = seqSizePerBlock();
+        const int64_t kv_bpt       = static_cast<int64_t>(probe[0].size_bytes) / block_tokens;
+        const int64_t cap_tokens   = static_cast<int64_t>(admit_total_blocks + 160) * block_tokens;
+        if (!V32AdmissionStore::instance().prepareAsync(admission_block0_,
+                                                        static_cast<int32_t>(cache_config.layer_num),
+                                                        cap_tokens,
+                                                        kv_bpt,
+                                                        block_tokens,
+                                                        pool_attr.device)) {
+            return absl::InternalError("failed to start asynchronous admission mirror preparation");
+        }
+        RTP_LLM_LOG_INFO("stream [%ld] admission capped: total=%d resident=%d(+%d tail extra) ring=%d block0=%ld "
+                         "dual_pool=%d",
                          stream_->streamId(),
                          admit_total_blocks,
                          head + kAdmitKeepBlocks,
                          tail - kAdmitKeepBlocks,
                          kAdmitRingBlocks,
-                         admission_block0_);
+                         admission_block0_,
+                         dsa_dual_pool);
     }
 
     if (result.reuse_len > 0) {
@@ -531,9 +594,11 @@ int StreamCacheResource::offloadPrefixBlocks(int keep_last_n) {
     if (batch.batchSize() != 1 || keep_last_n <= 0) {
         return 0;
     }
-    const auto& blocks = batch.blocks(0, 0);
-    const int   total  = static_cast<int>(blocks.size());
-    const int   n      = total - keep_last_n;
+    const auto& cache_config = resource_context_.cache_manager->cacheConfig();
+    const bool  has_default  = hasTag(cache_config, kDefaultCacheTag);
+    const auto& blocks       = has_default ? batch.blocks(0, kDefaultCacheTag) : batch.blocks(0, 0);
+    const int   total        = static_cast<int>(blocks.size());
+    const int   n            = total - keep_last_n;
     // Keep blocks[0] resident: stable per-stream identity for the python hook.
     // Also keep RTP_KV_OFFLOAD_STAGING_BLOCKS blocks right after it as a python-
     // managed staging area (native kernels read hot offloaded rows from there).
@@ -557,11 +622,13 @@ int StreamCacheResource::offloadPrefixBlocks(int keep_last_n) {
     }
     // Zero released prefix entries: python treats phys==0 as "offloaded"; the
     // kernels never dereference them (python feeds explicit global indices).
-    auto& mut = batch.mutableBlockIds(0, 0);
+    auto& mut = has_default ? batch.mutableBlockIds(0, kDefaultCacheTag) : batch.mutableBlockIds(0, 0);
     for (int j = free_from; j < n; ++j) {
         mut.setAt(j, 0);
     }
-    resource_context_.cache_manager->freeBlockList(to_free);
+    // Free only the main KV group: with the independent dsa_indexer_k pool the
+    // indexer-K blocks must stay resident so native scoring keeps reading them.
+    resource_context_.cache_manager->freeBlockListByTag("default", to_free);
     prefix_offloaded_ = true;
     RTP_LLM_LOG_INFO("stream [%ld] offloaded %zu prefix blocks to host tier, keep_last=%d total=%d",
                      stream_->streamId(),
@@ -575,7 +642,7 @@ void StreamCacheResource::releaseAdmissionRing() {
     if (admission_ring_.empty()) {
         return;
     }
-    resource_context_.cache_manager->freeBlockList(admission_ring_);
+    resource_context_.cache_manager->freeBlockListByTag("default", admission_ring_);
     RTP_LLM_LOG_INFO("stream [%ld] released %zu admission ring blocks", stream_->streamId(), admission_ring_.size());
     admission_ring_.clear();
 }

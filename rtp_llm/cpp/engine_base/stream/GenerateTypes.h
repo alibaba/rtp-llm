@@ -41,6 +41,11 @@ struct PDLatencyBreakdown {
     std::string transport_path;
     std::string prefill_worker_addr;
     std::string decode_worker_addr;
+    int64_t     admission_prepare_us      = 0;
+    int64_t     admission_prepare_wait_us = 0;
+    int64_t     decode_normal_load_us     = 0;
+    int64_t     decode_ring_load_us       = 0;
+    int64_t     decode_first_token_us     = 0;
 };
 
 class GenerateInput {

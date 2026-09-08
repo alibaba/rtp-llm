@@ -27,6 +27,10 @@ struct DecodeStatInfo {
     int64_t      load_cache_min_rt_us           = 0;
     int64_t      load_cache_max_rt_us           = 0;
     int64_t      load_cache_polling_cost_us     = 0;
+    int64_t      admission_prepare_us           = 0;
+    int64_t      admission_prepare_wait_us      = 0;
+    int64_t      normal_load_us                 = 0;
+    int64_t      ring_load_us                   = 0;
     ExecuteStage stage                          = start;
 
     ExecuteStage saveStage() const;

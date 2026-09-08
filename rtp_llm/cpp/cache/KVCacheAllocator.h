@@ -47,9 +47,13 @@ public:
 
     virtual ~KVCacheAllocator() = default;
 
-    bool                           init();
-    virtual void                   free(const FreeInfo& free_info) = 0;
-    virtual void                   freeBlockList(const BlockIndicesType& /*blocks*/) {}
+    bool         init();
+    virtual void free(const FreeInfo& free_info) = 0;
+    virtual void freeBlockList(const BlockIndicesType& /*blocks*/) {}
+    // Tag-aware variant for multi-group allocators; single-pool allocators ignore the tag.
+    virtual void freeBlockListByTag(const std::string& /*tag*/, const BlockIndicesType& blocks) {
+        freeBlockList(blocks);
+    }
     virtual void                   insertIntoCache(const InsertInfo& insert_info)         = 0;
     virtual BlockAddrInfo          convertIndexToAddr(int layer_id, int block_id) const   = 0;
     virtual std::vector<BlockInfo> convertIndexToBuffer(int layer_id, int block_id) const = 0;

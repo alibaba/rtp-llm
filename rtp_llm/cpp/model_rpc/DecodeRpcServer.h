@@ -34,7 +34,8 @@ public:
                            int                              partition_count,
                            int                              partition_id,
                            grpc::ServerContext*             server_context,
-                           int32_t                          prefill_cp_size = 1):
+                           int32_t                          prefill_cp_size = 1,
+                           DecodeStatInfo*                  stat_info       = nullptr):
             request_id(request_id),
             request_key(request_key),
             peer_addrs(peer_addrs),
@@ -45,7 +46,8 @@ public:
             partition_count(partition_count),
             partition_id(partition_id),
             server_context(server_context),
-            prefill_cp_size(prefill_cp_size) {}
+            prefill_cp_size(prefill_cp_size),
+            stat_info(stat_info) {}
         int64_t                          request_id;
         const std::string&               request_key;
         const std::vector<std::string>&  peer_addrs;
@@ -58,6 +60,7 @@ public:
 
         grpc::ServerContext* server_context;
         int32_t              prefill_cp_size;
+        DecodeStatInfo*      stat_info;
         // v32 staging-ring admission: transfer scratch blocks for pulling the
         // offloaded prefix (0-sentinel positions in block_ids) into the
         // admission mirror. Empty = no ring pull.

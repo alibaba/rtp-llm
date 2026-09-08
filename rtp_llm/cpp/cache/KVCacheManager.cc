@@ -343,6 +343,10 @@ void KVCacheManager::freeBlockList(const BlockIndicesType& blocks) {
     allocator_->freeBlockList(blocks);
 }
 
+void KVCacheManager::freeBlockListByTag(const std::string& tag, const BlockIndicesType& blocks) {
+    allocator_->freeBlockListByTag(tag, blocks);
+}
+
 void KVCacheManager::insertIntoCache(const InsertInfo& insert_info) {
     RTP_LLM_PROFILE_FUNCTION();
     dropLastPartialBlock(insert_info.batch_kv_cache_resource);

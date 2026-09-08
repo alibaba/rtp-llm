@@ -31,10 +31,10 @@ public:
     const CacheKeysType& cacheKeys(int32_t batch_id) const;
     absl::Status         initKVBlock();
     // seq_len_override (-1 = unset) is forwarded to MallocInfo::incr_seq_len_override.
-    // ECHO-style decode offload: release prefix blocks of group 0 back to the
-    // pool, keeping the vector length (NULL sentinels) so growth accounting is
-    // unchanged. Python-side hook serves attention for the released region
-    // from a host mirror. Returns number of blocks released.
+    // Decode offload: release prefix blocks of the semantic default group back
+    // to its pool, keeping logical-width 0 sentinels so growth accounting is
+    // unchanged. The independent indexer group remains dense on GPU. Returns
+    // the number of main-KV blocks released.
     int offloadPrefixBlocks(int keep_last_n);
     // v32 staging-ring admission (decode): initKVBlock capped the first malloc
     // at the resident window; the middle prefix positions are 0 sentinels and

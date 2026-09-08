@@ -1,4 +1,5 @@
 import logging
+from collections.abc import Mapping
 from typing import Any, Dict, Optional
 
 import torch
@@ -7,7 +8,10 @@ from torch import nn
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
-from rtp_llm.models_py.model_desc.block_map import select_fmha_impl_for_layer
+from rtp_llm.models_py.model_desc.block_map import (
+    get_attention_inputs_value,
+    select_fmha_impl_for_layer,
+)
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules import (
     CausalAttention,
@@ -24,6 +28,9 @@ from rtp_llm.models_py.modules import (
     SelectTopk,
     SigmoidGateScaleAdd,
 )
+from rtp_llm.models_py.modules.base.common.kvcache_store import (
+    create_write_cache_store_impl,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
@@ -32,6 +39,9 @@ from rtp_llm.ops.compute_ops import LayerKVCache, PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
 
 logger = logging.getLogger(__name__)
+
+_DSA_INDEXER_TAG = "dsa_indexer_k"
+_DSA_MAIN_TAG = "default"
 
 
 class GenericMoeLayer(nn.Module):
@@ -413,6 +423,16 @@ class GenericMoeModel(GptModelBase):
             weights.get_global_weight(W.final_ln_gamma), eps=model_config.layernorm_eps
         )
 
+    def _uses_dsa_indexer_companion(self) -> bool:
+        return (
+            self.kv_cache is not None and _DSA_INDEXER_TAG in self.kv_cache.group_tags
+        )
+
+    def _get_fmha_group_tags(self) -> Optional[list[str]]:
+        if self._uses_dsa_indexer_companion():
+            return [_DSA_MAIN_TAG]
+        return None
+
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
         input_ids: torch.Tensor = inputs.input_ids
         hidden_states = self.embed_tokens(input_ids)
@@ -420,15 +440,40 @@ class GenericMoeModel(GptModelBase):
             fmha_impl = self.prepare_fmha_impl(
                 inputs
             )  # pyright: ignore[reportUnreachable]
+
+        uses_dsa_indexer = self._uses_dsa_indexer_companion()
+        indexer_cache_store = None
+        if uses_dsa_indexer:
+            attention_inputs = get_attention_inputs_value(inputs)
+            if not isinstance(attention_inputs, Mapping):
+                raise RuntimeError(
+                    "DSA independent indexer cache requires tagged attention inputs"
+                )
+            indexer_inputs = attention_inputs.get(_DSA_INDEXER_TAG)
+            if indexer_inputs is None:
+                raise RuntimeError("missing dsa_indexer_k attention inputs")
+            indexer_cache_store = create_write_cache_store_impl(
+                indexer_inputs, self.kv_cache
+            )
+
         residual = torch.zeros_like(hidden_states)
         for i, decoder_layer in enumerate(self.layers[: self.layer_num]):
-            layer_fmha_impl = select_fmha_impl_for_layer(fmha_impl, self.kv_cache, i)
+            if uses_dsa_indexer:
+                if not isinstance(fmha_impl, Mapping) or _DSA_MAIN_TAG not in fmha_impl:
+                    raise RuntimeError("missing default FMHA for DSA independent cache")
+                layer_fmha_impl = fmha_impl[_DSA_MAIN_TAG]
+            else:
+                layer_fmha_impl = select_fmha_impl_for_layer(
+                    fmha_impl, self.kv_cache, i
+                )
             output = decoder_layer(
                 hidden_states,
                 residual,
                 layer_fmha_impl,
                 kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
             )
+            if indexer_cache_store is not None:
+                indexer_cache_store(self.kv_cache.get_layer_cache(i, _DSA_INDEXER_TAG))
             hidden_states = output.hidden_states
             residual = output.residual
 

@@ -99,6 +99,11 @@ class PDLatencyBreakdown:
     decode_kv_load_us: int = 0
     decode_queue_us: int = 0
     decode_service_us: int = 0
+    admission_prepare_us: int = 0
+    admission_prepare_wait_us: int = 0
+    decode_normal_load_us: int = 0
+    decode_ring_load_us: int = 0
+    decode_first_token_us: int = 0
     prefill_worker_id: str = ""
     decode_worker_id: str = ""
     kv_bytes: int = 0

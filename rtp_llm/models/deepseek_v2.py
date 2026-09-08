@@ -540,6 +540,95 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
 
 class DeepSeekV2(BaseModel):
     @classmethod
+    def _post_build_model_config(cls, model_config: ModelConfig) -> None:
+        """Independent DSA indexer-K cache group (verified 2026-09-01, HANDOFF §11).
+
+        Legacy layout rode the indexer-K inside kv_scale_base sharing the main
+        KV's block ids, so offloading a prefix freed both and native scoring
+        read freed memory - the v32 shadow pool existed to work around that.
+        Declaring the indexer as its own cache group gives it a separate block
+        table and lifecycle from the HybridPool allocator, exactly like DSv4's
+        indexer_kv pool (132 bytes/token = 128B fp8 + 4B scale).
+
+        Activation: automatic whenever decode offload is enabled
+        (RTP_KV_OFFLOAD_KEEP_BLOCKS / RTP_KV_ADMIT_RING_BLOCKS > 0), since the
+        shadow pool that used to make single-pool offload safe is gone.
+        V32_INDEPENDENT_IDX_POOL=1 forces it on without offload; =0 forces it
+        off (expert/debug only - offload with a single pool scores freed
+        indexer-K). V32_IDX_POOL_BLOCKS may reserve explicit indexer capacity
+        for concurrent long requests. CUDA-graph capture remains unsupported
+        while the indexer slot mapping is host-computed.
+        """
+
+        def _int_env(name: str) -> int:
+            try:
+                return int(os.environ.get(name, "0") or "0")
+            except ValueError:
+                return 0
+
+        override = os.environ.get("V32_INDEPENDENT_IDX_POOL")
+        offload_on = (
+            _int_env("RTP_KV_OFFLOAD_KEEP_BLOCKS") > 0
+            or _int_env("RTP_KV_ADMIT_RING_BLOCKS") > 0
+        )
+        enabled = override == "1" or (offload_on and override != "0")
+        if offload_on and override == "0":
+            logging.error(
+                "[v32] V32_INDEPENDENT_IDX_POOL=0 with decode offload enabled: "
+                "native scoring will read freed indexer-K (the shadow pool "
+                "workaround has been removed)"
+            )
+        if not enabled:
+            return super()._post_build_model_config(model_config)
+        attn = model_config.attn_config
+        if not attn.is_sparse or model_config.kv_cache_spec_descs:
+            return super()._post_build_model_config(model_config)
+        from rtp_llm.ops import (
+            CacheCapacityPolicyDesc,
+            DataType,
+            HybridAttentionType,
+            OpaqueBlockEntryCountMode,
+        )
+
+        main = KVCacheSpecDesc()
+        main.cache_type = (
+            KVCacheSpecType.MLA
+            if attn.use_mla and model_config.mla_ops_type != MlaOpsType.MHA
+            else KVCacheSpecType.MHA
+        )
+        main.tag = "default"
+
+        idx = KVCacheSpecDesc()
+        idx.cache_type = KVCacheSpecType.OPAQUE_KV
+        idx.tag = "dsa_indexer_k"
+        idx.entry_dtype = DataType.TYPE_UINT8
+        idx.entry_elems = (
+            int(attn.indexer_head_dim) + int(attn.indexer_head_dim) // 128 * 4
+        )
+        idx.entry_count_mode = OpaqueBlockEntryCountMode.EXPLICIT
+        idx.explicit_entry_count = int(attn.kernel_tokens_per_block)
+        indexer_pool_blocks = _int_env("V32_IDX_POOL_BLOCKS")
+        if indexer_pool_blocks > 0:
+            capacity = CacheCapacityPolicyDesc()
+            capacity.explicit_block_num = indexer_pool_blocks
+            capacity.charge_to_paged_budget = True
+            idx.capacity = capacity
+
+        layer_num = int(model_config.num_layers)
+        hybrid = model_config.hybrid_attention_config
+        hybrid.hybrid_attention_types = [HybridAttentionType.NONE] * layer_num
+        # Without this the C++ side never dispatches into HybridPoolConfigCreator
+        # and collapses everything back into one pool (same note as DSv4).
+        hybrid.enable_independent_kv_cache_pools = True
+        model_config.kv_cache_spec_descs = [[main, idx] for _ in range(layer_num)]
+        logging.warning(
+            "[v32] independent DSA indexer-K pool declared: %dB/token, %d tok/block, explicit_blocks=%d",
+            idx.entry_elems,
+            idx.explicit_entry_count,
+            indexer_pool_blocks,
+        )
+
+    @classmethod
     def _create_config(cls, ckpt_path: str):
         config = ModelConfig()
         config.attn_config.head_num = 0
@@ -808,7 +897,10 @@ class DeepSeekV3Mtp(DeepSeekV2):
     @classmethod
     def _post_build_model_config(cls, model_config: ModelConfig) -> None:
         desc = KVCacheSpecDesc()
-        if model_config.attn_config.use_mla and model_config.mla_ops_type != MlaOpsType.MHA:
+        if (
+            model_config.attn_config.use_mla
+            and model_config.mla_ops_type != MlaOpsType.MHA
+        ):
             desc.cache_type = KVCacheSpecType.MLA
         else:
             desc.cache_type = KVCacheSpecType.MHA

@@ -53,6 +53,15 @@ void registerPyOpDefs(pybind11::module& m) {
             pybind11::arg("kv_scale_base") = pybind11::none())
         .def_readwrite("kv_cache_base", &LayerKVCache::kv_cache_base, "Key/value cache tensor (per-layer view)")
         .def_readwrite("kv_scale_base", &LayerKVCache::kv_scale_base, "Key/value cache scale tensor")
+        .def_readwrite("indexer_cache_base",
+                       &LayerKVCache::indexer_cache_base,
+                       "Independent DSA indexer-K pool (unset unless the layer declares dsa_indexer_k)")
+        .def_readonly("indexer_seq_size_per_block",
+                      &LayerKVCache::indexer_seq_size_per_block,
+                      "Tokens per block of the independent indexer-K pool")
+        .def_readonly("indexer_group_id",
+                      &LayerKVCache::indexer_group_id,
+                      "Cache group id of the independent indexer-K pool (-1 = none)")
         .def_readonly("seq_size_per_block", &LayerKVCache::seq_size_per_block, "Sequence size per block")
         .def_readonly("layer_id", &LayerKVCache::layer_id, "Global layer id")
         .def_readonly("group_id", &LayerKVCache::group_id, "Cache group id (-1 = default)")
@@ -146,6 +155,8 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readwrite("input_lengths", &PyAttentionInputs::input_lengths)
         .def_readwrite("kv_cache_kernel_block_id", &PyAttentionInputs::kv_cache_kernel_block_id)
         .def_readwrite("kv_cache_kernel_block_id_device", &PyAttentionInputs::kv_cache_kernel_block_id_device)
+        .def_readwrite("indexer_cache_kernel_block_id", &PyAttentionInputs::indexer_cache_kernel_block_id)
+        .def_readwrite("indexer_cache_kernel_block_id_device", &PyAttentionInputs::indexer_cache_kernel_block_id_device)
         .def_readwrite("kv_cache_block_id", &PyAttentionInputs::kv_cache_block_id)
         .def_readwrite("kv_cache_block_id_device", &PyAttentionInputs::kv_cache_block_id_device)
         .def_readwrite("dtype", &PyAttentionInputs::dtype)
@@ -273,8 +284,7 @@ void registerPyOpDefs(pybind11::module& m) {
             "A PyAttentionInputs value or a tag-to-PyAttentionInputs mapping")
         .def_readwrite(
             "bert_embedding_inputs", &PyModelInputs::bert_embedding_inputs, "BERT embedding inputs structure")
-        .def_readwrite(
-            "dspark_call_phase", &PyModelInputs::dspark_call_phase, "Explicit DSpARK proposal/commit phase");
+        .def_readwrite("dspark_call_phase", &PyModelInputs::dspark_call_phase, "Explicit DSpARK proposal/commit phase");
 
     pybind11::class_<PyModelOutputs>(m, "PyModelOutputs")
         .def(pybind11::init<>(), "Default constructor")

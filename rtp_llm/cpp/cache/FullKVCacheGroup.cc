@@ -101,17 +101,32 @@ void FullKVCacheGroup::insertIntoCache(const CacheKeysType&    cache_keys,
 }
 
 void FullKVCacheGroup::free(const BlockIndicesType& block_indices) {
-    if (block_indices.empty()) {
+    BlockIndicesType valid;
+    valid.reserve(block_indices.size());
+    for (auto block : block_indices) {
+        if (block > 0) {
+            valid.push_back(block);
+        }
+    }
+    if (valid.empty()) {
         return;
     }
-
-    block_pool_->requestFree(block_indices);
-    RTP_LLM_LOG_DEBUG("Freed %zu blocks", block_indices.size());
+    block_pool_->requestFree(valid);
+    RTP_LLM_LOG_DEBUG("Freed %zu blocks", valid.size());
 }
 
 void FullKVCacheGroup::reference(BlockIds& block_ids, const BlockIndicesType& new_block_indices) {
     block_ids.add(new_block_indices);
-    block_pool_->requestReference(new_block_indices);
+    BlockIndicesType valid;
+    valid.reserve(new_block_indices.size());
+    for (auto block : new_block_indices) {
+        if (block > 0) {
+            valid.push_back(block);
+        }
+    }
+    if (!valid.empty()) {
+        block_pool_->requestReference(valid);
+    }
 }
 
 void FullKVCacheGroup::removeSkippedBlocks(BlockIds& /*block_ids*/, bool /*enable_reuse_cache*/, int /*reserve_step*/) {

@@ -158,6 +158,13 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
             generate_output.aux_info.remote_reuse_len = remote_reuse_length_;
             generate_output.aux_info.memory_reuse_len = memory_reuse_length_;
 
+            generate_output.aux_info.pd_latency = generate_input_->pd_latency;
+            if (generate_output.aux_info.pd_latency.schema_version > 0) {
+                generate_output.aux_info.pd_latency.decode_queue_us   = wait_time_us_;
+                generate_output.aux_info.pd_latency.decode_service_us = generate_output.aux_info.cost_time_us;
+                generate_output.aux_info.pd_latency.decode_first_token_us =
+                    generate_output.aux_info.first_token_cost_time_us;
+            }
             generate_output.aux_info.multimodal_lengths = generate_input_->multimodalLengths();
 
             if (calculateSoftmaxProbs() && softmax_probs_.defined()) {

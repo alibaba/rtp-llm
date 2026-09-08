@@ -30,10 +30,16 @@ namespace torch_ext {
 struct LayerKVCache {
     torch::Tensor kv_cache_base;
     torch::Tensor kv_scale_base;
-    int           seq_size_per_block = 0;
-    int           layer_id           = -1;
-    int           group_id           = -1;
-    std::string   tag                = "default";
+    // Independent DSA indexer-K pool (sparse V3.2 stage-2 decoupling). Unset for
+    // single-group models; filled when the layer declares the "dsa_indexer_k"
+    // companion group so the indexer survives main-KV prefix offload.
+    torch::Tensor indexer_cache_base;
+    int           indexer_seq_size_per_block = 0;
+    int           indexer_group_id           = -1;
+    int           seq_size_per_block         = 0;
+    int           layer_id                   = -1;
+    int           group_id                   = -1;
+    std::string   tag                        = "default";
 
     LayerKVCache() = default;
 
@@ -59,6 +65,20 @@ public:
 
     LayerKVCache getLayerCache(int layer_id) const {
         validateLayer(layer_id);
+        // Sparse V3.2 declares an independent indexer-K companion group next to
+        // the main KV; the primary compute cache stays the main group and the
+        // indexer tensor rides along, so single-cache call sites are unchanged.
+        static const std::string kDsaIndexerTag = "dsa_indexer_k";
+        const auto&              tags           = grouped_layout_.topology().layer(layer_id).group_tags;
+        if (tags.size() == 2 && (tags[0] == kDsaIndexerTag || tags[1] == kDsaIndexerTag)) {
+            const std::string& main_tag      = tags[0] == kDsaIndexerTag ? tags[1] : tags[0];
+            auto               cache         = getLayerCache(layer_id, main_tag);
+            auto               idx           = getLayerCache(layer_id, kDsaIndexerTag);
+            cache.indexer_cache_base         = std::move(idx.kv_cache_base);
+            cache.indexer_seq_size_per_block = idx.seq_size_per_block;
+            cache.indexer_group_id           = idx.group_id;
+            return cache;
+        }
         const auto& group = grouped_layout_.topology().soleGroupForLayer(layer_id);
         return getLayerCache(layer_id, group.tag);
     }
@@ -322,6 +342,12 @@ struct PyAttentionInputs {
     bool is_cuda_graph = false;  // True when running in CUDA graph mode (capture or replay)
 
     std::optional<PyContextParallelParams> context_parallel_info;
+
+    // Independent DSA indexer-K kernel block table (sparse V3.2 decoupling).
+    // Undefined unless the topology declares the dsa_indexer_k companion group;
+    // then indexer writes/scoring must address this table, not the main one.
+    torch::Tensor indexer_cache_kernel_block_id;
+    torch::Tensor indexer_cache_kernel_block_id_device;
 
     // Headwise attention config (Python dict or None).
     py::object headwise_config{py::none()};

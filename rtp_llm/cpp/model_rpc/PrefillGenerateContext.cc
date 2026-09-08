@@ -150,6 +150,11 @@ void PrefillGenerateContext::reset() {
     std::atomic_store(&client_context, std::shared_ptr<grpc::ClientContext>());
     grpc_stream_closed             = false;
     last_grpc_stream_closed_status = grpc::Status::OK;
+    prefill_queue_begin_time_us    = 0;
+    prefill_admit_time_us          = 0;
+    prefill_compute_done_time_us   = 0;
+    handoff_begin_time_us          = 0;
+    handoff_end_time_us            = 0;
 }
 
 bool PrefillGenerateContext::isRequestCancelled() const {
@@ -196,11 +201,9 @@ bool PrefillGenerateContext::isPriorityPreempted() const {
 
 bool PrefillGenerateContext::tryMarkOtherTerminal() {
     std::lock_guard<std::mutex> lock(terminal_transition_mu_);
-    auto expected = PrefillTerminalCause::ACTIVE;
-    if (terminal_cause_.compare_exchange_strong(expected,
-                                                PrefillTerminalCause::OTHER,
-                                                std::memory_order_acq_rel,
-                                                std::memory_order_acquire)) {
+    auto                        expected = PrefillTerminalCause::ACTIVE;
+    if (terminal_cause_.compare_exchange_strong(
+            expected, PrefillTerminalCause::OTHER, std::memory_order_acq_rel, std::memory_order_acquire)) {
         return true;
     }
     return expected == PrefillTerminalCause::OTHER;
@@ -243,9 +246,8 @@ bool PrefillGenerateContext::finalizePriorityPreemption() {
     details.set_error_message(error_info.ToString());
     std::string serialized_details;
     details.SerializeToString(&serialized_details);
-    error_status = grpc::Status(transErrorCodeToGrpc(ErrorCode::PRIORITY_PREEMPTED),
-                                error_info.ToString(),
-                                serialized_details);
+    error_status =
+        grpc::Status(transErrorCodeToGrpc(ErrorCode::PRIORITY_PREEMPTED), error_info.ToString(), serialized_details);
 
     // TryCancel is only the stop trigger. Finish joins the existing P->D RPC
     // execution; Decode's cancellation finalizer runs before Finish returns.
@@ -267,9 +269,8 @@ bool PrefillGenerateContext::finalizePriorityPreemption() {
     }
 
     if (meta) {
-        meta->markPriorityPreemptionCanceled(request_id,
-                                             static_cast<int64_t>(ErrorCode::PRIORITY_PREEMPTED),
-                                             "preempted by a higher-priority request");
+        meta->markPriorityPreemptionCanceled(
+            request_id, static_cast<int64_t>(ErrorCode::PRIORITY_PREEMPTED), "preempted by a higher-priority request");
     }
     priority_finalized_ = true;
     return true;

@@ -237,6 +237,11 @@ message PDLatencyBreakdownPB {
     string transport_path = 13; // GDR_DIRECT or TCP
     string prefill_worker_addr = 14;
     string decode_worker_addr = 15;
+    int64 admission_prepare_us = 16;
+    int64 admission_prepare_wait_us = 17;
+    int64 decode_normal_load_us = 18;
+    int64 decode_ring_load_us = 19;
+    int64 decode_first_token_us = 20;
 }
 
 message AuxInfoPB {
@@ -397,6 +402,10 @@ message BroadcastLoadResponsePB {
     int64 done_time_us = 2;
     int64 kv_bytes = 3;
     int64 kv_blocks = 4;
+    int64 admission_prepare_us = 5;
+    int64 admission_prepare_wait_us = 6;
+    int64 normal_load_us = 7;
+    int64 ring_load_us = 8;
 }
 
 message RemoteFinishRequestPB {
