@@ -46,10 +46,6 @@ bool ApiServerMetricReporter::init() {
 
     LOCAL_REGISTER_GAUGE_MUTABLE_METRIC(response_iterate_count_metric_, "response_iterate_count");
 
-    LOCAL_REGISTER_QPS_MUTABLE_METRIC(update_qps_metric_, "update_qps");
-    LOCAL_REGISTER_QPS_MUTABLE_METRIC(error_update_target_qps_metric_, "error_update_target_qps");
-    LOCAL_REGISTER_GAUGE_MUTABLE_METRIC(update_framework_rt_metric_, "update_framework_rt");
-
     LOCAL_REGISTER_GAUGE_MUTABLE_METRIC(ft_iterate_count_metric_, "ft_iterate_count");
     LOCAL_REGISTER_GAUGE_MUTABLE_METRIC(ft_input_token_length_metric_, "ft_input_token_length");
     LOCAL_REGISTER_GAUGE_MUTABLE_METRIC(ft_output_token_length_metric_, "ft_output_token_length");
@@ -148,19 +144,6 @@ void ApiServerMetricReporter::reportResponseIterateLatencyMs(double val) {
 void ApiServerMetricReporter::reportResponseIterateCountMetric(int32_t val) {
     REPORT_METRIC_IF_INITED(
         response_iterate_count_metric_, val, "report response iterate count metric failed, not inited");
-}
-
-void ApiServerMetricReporter::reportUpdateQpsMetric() {
-    REPORT_METRIC_IF_INITED(update_qps_metric_, 1, "report update qps metric failed, not inited");
-}
-
-void ApiServerMetricReporter::reportErrorUpdateTargetQpsMetric() {
-    REPORT_METRIC_IF_INITED(
-        error_update_target_qps_metric_, 1, "report error update target qps metric failed, not inited");
-}
-
-void ApiServerMetricReporter::reportUpdateLatencyMs(double val) {
-    REPORT_METRIC_IF_INITED(update_framework_rt_metric_, val, "report update latency ms failed, not inited");
 }
 
 void ApiServerMetricReporter::reportFTIterateCountMetric(double val) {

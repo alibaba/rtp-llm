@@ -1,6 +1,7 @@
 #include "gtest/gtest.h"
 
 #include <unistd.h>
+#include <vector>
 
 #include "rtp_llm/cpp/disaggregate/cache_store/test/CacheStoreTestBase.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/CacheStoreMetricsCollector.h"
@@ -47,22 +48,55 @@ TEST_F(CacheStoreMetricsCollectorTest, testClientLoadMetrics) {
     collector.reset();
 }
 
-TEST_F(CacheStoreMetricsCollectorTest, testServerLoadMetrics) {
-    auto collector = std::make_shared<CacheStoreServerLoadMetricsCollector>(nullptr, 1, 1024, 123);
-    collector.reset();
+TEST_F(CacheStoreMetricsCollectorTest, testServerLoadMetricsReportsCollectedValues) {
+    RtpLLMCacheStoreLoadServerMetricsCollector reported_metrics;
+    size_t                                     report_count = 0;
+    auto                                       collector =
+        std::make_shared<CacheStoreServerLoadMetricsCollector>(nullptr, 2, 2048, 123, [&](const auto& metrics) {
+            reported_metrics = metrics;
+            ++report_count;
+        });
 
-    auto kmon_tags = kmonitor::MetricsTags();
-    auto reporter  = std::make_shared<kmonitor::MetricsReporter>("", "", kmon_tags);
-    collector      = std::make_shared<CacheStoreServerLoadMetricsCollector>(reporter, 1, 1024, 123);
-    usleep(10);
-    collector->markFirstBlockReady();
-    usleep(10);
+    usleep(1000);
     collector->markAllBlocksReady();
     collector->setWriteInfo(1, 111, 1111);
-    usleep(10);
-    collector->markEnd(true);
+    collector->setWriteInfo(2, 222, 2222);
+    usleep(1000);
+    collector->markEnd(false);
 
     collector.reset();
+
+    EXPECT_EQ(1, report_count);
+    EXPECT_FALSE(reported_metrics.success);
+    EXPECT_EQ(2, reported_metrics.block_count);
+    EXPECT_EQ(2048, reported_metrics.total_block_size);
+    EXPECT_EQ(123, reported_metrics.request_send_cost_us);
+    EXPECT_GT(reported_metrics.latency_us, 0);
+    EXPECT_GT(reported_metrics.all_block_ready_latency_us, 0);
+    EXPECT_GT(reported_metrics.transfer_gap_latency_us, 0);
+    EXPECT_EQ((std::vector<int64_t>{1, 2}), reported_metrics.write_block_count);
+    EXPECT_EQ((std::vector<int64_t>{111, 222}), reported_metrics.write_total_block_size);
+    EXPECT_EQ((std::vector<int64_t>{1111, 2222}), reported_metrics.write_latency_us);
+}
+
+TEST_F(CacheStoreMetricsCollectorTest, testServerLoadMetricsWithoutAllBlocksReady) {
+    RtpLLMCacheStoreLoadServerMetricsCollector reported_metrics;
+    size_t                                     report_count = 0;
+    auto                                       collector =
+        std::make_shared<CacheStoreServerLoadMetricsCollector>(nullptr, 1, 1024, 123, [&](const auto& metrics) {
+            reported_metrics = metrics;
+            ++report_count;
+        });
+
+    usleep(1000);
+    collector->markEnd(true);
+    collector.reset();
+
+    EXPECT_EQ(1, report_count);
+    EXPECT_TRUE(reported_metrics.success);
+    EXPECT_GT(reported_metrics.latency_us, 0);
+    EXPECT_EQ(0, reported_metrics.all_block_ready_latency_us);
+    EXPECT_EQ(0, reported_metrics.transfer_gap_latency_us);
 }
 
 }  // namespace rtp_llm

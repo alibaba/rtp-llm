@@ -3,7 +3,9 @@
 #include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
+#include <functional>
 #include <memory>
+#include <utility>
 
 namespace rtp_llm {
 
@@ -72,16 +74,16 @@ private:
 
 class CacheStoreServerLoadMetricsCollector {
 public:
+    using ReportCallback = std::function<void(const RtpLLMCacheStoreLoadServerMetricsCollector&)>;
+
     CacheStoreServerLoadMetricsCollector(const kmonitor::MetricsReporterPtr& reporter,
                                          int64_t                             block_count,
                                          int64_t                             block_size,
-                                         int64_t                             request_send_cost_us);
+                                         int64_t                             request_send_cost_us,
+                                         ReportCallback                      report_callback = {});
     ~CacheStoreServerLoadMetricsCollector();
 
 public:
-    void markFirstBlockReady() {
-        first_block_ready_time_us_ = currentTimeUs();
-    }
     void markAllBlocksReady() {
         all_block_ready_time_us_ = currentTimeUs();
     }
@@ -94,18 +96,18 @@ public:
 private:
     kmonitor::MetricsReporterPtr               reporter_;
     RtpLLMCacheStoreLoadServerMetricsCollector collector_;
-    int64_t                                    start_time_us_             = 0;
-    int64_t                                    first_block_ready_time_us_ = 0;
-    int64_t                                    all_block_ready_time_us_   = 0;
-    int64_t                                    end_time_us_               = 0;
+    ReportCallback                             report_callback_;
+    int64_t                                    start_time_us_           = 0;
+    int64_t                                    all_block_ready_time_us_ = 0;
+    int64_t                                    end_time_us_             = 0;
     std::mutex                                 write_mutex_;
 };
 
 class CacheStoreRemoteStoreMetricsCollector {
 public:
-    CacheStoreRemoteStoreMetricsCollector(const kmonitor::MetricsReporterPtr& reporter,
-                                          int64_t                             block_count);
+    CacheStoreRemoteStoreMetricsCollector(const kmonitor::MetricsReporterPtr& reporter, int64_t block_count);
     ~CacheStoreRemoteStoreMetricsCollector();
+
 public:
     void markStart() {
         start_time_us_ = currentTimeUs();
@@ -119,7 +121,7 @@ public:
     }
     void markAllBlocksReady() {
         all_block_ready_time_us_ = currentTimeUs();
-    }   
+    }
     void setBlockSize(int total_block_size) {
         collector_.total_block_size = total_block_size;
     }
@@ -140,12 +142,12 @@ public:
                                        int64_t                             block_count,
                                        int64_t                             total_block_size);
     ~CacheStoreTransferMetricsCollector();
-private:
-    kmonitor::MetricsReporterPtr                reporter_;
-    RtpLLMCacheStoreTransferMetricsCollector    collector_;
-    int64_t                                     start_time_us_             = 0;
-    int64_t                                     end_time_us_               = 0;
-};
 
+private:
+    kmonitor::MetricsReporterPtr             reporter_;
+    RtpLLMCacheStoreTransferMetricsCollector collector_;
+    int64_t                                  start_time_us_ = 0;
+    int64_t                                  end_time_us_   = 0;
+};
 
 }  // namespace rtp_llm
