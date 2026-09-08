@@ -108,12 +108,28 @@ RTP_LLM_SCHEDULE_CODE = "flexlb.schedule.code"
 
 # --- C++-side span keys (single-source registry; C++ mirror lives in
 # rtp_llm/cpp/telemetry/TraceAttributes.h and must stay in sync with this
-# section). host.ip is a resource attribute set in TelemetryRuntime.cc and is
-# intentionally excluded from the span-key registry. ---
+# section). Resource attributes (service.name, service.instance.id, process.pid,
+# rtp_llm.role, rtp_llm.dp_rank, rtp_llm.world_rank,
+# gen_ai.instrumentation.sdk.name, host.name, host.ip, rtp_llm.pod_ip) are
+# process identity written once per TracerProvider, so they are deliberately
+# absent from this span-key registry. Note host.ip carries "{hostname}-{pid}"
+# for per-process platform aggregation, while the real pod address lives in
+# rtp_llm.pod_ip. ---
 # Bailian Unitrace indexes spans by the unprefixed string request_id; the
 # rtp_llm.* twin retains the numeric engine id for internal correlation.
 REQUEST_ID = "request_id"
 RTP_LLM_REQUEST_ID = "rtp_llm.request_id"
+# Engine identity on C++-synthesized phase spans, sourced from world_rank alone
+# (not a dp_rank/world_rank pair: the world rank is already unique per
+# deployment). Written as an integer so the platform aggregates it numerically.
+GEN_AI_ENGINE_INDEX = "gen_ai.engine.index"
+# PD topology role of the measured phase. Only the compute phases carry it:
+# `wait` (queueing) and `load_cache` (transfer) produce and consume nothing.
+# A fused deployment reports "none" instead of omitting the key.
+GEN_AI_PD_ROLE = "gen_ai.pd_role"
+GEN_AI_PD_ROLE_PRODUCER = "producer"
+GEN_AI_PD_ROLE_CONSUMER = "consumer"
+GEN_AI_PD_ROLE_NONE = "none"
 # Numeric gRPC status companion to error.type (GrpcStatusSpanGuard).
 RTP_LLM_GRPC_STATUS_CODE = "rtp_llm.grpc_status_code"
 # Stable application error identity on the operation that directly observed

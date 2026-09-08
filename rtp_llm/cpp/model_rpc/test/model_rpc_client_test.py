@@ -1115,6 +1115,7 @@ class _FakeClientSpan:
         self.error_type = None
         self.finished = False
         self.finish_calls = 0
+        self.end_count = 0
         self.finished_event = asyncio.Event()
 
     def set_attribute(self, key, value):
@@ -1125,6 +1126,7 @@ class _FakeClientSpan:
         self.finish_calls += 1
         if self.finished:
             return
+        self.end_count += 1
         self.finished = True
         if error is not None or error_type:
             self.status = "ERROR"
@@ -1178,6 +1180,9 @@ class _SpanAwareStub:
         self._terminal_delay = terminal_delay
         self._terminal_never = terminal_never
         self.iterator = None
+
+    def FetchResponse(self, request, timeout=None, metadata=None):
+        return self.GenerateStreamCall(request, timeout=timeout, metadata=metadata)
 
     def GenerateStreamCall(self, input_pb, timeout=None, metadata=None):
         total, finish_last, terminal_error, terminal_delay, terminal_never = (
@@ -1722,6 +1727,115 @@ class ClientSpanSettlementTest(TestCase):
         self.assertEqual(span.attributes["rpc.response.status_code"], "CANCELLED")
         for key in self.USAGE_KEYS:
             self.assertIn(key, span.attributes)
+
+    def test_fetch_cancellation_records_observed_latency_before_single_end(self):
+        async def run(span, client, exception_type, output_len, sequences):
+            input_py = self._make_input()
+            input_py.enqueued_by_master = True
+            input_py.generate_config.role_addrs = [
+                _prefill_role_addr("127.0.0.1", 1234)
+            ]
+            outputs = GenerateOutputs(
+                generate_outputs=[
+                    _FakeOut(False, output_len=output_len) for _ in range(sequences)
+                ]
+            )
+            with patch(
+                "rtp_llm.cpp.model_rpc.model_rpc_client.trans_output",
+                return_value=outputs,
+            ):
+                gen = client.enqueue(input_py)
+                await gen.__anext__()
+                with self.assertRaises(exception_type):
+                    await gen.athrow(exception_type())
+                await gen.aclose()
+            self.assertTrue(client._test_stub.iterator.cancelled)
+            self.assertEqual(span.status, "ERROR")
+            self.assertEqual(span.error_type, "Cancelled")
+            self.assertEqual(span.attributes["rpc.response.status_code"], "CANCELLED")
+            self.assertEqual(span.end_count, 1)
+            ttft = span.attributes.get("rtp_llm.engine.time_to_first_token_ms")
+            tpot = span.attributes.get("rtp_llm.engine.time_per_output_token_ms")
+            self.assertEqual(ttft, 8.5 if output_len > 0 else None)
+            self.assertEqual(tpot, 5.75 if output_len == 3 and sequences == 1 else None)
+
+        for exception_type in (GeneratorExit, asyncio.CancelledError):
+            for output_len, sequences in ((0, 1), (1, 1), (3, 1), (3, 2)):
+                with self.subTest(
+                    exception=exception_type, tokens=output_len, sequences=sequences
+                ):
+                    span = _FakeClientSpan()
+                    client = self._build_client(span, total=1, finish_last=False)
+                    asyncio.run(
+                        run(span, client, exception_type, output_len, sequences)
+                    )
+
+    def test_fetch_cleanup_recancellation_records_latency_before_single_end(self):
+        span = _FakeClientSpan()
+        client = self._build_client(span, total=3, finish_last=False)
+
+        async def run():
+            input_py = self._make_input()
+            input_py.enqueued_by_master = True
+            input_py.generate_config.role_addrs = [
+                _prefill_role_addr("127.0.0.1", 1234)
+            ]
+            gen = client.enqueue(input_py)
+            for _ in range(3):
+                await gen.__anext__()
+            # Cancel during the first teardown wait, then again in finally.
+            with patch(
+                "rtp_llm.cpp.model_rpc.model_rpc_client._wait_for_rpc_termination",
+                side_effect=asyncio.CancelledError,
+            ) as wait:
+                with self.assertRaises(asyncio.CancelledError):
+                    await gen.aclose()
+                self.assertEqual(wait.await_count, 2)
+            self.assertTrue(client._test_stub.iterator.cancelled)
+            self.assertEqual(span.end_count, 1)
+            self.assertEqual(span.status, "ERROR")
+            self.assertEqual(span.error_type, "Cancelled")
+            self.assertEqual(span.attributes["rpc.response.status_code"], "CANCELLED")
+            self.assertEqual(
+                span.attributes["rtp_llm.engine.time_to_first_token_ms"], 8.5
+            )
+            self.assertEqual(
+                span.attributes["rtp_llm.engine.time_per_output_token_ms"], 5.75
+            )
+
+        asyncio.run(run())
+
+    def test_fetch_cancel_before_any_output_omits_latency(self):
+        span = _FakeClientSpan()
+        client = self._build_client(span, total=0, terminal_never=True)
+
+        async def run():
+            input_py = self._make_input()
+            input_py.enqueued_by_master = True
+            input_py.generate_config.role_addrs = [
+                _prefill_role_addr("127.0.0.1", 1234)
+            ]
+
+            async def consume():
+                async for _ in client.enqueue(input_py):
+                    self.fail("no output was expected")
+
+            task = asyncio.create_task(consume())
+            while client._test_stub.iterator is None:
+                await asyncio.sleep(0)
+            await asyncio.wait_for(
+                client._test_stub.iterator.code_started.wait(), timeout=5
+            )
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+            self.assertEqual(span.end_count, 1)
+            self.assertEqual(span.status, "ERROR")
+            self.assertEqual(span.attributes["rpc.response.status_code"], "CANCELLED")
+            self.assertNotIn("rtp_llm.engine.time_to_first_token_ms", span.attributes)
+            self.assertNotIn("rtp_llm.engine.time_per_output_token_ms", span.attributes)
+
+        asyncio.run(run())
 
     def test_stop_word_break_with_renderer_milestone_keeps_span_ok(self):
         """Stop-word truncation is normal before the root span is settled.
