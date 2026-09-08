@@ -19,7 +19,7 @@ py_test (
     # hardware. The 3090 has 82 SMs and the A10 has 72, and kernels that
     # partition work by SM count accumulate in a different order -- enough to
     # flip a greedy token. Exact-output tests need the real target GPU, not a
-    # same-capability stand-in.
+    # same-capability stand-in. Staying on H20 by decision.
     exec_properties = {'gpu':'H20'},
 )
 

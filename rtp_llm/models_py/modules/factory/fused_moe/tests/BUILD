@@ -19,7 +19,9 @@ py_test(
     # not the capability gate, and DeepGemmMaskedExecutorV2.check_conditions has
     # checker.check(get_sm()[0] >= 9) (deepgemm_masked_executor_v2.py:41), so
     # every DeepGemmMaskedExecutorV2-backed strategy correctly declines below
-    # sm90. Mock the SM gate too and this can move.
+    # sm90. Staying on H20 by decision, not as a TODO: the test is correct about
+    # what the executor does, and mocking the capability gate to relocate it would
+    # make it assert something the hardware does not do.
     exec_properties = {'gpu':'H20'},
 )
 

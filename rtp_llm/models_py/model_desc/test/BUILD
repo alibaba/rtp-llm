@@ -53,7 +53,8 @@ py_test(
     # Byte-identical across two sm86 runs, and it passes on H20. This is a plain
     # bf16 x @ w GEMM -- the tolerance was tuned for the sm90/hipBLASLt tiling
     # (see the test's own comment) and the sm86 cuBLAS kernel accumulates in a
-    # different order. Widening the tolerance for a GEMM this size would move it.
+    # different order. Staying on H20 by decision: loosening an exact-output check
+    # to relocate a test trades real coverage for a scheduling preference.
     exec_properties = {'gpu':'H20', 'gpu_count': '1'},
 )
 

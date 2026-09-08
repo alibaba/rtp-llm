@@ -69,7 +69,8 @@ py_test (
    # (num_tokens=83, hidden_size=8192, bfloat16) on allclose(atol=1e-2,
    # rtol=1e-2). Deterministic under manual_seed(0) and identical across two
    # sm86 runs, and it passes on H20, so this is fused-vs-reference bf16
-   # accumulation order at that one shape, not flakiness.
+   # accumulation order at that one shape, not flakiness. Staying on H20 by
+   # decision rather than widening the tolerance to relocate it.
    exec_properties = {'gpu':'H20'},
 )
 
