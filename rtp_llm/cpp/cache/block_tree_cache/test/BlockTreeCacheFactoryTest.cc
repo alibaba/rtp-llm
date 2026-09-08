@@ -1274,15 +1274,14 @@ TEST_F(BlockTreeCacheFactoryTest, FailedWatermarkPlanStopsThisPassAndRecomputesO
     block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
 }
 
-TEST_F(BlockTreeCacheFactoryTest, DeviceMinFreeDoesNotTriggerBlockTreeWatermarkEviction) {
+TEST_F(BlockTreeCacheFactoryTest, DeviceWatermarkKeepsCacheBelowHighThreshold) {
     const auto config    = makeSingleConfig();
     auto       allocator = initAllocator<SingleTypeKVCacheAllocator>(config);
 
     KVCacheConfig kv_cache_config;
-    kv_cache_config.enable_host_cache            = true;
-    kv_cache_config.host_cache_size_mb           = 1;
-    kv_cache_config.device_cache_min_free_blocks = 7;
-    auto cache                                   = createBlockTreeCache(config, kv_cache_config, allocator);
+    kv_cache_config.enable_host_cache  = true;
+    kv_cache_config.host_cache_size_mb = 1;
+    auto cache                         = createBlockTreeCache(config, kv_cache_config, allocator);
     ASSERT_NE(cache, nullptr);
     allocator->attachBlockTreeCache(cache);
 
