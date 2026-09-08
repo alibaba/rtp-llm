@@ -93,6 +93,7 @@ public:
     rtp_llm::DataType dtype                   = rtp_llm::DataType::TYPE_INVALID;
     uint32_t          layer_num               = 0;  // the number of main model layers
     uint32_t          layer_all_num           = 0;  // the number of all layers including mtp modules
+    uint32_t          global_layer_begin      = 0;  // first global layer id; range length is layer_all_num
     bool              use_mla                 = false;
     bool              enable_hybrid_attention = false;
     bool              is_sparse               = false;

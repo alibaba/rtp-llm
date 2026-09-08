@@ -396,6 +396,7 @@ CacheConfig createConfigFromDescs(const ModelConfig& model_config, const SpecBui
     CacheConfig config(std::move(data.topology.first),
                        std::move(data.topology.second),
                        static_cast<uint32_t>(model_config.num_layers));
+    config.global_layer_begin                       = model_config.global_layer_begin;
     config.seq_size_per_block                       = ctx.seq_size_per_block;
     config.use_mla                                  = model_config.attn_config.use_mla;
     config.enable_hybrid_attention                  = model_config.hybrid_attention_config.enable_hybrid_attention;
@@ -674,8 +675,9 @@ ModelConfig CacheConfigCreator::stageScopedModelConfig(const ModelConfig&       
                             model_config.kv_cache_spec_descs.size(),
                             model_config.num_layers);
 
-    ModelConfig stage_config = model_config;
-    stage_config.num_layers  = end - begin;
+    ModelConfig stage_config        = model_config;
+    stage_config.num_layers         = end - begin;
+    stage_config.global_layer_begin = static_cast<uint32_t>(begin);
     stage_config.kv_cache_spec_descs.assign(model_config.kv_cache_spec_descs.begin() + begin,
                                             model_config.kv_cache_spec_descs.begin() + end);
 
