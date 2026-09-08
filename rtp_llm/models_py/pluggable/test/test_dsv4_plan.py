@@ -215,6 +215,32 @@ class Dsv4PlanTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "No compatible"):
             unsupported.prepare([request_for("model", unsupported.selection)])
 
+    def test_decode_metadata_graph_preserves_rank_protocol(self):
+        digests = set()
+        for rank in range(8):
+            ctx = self.decode_context(
+                rank,
+                execution_options={
+                    "DSV4_PPU_SGLANG_MOE": "1",
+                    "DSV4_PPU_DECODE_METADATA": "graph",
+                },
+            )
+            digests.add(ctx.prepare([request_for("model", ctx.selection)]))
+            self.assertEqual(len(ctx.bindings), 130)
+        self.assertEqual(len(digests), 1)
+        sequential = self.decode_context()
+        self.assertNotIn(
+            sequential.prepare([request_for("model", sequential.selection)]), digests
+        )
+        unsupported = self.decode_context(
+            execution_options={
+                "DSV4_PPU_SGLANG_MOE": "1",
+                "DSV4_PPU_DECODE_METADATA": "unknown",
+            }
+        )
+        with self.assertRaisesRegex(ValueError, "No compatible"):
+            unsupported.prepare([request_for("model", unsupported.selection)])
+
     def test_decode_fp8_v2_preserves_rank_protocol(self):
         digests = set()
         for rank in range(8):

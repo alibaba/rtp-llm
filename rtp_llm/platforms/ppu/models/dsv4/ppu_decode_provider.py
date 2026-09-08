@@ -1,11 +1,16 @@
 """Explicit TP1/DP8/EP8 Decode candidate using engine-owned communication."""
 
+from rtp_llm.models_py.modules.dsv4.platform_provider import Dsv4ProviderCapability
+
 from .ppu_module_provider import PpuModuleProvider
 
 
 class PpuDecodeProvider(PpuModuleProvider):
     name = "m890p-dsv4-fp4-decode-candidate"
     indexer_mode = "FP4"
+    capabilities = PpuModuleProvider.capabilities | frozenset(
+        {Dsv4ProviderCapability.DECODE_METADATA}
+    )
 
     def __init__(self, execution_options=None):
         super().__init__(execution_options)
@@ -21,7 +26,25 @@ class PpuDecodeProvider(PpuModuleProvider):
         )
         if self._moe_hint not in ("capacity", "batch"):
             raise ValueError("PPU Decode MoE hint must be capacity or batch")
+        self._metadata_mode = self.execution_options.get(
+            "DSV4_PPU_DECODE_METADATA", "eager"
+        )
+        if self._metadata_mode not in ("eager", "graph"):
+            raise ValueError("PPU Decode metadata mode must be eager or graph")
         self.stream_pool = PpuStreamPool()
+
+    def build_decode_metadata(self, default_factory, *args, **kwargs):
+        if self._metadata_mode == "eager":
+            return default_factory(*args, **kwargs)
+        from rtp_llm.models_py.modules.dsv4.fp8.decode.decode_fmha_impl import (
+            DSv4DecodeFmhaImplFP8,
+        )
+
+        from .ppu_decode_metadata import PpuDecodeMetadataGraph
+
+        if default_factory is not DSv4DecodeFmhaImplFP8:
+            raise ValueError("PPU metadata Graph requires the FP8 Decode factory")
+        return PpuDecodeMetadataGraph(*args, **kwargs)
 
     def build_fp8_linear(self, default_factory, *args, **kwargs):
         return super().build_fp8_linear(

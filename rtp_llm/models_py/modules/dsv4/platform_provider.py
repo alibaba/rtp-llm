@@ -28,6 +28,7 @@ class Dsv4ProviderCapability(str, Enum):
     FP8_MQA_LOGITS = "fp8_mqa_logits"
     FP4_LINEAR = "fp4_linear"
     HC_PRENORM = "hc_prenorm"
+    DECODE_METADATA = "decode_metadata"
 
 
 class Dsv4AttentionLayout(str, Enum):
@@ -42,6 +43,10 @@ class Dsv4PlatformProvider(Protocol):
     capabilities: FrozenSet[Dsv4ProviderCapability]
 
     def run_hc_prenorm(self, *args: Any, **kwargs: Any) -> Any: ...
+
+    def build_decode_metadata(
+        self, default_factory: Callable[..., Any], *args: Any, **kwargs: Any
+    ) -> Any: ...
 
     def build_block(
         self, default_factory: Callable[..., Any], *args: Any, **kwargs: Any
@@ -146,6 +151,7 @@ def _validate_provider(provider: Dsv4PlatformProvider) -> None:
         Dsv4ProviderCapability.FP8_MQA_LOGITS: "run_fp8_mqa_logits",
         Dsv4ProviderCapability.FP4_LINEAR: "build_fp4_linear",
         Dsv4ProviderCapability.HC_PRENORM: "run_hc_prenorm",
+        Dsv4ProviderCapability.DECODE_METADATA: "build_decode_metadata",
     }
     for capability in capabilities:
         method_name = methods[capability]
@@ -282,6 +288,16 @@ def build_dsv4_prefill_topk(default_factory, *, platform_provider=None):
     provider = resolve_dsv4_operator_provider(platform_provider)
     builder = getattr(provider, "build_prefill_topk", None)
     return default_factory if builder is None else builder(default_factory)
+
+
+def build_dsv4_decode_metadata(
+    default_factory, *args, platform_provider=None, **kwargs
+):
+    """Construct the per-graph metadata owner through the model's provider."""
+    provider = resolve_dsv4_operator_provider(platform_provider)
+    if Dsv4ProviderCapability.DECODE_METADATA not in provider.capabilities:
+        return default_factory(*args, **kwargs)
+    return provider.build_decode_metadata(default_factory, *args, **kwargs)
 
 
 def build_dsv4_fp8_linear(

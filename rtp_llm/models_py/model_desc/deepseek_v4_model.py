@@ -57,6 +57,7 @@ from rtp_llm.models_py.modules.dsv4.moe.moe_layer import (
 )
 from rtp_llm.models_py.modules.dsv4.platform_provider import (
     Dsv4ProviderCapability,
+    build_dsv4_decode_metadata,
     resolve_dsv4_platform_provider,
 )
 from rtp_llm.models_py.modules.dsv4.prefill.forward import forward_prefill
@@ -1285,8 +1286,10 @@ class DeepSeekV4Model(GptModelBase):
             group_tags=group_tags_snapshot,
         )
         cfg = _DecodeFmhaImplConfig(**cfg_kwargs)
-        impl = _DecodeFmhaImpl(
+        impl = build_dsv4_decode_metadata(
+            _DecodeFmhaImpl,
             cfg,
+            platform_provider=self._platform_provider,
             device=device,
             attn_inputs=attn,
         )

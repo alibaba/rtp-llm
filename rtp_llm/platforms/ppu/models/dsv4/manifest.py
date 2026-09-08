@@ -168,6 +168,10 @@ def supports_ppu_fp4_decode(selection, request):
             "requires auto or v2 FP8 quantization",
         ),
         (
+            options.get("DSV4_PPU_DECODE_METADATA", "eager") in ("eager", "graph"),
+            "requires eager or graph Decode metadata",
+        ),
+        (
             options.get("DSV4_PPU_DECODE_MOE_HINT", "capacity")
             in ("capacity", "batch"),
             "requires capacity or batch MoE launch hint",
