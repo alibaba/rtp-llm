@@ -32,9 +32,9 @@ py_test (
 # only ever builds float32 tensors while symm_mem.py:147-149 requires bfloat16.
 # Verified on sm86 with peer access unavailable (8x RTX 3090, CUDA_VISIBLE_DEVICES=0-3):
 # 4 tests run, 0 skipped, OK -- NCCL falls back to its shared-memory transport.
-# A10 CI workers expose exactly 4 GPUs (ut-sm8x on 33.100.174.171 and
-# 33.52.146.100 both report "NVIDIA A10": 4 and lock devices 0-3), so
-# gpu_count 4 takes a whole node but is satisfiable.
+# The A10 executor presents 4 visible GPUs per node, so gpu_count 4 is
+# satisfiable but occupies a whole node. Verification records live with the
+# internal CI evidence, not here.
 py_test(
     name = "collective_torch_test",
     srcs = ["collective_torch_test.py"],

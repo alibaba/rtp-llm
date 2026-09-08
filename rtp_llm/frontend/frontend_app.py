@@ -3,6 +3,7 @@ import gc
 import json
 import logging
 import os
+import queue
 import signal
 import socket
 import threading
@@ -94,28 +95,59 @@ class GracefulShutdownServer(Server):
         self._pre_stop_timer: Optional[threading.Timer] = None
         self._shutdown_requested = False
         self._shutdown_timeout_budget = self.config.timeout_graceful_shutdown
-        # Signal handlers run on the main thread. If the signal arrives while that
-        # thread is mid-write inside logging, a logging call from the handler
-        # re-enters the same stream and raises
-        #   RuntimeError: reentrant call inside <_io.BufferedWriter name='<stderr>'>
-        # which escapes the handler and takes the shutdown path down with it.
-        # Buffer while in the handler, flush once off it.
-        self._in_signal_handler = False
-        self._deferred_log_records: List[Any] = []
+        # Signal handlers run on the main thread, so anything they touch can be
+        # re-entered mid-update. Two concrete hazards here, and buffering the
+        # logging is not enough to cover either:
+        #
+        #  - FrontendShutdownManager guards its state with a plain threading.Lock
+        #    and takes it in try_begin_request/finish_request, i.e. on every
+        #    request. A signal landing inside that window, whose handler then
+        #    calls start_unavailable or active_request_count, deadlocks the
+        #    process on a non-reentrant lock it already holds.
+        #  - That manager also logs while holding the lock, so the handler can
+        #    re-enter the stderr writer and raise
+        #    "reentrant call inside <_io.BufferedWriter ...>", which escapes the
+        #    handler and takes the shutdown path with it.
+        #
+        # So the handlers do no work at all: they hand the signal to this queue
+        # and return. SimpleQueue.put is documented as reentrant-safe and usable
+        # from a signal handler; everything else runs on the worker below, off
+        # the handler, where locks and logging are ordinary operations.
+        self._signal_events: "queue.SimpleQueue" = queue.SimpleQueue()
+        self._signal_worker = threading.Thread(
+            target=self._dispatch_signal_events,
+            name="frontend-signal-dispatch",
+            daemon=True,
+        )
+        self._signal_worker.start()
 
-    def _signal_safe_log(self, level: int, msg: str, *args: Any) -> None:
-        if self._in_signal_handler:
-            # list.append is a single C-level operation, so it is safe here.
-            self._deferred_log_records.append((level, msg, args))
-            return
-        logging.log(level, msg, *args)
+    @staticmethod
+    def _signal_name(sig: int) -> str:
+        try:
+            return signal.Signals(sig).name
+        except ValueError:
+            return str(sig)
 
-    def _flush_deferred_logs(self) -> None:
-        if not self._deferred_log_records:
-            return
-        records, self._deferred_log_records = self._deferred_log_records, []
-        for level, msg, args in records:
-            logging.log(level, msg, *args)
+    def _dispatch_signal_events(self) -> None:
+        while True:
+            kind, sig, frame = self._signal_events.get()
+            try:
+                sig_name = self._signal_name(sig)
+                if kind == "exit":
+                    if not self._defer_sigterm_for_pre_stop_drain(
+                        sig, frame, sig_name
+                    ):
+                        self._begin_shutdown(sig, frame, sig_name)
+                else:
+                    self.shutdown_manager.start_unavailable(f"signal {sig_name}")
+                    if not self._schedule_shutdown_after_pre_stop(
+                        sig, frame, sig_name
+                    ):
+                        self._begin_shutdown(sig, frame, sig_name)
+            except Exception:
+                # Never let the dispatcher die: a lost signal means a frontend
+                # that ignores SIGTERM.
+                logging.exception("Frontend signal dispatch failed for %s", sig)
 
     def install_pre_stop_drain_signal_handler(self) -> None:
         pre_stop_signal = getattr(signal, "SIGUSR1", None)
@@ -130,38 +162,13 @@ class GracefulShutdownServer(Server):
             )
 
     def handle_pre_stop_drain_signal(self, sig: int, frame) -> None:
-        self._in_signal_handler = True
-        try:
-            try:
-                sig_name = signal.Signals(sig).name
-            except ValueError:
-                sig_name = str(sig)
-            self.shutdown_manager.start_unavailable(f"signal {sig_name}")
-            self._signal_safe_log(
-                logging.INFO,
-                "Frontend entering pre-stop unavailable state before uvicorn shutdown: "
-                "signal=%s, active_requests=%s",
-                sig_name,
-                self.shutdown_manager.active_request_count(),
-            )
-            if not self._schedule_shutdown_after_pre_stop(sig, frame, sig_name):
-                self._begin_shutdown(sig, frame, sig_name)
-        finally:
-            self._in_signal_handler = False
+        # Signal-handler context: hand off and return. See set_server.
+        self._signal_events.put(("pre_stop", sig, frame))
 
     @override
     def handle_exit(self, sig: int, frame) -> None:
-        self._in_signal_handler = True
-        try:
-            try:
-                sig_name = signal.Signals(sig).name
-            except ValueError:
-                sig_name = str(sig)
-            if self._defer_sigterm_for_pre_stop_drain(sig, frame, sig_name):
-                return
-            self._begin_shutdown(sig, frame, sig_name)
-        finally:
-            self._in_signal_handler = False
+        # Signal-handler context: hand off and return. See set_server.
+        self._signal_events.put(("exit", sig, frame))
 
     def _defer_sigterm_for_pre_stop_drain(self, sig: int, frame, sig_name: str) -> bool:
         if sig != signal.SIGTERM:
@@ -183,8 +190,7 @@ class GracefulShutdownServer(Server):
             if self._shutdown_requested:
                 return True
             if self._pre_stop_timer is not None:
-                self._signal_safe_log(
-                    logging.INFO,
+                logging.info(
                     "Frontend received duplicate %s during pre-stop drain; "
                     "continuing pre-stop drain before uvicorn shutdown",
                     sig_name,
@@ -192,8 +198,7 @@ class GracefulShutdownServer(Server):
                 return True
 
             self.shutdown_manager.start_unavailable(f"signal {sig_name}")
-            self._signal_safe_log(
-                logging.INFO,
+            logging.info(
                 "Frontend entering pre-stop unavailable window before uvicorn shutdown: "
                 "remaining=%.3fs, elapsed=%.3fs, active_requests=%s",
                 remaining,
@@ -217,11 +222,6 @@ class GracefulShutdownServer(Server):
         sig_name: str,
         force_on_duplicate: bool = True,
     ) -> None:
-        # Reached either from a signal handler or from the pre-stop Timer thread.
-        # The timer path is off the handler, so it is the first safe chance to emit
-        # anything the handler buffered.
-        if not self._in_signal_handler:
-            self._flush_deferred_logs()
         with self._pre_stop_lock:
             if self._shutdown_requested:
                 if force_on_duplicate:
@@ -250,8 +250,7 @@ class GracefulShutdownServer(Server):
         current_timeout = self.config.timeout_graceful_shutdown
         if current_timeout is None or current_timeout <= remaining_timeout:
             return
-        self._signal_safe_log(
-            logging.INFO,
+        logging.info(
             "Limit frontend graceful shutdown timeout from %.3fs to remaining "
             "pre-stop budget %.3fs",
             float(current_timeout),
@@ -269,10 +268,6 @@ class GracefulShutdownServer(Server):
 
     @override
     async def shutdown(self, sockets: Optional[List[socket.socket]] = None) -> None:
-        # Backstop for anything a signal handler buffered: this runs on the event
-        # loop, never inside a handler, and is always reached on the shutdown path
-        # even when the pre-stop timer never fires.
-        self._flush_deferred_logs()
         self.shutdown_manager.start_draining("uvicorn shutdown")
         try:
             await super().shutdown(sockets)
