@@ -95,6 +95,7 @@ Padding-token slots are nulled via ``cp_info.prefill_qkv_padding_mask``.
 from __future__ import annotations
 
 import os
+import time
 from contextlib import nullcontext
 from typing import TYPE_CHECKING, Any, Callable, Dict, Optional, Tuple
 
@@ -145,6 +146,185 @@ _PrefillFastLayerCall = Callable[..., torch.Tensor]
 
 def _env_flag(name: str, default: str = "0") -> bool:
     return os.environ.get(name, default).strip().lower() in _TRUE_ENV_VALUES
+
+
+# ---------------------------------------------------------------------------
+# Env-gated per-forward CPU-wall accounting (``DSV4_FWD_STATS=1``).
+#
+# Step 15's ``t_stage(C) = 799 + C*26.0`` fit leaves ~15 ms/round unexplained:
+# the timed CP gathers are only ~7-10 ms/round and the removed D2H syncs ~0.6.
+# The remainder has to be host-side work the layer loop cannot overlap — D2H
+# ``.item()`` syncs, the per-forward ``PrefillWorkspace`` union allocation, and
+# the meta build. All three are CPU costs, so they show up as CPU wall time, and
+# a real cudaMalloc/cudaFree shows up in the allocator counters. Neither needs a
+# profiler or a rebuild. Free when the flag is off (one bool read per forward).
+# ---------------------------------------------------------------------------
+_FWD_STATS = _env_flag("DSV4_FWD_STATS")
+_FWD_STATS_MAX = int(os.environ.get("DSV4_FWD_STATS_MAX", "0") or 0)
+_FWD_STATS_ROWS: list = []
+_FWD_STATS_N = [0]
+
+# Allocator counters that only move on a real driver call. A per-forward union
+# buffer that the caching allocator recycles leaves all three at zero; one that
+# does not is paying cudaMalloc/cudaFree (a cudaFree is a device sync).
+_FWD_STATS_MEM_KEYS = (
+    "num_device_alloc",
+    "num_device_free",
+    "num_alloc_retries",
+)
+
+
+def _fwd_stats_snap() -> Optional[tuple]:
+    if not _FWD_STATS:
+        return None
+    ms = torch.cuda.memory_stats()
+    return tuple(int(ms.get(k, 0)) for k in _FWD_STATS_MEM_KEYS)
+
+
+def _fwd_stats_report_row(
+    *,
+    n_tokens: int,
+    cp_size: int,
+    marks: Dict[str, float],
+    mem_before: Optional[tuple],
+    mem_after: Optional[tuple],
+) -> None:
+    """Emit one ``[FWDT]`` line of per-phase CPU wall times (ms)."""
+    _FWD_STATS_N[0] += 1
+    if _FWD_STATS_MAX and _FWD_STATS_N[0] > _FWD_STATS_MAX:
+        return
+    order = ("cpctx", "pos", "embed", "meta", "loop", "tail")
+    parts = []
+    prev = marks.get("entry")
+    for name in order:
+        cur = marks.get(name)
+        if prev is None or cur is None:
+            parts.append("%s=NA" % name)
+            prev = cur if cur is not None else prev
+            continue
+        parts.append("%s=%.2f" % (name, (cur - prev) * 1e3))
+        prev = cur
+    total = 0.0
+    if marks.get("entry") is not None and marks.get("tail") is not None:
+        total = (marks["tail"] - marks["entry"]) * 1e3
+    deltas = ""
+    if mem_before is not None and mem_after is not None:
+        deltas = " " + " ".join(
+            "d_%s=%d" % (k, a - b)
+            for k, b, a in zip(_FWD_STATS_MEM_KEYS, mem_before, mem_after)
+        )
+    import sys
+
+    print(
+        "[FWDT] rank=%d n=%d T=%d cp=%d total=%.2f %s%s"
+        % (
+            torch.distributed.get_rank()
+            if torch.distributed.is_initialized()
+            else -1,
+            _FWD_STATS_N[0],
+            n_tokens,
+            cp_size,
+            total,
+            " ".join(parts),
+            deltas,
+        ),
+        file=sys.stderr,
+        flush=True,
+    )
+    _FWD_STATS_ROWS.append((n_tokens, cp_size, total, tuple(parts)))
+
+
+def _fwd_stats_flush() -> None:
+    if not _FWD_STATS or not _FWD_STATS_ROWS:
+        return
+    import sys
+
+    by_shape: Dict[tuple, list] = {}
+    for n_tokens, cp_size, total, _parts in _FWD_STATS_ROWS:
+        by_shape.setdefault((n_tokens, cp_size), []).append(total)
+    print("[FWDT] ---- summary over %d forwards ----" % len(_FWD_STATS_ROWS),
+          file=sys.stderr, flush=True)
+    for (n_tokens, cp_size), totals in sorted(by_shape.items()):
+        print(
+            "[FWDT] T=%d cp=%d calls=%d mean_total=%.2f ms sum_total=%.1f ms"
+            % (
+                n_tokens,
+                cp_size,
+                len(totals),
+                sum(totals) / len(totals),
+                sum(totals),
+            ),
+            file=sys.stderr,
+            flush=True,
+        )
+
+
+if _FWD_STATS:
+    import atexit
+
+    atexit.register(_fwd_stats_flush)
+
+
+# ---------------------------------------------------------------------------
+# Env-gated single-forward GPU kernel breakdown (``DSV4_FWD_PROFILE=1``).
+#
+# pH0's CPU-wall accounting put a whole forward at ~65 ms of host time while the
+# fitted stage cost is ~126 ms per round, so the per-round term ``o`` is GPU-side
+# and host timings cannot localise it further. This captures ONE forward per rank
+# with CUPTI and prints self-CUDA time per kernel — one profiled forward inflates
+# that request's TTFT, so a profiling leg's mean is not a result.
+# ---------------------------------------------------------------------------
+_FWD_PROFILE = _env_flag("DSV4_FWD_PROFILE")
+_FWD_PROFILE_IDX = int(os.environ.get("DSV4_FWD_PROFILE_IDX", "20") or 20)
+_FWD_PROFILE_ROWS = int(os.environ.get("DSV4_FWD_PROFILE_ROWS", "35") or 35)
+# -1 = every rank profiles. CUPTI on all 8 ranks at once perturbs the pipeline
+# and the CP collectives, so measurement legs normally pin one world rank.
+_FWD_PROFILE_RANK = int(os.environ.get("DSV4_FWD_PROFILE_RANK", "-1") or -1)
+_FWD_PROFILE_CT = [0]
+
+
+def _fwd_profile_rank_ok() -> bool:
+    if _FWD_PROFILE_RANK < 0:
+        return True
+    if not torch.distributed.is_initialized():
+        return _FWD_PROFILE_RANK == 0
+    return torch.distributed.get_rank() == _FWD_PROFILE_RANK
+
+
+def _fwd_profile_start():
+    prof = torch.profiler.profile(
+        activities=[
+            torch.profiler.ProfilerActivity.CPU,
+            torch.profiler.ProfilerActivity.CUDA,
+        ]
+    )
+    prof.__enter__()
+    return prof
+
+
+def _fwd_profile_dump(prof) -> None:
+    import sys
+
+    rank = (
+        torch.distributed.get_rank() if torch.distributed.is_initialized() else -1
+    )
+    ka = prof.key_averages()
+    total_us = sum(float(e.self_device_time_total) for e in ka)
+    print(
+        "[FWDP] rank=%d ---- one forward: total self GPU %.2f ms ----"
+        % (rank, total_us / 1e3),
+        file=sys.stderr,
+        flush=True,
+    )
+    print(
+        ka.table(
+            sort_by="self_device_time_total",
+            row_limit=_FWD_PROFILE_ROWS,
+            max_name_column_width=78,
+        ),
+        file=sys.stderr,
+        flush=True,
+    )
 
 
 def _prefill_fast_path_layer_calls(
@@ -340,6 +520,17 @@ def forward_layers(
     owned KV regions are registered with the PD-disagg cache_store immediately
     after that layer's forward.
     """
+    _fs_marks: Optional[Dict[str, float]] = None
+    _fs_mem0 = None
+    if _FWD_STATS:
+        _fs_marks = {"entry": time.perf_counter()}
+        _fs_mem0 = _fwd_stats_snap()
+    _fs_prof = None
+    if _FWD_PROFILE and _fwd_profile_rank_ok() and int(input_ids.size(0)) >= 1024:
+        _FWD_PROFILE_CT[0] += 1
+        if _FWD_PROFILE_CT[0] == _FWD_PROFILE_IDX:
+            _fs_prof = _fwd_profile_start()
+
     # Build + propagate CP context once per prefill step. Under CP the
     # caller hands us a per-rank chunk slice (T_local = chunk_length),
     # and each attn / compressor / indexer reads ``cp_ctx`` off the
@@ -360,6 +551,8 @@ def forward_layers(
             kv_cache_sharded=bool(getattr(v4, "_kv_cache_sharded", False)),
         )
     v4._propagate_cp_ctx(cp_ctx)
+    if _fs_marks is not None:
+        _fs_marks["cpctx"] = time.perf_counter()
     if os.environ.get("DSV4_CP_PROBE"):
         # Report the first few DISTINCT large token counts. A one-shot probe is
         # useless here: the 5-token warm-up request legitimately has CP cleared
@@ -403,6 +596,8 @@ def forward_layers(
     positions = positions.reshape(-1).contiguous()
     if cu_seqlens is not None:
         cu_seqlens = cu_seqlens.reshape(-1).contiguous()
+    if _fs_marks is not None:
+        _fs_marks["pos"] = time.perf_counter()
 
     # MOEDBG hook (mirrors V4Transformer.forward standalone path so the
     # smoke / production prefill path produces the same per-layer dump
@@ -433,6 +628,8 @@ def forward_layers(
 
     capture_ids = frozenset(v4.capture_aux_hidden_layer_ids)
     capture_aux = bool(capture_ids)
+    if _fs_marks is not None:
+        _fs_marks["embed"] = time.perf_counter()
 
     prefill_fast_layer_calls = _prefill_fast_path_layer_calls(v4)
     use_prefill_fast_path = _prefill_fast_path_enabled(
@@ -557,6 +754,9 @@ def forward_layers(
                 workspace=ws,
             )
 
+    if _fs_marks is not None:
+        _fs_marks["meta"] = time.perf_counter()
+
     try:
         with record_range_ctx():
             # Two callable chains intentionally coexist:
@@ -632,6 +832,15 @@ def forward_layers(
         # on a near-full card. ``clear`` is idempotent (sets None per layer).
         if v4.fp8_kv_cache:
             clear_prefill_meta_shared_fp8(v4)
+        if _fs_prof is not None:
+            # __exit__ synchronises, so every kernel the loop launched is
+            # captured even though the launches themselves are async.
+            _fs_prof.__exit__(None, None, None)
+            _fwd_profile_dump(_fs_prof)
+            _fs_prof = None
+
+    if _fs_marks is not None:
+        _fs_marks["loop"] = time.perf_counter()
 
     if v4._mtp_hidden_buffer is not None:
         if capture_aux:
@@ -652,6 +861,15 @@ def forward_layers(
     # stage continues from.  Returning before the reduce also skips the debug
     # blocks below, which dereference ``v4.head_weight``.
     if v4.norm is None:
+        if _fs_marks is not None:
+            _fs_marks["tail"] = time.perf_counter()
+            _fwd_stats_report_row(
+                n_tokens=int(input_ids.size(0)),
+                cp_size=int(cp_ctx.cp_size) if cp_ctx is not None else 1,
+                marks=_fs_marks,
+                mem_before=_fs_mem0,
+                mem_after=_fwd_stats_snap(),
+            )
         return h  # [T, hc, dim]
 
     # _hc_head_reduce is flat-native: [T, hc, dim] -> [T, dim].
@@ -738,6 +956,15 @@ def forward_layers(
     # forward (which runs right after the main model on a near-full card) can
     # borrow it. No explicit reset needed — the per-layer ``common.workspace``
     # references were cleared by ``clear_prefill_meta_shared_fp8`` above.
+    if _fs_marks is not None:
+        _fs_marks["tail"] = time.perf_counter()
+        _fwd_stats_report_row(
+            n_tokens=int(input_ids.size(0)),
+            cp_size=int(cp_ctx.cp_size) if cp_ctx is not None else 1,
+            marks=_fs_marks,
+            mem_before=_fs_mem0,
+            mem_after=_fwd_stats_snap(),
+        )
     return h  # [T, dim]
 
 
