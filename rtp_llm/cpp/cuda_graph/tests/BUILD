@@ -5,12 +5,11 @@ cc_test(
     name = "combo_position_ids_validation_test",
     srcs = ["combo_position_ids_validation_test.cc"],
     copts = copts(),
-    tags = ["H20"],
-    exec_properties = {"gpu": "H20"},
     deps = [
         "//rtp_llm/cpp/cuda_graph:combo_position_ids_validation",
         "@com_google_googletest//:gtest_main",
     ] + torch_deps(),
+    exec_properties = {'gpu':'A10'},
 )
 
 cc_library(
@@ -67,8 +66,7 @@ py_test(
         "HACK_LAYER_NUM": "1",
         "ENABLE_CUDA_GRAPH_DEBUG_MODE": "1",
     },
-    tags = ["H20"],
-    exec_properties = {"gpu": "H20"},
+    exec_properties = {'gpu':'A10'},
 )
 
 py_test(
@@ -93,7 +91,14 @@ py_test(
         "ACT_TYPE": "BF16",
     },
     tags = ["H20"],
-    exec_properties = {"gpu": "H20"},
+    # Back on H20 after measuring on sm86. Passes on H20 (ut-sm9x, run
+    # 69503829); on sm86 it fails deterministically, 2 of 2, during unittest
+    # collection: py_flashinfer_mha.py:369 raises "kv_cache is required for
+    # paged attention" from __init__ -> init_prefill. A different fmha backend
+    # is selected below sm90 and this fixture does not supply a kv_cache for it.
+    # Which selection branch diverges is not yet pinned down -- the is_sm90()
+    # gate at py_flashinfer_mha.py:135 is FP8-Q-only, so it is not that one.
+    exec_properties = {'gpu':'H20'},
 )
 
 py_test(
@@ -112,8 +117,7 @@ py_test(
         "NOT_USE_DEFAULT_STREAM": "1",
         "TEST_USING_DEVICE": "CUDA",
     },
-    tags = ["H20"],
-    exec_properties = {"gpu": "H20"},
+    exec_properties = {'gpu':'A10'},
 )
 
 py_test(
@@ -134,6 +138,5 @@ py_test(
         "CUDA_LAUNCH_BLOCKING": "1",
         "ENABLE_CUDA_GRAPH_DEBUG_MODE": "1",
     },
-    tags = ["H20"],
-    exec_properties = {"gpu": "H20"},
+    exec_properties = {'gpu':'A10'},
 )

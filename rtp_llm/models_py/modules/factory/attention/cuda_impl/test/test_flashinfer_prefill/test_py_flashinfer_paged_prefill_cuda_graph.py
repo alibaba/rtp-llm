@@ -55,14 +55,20 @@ class _PrefillPagedCudaGraphTestMixin:
         for il in input_lengths:
             cu.append(cu[-1] + il)
 
-        if with_copy_params:
-            inp.cu_seqlens_device = torch.tensor(cu, dtype=torch.int32).pin_memory()
-            inp.cu_kv_seqlens_device = torch.tensor(cu, dtype=torch.int32).pin_memory()
-        else:
-            inp.cu_seqlens_device = torch.tensor(cu, dtype=torch.int32, device="cuda")
-            inp.cu_kv_seqlens_device = torch.tensor(
-                cu, dtype=torch.int32, device="cuda"
-            )
+        # Device, in both cases. These are what FlashInfer keeps as its persistent
+        # graph buffers and dereferences on the device at each replay, and the
+        # field names say _device. The copy-params path does not change that: the
+        # engine pins exactly one tensor, cuda_graph_prefill_batch_size, and
+        # asserts is_pinned() on it (initCaptureAttentionInputsPost) -- these two
+        # it passes as device tensors.
+        #
+        # This branch used to hand over pinned *host* memory whenever
+        # with_copy_params was set, which is what made the kernel read a host
+        # pointer and abort with an illegal memory access. That was a bug in the
+        # test, not in the op: "fixing" the op to copy these onto the device
+        # instead broke the real engine's multi-graph capture path.
+        inp.cu_seqlens_device = torch.tensor(cu, dtype=torch.int32, device="cuda")
+        inp.cu_kv_seqlens_device = torch.tensor(cu, dtype=torch.int32, device="cuda")
 
         max_blocks = max(math.ceil(s / PAGE_SIZE) for s in seq_lengths)
         block_ids = torch.zeros(batch_size, max_blocks, dtype=torch.int32)
@@ -152,7 +158,22 @@ class _PrefillPagedCudaGraphTestMixin:
         normal_op.prepare(normal_inp)
         normal_out = normal_op.forward(q, kv_cache)
 
-        # CUDA graph path: capture then replay
+        # CUDA graph path: capture then replay.
+        #
+        # Scope, because this test has already been over-trusted once: it exercises
+        # the *contract* the graph path depends on -- persistent buffers, plan()
+        # under forbid_realloc, prepare-then-forward with updated inputs, compared
+        # against the eager result -- but it does not create a torch CUDAGraph and
+        # replay it, and it does not reproduce how the engine captures.
+        #
+        # The engine drives capture from C++ across 16 decode graphs plus a prefill
+        # graph sharing one at::cuda::graph_pool_handle(). A commit that made these
+        # buffers device-resident passed this test and then broke both cudagraph
+        # eagle smoke cases -- measured 12/12 passing at main's file state versus
+        # 0/12 with the change -- so passing here is not evidence about the engine.
+        # Adding a single-graph Python capture would not close that gap either; it
+        # would just look like it had. Engine-level coverage belongs in the smoke
+        # cases, which is where that regression was actually caught.
         capture_input_lengths = capture_input_lengths or input_lengths
         capture_prefix_lengths = capture_prefix_lengths or prefix_lengths
         cg_init = self._make_inputs(

@@ -60,6 +60,33 @@ def get_package_info(package_name):
         return None, None
 
 
+def _build_variant(source_path):
+    """The bazel external repo a package came from, e.g. pip_gpu_rocm_torch_torch.
+
+    A version string is not a build identity. The same version is built per
+    platform into separate external repos -- pip_gpu_cuda12_9_torch_torch,
+    pip_gpu_rocm_torch_torch, the ppu and arm variants -- while the cache below
+    lives in ~/.cache, shared by every job that lands on the host. Keyed on
+    version alone, whichever job populates the cache first decides which build
+    every later job on that host imports, and it does so silently, because the
+    staged directory is prepended to sys.path.
+
+    Returns None when the layout is unrecognised, in which case the caller keeps
+    the old version-only key rather than guessing.
+    """
+    for part in Path(source_path).parts:
+        if part.startswith("pip_"):
+            return part
+    return None
+
+
+def _cache_key(package_name, version, source_path):
+    variant = _build_variant(source_path)
+    if variant is None:
+        return "%s_python-%s" % (package_name, version)
+    return "%s_python-%s__%s" % (package_name, version, variant)
+
+
 def copy_package_with_lock(package_name, cache_dir):
     """
     Copy a Python package to cache directory with version in name.
@@ -76,13 +103,14 @@ def copy_package_with_lock(package_name, cache_dir):
 
     logging.info(f"[Package Copy] Found {package_name} v{version} at {source_path}")
 
-    # Create target directory with version
-    target_base = Path(cache_dir) / f"{package_name}_python-{version}"
+    # Keyed on version AND build variant; see _build_variant.
+    cache_key = _cache_key(package_name, version, source_path)
+    target_base = Path(cache_dir) / cache_key
     target_site_packages = target_base / "site-packages"
     target_package_path = target_site_packages / Path(source_path).name
 
     # Lock file for this specific package and version
-    lock_file = Path(cache_dir) / f".{package_name}-{version}.lock"
+    lock_file = Path(cache_dir) / f".{cache_key}.lock"
     completion_marker = target_base / ".copy_complete"
 
     # Check if already copied and complete

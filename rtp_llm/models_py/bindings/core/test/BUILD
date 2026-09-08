@@ -38,7 +38,7 @@ cc_test(
     args = ["--gtest_filter=" + cache_store_test_filter],
     deps = exec_ops_test_deps,
     copts = test_copts,
-    exec_properties = {"gpu": "H20"},
+    exec_properties = {'gpu':'A10'},
 )
 
 # Run the packed-mask boundary cases against the production CUDA kernel in
@@ -49,7 +49,7 @@ cc_test(
     args = ["--gtest_filter=" + packed_mask_logits_test_filter],
     deps = exec_ops_test_deps,
     copts = test_copts,
-    exec_properties = {"gpu": "H20"},
+    exec_properties = {'gpu':'A10'},
 )
 
 # Exercise the CPU fallback without initializing or allocating a GPU.
@@ -63,7 +63,7 @@ cc_test(
         "@com_google_googletest//:gtest_main",
     ] + torch_deps(),
     copts = test_copts,
-    exec_properties = {"gpu": "H20"},
+    exec_properties = {'gpu':'A10'},
 )
 
 cc_test(
@@ -101,8 +101,13 @@ cc_test_wrapper(
         "//conditions:default": [],
     }),
     copts = test_copts,
+    # A select needs its own CUDA branch: with only the rocm branch present, CUDA
+    # falls through to "//conditions:default": {} -- empty exec_properties, which
+    # is not a GPU request at all. The test then lands on a CPU-only worker and
+    # dies with "libnvidia-ml.so.1: cannot open shared object file" (exit 127),
+    # as it did in run 69714248.
     exec_properties = select({
-        "@//:using_cuda": {"gpu": "H20"},
+        "@//:using_cuda": {"gpu": "A10"},
         "@//:using_rocm": {"gpu": "MI308X-ROCM7"},
         "//conditions:default": {},
     }),
