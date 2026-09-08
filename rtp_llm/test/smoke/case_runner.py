@@ -30,10 +30,7 @@ from smoke.cache_status_comparer import CacheStatusComparer
 from smoke.classifier_comparer import ClassifierComparer
 from smoke.common_def import QueryStatus, SmokeException, Tracer
 from smoke.dash_grpc_comparer import DASH_ENDPOINT, DashGrpcComparer
-from smoke.dash_sc_grpc_comparer import (
-    DASH_SC_GRPC_ENDPOINT,
-    DashScGrpcComparer,
-)
+from smoke.dash_sc_grpc_comparer import DASH_SC_GRPC_ENDPOINT, DashScGrpcComparer
 from smoke.embedding_comparer import EmbeddingComparer
 from smoke.gpu_diagnostics import (
     ExceptionType,
@@ -374,8 +371,7 @@ class CaseRunner(object):
             ["H", "O", "C"],
         ),
         (
-            "List the months of summer in the Northern Hemisphere, "
-            "one per line.",
+            "List the months of summer in the Northern Hemisphere, " "one per line.",
             ["June", "August"],
         ),
         (
@@ -577,6 +573,10 @@ class CaseRunner(object):
             return ClassifierComparer
         elif request_endpoint == "/v1/reranker":
             return RerankerComparer
+        elif q_r.get("pg_module", None) == True:
+            from internal_source.rtp_llm.test.smoke.pg.pg_comparer import PgComparer
+
+            return PgComparer
         elif q_r.get("mainse_module", None) == True:
             if q_r.get("use_decode_arpc", None) == True:
                 from smoke.mainse.mainse_decode_arpc_comparer import (
