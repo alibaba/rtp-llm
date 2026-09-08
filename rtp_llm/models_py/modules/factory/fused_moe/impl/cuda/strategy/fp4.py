@@ -22,7 +22,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver import (
 
 
 class CudaFp4B12xNoDPStrategy(MoeStrategy):
-    """SM120/121 NVFP4 single-GPU strategy using flashinfer b12x."""
+    """SM120/121 NVFP4 pure-TP strategy using flashinfer b12x."""
 
     @classmethod
     def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:

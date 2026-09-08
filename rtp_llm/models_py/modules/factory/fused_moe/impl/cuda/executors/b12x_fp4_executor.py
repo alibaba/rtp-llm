@@ -292,9 +292,7 @@ class B12xFp4Executor(FusedMoeExpertExecutor):
             and resolver.get_quant_method(config) == "modelopt_fp4"
         )
         checker.check(is_sm12x())
-        checker.check(
-            config.tp_size == 1 and config.ep_size == 1 and config.dp_size == 1
-        )
+        checker.check(config.ep_size == 1 and config.dp_size == 1)
 
     def __init__(
         self,
