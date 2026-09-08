@@ -771,10 +771,10 @@ public class EndpointRegistry {
 
     private void prepareEndpointMetrics(RoleType roleType, WorkerStatus status) {
         try {
-            reporter.prepareEndpointMetrics(roleType.name(), status.getIp());
+            reporter.prepareEndpointMetrics(roleType.name(), status.getMetricIpPort());
         } catch (RuntimeException telemetryFailure) {
             Logger.warn("Endpoint metric preparation failed: role={}, engine={}",
-                    roleType, status.getIp(), telemetryFailure);
+                    roleType, status.getMetricIpPort(), telemetryFailure);
         }
     }
 

@@ -14,6 +14,7 @@ import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.cache.HostCacheMatch;
 import org.flexlb.dao.loadbalance.Request;
+import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.EngineHealthReporter;
@@ -107,7 +108,7 @@ class CostBasedPrefillSelectionMetricTest {
             ArgumentCaptor<Long> ttft = ArgumentCaptor.forClass(Long.class);
             ArgumentCaptor<Long> execution = ArgumentCaptor.forClass(Long.class);
             verify(reporter).reportPrefillSelectedEstimates(
-                    Mockito.eq(RoleType.PREFILL), Mockito.eq("10.0.0.1"),
+                    Mockito.eq(RoleType.PREFILL), Mockito.eq("10.0.0.1:8080"),
                     Mockito.eq(deliveryMode), ttft.capture(), execution.capture());
             assertEquals(selected.serverStatus().getPrefillTime(), ttft.getValue());
             assertEquals(selected.prefillWorkMs(), execution.getValue());
@@ -127,6 +128,54 @@ class CostBasedPrefillSelectionMetricTest {
     }
 
     @Test
+    void selectedMultiEnginePrefillPreservesLogicalIdentity() {
+        ConfigService localConfigService = mock(ConfigService.class);
+        when(localConfigService.loadBalanceConfig()).thenReturn(config);
+        EndpointRegistry localRegistry = StrategyTestSupport.endpointRegistry(
+                localConfigService);
+        try {
+            WorkerStatus first = WorkerStatus.createDiscovered(
+                    RoleType.PREFILL, null, "10.0.0.8", 8080, 8081,
+                    "test-site", null, 0, 2);
+            WorkerStatus second = WorkerStatus.createDiscovered(
+                    RoleType.PREFILL, null, "10.0.0.8", 8080, 8081,
+                    "test-site", null, 1, 2);
+            StrategyTestSupport.publish(first, StrategyTestSupport.response(
+                    RoleType.PREFILL, true, 1_000_000L, 1_000_000L, 1L));
+            StrategyTestSupport.publish(second, StrategyTestSupport.response(
+                    RoleType.PREFILL, true, 1_000_000L, 1_000_000L, 1L));
+            StrategyTestSupport.publishEndpoint(localRegistry,
+                    RoleType.PREFILL, first.getLogicalIpPort(), first);
+            StrategyTestSupport.publishEndpoint(localRegistry,
+                    RoleType.PREFILL, second.getLogicalIpPort(), second);
+            WorkerDirectory directory = new WorkerDirectory(localRegistry);
+            for (String address : localRegistry.endpointAddressSnapshot(
+                    RoleType.PREFILL)) {
+                WorkerStatus endpointStatus = localRegistry.get(
+                        RoleType.PREFILL, address).getStatus();
+                directory.currentOrDiscover(
+                        RoleType.PREFILL, address, () -> endpointStatus);
+            }
+            CostBasedPrefillStrategy localStrategy =
+                    new CostBasedPrefillStrategy(directory, cache, reporter);
+
+            PlacementResult<SelectedRole, RoleType> result = localStrategy.select(
+                    context, RoleType.PREFILL, null);
+
+            assertEquals(PlacementResult.Status.SUCCESS, result.status());
+            try (SelectedRole selected = result.value()) {
+                ServerStatus selectedStatus = selected.serverStatus();
+                assertTrue(selectedStatus.getEngineIndex() != null);
+                assertEquals("10.0.0.8:8080@"
+                                + selectedStatus.getEngineIndex(),
+                        selectedStatus.getLogicalIpPort());
+            }
+        } finally {
+            localRegistry.close();
+        }
+    }
+
+    @Test
     void cacheLeaderInsideTtftCapOverridesTheBaselineCandidate() {
         configureAffinity(600L, 5.0,
                 RoutingConfig.CandidateChoiceType.BEST_ONLY);
@@ -134,7 +183,7 @@ class CostBasedPrefillSelectionMetricTest {
         try (SelectedRole selected = select()) {
             assertEquals("10.0.0.2", selected.serverStatus().getServerIp());
             verify(reporter).reportCacheAffinityDecision(
-                    RoleType.PREFILL, "10.0.0.2", "CACHE_LEADER");
+                    RoleType.PREFILL, "10.0.0.2:8080", "CACHE_LEADER");
         }
     }
 
@@ -157,7 +206,7 @@ class CostBasedPrefillSelectionMetricTest {
         try (SelectedRole selected = select()) {
             assertEquals("10.0.0.2", selected.serverStatus().getServerIp());
             verify(reporter).reportCacheHitMetrics(
-                    RoleType.PREFILL, 200L, 0.2);
+                    RoleType.PREFILL, "10.0.0.2:8080", 200L, 0.2);
         }
     }
 
@@ -206,7 +255,7 @@ class CostBasedPrefillSelectionMetricTest {
         try (SelectedRole selected = select()) {
             assertEquals("10.0.0.1", selected.serverStatus().getServerIp());
             verify(reporter).reportCacheAffinityDecision(
-                    RoleType.PREFILL, "10.0.0.1", reason);
+                    RoleType.PREFILL, "10.0.0.1:8080", reason);
         }
     }
 
@@ -219,7 +268,7 @@ class CostBasedPrefillSelectionMetricTest {
             assertEquals("10.0.0.2", selected.serverStatus().getServerIp());
         }
         PrefillEndpoint cacheEndpoint = (PrefillEndpoint)
-                registry.get(RoleType.PREFILL, "10.0.0.2:8080");
+                registry.get(RoleType.PREFILL, "10.0.0.2:8080@0");
         cacheEndpoint.getLastSelectedTime().set(Long.MAX_VALUE);
         context.getRequest().setRequestId("20002");
 
@@ -229,7 +278,7 @@ class CostBasedPrefillSelectionMetricTest {
         assertEquals(Long.MAX_VALUE, cacheEndpoint.getLastSelectedTime().get());
         verify(reporter, times(2))
                 .reportCacheAffinityDecision(
-                        RoleType.PREFILL, "10.0.0.2", "CACHE_LEADER");
+                        RoleType.PREFILL, "10.0.0.2:8080", "CACHE_LEADER");
     }
 
     private SelectedRole select() {
@@ -269,7 +318,7 @@ class CostBasedPrefillSelectionMetricTest {
     private static CacheMatchResult localCacheMatch(
             String workerIpPort, long matchedBlocks) {
         return new CacheMatchResult(
-                Map.of(workerIpPort, HostCacheMatch.local(matchedBlocks)),
+                Map.of(workerIpPort + "@0", HostCacheMatch.local(matchedBlocks)),
                 CacheMatchSource.LOCAL_SYNC,
                 0L,
                 100L);
@@ -280,6 +329,6 @@ class CostBasedPrefillSelectionMetricTest {
                 RoleType.PREFILL, null, ip, port, port + 1,
                 true, 1_000_000L, 1_000_000L);
         StrategyTestSupport.publishEndpoint(
-                registry, RoleType.PREFILL, ip + ":" + port, status);
+                registry, RoleType.PREFILL, status.getLogicalIpPort(), status);
     }
 }

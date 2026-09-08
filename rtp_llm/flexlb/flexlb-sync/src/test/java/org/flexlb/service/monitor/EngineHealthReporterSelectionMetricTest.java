@@ -69,10 +69,10 @@ class EngineHealthReporterSelectionMetricTest {
     @Test
     void reportsSelectedPrefillEstimatesWithDeliveryMode() {
         reporter.reportPrefillSelectedEstimates(
-                RoleType.PREFILL, "10.0.0.1", "NON_BATCH", 1_250L, 400L);
+                RoleType.PREFILL, "10.0.0.1:8080@0", "NON_BATCH", 1_250L, 400L);
 
         FlexMetricTags tags = FlexMetricTags.of(
-                "engineIp", "10.0.0.1",
+                "engineIp", "10.0.0.1:8080@0",
                 "role", "PREFILL",
                 "delivery_mode", "NON_BATCH");
         verify(monitor).report(PREFILL_SELECTED_ESTIMATED_TTFT_MS, tags, 1_250.0);

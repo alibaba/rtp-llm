@@ -89,7 +89,7 @@ public final class WorkerDirectory implements WorkerStatusProvider {
             WorkerStatus discovered = Objects.requireNonNull(
                     discoveredFactory.get(), "discovered status");
             if (discovered.getRole() != role
-                    || !address.equals(discovered.getIpPort())) {
+                    || !address.equals(discovered.getLogicalIpPort())) {
                 throw new IllegalArgumentException(
                         "Discovered WorkerStatus identity does not match directory key");
             }
@@ -258,9 +258,6 @@ public final class WorkerDirectory implements WorkerStatusProvider {
     /** Immutable Decode routing values for one group. */
     public List<DecodeEndpoint.DecodeRoutingView> decodeRoutingSnapshot(
             String group) {
-        // The selector copies this lazy view into its primitive candidate
-        // buffer in one pass. Avoid an intermediate immutable list when no
-        // group filter is needed.
         List<DecodeEndpoint.DecodeRoutingView> snapshots =
                 endpointRegistry.decodeRoutingSnapshot();
         if (group == null || snapshots.isEmpty()) {
@@ -268,8 +265,7 @@ public final class WorkerDirectory implements WorkerStatusProvider {
         }
         ArrayList<DecodeEndpoint.DecodeRoutingView> matching =
                 new ArrayList<>(snapshots.size());
-        for (int index = 0; index < snapshots.size(); index++) {
-            DecodeEndpoint.DecodeRoutingView snapshot = snapshots.get(index);
+        for (DecodeEndpoint.DecodeRoutingView snapshot : snapshots) {
             if (group.equals(snapshot.topology().group())) {
                 matching.add(snapshot);
             }
@@ -331,4 +327,5 @@ public final class WorkerDirectory implements WorkerStatusProvider {
             }
         }
     }
+
 }

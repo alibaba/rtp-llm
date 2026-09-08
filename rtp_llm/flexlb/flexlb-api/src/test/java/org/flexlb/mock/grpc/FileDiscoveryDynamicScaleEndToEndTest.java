@@ -126,7 +126,9 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
 
         // Initial discovery file: A + B on the prefill domain, base decode worker.
         discoveryFile = tempDir.resolve("discovery-" + System.nanoTime() + ".json");
-        writeDiscoveryFileAtomic(List.of(prefillIpPort, workerIpPort(workerB)));
+        writeDiscoveryFileAtomic(List.of(
+                physicalIpPort(prefillIp, prefillHttpPort),
+                physicalWorkerIpPort(workerB)));
 
         // Real file-backed ServiceDiscovery — re-reads the file on every poll.
         fileServiceDiscovery = new RoutingServiceDiscovery(
@@ -255,7 +257,10 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
         workerC = new MockPrefillWorker(MockWorkerBehavior.builder().build());
         workerC.start(0);
         String cIpPort = workerIpPort(workerC);
-        writeDiscoveryFileAtomic(List.of(prefillIpPort, workerIpPort(workerB), cIpPort));
+        writeDiscoveryFileAtomic(List.of(
+                physicalIpPort(prefillIp, prefillHttpPort),
+                physicalWorkerIpPort(workerB),
+                physicalWorkerIpPort(workerC)));
 
         long addStartMs = System.nanoTime();
         AtomicBoolean cReceived = new AtomicBoolean(false);
@@ -272,15 +277,18 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
         assertTrue(cReceived.get(),
                 "worker C should start receiving requests within " + CONVERGENCE_CAP_MS + " ms "
                         + "of appearing in the discovery file");
-        assertNotNull(endpointRegistry.get(RoleType.PREFILL, cIpPort),
+        assertNotNull(endpointRegistry.get(RoleType.PREFILL, logicalWorkerIpPort(cIpPort)),
                 "worker C must be registered in the EndpointRegistry after discovery");
 
         // ─── Phase 3: remove A from the file → A must stop receiving new requests ───
-        writeDiscoveryFileAtomic(List.of(workerIpPort(workerB), cIpPort));
+        writeDiscoveryFileAtomic(List.of(
+                physicalWorkerIpPort(workerB),
+                physicalWorkerIpPort(workerC)));
 
         long removeStartMs = System.nanoTime();
         awaitUntil(CONVERGENCE_CAP_MS, () ->
-                        endpointRegistry.get(RoleType.PREFILL, prefillIpPort) == null,
+                        endpointRegistry.get(RoleType.PREFILL,
+                                logicalWorkerIpPort(prefillIpPort)) == null,
                 "worker A should be evicted from the EndpointRegistry after removal from the file");
         long removeConvergenceMs = elapsedMs(removeStartMs);
 
@@ -308,7 +316,7 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
     private void writeDiscoveryFileAtomic(List<String> prefillHosts) throws IOException {
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put(PREFILL_DOMAIN, prefillHosts);
-        payload.put(DECODE_DOMAIN, List.of(decodeIpPort));
+        payload.put(DECODE_DOMAIN, List.of(physicalIpPort(decodeIp, decodeHttpPort)));
         Path tmp = discoveryFile.resolveSibling(discoveryFile.getFileName() + ".tmp");
         MAPPER.writerWithDefaultPrettyPrinter().writeValue(tmp.toFile(), payload);
         try {
@@ -342,7 +350,12 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
             }
             Collections.sort(candidates);
             String chosen = candidates.get(routerCounter.getAndIncrement() % candidates.size());
-            String[] parts = chosen.split(":");
+            int engineSeparator = chosen.lastIndexOf('@');
+            String physicalAddress = engineSeparator < 0
+                    ? chosen : chosen.substring(0, engineSeparator);
+            int engineIndex = engineSeparator < 0
+                    ? 0 : Integer.parseInt(chosen.substring(engineSeparator + 1));
+            String[] parts = physicalAddress.split(":");
             String ip = parts[0];
             int httpPort = Integer.parseInt(parts[1]);
             // admittedRoute() converts this response into the exact pinned
@@ -351,29 +364,36 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
             // later marks queued; without it admission would hit NOT_QUEUED ->
             // OwnershipLost and the request would never complete.
             return admittedRoute(ctx,
-                    routeResponse(ctx.getRequestId(), ip, httpPort, httpPort + 1));
+                    routeResponse(ctx.getRequestId(), ip, httpPort, httpPort + 1, engineIndex));
         });
         return roundRobin;
     }
 
     private Response routeResponse(String requestId, String prefillIpAddr, int prefillHttpPort,
-                                    int prefillGrpcPort) {
+                                    int prefillGrpcPort, int prefillEngineIndex) {
         Response response = new Response();
         response.setSuccess(true);
         response.setServerStatus(List.of(
-                serverStatus(RoleType.PREFILL, prefillIpAddr, prefillHttpPort, prefillGrpcPort, requestId),
+                serverStatus(RoleType.PREFILL, prefillIpAddr, prefillHttpPort, prefillGrpcPort,
+                        prefillEngineIndex, requestId),
                 serverStatus(RoleType.DECODE, decodeIp, decodeHttpPort, decodeGrpcPort, requestId)));
         return response;
     }
 
     private static ServerStatus serverStatus(RoleType role, String ip, int httpPort, int grpcPort,
                                               String requestId) {
+        return serverStatus(role, ip, httpPort, grpcPort, 0, requestId);
+    }
+
+    private static ServerStatus serverStatus(RoleType role, String ip, int httpPort, int grpcPort,
+                                              int engineIndex, String requestId) {
         ServerStatus status = new ServerStatus();
         status.setSuccess(true);
         status.setRole(role);
         status.setServerIp(ip);
         status.setHttpPort(httpPort);
         status.setGrpcPort(grpcPort);
+        status.setSelectedEngineIndex(engineIndex, 1);
         status.setDpRank(0);
         status.setGroup("test-group");
         status.setRequestId(requestId);
@@ -416,7 +436,7 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
         List<String> routable =
                 endpointRegistry.endpointAddressSnapshot(RoleType.PREFILL);
         for (String ipPort : ipPorts) {
-            if (!routable.contains(ipPort)) {
+            if (!routable.contains(logicalWorkerIpPort(ipPort))) {
                 return false;
             }
         }

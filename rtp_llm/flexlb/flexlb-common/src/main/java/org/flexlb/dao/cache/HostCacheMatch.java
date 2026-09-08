@@ -18,6 +18,9 @@ public record HostCacheMatch(
         return new HostCacheMatch(matchBlocks, 0, matchBlocks);
     }
 
+    /**
+     * Converts local match counts while preserving logical {@code ip:port@engineIndex} keys.
+     */
     public static Map<String, HostCacheMatch> fromLocalMatches(Map<String, Integer> localMatches) {
         return localMatches.entrySet().stream().collect(Collectors.toMap(
                 Map.Entry::getKey,

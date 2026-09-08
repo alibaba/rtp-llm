@@ -33,9 +33,9 @@ class ExpirationCleanerTest {
         WorkerStatus second = status("127.0.0.2", 8080);
         WorkerDirectory directory = new WorkerDirectory(registry);
         directory.currentOrDiscover(
-                RoleType.PREFILL, first.getIpPort(), () -> first);
+                RoleType.PREFILL, first.getLogicalIpPort(), () -> first);
         directory.currentOrDiscover(
-                RoleType.PREFILL, second.getIpPort(), () -> second);
+                RoleType.PREFILL, second.getLogicalIpPort(), () -> second);
 
         EndpointRegistry.DetachedGeneration firstDetached =
                 mock(EndpointRegistry.DetachedGeneration.class);
@@ -74,8 +74,8 @@ class ExpirationCleanerTest {
             releaseFirstAwait.countDown();
             cleaning.get(5, TimeUnit.SECONDS);
             assertTrue(directory.statusSnapshot(RoleType.PREFILL).isEmpty());
-            verify(cache).removeEngineBlockCache(first.getIpPort());
-            verify(cache).removeEngineBlockCache(second.getIpPort());
+            verify(cache).removeEngineBlockCache(first.getLogicalIpPort());
+            verify(cache).removeEngineBlockCache(second.getLogicalIpPort());
         } finally {
             releaseFirstAwait.countDown();
             executor.shutdownNow();
@@ -88,11 +88,11 @@ class ExpirationCleanerTest {
             WorkerEndpoint endpoint,
             EndpointRegistry.DetachedGeneration detached) {
         when(registry.get(
-                RoleType.PREFILL, status.getIpPort(), status))
+                RoleType.PREFILL, status.getLogicalIpPort(), status))
                 .thenReturn(endpoint);
         when(detached.ownsEndpoint(endpoint)).thenReturn(true);
         when(registry.detachAndBeginRetirement(
-                RoleType.PREFILL, status.getIpPort(), status))
+                RoleType.PREFILL, status.getLogicalIpPort(), status))
                 .thenAnswer(invocation -> {
                     status.beginRetirementAfterEndpointGateClosed();
                     return detached;

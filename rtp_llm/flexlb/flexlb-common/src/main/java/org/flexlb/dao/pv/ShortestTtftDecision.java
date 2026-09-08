@@ -31,6 +31,8 @@ public record ShortestTtftDecision(
 
     /**
      * Cache-affinity-specific inputs for one routing decision. Null for other TTFT strategies.
+     * Both worker fields use logical {@code ip:port@engineIndex} identities so different engines
+     * behind the same physical frontend remain distinguishable.
      */
     public record CacheAffinityDecision(
             String cacheLeaderIpPort,

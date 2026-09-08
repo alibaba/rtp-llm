@@ -29,10 +29,10 @@ class GrpcWorkerStatusRunnerTest {
 
     @Test
     void newGenerationProjectionRunsOutsideWorkerStatusLock() {
-        String ipPort = "127.0.0.1:8080";
         WorkerStatus status = RunnerTestSupport.discovered(
                 RoleType.DECODE, null, "127.0.0.1",
                 8080, 8081, "test-site");
+        String ipPort = status.getLogicalIpPort();
         WorkerStatus.PollLease pollLease = status.tryBeginStatusPoll();
         assertNotNull(pollLease);
 
@@ -83,10 +83,10 @@ class GrpcWorkerStatusRunnerTest {
 
     @Test
     void sameVersionResponseProjectsExactEndpointActivity() {
-        String ipPort = "127.0.0.1:8080";
         WorkerStatus status = RunnerTestSupport.alive(
                 RoleType.DECODE, null, "127.0.0.1",
                 8080, 8081, "test-site");
+        String ipPort = status.getLogicalIpPort();
         WorkerStatus.PollLease pollLease = status.tryBeginStatusPoll();
         assertNotNull(pollLease);
 
@@ -141,7 +141,7 @@ class GrpcWorkerStatusRunnerTest {
             EndpointRegistry registry, WorkerStatus status) {
         WorkerDirectory directory = new WorkerDirectory(registry);
         directory.currentOrDiscover(
-                status.getRole(), status.getIpPort(), () -> status);
+                status.getRole(), status.getLogicalIpPort(), () -> status);
         return directory;
     }
 }

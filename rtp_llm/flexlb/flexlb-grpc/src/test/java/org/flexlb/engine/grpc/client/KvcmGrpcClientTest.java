@@ -37,7 +37,7 @@ class KvcmGrpcClientTest {
     }
 
     @Test
-    void returnsP2pAwareMatches() {
+    void preservesLogicalWorkerIdentitiesInP2pAwareMatches() {
         CacheMatchConfiguration configuration = mock(CacheMatchConfiguration.class);
         KvcmConfig config = new KvcmConfig();
         KvcmCacheMatchingConfig runtimeConfig = new KvcmCacheMatchingConfig();
@@ -60,7 +60,7 @@ class KvcmGrpcClientTest {
                 .thenReturn(GetHostCacheStateResponse.newBuilder()
                         .setHeader(okHeader())
                         .addHosts(HostCacheMatch.newBuilder()
-                                .setHostIpPort("10.0.0.1:8601")
+                                .setHostIpPort("10.0.0.1:8601@1")
                                 .setLocal(2)
                                 .setP2P1Fetch(8)
                                 .setP2P1TotalMatch(10))
@@ -78,9 +78,9 @@ class KvcmGrpcClientTest {
                         "request-1", List.of(11L, 22L), 2192L,
                         RoleType.PREFILL, "default");
 
-        assertEquals(2, result.get("10.0.0.1:8601").localMatchBlocks());
-        assertEquals(8, result.get("10.0.0.1:8601").p2pFetchBlocks());
-        assertEquals(10, result.get("10.0.0.1:8601").p2pTotalMatchBlocks());
+        assertEquals(2, result.get("10.0.0.1:8601@1").localMatchBlocks());
+        assertEquals(8, result.get("10.0.0.1:8601@1").p2pFetchBlocks());
+        assertEquals(10, result.get("10.0.0.1:8601@1").p2pTotalMatchBlocks());
     }
 
     @Test

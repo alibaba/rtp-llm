@@ -24,7 +24,10 @@ import static org.flexlb.constant.MetricConstant.CACHE_ROUTING_SELECTED_MATCH_TO
 import static org.flexlb.constant.MetricConstant.CACHE_THEORY_HIT_COUNT;
 import static org.flexlb.constant.MetricConstant.CACHE_THEORY_HIT_RATIO;
 import static org.flexlb.constant.MetricConstant.CACHE_THEORY_TOTAL_COUNT;
+import static org.flexlb.constant.MetricConstant.CACHE_UPDATE_ENGINE_BLOCK_CACHE_RT;
 import static org.junit.jupiter.api.Assertions.fail;
+import static org.mockito.ArgumentMatchers.anyDouble;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 
@@ -64,10 +67,10 @@ class CacheMetricsReporterTest {
     }
 
     @Test
-    void should_report_engine_local_metrics_without_engine_ip_port() {
-        reporter.reportEngineLocalMetrics("10.0.0.1", "PREFILL", 2);
+    void should_report_engine_local_metrics_with_logical_worker_address() {
+        reporter.reportEngineLocalMetrics("10.0.0.1:8080@0", "PREFILL", 2);
 
-        FlexMetricTags tags = FlexMetricTags.of("engineIp", "10.0.0.1", "role", "PREFILL");
+        FlexMetricTags tags = FlexMetricTags.of("engineIp", "10.0.0.1:8080@0", "role", "PREFILL");
         verify(monitor).report(CACHE_ENGINE_LOCAL_COUNT, tags, 2);
         verify(monitor).report(CACHE_ENGINE_LOCAL_BYTES, tags, 272L);
     }
@@ -116,12 +119,22 @@ class CacheMetricsReporterTest {
 
     @Test
     void should_report_cache_affinity_decision() {
-        reporter.reportCacheAffinityDecision(RoleType.PREFILL, "10.0.0.1", "CACHE_LEADER");
+        reporter.reportCacheAffinityDecision(RoleType.PREFILL, "10.0.0.1:8080@0", "CACHE_LEADER");
 
         FlexMetricTags tags = FlexMetricTags.of(
                 "role", "PREFILL",
-                "engineIp", "10.0.0.1",
+                "engineIp", "10.0.0.1:8080@0",
                 "decision", "CACHE_LEADER");
         verify(monitor).report(CACHE_AFFINITY_DECISION, tags, 1.0);
+    }
+
+    @Test
+    void reportsCacheUpdateLatencyWithIndexedEngineIp() {
+        reporter.reportUpdateEngineBlockCacheRT("10.0.0.8:8080@1", "PREFILL", 0L, "1");
+
+        verify(monitor).report(
+                eq(CACHE_UPDATE_ENGINE_BLOCK_CACHE_RT),
+                eq(FlexMetricTags.of("engineIp", "10.0.0.8:8080@1", "role", "PREFILL", "success", "1")),
+                anyDouble());
     }
 }

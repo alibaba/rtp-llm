@@ -481,7 +481,7 @@ public class EvictionManager {
         try {
             deliveryReporter.reportRouteSubmitTimeMs(
                     org.flexlb.dao.route.RoleType.PREFILL.name(),
-                    item.prefillEp().getIp(),
+                    item.prefillEp().getStatus().getMetricIpPort(),
                     System.currentTimeMillis() - context.getStartTime());
         } catch (RuntimeException telemetryFailure) {
             Logger.warn(

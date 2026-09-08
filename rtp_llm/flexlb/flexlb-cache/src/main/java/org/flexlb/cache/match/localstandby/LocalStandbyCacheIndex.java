@@ -67,6 +67,13 @@ class LocalStandbyCacheIndex {
         }
     }
 
+    /**
+     * Adds predicted block ownership for one logical worker.
+     *
+     * @param workerIpPort logical worker identity in {@code ip:port@engineIndex} format
+     * @param blockCacheKeys predicted block hashes
+     * @return number of mappings rejected by the capacity limit
+     */
     int addWorkerBlockMappings(String workerIpPort, List<Long> blockCacheKeys) {
         if (workerIpPort == null || workerIpPort.isEmpty() || blockCacheKeys == null || blockCacheKeys.isEmpty()) {
             return 0;

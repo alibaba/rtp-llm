@@ -476,6 +476,8 @@ public class CostBasedDecodeStrategy {
             result.setDpRank(status.dpRank());
             result.setGroup(topology.group());
             result.setRequestId(balanceContext.getRequestId());
+            result.setSelectedEngineIndex(
+                    topology.engineIndex(), topology.multiEngineNum());
 
             // SelectedRole consumes the pin even if its validation rejects.
             WorkerEndpoint.GenerationPin factoryPin = selectedPin;
@@ -630,4 +632,5 @@ public class CostBasedDecodeStrategy {
                     tierCounts, capacity);
         }
     }
+
 }

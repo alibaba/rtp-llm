@@ -1,5 +1,6 @@
 package org.flexlb.dao.master;
 
+import lombok.AccessLevel;
 import lombok.Getter;
 
 /**
@@ -29,9 +30,25 @@ public class WorkerHost {
      */
     private final int httpServerPort;
     /**
-     * gRPC port for GetWorkerStatus.
+     * Per-engine gRPC port for worker control RPCs, including GetWorkerStatus and GetCacheStatus.
      */
     private final int workerStatusPort;
+    /**
+     * Logical engine index behind the shared frontend.
+     */
+    private final int engineIndex;
+    /**
+     * Expected number of logical engines for this physical frontend.
+     */
+    private final int multiEngineNum;
+    /**
+     * Canonical identity for this logical worker. It precomputes the physical frontend
+     * identity ({@code ip:port}) and routable/cache identity
+     * ({@code ip:port@engineIndex}); callers use the corresponding semantic getters
+     * exposed by {@link WorkerHost}.
+     */
+    @Getter(AccessLevel.NONE)
+    private final WorkerIdentity workerIdentity;
     /**
      * Data center/site information
      */
@@ -68,11 +85,21 @@ public class WorkerHost {
 
     public WorkerHost(String ip, int httpPort, int grpcPort, int httpServerPort, int workerStatusPort,
                       String site, String group, String deploymentName) {
+        this(ip, httpPort, grpcPort, httpServerPort, workerStatusPort,
+                site, group, deploymentName, 0, 1);
+    }
+
+    public WorkerHost(String ip, int httpPort, int grpcPort, int httpServerPort, int workerStatusPort,
+                      String site, String group, String deploymentName,
+                      int engineIndex, int multiEngineNum) {
         this.ip = ip;
         this.httpPort = httpPort;
         this.grpcPort = grpcPort;
         this.httpServerPort = httpServerPort;
         this.workerStatusPort = workerStatusPort;
+        this.engineIndex = engineIndex;
+        this.multiEngineNum = multiEngineNum;
+        this.workerIdentity = new WorkerIdentity(ip, httpPort, engineIndex);
         this.site = site != null ? site : "";
         this.group = group != null ? group : "";
         this.deploymentName = deploymentName != null ? deploymentName : "";
@@ -100,12 +127,25 @@ public class WorkerHost {
     }
 
     /**
-     * Get IP:Port format string
+     * Get the physical frontend address.
      *
-     * @return IP:Port format string
+     * @return physical address in {@code ip:port} format, without an engine index
      */
     public String getIpPort() {
-        return ip + ":" + httpPort;
+        return workerIdentity.getPhysicalIpPort();
+    }
+
+    /** Returns the physical frontend address in {@code ip:port} format. */
+    public String getPhysicalIpPort() {
+        return workerIdentity.getPhysicalIpPort();
+    }
+
+    /**
+     * Returns the logical worker identity in {@code ip:port@engineIndex} format. The index
+     * identifies one independently routable engine behind the physical frontend.
+     */
+    public String getLogicalIpPort() {
+        return workerIdentity.getLogicalIpPort();
     }
 
     /**
