@@ -14,6 +14,20 @@ from rtp_llm.utils.tensor_utils import bert_dual_head_scores
 
 
 class BertUserProfileTest(unittest.TestCase):
+    def test_host_pooling_uses_first_marker_and_sequence_local_fallback(self):
+        ids = torch.tensor([101, 2, 2, 102, 101, 102, 2, 102], dtype=torch.int32)
+        lengths = torch.tensor([4, 2, 2], dtype=torch.int32)
+        hidden = torch.randn(8, 16)
+        qi, uqi = torch.nn.Linear(16, 4), torch.nn.Linear(16, 4)
+        expected = torch.cat(
+            (torch.softmax(qi(hidden[[0, 4, 6]]), -1),
+             torch.softmax(uqi(hidden[[1, 4, 6]]), -1)), dim=-1
+        )
+        torch.testing.assert_close(
+            bert_dual_head_scores(hidden, ids, lengths, qi, uqi),
+            expected, rtol=0, atol=0
+        )
+
     def test_ragged_segments_include_vision_in_qi(self):
         ids = torch.tensor([101, 102, 2, 17, 102, -1, -2, 101, 102, -1])
         cu = torch.tensor([0, 7, 10])
