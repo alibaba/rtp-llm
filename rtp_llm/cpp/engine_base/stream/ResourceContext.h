@@ -26,6 +26,11 @@ struct ResourceContext {
     bool    write_cache_sync{false};
     bool    enable_tiered_memory_cache{false};
     int64_t device_cache_min_free_blocks{0};
+    bool    enable_memory_cache_remote_eviction{false};
+    int     device_cache_high_watermark_ratio{95};
+    int     memory_cache_high_watermark_ratio{95};
+    int     memory_cache_remote_eviction_timeout_ms{2000};
+    int     memory_cache_remote_eviction_max_blocks{32};
     int     load_cache_retry_times{1};
 
     void initCacheConfig(const KVCacheConfig&       kv_cache_config,

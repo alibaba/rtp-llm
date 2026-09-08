@@ -460,6 +460,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("enable_dsv4_state_block_independent_eviction",
                        &KVCacheConfig::enable_dsv4_state_block_independent_eviction)
         .def_readwrite("device_cache_min_free_blocks", &KVCacheConfig::device_cache_min_free_blocks)
+        .def_readwrite("enable_memory_cache_remote_eviction", &KVCacheConfig::enable_memory_cache_remote_eviction)
+        .def_readwrite("device_cache_high_watermark_ratio", &KVCacheConfig::device_cache_high_watermark_ratio)
+        .def_readwrite("memory_cache_high_watermark_ratio", &KVCacheConfig::memory_cache_high_watermark_ratio)
+        .def_readwrite("memory_cache_remote_eviction_timeout_ms", &KVCacheConfig::memory_cache_remote_eviction_timeout_ms)
+        .def_readwrite("memory_cache_remote_eviction_max_blocks", &KVCacheConfig::memory_cache_remote_eviction_max_blocks)
         .def_readwrite("load_cache_retry_times", &KVCacheConfig::load_cache_retry_times)
         .def_readwrite("dsv4_fixed_pool_blocks", &KVCacheConfig::dsv4_fixed_pool_blocks)
         .def_readwrite("dsv4_hca_state_pool_blocks", &KVCacheConfig::dsv4_hca_state_pool_blocks)
@@ -545,7 +550,12 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.enable_prefix_tree_memory_cache,
                                       self.enable_legacy_memory_connector_fallback,
                                       self.prefix_tree_memory_state_swa_pool_ratio,
-                                      self.enable_dsv4_state_block_independent_eviction);
+                                      self.enable_dsv4_state_block_independent_eviction,
+                                      self.enable_memory_cache_remote_eviction,
+                                      self.device_cache_high_watermark_ratio,
+                                      self.memory_cache_high_watermark_ratio,
+                                      self.memory_cache_remote_eviction_timeout_ms,
+                                      self.memory_cache_remote_eviction_max_blocks);
             },
             [](py::tuple t) {
                 const bool   has_disk_fields = t.size() >= 50 && py::isinstance<py::str>(t[9]);
@@ -629,6 +639,13 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                             if (extra_count >= 6) {
                                 c.prefix_tree_memory_state_swa_pool_ratio      = t[extra_start + 4].cast<int64_t>();
                                 c.enable_dsv4_state_block_independent_eviction = t[extra_start + 5].cast<bool>();
+                            }
+                            if (extra_count >= 11) {
+                                c.enable_memory_cache_remote_eviction     = t[extra_start + 6].cast<bool>();
+                                c.device_cache_high_watermark_ratio       = t[extra_start + 7].cast<int>();
+                                c.memory_cache_high_watermark_ratio       = t[extra_start + 8].cast<int>();
+                                c.memory_cache_remote_eviction_timeout_ms = t[extra_start + 9].cast<int>();
+                                c.memory_cache_remote_eviction_max_blocks = t[extra_start + 10].cast<int>();
                             }
                         }
                     }

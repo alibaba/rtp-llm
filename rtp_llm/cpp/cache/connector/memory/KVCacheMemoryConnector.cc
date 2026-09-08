@@ -3228,6 +3228,83 @@ size_t KVCacheMemoryConnector::estimateCopyPlanBytes(const std::shared_ptr<CopyP
     return bytes;
 }
 
+
+size_t KVCacheMemoryConnector::totalMemoryBlocks() const {
+    return block_pool_ ? block_pool_->totalBlocksNum() : 0;
+}
+
+size_t KVCacheMemoryConnector::freeMemoryBlocks() const {
+    return block_pool_ ? block_pool_->freeBlocksNum() : 0;
+}
+
+std::vector<KVCacheMemoryConnector::MemoryRemoteEvictionItem>
+KVCacheMemoryConnector::prepareRemoteEviction(size_t block_num) {
+    if (!block_cache_ || !block_pool_ || block_num == 0 || isDualPool() || usePrefixTreeMemoryCache()) {
+        return {};
+    }
+    return block_cache_->detachMemoryForRemoteEviction(block_num);
+}
+
+bool KVCacheMemoryConnector::buildHostBlockBuffers(const std::vector<MemoryRemoteEvictionItem>& items,
+                                                   const std::vector<size_t>& selected_indices,
+                                                   HostBlockBuffers& buffers) const {
+    if (!block_pool_) {
+        return false;
+    }
+    const auto slots = layerRegionSlots();
+    buffers.clear();
+    buffers.reserve(selected_indices.size());
+    for (size_t selected : selected_indices) {
+        if (selected >= items.size() || items[selected].backing_type != CacheBackingType::MEMORY) {
+            return false;
+        }
+        auto mem = block_pool_->convertIndexToBuffer(0, items[selected].block_index);
+        if (mem.size() != 1 || !mem[0].addr || mem[0].size_bytes < items[selected].block_size) {
+            return false;
+        }
+        HostBlockBuffer block_buffer;
+        size_t offset = 0;
+        for (const auto& slot : slots) {
+            if (offset + slot.stride_bytes > mem[0].size_bytes) {
+                return false;
+            }
+            BlockInfo info;
+            info.is_cuda = false;
+            info.addr = static_cast<char*>(mem[0].addr) + offset;
+            info.size_bytes = slot.stride_bytes;
+            block_buffer.push_back(info);
+            offset += slot.stride_bytes;
+        }
+        buffers.push_back(std::move(block_buffer));
+    }
+    return true;
+}
+
+void KVCacheMemoryConnector::finishRemoteEviction(const std::vector<MemoryRemoteEvictionItem>& items,
+                                                  bool remote_success) {
+    (void)remote_success;
+    if (!block_cache_) {
+        return;
+    }
+    for (const auto& item : items) {
+        auto finished = block_cache_->finishRemoteEviction(item.cache_key, item.generation);
+        if (finished.has_value()) {
+            releaseCacheBacking(*finished);
+        }
+    }
+}
+
+size_t KVCacheMemoryConnector::evictMemoryImmediately(size_t block_num) {
+    if (!block_cache_ || block_num == 0) {
+        return 0;
+    }
+    auto victims = block_cache_->popMemoryForImmediateEviction(block_num);
+    for (const auto& item : victims) {
+        releaseCacheBacking(item);
+    }
+    return victims.size();
+}
+
 std::vector<CacheKeyType> KVCacheMemoryConnector::cacheKeys() const {
     if (usePrefixTreeMemoryCache()) {
         RTP_LLM_CHECK_WITH_INFO(prefix_block_cache_ != nullptr, "prefix block cache should not be null");

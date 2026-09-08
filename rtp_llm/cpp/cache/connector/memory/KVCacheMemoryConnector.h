@@ -66,6 +66,19 @@ public:
     virtual bool              copyCache(const MemoryOperationRequestPB& request, MemoryOperationResponsePB& response);
     std::vector<CacheKeyType> cacheKeys() const;
 
+    using MemoryRemoteEvictionItem = MemoryDiskBlockCache::CacheItem;
+    using HostBlockBuffer = std::vector<BlockInfo>;
+    using HostBlockBuffers = std::vector<HostBlockBuffer>;
+    size_t totalMemoryBlocks() const;
+    size_t freeMemoryBlocks() const;
+    std::vector<MemoryRemoteEvictionItem> prepareRemoteEviction(size_t block_num);
+    bool buildHostBlockBuffers(const std::vector<MemoryRemoteEvictionItem>& items,
+                               const std::vector<size_t>& selected_indices,
+                               HostBlockBuffers& buffers) const;
+    void finishRemoteEviction(const std::vector<MemoryRemoteEvictionItem>& items, bool remote_success);
+    size_t evictMemoryImmediately(size_t block_num);
+
+
 private:
     struct LayerRegionSlot {
         int               layer_id{-1};

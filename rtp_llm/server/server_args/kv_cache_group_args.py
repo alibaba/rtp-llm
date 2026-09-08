@@ -408,6 +408,48 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         help="分层 cache 开关。开启后，stream 释放时只全量写 remote，再按 GPU 空闲 block 阈值将冷 block 淘汰到 memory。",
     )
     kv_cache_group.add_argument(
+        "--enable_memory_cache_remote_eviction",
+        env_name="ENABLE_MEMORY_CACHE_REMOTE_EVICTION",
+        bind_to=(kv_cache_config, "enable_memory_cache_remote_eviction"),
+        type=str2bool,
+        default=False,
+        help="Memory cache 超过水位时是否先异步淘汰到 Remote；首版仅支持单 cache group。",
+    )
+    kv_cache_group.add_argument(
+        "--device_cache_high_watermark_ratio",
+        env_name="DEVICE_CACHE_HIGH_WATERMARK_RATIO",
+        bind_to=(kv_cache_config, "device_cache_high_watermark_ratio"),
+        type=int,
+        choices=range(1, 101),
+        default=95,
+        help="Device cache 允许使用的最大 block 百分比，范围 [1, 100]。",
+    )
+    kv_cache_group.add_argument(
+        "--memory_cache_high_watermark_ratio",
+        env_name="MEMORY_CACHE_HIGH_WATERMARK_RATIO",
+        bind_to=(kv_cache_config, "memory_cache_high_watermark_ratio"),
+        type=int,
+        choices=range(1, 101),
+        default=95,
+        help="Memory cache 允许使用的最大 block 百分比，范围 [1, 100]。",
+    )
+    kv_cache_group.add_argument(
+        "--memory_cache_remote_eviction_timeout_ms",
+        env_name="MEMORY_CACHE_REMOTE_EVICTION_TIMEOUT_MS",
+        bind_to=(kv_cache_config, "memory_cache_remote_eviction_timeout_ms"),
+        type=int,
+        default=2000,
+        help="Memory 到 Remote 淘汰任务的超时时间（毫秒）。",
+    )
+    kv_cache_group.add_argument(
+        "--memory_cache_remote_eviction_max_blocks",
+        env_name="MEMORY_CACHE_REMOTE_EVICTION_MAX_BLOCKS",
+        bind_to=(kv_cache_config, "memory_cache_remote_eviction_max_blocks"),
+        type=int,
+        default=32,
+        help="单次 Memory 到 Remote 淘汰的最大 block 数。",
+    )
+    kv_cache_group.add_argument(
         "--enable_gpu_prefix_tree",
         env_name="ENABLE_GPU_PREFIX_TREE",
         bind_to=(kv_cache_config, "enable_gpu_prefix_tree"),

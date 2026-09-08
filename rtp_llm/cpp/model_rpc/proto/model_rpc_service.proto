@@ -667,6 +667,7 @@ enum RemoteOpType {
     REMOTE_OPERATION_UNSPECIFIED = 0;
     REMOTE_OPERATION_READ = 1;
     REMOTE_OPERATION_WRITE = 2;
+    REMOTE_OPERATION_WRITE_MEMORY = 3;
 }
 
 message RemoteBoolMasksTypePB { repeated bool values = 1; }

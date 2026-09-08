@@ -33,6 +33,7 @@ AUTIL_LOG_SETUP(rtp_llm, RtpLLMDiskCacheMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMRemoteCacheMatchMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMRemoteCacheReadMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMRemoteCacheWriteMetrics);
+AUTIL_LOG_SETUP(rtp_llm, RtpLLMMemoryRemoteEvictionMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMRemoteCacheSDKMetrics);
 
 #define REPORT_QPS(name)                                                                                               \
@@ -541,6 +542,46 @@ void RtpLLMRemoteCacheWriteMetrics::report(const kmonitor::MetricsTags*         
     REPORT_MUTABLE_METRIC(remote_get_write_location_time_us_metric, collector->remote_get_write_location_time_us);
     REPORT_MUTABLE_METRIC(remote_write_broadcast_time_us_metric, collector->remote_write_broadcast_time_us);
     REPORT_MUTABLE_METRIC(remote_finish_write_time_us_metric, collector->remote_finish_write_time_us);
+}
+
+bool RtpLLMMemoryRemoteEvictionMetrics::init(kmonitor::MetricsGroupManager* manager) {
+    REGISTER_QPS_MUTABLE_METRIC(memory_remote_evict_qps_metric, "rtp_llm_memory_remote_evict_qps");
+    REGISTER_QPS_MUTABLE_METRIC(memory_remote_evict_fail_qps_metric, "rtp_llm_memory_remote_evict_fail_qps");
+    REGISTER_GAUGE_MUTABLE_METRIC(memory_remote_evict_block_count_metric,
+                                  "rtp_llm_memory_remote_evict_block_count");
+    REGISTER_GAUGE_MUTABLE_METRIC(memory_remote_evict_success_block_count_metric,
+                                  "rtp_llm_memory_remote_evict_success_block_count");
+    REGISTER_GAUGE_MUTABLE_METRIC(memory_remote_evict_failed_block_count_metric,
+                                  "rtp_llm_memory_remote_evict_failed_block_count");
+    REGISTER_GAUGE_MUTABLE_METRIC(memory_remote_evict_latency_us_metric,
+                                  "rtp_llm_memory_remote_evict_latency_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(memory_remote_evict_bytes_metric, "rtp_llm_memory_remote_evict_bytes");
+    REGISTER_GAUGE_MUTABLE_METRIC(memory_remote_evict_inflight_blocks_metric,
+                                  "rtp_llm_memory_remote_evict_inflight_blocks");
+    REGISTER_GAUGE_MUTABLE_METRIC(memory_emergency_evict_block_count_metric,
+                                  "rtp_llm_memory_emergency_evict_block_count");
+    REGISTER_GAUGE_MUTABLE_METRIC(device_to_memory_after_remote_latency_us_metric,
+                                  "rtp_llm_device_to_memory_after_remote_latency_us");
+    return true;
+}
+
+void RtpLLMMemoryRemoteEvictionMetrics::report(
+    const kmonitor::MetricsTags* tags, RtpLLMMemoryRemoteEvictionMetricsCollector* collector) {
+    REPORT_QPS(memory_remote_evict_qps);
+    REPORT_QPS(memory_remote_evict_fail_qps);
+    REPORT_MUTABLE_METRIC(memory_remote_evict_block_count_metric, collector->memory_remote_evict_block_count);
+    REPORT_MUTABLE_METRIC(memory_remote_evict_success_block_count_metric,
+                          collector->memory_remote_evict_success_block_count);
+    REPORT_MUTABLE_METRIC(memory_remote_evict_failed_block_count_metric,
+                          collector->memory_remote_evict_failed_block_count);
+    REPORT_MUTABLE_METRIC(memory_remote_evict_latency_us_metric, collector->memory_remote_evict_latency_us);
+    REPORT_MUTABLE_METRIC(memory_remote_evict_bytes_metric, collector->memory_remote_evict_bytes);
+    REPORT_MUTABLE_METRIC(memory_remote_evict_inflight_blocks_metric,
+                          collector->memory_remote_evict_inflight_blocks);
+    REPORT_MUTABLE_METRIC(memory_emergency_evict_block_count_metric,
+                          collector->memory_emergency_evict_block_count);
+    REPORT_MUTABLE_METRIC(device_to_memory_after_remote_latency_us_metric,
+                          collector->device_to_memory_after_remote_latency_us);
 }
 
 bool RtpLLMRemoteCacheSDKMetrics::init(kmonitor::MetricsGroupManager* manager) {

@@ -877,6 +877,41 @@ public:
     int64_t remote_finish_write_time_us       = 0;
 };
 
+class RtpLLMMemoryRemoteEvictionMetricsCollector final {
+public:
+    bool    memory_remote_evict_qps                     = false;
+    bool    memory_remote_evict_fail_qps                = false;
+    int64_t memory_remote_evict_block_count             = 0;
+    int64_t memory_remote_evict_success_block_count     = 0;
+    int64_t memory_remote_evict_failed_block_count      = 0;
+    int64_t memory_remote_evict_latency_us              = 0;
+    int64_t memory_remote_evict_bytes                   = 0;
+    int64_t memory_remote_evict_inflight_blocks         = 0;
+    int64_t memory_emergency_evict_block_count          = 0;
+    int64_t device_to_memory_after_remote_latency_us    = 0;
+};
+
+class RtpLLMMemoryRemoteEvictionMetrics: public kmonitor::MetricsGroup {
+public:
+    bool init(kmonitor::MetricsGroupManager* manager) override;
+    void report(const kmonitor::MetricsTags* tags, RtpLLMMemoryRemoteEvictionMetricsCollector* collector);
+
+public:
+    kmonitor::MutableMetric* memory_remote_evict_qps_metric                  = nullptr;
+    kmonitor::MutableMetric* memory_remote_evict_fail_qps_metric             = nullptr;
+    kmonitor::MutableMetric* memory_remote_evict_block_count_metric          = nullptr;
+    kmonitor::MutableMetric* memory_remote_evict_success_block_count_metric  = nullptr;
+    kmonitor::MutableMetric* memory_remote_evict_failed_block_count_metric   = nullptr;
+    kmonitor::MutableMetric* memory_remote_evict_latency_us_metric           = nullptr;
+    kmonitor::MutableMetric* memory_remote_evict_bytes_metric                = nullptr;
+    kmonitor::MutableMetric* memory_remote_evict_inflight_blocks_metric      = nullptr;
+    kmonitor::MutableMetric* memory_emergency_evict_block_count_metric       = nullptr;
+    kmonitor::MutableMetric* device_to_memory_after_remote_latency_us_metric = nullptr;
+
+private:
+    AUTIL_LOG_DECLARE();
+};
+
 class RtpLLMRemoteCacheSDKMetricsCollector final {
 public:
     bool    remote_sdk_fail_qps     = true;
