@@ -947,10 +947,9 @@ async def iter_real_model_stream_infer(
     model_type comparisons. ``None`` means "no think state" (phase-2 disabled, all
     dashllm limit params null).
 
-    Hot-path layout: dashscope-serving doesn't ship ``stop_words_list`` per request,
-    so 99% of calls hit the fast branch (empty ``existing``) and skip the dedup set
-    + tuple hashing entirely. The slow branch only fires when a caller explicitly
-    sets ``stop_words_list`` on the request.
+    Hot-path layout: calls without request-level stop controls hit the fast branch
+    (empty ``existing``) and skip the dedup set + tuple hashing. The slow branch
+    merges stops decoded from either the input tensor or compatible JSON parameters.
     """
     trace_str = str(request.id)
     tag = stream_log_tag(request_id_numeric=rtp_llm_request_id, trace_id=trace_str)

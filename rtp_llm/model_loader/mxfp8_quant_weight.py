@@ -10,6 +10,7 @@ Only two things differ from FP8_PER_BLOCK:
   deferred to first forward and cached by the linear/MoE executor.
 """
 
+import fnmatch
 import functools
 from typing import Any, Dict, List, Union
 
@@ -24,12 +25,16 @@ from rtp_llm.model_loader.ffn_weight import FfnAtomicWeight, MoeAtomicWeight
 from rtp_llm.model_loader.load_config import LoadConfig
 from rtp_llm.model_loader.per_block_fp8_quant_weight import (
     PerBlockFp8Weight,
+    W8A8Fp8PerBlockAtomicWeight,
     create_w8a8_fp8_per_block_weight,
+    gemm_block_fp8_gpt_style_tp_strategy,
 )
 from rtp_llm.model_loader.weight_module import CompositeWeight, WeightModule
 from rtp_llm.utils.model_weight import (
     CkptWeightInfo,
     W,
+    ffn_sp_0,
+    ffn_sp_neg1,
     identity,
     is_v4_weight,
     pad,
@@ -40,8 +45,22 @@ from rtp_llm.utils.model_weight import (
     transpose_slice_v,
 )
 
-
 MX_BLOCK = 32
+
+
+def mxfp8_gpt_style_tp_strategy() -> Dict[str, Any]:
+    strategy = gemm_block_fp8_gpt_style_tp_strategy()
+    strategy.update(
+        {
+            W.ffn_w1: ffn_sp_0,
+            W.ffn_w3: ffn_sp_0,
+            W.ffn_w2: ffn_sp_neg1,
+        }
+    )
+    for kernel_name, scale_name in PerBlockFp8Weight.w8a8_weight_list.items():
+        if scale_name is not None and kernel_name in strategy:
+            strategy[scale_name] = strategy[kernel_name]
+    return strategy
 
 
 def _dequantize_mxfp8(weight: torch.Tensor, scale_exponents: torch.Tensor) -> torch.Tensor:
@@ -97,6 +116,8 @@ def _dequantize_mxfp8_split_v(
 
 
 class Mxfp8Weight(PerBlockFp8Weight):
+    gpt_style_tp_strategy = mxfp8_gpt_style_tp_strategy()
+
     def __init__(
         self,
         src_weight_info: WeightModule,
@@ -111,29 +132,9 @@ class Mxfp8Weight(PerBlockFp8Weight):
             quant_config, "packed_scale_suffix", "_scale_inv"
         )
         super().__init__(src_weight_info, quant_config, *args, **kwargs)
-        # TP-split fix for the (1,32) microscale.
-        #
-        # ``PerBlockFp8Weight`` is built for the 128x128 block-FP8 scale and
-        # assigns the qkv scale the ``sp_head_s_gemm_a8_block`` strategy, which
-        # divides the head/hidden dims by ``block_size=128`` before splitting.
-        # That layout assumption is wrong for MXFP8: the scale is ``[N, K//32]``
-        # with one UE8M0 byte per (row, 32-col) block, so its row (N) axis is
-        # identical to the kernel's and its col axis is just ``K//32`` (not a
-        # 128-block grid). Running the 128-block splitter mangles the scale
-        # under TP>1 (rows collapse to ``N/128`` and the tensor is reshaped to
-        # a block grid), so ``pack_mxfp8_scale`` then fails
-        # ``sf.size(-2) == ceil_div(mn, gran_mn)``.
-        #
-        # The (1,32) scale shares the kernel's axes exactly (same N rows;
-        # K//32 cols that split proportionally to the kernel's K cols), so the
-        # kernel's own split function partitions it correctly regardless of
-        # whether the split is by-head (dim 0) or even (dim -1). Force the scale
-        # to reuse the kernel's split function so it is sharded identically.
-        if getattr(self, "scale", None) is not None and getattr(
-            self, "kernel", None
-        ) is not None:
-            kernel_split = self.kernel._get_split_func()
-            self.scale._get_split_func = lambda _f=kernel_split: _f
+        for weight in (self.kernel, self.scale):
+            if isinstance(weight, W8A8Fp8PerBlockAtomicWeight):
+                weight.gpt_style_tp_strategy = self.gpt_style_tp_strategy
 
     def _get_scale_suffix(self, scale_fmt: object) -> str:
         del scale_fmt
@@ -149,8 +150,6 @@ class Mxfp8Weight(PerBlockFp8Weight):
         quant_config: QuantizationConfig, src_weight_info: WeightModule
     ) -> bool:
         excluded = getattr(quant_config, "exclude_modules", set())
-        if not excluded:
-            return False
         layer_id = getattr(src_weight_info, "layer_id", None)
         for ckpt in getattr(src_weight_info, "weights", ()):
             source_name = ckpt.name
@@ -163,8 +162,19 @@ class Mxfp8Weight(PerBlockFp8Weight):
                 if source_name.endswith(".weight")
                 else source_name
             )
-            if source_name in excluded or module_name in excluded:
+            if any(
+                name == pattern or fnmatch.fnmatch(name, pattern)
+                for pattern in excluded
+                for name in (source_name, module_name)
+            ):
                 return True
+
+            if quant_config.quantized_layers:
+                # MIXED_PRECISION lists the authoritative quantization for
+                # each module. Parent entries such as ``...mlp.experts`` cover
+                # the fused routed-expert checkpoint tensors below them.
+                if quant_config.resolve_module_quant_algo(module_name) != "MXFP8":
+                    return True
         return False
 
     @staticmethod

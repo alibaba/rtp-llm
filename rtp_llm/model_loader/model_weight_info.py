@@ -52,8 +52,9 @@ def _apply_mega_moe_fp4_wrappers(
     load-time quantizers when a MegaMoE strategy is selected.
 
     Three cases are handled:
-      - **Offline FP4 ckpt** (``quantization_config.expert_dtype == "fp4"``,
-        fallback: legacy ``experts.*.weight_scale`` keys): replace with
+      - **Offline FP4 ckpt** (``quantization_config.expert_dtype == "fp4"`` or
+        ModelOpt ``quantized_layers`` contains MXFP4; fallback: FP4 expert
+        scale keys): replace with
         :class:`OfflineMegaMoeFp4MoeWeight` (direct load; scale key is
         ``.scale`` for UE8M0 or ``.weight_scale`` for float32).
         ``MOE_STRATEGY=mega_moe_se`` or ``mega_moe_fused`` additionally wraps
@@ -81,7 +82,7 @@ def _apply_mega_moe_fp4_wrappers(
     if not is_mega_moe_strategy():
         return weight_info
 
-    is_offline = is_offline_mega_moe_fp4_ckpt(database)
+    is_offline = is_offline_mega_moe_fp4_ckpt(database, quant_config)
     include_shared_expert = is_mega_moe_fused_strategy()
     scale_dtype = (
         PerBlockFp8Weight._get_scale_dtype(getattr(quant_config, "scale_fmt", None))
@@ -444,7 +445,8 @@ class ModelDeployWeightInfo:
         # AFTER `to_quant_weight_info` so we can replace any PerBlockFp8Weight
         # MoE wrapper with the FP8→FP4 variant. `database` / `quant_config`
         # auto-detect offline FP4 MoE (`expert_dtype=fp4` or legacy
-        # `experts.*.weight_scale`) and pick UE8M0 vs float32 scale dtype.
+        # ModelOpt MXFP4 entries / expert scale keys) and pick UE8M0 vs float32
+        # scale dtype.
         weight_info = _apply_mega_moe_fp4_wrappers(
             weight_info, database=database, quant_config=self._quant_config
         )

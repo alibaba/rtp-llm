@@ -789,6 +789,104 @@ def _parse_stop_words_list_input(request) -> tuple[tuple[int, ...], ...] | None:
     return (tuple(flat),) if flat else tuple()
 
 
+def _parse_stop_parameter_json(request, param_name: str) -> Any | None:
+    """Decode one JSON-valued stop parameter from the Triton parameter map."""
+    if param_name not in request.parameters:
+        return None
+    param = request.parameters[param_name]
+    if param.HasField("int64_param") and param_name == "stop_token_ids":
+        return int(param.int64_param)
+    if not param.HasField("string_param"):
+        raise DashScParameterError(
+            f"invalid {param_name}: expected a JSON string parameter"
+        )
+    raw_value = str(param.string_param).strip()
+    if not raw_value:
+        return []
+    try:
+        return json.loads(raw_value)
+    except Exception:
+        raise DashScParameterError(
+            f"invalid {param_name}: expected valid JSON"
+        ) from None
+
+
+def _validate_stop_token_id(value: Any, param_name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise DashScParameterError(
+            f"invalid {param_name}: token ids must be non-negative integers"
+        )
+    return int(value)
+
+
+def _normalize_stop_words_list_parameter(
+    value: Any, param_name: str
+) -> tuple[tuple[int, ...], ...]:
+    """Normalize ``List[List[int]]`` plus Dash's one-element batch wrapper."""
+    if not isinstance(value, list):
+        raise DashScParameterError(
+            f"invalid {param_name}: expected a JSON array of token-id sequences"
+        )
+    # dashscope-serving batch-wraps request controls, for example
+    # ``[[[13693]]]`` for the logical stop-words list ``[[13693]]``.
+    if (
+        len(value) == 1
+        and isinstance(value[0], list)
+        and all(isinstance(group, list) for group in value[0])
+    ):
+        value = value[0]
+    if value and all(not isinstance(item, list) for item in value):
+        value = [value]
+
+    groups: list[tuple[int, ...]] = []
+    for group in value:
+        if not isinstance(group, list) or not group:
+            raise DashScParameterError(
+                f"invalid {param_name}: each stop sequence must be a non-empty array"
+            )
+        groups.append(
+            tuple(_validate_stop_token_id(token_id, param_name) for token_id in group)
+        )
+    return tuple(groups)
+
+
+def _normalize_stop_token_ids_parameter(
+    value: Any, param_name: str
+) -> tuple[tuple[int, ...], ...]:
+    """Normalize possibly batch-wrapped token IDs into singleton stop groups."""
+    token_ids: list[int] = []
+
+    def collect(item: Any) -> None:
+        if isinstance(item, list):
+            for nested in item:
+                collect(nested)
+            return
+        token_ids.append(_validate_stop_token_id(item, param_name))
+
+    collect(value)
+    return tuple((token_id,) for token_id in token_ids)
+
+
+def _parse_stop_words_list_parameters(
+    request,
+) -> tuple[tuple[int, ...], ...] | None:
+    """Read Dash JSON stop controls when no stop tensor was supplied."""
+    groups: list[tuple[int, ...]] = []
+    found = False
+    for param_name, normalizer in (
+        ("stop_words_list", _normalize_stop_words_list_parameter),
+        ("stop_token_ids", _normalize_stop_token_ids_parameter),
+    ):
+        value = _parse_stop_parameter_json(request, param_name)
+        if value is None:
+            continue
+        found = True
+        groups.extend(normalizer(value, param_name))
+    if not found:
+        return None
+    return tuple(dict.fromkeys(groups))
+
+
 # ----------------------------------------------------------------------------
 # Sampling / Other params (dataclasses consumed by the inference path)
 # ----------------------------------------------------------------------------
@@ -866,7 +964,7 @@ class OtherParams:
 
 @dataclass(frozen=True)
 class SamplingParams:
-    """Sampling / generation options from ``request.inputs`` (+ legacy ``top_k`` in ``request.parameters``)."""
+    """Sampling / generation options decoded from one Dash SC request."""
 
     max_new_tokens: int = _DEFAULT_MAX_NEW_TOKENS
     max_new_tokens_from_completion_alias: bool = False
@@ -974,6 +1072,10 @@ def parse_sampling_params(
 
     Legacy: if there is no ``top_k`` input, ``request.parameters["top_k"].int64_param``
     is used instead.
+
+    If there is no valid ``stop_words_list`` input tensor, JSON-valued
+    ``request.parameters["stop_words_list"]`` and ``["stop_token_ids"]`` are
+    merged as a compatibility fallback.
     """
     num_return_sequences = 0
     top_p = 1.0
@@ -1088,6 +1190,8 @@ def parse_sampling_params(
             break
 
     sw = _parse_stop_words_list_input(request)
+    if sw is None:
+        sw = _parse_stop_words_list_parameters(request)
     if sw is not None:
         stop_words_list = sw
 

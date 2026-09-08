@@ -261,7 +261,12 @@ class QuantizationConfig(ABC):
         if quant_method == "modelopt":
             modelopt_quant = quant_config.get("quantization", {})
             modelopt_algo = str(modelopt_quant.get("quant_algo", "")).upper()
-            if modelopt_algo == "MXFP8":
+            if modelopt_algo in ("MXFP8", "MIXED_PRECISION"):
+                quantized_layers = modelopt_quant.get("quantized_layers", {}) or {}
+                if modelopt_algo == "MIXED_PRECISION":
+                    Fp8MxBlockWiseQuantConfig.validate_modelopt_quantized_layers(
+                        quantized_layers
+                    )
                 result = Fp8MxBlockWiseQuantConfig.from_config(
                     {
                         "bits": 8,
@@ -272,6 +277,11 @@ class QuantizationConfig(ABC):
                         # packed expert tensors use ``foo_scale``.
                         "checkpoint_scale_suffix": ".weight_scale",
                         "packed_scale_suffix": "_scale",
+                        # ModelOpt stores MX scale factors as raw UE8M0 bytes.
+                        # The MXFP8 loader materializes fp32 powers of two;
+                        # the offline MXFP4 MoE loader preserves the bit pattern.
+                        "scale_fmt": "ue8m0",
+                        "quantized_layers": quantized_layers,
                     }
                 )
                 result.exclude_modules = set(
@@ -485,6 +495,67 @@ class Fp8MxBlockWiseQuantConfig(Fp8BlockWiseQuantConfig):
         )
         self.packed_scale_suffix = kwargs.get(
             "packed_scale_suffix", "_scale_inv"
+        )
+        self.quantized_layers = dict(kwargs.get("quantized_layers", {}) or {})
+
+    @staticmethod
+    def validate_modelopt_quantized_layers(quantized_layers: Any) -> None:
+        if not isinstance(quantized_layers, dict) or not quantized_layers:
+            raise ValueError(
+                "ModelOpt MIXED_PRECISION requires a non-empty "
+                "quantized_layers mapping"
+            )
+        invalid_entries = [
+            name
+            for name, info in quantized_layers.items()
+            if not isinstance(info, dict) or not info.get("quant_algo")
+        ]
+        if invalid_entries:
+            raise ValueError(
+                "ModelOpt MIXED_PRECISION quantized_layers entries must contain "
+                f"quant_algo, invalid entries: {invalid_entries[:8]}"
+            )
+        layer_algos = {
+            str(info["quant_algo"]).upper() for info in quantized_layers.values()
+        }
+        unsupported = layer_algos - {"MXFP8", "MXFP4"}
+        if unsupported:
+            raise ValueError(
+                "RTP-LLM ModelOpt MIXED_PRECISION currently supports MXFP8 "
+                f"linears with MXFP4 routed experts, got {sorted(unsupported)}"
+            )
+        invalid_fp4_modules = [
+            name
+            for name, info in quantized_layers.items()
+            if str(info["quant_algo"]).upper() == "MXFP4"
+            and not name.endswith(".mlp.experts")
+        ]
+        if invalid_fp4_modules:
+            raise ValueError(
+                "ModelOpt MIXED_PRECISION only supports MXFP4 on routed expert "
+                f"modules, got {invalid_fp4_modules[:8]}"
+            )
+
+    def resolve_module_quant_algo(self, module_name: str) -> Optional[str]:
+        matches = [
+            (prefix, info)
+            for prefix, info in self.quantized_layers.items()
+            if module_name == prefix or module_name.startswith(prefix + ".")
+        ]
+        if not matches:
+            return None
+        _, info = max(matches, key=lambda item: len(item[0]))
+        if not isinstance(info, dict):
+            return None
+        quant_algo = str(info.get("quant_algo", "")).upper()
+        return quant_algo or None
+
+    def has_quant_algo(self, quant_algo: str) -> bool:
+        expected = quant_algo.upper()
+        return any(
+            isinstance(info, dict)
+            and str(info.get("quant_algo", "")).upper() == expected
+            for info in self.quantized_layers.values()
         )
 
     @classmethod

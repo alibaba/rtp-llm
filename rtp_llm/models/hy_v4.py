@@ -6,6 +6,7 @@ import functools
 import json
 import logging
 import os
+from enum import IntFlag, auto
 from typing import Any, List, Optional
 
 import torch
@@ -51,6 +52,52 @@ def _transpose_stacked_gate_up(ts: List[torch.Tensor]) -> torch.Tensor:
     return torch.cat((stacked[:, half:, :], stacked[:, :half, :]), dim=1)
 
 
+class Hy4ExpertCheckpointLayout(IntFlag):
+    PER_EXPERT = 0
+    FUSED = auto()
+    GATE_UP_WEIGHT_SUFFIX = auto()
+    DOWN_WEIGHT_SUFFIX = auto()
+    MODELOPT_MXFP4 = auto()
+
+    @property
+    def is_fused(self) -> bool:
+        return bool(self & (self.FUSED | self.MODELOPT_MXFP4))
+
+    @property
+    def gate_up_suffix(self) -> str:
+        return ".weight" if self & self.GATE_UP_WEIGHT_SUFFIX else ""
+
+    @property
+    def down_suffix(self) -> str:
+        return ".weight" if self & self.DOWN_WEIGHT_SUFFIX else ""
+
+
+def _detect_expert_checkpoint_layout(
+    weight_keys: List[str], model_prefix: Optional[str] = None
+) -> Hy4ExpertCheckpointLayout:
+    expert_prefix = (
+        f"{model_prefix}.mlp.experts."
+        if model_prefix is not None
+        else ".mlp.experts."
+    )
+
+    def contains(name: str) -> bool:
+        if model_prefix is not None:
+            return any(key.startswith(expert_prefix + name) for key in weight_keys)
+        return any(expert_prefix + name in key for key in weight_keys)
+
+    if contains("w13_weight") or contains("w2_weight"):
+        return Hy4ExpertCheckpointLayout.MODELOPT_MXFP4
+    layout = Hy4ExpertCheckpointLayout.PER_EXPERT
+    if contains("gate_up_proj") or contains("down_proj"):
+        layout |= Hy4ExpertCheckpointLayout.FUSED
+    if contains("gate_up_proj.weight"):
+        layout |= Hy4ExpertCheckpointLayout.GATE_UP_WEIGHT_SUFFIX
+    if contains("down_proj.weight"):
+        layout |= Hy4ExpertCheckpointLayout.DOWN_WEIGHT_SUFFIX
+    return layout
+
+
 def _move_indexer_rope_to_front(
     ts: List[torch.Tensor],
     *,
@@ -84,33 +131,30 @@ def _move_indexer_rope_to_front(
 class Hy4Weight(DeepSeekV2Weight):
     """Checkpoint mapping for HY V4 backbone weights."""
 
-    has_fused_experts = False
-    fused_gate_up_suffix = ""
-    fused_down_suffix = ""
-
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         # Metadata may be processed once for pretrain shards and again for a
         # finetune overlay. Keep the detection state per loader instance and
         # accumulate it across both passes.
         self.q_use_lora = False
         self.has_e_score_correction_bias = False
-        self.has_fused_experts = False
-        self.fused_gate_up_suffix = ""
-        self.fused_down_suffix = ""
+        self.expert_checkpoint_layout = Hy4ExpertCheckpointLayout.PER_EXPERT
         super().__init__(*args, **kwargs)
+
+    def _update_expert_checkpoint_layout(
+        self, weight_keys: List[str], model_prefix: Optional[str] = None
+    ) -> None:
+        detected = _detect_expert_checkpoint_layout(weight_keys, model_prefix)
+        if detected is Hy4ExpertCheckpointLayout.MODELOPT_MXFP4:
+            self.expert_checkpoint_layout = detected
+        elif (
+            self.expert_checkpoint_layout
+            is not Hy4ExpertCheckpointLayout.MODELOPT_MXFP4
+        ):
+            self.expert_checkpoint_layout |= detected
 
     def _process_meta(self, meta_dict: Any, weight_keys: List[str]):
         super()._process_meta(meta_dict, weight_keys)
-        self.has_fused_experts = self.has_fused_experts or any(
-            ".mlp.experts.gate_up_proj" in key for key in weight_keys
-        )
-        if any(
-            key.endswith(".mlp.experts.gate_up_proj.weight")
-            for key in weight_keys
-        ):
-            self.fused_gate_up_suffix = ".weight"
-        if any(key.endswith(".mlp.experts.down_proj.weight") for key in weight_keys):
-            self.fused_down_suffix = ".weight"
+        self._update_expert_checkpoint_layout(weight_keys)
 
     def _mla_config(self) -> MlaConfig:
         return MlaConfig(
@@ -216,7 +260,10 @@ class Hy4Weight(DeepSeekV2Weight):
         return layer_weights
 
     def _get_hf_ffn_layer_weight_info(self, layer_id: int):
-        if layer_id not in self.moe_layer_index_ or not self.has_fused_experts:
+        if (
+            layer_id not in self.moe_layer_index_
+            or not self.expert_checkpoint_layout.is_fused
+        ):
             layer_weights = super()._get_hf_ffn_layer_weight_info(layer_id)
             if layer_id in self.moe_layer_index_:
                 for weight in layer_weights:
@@ -232,6 +279,22 @@ class Hy4Weight(DeepSeekV2Weight):
             is_moe=False,
         )
         moe_config = MoeConfig(align_size=align_size, expert_num=self.expert_num_)
+        direct_mxfp4 = (
+            self.expert_checkpoint_layout
+            is Hy4ExpertCheckpointLayout.MODELOPT_MXFP4
+        )
+        routed_w2_name = (
+            "model.layers.{i}.mlp.experts.w2_weight"
+            if direct_mxfp4
+            else "model.layers.{i}.mlp.experts.down_proj"
+            + self.expert_checkpoint_layout.down_suffix
+        )
+        routed_w13_name = (
+            "model.layers.{i}.mlp.experts.w13_weight"
+            if direct_mxfp4
+            else "model.layers.{i}.mlp.experts.gate_up_proj"
+            + self.expert_checkpoint_layout.gate_up_suffix
+        )
         layer_weights: List[WeightModule] = [
             FfnWeight(
                 sub_weights=[
@@ -282,24 +345,14 @@ class Hy4Weight(DeepSeekV2Weight):
                     ),
                     MoeAtomicWeight(
                         W.moe_w2,
-                        [
-                            CkptWeightInfo(
-                                "model.layers.{i}.mlp.experts.down_proj"
-                                + self.fused_down_suffix
-                            )
-                        ],
+                        [CkptWeightInfo(routed_w2_name)],
                         stack_,
                         config=moe_config,
                         stacked_ckpt_keys=True,
                     ),
                     MoeAtomicWeight(
                         W.moe_w1,
-                        [
-                            CkptWeightInfo(
-                                "model.layers.{i}.mlp.experts.gate_up_proj"
-                                + self.fused_gate_up_suffix
-                            )
-                        ],
+                        [CkptWeightInfo(routed_w13_name)],
                         _transpose_stacked_gate_up,
                         config=moe_config,
                         stacked_ckpt_keys=True,
@@ -363,14 +416,7 @@ class Hy4MtpWeight(Hy4Weight):
         self.has_e_score_correction_bias = self.has_e_score_correction_bias or (
             "model.mtp_layers.0.mlp.gate.e_score_correction_bias" in weight_keys
         )
-        self.has_fused_experts = self.has_fused_experts or any(
-            key.startswith("model.mtp_layers.0.mlp.experts.gate_up_proj")
-            for key in weight_keys
-        )
-        if "model.mtp_layers.0.mlp.experts.gate_up_proj.weight" in weight_keys:
-            self.fused_gate_up_suffix = ".weight"
-        if "model.mtp_layers.0.mlp.experts.down_proj.weight" in weight_keys:
-            self.fused_down_suffix = ".weight"
+        self._update_expert_checkpoint_layout(weight_keys, "model.mtp_layers.0")
 
     @staticmethod
     def _remap_to_mtp(layer_weights: List[WeightModule]) -> None:
