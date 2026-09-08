@@ -119,7 +119,12 @@ class RMSNorm(RtpModule):
 
 
 class RMSResNorm(RtpModule):
-    """RMSNorm with the residual-add contract used by decoder runtimes."""
+    """RMSNorm with the in-place residual-add contract used by decoders.
+
+    Both input tensors are overwritten on every backend: ``hidden_states``
+    receives the normalized output and ``residual`` receives the residual sum.
+    The returned tensors alias those two inputs.
+    """
 
     def __init__(
         self,
@@ -203,7 +208,9 @@ class RMSResNorm(RtpModule):
                             self.eps,
                             0,
                         )
-                    return output, residual_out
+                    hidden_states.copy_(output)
+                    residual.copy_(residual_out)
+                    return hidden_states, residual
 
             else:
                 try:
@@ -224,9 +231,12 @@ class RMSResNorm(RtpModule):
                         )
                     return hidden_states, residual
 
-        return _eager_rms_res_norm(
+        output, residual_out = _eager_rms_res_norm(
             self.weight,
             hidden_states,
             residual,
             self.eps,
         )
+        hidden_states.copy_(output)
+        residual.copy_(residual_out)
+        return hidden_states, residual

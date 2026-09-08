@@ -646,7 +646,8 @@ void FlashInferMlaAttnParams::fillParamsMhaDevice(torch::Tensor t_prefix_lengths
                                                   torch::Tensor t_kv_cache_block_id_device,
                                                   int           seq_size_per_block,
                                                   bool          forbid_realloc,
-                                                  int           planned_batch_size) {
+                                                  int           planned_batch_size,
+                                                  int           input_token_count) {
     RTP_LLM_CHECK_WITH_INFO(t_input_lengths.defined() && t_input_lengths.dim() == 1,
                             "fillParamsMhaDevice: input_lengths must be a 1-D tensor");
     const int input_batch_size = t_input_lengths.size(0);
@@ -673,12 +674,27 @@ void FlashInferMlaAttnParams::fillParamsMhaDevice(torch::Tensor t_prefix_lengths
                             "fillParamsMhaDevice: kv_cache_block_id_device must be 2-D and cover the batch");
     const int max_blocks_per_bs = t_block_id_dev.size(1);
 
+    const bool has_prefix = t_prefix_lengths_dev.defined() && t_prefix_lengths_dev.numel() > 0;
+    // Prefill input_lengths stays device-resident for graph-safe planning.
+    // The caller supplies PyAttentionInputs.total_tokens, which is the
+    // host-authoritative sum used to size the model input itself.
+    if (input_token_count < 0) {
+        RTP_LLM_CHECK_WITH_INFO(!has_prefix, "fillParamsMhaDevice: prefill requires the verified input token count");
+        input_token_count = input_batch_size;
+    }
+
     // Exact page/token counts stay on device, so size for the worst case:
     // every batch fills its full page-table row. MIN_CACHE_PAGE_NUM prevents
     // allocator churn.
     const int page_num_upper = batch_size * max_blocks_per_bs;
     const int input_token_num_upper =
         std::max(MIN_CACHE_INPUT_TOKEN_NUM, batch_size * max_blocks_per_bs * seq_size_per_block);
+    const int64_t page_table_token_capacity =
+        static_cast<int64_t>(input_batch_size) * max_blocks_per_bs * seq_size_per_block;
+    RTP_LLM_CHECK_WITH_INFO(input_token_count >= 0 && input_token_count <= page_table_token_capacity,
+                            "fillParamsMhaDevice: input token count %d exceeds page-table capacity %lld",
+                            input_token_count,
+                            static_cast<long long>(page_table_token_capacity));
 
     // Reuse MLA-superset buffers to keep FlashInfer _paged_kv_* aliases stable.
     // Match fillParams' batch_reuse_info envelope so later graph replay does
@@ -701,7 +717,7 @@ void FlashInferMlaAttnParams::fillParamsMhaDevice(torch::Tensor t_prefix_lengths
                            page_indice_d,
                            batch_indice_d,
                            positions_d,
-                           input_token_num_upper,
+                           input_token_count,
                            batch_size,
                            stream);
 
@@ -764,14 +780,16 @@ void registerPyFlashInferMlaParams(pybind11::module& m) {
                torch::Tensor                     kv_cache_block_id_device,
                int                               seq_size_per_block,
                bool                              forbid_realloc,
-               int                               planned_batch_size) {
+               int                               planned_batch_size,
+               int                               input_token_count) {
                 self.fillParamsMhaDevice(prefix_lengths,
                                          sequence_lengths,
                                          input_lengths,
                                          kv_cache_block_id_device,
                                          seq_size_per_block,
                                          forbid_realloc,
-                                         planned_batch_size);
+                                         planned_batch_size,
+                                         input_token_count);
             },
             pybind11::arg("prefix_lengths"),
             pybind11::arg("sequence_lengths"),
@@ -780,6 +798,7 @@ void registerPyFlashInferMlaParams(pybind11::module& m) {
             pybind11::arg("seq_size_per_block"),
             pybind11::arg("forbid_realloc")     = false,
             pybind11::arg("planned_batch_size") = -1,
+            pybind11::arg("input_token_count")  = -1,
             "MHA-only device-resident planner — fills decode_page_indptr_d / paged_kv_last_page_len_d / page_indice_d via a single CUDA kernel, leaving MLA-only fields untouched")
         // HOST tensors (_h suffix)
         .def_readonly("batch_indice_h", &FlashInferMlaAttnParams::batch_indice_h, "Batch indices on HOST")

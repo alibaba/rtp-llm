@@ -20,9 +20,9 @@ namespace rtp_llm {
 //   paged_kv_last_page_len   >= planned_batch_size
 //   decode_page_indptr       >= planned_batch_size + 1
 //   page_indice              >= planned_batch_size * max_blocks_per_bs (loose upper bound)
-//   input_token_capacity     >= sum(input_lengths) for prefill, or input batch size for decode
-//   batch_indice             >= input_token_capacity
-//   positions                >= input_token_capacity
+//   input_token_count        == sum(input_lengths) for prefill, or input batch size for decode
+//   batch_indice             >= input_token_count
+//   positions                >= input_token_count
 //
 // One CTA, batch_size threads — designed for the small batches typical of
 // decode/prefill in this engine (<= 1024).
@@ -36,7 +36,7 @@ void invokeMhaPagedAttnPlan(const at::Tensor& input_lengths,
                             at::Tensor&       page_indice,
                             at::Tensor&       batch_indice,
                             at::Tensor&       positions,
-                            int               input_token_capacity,
+                            int               input_token_count,
                             int               planned_batch_size,
                             cudaStream_t      stream);
 

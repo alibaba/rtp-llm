@@ -2712,7 +2712,13 @@ class TestAiterPrefillImplMropePositionIds(unittest.TestCase):
         replay_position_ids = active_position_ids + torch.tensor(
             [5, 3, 1], dtype=torch.int32, device=self.device
         )
-        position_id_capacity[:total_tokens].copy_(replay_position_ids)
+        replay_position_id_capacity = position_id_capacity.clone()
+        replay_position_id_capacity[:total_tokens].copy_(replay_position_ids)
+        attn_inputs.combo_position_ids = replay_position_id_capacity
+        self.assertNotEqual(
+            position_id_capacity.data_ptr(), replay_position_id_capacity.data_ptr()
+        )
+        params.prepare_in_place(attn_inputs)
         graph.replay()
         torch.cuda.synchronize()
 
@@ -2727,6 +2733,10 @@ class TestAiterPrefillImplMropePositionIds(unittest.TestCase):
             rtol=1e-2,
         )
         self.assertTrue(torch.equal(captured_q[2], torch.zeros_like(captured_q[2])))
+
+        attn_inputs.combo_position_ids = replay_position_id_capacity[:-1]
+        with self.assertRaisesRegex(RuntimeError, "combo_position_ids"):
+            params.prepare_in_place(attn_inputs)
 
 
 @unittest.skipUnless(_OPS_IMPORTABLE, "Requires ROCm attention wrappers")
