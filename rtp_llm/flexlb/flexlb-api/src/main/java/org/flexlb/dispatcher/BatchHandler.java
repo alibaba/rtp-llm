@@ -14,6 +14,7 @@ import org.springframework.web.reactive.function.server.ServerRequest;
 import org.springframework.web.reactive.function.server.ServerResponse;
 import reactor.core.publisher.Mono;
 import reactor.core.publisher.SignalType;
+import reactor.core.scheduler.Schedulers;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -47,6 +48,7 @@ public class BatchHandler {
     private final boolean preAssignBe;
     private final FeAllocationMode feAllocationMode;
     private final int maxChunkCount;
+    private final long maxAggregateRequestBytes;
 
     @Autowired
     public BatchHandler(FanoutService fanoutService,
@@ -56,7 +58,8 @@ public class BatchHandler {
                         DispatcherMetricsReporter metricsReporter,
                         ConfigService configService) {
         this(fanoutService, cfg, batchScheduleClient, passthroughClient, metricsReporter,
-                configService.loadBalanceConfig().getBatchScheduleMaxCount());
+                configService.loadBalanceConfig().getBatchScheduleMaxCount(),
+                cfg.getMaxAggregateRequestBytes());
     }
 
     /** Package-private convenience for focused tests; mirrors the production default. */
@@ -65,7 +68,8 @@ public class BatchHandler {
                  BatchScheduleClient batchScheduleClient,
                  PassthroughClient passthroughClient,
                  DispatcherMetricsReporter metricsReporter) {
-        this(fanoutService, cfg, batchScheduleClient, passthroughClient, metricsReporter, 1000);
+        this(fanoutService, cfg, batchScheduleClient, passthroughClient, metricsReporter,
+                1000, cfg.getMaxAggregateRequestBytes());
     }
 
     BatchHandler(FanoutService fanoutService,
@@ -74,6 +78,17 @@ public class BatchHandler {
                  PassthroughClient passthroughClient,
                  DispatcherMetricsReporter metricsReporter,
                  int maxChunkCount) {
+        this(fanoutService, cfg, batchScheduleClient, passthroughClient, metricsReporter,
+                maxChunkCount, cfg.getMaxAggregateRequestBytes());
+    }
+
+    BatchHandler(FanoutService fanoutService,
+                 DispatchConfig cfg,
+                 BatchScheduleClient batchScheduleClient,
+                 PassthroughClient passthroughClient,
+                 DispatcherMetricsReporter metricsReporter,
+                 int maxChunkCount,
+                 long maxAggregateRequestBytes) {
         this.fanoutService = fanoutService;
         this.subBatch = cfg.getSubBatchSpec();
         this.splitPolicy = subBatch.mode().name().toLowerCase() + ":" + subBatch.value();
@@ -87,12 +102,18 @@ public class BatchHandler {
         if (maxChunkCount < 1) {
             throw new IllegalArgumentException("maxChunkCount must be >= 1, got " + maxChunkCount);
         }
+        if (maxAggregateRequestBytes <= 0) {
+            throw new IllegalArgumentException("maxAggregateRequestBytes must be > 0, got "
+                    + maxAggregateRequestBytes);
+        }
         this.maxChunkCount = maxChunkCount;
+        this.maxAggregateRequestBytes = maxAggregateRequestBytes;
     }
 
     public Mono<ServerResponse> handle(ServerRequest request, BatchEndpointSpec spec) {
         DispatchPvLogData pv = DispatchPvLogData.batch(spec.getPath(), System.currentTimeMillis());
         AtomicBoolean delegatedToPassthrough = new AtomicBoolean(false);
+        AtomicBoolean pvFinalized = new AtomicBoolean(false);
         return request.bodyToMono(byte[].class).defaultIfEmpty(new byte[0]).flatMap(bytes -> {
             JSONObject body = BatchBodyParser.parseObject(bytes);
             if (body == null) {
@@ -135,42 +156,41 @@ public class BatchHandler {
                         "batch produces " + chunkCount + " sub-batches; maximum is "
                                 + maxChunkCount + " (BATCH_SCHEDULE_MAX_COUNT)");
             }
-            List<JSONArray> chunks = BatchChunkAssembler.split(arr, subBatch);
-            recordChunkShape(pv, chunks);
-            List<JSONObject> chunkBodies = BatchChunkAssembler.buildChunkBodies(
-                    body, chunks, spec.getRequestArrayField());
-            spec.prepareChunkBodies(body, chunkBodies);
-            boolean assignBe = preAssignBe && spec.isPreAssignable();
-            boolean assignFe = feAllocationMode == FeAllocationMode.MASTER;
-            return resolveTargets(chunks.size(), assignBe, assignFe)
-                    .flatMap(targets -> {
-                        if (assignBe) {
-                            BatchChunkAssembler.stampPreAssignedBe(chunkBodies, targets);
-                        }
-                        // In master mode these are index-aligned authoritative assignments. Local
-                        // mode deliberately passes none; FanoutService reserves one contiguous
-                        // batch from this node's health-filtered FePool instead.
-                        List<String> preAssignedFeUrls = assignFe
-                                ? preAssignedFeUrls(targets) : List.of();
-                        long fanoutStart = System.currentTimeMillis();
-                        // Relay the caller's end-to-end headers and query to every chunk: the split
-                        // path must not silently change auth/tenancy/tracing semantics relative to
-                        // the passthrough path for the same route.
-                        return fanoutService.dispatchChunks(spec.getPath(), chunkBodies,
-                                        preAssignedFeUrls, spec,
-                                        request.headers().asHttpHeaders(), request.uri().getRawQuery())
-                                .doOnNext(subs -> metricsReporter.reportFanoutRt(
-                                        System.currentTimeMillis() - fanoutStart,
-                                        feAllocationMode.configValue()))
-                                .map(subs -> ResponseMerger.merge(subs, spec, body))
-                                .flatMap(merged -> {
-                                    pv.setFailedChunks(merged.failedReasons().size());
-                                    if (merged.allFailed()
-                                            || (spec.isFailOnPartialFailure() && merged.hasFailures())) {
-                                        return errorResponse(merged);
+            return Mono.fromCallable(() -> prepareBatch(body, arr, chunkCount, spec, pv))
+                    .subscribeOn(Schedulers.parallel())
+                    .flatMap(prepared -> {
+                        boolean assignBe = preAssignBe && spec.isPreAssignable();
+                        boolean assignFe = feAllocationMode == FeAllocationMode.MASTER;
+                        return resolveTargets(prepared.chunkBodies().size(), assignBe, assignFe)
+                                .flatMap(targets -> {
+                                    if (assignBe) {
+                                        BatchChunkAssembler.stampPreAssignedBe(
+                                                prepared.chunkBodies(), targets);
                                     }
-                                    return DispatcherResponses.jsonBytes(
-                                            200, BatchBodyParser.serialize(merged.body()));
+                                    List<String> preAssignedFeUrls = assignFe
+                                            ? preAssignedFeUrls(targets) : List.of();
+                                    long fanoutStart = System.currentTimeMillis();
+                                    return fanoutService.dispatchChunks(
+                                                    spec.getPath(), prepared.chunkBodies(),
+                                                    preAssignedFeUrls, spec,
+                                                    request.headers().asHttpHeaders(),
+                                                    request.uri().getRawQuery())
+                                            .doOnNext(subs -> metricsReporter.reportFanoutRt(
+                                                    System.currentTimeMillis() - fanoutStart,
+                                                    feAllocationMode.configValue()))
+                                            .map(subs -> ResponseMerger.merge(subs, spec, body))
+                                            .flatMap(merged -> {
+                                                pv.setFailedChunks(
+                                                        merged.failedReasons().size());
+                                                if (merged.allFailed()
+                                                        || (spec.isFailOnPartialFailure()
+                                                        && merged.hasFailures())) {
+                                                    return errorResponse(merged);
+                                                }
+                                                return DispatcherResponses.jsonBytes(
+                                                        200, BatchBodyParser.serialize(
+                                                                merged.body()));
+                                            });
                                 });
                     });
         }).onErrorResume(e -> {
@@ -187,13 +207,27 @@ public class BatchHandler {
                 return DispatcherResponses.error(413, "batch_response_too_large",
                         "aggregate sub-batch response exceeds the dispatcher limit");
             }
+            if (e instanceof AggregateRequestTooLargeException) {
+                return DispatcherResponses.error(413, "batch_request_too_large",
+                        "aggregate sub-batch request exceeds the dispatcher limit");
+            }
             // Stable, non-revealing text: the exception message can carry the FE address or
             // upstream response detail, which must not cross the client boundary. The full
             // reason is in the WARN above and in pv.log.
             return DispatcherResponses.error(500, "dispatch_failed", "batch dispatch failed");
-        }).doOnNext(resp -> pv.setHttpStatus(resp.rawStatusCode()))
+        }).doOnNext(resp -> {
+            pv.setHttpStatus(resp.rawStatusCode());
+            if (!delegatedToPassthrough.get() && pvFinalized.compareAndSet(false, true)) {
+                // Emit before handing the response downstream. A doFinally-only record can race
+                // the caller observing Mono.block()/onNext after CPU work was offloaded.
+                finalizePvRecord(pv, SignalType.ON_COMPLETE);
+            }
+        })
           .doFinally(signal -> {
-              if (!delegatedToPassthrough.get()) {
+              // Cancellation before any response has no onNext; this is also a defensive fallback
+              // for an unexpected terminal error while preserving exactly-once accounting.
+              if (!delegatedToPassthrough.get()
+                      && pvFinalized.compareAndSet(false, true)) {
                   finalizePvRecord(pv, signal);
               }
           });
@@ -213,6 +247,23 @@ public class BatchHandler {
             metricsReporter.reportBatchShape(pv.getPath(), pv.getTotalItems(), pv.getChunkCount());
         }
     }
+
+    private PreparedBatch prepareBatch(JSONObject body, JSONArray arr, int chunkCount,
+                                       BatchEndpointSpec spec, DispatchPvLogData pv) {
+        long projectedBytes = BatchChunkAssembler.projectedOutboundBytes(
+                body, arr, chunkCount, spec);
+        if (projectedBytes > maxAggregateRequestBytes) {
+            throw new AggregateRequestTooLargeException(maxAggregateRequestBytes);
+        }
+        List<JSONArray> chunks = BatchChunkAssembler.split(arr, subBatch);
+        recordChunkShape(pv, chunks);
+        List<JSONObject> chunkBodies = BatchChunkAssembler.buildChunkBodies(
+                body, chunks, spec.getRequestArrayField());
+        spec.prepareChunkBodies(body, chunkBodies);
+        return new PreparedBatch(chunkBodies);
+    }
+
+    private record PreparedBatch(List<JSONObject> chunkBodies) {}
 
     private void populateRequestLogFields(DispatchPvLogData pv, JSONObject body) {
         pv.setSplitPolicy(splitPolicy);

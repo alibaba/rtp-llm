@@ -15,6 +15,7 @@ import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.enums.ScheduleModeEnum;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.sync.status.EngineWorkerStatus;
@@ -82,6 +83,31 @@ class ShortestTTFTStrategyTest {
 
         assertTrue(result.isSuccess());
         assertEquals("10.0.0.2", result.getServerIp());
+    }
+
+    @Test
+    void directFallbackReservationsInfluenceConsecutivePlacement() {
+        FlexlbConfig config = new FlexlbConfig();
+        config.setShortestTtftCandidatePoolMode("FIXED");
+        config.setShortestTtftCandidatePoolSize(1);
+        Map<String, WorkerStatus> prefillMap =
+                EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
+        prefillMap.put("10.0.0.1:8080", createWorker("10.0.0.1", 0));
+        prefillMap.put("10.0.0.2:8080", createWorker("10.0.0.2", 0));
+
+        BalanceContext firstContext = buildContext(500, 1L, config);
+        firstContext.setScheduleMode(ScheduleModeEnum.DIRECT);
+        ServerStatus first = strategy.select(firstContext, RoleType.PREFILL, null);
+        BalanceContext secondContext = buildContext(500, 2L, config);
+        secondContext.setScheduleMode(ScheduleModeEnum.DIRECT);
+        ServerStatus second = strategy.select(secondContext, RoleType.PREFILL, null);
+
+        assertTrue(first.isSuccess());
+        assertTrue(second.isSuccess());
+        assertFalse(first.getServerIp().equals(second.getServerIp()),
+                "the first placement reservation must move the next request to the idle worker");
+        assertEquals(1, endpointRegistry.getPrefill(
+                first.getServerIp() + ":" + first.getHttpPort()).getInflightBatchCount());
     }
 
     @Test

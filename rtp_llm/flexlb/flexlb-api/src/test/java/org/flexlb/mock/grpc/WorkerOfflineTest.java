@@ -1,15 +1,26 @@
 package org.flexlb.mock.grpc;
 
+import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.scheduler.RequestLifecycleState;
+import org.flexlb.balance.scheduler.RequestLifecycleSnapshot;
+import org.flexlb.balance.scheduler.priority.EngineCancelChannel;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.loadbalance.Response;
+import org.flexlb.dao.loadbalance.StrategyErrorType;
+import org.flexlb.dao.master.TaskInfo;
+import org.flexlb.dao.master.WorkerStatusResponse;
+import org.flexlb.dao.route.RoleType;
 import org.flexlb.mock.FlexLBMockTestBase;
+import org.flexlb.mock.InflightAssertions;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicLong;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -48,6 +59,11 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 class WorkerOfflineTest extends FlexLBMockTestBase {
 
+    private final CompletableFuture<EngineCancelChannel.CancelOutcome> dispatchFence =
+            new CompletableFuture<>();
+    private final CountDownLatch cancelInvoked = new CountDownLatch(1);
+    private final AtomicLong canceledRequestId = new AtomicLong(-1);
+
     @Override
     protected FlexlbConfig createConfig() {
         FlexlbConfig cfg = new FlexlbConfig();
@@ -60,6 +76,24 @@ class WorkerOfflineTest extends FlexLBMockTestBase {
         return cfg;
     }
 
+    @Override
+    protected EngineCancelChannel createEngineCancelChannel() {
+        return new EngineCancelChannel() {
+            @Override
+            public boolean isSupported(DecodeEndpoint endpoint) {
+                return true;
+            }
+
+            @Override
+            public CompletableFuture<CancelOutcome> cancel(
+                    CancelTarget target, long requestId, long timeoutMs) {
+                canceledRequestId.set(requestId);
+                cancelInvoked.countDown();
+                return dispatchFence;
+            }
+        };
+    }
+
     @Test
     @Timeout(20)
     void workerOffline_newRequestRemainsFencedUntilAuthoritativeSettlement() throws Exception {
@@ -68,7 +102,10 @@ class WorkerOfflineTest extends FlexLBMockTestBase {
         Response ackResponse = future1.get(5, TimeUnit.SECONDS);
         assertTrue(ackResponse.isSuccess(), "First request should succeed while worker is online");
         assertTrue(ackResponse.isEnqueuedByMaster(), "Should be enqueued by master");
-        int existingBatches = getPrefillEndpoint().getInflightBatchCount();
+        reportSuccessfulCompletion(20001L);
+        InflightAssertions.assertSchedulerInflightEmptyWithin(scheduler, 5_000);
+        InflightAssertions.assertResourcesReleasedWithin(
+                getPrefillEndpoint(), getDecodeEndpoint(), 5_000);
 
         // 2. Stop the mock prefill worker's gRPC server (simulates worker crash)
         mockPrefillWorker.stop();
@@ -80,13 +117,48 @@ class WorkerOfflineTest extends FlexLBMockTestBase {
                 () -> future2.get(2, TimeUnit.SECONDS));
         assertFalse(future2.isDone(),
                 "transport failure must not claim the worker rejected the request");
+        assertTrue(cancelInvoked.await(5, TimeUnit.SECONDS),
+                "an ambiguous transport failure must invoke the Engine ownership fence");
+        assertEquals(20002L, canceledRequestId.get());
         assertEquals(RequestLifecycleState.DISPATCHING,
                 scheduler.getRequestState(20002L, 0).state());
-        assertEquals(existingBatches + 1, getPrefillEndpoint().getInflightBatchCount(),
+        assertEquals(1, getPrefillEndpoint().getInflightBatchCount(),
                 "ambiguous dispatch must retain its Prefill ledger until fenced");
+        assertEquals(1, getDecodeEndpoint().getInflightCount(),
+                "ambiguous dispatch must retain its Decode reservation until fenced");
 
-        // 4. Decode receives no enqueue in the P/D-separated path.
+        // 4. An Engine tombstone proves non-ownership and atomically settles both ledgers.
+        dispatchFence.complete(EngineCancelChannel.CancelOutcome.tombstoned());
+        Response fenced = future2.get(5, TimeUnit.SECONDS);
+        assertFalse(fenced.isSuccess());
+        assertEquals(StrategyErrorType.BATCH_SLO_EXPIRED.getErrorCode(), fenced.getCode());
+        InflightAssertions.assertSchedulerInflightEmptyWithin(scheduler, 5_000);
+        InflightAssertions.assertResourcesReleasedWithin(
+                getPrefillEndpoint(), getDecodeEndpoint(), 5_000);
+
+        // 5. Decode receives no enqueue in the P/D-separated path.
         assertEquals(0, mockDecodeWorker.getEnqueueCount(),
                 "Decode worker should not have received any request");
+    }
+
+    private void reportSuccessfulCompletion(long requestId) {
+        RequestLifecycleSnapshot state = scheduler.getRequestState(requestId, 0);
+        TaskInfo task = new TaskInfo();
+        task.setRequestId(requestId);
+        task.setBatchId(state.batchId());
+
+        WorkerStatusResponse prefillFinished = new WorkerStatusResponse();
+        prefillFinished.setRole(RoleType.PREFILL);
+        prefillFinished.setFinishedTaskInfo(Map.of(Long.toString(requestId), task));
+        getPrefillEndpoint().onWorkerStatusUpdate(
+                getPrefillEndpoint().getStatus(), prefillFinished);
+        scheduler.onWorkerStatusUpdate(prefillFinished);
+
+        WorkerStatusResponse decodeFinished = new WorkerStatusResponse();
+        decodeFinished.setRole(RoleType.DECODE);
+        decodeFinished.setFinishedTaskInfo(Map.of(Long.toString(requestId), task));
+        getDecodeEndpoint().onWorkerStatusUpdate(
+                getDecodeEndpoint().getStatus(), decodeFinished);
+        scheduler.onWorkerStatusUpdate(decodeFinished);
     }
 }

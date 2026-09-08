@@ -100,7 +100,7 @@ jobs:
   build:
     needs: [flexlb-tests]
     if: >-
-      always() && (
+      !cancelled() && (
         github.event_name == 'workflow_dispatch' ||
         github.event_name == 'pull_request'
       )

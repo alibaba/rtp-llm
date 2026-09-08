@@ -16,6 +16,7 @@ import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.LoadBalanceStrategyEnum;
 import org.flexlb.enums.ResourceMeasureIndicatorEnum;
+import org.flexlb.enums.ScheduleModeEnum;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.sync.status.EngineWorkerStatus;
 import org.flexlb.util.CommonUtils;
@@ -144,7 +145,7 @@ public class ShortestTTFTStrategy implements LoadBalanceStrategy {
                 candidateMaxHitTokens,
                 seqLen);
 
-        return buildServerStatus(selected, roleType, requestId, config);
+        return buildServerStatus(selected, roleType, requestId, balanceContext);
     }
 
     /**
@@ -315,14 +316,14 @@ public class ShortestTTFTStrategy implements LoadBalanceStrategy {
     }
 
     private ServerStatus buildServerStatus(ScoredEndpoint selected, RoleType roleType, long requestId,
-                                           FlexlbConfig config) {
+                                           BalanceContext balanceContext) {
         PrefillEndpoint ep = selected.ep();
         long ttft = selected.ttft();
         long bestCacheHit = selected.hitCache();
 
         // Non-batch path: reserve prefill inflight for load-aware scoring.
         // Batch path uses FlexlbBatchScheduler.commitBatch() instead — skip here to avoid double-counting.
-        if (isNonBatchPath(config)) {
+        if (isNonBatchPath(balanceContext)) {
             ep.commitBatch(requestId, ttft, Collections.emptyList());
         }
 
@@ -345,11 +346,12 @@ public class ShortestTTFTStrategy implements LoadBalanceStrategy {
     }
 
     /**
-     * Whether batch dispatching is globally disabled.
-     * <p>When batch mode is active, FlexlbBatchScheduler handles all inflight tracking;
-     * placeholders are only needed when the schedule mode is not BATCH.
+     * Whether this request is using a non-batch path. RouteService may deliberately fall back
+     * from a deployment-level BATCH default to DIRECT for placement-only calls; consulting the
+     * immutable global config here would skip their reservation and repeatedly select a stale
+     * low-load endpoint.
      */
-    private static boolean isNonBatchPath(FlexlbConfig config) {
-        return !config.isBatchPath();
+    private static boolean isNonBatchPath(BalanceContext context) {
+        return context.getScheduleMode() != ScheduleModeEnum.BATCH;
     }
 }

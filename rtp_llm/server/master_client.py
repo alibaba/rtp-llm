@@ -266,6 +266,9 @@ class MasterClient:
         request_id: int,
         input_pb: Optional["GenerateInputPB"] = None,
         seq_len_hint: Optional[int] = None,
+        *,
+        max_new_tokens_hint: Optional[int] = None,
+        generate_timeout_hint: Optional[int] = None,
     ) -> FlexlbResponse:
         """
         Resolve backend role addrs from FlexLB scheduler (master, then slave on connection failure).
@@ -275,6 +278,8 @@ class MasterClient:
         seq_len_hint overrides the reported seq_len when one routing call stands in for
         more work than this single input — a batch routed as one scheduling unit reports
         its aggregate prompt length so the master's load accounting sees the true weight.
+        max_new_tokens_hint and generate_timeout_hint likewise override the single input's
+        values when one placement represents the full batch.
         """
         master_addr = self.host_service.get_master_addr() if self.host_service else None
         if not master_addr:
@@ -285,8 +290,12 @@ class MasterClient:
             slave_addr = self.host_service.get_slave_addr()
 
         ttft_timeout_ms = (
-            input.generate_config.ttft_timeout_ms
-            or input.generate_config.timeout_ms
+            generate_timeout_hint
+            if generate_timeout_hint is not None
+            else (
+                input.generate_config.ttft_timeout_ms
+                or input.generate_config.timeout_ms
+            )
         )
         if ttft_timeout_ms is None or ttft_timeout_ms <= 0:
             ttft_timeout_ms = self.master_config.master_default_timeout_ms
@@ -305,7 +314,11 @@ class MasterClient:
             ),
             generate_timeout=ttft_timeout_ms,
             request_time_ms=int(time.time() * 1000),
-            max_new_tokens=gc.max_new_tokens,
+            max_new_tokens=(
+                max_new_tokens_hint
+                if max_new_tokens_hint is not None
+                else gc.max_new_tokens
+            ),
             num_beams=gc.num_beams,
             force_disable_sp_run=gc.force_disable_sp_run,
             model="engine_service",

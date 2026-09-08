@@ -56,8 +56,10 @@ public class RouteService {
         CompletableFuture<Response> resultFuture;
         switch (mode) {
             case BATCH -> {
-                if (flexlbBatchScheduler == null || !hasValidGenerateInput(balanceContext)) {
+                boolean validGenerateInput = hasValidGenerateInput(balanceContext);
+                if (flexlbBatchScheduler == null || !validGenerateInput) {
                     Logger.debug("BATCH mode cannot process this request, falling back to DIRECT");
+                    balanceContext.setPlacementOnly(!validGenerateInput);
                     balanceContext.setScheduleMode(ScheduleModeEnum.DIRECT);
                     resultFuture = routeDirect(balanceContext);
                 } else {

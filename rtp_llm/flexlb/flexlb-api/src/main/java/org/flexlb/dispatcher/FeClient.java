@@ -4,19 +4,29 @@ import io.netty.channel.ChannelOption;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.client.reactive.ReactorClientHttpConnector;
+import org.springframework.core.io.buffer.DataBuffer;
+import org.springframework.core.io.buffer.DataBufferLimitException;
+import org.springframework.core.io.buffer.DataBufferUtils;
 import org.springframework.stereotype.Component;
+import org.springframework.web.reactive.function.BodyExtractors;
 import org.springframework.web.reactive.function.client.ExchangeStrategies;
 import org.springframework.web.reactive.function.client.WebClient;
+import org.springframework.web.reactive.function.client.WebClientResponseException;
 import reactor.core.publisher.Mono;
 import reactor.netty.http.client.HttpClient;
 import reactor.netty.resources.ConnectionProvider;
 
+import java.io.ByteArrayOutputStream;
 import java.net.URI;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 @Component
 @ConditionalOnProperty(prefix = "dispatch", name = "fe-pool-service-id")
@@ -28,7 +38,7 @@ public class FeClient {
      * a config). 16MB covers extreme "long generation × large batch" workloads with margin while
      * staying well below typical 8-16GB heap allocations even under peak concurrency.
      */
-    private static final int MAX_RESPONSE_BYTES = 16 * 1024 * 1024;
+    static final int MAX_RESPONSE_BYTES = 16 * 1024 * 1024;
 
     private final WebClient webClient;
     private final Duration overallTimeout;
@@ -60,6 +70,12 @@ public class FeClient {
         this.overallTimeout = Duration.ofMillis(cfg.getBatchTimeoutMs() + cfg.getBodyReadMarginMs());
     }
 
+    /** Test seam for exercising streaming body accounting without a real socket. */
+    FeClient(WebClient webClient, Duration overallTimeout) {
+        this.webClient = webClient;
+        this.overallTimeout = overallTimeout;
+    }
+
     /**
      * Caller serializes the chunk body with {@code JSON.toJSONBytes} and gets the FE response
      * as raw bytes to parse with {@code JSON.parseObject(byte[])} — no intermediate {@code String}
@@ -69,17 +85,85 @@ public class FeClient {
      */
     public Mono<byte[]> postBytes(String feBaseUrl, String fePath, byte[] body,
                                   HttpHeaders inboundHeaders, String rawQuery) {
-        return webClient.post()
-                .uri(resolveUri(feBaseUrl, fePath, rawQuery))
-                // End-to-end headers first (Authorization, tenant, tracing — the caller's request
-                // must not lose them just because it took the split path), then the content type of
-                // the chunk body we re-serialized, which overrides any inbound value.
-                .headers(h -> DispatcherHeaders.copyEndToEnd(inboundHeaders, h, DispatcherHeaders.FANOUT_SKIP))
-                .contentType(MediaType.APPLICATION_JSON)
-                .bodyValue(body)
-                .retrieve()
-                .bodyToMono(byte[].class)
-                .timeout(overallTimeout);
+        return postBytes(feBaseUrl, fePath, body, inboundHeaders, rawQuery,
+                new AtomicByteBudget(MAX_RESPONSE_BYTES).newReservation());
+    }
+
+    /**
+     * Reads the FE body incrementally, reserving the shared response budget before each network
+     * buffer is copied. Crossing either cap cancels the response immediately; a failed or
+     * cancelled sub-call releases its partial reservation, while a successful byte array retains
+     * it until the parent fanout finishes.
+     */
+    Mono<byte[]> postBytes(String feBaseUrl, String fePath, byte[] body,
+                           HttpHeaders inboundHeaders, String rawQuery,
+                           AtomicByteBudget.Reservation reservation) {
+        return Mono.defer(() -> {
+            AtomicBoolean retained = new AtomicBoolean(false);
+            return webClient.post()
+                    .uri(resolveUri(feBaseUrl, fePath, rawQuery))
+                    // End-to-end headers first (Authorization, tenant, tracing — the caller's
+                    // request must not lose them just because it took the split path), then the
+                    // content type of the chunk body we re-serialized.
+                    .headers(h -> DispatcherHeaders.copyEndToEnd(
+                            inboundHeaders, h, DispatcherHeaders.FANOUT_SKIP))
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .bodyValue(body)
+                    .exchangeToMono(response -> readBody(response, reservation)
+                            .flatMap(bytes -> {
+                                int status = response.rawStatusCode();
+                                if (status >= 400) {
+                                    HttpStatus resolved = HttpStatus.resolve(status);
+                                    String reason = resolved == null
+                                            ? "FE response" : resolved.getReasonPhrase();
+                                    return Mono.error(WebClientResponseException.create(
+                                            status, reason, response.headers().asHttpHeaders(),
+                                            bytes, StandardCharsets.UTF_8));
+                                }
+                                retained.set(true);
+                                return Mono.just(bytes);
+                            }))
+                    .timeout(overallTimeout)
+                    .doFinally(ignored -> {
+                        if (!retained.get()) {
+                            reservation.release();
+                        }
+                    });
+        });
+    }
+
+    private Mono<byte[]> readBody(
+            org.springframework.web.reactive.function.client.ClientResponse response,
+            AtomicByteBudget.Reservation reservation) {
+        return Mono.defer(() -> {
+            ByteArrayOutputStream output = new ByteArrayOutputStream();
+            AtomicInteger responseBytes = new AtomicInteger();
+            return response.body(BodyExtractors.toDataBuffers())
+                    .handle((DataBuffer buffer, reactor.core.publisher.SynchronousSink<Integer> sink) -> {
+                        try {
+                            int readable = buffer.readableByteCount();
+                            int current = responseBytes.get();
+                            if (readable > MAX_RESPONSE_BYTES - current) {
+                                sink.error(new DataBufferLimitException(
+                                        "FE response exceeds " + MAX_RESPONSE_BYTES + " bytes"));
+                                return;
+                            }
+                            if (!reservation.tryReserve(readable)) {
+                                sink.error(new AggregateResponseTooLargeException(
+                                        reservation.limit()));
+                                return;
+                            }
+                            byte[] chunk = new byte[readable];
+                            buffer.read(chunk);
+                            output.write(chunk, 0, chunk.length);
+                            responseBytes.addAndGet(readable);
+                            sink.next(readable);
+                        } finally {
+                            DataBufferUtils.release(buffer);
+                        }
+                    })
+                    .then(Mono.fromSupplier(output::toByteArray));
+        });
     }
 
     /**

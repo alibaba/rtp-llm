@@ -1,9 +1,12 @@
 package org.flexlb.dao.loadbalance;
 
+import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.dao.route.RoleType;
 import org.flexlb.util.JsonUtils;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -60,5 +63,26 @@ class BatchScheduleTargetJsonTest {
         BatchScheduleTarget back = JsonUtils.toObject(legacy, BatchScheduleTarget.class);
         assertNull(back.getFeUrl(), "a body without fe_url must leave it null, not fail to parse");
         assertEquals("10.0.0.1", back.getServerIp());
+    }
+
+    @Test
+    void embeddingTargetRoundTripsOnlyArpcPort() {
+        WorkerStatus worker = new WorkerStatus();
+        worker.setIp("10.0.0.7");
+        worker.setPort(23840);
+
+        BatchScheduleTarget target = BatchScheduleTarget.of(
+                worker, RoleType.PREFILL, true);
+        String json = JsonUtils.toString(target);
+
+        assertTrue(json.contains("\"arpc_port\":23841"),
+                "embedding targets must expose their Engine ARPC port, got: " + json);
+        assertFalse(json.contains("grpc_port"),
+                "embedding targets must not label the ARPC endpoint as gRPC, got: " + json);
+
+        BatchScheduleTarget back = JsonUtils.toObject(json, BatchScheduleTarget.class);
+        assertEquals(23841, back.getArpcPort());
+        assertNull(back.getGrpcPort());
+        assertEquals(RoleType.PREFILL, back.getRole());
     }
 }

@@ -11,7 +11,6 @@ import reactor.test.StepVerifier;
 import java.nio.charset.StandardCharsets;
 import java.util.Collections;
 import java.util.List;
-import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -36,7 +35,7 @@ class FanoutServiceTest {
         // lines per second — enough to cost real throughput. Failures must still produce
         // SubBatchResult.failed per chunk, but the WARN stream must be rate-limited.
         FeClient feClient = mock(FeClient.class);
-        when(feClient.postBytes(anyString(), anyString(), any(), any(), any()))
+        when(feClient.postBytes(anyString(), anyString(), any(), any(), any(), any()))
                 .thenReturn(Mono.error(new RuntimeException("connection refused")));
         FanoutService svc = new FanoutService(feClient, DispatcherTestSupport.noopMetrics());
 
@@ -74,9 +73,9 @@ class FanoutServiceTest {
     @Test
     void fansOutChunksAndPreservesOrder() {
         FeClient feClient = mock(FeClient.class);
-        when(feClient.postBytes(eq("http://a"), eq("/batch_infer"), any(), any(), any()))
+        when(feClient.postBytes(eq("http://a"), eq("/batch_infer"), any(), any(), any(), any()))
                 .thenReturn(Mono.just(responseBatchBytes("r0", "r1")));
-        when(feClient.postBytes(eq("http://b"), eq("/batch_infer"), any(), any(), any()))
+        when(feClient.postBytes(eq("http://b"), eq("/batch_infer"), any(), any(), any(), any()))
                 .thenReturn(Mono.just(responseBatchBytes("r2")));
 
         FanoutService svc = new FanoutService(feClient, DispatcherTestSupport.noopMetrics());
@@ -105,9 +104,9 @@ class FanoutServiceTest {
     @Test
     void failedChunkBecomesFailedSubResultNotAnError() {
         FeClient feClient = mock(FeClient.class);
-        when(feClient.postBytes(eq("http://a"), eq("/batch_infer"), any(), any(), any()))
+        when(feClient.postBytes(eq("http://a"), eq("/batch_infer"), any(), any(), any(), any()))
                 .thenReturn(Mono.just(responseBatchBytes("r0", "r1")));
-        when(feClient.postBytes(eq("http://b"), eq("/batch_infer"), any(), any(), any()))
+        when(feClient.postBytes(eq("http://b"), eq("/batch_infer"), any(), any(), any(), any()))
                 .thenReturn(Mono.error(new RuntimeException("FE down")));
 
         FanoutService svc = new FanoutService(feClient, DispatcherTestSupport.noopMetrics());
@@ -133,9 +132,9 @@ class FanoutServiceTest {
         // chunk would silently disappear from collectList and the merged response array would
         // come back shorter than the request — breaking index correlation for the caller.
         FeClient feClient = mock(FeClient.class);
-        when(feClient.postBytes(eq("http://a"), eq("/batch_infer"), any(), any(), any()))
+        when(feClient.postBytes(eq("http://a"), eq("/batch_infer"), any(), any(), any(), any()))
                 .thenReturn(Mono.just(responseBatchBytes("r0", "r1")));
-        when(feClient.postBytes(eq("http://b"), eq("/batch_infer"), any(), any(), any()))
+        when(feClient.postBytes(eq("http://b"), eq("/batch_infer"), any(), any(), any(), any()))
                 .thenReturn(Mono.empty());
 
         FanoutService svc = new FanoutService(feClient, DispatcherTestSupport.noopMetrics());
@@ -163,9 +162,9 @@ class FanoutServiceTest {
         // not a transport fault: it must categorize as malformed_body (same as a wrong-length
         // response array), keeping the transport tag reserved for connection-layer failures.
         FeClient feClient = mock(FeClient.class);
-        when(feClient.postBytes(eq("http://a"), eq("/batch_infer"), any(), any(), any()))
+        when(feClient.postBytes(eq("http://a"), eq("/batch_infer"), any(), any(), any(), any()))
                 .thenReturn(Mono.just(responseBatchBytes("r0", "r1")));
-        when(feClient.postBytes(eq("http://b"), eq("/batch_infer"), any(), any(), any()))
+        when(feClient.postBytes(eq("http://b"), eq("/batch_infer"), any(), any(), any(), any()))
                 .thenReturn(Mono.just("not json".getBytes(StandardCharsets.UTF_8)));
         DispatcherTestSupport.RecordingMetrics metrics = DispatcherTestSupport.recordingMetrics();
         FanoutService svc = new FanoutService(feClient, metrics);
@@ -201,7 +200,7 @@ class FanoutServiceTest {
         // transport fault. Mutation guard: let the parse failure fall through to the transport
         // onErrorResume and this asserts transport instead.
         FeClient feClient = mock(FeClient.class);
-        when(feClient.postBytes(eq("http://a"), eq("/batch_infer"), any(), any(), any()))
+        when(feClient.postBytes(eq("http://a"), eq("/batch_infer"), any(), any(), any(), any()))
                 .thenReturn(Mono.just("[1,2,3]".getBytes(StandardCharsets.UTF_8)));
         DispatcherTestSupport.RecordingMetrics metrics = DispatcherTestSupport.recordingMetrics();
         FanoutService svc = new FanoutService(feClient, metrics);
@@ -229,9 +228,9 @@ class FanoutServiceTest {
         // wellFormed authority. chunk0 (size 2) gets a matching 2-element array → ok; chunk1
         // (size 1) gets a 2-element array → length mismatch → malformed.
         FeClient feClient = mock(FeClient.class);
-        when(feClient.postBytes(eq("http://a"), eq("/batch_infer"), any(), any(), any()))
+        when(feClient.postBytes(eq("http://a"), eq("/batch_infer"), any(), any(), any(), any()))
                 .thenReturn(Mono.just(responseBatchBytes("r0", "r1")));
-        when(feClient.postBytes(eq("http://b"), eq("/batch_infer"), any(), any(), any()))
+        when(feClient.postBytes(eq("http://b"), eq("/batch_infer"), any(), any(), any(), any()))
                 .thenReturn(Mono.just(responseBatchBytes("x0", "x1")));
         DispatcherTestSupport.RecordingMetrics metrics = DispatcherTestSupport.recordingMetrics();
         FanoutService svc = new FanoutService(feClient, metrics);
@@ -260,7 +259,7 @@ class FanoutServiceTest {
         // only path. Mutation guard: change dispatchOne to ignore plan.feUrl() and the stubbed FE
         // is never called.
         FeClient feClient = mock(FeClient.class);
-        when(feClient.postBytes(eq("http://master-fe"), eq("/batch_infer"), any(), any(), any()))
+        when(feClient.postBytes(eq("http://master-fe"), eq("/batch_infer"), any(), any(), any(), any()))
                 .thenReturn(Mono.just(responseBatchBytes("r0")));
         FanoutService svc = new FanoutService(feClient, DispatcherTestSupport.noopMetrics());
 
@@ -272,15 +271,15 @@ class FanoutServiceTest {
                     assertTrue(subs.get(0).success(), "chunk must reach the master-assigned FE");
                 })
                 .verifyComplete();
-        verify(feClient).postBytes(eq("http://master-fe"), eq("/batch_infer"), any(), any(), any());
+        verify(feClient).postBytes(eq("http://master-fe"), eq("/batch_infer"), any(), any(), any(), any());
     }
 
     @Test
     void localModeUsesOneHealthFilteredPoolReservationAndIgnoresMasterUrls() {
         FeClient feClient = mock(FeClient.class);
-        when(feClient.postBytes(eq("http://local-a"), eq("/batch_infer"), any(), any(), any()))
+        when(feClient.postBytes(eq("http://local-a"), eq("/batch_infer"), any(), any(), any(), any()))
                 .thenReturn(Mono.just(responseBatchBytes("r0")));
-        when(feClient.postBytes(eq("http://local-b"), eq("/batch_infer"), any(), any(), any()))
+        when(feClient.postBytes(eq("http://local-b"), eq("/batch_infer"), any(), any(), any(), any()))
                 .thenReturn(Mono.just(responseBatchBytes("r1")));
         FePool pool = mock(FePool.class);
         when(pool.nextBatch(2)).thenReturn(List.of("http://local-a", "http://local-b"));
@@ -299,9 +298,9 @@ class FanoutServiceTest {
 
         verify(pool).nextBatch(2);
         verify(feClient, never()).postBytes(
-                eq("http://stale-master-a"), anyString(), any(), any(), any());
+                eq("http://stale-master-a"), anyString(), any(), any(), any(), any());
         verify(feClient, never()).postBytes(
-                eq("http://stale-master-b"), anyString(), any(), any(), any());
+                eq("http://stale-master-b"), anyString(), any(), any(), any(), any());
     }
 
     @Test
@@ -341,7 +340,7 @@ class FanoutServiceTest {
         // The master assignment is index-aligned to chunks. If it covers fewer chunks than the
         // batch (short list), the uncovered chunks have no fe_url — they must fail, not fall back.
         FeClient feClient = mock(FeClient.class);
-        when(feClient.postBytes(eq("http://a"), eq("/batch_infer"), any(), any(), any()))
+        when(feClient.postBytes(eq("http://a"), eq("/batch_infer"), any(), any(), any(), any()))
                 .thenReturn(Mono.just(responseBatchBytes("r0")));
         FanoutService svc = new FanoutService(feClient, DispatcherTestSupport.noopMetrics());
 
@@ -354,8 +353,8 @@ class FanoutServiceTest {
                     assertFalse(subs.get(1).success(), "the uncovered chunk fails, no fallback");
                 })
                 .verifyComplete();
-        verify(feClient).postBytes(eq("http://a"), eq("/batch_infer"), any(), any(), any());
-        verify(feClient, never()).postBytes(eq("http://b"), anyString(), any(), any(), any());
+        verify(feClient).postBytes(eq("http://a"), eq("/batch_infer"), any(), any(), any(), any());
+        verify(feClient, never()).postBytes(eq("http://b"), anyString(), any(), any(), any(), any());
     }
 
     @Test
@@ -390,7 +389,7 @@ class FanoutServiceTest {
         // byte-for-byte; /batch_infer sets it false and drops the null (the common-wire-shape win).
         FeClient feClient = mock(FeClient.class);
         ArgumentCaptor<byte[]> payload = ArgumentCaptor.forClass(byte[].class);
-        when(feClient.postBytes(anyString(), anyString(), payload.capture(), any(), any()))
+        when(feClient.postBytes(anyString(), anyString(), payload.capture(), any(), any(), any()))
                 .thenReturn(Mono.just(responseBatchBytes("r0")));
         FanoutService svc = new FanoutService(feClient, DispatcherTestSupport.noopMetrics());
 
@@ -412,13 +411,12 @@ class FanoutServiceTest {
     }
 
     @Test
-    void aggregateResponseWatermarkAbortsAndCancelsSiblingCalls() {
+    void smallAggregateResponseBudgetPreventsSiblingCallFromStarting() {
         FeClient feClient = mock(FeClient.class);
-        AtomicBoolean siblingCancelled = new AtomicBoolean();
-        when(feClient.postBytes(eq("http://a"), eq("/batch_infer"), any(), any(), any()))
+        when(feClient.postBytes(eq("http://a"), eq("/batch_infer"), any(), any(), any(), any()))
                 .thenReturn(Mono.just(responseBatchBytes("response-over-limit")));
-        when(feClient.postBytes(eq("http://b"), eq("/batch_infer"), any(), any(), any()))
-                .thenReturn(Mono.<byte[]>never().doOnCancel(() -> siblingCancelled.set(true)));
+        when(feClient.postBytes(eq("http://b"), eq("/batch_infer"), any(), any(), any(), any()))
+                .thenReturn(Mono.never());
         FanoutService svc = new FanoutService(
                 feClient, DispatcherTestSupport.noopMetrics(), null,
                 FeAllocationMode.MASTER, 1);
@@ -430,8 +428,8 @@ class FanoutServiceTest {
                 .expectError(AggregateResponseTooLargeException.class)
                 .verify();
 
-        assertTrue(siblingCancelled.get(),
-                "crossing the aggregate watermark must cancel still-running sibling calls");
+        verify(feClient, never()).postBytes(
+                eq("http://b"), eq("/batch_infer"), any(), any(), any(), any());
     }
 
     private static JSONObject chunk(String... prompts) {

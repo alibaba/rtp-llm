@@ -76,6 +76,13 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
     private final EngineCancelChannel engineCancelChannel;
     private final Map<Long, InflightEntry> inflight = new ConcurrentHashMap<>();
     private final Map<Long, RequestLifecycleSnapshot> terminalStates = new ConcurrentHashMap<>();
+    /**
+     * Admission claims cover the gap between accepting a request and publishing its inflight
+     * entry. Capacity and request-id ownership are decided together under {@link #admissionGate},
+     * so concurrent callers cannot both pass a stale {@code inflight.size()} check.
+     */
+    private final Map<Long, CompletableFuture<Response>> admissionClaims = new HashMap<>();
+    private final Object admissionGate = new Object();
     private final BatchIdGenerator batchIdGenerator;
     /** Linearizes the final endpoint-ledger commit/RPC handoff with fencing. */
     private final Object dispatchFence = new Object();
@@ -142,15 +149,16 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
                 return future;
             }
 
-            if (inflight.containsKey(ctx.getRequestId()) || terminalStates.containsKey(ctx.getRequestId())) {
+            FlexlbConfig config = configService.loadBalanceConfig();
+            AdmissionClaim claim = tryClaimAdmission(
+                    ctx.getRequestId(), future, config.getFlexlbBatchMaxInflight());
+            if (claim == AdmissionClaim.DUPLICATE) {
                 completeError(future, StrategyErrorType.INVALID_REQUEST,
                         "duplicate request_id: " + ctx.getRequestId());
                 return future;
             }
-
-            int maxInflight = configService.loadBalanceConfig().getFlexlbBatchMaxInflight();
-            if (maxInflight > 0 && inflight.size() >= maxInflight) {
-                if (configService.loadBalanceConfig().isAutoTpmEnabled()) {
+            if (claim == AdmissionClaim.CAPACITY_FULL) {
+                if (config.isAutoTpmEnabled()) {
                     Response response = Response.error(StrategyErrorType.RESOURCE_EXHAUSTED,
                             AdmissionRejectReason.RESOURCE_EXHAUSTED);
                     response.setErrorMessage(StrategyErrorType.RESOURCE_EXHAUSTED
@@ -161,13 +169,14 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
                 }
                 return future;
             }
+            attachAdmissionClaimCleanup(ctx.getRequestId(), future);
 
             // Auto-TPM priority path: delegate plan/commit to the priority
             // scheduler. Disabled by default — the legacy path below is
             // byte-for-byte unchanged when the switch is off.
             // normalize() always assigns 1-100, so every request participates
             // when Auto-TPM is enabled; no separate hasPriority gate needed.
-            if (configService.loadBalanceConfig().isAutoTpmEnabled() && priorityScheduler != null) {
+            if (config.isAutoTpmEnabled() && priorityScheduler != null) {
                 priorityScheduler.schedule(ctx, future, this);
                 // The deadline is an ordinary terminal event in the same
                 // reducer as dispatch/worker failures. It must compete with a
@@ -211,11 +220,7 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
             BatchItem item = new BatchItem(ctx, future, routeResponse, copyOf(prefill), copyOf(decode),
                     prefillEp, decodeEp, System.currentTimeMillis());
             InflightEntry entry = new InflightEntry(item, false);
-            InflightEntry existing = inflight.putIfAbsent(ctx.getRequestId(), entry);
-            if (existing != null || terminalStates.containsKey(ctx.getRequestId())) {
-                if (existing == null) {
-                    inflight.remove(ctx.getRequestId(), entry);
-                }
+            if (!registerClaimedInflight(entry)) {
                 rollback(item);
                 completeError(future, StrategyErrorType.INVALID_REQUEST,
                         "duplicate request_id: " + ctx.getRequestId());
@@ -232,7 +237,7 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
                     System.currentTimeMillis() - ctx.getStartTime());
         } catch (Throwable t) {
             if (ctx != null) {
-                inflight.remove(ctx.getRequestId());
+                unregisterInflightEntry(ctx.getRequestId(), future);
             }
             Logger.error("FlexlbBatchScheduler submit failed for request id: {}",
                     ctx == null ? null : ctx.getRequestId(), t);
@@ -240,6 +245,92 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
                     "Submit failed: " + t.getMessage());
         }
         return future;
+    }
+
+    /** Atomically owns both one request id and one global admission slot. */
+    private AdmissionClaim tryClaimAdmission(long requestId,
+                                             CompletableFuture<Response> future,
+                                             int maxInflight) {
+        synchronized (admissionGate) {
+            if (admissionClaims.containsKey(requestId)
+                    || inflight.containsKey(requestId)
+                    || terminalStates.containsKey(requestId)) {
+                return AdmissionClaim.DUPLICATE;
+            }
+            if (maxInflight > 0 && admissionClaims.size() >= maxInflight) {
+                return AdmissionClaim.CAPACITY_FULL;
+            }
+            admissionClaims.put(requestId, future);
+            return AdmissionClaim.CLAIMED;
+        }
+    }
+
+    /**
+     * A rejected route or admission plan may complete before an inflight entry exists. Release
+     * that provisional claim; a live inflight generation retains ownership until finishEntry.
+     */
+    private void attachAdmissionClaimCleanup(long requestId,
+                                             CompletableFuture<Response> future) {
+        future.whenComplete((ignoredResponse, ignoredError) -> {
+            synchronized (admissionGate) {
+                InflightEntry entry = inflight.get(requestId);
+                if (entry == null || entry.item.future() != future) {
+                    admissionClaims.remove(requestId, future);
+                }
+            }
+        });
+    }
+
+    /** Install an inflight entry only while this exact future owns the admission claim. */
+    private boolean registerClaimedInflight(InflightEntry entry) {
+        BatchItem item = entry.item;
+        boolean attachCleanup = false;
+        synchronized (admissionGate) {
+            if (item.future().isDone() || terminalStates.containsKey(item.requestId())) {
+                return false;
+            }
+            CompletableFuture<Response> owner = admissionClaims.get(item.requestId());
+            if (owner == null) {
+                int maxInflight = configService.loadBalanceConfig().getFlexlbBatchMaxInflight();
+                if (maxInflight > 0 && admissionClaims.size() >= maxInflight) {
+                    return false;
+                }
+                admissionClaims.put(item.requestId(), item.future());
+                attachCleanup = true;
+            } else if (owner != item.future()) {
+                return false;
+            }
+            if (inflight.putIfAbsent(item.requestId(), entry) != null) {
+                if (attachCleanup) {
+                    admissionClaims.remove(item.requestId(), item.future());
+                }
+                return false;
+            }
+        }
+        if (attachCleanup) {
+            attachAdmissionClaimCleanup(item.requestId(), item.future());
+        }
+        return true;
+    }
+
+    /** Remove a non-terminal generation and release its claim once its future is terminal. */
+    private void unregisterInflightEntry(long requestId,
+                                         CompletableFuture<Response> expectedFuture) {
+        synchronized (admissionGate) {
+            InflightEntry entry = inflight.get(requestId);
+            if (entry != null && entry.item.future() == expectedFuture) {
+                inflight.remove(requestId, entry);
+            }
+            if (expectedFuture.isDone() && !inflight.containsKey(requestId)) {
+                admissionClaims.remove(requestId, expectedFuture);
+            }
+        }
+    }
+
+    enum AdmissionClaim {
+        CLAIMED,
+        DUPLICATE,
+        CAPACITY_FULL
     }
 
     /**
@@ -337,14 +428,7 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
         // This registrar is the Auto-TPM commit boundary. Legacy submit()
         // constructs its entry directly with autoTpmAdmission=false.
         InflightEntry entry = new InflightEntry(item, true);
-        InflightEntry existing = inflight.putIfAbsent(item.requestId(), entry);
-        if (existing != null || terminalStates.containsKey(item.requestId())) {
-            if (existing == null) {
-                inflight.remove(item.requestId(), entry);
-            }
-            return false;
-        }
-        return true;
+        return registerClaimedInflight(entry);
     }
 
     @Override
@@ -372,10 +456,7 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
 
     @Override
     public void unregisterInflight(BatchItem item) {
-        InflightEntry entry = inflight.get(item.requestId());
-        if (entry != null && entry.item == item) {
-            inflight.remove(item.requestId(), entry);
-        }
+        unregisterInflightEntry(item.requestId(), item.future());
     }
 
     @Override
@@ -975,7 +1056,7 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
                             entry.item.requestId(), "LEASE_RELEASE");
                 }
                 rollbackOnce(entry);
-                inflight.remove(entry.item.requestId(), entry);
+                unregisterInflightEntry(entry.item.requestId(), entry.item.future());
             }
             case FAILURE -> {
                 rollbackOnce(entry);
@@ -1781,10 +1862,13 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
     private void finishEntry(InflightEntry entry,
                              RequestLifecycleSnapshot terminal) {
         clearDispatchReconciliation(entry);
-        // Publish the tombstone before removing inflight. submit() then observes
-        // at least one side of the handoff and cannot revive the request ID.
-        terminalStates.put(terminal.requestId(), terminal);
-        inflight.remove(terminal.requestId(), entry);
+        synchronized (admissionGate) {
+            // Publish the tombstone before removing inflight and its admission claim. submit()
+            // observes this entire handoff atomically and cannot revive the request ID.
+            terminalStates.put(terminal.requestId(), terminal);
+            inflight.remove(terminal.requestId(), entry);
+            admissionClaims.remove(terminal.requestId(), entry.item.future());
+        }
     }
 
     private static boolean batchMatches(RequestLifecycleSnapshot snapshot,

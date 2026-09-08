@@ -3,6 +3,7 @@ package org.flexlb.config;
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
+import org.flexlb.enums.EngineType;
 import org.flexlb.util.JsonUtils;
 import org.springframework.stereotype.Component;
 
@@ -22,6 +23,8 @@ import java.util.Set;
 public class ConfigService {
 
     private static final String FLEXLB_CONFIG_ENV = "FLEXLB_CONFIG";
+    private static final String FLEXLB_ENGINE_TYPE_ENV = "FLEXLB_ENGINE_TYPE";
+    private static final String LEGACY_ENGINE_TYPE_ENV = "ENGINE_TYPE";
     private static final String PREFILL_TIME_FORMULA_ENV = "PREFILL_TIME_FORMULA";
     private static final String TRAFFIC_POLICY_CONFIG_ENV = "TRAFFIC_POLICY_CONFIG";
     private static final String TRAFFIC_POLICY_CONFIG_FILE_ENV = "TRAFFIC_POLICY_CONFIG_FILE";
@@ -82,12 +85,13 @@ public class ConfigService {
 
         // If corresponding advanced environment variables exist, override and update
         applyEnvironmentOverrides(config, environment);
+        applyEngineTypeOverride(config, environment);
         applyTrafficPolicyOverride(config, environment);
         applyPrefillFormulaOverride(config, environment);
 
         this.strategyConfigs = loadStrategyConfigs(environment);
 
-        warnDeprecatedEnvVars();
+        warnDeprecatedEnvVars(environment);
         warnUnmatchedEnvVars(environment);
 
         // Pre-validate critical parsed config at startup (fail-fast).
@@ -153,6 +157,12 @@ public class ConfigService {
                 continue;
             }
 
+            // ENGINE_TYPE is unusually generic and commonly belongs to another process in a
+            // shared container. Resolve it through the namespaced compatibility policy below.
+            if ("engineType".equals(field.getName())) {
+                continue;
+            }
+
             String envVarName = camelToUpperSnakeCase(field.getName());
             String envValue = environment.get(envVarName);
 
@@ -189,6 +199,43 @@ public class ConfigService {
                             e);
                 }
             }
+        }
+    }
+
+    /**
+     * Resolve engine type without letting an unrelated generic {@code ENGINE_TYPE} break startup.
+     * The namespaced form is authoritative and remains fail-fast; the bare name is retained only
+     * as a deprecated, best-effort migration fallback.
+     */
+    private void applyEngineTypeOverride(FlexlbConfig config, Map<String, String> environment) {
+        String namespaced = StringUtils.trimToNull(environment.get(FLEXLB_ENGINE_TYPE_ENV));
+        if (namespaced != null) {
+            config.setEngineType(parseEngineType(namespaced, FLEXLB_ENGINE_TYPE_ENV));
+            log.info("Environment variable override: {} = {} (field: engineType)",
+                    FLEXLB_ENGINE_TYPE_ENV, config.getEngineType());
+            return;
+        }
+
+        String legacy = StringUtils.trimToNull(environment.get(LEGACY_ENGINE_TYPE_ENV));
+        if (legacy == null) {
+            return;
+        }
+        try {
+            config.setEngineType(parseEngineType(legacy, LEGACY_ENGINE_TYPE_ENV));
+            log.warn("Environment variable {} is deprecated; use {} instead",
+                    LEGACY_ENGINE_TYPE_ENV, FLEXLB_ENGINE_TYPE_ENV);
+        } catch (ConfigValidationException invalidLegacyValue) {
+            log.warn("Ignoring unrelated or invalid deprecated {} value '{}'; use {} for FlexLB",
+                    LEGACY_ENGINE_TYPE_ENV, legacy, FLEXLB_ENGINE_TYPE_ENV);
+        }
+    }
+
+    private EngineType parseEngineType(String value, String envName) {
+        try {
+            return (EngineType) parseValue(value, EngineType.class, envName);
+        } catch (Exception e) {
+            throw new ConfigValidationException(envName,
+                    "Invalid engine type '" + value + "'. Expected: LLM or EMBEDDING", e);
         }
     }
 
@@ -337,8 +384,7 @@ public class ConfigService {
         log.info("==========================================");
     }
 
-    private void warnDeprecatedEnvVars() {
-        Map<String, String> env = System.getenv();
+    private void warnDeprecatedEnvVars(Map<String, String> env) {
         if (env.containsKey("FLEXLB_BATCH_ENABLED")) {
             log.warn("Environment variable FLEXLB_BATCH_ENABLED is deprecated and ignored. Use DEFAULT_SCHEDULE_MODE=BATCH|DIRECT|QUEUE instead.");
         }
@@ -421,6 +467,7 @@ public class ConfigService {
             names.add(camelToUpperSnakeCase(field.getName()));
         }
         names.add(FLEXLB_CONFIG_ENV);
+        names.add(FLEXLB_ENGINE_TYPE_ENV);
         names.add(PREFILL_TIME_FORMULA_ENV);
         names.add(TRAFFIC_POLICY_CONFIG_ENV);
         names.add(TRAFFIC_POLICY_CONFIG_FILE_ENV);

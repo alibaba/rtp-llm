@@ -48,7 +48,9 @@ class DispatchFailureTest extends FlexLBMockTestBase {
         assertEquals(1, mockPrefillWorker.getEnqueueCount(),
                 "unexpected terminal before EnqueueBatch: " + response.getErrorMessage());
         assertEquals(0, mockDecodeWorker.getEnqueueCount());
-        InflightAssertions.assertPrefillInflightEmpty(getPrefillEndpoint());
+        InflightAssertions.assertSchedulerInflightEmptyWithin(scheduler, 5_000);
+        InflightAssertions.assertResourcesReleasedWithin(
+                getPrefillEndpoint(), getDecodeEndpoint(), 5_000);
 
         mockPrefillWorker.setBehavior(MockWorkerBehavior.builder().build());
         Response recovered = submitRequest(7002).get(5, TimeUnit.SECONDS);

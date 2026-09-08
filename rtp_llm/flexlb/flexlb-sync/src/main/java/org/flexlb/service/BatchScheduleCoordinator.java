@@ -50,11 +50,7 @@ public class BatchScheduleCoordinator {
         if (consistency.isNeedConsistency() && !consistency.isMaster()) {
             return forwardToMaster(request);
         }
-        return routeService.batchSchedule(request)
-                .doOnNext(response -> {
-                    response.setRealMasterHost(consistency.getMasterHostIpPort());
-                    response.setResolvedLocally(true);
-                });
+        return resolveLocally(request, consistency.getMasterHostIpPort());
     }
 
     private Mono<BatchScheduleResponse> forwardToMaster(BatchScheduleRequest request) {
@@ -76,6 +72,20 @@ public class BatchScheduleCoordinator {
                     }
                     String errorCode;
                     if (e instanceof HttpErrorResponseException httpError) {
+                        if (isUnsupportedBatchEndpoint(httpError.getStatusCode())) {
+                            // Rolling upgrade: an older elected master does not expose the new
+                            // endpoint yet. The follower has the replicated routing view, so use
+                            // the explicit local compatibility path until leadership/version
+                            // converges. Other HTTP/transport failures remain fail-closed.
+                            String compatibilityCode =
+                                    "BATCH_ENDPOINT_UNSUPPORTED_" + httpError.getStatusCode();
+                            masterUnreachableWarn.warn("[BatchSchedule] Master {} lacks batch endpoint "
+                                            + "(HTTP {}); resolving locally for rolling-upgrade compatibility",
+                                    master, httpError.getStatusCode());
+                            engineHealthReporter.reportForwardToMasterResult(
+                                    uri.getHost(), compatibilityCode);
+                            return resolveLocally(request, master);
+                        }
                         BatchScheduleResponse businessFailure =
                                 JsonUtils.toObjectOrNull(httpError.getBody(), BatchScheduleResponse.class);
                         if (businessFailure != null) {
@@ -96,5 +106,18 @@ public class BatchScheduleCoordinator {
                     return Mono.error(new BatchScheduleTransportException(
                             "master unreachable: " + errorCode, errorCode));
                 });
+    }
+
+    private Mono<BatchScheduleResponse> resolveLocally(BatchScheduleRequest request,
+                                                       String electedMaster) {
+        return routeService.batchSchedule(request)
+                .doOnNext(response -> {
+                    response.setRealMasterHost(electedMaster);
+                    response.setResolvedLocally(true);
+                });
+    }
+
+    private static boolean isUnsupportedBatchEndpoint(int statusCode) {
+        return statusCode == 404 || statusCode == 405 || statusCode == 501;
     }
 }

@@ -12,9 +12,17 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpStatus;
+import org.springframework.core.io.buffer.DataBuffer;
+import org.springframework.core.io.buffer.DefaultDataBufferFactory;
+import org.springframework.web.reactive.function.client.ClientResponse;
 import org.springframework.web.reactive.function.client.WebClient;
+import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
 import reactor.netty.resources.ConnectionProvider;
 import reactor.test.StepVerifier;
+
+import java.time.Duration;
 
 @Timeout(30)
 class FeClientTest {
@@ -238,5 +246,32 @@ class FeClientTest {
                             "a timeout is a transport failure and carries no FE HTTP status");
                 })
                 .verify(java.time.Duration.ofSeconds(5));
+    }
+
+    @Test
+    void aggregateBudgetFailsDuringIncrementalReadAndReleasesReservation() {
+        DefaultDataBufferFactory buffers = new DefaultDataBufferFactory();
+        Flux<DataBuffer> body = Flux.concat(
+                Mono.just(buffers.wrap(new byte[4])),
+                Mono.just(buffers.wrap(new byte[4])),
+                Mono.just(buffers.wrap(new byte[4])));
+        ClientResponse response = ClientResponse.create(HttpStatus.OK)
+                .body(body)
+                .build();
+        WebClient webClient = WebClient.builder()
+                .exchangeFunction(ignored -> Mono.just(response))
+                .build();
+        FeClient client = new FeClient(webClient, Duration.ofSeconds(5));
+        AtomicByteBudget.Reservation reservation =
+                new AtomicByteBudget(5).newReservation();
+
+        StepVerifier.create(client.postBytes(
+                        "http://unused", "/batch_infer", new byte[0],
+                        new HttpHeaders(), null, reservation))
+                .expectError(AggregateResponseTooLargeException.class)
+                .verify();
+
+        Assertions.assertEquals(0, reservation.bytes(),
+                "a rejected response must release its partial reservation");
     }
 }

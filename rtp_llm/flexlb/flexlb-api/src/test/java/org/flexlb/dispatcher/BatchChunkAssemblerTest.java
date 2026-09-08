@@ -250,4 +250,21 @@ class BatchChunkAssemblerTest {
         assertEquals(0, BatchChunkAssembler.chunkCount(
                 0, new SubBatchSpec(SubBatchSpec.Mode.SIZE, 1)));
     }
+
+    @Test
+    void projectedOutboundBytesAccountsForRepeatedEnvelope() {
+        JSONObject body = new JSONObject();
+        body.put("model", "x".repeat(4096));
+        JSONArray inputs = JSONArray.of("a", "b", "c");
+        body.put("input", inputs);
+        BatchEndpointSpec embeddings = BatchEndpointSpec.BY_PATH.get("/v1/embeddings");
+
+        long oneChunk = BatchChunkAssembler.projectedOutboundBytes(
+                body, inputs, 1, embeddings);
+        long threeChunks = BatchChunkAssembler.projectedOutboundBytes(
+                body, inputs, 3, embeddings);
+
+        assertTrue(threeChunks > oneChunk + 8_000,
+                "the shared 4KiB envelope must be charged once per chunk");
+    }
 }

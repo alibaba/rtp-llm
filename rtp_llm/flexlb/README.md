@@ -180,6 +180,7 @@ export DISPATCH_CONFIG='{
     "subBatch":"count:5",
     "feAllocation":"master",
     "preAssignBe":false,
+    "maxAggregateRequestBytes":134217728,
     "maxAggregateResponseBytes":134217728,
     "maxDryRunResponseBytes":67108864
 }'

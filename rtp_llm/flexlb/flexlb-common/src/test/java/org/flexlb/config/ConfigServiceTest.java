@@ -4,6 +4,7 @@ import ch.qos.logback.classic.Logger;
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
 import org.flexlb.dao.loadbalance.Request;
+import org.flexlb.enums.EngineType;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.slf4j.LoggerFactory;
@@ -251,9 +252,33 @@ class ConfigServiceTest {
     }
 
     @Test
-    void invalid_engine_type_env_aborts_startup() {
+    void unrelated_invalid_legacy_engine_type_is_ignored() {
+        ConfigService service = new ConfigService(Map.of(
+                "ENGINE_TYPE", "not-an-engine"));
+
+        assertEquals(EngineType.LLM, service.loadBalanceConfig().getEngineType());
+    }
+
+    @Test
+    void invalid_namespaced_engine_type_aborts_startup() {
         assertThrows(ConfigValidationException.class,
-                () -> new ConfigService(Map.of("ENGINE_TYPE", "not-an-engine")));
+                () -> new ConfigService(Map.of("FLEXLB_ENGINE_TYPE", "not-an-engine")));
+    }
+
+    @Test
+    void valid_legacy_engine_type_remains_a_migration_fallback() {
+        ConfigService service = new ConfigService(Map.of("ENGINE_TYPE", "EMBEDDING"));
+
+        assertEquals(EngineType.EMBEDDING, service.loadBalanceConfig().getEngineType());
+    }
+
+    @Test
+    void namespaced_engine_type_wins_over_conflicting_legacy_value() {
+        ConfigService service = new ConfigService(Map.of(
+                "FLEXLB_ENGINE_TYPE", "LLM",
+                "ENGINE_TYPE", "EMBEDDING"));
+
+        assertEquals(EngineType.LLM, service.loadBalanceConfig().getEngineType());
     }
 
     @Test

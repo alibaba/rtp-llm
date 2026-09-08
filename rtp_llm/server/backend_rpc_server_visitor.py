@@ -245,6 +245,9 @@ class BackendRPCServerVisitor:
         input: GenerateInput,
         seq_len_hint: Optional[int] = None,
         placement_only: bool = False,
+        *,
+        max_new_tokens_hint: Optional[int] = None,
+        generate_timeout_hint: Optional[int] = None,
     ) -> Optional[FlexlbResponse]:
         """
         Resolve role addrs from FlexLB master (and slave on connection failure).
@@ -252,25 +255,36 @@ class BackendRPCServerVisitor:
         request_id is frontend-generated and is not overwritten.
         seq_len_hint: see MasterClient.get_backend_role_addrs — aggregate weight when this
         one routing call stands in for a whole batch.
+        placement_only omits generate_input so routing reserves load without enqueueing one item.
+        max_new_tokens_hint and generate_timeout_hint carry the remaining aggregate demand.
         """
-        token_ids = (
-            input.token_ids.tolist()[0]
-            if len(input.token_ids.shape) == 2
-            else input.token_ids.tolist()
-        )
-        # Keep hash generation at the physical KV block granularity. Page-RR
-        # routing samples canonical keys from this full logical-block key list;
-        # it must not recompute request hashes with the virtual block size.
-        full_block_cache_keys = get_block_cache_keys(token_ids, self.seq_size_per_block)
-        block_cache_keys = self._route_cache_keys(full_block_cache_keys)
-        self._report_recent_cache_key_metrics(block_cache_keys)
+        if placement_only:
+            # One placement represents multiple independent prompts. Using the first member's
+            # cache keys makes merely reordering the batch change the selected worker, while the
+            # rest of the batch receives no cache-locality benefit. Prefer an order-independent
+            # load decision until the protocol can carry per-item cache keys.
+            block_cache_keys = []
+        else:
+            token_ids = (
+                input.token_ids.tolist()[0]
+                if len(input.token_ids.shape) == 2
+                else input.token_ids.tolist()
+            )
+            # Keep hash generation at the physical KV block granularity. Page-RR
+            # routing samples canonical keys from this full logical-block key list;
+            # it must not recompute request hashes with the virtual block size.
+            full_block_cache_keys = get_block_cache_keys(
+                token_ids, self.seq_size_per_block
+            )
+            block_cache_keys = self._route_cache_keys(full_block_cache_keys)
+            self._report_recent_cache_key_metrics(block_cache_keys)
         # BatchGenerateCall itself carries every item to the chosen backend. Supplying the first
         # item here would let a BATCH-mode master enqueue it as a separate GenerateStreamCall,
         # duplicating work. Omitting generate_input asks master for placement/accounting only.
         input_pb = None if placement_only else trans_input(input)
 
         try:
-            route_result = await self.master_client.get_backend_role_addrs(
+            route_kwargs = dict(
                 block_cache_keys=block_cache_keys,
                 cache_key_block_size=self._cache_key_block_size(),
                 input=input,
@@ -278,6 +292,11 @@ class BackendRPCServerVisitor:
                 input_pb=input_pb,
                 seq_len_hint=seq_len_hint,
             )
+            if max_new_tokens_hint is not None:
+                route_kwargs["max_new_tokens_hint"] = max_new_tokens_hint
+            if generate_timeout_hint is not None:
+                route_kwargs["generate_timeout_hint"] = generate_timeout_hint
+            route_result = await self.master_client.get_backend_role_addrs(**route_kwargs)
         except BaseException as e:
             exception_json = format_exception(e)
             kmonitor.report(
@@ -377,6 +396,9 @@ class BackendRPCServerVisitor:
         input: GenerateInput,
         seq_len_hint: Optional[int] = None,
         placement_only: bool = False,
+        *,
+        max_new_tokens_hint: Optional[int] = None,
+        generate_timeout_hint: Optional[int] = None,
     ):
         # PD node selection span: master routing is a real RPC round-trip that
         # directly delays TTFT. Child of the HTTP SERVER span (same contextvars
@@ -434,11 +456,21 @@ class BackendRPCServerVisitor:
                 master_route_succeeded = False
                 if not role_addrs_specified and master_addr and not input_token_batched:
                     with Timer() as master_route_timer:
-                        if placement_only:
+                        if (
+                            placement_only
+                            or max_new_tokens_hint is not None
+                            or generate_timeout_hint is not None
+                        ):
                             master_route_result = await self.get_master_route_addrs(
-                                input, seq_len_hint, placement_only=True
+                                input,
+                                seq_len_hint,
+                                placement_only,
+                                max_new_tokens_hint=max_new_tokens_hint,
+                                generate_timeout_hint=generate_timeout_hint,
                             )
                         else:
+                            # Preserve compatibility with test/deployment overrides that implement
+                            # the historical two-argument internal hook.
                             master_route_result = await self.get_master_route_addrs(
                                 input, seq_len_hint
                             )
@@ -734,6 +766,7 @@ class BackendRPCServerVisitor:
             self.check_sp_supported(input)
             self.check_prefill_cp_supported(input)
 
+        placement_hints = self._batch_placement_hints(inputs)
         if self.host_service.service_available:
             # A batch RPC is one scheduling unit: every input goes to the same backend in a
             # single BatchGenerateCall (ModelRpcClient._select_batch_address enforces this).
@@ -763,7 +796,9 @@ class BackendRPCServerVisitor:
                 # worker that just absorbed N inputs.
                 await self.route_ips(
                     inputs[0],
-                    seq_len_hint=sum(inp.prompt_length for inp in inputs),
+                    seq_len_hint=placement_hints[0],
+                    max_new_tokens_hint=placement_hints[1],
+                    generate_timeout_hint=placement_hints[2],
                     placement_only=True,
                 )
                 for inp in inputs[1:]:
@@ -771,7 +806,105 @@ class BackendRPCServerVisitor:
                         inputs[0].generate_config.role_addrs
                     )
 
-        return await self.model_rpc_client.batch_enqueue(inputs)
+        try:
+            return await self.model_rpc_client.batch_enqueue(inputs)
+        except BaseException as error:
+            if (
+                not inputs
+                or not self.host_service.service_available
+                or not self._is_confirmed_not_executed_batch_error(error)
+            ):
+                raise
+
+            failed_target = self.model_rpc_client._role_addr_target(inputs[0])
+            for inp in inputs:
+                inp.generate_config.role_addrs = []
+                inp.enqueued_by_master = False
+            await self.route_ips(
+                inputs[0],
+                seq_len_hint=placement_hints[0],
+                max_new_tokens_hint=placement_hints[1],
+                generate_timeout_hint=placement_hints[2],
+                placement_only=True,
+            )
+            for inp in inputs[1:]:
+                inp.generate_config.role_addrs = copy.deepcopy(
+                    inputs[0].generate_config.role_addrs
+                )
+            replacement = self.model_rpc_client._role_addr_target(inputs[0])
+            if replacement == failed_target:
+                # Retrying the same unhealthy peer adds duplicate risk without providing a
+                # replacement. Preserve the original, confirmed connection failure.
+                raise
+            route_logger.warning(
+                "rerouting batch after pre-execution connection failure, "
+                "items=%s, old_target=%s, new_target=%s",
+                len(inputs),
+                failed_target,
+                replacement,
+            )
+            return await self.model_rpc_client.batch_enqueue(inputs)
+
+    @staticmethod
+    def _batch_placement_hints(inputs: list[GenerateInput]) -> tuple[int, int, int]:
+        """Return order-independent prompt/output/deadline demand for one batch placement."""
+        if not inputs:
+            return 0, 0, 0
+
+        routing_identity = {
+            (
+                MasterClient._extract_api_key(inp),
+                MasterClient._extract_priority(inp),
+                bool(getattr(inp.generate_config, "force_disable_sp_run", False)),
+            )
+            for inp in inputs
+        }
+        if len(routing_identity) != 1:
+            raise FtRuntimeException(
+                ExceptionType.INVALID_PARAMS,
+                "batch request mixes API keys, priorities, or SP-routing controls; "
+                "one batch placement requires homogeneous routing metadata",
+            )
+
+        prompt_tokens = sum(max(0, int(inp.prompt_length)) for inp in inputs)
+        output_tokens = 0
+        timeouts = []
+        for inp in inputs:
+            gc = inp.generate_config
+            variable_beams = list(getattr(gc, "variable_num_beams", []) or [])
+            beam_count = max(
+                [1, int(getattr(gc, "num_beams", 1) or 1)]
+                + [int(value) for value in variable_beams]
+            )
+            return_count = max(1, int(getattr(gc, "num_return_sequences", 0) or 1))
+            output_tokens += max(0, int(gc.max_new_tokens)) * max(
+                beam_count, return_count
+            )
+            timeout_ms = (
+                getattr(gc, "ttft_timeout_ms", None)
+                or getattr(gc, "timeout_ms", None)
+                or 0
+            )
+            if timeout_ms > 0:
+                timeouts.append(int(timeout_ms))
+
+        if output_tokens > 2_147_483_647:
+            raise FtRuntimeException(
+                ExceptionType.INVALID_PARAMS,
+                "batch output reservation exceeds the FlexLB protocol limit",
+            )
+        return prompt_tokens, output_tokens, min(timeouts, default=0)
+
+    @staticmethod
+    def _is_confirmed_not_executed_batch_error(error: BaseException) -> bool:
+        if not isinstance(error, FtRuntimeException):
+            return False
+        return error.exception_type in {
+            ExceptionType.GET_HOST_FAILED,
+            ExceptionType.GET_CONNECTION_FAILED,
+            ExceptionType.CONNECT_FAILED,
+            ExceptionType.CONNECT_TIMEOUT,
+        }
 
     def is_backend_service_ready(self, refresh: bool = False) -> bool:
         roles: List[RoleAddr] = self.host_service.get_backend_role_addrs(

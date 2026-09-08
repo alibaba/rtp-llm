@@ -361,6 +361,7 @@ A non-blank `fePoolServiceId` is the enable signal (there is no separate `enable
   "probePath": "/frontend_health",
   "feAllocation": "master",
   "preAssignBe": false,
+  "maxAggregateRequestBytes": 134217728,
   "maxAggregateResponseBytes": 134217728,
   "maxDryRunResponseBytes": 67108864
 }
@@ -372,12 +373,13 @@ A non-blank `fePoolServiceId` is the enable signal (there is no separate `enable
 - `probePath`: FE liveness probe path (`/frontend_health` for rtp_llm, `/health` for vLLM).
 - `feAllocation`: FE assignment source. `master` (default) asks the elected master's single cursor for index-aligned `fe_url` values; `local` reserves one contiguous range from the serving dispatcher's health-filtered `FePool`. The request never falls back across these sources implicitly.
 - `preAssignBe`: BE pre-assignment toggle, default `false` for rolling-upgrade safety (see Known limits below). Note `/dispatcher/_dryrun` ignores this default and never pre-assigns unless called with `?pre_assign=true`: resolving BE targets advances master's round-robin cursor, and a diagnostic must not perturb live distribution.
+- `maxAggregateRequestBytes`: maximum total serialized bytes sent across all FE chunks for one request (default 128 MiB). The dispatcher preflights repeated-envelope amplification before target resolution and enforces the exact shared budget during serialization; crossing it returns 413.
 - `maxAggregateResponseBytes`: maximum bytes retained across all successful FE chunk responses for one request (default 128 MiB). Crossing it cancels sibling calls and returns 413.
 - `maxDryRunResponseBytes`: maximum serialized dry-run response (default 64 MiB). Dry-run preflights envelope amplification before constructing chunks and verifies the exact serialized size before returning.
 
 **FE pool and empty discovery:** an empty discovery snapshot rides a bounded grace window measured from the last non-empty snapshot. Within the window it is treated as suspect — indistinguishable from a swallowed lookup failure — and the known FEs are kept; liveness is not discovery's job here: `FeHealthChecker` probes the known FEs directly, so hosts that are genuinely gone still leave rotation via the probe. Past the window the empty result is accepted as the truth (the fleet scaled to zero): the pool drains and `FePool.next()` fails fast until discovery reports hosts again. The window follows the same `FlexlbConfig.discoveryFailureGraceMs` the sync side reads (default 5 min; an absent or non-positive value falls back to 5 min). Lookup FAILURES throw and never touch the pool — only a lookup that succeeded with an empty list enters the grace logic. A cold pool (nothing known yet) still accepts an empty snapshot, and any non-empty answer replaces the retained one and resets the grace clock.
 
-Loading order: defaults → `DISPATCH_CONFIG` JSON → per-field `DISPATCH_*` env overrides (e.g. `DISPATCH_BATCH_TIMEOUT_MS`, `DISPATCH_PROBE_PATH`), matching the `FLEXLB_CONFIG` contract. Connection-pool/timeout knobs that are never operator-tuned (connect timeout, max connections, pending acquire, stream duration cap, per-FE max response bytes) are constants in `DispatcherConfiguration` / `FeClient` / `PassthroughClient`; aggregate fanout and dry-run response budgets are configurable because they scale with batch shape.
+Loading order: defaults → `DISPATCH_CONFIG` JSON → per-field `DISPATCH_*` env overrides (e.g. `DISPATCH_BATCH_TIMEOUT_MS`, `DISPATCH_PROBE_PATH`), matching the `FLEXLB_CONFIG` contract. Connection-pool/timeout knobs that are never operator-tuned (connect timeout, max connections, pending acquire, stream duration cap, per-FE max response bytes) are constants in `DispatcherConfiguration` / `FeClient` / `PassthroughClient`; aggregate fanout request/response and dry-run response budgets are configurable because they scale with batch shape.
 
 **Batch endpoint registry (built-in):**
 

@@ -124,6 +124,12 @@ public class DispatchConfig {
     private long maxAggregateResponseBytes = 128L * 1024 * 1024;
 
     /**
+     * Maximum total bytes sent across all FE chunks for one request. This bounds amplification
+     * when a large shared request envelope is repeated once per sub-batch.
+     */
+    private long maxAggregateRequestBytes = 128L * 1024 * 1024;
+
+    /**
      * Maximum serialized response size for {@code /dispatcher/_dryrun/**}. Dry-run repeats the
      * request envelope once per chunk, so a small input can otherwise amplify into a very large
      * diagnostic response without contacting an FE.

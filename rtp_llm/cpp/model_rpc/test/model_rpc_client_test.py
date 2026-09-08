@@ -73,6 +73,7 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     TensorPB,
 )
 from rtp_llm.telemetry import CURRENT_TRACE_STATE, tracing
+from rtp_llm.telemetry import attributes as trace_attrs
 from rtp_llm.utils.base_model_datatypes import (
     GenerateInput,
     GenerateOutputs,
@@ -1974,7 +1975,7 @@ class BatchEnqueueDecodeSemanticsTest(TestCase):
         return SimpleNamespace(role=RoleType.PDFUSION, ip=ip, grpc_port=8089)
 
     @staticmethod
-    def _stub(response=None, error=None, seen_call=None):
+    def _stub(response=None, error=None, seen_call=None, seen_metadata=None):
         class _FakeStub:
             def __init__(self, channel):
                 pass
@@ -1984,6 +1985,8 @@ class BatchEnqueueDecodeSemanticsTest(TestCase):
                     seen_call.append(
                         (batch_input_pb, kwargs.get("timeout"), "timeout" in kwargs)
                     )
+                if seen_metadata is not None:
+                    seen_metadata.append(kwargs.get("metadata"))
                 if error is not None:
                     raise error
                 return response
@@ -1991,7 +1994,15 @@ class BatchEnqueueDecodeSemanticsTest(TestCase):
         return _FakeStub
 
     def _run(
-        self, client, inputs, *, response=None, error=None, seen=None, seen_call=None
+        self,
+        client,
+        inputs,
+        *,
+        response=None,
+        error=None,
+        seen=None,
+        seen_call=None,
+        seen_metadata=None,
     ):
         def spy_trans_output(input_py, final_output, stream_state):
             if seen is not None:
@@ -2000,7 +2011,12 @@ class BatchEnqueueDecodeSemanticsTest(TestCase):
 
         with patch(
             "rtp_llm.cpp.model_rpc.model_rpc_client.RpcServiceStub",
-            new=self._stub(response=response, error=error, seen_call=seen_call),
+            new=self._stub(
+                response=response,
+                error=error,
+                seen_call=seen_call,
+                seen_metadata=seen_metadata,
+            ),
         ), patch(
             "rtp_llm.cpp.model_rpc.model_rpc_client.trans_input",
             new=lambda inp: GenerateInputPB(),
@@ -2018,8 +2034,8 @@ class BatchEnqueueDecodeSemanticsTest(TestCase):
 
     def test_all_success_returns_one_output_per_input_in_order(self):
         resp = BatchGenerateOutputsPB()
-        resp.results.add()  # result[0]: no error_info -> success
-        resp.results.add()  # result[1]: success
+        resp.results.add().final_output.SetInParent()
+        resp.results.add().final_output.SetInParent()
         inputs = [self._input(0), self._input(1)]
         seen = []
 
@@ -2033,7 +2049,7 @@ class BatchEnqueueDecodeSemanticsTest(TestCase):
 
     def test_first_item_error_aborts_whole_chunk_and_names_the_index(self):
         resp = BatchGenerateOutputsPB()
-        resp.results.add()  # result[0]: success, decoded before the failure is seen ...
+        resp.results.add().final_output.SetInParent()
         r1 = resp.results.add()  # result[1]: failure
         r1.error_info.error_message = "boom"
         inputs = [self._input(0), self._input(1)]
@@ -2050,8 +2066,8 @@ class BatchEnqueueDecodeSemanticsTest(TestCase):
     def test_error_index_is_the_failing_position_not_a_constant(self):
         # Guards against a hard-coded index or an off-by-one in the error message.
         resp = BatchGenerateOutputsPB()
-        resp.results.add()
-        resp.results.add()
+        resp.results.add().final_output.SetInParent()
+        resp.results.add().final_output.SetInParent()
         r2 = resp.results.add()
         r2.error_info.error_message = "third one failed"
         inputs = [self._input(0), self._input(1), self._input(2)]
@@ -2093,8 +2109,8 @@ class BatchEnqueueDecodeSemanticsTest(TestCase):
 
     def test_batch_timeout_preserves_per_item_defaults_without_mutating_inputs(self):
         resp = BatchGenerateOutputsPB()
-        resp.results.add()
-        resp.results.add()
+        resp.results.add().final_output.SetInParent()
+        resp.results.add().final_output.SetInParent()
         defaulted = self._input(0)
         defaulted.generate_config.timeout_ms = 0
         explicit = self._input(1)
@@ -2123,7 +2139,7 @@ class BatchEnqueueDecodeSemanticsTest(TestCase):
         item = self._input(0)
         item.generate_config.timeout_ms = 0
         response = BatchGenerateOutputsPB()
-        response.results.add()
+        response.results.add().final_output.SetInParent()
         seen_call = []
 
         self._run(client, [item], response=response, seen_call=seen_call)
@@ -2141,8 +2157,8 @@ class BatchEnqueueDecodeSemanticsTest(TestCase):
         finite = self._input(1)
         finite.generate_config.timeout_ms = 1000
         response = BatchGenerateOutputsPB()
-        response.results.add()
-        response.results.add()
+        response.results.add().final_output.SetInParent()
+        response.results.add().final_output.SetInParent()
         seen_call = []
 
         self._run(client, [unbounded, finite], response=response, seen_call=seen_call)
@@ -2162,8 +2178,8 @@ class BatchEnqueueDecodeSemanticsTest(TestCase):
         second = self._input(1)
         second.generate_config.timeout_ms = 1003
         response = BatchGenerateOutputsPB()
-        response.results.add()
-        response.results.add()
+        response.results.add().final_output.SetInParent()
+        response.results.add().final_output.SetInParent()
         seen_call = []
 
         self._run(client, [first, second], response=response, seen_call=seen_call)
@@ -2192,7 +2208,8 @@ class BatchEnqueueDecodeSemanticsTest(TestCase):
         resp = BatchGenerateOutputsPB()
         r0 = resp.results.add()
         r0.error_info.SetInParent()  # error_info present (HasField True) but error_message == ""
-        resp.results.add()  # result[1]: plain success
+        r0.final_output.SetInParent()
+        resp.results.add().final_output.SetInParent()
         inputs = [self._input(0), self._input(1)]
         seen = []
 
@@ -2211,6 +2228,43 @@ class BatchEnqueueDecodeSemanticsTest(TestCase):
 
         self.assertEqual(ExceptionType.LOAD_CACHE_TIMEOUT, ctx.exception.exception_type)
         self.assertIn("LOAD_CACHE_TIMEOUT", str(ctx.exception))
+
+    def test_success_result_without_final_output_fails_typed(self):
+        resp = BatchGenerateOutputsPB()
+        resp.results.add()
+
+        with self.assertRaises(FtRuntimeException) as ctx:
+            self._run(self._client(), [self._input(0)], response=resp)
+
+        self.assertEqual(ExceptionType.UNKNOWN_ERROR, ctx.exception.exception_type)
+        self.assertIn("missing final_output", str(ctx.exception))
+
+    def test_batch_rpc_propagates_trace_context_and_settles_client_span(self):
+        resp = BatchGenerateOutputsPB()
+        resp.results.add().final_output.SetInParent()
+        span = _FakeClientSpan()
+        seen_metadata = []
+        metadata = (("traceparent", "00-abc-def-01"),)
+
+        with patch(
+            "rtp_llm.cpp.model_rpc.model_rpc_client.start_client_span",
+            return_value=(span, metadata),
+        ) as start_span:
+            self._run(
+                self._client(),
+                [self._input(7)],
+                response=resp,
+                seen_metadata=seen_metadata,
+            )
+
+        start_span.assert_called_once_with(
+            "rtp_llm.batch_generate_call", "10.0.0.1:8089"
+        )
+        self.assertEqual([metadata], seen_metadata)
+        self.assertEqual("7", span.attributes[trace_attrs.REQUEST_ID])
+        self.assertEqual(1, span.attributes["rtp_llm.batch_size"])
+        self.assertEqual("OK", span.status)
+        self.assertEqual(1, span.finish_calls)
 
     def test_result_count_mismatch_fails_loudly_instead_of_silently_truncating(self):
         # The C++ contract is 1:1 (one result per input). A short result vector must fail typed,

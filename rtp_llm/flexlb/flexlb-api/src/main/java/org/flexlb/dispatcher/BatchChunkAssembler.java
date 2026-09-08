@@ -1,7 +1,9 @@
 package org.flexlb.dispatcher;
 
+import com.alibaba.fastjson2.JSON;
 import com.alibaba.fastjson2.JSONArray;
 import com.alibaba.fastjson2.JSONObject;
+import com.alibaba.fastjson2.JSONWriter;
 import org.flexlb.dao.loadbalance.BatchScheduleTarget;
 
 import java.util.ArrayList;
@@ -23,6 +25,9 @@ import java.util.List;
  * assembly O(chunk_count) instead of O(envelope_size × chunk_count) on the whole tree.
  */
 public final class BatchChunkAssembler {
+
+    /** Conservative allowance for dispatcher-owned role_addrs and small rewrite fields. */
+    private static final int ROUTING_STAMP_RESERVE_BYTES = 1024;
 
     private BatchChunkAssembler() {}
 
@@ -53,6 +58,41 @@ public final class BatchChunkAssembler {
             case SIZE -> 1 + (total - 1) / spec.value();
             case COUNT -> Math.min(total, spec.value());
         };
+    }
+
+    /**
+     * Projects total FE-bound bytes without materializing every repeated envelope. JSON array
+     * slices add one bracket/comma byte per split; all non-array fields repeat once per chunk.
+     * A small per-chunk reserve covers dispatcher-owned target stamps added after allocation.
+     */
+    public static long projectedOutboundBytes(JSONObject envelope, JSONArray requestArray,
+                                              int chunkCount, BatchEndpointSpec spec) {
+        if (chunkCount < 1) {
+            return 0;
+        }
+        List<JSONObject> templateBodies = buildChunkBodies(
+                envelope, List.of(new JSONArray()), spec.getRequestArrayField());
+        spec.prepareChunkBodies(envelope, templateBodies);
+        JSONWriter.Feature[] features = spec.isFanoutWriteNulls()
+                ? new JSONWriter.Feature[] {JSONWriter.Feature.WriteNulls}
+                : new JSONWriter.Feature[0];
+        long templateBytes = JSON.toJSONBytes(templateBodies.getFirst(), features).length;
+        long arrayBytes = JSON.toJSONBytes(requestArray, features).length;
+        long repeatedEnvelope = saturatingMultiply(Math.max(0, templateBytes - 2), chunkCount);
+        long slicedArrays = saturatingAdd(arrayBytes, chunkCount - 1L);
+        long routingReserve = saturatingMultiply(ROUTING_STAMP_RESERVE_BYTES, chunkCount);
+        return saturatingAdd(saturatingAdd(repeatedEnvelope, slicedArrays), routingReserve);
+    }
+
+    private static long saturatingMultiply(long left, long right) {
+        if (left == 0 || right == 0) {
+            return 0;
+        }
+        return left > Long.MAX_VALUE / right ? Long.MAX_VALUE : left * right;
+    }
+
+    private static long saturatingAdd(long left, long right) {
+        return left > Long.MAX_VALUE - right ? Long.MAX_VALUE : left + right;
     }
 
     /**

@@ -50,6 +50,7 @@ class BatchHandlerPvTest {
     void setUp() {
         when(cfg.getSubBatchSpec()).thenReturn(SubBatchSpec.parse("count:2"));
         when(cfg.isPreAssignBe()).thenReturn(false);
+        lenient().when(cfg.getMaxAggregateRequestBytes()).thenReturn(128L * 1024 * 1024);
         lenient().when(batchScheduleClient.requestTargets(
                         org.mockito.ArgumentMatchers.anyInt(),
                         org.mockito.ArgumentMatchers.anyBoolean(),

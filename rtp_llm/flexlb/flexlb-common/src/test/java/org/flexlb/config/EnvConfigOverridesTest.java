@@ -171,14 +171,28 @@ class EnvConfigOverridesTest {
     }
 
     @Test
-    void booleanKeepsParseBooleanSemanticsAnythingButTrueIsFalse() {
-        // Deliberately Boolean.parseBoolean, matching the pre-extraction ConfigService behavior:
-        // any value other than (case-insensitive) "true" — including "1"/"yes"/typos — reads as
-        // false. Stricter parsing would be a backward-incompatible change for live deployments.
+    void booleanAliasesMatchConfigService() {
+        for (String value : new String[] {"true", "1", "yes", "on", "enabled"}) {
+            Sample s = new Sample();
+            EnvConfigOverrides.apply(s, "TEST_", Map.of("TEST_BOOLEAN_FIELD", value));
+            assertTrue(s.booleanField, value);
+        }
+        for (String value : new String[] {"false", "0", "no", "off", "disabled"}) {
+            Sample s = new Sample();
+            s.booleanField = true;
+            EnvConfigOverrides.apply(s, "TEST_", Map.of("TEST_BOOLEAN_FIELD", value));
+            assertFalse(s.booleanField, value);
+        }
+    }
+
+    @Test
+    void invalidBooleanIsIgnoredInsteadOfSilentlyBecomingFalse() {
         Sample s = new Sample();
         s.booleanField = true;
-        EnvConfigOverrides.apply(s, "TEST_", Map.of("TEST_BOOLEAN_FIELD", "1"));
-        assertFalse(s.booleanField);
+
+        EnvConfigOverrides.apply(s, "TEST_", Map.of("TEST_BOOLEAN_FIELD", "treu"));
+
+        assertTrue(s.booleanField, "a typo must preserve the configured default");
     }
 
     @Test

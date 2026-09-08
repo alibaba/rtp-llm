@@ -36,6 +36,7 @@ class DispatchConfigTest {
         assertEquals("master", c.getFeAllocation());
         assertFalse(c.isPreAssignBe(),
                 "first rollout must be safe for mixed-version FE fleets");
+        assertEquals(128L * 1024 * 1024, c.getMaxAggregateRequestBytes());
         assertEquals(128L * 1024 * 1024, c.getMaxAggregateResponseBytes());
         assertEquals(64L * 1024 * 1024, c.getMaxDryRunResponseBytes());
     }
@@ -137,12 +138,16 @@ class DispatchConfigTest {
     void responseBudgetsLoadFromEnvAndMustBePositive() {
         Map<String, String> env = mutableEnv(
                 "DISPATCH_FE_POOL_SERVICE_ID", "x",
+                "DISPATCH_MAX_AGGREGATE_REQUEST_BYTES", "2097152",
                 "DISPATCH_MAX_AGGREGATE_RESPONSE_BYTES", "1048576",
                 "DISPATCH_MAX_DRY_RUN_RESPONSE_BYTES", "524288");
         DispatchConfig c = DispatcherConfiguration.loadAndValidate(env);
+        assertEquals(2097152L, c.getMaxAggregateRequestBytes());
         assertEquals(1048576L, c.getMaxAggregateResponseBytes());
         assertEquals(524288L, c.getMaxDryRunResponseBytes());
 
+        assertThrows(IllegalArgumentException.class,
+                () -> load("{\"fePoolServiceId\":\"x\",\"maxAggregateRequestBytes\":0}"));
         assertThrows(IllegalArgumentException.class,
                 () -> load("{\"fePoolServiceId\":\"x\",\"maxAggregateResponseBytes\":0}"));
         assertThrows(IllegalArgumentException.class,
@@ -212,6 +217,19 @@ class DispatchConfigTest {
         DispatchConfig c = DispatcherConfiguration.loadAndValidate(env);
         assertTrue(c.isPreAssignBe(),
                 "DISPATCH_PRE_ASSIGN_BE=true must opt into the optimization without code change");
+    }
+
+    @Test
+    void booleanAliasEnablesPreAssignBeAndTypoPreservesDefault() {
+        DispatchConfig enabled = DispatcherConfiguration.loadAndValidate(mutableEnv(
+                "DISPATCH_CONFIG", "{\"fePoolServiceId\":\"x\"}",
+                "DISPATCH_PRE_ASSIGN_BE", "1"));
+        assertTrue(enabled.isPreAssignBe());
+
+        DispatchConfig typo = DispatcherConfiguration.loadAndValidate(mutableEnv(
+                "DISPATCH_CONFIG", "{\"fePoolServiceId\":\"x\"}",
+                "DISPATCH_PRE_ASSIGN_BE", "treu"));
+        assertFalse(typo.isPreAssignBe(), "invalid boolean must leave the default unchanged");
     }
 
     @Test

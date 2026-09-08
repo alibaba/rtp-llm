@@ -33,6 +33,13 @@ public class BalanceContext implements Prioritized {
 
     private volatile ScheduleModeEnum scheduleMode = ScheduleModeEnum.BATCH;
 
+    /**
+     * True when a BATCH deployment deliberately routes without generate_input to reserve one
+     * whole Python BatchGenerateCall. Its maxNewTokens is already aggregate demand and must not
+     * be clamped as though it represented one request.
+     */
+    private boolean placementOnly;
+
     //======================== Queue ========================//
 
     private CompletableFuture<Response> future;

@@ -5,17 +5,26 @@ import org.flexlb.util.Logger;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.core.io.buffer.DataBuffer;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseCookie;
 import org.springframework.http.client.reactive.ClientHttpRequest;
 import org.springframework.stereotype.Component;
+import org.springframework.util.MultiValueMap;
+import org.springframework.web.server.ServerWebExchange;
 import org.springframework.web.reactive.function.BodyInserter;
 import org.springframework.web.reactive.function.BodyInserters;
+import org.springframework.web.reactive.function.client.ClientResponse;
 import org.springframework.web.reactive.function.client.WebClient;
 import org.springframework.web.reactive.function.server.ServerRequest;
 import org.springframework.web.reactive.function.server.ServerResponse;
+import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
 import java.net.URI;
 import java.time.Duration;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 @Component
 @ConditionalOnProperty(prefix = "dispatch", name = "fe-pool-service-id")
@@ -61,10 +70,10 @@ public class PassthroughClient {
      * so connection release is deferred until the body Flux is consumed at {@code writeTo} time
      * (the modern {@code exchangeToMono} would auto-release the body when the mapping function
      * returns, which for a streamed passthrough — the body is written later, not within the
-     * function — would drop the response). Release is covered on every non-consuming exit: {@code
-     * doOnCancel} for a cancel before the body is subscribed, and an explicit release if assembling
-     * the response throws after headers arrive. PV is emitted when FE response headers arrive or
-     * when an upstream step throws.
+     * function — would drop the response). An explicit response lease owns the narrow handoff from
+     * received FE headers to the first body subscription. Cancellation/discard/assembly failure in
+     * that window releases the FE body; once body writing starts, its own terminal signal owns the
+     * connection. PV is emitted when FE response headers arrive or when an upstream step throws.
      *
      * <p>Upstream failures surface to the client as a 502 with the same {@code {error, message}}
      * JSON envelope the batch path uses, so callers parse one error shape regardless of which
@@ -91,6 +100,7 @@ public class PassthroughClient {
         String rawPath = src.getRawPath();
         String fePath = normalizeFePath(rawPath);
         DispatchPvLogData pv = DispatchPvLogData.passthrough(fePath, System.currentTimeMillis());
+        AtomicReference<UpstreamResponseLease> pendingLease = new AtomicReference<>();
         return Mono.fromCallable(fePool::next)
                 .doOnNext(pv::setFeHost)
                 .flatMap(feBaseUrl -> {
@@ -104,21 +114,33 @@ public class PassthroughClient {
                             .exchange()
                             .timeout(headersTimeout)
                             .flatMap(clientResponse -> {
+                                UpstreamResponseLease lease = new UpstreamResponseLease(clientResponse);
+                                pendingLease.set(lease);
                                 int status = clientResponse.rawStatusCode();
                                 Mono<ServerResponse> response;
                                 try {
+                                    Flux<DataBuffer> leasedBody = Flux.defer(() -> {
+                                        if (!lease.tryStartBody()) {
+                                            return Flux.empty();
+                                        }
+                                        return clientResponse.bodyToFlux(DataBuffer.class)
+                                                .timeout(Duration.ofMillis(STREAM_TIMEOUT_MS))
+                                                .doFinally(lease::bodyTerminated);
+                                    });
                                     response = ServerResponse.status(status)
                                             .headers(h -> DispatcherHeaders.copyEndToEnd(
                                                     clientResponse.headers().asHttpHeaders(), h, DispatcherHeaders.HOP_BY_HOP))
                                             .body(BodyInserters.fromDataBuffers(
-                                                    clientResponse.bodyToFlux(DataBuffer.class)
-                                                            .timeout(Duration.ofMillis(STREAM_TIMEOUT_MS))))
-                                            .doOnCancel(() -> clientResponse.releaseBody().subscribe());
+                                                    leasedBody))
+                                            .<ServerResponse>map(
+                                                    delegate -> new UpstreamOwnedResponse(delegate, lease))
+                                            .doOnError(ignored -> lease.releaseIfUnwritten())
+                                            .doOnCancel(lease::releaseIfUnwritten);
                                 } catch (RuntimeException assemblyFailure) {
                                     // Headers arrived but assembling the passthrough response threw before it was
                                     // handed to a self-releasing consumer; release the FE body now or the pooled
                                     // connection leaks. The shared 502 envelope below answers the caller.
-                                    clientResponse.releaseBody().subscribe();
+                                    lease.releaseIfUnwritten();
                                     throw assemblyFailure;
                                 }
                                 // response is built and will be returned (then subscribed), so its doOnCancel /
@@ -138,6 +160,13 @@ public class PassthroughClient {
                                 return response;
                             });
                 })
+                .doOnCancel(() -> {
+                    UpstreamResponseLease lease = pendingLease.get();
+                    if (lease != null) {
+                        lease.releaseIfUnwritten();
+                    }
+                })
+                .doOnDiscard(UpstreamOwnedResponse.class, UpstreamOwnedResponse::discard)
                 .doOnError(e -> {
                     String reason = DispatcherResponses.briefReason(e);
                     Logger.warn("passthrough forward failed: path={}, feHost={}, err={}",
@@ -150,6 +179,90 @@ public class PassthroughClient {
                 // client has no business learning. Full reason is in the WARN above and pv.log.
                 .onErrorResume(e -> DispatcherResponses.error(
                         502, "passthrough_failed", "upstream request failed"));
+    }
+
+    /** Called by the router when an emitted response is discarded before {@code writeTo}. */
+    static void releaseIfUnwritten(ServerResponse response) {
+        if (response instanceof UpstreamOwnedResponse owned) {
+            owned.discard();
+        }
+    }
+
+    /**
+     * Owns the FE body only until WebFlux subscribes it. State transitions are one-way, making
+     * overlapping cancel/discard/write signals harmless and ensuring releaseBody is subscribed at
+     * most once.
+     */
+    private static final class UpstreamResponseLease {
+        private static final int PENDING = 0;
+        private static final int BODY_STARTED = 1;
+        private static final int TERMINAL = 2;
+
+        private final ClientResponse response;
+        private final AtomicInteger state = new AtomicInteger(PENDING);
+
+        UpstreamResponseLease(ClientResponse response) {
+            this.response = response;
+        }
+
+        boolean tryStartBody() {
+            return state.compareAndSet(PENDING, BODY_STARTED);
+        }
+
+        void bodyTerminated(reactor.core.publisher.SignalType ignored) {
+            state.compareAndSet(BODY_STARTED, TERMINAL);
+        }
+
+        void releaseIfUnwritten() {
+            if (!state.compareAndSet(PENDING, TERMINAL)) {
+                return;
+            }
+            response.releaseBody().subscribe(
+                    ignored -> { },
+                    error -> Logger.warn("failed to release discarded passthrough body: {}",
+                            DispatcherResponses.briefReason(error)));
+        }
+    }
+
+    /** ServerResponse wrapper that keeps the FE-body lease attached through the write boundary. */
+    private static final class UpstreamOwnedResponse implements ServerResponse {
+        private final ServerResponse delegate;
+        private final UpstreamResponseLease lease;
+
+        UpstreamOwnedResponse(ServerResponse delegate, UpstreamResponseLease lease) {
+            this.delegate = delegate;
+            this.lease = lease;
+        }
+
+        void discard() {
+            lease.releaseIfUnwritten();
+        }
+
+        @Override
+        public HttpStatus statusCode() {
+            return delegate.statusCode();
+        }
+
+        @Override
+        public int rawStatusCode() {
+            return delegate.rawStatusCode();
+        }
+
+        @Override
+        public HttpHeaders headers() {
+            return delegate.headers();
+        }
+
+        @Override
+        public MultiValueMap<String, ResponseCookie> cookies() {
+            return delegate.cookies();
+        }
+
+        @Override
+        public Mono<Void> writeTo(ServerWebExchange exchange, Context context) {
+            return Mono.defer(() -> delegate.writeTo(exchange, context))
+                    .doFinally(ignored -> lease.releaseIfUnwritten());
+        }
     }
 
     /**

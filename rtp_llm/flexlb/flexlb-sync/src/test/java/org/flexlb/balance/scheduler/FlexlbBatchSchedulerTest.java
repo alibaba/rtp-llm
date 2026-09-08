@@ -444,6 +444,69 @@ class FlexlbBatchSchedulerTest {
     }
 
     @Test
+    void globalInflightSlotIsClaimedBeforeRoutingCompletes() throws Exception {
+        config.setFlexlbBatchMaxInflight(1);
+        CountDownLatch routeEntered = new CountDownLatch(1);
+        CountDownLatch releaseRoute = new CountDownLatch(1);
+        AtomicInteger routeCalls = new AtomicInteger();
+        when(router.route(any(BalanceContext.class))).thenAnswer(inv -> {
+            BalanceContext ctx = inv.getArgument(0);
+            routeCalls.incrementAndGet();
+            if (ctx.getRequestId() == 43L) {
+                routeEntered.countDown();
+                assertTrue(releaseRoute.await(5, TimeUnit.SECONDS));
+            }
+            return successRoute(ctx.getRequestId());
+        });
+
+        CompletableFuture<CompletableFuture<Response>> firstSubmit =
+                CompletableFuture.supplyAsync(() -> scheduler.submit(context(43)));
+        try {
+            assertTrue(routeEntered.await(2, TimeUnit.SECONDS));
+
+            Response rejected = scheduler.submit(context(44)).get(1, TimeUnit.SECONDS);
+
+            assertFalse(rejected.isSuccess());
+            assertEquals(StrategyErrorType.QUEUE_FULL.getErrorCode(), rejected.getCode());
+            assertEquals(1, routeCalls.get(),
+                    "a capacity-rejected request must never enter routing");
+        } finally {
+            releaseRoute.countDown();
+        }
+        firstSubmit.get(2, TimeUnit.SECONDS);
+    }
+
+    @Test
+    void duplicateRequestIdIsClaimedBeforeRoutingCompletes() throws Exception {
+        CountDownLatch routeEntered = new CountDownLatch(1);
+        CountDownLatch releaseRoute = new CountDownLatch(1);
+        AtomicInteger routeCalls = new AtomicInteger();
+        when(router.route(any(BalanceContext.class))).thenAnswer(inv -> {
+            BalanceContext ctx = inv.getArgument(0);
+            routeCalls.incrementAndGet();
+            routeEntered.countDown();
+            assertTrue(releaseRoute.await(5, TimeUnit.SECONDS));
+            return successRoute(ctx.getRequestId());
+        });
+
+        CompletableFuture<CompletableFuture<Response>> firstSubmit =
+                CompletableFuture.supplyAsync(() -> scheduler.submit(context(45)));
+        try {
+            assertTrue(routeEntered.await(2, TimeUnit.SECONDS));
+
+            Response duplicate = scheduler.submit(context(45)).get(1, TimeUnit.SECONDS);
+
+            assertFalse(duplicate.isSuccess());
+            assertEquals(StrategyErrorType.INVALID_REQUEST.getErrorCode(), duplicate.getCode());
+            assertEquals(1, routeCalls.get(),
+                    "a duplicate request id must never enter routing twice");
+        } finally {
+            releaseRoute.countDown();
+        }
+        firstSubmit.get(2, TimeUnit.SECONDS);
+    }
+
+    @Test
     void batcher_rejects_when_queue_full() throws Exception {
         config.setFlexlbBatchQueueMaxSize(1);
 

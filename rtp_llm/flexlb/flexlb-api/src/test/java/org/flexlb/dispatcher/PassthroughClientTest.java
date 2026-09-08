@@ -24,6 +24,7 @@ import org.springframework.web.reactive.function.server.HandlerStrategies;
 import org.springframework.web.reactive.function.server.ServerResponse;
 import org.springframework.web.reactive.result.view.ViewResolver;
 import reactor.core.Disposable;
+import reactor.core.publisher.BaseSubscriber;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import reactor.netty.http.client.HttpClient;
@@ -272,6 +273,41 @@ class PassthroughClientTest {
         // this fails — the FE body (its pooled connection) would leak on this non-consuming exit.
         Assertions.assertTrue(released.get(),
                 "assembly failure must release the FE body so the pooled connection is not leaked");
+    }
+
+    @Test
+    void cancelAfterHeadersBeforeBodyWriteReleasesFeBody() {
+        AtomicBoolean released = new AtomicBoolean(false);
+        ClientResponse.Headers headers = mock(ClientResponse.Headers.class);
+        when(headers.asHttpHeaders()).thenReturn(new org.springframework.http.HttpHeaders());
+        ClientResponse feResponse = mock(ClientResponse.class);
+        when(feResponse.rawStatusCode()).thenReturn(200);
+        when(feResponse.headers()).thenReturn(headers);
+        when(feResponse.releaseBody()).thenReturn(Mono.fromRunnable(() -> released.set(true)));
+
+        WebClient webClient = WebClient.builder()
+                .exchangeFunction(ignored -> Mono.just(feResponse))
+                .build();
+        FePool pool = DispatcherTestSupport.fePool(
+                () -> List.of("http://fe-unused:8088"), ignored -> true);
+        PassthroughClient client = new PassthroughClient(
+                webClient, pool, DispatcherTestSupport.noopMetrics(), new DispatchConfig());
+        MockServerRequest request = MockServerRequest.builder()
+                .method(HttpMethod.GET)
+                .uri(URI.create("/worker_status"))
+                .body(Flux.empty());
+
+        client.forward(request).subscribe(new BaseSubscriber<>() {
+            @Override
+            protected void hookOnNext(ServerResponse ignored) {
+                // Re-entrant cancellation pins the handoff window: FE headers have produced a
+                // ServerResponse, but WebFlux has not invoked writeTo or subscribed its body.
+                cancel();
+            }
+        });
+
+        Assertions.assertTrue(released.get(),
+                "cancelling before writeTo must release the FE response body");
     }
 
     @Test

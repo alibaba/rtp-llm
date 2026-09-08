@@ -2,6 +2,7 @@ package org.flexlb.dispatcher;
 
 import okhttp3.mockwebserver.MockResponse;
 import okhttp3.mockwebserver.MockWebServer;
+import okhttp3.mockwebserver.RecordedRequest;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -25,6 +26,7 @@ import static org.flexlb.dispatcher.DispatcherTestSupport.feHealthChecker;
 import static org.flexlb.dispatcher.DispatcherTestSupport.fePool;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
@@ -307,7 +309,9 @@ class FeHealthCheckerTest {
         assertTrue(checker.isAlive(url(feA)));
         // First (and only) recorded request must hit /health, proving the probe path
         // is wired through and not silently falling back to the old default.
-        String hit = feA.takeRequest().getPath();
+        RecordedRequest recorded = feA.takeRequest(5, TimeUnit.SECONDS);
+        assertNotNull(recorded, "health probe request was not observed within 5 seconds");
+        String hit = recorded.getPath();
         assertTrue(hit != null && hit.startsWith("/health"),
                 "probe must hit configured /health path, got: " + hit);
     }

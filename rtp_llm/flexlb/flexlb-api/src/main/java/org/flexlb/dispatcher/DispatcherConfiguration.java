@@ -126,6 +126,10 @@ public class DispatcherConfiguration {
             throw new IllegalArgumentException("maxAggregateResponseBytes must be > 0, got "
                     + c.getMaxAggregateResponseBytes());
         }
+        if (c.getMaxAggregateRequestBytes() <= 0) {
+            throw new IllegalArgumentException("maxAggregateRequestBytes must be > 0, got "
+                    + c.getMaxAggregateRequestBytes());
+        }
         if (c.getMaxDryRunResponseBytes() <= 0) {
             throw new IllegalArgumentException("maxDryRunResponseBytes must be > 0, got "
                     + c.getMaxDryRunResponseBytes());
@@ -211,11 +215,13 @@ public class DispatcherConfiguration {
         return () -> Logger.warn(
                 "dispatcher enabled: fePoolServiceId={}, seedHosts={}, subBatch={}, batchSpecs={}, "
                         + "batchTimeoutMs={}, probePath={}, feAllocation={}, preAssignBe={}, "
-                        + "maxAggregateResponseBytes={}, maxDryRunResponseBytes={}",
+                        + "maxAggregateRequestBytes={}, maxAggregateResponseBytes={}, "
+                        + "maxDryRunResponseBytes={}",
                 cfg.getFePoolServiceId(), refresher.currentSize(), cfg.getSubBatch(),
                 BatchEndpointSpec.SPECS.size(),
                 cfg.getBatchTimeoutMs(), cfg.getProbePath(), cfg.getFeAllocation(),
-                cfg.isPreAssignBe(), cfg.getMaxAggregateResponseBytes(),
+                cfg.isPreAssignBe(), cfg.getMaxAggregateRequestBytes(),
+                cfg.getMaxAggregateResponseBytes(),
                 cfg.getMaxDryRunResponseBytes());
     }
 }

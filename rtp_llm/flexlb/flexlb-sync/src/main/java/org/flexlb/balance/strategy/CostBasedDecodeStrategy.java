@@ -47,7 +47,10 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
         long seqLen = request.getSeqLen();
         long maxNewTokens = request.getMaxNewTokens();
         FlexlbConfig config = balanceContext.getConfig();
-        long expectedKvTokens = seqLen + config.effectiveMaxNewTokensForReservation(maxNewTokens);
+        long outputReservation = balanceContext.isPlacementOnly()
+                ? Math.max(0, maxNewTokens)
+                : config.effectiveMaxNewTokensForReservation(maxNewTokens);
+        long expectedKvTokens = seqLen + outputReservation;
 
         EndpointFilterResult filterResult = getAvailableEndpoints(roleType, group, config.getResourceMeasureIndicator(roleType));
         List<DecodeEndpoint> eligible = filterResult.endpoints();

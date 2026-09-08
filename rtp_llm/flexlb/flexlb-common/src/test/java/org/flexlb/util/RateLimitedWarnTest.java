@@ -106,33 +106,40 @@ class RateLimitedWarnTest {
 
     @Test
     void concurrentBurstAtAFrozenClockEmitsExactlyOnce() throws Exception {
-        AtomicLong clock = new AtomicLong(0);
-        RateLimitedWarn warn = new RateLimitedWarn(1, TimeUnit.SECONDS, clock::get);
         int threads = 8;
+        int rounds = 20;
         ExecutorService pool = Executors.newFixedThreadPool(threads);
-        CountDownLatch start = new CountDownLatch(1);
-        CountDownLatch done = new CountDownLatch(threads);
         try {
-            for (int i = 0; i < threads; i++) {
-                pool.submit(() -> {
-                    try {
-                        start.await(5, TimeUnit.SECONDS);
-                        warn.warn(MARKER + " burst");
-                    } catch (InterruptedException e) {
-                        Thread.currentThread().interrupt();
-                    } finally {
-                        done.countDown();
-                    }
-                });
+            for (int round = 0; round < rounds; round++) {
+                AtomicLong clock = new AtomicLong(0);
+                RateLimitedWarn warn = new RateLimitedWarn(1, TimeUnit.SECONDS, clock::get);
+                CountDownLatch ready = new CountDownLatch(threads);
+                CountDownLatch start = new CountDownLatch(1);
+                CountDownLatch done = new CountDownLatch(threads);
+                for (int i = 0; i < threads; i++) {
+                    pool.submit(() -> {
+                        ready.countDown();
+                        try {
+                            start.await(5, TimeUnit.SECONDS);
+                            warn.warn(MARKER + " burst");
+                        } catch (InterruptedException e) {
+                            Thread.currentThread().interrupt();
+                        } finally {
+                            done.countDown();
+                        }
+                    });
+                }
+                assertTrue(ready.await(5, TimeUnit.SECONDS),
+                        "all contenders must reach the start gate before release");
+                start.countDown();
+                assertTrue(done.await(5, TimeUnit.SECONDS));
             }
-            start.countDown();
-            assertTrue(done.await(5, TimeUnit.SECONDS));
         } finally {
             pool.shutdownNow();
         }
 
-        assertEquals(1, emitted().size(),
-                "a concurrent burst inside one window must produce exactly one line — the CAS, not "
-                        + "luck, decides the winner");
+        assertEquals(rounds, emitted().size(),
+                "every concurrent burst must produce exactly one line — the CAS, not luck, "
+                        + "decides each winner");
     }
 }

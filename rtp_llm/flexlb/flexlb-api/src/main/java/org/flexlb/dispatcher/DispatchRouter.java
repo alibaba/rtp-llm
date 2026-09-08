@@ -130,6 +130,7 @@ public class DispatchRouter {
 
         /** Releases the drain token when this response is discarded before {@code writeTo} ran. */
         void closeToken() {
+            PassthroughClient.releaseIfUnwritten(delegate);
             token.close();
         }
 
@@ -155,7 +156,8 @@ public class DispatchRouter {
 
         @Override
         public Mono<Void> writeTo(ServerWebExchange exchange, Context context) {
-            return delegate.writeTo(exchange, context).doFinally(signal -> token.close());
+            return Mono.defer(() -> delegate.writeTo(exchange, context))
+                    .doFinally(signal -> token.close());
         }
     }
 }

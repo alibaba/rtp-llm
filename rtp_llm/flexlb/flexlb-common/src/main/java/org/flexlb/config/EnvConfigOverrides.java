@@ -17,10 +17,10 @@ import java.util.Map;
  * {@code String}, and any {@code Enum}. Unsupported field types are silently skipped — they can't
  * be overridden through env, only through the bean's natural construction path.
  *
- * <p>A malformed numeric value logs an error and leaves the field at its default, so a typo in a
- * tuning knob cannot crash startup. Booleans follow {@link Boolean#parseBoolean}: anything but a
- * case-insensitive {@code "true"} — including {@code "1"}/{@code "yes"}/typos — reads as
- * {@code false}, never errors. Enums preserve the legacy {@code ConfigService} contract too:
+ * <p>A malformed value logs an error and leaves the field at its default, so a typo in a tuning
+ * knob cannot crash startup. Booleans use the same strict aliases as {@link ConfigService}:
+ * {@code true/false/1/0/yes/no/on/off/enabled/disabled}; an unrecognized value is ignored instead
+ * of silently becoming false. Enums preserve the legacy {@code ConfigService} contract:
  * matching is case-sensitive and an invalid value is logged and ignored. In particular, upgrading
  * must not make a previously ignored lowercase value suddenly take effect or turn a tolerated typo
  * into a startup failure.
@@ -84,8 +84,8 @@ public final class EnvConfigOverrides {
             }
             Object parsed;
             try {
-                parsed = parseValue(value, type);
-            } catch (IllegalArgumentException e) {
+                parsed = parseValue(value, type, envName);
+            } catch (RuntimeException e) {
                 log.error("env override failed for {} = {}: {}", envName, raw, e.getMessage(), e);
                 continue;
             }
@@ -125,7 +125,7 @@ public final class EnvConfigOverrides {
     }
 
     @SuppressWarnings({"unchecked", "rawtypes"})
-    private static Object parseValue(String value, Class<?> targetType) {
+    private static Object parseValue(String value, Class<?> targetType, String envName) {
         if (targetType == int.class || targetType == Integer.class) {
             return Integer.parseInt(value);
         }
@@ -136,7 +136,7 @@ public final class EnvConfigOverrides {
             return Double.parseDouble(value);
         }
         if (targetType == boolean.class || targetType == Boolean.class) {
-            return Boolean.parseBoolean(value);
+            return ConfigService.parseStrictBoolean(value, envName);
         }
         if (targetType == String.class) {
             return value;

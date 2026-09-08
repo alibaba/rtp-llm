@@ -83,11 +83,25 @@ class BatchEnqueueRoutingTest(TestCase):
         visitor.model_rpc_client = model_rpc_client
         route_calls = []
 
-        async def fake_route_ips(inp, seq_len_hint=None, placement_only=False):
+        async def fake_route_ips(
+            inp,
+            seq_len_hint=None,
+            max_new_tokens_hint=None,
+            generate_timeout_hint=None,
+            placement_only=False,
+        ):
             inp.generate_config.role_addrs = [
                 master_rotation[len(route_calls) % len(master_rotation)]
             ]
-            route_calls.append((inp, seq_len_hint, placement_only))
+            route_calls.append(
+                (
+                    inp,
+                    seq_len_hint,
+                    max_new_tokens_hint,
+                    generate_timeout_hint,
+                    placement_only,
+                )
+            )
 
         visitor.route_ips = fake_route_ips
         return visitor, route_calls, sent
@@ -126,8 +140,9 @@ class BatchEnqueueRoutingTest(TestCase):
         # The single routing call must carry the batch's aggregate weight — otherwise
         # the master accounts one request's load while N inputs land on the worker.
         self.assertEqual(sum(inp.prompt_length for inp in inputs), route_calls[0][1])
+        self.assertEqual(64, route_calls[0][2])
         self.assertTrue(
-            route_calls[0][2],
+            route_calls[0][4],
             "batch routing must request placement only, never enqueue the first item",
         )
         # Every input carries the first routing decision, and the whole batch resolves to a
@@ -143,6 +158,89 @@ class BatchEnqueueRoutingTest(TestCase):
             inputs[0].generate_config.role_addrs,
             inputs[1].generate_config.role_addrs,
         )
+
+    def test_placement_demand_is_order_independent(self):
+        def route_hints(order):
+            visitor, route_calls, _ = self._visitor([self._addr("10.0.0.1")])
+            inputs = [self._input(i) for i in order]
+            budgets = {0: (3, 7), 1: (11, 19), 2: (5, 13)}
+            for inp in inputs:
+                inp.prompt_length, inp.generate_config.max_new_tokens = budgets[
+                    inp.request_id
+                ]
+            asyncio.run(visitor.batch_enqueue(inputs))
+            return route_calls[0][1:3]
+
+        self.assertEqual((19, 39), route_hints([0, 1, 2]))
+        self.assertEqual((19, 39), route_hints([2, 0, 1]))
+
+    def test_multi_output_width_is_included_in_output_reservation(self):
+        visitor, route_calls, _ = self._visitor([self._addr("10.0.0.1")])
+        first = self._input(0)
+        first.generate_config.max_new_tokens = 10
+        first.generate_config.num_return_sequences = 3
+        second = self._input(1)
+        second.generate_config.max_new_tokens = 5
+        second.generate_config.num_beams = 2
+
+        asyncio.run(visitor.batch_enqueue([first, second]))
+
+        self.assertEqual(40, route_calls[0][2], "10*3 + 5*2 output KV tokens")
+
+    def test_heterogeneous_routing_identity_is_rejected_before_remote_work(self):
+        visitor, route_calls, sent = self._visitor([self._addr("10.0.0.1")])
+        first = self._input(0)
+        first.headers = {"x-api-key": "tenant-a"}
+        second = self._input(1)
+        second.headers = {"x-api-key": "tenant-b"}
+
+        with self.assertRaises(FtRuntimeException) as raised:
+            asyncio.run(visitor.batch_enqueue([first, second]))
+
+        self.assertEqual(ExceptionType.INVALID_PARAMS, raised.exception.exception_type)
+        self.assertEqual([], route_calls)
+        self.assertNotIn("inputs", sent)
+
+    def test_confirmed_connection_failure_replaces_preassigned_target_once(self):
+        replacement = self._addr("10.0.0.9")
+        visitor, route_calls, _ = self._visitor([replacement])
+        failed = self._addr("10.0.0.7")
+        inputs = [self._input(0, [failed]), self._input(1, [failed])]
+        calls = []
+
+        async def fail_then_succeed(batch):
+            calls.append(visitor.model_rpc_client._select_batch_address(batch))
+            if len(calls) == 1:
+                raise FtRuntimeException(
+                    ExceptionType.CONNECT_FAILED, "connection refused before dispatch"
+                )
+            return []
+
+        visitor.model_rpc_client.batch_enqueue = fail_then_succeed
+
+        asyncio.run(visitor.batch_enqueue(inputs))
+
+        self.assertEqual(["10.0.0.7:8089", "10.0.0.9:8089"], calls)
+        self.assertEqual(1, len(route_calls), "reroute is bounded to one replacement")
+        self.assertTrue(all(not inp.enqueued_by_master for inp in inputs))
+
+    def test_uncertain_connection_reset_is_never_retried(self):
+        visitor, route_calls, _ = self._visitor([self._addr("10.0.0.9")])
+        failed = self._addr("10.0.0.7")
+        inputs = [self._input(0, [failed]), self._input(1, [failed])]
+
+        async def uncertain(_batch):
+            raise FtRuntimeException(
+                ExceptionType.CONNECTION_RESET_BY_PEER,
+                "peer reset after request may have executed",
+            )
+
+        visitor.model_rpc_client.batch_enqueue = uncertain
+
+        with self.assertRaises(FtRuntimeException):
+            asyncio.run(visitor.batch_enqueue(inputs))
+
+        self.assertEqual([], route_calls, "uncertain execution must preserve at-most-once")
 
     def test_dispatcher_pre_assigned_chunk_never_touches_the_master(self):
         visitor, route_calls, sent = self._visitor([self._addr("10.0.0.9")])
@@ -288,6 +386,21 @@ class SchedulePayloadSeqLenTest(TestCase):
 
         self.assertEqual(210, sent["payload"].seq_len)
 
+    def test_aggregate_output_hint_is_what_reaches_the_master(self):
+        client, sent = self._client()
+
+        asyncio.run(
+            client.get_backend_role_addrs(
+                block_cache_keys=[],
+                cache_key_block_size=8,
+                input=self._input(7),
+                request_id=1,
+                max_new_tokens_hint=1234,
+            )
+        )
+
+        self.assertEqual(1234, sent["payload"].max_new_tokens)
+
     def test_without_a_hint_the_single_input_length_is_reported(self):
         client, sent = self._client()
 
@@ -399,7 +512,9 @@ class RouteIpsSeqLenHintTest(TestCase):
         visitor, seen = self._visitor()
         request = self._input()
 
-        asyncio.run(visitor.route_ips(request, seq_len_hint=210, placement_only=True))
+        # Keep the pre-existing third positional argument contract: new aggregate-hint
+        # parameters are keyword-only and cannot silently reinterpret this boolean.
+        asyncio.run(visitor.route_ips(request, 210, True))
 
         self.assertIsNone(seen["input_pb"])
         self.assertFalse(request.enqueued_by_master)

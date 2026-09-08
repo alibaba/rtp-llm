@@ -22,6 +22,13 @@ public final class EmbeddingMerger implements BatchEndpointSpec.PostMerger {
     @Override
     public void apply(JSONObject mergedBody, List<SubBatchResult> subs, List<Integer> failedIndices,
                       BatchEndpointSpec spec, JSONObject originalRequest) {
+        if (mergedBody.getString("object") == null) {
+            mergedBody.put("object", "list");
+        }
+        if (mergedBody.getString("model") == null) {
+            String model = originalRequest == null ? null : originalRequest.getString("model");
+            mergedBody.put("model", model == null ? "" : model);
+        }
         JSONArray data = mergedBody.getJSONArray(spec.getResponseArrayField());
         if (data != null) {
             for (int i = 0; i < data.size(); i++) {
@@ -45,13 +52,11 @@ public final class EmbeddingMerger implements BatchEndpointSpec.PostMerger {
             totalTokens += usage.getLongValue("total_tokens", 0);
         }
         JSONObject u = mergedBody.getJSONObject("usage");
-        if (u != null || promptTokens > 0 || totalTokens > 0) {
-            if (u == null) {
-                u = new JSONObject();
-                mergedBody.put("usage", u);
-            }
-            u.put("prompt_tokens", promptTokens);
-            u.put("total_tokens", totalTokens);
+        if (u == null) {
+            u = new JSONObject();
+            mergedBody.put("usage", u);
         }
+        u.put("prompt_tokens", promptTokens);
+        u.put("total_tokens", totalTokens);
     }
 }

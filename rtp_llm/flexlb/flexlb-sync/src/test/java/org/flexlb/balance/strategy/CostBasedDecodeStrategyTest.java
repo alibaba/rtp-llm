@@ -13,6 +13,7 @@ import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.enums.ScheduleModeEnum;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.sync.status.EngineWorkerStatus;
 import org.flexlb.sync.status.ModelWorkerStatus;
@@ -130,6 +131,40 @@ class CostBasedDecodeStrategyTest {
 
         Assertions.assertTrue(status.isSuccess());
         Assertions.assertNotNull(status.getServerIp());
+    }
+
+    @Test
+    void placementOnlyUsesAlreadyAggregatedOutputDemandWithoutSingleRequestCap() {
+        Map<String, WorkerStatus> decodeMap =
+                EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap();
+        WorkerStatus worker = createWorkerStatus("127.0.0.1");
+        worker.getTotalKvCacheTokens().set(10_000);
+        worker.getAvailableKvCacheTokens().set(10_000);
+        decodeMap.put("127.0.0.1:8080", worker);
+        EndpointRegistry registry = createDecodeRegistry(decodeMap);
+        EngineWorkerStatus engineWorkerStatus = new EngineWorkerStatus(registry);
+        ResourceMeasureFactory measures = Mockito.mock(ResourceMeasureFactory.class);
+        DecodeResourceMeasure measure = Mockito.mock(DecodeResourceMeasure.class);
+        Mockito.when(measures.getMeasure(Mockito.any())).thenReturn(measure);
+        Mockito.when(measure.isResourceAvailable(any())).thenReturn(true);
+        CostBasedDecodeStrategy strategy = new CostBasedDecodeStrategy(
+                configService, engineWorkerStatus, measures);
+        Request request = new Request();
+        request.setRequestId(77L);
+        request.setSeqLen(300);
+        request.setMaxNewTokens(2_000);
+        BalanceContext context = new BalanceContext();
+        context.setRequest(request);
+        context.setConfig(configService.loadBalanceConfig());
+        context.setScheduleMode(ScheduleModeEnum.DIRECT);
+        context.setPlacementOnly(true);
+
+        ServerStatus status = strategy.select(context, RoleType.DECODE, null);
+
+        Assertions.assertTrue(status.isSuccess());
+        DecodeEndpoint endpoint = registry.getDecode("127.0.0.1:8080");
+        Assertions.assertEquals(2_300, endpoint.inflightExpectedKvReserved(),
+                "aggregate placement output must not be clamped by the per-request cap");
     }
 
     @Test

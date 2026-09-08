@@ -17,8 +17,9 @@ import static org.mockito.Mockito.when;
 /**
  * Direct unit coverage for {@link MasterFeAssigner}, the single FE-stamp point. The two production
  * entry points ({@link BatchScheduleClient} and {@link org.flexlb.httpserver.HttpLoadBalanceServer})
- * exercise the happy paths, but three guard/exception branches are only reachable — and only
- * assertable — here: the null/empty-targets early return, the absent-{@link FePool}-bean no-op
+ * exercise the happy paths, but guard/exception branches are only reachable — and only
+ * assertable — here: the null-response and null/empty-targets early returns, the
+ * absent-{@link FePool}-bean no-op
  * (the documented deployment precondition failure), and the two "swallow and leave fe_url null"
  * exception paths. Each test doubles as a mutation guard: deleting the guard/catch it targets turns
  * it red.
@@ -56,12 +57,20 @@ class MasterFeAssignerTest {
     }
 
     @Test
-    void nullTargetsIsNoOpAndNeverTouchesPool() {
-        // Early return before any consistency/pool interaction. Mutation guard: drop the null check
-        // and assign(null) NPEs on targets.isEmpty()/the for-loop.
+    void nullResponseIsNoOpAndNeverTouchesPool() {
         FePool pool = mock(FePool.class);
         MasterFeAssigner assigner = DispatcherTestSupport.masterFeAssigner(pool);
         assertDoesNotThrow(() -> assigner.assign(request(true), null));
+        verifyNoInteractions(pool);
+    }
+
+    @Test
+    void nullTargetsIsNoOpAndNeverTouchesPool() {
+        // A valid response can legitimately carry no targets on an upstream compatibility edge.
+        // Keep this branch independent from the null-response guard.
+        FePool pool = mock(FePool.class);
+        MasterFeAssigner assigner = DispatcherTestSupport.masterFeAssigner(pool);
+        assertDoesNotThrow(() -> assigner.assign(request(true), response(null, true)));
         verifyNoInteractions(pool);
     }
 

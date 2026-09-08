@@ -222,6 +222,29 @@ class BatchScheduleCoordinatorTest {
     }
 
     @Test
+    void schedule_slave_oldMasterWithoutBatchEndpoint_resolvesLocally() {
+        when(consistency.isNeedConsistency()).thenReturn(true);
+        when(consistency.isMaster()).thenReturn(false);
+        when(consistency.getMasterHostIpPort()).thenReturn("10.0.0.2:7001");
+        when(httpNettyService.request(any(BatchScheduleRequest.class), any(URI.class),
+                eq("/rtp_llm/batch_schedule"), eq(BatchScheduleResponse.class)))
+                .thenReturn(Mono.error(new org.flexlb.exception.HttpErrorResponseException(
+                        404, "{\"timestamp\":1,\"status\":404,\"path\":\"/rtp_llm/batch_schedule\"}")));
+        BatchScheduleResponse local = BatchScheduleResponse.success(null);
+        when(routeService.batchSchedule(any())).thenReturn(Mono.just(local));
+
+        BatchScheduleResponse returned =
+                coordinator.schedule(new BatchScheduleRequest()).block();
+
+        assertSame(local, returned);
+        assertTrue(returned.isResolvedLocally());
+        assertEquals("10.0.0.2:7001", returned.getRealMasterHost());
+        verify(engineHealthReporter).reportForwardToMasterResult(
+                "10.0.0.2", "BATCH_ENDPOINT_UNSUPPORTED_404");
+        verify(routeService).batchSchedule(any());
+    }
+
+    @Test
     void schedule_slave_http500WithUnparseableBody_throwsHttpError() {
         when(consistency.isNeedConsistency()).thenReturn(true);
         when(consistency.isMaster()).thenReturn(false);

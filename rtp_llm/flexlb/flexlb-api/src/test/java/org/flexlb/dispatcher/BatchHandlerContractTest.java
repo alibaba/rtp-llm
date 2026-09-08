@@ -68,6 +68,7 @@ class BatchHandlerContractTest {
     void setUp() {
         lenient().when(cfg.getSubBatchSpec()).thenReturn(SubBatchSpec.parse("count:2"));
         lenient().when(cfg.isPreAssignBe()).thenReturn(false);
+        lenient().when(cfg.getMaxAggregateRequestBytes()).thenReturn(128L * 1024 * 1024);
         // Master mode requests FE assignment for each splittable batch. The explicit dimensions
         // vary by endpoint and preAssignBe, so the generic fixture accepts either combination.
         lenient().when(batchScheduleClient.requestTargets(
@@ -201,6 +202,23 @@ class BatchHandlerContractTest {
     }
 
     @Test
+    void emptyEmbeddingBatchReturnsSchemaCompleteOpenAiResponse() {
+        BatchEndpointSpec spec = BatchEndpointSpec.BY_PATH.get("/v1/embeddings");
+        stubBody("{\"model\":\"embed-v1\",\"input\":[]}");
+
+        ServerResponse out = handler.handle(serverRequest, spec).block();
+
+        assertEquals(HttpStatus.OK, out.statusCode());
+        ObjectNode response = parseBody(out);
+        assertEquals("list", response.get("object").asText());
+        assertEquals("embed-v1", response.get("model").asText());
+        assertEquals(0, response.get("data").size());
+        assertEquals(0L, response.get("usage").get("prompt_tokens").asLong());
+        assertEquals(0L, response.get("usage").get("total_tokens").asLong());
+        verifyNoInteractions(fanoutService, batchScheduleClient, passthroughClient);
+    }
+
+    @Test
     void rerankerRejectsInvalidRewrittenControlsBeforeFanout() {
         BatchEndpointSpec spec = BatchEndpointSpec.BY_PATH.get("/v1/reranker");
         stubBody("{\"query\":\"cape pants\",\"documents\":[\"a\",\"b\"],\"top_k\":1.5}");
@@ -281,6 +299,21 @@ class BatchHandlerContractTest {
         ObjectNode body = parseBody(out);
         assertEquals("too_many_sub_batches", body.get("error").asText());
         assertTrue(body.get("message").asText().contains("maximum is 2"));
+        verifyNoInteractions(fanoutService, batchScheduleClient, passthroughClient);
+    }
+
+    @Test
+    void repeatedEnvelopeOverRequestBudgetIsRejectedBeforeScheduling() {
+        handler = new BatchHandler(fanoutService, cfg, batchScheduleClient, passthroughClient,
+                DispatcherTestSupport.noopMetrics(), 1000, 2048);
+        BatchEndpointSpec spec = BatchEndpointSpec.BY_PATH.get("/v1/embeddings");
+        stubBody("{\"model\":\"" + "x".repeat(1500)
+                + "\",\"input\":[\"a\",\"b\"]}");
+
+        ServerResponse out = handler.handle(serverRequest, spec).block();
+
+        assertEquals(HttpStatus.PAYLOAD_TOO_LARGE, out.statusCode());
+        assertEquals("batch_request_too_large", parseBody(out).get("error").asText());
         verifyNoInteractions(fanoutService, batchScheduleClient, passthroughClient);
     }
 

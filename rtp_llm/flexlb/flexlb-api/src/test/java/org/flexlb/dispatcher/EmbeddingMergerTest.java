@@ -68,14 +68,31 @@ class EmbeddingMergerTest {
     }
 
     @Test
-    void omitsUsageWhenNoSuccessfulSubsAndEnvelopeMissingUsage() {
+    void suppliesCompleteOpenAiEnvelopeWhenUsageIsMissing() {
         JSONObject envelopeNoUsage = new JSONObject();
         envelopeNoUsage.put("data", new JSONArray());
         SubBatchResult ok = SubBatchResult.ok(envelopeNoUsage, 0, 0);
         ResponseMerger.MergedResponse merged =
                 ResponseMerger.merge(List.of(ok), EMBEDDINGS);
-        // No incoming usage and no totals to add → don't fabricate one.
-        assertEquals(null, merged.body().getJSONObject("usage"));
+
+        assertEquals("list", merged.body().getString("object"));
+        assertEquals("", merged.body().getString("model"));
+        assertEquals(0, merged.body().getJSONObject("usage").getLongValue("prompt_tokens"));
+        assertEquals(0, merged.body().getJSONObject("usage").getLongValue("total_tokens"));
+    }
+
+    @Test
+    void modelFallsBackToOriginalRequestWithoutOverwritingFeEnvelope() {
+        JSONObject request = JSONObject.of("model", "requested-model");
+        JSONObject bodyWithoutModel = JSONObject.of("data", new JSONArray());
+        ResponseMerger.MergedResponse missing = ResponseMerger.merge(
+                List.of(SubBatchResult.ok(bodyWithoutModel, 0, 0)), EMBEDDINGS, request);
+        assertEquals("requested-model", missing.body().getString("model"));
+
+        JSONObject bodyWithModel = JSONObject.of("data", new JSONArray(), "model", "served-model");
+        ResponseMerger.MergedResponse present = ResponseMerger.merge(
+                List.of(SubBatchResult.ok(bodyWithModel, 0, 0)), EMBEDDINGS, request);
+        assertEquals("served-model", present.body().getString("model"));
     }
 
     private static JSONObject embeddingBody(int items, long prompt, long total) {
