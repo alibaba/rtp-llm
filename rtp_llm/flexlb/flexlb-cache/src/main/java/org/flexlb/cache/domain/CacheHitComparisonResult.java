@@ -25,7 +25,7 @@ public record CacheHitComparisonResult(
         String state,
         long inputTokens,
         Actual actual,
-        HitComparison routing,
+        @JsonIgnore HitComparison routing,
         HitComparison localStandby,
         @JsonIgnore KvcmDetails kvcmDetails) {
 
@@ -33,6 +33,11 @@ public record CacheHitComparisonResult(
     @JsonProperty("worker")
     public String worker() {
         return workerIdentity == null ? null : workerIdentity.getLogicalIpPort();
+    }
+
+    @JsonProperty("routing")
+    public HitComparison routingPrediction() {
+        return CacheMatchSource.KVCM.name().equals(source) ? null : routing;
     }
 
     @JsonProperty("kvcm")

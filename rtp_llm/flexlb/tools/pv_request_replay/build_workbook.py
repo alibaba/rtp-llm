@@ -302,7 +302,15 @@ def get_prefill_server_status(route: dict[str, Any] | None) -> dict[str, Any]:
 
 
 def get_route_cache_selection(route: dict[str, Any] | None) -> dict[str, Any]:
-    return _prefill_equivalent_item(route, "cacheMatchSelections")
+    selection = _prefill_equivalent_item(route, "cacheMatchSelections")
+    if selection:
+        return selection
+    decision = get_prefill_decision(route)
+    for candidate in decision.get("candidates", []):
+        if candidate.get("selected"):
+            return {"hitCacheTokens": candidate.get("routingMatchTokens"),
+                    "selectedIp": candidate.get("endpoint", "").split(":")[0]}
+    return {}
 
 
 def get_prefill_decision(route: dict[str, Any] | None) -> dict[str, Any]:
@@ -385,7 +393,7 @@ def route_success(route: dict[str, Any] | None) -> bool:
     if not route:
         return False
     response = route.get("response", {})
-    return bool(route.get("success")) and response.get("code") == 200
+    return bool(route.get("success")) and route.get("code", response.get("code")) == 200
 
 
 def largest_phase(row: dict[str, Any]) -> tuple[str, float | None]:
@@ -629,7 +637,7 @@ def build_rows(sources: Sequence[PvSource], start: datetime | str | None = None,
             )
         selected_snapshot = selected_snapshot or {}
         selection_reasons = (route or {}).get("selectionReasons", {})
-        selection_reason = next(
+        selection_reason = decision.get("selectionReason") or next(
             (
                 selection_reasons.get(role)
                 for role in PREFILL_EQUIVALENT_ROLES
@@ -689,7 +697,7 @@ def build_rows(sources: Sequence[PvSource], start: datetime | str | None = None,
             "selected_snapshot_tracked_running_remaining_prefill_tokens": as_number(selected_snapshot.get("trackedRunningRemainingPrefillTokens")),
             "selected_snapshot_engine_waiting_uncached_tokens": as_number(selected_snapshot.get("engineWaitingUncachedTokens")),
             "selected_snapshot_engine_running_remaining_prefill_tokens": as_number(selected_snapshot.get("engineRunningRemainingPrefillTokens")),
-            "route_response_code": route.get("response", {}).get("code") if route else None,
+            "route_response_code": route.get("code", route.get("response", {}).get("code")) if route else None,
             "prefill_route_code": server_status.get("code") if server_status else None,
             "route_success": route_success(route),
             "telemetry_status": availability_text(bool(route), bool(cache), bool(status), prefill_engine_ttft_ms is not None),

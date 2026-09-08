@@ -1,10 +1,13 @@
 package org.flexlb.dao.pv;
 
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonInclude;
+import com.fasterxml.jackson.annotation.JsonProperty;
 import lombok.Data;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
+import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.route.RoleType;
 
 import java.util.List;
@@ -14,17 +17,15 @@ import java.util.Map;
 @Data
 public class PvLogData {
 
+    // Identifiers may be absent when entry parsing fails.
     @JsonInclude(JsonInclude.Include.NON_NULL)
     private String requestId;
     @JsonInclude(JsonInclude.Include.NON_NULL)
     private Long seqLen;
     @JsonInclude(JsonInclude.Include.NON_NULL)
-    private Long inputIdsCount;
-    @JsonInclude(JsonInclude.Include.NON_NULL)
     private Long requestBodyBytes;
     @JsonInclude(JsonInclude.Include.NON_NULL)
     private Long requestTimeMs;
-    private Long requestMessageBytes;
 
     private Response response;
     private String error;
@@ -40,16 +41,15 @@ public class PvLogData {
     private long batchId;
     private String requestState;
     private String realMasterHost;
-    private Map<String, Object> schedulingDiagnostics;
 
     private long totalUs;
     private Long arrivalMs;
     private Long reqParseUs;
+    @JsonIgnoreProperties({"policy", "dispatcher", "worker"})
     private DecisionGroup decisionGroup;
     @JsonInclude(JsonInclude.Include.NON_EMPTY)
+    @JsonIgnoreProperties("prefillPolicy")
     private List<RoutingDecision> routingDecisions;
-    private long hashWaitUs;
-    private long hashUs;
     private String cacheMatchSource;
     private long cacheMatchUs;
     private int cacheMatchCount;
@@ -80,59 +80,66 @@ public class PvLogData {
         this.batchId = batchId;
         this.requestState = requestState;
         this.realMasterHost = realMasterHost;
-        if (this.response != null) {
-            Response source = this.response;
-            Response terminal = new Response();
-            terminal.setServerStatus(source.getServerStatus());
-            terminal.setWorkerSummary(source.getWorkerSummary());
-            terminal.setQueueLength(source.getQueueLength());
-            terminal.setEnqueuedByMaster(source.isEnqueuedByMaster());
-            terminal.setReady(source.isReady());
-            terminal.setSuccess(this.success);
-            terminal.setCode(code);
-            terminal.setErrorMessage(this.error);
-            terminal.setRealMasterHost(realMasterHost);
-            terminal.setAdmissionRejectReason(admissionRejectReason == null ? null : source.getAdmissionRejectReason());
-            this.response = terminal;
-        }
     }
 
     private void populateCommonFields(BalanceContext ctx) {
         BalanceContext.RoutingTelemetry telemetry = ctx.getRoutingTelemetry();
         Request request = ctx.getRequest();
         if (request != null) {
-            this.requestId = String.valueOf(request.getRequestId());
+            this.requestId = request.getRequestId();
             this.seqLen = request.getSeqLen();
             this.requestTimeMs = request.getRequestTimeMs();
         }
-        this.inputIdsCount = ctx.getInputIdsCount();
         this.requestBodyBytes = ctx.getRequestBodyBytes();
-        this.requestMessageBytes = ctx.getRequestMessageBytes();
         this.decisionGroup = ctx.getDecisionGroup();
         this.routingDecisions = telemetry.routingDecisions().entrySet().stream()
-                .sorted(Map.Entry.comparingByKey())
-                .map(Map.Entry::getValue)
-                .toList();
-        this.response = ctx.getResponse();
+                .sorted(Map.Entry.comparingByKey()).map(Map.Entry::getValue).toList();
+        if (ctx.getResponse() != null) {
+            Response source = ctx.getResponse();
+            Response projected = new PvResponse();
+            projected.setServerStatus(source.getServerStatus());
+            projected.setQueueLength(source.getQueueLength());
+            projected.setWorkerSummary(source.getWorkerSummary());
+            this.response = projected;
+        }
         this.error = ctx.getErrorMessage();
         this.success = ctx.isSuccess();
-        if (!success) {
-            this.schedulingDiagnostics = ctx.getSchedulingDiagnostics();
-        }
         this.enqueueTime = ctx.getEnqueueTime();
         this.startTime = ctx.getStartTime();
         this.totalUs = ctx.getTotalTimeUs();
         this.arrivalMs = ctx.getRequestArrivalDelayMs();
         this.reqParseUs = ctx.getRequestBodyReadAndDeserializeTimeUs();
-        this.hashWaitUs = telemetry.hashWaitUs();
-        this.hashUs = telemetry.hashUs();
         this.cacheMatchSource = telemetry.cacheSource();
         this.cacheMatchUs = telemetry.cacheQueryUs();
         this.cacheMatchCount = telemetry.cacheQueryCount();
         this.cacheMatchSelections = telemetry.cacheSelections().entrySet().stream()
-                .sorted(Map.Entry.comparingByKey())
-                .map(Map.Entry::getValue)
-                .toList();
-        this.selectionReasons = Map.copyOf(telemetry.selectionReasons());
+                .sorted(Map.Entry.comparingByKey()).map(Map.Entry::getValue)
+                .filter(selection -> !hasRecordedCacheSelection(selection)).toList();
+        this.selectionReasons = telemetry.selectionReasons().entrySet().stream()
+                .filter(entry -> {
+                    RoutingDecision decision = telemetry.routingDecisions().get(entry.getKey());
+                    return decision == null || !java.util.Objects.equals(decision.selectionReason(), entry.getValue());
+                })
+                .collect(java.util.stream.Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
     }
+
+    private boolean hasRecordedCacheSelection(BalanceContext.CacheMatchSelection selection) {
+        return routingDecisions.stream().filter(decision -> decision.role() == selection.role())
+                .flatMap(decision -> decision.candidates().stream())
+                .anyMatch(candidate -> candidate.selected()
+                        && candidate.endpoint().startsWith(selection.selectedIp() + ":")
+                        && java.util.Objects.equals(candidate.routingMatchTokens(), selection.hitCacheTokens()));
+    }
+
+    @JsonIgnoreProperties({"success", "code", "error_message", "admission_reject_reason",
+            "ready", "enqueued_by_master"})
+    private static class PvResponse extends Response {
+        @Override
+        @JsonProperty("server_status")
+        @JsonIgnoreProperties("request_id")
+        public List<ServerStatus> getServerStatus() {
+            return super.getServerStatus();
+        }
+    }
+
 }

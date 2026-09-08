@@ -26,14 +26,52 @@ class PvLogDataTest {
         context.setErrorMessage("Schedule RPC deadline exceeded");
         int deadlineCode = org.flexlb.dao.loadbalance.StrategyErrorType.BATCH_SLO_EXPIRED.getErrorCode();
         PvLogData data = new PvLogData(context, deadlineCode, null, "LOCAL_MASTER", 0,
-                "REQUEST_STATE_TIMED_OUT", "", System.currentTimeMillis());
+                "REQUEST_STATE_TIMED_OUT", System.currentTimeMillis());
         var json = new com.fasterxml.jackson.databind.ObjectMapper().readTree(JsonUtils.toStringOrEmpty(data));
-        assertEquals(json.path("code"), json.path("response").path("code"));
-        assertEquals(json.path("error"), json.path("response").path("error_message"));
-        assertFalse(json.path("response").path("success").asBoolean());
+        assertEquals(deadlineCode, json.path("code").asInt());
+        assertFalse(json.path("response").has("code"));
+        assertEquals("Schedule RPC deadline exceeded", json.path("error").asText());
+        assertFalse(json.path("response").has("error_message"));
+        assertFalse(json.path("response").has("success"));
+        assertFalse(json.has("realMasterHost"));
+        assertFalse(json.path("response").has("real_master_host"));
         assertFalse(json.has("admissionRejectReason"));
         assertFalse(json.path("response").has("admission_reject_reason"));
         assertEquals(org.flexlb.dao.loadbalance.StrategyErrorType.REQUEST_CANCELLED.getErrorCode(), routed.getCode());
+    }
+
+    @Test
+    void compactPvKeepsProtocolIdentityAndRuntimeGroupFields() throws Exception {
+        BalanceContext context = new BalanceContext();
+        Request request = new Request();
+        request.setRequestId("compact");
+        context.setRequest(request);
+        org.flexlb.dao.loadbalance.ServerStatus worker = new org.flexlb.dao.loadbalance.ServerStatus();
+        worker.setRequestId("compact");
+        worker.setServerIp("10.0.0.1");
+        Response response = new Response();
+        response.setServerStatus(List.of(worker));
+        context.setResponse(response);
+        context.setDecisionGroup(new DecisionGroup("group", "FIXED_WINDOW", "NON_BATCH", "10.0.0.1",
+                2, "batch_full", 1234, 10));
+        RoutingDecision.PrefillPolicy policy = new RoutingDecision.PrefillPolicy(100, "BEST_ONLY", 10L,
+                0.2, 20, 1, 0L, 15.0, 0.0, 50000L, 0, 50, 3.0, 3.0);
+        context.recordRoutingDecision(new RoutingDecision(RoleType.PREFILL, "default", "CostBasedPrefill",
+                "BEST_ONLY", 1234, 1, "10.0.0.1:8080", 1, 1, false, java.util.Map.of(), List.of(), policy));
+        var mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+        var json = mapper.readTree(JsonUtils.toStringOrEmpty(new PvLogData(context)));
+        assertEquals("compact", json.path("requestId").asText());
+        assertFalse(json.path("response").path("server_status").get(0).has("request_id"));
+        assertEquals("compact", mapper.readTree(JsonUtils.toStringOrEmpty(response))
+                .path("server_status").get(0).path("request_id").asText());
+        assertFalse(json.path("routingDecisions").get(0).has("prefillPolicy"));
+        var group = json.path("decisionGroup");
+        assertEquals(5, group.size());
+        assertEquals("group", group.path("id").asText());
+        assertEquals(2, group.path("committedSize").asInt());
+        assertEquals("batch_full", group.path("reason").asText());
+        assertEquals(1234, group.path("committedAtMs").asLong());
+        assertEquals(10, group.path("requestWaitMs").asLong());
     }
 
     @Test
@@ -91,28 +129,26 @@ class PvLogDataTest {
         assertEquals(context.getTotalTimeUs(), data.getTotalUs());
         assertEquals(500, data.getArrivalMs());
         assertEquals(9, data.getReqParseUs());
-        assertEquals(12, data.getHashWaitUs());
-        assertEquals(34, data.getHashUs());
         assertEquals("KVCM", data.getCacheMatchSource());
         assertEquals(144, data.getCacheMatchUs());
         assertEquals(3, data.getCacheMatchCount());
-        assertEquals(2, data.getCacheMatchSelections().size());
-        assertEquals("CACHE_LEADER", data.getSelectionReasons().get(RoleType.PREFILL));
+        assertEquals(1, data.getCacheMatchSelections().size());
+        assertTrue(data.getSelectionReasons().isEmpty());
         assertEquals(1, data.getRoutingDecisions().size());
-        assertEquals("10.0.0.2", data.getCacheMatchSelections().getFirst().selectedIp());
-        assertEquals(512, data.getCacheMatchSelections().getFirst().hitCacheTokens());
+        assertEquals("10.0.0.3", data.getCacheMatchSelections().getFirst().selectedIp());
+        assertEquals(128, data.getCacheMatchSelections().getFirst().hitCacheTokens());
 
         String json = JsonUtils.toStringOrEmpty(data);
         assertTrue(json.contains("\"totalUs\":" + context.getTotalTimeUs()));
         assertTrue(json.contains("\"arrivalMs\":500"));
         assertTrue(json.contains("\"reqParseUs\":9"));
-        assertTrue(json.contains("\"hashWaitUs\":12"));
-        assertTrue(json.contains("\"hashUs\":34"));
+        assertFalse(json.contains("\"hashWaitUs\""));
+        assertFalse(json.contains("\"hashUs\""));
         assertTrue(json.contains("\"cacheMatchSource\":\"KVCM\""));
         assertTrue(json.contains("\"cacheMatchUs\":144"));
         assertTrue(json.contains("\"cacheMatchCount\":3"));
-        assertTrue(json.contains("\"cacheMatchSelections\":[{\"role\":\"PREFILL\",\"selectedIp\":\"10.0.0.2\",\"hitCacheTokens\":512}"));
-        assertTrue(json.contains("\"selectionReasons\":{\"PREFILL\":\"CACHE_LEADER\"}"));
+        assertTrue(json.contains("\"cacheMatchSelections\":[{\"role\":\"DECODE\""));
+        assertFalse(json.contains("\"selectionReasons\""));
         assertTrue(json.contains("\"routingDecisions\":[{\"role\":\"PREFILL\""));
         assertTrue(json.contains("\"strategy\":\"CostBasedPrefill\""));
         assertTrue(json.contains("\"projectedTtftMs\":90"));
@@ -122,7 +158,7 @@ class PvLogDataTest {
     }
 
     @Test
-    void includesActualInputIdsCountAndRequestBodyBytes() {
+    void includesSequenceLengthAndOmitsPayloadDiagnostics() {
         Request request = new Request();
         request.setRequestId("2");
         request.setSeqLen(999);
@@ -131,14 +167,17 @@ class PvLogDataTest {
         BalanceContext context = new BalanceContext();
         context.setRequest(request);
         context.setInputIdsCount(3L);
+        context.setRequestMessageBytes(1234L);
         context.setRequestBodyBytes(1_234L);
 
         PvLogData data = new PvLogData(context);
 
-        assertEquals(Long.valueOf(3), data.getInputIdsCount());
+        assertEquals(Long.valueOf(999), data.getSeqLen());
         assertEquals(Long.valueOf(1_234), data.getRequestBodyBytes());
         String json = JsonUtils.toStringOrEmpty(data);
-        assertTrue(json.contains("\"inputIdsCount\":3"));
+        assertTrue(json.contains("\"seqLen\":999"));
+        assertFalse(json.contains("\"inputIdsCount\""));
+        assertFalse(json.contains("\"requestMessageBytes\""));
         assertTrue(json.contains("\"requestBodyBytes\":1234"));
     }
 
@@ -153,7 +192,6 @@ class PvLogDataTest {
 
         assertNull(data.getRequestId());
         assertNull(data.getSeqLen());
-        assertNull(data.getInputIdsCount());
         assertEquals(Long.valueOf(5_242_881), data.getRequestBodyBytes());
         String json = JsonUtils.toStringOrEmpty(data);
         assertFalse(json.contains("\"requestId\""));
@@ -194,7 +232,7 @@ class PvLogDataTest {
                     PvLogData snapshot = new PvLogData(context);
                     assertEquals(snapshot.getCacheMatchCount() * 2L, snapshot.getCacheMatchUs());
                     for (RoutingDecision decision : snapshot.getRoutingDecisions()) {
-                        assertEquals(decision.selectionReason(), snapshot.getSelectionReasons().get(decision.role()));
+                        assertFalse(snapshot.getSelectionReasons().containsKey(decision.role()));
                     }
                     assertFalse(JsonUtils.toStringOrEmpty(snapshot).isEmpty());
                 }
@@ -220,8 +258,6 @@ class PvLogDataTest {
             }).get(5, java.util.concurrent.TimeUnit.SECONDS);
         }
         PvLogData result = new PvLogData(context);
-        assertEquals(5_000, result.getHashWaitUs());
-        assertEquals(5_000, result.getHashUs());
         assertEquals(5_000, result.getCacheMatchCount());
         assertEquals(10_000, result.getCacheMatchUs());
     }
