@@ -634,7 +634,7 @@ void KVCacheManager::allocateAndSync() {
         auto   block_num_t   = torch::empty({(int64_t)world_size}, torch::kInt32).pin_memory();
         auto   block_num_ptr = block_num_t.data_ptr<int>();
         block_num_ptr[local_rank] = config_.block_num;
-        execAllGather({{block_num_t}, ParallelMode::DP_AND_TP});
+        execAllGather({{block_num_t}, ParallelMode::WORLD});
         execSyncCommunication(false);
         cudaSyncAndCheck();
 

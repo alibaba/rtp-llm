@@ -12,13 +12,16 @@ from enum import Enum
 from typing import List
 
 
-class Axis(Enum):
-    """Parallelism axes. Rank layout order is fixed by RankLayout (PP
-    outermost, TP innermost); PCP is reserved, not materialized yet."""
+class Group(Enum):
+    """Parallel dimensions plus the whole world. Single enum shared by the
+    layout model and collective communication. WORLD spans all ranks
+    (torch.distributed WORLD; the former "DP_AND_TP", named before PP existed).
+    PCP is reserved, not materialized yet."""
 
     TP = "TP"
     DP = "DP"
     PP = "PP"
+    WORLD = "WORLD"
 
 
 @dataclass(frozen=True)
@@ -72,12 +75,13 @@ class RankLayout:
     def tp_size(self) -> int:
         return self._tp_size
 
-    def size_of(self, axis: Axis) -> int:
+    def size_of(self, group: Group) -> int:
         return {
-            Axis.TP: self._tp_size,
-            Axis.DP: self._dp_size,
-            Axis.PP: self._pp_size,
-        }[axis]
+            Group.TP: self._tp_size,
+            Group.DP: self._dp_size,
+            Group.PP: self._pp_size,
+            Group.WORLD: self.world_size(),
+        }[group]
 
     def world_size(self) -> int:
         return self._pp_size * self._dp_size * self._tp_size
@@ -122,10 +126,10 @@ class RankLayout:
             )
         return (coord.pp * self._dp_size + coord.dp) * self._tp_size + coord.tp
 
-    def groups(self, axis: Axis) -> List[List[int]]:
-        """All groups of `axis`, deterministic order (see class docstring)."""
+    def groups(self, group: Group) -> List[List[int]]:
+        """All groups of `group`, deterministic order (see class docstring)."""
         groups: List[List[int]] = []
-        if axis is Axis.TP:
+        if group is Group.TP:
             for pp in range(self._pp_size):
                 for dp in range(self._dp_size):
                     groups.append(
@@ -134,7 +138,7 @@ class RankLayout:
                             for t in range(self._tp_size)
                         ]
                     )
-        elif axis is Axis.DP:
+        elif group is Group.DP:
             for pp in range(self._pp_size):
                 for tp in range(self._tp_size):
                     groups.append(
@@ -143,7 +147,7 @@ class RankLayout:
                             for d in range(self._dp_size)
                         ]
                     )
-        elif axis is Axis.PP:
+        elif group is Group.PP:
             for dp in range(self._dp_size):
                 for tp in range(self._tp_size):
                     groups.append(
@@ -152,24 +156,31 @@ class RankLayout:
                             for p in range(self._pp_size)
                         ]
                     )
-        else:  # pragma: no cover - guarded by the Axis enum
-            raise ValueError(f"unknown axis: {axis}")
+        elif group is Group.WORLD:
+            groups.append(list(range(self.world_size())))
+        else:  # pragma: no cover - guarded by the Group enum
+            raise ValueError(f"unknown group: {group}")
         return groups
 
-    def group_of(self, axis: Axis, world_rank: int) -> List[int]:
-        """The unique group of `axis` that contains `world_rank`."""
+    def group_of(self, group: Group, world_rank: int) -> List[int]:
+        """The unique group of `group` that contains `world_rank`."""
         coord = self.coord_of(world_rank)
-        for group in self.groups(axis):
-            if world_rank in group:
-                return group
+        for members in self.groups(group):
+            if world_rank in members:
+                return members
         raise AssertionError(  # pragma: no cover - unreachable by construction
-            f"world_rank {world_rank} (coord {coord}) not found in any {axis} group"
+            f"world_rank {world_rank} (coord {coord}) not found in any {group} group"
         )
 
-    def rank_in_group(self, axis: Axis, world_rank: int) -> int:
-        """Position inside the `axis` group; equals the coordinate along that axis."""
+    def rank_in_group(self, group: Group, world_rank: int) -> int:
+        """Position inside the `group` group; equals the coordinate along that axis."""
         coord = self.coord_of(world_rank)
-        return {Axis.TP: coord.tp, Axis.DP: coord.dp, Axis.PP: coord.pp}[axis]
+        return {
+            Group.TP: coord.tp,
+            Group.DP: coord.dp,
+            Group.PP: coord.pp,
+            Group.WORLD: world_rank,
+        }[group]
 
     def __repr__(self) -> str:
         return (

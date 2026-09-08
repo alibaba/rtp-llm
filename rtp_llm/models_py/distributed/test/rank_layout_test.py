@@ -6,7 +6,7 @@ import itertools
 import unittest
 from types import SimpleNamespace
 
-from rtp_llm.models_py.distributed.rank_layout import Axis, Coord, RankLayout
+from rtp_llm.models_py.distributed.rank_layout import Coord, Group, RankLayout
 
 _SWEEP = list(itertools.product((1, 2, 3), repeat=3))
 
@@ -141,9 +141,9 @@ class RankLayoutCoordTest(unittest.TestCase):
 
     def test_basic_quantities(self):
         layout = RankLayout(pp_size=3, dp_size=2, tp_size=4)
-        self.assertEqual(layout.size_of(Axis.PP), 3)
-        self.assertEqual(layout.size_of(Axis.DP), 2)
-        self.assertEqual(layout.size_of(Axis.TP), 4)
+        self.assertEqual(layout.size_of(Group.PP), 3)
+        self.assertEqual(layout.size_of(Group.DP), 2)
+        self.assertEqual(layout.size_of(Group.TP), 4)
         self.assertEqual(layout.lane_stride(), 8)
 
     def test_from_parallelism_config_duck_typed(self):
@@ -160,25 +160,36 @@ class RankLayoutGroupsTest(unittest.TestCase):
         for pp_size, dp_size, tp_size in _SWEEP:
             layout = RankLayout(pp_size=pp_size, dp_size=dp_size, tp_size=tp_size)
             expected = _legacy_tp_groups(layout.world_size(), pp_size, dp_size, tp_size)
-            self.assertEqual(layout.groups(Axis.TP), expected, msg=f"layout={layout}")
+            self.assertEqual(layout.groups(Group.TP), expected, msg=f"layout={layout}")
 
     def test_dp_groups_match_legacy_exhaustive(self):
         for pp_size, dp_size, tp_size in _SWEEP:
             layout = RankLayout(pp_size=pp_size, dp_size=dp_size, tp_size=tp_size)
             expected = _legacy_dp_groups(layout.world_size(), pp_size, dp_size, tp_size)
-            self.assertEqual(layout.groups(Axis.DP), expected, msg=f"layout={layout}")
+            self.assertEqual(layout.groups(Group.DP), expected, msg=f"layout={layout}")
 
     def test_pp_groups_match_legacy_exhaustive(self):
         for pp_size, dp_size, tp_size in _SWEEP:
             layout = RankLayout(pp_size=pp_size, dp_size=dp_size, tp_size=tp_size)
             expected = _legacy_pp_groups(layout.world_size(), pp_size, dp_size, tp_size)
-            self.assertEqual(layout.groups(Axis.PP), expected, msg=f"layout={layout}")
+            self.assertEqual(layout.groups(Group.PP), expected, msg=f"layout={layout}")
+
+    def test_world_group_spans_all_ranks_exhaustive(self):
+        # WORLD is the whole lattice: one group of every rank.
+        for pp_size, dp_size, tp_size in _SWEEP:
+            layout = RankLayout(pp_size=pp_size, dp_size=dp_size, tp_size=tp_size)
+            all_ranks = list(range(layout.world_size()))
+            self.assertEqual(layout.size_of(Group.WORLD), layout.world_size())
+            self.assertEqual(layout.groups(Group.WORLD), [all_ranks])
+            for r in all_ranks:
+                self.assertEqual(layout.group_of(Group.WORLD, r), all_ranks)
+                self.assertEqual(layout.rank_in_group(Group.WORLD, r), r)
 
     def test_groups_partition_world_exhaustive(self):
         # Every axis' groups must partition [0, world_size) exactly once.
         for pp_size, dp_size, tp_size in _SWEEP:
             layout = RankLayout(pp_size=pp_size, dp_size=dp_size, tp_size=tp_size)
-            for axis in (Axis.TP, Axis.DP, Axis.PP):
+            for axis in (Group.TP, Group.DP, Group.PP):
                 groups = layout.groups(axis)
                 flat = sorted(r for g in groups for r in g)
                 self.assertEqual(
@@ -195,27 +206,27 @@ class RankLayoutGroupsTest(unittest.TestCase):
         layout = RankLayout(pp_size=2, dp_size=2, tp_size=2)
         # rank 5 = pp=1, dp=0, tp=1
         self.assertEqual(layout.coord_of(5), Coord(tp=1, dp=0, pp=1))
-        self.assertEqual(layout.group_of(Axis.TP, 5), [4, 5])
-        self.assertEqual(layout.group_of(Axis.DP, 5), [5, 7])
-        self.assertEqual(layout.group_of(Axis.PP, 5), [1, 5])
-        self.assertEqual(layout.rank_in_group(Axis.TP, 5), 1)
-        self.assertEqual(layout.rank_in_group(Axis.DP, 5), 0)
-        self.assertEqual(layout.rank_in_group(Axis.PP, 5), 1)
+        self.assertEqual(layout.group_of(Group.TP, 5), [4, 5])
+        self.assertEqual(layout.group_of(Group.DP, 5), [5, 7])
+        self.assertEqual(layout.group_of(Group.PP, 5), [1, 5])
+        self.assertEqual(layout.rank_in_group(Group.TP, 5), 1)
+        self.assertEqual(layout.rank_in_group(Group.DP, 5), 0)
+        self.assertEqual(layout.rank_in_group(Group.PP, 5), 1)
 
     def test_rank_in_group_equals_axis_coordinate_exhaustive(self):
         for pp_size, dp_size, tp_size in _SWEEP:
             layout = RankLayout(pp_size=pp_size, dp_size=dp_size, tp_size=tp_size)
             for r in range(layout.world_size()):
                 coord = layout.coord_of(r)
-                self.assertEqual(layout.rank_in_group(Axis.TP, r), coord.tp)
-                self.assertEqual(layout.rank_in_group(Axis.DP, r), coord.dp)
-                self.assertEqual(layout.rank_in_group(Axis.PP, r), coord.pp)
+                self.assertEqual(layout.rank_in_group(Group.TP, r), coord.tp)
+                self.assertEqual(layout.rank_in_group(Group.DP, r), coord.dp)
+                self.assertEqual(layout.rank_in_group(Group.PP, r), coord.pp)
 
     def test_degenerate_single_rank(self):
         layout = RankLayout()
         self.assertEqual(layout.world_size(), 1)
         self.assertEqual(layout.coord_of(0), Coord())
-        for axis in (Axis.TP, Axis.DP, Axis.PP):
+        for axis in (Group.TP, Group.DP, Group.PP):
             self.assertEqual(layout.groups(axis), [[0]])
             self.assertEqual(layout.group_of(axis, 0), [0])
             self.assertEqual(layout.rank_in_group(axis, 0), 0)
@@ -223,9 +234,9 @@ class RankLayoutGroupsTest(unittest.TestCase):
     def test_degenerate_pure_tp(self):
         # pp=dp=1 must reduce to the legacy pure-TP deployment exactly.
         layout = RankLayout(pp_size=1, dp_size=1, tp_size=4)
-        self.assertEqual(layout.groups(Axis.TP), [[0, 1, 2, 3]])
-        self.assertEqual(layout.groups(Axis.DP), [[0], [1], [2], [3]])
-        self.assertEqual(layout.groups(Axis.PP), [[0], [1], [2], [3]])
+        self.assertEqual(layout.groups(Group.TP), [[0, 1, 2, 3]])
+        self.assertEqual(layout.groups(Group.DP), [[0], [1], [2], [3]])
+        self.assertEqual(layout.groups(Group.PP), [[0], [1], [2], [3]])
 
 
 if __name__ == "__main__":

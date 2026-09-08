@@ -81,7 +81,7 @@ void LoadFlags::setReady(bool ready) {
 bool LoadFlags::isReady(size_t world_size) {
     if (world_size > 1) {
         // sync all ranks load_flag_tensor_
-        flag_sync = execAllReduce({flag_gpu, ReduceOp::Sum, false, ParallelMode::DP_AND_TP, flag_sync}).buffer;
+        flag_sync = execAllReduce({flag_gpu, ReduceOp::Sum, false, ParallelMode::WORLD, flag_sync}).buffer;
     } else {
         flag_sync.copy_(flag_gpu);
     }
@@ -138,7 +138,7 @@ EPLBConfig EplbController::getAndSyncData(size_t world_size) {
     eplb_control_data_buf_device.copy_(eplb_control_data_buf_host, /*non_blocking=*/true);
 
     if (world_size > 1) {
-        execBroadcast({{eplb_control_data_buf_device}, 0, ParallelMode::DP_AND_TP});
+        execBroadcast({{eplb_control_data_buf_device}, 0, ParallelMode::WORLD});
     }
 
     // copy to host
@@ -320,8 +320,8 @@ void ExpertBalancer::copyToTensor(const torch::Tensor& src, torch::Tensor& dst) 
 void ExpertBalancer::createPlan() {
     // pre run
     if (world_size_ > 1) {
-        execAllReduce({stats_.log_stats_gpu, ReduceOp::Sum, false, ParallelMode::DP_AND_TP});
-        execAllReduce({stats_.gpu_loads_gpu, ReduceOp::Sum, false, ParallelMode::DP_AND_TP});
+        execAllReduce({stats_.log_stats_gpu, ReduceOp::Sum, false, ParallelMode::WORLD});
+        execAllReduce({stats_.gpu_loads_gpu, ReduceOp::Sum, false, ParallelMode::WORLD});
     }
 
     // copy stats gpu tensor to host tensor [implicit sync]
@@ -345,7 +345,7 @@ void ExpertBalancer::createPlan() {
                         eplb_plan_buffers_.log2phy,
                         eplb_plan_buffers_.phy2log},
                        0,
-                       ParallelMode::DP_AND_TP});
+                       ParallelMode::WORLD});
     }
 
     // copy plan gpu tensor to host tensor [implicit sync]

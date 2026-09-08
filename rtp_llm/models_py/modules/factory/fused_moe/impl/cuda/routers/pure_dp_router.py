@@ -3,9 +3,9 @@
 Replaces the per-token all_reduce pattern in PureTpRouter with a communication
 pattern designed for Data Parallel (DP) MoE:
 
-  prepare:  allgather(scattered_tokens, DP_AND_TP) -> full_tokens
+  prepare:  allgather(scattered_tokens, WORLD) -> full_tokens
   execute:  MoE on full_tokens (each rank computes partial sums)
-  finalize: reduce_scatter(partial_output, DP_AND_TP) -> scattered_output
+  finalize: reduce_scatter(partial_output, WORLD) -> scattered_output
 
 This avoids DeepEP entirely and uses standard NCCL collectives.
 
@@ -55,7 +55,7 @@ class PureDpRouterBase(FusedMoeDataRouter):
     """Base class for pure DP routers using allgather + reduce_scatter.
 
     Instead of all_reduce at finalize time, this router:
-    - In prepare(): allgathers scattered tokens across DP_AND_TP group
+    - In prepare(): allgathers scattered tokens across WORLD group
     - In finalize(): reduce_scatters the partial MoE output back
 
     In DP mode, ranks may have different batch sizes (real vs fake streams).
@@ -120,7 +120,7 @@ class PureDpRouterBase(FusedMoeDataRouter):
         # Plan to lift max_n to step-level host metadata (computed once before
         # entering the MoE stack) in a follow-up PR. Tracked on PR #968 review.
         n_tensor = torch.tensor([local_n], device=a1.device, dtype=torch.int64)
-        all_n = all_gather(n_tensor, group=Group.DP_AND_TP)
+        all_n = all_gather(n_tensor, group=Group.WORLD)
         max_n = int(all_n.max().item())
 
         if local_n < max_n:
@@ -143,9 +143,9 @@ class PureDpRouterBase(FusedMoeDataRouter):
 
         a1, topk_weights, topk_ids, _ = self._pad_to_max(a1, topk_weights, topk_ids)
 
-        a1_full = all_gather(a1, group=Group.DP_AND_TP)
-        topk_weights_full = all_gather(topk_weights, group=Group.DP_AND_TP)
-        topk_ids_full = all_gather(topk_ids, group=Group.DP_AND_TP)
+        a1_full = all_gather(a1, group=Group.WORLD)
+        topk_weights_full = all_gather(topk_weights, group=Group.WORLD)
+        topk_ids_full = all_gather(topk_ids, group=Group.WORLD)
 
         expert_x, expert_x_scale = self._do_quant(a1_full)
 
@@ -181,7 +181,7 @@ class PureDpRouterBase(FusedMoeDataRouter):
         ), "PureDpRouter.finalize requires extra_finalize_args['original_num_tokens']"
         local_batch_size: int = extra_finalize_args["original_num_tokens"]
 
-        output = reduce_scatter(payload.fused_expert_output, group=Group.DP_AND_TP)
+        output = reduce_scatter(payload.fused_expert_output, group=Group.WORLD)
         if output.shape[0] > local_batch_size:
             output = output[:local_batch_size]
         return output

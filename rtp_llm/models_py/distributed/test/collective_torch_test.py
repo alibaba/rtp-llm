@@ -32,7 +32,7 @@ from rtp_llm.test.utils.port_util import PortManager
 
 def _calculate_group_ranks(rank: int, world_size: int, tp_size: int, group_type: Group):
     """Calculate ranks in a specific group"""
-    if group_type == Group.DP_AND_TP:
+    if group_type == Group.WORLD:
         return list(range(world_size))
     elif group_type == Group.DP:
         tp_rank = rank % tp_size
@@ -52,7 +52,7 @@ def _test_all_reduce_collective(
 ):
     """Test all_reduce collective operation across all groups"""
     logging.info(f"Rank {rank} testing all_reduce")
-    for group_type in [Group.DP_AND_TP, Group.DP, Group.TP]:
+    for group_type in [Group.WORLD, Group.DP, Group.TP]:
         # Skip if group doesn't make sense for this configuration
         if group_type == Group.DP and dp_size == 1:
             continue
@@ -98,7 +98,7 @@ def _test_broadcast_collective(
 ):
     """Test broadcast collective operation across all groups"""
     logging.info(f"Rank {rank} testing broadcast")
-    for group_type in [Group.DP_AND_TP, Group.DP, Group.TP]:
+    for group_type in [Group.WORLD, Group.DP, Group.TP]:
         # Skip if group doesn't make sense for this configuration
         if group_type == Group.DP and dp_size == 1:
             continue
@@ -146,7 +146,7 @@ def _test_send_recv_collective(
     Simple test: if group has at least 2 ranks, rank 0 sends and rank 1 receives.
     """
     logging.info(f"Rank {rank} testing send/recv")
-    for group_type in [Group.DP_AND_TP, Group.DP, Group.TP]:
+    for group_type in [Group.WORLD, Group.DP, Group.TP]:
         # Skip if group doesn't make sense for this configuration
         if group_type == Group.DP and dp_size == 1:
             continue
@@ -199,7 +199,7 @@ def _test_all_gather_collective(
 ):
     """Test all_gather collective operation across all groups"""
     logging.info(f"Rank {rank} testing all_gather")
-    for group_type in [Group.DP_AND_TP, Group.DP, Group.TP]:
+    for group_type in [Group.WORLD, Group.DP, Group.TP]:
         # Skip if group doesn't make sense for this configuration
         if group_type == Group.DP and dp_size == 1:
             continue
@@ -241,7 +241,7 @@ def _test_reduce_scatter_collective(
 ):
     """Test reduce_scatter collective operation across all groups"""
     logging.info(f"Rank {rank} testing reduce_scatter")
-    for group_type in [Group.DP_AND_TP, Group.DP, Group.TP]:
+    for group_type in [Group.WORLD, Group.DP, Group.TP]:
         if group_type == Group.DP and dp_size == 1:
             continue
         if group_type == Group.TP and tp_size == 1:
@@ -259,12 +259,13 @@ def _test_reduce_scatter_collective(
             # mis-scatter (e.g. wrong offset) cannot be hidden by uniform
             # inputs. Chunk c on rank r holds the value (r+1) * (c+1).
             input_tensor = torch.empty(
-                group_size * chunk_size, hidden_dim,
+                group_size * chunk_size,
+                hidden_dim,
                 device=f"cuda:{parallelism_config.local_rank}",
             )
             for c in range(group_size):
-                input_tensor[c * chunk_size : (c + 1) * chunk_size] = (
-                    (rank + 1) * (c + 1)
+                input_tensor[c * chunk_size : (c + 1) * chunk_size] = (rank + 1) * (
+                    c + 1
                 )
 
             result = reduce_scatter(input_tensor, group=group_type)
@@ -277,10 +278,14 @@ def _test_reduce_scatter_collective(
             # If reduce_scatter mis-aligned chunks, expected != observed.
             expected_sum = sum(r + 1 for r in group_ranks)
             expected_chunk_value = expected_sum * (local_idx + 1)
-            expected = torch.ones(
-                chunk_size, hidden_dim,
-                device=f"cuda:{parallelism_config.local_rank}",
-            ) * expected_chunk_value
+            expected = (
+                torch.ones(
+                    chunk_size,
+                    hidden_dim,
+                    device=f"cuda:{parallelism_config.local_rank}",
+                )
+                * expected_chunk_value
+            )
 
             assert result.shape == (chunk_size, hidden_dim), (
                 f"Rank {rank} reduce_scatter {group_type}: "
@@ -308,7 +313,7 @@ def _test_allgather_reduce_scatter_roundtrip(
     scattered -> all_gather -> (compute partial results) -> reduce_scatter -> scattered
     """
     logging.info(f"Rank {rank} testing allgather+reduce_scatter roundtrip")
-    for group_type in [Group.DP_AND_TP, Group.TP]:
+    for group_type in [Group.WORLD, Group.TP]:
         if group_type == Group.TP and tp_size == 1:
             continue
 
@@ -322,7 +327,8 @@ def _test_allgather_reduce_scatter_roundtrip(
 
             # Each rank starts with its own scattered chunk
             original = torch.randn(
-                chunk_size, hidden_dim,
+                chunk_size,
+                hidden_dim,
                 device=f"cuda:{parallelism_config.local_rank}",
             )
 
@@ -393,7 +399,7 @@ def _test_all_collectives_worker(
         # Helper function to get process group and group ranks
         def _get_process_group_and_ranks(group_type: Group):
             """Get process group and ranks for a given group type"""
-            if group_type == Group.DP_AND_TP:
+            if group_type == Group.WORLD:
                 process_group = torch.distributed.group.WORLD
             elif group_type == Group.DP:
                 process_group = _get_group(Group.DP)
