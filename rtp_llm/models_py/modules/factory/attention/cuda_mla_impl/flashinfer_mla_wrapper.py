@@ -2,6 +2,7 @@ import os
 from typing import Any, Dict, List, Optional
 
 import torch
+import triton
 
 from rtp_llm.models_py.modules.base.common.kvcache_store import WriteCacheStoreOp
 from rtp_llm.models_py.modules.factory.attention import common
@@ -464,9 +465,19 @@ class MlaFlashMLAPrefillImpl(MlaFlashInferPrefillImpl):
         max_seq_len: int = 0,
         is_cuda_graph: bool = False,
         parallelism_config: Optional[ParallelismConfig] = None,
+        cache_group_id: Optional[int] = None,
     ) -> None:
         from .flashmla_dense_prefill import MlaFlashMLAPrefillOp
 
+        if cache_group_id is None:
+            cp_size, cp_rank = 1, 0
+        else:
+            if parallelism_config is None or parallelism_config.tp_size <= 1:
+                raise ValueError("Page-RR Prefill requires a parallelism configuration")
+            cp_size, cp_rank = parallelism_config.tp_size, parallelism_config.tp_rank
+        if cp_size > 1 and attn_configs.kv_cache_dtype != KvCacheDataType.BASE:
+            raise ValueError("Page-RR Prefill currently requires BASE KV cache")
+        self.cache_group_id = cache_group_id
         MlaFlashInferImplBase.__init__(
             self,
             MlaFlashMLAPrefillOp(
@@ -487,6 +498,9 @@ class MlaFlashMLAPrefillImpl(MlaFlashInferPrefillImpl):
                 fp8_compute=attn_configs.mla_fp8_compute,
                 q_scale=attn_configs.mla_fp8_q_scale,
                 kv_scale=attn_configs.mla_fp8_kv_scale,
+                cp_size=cp_size,
+                cp_rank=cp_rank,
+                tokens_per_block=attn_configs.tokens_per_block,
             ),
             NewMlaRotaryEmbeddingOp(
                 cos_sin_cache=cos_sin_cache,
@@ -517,6 +531,26 @@ class MlaFlashMLAPrefillImpl(MlaFlashInferPrefillImpl):
     def release_forward_workspace(self) -> None:
         self.fmha_impl.release_forward_workspace()
 
+    def _device_slot_mapping(self) -> Optional[torch.Tensor]:
+        op = self.fmha_impl
+        if op.cp_size == 1:
+            return super()._device_slot_mapping()
+        from .page_rr_mla_kernels import _prefill_page_rr_slots
+
+        positions = self.fmha_params.positions_d
+        requests = self.fmha_params.batch_indice_d
+        table = self.attn_inputs.kv_cache_kernel_block_id_device
+        if positions.numel():
+            _prefill_page_rr_slots[(triton.cdiv(positions.numel(), 128),)](
+                positions, requests, table, self._cp_slot_mapping,
+                positions.numel(), table.shape[0], table.shape[1],
+                table.stride(0), table.stride(1),
+                tokens_per_block=op.tokens_per_block,
+                kernel_tokens_per_block=op.page_size,
+                cp_size=op.cp_size, cp_rank=op.cp_rank, block=128,
+            )
+        return self._cp_slot_mapping
+
     def create_params(self, attn_inputs: PyAttentionInputs):
         if self.fmha_impl is not None:
             self.prepare(attn_inputs)
@@ -533,11 +567,15 @@ class MlaFlashMLAPrefillImpl(MlaFlashInferPrefillImpl):
         check_attention_inputs(attn_inputs)
         from .flashmla_dense_prefill import build_flashmla_device_params
 
-        params = build_flashmla_device_params(attn_inputs, self.seq_size_per_block)
+        params = build_flashmla_device_params(
+            attn_inputs, self.seq_size_per_block, self.cache_group_id
+        )
         self.attn_inputs = attn_inputs
         self.fmha_params = params
         self.rope_params = params
         self.fmha_impl.plan(params)
+        if self.fmha_impl.cp_size > 1:
+            self._cp_slot_mapping = torch.empty_like(params.positions_d, dtype=torch.int64)
         return params
 
     @classmethod

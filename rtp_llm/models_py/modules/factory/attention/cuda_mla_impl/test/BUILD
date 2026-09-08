@@ -98,7 +98,7 @@ py_test(
 
 py_test(
     name = "page_rr_mla_decode_test",
-    srcs = ["page_rr_mla_decode_test.py"],
+    srcs = ["page_rr_mla_decode_test.py", "flashmla_forward_test_utils.py"],
     timeout = "long",
     data = ["//rtp_llm/cpp/cuda_graph/tests:test_cuda_graph_runner"],
     deps = [

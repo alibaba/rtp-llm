@@ -108,12 +108,10 @@ def get_mla_impl(
         if attn_inputs.is_prefill and not is_target_verify and not is_mtp_draft_update
         else DECODE_MLA_IMPS
     )
-    cache_group_id = None
-    if mla_impls is DECODE_MLA_IMPS:
-        cache_group_id = _page_rr_cache_group(
-            attn_inputs, parallelism_config, hybrid_attention_config
-        )
-    if cache_group_id is not None:
+    cache_group_id = _page_rr_cache_group(
+        attn_inputs, parallelism_config, hybrid_attention_config
+    )
+    if mla_impls is DECODE_MLA_IMPS and cache_group_id is not None:
         from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.page_rr_mla_decode import (
             PageRRMlaDecodeImpl,
         )
@@ -181,6 +179,15 @@ def get_mla_impl(
             logging.debug(f"skip mla impl [{impl}] because sparse mla is not supported")
             continue
 
+        storage_kwargs = {}
+        if mla_impls is PREFILL_MLA_IMPS and cache_group_id is not None:
+            from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashinfer_mla_wrapper import (
+                MlaFlashMLAPrefillImpl,
+            )
+
+            if issubclass(impl, MlaFlashMLAPrefillImpl):
+                storage_kwargs["cache_group_id"] = cache_group_id
+
         instance = impl(
             attn_configs,
             attn_inputs,
@@ -191,6 +198,7 @@ def get_mla_impl(
             max_seq_len=max_seq_len,
             is_cuda_graph=is_cuda_graph,
             parallelism_config=parallelism_config,
+            **storage_kwargs,
         )
         if not is_cuda_graph or instance.support_cuda_graph():
             return instance

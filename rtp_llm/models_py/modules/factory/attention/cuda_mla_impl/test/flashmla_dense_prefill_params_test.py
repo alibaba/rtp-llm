@@ -22,7 +22,7 @@ from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_dense_pr
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_forward_plan import (
     FlashMLAForwardRoute,
 )
-from rtp_llm.ops import AttentionConfigs
+from rtp_llm.ops import AttentionConfigs, KvCacheDataType, ParallelismConfig
 from rtp_llm.ops.compute_ops import rtp_llm_ops
 
 _TEST_TMPDIR = os.environ.get("TEST_TMPDIR")
@@ -73,9 +73,12 @@ class FlashMlaDensePrefillConfigForwardingTest(TestCase):
         captured: dict[str, object] = {}
 
         def make_op(*args: object, **kwargs: object) -> object:
+            captured["kv_cache_dtype"] = kwargs["kv_cache_dtype"]
             captured["expanded_kv_budget_bytes"] = int(
                 kwargs["expanded_kv_budget_bytes"]
             )
+            captured["cp_size"] = kwargs["cp_size"]
+            captured["cp_rank"] = kwargs["cp_rank"]
             return object()
 
         with (
@@ -106,6 +109,29 @@ class FlashMlaDensePrefillConfigForwardingTest(TestCase):
                 [],
                 torch.empty(0),
             )
+            # The new upstream FP8 path stays available without cache CP.
+            parallel = ParallelismConfig()
+            parallel.tp_size, parallel.tp_rank = 8, 3
+            for cache_group_id, dtype in (
+                (0, KvCacheDataType.BASE), (None, KvCacheDataType.FP8)
+            ):
+                configs.kv_cache_dtype = dtype
+                configs.mla_fp8_compute = dtype == KvCacheDataType.FP8
+                MlaFlashMLAPrefillImpl(
+                    configs, SimpleNamespace(), [], torch.empty(0),
+                    cache_group_id=cache_group_id,
+                    parallelism_config=parallel,
+                )
+                self.assertEqual(captured["kv_cache_dtype"], dtype)
+                self.assertEqual(
+                    (captured["cp_size"], captured["cp_rank"]),
+                    (8, 3) if cache_group_id is not None else (1, 0),
+                )
+            with self.assertRaisesRegex(ValueError, "Page-RR Prefill.*BASE"):
+                MlaFlashMLAPrefillImpl(
+                    configs, SimpleNamespace(), [], torch.empty(0),
+                    cache_group_id=0, parallelism_config=parallel,
+                )
 
         self.assertEqual(captured["expanded_kv_budget_bytes"], 5 * 1024**3)
 
@@ -170,12 +196,16 @@ class FlashMlaDensePrefillParamsTest(TestCase):
         expanded_kv_budget_bytes: int = 5 * 1024**3,
     ) -> MlaFlashMLAPrefillOp:
         op = object.__new__(MlaFlashMLAPrefillOp)
+        op.fp8_compute = False
         op.num_heads = 12
         op.kv_lora_rank = 512
         op.qk_rope_head_dim = 64
         op.qk_nope_head_dim = 128
         op.v_head_dim = 128
         op.page_size = self.page_size
+        op.cp_size = 1
+        op.cp_rank = 0
+        op.tokens_per_block = self.page_size
         op.expanded_kv_budget_bytes = expanded_kv_budget_bytes
         op.flash_mla_cuda = SimpleNamespace(dense_prefill_fwd=lambda *args: None)
         op.fp8_compute = False
@@ -422,6 +452,7 @@ class FlashMlaDensePrefillParamsTest(TestCase):
         params = build_flashmla_device_params(attn_inputs, self.page_size)
 
         impl = object.__new__(MlaFlashMLAPrefillImpl)
+        impl.fmha_impl = SimpleNamespace(cp_size=1)
         impl.fmha_params = params
         impl.attn_inputs = attn_inputs
         impl.seq_size_per_block = self.page_size
@@ -452,6 +483,126 @@ class FlashMlaDensePrefillParamsTest(TestCase):
             rtol=0,
             atol=0,
         )
+
+    def test_factory_prefill_writes_only_owned_cp_pages(self) -> None:
+        from rtp_llm.config.model_config import ModelConfig
+        from rtp_llm.model_loader.model_weight_info import ModelWeights
+        from rtp_llm.models_py.model_desc.block_map import select_block_map_for_layer
+        from rtp_llm.models_py.modules.factory.attention.attn_factory import AttnImplFactory
+        from rtp_llm.ops import HybridAttentionType, RoleType
+        from rtp_llm.ops.compute_ops import LayerKVCache, PyAttentionInputs
+        from rtp_llm.utils.model_weight import W
+
+        for page, kernel_page, cp_size in ((4, 2, 2), (4096, 128, 8)):
+            config = ModelConfig()
+            config.num_layers, config.max_seq_len = 3, 4 * page
+            config.quant_config = None
+            attn = config.attn_config
+            attn.use_mla, attn.is_sparse = True, False
+            attn.head_num, attn.kv_head_num = 96, 1
+            attn.kv_lora_rank, attn.nope_head_dim = 512, 128
+            attn.rope_head_dim, attn.v_head_dim = 64, 128
+            attn.tokens_per_block, attn.kernel_tokens_per_block = page, kernel_page
+            attn.kv_cache_dtype = KvCacheDataType.BASE
+            hybrid = config.hybrid_attention_config
+            hybrid.enable_hybrid_attention = hybrid.enable_independent_kv_cache_pools = True
+            hybrid.hybrid_attention_types = [
+                HybridAttentionType.LINEAR, HybridAttentionType.LINEAR, HybridAttentionType.NONE
+            ]
+            weights = ModelWeights(3, "cuda", torch.bfloat16)
+            weights.set_global_weight(
+                W.rope_cos_sin_cache, torch.zeros(4 * page, 64, device="cuda")
+            )
+            lengths, prefixes = [4, 2], [page - 2, 3 * page - 1]
+            payload = torch.arange(6 * 576, device="cuda").reshape(6, 576).to(torch.bfloat16)
+            table_width = 4 * page // kernel_page
+            for sharded in (False, True):
+                for rank in range(cp_size) if sharded else (0,):
+                    with self.subTest(page=page, sharded=sharded, rank=rank):
+                        parallel = ParallelismConfig()
+                        parallel.tp_size = parallel.world_size = cp_size
+                        parallel.tp_rank = parallel.world_rank = rank
+                        parallel.role_type = RoleType.PREFILL
+                        parallel.prefill_cp_config.kv_cache_sharded = sharded
+                        table_storage = torch.full(
+                            (2, table_width + 3), -1, dtype=torch.int32, device="cuda"
+                        )
+                        table = table_storage[:, :table_width]
+                        linear_table = torch.zeros((2, 1), dtype=torch.int32, device="cuda")
+                        inputs = PyAttentionInputs()
+                        for name, item in vars(
+                            _attention_inputs(lengths, prefixes, [table, linear_table], 1)
+                        ).items():
+                            setattr(inputs, name, item)
+                        inputs.kv_cache_layer_to_group_host = torch.tensor(
+                            [1, 1, 0], dtype=torch.int32
+                        )
+                        inputs.kv_cache_layer_to_group = inputs.kv_cache_layer_to_group_host
+                        cache = LayerKVCache()
+                        cache.kv_cache_base = torch.full(
+                            (3 * table_width, kernel_page, 576), -7,
+                            dtype=torch.bfloat16, device="cuda",
+                        )
+                        impl = AttnImplFactory.get_fmha_impl(config, parallel, weights, inputs)
+                        if sharded:
+                            self.assertEqual(impl.cache_group_id, 0)
+                            self.assertEqual(
+                                impl.fmha_params.batch_reuse_info_host[1][2], table_width
+                            )
+                        select_block_map_for_layer(inputs, 2)
+                        pointer = None
+                        # Step 2 fills a table with NULL entries.  Only the Page-RR
+                        # path treats a non-positive page as "skip this write"; dense
+                        # prefill maps the entry as it is, so a zero page would send
+                        # every token into physical page 0.
+                        for step in range(3 if sharded else 2):
+                            table.copy_(
+                                torch.arange(2 * table_width, device="cuda", dtype=torch.int32)
+                                .view(2, table_width) + (step % 2 + 1) * page // kernel_page
+                            )
+                            if step == 2:
+                                table[0].zero_()
+                                table[1].fill_(-1)
+                            slots = impl._device_slot_mapping()
+                            if sharded:
+                                if pointer is not None:
+                                    self.assertEqual(slots.data_ptr(), pointer)
+                                pointer = slots.data_ptr()
+                            expected = cache.kv_cache_base.clone().view(-1, 576)
+                            table_host = table.cpu().tolist()
+                            expected_slots = []
+                            token = 0
+                            for request, (prefix, length) in enumerate(zip(prefixes, lengths)):
+                                for position in range(prefix, prefix + length):
+                                    slot = -1
+                                    size = cp_size if sharded else 1
+                                    if not sharded or position // page % size == rank:
+                                        local_position = (
+                                            position // (page * size) * page + position % page
+                                        )
+                                        physical = table_host[request][local_position // kernel_page]
+                                        # Only the Page-RR path skips non-positive pages.
+                                        # Dense prefill maps the table entry as it is, so a
+                                        # zero page writes slots [0, kernel_page) and a
+                                        # negative one yields negative slots that write nothing.
+                                        if not sharded or physical > 0:
+                                            slot = physical * kernel_page + local_position % kernel_page
+                                            if slot >= 0:
+                                                expected[slot] = payload[token]
+                                    expected_slots.append(slot)
+                                    token += 1
+                            torch.testing.assert_close(
+                                slots.cpu(), torch.tensor(expected_slots, dtype=torch.int64),
+                                atol=0, rtol=0,
+                            )
+                            impl.kv_cache_write_op.forward(
+                                payload[:, :512], payload[:, 512:], cache, impl.rope_params,
+                                slot_mapping_override=slots,
+                            )
+                            torch.testing.assert_close(
+                                cache.kv_cache_base.view(-1, 576), expected, atol=0, rtol=0
+                            )
+                            self.assertTrue(torch.all(table_storage[:, table_width:] == -1))
 
     def test_reuse_gather_reads_live_hybrid_group_alias(self) -> None:
         initial_group = torch.tensor(

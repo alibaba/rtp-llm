@@ -6,14 +6,17 @@ replaced.
 """
 
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Optional, cast
+from typing import Any, Dict, Iterable, List, Optional, Sequence, cast
 
 import torch
 
+from rtp_llm.models_py.distributed.collective_torch import Group, all_gather_into
+from rtp_llm.models_py.modules.factory.attention.common import mla_cache_block_table
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_forward_plan import (
     FlashMLAForwardPlan,
     FlashMLAForwardRoute,
     FlashMLAPrefixLaunch,
+    FlashMLAPrefixSlice,
     plan_flashmla_forward,
 )
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_state_merge import (
@@ -158,6 +161,78 @@ def _prefix_sum(lengths: Iterable[int]) -> list[int]:
     return values
 
 
+@dataclass(frozen=True)
+class _CpGatherPlan:
+    stride: int
+    local_count: int
+    total_count: int
+    pack_request: torch.Tensor
+    pack_column: torch.Tensor
+    pack_offset: torch.Tensor
+    restore_source: torch.Tensor
+    restore_target: torch.Tensor
+
+
+def _owned_before(position: int, owner: int, page: int, size: int) -> int:
+    cycles, tail = divmod(position, page * size)
+    return cycles * page + min(max(tail - owner * page, 0), page)
+
+
+def _build_cp_gather_plan(
+    slices: tuple[FlashMLAPrefixSlice, ...],
+    offsets: tuple[int, ...],
+    *,
+    page: int,
+    kernel_page: int,
+    size: int,
+    rank: int,
+    device: torch.device,
+) -> _CpGatherPlan:
+    counts = [
+        [
+            _owned_before(s.prefix_start + s.prefix_len, owner, page, size)
+            - _owned_before(s.prefix_start, owner, page, size)
+            for s in slices
+        ]
+        for owner in range(size)
+    ]
+    stride = max((sum(row) for row in counts), default=0)
+    pack_request, pack_column, pack_offset = [], [], []
+    restore_source, restore_target = [], []
+    for owner, owner_counts in enumerate(counts):
+        cursor = owner * stride
+        for item, destination, count in zip(slices, offsets, owner_counts):
+            if count:
+                begin = _owned_before(item.prefix_start, owner, page, size)
+                rows = torch.arange(begin, begin + count, device=device)
+                if owner == rank:
+                    pack_request.append(torch.full_like(rows, item.request_idx))
+                    pack_column.append(rows // kernel_page)
+                    pack_offset.append(rows % kernel_page)
+                positions = (rows // page * size + owner) * page + rows % page
+                restore_source.append(
+                    torch.arange(cursor, cursor + count, device=device)
+                )
+                restore_target.append(destination + positions - item.prefix_start)
+            cursor += count
+
+    def concat(parts: list[torch.Tensor]) -> torch.Tensor:
+        if parts:
+            return torch.cat(parts)
+        return torch.empty(0, dtype=torch.int64, device=device)
+
+    return _CpGatherPlan(
+        stride=stride,
+        local_count=sum(counts[rank]),
+        total_count=sum(sum(row) for row in counts),
+        pack_request=concat(pack_request),
+        pack_column=concat(pack_column),
+        pack_offset=concat(pack_offset),
+        restore_source=concat(restore_source),
+        restore_target=concat(restore_target),
+    )
+
+
 class FlashMLADeviceParams:
     """Device-resident metadata consumed by dense FlashMLA Prefill.
 
@@ -203,6 +278,7 @@ def _host_i32_values(tensor: torch.Tensor) -> List[int]:
 def build_flashmla_device_params(
     attn_inputs: Any,
     page_size: int,
+    cache_group_id: Optional[int] = None,
 ) -> FlashMLADeviceParams:
     """Build dense-prefill metadata without FlashInfer's pinned ``buf_h``.
 
@@ -243,7 +319,7 @@ def build_flashmla_device_params(
         + local_positions
     )
 
-    block_table = getattr(attn_inputs, "kv_cache_kernel_block_id_device", None)
+    block_table = mla_cache_block_table(attn_inputs, cache_group_id)
     if block_table is None or block_table.numel() == 0:
         block_table = torch.empty((batch_size, 0), dtype=torch.int32, device=device)
     max_blocks = int(block_table.shape[1])
@@ -322,6 +398,10 @@ class MlaFlashMLAPrefillOp:
         fp8_compute: bool = False,
         q_scale: float = 1.0,
         kv_scale: float = 1.0,
+        *,
+        cp_size: int = 1,
+        cp_rank: int = 0,
+        tokens_per_block: Optional[int] = None,
     ) -> None:
         if weights is None:
             raise ValueError("FlashMLA Prefill requires MLA projection weights")
@@ -373,6 +453,17 @@ class MlaFlashMLAPrefillOp:
         self.qk_nope_head_dim = qk_nope_head_dim
         self.v_head_dim = v_head_dim
         self.page_size = page_size
+        self.cp_size = cp_size
+        self.cp_rank = cp_rank
+        self.tokens_per_block = page_size if tokens_per_block is None else tokens_per_block
+        if cp_size > 1 and (
+            self.tokens_per_block <= 0
+            or page_size <= 0
+            or self.tokens_per_block % page_size
+        ):
+            raise ValueError(
+                "Page-RR physical page must be a multiple of kernel page size"
+            )
         self.expanded_kv_budget_bytes = expanded_kv_budget_bytes
         self.scale = (
             (qk_nope_head_dim + qk_rope_head_dim) ** -0.5
@@ -400,6 +491,11 @@ class MlaFlashMLAPrefillOp:
         self._q_offsets: tuple[int, ...] = ()
         self._prefix_runtime_launches: tuple[_FlashMLAPrefixRuntimeLaunch, ...] = ()
         self._forward_workspace: Optional[_FlashMLAForwardWorkspace] = None
+        self._cp_gather_plans: dict[tuple, _CpGatherPlan] = {}
+        self._cp_gather_buffers: Optional[
+            tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+        ] = None
+        self._cp_gather_capacity = (0, 0)
 
     def release_forward_workspace(self) -> None:
         """Drop per-plan scratch once all target layers have consumed it.
@@ -409,6 +505,7 @@ class MlaFlashMLAPrefillOp:
         """
         self._forward_workspace = None
         self._fp8_prefix_rope = None
+        self._cp_gather_buffers = None
 
     def plan(self, mla_params: FlashMLADeviceParams) -> None:
         self.q_lens = list(mla_params.q_lens_host)
@@ -437,6 +534,34 @@ class MlaFlashMLAPrefillOp:
         self.release_forward_workspace()
         if self._forward_plan.route is FlashMLAForwardRoute.HYBRID:
             self._materialize_prefix_runtime_launches(mla_params.qo_indptr_d.device)
+
+        self._cp_gather_plans = {}
+        self._cp_gather_buffers = None
+        self._cp_gather_capacity = (0, 0)
+        if self.cp_size > 1 and self.has_reuse_cache:
+            specs = []
+            if self._forward_plan.route is FlashMLAForwardRoute.HYBRID:
+                for launch in self._prefix_runtime_launches:
+                    slices = launch.spec.slices
+                    offsets = tuple(_prefix_sum(s.prefix_len for s in slices)[:-1])
+                    specs.append((slices, offsets))
+            else:
+                slices = tuple(
+                    FlashMLAPrefixSlice(i, 0, row[1])
+                    for i, row in enumerate(self.batch_reuse_info_host)
+                )
+                specs.append((slices, tuple(_prefix_sum(self.kv_lens)[:-1])))
+            for slices, offsets in specs:
+                self._cp_gather_plans[(slices, offsets)] = _build_cp_gather_plan(
+                    slices, offsets, page=self.tokens_per_block,
+                    kernel_page=self.page_size, size=self.cp_size, rank=self.cp_rank,
+                    device=mla_params.qo_indptr_d.device,
+                )
+            plans = self._cp_gather_plans.values()
+            self._cp_gather_capacity = (
+                max((p.stride for p in plans), default=0),
+                max((p.total_count for p in plans), default=0),
+            )
 
     def _expanded_kv_bytes_per_token(self) -> int:
         return (
@@ -541,7 +666,6 @@ class MlaFlashMLAPrefillOp:
         flat_k_pe = k_pe.view(-1, self.qk_rope_head_dim)
         if not self.has_reuse_cache:
             return compressed_kv, flat_k_pe
-        kv_cache_base, reuse_cache_page_indice = self._reuse_cache_inputs(kv_cache)
 
         final_compressed_kv = torch.empty(
             (self.total_kv_lens, self.kv_lora_rank),
@@ -553,6 +677,26 @@ class MlaFlashMLAPrefillOp:
             dtype=flat_k_pe.dtype,
             device=flat_k_pe.device,
         )
+        if self.cp_size > 1:
+            current_latent = retained_bf16(compressed_kv)
+            prefixes = [row[1] for row in self.batch_reuse_info_host]
+            offsets = _prefix_sum(self.kv_lens)
+            slices = tuple(FlashMLAPrefixSlice(i, 0, n) for i, n in enumerate(prefixes))
+            self._gather_cp_prefix(
+                kv_cache, slices, offsets[:-1], final_compressed_kv, final_k_pe
+            )
+            q_offset = 0
+            for request, (prefix, length) in enumerate(zip(prefixes, self.q_lens)):
+                destination = offsets[request] + prefix
+                final_compressed_kv[destination : destination + length].copy_(
+                    current_latent[q_offset : q_offset + length]
+                )
+                final_k_pe[destination : destination + length].copy_(
+                    flat_k_pe[q_offset : q_offset + length]
+                )
+                q_offset += length
+            return final_compressed_kv, final_k_pe
+        kv_cache_base, reuse_cache_page_indice = self._reuse_cache_inputs(kv_cache)
         final_compressed_kv = self._gather_cache(
             final_compressed_kv,
             final_k_pe,
@@ -565,6 +709,47 @@ class MlaFlashMLAPrefillOp:
             self.page_size,
         )
         return final_compressed_kv, final_k_pe
+
+    def _gather_cp_prefix(
+        self,
+        kv_cache: Optional[LayerKVCache],
+        slices: tuple[FlashMLAPrefixSlice, ...],
+        offsets: Sequence[int],
+        latent_out: torch.Tensor,
+        rope_out: torch.Tensor,
+    ) -> None:
+        plan = self._cp_gather_plans[(slices, tuple(offsets))]
+        if plan.stride == 0:
+            return
+
+        width = self.kv_lora_rank + self.qk_rope_head_dim
+        if self._cp_gather_buffers is None:
+            max_stride, max_count = self._cp_gather_capacity
+            self._cp_gather_buffers = (
+                latent_out.new_empty((max_stride, width)),
+                latent_out.new_empty((self.cp_size * max_stride, width)),
+                latent_out.new_empty((max_count, width)),
+            )
+        local_buffer, gather_buffer, row_buffer = self._cp_gather_buffers
+        local = local_buffer[:plan.stride]
+        gathered = gather_buffer[:self.cp_size * plan.stride]
+        rows = row_buffer[:plan.total_count]
+
+        if plan.local_count:
+            table = self._direct_attn_inputs.kv_cache_kernel_block_id_device
+            cache = cast(LayerKVCache, kv_cache).kv_cache_base
+            physical = table[plan.pack_request, plan.pack_column].to(torch.int64)
+            local[:plan.local_count].copy_(
+                cache[physical, plan.pack_offset, :width]
+            )
+        all_gather_into(local, gathered, Group.TP)
+        torch.index_select(gathered, 0, plan.restore_source, out=rows)
+        latent_out.index_copy_(0, plan.restore_target, rows[:, :self.kv_lora_rank])
+        rope = rows[:, self.kv_lora_rank:]
+        if rope_out.ndim == 3:
+            rope_out[plan.restore_target] = rope[:, None, :]
+        else:
+            rope_out.index_copy_(0, plan.restore_target, rope)
 
     def _reuse_cache_inputs(
         self,
@@ -588,6 +773,7 @@ class MlaFlashMLAPrefillOp:
             or self.fp8_compute
             or not self.has_reuse_cache
             or not callable(fused_gather)
+            or self.cp_size > 1
         ):
             return None
 
@@ -858,14 +1044,29 @@ class MlaFlashMLAPrefillOp:
     ) -> None:
         fused_gather = rtp_llm_ops._gather_mla_latent_and_fill_k_pe
         flat_k_pe = k_pe.view(-1, self.qk_rope_head_dim)
-        kv_cache_base, reuse_cache_page_indice = self._reuse_cache_inputs(kv_cache)
+        if self.cp_size == 1:
+            kv_cache_base, reuse_cache_page_indice = self._reuse_cache_inputs(kv_cache)
         packed_head_dim = sum(_K3_PACKED_KV_HEAD_SPLITS)
 
         for launch in self._prefix_runtime_launches:
             kv_tokens = launch.spec.expanded_kv_tokens
             launch_compressed = workspace.compressed_kv_buffer(kv_tokens)
             launch_packed_kv = workspace.packed_kv_buffer(kv_tokens)
-            if self.fp8_compute or self._prefix_producer is not None:
+            if self.cp_size > 1:
+                offsets = _prefix_sum(item.prefix_len for item in launch.spec.slices)[
+                    :-1
+                ]
+                rope_out = launch_packed_kv.view(
+                    kv_tokens, self.num_heads, packed_head_dim
+                )[
+                    ...,
+                    self.qk_nope_head_dim : self.qk_nope_head_dim
+                    + self.qk_rope_head_dim,
+                ]
+                self._gather_cp_prefix(
+                    kv_cache, launch.spec.slices, offsets, launch_compressed, rope_out
+                )
+            elif self.fp8_compute or self._prefix_producer is not None:
                 launch_rope = self._fp8_prefix_rope[:kv_tokens]
                 launch_compressed = self._gather_cache(
                     launch_compressed,

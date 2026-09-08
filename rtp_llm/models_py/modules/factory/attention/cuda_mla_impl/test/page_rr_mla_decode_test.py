@@ -105,7 +105,9 @@ def _run_history(rank, port, queries=7, mla_layers=1):
             model_config.num_layers = 2 + mla_layers
             model_config.max_seq_len = max_seq_len
             model_config.hybrid_attention_config.enable_hybrid_attention = True
-            model_config.hybrid_attention_config.enable_independent_kv_cache_pools = True
+            model_config.hybrid_attention_config.enable_independent_kv_cache_pools = (
+                True
+            )
             model_config.hybrid_attention_config.hybrid_attention_types = [
                 HybridAttentionType.LINEAR,
                 HybridAttentionType.LINEAR,
@@ -116,7 +118,8 @@ def _run_history(rank, port, queries=7, mla_layers=1):
             weights = ModelWeights(model_config.num_layers, str(device), dtype)
             for i, layer_id in enumerate(layer_ids):
                 weights.weights[layer_id] = {
-                    W.mla_kc: kcs[i][selected], W.mla_vc: vcs[i][selected]
+                    W.mla_kc: kcs[i][selected],
+                    W.mla_vc: vcs[i][selected],
                 }
             weights.set_global_weight(W.rope_cos_sin_cache, cos_sin)
             parallel.role_type = RoleType.PDFUSION if replicated else RoleType.DECODE
@@ -151,7 +154,8 @@ def _run_history(rank, port, queries=7, mla_layers=1):
                 layer_cache = LayerKVCache()
                 layer_cache.kv_cache_base = torch.empty(
                     (5 * pages_per_block, kernel_page, latent + rope),
-                    dtype=dtype, device=device,
+                    dtype=dtype,
+                    device=device,
                 )
                 layer_caches.append(layer_cache)
             q = torch.empty_like(query[:, selected].contiguous())
@@ -235,7 +239,9 @@ def _run_history(rank, port, queries=7, mla_layers=1):
                     )
                 inputs.kv_cache_layer_to_group = host_map
             model_config.attn_config.is_sparse = True
-            with unittest.TestCase().assertRaisesRegex(ValueError, "requires dense MLA"):
+            with unittest.TestCase().assertRaisesRegex(
+                ValueError, "requires dense MLA"
+            ):
                 AttnImplFactory.get_fmha_impl(
                     model_config, parallel, weights, inputs, is_cuda_graph=True
                 )
@@ -255,12 +261,17 @@ def _run_history(rank, port, queries=7, mla_layers=1):
                 metadata = fmha.fmha_params
                 table_pointer = metadata.query_block_tables.data_ptr()
                 outputs = []
-                with mock.patch.object(metadata, "prepare", wraps=metadata.prepare) as spy:
+                with mock.patch.object(
+                    metadata, "prepare", wraps=metadata.prepare
+                ) as spy:
                     for layer_id, cache in zip(layer_ids, layer_caches):
                         outputs.append(
                             fmha.forward(
-                                layer_q.clone(), layer_ckv, layer_kpe.clone(),
-                                cache, layer_id,
+                                layer_q.clone(),
+                                layer_ckv,
+                                layer_kpe.clone(),
+                                cache,
+                                layer_id,
                             )
                         )
                         assert fmha.fmha_params is metadata
@@ -288,8 +299,12 @@ def _run_history(rank, port, queries=7, mla_layers=1):
                     physical_pages = torch.tensor(physical[b], device=device)
                     slots = physical_pages[owned // (page * 8)] * page + owned % page
                     torch.testing.assert_close(
-                        layer_caches[layer_index].kv_cache_base.view(-1, latent + rope)[slots],
-                        dense[b, owned], atol=0.015, rtol=0.01,
+                        layer_caches[layer_index].kv_cache_base.view(-1, latent + rope)[
+                            slots
+                        ],
+                        dense[b, owned],
+                        atol=0.015,
+                        rtol=0.01,
                     )
                 assert torch.all(table_storage[:, table_width:] == -1)
 
@@ -350,11 +365,17 @@ def _run_history(rank, port, queries=7, mla_layers=1):
             runner = CudaGraphRunner()
             try:
                 runner.init_decode(
-                    runner_model, hidden_size=hidden_width, max_seq_len=max_seq_len,
-                    tokens_per_block=page, kernel_tokens_per_block=kernel_page,
-                    decode_capture_batch_sizes=[batch], num_tokens_per_bs=queries,
-                    is_target_verify=queries > 1, max_context_batch_size=batch,
-                    kv_cache_layer_to_group=layer_to_group, kv_cache_group_num=2,
+                    runner_model,
+                    hidden_size=hidden_width,
+                    max_seq_len=max_seq_len,
+                    tokens_per_block=page,
+                    kernel_tokens_per_block=kernel_page,
+                    decode_capture_batch_sizes=[batch],
+                    num_tokens_per_bs=queries,
+                    is_target_verify=queries > 1,
+                    max_context_batch_size=batch,
+                    kv_cache_layer_to_group=layer_to_group,
+                    kv_cache_group_num=2,
                 )
                 captured_table = runner_model.captured_metadata.query_block_tables
                 table_pointer = captured_table.data_ptr()
@@ -377,7 +398,10 @@ def _run_history(rank, port, queries=7, mla_layers=1):
                         )
                         replay.input_hiddens = torch.nn.functional.pad(
                             torch.cat(
-                                (query[:real_tokens, selected].flatten(1), append[:real_tokens]),
+                                (
+                                    query[:real_tokens, selected].flatten(1),
+                                    append[:real_tokens],
+                                ),
                                 dim=1,
                             ).to(torch.float16),
                             (0, hidden_width - input_width),
@@ -403,16 +427,25 @@ def _run_history(rank, port, queries=7, mla_layers=1):
                             starts, dtype=torch.int32
                         ).pin_memory()
                         live.decode_cu_seqlens_d = torch.arange(
-                            0, real_tokens + 1, queries, dtype=torch.int32, device=device
+                            0,
+                            real_tokens + 1,
+                            queries,
+                            dtype=torch.int32,
+                            device=device,
                         )
                         live.cu_seqlens = live.decode_cu_seqlens_d
                         live.cu_seqlens_host = live.cu_seqlens.cpu().pin_memory()
                         live.cu_kv_seqlens = live.cu_seqlens.clone()
                         live.kv_cache_layer_to_group = inputs.kv_cache_layer_to_group
-                        live.kv_cache_layer_to_group_host = inputs.kv_cache_layer_to_group
-                        live.kv_cache_kernel_block_id_device = linear_table[:actual_batch]
+                        live.kv_cache_layer_to_group_host = (
+                            inputs.kv_cache_layer_to_group
+                        )
+                        live.kv_cache_kernel_block_id_device = linear_table[
+                            :actual_batch
+                        ]
                         live.kv_cache_kernel_block_id_device_by_group = [
-                            full_table[:actual_batch], linear_table[:actual_batch]
+                            full_table[:actual_batch],
+                            linear_table[:actual_batch],
                         ]
                         live.kv_cache_kernel_block_id_host = (
                             linear_table[:actual_batch].cpu().pin_memory()
@@ -434,8 +467,11 @@ def _run_history(rank, port, queries=7, mla_layers=1):
                             width = local_heads * value
                             check(
                                 actual[:, i * width : (i + 1) * width]
-                                .reshape(real_tokens, local_heads, value).to(dtype),
-                                expected[i], i, actual_batch,
+                                .reshape(real_tokens, local_heads, value)
+                                .to(dtype),
+                                expected[i],
+                                i,
+                                actual_batch,
                             )
                             if actual_batch < batch:
                                 # The inactive request's physical pages remain untouched.
@@ -443,16 +479,20 @@ def _run_history(rank, port, queries=7, mla_layers=1):
                                 for p in physical:
                                     begin = p * pages_per_block
                                     torch.testing.assert_close(
-                                        layer_caches[i].kv_cache_base[begin : begin + pages_per_block],
+                                        layer_caches[i].kv_cache_base[
+                                            begin : begin + pages_per_block
+                                        ],
                                         before[i][begin : begin + pages_per_block],
-                                        atol=0, rtol=0,
+                                        atol=0,
+                                        rtol=0,
                                     )
                         assert captured_table.data_ptr() == table_pointer
                         assert captured_table.shape == (batch * queries, table_width)
                         torch.testing.assert_close(
                             captured_table[:real_tokens],
                             full_table[:actual_batch].repeat_interleave(queries, dim=0),
-                            atol=0, rtol=0,
+                            atol=0,
+                            rtol=0,
                         )
             finally:
                 del runner
@@ -553,6 +593,495 @@ def _run_merge_history(rank, port):
         destroy_distributed_environment()
 
 
+def _run_prefill_gather(rank, port):
+    from rtp_llm.models_py.model_desc.block_map import select_block_map_for_layer
+    from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl import (
+        flashmla_dense_prefill,
+    )
+    from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.test.flashmla_forward_test_utils import (
+        DeterministicPackedProjection,
+    )
+    from rtp_llm.ops.compute_ops import CacheGroupType, KVCache
+
+    torch.cuda.set_device(rank)
+    parallel = ParallelismConfig()
+    parallel.world_rank = parallel.local_rank = parallel.tp_rank = rank
+    parallel.world_size = parallel.tp_size = 8
+    parallel.role_type = RoleType.PREFILL
+    init_distributed_environment(
+        parallel, NcclCommConfig(nccl_ip="127.0.0.1"), port, timeout=120
+    )
+    try:
+        page, kernel_page, width = 4096, 128, 576
+        pages_per_block = page // kernel_page
+        prefixes, lengths = [0, page + 5, 9 * page + 3], [3, 1, 2]
+        q_offsets = [0, 3, 4, 6]
+        config = ModelConfig()
+        config.num_layers, config.max_seq_len = 3, 10 * page
+        config.quant_config = None
+        attn = config.attn_config
+        attn.use_mla, attn.is_sparse = True, False
+        attn.head_num, attn.kv_head_num = 96, 1
+        attn.kv_lora_rank, attn.nope_head_dim = 512, 128
+        attn.rope_head_dim, attn.v_head_dim = 64, 128
+        attn.tokens_per_block, attn.kernel_tokens_per_block = page, kernel_page
+        attn.kv_cache_dtype = KvCacheDataType.BASE
+        hybrid = config.hybrid_attention_config
+        hybrid.enable_hybrid_attention = hybrid.enable_independent_kv_cache_pools = True
+        hybrid.hybrid_attention_types = [
+            HybridAttentionType.LINEAR,
+            HybridAttentionType.NONE,
+            HybridAttentionType.NONE,
+        ]
+        weights = ModelWeights(3, "cuda", torch.bfloat16)
+        weights.set_global_weight(
+            W.rope_cos_sin_cache, torch.zeros(config.max_seq_len, 64, device="cuda")
+        )
+        torch.manual_seed(191)
+        history = [
+            torch.randn(n, width, device="cuda", dtype=torch.bfloat16) for n in prefixes
+        ]
+        fresh = torch.randn(sum(lengths), width, device="cuda", dtype=torch.bfloat16)
+        query = (
+            torch.randn(sum(lengths), 12, 192, device="cuda", dtype=torch.bfloat16)
+            * 0.125
+        )
+
+        def reference(history_rows, suffix):
+            outputs = []
+            for request, old in enumerate(history_rows):
+                begin, end = q_offsets[request : request + 2]
+                kv = torch.cat((old, suffix[begin:end])).float()
+                key = torch.cat((kv[:, :128], kv[:, 512:]), -1)
+                scores = torch.einsum("qhd,kd->hqk", query[begin:end].float(), key) * (
+                    192**-0.5
+                )
+                q_positions = old.shape[0] + torch.arange(
+                    lengths[request], device="cuda"
+                )
+                k_positions = torch.arange(kv.shape[0], device="cuda")
+                scores.masked_fill_(
+                    k_positions[None, :] > q_positions[:, None], -torch.inf
+                )
+                outputs.append(
+                    torch.einsum("hqk,kd->qhd", scores.softmax(-1), kv[:, 128:256])
+                )
+            return torch.cat(outputs)
+
+        native_unit = {}
+        table_width = (max(prefixes) + max(lengths) + kernel_page - 1) // kernel_page
+        saw_empty_owner = False
+        for sharded in (False, True):
+            parallel.prefill_cp_config.kv_cache_sharded = sharded
+            cp_size = 8 if sharded else 1
+            # Preserve the C++ producer's kernel-page padding and layer offsets.
+            padding = 64
+            raw_stride = page * width + pages_per_block * padding
+            raw = torch.full(
+                (3, 16, raw_stride), float("nan"), device="cuda", dtype=torch.bfloat16
+            )
+            kv_cache = KVCache()
+            kv_cache.kv_cache_base_by_layer = [raw[i] for i in range(3)]
+            kv_cache.seq_size_per_block = page
+            kv_cache.kernel_seq_size_per_block = kernel_page
+            kv_cache.use_mla = True
+            kv_cache.kv_lora_rank, kv_cache.rope_head_dim = 512, 64
+            kv_cache.layer_group_types = [
+                CacheGroupType.LINEAR,
+                CacheGroupType.FULL,
+                CacheGroupType.FULL,
+            ]
+            kv_cache.layer_region_to_group_id = [[0], [1], [1]]
+            table_storage = torch.full(
+                (3, table_width + 5), -1, dtype=torch.int32, device="cuda"
+            )
+            table = table_storage[:, :table_width]
+            linear_table = torch.zeros((3, 1), dtype=torch.int32, device="cuda")
+            layer_caches = {i: kv_cache.get_layer_cache(i) for i in (1, 2)}
+            for i, cache in layer_caches.items():
+                view = cache.kv_cache_base
+                assert view.shape == (16 * pages_per_block, kernel_page, width)
+                assert view.stride() == (kernel_page * width + padding, width, 1)
+                assert view.data_ptr() == raw[i].data_ptr()
+                assert view.storage_offset() == raw[i].storage_offset()
+
+            def make_inputs(prefix_lengths):
+                inputs = PyAttentionInputs()
+                inputs.is_prefill, inputs.total_tokens = True, sum(lengths)
+                inputs.input_lengths_host = torch.tensor(lengths, dtype=torch.int32)
+                inputs.prefix_lengths_host = torch.tensor(
+                    prefix_lengths, dtype=torch.int32
+                )
+                inputs.input_lengths = inputs.input_lengths_host.cuda()
+                inputs.prefix_lengths = inputs.prefix_lengths_host.cuda()
+                inputs.cu_seqlens = torch.tensor(
+                    q_offsets, dtype=torch.int32, device="cuda"
+                )
+                inputs.cu_kv_seqlens = torch.tensor(
+                    [0] + [p + q for p, q in zip(prefix_lengths, lengths)],
+                    dtype=torch.int32,
+                    device="cuda",
+                ).cumsum(0, dtype=torch.int32)
+                inputs.padding_offset = torch.tensor(
+                    [0, 0, 0, 0, 2, 2], dtype=torch.int32, device="cuda"
+                )
+                inputs.kv_cache_kernel_block_id_device = (
+                    linear_table if sharded else table
+                )
+                inputs.kv_cache_kernel_block_id_device_by_group = [linear_table, table]
+                inputs.kv_cache_layer_to_group_host = torch.tensor(
+                    [0, 1, 1], dtype=torch.int32
+                )
+                inputs.kv_cache_layer_to_group = inputs.kv_cache_layer_to_group_host
+                return inputs
+
+            def populate(prefix_lengths, scale, remap):
+                raw.fill_(float("nan"))
+                table.zero_()
+                history_by_layer = {
+                    i: [
+                        old[:n] * (scale * 0.5 ** (i - 1))
+                        for old, n in zip(history, prefix_lengths)
+                    ]
+                    for i in (1, 2)
+                }
+                fresh_by_layer = {i: fresh * (scale * 0.5 ** (i - 1)) for i in (1, 2)}
+                physical_page = 15 - remap
+                for request, n in enumerate(prefix_lengths):
+                    for global_page in range((n + page - 1) // page):
+                        if sharded and global_page % cp_size != rank:
+                            continue
+                        local_page = global_page // cp_size
+                        first = local_page * pages_per_block
+                        destination = table[request, first : first + pages_per_block]
+                        destination.copy_(
+                            torch.arange(
+                                physical_page * pages_per_block,
+                                (physical_page + 1) * pages_per_block,
+                                device="cuda",
+                                dtype=torch.int32,
+                            )[: destination.numel()]
+                        )
+                        count = min(page, n - global_page * page)
+                        rows = torch.arange(count, device="cuda")
+                        for i, cache in layer_caches.items():
+                            cache.kv_cache_base[
+                                physical_page * pages_per_block + rows // kernel_page,
+                                rows % kernel_page,
+                                :width,
+                            ] = history_by_layer[i][request][
+                                global_page * page : global_page * page + count
+                            ]
+                        physical_page -= 1
+                return history_by_layer, fresh_by_layer
+
+            for capacity in (0, page):
+                config.attn_config.mla_prefill_expanded_kv_budget_bytes = (
+                    capacity * 12 * 320 * 2
+                )
+                impl = None
+                scenarios = (
+                    (prefixes, 1.0),
+                    (prefixes, 0.125),
+                    ([0, 0, 0], 0.125),
+                    ([0, 129, page - 3], 0.125),
+                )
+                for scenario, (prefix_lengths, scale) in enumerate(scenarios):
+                    histories, suffixes = populate(prefix_lengths, scale, scenario % 2)
+                    inputs = make_inputs(prefix_lengths)
+                    with mock.patch.object(
+                        flashmla_dense_prefill,
+                        "_build_cp_gather_plan",
+                        wraps=flashmla_dense_prefill._build_cp_gather_plan,
+                    ) as builder:
+                        if impl is None:
+                            impl = AttnImplFactory.get_fmha_impl(
+                                config, parallel, weights, inputs
+                            )
+                        else:
+                            impl.prepare(inputs)
+                        op = impl.fmha_impl
+                        plans = dict(op._cp_gather_plans)
+                        oracle_counts = {}
+                        for key, plan in plans.items():
+                            counts = [0] * cp_size
+                            for item in key[0]:
+                                for position in range(
+                                    item.prefix_start,
+                                    item.prefix_start + item.prefix_len,
+                                ):
+                                    counts[position // page % cp_size] += 1
+                            oracle_counts[key] = counts
+                            assert plan.stride == max(counts)
+                            assert plan.local_count == counts[rank]
+                            assert plan.total_count == sum(counts)
+                            coordinates = (
+                                plan.pack_request,
+                                plan.pack_column,
+                                plan.pack_offset,
+                                plan.restore_source,
+                                plan.restore_target,
+                            )
+                            assert sum(
+                                t.numel() * t.element_size() for t in coordinates
+                            ) == (8 * (3 * counts[rank] + 2 * sum(counts)))
+                        plan_pointers = {
+                            key: tuple(
+                                getattr(plan, field).data_ptr()
+                                for field in (
+                                    "pack_request",
+                                    "pack_column",
+                                    "pack_offset",
+                                    "restore_source",
+                                    "restore_target",
+                                )
+                            )
+                            for key, plan in plans.items()
+                        }
+                        assert builder.call_count == len(plans)
+                        build_count = builder.call_count
+                        gather_calls = []
+                        buffers = None
+                        original_gather = op._gather_cp_prefix
+
+                        def checked_gather(
+                            cache, slices, offsets, latent_out, rope_out
+                        ):
+                            sentinel = -123.0
+                            latent_out.fill_(sentinel)
+                            rope_out.fill_(sentinel)
+                            original_gather(
+                                cache, slices, offsets, latent_out, rope_out
+                            )
+                            untouched = torch.ones(
+                                latent_out.shape[0], dtype=torch.bool, device="cuda"
+                            )
+                            for item, destination in zip(slices, offsets):
+                                count = item.prefix_len
+                                expected = active_history[item.request_idx][
+                                    item.prefix_start : item.prefix_start + count
+                                ]
+                                torch.testing.assert_close(
+                                    latent_out[destination : destination + count],
+                                    expected[:, :512],
+                                    atol=0,
+                                    rtol=0,
+                                )
+                                expected_rope = expected[:, 512:]
+                                if rope_out.ndim == 3:
+                                    expected_rope = expected_rope[:, None].expand(
+                                        -1, rope_out.shape[1], -1
+                                    )
+                                torch.testing.assert_close(
+                                    rope_out[destination : destination + count],
+                                    expected_rope,
+                                    atol=0,
+                                    rtol=0,
+                                )
+                                untouched[destination : destination + count] = False
+                            assert torch.all(latent_out[untouched] == sentinel)
+                            assert torch.all(rope_out[untouched] == sentinel)
+                            gather_calls.append((slices, tuple(offsets), rope_out.ndim))
+
+                        with (
+                            mock.patch.object(
+                                op,
+                                "_create_kv_b_proj",
+                                return_value=DeterministicPackedProjection(),
+                            ),
+                            mock.patch.object(
+                                op, "_gather_cp_prefix", side_effect=checked_gather
+                            ),
+                            mock.patch.object(
+                                flashmla_dense_prefill,
+                                "all_gather_into",
+                                wraps=flashmla_dense_prefill.all_gather_into,
+                            ) as collective,
+                        ):
+                            for layer_id in (1, 2):
+                                select_block_map_for_layer(inputs, layer_id)
+                                active_history = histories[layer_id]
+                                suffix = suffixes[layer_id]
+                                output = op.forward(
+                                    query,
+                                    suffix[:, :512].contiguous(),
+                                    suffix[:, 512:],
+                                    layer_caches[layer_id],
+                                    layer_id,
+                                ).clone()
+                                if scenario == 0:
+                                    key = (capacity, layer_id)
+                                    if sharded:
+                                        torch.testing.assert_close(
+                                            output, native_unit[key], atol=0, rtol=0
+                                        )
+                                    else:
+                                        native_unit[key] = output
+                                else:
+                                    torch.testing.assert_close(
+                                        output.float(),
+                                        reference(active_history, suffix),
+                                        atol=1e-3,
+                                        rtol=2e-2,
+                                    )
+                                assert builder.call_count == build_count
+                                assert all(
+                                    op._cp_gather_plans[k] is v
+                                    for k, v in plans.items()
+                                )
+                                for key, plan in plans.items():
+                                    current = tuple(
+                                        getattr(plan, field).data_ptr()
+                                        for field in (
+                                            "pack_request",
+                                            "pack_column",
+                                            "pack_offset",
+                                            "restore_source",
+                                            "restore_target",
+                                        )
+                                    )
+                                    assert current == plan_pointers[key]
+                                    saw_empty_owner |= (
+                                        plan.local_count == 0 and plan.stride > 0
+                                    )
+                                if sharded and any(prefix_lengths):
+                                    current = tuple(
+                                        t.data_ptr() for t in op._cp_gather_buffers
+                                    )
+                                    if buffers is not None:
+                                        assert current == buffers
+                                    buffers = current
+                                    for buffer in op._cp_gather_buffers:
+                                        buffer.fill_(float("nan"))
+                                padding_view = raw[layer_id].view(
+                                    16 * pages_per_block, -1
+                                )
+                                assert torch.isnan(
+                                    padding_view[:, kernel_page * width :]
+                                ).all()
+                            if sharded and any(prefix_lengths):
+                                calls_per_layer = (
+                                    len(op._prefix_runtime_launches)
+                                    if op._forward_plan.route.value == "hybrid"
+                                    else 1
+                                )
+                                assert len(gather_calls) == 2 * calls_per_layer
+                                assert collective.call_count == len(gather_calls)
+                                for call in collective.call_args_list:
+                                    local, gathered, group = call.args
+                                    assert group == Group.TP
+                                    assert (
+                                        local.is_contiguous()
+                                        and gathered.is_contiguous()
+                                    )
+                                    assert local.shape[1] == width
+                                    assert gathered.shape == (8 * local.shape[0], width)
+                                maximum_stride = max(
+                                    max(counts) for counts in oracle_counts.values()
+                                )
+                                maximum_count = max(
+                                    sum(counts) for counts in oracle_counts.values()
+                                )
+                                expected_shapes = (
+                                    (maximum_stride, width),
+                                    (8 * maximum_stride, width),
+                                    (maximum_count, width),
+                                )
+                                assert (
+                                    tuple(t.shape for t in op._cp_gather_buffers)
+                                    == expected_shapes
+                                )
+                                if capacity and scenario == 0:
+                                    assert any(
+                                        item.prefix_start > 0
+                                        for slices, _, _ in gather_calls
+                                        for item in slices
+                                    )
+                                    assert {ndim for _, _, ndim in gather_calls} == {3}
+                                if scenario == 1:
+                                    impl.release_forward_workspace()
+                                    assert op._cp_gather_buffers is None
+                                    assert op._forward_workspace is None
+                                    assert all(
+                                        op._cp_gather_plans[key] is plan
+                                        for key, plan in plans.items()
+                                    )
+                                    repeated = op.forward(
+                                        query,
+                                        suffix[:, :512].contiguous(),
+                                        suffix[:, 512:],
+                                        layer_caches[2],
+                                        2,
+                                    ).clone()
+                                    torch.testing.assert_close(
+                                        repeated, output, atol=0, rtol=0
+                                    )
+                                    assert builder.call_count == build_count
+                            else:
+                                assert not gather_calls
+                                collective.assert_not_called()
+                                assert not plans and op._cp_gather_buffers is None
+                        assert torch.all(table_storage[:, table_width:] == -1)
+                        if sharded and scenario == 1:
+                            from rtp_llm.config.quant_config import init_quant_config
+                            from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_deepgemm_linear import (
+                                CudaFp8DeepGEMMLinear,
+                            )
+                            from rtp_llm.models_py.modules.kimi_k3.fp8_producers import (
+                                Fp8RMSNorm,
+                            )
+
+                            # The production producer retains BF16 for cache writes;
+                            # both current and historical KV still reach real KV-B GEMM.
+                            payload = Fp8RMSNorm(
+                                torch.ones(512, dtype=torch.bfloat16, device="cuda"),
+                                1e-6,
+                                retain_bf16=True,
+                            )(suffixes[2][:, :512])
+                            projection = CudaFp8DeepGEMMLinear(
+                                weight=(
+                                    torch.randn(3072, 512, device="cuda") * 0.03
+                                ).to(torch.float8_e4m3fn),
+                                weight_scales=torch.full(
+                                    (1, 3072),
+                                    0x7F7F7F7F,
+                                    dtype=torch.int32,
+                                    device="cuda",
+                                ).T,
+                                input_scales=None,
+                                bias=None,
+                                quant_config=init_quant_config("FP8_PER_BLOCK"),
+                            )
+                            with mock.patch.object(
+                                op, "_create_kv_b_proj", return_value=projection
+                            ):
+                                expected_quantized = op.forward(
+                                    query,
+                                    payload.bf16,
+                                    suffixes[2][:, 512:],
+                                    layer_caches[2],
+                                    2,
+                                ).clone()
+                                actual_quantized = op.forward(
+                                    query,
+                                    payload,
+                                    suffixes[2][:, 512:],
+                                    layer_caches[2],
+                                    2,
+                                ).clone()
+                            torch.testing.assert_close(
+                                actual_quantized, expected_quantized, atol=0, rtol=0
+                            )
+                            assert builder.call_count == build_count
+                    del plans
+                torch.distributed.barrier()
+        empties = torch.tensor(int(saw_empty_owner), device="cuda")
+        torch.distributed.all_reduce(empties)
+        assert int(empties) > 0
+    finally:
+        destroy_distributed_environment()
+
+
 class PageRRMlaDecodeTest(unittest.TestCase):
     def _run(self, worker, *args):
         self.assertEqual(
@@ -576,6 +1105,9 @@ class PageRRMlaDecodeTest(unittest.TestCase):
 
     def test_partial_merge_graph_history(self):
         self._run(_run_merge_history)
+
+    def test_prefill_prefix_gather_from_owners(self):
+        self._run(_run_prefill_gather)
 
 
 if __name__ == "__main__":
