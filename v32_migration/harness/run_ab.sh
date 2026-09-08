@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
-# A/B runner for DSV3.2 lossy KV offload (scheme B tier-2).
-#   MODE=A : no offload (baseline)   MODE=B : capacity offload + lossy third-pool
+# A/B/C runner for DSV3.2 KV offload.
+#   MODE=A : no offload (baseline)
+#   MODE=B : capacity offload + lossy third-pool (drop non-resident selections)
+#   MODE=C : capacity offload + lossless token-granular fetch (exact top-k)
+# B and C share an identical offload configuration so their delta isolates the
+# cost of being lossless.
 set -uo pipefail
 RUNTIME=${RUNTIME:-/home/admin/rtp-hol/runtime/rtp-b-offload-20260819-ring}
 MODEL=/home/admin/models/DeepSeek-V3.2-Exp
@@ -11,7 +15,7 @@ mkdir -p /home/admin/rtp-hol/logs
 log() { printf '[%(%Y-%m-%d %H:%M:%S)T] %s\n' -1 "$*"; }
 
 offload_env=()
-if [[ "$MODE" == "B" ]]; then
+if [[ "$MODE" == "B" || "$MODE" == "C" ]]; then
   offload_env=(
     V32_OFFLOAD_MODE=capacity
     RTP_KV_OFFLOAD_KEEP_BLOCKS=${KEEP:-256}
@@ -21,8 +25,12 @@ if [[ "$MODE" == "B" ]]; then
     V32_IDX_POOL_BLOCKS=${IDXNB:-8192}
     V32_SINGLE_WAVE=${SINGLE:-1}
     V32_LOSSY=${LOSSY:-1}
-    V32_LOSSY_PREFETCH=${PREFETCH:-8}
   )
+  if [[ "$MODE" == "C" ]]; then
+    offload_env+=(V32_LOSSLESS=1)
+  else
+    offload_env+=(V32_LOSSY_PREFETCH=${PREFETCH:-8})
+  fi
 fi
 [[ -n "${EXTRA_ENV:-}" ]] && offload_env+=($EXTRA_ENV)
 

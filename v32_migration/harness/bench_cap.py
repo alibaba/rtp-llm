@@ -30,7 +30,11 @@ def post(port, prompt, max_new, timeout):
     body = json.dumps(
         {
             "prompt": prompt,
-            "generate_config": {"max_new_tokens": max_new, "top_k": 1},
+            "generate_config": {
+                "max_new_tokens": max_new,
+                "min_new_tokens": max_new,
+                "top_k": 1,
+            },
         }
     ).encode()
     req = urllib.request.Request(
@@ -50,17 +54,30 @@ def one(port, ctx, ratio, out_tokens, seed, timeout):
         return {"ok": False, "err": type(e).__name__ + ":" + str(e)[:80]}
     aux = res.get("aux_info") or {}
     ol = aux.get("output_len") or out_tokens
-    cost, pre = aux.get("cost_time"), aux.get("prefill_time") or aux.get(
-        "first_token_cost_time"
-    )
+    cost = aux.get("cost_time")
+    model_prefill = aux.get("prefill_time")
+    first_token = aux.get("first_token_cost_time")
+    pd = aux.get("pd_latency") or {}
+    decode_service_ms = (pd.get("decode_service_us") or 0) / 1000.0
+    if decode_service_ms and ol > 1:
+        tpot = decode_service_ms / (ol - 1)
+    else:
+        steady_start = first_token or model_prefill
+        tpot = (
+            (cost - steady_start) / (ol - 1)
+            if (cost and steady_start and ol > 1)
+            else None
+        )
     return {
         "ok": True,
         "wall_s": wall,
         "il": aux.get("input_len"),
         "ol": ol,
-        "prefill_ms": pre,
+        "prefill_ms": model_prefill,
+        "ttft_ms": first_token,
         "cost_ms": cost,
-        "tpot_ms": (cost - pre) / (ol - 1) if (cost and pre and ol > 1) else None,
+        "tpot_ms": tpot,
+        "pd_latency": pd,
     }
 
 
@@ -135,6 +152,30 @@ def main():
         walls = sorted(r["wall_s"] for r in ok)
         tp = [r["tpot_ms"] for r in ok if r["tpot_ms"]]
         toks = sum(r["ol"] or 0 for r in ok)
+        phase_names = (
+            "prefill_queue_us",
+            "prefill_compute_wall_us",
+            "handoff_total_us",
+            "handoff_blocking_tail_us",
+            "decode_kv_load_us",
+            "admission_prepare_us",
+            "admission_prepare_wait_us",
+            "decode_normal_load_us",
+            "decode_ring_load_us",
+            "decode_queue_us",
+            "decode_first_token_us",
+            "decode_service_us",
+        )
+        phase_means = {}
+        for name in phase_names:
+            values = [
+                r["pd_latency"].get(name)
+                for r in ok
+                if r["pd_latency"].get(name) is not None
+            ]
+            phase_means[name.removesuffix("_us") + "_ms"] = (
+                round(st.mean(values) / 1000.0, 2) if values else None
+            )
         row = {
             "tag": a.tag,
             "ctx": a.ctx,
@@ -146,7 +187,18 @@ def main():
             "wall_max": round(walls[-1], 1) if walls else None,
             "tpot_mean": round(st.mean(tp), 1) if tp else None,
             "tpot_max": round(max(tp), 1) if tp else None,
+            "ttft_mean_ms": (
+                round(st.mean(r["ttft_ms"] for r in ok if r["ttft_ms"]), 1)
+                if any(r["ttft_ms"] for r in ok)
+                else None
+            ),
+            "prefill_mean_ms": (
+                round(st.mean(r["prefill_ms"] for r in ok if r["prefill_ms"]), 1)
+                if any(r["prefill_ms"] for r in ok)
+                else None
+            ),
             "agg_tok_s": round(toks / dur, 1) if dur else None,
+            **phase_means,
             "max_running": max((r for r, _ in occ), default=None),
             "max_waiting": max((w for _, w in occ), default=None),
             "errs": [r["err"] for r in err[:3]],
