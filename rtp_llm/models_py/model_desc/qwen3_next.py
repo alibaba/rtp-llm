@@ -11,6 +11,7 @@ from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.distributed.collective_torch import Group, all_gather, all_reduce
 from rtp_llm.models_py.model_desc.block_map import (
+    get_attention_inputs_value,
     get_group_tags_for_layers,
     get_primary_attention_inputs,
     select_attention_inputs_for_layer,
@@ -41,6 +42,7 @@ from rtp_llm.models_py.triton_kernels.fla.aiter_flydsl_gdn_decode import (
     aiter_flydsl_gdn_decode,
     is_aiter_flydsl_gdn_decode_supported,
     prepare_aiter_flydsl_gdn_decode_state_indices,
+    validate_aiter_flydsl_gdn_decode_real_state_indices,
 )
 from rtp_llm.models_py.triton_kernels.fla.aiter_flydsl_gdn_prefill import (
     build_aiter_flydsl_gdn_prefill_metadata,
@@ -117,6 +119,7 @@ class Qwen3NextMetadata(object):
         cp_restore_indices: Optional[torch.Tensor] = None,
         cp_local_extract_indices: Optional[torch.Tensor] = None,
         cp_local_valid_mask: Optional[torch.Tensor] = None,
+        is_cuda_graph: bool = False,
         aiter_gdn_prefill_metadata: Optional[
             dict[int, tuple[torch.Tensor, object]]
         ] = None,
@@ -128,6 +131,7 @@ class Qwen3NextMetadata(object):
         self.cp_restore_indices = cp_restore_indices
         self.cp_local_extract_indices = cp_local_extract_indices
         self.cp_local_valid_mask = cp_local_valid_mask
+        self.is_cuda_graph = is_cuda_graph
         self.aiter_gdn_prefill_metadata = aiter_gdn_prefill_metadata or {}
         # One metadata instance is shared by all layers in a model forward.
         # Decode state indices are layer-independent, so cache them by the
@@ -183,6 +187,32 @@ def _cpu_sequence_lengths(lengths: torch.Tensor) -> tuple[int, ...] | None:
     if lengths.device.type != "cpu":
         return None
     return tuple(int(length) for length in lengths.tolist())
+
+
+def _validate_aiter_flydsl_gdn_decode_eager_state(
+    state_metadata: AiterFlydslGdnDecodeStateMetadata,
+    *,
+    is_cuda_graph: bool,
+) -> None:
+    """Validate live normal-forward state without touching graph capture data.
+
+    A disabled graph and a graph miss both call ``prepare_fmha_impl(...,
+    False)`` before normal forward, so ``is_cuda_graph`` is false in both eager
+    cases. Captured inputs use synthetic zero block tables and are validated
+    later by ``CudaGraphRunner`` after live host metadata has been copied.
+    """
+    if not is_cuda_graph:
+        validate_aiter_flydsl_gdn_decode_real_state_indices(state_metadata)
+
+
+def _is_cuda_graph_forward(inputs: PyModelInputs) -> bool:
+    """Return the graph state propagated by any prepared attention group."""
+    attention_inputs = get_attention_inputs_value(inputs)
+    if isinstance(attention_inputs, PyAttentionInputs):
+        return attention_inputs.is_cuda_graph
+    # Only FMHA groups are prepared by prepare_fmha_impl. In a mixed cache,
+    # their true flag is the model-wide graph signal for LINEAR groups too.
+    return any(group_inputs.is_cuda_graph for group_inputs in attention_inputs.values())
 
 
 def _should_use_aiter_flydsl_gdn_prefill(
@@ -646,6 +676,17 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
                     scale=None,
                 )
                 if supported:
+                    # Graph capture uses synthetic zero block tables and is
+                    # validated by C++ before each real replay using the pool
+                    # bound persisted from eager graph warmup. Both graph-off
+                    # decode and a graph miss enter normal forward with this
+                    # flag false, so validate their live host metadata here
+                    # before selecting AITER instead of silently mapping a bad
+                    # row to the kernel's skip sentinel.
+                    _validate_aiter_flydsl_gdn_decode_eager_state(
+                        state_metadata,
+                        is_cuda_graph=attn_meta.is_cuda_graph,
+                    )
                     read_indices, write_indices, invalid_row_flags = (
                         prepare_aiter_flydsl_gdn_decode_state_indices(state_metadata)
                     )
@@ -1311,6 +1352,31 @@ class Qwen3NextModel(GptModelBase):
         self.norm = RMSResNorm(
             weights.get_global_weight(W.final_ln_gamma), eps=model_config.layernorm_eps
         )
+        self._gdn_decode_state_pool_sizes: dict[str, int] = {}
+
+    def get_gdn_decode_state_pool_sizes(self) -> dict[str, int]:
+        """Return state-pool bounds observed during the latest graph warmup."""
+        return self._gdn_decode_state_pool_sizes.copy()
+
+    def _record_gdn_decode_graph_state_pool_sizes(self, inputs: PyModelInputs) -> None:
+        if torch.version.hip is None:
+            return
+        attention_inputs = get_attention_inputs_value(inputs)
+        tagged_inputs = (
+            {"": attention_inputs}
+            if isinstance(attention_inputs, PyAttentionInputs)
+            else attention_inputs
+        )
+        # At least one prepared FMHA group carries the reliable graph flag in a
+        # mixed-cache model. Linear groups are intentionally not FMHA targets,
+        # so their individual flag alone is not authoritative.
+        if not _is_cuda_graph_forward(inputs):
+            return
+        self._gdn_decode_state_pool_sizes = {
+            str(tag): int(group_inputs.gdn_decode_state_pool_size)
+            for tag, group_inputs in tagged_inputs.items()
+            if group_inputs.gdn_decode_state_pool_size > 0
+        }
 
     def _get_fmha_group_tags(self) -> Optional[list[str]]:
         if self.kv_cache is None:
@@ -1387,6 +1453,7 @@ class Qwen3NextModel(GptModelBase):
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
         hidden_states = self.word_embedding(inputs)
 
+        is_cuda_graph = _is_cuda_graph_forward(inputs)
         attention_inputs = get_primary_attention_inputs(inputs, self.kv_cache)
         linear_layer_idx = next(
             (
@@ -1484,6 +1551,7 @@ class Qwen3NextModel(GptModelBase):
             cp_restore_indices=cp_restore_indices,
             cp_local_extract_indices=cp_local_extract_indices,
             cp_local_valid_mask=cp_local_valid_mask,
+            is_cuda_graph=is_cuda_graph,
             aiter_gdn_prefill_metadata=aiter_gdn_prefill_metadata,
         )
 
@@ -1510,6 +1578,7 @@ class Qwen3NextModel(GptModelBase):
                 attn_meta=attn_meta,
             )
 
+        self._record_gdn_decode_graph_state_pool_sizes(inputs)
         hidden_states, residual = self.norm(hidden_states, residual)
         return PyModelOutputs(hidden_states)
 

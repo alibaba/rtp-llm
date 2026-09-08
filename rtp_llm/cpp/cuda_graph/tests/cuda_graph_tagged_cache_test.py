@@ -49,6 +49,23 @@ class TaggedSequenceLengthModel:
         return PyModelOutputs(inputs.input_hiddens + signature)
 
 
+class TaggedGdnStatePoolModel(TaggedBlockTableModel):
+    """Record distinct per-tag GDN state-pool bounds during graph warmup."""
+
+    def __init__(self) -> None:
+        self._state_pool_sizes: dict[str, int] = {}
+
+    def forward(self, inputs: PyModelInputs, fmha_impl=None) -> PyModelOutputs:
+        if not inputs.attention_inputs["full"].is_prefill:
+            inputs.attention_inputs["full"].gdn_decode_state_pool_size = 8
+            inputs.attention_inputs["aux"].gdn_decode_state_pool_size = 4
+            self._state_pool_sizes = {"full": 8, "aux": 4}
+        return super().forward(inputs, fmha_impl)
+
+    def get_gdn_decode_state_pool_sizes(self) -> dict[str, int]:
+        return self._state_pool_sizes.copy()
+
+
 def _tag_attention_inputs(
     common: PyAttentionInputs, tags: list[str], values: dict[str, int]
 ) -> dict[str, PyAttentionInputs]:
@@ -108,9 +125,7 @@ def _build_decode_inputs(
     attention_inputs = PyAttentionInputs()
     attention_inputs.is_prefill = False
     attention_inputs.is_target_verify = False
-    attention_inputs.prefix_lengths = torch.empty(
-        0, dtype=torch.int32
-    ).pin_memory()
+    attention_inputs.prefix_lengths = torch.empty(0, dtype=torch.int32).pin_memory()
     attention_inputs.input_lengths = torch.ones(
         batch_size, dtype=torch.int32
     ).pin_memory()
@@ -186,16 +201,12 @@ def _build_target_verify_inputs(
     attention_inputs.prefix_lengths = torch.full(
         (batch_size,), prefix_len, dtype=torch.int32
     ).pin_memory()
-    attention_inputs.sequence_lengths = torch.empty(
-        0, dtype=torch.int32
-    ).pin_memory()
+    attention_inputs.sequence_lengths = torch.empty(0, dtype=torch.int32).pin_memory()
     attention_inputs.sequence_lengths_plus_1_device = (
         attention_inputs.prefix_lengths.cuda() + 1
     )
 
-    cu_q = torch.arange(
-        0, token_count + 1, query_len, dtype=torch.int32
-    ).pin_memory()
+    cu_q = torch.arange(0, token_count + 1, query_len, dtype=torch.int32).pin_memory()
     attention_inputs.cu_seqlens = cu_q
     attention_inputs.cu_seqlens_device = cu_q.cuda()
     attention_inputs.cu_kv_seqlens_device = torch.arange(
@@ -212,13 +223,9 @@ def _build_target_verify_inputs(
         attention_inputs.decode_cu_seqlens.cuda()
     )
 
-    attention_inputs.context_total_kv_length = batch_size * (
-        query_len + prefix_len
-    )
+    attention_inputs.context_total_kv_length = batch_size * (query_len + prefix_len)
 
-    block_count = (
-        prefix_len + query_len + TOKENS_PER_BLOCK - 1
-    ) // TOKENS_PER_BLOCK
+    block_count = (prefix_len + query_len + TOKENS_PER_BLOCK - 1) // TOKENS_PER_BLOCK
     return _build_common_inputs(
         attention_inputs,
         tags,
@@ -276,6 +283,39 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
                 _build_decode_inputs(["full", "wrong"], {"full": 2, "wrong": 1})
             )
         )
+
+    def test_decode_replay_uses_warmup_state_pool_bound_per_tag(self) -> None:
+        runner = CudaGraphRunner()
+        runner.init_decode(
+            TaggedGdnStatePoolModel(),
+            HIDDEN_SIZE,
+            TOKENS_PER_BLOCK,
+            TOKENS_PER_BLOCK,
+            TOKENS_PER_BLOCK,
+            [2],
+            GROUP_TAGS,
+        )
+
+        # Live inputs intentionally carry the binding default (pool size 0).
+        # Replay must use the bounds persisted from graph warmup instead.
+        self._assert_replay_signature(
+            runner,
+            _build_decode_inputs(GROUP_TAGS, {"full": 5, "aux": 3}),
+            53,
+        )
+
+        for tag, values in (
+            ("full", {"full": 8, "aux": 3}),
+            ("aux", {"full": 5, "aux": 4}),
+        ):
+            with self.subTest(tag=tag):
+                invalid_inputs = _build_decode_inputs(GROUP_TAGS, values)
+                self.assertTrue(runner.canRun(invalid_inputs))
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    rf"tag={tag}: .*invalid state block ID",
+                ):
+                    runner.forward(invalid_inputs)
 
     def test_prefill_tagged_capture_and_replay_updates(self) -> None:
         runner = CudaGraphRunner()

@@ -7,6 +7,7 @@
 #include <torch/version.h>
 
 #include <string>
+#include <unordered_map>
 
 namespace rtp_llm {
 
@@ -51,6 +52,7 @@ public:
         py_model_inputs_.attention_inputs.padding_offset          = inputs.attention_inputs.padding_offset;
         py_model_inputs_.attention_inputs.is_prefill              = inputs.attention_inputs.is_prefill;
         py_model_inputs_.attention_inputs.is_target_verify        = inputs.attention_inputs.is_target_verify;
+        py_model_inputs_.attention_inputs.is_cuda_graph           = inputs.attention_inputs.is_cuda_graph;
         py_model_inputs_.attention_inputs.dtype                   = inputs.attention_inputs.dtype;
         py_model_inputs_.attention_inputs.context_total_kv_length = inputs.attention_inputs.context_total_kv_length;
 
@@ -81,6 +83,11 @@ public:
 #endif
     at::cuda::CUDAGraph graph_;
     CaptureMemoryHold   mem_hold_;
+    // State-pool bounds observed by the Python model during this graph
+    // instance's eager warmup. An empty tag denotes the single-cache fast path.
+    // Keeping the bounds outside PyAttentionInputs prevents replay metadata
+    // refreshes from dropping the scalar contract established at capture time.
+    std::unordered_map<std::string, int64_t> gdn_decode_state_pool_sizes_;
 };
 
 class CudaGraphStreamLife {

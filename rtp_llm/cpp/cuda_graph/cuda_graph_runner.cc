@@ -255,8 +255,9 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
 
     const size_t graph_idx =
         is_prefill_cuda_graph_mode_ ? state.current_real_graph_seq_len : state.current_real_graph_bs;
-    auto&      py_model_inputs_ = graph_instances_[graph_idx].mem_hold_.py_model_inputs_;
-    auto       attn_pyobj       = graph_instances_[graph_idx].mem_hold_.attn_pyobj_;
+    auto&      graph_instance   = graph_instances_[graph_idx];
+    auto&      py_model_inputs_ = graph_instance.mem_hold_.py_model_inputs_;
+    auto       attn_pyobj       = graph_instance.mem_hold_.attn_pyobj_;
     const bool has_tagged_cache = !inputs.attention_inputs_by_tag.empty();
 
     // Per-launch capacity contract: see fuse_copy_util.h sizing rationale.
@@ -652,23 +653,33 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
             RTP_LLM_PROFILE_SCOPE("cuda_graph.prepareAttentionInputs(wait_host_mirror_d2h)");
             cuda_graph::graphGetCurrentStream().synchronize();
         }
-        // Qwen3.5 records the SSM pool bound during graph capture. Validate the
-        // refreshed pinned host metadata for only the live rows before replay;
-        // this consumes no device flag and adds no decode-path synchronization.
-        auto validate_gdn_state_blocks = [&state, this](const PyAttentionInputs& attn_inputs) {
+        // Validate only tags that selected AITER GDN during this graph
+        // instance's eager warmup. Their pool bounds are persisted on the
+        // GraphInstance because refreshed replay inputs do not carry model-owned
+        // scalar metadata. The host mirrors are already current here, so this
+        // adds neither a device flag nor another synchronization.
+        auto validate_gdn_state_blocks = [&state, this](const PyAttentionInputs& attn_inputs,
+                                                        int64_t                  state_pool_size,
+                                                        const std::string&       tag) {
             const auto error = validateGdnDecodeStateBlockTable(attn_inputs.kv_cache_kernel_block_id,
                                                                  attn_inputs.sequence_lengths,
                                                                  state.current_batch_size,
                                                                  seq_size_per_block_,
-                                                                 attn_inputs.gdn_decode_state_pool_size);
-            RTP_LLM_CHECK_WITH_INFO(error.empty(), "%s", error.c_str());
+                                                                 state_pool_size);
+            RTP_LLM_CHECK_WITH_INFO(error.empty(),
+                                    "GDN decode state validation failed for tag=%s: %s",
+                                    tag.empty() ? "<default>" : tag.c_str(),
+                                    error.c_str());
         };
-        if (py_model_inputs_.attention_inputs_by_tag.empty()) {
-            validate_gdn_state_blocks(py_model_inputs_.attention_inputs);
-        } else {
-            for (const auto& [tag, attn_inputs] : py_model_inputs_.attention_inputs_by_tag) {
-                (void)tag;
-                validate_gdn_state_blocks(attn_inputs);
+        for (const auto& [tag, state_pool_size] : graph_instance.gdn_decode_state_pool_sizes_) {
+            if (tag.empty()) {
+                validate_gdn_state_blocks(py_model_inputs_.attention_inputs, state_pool_size, tag);
+            } else {
+                const auto tagged_it = py_model_inputs_.attention_inputs_by_tag.find(tag);
+                RTP_LLM_CHECK_WITH_INFO(tagged_it != py_model_inputs_.attention_inputs_by_tag.end(),
+                                        "GDN decode CUDA graph state-pool tag=%s is missing during replay",
+                                        tag.c_str());
+                validate_gdn_state_blocks(tagged_it->second, state_pool_size, tag);
             }
         }
         py::gil_scoped_acquire gil;
@@ -941,6 +952,7 @@ int CudaGraphRunner::getCurrentRealGraphBs(const CudaGraphState& state) const {
 void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_bs, int num_tokens_per_bs) {
     inputs.attention_inputs.is_target_verify = is_target_verify_;
     inputs.attention_inputs.is_prefill       = is_prefill_cuda_graph_mode_ || is_target_verify_;
+    inputs.attention_inputs.is_cuda_graph    = true;
 
     // input_ids [tokens_nums] = [batch_size * num_tokens_per_bs]
     inputs.input_ids = torch::zeros({max_num_token_}, options_cuda_int32_);
@@ -1226,6 +1238,25 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
         RTP_LLM_LOG_ERROR("WarmUp forward failed for %s %d: %s", key_type, key, e.what());
         throw;
     }
+    // Python records a positive pool bound only for the attention-input group
+    // that actually selected AITER FlyDSL GDN. Read that model-owned warmup
+    // result because PyModelInputs crosses pybind by value: mutating a scalar on
+    // the Python wrapper does not update this C++ copy. Persist the result per
+    // graph bucket and tag so replay metadata is never the authority for it.
+    auto& state_pool_sizes = graph_instances_[key].gdn_decode_state_pool_sizes_;
+    state_pool_sizes.clear();
+    if (py::hasattr(py_instance_, "get_gdn_decode_state_pool_sizes")) {
+        const auto py_state_pool_sizes = py_instance_.attr("get_gdn_decode_state_pool_sizes")().cast<py::dict>();
+        for (const auto& item : py_state_pool_sizes) {
+            const auto tag             = py::cast<std::string>(item.first);
+            const auto state_pool_size = py::cast<int64_t>(item.second);
+            RTP_LLM_CHECK_WITH_INFO(
+                state_pool_size > 0, "GDN decode warmup state-pool size must be positive for tag=%s", tag.c_str());
+            const auto [it, inserted] = state_pool_sizes.emplace(tag, state_pool_size);
+            (void)it;
+            RTP_LLM_CHECK_WITH_INFO(inserted, "duplicate GDN decode warmup state-pool tag=%s", tag.c_str());
+        }
+    }
     RTP_LLM_LOG_INFO("WarmUp for %s %d successfully.", key_type, key);
 
     {
@@ -1288,6 +1319,7 @@ void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size
     // Common slice operations for input_ids and padding_offset
     inputs.attention_inputs.is_prefill       = is_prefill_cuda_graph_mode_ || is_target_verify_;
     inputs.attention_inputs.is_target_verify = is_target_verify_;
+    inputs.attention_inputs.is_cuda_graph    = true;
     // HC-shaped MTP draft prefill executes a fixed-capacity Python path. Other
     // MTP models must slice to the current graph key so FlashInfer's batch
     // indices length remains equal to the query nnz.
