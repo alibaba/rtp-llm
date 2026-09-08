@@ -2649,7 +2649,10 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
                 )
 
                 self.assertEqual(status, expected_status)
-                self.assertIn(str(error), message)
+                if isinstance(error, GrammarCheckOverloaded):
+                    self.assertEqual("Too many requests.", message)
+                else:
+                    self.assertIn(str(error), message)
 
     async def test_model_stream_infer_passes_multimodal_payload_to_backend(
         self,

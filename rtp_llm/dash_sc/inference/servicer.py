@@ -1516,8 +1516,8 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                 return None
         except GrammarCompilationError as e:
             return DASH_ERROR_BAD_REQUEST, str(e)
-        except GrammarCheckOverloaded as e:
-            return DASH_ERROR_ADMISSION_OVERLOADED, f"grammar validation overloaded: {e}"
+        except GrammarCheckOverloaded:
+            return DASH_ERROR_ADMISSION_OVERLOADED, "Too many requests."
         except GrammarCheckTimeout as e:
             return DASH_ERROR_TIMEOUT, f"grammar validation timed out: {e}"
         except GrammarCheckUnavailable as e:
