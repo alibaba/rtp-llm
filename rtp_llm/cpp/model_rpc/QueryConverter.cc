@@ -478,12 +478,30 @@ void QueryConverter::transResponse(GenerateOutputsPB*     outputs,
     stackBuffersToTensorPB(
         flatten_output->mutable_hidden_states(), source_outputs, [](const auto& r) { return r.hidden_states; });
 
+    if (dump_aux_info) {
+        // Keep writing the per-output AuxInfo field for rolling-upgrade compatibility.
+        // New clients consume this aggregate tensor and avoid deserializing one TensorPB per beam/output.
+        stackBuffersToTensorPB(flatten_output->mutable_all_softmax_probs(), source_outputs, [](const auto& r) {
+            return r.aux_info.softmax_probs;
+        });
+    }
+
     stackBuffersToTensorPB(flatten_output->mutable_loss(), source_outputs, [](const auto& r) { return r.loss; });
 
     stackBuffersToTensorPB(flatten_output->mutable_logits(), source_outputs, [](const auto& r) { return r.logits; });
 
-    stackBuffersToTensorPB(
-        flatten_output->mutable_all_hidden_states(), source_outputs, [](const auto& r) { return r.all_hidden_states; });
+    {
+        torch::Tensor all_hidden_states;
+        for (const auto& resp : source_outputs) {
+            if (resp.all_hidden_states.has_value()) {
+                all_hidden_states = resp.all_hidden_states.value();
+                break;
+            }
+        }
+        if (all_hidden_states.defined()) {
+            transTensorPB(flatten_output->mutable_all_hidden_states(), all_hidden_states.contiguous());
+        }
+    }
 
     if (!source_outputs.empty() && source_outputs[0].prompt_logits.has_value()) {
         auto*       pb = flatten_output->mutable_prompt_logits();

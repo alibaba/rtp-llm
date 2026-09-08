@@ -243,6 +243,12 @@ TEST_F(QueryConverterTest, testTransOutput) {
         hidden_states_data[i] = i;
     }
     res.hidden_states.emplace(hidden_states_tensor);
+    auto all_hidden_states_tensor = torch::empty({4, 2}, torch::kFloat32);
+    auto all_hidden_states_data   = all_hidden_states_tensor.data_ptr<float>();
+    for (int i = 0; i < 8; ++i) {
+        all_hidden_states_data[i] = i + 10;
+    }
+    res.all_hidden_states.emplace(all_hidden_states_tensor);
     outputs.generate_outputs.push_back(res);
 
     GenerateOutputsPB outputs_pb;
@@ -286,6 +292,96 @@ TEST_F(QueryConverterTest, testTransOutput) {
     for (int i = 0; i < 6; ++i) {
         ASSERT_FLOAT_EQ(hidden_states_vector[i], i);
     }
+    ASSERT_TRUE(output_pb.has_all_hidden_states());
+    auto all_hidden_states_pb = output_pb.all_hidden_states();
+    ASSERT_EQ(all_hidden_states_pb.data_type(), TensorPB_DataType::TensorPB_DataType_FP32);
+    ASSERT_EQ(all_hidden_states_pb.shape_size(), 2);
+    ASSERT_EQ(all_hidden_states_pb.shape(0), 4);
+    ASSERT_EQ(all_hidden_states_pb.shape(1), 2);
+    auto          all_hidden_states_string = all_hidden_states_pb.fp32_data();
+    vector<float> all_hidden_states_vector;
+    all_hidden_states_vector.resize(all_hidden_states_string.size() / sizeof(float));
+    std::memcpy(all_hidden_states_vector.data(), all_hidden_states_string.data(), all_hidden_states_string.size());
+    for (int i = 0; i < 8; ++i) {
+        ASSERT_FLOAT_EQ(all_hidden_states_vector[i], i + 10);
+    }
+}
+
+TEST_F(QueryConverterTest, TransOutputSerializesSharedAllHiddenStatesAsSingle2DTensor) {
+    GenerateOutputs outputs;
+
+    auto first_all_hidden_states = torch::empty({2, 2}, torch::kFloat32);
+    auto first_data              = first_all_hidden_states.data_ptr<float>();
+    for (int i = 0; i < 4; ++i) {
+        first_data[i] = i + 1;
+    }
+    GenerateOutput first_output;
+    first_output.finished = true;
+    first_output.all_hidden_states.emplace(first_all_hidden_states);
+    outputs.generate_outputs.push_back(first_output);
+
+    auto second_all_hidden_states = torch::empty({2, 2}, torch::kFloat32);
+    auto second_data              = second_all_hidden_states.data_ptr<float>();
+    for (int i = 0; i < 4; ++i) {
+        second_data[i] = i + 101;
+    }
+    GenerateOutput second_output;
+    second_output.finished = true;
+    second_output.all_hidden_states.emplace(second_all_hidden_states);
+    outputs.generate_outputs.push_back(second_output);
+
+    GenerateOutputsPB outputs_pb;
+    QueryConverter::transResponse(&outputs_pb, &outputs, false, "", 10000);
+
+    const auto& output_pb            = outputs_pb.flatten_output();
+    const auto& all_hidden_states_pb = output_pb.all_hidden_states();
+    ASSERT_EQ(all_hidden_states_pb.data_type(), TensorPB_DataType::TensorPB_DataType_FP32);
+    ASSERT_EQ(all_hidden_states_pb.shape_size(), 2);
+    ASSERT_EQ(all_hidden_states_pb.shape(0), 2);
+    ASSERT_EQ(all_hidden_states_pb.shape(1), 2);
+
+    const auto&   all_hidden_states_string = all_hidden_states_pb.fp32_data();
+    vector<float> all_hidden_states_vector;
+    all_hidden_states_vector.resize(all_hidden_states_string.size() / sizeof(float));
+    std::memcpy(all_hidden_states_vector.data(), all_hidden_states_string.data(), all_hidden_states_string.size());
+    ASSERT_EQ(all_hidden_states_vector.size(), 4);
+    for (int i = 0; i < 4; ++i) {
+        ASSERT_FLOAT_EQ(all_hidden_states_vector[i], i + 1);
+    }
+}
+
+TEST_F(QueryConverterTest, TransOutputAggregatesSoftmaxProbsAndKeepsLegacyAuxInfo) {
+    GenerateOutputs outputs;
+    for (const auto& values : {std::vector<float>{0.1f, 0.9f}, std::vector<float>{0.25f, 0.75f}}) {
+        GenerateOutput output;
+        output.finished               = true;
+        output.aux_info.softmax_probs = torch::tensor(values, torch::kFloat32);
+        outputs.generate_outputs.push_back(std::move(output));
+    }
+
+    GenerateOutputsPB outputs_pb;
+    QueryConverter::transResponse(&outputs_pb, &outputs, true, "", 10000);
+
+    const auto& flatten = outputs_pb.flatten_output();
+    ASSERT_TRUE(flatten.has_all_softmax_probs());
+    ASSERT_EQ(flatten.all_softmax_probs().shape_size(), 2);
+    EXPECT_EQ(flatten.all_softmax_probs().shape(0), 2);
+    EXPECT_EQ(flatten.all_softmax_probs().shape(1), 2);
+    const auto& data = flatten.all_softmax_probs().fp32_data();
+    ASSERT_EQ(data.size(), 4 * sizeof(float));
+    const auto* probs = reinterpret_cast<const float*>(data.data());
+    EXPECT_FLOAT_EQ(probs[0], 0.1f);
+    EXPECT_FLOAT_EQ(probs[1], 0.9f);
+    EXPECT_FLOAT_EQ(probs[2], 0.25f);
+    EXPECT_FLOAT_EQ(probs[3], 0.75f);
+
+    ASSERT_EQ(flatten.aux_info_size(), 2);
+    EXPECT_TRUE(flatten.aux_info(0).has_softmax_probs());
+    EXPECT_TRUE(flatten.aux_info(1).has_softmax_probs());
+
+    GenerateOutputsPB outputs_without_aux;
+    QueryConverter::transResponse(&outputs_without_aux, &outputs, false, "", 10000);
+    EXPECT_FALSE(outputs_without_aux.flatten_output().has_all_softmax_probs());
 }
 
 TEST_F(QueryConverterTest, TransTensorPB_FP32) {
