@@ -83,10 +83,21 @@ as a substitute for a prefill decision.
 
 Every command returns a non-zero exit status when collection or request joins are partial, even if non-strict mode produced inspectable artifacts. Use `--strict` to stop before HTML generation when log coverage is incomplete or any routed request lacks cache/WorkerStatus first-token telemetry.
 
+## Cache comparison
+
+`cache_hit_comparison` contains the selected routing source, actual Engine hit tokens, routing prediction,
+KVCM local and local-plus-P2P predictions, and the Local Standby prediction. All `delta` values are
+actual minus predicted tokens. A negative value means overprediction; a positive value means underprediction.
+`routing` describes the active source's prediction. `kvcm` is present for KVCM-sourced decisions;
+`localStandby` requires an available Standby prediction. Missing predictions are unknown, while zero
+is a measured or predicted zero. The Requests sheet and HTML request detail expose these comparisons.
+
 ## Semantics and limitations
 
 - The page ends a request at observed first token. PV does not contain Chat/Decode completion, so the page does not claim full request completion.
-- Decision Top5 rows are the facts recorded at route time. Host lifecycle buckets are reconstructed from request timestamps.
+- Both historical `shortestTtftDecisions` and current `routingDecisions` are supported, including mixed log windows. Historical token-work estimates remain in `Decision Snapshot Top5`; current millisecond estimates, role candidates, policy thresholds, rejection counts and committed decision groups appear in `Routing Decisions` and in the HTML candidate cards. Unknown values remain blank; they are not zero or terminal Engine measurements.
+- Current-only workbooks promote current fields in Requests and omit obsolete decision columns. Mixed workbooks retain both schemas in separate columns. The HTML summary switches units with the selected request; Prefill and Decode decisions are displayed separately without using Decode as a Prefill substitute.
+- Snapshot candidates are recorded facts, capped at 5 per role for current strategies with an explicit truncation flag. Prefill retains selected, shortest-TTFT and greatest-effective-hit candidates. Host lifecycle buckets are reconstructed from request timestamps.
 - If the source only has terminal WorkerStatus, RUNNING water level and step progress are interpolated between RUNNING and first-token boundaries; they are not a historical sequence of per-step snapshots.
 - Multiple FlexLB instances are kept separate while joining records. This avoids accidentally joining identical request IDs across instances.
 - Automatic deployment resolution sees the instances that are RUNNING at collection time. For a historical window that crossed a rollout or scale event, pass each still-accessible historical instance explicitly with repeated `--instance`, or build from an exported PV log bundle. The manifest cannot claim coverage for an instance that no longer exists.

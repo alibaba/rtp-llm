@@ -79,6 +79,47 @@ class BuildHtmlTest(unittest.TestCase):
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_current_candidate_card_keeps_milliseconds_weight_and_missing_values(self) -> None:
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("Node is required to execute the card renderer")
+        template = (TOOL_DIR / "replay_template.html").read_text()
+        declarations = []
+        for name in ("nf", "number", "milliseconds", "work", "tokenWork", "pct"):
+            declarations.append(re.search(r"    const " + name + r" = .*;", template).group(0))
+        helpers = template[template.index("    function escaped("):template.index("    function renderDecisionMicroscope(")]
+        script = "\n".join(declarations) + helpers + "\n" + '''
+        const prefill = currentDecisionCard({role: 'PREFILL', host: 'worker', port: 8001,
+          projectedTtftMs: 12, projectedDrainMs: 0, incomingPrefillMs: null,
+          policy: {minimumTtftMs: 12}, pendingRequests: 0});
+        const decode = currentDecisionCard({role: 'DECODE', host: 'worker', logWeight: -0.25});
+        if (!prefill.includes('12 ms') || !prefill.includes('0 ms') || !prefill.includes('本请求 Prefill 耗时<b>—</b>'))
+          throw new Error('Current estimates lost their units or unknown values');
+        if (!decode.includes('-0.250000')) throw new Error('Decode weight rounded to zero');
+        '''
+        result = subprocess.run([node, "-e", script], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_cache_comparison_card_preserves_zero_signed_delta_and_unknown(self) -> None:
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("Node is required to execute the card renderer")
+        template = (TOOL_DIR / "replay_template.html").read_text()
+        declarations = [re.search(r"    const " + name + r" = .*;", template).group(0)
+                        for name in ("nf", "number", "work", "tokenWork")]
+        helpers = template[template.index("    function escaped("):template.index("    function currentDecisionCard(")]
+        renderer = template[template.index("    function renderCacheComparison("):template.index("    function renderRequestDetail(")]
+        script = "\n".join(declarations) + helpers + renderer + "\n" + '''
+        const html = renderCacheComparison({actualHit: 0, cacheComparison: {
+          source: '<Standby>', kvcm: {hit: null, delta: null},
+          local_standby: {hit: 300, delta: -300}}});
+        if (!html.includes('实际命中 0 Token') || !html.includes('差值 -300 Token')
+          || !html.includes('— · 差值 —') || !html.includes('&lt;Standby&gt;'))
+          throw new Error('Cache comparison lost zero, signed delta, unknown, or source escaping');
+        '''
+        result = subprocess.run([node, "-e", script], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_builds_replay_from_legacy_requests_header_row(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)

@@ -135,6 +135,9 @@ def compact_request(row: dict[str, Any]) -> dict[str, Any] | None:
         "selectedRank": number("selected snapshot TTFT rank"),
         "selectedSnapshotHitRate": number("selected snapshot hit rate"),
         "selectedSnapshotUncache": number("selected snapshot request uncache"),
+        "effectiveUncache": (max(0, number("input_tokens") - number("selected effective hit tokens"))
+                             if number("input_tokens") is not None and number("selected effective hit tokens") is not None
+                             else None),
         "selectedQueueWork": number("selected snapshot queue work"),
         "selectedEstimatedTtft": number("selected snapshot estimated TTFT"),
         "selectedOutstanding": number("selected outstanding uncache"),
@@ -167,6 +170,12 @@ def compact_request(row: dict[str, Any]) -> dict[str, Any] | None:
         "hitDeltaPp": number("actual_minus_predicted_pp"),
         "predictedHit": number("predicted_hit_tokens"),
         "actualHit": number("actual_hit_tokens"),
+        "cacheComparison": {"source": row.get("cache comparison source"),
+                            "kvcm": {"hit": number("kvcm_hit_tokens"), "delta": number("kvcm_delta_tokens")},
+                            "kvcm_local": {"hit": number("kvcm_local_hit_tokens"), "delta": number("kvcm_local_delta_tokens")},
+                            "kvcm_p2p_total": {"hit": number("kvcm_p2p_total_hit_tokens"), "delta": number("kvcm_p2p_total_delta_tokens")},
+                            "local_standby": {"hit": number("local_standby_hit_tokens"), "delta": number("local_standby_delta_tokens")},
+                            "kvcmMinusStandby": number("kvcm_minus_standby_tokens")},
         "cacheState": row.get("cache_state") or "",
         "workerStatusEvent": timestamp_ms(row.get("worker_status_event_time")),
     }
@@ -207,6 +216,33 @@ def compact_candidate(row: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
+def compact_current_candidate(row: dict[str, Any]) -> dict[str, Any] | None:
+    if not row.get("request_id"):
+        return None
+    endpoint = str(row.get("endpoint") or "")
+    physical_endpoint, engine_separator, engine_index = endpoint.partition("@")
+    host, separator, port = physical_endpoint.rpartition(":")
+    fields = ("projectedTtftMs", "projectedDrainMs", "incomingPrefillMs", "effectiveHitTokens",
+              "routingMatchTokens", "pendingRequests", "usedKvTokens", "availableKvTokens", "logWeight",
+              "ownershipVersion", "routingAttempt", "totalWorkerCount", "candidateWorkerCount")
+    return {
+        **{key: cell_number(row.get(key)) for key in fields},
+        "schema": "routingDecisions", "rank": None,
+        "endpoint": endpoint,
+        "engineIndex": cell_number(engine_index) if engine_separator else None,
+        "host": host.strip("[]") if separator else endpoint or "unknown",
+        "port": cell_number(port) if separator else None,
+        "selected": cell_bool(row.get("selected")),
+        "role": row.get("role"), "strategy": row.get("strategy"),
+        "selectionReason": row.get("selectionReason"), "predictionState": row.get("predictionState"),
+        "snapshotTruncated": cell_bool(row.get("snapshotTruncated")),
+        "policy": {key.removeprefix("policy."): value for key, value in row.items() if key.startswith("policy.")},
+        "decisionGroup": {key.removeprefix("decisionGroup."): value for key, value in row.items()
+                          if key.startswith("decisionGroup.")},
+        "rejections": row.get("rejections") or "{}",
+    }
+
+
 def _build_replay(input_path: Path) -> dict[str, Any]:
     workbook = load_workbook(input_path, read_only=True, data_only=True)
     try:
@@ -232,6 +268,13 @@ def _build_replay(input_path: Path) -> dict[str, Any]:
             item = compact_candidate(row)
             if item:
                 candidates.setdefault(replay_key(row), []).append(item)
+        if "Routing Decisions" in workbook.sheetnames:
+            current_candidates: dict[str, list[dict[str, Any]]] = {}
+            for row in read_table(workbook["Routing Decisions"], 1):
+                item = compact_current_candidate(row)
+                if item:
+                    current_candidates.setdefault(replay_key(row), []).append(item)
+            candidates.update(current_candidates)
         for values in candidates.values():
             values.sort(key=lambda item: (item["rank"] or 10**9, item["host"]))
     finally:
@@ -251,7 +294,7 @@ def _build_replay(input_path: Path) -> dict[str, Any]:
             "end": max(terminal_times),
             "timezone": "Asia/Shanghai",
             "notice": (
-                "决策候选为 PV 中的真实 Top5/关键候选快照；请求生命周期和 "
+                "决策候选为 PV 中的实际快照；CostBased 预测使用毫秒，历史工作量使用 Token；请求生命周期和 "
                 "step 进度依据观测边界展示。"
             ),
         },

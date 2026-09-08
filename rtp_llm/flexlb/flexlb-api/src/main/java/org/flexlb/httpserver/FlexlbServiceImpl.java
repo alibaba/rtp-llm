@@ -723,6 +723,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
             return;
         }
         try {
+            ctx.finishRequestTiming();
             FlexlbScheduleProtocol.RequestLifecyclePB lifecycle = response.hasLifecycle()
                     ? response.getLifecycle()
                     : FlexlbScheduleProtocol.RequestLifecyclePB.getDefaultInstance();
@@ -848,6 +849,9 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
     private BalanceContext buildContext(FlexlbScheduleProtocol.FlexlbScheduleRequestPB pb) {
         var config = configService.loadBalanceConfig();
         BalanceContext ctx = new BalanceContext(config);
+        ctx.setInputIdsCount((long) pb.getInputIdsCount());
+        ctx.setRequestMessageBytes((long) pb.getSerializedSize());
+        ctx.recordRequestTiming(pb.getRequestTimeMs(), null);
         ctx.setTraceContext(entryTraceContext());
         Span span = Span.fromContext(ctx.getTraceContext());
         FlexlbTrace.setRequestAttributes(span, pb.getRequestId());
