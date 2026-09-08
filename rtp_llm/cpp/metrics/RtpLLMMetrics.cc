@@ -1,7 +1,6 @@
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "autil/EnvUtil.h"
 #include "rtp_llm/cpp/utils/Logger.h"
-#include "kmonitor/client/KMonitor.h"
 #include "kmonitor/client/KMonitorFactory.h"
 #include "kmonitor/client/KMonitorWorker.h"
 #include "kmonitor/client/core/MetricsConfig.h"
@@ -1167,18 +1166,6 @@ void fillKmonitorConfig(kmonitor::MetricsConfig& metricsConfig, const KmonParam&
     setHippoTags(metricsConfig);
 }
 
-void refreshRegisteredKmonitorTags(const kmonitor::MetricsConfig& config) {
-    auto tags = config.global_tags()->GetTagsMap();
-    for (const auto& pair : config.CommonTags()) {
-        tags[pair.first] = pair.second;
-    }
-    for (const auto& monitorPair : *kmonitor::KMonitorFactory::GetKMonitorMap()) {
-        for (const auto& tagPair : tags) {
-            monitorPair.second->AddTag(tagPair.first, tagPair.second);
-        }
-    }
-}
-
 }  // namespace
 
 bool initKmonitorFactory() {
@@ -1279,7 +1266,6 @@ bool resumeKmonitorAfterScr() {
     auto* system = worker->getMetricsSystem();
     if (kmonitorTransportDeferred) {
         worker->addCommonTags();
-        refreshRegisteredKmonitorTags(*factoryConfig);
         kmonitor::KMonitorFactory::Start();
         if (!system->Started()) {
             return false;
@@ -1290,7 +1276,6 @@ bool resumeKmonitorAfterScr() {
     }
     system->Stop();
     worker->addCommonTags();
-    refreshRegisteredKmonitorTags(*factoryConfig);
     system->Init(factoryConfig);
     if (!system->Started()) {
         return false;

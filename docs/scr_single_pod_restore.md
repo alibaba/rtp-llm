@@ -66,10 +66,13 @@ error, both reporters activate their external transport. They reread the Hippo
 runtime environment and rebuild the sink and identity tags so a restored process
 does not report with the seed Pod's host or container IP. Python also replaces
 stale runtime tags when rendering data points that were registered before the
-checkpoint. The native library must provide the matching lifecycle hooks; mixing
-new Python helpers with an older loaded native library rejects checkpoint
-participation rather than silently retaining sockets. Ordinary serving without
-SCR keeps the original eager reporting behavior.
+checkpoint. Native reporting applies the refreshed runtime identity at the
+publish boundary, so a metric declared before the checkpoint can retain its
+existing handle while its emitted records use the restored Pod's IP tags. The
+native library must provide the matching lifecycle hooks; mixing new Python
+helpers with an older loaded native library rejects checkpoint participation
+rather than silently retaining sockets. Ordinary serving without SCR keeps the
+original eager reporting behavior.
 
 CPU validation covers deferred Python transport activation, real TCP
 closure/reconnection, refreshed runtime identity, and native metric registration
