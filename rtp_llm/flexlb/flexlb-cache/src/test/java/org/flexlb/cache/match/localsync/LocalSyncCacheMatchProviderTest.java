@@ -41,7 +41,7 @@ class LocalSyncCacheMatchProviderTest {
         verify(kvCacheManager).updateEngineCache(
                 new WorkerIdentity("127.0.0.1", 8080, 0), "PREFILL", Set.of(11L, 22L));
         verify(metricsReporter).reportUpdateEngineBlockCacheRT(
-                eq("127.0.0.1@0"), eq("PREFILL"), anyLong(), eq("1"));
+                eq("127.0.0.1:8080@0"), eq("PREFILL"), anyLong(), eq("1"));
     }
 
     @Test
@@ -60,7 +60,7 @@ class LocalSyncCacheMatchProviderTest {
         assertEquals("Worker Cache Status is null", result.getErrorMessage());
         verifyNoInteractions(kvCacheManager);
         verify(metricsReporter).reportUpdateEngineBlockCacheRT(
-                eq("127.0.0.1@0"), eq("PREFILL"), anyLong(), eq("0"));
+                eq("127.0.0.1:8080@0"), eq("PREFILL"), anyLong(), eq("0"));
     }
 
     @Test
@@ -77,7 +77,7 @@ class LocalSyncCacheMatchProviderTest {
         assertEquals("Worker Cached Keys is null", result.getErrorMessage());
         verifyNoInteractions(kvCacheManager);
         verify(metricsReporter).reportUpdateEngineBlockCacheRT(
-                eq("127.0.0.1@0"), eq("PREFILL"), anyLong(), eq("0"));
+                eq("127.0.0.1:8080@0"), eq("PREFILL"), anyLong(), eq("0"));
     }
 
     @Test
@@ -95,7 +95,7 @@ class LocalSyncCacheMatchProviderTest {
         verify(kvCacheManager).updateEngineCache(
                 new WorkerIdentity("127.0.0.1", 8080, 0), "PREFILL", Set.of());
         verify(metricsReporter).reportUpdateEngineBlockCacheRT(
-                eq("127.0.0.1@0"), eq("PREFILL"), anyLong(), eq("1"));
+                eq("127.0.0.1:8080@0"), eq("PREFILL"), anyLong(), eq("1"));
     }
 
     @Test
@@ -115,7 +115,7 @@ class LocalSyncCacheMatchProviderTest {
         assertFalse(result.isSuccess());
         assertEquals("cache update failed", result.getErrorMessage());
         verify(metricsReporter).reportUpdateEngineBlockCacheRT(
-                eq("127.0.0.1@0"), eq("PREFILL"), anyLong(), eq("0"));
+                eq("127.0.0.1:8080@0"), eq("PREFILL"), anyLong(), eq("0"));
     }
 
     private WorkerStatus workerStatusFixture() {

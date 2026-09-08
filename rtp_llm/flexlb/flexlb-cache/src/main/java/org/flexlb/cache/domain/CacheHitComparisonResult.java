@@ -9,7 +9,7 @@ import org.flexlb.dao.master.WorkerIdentity;
  * Cache-hit comparison result and PV log payload.
  *
  * @param workerIdentity worker identity providing the routing/PV identity
- *                       {@code ip:port@engineIndex} and the metrics identity
+ *                       {@code ip:port@engineIndex} and legacy short identity
  *                       {@code ip@engineIndex}; omitted from PV JSON itself
  */
 @JsonPropertyOrder({
@@ -36,7 +36,7 @@ public record CacheHitComparisonResult(
         return workerIdentity == null ? null : workerIdentity.getLogicalIpPort();
     }
 
-    /** Metrics identity in {@code ip@engineIndex} format; omitted from PV JSON. */
+    /** Legacy short identity in {@code ip@engineIndex} format; omitted from PV JSON. */
     public String ipIndex() {
         return workerIdentity == null ? null : workerIdentity.getIpIndex();
     }

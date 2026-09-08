@@ -87,7 +87,7 @@ public final class DeliveryMetrics {
     }
 
     private static String prefillIp(ScheduledRequest item) {
-        return item.prefillEp().getIp();
+        return item.prefillEp().getStatus().getLogicalIpPort();
     }
 
     private static long saturatedAdd(long left, long right) {

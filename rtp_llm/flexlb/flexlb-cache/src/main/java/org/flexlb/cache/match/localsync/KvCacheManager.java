@@ -125,7 +125,7 @@ public class KvCacheManager implements EngineCacheInvalidator {
         // Calculate diff
         DiffResult diffResult = engineLocalView.calculateDiff(engineIPort, newCacheBlocks);
         cacheMetricsReporter.reportCacheDiffMetrics(
-                identity.getIpIndex(), role,
+                identity.getLogicalIpPort(), role,
                 diffResult.getAddedBlocks().size(), diffResult.getRemovedBlocks().size());
         if (!diffResult.hasChanges()) {
             return;
@@ -152,7 +152,7 @@ public class KvCacheManager implements EngineCacheInvalidator {
 
         // Report metrics
         cacheMetricsReporter.reportEngineLocalMetrics(
-                identity.getIpIndex(), role, engineLocalView.size(engineIPort));
+                identity.getLogicalIpPort(), role, engineLocalView.size(engineIPort));
         cacheMetricsReporter.reportGlobalCacheMetrics(globalCacheIndex.totalBlocks(), globalCacheIndex.totalMappings());
         cacheMetricsReporter.reportEngineViewsMapSize(engineLocalView.getEngineViewsMapSize());
     }

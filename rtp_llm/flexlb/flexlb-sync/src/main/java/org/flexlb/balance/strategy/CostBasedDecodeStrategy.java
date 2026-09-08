@@ -659,7 +659,7 @@ public class CostBasedDecodeStrategy {
         }
     }
 
-    private interface DecodeDirectoryView {
+    interface DecodeDirectoryView {
 
         List<DecodeRoutingView> decodeRoutingSnapshot(String group);
 

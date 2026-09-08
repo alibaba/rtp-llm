@@ -154,7 +154,8 @@ public class GrpcWorkerStatusRunner implements Runnable {
             if (observation == null) {
                 logger.debug("query engine worker status via gRPC, response body is null");
                 engineHealthReporter.reportStatusCheckerFail(
-                        modelName, BalanceStatusEnum.RESPONSE_NULL, roleType);
+                        modelName, BalanceStatusEnum.RESPONSE_NULL,
+                        workerStatus.getLogicalIpPort(), roleType);
                 return;
             }
             if (!workerDirectory.isCurrentStatus(
@@ -299,7 +300,8 @@ public class GrpcWorkerStatusRunner implements Runnable {
             logger.error("Worker status response handling failed after callback for {}",
                     ipPort, e);
             engineHealthReporter.reportStatusCheckerFail(
-                    modelName, BalanceStatusEnum.UNKNOWN_ERROR, roleType);
+                    modelName, BalanceStatusEnum.UNKNOWN_ERROR,
+                    workerStatus.getLogicalIpPort(), roleType);
         }
     }
 
@@ -381,7 +383,8 @@ public class GrpcWorkerStatusRunner implements Runnable {
             WorkerEndpoint endpoint) {
         try {
             engineHealthReporter.reportStatusCheckRemoteInfo(
-                    modelName, observation.role().name(), startTime);
+                    modelName, workerStatus.getLogicalIpPort(),
+                    observation.role().name(), startTime);
             engineHealthReporter.reportStatusCheckerSuccess(
                     modelName,
                     workerStatus,
@@ -431,10 +434,12 @@ public class GrpcWorkerStatusRunner implements Runnable {
         if (ex.getMessage() != null && ex.getMessage().toLowerCase().contains(DEADLINE_EXCEEDED_MESSAGE.toLowerCase())) {
             logger.debug("gRPC worker status check timeout, msg={}, ipPort: {}, rt: {}", ex.getMessage(), ipPort, System.nanoTime() / 1000 - createTimeUs);
             engineHealthReporter.reportStatusCheckerFail(
-                    modelName, BalanceStatusEnum.WORKER_STATUS_GRPC_TIMEOUT, roleType);
+                    modelName, BalanceStatusEnum.WORKER_STATUS_GRPC_TIMEOUT,
+                    workerStatus.getLogicalIpPort(), roleType);
         } else {
             engineHealthReporter.reportStatusCheckerFail(
-                    modelName, BalanceStatusEnum.WORKER_SERVICE_UNAVAILABLE, roleType);
+                    modelName, BalanceStatusEnum.WORKER_SERVICE_UNAVAILABLE,
+                    workerStatus.getLogicalIpPort(), roleType);
         }
     }
 

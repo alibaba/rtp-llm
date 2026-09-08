@@ -12,8 +12,8 @@ import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.CacheStatus;
-import org.flexlb.dao.master.WorkerIdentity;
 import org.flexlb.dao.master.TaskInfo;
+import org.flexlb.dao.master.WorkerIdentity;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
@@ -108,12 +108,12 @@ class EngineHealthReporterTest {
         FlexMetricTags expectedTags = FlexMetricTags.of(
                 "model", "test-model",
                 "code", String.valueOf(failure.getCode()),
-                "engineIp", "10.0.0.1",
+                "engineIp", "10.0.0.1:8080@0",
                 "role", RoleType.PREFILL.getCode());
 
-        reporter.reportStatusCheckerFail("test-model", failure, "10.0.0.1", RoleType.PREFILL);
+        reporter.reportStatusCheckerFail("test-model", failure, "10.0.0.1:8080@0", RoleType.PREFILL);
         reporter.reportStatusCheckFailureLatency(
-                "test-model", failure, "10.0.0.1", RoleType.PREFILL, 201_234);
+                "test-model", failure, "10.0.0.1:8080@0", RoleType.PREFILL, 201_234);
 
         verify(monitor).report("app.engine.health.check.fail", expectedTags, 1.0);
         verify(monitor).report("app.engine.health.check.fail.total", expectedTags, 1.0);
@@ -157,6 +157,7 @@ class EngineHealthReporterTest {
         ServerStatus serverStatus = new ServerStatus();
         serverStatus.setRole(RoleType.PREFILL);
         serverStatus.setServerIp("10.0.0.1");
+        serverStatus.setHttpPort(8080);
         Response response = new Response();
         response.setSuccess(true);
         response.setCode(200);
@@ -173,17 +174,17 @@ class EngineHealthReporterTest {
         verify(monitor).report("app.engine.balancing.master.select.detail", FlexMetricTags.of(
                 "role", "PREFILL",
                 "strategy", "LEAST_RECENTLY_USED_IN_POOL",
-                "engineIp", "10.0.0.1",
+                "engineIp", "10.0.0.1:8080@0",
                 "success", "true",
                 "code", "200"), 1.0);
     }
 
     @Test
     void shouldReportCacheAffinityDecisionBySelectedEngine() {
-        reporter.reportCacheAffinityDecision(RoleType.PREFILL, "10.0.0.1", "CACHE_LEADER");
+        reporter.reportCacheAffinityDecision(RoleType.PREFILL, "10.0.0.1:8080@0", "CACHE_LEADER");
 
         verify(cacheMetricsReporter).reportCacheAffinityDecision(
-                RoleType.PREFILL, "10.0.0.1", "CACHE_LEADER");
+                RoleType.PREFILL, "10.0.0.1:8080@0", "CACHE_LEADER");
     }
 
     @Test
@@ -197,11 +198,11 @@ class EngineHealthReporterTest {
     @Test
     void shouldReportMasterDecisionToWaitingConfirmationLatency() {
         reporter.reportFlexlbObservedMasterDecisionToWaitingConfirmationLatency(
-                "test-model", "10.0.0.1", "PREFILL", "test-group", 53);
+                "test-model", "10.0.0.1:8080@0", "PREFILL", "test-group", 53);
 
         FlexMetricTags expectedTags = FlexMetricTags.of(
                 "model", "test-model",
-                "engineIp", "10.0.0.1",
+                "engineIp", "10.0.0.1:8080@0",
                 "role", "PREFILL",
                 "group", "test-group");
         verify(monitor).report("app.engine.worker.status.observed.decision.to.waiting.ms",
@@ -219,11 +220,11 @@ class EngineHealthReporterTest {
     @Test
     void shouldReportWaitingToRunningLatency() {
         reporter.reportFlexlbObservedWaitingToRunningLatency(
-                "test-model", "10.0.0.1", "PREFILL", "test-group", 42);
+                "test-model", "10.0.0.1:8080@0", "PREFILL", "test-group", 42);
 
         FlexMetricTags expectedTags = FlexMetricTags.of(
                 "model", "test-model",
-                "engineIp", "10.0.0.1",
+                "engineIp", "10.0.0.1:8080@0",
                 "role", "PREFILL",
                 "group", "test-group");
         verify(monitor).report("app.engine.worker.status.observed.waiting.to.running.ms",
@@ -241,11 +242,11 @@ class EngineHealthReporterTest {
     @Test
     void shouldReportEngineObservedWaitingToRunningLatency() {
         reporter.reportEngineObservedWaitingToRunningLatency(
-                "test-model", "10.0.0.1", "PREFILL", "test-group", 42);
+                "test-model", "10.0.0.1:8080@0", "PREFILL", "test-group", 42);
 
         FlexMetricTags expectedTags = FlexMetricTags.of(
                 "model", "test-model",
-                "engineIp", "10.0.0.1",
+                "engineIp", "10.0.0.1:8080@0",
                 "role", "PREFILL",
                 "group", "test-group");
         verify(monitor).report("app.engine.worker.status.engine.waiting.to.running.ms",
@@ -263,11 +264,11 @@ class EngineHealthReporterTest {
     @Test
     void shouldReportEngineObservedReceivedToWaitingLatency() {
         reporter.reportEngineObservedReceivedToWaitingLatency(
-                "test-model", "10.0.0.1", "PREFILL", "test-group", 42);
+                "test-model", "10.0.0.1:8080@0", "PREFILL", "test-group", 42);
 
         FlexMetricTags expectedTags = FlexMetricTags.of(
                 "model", "test-model",
-                "engineIp", "10.0.0.1",
+                "engineIp", "10.0.0.1:8080@0",
                 "role", "PREFILL",
                 "group", "test-group");
         verify(monitor).report("app.engine.worker.status.engine.received.to.waiting.ms",
@@ -290,11 +291,11 @@ class EngineHealthReporterTest {
         task.setPrefillNonfinalChunkTokensMax(256);
 
         reporter.reportPrefillWorkerStatusTask(
-                "test-model", "10.0.0.1", "PREFILL", "test-group", task);
+                "test-model", "10.0.0.1:8080@0", "PREFILL", "test-group", task);
 
         FlexMetricTags expectedTags = FlexMetricTags.of(
                 "model", "test-model",
-                "engineIp", "10.0.0.1",
+                "engineIp", "10.0.0.1:8080@0",
                 "role", "PREFILL",
                 "group", "test-group");
         verify(monitor).report("app.engine.worker.status.input.queue.wait.ms", expectedTags, 100.0);
@@ -330,7 +331,7 @@ class EngineHealthReporterTest {
 
         FlexMetricTags expectedTags = FlexMetricTags.of(
                 "model", "test-model",
-                "engineIp", "10.0.0.1",
+                "engineIp", "10.0.0.1:8080@0",
                 "role", "PREFILL");
         verify(monitor).report("app.engine.health.check.running.task.info.size", expectedTags, 3.0);
         verify(monitor).report("app.engine.health.check.finished.task.list.size", expectedTags, 4.0);
@@ -344,7 +345,7 @@ class EngineHealthReporterTest {
 
         FlexMetricTags expectedTags = FlexMetricTags.of(
                 "model", "test-model",
-                "engineIp", "10.0.0.1",
+                "engineIp", "10.0.0.1:8080@0",
                 "role", "PREFILL");
         verify(monitor).report("app.cache.block.size",
                 FlexMetricTags.of("model", "test-model", "role", "PREFILL"), 64.0);
@@ -355,6 +356,20 @@ class EngineHealthReporterTest {
                 FlexMetricTags.of("model", "test-model", "role", "PREFILL"), 1000.0);
         verify(monitor).report("app.cache.used.kv.cache.ratio", expectedTags, 20.0);
         verify(monitor).report("app.cache.key.size", expectedTags, 7.0);
+    }
+
+    @Test
+    void shouldReportCacheStatusFailuresWithLogicalWorkerIdentity() {
+        WorkerStatus workerStatus = workerStatus("10.0.0.1", RoleType.PREFILL);
+        BalanceStatusEnum failure = BalanceStatusEnum.CACHE_SERVICE_UNAVAILABLE;
+
+        reporter.reportCacheStatusCheckerFail("test-model", workerStatus, failure);
+
+        verify(monitor).report("app.cache.status.check.fail", FlexMetricTags.of(
+                "model", "test-model",
+                "engineIp", "10.0.0.1:8080@0",
+                "code", String.valueOf(failure.getCode()),
+                "role", "PREFILL"), 1.0);
     }
 
     @Test
@@ -378,7 +393,7 @@ class EngineHealthReporterTest {
 
         FlexMetricTags expectedTags = FlexMetricTags.of(
                 "model", "test-model",
-                "engineIp", "10.0.0.1",
+                "engineIp", "10.0.0.1:8080@0",
                 "role", "PREFILL");
         verify(monitor).report("app.cache.local.standby.block.size", expectedTags, 4096.0);
     }
@@ -402,7 +417,7 @@ class EngineHealthReporterTest {
 
         FlexMetricTags expectedTags = FlexMetricTags.of(
                 "model", "test-model",
-                "engineIp", "10.0.0.1",
+                "engineIp", "10.0.0.1:8080@0",
                 "role", "PREFILL");
         verify(monitor).report("app.cache.key.size", expectedTags, 7.0);
     }
@@ -422,7 +437,7 @@ class EngineHealthReporterTest {
 
         FlexMetricTags expectedTags = FlexMetricTags.of(
                 "model", "test-model",
-                "engineIp", "10.0.0.1@0",
+                "engineIp", "10.0.0.1:8080@0",
                 "role", "PREFILL",
                 "group", "test-group",
                 "taskState", "running",
@@ -437,7 +452,7 @@ class EngineHealthReporterTest {
         verify(monitor).report("app.cache.hit.comparison.local.standby.predicted.ratio", expectedTags, 0.4);
         assertEquals(Map.of(
                 "model", "test-model",
-                "engineIp", "10.0.0.1@0",
+                "engineIp", "10.0.0.1:8080@0",
                 "role", "PREFILL",
                 "group", "test-group",
                 "taskState", "running",
@@ -446,15 +461,15 @@ class EngineHealthReporterTest {
 
     @Test
     void shouldReportSelectedKvcmP2pMatchDetails() {
-        reporter.reportKvcmSelectedMatch(RoleType.PREFILL, "10.0.0.1", 40, 80, 100, true);
+        reporter.reportKvcmSelectedMatch(RoleType.PREFILL, "10.0.0.1:8080@0", 40, 80, 100, true);
 
         verify(cacheMetricsReporter).reportKvcmSelectedMatch(
-                RoleType.PREFILL, "10.0.0.1", 40, 80, 100);
+                RoleType.PREFILL, "10.0.0.1:8080@0", 40, 80, 100);
     }
 
     @Test
     void shouldSkipSelectedKvcmP2pMetricsWhenDetailsAreUnavailable() {
-        reporter.reportKvcmSelectedMatch(RoleType.PREFILL, "10.0.0.1", 0, 0, 0, false);
+        reporter.reportKvcmSelectedMatch(RoleType.PREFILL, "10.0.0.1:8080@0", 0, 0, 0, false);
 
         verify(cacheMetricsReporter, never()).reportKvcmSelectedMatch(
                 org.mockito.ArgumentMatchers.any(),
@@ -479,7 +494,7 @@ class EngineHealthReporterTest {
 
         FlexMetricTags expectedTags = FlexMetricTags.of(
                 "model", "test-model",
-                "engineIp", "10.0.0.1@0",
+                "engineIp", "10.0.0.1:8080@0",
                 "role", "PREFILL",
                 "group", "test-group",
                 "taskState", "running",
@@ -526,7 +541,7 @@ class EngineHealthReporterTest {
 
         FlexMetricTags expectedTags = FlexMetricTags.of(
                 "model", "test-model",
-                "engineIp", "10.0.0.1@0",
+                "engineIp", "10.0.0.1:8080@0",
                 "role", "PREFILL",
                 "group", "test-group",
                 "taskState", "running",

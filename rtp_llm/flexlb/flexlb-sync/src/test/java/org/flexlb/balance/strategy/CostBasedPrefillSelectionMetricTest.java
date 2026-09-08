@@ -107,7 +107,7 @@ class CostBasedPrefillSelectionMetricTest {
             ArgumentCaptor<Long> ttft = ArgumentCaptor.forClass(Long.class);
             ArgumentCaptor<Long> execution = ArgumentCaptor.forClass(Long.class);
             verify(reporter).reportPrefillSelectedEstimates(
-                    Mockito.eq(RoleType.PREFILL), Mockito.eq("10.0.0.1"),
+                    Mockito.eq(RoleType.PREFILL), Mockito.eq("10.0.0.1:8080@0"),
                     Mockito.eq(deliveryMode), ttft.capture(), execution.capture());
             assertEquals(selected.serverStatus().getPrefillTime(), ttft.getValue());
             assertEquals(selected.prefillWorkMs(), execution.getValue());
@@ -134,7 +134,7 @@ class CostBasedPrefillSelectionMetricTest {
         try (SelectedRole selected = select()) {
             assertEquals("10.0.0.2", selected.serverStatus().getServerIp());
             verify(reporter).reportCacheAffinityDecision(
-                    RoleType.PREFILL, "10.0.0.2", "CACHE_LEADER");
+                    RoleType.PREFILL, "10.0.0.2:8080@0", "CACHE_LEADER");
         }
     }
 
@@ -157,7 +157,7 @@ class CostBasedPrefillSelectionMetricTest {
         try (SelectedRole selected = select()) {
             assertEquals("10.0.0.2", selected.serverStatus().getServerIp());
             verify(reporter).reportCacheHitMetrics(
-                    RoleType.PREFILL, "10.0.0.2@0", 200L, 0.2);
+                    RoleType.PREFILL, "10.0.0.2:8080@0", 200L, 0.2);
         }
     }
 
@@ -206,7 +206,7 @@ class CostBasedPrefillSelectionMetricTest {
         try (SelectedRole selected = select()) {
             assertEquals("10.0.0.1", selected.serverStatus().getServerIp());
             verify(reporter).reportCacheAffinityDecision(
-                    RoleType.PREFILL, "10.0.0.1", reason);
+                    RoleType.PREFILL, "10.0.0.1:8080@0", reason);
         }
     }
 
@@ -229,7 +229,7 @@ class CostBasedPrefillSelectionMetricTest {
         assertEquals(Long.MAX_VALUE, cacheEndpoint.getLastSelectedTime().get());
         verify(reporter, times(2))
                 .reportCacheAffinityDecision(
-                        RoleType.PREFILL, "10.0.0.2", "CACHE_LEADER");
+                        RoleType.PREFILL, "10.0.0.2:8080@0", "CACHE_LEADER");
     }
 
     private SelectedRole select() {

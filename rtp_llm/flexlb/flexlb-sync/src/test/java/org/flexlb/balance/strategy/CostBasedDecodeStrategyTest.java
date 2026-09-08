@@ -120,7 +120,8 @@ class CostBasedDecodeStrategyTest {
                 decodeEndpoint(registry, replacement.address()));
         Mockito.when(replacementPin.generationId()).thenReturn(
                 replacement.generationId());
-        DecodeDirectoryView racing = Mockito.mock(DecodeDirectoryView.class);
+        CostBasedDecodeStrategy.DecodeDirectoryView racing =
+                Mockito.mock(CostBasedDecodeStrategy.DecodeDirectoryView.class);
         Mockito.when(racing.decodeRoutingSnapshot(null))
                 .thenReturn(List.of(stale))
                 .thenReturn(List.of(replacement));
@@ -229,7 +230,8 @@ class CostBasedDecodeStrategyTest {
         ordered.add(globalMinimum);
         Assertions.assertEquals(workerCount, ordered.size(),
                 "the decode selector must retain the complete live fleet");
-        DecodeDirectoryView fullFleet = Mockito.mock(DecodeDirectoryView.class);
+        CostBasedDecodeStrategy.DecodeDirectoryView fullFleet =
+                Mockito.mock(CostBasedDecodeStrategy.DecodeDirectoryView.class);
         Mockito.when(fullFleet.decodeRoutingSnapshot(null)).thenReturn(ordered);
         Mockito.when(fullFleet.captureDecodeGeneration(any()))
                 .thenAnswer(invocation -> actual.captureDecodeGeneration(

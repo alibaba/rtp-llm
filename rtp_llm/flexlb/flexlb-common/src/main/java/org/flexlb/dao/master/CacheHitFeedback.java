@@ -3,7 +3,7 @@ package org.flexlb.dao.master;
 /**
  * Engine feedback comparing the routing cache-hit prediction with the actual cache hit.
  * The embedded {@link WorkerIdentity} preserves both the routing identity
- * ({@code ip:port@engineIndex}) and metrics identity ({@code ip@engineIndex}).
+ * ({@code ip:port@engineIndex}) and legacy short identity ({@code ip@engineIndex}).
  */
 public record CacheHitFeedback(
         String eventType,
@@ -143,7 +143,7 @@ public record CacheHitFeedback(
         return workerIdentity.getLogicalIpPort();
     }
 
-    /** Returns the metrics identity in {@code ip@engineIndex} format. */
+    /** Returns the legacy short identity in {@code ip@engineIndex} format. */
     public String ipIndex() {
         return workerIdentity.getIpIndex();
     }

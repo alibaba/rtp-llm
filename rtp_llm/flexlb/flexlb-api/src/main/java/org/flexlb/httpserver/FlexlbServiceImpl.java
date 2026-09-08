@@ -667,7 +667,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
             if (ctx.getResponse() != null && ctx.getResponse().getServerStatus() != null) {
                 for (ServerStatus ss : ctx.getResponse().getServerStatus()) {
                     if (ss.getRole() == RoleType.PREFILL) {
-                        prefillIp = ss.getServerIp() != null ? ss.getServerIp() : "";
+                        prefillIp = ss.getLogicalIpPort() != null ? ss.getLogicalIpPort() : "";
                         break;
                     }
                 }

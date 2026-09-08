@@ -110,7 +110,7 @@ public class ServerStatus {
         return workerIdentity.getLogicalIpPort();
     }
 
-    /** Returns the port-free metrics identity in {@code ip@engineIndex} format. */
+    /** Returns the legacy port-free identity in {@code ip@engineIndex} format. */
     @JsonIgnore
     public String getIpIndex() {
         return workerIdentity.getIpIndex();

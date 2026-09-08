@@ -15,7 +15,8 @@ import static org.flexlb.constant.CommonConstants.LOGICAL_WORKER_ENGINE_INDEX_SE
  *   <li>{@code engineIndex}: raw logical engine index</li>
  *   <li>{@code physicalIpPort}: {@code ip:port}, identifying the shared frontend</li>
  *   <li>{@code logicalIpPort}: {@code ip:port@engineIndex}, used by routing and cache matching</li>
- *   <li>{@code ipIndex}: {@code ip@engineIndex}, used by per-engine metrics</li>
+ *   <li>{@code ipIndex}: legacy short form {@code ip@engineIndex}</li>
+ *   <li>{@code logicalIpPort}: {@code ip:port@engineIndex}, used by per-engine metrics</li>
  * </ul>
  */
 @Getter
@@ -33,7 +34,7 @@ public final class WorkerIdentity {
     private final String physicalIpPort;
     /** Routable/cache identity in {@code ip:port@engineIndex} format. */
     private final String logicalIpPort;
-    /** Per-engine metrics identity in {@code ip@engineIndex} format. */
+    /** Legacy short per-engine identity in {@code ip@engineIndex} format. */
     private final String ipIndex;
 
     public WorkerIdentity(String ip, int port, int engineIndex) {

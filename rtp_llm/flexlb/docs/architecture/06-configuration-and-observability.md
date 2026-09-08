@@ -224,7 +224,9 @@ Spring profile 与日志、监控 provider 的具体默认值见
 `worker_status_port` 必须处于 `[1, 65535]`；N>1 必须指定该端口，并保证
 `worker_status_port + N - 1 <= 65535`。每个 index 使用独立的 status gRPC 端口，
 frontend HTTP/gRPC 仍为共享物理地址。protocol 只解释 frontend discovery port。
+N=1 沿用 discovery 的 legacy gRPC port，因而兼容未配置 `worker_status_port` 的 RTP-LLM。
 
 逻辑 worker identity 为 `ip:http_port@engineIndex`，包括 N=1 的 `@0`。
-引擎与 cache 指标的 `engineIp` 使用不含端口的 `ip@engineIndex`；网络连接仍使用
-物理地址。schedule 在 N=1 时省略 `engine_index`，内部 identity 和观测仍保留 index 0。
+引擎与 cache 指标的 `engineIp` 使用完整 logical identity `ip:http_port@engineIndex`；
+网络连接仍使用物理地址。schedule 在 N=1 时省略 `engine_index`，内部 identity 和观测仍保留
+index 0。

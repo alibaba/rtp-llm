@@ -104,6 +104,7 @@ class PdfusionSchedulingTest {
         try {
             endpoints.publishPreparedEndpoint(worker.getLogicalIpPort(), worker,
                     worker.prepareNewStatus(worker.freezeStatusResponse(status)));
+            worker.recordSuccessfulPoll(true);
         } finally {
             worker.lock.unlock();
         }
@@ -130,7 +131,8 @@ class PdfusionSchedulingTest {
                     .map(ServerStatus::getRole).toList());
             assertEquals(0, endpoints.getEndpointCount(RoleType.DECODE));
             assertEquals(0, lifecycle.decodeAcceptanceCount());
-            PrefillEndpoint endpoint = (PrefillEndpoint) endpoints.get(RoleType.PDFUSION, worker.getIpPort());
+            PrefillEndpoint endpoint = (PrefillEndpoint) endpoints.get(
+                    RoleType.PDFUSION, worker.getLogicalIpPort());
             assertEquals(1, endpoint.admissionPendingRequestCount());
             var committedWork = endpoint.captureRouteProjectionInputs().work();
             assertTrue(committedWork.containsRequest(Long.toString(requestId)));

@@ -44,7 +44,7 @@ public class WorkerHost {
     /**
      * Canonical identity for this logical worker. It precomputes the physical frontend
      * identity ({@code ip:port}), routable/cache identity ({@code ip:port@engineIndex}), and
-     * metrics identity ({@code ip@engineIndex}); callers use the corresponding semantic getters
+     * legacy short identity ({@code ip@engineIndex}); callers use the corresponding semantic getters
      * exposed by {@link WorkerHost}.
      */
     @Getter(AccessLevel.NONE)
@@ -160,7 +160,7 @@ public class WorkerHost {
         return workerIdentity.getLogicalIpPort();
     }
 
-    /** Returns the port-free metrics identity in {@code ip@engineIndex} format. */
+    /** Returns the legacy port-free identity in {@code ip@engineIndex} format. */
     public String getIpIndex() {
         return workerIdentity.getIpIndex();
     }

@@ -158,7 +158,7 @@ public class CostBasedPrefillStrategy {
                 selectedTtft,
                 selectedPrefillMs);
         reportCacheHitMetrics(
-                roleType, best.getStatus().getIpIndex(), bestCacheHit, seqLen);
+                roleType, best.getStatus().getLogicalIpPort(), bestCacheHit, seqLen);
         reportRoutingCacheMatchMetrics(
                 roleType,
                 survivors.routingCacheMatchTokens(selectedIndex),
@@ -281,7 +281,7 @@ public class CostBasedPrefillStrategy {
 
         if (selectedIndex >= 0 && cacheAffinity != null) {
             reportCacheAffinityDecision(
-                    roleType, survivors.endpoint(selectedIndex).getIp(),
+                    roleType, survivors.endpoint(selectedIndex).getStatus().getLogicalIpPort(),
                     affinityReason);
             if (Logger.isDebugEnabled()) {
                 Logger.debug(
@@ -338,7 +338,7 @@ public class CostBasedPrefillStrategy {
                     ? "CACHE_LEADER"
                     : affinityReason;
             reportCacheAffinityDecision(
-                    roleType, candidates.endpoint(selectedIndex).getIp(), reason);
+                    roleType, candidates.endpoint(selectedIndex).getStatus().getLogicalIpPort(), reason);
             if (Logger.isDebugEnabled()) {
                 Logger.debug(
                         "Prefill LRU cache-affinity decision - role: {}, group: {}, "
@@ -903,7 +903,7 @@ public class CostBasedPrefillStrategy {
         try {
             engineHealthReporter.reportPrefillSelectedEstimates(
                     roleType,
-                    endpoint.getIp(),
+                    endpoint.getStatus().getLogicalIpPort(),
                     deliveryMode,
                     projectedTtftMs.getAsLong(),
                     executionTimeMs);

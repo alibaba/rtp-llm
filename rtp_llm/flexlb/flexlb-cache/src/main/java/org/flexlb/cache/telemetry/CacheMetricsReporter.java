@@ -135,7 +135,7 @@ public class CacheMetricsReporter {
     /**
      * Report local cache metrics for a single engine
      *
-     * @param ipIndex    metrics identity in {@code ip@engineIndex} format
+     * @param ipIndex    metrics identity in {@code ip:port@engineIndex} format
      * @param role       Engine role
      * @param cacheCount Cache count
      */
@@ -172,7 +172,7 @@ public class CacheMetricsReporter {
      * Report cache hit rate metrics
      *
      * @param roleType  Role type
-     * @param ipIndex   indexed engine IP in {@code ip@engineIndex} format
+     * @param ipIndex   logical engine address in {@code ip:port@engineIndex} format
      * @param hitTokens Number of hit tokens
      * @param hitRatio  Hit percentage
      */
@@ -452,7 +452,7 @@ public class CacheMetricsReporter {
     /**
      * Report local cache metadata update time in microseconds.
      *
-     * @param ipIndex   metrics identity in {@code ip@engineIndex} format
+     * @param ipIndex   metrics identity in {@code ip:port@engineIndex} format
      * @param role      Engine role
      * @param startTime Start time in microseconds
      * @param success   Whether successful
@@ -467,7 +467,7 @@ public class CacheMetricsReporter {
     /**
      * Report cache diff calculation metrics
      *
-     * @param ipIndex           metrics identity in {@code ip@engineIndex} format
+     * @param ipIndex           metrics identity in {@code ip:port@engineIndex} format
      * @param role              Role
      * @param addedBlocksSize   Number of added blocks
      * @param removedBlocksSize Number of removed blocks
