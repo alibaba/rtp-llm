@@ -21,10 +21,20 @@ public final class BucketSidReader {
     private final SidBucketClient client;
     private final Settings settings;
 
+    public enum BucketAlgorithm { CRC32, ITEM_ID_MOD }
+
     public record Settings(String keyPrefix, int bucketCount, int concurrency, int maxRowsPerBucket,
-                           Duration queryTimeout, Duration roundTimeout, int retries) {
+                           Duration queryTimeout, Duration roundTimeout, int retries,
+                           BucketAlgorithm bucketAlgorithm, int sourceRowLimit) {
+        public Settings(String keyPrefix, int bucketCount, int concurrency, int maxRowsPerBucket,
+                        Duration queryTimeout, Duration roundTimeout, int retries) {
+            this(keyPrefix, bucketCount, concurrency, maxRowsPerBucket, queryTimeout, roundTimeout, retries,
+                    BucketAlgorithm.CRC32, 0);
+        }
+
         public Settings {
-            if (keyPrefix == null || !keyPrefix.matches("[A-Za-z0-9_.-]+")
+            if (keyPrefix == null || !keyPrefix.matches("[A-Za-z0-9_.-]*")
+                    || bucketAlgorithm == null || sourceRowLimit < 0
                     || bucketCount < 1 || bucketCount > 1_000_000 || concurrency < 1 || concurrency > 256
                     || maxRowsPerBucket < 1 || maxRowsPerBucket >= 50_000 || retries < 0 || retries > 3
                     || queryTimeout == null || queryTimeout.toMillis() < 1
@@ -36,7 +46,8 @@ public final class BucketSidReader {
         public String key(int bucket) { return keyPrefix + bucket; }
     }
 
-    public record Result(List<String> sids, long itemCount, int bucketCount, long elapsedMillis) { }
+    public record Result(List<String> sids, long itemCount, int bucketCount, long elapsedMillis,
+                         int maxBucketRows) { }
 
     public BucketSidReader(SidBucketClient client, Settings settings) {
         this.client = client;
@@ -48,6 +59,7 @@ public final class BucketSidReader {
         long deadline = started + settings.roundTimeout().toNanos();
         var sids = new HashSet<String>();
         long items = 0;
+        int maxBucketRows = 0;
         // Only one window is live at a time. Parsing/merging happens on the caller's background thread.
         for (int first = 0; first < settings.bucketCount(); first += settings.concurrency()) {
             check(mayContinue, deadline);
@@ -63,13 +75,18 @@ public final class BucketSidReader {
                     if (rows == null || rows.size() > settings.maxRowsPerBucket()) {
                         throw new IllegalStateException("bucket " + key + " exceeds row limit or has invalid response");
                     }
+                    if (settings.sourceRowLimit() > 0 && rows.size() >= settings.sourceRowLimit()) {
+                        throw new IllegalStateException("bucket " + key + " reached source row limit; possible truncation");
+                    }
+                    maxBucketRows = Math.max(maxBucketRows, rows.size());
                     Map<String, String> uniqueItems = new HashMap<>();
                     for (var row : rows) {
                         if (row == null || !key.equals(row.pkey()) || row.itemId() == null || row.itemId().isBlank()
                                 || row.sid() == null || !SID.matcher(row.sid()).matches()) {
                             throw new IllegalStateException("invalid item/SID in bucket " + key);
                         }
-                        if (!key.equals(settings.key(bucketForItem(row.itemId(), settings.bucketCount())))) {
+                        if (!key.equals(settings.key(bucketForItem(row.itemId(), settings.bucketCount(),
+                                settings.bucketAlgorithm())))) {
                             throw new IllegalStateException("item is in the wrong hash bucket " + key);
                         }
                         String previous = uniqueItems.putIfAbsent(row.itemId(), row.sid());
@@ -89,12 +106,12 @@ public final class BucketSidReader {
             throw new IllegalStateException("empty source; retaining existing tree (empty-tree publication unsupported)");
         }
         return new Result(List.copyOf(sids), items, settings.bucketCount(),
-                TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started));
+                TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started), maxBucketRows);
     }
 
     private CompletableFuture<List<SidBucketClient.Row>> start(String key) {
         try {
-            // Fetch one extra row: an overflowing bucket must never silently become a truncated tree.
+            // Detect client-limit overflow. Hidden server/index truncation still requires source reconciliation.
             return client.readAsync(key, settings.maxRowsPerBucket() + 1, settings.queryTimeout());
         } catch (Exception e) {
             return CompletableFuture.failedFuture(e);
@@ -138,8 +155,25 @@ public final class BucketSidReader {
 
     /** Writer contract: unsigned CRC32 of the exact UTF-8 item_id string, modulo a fixed bucket count. */
     public static int bucketForItem(String itemId, int bucketCount) {
+        return bucketForItem(itemId, bucketCount, BucketAlgorithm.CRC32);
+    }
+
+    public static int bucketForItem(String itemId, int bucketCount, BucketAlgorithm algorithm) {
         if (itemId == null || itemId.isBlank() || bucketCount < 1) {
             throw new IllegalArgumentException("item id and bucket count are required");
+        }
+        if (algorithm == null) { throw new IllegalArgumentException("bucket algorithm is required"); }
+        if (algorithm == BucketAlgorithm.ITEM_ID_MOD) {
+            // Decimal streaming remainder: exact even beyond signed long / floating point precision.
+            long remainder = 0;
+            for (int i = 0; i < itemId.length(); i++) {
+                char digit = itemId.charAt(i);
+                if (digit < '0' || digit > '9') {
+                    throw new IllegalArgumentException("ITEM_ID_MOD requires an unsigned decimal item_id");
+                }
+                remainder = (remainder * 10 + digit - '0') % bucketCount;
+            }
+            return (int) remainder;
         }
         CRC32 crc = new CRC32();
         crc.update(itemId.getBytes(StandardCharsets.UTF_8));

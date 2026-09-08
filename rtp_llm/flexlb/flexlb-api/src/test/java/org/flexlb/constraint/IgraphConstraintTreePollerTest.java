@@ -15,6 +15,58 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.*;
 
 class IgraphConstraintTreePollerTest {
+    @Test
+    void explicitEmptyPrefixNumericConfigAndDryRunNeverPublish() {
+        var builds = builds();
+        var leader = mock(org.flexlb.consistency.LBStatusConsistencyService.class);
+        when(leader.isMaster()).thenReturn(true);
+        var env = new org.springframework.mock.env.MockEnvironment()
+                .withProperty("constraint.tree.igraph.model", "engine_service")
+                .withProperty("constraint.tree.igraph.key.prefix", "")
+                .withProperty("constraint.tree.igraph.bucket.algorithm", "ITEM_ID_MOD")
+                .withProperty("constraint.tree.igraph.bucket.count", "4000")
+                .withProperty("constraint.tree.igraph.source.row.limit", "2000")
+                .withProperty("constraint.tree.igraph.dry.run", "true");
+        var calls = new AtomicInteger();
+        SidBucketClient client = (k, l, t) -> {
+            calls.incrementAndGet();
+            return CompletableFuture.completedFuture(List.of(new SidBucketClient.Row(k, k, "C1C2")));
+        };
+        var poller = new IgraphConstraintTreePoller(client, builds, leader, env);
+        try {
+            poller.pollOnce();
+            assertEquals("VALIDATED_NO_PUBLISH", poller.getStatus().state());
+            assertEquals(4000, calls.get());
+            assertEquals(4000, poller.getStatus().items());
+            assertEquals(0, poller.getStatus().submittedVersion());
+            assertTrue(poller.getStatus().message().contains("maxBucketRows=1"));
+            verifyNoInteractions(builds);
+            when(leader.isMaster()).thenReturn(false);
+            poller.pollOnce();
+            assertEquals(4000, calls.get());
+        } finally { poller.close(); }
+        var missingPrefix = new org.springframework.mock.env.MockEnvironment()
+                .withProperty("constraint.tree.igraph.model", "engine_service");
+        assertThrows(IllegalArgumentException.class,
+                () -> new IgraphConstraintTreePoller(client, builds, leader, missingPrefix));
+        env.withProperty("constraint.tree.igraph.key.prefix", "").withProperty("constraint.tree.igraph.bucket.algorithm", "TYPO");
+        assertThrows(IllegalArgumentException.class, () -> new IgraphConstraintTreePoller(client, builds, leader, env));
+    }
+
+    @Test
+    void serverCapFailureRetainsTreeEvenWithPublicationEnabled() {
+        var builds = builds();
+        var reader = new BucketSidReader((k, l, t) -> CompletableFuture.completedFuture(
+                List.of(new SidBucketClient.Row(k, k, "C1C2"))), BucketSidReaderTest.numericSettings(4000, 1));
+        var poller = new IgraphConstraintTreePoller(reader, builds, () -> true, "gul_item", true, true, 600, CLOCK);
+        try {
+            poller.pollOnce();
+            assertEquals("FAILED", poller.getStatus().state());
+            assertTrue(poller.getStatus().message().contains("possible truncation"));
+            verify(builds, never()).submit(any());
+        } finally { poller.close(); }
+    }
+
     private static final Clock CLOCK = Clock.fixed(Instant.ofEpochMilli(100), ZoneOffset.UTC);
 
     private ConstraintTreeBuildService builds() {
@@ -157,7 +209,8 @@ class IgraphConstraintTreePollerTest {
         });
         java.util.Map<String, Object> variables = java.util.Map.of(
                 "CONSTRAINT_TREE_IGRAPH_ENABLED", "true", "CONSTRAINT_TREE_IGRAPH_MODEL", "gul_item",
-                "CONSTRAINT_TREE_IGRAPH_KEY_PREFIX", "pool_", "CONSTRAINT_TREE_IGRAPH_BUCKET_COUNT", "1",
+                "CONSTRAINT_TREE_IGRAPH_KEY_PREFIX", "", "CONSTRAINT_TREE_IGRAPH_BUCKET_COUNT", "1",
+                "CONSTRAINT_TREE_IGRAPH_BUCKET_ALGORITHM", "ITEM_ID_MOD",
                 "CONSTRAINT_TREE_IGRAPH_SOURCE_READY", "true", "CONSTRAINT_TREE_IGRAPH_ALLOW_NON_ATOMIC_READ", "true");
         // ApplicationContextRunner registers conditional user classes before invoking initializers.
         // Install the environment in the context factory, matching normal boot startup ordering.

@@ -64,11 +64,11 @@ class ConstraintTreeMappedE2ETest {
                 if (failRead.get()) {
                     return java.util.concurrent.CompletableFuture.failedFuture(new IllegalStateException("source unavailable"));
                 }
-                int bucket = BucketSidReader.bucketForItem("123", 4);
-                return java.util.concurrent.CompletableFuture.completedFuture(key.equals("pool_" + bucket)
+                int bucket = 123 % 4000;
+                return java.util.concurrent.CompletableFuture.completedFuture(key.equals(Integer.toString(bucket))
                         ? List.of(new org.flexlb.constraint.source.SidBucketClient.Row(key, "123", sid.get())) : List.of());
             };
-            poller = new IgraphConstraintTreePoller(new BucketSidReader(client, BucketSidReaderTest.settings(4, 2, 100, 0)),
+            poller = new IgraphConstraintTreePoller(new BucketSidReader(client, BucketSidReaderTest.numericSettings(4000, 2000)),
                     builds, () -> true, "gul_item", true, true, 600,
                     java.time.Clock.fixed(java.time.Instant.ofEpochMilli(100), java.time.ZoneOffset.UTC));
             poller.pollOnce();

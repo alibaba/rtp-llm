@@ -1,6 +1,9 @@
 # iGraph bucket input for the CSR constraint-tree Master
 
-Status (2026-09-08): Local acceptance passed: 60 tests, zero failures/errors/skips,
+Status (2026-09-08, numeric-bucket update): Local acceptance passed: 66 tests,
+zero failures/errors/skips, with numeric 4000-bucket E2E and a 2.5-million-item
+synthetic merge. See `build_logs/igraph_numeric_acceptance_20260908.log`.
+The earlier acceptance passed 60 tests,
 including three native C++ Worker HTTP E2E cases and synthetic 2-million-item
 input. The local Master Java package and packaged class-loading/CSR smoke check
 also passed. See `build_logs/igraph_local_acceptance_20260908.md` for evidence.
@@ -8,7 +11,9 @@ The native tokenizer fix has additionally passed real-model startup and full
 C-coded SID publication with fixed 1024/1500-beam replay; see
 `build_logs/csr_saro_release_validation_20260908.md`. No live iGraph request or
 current-production-workload acceptance has been performed. Do not treat the
-local results as production acceptance.
+local results as production acceptance. A subsequent packaged Java SDK single-key
+probe failed at service discovery (`no host to srv`) in the local container,
+whose jmenv reports `daily`; no table response or live completeness was obtained.
 
 ## Scope and data contract
 
@@ -20,14 +25,21 @@ The existing SID mapping -> CSR -> HTTP Worker publication path is reused.
 
 Writer/reader agreement for this implementation:
 
-- `bucket = unsigned_crc32(UTF8(item_id)) % bucket_count`.
+- `BUCKET_ALGORITHM=CRC32` (legacy default):
+  `bucket = unsigned_crc32(UTF8(item_id)) % bucket_count`.
+- `BUCKET_ALGORITHM=ITEM_ID_MOD`: unsigned decimal numeric `item_id % bucket_count`.
+  Arithmetic is exact even beyond 64 bits; signs, whitespace, non-ASCII digits
+  and floating-point notation are rejected. Leading zeros do not change the
+  numeric bucket, but the original item ID remains the skey.
 - `pkey = key_prefix + decimal(bucket)`; no zero padding. Defaults: 4096 buckets,
   e.g. prefix `gul_item_bucket_` gives keys `gul_item_bucket_0` ... `_4095`.
+- Explicit empty `KEY_PREFIX` supports plain numeric pkeys. Omitting the variable
+  is an error. `ITEM_ID_MOD`, count `4000`, empty prefix yields `"0"` ... `"3999"`.
 - `skey = item_id`; value field `sid` contains the C-coded SID, not token IDs.
 - Hash the exact canonical item ID string; do not use Java/Python's built-in
   string hash, signed CRC conversion, whitespace or inconsistent leading zeros.
   Test vector: CRC32(`123456789`) = `0xcbf43926`, bucket 2342 for 4096 buckets.
-- Bucket count/prefix remain fixed while incremental writes are active. Changing
+- Bucket algorithm/count/prefix remain fixed while incremental writes are active. Changing
   either requires a freshly initialized table/keyspace and a coordinated switch.
 - The table contains **only eligible items**. Downstream-ineligible items must
   be deleted by `(pkey, item_id)`, or expire through a verified source TTL policy.
@@ -43,6 +55,10 @@ Writer/reader agreement for this implementation:
 4096 buckets give an average of about 488 rows for 2 million items; this is
 not a per-bucket bound. The default accepted maximum is 2000 rows, with a query
 for 2001 rows to detect overflow. Tune using actual distribution and measured RT.
+Set `SOURCE_ROW_LIMIT` to the known server/index cap (e.g. `2000`): reaching
+that number, including exact equality, rejects the round. Default `0` disables
+this extra guard for legacy sources. Fewer rows do NOT prove completeness after
+historical index truncation and deletes; reconcile against an authoritative source.
 
 ## Completeness and freshness limits (deployment prerequisites)
 
@@ -53,7 +69,7 @@ for 2001 rows to detect overflow. Tune using actual distribution and measured RT
    and query/seek/response limits allow the configured maximum **plus one**.
    The sentinel detects our requested limit, NOT hidden lower server-side caps.
 3. All configured buckets must succeed. One error, timeout, malformed row,
-   wrong CRC bucket, duplicate item, reported hot-key/degradation, or overflow
+   wrong configured bucket, duplicate item, reported hot-key/degradation, or overflow
    aborts the round. No partial input is submitted. Empty individual buckets
    are legitimate; an all-empty round retains the old tree and reports failure.
    A valid empty pool cannot currently be published as a deny-all tree.
@@ -84,23 +100,50 @@ CONSTRAINT_TREE_IGRAPH_PKEY_FIELD=pkey
 CONSTRAINT_TREE_IGRAPH_ITEM_FIELD=item_id
 CONSTRAINT_TREE_IGRAPH_SID_FIELD=sid
 CONSTRAINT_TREE_IGRAPH_KEY_PREFIX=gul_item_bucket_
+CONSTRAINT_TREE_IGRAPH_BUCKET_ALGORITHM=CRC32
 CONSTRAINT_TREE_IGRAPH_BUCKET_COUNT=4096
 CONSTRAINT_TREE_IGRAPH_CONCURRENCY=16
 CONSTRAINT_TREE_IGRAPH_MAX_ROWS_PER_BUCKET=2000
+CONSTRAINT_TREE_IGRAPH_SOURCE_ROW_LIMIT=2000
 CONSTRAINT_TREE_IGRAPH_QUERY_TIMEOUT_MS=5000
 CONSTRAINT_TREE_IGRAPH_ROUND_TIMEOUT_SECONDS=300
 CONSTRAINT_TREE_IGRAPH_RETRIES=1
 CONSTRAINT_TREE_IGRAPH_INTERVAL_SECONDS=600
 CONSTRAINT_TREE_IGRAPH_SOURCE_READY=false
 CONSTRAINT_TREE_IGRAPH_ALLOW_NON_ATOMIC_READ=false
+CONSTRAINT_TREE_IGRAPH_DRY_RUN=true
 ```
 
 Replace table/domain placeholders and field names. Enable the final two flags
 only after the prerequisites above are met. The update domain is an SDK builder
 requirement; our adapter never calls a write API. Do not embed personal credentials.
 
-Only the active Master polls. An additional round is skipped while a read or
-build/publication is running. New artifact versions use at least wall-clock
+Start with `DRY_RUN=true`: the active Master traverses and validates all buckets,
+reports item/SID counts, maximum bucket occupancy and read duration, but NEVER
+submits a CSR build. The two readiness acknowledgements are not required in this
+mode. Successful source status is `VALIDATED_NO_PUBLISH`, not proof of source
+completeness. Failed reads/cap checks report `FAILED` without partial publication.
+After source reconciliation and accepting non-atomic reads, configure
+`DRY_RUN=false`, `SOURCE_READY=true`, `ALLOW_NON_ATOMIC_READ=true` and restart
+through the normal deployment process. These are startup properties, not HTTP
+switches. Dry run does not disable manual builds or existing tree reconciliation.
+
+For a numeric-source deployment override:
+
+```text
+CONSTRAINT_TREE_IGRAPH_BUCKET_ALGORITHM=ITEM_ID_MOD
+CONSTRAINT_TREE_IGRAPH_BUCKET_COUNT=4000
+CONSTRAINT_TREE_IGRAPH_KEY_PREFIX=
+CONSTRAINT_TREE_IGRAPH_PKEY_FIELD=item_bucket_id
+CONSTRAINT_TREE_IGRAPH_CONCURRENCY=4
+CONSTRAINT_TREE_IGRAPH_RETRIES=0
+```
+
+In zone JSON, preserve empty prefix as `["CONSTRAINT_TREE_IGRAPH_KEY_PREFIX", ""]`.
+MODEL must be the actual Worker discovery model key, not an inferred project name.
+
+Only the active Master polls. An additional round is skipped while a read is
+running, or while a build/publication runs in publishing mode. New artifact versions use at least wall-clock
 milliseconds and exceed the local latest accepted version; this is an artifact
 version, not an iGraph data version. Keep a single active Master and avoid
 concurrent manual full-input submissions from a different versioning scheme.
@@ -117,6 +160,17 @@ curl http://MASTER/rtp_llm/constraint_tree/status
 The first automatic read starts after one configured interval. Manual refresh
 can start it earlier. Protect these management routes with existing deployment
 network/access controls; no new authentication mechanism is added here.
+
+To test one numeric bucket without starting Master, use the packaged classpath
+and the same `CONSTRAINT_TREE_IGRAPH_*` endpoint/table/field environment:
+
+```bash
+timeout 30s "$JAVA_HOME/bin/java" --class-path 'rtp_llm/flexlb/flexlb-api/target/FlexLB/BOOT-INF/classes:rtp_llm/flexlb/flexlb-api/target/FlexLB/BOOT-INF/lib/*' rtp_llm/flexlb/scripts/IgraphReadProbe.java 0
+```
+
+The probe only queries one key and prints counts, never SIDs or tree publication.
+Successful zero rows show an empty response, not a populated/correct table. Keep
+an outer timeout because SDK discovery initialization can precede query timeouts.
 
 ## Packaging
 
@@ -162,11 +216,13 @@ test Worker, to avoid silently skipping its HTTP E2E. It performs:
   timings are recorded for local merge, mapping and construction; none is real
   iGraph RT or GPU latency. The existing million-variable-length-token-path
   construction regression also runs.
+- Numeric 4000-bucket bounded-concurrency tests, exact large-ID modulo, server
+  cap equality rejection, dry-run/no-publication and 2.5-million-item merge test.
 - Fake bucket source -> real Java CSR builder/publisher -> native C++ HTTP Worker,
   failure retaining old tree, subsequent update and current/backup checks;
   existing mapping/restart/publication regressions are included.
 
-The accepted run had 7 internal SDK tests and 53 API tests (60 total).
+The numeric update run had 7 internal SDK tests and 59 API tests (66 total).
 After testing, build the local Java package inside the same container:
 
 ```bash
@@ -191,8 +247,10 @@ the real checkpoint vocabulary and actual inference Worker startup. Full C-coded
 SID publication and fixed 1024/1500-beam historical-prompt replay passed on the
 local BF16 checkpoint/H20, not the current online checkpoint/L20. See
 `build_logs/csr_saro_release_validation_20260908.md` for exact evidence and limits.
-The local Master Java package does not include the native Worker fix: upgrade
-both Master and Worker images for deployment.
+The local Master Java package does not include the native Worker fix: deployments
+must already run the mapping-aware CSR Worker. The numeric-bucket update changes
+only Master; compatible Workers from the previous mapped-CSR release need not
+be rebuilt or replaced.
 
 ## First test deployment
 

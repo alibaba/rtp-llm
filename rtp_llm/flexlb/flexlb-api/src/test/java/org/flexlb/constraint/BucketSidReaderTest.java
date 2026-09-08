@@ -16,6 +16,91 @@ import static org.junit.jupiter.api.Assertions.*;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 class BucketSidReaderTest {
+    static BucketSidReader.Settings numericSettings(int buckets, int sourceLimit) {
+        return new BucketSidReader.Settings("", buckets, 4, 2000, Duration.ofSeconds(5),
+                Duration.ofMinutes(5), 0, BucketSidReader.BucketAlgorithm.ITEM_ID_MOD, sourceLimit);
+    }
+
+    @Test
+    void numericModuloIsExactAndStrictAndLegacyCrcIsUnchanged() {
+        for (String id : List.of("0", "3999", "4000", "000123", "9007199254740993",
+                "9223372036854775808", "123456789012345678901234567890123456789")) {
+            assertEquals(new java.math.BigInteger(id).mod(java.math.BigInteger.valueOf(4000)).intValue(),
+                    BucketSidReader.bucketForItem(id, 4000, BucketSidReader.BucketAlgorithm.ITEM_ID_MOD));
+        }
+        for (String id : List.of("", "-1", "+1", " 1", "1 ", "1.0", "1e3", "１２３", "item1")) {
+            assertThrows(IllegalArgumentException.class,
+                    () -> BucketSidReader.bucketForItem(id, 4000, BucketSidReader.BucketAlgorithm.ITEM_ID_MOD));
+        }
+        assertEquals("0", numericSettings(4000, 2000).key(0));
+        assertEquals("3999", numericSettings(4000, 2000).key(3999));
+        assertEquals(0xcbf43926L % 4096, BucketSidReader.bucketForItem("123456789", 4096));
+        assertThrows(IllegalArgumentException.class, () -> new BucketSidReader.Settings(null, 1, 1, 10,
+                Duration.ofSeconds(1), Duration.ofSeconds(1), 0));
+    }
+
+    @Test
+    void rejectsWrongModuloBucketAndExactServerCap() throws Exception {
+        var config = numericSettings(4000, 2000);
+        assertThrows(IllegalStateException.class, () -> new BucketSidReader((k, l, t) ->
+                CompletableFuture.completedFuture(k.equals("0")
+                        ? List.of(new SidBucketClient.Row(k, "1", "C1C2")) : List.of()), config).read(() -> true));
+        var rows = new ArrayList<SidBucketClient.Row>();
+        for (int i = 0; i < 2000; i++) { rows.add(new SidBucketClient.Row("0", "" + (i * 4000), "C1C2")); }
+        var reader = new BucketSidReader((k, l, t) -> CompletableFuture.completedFuture(
+                k.equals("0") ? rows : List.of()), config);
+        assertTrue(assertThrows(IllegalStateException.class, () -> reader.read(() -> true))
+                .getMessage().contains("possible truncation"));
+        rows.remove(rows.size() - 1);
+        assertEquals(1999, reader.read(() -> true).itemCount());
+    }
+
+    @Test
+    void numeric4000BucketsRemainBoundedAndMergeSharedSids() throws Exception {
+        var live = new AtomicInteger();
+        var peak = new AtomicInteger();
+        var calls = new AtomicInteger();
+        var executor = Executors.newScheduledThreadPool(4);
+        try {
+            var reader = new BucketSidReader((key, limit, timeout) -> {
+                calls.incrementAndGet();
+                peak.accumulateAndGet(live.incrementAndGet(), Math::max);
+                var future = new CompletableFuture<List<SidBucketClient.Row>>();
+                executor.schedule(() -> {
+                    live.decrementAndGet();
+                    future.complete(List.of(new SidBucketClient.Row(key, key, "C1C2")));
+                }, 1, TimeUnit.MILLISECONDS);
+                return future;
+            }, numericSettings(4000, 2000));
+            var result = reader.read(() -> true);
+            assertEquals(4000, calls.get());
+            assertEquals(4000, result.itemCount());
+            assertEquals(1, result.sids().size());
+            assertTrue(peak.get() > 1 && peak.get() <= 4);
+        } finally { executor.shutdownNow(); }
+    }
+
+    @Test
+    void twoPointFiveMillionNumericItemsAcross4000Buckets() throws Exception {
+        assumeTrue("1".equals(System.getenv("CONSTRAINT_TREE_RUN_IGRAPH_SCALE_TEST")), "opt-in synthetic scale test");
+        var data = new ArrayList<List<SidBucketClient.Row>>();
+        for (int bucket = 0; bucket < 4000; bucket++) {
+            var rows = new ArrayList<SidBucketClient.Row>();
+            for (int i = bucket; i < 2_500_000; i += 4000) {
+                rows.add(new SidBucketClient.Row("" + bucket, "" + i, "C" + (i / 2048) + "C" + (i % 2048)));
+            }
+            data.add(rows);
+        }
+        var result = new BucketSidReader((k, l, t) -> CompletableFuture.completedFuture(
+                data.get(Integer.parseInt(k))), numericSettings(4000, 2000)).read(() -> true);
+        assertEquals(2_500_000, result.itemCount());
+        assertEquals(2_500_000, result.sids().size());
+        assertEquals(625, result.maxBucketRows());
+        System.out.println("SYNTHETIC_NUMERIC_IGRAPH items=" + result.itemCount() + " buckets=" + result.bucketCount()
+                + " maxBucket=" + result.maxBucketRows() + " mergeMs=" + result.elapsedMillis()
+                + " (sequential synthetic IDs, NOT real distribution or network RT)");
+    }
+
     static BucketSidReader.Settings settings(int buckets, int concurrency, int limit, int retries) {
         return new BucketSidReader.Settings("pool_", buckets, concurrency, limit,
                 Duration.ofMillis(100), Duration.ofSeconds(10), retries);

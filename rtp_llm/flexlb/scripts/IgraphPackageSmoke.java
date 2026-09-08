@@ -13,6 +13,14 @@ public class IgraphPackageSmoke {
             throw new AssertionError("packaged dependencies changed Master logging: " + bindings);
         }
         System.out.println("PACK_SINGLE_LOGBACK_BINDING_OK");
+        var settings = new org.flexlb.constraint.BucketSidReader.Settings("", 4000, 4, 2000,
+                java.time.Duration.ofSeconds(5), java.time.Duration.ofMinutes(5), 0,
+                org.flexlb.constraint.BucketSidReader.BucketAlgorithm.ITEM_ID_MOD, 2000);
+        if (!settings.key(3999).equals("3999") || org.flexlb.constraint.BucketSidReader.bucketForItem(
+                "9223372036854775808", 4000, settings.bucketAlgorithm()) != 3808) {
+            throw new AssertionError("packaged numeric bucket contract failed");
+        }
+        System.out.println("PACK_NUMERIC_BUCKET_OK");
         for (String name : List.of("org.flexlb.constraint.BucketSidReader",
                 "org.flexlb.constraint.IgraphConstraintTreePoller",
                 "org.flexlb.httpserver.IgraphConstraintTreeServer",

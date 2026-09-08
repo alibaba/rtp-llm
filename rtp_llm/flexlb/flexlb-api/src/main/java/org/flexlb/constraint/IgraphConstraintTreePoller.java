@@ -29,6 +29,7 @@ public class IgraphConstraintTreePoller {
     private final String model;
     private final boolean sourceReady;
     private final boolean allowNonAtomicRead;
+    private final boolean dryRun;
     private final long intervalSeconds;
     private final Clock clock;
     private final AtomicBoolean running = new AtomicBoolean();
@@ -47,20 +48,30 @@ public class IgraphConstraintTreePoller {
     public IgraphConstraintTreePoller(SidBucketClient client, ConstraintTreeBuildService builds,
                                      LBStatusConsistencyService consistency, Environment env) {
         this(new BucketSidReader(client, new BucketSidReader.Settings(
-                        required(env, "key.prefix"), number(env, "bucket.count", 4096),
+                        requiredPrefix(env), number(env, "bucket.count", 4096),
                         number(env, "concurrency", 16), number(env, "max.rows.per.bucket", 2000),
                         Duration.ofMillis(number(env, "query.timeout.ms", 5000)),
                         Duration.ofSeconds(number(env, "round.timeout.seconds", 300)),
-                        number(env, "retries", 1))),
+                        number(env, "retries", 1),
+                        BucketSidReader.BucketAlgorithm.valueOf(env.getProperty(
+                                "constraint.tree.igraph.bucket.algorithm", "CRC32")),
+                        number(env, "source.row.limit", 0))),
                 builds, consistency::isMaster, required(env, "model"),
                 Boolean.parseBoolean(env.getProperty("constraint.tree.igraph.source.ready", "false")),
                 Boolean.parseBoolean(env.getProperty("constraint.tree.igraph.allow.non.atomic.read", "false")),
-                number(env, "interval.seconds", 600), Clock.systemUTC());
+                number(env, "interval.seconds", 600), Clock.systemUTC(),
+                Boolean.parseBoolean(env.getProperty("constraint.tree.igraph.dry.run", "false")));
     }
 
     IgraphConstraintTreePoller(BucketSidReader reader, ConstraintTreeBuildService builds, BooleanSupplier leader,
                                String model, boolean sourceReady, boolean allowNonAtomicRead,
                                long intervalSeconds, Clock clock) {
+        this(reader, builds, leader, model, sourceReady, allowNonAtomicRead, intervalSeconds, clock, false);
+    }
+
+    IgraphConstraintTreePoller(BucketSidReader reader, ConstraintTreeBuildService builds, BooleanSupplier leader,
+                               String model, boolean sourceReady, boolean allowNonAtomicRead,
+                               long intervalSeconds, Clock clock, boolean dryRun) {
         if (model == null || model.isBlank() || intervalSeconds < 1) {
             throw new IllegalArgumentException("model and positive polling interval are required");
         }
@@ -70,6 +81,7 @@ public class IgraphConstraintTreePoller {
         this.model = model;
         this.sourceReady = sourceReady;
         this.allowNonAtomicRead = allowNonAtomicRead;
+        this.dryRun = dryRun;
         this.intervalSeconds = intervalSeconds;
         this.clock = clock;
     }
@@ -108,6 +120,7 @@ public class IgraphConstraintTreePoller {
 
     private boolean eligible() {
         if (closed.get() || !leader.getAsBoolean()) { return false; }
+        if (dryRun) { return true; }
         if (!sourceReady || !allowNonAtomicRead) {
             status = new Status("NOT_READY", 0, clock.millis(), 0, 0, 0, 0,
                     "confirm source initialization and explicitly accept non-atomic bucket reads before enabling publication");
@@ -125,6 +138,17 @@ public class IgraphConstraintTreePoller {
         try {
             var result = reader.read(() -> !closed.get() && leader.getAsBoolean());
             if (!eligible()) { throw new IllegalStateException("no longer eligible to submit tree"); }
+            if (dryRun) {
+                status = new Status("VALIDATED_NO_PUBLISH", started, clock.millis(), 0,
+                        result.bucketCount(), result.itemCount(), result.sids().size(),
+                        "dry run; no tree submitted; maxBucketRows=" + result.maxBucketRows()
+                                + "; readMs=" + result.elapsedMillis()
+                                + "; source completeness and snapshot consistency NOT verified");
+                log.info("iGraph dry run: buckets={}, items={}, sids={}, maxBucketRows={}, readMs={}",
+                        result.bucketCount(), result.itemCount(), result.sids().size(),
+                        result.maxBucketRows(), result.elapsedMillis());
+                return;
+            }
             long version = Math.max(clock.millis(), Math.addExact(builds.getStatus().requestedVersion(), 1));
             var request = new ConstraintTreeModels.BuildRequest(version, model, null, null, null, null, result.sids());
             var submission = builds.submit(request);
@@ -158,6 +182,12 @@ public class IgraphConstraintTreePoller {
     private static String required(Environment env, String key) {
         String value = env.getProperty("constraint.tree.igraph." + key);
         if (value == null || value.isBlank()) { throw new IllegalArgumentException("missing iGraph " + key); }
+        return value;
+    }
+
+    private static String requiredPrefix(Environment env) {
+        String value = env.getProperty("constraint.tree.igraph.key.prefix");
+        if (value == null) { throw new IllegalArgumentException("missing iGraph key.prefix (explicit empty is allowed)"); }
         return value;
     }
 }
