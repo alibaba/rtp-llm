@@ -467,6 +467,32 @@ def get_sp_tensor(
     return torch.concat([qs, ks, vs], dim=1).contiguous()
 
 
+# Fused-QKV split for the K != V case (MiMo V2.5: QK head_dim=192, V head_dim=128).
+# Along the last dim the layout is three segments -- [head_num*size_per_head,
+# head_num_kv*size_per_head, head_num_kv*v_size_per_head] -- so slice each segment's
+# heads for this rank separately and concatenate the results.
+def get_sp_tensor_kv_asym(
+    t: torch.Tensor,
+    head_num: int,
+    head_num_kv: int,
+    size_per_head: int,
+    v_size_per_head: int,
+    tp: int,
+    tp_rank: int,
+    **kwargs,
+):
+    q_hidden = head_num * size_per_head
+    k_hidden = head_num_kv * size_per_head
+    v_hidden = head_num_kv * v_size_per_head
+    t = t.reshape([-1, q_hidden + k_hidden + v_hidden])
+    qs = sp_neg1(t[:, :q_hidden], tp, tp_rank)
+    _kv_tp = math.gcd(head_num_kv, tp)
+    _kv_rank = tp_rank // (tp // _kv_tp)
+    ks = sp_neg1(t[:, q_hidden : q_hidden + k_hidden], _kv_tp, _kv_rank)
+    vs = sp_neg1(t[:, q_hidden + k_hidden :], _kv_tp, _kv_rank)
+    return torch.concat([qs, ks, vs], dim=1).contiguous()
+
+
 # MHA layout: [D, head*size_per_head, head*size_per_head, head*size_per_head] == [D, 3, D] (sp_neg)
 # MQA layout: [D, head*size_per_head, kv_head*size_per_head, kv_head*size_per_head] (sp_head)
 def sp_head(
@@ -1185,6 +1211,8 @@ class W:
     pre_attn_ln_beta = "pre_attn_layernorm_weights.beta"
     attn_qkv_w = "self_attention_weights.query_weight.kernel"
     attn_qkv_b = "self_attention_weights.query_weight.bias"
+    # Attention sink bias, one scalar per query head (MiMo V2.5 sliding-window layers)
+    attn_sink_bias = "self_attention_weights.sink_bias"
     attn_ln_gamma = "self_attention_weights.attention_layernorm.gamma"
     attn_ln_beta = "self_attention_weights.attention_layernorm.beta"
     qk_ln_gamma = "self_attention_weights.qk_layernorm.gamma"
@@ -1518,6 +1546,9 @@ class W:
         attn_qkv_z: sp_head_z,
         attn_qkv_s: sp_head_s,
         attn_qkv_b: sp_head_b,
+        # One scalar per query head. FlashInfer indexes sinks by the *local*
+        # qo_head_idx, so each rank must hold its own head slice, not the whole tensor.
+        attn_sink_bias: sp_0,
         attn_o_w: sp_0,
         attn_o_z: sp_0,
         attn_o_s: sp_0,
@@ -1746,3 +1777,11 @@ def is_v4_weight(src_weight_info) -> bool:
     do not accidentally match DSv2/V3 weights with similar shapes."""
     name = getattr(src_weight_info, "name", None)
     return isinstance(name, str) and name.startswith("v4.")
+
+
+def is_mimo_v25_weight(src_weight_info) -> bool:
+    """Return True iff the weight instance is marked as MiMo V2.5 specific
+    (class attribute ``is_mimo_v25 = True``). MiMo uses the standard W slot names, so
+    quant-wrapping dispatch discriminates by instance marker instead of the name prefix
+    DSv4 relies on (`is_v4_weight`)."""
+    return bool(getattr(src_weight_info, "is_mimo_v25", False))

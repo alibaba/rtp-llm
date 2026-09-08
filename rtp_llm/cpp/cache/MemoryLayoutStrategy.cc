@@ -244,6 +244,14 @@ std::vector<BlockInfo> MemoryLayoutStrategy::createPartitionedBlockInfo(int laye
 
     const int heads = static_cast<int>(config_.local_head_num_kv);
 
+    // The halving below assumes a block is [K plane][V plane] with equal planes. An
+    // asymmetric-K/V group instead stores [H][N][K_dim + V_dim] interleaved, where no
+    // byte range corresponds to a K-only or V-only partition.
+    RTP_LLM_CHECK_WITH_INFO(config_.k_block_stride_bytes == config_.v_block_stride_bytes,
+                            "partitioned block info requires equal K/V block strides, got k=%zu v=%zu",
+                            config_.k_block_stride_bytes,
+                            config_.v_block_stride_bytes);
+
     auto kv_parts = splitKVPartitionBytes(static_cast<size_t>(config_.kv_block_stride_bytes),
                                           static_cast<size_t>(config_.kv_block_stride_bytes / 2),
                                           static_cast<size_t>(config_.kv_block_stride_bytes / 2),

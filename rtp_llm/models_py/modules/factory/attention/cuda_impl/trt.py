@@ -9,6 +9,7 @@ except (ImportError, AttributeError):
 
 from rtp_llm.models_py.modules.factory.attention import common
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.utils import (
+    has_asymmetric_kv_head_dim,
     is_cuda_12_9_or_later,
 )
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
@@ -38,6 +39,8 @@ def _supports_trtllm_fmha_v2(attn_configs: AttentionConfigs) -> bool:
     if (
         not is_cuda_12_9_or_later()
         or trtllm_fmha_v2_prefill is None
+        # The kernel carries one head dimension for QK and VO alike.
+        or has_asymmetric_kv_head_dim(attn_configs)
         or attn_configs.head_num <= 0
         or attn_configs.kv_head_num <= 0
         or attn_configs.head_num % attn_configs.kv_head_num != 0

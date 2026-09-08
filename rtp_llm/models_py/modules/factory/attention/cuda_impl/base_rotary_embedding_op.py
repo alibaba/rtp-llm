@@ -13,7 +13,73 @@ import flashinfer.rope as rope
 import torch
 from flashinfer import get_batch_indices_positions, get_seq_lens
 
-from rtp_llm.ops import RopeConfig, get_rope_cache_once
+from rtp_llm.ops import (
+    RopeConfig,
+    check_rope_cache,
+    get_rope_cache,
+    get_rope_cache_once,
+)
+
+# cos/sin caches keyed by the rope parameters they were built from, see
+# _resolve_cos_sin_cache().
+_COS_SIN_CACHE_BY_CONFIG: dict[tuple, torch.Tensor] = {}
+
+
+def _cos_sin_cache_key(
+    rope_config: RopeConfig, max_position_embeddings: int, interleave: bool
+) -> tuple:
+    return (
+        str(rope_config.style),
+        int(rope_config.dim),
+        int(rope_config.base),
+        float(rope_config.scale),
+        int(rope_config.max_pos),
+        float(rope_config.factor1),
+        float(rope_config.factor2),
+        float(rope_config.extrapolation_factor),
+        float(rope_config.mscale),
+        int(max_position_embeddings),
+        bool(interleave),
+    )
+
+
+def _resolve_cos_sin_cache(
+    rope_config: RopeConfig, max_position_embeddings: int, interleave: bool
+) -> Optional[torch.Tensor]:
+    """Build the cos/sin cache that matches ``rope_config``.
+
+    ``get_rope_cache_once`` keeps a single process-wide cache per interleave mode
+    (``std::call_once``) and returns it for every later call regardless of the config
+    passed in. Models whose layers use different rope parameters would therefore all get
+    whichever config asked first -- MiMo V2.5 has theta 1e7 on its 9 global-attention
+    layers and 1e4 on its 39 sliding-window layers, so the SWA layers would silently be
+    positioned with the GA theta.
+
+    Take the singleton only when it actually matches (``check_rope_cache`` plus a length
+    check, which that helper does not cover), otherwise build a dedicated cache and
+    memoize it per config.
+    """
+    key = _cos_sin_cache_key(rope_config, max_position_embeddings, interleave)
+    cached = _COS_SIN_CACHE_BY_CONFIG.get(key)
+    if cached is not None:
+        return cached
+
+    try:
+        shared = get_rope_cache_once(
+            rope_config, max_position_embeddings, is_cuda=True, interleave=interleave
+        )
+        if check_rope_cache(rope_config, shared) and shared.data.size(0) >= (
+            max_position_embeddings
+        ):
+            data = shared.data
+        else:
+            data = get_rope_cache(rope_config, max_position_embeddings, interleave)
+    except Exception:
+        # Fall back to dynamic computation in _apply_rope.
+        return None
+
+    _COS_SIN_CACHE_BY_CONFIG[key] = data
+    return data
 
 
 class BaseRotaryEmbeddingOp(ABC):
@@ -56,17 +122,10 @@ class BaseRotaryEmbeddingOp(ABC):
 
         # Try to get cos_sin_cache from C++ RopeCache if not provided
         if cos_sin_cache is None and rope_config is not None:
-            # Save original interleave value
-
-            try:
-                # FlashInfer uses non-interleaved format (False)
-                rope_cache = get_rope_cache_once(
-                    rope_config, max_position_embeddings, is_cuda=True, interleave=False
-                )
-                self.cos_sin_cache = rope_cache.data
-            except Exception:
-                # If get_rope_cache_once fails, fallback to dynamic computation in _apply_rope
-                self.cos_sin_cache = None
+            # FlashInfer uses non-interleaved format (False)
+            self.cos_sin_cache = _resolve_cos_sin_cache(
+                rope_config, max_position_embeddings, interleave=False
+            )
         else:
             self.cos_sin_cache = cos_sin_cache
 

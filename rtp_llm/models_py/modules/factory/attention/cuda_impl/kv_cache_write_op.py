@@ -5,6 +5,9 @@ from typing import Any, Optional, Tuple
 import flashinfer.page as page
 import torch
 
+from rtp_llm.models_py.triton_kernels.common.paged_kv_cache_write import (
+    write_asymmetric_paged_kv_cache,
+)
 from rtp_llm.ops.compute_ops import LayerKVCache
 
 
@@ -45,18 +48,26 @@ class KVCacheWriteOp:
 
         Args:
             key: Key tensor [total_tokens, num_kv_heads, head_dim]
-            value: Value tensor [total_tokens, num_kv_heads, head_dim]
-            kv_cache: KV cache [num_pages, 2, num_kv_heads, page_size, head_dim] (HND layout)
+            value: Value tensor [total_tokens, num_kv_heads, v_head_dim]
+            kv_cache: KV cache [num_pages, 2, num_kv_heads, page_size, head_dim] (HND layout),
+                      or the split k_cache/v_cache views when V's head dim differs
         """
         if kv_cache is not None:
             # For real execution - use provided KV cache
-            # KV cache has shape [num_pages, 2, num_kv_heads, page_size, head_dim] (HND layout)
-            k_cache = kv_cache.kv_cache_base[
-                :, 0, :, :, :
-            ]  # [num_pages, num_kv_heads, page_size, head_dim]
-            v_cache = kv_cache.kv_cache_base[
-                :, 1, :, :, :
-            ]  # [num_pages, num_kv_heads, page_size, head_dim]
+            k_cache_split = kv_cache.k_cache
+            if k_cache_split is not None and k_cache_split.numel() > 0:
+                # Asymmetric K/V: the C++ layer narrowed these out of the interleaved
+                # block, each [num_pages, num_kv_heads, page_size, its own head_dim].
+                k_cache = k_cache_split
+                v_cache = kv_cache.v_cache
+            else:
+                # KV cache has shape [num_pages, 2, num_kv_heads, page_size, head_dim] (HND layout)
+                k_cache = kv_cache.kv_cache_base[
+                    :, 0, :, :, :
+                ]  # [num_pages, num_kv_heads, page_size, head_dim]
+                v_cache = kv_cache.kv_cache_base[
+                    :, 1, :, :, :
+                ]  # [num_pages, num_kv_heads, page_size, head_dim]
             if key.dtype != k_cache.dtype:
                 raise ValueError(
                     f"key dtype {key.dtype} must match K cache dtype {k_cache.dtype}"
@@ -72,18 +83,30 @@ class KVCacheWriteOp:
             batch_indices = self.params.batch_indice_d.narrow(0, 0, nnz)
             positions = self.params.positions_d.narrow(0, 0, nnz)
 
-            # Append K and V to paged cache using HND layout
-            page.append_paged_kv_cache(  # type: ignore
-                key,  # append_key: [total_tokens, num_kv_heads, head_dim]
-                value,  # append_value: [total_tokens, num_kv_heads, head_dim]
-                batch_indices,
-                positions,
-                (k_cache, v_cache),  # paged_kv_cache: tuple of K and V caches
-                self.params.page_indice_d,
-                self.params.decode_page_indptr_d,
-                self.params.paged_kv_last_page_len_d,
-                "HND",  # kv_layout: HND layout (num_pages, num_kv_heads, page_size, head_dim)
-            )
+            if k_cache.size(-1) != v_cache.size(-1):
+                self._scatter_write(
+                    key,
+                    value,
+                    k_cache,
+                    v_cache,
+                    batch_indices,
+                    positions,
+                    self.params.page_indice_d,
+                    self.params.decode_page_indptr_d,
+                )
+            else:
+                # Append K and V to paged cache using HND layout
+                page.append_paged_kv_cache(  # type: ignore
+                    key,  # append_key: [total_tokens, num_kv_heads, head_dim]
+                    value,  # append_value: [total_tokens, num_kv_heads, head_dim]
+                    batch_indices,
+                    positions,
+                    (k_cache, v_cache),  # paged_kv_cache: tuple of K and V caches
+                    self.params.page_indice_d,
+                    self.params.decode_page_indptr_d,
+                    self.params.paged_kv_last_page_len_d,
+                    "HND",  # kv_layout: HND layout (num_pages, num_kv_heads, page_size, head_dim)
+                )
         else:
             # For warmup/JIT compilation - create dummy KV cache
             (
@@ -111,24 +134,77 @@ class KVCacheWriteOp:
                     max_num_pages,
                     self.num_kv_heads,
                     self.token_per_block,
-                    self.head_size,
+                    # V's own head dim, which need not match K's.
+                    value.size(-1),
                 ),
                 dtype=value.dtype,
                 device=value.device,
             )
 
-            # Append K and V to paged cache using HND layout
-            page.append_paged_kv_cache(  # type: ignore
-                key,
-                value,
-                batch_indices,
-                positions,
-                (k_cache, v_cache),  # paged_kv_cache: tuple of K and V caches
-                kv_page_indices,
-                kv_page_indptr,
-                kv_last_page_len,
-                "HND",  # kv_layout: HND layout (num_pages, num_kv_heads, page_size, head_dim)
-            )
+            if k_cache.size(-1) != v_cache.size(-1):
+                self._scatter_write(
+                    key,
+                    value,
+                    k_cache,
+                    v_cache,
+                    batch_indices,
+                    positions,
+                    kv_page_indices,
+                    kv_page_indptr,
+                )
+            else:
+                # Append K and V to paged cache using HND layout
+                page.append_paged_kv_cache(  # type: ignore
+                    key,
+                    value,
+                    batch_indices,
+                    positions,
+                    (k_cache, v_cache),  # paged_kv_cache: tuple of K and V caches
+                    kv_page_indices,
+                    kv_page_indptr,
+                    kv_last_page_len,
+                    "HND",  # kv_layout: HND layout (num_pages, num_kv_heads, page_size, head_dim)
+                )
+
+    def _scatter_write(
+        self,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        k_cache: torch.Tensor,
+        v_cache: torch.Tensor,
+        batch_indices: torch.Tensor,
+        positions: torch.Tensor,
+        kv_page_indices: torch.Tensor,
+        kv_page_indptr: torch.Tensor,
+    ) -> None:
+        """Write asymmetric K/V through one fused Triton launch.
+
+        FlashInfer's ``append_paged_kv_cache`` takes K and V through one head dimension,
+        so an asymmetric layer needs a separate writer. Position ``p`` lives at slot
+        ``p % page_size`` of the request's ``p // page_size``-th page, which the block table
+        maps to a physical page. The Triton implementation consumes the existing packed
+        token metadata directly and avoids the temporary int64 tensors and advanced-index
+        assignment created by the former PyTorch implementation.
+
+        A sliding-window group materializes only the tail of each request's page list and
+        leaves NULL_BLOCK_IDX in the older slots. Tokens landing there are diverted to
+        reserved block 0 -- the one block the pool never hands out -- instead of being
+        filtered out, because selecting rows would need a device-to-host sync on every
+        layer. Writing through the negative page id itself would corrupt memory ahead of
+        the pool, and block 0's contents are never read for their value: the plan kernel
+        substitutes it for the same NULL slots, all of which sit outside the window and are
+        masked away by window_left.
+        """
+        write_asymmetric_paged_kv_cache(
+            key,
+            value,
+            k_cache,
+            v_cache,
+            batch_indices,
+            positions,
+            kv_page_indices,
+            kv_page_indptr,
+        )
 
     def _prepare_warmup_cache_indices(
         self, num_tokens: int, device: torch.device

@@ -14,7 +14,7 @@ from rtp_llm.config.quant_config import (
     init_quant_config,
 )
 from rtp_llm.multimodal.multimodal_mixin_register import get_multimodal_mixin_cls
-from rtp_llm.ops import DataType, KvCacheDataType
+from rtp_llm.ops import DataType, HybridAttentionType, KvCacheDataType
 from rtp_llm.ops import ModelConfig as CppModelConfig
 from rtp_llm.ops import TaskType
 from rtp_llm.utils.base_model_datatypes import VitParameters
@@ -78,6 +78,7 @@ class ModelConfig(CppModelConfig):
         "phy2log_path",
         "lora_infos",
         "headwise_config",
+        "attention_value_scale",
     }
 
     # Known C++ ModelConfig members (from ModelConfig.h)
@@ -251,6 +252,12 @@ class ModelConfig(CppModelConfig):
         # Get kv_cache_dtype from attn_config
         kv_cache_dtype_enum = self.attn_config.kv_cache_dtype
         kv_cache_bytes = 1 if kv_cache_dtype_enum == KvCacheDataType.FP8 else 2
+        # MiMo V2.5 is the only model whose model-wide attention config currently
+        # describes two *MHA* geometries: Full attention and SWA. Do not dispatch every
+        # hybrid model here. For example, Kimi/Qwen hybrid models use Full + Linear
+        # groups, whose linear state cache is not a token-indexed K/V cache.
+        if self.model_type == "mimo_v25":
+            return self._eval_mimo_v25_hybrid_kv_cache_mem_size(kv_cache_bytes)
         kv_cache_size = (
             2
             * self.num_layers
@@ -260,6 +267,72 @@ class ModelConfig(CppModelConfig):
             * self.max_seq_len
         )
         return kv_cache_size
+
+    def _eval_mimo_v25_hybrid_kv_cache_mem_size(self, kv_cache_bytes: int) -> float:
+        """Estimate MiMo-V2.5's Full/SWA MHA cache, in bytes.
+
+        This is intentionally model-specific. MiMo-V2.5 has 9 Full-attention layers
+        and 39 SWA layers, and their KV head counts differ. Its K and V head dimensions
+        also differ, so the ordinary homogeneous MHA estimate is not applicable.
+
+        ``HybridAttentionType.NONE`` is the explicit Full-attention marker and
+        ``SLIDING_WINDOW`` is the explicit SWA marker. A ``LINEAR`` layer is not a
+        valid input to this formula: linear attention stores a fixed SSM/conv state,
+        not token-indexed K/V entries. Rejecting it here prevents a different hybrid
+        model (for example Full + Linear) from being silently classified as Full/SWA.
+
+        The estimate is a logical capacity estimate. The runtime allocator may use
+        additional bytes for block alignment, padding, or auxiliary quantization data.
+        """
+        swa_config = self.hybrid_attention_config.swa_attention_config
+        pattern = self.hybrid_attention_config.hybrid_attention_types
+        if len(pattern) != self.num_layers:
+            raise ValueError(
+                "MiMo-V2.5 hybrid attention pattern length must equal num_layers: "
+                f"{len(pattern)} != {self.num_layers}"
+            )
+
+        unsupported = {
+            t
+            for t in pattern
+            if t
+            not in {
+                HybridAttentionType.NONE,
+                HybridAttentionType.SLIDING_WINDOW,
+            }
+        }
+        if unsupported:
+            names = ", ".join(sorted(getattr(t, "name", str(t)) for t in unsupported))
+            raise ValueError(
+                "MiMo-V2.5 cache-size evaluator only supports Full (NONE) and "
+                f"SWA (SLIDING_WINDOW) layers, got: {names}"
+            )
+
+        ga_layers = sum(1 for t in pattern if t == HybridAttentionType.NONE)
+        swa_layers = sum(1 for t in pattern if t == HybridAttentionType.SLIDING_WINDOW)
+
+        k_head_size = self.attn_config.size_per_head
+        v_head_size = self.attn_config.v_size_per_head or k_head_size
+        kv_head_size = k_head_size + v_head_size
+
+        ga_kv_head_num = swa_config.ga_kv_head_num or self.attn_config.kv_head_num
+        swa_kv_head_num = swa_config.swa_kv_head_num or self.attn_config.kv_head_num
+        # A windowed layer only ever keeps the last window_size tokens resident.
+        swa_tokens = (
+            swa_config.window_size if swa_config.window_size > 0 else self.max_seq_len
+        )
+
+        ga_bytes = (
+            ga_layers
+            * ga_kv_head_num
+            * kv_head_size
+            * kv_cache_bytes
+            * self.max_seq_len
+        )
+        swa_bytes = (
+            swa_layers * swa_kv_head_num * kv_head_size * kv_cache_bytes * swa_tokens
+        )
+        return ga_bytes + swa_bytes
 
     def _eval_runtime_buffer_mem_size(self) -> float:
         """Evaluate runtime buffer memory size."""
@@ -565,6 +638,10 @@ class ModelConfig(CppModelConfig):
         self.render_config: Optional[Any] = None  # RenderConfig for renderer factory
         self.mm_related_params = VitParameters()
         self.quant_config = None
+
+        # Checkpoint-provided scale applied to V before attention. None means the
+        # checkpoint does not scale V, which is the case for every model but MiMo V2.5.
+        self.attention_value_scale: Optional[float] = None
 
     def apply_override_args(self, json_model_override_args: str) -> None:
         """Apply model override arguments to ModelConfig.

@@ -27,6 +27,7 @@ from rtp_llm.utils.model_weight import (
     convert_down_proj_,
     convert_gate_up_proj_,
     identity,
+    is_mimo_v25_weight,
     is_v4_weight,
     merge_block_scale,
     merge_te_qkv,
@@ -283,6 +284,11 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
         # (V4PerBlockFp8Weight) — keep the base class out of contention so the
         # registry's "must be exactly one match" check passes.
         if is_v4_weight(src_weight_info):
+            return False
+        # Same reasoning for MiMo V2.5, dispatched to MiMoPerBlockFp8Weight: its
+        # checkpoint keeps QKV fused in a single tensor and leaves o_proj in BF16,
+        # neither of which fits the base class's three-tensor merge_te_qkv assumption.
+        if is_mimo_v25_weight(src_weight_info):
             return False
         return True
 

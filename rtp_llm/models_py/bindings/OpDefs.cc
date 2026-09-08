@@ -48,6 +48,8 @@ void registerPyOpDefs(pybind11::module& m) {
             pybind11::arg("kv_scale_base") = pybind11::none())
         .def_readwrite("kv_cache_base", &LayerKVCache::kv_cache_base, "Key/value cache tensor (per-layer view)")
         .def_readwrite("kv_scale_base", &LayerKVCache::kv_scale_base, "Key/value cache scale tensor")
+        .def_readwrite("k_cache", &LayerKVCache::k_cache, "K cache view (set only when V head dim != QK head dim)")
+        .def_readwrite("v_cache", &LayerKVCache::v_cache, "V cache view (set only when V head dim != QK head dim)")
         .def_readonly("seq_size_per_block", &LayerKVCache::seq_size_per_block, "Sequence size per block")
         .def_readonly("layer_id", &LayerKVCache::layer_id, "Global layer id")
         .def_readonly("group_id", &LayerKVCache::group_id, "Cache group id (-1 = default)")

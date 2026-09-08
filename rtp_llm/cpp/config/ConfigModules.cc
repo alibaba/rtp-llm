@@ -187,11 +187,24 @@ std::string LinearAttentionConfig::to_string() const {
         << "conv_state_dtype: " << getDataTypeStr(conv_state_dtype);
     return oss.str();
 }
+// SwaAttentionConfig
+std::string SwaAttentionConfig::to_string() const {
+    std::ostringstream oss;
+    oss << "window_size: " << window_size << "\n"
+        << "swa_kv_head_num: " << swa_kv_head_num << "\n"
+        << "ga_kv_head_num: " << ga_kv_head_num << "\n"
+        << "swa_rope_theta: " << swa_rope_theta << "\n"
+        << "add_sink_bias: " << add_sink_bias;
+    return oss.str();
+}
+
 // HybridAttentionConfig
 std::string HybridAttentionConfig::to_string() const {
     std::ostringstream oss;
     oss << "enable_hybrid_attention: " << enable_hybrid_attention << "\n"
-        << "enable_independent_kv_cache_pools: " << enable_independent_kv_cache_pools << "\n";
+        << "enable_independent_kv_cache_pools: " << enable_independent_kv_cache_pools << "\n"
+        << "swa_attention_config: {\n"
+        << swa_attention_config.to_string() << "\n}\n";
     return oss.str();
 }
 

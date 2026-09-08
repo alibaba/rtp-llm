@@ -55,9 +55,13 @@ struct CacheGroupPolicy {
     bool                 charge_to_paged_budget = false;
     CacheMemoryPlacement memory_placement       = CacheMemoryPlacement::DEVICE;
     uint32_t             active_tail_blocks     = 0;
-    bool                 validate_tail_blocks   = true;
-    CpBlockMappingMode   cp_mapping             = CpBlockMappingMode::NONE;
-    CpBlockSliceMode     cp_slice               = CpBlockSliceMode::NONE;
+    // Number of token positions covered by the SWA prefix-reuse window. This
+    // is intentionally separate from active_tail_blocks: the latter controls
+    // allocation/retention, while this value controls cache-key matching.
+    uint32_t           prefix_reuse_window_tokens = 0;
+    bool               validate_tail_blocks       = true;
+    CpBlockMappingMode cp_mapping                 = CpBlockMappingMode::NONE;
+    CpBlockSliceMode   cp_slice                   = CpBlockSliceMode::NONE;
 };
 
 // One cache-store registration step: pair a cache key from the full logical

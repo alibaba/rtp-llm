@@ -29,6 +29,13 @@ namespace torch_ext {
 struct LayerKVCache {
     torch::Tensor kv_cache_base;
     torch::Tensor kv_scale_base;
+    // Set only when the group's V head dimension differs from its QK head dimension
+    // (MiMo V2.5: QK=192, V=128). Such a block is laid out interleaved as
+    // [kernel_block_num, num_kv_heads, kernel_seq_size_per_block, head_dim + v_head_dim]
+    // and these are narrow views of its last axis, which leaves both with identical
+    // strides — FlashInfer's paged kernels share one stride set between K and V.
+    torch::Tensor k_cache;
+    torch::Tensor v_cache;
     int           seq_size_per_block = 0;
     int           layer_id           = -1;
     int           group_id           = -1;
@@ -165,9 +172,9 @@ private:
                             buffers.kv_scale_addr);
 
         const auto spec_type = group.spec->type;
-        if (group.policy.group_type != rtp_llm::CacheGroupType::FULL
-            || spec_type == rtp_llm::KVCacheSpecType::LinearAttention
-            || spec_type == rtp_llm::KVCacheSpecType::OpaqueState) {
+        if (spec_type == rtp_llm::KVCacheSpecType::LinearAttention || spec_type == rtp_llm::KVCacheSpecType::OpaqueState
+            || (group.policy.group_type != rtp_llm::CacheGroupType::FULL
+                && spec_type != rtp_llm::KVCacheSpecType::MultiHeadAttention)) {
             return result;
         }
 
@@ -188,18 +195,52 @@ private:
                                     k_block_elems,
                                     local_kv_heads,
                                     physical_seq_size);
-            const int64_t head_dim = k_block_elems / (local_kv_heads * physical_seq_size);
+            const int64_t head_dim      = k_block_elems / (local_kv_heads * physical_seq_size);
+            const int64_t v_block_elems = static_cast<int64_t>(group.spec->v_block_size());
+            RTP_LLM_CHECK_WITH_INFO(v_block_elems > 0 && v_block_elems % (local_kv_heads * physical_seq_size) == 0,
+                                    "MHA tag=%s cannot derive V head dimension from v_block_size=%ld heads=%ld seq=%ld",
+                                    group.tag.c_str(),
+                                    v_block_elems,
+                                    local_kv_heads,
+                                    physical_seq_size);
+            const int64_t v_head_dim = v_block_elems / (local_kv_heads * physical_seq_size);
             RTP_LLM_CHECK_WITH_INFO(
                 buffers.kv_addr.is_contiguous(), "MHA KV cache base for tag=%s must be contiguous", group.tag.c_str());
-            const int64_t expected_numel = kernel_block_num * 2 * local_kv_heads * kernel_seq_size * head_dim;
+            const int64_t expected_numel =
+                kernel_block_num * local_kv_heads * kernel_seq_size * (head_dim + v_head_dim);
             RTP_LLM_CHECK_WITH_INFO(buffers.kv_addr.numel() == expected_numel,
                                     "MHA KV cache elements=%ld expected=%ld for layer=%d tag=%s",
                                     buffers.kv_addr.numel(),
                                     expected_numel,
                                     layer_id,
                                     group.tag.c_str());
-            result.kv_cache_base =
-                buffers.kv_addr.view({kernel_block_num, 2, local_kv_heads, kernel_seq_size, head_dim});
+            if (head_dim == v_head_dim) {
+                result.kv_cache_base =
+                    buffers.kv_addr.view({kernel_block_num, 2, local_kv_heads, kernel_seq_size, head_dim});
+            } else {
+                // Asymmetric K/V. A block holds [H][N][K_dim + V_dim] rather than the
+                // symmetric [2][H][N][D], so K and V come out as narrow views of the last
+                // axis. That keeps their strides identical, which FlashInfer's paged
+                // kernels require — they carry one stride set for both tensors.
+                //
+                // Splitting N into kernel blocks would move the token axis above the head
+                // axis, so the view below matches memory only when nothing sits between
+                // the block axis and the token axis (heads == 1). Refuse rather than hand
+                // back a plausible-looking transposition.
+                RTP_LLM_CHECK_WITH_INFO(blocks_per_physical == 1 || local_kv_heads == 1,
+                                        "asymmetric K/V cache for tag=%s cannot be viewed at kernel-block "
+                                        "granularity: kernel_blocks_per_kv_block=%ld with local_kv_heads=%ld "
+                                        "(layer=%d); set kernel_seq_size_per_block == seq_size_per_block",
+                                        group.tag.c_str(),
+                                        blocks_per_physical,
+                                        local_kv_heads,
+                                        layer_id);
+                auto pool =
+                    buffers.kv_addr.view({kernel_block_num, local_kv_heads, kernel_seq_size, head_dim + v_head_dim});
+                result.k_cache       = pool.narrow(3, 0, head_dim);
+                result.v_cache       = pool.narrow(3, head_dim, v_head_dim);
+                result.kv_cache_base = pool;
+            }
             if (buffers.kv_scale_addr.defined()) {
                 RTP_LLM_CHECK_WITH_INFO(buffers.kv_scale_addr.is_contiguous() && buffers.kv_scale_addr.dim() > 0
                                             && buffers.kv_scale_addr.size(0) == physical_block_num

@@ -1,10 +1,11 @@
-from typing import Any, Callable, List, Optional, Union, Dict
+from typing import Any, Callable, Dict, List, Optional, Union
 
 import torch
 from pydantic import BaseModel
+
 from rtp_llm.model_loader.load_config import LoadConfig
 from rtp_llm.model_loader.weight_module import AtomicWeight
-from rtp_llm.utils.model_weight import CkptWeightInfo, identity, W
+from rtp_llm.utils.model_weight import CkptWeightInfo, W, identity
 
 
 class AttnConfig(BaseModel):
@@ -12,6 +13,9 @@ class AttnConfig(BaseModel):
     size_per_head: int = -1
     head_num: int = -1
     head_num_kv: int = -1
+    # V head dim, used when it differs from the K head dim; 0 means identical to
+    # size_per_head
+    v_size_per_head: int = 0
     need_post_ln: bool = False
 
 
