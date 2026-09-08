@@ -54,20 +54,26 @@ network namespace. Leave it unset for multi-node deployments.
 
 ## Monitoring connections at the checkpoint boundary
 
-Each SCR participant pauses its already-loaded Kmonitor reporters before entering
-the Epsilon barrier. Python reporters join their reporting thread and close Flume.
-The native reporter stops its sampling/sending threads and reinitializes the
-configured sink in manual mode, releasing the old transport while retaining the
-registered metric sources. It does not shut down the Kmonitor factory.
+During an SCR checkpoint or restore phase, each participant creates its Python
+and native metric registries at the normal initialization points, but defers the
+external Kmonitor transport. The Python reporter does not create its Flume client
+or reporting thread. The native reporter initializes the factory configuration
+in manual mode and accepts metric registration, but does not start its metrics
+system or create the configured sink.
 
-When the barrier returns, including after a checkpoint error, both reporters
-resume using their original configuration. The native library must provide the
-matching lifecycle hooks; mixing new Python helpers with an older loaded native
-library rejects checkpoint participation rather than silently retaining sockets.
-Ordinary serving without SCR does not pause reporting.
+After `epsilon.snapstart_checkpoint()` returns, including after a checkpoint
+error, both reporters activate their external transport. They reread the Hippo
+runtime environment and rebuild the sink and identity tags so a restored process
+does not report with the seed Pod's host or container IP. Python also replaces
+stale runtime tags when rendering data points that were registered before the
+checkpoint. The native library must provide the matching lifecycle hooks; mixing
+new Python helpers with an older loaded native library rejects checkpoint
+participation rather than silently retaining sockets. Ordinary serving without
+SCR keeps the original eager reporting behavior.
 
-CPU validation covers real Python TCP closure/reconnection and native metric
-registration retention across sink replacement. Full acceptance must additionally
-verify dump/restore, restored inference, and resumed reporting in a fresh image.
+CPU validation covers deferred Python transport activation, real TCP
+closure/reconnection, refreshed runtime identity, and native metric registration
+retention across sink replacement. Full acceptance must additionally verify
+dump/restore, restored inference, and resumed reporting in a fresh image.
 These hooks address the configured built-in sink; custom sinks and independently
 retained sink references require their own external-connection lifecycle checks.
