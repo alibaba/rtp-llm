@@ -104,6 +104,7 @@ class ModelFactory:
         model_config: ModelConfig,
         propose_model_config: Optional[ModelConfig],
         engine_config: EngineConfig,
+        target_model: Optional[Any] = None,
     ) -> Optional[Any]:
         """Get and create ProposeModel from engine_config and propose_model_config.
 
@@ -133,6 +134,38 @@ class ModelFactory:
             or sp_type == SpeculativeType.EAGLE
         ):
             model_type = propose_model_config.model_type
+            if model_config.model_type == "kimi_k3":
+                expected = {
+                    SpeculativeType.EAGLE3: "kimi_k3_mla_swa_eagle3",
+                    SpeculativeType.MTP: "kimi_k3_mtp",
+                }.get(sp_type)
+                if expected is not None and model_type != expected:
+                    raise ValueError(
+                        f"K3 {sp_type} requires SP_MODEL_TYPE={expected}, got {model_type}"
+                    )
+            is_k3_mtp = model_type == "kimi_k3_mtp"
+            if is_k3_mtp and (
+                sp_type != SpeculativeType.MTP or model_config.model_type != "kimi_k3"
+            ):
+                raise ValueError(
+                    "kimi_k3_mtp requires SP_TYPE=mtp and a kimi_k3 target"
+                )
+            cp_config = engine_config.parallelism_config.prefill_cp_config
+            if is_k3_mtp and (cp_config.is_enabled() or cp_config.is_prefill_enabled()):
+                raise ValueError("K3 MTP supports TP/EP Prefill, not Prefill CP")
+            if is_k3_mtp and model_config.mm_model_config.is_multimodal:
+                target_media = model_config.mm_related_params.special_token_ids.get(
+                    "image_token_index"
+                )
+                draft_media = (
+                    propose_model_config.mm_related_params.special_token_ids.get(
+                        "image_token_index"
+                    )
+                )
+                if target_media is None or draft_media != target_media:
+                    raise ValueError(
+                        "K3 MTP target/draft media placeholder token mismatch"
+                    )
             if model_type == "deepseek-v3-mtp" or model_type == "mixtbstars-mtp":
                 logging.warning(
                     f"create sp model type is {model_type}, so change the sp type to mtp"
@@ -164,7 +197,32 @@ class ModelFactory:
                 device_resource_config=engine_config.device_resource_config,
                 vit_config=None,  # Propose model doesn't need vit_config
                 merge_lora=False,  # Propose model doesn't need merge_lora
+                skip_python_model=is_k3_mtp,
             )
+            if is_k3_mtp:
+                from rtp_llm.utils.model_weight import W
+
+                if target_model is None:
+                    raise ValueError(
+                        "K3 MTP needs the loaded target for embedding/head sharing"
+                    )
+                for key in (W.embedding, W.lm_head):
+                    target_weight = target_model.weight.get_global_weight(key)
+                    draft_weight = gpt_model.weight.get_global_weight(key)
+                    if (
+                        target_weight.shape != draft_weight.shape
+                        or target_weight.dtype != draft_weight.dtype
+                        or target_weight.device != draft_weight.device
+                        or target_weight.stride() != draft_weight.stride()
+                    ):
+                        raise ValueError(
+                            f"K3 MTP target/draft shared weight layout mismatch: {key}"
+                        )
+                    gpt_model.weight.set_global_weight(key, target_weight)
+                gpt_model._create_python_model()
+                logging.info(
+                    "[K3_MTP] shared target embedding/head; retained draft head norm"
+                )
             logging.info(f"create propose model {engine_config.sp_config.type}")
             return ProposeModel(sp_type, gen_num_per_circle, gpt_model)
         elif sp_type == SpeculativeType.DETERMINISTIC:
@@ -235,6 +293,7 @@ class ModelFactory:
             model_config=model_config,
             propose_model_config=propose_model_config,
             engine_config=engine_config,
+            target_model=model,
         )
 
         # Create engine using create_engine function (replaces AsyncModel)
@@ -379,6 +438,24 @@ class ModelFactory:
         sp_config = engine_config.sp_config
         if not sp_config.type or sp_config.type == SpeculativeType.NONE:
             return None
+
+        if model_config.model_type == "kimi_k3" and sp_config.type in (
+            SpeculativeType.MTP,
+            SpeculativeType.EAGLE3,
+        ):
+            expected = (
+                "kimi_k3_mtp"
+                if sp_config.type == SpeculativeType.MTP
+                else "kimi_k3_mla_swa_eagle3"
+            )
+            if sp_config.model_type != expected or not sp_config.checkpoint_path:
+                raise ValueError(
+                    f"K3 {sp_config.type} requires SP_MODEL_TYPE={expected} and SP_CHECKPOINT_PATH"
+                )
+            if sp_config.gen_num_per_cycle < 1:
+                raise ValueError(
+                    "K3 speculative decoding requires GEN_NUM_PER_CIRCLE >= 1"
+                )
 
         if not sp_config.checkpoint_path:
             return None

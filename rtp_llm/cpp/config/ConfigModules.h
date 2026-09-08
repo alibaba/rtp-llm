@@ -316,6 +316,9 @@ enum SpeculativeType {
 };
 
 struct SpeculativeExecutionConfig {
+    bool isKimiK3Mtp() const {
+        return type == SP_TYPE_MTP && model_type == "kimi_k3_mtp";
+    }
     std::string     model_type                    = "";
     SpeculativeType type                          = SP_TYPE_NONE;
     int64_t         sp_min_token_match            = 2;

@@ -318,7 +318,7 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
     int num_mtp_modules = 1;
     if (is_mtp) {
         num_mtp_modules = sp_config.gen_num_per_cycle;
-        if (is_eagle) {
+        if (is_eagle || sp_config.isKimiK3Mtp()) {
             num_mtp_modules = 1;
         }
     }
@@ -412,13 +412,14 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
     const uint32_t mtp_layer_num  = propose_config.layer_num;
 
     // Kimi K3 uses independent target pools (FULL/MLA and LINEAR/KDA).  An
-    // EAGLE draft layer must not alias either pool: its local layer id starts
+    // EAGLE or K3 MTP draft must not alias either pool: its local layer id starts
     // at zero, but its cache has an independent lifetime and is addressed as
     // a global layer after the target model.  Materialize the propose groups
     // as additional physical pools before wiring global layer ids below.
-    const bool   independent_eagle_pool = is_eagle && config.use_independent_block_pools;
+    const bool   independent_draft_pool =
+        (is_eagle || sp_config.isKimiK3Mtp()) && config.use_independent_block_pools;
     const size_t propose_group_offset   = config.group_types.size();
-    if (independent_eagle_pool) {
+    if (independent_draft_pool) {
         for (size_t g = 0; g < propose_config.group_types.size(); ++g) {
             config.cache_specs.push_back(propose_config.cache_specs[g]);
             config.global_layer_ids.emplace_back();
@@ -518,7 +519,7 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
                 // Keep the propose model's group placement. DSV4 MTP is
                 // SWA-only and lives in the SWA typed pool, not the first FULL
                 // pool. Non-typed hybrid configs fall back to the full group.
-                const int target_gid = independent_eagle_pool
+                const int target_gid = independent_draft_pool
                                            ? static_cast<int>(propose_group_offset + g)
                                            : ((g < config.global_layer_ids.size()) ? static_cast<int>(g)
                                                                                   : static_cast<int>(full_gid));
@@ -541,7 +542,7 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
                         config.layer_region_to_group_id[static_cast<size_t>(global_layer_id)][region] = target_gid;
                     }
                 }
-                if (!independent_eagle_pool && target_gid >= 0
+                if (!independent_draft_pool && target_gid >= 0
                     && static_cast<size_t>(target_gid) < config.group_block_size_bytes.size()) {
                     size_t stride_bytes = 0;
                     if (g < propose_config.group_kv_block_stride_bytes.size()) {

@@ -75,7 +75,7 @@ public:
                 model_config.input_embedding_scalar,
                 model_config.residual_scalar,
                 model_config.reverse_e_h_norm,
-                model_config.model_type == "kimi_k3"};
+                model_config.model_type == "kimi_k3" || model_config.model_type == "kimi_k3_mtp"};
     }
 
     virtual ~Executor() {};

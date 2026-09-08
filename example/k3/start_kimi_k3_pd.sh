@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
-# Start one side of the validated Kimi K3 PD topology. Both roles are
-# TP8 / DP1 / EP8 and use all eight GPUs on their respective hosts.
+# Start one side of the Kimi K3 PD topology. Both roles
+# default to TP8 / DP1 / EP8; TP and EP are configurable on both hosts.
 #
 # The script incrementally builds its Bazel launcher with CUDA13/SM10x.  It
 # does not install or replace a system rtp-llm wheel.
@@ -50,6 +50,10 @@ Required on both hosts:
   PREFILL_ENDPOINT                       externally reachable host:port
   DECODE_ENDPOINT                        externally reachable host:port
 
+Topology (set the same values on both roles):
+  KIMI_K3_TP_SIZE                       defaults to 8
+  KIMI_K3_EP_SIZE                       defaults to TP; current MegaMoE requires TP=EP
+
 Model and cache (normally change these together on both roles):
   TOKENIZER_PATH                         defaults to CHECKPOINT_PATH
   THINK_START_TAG                        defaults to the K3 XTML think opener
@@ -58,7 +62,6 @@ Model and cache (normally change these together on both roles):
   MAX_SEQ_LEN                            defaults to 16384
   MAX_BATCH_TOKENS_SIZE                  optional token admission limit
   KV_CACHE_MEM_MB                        defaults: Prefill 43000, Decode 46000;
-                                         BF16 only
   SEQ_SIZE_PER_BLOCK                     defaults to 4096
   KERNEL_SEQ_SIZE_PER_BLOCK              defaults to 128
   REUSE_CACHE                            defaults to 0
@@ -127,8 +130,18 @@ case "${role}" in
         ;;
 esac
 
+tp_size="${KIMI_K3_TP_SIZE:-8}"
+ep_size="${KIMI_K3_EP_SIZE:-${tp_size}}"
+[[ "${tp_size}" =~ ^[1-9][0-9]*$ && "${ep_size}" =~ ^[1-9][0-9]*$ ]] \
+    || die "KIMI_K3_TP_SIZE and KIMI_K3_EP_SIZE must be positive integers"
+# The existing MegaMoE sequence-parallel implementation requires matching groups.
+[[ "${tp_size}" == "${ep_size}" ]] || die "K3 PD MegaMoE requires TP == EP"
+decode_topology="tp${tp_size}_ep${ep_size}"
+[[ "${KIMI_K3_DECODE_TOPOLOGY:-${decode_topology}}" == "${decode_topology}" ]] \
+    || die "KIMI_K3_DECODE_TOPOLOGY disagrees with KIMI_K3_TP_SIZE/EP_SIZE"
+
 if [[ "${role}" == "PREFILL" ]]; then
-    export KIMI_K3_SHARED_EXPERT_WEIGHT_SHARD="${KIMI_K3_SHARED_EXPERT_WEIGHT_SHARD:-1}"
+    export KIMI_K3_SHARED_EXPERT_WEIGHT_SHARD="${KIMI_K3_SHARED_EXPERT_WEIGHT_SHARD:-$((tp_size % 2 == 0))}"
     [[ "${KIMI_K3_SHARED_EXPERT_WEIGHT_SHARD}" == "0" \
         || "${KIMI_K3_SHARED_EXPERT_WEIGHT_SHARD}" == "1" ]] \
         || die "KIMI_K3_SHARED_EXPERT_WEIGHT_SHARD must be 0 or 1"
@@ -221,7 +234,7 @@ export FLASHINFER_CUDA_ARCH_LIST="${FLASHINFER_CUDA_ARCH_LIST:-10.3a}"
 mkdir -p "${FLASHINFER_WORKSPACE_BASE}"
 
 # ---------------------------------------------------------------------------
-# Model/cache settings. Cache precision is fixed to BF16 in server_args.
+# Generic cache flags remain off; KIMI_K3_MLA_FP8 controls MLA precision only.
 # ---------------------------------------------------------------------------
 
 max_seq_len="${MAX_SEQ_LEN:-16384}"
@@ -275,7 +288,7 @@ if [[ "${role}" == "PREFILL" ]]; then
     decode_capture_config=
     prefill_capture_config="${PREFILL_CAPTURE_CONFIG:-}"
     export KIMI_K3_PREFILL_CHUNK_TOKENS="${KIMI_K3_PREFILL_CHUNK_TOKENS:-65536}"
-    default_mega_moe_tokens=8192
+    default_mega_moe_tokens=$(( (KIMI_K3_PREFILL_CHUNK_TOKENS + tp_size - 1) / tp_size ))
 else
     enable_cuda_graph="${ENABLE_CUDA_GRAPH:-1}"
     decode_capture_config="${DECODE_CAPTURE_CONFIG:-1}"
@@ -347,7 +360,7 @@ model_service_config="$(
         "${DECODE_ENDPOINT}"
 )"
 
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}"
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-$(seq -s, 0 $((tp_size - 1)))}"
 export PYTHONUNBUFFERED=1
 export PYTHONFAULTHANDLER=1
 export TMPDIR="${runtime_tmpdir}"
@@ -464,7 +477,9 @@ fi
 echo "  MegaMoE packer:  ${DSV4_MEGA_MOE_INPUT_PACKER}/${DSV4_MEGA_MOE_INPUT_PACKER_IMPL}"
 echo "  MegaMoE tokens:  ${MEGA_MOE_MAX_TOKENS_PER_RANK}/rank"
 echo "  cache blocks:    seq=${seq_size_per_block}, kernel=${kernel_seq_size_per_block}"
-echo "  cache precision: bf16 (int8=0, fp8=0), linear_step=${linear_step}, kda_pool_blocks=${kimi_k3_kda_pool_blocks}"
+echo "  attention quant: ${KIMI_K3_ATTENTION_QUANTIZATION:-none}"
+echo "  MLA FP8:         ${KIMI_K3_MLA_FP8:-0} (Q scale=${KIMI_K3_MLA_FP8_Q_SCALE:-1}, KV scale=${KIMI_K3_MLA_FP8_KV_SCALE:-1})"
+echo "  KDA cache:       native state, linear_step=${linear_step}, kda_pool_blocks=${kimi_k3_kda_pool_blocks}"
 echo "  CUDA Graph:      enabled=${enable_cuda_graph}, debug=${enable_cuda_graph_debug_mode}"
 if [[ -n "${decode_capture_config}" ]]; then
     echo "  Decode captures: ${decode_capture_config}"

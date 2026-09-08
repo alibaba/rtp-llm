@@ -2,7 +2,7 @@ import json
 import logging
 import math
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Dict, Iterable, List, Optional, Set
 
 import torch
@@ -11,7 +11,7 @@ from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.models.base_model import BaseModel
-from rtp_llm.models.kimi_k3.kimi_k3_weight import KimiK3Eagle3Weight, KimiK3Weight
+from rtp_llm.models.kimi_k3.kimi_k3_weight import KimiK3Eagle3Weight, KimiK3MtpWeight, KimiK3Weight
 from rtp_llm.ops import HybridAttentionType, KvCacheDataType
 
 _MLA_PREFILL_EXPANDED_KV_BUDGET_BYTES_ENV = (
@@ -53,6 +53,7 @@ class KimiK3RuntimeConfig:
     mla_use_output_gate: bool
     kda_gate_lower_bound: Optional[float]
     kda_use_full_rank_gate: bool
+    mtp_source_layer: Optional[int] = None
 
 
 class KimiK3ModelConfig(ModelConfig):
@@ -85,7 +86,7 @@ class KimiK3ModelConfig(ModelConfig):
             raise ValueError(
                 "KIMI_K3_ATTENTION_QUANTIZATION must be none or fp8_per_block"
             )
-        # Standalone draft checkpoints retain their own BF16 policy.
+        # EAGLE3 retains BF16; target and full-MLA MTP share the FP8 policy.
         enabled = method == "fp8_per_block" and "eagle3" not in self.model_type
         self.k3_attention_quant_config = Fp8BlockWiseQuantConfig() if enabled else None
         mla_fp8 = os.environ.get("KIMI_K3_MLA_FP8", "0").strip()
@@ -602,6 +603,84 @@ class KimiK3Eagle3(KimiK3):
     def get_weight_cls():
         return KimiK3Eagle3Weight
 
+
+class KimiK3Mtp(KimiK3):
+    """The independent, recurrent K3 MTP layer from a draft-only checkpoint."""
+
+    @classmethod
+    def _from_config_json(cls, config_json, ckpt_path=""):
+        text = config_json.get("text_config", {})
+        if config_json.get("model_type") != "kimi_k3":
+            raise ValueError("K3 MTP requires a kimi_k3 checkpoint")
+        from rtp_llm.utils.kimi_k3_mtp_checkpoint import mtp_source_layer
+
+        source_layer = mtp_source_layer(text)
+        schedule = text.get("linear_attn_config", {})
+        # Checkpoint attention schedules use one-based layer numbers.
+        schedule_layer = source_layer + 1
+        if schedule_layer not in schedule.get("full_attn_layers", []) or schedule_layer in schedule.get(
+            "kda_layers", []
+        ):
+            raise ValueError(f"K3 MTP checkpoint layer {source_layer} must be full MLA")
+        config = KimiK3ModelConfig()
+        config.ckpt_path = ckpt_path
+        config.tokenizer_path = ckpt_path
+        config.model_type = "kimi_k3_mtp"
+        cls._parse_basic_config(config_json, text, config)
+        cls._parse_attention_config(text, config)
+        cls._parse_moe_config(text, config)
+        cls._parse_kimi_runtime_config(text, config)
+        if source_layer not in config.moe_layer_index:
+            # The target schedule excludes MTP; evaluate its source layer explicitly.
+            if source_layer < int(text.get("first_k_dense_replace", 0)) or source_layer % int(
+                text.get("moe_layer_freq", 1)
+            ):
+                raise ValueError("K3 MTP source layer must be MoE")
+        config.num_layers = 1
+        config.moe_layer_index = [0]
+        config.hybrid_attention_config.enable_hybrid_attention = True
+        config.hybrid_attention_config.enable_independent_kv_cache_pools = True
+        config.hybrid_attention_config.hybrid_attention_types = [
+            HybridAttentionType.NONE
+        ]
+        config.k3_runtime_config = replace(
+            config.k3_runtime_config, attn_res_block_size=0, mtp_source_layer=source_layer
+        )
+        config.mm_model_config.is_multimodal = False
+        if "media_placeholder_token_id" in config_json:
+            config.mm_related_params.special_token_ids["image_token_index"] = int(
+                config_json["media_placeholder_token_id"]
+            )
+        if not config.k3_runtime_config.mla_use_nope:
+            raise ValueError("K3 MTP requires NoPE MLA")
+        if ckpt_path:
+            from rtp_llm.utils.kimi_k3_mtp_checkpoint import validate_checkpoint
+
+            validated = validate_checkpoint(ckpt_path, config_json)
+            logging.info("[K3_MTP] validated standalone checkpoint: %s", validated)
+        return config
+
+    @staticmethod
+    def get_weight_cls():
+        return KimiK3MtpWeight
+
+    def _create_python_model(self):
+        from rtp_llm.models_py.model_desc.kimi_k3_mtp import KimiK3MtpModel
+
+        self.py_model = KimiK3MtpModel(
+            self.model_config,
+            self.parallelism_config,
+            self.weight,
+            max_generate_batch_size=self.max_generate_batch_size,
+            fmha_config=self.fmha_config,
+            py_hw_kernel_config=self.hw_kernel_config,
+            device_resource_config=self.device_resource_config,
+            moe_config=self.moe_config,
+        )
+        return self.py_model
+
+
+register_model("kimi_k3_mtp", KimiK3Mtp, ["KimiK3MTPModel"])
 
 register_model(
     "kimi_k3",

@@ -46,12 +46,13 @@ bool readEnvFlagOnce(const char* env_name, const char* log_tag, const char* labe
     return on;
 }
 
-bool isChunkedMtpPrefillEnabled(size_t configured_chunk_tokens) {
+bool isChunkedMtpPrefillEnabled(size_t configured_chunk_tokens, bool kimi_k3_mtp) {
     // A model must opt in through chunkPrefillTokenBudget(). Kimi K3 Eagle3 is
     // currently the only implementation, while the executor contract remains
     // reusable by another MTP model.
     const char* sp_type = std::getenv("SP_TYPE");
-    return configured_chunk_tokens > 0 && sp_type != nullptr && std::string(sp_type) == "eagle3";
+    return configured_chunk_tokens > 0
+           && (kimi_k3_mtp || (sp_type != nullptr && std::string(sp_type) == "eagle3"));
 }
 
 torch::Tensor narrowTokenAlignedTensor(
@@ -368,6 +369,36 @@ PrefillChunkRound parsePyPrefillChunkRound(const py::object& round_plan) {
 }
 
 }  // namespace
+
+void MtpExecutor::restoreKimiMtpMediaTokens(GptModelInputs& inputs) const {
+    if (!kimi_k3_mtp_ || !inputs.multimodal_features.has_value() || inputs.multimodal_features->empty()) {
+        return;
+    }
+    // vLLM K3 MTP consumes media placeholder embeddings, not target visual
+    // embeddings. Restore RTP's feature-hash cache-key tokens BEFORE slicing
+    // and shifting: this also covers lookahead across a chunk boundary.
+    const auto& features = *inputs.multimodal_features;
+    RTP_LLM_CHECK_WITH_INFO(kimi_k3_media_token_id_ >= 0 && kimi_k3_media_token_id_ < vocab_size_,
+                            "K3 MTP requires a valid media_placeholder_token_id");
+    RTP_LLM_CHECK_WITH_INFO(inputs.mm_features_locs.defined()
+                                && inputs.mm_features_locs.numel() == features.size(),
+                            "K3 MTP multimodal locations must match features");
+    auto locs = inputs.mm_features_locs.to(torch::kCPU).to(torch::kInt64).contiguous();
+    inputs.combo_tokens = inputs.combo_tokens.clone();
+    for (size_t i = 0; i < features.size(); ++i) {
+        const int64_t loc = locs.data_ptr<int64_t>()[i];
+        const int64_t start = std::max<int64_t>(0, loc);
+        const int64_t end = std::min<int64_t>(inputs.combo_tokens.numel(), loc + features[i].size(0));
+        if (end > start) {
+            inputs.combo_tokens.narrow(0, start, end - start).fill_(kimi_k3_media_token_id_);
+        }
+    }
+    if (inputs.combo_tokens_host_for_log.defined()) {
+        inputs.combo_tokens_host_for_log = inputs.combo_tokens.cpu().clone();
+    }
+    inputs.multimodal_features.reset();
+    inputs.mm_features_locs = torch::Tensor();
+}
 
 GptModelInputs MtpExecutor::makePrefillRoundInput(const GptModelInputs& full_inputs,
                                                   const PrefillChunkRound& round,
@@ -977,6 +1008,11 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     spec_logits_verify_async_runner_(cuda_graph::graphGetStreamFromPool(true)),
     spec_logits_verify_runner_(std::make_unique<SpecLogitsVerifyRunner>()),
     spec_bookkeeping_runner_(cuda_graph::graphGetStreamFromPool(true)) {
+    kimi_k3_mtp_      = params.sp_config.isKimiK3Mtp();
+    const auto& mm_tokens = params.model_config_.mm_model_config.mm_sep_tokens;
+    if (kimi_k3_mtp_ && mm_tokens.size() == 1 && mm_tokens[0].size() == 1) {
+        kimi_k3_media_token_id_ = mm_tokens[0][0];
+    }
     data_type_        = params.model_config_.data_type;
     hidden_size_      = params.model_config_.hidden_size * params.model_config_.hc_mult;
     propose_step_     = propose_params->gen_num_per_circle;
@@ -1313,7 +1349,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
 
     const size_t configured_chunk_tokens = model_->chunkPrefillTokenBudget();
     const bool chunked_mtp_prefill =
-        isChunkedMtpPrefillEnabled(configured_chunk_tokens) && model_input.combo_tokens.defined()
+        isChunkedMtpPrefillEnabled(configured_chunk_tokens, kimi_k3_mtp_) && model_input.combo_tokens.defined()
         && static_cast<size_t>(model_input.combo_tokens.size(0)) > configured_chunk_tokens;
 
     if (chunked_mtp_prefill) {
@@ -1374,6 +1410,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
 
         ChunkPrefillContext chunk_hook;
         chunk_hook.full_inputs      = model_input;
+        restoreKimiMtpMediaTokens(chunk_hook.full_inputs);
         chunk_hook.total_tokens     = total_tokens;
         chunk_hook.terminal_seen.assign(static_cast<size_t>(model_input.input_lengths.numel()), false);
         chunk_hook.draft_publish_frontier.assign(static_cast<size_t>(model_input.input_lengths.numel()), 0);
@@ -1455,6 +1492,10 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
                 final_chunk_input, chunk_hook.terminal_round, chunk_hook.draft_publish_frontier);
 
             // The terminal pass contains exactly one token per request.
+            // Capture recurrent h before making the owned RPC snapshot. K3 MTP's
+            // ordinary forward output is normalized z for logits; the later
+            // non-CP override cannot repair a snapshot already cloned from z.
+            maybeOverrideLastHiddenWithMtpBuffer(draft_model_output, *draft_model_);
             if (draft_model_output.all_hidden_states.defined() && draft_model_output.all_hidden_states.size(0) > 0) {
                 draft_last_hidden_states = draft_model_output.all_hidden_states.clone();
             }
