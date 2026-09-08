@@ -96,3 +96,8 @@ cc_library(
         "//conditions:default": [],
     }),
 )
+
+exports_files(
+    ["VIPServerSubscriber.cc", "VIPServerSubscriber.h", "Subscriber.h"],
+    visibility = ["//rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/test:__pkg__"],
+)

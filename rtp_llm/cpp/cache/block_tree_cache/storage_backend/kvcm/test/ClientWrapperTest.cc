@@ -123,6 +123,49 @@ std::shared_ptr<ClientWrapper> initializeClient(bool                            
     return wrapper;
 }
 
+TEST(ClientWrapperTest, RejectsInvalidConfigBeforeCreatingSubscriberOrClients) {
+    auto                         valid      = makeConfig(false, "endpoint");
+    auto                         serialized = autil::legacy::ToJsonString(valid);
+    autil::legacy::json::JsonMap fields;
+    autil::legacy::FromJsonString(fields, serialized);
+    fields.erase("meta_channel_config");
+    KVCMConfigPtr missing;
+    autil::legacy::FromJsonString(missing, autil::legacy::ToJsonString(fields));
+    fields["meta_channel_config"] = autil::legacy::Any();
+    KVCMConfigPtr null_channel;
+    autil::legacy::FromJsonString(null_channel, autil::legacy::ToJsonString(fields));
+    const std::vector<ClientWrapper::ConfigMap> invalid = {{},
+                                                           {{"null", nullptr}},
+                                                           {{"empty", std::make_shared<KVCMConfig>()}},
+                                                           {{"missing", missing}},
+                                                           {{"null_channel", null_channel}},
+                                                           {{"zero_retry", makeConfig(false, "endpoint", 0)}}};
+    for (const auto& configs : invalid) {
+        auto factory = std::make_unique<MockClientFactory>();
+        EXPECT_CALL(*factory, createSubscriber(_)).Times(0);
+        EXPECT_CALL(*factory, createMetaClient(_, _)).Times(0);
+        EXPECT_CALL(*factory, createTransferClient(_, _)).Times(0);
+        ClientWrapper wrapper(std::move(factory));
+        EXPECT_FALSE(wrapper.init(configs, {kv_cache_manager::RoleType::HYBRID, nullptr, "tp0_Ffull"}));
+        wrapper.shutdown();
+    }
+}
+
+TEST(ClientWrapperTest, RejectsMultipleDirectEndpointsAndVipDomainsBeforeSideEffects) {
+    for (bool vip : {false, true}) {
+        for (auto role : {kv_cache_manager::RoleType::HYBRID, kv_cache_manager::RoleType::WORKER}) {
+            auto factory = std::make_unique<MockClientFactory>();
+            EXPECT_CALL(*factory, createSubscriber(_)).Times(0);
+            EXPECT_CALL(*factory, createMetaClient(_, _)).Times(0);
+            EXPECT_CALL(*factory, createTransferClient(_, _)).Times(0);
+            ClientWrapper wrapper(std::move(factory));
+            EXPECT_FALSE(wrapper.init({{"a", makeConfig(vip, "first")}, {"b", makeConfig(vip, "second")}},
+                                      {role, nullptr, "tp0_Ffull"}));
+            wrapper.shutdown();
+        }
+    }
+}
+
 TEST(ClientWrapperTest, RecreatesTransferClientForDifferentRegistrationSpan) {
     std::array<char, 64>         first_pool{};
     std::array<char, 96>         second_pool{};

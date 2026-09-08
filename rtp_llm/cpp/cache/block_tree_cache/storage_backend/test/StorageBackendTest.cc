@@ -454,6 +454,57 @@ StorageRequest makeRequest(BlockIdxType block, size_t key_count = 1) {
     return {std::make_shared<CacheKeysType>(std::move(keys)), std::move(handles)};
 }
 
+TEST(StorageBackendTest, RejectsSharedExecutorBeforeInitializingSecondBackend) {
+    auto        pool     = std::make_shared<TestBlockPool>();
+    auto        executor = makeStorageBackendExecutor(1, 8);
+    TestBackend first(true, executor);
+    TestBackend second(true, executor);
+    ASSERT_TRUE(initBackend(first, pool));
+    EXPECT_FALSE(initBackend(second, pool));
+    EXPECT_EQ(second.initCalls(), 0u);
+    second.shutdown();
+    auto block = pool->malloc().value();
+    EXPECT_TRUE(first.write(first.prepareWrite(makeRequest(block)), true));
+    first.shutdown();
+}
+
+TEST(StorageBackendTest, CallbackExceptionsSettleTasksAndPreserveExecutor) {
+    BoundedThread<void> test([] {
+        auto        pool     = std::make_shared<TestBlockPool>();
+        auto        executor = std::make_shared<HoldingExecutor>();
+        TestBackend backend(true, executor);
+        ASSERT_TRUE(initBackend(backend, pool));
+        auto block = pool->malloc().value();
+        pool->incRef(block);
+        size_t callbacks = 0;
+        backend.match(makeRequest(block), [&](size_t, auto, bool) {
+            ++callbacks;
+            throw std::runtime_error("match callback failure");
+        });
+        backend.read(makeRequest(block), nullptr, [&](bool) {
+            ++callbacks;
+            throw 42;
+        });
+        executor->setDuplicate(true);
+        EXPECT_NO_THROW(executor->runAll());
+        EXPECT_EQ(callbacks, 2u);
+        EXPECT_EQ(pool->refCount(block), 1u);
+        backend.match(makeRequest(block), [&](size_t, auto, bool success) {
+            EXPECT_TRUE(success);
+            ++callbacks;
+        });
+        EXPECT_NO_THROW(executor->runAll());
+        EXPECT_EQ(callbacks, 3u);
+        // Running shutdown on the same thread also checks the completion marker
+        // was restored when either kind of callback exception was caught.
+        EXPECT_NO_THROW(backend.shutdown());
+        EXPECT_TRUE(backend.shutdownCalled());
+        pool->decRef(block);
+    });
+    ASSERT_EQ(test.waitFor(std::chrono::seconds(5)), std::future_status::ready);
+    test.get();
+}
+
 TEST(StorageBackendTest, DefaultExecutorRunsOperationsAsynchronously) {
     auto        pool = std::make_shared<TestBlockPool>();
     TestBackend backend;

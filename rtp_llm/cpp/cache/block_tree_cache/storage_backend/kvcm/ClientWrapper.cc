@@ -50,7 +50,19 @@ ClientWrapper::~ClientWrapper() {
 
 bool ClientWrapper::init(const ConfigMap& config_map, const kv_cache_manager::InitParams& init_params) {
     std::lock_guard<std::mutex> shutdown_lock(shutdown_mutex_);
-    RTP_LLM_CHECK_WITH_INFO(!config_map.empty(), "no invalid config");
+    if (config_map.size() != 1) {
+        RTP_LLM_LOG_ERROR("KVCM requires exactly one endpoint config, got %zu", config_map.size());
+        return false;
+    }
+    const auto& [unique_id, config] = *config_map.begin();
+    if (!config || !config->meta_channel_config()) {
+        RTP_LLM_LOG_ERROR("KVCM config [%s] requires a non-null config and meta_channel_config", unique_id.c_str());
+        return false;
+    }
+    if (config->meta_channel_config()->retry_time() <= 0) {
+        RTP_LLM_LOG_ERROR("KVCM config [%s] requires a positive meta_channel_config.retry_time", unique_id.c_str());
+        return false;
+    }
     {
         std::lock_guard<std::mutex> lock(reinit_worker_mutex_);
         if (stop_requested_) {
@@ -67,19 +79,11 @@ bool ClientWrapper::init(const ConfigMap& config_map, const kv_cache_manager::In
         registration_span_       = *init_params.regist_span;
         init_params_.regist_span = &registration_span_;
     }
-    // init all meta_client
-    if (init_params_.role_type == kv_cache_manager::RoleType::HYBRID) {
-        for (auto& [unique_id, config] : config_map) {
-            if (!initMetaClient(unique_id, config)) {
-                return false;
-            }
-        }
-    } else {
+    if (init_params_.role_type != kv_cache_manager::RoleType::HYBRID) {
         init_params_.role_type = kv_cache_manager::RoleType::SCHEDULER;
-        const auto& item       = *config_map.begin();
-        if (!initMetaClient(item.first, item.second)) {
-            return false;
-        }
+    }
+    if (!initMetaClient(unique_id, config)) {
+        return false;
     }
     init_params_.storage_configs = meta_client_map_.begin()->second->GetStorageConfig();
     RTP_LLM_LOG_INFO("transfer client storage config [%s]", init_params_.storage_configs.c_str());
@@ -131,16 +135,9 @@ bool ClientWrapper::initMetaClient(const std::string& unique_id, KVCMConfigPtr c
     RTP_LLM_LOG_INFO(
         "kvcm unique_id [%s], init config [%s]", unique_id.c_str(), autil::legacy::ToJsonString(config).c_str());
     const bool enable_vipserver = config->enable_vipserver();
-    if (!subscriber_mode_initialized_) {
-        subscriber_ = client_factory_->createSubscriber(enable_vipserver);
-        if (!subscriber_) {
-            RTP_LLM_LOG_ERROR("unique_id [%s] create subscriber failed", unique_id.c_str());
-            return false;
-        }
-        subscriber_mode_initialized_ = true;
-        subscriber_uses_vipserver_   = enable_vipserver;
-    } else if (subscriber_uses_vipserver_ != enable_vipserver) {
-        RTP_LLM_LOG_ERROR("KVCM client configs cannot mix direct and VIPServer subscribers");
+    subscriber_                 = client_factory_->createSubscriber(enable_vipserver);
+    if (!subscriber_) {
+        RTP_LLM_LOG_ERROR("unique_id [%s] create subscriber failed", unique_id.c_str());
         return false;
     }
     if (enable_vipserver) {

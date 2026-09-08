@@ -96,8 +96,6 @@ private:
     std::unique_ptr<ClientFactory>                    client_factory_;
     std::unique_ptr<kv_cache_manager::TransferClient> transfer_client_;
     std::unique_ptr<kvcm::Subscriber>                 subscriber_;
-    bool                                              subscriber_mode_initialized_ = false;
-    bool                                              subscriber_uses_vipserver_   = false;
 
     std::mutex              reinit_worker_mutex_;
     std::mutex              shutdown_mutex_;

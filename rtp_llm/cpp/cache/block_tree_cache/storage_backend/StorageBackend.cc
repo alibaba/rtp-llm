@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/StorageBackend.h"
 
 #include <mutex>
+#include <exception>
 #include <unordered_set>
 #include <utility>
 
@@ -13,10 +14,20 @@ thread_local const StorageBackend* completing_backend = nullptr;
 
 template<typename Callback>
 void invokeCallback(const StorageBackend* backend, Callback&& callback) noexcept {
-    const auto* previous = completing_backend;
-    completing_backend   = backend;
-    callback();
-    completing_backend = previous;
+    struct CompletionScope {
+        const StorageBackend* previous = completing_backend;
+        ~CompletionScope() {
+            completing_backend = previous;
+        }
+    } scope;
+    completing_backend = backend;
+    try {
+        callback();
+    } catch (const std::exception& error) {
+        RTP_LLM_LOG_ERROR("StorageBackend completion failed: %s", error.what());
+    } catch (...) {
+        RTP_LLM_LOG_ERROR("StorageBackend completion failed with an unknown exception");
+    }
 }
 
 struct StorageTaskState {
@@ -99,18 +110,22 @@ bool StorageBackend::init(std::shared_ptr<const CacheTopology> topology,
     for (const auto& pool : device_pools) {
         RTP_LLM_CHECK(pool != nullptr);
     }
+    if (executor_ == nullptr) {
+        executor_ = makeDefaultStorageBackendExecutor();
+    }
+    if (executor_->bound_to_backend_.exchange(true)) {
+        RTP_LLM_LOG_ERROR("StorageBackend executor cannot be shared between backends");
+        return false;
+    }
     topology_        = std::move(topology);
     device_pools_    = std::move(device_pools);
     buffer_resolver_ = std::move(buffer_resolver);
     if (!initImpl()) {
         return false;
     }
-    if (executor_ == nullptr) {
-        executor_ = makeDefaultStorageBackendExecutor();
-    }
     bool started = false;
     try {
-        started = executor_ != nullptr && executor_->start();
+        started = executor_->start();
     } catch (...) {}
     if (!started) {
         executor_->shutdown();
@@ -146,6 +161,8 @@ bool StorageBackend::dispatch(Operation operation) {
     auto complete = [this, once, operation = std::move(operation)](Lifecycle result) mutable {
         std::call_once(*once, [&] {
             storage_backend_detail::invokeCallback(this, [&] { operation(result); });
+            // invokeCallback isolates all exceptions, so every admitted task
+            // reaches this exactly-once accounting boundary.
             taskFinished();
         });
     };

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <atomic>
 #include <functional>
 #include <memory>
 namespace rtp_llm {
@@ -14,6 +15,11 @@ public:
     virtual bool start()              = 0;
     virtual bool submit(Task task)    = 0;
     virtual void shutdown() noexcept  = 0;
+
+private:
+    friend class StorageBackend;
+    // Executors cannot be restarted or shared by multiple backend lifecycles.
+    std::atomic<bool> bound_to_backend_{false};
 };
 std::shared_ptr<StorageBackendExecutor> makeStorageBackendExecutor(size_t thread_count, size_t queue_size);
 std::shared_ptr<StorageBackendExecutor> makeDefaultStorageBackendExecutor();
