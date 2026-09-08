@@ -131,7 +131,8 @@ TEST(ModelRpcProtoTest, GroupedCacheFieldsPreserveLegacyNumbers) {
 
     const auto* response = BroadcastLoadResponsePB::descriptor();
     ASSERT_NE(response, nullptr);
-    EXPECT_EQ(response->FindFieldByName("loaded_cache_block_count")->number(), 3);
+    EXPECT_EQ(response->FindFieldByName("loaded_cache_block_count"), nullptr);
+    EXPECT_TRUE(response->IsReservedNumber(3));
 
     const auto* remote = RemoteOperationRequestPB::descriptor();
     ASSERT_NE(remote, nullptr);
@@ -142,53 +143,9 @@ TEST(ModelRpcProtoTest, GroupedCacheFieldsPreserveLegacyNumbers) {
     EXPECT_EQ(remote->FindFieldByName("group_tags")->number(), 6);
 }
 
-TEST(DecodeRpcServerTest, HeterogeneousPhysicalBlockMarksExactCoveredBaseKeys) {
-    auto policy = defaultCacheGroupPolicy(CacheGroupType::FULL);
-    EXPECT_EQ(DecodeRpcServer::cacheKeysPerPhysicalBlock(8, 4), 2u);
-    EXPECT_EQ(DecodeRpcServer::keyBlocksPerLogicalBlock(policy, 8, 4), 2u);
 
-    std::vector<size_t> transferred(5, 0);
-    DecodeRpcServer::markCacheKeyRange(transferred, /*endpoint_key_index=*/1, /*block_offset_index=*/0, /*key_span=*/2);
-    DecodeRpcServer::markCacheKeyRange(transferred, /*endpoint_key_index=*/3, /*block_offset_index=*/1, /*key_span=*/2);
-    DecodeRpcServer::markCacheKeyRange(transferred, /*endpoint_key_index=*/4, /*block_offset_index=*/2, /*key_span=*/2);
 
-    EXPECT_EQ(transferred, (std::vector<size_t>{1, 1, 1, 1, 1}));
-}
 
-TEST(DecodeRpcServerTest, CompactPhysicalBlockCoversEveryBaseKey) {
-    auto policy = makeCompactStatePolicy(/*active_tail_blocks=*/2);
-    EXPECT_EQ(DecodeRpcServer::cacheKeysPerPhysicalBlock(kCompactSeqSizePerBlock, kBaseSeqSizePerBlock), 2u);
-    EXPECT_EQ(DecodeRpcServer::keyBlocksPerLogicalBlock(policy, kCompactSeqSizePerBlock, kBaseSeqSizePerBlock), 1u);
-
-    std::vector<size_t> transferred(11, 0);
-    DecodeRpcServer::markCacheKeyRange(transferred, /*endpoint_key_index=*/9, /*block_offset_index=*/4, /*key_span=*/2);
-    DecodeRpcServer::markCacheKeyRange(
-        transferred, /*endpoint_key_index=*/10, /*block_offset_index=*/5, /*key_span=*/2);
-
-    EXPECT_EQ(transferred, (std::vector<size_t>{0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1}));
-}
-
-TEST(DecodeRpcServerTest, CompletedHandoffPrefixRequiresEveryTransferObligation) {
-    EXPECT_EQ(DecodeRpcServer::completedHandoffPrefixBlocks(
-                  /*already_reused_blocks=*/2,
-                  /*required=*/{0, 0, 2, 2, 2, 2},
-                  /*transferred=*/{0, 0, 2, 2, 1, 2}),
-              4u);
-    EXPECT_EQ(DecodeRpcServer::completedHandoffPrefixBlocks(
-                  /*already_reused_blocks=*/0, /*required=*/{2, 2}, /*transferred=*/{1, 2}),
-              0u);
-    EXPECT_EQ(DecodeRpcServer::completedHandoffPrefixBlocks(
-                  /*already_reused_blocks=*/2, /*required=*/{0, 0, 0, 0}, /*transferred=*/{0, 0, 0, 0}),
-              0u);
-    EXPECT_EQ(DecodeRpcServer::completedHandoffPrefixBlocks(
-                  /*already_reused_blocks=*/0, /*required=*/{1}, /*transferred=*/{}),
-              0u);
-}
-
-TEST(DecodeRpcServerTest, MultiRankHandoffUsesMinimumPrefix) {
-    EXPECT_EQ(DecodeRpcServer::minLoadedCacheBlockCount({6, 4, 5}), 4u);
-    EXPECT_EQ(DecodeRpcServer::minLoadedCacheBlockCount({}), 0u);
-}
 
 TEST(DecodeRpcServerTest, EmptyRemoteLoadTopologyFailsBeforePartitionArithmetic) {
     EXPECT_EQ(DecodeRpcServer::validateRemoteLoadTopology(/*worker_size=*/0, /*peer_size=*/1).code(),
@@ -207,35 +164,7 @@ TEST(DecodeRpcServerTest, OddTpWorkersWaitForEveryCompletionQueueResponse) {
     EXPECT_TRUE(DecodeRpcServer::completionQueueExpectedResponseCounts(0).empty());
 }
 
-TEST(DecodeRpcServerTest, CompletedHandoffPublishesOnlyReusablePromptBlocks) {
-    auto stream = makeGenerateStream(/*seq_length=*/2560);
 
-    EXPECT_EQ(DecodeRpcServer::markLoadedCacheReuse(stream,
-                                                    {ErrorInfo::OkStatus(), /*loaded_cache_block_count=*/10},
-                                                    /*seq_size_per_block=*/256,
-                                                    /*use_independent_block_pools=*/true),
-              2304);
-    EXPECT_EQ(stream->initialReuseLength(), 2304);
-    EXPECT_EQ(stream->reuseLength(), 2304);
-    EXPECT_EQ(stream->localReuseLength(), 2304);
-}
-
-TEST(DecodeRpcServerTest, FailedOrSharedPoolHandoffDoesNotPublishReuse) {
-    auto stream = makeGenerateStream(/*seq_length=*/513);
-
-    EXPECT_EQ(DecodeRpcServer::markLoadedCacheReuse(
-                  stream,
-                  {ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "load failed"), /*loaded_cache_block_count=*/2},
-                  /*seq_size_per_block=*/256,
-                  /*use_independent_block_pools=*/true),
-              0);
-    EXPECT_EQ(DecodeRpcServer::markLoadedCacheReuse(stream,
-                                                    {ErrorInfo::OkStatus(), /*loaded_cache_block_count=*/2},
-                                                    /*seq_size_per_block=*/256,
-                                                    /*use_independent_block_pools=*/false),
-              0);
-    EXPECT_EQ(stream->initialReuseLength(), 0);
-}
 
 TEST(DecodeRpcServerTest, CPShardedLoadRequestReadsFromEveryPrefillPeer) {
     DecodeRpcServer server;

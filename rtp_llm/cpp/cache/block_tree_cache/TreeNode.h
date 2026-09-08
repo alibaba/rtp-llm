@@ -15,8 +15,8 @@ struct TreeNode {
     std::vector<int>                            token_ids;
     std::unordered_map<CacheKeyType, TreeNode*> children;
     TreeNode*                                   parent{nullptr};
-
-    std::vector<GroupSetResource> group_set_resources;
+    std::vector<GroupSetResource>               group_set_resources;
+    bool                                        is_resident{false};  // Must never change from true to false.
 };
 
 }  // namespace rtp_llm

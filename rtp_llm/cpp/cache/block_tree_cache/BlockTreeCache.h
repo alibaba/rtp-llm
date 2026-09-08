@@ -127,7 +127,8 @@ public:
     void                 insert(const CacheKeysType&                              cache_keys,
                                 const std::vector<std::vector<GroupSetResource>>& resources,
                                 Tier                                              target_tier,
-                                bool                                              write_remote = true);
+                                bool                                              write_remote,
+                                bool                                              is_resident);
     // Directly reclaim up to num_blocks device blocks belonging to one group set
     // (target_tier = NONE, content dropped). Returns the number actually freed.
     int evictForGroup(size_t group_id, size_t num_blocks);
@@ -135,7 +136,7 @@ public:
     CacheStats                                getStats() const;
     std::vector<BlockTreePoolMetricsSnapshot> poolMetricsSnapshots() const;
     void                                      reportMetrics() const;
-    BlockTreeKeySnapshot                      getKeySnapshot(size_t limit) const;
+    BlockTreeKeySnapshot                      getKeySnapshot() const;
     bool                                      abortPendingLoad(const std::shared_ptr<AsyncContext>& context);
 
     BlockIndicesType matchedBlocksForGroup(size_t                                group_id,

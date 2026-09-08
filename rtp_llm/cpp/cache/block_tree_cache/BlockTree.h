@@ -33,6 +33,8 @@ struct BlockTreeInsertResult {
     std::vector<TreeNode*>            path;
     std::vector<TreeNode*>            inserted_nodes;
     std::vector<BlockTreeAdoptedNode> adopted_nodes;
+    // Borrowed from the tree; consumed under the BlockTreeCache mutex.
+    std::vector<TreeNode*> newly_resident_nodes;
     // Number of logical GroupSetResources the tree took BLOCK_CACHE ownership of.
     size_t accepted_resource_count{0};
 };
@@ -55,7 +57,8 @@ public:
 
     BlockTreeInsertResult insertNode(const CacheKeysType&                              cache_keys,
                                      const std::vector<std::vector<GroupSetResource>>& resources,
-                                     bool                                              collect_path);
+                                     bool                                              collect_path,
+                                     bool                                              is_resident);
 
     bool      isRemovable(TreeNode* node) const;
     TreeNode* removeNodeAndEmptyAncestors(TreeNode* node);
@@ -87,7 +90,8 @@ private:
     BlockTreeInsertResult insertNodeImpl(const CacheKeysType&                              cache_keys,
                                          const std::vector<std::vector<GroupSetResource>>& resources,
                                          bool                                              enable_hard_stop,
-                                         bool                                              collect_path);
+                                         bool                                              collect_path,
+                                         bool                                              is_resident);
 
     void      removeNode(TreeNode* node);
     TreeNode* createNode(CacheKeyType key, TreeNode* parent);

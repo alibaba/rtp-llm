@@ -401,7 +401,8 @@ void SingleTypeKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) 
         if (publish_prefix > 0) {
             insert_keys.resize(publish_prefix);
             resources.resize(publish_prefix);
-            block_tree_cache_->insert(insert_keys, resources, insert_info.target_tier, insert_info.write_remote);
+            block_tree_cache_->insert(
+                insert_keys, resources, insert_info.target_tier, insert_info.write_remote, insert_info.is_resident);
         }
     }
 }

@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/store/BlockTreeStorer.h"
 
 #include <chrono>
+#include <cassert>
 #include <exception>
 #include <utility>
 
@@ -41,7 +42,9 @@ void BlockTreeStorer::stopAdmissionLocked() {
 StorageWriteTask BlockTreeStorer::storeLocked(const CacheKeysType&                              cache_keys,
                                               const std::vector<std::vector<GroupSetResource>>& resources,
                                               Tier                                              target_tier,
-                                              bool                                              write_remote) {
+                                              bool                                              write_remote,
+                                              bool                                              is_resident) {
+    assert(!is_resident || target_tier == Tier::DEVICE);
     RTP_LLM_CHECK_WITH_INFO(target_tier == Tier::DEVICE || target_tier == Tier::HOST || target_tier == Tier::DISK
                                 || target_tier == Tier::REMOTE,
                             "unsupported store target tier: %s",
@@ -51,7 +54,7 @@ StorageWriteTask BlockTreeStorer::storeLocked(const CacheKeysType&              
     RTP_LLM_CHECK_WITH_INFO(target_tier != Tier::REMOTE || write_remote,
                             "remote store target requires remote write to be enabled");
     if (target_tier == Tier::DEVICE) {
-        (void)publishDeviceLocked(cache_keys, resources);
+        publishDeviceLocked(cache_keys, resources, is_resident);
     } else if (target_tier == Tier::HOST || target_tier == Tier::DISK) {
         submitLowerTierLocked(cache_keys, resources, target_tier);
     }
@@ -60,14 +63,17 @@ StorageWriteTask BlockTreeStorer::storeLocked(const CacheKeysType&              
                StorageWriteTask{};
 }
 
-StorageWriteTask BlockTreeStorer::publishDeviceLocked(const CacheKeysType&                              cache_keys,
-                                                      const std::vector<std::vector<GroupSetResource>>& resources) {
-    const BlockTreeInsertResult insert_result = tree_->insertNode(cache_keys, resources, false);
-    if (!insert_result.inserted_nodes.empty() || !insert_result.adopted_nodes.empty()) {
+void BlockTreeStorer::publishDeviceLocked(const CacheKeysType&                              cache_keys,
+                                          const std::vector<std::vector<GroupSetResource>>& resources,
+                                          bool                                              is_resident) {
+    const BlockTreeInsertResult insert_result = tree_->insertNode(cache_keys, resources, false, is_resident);
+    const bool tree_data_mutated = !insert_result.inserted_nodes.empty() || !insert_result.adopted_nodes.empty();
+    if (tree_data_mutated || !insert_result.newly_resident_nodes.empty()) {
         evictor_.onInserted(insert_result);
+    }
+    if (tree_data_mutated) {
         settled_(true, true);
     }
-    return {};
 }
 
 StorageRequest BlockTreeStorer::makeStorageRequest(const CacheKeysType&                              cache_keys,
@@ -228,7 +234,7 @@ size_t BlockTreeStorer::settleLocked(const StoreTask& task, bool publish) {
             resources[descriptor.path_index][descriptor.group_set_id].setBlocks(
                 task.target_tier, {descriptor.singleBlockAt(task.target_tier)});
         }
-        insert_result = tree_->insertNode(task.cache_keys, resources, true);
+        insert_result = tree_->insertNode(task.cache_keys, resources, true, false);
     }
 
     store_task_runner_.releaseTaskResources(task);

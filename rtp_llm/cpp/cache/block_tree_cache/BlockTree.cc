@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTree.h"
 
 #include <algorithm>
+#include <cassert>
 
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -128,7 +129,8 @@ bool BlockTree::isLeafAtTier(const TreeNode* node, size_t group_set_id, Tier tie
 
 BlockTreeInsertResult BlockTree::insertNode(const CacheKeysType&                              cache_keys,
                                             const std::vector<std::vector<GroupSetResource>>& resources,
-                                            bool                                              collect_path) {
+                                            bool                                              collect_path,
+                                            bool                                              is_resident) {
     BlockTreeInsertResult result;
     if (resources.size() != cache_keys.size()) {
         RTP_LLM_LOG_WARNING("key/resource size mismatch, keys=%zu resources=%zu", cache_keys.size(), resources.size());
@@ -155,13 +157,14 @@ BlockTreeInsertResult BlockTree::insertNode(const CacheKeysType&                
         }
     }
 
-    return insertNodeImpl(cache_keys, resources, /*enable_hard_stop=*/true, collect_path);
+    return insertNodeImpl(cache_keys, resources, /*enable_hard_stop=*/true, collect_path, is_resident);
 }
 
 BlockTreeInsertResult BlockTree::insertNodeImpl(const CacheKeysType&                              cache_keys,
                                                 const std::vector<std::vector<GroupSetResource>>& resources,
                                                 bool                                              enable_hard_stop,
-                                                bool                                              collect_path) {
+                                                bool                                              collect_path,
+                                                bool                                              is_resident) {
     BlockTreeInsertResult result;
     if (collect_path) {
         result.path.reserve(cache_keys.size());
@@ -180,6 +183,16 @@ BlockTreeInsertResult BlockTree::insertNodeImpl(const CacheKeysType&            
         auto         it  = current->children.find(key);
         if (it != current->children.end()) {
             TreeNode* child = it->second;
+            if (is_resident
+                && std::any_of(child->group_set_resources.begin(),
+                               child->group_set_resources.end(),
+                               [](const GroupSetResource& resource) {
+                                   return resource.transfer_state != GroupSetTransferState::IDLE
+                                          || resource.transfer_detached;
+                               })) {
+                RTP_LLM_LOG_WARNING("resident insert stopped at busy prefix: key_index=%zu key=%ld", i, key);
+                break;
+            }
             if (enable_hard_stop) {
                 bool full_path_ready = true;
                 for (size_t group_set_id = 0; group_set_id < group_sets_.size(); ++group_set_id) {
@@ -271,6 +284,11 @@ BlockTreeInsertResult BlockTree::insertNodeImpl(const CacheKeysType&            
             }
             result.inserted_nodes.push_back(current);
         }
+        if (is_resident && !current->is_resident) {
+            assert(current->parent == root_.get() || current->parent->is_resident);
+            current->is_resident = true;
+            result.newly_resident_nodes.push_back(current);
+        }
         if (collect_path) {
             result.path.push_back(current);
         }
@@ -286,7 +304,7 @@ BlockTreeInsertResult BlockTree::insertNodeImpl(const CacheKeysType&            
 }
 
 bool BlockTree::isRemovable(TreeNode* node) const {
-    return node != root_.get() && node->children.empty()
+    return node != root_.get() && !node->is_resident && node->children.empty()
            && std::all_of(node->group_set_resources.begin(),
                           node->group_set_resources.end(),
                           [](const GroupSetResource& resource) { return resource.is_removable(); });
