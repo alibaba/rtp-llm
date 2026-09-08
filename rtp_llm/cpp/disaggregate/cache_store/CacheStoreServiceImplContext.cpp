@@ -38,10 +38,6 @@ std::shared_ptr<BlockBufferInfo> CacheStoreServiceImplContext::getAndEraseUnLoad
     if (it == unloaded_blocks_.end()) {
         return nullptr;
     }
-    if (unloaded_blocks_.size() == total_block_count_) {
-        collector_->markFirstBlockReady();
-    }
-
     auto block_info = it->second;
     unloaded_blocks_.erase(it);
 

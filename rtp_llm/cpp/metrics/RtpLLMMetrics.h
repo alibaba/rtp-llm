@@ -291,12 +291,11 @@ private:
 
 class RtpLLMSchedulerMetricsCollector final {
 public:
-    int64_t wait_stream_size           = 0;
-    int64_t running_stream_size        = 0;
-    int64_t remote_running_stream_size = 0;
-    int64_t loading_cache_stream_size  = 0;
-    int64_t pending_decode_stream_size = 0;
-    int64_t decode_since_prefill       = 0;
+    int64_t wait_stream_size            = 0;
+    int64_t running_stream_size         = 0;
+    int64_t loading_cache_stream_size   = 0;
+    int64_t pending_decode_stream_size  = 0;
+    int64_t decode_since_prefill        = 0;
     int64_t admitted_context_batch_size = 0;
     int64_t admitted_context_token_size = 0;
     int64_t waiting_oldest_age_us       = 0;
@@ -309,12 +308,11 @@ public:
     void report(const kmonitor::MetricsTags* tags, RtpLLMSchedulerMetricsCollector* collector);
 
 public:
-    kmonitor::MutableMetric* wait_stream_size_metric           = nullptr;
-    kmonitor::MutableMetric* running_stream_size_metric        = nullptr;
-    kmonitor::MutableMetric* remote_running_stream_size_metric = nullptr;
-    kmonitor::MutableMetric* loading_cache_stream_size_metric  = nullptr;
-    kmonitor::MutableMetric* pending_decode_stream_size_metric = nullptr;
-    kmonitor::MutableMetric* decode_since_prefill_metric       = nullptr;
+    kmonitor::MutableMetric* wait_stream_size_metric            = nullptr;
+    kmonitor::MutableMetric* running_stream_size_metric         = nullptr;
+    kmonitor::MutableMetric* loading_cache_stream_size_metric   = nullptr;
+    kmonitor::MutableMetric* pending_decode_stream_size_metric  = nullptr;
+    kmonitor::MutableMetric* decode_since_prefill_metric        = nullptr;
     kmonitor::MutableMetric* admitted_context_batch_size_metric = nullptr;
     kmonitor::MutableMetric* admitted_context_token_size_metric = nullptr;
     kmonitor::MutableMetric* waiting_oldest_age_us_metric       = nullptr;
@@ -1059,14 +1057,11 @@ private:
 
 class RtpLLMSpeculativeEngineMetricsCollector final {
 public:
-    int64_t step_latency_us                = 0;
-    int64_t propose_step_latency_us        = 0;
-    int64_t score_step_latency_us          = 0;
-    int64_t speculative_sampler_latency_us = 0;
-    int64_t total_propose_token_num        = 0;
-    int64_t total_accepted_token_num       = 0;
-    int64_t total_stream_num               = 0;
-    int64_t spec_steps                     = 0;
+    int64_t step_latency_us          = 0;
+    int64_t total_propose_token_num  = 0;
+    int64_t total_accepted_token_num = 0;
+    int64_t total_stream_num         = 0;
+    int64_t spec_steps               = 0;
 };
 
 class RtpLLMSpeculativeEngineMetrics: public kmonitor::MetricsGroup {
@@ -1075,16 +1070,13 @@ public:
     void report(const kmonitor::MetricsTags* tags, RtpLLMSpeculativeEngineMetricsCollector* collector);
 
 public:
-    kmonitor::MutableMetric* step_latency_us_metric                = nullptr;
-    kmonitor::MutableMetric* propose_step_latency_us_metric        = nullptr;
-    kmonitor::MutableMetric* score_step_latency_us_metric          = nullptr;
-    kmonitor::MutableMetric* speculative_sampler_latency_us_metric = nullptr;
-    kmonitor::MutableMetric* total_propose_token_num_metric        = nullptr;
-    kmonitor::MutableMetric* total_accepted_token_num_metric       = nullptr;
-    kmonitor::MutableMetric* sp_avg_accept_token_num_metric        = nullptr;
-    kmonitor::MutableMetric* sp_avg_accept_rate_metric             = nullptr;
-    kmonitor::MutableMetric* sp_avg_fix_accept_rate_metric         = nullptr;
-    kmonitor::MutableMetric* sp_estimate_tpot_us_metric            = nullptr;
+    kmonitor::MutableMetric* step_latency_us_metric          = nullptr;
+    kmonitor::MutableMetric* total_propose_token_num_metric  = nullptr;
+    kmonitor::MutableMetric* total_accepted_token_num_metric = nullptr;
+    kmonitor::MutableMetric* sp_avg_accept_token_num_metric  = nullptr;
+    kmonitor::MutableMetric* sp_avg_accept_rate_metric       = nullptr;
+    kmonitor::MutableMetric* sp_avg_fix_accept_rate_metric   = nullptr;
+    kmonitor::MutableMetric* sp_estimate_tpot_us_metric      = nullptr;
 
 private:
     AUTIL_LOG_DECLARE();
@@ -1318,7 +1310,7 @@ public:
     kmonitor::MutableMetric* kv_cache_memory_cache_copy_failed_qps_metric = nullptr;
     kmonitor::MutableMetric* kv_cache_memory_cache_copy_latency_metric    = nullptr;
 
-    kmonitor::MutableMetric* kv_cache_memory_cache_status_item_num_metric            = nullptr;
+    kmonitor::MutableMetric* kv_cache_memory_cache_status_item_num_metric           = nullptr;
     kmonitor::MutableMetric* kv_cache_memory_cache_copy_task_qps_metric             = nullptr;
     kmonitor::MutableMetric* kv_cache_memory_cache_copy_task_failed_qps_metric      = nullptr;
     kmonitor::MutableMetric* kv_cache_memory_cache_copy_task_latency_metric         = nullptr;

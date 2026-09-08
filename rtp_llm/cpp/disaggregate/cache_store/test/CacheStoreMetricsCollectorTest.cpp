@@ -55,8 +55,6 @@ TEST_F(CacheStoreMetricsCollectorTest, testServerLoadMetrics) {
     auto reporter  = std::make_shared<kmonitor::MetricsReporter>("", "", kmon_tags);
     collector      = std::make_shared<CacheStoreServerLoadMetricsCollector>(reporter, 1, 1024, 123);
     usleep(10);
-    collector->markFirstBlockReady();
-    usleep(10);
     collector->markAllBlocksReady();
     collector->setWriteInfo(1, 111, 1111);
     usleep(10);
