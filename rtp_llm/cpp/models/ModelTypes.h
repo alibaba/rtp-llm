@@ -51,6 +51,7 @@ struct GptModelInitParams {
     int32_t                               kv_cache_group_num      = 1;
     std::vector<int32_t>                  kv_cache_layer_to_group;
     std::shared_ptr<KVCacheManager>       cache_manager;
+    MoeConfig                             moe_config;
 };
 
 enum GptModelInputIndex : size_t {

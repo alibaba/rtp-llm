@@ -2,6 +2,7 @@
 #include "rtp_llm/models_py/bindings/rocm/kernels/fused_rope_kvcache_kernel.h"
 #include "rtp_llm/models_py/bindings/core/Dispatch.h"
 #include "rtp_llm/models_py/bindings/core/torch_utils/TypeConvert.h"
+#include <algorithm>
 #include <stdexcept>
 #include <string>
 #include "rtp_llm/cpp/model_utils/RopeConfig.h"
@@ -35,9 +36,8 @@ static void copyTensorExactInPlace(torch::Tensor& dst, const torch::Tensor& src,
     }
     torch::Tensor dst_flat = dst.reshape({-1});
     if (dst_flat.numel() != src_flat.numel()) {
-        throw std::runtime_error(
-            std::string("prepare_in_place tensor size mismatch for ")
-            + name + ": capture=" + std::to_string(dst_flat.numel()) + ", replay=" + std::to_string(src_flat.numel()));
+        throw std::runtime_error(std::string("prepare_in_place tensor size mismatch for ") + name + ": capture="
+                                 + std::to_string(dst_flat.numel()) + ", replay=" + std::to_string(src_flat.numel()));
     }
 
     torch::Tensor src_match = src_flat;
@@ -66,9 +66,24 @@ void updateKvCacheOffset(CKAttn& params, const torch::Tensor& kv_cache_block_id_
 }
 
 void prepareInPlace(CKAttn& params, const torch_ext::PyAttentionInputs& attn_inputs) {
-    const bool has_prefix =
-        attn_inputs.prefix_lengths.defined() && attn_inputs.prefix_lengths.numel() > 0;
+    if (params.enable_cuda_graph) {
+        TORCH_CHECK(attn_inputs.cu_seqlens.defined()
+                        && attn_inputs.cu_seqlens.data_ptr() == params.cu_seqlens.data_ptr(),
+                    "CUDA Graph prefill cu_seqlens storage changed");
+        TORCH_CHECK(attn_inputs.cu_kv_seqlens.defined()
+                        && attn_inputs.cu_kv_seqlens.data_ptr() == params.cu_kv_seqlens.data_ptr(),
+                    "CUDA Graph prefill cu_kv_seqlens storage changed");
+        TORCH_CHECK(attn_inputs.prefix_lengths_d.defined()
+                        && attn_inputs.prefix_lengths_d.data_ptr() == params.prefix_lengths.data_ptr(),
+                    "CUDA Graph prefill prefix_lengths_d storage changed");
+        TORCH_CHECK(attn_inputs.padding_offset.defined()
+                        && attn_inputs.padding_offset.data_ptr() == params.padding_offset.data_ptr(),
+                    "CUDA Graph prefill padding_offset storage changed");
+        updateKvCacheOffset(params, attn_inputs.kv_cache_kernel_block_id_device);
+        return;
+    }
 
+    const bool has_prefix = attn_inputs.prefix_lengths.defined() && attn_inputs.prefix_lengths.numel() > 0;
     if (has_prefix && params.prefix_lengths.defined() && params.prefix_lengths.numel() > 0
         && params.prefix_lengths.data_ptr() != attn_inputs.prefix_lengths.data_ptr()) {
         copyTensorExactInPlace(params.prefix_lengths, attn_inputs.prefix_lengths, "prefix_lengths");
@@ -105,36 +120,49 @@ CKAttnPtr FusedRopeKVCachePrefillOpBase::prepare(torch_ext::PyAttentionInputs at
     bool has_prefix = attn_inputs.prefix_lengths.defined() && attn_inputs.prefix_lengths.numel() > 0;
 
     const bool use_fmha_fp8 = attn_configs_.kv_cache_dtype == KvCacheDataType::FP8;
-    CKAttnPtr attn_params;
-    auto      params =
+    CKAttnPtr  attn_params;
+    auto       params =
         PrepareCKAttn(attn_configs_, kv_cache_kernel_block_id_device, attn_inputs.input_lengths.size(0), use_fmha_fp8);
     if (params) {
         attn_params = CKAttnPtr(params, (CKAttn*)params.get());
     } else {
         attn_params = std::make_shared<CKAttn>();
     }
-    attn_params->attn_type      = torchDTypeToDataType(attn_inputs.dtype);
-    attn_params->cu_seqlens     = attn_inputs.cu_seqlens;
-    attn_params->cu_kv_seqlens  = attn_inputs.cu_kv_seqlens;
-    attn_params->input_lengths  = attn_inputs.input_lengths;
-    attn_params->max_seq_len    = attn_inputs.input_lengths.max().item<int32_t>();
-    attn_params->padding_offset = attn_inputs.padding_offset;
-    // 处理 prefix_lengths：确保在 CUDA 上且连续
-    if (has_prefix) {
-        torch::Tensor prefix_lengths = attn_inputs.prefix_lengths;
-        if (!prefix_lengths.is_cuda()) {
-            prefix_lengths = prefix_lengths.to(torch::kCUDA, /*non_blocking=*/false, /*copy=*/true);
-        }
-        attn_params->prefix_lengths = prefix_lengths.contiguous();
-    } else {
-        attn_params->prefix_lengths = attn_inputs.prefix_lengths;
-    }
-    attn_params->kv_block_array.cache_type = attn_configs_.kv_cache_dtype;
+    attn_params->attn_type         = torchDTypeToDataType(attn_inputs.dtype);
+    attn_params->enable_cuda_graph = attn_inputs.is_cuda_graph;
+    attn_params->cu_seqlens        = attn_inputs.cu_seqlens;
+    attn_params->cu_kv_seqlens     = attn_inputs.cu_kv_seqlens;
+    attn_params->input_lengths     = attn_inputs.input_lengths;
+    attn_params->padding_offset    = attn_inputs.padding_offset;
 
     int max_prefix_length = 0;
-    if (has_prefix && attn_params->prefix_lengths.defined() && attn_params->prefix_lengths.numel() > 0) {
-        max_prefix_length = attn_params->prefix_lengths.max().item<int32_t>();
+    if (attn_params->enable_cuda_graph) {
+        TORCH_CHECK(attn_inputs.context_total_kv_length > 0,
+                    "CUDA Graph prefill requires a fixed positive token bucket");
+        TORCH_CHECK(attn_inputs.prefill_cuda_graph_copy_params.has_value()
+                        && attn_inputs.prefill_cuda_graph_copy_params->max_seq_len > 0,
+                    "CUDA Graph prefill requires a fixed maximum sequence length");
+        TORCH_CHECK(attn_inputs.prefix_lengths_d.defined() && attn_inputs.prefix_lengths_d.is_cuda()
+                        && attn_inputs.prefix_lengths_d.scalar_type() == at::kInt,
+                    "CUDA Graph prefill requires stable CUDA int32 prefix_lengths_d");
+        const int graph_max_seq_len = attn_inputs.prefill_cuda_graph_copy_params->max_seq_len;
+        attn_params->max_seq_len    = std::min(attn_inputs.context_total_kv_length, graph_max_seq_len);
+        attn_params->prefix_lengths = attn_inputs.prefix_lengths_d;
+        max_prefix_length           = graph_max_seq_len;
+    } else {
+        attn_params->max_seq_len = attn_inputs.input_lengths.max().item<int32_t>();
+        if (has_prefix) {
+            torch::Tensor prefix_lengths = attn_inputs.prefix_lengths;
+            if (!prefix_lengths.is_cuda()) {
+                prefix_lengths = prefix_lengths.to(torch::kCUDA, /*non_blocking=*/false, /*copy=*/true);
+            }
+            attn_params->prefix_lengths = prefix_lengths.contiguous();
+            max_prefix_length           = attn_params->prefix_lengths.max().item<int32_t>();
+        } else {
+            attn_params->prefix_lengths = attn_inputs.prefix_lengths;
+        }
     }
+    attn_params->kv_block_array.cache_type           = attn_configs_.kv_cache_dtype;
     attn_params->prefill_runtime_max_seq_len         = attn_params->max_seq_len;
     attn_params->prefill_runtime_max_prefix_len      = max_prefix_length;
     attn_params->prefill_runtime_seq_len_with_prefix = attn_params->max_seq_len + max_prefix_length;
@@ -148,19 +176,50 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
     const int size_per_head     = attn_configs_.size_per_head;
     const int token_num         = qkv.size(0);
     const int batch_size        = params->cu_seqlens.size(0) - 1;
-    const int seq_len = params->prefill_runtime_max_seq_len >= 0 ? params->prefill_runtime_max_seq_len : params->max_seq_len;
-    const int max_prefix_length = params->prefill_runtime_max_prefix_len >= 0 ? params->prefill_runtime_max_prefix_len : 0;
+    const int seq_len =
+        params->prefill_runtime_max_seq_len >= 0 ? params->prefill_runtime_max_seq_len : params->max_seq_len;
+    const int max_prefix_length =
+        params->prefill_runtime_max_prefix_len >= 0 ? params->prefill_runtime_max_prefix_len : 0;
     const int seq_len_with_prefix = seq_len + max_prefix_length;
+    TORCH_CHECK(!params->enable_cuda_graph || use_paged_fmha, "CUDA Graph prefill requires the paged FMHA layout");
 
     const int  q_output_token_num = (use_paged_fmha && pad_query) ? batch_size * seq_len : token_num;
-    const bool paged_fp8 = use_paged_fmha && attn_configs_.kv_cache_dtype == KvCacheDataType::FP8;
-    const auto q_opts = torch::TensorOptions(qkv.dtype()).device(qkv.device());
+    const bool paged_fp8          = use_paged_fmha && attn_configs_.kv_cache_dtype == KvCacheDataType::FP8;
+    const auto q_opts             = torch::TensorOptions(qkv.dtype()).device(qkv.device());
 
-    torch::Tensor q_output = torch::zeros({q_output_token_num, local_head_num, size_per_head}, q_opts);
+    torch::Tensor q_output;
+    if (params->enable_cuda_graph) {
+        if (!params->prefill_q_output.defined()) {
+            params->prefill_q_output = torch::empty({q_output_token_num, local_head_num, size_per_head}, q_opts);
+        }
+        TORCH_CHECK(params->prefill_q_output.size(0) == q_output_token_num
+                        && params->prefill_q_output.size(1) == local_head_num
+                        && params->prefill_q_output.size(2) == size_per_head
+                        && params->prefill_q_output.scalar_type() == qkv.scalar_type()
+                        && params->prefill_q_output.device() == qkv.device(),
+                    "CUDA Graph prefill Q output shape, dtype, or device changed");
+        q_output = params->prefill_q_output;
+    } else {
+        q_output = torch::zeros({q_output_token_num, local_head_num, size_per_head}, q_opts);
+    }
+
     torch::Tensor q_fp8_buf;
     if (paged_fp8) {
-        q_fp8_buf = torch::empty({q_output_token_num, local_head_num, size_per_head},
-                                 torch::TensorOptions(get_fp8_dtype()).device(qkv.device()));
+        if (params->enable_cuda_graph) {
+            if (!params->prefill_q_fp8_buf.defined()) {
+                params->prefill_q_fp8_buf = torch::empty({q_output_token_num, local_head_num, size_per_head},
+                                                         torch::TensorOptions(get_fp8_dtype()).device(qkv.device()));
+            }
+            TORCH_CHECK(params->prefill_q_fp8_buf.size(0) == q_output_token_num
+                            && params->prefill_q_fp8_buf.size(1) == local_head_num
+                            && params->prefill_q_fp8_buf.size(2) == size_per_head
+                            && params->prefill_q_fp8_buf.device() == qkv.device(),
+                        "CUDA Graph prefill FP8 Q buffer shape or device changed");
+            q_fp8_buf = params->prefill_q_fp8_buf;
+        } else {
+            q_fp8_buf = torch::empty({q_output_token_num, local_head_num, size_per_head},
+                                     torch::TensorOptions(get_fp8_dtype()).device(qkv.device()));
+        }
     }
 
     PrefixPromptBatchWeightsParam prefix_prompt_param{};
@@ -206,7 +265,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
     // Non-FP8 path: paged layout only (Q packed-token, K/V in paged cache).
     //   store_kv=false because K/V go directly into paged cache via store_cache;
     //   writing k_output/v_output would be wasted HBM bandwidth.
-    bool store_qkv = use_fmha_fp8 ? !use_paged_fmha : false;
+    bool store_qkv   = use_fmha_fp8 ? !use_paged_fmha : false;
     bool store_q     = true;
     bool store_kv    = use_fmha_fp8 ? !use_paged_fmha : false;
     bool store_cache = kv_cache.has_value();
@@ -267,37 +326,37 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
             pad_query,
             stream_);
     } else {
-        DISPATCH_CUDA_FUNCTION_DATA_TYPE(torchDTypeToDataType(qkv.dtype()),
-                                         invokeAddFusedQKVBiasTransposePrefillV1,
-                                         q_output.data_ptr(),
-                                         k_output_ptr,
-                                         v_output_ptr,
-                                         &prefix_prompt_param,
-                                         qkv.data_ptr(),
-                                         paged_fp8 ? q_fp8_buf.data_ptr() :
-                                                     (use_fmha_fp8 && qkv_buf_fp8.defined() ? qkv_buf_fp8.data_ptr() : nullptr),
-                                         nullptr,
-                                         nullptr,
-                                         params->padding_offset.data_ptr<int>(),
-                                         params->cu_seqlens.data_ptr<int>(),
-                                         batch_size,
-                                         seq_len,
-                                         token_num,
-                                         local_head_num,
-                                         local_head_num_kv,
-                                         size_per_head,
-                                         attn_configs_.rope_config,
-                                         attn_configs_.use_logn_attn,
-                                         nullptr,
-                                         0,
-                                         use_fmha_fp8 ? use_paged_fmha :
-                                                        true,  // FP8: original flag; non-FP8: always paged
-                                         store_qkv,
-                                         store_q,
-                                         store_kv,
-                                         store_cache,
-                                         nullptr,
-                                         stream_);
+        DISPATCH_CUDA_FUNCTION_DATA_TYPE(
+            torchDTypeToDataType(qkv.dtype()),
+            invokeAddFusedQKVBiasTransposePrefillV1,
+            q_output.data_ptr(),
+            k_output_ptr,
+            v_output_ptr,
+            &prefix_prompt_param,
+            qkv.data_ptr(),
+            paged_fp8 ? q_fp8_buf.data_ptr() :
+                        (use_fmha_fp8 && qkv_buf_fp8.defined() ? qkv_buf_fp8.data_ptr() : nullptr),
+            nullptr,
+            nullptr,
+            params->padding_offset.data_ptr<int>(),
+            params->cu_seqlens.data_ptr<int>(),
+            batch_size,
+            seq_len,
+            token_num,
+            local_head_num,
+            local_head_num_kv,
+            size_per_head,
+            attn_configs_.rope_config,
+            attn_configs_.use_logn_attn,
+            nullptr,
+            0,
+            use_fmha_fp8 ? use_paged_fmha : true,  // FP8: original flag; non-FP8: always paged
+            store_qkv,
+            store_q,
+            store_kv,
+            store_cache,
+            nullptr,
+            stream_);
     }
     // FP8 path: paged returns Q-only fp8 buf; non-paged returns full qkv fp8 buf
     if (use_fmha_fp8) {

@@ -31,6 +31,27 @@ from rtp_llm.ops.compute_ops import LayerKVCache, PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
 
 
+class GraphPaddingMask:
+    def __init__(self):
+        self.buffers: Dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
+
+    def get(
+        self, attention_inputs: Any, token_count: int, device: torch.device
+    ) -> Optional[torch.Tensor]:
+        if not attention_inputs.is_cuda_graph or not attention_inputs.is_prefill:
+            return None
+        buffers = self.buffers.get(token_count)
+        if buffers is None:
+            buffers = (
+                torch.arange(token_count, dtype=torch.int32, device=device),
+                torch.empty(token_count, dtype=torch.bool, device=device),
+            )
+            self.buffers[token_count] = buffers
+        token_indices, padding_mask = buffers
+        torch.ge(token_indices, attention_inputs.cu_seqlens[-1], out=padding_mask)
+        return padding_mask
+
+
 class GenericMoeLayer(nn.Module):
     """Generic MoE layer supporting both Qwen3 and internal model."""
 
@@ -109,8 +130,14 @@ class GenericMoeLayer(nn.Module):
         # for group topk
         self.correction_bias = weights.get(W.e_score_correction_b, None)
 
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        padding_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         num_tokens, _ = hidden_states.shape
+        if padding_mask is not None:
+            hidden_states.masked_fill_(padding_mask.unsqueeze(1), 0)
         router_logits = self.gate(hidden_states)
         router_logits_fp32 = router_logits.float()
 
@@ -152,6 +179,10 @@ class GenericMoeLayer(nn.Module):
 
         if self.fake_balance_expert is not None:
             self.fake_balance_expert(topk_ids, topk_weights)
+        if padding_mask is not None:
+            expanded_padding_mask = padding_mask.unsqueeze(1)
+            topk_ids.masked_fill_(expanded_padding_mask, 0)
+            topk_weights.masked_fill_(expanded_padding_mask, 0)
 
         is_ep_mode = self.ep_size > 1
         # EP mode: routed expert output is already complete (EP combine handles it).
@@ -174,7 +205,7 @@ class GenericMoeLayer(nn.Module):
             if use_ep_shared_allreduce:
                 # EP mode: routed expert output is already complete
                 # (EP combine via all_to_all / all_gather aggregated across ranks).
-                # Only the shared expert output is TP-partial and needs all_reduce.
+                # Only the shared expert output needs all_reduce.
                 if self.shared_expert_gate is not None:
                     gate_output = self.shared_expert_gate(hidden_states)  # [T, 1]
                     shared_expert_output = (
@@ -193,6 +224,8 @@ class GenericMoeLayer(nn.Module):
                 else:
                     experts_output = experts_output + shared_expert_output
 
+        if padding_mask is not None:
+            experts_output.masked_fill_(padding_mask.unsqueeze(1), 0)
         return experts_output
 
 
@@ -248,7 +281,8 @@ class GenericMoeDecoderLayer(nn.Module):
             )
 
         # Determine if this is a Dense layer (before first MoE layer or dense only)
-        if layer_idx not in config.moe_layer_index:
+        self.is_moe_layer = layer_idx in config.moe_layer_index
+        if not self.is_moe_layer:
             self.mlp = DenseMLP(
                 config.activation_type, parallelism_config, weights, quant_config
             )
@@ -277,6 +311,7 @@ class GenericMoeDecoderLayer(nn.Module):
         residual: torch.Tensor,
         fmha_impl: FMHAImplBase,
         kv_cache: Optional[LayerKVCache] = None,
+        padding_mask: Optional[torch.Tensor] = None,
     ) -> DecodeLayerOutput:
         hidden_states, residual = self.input_layernorm(hidden_states, residual)
 
@@ -286,7 +321,10 @@ class GenericMoeDecoderLayer(nn.Module):
 
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
 
-        hidden_states = self.mlp(hidden_states)
+        if self.is_moe_layer:
+            hidden_states = self.mlp(hidden_states, padding_mask)
+        else:
+            hidden_states = self.mlp(hidden_states)
 
         return DecodeLayerOutput(hidden_states, residual)
 
@@ -343,10 +381,15 @@ class GenericMoeModel(GptModelBase):
         self.norm = RMSResNorm(
             weights.get_global_weight(W.final_ln_gamma), eps=model_config.layernorm_eps
         )
+        self.graph_padding_mask = GraphPaddingMask()
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
         input_ids: torch.Tensor = inputs.input_ids
         hidden_states = self.embed_tokens(input_ids)
+        attention_inputs = inputs.attention_inputs
+        padding_mask = self.graph_padding_mask.get(
+            attention_inputs, input_ids.shape[0], hidden_states.device
+        )
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(
                 inputs
@@ -359,6 +402,7 @@ class GenericMoeModel(GptModelBase):
                 residual,
                 fmha_impl,
                 kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
+                padding_mask=padding_mask,
             )
             hidden_states = output.hidden_states
             residual = output.residual

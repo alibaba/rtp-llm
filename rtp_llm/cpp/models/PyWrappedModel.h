@@ -4,7 +4,6 @@
 #include "rtp_llm/models_py/bindings/core/torch_utils/TypeConvert.h"
 #include <optional>
 #include <string>
-#include <mutex>
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/models_py/bindings/core/DeviceData.h"
 #include <pybind11/pybind11.h>
@@ -83,11 +82,13 @@ private:
     ModelBufferHolder                        buffer_holder_;
 
     GraphBase* graph_runner_{nullptr};
+    GraphBase* prefill_graph_runner_{nullptr};
     py::object py_model_;
     py::object held_attn_pyobj_;
     bool       enable_cuda_graph_{false};
     bool       is_prefill_cuda_graph_mode_{false};
     bool       use_spec_decoding_{false};
+    bool       use_mori_ep_{false};
     bool       enable_device_perf_{false};
     bool       check_nan_{false};
 
@@ -116,6 +117,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     enable_cuda_graph_(params.hw_kernel_config.enable_cuda_graph),
     is_prefill_cuda_graph_mode_(is_prefill_cuda_graph_mode),
     use_spec_decoding_(use_spec_decoding),
+    use_mori_ep_(params.moe_config.use_mori_ep),
     enable_device_perf_(params.profile_debug_logging_config.enable_device_perf),
     check_nan_(params.profile_debug_logging_config.check_nan) {
     weights_               = params.weights;
@@ -190,6 +192,9 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         graph_params.prefill_capture_seq_lens     = params.hw_kernel_config.prefill_capture_seq_lens;
         graph_params.decode_capture_batch_sizes   = params.hw_kernel_config.decode_capture_batch_sizes;
         graph_params.kv_cache_group_num           = params.kv_cache_group_num;
+        if (params.moe_config.use_mori_ep) {
+            graph_params.mori_max_tokens = params.moe_config.ll_num_max_token;
+        }
 
         if (kv_cache_layer_to_group.size() > 0) {
             graph_params.kv_cache_layer_to_group = kv_cache_layer_to_group;
@@ -225,8 +230,29 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
             graph_params.sp_steps = params.sp_config.gen_num_per_cycle;
         }
 
+        const bool is_normal_generation_model =
+            !is_prefill_cuda_graph_mode && !use_spec_decoding && params.sp_config.type == SP_TYPE_NONE;
+        if (is_prefill_cuda_graph_mode) {
+            graph_params.graph_mode =
+                params.sp_config.type == SP_TYPE_NONE ? GraphMode::EmbeddingPrefill : GraphMode::MtpPrefill;
+        } else {
+            graph_params.graph_mode = GraphMode::Decode;
+        }
+        graph_params.lazy_capture = is_normal_generation_model;
+
         graph_runner_ = new CudaGraphRunner(graph_params, py_instance);
         RTP_LLM_CHECK_WITH_INFO(graph_runner_ != nullptr, "graph_runner_ can't be nullptr in PyWrapper");
+        if (is_normal_generation_model && !params.hw_kernel_config.prefill_capture_seq_lens.empty()
+            && !device_props_.enable_prefill_cp && !int(device_props_.enable_layer_micro_batch)) {
+            GraphParams prefill_graph_params                = graph_params;
+            prefill_graph_params.graph_mode                 = GraphMode::GenerationPrefill;
+            prefill_graph_params.is_prefill_cuda_graph_mode = true;
+            prefill_graph_params.num_tokens_per_bs          = 1;
+            prefill_graph_params.max_context_batch_size =
+                params.runtime_config.fifo_scheduler_config.max_context_batch_size;
+            prefill_graph_params.lazy_capture = true;
+            prefill_graph_runner_             = new CudaGraphRunner(prefill_graph_params, py_instance);
+        }
         {
             void* nccl_comm = cuda_graph::getGraphCaptureTpNcclComm();
             cuda_graph::register_graph_capture_nccl_comm(nccl_comm,
@@ -236,17 +262,26 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
 #else
         RTP_LLM_CHECK_WITH_INFO(false, "CUDA/HIP Graph is only supported on CUDA/ROCm platform");
 #endif
-        if (weights_.position_encoding) {
-            graph_runner_->setPositionEncoding(weights_.position_encoding->kernel.cuda());
-        }
-        if (weights_.token_type_embedding) {
-            graph_runner_->setTokenTypeEmbedding(weights_.token_type_embedding->kernel.cuda());
-        }
-        graph_runner_->setInputEmbeddingScalar(description_.input_embedding_scalar);
-        RTP_LLM_CHECK_WITH_INFO(graph_runner_ != nullptr, "graph_runner_ can't be null");
+        auto configure_graph_runner = [&](GraphBase* runner) {
+            if (runner == nullptr) {
+                return;
+            }
+            if (weights_.position_encoding) {
+                runner->setPositionEncoding(weights_.position_encoding->kernel.cuda());
+            }
+            if (weights_.token_type_embedding) {
+                runner->setTokenTypeEmbedding(weights_.token_type_embedding->kernel.cuda());
+            }
+            runner->setInputEmbeddingScalar(description_.input_embedding_scalar);
+        };
+        configure_graph_runner(graph_runner_);
+        configure_graph_runner(prefill_graph_runner_);
         auto py_initialize_method = py_instance.attr("initialize");
         py_init_result            = py_initialize_method(init_resources);
         graph_runner_->initCapture();
+        if (prefill_graph_runner_ != nullptr) {
+            prefill_graph_runner_->initCapture();
+        }
     }
 
     auto py_init_success = py_init_result.cast<bool>();

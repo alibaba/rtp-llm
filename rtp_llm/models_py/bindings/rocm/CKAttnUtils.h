@@ -30,8 +30,12 @@ struct CKAttn {
     int           prefill_runtime_max_seq_len         = -1;
     int           prefill_runtime_max_prefix_len      = -1;
     int           prefill_runtime_seq_len_with_prefix = -1;
-    int           max_seq_len;
-    bool          decode_plan;
+    int           max_seq_len                         = 0;
+    bool          decode_plan                         = false;
+    bool          enable_cuda_graph                   = false;
+
+    torch::Tensor prefill_q_output;
+    torch::Tensor prefill_q_fp8_buf;
 
     DataType attn_type;
 

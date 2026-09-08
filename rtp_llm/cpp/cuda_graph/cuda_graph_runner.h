@@ -1,5 +1,6 @@
 #pragma once
 
+#include <mutex>
 #include <unordered_map>
 #include <vector>
 #include <pybind11/embed.h>
@@ -22,7 +23,9 @@ public:
         GraphBase(std::move(py_instance)),
         enable_cuda_graph_(graph_params.enable_cuda_graph),
         is_prefill_cuda_graph_mode_(graph_params.is_prefill_cuda_graph_mode),
+        graph_mode_(graph_params.graph_mode),
         is_target_verify_(graph_params.is_target_verify),
+        lazy_capture_(graph_params.lazy_capture),
         capture_stream_(cuda_graph::graphGetStreamFromPool(true)),
         enable_cuda_graph_debug_mode_(graph_params.enable_cuda_graph_debug_mode),
         num_tokens_per_bs_(graph_params.num_tokens_per_bs),
@@ -31,6 +34,7 @@ public:
         kernel_seq_size_per_block_(graph_params.kernel_tokens_per_block),
         hidden_size_(graph_params.hidden_size),
         sp_steps_(graph_params.sp_steps),
+        mori_max_tokens_(graph_params.mori_max_tokens),
         prefill_capture_seq_lens_(graph_params.prefill_capture_seq_lens),
         decode_capture_batch_sizes_(graph_params.decode_capture_batch_sizes),
         model_data_type_(graph_params.model_data_type),
@@ -43,11 +47,15 @@ public:
         if (kernel_seq_size_per_block_ <= 0) {
             throw std::runtime_error("CudaGraphRunner constructor: kernel_tokens_per_block must be > 0.");
         }
-        max_bs_               = graph_params.max_context_batch_size;
-        py_attn_pyobj_method_ = py_instance_.attr("prepare_fmha_impl");
-        py_forward_method_    = py_instance_.attr("forward");
-        options_cuda_int32_   = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA).requires_grad(false);
-        options_cpu_int32_    = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU).requires_grad(false);
+        if (is_prefill_cuda_graph_mode_ && graph_mode_ == GraphMode::Decode) {
+            graph_mode_ = num_tokens_per_bs_ == max_seq_len_ ? GraphMode::EmbeddingPrefill : GraphMode::MtpPrefill;
+        }
+        is_prefill_cuda_graph_mode_ = graph_mode_ != GraphMode::Decode;
+        max_bs_                     = graph_params.max_context_batch_size;
+        py_attn_pyobj_method_       = py_instance_.attr("prepare_fmha_impl");
+        py_forward_method_          = py_instance_.attr("forward");
+        options_cuda_int32_ = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA).requires_grad(false);
+        options_cpu_int32_  = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU).requires_grad(false);
         options_cuda_float_ = torch::TensorOptions().dtype(model_data_type_).device(torch::kCUDA).requires_grad(false);
         RTP_LLM_LOG_INFO("Initialize CudaGraphRunner with parameters below: \n \
             enable_cuda_graph_: %d, max_bs_: %d, enable_cuda_graph_debug_mode_: %d, max_seq_len_: %d, kernel_seq_size_per_block_: %d, \
@@ -69,18 +77,20 @@ public:
         py_instance_.release();
         RTP_LLM_LOG_INFO("Release CudaGraphRunner Successfully");
     }
-    void           captureDecode();
-    void           capturePrefill();
-    void           captureDecodeOneBatchSize(int bs);
-    void           capturePrefillOneSeqLen(int seq_len);
-    void           prepareInputs(const PyModelInputs& inputs, CudaGraphState& state);
-    bool           canRun(const PyModelInputs& inputs, CudaGraphState& state) override;
-    void           replayGraph(int key);
-    void           replayDecode(int bs);
-    void           replayPrefill(int seq_len);
-    int            getCurrentRealGraphBs(const CudaGraphState& state) const;
-    PyModelOutputs forward(const PyModelInputs& inputs, CudaGraphState& state) override;
-    void           initCapture() override;
+    void             captureDecode();
+    void             capturePrefill();
+    void             captureDecodeOneBatchSize(int bs);
+    void             capturePrefillOneSeqLen(int seq_len);
+    void             prepareInputs(const PyModelInputs& inputs, CudaGraphState& state);
+    bool             canRun(const PyModelInputs& inputs, CudaGraphState& state) override;
+    GraphRunDecision plan(const PyModelInputs& inputs, CudaGraphState& state) override;
+    bool             captureCurrentBucket(const CudaGraphState& state) override;
+    void             replayGraph(int key);
+    void             replayDecode(int bs);
+    void             replayPrefill(int seq_len);
+    int              getCurrentRealGraphBs(const CudaGraphState& state) const;
+    PyModelOutputs   forward(const PyModelInputs& inputs, CudaGraphState& state) override;
+    void             initCapture() override;
 
     // Factory methods for test: take GraphParams so callers can reuse the same struct
     static CudaGraphRunner* createForPrefill(py::object py_instance, GraphParams params);
@@ -91,12 +101,28 @@ private:
     void captureOneGraphInstance(int key, const char* key_type);
     // Common replay and sync check logic
     void replayAndSyncCheck(int key, const char* key_type);
+    // Lazy-capture helpers (used when lazy_capture_ is true).
+    // initLazyStorage allocates the shared backing storage + output once, without capturing.
+    void initLazyStorage();
+    bool captureBucketLazy(int key);
+    bool synchronizeCaptureSuccess(bool local_success);
+    void buildBucketInstance(int key);
+    // Lazy buckets are built after real requests have already written into the shared backing
+    // storage. Synthetic capture must never inherit those block IDs, otherwise it writes garbage
+    // KV/conv/SSM state into blocks that the allocator has since handed to another request.
+    void resetSharedCaptureStorage();
 
+    bool isPrefillCudaGraph() const {
+        return graph_mode_ != GraphMode::Decode;
+    }
+    bool isGenerationPrefillCudaGraph() const {
+        return graph_mode_ == GraphMode::GenerationPrefill;
+    }
     bool isEmbeddingStylePrefillCudaGraph() const {
-        return is_prefill_cuda_graph_mode_ && num_tokens_per_bs_ == max_seq_len_;
+        return graph_mode_ == GraphMode::EmbeddingPrefill;
     }
     bool isMtpDraftPrefillCudaGraph() const {
-        return is_prefill_cuda_graph_mode_ && num_tokens_per_bs_ != max_seq_len_;
+        return graph_mode_ == GraphMode::MtpPrefill;
     }
     // Common input preparation logic for capture
     void prepareCaptureInputs(PyModelInputs& inputs, int batch_size, int seq_len_or_tokens);
@@ -122,7 +148,9 @@ private:
     py::object              py_attn_pyobj_method_;
     bool                    enable_cuda_graph_{false};
     bool                    is_prefill_cuda_graph_mode_{false};
+    GraphMode               graph_mode_{GraphMode::Decode};
     bool                    is_target_verify_{false};
+    bool                    lazy_capture_{false};
     cuda_graph::GraphStream capture_stream_;
     bool                    enable_cuda_graph_debug_mode_{false};
     size_t                  max_bs_{1};
@@ -133,13 +161,30 @@ private:
     int                     kernel_seq_size_per_block_{0};
     int                     hidden_size_{0};
     int                     sp_steps_{0};
+    int                     mori_max_tokens_{0};
     std::vector<int>        capture_range_;
     std::vector<int>        prefill_capture_seq_lens_;    // Pre-configured sequence lengths from Python
     std::vector<int>        decode_capture_batch_sizes_;  // Pre-configured batch sizes from Python
+    // Per-bucket lifecycle for lazy capture. A bucket transitions
+    // Uncaptured -> Capturing -> Ready on success, or -> Failed on any capture error.
+    // Failed/Disabled buckets are served eagerly forever (no automatic retry).
+    enum class BucketState {
+        Uncaptured,
+        Capturing,
+        Ready,
+        Failed,
+        Disabled,
+    };
+    std::unordered_map<int, BucketState> bucket_states_;
+    std::mutex                           bucket_states_mutex_;
+    bool                                 lazy_storage_ready_{false};
     // capture seqLen -> GraphInstance (prefill)
     // batch_size -> GraphInstance (decode)
     std::unordered_map<int, GraphInstance> graph_instances_;
     CaptureMemoryHold                      capture_mem_hold_;
+    torch::Tensor                          zero_input_ids_;
+    torch::Tensor                          zero_input_hiddens_;
+    torch::Tensor                          prefill_padding_offset_host_;
     torch::Tensor                          position_encoding_;
     torch::Tensor                          token_type_embedding_;
     float                                  input_embedding_scalar_;

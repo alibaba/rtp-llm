@@ -10,8 +10,9 @@ namespace rtp_llm {
 // compile time.
 //
 // Sizing rationale (worst-case callers as of 2026):
-//   * cuda_graph_runner.cc::prepareInputs accumulates ~8 contiguous copies
-//     plus 1 + group_count strided copies per launch (one launch per replay).
+//   * cuda_graph_runner.cc::prepareInputs accumulates ~10 contiguous copies
+//     (including padded input-tail clearing) plus 1 + group_count strided copies
+//     per launch (one launch per replay).
 //   * PyWrappedModel.cc::forwardMicroBatched is the tightest path: it
 //     accumulates across ALL micro-batches before a single flush. Per
 //     micro-batch it adds ~6 contiguous copies (5 from buildPyAttentionInputs

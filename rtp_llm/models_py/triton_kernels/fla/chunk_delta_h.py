@@ -155,30 +155,30 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
         p_w = tl.make_block_ptr(
             w, (T, K), (stride_w, 1), (i_t * BT, 0), (BT, 64), (1, 0)
         )
-        b_w = tl.load(p_w, boundary_check=(0, 1))
+        b_w = tl.load(p_w, boundary_check=(0, 1), padding_option="zero")
         b_v = tl.dot(b_w, b_h1.to(b_w.dtype))
         if K > 64:
             p_w = tl.make_block_ptr(
                 w, (T, K), (stride_w, 1), (i_t * BT, 64), (BT, 64), (1, 0)
             )
-            b_w = tl.load(p_w, boundary_check=(0, 1))
+            b_w = tl.load(p_w, boundary_check=(0, 1), padding_option="zero")
             b_v += tl.dot(b_w, b_h2.to(b_w.dtype))
         if K > 128:
             p_w = tl.make_block_ptr(
                 w, (T, K), (stride_w, 1), (i_t * BT, 128), (BT, 64), (1, 0)
             )
-            b_w = tl.load(p_w, boundary_check=(0, 1))
+            b_w = tl.load(p_w, boundary_check=(0, 1), padding_option="zero")
             b_v += tl.dot(b_w, b_h3.to(b_w.dtype))
         if K > 192:
             p_w = tl.make_block_ptr(
                 w, (T, K), (stride_w, 1), (i_t * BT, 192), (BT, 64), (1, 0)
             )
-            b_w = tl.load(p_w, boundary_check=(0, 1))
+            b_w = tl.load(p_w, boundary_check=(0, 1), padding_option="zero")
             b_v += tl.dot(b_w, b_h4.to(b_w.dtype))
         p_v = tl.make_block_ptr(
             v, (T, V), (stride_v, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0)
         )
-        b_v = tl.load(p_v, boundary_check=(0, 1)) - b_v
+        b_v = tl.load(p_v, boundary_check=(0, 1), padding_option="zero") - b_v
 
         if SAVE_NEW_VALUE:
             p_v = tl.make_block_ptr(
@@ -193,13 +193,15 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
                 # The fp32 promotions, int64 index and m_t mask are robustness
                 # tweaks added together with the log2 rewrite for MI355X/MI308X.
                 m_t = (i_t * BT + tl.arange(0, BT)) < T
-                b_g_last = tl.load(
-                    g + (bos * H + last_idx * H + i_h).to(tl.int64)
-                ).to(tl.float32)
+                b_g_last = tl.load(g + (bos * H + last_idx * H + i_h).to(tl.int64)).to(
+                    tl.float32
+                )
                 p_g = tl.make_block_ptr(
                     g + bos * H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,)
                 )
-                b_g = tl.load(p_g, boundary_check=(0,)).to(tl.float32)
+                b_g = tl.load(p_g, boundary_check=(0,), padding_option="zero").to(
+                    tl.float32
+                )
                 b_v = b_v * tl.where(m_t, exp2(b_g_last - b_g), 0)[:, None]
                 b_g_last = exp2(b_g_last)
             else:
@@ -270,25 +272,25 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
         p_k = tl.make_block_ptr(
             k, (K, T), (1, stride_k), (0, i_t * BT), (64, BT), (0, 1)
         )
-        b_k = tl.load(p_k, boundary_check=(0, 1))
+        b_k = tl.load(p_k, boundary_check=(0, 1), padding_option="zero")
         b_h1 += tl.dot(b_k, b_v)
         if K > 64:
             p_k = tl.make_block_ptr(
                 k, (K, T), (1, stride_k), (64, i_t * BT), (64, BT), (0, 1)
             )
-            b_k = tl.load(p_k, boundary_check=(0, 1))
+            b_k = tl.load(p_k, boundary_check=(0, 1), padding_option="zero")
             b_h2 += tl.dot(b_k, b_v)
         if K > 128:
             p_k = tl.make_block_ptr(
                 k, (K, T), (1, stride_k), (128, i_t * BT), (64, BT), (0, 1)
             )
-            b_k = tl.load(p_k, boundary_check=(0, 1))
+            b_k = tl.load(p_k, boundary_check=(0, 1), padding_option="zero")
             b_h3 += tl.dot(b_k, b_v)
         if K > 192:
             p_k = tl.make_block_ptr(
                 k, (K, T), (1, stride_k), (192, i_t * BT), (64, BT), (0, 1)
             )
-            b_k = tl.load(p_k, boundary_check=(0, 1))
+            b_k = tl.load(p_k, boundary_check=(0, 1), padding_option="zero")
             b_h4 += tl.dot(b_k, b_v)
 
     # epilogue
@@ -324,6 +326,8 @@ def chunk_gated_delta_rule_fwd_h(
     save_new_value: bool = True,
     cu_seqlens: Optional[torch.LongTensor] = None,
     state_dtype: Optional[torch.dtype] = None,
+    chunk_indices: Optional[torch.Tensor] = None,
+    chunk_offsets: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Args:
@@ -354,8 +358,13 @@ def chunk_gated_delta_rule_fwd_h(
         # non-16-aligned V, non-bf16 dtype, or any sequence whose length
         # is not a multiple of BT=64, which would OOB the prologue /
         # prefetch / v_new-store tail) — see ``_is_gluon_beneficial`` docstring.
-        if gk is None and _is_gluon_beneficial(
-            H, T, K, k_dtype=k.dtype, v_dim=V, cu_seqlens=cu_seqlens
+        if (
+            gk is None
+            and chunk_indices is None
+            and chunk_offsets is None
+            and _is_gluon_beneficial(
+                H, T, K, k_dtype=k.dtype, v_dim=V, cu_seqlens=cu_seqlens
+            )
         ):
             return chunk_gated_delta_rule_fwd_h_gluon(
                 k=k,
@@ -373,20 +382,15 @@ def chunk_gated_delta_rule_fwd_h(
     H = u.shape[-2]
     BT = chunk_size
 
-    chunk_indices = (
-        prepare_chunk_indices(cu_seqlens, chunk_size)
-        if cu_seqlens is not None
-        else None
-    )
+    if chunk_indices is None and cu_seqlens is not None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size)
     # N: the actual number of sequences in the batch with either equal or variable lengths
     if cu_seqlens is None:
         N, NT, chunk_offsets = B, triton.cdiv(T, BT), None
     else:
-        N, NT, chunk_offsets = (
-            len(cu_seqlens) - 1,
-            len(chunk_indices),
-            prepare_chunk_offsets(cu_seqlens, BT),
-        )
+        if chunk_offsets is None:
+            chunk_offsets = prepare_chunk_offsets(cu_seqlens, BT)
+        N, NT = len(cu_seqlens) - 1, len(chunk_indices)
     assert K <= 256, "current kernel does not support head dimension larger than 256."
 
     # Generic Triton fallback: the kernel accumulates ``b_h*`` in fp32 and

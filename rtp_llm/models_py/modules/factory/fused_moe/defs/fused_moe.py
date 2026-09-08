@@ -40,6 +40,11 @@ class ExpertForwardPayload:
     expert_topk_ids: Optional[torch.Tensor] = None
     expert_topk_weights: Optional[torch.Tensor] = None
     expert_ids_are_local: bool = False
+    valid_token_count: Optional[torch.Tensor] = None
+    # Optional router-private combine context (e.g. Mori global dispatch ids)
+    # carried with the payload so a captured forward is self-contained and does
+    # not rely on cross-call router instance state.
+    combine_indices: Optional[torch.Tensor] = None
 
 
 @dataclass
@@ -49,6 +54,7 @@ class CombineForwardPayload:
     """
 
     fused_expert_output: torch.Tensor
+    combine_indices: Optional[torch.Tensor] = None
 
 
 class FusedMoeDataRouter(ABC):
@@ -69,6 +75,10 @@ class FusedMoeDataRouter(ABC):
     @classmethod
     def router_type(cls) -> RouterType:
         raise NotImplementedError
+
+    @property
+    def max_inp_tokens(self) -> Optional[int]:
+        return None
 
     @classmethod
     def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
@@ -187,7 +197,59 @@ class FusedMoe(torch.nn.Module):
         extra_expert_args: Optional[Dict[str, Any]] = None,
         extra_finalize_args: Optional[Dict[str, Any]] = None,
     ) -> torch.Tensor:
+        max_inp_tokens = self.router.max_inp_tokens
+        if max_inp_tokens is not None and hidden_states.shape[0] > max_inp_tokens:
+            if torch.cuda.is_current_stream_capturing():
+                raise RuntimeError("FusedMoe graph input exceeds router capacity")
+            outputs = []
+            for start in range(0, hidden_states.shape[0], max_inp_tokens):
+                end = min(start + max_inp_tokens, hidden_states.shape[0])
+                outputs.append(
+                    self._forward_single(
+                        hidden_states[start:end],
+                        topk_weights[start:end],
+                        topk_ids[start:end],
+                        activation=activation,
+                        expert_map=expert_map,
+                        a1_scale=a1_scale,
+                        a2_scale=a2_scale,
+                        apply_router_weight_on_input=apply_router_weight_on_input,
+                        extra_expert_args=extra_expert_args,
+                        extra_finalize_args=(
+                            dict(extra_finalize_args)
+                            if extra_finalize_args is not None
+                            else None
+                        ),
+                    )
+                )
+            return torch.cat(outputs, dim=0)
 
+        return self._forward_single(
+            hidden_states,
+            topk_weights,
+            topk_ids,
+            activation=activation,
+            expert_map=expert_map,
+            a1_scale=a1_scale,
+            a2_scale=a2_scale,
+            apply_router_weight_on_input=apply_router_weight_on_input,
+            extra_expert_args=extra_expert_args,
+            extra_finalize_args=extra_finalize_args,
+        )
+
+    def _forward_single(
+        self,
+        hidden_states: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        activation: str,
+        expert_map: Optional[torch.Tensor],
+        a1_scale: Optional[torch.Tensor],
+        a2_scale: Optional[torch.Tensor],
+        apply_router_weight_on_input: bool,
+        extra_expert_args: Optional[Dict[str, Any]],
+        extra_finalize_args: Optional[Dict[str, Any]],
+    ) -> torch.Tensor:
         a1 = hidden_states
 
         expert_payload = self.router.prepare(
@@ -204,12 +266,6 @@ class FusedMoe(torch.nn.Module):
             expert_payload.expert_topk_weights = topk_weights
 
         if expert_payload.expert_x.numel() == 0:
-            # This happens when none of the tokens from the all2all reach this
-            # EP rank. Also, note that this is only relevant for CUDAGraph
-            # incompatible all2all kernels like the DeepEP high-throughput
-            # kernels. CUDAGraph compatible all2all kernels like the pplx
-            # kernels and the DeepEP low-latency kernels are always batched
-            # and can never run into the tensor.numel() == 0 case.
             combine_payload = CombineForwardPayload(
                 fused_expert_output=torch.empty_like(
                     expert_payload.expert_x, dtype=a1.dtype
@@ -225,7 +281,9 @@ class FusedMoe(torch.nn.Module):
                 extra_expert_args=extra_expert_args,
             )
 
-        # pass a1.shape to finalize for shape check
+        if combine_payload.combine_indices is None:
+            combine_payload.combine_indices = expert_payload.combine_indices
+
         if extra_finalize_args is None:
             extra_finalize_args = {"a1_shape": a1.shape}
         else:

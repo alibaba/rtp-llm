@@ -146,6 +146,7 @@ class RocmExpertsBf16(FusedMoeExpertExecutor):
             topk_ids,
             activation=_moe_activation_type(activation),
             expert_mask=effective_expert_mask,
+            num_local_tokens=payload.valid_token_count,
         )
 
         return CombineForwardPayload(fused_expert_output=output)
@@ -266,6 +267,7 @@ class RocmExpertsFp8PerChannel(FusedMoeExpertExecutor):
             w2_scale=self.w2_scale,
             activation=_moe_activation_type(activation),
             expert_mask=effective_expert_mask,
+            num_local_tokens=payload.valid_token_count,
         )
 
         return CombineForwardPayload(fused_expert_output=output)
@@ -379,6 +381,7 @@ class RocmExpertsFp8PerBlock(FusedMoeExpertExecutor):
             w2_scale=self.w2_scale,
             activation=_moe_activation_type(activation),
             expert_mask=effective_expert_mask,
+            num_local_tokens=payload.valid_token_count,
         )
 
         return CombineForwardPayload(fused_expert_output=output)
@@ -523,6 +526,7 @@ class RocmExpertsFp4PerGroup(FusedMoeExpertExecutor):
             w2_scale=self.w2_scale,
             activation=_moe_activation_type(activation),
             expert_mask=effective_expert_mask,
+            num_local_tokens=payload.valid_token_count,
             doweight_stage1=apply_router_weight_on_input,
         )
 

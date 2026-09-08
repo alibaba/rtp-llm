@@ -51,6 +51,54 @@ class GenerateConfigTest(TestCase):
     @patch.dict(
         "os.environ",
         {
+            "TP_SIZE": "4",
+            "PP_SIZE": "1",
+            "WORLD_SIZE": "4",
+            "WORLD_RANK": "0",
+            "LOCAL_WORLD_SIZE": "4",
+            "CONCURRENCY_LIMIT": "32",
+            "START_PORT": "20000",
+            "MODEL_TYPE": "fake_model",
+            "USE_MORI_EP": "1",
+            "ENABLE_CUDA_GRAPH": "1",
+            "PREFILL_CAPTURE_CONFIG": "128,256,512,1024,2048,4096",
+        },
+        clear=True,
+    )
+    def test_mori_capacity_includes_prefill_graph_bucket(self):
+        py_env_configs: PyEnvConfigs = setup_args()
+        setup_and_configure_server(py_env_configs)
+
+        self.assertTrue(py_env_configs.moe_config.use_mori_ep)
+        self.assertEqual(py_env_configs.moe_config.ll_num_max_token, 4096)
+
+    @patch.dict(
+        "os.environ",
+        {
+            "TP_SIZE": "4",
+            "PP_SIZE": "1",
+            "WORLD_SIZE": "4",
+            "WORLD_RANK": "0",
+            "LOCAL_WORLD_SIZE": "4",
+            "CONCURRENCY_LIMIT": "32",
+            "START_PORT": "20000",
+            "MODEL_TYPE": "fake_model",
+            "USE_MORI_EP": "1",
+            "ENABLE_CUDA_GRAPH": "0",
+            "PREFILL_CAPTURE_CONFIG": "128,256,512,1024,2048,4096",
+        },
+        clear=True,
+    )
+    def test_mori_capacity_unchanged_without_graph(self):
+        py_env_configs: PyEnvConfigs = setup_args()
+        setup_and_configure_server(py_env_configs)
+
+        self.assertTrue(py_env_configs.moe_config.use_mori_ep)
+        self.assertEqual(py_env_configs.moe_config.ll_num_max_token, 32)
+
+    @patch.dict(
+        "os.environ",
+        {
             "TP_SIZE": "2",
             "PP_SIZE": "1",
             "WORLD_SIZE": "2",

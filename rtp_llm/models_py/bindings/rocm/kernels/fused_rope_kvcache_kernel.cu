@@ -163,9 +163,12 @@ __global__ void add_fusedQKV_bias_transpose_prefill_kernel_v1(T*                
     using QuantizedEltType = __nv_fp8_e4m3;
     using QuantizedVecType = typename Vec_t<T>::QuantizedType;
 #endif
-    constexpr int vec_size         = Vec_t<T>::size;
-    using Vec_t                    = typename Vec_t<T>::Type;
-    const int token_idx            = blockIdx.x;
+    constexpr int vec_size = Vec_t<T>::size;
+    using Vec_t            = typename Vec_t<T>::Type;
+    const int token_idx    = blockIdx.x;
+    if (cu_seqlens != nullptr && token_idx >= cu_seqlens[batch_size]) {
+        return;
+    }
     const int token_padding_offset = padding_offset == nullptr ? 0 : padding_offset[token_idx];
     const int tgt_token_idx        = token_idx + token_padding_offset;
 
@@ -477,9 +480,12 @@ __global__ void add_fusedQKV_bias_transpose_prefill_kernel(T*                   
     using QuantizedEltType = __hip_fp8_e4m3_fnuz;
     using QuantizedVecType = __hip_fp8x2_e4m3_fnuz;
 
-    constexpr int vec_size         = Vec_t<T>::size;
-    using Vec_t                    = typename Vec_t<T>::Type;
-    const int token_idx            = blockIdx.x;
+    constexpr int vec_size = Vec_t<T>::size;
+    using Vec_t            = typename Vec_t<T>::Type;
+    const int token_idx    = blockIdx.x;
+    if (cu_seqlens != nullptr && token_idx >= cu_seqlens[batch_size]) {
+        return;
+    }
     const int token_padding_offset = padding_offset == nullptr ? 0 : padding_offset[token_idx];
     const int tgt_token_idx        = token_idx + token_padding_offset;
 

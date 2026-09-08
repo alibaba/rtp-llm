@@ -17,7 +17,11 @@ from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
 from rtp_llm.models_py.model_desc.block_map import select_block_map_for_layer
-from rtp_llm.models_py.model_desc.generic_moe import DecodeLayerOutput, GenericMoeLayer
+from rtp_llm.models_py.model_desc.generic_moe import (
+    DecodeLayerOutput,
+    GenericMoeLayer,
+    GraphPaddingMask,
+)
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules import (
     DenseMLP,
@@ -31,6 +35,7 @@ from rtp_llm.models_py.triton_kernels.causal_conv1d import (
     CausalConv1dMetadata,
     causal_conv1d_fn,
     causal_conv1d_update,
+    prepare_causal_conv1d_graph_metadata,
     prepare_causal_conv1d_metadata,
 )
 from rtp_llm.models_py.triton_kernels.common.layernorm_gated import RmsNormGated
@@ -668,7 +673,8 @@ class KimiLinearDecoderLayer(nn.Module):
             )
 
         # FFN: Dense (layer 0) or MoE (layer 1+)
-        if layer_idx not in config.moe_layer_index:
+        self.is_moe_layer = layer_idx in config.moe_layer_index
+        if not self.is_moe_layer:
             self.mlp = DenseMLP(
                 config.activation_type, parallelism_config, weights, quant_config
             )
@@ -698,6 +704,7 @@ class KimiLinearDecoderLayer(nn.Module):
         kv_cache: Optional[LayerKVCache] = None,
         attention_inputs: Optional[PyAttentionInputs] = None,
         attn_meta: KimiLinearMetadata = KimiLinearMetadata(),
+        padding_mask: Optional[torch.Tensor] = None,
     ) -> DecodeLayerOutput:
         # Fused: residual = residual + hidden_states, hidden_states = RMSNorm(residual)
         hidden_states, residual = self.input_layernorm(hidden_states, residual)
@@ -722,7 +729,10 @@ class KimiLinearDecoderLayer(nn.Module):
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
 
         # MLP (Dense or MoE)
-        hidden_states = self.mlp(hidden_states)
+        if self.is_moe_layer:
+            hidden_states = self.mlp(hidden_states, padding_mask)
+        else:
+            hidden_states = self.mlp(hidden_states)
 
         return DecodeLayerOutput(hidden_states, residual)
 
@@ -773,6 +783,8 @@ class KimiLinearModel(GptModelBase):
         self.norm = RMSResNorm(
             weights.get_global_weight(W.final_ln_gamma), eps=model_config.layernorm_eps
         )
+        self.graph_padding_mask = GraphPaddingMask()
+        self.graph_prefill_conv1d_metadata: Dict[int, CausalConv1dMetadata] = {}
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
         input_ids: torch.Tensor = inputs.input_ids
@@ -780,14 +792,27 @@ class KimiLinearModel(GptModelBase):
         hidden_states = inputs_embeds
 
         attention_inputs: PyAttentionInputs = inputs.attention_inputs
+        padding_mask = self.graph_padding_mask.get(
+            attention_inputs, input_ids.shape[0], hidden_states.device
+        )
         prefill_conv1d_meta = None
         is_target_verify = attention_inputs.is_target_verify
         if attention_inputs.is_prefill and not is_target_verify:
             cu_seqlen_without_padding = attention_inputs.cu_seqlens
-            prefill_conv1d_meta = prepare_causal_conv1d_metadata(
-                query_start_loc=cu_seqlen_without_padding,
-                device=hidden_states.device,
-            )
+            if attention_inputs.is_cuda_graph:
+                token_capacity = hidden_states.shape[0]
+                prefill_conv1d_meta = prepare_causal_conv1d_graph_metadata(
+                    query_start_loc=cu_seqlen_without_padding,
+                    device=hidden_states.device,
+                    token_capacity=token_capacity,
+                    metadata=self.graph_prefill_conv1d_metadata.get(token_capacity),
+                )
+                self.graph_prefill_conv1d_metadata[token_capacity] = prefill_conv1d_meta
+            else:
+                prefill_conv1d_meta = prepare_causal_conv1d_metadata(
+                    query_start_loc=cu_seqlen_without_padding,
+                    device=hidden_states.device,
+                )
 
         attn_meta = KimiLinearMetadata(prefill_conv1d_meta, is_target_verify)
 
@@ -805,6 +830,7 @@ class KimiLinearModel(GptModelBase):
                 kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
                 attention_inputs=attention_inputs,
                 attn_meta=attn_meta,
+                padding_mask=padding_mask,
             )
             hidden_states = output.hidden_states
             residual = output.residual

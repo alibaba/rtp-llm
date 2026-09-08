@@ -154,8 +154,12 @@ def get_fmha_impl(
         # Check if this FMHA implementation is disabled before creating instance
         impl_class_name = impl.__name__
 
-        # Skip if this FMHA implementation is disabled in config
-        if _is_fmha_impl_disabled(impl_class_name, fmha_config):
+        graph_paged_prefill = (
+            is_cuda_graph and impl_class_name == "AiterPrefillImplPaged"
+        )
+        if not graph_paged_prefill and _is_fmha_impl_disabled(
+            impl_class_name, fmha_config
+        ):
             continue
 
         # Check support before creating instance

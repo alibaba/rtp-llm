@@ -47,22 +47,8 @@ void CudaGraphRunner::captureDecode() {
     }
     int capture_range_size = capture_range_.size();
     for (int i = capture_range_size - 1; i >= 0; i--) {
-        int           bs = capture_range_[i];
-        PyModelInputs inputs;
-        // Prepare common inputs using shared function
-        prepareCaptureInputs(inputs, bs, bs * num_tokens_per_bs_);
-
-        // calculate context_total_kv_length
-        int max_input_len  = inputs.attention_inputs.input_lengths.max().item<int>();
-        int max_prefix_len = 0;
-        if (inputs.attention_inputs.prefix_lengths.defined() && inputs.attention_inputs.prefix_lengths.size(0) > 0) {
-            max_prefix_len = inputs.attention_inputs.prefix_lengths.max().item<int>();
-        }
-        inputs.attention_inputs.context_total_kv_length = bs * (max_input_len + max_prefix_len);
-
-        graph_instances_[bs].mem_hold_ = createCaptureMemoryHold(inputs, bs * num_tokens_per_bs_);
-        graph_instances_[bs].mem_hold_.attn_pyobj_ =
-            py_attn_pyobj_method_(graph_instances_[bs].mem_hold_.py_model_inputs_, true);
+        int bs = capture_range_[i];
+        buildBucketInstance(bs);
         captureDecodeOneBatchSize(bs);
         cuda_graph::finish_capture_session();
         replayAndSyncCheck(bs, "batch size");

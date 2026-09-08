@@ -18,6 +18,7 @@ from rtp_llm.models_py.triton_kernels.fla.chunk_scaled_dot_kkt import (
     chunk_scaled_dot_kkt_fwd,
 )
 from rtp_llm.models_py.triton_kernels.fla.cumsum import chunk_local_cumsum
+from rtp_llm.models_py.triton_kernels.fla.index import FLAChunkMetadata
 from rtp_llm.models_py.triton_kernels.fla.l2norm import fused_l2norm_qk, l2norm_fwd
 from rtp_llm.models_py.triton_kernels.fla.solve_tril import solve_tril
 from rtp_llm.models_py.triton_kernels.fla.utils import (
@@ -41,7 +42,11 @@ def chunk_gated_delta_rule_fwd(
     initial_state: Optional[torch.Tensor],
     output_final_state: bool,
     cu_seqlens: Optional[torch.LongTensor] = None,
+    chunk_metadata: Optional[FLAChunkMetadata] = None,
 ):
+    chunk_indices = chunk_metadata.chunk_indices if chunk_metadata is not None else None
+    chunk_offsets = chunk_metadata.chunk_offsets if chunk_metadata is not None else None
+
     # AMD: scale g to log2 domain (multiply cumsum by 1/ln2) so AMD-side
     # downstream kernels can use the single-instruction exp2.
     # NVIDIA: keep the original natural-log domain. The RCP_LN2 (~1.4427) scale
@@ -53,6 +58,7 @@ def chunk_gated_delta_rule_fwd(
             chunk_size=64,
             scale=RCP_LN2,
             cu_seqlens=cu_seqlens,
+            chunk_indices=chunk_indices,
         )
         # AMD-optimized: fused kkt + solve_tril + recompute_w_u
         w, u, A = chunk_gated_delta_rule_fwd_intra(
@@ -61,12 +67,17 @@ def chunk_gated_delta_rule_fwd(
             g=g,
             beta=beta,
             cu_seqlens=cu_seqlens,
+            chunk_indices=chunk_indices,
         )
     else:
         g = chunk_local_cumsum(g, chunk_size=64, cu_seqlens=cu_seqlens)
         # Original pipeline: separate kkt -> solve_tril -> recompute_w_u
         A = chunk_scaled_dot_kkt_fwd(
-            k=k, beta=beta, g_cumsum=g, cu_seqlens=cu_seqlens, output_dtype=torch.float32
+            k=k,
+            beta=beta,
+            g_cumsum=g,
+            cu_seqlens=cu_seqlens,
+            output_dtype=torch.float32,
         )
         A = solve_tril(A=A, cu_seqlens=cu_seqlens, output_dtype=k.dtype)
         w, u = recompute_w_u_fwd(
@@ -86,6 +97,8 @@ def chunk_gated_delta_rule_fwd(
         initial_state=initial_state,
         output_final_state=output_final_state,
         cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
+        chunk_offsets=chunk_offsets,
     )
     o = chunk_fwd_o(
         q=q,
@@ -95,6 +108,7 @@ def chunk_gated_delta_rule_fwd(
         g=g,
         scale=scale,
         cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
     )
     return g, o, A, final_state, w, h, v_new
 
@@ -116,6 +130,7 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
         output_final_state: bool,
         cu_seqlens: Optional[torch.LongTensor] = None,
         use_qk_l2norm_in_kernel: bool = False,
+        chunk_metadata: Optional[FLAChunkMetadata] = None,
     ):
         q_orig = q
         k_orig = k
@@ -139,6 +154,7 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
             initial_state=initial_state,
             output_final_state=output_final_state,
             cu_seqlens=cu_seqlens,
+            chunk_metadata=chunk_metadata,
         )
         return o.to(q.dtype), h, final_state
 
@@ -156,6 +172,7 @@ def chunk_gated_delta_rule(
     cu_seqlens: Optional[torch.LongTensor] = None,
     head_first: bool = False,
     use_qk_l2norm_in_kernel: bool = False,
+    chunk_metadata: Optional[FLAChunkMetadata] = None,
 ):
     r"""
     Args:
@@ -267,6 +284,7 @@ def chunk_gated_delta_rule(
         output_final_state,
         cu_seqlens,
         use_qk_l2norm_in_kernel,
+        chunk_metadata,
     )
     if head_first:
         o = rearrange(o, "b t h ... -> b h t ...")

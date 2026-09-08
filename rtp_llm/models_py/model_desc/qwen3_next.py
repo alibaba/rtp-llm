@@ -10,7 +10,7 @@ from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.distributed.collective_torch import Group, all_gather, all_reduce
 from rtp_llm.models_py.model_desc.block_map import select_block_map_for_layer
-from rtp_llm.models_py.model_desc.generic_moe import GenericMoeLayer
+from rtp_llm.models_py.model_desc.generic_moe import GenericMoeLayer, GraphPaddingMask
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules import (
     CausalAttention,
@@ -26,6 +26,7 @@ from rtp_llm.models_py.triton_kernels.causal_conv1d import (
     CausalConv1dMetadata,
     causal_conv1d_fn,
     causal_conv1d_update,
+    prepare_causal_conv1d_graph_metadata,
     prepare_causal_conv1d_metadata,
 )
 from rtp_llm.models_py.triton_kernels.common.layernorm_gated import RmsNormGated
@@ -38,6 +39,10 @@ from rtp_llm.models_py.triton_kernels.fla.fused_recurrent import (
     fused_recurrent_gated_delta_rule,
 )
 from rtp_llm.models_py.triton_kernels.fla.gdn_gating import fused_gdn_gating
+from rtp_llm.models_py.triton_kernels.fla.index import (
+    FLAChunkMetadata,
+    prepare_chunk_graph_metadata,
+)
 from rtp_llm.models_py.utils.debug import cudagraph_debug_kernel
 from rtp_llm.models_py.utils.typed_storage_view import LinearCacheConverter
 from rtp_llm.ops import (
@@ -67,6 +72,7 @@ class Qwen3NextMetadata(object):
         cp_local_extract_indices: Optional[torch.Tensor] = None,
         cp_local_valid_mask: Optional[torch.Tensor] = None,
         cp_write_cache_store_impl: Optional[WriteCacheStoreOp] = None,
+        fla_chunk_metadata: Optional[FLAChunkMetadata] = None,
     ):
         self.prefill_conv1d_meta = prefill_conv1d_meta
         self.is_target_verify = is_target_verify
@@ -76,6 +82,7 @@ class Qwen3NextMetadata(object):
         self.cp_local_extract_indices = cp_local_extract_indices
         self.cp_local_valid_mask = cp_local_valid_mask
         self.cp_write_cache_store_impl = cp_write_cache_store_impl
+        self.fla_chunk_metadata = fla_chunk_metadata
 
     def get_prefill_conv1d_meta(self) -> Optional[CausalConv1dMetadata]:
         return self.prefill_conv1d_meta
@@ -208,6 +215,7 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
         kv_cache_tensor: Optional[torch.Tensor],
         seq_size_per_block: int,
         attn_inputs: PyAttentionInputs,
+        chunk_metadata: Optional[FLAChunkMetadata] = None,
     ) -> torch.Tensor:
         g, beta = fused_gdn_gating(self.alog, a, b, self.dt_bias)
         ssm_states = (
@@ -258,6 +266,7 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
             output_final_state=True,
             cu_seqlens=cu_seqlens_without_padding,
             use_qk_l2norm_in_kernel=True,
+            chunk_metadata=chunk_metadata,
         )
         if ssm_states is not None:
             store_ssm_state_to_block_map(
@@ -269,6 +278,9 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
                 ssm_states,
                 seq_size_per_block,
                 chunk_size=64,
+                chunk_indices=(
+                    chunk_metadata.chunk_indices if chunk_metadata is not None else None
+                ),
             )
         return attn_out.squeeze_(0)
 
@@ -296,7 +308,13 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
             metadata=attn_meta.get_prefill_conv1d_meta(),
         )
         attn_out = self._fla(
-            mixed_qkv, b, a, kv_cache_tensor, seq_size_per_block, attn_inputs
+            mixed_qkv,
+            b,
+            a,
+            kv_cache_tensor,
+            seq_size_per_block,
+            attn_inputs,
+            chunk_metadata=attn_meta.fla_chunk_metadata,
         )
         if kv_cache is not None:
             # write kvcache to cache store
@@ -806,7 +824,8 @@ class Qwen3NextDecoderLayer(nn.Module):
                 hw_kernel_config=hw_kernel_config,
             )
 
-        if config.moe_style == 2:
+        self.is_moe_layer = config.moe_style == 2
+        if self.is_moe_layer:
             self.mlp = GenericMoeLayer(
                 config,
                 parallelism_config,
@@ -840,6 +859,7 @@ class Qwen3NextDecoderLayer(nn.Module):
         kv_cache: Optional[LayerKVCache] = None,
         attention_inputs: Optional[PyAttentionInputs] = None,
         attn_meta: Qwen3NextMetadata = Qwen3NextMetadata(),
+        padding_mask: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         hidden_states, residual = self.input_layernorm(hidden_states, residual)
 
@@ -853,7 +873,10 @@ class Qwen3NextDecoderLayer(nn.Module):
 
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
 
-        hidden_states = self.mlp(hidden_states)
+        if self.is_moe_layer:
+            hidden_states = self.mlp(hidden_states, padding_mask)
+        else:
+            hidden_states = self.mlp(hidden_states)
 
         return hidden_states, residual
 
@@ -906,6 +929,9 @@ class Qwen3NextModel(GptModelBase):
         self.norm = RMSResNorm(
             weights.get_global_weight(W.final_ln_gamma), eps=model_config.layernorm_eps
         )
+        self.graph_padding_mask = GraphPaddingMask()
+        self.graph_prefill_conv1d_metadata: Dict[int, CausalConv1dMetadata] = {}
+        self.graph_prefill_fla_metadata: Dict[int, FLAChunkMetadata] = {}
 
     def _build_cp_linear_attn_metadata(
         self,
@@ -971,7 +997,11 @@ class Qwen3NextModel(GptModelBase):
         hidden_states = inputs_embeds
 
         attention_inputs: PyAttentionInputs = inputs.attention_inputs
+        padding_mask = self.graph_padding_mask.get(
+            attention_inputs, input_ids.shape[0], hidden_states.device
+        )
         prefill_conv1d_meta = None
+        fla_chunk_metadata = None
         is_target_verify = attention_inputs.is_target_verify
         is_cp = self.parallelism_config.prefill_cp_config.is_enabled()
 
@@ -1003,10 +1033,29 @@ class Qwen3NextModel(GptModelBase):
                     )
             else:
                 cu_seqlen_without_padding = attention_inputs.cu_seqlens
-                prefill_conv1d_meta = prepare_causal_conv1d_metadata(
-                    query_start_loc=cu_seqlen_without_padding,
-                    device=hidden_states.device,
-                )
+                if attention_inputs.is_cuda_graph:
+                    token_capacity = hidden_states.shape[0]
+                    prefill_conv1d_meta = prepare_causal_conv1d_graph_metadata(
+                        query_start_loc=cu_seqlen_without_padding,
+                        device=hidden_states.device,
+                        token_capacity=token_capacity,
+                        metadata=self.graph_prefill_conv1d_metadata.get(token_capacity),
+                    )
+                    self.graph_prefill_conv1d_metadata[token_capacity] = (
+                        prefill_conv1d_meta
+                    )
+                    fla_chunk_metadata = prepare_chunk_graph_metadata(
+                        cu_seqlen_without_padding,
+                        token_capacity=token_capacity,
+                        chunk_size=64,
+                        metadata=self.graph_prefill_fla_metadata.get(token_capacity),
+                    )
+                    self.graph_prefill_fla_metadata[token_capacity] = fla_chunk_metadata
+                else:
+                    prefill_conv1d_meta = prepare_causal_conv1d_metadata(
+                        query_start_loc=cu_seqlen_without_padding,
+                        device=hidden_states.device,
+                    )
 
         attn_meta = Qwen3NextMetadata(
             prefill_conv1d_meta=prefill_conv1d_meta,
@@ -1017,6 +1066,7 @@ class Qwen3NextModel(GptModelBase):
             cp_local_extract_indices=cp_local_extract_indices,
             cp_local_valid_mask=cp_local_valid_mask,
             cp_write_cache_store_impl=cp_write_cache_store_impl,
+            fla_chunk_metadata=fla_chunk_metadata,
         )
 
         if fmha_impl is None:
@@ -1033,6 +1083,7 @@ class Qwen3NextModel(GptModelBase):
                 kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
                 attention_inputs=attention_inputs,
                 attn_meta=attn_meta,
+                padding_mask=padding_mask,
             )
 
         hidden_states, residual = self.norm(hidden_states, residual)

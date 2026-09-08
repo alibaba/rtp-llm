@@ -527,6 +527,19 @@ def setup_and_configure_server(py_env_configs: PyEnvConfigs):
         role_type=py_env_configs.role_config.role_type,
         ll_num_max_token=ll_num_max_token,
     )
+    if (
+        py_env_configs.moe_config.use_mori_ep
+        and py_env_configs.py_hw_kernel_config.enable_cuda_graph
+        and py_env_configs.py_hw_kernel_config.prefill_capture_seq_lens
+    ):
+        py_env_configs.moe_config.ll_num_max_token = max(
+            py_env_configs.moe_config.ll_num_max_token,
+            max(py_env_configs.py_hw_kernel_config.prefill_capture_seq_lens),
+        )
+        logging.info(
+            "Expanded MoriEP token capacity to %d for prefill graph buckets",
+            py_env_configs.moe_config.ll_num_max_token,
+        )
 
     # Set local ip if not already set (e.g. for world_info / distributed_server)
     if not py_env_configs.server_config.ip:

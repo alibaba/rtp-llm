@@ -24,6 +24,23 @@ using namespace std;
 
 namespace rtp_llm {
 
+#if USING_CUDA || USING_ROCM
+namespace {
+
+struct MoriExecutionState {
+    std::mutex   mutex;
+    torch::Event forward_event = cuda_graph::makeGraphEvent();
+    bool         forward_event_recorded{false};
+};
+
+MoriExecutionState& moriExecutionState() {
+    static MoriExecutionState state;
+    return state;
+}
+
+}  // namespace
+#endif
+
 torch::Tensor PyWrappedModel::tensorHoldHostAndToCuda(const torch::Tensor& tensor) {
     if (tensor.device().is_cuda()) {
         return tensor;
@@ -65,6 +82,10 @@ PyWrappedModel::~PyWrappedModel() {
         if (graph_runner_ != nullptr) {
             delete graph_runner_;
             graph_runner_ = nullptr;
+        }
+        if (prefill_graph_runner_ != nullptr) {
+            delete prefill_graph_runner_;
+            prefill_graph_runner_ = nullptr;
         }
         RTP_LLM_LOG_INFO("PyWrappedModel destroyed, Python object instance released.");
     } catch (const py::error_already_set& e) {
@@ -410,11 +431,32 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
     if (pinned_check_remaining_ > 0) {
         --pinned_check_remaining_;
     }
+#if USING_CUDA || USING_ROCM
+    MoriExecutionState*          mori_execution_state = nullptr;
+    std::unique_lock<std::mutex> mori_execution_lock;
+    auto                         record_mori_completion = [&]() {
+        if (mori_execution_lock.owns_lock()) {
+            mori_execution_state->forward_event.record(cuda_graph::graphGetCurrentStream());
+            mori_execution_state->forward_event_recorded = true;
+        }
+    };
+    if (use_mori_ep_) {
+        mori_execution_state = &moriExecutionState();
+        mori_execution_lock  = std::unique_lock<std::mutex>(mori_execution_state->mutex);
+        if (mori_execution_state->forward_event_recorded) {
+            mori_execution_state->forward_event.block(cuda_graph::graphGetCurrentStream());
+        }
+    }
+#endif
     try {
         RTP_LLM_LOG_DEBUG("Calling forward method on Python object instance.");
 
         if (int(device_props_.enable_layer_micro_batch)) {
-            return forwardMicroBatched(inputs);
+            auto outputs = forwardMicroBatched(inputs);
+#if USING_CUDA || USING_ROCM
+            record_mori_completion();
+#endif
+            return outputs;
         }
         PyContextParallelParams cp_params;
         if (device_props_.enable_prefill_cp) {
@@ -451,8 +493,14 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         torch::Tensor  hidden_states;
 
         // Cast the Python object to PyModelOutputs and extract hidden states
-        CudaGraphState graph_state;
-        if (enable_cuda_graph_ && graph_runner_->canRun(py_model_inputs, graph_state)) {
+        GraphBase* active_graph_runner =
+            attention_inputs.is_prefill && prefill_graph_runner_ != nullptr ? prefill_graph_runner_ : graph_runner_;
+        CudaGraphState   graph_state;
+        GraphRunDecision graph_decision = GraphRunDecision::Eager;
+        if (enable_cuda_graph_ && active_graph_runner != nullptr) {
+            graph_decision = active_graph_runner->plan(py_model_inputs, graph_state);
+        }
+        if (graph_decision == GraphRunDecision::Replay) {
             py::gil_scoped_acquire gil;
             RTP_LLM_PROFILE_SCOPE("py_model.forward(cuda_graph)");
             DevicePerfWrapper wrapper(enable_device_perf_, "cuda graph python forward");
@@ -462,7 +510,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
                 py_model_inputs.attention_inputs.is_prefill,
                 graph_state.current_real_graph_bs);
             py_model_inputs.attention_inputs.is_s_padded = true;
-            py_model_outputs                             = graph_runner_->forward(py_model_inputs, graph_state);
+            py_model_outputs                             = active_graph_runner->forward(py_model_inputs, graph_state);
             RTP_LLM_LOG_DEBUG("[PyWrappedModel] CUDA graph forward completed");
             hidden_states = py_model_outputs.hidden_states.clone();
         } else {
@@ -483,6 +531,20 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             cache_store_async_writer_->waitAllDone();
         }
 
+        // Lazy capture hook: the current request was just served eagerly. Now that its forward
+        // (and any pending cache-store writes) are done, capture the selected bucket using the
+        // reserved scratch storage / KV block 0. Capture runs collectively on all TP ranks because
+        // plan() made the same decision on every rank for this request shape. On success the next
+        // request that hits this bucket will replay; on failure the bucket is marked Failed and
+        // served eagerly forever (no retry, no server hang).
+        if (graph_decision == GraphRunDecision::CaptureAfterEager) {
+            RTP_LLM_PROFILE_SCOPE("py_model.forward(lazy_capture)");
+            active_graph_runner->captureCurrentBucket(graph_state);
+        }
+#if USING_CUDA || USING_ROCM
+        record_mori_completion();
+#endif
+
         RTP_LLM_LOG_DEBUG("Python object instance forward method called successfully.");
         if (device_props_.enable_prefill_cp) {
             size_t num_valid_tokens = context_parallel_processor_->handleOutputs(hidden_states, inputs, cp_params);
@@ -491,12 +553,21 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         return callForwardPostLayers(hidden_states, inputs, true);
 
     } catch (const py::error_already_set& e) {
+#if USING_CUDA || USING_ROCM
+        record_mori_completion();
+#endif
         RTP_LLM_LOG_ERROR("Python error during forward call on Python instance: %s", e.what());
         throw std::runtime_error(std::string("pybind11 error during forward call on Python instance: ") + e.what());
     } catch (const std::exception& e) {
+#if USING_CUDA || USING_ROCM
+        record_mori_completion();
+#endif
         RTP_LLM_LOG_ERROR("C++ error during forward call on Python instance: %s", e.what());
         throw std::runtime_error(std::string("C++ error during forward call on Python instance: ") + e.what());
     } catch (...) {
+#if USING_CUDA || USING_ROCM
+        record_mori_completion();
+#endif
         RTP_LLM_LOG_ERROR("An unknown error occurred during forward call on Python instance.");
         throw std::runtime_error("An unknown error occurred during forward call on Python instance.");
     }
