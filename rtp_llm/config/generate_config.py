@@ -369,7 +369,8 @@ class GenerateConfig(BaseModel):
         # 同步保障机制：
         #   - 常量：static_assert 钉住 kMaxDivergeDepth / kDivergeStartComboWarnThreshold
         #   - 启用条件逻辑：人工维护双份真值表测试，无运行期交叉校验
-        #   - 生产映射：C++ 测试中断言 batchSize(0)==max(num,1) 等价性
+        #   - 生产映射：非 beam 多返回序列以 logits_processor_init_batch_size 的输出宽度初始化
+        #     （next_batch_size = batchSize(1)）；真值表直接传入该宽度，不验证流的批宽切换
         # ━━ 新增/修改启用条件时的 CHECKLIST ━━
         #   1. 同步修改另一侧的判定逻辑
         #   2. 更新双侧真值表测试：

@@ -1059,13 +1059,12 @@ TEST_F(RecommendationLogitsProcessorTest, testProcessWithNonZeroStartIdx) {
 
 // 场景 25：启用条件真值表 —— SYNC with Python TestCrossLanguageConstantSync::test_enable_conditions_sync
 // SYNC: 修改这里的真值表时必须同时更新 Python 侧的 test_enable_conditions_sync
-// NOTE: 生产路径中 fromGenerateInput 收到的 num 等于 batchSize(0) = max(num_return_sequences, 1)
-// （调用链：GenerateStream.cc:58 → LogitsProcessorFactory.cc:32）。
-// 本测试直接传 num_return_sequences 作为 num，等价性由下方断言保证。
+// NOTE: 生产路径传入 logits_processor_init_batch_size；非 beam 多返回序列在
+// prefill 后扩展，因此该值采用 next_batch_size = batchSize(1)，而不是 batchSize(0)。
+// 本测试直接传输出序列宽度，仅验证 fromGenerateInput 的启用条件。
 TEST_F(RecommendationLogitsProcessorTest, testEnableConditionsTruthTable) {
-    // 静态确认：当 hasNumBeams()=false 时，batchSize(0) = max(num_return_sequences, 1).
-    // 真值表中所有 num_return_sequences >= 1，因此 max(n,1)==n，直接传入等价于生产路径。
-    // 若 batchSize 映射逻辑变化，此处需同步更新。
+    // 非 beam 的输出宽度为 max(num_return_sequences, 1)；本真值表中的数量均 >= 1。
+    // GenerateStream 的 prefill/输出宽度切换由其独立测试覆盖。
     // 真值表：(num_beams, combo_token_size, num_return_sequences, expected_enabled)
     struct Case {
         int  num_beams;
@@ -1087,15 +1086,6 @@ TEST_F(RecommendationLogitsProcessorTest, testEnableConditionsTruthTable) {
         // 多条件同时不满足 → 禁用
         {2, 1, 1, false},
     };
-
-    // 断言 batchSize(0) 映射等价性：对于所有 num>=1 且 hasNumBeams=false，
-    // batchSize(0) == max(num_return_sequences, 1) == num_return_sequences。
-    for (const auto& c : truth_table) {
-        if (c.num_beams <= 1 && c.num_return_sequences >= 1) {
-            ASSERT_EQ(c.num_return_sequences, std::max(c.num_return_sequences, 1))
-                << "batchSize(0) equivalence broken for num=" << c.num_return_sequences;
-        }
-    }
 
     for (const auto& c : truth_table) {
         auto generate_input                                        = std::make_shared<GenerateInput>();
