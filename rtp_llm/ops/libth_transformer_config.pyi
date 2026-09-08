@@ -665,6 +665,9 @@ class KVCacheConfig:
     enable_device_cache: bool
     enable_memory_cache: bool
     enable_memory_cache_sm_copy: bool
+    memory_cache_h2d_copy_mode: str
+    memory_cache_h2d_copy_strict: bool
+    enable_memory_cache_h2d_3d_batch_auto: bool
     enable_prefix_tree_memory_cache: bool
     enable_legacy_memory_connector_fallback: bool
     enable_gpu_prefix_tree: bool

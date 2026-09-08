@@ -143,6 +143,30 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         help="内存 Cache 拷贝是否启用 split-KV SM scatter/gather（CUDA 上满足布局条件时）。默认 False；True 时满足条件可走 SM copy。",
     )
     kv_cache_group.add_argument(
+        "--memory_cache_h2d_copy_mode",
+        env_name="MEMORY_CACHE_H2D_COPY_MODE",
+        bind_to=(kv_cache_config, "memory_cache_h2d_copy_mode"),
+        type=str,
+        default="auto",
+        help="Memory-cache H2D copy mode: auto, generic, memcpy_batch, memcpy3d_batch, staged_sm, split_kv_sm.",
+    )
+    kv_cache_group.add_argument(
+        "--memory_cache_h2d_copy_strict",
+        env_name="MEMORY_CACHE_H2D_COPY_STRICT",
+        bind_to=(kv_cache_config, "memory_cache_h2d_copy_strict"),
+        type=str2bool,
+        default=False,
+        help="Fail H2D copy instead of falling back when the requested copy mode is unavailable.",
+    )
+    kv_cache_group.add_argument(
+        "--enable_memory_cache_h2d_3d_batch_auto",
+        env_name="ENABLE_MEMORY_CACHE_H2D_3D_BATCH_AUTO",
+        bind_to=(kv_cache_config, "enable_memory_cache_h2d_3d_batch_auto"),
+        type=str2bool,
+        default=False,
+        help="Allow auto mode to select CUDA 13 cudaMemcpy3DBatchAsync for eligible layouts.",
+    )
+    kv_cache_group.add_argument(
         "--enable_prefix_tree_memory_cache",
         env_name="ENABLE_PREFIX_TREE_MEMORY_CACHE",
         bind_to=(kv_cache_config, "enable_prefix_tree_memory_cache"),

@@ -18,6 +18,7 @@
 #include "rtp_llm/cpp/cache/connector/memory/KVCacheMemoryConnector.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
+#include "rtp_llm/models_py/bindings/NoBlockCopy.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
@@ -589,7 +590,7 @@ TEST(KVCacheBatchedMemoryCopyTest, StagedCopyEligibilityRequiresDsv4TypedLayout)
     EXPECT_TRUE(pro_connector->isDsv4TypedCacheLayout(pro_connector->layerRegionSlots()));
 }
 
-void runDsv4TypedStagedCopyRoundTrip(const std::set<KVCacheRegionName>& host_regions) {
+void runDsv4TypedStagedCopyRoundTrip(const std::set<KVCacheRegionName>& host_regions, bool use_3d_h2d = false) {
     const auto set_device_rc = cudaSetDevice(0);
     ASSERT_EQ(set_device_rc, cudaSuccess) << cudaGetErrorString(set_device_rc);
 
@@ -701,7 +702,20 @@ void runDsv4TypedStagedCopyRoundTrip(const std::set<KVCacheRegionName>& host_reg
         }
     }
 
-    ASSERT_TRUE(connector->tryCopyCacheWithStagedMemoryCopy(req, KVCacheMemoryConnector::CopyDirection::H2D, slots));
+    if (use_3d_h2d) {
+        size_t tile_count = 0;
+        size_t run_count = 0;
+        size_t payload_bytes = 0;
+        ASSERT_TRUE(connector->tryCopyCacheWith3DBatchedMemoryCopy(
+            req, slots, &tile_count, &run_count, &payload_bytes));
+        EXPECT_GT(tile_count, 0u);
+        EXPECT_GT(run_count, 0u);
+        EXPECT_LT(run_count, tile_count);
+        EXPECT_GT(payload_bytes, 0u);
+    } else {
+        ASSERT_TRUE(connector->tryCopyCacheWithStagedMemoryCopy(
+            req, KVCacheMemoryConnector::CopyDirection::H2D, slots));
+    }
 
     for (size_t block_idx = 0; block_idx < request_mem_blocks.size(); ++block_idx) {
         for (size_t i = 0; i < slots.size(); ++i) {
@@ -715,6 +729,10 @@ void runDsv4TypedStagedCopyRoundTrip(const std::set<KVCacheRegionName>& host_reg
 
 TEST(KVCacheBatchedMemoryCopyTest, Dsv4TypedLayoutUsesStagedCopyForD2HAndH2D) {
     runDsv4TypedStagedCopyRoundTrip({});
+}
+
+TEST(KVCacheBatchedMemoryCopyTest, Dsv4TypedLayoutUsesCuda3DBatchForH2D) {
+    runDsv4TypedStagedCopyRoundTrip({}, true);
 }
 
 TEST(KVCacheBatchedMemoryCopyTest, Dsv4TypedStagedCopySupportsHostBackedStateRegions) {
@@ -1524,6 +1542,64 @@ TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeWriteAllocationFailureDoesNotDouble
     EXPECT_FALSE(no_need_write);
     EXPECT_EQ(connector->compressed_pool_->freeBlocksNum(), 1u);
     EXPECT_EQ(connector->state_swa_pool_->freeBlocksNum(), 1u);
+}
+
+
+TEST(MemoryCopy3DRunBuilderTest, CoalescesRegularLayersPerBlockAndComponent) {
+    std::vector<BatchedMemoryCopy3DTile> tiles;
+    for (int layer = 0; layer < 4; ++layer) {
+        tiles.push_back({reinterpret_cast<void*>(0x1000 + layer * 0x100),
+                         reinterpret_cast<void*>(0x5000 + layer * 0x200),
+                         64,
+                         layer,
+                         0,
+                         0});
+    }
+    std::vector<BatchedMemoryCopy3DRun> runs;
+    std::string reason;
+    ASSERT_TRUE(buildBatchedMemoryCopy3DRuns(tiles, runs, &reason)) << reason;
+    ASSERT_EQ(runs.size(), 1u);
+    EXPECT_EQ(runs[0].depth, 4u);
+    EXPECT_EQ(runs[0].width_bytes, 64u);
+    EXPECT_EQ(runs[0].src_layer_pitch_bytes, 0x100u);
+    EXPECT_EQ(runs[0].dst_layer_pitch_bytes, 0x200u);
+}
+
+TEST(MemoryCopy3DRunBuilderTest, SplitsComponentsBlocksAndPitchBoundaries) {
+    std::vector<BatchedMemoryCopy3DTile> tiles;
+    for (int block = 0; block < 2; ++block) {
+        for (int component = 0; component < 2; ++component) {
+            for (int layer = 0; layer < 3; ++layer) {
+                const uintptr_t src_base = 0x10000 + block * 0x10000 + component * 0x4000;
+                const uintptr_t dst_base = 0x50000 + block * 0x10000 + component * 0x4000;
+                const uintptr_t src = src_base + (layer < 2 ? layer * 0x100 : 0x280);
+                const uintptr_t dst = dst_base + (layer < 2 ? layer * 0x100 : 0x280);
+                tiles.push_back({reinterpret_cast<void*>(src),
+                                 reinterpret_cast<void*>(dst),
+                                 64,
+                                 layer,
+                                 component,
+                                 block});
+            }
+        }
+    }
+    std::vector<BatchedMemoryCopy3DRun> runs;
+    ASSERT_TRUE(buildBatchedMemoryCopy3DRuns(tiles, runs));
+    EXPECT_EQ(runs.size(), 8u);
+    for (size_t i = 0; i < runs.size(); i += 2) {
+        EXPECT_EQ(runs[i].depth, 2u);
+        EXPECT_EQ(runs[i + 1].depth, 1u);
+    }
+}
+
+TEST(MemoryCopy3DRunBuilderTest, RejectsOverlappingRanges) {
+    std::vector<BatchedMemoryCopy3DTile> tiles{
+        {reinterpret_cast<void*>(0x1000), reinterpret_cast<void*>(0x5000), 128, 0, 0, 0},
+        {reinterpret_cast<void*>(0x1040), reinterpret_cast<void*>(0x6000), 128, 1, 0, 0}};
+    std::vector<BatchedMemoryCopy3DRun> runs;
+    std::string reason;
+    EXPECT_FALSE(buildBatchedMemoryCopy3DRuns(tiles, runs, &reason));
+    EXPECT_EQ(reason, "overlapping_tiles");
 }
 
 }  // namespace rtp_llm::test

@@ -175,8 +175,11 @@ struct KVCacheConfig {
     bool        enable_device_cache       = true;
     bool        enable_memory_cache       = false;
     // When true, memory-cache H2D/D2H may use split-KV SM scatter/gather (CUDA) when layout is eligible.
-    bool    enable_memory_cache_sm_copy                  = false;
-    bool    enable_remote_cache                          = false;
+    bool        enable_memory_cache_sm_copy             = false;
+    std::string memory_cache_h2d_copy_mode                = "auto";
+    bool        memory_cache_h2d_copy_strict              = false;
+    bool        enable_memory_cache_h2d_3d_batch_auto     = false;
+    bool        enable_remote_cache                       = false;
     bool    write_cache_sync                             = false;
     bool    enable_tiered_memory_cache                   = false;
     bool    enable_gpu_prefix_tree                       = true;

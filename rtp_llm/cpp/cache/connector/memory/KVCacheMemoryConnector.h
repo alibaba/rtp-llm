@@ -139,6 +139,11 @@ private:
                                                 bool                             is_complete,
                                                 std::vector<torch::Tensor>&      dst,
                                                 std::vector<torch::Tensor>&      src);
+    bool                     tryCopyCacheWith3DBatchedMemoryCopy(const MemoryOperationRequestPB&     request,
+                                                                 const std::vector<LayerRegionSlot>& slots,
+                                                                 size_t* tile_count = nullptr,
+                                                                 size_t* run_count = nullptr,
+                                                                 size_t* payload_bytes = nullptr);
     bool                     tryCopyCacheWithBatchedMemoryCopy(const MemoryOperationRequestPB&     request,
                                                                CopyDirection                       direction,
                                                                const std::vector<LayerRegionSlot>& slots);
@@ -161,7 +166,8 @@ private:
                                           void*                                     staging_buffer);
     bool                     copyMemoryItemsGeneric(const MemoryOperationRequestPB&     request,
                                                     CopyDirection                       direction,
-                                                    const std::vector<LayerRegionSlot>& slots);
+                                                    const std::vector<LayerRegionSlot>& slots,
+                                                    bool use_split_kv = false);
     bool                     validateCopyItemBacking(const MemoryOperationRequestPB::CopyItem& item) const;
 
     void                         checkLayerBlockStrideBytes() const;
