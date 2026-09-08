@@ -951,12 +951,13 @@ class BackendTest(JitCacheTestBase):
 
     def test_cpu_path_forwards_pipe_writer_and_skips_jit(self):
         controller, configs, pipe_writer = mock.Mock(), mock.Mock(), mock.Mock()
+        configs.parallelism_config.world_rank = 3
         with self.patched_backend(cuda=False), mock.patch.object(
             backend, "local_rank_start", return_value="served"
         ) as rank_start, mock.patch.object(jit, "start_from_config") as jit_start:
             result = backend.start_backend_server(controller, configs, pipe_writer)
         self.assertEqual(result, "served")
-        rank_start.assert_called_once_with(controller, configs, 0, pipe_writer)
+        rank_start.assert_called_once_with(controller, configs, 3, pipe_writer)
         jit_start.assert_not_called()
 
     def test_bootstrap_failure_releases_the_manager(self):
