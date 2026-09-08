@@ -507,3 +507,47 @@ class PpuFp8Linear(nn.Module):
                 "deep_gemm.fp8_gemm_nt ABI mismatch for the M890P DSV4 "
                 "contract; expected (lhs_pair, rhs_pair, out)"
             ) from exc
+
+
+def concatenate_ppu_fp8_linears(linears: Sequence[PpuFp8Linear]) -> PpuFp8Linear:
+    """Build an owned output-axis concatenation before Graph capture.
+
+    Sources remain valid and are not mutated. The result owns a weight copy;
+    callers retain or release the source projections according to their model
+    lifecycle. All consumers must have one quantization and status contract.
+    """
+    if len(linears) < 2 or any(type(part) is not PpuFp8Linear for part in linears):
+        raise TypeError(
+            "Concatenation requires at least two exact PpuFp8Linear instances"
+        )
+    first = linears[0]
+    if torch.cuda.is_current_stream_capturing():
+        raise RuntimeError("FP8 projection concatenation must precede Graph capture")
+    for part in linears:
+        if (
+            part.k != first.k
+            or part.weight.device != first.weight.device
+            or part.quantization != first.quantization
+            or part.quant_status is not first.quant_status
+        ):
+            raise ValueError(
+                "FP8 projections must share K, device, quantization and status"
+            )
+    weight = torch.cat([part.weight.view(torch.uint8) for part in linears], dim=0).view(
+        first.weight.dtype
+    )
+    scales = torch.cat([part.weight_scale for part in linears], dim=0)
+    checkpoint_scales = scales.to(_require_dtype("float8_e8m0fnu"))
+    if not torch.equal(scales, checkpoint_scales.float()):
+        raise ValueError(
+            "FP8 projection scales no longer satisfy the checkpoint E8M0 contract"
+        )
+    return PpuFp8Linear(
+        weight,
+        checkpoint_scales,
+        quant_status=first.quant_status,
+        share_input_quantization=all(
+            part._share_input_quantization for part in linears
+        ),
+        quantization=first.quantization,
+    )

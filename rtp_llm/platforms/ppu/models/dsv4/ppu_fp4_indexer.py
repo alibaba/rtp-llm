@@ -2,6 +2,7 @@
 
 import torch
 import torch.nn.functional as F
+
 from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
 from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
 from rtp_llm.models_py.modules.dsv4.fp8.compressor import (
@@ -226,8 +227,19 @@ class PpuFP4Indexer(IndexerFP8):
             self._clear_nested_pool()
 
     def forward_decode_vectorized(
-        self, x, qr, start_pos, out_topk_buffer, position_ids=None, compressor_meta=None
+        self,
+        x,
+        qr,
+        start_pos,
+        out_topk_buffer,
+        position_ids=None,
+        compressor_meta=None,
+        *,
+        q_producer_stream=None,
+        decode_streams=None,
     ):
+        if (q_producer_stream is None) != (decode_streams is None):
+            raise ValueError("Indexer overlap requires producer and auxiliary streams")
         if x.ndim != 3 or x.shape[1] != 1:
             raise ValueError("FP4 Indexer Decode requires one token per request")
         if compressor_meta is None:
@@ -246,22 +258,36 @@ class PpuFP4Indexer(IndexerFP8):
         self.compressor.freqs_cis = self.freqs_cis
         self._propagate_pool_to_nested()
         try:
-            self.compressor.forward_decode_vectorized(
-                x, start_pos, meta=compressor_meta, position_ids=position_ids
-            )
-            q = (
-                self._compute_indexer_q(qr, None, apply_rope=False)
-                .reshape(bsz, self.n_heads, 128)
-                .contiguous()
-            )
-            weights = F.linear(x.reshape(bsz, -1), self.weights_proj)
-            q, qs, weights = quantize_q(
-                q,
-                weights,
-                self.weight_scale,
-                torch.view_as_real(self.freqs_cis).flatten(-2),
-                compressor_meta.positions,
-            )
+            if decode_streams is not None:
+                from .ppu_decode_indexer import prepare_decode_indexer_overlap
+
+                q, qs, weights = prepare_decode_indexer_overlap(
+                    self,
+                    x,
+                    qr,
+                    start_pos,
+                    position_ids,
+                    compressor_meta,
+                    q_producer_stream,
+                    decode_streams,
+                )
+            else:
+                self.compressor.forward_decode_vectorized(
+                    x, start_pos, meta=compressor_meta, position_ids=position_ids
+                )
+                q = (
+                    self._compute_indexer_q(qr, None, apply_rope=False)
+                    .reshape(bsz, self.n_heads, 128)
+                    .contiguous()
+                )
+                weights = F.linear(x.reshape(bsz, -1), self.weights_proj)
+                q, qs, weights = quantize_q(
+                    q,
+                    weights,
+                    self.weight_scale,
+                    torch.view_as_real(self.freqs_cis).flatten(-2),
+                    compressor_meta.positions,
+                )
             lengths = compressor_meta.compressed_lens_per_token
             if lengths is None:
                 lengths = (compressor_meta.positions + 1) // self.compress_ratio
@@ -289,9 +315,38 @@ class PpuFP4Indexer(IndexerFP8):
 
 
 class PpuFP4Attention(PpuRopeAttention):
-    def __init__(self, *args, decode_stream_pool=None, **kwargs):
+    def __init__(
+        self,
+        *args,
+        decode_stream_pool=None,
+        decode_qkv_mode="separate",
+        decode_indexer_mode="sequential",
+        **kwargs,
+    ):
+        if decode_qkv_mode not in ("separate", "merged"):
+            raise ValueError("PPU Decode QKV must be separate or merged")
+        if decode_qkv_mode == "merged" and decode_stream_pool is None:
+            raise ValueError("Merged PPU Decode QKV requires model-owned streams")
+        if decode_indexer_mode not in ("sequential", "overlap"):
+            raise ValueError("PPU Decode Indexer must be sequential or overlap")
+        if decode_indexer_mode == "overlap" and decode_stream_pool is None:
+            raise ValueError("PPU Indexer overlap requires model-owned streams")
         super().__init__(*args, indexer_factory=PpuFP4Indexer, **kwargs)
         self._decode_streams = None
+        self._decode_indexer_streams = None
+        self._decode_qkv_projection = None
+        if decode_qkv_mode == "merged":
+            from rtp_llm.platforms.ppu.modules.linear.fp8_linear import (
+                concatenate_ppu_fp8_linears,
+            )
+
+            if (self.q_lora_rank, self.head_dim, self.rope_head_dim) != (1024, 512, 64):
+                raise ValueError(
+                    "Merged PPU Decode QKV requires Flash 1024/512/64 geometry"
+                )
+            self._decode_qkv_projection = concatenate_ppu_fp8_linears(
+                (self.wq_a, self.wkv)
+            )
         if decode_stream_pool is not None:
             self._decode_streams = {
                 role: decode_stream_pool.get(
@@ -299,6 +354,54 @@ class PpuFP4Attention(PpuRopeAttention):
                 )
                 for role in ("kv", "compressor", "indexer")
             }
+            if decode_indexer_mode == "overlap" and self.indexer is not None:
+                self._decode_indexer_streams = {
+                    role: decode_stream_pool.get(
+                        "attention_indexer_" + role, self.wq_a.weight.device
+                    )
+                    for role in ("q", "weights")
+                }
+
+    def _decode_update_indexer(
+        self,
+        x,
+        qr,
+        bsz,
+        q_len,
+        start_pos,
+        position_ids,
+        attn_metadata,
+        *,
+        q_producer_stream=None,
+    ):
+        if q_producer_stream is None:
+            return super()._decode_update_indexer(
+                x, qr, bsz, q_len, start_pos, position_ids, attn_metadata
+            )
+        from rtp_llm.models_py.modules.dsv4.kv_cache_utils import (
+            INDEXER_KV,
+            INDEXER_STATE,
+        )
+
+        if self.indexer is None or self._decode_indexer_streams is None:
+            raise ValueError("Indexer overlap was not prepared for this layer")
+        meta = self._decode_compressor_meta_from_metadata(
+            attn_metadata,
+            state_attn_type=INDEXER_STATE,
+            kv_attn_type=INDEXER_KV,
+            bsz=bsz,
+            q_len=q_len,
+        )
+        return self.indexer.forward_decode_vectorized(
+            x,
+            qr,
+            start_pos,
+            attn_metadata.topk_buffer_compressed[:bsz],
+            position_ids=position_ids,
+            compressor_meta=meta,
+            q_producer_stream=q_producer_stream,
+            decode_streams=self._decode_indexer_streams,
+        )
 
     def _forward_decode_body(self, x, attn_metadata):
         if self._decode_streams is None:

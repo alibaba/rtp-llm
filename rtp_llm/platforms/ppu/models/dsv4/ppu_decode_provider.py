@@ -23,6 +23,26 @@ class PpuDecodeProvider(PpuModuleProvider):
         )
         if self._fp8_quantization not in ("auto", "v2"):
             raise ValueError("PPU Decode FP8 quantization must be auto or v2")
+        self._qkv_mode = self.execution_options.get("DSV4_PPU_DECODE_QKV", "separate")
+        if self._qkv_mode not in ("separate", "merged"):
+            raise ValueError("PPU Decode QKV must be separate or merged")
+        if (
+            self._qkv_mode == "merged"
+            and self.execution_options.get("DSV4_PPU_DECODE_ATTN_MODE", "sequential")
+            != "overlap"
+        ):
+            raise ValueError("Merged PPU Decode QKV requires overlap mode")
+        self._indexer_schedule = self.execution_options.get(
+            "DSV4_PPU_DECODE_INDEXER", "sequential"
+        )
+        if self._indexer_schedule not in ("sequential", "overlap"):
+            raise ValueError("PPU Decode Indexer must be sequential or overlap")
+        if (
+            self._indexer_schedule == "overlap"
+            and self.execution_options.get("DSV4_PPU_DECODE_ATTN_MODE", "sequential")
+            != "overlap"
+        ):
+            raise ValueError("PPU Indexer overlap requires Attention overlap")
         self._moe_hint = self.execution_options.get(
             "DSV4_PPU_DECODE_MOE_HINT", "capacity"
         )
@@ -89,6 +109,8 @@ class PpuDecodeProvider(PpuModuleProvider):
             default_factory,
             *args,
             decode_stream_pool=self.stream_pool if mode == "overlap" else None,
+            decode_qkv_mode=self._qkv_mode,
+            decode_indexer_mode=self._indexer_schedule,
             **kwargs,
         )
 

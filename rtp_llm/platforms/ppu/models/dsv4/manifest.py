@@ -168,6 +168,23 @@ def supports_ppu_fp4_decode(selection, request):
             "requires auto or v2 FP8 quantization",
         ),
         (
+            options.get("DSV4_PPU_DECODE_QKV", "separate") in ("separate", "merged")
+            and (
+                options.get("DSV4_PPU_DECODE_QKV", "separate") != "merged"
+                or options.get("DSV4_PPU_DECODE_ATTN_MODE", "sequential") == "overlap"
+            ),
+            "requires separate QKV or merged QKV with Attention overlap",
+        ),
+        (
+            options.get("DSV4_PPU_DECODE_INDEXER", "sequential")
+            in ("sequential", "overlap")
+            and (
+                options.get("DSV4_PPU_DECODE_INDEXER", "sequential") != "overlap"
+                or options.get("DSV4_PPU_DECODE_ATTN_MODE", "sequential") == "overlap"
+            ),
+            "requires sequential Indexer or Indexer overlap with Attention overlap",
+        ),
+        (
             options.get("DSV4_PPU_DECODE_METADATA", "eager") in ("eager", "graph"),
             "requires eager or graph Decode metadata",
         ),
