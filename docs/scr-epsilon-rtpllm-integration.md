@@ -1,5 +1,33 @@
 # SCR / Epsilon / RTP-LLM 集成调研与端到端 dump/restore 方案
 
+## Template lifecycle and cross-host endpoint contract
+
+All template participants use one process-local lifecycle around the Epsilon
+arrival: `prepare_for_template -> arrival -> restore_fixup -> release_template`.
+Normal startup and SCR-enabled non-template phases do not enter this lifecycle.
+Grammar sandbox workers and Python/native monitoring are quiesced through hooks;
+deferred RPC, TP broadcaster and PD cache-store services are started only after
+endpoint fixup succeeds.
+
+For restore on another host, the controller must publish a JSON endpoint manifest
+through `RTP_LLM_SCR_ENDPOINT_MANIFEST`. The value may be a file path or inline
+JSON. The manifest must include `generation`, `num_nodes`, and one `members` row
+per logical rank with `world_rank`, `local_rank`, `ip`/`host`, and `server_port`.
+For restore it must also contain `transport: {"ready": true}` after the platform
+has rebuilt TCPStore/NCCL/RDMA for the target host.
+RTP-LLM validates generation and rank continuity, updates frontend/Dash/backend
+RPC peers, worker and gRPC endpoints before deferred services start, and rejects
+a multi-node restore when the manifest is absent. PD Prefill/Decode roles also
+require the manifest even when each role has only one local rank. Single-Pod
+local communication may use `RTP_LLM_SCR_LOCAL_COMM=1`, but that mode is never
+used for cross-host PD.
+
+The manifest fixes application peers; it is not a promise that a restored NCCL
+process group, TCPStore, RDMA QP, or CUDA context can migrate between hosts.
+Those resources must be rebuilt by the platform's restore provider before the
+RTP-LLM release barrier. If the provider cannot recreate them, the participant
+must fail closed and cold-start rather than advertise a restored service.
+
 > 调研对象：e01-cn-xp54kwggb06-a0002 上的 serina.wzq.dev.new.worker0 与 serina.wzq.dev.new.scr-scheduler。
 > 调研时间：2026-09-06（Asia/Shanghai）。
 > 第三方 SCR/Epsilon 没有源代码，本文把可执行文件帮助、日志、Python shim、挂载、历史命令和 RTP-LLM 工作树结合起来，区分实测事实和基于行为的推断。
@@ -22,7 +50,7 @@
 
 本轮代码已完成 active phase 的同步 pre-service gate 和 LanguageCppEngine 的
 listener 两阶段启动；这不代表所有 host-bound 状态都已可跨机器复用。TCPStore/
-NCCL/TP broadcaster、frontend/Dash visitor 构造期的 HostService heartbeat，以及
+NCCL/TP broadcaster、frontend/Dash 构造期的 HostService heartbeat，以及
 EmbeddingCppEngine 的 ARPC/HTTP/gRPC 仍未两阶段化；active template phase 会在创建
 EmbeddingCppEngine 前 fail-closed，不能把 embedding 模板误当成已支持。不能把本轮验证
 结果表述为“完全无状态跨 host 模板”。
@@ -460,7 +488,7 @@ participants:
 
 不能只看 register_after_restore_func 返回 0。
 
-#### C.1 预留 restore fix-up 接口（下一步实现）
+#### C.1 restore fix-up 接口与传输层边界
 
 跨 host restore 需要一个由 sidecar/控制面驱动的窄接口，RTP-LLM 不执行
 `scr_controller` 操作。建议接口只包含：
@@ -472,10 +500,11 @@ abort_restore(reason)        -> stop advertising / cold-start fallback
 ```
 
 `context` 至少携带 generation、目标 host、rank/world 信息、恢复后的 peer
-endpoint 和 restore 起始时间。实现时重建 TCPStore/process-group/NCCL、TP
-broadcaster/UDS、PD/RDMA channel 以及 HostService/discovery；所有接口必须
-幂等、带 generation 校验和超时日志。当前版本只记录为 TODO，不改变普通启动
-路径，也不把恢复状态藏在新 launcher 的环境变量中。
+endpoint 和 restore 起始时间。应用层 endpoint manifest 和本地 lifecycle hook
+已经落地；TCPStore/process-group/NCCL、TP broadcaster/UDS、PD/RDMA channel
+以及 HostService/discovery 的重建仍由平台 restore provider 完成。所有接口必须
+幂等、带 generation 校验和超时日志；普通启动路径不改变，恢复状态也不藏在新
+launcher 的环境变量中。
 
 #### D. active arrival 必须 fail-closed
 

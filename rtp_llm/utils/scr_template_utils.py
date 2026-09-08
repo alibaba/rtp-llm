@@ -27,8 +27,101 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Callable, Iterator, Mapping as TypingMapping, Optional
 
+from rtp_llm.utils.scr_template_lifecycle import get_template_lifecycle
+
 
 LOGGER = logging.getLogger(__name__)
+
+
+class _NativeKmonitorTemplateHook:
+    """Pause native kmonitor without importing the CUDA extension eagerly."""
+
+    def __init__(self) -> None:
+        self._paused = False
+
+    @staticmethod
+    def _extension():
+        # The backend imports libth_transformer during engine construction. Do
+        # not import it in frontend/CPU-only processes just to register a hook.
+        return sys.modules.get("libth_transformer")
+
+    def prepare_for_template(self, generation: str) -> None:
+        extension = self._extension()
+        pause = getattr(extension, "pause_kmonitor_for_scr", None) if extension else None
+        self._paused = bool(pause()) if pause is not None else False
+        if self._paused:
+            LOGGER.info("native Kmonitor paused for SCR generation=%s", generation)
+
+    def restore_fixup(self, generation: str) -> None:
+        return None
+
+    def release_template(self, generation: str) -> None:
+        self._resume(generation)
+
+    def abort_template(self, generation: str) -> None:
+        self._resume(generation)
+
+    def _resume(self, generation: str) -> None:
+        if not self._paused:
+            return
+        extension = self._extension()
+        resume = getattr(extension, "resume_kmonitor_after_scr", None) if extension else None
+        if resume is None or not resume():
+            raise RuntimeError("native Kmonitor did not resume after SCR")
+        self._paused = False
+        LOGGER.info("native Kmonitor released for SCR generation=%s", generation)
+
+
+_NATIVE_KMONITOR_HOOK = _NativeKmonitorTemplateHook()
+get_template_lifecycle().register("native-kmonitor", _NATIVE_KMONITOR_HOOK)
+
+
+class _BackendVisitorTemplateHook:
+    def __init__(self, visitor: Any, py_env_configs: Any) -> None:
+        self.visitor = visitor
+        self.configs = py_env_configs
+
+    def prepare_for_template(self, generation: str) -> None:
+        return None
+
+    def restore_fixup(self, generation: str) -> None:
+        from rtp_llm.distribute.distributed_server import (
+            get_dp_addrs_from_world_info,
+            get_world_info,
+        )
+        from rtp_llm.utils.scr_endpoint_provider import resolve_world_info
+
+        current = get_world_info(
+            self.configs.server_config,
+            self.configs.distribute_config,
+            self.configs.parallelism_config,
+        )
+        role = getattr(self.configs.pd_sep_config, "role_type", "")
+        role_name = str(getattr(role, "name", role)).lower()
+        world_info = resolve_world_info(
+            current,
+            generation=generation,
+            require_manifest=os.environ.get("SCR_PHASE", "").strip().lower() == "restore"
+            and (current.num_nodes > 1 or role_name in {"prefill", "decode", "role_type.prefill", "role_type.decode"}),
+            require_transport=os.environ.get("SCR_PHASE", "").strip().lower() == "restore"
+            and (current.num_nodes > 1 or role_name in {"prefill", "decode", "role_type.prefill", "role_type.decode"}),
+        )
+        self.visitor.update_addresses(
+            get_dp_addrs_from_world_info(world_info, self.configs.parallelism_config)
+        )
+
+    def release_template(self, generation: str) -> None:
+        return None
+
+    def abort_template(self, generation: str) -> None:
+        return None
+
+
+def register_backend_visitor_template_hook(visitor: Any, py_env_configs: Any) -> None:
+    get_template_lifecycle().register(
+        f"backend-visitor:{id(visitor)}",
+        _BackendVisitorTemplateHook(visitor, py_env_configs),
+    )
 
 # ``RTPLLM_ENABLE_SCR`` is RTP-LLM's own participation switch.  ``SCR_ENABLE``
 # and ``SCR_PHASE`` are external control-plane inputs and are never derived or
@@ -1295,6 +1388,50 @@ def arrive_scr_checkpoint_barrier(
         return None
 
 
+def arrive_scr_template_barrier(
+    *,
+    worker_id: int,
+    worker_num: int,
+    timeout: int | None = None,
+    inactivity_timeout: int | None = None,
+    generation: str | None = None,
+    fail_closed: bool = False,
+) -> int | None:
+    """Run lifecycle hooks and Epsilon arrival as one template barrier."""
+
+    if not is_scr_template_phase_active():
+        return arrive_scr_checkpoint_barrier(
+            worker_id=worker_id,
+            worker_num=worker_num,
+            timeout=timeout,
+            inactivity_timeout=inactivity_timeout,
+            generation=generation,
+            fail_closed=fail_closed,
+        )
+
+    actual_generation = generation or _scr_generation()
+    if actual_generation == "<unset>":
+        actual_generation = ""
+    phase = os.environ.get(SCR_PHASE_ENV, "").strip().lower()
+    lifecycle = get_template_lifecycle()
+    lifecycle.prepare_for_template(actual_generation, phase)
+    try:
+        result = arrive_scr_checkpoint_barrier(
+            worker_id=worker_id,
+            worker_num=worker_num,
+            timeout=timeout,
+            inactivity_timeout=inactivity_timeout,
+            generation=generation,
+            fail_closed=fail_closed,
+        )
+        lifecycle.restore_fixup(actual_generation)
+        lifecycle.release_template(actual_generation)
+        return result
+    except BaseException:
+        lifecycle.abort_template(actual_generation)
+        raise
+
+
 def start_scr_checkpoint_arrival_thread(
     *,
     worker_id: int,
@@ -1390,6 +1527,7 @@ __all__ = [
     "ScrParticipantManifest",
     "ScrRegistration",
     "arrive_scr_checkpoint_barrier",
+    "arrive_scr_template_barrier",
     "build_scr_participant_manifest",
     "epsilon_backend_mode",
     "configure_scr_environment",
