@@ -64,7 +64,14 @@ class LongPrefixCaseTest(unittest.TestCase):
             with self.subTest(text=text), self.assertRaises(ValueError):
                 check_answer(text)
 
-    def run_fake_service(self, directory, *, fault=None):
+    def run_fake_service(
+        self,
+        directory,
+        *,
+        fault=None,
+        target_tokens=600000,
+        bytes_per_token=7680,
+    ):
         case = LongPrefixCase(
             "http://prefill",
             pathlib.Path(directory) / "case",
@@ -72,10 +79,12 @@ class LongPrefixCaseTest(unittest.TestCase):
             timeout=900,
             budget=4294967296,
             page_size=4096,
-            bytes_per_token=7680,
+            bytes_per_token=bytes_per_token,
+            target_tokens=target_tokens,
         )
         seed = [{"role": "user", "content": "Original archive"}]
-        ids = [1] * 599968
+        ids = [1] * (target_tokens - 32)
+        reuse = (target_tokens - 1000) // 4096 * 4096
         sent = []
 
         def post(route, payload):
@@ -98,7 +107,7 @@ class LongPrefixCaseTest(unittest.TestCase):
                 "aux_info": {
                     "pd_sep": True,
                     "input_len": len(ids) if is_seed else len(ids) + 82,
-                    "prefill_total_reuse_len": 0 if is_seed else 598016,
+                    "prefill_total_reuse_len": 0 if is_seed else reuse,
                 },
                 "choices": [
                     {
@@ -119,7 +128,7 @@ class LongPrefixCaseTest(unittest.TestCase):
                 elif fault == "short_prefix":
                     response["aux_info"]["prefill_total_reuse_len"] = 4096
                 elif fault == "physical_page_mismatch":
-                    response["aux_info"]["prefill_total_reuse_len"] = 598144
+                    response["aux_info"]["prefill_total_reuse_len"] = reuse + 128
                 elif fault == "truncated":
                     response["choices"][0]["finish_reason"] = "length"
                 elif fault == "input_mismatch":
@@ -142,6 +151,19 @@ class LongPrefixCaseTest(unittest.TestCase):
             self.assertTrue(
                 (pathlib.Path(tmp) / "case/long_prefix_hit-tokens.json.gz").exists()
             )
+
+    def test_topology_aware_100k_target_still_spans_expansion_blocks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result, sent = self.run_fake_service(
+                tmp,
+                target_tokens=100000,
+                bytes_per_token=61440,
+            )
+            self.assertTrue(result["passed"])
+            self.assertEqual(result["target_tokens"], 100000)
+            self.assertEqual(result["seed_tokens"], 99968)
+            self.assertEqual(len(result["planned_prefix_blocks"]), 2)
+            self.assertEqual(len(sent), 2)
 
     def test_failures_are_fatal_and_preserve_evidence(self):
         for fault in [

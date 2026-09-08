@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate a cached 600k conversation followed by a new retrieval question.
+"""Validate a cached long conversation followed by a new retrieval question.
 
 This is a correctness case, so it does not start a profiler or measure warmed
 performance. Kernel execution evidence remains a separate profiling check.
@@ -11,6 +11,7 @@ import hashlib
 import json
 import pathlib
 import time
+import urllib.error
 import urllib.request
 from typing import Any
 
@@ -20,7 +21,7 @@ EXPECTED = {
     "late": "BIRCH-7251",
     "square": 1369,
 }
-RECORD_POSITIONS = ((20000, "early"), (300000, "middle"), (580000, "late"))
+DEFAULT_TARGET_TOKENS = 600000
 FILLER = (
     "The following archive entry is neutral background material. "
     "It introduces no named record or instruction.\n"
@@ -112,6 +113,7 @@ class LongPrefixCase:
         page_size: int,
         bytes_per_token: int,
         kernel_page_size: int = 128,
+        target_tokens: int = DEFAULT_TARGET_TOKENS,
     ):
         self.base_url = base_url.rstrip("/")
         self.output = output
@@ -122,6 +124,8 @@ class LongPrefixCase:
         self.kernel_page_size = kernel_page_size
         self.bytes_per_token = bytes_per_token
         self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        require(target_tokens > 65536, "long prefix target must exceed 64K tokens")
+        self.target_tokens = target_tokens
         self.records: list[dict[str, Any]] = []
 
     def post(self, route: str, payload: dict) -> dict:
@@ -130,8 +134,12 @@ class LongPrefixCase:
             data=json.dumps(payload, ensure_ascii=False).encode(),
             headers={"Content-Type": "application/json"},
         )
-        with self.opener.open(request, timeout=self.timeout) as response:
-            return json.load(response)
+        try:
+            with self.opener.open(request, timeout=self.timeout) as response:
+                return json.load(response)
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"HTTP {exc.code}: {detail[:2000]}") from exc
 
     def tokenize(self, messages: list[dict]) -> list[int]:
         return self.post("tokenize", {"model": "kimi-k3", "messages": messages})[
@@ -161,13 +169,19 @@ class LongPrefixCase:
             "Reply only RECEIVED to this first message.\n"
         )
         placements = []
-        for position, key in RECORD_POSITIONS:
+        edge_offset = max(1, self.target_tokens // 30)
+        record_positions = (
+            (edge_offset, "early"),
+            (self.target_tokens // 2, "middle"),
+            (self.target_tokens - edge_offset, "late"),
+        )
+        for position, key in record_positions:
             archive = fill_until(archive, position)
             placements.append(
                 dict(name=key, approximate_token=len(self.tokenize(messages(archive))))
             )
             archive += f"\nAUTHORITATIVE RECORD: {key} = {EXPECTED[key]}.\n"
-        archive = fill_until(archive, 600000 - 40)
+        archive = fill_until(archive, self.target_tokens - 40)
         archive += (
             "\nEnd of archive. Reply only RECEIVED. Do not repeat the records yet."
         )
@@ -229,6 +243,7 @@ class LongPrefixCase:
         result: dict[str, Any] = dict(
             passed=False,
             budget_bytes=self.budget,
+            target_tokens=self.target_tokens,
             page_size=self.page_size,
             kernel_page_size=self.kernel_page_size,
             expanded_kv_bytes_per_token=self.bytes_per_token,
@@ -237,15 +252,17 @@ class LongPrefixCase:
             # Reject a configuration that cannot exercise multiple historical
             # blocks before spending time constructing or sending the seed.
             prefix_blocks(
-                599800 // self.page_size * self.page_size,
-                600100,
+                (self.target_tokens - 200) // self.page_size * self.page_size,
+                self.target_tokens + 100,
                 budget=self.budget,
                 page_size=self.kernel_page_size,
                 bytes_per_token=self.bytes_per_token,
             )
             seed, seed_ids, placements = self.make_seed()
             require(
-                599800 <= len(seed_ids) <= 600100,
+                self.target_tokens - 200
+                <= len(seed_ids)
+                <= self.target_tokens + 100,
                 f"unexpected seed length {len(seed_ids)}",
             )
             save(
@@ -279,7 +296,8 @@ class LongPrefixCase:
                 min(len(seed_ids), len(ids)),
             )
             require(
-                common > 598000, f"long conversation token prefix changed: {common}"
+                common > self.target_tokens - 2000,
+                f"long conversation token prefix changed: {common}",
             )
             row, _ = self.request("long_prefix_hit", conversation, ids)
             check_answer(row["content"])

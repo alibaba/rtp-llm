@@ -47,6 +47,7 @@ def make_args() -> argparse.Namespace:
         timeout=900,
         long_prefix_checkpoint=None,
         long_prefix_tp_size=8,
+        long_prefix_target_tokens=600000,
         long_prefix_kernel_page_size=128,
         expanded_kv_budget_bytes=4294967296,
     )

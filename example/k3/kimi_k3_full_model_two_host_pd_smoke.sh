@@ -332,6 +332,8 @@ smoke_proposal_tokens="${GEN_NUM_PER_CIRCLE:-3}"
 smoke_shared_expert_shard=$((smoke_tp_size % 2 == 0))
 smoke_decode_kv_cache_mem_mb="${SMOKE_DECODE_KV_CACHE_MEM_MB:-20000}"
 smoke_decode_kda_pool_blocks="${SMOKE_DECODE_KDA_POOL_BLOCKS:-32}"
+smoke_long_prefix_target_tokens="${SMOKE_LONG_PREFIX_TARGET_TOKENS:-100000}"
+smoke_long_prefix_tp_size="${SMOKE_LONG_PREFIX_TP_SIZE:-1}"
 smoke_linear_step="${SMOKE_LINEAR_STEP:-1}"
 smoke_chunkwise_rdma="${SMOKE_CHUNKWISE_RDMA:-1}"
 smoke_keep_cluster_on_success="${SMOKE_KEEP_CLUSTER_ON_SUCCESS:-0}"
@@ -347,10 +349,14 @@ for size_value in \
     "${smoke_chunk_tokens}" \
     "${smoke_decode_kv_cache_mem_mb}" \
     "${smoke_decode_kda_pool_blocks}" \
+    "${smoke_long_prefix_target_tokens}" \
+    "${smoke_long_prefix_tp_size}" \
     "${smoke_linear_step}"; do
     [[ "${size_value}" =~ ^[1-9][0-9]*$ ]] \
         || die "smoke block/chunk/linear settings must be positive integers"
 done
+[[ "${smoke_long_prefix_target_tokens}" -gt 65536 ]] \
+    || die "SMOKE_LONG_PREFIX_TARGET_TOKENS must exceed 65536"
 smoke_mega_tokens=$(( (smoke_chunk_tokens + smoke_tp_size - 1) / smoke_tp_size ))
 ((smoke_block_size % 64 == 0)) \
     || die "SMOKE_BLOCK_SIZE must be divisible by the cuLA checkpoint step 64"
@@ -1015,7 +1021,8 @@ python3 -u "${case_runner}" \
     --rdma-prewarm-backoff-s "${smoke_rdma_prewarm_backoff_s}" \
     --rdma-prewarm-settle-s "${smoke_rdma_prewarm_settle_s}" \
     --long-prefix-checkpoint "${CHECKPOINT_PATH}" \
-    --long-prefix-tp-size "${smoke_tp_size}" \
+    --long-prefix-tp-size "${smoke_long_prefix_tp_size}" \
+    --long-prefix-target-tokens "${smoke_long_prefix_target_tokens}" \
     --long-prefix-kernel-page-size "${KERNEL_SEQ_SIZE_PER_BLOCK}" \
     --expanded-kv-budget-bytes "${KIMI_K3_MLA_PREFILL_EXPANDED_KV_BUDGET_BYTES}" \
     --timeout "${request_timeout}"
