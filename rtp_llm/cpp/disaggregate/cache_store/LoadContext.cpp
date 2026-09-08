@@ -114,7 +114,7 @@ std::string SyncContext::getErrorInfoString() const {
     return error_info_.ToString();
 }
 
-const ErrorInfo& SyncContext::getErrorInfo() const {
+ErrorInfo SyncContext::getErrorInfo() const {
     std::unique_lock<std::mutex> lock(mutex_);
     return error_info_;
 }

@@ -8,6 +8,22 @@
 
 namespace rtp_llm {
 
+TEST(SyncContextTest, ErrorSnapshotSurvivesLaterCompletion) {
+    auto context = std::make_shared<LoadContext>(nullptr, false);
+    auto request = std::make_shared<RequestBlockBuffer>("error-snapshot");
+    context->updateResult(false, CacheStoreErrorCode::LoadBufferTimeout, request);
+
+    const auto& snapshot = context->getErrorInfo();
+    const auto  message  = snapshot.ToString();
+    ASSERT_EQ(snapshot.code(), ErrorCode::CACHE_STORE_LOAD_BUFFER_TIMEOUT);
+
+    // A late callback may replace the context's error, but not the caller's snapshot.
+    context->updateResult(false, CacheStoreErrorCode::LoadConnectFailed, request);
+    EXPECT_EQ(context->getErrorInfo().code(), ErrorCode::CACHE_STORE_LOAD_CONNECT_FAILED);
+    EXPECT_EQ(snapshot.code(), ErrorCode::CACHE_STORE_LOAD_BUFFER_TIMEOUT);
+    EXPECT_EQ(snapshot.ToString(), message);
+}
+
 class NormalCacheStoreTest: public CacheStoreTestBase {
 protected:
     bool initCacheStores();

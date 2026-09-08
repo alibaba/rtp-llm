@@ -28,7 +28,7 @@ public:
     void waitDone();
 
     bool             success() const;
-    const ErrorInfo& getErrorInfo() const;
+    ErrorInfo        getErrorInfo() const;
     std::string      getErrorInfoString() const;
 
     void
