@@ -175,8 +175,14 @@ TEST(KVCacheLayoutViewTest, MultiGroupRequiresTagAndEnumerationSkipsPlaceholder)
     ASSERT_EQ(groups.size(), 2u);
     EXPECT_EQ(groups[0].tag, "full");
     EXPECT_EQ(groups[1].tag, "linear");
+    EXPECT_TRUE(cache.hasLayerCache(0, "full"));
+    EXPECT_TRUE(cache.hasLayerCache(0, "linear"));
+    EXPECT_FALSE(cache.hasLayerCache(0, "empty"));
+    EXPECT_FALSE(cache.hasLayerCache(0, "missing"));
     EXPECT_EQ(cache.getLayerCache(0, "linear").kv_cache_base.data_ptr(), linear.data_ptr());
 
+    EXPECT_ANY_THROW(cache.hasLayerCache(-1, "full"));
+    EXPECT_ANY_THROW(cache.hasLayerCache(1, "full"));
     EXPECT_ANY_THROW(cache.getLayerCache(-1));
     EXPECT_ANY_THROW(cache.getLayerCache(1));
     EXPECT_ANY_THROW(cache.getLayerCache(0, "missing"));

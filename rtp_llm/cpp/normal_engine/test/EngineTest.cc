@@ -117,10 +117,16 @@ TEST_F(NormalEngineTest, testSystemPrompt) {
     vector<int>  prompt_1           = {1, 2, 3};
     vector<int>  prompt_2           = {4, 5, 6, 7, 8, 9};
     config.multi_task_prompt_tokens = {{"1", prompt_1}, {"2", prompt_2}};
+    config.reuse_cache              = false;
+    config.enable_device_cache      = false;
     auto engine                     = createMockEngine(config);
     ASSERT_TRUE(engine->resourceContext().cache_manager);
     ASSERT_TRUE(engine->resourceContext().system_prompt);
     ASSERT_TRUE(engine->resourceContext().reuse_cache);
+    ASSERT_TRUE(engine->resourceContext().enable_device_cache);
+    const auto block_tree_cache = engine->resourceContext().cache_manager->blockTreeCache();
+    ASSERT_NE(block_tree_cache, nullptr);
+    ASSERT_TRUE(block_tree_cache->config().enable_device_cache);
 
     {
         std::shared_ptr<GenerateInput> query   = make_shared<GenerateInput>();

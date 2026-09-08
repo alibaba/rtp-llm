@@ -77,3 +77,11 @@ py_test(
         "//rtp_llm:frontend",
     ],
 )
+
+py_test(
+    name = "frontend_app_shutdown_test",
+    srcs = ["frontend_app_shutdown_test.py"],
+    deps = [
+        "//rtp_llm:testlib",
+    ],
+)

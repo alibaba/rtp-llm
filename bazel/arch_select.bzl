@@ -8,7 +8,9 @@ load(
 
 requirement = _requirement
 torch_deps = _torch_deps
-transfer_backend_deps = _transfer_backend_deps
 
 def no_block_copy_link_deps():
     return _no_block_copy_link_deps()
+
+def transfer_backend_deps():
+    return _transfer_backend_deps()

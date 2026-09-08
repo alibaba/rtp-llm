@@ -44,14 +44,10 @@ CacheGroupPolicy SpecBuilder::groupPolicy(const KVCacheSpecDesc& desc) {
     CacheGroupPolicy policy = defaultCacheGroupPolicy(groupType(desc));
     if (desc.is_state_cache) {
         policy.enable_prefix_reuse = true;
-        policy.evict_policy        = CacheEvictPolicy::INDEPENDENT;
     }
     if (desc.reuse.has_value()) {
         if (desc.reuse->enable_prefix_reuse.has_value()) {
             policy.enable_prefix_reuse = *desc.reuse->enable_prefix_reuse;
-        }
-        if (desc.reuse->evict_policy.has_value()) {
-            policy.evict_policy = *desc.reuse->evict_policy;
         }
     }
     if (desc.capacity.has_value()) {

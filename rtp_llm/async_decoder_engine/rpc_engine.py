@@ -96,3 +96,7 @@ class LanguageCppEngine(BaseEngine):
         if self.mm_process_engine is not None:
             self.mm_process_engine.stop()
             self.mm_process_engine = None
+
+    @override
+    def request_stop(self) -> None:
+        self.rtp_llm_op_.request_stop()

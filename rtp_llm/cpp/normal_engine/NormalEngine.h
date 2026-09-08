@@ -32,6 +32,7 @@ public:
     absl::StatusOr<GenerateStreamPtr> preRun(const std::shared_ptr<GenerateInput>& generate_input,
                                              preRunMode                            mode) override;
     absl::Status                      stop() override;
+    absl::Status                      requestStop() override;
 
     KVCacheInfo  getCacheStatusInfo(int64_t latest_version, bool need_cache_keys) override;
     absl::Status step();
@@ -54,6 +55,7 @@ private:
     void                            initLoadBalance();
     absl::Status                    trySaveStepError() const;
     void                            loop();
+    void                            normalizeSystemPromptCacheConfig();
     void                            initCacheManager(std::optional<WarmUpResult> warm_up_result);
     absl::Status                    initSystemPrompt();
     std::shared_ptr<GenerateInput>  makeFakeInput(size_t seq_len);

@@ -23,6 +23,12 @@ class BaseEngine:
         self.started = False
         self._stop()
 
+    def request_stop(self) -> None:
+        """Stop scheduling new work without waiting for full engine teardown."""
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement nonblocking stop"
+        )
+
     @abstractmethod
     def _stop(self) -> None:
         raise NotImplementedError()

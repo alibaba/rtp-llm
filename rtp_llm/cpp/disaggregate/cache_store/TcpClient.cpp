@@ -38,12 +38,21 @@ bool TcpClient::init(int io_thread_count) {
 
 void TcpClient::stop() {
     if (rpc_channel_manager_) {
-        rpc_channel_transport_->stop();
-        rpc_channel_transport_->wait();
+        {
+            std::lock_guard<std::mutex> lock(channel_map_mutex_);
+            channel_map_.clear();
+        }
+        // Release both ARPC and ANet metric reporter state before KMonitor and
+        // the transport begin shutting down.
+        rpc_channel_manager_->SetMetricReporter(nullptr);
 
         rpc_channel_manager_->Close();
         rpc_channel_manager_.reset();
+    }
 
+    if (rpc_channel_transport_) {
+        rpc_channel_transport_->stop();
+        rpc_channel_transport_->wait();
         rpc_channel_transport_.reset();
     }
 }

@@ -70,6 +70,10 @@ class SingleGroupKVCacheAdapter:
             kv_scale_base=self._layer_scale_tensors[layer_id],
         )
 
+    def has_layer_cache(self, layer_id: int, tag: str) -> bool:
+        self._validate_layer(layer_id)
+        return str(tag) == self._tag
+
     def get_layer_cache_groups(self, layer_id: int) -> list[LayerKVCache]:
         return [self.get_layer_cache(layer_id)]
 

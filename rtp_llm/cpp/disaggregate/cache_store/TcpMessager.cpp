@@ -7,6 +7,13 @@
 
 namespace rtp_llm {
 
+TcpMessager::~TcpMessager() {
+    // TcpServer registers service_ as a raw pointer. Stop its transport and
+    // worker pool while the service is still alive.
+    tcp_server_.reset();
+    service_.reset();
+}
+
 bool TcpMessager::init(MessagerInitParams params) {
     init_params_ = params;
 

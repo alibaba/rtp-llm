@@ -56,7 +56,7 @@ private:
     // made scheduling progress contribute, so a stream whose KV malloc failed and stayed
     // WAITING does not consume this round's token budget.
     struct ScheduleRuntime {
-        size_t admitted_running_stream_count             = 0;
+        size_t admitted_stream_count                     = 0;
         size_t admitted_prefill_token_size_with_cache    = 0;
         size_t admitted_prefill_max_seq_len_with_cache   = 0;
         size_t admitted_prefill_sequence_count           = 0;

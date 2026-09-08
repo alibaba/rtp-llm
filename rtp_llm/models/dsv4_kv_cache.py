@@ -37,7 +37,6 @@ from typing import Optional, Sequence
 from rtp_llm.ops import (
     CacheCapacityPolicyDesc,
     CacheCpPolicyDesc,
-    CacheEvictPolicy,
     CacheMemoryPlacement,
     CacheMemoryPolicyDesc,
     CacheReusePolicyDesc,
@@ -122,7 +121,6 @@ def _make_dsv4_desc(
     desc.entry_count_mode = OpaqueBlockEntryCountMode.STATE_RING
 
     reuse = CacheReusePolicyDesc()
-    reuse.evict_policy = CacheEvictPolicy.INDEPENDENT
     cp = CacheCpPolicyDesc()
 
     if tag in (INDEXER_STATE_TAG, CSA_STATE_TAG):

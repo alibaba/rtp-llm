@@ -75,7 +75,7 @@ TEST_F(FIFOSchedulerTest, testSimple) {
         make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
     ASSERT_TRUE(scheduler.enqueue(stream).ok());
 
-    // Single schedule: stream calls initKVBlock and asyncLoadCache (returns false without enable_memory_cache)
+    // Single schedule: stream calls initKVBlock and asyncLoadCache (returns false without enable_host_cache)
     // Since no cache loading is needed, stream transitions directly to RUNNING in one schedule call
     auto streams_status = scheduler.schedule();
     ASSERT_TRUE(streams_status.ok());
@@ -350,7 +350,229 @@ TEST_F(FIFOSchedulerTest, testInitKVCacheRejectedByReserveBlocks) {
     ASSERT_TRUE(stream->hasError());
     ASSERT_EQ(stream->stopReason(), "LACK MEM");
     ASSERT_EQ(cache_manager->freeBlocksNum(), 10);
-    ASSERT_EQ(cache_manager->availableBlocksNum(), 10);
+    const auto block_tree_cache = cache_manager->blockTreeCache();
+    ASSERT_NE(block_tree_cache, nullptr);
+    ASSERT_EQ(block_tree_cache->groupSets().size(), 1u);
+    ASSERT_EQ(block_tree_cache->groupSets().front()->devicePools().size(), 1u);
+    const auto device_pool = block_tree_cache->groupSets().front()->devicePools().front();
+    ASSERT_NE(device_pool, nullptr);
+    ASSERT_EQ(device_pool->freeBlocksNum(), 10);
+}
+
+TEST_F(FIFOSchedulerTest, testReserveBlocksOnlyAffectInitMallocNotIncrMalloc) {
+    CacheConfig cache_config = makeMhaCacheConfig(/*layer_num=*/1,
+                                                  /*block_num=*/11,
+                                                  /*local_head_num_kv=*/1,
+                                                  /*size_per_head=*/4,
+                                                  /*tokens_per_block=*/1,
+                                                  rtp_llm::DataType::TYPE_FP16);
+
+    KVCacheConfig kv_cache_config;
+    kv_cache_config.reserve_block_ratio = 50;  // reserve = 5 blocks
+
+    std::shared_ptr<KVCacheManager> cache_manager =
+        std::make_shared<KVCacheManager>(cache_config, /*warmup=*/false, nullptr, kv_cache_config);
+    ASSERT_TRUE(cache_manager->init());
+    ASSERT_EQ(cache_manager->freeBlocksNum(), 10);
+
+    ResourceContext resource_context;
+    resource_context.cache_manager = cache_manager;
+    resource_context.reuse_cache   = false;
+
+    ModelConfig model_config;
+    model_config.max_seq_len = 8192;
+    RuntimeConfig runtime_config;
+    runtime_config.max_generate_batch_size                     = 100;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
+    PDSepConfig         pd_sep_config;
+    ParallelismConfig   parallelism_config;
+    ModelSpecificConfig model_specific_config;
+    FIFOScheduler       scheduler(
+        runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
+
+    // Init need 4 blocks, should pass: 10 >= 4 + 5.
+    std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
+    query->input_ids                     = torch::tensor({1, 2, 3, 4}, torch::kInt32);
+    query->generate_config               = makeTestGenerateConfig();
+
+    shared_ptr<GenerateStream> stream =
+        make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+    ASSERT_TRUE(scheduler.enqueue(stream).ok());
+
+    // Single schedule: stream calls initKVBlock and asyncLoadCache (returns false)
+    // Since no cache loading is needed, stream transitions directly to RUNNING in one schedule call
+    auto streams_status1 = scheduler.schedule();
+    ASSERT_TRUE(streams_status1.ok());
+    ASSERT_EQ(streams_status1.value().size(), 1);
+    ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
+    ASSERT_FALSE(stream->hasError());
+
+    stream->setSeqLength(9);
+    auto streams_status2 = scheduler.schedule();
+    ASSERT_TRUE(streams_status2.ok());
+    ASSERT_EQ(streams_status2.value().size(), 1);
+    ASSERT_FALSE(stream->hasError());
+}
+
+TEST_F(FIFOSchedulerTest, testReuseCache) {
+    CacheConfig                     cache_config  = makeMhaCacheConfig(1, 11, 1, 4, 2, rtp_llm::DataType::TYPE_FP16);
+    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    ASSERT_TRUE(cache_manager->init());
+    ASSERT_EQ(cache_manager->freeBlocksNum(), 10);
+    ResourceContext resource_context;
+    resource_context.cache_manager = cache_manager;
+    resource_context.reuse_cache   = true;
+
+    ModelConfig model_config;
+    model_config.max_seq_len = 8192;
+    RuntimeConfig runtime_config;
+    runtime_config.max_generate_batch_size                     = 100;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
+    PDSepConfig         pd_sep_config;
+    ParallelismConfig   parallelism_config;
+    ModelSpecificConfig model_specific_config;
+    FIFOScheduler       scheduler(
+        runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
+
+    std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
+    query->input_ids                     = torch::tensor({1, 2, 3, 4, 5}, torch::kInt32);
+    query->generate_config               = makeTestGenerateConfig();
+    shared_ptr<GenerateStream> stream1 =
+        make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+    ASSERT_TRUE(scheduler.enqueue(stream1).ok());
+
+    // Single schedule: stream calls initKVBlock and asyncLoadCache (returns false without enable_host_cache)
+    // Since no cache loading is needed, stream transitions directly to RUNNING in one schedule call
+    auto streams_status = scheduler.schedule();
+    ASSERT_TRUE(streams_status.ok());
+    ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
+    ASSERT_EQ(scheduler.runningStreamsSize(), 1);
+
+    // Stream is already running, no need for second schedule
+    auto streams_status2 = scheduler.schedule();
+    ASSERT_TRUE(streams_status2.ok());
+    ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
+    ASSERT_EQ(scheduler.runningStreamsSize(), 1);
+    ASSERT_EQ(cache_manager->freeBlocksNum(), 7);
+
+    stream1->reportEvent(StreamEvents::GenerateDone);
+    auto streams_status3 = scheduler.schedule();
+
+    ASSERT_TRUE(streams_status3.ok());
+    ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
+    ASSERT_EQ(scheduler.runningStreamsSize(), 0);
+    ASSERT_EQ(cache_manager->freeBlocksNum(), 8);
+
+    std::shared_ptr<GenerateInput> query2 = make_shared<GenerateInput>();
+    query2->input_ids                     = torch::tensor({1, 2, 3, 4, 5, 6, 7}, torch::kInt32);
+    query2->generate_config               = makeTestGenerateConfig();
+    shared_ptr<GenerateStream> stream2 =
+        make_shared<NormalGenerateStream>(query2, model_config, runtime_config, resource_context, nullptr);
+    ASSERT_TRUE(scheduler.enqueue(stream2).ok());
+
+    // Third schedule for stream2: transitions to RUNNING in single call (no cache loading needed)
+    auto streams_status4 = scheduler.schedule();
+    ASSERT_TRUE(streams_status4.ok());
+    ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
+    ASSERT_EQ(scheduler.runningStreamsSize(), 1);
+    ASSERT_EQ(cache_manager->freeBlocksNum(), 6);
+
+    stream2->reportEvent(StreamEvents::GenerateDone);
+    auto streams_status6 = scheduler.schedule();
+    ASSERT_TRUE(streams_status6.ok());
+    ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
+    ASSERT_EQ(scheduler.runningStreamsSize(), 0);
+    ASSERT_EQ(cache_manager->freeBlocksNum(), 7);
+}
+
+TEST_F(FIFOSchedulerTest, testMaxContextBatchSize) {
+    CacheConfig                     cache_config  = makeMhaCacheConfig(1, 21, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
+    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    ASSERT_TRUE(cache_manager->init());
+    ASSERT_EQ(cache_manager->freeBlocksNum(), 20);
+    ResourceContext resource_context;
+    resource_context.cache_manager = cache_manager;
+    resource_context.reuse_cache   = true;
+
+    ModelConfig model_config;
+    model_config.max_seq_len = 100;
+    RuntimeConfig runtime_config;
+    runtime_config.max_generate_batch_size                      = 1;
+    runtime_config.fifo_scheduler_config.max_context_batch_size = 1;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_size  = 100;
+    PDSepConfig         pd_sep_config;
+    ParallelismConfig   parallelism_config;
+    ModelSpecificConfig model_specific_config;
+    FIFOScheduler       scheduler(
+        runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
+
+    {
+        // test normalcase
+        std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
+        query->input_ids                     = torch::tensor({1, 2, 3, 4, 5}, torch::kInt32);
+        query->generate_config               = makeTestGenerateConfig();
+        shared_ptr<GenerateStream> stream1 =
+            make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+        ASSERT_TRUE(scheduler.enqueue(stream1).ok());
+
+        // Single schedule: transitions to RUNNING (no cache loading needed)
+        auto streams_status = scheduler.schedule();
+        ASSERT_TRUE(streams_status.ok());
+        ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
+        ASSERT_EQ(scheduler.runningStreamsSize(), 1);
+
+        stream1->reportEvent(StreamEvents::GenerateDone);
+        auto streams_status2 = scheduler.schedule();
+
+        ASSERT_TRUE(streams_status2.ok());
+        ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
+        ASSERT_EQ(scheduler.runningStreamsSize(), 0);
+        ASSERT_EQ(cache_manager->freeBlocksNum(), 20);
+    }
+
+    {
+        // test normal case with tile num
+        std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
+        query->input_ids                     = torch::tensor({1, 2, 3, 4, 5}, torch::kInt32);
+        query->generate_config               = makeTestGenerateConfig();
+        query->generate_config->num_beams    = 2;
+        shared_ptr<GenerateStream> stream1 =
+            make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+        ASSERT_TRUE(scheduler.enqueue(stream1).ok());
+
+        // Single schedule: transitions to RUNNING (no cache loading needed)
+        auto streams_status = scheduler.schedule();
+        ASSERT_TRUE(streams_status.ok());
+        ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
+        ASSERT_EQ(scheduler.runningStreamsSize(), 1);
+
+        stream1->reportEvent(StreamEvents::GenerateDone);
+        auto streams_status2 = scheduler.schedule();
+
+        ASSERT_TRUE(streams_status2.ok());
+        ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
+        ASSERT_EQ(scheduler.runningStreamsSize(), 0);
+        ASSERT_EQ(cache_manager->freeBlocksNum(), 20);
+    }
+
+    {
+        // After fix (commit 2238d50cf): checkInputLength no longer rejects when
+        // inputLength * currentBatchSize > max_batch_tokens_size. Such requests must
+        // be admitted to the waiting queue; the per-round token-budget constraint is
+        // enforced later in evaluateRunningMemory using contextLength (not batch_size).
+        autil::EnvGuard perf_scope("PERF_TEST", "1");
+
+        std::shared_ptr<GenerateInput> query2         = make_shared<GenerateInput>();
+        query2->input_ids                             = torch::tensor({1, 2, 3, 4, 5, 6, 7}, torch::kInt32);
+        query2->generate_config                       = makeTestGenerateConfig();
+        query2->generate_config->num_return_sequences = 20;
+        shared_ptr<GenerateStream> stream2 =
+            make_shared<NormalGenerateStream>(query2, model_config, runtime_config, resource_context, nullptr);
+        // input_len 7 * batch_size 20 = 140 > max_batch_tokens_size 100, but enqueue still succeeds.
+        ASSERT_TRUE(scheduler.enqueue(stream2).ok());
+        ASSERT_FALSE(stream2->hasError());
+        ASSERT_EQ(scheduler.waitingStreamsSize(), 1);
+    }
 }
 
 // Regression test for commit 2238d50cf: removing the
@@ -464,13 +686,13 @@ static std::shared_ptr<GenerateStream> makeStream(const std::vector<int>& ids,
                                                   const ModelConfig&      model_config,
                                                   const RuntimeConfig&    runtime_config,
                                                   const ResourceContext&  resource_context,
-                                                  int                     max_new_tokens      = 1,
+                                                  int                     max_new_tokens       = 1,
                                                   int                     num_return_sequences = 1,
-                                                  const std::vector<int>&  variable_num_beams   = {}) {
-    auto query             = std::make_shared<GenerateInput>();
-    query->input_ids       = torch::tensor(ids, torch::kInt32);
-    query->generate_config = makeTestGenerateConfig();
-    query->generate_config->max_new_tokens      = max_new_tokens;
+                                                  const std::vector<int>& variable_num_beams   = {}) {
+    auto query                                   = std::make_shared<GenerateInput>();
+    query->input_ids                             = torch::tensor(ids, torch::kInt32);
+    query->generate_config                       = makeTestGenerateConfig();
+    query->generate_config->max_new_tokens       = max_new_tokens;
     query->generate_config->num_return_sequences = num_return_sequences;
     query->generate_config->variable_num_beams   = variable_num_beams;
     return std::make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
@@ -1139,7 +1361,7 @@ TEST_F(FIFOSchedulerTest, testPrefillAdmissionAccountsFanOutAtShortLifetimePeak)
 }
 
 TEST_F(FIFOSchedulerTest, testPeakEstimateSharesAlignedPromptAcrossMaximumBatchWidth) {
-    CacheConfig cache_config = makeMhaCacheConfig(1, 64, 1, 4, 4, rtp_llm::DataType::TYPE_FP16);
+    CacheConfig cache_config  = makeMhaCacheConfig(1, 64, 1, 4, 4, rtp_llm::DataType::TYPE_FP16);
     auto        cache_manager = std::make_shared<KVCacheManager>(cache_config);
     ASSERT_TRUE(cache_manager->init());
 
@@ -1151,20 +1373,20 @@ TEST_F(FIFOSchedulerTest, testPeakEstimateSharesAlignedPromptAcrossMaximumBatchW
     RuntimeConfig runtime_config;
 
     const std::vector<int> aligned_prompt{1, 2, 3, 4, 5, 6, 7, 8};
-    auto single_beam = makeStream(aligned_prompt,
+    auto                   single_beam  = makeStream(aligned_prompt,
                                   model_config,
                                   runtime_config,
                                   resource_context,
                                   /*max_new_tokens=*/3,
                                   /*num_return_sequences=*/1,
                                   /*variable_num_beams=*/{1});
-    auto multi_return = makeStream(aligned_prompt,
+    auto                   multi_return = makeStream(aligned_prompt,
                                    model_config,
                                    runtime_config,
                                    resource_context,
                                    /*max_new_tokens=*/3,
                                    /*num_return_sequences=*/4);
-    auto dynamic_beam = makeStream(aligned_prompt,
+    auto                   dynamic_beam = makeStream(aligned_prompt,
                                    model_config,
                                    runtime_config,
                                    resource_context,
@@ -1221,7 +1443,7 @@ TEST_F(FIFOSchedulerTest, testMultiSequenceAdmissionMatchesPhysicalFreeBlockWate
     ASSERT_EQ(first_prefill.value().size(), 1);
     ASSERT_EQ(cache_manager->freeBlocksNum(), 6);
 
-    auto candidate = makeStream({1, 2, 3, 4, 5, 6, 7, 8},
+    auto         candidate             = makeStream({1, 2, 3, 4, 5, 6, 7, 8},
                                 model_config,
                                 runtime_config,
                                 resource_context,
@@ -1392,7 +1614,7 @@ TEST_F(FIFOSchedulerTest, testScheduleBatchKVAdmissionCostAcrossWaitingCounts) {
 
     for (const int stream_count : {256, 512}) {
         // Block zero is unavailable for allocation, leaving exactly one physical block per stream.
-        auto cache_config = makeMhaCacheConfig(/*layer_num=*/1,
+        auto          cache_config = makeMhaCacheConfig(/*layer_num=*/1,
                                                /*block_num=*/stream_count + 1,
                                                /*local_head_num_kv=*/1,
                                                /*size_per_head=*/4,
@@ -1400,8 +1622,7 @@ TEST_F(FIFOSchedulerTest, testScheduleBatchKVAdmissionCostAcrossWaitingCounts) {
                                                rtp_llm::DataType::TYPE_FP16);
         KVCacheConfig kv_cache_config;
         kv_cache_config.reserve_block_ratio = 0;
-        auto cache_manager =
-            std::make_shared<KVCacheManager>(cache_config, /*warmup=*/false, nullptr, kv_cache_config);
+        auto cache_manager = std::make_shared<KVCacheManager>(cache_config, /*warmup=*/false, nullptr, kv_cache_config);
         ASSERT_TRUE(cache_manager->init());
         ASSERT_EQ(cache_manager->availableBlocksNum(), stream_count);
         ASSERT_EQ(cache_manager->reserveBlocksNum(), 0);
@@ -1444,8 +1665,8 @@ TEST_F(FIFOSchedulerTest, testScheduleBatchKVAdmissionCostAcrossWaitingCounts) {
         ASSERT_EQ(scheduler.pendingDecodeStreamsSize(), stream_count);
         ASSERT_EQ(cache_manager->freeBlocksNum(), 0);
 
-        std::cout << "[KV_BATCH_ADMISSION_COST] waiting_streams=" << stream_count
-                  << " schedule_total_ms=" << elapsed_ms << std::endl;
+        std::cout << "[KV_BATCH_ADMISSION_COST] waiting_streams=" << stream_count << " schedule_total_ms=" << elapsed_ms
+                  << std::endl;
         RecordProperty("waiting_streams_" + std::to_string(stream_count) + "_schedule_total_ms", elapsed_ms);
         // Keep ample headroom for loaded CI hosts while bounding scheduler-lock latency for the largest batch.
         EXPECT_LT(elapsed_ms, 100);
@@ -1453,7 +1674,7 @@ TEST_F(FIFOSchedulerTest, testScheduleBatchKVAdmissionCostAcrossWaitingCounts) {
 }
 
 TEST_F(FIFOSchedulerTest, testReserveOnlyLimitsInitialAllocationNotLifecycleGrowth) {
-    CacheConfig cache_config = makeMhaCacheConfig(/*layer_num=*/1,
+    CacheConfig   cache_config = makeMhaCacheConfig(/*layer_num=*/1,
                                                   /*block_num=*/11,
                                                   /*local_head_num_kv=*/1,
                                                   /*size_per_head=*/4,
@@ -1599,7 +1820,7 @@ TEST_F(FIFOSchedulerTest, testMaxNewTokensOneDoesNotReserveFinalTokenKVBlock) {
 }
 
 TEST_F(FIFOSchedulerTest, testSinglePrefillDefersReserveCapacityFailureToAllocator) {
-    CacheConfig cache_config = makeMhaCacheConfig(/*layer_num=*/1,
+    CacheConfig   cache_config = makeMhaCacheConfig(/*layer_num=*/1,
                                                   /*block_num=*/11,
                                                   /*local_head_num_kv=*/1,
                                                   /*size_per_head=*/4,
@@ -1607,8 +1828,7 @@ TEST_F(FIFOSchedulerTest, testSinglePrefillDefersReserveCapacityFailureToAllocat
                                                   rtp_llm::DataType::TYPE_FP16);
     KVCacheConfig kv_cache_config;
     kv_cache_config.reserve_block_ratio = 50;
-    auto cache_manager =
-        std::make_shared<KVCacheManager>(cache_config, /*warmup=*/false, nullptr, kv_cache_config);
+    auto cache_manager = std::make_shared<KVCacheManager>(cache_config, /*warmup=*/false, nullptr, kv_cache_config);
     ASSERT_TRUE(cache_manager->init());
     ASSERT_EQ(cache_manager->totalBlocksNum(), 10);
     ASSERT_EQ(cache_manager->reserveBlocksNum(), 5);
@@ -2425,207 +2645,6 @@ TEST_F(FIFOSchedulerTest, explicitGroupResidualPrecedesFollowingExplicitGroup) {
     EXPECT_EQ(following_group[0]->getStatus(), StreamState::RUNNING);
 }
 
-TEST_F(FIFOSchedulerTest, testReserveBlocksOnlyAffectInitMallocNotIncrMalloc) {
-    CacheConfig cache_config = makeMhaCacheConfig(/*layer_num=*/1,
-                                                  /*block_num=*/11,
-                                                  /*local_head_num_kv=*/1,
-                                                  /*size_per_head=*/4,
-                                                  /*tokens_per_block=*/1,
-                                                  rtp_llm::DataType::TYPE_FP16);
-
-    KVCacheConfig kv_cache_config;
-    kv_cache_config.reserve_block_ratio = 50;  // reserve = 5 blocks
-
-    std::shared_ptr<KVCacheManager> cache_manager =
-        std::make_shared<KVCacheManager>(cache_config, /*warmup=*/false, nullptr, kv_cache_config);
-    ASSERT_TRUE(cache_manager->init());
-    ASSERT_EQ(cache_manager->freeBlocksNum(), 10);
-
-    ResourceContext resource_context;
-    resource_context.cache_manager = cache_manager;
-    resource_context.reuse_cache   = false;
-
-    ModelConfig model_config;
-    model_config.max_seq_len = 8192;
-    RuntimeConfig runtime_config;
-    runtime_config.max_generate_batch_size                     = 100;
-    runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
-    PDSepConfig         pd_sep_config;
-    ParallelismConfig   parallelism_config;
-    ModelSpecificConfig model_specific_config;
-    FIFOScheduler       scheduler(
-        runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
-
-    // Init need 4 blocks, should pass: 10 >= 4 + 5.
-    std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
-    query->input_ids                     = torch::tensor({1, 2, 3, 4}, torch::kInt32);
-    query->generate_config               = make_shared<GenerateConfig>();
-
-    shared_ptr<GenerateStream> stream =
-        make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
-    ASSERT_TRUE(scheduler.enqueue(stream).ok());
-
-    // Single schedule: stream calls initKVBlock and asyncLoadCache (returns false)
-    // Since no cache loading is needed, stream transitions directly to RUNNING in one schedule call
-    auto streams_status1 = scheduler.schedule();
-    ASSERT_TRUE(streams_status1.ok());
-    ASSERT_EQ(streams_status1.value().size(), 1);
-    ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
-    ASSERT_FALSE(stream->hasError());
-
-    stream->setSeqLength(9);
-    auto streams_status2 = scheduler.schedule();
-    ASSERT_TRUE(streams_status2.ok());
-    ASSERT_EQ(streams_status2.value().size(), 1);
-    ASSERT_FALSE(stream->hasError());
-}
-
-TEST_F(FIFOSchedulerTest, testReuseCache) {
-    CacheConfig                     cache_config  = makeMhaCacheConfig(1, 11, 1, 4, 2, rtp_llm::DataType::TYPE_FP16);
-    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config);
-    ASSERT_TRUE(cache_manager->init());
-    ASSERT_EQ(cache_manager->freeBlocksNum(), 10);
-    ResourceContext resource_context;
-    resource_context.cache_manager = cache_manager;
-    resource_context.reuse_cache   = true;
-
-    ModelConfig model_config;
-    model_config.max_seq_len = 8192;
-    RuntimeConfig runtime_config;
-    runtime_config.max_generate_batch_size                     = 100;
-    runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
-    PDSepConfig         pd_sep_config;
-    ParallelismConfig   parallelism_config;
-    ModelSpecificConfig model_specific_config;
-    FIFOScheduler       scheduler(
-        runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
-
-    std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
-    query->input_ids                     = torch::tensor({1, 2, 3, 4, 5}, torch::kInt32);
-    query->generate_config               = make_shared<GenerateConfig>();
-    shared_ptr<GenerateStream> stream1 =
-        make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
-    ASSERT_TRUE(scheduler.enqueue(stream1).ok());
-
-    // Single schedule: stream calls initKVBlock and asyncLoadCache (returns false without enable_memory_cache)
-    // Since no cache loading is needed, stream transitions directly to RUNNING in one schedule call
-    auto streams_status = scheduler.schedule();
-    ASSERT_TRUE(streams_status.ok());
-    ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
-    ASSERT_EQ(scheduler.runningStreamsSize(), 1);
-
-    // Stream is already running, no need for second schedule
-    auto streams_status2 = scheduler.schedule();
-    ASSERT_TRUE(streams_status2.ok());
-    ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
-    ASSERT_EQ(scheduler.runningStreamsSize(), 1);
-    ASSERT_EQ(cache_manager->freeBlocksNum(), 7);
-
-    stream1->reportEvent(StreamEvents::GenerateDone);
-    auto streams_status3 = scheduler.schedule();
-
-    ASSERT_TRUE(streams_status3.ok());
-    ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
-    ASSERT_EQ(scheduler.runningStreamsSize(), 0);
-    ASSERT_EQ(cache_manager->freeBlocksNum(), 8);
-
-    std::shared_ptr<GenerateInput> query2 = make_shared<GenerateInput>();
-    query2->input_ids                     = torch::tensor({1, 2, 3, 4, 5, 6, 7}, torch::kInt32);
-    query2->generate_config               = make_shared<GenerateConfig>();
-    shared_ptr<GenerateStream> stream2 =
-        make_shared<NormalGenerateStream>(query2, model_config, runtime_config, resource_context, nullptr);
-    ASSERT_TRUE(scheduler.enqueue(stream2).ok());
-
-    // Third schedule for stream2: transitions to RUNNING in single call (no cache loading needed)
-    auto streams_status4 = scheduler.schedule();
-    ASSERT_TRUE(streams_status4.ok());
-    ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
-    ASSERT_EQ(scheduler.runningStreamsSize(), 1);
-    ASSERT_EQ(cache_manager->freeBlocksNum(), 6);
-
-    stream2->reportEvent(StreamEvents::GenerateDone);
-    auto streams_status6 = scheduler.schedule();
-    ASSERT_TRUE(streams_status6.ok());
-    ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
-    ASSERT_EQ(scheduler.runningStreamsSize(), 0);
-    ASSERT_EQ(cache_manager->freeBlocksNum(), 7);
-}
-
-TEST_F(FIFOSchedulerTest, testMaxContextBatchSize) {
-    CacheConfig                     cache_config  = makeMhaCacheConfig(1, 21, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
-    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config);
-    ASSERT_TRUE(cache_manager->init());
-    ASSERT_EQ(cache_manager->freeBlocksNum(), 20);
-    ResourceContext resource_context;
-    resource_context.cache_manager = cache_manager;
-    resource_context.reuse_cache   = true;
-
-    ModelConfig model_config;
-    model_config.max_seq_len = 100;
-    RuntimeConfig runtime_config;
-    runtime_config.max_generate_batch_size                      = 1;
-    runtime_config.fifo_scheduler_config.max_context_batch_size = 1;
-    runtime_config.fifo_scheduler_config.max_batch_tokens_size  = 100;
-    PDSepConfig         pd_sep_config;
-    ParallelismConfig   parallelism_config;
-    ModelSpecificConfig model_specific_config;
-    FIFOScheduler       scheduler(
-        runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
-
-    {
-        // test normalcase
-        std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
-        query->input_ids                     = torch::tensor({1, 2, 3, 4, 5}, torch::kInt32);
-        query->generate_config               = make_shared<GenerateConfig>();
-        shared_ptr<GenerateStream> stream1 =
-            make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
-        ASSERT_TRUE(scheduler.enqueue(stream1).ok());
-
-        // Single schedule: transitions to RUNNING (no cache loading needed)
-        auto streams_status = scheduler.schedule();
-        ASSERT_TRUE(streams_status.ok());
-        ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
-        ASSERT_EQ(scheduler.runningStreamsSize(), 1);
-
-        stream1->reportEvent(StreamEvents::GenerateDone);
-        auto streams_status2 = scheduler.schedule();
-
-        ASSERT_TRUE(streams_status2.ok());
-        ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
-        ASSERT_EQ(scheduler.runningStreamsSize(), 0);
-        ASSERT_EQ(cache_manager->freeBlocksNum(), 20);
-    }
-
-    {
-        // test normal case with tile num
-        std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
-        query->input_ids                     = torch::tensor({1, 2, 3, 4, 5}, torch::kInt32);
-        query->generate_config               = make_shared<GenerateConfig>();
-        query->generate_config->num_beams    = 2;
-        shared_ptr<GenerateStream> stream1 =
-            make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
-        ASSERT_TRUE(scheduler.enqueue(stream1).ok());
-
-        // Single schedule: transitions to RUNNING (no cache loading needed)
-        auto streams_status = scheduler.schedule();
-        ASSERT_TRUE(streams_status.ok());
-        ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
-        ASSERT_EQ(scheduler.runningStreamsSize(), 1);
-
-        stream1->reportEvent(StreamEvents::GenerateDone);
-        auto streams_status2 = scheduler.schedule();
-
-        ASSERT_TRUE(streams_status2.ok());
-        ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
-        ASSERT_EQ(scheduler.runningStreamsSize(), 0);
-        ASSERT_EQ(cache_manager->freeBlocksNum(), 20);
-    }
-
-    // NOTE: the historical "abnormal case" that expected enqueue-time rejection of
-    // input_len * batch_size fan-out was removed: checkInputLength deliberately
-    // ignores fan-out (see testCheckInputLengthIgnoresBatchSizeFanOut and commit
-    // 2238d50cf); per-round token budgeting happens at schedule time instead.
-}
 
 TEST_F(FIFOSchedulerTest, testEnqueueGroup) {
     CacheConfig                     cache_config  = makeMhaCacheConfig(1, 4, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);

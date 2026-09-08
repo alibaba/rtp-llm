@@ -17,16 +17,18 @@ enum class CacheGroupType : int8_t {
     SWA    = 2,
 };
 
-enum class CacheReusePolicy : int8_t {
-    REUSABLE     = 0,
-    NON_REUSABLE = 1,
-};
-
-enum class CacheEvictPolicy : int8_t {
-    CHAIN       = 0,
-    INDEPENDENT = 1,
-    NONE        = 2,
-};
+inline const char* metricCacheGroupTypeName(CacheGroupType group_type) {
+    if (group_type == CacheGroupType::LINEAR) {
+        return "linear";
+    }
+    if (group_type == CacheGroupType::FULL) {
+        return "full";
+    }
+    if (group_type == CacheGroupType::SWA) {
+        return "swa";
+    }
+    return "unknown";
+}
 
 enum class CacheMemoryPlacement : int8_t {
     DEVICE      = 0,
@@ -49,7 +51,6 @@ enum class CpBlockSliceMode : int8_t {
 struct CacheGroupPolicy {
     CacheGroupType       group_type             = CacheGroupType::FULL;
     bool                 enable_prefix_reuse    = true;
-    CacheEvictPolicy     evict_policy           = CacheEvictPolicy::CHAIN;
     bool                 reservable             = true;
     uint32_t             explicit_block_num     = 0;
     bool                 charge_to_paged_budget = false;
@@ -58,6 +59,9 @@ struct CacheGroupPolicy {
     bool                 validate_tail_blocks   = true;
     CpBlockMappingMode   cp_mapping             = CpBlockMappingMode::NONE;
     CpBlockSliceMode     cp_slice               = CpBlockSliceMode::NONE;
+    // Model-derived SWA attention window in tokens. Zero means no bounded
+    // window is configured and remains the default for non-SWA groups.
+    int sliding_window_size = 0;
 };
 
 // One cache-store registration step: pair a cache key from the full logical
@@ -75,7 +79,9 @@ inline std::vector<CacheStoreBlockPair> buildCacheStorePlan(const CacheGroupPoli
                                                             size_t                  reuse_block_size,
                                                             bool                    use_hybrid,
                                                             int                     cp_rank,
-                                                            int                     cp_size) {
+                                                            int                     cp_size,
+                                                            size_t                  unsharded_key_stride = 1,
+                                                            size_t                  cache_key_count      = 0) {
     std::vector<CacheStoreBlockPair> plan;
     if (total_logical_blocks == 0) {
         return plan;
@@ -111,7 +117,19 @@ inline std::vector<CacheStoreBlockPair> buildCacheStorePlan(const CacheGroupPoli
         if (sharded_full && block_pos % cp_size != cp_rank) {
             continue;
         }
-        plan.push_back({block_pos, sharded_full ? block_pos / cp_size : block_pos});
+        int key_index = block_pos;
+        if (cp_size == 1 && unsharded_key_stride > 1) {
+            if (cache_key_count == 0) {
+                return {};
+            }
+            // An unsharded tag-local block may span several entries in the
+            // global cache-key namespace. Its identity is the terminal hash of
+            // that span; the final partial block uses the last available key.
+            const size_t full_spans   = cache_key_count / unsharded_key_stride;
+            const size_t terminal_key = pos < full_spans ? (pos + 1) * unsharded_key_stride - 1 : cache_key_count - 1;
+            key_index                 = static_cast<int>(terminal_key);
+        }
+        plan.push_back({key_index, sharded_full ? block_pos / cp_size : block_pos});
     }
     return plan;
 }
@@ -126,18 +144,6 @@ inline const char* cacheGroupTypeName(CacheGroupType group_type) {
             return "SWA";
     }
     return "UNKNOWN";
-}
-
-inline const char* cacheEvictPolicyName(CacheEvictPolicy evict_policy) {
-    switch (evict_policy) {
-        case CacheEvictPolicy::CHAIN:
-            return "chain";
-        case CacheEvictPolicy::INDEPENDENT:
-            return "independent";
-        case CacheEvictPolicy::NONE:
-            return "none";
-    }
-    return "unknown";
 }
 
 inline CacheGroupPolicy defaultCacheGroupPolicy(CacheGroupType group_type) {

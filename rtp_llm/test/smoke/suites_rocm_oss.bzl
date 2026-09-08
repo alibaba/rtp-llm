@@ -163,8 +163,8 @@ def rocm_oss_suites():
                 name="rocm_pd_qwen3_8b",
                 task_info="data/model/qwen3/q_r_new_model_py.json",
                 smoke_args= {
-                    "prefill": "--test_block_num 10 --warm_up 0 --seq_size_per_block 16 --act_type bf16 --use_swizzleA 1 --use_asm_pa 1 --disable_flashinfer_native 1 --use_aiter_pa 1 --use_local 1 --role_type PREFILL --world_size 1",
-                    "decode": "--test_block_num 10 --warm_up 0 --seq_size_per_block 16 --act_type bf16 --use_swizzleA 1 --use_asm_pa 1 --disable_flashinfer_native 1 --use_aiter_pa 1 --use_local 1 --role_type DECODE --world_size 1"
+                    "prefill": "--test_block_num 10 --device_cache_min_free_blocks 1 --warm_up 0 --seq_size_per_block 16 --act_type bf16 --use_swizzleA 1 --use_asm_pa 1 --disable_flashinfer_native 1 --use_aiter_pa 1 --use_local 1 --role_type PREFILL --world_size 1",
+                    "decode": "--test_block_num 10 --device_cache_min_free_blocks 1 --warm_up 0 --seq_size_per_block 16 --act_type bf16 --use_swizzleA 1 --use_asm_pa 1 --disable_flashinfer_native 1 --use_aiter_pa 1 --use_local 1 --role_type DECODE --world_size 1"
                 },
                 gpu_type=["MI308X-ROCM7"]
             ),

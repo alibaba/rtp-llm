@@ -24,6 +24,8 @@ public:
         config << "alog.rootLogger=INFO, " << appender << "\n"
                << "alog.logger.engine=INFO, " << appender << "\n"
                << "inherit.engine=false\n"
+               << "alog.logger.console=INFO, " << appender << "\n"
+               << "inherit.console=false\n"
                << "alog.appender." << appender << "=FileAppender\n"
                << "alog.appender." << appender << ".fileName=" << log_path_ << "\n"
                << "alog.appender." << appender << ".layout=PatternLayout\n"

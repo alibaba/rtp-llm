@@ -42,8 +42,9 @@ private:
 };
 
 struct CustomConfig {
-    bool                                    reuse_cache        = false;
-    DataType                                kv_cache_data_type = DataType::TYPE_FP16;
+    bool                                    reuse_cache         = false;
+    bool                                    enable_device_cache = true;
+    DataType                                kv_cache_data_type  = DataType::TYPE_FP16;
     std::map<std::string, std::vector<int>> multi_task_prompt_tokens;
     std::vector<int64_t>                    output_vocab_ids;  // non-empty enables output-vocab pruning
     bool                                    prefill_cp_enabled  = false;
@@ -69,7 +70,9 @@ rtp_llm::EngineInitParams createEngineInitParams(const CustomConfig&     config,
     model_config.attn_config.kv_head_num                        = 2;
     model_config.activation_type                                = ActivationType::Silu;
     kv_cache_config.test_block_num                              = 100;
+    kv_cache_config.device_cache_min_free_blocks                = 1;
     kv_cache_config.reuse_cache                                 = config.reuse_cache;
+    kv_cache_config.enable_device_cache                         = config.enable_device_cache;
     kv_cache_config.multi_task_prompt_tokens                    = config.multi_task_prompt_tokens;
     runtime_config.max_generate_batch_size                      = 128;
     runtime_config.fifo_scheduler_config.max_context_batch_size = 128;

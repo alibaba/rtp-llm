@@ -62,6 +62,9 @@ void registerPyOpDefs(pybind11::module& m) {
         .def("get_layer_cache",
              static_cast<LayerKVCache (KVCache::*)(int, const std::string&) const>(&KVCache::getLayerCache),
              "Return a LayerKVCache for the given layer and tag")
+        .def("has_layer_cache",
+             &KVCache::hasLayerCache,
+             "Return whether the layer owns an allocated cache tensor for the tag")
         .def("get_layer_cache_groups",
              &KVCache::getLayerCacheGroups,
              "Return every valid LayerKVCache group owned by the layer")

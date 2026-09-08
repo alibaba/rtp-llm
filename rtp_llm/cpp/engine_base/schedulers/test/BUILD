@@ -31,7 +31,6 @@ test_deps = [
 async_cache_test_deps = test_deps + [
     "//rtp_llm/cpp/cache/test:cache_config_test_utils",
     "//rtp_llm/cpp/cache/test/mock:mock_allocator_lib",
-    "//rtp_llm/cpp/cache/connector/test/mock:connector_mock_files_lib",
 ]
 
 cc_test(
@@ -62,4 +61,12 @@ cc_test(
         "TEST_USING_DEVICE": "CUDA",
     },
     exec_properties = {'gpu':'A10'},
+)
+
+cc_test(
+    name = "batch_decode_scheduler_stop_test",
+    srcs = ["BatchDecodeSchedulerStopTest.cc"],
+    copts = copts(),
+    deps = test_deps,
+    exec_properties = {'gpu':'H20'},
 )

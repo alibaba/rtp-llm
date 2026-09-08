@@ -13,25 +13,6 @@ size_t groupSeqSize(const CacheConfig& config, size_t gid, size_t fallback) {
     return gid < static_cast<size_t>(config.groupNums()) ? config.seqSizePerBlockForGroup(gid) : fallback;
 }
 
-bool isCompactFullBlockList(const KVCacheResource&  source,
-                            const BlockIndicesType& src_blocks,
-                            const CacheKeysType&    selected_keys) {
-    return src_blocks.size() <= selected_keys.size() || src_blocks.size() < source.cacheKeys().size();
-}
-
-bool selectedLastRankKeysAreAligned(const KVCacheResource& source, int cp_size) {
-    if (source.lastBlockAligned()) {
-        return true;
-    }
-    const auto& keys = source.cacheKeys();
-    if (keys.empty() || cp_size <= 1) {
-        return source.lastBlockAligned();
-    }
-    const int partial_key_pos = static_cast<int>(keys.size() - 1);
-    const int last_rank       = cp_size - 1;
-    return partial_key_pos % cp_size != last_rank;
-}
-
 }  // namespace
 
 CPSlotMapper::CPSlotMapper(): cp_rank_(0), cp_size_(1), block_size_(1), virtual_block_size_(1) {}
@@ -103,6 +84,17 @@ size_t CPSlotMapper::logicalSeqSizePerBlock(const CacheConfig& config, size_t gi
         return static_cast<size_t>(virtual_block_size_);
     }
     return groupSeqSize(config, gid, config.seq_size_per_block);
+}
+
+int CPSlotMapper::reuseBlockTokens(const CacheConfig& config) const {
+    if (isSharded()) {
+        for (size_t gid = 0; gid < static_cast<size_t>(config.groupNums()); ++gid) {
+            if (config.typeForGroup(gid) == CacheGroupType::FULL) {
+                return static_cast<int>(logicalSeqSizePerBlock(config, gid));
+            }
+        }
+    }
+    return static_cast<int>(config.seq_size_per_block);
 }
 
 CacheKeysType CPSlotMapper::canonicalCacheKeys(const CacheKeysType& full_keys) const {
@@ -191,60 +183,6 @@ std::vector<BlockInfo> CPSlotMapper::sliceBlockForPeer(const CacheConfig&     co
     block.addr       = static_cast<void*>(static_cast<char*>(block.addr) + slice_offset);
     block.size_bytes = slice_bytes;
     return parts;
-}
-
-KVCacheResource CPSlotMapper::projectConnectorResource(const KVCacheResource& source,
-                                                       const CacheConfig&     config,
-                                                       const CacheKeysType&   selected_keys) const {
-    KVCacheResource selected = source;
-    selected.initGroups(config.topologyPtr());
-    selected.setCacheKeys(selected_keys);
-    const bool selected_aligned = selectedLastRankKeysAreAligned(source, cp_size_);
-    selected.setLastBlockAligned(selected_aligned);
-
-    // Memory connector intentionally drops the last key to avoid matching a
-    // partial tail.  After CP Page-RR remap, a source partial can belong to a
-    // non-last rank, making the selected last-rank key complete.  Append the
-    // original partial key as a connector-only dummy tail so the drop-last
-    // contract discards the dummy, not the usable selected key.
-    if (!source.lastBlockAligned() && selected_aligned && !source.cacheKeys().empty()) {
-        selected.cacheKeys().push_back(source.cacheKeys().back());
-        selected.rebuildLinearBlockDependencies();
-        selected.setLastBlockAligned(false);
-    }
-
-    for (int gid = 0; gid < source.groupNums(); ++gid) {
-        const auto&      src_blocks = source.blocks(gid);
-        BlockIndicesType dst_blocks;
-        dst_blocks.reserve(selected_keys.size());
-
-        const auto layout = layoutForGroup(config, static_cast<size_t>(gid));
-        if (layout.slice != CpBlockSliceMode::NONE) {
-            for (size_t i = 0; i < selected_keys.size(); ++i) {
-                dst_blocks.push_back(i < src_blocks.size() ? src_blocks[i] : NULL_BLOCK_IDX);
-            }
-        } else if (layout.mapping == CpBlockMappingMode::BLOCK_ROUND_ROBIN) {
-            if (isCompactFullBlockList(source, src_blocks, selected_keys)) {
-                for (size_t i = 0; i < selected_keys.size(); ++i) {
-                    dst_blocks.push_back(i < src_blocks.size() ? src_blocks[i] : NULL_BLOCK_IDX);
-                }
-            } else {
-                for (size_t logical_pos = static_cast<size_t>(cp_size_ - 1); dst_blocks.size() < selected_keys.size();
-                     logical_pos += static_cast<size_t>(cp_size_)) {
-                    dst_blocks.push_back(logical_pos < src_blocks.size() ? src_blocks[logical_pos] : NULL_BLOCK_IDX);
-                }
-            }
-        } else {
-            for (size_t logical_pos = static_cast<size_t>(cp_size_ - 1); dst_blocks.size() < selected_keys.size();
-                 logical_pos += static_cast<size_t>(cp_size_)) {
-                dst_blocks.push_back(logical_pos < src_blocks.size() ? src_blocks[logical_pos] : NULL_BLOCK_IDX);
-            }
-        }
-
-        selected.mutableBlockIds(gid).assign(std::move(dst_blocks));
-    }
-
-    return selected;
 }
 
 }  // namespace rtp_llm

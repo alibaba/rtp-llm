@@ -1,6 +1,7 @@
 import logging
 import multiprocessing
 import os
+import signal
 import sys
 import time
 import traceback
@@ -28,6 +29,7 @@ from rtp_llm.utils.process_manager import (
     DEFER_FIRST_SIGTERM_SECONDS_ENV,
     DEFER_FIRST_SIGTERM_VALUE,
     ProcessManager,
+    parent_shutdown_timeout,
 )
 from rtp_llm.utils.warmup import configure_warmup
 
@@ -650,7 +652,11 @@ def start_server(py_env_configs: PyEnvConfigs):
 
     # Create process manager with config values
     process_manager = ProcessManager(
-        shutdown_timeout=py_env_configs.server_config.shutdown_timeout,
+        # The backend owns another ProcessManager for its local ranks. Let the
+        # child deadline expire before the outer manager may escalate.
+        shutdown_timeout=parent_shutdown_timeout(
+            py_env_configs.server_config.shutdown_timeout
+        ),
         monitor_interval=py_env_configs.server_config.monitor_interval,
         frontend_pre_stop_drain_seconds=(
             py_env_configs.server_config.frontend_pre_stop_drain_seconds
@@ -689,7 +695,10 @@ def start_server(py_env_configs: PyEnvConfigs):
         if py_env_configs.role_config.role_type == RoleType.VIT:
             logging.info("start vit server")
             vit_processes = start_vit_server_impl(py_env_configs, process_manager)
-            process_manager.add_processes(vit_processes)
+            process_manager.add_processes(
+                vit_processes,
+                expected_shutdown_exit_codes={-signal.SIGTERM},
+            )
 
         if (
             py_env_configs.role_config.role_type != RoleType.FRONTEND
@@ -708,7 +717,11 @@ def start_server(py_env_configs: PyEnvConfigs):
             frontend_process = start_frontend_server_impl(
                 global_controller, py_env_configs, process_manager
             )
-            process_manager.add_processes(frontend_process, shutdown_group="frontend")
+            process_manager.add_processes(
+                frontend_process,
+                shutdown_group="frontend",
+                expected_shutdown_exit_codes={-signal.SIGTERM},
+            )
 
             logging.info("start dash_sc server")
             dash_sc_processes = start_dash_sc_server_impl(
@@ -721,8 +734,14 @@ def start_server(py_env_configs: PyEnvConfigs):
 
         # Start parallel health checks and wait for completion
         if not process_manager.run_health_checks():
-            logging.error("[START_SERVER] Health checks failed")
-            raise Exception("Health checks failed")
+            if process_manager.shutdown_requested:
+                logging.info(
+                    "[START_SERVER] Shutdown requested while health checks were running"
+                )
+                return
+            else:
+                logging.error("[START_SERVER] Health checks failed")
+                raise Exception("Health checks failed")
 
         _maybe_run_startup_real_warmup(py_env_configs)
         _mark_startup_warmup_health_gate_ready(startup_warmup_gate_file)
@@ -742,7 +761,8 @@ def start_server(py_env_configs: PyEnvConfigs):
         if not process_manager.shutdown_requested:
             process_manager.request_failure_shutdown()
     finally:
-        process_manager.monitor_and_release_processes()
+        if not process_manager.monitor_and_release_processes():
+            raise RuntimeError("one or more managed server processes exited abnormally")
 
 
 def _get_startup_real_warmup_pow2_lens(max_len: int):
@@ -950,7 +970,8 @@ async def _run_startup_real_warmup_grpc(py_env_configs: PyEnvConfigs):
                     can_use_pd_separation=False,
                     reuse_cache=False,
                     enable_device_cache=False,
-                    enable_memory_cache=False,
+                    enable_host_cache=False,
+                    enable_disk_cache=False,
                     enable_remote_cache=False,
                     aux_info=True,
                     timeout_ms=timeout_ms,

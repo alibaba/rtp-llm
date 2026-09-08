@@ -3,6 +3,7 @@
 #include "rtp_llm/cpp/model_rpc/DecodeRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
+#include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/testing/TestLogCapture.h"
 
 namespace rtp_llm {
@@ -68,6 +69,17 @@ KeyOffsetPairs keyOffsetPairs(const std::vector<CacheStoreBlockPair>& plan) {
     return pairs;
 }
 
+std::shared_ptr<NormalGenerateStream> makeGenerateStream(int seq_length, ResourceContext resource_context = {}) {
+    auto input             = std::make_shared<GenerateInput>();
+    input->generate_config = std::make_shared<GenerateConfig>();
+    input->input_ids       = torch::zeros({seq_length}, torch::kInt32);
+
+    ModelConfig model_config;
+    model_config.max_seq_len = seq_length + 16;
+    return std::make_shared<NormalGenerateStream>(
+        input, model_config, RuntimeConfig{}, std::move(resource_context), nullptr);
+}
+
 }  // namespace
 
 TEST(ModelRpcProtoTest, GroupedCacheFieldsPreserveLegacyNumbers) {
@@ -84,6 +96,10 @@ TEST(ModelRpcProtoTest, GroupedCacheFieldsPreserveLegacyNumbers) {
     EXPECT_EQ(broadcast->FindFieldByName("prefill_cp_size")->number(), 13);
     EXPECT_EQ(broadcast->FindFieldByName("tagged_group_block_ids")->number(), 14);
 
+    const auto* response = BroadcastLoadResponsePB::descriptor();
+    ASSERT_NE(response, nullptr);
+    EXPECT_EQ(response->FindFieldByName("loaded_cache_block_count")->number(), 3);
+
     const auto* remote = RemoteOperationRequestPB::descriptor();
     ASSERT_NE(remote, nullptr);
     EXPECT_TRUE(remote->IsReservedNumber(3));
@@ -91,6 +107,156 @@ TEST(ModelRpcProtoTest, GroupedCacheFieldsPreserveLegacyNumbers) {
     EXPECT_EQ(remote->FindFieldByName("block_ids")->number(), 4);
     EXPECT_EQ(remote->FindFieldByName("uris")->number(), 5);
     EXPECT_EQ(remote->FindFieldByName("group_tags")->number(), 6);
+}
+
+TEST(DecodeRpcServerTest, CompletedHandoffPrefixRequiresRealContiguousTransfers) {
+    EXPECT_EQ(DecodeRpcServer::completedHandoffPrefixBlocks(
+                  /*already_reused_blocks=*/0, std::vector<bool>(10, true)),
+              10u);
+    EXPECT_EQ(DecodeRpcServer::completedHandoffPrefixBlocks(
+                  /*already_reused_blocks=*/2, {false, false, true, true, false, true}),
+              4u);
+
+    // A long input alone, an out-of-order transfer, or work confined to the
+    // already reused prefix is not proof of a new P/D handoff prefix.
+    EXPECT_EQ(DecodeRpcServer::completedHandoffPrefixBlocks(/*already_reused_blocks=*/0, {}), 0u);
+    EXPECT_EQ(DecodeRpcServer::completedHandoffPrefixBlocks(/*already_reused_blocks=*/0, {false, true}), 0u);
+    EXPECT_EQ(DecodeRpcServer::completedHandoffPrefixBlocks(
+                  /*already_reused_blocks=*/2, {true, false, false, false}),
+              0u);
+}
+
+TEST(DecodeRpcServerTest, MultiRankHandoffUsesMinimumInsteadOfSummingLogicalBlocks) {
+    EXPECT_EQ(DecodeRpcServer::minLoadedCacheBlockCount({10, 10, 10, 10}), 10u);
+    EXPECT_EQ(DecodeRpcServer::minLoadedCacheBlockCount({10, 8, 10, 9}), 8u);
+    EXPECT_EQ(DecodeRpcServer::minLoadedCacheBlockCount({}), 0u);
+}
+
+TEST(DecodeRpcServerTest, OddTpWorkersWaitForEveryCompletionQueueResponse) {
+    EXPECT_EQ(DecodeRpcServer::completionQueueExpectedResponseCounts(3), (std::vector<size_t>{2, 1}));
+    EXPECT_EQ(DecodeRpcServer::completionQueueExpectedResponseCounts(5), (std::vector<size_t>{2, 2, 1}));
+    EXPECT_EQ(DecodeRpcServer::completionQueueExpectedResponseCounts(4), (std::vector<size_t>{2, 2}));
+    EXPECT_EQ(DecodeRpcServer::completionQueueExpectedResponseCounts(1), (std::vector<size_t>{1}));
+    EXPECT_TRUE(DecodeRpcServer::completionQueueExpectedResponseCounts(0).empty());
+}
+
+TEST(DecodeRpcServerTest, CompletedHandoffPublishesBlockAlignedReuseWithoutLengthInference) {
+    auto stream = makeGenerateStream(/*seq_length=*/2798);
+
+    EXPECT_EQ(DecodeRpcServer::markLoadedCacheReuse(stream,
+                                                    {ErrorInfo::OkStatus(), /*loaded_cache_block_count=*/10},
+                                                    /*seq_size_per_block=*/256,
+                                                    /*use_independent_block_pools=*/true),
+              2560);
+    EXPECT_EQ(stream->initialReuseLength(), 2560);
+    EXPECT_EQ(stream->reuseLength(), 2560);
+    EXPECT_EQ(stream->localReuseLength(), 2560);
+}
+
+TEST(DecodeRpcServerTest, LegacySinglePoolHandoffDoesNotPublishColdReuse) {
+    auto stream = makeGenerateStream(/*seq_length=*/11);
+
+    EXPECT_EQ(DecodeRpcServer::markLoadedCacheReuse(stream,
+                                                    {ErrorInfo::OkStatus(), /*loaded_cache_block_count=*/1},
+                                                    /*seq_size_per_block=*/8,
+                                                    /*use_independent_block_pools=*/false),
+              0);
+    EXPECT_EQ(stream->initialReuseLength(), 0);
+    EXPECT_EQ(stream->reuseLength(), 0);
+    EXPECT_EQ(stream->localReuseLength(), 0);
+}
+
+TEST(DecodeRpcServerTest, CompletedHandoffCapsPhysicalTailAtReusablePromptBoundary) {
+    auto partial_tail_stream = makeGenerateStream(/*seq_length=*/63287);
+    EXPECT_EQ(DecodeRpcServer::markLoadedCacheReuse(partial_tail_stream,
+                                                    {ErrorInfo::OkStatus(), /*loaded_cache_block_count=*/248},
+                                                    /*seq_size_per_block=*/256,
+                                                    /*use_independent_block_pools=*/true),
+              63232);
+    EXPECT_EQ(partial_tail_stream->initialReuseLength(), 63232);
+    EXPECT_EQ(partial_tail_stream->reuseLength(), 63232);
+    EXPECT_EQ(partial_tail_stream->localReuseLength(), 63232);
+
+    auto exact_boundary_stream = makeGenerateStream(/*seq_length=*/2560);
+    EXPECT_EQ(DecodeRpcServer::markLoadedCacheReuse(exact_boundary_stream,
+                                                    {ErrorInfo::OkStatus(), /*loaded_cache_block_count=*/10},
+                                                    /*seq_size_per_block=*/256,
+                                                    /*use_independent_block_pools=*/true),
+              2304);
+    EXPECT_EQ(exact_boundary_stream->initialReuseLength(), 2304);
+}
+
+TEST(DecodeRpcServerTest, FailedOrNoOpHandoffCannotPublishReuse) {
+    auto stream = makeGenerateStream(/*seq_length=*/63287);
+
+    EXPECT_EQ(DecodeRpcServer::markLoadedCacheReuse(stream,
+                                                    {ErrorInfo::OkStatus(), /*loaded_cache_block_count=*/0},
+                                                    /*seq_size_per_block=*/256,
+                                                    /*use_independent_block_pools=*/true),
+              0);
+    EXPECT_EQ(DecodeRpcServer::markLoadedCacheReuse(
+                  stream,
+                  {ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "load failed"), /*loaded_cache_block_count=*/247},
+                  /*seq_size_per_block=*/256,
+                  /*use_independent_block_pools=*/true),
+              0);
+    EXPECT_EQ(stream->initialReuseLength(), 0);
+    EXPECT_EQ(stream->reuseLength(), 0);
+    EXPECT_EQ(stream->localReuseLength(), 0);
+}
+
+TEST(DecodeRpcServerTest, CompletedHandoffDoesNotDowngradeExistingReuse) {
+    auto stream = makeGenerateStream(/*seq_length=*/2798);
+    stream->setInitialReuseLength(2700);
+    stream->setReuseLength(2700);
+    stream->setLocalReuseLength(2700);
+
+    EXPECT_EQ(DecodeRpcServer::markLoadedCacheReuse(stream,
+                                                    {ErrorInfo::OkStatus(), /*loaded_cache_block_count=*/10},
+                                                    /*seq_size_per_block=*/256,
+                                                    /*use_independent_block_pools=*/true),
+              2560);
+    EXPECT_EQ(stream->initialReuseLength(), 2700);
+    EXPECT_EQ(stream->reuseLength(), 2700);
+    EXPECT_EQ(stream->localReuseLength(), 2700);
+}
+
+TEST(DecodeRpcServerTest, RemoteOnlyOrRequestDisabledLocalTierPreservesExistingAttribution) {
+    ResourceContext remote_only_context;
+    remote_only_context.enable_device_cache = false;
+    remote_only_context.enable_remote_cache = true;
+    auto remote_only_stream                 = makeGenerateStream(/*seq_length=*/149, remote_only_context);
+    remote_only_stream->setInitialReuseLength(128);
+    remote_only_stream->setReuseLength(128);
+    remote_only_stream->setRemoteReuseLength(128);
+
+    EXPECT_EQ(DecodeRpcServer::markLoadedCacheReuse(remote_only_stream,
+                                                    {ErrorInfo::OkStatus(), /*loaded_cache_block_count=*/18},
+                                                    /*seq_size_per_block=*/256,
+                                                    /*use_independent_block_pools=*/true),
+              0);
+    EXPECT_EQ(remote_only_stream->initialReuseLength(), 128);
+    EXPECT_EQ(remote_only_stream->localReuseLength(), 0);
+    EXPECT_EQ(remote_only_stream->remoteReuseLength(), 128);
+
+    ResourceContext local_context;
+    local_context.enable_device_cache = true;
+    auto request_disabled_stream      = makeGenerateStream(/*seq_length=*/257, local_context);
+    request_disabled_stream->generate_input_->generate_config->enable_device_cache = false;
+    EXPECT_EQ(DecodeRpcServer::markLoadedCacheReuse(request_disabled_stream,
+                                                    {ErrorInfo::OkStatus(), /*loaded_cache_block_count=*/1},
+                                                    /*seq_size_per_block=*/256,
+                                                    /*use_independent_block_pools=*/true),
+              0);
+
+    local_context.ignore_request_cache_switches = true;
+    auto ignored_switch_stream                  = makeGenerateStream(/*seq_length=*/257, local_context);
+    ignored_switch_stream->generate_input_->generate_config->enable_device_cache = false;
+    EXPECT_EQ(DecodeRpcServer::markLoadedCacheReuse(ignored_switch_stream,
+                                                    {ErrorInfo::OkStatus(), /*loaded_cache_block_count=*/1},
+                                                    /*seq_size_per_block=*/256,
+                                                    /*use_independent_block_pools=*/true),
+              256);
 }
 
 TEST(DecodeRpcServerTest, CPShardedLoadRequestReadsFromEveryPrefillPeer) {
@@ -363,11 +529,61 @@ TEST(DecodeRpcServerTest, CompactStateGroupLoadsGlobalTailKeysIntoCanonicalSlots
     EXPECT_EQ(keyOffsetPairs(plan), (KeyOffsetPairs{{9, 4}, {10, 5}}));
 }
 
+TEST(DecodeRpcServerTest, UnshardedFullGroupUsesTerminalKeyOfEachTagBlock) {
+    auto       policy = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    const auto plan   = DecodeRpcServer::buildGroupLoadPlan(policy,
+                                                          /*local_block_num=*/3,
+                                                          /*cache_key_count=*/6,
+                                                          /*reuse_block_size=*/0,
+                                                          /*use_hybrid=*/true,
+                                                          /*group_seq_size_per_block=*/2,
+                                                          /*base_seq_size_per_block=*/1,
+                                                          /*physical_cp_size=*/1);
+
+    EXPECT_EQ(keyOffsetPairs(plan), (KeyOffsetPairs{{1, 0}, {3, 1}, {5, 2}}));
+}
+
+TEST(DecodeRpcServerTest, UnshardedSameGeometryKeepsCompleteKeyNamespace) {
+    auto       policy = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    const auto plan   = DecodeRpcServer::buildGroupLoadPlan(policy,
+                                                          /*local_block_num=*/44,
+                                                          /*cache_key_count=*/44,
+                                                          /*reuse_block_size=*/0,
+                                                          /*use_hybrid=*/false,
+                                                          /*group_seq_size_per_block=*/8,
+                                                          /*base_seq_size_per_block=*/8,
+                                                          /*physical_cp_size=*/1);
+
+    ASSERT_EQ(plan.size(), 44u);
+    for (size_t i = 0; i < plan.size(); ++i) {
+        EXPECT_EQ(plan[i].key_index, static_cast<int>(i));
+        EXPECT_EQ(plan[i].offset_index, static_cast<int>(i));
+    }
+}
+
+TEST(DecodeRpcServerTest, PhysicallyShardedFullGroupKeepsLogicalPlanForPeerSplit) {
+    auto       policy = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    const auto plan   = DecodeRpcServer::buildGroupLoadPlan(policy,
+                                                          /*local_block_num=*/11,
+                                                          /*cache_key_count=*/11,
+                                                          /*reuse_block_size=*/0,
+                                                          /*use_hybrid=*/false,
+                                                          /*group_seq_size_per_block=*/8,
+                                                          /*base_seq_size_per_block=*/4,
+                                                          /*physical_cp_size=*/2);
+
+    ASSERT_EQ(plan.size(), 11u);
+    for (size_t i = 0; i < plan.size(); ++i) {
+        EXPECT_EQ(plan[i].key_index, static_cast<int>(i));
+        EXPECT_EQ(plan[i].offset_index, static_cast<int>(i));
+    }
+}
+
 TEST(DecodeRpcServerTest, CompactStateGroupLoadPlanMatchesProducerStorePlan) {
     // The consumer must project exactly like the producer: same (key, offset)
     // pairs, or the decode reads a key the prefill never registered.
-    const auto policy = makeCompactStatePolicy(/*active_tail_blocks=*/2);
-    const auto decode_plan = DecodeRpcServer::buildGroupLoadPlan(policy,
+    const auto policy        = makeCompactStatePolicy(/*active_tail_blocks=*/2);
+    const auto decode_plan   = DecodeRpcServer::buildGroupLoadPlan(policy,
                                                                  /*local_block_num=*/6,
                                                                  /*cache_key_count=*/11,
                                                                  /*reuse_block_size=*/0,

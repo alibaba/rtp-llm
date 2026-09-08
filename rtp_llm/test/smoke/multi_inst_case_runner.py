@@ -68,8 +68,8 @@ class PdSeperationCaseRunner(CaseRunner):
         if enable_remote_cache:
             self.remote_kvcm_server = self._start_remote_kvcm_server()
             assert self.remote_kvcm_server is not None, "remote kvcm shoule not be None"
-            prefill_envs["RECO_SERVER_ADDRESS"] = self.remote_kvcm_server.address()
-            decode_envs["RECO_SERVER_ADDRESS"] = self.remote_kvcm_server.address()
+            prefill_envs["KVCM_SERVER_ADDRESS"] = self.remote_kvcm_server.address()
+            decode_envs["KVCM_SERVER_ADDRESS"] = self.remote_kvcm_server.address()
         prefill_gpu_size = int(prefill_envs["WORLD_SIZE"])
         decode_gpu_size = int(decode_envs["WORLD_SIZE"])
         share_gpu = _consume_pd_share_gpu(prefill_envs, decode_envs)
@@ -257,8 +257,8 @@ class DpSeperationCaseRunner(CaseRunner):
         if enable_remote_cache:
             self.remote_kvcm_server = self._start_remote_kvcm_server()
             assert self.remote_kvcm_server is not None, "remote kvcm shoule not be None"
-            prefill_envs["RECO_SERVER_ADDRESS"] = self.remote_kvcm_server.address()
-            decode_envs["RECO_SERVER_ADDRESS"] = self.remote_kvcm_server.address()
+            prefill_envs["KVCM_SERVER_ADDRESS"] = self.remote_kvcm_server.address()
+            decode_envs["KVCM_SERVER_ADDRESS"] = self.remote_kvcm_server.address()
         prefill_gpu_size = int(prefill_envs["WORLD_SIZE"])
         decode_gpu_size = int(decode_envs["WORLD_SIZE"])
         share_gpu = _consume_pd_share_gpu(prefill_envs, decode_envs)

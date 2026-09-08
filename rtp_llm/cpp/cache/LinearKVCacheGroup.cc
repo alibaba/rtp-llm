@@ -152,7 +152,12 @@ int LinearKVCacheGroup::estimateInitialBatchPeakNeedBlocks(int  seq_len,
 }
 
 NeedBlocksInfo LinearKVCacheGroup::getNeedBlocks(
-    int common_seq_len, int seq_len, int reserve_step, int reuse_blocks_len, bool reuse_enabled) const {
+    int                      common_seq_len,
+    int                      seq_len,
+    int                      reserve_step,
+    int                      reuse_blocks_len,
+    bool                     reuse_enabled,
+    const RequiredPositions& required_positions) const {
     NeedBlocksInfo info;
 
     const int common_slots = needBlocksNum(common_seq_len, 0);
@@ -181,28 +186,26 @@ NeedBlocksInfo LinearKVCacheGroup::getNeedBlocks(
         }
     }
 
+    for (const size_t position : required_positions) {
+        if (position >= static_cast<size_t>(common_slots)) {
+            continue;
+        }
+        if (!common_required(static_cast<int>(position)) || static_cast<int>(position) == reused_tail_pos) {
+            ++info.common_blocks;
+        }
+    }
+
     info.common_blocks = std::max(info.common_blocks, 0);
     info.extra_blocks  = std::max(info.extra_blocks, 0);
     return info;
 }
 
-MatchResult LinearKVCacheGroup::matchSingleKey(CacheKeyType cache_key) const {
-    MatchResult result;
-    if (!shared_cache_) {
-        return result;
-    }
-    auto block_idx = shared_cache_->matchGroup(cache_key, group_id());
-    if (!isNullBlockIdx(block_idx)) {
-        result.block_indices = {block_idx};
-    }
-    return result;
-}
-
-bool LinearKVCacheGroup::malloc(BlockIds&            block_ids,
-                                int                  seq_len,
-                                bool                 enable_reuse_cache,
-                                int                  reserve_step,
-                                std::vector<size_t>* backfilled_positions) {
+bool LinearKVCacheGroup::malloc(BlockIds&                  block_ids,
+                                int                        seq_len,
+                                bool                       enable_reuse_cache,
+                                int                        reserve_step,
+                                std::vector<size_t>*       backfilled_positions,
+                                const RequiredPositions&        required_positions) {
     if (backfilled_positions != nullptr) {
         backfilled_positions->clear();
     }
@@ -211,7 +214,8 @@ bool LinearKVCacheGroup::malloc(BlockIds&            block_ids,
     const int new_blocks_len     = std::max(total_slots - current_blocks_len, 0);
 
     auto should_materialize = [&](int pos) {
-        return shouldMaterializeBlock(pos, seq_len, reserve_step, enable_reuse_cache);
+        return shouldMaterializeBlock(pos, seq_len, reserve_step, enable_reuse_cache)
+               || required_positions.find(static_cast<size_t>(pos)) != required_positions.end();
     };
 
     std::vector<size_t> positions_to_backfill;
@@ -245,13 +249,12 @@ bool LinearKVCacheGroup::malloc(BlockIds&            block_ids,
 
     BlockIndicesType allocated_blocks;
     if (need_alloc_blocks > 0) {
-        allocated_blocks = block_pool_->malloc(need_alloc_blocks);
-        if (allocated_blocks.size() != static_cast<size_t>(need_alloc_blocks)) {
-            if (!allocated_blocks.empty()) {
-                block_pool_->requestFree(allocated_blocks);
-            }
+        auto allocated = block_pool_->malloc(static_cast<size_t>(need_alloc_blocks));
+        if (!allocated.has_value() || allocated->size() != static_cast<size_t>(need_alloc_blocks)) {
             return false;
         }
+        allocated_blocks = std::move(*allocated);
+        block_pool_->incRef(allocated_blocks);
     }
 
     size_t allocated_idx = 0;
@@ -303,29 +306,8 @@ void LinearKVCacheGroup::removeSkippedBlocks(BlockIds& block_ids, bool enable_re
         pos_to_remove.push_back(static_cast<size_t>(i));
     }
     if (!blocks_to_free.empty()) {
-        block_pool_->requestFree(blocks_to_free);
+        block_pool_->decRef(blocks_to_free);
         block_ids.remove(pos_to_remove);
-    }
-}
-
-void LinearKVCacheGroup::free(const BlockIndicesType& block_indices) {
-    if (block_indices.empty()) {
-        return;
-    }
-    BlockIndicesType valid;
-    filterValidBlocks(block_indices, valid);
-    if (valid.empty()) {
-        return;
-    }
-    block_pool_->requestFree(valid);
-}
-
-void LinearKVCacheGroup::reference(BlockIds& block_ids, const BlockIndicesType& new_block_indices) {
-    block_ids.add(new_block_indices);
-    BlockIndicesType valid;
-    filterValidBlocks(new_block_indices, valid);
-    if (!valid.empty()) {
-        block_pool_->requestReference(valid);
     }
 }
 

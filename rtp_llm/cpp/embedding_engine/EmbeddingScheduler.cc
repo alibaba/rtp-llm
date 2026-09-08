@@ -19,14 +19,24 @@ EmbeddingScheduler::~EmbeddingScheduler() {
 
 absl::Status EmbeddingScheduler::stop() {
     RTP_LLM_LOG_INFO("stop EmbeddingScheduler");
-    lock_guard<mutex> lock(lock_);
-    stop_ = true;
+    {
+        lock_guard<mutex> lock(lock_);
+        stop_ = true;
+        for (auto& stream : waiting_streams_) {
+            stream->setError("embedding scheduler stopped");
+        }
+        waiting_streams_.clear();
+    }
     cond_.notify_all();
     return absl::OkStatus();
 }
 
 absl::Status EmbeddingScheduler::enqueue(EmbeddingStreamPtr stream) {
     lock_guard<mutex> lock(lock_);
+    if (stop_) {
+        stream->setError("embedding scheduler stopped");
+        return absl::CancelledError("embedding scheduler stopped");
+    }
     waiting_streams_.emplace_back(stream);
     cond_.notify_all();
     return absl::OkStatus();
@@ -36,6 +46,9 @@ absl::StatusOr<list<EmbeddingStreamPtr>> EmbeddingScheduler::scheduleNew() {
     unique_lock<mutex> lock(lock_);
     cond_.wait(lock, [this] { return stop_ || !waiting_streams_.empty(); });
     std::list<EmbeddingStreamPtr> new_streams;
+    if (stop_) {
+        return new_streams;
+    }
     int                           total_len = 0;
     auto                          it        = waiting_streams_.begin();
     while (it != waiting_streams_.end()) {

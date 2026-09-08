@@ -221,6 +221,13 @@ void applySpecLogitsAcceptLenCap(const SpecLogitsVerifyRunner::LaunchResult& ver
 
 }  // namespace
 
+torch::Tensor MtpExecutor::snapshotMutableHostInputToCuda(const torch::Tensor& tensor, TensorHolder& holder) {
+    if (!tensor.defined() || tensor.is_cuda()) {
+        return tensor;
+    }
+    return toCudaWithHostHold(tensor.clone().pin_memory(), holder);
+}
+
 bool MtpExecutor::isTpRank0() const {
     return tp_rank_ == 0;
 }
@@ -856,36 +863,15 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     // release model input before forward
     releaseAllModelBuffers();
 
-    // CP+MTP: PyWrappedModel's CP processor (handleInputs) rewrites
-    // ``model_input.combo_tokens`` and ``model_input.input_lengths`` to the
-    // rank-local zigzag chunk layout for the target forward.
-    // The post-target MTP pipeline (updatePrefillPostDraftModelInput +
-    // draft re-CP-slice) needs the FULL/global view, so snapshot both
-    // tensors here while they still hold the global sequence and restore
-    // on rank 0 before the second tpSync (which then broadcasts the
-    // restored full view to every rank for the draft pass).
-    torch::Tensor saved_combo_tokens;
-    torch::Tensor saved_input_lengths;
-    // Under prefix reuse handleInputs also *replaces* combo_position_ids with
-    // a rank-local absolute vector; the draft pass divides that count by the
-    // global token count, so it has to go back to its pre-target state too
-    // (usually undefined, which lets handleInputs rebuild it).
-    torch::Tensor saved_combo_position_ids;
-    // Only rank 0 restores; non-root ranks get the restored view from the
-    // second tpSync, so skip the snapshot copies there.
+    // CP mutates the target input to a rank-local layout. Preserve the full
+    // input so rank-local optional fields do not survive into the draft pass.
+    GptModelInputs global_model_input{};
+    if (cp_enabled) {
+        global_model_input = model_input;
+    }
     if (cp_enabled && isTpRank0()) {
-        // Materialize both copies now: an async H2D of a live host buffer could
-        // land after handleInputs rewrote it to the rank-local chunk, which
-        // would capture the split lengths and make the restore below a no-op.
-        auto snapshot = [](const torch::Tensor& tensor) {
-            if (!tensor.defined()) {
-                return tensor;
-            }
-            return tensor.is_cuda() ? tensor.clone() : tensor.to(torch::kCUDA, /*non_blocking=*/false);
-        };
-        saved_combo_tokens       = snapshot(model_input.combo_tokens);
-        saved_input_lengths      = snapshot(model_input.input_lengths);
-        saved_combo_position_ids = model_input.combo_position_ids;
+        global_model_input.combo_tokens  = toCudaWithHostHold(model_input.combo_tokens, buffer_holder_);
+        global_model_input.input_lengths = snapshotMutableHostInputToCuda(model_input.input_lengths, buffer_holder_);
     }
 
     // target model prefill
@@ -916,16 +902,8 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
             holdSamplerInputHostBuffers(buffer_holder_, sampler_input);
             sampler_output = std::move(sampler_->forward(sampler_input));
         }
-        // Restore the full combo_tokens / input_lengths — under CP both were
-        // mutated to rank-local by the target forward's handleInputs. The MTP
-        // shift formula (offset += input_length, last token overwrite at
-        // offset+input_length-1) and the dspark commit validation both assume
-        // the contiguous full sequence; the tpSync below then publishes the
-        // restored view to every draft rank (fake/warmup streams included).
         if (cp_enabled) {
-            model_input.combo_tokens       = saved_combo_tokens;
-            model_input.input_lengths      = saved_input_lengths;
-            model_input.combo_position_ids = saved_combo_position_ids;
+            model_input = std::move(global_model_input);
         }
         if (!is_dspark_ && model_input.is_fake_stream) {
             model_input.last_hidden_states = model_output.all_hidden_states;
@@ -933,6 +911,10 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
             batch_stream_processor_->updatePrefillPostDraftModelInput(
                 stream_groups, model_input, model_output, sampler_output, buffer_holder_);
         }
+    }
+
+    if (cp_enabled && !isTpRank0()) {
+        model_input = std::move(global_model_input);
     }
 
     // draft model prefill

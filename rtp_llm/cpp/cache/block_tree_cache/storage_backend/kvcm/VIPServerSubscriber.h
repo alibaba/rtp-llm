@@ -1,0 +1,20 @@
+#pragma once
+#include <mutex>
+#include <memory>
+#include "Subscriber.h"
+
+namespace rtp_llm {
+namespace kvcm {
+
+class VIPServerSubscriber: public Subscriber {
+public:
+    ~VIPServerSubscriber() override = default;
+    virtual bool init(const std::vector<std::string>& domains) override;
+    virtual bool getAddresses(std::vector<std::string>& addresses) const override;
+
+private:
+    std::vector<std::string> domains_;
+};
+
+}  // namespace kvcm
+}  // namespace rtp_llm

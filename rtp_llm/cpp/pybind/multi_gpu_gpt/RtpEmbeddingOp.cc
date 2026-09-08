@@ -171,22 +171,42 @@ void RtpEmbeddingOp::initGrpcServer(int64_t                              embeddi
     grpc_server_->Wait();
 }
 
+void RtpEmbeddingOp::requestStop() {
+    if (!is_server_shutdown_ && embedding_engine_) {
+        THROW_IF_STATUS_ERROR(embedding_engine_->requestStop());
+    }
+}
+
 void RtpEmbeddingOp::stop() {
     if (embedding_rpc_service_) {
-        embedding_rpc_service_->stop();
+        {
+            py::gil_scoped_release release;
+            embedding_rpc_service_->stop();
+        }
         embedding_rpc_service_.reset();
     }
     if (http_server_) {
-        http_server_->stop();
+        {
+            py::gil_scoped_release release;
+            http_server_->stop();
+        }
         http_server_.reset();
     }
     if (!is_server_shutdown_ && embedding_engine_) {
-        (void)embedding_engine_->stop();
+        {
+            // The loop may need the GIL for its final Python handler/update.
+            // Do not hold it while waiting for that loop to join.
+            py::gil_scoped_release release;
+            (void)embedding_engine_->stop();
+        }
         embedding_engine_.reset();
         is_server_shutdown_ = true;
     }
     if (grpc_server_) {
-        grpc_server_->Shutdown();
+        {
+            py::gil_scoped_release release;
+            grpc_server_->Shutdown();
+        }
         grpc_server_.reset();
     }
     embedding_grpc_service_.reset();
@@ -276,6 +296,7 @@ void registerRtpEmbeddingOp(const py::module& m) {
              py::arg("vit_config"),
              py::arg("mm_process_engine"))
         .def("stop", &RtpEmbeddingOp::stop)
+        .def("request_stop", &RtpEmbeddingOp::requestStop)
         .def("decode",
              &RtpEmbeddingOp::decode,
              py::call_guard<py::gil_scoped_release>(),

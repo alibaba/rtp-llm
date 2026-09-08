@@ -73,6 +73,17 @@ public:
         return makeLayerCache(layer_id, group, group_layout.at(layer));
     }
 
+    bool hasLayerCache(int layer_id, const std::string& tag) const {
+        validateLayer(layer_id);
+        const auto  layer = static_cast<size_t>(layer_id);
+        const auto& tags  = grouped_layout_.topology().layer(layer_id).group_tags;
+        if (std::find(tags.begin(), tags.end(), tag) == tags.end()) {
+            return false;
+        }
+        const auto& group_layout = grouped_layout_.group(tag);
+        return !group_layout.empty() && group_layout.hasLayer(layer);
+    }
+
     std::vector<LayerKVCache> getLayerCacheGroups(int layer_id) const {
         validateLayer(layer_id);
         const auto  layer = static_cast<size_t>(layer_id);

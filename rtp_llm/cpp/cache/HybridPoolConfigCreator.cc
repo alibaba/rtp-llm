@@ -155,13 +155,18 @@ void populateGroupsFromLayerSpecs(CacheConfig&                 config,
                                     "hybrid-pool layer %u has duplicate tag=%s",
                                     layer,
                                     spec->tag.c_str());
-            const auto policy = SpecBuilder::groupPolicy(desc);
-            // Residency and paged-budget accounting are independent knobs, and
-            // CacheConfig::finalizeBlockNums only looks at charge_to_paged_budget.
-            // A host-resident pool that still charges the budget would silently
-            // shrink the device paged pool by bytes it never occupies.
+            const auto type   = SpecBuilder::groupType(desc);
+            auto       policy = SpecBuilder::groupPolicy(desc);
+            // Residency and paged-budget accounting are independent: a host
+            // pool must not shrink the HBM-backed paged pool.
             checkGroupResidencyBudget(policy, spec->tag);
-            const auto type              = SpecBuilder::groupType(desc);
+            if (type == CacheGroupType::SWA) {
+                RTP_LLM_CHECK_WITH_INFO(model_config.attn_config.sliding_window >= 0,
+                                        "hybrid-pool SWA tag=%s has negative sliding window=%d",
+                                        spec->tag.c_str(),
+                                        model_config.attn_config.sliding_window);
+                policy.sliding_window_size = model_config.attn_config.sliding_window;
+            }
             const auto local_kv_head_num = localKvHeadNumForDesc(desc, model_config, parallelism_config);
             auto       group_it          = group_by_tag.find(spec->tag);
             if (group_it == group_by_tag.end()) {
