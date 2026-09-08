@@ -22,3 +22,17 @@ py_test(
     # sm90. Mock the SM gate too and this can move.
     exec_properties = {'gpu':'H20'},
 )
+
+py_test(
+    name = "test_batched_data_router_ep",
+    srcs = ["test_batched_data_router_ep.py"],
+    deps = [
+        "//rtp_llm:testlib",
+    ],
+    # The pin needs a matching tag, otherwise ut-sm8x's -H20 filter does not
+    # exclude this target and it runs there while being dispatched to an H20
+    # worker -- leaking sm8x work onto the pool smoke needs. Keeping upstream's
+    # H20 choice, just making the routing agree with it.
+    tags = ["H20"],
+    exec_properties = {'gpu':'H20'},
+)

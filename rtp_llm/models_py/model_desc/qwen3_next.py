@@ -938,11 +938,7 @@ class Qwen3NextGatedDeltaNet(nn.Module):
         local_attn_out[valid_mask] = full_attn_out[attn_meta.cp_local_extract_indices]
 
         local_attn_out = self.norm(
-            local_attn_out.reshape(-1, self.head_v_dim),
-            z.reshape(-1, self.head_v_dim),
-        )
-        local_attn_out = local_attn_out.reshape(
-            -1, self.local_num_v_heads * self.head_v_dim
+            local_attn_out.reshape(-1, self.local_num_v_heads * self.head_v_dim), z
         )
         local_attn_out = self.out_proj(local_attn_out)
         return local_attn_out
@@ -979,10 +975,8 @@ class Qwen3NextGatedDeltaNet(nn.Module):
                 mixed_qkv, b, a, attention_inputs, kv_cache, attn_meta
             )
         attn_output = self.norm(
-            attn_output.reshape(-1, self.head_v_dim), z.reshape(-1, self.head_v_dim)
+            attn_output.reshape(-1, self.local_num_v_heads * self.head_v_dim), z
         )
-        # from [token * head, dim] -> [token, head * dim]
-        attn_output = attn_output.reshape(-1, self.local_num_v_heads * self.head_v_dim)
         attn_output = self.out_proj(attn_output)
         if self.parallelism_config.get_attn_tp_size() > 1:
             attn_output = all_reduce(attn_output, group=Group.TP)

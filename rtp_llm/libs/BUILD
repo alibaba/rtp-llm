@@ -47,6 +47,8 @@ filegroup(
     data = [
         ":copy_acclep_libs",
         ":copy_hf3fs_libs",
+        ":libmm_rdma_exporter_so",
+        ":librtp_compute_ops_so",
         ":copy_remote_kv_cache_manager_client_libs",
     ],
 )
@@ -55,6 +57,7 @@ filegroup(
     name = "whl_package_libs",
     srcs = [],
     data = [
+        ":libmm_rdma_exporter_so",
         ":librtp_compute_ops_so",
         ":libth_grammar_tokenizer_info_so",
         ":libth_transformer_config_so",

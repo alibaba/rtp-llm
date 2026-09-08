@@ -85,6 +85,7 @@ def vit_proxy_start_server(
         external_grpc_port=grpc_port,
         load_balance_strategy=load_balance_strategy,
         default_rpc_timeout_seconds=default_timeout_seconds,
+        transport_config=py_env_configs.vit_config.output_transport,
     )
     logging.info(
         f"[VIT_PROXY] Using load balance strategy: {load_balance_strategy}, "

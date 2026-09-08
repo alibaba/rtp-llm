@@ -1,6 +1,19 @@
 import unittest
+from unittest.mock import AsyncMock, MagicMock
 
 from rtp_llm.embedding.embedding_endpoint import EmbeddingEndpoint
+
+
+class TestEmbeddingEndpointLifecycle(unittest.IsolatedAsyncioTestCase):
+    async def test_close_closes_channel_pool(self):
+        endpoint = object.__new__(EmbeddingEndpoint)
+        channel_pool = MagicMock()
+        channel_pool.close = AsyncMock()
+        endpoint._channel_pool = channel_pool
+
+        await endpoint.close()
+
+        channel_pool.close.assert_awaited_once()
 
 
 class TestExtractProfileConfig(unittest.TestCase):

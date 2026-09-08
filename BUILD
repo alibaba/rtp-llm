@@ -185,6 +185,19 @@ cc_binary(
 )
 
 cc_binary(
+    name = "mm_rdma_exporter",
+    copts = copts(),
+    linkopts = [
+        "-Wl,-rpath='$$ORIGIN'",
+    ],
+    linkshared = 1,
+    visibility = ["//visibility:public"],
+    deps = [
+        "//rtp_llm/cpp/pybind:mm_rdma_exporter_pybind",
+    ],
+)
+
+cc_binary(
     name = "th_transformer",
     srcs = [
         ":rtp_compute_ops",

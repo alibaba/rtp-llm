@@ -615,7 +615,7 @@ TEST_F(NormalBatchStreamProcessorTest, testOutputVocabClampsPositiveTopKToLogits
     EXPECT_EQ(sampler_inputs->top_k.data_ptr<int32_t>()[0], 2);
 }
 
-TEST_F(NormalBatchStreamProcessorTest, testDisabledOutputVocabPreservesTopK) {
+TEST_F(NormalBatchStreamProcessorTest, testDisabledOutputVocabMasksPaddedLogits) {
     ResourceContext resource_context;
     ModelConfig     model_config;
     model_config.max_seq_len = 8;
@@ -623,10 +623,11 @@ TEST_F(NormalBatchStreamProcessorTest, testDisabledOutputVocabPreservesTopK) {
     model_config.num_layers  = 1;
     RuntimeConfig runtime_config;
 
-    auto query                    = make_shared<GenerateInput>();
-    query->input_ids              = hostIntBuffer({2});
-    query->generate_config        = make_shared<GenerateConfig>();
-    query->generate_config->top_k = 8;
+    auto query                               = make_shared<GenerateInput>();
+    query->input_ids                         = hostIntBuffer({2});
+    query->generate_config                   = make_shared<GenerateConfig>();
+    query->generate_config->top_k            = 8;
+    query->generate_config->return_all_probs = ReturnAllProbsMode::DEFAULT;
     auto stream = make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
     stream->generate_status_->status = StreamState::RUNNING;
 
@@ -637,11 +638,14 @@ TEST_F(NormalBatchStreamProcessorTest, testDisabledOutputVocabPreservesTopK) {
         model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
     StreamGroups    stream_groups({stream});
     GptModelOutputs model_output;
-    model_output.logits = torch::zeros({1, 2}, torch::kFloat32).to(torch::kCUDA);
+    model_output.logits = torch::zeros({1, 16}, torch::kFloat32).to(torch::kCUDA);
+    model_output.logits.narrow(1, 10, 6).fill_(100.0f);
 
     auto sampler_inputs = processor.gatherSamplerInput(stream_groups, GptModelInputs(), model_output);
     ASSERT_TRUE(sampler_inputs.ok());
     EXPECT_EQ(sampler_inputs->top_k.data_ptr<int32_t>()[0], 8);
+    EXPECT_EQ(sampler_inputs->all_probs.size(1), 16);
+    EXPECT_TRUE(torch::isneginf(sampler_inputs->logits.narrow(1, 10, 6)).all().item<bool>());
 }
 
 TEST_F(NormalBatchStreamProcessorTest, testPaddedSizeLargerThanKKeepsDispatchAndSamplingOnK) {
