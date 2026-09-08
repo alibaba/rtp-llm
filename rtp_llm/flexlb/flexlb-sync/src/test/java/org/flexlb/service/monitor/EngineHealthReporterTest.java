@@ -134,6 +134,8 @@ class EngineHealthReporterTest {
 
         verify(monitor).register("app.request.input.ids.count",
                 FlexMetricType.GAUGE, FlexStatisticsType.SUMMARY);
+        verify(monitor).register("app.request.message.bytes",
+                FlexMetricType.GAUGE, FlexStatisticsType.SUMMARY);
         verify(monitor).register("app.request.body.bytes",
                 FlexMetricType.GAUGE, FlexStatisticsType.SUMMARY);
     }
@@ -143,6 +145,7 @@ class EngineHealthReporterTest {
         BalanceContext context = new BalanceContext();
         context.setSuccess(false);
         context.setInputIdsCount(512L);
+        context.setRequestMessageBytes(8192L);
         context.setRequestBodyBytes(5_242_881L);
 
         reporter.reportRequestPayload(context);
@@ -150,6 +153,7 @@ class EngineHealthReporterTest {
         FlexMetricTags expectedTags = FlexMetricTags.of("success", "false");
         verify(monitor).report("app.request.input.ids.count", expectedTags, 512.0);
         verify(monitor).report("app.request.body.bytes", expectedTags, 5_242_881.0);
+        verify(monitor).report("app.request.message.bytes", expectedTags, 8192.0);
     }
 
     @Test
@@ -192,6 +196,7 @@ class EngineHealthReporterTest {
         reporter.reportRequestPayload(new BalanceContext());
 
         verify(monitor, never()).report(eq("app.request.input.ids.count"), any(FlexMetricTags.class), anyDouble());
+        verify(monitor, never()).report(eq("app.request.message.bytes"), any(FlexMetricTags.class), anyDouble());
         verify(monitor, never()).report(eq("app.request.body.bytes"), any(FlexMetricTags.class), anyDouble());
     }
 
