@@ -251,7 +251,7 @@ TreeNode* insertCascadeLeafWithMultiTierLinear(BlockTree& tree, const std::vecto
     RTP_LLM_CHECK(linear_device_blocks.size() == 1);
     resources[2].device_blocks = linear_device_blocks.front();
 
-    auto inserted = tree.insertNode({100}, {resources}, /*collect_path=*/false);
+    auto inserted = tree.insertNode({100}, {resources}, /*collect_path=*/false, /*is_resident=*/false);
     releaseLowerTierSeedRefs(groups, {resources});
     unreferenceDeviceBlocksForTest(*groups[2], linear_device_blocks, BlockTreeRefType::CACHE);
     RTP_LLM_CHECK(inserted.inserted_nodes.size() == 1);
@@ -475,7 +475,8 @@ TEST(BlockTreeEvictorAsyncTest, PendingTransferDoesNotOccupyBusinessWorker) {
     MultiNodeBlocks device_blocks = allocateDeviceBlocksForTest(*group, 1, BlockTreeRefType::CACHE);
     ASSERT_EQ(device_blocks.size(), 1u);
     const BlockIdxType source = device_blocks.front().front();
-    auto inserted             = tree.insertNode({100}, {{makeResource(Tier::DEVICE, source)}}, /*collect_path=*/false);
+    auto               inserted =
+        tree.insertNode({100}, {{makeResource(Tier::DEVICE, source)}}, /*collect_path=*/false, /*is_resident=*/false);
     unreferenceDeviceBlocksForTest(*group, device_blocks, BlockTreeRefType::CACHE);
     evictor.onInserted(inserted);
 
@@ -589,7 +590,7 @@ public:
             device_sources_[group_set_id]         = seed_blocks[group_set_id].front().front();
             resources[group_set_id].device_blocks = seed_blocks[group_set_id].front();
         }
-        auto result = tree_->insertNode({100}, {resources}, /*collect_path=*/false);
+        auto result = tree_->insertNode({100}, {resources}, /*collect_path=*/false, /*is_resident=*/false);
         for (size_t group_set_id = 0; group_set_id < groups_.size(); ++group_set_id) {
             unreferenceDeviceBlocksForTest(*groups_[group_set_id], seed_blocks[group_set_id], BlockTreeRefType::CACHE);
         }
@@ -617,7 +618,7 @@ public:
             }
             resources[1][group_set_id].host_block = host_sources_[group_set_id];
         }
-        auto result = tree_->insertNode({100, 200}, resources, /*collect_path=*/false);
+        auto result = tree_->insertNode({100, 200}, resources, /*collect_path=*/false, /*is_resident=*/false);
         for (size_t group_set_id = 0; group_set_id < groups_.size(); ++group_set_id) {
             unreferenceDeviceBlocksForTest(
                 *groups_[group_set_id], device_seed_blocks[group_set_id], BlockTreeRefType::CACHE);
@@ -829,7 +830,7 @@ void verifyMixedDetachedBatchSettlement(bool transfer_success) {
     std::vector<std::vector<GroupSetResource>> path_resources(2, std::vector<GroupSetResource>(1));
     path_resources[0][0].device_blocks = parent_device_blocks.front();
     path_resources[1][0].host_block    = child_host_source;
-    auto path_insert                   = tree.insertNode({100, 200}, path_resources, /*collect_path=*/false);
+    auto path_insert = tree.insertNode({100, 200}, path_resources, /*collect_path=*/false, /*is_resident=*/false);
     unreferenceDeviceBlocksForTest(*group, parent_device_blocks, BlockTreeRefType::CACHE);
     releaseLowerTierSeedRefs(groups, path_resources);
     evictor.onInserted(path_insert);
@@ -841,7 +842,7 @@ void verifyMixedDetachedBatchSettlement(bool transfer_success) {
     ASSERT_FALSE(isNullBlockIdx(sibling_host_source));
     std::vector<std::vector<GroupSetResource>> sibling_resources(1, std::vector<GroupSetResource>(1));
     sibling_resources[0][0].host_block = sibling_host_source;
-    auto sibling_insert                = tree.insertNode({300}, sibling_resources, /*collect_path=*/false);
+    auto sibling_insert = tree.insertNode({300}, sibling_resources, /*collect_path=*/false, /*is_resident=*/false);
     releaseLowerTierSeedRefs(groups, sibling_resources);
     evictor.onInserted(sibling_insert);
     TreeNode* const sibling = insertedNode(sibling_insert);
@@ -1012,7 +1013,7 @@ public:
             resources[group_set_id].host_block = host_blocks_[group_set_id];
         }
 
-        auto result = tree_->insertNode({100}, {resources}, /*collect_path=*/false);
+        auto result = tree_->insertNode({100}, {resources}, /*collect_path=*/false, /*is_resident=*/false);
         releaseLowerTierSeedRefs(groups_, {resources});
         evictor_->onInserted(result);
         node_ = insertedNode(result);
@@ -1109,7 +1110,7 @@ protected:
 
     BlockTreeInsertResult insert(const CacheKeysType&                              keys,
                                  const std::vector<std::vector<GroupSetResource>>& resources) {
-        auto result = tree_->insertNode(keys, resources, /*collect_path=*/false);
+        auto result = tree_->insertNode(keys, resources, /*collect_path=*/false, /*is_resident=*/false);
         releaseLowerTierSeedRefs(groups_, resources);
         evictor_->onInserted(result);
         return result;
@@ -2042,7 +2043,7 @@ TEST(BlockTreeEvictorCascadeTest, NonLeafDropCascadeFollowsGroupPriority) {
             node_resources[group_set_id] = makeResource(Tier::HOST, block);
         }
     }
-    auto path = tree.insertNode({100, 200}, resources, /*collect_path=*/false);
+    auto path = tree.insertNode({100, 200}, resources, /*collect_path=*/false, /*is_resident=*/false);
     releaseLowerTierSeedRefs(groups, resources);
     ASSERT_EQ(path.inserted_nodes.size(), 2u);
     TreeNode*  non_leaf  = path.inserted_nodes.front();
@@ -2072,7 +2073,7 @@ TEST(BlockTreeEvictorCascadeTest, LeafDropCascadeSelectsAllOtherGroups) {
         ASSERT_FALSE(isNullBlockIdx(block));
         resources[group_set_id] = makeResource(Tier::HOST, block);
     }
-    auto inserted = tree.insertNode({100}, {resources}, /*collect_path=*/false);
+    auto inserted = tree.insertNode({100}, {resources}, /*collect_path=*/false, /*is_resident=*/false);
     releaseLowerTierSeedRefs(groups, {resources});
 
     ASSERT_NE(insertedNode(inserted), nullptr);
@@ -2169,7 +2170,7 @@ TEST(BlockTreeEvictorCascadeTest, StopsAtLogicallyMatchableParent) {
         {makeResource(Tier::HOST, parent_block)},
         {makeResource(Tier::HOST, leaf_block)},
     };
-    auto inserted = tree.insertNode({100, 200}, resources, /*collect_path=*/false);
+    auto inserted = tree.insertNode({100, 200}, resources, /*collect_path=*/false, /*is_resident=*/false);
     releaseLowerTierSeedRefs(groups, resources);
     evictor->onInserted(inserted);
     ASSERT_EQ(inserted.inserted_nodes.size(), 2u);
@@ -2201,7 +2202,7 @@ TEST(BlockTreeEvictorCascadeTest, StopsAtParentWithAnotherEmptyChild) {
         {makeResource(Tier::HOST, parent_block)},
         {makeResource(Tier::HOST, leaf_block)},
     };
-    auto inserted = tree.insertNode({100, 200, 300}, leaf_resources, /*collect_path=*/false);
+    auto inserted = tree.insertNode({100, 200, 300}, leaf_resources, /*collect_path=*/false, /*is_resident=*/false);
     releaseLowerTierSeedRefs(groups, leaf_resources);
     ASSERT_EQ(inserted.inserted_nodes.size(), 3u);
 
@@ -2211,7 +2212,7 @@ TEST(BlockTreeEvictorCascadeTest, StopsAtParentWithAnotherEmptyChild) {
         {makeResource(Tier::HOST, parent_block)},
         {GroupSetResource{}},
     };
-    auto sibling = tree.insertNode({100, 200, 400}, sibling_resources, /*collect_path=*/false);
+    auto sibling = tree.insertNode({100, 200, 400}, sibling_resources, /*collect_path=*/false, /*is_resident=*/false);
     releaseLowerTierSeedRefs(groups, sibling_resources);
     ASSERT_EQ(sibling.inserted_nodes.size(), 1u);
 
@@ -2244,7 +2245,7 @@ TEST(BlockTreeEvictorCascadeTest, DemotionPrepareLeavesAncestorUnchanged) {
         {makeResource(Tier::HOST, parent_block)},
         {makeResource(Tier::HOST, leaf_block)},
     };
-    auto inserted = tree.insertNode({100, 200, 300}, resources, /*collect_path=*/false);
+    auto inserted = tree.insertNode({100, 200, 300}, resources, /*collect_path=*/false, /*is_resident=*/false);
     releaseLowerTierSeedRefs(groups, resources);
     evictor->onInserted(inserted);
 
@@ -2280,7 +2281,7 @@ TEST(BlockTreeEvictorCascadeTest, ForceDropRemovesUnmatchableParentChain) {
         {makeResource(Tier::HOST, parent_block)},
         {makeResource(Tier::HOST, leaf_block)},
     };
-    auto inserted = tree.insertNode({100, 200, 300}, resources, /*collect_path=*/false);
+    auto inserted = tree.insertNode({100, 200, 300}, resources, /*collect_path=*/false, /*is_resident=*/false);
     releaseLowerTierSeedRefs(groups, resources);
     evictor->onInserted(inserted);
 
@@ -2310,7 +2311,7 @@ TEST(BlockTreeEvictorCascadeTest, PruneCascadesAncestorResourcesFromTheirActualT
         {makeResource(Tier::DISK, parent_block)},
         {makeResource(Tier::HOST, leaf_block)},
     };
-    auto inserted = tree.insertNode({100, 200, 300}, resources, /*collect_path=*/false);
+    auto inserted = tree.insertNode({100, 200, 300}, resources, /*collect_path=*/false, /*is_resident=*/false);
     releaseLowerTierSeedRefs(groups, resources);
     ASSERT_EQ(inserted.inserted_nodes.size(), 3u);
 
@@ -2766,8 +2767,11 @@ TEST_F(BlockTreeEvictorTest, ExistingGroupFillAdmitsChildAndRemovesFullParentCan
 
     GroupSetResource empty_resource;
     empty_resource.device_blocks      = {NULL_BLOCK_IDX};
-    BlockTreeInsertResult empty_child = tree_->insertNode(
-        {100, 200}, {{makeResource(Tier::DEVICE, parent_block)}, {empty_resource}}, /*collect_path=*/false);
+    BlockTreeInsertResult empty_child =
+        tree_->insertNode({100, 200},
+                          {{makeResource(Tier::DEVICE, parent_block)}, {empty_resource}},
+                          /*collect_path=*/false,
+                          /*is_resident=*/false);
     evictor_->onInserted(empty_child);
     ASSERT_NE(insertedNode(empty_child), nullptr);
     ASSERT_EQ(evictor_->candidateStats().device_candidates, 1u);
@@ -2995,7 +2999,7 @@ TEST_F(BlockTreeEvictorTest, ChooseVictimSkipsFullNodeThatBecameNonLeaf) {
     // The duplicate entry reuses a tree-owned block, so it needs its own seed hold
     // for the release below to stay balanced.
     group_->referenceBlocks(MultiNodeResource{0, Tier::HOST, {{nullptr, {parent_source}}}}, BlockTreeRefType::CACHE);
-    auto child_result = tree_->insertNode({100, 101}, child_resources, /*collect_path=*/false);
+    auto child_result = tree_->insertNode({100, 101}, child_resources, /*collect_path=*/false, /*is_resident=*/false);
     releaseLowerTierSeedRefs(groups_, child_resources);
     evictor_->onInserted(child_result);
     ASSERT_NE(insertedNode(child_result), nullptr);
@@ -3341,13 +3345,13 @@ TEST(BlockTreeEvictorStatsTest, AggregatesCandidatesAcrossGroupsAndTiers) {
 
     const std::vector<std::vector<GroupSetResource>> first_resources = {
         {makeResource(Tier::DEVICE, device_set.front().front()), makeResource(Tier::DISK, disk_block)}};
-    auto first = tree.insertNode({100}, first_resources, /*collect_path=*/false);
+    auto first = tree.insertNode({100}, first_resources, /*collect_path=*/false, /*is_resident=*/false);
     unreferenceDeviceBlocksForTest(*group0, device_set, BlockTreeRefType::CACHE);
     releaseLowerTierSeedRefs(groups, first_resources);
     evictor.onInserted(first);
     const std::vector<std::vector<GroupSetResource>> second_resources = {
         {makeResource(Tier::HOST, host_block), GroupSetResource{}}};
-    auto second = tree.insertNode({200}, second_resources, /*collect_path=*/false);
+    auto second = tree.insertNode({200}, second_resources, /*collect_path=*/false, /*is_resident=*/false);
     releaseLowerTierSeedRefs(groups, second_resources);
     evictor.onInserted(second);
 
@@ -3383,11 +3387,13 @@ TEST(BlockTreeEvictorPolicyTest, MatchDoesNotChangeFifoAdmissionOrder) {
 
     MultiNodeBlocks device_set = allocateDeviceBlocksForTest(*group, 2, BlockTreeRefType::CACHE);
     ASSERT_EQ(device_set.size(), 2u);
-    auto first = tree.insertNode({100}, {{makeResource(Tier::DEVICE, device_set[0][0])}}, /*collect_path=*/false);
+    auto first = tree.insertNode(
+        {100}, {{makeResource(Tier::DEVICE, device_set[0][0])}}, /*collect_path=*/false, /*is_resident=*/false);
     group->unreferenceBlocks(MultiNodeResource{0, Tier::DEVICE, {{insertedNode(first), device_set[0]}}},
                              BlockTreeRefType::CACHE);
     evictor.onInserted(first);
-    auto second = tree.insertNode({200}, {{makeResource(Tier::DEVICE, device_set[1][0])}}, /*collect_path=*/false);
+    auto second = tree.insertNode(
+        {200}, {{makeResource(Tier::DEVICE, device_set[1][0])}}, /*collect_path=*/false, /*is_resident=*/false);
     group->unreferenceBlocks(MultiNodeResource{0, Tier::DEVICE, {{insertedNode(second), device_set[1]}}},
                              BlockTreeRefType::CACHE);
     evictor.onInserted(second);
@@ -3432,7 +3438,7 @@ TEST(BlockTreeEvictorPolicyTest, ExistingGroupFillPrecedesNewSuffixAdmission) {
 
     GroupSetResource empty_resource;
     empty_resource.device_blocks = {NULL_BLOCK_IDX};
-    auto existing                = tree.insertNode({100}, {{empty_resource}}, /*collect_path=*/false);
+    auto existing = tree.insertNode({100}, {{empty_resource}}, /*collect_path=*/false, /*is_resident=*/false);
     evictor.onInserted(existing);
 
     MultiNodeBlocks device_set = allocateDeviceBlocksForTest(*group, 2, BlockTreeRefType::CACHE);
@@ -3440,7 +3446,8 @@ TEST(BlockTreeEvictorPolicyTest, ExistingGroupFillPrecedesNewSuffixAdmission) {
     auto mixed = tree.insertNode(
         {100, 200},
         {{makeResource(Tier::DEVICE, device_set[0][0])}, {makeResource(Tier::DEVICE, device_set[1][0])}},
-        /*collect_path=*/false);
+        /*collect_path=*/false,
+        /*is_resident=*/false);
     ASSERT_EQ(mixed.adopted_nodes.size(), 1u);
     ASSERT_EQ(mixed.inserted_nodes.size(), 1u);
     unreferenceDeviceBlocksForTest(*group, device_set, BlockTreeRefType::CACHE);
@@ -3475,11 +3482,13 @@ TEST(BlockTreeEvictorPolicyTest, MatchUpdatesLfuHitCountAndOrder) {
 
     MultiNodeBlocks device_set = allocateDeviceBlocksForTest(*group, 2, BlockTreeRefType::CACHE);
     ASSERT_EQ(device_set.size(), 2u);
-    auto first = tree.insertNode({100}, {{makeResource(Tier::DEVICE, device_set[0][0])}}, /*collect_path=*/false);
+    auto first = tree.insertNode(
+        {100}, {{makeResource(Tier::DEVICE, device_set[0][0])}}, /*collect_path=*/false, /*is_resident=*/false);
     group->unreferenceBlocks(MultiNodeResource{0, Tier::DEVICE, {{insertedNode(first), device_set[0]}}},
                              BlockTreeRefType::CACHE);
     evictor.onInserted(first);
-    auto second = tree.insertNode({200}, {{makeResource(Tier::DEVICE, device_set[1][0])}}, /*collect_path=*/false);
+    auto second = tree.insertNode(
+        {200}, {{makeResource(Tier::DEVICE, device_set[1][0])}}, /*collect_path=*/false, /*is_resident=*/false);
     group->unreferenceBlocks(MultiNodeResource{0, Tier::DEVICE, {{insertedNode(second), device_set[1]}}},
                              BlockTreeRefType::CACHE);
     evictor.onInserted(second);

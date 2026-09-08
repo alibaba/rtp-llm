@@ -230,7 +230,8 @@ TEST(BlockTreeLoaderTest, HostOnlyPolicyReadsHostCopyWhenDeviceCopyAlsoExists) {
                 environment->request_blocks[group_set_id][path_index];
         }
     }
-    environment->cache->insert(environment->keys, source_resources, Tier::HOST);
+    environment->cache->insert(
+        environment->keys, source_resources, Tier::HOST, /*write_remote=*/true, /*is_resident=*/false);
     block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*environment->cache);
     ASSERT_TRUE(environment->allResourcesAtTier(Tier::DEVICE));
     ASSERT_TRUE(environment->allResourcesAtTier(Tier::HOST));

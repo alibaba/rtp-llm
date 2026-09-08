@@ -105,10 +105,12 @@ public:
 
     std::shared_ptr<AsyncContext> execute(TransferTask task) override;
 
+    // Reconfigure only after all cache tasks settle and before submitting new work.
+    void   setCopyBehavior(TransferCopyAction action, std::shared_ptr<CallbackBarrier> barrier);
     size_t submittedBatchCount() const;
 
 private:
-    const TransferCopyAction         action_;
+    TransferCopyAction               action_;
     std::shared_ptr<CallbackBarrier> barrier_;
     std::atomic<size_t>              submit_count_{0};
 };
