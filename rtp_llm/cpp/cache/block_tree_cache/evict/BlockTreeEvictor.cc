@@ -465,6 +465,7 @@ void BlockTreeEvictor::scheduleEvictionSettlement(std::shared_ptr<const Eviction
                 rollbackTransferLocked(task->descriptors());
             }
             updatePendingRelease(task->descriptors(), false);
+            const auto& descriptor = task->descriptors().front();
 
             for (size_t desc_index = 0; desc_index < task->descriptors().size(); ++desc_index) {
                 const TransferDescriptor& desc = task->descriptors()[desc_index];
@@ -478,6 +479,7 @@ void BlockTreeEvictor::scheduleEvictionSettlement(std::shared_ptr<const Eviction
                 }
             }
             settled_(success || any_detached, success && any_not_detached);
+            finishWatermarkRoundLocked(descriptor.group_set_id, descriptor.source_tier);
         }
         if (!settled_task.descriptors().empty()) {
             metrics_reporter_->reportEvictionFinished(settled_task, tree_->groupSets());
@@ -589,14 +591,17 @@ size_t BlockTreeEvictor::watermarkLogicalBatchLimit(Tier source_tier, Tier targe
 void BlockTreeEvictor::scheduleWatermarkEvictionsLocked(Tier tier, const TierWatermark& watermark) {
     for (const GroupSetPtr& group_set : tree_->groupSets()) {
         const size_t initial_required_count = computeWatermarkEvictCount(*group_set, tier, watermark);
-        size_t       required_count         = initial_required_count;
-        size_t       scheduled_count        = 0;
-        bool         eviction_reported      = false;
+        auto&        round = heaps_[group_set->groupSetId()].watermark_rounds[static_cast<size_t>(tier)];
+        if (round.required_count == 0) {
+            round.required_count = initial_required_count;
+        }
+        size_t required_count    = initial_required_count;
+        bool   eviction_reported = false;
         while (required_count > 0) {
             const Tier   target_tier      = watermarkTargetTier(tier);
             const size_t batch_count      = std::min(required_count, watermarkLogicalBatchLimit(tier, target_tier));
             const BatchEvictResult result = batchEvictStepLocked(group_set->groupSetId(), tier, batch_count);
-            scheduled_count += result.scheduled_count;
+            round.scheduled_count += result.scheduled_count;
             if (result.madeProgress() && !eviction_reported) {
                 metrics_reporter_->reportEvictionTriggered(tier, group_set->groupType(), /*force_drop=*/false);
                 eviction_reported = true;
@@ -611,12 +616,21 @@ void BlockTreeEvictor::scheduleWatermarkEvictionsLocked(Tier tier, const TierWat
             }
             required_count = remaining_count;
         }
-        metrics_reporter_->reportEvictionBlocks(tier,
-                                                group_set->groupType(),
-                                                /*force_drop=*/false,
-                                                initial_required_count,
-                                                std::min(scheduled_count, initial_required_count));
+        finishWatermarkRoundLocked(group_set->groupSetId(), tier);
     }
+}
+
+void BlockTreeEvictor::finishWatermarkRoundLocked(size_t group_set_id, Tier source_tier) {
+    auto& round = heaps_[group_set_id].watermark_rounds[static_cast<size_t>(source_tier)];
+    if (round.required_count == 0 || round.pending_count != 0) {
+        return;
+    }
+    metrics_reporter_->reportEvictionBlocks(source_tier,
+                                            tree_->groupSets()[group_set_id]->groupType(),
+                                            /*force_drop=*/false,
+                                            round.required_count,
+                                            round.scheduled_count);
+    round = {};
 }
 
 void BlockTreeEvictor::updatePendingRelease(const std::vector<TransferDescriptor>& descs, bool reserve) {
@@ -649,6 +663,9 @@ void BlockTreeEvictor::updatePendingRelease(const std::vector<TransferDescriptor
         for (const auto& [pool, delta] : deltas) {
             pending_release_counts_[pool] += delta;
         }
+        for (const TransferDescriptor& desc : descs) {
+            ++heaps_[desc.group_set_id].watermark_rounds[static_cast<size_t>(desc.source_tier)].pending_count;
+        }
         return;
     }
     for (const auto& [pool, delta] : deltas) {
@@ -664,6 +681,9 @@ void BlockTreeEvictor::updatePendingRelease(const std::vector<TransferDescriptor
     for (const auto& [pool, delta] : deltas) {
         auto it = pending_release_counts_.find(pool);
         it->second -= delta;
+    }
+    for (const TransferDescriptor& desc : descs) {
+        --heaps_[desc.group_set_id].watermark_rounds[static_cast<size_t>(desc.source_tier)].pending_count;
     }
 }
 
