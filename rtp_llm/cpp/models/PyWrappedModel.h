@@ -276,13 +276,14 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         graph_params.kernel_tokens_per_block      = params.kernel_tokens_per_block;
         graph_params.hidden_size                  = params.hidden_size;
         graph_params.hc_mult                      = params.hc_mult;
-        // Default input_hiddens row width for MTP: hc_mult * hidden_size. DSpARK
-        // consumes len(target_layer_ids) * hidden_size instead, which only the
-        // Python model knows.
         graph_params.input_hidden_size = static_cast<size_t>(params.hidden_size) * static_cast<size_t>(params.hc_mult);
-        if (dspark_model_role_ != DSparkModelRole::NONE) {
-            auto width = py_instance.attr("cuda_graph_input_hidden_size")().cast<int64_t>();
-            RTP_LLM_CHECK_WITH_INFO(width > 0, "DSpARK CUDA graph input hidden width must be positive, got %ld", width);
+        const bool use_model_input_hidden_size =
+            dspark_model_role_ != DSparkModelRole::NONE
+            || (is_prefill_cuda_graph_mode_ && params.sp_config.type != SP_TYPE_NONE
+                && py::hasattr(py_instance, "input_hidden_size"));
+        if (use_model_input_hidden_size) {
+            auto width = py_instance.attr("input_hidden_size").cast<int64_t>();
+            RTP_LLM_CHECK_WITH_INFO(width > 0, "speculative input hidden width must be positive, got %ld", width);
             graph_params.input_hidden_size = static_cast<size_t>(width);
         }
         graph_params.model_data_type            = dtype;
