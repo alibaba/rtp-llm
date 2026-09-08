@@ -113,6 +113,7 @@ class FlexlbForwardHopGuardNettyTest {
         return FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
                 .setRequestId(requestId)
                 .setSeqLen(1024)
+                .addInputIds(1)
                 .build();
     }
 

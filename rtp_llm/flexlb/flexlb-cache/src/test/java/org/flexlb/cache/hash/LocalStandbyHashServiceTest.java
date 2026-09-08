@@ -4,6 +4,7 @@ import org.flexlb.cache.domain.LocalStandbyHashResult;
 import org.flexlb.config.CacheMatchConfiguration;
 import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.loadbalance.Request;
+import org.flexlb.dao.loadbalance.TokenIds;
 import org.flexlb.dao.route.KvcmConfig;
 import org.flexlb.dao.route.ServiceRoute;
 import org.flexlb.metric.FlexMonitor;
@@ -32,7 +33,7 @@ class LocalStandbyHashServiceTest {
 
         try {
             LocalStandbyHashResult result =
-                    hashService.submit(request, new int[]{1, 2, 3, 4}, 4, 0)
+                    hashService.submit(request, TokenIds.wrap(new int[]{1, 2, 3, 4}), 4, 0)
                             .get(5, TimeUnit.SECONDS);
 
             assertEquals(List.of(2164874634404590027L), result.blockCacheKeys());
@@ -56,7 +57,7 @@ class LocalStandbyHashServiceTest {
 
         try {
             LocalStandbyHashResult result =
-                    hashService.submit(request, new int[]{1, 2, 3, 4, 5}, 4, 0)
+                    hashService.submit(request, TokenIds.wrap(new int[]{1, 2, 3, 4, 5}), 4, 0)
                             .get(5, TimeUnit.SECONDS);
 
             assertEquals(
@@ -82,7 +83,7 @@ class LocalStandbyHashServiceTest {
 
         try {
             LocalStandbyHashResult result =
-                    hashService.submit(request, new int[]{1, 2, 3, 4, 5, 6}, 4, 1)
+                    hashService.submit(request, TokenIds.wrap(new int[]{1, 2, 3, 4, 5, 6}), 4, 1)
                             .get(5, TimeUnit.SECONDS);
 
             assertEquals(

@@ -321,6 +321,7 @@ class FollowerAsyncForwardingNettyTest {
         return FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
                 .setRequestId(requestId)
                 .setSeqLen(1024)
+                .addInputIds(1)
                 .setGenerateTimeout(TimeUnit.SECONDS.toMillis(10))
                 .build();
     }

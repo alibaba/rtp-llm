@@ -2,6 +2,7 @@ package org.flexlb.util;
 
 import com.fasterxml.jackson.dataformat.cbor.CBORFactory;
 import com.fasterxml.jackson.dataformat.cbor.CBORGenerator;
+import org.flexlb.dao.loadbalance.TokenIds;
 
 import java.io.IOException;
 import java.io.OutputStream;
@@ -32,18 +33,7 @@ public final class BlockCacheKeyCalculator {
     private BlockCacheKeyCalculator() {
     }
 
-    /**
-     * Hashes complete token blocks and drops the final partial block.
-     */
-    public static List<Long> calculate(int[] inputIds, long blockSize) {
-        return calculate(inputIds, blockSize, 0);
-    }
-
-    /**
-     * Hashes complete token blocks with the configured number of lookahead tokens.
-     * The block stride remains {@code blockSize}.
-     */
-    public static List<Long> calculate(int[] inputIds, long blockSize, int lookaheadTokens) {
+    public static List<Long> calculate(TokenIds inputIds, long blockSize, int lookaheadTokens) {
         if (inputIds == null) {
             throw new IllegalArgumentException("input_ids must not be null");
         }
@@ -53,18 +43,15 @@ public final class BlockCacheKeyCalculator {
         if (lookaheadTokens < 0) {
             throw new IllegalArgumentException("block_hash_lookahead_tokens must not be negative");
         }
-        if (inputIds.length == 0 || blockSize > inputIds.length) {
+        if (inputIds.size() == 0 || blockSize > inputIds.size()) {
             return Collections.emptyList();
         }
 
         return calculateBlockCacheKeys(inputIds, (int) blockSize, lookaheadTokens);
     }
 
-    private static List<Long> calculateBlockCacheKeys(
-            int[] inputIds,
-            int blockSize,
-            int lookaheadTokens) {
-        int fullBlockCount = inputIds.length / blockSize;
+    private static List<Long> calculateBlockCacheKeys(TokenIds inputIds, int blockSize, int lookaheadTokens) {
+        int fullBlockCount = inputIds.size() / blockSize;
         List<Long> blockCacheKeys = new ArrayList<>(fullBlockCount);
         byte[] parentHash = NONE_HASH;
         int tokenIndex = 0;
@@ -75,7 +62,7 @@ public final class BlockCacheKeyCalculator {
         try (CBORGenerator generator = newCborGenerator(digestOutput)) {
             for (int blockIndex = 0; blockIndex < fullBlockCount; blockIndex++) {
                 digest.reset();
-                int remainingTokens = inputIds.length - tokenIndex - blockSize;
+                int remainingTokens = inputIds.size() - tokenIndex - blockSize;
                 int tokenCount = blockSize + Math.min(lookaheadTokens, remainingTokens);
                 writeBlock(generator, parentHash, inputIds, tokenIndex, tokenCount);
                 generator.flush();
@@ -111,18 +98,17 @@ public final class BlockCacheKeyCalculator {
         generator.writeString(HASH_SEED);
     }
 
-    static void writeBlock(
-            CBORGenerator generator,
-            byte[] parentHash,
-            int[] inputIds,
-            int tokenOffset,
-            int blockSize) throws IOException {
+    static void writeBlock(CBORGenerator generator,
+                           byte[] parentHash,
+                           TokenIds inputIds,
+                           int tokenOffset,
+                           int blockSize) throws IOException {
         // Supplying array sizes forces definite-length arrays, as required by canonical CBOR.
         generator.writeStartArray(null, 3);
         generator.writeBinary(parentHash);
         generator.writeStartArray(null, blockSize);
         for (int tokenIndex = tokenOffset; tokenIndex < tokenOffset + blockSize; tokenIndex++) {
-            generator.writeNumber(inputIds[tokenIndex]);
+            generator.writeNumber(inputIds.getInt(tokenIndex));
         }
         generator.writeEndArray();
         generator.writeNull();

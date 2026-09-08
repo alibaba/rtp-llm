@@ -64,6 +64,9 @@ message FlexlbScheduleRequestPB {
     // metadata) preserves the guard through a rolling upgrade because older
     // protobuf runtimes retain unknown fields when they relay the request.
     uint32 forward_hop = 15;
+    // Raw prompt token IDs used by the Master to derive block_cache_keys when
+    // the client does not provide precomputed keys.
+    repeated int32 input_ids = 16;
 }
 
 message FlexlbServerStatusPB {

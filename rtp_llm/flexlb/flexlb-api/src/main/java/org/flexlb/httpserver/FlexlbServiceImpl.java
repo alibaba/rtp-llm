@@ -16,6 +16,7 @@ import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
+import org.flexlb.dao.loadbalance.TokenIds;
 import org.flexlb.dao.pv.PvLogData;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.RequestId;
@@ -137,6 +138,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         try {
             context = buildContext(request);
             BalanceContext requestContext = context;
+            validateCacheIdentity(requestContext.getRequest());
             boolean consistencyEnabled = masterElectService.isNeedConsistency();
             boolean masterAtEntry = consistencyEnabled
                     && masterElectService.isMaster();
@@ -645,15 +647,18 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
     }
 
     private CompletableFuture<Void> prepareBlockCacheKeys(BalanceContext context) {
-        Request request = context.getRequest();
+        return cacheAwareService.prepareBlockCacheKeys(context);
+    }
+
+    private void validateCacheIdentity(Request request) {
         boolean hasBlockCacheKeys = request.getBlockCacheKeys() != null
                 && !request.getBlockCacheKeys().isEmpty();
         boolean hasInputIds = request.getInputIds() != null
-                && request.getInputIds().length > 0;
+                && request.getInputIds().size() > 0;
         if (!hasBlockCacheKeys && !hasInputIds) {
-            return CompletableFuture.completedFuture(null);
+            throw new IllegalArgumentException(
+                    "block_cache_keys and input_ids must not both be empty");
         }
-        return cacheAwareService.prepareBlockCacheKeys(context);
     }
 
     private void completeSchedule(BalanceContext ctx,
@@ -857,6 +862,13 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
                     StrategyErrorType.NO_PREFILL_WORKER.getErrorCode(),
                     "NO_AVAILABLE_WORKER: schedule timeout");
         }
+        if (cause instanceof IllegalArgumentException) {
+            return buildErrorResponse(
+                    StrategyErrorType.INVALID_REQUEST.getErrorCode(),
+                    cause.getMessage() != null
+                            ? cause.getMessage()
+                            : StrategyErrorType.INVALID_REQUEST.getErrorMsg());
+        }
         return buildErrorResponse(StatusEnum.INTERNAL_ERROR.getCode(),
                 error.getMessage() != null ? error.getMessage() : "internal error");
     }
@@ -905,6 +917,9 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         request.setModel(pb.getModel());
         request.setApiKey(pb.getApiKey());
         request.setCacheKeyBlockSize(pb.getCacheKeyBlockSize());
+        if (pb.getInputIdsCount() > 0) {
+            request.setInputIds(TokenIds.wrap(pb.getInputIdsCount(), pb::getInputIds));
+        }
         // KVCM matching uses the generic block-size field. The dsv4 wire
         // protocol still names the same value cache_key_block_size.
         request.setBlockSize(pb.getCacheKeyBlockSize());

@@ -1,15 +1,18 @@
 package org.flexlb.cache.hash;
 
 import org.flexlb.cache.domain.BlockHashCalculationResult;
+import org.flexlb.dao.loadbalance.TokenIds;
 import org.flexlb.metric.FlexMonitor;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import reactor.core.Disposable;
+import reactor.core.publisher.Mono;
 import reactor.test.StepVerifier;
 
 import java.time.Duration;
 import java.util.List;
+import java.util.concurrent.Callable;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
@@ -23,7 +26,9 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyDouble;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -31,10 +36,12 @@ class BlockHashExecutorTest {
 
     private final FlexMonitor monitor = mock(FlexMonitor.class);
     private BlockHashExecutor executor;
+    private BlockHashStrategy strategy;
 
     @BeforeEach
     void setUp() {
-        executor = new BlockHashExecutor(monitor, new VllmBlockHashStrategy(), 1, 2, 60, 1);
+        strategy = spy(new VllmBlockHashStrategy());
+        executor = new BlockHashExecutor(monitor, strategy, 1, 2, 60, 1);
     }
 
     @AfterEach
@@ -44,16 +51,20 @@ class BlockHashExecutorTest {
 
     @Test
     void runsCpuTaskOnDedicatedThreadAndReportsLatency() {
-        String threadName = executor.submit(() -> Thread.currentThread().getName()).block();
+        AtomicReference<String> threadName = new AtomicReference<>();
+        submitHashTask(() -> {
+            threadName.set(Thread.currentThread().getName());
+            return null;
+        }).block();
 
-        assertTrue(threadName.startsWith("block-hash"));
+        assertTrue(threadName.get().startsWith("block-hash"));
         verify(monitor).report(eq(BLOCK_HASH_QUEUE_WAIT_TIME_US), anyDouble());
         verify(monitor).report(eq(BLOCK_HASH_EXECUTION_TIME_US), anyDouble());
     }
 
     @Test
     void returnsPerRequestHashTimings() {
-        BlockHashCalculationResult result = executor.calculate(new int[]{1, 2, 3, 4}, 4).block();
+        BlockHashCalculationResult result = executor.calculate(TokenIds.wrap(new int[]{1, 2, 3, 4}), 4, 0).block();
 
         assertNotNull(result);
         assertEquals(List.of(2164874634404590027L), result.blockCacheKeys());
@@ -64,18 +75,19 @@ class BlockHashExecutorTest {
     @Test
     void usesConfiguredBlockHashStrategy() {
         BlockHashStrategy strategy = mock(BlockHashStrategy.class);
-        when(strategy.calculate(new int[]{1, 2, 3, 4, 5}, 4, 0))
+        TokenIds inputIds = TokenIds.wrap(new int[]{1, 2, 3, 4, 5});
+        when(strategy.calculate(inputIds, 4, 0))
                 .thenReturn(List.of(11L, 22L));
         BlockHashExecutor configuredExecutor =
                 new BlockHashExecutor(monitor, strategy, 1, 2, 60, 1);
 
         try {
             BlockHashCalculationResult result =
-                    configuredExecutor.calculate(new int[]{1, 2, 3, 4, 5}, 4, 0).block();
+                    configuredExecutor.calculate(inputIds, 4, 0).block();
 
             assertNotNull(result);
             assertEquals(List.of(11L, 22L), result.blockCacheKeys());
-            verify(strategy).calculate(new int[]{1, 2, 3, 4, 5}, 4, 0);
+            verify(strategy).calculate(inputIds, 4, 0);
         } finally {
             configuredExecutor.shutdown();
         }
@@ -88,7 +100,7 @@ class BlockHashExecutorTest {
 
         try {
             BlockHashCalculationResult result =
-                    sglangExecutor.calculate(new int[]{1, 2, 3, 4, 5}, 4, 0).block();
+                    sglangExecutor.calculate(TokenIds.wrap(new int[]{1, 2, 3, 4, 5}), 4, 0).block();
 
             assertNotNull(result);
             assertEquals(
@@ -106,7 +118,7 @@ class BlockHashExecutorTest {
 
         try {
             BlockHashCalculationResult result =
-                    sglangExecutor.calculate(new int[]{1, 2, 3, 4, 5, 6}, 4, 1).block();
+                    sglangExecutor.calculate(TokenIds.wrap(new int[]{1, 2, 3, 4, 5, 6}), 4, 1).block();
 
             assertNotNull(result);
             assertEquals(
@@ -127,7 +139,7 @@ class BlockHashExecutorTest {
         CountDownLatch queuedTaskCompleted = new CountDownLatch(1);
         AtomicReference<Throwable> backgroundError = new AtomicReference<>();
 
-        Disposable runningTask = executor.submit(() -> {
+        Disposable runningTask = submitHashTask(() -> {
                     firstTaskStarted.countDown();
                     releaseFirstTask.await(5, TimeUnit.SECONDS);
                     return "running";
@@ -135,20 +147,20 @@ class BlockHashExecutorTest {
                 .subscribe(ignored -> { }, backgroundError::set);
         assertTrue(firstTaskStarted.await(5, TimeUnit.SECONDS));
 
-        Disposable queuedTask = executor.submit(() -> {
+        Disposable queuedTask = submitHashTask(() -> {
                     releaseFirstTask.await(5, TimeUnit.SECONDS);
                     return "queued";
                 })
                 .doFinally(ignored -> queuedTaskCompleted.countDown())
                 .subscribe(ignored -> { }, backgroundError::set);
 
-        Disposable secondRunningTask = executor.submit(() -> {
+        Disposable secondRunningTask = submitHashTask(() -> {
                     releaseFirstTask.await(5, TimeUnit.SECONDS);
                     return "second-running";
                 })
                 .subscribe(ignored -> { }, backgroundError::set);
 
-        StepVerifier.create(executor.submit(() -> "rejected"))
+        StepVerifier.create(submitHashTask(() -> "rejected"))
                 .expectError(RejectedExecutionException.class)
                 .verify(Duration.ofSeconds(5));
 
@@ -166,15 +178,15 @@ class BlockHashExecutorTest {
         CountDownLatch coreTaskStarted = new CountDownLatch(1);
         CountDownLatch expandedTaskCompleted = new CountDownLatch(1);
 
-        Disposable coreTask = executor.submit(() -> {
+        Disposable coreTask = submitHashTask(() -> {
                     coreTaskStarted.countDown();
                     releaseCoreTask.await(5, TimeUnit.SECONDS);
                     return "core";
                 })
                 .subscribe();
         assertTrue(coreTaskStarted.await(5, TimeUnit.SECONDS));
-        Disposable queuedTask = executor.submit(() -> "queued").subscribe();
-        Disposable expandedTask = executor.submit(() -> "expanded")
+        Disposable queuedTask = submitHashTask(() -> "queued").subscribe();
+        Disposable expandedTask = submitHashTask(() -> "expanded")
                 .doFinally(ignored -> expandedTaskCompleted.countDown())
                 .subscribe();
 
@@ -186,5 +198,13 @@ class BlockHashExecutorTest {
             queuedTask.dispose();
             expandedTask.dispose();
         }
+    }
+    private Mono<BlockHashCalculationResult> submitHashTask(Callable<?> task) {
+        TokenIds inputIds = TokenIds.wrap(new int[]{1});
+        doAnswer(invocation -> {
+            task.call();
+            return List.of(1L);
+        }).when(strategy).calculate(inputIds, 1, 0);
+        return executor.calculate(inputIds, 1, 0);
     }
 }

@@ -5,6 +5,7 @@ import ch.qos.logback.core.read.ListAppender;
 import io.grpc.stub.StreamObserver;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.nio.NioEventLoopGroup;
+import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.consistency.LBStatusConsistencyService;
@@ -16,6 +17,7 @@ import org.flexlb.service.grace.ActiveRequestCounter;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
+import org.flexlb.service.optimizer.OptimizerClient;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -116,6 +118,10 @@ class ScheduleForwardMatrixTest {
         requestToken = mock(ActiveRequestCounter.RequestToken.class);
         when(activeRequestCounter.acquire()).thenReturn(requestToken);
 
+        CacheAwareService cacheAwareService = mock(CacheAwareService.class);
+        when(cacheAwareService.prepareBlockCacheKeys(any()))
+                .thenReturn(CompletableFuture.completedFuture(null));
+
         service = new FlexlbServiceImpl(
                 routeService,
                 consistency,
@@ -125,7 +131,9 @@ class ScheduleForwardMatrixTest {
                 configService,
                 mock(BatchSchedulerReporter.class),
                 mock(ServerScheduleLatencyRecorder.class),
-                mock(RequestSchedulerReporter.class));
+                mock(RequestSchedulerReporter.class),
+                cacheAwareService,
+                mock(OptimizerClient.class));
 
         pvLogger = (ch.qos.logback.classic.Logger) LoggerFactory.getLogger("pvLogger");
         pvAppender = new ListAppender<>();
@@ -441,6 +449,7 @@ class ScheduleForwardMatrixTest {
         return FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
                 .setRequestId(Long.toString(requestId))
                 .setSeqLen(1024)
+                .addInputIds(1)
                 .build();
     }
 

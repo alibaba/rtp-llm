@@ -1,6 +1,7 @@
 package org.flexlb.util;
 
 import com.fasterxml.jackson.dataformat.cbor.CBORGenerator;
+import org.flexlb.dao.loadbalance.TokenIds;
 import org.junit.jupiter.api.Test;
 
 import java.io.ByteArrayOutputStream;
@@ -34,7 +35,11 @@ class BlockCacheKeyCalculatorTest {
         int[] inputIds = {
                 0, 23, 24, 255, 256, 65535, 65536, Integer.MAX_VALUE};
         byte[] encodedBlock = encode(generator -> BlockCacheKeyCalculator.writeBlock(
-                generator, HEX.parseHex(NONE_HASH), inputIds, 0, inputIds.length));
+                generator,
+                HEX.parseHex(NONE_HASH),
+                TokenIds.wrap(inputIds),
+                0,
+                inputIds.length));
 
         assertEquals(
                 "8358204e1195df020de59e0d65a33a4279f1183e7ae4e5d980e309f8b55adff2e61c3e"
@@ -45,7 +50,7 @@ class BlockCacheKeyCalculatorTest {
                 sha256Hex(encodedBlock));
         assertEquals(
                 List.of(2377946987338068860L),
-                BlockCacheKeyCalculator.calculate(inputIds, inputIds.length));
+                BlockCacheKeyCalculator.calculate(TokenIds.wrap(inputIds), inputIds.length, 0));
     }
 
     @Test
@@ -58,7 +63,7 @@ class BlockCacheKeyCalculatorTest {
                 HEX.formatHex(blockHash));
         assertEquals(
                 List.of(2164874634404590027L),
-                BlockCacheKeyCalculator.calculate(inputIds, 4));
+                BlockCacheKeyCalculator.calculate(TokenIds.wrap(inputIds), 4, 0));
     }
 
     @Test
@@ -75,7 +80,7 @@ class BlockCacheKeyCalculatorTest {
                 HEX.formatHex(secondBlockHash));
         assertEquals(
                 List.of(-7527834946346035334L, -7860823284622341314L),
-                BlockCacheKeyCalculator.calculate(inputIds, 64));
+                BlockCacheKeyCalculator.calculate(TokenIds.wrap(inputIds), 64, 0));
     }
 
     @Test
@@ -84,7 +89,7 @@ class BlockCacheKeyCalculatorTest {
 
         assertEquals(
                 List.of(2771287707320467766L, -4525836348354197114L),
-                BlockCacheKeyCalculator.calculate(inputIds, 4, 1));
+                BlockCacheKeyCalculator.calculate(TokenIds.wrap(inputIds), 4, 1));
     }
 
     @Test
@@ -93,35 +98,39 @@ class BlockCacheKeyCalculatorTest {
 
         assertEquals(
                 List.of(-7527834946346035334L, -7860823284622341314L),
-                BlockCacheKeyCalculator.calculate(inputIds, 64));
+                BlockCacheKeyCalculator.calculate(TokenIds.wrap(inputIds), 64, 0));
     }
 
     @Test
     void returnsEmptyListWhenThereIsNoCompleteBlock() {
-        assertEquals(List.of(), BlockCacheKeyCalculator.calculate(new int[]{1, 2}, 4));
+        assertEquals(List.of(), BlockCacheKeyCalculator.calculate(TokenIds.wrap(new int[]{1, 2}), 4, 0));
     }
 
     @Test
     void rejectsInvalidInput() {
         assertThrows(
                 IllegalArgumentException.class,
-                () -> BlockCacheKeyCalculator.calculate(null, 1));
+                () -> BlockCacheKeyCalculator.calculate(null, 1, 0));
         assertThrows(
                 IllegalArgumentException.class,
-                () -> BlockCacheKeyCalculator.calculate(new int[]{1}, 0));
+                () -> BlockCacheKeyCalculator.calculate(TokenIds.wrap(new int[]{1}), 0, 0));
         assertThrows(
                 IllegalArgumentException.class,
-                () -> BlockCacheKeyCalculator.calculate(new int[]{1}, 1, -1));
+                () -> BlockCacheKeyCalculator.calculate(
+                        TokenIds.wrap(new int[]{1}), 1, -1));
     }
 
-    private static byte[] hashBlock(
-            byte[] parentHash,
-            int[] inputIds,
-            int tokenOffset,
-            int blockSize) throws Exception {
+    private static byte[] hashBlock(byte[] parentHash,
+                                    int[] inputIds,
+                                    int tokenOffset,
+                                    int blockSize) throws Exception {
         return MessageDigest.getInstance("SHA-256").digest(encode(generator ->
                 BlockCacheKeyCalculator.writeBlock(
-                        generator, parentHash, inputIds, tokenOffset, blockSize)));
+                        generator,
+                        parentHash,
+                        TokenIds.wrap(inputIds),
+                        tokenOffset,
+                        blockSize)));
     }
 
     private static String sha256Hex(byte[] value) throws NoSuchAlgorithmException {
