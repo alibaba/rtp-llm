@@ -125,9 +125,46 @@ class GenerateConfigTest(TestCase):
         self.assertEqual(config.device_eviction_policy, "lru")
         self.assertEqual(config.host_eviction_policy, "lru")
         self.assertEqual(config.disk_eviction_policy, "fifo")
-        self.assertEqual(config.device_cache_min_free_blocks, 0)
+        self.assertEqual(config.reserve_block_ratio, 5)
         self.assertEqual(config.block_tree_full_prefix_scan_interval_ms, 0)
         self.assertFalse(config.write_cache_sync)
+
+    @patch.dict("os.environ", _jit_env(), clear=True)
+    def test_kv_cache_scheduler_reserve_defaults_and_override(self):
+        self.assertEqual(setup_args().kv_cache_config.reserve_block_ratio, 5)
+        config = setup_args(["--reserve_block_ratio", "7"]).kv_cache_config
+        self.assertEqual(config.reserve_block_ratio, 7)
+
+    @patch.dict("os.environ", _jit_env(), clear=True)
+    def test_removed_device_min_free_cli_is_ignored(self):
+        for legacy_args in (
+            ["--device_cache_min_free_blocks", "1"],
+            ["--device_cache_min_free_blocks=123"],
+        ):
+            for reserve_args, expected_ratio in (
+                ([], 5),
+                (["--reserve_block_ratio", "7"], 7),
+            ):
+                with self.subTest(legacy_args=legacy_args, reserve_args=reserve_args):
+                    config = setup_args([*legacy_args, *reserve_args]).kv_cache_config
+                    self.assertEqual(config.reserve_block_ratio, expected_ratio)
+                    self.assertFalse(hasattr(config, "device_cache_min_free_blocks"))
+
+    @patch.dict(
+        "os.environ",
+        _jit_env(DEVICE_CACHE_MIN_FREE_BLOCKS="123", RESERVE_BLOCK_RATIO="7"),
+        clear=True,
+    )
+    def test_removed_device_min_free_env_is_ignored(self):
+        for args, expected_ratio in (
+            (None, 7),
+            ([], 7),
+            (["--reserve_block_ratio", "9"], 9),
+        ):
+            with self.subTest(args=args):
+                config = setup_args(args).kv_cache_config
+                self.assertEqual(config.reserve_block_ratio, expected_ratio)
+                self.assertFalse(hasattr(config, "device_cache_min_free_blocks"))
 
     def test_legacy_kv_cache_cli_aliases(self):
         config = setup_args(
@@ -205,7 +242,7 @@ class GenerateConfigTest(TestCase):
         config.device_eviction_policy = "fifo"
         config.host_eviction_policy = "lfu"
         config.disk_eviction_policy = "lru"
-        config.device_cache_min_free_blocks = 123
+        config.reserve_block_ratio = 7
         config.dsv4_fixed_pool_blocks = 512
         config.dsv4_hca_state_pool_blocks = 256
         config.dsv4_fixed_pool_use_memory = True
@@ -223,8 +260,8 @@ class GenerateConfigTest(TestCase):
         config.write_cache_sync = True
 
         state = config.__getstate__()
-        self.assertEqual(len(state), 66)
-        self.assertEqual(state[:2], ("KVCacheConfig", 4))
+        self.assertEqual(len(state), 65)
+        self.assertEqual(state[:2], ("KVCacheConfig", 5))
 
         restored = pickle.loads(pickle.dumps(config))
         self.assertEqual(restored.disk_cache_staging_block_count, 8)
@@ -232,7 +269,7 @@ class GenerateConfigTest(TestCase):
         self.assertEqual(restored.device_eviction_policy, "fifo")
         self.assertEqual(restored.host_eviction_policy, "lfu")
         self.assertEqual(restored.disk_eviction_policy, "lru")
-        self.assertEqual(restored.device_cache_min_free_blocks, 123)
+        self.assertEqual(restored.reserve_block_ratio, 7)
         self.assertEqual(restored.dsv4_fixed_pool_blocks, 512)
         self.assertEqual(restored.dsv4_hca_state_pool_blocks, 256)
         self.assertTrue(restored.dsv4_fixed_pool_use_memory)
@@ -258,7 +295,17 @@ class GenerateConfigTest(TestCase):
             value.__setstate__(pickle_state)
             return value
 
-        legacy_state = (state[0], 3, *state[2:20], False, *state[20:])
+        version_four_state = (state[0], 4, *state[2:50], 123, *state[50:])
+        restored_version_four = restore(version_four_state)
+        self.assertEqual(restored_version_four.__getstate__(), state)
+
+        legacy_state = (
+            state[0],
+            3,
+            *version_four_state[2:20],
+            False,
+            *version_four_state[20:],
+        )
         restored_legacy = restore(legacy_state)
         self.assertEqual(restored_legacy.__getstate__(), state)
 
@@ -269,6 +316,15 @@ class GenerateConfigTest(TestCase):
             restored_source_extended.block_tree_business_queue_max_size, 211
         )
         self.assertFalse(restored_source_extended.write_cache_sync)
+
+        source_state = (state[0], 1, *legacy_state[2:57])
+        restored_source = restore(source_state)
+        self.assertEqual(restored_source.dsv4_fixed_pool_blocks, 512)
+        self.assertEqual(restored_source.dsv4_hca_state_pool_blocks, 256)
+        self.assertEqual(
+            restored_source.memory_cache_max_descriptors_per_transfer_batch, 17
+        )
+        self.assertFalse(restored_source.write_cache_sync)
 
         write_sync_state = (state[0], 2, *legacy_state[2:57], state[-1])
         restored_write_sync = restore(write_sync_state)

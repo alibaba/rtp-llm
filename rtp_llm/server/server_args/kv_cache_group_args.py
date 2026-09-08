@@ -476,10 +476,9 @@ def init_kv_cache_group_args(parser, kv_cache_config):
     kv_cache_group.add_argument(
         "--device_cache_min_free_blocks",
         env_name="DEVICE_CACHE_MIN_FREE_BLOCKS",
-        bind_to=(kv_cache_config, "device_cache_min_free_blocks"),
         type=int,
         default=0,
-        help="Device KVCache 全局最小空闲 block 数；独立 pool 按各自 block 容量占比分摊。0 表示按调度容量自动计算。",
+        help="[deprecated] 仅兼容旧启动命令，参数值已忽略；请使用 --reserve_block_ratio 配置调度预留比例。",
     )
     kv_cache_group.add_argument(
         "--dsv4_fixed_pool_blocks",

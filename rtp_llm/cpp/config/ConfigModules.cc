@@ -153,7 +153,6 @@ std::string KVCacheConfig::to_string() const {
         << "device_eviction_policy: " << device_eviction_policy << "\n"
         << "host_eviction_policy: " << host_eviction_policy << "\n"
         << "disk_eviction_policy: " << disk_eviction_policy << "\n"
-        << "device_cache_min_free_blocks: " << device_cache_min_free_blocks << "\n"
         << "dsv4_fixed_pool_blocks: " << dsv4_fixed_pool_blocks << "\n"
         << "dsv4_hca_state_pool_blocks: " << dsv4_hca_state_pool_blocks << "\n"
         << "dsv4_fixed_pool_use_memory: " << dsv4_fixed_pool_use_memory << "\n"

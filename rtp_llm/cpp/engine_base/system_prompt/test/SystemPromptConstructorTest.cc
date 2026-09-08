@@ -69,16 +69,13 @@ private:
 };
 
 template<typename EngineType>
-std::shared_ptr<EngineType> createFocusedEngine(int64_t device_min_free_blocks,
-                                                int64_t max_context_batch_size = 128,
-                                                int64_t max_batch_tokens       = 4096) {
+std::shared_ptr<EngineType> createFocusedEngine(int64_t max_context_batch_size = 128, int64_t max_batch_tokens = 4096) {
     CustomConfig  config;
     ModelConfig   model_config;
     RuntimeConfig runtime_config;
     KVCacheConfig kv_cache_config;
     config.reuse_cache = true;
     auto params        = createEngineInitParams(config, model_config, runtime_config, kv_cache_config);
-    params.kv_cache_config.device_cache_min_free_blocks                = device_min_free_blocks;
     params.runtime_config.fifo_scheduler_config.max_context_batch_size = max_context_batch_size;
     params.runtime_config.fifo_scheduler_config.max_batch_tokens_size  = max_batch_tokens;
 
@@ -131,7 +128,7 @@ TEST_F(SystemPromptConstructorTest, testMultiTaskPromptConstruct) {
 }
 
 TEST_F(SystemPromptConstructorTest, testSecondTaskFailureReleasesEarlierRequestOwnership) {
-    auto engine  = createFocusedEngine<FailSecondPreRunEngine>(/*device_min_free_blocks=*/1);
+    auto engine  = createFocusedEngine<FailSecondPreRunEngine>();
     auto manager = engine->resourceContext().cache_manager;
     ASSERT_NE(manager->blockTreeCache(), nullptr);
     const size_t free_before      = manager->freeBlocksNum();
@@ -162,17 +159,39 @@ TEST_F(SystemPromptConstructorTest, testSecondTaskFailureReleasesEarlierRequestO
     EXPECT_EQ(manager->freeBlocksNum(), free_before);
 }
 
-TEST_F(SystemPromptConstructorTest, testNormalEngineResolvesAbsoluteDeviceReserveBeforeManagerInit) {
-    auto engine = createFocusedEngine<NormalEngine>(
-        /*device_min_free_blocks=*/0, /*max_context_batch_size=*/3, /*max_batch_tokens=*/17);
+TEST_F(SystemPromptConstructorTest, testNormalEnginePreservesSchedulerReserveWithoutPrefillOverride) {
+    auto engine = createFocusedEngine<NormalEngine>(/*max_context_batch_size=*/3, /*max_batch_tokens=*/17);
 
-    EXPECT_EQ(engine->kv_cache_config.device_cache_min_free_blocks, 9);
-    ASSERT_NE(engine->resourceContext().cache_manager, nullptr);
-    EXPECT_EQ(engine->resourceContext().cache_manager->reserveBlocksNum(), 9u);
+    auto manager = engine->resourceContext().cache_manager;
+    ASSERT_NE(manager, nullptr);
+    ASSERT_EQ(manager->freeBlocksNum(), 99u);
+    EXPECT_EQ(manager->reserveBlocksNum(), 4u);
+
+    auto resource = std::make_shared<BatchKVCacheResource>();
+    resource->resetBatchSize(1);
+    resource->initGroups(manager->cacheConfig().topologyPtr());
+    auto input       = makeSystemPromptInput();
+    input->input_ids = torch::arange(190, torch::kInt32);
+    auto tokens      = std::make_shared<CompleteTokenIds>(1, 1, 198, manager->cacheConfig().seq_size_per_block);
+    tokens->init(input);
+    MallocInfo info{resource, tokens};
+    info.reuse_cache         = false;
+    info.enable_cache_lookup = false;
+
+    ASSERT_TRUE(manager->malloc(info).success);
+    EXPECT_EQ(resource->blocksNum(0, 0), 95);
+    EXPECT_EQ(manager->freeBlocksNum(), 4u);
+
+    tokens->setSeqLength(198);
+    ASSERT_TRUE(manager->malloc(info).success);
+    EXPECT_EQ(resource->blocksNum(0, 0), 99);
+    EXPECT_EQ(manager->freeBlocksNum(), 0u);
+    manager->free(FreeInfo{resource, tokens});
+    EXPECT_EQ(manager->freeBlocksNum(), 99u);
 }
 
 TEST_F(SystemPromptConstructorTest, testNormalEngineWaitsForAllocatorObserverBeforeSystemPromptExecution) {
-    auto engine         = createFocusedEngine<NormalEngine>(/*device_min_free_blocks=*/1);
+    auto engine         = createFocusedEngine<NormalEngine>();
     auto manager        = engine->resourceContext().cache_manager;
     auto real_allocator = manager->allocator_;
     auto context        = CountingReadyContext::create();

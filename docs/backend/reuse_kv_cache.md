@@ -40,7 +40,16 @@ Reused KV cache can live in three local tiers, each controlled by its own indepe
 | L2 | Pinned host memory | `ENABLE_HOST_CACHE` (default off) | `HOST_CACHE_SIZE_MB` |
 | L3 | Local disk | `ENABLE_DISK_CACHE` (default off) | `DISK_CACHE_SIZE_MB`, `DISK_CACHE_PATHS` |
 
-`DEVICE_CACHE_MIN_FREE_BLOCKS` sets the global L1 free-block headroom. With independent device pools, the value is distributed in proportion to each participating pool’s block capacity; zero keeps automatic sizing.
+Device free-block headroom is managed by `BLOCK_TREE_DEVICE_EVICT_HIGH_WATERMARK_RATIO` (default 0.90)
+and `BLOCK_TREE_DEVICE_EVICT_LOW_WATERMARK_RATIO` (default 0.82). Reaching the high occupancy watermark
+triggers eviction toward the low watermark. Allocations can consume this headroom and reclaim cached
+blocks on demand; blocks still referenced by requests or transfers may delay physical reclamation.
+Scheduler admission separately uses `RESERVE_BLOCK_RATIO` (default 5%) to preserve headroom for
+running requests to grow. This admission reserve is independent of the cache eviction watermarks.
+
+Legacy `--device_cache_min_free_blocks` and `DEVICE_CACHE_MIN_FREE_BLOCKS` are accepted for startup
+compatibility but ignored. Remove these settings; use `RESERVE_BLOCK_RATIO` to configure scheduler
+admission headroom.
 
 All eight combinations are valid, including L2-only and L3-only deployments. Enabling a tier
 without its capacity or path settings is a startup error rather than a silent downgrade, so a

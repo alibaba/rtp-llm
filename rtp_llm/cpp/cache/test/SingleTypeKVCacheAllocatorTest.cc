@@ -1009,7 +1009,6 @@ TEST_F(SingleTypeKVCacheAllocatorTest, SuccessfulOuterAllocationCommitsLoadExact
     const auto config  = createSingleTypeTestConfig(/*layer_num=*/2, /*block_num=*/16, /*seq_size_per_block=*/4);
     allocator_         = std::make_shared<TestSingleTypeKVCacheAllocator>(config);
     auto tiered_config = makeSingleTypeTieredConfig(Tier::HOST, disk_directory.path());
-    tiered_config.device_cache_min_free_blocks = 15;
     allocator_->setBlockTreeCacheConfigForTest(std::move(tiered_config));
     ASSERT_TRUE(allocator_->init());
 

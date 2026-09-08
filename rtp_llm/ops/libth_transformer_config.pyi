@@ -688,7 +688,6 @@ class KVCacheConfig:
     device_eviction_policy: str
     host_eviction_policy: str
     disk_eviction_policy: str
-    device_cache_min_free_blocks: int
     dsv4_fixed_pool_blocks: int
     dsv4_hca_state_pool_blocks: int
     dsv4_fixed_pool_use_memory: bool
