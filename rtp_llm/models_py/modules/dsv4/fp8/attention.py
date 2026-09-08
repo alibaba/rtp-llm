@@ -55,6 +55,7 @@ from rtp_llm.models_py.modules.dsv4.cp import (
     build_cp_full_prefill_positions,
     cp_actual_owned_kv_lens,
     cp_all_gather_full_varlen,
+    cp_all_gather_full_varlen_fp8,
     cp_freqs_cis_local,
     cp_padded_local_kv_lens,
 )
@@ -4053,7 +4054,7 @@ class AttentionFP8(nn.Module):
             0, new_k_slots, qkv.kv_full.to(torch.bfloat16).reshape(-1, D)
         )
 
-        q_full = cp_all_gather_full_varlen(qkv.q, cp_ctx)
+        q_full = cp_all_gather_full_varlen_fp8(qkv.q, cp_ctx, kind="q")
         if wm.dense_cmp_topk is not None:
             if wm.N > 0:
                 dense = (
@@ -5471,9 +5472,10 @@ class AttentionFP8(nn.Module):
                     "dsv4.fp8.attn.swa_kv_full.cp_gather_varlen"
                 ):
                     kv_flat = kv.reshape(kv.size(0) * kv.size(1), *kv.shape[2:])
-                    kv_full_flat = cp_all_gather_full_varlen(
+                    kv_full_flat = cp_all_gather_full_varlen_fp8(
                         kv_flat,
                         common.cp_ctx,
+                        kind="kv",
                         profile_name=(
                             f"dsv4.cp.all_gather.L{self.layer_id:02d}."
                             "swa_kv_full.varlen"
