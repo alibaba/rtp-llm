@@ -238,10 +238,6 @@ bool KVCacheManager::init() {
     RTP_LLM_CHECK_WITH_INFO(!allocator_ && !block_tree_cache_ && !metrics_reporter_thread_.joinable(),
                             "KVCacheManager::init called more than once");
     RTP_LLM_CHECK_WITH_INFO(config_.groupNums() > 0, "cache specs must not be empty");
-    if (kv_cache_config_.enable_remote_cache && config_.use_independent_block_pools) {
-        RTP_LLM_LOG_ERROR("remote cache does not support independent device block pools");
-        return false;
-    }
     if (kv_cache_config_.enable_remote_cache
         && (kv_cache_config_.kvcm_asyncwrapper_thread_num == 0 || kv_cache_config_.kvcm_asyncwrapper_queue_size == 0)) {
         RTP_LLM_LOG_ERROR("remote cache executor thread count and queue size must be positive, got %zu/%zu",

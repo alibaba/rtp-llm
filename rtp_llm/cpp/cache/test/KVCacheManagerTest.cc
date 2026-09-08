@@ -1018,17 +1018,6 @@ TEST_F(KVCacheManagerTest, Init_ReturnTrue_WhenHostCacheDisabled) {
     EXPECT_FALSE(kv_cache_manager->blockTreeCache()->isHostCacheEnabled());
 }
 
-TEST_F(KVCacheManagerTest, InitRejectsRemoteCacheWithIndependentDevicePoolsBeforeAllocation) {
-    auto cache_config                        = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
-    cache_config.use_independent_block_pools = true;
-    KVCacheConfig kv_cache_config;
-    kv_cache_config.enable_remote_cache = true;
-
-    auto manager = std::make_shared<KVCacheManager>(cache_config, false, nullptr, kv_cache_config);
-    EXPECT_FALSE(manager->init());
-    EXPECT_EQ(manager->blockTreeCache(), nullptr);
-}
-
 TEST_F(KVCacheManagerTest, InitRejectsInvalidRemoteExecutorConfigurationBeforeAllocation) {
     const auto cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
     for (const auto [thread_count, queue_size] : {std::pair<size_t, size_t>{0, 1}, std::pair<size_t, size_t>{1, 0}}) {

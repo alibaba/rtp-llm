@@ -114,3 +114,48 @@ cc_test_wrapper(
         "@havenask//aios/autil:json",
     ],
 )
+
+# Compile the actual subscriber against a recording VIP API. This exercises
+# the internal branch without contacting service discovery in unit tests.
+cc_test_wrapper(
+    name = "vipserver_subscriber_test",
+    testonly = True,
+    srcs = [
+        "VIPServerSubscriberTest.cc",
+        "vipserver_stubs/option.h",
+        "vipserver_stubs/iphost.h",
+        "vipserver_stubs/vipclient.h",
+        "//rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm:VIPServerSubscriber.cc",
+        "//rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm:VIPServerSubscriber.h",
+        "//rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm:Subscriber.h",
+    ],
+    copts = copts() + [
+        "-DKVCM_INTERNAL=1",
+        "-Irtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/test/vipserver_stubs",
+    ],
+    deps = [
+        "//rtp_llm/cpp/utils:core_utils",
+        "@havenask//aios/autil:env_util",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test_wrapper(
+    name = "kvcm_independent_pool_test",
+    testonly = True,
+    srcs = ["KVCMIndependentPoolTest.cc", "KVCMMockTestBase.h", "MockKVCMClient.h"],
+    copts = copts(),
+    tags = ["exclusive-if-local"],
+    target_compatible_with = select({
+        "//:using_remote_kv_cache": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    deps = kvcm_backend_test_deps + [
+        "//rtp_llm/cpp/cache:kv_cache_allocator",
+        "//rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm:subscriber",
+        "//rtp_llm/cpp/testing:device_test_utils",
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ],
+)

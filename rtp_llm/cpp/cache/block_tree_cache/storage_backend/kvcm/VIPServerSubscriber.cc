@@ -12,53 +12,60 @@ namespace rtp_llm {
 namespace kvcm {
 
 #if defined(KVCM_INTERNAL) || defined(RECO_INTERNAL)
-class VIPServerSubscriber::VIPServerDestructor {
+namespace {
+
+// The process owns the VIP API. Subscriber destruction must never tear down
+// global state while another wrapper is discovering addresses.
+class VIPServerApi {
 public:
-    ~VIPServerDestructor() {
+    static VIPServerApi& instance() {
+        static VIPServerApi api;
+        return api;
+    }
+
+    bool init() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (inited_) {
+            return true;
+        }
+        const auto domain = autil::EnvUtil::getEnv(
+            "KVCM_VIP_JMENV", autil::EnvUtil::getEnv("RECO_VIP_JMENV", std::string("jmenv.tbsite.net")));
+        VipClientApi::CreateApi();
+        Option option;
+        option.set_failover_path(".");
+        option.set_log_path(".");
+        option.set_cache_path(".");
+        if (!VipClientApi::Init(domain.c_str(), option)) {
+            RTP_LLM_LOG_ERROR("VIPServer initialization failed: %s", strerror(errno));
+            VipClientApi::DestoryApi();
+            return false;
+        }
+        inited_ = true;
+        return true;
+    }
+
+    ~VIPServerApi() {
         if (inited_) {
             VipClientApi::UnInit();
             VipClientApi::DestoryApi();
-            inited_ = false;
         }
-    }
-    void set_inited() {
-        inited_ = true;
-    }
-
-    bool inited() const {
-        return inited_;
     }
 
 private:
-    bool inited_ = false;
+    VIPServerApi() = default;
+    std::mutex mutex_;
+    bool       inited_ = false;
 };
 
+}  // namespace
 #endif
+
 bool VIPServerSubscriber::init(const std::vector<std::string>& domains) {
 #if defined(KVCM_INTERNAL) || defined(RECO_INTERNAL)
-    std::unique_lock<std::mutex> lock(destructor_mutex_);
-    if (destructor_ == nullptr) {
-        destructor_ = std::make_shared<VIPServerDestructor>();
-    }
-    if (destructor_->inited()) {
-        RTP_LLM_LOG_INFO("VIPServerSubscriber has been inited");
-        return true;
-    }
-    jmenv_domain_ = autil::EnvUtil::getEnv("KVCM_VIP_JMENV",
-                                           autil::EnvUtil::getEnv("RECO_VIP_JMENV", std::string("jmenv.tbsite.net")));
-    VipClientApi::CreateApi();
-    Option option;
-    option.set_failover_path(".");
-    option.set_log_path(".");
-    option.set_cache_path(".");
-    if (!VipClientApi::Init(jmenv_domain_.c_str(), option)) {
-        RTP_LLM_LOG_ERROR("init failed jmenvDom: [%s], error: [%s]\n", jmenv_domain_.c_str(), strerror(errno));
-        VipClientApi::DestoryApi();
+    if (!VIPServerApi::instance().init()) {
         return false;
     }
-    RTP_LLM_LOG_INFO("init success jmenvDom: [%s]", jmenv_domain_.c_str());
     domains_ = domains;
-    destructor_->set_inited();
     return true;
 #else
     RTP_LLM_LOG_ERROR("not support vipserver");
