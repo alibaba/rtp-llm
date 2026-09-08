@@ -69,9 +69,7 @@ EmbeddingExecutor::EmbeddingExecutor(const EngineInitParams& params, py::object 
     RTP_LLM_LOG_INFO("init executor with python model");
     // Model-input dumps target autoregressive Normal/MTP replay. Embedding and
     // rerank use a different input contract and intentionally do not need it.
-    PyWrappedModelOptions model_options;
-    model_options.is_prefill_cuda_graph_mode = true;
-    model_.reset(new PyWrappedModel(model_init_params, params.py_model, model_options));
+    model_.reset(new PyWrappedModel(model_init_params, params.py_model, true));
 
     init_position_ids(model_config_.max_seq_len);
     std::vector<std::string> handler_args;
