@@ -22,7 +22,7 @@ and BATCH deferred versus NON_BATCH immediate stream consumption.
 | Variant / legacy suffix | Environment | Construction and acceptance |
 | --- | --- | --- |
 | `decode_pool_exhaustion_terminal` | 2P/1D, D pool 3 | 2560/2 probe with two explicit keys; LACK_MEM plus decode-side text, BATCH additionally EnqueueBatch rejected, elapsed <3s. D permanent counter grows exactly one within 10s, retry counter remains flat; every P permanent counter stays flat and held blocks return to its own baseline within 10s. A 1024/2 headroom request succeeds, D counters stabilize, Master and engine tables clean separately (30s each), fresh generic recovery succeeds. |
-| `decode_capacity_park` | 2P/4D, default pools | Exhaust each D's actual available+active tokens, sync 1.5s; snapshot pre-probe scheduler/P-batch/D-reservation watermarks. 2048/10 Schedule reaches its 5s client deadline and never starts a stream. After .5s, no engine lifecycle contains this request. Explicit Master Cancel, .5s pause and 10s poll restore each total to <= its pre-probe watermark. Clear all pressure, sync 2s, then both fresh and generic recovery succeed. No global-zero replacement of the ownership watermark. |
+| `decode_capacity_park` | 2P/4D, default pools | Exhaust each D's actual available+active tokens, sync 1.5s; snapshot pre-probe scheduler/P-batch/D-load watermarks. 2048/10 Schedule reaches its 5s client deadline and never starts a stream. After .5s, no engine lifecycle contains this request. Explicit Master Cancel, .5s pause and 10s poll restore each total to <= its pre-probe watermark. Clear all pressure, sync 2s, then both fresh and generic recovery succeed. No global-zero replacement of the ownership watermark. |
 | `pool_saturation_evict_reject_recover` | 1P/2D, P pool 27, D pool 32 | Ten serial 2048/2 requests, eight disjoint keys each, all succeed; every post-request sample conserves held+referenced+available=capacity, eviction delta >=1, final key count <=27. Slow P to 3000ms, sync 1.5s, fire three eight-key occupants .4s apart, pause .3s. Preserve the ignored 2s/.05s peak wait followed by a separate leading sample. Probe typed LACK_MEM/insufficient KV cache (+BATCH wrapper) in <3s; two follow-up requests may succeed but any failure must carry LACK_MEM in <3s; total failures 1..3. Leading plus 3s/.1s samples show peak held >=24, available floor <=3, conservation always; permanent reject delta >=1. Drain all three occupants successfully, recover >=8 available blocks within 10s, fresh request succeeds, separate Master/engine clean checks and generic recovery, restore perf. No explicit cache eviction API is used. |
 | `capacity_conflict_overflow` | 2P/2D, D pool 180, default P pool | Prime 40-key family at 40960/2; resolve actual holder, wait both key sets quiet 3.5s within 8s. Slow both P to 5000ms, sync 1.5s; seed 147456/2 with the same 40-key prefix plus 104 tail keys must land on holder and appear pending within 6s. Restore cool P to 100ms, pause .3s, measure 2048/2 baseline. Five 40960/2 same-prefix requests with .12s gaps, drain seed+wave, then measure same-prefix probe. Preserve that source order even though its comment calls the later probe a live-ledger measurement. P6 requires all five admissions and successful probe, hard hot share <1; P5 share bands strict/normal/loose=0/.05/.1; P7 probe/baseline ratio bands=2/3/5. BATCH uses Schedule-to-transport-end duration, NON_BATCH uses Schedule-to-first-output TTFT. Restore both P to 100ms. |
 
@@ -89,3 +89,18 @@ capacity tests passed in 2.519s with exit code 0. The review explicitly retained
 the execution differences above and did not claim identical error classification.
 The reviewed test setup merges HANDLERS explicitly. Default catalog integration,
 whole-suite validation and actual Java evidence remain separate outstanding gates.
+
+## Decode watermark runtime compatibility correction
+
+The frozen 3e160 run reports ERROR at `before` for decode_capacity_park: the
+Java Decode endpoint exposes `total_load` and `reserved_total`, not
+`inflight_requests`. The old case silently defaulted the missing field to zero;
+the original YAML action rejected it. Neither establishes a reservation watermark.
+
+The corrected action records `decode_load`, using the established d955a8434b
+cleanup expression `inflight_requests or total_load`. Every present load field
+must be a nonnegative integer; missing evidence remains an error. In particular,
+0/7 yields 7. `reserved_total` is a distinct owner view and is neither substituted
+nor added. Scheduler and Prefill batch watermarks remain separate. This strengthens
+the old missing-field-zero behavior rather than claiming exact legacy equivalence.
+The original ERROR is retained; fixture success does not imply a Java rerun PASS.

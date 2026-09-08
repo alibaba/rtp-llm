@@ -507,6 +507,15 @@ def _watermark_validate(params, plan):
     return _fields(params, set())
 
 
+def _decode_load(row):
+    # Match the established cleanup compatibility contract (d955a8434b).
+    # total_load is routing load, not reserved_total; never sum these owners.
+    fields = [key for key in ("inflight_requests", "total_load") if key in row]
+    if not fields or any(type(row[key]) is not int or row[key] < 0 for key in fields):
+        raise ValueError("missing or malformed Decode load watermark")
+    return row.get("inflight_requests") or row.get("total_load", 0)
+
+
 def _watermark(ctx, deadline):
     data = _master_json(ctx, "single", "/rtp_llm/inflight_status", deadline)
     scheduler = data.get("scheduler_inflight")
@@ -531,7 +540,7 @@ def _watermark(ctx, deadline):
     return dict(
         scheduler=scheduler,
         prefill_batches=total(pre, "inflight_batches"),
-        decode_reservations=total(dec, "inflight_requests"),
+        decode_load=sum(_decode_load(row) for row in dec),
         raw=data,
     )
 
@@ -563,7 +572,7 @@ def watermark_wait(ctx, p, deadline):
             samples.append(current)
             if all(
                 current[k] <= base[k]
-                for k in ("scheduler", "prefill_batches", "decode_reservations")
+                for k in ("scheduler", "prefill_batches", "decode_load")
             ):
                 break
             deadline.sleep(0.5)

@@ -18,6 +18,67 @@ from flexlb_ft.scenario.runtime import execute_instance
 
 
 class CapacityPrograms(unittest.TestCase):
+    def test_decode_load_ownership_and_validation(self):
+        for row, expected in (
+            ({"total_load": 7, "reserved_total": 2}, 7),
+            ({"inflight_requests": 0, "total_load": 7}, 7),
+            ({"inflight_requests": 4, "total_load": 7}, 4),
+            ({"inflight_requests": 0}, 0),
+            ({"total_load": 0}, 0),
+        ):
+            with self.subTest(row=row):
+                self.assertEqual(capacity._decode_load(row), expected)
+        for row in (
+            {},
+            {"reserved_total": 7},
+            {"total_load": None},
+            {"total_load": False},
+            {"total_load": -1},
+            {"total_load": "7"},
+            {"total_load": 1.5},
+            {"inflight_requests": 0, "total_load": None},
+            {"inflight_requests": False, "total_load": 7},
+        ):
+            with self.subTest(row=row), self.assertRaises(ValueError):
+                capacity._decode_load(row)
+
+    def test_watermark_preserves_decode_load(self):
+        view = dict(
+            scheduler_inflight=7,
+            prefill_endpoints=[dict(inflight_batches=2)],
+            decode_endpoints=[
+                dict(inflight_requests=0, total_load=7, reserved_total=2)
+            ],
+        )
+        with patch.object(capacity, "_master_json", return_value=view):
+            result = capacity._watermark(None, None)
+        self.assertEqual(result["decode_load"], 7)
+        self.assertEqual(result["scheduler"], 7)
+        self.assertEqual(result["prefill_batches"], 2)
+        self.assertIs(result["raw"], view)
+
+    def test_watermark_wait_requires_load_return(self):
+        baseline = dict(scheduler=7, prefill_batches=2, decode_load=3)
+        views = [
+            dict(
+                scheduler_inflight=7,
+                prefill_endpoints=[dict(inflight_batches=2)],
+                decode_endpoints=[
+                    dict(inflight_requests=0, total_load=n, reserved_total=0)
+                ],
+            )
+            for n in (7, 3)
+        ]
+        sleeps = []
+        ctx = SimpleNamespace(resource=lambda *args: baseline)
+        deadline = SimpleNamespace(sleep=sleeps.append)
+        with patch.object(capacity, "_master_json", side_effect=views), patch.object(
+            capacity, "_artifact", return_value="fixture.json"
+        ):
+            output = capacity.watermark_wait(ctx, {"baseline": "before"}, deadline)
+        self.assertEqual(sleeps, [0.5])
+        self.assertEqual(output.checks[0].actual["decode_load"], 3)
+
     def plans(self):
         h = handlers()
         h.update({x.name: x for x in capacity.HANDLERS})
@@ -261,7 +322,7 @@ class CapacityPrograms(unittest.TestCase):
             return dict(
                 scheduler_inflight=7 + int(state.sent > 0 and not state.cancelled),
                 prefill_endpoints=[dict(inflight_batches=2)],
-                decode_endpoints=[dict(inflight_requests=3)],
+                decode_endpoints=[dict(total_load=3, reserved_total=1)],
             )
 
         old = h["master_ready"]
