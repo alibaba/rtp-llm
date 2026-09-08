@@ -159,8 +159,6 @@ void BlockTreeCacheMetricsReporter::reportEvictableCandidateCount(
         metrics_reporter_->report<RtpLLMCacheEvictionMetrics, RtpLLMCacheEvictionMetricsCollector>(nullptr, &collector);
         reportEvictionTrigger(snapshot.tier, snapshot.group_type, "watermark", 0);
         reportEvictionTrigger(snapshot.tier, snapshot.group_type, "force_drop", 0);
-        reportEvictionBlocks(snapshot.tier, snapshot.group_type, false, 0, 0);
-        reportEvictionBlocks(snapshot.tier, snapshot.group_type, true, 0, 0);
     }
 }
 
