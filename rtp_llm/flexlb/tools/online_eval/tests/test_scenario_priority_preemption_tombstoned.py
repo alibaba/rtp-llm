@@ -184,7 +184,9 @@ class TombstoneBackend(programs.Backend):
     ):
         if server != "master":
             raise AssertionError(server)
-        if path == "rtp_llm/info":
+        if path == "rtp_llm/master/info":
+            if body != {}:
+                raise AssertionError("Master info requires POST JSON {}")
             return 200, dict(
                 worker_summary={"PREFILL": dict(alive=0 if self.stopped else 1)}
             )
@@ -196,6 +198,44 @@ class TombstoneBackend(programs.Backend):
 
 
 class TombstonedPrograms(unittest.TestCase):
+    def test_health_uses_real_master_info_post_contract(self):
+        from flexlb_ft.scenario.actions import status_protocol
+
+        for state, alive in (("dropped", 0), ("restored", 1)):
+            with self.subTest(state=state), tempfile.TemporaryDirectory() as tmp:
+                ctx = NS(
+                    clock=lambda: 0,
+                    artifact_dir=Path(tmp),
+                    env=NS(master_http_port=12345),
+                )
+                deadline = NS(check=lambda: None, remaining=lambda: 30)
+
+                class Response:
+                    status = 200
+
+                    def __enter__(self):
+                        return self
+
+                    def __exit__(self, *args):
+                        pass
+
+                    def read(self, limit):
+                        return json.dumps(
+                            {"worker_summary": {"PREFILL": {"alive": alive}}}
+                        ).encode()
+
+                def urlopen(request, timeout):
+                    self.assertEqual(
+                        request.full_url, "http://127.0.0.1:12345/rtp_llm/master/info"
+                    )
+                    self.assertEqual(request.get_method(), "POST")
+                    self.assertEqual(json.loads(request.data), {})
+                    return Response()
+
+                with patch.object(status_protocol.urllib.request, "urlopen", urlopen):
+                    result = preempt._ts_health(ctx, {"state": state}, deadline)
+                self.assertEqual(result.checks[0].status, "PASS")
+
     def run_program(self, profile="single-batch", **kwargs):
         _, registry = programs.PreemptionPrograms().plan("cancel_tombstoned")
         plans = compile_scenarios(

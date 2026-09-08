@@ -755,3 +755,13 @@ Final local checkpoint verification: fixed shared
 files passed all78 preemption unittest cases in321.827s. The TOMBSTONED
 focused six tests independently within that local work passed in80.179s.
 These are actual Python driver/consumer fixture runs, not Java runs.
+
+## Tombstoned health endpoint correction
+
+The frozen 3e160 batch-07 run stopped at `prefill_dropped` with HTTP 404.
+The action and its fixture incorrectly used GET `/rtp_llm/info`. Java routes
+and the old EngineOps helper require POST `/rtp_llm/master/info` with JSON `{}`.
+The correction changes only this HTTP contract, for both dropped and restored
+observations. A request-level fixture asserts URL, POST and body through the
+real HTTP helper. Timing, health predicates, crash/fence checks and cleanup
+remain unchanged. Original ERROR is retained; Java revalidation is still required.

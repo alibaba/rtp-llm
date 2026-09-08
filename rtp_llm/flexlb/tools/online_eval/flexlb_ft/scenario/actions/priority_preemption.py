@@ -1971,7 +1971,9 @@ def _ts_health(ctx, p, deadline):
     path = ctx.artifact_dir / f"preemption-ts-health-{uuid.uuid4().hex}.json"
     try:
         while ctx.clock() < end:
-            _, raw = status_http(ctx, "master", "rtp_llm/info", deadline)
+            _, raw = status_http(
+                ctx, "master", "rtp_llm/master/info", deadline, body={}
+            )
             alive = _number(
                 raw.get("worker_summary", {}).get("PREFILL", {}).get("alive"),
                 0,
