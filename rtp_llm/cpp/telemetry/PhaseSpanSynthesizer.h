@@ -107,12 +107,17 @@ phaseErrorDescription(const std::string& name, const char* error_type, const cha
 // timestamps are synthetic (anchored at now()) since we only need the
 // delta for duration computation.
 //
+// `pd_role` has no default on purpose: every phase must state whether it is a
+// PD producer/consumer or explicitly nothing (nullptr), so a newly added phase
+// cannot silently inherit a neighbouring phase's topology role.
+//
 // Never throws; returns silently on any failure (fail-open contract).
 inline void synthesizeChildSpan(const opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span>& parent_span,
                                 const std::string&                                                  name,
                                 int64_t                                                             start_epoch_us,
                                 int64_t                                                             duration_us,
                                 int64_t                                                             request_id,
+                                const char*                                                         pd_role,
                                 opentelemetry::trace::StatusCode status       = opentelemetry::trace::StatusCode::kOk,
                                 bool                             truncated    = false,
                                 const char*                      error_type   = nullptr,
@@ -142,7 +147,13 @@ inline void synthesizeChildSpan(const opentelemetry::nostd::shared_ptr<opentelem
         // Analysis (visible in the detail waterfall only).
         if (request_id >= 0) {
             span->SetAttribute(kAttrRequestId, std::to_string(request_id));
-            span->SetAttribute(kAttrRtpLlmRequestId, request_id);
+        }
+        // Engine identity is unconditional: rank 0 is a real rank (every
+        // single-node deployment reports it), so a missing key would be
+        // indistinguishable from rank 0 on the platform's per-engine view.
+        span->SetAttribute(kAttrGenAiEngineIndex, TelemetryRuntime::worldRank());
+        if (pd_role != nullptr) {
+            span->SetAttribute(kAttrGenAiPdRole, pd_role);
         }
         if (status == opentelemetry::trace::StatusCode::kError) {
             span->SetStatus(status, phaseErrorDescription(name, error_type, error_reason));
@@ -202,6 +213,9 @@ inline void synthesizeKvLoadSpan(const opentelemetry::nostd::shared_ptr<opentele
                                 load_begin_us,
                                 load_end_us - load_begin_us,
                                 request_id,
+                                // A cache transfer window neither produces nor
+                                // consumes tokens, so it carries no PD role.
+                                /*pd_role=*/nullptr,
                                 ok ? opentelemetry::trace::StatusCode::kOk : opentelemetry::trace::StatusCode::kError,
                                 /*truncated=*/false,
                                 error_type,
@@ -232,6 +246,9 @@ inline void synthesizePhaseSpans(const opentelemetry::nostd::shared_ptr<opentele
     }
 
     constexpr auto kError = opentelemetry::trace::StatusCode::kError;
+    // `wait` is queueing that precedes any producer/consumer distinction, so it
+    // never carries a PD role.
+    constexpr const char* kWaitPdRole = nullptr;
     if (!timing.running_started) {
         if (!request_ok) {
             detail::synthesizeChildSpan(parent_span,
@@ -239,6 +256,7 @@ inline void synthesizePhaseSpans(const opentelemetry::nostd::shared_ptr<opentele
                                         begin,
                                         end - begin,
                                         timing.request_id,
+                                        kWaitPdRole,
                                         kError,
                                         /*truncated=*/true,
                                         timing.error_type);
@@ -251,8 +269,14 @@ inline void synthesizePhaseSpans(const opentelemetry::nostd::shared_ptr<opentele
         return;
     }
     if (running > begin) {
-        detail::synthesizeChildSpan(parent_span, "wait", begin, running - begin, timing.request_id);
+        detail::synthesizeChildSpan(parent_span, "wait", begin, running - begin, timing.request_id, kWaitPdRole);
     }
+
+    // A non-separated deployment still reports the key, as "none": the platform
+    // must be able to tell "this engine fuses P and D" from "this engine did not
+    // report a role".
+    const char* const prefill_pd_role = (role == PhaseRole::Prefill) ? kValPdRoleProducer : kValPdRoleNone;
+    const char* const decode_pd_role  = (role == PhaseRole::Decode) ? kValPdRoleConsumer : kValPdRoleNone;
 
     switch (role) {
         case PhaseRole::Fusion: {
@@ -263,6 +287,7 @@ inline void synthesizePhaseSpans(const opentelemetry::nostd::shared_ptr<opentele
                                                 running,
                                                 end - running,
                                                 timing.request_id,
+                                                prefill_pd_role,
                                                 kError,
                                                 /*truncated=*/true,
                                                 timing.error_type);
@@ -274,13 +299,14 @@ inline void synthesizePhaseSpans(const opentelemetry::nostd::shared_ptr<opentele
                 break;
             }
             if (first_token > running) {
-                detail::synthesizeChildSpan(parent_span, "prefill", running, first_token - running, timing.request_id);
+                detail::synthesizeChildSpan(
+                    parent_span, "prefill", running, first_token - running, timing.request_id, prefill_pd_role);
             }
             if (timing.generation_done) {
                 const int64_t done = timing.generation_done_time_us;
                 if (done >= first_token && done <= end && done > first_token) {
                     detail::synthesizeChildSpan(
-                        parent_span, "decode", first_token, done - first_token, timing.request_id);
+                        parent_span, "decode", first_token, done - first_token, timing.request_id, decode_pd_role);
                 }
             } else if (!request_ok && end > first_token) {
                 detail::synthesizeChildSpan(parent_span,
@@ -288,6 +314,7 @@ inline void synthesizePhaseSpans(const opentelemetry::nostd::shared_ptr<opentele
                                             first_token,
                                             end - first_token,
                                             timing.request_id,
+                                            decode_pd_role,
                                             kError,
                                             /*truncated=*/true,
                                             timing.error_type);
@@ -302,6 +329,7 @@ inline void synthesizePhaseSpans(const opentelemetry::nostd::shared_ptr<opentele
                                                 running,
                                                 end - running,
                                                 timing.request_id,
+                                                prefill_pd_role,
                                                 kError,
                                                 /*truncated=*/true,
                                                 timing.error_type);
@@ -310,7 +338,8 @@ inline void synthesizePhaseSpans(const opentelemetry::nostd::shared_ptr<opentele
             }
             const int64_t first_token = timing.first_token_time_us;
             if (first_token > running && first_token <= end) {
-                detail::synthesizeChildSpan(parent_span, "prefill", running, first_token - running, timing.request_id);
+                detail::synthesizeChildSpan(
+                    parent_span, "prefill", running, first_token - running, timing.request_id, prefill_pd_role);
             }
             break;
         }
@@ -318,7 +347,8 @@ inline void synthesizePhaseSpans(const opentelemetry::nostd::shared_ptr<opentele
             if (timing.generation_done) {
                 const int64_t done = timing.generation_done_time_us;
                 if (done > running && done <= end) {
-                    detail::synthesizeChildSpan(parent_span, "decode", running, done - running, timing.request_id);
+                    detail::synthesizeChildSpan(
+                        parent_span, "decode", running, done - running, timing.request_id, decode_pd_role);
                 }
             } else if (!request_ok) {
                 detail::synthesizeChildSpan(parent_span,
@@ -326,6 +356,7 @@ inline void synthesizePhaseSpans(const opentelemetry::nostd::shared_ptr<opentele
                                             running,
                                             end - running,
                                             timing.request_id,
+                                            decode_pd_role,
                                             kError,
                                             /*truncated=*/true,
                                             timing.error_type);

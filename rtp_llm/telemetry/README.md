@@ -18,7 +18,7 @@ export OTEL_EXPORTER_OTLP_TRACES_HEADERS='x-arms-license-key=<key>,x-arms-projec
 行为要点（代码依据：`tracing.py` / `cpp/telemetry/TelemetryRuntime.cc`）：
 
 - **fail-open**：telemetry 任何初始化/导出失败只降级关闭，不影响推理。
-- **仅 tp_rank 0 产 span**，其余 rank 自动禁用；DP 部署下每个 DP 组的 tp_rank0 均产 span（请求只路由到一组，trace 不重复）。C++ 侧 Resource 带 `rtp_llm.dp_rank` / `rtp_llm.world_rank` 用于区分副本；Python frontend 侧 Resource 只有 `service.name` / `service.instance.id` / `process.pid` / `rtp_llm.role`，副本靠 `service.instance.id`（`hostname-pid`）区分。
+- **仅 tp_rank 0 产 span**，其余 rank 自动禁用；DP 部署下每个 DP 组的 tp_rank0 均产 span（请求只路由到一组，trace 不重复）。C++ 侧 Resource 带 `rtp_llm.dp_rank` / `rtp_llm.world_rank` 用于区分副本；Python frontend 侧无 rank 字段，副本靠 `service.instance.id` 区分（见第 3 节）。
 - 开关打开但无 endpoint 时 telemetry 静默禁用（error 日志可查）。
 
 ## 2. endpoint 解析优先级
@@ -34,20 +34,36 @@ export OTEL_EXPORTER_OTLP_TRACES_HEADERS='x-arms-license-key=<key>,x-arms-projec
 `/etc/rtp_llm/trace_regions.json`）。region 解析结果不会覆盖用户已显式设置的 env。
 region 解析在 launcher 进程（`start_server.py`）中执行后随环境继承给 C++ backend 子进程。
 
-## 3. POD_IP 与平台指标面板（重要）
+## 3. 实例身份与平台指标面板
 
-Python/C++ 两侧均在 **`POD_IP` 环境变量非空**时向 Resource 写入 `host.ip`。
-观测平台的请求数/错误数/耗时面板依赖该属性做实例维度的过滤统计，
-**span 缺少它时这些面板恒为"暂无数据"**——trace 本身仍然完整，只是指标面板统计不到。
+观测平台的请求数/错误数/耗时面板依赖 Resource 的 `host.ip` 做实例维度的过滤统计，
+**span 缺少它时这些面板恒为“暂无数据”**——trace 本身仍然完整，只是指标面板统计不到。
 
-- **k8s 部署**：`POD_IP` 通常已由 downward API 注入，无需额外配置。
-- **非 k8s 部署（物理机 / docker 直跑）**：必须显式设置，例如：
+各侧默认 Resource 属性：
+
+| 属性 | 取值 | 写入条件 |
+|---|---|---|
+| `host.name` | 主机名 | 主机名可取到时 |
+| `host.ip` | `{主机名}-{pid}`（**不是 IP**） | 同上 |
+| `service.instance.id` | `{主机名}-{pid}`，主机名缺失时为 `unknown-{pid}` | Python / C++ 自动写入；FlexLB 仅保留显式配置 |
+| `rtp_llm.pod_ip` | `POD_IP` | `POD_IP` 非空时 |
+| `gen_ai.instrumentation.sdk.name` | 固定 `loongsuite-genai-utils` | 恒写 |
+
+部署要点：
+
+- `host.name` / `host.ip` 由进程自行取主机名得到，**无需配置**；`$HOSTNAME` 不作为取值来源，
+  设置该变量不会改变它们。引擎进程取 `gethostname(2)`，FlexLB 读取 `/proc/sys/kernel/hostname`，
+  均取当前 UTS 命名空间的内核主机名。同一命名空间且主机名未变化时，三端取值一致。
+  取不到或为空时这两个键直接省略，不回退 `/etc/hostname` 或环境变量，也不写占位值；
+  部署显式配置的 Resource 属性仍保留。
+- `POD_IP` **不再影响指标面板**，只决定 `rtp_llm.pod_ip` 是否有值。k8s 下通常已由 downward API
+  注入；非 k8s 部署如需该字段，显式设置：
 
   ```bash
   export POD_IP=$(hostname -i | awk '{print $1}')
   ```
 
-注：时间窗内无错误请求时错误数显示"暂无数据"属正常现象（口径为 OTel status=ERROR 的 span 数）。
+注：时间窗内无错误请求时错误数显示“暂无数据”属正常现象（口径为 OTel status=ERROR 的 span 数）。
 
 ## 4. 环境变量一览
 
@@ -62,7 +78,7 @@ Python/C++ 两侧均在 **`POD_IP` 环境变量非空**时向 Resource 写入 `h
 | `RTP_LLM_OTEL_BSP_SCHEDULE_DELAY_MS` | `5000` | BSP 导出周期 |
 | `RTP_LLM_OTEL_BSP_MAX_EXPORT_BATCH_SIZE` | `512` | 单批导出条数（自动 clamp 到不超过队列上限） |
 | `RTP_LLM_OTEL_HTTP_TIMEOUT_MS` | `3000` | OTLP HTTP 导出超时 |
-| `POD_IP` | 空 | 非空时写 Resource `host.ip`（指标面板依赖，见第 3 节） |
+| `POD_IP` | 空 | 非空时写 Resource `rtp_llm.pod_ip`（不影响指标面板，见第 3 节） |
 
 以上默认值 Python 与 C++ 两侧一致；两侧读取同一组环境变量，无需分别配置。
 
@@ -123,7 +139,7 @@ current span 时复用它（`ownsSpan=false`），不会再建第二个。
 3. 确认导出无失败：`grep 'failed to export' logs/*.log` 应无命中。
 4. 在观测平台用 trace_id 检索，确认 span 树完整、
    流式请求的 POST span 附加信息 Events(1) 为 `first_response_chunk`；非流式请求无该 event、
-   平台上能看到该实例 IP（`<POD_IP>`）、且请求数/耗时指标有数据。
+   平台上该实例显示为 `host.ip`（即 `{主机名}-{pid}`，不是 IP）、且请求数/耗时指标有数据。
 
    按拓扑对照 span 数（实测值）：
 

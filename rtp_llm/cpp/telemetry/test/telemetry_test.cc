@@ -5,6 +5,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <unistd.h>
 #include <vector>
 
 #include "gtest/gtest.h"
@@ -56,6 +57,42 @@ void clearTelemetryEnv() {
     unsetenv("RTP_LLM_OTEL_SERVICE_NAME");
 }
 
+// Scoped override for an env var owned by the execution environment rather than
+// by telemetry. clearTelemetryEnv() deliberately leaves HOSTNAME and POD_IP
+// alone, so a resource test that changed them without restoring would leak into
+// every test running later in this binary. A null value means "unset".
+class ScopedEnv {
+public:
+    ScopedEnv(const char* name, const char* value): name_(name) {
+        const char* previous = std::getenv(name);
+        had_previous_        = previous != nullptr;
+        if (had_previous_) {
+            previous_ = previous;
+        }
+        if (value == nullptr) {
+            unsetenv(name);
+        } else {
+            setenv(name, value, 1);
+        }
+    }
+
+    ~ScopedEnv() {
+        if (had_previous_) {
+            setenv(name_.c_str(), previous_.c_str(), 1);
+        } else {
+            unsetenv(name_.c_str());
+        }
+    }
+
+    ScopedEnv(const ScopedEnv&)            = delete;
+    ScopedEnv& operator=(const ScopedEnv&) = delete;
+
+private:
+    std::string name_;
+    std::string previous_;
+    bool        had_previous_ = false;
+};
+
 class TelemetryTest: public ::testing::Test {
 protected:
     void SetUp() override {
@@ -81,6 +118,35 @@ protected:
         config.tp_rank       = 0;
         EXPECT_TRUE(TelemetryRuntime::initWithExporter(std::move(exporter), config));
         return span_data;
+    }
+
+    // Runtime whose BSP flushes almost immediately, so a probe span can be read
+    // back while the provider is still alive. Required for resource assertions:
+    // SpanData::SetResource keeps a RAW POINTER into the provider's
+    // TracerContext, so reading GetResource() after shutdown() would dangle.
+    std::shared_ptr<memory_exporter::InMemorySpanData> startFastFlushRuntime(const std::string& role) {
+        std::shared_ptr<memory_exporter::InMemorySpanData> span_data;
+        auto            exporter = memory_exporter::InMemorySpanExporterFactory::Create(span_data);
+        TelemetryConfig config;
+        config.enabled           = true;
+        config.schedule_delay_ms = 1;
+        config.role              = role;
+        config.tp_rank           = 0;
+        EXPECT_TRUE(TelemetryRuntime::initWithExporter(std::move(exporter), config));
+        return span_data;
+    }
+
+    // Exports one span and waits for the BSP to hand it to the exporter. Callers
+    // must still be ACTIVE when they read the returned resource.
+    std::vector<std::unique_ptr<opentelemetry::sdk::trace::SpanData>>
+    exportProbeSpan(const std::shared_ptr<memory_exporter::InMemorySpanData>& span_data) {
+        TelemetryRuntime::tracer()->StartSpan("probe")->End();
+        std::vector<std::unique_ptr<opentelemetry::sdk::trace::SpanData>> spans;
+        for (int i = 0; i < 200 && spans.empty(); ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            spans = span_data->GetSpans();
+        }
+        return spans;
     }
 };
 
@@ -165,7 +231,7 @@ TEST_F(TelemetryTest, InMemoryExportWithAttributes) {
 
     auto tracer = TelemetryRuntime::tracer();
     auto span   = tracer->StartSpan("rtp_llm.test_span");
-    span->SetAttribute("rtp_llm.request_id", (int64_t)42);
+    span->SetAttribute("request_id", "42");
     span->End();
 
     EXPECT_TRUE(TelemetryRuntime::shutdown(5000));
@@ -173,8 +239,10 @@ TEST_F(TelemetryTest, InMemoryExportWithAttributes) {
     ASSERT_EQ(spans.size(), 1u);
     EXPECT_EQ(spans[0]->GetName(), "rtp_llm.test_span");
     const auto& attributes = spans[0]->GetAttributes();
-    auto        it         = attributes.find("rtp_llm.request_id");
+    auto        it         = attributes.find("request_id");
     ASSERT_NE(it, attributes.end());
+    EXPECT_EQ(nostd::get<std::string>(it->second), "42");
+    EXPECT_EQ(attributes.count("rtp_llm.request_id"), 0u);
 }
 
 TEST_F(TelemetryTest, PropagatorInjectExtractRoundtrip) {
@@ -278,6 +346,65 @@ TEST_F(TelemetryTest, ResourceCarriesReplicaIdentityRanks) {
     // "rtp_llm" default while init() derived a different name.
     ASSERT_NE(res.find("service.name"), res.end());
     EXPECT_EQ(opentelemetry::nostd::get<std::string>(res.at("service.name")), "rtp_llm_decode");
+    EXPECT_TRUE(TelemetryRuntime::shutdown(5000));
+}
+
+// The four platform-identity resource attributes. host.ip is process identity
+// (hostname-pid), NOT an address: the per-instance panels key off it and a pod
+// IP would merge every co-located process into one bucket. The real address
+// moves to rtp_llm.pod_ip.
+TEST_F(TelemetryTest, ResourceCarriesPlatformIdentityAttributes) {
+    // A deliberately wrong $HOSTNAME: host identity must come from
+    // gethostname(2), so a leaked env value from an outer shell cannot make this
+    // process report another machine's name.
+    ScopedEnv hostname_env("HOSTNAME", "leaked-outer-host");
+    ScopedEnv pod_ip_env("POD_IP", "10.66.12.32");
+
+    char kernel_hostname[256] = {0};
+    ASSERT_EQ(gethostname(kernel_hostname, sizeof(kernel_hostname) - 1), 0);
+    const std::string expected_host_name = kernel_hostname;
+    const std::string expected_host_ip   = expected_host_name + "-" + std::to_string(getpid());
+
+    auto span_data = startFastFlushRuntime("prefill");
+    auto spans     = exportProbeSpan(span_data);
+    ASSERT_EQ(spans.size(), 1u);
+    const auto& res = spans[0]->GetResource().GetAttributes();
+
+    ASSERT_NE(res.find("gen_ai.instrumentation.sdk.name"), res.end());
+    EXPECT_EQ(nostd::get<std::string>(res.at("gen_ai.instrumentation.sdk.name")), "loongsuite-genai-utils");
+    ASSERT_NE(res.find("host.name"), res.end());
+    EXPECT_EQ(nostd::get<std::string>(res.at("host.name")), expected_host_name);
+    EXPECT_NE(nostd::get<std::string>(res.at("host.name")), "leaked-outer-host");
+    ASSERT_NE(res.find("host.ip"), res.end());
+    EXPECT_EQ(nostd::get<std::string>(res.at("host.ip")), expected_host_ip);
+    // Guards the regression this change is most likely to suffer: host.ip must
+    // never fall back to carrying the pod address again.
+    EXPECT_NE(nostd::get<std::string>(res.at("host.ip")), "10.66.12.32");
+    ASSERT_NE(res.find("rtp_llm.pod_ip"), res.end());
+    EXPECT_EQ(nostd::get<std::string>(res.at("rtp_llm.pod_ip")), "10.66.12.32");
+    // Both keys derive from the same source, so they can never disagree about
+    // which host this process runs on.
+    ASSERT_NE(res.find("service.instance.id"), res.end());
+    EXPECT_EQ(nostd::get<std::string>(res.at("service.instance.id")), expected_host_ip);
+    EXPECT_TRUE(TelemetryRuntime::shutdown(5000));
+}
+
+// POD_IP keeps its "absent means omitted" contract, now on rtp_llm.pod_ip.
+// host.ip stays present because it no longer depends on the pod address.
+TEST_F(TelemetryTest, ResourceOmitsPodIpWhenUnsetButKeepsHostIdentity) {
+    ScopedEnv pod_ip_env("POD_IP", nullptr);
+
+    auto span_data = startFastFlushRuntime("decode");
+    auto spans     = exportProbeSpan(span_data);
+    ASSERT_EQ(spans.size(), 1u);
+    const auto& res = spans[0]->GetResource().GetAttributes();
+
+    EXPECT_EQ(res.count("rtp_llm.pod_ip"), 0u);
+    ASSERT_NE(res.find("host.ip"), res.end());
+    const std::string host_ip    = nostd::get<std::string>(res.at("host.ip"));
+    const std::string pid_suffix = "-" + std::to_string(getpid());
+    EXPECT_GT(host_ip.size(), pid_suffix.size());
+    EXPECT_EQ(host_ip.compare(host_ip.size() - pid_suffix.size(), pid_suffix.size(), pid_suffix), 0) << host_ip;
     EXPECT_TRUE(TelemetryRuntime::shutdown(5000));
 }
 
@@ -458,7 +585,7 @@ TEST_F(TelemetryTest, SpanFactoriesCarryRpcAttributes) {
             EXPECT_EQ(nostd::get<std::string>(attributes.at("server.address")), "decode.example");
             EXPECT_EQ(nostd::get<int64_t>(attributes.at("server.port")), 26101);
             EXPECT_EQ(nostd::get<std::string>(attributes.at("request_id")), "42");
-            EXPECT_EQ(nostd::get<int64_t>(attributes.at("rtp_llm.request_id")), 42);
+            EXPECT_EQ(attributes.count("rtp_llm.request_id"), 0u);
             EXPECT_EQ(nostd::get<int64_t>(attributes.at("rtp_llm.retry_attempt")), 1);
         } else if (span->GetName() == "rtp_llm.decode_remote_generate") {
             const auto& attributes = span->GetAttributes();

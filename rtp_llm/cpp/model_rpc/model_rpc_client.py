@@ -1046,9 +1046,6 @@ class ModelRpcClient(object):
             client_settlement_abandoned = asyncio.Event()
             # Bailian Unitrace index key (see rtp_llm/telemetry/attributes.py)
             client_span.set_attribute(trace_attrs.REQUEST_ID, str(input_py.request_id))
-            client_span.set_attribute(
-                trace_attrs.RTP_LLM_REQUEST_ID, input_py.request_id
-            )
         last_output = None
 
         try:
@@ -1160,6 +1157,7 @@ class ModelRpcClient(object):
                     _record_client_span_latency(client_span, last_output)
                     client_span.finish()
                 else:
+                    _record_client_span_latency(client_span, last_output)
                     client_span.finish(error=e, error_type="Cancelled")
             raise
         except Exception as e:
@@ -1235,6 +1233,7 @@ class ModelRpcClient(object):
                         last_output,
                         include_all_sequences=include_all_sequences,
                     )
+                    _record_client_span_latency(client_span, last_output)
                     client_span.finish(error=cleanup_cancel, error_type="Cancelled")
                 raise
             should_cancel = (

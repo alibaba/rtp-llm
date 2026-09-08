@@ -94,14 +94,10 @@ class MasterClientScheduleSpanTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(SUCCESS_CODE, response.code)
         attributes = self.span.attributes
-        # Double-write: the platform indexes the unprefixed string key for span
-        # search, so the numeric twin alone leaves the span unsearchable.
+        # Preserve the exact internal ID, including values above 2**53.
         self.assertEqual("3540218608800727041", attributes[trace_attrs.REQUEST_ID])
         self.assertIsInstance(attributes[trace_attrs.REQUEST_ID], str)
-        self.assertEqual(
-            3540218608800727041, attributes[trace_attrs.RTP_LLM_REQUEST_ID]
-        )
-        self.assertIsInstance(attributes[trace_attrs.RTP_LLM_REQUEST_ID], int)
+        self.assertNotIn("rtp_llm.request_id", attributes)
         self.assertEqual("OK", attributes[trace_attrs.RPC_RESPONSE_STATUS_CODE])
         self.assertEqual(SUCCESS_CODE, attributes[trace_attrs.RTP_LLM_SCHEDULE_CODE])
         # A successful schedule closes clean.
