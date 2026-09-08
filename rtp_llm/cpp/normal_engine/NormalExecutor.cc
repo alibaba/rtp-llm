@@ -4,8 +4,10 @@
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include <cstdlib>
 #include <algorithm>
+#include <chrono>
 #include <memory>
 #include <string>
+#include <thread>
 #include "rtp_llm/cpp/utils/StatusUtil.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "rtp_llm/cpp/models/ModelInputsLogger.h"
@@ -332,8 +334,8 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         RTP_LLM_PROFILE_SCOPE("executor.dispatch_output(stream_async)");
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
 
-        // Record as soon as sampler outputs are valid so the worker waits with
-        // cudaStreamWaitEvent before pinned D2H staging.
+        // Record as soon as sampler outputs are valid so the worker can wait
+        // for sampling before pinned D2H staging.
         auto sampler_event = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
         sampler_event->record(cuda_graph::graphGetCurrentStream());
 
@@ -715,10 +717,21 @@ absl::Status NormalExecutor::dispatchOutputAsync(const StreamGroups&           s
             }
         });
 
-        // Queue a stream wait, then do pinned D2H on the worker stream while
-        // the main thread continues to the next gather.
+        // Wait for sampling on the bookkeeping worker while the main thread
+        // continues to the next gather and forward.
         if (sampler_event) {
+#if USING_ROCM
+            // Keep the worker's GPU queue idle until there is a token to copy.
+            // A pending HIP stream-wait packet on the second queue increases
+            // dispatch latency inside the concurrently executing model graph.
+            // Do not hold a blocking HIP API call across the next graph's
+            // submission either (notably when runtime tracing is enabled).
+            while (!sampler_event->query()) {
+                std::this_thread::sleep_for(std::chrono::microseconds(50));
+            }
+#else
             sampler_event->block(cuda_graph::graphGetCurrentStream());
+#endif
         }
 
         auto status =

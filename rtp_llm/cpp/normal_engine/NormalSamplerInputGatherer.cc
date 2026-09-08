@@ -116,13 +116,19 @@ SamplerInputs NormalSamplerInputGatherer::allocateSamplerInputs(const StreamGrou
                                                                 size_t              propose_step) const {
     // TODO(xinfei.sxf) don't sample for chunk stream
     SamplerInputs sampler_inputs;
-    sampler_inputs.step             = stream_groups.maxSeqLen() + propose_step;
-    sampler_inputs.batch_size       = total_batch_size_in;
-    sampler_inputs.batch_size_out   = total_batch_size_out;
-    auto bs                         = (int64_t)total_batch_size_in;
-    sampler_inputs.sequence_lengths = torch::empty({bs}, torch::kInt32);
+    sampler_inputs.step           = stream_groups.maxSeqLen() + propose_step;
+    sampler_inputs.batch_size     = total_batch_size_in;
+    sampler_inputs.batch_size_out = total_batch_size_out;
+    auto bs                       = (int64_t)total_batch_size_in;
+    auto history_options          = torch::TensorOptions(torch::kInt32);
+#if USING_ROCM
+    // The sampler copies these on the execution stream without waiting for
+    // the preceding decode graph. HIP requires pinned sources for this path.
+    history_options = history_options.pinned_memory(true);
+#endif
+    sampler_inputs.sequence_lengths = torch::empty({bs}, history_options);
     sampler_inputs.logits_processor_states_ptr.reset();
-    sampler_inputs.input_lengths  = torch::empty({bs}, torch::kInt32);
+    sampler_inputs.input_lengths  = torch::empty({bs}, history_options);
     sampler_inputs.num_beams_in   = torch::empty({bs}, torch::kLong);
     sampler_inputs.num_beams_out  = torch::empty({bs}, torch::kLong);
     static const auto pinned_int  = torch::TensorOptions(torch::kInt).pinned_memory(true);

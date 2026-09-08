@@ -78,6 +78,28 @@ bool streamAsyncReplayPrepEnabled() {
     return enabled;
 }
 
+#if USING_ROCM
+bool supportsDeviceMetadataReplay(const py::object& impl) {
+    if (!impl || impl.is_none()) {
+        return false;
+    }
+    if (py::isinstance<py::dict>(impl)) {
+        auto impls = impl.cast<py::dict>();
+        if (impls.size() == 0) {
+            return false;
+        }
+        for (auto item : impls) {
+            if (!supportsDeviceMetadataReplay(py::reinterpret_borrow<py::object>(item.second))) {
+                return false;
+            }
+        }
+        return true;
+    }
+    return py::hasattr(impl, "supports_device_metadata_replay")
+           && impl.attr("supports_device_metadata_replay").cast<bool>();
+}
+#endif
+
 void callPrepareCudaGraph(py::object attn_pyobj, PyModelInputs& inputs) {
     if (!attn_pyobj || attn_pyobj.is_none()) {
         return;
@@ -498,6 +520,23 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
         RTP_LLM_PROFILE_SCOPE("cuda_graph.prepareAttentionInputs(fused_d2d_copy)");
         fusedCopy(d2d_copies);
         fusedStridedCopy(strided_d2d_copies);
+    }
+
+    if (device_metadata_replay_) {
+        // Every consumer opted into device-only replay preparation. These
+        // copies and padding writes are ordered after the previous replay on
+        // the execution stream; no host mirror may be consumed below.
+        const int graph_bs = state.current_real_graph_bs;
+        if (state.current_batch_size < graph_bs) {
+            // Match a padded host sequence length of zero (+1 for attention).
+            py_model_inputs_.attention_inputs.sequence_lengths_plus_1_device
+                .slice(0, state.current_batch_size, graph_bs)
+                .fill_(1);
+        }
+        RTP_LLM_PROFILE_SCOPE("cuda_graph.prepareAttentionInputs(device_metadata)");
+        py::gil_scoped_acquire gil;
+        callPrepareCudaGraph(attn_pyobj, py_model_inputs_);
+        return;
     }
 
     // NOTE: we do H2H after D2D copies to let GPU finish the D2D copies as soon as possible,
@@ -1117,6 +1156,10 @@ void CudaGraphRunner::initCapture() {
         py::object attn_pyobj;
         try {
             attn_pyobj = py_attn_pyobj_method_(capture_mem_hold_.py_model_inputs_, true);
+#if USING_ROCM
+            device_metadata_replay_ =
+                role_ == CudaGraphRole::DECODE && num_tokens_per_bs_ == 1 && supportsDeviceMetadataReplay(attn_pyobj);
+#endif
         } catch (const py::error_already_set& e) {
             RTP_LLM_LOG_ERROR("initCapture prepare_fmha_impl failed: %s", e.what());
             throw;
@@ -1167,6 +1210,9 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
     // WarmUp twice (params already prepared in attn impl __init__/create_params when instance was created)
     RTP_LLM_LOG_INFO("WarmUp for %s %d start.", key_type, key);
     auto attn_pyobj = graph_instances_[key].mem_hold_.attn_pyobj_;
+#if USING_ROCM
+    device_metadata_replay_ = device_metadata_replay_ && supportsDeviceMetadataReplay(attn_pyobj);
+#endif
     try {
         // Run the same backend that will be captured for this exact key.  In
         // particular, static torch.compile/Triton specializations must be

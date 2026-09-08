@@ -491,14 +491,18 @@ CKAttnPtr FusedRopeKVCacheDecodeOpBase::prepare(torch_ext::PyAttentionInputs att
                                  + std::to_string(attn_inputs.kv_cache_kernel_block_id_device.size(0)));
     }
 
-    attn_params                            = CKAttnPtr(params, (CKAttn*)params.get());
-    attn_params->decode_plan               = true;
-    attn_params->attn_type                 = torchDTypeToDataType(attn_inputs.dtype);
-    attn_params->cu_seqlens                = attn_inputs.cu_seqlens_device;
-    attn_params->cu_kv_seqlens             = attn_inputs.cu_kv_seqlens_device;
-    attn_params->sequence_lengths          = attn_inputs.sequence_lengths;
+    attn_params                = CKAttnPtr(params, (CKAttn*)params.get());
+    attn_params->decode_plan   = true;
+    attn_params->attn_type     = torchDTypeToDataType(attn_inputs.dtype);
+    attn_params->cu_seqlens    = attn_inputs.cu_seqlens_device;
+    attn_params->cu_kv_seqlens = attn_inputs.cu_kv_seqlens_device;
+    // Captured kernels must not read mutable pinned host lengths. Replay
+    // updates this stable device allocation on the execution stream.
+    attn_params->sequence_lengths          = attn_inputs.sequence_lengths.to(torch::kCUDA);
     attn_params->kv_block_array.cache_type = attn_configs_.kv_cache_dtype;
-    attn_params->input_lengths             = attn_inputs.input_lengths;
+    attn_params->input_lengths             = attn_inputs.input_lengths_device.defined() ?
+                                                 attn_inputs.input_lengths_device :
+                                                 attn_inputs.input_lengths.to(torch::kCUDA);
     attn_params->prefix_lengths            = attn_inputs.prefix_lengths;
     attn_params->padding_offset            = attn_inputs.padding_offset;
     attn_params->position_ids              = attn_inputs.combo_position_ids;
@@ -650,6 +654,15 @@ void registerFusedRopeKVCacheOp(const py::module& m) {
     pybind11::class_<CKAttn, std::shared_ptr<CKAttn>>(m, "CKAttn")
         .def(pybind11::init<>())
         .def("update_kv_cache_offset", &updateKvCacheOffset, py::arg("kv_cache_block_id_device"))
+        .def(
+            "update_decode_lengths",
+            [](CKAttn& params, const torch::Tensor& sequence_lengths_plus_1) {
+                TORCH_CHECK(params.decode_plan && params.sequence_lengths.is_cuda() && sequence_lengths_plus_1.is_cuda()
+                                && params.sequence_lengths.sizes() == sequence_lengths_plus_1.sizes(),
+                            "decode replay requires matching device sequence lengths");
+                params.sequence_lengths.copy_(sequence_lengths_plus_1 - 1);
+            },
+            py::arg("sequence_lengths_plus_1"))
         .def("prepare_in_place", &prepareInPlace, py::arg("attn_inputs"));
 
     // Prefill ASM

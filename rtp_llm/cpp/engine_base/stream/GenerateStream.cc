@@ -632,11 +632,15 @@ torch::Tensor GenerateStream::generateContextPositionIds() {
 }
 
 void GenerateStream::generateNextPositionId(int32_t* now_pos) {
+    generateNextPositionId(now_pos, seqLength());
+}
+
+void GenerateStream::generateNextPositionId(int32_t* now_pos, int sequence_length) {
     if (!context_position_ids_) {
         return;
     }
     PositionIdsGenerator::generateNextPositionId(
-        now_pos, seqLength(), mm_position_ids_style_, context_position_ids_.value());
+        now_pos, sequence_length, mm_position_ids_style_, context_position_ids_.value());
 }
 
 vector<int> GenerateStream::currentExecuteTokens(int batch_idx) const {

@@ -145,6 +145,7 @@ private:
     py::object              py_forward_method_;
     py::object              py_attn_pyobj_method_;
     bool                    enable_cuda_graph_{false};
+    bool                    device_metadata_replay_{false};
     bool                    is_prefill_cuda_graph_mode_{false};
     bool                    is_target_verify_{false};
     cuda_graph::GraphStream capture_stream_;
