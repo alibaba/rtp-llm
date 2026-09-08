@@ -1,3 +1,5 @@
+#include "autil/Scope.h"
+#include <exception>
 #include "autil/TimeUtility.h"
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/PrefillRpcServer.h"
@@ -744,6 +746,12 @@ grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*          
                                                   maga_init_params_.pd_sep_config.prefill_stop_stream_wait_timeout_ms);
     prefill_context.onflight_requests      = onflight_requests_;
     prefill_context.loading_cache_requests = loading_cache_requests_;
+    const int         uncaught_exceptions  = std::uncaught_exceptions();
+    autil::ScopeGuard rpc_completion_guard([&prefill_context, uncaught_exceptions] {
+        if (std::uncaught_exceptions() == uncaught_exceptions) {
+            prefill_context.markRpcHandlingCompleted();
+        }
+    });
 
     // Prefill SERVER span is created only on the PD path, AFTER the fallback
     // check above, so Local/Prefill each own exactly one SERVER span. RAII
