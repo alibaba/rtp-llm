@@ -76,7 +76,10 @@ class BertMultimodalEmbeddingTest(TestCase):
             raise SkipTest("CUDA is not available")
 
     def test_user_mask_routes_only_text_markers_to_flashinfer(self):
-        with mock.patch.dict(os.environ, {"USE_VISION_BERT_UQI_BLOCK_MASK": "1"}):
+        with mock.patch.dict(
+            os.environ,
+            {"USE_VISION_BERT_UQI_BLOCK_MASK": "1", "VISION_BERT_UQI_TWO_PASS": "0"},
+        ):
             model = self._build_model()
         inputs = _build_inputs()
         inputs.input_ids = torch.tensor(
@@ -109,7 +112,10 @@ class BertMultimodalEmbeddingTest(TestCase):
             model.prepare_fmha_impl(inputs, is_cuda_graph=True)
 
     def test_no_user_profile_routes_to_native_flashinfer_without_mask(self):
-        with mock.patch.dict(os.environ, {"USE_VISION_BERT_UQI_BLOCK_MASK": "1"}):
+        with mock.patch.dict(
+            os.environ,
+            {"USE_VISION_BERT_UQI_BLOCK_MASK": "1", "VISION_BERT_UQI_TWO_PASS": "0"},
+        ):
             model = self._build_model()
         inputs = _build_inputs()
         # A vision placeholder equal to CLS_UQI must not create a profile mask.
@@ -130,6 +136,22 @@ class BertMultimodalEmbeddingTest(TestCase):
         with mock.patch(path) as backend:
             self.assertIs(model.prepare_fmha_impl(inputs), backend.return_value)
             self.assertIsNone(backend.call_args.kwargs["custom_mask"])
+
+    def test_user_profile_defaults_to_two_pass_and_rejects_cuda_graph(self):
+        with mock.patch.dict(os.environ, {"USE_VISION_BERT_UQI_BLOCK_MASK": "1"}):
+            os.environ.pop("VISION_BERT_UQI_TWO_PASS", None)
+            model = self._build_model()
+        inputs = _build_inputs()
+        attention = PyAttentionInputs()
+        attention.is_prefill = True
+        inputs.attention_inputs = attention
+        with mock.patch.object(model, "_prepare_uqi_two_pass_impl") as backend:
+            self.assertIs(model.prepare_fmha_impl(inputs), backend.return_value)
+            backend.assert_called_once_with(inputs, inputs.attention_inputs)
+            backend.reset_mock()
+            with self.assertRaisesRegex(ValueError, "CUDA graphs"):
+                model.prepare_fmha_impl(inputs, is_cuda_graph=True)
+            backend.assert_not_called()
 
     def _build_model(
         self,
