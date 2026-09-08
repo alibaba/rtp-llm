@@ -206,6 +206,7 @@ def forwarded_optional_environment(role: str) -> dict[str, str]:
         "KIMI_K3_MLA_FP8_Q_SCALE",
         "KIMI_K3_MLA_FP8_KV_SCALE",
         "KIMI_K3_MLA_FP8_DIAGNOSTICS",
+        "KIMI_K3_MLA_PREFILL_EXPANDED_KV_BUDGET_BYTES",
         "RTP_LLM_MTP_ACCEPTANCE_DIAGNOSTICS",
         "LOAD_METHOD",
     )

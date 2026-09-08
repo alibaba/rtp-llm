@@ -40,7 +40,8 @@ Reference source snapshots audited for this implementation: vLLM K3 `38e7f533d8b
 
 ## Independent switches
 
-Both switches default to off. Set the same MLA cache policy on both PD roles.
+Both model switches default to off. The two-host smoke overrides these defaults
+to enable both. Set the same MLA cache policy on both PD roles.
 
 | Mode | `KIMI_K3_ATTENTION_QUANTIZATION` | `KIMI_K3_MLA_FP8` |
 |---|---|---|
@@ -50,6 +51,47 @@ Both switches default to off. Set the same MLA cache policy on both PD roles.
 | Weight FP8 and MLA FP8 | `fp8_per_block` | `1` |
 
 Native MoE quantization and the standalone Eagle3 draft precision are unchanged.
+
+## Two-host PD smoke
+
+The role script defaults to Weight FP8, MLA FP8, unit scales, FP8 collective GEMM
+and a 4 GiB historical KV expansion budget per rank. The controller forwards
+explicit overrides to both roles. After
+configuring the existing host, endpoint, local checkpoint and deployed-launcher
+settings, launch the full suite with:
+
+```bash
+export KIMI_K3_ATTENTION_QUANTIZATION=fp8_per_block
+export KIMI_K3_MLA_FP8=1
+export KIMI_K3_MLA_FP8_Q_SCALE=1
+export KIMI_K3_MLA_FP8_KV_SCALE=1
+export KIMI_K3_FP8_COLLECTIVE_GEMM=1
+export KIMI_K3_MLA_FP8_DIAGNOSTICS=0
+export LOAD_METHOD=fastsafetensors
+export RTP_LLM_SKIP_BUILD=1
+export SMOKE_SUITE=all
+# Default smoke prefix-expansion budget: 4 GiB per rank.
+export KIMI_K3_MLA_PREFILL_EXPANDED_KV_BUDGET_BYTES=4294967296
+python3 example/k3/kimi_k3_full_model_two_host_pd_smoke_driver.py
+```
+
+Use the independent-switch table above for the other three precision modes.
+Explicitly use `none` and `0` for a BF16 comparison so an earlier shell export
+does not carry over. Add `--dry-run` to inspect both remote launch commands
+without starting services. Each role records and checks the supplied settings
+against its service process in `service.env`; these environment checks alone do
+not prove FP8 kernel execution.
+
+The smoke prefix budget defaults to `4294967296`; set `0` to disable it.
+Outside this smoke the model default remains `0`. The budget splits historical KV
+expansion into page-aligned blocks, runs attention on each block, and merges
+output/LSE. It does not cap the current chunk's expanded KV or FP8 temporary
+buffers; use `SMOKE_CHUNK_TOKENS` to control the current input chunk. A positive
+budget only exercises the split route when the request exceeds its capacity
+and has a historical prefix. The full suite includes prefix-hit and chunk
+cases, but setting a budget alone is not evidence that multiple prefix blocks
+were executed.
+
 The rebased implementation uses the upstream expanded-KV byte budget and forward
 planner. FP8 historical chunks restore the cache into bounded BF16 latent/RoPE
 buffers before projection and FP8 attention; BF16 retains the upstream fused

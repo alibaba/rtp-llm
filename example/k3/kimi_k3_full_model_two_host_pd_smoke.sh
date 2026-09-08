@@ -82,9 +82,9 @@ The two roles may start concurrently. Prefill waits for both the Decode model
 and result channel. The default result channel is DECODE host at DECODE port +
 100; override SMOKE_RESULT_ENDPOINT on both hosts when that port is unavailable.
 
-The validated BF16 1M model/runtime profile is fixed by this smoke and always
-uses Eagle3 MTP. Only host, target/draft checkpoint, artifact, timeout and
-prebuilt-launcher settings are configurable.
+Weight FP8 and MLA FP8 are enabled by default. Set attention quantization to
+none and MLA FP8 to 0 for BF16; use the same precision and scales on both roles.
+The smoke always uses Eagle3 MTP. See example/k3/FP8_MLA.md for FP8 examples.
 
 Merge-gate accuracy validation must use SMOKE_SUITE=all. SMOKE_SUITE=flow is
 only a four-layer RDMA connectivity/multi-round preflight and does not satisfy
@@ -129,6 +129,18 @@ Important optional variables:
   SMOKE_LINEAR_STEP         KDA materialization step; defaults to 1
   SMOKE_CHUNKWISE_RDMA      1 (default) enables Layer x Chunk publication;
                             0 retains compute-all-then-transfer behavior
+  KIMI_K3_ATTENTION_QUANTIZATION
+                            fp8_per_block (default) or none for target weights
+  KIMI_K3_MLA_FP8           1 (default) or 0 for target FP8 cache and attention
+  KIMI_K3_MLA_FP8_Q_SCALE   fixed Q scale; defaults to 1
+  KIMI_K3_MLA_FP8_KV_SCALE  fixed cache scale; defaults to 1
+  KIMI_K3_FP8_COLLECTIVE_GEMM
+                            1 (default) enables FP8 AG/GEMM and GEMM/RS;
+                            0 selects explicit communication for comparison
+  KIMI_K3_MLA_PREFILL_EXPANDED_KV_BUDGET_BYTES
+                            defaults to 4294967296 (4 GiB) per rank;
+                            0 disables historical KV expansion limits.
+                            Current-chunk KV and FP8 temporaries are not capped.
   RTP_LLM_SERVER_BINARY     use an existing Bazel launcher
   RTP_LLM_SKIP_BUILD=1      skip the CUDA13/SM10x build in the launcher
 EOF
@@ -575,6 +587,7 @@ else:
 
 for key in ("KIMI_K3_ATTENTION_QUANTIZATION", "KIMI_K3_FP8_COLLECTIVE_GEMM",
             "KIMI_K3_MLA_FP8", "KIMI_K3_MLA_FP8_Q_SCALE", "KIMI_K3_MLA_FP8_KV_SCALE",
+            "KIMI_K3_MLA_PREFILL_EXPANDED_KV_BUDGET_BYTES",
             "KIMI_K3_MLA_FP8_DIAGNOSTICS", "RTP_LLM_MTP_ACCEPTANCE_DIAGNOSTICS"):
     if key in os.environ:
         expected[key] = os.environ[key]
@@ -593,8 +606,8 @@ PY
 }
 
 # Operator versions are supplied by the Bazel server target. Keep the exact
-# validated BF16 1M runtime profile here instead of relying on the caller's
-# shell or on the generic launcher's conservative defaults.
+# common runtime profile here. Precision defaults apply only to this smoke;
+# explicit overrides preserve BF16 and separate weight/MLA comparisons.
 apply_validated_common_profile() {
     local run_hash
     run_hash="$(printf '%s' "${SMOKE_RUN_ID}" | sha256sum)"
@@ -603,6 +616,12 @@ apply_validated_common_profile() {
     export TOKENIZER_PATH="${checkpoint_real}"
     export PREFILL_ENDPOINT DECODE_ENDPOINT
     export LOAD_METHOD=fastsafetensors
+    export KIMI_K3_ATTENTION_QUANTIZATION="${KIMI_K3_ATTENTION_QUANTIZATION:-fp8_per_block}"
+    export KIMI_K3_MLA_FP8="${KIMI_K3_MLA_FP8:-1}"
+    export KIMI_K3_MLA_FP8_Q_SCALE="${KIMI_K3_MLA_FP8_Q_SCALE:-1}"
+    export KIMI_K3_MLA_FP8_KV_SCALE="${KIMI_K3_MLA_FP8_KV_SCALE:-1}"
+    export KIMI_K3_FP8_COLLECTIVE_GEMM="${KIMI_K3_FP8_COLLECTIVE_GEMM:-1}"
+    export KIMI_K3_MLA_PREFILL_EXPANDED_KV_BUDGET_BYTES="${KIMI_K3_MLA_PREFILL_EXPANDED_KV_BUDGET_BYTES:-4294967296}"
     export SEQ_SIZE_PER_BLOCK="${smoke_block_size}"
     export KERNEL_SEQ_SIZE_PER_BLOCK="${smoke_kernel_block_size}"
     export CONCURRENCY_LIMIT=32
