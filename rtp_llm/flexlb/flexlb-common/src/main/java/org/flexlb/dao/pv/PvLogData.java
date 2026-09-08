@@ -133,7 +133,7 @@ public class PvLogData {
     private static class PvResponse extends Response {
         @Override
         @JsonProperty("server_status")
-        @JsonIgnoreProperties("request_id")
+        @JsonIgnoreProperties({"request_id", "prefill_time", "debug_info"})
         public List<ServerStatus> getServerStatus() {
             return super.getServerStatus();
         }

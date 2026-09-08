@@ -129,6 +129,7 @@ class CurrentRoutingDecisionTest(unittest.TestCase):
                 for row in sheet.iter_rows(min_row=2, values_only=True)) if record.get("request_id") == "compact")
             self.assertEqual(values["route_response_code"], 200)
             self.assertEqual(values["route_predicted_hit_tokens"], 512)
+            self.assertEqual(values["flexlb_predicted_prefill_time (routing prediction)"], 20)
             self.assertIn("CACHE_LEADER", values.values())
             self.assertTrue(html_module._build_replay(destination)["candidates"])
             workbook.close()
