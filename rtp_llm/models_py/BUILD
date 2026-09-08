@@ -166,6 +166,12 @@ py_library(
 )
 
 py_library(
+    name = "quantization_exclusion",
+    srcs = ["quantization_exclusion.py"],
+    visibility = ["//visibility:public"],
+)
+
+py_library(
     name = "model_desc_base",
     srcs = [
         "model_desc/block_map.py",
@@ -211,6 +217,7 @@ py_library(
     deps = [
         ":model_desc_base",
         ":new_loader_core",
+        ":quantization_exclusion",
         ":kernels",
         ":modules",
         "//rtp_llm:_ft_pickler",

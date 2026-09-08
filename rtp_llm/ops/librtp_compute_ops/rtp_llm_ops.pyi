@@ -23,7 +23,7 @@ class FlashInferMlaAttnParams(librtp_compute_ops.ParamsBase):
         """
         Update FlashInfer decode metadata on device during CUDA graph replay
         """
-    def fill_params_mha_device(self, prefix_lengths: torch.Tensor, sequence_lengths: torch.Tensor, input_lengths: torch.Tensor, kv_cache_block_id_device: torch.Tensor, seq_size_per_block: int, forbid_realloc: bool = False, planned_batch_size: int = -1) -> None:
+    def fill_params_mha_device(self, prefix_lengths: torch.Tensor, sequence_lengths: torch.Tensor, input_lengths: torch.Tensor, kv_cache_block_id_device: torch.Tensor, seq_size_per_block: int, forbid_realloc: bool = False, planned_batch_size: int = -1, input_token_count: int = -1) -> None:
         """
         Fill MHA attention metadata directly from device-resident inputs.
         """
