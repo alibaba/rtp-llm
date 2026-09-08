@@ -35,6 +35,8 @@ from __future__ import annotations
 
 from typing import Optional
 
+import os
+
 import torch
 import triton
 import triton.language as tl
@@ -198,6 +200,22 @@ def v4_indexer_score(
     if S == 0 or T == 0:
         return out
 
+    # P2 shape probe (Sep 4): env-gated, first-3-uniques only, flag-off inert.
+    if os.environ.get("DSV4_P2_SHAPE_PROBE"):
+        key = (B, S, H, D, T)
+        _seen = getattr(v4_indexer_score, "_p2_seen", None)
+        if _seen is None:
+            _seen = v4_indexer_score._p2_seen = set()
+        if len(_seen) < 3 and key not in _seen:
+            _seen.add(key)
+            import sys as _sys
+            print(
+                f"[P2-SHAPE] indexer B={B} S={S} H={H} D={D} T={T} mask={apply_mask} "
+                f"compress={compress_ratio} q.dtype={q.dtype} kv.dtype={kv.dtype}",
+                file=_sys.stderr,
+                flush=True,
+            )
+
     # Tile sizes tuned on SM100 (GB200) for V4-Flash 64k+CP=4 (S=T=16384,
     # H=64, D=128).  Best config across the 4-of-4 shape sweep was
     # BLOCK_S=16 / BLOCK_T=256 / num_warps=4 / num_stages=2, with the
@@ -208,8 +226,21 @@ def v4_indexer_score(
     # Triton 3.4 rejects tl.dot tiles with M or N below 16.  Short prompts
     # can produce S/T < 16, so keep the MMA tile at the legal minimum and
     # rely on the masks above to discard padded rows/columns.
+    # M5-A (Sep 7): SM120 autotune found (16,256,8,3) = -49.1% on the score
+    # family at the real prefill chunk shapes (results_20260904_p2_shapes/
+    # M5A_M6_FINDINGS.md). DSV4_INDEXER_TILE="BLOCK_S,BLOCK_T,warps,stages"
+    # overrides; default keeps the SM100-tuned ship values (flag-off inert).
     BLOCK_S = 16
     BLOCK_T = 256 if T >= 256 else max(16, triton.next_power_of_2(T))
+    num_warps, num_stages = 4, 2
+    _tile = os.environ.get("DSV4_INDEXER_TILE")
+    if _tile:
+        try:
+            _bs, _bt, _w, _st = (int(v) for v in _tile.split(","))
+            BLOCK_S, BLOCK_T = _bs, max(16, min(_bt, triton.next_power_of_2(max(T, 16))))
+            num_warps, num_stages = _w, _st
+        except ValueError:
+            pass
 
     grid = (B, triton.cdiv(S, BLOCK_S), triton.cdiv(T, BLOCK_T))
 
@@ -237,7 +268,7 @@ def v4_indexer_score(
         BLOCK_S=BLOCK_S,
         BLOCK_T=BLOCK_T,
         APPLY_MASK=apply_mask,
-        num_warps=4,
-        num_stages=2,
+        num_warps=num_warps,
+        num_stages=num_stages,
     )
     return out
