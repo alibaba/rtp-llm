@@ -289,5 +289,20 @@ class PpuFP4Indexer(IndexerFP8):
 
 
 class PpuFP4Attention(PpuRopeAttention):
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, decode_stream_pool=None, **kwargs):
         super().__init__(*args, indexer_factory=PpuFP4Indexer, **kwargs)
+        self._decode_streams = None
+        if decode_stream_pool is not None:
+            self._decode_streams = {
+                role: decode_stream_pool.get(
+                    "attention_" + role, self.wq_a.weight.device
+                )
+                for role in ("kv", "compressor", "indexer")
+            }
+
+    def _forward_decode_body(self, x, attn_metadata):
+        if self._decode_streams is None:
+            return super()._forward_decode_body(x, attn_metadata)
+        from .ppu_decode_attention import decode_attention_overlap
+
+        return decode_attention_overlap(self, x, attn_metadata, self._decode_streams)

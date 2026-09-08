@@ -12,9 +12,9 @@ import os
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import torch
-
 from rtp_llm.models_py.modules.dsv4.fp8.decode.decode_fmha_impl import (
     DSv4DecodeFmhaImplConfigFP8,
     DSv4DecodeFmhaImplFP8,
@@ -136,7 +136,7 @@ def inject_long_history(cache, reference):
         reference.pools[tag].kv_cache_base.copy_(cache.pools[tag].kv_cache_base)
 
 
-def load_attention(checkpoint, layer, max_batch):
+def load_attention(checkpoint, layer, max_batch, overlap=False):
     from safetensors import safe_open
 
     config = json.loads((checkpoint / "config.json").read_text())
@@ -178,7 +178,14 @@ def load_attention(checkpoint, layer, max_batch):
             value = value.float()
         weights[tag] = value.cuda()
     rope = config["rope_scaling"]
-    attn = PpuFP4Attention(
+    provider = PpuDecodeProvider(
+        {
+            "DSV4_PPU_SGLANG_WO_A": "1",
+            "DSV4_PPU_DECODE_ATTN_MODE": "overlap" if overlap else "sequential",
+        }
+    )
+    attn = provider.build_attention(
+        PpuFP4Attention,
         layer_id=layer,
         dim=config["hidden_size"],
         n_heads=config["num_attention_heads"],
@@ -202,7 +209,6 @@ def load_attention(checkpoint, layer, max_batch):
         index_topk=config["index_topk"],
         norm_eps=config["rms_norm_eps"],
         layer_weights=weights,
-        platform_provider=PpuDecodeProvider({"DSV4_PPU_SGLANG_WO_A": "1"}),
     )
     attn.reset_rope_cache(torch.device("cuda"))
     return attn, hashes
@@ -214,6 +220,22 @@ class AttentionTrace:
     def __init__(self, attn):
         self.values = {}
         self.arguments = {}
+        self.preparation_streams = {}
+        for name, role in (
+            ("_decode_write_swa_fp8", "kv"),
+            ("_decode_update_compressor", "compressor"),
+            ("_decode_update_indexer", "indexer"),
+        ):
+            method = getattr(attn, name)
+
+            def observe(*args, _method=method, _role=role, **kwargs):
+                self.preparation_streams[_role] = (
+                    torch.cuda.current_stream().cuda_stream,
+                    torch.cuda.is_current_stream_capturing(),
+                )
+                return _method(*args, **kwargs)
+
+            setattr(attn, name, observe)
         op = attn._get_fp8_decode_op()
         original = op.forward
         self.original = original
@@ -270,9 +292,13 @@ class DecodeAttentionTest(unittest.TestCase):
             for n in os.environ.get("RTP_PPU_ATTN_BATCHES", "1,3,8,32,128").split(",")
         )
         reports = []
+        overlap = os.environ.get("RTP_PPU_ATTN_OVERLAP", "0") == "1"
         for layer in (0, 2, 3):
             attn, hashes = load_attention(
-                Path(os.environ["RTP_PPU_DSV4_CHECKPOINT"]), layer, max(batches)
+                Path(os.environ["RTP_PPU_DSV4_CHECKPOINT"]),
+                layer,
+                max(batches),
+                overlap,
             )
             trace = AttentionTrace(attn)
             for batch in batches:
@@ -310,6 +336,21 @@ class DecodeAttentionTest(unittest.TestCase):
                     graph_trace = trace.begin()
                     with torch.cuda.graph(graph, stream=stream):
                         actual = attn.forward_decode(inputs, impl.metadata, cache)
+                    if overlap:
+                        roles = ["kv"]
+                        if attn.compress_ratio:
+                            roles.append("compressor")
+                        if attn.indexer is not None:
+                            roles.append("indexer")
+                        for role in roles:
+                            self.assertEqual(
+                                trace.preparation_streams[role],
+                                (attn._decode_streams[role].cuda_stream, True),
+                            )
+                            self.assertNotEqual(
+                                attn._decode_streams[role].cuda_stream,
+                                stream.cuda_stream,
+                            )
                     graph_arguments = trace.arguments
                     torch.cuda.current_stream().wait_stream(stream)
                     cache.restore(initial)
@@ -349,9 +390,12 @@ class DecodeAttentionTest(unittest.TestCase):
                         )
                         eager.prepare_cuda_graph(tagged)
                         eager_trace = trace.begin()
-                        expected = attn.forward_decode(
-                            inputs, eager.metadata, reference
-                        )
+                        # The reference always uses the original sequential
+                        # schedule, including when testing overlapping replay.
+                        with patch.object(attn, "_decode_streams", None):
+                            expected = attn.forward_decode(
+                                inputs, eager.metadata, reference
+                            )
                         actual.fill_(float("nan"))
                         graph.replay()
                         self.assertTrue(
@@ -506,6 +550,7 @@ class DecodeAttentionTest(unittest.TestCase):
                         {
                             "layer": layer,
                             "batch": batch,
+                            "overlap": overlap,
                             "steps": len(cases),
                             "max_mla_bf16_ulp": max_mla_ulp,
                             "max_mla_abs": max_mla_abs,

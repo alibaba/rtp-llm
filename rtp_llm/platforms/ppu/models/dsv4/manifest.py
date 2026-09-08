@@ -159,6 +159,8 @@ def supports_ppu_fp4_decode(selection, request):
             options.get("DSV4_PPU_SGLANG_MOE", "0") == "1"
             and options.get("DSV4_MOE_SHARED_EXPERT_OVERLAP", "0") == "0"
             and options.get("DSV4_SHARED_EXPERT_MODE", "sequential")
+            in ("sequential", "overlap")
+            and options.get("DSV4_PPU_DECODE_ATTN_MODE", "sequential")
             in ("sequential", "overlap"),
             "requires SG activation and a supported PPU shared expert executor",
         ),

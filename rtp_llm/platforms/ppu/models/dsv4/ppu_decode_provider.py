@@ -13,6 +13,17 @@ class PpuDecodeProvider(PpuModuleProvider):
 
         self.stream_pool = PpuStreamPool()
 
+    def build_attention(self, default_factory, *args, **kwargs):
+        mode = self.execution_options.get("DSV4_PPU_DECODE_ATTN_MODE", "sequential")
+        if mode not in ("sequential", "overlap"):
+            raise ValueError("PPU Decode attention mode must be sequential or overlap")
+        return super().build_attention(
+            default_factory,
+            *args,
+            decode_stream_pool=self.stream_pool if mode == "overlap" else None,
+            **kwargs,
+        )
+
     def build_shared_expert_executor(self, **kwargs):
         from .ppu_shared_expert import PpuSharedExpertExecutor
 
