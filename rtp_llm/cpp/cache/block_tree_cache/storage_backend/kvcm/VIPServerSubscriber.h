@@ -13,11 +13,7 @@ public:
     virtual bool getAddresses(std::vector<std::string>& addresses) const override;
 
 private:
-    class VIPServerDestructor;
-    std::mutex                           destructor_mutex_;
-    std::shared_ptr<VIPServerDestructor> destructor_;
-    std::string                          jmenv_domain_;
-    std::vector<std::string>             domains_;
+    std::vector<std::string> domains_;
 };
 
 }  // namespace kvcm

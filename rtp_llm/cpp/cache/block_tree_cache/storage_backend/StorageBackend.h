@@ -78,6 +78,8 @@ public:
     using Done           = std::function<void(bool success)>;
     using BufferResolver = std::function<std::vector<BlockInfo>(int layer_id, int group_id, int block_id)>;
 
+    // An injected executor may be observed by its owner but belongs to only
+    // one backend; init rejects binding the same instance a second time.
     explicit StorageBackend(std::shared_ptr<StorageBackendExecutor> executor = nullptr);
     virtual ~StorageBackend();
 
