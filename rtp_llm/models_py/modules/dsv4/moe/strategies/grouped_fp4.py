@@ -36,6 +36,7 @@ from rtp_llm.models_py.triton_kernels.moe.ep_kernels import (
 from rtp_llm.models_py.utils.arch import is_sm120
 from rtp_llm.models_py.utils.math import align, ceil_div
 
+from ...const_cache import cached_zeroed
 from ...quant_layouts import FP4_BLOCK, FP8_BLOCK, prepare_fp4_weight_scale_for_deepgemm
 from .._silu_mul_fp8_quant_triton import (
     silu_mul_fp8_quant_packed,
@@ -48,6 +49,10 @@ from .base import MoeCfg, RoutedExpertsStrategy, register_strategy
 # DeepGEMM contiguous requires per-expert M to be a multiple of the kernel's
 # alignment (128 on SM100). We use the same constant.
 _GROUPED_ALIGNMENT = 128
+# DSV4_GROUPED_FP4_ASYNC=1: shape-driven grouped GEMM — no counts.cpu() /
+# sf_offsets.item() per layer per forward (each was a pipeline drain).
+# Default off = the host-counts path.
+_GROUPED_FP4_ASYNC = os.environ.get("DSV4_GROUPED_FP4_ASYNC", "0") == "1"
 # Base layout -> stable-address power-of-two generations. Older generations
 # stay alive because already-captured CUDA graphs may still reference them.
 _SM120_FUSED_MOE_WORKSPACES: dict[tuple, list[tuple[int, torch.Tensor]]] = {}
@@ -397,28 +402,42 @@ class GroupedFP4Strategy(RoutedExpertsStrategy):
         adjusted_ids, counts = recompute_topk_ids_sum_expert_count(
             routed_ids, current_expert_start_id=0, num_local_experts=e
         )
-        counts_list = counts.cpu().tolist()
-        aligned_list = [align(int(count), 4) for count in counts_list]
-        total_rows = sum(aligned_list)
-        if total_rows == 0:
-            return torch.zeros((n, d), dtype=torch.float32, device=device)
-        indptr_list = [0]
-        for count in aligned_list:
-            indptr_list.append(indptr_list[-1] + count)
-        sf_offsets_list = [
-            ((row + expert_id * 127) // 128) * 128
-            for expert_id, row in enumerate(indptr_list)
-        ]
-        aligned = torch.tensor(aligned_list, dtype=torch.int32, pin_memory=True).to(
-            device, non_blocking=True
-        )
-        indptr = torch.tensor(indptr_list, dtype=torch.int32, pin_memory=True).to(
-            device, non_blocking=True
-        )
-        expert_start = torch.empty_like(aligned)
-        m_indices = torch.empty(
-            align(total_rows, 128), dtype=torch.int32, device=device
-        )
+        topk = indices.shape[-1]
+        if _GROUPED_FP4_ASYNC:
+            # Shape-driven sizing, zero D2H syncs. sum(counts) == n*topk always
+            # and 4-alignment adds <= 3 rows/expert, so total_rows overshoots
+            # the true total by <= ~0.6% — the extra GEMM rows are stale-expert
+            # garbage that ep_gather discards. The flashinfer SM120 group GEMM
+            # derives per-group work from indptr on device.
+            total_rows = n * topk + 4 * e
+            aligned = (counts + 3) & ~3
+            indptr = torch.zeros(e + 1, dtype=torch.int32, device=device)
+            torch.cumsum(aligned, 0, dtype=torch.int32, out=indptr[1:])
+            expert_start = torch.empty_like(aligned)
+            # m_indices MUST be zero-initialized (0 is a valid expert id):
+            # garbage values would index out-of-range expert weights.
+            m_indices = cached_zeroed(
+                (align(total_rows, 128),), dtype=torch.int32, device=device
+            )
+            # Host-side upper bound of sf_offsets[-1]: each expert's scale rows
+            # round up by <= 127, and block_scale_interleave additionally pads
+            # rows to a 128-multiple, so keep sf_rows 128-aligned too.
+            sf_rows = ((total_rows + 127 * e + 128 + 127) // 128) * 128
+        else:
+            counts_list = counts.cpu().tolist()
+            aligned_list = [align(int(count), 4) for count in counts_list]
+            total_rows = sum(aligned_list)
+            if total_rows == 0:
+                return torch.zeros((n, d), dtype=torch.float32, device=device)
+            aligned = torch.tensor(
+                aligned_list, dtype=torch.int32, pin_memory=True
+            ).to(device, non_blocking=True)
+            indptr = torch.zeros(e + 1, dtype=torch.int32, device=device)
+            torch.cumsum(aligned, 0, dtype=torch.int32, out=indptr[1:])
+            expert_start = torch.empty_like(aligned)
+            m_indices = torch.empty(
+                align(total_rows, 128), dtype=torch.int32, device=device
+            )
         output_index = torch.empty_like(adjusted_ids)
         if input_scale is None:
             x_q, linear_scale = mxfp8_quantize(
@@ -443,16 +462,19 @@ class GroupedFP4Strategy(RoutedExpertsStrategy):
             m_indices,
             output_index,
         )
+        # clamp_max_ is a no-op when total_rows == indptr[-1] (host-counts path)
+        # and required when it overshoots (async path): bucketize would return e
+        # for the pad tail and index past the expert weights.
         expert_ids = torch.bucketize(
             torch.arange(total_rows, device=device), indptr[1:], right=True
-        )
-        sf_offsets = torch.tensor(
-            sf_offsets_list, dtype=torch.int32, pin_memory=True
-        ).to(device, non_blocking=True)
+        ).clamp_max_(e - 1)
+        group_ids = torch.arange(e + 1, dtype=torch.int32, device=device)
+        sf_offsets = ((indptr + group_ids * 127) // 128) * 128
         scale_rows = torch.arange(total_rows, device=device) + (
             sf_offsets[:-1] - indptr[:-1]
         ).index_select(0, expert_ids)
-        sf_rows = sf_offsets_list[-1]
+        if not _GROUPED_FP4_ASYNC:
+            sf_rows = int(sf_offsets[-1].item())
 
         def pack_scale(linear: torch.Tensor) -> torch.Tensor:
             padded = torch.zeros(
