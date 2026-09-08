@@ -1,3 +1,5 @@
+#include <cstdlib>
+#include <string>
 #include "ATen/ops/ones.h"
 #include "c10/core/ScalarType.h"
 #include "rtp_llm/cpp/utils/StatusUtil.h"
@@ -238,10 +240,20 @@ absl::StatusOr<GptModelInputs> EmbeddingExecutor::gatherModelInput(const std::li
     // but the model-facing GptModelInputs metadata should be CUDA resident.
     // Non-CUDA platforms keep the host pipeline: buildPyAttentionInputs's
     // device-metadata branch requires the CUDA-only metadata kernel.
-    model_input.combo_tokens     = toCudaInt32ModelInput(model_input.combo_tokens);
-    model_input.input_lengths    = toCudaInt32ModelInput(model_input.input_lengths);
-    model_input.sequence_lengths = toCudaInt32ModelInput(model_input.sequence_lengths);
-    model_input.prefix_lengths   = toCudaInt32ModelInput(model_input.prefix_lengths);
+    // BERT two-pass plans ragged attention from host lengths and scans host tokens.
+    // Keep the already gathered metadata on CPU rather than copying it back from CUDA.
+    static const bool use_uqi_two_pass = []() {
+        const char* mask = std::getenv("USE_VISION_BERT_UQI_BLOCK_MASK");
+        const char* two_pass = std::getenv("VISION_BERT_UQI_TWO_PASS");
+        return mask && std::string(mask) == "1"
+               && (!two_pass || std::string(two_pass) == "1");
+    }();
+    if (!use_uqi_two_pass) {
+        model_input.combo_tokens     = toCudaInt32ModelInput(model_input.combo_tokens);
+        model_input.input_lengths    = toCudaInt32ModelInput(model_input.input_lengths);
+        model_input.sequence_lengths = toCudaInt32ModelInput(model_input.sequence_lengths);
+        model_input.prefix_lengths   = toCudaInt32ModelInput(model_input.prefix_lengths);
+    }
 #endif
     return model_input;
 }
