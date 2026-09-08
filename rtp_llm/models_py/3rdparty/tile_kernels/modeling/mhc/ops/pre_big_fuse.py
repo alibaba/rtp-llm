@@ -71,6 +71,12 @@ def _run_deepgemm_splitk_gemm(
     )
 
 
+
+def residual_flat_shape(t: torch.Tensor) -> int:
+    return int(t.numel() // (t.shape[-1] * 4)) if t.dim() >= 2 else int(t.shape[0])
+
+
+
 def mhc_pre_big_fuse(
     residual: torch.Tensor,
     fn: torch.Tensor,
@@ -87,6 +93,12 @@ def mhc_pre_big_fuse(
     assert fn.dtype == torch.float32
     assert mhc_scale.dtype == torch.float32
     assert mhc_base.dtype == torch.float32
+
+    # D4 engagement marker (decode night): first-call backend proof, capped.
+    _seen = globals().setdefault("_BACKEND_SEEN", set())
+    if len(_seen) < 2:
+        _seen.add(residual.shape)
+        print("[MHC-BACKEND] %s n_tokens=%d" % (_requested_backend(), int(residual_flat_shape(residual))), flush=True)
 
     mhc_mult = residual.shape[-2]
     hidden_size = residual.shape[-1]
