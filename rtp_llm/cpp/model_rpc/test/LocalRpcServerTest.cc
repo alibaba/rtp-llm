@@ -30,6 +30,14 @@ public:
 
 class TestLocalRpcServer: public LocalRpcServer {
 public:
+    void setEngineForRuntimePolicyTest(std::shared_ptr<EngineBase> engine) {
+        engine_ = std::move(engine);
+    }
+
+    ErrorInfo prepareForRuntimePolicyTest(const GenerateInputPB& input, std::shared_ptr<GenerateInput>& output) {
+        return prepareInput(input, output);
+    }
+
     grpc::Status poll(std::shared_ptr<GenerateStream>& stream) {
         return pollStreamOutput(nullptr, "request", nullptr, stream);
     }
@@ -59,6 +67,48 @@ private:
     mutable std::once_flag     cancellation_check_once_;
     mutable std::promise<void> cancellation_checked_;
 };
+
+class RuntimePolicyEngine: public EngineBase {
+public:
+    explicit RuntimePolicyEngine(bool mtp): EngineBase(EngineInitParams()), mtp_(mtp) {}
+
+    std::shared_ptr<GenerateStream> enqueue(const std::shared_ptr<GenerateInput>&) override {
+        return nullptr;
+    }
+    void         enqueue(std::shared_ptr<GenerateStream>&) override {}
+    absl::Status stop() override {
+        return absl::OkStatus();
+    }
+    absl::StatusOr<GenerateStreamPtr> preRun(const std::shared_ptr<GenerateInput>&, preRunMode) override {
+        return absl::UnimplementedError("not used");
+    }
+    KVCacheInfo getCacheStatusInfo(int64_t, bool) override {
+        return {};
+    }
+    bool isMTPEagle() override {
+        return mtp_;
+    }
+
+private:
+    bool mtp_;
+};
+
+GenerateInputPB makeRuntimePolicyInputPb(bool with_embeddings) {
+    GenerateInputPB input_pb;
+    input_pb.set_request_id(1);
+    input_pb.add_token_ids(1);
+    input_pb.mutable_generate_config()->set_max_new_tokens(1);
+    if (with_embeddings) {
+        auto* tensor = input_pb.mutable_input_embeddings()->add_embeddings();
+        tensor->set_data_type(TensorPB::FP32);
+        tensor->add_shape(1);
+        tensor->add_shape(1);
+        const float value = 1.0f;
+        tensor->set_fp32_data(&value, sizeof(value));
+        input_pb.mutable_input_embeddings()->add_embedding_locs(0);
+    }
+    return input_pb;
+}
 
 class RecordingWriter: public LocalRpcServer::WriterInterface {
 public:
@@ -129,6 +179,42 @@ void publishWakeError(MockGenerateStream* stream, WakeReason reason) {
         stream->reportError(ErrorCode::EXECUTION_EXCEPTION, "failed");
     } else if (reason == WakeReason::TIMEOUT) {
         stream->reportError(ErrorCode::GENERATE_TIMEOUT, "timeout");
+    }
+}
+
+TEST(LocalRpcServerTest, SingleAndBatchPreparationRejectMtpInputEmbeddings) {
+    TestLocalRpcServer server;
+    server.setEngineForRuntimePolicyTest(std::make_shared<RuntimePolicyEngine>(true));
+
+    std::shared_ptr<GenerateInput> single_input;
+    const auto single_status = server.prepareForRuntimePolicyTest(makeRuntimePolicyInputPb(true), single_input);
+    EXPECT_FALSE(single_status.ok());
+    EXPECT_EQ(single_status.code(), ErrorCode::INVALID_PARAMS);
+
+    BatchGenerateInputPB batch_pb;
+    *batch_pb.add_inputs() = makeRuntimePolicyInputPb(true);
+    *batch_pb.add_inputs() = makeRuntimePolicyInputPb(true);
+    BatchGenerateOutputsPB batch_response;
+    const auto             batch_rpc_status = server.BatchGenerateCall(nullptr, &batch_pb, &batch_response);
+    EXPECT_TRUE(batch_rpc_status.ok());
+    ASSERT_EQ(batch_response.results_size(), 2);
+    EXPECT_THAT(batch_response.results(0).error_info().error_message(), HasSubstr("input_embeddings"));
+    EXPECT_THAT(batch_response.results(1).error_info().error_message(), HasSubstr("batch aborted"));
+}
+
+TEST(LocalRpcServerTest, SingleAndBatchPreparationAllowTokenOnlyMtpRequests) {
+    TestLocalRpcServer server;
+    server.setEngineForRuntimePolicyTest(std::make_shared<RuntimePolicyEngine>(true));
+
+    std::shared_ptr<GenerateInput> single_input;
+    EXPECT_TRUE(server.prepareForRuntimePolicyTest(makeRuntimePolicyInputPb(false), single_input).ok());
+
+    BatchGenerateInputPB batch_pb;
+    *batch_pb.add_inputs() = makeRuntimePolicyInputPb(false);
+    *batch_pb.add_inputs() = makeRuntimePolicyInputPb(false);
+    for (const auto& input_pb : batch_pb.inputs()) {
+        std::shared_ptr<GenerateInput> batch_input;
+        EXPECT_TRUE(server.prepareForRuntimePolicyTest(input_pb, batch_input).ok());
     }
 }
 

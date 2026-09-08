@@ -368,8 +368,8 @@ WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
     // value when the user passed --seq_size_per_block < 256.
     const int cache_gen_num_per_cycle =
         sp_config.type != SP_TYPE_NONE ? static_cast<int>(sp_config.gen_num_per_cycle) : 0;
-    auto cache_config = CacheConfigCreator::createBasicConfig(
-        model_config_, parallelism_config, false, cache_gen_num_per_cycle);
+    auto cache_config =
+        CacheConfigCreator::createBasicConfig(model_config_, parallelism_config, false, cache_gen_num_per_cycle);
     cache_config.block_num = 5;
     // createBasicConfig's SingleConfigCreator / HybridConfigCreator paths can
     // leave kernel_seq_size_per_block at 0 (only the real createConfig path
@@ -456,7 +456,7 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
                                                                       pd_sep_config,
                                                                       cache_store_config,
                                                                       use_cuda_malloc_block_pool);
-        resource_context_.role_type = pd_sep_config.role_type;
+        resource_context_.role_type     = pd_sep_config.role_type;
         if (!resource_context_.cache_manager->init()) {
             RTP_LLM_FAIL("init kv cache manager failed");
         }
@@ -481,7 +481,7 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
                                                                       pd_sep_config,
                                                                       cache_store_config,
                                                                       use_cuda_malloc_block_pool);
-        resource_context_.role_type = pd_sep_config.role_type;
+        resource_context_.role_type     = pd_sep_config.role_type;
         if (!resource_context_.cache_manager->init()) {
             RTP_LLM_FAIL("init kv cache manager failed");
         }
@@ -553,16 +553,32 @@ std::shared_ptr<GenerateStream> NormalEngine::makeStream(const std::shared_ptr<G
     return stream;
 }
 
+bool NormalEngine::rejectMtpInputEmbeddings(const GenerateStreamPtr& stream) const {
+    if (!propose_params_ || !stream->hasInputEmbeddings()) {
+        return false;
+    }
+    const auto sp_type = propose_params_->sp_type;
+    if (sp_type != SP_TYPE_MTP && sp_type != SP_TYPE_EAGLE && sp_type != SP_TYPE_DSPARK) {
+        return false;
+    }
+    stream->reportError(ErrorCode::INVALID_PARAMS,
+                        "input_embeddings is not supported by MTP, EAGLE, or DSpARK engines; "
+                        "omit input_embeddings or use a non-speculative deployment.");
+    return true;
+}
+
 void NormalEngine::enqueue(std::shared_ptr<GenerateStream>& stream) {
     stream->setReserveStep(reserve_step_);
+    if (rejectMtpInputEmbeddings(stream)) {
+        return;
+    }
     (void)scheduler_->enqueue(stream);
 }
 
 std::shared_ptr<GenerateStream> NormalEngine::enqueue(const std::shared_ptr<GenerateInput>& input) {
     std::shared_ptr<GenerateStream> stream = std::make_shared<NormalGenerateStream>(
         input, model_config_, runtime_config, resource_context_, metrics_reporter_);
-    stream->setReserveStep(reserve_step_);
-    (void)scheduler_->enqueue(stream);
+    enqueue(stream);
     return stream;
 }
 
@@ -575,6 +591,22 @@ NormalEngine::enqueueMultiple(const std::vector<std::shared_ptr<GenerateInput>>&
             inp, model_config_, runtime_config, resource_context_, metrics_reporter_);
         stream->setReserveStep(reserve_step_);
         streams.push_back(stream);
+    }
+    const bool mtp_engine = propose_params_
+                            && (propose_params_->sp_type == SP_TYPE_MTP || propose_params_->sp_type == SP_TYPE_EAGLE
+                                || propose_params_->sp_type == SP_TYPE_DSPARK);
+    const bool has_unsupported_embeddings =
+        mtp_engine && std::any_of(streams.begin(), streams.end(), [](const GenerateStreamPtr& stream) {
+            return stream->hasInputEmbeddings();
+        });
+    if (has_unsupported_embeddings) {
+        for (const auto& stream : streams) {
+            if (!rejectMtpInputEmbeddings(stream)) {
+                stream->reportError(ErrorCode::INVALID_PARAMS,
+                                    "request group contains input_embeddings unsupported by MTP, EAGLE, or DSpARK");
+            }
+        }
+        return {std::vector<bool>(streams.size(), false), streams};
     }
     return scheduler_->enqueueGroup(streams);
 }

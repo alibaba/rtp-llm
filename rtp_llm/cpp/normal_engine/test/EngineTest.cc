@@ -5,7 +5,9 @@
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/cpp/models/models_weight/W.h"
+#define private public
 #include "rtp_llm/cpp/normal_engine/NormalEngine.h"
+#undef private
 #include "rtp_llm/cpp/engine_base/schedulers/FIFOScheduler.h"
 #include "rtp_llm/cpp/normal_engine/test/MockEngine.h"
 #include "gmock/gmock-actions.h"
@@ -21,6 +23,63 @@ namespace rtp_llm {
 class NormalEngineTest: public DeviceTestBase {
 public:
 };
+
+std::shared_ptr<GenerateInput> makeInputEmbeddingsPolicyInput(bool with_embeddings) {
+    auto input             = std::make_shared<GenerateInput>();
+    input->input_ids       = torch::tensor({1, 2, 3}, torch::kInt32);
+    input->generate_config = std::make_shared<GenerateConfig>();
+    if (with_embeddings) {
+        input->input_embeddings      = std::vector<torch::Tensor>{torch::ones({1, 128}, torch::kFloat32)};
+        input->input_embeddings_locs = std::vector<int32_t>{0};
+    }
+    return input;
+}
+
+void configureStoppedMtpPolicyEngine(const std::shared_ptr<NormalEngine>& engine) {
+    EXPECT_TRUE(engine->stop().ok());
+    engine->propose_params_          = std::make_unique<ProposeModelEngineInitParams>();
+    engine->propose_params_->sp_type = SP_TYPE_MTP;
+}
+
+TEST_F(NormalEngineTest, testMtpInputEmbeddingsRejectedByEveryDirectEnqueueEntry) {
+    CustomConfig config;
+    auto         engine = createMockEngine(config);
+    configureStoppedMtpPolicyEngine(engine);
+
+    auto stream = engine->makeStream(makeInputEmbeddingsPolicyInput(true));
+    engine->enqueue(stream);
+    EXPECT_EQ(stream->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+
+    auto input_stream = engine->enqueue(makeInputEmbeddingsPolicyInput(true));
+    EXPECT_EQ(input_stream->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+
+    auto [accepted, batch_streams] =
+        engine->enqueueMultiple({makeInputEmbeddingsPolicyInput(true), makeInputEmbeddingsPolicyInput(false)});
+    EXPECT_EQ(accepted, std::vector<bool>({false, false}));
+    ASSERT_EQ(batch_streams.size(), 2);
+    EXPECT_EQ(batch_streams[0]->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+    EXPECT_EQ(batch_streams[1]->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+}
+
+TEST_F(NormalEngineTest, testMtpTokenOnlyRequestsReachEveryDirectEnqueueEntry) {
+    CustomConfig config;
+    auto         engine = createMockEngine(config);
+    configureStoppedMtpPolicyEngine(engine);
+
+    auto stream = engine->makeStream(makeInputEmbeddingsPolicyInput(false));
+    engine->enqueue(stream);
+    EXPECT_NE(stream->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+
+    auto input_stream = engine->enqueue(makeInputEmbeddingsPolicyInput(false));
+    EXPECT_NE(input_stream->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+
+    auto [accepted, batch_streams] =
+        engine->enqueueMultiple({makeInputEmbeddingsPolicyInput(false), makeInputEmbeddingsPolicyInput(false)});
+    EXPECT_EQ(accepted, std::vector<bool>({true, true}));
+    ASSERT_EQ(batch_streams.size(), 2);
+    EXPECT_NE(batch_streams[0]->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+    EXPECT_NE(batch_streams[1]->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+}
 
 TEST_F(NormalEngineTest, testFp8KVCache) {
     CustomConfig config;

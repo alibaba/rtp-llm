@@ -784,6 +784,7 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
     def forward_propose(
         self, inputs: PyModelInputs, fmha_impl: Any = None
     ) -> PyModelOutputs:
+        self._reject_input_embeddings(inputs)
         device = self._forward_device()
         # PyWrappedModel warmup intentionally has no KVCache.  Produce stable
         # shapes without invoking any paged-cache or FlashMLA kernels.
@@ -803,6 +804,7 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
     def forward_commit(
         self, inputs: PyModelInputs, fmha_impl: Any = None
     ) -> PyModelOutputs:
+        self._reject_input_embeddings(inputs)
         device = self._forward_device()
         if self.kv_cache is None:
             return PyModelOutputs(

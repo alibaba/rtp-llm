@@ -5,11 +5,43 @@
 
 namespace rtp_llm {
 
+namespace {
+
+void validateInactivePayloadsAreEmpty(const TensorPB& tensor_pb) {
+    switch (tensor_pb.data_type()) {
+        case TensorPB::FP32:
+            if (!tensor_pb.int32_data().empty() || !tensor_pb.fp16_data().empty() || !tensor_pb.bf16_data().empty()) {
+                throw std::runtime_error("TensorPB contains payload for inactive dtype field.");
+            }
+            break;
+        case TensorPB::INT32:
+            if (!tensor_pb.fp32_data().empty() || !tensor_pb.fp16_data().empty() || !tensor_pb.bf16_data().empty()) {
+                throw std::runtime_error("TensorPB contains payload for inactive dtype field.");
+            }
+            break;
+        case TensorPB::FP16:
+            if (!tensor_pb.fp32_data().empty() || !tensor_pb.int32_data().empty() || !tensor_pb.bf16_data().empty()) {
+                throw std::runtime_error("TensorPB contains payload for inactive dtype field.");
+            }
+            break;
+        case TensorPB::BF16:
+            if (!tensor_pb.fp32_data().empty() || !tensor_pb.int32_data().empty() || !tensor_pb.fp16_data().empty()) {
+                throw std::runtime_error("TensorPB contains payload for inactive dtype field.");
+            }
+            break;
+        default:
+            break;
+    }
+}
+
+}  // namespace
+
 torch::Tensor TensorPbConvert::pbToTorch(const TensorPB& tensor_pb) {
     std::vector<int64_t> shape(tensor_pb.shape().begin(), tensor_pb.shape().end());
-    const std::string*   payload      = nullptr;
-    c10::ScalarType      scalar_type  = torch::kFloat32;
-    size_t               element_size = 0;
+    validateInactivePayloadsAreEmpty(tensor_pb);
+    const std::string* payload      = nullptr;
+    c10::ScalarType    scalar_type  = torch::kFloat32;
+    size_t             element_size = 0;
     switch (tensor_pb.data_type()) {
         case TensorPB::FP32: {
             payload      = &tensor_pb.fp32_data();
@@ -67,6 +99,11 @@ torch::Tensor TensorPbConvert::pbToTorch(const TensorPB& tensor_pb) {
 }
 
 void TensorPbConvert::torchToPb(TensorPB* tensor_pb, const torch::Tensor& tensor) {
+    tensor_pb->clear_shape();
+    tensor_pb->clear_fp32_data();
+    tensor_pb->clear_int32_data();
+    tensor_pb->clear_fp16_data();
+    tensor_pb->clear_bf16_data();
     switch (tensor.dtype().toScalarType()) {
         case torch::kFloat32:
             tensor_pb->set_data_type(TensorPB::FP32);

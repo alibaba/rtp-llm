@@ -3,7 +3,7 @@ import json
 import struct
 import sys
 from enum import Enum
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 # Mock the ops module to avoid CUDA dependency in this unit test
 # This MUST be at the very top before any other imports, even before unittest
@@ -73,6 +73,7 @@ from rtp_llm.telemetry import CURRENT_TRACE_STATE, tracing
 from rtp_llm.utils.base_model_datatypes import (
     GenerateInput,
     GenerateOutputs,
+    InputEmbeddings,
     RequestInfo,
 )
 
@@ -208,6 +209,43 @@ class ModelRpcClientTest(TestCase):
         async for res in client.enqueue(input):
             responses.extend(res.generate_outputs)
         return responses
+
+    def test_enqueue_serializes_input_once(self):
+        class EmptyResponseIterator:
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                raise StopAsyncIteration
+
+            def cancel(self):
+                pass
+
+        client = ModelRpcClient(["127.0.0.1:12345"], {})
+        client._channel_pool.get = AsyncMock(return_value=MagicMock())
+        stub = MagicMock()
+        stub.GenerateStreamCall.return_value = EmptyResponseIterator()
+        input_py = GenerateInput(
+            token_ids=torch.tensor([1, 2, 3]),
+            generate_config=GenerateConfig(max_new_tokens=1),
+            request_id=123,
+            mm_inputs=[],
+        )
+
+        async def drain():
+            async for _ in client.enqueue(input_py):
+                pass
+
+        with patch(
+            "rtp_llm.cpp.model_rpc.model_rpc_client.trans_input",
+            wraps=trans_input,
+        ) as convert, patch(
+            "rtp_llm.cpp.model_rpc.model_rpc_client.RpcServiceStub",
+            return_value=stub,
+        ):
+            asyncio.run(drain())
+
+        convert.assert_called_once_with(input_py)
 
     def test_trans_input_serializes_typed_request_info(self):
         input_py = GenerateInput(
@@ -581,6 +619,59 @@ class ModelRpcClientTest(TestCase):
         self.assertEqual(len(stub.generate_calls), 1)
         self.assertEqual(stub.generate_calls[0][0].request_id, 322)
         self.assertEqual(stub.fetch_calls, [])
+
+    def test_single_enqueue_uses_dict_output_callback_and_raw_finished_state(self):
+        callback_calls = []
+
+        def dict_output(input_py, response, stream_state):
+            callback_calls.append((input_py.request_id, response, stream_state))
+            return {"request_id": input_py.request_id, "finished": "custom"}
+
+        async def run_and_close(enqueued_by_master):
+            client = ModelRpcClient(
+                addresses=["worker:9000"],
+                client_config={},
+                max_rpc_timeout_ms=0,
+                decode_entrance=False,
+                trans_output_fn=dict_output,
+            )
+            client._channel_pool = _FakeChannelPool()
+            response = _make_response(finished=True)
+            stub = _RoutingStub(
+                fetch_responses=[response] if enqueued_by_master else None,
+                generate_responses=None if enqueued_by_master else [response],
+            )
+            input_py = GenerateInput(
+                token_ids=torch.tensor([1, 2, 3]),
+                generate_config=GenerateConfig(
+                    timeout_ms=1000,
+                    role_addrs=[_prefill_role_addr("prefill-worker", 9000)],
+                ),
+                request_id=327 if enqueued_by_master else 326,
+                mm_inputs=[],
+                enqueued_by_master=enqueued_by_master,
+            )
+            with patch(
+                "rtp_llm.cpp.model_rpc.model_rpc_client.RpcServiceStub",
+                return_value=stub,
+            ):
+                gen = client.enqueue(input_py)
+                result = await gen.__anext__()
+                await gen.aclose()
+            iterator = (
+                stub.fetch_iterator if enqueued_by_master else stub.generate_iterator
+            )
+            return result, iterator.cancelled
+
+        generate_result, generate_cancelled = asyncio.run(run_and_close(False))
+        fetch_result, fetch_cancelled = asyncio.run(run_and_close(True))
+
+        self.assertEqual(generate_result["finished"], "custom")
+        self.assertEqual(fetch_result["finished"], "custom")
+        # GenerateStreamCall owns its transport; completed FetchResponse does not.
+        self.assertTrue(generate_cancelled)
+        self.assertFalse(fetch_cancelled)
+        self.assertEqual([call[0] for call in callback_calls], [326, 327])
 
     def test_enqueue_cancels_fetch_stream_on_early_close(self):
         async def run_and_close():
@@ -1633,8 +1724,9 @@ class ClientSpanSettlementTest(TestCase):
             return trans_output(*args)
 
         async def run():
-            with patch(
-                "rtp_llm.cpp.model_rpc.model_rpc_client.trans_output",
+            with patch.object(
+                client,
+                "_trans_output_fn",
                 side_effect=fail_second_response,
             ):
                 with self.assertRaisesRegex(RuntimeError, "conversion failed"):
@@ -1692,6 +1784,85 @@ class ClientSpanSettlementTest(TestCase):
 
         self.assertEqual(raised.exception.exception_type, ExceptionType.UNKNOWN_ERROR)
         self.assertEqual(raised.exception.message, "future error")
+
+    def test_trans_output_reuses_single_all_hidden_states_for_all_outputs(self):
+        input_py = GenerateInput(
+            token_ids=torch.tensor([1, 2, 3]),
+            generate_config=GenerateConfig(return_all_hidden_states=True),
+            request_id=123,
+            mm_inputs=[],
+        )
+        outputs_pb = GenerateOutputsPB()
+        flatten = outputs_pb.flatten_output
+        flatten.finished.extend([True, True])
+        flatten.all_hidden_states.data_type = TensorPB.DataType.FP32
+        flatten.all_hidden_states.shape.extend([2, 2])
+        flatten.all_hidden_states.fp32_data = struct.pack("<ffff", 1.0, 2.0, 3.0, 4.0)
+
+        outputs = trans_output(input_py, outputs_pb, StreamState())
+
+        self.assertEqual(len(outputs.generate_outputs), 2)
+        for output in outputs.generate_outputs:
+            self.assertEqual(
+                [[1.0, 2.0], [3.0, 4.0]],
+                output.all_hidden_states.tolist(),
+            )
+
+    def test_trans_output_keeps_legacy_per_output_all_hidden_states(self):
+        input_py = GenerateInput(
+            token_ids=torch.tensor([1, 2, 3]),
+            generate_config=GenerateConfig(return_all_hidden_states=True),
+            request_id=123,
+            mm_inputs=[],
+        )
+        outputs_pb = GenerateOutputsPB()
+        flatten = outputs_pb.flatten_output
+        flatten.finished.extend([True, True])
+        flatten.all_hidden_states.data_type = TensorPB.DataType.FP32
+        flatten.all_hidden_states.shape.extend([2, 2, 2])
+        flatten.all_hidden_states.fp32_data = struct.pack(
+            "<ffffffff", 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0
+        )
+
+        outputs = trans_output(input_py, outputs_pb, StreamState())
+
+        self.assertEqual(len(outputs.generate_outputs), 2)
+        self.assertEqual(
+            [[1.0, 2.0], [3.0, 4.0]],
+            outputs.generate_outputs[0].all_hidden_states.tolist(),
+        )
+        self.assertEqual(
+            [[5.0, 6.0], [7.0, 8.0]],
+            outputs.generate_outputs[1].all_hidden_states.tolist(),
+        )
+
+    def test_trans_input_serializes_input_embeddings(self):
+        input_py = GenerateInput(
+            token_ids=torch.tensor([1, 2, 3]),
+            generate_config=GenerateConfig(),
+            request_id=123,
+            mm_inputs=[],
+            input_embeddings=InputEmbeddings(
+                embeddings=[
+                    torch.tensor([[1.0, 2.0], [3.0, 4.0]], dtype=torch.float32),
+                    torch.tensor([[5.0, 6.0]], dtype=torch.float32),
+                ],
+                embedding_locs=[0, 2],
+            ),
+        )
+
+        input_pb = trans_input(input_py)
+
+        self.assertEqual(len(input_pb.input_embeddings.embeddings), 2)
+        self.assertEqual(list(input_pb.input_embeddings.embedding_locs), [0, 2])
+        self.assertEqual(
+            list(input_pb.input_embeddings.embeddings[0].shape),
+            [2, 2],
+        )
+        self.assertEqual(
+            input_pb.input_embeddings.embeddings[0].fp32_data,
+            struct.pack("<ffff", 1.0, 2.0, 3.0, 4.0),
+        )
 
 
 if __name__ == "__main__":
