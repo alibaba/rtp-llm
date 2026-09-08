@@ -13,6 +13,7 @@ from abc import ABC, abstractmethod
 
 import torch
 import torch.nn as nn
+
 from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
 
 from .warmup_sync import cuda_graph_warmup_forward_enabled
@@ -435,6 +436,8 @@ class FusedSharedExpertExecutor(FusedSharedExpertFastPath):
 
 class SharedExpertExecutor(ABC):
     name: str
+    # The executor must fence the input producer and join its output consumer.
+    start_before_routing = False
 
     def prepare(self, shared_experts: nn.Module) -> None:
         return None

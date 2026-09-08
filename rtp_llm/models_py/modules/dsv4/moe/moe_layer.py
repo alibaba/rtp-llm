@@ -396,6 +396,26 @@ class MoE(nn.Module):
             return self.gate(x, input_ids, include_route_scale=False)
         return self.gate(x, input_ids)
 
+    def _route_and_start_shared(self, x: torch.Tensor, input_ids: torch.Tensor):
+        """Allow an independent shared expert to overlap Gate and dispatch."""
+        if self._routed_includes_shared:
+            return self._route(x, input_ids)
+        early = getattr(self._shared_executor, "start_before_routing", False)
+        if early:
+            with record_function_range("dsv4.moe.shared_expert_start"):
+                self._shared_executor.start(self.shared_experts, x)
+        try:
+            routing = self._route(x, input_ids)
+        except Exception:
+            if early:
+                with record_function_range("dsv4.moe.shared_expert_finish"):
+                    self._shared_executor.finish()
+            raise
+        if not early:
+            with record_function_range("dsv4.moe.shared_expert_start"):
+                self._shared_executor.start(self.shared_experts, x)
+        return routing
+
     def _finish_routed(self, routed: torch.Tensor) -> torch.Tensor:
         """Apply route scale, then TP reduction, before any shared add."""
         if not self._post_w2_route_weight_contract:
@@ -465,7 +485,7 @@ class MoE(nn.Module):
             return
 
         with record_function_range("dsv4.moe.gate"):
-            weights, indices = self._route(x, input_ids)
+            weights, indices = self._route_and_start_shared(x, input_ids)
 
         if self._routed_includes_shared:
             # Fused strategy returns ``routed + shared`` directly.
@@ -474,8 +494,6 @@ class MoE(nn.Module):
             out.copy_(routed)
             return
 
-        with record_function_range("dsv4.moe.shared_expert_start"):
-            self._shared_executor.start(self.shared_experts, x)
         try:
             with record_function_range("dsv4.moe.routed_experts"):
                 routed = self._strategy(x, weights, indices)
@@ -607,7 +625,7 @@ class MoE(nn.Module):
             if _dbg:
                 self.gate._dbg_prefix = f"L{self.layer_id:02d}_moe_gate"
             try:
-                weights, indices = self._route(x, input_ids_flat)
+                weights, indices = self._route_and_start_shared(x, input_ids_flat)
             finally:
                 if _dbg:
                     self.gate._dbg_prefix = None
@@ -650,8 +668,6 @@ class MoE(nn.Module):
                 out[:T].copy_(y)
                 return out[:T].view(shape)
 
-        with record_function_range("dsv4.moe.shared_expert_start"):
-            self._shared_executor.start(self.shared_experts, x)
         try:
             with record_function_range("dsv4.moe.routed_experts"):
                 y = self._strategy(x, weights, indices)

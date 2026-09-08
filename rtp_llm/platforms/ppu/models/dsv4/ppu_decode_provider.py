@@ -31,6 +31,17 @@ class PpuDecodeProvider(PpuModuleProvider):
         )
         if self._metadata_mode not in ("eager", "graph"):
             raise ValueError("PPU Decode metadata mode must be eager or graph")
+        self._shared_schedule = self.execution_options.get(
+            "DSV4_PPU_DECODE_SHARED_SCHEDULE", "after_route"
+        )
+        if self._shared_schedule not in ("after_route", "before_route"):
+            raise ValueError("PPU shared schedule must be after_route or before_route")
+        if (
+            self._shared_schedule == "before_route"
+            and self.execution_options.get("DSV4_SHARED_EXPERT_MODE", "sequential")
+            != "overlap"
+        ):
+            raise ValueError("Early shared execution requires overlap mode")
         self.stream_pool = PpuStreamPool()
 
     def build_decode_metadata(self, default_factory, *args, **kwargs):
@@ -80,7 +91,8 @@ class PpuDecodeProvider(PpuModuleProvider):
         if mode not in ("sequential", "overlap"):
             raise ValueError("PPU shared expert mode must be sequential or overlap")
         return PpuSharedExpertExecutor(
-            stream_pool=self.stream_pool if mode == "overlap" else None
+            stream_pool=self.stream_pool if mode == "overlap" else None,
+            start_before_routing=self._shared_schedule == "before_route",
         )
 
     def build_moe(self, default_factory, *args, **kwargs):

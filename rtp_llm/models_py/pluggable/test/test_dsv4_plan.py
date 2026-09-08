@@ -215,6 +215,34 @@ class Dsv4PlanTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "No compatible"):
             unsupported.prepare([request_for("model", unsupported.selection)])
 
+    def test_decode_shared_schedule_preserves_rank_protocol(self):
+        options = {
+            "DSV4_PPU_SGLANG_MOE": "1",
+            "DSV4_SHARED_EXPERT_MODE": "overlap",
+            "DSV4_PPU_DECODE_SHARED_SCHEDULE": "before_route",
+        }
+        digests = set()
+        for rank in range(8):
+            ctx = self.decode_context(rank, execution_options=options)
+            digests.add(ctx.prepare([request_for("model", ctx.selection)]))
+        self.assertEqual(len(digests), 1)
+        for extra in (
+            {"DSV4_PPU_DECODE_SHARED_SCHEDULE": "unknown"},
+            {"DSV4_SHARED_EXPERT_MODE": "sequential"},
+        ):
+            ctx = self.decode_context(execution_options={**options, **extra})
+            with self.assertRaisesRegex(ValueError, "No compatible"):
+                ctx.prepare([request_for("model", ctx.selection)])
+        later = self.decode_context(
+            execution_options={
+                **options,
+                "DSV4_PPU_DECODE_SHARED_SCHEDULE": "after_route",
+            }
+        )
+        self.assertNotIn(
+            later.prepare([request_for("model", later.selection)]), digests
+        )
+
     def test_decode_metadata_graph_preserves_rank_protocol(self):
         digests = set()
         for rank in range(8):

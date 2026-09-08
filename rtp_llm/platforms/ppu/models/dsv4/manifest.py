@@ -172,6 +172,16 @@ def supports_ppu_fp4_decode(selection, request):
             "requires eager or graph Decode metadata",
         ),
         (
+            options.get("DSV4_PPU_DECODE_SHARED_SCHEDULE", "after_route")
+            in ("after_route", "before_route")
+            and (
+                options.get("DSV4_PPU_DECODE_SHARED_SCHEDULE", "after_route")
+                != "before_route"
+                or options.get("DSV4_SHARED_EXPERT_MODE", "sequential") == "overlap"
+            ),
+            "requires after_route or an overlapped before_route shared schedule",
+        ),
+        (
             options.get("DSV4_PPU_DECODE_MOE_HINT", "capacity")
             in ("capacity", "batch"),
             "requires capacity or batch MoE launch hint",

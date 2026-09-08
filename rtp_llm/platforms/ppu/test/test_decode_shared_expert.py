@@ -4,15 +4,17 @@ import json
 import os
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
+from safetensors import safe_open
+
 from rtp_llm.models_py.modules.dsv4.moe.shared_expert import (
     FusedSharedExpertFastPath,
     SequentialSharedExpertExecutor,
 )
 from rtp_llm.platforms.ppu.models.dsv4.ppu_decode_provider import PpuDecodeProvider
-from safetensors import safe_open
 
 
 @unittest.skipUnless(
@@ -102,7 +104,14 @@ class DecodeSharedExpertTest(unittest.TestCase):
 
     @torch.inference_mode()
     def test_overlap_graph_joins_producer_and_consumer(self):
-        provider = PpuDecodeProvider({"DSV4_SHARED_EXPERT_MODE": "overlap"})
+        from rtp_llm.models_py.modules.dsv4.moe.moe_layer import MoE
+
+        provider = PpuDecodeProvider(
+            {
+                "DSV4_SHARED_EXPERT_MODE": "overlap",
+                "DSV4_PPU_DECODE_SHARED_SCHEDULE": "before_route",
+            }
+        )
         executor = provider.build_shared_expert_executor()
         executor.prepare(self.shared)
         second = provider.build_shared_expert_executor()
@@ -137,8 +146,13 @@ class DecodeSharedExpertTest(unittest.TestCase):
                     def run():
                         # Producer work must precede the auxiliary stream's read.
                         x.add_(1)
-                        executor.start(self.shared, x)
-                        routed = x * 0.5
+                        context = SimpleNamespace(
+                            _routed_includes_shared=False,
+                            _shared_executor=executor,
+                            shared_experts=self.shared,
+                            _route=lambda values, ids: (values * 0.5, ids),
+                        )
+                        routed, _ = MoE._route_and_start_shared(context, x, None)
                         shared = executor.finish()
                         # Consumer work must wait for the shared result.
                         return shared.float() + routed.float()

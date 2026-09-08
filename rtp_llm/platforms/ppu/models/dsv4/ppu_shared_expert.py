@@ -1,6 +1,7 @@
 """PPU shared expert; the loader's merged FP8 weights remain unchanged."""
 
 import torch
+
 from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
 from rtp_llm.models_py.modules.dsv4.moe.shared_expert import (
     SharedExpertExecutor,
@@ -37,7 +38,10 @@ class PpuSharedExpertExecutor(SharedExpertExecutor):
 
     name = "ppu_sequential"
 
-    def __init__(self, stream_pool=None):
+    def __init__(self, stream_pool=None, *, start_before_routing=False):
+        if start_before_routing and stream_pool is None:
+            raise ValueError("Early shared execution requires a PPU overlap stream")
+        self.start_before_routing = bool(start_before_routing)
         self._shared = None
         self._out = None
         self._stream_pool = stream_pool
