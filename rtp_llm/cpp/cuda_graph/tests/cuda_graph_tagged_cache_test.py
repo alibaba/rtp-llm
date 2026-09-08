@@ -109,8 +109,7 @@ class StaticTokenMetadataTailModel:
     def forward(self, inputs: PyModelInputs, fmha_impl=None) -> PyModelOutputs:
         tail_signature = torch.stack(
             (
-                inputs.input_ids[-1]
-                + inputs.input_hiddens[-1].sum().to(torch.int32),
+                inputs.input_ids[-1] + inputs.input_hiddens[-1].sum().to(torch.int32),
                 inputs.combo_position_ids[-3],
                 inputs.combo_position_ids[-2],
                 inputs.combo_position_ids[-1],
@@ -906,6 +905,31 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
         # decode/MTP-only input_hiddens scratch buffer.
         self.assertEqual(model.input_hiddens_numel, 0)
 
+        # A prior replay must not make dynamic input embeddings graph-eligible.
+        # Check both entrypoints and restore a token-only replay after each request.
+        for value in (1.0, 2.0):
+            embedded = _with_mrope_positions(
+                _build_prefill_inputs(GROUP_TAGS, {"full": 1, "aux": 2}, seq_len=[2, 2])
+            )
+            embedded.input_embeddings = [
+                torch.full((1, HIDDEN_SIZE), value, dtype=torch.bfloat16, device="cuda")
+            ]
+            embedded.input_embeddings_locs = torch.tensor([0], dtype=torch.int32)
+            self.assertFalse(runner.canPrepare(embedded))
+            self.assertEqual(
+                runner.getGenerationPrefillStatus(), "request_not_supported"
+            )
+            self.assertFalse(runner.canRun(embedded))
+            self.assertEqual(
+                runner.getGenerationPrefillStatus(), "request_not_supported"
+            )
+            self.assertTrue(runner.canRun(inputs))
+            replayed = runner.forward(inputs)
+            torch.cuda.synchronize()
+            torch.testing.assert_close(replayed.hidden_states, expected)
+            # The runner clears fallback status; PyWrappedModel reports REPLAYED.
+            self.assertEqual(runner.getGenerationPrefillStatus(), "not_requested")
+
         reject_cases: list[tuple[str, PyModelInputs, str]] = []
 
         prefixed = _with_mrope_positions(
@@ -1302,21 +1326,16 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
                     expected_signature = torch.tensor(
                         [
                             graph_size * query_len,
-                            total_kv_length
-                            + (graph_size - batch_size) * query_len,
+                            total_kv_length + (graph_size - batch_size) * query_len,
                             graph_size * query_len,
-                            prefix_len + 1
-                            if batch_size == graph_size
-                            else query_len,
+                            prefix_len + 1 if batch_size == graph_size else query_len,
                         ],
                         dtype=output.hidden_states.dtype,
                         device=output.hidden_states.device,
                     )
                     torch.testing.assert_close(
                         output.hidden_states,
-                        expected_signature.unsqueeze(0).expand_as(
-                            output.hidden_states
-                        ),
+                        expected_signature.unsqueeze(0).expand_as(output.hidden_states),
                     )
 
     def test_target_verify_clears_static_token_metadata_after_shrink(self) -> None:
@@ -1416,9 +1435,7 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
         runner.forward(full_inputs)
         torch.cuda.synchronize()
 
-        inputs = _build_decode_inputs(
-            GROUP_TAGS, {"full": 2, "aux": 1}, batch_size=3
-        )
+        inputs = _build_decode_inputs(GROUP_TAGS, {"full": 2, "aux": 1}, batch_size=3)
         self.assertTrue(runner.canRun(inputs))
         self.assertEqual(runner.getCurrentRealGraphSize(), 4)
 
@@ -1454,9 +1471,7 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
         runner.forward(full_inputs)
         torch.cuda.synchronize()
 
-        inputs = _build_decode_inputs(
-            GROUP_TAGS, {"full": 2, "aux": 1}, batch_size=3
-        )
+        inputs = _build_decode_inputs(GROUP_TAGS, {"full": 2, "aux": 1}, batch_size=3)
         self.assertTrue(runner.canRun(inputs))
         output = runner.forward(inputs)
         torch.cuda.synchronize()
@@ -1500,9 +1515,7 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
                     (batch_size, HIDDEN_SIZE * 2),
                     tuple(output.mtp_target_hidden_states.shape),
                 )
-                torch.testing.assert_close(
-                    output.mtp_target_hidden_states, expected
-                )
+                torch.testing.assert_close(output.mtp_target_hidden_states, expected)
 
 
 if __name__ == "__main__":

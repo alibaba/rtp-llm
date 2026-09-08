@@ -1359,6 +1359,10 @@ bool CudaGraphRunner::canRun(const PyModelInputs& inputs, CudaGraphState& state,
     if (!enable_cuda_graph_) {
         return false;
     }
+    const bool has_input_embeddings = inputs.input_embeddings.has_value() && !inputs.input_embeddings->empty();
+    if (has_input_embeddings && !isGenerationPrefillCudaGraph()) {
+        return false;
+    }
     if (isGenerationPrefillCudaGraph()) {
         state.generation_prefill_status = GenerationPrefillCudaGraphStatus::NOT_REQUESTED;
         auto fallback                   = [&](const char* reason, GenerationPrefillCudaGraphStatus status) {
@@ -1374,6 +1378,9 @@ bool CudaGraphRunner::canRun(const PyModelInputs& inputs, CudaGraphState& state,
             }
             return false;
         };
+        if (has_input_embeddings) {
+            return fallback("input_embeddings", GenerationPrefillCudaGraphStatus::REQUEST_NOT_SUPPORTED);
+        }
         if (!inputs.attention_inputs.is_prefill || inputs.attention_inputs.is_target_verify) {
             return fallback("mixed_prefill_decode_batch",
                             GenerationPrefillCudaGraphStatus::MIXED_PREFILL_DECODE_NOT_SUPPORTED);
