@@ -78,8 +78,6 @@ void PrefillGenerateContext::setStream(const std::shared_ptr<GenerateStream>& st
 
 void PrefillGenerateContext::stopStream() {
     if (stream_) {
-        // if is waiting, cancel it
-        dequeueStreamFromRuntimeMeta();
         if (stream_->getStatus() != StreamState::FINISHED) {
             // The scheduler's moveToNext() runs BEFORE process() in each step(),
             // so GenerateDone set during process() won't be detected until the
@@ -91,7 +89,6 @@ void PrefillGenerateContext::stopStream() {
                 stream_->reportError(ErrorCode::CANCELLED, "cancel stream");
             }
         }
-        // if is running, waiting util done
         int wait_iters = 0;
         while (stream_->getStatus() == StreamState::RUNNING) {
             RTP_LLM_LOG_DEBUG("waiting prefill stream [%d] running done to cancel",
@@ -106,6 +103,7 @@ void PrefillGenerateContext::stopStream() {
                 break;
             }
         }
+        dequeueStreamFromRuntimeMeta();
         // stream status will only be set to finished by scheduler.
         markRequestEnd();
         stream_.reset();

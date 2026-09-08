@@ -406,16 +406,39 @@ class FlexlbServiceImplTest {
                 CompletableFuture.completedFuture(
                         FlexlbGrpcForwarder.MasterForwardResult.forwarded(
                                 masterResponse, "10.0.0.2:7001")));
+        when(grpcForwarder.forwardCompensatingCancelToMaster(any(), any()))
+                .thenAnswer(invocation -> {
+                    assertFalse(Context.current().isCancelled());
+                    return CompletableFuture.completedFuture(
+                            FlexlbGrpcForwarder.CancelForwardResult.forwarded(
+                                    FlexlbScheduleProtocol.FlexlbCancelResponsePB.newBuilder()
+                                            .setFound(true)
+                                            .build(),
+                                    "10.0.0.2:7001"));
+                });
         StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer =
                 mock(StreamObserver.class);
         doThrow(new RuntimeException("client disconnected"))
                 .when(observer).onNext(any());
+        FlexlbScheduleProtocol.FlexlbScheduleRequestPB request =
+                FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                        .setRequestId(12_346L)
+                        .build();
 
-        service.schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
-                .setRequestId(12_346L)
-                .build(), observer);
+        Context.CancellableContext inbound = Context.current().withCancellation();
+        inbound.cancel(null);
+        inbound.run(() -> service.schedule(request, observer));
 
         verify(grpcForwarder, times(1)).forwardScheduleToMaster(any());
+        ArgumentCaptor<FlexlbScheduleProtocol.FlexlbCancelRequestPB> cancel =
+                ArgumentCaptor.forClass(
+                        FlexlbScheduleProtocol.FlexlbCancelRequestPB.class);
+        verify(grpcForwarder).forwardCompensatingCancelToMaster(
+                cancel.capture(), org.mockito.ArgumentMatchers.eq("10.0.0.2:7001"));
+        assertEquals(request.getRequestId(), cancel.getValue().getRequestId());
+        assertEquals(
+                FlexlbScheduleProtocol.CancelReasonPB.CANCEL_REASON_CLIENT_CANCELLED,
+                cancel.getValue().getReason());
         verify(routeService, never()).route(any());
         verify(observer, times(1)).onNext(any());
         verify(observer, never()).onCompleted();

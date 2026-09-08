@@ -146,8 +146,6 @@ void GenerateContext::setStream(const std::shared_ptr<GenerateStream>& stream) {
 
 void GenerateContext::stopStream() {
     if (stream_) {
-        // if is waiting, cancel it
-        meta->dequeue(request_id, stream_);
         if (stream_->getStatus() != StreamState::FINISHED && !stream_->hasError()) {
             if (error_info.hasError()) {
                 RTP_LLM_LOG_WARNING("request [%s] stopping stream with terminal source=context_error, code=%d, err=%s",
@@ -165,11 +163,11 @@ void GenerateContext::stopStream() {
                 stream_->reportError(ErrorCode::CANCELLED, "context cleanup before stream finished");
             }
         }
-        // if is running, waiting util done
         while (stream_->getStatus() == StreamState::RUNNING) {
             RTP_LLM_LOG_DEBUG("waiting stream [%d] running done to cancel", stream_->generateInput()->request_id);
             usleep(1000);
         }
+        meta->dequeue(request_id, stream_);
         stream_.reset();
     }
 }

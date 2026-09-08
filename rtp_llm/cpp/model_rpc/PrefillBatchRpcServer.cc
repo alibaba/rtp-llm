@@ -135,12 +135,8 @@ void addBatchError(EnqueueBatchResponsePB* response, int64_t request_id, int64_t
 }
 
 int64_t batchErrorCode(const grpc::Status& status) {
-    // AutoTPM 8429 is carried in gRPC details because RESOURCE_EXHAUSTED is
-    // only its transport projection. Preserve the domain code when adapting
-    // the status into EnqueueBatchErrorPB.
     ErrorDetailsPB details;
-    if (!status.error_details().empty() && details.ParseFromString(status.error_details())
-        && details.error_code() == static_cast<int64_t>(ErrorCode::PRIORITY_PREEMPTED)) {
+    if (!status.error_details().empty() && details.ParseFromString(status.error_details()) && details.error_code() != 0) {
         return details.error_code();
     }
     return status.error_code();

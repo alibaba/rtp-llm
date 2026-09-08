@@ -459,17 +459,21 @@ TEST(RpcWriterCancellationTest, PrefillStageSettlementIsIdempotent) {
 }
 
 TEST(RpcWriterCancellationTest, ContextCleanupPropagatesSpecificTerminalError) {
-    auto stream = std::make_shared<SingleOutputStream>();
+    auto                              stream = std::make_shared<SingleOutputStream>();
+    auto                              meta   = std::make_shared<RpcServerRuntimeMeta>();
+    kmonitor::MetricsReporterPtr metrics_reporter;
     {
-        kmonitor::MetricsReporterPtr metrics_reporter;
-        auto                         meta = std::make_shared<RpcServerRuntimeMeta>();
-        GenerateContext              context(49, 0, nullptr, metrics_reporter, meta);
-        context.stream_     = stream;
+        GenerateContext context(49, 0, nullptr, metrics_reporter, meta);
+        context.setStream(stream);
         context.error_info = ErrorInfo(ErrorCode::MALLOC_FAILED, "allocation failed");
     }
 
     ASSERT_TRUE(stream->hasError());
     EXPECT_EQ(stream->statusInfo().code(), ErrorCode::MALLOC_FAILED);
+    const auto schedule_info = meta->getEngineScheduleInfo(/*latest_finished_version=*/-1);
+    ASSERT_EQ(schedule_info.finished_task_info_list.size(), 1);
+    EXPECT_EQ(schedule_info.finished_task_info_list[0].request_id, 49);
+    EXPECT_EQ(schedule_info.finished_task_info_list[0].error_code, static_cast<int64_t>(ErrorCode::MALLOC_FAILED));
 }
 
 TEST(RpcWriterCancellationTest, ContextCleanupPreservesExistingStreamError) {
