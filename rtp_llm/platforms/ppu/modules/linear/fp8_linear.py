@@ -12,8 +12,9 @@ from functools import lru_cache
 from typing import Callable, Optional, Sequence
 
 import torch
-from rtp_llm.platforms.ppu.runtime import install_deep_gemm_build_lock, require_symbol
 from torch import nn
+
+from rtp_llm.platforms.ppu.runtime import install_deep_gemm_build_lock, require_symbol
 
 FP8_BLOCK_SIZE = 128
 FP8_QUANT_EPS = 1.0e-4
@@ -24,6 +25,20 @@ _QUANT_V2_SYMBOL = "per_token_group_quant_fp8_v2"
 _QUANT_LEGACY_CHECKED_SYMBOL = "per_token_group_quant_fp8_checked"
 _QUANT_V2_CHECKED_SYMBOL = "per_token_group_quant_fp8_v2_checked"
 _QUANT_V2_MIN_ELEMENTS = 4 * 1024 * 1024
+
+
+def _validate_fp8_quantization(quantization: str) -> None:
+    if quantization not in ("auto", "v2_row", "v2_column"):
+        raise ValueError("PPU FP8 quantization must be auto, v2_row, or v2_column")
+
+
+def _validate_activation_scale_layout(scale: torch.Tensor, quantization: str) -> None:
+    if quantization == "v2_column":
+        expected = (1, max(1, scale.shape[0]))
+        if scale.stride() != expected:
+            raise ValueError(f"PPU FP8 column scales require strides {expected}")
+    elif not scale.is_contiguous():
+        raise ValueError("PPU FP8 row scales must be contiguous")
 
 
 def _require_dtype(name: str) -> torch.dtype:
@@ -164,15 +179,20 @@ def checkpoint_ue8m0_scale_to_fp32(
 def quantize_ppu_fp8_activation(
     x: torch.Tensor,
     status: Optional[torch.Tensor] = None,
+    *,
+    quantization: str = "auto",
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Quantize BF16 through the M890P compute-ops ABI.
 
-    The contract is group 128, epsilon ``1e-4``, contiguous row-major FP32
-    scales and no UE8M0 packing.  Plain activations switch from the legacy
+    The contract is group 128, epsilon ``1e-4``, FP32 scales and no UE8M0
+    packing. The default uses row-major scales and switches from the legacy
     kernel to v2 at four million elements, matching the established RTP
-    dispatch threshold without importing the CUDA-gated public wrapper.
+    dispatch threshold. Explicit v2_row/v2_column select the v2 arithmetic
+    and scale layout for all shapes. Column scales feed PPU DeepGEMM directly
+    without a transpose copy; the installed M890P ABI uses unpadded M strides.
     """
 
+    _validate_fp8_quantization(quantization)
     if x.ndim != 2:
         raise ValueError(f"activation must be 2D, got {x.ndim}D")
     if x.dtype != torch.bfloat16:
@@ -187,7 +207,12 @@ def quantize_ppu_fp8_activation(
 
     expected_scale_shape = (x.shape[0], x.shape[1] // FP8_BLOCK_SIZE)
     payload = torch.empty_like(x, dtype=_require_dtype("float8_e4m3fn"))
-    scale = torch.empty(expected_scale_shape, dtype=torch.float32, device=x.device)
+    if quantization == "v2_column":
+        scale = torch.empty(
+            expected_scale_shape[::-1], dtype=torch.float32, device=x.device
+        ).t()
+    else:
+        scale = torch.empty(expected_scale_shape, dtype=torch.float32, device=x.device)
     if x.shape[0] > 0:
         if status is None:
             legacy_quant, v2_quant = _resolve_ppu_quant_symbols()
@@ -198,7 +223,7 @@ def quantize_ppu_fp8_activation(
             legacy_symbol_name = _QUANT_LEGACY_CHECKED_SYMBOL
             v2_symbol_name = _QUANT_V2_CHECKED_SYMBOL
         fp8_max = torch.finfo(payload.dtype).max
-        if x.numel() >= _QUANT_V2_MIN_ELEMENTS:
+        if quantization != "auto" or x.numel() >= _QUANT_V2_MIN_ELEMENTS:
             try:
                 v2_quant(
                     x,
@@ -262,8 +287,7 @@ def quantize_ppu_fp8_activation(
             f"dtype={scale.dtype}, shape={tuple(scale.shape)}, "
             f"expected=torch.float32/{expected_scale_shape}"
         )
-    if not scale.is_contiguous():
-        raise RuntimeError("PPU activation helper scale must be row-major contiguous")
+    _validate_activation_scale_layout(scale, quantization)
     if scale.device != x.device:
         raise RuntimeError(
             "PPU activation helper returned scale on the wrong device: "
@@ -320,8 +344,11 @@ class PpuFp8Linear(nn.Module):
         *,
         quant_status: Optional[torch.Tensor] = None,
         share_input_quantization: bool = False,
+        quantization: str = "auto",
     ):
         super().__init__()
+        _validate_fp8_quantization(quantization)
+        self.quantization = quantization
         if not isinstance(share_input_quantization, bool):
             raise TypeError("share_input_quantization must be bool")
         if weight.ndim != 2:
@@ -364,6 +391,7 @@ class PpuFp8Linear(nn.Module):
             and self.k == other.k
             and self.weight.device == other.weight.device
             and self.quant_status is other.quant_status
+            and self.quantization == other.quantization
         )
 
     def _validate_input(self, x: torch.Tensor, status: Optional[torch.Tensor]) -> None:
@@ -391,9 +419,7 @@ class PpuFp8Linear(nn.Module):
         self._validate_input(x, status)
         if x.ndim != 2:
             raise ValueError(f"shared quantization input must be 2D, got {x.ndim}D")
-        if status is None:
-            return quantize_ppu_fp8_activation(x)
-        return quantize_ppu_fp8_activation(x, status)
+        return quantize_ppu_fp8_activation(x, status, quantization=self.quantization)
 
     def forward_quantized(
         self,
@@ -403,7 +429,7 @@ class PpuFp8Linear(nn.Module):
         *,
         quant_status: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        """Consume shared E4M3/row-major FP32 tensors without re-quantizing.
+        """Consume E4M3/FP32 tensors in this instance's selected scale layout.
 
         The caller retains the quantized tensors through all consumers on
         their producer stream (or supplies an explicit cross-stream fence).
@@ -416,14 +442,14 @@ class PpuFp8Linear(nn.Module):
         _require_m890p(x_fp8, "quantized activation")
         expected_scale = (x_fp8.shape[0], self.k // FP8_BLOCK_SIZE)
         if x_scale.dtype != torch.float32:
-            raise TypeError(
-                "quantized activation scales must be row-major torch.float32"
-            )
+            raise TypeError("quantized activation scales must be torch.float32")
         if tuple(x_scale.shape) != expected_scale:
             raise ValueError(
                 f"quantized activation scale shape must be {expected_scale}"
             )
-        _require_cuda_contiguous(x_scale, "quantized activation scale")
+        if not x_scale.is_cuda:
+            raise ValueError("quantized activation scale must be a CUDA/PPU tensor")
+        _validate_activation_scale_layout(x_scale, self.quantization)
         if x_fp8.device != self.weight.device or x_scale.device != x_fp8.device:
             raise ValueError(
                 "quantized activation, scale and weight must share a device"
@@ -461,10 +487,9 @@ class PpuFp8Linear(nn.Module):
 
         x_2d = x.view(m, self.k)
         output_2d = output.view(m, self.n)
-        if status is None:
-            x_fp8, x_scale = quantize_ppu_fp8_activation(x_2d)
-        else:
-            x_fp8, x_scale = quantize_ppu_fp8_activation(x_2d, status)
+        x_fp8, x_scale = quantize_ppu_fp8_activation(
+            x_2d, status, quantization=self.quantization
+        )
         self._run_gemm(x_fp8, x_scale, output_2d)
         return output
 

@@ -1799,9 +1799,7 @@ def warmup_mhc_head_fused_jit(
         return
     _assert_not_capturing()
 
-    from rtp_llm.models_py.modules.dsv4.hc.mhc_tilelang import (
-        tk_mhc_head_fused_enabled,
-    )
+    from rtp_llm.models_py.modules.dsv4.hc.mhc_tilelang import tk_mhc_head_fused_enabled
 
     if not tk_mhc_head_fused_enabled():
         return
@@ -1837,13 +1835,9 @@ def warmup_mhc_head_fused_jit(
             _release_cuda_cache(device)
 
     t0 = time.time()
-    _run_deepgemm_warmup_launches_serialized(
-        "DSV4 mHCHeadFused", _run_warmup_launches
-    )
+    _run_deepgemm_warmup_launches_serialized("DSV4 mHCHeadFused", _run_warmup_launches)
     if rank == 0:
-        logging.info(
-            "[DSV4 mHCHeadFused] JIT warmup done in %.2fs", time.time() - t0
-        )
+        logging.info("[DSV4 mHCHeadFused] JIT warmup done in %.2fs", time.time() - t0)
     _MHC_HEAD_FUSED_JIT_WARMED_KEYS.add(warmup_key)
 
 
@@ -2199,6 +2193,7 @@ def _launch_dummy_mhc_pre_big_fuse(
         post_mix,
         comb_mix,
         layer_input,
+        layer_input.view(-1)[:0],
     )
     del (
         gemm_out_mul,

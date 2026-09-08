@@ -156,6 +156,23 @@ def supports_ppu_fp4_decode(selection, request):
             "requires deterministic PPU HC with TileLang POST and PDL off",
         ),
         (
+            options.get("DSV4_PPU_DECODE_HC_REDUCTION", "torch") in ("torch", "fused"),
+            "requires torch or fused HC reduction",
+        ),
+        (
+            options.get("DSV4_PPU_DECODE_HC_NORM", "separate") in ("separate", "fused"),
+            "requires separate or fused HC norm",
+        ),
+        (
+            options.get("DSV4_PPU_DECODE_FP8_QUANT", "auto") in ("auto", "v2"),
+            "requires auto or v2 FP8 quantization",
+        ),
+        (
+            options.get("DSV4_PPU_DECODE_MOE_HINT", "capacity")
+            in ("capacity", "batch"),
+            "requires capacity or batch MoE launch hint",
+        ),
+        (
             options.get("DSV4_PPU_SGLANG_MOE", "0") == "1"
             and options.get("DSV4_MOE_SHARED_EXPERT_OVERLAP", "0") == "0"
             and options.get("DSV4_SHARED_EXPERT_MODE", "sequential")

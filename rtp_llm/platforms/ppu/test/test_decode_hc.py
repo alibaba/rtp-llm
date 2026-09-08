@@ -1,8 +1,10 @@
 """Exercise the selected HC model interface and its in-place Graph lifecycle."""
 
 import unittest
+from unittest.mock import patch
 
 import torch
+
 from rtp_llm.platforms.ppu.models.dsv4.ppu_decode_provider import PpuDecodeProvider
 
 
@@ -11,12 +13,14 @@ from rtp_llm.platforms.ppu.models.dsv4.ppu_decode_provider import PpuDecodeProvi
     "requires a PPU M890P",
 )
 class DecodeHCTest(unittest.TestCase):
-    def unit(self, *, zero=False):
+    def unit(self, *, zero=False, reduction="torch"):
         torch.manual_seed(890409)
         fn = torch.randn((24, 16384), device="cuda", dtype=torch.float32) / 128
         if zero:
             fn.zero_()
-        return PpuDecodeProvider({}).build_hc_unit(
+        return PpuDecodeProvider(
+            {"DSV4_PPU_DECODE_HC_REDUCTION": reduction}
+        ).build_hc_unit(
             fn,
             torch.zeros(24, device="cuda"),
             torch.ones(3, device="cuda"),
@@ -45,41 +49,65 @@ class DecodeHCTest(unittest.TestCase):
 
     @torch.inference_mode()
     def test_graph_replay_matches_eager_for_changing_inputs(self):
-        unit = self.unit()
-        for batch in (1, 3, 8, 32, 64, 128):
-            with self.subTest(batch=batch):
-                inputs = torch.randn(
-                    (batch, 1, 4, 4096), device="cuda", dtype=torch.bfloat16
-                )
-                residual = torch.empty_like(inputs)
+        for reduction in ("torch", "fused"):
+            unit = self.unit(reduction=reduction)
+            for batch in (1, 3, 8, 32, 64, 128):
+                with self.subTest(batch=batch, reduction=reduction):
+                    inputs = torch.randn(
+                        (batch, 1, 4, 4096), device="cuda", dtype=torch.bfloat16
+                    )
+                    residual = torch.empty_like(inputs)
 
-                def run():
-                    residual.copy_(inputs)
-                    y, post, comb = unit.pre(residual)
-                    out = unit.post(y, residual, post, comb)
-                    return y, post, comb, out
+                    def run():
+                        residual.copy_(inputs)
+                        y, post, comb = unit.pre(residual)
+                        out = unit.post(y, residual, post, comb)
+                        return y, post, comb, out
 
-                stream = torch.cuda.Stream()
-                stream.wait_stream(torch.cuda.current_stream())
-                with torch.cuda.stream(stream):
-                    for _ in range(3):
-                        run()
-                torch.cuda.current_stream().wait_stream(stream)
-                graph = torch.cuda.CUDAGraph()
-                with torch.cuda.graph(graph, stream=stream):
-                    outputs = run()
-                torch.cuda.current_stream().wait_stream(stream)
-                for _ in range(5):
-                    inputs.normal_()
-                    expected = tuple(t.clone() for t in run())
-                    # Poison call-owned output storage before replay. Captured
-                    # scratch/reductions must fully overwrite previous values.
-                    for tensor in outputs:
-                        tensor.fill_(float("nan"))
-                    graph.replay()
-                    for actual, reference in zip(outputs, expected):
-                        self.assertTrue(bool(torch.isfinite(actual).all()))
-                        torch.testing.assert_close(actual, reference, rtol=0, atol=0)
+                    stream = torch.cuda.Stream()
+                    stream.wait_stream(torch.cuda.current_stream())
+                    with torch.cuda.stream(stream):
+                        for _ in range(3):
+                            run()
+                    torch.cuda.current_stream().wait_stream(stream)
+                    graph = torch.cuda.CUDAGraph()
+                    with torch.cuda.graph(graph, stream=stream):
+                        outputs = run()
+                    torch.cuda.current_stream().wait_stream(stream)
+                    for _ in range(5):
+                        inputs.normal_()
+                        expected = tuple(t.clone() for t in run())
+                        # Poison call-owned output storage before replay. Captured
+                        # scratch/reductions must fully overwrite previous values.
+                        for tensor in outputs:
+                            tensor.fill_(float("nan"))
+                        graph.replay()
+                        for actual, reference in zip(outputs, expected):
+                            self.assertTrue(bool(torch.isfinite(actual).all()))
+                            torch.testing.assert_close(
+                                actual, reference, rtol=0, atol=0
+                            )
+
+    @torch.inference_mode()
+    def test_fused_pre_uses_partials_without_torch_reductions(self):
+        unit = self.unit(zero=True, reduction="fused")
+        residual = torch.ones((8, 1, 4, 4096), device="cuda", dtype=torch.bfloat16)
+        original = unit._prenorm_partials
+        observed = []
+
+        def partials(*args):
+            output = original(*args)
+            observed.append(tuple(output[0].shape))
+            return output
+
+        with patch.object(unit, "_prenorm_partials", partials), patch.object(
+            torch, "sum", side_effect=AssertionError("unfused HC reduction")
+        ):
+            y, post, comb = unit.pre(residual)
+        self.assertEqual(observed, [(64, 8, 24)])
+        self.assertTrue(torch.equal(y, torch.full_like(y, 2)))
+        self.assertTrue(torch.equal(post, torch.ones_like(post)))
+        torch.testing.assert_close(comb, torch.full_like(comb, 0.25), rtol=0, atol=1e-6)
 
     def test_empty_batch_and_instance_capture_policy(self):
         unit = self.unit()

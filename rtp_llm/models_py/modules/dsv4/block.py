@@ -10,6 +10,7 @@ from typing import Callable, Dict, Optional, Tuple
 
 import torch
 import torch.nn as nn
+
 from rtp_llm.models_py.modules import RMSNorm
 from rtp_llm.models_py.modules.dsv4.fp8.attention import AttentionFP8
 from rtp_llm.models_py.modules.dsv4.hc import build_hc_unit
@@ -392,19 +393,13 @@ class Block(nn.Module):
         _dbg_layer = _rt.should_record_layer(self.layer_id)
         # Attention path
         residual = x
-        x_pre, post, comb = self.attn_hc.pre(
+        x_pre, post, comb = self.attn_hc.pre_norm(
             x,
-            dbg_tag=f"L{self.layer_id:02d}_decode_attn_hc_pre" if _dbg_layer else None,
-        )
-        # Framework RMSNorm wants 2D — collapse [B, q_len, dim] → [B*q_len, dim]
-        # and view back; attention.forward_decode wants the original 3D shape.
-        bsz, q_len, dim_ = x_pre.shape
-        x_pre = tp_rms_norm(
             self.attn_norm,
-            x_pre.reshape(bsz * q_len, dim_),
             tp_size=self.tp_size,
             tp_rank=self.tp_rank,
-        ).view(bsz, q_len, dim_)
+            dbg_tag=f"L{self.layer_id:02d}_decode_attn_hc_pre" if _dbg_layer else None,
+        )
         if _dbg_layer:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_decode_attn_in", x_pre)
         if attn_fn is not None:
@@ -425,17 +420,13 @@ class Block(nn.Module):
 
         # FFN path — MoE has no per-step state, reuse existing forward
         residual = x
-        x_pre, post, comb = self.ffn_hc.pre(
+        x_pre, post, comb = self.ffn_hc.pre_norm(
             x,
-            dbg_tag=f"L{self.layer_id:02d}_decode_ffn_hc_pre" if _dbg_layer else None,
-        )
-        bsz, q_len, dim_ = x_pre.shape
-        x_pre = tp_rms_norm(
             self.ffn_norm,
-            x_pre.reshape(bsz * q_len, dim_),
             tp_size=self.tp_size,
             tp_rank=self.tp_rank,
-        ).view(bsz, q_len, dim_)
+            dbg_tag=f"L{self.layer_id:02d}_decode_ffn_hc_pre" if _dbg_layer else None,
+        )
         if _dbg_layer:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_decode_ffn_in", x_pre)
         ffn_out = self._call_moe(x_pre, input_ids, numerical_status=numerical_status)
@@ -602,13 +593,13 @@ class Block(nn.Module):
             dbg_pos_name = f"pos{dbg_pos}"
         # Attention path
         residual = x
-        x_pre, post, comb = self.attn_hc.pre(
+        x_pre, post, comb = self.attn_hc.pre_norm(
             x,
+            self.attn_norm,
+            tp_size=self.tp_size,
+            tp_rank=self.tp_rank,
             dbg_tag=f"L{self.layer_id:02d}_attn_hc_pre" if _dbg_layer else None,
         )  # [T, dim], [T, hc, 1], [T, hc, hc]
-        x_pre = tp_rms_norm(
-            self.attn_norm, x_pre, tp_size=self.tp_size, tp_rank=self.tp_rank
-        )  # [T, dim]
         if _dbg_layer:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_attn_in", x_pre)
             if dbg_pos_mask is not None:
@@ -706,13 +697,13 @@ class Block(nn.Module):
 
         # FFN path
         residual = x
-        x_pre, post, comb = self.ffn_hc.pre(
+        x_pre, post, comb = self.ffn_hc.pre_norm(
             x,
+            self.ffn_norm,
+            tp_size=self.tp_size,
+            tp_rank=self.tp_rank,
             dbg_tag=f"L{self.layer_id:02d}_ffn_hc_pre" if _dbg_layer else None,
         )  # [T, dim], ...
-        x_pre = tp_rms_norm(
-            self.ffn_norm, x_pre, tp_size=self.tp_size, tp_rank=self.tp_rank
-        )  # [T, dim]
         if _dbg_layer:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_ffn_in", x_pre)
             if dbg_pos_mask is not None:

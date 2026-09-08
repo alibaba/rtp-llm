@@ -1,10 +1,12 @@
 """PPU MXFP4 compute and buffer ownership for an engine-owned DeepEP group."""
 
 import torch
+
 from rtp_llm.platforms.ppu.kernels.ppu_mxfp4_masked import (
     mxfp4_experts_masked,
     tensor_spans_overlap,
 )
+from rtp_llm.platforms.ppu.kernels.ppu_topk_padding import pad_inactive_routes
 
 
 def pad_topk(indices, weights):
@@ -16,11 +18,7 @@ def pad_topk(indices, weights):
     target = next((n for n in supported if n > width), None)
     if target is None or width <= 0:
         raise ValueError("DeepEP topk must be in [1,16]")
-    shape = (indices.shape[0], target - width)
-    return (
-        torch.cat((indices, indices.new_full(shape, -1)), dim=1),
-        torch.cat((weights, weights.new_zeros(shape)), dim=1),
-    )
+    return pad_inactive_routes(indices, weights, target)
 
 
 def low_latency_mxfp4_moe(

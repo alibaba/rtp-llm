@@ -4,17 +4,19 @@ import os
 from typing import Optional
 
 import torch
+from torch import nn
+
 from rtp_llm.platforms.ppu.modules.linear.fp8_linear import (
     FP8_BLOCK_SIZE,
     _require_dtype,
     _require_m890p,
     _resolve_deep_gemm_symbol,
+    _validate_fp8_quantization,
     _validate_out,
     _validate_quant_status,
     checkpoint_ue8m0_scale_to_fp32,
     quantize_ppu_fp8_activation,
 )
-from torch import nn
 
 
 class PpuWoAFp8Linear(nn.Module):
@@ -34,8 +36,13 @@ class PpuWoAFp8Linear(nn.Module):
         k_local: int,
         sglang_layout: Optional[bool] = None,
         quant_status: Optional[torch.Tensor] = None,
+        quantization: str = "auto",
     ):
         super().__init__()
+        _validate_fp8_quantization(quantization)
+        if quantization == "v2_column":
+            raise ValueError("PPU wo_a fused permutation requires row-major scales")
+        self.quantization = quantization
         self.sglang_layout = (
             (os.environ.get("DSV4_PPU_SGLANG_WO_A", "0") == "1")
             if sglang_layout is None
@@ -141,15 +148,15 @@ class PpuWoAFp8Linear(nn.Module):
 
         # Quantization retains the token-major arithmetic and block scales.
         x_2d = x.view(m * self.groups, self.k_local)
-        if status is None:
-            x_fp8, x_scale = quantize_ppu_fp8_activation(x_2d)
-        else:
-            x_fp8, x_scale = quantize_ppu_fp8_activation(x_2d, status)
+        x_fp8, x_scale = quantize_ppu_fp8_activation(
+            x_2d, status, quantization=self.quantization
+        )
         x_fp8 = x_fp8.view(m, self.groups, self.k_local)
         x_scale = x_scale.view(m, self.groups, self.k_local // FP8_BLOCK_SIZE)
         output_3d = output.view(m, self.groups, self.rank)
         if self.sglang_layout:
             from deep_gemm.jit_kernels.einsum import fp8_bmm
+
             from rtp_llm.platforms.ppu.kernels.cuda.ppu_sglang_permute import (
                 fused_permute,
             )

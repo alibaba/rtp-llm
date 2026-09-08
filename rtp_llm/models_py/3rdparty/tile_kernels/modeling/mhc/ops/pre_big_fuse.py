@@ -87,6 +87,9 @@ def mhc_pre_big_fuse(
     *,
     backend: str | None = None,
     prenorm_gemm=None,
+    prenorm_partials=None,
+    norm_weight=None,
+    norm_eps=None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     assert residual.dtype == torch.bfloat16
     assert fn.dtype == torch.float32
@@ -95,6 +98,18 @@ def mhc_pre_big_fuse(
 
     mhc_mult = residual.shape[-2]
     hidden_size = residual.shape[-1]
+    if norm_weight is not None:
+        if (
+            norm_eps is None
+            or norm_eps <= 0
+            or norm_weight.shape != (hidden_size,)
+            or norm_weight.dtype != torch.bfloat16
+            or norm_weight.device != residual.device
+            or not norm_weight.is_contiguous()
+        ):
+            raise ValueError(
+                "HC fused norm requires dense BF16 weights and positive epsilon"
+            )
     mhc_mult2 = mhc_mult * mhc_mult
     mhc_mult3 = mhc_mult * 2 + mhc_mult2
 
@@ -130,62 +145,81 @@ def mhc_pre_big_fuse(
         num_tokens, hidden_size, dtype=torch.bfloat16, device=residual.device
     )
 
-    # The PPU DeepGEMM implementation performs its split-K reduction inside
-    # HcPrenormGemm and writes a single reduced plane. Its current ABI accepts
-    # [1, M, N] / [1, M], unlike the old exposed-partials caller contract.
-    output_splits = 1 if deepgemm_backend or backend == "tilelang_single" else n_splits
-    gemm_out_mul = torch.empty(
-        output_splits,
-        num_tokens,
-        mhc_mult3,
-        dtype=torch.float32,
-        device=residual.device,
-    )
-    gemm_out_sqrsum = torch.empty(
-        output_splits, num_tokens, dtype=torch.float32, device=residual.device
-    )
-    if deepgemm_backend:
-        if prenorm_gemm is not None:
-            run_gemm = prenorm_gemm
-        elif backend == "deepgemm_deterministic":
-            from rtp_llm.models_py.modules.dsv4.platform_provider import (
-                run_dsv4_hc_prenorm,
-            )
-
-            run_gemm = run_dsv4_hc_prenorm
-        else:
-            run_gemm = _run_deepgemm_splitk_gemm
-        run_gemm(
-            residual_flat.view(num_tokens, mhc_hidden_size),
-            fn_flat,
-            gemm_out_mul,
-            gemm_out_sqrsum,
-            n_splits,
+    if prenorm_partials is not None:
+        if backend != "deepgemm_deterministic":
+            raise ValueError("Exposed HC partials require deterministic prenorm")
+        gemm_out_mul, gemm_out_sqrsum = prenorm_partials(
+            residual_flat.view(num_tokens, mhc_hidden_size), fn_flat
         )
-        # Both implementations return one reduced plane.
-        n_splits = 1
-    elif backend == "tilelang_single":
-        n_splits = _run_tilelang_single_gemm(
-            residual_flat,
-            fn_flat,
-            gemm_out_mul,
-            gemm_out_sqrsum,
-            mhc_mult3,
-            mhc_hidden_size,
-        )
-        gemm_out_mul = gemm_out_mul[:1]
-        gemm_out_sqrsum = gemm_out_sqrsum[:1]
-    elif backend == "tilelang_splitk":
-        raise RuntimeError(
-            "DSV4_MHC_PRE_GEMM_BACKEND=tilelang_splitk is not wired in this "
-            "RTP TileKernels snapshot; use deepgemm or tilelang_single."
+        n_splits = gemm_out_mul.shape[0]
+        assert n_splits > 0
+        assert gemm_out_mul.shape == (n_splits, num_tokens, mhc_mult3)
+        assert gemm_out_sqrsum.shape == (n_splits, num_tokens)
+        assert all(
+            tensor.dtype == torch.float32
+            and tensor.device == residual.device
+            and tensor.is_contiguous()
+            for tensor in (gemm_out_mul, gemm_out_sqrsum)
         )
     else:
-        raise ValueError(
-            "Unsupported DSV4_MHC_PRE_GEMM_BACKEND="
-            f"{backend!r}; expected deepgemm, deepgemm_deterministic, "
-            "tilelang_splitk, or tilelang_single."
+        # The PPU DeepGEMM implementation performs its split-K reduction inside
+        # HcPrenormGemm and writes a single reduced plane. Its current ABI accepts
+        # [1, M, N] / [1, M], unlike the old exposed-partials caller contract.
+        output_splits = (
+            1 if deepgemm_backend or backend == "tilelang_single" else n_splits
         )
+        gemm_out_mul = torch.empty(
+            output_splits,
+            num_tokens,
+            mhc_mult3,
+            dtype=torch.float32,
+            device=residual.device,
+        )
+        gemm_out_sqrsum = torch.empty(
+            output_splits, num_tokens, dtype=torch.float32, device=residual.device
+        )
+        if deepgemm_backend:
+            if prenorm_gemm is not None:
+                run_gemm = prenorm_gemm
+            elif backend == "deepgemm_deterministic":
+                from rtp_llm.models_py.modules.dsv4.platform_provider import (
+                    run_dsv4_hc_prenorm,
+                )
+
+                run_gemm = run_dsv4_hc_prenorm
+            else:
+                run_gemm = _run_deepgemm_splitk_gemm
+            run_gemm(
+                residual_flat.view(num_tokens, mhc_hidden_size),
+                fn_flat,
+                gemm_out_mul,
+                gemm_out_sqrsum,
+                n_splits,
+            )
+            # Both implementations return one reduced plane.
+            n_splits = 1
+        elif backend == "tilelang_single":
+            n_splits = _run_tilelang_single_gemm(
+                residual_flat,
+                fn_flat,
+                gemm_out_mul,
+                gemm_out_sqrsum,
+                mhc_mult3,
+                mhc_hidden_size,
+            )
+            gemm_out_mul = gemm_out_mul[:1]
+            gemm_out_sqrsum = gemm_out_sqrsum[:1]
+        elif backend == "tilelang_splitk":
+            raise RuntimeError(
+                "DSV4_MHC_PRE_GEMM_BACKEND=tilelang_splitk is not wired in this "
+                "RTP TileKernels snapshot; use deepgemm or tilelang_single."
+            )
+        else:
+            raise ValueError(
+                "Unsupported DSV4_MHC_PRE_GEMM_BACKEND="
+                f"{backend!r}; expected deepgemm, deepgemm_deterministic, "
+                "tilelang_splitk, or tilelang_single."
+            )
 
     _mhc_pre_big_fuse(
         hidden_size,
@@ -201,6 +235,8 @@ def mhc_pre_big_fuse(
         # Retain the legacy atomic backend's behavior for explicit A/B runs.
         stabilize_mixes=backend == "deepgemm",
         stabilize_comb=backend == "deepgemm",
+        fuse_norm=norm_weight is not None,
+        norm_eps=norm_eps if norm_eps is not None else 1e-6,
     )(
         gemm_out_mul,
         gemm_out_sqrsum,
@@ -210,6 +246,7 @@ def mhc_pre_big_fuse(
         post_mix,
         comb_mix,
         layer_input,
+        norm_weight if norm_weight is not None else layer_input.view(-1)[:0],
     )
 
     post_mix = post_mix.view(*outer_shape, mhc_mult, 1)
