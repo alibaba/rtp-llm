@@ -269,9 +269,11 @@ acceptance of earlier runs. No old FAIL/ERROR result is changed.
 A successful `/rtp_llm/master/info` omits a role when its worker directory is
 empty (`HttpLoadBalanceServer.buildWorkerSummary`), and explicitly returns null
 for an entirely empty summary. Alive observations now interpret that documented
-sparse response as zero for the absent role. Missing `worker_summary`, failed or
-untyped response envelopes, malformed role maps, missing counters inside a present
-role and invalid counts remain ERROR. Raw responses are retained unchanged.
+sparse response as zero for the absent role. On the new absent-role path, missing `worker_summary`, failed or untyped response
+envelopes, malformed role maps and missing/invalid counters remain ERROR. The
+pre-existing target-role-present path continues to validate its `alive` counter;
+this patch does not add envelope/discovered validation to that path. Raw responses
+are retained unchanged.
 
 This fixes framework decoding in the two batch-02 restart observations at frozen
 3e16092e4ee28df35a0f950dd91424820d21e767; it does not rewrite their original
