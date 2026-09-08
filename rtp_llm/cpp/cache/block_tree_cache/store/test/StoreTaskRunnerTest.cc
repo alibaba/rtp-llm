@@ -70,7 +70,7 @@ TEST(StoreTaskRunnerTest, PrepareTaskRecordsPathIndexInTransferDescriptors) {
     const GroupBase                            group    = makeTestGroupBase(policy);
     const std::shared_ptr<const CacheTopology> topology = makeTestTopology({group});
     DeviceBlockPoolPtr             device_pool = makeTestDevicePool({{16, 0}}, 4, "store_task_runner_path_index");
-    std::shared_ptr<HostBlockPool> host_pool            = block_transfer_engine_test::makeHostPool(16, 2);
+    std::shared_ptr<HostBlockPool> host_pool   = block_transfer_engine_test::makeHostPool(16, 2);
     GroupSetPtr                    group_set   = makeTestGroupSet(0, topology, {0}, {device_pool}, host_pool);
     const std::vector<GroupSetPtr> group_sets{group_set};
     StoreTaskRunner                runner(group_sets);
@@ -98,7 +98,7 @@ TEST(StoreTaskRunnerTest, ReleaseTaskResourcesDropsTemporaryHolds) {
     const GroupBase                            group    = makeTestGroupBase(policy);
     const std::shared_ptr<const CacheTopology> topology = makeTestTopology({group});
     DeviceBlockPoolPtr             device_pool          = makeTestDevicePool({{16, 0}}, 2, "store_task_runner_release");
-    std::shared_ptr<HostBlockPool>             host_pool = block_transfer_engine_test::makeHostPool(16, 1);
+    std::shared_ptr<HostBlockPool> host_pool            = block_transfer_engine_test::makeHostPool(16, 1);
     GroupSetPtr                    group_set            = makeTestGroupSet(0, topology, {0}, {device_pool}, host_pool);
     const std::vector<GroupSetPtr> group_sets{group_set};
     StoreTaskRunner                runner(group_sets);
@@ -157,7 +157,7 @@ TEST(StoreTaskRunnerTest, RunTransferReturnsDispatcherFailure) {
     const GroupBase                            group    = makeTestGroupBase(policy);
     const std::shared_ptr<const CacheTopology> topology = makeTestTopology({group});
     DeviceBlockPoolPtr             device_pool = makeTestDevicePool({{16, 0}}, 2, "store_task_runner_transfer");
-    std::shared_ptr<HostBlockPool>             host_pool   = block_transfer_engine_test::makeHostPool(16, 1);
+    std::shared_ptr<HostBlockPool> host_pool   = block_transfer_engine_test::makeHostPool(16, 1);
     GroupSetPtr                    group_set   = makeTestGroupSet(0, topology, {0}, {device_pool}, host_pool);
     const std::vector<GroupSetPtr> group_sets{group_set};
     StoreTaskRunner                runner(group_sets);
@@ -172,7 +172,7 @@ TEST(StoreTaskRunnerTest, RunTransferReturnsDispatcherFailure) {
 
     auto engine = std::make_shared<ControlledPerRankBlockTransferEngine>(group_sets, TransferCopyAction::Fail);
     BlockTransferDispatcher       dispatcher(engine);
-    BlockTreeCacheMetricsReporter metrics_reporter;
+    BlockTreeCacheMetricsReporter metrics_reporter{nullptr};
     std::optional<ErrorInfo>      result;
     runner.runTransfer(task, dispatcher, metrics_reporter, [&](ErrorInfo error) { result.emplace(std::move(error)); });
     ASSERT_TRUE(result.has_value());
@@ -189,7 +189,7 @@ TEST(StoreTaskRunnerTest, TransferSubmissionFollowsTargetTier) {
         makeTestGroupSet(0, topology, {0}, {makeTestDevicePool({{16, 0}}, 2, "store_task_runner_submission_0")}),
         makeTestGroupSet(1, topology, {0}, {makeTestDevicePool({{16, 0}}, 2, "store_task_runner_submission_1")})};
     StoreTaskRunner               runner(group_sets);
-    BlockTreeCacheMetricsReporter metrics_reporter;
+    BlockTreeCacheMetricsReporter metrics_reporter{nullptr};
 
     auto host_task = std::make_shared<StoreTaskRunner::Task>(Tier::HOST, CacheKeysType{}, std::chrono::seconds(30));
     host_task->transfer_task =
@@ -233,7 +233,7 @@ TEST(StoreTaskRunnerTest, PendingTransferDoesNotRetainOuterWorker) {
     StoreTaskRunner                runner(group_sets);
     auto                           engine = std::make_shared<PendingStoreTransferEngine>();
     BlockTransferDispatcher        dispatcher(engine);
-    BlockTreeCacheMetricsReporter  metrics_reporter;
+    BlockTreeCacheMetricsReporter  metrics_reporter{nullptr};
     BlockTreeTaskPool              outer_pool(1, 8, "AsyncStoreOuter");
     ASSERT_TRUE(outer_pool.start());
 

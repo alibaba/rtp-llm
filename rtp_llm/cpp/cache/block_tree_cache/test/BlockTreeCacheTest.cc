@@ -106,7 +106,7 @@ std::vector<DeviceBlockPoolPtr> makeStructuralDevicePools(size_t count, const st
         config->physical_block_count    = physical_block_count;
         config->total_size_bytes        = layout.total_size_bytes;
         config->memory_layouts          = {layout};
-        config->use_cuda_malloc_backing = false;
+        config->use_cuda_malloc_backing = true;
 
         auto device_pool = std::make_shared<DeviceBlockPool>(config);
         RTP_LLM_CHECK(device_pool->init());
@@ -263,7 +263,7 @@ TEST_F(BlockTreeCacheTest, CollectReuseTimeMetricsAggregatesPerTierAndGroupType)
     EXPECT_EQ(first_meta.last_access_time_us, first_meta.insert_time_us);
     EXPECT_EQ(first_meta.tier_enter_time_us, first_meta.insert_time_us);
 
-    BlockTreeCacheMetricsReporter                             reporter;
+    BlockTreeCacheMetricsReporter                             reporter{nullptr};
     const std::vector<BlockTreeCacheReuseTimeMetricsSnapshot> snapshots =
         reporter.collectCacheReuseTimeMetrics({{Tier::DEVICE, CacheGroupType::FULL, 1000, 3000, 11000},
                                                {Tier::DEVICE, CacheGroupType::FULL, 2000, 5000, 11000}});
@@ -285,7 +285,7 @@ TEST_F(BlockTreeCacheTest, AccumulateTransferBytesAggregatesDescriptors) {
     };
     BlockTreeTransferBytes transfer_bytes;
 
-    BlockTreeCacheMetricsReporter reporter;
+    BlockTreeCacheMetricsReporter reporter{nullptr};
     reporter.accumulateTransferBytes(descs, group_sets, transfer_bytes);
 
     ASSERT_EQ(transfer_bytes.size(), 1u);

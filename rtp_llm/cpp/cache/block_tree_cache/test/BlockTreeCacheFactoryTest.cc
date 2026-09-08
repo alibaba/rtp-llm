@@ -343,6 +343,7 @@ CacheConfig makeReusableGroupsAroundDisabledConfig() {
 template<typename Allocator>
 std::shared_ptr<Allocator> initAllocator(const CacheConfig& config) {
     auto allocator = std::make_shared<Allocator>(config);
+    allocator->setUseCudaMallocBlockPool(true);
     EXPECT_TRUE(allocator->init());
     return allocator;
 }
@@ -365,6 +366,7 @@ private:
 
 std::shared_ptr<GroupViewHybridPoolAllocator> initViewAllocator(const CacheConfig& config) {
     auto allocator = std::make_shared<GroupViewHybridPoolAllocator>(config);
+    allocator->setUseCudaMallocBlockPool(true);
     EXPECT_TRUE(allocator->init());
     return allocator;
 }
@@ -794,9 +796,9 @@ TEST_F(BlockTreeCacheFactoryTest, PerRankBlockTransferEnginePreservesNonContiguo
     const auto    config    = makeHybridConfig(/*independent_pools=*/true);
     auto          allocator = initAllocator<HybridPoolKVCacheAllocator>(config);
     KVCacheConfig kv_cache_config;
-    kv_cache_config.enable_host_cache        = true;
-    kv_cache_config.host_cache_size_mb       = 1;
-    auto cache                               = createBlockTreeCache(config, kv_cache_config, allocator);
+    kv_cache_config.enable_host_cache  = true;
+    kv_cache_config.host_cache_size_mb = 1;
+    auto cache                         = createBlockTreeCache(config, kv_cache_config, allocator);
     ASSERT_NE(cache, nullptr);
     EXPECT_DOUBLE_EQ(cache->config().watermark_host.low_ratio, 0.90);
     EXPECT_DOUBLE_EQ(cache->config().watermark_host.high_ratio, 0.94);
@@ -1911,6 +1913,7 @@ TEST_F(BlockTreeCacheFactoryTest, Factory_CreatesExecutableFullSWAConfig) {
         static_cast<int>(stride), static_cast<int>(stride), static_cast<int>(stride)};
 
     auto allocator = std::make_shared<HybridPoolKVCacheAllocator>(cache_config);
+    allocator->setUseCudaMallocBlockPool(true);
     ASSERT_TRUE(allocator->init());
     ASSERT_EQ(allocator->groupBlockPools().size(), 3u);
 

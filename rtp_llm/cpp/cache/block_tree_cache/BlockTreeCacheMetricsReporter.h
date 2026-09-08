@@ -87,7 +87,6 @@ using BlockTreeTransferBytes = std::unordered_map<BlockTreeTransferBytesKey, siz
 
 class BlockTreeCacheMetricsReporter final {
 public:
-    BlockTreeCacheMetricsReporter() = default;
     explicit BlockTreeCacheMetricsReporter(std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter);
 
     std::vector<BlockTreePoolMetricsSnapshot>

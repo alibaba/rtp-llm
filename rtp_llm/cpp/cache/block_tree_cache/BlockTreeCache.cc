@@ -112,9 +112,7 @@ bool BlockTreeCache::init() {
 }
 
 BlockTreeCache::~BlockTreeCache() {
-    if (full_prefix_scanner_) {
-        full_prefix_scanner_->stop();
-    }
+    full_prefix_scanner_.reset();
     RTP_LLM_LOG_INFO("destroying, closing load tickets...");
     loader_.shutdown();
     if (storage_backend_) {
@@ -128,8 +126,8 @@ BlockTreeCache::~BlockTreeCache() {
     task_pool_->stopAdmission();
     transfer_dispatcher_->cancelPendingStagingTransfers();
     task_pool_->waitForIdle();
-    transfer_dispatcher_->shutdown();
-    task_pool_->shutdown();
+    transfer_dispatcher_.reset();
+    task_pool_.reset();
     RTP_LLM_LOG_INFO("destroyed");
 }
 

@@ -32,8 +32,7 @@ public:
     // Callback-driven path used by Load/Store/Evict: stable grouping and bounded batches.
     void runTransfer(TransferTask task, TransferDoneCallback callback) const;
 
-    void cancelPendingStagingTransfers() const;
-    void                shutdown() const;
+    void                cancelPendingStagingTransfers() const;
     BlockTreeQueueSizes queueSizes() const;
 
 private:

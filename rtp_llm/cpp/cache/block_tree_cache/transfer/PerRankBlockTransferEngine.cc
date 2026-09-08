@@ -53,24 +53,16 @@ PerRankBlockTransferEngine::PerRankBlockTransferEngine(std::vector<GroupSetPtr> 
 }
 
 PerRankBlockTransferEngine::~PerRankBlockTransferEngine() {
-    shutdown();
+    transfer_task_pool_->stopAdmission();
+    cancelPendingStagingTransfers();
+    transfer_task_pool_->waitForIdle();
+    transfer_task_pool_.reset();
 }
 
 void PerRankBlockTransferEngine::cancelPendingStagingTransfers() {
     if (device_disk_executor_ != nullptr) {
         device_disk_executor_->cancelPendingTransfers();
     }
-}
-
-void PerRankBlockTransferEngine::stopAdmission() {
-    transfer_task_pool_->stopAdmission();
-}
-
-void PerRankBlockTransferEngine::shutdown() {
-    stopAdmission();
-    cancelPendingStagingTransfers();
-    transfer_task_pool_->waitForIdle();
-    transfer_task_pool_->shutdown();
 }
 
 BlockTreeQueueSizes PerRankBlockTransferEngine::queueSizes() const {

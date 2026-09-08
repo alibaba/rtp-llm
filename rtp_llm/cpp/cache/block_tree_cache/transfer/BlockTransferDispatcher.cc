@@ -113,10 +113,6 @@ void BlockTransferDispatcher::cancelPendingStagingTransfers() const {
     per_rank_engine_->cancelPendingStagingTransfers();
 }
 
-void BlockTransferDispatcher::shutdown() const {
-    per_rank_engine_->shutdown();
-}
-
 BlockTreeQueueSizes BlockTransferDispatcher::queueSizes() const {
     return per_rank_engine_->queueSizes();
 }

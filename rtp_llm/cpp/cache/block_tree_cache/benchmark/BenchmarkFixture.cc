@@ -48,7 +48,7 @@ DeviceBlockPoolPtr BenchmarkFixture::createDevicePool(size_t             layer_s
     config->pool_type               = BlockPoolType::DEVICE;
     config->pool_name               = pool_name;
     config->physical_block_count    = physical_block_count;
-    config->use_cuda_malloc_backing = false;
+    config->use_cuda_malloc_backing = true;
     config->total_size_bytes        = physical_block_count * block_stride_bytes;
 
     MemoryLayoutConfig layout;
@@ -200,7 +200,7 @@ std::unique_ptr<BlockTreeCache> BenchmarkFixture::createCache(std::vector<GroupS
         config.watermark_host = {host_watermark_ratio, std::nextafter(host_watermark_ratio, 1.0)};
     }
 
-    auto cache_metrics_reporter = std::make_shared<BlockTreeCacheMetricsReporter>();
+    auto cache_metrics_reporter = std::make_shared<BlockTreeCacheMetricsReporter>(nullptr);
     auto engine =
         std::make_shared<PerRankBlockTransferEngine>(group_sets,
                                                      config.enable_disk_cache,

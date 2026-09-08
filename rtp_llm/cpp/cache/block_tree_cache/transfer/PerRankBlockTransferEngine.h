@@ -34,8 +34,6 @@ public:
 
     virtual std::shared_ptr<AsyncContext> execute(TransferTask task);
     void                                  cancelPendingStagingTransfers();
-    void                                  stopAdmission();
-    void                                  shutdown();
     BlockTreeQueueSizes                   queueSizes() const;
 
     size_t transferWorkerCount() const {
