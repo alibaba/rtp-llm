@@ -388,6 +388,7 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
             torch.tensor([[10, 11], [20, 21]], dtype=torch.int32, device="cuda"),
             64,
             planned_batch_size=4,
+            input_token_count=3,
         )
         torch.cuda.synchronize()
 
@@ -400,6 +401,18 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
             params.paged_kv_last_page_len_d[:4].cpu().tolist(), [5, 5, 1, 1]
         )
         self.assertEqual(params.page_indice_d[:4].cpu().tolist(), [10, 20, 0, 0])
+
+    def test_device_planner_rejects_token_count_beyond_page_capacity(self):
+        params = rtp_llm_ops.FlashInferMlaAttnParams()
+        with self.assertRaisesRegex(RuntimeError, "exceeds page-table capacity"):
+            params.fill_params_mha_device(
+                torch.tensor([0], dtype=torch.int32, device="cuda"),
+                torch.empty(0, dtype=torch.int32, device="cuda"),
+                torch.tensor([1025], dtype=torch.int32, device="cuda"),
+                torch.tensor([[10]], dtype=torch.int32, device="cuda"),
+                64,
+                input_token_count=1025,
+            )
 
     def test_replay_refreshes_plan_metadata(self):
         """Tensor-core replay must refresh FlashInfer plan metadata."""

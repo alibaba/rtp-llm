@@ -3,6 +3,7 @@ deepseek_cpu_test_deps = [
     "//rtp_llm:config",
     "//rtp_llm:device",
     "//rtp_llm:fastapi",
+    "//rtp_llm:models",
     "//rtp_llm:ops",
     "//rtp_llm:psutil",
     "//rtp_llm:pydantic",

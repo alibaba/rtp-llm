@@ -163,14 +163,26 @@ class RtpModule(nn.Module):
         return result
 
     def _assign_weight(
-        self, module: nn.Module, name: str, tensor: torch.Tensor
+        self,
+        module: nn.Module,
+        name: str,
+        tensor: torch.Tensor,
+        *,
+        checkpoint_name: Optional[str] = None,
+        assigned_targets: Optional[Dict[int, str]] = None,
     ) -> bool:
         if "." in name:
             prefix, rest = name.split(".", 1)
             child = module._modules.get(prefix)
             if not isinstance(child, nn.Module):
                 return False
-            return self._assign_weight(child, rest, tensor)
+            return self._assign_weight(
+                child,
+                rest,
+                tensor,
+                checkpoint_name=checkpoint_name,
+                assigned_targets=assigned_targets,
+            )
         parameter = module._parameters.get(name)
         buffer = module._buffers.get(name)
         is_parameter = name in module._parameters and isinstance(
@@ -184,6 +196,16 @@ class RtpModule(nn.Module):
         if not is_parameter and not is_buffer:
             return False
         target = parameter if is_parameter else buffer
+        if assigned_targets is not None:
+            source = checkpoint_name or name
+            target_id = id(target)
+            previous_source = assigned_targets.get(target_id)
+            if previous_source is not None:
+                raise RuntimeError(
+                    "Multiple checkpoint tensors target the same runtime weight: "
+                    f"{previous_source!r} and {source!r}"
+                )
+            assigned_targets[target_id] = source
         if tuple(target.shape) != tuple(tensor.shape):
             raise ValueError(
                 f"Shape mismatch for {module.__class__.__name__}.{name}: "
@@ -231,7 +253,13 @@ class RtpModule(nn.Module):
         return matches[0] if matches else None
 
     def _dispatch_to_module_list(
-        self, module_list: nn.ModuleList, name: str, tensor: torch.Tensor
+        self,
+        module_list: nn.ModuleList,
+        name: str,
+        tensor: torch.Tensor,
+        *,
+        checkpoint_name: str,
+        assigned_targets: Dict[int, str],
     ) -> bool:
         if "." not in name:
             return False
@@ -247,11 +275,31 @@ class RtpModule(nn.Module):
         if child_loader is not None and child_loader is not RtpModule.load_weights:
             child.load_weights({rest: tensor})
             return True
-        return self._dispatch(child, rest, tensor)
+        return self._dispatch(
+            child,
+            rest,
+            tensor,
+            checkpoint_name=checkpoint_name,
+            assigned_targets=assigned_targets,
+        )
 
-    def _dispatch(self, module: nn.Module, name: str, tensor: torch.Tensor) -> bool:
+    def _dispatch(
+        self,
+        module: nn.Module,
+        name: str,
+        tensor: torch.Tensor,
+        *,
+        checkpoint_name: str,
+        assigned_targets: Dict[int, str],
+    ) -> bool:
         if "." not in name:
-            return self._assign_weight(module, name, tensor)
+            return self._assign_weight(
+                module,
+                name,
+                tensor,
+                checkpoint_name=checkpoint_name,
+                assigned_targets=assigned_targets,
+            )
         prefix, rest = name.split(".", 1)
         child = module._modules.get(prefix)
         if child is None:
@@ -260,22 +308,41 @@ class RtpModule(nn.Module):
                 child.load_weights({name: tensor})
                 return True
         if isinstance(child, nn.ModuleList):
-            return self._dispatch_to_module_list(child, rest, tensor)
+            return self._dispatch_to_module_list(
+                child,
+                rest,
+                tensor,
+                checkpoint_name=checkpoint_name,
+                assigned_targets=assigned_targets,
+            )
         if not isinstance(child, nn.Module):
             return False
         child_loader = getattr(type(child), "load_weights", None)
         if child_loader is not None and child_loader is not RtpModule.load_weights:
             child.load_weights({rest: tensor})
             return True
-        return self._dispatch(child, rest, tensor)
+        return self._dispatch(
+            child,
+            rest,
+            tensor,
+            checkpoint_name=checkpoint_name,
+            assigned_targets=assigned_targets,
+        )
 
     def load_weights(self, weights: Any) -> None:
         iterator = weights.items() if isinstance(weights, dict) else weights
         dropped: List[str] = []
+        assigned_targets: Dict[int, str] = {}
         for name, tensor in iterator:
             if not isinstance(name, str) or not isinstance(tensor, torch.Tensor):
                 raise TypeError("Weights must be (str, torch.Tensor) pairs")
-            if not self._dispatch(self, name, tensor):
+            if not self._dispatch(
+                self,
+                name,
+                tensor,
+                checkpoint_name=name,
+                assigned_targets=assigned_targets,
+            ):
                 dropped.append(name)
 
         unexpected = [name for name in dropped if not _is_allowed_dropped_weight(name)]

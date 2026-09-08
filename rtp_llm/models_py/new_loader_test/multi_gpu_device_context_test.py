@@ -90,6 +90,8 @@ class MultiGpuDeviceContextTest(unittest.TestCase):
         torch.cuda.synchronize(self.input_device)
 
         self.assertEqual(torch.cuda.current_device(), self.original_device)
+        self.assertIs(output, hidden_states)
+        self.assertIs(residual_out, residual)
         self.assertEqual(output.device, input_device)
         self.assertEqual(residual_out.device, input_device)
         torch.testing.assert_close(output, expected_output, rtol=2e-2, atol=2e-2)

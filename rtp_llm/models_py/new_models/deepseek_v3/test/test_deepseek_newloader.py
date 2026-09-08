@@ -11,6 +11,8 @@ from safetensors.torch import save_file
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.device.device_type import DeviceType, get_device_type, is_cuda, is_hip
+from rtp_llm.models.base_model import BaseModel
+from rtp_llm.models.deepseek_v2 import DeepSeekV2
 from rtp_llm.models_py.distributed.collective_torch import Group
 from rtp_llm.models_py.model_loader import NewLoaderConfig, NewModelLoader
 from rtp_llm.models_py.module_base import RtpModule
@@ -1320,6 +1322,25 @@ class DeepSeekNewloaderTest(unittest.TestCase):
         config.mla_ops_type = "MHA"
         with self.assertRaisesRegex(ValueError, "expanded-MHA fallback"):
             extract_config_values(config, _load_config(), _raw_config())
+
+    def test_expanded_mha_loader_route_falls_back_unless_explicit(self):
+        config = _model_config()
+        config.mla_ops_type = "MHA"
+        config.require_weight_update = False
+        model = object.__new__(DeepSeekV2)
+        model.model_config = config
+        model.keep_mla_checkpoint_weights = False
+
+        with mock.patch.object(
+            BaseModel, "_new_loader_unsupported_reason", return_value=None
+        ):
+            config.use_new_loader = None
+            self.assertFalse(model._use_new_loader())
+
+            config.use_new_loader = True
+            self.assertTrue(model._use_new_loader())
+            with self.assertRaisesRegex(ValueError, "expanded-MHA fallback"):
+                model._load_with_new_loader()
 
     def test_sparse_indexer_fast_and_sparse_call_sequences(self):
         class FakeIndexerOp(torch.nn.Module):

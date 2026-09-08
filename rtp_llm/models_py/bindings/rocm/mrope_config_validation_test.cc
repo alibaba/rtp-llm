@@ -16,6 +16,7 @@ TEST(MropeConfigValidationTest, RejectsInvalidShapeContracts) {
     EXPECT_NE(validateInterleavedMropeConfig(3, 63, 128, 11, 11, 10).find("positive even"), std::string::npos);
     EXPECT_NE(validateInterleavedMropeConfig(3, 130, 128, 23, 21, 21).find("size_per_head"), std::string::npos);
     EXPECT_NE(validateInterleavedMropeConfig(3, 64, 128, 10, 10, 10).find("section sum"), std::string::npos);
+    EXPECT_NE(validateInterleavedMropeConfig(3, 64, 128, 0, 16, 16).find("positive"), std::string::npos);
 }
 
 TEST(MropeConfigValidationTest, RejectsInterleavedCapacityOverflow) {
