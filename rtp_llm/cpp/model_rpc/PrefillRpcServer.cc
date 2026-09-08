@@ -202,8 +202,9 @@ grpc::Status PrefillRpcServer::init(const EngineInitParams&                     
 }
 
 ErrorInfo PrefillRpcServer::waitStreamBeforeRun(std::shared_ptr<GenerateStream> stream) {
-    static int max_wait_timeout_us = maga_init_params_.pd_sep_config.prefill_max_wait_timeout_ms * 1000;
-    auto       begin_time_us       = currentTimeUs();
+    const int64_t max_wait_timeout_us =
+        static_cast<int64_t>(maga_init_params_.pd_sep_config.prefill_max_wait_timeout_ms) * 1000;
+    auto begin_time_us = currentTimeUs();
     while (!stream->hasError() && stream->getStatus() == StreamState::WAITING) {
         usleep(100);
         auto current_time_us = currentTimeUs();

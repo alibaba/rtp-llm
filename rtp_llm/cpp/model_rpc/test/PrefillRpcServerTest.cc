@@ -8,6 +8,7 @@
 
 #include "gtest/gtest.h"
 #include "rtp_llm/cpp/model_rpc/PrefillRpcServer.h"
+#include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
 
 namespace rtp_llm {
@@ -181,8 +182,16 @@ public:
         return parseDownstreamError(status);
     }
 
+    ErrorInfo waitStreamBeforeRunForTest(const std::shared_ptr<GenerateStream>& stream) {
+        return waitStreamBeforeRun(stream);
+    }
+
     void setMaxRpcTimeoutForTest(int64_t timeout_ms) {
         maga_init_params_.pd_sep_config.max_rpc_timeout_ms = timeout_ms;
+    }
+
+    void setPrefillMaxWaitTimeoutForTest(int64_t timeout_ms) {
+        maga_init_params_.pd_sep_config.prefill_max_wait_timeout_ms = timeout_ms;
     }
 };
 
@@ -194,6 +203,19 @@ protected:
         input->input_ids         = torch::tensor({0, 1, 2}, torch::kInt32);
         input->multimodal_inputs = std::vector<MultimodalInput>{MultimodalInput("image")};
         return input;
+    }
+
+    std::shared_ptr<GenerateStream> makeWaitingStream() {
+        auto input             = std::make_shared<GenerateInput>();
+        input->generate_config = std::make_shared<GenerateConfig>();
+        input->begin_time_us   = currentTimeUs();
+        input->input_ids       = torch::tensor({0, 1, 2}, torch::kInt32);
+
+        ModelConfig model_config;
+        model_config.max_seq_len = 2048;
+        model_config.vocab_size  = 1024;
+        return std::make_shared<NormalGenerateStream>(
+            input, model_config, RuntimeConfig{}, ResourceContext{}, nullptr);
     }
 
     std::unique_ptr<PrefillGenerateContext> makeContext(GenerateInputPB* request, int64_t timeout_ms = 0) {
@@ -208,6 +230,20 @@ protected:
     grpc::ServerContext          server_context_;
     kmonitor::MetricsReporterPtr metrics_reporter_;
 };
+
+TEST_F(PrefillRpcServerTest, waitStreamBeforeRunUsesEachServerTimeout) {
+    TestPrefillRpcServer first_server;
+    first_server.setPrefillMaxWaitTimeoutForTest(1);
+    auto first_error = first_server.waitStreamBeforeRunForTest(makeWaitingStream());
+    EXPECT_EQ(first_error.code(), ErrorCode::WAIT_TO_RUN_TIMEOUT);
+    EXPECT_NE(first_error.ToString().find("1000 us"), std::string::npos);
+
+    TestPrefillRpcServer second_server;
+    second_server.setPrefillMaxWaitTimeoutForTest(7);
+    auto second_error = second_server.waitStreamBeforeRunForTest(makeWaitingStream());
+    EXPECT_EQ(second_error.code(), ErrorCode::WAIT_TO_RUN_TIMEOUT);
+    EXPECT_NE(second_error.ToString().find("7000 us"), std::string::npos);
+}
 
 TEST_F(PrefillRpcServerTest, prepareAllocateResourceRetriesDecodeWithoutRepeatingMultimodalProcessing) {
     TestDecodeRpcServer decode_server(/*fail_first_allocate=*/true);
