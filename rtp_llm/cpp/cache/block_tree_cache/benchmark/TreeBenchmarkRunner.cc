@@ -204,7 +204,7 @@ public:
                 resources[actual_matched_depth + j][gs].device_blocks = {out.suffix_blocks[gs][j]};
             }
         }
-        cache_.insert(path, resources, Tier::DEVICE);
+        cache_.insert(path, resources, Tier::DEVICE, /*write_remote=*/true, /*is_resident=*/false);
         // Blocks accepted by the tree keep BLOCK_CACHE ownership; rejected ones
         // return to the pool after their REQUEST reference is released.
         releaseRequestBlocks(request_blocks);
@@ -327,7 +327,7 @@ bool insertPathFromPrefix(BlockTreeCache& cache, const PathKeys& path, size_t ex
         }
         return false;
     }
-    cache.insert(path, resources, Tier::DEVICE);
+    cache.insert(path, resources, Tier::DEVICE, /*write_remote=*/true, /*is_resident=*/false);
     for (size_t gs = 0; gs < group_sets.size(); ++gs) {
         if (group_sets[gs]->devicePools().empty()) {
             continue;

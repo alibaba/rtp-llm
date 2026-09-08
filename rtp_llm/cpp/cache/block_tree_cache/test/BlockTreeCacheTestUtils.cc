@@ -82,6 +82,12 @@ std::shared_ptr<AsyncContext> ControlledPerRankBlockTransferEngine::execute(Tran
     return PerRankBlockTransferEngine::execute(std::move(task));
 }
 
+void ControlledPerRankBlockTransferEngine::setCopyBehavior(TransferCopyAction               action,
+                                                           std::shared_ptr<CallbackBarrier> barrier) {
+    action_  = action;
+    barrier_ = std::move(barrier);
+}
+
 size_t ControlledPerRankBlockTransferEngine::submittedBatchCount() const {
     return submit_count_.load();
 }
@@ -491,7 +497,8 @@ bool insertGroupSetResources(BlockTreeCache&                                   c
     if (tree == nullptr) {
         return false;
     }
-    const BlockTreeInsertResult insert_result = tree->insertNode(cache_keys, resources, /*collect_path=*/false);
+    const BlockTreeInsertResult insert_result =
+        tree->insertNode(cache_keys, resources, /*collect_path=*/false, /*is_resident=*/false);
     releaseLowerTierSeedRefs(tree->groupSets(), resources);
     cache.evictor_.onInserted(insert_result);
     return !insert_result.inserted_nodes.empty() || !insert_result.adopted_nodes.empty();
@@ -904,7 +911,7 @@ void FullSWAEnvironment::insertRequestPath() {
         resources[path_index][0].device_blocks = request_blocks[0][path_index];
         resources[path_index][1].device_blocks = request_blocks[1][path_index];
     }
-    cache->insert(keys, resources, Tier::DEVICE);
+    cache->insert(keys, resources, Tier::DEVICE, /*write_remote=*/true, /*is_resident=*/false);
 }
 
 void FullSWAEnvironment::releaseRequestRefs() {
