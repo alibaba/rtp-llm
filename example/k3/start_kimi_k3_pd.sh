@@ -51,8 +51,9 @@ Required on both hosts:
   DECODE_ENDPOINT                        externally reachable host:port
 
 Topology (set the same values on both roles):
-  KIMI_K3_TP_SIZE                       defaults to 8
-  KIMI_K3_EP_SIZE                       defaults to TP; current MegaMoE requires TP=EP
+  TP_SIZE / DP_SIZE / EP_SIZE            defaults to 8 / 1 / 0 (automatic EP)
+  WORLD_SIZE / LOCAL_WORLD_SIZE          defaults to TP*DP / WORLD_SIZE
+  KIMI_K3_TP_SIZE / KIMI_K3_EP_SIZE        compatibility fallbacks for TP_SIZE / EP_SIZE
 
 Model and cache (normally change these together on both roles):
   TOKENIZER_PATH                         defaults to CHECKPOINT_PATH
@@ -130,16 +131,23 @@ case "${role}" in
         ;;
 esac
 
-tp_size="${KIMI_K3_TP_SIZE:-8}"
-ep_size="${KIMI_K3_EP_SIZE:-${tp_size}}"
-[[ "${tp_size}" =~ ^[1-9][0-9]*$ && "${ep_size}" =~ ^[1-9][0-9]*$ ]] \
-    || die "KIMI_K3_TP_SIZE and KIMI_K3_EP_SIZE must be positive integers"
-# The existing MegaMoE sequence-parallel implementation requires matching groups.
-[[ "${tp_size}" == "${ep_size}" ]] || die "K3 PD MegaMoE requires TP == EP"
-decode_topology="tp${tp_size}_ep${ep_size}"
-[[ "${KIMI_K3_DECODE_TOPOLOGY:-${decode_topology}}" == "${decode_topology}" ]] \
-    || die "KIMI_K3_DECODE_TOPOLOGY disagrees with KIMI_K3_TP_SIZE/EP_SIZE"
-
+tp_size="${TP_SIZE:-${KIMI_K3_TP_SIZE:-8}}"
+dp_size="${DP_SIZE:-1}"
+ep_size="${EP_SIZE:-${KIMI_K3_EP_SIZE:-0}}"
+for topology_name in tp_size dp_size; do
+    topology_value="${!topology_name}"
+    [[ "${topology_value}" =~ ^[1-9][0-9]*$ ]] \
+        || die "${topology_name} must resolve to a positive integer, got ${topology_value}"
+done
+[[ "${ep_size}" =~ ^[0-9]+$ ]] \
+    || die "ep_size must resolve to a non-negative integer, got ${ep_size}"
+world_size="${WORLD_SIZE:-$((tp_size * dp_size))}"
+local_world_size="${LOCAL_WORLD_SIZE:-${world_size}}"
+for topology_name in world_size local_world_size; do
+    topology_value="${!topology_name}"
+    [[ "${topology_value}" =~ ^[1-9][0-9]*$ ]] \
+        || die "${topology_name} must resolve to a positive integer, got ${topology_value}"
+done
 if [[ "${role}" == "PREFILL" ]]; then
     export KIMI_K3_SHARED_EXPERT_WEIGHT_SHARD="${KIMI_K3_SHARED_EXPERT_WEIGHT_SHARD:-$((tp_size % 2 == 0))}"
     [[ "${KIMI_K3_SHARED_EXPERT_WEIGHT_SHARD}" == "0" \
@@ -248,23 +256,6 @@ max_context_batch_size="${MAX_CONTEXT_BATCH_SIZE:-1}"
 reuse_cache="${REUSE_CACHE:-0}"
 linear_step="${LINEAR_STEP:-1}"
 kimi_k3_kda_pool_blocks="${KIMI_K3_KDA_POOL_BLOCKS:-0}"
-tp_size="${TP_SIZE:-8}"
-dp_size="${DP_SIZE:-1}"
-ep_size="${EP_SIZE:-0}"
-for topology_name in tp_size dp_size; do
-    topology_value="${!topology_name}"
-    [[ "${topology_value}" =~ ^[1-9][0-9]*$ ]] \
-        || die "${topology_name} must resolve to a positive integer, got ${topology_value}"
-done
-[[ "${ep_size}" =~ ^[0-9]+$ ]] \
-    || die "ep_size must resolve to a non-negative integer, got ${ep_size}"
-world_size="${WORLD_SIZE:-$((tp_size * dp_size))}"
-local_world_size="${LOCAL_WORLD_SIZE:-${world_size}}"
-for topology_name in world_size local_world_size; do
-    topology_value="${!topology_name}"
-    [[ "${topology_value}" =~ ^[1-9][0-9]*$ ]] \
-        || die "${topology_name} must resolve to a positive integer, got ${topology_value}"
-done
 if [[ "${role}" == "PREFILL" ]]; then
     default_kv_cache_mem_mb=43000
 else
@@ -360,7 +351,7 @@ model_service_config="$(
         "${DECODE_ENDPOINT}"
 )"
 
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-$(seq -s, 0 $((tp_size - 1)))}"
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-$(seq -s, 0 $((local_world_size - 1)))}"
 export PYTHONUNBUFFERED=1
 export PYTHONFAULTHANDLER=1
 export TMPDIR="${runtime_tmpdir}"

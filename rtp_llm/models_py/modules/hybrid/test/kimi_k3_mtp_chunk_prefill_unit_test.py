@@ -140,6 +140,33 @@ class KimiK3MtpChunkPrefillUnitTest(unittest.TestCase):
             second.embedding_inputs.text_tokens_mask.tolist(), [True, False, True, True]
         )
 
+    def test_multimodal_chunk_clips_features_and_repacks_locations(self):
+        inputs = self._inputs(8, [4, 4], [5, 0])
+        a = torch.arange(20).reshape(5, 4)
+        b = torch.arange(12).reshape(3, 4) + 100
+        mm = SimpleNamespace(
+            multimodal_features=[a, b],
+            mm_features_locs_host=torch.tensor([-1, 4]),
+        )
+        plan = KimiK3ChunkRound(
+            (
+                KimiK3ChunkSlice(0, 2, 4, 5, 2, 2, 7, 9, True),
+                KimiK3ChunkSlice(1, 4, 6, 0, 0, 2, 0, 2, False),
+            )
+        )
+        chunk = build_chunk_model_inputs(
+            inputs.input_ids,
+            inputs.attention_inputs,
+            round_plan=plan,
+            multimodal_inputs=mm,
+        )
+        self.assertEqual(chunk.input_ids.tolist(), [2, 3, 4, 5])
+        self.assertEqual(chunk.multimodal_inputs.mm_features_locs_host.tolist(), [0, 2])
+        actual = chunk.multimodal_inputs.multimodal_features
+        torch.testing.assert_close(actual[0], a[3:5])
+        torch.testing.assert_close(actual[1], b[:2])
+        self.assertEqual(mm.mm_features_locs_host.tolist(), [-1, 4])
+
     def test_forward_dispatches_oversized_prefill_to_whole_chunk_path(self) -> None:
         model = self._model()
         whole_chunk = MagicMock(return_value=object())

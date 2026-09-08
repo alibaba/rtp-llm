@@ -579,6 +579,23 @@ TEST_F(MtpExecutorTest, testDeterministicDraftSamplerReportsPointMassProposal) {
     checkTensorEqual(output.all_probs, torch::tensor({{0.0f, 0.0f, 1.0f, 0.0f}}).to(torch::kCUDA));
 }
 
+TEST_F(MtpExecutorTest, testKimiMtpRestoresMediaTokensBeforeChunkLookahead) {
+    auto components = createMtpExecutorComponents(MtpExecutorTestConfig{});
+    auto& executor = *components.executor;
+    executor.kimi_k3_mtp_ = true;
+    executor.kimi_k3_media_token_id_ = 3;
+    GptModelInputs inputs;
+    inputs.combo_tokens = torch::tensor({-91, -92, 1, 2, -93, -94, -95, 0}, torch::kInt32);
+    inputs.mm_features_locs = torch::tensor({-1, 4}, torch::kInt32);
+    inputs.multimodal_features = std::vector<torch::Tensor>{torch::zeros({3, 4}), torch::zeros({3, 4})};
+    auto target_tokens = inputs.combo_tokens;
+    executor.restoreKimiMtpMediaTokens(inputs);
+    EXPECT_EQ(toVec<int32_t>(inputs.combo_tokens), (std::vector<int32_t>{3, 3, 1, 2, 3, 3, 3, 0}));
+    EXPECT_EQ(toVec<int32_t>(target_tokens), (std::vector<int32_t>{-91, -92, 1, 2, -93, -94, -95, 0}));
+    EXPECT_FALSE(inputs.multimodal_features.has_value());
+    EXPECT_FALSE(inputs.mm_features_locs.defined());
+}
+
 TEST_F(MtpExecutorTest, testMakePrefillRoundInputPacksMultiRequestRounds) {
     auto components = createMtpExecutorComponents(MtpExecutorTestConfig{});
     GptModelInputs inputs;

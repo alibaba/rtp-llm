@@ -29,6 +29,13 @@ py_test(
 )
 
 py_test(
+    name = "kimi_k3_mtp_contract_test",
+    srcs = ["kimi_k3_mtp_contract_test.py"],
+    deps = ["//rtp_llm/models_py:models", "//rtp_llm:testlib"],
+    timeout = "short",
+)
+
+py_test(
     name = "kimi_k3_ag_gemm_unit_test",
     srcs = ["kimi_k3_ag_gemm_unit_test.py"],
     deps = [
