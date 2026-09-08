@@ -1364,7 +1364,9 @@ class DeepSeekV4Model(GptModelBase):
 # signature (safe degradation; the log IS the M4 integration checklist).
 # Default off; probe-only, production paths unaffected.
 # ---------------------------------------------------------------------------
-_PREFILL_CAPTURE = os.environ.get("DSV4_PREFILL_CAPTURE", "0") == "1"
+_PREFILL_CAPTURE_RAW = os.environ.get("DSV4_PREFILL_CAPTURE", "0")
+_PREFILL_CAPTURE = _PREFILL_CAPTURE_RAW in ("1", "2")
+_PREFILL_CAPTURE_MODE2 = _PREFILL_CAPTURE_RAW == "2"
 if _PREFILL_CAPTURE and not globals().get("_PREFILL_CAPTURE_PATCHED", False):
     _PREFILL_CAPTURE_PATCHED = True
     import traceback as _tb
@@ -1406,6 +1408,21 @@ if _PREFILL_CAPTURE and not globals().get("_PREFILL_CAPTURE_PATCHED", False):
             print("[P4CAP] probe internal error (probe disabled, eager): %s" % repr(ex)[:200], flush=True)
             return _orig_forward(self, inputs, fmha_impl)
 
+    def _p4_navigate(root, path):
+        """Resolve a walk path ('inputs.a.b[i].c') on a live object tree ->
+        (parent_container, key) for the FINAL component."""
+        comps = path.replace("[", ".").replace("]", "").split(".")
+        obj = root
+        for c in comps[1:-1]:
+            obj = obj[int(c)] if c.isdigit() else getattr(obj, c)
+        last = comps[-1]
+        last = int(last) if last.isdigit() else last
+        return obj, last
+
+    def _p4_get(root, path):
+        parent, key = _p4_navigate(root, path)
+        return parent[key] if isinstance(key, int) else getattr(parent, key)
+
     def _p4_body(inputs, fmha_impl, self):
         sig, ptrs = _p4_signature(inputs)
         st = _p4_state.get("sigs", {}).get(sig)
@@ -1439,16 +1456,84 @@ if _PREFILL_CAPTURE and not globals().get("_PREFILL_CAPTURE_PATCHED", False):
                         flush=True,
                     )
             return _orig_forward(self, inputs, fmha_impl)
-        if st.get("dead") or st.get("unstable"):
+        if st.get("dead") or (st.get("unstable") and not _PREFILL_CAPTURE_MODE2):
             return _orig_forward(self, inputs, fmha_impl)
         if st.get("graph") is not None:
+            # replay with copy-in: refresh statics from THIS call's inputs
+            for path, static in st.get("statics", {}).items():
+                try:
+                    src = _p4_get(inputs, path)
+                    if src.is_cuda:
+                        static.copy_(src)
+                    parent, key = _p4_navigate(inputs, path)
+                    if isinstance(key, int):
+                        parent[key] = static
+                    else:
+                        setattr(parent, key, static)
+                except Exception as ex:  # noqa: BLE001
+                    st["dead"] = True
+                    print("[P4CAP] replay copy-in failed at %s: %s" % (path, repr(ex)[:150]), flush=True)
+                    return _orig_forward(self, inputs, fmha_impl)
+            if st.get("verify") :
+                st["verify"] = False
+                st["graph"].replay()
+                out_replay = st["out"].clone()
+                out_eager = _orig_forward(self, inputs, fmha_impl)
+                drift = (out_replay.float() - out_eager.float()).abs().max().item()
+                print("[P4CAP] in-engine replay-vs-eager max drift: %g" % drift, flush=True)
+                if drift != drift or drift > 1.0:
+                    st["dead"] = True
+                    print("[P4CAP] replay MISMATCH -> capture output unusable (missed moving tensor?)", flush=True)
+                return out_eager
             st["graph"].replay()
             return st["out"]
         if st["n"] != 3:
             return _orig_forward(self, inputs, fmha_impl)
-        # call #3: attempt capture of the full forward (output lives in the
-        # graph pool — stable across replays)
-        print("[P4CAP] call#3 ATTEMPTING capture", flush=True)
+        # call #3: capture attempt.
+        if _PREFILL_CAPTURE_MODE2:
+            # copy-in integration: allocate statics for every DEVICE tensor in
+            # the signature, substitute them into the inputs containers, then
+            # capture. Host tensors stay (consumed host-side by the builders;
+            # python does not run at replay).
+            if "statics" not in st:
+                statics = {}
+                bytes_total = 0
+                path = "?"
+                try:
+                    for path, shape, dt in st["sig"]:
+                        t_ = _p4_get(inputs, path)
+                        if not t_.is_cuda:
+                            continue
+                        static = torch.empty_like(t_)
+                        static.copy_(t_)
+                        statics[path] = static
+                        bytes_total += t_.numel() * t_.element_size()
+                    # feasibility: substitute on THIS inputs (setattr must be
+                    # accepted by the container types)
+                    for path, static in statics.items():
+                        parent, key = _p4_navigate(inputs, path)
+                        if isinstance(key, int):
+                            parent[key] = static
+                        else:
+                            setattr(parent, key, static)
+                except Exception as ex:  # noqa: BLE001
+                    st["dead"] = True
+                    print("[P4CAP] copy-in infeasible at %s: %s" % (path, repr(ex)[:200]), flush=True)
+                    return _orig_forward(self, inputs, fmha_impl)
+                st["statics"] = statics
+                print("[P4CAP] copy-in plan: %d/%d device statics (%.2f MB) substituted" % (len(statics), len(st["sig"]), bytes_total / 2**20), flush=True)
+            # refresh statics from this call's inputs + substitute
+            for path, static in st["statics"].items():
+                src = _p4_get(inputs, path)
+                static.copy_(src)
+                parent, key = _p4_navigate(inputs, path)
+                if isinstance(key, int):
+                    parent[key] = static
+                else:
+                    setattr(parent, key, static)
+            print("[P4CAP] call#3 ATTEMPTING capture (copy-in)", flush=True)
+        else:
+            print("[P4CAP] call#3 ATTEMPTING capture", flush=True)
         g = torch.cuda.CUDAGraph()
         try:
             with torch.cuda.graph(g):
@@ -1456,10 +1541,12 @@ if _PREFILL_CAPTURE and not globals().get("_PREFILL_CAPTURE_PATCHED", False):
             torch.cuda.synchronize()
             st["graph"] = g
             st["out"] = out2
+            st["verify"] = _PREFILL_CAPTURE_MODE2
             print("[P4CAP] CAPTURE OK — replaying from call#4", flush=True)
         except Exception as ex:
             st["dead"] = True
             print("[P4CAP] CAPTURE FAILED (first blocker): %s" % repr(ex)[:400], flush=True)
         return _orig_forward(self, inputs, fmha_impl)
+
     DeepSeekV4Model.forward = _capturing_forward
-    print("[P4CAP] capture probe installed (DSV4_PREFILL_CAPTURE=1)", flush=True)
+    print("[P4CAP] capture probe installed (DSV4_PREFILL_CAPTURE=%s)" % _PREFILL_CAPTURE_RAW, flush=True)
