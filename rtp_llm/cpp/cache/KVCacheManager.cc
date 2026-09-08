@@ -58,7 +58,8 @@ KVCacheManager::KVCacheManager(const CacheConfig&                 config,
     sp_config_(sp_config),
     pd_sep_config_(pd_sep_config),
     cache_store_config_(cache_store_config),
-    use_cuda_malloc_block_pool_(use_cuda_malloc_block_pool) {
+    use_cuda_malloc_block_pool_(use_cuda_malloc_block_pool),
+    cache_status_snapshot_enabled_(rtp_llm::cacheStatusSnapshotEnabled()) {
     if (config_.state_block_size_bytes > 0 || config_.swa_block_size_bytes > 0) {
         config_.fixed_pool_uses_pinned_cpu = kv_cache_config_.dsv4_fixed_pool_use_memory;
     }

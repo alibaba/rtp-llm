@@ -1019,6 +1019,8 @@ TEST_F(KVCacheManagerTest, GetKVCacheInfo_UsesSnapshotForCacheKeysWhenEnabled) {
     std::sort(first_keys.begin(), first_keys.end());
     EXPECT_EQ(first_keys, (std::vector<CacheKeyType>{10, 11}));
 
+    // An existing manager retains its startup policy after the environment changes.
+    ScopedEnvVar changed_snapshot_env("RTP_LLM_CACHE_STATUS_SNAPSHOT", "0");
     group_slots[0] = 3;
     shared_cache->put(12, group_slots, false);
 
@@ -1047,6 +1049,24 @@ TEST_F(KVCacheManagerTest, GetKVCacheInfo_UsesSnapshotForCacheKeysWhenEnabled) {
     auto current_keys = current.cached_keys;
     std::sort(current_keys.begin(), current_keys.end());
     EXPECT_EQ(current_keys, (std::vector<CacheKeyType>{10, 11, 12}));
+}
+
+TEST_F(KVCacheManagerTest, GetKVCacheInfo_DisabledSnapshotRemainsLive) {
+    ScopedEnvVar snapshot_env("RTP_LLM_CACHE_STATUS_SNAPSHOT", "0");
+    auto cache_config = makeSimpleMhaCacheConfig(1, 8, 2, rtp_llm::DataType::TYPE_INT8);
+    auto manager      = std::make_shared<KVCacheManager>(cache_config);
+    ASSERT_TRUE(manager->init());
+    auto shared_cache = manager->allocator_->sharedBlockCache();
+    ASSERT_NE(shared_cache, nullptr);
+    shared_cache->put(10, std::vector<BlockIdxType>{1}, false);
+
+    ScopedEnvVar changed_snapshot_env("RTP_LLM_CACHE_STATUS_SNAPSHOT", "1");
+    manager->refreshKVCacheInfoSnapshot();
+    shared_cache->put(11, std::vector<BlockIdxType>{2}, false);
+
+    auto keys = manager->getKVCacheInfo(/*latest_version=*/-1, /*need_cache_keys=*/true).cached_keys;
+    std::sort(keys.begin(), keys.end());
+    EXPECT_EQ(keys, (std::vector<CacheKeyType>{10, 11}));
 }
 
 TEST_F(KVCacheManagerTest, GetKVCacheInfo_UsesSmallestHybridPoolTokenCapacity) {

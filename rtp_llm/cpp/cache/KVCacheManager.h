@@ -97,6 +97,10 @@ public:
     KVCacheInfo             getKVCacheInfo(int64_t latest_version, bool need_cache_keys) const;
     void                    refreshKVCacheInfoSnapshot();
 
+    bool cacheStatusSnapshotEnabled() const {
+        return cache_status_snapshot_enabled_;
+    }
+
     // 系统资源管理
     void regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_store = nullptr);
 
@@ -158,6 +162,7 @@ private:
     const PDSepConfig                  pd_sep_config_;
     const CacheStoreConfig             cache_store_config_;
     const bool                         use_cuda_malloc_block_pool_;
+    const bool                         cache_status_snapshot_enabled_;
 
     std::shared_ptr<CPSlotMapper>                   cp_slot_mapper_;
     std::unique_ptr<PrefillCacheHitMetricsReporter> prefill_cache_hit_metrics_reporter_;
