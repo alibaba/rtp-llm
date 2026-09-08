@@ -15,6 +15,7 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 #include <algorithm>
+#include <chrono>
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 using namespace std;
 using namespace at::indexing;
@@ -406,11 +407,18 @@ absl::Status EmbeddingExecutor::process(const std::list<EmbeddingStreamPtr>& str
     auto            total_batch_size = model_request.context_batch_size;
     model_->releaseBuffers();
     model_output = std::move(model_->forward(model_input));
+    const auto result_process_start = std::chrono::steady_clock::now();
     py::gil_scoped_acquire acquire;
     // for py::list, handler should ensure object to cpu in the python impl,
     // for torch::Tensor, we manually move it to cpu during updateStreams()
     CHECK_AND_RETURN_REF(post, postProcess(model_request, model_output));
     auto res = updateStreams(post, streams, total_batch_size);
+    if (metrics_reporter_) {
+        RtpEmbeddingStageMetricsCollector collector;
+        collector.result_process_latency_us =
+            std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - result_process_start).count();
+        metrics_reporter_->report<RtpEmbeddingStageMetrics, RtpEmbeddingStageMetricsCollector>(nullptr, &collector);
+    }
     model_->releaseBuffers();
     return res;
 }
