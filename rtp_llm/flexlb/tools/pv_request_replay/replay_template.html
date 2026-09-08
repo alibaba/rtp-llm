@@ -292,14 +292,14 @@
     <section class="summary" id="summary"></section>
     <section class="replay-main">
       <details class="analysis-drawer">
-        <summary class="analysis-toggle"><span class="analysis-toggle-title">决策分析面板</span><span class="analysis-toggle-note">当前请求信息 · PV Top5 候选快照（点击收起 / 展开）</span><span class="drawer-chevron">⌄</span></summary>
+        <summary class="analysis-toggle"><span class="analysis-toggle-title">决策分析面板</span><span class="analysis-toggle-note">当前请求信息 · PV 决策候选快照（点击收起 / 展开）</span><span class="drawer-chevron">⌄</span></summary>
         <div class="analysis-grid">
           <div class="panel">
             <div class="panel-title"><span>当前请求</span><span class="small">点击请求或时间线事件</span></div>
             <div id="request-detail"></div>
           </div>
           <div class="panel">
-            <div class="panel-title"><span>候选机器对比</span><span class="small">PV 中记录的 Top5 候选快照</span></div>
+            <div class="panel-title"><span>候选机器对比</span><span class="small">PV 中记录的候选快照（含截断标记）</span></div>
             <div id="decision-microscope"></div>
           </div>
         </div>
@@ -323,7 +323,7 @@
     const nf = new Intl.NumberFormat('en-US');
     const state = { time: REPLAY.meta.start, playing: false, speed: 4, lastFrame: 0, selectedId: null, latestId: null, cacheMode: 'actual', focusedHost: 'all' };
     const requests = REPLAY.requests;
-    const maxBarWork = Math.max(1_000_000, ...requests.map((request) => Math.max(request.uncache || 0, request.selectedSnapshotUncache || 0)));
+    const maxBarWork = Math.max(1_000_000, ...requests.map((request) => Math.max(request.uncache || 0, request.effectiveUncache ?? request.selectedSnapshotUncache ?? 0)));
     const byId = new Map(requests.map((item) => [item.id, item]));
     const hosts = REPLAY.hosts;
     const derived = new Map();
@@ -333,6 +333,8 @@
     let currentActive = [];
 
     const shortId = (id) => id ? `${id.slice(0, 8)}…${id.slice(-5)}` : '—';
+    const milliseconds = (value) => value == null ? '—' : `${nf.format(value)} ms`;
+    const predictedUncache = (request) => request.snapshotStatus === 'COST_BASED' ? request.effectiveUncache : request.selectedSnapshotUncache;
     const number = (value) => value == null ? '—' : nf.format(Math.round(value));
     const pct = (value) => value == null ? '—' : `${Number(value).toFixed(2)}%`;
     const work = (value) => value == null ? '—' : value >= 1_000_000 ? `${(value / 1_000_000).toFixed(value >= 10_000_000 ? 0 : 2)}M` : value >= 1_000 ? `${(value / 1_000).toFixed(value >= 100_000 ? 0 : 1)}k` : number(value);
@@ -371,7 +373,7 @@
     }
 
     function activeWork(request, time, phase) {
-      const predicted = request.selectedSnapshotUncache ?? request.uncache ?? 0;
+      const predicted = predictedUncache(request) ?? request.uncache ?? 0;
       const actual = request.uncache ?? predicted;
       const p = lifecycle(request);
       if (phase !== 'running') {
@@ -404,7 +406,7 @@
 
     function currentCandidates() { return REPLAY.candidates[currentRequest()?.id] || []; }
 
-    function snapshotFor(host) { return currentCandidates().find((candidate) => candidate.host === host); }
+    function snapshotFor(host) { return currentCandidates().find((candidate) => candidate.host === host && candidate.role !== 'DECODE'); }
 
     function hitColor(value) {
       const ratio = Math.max(0, Math.min(100, Number(value) || 0)) / 100;
@@ -434,7 +436,7 @@
       return `<div class="tooltip-title">${shortId(request.requestId || request.id)} · ${request.host}</div>
         <div class="tooltip-grid">
           <span>路由决策时刻 <b>${timeText(request.route)}</b></span>
-          <span>预测 / 实际命中率 <b>${pct(request.predictedHitRate)} / ${pct(request.actualHitRate)}</b></span><span>预测 / 实际未命中 Token <b>${work(request.selectedSnapshotUncache)} / ${work(request.uncache)}</b></span>
+          <span>预测 / 实际命中率 <b>${pct(request.predictedHitRate)} / ${pct(request.actualHitRate)}</b></span><span>预测 / 实际未命中 Token <b>${work(predictedUncache(request))} / ${work(request.uncache)}</b></span>
           <span>路由策略 <b>${strategyLabel(request.reason)}（${request.reason || '—'}）</b></span><span>引擎首 Token 耗时 <b>${duration(request.engineTtft)}</b></span>
           <span>调度等待 <b>${duration(request.schedulerWait)}</b></span><span>执行到首 Token <b>${duration(request.runningToFirst)}</b></span>
           <span>执行步数 <b>${step ? `${step.current}/${step.total}${step.id == null ? '' : ` · #${step.id}`}` : `${number(request.stepCount)} 步`}</b></span><span>本地 HBM / 远端 KV 命中 <b>${work(request.hbmLocal)} / ${work(request.remoteKvAdded)}</b></span>
@@ -449,16 +451,27 @@
       const running = active.filter((item) => item.phase === 'running').length;
       const request = currentRequest();
       const candidates = currentCandidates();
-      const selected = candidates.find((item) => item.selected);
+      const selected = candidates.find((item) => item.selected && item.role !== 'DECODE');
       const cards = [
         ['回放时刻', timeText(state.time), `距第一条决策 ${Math.round((state.time - REPLAY.meta.start) / 1000)} 秒`],
         ['活跃 Prefill 请求', number(active.length), `尚未开始执行 ${waiting} · 执行中 ${running}`],
         ['待执行 Token', tokenWork(workSum), '活跃请求合计'],
         ['路由策略', request ? strategyLabel(request.reason) : '—', request ? `策略标识：${request.reason} · 所选机器：${request.host}` : '—'],
         ['引擎首 Token 分位', request ? (request.percentile || '—') : '—', '按本批请求的引擎首 Token 耗时排名'],
-        ['所选机器的预测首 Token 前工作量（Token）', selected ? tokenWork(selected.estimatedTtft) : '—', selected ? `候选第 ${selected.rank} 名 · 路由前排队工作 ${tokenWork(selected.queueWork)}` : '—'],
+        selected?.schema === 'routingDecisions'
+          ? ['所选机器的预测首 Token 耗时', milliseconds(selected.projectedTtftMs), `预测排空 ${milliseconds(selected.projectedDrainMs)} · pending ${number(selected.pendingRequests)}`]
+          : ['所选机器的预测首 Token 前工作量（Token）', selected ? tokenWork(selected.estimatedTtft) : '—', selected ? `候选第 ${selected.rank} 名 · 路由前排队工作 ${tokenWork(selected.queueWork)}` : '—'],
       ];
       $('#summary').innerHTML = cards.map(([label, value, note], index) => `<div class="metric ${index === 3 ? 'selection' : ''}"><div class="label">${label}</div><div class="value">${value}</div><div class="note">${note}</div></div>`).join('');
+    }
+
+    function renderCacheComparison(request) {
+      const comparison = request.cacheComparison || {};
+      const rows = [['KVCM 路由预测', comparison.kvcm], ['KVCM 本地匹配', comparison.kvcm_local],
+        ['KVCM 本地 + P2P 总匹配', comparison.kvcm_p2p_total], ['Local Standby', comparison.local_standby]];
+      return `<div class="muted">缓存对照 · 来源 ${escaped(comparison.source)} · 实际命中 ${tokenWork(request.actualHit)} · 差值 = 实际 − 预测</div>
+        <div class="kv-grid">${rows.map(([label, value]) => `<div class="kv"><div class="key">${label}</div><div class="val">${tokenWork(value?.hit)} · 差值 ${tokenWork(value?.delta)}</div></div>`).join('')}</div>
+        <div class="muted">KVCM 预测 − Local Standby 预测：${tokenWork(comparison.kvcmMinusStandby)}</div>`;
     }
 
     function renderRequestDetail() {
@@ -471,18 +484,46 @@
         <div class="request-id">${request.requestId || request.id}</div>
         <div class="kv-grid">
           <div class="kv"><div class="key">预测 / 实际命中率</div><div class="val">${pct(request.predictedHitRate)} / ${pct(request.actualHitRate)}</div></div>
-          <div class="kv"><div class="key">预测 / 实际未命中 Token</div><div class="val">${tokenWork(request.selectedSnapshotUncache)} / ${tokenWork(request.uncache)}</div></div>
+          <div class="kv"><div class="key">预测 / 实际未命中 Token</div><div class="val">${tokenWork(predictedUncache(request))} / ${tokenWork(request.uncache)}</div></div>
           <div class="kv"><div class="key">调度到开始执行</div><div class="val">${duration(request.schedulerToRunning)}</div></div>
           <div class="kv"><div class="key">开始执行到首 Token</div><div class="val">${duration(request.runningToFirst)}</div></div>
           <div class="kv"><div class="key">执行步数</div><div class="val">${step ? `${step.current} / ${step.total}` : `${number(request.stepCount)} 步`}</div></div>
           <div class="kv"><div class="key">首 Token 时刻</div><div class="val">${timeText(p.first)}</div></div>
-        </div>`;
+        </div>${renderCacheComparison(request)}`;
+    }
+
+    function escaped(value) {
+      return String(value ?? '—').replace(/[&<>"']/g, (char) => ({'&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;'}[char]));
+    }
+
+    function currentDecisionCard(candidate) {
+      const policy = candidate.policy || {};
+      const group = candidate.decisionGroup || {};
+      const decode = candidate.role === 'DECODE';
+      const metrics = decode
+        ? [['KV 已用 Token', tokenWork(candidate.usedKvTokens)], ['KV 可用 Token', tokenWork(candidate.availableKvTokens)], ['采样 logWeight', candidate.logWeight == null ? '—' : Number(candidate.logWeight).toPrecision(6)]]
+        : [['预测首 Token 耗时', milliseconds(candidate.projectedTtftMs)], ['预测排空耗时', milliseconds(candidate.projectedDrainMs)], ['本请求 Prefill 耗时', milliseconds(candidate.incomingPrefillMs)]];
+      const extra = decode ? [] : [['有效命中 Token', tokenWork(candidate.effectiveHitTokens)], ['路由匹配 Token', tokenWork(candidate.routingMatchTokens)], ['预测状态', escaped(candidate.predictionState)]];
+      const details = decode ? '' : `<div class="muted">最短 TTFT ${milliseconds(policy.minimumTtftMs)} · 选择方式 ${escaped(policy.candidateChoice)} · 缓存亲和额外耗时上限 ${milliseconds(policy.cacheAffinityMaxExtraTtftMs)} · 最低命中率 ${pct(policy.cacheAffinityMinPrefixHitPercent)}</div>`;
+      return `<div class="candidate ${candidate.selected ? 'selected' : ''}" data-candidate-host="${escaped(candidate.host)}">
+        <div class="candidate-top"><span class="host">${escaped(candidate.role)} · ${escaped(candidate.endpoint || `${candidate.host}:${candidate.port}`)}</span><span>${candidate.selected ? '✓ 最终选中' : ''}</span></div>
+        <div class="muted">${escaped(candidate.strategy)} · ${escaped(candidate.selectionReason)} · 第 ${number(candidate.routingAttempt)} 次尝试 · 候选总数 ${number(candidate.candidateWorkerCount)}${candidate.snapshotTruncated ? '（快照已截断）' : ''}</div>
+        <div class="candidate-numbers">${metrics.concat(extra).map(([key, value]) => `<span>${key}<b>${value}</b></span>`).join('')}</div>
+        <div class="muted">pending ${number(candidate.pendingRequests)} · ownership version ${number(candidate.ownershipVersion)}</div>
+        ${details}<details><summary>策略参数与拒绝统计</summary><pre>${escaped(JSON.stringify(policy, null, 2))}
+${escaped(candidate.rejections)}</pre></details>
+        ${group.id ? `<div class="muted">决策组 ${escaped(group.id)} · ${escaped(group.policy)} / ${escaped(group.dispatcher)} · 提交 ${number(group.committedSize)} 个 · ${escaped(group.reason)} · 等待 ${milliseconds(group.requestWaitMs)}</div>` : ''}
+      </div>`;
     }
 
     function renderDecisionMicroscope() {
       const request = currentRequest();
       const candidates = currentCandidates();
       if (!request || !candidates.length) { $('#decision-microscope').innerHTML = '<div class="empty">此请求没有决策候选快照。</div>'; return; }
+      if (candidates.some((candidate) => candidate.schema === 'routingDecisions')) {
+        $('#decision-microscope').innerHTML = '<div class="muted">当前策略的真实决策快照；耗时为毫秒预测，空值表示未记录。Prefill 与 Decode 分别展示。</div>' + candidates.map(currentDecisionCard).join('');
+        return;
+      }
       const maxTtft = Math.max(...candidates.map((item) => item.estimatedTtft || 0), 1);
       const text = candidates.map((candidate) => {
         const special = candidate.cacheLeader || candidate.shortest || candidate.selected;

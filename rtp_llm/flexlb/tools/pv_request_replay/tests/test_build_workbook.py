@@ -14,6 +14,7 @@ from openpyxl import load_workbook
 TOOL_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(TOOL_DIR))
 import build_workbook as workbook_module  # noqa: E402
+import build_html as html_module  # noqa: E402
 
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
@@ -103,6 +104,152 @@ def status_record(request_id: str, worker: str, request_time_ms: int) -> dict:
     }
 
 
+class CurrentRoutingDecisionTest(unittest.TestCase):
+    def test_current_candidates_keep_same_request_ids_separate_across_instances(self):
+        with tempfile.TemporaryDirectory() as directory:
+            route = route_record("same-id", epoch_ms(1, 45), "10.0.0.8")
+            del route["shortestTtftDecisions"]
+            route["routingDecisions"] = [{"role": "PREFILL", "strategy": "CostBasedPrefill", "candidates": [
+                {"endpoint": "10.0.0.8:8001@1", "selected": True, "projectedTtftMs": 20}]}]
+            source = Path(directory) / "pv.log"
+            source.write_text(pv_line("2026-08-11 01:45:00.010", route))
+            destination = Path(directory) / "analysis.xlsx"
+            workbook_module.build_workbook([workbook_module.PvSource(source, "instance-a"),
+                                            workbook_module.PvSource(source, "instance-b")], destination)
+            replay = html_module._build_replay(destination)
+            self.assertEqual(set(replay["candidates"]), {"instance-a::same-id", "instance-b::same-id"})
+            self.assertEqual([len(items) for items in replay["candidates"].values()], [1, 1])
+            candidate = replay["candidates"]["instance-a::same-id"][0]
+            self.assertEqual(candidate["endpoint"], "10.0.0.8:8001@1")
+            self.assertEqual(candidate["host"], "10.0.0.8")
+            self.assertEqual(candidate["port"], 8001)
+            self.assertEqual(candidate["engineIndex"], 1)
+
+    def test_current_and_historical_workbooks_keep_units_and_unknowns(self):
+        for mixed in (False, True):
+            with self.subTest(mixed=mixed), tempfile.TemporaryDirectory() as directory:
+                current = route_record("current", epoch_ms(1, 45), "10.0.0.8")
+                del current["shortestTtftDecisions"]
+                current["selectionReasons"] = {"PREFILL": "BEST_ONLY"}
+                current["decisionGroup"] = {"id": "group-1", "policy": "SINGLE", "committedSize": 1}
+                current["routingDecisions"] = [
+                    {"role": "PREFILL", "strategy": "CostBasedPrefill", "selectionReason": "BEST_ONLY",
+                     "selectedEndpoint": "10.0.0.8:8001", "snapshotTruncated": True,
+                     "candidateWorkerCount": 40, "prefillPolicy": {"minimumTtftMs": 12},
+                     "rejections": {"OUTLIER": 2}, "candidates": [
+                         {"endpoint": "10.0.0.8:8001", "selected": True, "projectedTtftMs": 12,
+                          "projectedDrainMs": 3, "incomingPrefillMs": 9, "effectiveHitTokens": 100,
+                          "pendingRequests": 0},
+                         {"endpoint": "10.0.0.9:8001", "selected": False,
+                          "predictionState": "UNMODELED_ENGINE_WORK"}]},
+                    {"role": "DECODE", "strategy": "CostBasedDecode", "candidates": [
+                        {"endpoint": "10.0.0.10:8001", "selected": True, "usedKvTokens": 55,
+                         "availableKvTokens": 100, "logWeight": -0.5}]}]
+                source = Path(directory) / "pv.log"
+                content = pv_line("2026-08-11 01:45:00.010", current)
+                if mixed:
+                    content += pv_line("2026-08-11 01:45:00.010",
+                                       route_record("legacy", epoch_ms(1, 45), "10.0.0.8"))
+                source.write_text(content)
+                destination = Path(directory) / "replay.xlsx"
+                workbook_module.build_workbook(source, destination)
+                workbook = load_workbook(destination, data_only=True)
+                sheet = workbook["Routing Decisions"]
+                headers = [cell.value for cell in sheet[1]]
+                records = [dict(zip(headers, values)) for values in sheet.iter_rows(min_row=2, values_only=True)]
+                self.assertEqual(len(records), 3)
+                self.assertEqual(records[0]["projectedTtftMs"], 12)
+                self.assertEqual(records[0]["pendingRequests"], 0)
+                self.assertIsNone(records[1]["projectedTtftMs"])
+                self.assertIsNone(records[1]["pendingRequests"])
+                self.assertEqual(records[2]["role"], "DECODE")
+                self.assertEqual(records[2]["usedKvTokens"], 55)
+                self.assertEqual(records[0]["policy.minimumTtftMs"], 12)
+                self.assertEqual(records[0]["decisionGroup.id"], "group-1")
+                requests = workbook["Requests"]
+                columns = [cell.value for cell in requests[1]]
+                request_rows = [dict(zip(columns, values)) for values in requests.iter_rows(min_row=2, values_only=True)]
+                row = next(item for item in request_rows if item.get("request_id") == "current")
+                self.assertEqual(row["selected projected TTFT ms"], 12)
+                self.assertIsNone(row.get("selected snapshot estimated TTFT"))
+                self.assertEqual(row["decision_snapshot_status"], "COST_BASED")
+                workbook.close()
+                output_html = Path(directory) / "replay.html"
+                summary = html_module.build_html(destination, TOOL_DIR / "replay_template.html", output_html)
+                payload = html_module._build_replay(destination)
+                current_request = next(request for request in payload["requests"] if request["requestId"] == "current")
+                candidates = payload["candidates"][current_request["id"]]
+                self.assertEqual(len(candidates), 3)
+                self.assertEqual(candidates[0]["schema"], "routingDecisions")
+                prefill = next(item for item in candidates if item["role"] == "PREFILL" and item["selected"])
+                self.assertEqual(prefill["projectedTtftMs"], 12)
+                self.assertNotIn("estimatedTtft", prefill)
+                self.assertEqual(prefill["decisionGroup"]["id"], "group-1")
+                self.assertEqual(summary["candidate_count"], 4 if mixed else 3)
+                self.assertIn("预测首 Token 耗时", output_html.read_text())
+
+
+class CacheComparisonReplayTest(unittest.TestCase):
+    def test_raw_feedback_preserves_all_predictions_and_valid_zero_through_workbook_and_html(self):
+        for source, actual, kvcm in (("KVCM", 500, True), ("LOCAL_STANDBY", 0, False)):
+            with self.subTest(source=source), tempfile.TemporaryDirectory() as directory:
+                route = route_record("feedback", epoch_ms(1, 45), "10.0.0.1")
+                cache = {"event": "cache_hit_comparison", "requestId": "feedback",
+                         "source": source, "inputTokens": 1000,
+                         "routing": {"hit": 400 if kvcm else 300}, "actual": {"hit": actual},
+                         "kvcm": {"hit": 400, "delta": 100,
+                                  "local": {"hit": 200, "delta": 300},
+                                  "p2pTotal": {"hit": 600, "delta": -100}} if kvcm else None,
+                         "localStandby": {"hit": 300, "delta": actual - 300}}
+                status = status_record("feedback", "10.0.0.1", epoch_ms(1, 45))
+                log = Path(directory) / "pv.log"
+                log.write_text("".join(pv_line("2026-08-11 01:45:02.000", item)
+                                       for item in (route, status, cache)))
+                xlsx = Path(directory) / "replay.xlsx"
+                workbook_module.build_workbook(log, xlsx)
+                workbook = load_workbook(xlsx, data_only=True)
+                sheet = workbook["Requests"]
+                headers = [cell.value for cell in sheet[1]]
+                row = next(item for item in (dict(zip(headers, values)) for values in
+                           sheet.iter_rows(min_row=2, values_only=True)) if item.get("request_id") == "feedback")
+                self.assertEqual(row["actual_hit_tokens"], actual)
+                self.assertEqual(row["local_standby_delta_tokens"], actual - 300)
+                self.assertEqual(row["kvcm_p2p_total_delta_tokens"], -100 if kvcm else None)
+                self.assertEqual(row["kvcm_minus_standby_tokens"], 100 if kvcm else None)
+                workbook.close()
+                output = Path(directory) / "replay.html"
+                html_module.build_html(xlsx, TOOL_DIR / "replay_template.html", output)
+                request = html_module._build_replay(xlsx)["requests"][0]
+                self.assertEqual(request["actualHit"], actual)
+                self.assertEqual(request["predictedHit"], 400 if kvcm else 300)
+                comparison = request["cacheComparison"]
+                self.assertEqual(comparison["source"], source)
+                self.assertEqual(comparison["kvcm_local"]["hit"], 200 if kvcm else None)
+                self.assertEqual(comparison["kvcm_p2p_total"]["hit"], 600 if kvcm else None)
+                self.assertEqual(comparison["local_standby"], {"hit": 300, "delta": actual - 300})
+                self.assertIn("renderCacheComparison", output.read_text())
+
+    def test_worker_actual_hit_survives_missing_prediction_feedback(self):
+        for valid, expected in ((True, 0), (False, None)):
+            with self.subTest(valid=valid), tempfile.TemporaryDirectory() as directory:
+                route = route_record("actual-only", epoch_ms(1, 45), "10.0.0.1")
+                status = {"event": "prefill_worker_status", "requestId": "actual-only",
+                          "prefixLengthValid": valid, "actualHitTokens": 0}
+                log = Path(directory) / "pv.log"
+                log.write_text("".join(pv_line("2026-08-11 01:45:02.000", item) for item in (route, status)))
+                xlsx = Path(directory) / "replay.xlsx"
+                workbook_module.build_workbook(log, xlsx)
+                request = html_module._build_replay(xlsx)["requests"][0]
+                self.assertEqual(request["actualHit"], expected)
+                self.assertIsNone(request["cacheComparison"]["kvcm"]["hit"])
+
+    def test_absent_feedback_keeps_predictions_and_actual_unknown(self):
+        request = html_module.compact_request({"request_id": "unknown", "route_log_time (decision)": "2026-08-11 01:45:00.000"})
+        self.assertIsNone(request["actualHit"])
+        for key in ("kvcm", "kvcm_local", "kvcm_p2p_total", "local_standby"):
+            self.assertEqual(request["cacheComparison"][key], {"hit": None, "delta": None})
+
+
 class BuildWorkbookTest(unittest.TestCase):
     def test_p95_to_p99_band_uses_bright_yellow(self) -> None:
         self.assertEqual(workbook_module.PERCENTILE_COLORS["P95-P99"], "FFFF00")
@@ -188,6 +335,7 @@ class BuildWorkbookTest(unittest.TestCase):
                     "Requests",
                     "P99 Focus",
                     "Decision Snapshot Top5",
+                    "Routing Decisions",
                     "Host Summary",
                     "Data Scope",
                 ],

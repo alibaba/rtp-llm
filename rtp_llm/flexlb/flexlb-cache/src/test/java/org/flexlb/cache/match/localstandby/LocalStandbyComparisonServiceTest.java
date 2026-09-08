@@ -58,7 +58,7 @@ class LocalStandbyComparisonServiceTest {
                 true, 4000, 8000, 10000,
                 6000, 1616);
         CacheHitComparisonResult result =
-                comparisonService.buildCacheHitComparison(feedback).get(1, TimeUnit.SECONDS);
+                comparisonService.captureComparison(feedback.requestId(), RoleType.valueOf(feedback.role())).apply(feedback).get(1, TimeUnit.SECONDS);
 
         assertEquals(4384, result.routing().hit());
         assertEquals(6000, result.actual().hit());
@@ -98,7 +98,7 @@ class LocalStandbyComparisonServiceTest {
                 false, 0, 0, 0,
                 6000, 1904);
         CacheHitComparisonResult result =
-                comparisonService.buildCacheHitComparison(feedback).get(1, TimeUnit.SECONDS);
+                comparisonService.captureComparison(feedback.requestId(), RoleType.valueOf(feedback.role())).apply(feedback).get(1, TimeUnit.SECONDS);
 
         assertEquals(6000, result.actual().hit());
         assertNotNull(result.localStandby());
@@ -134,7 +134,7 @@ class LocalStandbyComparisonServiceTest {
                 9000, 4904);
 
         CacheHitComparisonResult result =
-                comparisonService.buildCacheHitComparison(feedback).get(1, TimeUnit.SECONDS);
+                comparisonService.captureComparison(feedback.requestId(), RoleType.valueOf(feedback.role())).apply(feedback).get(1, TimeUnit.SECONDS);
 
         assertEquals("10.0.0.1:8080@1", result.worker());
         assertEquals(8192, result.localStandby().hit());
@@ -167,7 +167,7 @@ class LocalStandbyComparisonServiceTest {
                 9000, 4904);
 
         CacheHitComparisonResult result =
-                comparisonService.buildCacheHitComparison(feedback).get(1, TimeUnit.SECONDS);
+                comparisonService.captureComparison(feedback.requestId(), RoleType.valueOf(feedback.role())).apply(feedback).get(1, TimeUnit.SECONDS);
 
         assertNotNull(result.localStandby());
         assertEquals(0, result.localStandby().hit());
