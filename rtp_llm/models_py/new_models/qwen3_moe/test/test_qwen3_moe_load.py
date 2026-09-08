@@ -773,6 +773,34 @@ class MoEQuantizedDispatchTest(unittest.TestCase):
         self.assertEqual(tuple(layer._up_ch_scales.shape), (1, 1))
         self.assertEqual(tuple(layer._down_ch_scales.shape), (1, 1))
 
+    def test_fused_per_channel_fp8_scale_accepts_row_and_column_vectors(self):
+        num_experts = 2
+        intermediate_size = 4
+        values = torch.arange(
+            1,
+            num_experts * 2 * intermediate_size + 1,
+            dtype=torch.float32,
+        ).reshape(num_experts, 2 * intermediate_size)
+
+        for fused_scale in (
+            values.unsqueeze(1),
+            values.unsqueeze(-1),
+        ):
+            with self.subTest(shape=tuple(fused_scale.shape)):
+                layer = _make_experts(
+                    num_experts=num_experts,
+                    moe_intermediate_size=intermediate_size,
+                    quant_config=QuantizationConfig("fp8_per_channel"),
+                )
+                layer.load_weights({"gate_up_proj.weight_scale": fused_scale})
+
+                torch.testing.assert_close(
+                    layer._gate_ch_scales, values[:, :intermediate_size]
+                )
+                torch.testing.assert_close(
+                    layer._up_ch_scales, values[:, intermediate_size:]
+                )
+
     def test_custom_block_conversion_still_applies_ue8m0(self):
         layer = torch.nn.Module()
         layer._FP8_BLOCK_SIZE = 128
