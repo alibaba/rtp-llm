@@ -705,11 +705,28 @@ void KVCacheManager::initCacheEventPublisher() {
             return;
         }
 
-        // Tail-sparse LINEAR/SWA groups do not materialize complete reuse chains.
+        const auto group_policies = config_.groupPoliciesSnapshot();
+        // KVCM currently represents one complete prefix chain per key.  A
+        // tail-sparse reuse group is still required by local reuse, but cannot
+        // be represented in that contract; publishing only the FULL groups
+        // would advertise keys that the local cache cannot actually reuse.
+        for (const auto& policy : group_policies) {
+            if (policy.enable_prefix_reuse && policy.active_tail_blocks != 0) {
+                RTP_LLM_LOG_WARNING("KV cache event publisher disabled because tail-sparse reuse groups are unsupported");
+                return;
+            }
+        }
         const auto reuse_group_ids = allocator_->reuseParticipatingGroupIds();
         if (reuse_group_ids.empty()) {
             RTP_LLM_LOG_ERROR("KV cache event publisher disabled because no cache group participates in prefix reuse");
             return;
+        }
+        for (const auto group_id : reuse_group_ids) {
+            if (group_policies.at(static_cast<size_t>(group_id)).memory_placement
+                != CacheMemoryPlacement::DEVICE) {
+                RTP_LLM_LOG_WARNING("KV cache event publisher disabled because publishing non-DEVICE cache groups is unsupported");
+                return;
+            }
         }
 
         publisher_shared_cache_ = allocator_->sharedBlockCache();
@@ -733,8 +750,8 @@ void KVCacheManager::initCacheEventPublisher() {
         publisher_context.location_uri      = "rtp-llm://" + publisher_context.host_ip_port + "/hbm";
         publisher_context.block_size_tokens = static_cast<int32_t>(config_.seq_size_per_block);
         std::vector<int64_t> group_block_size_bytes;
-        group_block_size_bytes.reserve(static_cast<size_t>(config_.groupNums()));
-        for (size_t group_id = 0; group_id < static_cast<size_t>(config_.groupNums()); ++group_id) {
+        group_block_size_bytes.reserve(reuse_group_ids.size());
+        for (const auto group_id : reuse_group_ids) {
             group_block_size_bytes.push_back(static_cast<int64_t>(config_.blockSizeBytesForGroup(group_id)));
         }
         // Pipeline parallelism is rejected above because a unique PP owner is

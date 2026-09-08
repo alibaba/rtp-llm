@@ -501,21 +501,27 @@ public:
             state_.store(PublisherState::STOPPED, std::memory_order_relaxed);
             return;
         }
+        // Stop the heartbeat first.  HOST_DOWN must be the final request made
+        // by this publisher, so no in-flight heartbeat may outlive it.
+        const bool was_registered = registered_.load(std::memory_order_relaxed);
         stopping_.store(true, std::memory_order_relaxed);
-        if (snapshot_reporter_) {
+        queue_.stop();
+        if (heartbeat_worker_.joinable()) {
+            heartbeat_worker_.join();
+        }
+        // A separately owned snapshot request can be interrupted.  When both
+        // paths share a reporter, keep it usable for the final HOST_DOWN.
+        if (snapshot_reporter_ && snapshot_reporter_ != reporter_) {
             snapshot_reporter_->cancel();
         }
         RTP_LLM_LOG_INFO(
             "KVCMPublisher stopping; cancelling any in-flight snapshot request and waiting for the worker");
-        queue_.stop();
         if (worker_.joinable()) {
             worker_.join();
         }
-        if (reporter_ && reporter_ != snapshot_reporter_) {
-            reporter_->cancel();
-        }
-        if (heartbeat_worker_.joinable()) {
-            heartbeat_worker_.join();
+        if (was_registered && reporter_) {
+            const auto trace_id = nextTraceId("shutdown");
+            (void)post("/api/reportEvent", buildControlReport(context_, trace_id, ControlEventType::HOST_DOWN));
         }
         started_.store(false, std::memory_order_relaxed);
         stopped_permanently_ = true;
@@ -737,10 +743,6 @@ private:
                 }
             }
 
-            if (registered_.load(std::memory_order_relaxed)) {
-                const auto trace_id = nextTraceId("shutdown");
-                (void)post("/api/reportEvent", buildControlReport(context_, trace_id, ControlEventType::HOST_DOWN));
-            }
         } catch (const std::exception& e) {
             started_.store(false, std::memory_order_relaxed);
             stopping_.store(true, std::memory_order_relaxed);
