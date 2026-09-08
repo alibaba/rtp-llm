@@ -85,8 +85,8 @@ class RequestBlockHashServiceTest {
         assertEquals(List.of(99L), request.getBlockCacheKeys());
         assertEquals(4L, request.getBlockSize());
         assertNull(request.getInputIds());
-        assertEquals(12, context.getBlockHashQueueWaitTimeUs());
-        assertEquals(34, context.getBlockHashExecutionTimeUs());
+        assertEquals(12, context.getRoutingTelemetry().hashWaitUs());
+        assertEquals(34, context.getRoutingTelemetry().hashUs());
     }
 
     @Test
@@ -142,8 +142,8 @@ class RequestBlockHashServiceTest {
         assertNull(request.getLocalStandbyBlockCacheKeys());
         assertEquals(4096, request.getLocalStandbyBlockSize());
         assertNull(request.getInputIds());
-        assertEquals(12, context.getBlockHashQueueWaitTimeUs());
-        assertEquals(34, context.getBlockHashExecutionTimeUs());
+        assertEquals(12, context.getRoutingTelemetry().hashWaitUs());
+        assertEquals(34, context.getRoutingTelemetry().hashUs());
         verify(localStandbyHashService).submit(request, tokenIds, 4096, 1);
     }
 

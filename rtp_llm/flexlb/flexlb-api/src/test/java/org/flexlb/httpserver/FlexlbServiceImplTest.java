@@ -51,7 +51,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.doThrow;
-import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -154,8 +153,122 @@ class FlexlbServiceImplTest {
         assertTrue(resp.getSuccess());
         assertEquals(200, resp.getCode());
         assertPvContains("\"scheduleOrigin\":\"LOCAL_STANDALONE\"");
+        assertFalse(pvAppender.list.get(0).getFormattedMessage().contains("\"admissionRejectReason\""));
         verify(serverLatencyRecorder).recordArrival(anyLong());
         verify(serverLatencyRecorder).recordCompletion(any(BalanceContext.class), anyLong());
+    }
+
+    @Test
+    void pendingRoutePublishesResponseAndTimingsBeforePv() throws Exception {
+        CompletableFuture<Response> pending = new CompletableFuture<>();
+        when(routeService.route(any())).thenAnswer(invocation -> {
+            BalanceContext ctx = invocation.getArgument(0);
+            pending.whenComplete((value, failure) -> ctx.setResponse(value));
+            ctx.setServiceStartNanos(System.nanoTime() - 1_000_000L);
+            ctx.getRequest().clearInputIds();
+            return pending;
+        });
+        var request = FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                .setRequestId("pv-pending").setSeqLen(2).addInputIds(11).addInputIds(22)
+                .setRequestTimeMs(System.currentTimeMillis() - 100L).build();
+        StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer = mock(StreamObserver.class);
+        service.schedule(request, observer);
+        assertTrue(pvAppender.list.isEmpty());
+        var worker = new org.flexlb.dao.loadbalance.ServerStatus();
+        worker.setServerIp("10.0.0.1");
+        worker.setRole(org.flexlb.dao.route.RoleType.PREFILL);
+        Response response = new Response();
+        response.setSuccess(true);
+        response.setServerStatus(List.of(worker));
+        pending.complete(response);
+
+        assertEquals(1, pvAppender.list.size());
+        var json = new com.fasterxml.jackson.databind.ObjectMapper()
+                .readTree(pvAppender.list.getFirst().getFormattedMessage());
+        assertEquals("10.0.0.1", json.path("response").path("server_status").get(0).path("server_ip").asText());
+        assertEquals(2, json.path("inputIdsCount").asInt());
+        assertEquals(request.getSerializedSize(), json.path("requestMessageBytes").asInt());
+        assertTrue(json.path("totalUs").asLong() >= 1_000L);
+        assertTrue(json.path("arrivalMs").asLong() >= 100L);
+        assertFalse(json.has("reqParseUs"));
+        assertFalse(json.has("requestBodyBytes"));
+        assertFalse(json.has("admissionRejectReason"));
+        verify(cacheAwareService).updateFromRoutedRequest(any(), any());
+        verify(observer).onCompleted();
+    }
+
+    @Test
+    void expiredRpcWritesOneTerminalPvEvenWhenRouteCompletesLater() {
+        var timer = java.util.concurrent.Executors.newSingleThreadScheduledExecutor();
+        CompletableFuture<Response> pending = new CompletableFuture<>();
+        when(routeService.route(any())).thenReturn(pending);
+        StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer = mock(StreamObserver.class);
+        try (Context.CancellableContext inbound = Context.current().withDeadlineAfter(
+                -1L, java.util.concurrent.TimeUnit.SECONDS, timer)) {
+            inbound.run(() -> service.schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                    .setRequestId("pv-deadline").addInputIds(1).build(), observer));
+            pending.complete(new Response());
+            assertPvContains("\"requestState\":\"REQUEST_STATE_TIMED_OUT\"");
+            assertPvContains("\"success\":false");
+            assertPvContains("\"code\":" + StrategyErrorType.BATCH_SLO_EXPIRED.getErrorCode());
+            verifyNoInteractions(observer);
+            verify(requestToken, times(1)).close();
+        } finally {
+            timer.shutdownNow();
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void invalidIdentityStillWritesEntryFailurePv(boolean observerThrows) {
+        StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer = mock(StreamObserver.class);
+        RuntimeException deliveryError = new IllegalStateException("observer closed");
+        if (observerThrows) {
+            doThrow(deliveryError).when(observer).onError(any());
+        }
+        var request = FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                .addInputIds(1).addInputIds(2).setRequestTimeMs(System.currentTimeMillis() - 100).build();
+        if (observerThrows) {
+            assertEquals(deliveryError, org.junit.jupiter.api.Assertions.assertThrows(IllegalStateException.class,
+                    () -> service.schedule(request, observer)));
+        } else {
+            service.schedule(request, observer);
+        }
+        ArgumentCaptor<Throwable> error = ArgumentCaptor.forClass(Throwable.class);
+        verify(observer).onError(error.capture());
+        assertEquals(Status.Code.INVALID_ARGUMENT, Status.fromThrowable(error.getValue()).getCode());
+        assertEquals("Missing request ID", Status.fromThrowable(error.getValue()).getDescription());
+        verify(observer, never()).onNext(any());
+        verify(observer, never()).onCompleted();
+        verifyNoInteractions(activeRequestCounter, routeService, grpcForwarder);
+        verify(serverLatencyRecorder).recordArrival(anyLong());
+        ArgumentCaptor<BalanceContext> context = ArgumentCaptor.forClass(BalanceContext.class);
+        verify(serverLatencyRecorder).recordCompletion(context.capture(), anyLong());
+        assertEquals(2L, context.getValue().getInputIdsCount());
+        assertEquals((long) request.getSerializedSize(), context.getValue().getRequestMessageBytes());
+        assertTrue(context.getValue().getRequestArrivalDelayMs() >= 100);
+        assertEquals(1, pvAppender.list.size());
+        assertPvContains("\"scheduleOrigin\":\"ENTRY_ERROR\"");
+        assertPvContains("\"success\":false");
+        assertPvContains("\"code\":" + StrategyErrorType.INVALID_REQUEST.getErrorCode());
+        assertFalse(pvAppender.list.getFirst().getFormattedMessage().contains("\"requestId\""));
+    }
+
+    @Test
+    void requestInitializationFailureStillFinalizesEntryContext() {
+        when(configService.loadBalanceConfig()).thenThrow(new IllegalStateException("config unavailable"));
+        StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer = mock(StreamObserver.class);
+        service.schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                .setRequestId("entry-config-failure").addInputIds(1).build(), observer);
+        verify(observer).onCompleted();
+        verify(requestToken).close();
+        verify(serverLatencyRecorder).recordArrival(anyLong());
+        verify(serverLatencyRecorder).recordCompletion(any(BalanceContext.class), anyLong());
+        verifyNoInteractions(routeService, grpcForwarder);
+        assertEquals(1, pvAppender.list.size());
+        assertPvContains("\"requestId\":\"entry-config-failure\"");
+        assertPvContains("\"scheduleOrigin\":\"ENTRY_ERROR\"");
+        assertPvContains("\"success\":false");
     }
 
     @Test
@@ -298,7 +411,11 @@ class FlexlbServiceImplTest {
         verify(routeService).cancelRequest(
                 "12356", 0L, CancelReason.CLIENT_CANCELLED);
         verifyNoInteractions(observer);
-        verify(requestToken).close();
+        verify(requestToken, never()).close();
+        assertTrue(pvAppender.list.isEmpty());
+        ArgumentCaptor<BalanceContext> context = ArgumentCaptor.forClass(BalanceContext.class);
+        verify(routeService).route(context.capture());
+        context.getValue().recordCacheQuery("KVCM", 45);
 
         Response lateRoute = new Response();
         lateRoute.setSuccess(true);
@@ -307,30 +424,86 @@ class FlexlbServiceImplTest {
 
         verifyNoInteractions(observer);
         verify(requestToken, times(1)).close();
+        assertPvContains("\"requestState\":\"REQUEST_STATE_CANCELLED\"");
+        assertPvContains("\"success\":false");
+        assertPvContains("\"code\":8504");
+        assertPvContains("\"cacheMatchUs\":45");
+        assertEquals(1, pvAppender.list.size());
+        verify(serverLatencyRecorder, times(1)).recordCompletion(any(), anyLong());
     }
 
     @Test
-    void testSchedule_alreadyCancelledContextCannotRaceAheadOfRegistration() {
-        when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(false);
-        CompletableFuture<Response> pendingRoute = new CompletableFuture<>();
-        when(routeService.route(any(BalanceContext.class))).thenReturn(pendingRoute);
-        StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer =
-                mock(StreamObserver.class);
-        Context.CancellableContext inbound = Context.current().withCancellation();
-        inbound.cancel(null);
-
-        inbound.run(() -> service.schedule(
-                FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
-                        .setRequestId("12357")
-                        .addInputIds(1)
-                        .build(), observer));
-
-        var inOrder = inOrder(routeService);
-        inOrder.verify(routeService).route(any(BalanceContext.class));
-        inOrder.verify(routeService).cancelRequest(
-                "12357", 0L, CancelReason.CLIENT_CANCELLED);
+    void alreadyCancelledContextSkipsHashAndRoutingAndFinalizesOnce() {
+        StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer = mock(StreamObserver.class);
+        try (Context.CancellableContext inbound = Context.current().withCancellation()) {
+            inbound.cancel(null);
+            inbound.run(() -> service.schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                    .setRequestId("12357").addInputIds(1).build(), observer));
+        }
+        verify(cacheAwareService, never()).prepareBlockCacheKeys(any());
+        verify(routeService, never()).route(any());
         verifyNoInteractions(observer);
-        verify(requestToken).close();
+        verify(requestToken, times(1)).close();
+        assertEquals(1, pvAppender.list.size());
+        assertPvContains("\"requestState\":\"REQUEST_STATE_CANCELLED\"");
+    }
+
+    @Test
+    void cancellationDuringHashWaitsForHashTelemetryAndSkipsRouting() {
+        CompletableFuture<Void> hash = new CompletableFuture<>();
+        when(cacheAwareService.prepareBlockCacheKeys(any())).thenReturn(hash);
+        StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer = mock(StreamObserver.class);
+        try (Context.CancellableContext inbound = Context.current().withCancellation()) {
+            inbound.run(() -> service.schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                    .setRequestId("cancel-hash").addInputIds(1).build(), observer));
+            inbound.cancel(null);
+            assertTrue(pvAppender.list.isEmpty());
+            verify(requestToken, never()).close();
+            ArgumentCaptor<BalanceContext> context = ArgumentCaptor.forClass(BalanceContext.class);
+            verify(cacheAwareService).prepareBlockCacheKeys(context.capture());
+            context.getValue().recordBlockHashTiming(12, 34);
+            hash.complete(null);
+        }
+        verify(routeService, never()).route(any());
+        verifyNoInteractions(observer);
+        verify(requestToken, times(1)).close();
+        assertEquals(1, pvAppender.list.size());
+        assertPvContains("\"hashUs\":34");
+        assertPvContains("\"requestState\":\"REQUEST_STATE_CANCELLED\"");
+    }
+
+    @Test
+    void cancellationRacingSchedulerRegistrationIsReconciledBeforeFinalization() {
+        CompletableFuture<Response> route = new CompletableFuture<>();
+        StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer = mock(StreamObserver.class);
+        try (Context.CancellableContext inbound = Context.current().withCancellation()) {
+            when(routeService.route(any())).thenAnswer(call -> {
+                inbound.cancel(null);
+                return route;
+            });
+            inbound.run(() -> service.schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                    .setRequestId("registration-race").addInputIds(1).build(), observer));
+            verify(routeService, times(2)).cancelRequest("registration-race", 0L, CancelReason.CLIENT_CANCELLED);
+            assertTrue(pvAppender.list.isEmpty());
+            verify(requestToken, never()).close();
+            route.complete(new Response());
+        }
+        verifyNoInteractions(observer);
+        verify(requestToken, times(1)).close();
+        assertEquals(1, pvAppender.list.size());
+    }
+
+    @Test
+    void telemetryFailureStillWritesPvAndReleasesRequestToken() {
+        when(routeService.route(any())).thenReturn(CompletableFuture.completedFuture(new Response()));
+        Mockito.doThrow(new IllegalStateException("monitor unavailable")).when(serverLatencyRecorder)
+                .recordCompletion(any(), anyLong());
+        StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer = mock(StreamObserver.class);
+        service.schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                .setRequestId("monitor-failure").addInputIds(1).build(), observer);
+        verify(observer).onCompleted();
+        verify(requestToken, times(1)).close();
+        assertEquals(1, pvAppender.list.size());
     }
 
     @Test

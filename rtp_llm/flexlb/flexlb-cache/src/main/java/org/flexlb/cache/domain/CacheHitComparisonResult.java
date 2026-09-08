@@ -13,7 +13,7 @@ import org.flexlb.dao.master.WorkerIdentity;
  */
 @JsonPropertyOrder({
         "event", "requestId", "source", "role", "group", "worker", "state", "inputTokens",
-        "actual", "kvcm", "localStandby"
+        "actual", "routing", "kvcm", "localStandby"
 })
 public record CacheHitComparisonResult(
         String event,
@@ -25,7 +25,7 @@ public record CacheHitComparisonResult(
         String state,
         long inputTokens,
         Actual actual,
-        @JsonIgnore HitComparison routing,
+        HitComparison routing,
         HitComparison localStandby,
         @JsonIgnore KvcmDetails kvcmDetails) {
 

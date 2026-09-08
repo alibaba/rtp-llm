@@ -108,6 +108,31 @@ class CostBasedDecodeStrategyTest {
     }
 
     @Test
+    void pvSnapshotCapsCandidatesAtFiveAndRetainsSelectedWorker() {
+        for (int i = 1; i <= 10; i++) {
+            registerWorker("127.0.0." + i, 10_000, 9_000);
+        }
+        EndpointRegistry registry = decodeRegistry();
+        try {
+            BalanceContext context = context(100, 100L);
+            var result = availableStrategy(registry).select(context, RoleType.DECODE, null);
+            Assertions.assertEquals(PlacementResult.Status.SUCCESS, result.status());
+            try (SelectedRole selected = result.value()) {
+                var snapshot = context.getRoutingTelemetry().routingDecisions().get(RoleType.DECODE);
+                Assertions.assertEquals(5, snapshot.candidates().size());
+                Assertions.assertTrue(snapshot.snapshotTruncated());
+                Assertions.assertTrue(snapshot.candidates().getFirst().selected());
+                Assertions.assertEquals(selected.serverStatus().getServerIp() + ":8080",
+                        snapshot.candidates().getFirst().endpoint());
+                Assertions.assertEquals(5,
+                        snapshot.candidates().stream().map(candidate -> candidate.endpoint()).distinct().count());
+            }
+        } finally {
+            registry.close();
+        }
+    }
+
+    @Test
     void should_handle_empty_worker_map_when_no_workers_available() {
         EndpointRegistry emptyRegistry = StrategyTestSupport.endpointRegistry(configService);
         WorkerDirectory engineWorkerStatus = new WorkerDirectory(emptyRegistry);
@@ -149,9 +174,15 @@ class CostBasedDecodeStrategyTest {
         Mockito.when(racing.captureDecodeGeneration(stale)).thenReturn(null);
         Mockito.when(racing.captureDecodeGeneration(replacement))
                 .thenReturn(replacementPin);
+
+        BalanceContext routingContext = context(1_000, 1_001L);
         PlacementResult<SelectedRole, RoleType> result =
-                new CostBasedDecodeStrategy(racing).select(
-                        context(1_000, 1_001L), RoleType.DECODE, null);
+                new CostBasedDecodeStrategy(racing).select(routingContext, RoleType.DECODE, null);
+        var decision = routingContext.getRoutingTelemetry().routingDecisions().get(RoleType.DECODE);
+        Assertions.assertEquals("127.0.0.2:8080", decision.selectedEndpoint());
+        Assertions.assertEquals("CostBasedDecode", decision.strategy());
+        Assertions.assertNull(decision.candidates().getFirst().projectedTtftMs());
+        Assertions.assertEquals(replacement.realKvUsed(), decision.candidates().getFirst().usedKvTokens());
 
         Assertions.assertEquals(PlacementResult.Status.SUCCESS, result.status());
         SelectedRole selected = result.value();

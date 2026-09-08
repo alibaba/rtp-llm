@@ -216,8 +216,7 @@ public class EngineStatusConverter {
     /**
      * Convert protobuf task values directly into immutable observations.
      */
-    private static Map<String, TaskObservation> convertTasks(
-            List<EngineRpcService.TaskInfoPB> taskInfoPBList) {
+    private static Map<String, TaskObservation> convertTasks( List<EngineRpcService.TaskInfoPB> taskInfoPBList) {
         if (taskInfoPBList == null || taskInfoPBList.isEmpty()) {
             return Map.of();
         }
@@ -250,7 +249,22 @@ public class EngineStatusConverter {
                                 PriorityPreemptionProgress.CANCELED;
                         case PRIORITY_PREEMPTION_NONE, UNRECOGNIZED ->
                                 PriorityPreemptionProgress.NONE;
-                    });
+                    },
+                    new WorkerStatus.TaskTelemetry(task.getPrefixLengthValid(),
+                            task.getRequestReceivedTimeMs(),
+                            task.getInputQueueEnqueueTimeMs(),
+                            task.getInputQueueDrainTimeMs(),
+                            task.getWaitingEnteredTimeMs(),
+                            task.getRunningEnteredTimeMs(),
+                            task.getRemoteKvWaitMs(),
+                            task.getFirstTokenTimeMs(),
+                            task.getHbmLocalMatchTokens(),
+                            task.getRemoteKvAddedMatchTokens(),
+                            task.getFirstPrefillStepId(),
+                            task.getLastPrefillStepId(),
+                            task.getPrefillStepCount(),
+                            task.getPrefillNonfinalChunkTokensMin(),
+                            task.getPrefillNonfinalChunkTokensMax()));
             tasks.put(String.valueOf(task.getRequestId()), observation);
         }
         return Map.copyOf(tasks);

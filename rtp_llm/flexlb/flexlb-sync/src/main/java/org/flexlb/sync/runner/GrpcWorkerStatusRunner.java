@@ -147,9 +147,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
                 ? failure.getCause() : failure;
     }
 
-    private void handleStatusResponse(
-            WorkerStatus.StatusObservation observation,
-            long startTime) {
+    private void handleStatusResponse(WorkerStatus.StatusObservation observation, long startTime) {
         try {
             if (observation == null) {
                 logger.debug("query engine worker status via gRPC, response body is null");
@@ -294,6 +292,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
                     startTime,
                     ep);
 
+            reportCacheFeedback(committedObservation);
             logWorkerStatusUpdate(startTime, workerStatus);
 
         } catch (Throwable e) {
@@ -375,6 +374,27 @@ public class GrpcWorkerStatusRunner implements Runnable {
             throw error;
         }
         return new IllegalStateException("Worker status reconciliation failed", failure);
+    }
+
+    private void reportCacheFeedback(WorkerStatus.StatusObservation observation) {
+        try {
+            for (var result : cacheAwareService.observeCacheHitFeedback(workerStatus, observation)) {
+                result.whenComplete((comparison, error) -> {
+                    if (error != null || comparison == null) {
+                        logger.warn("Cache comparison failed at {}", ipPort, error);
+                        return;
+                    }
+                    try {
+                        LoggerFactory.getLogger("pvLogger").info(org.flexlb.util.JsonUtils.toStringOrEmpty(comparison));
+                        engineHealthReporter.reportCacheHitComparisonMetrics(modelName, comparison);
+                    } catch (RuntimeException failure) {
+                        logger.warn("Cache comparison telemetry failed at {}", ipPort, failure);
+                    }
+                });
+            }
+        } catch (RuntimeException failure) {
+            logger.warn("Cache feedback observation failed at {}", ipPort, failure);
+        }
     }
 
     private void reportSuccessfulStatus(

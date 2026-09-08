@@ -1245,12 +1245,19 @@ public final class WorkerBatcher {
         return deliveryStrategy.projectGroupDurationMs(items, evaluator);
     }
 
-    private void handoff(
-            DeliveryStrategy.Transaction transaction,
-            String decisionReason,
-            int remainingQueueDepth) {
+    private void handoff( DeliveryStrategy.Transaction transaction, String decisionReason, int remainingQueueDepth) {
         Throwable deliveryFailure = null;
         try {
+            String groupId = java.util.UUID.randomUUID().toString();
+            long committedAtMs = System.currentTimeMillis();
+            for (ScheduledRequest item : transaction.items()) {
+                var ctx = item.ctx();
+                ctx.setDecisionGroup(new org.flexlb.dao.pv.DecisionGroup(groupId,
+                        ctx.getConfig().decisionPolicy().getType().name(),
+                        ctx.getConfig().getDispatcher().getType().name(), item.prefillEp().getIp(),
+                        transaction.items().size(), decisionReason, committedAtMs,
+                        Math.max(0L, committedAtMs - item.enqueuedAtMs())));
+            }
             transaction.handoff(decisionReason, remainingQueueDepth);
         } catch (Throwable failure) {
             deliveryFailure = failure;

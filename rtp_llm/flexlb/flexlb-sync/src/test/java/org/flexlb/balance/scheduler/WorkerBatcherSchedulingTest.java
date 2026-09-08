@@ -152,6 +152,76 @@ class WorkerBatcherSchedulingTest {
         }
     }
 
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.CsvSource({
+            "NON_BATCH,SINGLE,1,0,single_request",
+            "BATCH,SINGLE,1,0,single_request",
+            "NON_BATCH,FIXED_WINDOW,2,60000,batch_full",
+            "BATCH,FIXED_WINDOW,2,60000,batch_full",
+            "NON_BATCH,FIXED_WINDOW,1,0,fixed_window_timeout",
+            "BATCH,FIXED_WINDOW,1,0,fixed_window_timeout"
+    })
+    void committedGroupIsVisibleBeforeDeliveryPublication(String dispatcher,
+                                                          String policy,
+                                                          int count,
+                                                          long windowMs,
+                                                          String expectedReason) throws Exception {
+        FlexlbConfig config = singleConfig();
+        if (dispatcher.equals("NON_BATCH")) {
+            config.setDispatcher(org.flexlb.config.DispatcherConfig.nonBatch());
+        }
+        if (policy.equals("FIXED_WINDOW")) {
+            var decision = SchedulingTestConfig.useFixedWindowDecision(config);
+            decision.setMaxRequests(2);
+            decision.setMaxCollectionWaitMs(windowMs);
+        }
+        PrefillEndpoint endpoint = stableEndpoint(stableStatus());
+        when(endpoint.getIp()).thenReturn("10.0.0.1");
+        when(endpoint.reservePublishedRouteCredit(org.mockito.ArgumentMatchers.any(),
+                org.mockito.ArgumentMatchers.anyLong(), org.mockito.ArgumentMatchers.anyInt()))
+                .thenAnswer(ignored -> new org.flexlb.balance.endpoint.PrefillState.ReservationResult<>(
+                        org.flexlb.balance.endpoint.PrefillState.CapacityStatus.ACQUIRED,
+                        mock(org.flexlb.balance.endpoint.PrefillState.RouteReservation.class)));
+        DeliveryStrategy delivery = mock(DeliveryStrategy.class);
+        List<org.flexlb.dao.pv.DecisionGroup> published = new CopyOnWriteArrayList<>();
+        when(delivery.prepare(org.mockito.ArgumentMatchers.anyList(), org.mockito.ArgumentMatchers.any(),
+                org.mockito.ArgumentMatchers.any())).thenAnswer(invocation -> {
+            List<ScheduledRequest> members = List.copyOf(invocation.getArgument(0));
+            var transaction = mock(DeliveryStrategy.Transaction.class);
+            when(transaction.items()).thenReturn(members);
+            org.mockito.Mockito.doAnswer(ignored -> {
+                for (ScheduledRequest member : members) {
+                    published.add(member.ctx().getDecisionGroup());
+                    member.future().complete(new Response());
+                }
+                return null;
+            }).when(transaction).handoff(org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.anyInt());
+            return transaction;
+        });
+        WorkerBatcher runtime = runningRuntime(config, endpoint, delivery);
+        List<ScheduledRequest> requests = new ArrayList<>();
+        for (int i = 0; i < count; i++) {
+            ScheduledRequest request = item(config, endpoint, 100L + i, 50, System.currentTimeMillis());
+            requests.add(request);
+            assertTrue(runtime.offer(request));
+        }
+        for (ScheduledRequest request : requests) {
+            request.future().get(5, TimeUnit.SECONDS);
+        }
+        assertEquals(count, published.size());
+        String id = published.getFirst().id();
+        assertNotNull(id);
+        for (var group : published) {
+            assertEquals(id, group.id());
+            assertEquals(count, group.committedSize());
+            assertEquals(expectedReason, group.reason());
+            assertEquals(policy, group.policy());
+            assertEquals(dispatcher, group.dispatcher());
+            assertEquals("10.0.0.1", group.worker());
+            assertTrue(group.requestWaitMs() >= 0L);
+        }
+    }
+
     private WorkerBatcher runningRuntime(
             FlexlbConfig config,
             PrefillEndpoint endpoint,

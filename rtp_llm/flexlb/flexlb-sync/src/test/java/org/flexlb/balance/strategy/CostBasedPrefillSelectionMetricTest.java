@@ -87,6 +87,30 @@ class CostBasedPrefillSelectionMetricTest {
     }
 
     @Test
+    void pvCapturesRealCacheQueryAndSelectionAcrossRetries() {
+        when(cache.findMatchingEngines(any())).thenReturn(new CacheMatchResult(
+                Map.of(), CacheMatchSource.KVCM, 37L, 100L));
+        for (int attempt = 0; attempt < 2; attempt++) {
+            try (SelectedRole selected = select()) {
+                var decision = context.getRoutingTelemetry().routingDecisions().get(RoleType.PREFILL);
+                assertEquals("CostBasedPrefill", decision.strategy());
+                assertEquals("10.0.0.1:8080@0", decision.selectedEndpoint());
+                assertEquals(1, decision.candidates().size());
+                assertTrue(decision.candidates().getFirst().selected());
+                assertEquals(selected.serverStatus().getPrefillTime(),
+                        decision.candidates().getFirst().projectedTtftMs());
+                assertEquals(decision.selectionReason(), context.getRoutingTelemetry().selectionReasons().get(RoleType.PREFILL));
+            }
+        }
+        assertEquals("KVCM", context.getRoutingTelemetry().cacheSource());
+        assertEquals(2, context.getRoutingTelemetry().cacheQueryCount());
+        assertEquals(74L, context.getRoutingTelemetry().cacheQueryUs());
+        assertEquals("10.0.0.1", context.getRoutingTelemetry().cacheSelections().get(RoleType.PREFILL).selectedIp());
+        assertEquals(1, context.getRoutingTelemetry().routingDecisions().size());
+        assertEquals(2, context.getRoutingTelemetry().routingDecisions().get(RoleType.PREFILL).routingAttempt());
+    }
+
+    @Test
     void selectionDoesNotOwnTheRequestDeadline() {
         context.setSchedulingMetadata(SchedulingMetadata.explicit(
                 50, System.currentTimeMillis() - 1L));
@@ -226,6 +250,12 @@ class CostBasedPrefillSelectionMetricTest {
         try (SelectedRole selected = select()) {
             assertEquals(cacheLeader, selected.serverStatus().getServerIp(),
                     "cache-first must inspect the complete 750-node fleet");
+            var decision = context.getRoutingTelemetry().routingDecisions().get(RoleType.PREFILL);
+            assertTrue(decision.snapshotTruncated());
+            assertEquals(5, decision.candidates().size());
+            assertEquals(5, decision.candidates().stream().map(candidate -> candidate.endpoint()).distinct().count());
+            assertEquals(cacheLeader + ":8080@0", decision.candidates().getFirst().endpoint());
+            assertTrue(decision.candidates().getFirst().selected());
         }
     }
 

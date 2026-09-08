@@ -13,6 +13,7 @@ import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.dao.pv.RoutingDecision;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.sync.status.WorkerDirectory;
 import org.flexlb.util.CommonUtils;
@@ -40,8 +41,10 @@ public class CostBasedDecodeStrategy {
         this.workerDirectory = workerDirectory;
     }
 
-    public PlacementResult<SelectedRole, RoleType> select(
-            BalanceContext balanceContext, RoleType roleType, String group) {
+    public PlacementResult<SelectedRole, RoleType> select(BalanceContext balanceContext,
+                                                          RoleType roleType,
+                                                          String group) {
+        balanceContext.beginRoutingAttempt(roleType);
         Request request = balanceContext.getRequest();
         long seqLen = request.getSeqLen();
         FlexlbConfig config = balanceContext.getConfig();
@@ -58,6 +61,7 @@ public class CostBasedDecodeStrategy {
                     workerDirectory.decodeRoutingSnapshot(group);
             int registered = snapshots.size();
             if (registered == 0) {
+                balanceContext.recordSelectionReason(roleType, "NO_REGISTERED_ENDPOINTS");
                 logNoAvailableEndpoint(
                         balanceContext, 0, Map.of("NO_REGISTERED", 1));
                 return PlacementResult.blocked(roleType);
@@ -66,12 +70,18 @@ public class CostBasedDecodeStrategy {
             captureCandidates(
                     candidates, snapshots, seqLen,
                     selector, queuePlacement, config);
+            double kvDecay = selector.getDecayPerToken();
+            double loadDecay = selector.getLoadDecayPerRequest();
             Response staticRejection = validateFleet(candidates, seqLen);
             if (staticRejection != null) {
+                recordDecision(balanceContext, roleType, group, registered, candidates, null,
+                        "FLEET_STATIC_REJECTION", kvDecay, loadDecay);
                 return PlacementResult.rejected(staticRejection);
             }
 
             if (candidates.availabilityEligible == 0) {
+                recordDecision(balanceContext, roleType, group, registered, candidates, null,
+                        "RESOURCE_UNAVAILABLE", kvDecay, loadDecay);
                 logNoAvailableEndpoint(
                         balanceContext, registered,
                         rejectionMap("RESOURCE_UNAVAILABLE",
@@ -80,13 +90,13 @@ public class CostBasedDecodeStrategy {
             }
 
             if (candidates.isEmpty()) {
+                recordDecision(balanceContext, roleType, group, registered, candidates, null,
+                        "NO_AVAILABLE_CANDIDATES", kvDecay, loadDecay);
                 logAllFilteredOut(
                         balanceContext,
                         candidates);
                 return PlacementResult.blocked(roleType);
             }
-            double kvDecay = selector.getDecayPerToken();
-            double loadDecay = selector.getLoadDecayPerRequest();
             if (queuePlacement) {
                 preferImmediatelyDispatchable(
                         candidates, balanceContext, kvDecay, loadDecay);
@@ -94,6 +104,8 @@ public class CostBasedDecodeStrategy {
             DecodeRoutingView selected = weightedRandomSelection(
                     candidates, kvDecay, loadDecay);
             if (selected == null) {
+                recordDecision(balanceContext, roleType, group, registered, candidates, null,
+                        "NO_SELECTED_CANDIDATE", kvDecay, loadDecay);
                 logAllFilteredOut(balanceContext, candidates);
                 return PlacementResult.blocked(roleType);
             }
@@ -101,9 +113,14 @@ public class CostBasedDecodeStrategy {
             WorkerEndpoint.GenerationPin pin =
                     workerDirectory.captureDecodeGeneration(selected);
             if (pin != null) {
+                recordDecision(balanceContext, roleType, group, registered, candidates, selected,
+                        queuePlacement ? "DECODE_DISPATCHABILITY_WEIGHTED_COST" : "DECODE_WEIGHTED_COST",
+                        kvDecay, loadDecay);
                 return PlacementResult.success(buildSelectedRole(
                         selected, pin, roleType, balanceContext));
             }
+            recordDecision(balanceContext, roleType, group, registered, candidates, null,
+                    "ENDPOINT_GENERATION_CHANGED", kvDecay, loadDecay);
         }
 
         Logger.debug(
@@ -111,6 +128,43 @@ public class CostBasedDecodeStrategy {
                     + " request_id={}",
                 balanceContext.getRequestId());
         return PlacementResult.blocked(roleType);
+    }
+
+    private void recordDecision(BalanceContext context,
+                                RoleType role,
+                                String group,
+                                int registered,
+                                CandidateBuffer candidates,
+                                DecodeRoutingView selected,
+                                String reason,
+                                double kvDecay,
+                                double loadDecay) {
+        List<RoutingDecision.Candidate> snapshot = new java.util.ArrayList<>();
+        if (selected != null) {
+            snapshot.add(snapshotCandidate(selected, true, kvDecay, loadDecay));
+        }
+        for (int i = 0; i < candidates.size && snapshot.size() < 5; i++) {
+            if (candidates.values[i] != selected) {
+                snapshot.add(snapshotCandidate(candidates.values[i], false, kvDecay, loadDecay));
+            }
+        }
+        context.recordRoutingDecision(new RoutingDecision(role, group, "CostBasedDecode", reason,
+                System.currentTimeMillis(), context.routingAttempt(role),
+                selected == null ? null : selected.address(), registered, candidates.size,
+                candidates.size > snapshot.size(), Map.of(
+                        "RESOURCE_UNAVAILABLE", candidates.availabilityRejected,
+                        "CAPACITY", candidates.capacityRejected,
+                        "HOTSPOT", candidates.hotspotRejected,
+                        "IMBALANCE", candidates.imbalanceRejected), snapshot, null));
+    }
+
+    private RoutingDecision.Candidate snapshotCandidate(DecodeRoutingView candidate,
+                                                        boolean selected,
+                                                        double kvDecay,
+                                                        double loadDecay) {
+        return new RoutingDecision.Candidate(candidate.address(), selected, null, null, null, null, null,
+                candidate.totalLoad(), candidate.realKvUsed(), candidate.realKvAvailable(),
+                rawLogWeight(candidate, kvDecay, loadDecay), null, null);
     }
 
     private Response validateFleet(

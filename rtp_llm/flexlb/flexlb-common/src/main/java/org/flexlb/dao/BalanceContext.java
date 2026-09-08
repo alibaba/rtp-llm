@@ -1,17 +1,21 @@
 package org.flexlb.dao;
 
 import com.google.protobuf.ByteString;
+import lombok.AccessLevel;
 import lombok.Data;
+import lombok.Getter;
+import lombok.Setter;
 import lombok.ToString;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
-import org.flexlb.dao.pv.ShortestTtftDecision;
+import org.flexlb.dao.pv.DecisionGroup;
+import org.flexlb.dao.pv.RoutingDecision;
 import org.flexlb.dao.route.RoleType;
 
-import java.util.Collections;
 import java.util.EnumMap;
 import java.util.Map;
+import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 
 /**
@@ -47,33 +51,26 @@ public class BalanceContext {
 
     private long totalTimeUs;
 
-    private long requestArrivalDelayMs;
+    private Long requestArrivalDelayMs;
 
-    private long requestBodyReadAndDeserializeTimeUs;
+    private Long requestBodyReadAndDeserializeTimeUs;
 
-    /** Null when the HTTP body has not been decoded or omitted input_ids. */
+    /** Number of input IDs on the incoming request, before hash preparation releases them. */
     private Long inputIdsCount;
 
     /** Null when the request body did not declare a Content-Length. */
     private Long requestBodyBytes;
 
-    private long blockHashQueueWaitTimeUs;
+    /** Serialized protobuf message size, excluding gRPC framing and compression. */
+    private Long requestMessageBytes;
 
-    private long blockHashExecutionTimeUs;
+    /** Per-request accumulator written by sequential processing stages and read after their completion. */
+    @Getter(AccessLevel.NONE)
+    @Setter(AccessLevel.NONE)
+    @ToString.Exclude
+    private final RoutingTelemetryState routingTelemetryState = new RoutingTelemetryState();
 
-    private long cacheMatchQueryTimeUs;
-
-    private int cacheMatchQueryCount;
-
-    private String cacheMatchSource;
-
-    private final Map<RoleType, CacheMatchSelection> cacheMatchSelectionByRole =
-            new EnumMap<>(RoleType.class);
-
-    private final Map<RoleType, String> selectionReasonByRole =
-            new EnumMap<>(RoleType.class);
-
-    private Map<RoleType, ShortestTtftDecision> shortestTtftDecisionByRole;
+    private volatile DecisionGroup decisionGroup;
 
     /**
      * Timestamp (ms) when the request entered the gRPC server pipeline,
@@ -144,7 +141,7 @@ public class BalanceContext {
     public int getPriority() {
         return schedulingMetadata != null
                 ? schedulingMetadata.priority()
-                : request.getPriority();
+                : request == null ? 50 : request.getPriority();
     }
 
     /**
@@ -170,7 +167,7 @@ public class BalanceContext {
         return schedulingMetadata;
     }
 
-    public void recordRequestTiming(long requestTimeMs, long bodyReadAndDeserializeTimeUs) {
+    public void recordRequestTiming(long requestTimeMs, Long bodyReadAndDeserializeTimeUs) {
         if (requestTimeMs > 0) {
             this.requestArrivalDelayMs = startTime - requestTimeMs;
         }
@@ -182,38 +179,85 @@ public class BalanceContext {
     }
 
     public void recordBlockHashTiming(long queueWaitTimeUs, long executionTimeUs) {
-        this.blockHashQueueWaitTimeUs = queueWaitTimeUs;
-        this.blockHashExecutionTimeUs = executionTimeUs;
+        routingTelemetryState.hashWaitUs = queueWaitTimeUs;
+        routingTelemetryState.hashUs = executionTimeUs;
     }
 
-    public void recordCacheMatch(
-            String source,
-            long queryTimeUs,
-            RoleType role,
-            String selectedIp,
-            long hitCacheTokens) {
-        this.cacheMatchSource = source;
-        this.cacheMatchQueryTimeUs += queryTimeUs;
-        this.cacheMatchQueryCount++;
-        this.cacheMatchSelectionByRole.put(
-                role, new CacheMatchSelection(role, selectedIp, hitCacheTokens));
+    public void recordCacheQuery(String source, long queryTimeUs) {
+        routingTelemetryState.cacheSource = source;
+        routingTelemetryState.cacheQueryUs += Math.max(0L, queryTimeUs);
+        routingTelemetryState.cacheQueryCount++;
     }
 
-    public void recordShortestTtftDecision(ShortestTtftDecision decision) {
-        if (this.shortestTtftDecisionByRole == null) {
-            this.shortestTtftDecisionByRole = new EnumMap<>(RoleType.class);
-        }
-        this.shortestTtftDecisionByRole.put(decision.role(), decision);
+    public void recordCacheSelection(RoleType role, String selectedIp, long hitCacheTokens) {
+        CacheMatchSelection selection = new CacheMatchSelection(role, selectedIp, hitCacheTokens);
+        routingTelemetryState.cacheSelections.put(role, selection);
+    }
+
+    public void beginRoutingAttempt(RoleType role) {
+        routingTelemetryState.routingAttempts.merge(role, 1, Integer::sum);
+        routingTelemetryState.cacheSelections.remove(role);
+        routingTelemetryState.selectionReasons.remove(role);
+        routingTelemetryState.routingDecisions.remove(role);
+    }
+
+    public void recordRoutingDecision(RoutingDecision decision) {
+        Objects.requireNonNull(decision.role(), "role");
+        Objects.requireNonNull(decision.selectionReason(), "selectionReason");
+        routingTelemetryState.selectionReasons.put(decision.role(), decision.selectionReason());
+        routingTelemetryState.routingDecisions.put(decision.role(), decision);
     }
 
     public void recordSelectionReason(RoleType role, String selectionReason) {
-        this.selectionReasonByRole.put(role, selectionReason);
+        Objects.requireNonNull(selectionReason, "selectionReason");
+        routingTelemetryState.selectionReasons.put(role, selectionReason);
     }
 
-    public Map<RoleType, ShortestTtftDecision> getShortestTtftDecisionByRole() {
-        return this.shortestTtftDecisionByRole == null
-                ? Collections.emptyMap()
-                : Collections.unmodifiableMap(this.shortestTtftDecisionByRole);
+    public int routingAttempt(RoleType role) {
+        return routingTelemetryState.routingAttempts.getOrDefault(role, 0);
+    }
+
+    public String selectionReason(RoleType role) {
+        return routingTelemetryState.selectionReasons.get(role);
+    }
+
+    /** Copies an immutable view after processing has settled; callers must not race an active writer. */
+    public RoutingTelemetry getRoutingTelemetry() {
+        return new RoutingTelemetry(routingTelemetryState.hashWaitUs, routingTelemetryState.hashUs,
+                routingTelemetryState.cacheSource, routingTelemetryState.cacheQueryUs,
+                routingTelemetryState.cacheQueryCount, routingTelemetryState.cacheSelections,
+                routingTelemetryState.selectionReasons, routingTelemetryState.routingDecisions,
+                routingTelemetryState.routingAttempts);
+    }
+
+    private static final class RoutingTelemetryState {
+        private long hashWaitUs;
+        private long hashUs;
+        private String cacheSource;
+        private long cacheQueryUs;
+        private int cacheQueryCount;
+        private final EnumMap<RoleType, CacheMatchSelection> cacheSelections = new EnumMap<>(RoleType.class);
+        private final EnumMap<RoleType, String> selectionReasons = new EnumMap<>(RoleType.class);
+        private final EnumMap<RoleType, RoutingDecision> routingDecisions = new EnumMap<>(RoleType.class);
+        private final EnumMap<RoleType, Integer> routingAttempts = new EnumMap<>(RoleType.class);
+    }
+
+    /** Each terminal snapshot is immutable and can be retained independently of the request context. */
+    public record RoutingTelemetry(long hashWaitUs,
+                                   long hashUs,
+                                   String cacheSource,
+                                   long cacheQueryUs,
+                                   int cacheQueryCount,
+                                   Map<RoleType, CacheMatchSelection> cacheSelections,
+                                   Map<RoleType, String> selectionReasons,
+                                   Map<RoleType, RoutingDecision> routingDecisions,
+                                   Map<RoleType, Integer> routingAttempts) {
+        public RoutingTelemetry {
+            cacheSelections = Map.copyOf(cacheSelections);
+            selectionReasons = Map.copyOf(selectionReasons);
+            routingDecisions = Map.copyOf(routingDecisions);
+            routingAttempts = Map.copyOf(routingAttempts);
+        }
     }
 
     public record CacheMatchSelection(RoleType role, String selectedIp, long hitCacheTokens) {

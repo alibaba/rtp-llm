@@ -180,6 +180,7 @@ class RequestAdmissionResourceLeakTest {
     void deferredCancellationReleasesGuardWhenAdmissionMutationCloses() {
         Registered registered = registerItem(201L);
         CompletableFuture<Response> future = registered.future();
+        var finalPv = future.thenApply(response -> new org.flexlb.dao.pv.PvLogData(registered.item().ctx()));
         AdmissionMutation admission =
                 lifecycle.claimAdmissionMutation("201", future);
         assertNotNull(admission);
@@ -197,11 +198,16 @@ class RequestAdmissionResourceLeakTest {
         assertEquals(1, lifecycle.decodeAcceptanceCount(),
                 "the open admission mutation still owns terminal cleanup");
 
+        org.junit.jupiter.api.Assertions.assertFalse(future.isDone(),
+                "a cancellation cannot publish completion while routing still owns telemetry writes");
+        registered.item().ctx().recordCacheQuery("KVCM", 45);
         admission.close();
 
         assertEquals(0, lifecycle.decodeAcceptanceCount());
         assertEquals(StrategyErrorType.REQUEST_CANCELLED.getErrorCode(),
                 future.join().getCode());
+        assertEquals(45, finalPv.join().getCacheMatchUs());
+        assertEquals(1, finalPv.join().getCacheMatchCount());
     }
 
     @Test

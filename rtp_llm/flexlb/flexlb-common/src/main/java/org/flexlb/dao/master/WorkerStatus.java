@@ -67,21 +67,21 @@ public class WorkerStatus {
     }
 
     /** Deeply immutable copy of the task fields reported by one status RPC. */
-    public record TaskObservation(
-            String requestId,
-            long prefixLength,
-            long prefillTime,
-            long inputLength,
-            long waitingTime,
-            long iterateCount,
-            long endTimeMs,
-            long dpRank,
-            long errorCode,
-            String errorMessage,
-            long batchId,
-            TaskPhase phase,
-            long executionTimeMs,
-            PriorityPreemptionProgress priorityPreemptionProgress) {
+    public record TaskObservation(String requestId,
+                                  long prefixLength,
+                                  long prefillTime,
+                                  long inputLength,
+                                  long waitingTime,
+                                  long iterateCount,
+                                  long endTimeMs,
+                                  long dpRank,
+                                  long errorCode,
+                                  String errorMessage,
+                                  long batchId,
+                                  TaskPhase phase,
+                                  long executionTimeMs,
+                                  PriorityPreemptionProgress priorityPreemptionProgress,
+                                  TaskTelemetry telemetry) {
 
         private static TaskObservation copyOf(TaskInfo task) {
             return new TaskObservation(
@@ -98,8 +98,41 @@ public class WorkerStatus {
                     task.getBatchId(),
                     task.getPhase(),
                     task.getExecutionTimeMs(),
-                    task.getPriorityPreemptionProgress());
+                    task.getPriorityPreemptionProgress(),
+                    new TaskTelemetry(task.isPrefixLengthValid(),
+                            task.getRequestReceivedTimeMs(),
+                            task.getInputQueueEnqueueTimeMs(),
+                            task.getInputQueueDrainTimeMs(),
+                            task.getWaitingEnteredTimeMs(),
+                            task.getRunningEnteredTimeMs(),
+                            task.getRemoteKvWaitMs(),
+                            task.getFirstTokenTimeMs(),
+                            task.getHbmLocalMatchTokens(),
+                            task.getRemoteKvAddedMatchTokens(),
+                            task.getFirstPrefillStepId(),
+                            task.getLastPrefillStepId(),
+                            task.getPrefillStepCount(),
+                            task.getPrefillNonfinalChunkTokensMin(),
+                            task.getPrefillNonfinalChunkTokensMax()));
         }
+    }
+
+    /** Immutable request telemetry retained from the Engine status RPC. */
+    public record TaskTelemetry(boolean prefixLengthValid,
+                                long requestReceivedTimeMs,
+                                long inputQueueEnqueueTimeMs,
+                                long inputQueueDrainTimeMs,
+                                long waitingEnteredTimeMs,
+                                long runningEnteredTimeMs,
+                                long remoteKvWaitMs,
+                                long firstTokenTimeMs,
+                                long hbmLocalMatchTokens,
+                                long remoteKvAddedMatchTokens,
+                                long firstPrefillStepId,
+                                long lastPrefillStepId,
+                                long prefillStepCount,
+                                long prefillNonfinalChunkTokensMin,
+                                long prefillNonfinalChunkTokensMax) {
     }
 
     /**

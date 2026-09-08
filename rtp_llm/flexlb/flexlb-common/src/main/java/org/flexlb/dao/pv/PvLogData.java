@@ -25,6 +25,7 @@ public class PvLogData {
     private Long requestBodyBytes;
     @JsonInclude(JsonInclude.Include.NON_NULL)
     private Long requestTimeMs;
+    private Long requestMessageBytes;
 
     // Historical scheduling fields retained for downstream compatibility.
     private Response response;
@@ -44,8 +45,11 @@ public class PvLogData {
 
     // Request-path observability added by the routing observability batch.
     private long totalUs;
-    private long arrivalMs;
-    private long reqParseUs;
+    private Long arrivalMs;
+    private Long reqParseUs;
+    private DecisionGroup decisionGroup;
+    @JsonInclude(JsonInclude.Include.NON_EMPTY)
+    private List<RoutingDecision> routingDecisions;
     private long hashWaitUs;
     private long hashUs;
     private String cacheMatchSource;
@@ -55,8 +59,6 @@ public class PvLogData {
     private List<BalanceContext.CacheMatchSelection> cacheMatchSelections;
     @JsonInclude(JsonInclude.Include.NON_EMPTY)
     private Map<RoleType, String> selectionReasons;
-    @JsonInclude(JsonInclude.Include.NON_EMPTY)
-    private List<ShortestTtftDecision> shortestTtftDecisions;
 
     public PvLogData(BalanceContext ctx) {
         populateCommonFields(ctx);
@@ -83,6 +85,7 @@ public class PvLogData {
     }
 
     private void populateCommonFields(BalanceContext ctx) {
+        BalanceContext.RoutingTelemetry telemetry = ctx.getRoutingTelemetry();
         Request request = ctx.getRequest();
         if (request != null) {
             this.requestId = request.getRequestId();
@@ -91,6 +94,10 @@ public class PvLogData {
         }
         this.inputIdsCount = ctx.getInputIdsCount();
         this.requestBodyBytes = ctx.getRequestBodyBytes();
+        this.requestMessageBytes = ctx.getRequestMessageBytes();
+        this.decisionGroup = ctx.getDecisionGroup();
+        this.routingDecisions = telemetry.routingDecisions().entrySet().stream()
+                .sorted(Map.Entry.comparingByKey()).map(Map.Entry::getValue).toList();
         this.response = ctx.getResponse();
         this.error = ctx.getErrorMessage();
         this.success = ctx.isSuccess();
@@ -99,17 +106,15 @@ public class PvLogData {
         this.totalUs = ctx.getTotalTimeUs();
         this.arrivalMs = ctx.getRequestArrivalDelayMs();
         this.reqParseUs = ctx.getRequestBodyReadAndDeserializeTimeUs();
-        this.hashWaitUs = ctx.getBlockHashQueueWaitTimeUs();
-        this.hashUs = ctx.getBlockHashExecutionTimeUs();
-        this.cacheMatchSource = ctx.getCacheMatchSource();
-        this.cacheMatchUs = ctx.getCacheMatchQueryTimeUs();
-        this.cacheMatchCount = ctx.getCacheMatchQueryCount();
+        this.hashWaitUs = telemetry.hashWaitUs();
+        this.hashUs = telemetry.hashUs();
+        this.cacheMatchSource = telemetry.cacheSource();
+        this.cacheMatchUs = telemetry.cacheQueryUs();
+        this.cacheMatchCount = telemetry.cacheQueryCount();
         this.cacheMatchSelections =
-                List.copyOf(ctx.getCacheMatchSelectionByRole().values());
-        this.selectionReasons = Map.copyOf(ctx.getSelectionReasonByRole());
-        if (!ctx.getShortestTtftDecisionByRole().isEmpty()) {
-            this.shortestTtftDecisions =
-                    List.copyOf(ctx.getShortestTtftDecisionByRole().values());
-        }
+                telemetry.cacheSelections().entrySet().stream()
+                        .sorted(Map.Entry.comparingByKey()).map(Map.Entry::getValue).toList();
+        this.selectionReasons = Map.copyOf(telemetry.selectionReasons());
+
     }
 }
