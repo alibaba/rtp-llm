@@ -109,3 +109,10 @@ index 6ac5d7b8..840186ef 100644
 +    std::map<std::string, std::string> output_override_tags_;
 +
  private:
+diff --git aios/kmonitor/cpp_client/src/kmonitor/client/core/MetricsConfig.cpp aios/kmonitor/cpp_client/src/kmonitor/client/core/MetricsConfig.cpp
+--- aios/kmonitor/cpp_client/src/kmonitor/client/core/MetricsConfig.cpp
++++ aios/kmonitor/cpp_client/src/kmonitor/client/core/MetricsConfig.cpp
+@@ -76,2 +76,3 @@ MetricsConfig &MetricsConfig::operator=(const MetricsConfig &config) {
+         use_common_tag_ = config.use_common_tag();
++        common_tags_ = config.CommonTags();
+     }

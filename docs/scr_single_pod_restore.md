@@ -74,6 +74,15 @@ helpers with an older loaded native library rejects checkpoint participation
 rather than silently retaining sockets. Ordinary serving without SCR keeps the
 original eager reporting behavior.
 
+CRIU can preserve `RequestedIP` from the seed even when the new Pod's hostname
+resolves to its new IP. Before native reporting resumes, the SCR helper resolves
+that hostname and refreshes `RequestedIP` in the process environment. If resolution
+fails, it logs the failure and leaves the existing value in place; that case still
+needs explicit monitoring validation. Rebuilding the native configuration also
+replaces its common tag map: otherwise the insert-only `host` tag would retain the
+seed value despite rerunning hostname resolution. Fresh-image acceptance checks
+both `container_ip` and `host` on actual emitted native records.
+
 CPU validation covers deferred Python transport activation, real TCP
 closure/reconnection, refreshed runtime identity, and native metric registration
 retention across sink replacement. Full acceptance must additionally verify

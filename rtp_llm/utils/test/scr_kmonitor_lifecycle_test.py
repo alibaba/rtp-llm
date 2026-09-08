@@ -17,6 +17,43 @@ reporters = importlib.import_module(
 
 
 class ScrKmonitorLifecycleTest(unittest.TestCase):
+    def test_native_resume_sees_resolved_ip_with_stale_seed_environment(self):
+        observed = []
+        native = SimpleNamespace(
+            resume_kmonitor_after_scr=lambda: observed.append(
+                os.getenv("RequestedIP")
+            ) or True
+        )
+        with mock.patch.dict(
+            os.environ,
+            {"HIPPO_ROLE": "rtp_role", "RequestedIP": "10.1.0.1"},
+        ), mock.patch.object(
+            socket, "gethostname", return_value="restored-pod"
+        ), mock.patch.object(
+            socket, "gethostbyname", return_value="10.1.0.2"
+        ) as resolve:
+            hook = scr._NativeKmonitorTemplateHook()
+            hook._paused = True
+            with mock.patch.dict(sys.modules, {"libth_transformer": native}):
+                hook.release_template("restored-generation")
+            resolve.assert_called_once_with("restored-pod")
+            self.assertEqual(observed, ["10.1.0.2"])
+
+    def test_native_resume_still_runs_if_hostname_resolution_fails(self):
+        native = SimpleNamespace(resume_kmonitor_after_scr=mock.Mock(return_value=True))
+        with mock.patch.dict(
+            os.environ,
+            {"HIPPO_ROLE": "rtp_role", "RequestedIP": "10.1.0.1"},
+        ), mock.patch.object(
+            socket, "gethostbyname", side_effect=OSError("resolution failed")
+        ):
+            hook = scr._NativeKmonitorTemplateHook()
+            hook._paused = True
+            with mock.patch.dict(sys.modules, {"libth_transformer": native}):
+                hook.release_template("restored-generation")
+            self.assertEqual(os.getenv("RequestedIP"), "10.1.0.1")
+        native.resume_kmonitor_after_scr.assert_called_once_with()
+
     def test_non_scr_hippo_transport_still_starts_eagerly(self):
         with mock.patch.object(
             reporters.HippoHelper, "is_hippo_env", return_value=True

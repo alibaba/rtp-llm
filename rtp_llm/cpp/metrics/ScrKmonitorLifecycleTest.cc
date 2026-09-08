@@ -60,6 +60,19 @@ TEST_F(ScrKmonitorLifecycleTest, InactiveFactoryStaysInactive) {
     EXPECT_FALSE(kmonitor::KMonitorFactory::IsStarted());
 }
 
+TEST_F(ScrKmonitorLifecycleTest, RebuiltConfigurationDiscardsSeedCommonTags) {
+    kmonitor::MetricsConfig seedConfig;
+    seedConfig.AddCommonTag("host", "10.1.0.1");
+    seedConfig.AddCommonTag("hippo_app", "seed_app");
+    kmonitor::MetricsConfig resumedConfig;
+    seedConfig = resumedConfig;
+    // addCommonTags uses emplace: a seed entry must be removed before a fresh
+    // runtime identity can be inserted into the rebuilt factory config.
+    seedConfig.AddCommonTag("host", "10.1.0.2");
+    EXPECT_EQ(seedConfig.CommonTags().at("host"), "10.1.0.2");
+    EXPECT_EQ(seedConfig.CommonTags().count("hippo_app"), 0);
+}
+
 TEST_F(ScrKmonitorLifecycleTest, RetainsRegisteredMetricsAndReleasesOldSink) {
     kmonitor::MetricsConfig config;
     config.set_inited(true);
