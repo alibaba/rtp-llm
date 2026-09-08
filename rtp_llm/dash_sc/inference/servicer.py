@@ -325,6 +325,11 @@ def _dash_error_mapping_for_ft_exception(
     )
     if typed_mapping is not None:
         return typed_mapping
+    if exception_type == ExceptionType.GRAMMAR_COMPILE_OVERLOADED:
+        return _DashFtErrorMapping(
+            DASH_ERROR_ADMISSION_OVERLOADED,
+            "Too many requests.",
+        )
 
     return _DashFtErrorMapping(
         _DASH_ERROR_SPEC_BY_EXCEPTION_CATEGORY[exception_type.category]

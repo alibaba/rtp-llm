@@ -159,6 +159,10 @@ class DashErrorSpecForFtExceptionTest(unittest.TestCase):
             (ExceptionType.LONG_PROMPT_ERROR, DASH_ERROR_TOO_LONG),
             (ExceptionType.UNSUPPORTED_OPERATION, DASH_ERROR_UNSUPPORTED),
             (ExceptionType.MASTER_NO_AVAILABLE_WORKER, DASH_ERROR_CAPACITY),
+            (
+                ExceptionType.GRAMMAR_COMPILE_OVERLOADED,
+                DASH_ERROR_ADMISSION_OVERLOADED,
+            ),
             (ExceptionType.GENERATE_TIMEOUT, DASH_ERROR_TIMEOUT),
             (ExceptionType.OUT_OF_VOCAB_RANGE, DASH_ERROR_INVALID_OUTPUT),
             (ExceptionType.CANCELLED_ERROR, DASH_ERROR_ABORT),
