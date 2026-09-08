@@ -1562,54 +1562,69 @@ TEST_F(KVCacheManagerTest, MultiRankZeroRejectsMismatchedBroadcastAddressCount) 
     EXPECT_FALSE(manager->init());
 }
 
-TEST_F(KVCacheManagerTest, GetKVCacheInfoUsesAuthoritativeBlockTreeSnapshot) {
-    auto          cache_config = makeSimpleMhaCacheConfig(1, 8, 2, rtp_llm::DataType::TYPE_INT8);
+TEST_F(KVCacheManagerTest, GetKVCacheInfoReturnsAllKeysBeyondTenThousand) {
+    ScopedEnvVar  snapshot_env("RTP_LLM_CACHE_STATUS_SNAPSHOT", "0");
+    constexpr int kKeyCount = 10001;
+    constexpr int kSeqLen   = kKeyCount * 2;
+    CacheConfig   cache_config = makeSimpleMhaCacheConfig(1, kKeyCount + 4, 2, rtp_llm::DataType::TYPE_INT8);
     KVCacheConfig kv_cache_config;
-    kv_cache_config.reuse_cache = true;
+    kv_cache_config.reuse_cache         = true;
+    kv_cache_config.reserve_block_ratio = 0;
+    // Keep every inserted key available throughout the snapshot assertions.
+    kv_cache_config.block_tree_device_evict_low_watermark_ratio  = 0.0;
+    kv_cache_config.block_tree_device_evict_high_watermark_ratio = 0.0;
 
     auto kv_cache_manager = std::make_shared<KVCacheManager>(cache_config, false, nullptr, kv_cache_config);
     ASSERT_TRUE(kv_cache_manager->init());
     ASSERT_NE(kv_cache_manager->allocator_, nullptr);
     ASSERT_NE(kv_cache_manager->blockTreeCache(), nullptr);
 
-    const auto empty = kv_cache_manager->getKVCacheInfo(/*latest_version=*/-1, /*need_cache_keys=*/true);
+    const KVCacheInfo empty = kv_cache_manager->getKVCacheInfo(/*latest_version=*/-1, /*need_cache_keys=*/true);
     EXPECT_TRUE(empty.cached_keys.empty());
 
-    auto       resource = makeDSV4BatchResource(cache_config);
-    auto       tokens   = makeDSV4CompleteTokenIds(/*initial_seq_len=*/4, /*max_seq_len=*/4, /*seq_size_per_block=*/2);
-    MallocInfo malloc_info{resource, tokens};
+    BatchKVCacheResourcePtr resource = makeDSV4BatchResource(cache_config);
+    CompleteTokenIdsPtr     tokens   = makeDSV4CompleteTokenIds(kSeqLen, kSeqLen, /*seq_size_per_block=*/2);
+    MallocInfo             malloc_info{resource, tokens};
     malloc_info.reuse_cache         = true;
     malloc_info.enable_cache_lookup = false;
     ASSERT_TRUE(kv_cache_manager->malloc(malloc_info).success);
     kv_cache_manager->insertIntoCache(InsertInfo{resource, tokens, /*is_resident=*/false});
 
-    const auto tree_snapshot = kv_cache_manager->blockTreeCache()->getKeySnapshot(/*limit=*/10000);
+    const BlockTreeKeySnapshot tree_snapshot = kv_cache_manager->blockTreeCache()->getKeySnapshot();
     ASSERT_GT(tree_snapshot.version, empty.version);
-    ASSERT_FALSE(tree_snapshot.keys.empty());
+    ASSERT_EQ(tree_snapshot.keys.size(), static_cast<size_t>(kKeyCount));
+    EXPECT_EQ(tree_snapshot.keys, resource->cacheKeys(0));
 
-    const auto changed = kv_cache_manager->getKVCacheInfo(/*latest_version=*/empty.version, /*need_cache_keys=*/true);
+    const KVCacheInfo changed =
+        kv_cache_manager->getKVCacheInfo(/*latest_version=*/empty.version, /*need_cache_keys=*/true);
     EXPECT_EQ(changed.version, tree_snapshot.version);
     EXPECT_EQ(changed.cached_keys, tree_snapshot.keys);
-    EXPECT_LE(changed.cached_keys.size(), 10000u);
-    const auto same =
+    const KVCacheInfo same =
         kv_cache_manager->getKVCacheInfo(/*latest_version=*/tree_snapshot.version, /*need_cache_keys=*/true);
     EXPECT_EQ(same.version, tree_snapshot.version);
-    EXPECT_TRUE(same.cached_keys.empty());
+    EXPECT_EQ(same.cached_keys, tree_snapshot.keys);
 
-    const auto version_only =
+    const KVCacheInfo version_only =
         kv_cache_manager->getKVCacheInfo(/*latest_version=*/empty.version, /*need_cache_keys=*/false);
-    EXPECT_EQ(version_only.version, tree_snapshot.version);
+    EXPECT_EQ(version_only.version, empty.version);
     EXPECT_TRUE(version_only.cached_keys.empty());
 
-    const auto before_duplicate = kv_cache_manager->blockTreeCache()->getKeySnapshot(/*limit=*/10000);
+    const BlockTreeKeySnapshot before_duplicate = kv_cache_manager->blockTreeCache()->getKeySnapshot();
     kv_cache_manager->insertIntoCache(InsertInfo{resource, tokens, /*is_resident=*/false});
-    const auto after_duplicate = kv_cache_manager->blockTreeCache()->getKeySnapshot(/*limit=*/10000);
+    const BlockTreeKeySnapshot after_duplicate = kv_cache_manager->blockTreeCache()->getKeySnapshot();
     EXPECT_EQ(after_duplicate.version, before_duplicate.version);
     EXPECT_EQ(after_duplicate.keys, before_duplicate.keys);
-    EXPECT_EQ(kv_cache_manager->getKVCacheInfo(after_duplicate.version, true).cached_keys, std::vector<CacheKeyType>{});
+    EXPECT_EQ(kv_cache_manager->getKVCacheInfo(after_duplicate.version, true).cached_keys, after_duplicate.keys);
+
+    {
+        ScopedEnvVar snapshot_enabled("RTP_LLM_CACHE_STATUS_SNAPSHOT", "1");
+        kv_cache_manager->refreshKVCacheInfoSnapshot();
+        const KVCacheInfo cached = kv_cache_manager->getKVCacheInfo(after_duplicate.version, true);
+        EXPECT_EQ(cached.version, after_duplicate.version);
+        EXPECT_EQ(cached.cached_keys, after_duplicate.keys);
+    }
 
     kv_cache_manager->free(FreeInfo{resource, tokens});
-    BlockTreeCacheTestPeer::reclaimBlocksForTest(*kv_cache_manager->blockTreeCache(), /*num_blocks=*/100, Tier::DEVICE);
 }
 
 TEST_F(KVCacheManagerTest, StorePublishesFullBlocksOnlyAndLookupLeavesOneToken) {
@@ -1635,7 +1650,7 @@ TEST_F(KVCacheManagerTest, StorePublishesFullBlocksOnlyAndLookupLeavesOneToken) 
     manager->insertIntoCache(InsertInfo{seed_resource, seed_tokens, /*is_resident=*/false});
     manager->free(FreeInfo{seed_resource, seed_tokens});
 
-    EXPECT_EQ(manager->blockTreeCache()->getKeySnapshot(/*limit=*/100).keys,
+    EXPECT_EQ(manager->blockTreeCache()->getKeySnapshot().keys,
               (CacheKeysType{seed_keys[0], seed_keys[1]}));
     auto partial_match = manager->blockTreeCache()->match(seed_keys);
     EXPECT_EQ(partial_match.matched_device_blocks, 2u);
@@ -1683,7 +1698,7 @@ TEST_F(KVCacheManagerTest, GetKVCacheInfo_UsesSnapshotForCacheKeysWhenEnabled) {
     ASSERT_TRUE(kv_cache_manager->malloc(malloc_info).success);
     kv_cache_manager->insertIntoCache(InsertInfo{resource, tokens, /*is_resident=*/false});
 
-    const auto initial_tree_snapshot = kv_cache_manager->blockTreeCache()->getKeySnapshot(/*limit=*/10000);
+    const auto initial_tree_snapshot = kv_cache_manager->blockTreeCache()->getKeySnapshot();
     ASSERT_EQ(initial_tree_snapshot.keys.size(), 2u);
 
     kv_cache_manager->refreshKVCacheInfoSnapshot();
@@ -1699,7 +1714,7 @@ TEST_F(KVCacheManagerTest, GetKVCacheInfo_UsesSnapshotForCacheKeysWhenEnabled) {
     tokens->setSeqLength(6);
     ASSERT_TRUE(kv_cache_manager->malloc(malloc_info).success);
     kv_cache_manager->insertIntoCache(InsertInfo{resource, tokens, /*is_resident=*/false});
-    const auto updated_tree_snapshot = kv_cache_manager->blockTreeCache()->getKeySnapshot(/*limit=*/10000);
+    const auto updated_tree_snapshot = kv_cache_manager->blockTreeCache()->getKeySnapshot();
     ASSERT_EQ(updated_tree_snapshot.keys.size(), 3u);
     ASSERT_GT(updated_tree_snapshot.version, initial_tree_snapshot.version);
 

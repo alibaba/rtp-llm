@@ -576,6 +576,33 @@ protected:
     }
 };
 
+TEST_F(HybridPoolKVCacheAllocatorTest, ResidentInsertProtectsAllReusableGroups) {
+    const CacheConfig                                     config    = makeTinyFullSwaMultiPoolHybridConfig(12, 12);
+    const std::shared_ptr<TestHybridPoolKVCacheAllocator> allocator = makeAllocator(config);
+    ASSERT_TRUE(allocator->init());
+    const BatchKVCacheResourcePtr seed = makeBatchResource(1, config);
+    seed->setBatchCacheKeys(0, CacheKeysType{100, 200});
+    const std::shared_ptr<CompleteTokenIds> tokens = makeCompleteTokenIds(1, 8, 4);
+    MallocInfo                              malloc_info{seed, tokens};
+    malloc_info.enable_cache_lookup = false;
+    ASSERT_TRUE(allocator->malloc(malloc_info).success);
+    allocator->insertIntoCache(InsertInfo{seed, tokens, /*is_resident=*/true});
+    allocator->free(FreeInfo{seed, tokens});
+
+    const BlockTreeCachePtr&     cache = allocator->blockTreeCacheOwner();
+    const std::vector<TreeNode*> path  = cache->tree()->findNode({100, 200});
+    ASSERT_EQ(path.size(), 2u);
+    for (const TreeNode* node : path) {
+        EXPECT_TRUE(node->is_resident);
+    }
+    EXPECT_EQ(cache->getStats().device_heap_total_size, 0u);
+    EXPECT_EQ(cache->evictForGroup(0, 12), 0);
+    EXPECT_EQ(cache->evictForGroup(1, 12), 0);
+    BlockTreeMatchResult match = cache->match({100, 200});
+    EXPECT_EQ(match.matched_device_blocks, 2u);
+    block_tree_cache_test::releaseRequestRefsForTest(*cache, match.matched_device_resources);
+}
+
 static void runStorageRoundTrip(const CacheConfig&                      config,
                                 const CacheKeysType&                    writer_keys,
                                 int                                     writer_seq_len,
@@ -1688,7 +1715,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, InitMallocRollbackReleasesLowerTierBackfi
             host_sources.emplace_back(group_set, source_block);
         }
     }
-    cache->insert(cached_keys, slots, Tier::HOST);
+    cache->insert(cached_keys, slots, Tier::HOST, /*write_remote=*/true, /*is_resident=*/false);
 
     const auto counters_before = snapshotPoolCounters(allocator);
     for (const auto& [group_set, source_block] : host_sources) {
@@ -2295,7 +2322,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4CPShardedEvictionCascadesFromFullToLo
     KVCacheResource canonical_source;
     canonical_source.setCacheKeys(full_keys);
     const auto expected_canonical = canonical_source.localCacheKeys(cp_mapper->cpSize() - 1, cp_mapper->cpSize());
-    const auto before             = allocator->blockTreeCacheOwner()->getKeySnapshot(expected_canonical.size() + 1);
+    const auto before             = allocator->blockTreeCacheOwner()->getKeySnapshot();
     EXPECT_EQ(before.keys, expected_canonical);
 
     const auto& group_sets      = allocator->blockTreeCacheOwner()->groupSets();
@@ -2356,7 +2383,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4CPShardedEvictionCascadesFromFullToLo
     }
     EXPECT_EQ(allocator->groupBlockPools()[static_cast<size_t>(target_group_id)]->freeBlocksNum(),
               free_before[static_cast<size_t>(target_group_id)] + static_cast<size_t>(reclaimed));
-    const auto after_target_reclaim = allocator->blockTreeCacheOwner()->getKeySnapshot(expected_canonical.size() + 1);
+    const auto after_target_reclaim = allocator->blockTreeCacheOwner()->getKeySnapshot();
     EXPECT_GT(after_target_reclaim.version, before.version);
 
     // Reverse cascading includes every group set on a tier leaf. The pressure

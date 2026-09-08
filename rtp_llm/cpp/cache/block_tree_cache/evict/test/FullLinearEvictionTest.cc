@@ -19,7 +19,9 @@ protected:
         auto linear = std::make_shared<LinearGroupSet>(
             std::vector<DeviceBlockPoolPtr>{block_tree_cache_test::makeStructuralDevicePool(0)}, nullptr, nullptr);
         std::vector<GroupSetPtr> groups = {full, linear};
-        cache_ = makeBlockTreeCacheForTest(std::move(groups), BlockTreeCacheConfig{.task_pool_size = 2});
+        BlockTreeCacheConfig config{};
+        config.task_pool_size = 2;
+        cache_ = makeBlockTreeCacheForTest(std::move(groups), config);
     }
 
     void insertPath(const CacheKeysType& keys, BlockIdxType full_block, BlockIdxType linear_block) {
@@ -28,7 +30,7 @@ protected:
             resources[i][0].device_blocks = {static_cast<BlockIdxType>(full_block + i)};
             resources[i][1].device_blocks = {static_cast<BlockIdxType>(linear_block + i)};
         }
-        cache_->insert(keys, resources, Tier::DEVICE);
+        cache_->insert(keys, resources, Tier::DEVICE, /*write_remote=*/true, /*is_resident=*/false);
     }
 
     std::unique_ptr<BlockTreeCache> cache_;
@@ -72,14 +74,15 @@ TEST_F(FullLinearEvictionTest, LinearOnlySequentialDrain) {
     auto linear = std::make_shared<LinearGroupSet>(
         std::vector<DeviceBlockPoolPtr>{block_tree_cache_test::makeStructuralDevicePool(0)}, nullptr, nullptr);
     std::vector<GroupSetPtr>        groups = {linear};
-    std::unique_ptr<BlockTreeCache> lin_cache =
-        makeBlockTreeCacheForTest(std::move(groups), BlockTreeCacheConfig{.task_pool_size = 2});
+    BlockTreeCacheConfig config{};
+    config.task_pool_size = 2;
+    std::unique_ptr<BlockTreeCache> lin_cache = makeBlockTreeCacheForTest(std::move(groups), config);
 
     std::vector<std::vector<GroupSetResource>> resources(3, std::vector<GroupSetResource>(1));
     resources[0][0].device_blocks = {30};
     resources[1][0].device_blocks = {31};
     resources[2][0].device_blocks = {32};
-    lin_cache->insert({100, 200, 300}, resources, Tier::DEVICE);
+    lin_cache->insert({100, 200, 300}, resources, Tier::DEVICE, /*write_remote=*/true, /*is_resident=*/false);
 
     EXPECT_EQ(lin_cache->getStats().device_heap_total_size, 3u);
 

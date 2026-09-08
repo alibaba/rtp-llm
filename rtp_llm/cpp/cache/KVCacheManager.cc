@@ -613,13 +613,10 @@ KVCacheInfo KVCacheManager::buildKVCacheInfo(int64_t latest_version, bool need_c
         return info;
     }
 
-    if (block_tree_cache_) {
-        constexpr size_t kMaxReportedCacheKeys = 10000;
-        const auto       snapshot = block_tree_cache_->getKeySnapshot(need_cache_keys ? kMaxReportedCacheKeys : 0);
-        info.version              = snapshot.version;
-        if (need_cache_keys && latest_version != snapshot.version) {
-            info.cached_keys = snapshot.keys;
-        }
+    if (need_cache_keys && block_tree_cache_) {
+        BlockTreeKeySnapshot snapshot = block_tree_cache_->getKeySnapshot();
+        info.version                 = snapshot.version;
+        info.cached_keys             = std::move(snapshot.keys);
     }
 
     const size_t block_size_tokens = cp_slot_mapper_ && cp_slot_mapper_->isSharded() ?

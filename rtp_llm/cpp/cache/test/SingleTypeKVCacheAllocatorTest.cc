@@ -153,7 +153,7 @@ BlockIdxType seedSingleTypeLowerTier(BlockTreeCache& cache, Tier source_tier, Ca
         resources[0][0].disk_block = source_block;
     }
     const BlockTreeInsertResult insert_result =
-        cache.tree()->insertNode(CacheKeysType{key}, resources, /*collect_path=*/false);
+        cache.tree()->insertNode(CacheKeysType{key}, resources, /*collect_path=*/false, /*is_resident=*/false);
     EXPECT_EQ(insert_result.inserted_nodes.size(), 1u);
     group->releaseSingleBlock(source_tier, source_block, BlockTreeRefType::CACHE);
     return source_block;
@@ -701,20 +701,40 @@ TEST_F(SingleTypeKVCacheAllocatorTest, InsertIntoCache) {
     allocator_->insertIntoCache(insert_info);
 }
 
-TEST_F(SingleTypeKVCacheAllocatorTest, InsertIntoCacheAsResident) {
-    auto config = createSingleTypeTestConfig();
-    allocator_  = std::make_shared<TestSingleTypeKVCacheAllocator>(config);
-    allocator_->init();
+TEST_F(SingleTypeKVCacheAllocatorTest, ResidentPrefixRemainsMatchableUnderAllocationPressure) {
+    const CacheConfig config = createSingleTypeTestConfig(/*layer_num=*/2, /*block_num=*/4, /*seq_size_per_block=*/4);
+    allocator_               = std::make_shared<TestSingleTypeKVCacheAllocator>(config);
+    ASSERT_TRUE(allocator_->init());
 
-    int  seq_length         = 16;
-    auto batch_resource     = createBatchKVCacheResource(1, config);
-    auto complete_token_ids = createCompleteTokenIds(1, seq_length);
+    const BatchKVCacheResourcePtr seed = createBatchKVCacheResource(1, config);
+    seed->setBatchCacheKeys(0, CacheKeysType{100});
+    const std::shared_ptr<CompleteTokenIds> seed_tokens = createCompleteTokenIds(1, 4, 4);
+    MallocInfo                              seed_malloc{seed, seed_tokens};
+    seed_malloc.enable_cache_lookup = false;
+    ASSERT_TRUE(allocator_->malloc(seed_malloc).success);
+    const BlockIdxType seed_block = seed->blocks(0, 0).front();
+    allocator_->insertIntoCache(InsertInfo{seed, seed_tokens, /*is_resident=*/true});
+    allocator_->free(FreeInfo{seed, seed_tokens});
 
-    MallocInfo malloc_info{batch_resource, complete_token_ids};
-    allocator_->malloc(malloc_info);
+    const BlockTreeCachePtr&     cache = allocator_->blockTreeCacheOwner();
+    const std::vector<TreeNode*> path  = cache->tree()->findNode({100});
+    ASSERT_EQ(path.size(), 1u);
+    EXPECT_TRUE(path.front()->is_resident);
+    EXPECT_EQ(cache->getStats().device_heap_total_size, 0u);
+    EXPECT_EQ(cache->groupSets().front()->devicePools().front()->refCount(seed_block), 1u);
 
-    InsertInfo insert_info{batch_resource, complete_token_ids, true};
-    allocator_->insertIntoCache(insert_info);
+    const BatchKVCacheResourcePtr pressure = createBatchKVCacheResource(1, config);
+    pressure->setBatchCacheKeys(0, CacheKeysType{200, 201, 202});
+    const std::shared_ptr<CompleteTokenIds> pressure_tokens = createCompleteTokenIds(1, 12, 4);
+    MallocInfo                              pressure_malloc{pressure, pressure_tokens};
+    pressure_malloc.enable_cache_lookup = false;
+    EXPECT_FALSE(allocator_->malloc(pressure_malloc).success);
+    EXPECT_EQ(pressure->curBlocksNum(), 0);
+    EXPECT_EQ(cache->evictForGroup(0, 1), 0);
+    BlockTreeMatchResult match = cache->match({100});
+    EXPECT_EQ(match.matched_device_blocks, 1u);
+    EXPECT_EQ(cache->matchedBlocksForGroup(0, match.matched_device_resources), (BlockIndicesType{seed_block}));
+    block_tree_cache_test::releaseRequestRefsForTest(*cache, match.matched_device_resources);
 }
 
 TEST_F(SingleTypeKVCacheAllocatorTest, OrdinaryAllocationEvictsTreeEntryWhileRequestStillHoldsBlock) {
@@ -890,7 +910,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, MergedCommonMallocFailureAbortsContextWit
         const size_t source_ref_before = source_tier == Tier::HOST ? group->hostPool()->treeRefCount(source_block) :
                                                                      group->diskPool()->treeRefCount(source_block);
         const size_t free_before       = allocator_->freeBlocksNum();
-        const auto   snapshot_before   = cache->getKeySnapshot(/*limit=*/16);
+        const auto   snapshot_before   = cache->getKeySnapshot();
 
         std::shared_ptr<LoadContextCoordinator> coordinator              = cache->loader_.load_context_coordinator_;
         LoadContextCoordinator::AbortCallback   original_abort           = coordinator->abort_callback_;
@@ -925,7 +945,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, MergedCommonMallocFailureAbortsContextWit
         EXPECT_EQ(events, (std::vector<std::string>{"context_abort_begin", "source_protection_released"}));
         EXPECT_EQ(resource->curBlocksNum(), 0);
         EXPECT_EQ(allocator_->freeBlocksNum(), free_before);
-        const auto snapshot_after = cache->getKeySnapshot(/*limit=*/16);
+        const auto snapshot_after = cache->getKeySnapshot();
         EXPECT_EQ(snapshot_after.version, snapshot_before.version);
         EXPECT_EQ(snapshot_after.keys, snapshot_before.keys);
 
@@ -954,7 +974,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, LowerTierHitFollowedByOuterIncrFailureNev
         const size_t source_ref_before = source_tier == Tier::HOST ? group->hostPool()->treeRefCount(source_block) :
                                                                      group->diskPool()->treeRefCount(source_block);
         const size_t free_before       = allocator_->freeBlocksNum();
-        const auto   snapshot_before   = cache->getKeySnapshot(/*limit=*/16);
+        const auto   snapshot_before   = cache->getKeySnapshot();
 
         std::shared_ptr<LoadContextCoordinator> coordinator     = cache->loader_.load_context_coordinator_;
         LoadContextCoordinator::CommitCallback  original_commit = coordinator->commit_callback_;
@@ -985,7 +1005,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, LowerTierHitFollowedByOuterIncrFailureNev
         EXPECT_EQ(allocator_->freeBlocksNum(), free_before);
 
         cache->task_pool_->waitForIdle();
-        const auto snapshot_after = cache->getKeySnapshot(/*limit=*/16);
+        const auto snapshot_after = cache->getKeySnapshot();
         EXPECT_EQ(snapshot_after.version, snapshot_before.version);
         EXPECT_EQ(snapshot_after.keys, snapshot_before.keys);
         const auto find = cache->tree()->findNode(CacheKeysType{100});
@@ -1060,11 +1080,11 @@ TEST_F(SingleTypeKVCacheAllocatorTest, SuccessfulOuterAllocationCommitsLoadExact
     // Two request holders (one per batch) plus the published tree holder.
     EXPECT_EQ(device_pool->refCount(published_target), 3u);
     EXPECT_EQ(cache->getStats().device_heap_total_size, 1u);
-    const auto before_watermark_retry = cache->getKeySnapshot(/*limit=*/16);
+    const auto before_watermark_retry = cache->getKeySnapshot();
     // Logical eviction succeeds, but the API reports newly freed blocks. The
     // two request holders keep the block allocated, so the reclaimed count is 0.
     EXPECT_EQ(cache->evictForGroup(0, 1), 0);
-    EXPECT_EQ(cache->getKeySnapshot(/*limit=*/16).version, before_watermark_retry.version + 1);
+    EXPECT_EQ(cache->getKeySnapshot().version, before_watermark_retry.version + 1);
     EXPECT_TRUE(cache->tree()->findNode(CacheKeysType{100}).empty());
     EXPECT_TRUE(device_pool->isAllocated(published_target));
     EXPECT_EQ(device_pool->refCount(published_target), 2u);
@@ -1156,7 +1176,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, PrefixReuseDisabledSkipsMatchAndInsert) {
     MallocInfo insert_malloc_info{insert_resource, insert_tokens};
     ASSERT_TRUE(allocator_->malloc(insert_malloc_info).success);
     allocator_->insertIntoCache(InsertInfo{insert_resource, insert_tokens, /*is_resident=*/false});
-    EXPECT_TRUE(allocator_->blockTreeCacheOwner()->getKeySnapshot(/*limit=*/16).keys.empty());
+    EXPECT_TRUE(allocator_->blockTreeCacheOwner()->getKeySnapshot().keys.empty());
 }
 
 // Test convert index to addr

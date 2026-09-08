@@ -145,18 +145,20 @@ TEST_F(SystemPromptConstructorTest, testSecondTaskFailureReleasesEarlierRequestO
     ASSERT_FALSE(result.ok());
     EXPECT_NE(result.status().message().find("injected second system prompt failure"), std::string::npos);
 
-    // The first task was already inserted, but its request ownership is not
-    // committed until every task succeeds. On failure only its tree holder
-    // remains; the partial tail and all request refs are released.
+    // Failure releases request refs and the partial tail; the first prompt
+    // remains resident with only the tree's CACHE ownership.
     EXPECT_EQ(manager->freeBlocksNum(), free_before - 1);
     ASSERT_EQ(manager->blockTreeCache()->groupSets().size(), 1u);
     EXPECT_EQ(manager->availableBlocksNum(), available_before);
-    EXPECT_EQ(manager->blockTreeCache()->getStats().device_heap_total_size, 1u);
+    const DeviceBlockPoolPtr& pool = manager->blockTreeCache()->groupSets().front()->devicePools().front();
+    EXPECT_EQ(pool->referencedBlocksNum(), 0u);
+    EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::CACHE), 1u);
+    EXPECT_EQ(manager->blockTreeCache()->getStats().device_heap_total_size, 0u);
 
     EXPECT_EQ(block_tree_cache_test::BlockTreeCacheTestPeer::reclaimBlocksForTest(
                   *manager->blockTreeCache(), /*num_blocks=*/100, Tier::DEVICE),
-              1);
-    EXPECT_EQ(manager->freeBlocksNum(), free_before);
+              0);
+    EXPECT_EQ(manager->freeBlocksNum(), free_before - 1);
 }
 
 TEST_F(SystemPromptConstructorTest, testNormalEnginePreservesSchedulerReserveWithoutPrefillOverride) {
