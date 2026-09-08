@@ -86,6 +86,22 @@ TEST_F(ScrKmonitorLifecycleTest, RetainsRegisteredMetricsAndReleasesOldSink) {
     }
 }
 
+TEST_F(ScrKmonitorLifecycleTest, DeferredDefaultModeStartsAutomaticReporter) {
+    autil::EnvGuard scrEnabled("RTPLLM_ENABLE_SCR", "1");
+    autil::EnvGuard scrPhase("SCR_PHASE", "checkpoint");
+    autil::EnvGuard manualMode("kmonitorManuallyMode", "false");
+
+    ASSERT_TRUE(initKmonitorFactory());
+    EXPECT_FALSE(kmonitor::KMonitorFactory::IsStarted());
+    EXPECT_TRUE(pauseKmonitorForScr());
+    resumeKmonitorAfterScr();
+
+    EXPECT_TRUE(kmonitor::KMonitorFactory::IsStarted());
+    EXPECT_TRUE(kmonitor::KMonitorFactory::GetWorker()->getMetricsSystem()->Started());
+    EXPECT_FALSE(kmonitor::KMonitorFactory::GetConfig()->manually_mode());
+    EXPECT_TRUE(kmonitor::KMonitorFactory::GetWorker()->getMetricsSystem()->GetSink("FlumeSink"));
+}
+
 TEST_F(ScrKmonitorLifecycleTest, DefersTransportAndRefreshesSinkAfterScr) {
     autil::EnvGuard scrEnabled("RTPLLM_ENABLE_SCR", "1");
     autil::EnvGuard scrPhase("SCR_PHASE", "checkpoint");
@@ -93,6 +109,9 @@ TEST_F(ScrKmonitorLifecycleTest, DefersTransportAndRefreshesSinkAfterScr) {
     autil::EnvGuard oldRequestedIp("RequestedIP", "10.1.0.1");
     autil::EnvGuard hippoRole("HIPPO_ROLE", "rtp_role");
     autil::EnvGuard serviceName("kmonitorServiceName", "scr_service");
+    // Keep the sampling threads disabled so ManuallySnapshot observes exactly
+    // the record produced below. Automatic-mode activation is covered above.
+    autil::EnvGuard manualMode("kmonitorManuallyMode", "true");
 
     ASSERT_TRUE(initKmonitorFactory());
     EXPECT_FALSE(kmonitor::KMonitorFactory::IsStarted());
@@ -126,7 +145,7 @@ TEST_F(ScrKmonitorLifecycleTest, DefersTransportAndRefreshesSinkAfterScr) {
     EXPECT_TRUE(kmonitor::KMonitorFactory::IsStarted());
     EXPECT_TRUE(kmonitor::KMonitorFactory::GetWorker()->getMetricsSystem()->Started());
     EXPECT_TRUE(kmonitor::KMonitorFactory::GetWorker()->getMetricsSystem()->GetSink("FlumeSink"));
-    EXPECT_FALSE(kmonitor::KMonitorFactory::GetConfig()->manually_mode());
+    EXPECT_TRUE(kmonitor::KMonitorFactory::GetConfig()->manually_mode());
     EXPECT_EQ(kmonitor::KMonitorFactory::GetConfig()->sink_address(), "10.0.0.2:4141");
     EXPECT_EQ(monitor, kmonitor::KMonitorFactory::GetKMonitor("scr_deferred"));
     auto* system = kmonitor::KMonitorFactory::GetWorker()->getMetricsSystem();
