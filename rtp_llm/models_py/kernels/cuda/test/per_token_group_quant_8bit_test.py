@@ -330,17 +330,26 @@ class PerTokenGroupQuantTest(TestCase):
         # results meant the reference cost a GPU slot while gating nothing -- the
         # two could disagree completely and the test would still pass.
         #
-        # Quantized values are compared exactly: both paths round the same fp16
-        # input to the same fp8 grid with the same per-group scale, so any
-        # difference is a real disagreement rather than accumulated error. The
-        # scales are compared with a tolerance because they come from a division
-        # by the group amax, which the two implementations may order differently.
+        # Quantized values are compared to within one fp8 ULP, not exactly. Both
+        # paths round the same fp16 input to the same fp8 grid with a per-group
+        # scale that agrees to the tolerance asserted below, but they are
+        # independent implementations and round half-way cases at the grid
+        # boundary differently. That shows up as a data-dependent handful of
+        # elements off by a single code (observed greatest relative difference
+        # 0.125, i.e. exactly one e4m3 mantissa step), so an exact comparison is
+        # flaky across GPU archs while a >= 2 ULP disagreement is still caught.
+        # finfo.eps is one mantissa step; finfo.tiny*eps is one subnormal step,
+        # which bounds the near-zero region where the relative term vanishes.
+        q_finfo = torch.finfo(dst_dtype)
         torch.testing.assert_close(
             x_q_sglang.to(torch.float32),
             x_q_triton.to(torch.float32),
-            rtol=0,
-            atol=0,
-            msg=lambda m: f"quantized values differ from the Triton reference: {m}",
+            rtol=q_finfo.eps,
+            atol=q_finfo.tiny * q_finfo.eps,
+            msg=lambda m: (
+                "quantized values differ from the Triton reference by more "
+                f"than one fp8 ULP: {m}"
+            ),
         )
         torch.testing.assert_close(
             x_s_sglang.to(torch.float32),
