@@ -620,7 +620,7 @@ void RtpLLMCacheTransferMetrics::report(const kmonitor::MetricsTags*         tag
 bool RtpLLMCacheEvictionMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_GAUGE_MUTABLE_METRIC(evictable_candidate_count_metric, "rtp_llm_kv_cache_evictable_candidate_count");
     REGISTER_QPS_MUTABLE_METRIC(eviction_trigger_qps_metric, "rtp_llm_kv_cache_eviction_trigger_qps");
-    REGISTER_QPS_MUTABLE_METRIC(eviction_blocks_qps_metric, "rtp_llm_kv_cache_eviction_blocks_qps");
+    REGISTER_GAUGE_MUTABLE_METRIC(eviction_blocks_count_metric, "rtp_llm_kv_cache_eviction_blocks_count");
     REGISTER_QPS_MUTABLE_METRIC(eviction_qps_metric, "rtp_llm_kv_cache_eviction_qps");
     REGISTER_GAUGE_MUTABLE_METRIC(evicted_block_tier_residence_time_ms_metric,
                                   "rtp_llm_kv_cache_evicted_block_tier_residence_time_ms");
@@ -648,13 +648,13 @@ void RtpLLMCacheEvictionMetrics::report(const kmonitor::MetricsTags*         tag
         required_tags.AddTag("block_type", "required");
         required_tags.AddTag("source_tier", collector->source_tier);
         required_tags.AddTag("group_type", collector->group_type);
-        eviction_blocks_qps_metric->Report(&required_tags, collector->eviction_required_blocks);
+        eviction_blocks_count_metric->Report(&required_tags, collector->eviction_required_blocks);
 
         kmonitor::MetricsTags scheduled_tags("trigger_type", collector->trigger_type);
         scheduled_tags.AddTag("block_type", "scheduled");
         scheduled_tags.AddTag("source_tier", collector->source_tier);
         scheduled_tags.AddTag("group_type", collector->group_type);
-        eviction_blocks_qps_metric->Report(&scheduled_tags, collector->eviction_scheduled_blocks);
+        eviction_blocks_count_metric->Report(&scheduled_tags, collector->eviction_scheduled_blocks);
     }
     if (collector->report_eviction) {
         kmonitor::MetricsTags eviction_tags("source_tier", collector->source_tier);

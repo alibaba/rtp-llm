@@ -544,7 +544,7 @@ TEST_F(BlockTreeCacheTest, EvictionTriggerQpsPublishesOnlyExistingGroupTypes) {
     ASSERT_NE(eviction_metrics, nullptr);
     EXPECT_EQ(metricSeriesCount(eviction_metrics->evictable_candidate_count_metric), 3u);
     EXPECT_EQ(metricSeriesCount(eviction_metrics->eviction_trigger_qps_metric), 6u);
-    EXPECT_EQ(metricSeriesCount(eviction_metrics->eviction_blocks_qps_metric), 12u);
+    EXPECT_EQ(metricSeriesCount(eviction_metrics->eviction_blocks_count_metric), 0u);
 
     kmonitor::MetricsTags watermark_tags("trigger_type", "watermark");
     watermark_tags.AddTag("source_tier", tierName(Tier::DEVICE));
@@ -570,8 +570,8 @@ TEST_F(BlockTreeCacheTest, EvictionTriggerQpsPublishesOnlyExistingGroupTypes) {
     scheduled_tags.AddTag("source_tier", tierName(Tier::DEVICE));
     scheduled_tags.AddTag("group_type", metricCacheGroupTypeName(CacheGroupType::FULL));
     reporter.reportEvictionBlocks(Tier::DEVICE, CacheGroupType::FULL, false, 3, 2);
-    EXPECT_DOUBLE_EQ(snapshotQps(eviction_metrics->eviction_blocks_qps_metric, required_tags), 3);
-    EXPECT_DOUBLE_EQ(snapshotQps(eviction_metrics->eviction_blocks_qps_metric, scheduled_tags), 2);
+    EXPECT_DOUBLE_EQ(snapshotQps(eviction_metrics->eviction_blocks_count_metric, required_tags), 3);
+    EXPECT_DOUBLE_EQ(snapshotQps(eviction_metrics->eviction_blocks_count_metric, scheduled_tags), 2);
 }
 
 TEST_F(BlockTreeCacheTest, SettledEvictionQpsCountsPrimaryDependentAndCascadeDescriptors) {

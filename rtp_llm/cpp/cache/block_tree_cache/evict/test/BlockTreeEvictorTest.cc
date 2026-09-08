@@ -16,6 +16,7 @@
 
 #include "kmonitor/client/MetricsReporter.h"
 #include "kmonitor/client/core/MetricsData.h"
+#include "kmonitor/client/metric/GaugeMetric.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/evict/BlockTreeEvictor.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/evict/EvictionTaskRunner.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheMetricsReporter.h"
@@ -60,6 +61,16 @@ double snapshotQps(kmonitor::MutableMetric* metric, const kmonitor::MetricsTags&
         return -1;
     }
     return std::stod(record.Values().front()->Value());
+}
+
+void expectCountSamples(kmonitor::MutableMetric* metric, const kmonitor::MetricsTags& tags, size_t count) {
+    auto* series = metric->DeclareMetric(&tags);
+    auto* gauge  = dynamic_cast<kmonitor::GaugeMetric*>(series);
+    EXPECT_NE(gauge, nullptr);
+    if (gauge != nullptr) {
+        EXPECT_EQ(gauge->calculator_.Count(), count);
+    }
+    EXPECT_TRUE(metric->UndeclareMetric(series));
 }
 
 static_assert(!noexcept(std::declval<BlockTreeEvictor&>().runDropTask(std::declval<TransferDescriptor>())));
@@ -1359,7 +1370,7 @@ TEST_F(BlockTreeEvictorTest, WatermarkRequiresHighAndRequestsDownToLowWithIntege
     device_pool_->decRef(*second);
 }
 
-TEST_F(BlockTreeEvictorTest, WatermarkRequiredBlocksQpsClearsWhenNextCheckHasNoDeficit) {
+TEST_F(BlockTreeEvictorTest, WatermarkBlockCountsReportNoProgressOnceAndSkipIdleChecks) {
     const auto metrics_reporter = evictor_runtime_.metricsReporter();
 
     const auto blocks = device_pool_->malloc(116);
@@ -1379,12 +1390,15 @@ TEST_F(BlockTreeEvictorTest, WatermarkRequiredBlocksQpsClearsWhenNextCheckHasNoD
     scheduled_tags.AddTag("block_type", "scheduled");
     scheduled_tags.AddTag("source_tier", tierName(Tier::DEVICE));
     scheduled_tags.AddTag("group_type", metricCacheGroupTypeName(CacheGroupType::FULL));
-    EXPECT_DOUBLE_EQ(snapshotQps(eviction_metrics->eviction_blocks_qps_metric, required_tags), 12);
-    EXPECT_DOUBLE_EQ(snapshotQps(eviction_metrics->eviction_blocks_qps_metric, scheduled_tags), 0);
+    expectCountSamples(eviction_metrics->eviction_blocks_count_metric, required_tags, 1);
+    expectCountSamples(eviction_metrics->eviction_blocks_count_metric, scheduled_tags, 1);
+    EXPECT_DOUBLE_EQ(snapshotQps(eviction_metrics->eviction_blocks_count_metric, required_tags), 12);
+    EXPECT_DOUBLE_EQ(snapshotQps(eviction_metrics->eviction_blocks_count_metric, scheduled_tags), 0);
 
     device_pool_->decRef(*blocks);
     evictor_->scheduleWatermarkEvictionsLocked(Tier::DEVICE, watermark);
-    EXPECT_DOUBLE_EQ(snapshotQps(eviction_metrics->eviction_blocks_qps_metric, required_tags), 0);
+    expectCountSamples(eviction_metrics->eviction_blocks_count_metric, required_tags, 0);
+    expectCountSamples(eviction_metrics->eviction_blocks_count_metric, scheduled_tags, 0);
 }
 
 TEST_F(BlockTreeEvictorTest, DeviceHostWatermarkCapsBatchByRemainingRequiredCount) {
@@ -1457,7 +1471,11 @@ TEST_F(BlockTreeEvictorTest, DeviceHostWatermarkSubmitsOneLogicalBatchCappedByTr
     }
 
     evictor_runtime_.transferEngine()->enqueue(false);
-    evictor_->scheduleWatermarkEvictionsLocked(Tier::DEVICE, TierWatermark{/*low_ratio=*/0.001, /*high_ratio=*/0.02});
+    {
+        std::lock_guard<std::mutex> lock(*evictor_->mutex_);
+        evictor_->scheduleWatermarkEvictionsLocked(Tier::DEVICE,
+                                                   TierWatermark{/*low_ratio=*/0.001, /*high_ratio=*/0.02});
+    }
     task_pool.waitForIdle();
 
     EXPECT_EQ(evictor_runtime_.transferEngine()->submittedBatchCount(), 1u);
@@ -1472,8 +1490,10 @@ TEST_F(BlockTreeEvictorTest, DeviceHostWatermarkSubmitsOneLogicalBatchCappedByTr
     scheduled_tags.AddTag("block_type", "scheduled");
     scheduled_tags.AddTag("source_tier", tierName(Tier::DEVICE));
     scheduled_tags.AddTag("group_type", metricCacheGroupTypeName(CacheGroupType::FULL));
-    EXPECT_DOUBLE_EQ(snapshotQps(eviction_metrics->eviction_blocks_qps_metric, required_tags), 3);
-    EXPECT_DOUBLE_EQ(snapshotQps(eviction_metrics->eviction_blocks_qps_metric, scheduled_tags), 2);
+    expectCountSamples(eviction_metrics->eviction_blocks_count_metric, required_tags, 1);
+    expectCountSamples(eviction_metrics->eviction_blocks_count_metric, scheduled_tags, 1);
+    EXPECT_DOUBLE_EQ(snapshotQps(eviction_metrics->eviction_blocks_count_metric, required_tags), 3);
+    EXPECT_DOUBLE_EQ(snapshotQps(eviction_metrics->eviction_blocks_count_metric, scheduled_tags), 2);
 
     while (evictor_->dropLocked(/*group_set_id=*/0, Tier::DEVICE, /*notify_settled=*/true)) {}
     task_pool.shutdown();
@@ -1542,8 +1562,8 @@ TEST_F(BlockTreeEvictorTest, DirectDeviceDropsConvergePastTransferBatchLimit) {
     scheduled_tags.AddTag("block_type", "scheduled");
     scheduled_tags.AddTag("source_tier", tierName(Tier::DEVICE));
     scheduled_tags.AddTag("group_type", metricCacheGroupTypeName(CacheGroupType::FULL));
-    EXPECT_DOUBLE_EQ(snapshotQps(eviction_metrics->eviction_blocks_qps_metric, required_tags), 10);
-    EXPECT_DOUBLE_EQ(snapshotQps(eviction_metrics->eviction_blocks_qps_metric, scheduled_tags), 10);
+    EXPECT_DOUBLE_EQ(snapshotQps(eviction_metrics->eviction_blocks_count_metric, required_tags), 10);
+    EXPECT_DOUBLE_EQ(snapshotQps(eviction_metrics->eviction_blocks_count_metric, scheduled_tags), 10);
     kmonitor::MetricsTags trigger_tags("trigger_type", "watermark");
     trigger_tags.AddTag("source_tier", tierName(Tier::DEVICE));
     trigger_tags.AddTag("group_type", metricCacheGroupTypeName(CacheGroupType::FULL));
@@ -1583,18 +1603,36 @@ TEST_F(BlockTreeEvictorTest, DeviceWatermarkStaysTriggeredAcrossBatchesUntilLow)
     }
     ASSERT_EQ(device_pool_->usedBlocksNum(), 8u);
 
+    auto* eviction_metrics = evictor_runtime_.metricsReporter()->getMetricsGroup<RtpLLMCacheEvictionMetrics>();
+    ASSERT_NE(eviction_metrics, nullptr);
+    kmonitor::MetricsTags required_tags("trigger_type", "watermark");
+    required_tags.AddTag("block_type", "required");
+    required_tags.AddTag("source_tier", tierName(Tier::DEVICE));
+    required_tags.AddTag("group_type", metricCacheGroupTypeName(CacheGroupType::FULL));
+    kmonitor::MetricsTags scheduled_tags("trigger_type", "watermark");
+    scheduled_tags.AddTag("block_type", "scheduled");
+    scheduled_tags.AddTag("source_tier", tierName(Tier::DEVICE));
+    scheduled_tags.AddTag("group_type", metricCacheGroupTypeName(CacheGroupType::FULL));
+
     const TierWatermark                watermark{/*low_ratio=*/0.50, /*high_ratio=*/0.80};
     std::vector<std::pair<bool, bool>> settled_events;
-    evictor_->settled_ = [this, &watermark, &settled_events](bool tree_data_mutated, bool check_watermark) {
+    evictor_->settled_ = [this, &watermark, &settled_events, eviction_metrics, &required_tags, &scheduled_tags](
+                             bool tree_data_mutated, bool check_watermark) {
+        expectCountSamples(eviction_metrics->eviction_blocks_count_metric, required_tags, 0);
+        expectCountSamples(eviction_metrics->eviction_blocks_count_metric, scheduled_tags, 0);
         settled_events.emplace_back(tree_data_mutated, check_watermark);
         if (check_watermark) {
+            evictor_->scheduleWatermarkEvictionsLocked(Tier::DEVICE, watermark);
             evictor_->scheduleWatermarkEvictionsLocked(Tier::DEVICE, watermark);
         }
     };
     evictor_runtime_.transferEngine()->enqueue(true);
     evictor_runtime_.transferEngine()->enqueue(true);
 
-    evictor_->scheduleWatermarkEvictionsLocked(Tier::DEVICE, watermark);
+    {
+        std::lock_guard<std::mutex> lock(*evictor_->mutex_);
+        evictor_->scheduleWatermarkEvictionsLocked(Tier::DEVICE, watermark);
+    }
     task_pool.waitForIdle();
 
     EXPECT_EQ(evictor_runtime_.transferEngine()->submittedBatchCount(), 2u);
@@ -1603,6 +1641,11 @@ TEST_F(BlockTreeEvictorTest, DeviceWatermarkStaysTriggeredAcrossBatchesUntilLow)
     EXPECT_EQ(host_pool->usedBlocksNum(), 3u);
     EXPECT_EQ(settled_events, (std::vector<std::pair<bool, bool>>{{true, true}, {true, true}}));
 
+    expectCountSamples(eviction_metrics->eviction_blocks_count_metric, required_tags, 1);
+    expectCountSamples(eviction_metrics->eviction_blocks_count_metric, scheduled_tags, 1);
+    EXPECT_DOUBLE_EQ(snapshotQps(eviction_metrics->eviction_blocks_count_metric, required_tags), 3);
+    EXPECT_DOUBLE_EQ(snapshotQps(eviction_metrics->eviction_blocks_count_metric, scheduled_tags), 3);
+
     const MultiNodeBlocks blocks = allocateDeviceBlocksForTest(*group_, 1, BlockTreeRefType::CACHE);
     ASSERT_EQ(blocks.size(), 1u);
     auto result = insert({900}, {{makeResource(Tier::DEVICE, blocks.front().front())}});
@@ -1610,9 +1653,15 @@ TEST_F(BlockTreeEvictorTest, DeviceWatermarkStaysTriggeredAcrossBatchesUntilLow)
     unreferenceDeviceBlocksForTest(*group_, blocks, BlockTreeRefType::CACHE);
     ASSERT_EQ(device_pool_->usedBlocksNum(), 6u);
 
-    evictor_->scheduleWatermarkEvictionsLocked(Tier::DEVICE, watermark);
+    {
+        std::lock_guard<std::mutex> lock(*evictor_->mutex_);
+        evictor_->scheduleWatermarkEvictionsLocked(Tier::DEVICE, watermark);
+    }
     task_pool.waitForIdle();
     EXPECT_EQ(evictor_runtime_.transferEngine()->submittedBatchCount(), 2u);
+
+    expectCountSamples(eviction_metrics->eviction_blocks_count_metric, required_tags, 0);
+    expectCountSamples(eviction_metrics->eviction_blocks_count_metric, scheduled_tags, 0);
 
     evictor_->settled_ = [](bool, bool) {};
     while (evictor_->dropLocked(/*group_set_id=*/0, Tier::DEVICE, /*notify_settled=*/false)) {}
