@@ -186,7 +186,9 @@ final class RequestCompletionPublisher implements AutoCloseable {
         try {
             if (delivery.batchEnqueueStartedAtMs() > 0L && delivery.item().ctx().getAckAtMs() > 0L) {
                 reporter.reportDispatchAckTimeMs(org.flexlb.dao.route.RoleType.PREFILL.name(),
-                        delivery.item().prefillEp() == null ? "" : delivery.item().prefillEp().getIp(),
+                        delivery.item().prefillEp() == null
+                                ? ""
+                                : delivery.item().prefillEp().getStatus().getMetricIpPort(),
                         Math.max(0L, delivery.item().ctx().getAckAtMs() - delivery.batchEnqueueStartedAtMs()));
             }
         } catch (Throwable failure) {
