@@ -2,6 +2,13 @@ load("@arch_config//:arch_select.bzl", "deep_ep_py_deps")
 
 deep_ep_py_deps()
 
+# Authoritative rank coordinate system: pure stdlib, zero deps.
+py_library(
+    name = "rank_layout",
+    srcs = ["rank_layout.py"],
+    visibility = ["//visibility:public"],
+)
+
 py_library(
     name = "collective_torch",
     srcs = [
