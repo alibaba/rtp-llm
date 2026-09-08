@@ -64,9 +64,9 @@ cc_test(
     deps = test_deps + [
         ":test_utils",
     ],
-    env = select({
-        "@//:using_rocm": {"TEST_USING_DEVICE": "ROCM",},
-        "//conditions:default": {"TEST_USING_DEVICE": "CUDA",},
+    env = device_test_envs(),
+    exec_properties = select({
+        "@//:using_rocm": {"gpu": "MI308X-ROCM7"},
+        "//conditions:default": {"gpu": "H20"},
     }),
-    exec_properties = {'gpu':'H20'},
 )
