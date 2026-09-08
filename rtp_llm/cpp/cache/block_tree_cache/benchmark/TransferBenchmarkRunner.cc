@@ -447,7 +447,7 @@ bool TransferBenchmarkRunner::runPurePathTransfer() {
     std::shared_ptr<HostBlockPool> host_pool;
     BlockTreeDiskBlockPoolPtr      disk_pool;
     if (host_block_count > 0) {
-        host_pool = BenchmarkFixture::createHostPool(payload_bytes, host_block_count, options_.host_memory == "pinned");
+        host_pool = BenchmarkFixture::createHostPool(payload_bytes, host_block_count);
     }
     if (need_disk) {
         disk_pool = BenchmarkFixture::createDiskPool(payload_bytes,

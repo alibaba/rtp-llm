@@ -153,14 +153,13 @@ DeviceBlockPoolPtr makeTestDevicePool(const std::vector<std::pair<size_t, size_t
     return pool;
 }
 
-std::shared_ptr<HostBlockPool> makeHostPool(size_t payload_bytes, size_t usable_count, bool enable_pinned) {
+std::shared_ptr<HostBlockPool> makeHostPool(size_t payload_bytes, size_t usable_count) {
     auto config                  = std::make_shared<HostBlockPoolConfig>();
     config->pool_type            = BlockPoolType::HOST;
     config->pool_name            = "per_rank_transfer_engine_host";
     config->physical_block_count = usable_count + 1;
     config->payload_bytes        = payload_bytes;
     config->stride_bytes         = ((payload_bytes + 4095) / 4096) * 4096;
-    config->enable_pinned        = enable_pinned;
     config->alignment            = 4096;
 
     auto pool = std::make_shared<HostBlockPool>(config);

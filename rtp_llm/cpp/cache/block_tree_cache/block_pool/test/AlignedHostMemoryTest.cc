@@ -7,15 +7,16 @@
 namespace rtp_llm {
 namespace {
 
-TEST(AlignedHostMemoryTest, AllocatesAlignedWritablePageableMemory) {
+TEST(AlignedHostMemoryTest, AllocatesAlignedWritablePinnedMemory) {
     constexpr size_t kUsableBytes = 8192;
     constexpr size_t kAlignment   = 4096;
 
-    AlignedHostMemory memory(kUsableBytes, kAlignment, false, "test aligned host memory");
+    AlignedHostMemory memory(kUsableBytes, kAlignment, "test aligned host memory");
 
     ASSERT_NE(memory.data(), nullptr);
     EXPECT_EQ(reinterpret_cast<uintptr_t>(memory.data()) % kAlignment, 0);
-    EXPECT_FALSE(memory.isPinned());
+    const auto tensor = torch::from_blob(memory.data(), {kUsableBytes}, torch::TensorOptions().dtype(torch::kUInt8));
+    EXPECT_TRUE(tensor.is_pinned());
 
     memory.data()[0]                = 0x12;
     memory.data()[kUsableBytes - 1] = 0x34;

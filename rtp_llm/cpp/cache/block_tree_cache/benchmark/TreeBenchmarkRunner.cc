@@ -411,7 +411,7 @@ std::unique_ptr<BlockTreeCache> TreeBenchmarkRunner::buildTreeCache(const Online
         auto device_pool = BenchmarkFixture::createDevicePool(
             group_payloads[gs_idx], 1, config.device_pool_blocks, "device_" + profile_.group_sets[gs_idx].name);
         auto host_pool = BenchmarkFixture::createHostPool(
-            group_payloads[gs_idx], config.host_pool_blocks, true, "host_" + profile_.group_sets[gs_idx].name);
+            group_payloads[gs_idx], config.host_pool_blocks, "host_" + profile_.group_sets[gs_idx].name);
         const std::vector<size_t> group_ids = {gs_idx};
 
         if (profile_.group_sets[gs_idx].group_type == benchmark::CacheGroupType::SWA) {

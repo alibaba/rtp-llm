@@ -32,7 +32,7 @@ GroupSetPtr makeTaskRunnerTestGroupSet(size_t group_set_id = 0) {
     DeviceBlockPoolPtr pool = makeTestDevicePool({{group.kv_block_stride_bytes, group.kv_scale_stride_bytes}},
                                                  /*usable_count=*/1,
                                                  "load_task_runner_" + std::to_string(group_set_id));
-    auto host_pool          = makeHostPool(group.kv_block_stride_bytes, /*usable_count=*/2, /*enable_pinned=*/false);
+    auto               host_pool = makeHostPool(group.kv_block_stride_bytes, /*usable_count=*/2);
     auto disk_pool          = makeDiskPool(group.kv_block_stride_bytes,
                                   /*usable_count=*/2,
                                   "/tmp",
