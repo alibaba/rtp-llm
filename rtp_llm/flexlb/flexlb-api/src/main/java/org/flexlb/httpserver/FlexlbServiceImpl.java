@@ -690,6 +690,9 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         } finally {
             try {
                 serverLatencyRecorder.recordCompletion(ctx, System.nanoTime());
+                if (ctx != null) {
+                    engineHealthReporter.reportRequestPayload(ctx);
+                }
             } finally {
                 if (ctx != null) {
                     logPvRecord(ctx, response, origin);

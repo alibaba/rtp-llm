@@ -43,7 +43,7 @@ def route_record(
         "requestTimeMs": request_time_ms,
         "totalUs": 1234,
         "success": True,
-        "inputIdsCount": 1000,
+        "seqLen": 1000,
         "selectionReasons": {role: "SHORTEST_TTFT"},
         "response": {
             "code": 200,
@@ -105,6 +105,34 @@ def status_record(request_id: str, worker: str, request_time_ms: int) -> dict:
 
 
 class CurrentRoutingDecisionTest(unittest.TestCase):
+    def test_compact_pv_uses_top_level_outcome_and_selected_candidate(self):
+        route = route_record("compact", epoch_ms(1, 45), "10.0.0.8")
+        route["code"] = 200
+        route["response"].pop("code", None)
+        route.pop("selectionReasons", None)
+        route.pop("cacheMatchSelections", None)
+        route.pop("shortestTtftDecisions", None)
+        route["routingDecisions"] = [{"role": "PREFILL", "selectionReason": "CACHE_LEADER",
+            "candidates": [{"endpoint": "10.0.0.8:8001@1", "selected": True,
+                            "routingMatchTokens": 512, "projectedTtftMs": 20}]}]
+        self.assertTrue(workbook_module.route_success(route))
+        self.assertEqual(workbook_module.get_route_cache_selection(route)["hitCacheTokens"], 512)
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "pv.log"
+            source.write_text(pv_line("2026-08-11 01:45:00.010", route))
+            destination = Path(directory) / "analysis.xlsx"
+            workbook_module.build_workbook([source], destination)
+            workbook = load_workbook(destination)
+            sheet = workbook["Requests"]
+            headers = [cell.value for cell in sheet[1]]
+            values = next(record for record in (dict(zip(headers, row))
+                for row in sheet.iter_rows(min_row=2, values_only=True)) if record.get("request_id") == "compact")
+            self.assertEqual(values["route_response_code"], 200)
+            self.assertEqual(values["route_predicted_hit_tokens"], 512)
+            self.assertIn("CACHE_LEADER", values.values())
+            self.assertTrue(html_module._build_replay(destination)["candidates"])
+            workbook.close()
+
     def test_current_candidates_keep_same_request_ids_separate_across_instances(self):
         with tempfile.TemporaryDirectory() as directory:
             route = route_record("same-id", epoch_ms(1, 45), "10.0.0.8")
