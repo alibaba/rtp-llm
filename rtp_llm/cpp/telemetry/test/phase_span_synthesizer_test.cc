@@ -83,6 +83,21 @@ protected:
         return it == attrs.end() ? -1 : opentelemetry::nostd::get<int64_t>(it->second);
     }
 
+    // Re-initializes the runtime with an explicit engine identity. SetUp() has
+    // already started one at world_rank 0, and initWithExporter refuses to run
+    // while ACTIVE, so the old runtime must be shut down first.
+    void restartWithWorldRank(int64_t world_rank) {
+        TelemetryRuntime::shutdown(5000);
+        span_data_.reset();
+        auto            exporter = memory_exporter::InMemorySpanExporterFactory::Create(span_data_);
+        TelemetryConfig config;
+        config.enabled    = true;
+        config.role       = "test";
+        config.tp_rank    = 0;
+        config.world_rank = world_rank;
+        ASSERT_TRUE(TelemetryRuntime::initWithExporter(std::move(exporter), config));
+    }
+
     std::shared_ptr<memory_exporter::InMemorySpanData> span_data_;
 };
 
@@ -241,6 +256,134 @@ TEST_F(PhaseSpanSynthesizerTest, DecodeModeProducesWaitAndDecodeOnly) {
 
     // No prefill span
     EXPECT_EQ(findSpan(spans, "prefill"), nullptr);
+}
+
+// Engine identity rides every phase span, sourced from world_rank alone.
+// pd_role marks only the compute phases: a fused deployment reports "none"
+// rather than omitting the key, and `wait` carries no role at all because
+// queueing precedes any producer/consumer distinction.
+TEST_F(PhaseSpanSynthesizerTest, FusionPhaseSpansCarryEngineIndexAndNonePdRole) {
+    restartWithWorldRank(7);
+    auto parent = createParentSpan("parent");
+    auto timing = completedTiming(1000000, 1005000, 1020000, 1100000, 1105000, 42);
+
+    synthesizePhaseSpans(parent, timing, PhaseRole::Fusion, /*request_ok=*/true);
+    parent->End();
+
+    EXPECT_TRUE(TelemetryRuntime::shutdown(5000));
+    auto spans = span_data_->GetSpans();
+    ASSERT_EQ(spans.size(), 4u);
+
+    for (const char* name : {"wait", "prefill", "decode"}) {
+        auto* span = findSpan(spans, name);
+        ASSERT_NE(span, nullptr) << name;
+        EXPECT_EQ(getInt64Attribute(span, "gen_ai.engine.index"), 7) << name;
+    }
+    auto* fusion_prefill = findSpan(spans, "prefill");
+    auto* fusion_decode  = findSpan(spans, "decode");
+    auto* fusion_wait    = findSpan(spans, "wait");
+    ASSERT_NE(fusion_prefill, nullptr);
+    ASSERT_NE(fusion_decode, nullptr);
+    ASSERT_NE(fusion_wait, nullptr);
+    EXPECT_EQ(getStringAttribute(fusion_prefill, "gen_ai.pd_role"), "none");
+    EXPECT_EQ(getStringAttribute(fusion_decode, "gen_ai.pd_role"), "none");
+    EXPECT_EQ(fusion_wait->GetAttributes().count("gen_ai.pd_role"), 0u);
+}
+
+// Rank 0 is a real rank: omitting the key there would be indistinguishable from
+// "this engine reported nothing" on the platform's per-engine view.
+TEST_F(PhaseSpanSynthesizerTest, EngineIndexIsWrittenForRankZero) {
+    auto parent = createParentSpan("parent");
+    auto timing = completedTiming(1000000, 1005000, 1020000, 1100000, 1105000, 42);
+
+    synthesizePhaseSpans(parent, timing, PhaseRole::Fusion, /*request_ok=*/true);
+    parent->End();
+
+    EXPECT_TRUE(TelemetryRuntime::shutdown(5000));
+    auto  spans = span_data_->GetSpans();
+    auto* wait  = findSpan(spans, "wait");
+    ASSERT_NE(wait, nullptr);
+    EXPECT_EQ(getInt64Attribute(wait, "gen_ai.engine.index"), 0);
+}
+
+TEST_F(PhaseSpanSynthesizerTest, PrefillRoleMarksPrefillAsProducer) {
+    restartWithWorldRank(3);
+    auto parent = createParentSpan("parent");
+    auto timing = completedTiming(2000000, 2003000, 2050000, 2051000, 2060000, 42);
+
+    synthesizePhaseSpans(parent, timing, PhaseRole::Prefill, /*request_ok=*/true);
+    parent->End();
+
+    EXPECT_TRUE(TelemetryRuntime::shutdown(5000));
+    auto  spans   = span_data_->GetSpans();
+    auto* prefill = findSpan(spans, "prefill");
+    ASSERT_NE(prefill, nullptr);
+    EXPECT_EQ(getStringAttribute(prefill, "gen_ai.pd_role"), "producer");
+    EXPECT_EQ(getInt64Attribute(prefill, "gen_ai.engine.index"), 3);
+    auto* prefill_wait = findSpan(spans, "wait");
+    ASSERT_NE(prefill_wait, nullptr);
+    EXPECT_EQ(prefill_wait->GetAttributes().count("gen_ai.pd_role"), 0u);
+}
+
+TEST_F(PhaseSpanSynthesizerTest, DecodeRoleMarksDecodeAsConsumer) {
+    restartWithWorldRank(5);
+    auto parent = createParentSpan("parent");
+    auto timing = completedTiming(3000000, 3002000, 2999000, 3200000, 3205000, 42);
+
+    synthesizePhaseSpans(parent, timing, PhaseRole::Decode, /*request_ok=*/true);
+    parent->End();
+
+    EXPECT_TRUE(TelemetryRuntime::shutdown(5000));
+    auto  spans  = span_data_->GetSpans();
+    auto* decode = findSpan(spans, "decode");
+    ASSERT_NE(decode, nullptr);
+    EXPECT_EQ(getStringAttribute(decode, "gen_ai.pd_role"), "consumer");
+    EXPECT_EQ(getInt64Attribute(decode, "gen_ai.engine.index"), 5);
+    auto* decode_wait = findSpan(spans, "wait");
+    ASSERT_NE(decode_wait, nullptr);
+    EXPECT_EQ(decode_wait->GetAttributes().count("gen_ai.pd_role"), 0u);
+}
+
+// A truncated phase still identifies its engine and role: failure analysis by
+// engine index is exactly when these attributes matter most.
+TEST_F(PhaseSpanSynthesizerTest, TruncatedDecodeKeepsEngineIndexAndConsumerRole) {
+    restartWithWorldRank(5);
+    auto parent = createParentSpan("parent");
+
+    PhaseTiming timing;
+    timing.begin_time_us           = 3000000;
+    timing.running_started         = true;
+    timing.running_started_time_us = 3002000;
+    timing.synthesis_end_time_us   = 3100000;
+    timing.request_id              = 42;
+    timing.error_type              = "Cancelled";
+    synthesizePhaseSpans(parent, timing, PhaseRole::Decode, /*request_ok=*/false);
+    parent->End();
+
+    EXPECT_TRUE(TelemetryRuntime::shutdown(5000));
+    auto  spans  = span_data_->GetSpans();
+    auto* decode = findSpan(spans, "decode");
+    ASSERT_NE(decode, nullptr);
+    EXPECT_EQ(decode->GetStatus(), trace_api::StatusCode::kError);
+    EXPECT_EQ(getStringAttribute(decode, "gen_ai.pd_role"), "consumer");
+    EXPECT_EQ(getInt64Attribute(decode, "gen_ai.engine.index"), 5);
+}
+
+// load_cache is a transfer window, not a compute phase: it identifies the engine
+// but claims no producer/consumer role.
+TEST_F(PhaseSpanSynthesizerTest, KvLoadSpanCarriesEngineIndexWithoutPdRole) {
+    restartWithWorldRank(9);
+    auto parent = createParentSpan("rtp_llm.decode_remote_generate");
+
+    synthesizeKvLoadSpan(parent, 4000000, 4069000, 42, /*ok=*/true);
+    parent->End();
+
+    EXPECT_TRUE(TelemetryRuntime::shutdown(5000));
+    auto  spans = span_data_->GetSpans();
+    auto* load  = findSpan(spans, "load_cache");
+    ASSERT_NE(load, nullptr);
+    EXPECT_EQ(getInt64Attribute(load, "gen_ai.engine.index"), 9);
+    EXPECT_EQ(load->GetAttributes().count("gen_ai.pd_role"), 0u);
 }
 
 TEST_F(PhaseSpanSynthesizerTest, ZeroWaitSkipsWaitSpan) {

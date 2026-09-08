@@ -48,6 +48,11 @@ struct RuntimeGlobals {
     // on hot RPC paths (avoids a process-wide mutex hotspot).
     std::atomic<bool>                          active{false};
     std::shared_ptr<trace_sdk::TracerProvider> provider;
+    // Engine identity replayed onto every synthesized phase span. Atomic for the
+    // same reason as `active`: it is read once per phase span on the per-request
+    // path, and config is long gone by then. Published before the `active`
+    // release store, so any reader that observes ACTIVE also observes this rank.
+    std::atomic<int64_t> world_rank{0};
 };
 
 RuntimeGlobals& globals() {
@@ -122,6 +127,23 @@ std::string getEnvString(const char* name, const std::string& default_value) {
         return default_value;
     }
     return std::string(value);
+}
+
+// Host identity comes from gethostname(2), never from $HOSTNAME. The env var is
+// a snapshot of whoever launched the process: an outer shell can overwrite it
+// with a different machine's name (observed: a docker-exec session leaking the
+// physical host name into a container whose PID 1 had the correct value) or omit
+// it entirely, and either way the resulting host.ip/host.name would be silently
+// wrong or silently absent. The syscall always reports this UTS namespace and
+// tracks a hostname that changes at runtime. Same source as the Python runtime's
+// socket.gethostname() and the dashlog reference SDK. Returns empty only when
+// the syscall itself fails.
+std::string readHostname() {
+    char buffer[256] = {0};
+    if (gethostname(buffer, sizeof(buffer) - 1) != 0) {
+        return "";
+    }
+    return std::string(buffer);
 }
 
 bool getEnvBool(const char* name, bool default_value) {
@@ -227,15 +249,30 @@ bool TelemetryRuntime::initInternal(std::unique_ptr<trace_sdk::SpanExporter> exp
                                          config.service_name :
                                          (config.role.empty() ? std::string("rtp_llm") : "rtp_llm_" + config.role);
     try {
-        // 1. Resource: service.instance.id carries per-process
-        // identity; host.ip is written ONLY when a real pod IP is available and
-        // is never synthesized from hostname-pid, which would misrepresent the
-        // node address to topology views.
+        // 1. Resource: process identity shared by every span this process
+        // exports.
+        //
+        // host.ip deliberately carries "{hostname}-{pid}" rather than the pod
+        // IP. The platform's per-instance request/error/latency panels key off
+        // host.ip, and a pod IP is not process-unique: one RTP-LLM pod runs the
+        // frontend, the backend and every DP rank side by side, so an IP-valued
+        // host.ip collapses them into a single bucket. The real address is still
+        // reported, under rtp_llm.pod_ip. Neither host.ip nor host.name is
+        // synthesized when the hostname is unknown -- exporting "unknown-<pid>"
+        // would pollute exactly the aggregation this field exists to serve.
+        const std::string            hostname = readHostname();
         resource::ResourceAttributes attributes{
             {"service.name", service_name},
-            {"service.instance.id", getEnvString("HOSTNAME", "unknown") + "-" + std::to_string(getpid())},
+            // Keeps the historical "unknown" fallback so the instance id stays
+            // present on every span even if the hostname lookup fails.
+            {"service.instance.id",
+             (hostname.empty() ? std::string("unknown") : hostname) + "-" + std::to_string(getpid())},
             {"process.pid", (int64_t)getpid()},
             {"rtp_llm.role", config.role},
+            // Fixed marker the platform's GenAI statistics match on. It names the
+            // instrumentation contract being followed, not a linked library, so
+            // it is a literal rather than a version of anything we build.
+            {"gen_ai.instrumentation.sdk.name", "loongsuite-genai-utils"},
             // rtp_llm.tp_rank is intentionally NOT a resource attribute: the
             // rank0-only gate makes it constantly 0 on every exported span
             // (zero information). tp_rank stays an init() gate parameter only.
@@ -245,9 +282,14 @@ bool TelemetryRuntime::initInternal(std::unique_ptr<trace_sdk::SpanExporter> exp
             {"rtp_llm.dp_rank", config.dp_rank},
             {"rtp_llm.world_rank", config.world_rank},
         };
+        if (!hostname.empty()) {
+            attributes.SetAttribute("host.name", opentelemetry::nostd::string_view(hostname));
+            const std::string host_ip = hostname + "-" + std::to_string(getpid());
+            attributes.SetAttribute("host.ip", opentelemetry::nostd::string_view(host_ip));
+        }
         std::string pod_ip = getEnvString("POD_IP", "");
         if (!pod_ip.empty()) {
-            attributes.SetAttribute("host.ip", opentelemetry::nostd::string_view(pod_ip));
+            attributes.SetAttribute("rtp_llm.pod_ip", opentelemetry::nostd::string_view(pod_ip));
         }
         auto res = resource::Resource::Create(attributes);
 
@@ -275,6 +317,7 @@ bool TelemetryRuntime::initInternal(std::unique_ptr<trace_sdk::SpanExporter> exp
                 new trace_api::propagation::HttpTraceContext()));
 
         g.state = TelemetryState::ACTIVE;
+        g.world_rank.store(config.world_rank, std::memory_order_relaxed);
         g.active.store(true, std::memory_order_release);
         RTP_LLM_LOG_INFO("telemetry runtime active: role=%s tp_rank=%ld service=%s",
                          config.role.c_str(),
@@ -441,6 +484,12 @@ TelemetryState TelemetryRuntime::state() {
     auto&                       g = globals();
     std::lock_guard<std::mutex> lock(g.mutex);
     return g.state;
+}
+
+int64_t TelemetryRuntime::worldRank() {
+    // Lock-free: read once per synthesized phase span. Pairs with the release
+    // store in initInternal via the `active` flag callers already checked.
+    return globals().world_rank.load(std::memory_order_relaxed);
 }
 
 nostd::shared_ptr<trace_api::Tracer> TelemetryRuntime::tracer() {
