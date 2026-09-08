@@ -20,6 +20,8 @@ public:
     bool        initialized  = false;
     uint64_t    prefix_count = 0;
     uint64_t    edge_count   = 0;
+    std::string mapping_fingerprint;
+    std::string content_sha256;
 
     void Jsonize(autil::legacy::Jsonizable::JsonWrapper& json) override {
         json.Jsonize("status", status, status);
@@ -29,6 +31,8 @@ public:
         json.Jsonize("initialized", initialized, initialized);
         json.Jsonize("prefix_count", prefix_count, prefix_count);
         json.Jsonize("edge_count", edge_count, edge_count);
+        json.Jsonize("mapping_fingerprint", mapping_fingerprint, mapping_fingerprint);
+        json.Jsonize("content_sha256", content_sha256, content_sha256);
     }
 };
 
@@ -41,22 +45,53 @@ ConstraintTreeUpdateResponse makeResponse(std::string status, uint64_t requested
     const auto snapshot = ConstraintTreeCsrManager::instance()->snapshot();
 
     ConstraintTreeUpdateResponse response;
-    response.status            = std::move(status);
-    response.requested_version = requested_version;
-    response.message           = std::move(message);
-    response.initialized       = snapshot != nullptr;
-    response.version           = snapshot ? snapshot->version() : 0;
-    response.prefix_count      = snapshot ? snapshot->stateCount() : 0;
-    response.edge_count        = snapshot ? snapshot->edgeCount() : 0;
+    response.status              = std::move(status);
+    response.requested_version   = requested_version;
+    response.message             = std::move(message);
+    response.initialized         = snapshot != nullptr;
+    response.version             = snapshot ? snapshot->version() : 0;
+    response.prefix_count        = snapshot ? snapshot->stateCount() : 0;
+    response.edge_count          = snapshot ? snapshot->edgeCount() : 0;
+    response.mapping_fingerprint = snapshot ? snapshot->mappingFingerprint() : "";
+    response.content_sha256      = snapshot ? snapshot->contentSha256() : "";
     return response;
 }
 
 }  // namespace
 
-ConstraintTreeService::ConstraintTreeService(DeviceBase* device):
+ConstraintTreeService::ConstraintTreeService(DeviceBase* device, std::string mapping_json):
     latest_requested_version_(ConstraintTreeCsrManager::instance()->currentVersion()),
-    device_(device),
-    update_thread_([this]() { updateLoop(); }) {}
+    mapping_json_(std::move(mapping_json)),
+    device_(device) {
+    // Tokenizer access happened before this service was created. HTTP/background
+    // threads only read an immutable manifest and never acquire the Python GIL.
+    class MappingStatus: public autil::legacy::Jsonizable {
+    public:
+        std::string mapping_fingerprint;
+        int         vocab_size = 0, start_token_id = 0, end_token_id = 0;
+        void        Jsonize(autil::legacy::Jsonizable::JsonWrapper& json) override {
+            json.Jsonize("mapping_fingerprint", mapping_fingerprint, mapping_fingerprint);
+            json.Jsonize("vocab_size", vocab_size, vocab_size);
+            json.Jsonize("start_token_id", start_token_id, start_token_id);
+            json.Jsonize("end_token_id", end_token_id, end_token_id);
+        }
+    } mapping;
+    autil::legacy::FromJsonString(mapping, mapping_json_);
+    mapping_fingerprint_ = mapping.mapping_fingerprint;
+    mapping_status_json_ = autil::legacy::ToJsonString(mapping, true);
+    update_thread_       = std::thread([this]() { updateLoop(); });
+}
+
+void ConstraintTreeService::constraintTreeMapping(const std::unique_ptr<http_server::HttpResponseWriter>& writer,
+                                                  bool                                                    full) {
+    prepareJsonResponse(writer);
+    if (mapping_fingerprint_.empty()) {
+        writer->SetStatus(503, "Service Unavailable");
+        writer->Write("{\"error\":\"Worker has no C-token SID mapping\"}");
+        return;
+    }
+    writer->Write(full ? mapping_json_ : mapping_status_json_);
+}
 
 ConstraintTreeService::~ConstraintTreeService() {
     {
@@ -75,14 +110,23 @@ void ConstraintTreeService::updateConstraintTree(const std::unique_ptr<http_serv
     prepareJsonResponse(writer);
     std::string body              = request.GetBody();
     uint64_t    requested_version = 0;
-    const auto  header_result     = ConstraintTreeCsrManager::peekVersion(body, requested_version);
+    std::string requested_mapping, requested_content;
+    const auto  header_result =
+        ConstraintTreeCsrManager::peekVersion(body, requested_version, &requested_mapping, &requested_content);
     if (!header_result.ok()) {
         writer->SetStatus(400, "Bad Request");
         writer->Write(autil::legacy::ToJsonString(makeResponse("invalid_request", 0, header_result.message), true));
         return;
     }
+    if (requested_mapping != mapping_fingerprint_) {
+        writer->SetStatus(409, "Conflict");
+        writer->Write(autil::legacy::ToJsonString(
+            makeResponse("mapping_mismatch", requested_version, "Worker SID mapping fingerprint mismatch"), true));
+        return;
+    }
 
-    const uint64_t active_version = ConstraintTreeCsrManager::instance()->currentVersion();
+    const auto     active         = ConstraintTreeCsrManager::instance()->snapshot();
+    const uint64_t active_version = active ? active->version() : 0;
     std::string    response_status;
     std::string    response_message;
     int            response_code = 200;
@@ -92,20 +136,32 @@ void ConstraintTreeService::updateConstraintTree(const std::unique_ptr<http_serv
             response_status  = "stale_version";
             response_message = "a newer tree version is active or already queued";
             response_code    = 409;
+        } else if (requested_version == latest_requested_version_ && !latest_requested_content_sha256_.empty()
+                   && requested_content != latest_requested_content_sha256_) {
+            response_status  = "version_conflict";
+            response_message = "same version has different content";
+            response_code    = 409;
         } else if (requested_version == active_version) {
-            response_status  = "already_current";
-            response_message = "tree version is already active";
+            const bool same = active && active->mappingFingerprint() == requested_mapping
+                              && active->contentSha256() == requested_content;
+            response_status  = same ? "already_current" : "version_conflict";
+            response_message = same ? "tree version is already active" : "same version has different content";
+            response_code    = same ? 200 : 409;
         } else if (requested_version == latest_requested_version_
                    && (update_state_ == "queued" || update_state_ == "loading")) {
-            response_status  = "already_accepted";
-            response_message = "tree version is already queued or loading";
+            const bool same = latest_requested_content_sha256_ == requested_content;
+            response_status = same ? "already_accepted" : "version_conflict";
+            response_message =
+                same ? "tree version is already queued or loading" : "same version has different content";
+            response_code = same ? 200 : 409;
         } else {
-            latest_requested_version_ = requested_version;
-            pending_update_           = PendingUpdate{requested_version, std::move(body)};
-            update_state_             = "queued";
-            update_message_           = "tree update queued";
-            response_status           = "accepted";
-            response_message          = "tree update accepted for background loading";
+            latest_requested_version_        = requested_version;
+            latest_requested_content_sha256_ = requested_content;
+            pending_update_                  = PendingUpdate{requested_version, std::move(body)};
+            update_state_                    = "queued";
+            update_message_                  = "tree update queued";
+            response_status                  = "accepted";
+            response_message                 = "tree update accepted for background loading";
         }
     }
 
@@ -161,7 +217,7 @@ void ConstraintTreeService::updateLoop() {
             if (device_ != nullptr) {
                 device_->preRun();
             }
-            result = ConstraintTreeCsrManager::instance()->updateFromBinary(update.body, device_);
+            result = ConstraintTreeCsrManager::instance()->updateFromBinary(update.body, device_, mapping_fingerprint_);
         } catch (const std::exception& e) {
             result = {ConstraintTreeCsrUpdateCode::RESOURCE_ERROR,
                       ConstraintTreeCsrManager::instance()->currentVersion(),

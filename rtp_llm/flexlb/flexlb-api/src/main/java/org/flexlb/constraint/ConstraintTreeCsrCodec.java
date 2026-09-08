@@ -18,6 +18,10 @@ public final class ConstraintTreeCsrCodec {
     }
 
     public static byte[] encode(Artifact artifact) {
+        return encode(artifact, "", "");
+    }
+
+    public static byte[] encode(Artifact artifact, String mappingFingerprint, String contentSha256) {
         if (artifact == null) {
             throw new IllegalArgumentException("artifact must not be null");
         }
@@ -26,21 +30,31 @@ public final class ConstraintTreeCsrCodec {
         long elementCount = (long) artifact.rowPtr().length
                 + artifact.colIdx().length
                 + artifact.nextState().length;
-        long encodedSize = HEADER_SIZE + elementCount * Integer.BYTES;
+        boolean mapped = mappingFingerprint != null && !mappingFingerprint.isEmpty();
+        if (mapped && (!mappingFingerprint.matches("[0-9a-f]{64}")
+                || contentSha256 == null || !contentSha256.matches("[0-9a-f]{64}"))) {
+            throw new IllegalArgumentException("CSR fingerprints must be lowercase SHA-256 hex");
+        }
+        int headerSize = mapped ? 176 : HEADER_SIZE;
+        long encodedSize = headerSize + elementCount * Integer.BYTES;
         if (encodedSize > Integer.MAX_VALUE) {
             throw new IllegalArgumentException("serialized CSR artifact exceeds HTTP int32 body capacity");
         }
 
         ByteBuffer output = ByteBuffer.allocate((int) encodedSize).order(ByteOrder.LITTLE_ENDIAN);
         output.put(MAGIC);
-        output.putInt(FORMAT_VERSION);
-        output.putInt(HEADER_SIZE);
+        output.putInt(mapped ? 2 : FORMAT_VERSION);
+        output.putInt(headerSize);
         output.putLong(artifact.version());
         output.putInt(artifact.startTokenId());
         output.putInt(artifact.endTokenId());
         output.putInt(artifact.rowPtr().length - 1);
         output.putInt(artifact.colIdx().length);
         output.putLong(artifact.sidCount());
+        if (mapped) {
+            output.put(mappingFingerprint.getBytes(StandardCharsets.US_ASCII));
+            output.put(contentSha256.getBytes(StandardCharsets.US_ASCII));
+        }
         putInts(output, artifact.rowPtr());
         putInts(output, artifact.colIdx());
         putInts(output, artifact.nextState());
@@ -59,7 +73,8 @@ public final class ConstraintTreeCsrCodec {
         }
         int formatVersion = input.getInt();
         int headerSize = input.getInt();
-        if (formatVersion != FORMAT_VERSION || headerSize != HEADER_SIZE) {
+        if (!((formatVersion == FORMAT_VERSION && headerSize == HEADER_SIZE)
+                || (formatVersion == 2 && headerSize == 176)) || payload.length < headerSize) {
             throw new IllegalArgumentException("unsupported CSR artifact format");
         }
         long version = input.getLong();
@@ -68,10 +83,22 @@ public final class ConstraintTreeCsrCodec {
         int stateCount = input.getInt();
         int edgeCount = input.getInt();
         long sidCount = input.getLong();
+        String mappingFingerprint = "";
+        String contentSha256 = "";
+        if (formatVersion == 2) {
+            byte[] digest = new byte[64];
+            input.get(digest);
+            mappingFingerprint = new String(digest, StandardCharsets.US_ASCII);
+            input.get(digest);
+            contentSha256 = new String(digest, StandardCharsets.US_ASCII);
+            if (!mappingFingerprint.matches("[0-9a-f]{64}") || !contentSha256.matches("[0-9a-f]{64}")) {
+                throw new IllegalArgumentException("invalid CSR fingerprints");
+            }
+        }
         if (version <= 0 || stateCount <= 0 || edgeCount <= 0 || sidCount <= 0) {
             throw new IllegalArgumentException("CSR artifact header contains invalid counts or version");
         }
-        long expectedSize = HEADER_SIZE + Integer.BYTES * ((long) stateCount + 1L + 2L * edgeCount);
+        long expectedSize = headerSize + Integer.BYTES * ((long) stateCount + 1L + 2L * edgeCount);
         if (expectedSize != payload.length) {
             throw new IllegalArgumentException("CSR artifact length does not match its header");
         }
@@ -80,7 +107,7 @@ public final class ConstraintTreeCsrCodec {
         int[] nextState = readInts(input, edgeCount);
         validateArtifact(startTokenId, endTokenId, sidCount, rowPtr, colIdx, nextState);
         return new DecodedArtifact(
-                version, startTokenId, endTokenId, sidCount, rowPtr, colIdx, nextState);
+                version, startTokenId, endTokenId, sidCount, rowPtr, colIdx, nextState, mappingFingerprint, contentSha256);
     }
 
     private static void validateArtifact(int startTokenId,
@@ -155,6 +182,8 @@ public final class ConstraintTreeCsrCodec {
             long sidCount,
             int[] rowPtr,
             int[] colIdx,
-            int[] nextState) {
+            int[] nextState,
+            String mappingFingerprint,
+            String contentSha256) {
     }
 }

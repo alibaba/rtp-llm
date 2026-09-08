@@ -3,13 +3,15 @@
 #include <limits>
 #include <memory>
 #include <string>
+#include <fstream>
+#include <sstream>
 
 #include "http_server/HttpServer.h"
 #include "rtp_llm/cpp/api_server/ConstraintTreeService.h"
 
 int main(int argc, char** argv) {
-    if (argc != 2) {
-        std::cerr << "usage: constraint_tree_test_server <port>" << std::endl;
+    if (argc != 2 && argc != 3) {
+        std::cerr << "usage: constraint_tree_test_server <port> [mapping_json_file]" << std::endl;
         return 2;
     }
 
@@ -19,7 +21,17 @@ int main(int argc, char** argv) {
         return 2;
     }
 
-    auto service = std::make_shared<rtp_llm::ConstraintTreeService>();
+    std::string mapping_json = "{}";
+    if (argc == 3) {
+        std::ifstream input(argv[2]);
+        if (!input) {
+            return 2;
+        }
+        std::ostringstream contents;
+        contents << input.rdbuf();
+        mapping_json = contents.str();
+    }
+    auto service = std::make_shared<rtp_llm::ConstraintTreeService>(nullptr, mapping_json);
     auto server  = std::make_shared<http_server::HttpServer>(nullptr, 2, 50, std::numeric_limits<int>::max());
     if (!server->RegisterRoute(
             "POST",
@@ -31,6 +43,18 @@ int main(int argc, char** argv) {
             "/constraint_tree_status",
             [service](std::unique_ptr<http_server::HttpResponseWriter> writer,
                       const http_server::HttpRequest& request) { service->constraintTreeStatus(writer, request); })
+        || !server->RegisterRoute(
+            "GET",
+            "/constraint_tree_mapping",
+            [service](std::unique_ptr<http_server::HttpResponseWriter> writer, const http_server::HttpRequest&) {
+                service->constraintTreeMapping(writer, true);
+            })
+        || !server->RegisterRoute(
+            "GET",
+            "/constraint_tree_mapping_status",
+            [service](std::unique_ptr<http_server::HttpResponseWriter> writer, const http_server::HttpRequest&) {
+                service->constraintTreeMapping(writer, false);
+            })
         || !server->Start("tcp:127.0.0.1:" + std::to_string(port))) {
         std::cerr << "failed to start constraint-tree test server" << std::endl;
         return 1;

@@ -17,13 +17,14 @@ class DeviceBase;
 
 class ConstraintTreeService {
 public:
-    explicit ConstraintTreeService(DeviceBase* device = nullptr);
+    explicit ConstraintTreeService(DeviceBase* device = nullptr, std::string mapping_json = "{}");
     ~ConstraintTreeService();
 
     void updateConstraintTree(const std::unique_ptr<http_server::HttpResponseWriter>& writer,
                               const http_server::HttpRequest&                         request);
     void constraintTreeStatus(const std::unique_ptr<http_server::HttpResponseWriter>& writer,
                               const http_server::HttpRequest&                         request);
+    void constraintTreeMapping(const std::unique_ptr<http_server::HttpResponseWriter>& writer, bool full);
 
 private:
     struct PendingUpdate {
@@ -39,9 +40,13 @@ private:
     bool                         stopping_ = false;
     std::optional<PendingUpdate> pending_update_;
     uint64_t                     latest_requested_version_ = 0;
-    std::string                  update_state_             = "idle";
-    std::string                  update_message_           = "no runtime update has been submitted";
-    DeviceBase*                  device_                   = nullptr;
+    std::string                  latest_requested_content_sha256_;
+    std::string                  mapping_json_;
+    std::string                  mapping_status_json_;
+    std::string                  mapping_fingerprint_;
+    std::string                  update_state_   = "idle";
+    std::string                  update_message_ = "no runtime update has been submitted";
+    DeviceBase*                  device_         = nullptr;
     std::thread                  update_thread_;
 };
 

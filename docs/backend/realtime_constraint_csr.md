@@ -15,13 +15,21 @@ CONSTRAINT_TREE_BUILD_THREADS=10
 CONSTRAINT_TREE_RECONCILE_INTERVAL_SECONDS=60
 CONSTRAINT_TREE_PUBLISH_CONCURRENCY=2
 CONSTRAINT_TREE_PUBLISH_TIMEOUT_SECONDS=120
+MAX_IN_MEMORY_SIZE=-1
 ```
+
+`MAX_IN_MEMORY_SIZE=-1` disables the Master's WebFlux aggregation limit for the
+full JSON batch. Size the Master heap, VIP/request limits and client timeout for
+the actual batch size; the parsed input and build buffers coexist temporarily.
+This is not a promise of unlimited capacity. Only one current artifact and one
+backup artifact are retained after successful construction.
 
 On every inference Worker:
 
 ```text
 CONSTRAINT_TREE_REQUIRED=true
 WARM_UP=0
+ACT_TYPE=bf16
 ```
 
 Remove the legacy `TREE_DECODE_CONFIG=prefix_config.json` setting. Start the
@@ -41,16 +49,29 @@ curl -X POST "http://MASTER/rtp_llm/constraint_tree/build" \
   -d '{
     "version": 1001,
     "model": "engine_service",
-    "start_token_id": 1699,
-    "end_token_id": 151645,
-    "sids": ["169967_216546", "169968_215835_215836", "169969"]
+    "sids": ["C123C456", "C789C012"]
   }'
 ```
 
-SID strings contain model token IDs separated by underscores; length need not
-be two. Do not include the start/end token in the SID itself. Token IDs must match
-the deployed model's vocabulary. Each publication replaces the complete allowed
-set; it is not a delta update. Use increasing versions from one publisher.
+The SARO contract is a full set of **two-level C-token SIDs**. Preserve the original
+symbols, including leading zeros; `C012` is not silently rewritten to `C12`.
+Each symbol must exist in the deployed tokenizer's mapping. Examples do not
+guarantee those symbols exist in every model. SARO does not supply token IDs or
+start/end tokens. The Worker exports an immutable mapping and SHA-256 fingerprint;
+the Master probes all target Workers before each build, fetches the full mapping
+only on a cache miss/change, and converts in its background task. Mixed Worker
+fingerprints prevent the build until model rollout is consistent.
+
+Each publication replaces the complete allowed set, not a delta. Use increasing
+versions from one publisher. Same version and content is idempotent (SID ordering
+and duplicates do not change content), including after a failed task: repeated POST
+does not implicitly retry a failed build. Different content at the same version
+returns HTTP 409 with `{"error":"..."}`. Older versions return HTTP 200 with
+`state=STALE_VERSION`. Empty SID sets are rejected.
+
+Legacy numeric `rq_token_ids` and underscore SID inputs remain available for
+internal callers and variable-length trie tests; they are not the SARO contract.
+Production artifacts from either input path are bound to the Worker mapping.
 
 An accepted build is **not yet a completed rollout**. Check:
 
@@ -64,6 +85,24 @@ published/target Worker counts. Workers should report `ready` and the same
 `version`. The Master periodically checks actual state and republishes to
 restarted Workers. Old versions and malformed artifacts do not replace a good
 active tree. A failed background load retains the old snapshot.
+
+Wire format v2 includes the mapping fingerprint and canonical input SHA-256. The
+Worker checks the mapping before accepting/loading and reports both digests with
+the active version. Master acknowledgement requires matching version and digests,
+not just HTTP 200. A v1 artifact cannot bypass a configured mapping. Upgrade all
+Workers to the mapping-aware release before enabling the new Master.
+
+Operator-only retry (not needed for ordinary SARO network retries):
+
+```bash
+curl -X POST "http://MASTER/rtp_llm/constraint_tree/retry" \
+  -H 'Content-Type: application/json' \
+  -d '{"version":1001,"model":"engine_service"}'
+```
+
+Only the latest model/version can be retriggered. A failed build repeats mapping
+verification and construction using retained input. A built artifact is repushed
+without rebuilding. Corrected SID data must use a new version.
 
 Normal inference requests do not carry the tree or a download address. They use
 the currently active snapshot. Use fixed `num_beams`, with at least that many
@@ -108,3 +147,8 @@ For a Java-to-C++ protocol-only test without model weights, use
 to the built `constraint_tree_test_server`. This does not replace real GPU
 inference validation. Follow the repository's test-execution skill for all builds
 and container execution.
+
+`ConstraintTreeMappedE2ETest` additionally exercises the Java HTTP receiver and
+production mapping-aware publisher against two C++ Worker HTTP processes, including
+mapping disagreement, same-content retry/conflict, manual retry, Worker restart and
+current/backup. These protocol tests do not measure inference latency.

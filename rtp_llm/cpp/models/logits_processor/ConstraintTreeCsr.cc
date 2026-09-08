@@ -36,12 +36,15 @@ int32_t readI32(const char* data) {
 }
 
 struct WireHeader {
-    uint64_t version;
-    int32_t  start_token_id;
-    int32_t  end_token_id;
-    uint32_t state_count;
-    uint32_t edge_count;
-    uint64_t sid_count;
+    uint32_t    header_size = kHeaderSize;
+    std::string mapping_fingerprint;
+    std::string content_sha256;
+    uint64_t    version;
+    int32_t     start_token_id;
+    int32_t     end_token_id;
+    uint32_t    state_count;
+    uint32_t    edge_count;
+    uint64_t    sid_count;
 };
 
 bool parseHeader(std::string_view artifact, WireHeader& header, std::string& error, bool validate_length) {
@@ -53,9 +56,23 @@ bool parseHeader(std::string_view artifact, WireHeader& header, std::string& err
         error = "CSR artifact has invalid magic";
         return false;
     }
-    if (readU32(artifact.data() + 8) != kFormatVersion || readU32(artifact.data() + 12) != kHeaderSize) {
+    const auto format_version = readU32(artifact.data() + 8);
+    header.header_size        = readU32(artifact.data() + 12);
+    if (!((format_version == kFormatVersion && header.header_size == kHeaderSize)
+          || (format_version == 2 && header.header_size == 176))
+        || artifact.size() < header.header_size) {
         error = "unsupported CSR artifact format";
         return false;
+    }
+    if (format_version == 2) {
+        header.mapping_fingerprint = std::string(artifact.substr(48, 64));
+        header.content_sha256      = std::string(artifact.substr(112, 64));
+        const auto is_hex          = [](char c) { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'); };
+        if (!std::all_of(header.mapping_fingerprint.begin(), header.mapping_fingerprint.end(), is_hex)
+            || !std::all_of(header.content_sha256.begin(), header.content_sha256.end(), is_hex)) {
+            error = "CSR fingerprints must be lowercase SHA-256 hex";
+            return false;
+        }
     }
 
     header.version        = readU64(artifact.data() + 16);
@@ -79,7 +96,7 @@ bool parseHeader(std::string_view artifact, WireHeader& header, std::string& err
         error = "CSR artifact size overflows uint64";
         return false;
     }
-    const uint64_t expected_size = kHeaderSize + element_count * sizeof(int32_t);
+    const uint64_t expected_size = header.header_size + element_count * sizeof(int32_t);
     if (validate_length && expected_size != artifact.size()) {
         error = "CSR artifact length does not match its header";
         return false;
@@ -189,22 +206,35 @@ uint64_t ConstraintTreeCsrManager::currentVersion() const {
     return current ? current->version() : 0;
 }
 
-ConstraintTreeCsrUpdateResult ConstraintTreeCsrManager::peekVersion(const std::string& artifact, uint64_t& version) {
+ConstraintTreeCsrUpdateResult ConstraintTreeCsrManager::peekVersion(const std::string& artifact,
+                                                                    uint64_t&          version,
+                                                                    std::string*       mapping_fingerprint,
+                                                                    std::string*       content_sha256) {
     WireHeader  header{};
     std::string error;
     if (!parseHeader(artifact, header, error, true)) {
         return {ConstraintTreeCsrUpdateCode::INVALID_ARTIFACT, 0, std::move(error)};
     }
     version = header.version;
+    if (mapping_fingerprint) {
+        *mapping_fingerprint = header.mapping_fingerprint;
+    }
+    if (content_sha256) {
+        *content_sha256 = header.content_sha256;
+    }
     return {ConstraintTreeCsrUpdateCode::UPDATED, version, "CSR header is valid"};
 }
 
-ConstraintTreeCsrUpdateResult ConstraintTreeCsrManager::updateFromBinary(const std::string& artifact,
-                                                                         DeviceBase*        device) {
+ConstraintTreeCsrUpdateResult ConstraintTreeCsrManager::updateFromBinary(
+    const std::string& artifact, DeviceBase* device, const std::string& expected_mapping_fingerprint) {
     WireHeader  header{};
     std::string error;
     if (!parseHeader(artifact, header, error, true)) {
         return {ConstraintTreeCsrUpdateCode::INVALID_ARTIFACT, currentVersion(), std::move(error)};
+    }
+    if (header.mapping_fingerprint != expected_mapping_fingerprint) {
+        return {
+            ConstraintTreeCsrUpdateCode::INVALID_ARTIFACT, currentVersion(), "Worker SID mapping fingerprint mismatch"};
     }
 
     const auto active = snapshot();
@@ -212,20 +242,28 @@ ConstraintTreeCsrUpdateResult ConstraintTreeCsrManager::updateFromBinary(const s
         return {ConstraintTreeCsrUpdateCode::STALE_VERSION, active->version(), "a newer CSR tree is already active"};
     }
     if (active && header.version == active->version()) {
+        if (header.mapping_fingerprint != active->mappingFingerprint()
+            || header.content_sha256 != active->contentSha256()) {
+            return {ConstraintTreeCsrUpdateCode::INVALID_ARTIFACT,
+                    active->version(),
+                    "same CSR version has different content or mapping"};
+        }
         return {ConstraintTreeCsrUpdateCode::ALREADY_CURRENT, active->version(), "CSR tree version is already active"};
     }
 
     std::shared_ptr<ConstraintTreeCsrSnapshot> next;
     try {
-        next                  = std::make_shared<ConstraintTreeCsrSnapshot>();
-        next->version_        = header.version;
-        next->start_token_id_ = header.start_token_id;
-        next->end_token_id_   = header.end_token_id;
-        next->sid_count_      = header.sid_count;
+        next                       = std::make_shared<ConstraintTreeCsrSnapshot>();
+        next->version_             = header.version;
+        next->mapping_fingerprint_ = header.mapping_fingerprint;
+        next->content_sha256_      = header.content_sha256;
+        next->start_token_id_      = header.start_token_id;
+        next->end_token_id_        = header.end_token_id;
+        next->sid_count_           = header.sid_count;
         next->row_ptr_.resize(static_cast<size_t>(header.state_count) + 1);
         next->col_idx_.resize(header.edge_count);
         next->next_state_.resize(header.edge_count);
-        size_t offset = kHeaderSize;
+        size_t offset = header.header_size;
         readVector(artifact, offset, next->row_ptr_);
         readVector(artifact, offset, next->col_idx_);
         readVector(artifact, offset, next->next_state_);
@@ -273,6 +311,12 @@ ConstraintTreeCsrUpdateResult ConstraintTreeCsrManager::updateFromBinary(const s
         return {ConstraintTreeCsrUpdateCode::STALE_VERSION, current->version(), "a newer CSR tree is already active"};
     }
     if (current && header.version == current->version()) {
+        if (header.mapping_fingerprint != current->mappingFingerprint()
+            || header.content_sha256 != current->contentSha256()) {
+            return {ConstraintTreeCsrUpdateCode::INVALID_ARTIFACT,
+                    current->version(),
+                    "same CSR version has different content or mapping"};
+        }
         return {ConstraintTreeCsrUpdateCode::ALREADY_CURRENT, current->version(), "CSR tree version is already active"};
     }
     const auto activated = ConstraintTreeCsrSnapshotPtr(std::move(next));

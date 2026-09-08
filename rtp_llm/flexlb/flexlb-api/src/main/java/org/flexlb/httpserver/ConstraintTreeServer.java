@@ -6,6 +6,8 @@ import org.flexlb.constraint.ConstraintTreeBuildService;
 import org.flexlb.constraint.ConstraintTreeModels.BuildRequest;
 import org.flexlb.constraint.ConstraintTreeModels.SerializedArtifact;
 import org.flexlb.constraint.ConstraintTreeModels.Submission;
+import org.flexlb.constraint.ConstraintTreeModels.SubmissionState;
+import org.flexlb.constraint.ConstraintTreeModels.RetryRequest;
 import org.flexlb.transport.GeneralHttpNettyService;
 import org.springframework.context.annotation.Bean;
 import org.springframework.http.MediaType;
@@ -15,6 +17,7 @@ import org.springframework.web.reactive.function.server.ServerRequest;
 import org.springframework.web.reactive.function.server.ServerResponse;
 import org.springframework.web.server.ServerWebInputException;
 import reactor.core.publisher.Mono;
+import reactor.core.scheduler.Schedulers;
 
 import java.net.URI;
 import java.time.Duration;
@@ -30,6 +33,7 @@ public class ConstraintTreeServer {
     static final String BUILD_PATH = "/rtp_llm/constraint_tree/build";
     static final String STATUS_PATH = "/rtp_llm/constraint_tree/status";
     static final String ARTIFACT_PATH = "/rtp_llm/constraint_tree/artifact";
+    static final String RETRY_PATH = "/rtp_llm/constraint_tree/retry";
 
     private final ConstraintTreeBuildService buildService;
     private final LBStatusConsistencyService consistencyService;
@@ -47,6 +51,7 @@ public class ConstraintTreeServer {
     public RouterFunction<ServerResponse> constraintTreeRoutes() {
         return route()
                 .POST(BUILD_PATH, accept(MediaType.APPLICATION_JSON), this::build)
+                .POST(RETRY_PATH, accept(MediaType.APPLICATION_JSON), this::retry)
                 .GET(STATUS_PATH, this::status)
                 .GET(ARTIFACT_PATH, this::artifact)
                 .build();
@@ -54,6 +59,8 @@ public class ConstraintTreeServer {
 
     Mono<ServerResponse> build(ServerRequest request) {
         return request.bodyToMono(BuildRequest.class)
+                // Canonical hashing of a full SID batch must not block Netty's event loop.
+                .publishOn(Schedulers.boundedElastic())
                 .flatMap(buildRequest -> {
                     buildService.validateRequest(buildRequest);
                     if (!consistencyService.isMaster()) {
@@ -76,6 +83,18 @@ public class ConstraintTreeServer {
                             .contentType(MediaType.APPLICATION_JSON)
                             .bodyValue(new ErrorResponse("constraint tree build request failed"));
                 });
+    }
+
+    Mono<ServerResponse> retry(ServerRequest request) {
+        if (!consistencyService.isMaster()) {
+            return redirectToMaster(RETRY_PATH);
+        }
+        return request.bodyToMono(RetryRequest.class)
+                .publishOn(Schedulers.boundedElastic())
+                .flatMap(value -> submissionResponse(buildService.retry(value)))
+                .switchIfEmpty(ServerResponse.badRequest().bodyValue(new ErrorResponse("request body must not be empty")))
+                .onErrorResume(IllegalArgumentException.class, e -> ServerResponse.badRequest().bodyValue(new ErrorResponse(e.getMessage())))
+                .onErrorResume(ServerWebInputException.class, e -> ServerResponse.badRequest().bodyValue(new ErrorResponse("invalid JSON")));
     }
 
     Mono<ServerResponse> status(ServerRequest request) {
@@ -126,6 +145,10 @@ public class ConstraintTreeServer {
     }
 
     private Mono<ServerResponse> submissionResponse(Submission submission) {
+        if (submission.state() == SubmissionState.VERSION_CONFLICT) {
+            return ServerResponse.status(409).contentType(MediaType.APPLICATION_JSON)
+                    .bodyValue(new ErrorResponse("version already exists with different content"));
+        }
         return ServerResponse.ok()
                 .contentType(MediaType.APPLICATION_JSON)
                 .bodyValue(submission);

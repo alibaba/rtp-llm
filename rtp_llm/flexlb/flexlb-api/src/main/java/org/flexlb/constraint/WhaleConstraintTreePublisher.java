@@ -25,6 +25,7 @@ import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.ConcurrentHashMap;
 
 @Slf4j
 @Service
@@ -37,6 +38,7 @@ public class WhaleConstraintTreePublisher implements ConstraintTreePublisher {
     private final GeneralHttpNettyService httpService;
     private final ExecutorService publishExecutor;
     private final Duration publishTimeout;
+    private final Map<String, ConstraintTreeSidMapping> mappingCache = new ConcurrentHashMap<>();
 
     @Autowired
     public WhaleConstraintTreePublisher(WorkerAddressService workerAddressService,
@@ -56,6 +58,41 @@ public class WhaleConstraintTreePublisher implements ConstraintTreePublisher {
         this.publishExecutor = Executors.newFixedThreadPool(
                 Math.max(1, concurrency), new NamedThreadFactory("constraint-tree-publisher"));
         this.publishTimeout = publishTimeout;
+    }
+
+    @Override
+    public ConstraintTreeModels.PreparedBuild prepare(ConstraintTreeModels.BuildRequest request) {
+        Map<String, URI> targets = discoverTargets(request.model());
+        if (targets.isEmpty()) {
+            throw new IllegalStateException("no Whale inference workers available for SID mapping verification");
+        }
+        String fingerprint = null;
+        URI source = null;
+        // Every build probes cheap metadata on all current targets. No full
+        // vocabulary is fetched while the cached fingerprint remains unchanged.
+        for (URI uri : targets.values()) {
+            ConstraintTreeSidMapping status = httpService.get(uri, "/constraint_tree_mapping_status", ConstraintTreeSidMapping.class)
+                    .timeout(publishTimeout).block();
+            if (status == null || status.fingerprint() == null || !status.fingerprint().matches("[0-9a-f]{64}")) {
+                throw new IllegalStateException("Worker SID mapping metadata is unavailable");
+            }
+            if (fingerprint != null && !fingerprint.equals(status.fingerprint())) {
+                throw new IllegalStateException("Workers disagree on SID mapping fingerprint; finish model rollout before building");
+            }
+            fingerprint = status.fingerprint();
+            source = uri;
+        }
+        ConstraintTreeSidMapping mapping = mappingCache.get(request.model());
+        if (mapping == null || !mapping.fingerprint().equals(fingerprint)) {
+            mapping = httpService.get(source, "/constraint_tree_mapping", ConstraintTreeSidMapping.class)
+                    .timeout(publishTimeout).block();
+            if (mapping == null || !fingerprint.equals(mapping.fingerprint())) {
+                throw new IllegalStateException("Worker SID mapping changed during fetch; retry build");
+            }
+            mapping = mapping.validated();
+            mappingCache.put(request.model(), mapping);
+        }
+        return new ConstraintTreeModels.PreparedBuild(mapping.convert(request), fingerprint);
     }
 
     @Override
@@ -127,7 +164,9 @@ public class WhaleConstraintTreePublisher implements ConstraintTreePublisher {
                         "worker already has a newer tree version");
             }
             if (response.version() == artifact.version()) {
-                return new WorkerPublication(worker, true, response.version(), "tree is active");
+                boolean matches = identityMatches(response, artifact);
+                return new WorkerPublication(worker, matches, response.version(),
+                        matches ? "tree is active" : "Worker version matches but content or mapping differs");
             }
             String status = response.status() == null ? "" : response.status().toLowerCase(Locale.ROOT);
             if (status.equals("accepted") || status.equals("already_accepted")) {
@@ -156,7 +195,9 @@ public class WhaleConstraintTreePublisher implements ConstraintTreePublisher {
                         "worker already has a newer tree version");
             }
             if (response.version() == artifact.version()) {
-                return new WorkerPublication(worker, true, response.version(), "already current");
+                boolean matches = identityMatches(response, artifact);
+                return new WorkerPublication(worker, matches, response.version(),
+                        matches ? "already current" : "Worker version matches but content or mapping differs");
             }
             if (response.requestedVersion() > artifact.version()) {
                 return new WorkerPublication(worker, false, response.version(),
@@ -175,6 +216,12 @@ public class WhaleConstraintTreePublisher implements ConstraintTreePublisher {
 
     private static int configuredConcurrency() {
         return configuredPositiveInt("CONSTRAINT_TREE_PUBLISH_CONCURRENCY", 2);
+    }
+
+    private static boolean identityMatches(WorkerUpdateResponse response, SerializedArtifact artifact) {
+        return artifact.mappingFingerprint().isEmpty()
+                || (artifact.mappingFingerprint().equals(response.mappingFingerprint())
+                    && artifact.contentSha256().equals(response.contentSha256()));
     }
 
     private static int configuredTimeoutSeconds() {

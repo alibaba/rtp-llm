@@ -71,7 +71,8 @@ class ConstraintTreeBuildServiceTest {
         service.submit(request(10, "1_3"));
         awaitState(BuildState.READY);
 
-        assertEquals(SubmissionState.ALREADY_ACCEPTED, service.submit(request(10, "4_5_6")).state());
+        assertEquals(SubmissionState.ALREADY_ACCEPTED, service.submit(request(10, "1_3", "1_3")).state());
+        assertEquals(SubmissionState.VERSION_CONFLICT, service.submit(request(10, "4_5_6")).state());
         assertEquals(SubmissionState.STALE_VERSION, service.submit(request(9, "4_5_6")).state());
         assertEquals(10, service.getStatus().activeVersion());
     }
@@ -93,9 +94,10 @@ class ConstraintTreeBuildServiceTest {
         assertEquals(11, service.getCurrentArtifact().orElseThrow().version());
         assertEquals(10, service.getBackupArtifact().orElseThrow().version());
 
-        assertEquals(SubmissionState.ACCEPTED, service.submit(request(12, "7_8_9")).state());
+        assertEquals(SubmissionState.VERSION_CONFLICT, service.submit(request(12, "7_8_9")).state());
+        assertEquals(SubmissionState.ACCEPTED, service.submit(request(13, "7_8_9")).state());
         awaitState(BuildState.READY);
-        assertEquals(12, service.getCurrentArtifact().orElseThrow().version());
+        assertEquals(13, service.getCurrentArtifact().orElseThrow().version());
         assertEquals(11, service.getBackupArtifact().orElseThrow().version());
     }
 
@@ -228,10 +230,51 @@ class ConstraintTreeBuildServiceTest {
             assertEquals(51, localService.getStatus().requestedVersion());
             assertEquals(50, localService.getStatus().activeVersion());
             assertEquals(SubmissionState.ACCEPTED,
-                    localService.submit(request(51, "4_5_6")).state());
+                    localService.submit(request(52, "4_5_6")).state());
             awaitState(localService, BuildState.READY);
         } finally {
             localService.destroy();
+        }
+    }
+
+    @Test
+    void manualRetryRechecksMappingAndReadyRetryDoesNotRebuild() throws Exception {
+        AtomicInteger prepares = new AtomicInteger();
+        AtomicInteger publications = new AtomicInteger();
+        var mapping = ConstraintTreeSidMappingTest.mapping(java.util.Map.of("C1", 17)).validated();
+        ConstraintTreePublisher transientPublisher = new ConstraintTreePublisher() {
+            public ConstraintTreeModels.PreparedBuild prepare(BuildRequest request) {
+                if (prepares.incrementAndGet() == 1) {
+                    throw new IllegalStateException("temporary mapping lookup failure");
+                }
+                return new ConstraintTreeModels.PreparedBuild(mapping.convert(request), mapping.fingerprint());
+            }
+            public PublicationResult publish(ConstraintTreeModels.SerializedArtifact artifact) {
+                publications.incrementAndGet();
+                return new PublicationResult(1, 1, List.of());
+            }
+        };
+        var local = new ConstraintTreeBuildService(new ConstraintTreeBuilder(), Executors.newSingleThreadExecutor(), transientPublisher);
+        try {
+            local.submit(request(70, "C1C1"));
+            awaitState(local, BuildState.FAILED);
+            assertEquals(SubmissionState.ALREADY_ACCEPTED, local.submit(request(70, "C1C1")).state());
+            assertEquals(1, prepares.get());
+            assertEquals(SubmissionState.VERSION_CONFLICT, local.submit(request(70, "C2")).state());
+            local.retry(new ConstraintTreeModels.RetryRequest(70, "gul_item"));
+            awaitState(local, BuildState.READY);
+            var artifact = local.getCurrentArtifact().orElseThrow();
+            assertEquals(mapping.fingerprint(), ConstraintTreeCsrCodec.decode(artifact.payload()).mappingFingerprint());
+            local.retry(new ConstraintTreeModels.RetryRequest(70, "gul_item"));
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+            while (publications.get() < 2 && System.nanoTime() < deadline) {
+                Thread.sleep(5);
+            }
+            assertEquals(2, publications.get());
+            assertEquals(2, prepares.get());
+            assertTrue(artifact == local.getCurrentArtifact().orElseThrow());
+        } finally {
+            local.destroy();
         }
     }
 

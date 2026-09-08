@@ -92,7 +92,11 @@ public final class ConstraintTreeModels {
             @JsonProperty("serialized_size_bytes") long serializedSizeBytes) {
     }
 
-    public record SerializedArtifact(ArtifactMetadata metadata, byte[] payload) {
+    public record SerializedArtifact(ArtifactMetadata metadata, byte[] payload,
+                                     String mappingFingerprint, String contentSha256) {
+        public SerializedArtifact(ArtifactMetadata metadata, byte[] payload) {
+            this(metadata, payload, "", "");
+        }
         public long version() {
             return metadata.version();
         }
@@ -117,13 +121,23 @@ public final class ConstraintTreeModels {
             @JsonProperty("prefix_count") long prefixCount,
             @JsonProperty("published_worker_count") int publishedWorkerCount,
             @JsonProperty("target_worker_count") int targetWorkerCount,
-            String message) {
+            String message,
+            String model,
+            @JsonProperty("mapping_fingerprint") String mappingFingerprint,
+            @JsonProperty("content_sha256") String contentSha256,
+            @JsonProperty("active_content_sha256") String activeContentSha256) {
+        public BuildStatus(BuildState state, long requestedVersion, long activeVersion, long backupVersion,
+                           long sidCount, long prefixCount, int publishedWorkerCount, int targetWorkerCount, String message) {
+            this(state, requestedVersion, activeVersion, backupVersion, sidCount, prefixCount,
+                    publishedWorkerCount, targetWorkerCount, message, "", "", "", "");
+        }
     }
 
     public enum SubmissionState {
         ACCEPTED,
         ALREADY_ACCEPTED,
-        STALE_VERSION
+        STALE_VERSION,
+        VERSION_CONFLICT
     }
 
     public record Submission(
@@ -140,8 +154,18 @@ public final class ConstraintTreeModels {
             String message,
             boolean initialized,
             @JsonProperty("prefix_count") long prefixCount,
-            @JsonProperty("edge_count") long edgeCount) {
+            @JsonProperty("edge_count") long edgeCount,
+            @JsonProperty("mapping_fingerprint") String mappingFingerprint,
+            @JsonProperty("content_sha256") String contentSha256) {
+        public WorkerUpdateResponse(String status, long version, long requestedVersion, String message,
+                                    boolean initialized, long prefixCount, long edgeCount) {
+            this(status, version, requestedVersion, message, initialized, prefixCount, edgeCount, "", "");
+        }
     }
+
+    public record RetryRequest(long version, String model) { }
+
+    public record PreparedBuild(BuildRequest request, String mappingFingerprint) { }
 
     public record WorkerPublication(
             String worker,

@@ -57,6 +57,11 @@
                     <groupId>org.flexlb</groupId>
                     <artifactId>vipserver</artifactId>
                 </dependency>
+                <dependency>
+                    <groupId>org.flexlb</groupId>
+                    <artifactId>igraph</artifactId>
+                    <version>${project.version}</version>
+                </dependency>
             </dependencies>
         </profile>
     </profiles>

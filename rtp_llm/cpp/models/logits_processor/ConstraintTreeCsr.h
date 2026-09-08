@@ -21,6 +21,12 @@ public:
     uint64_t version() const {
         return version_;
     }
+    const std::string& mappingFingerprint() const {
+        return mapping_fingerprint_;
+    }
+    const std::string& contentSha256() const {
+        return content_sha256_;
+    }
     int32_t startTokenId() const {
         return start_token_id_;
     }
@@ -71,10 +77,12 @@ public:
 private:
     friend class ConstraintTreeCsrManager;
 
-    uint64_t             version_        = 0;
-    int32_t              start_token_id_ = -1;
-    int32_t              end_token_id_   = -1;
-    uint64_t             sid_count_      = 0;
+    uint64_t             version_ = 0;
+    std::string          mapping_fingerprint_;
+    std::string          content_sha256_;
+    int32_t              start_token_id_      = -1;
+    int32_t              end_token_id_        = -1;
+    uint64_t             sid_count_           = 0;
     int32_t              terminal_mask_state_ = -1;
     std::vector<int32_t> row_ptr_;
     std::vector<int32_t> col_idx_;
@@ -114,13 +122,18 @@ public:
     ConstraintTreeCsrSnapshotPtr snapshot() const;
     uint64_t                     currentVersion() const;
 
-    static ConstraintTreeCsrUpdateResult peekVersion(const std::string& artifact, uint64_t& version);
-    ConstraintTreeCsrUpdateResult        updateFromBinary(const std::string& artifact, DeviceBase* device);
+    static ConstraintTreeCsrUpdateResult peekVersion(const std::string& artifact,
+                                                     uint64_t&          version,
+                                                     std::string*       mapping_fingerprint = nullptr,
+                                                     std::string*       content_sha256      = nullptr);
+    ConstraintTreeCsrUpdateResult        updateFromBinary(const std::string& artifact,
+                                                          DeviceBase*        device,
+                                                          const std::string& expected_mapping_fingerprint = "");
 
 private:
-    ConstraintTreeCsrManager()                                = default;
-    ConstraintTreeCsrManager(const ConstraintTreeCsrManager&) = delete;
-    ConstraintTreeCsrManager(ConstraintTreeCsrManager&&)      = delete;
+    ConstraintTreeCsrManager()                                           = default;
+    ConstraintTreeCsrManager(const ConstraintTreeCsrManager&)            = delete;
+    ConstraintTreeCsrManager(ConstraintTreeCsrManager&&)                 = delete;
     ConstraintTreeCsrManager& operator=(const ConstraintTreeCsrManager&) = delete;
 
 private:

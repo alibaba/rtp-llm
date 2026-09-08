@@ -138,6 +138,27 @@ class ConstraintTreeServerTest {
                 eq(Submission.class));
     }
 
+    @Test
+    void rejectsConflictingContentAndExposesManualRetry() throws Exception {
+        String body = "{\"version\":44,\"model\":\"gul_item\",\"sids\":[\"1_3\"]}";
+        client.post().uri(ConstraintTreeServer.BUILD_PATH).contentType(MediaType.APPLICATION_JSON)
+                .bodyValue(body).exchange().expectStatus().isOk();
+        awaitBuilt();
+        client.post().uri(ConstraintTreeServer.BUILD_PATH).contentType(MediaType.APPLICATION_JSON)
+                .bodyValue(body).exchange().expectStatus().isOk().expectBody().jsonPath("$.state").isEqualTo("ALREADY_ACCEPTED");
+        client.post().uri(ConstraintTreeServer.BUILD_PATH).contentType(MediaType.APPLICATION_JSON)
+                .bodyValue(body.replace("1_3", "1_4")).exchange().expectStatus().isEqualTo(409)
+                .expectBody().jsonPath("$.error").isEqualTo("version already exists with different content")
+                .jsonPath("$.state").doesNotExist();
+        client.post().uri(ConstraintTreeServer.BUILD_PATH).contentType(MediaType.APPLICATION_JSON)
+                .bodyValue(body.replace("44", "43")).exchange().expectStatus().isOk()
+                .expectBody().jsonPath("$.state").isEqualTo("STALE_VERSION");
+        client.post().uri(ConstraintTreeServer.RETRY_PATH).contentType(MediaType.APPLICATION_JSON)
+                .bodyValue("{\"version\":44,\"model\":\"gul_item\"}").exchange().expectStatus().isOk();
+        client.post().uri(ConstraintTreeServer.RETRY_PATH).contentType(MediaType.APPLICATION_JSON)
+                .bodyValue("{\"version\":43,\"model\":\"gul_item\"}").exchange().expectStatus().isBadRequest();
+    }
+
     private void awaitBuilt() throws Exception {
         long deadline = System.nanoTime() + Duration.ofSeconds(5).toNanos();
         while (System.nanoTime() < deadline) {

@@ -35,6 +35,9 @@ public class ConstraintTreeBuildService {
     private final ConstraintTreePublisher publisher;
     private final ScheduledExecutorService reconcileExecutor;
     private final AtomicLong latestAcceptedVersion = new AtomicLong();
+    private volatile String latestContentSha256 = "";
+    private volatile String latestModel = "";
+    private BuildRequest retryRequest;
     private final AtomicReference<SerializedArtifact> currentArtifact = new AtomicReference<>();
     private final AtomicReference<SerializedArtifact> backupArtifact = new AtomicReference<>();
     private final AtomicReference<BuildStatus> status = new AtomicReference<>(
@@ -98,8 +101,14 @@ public class ConstraintTreeBuildService {
         }
     }
 
-    public synchronized Submission submit(BuildRequest request) {
+    public Submission submit(BuildRequest request) {
         builder.validateMetadata(request);
+        BuildRequest frozen = ConstraintTreeRequestIdentity.freeze(request);
+        String contentSha256 = ConstraintTreeRequestIdentity.fingerprint(frozen);
+        return submitFrozen(frozen, contentSha256, false);
+    }
+
+    private synchronized Submission submitFrozen(BuildRequest request, String contentSha256, boolean manualRetry) {
         long latestVersion = latestAcceptedVersion.get();
         if (request.version() < latestVersion) {
             return new Submission(
@@ -108,7 +117,11 @@ public class ConstraintTreeBuildService {
                     latestVersion,
                     "a newer version has already been accepted");
         }
-        if (request.version() == latestVersion && status.get().state() != BuildState.FAILED) {
+        if (request.version() == latestVersion && !contentSha256.equals(latestContentSha256)) {
+            return new Submission(SubmissionState.VERSION_CONFLICT, request.version(), latestVersion,
+                    "same version has different content; submit a new version");
+        }
+        if (request.version() == latestVersion && !manualRetry) {
             return new Submission(
                     SubmissionState.ALREADY_ACCEPTED,
                     request.version(),
@@ -117,9 +130,12 @@ public class ConstraintTreeBuildService {
         }
 
         latestAcceptedVersion.set(request.version());
+        latestContentSha256 = contentSha256;
+        latestModel = request.model();
+        retryRequest = request;
         SerializedArtifact current = currentArtifact.get();
         SerializedArtifact backup = backupArtifact.get();
-        status.set(new BuildStatus(
+        setStatus(new BuildStatus(
                 BuildState.QUEUED,
                 request.version(),
                 versionOf(current),
@@ -129,7 +145,7 @@ public class ConstraintTreeBuildService {
                 0,
                 0,
                 "build queued"));
-        buildExecutor.execute(() -> buildLatest(request));
+        buildExecutor.execute(() -> buildLatest(request, contentSha256));
         return new Submission(
                 SubmissionState.ACCEPTED,
                 request.version(),
@@ -141,13 +157,29 @@ public class ConstraintTreeBuildService {
         builder.validateMetadata(request);
     }
 
-    private void buildLatest(BuildRequest request) {
+    public synchronized Submission retry(ConstraintTreeModels.RetryRequest request) {
+        if (request == null || request.version() != latestAcceptedVersion.get() || !latestModel.equals(request.model())) {
+            throw new IllegalArgumentException("retry must identify the latest submitted model and version");
+        }
+        BuildState state = status.get().state();
+        if (state == BuildState.BUILDING || state == BuildState.QUEUED || state == BuildState.PUBLISHING) {
+            return new Submission(SubmissionState.ALREADY_ACCEPTED, request.version(), request.version(), "task is still running");
+        }
+        if (state == BuildState.FAILED && retryRequest != null) {
+            return submitFrozen(retryRequest, latestContentSha256, true);
+        }
+        buildExecutor.execute(this::reconcileCurrent);
+        return new Submission(SubmissionState.ACCEPTED, request.version(), request.version(),
+                "republication queued; the existing artifact will not be rebuilt");
+    }
+
+    private void buildLatest(BuildRequest request, String contentSha256) {
         if (request.version() != latestAcceptedVersion.get()) {
             return;
         }
         SerializedArtifact current = currentArtifact.get();
         SerializedArtifact backup = backupArtifact.get();
-        status.set(new BuildStatus(
+        setStatus(new BuildStatus(
                 BuildState.BUILDING,
                 request.version(),
                 versionOf(current),
@@ -159,11 +191,12 @@ public class ConstraintTreeBuildService {
                 "building prefix tree"));
         long buildStartedAt = System.nanoTime();
         try {
-            Artifact built = builder.build(request);
+            ConstraintTreeModels.PreparedBuild prepared = publisher.prepare(request);
+            Artifact built = builder.build(prepared.request());
             if (request.version() != latestAcceptedVersion.get()) {
                 return;
             }
-            byte[] payload = serialize(built);
+            byte[] payload = ConstraintTreeCsrCodec.encode(built, prepared.mappingFingerprint(), contentSha256);
             SerializedArtifact candidate = new SerializedArtifact(
                     new ArtifactMetadata(
                             built.version(),
@@ -176,16 +209,23 @@ public class ConstraintTreeBuildService {
                             built.edgeCount(),
                             built.createdAtEpochMs(),
                             payload.length),
-                    payload);
+                    payload, prepared.mappingFingerprint(), contentSha256);
 
-            SerializedArtifact previous = currentArtifact.getAndSet(candidate);
-            backupArtifact.set(previous);
+            SerializedArtifact previous;
+            synchronized (this) {
+                if (request.version() != latestAcceptedVersion.get()) {
+                    return;
+                }
+                previous = currentArtifact.getAndSet(candidate);
+                backupArtifact.set(previous);
+                retryRequest = null; // Re-push the artifact after publication errors; do not retain all input SIDs.
+            }
             long buildMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - buildStartedAt);
             log.info("constraint CSR built model={}, version={}, input_sids={}, unique_sids={}, states={}, edges={}, bytes={}, cost_ms={}",
                     built.model(), built.version(), built.inputSidCount(), built.sidCount(), built.prefixCount(),
                     built.edgeCount(), payload.length, buildMillis);
 
-            status.set(new BuildStatus(
+            setStatus(new BuildStatus(
                     BuildState.PUBLISHING,
                     request.version(),
                     candidate.version(),
@@ -205,7 +245,7 @@ public class ConstraintTreeBuildService {
                 }
                 log.warn("constraint tree built but publication failed model={}, version={}",
                         request.model(), request.version(), publishError);
-                status.set(new BuildStatus(
+                setStatus(new BuildStatus(
                         BuildState.PARTIALLY_PUBLISHED,
                         request.version(),
                         candidate.version(),
@@ -229,7 +269,7 @@ public class ConstraintTreeBuildService {
             } else {
                 publicationMessage = "tree built; some Whale inference workers still need retry";
             }
-            status.set(new BuildStatus(
+            setStatus(new BuildStatus(
                     fullyPublished ? BuildState.READY : BuildState.PARTIALLY_PUBLISHED,
                     request.version(),
                     candidate.version(),
@@ -246,7 +286,7 @@ public class ConstraintTreeBuildService {
             SerializedArtifact active = currentArtifact.get();
             SerializedArtifact previous = backupArtifact.get();
             log.error("constraint tree build failed model={}, version={}", request.model(), request.version(), e);
-            status.set(new BuildStatus(
+            setStatus(new BuildStatus(
                     BuildState.FAILED,
                     request.version(),
                     versionOf(active),
@@ -257,14 +297,6 @@ public class ConstraintTreeBuildService {
                     0,
                     e.getMessage()));
         }
-    }
-
-    private byte[] serialize(Artifact artifact) {
-        byte[] payload = ConstraintTreeCsrCodec.encode(artifact);
-        if (payload.length == 0) {
-            throw new IllegalStateException("failed to serialize constraint CSR artifact");
-        }
-        return payload;
     }
 
     private static long versionOf(SerializedArtifact artifact) {
@@ -308,7 +340,7 @@ public class ConstraintTreeBuildService {
             } else {
                 publicationMessage = "some Whale inference workers still need retry";
             }
-            status.set(new BuildStatus(
+            setStatus(new BuildStatus(
                     complete ? BuildState.READY : BuildState.PARTIALLY_PUBLISHED,
                     current.version(),
                     current.version(),
@@ -323,8 +355,19 @@ public class ConstraintTreeBuildService {
         }
     }
 
-    public BuildStatus getStatus() {
-        return status.get();
+    private synchronized void setStatus(BuildStatus next) {
+        if (next.requestedVersion() == latestAcceptedVersion.get()) {
+            status.set(next);
+        }
+    }
+
+    public synchronized BuildStatus getStatus() {
+        BuildStatus current = status.get();
+        SerializedArtifact artifact = currentArtifact.get();
+        return new BuildStatus(current.state(), current.requestedVersion(), current.activeVersion(), current.backupVersion(),
+                current.sidCount(), current.prefixCount(), current.publishedWorkerCount(), current.targetWorkerCount(),
+                current.message(), latestModel, artifact == null ? "" : artifact.mappingFingerprint(),
+                latestContentSha256, artifact == null ? "" : artifact.contentSha256());
     }
 
     public Optional<SerializedArtifact> getCurrentArtifact() {

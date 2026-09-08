@@ -228,7 +228,17 @@ bool HttpApiServer::registerConstraintTreeService() {
         return false;
     }
 
-    constraint_tree_service_.reset(new ConstraintTreeService(engine_ ? engine_->getDevice() : nullptr));
+    std::string mapping_json = "{}";
+    if (tokenizer_) {
+        try {
+            mapping_json = tokenizer_->sidMappingJson();
+        } catch (const std::exception& e) {
+            // Non-SID tokenizers remain usable. A Master cannot publish mapped
+            // SID trees to such a worker because the manifest endpoint fails closed.
+            RTP_LLM_LOG_WARNING("SID mapping is unavailable: %s", e.what());
+        }
+    }
+    constraint_tree_service_.reset(new ConstraintTreeService(engine_ ? engine_->getDevice() : nullptr, mapping_json));
     auto update_callback = [constraint_tree_service =
                                 constraint_tree_service_](std::unique_ptr<http_server::HttpResponseWriter> writer,
                                                           const http_server::HttpRequest& request) -> void {
@@ -239,8 +249,18 @@ bool HttpApiServer::registerConstraintTreeService() {
                                                           const http_server::HttpRequest& request) -> void {
         constraint_tree_service->constraintTreeStatus(writer, request);
     };
+    auto mapping_callback = [service = constraint_tree_service_](
+                                std::unique_ptr<http_server::HttpResponseWriter> writer,
+                                const http_server::HttpRequest&) { service->constraintTreeMapping(writer, true); };
+    auto mapping_status_callback =
+        [service = constraint_tree_service_](std::unique_ptr<http_server::HttpResponseWriter> writer,
+                                             const http_server::HttpRequest&) {
+            service->constraintTreeMapping(writer, false);
+        };
     return http_server_->RegisterRoute("POST", "/update_constraint_tree", update_callback)
-           && http_server_->RegisterRoute("GET", "/constraint_tree_status", status_callback);
+           && http_server_->RegisterRoute("GET", "/constraint_tree_status", status_callback)
+           && http_server_->RegisterRoute("GET", "/constraint_tree_mapping", mapping_callback)
+           && http_server_->RegisterRoute("GET", "/constraint_tree_mapping_status", mapping_status_callback);
 }
 
 bool HttpApiServer::registerChatService() {

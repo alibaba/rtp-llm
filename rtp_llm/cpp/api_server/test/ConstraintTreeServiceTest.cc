@@ -313,4 +313,40 @@ TEST_F(ConstraintTreeServiceTest, RealHttpEndpointsQueueActivateAndReportStatus)
     server->Stop();
 }
 
+TEST_F(ConstraintTreeServiceTest, MappedArtifactsRequireMatchingFingerprintAndImmutableVersionContent) {
+    const std::string fingerprint(64, 'a');
+    const std::string content(64, 'b');
+    service_ = std::make_shared<ConstraintTreeService>(
+        nullptr,
+        "{\"mapping_fingerprint\":\"" + fingerprint
+            + "\",\"vocab_size\":256,\"start_token_id\":225,\"end_token_id\":2}");
+    const auto version = ConstraintTreeCsrManager::instance()->currentVersion() + 1;
+    auto       body    = makeArtifact(version);
+    body[8]            = 2;
+    body[12]           = static_cast<char>(176);
+    body.insert(48, fingerprint + content);
+
+    auto wrong_mapping = body;
+    wrong_mapping.replace(48, 64, std::string(64, 'c'));
+    auto rejected = sendUpdate(wrong_mapping);
+    EXPECT_EQ(409, rejected.status_code);
+    EXPECT_THAT(rejected.body, HasSubstr("mapping_mismatch"));
+    EXPECT_NE(version, ConstraintTreeCsrManager::instance()->currentVersion());
+
+    ASSERT_EQ(200, sendUpdate(body).status_code);
+    ASSERT_TRUE(waitForState("ready"));
+    const auto pinned = ConstraintTreeCsrManager::instance()->snapshot();
+    EXPECT_EQ(fingerprint, pinned->mappingFingerprint());
+    EXPECT_EQ(content, pinned->contentSha256());
+    EXPECT_THAT(readStatus().body, HasSubstr("\"mapping_fingerprint\":\"" + fingerprint + "\""));
+    EXPECT_THAT(sendUpdate(body).body, HasSubstr("already_current"));
+
+    auto conflict = body;
+    conflict.replace(112, 64, std::string(64, 'd'));
+    EXPECT_EQ(409, sendUpdate(conflict).status_code);
+    EXPECT_EQ(pinned, ConstraintTreeCsrManager::instance()->snapshot());
+    EXPECT_EQ(409, sendUpdate(makeArtifact(version + 1)).status_code);  // v1 cannot bypass the mapping check.
+    EXPECT_EQ(pinned, ConstraintTreeCsrManager::instance()->snapshot());
+}
+
 }  // namespace rtp_llm

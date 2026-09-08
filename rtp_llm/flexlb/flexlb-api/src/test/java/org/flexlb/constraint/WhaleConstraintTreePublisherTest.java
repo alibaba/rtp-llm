@@ -23,6 +23,8 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.times;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class WhaleConstraintTreePublisherTest {
 
@@ -124,5 +126,37 @@ class WhaleConstraintTreePublisherTest {
         return new SerializedArtifact(
                 new ArtifactMetadata(7, "gul_item", 1699, 151645, 2, 2, 4, 5, 1, payload.length),
                 payload);
+    }
+
+    @Test
+    void probesFingerprintsEveryBuildAndFetchesMappingOnlyWhenChanged() {
+        WorkerHost worker = new WorkerHost("10.0.0.1", 8000, 8001, 8005, "hz", "default");
+        URI uri = URI.create("http://10.0.0.1:8005");
+        when(addresses.getEngineWorkerList("gul_item", RoleType.DECODE)).thenReturn(List.of(worker));
+        when(addresses.getEngineWorkerList("gul_item", RoleType.PDFUSION)).thenReturn(List.of());
+        var first = ConstraintTreeSidMappingTest.mapping(java.util.Map.of("C1", 17));
+        var second = ConstraintTreeSidMappingTest.mapping(java.util.Map.of("C1", 19));
+        when(http.get(uri, "/constraint_tree_mapping_status", ConstraintTreeSidMapping.class))
+                .thenReturn(Mono.just(first), Mono.just(first), Mono.just(second));
+        when(http.get(uri, "/constraint_tree_mapping", ConstraintTreeSidMapping.class))
+                .thenReturn(Mono.just(first), Mono.just(second));
+        assertEquals(17, publisher.prepare(ConstraintTreeSidMappingTest.request(1, "C1C1")).request().rqTokenIds().get(0)[0]);
+        publisher.prepare(ConstraintTreeSidMappingTest.request(2, "C1C1"));
+        assertEquals(19, publisher.prepare(ConstraintTreeSidMappingTest.request(3, "C1C1")).request().rqTokenIds().get(0)[0]);
+        verify(http, times(3)).get(uri, "/constraint_tree_mapping_status", ConstraintTreeSidMapping.class);
+        verify(http, times(2)).get(uri, "/constraint_tree_mapping", ConstraintTreeSidMapping.class);
+    }
+
+    @Test
+    void mismatchedWorkersBlockConversionBeforeAnyFullMappingFetch() {
+        WorkerHost first = new WorkerHost("10.0.0.1", 8000, 8001, 8005, "hz", "default");
+        WorkerHost second = new WorkerHost("10.0.0.2", 9000, 9001, 9005, "sh", "default");
+        when(addresses.getEngineWorkerList("gul_item", RoleType.DECODE)).thenReturn(List.of(first, second));
+        when(addresses.getEngineWorkerList("gul_item", RoleType.PDFUSION)).thenReturn(List.of());
+        when(http.get(any(URI.class), eq("/constraint_tree_mapping_status"), eq(ConstraintTreeSidMapping.class)))
+                .thenReturn(Mono.just(ConstraintTreeSidMappingTest.mapping(java.util.Map.of("C1", 17))),
+                        Mono.just(ConstraintTreeSidMappingTest.mapping(java.util.Map.of("C1", 19))));
+        assertThrows(IllegalStateException.class, () -> publisher.prepare(ConstraintTreeSidMappingTest.request(1, "C1")));
+        verify(http, never()).get(any(URI.class), eq("/constraint_tree_mapping"), eq(ConstraintTreeSidMapping.class));
     }
 }

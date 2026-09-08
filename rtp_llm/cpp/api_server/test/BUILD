@@ -124,6 +124,27 @@ cc_test(
     ],
 )
 
+# Exercise the production C++ -> Python tokenizer boundary without loading a model.
+cc_binary(
+    name = "tokenizer_sid_mapping_test_lib.so",
+    srcs = ["TokenizerSidMappingTestBinding.cc"],
+    deps = ["//rtp_llm/cpp/api_server:tokenizer"],
+    copts = copts(),
+    linkshared = 1,
+)
+
+py_test(
+    name = "tokenizer_sid_mapping_test",
+    srcs = ["tokenizer_sid_mapping_test.py"],
+    data = [
+        ":tokenizer_sid_mapping_test_lib.so",
+        "//rtp_llm:frontend/tokenizer_factory/tokenizers/base_tokenizer.py",
+    ],
+    deps = ["//rtp_llm:transformers"],
+    imports = ["."],
+    python_version = "PY3",
+)
+
 cc_binary(
     name = "constraint_tree_test_server",
     srcs = ["ConstraintTreeTestServer.cc"],
