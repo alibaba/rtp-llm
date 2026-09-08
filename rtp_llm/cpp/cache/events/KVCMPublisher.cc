@@ -456,6 +456,7 @@ public:
         }
         stopping_.store(false, std::memory_order_relaxed);
         registered_.store(false, std::memory_order_relaxed);
+        registered_once_.store(false, std::memory_order_relaxed);
         state_.store(PublisherState::STARTING, std::memory_order_relaxed);
         try {
             worker_           = std::thread(&Impl::workerLoop, this);
@@ -503,7 +504,7 @@ public:
         }
         // Stop the heartbeat first.  HOST_DOWN must be the final request made
         // by this publisher, so no in-flight heartbeat may outlive it.
-        const bool was_registered = registered_.load(std::memory_order_relaxed);
+        const bool was_registered = registered_once_.load(std::memory_order_relaxed);
         stopping_.store(true, std::memory_order_relaxed);
         queue_.stop();
         if (heartbeat_worker_.joinable()) {
@@ -682,6 +683,7 @@ private:
                         continue;
                     }
                     registered_.store(true, std::memory_order_relaxed);
+                    registered_once_.store(true, std::memory_order_relaxed);
                     dirty_generation_.fetch_add(1, std::memory_order_relaxed);
                 }
 
@@ -771,6 +773,7 @@ private:
     std::atomic<bool>                     started_{false};
     std::atomic<bool>                     stopping_{false};
     std::atomic<bool>                     registered_{false};
+    std::atomic<bool>                     registered_once_{false};
     bool                                  stopped_permanently_{false};
     std::atomic<PublisherState>           state_{PublisherState::DISABLED};
     std::atomic<uint64_t>                 accepted_count_{0};
