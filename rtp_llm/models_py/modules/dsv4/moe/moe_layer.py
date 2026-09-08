@@ -24,6 +24,7 @@ from typing import Dict, Optional
 
 import torch
 import torch.nn as nn
+
 from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
 from rtp_llm.models_py.modules.dsv4.chunk_env import (
     DEFAULT_DSV4_CHUNK_TOKENS,
@@ -320,7 +321,12 @@ class MoE(nn.Module):
                 swiglu_limit=swiglu_limit,
                 platform_provider=self._platform_provider,
             )
-            self._shared_executor = get_shared_expert_executor(
+            executor_factory = getattr(
+                self._platform_provider,
+                "build_shared_expert_executor",
+                get_shared_expert_executor,
+            )
+            self._shared_executor = executor_factory(
                 max_tokens_per_rank=max_tokens_per_rank,
                 dim=dim,
                 inter_dim=moe_inter_dim,

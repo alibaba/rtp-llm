@@ -36,6 +36,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
 
 import torch
+
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
@@ -61,6 +62,10 @@ from rtp_llm.models_py.modules.dsv4.platform_provider import (
 from rtp_llm.models_py.modules.dsv4.prefill.forward import forward_prefill
 from rtp_llm.models_py.modules.dsv4.prefill_workspace import tp_local_prefill_q_dim
 from rtp_llm.models_py.modules.dsv4.transformer import V4Args, V4Transformer
+from rtp_llm.models_py.pluggable.dsv4_specs import (
+    forward_capabilities,
+    validate_forward_phase,
+)
 from rtp_llm.ops import RoleType
 from rtp_llm.utils.warmup import model_warm_up_enabled
 
@@ -481,6 +486,11 @@ class DeepSeekV4Model(GptModelBase):
         self.v4: Optional[V4Transformer] = None
 
         self._materialized = False
+        self._module_forward_capabilities = (
+            forward_capabilities(module_build_context.bindings)
+            if module_build_context is not None
+            else None
+        )
         self._ckpt_path: str = model_config.ckpt_path
 
         # Optional on-demand timeline capture. Set DSV4_PROFILE_TRACE=/path/trace.json
@@ -833,6 +843,7 @@ class DeepSeekV4Model(GptModelBase):
             # same (H, D, ratio, T) but with mask. We compile both APPLY_MASK
             # variants here.
             import torch as _torch
+
             from rtp_llm.models_py.modules.dsv4._indexer_score_triton import (
                 v4_indexer_score as _v4_idx,
             )
@@ -1365,12 +1376,13 @@ class DeepSeekV4Model(GptModelBase):
             raise RuntimeError(
                 "DeepSeekV4Model.forward: PyModelInputs carries no attention inputs"
             )
-        if self.module_build_context is not None and (
-            not attn.is_prefill
-            or _is_decode_fmha(fmha_impl)
-            or bool(getattr(attn, "is_target_verify", False))
-        ):
-            raise RuntimeError("Selected module contract supports Prefill only")
+        if self._module_forward_capabilities is not None:
+            validate_forward_phase(
+                self._module_forward_capabilities,
+                is_prefill=attn.is_prefill,
+                has_decode_fmha=_is_decode_fmha(fmha_impl),
+                is_target_verify=bool(getattr(attn, "is_target_verify", False)),
+            )
 
         # Subclass-overridable hidden-state preparation hooks.  When a
         # subclass (e.g. ``DeepSeekV4MtpModel``) overrides

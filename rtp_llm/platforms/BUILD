@@ -48,3 +48,21 @@ py_test(
     deps = ["//rtp_llm/models_py:models", "//rtp_llm:torch"],
     tags = ["manual", "gpu", "ppu"],
 )
+
+py_test(
+    name = "decode_attention_test",
+    srcs = ["ppu/test/test_decode_attention.py"],
+    main = "ppu/test/test_decode_attention.py",
+    data = [":platform_sources"],
+    deps = ["//rtp_llm/models_py:models", "//rtp_llm:torch"],
+    tags = ["manual", "gpu", "ppu"],
+)
+
+py_test(
+    name = "decode_shared_expert_test",
+    srcs = ["ppu/test/test_decode_shared_expert.py"],
+    main = "ppu/test/test_decode_shared_expert.py",
+    data = [":platform_sources"],
+    deps = ["//rtp_llm/models_py:models", "//rtp_llm:torch"],
+    tags = ["manual", "gpu", "ppu"],
+)

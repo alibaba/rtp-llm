@@ -7,6 +7,16 @@ class PpuDecodeProvider(PpuModuleProvider):
     name = "m890p-dsv4-fp4-decode-candidate"
     indexer_mode = "FP4"
 
+    def build_shared_expert_executor(self, **kwargs):
+        from .ppu_shared_expert import PpuSharedExpertExecutor
+
+        if (
+            self.execution_options.get("DSV4_SHARED_EXPERT_MODE", "sequential")
+            != "sequential"
+        ):
+            raise ValueError("PPU Decode shared experts require sequential execution")
+        return PpuSharedExpertExecutor()
+
     def build_moe(self, default_factory, *args, **kwargs):
         from .ppu_deepep_fp4 import PpuDeepEPFP4Strategy
 

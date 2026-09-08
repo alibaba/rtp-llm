@@ -121,6 +121,10 @@ def supports_ppu_fp4_decode(selection, request):
         ),
         (metadata.get("role") == "DECODE", "requires Decode resources"),
         (
+            metadata.get("cache_geometry", {}).get("kernel_tokens_per_block") == 256,
+            "requires 256 raw tokens per kernel block (CSA/Indexer 64, HCA 2)",
+        ),
+        (
             metadata.get("hidden_size") == 4096 and metadata.get("num_layers") == 43,
             "requires Flash 43-layer/4096 model",
         ),

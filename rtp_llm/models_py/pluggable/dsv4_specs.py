@@ -141,6 +141,28 @@ def validate_runtime_role(metadata, *, is_decode_role, is_speculative):
         raise ValueError("Runtime speculation is not supported by this module contract")
 
 
+def forward_capabilities(bindings):
+    """Snapshot phases supported by every selected module before allocation."""
+    if not bindings:
+        raise ValueError("Forward capabilities require a prepared module plan")
+    return frozenset.intersection(
+        *(binding.implementation.capabilities for binding in bindings)
+    )
+
+
+def validate_forward_phase(
+    capabilities, *, is_prefill, has_decode_fmha, is_target_verify
+):
+    if is_target_verify:
+        phase = "target_verify"
+    elif has_decode_fmha or not is_prefill:
+        phase = "decode"
+    else:
+        phase = "prefill"
+    if phase not in capabilities:
+        raise RuntimeError(f"Selected module contract does not support {phase}")
+
+
 def describe_model(selection, request):
     return [
         request_for("block", selection, index)

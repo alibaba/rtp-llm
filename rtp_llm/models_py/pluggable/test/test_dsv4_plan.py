@@ -63,6 +63,7 @@ class Dsv4PlanTest(unittest.TestCase):
             ep_size=8,
             world_size=8,
             role="DECODE",
+            cache_geometry={"kernel_tokens_per_block": 256},
             cuda_graph=True,
             indexer_cache_mode="fp4",
             execution_options={"DSV4_PPU_SGLANG_MOE": "1"},
@@ -118,6 +119,38 @@ class Dsv4PlanTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             validate_parallelism(pc)
 
+    def test_selected_plan_controls_actual_forward_phase(self):
+        from rtp_llm.models_py.pluggable.dsv4_specs import (
+            forward_capabilities,
+            validate_forward_phase,
+        )
+
+        for ctx, allowed in (
+            (self.context(), "prefill"),
+            (self.decode_context(), "decode"),
+        ):
+            ctx.prepare([request_for("model", ctx.selection)])
+            capabilities = forward_capabilities(ctx.bindings)
+            self.assertEqual(capabilities, frozenset({allowed}))
+            for is_prefill, graph, verify, phase in (
+                (True, False, False, "prefill"),
+                (False, False, False, "decode"),
+                (False, True, False, "decode"),
+                (True, True, True, "target_verify"),
+            ):
+                args = dict(
+                    is_prefill=is_prefill,
+                    has_decode_fmha=graph,
+                    is_target_verify=verify,
+                )
+                if phase == allowed:
+                    validate_forward_phase(capabilities, **args)
+                else:
+                    with self.assertRaisesRegex(
+                        RuntimeError, f"does not support {phase}"
+                    ):
+                        validate_forward_phase(capabilities, **args)
+
     def test_decode_rejects_mismatched_runtime_and_communication(self):
         from rtp_llm.models_py.pluggable.dsv4_specs import validate_runtime_role
 
@@ -138,6 +171,8 @@ class Dsv4PlanTest(unittest.TestCase):
             {"ep_size": 4},
             {"dp_size": 4},
             {"role": "PDFUSION"},
+            {"cache_geometry": {}},
+            {"cache_geometry": {"kernel_tokens_per_block": 1024}},
             {"speculative": True},
             {"cp_enabled": True},
             {"reuse_cache": True},
