@@ -7,15 +7,21 @@ class PpuDecodeProvider(PpuModuleProvider):
     name = "m890p-dsv4-fp4-decode-candidate"
     indexer_mode = "FP4"
 
+    def __init__(self, execution_options=None):
+        super().__init__(execution_options)
+        from rtp_llm.platforms.ppu.runtime import PpuStreamPool
+
+        self.stream_pool = PpuStreamPool()
+
     def build_shared_expert_executor(self, **kwargs):
         from .ppu_shared_expert import PpuSharedExpertExecutor
 
-        if (
-            self.execution_options.get("DSV4_SHARED_EXPERT_MODE", "sequential")
-            != "sequential"
-        ):
-            raise ValueError("PPU Decode shared experts require sequential execution")
-        return PpuSharedExpertExecutor()
+        mode = self.execution_options.get("DSV4_SHARED_EXPERT_MODE", "sequential")
+        if mode not in ("sequential", "overlap"):
+            raise ValueError("PPU shared expert mode must be sequential or overlap")
+        return PpuSharedExpertExecutor(
+            stream_pool=self.stream_pool if mode == "overlap" else None
+        )
 
     def build_moe(self, default_factory, *args, **kwargs):
         from .ppu_deepep_fp4 import PpuDeepEPFP4Strategy

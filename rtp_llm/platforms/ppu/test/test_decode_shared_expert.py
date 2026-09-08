@@ -7,13 +7,12 @@ from pathlib import Path
 from unittest.mock import patch
 
 import torch
-from safetensors import safe_open
-
 from rtp_llm.models_py.modules.dsv4.moe.shared_expert import (
     FusedSharedExpertFastPath,
     SequentialSharedExpertExecutor,
 )
 from rtp_llm.platforms.ppu.models.dsv4.ppu_decode_provider import PpuDecodeProvider
+from safetensors import safe_open
 
 
 @unittest.skipUnless(
@@ -100,6 +99,77 @@ class DecodeSharedExpertTest(unittest.TestCase):
         with patch.dict(os.environ, {"DSV4_MOE_STRICT_FUSED": "1"}):
             with self.assertRaisesRegex(RuntimeError, "forbids generic"):
                 SequentialSharedExpertExecutor().start(self.shared, x)
+
+    @torch.inference_mode()
+    def test_overlap_graph_joins_producer_and_consumer(self):
+        provider = PpuDecodeProvider({"DSV4_SHARED_EXPERT_MODE": "overlap"})
+        executor = provider.build_shared_expert_executor()
+        executor.prepare(self.shared)
+        second = provider.build_shared_expert_executor()
+        second.prepare(self.shared)
+        self.assertIs(executor._stream, second._stream)
+        other_provider = PpuDecodeProvider({"DSV4_SHARED_EXPERT_MODE": "overlap"})
+        other = other_provider.build_shared_expert_executor()
+        other.prepare(self.shared)
+        self.assertIsNot(executor._stream, other._stream)
+        self.assertEqual(executor.name, "ppu_overlap")
+
+        original = self.shared.forward
+        calls = []
+
+        def observed(x):
+            calls.append(
+                (
+                    torch.cuda.current_stream().cuda_stream,
+                    torch.cuda.is_current_stream_capturing(),
+                )
+            )
+            return original(x)
+
+        torch.manual_seed(890414)
+        with patch.object(self.shared, "forward", side_effect=observed), patch.dict(
+            os.environ, {"DSV4_MOE_STRICT_FUSED": "1"}
+        ):
+            for batch in (1, 3, 8, 32, 128):
+                with self.subTest(batch=batch):
+                    x = torch.randn((batch, 4096), device="cuda", dtype=torch.bfloat16)
+
+                    def run():
+                        # Producer work must precede the auxiliary stream's read.
+                        x.add_(1)
+                        executor.start(self.shared, x)
+                        routed = x * 0.5
+                        shared = executor.finish()
+                        # Consumer work must wait for the shared result.
+                        return shared.float() + routed.float()
+
+                    stream = torch.cuda.Stream()
+                    stream.wait_stream(torch.cuda.current_stream())
+                    with torch.cuda.stream(stream):
+                        for _ in range(3):
+                            run()
+                    torch.cuda.current_stream().wait_stream(stream)
+                    graph = torch.cuda.CUDAGraph()
+                    with torch.cuda.graph(graph, stream=stream):
+                        actual = run()
+                    self.assertEqual(calls[-1], (executor._stream.cuda_stream, True))
+                    torch.cuda.current_stream().wait_stream(stream)
+                    for _ in range(5):
+                        x.normal_()
+                        updated = x + 1
+                        expected = original(updated).float() + (updated * 0.5).float()
+                        actual.fill_(float("nan"))
+                        graph.replay()
+                        self.assertTrue(bool(actual.isfinite().all()))
+                        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+        x = torch.ones((1, 4096), device="cuda", dtype=torch.bfloat16)
+        executor.start(self.shared, x)
+        with self.assertRaisesRegex(RuntimeError, "pending output"):
+            executor.start(self.shared, x)
+        with self.assertRaisesRegex(RuntimeError, "pending output"):
+            executor.prepare(self.shared)
+        executor.finish()
 
 
 if __name__ == "__main__":

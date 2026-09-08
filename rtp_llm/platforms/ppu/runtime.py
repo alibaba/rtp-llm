@@ -7,6 +7,34 @@ import sys
 from functools import wraps
 
 
+class PpuStreamPool:
+    """Auxiliary streams owned by one model provider, shared across its layers.
+
+    Callers must prepare each role before capture and join its work before
+    consuming results. No stream or device state is created on construction.
+    """
+
+    def __init__(self):
+        self._streams = {}
+
+    def get(self, role, device):
+        import torch
+
+        device = torch.device(device)
+        if device.type != "cuda":
+            raise ValueError("PPU auxiliary streams require a CUDA/PPU device")
+        index = device.index
+        if index is None:
+            index = torch.cuda.current_device()
+        key = (index, role)
+        if key not in self._streams:
+            with torch.cuda.device(index):
+                if torch.cuda.is_current_stream_capturing():
+                    raise RuntimeError("PPU streams must be prepared before capture")
+                self._streams[key] = torch.cuda.Stream(device=index)
+        return self._streams[key]
+
+
 def configure_runtime_paths():
     """Restore packaged JIT dependency paths in multiprocessing.spawn workers."""
     for path in os.environ.get("_JIT_CACHE_PATHS", "").split(os.pathsep):

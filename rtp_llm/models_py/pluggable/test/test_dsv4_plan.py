@@ -119,6 +119,24 @@ class Dsv4PlanTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             validate_parallelism(pc)
 
+    def test_decode_shared_overlap_preserves_rank_protocol(self):
+        digests = set()
+        for rank in range(8):
+            ctx = self.decode_context(
+                rank,
+                execution_options={
+                    "DSV4_PPU_SGLANG_MOE": "1",
+                    "DSV4_SHARED_EXPERT_MODE": "overlap",
+                },
+            )
+            digests.add(ctx.prepare([request_for("model", ctx.selection)]))
+            self.assertEqual(len(ctx.bindings), 130)
+        self.assertEqual(len(digests), 1)
+        sequential = self.decode_context()
+        self.assertNotIn(
+            sequential.prepare([request_for("model", sequential.selection)]), digests
+        )
+
     def test_selected_plan_controls_actual_forward_phase(self):
         from rtp_llm.models_py.pluggable.dsv4_specs import (
             forward_capabilities,
