@@ -81,3 +81,11 @@ py_test(
     tags = ["L20A_DEV"],
     timeout = "long",
 )
+
+py_test(
+    name = "glm53_collective_gemm_test",
+    srcs = ["glm53_collective_gemm_test.py"],
+    deps = ["//rtp_llm:testlib", "//rtp_llm/models_py:modules", "//rtp_llm/models_py/distributed:collective_torch"],
+    tags = ["manual", "L20A_DEV"],
+    timeout = "long",
+)

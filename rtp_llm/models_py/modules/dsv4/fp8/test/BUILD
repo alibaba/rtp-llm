@@ -13,6 +13,7 @@ _DSV4_FP8_TEST_DEPS = [
 ]
 
 _DSV4_FP8_TESTS = [
+    "test_glm53_indexer_fusion",
     "test_bf16_gemm_fp32",
     "test_compressor_disable_raw_path",
     "test_cp_pool_reader_owned_lens",

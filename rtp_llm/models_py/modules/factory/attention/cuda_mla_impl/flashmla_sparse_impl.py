@@ -187,8 +187,13 @@ class SparseMlaOp(object):
         self.bf16_q_chunk_rows = int(
             os.environ.get("GLM53_SPARSE_MLA_BF16_Q_CHUNK", "4096")
         )
+        self.native_q_chunk_rows = int(
+            os.environ.get(
+                "GLM53_SPARSE_MLA_NATIVE_Q_CHUNK", str(self.bf16_q_chunk_rows)
+            )
+        )
         self.bf16_backend = os.environ.get("GLM53_SPARSE_MLA_BF16_BACKEND", "auto")
-        if self.bf16_q_chunk_rows <= 0:
+        if self.bf16_q_chunk_rows <= 0 or self.native_q_chunk_rows <= 0:
             raise ValueError("GLM53_SPARSE_MLA_BF16_Q_CHUNK must be positive")
         if self.bf16_backend not in (
             "auto",
@@ -389,7 +394,12 @@ class SparseMlaOp(object):
             return out
 
         tokens = int(q.shape[0])
-        if local_heads == self.kernel_num_heads and tokens <= self.bf16_q_chunk_rows:
+        chunk_rows = (
+            self.native_q_chunk_rows
+            if local_heads == self.kernel_num_heads
+            else self.bf16_q_chunk_rows
+        )
+        if local_heads == self.kernel_num_heads and tokens <= chunk_rows:
             out, _, _ = flash_mla_sparse_fwd(
                 q,
                 kv,
@@ -399,8 +409,8 @@ class SparseMlaOp(object):
             )
             return out
         out = q.new_empty((tokens, local_heads, self.kv_lora_rank))
-        for begin in range(0, tokens, self.bf16_q_chunk_rows):
-            end = min(begin + self.bf16_q_chunk_rows, tokens)
+        for begin in range(0, tokens, chunk_rows):
+            end = min(begin + chunk_rows, tokens)
             q_chunk = q[begin:end]
             if local_heads != self.kernel_num_heads:
                 padded = q.new_zeros((end - begin, self.kernel_num_heads, q.shape[2]))

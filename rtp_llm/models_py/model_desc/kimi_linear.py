@@ -11,10 +11,8 @@ import logging
 import os
 from typing import Any, Dict, Optional
 
-import torch
-from torch import nn
-
 import rtp_llm.ops.compute_ops as compute_ops
+import torch
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models.glm53_prefill_parallel import (
@@ -92,6 +90,7 @@ from rtp_llm.ops.compute_ops import (
 )
 from rtp_llm.utils.model_weight import W
 from rtp_llm.utils.util import to_torch_dtype
+from torch import nn
 
 _CULA_LOGGED_DEVICES: set[int] = set()
 
@@ -607,6 +606,10 @@ class KimiLinearKDADecode(KimiLinearKDABase):
         super().__init__(
             linear_attn_config, parallelism_config, weights, gate_lower_bound
         )
+        self.fuse_decode = os.environ.get("GLM53_KDA_DECODE_FUSION", "0") == "1"
+        self.decode_low_warps = (
+            os.environ.get("GLM53_KDA_RECURRENT_LOW_WARPS", "0") == "1"
+        )
 
     def _conv1d(
         self,
@@ -646,6 +649,7 @@ class KimiLinearKDADecode(KimiLinearKDABase):
         seq_size_per_block: int,
         attn_inputs: PyAttentionInputs,
         is_target_verify: bool,
+        qkv: Optional[tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = None,
     ) -> torch.Tensor:
         batch, seq = self._get_bs_from_attention_input(
             mixed_qkv, attn_inputs, is_target_verify
@@ -657,14 +661,18 @@ class KimiLinearKDADecode(KimiLinearKDABase):
             self.local_num_k_heads * 2 + self.local_num_v_heads,
             self.head_k_dim,
         )
-        query, key, value = torch.split(
-            mixed_qkv,
-            [
-                self.local_num_k_heads,
-                self.local_num_k_heads,
-                self.local_num_v_heads,
-            ],
-            dim=2,
+        query, key, value = (
+            qkv
+            if qkv is not None
+            else torch.split(
+                mixed_qkv,
+                [
+                    self.local_num_k_heads,
+                    self.local_num_k_heads,
+                    self.local_num_v_heads,
+                ],
+                dim=2,
+            )
         )
 
         # Compute gate: reshape to [B, S, local_H, D] for fused_recurrent
@@ -673,7 +681,9 @@ class KimiLinearKDADecode(KimiLinearKDABase):
             batch, seq, self.local_num_v_heads, self.head_k_dim
         ).contiguous()
         # beta: [batch*seq, H] -> sigmoid in float32 -> [batch, seq, H]
-        beta_out = beta.reshape(batch * seq, -1).float().sigmoid()
+        beta_out = beta.reshape(batch * seq, -1)
+        if qkv is None:
+            beta_out = beta_out.float().sigmoid()
         beta_out = beta_out.view(batch, seq, self.local_num_v_heads)
 
         ssm_states = self._get_ssm_states(kv_cache_tensor)
@@ -691,6 +701,8 @@ class KimiLinearKDADecode(KimiLinearKDABase):
             inplace_final_state=True,
             use_qk_l2norm_in_kernel=True,
             use_gate_in_kernel=True,
+            use_beta_sigmoid_in_kernel=qkv is not None,
+            decode_low_warps=self.decode_low_warps and not is_target_verify,
             block_map=attn_inputs.kv_cache_kernel_block_id_device,
             seq_size_per_block=seq_size_per_block,
             sequence_lengths=attn_inputs.sequence_lengths_plus_1_d,
@@ -719,6 +731,39 @@ class KimiLinearKDADecode(KimiLinearKDABase):
             kv_cache.kv_cache_base.shape[0], -1
         )
         is_target_verify = attn_meta.is_target_verify
+
+        if (
+            self.fuse_decode
+            and not is_target_verify
+            and self.linear_conv_kernel_dim == 4
+            and self.local_num_k_heads == self.local_num_v_heads
+            and mixed_qkv.is_contiguous()
+        ):
+            from rtp_llm.models_py.triton_kernels.kimi_kda.glm53_short_conv import (
+                glm53_kda_short_conv_decode,
+            )
+
+            qkv = glm53_kda_short_conv_decode(
+                mixed_qkv,
+                self.conv_weights,
+                self._get_conv_states(kv_cache_tensor),
+                attn_inputs.kv_cache_kernel_block_id_device,
+                attn_inputs.sequence_lengths_plus_1_d,
+                kv_cache.seq_size_per_block,
+            )
+            qkv = tuple(
+                t.view(-1, 1, self.local_num_k_heads, self.head_k_dim) for t in qkv
+            )
+            return self._fla(
+                mixed_qkv,
+                forget_gate,
+                beta,
+                kv_cache_tensor,
+                kv_cache.seq_size_per_block,
+                attn_inputs,
+                False,
+                qkv=qkv,
+            )
 
         mixed_qkv = self._conv1d(
             mixed_qkv,
@@ -834,6 +879,9 @@ class KimiLinearKDA(nn.Module):
             weights, W.linear_attn_out_w, None, None, quant_config
         )
 
+    def input_projections(self):
+        return (self.in_proj_qkv, self.in_proj_b, self.f_a_proj, self.g_a_proj)
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -841,6 +889,7 @@ class KimiLinearKDA(nn.Module):
         kv_cache: Optional[LayerKVCache],
         attention_inputs: Optional[PyAttentionInputs],
         attn_meta: KimiLinearMetadata,
+        input_is_sharded: bool = False,
     ) -> torch.Tensor:
         assert attention_inputs is not None, "attention_inputs is required"
         assert (
@@ -849,11 +898,24 @@ class KimiLinearKDA(nn.Module):
             or attn_meta.get_prefill_conv1d_meta() is not None
         ), "prefill_conv1d_meta is required for prefill"
 
-        # 1. Projections
-        projected_qkv = self.in_proj_qkv(hidden_states)
-        beta_input = self.in_proj_b(hidden_states)  # [token, H]
-        forget_gate = self.f_b_proj(self.f_a_proj(hidden_states))  # [token, H*D]
-        g_proj = self.g_b_proj(self.g_a_proj(hidden_states))  # [token, H*D]
+        # 1. Projections. The SP caller may leave the input rank-local for AG/GEMM.
+        if input_is_sharded:
+            from rtp_llm.models_py.distributed.glm53_collective_gemm import (
+                all_gather_projections,
+            )
+
+            projected_qkv, beta_input, forget_low, gate_low = all_gather_projections(
+                hidden_states,
+                self.input_projections(),
+                attn_meta.token_shard.logical_tokens,
+            )
+            forget_gate = self.f_b_proj(forget_low)
+            g_proj = self.g_b_proj(gate_low)
+        else:
+            projected_qkv = self.in_proj_qkv(hidden_states)
+            beta_input = self.in_proj_b(hidden_states)
+            forget_gate = self.f_b_proj(self.f_a_proj(hidden_states))
+            g_proj = self.g_b_proj(self.g_a_proj(hidden_states))
 
         # 2. Prefill or decode
         if attention_inputs.is_prefill and not attn_meta.is_target_verify:
@@ -876,15 +938,35 @@ class KimiLinearKDA(nn.Module):
             )
 
         # 3. o_norm with sigmoid gating: y = RMSNorm(attn_out) * sigmoid(g_proj)
-        attn_output = self.norm(
-            attn_output.reshape(-1, self.head_v_dim),
-            g_proj.reshape(-1, self.head_v_dim),
-        )
+        if self.decode_kda.fuse_decode and not attention_inputs.is_prefill:
+            from rtp_llm.models_py.triton_kernels.kimi_kda.rms_norm_gate import (
+                kimi_kda_rms_norm_sigmoid_gate,
+            )
+
+            attn_output = kimi_kda_rms_norm_sigmoid_gate(
+                attn_output.reshape(-1, self.head_v_dim),
+                g_proj.reshape(-1, self.head_v_dim),
+                self.norm.weight,
+                self.norm.eps,
+            )
+        else:
+            attn_output = self.norm(
+                attn_output.reshape(-1, self.head_v_dim),
+                g_proj.reshape(-1, self.head_v_dim),
+            )
 
         # from [token * head, dim] -> [token, head * dim]
         attn_output = attn_output.reshape(-1, self.local_num_v_heads * self.head_v_dim)
 
-        # 4. Output projection + all_reduce
+        # 4. Output projection and TP sum, optionally writing directly to RS peers.
+        if attn_meta.token_shard is not None:
+            from rtp_llm.models_py.distributed.glm53_collective_gemm import (
+                project_reduce_scatter,
+            )
+
+            scattered = project_reduce_scatter(attn_output, self.out_proj)
+            if scattered is not None:
+                return scattered
         attn_output = self.out_proj(attn_output)
 
         if self.parallelism_config.get_attn_tp_size() > 1:
@@ -1114,15 +1196,24 @@ class KimiLinearDecoderLayer(nn.Module):
         hidden_states, post, comb = self.attn_hc.pre(residual)
         hidden_states = self.input_layernorm(hidden_states)
         if self.layer_type == HybridAttentionType.LINEAR:
-            hidden_states = all_gather_trim(
-                hidden_states, layout.logical_tokens, Group.TP
+            from rtp_llm.models_py.distributed.glm53_collective_gemm import (
+                can_fuse_input,
             )
+
+            fuse_ag = can_fuse_input(
+                self.self_attn.input_projections(), layout.logical_tokens
+            )
+            if not fuse_ag:
+                hidden_states = all_gather_trim(
+                    hidden_states, layout.logical_tokens, Group.TP
+                )
             hidden_states = self.self_attn(
                 hidden_states=hidden_states,
                 fmha_impl=fmha_impl,
                 kv_cache=kv_cache,
                 attention_inputs=attention_inputs,
                 attn_meta=attn_meta,
+                input_is_sharded=fuse_ag,
             )
         elif cp_layout is not None:
             hidden_states = cp_layout.sp_to_cp(hidden_states)
@@ -1306,6 +1397,15 @@ class KimiLinearModel(GptModelBase):
         )
 
         bind_indexer_block_table_group_ids(self.layers, self.kv_cache)
+        if self.prefill_sequence_parallel:
+            from rtp_llm.models_py.distributed.collective_torch import get_process_group
+            from rtp_llm.models_py.distributed.glm53_collective_gemm import (
+                configure_glm53_collective_gemm,
+            )
+
+            configure_glm53_collective_gemm(
+                get_process_group(Group.TP), self.config.hidden_size
+            )
         return True
 
     def prepare_fmha_impl(self, inputs: PyModelInputs, is_cuda_graph: bool = False):

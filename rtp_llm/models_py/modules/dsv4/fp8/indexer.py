@@ -27,7 +27,6 @@ from typing import Any, Callable, Dict, NamedTuple, Optional
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
 from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
 from rtp_llm.models_py.modules.dsv4.chunk_env import dsv4_chunk_tokens_from_env
 from rtp_llm.models_py.modules.dsv4.cp import (
@@ -304,6 +303,12 @@ class _IndexerFP8PrefillMeta(NamedTuple):
     # with the rest of prefill metadata.
     indexer_cp_plan: Optional[Any]
     indexer_cp_local_cu: Optional[torch.Tensor]
+    # GLM sequence-CP lays out each request's local Q contiguously. Slice the
+    # corresponding K interval before allocating logits; top-k stays relative
+    # to that request, with its original causal bound and canonical ordering.
+    score_segments: Optional[tuple[tuple[int, int, int, int], ...]] = None
+    score_relative_ks: Optional[torch.Tensor] = None
+    score_relative_ke: Optional[torch.Tensor] = None
 
 
 class IndexerFP8(PoolBackedModule):
@@ -439,6 +444,66 @@ class IndexerFP8(PoolBackedModule):
         """Project per-head gates in the checkpoint weight's native dtype."""
         weight = self.weights_proj
         return F.linear(x if x.dtype == weight.dtype else x.to(weight.dtype), weight)
+
+    def _fuse_glm_q_quant(self) -> bool:
+        return (
+            self.compressor.kpool_mode
+            and self.rotate_q
+            and os.environ.get("GLM53_INDEXER_FUSED_Q_QUANT", "0") == "1"
+        )
+
+    def _quantize_q(self, q: torch.Tensor, weights: torch.Tensor):
+        if self._fuse_glm_q_quant():
+            from rtp_llm.models_py.modules.dsv4.fp8._indexer_hadamard_quant_triton import (
+                indexer_hadamard_quant_fold,
+            )
+
+            return indexer_hadamard_quant_fold(q, weights)
+        return indexer_q_fp8_quant_fold(q, weights)
+
+    def _prefill_score_topk(self, q, weights, key, key_scale, meta):
+        out = torch.empty((meta.M, self.index_topk), dtype=torch.int32, device=q.device)
+        if meta.M == 0:
+            return out
+        chunk = _fp8_prefill_score_chunk_rows() or meta.M
+        segments = getattr(meta, "score_segments", None)
+        starts, ends = meta.ks, meta.ke
+        if segments is not None:
+            starts, ends = meta.score_relative_ks, meta.score_relative_ke
+        else:
+            segments = ((0, meta.M, 0, meta.T),)
+        for q_begin, q_end, k_begin, k_end in segments:
+            if k_begin == k_end:
+                out[q_begin:q_end].fill_(-1)
+                continue
+            segment_scale = key_scale[k_begin:k_end]
+            # TMA requires a 16-byte base; contiguous() preserves sliced offsets.
+            if segment_scale.data_ptr() % 16:
+                segment_scale = segment_scale.clone()
+            for begin in range(q_begin, q_end, chunk):
+                end = min(begin + chunk, q_end)
+                with record_function_range("dsv4.fp8.indexer.prefill.score"):
+                    logits = fp8_mqa_indexer_score(
+                        q[begin:end],
+                        weights[begin:end],
+                        key[k_begin:k_end],
+                        segment_scale,
+                        starts[begin:end],
+                        ends[begin:end],
+                        clean_logits=False,
+                    )
+                with record_function_range("dsv4.fp8.indexer.prefill.topk"):
+                    _run_prefill_topk(
+                        logits,
+                        starts[begin:end],
+                        ends[begin:end],
+                        out[begin:end],
+                        self.index_topk,
+                        self.compress_ratio,
+                        backend=self.prefill_topk_backend,
+                    )
+                del logits
+        return out
 
     # --------------------------------------------------------------
     # Pool propagation to nested compressor
@@ -591,7 +656,7 @@ class IndexerFP8(PoolBackedModule):
                 q = self.wq_b(qr)
             q = q.unflatten(-1, (self.n_heads, self.head_dim))
         if not apply_rope:
-            if self.rotate_q:
+            if self.rotate_q and not self._fuse_glm_q_quant():
                 from rtp_llm.models_py.modules.base.cuda.indexer_op import (
                     _rotate_activation,
                 )
@@ -690,7 +755,7 @@ class IndexerFP8(PoolBackedModule):
             # The block table is the only capture-stable bound for all replays.
             T_max = max(32, T_cache)
 
-            q_fp8, w_fold = indexer_q_fp8_quant_fold(
+            q_fp8, w_fold = self._quantize_q(
                 _as_bf16_contig(q), _as_bf16_contig(weights)
             )
             ctx_lens_2d = compressed_len.view(bsz, q_len)
@@ -960,6 +1025,37 @@ class IndexerFP8(PoolBackedModule):
             # field as ``None`` to skip the launch entirely on the legacy path.
             cu_kv_per_token = None
 
+        score_segments = None
+        score_relative_ks = score_relative_ke = None
+        if (
+            cp_active
+            and use_varlen
+            and self.compressor.kpool_mode
+            and getattr(cp_ctx, "sequence_parallel", False)
+            and cp_ctx.chunk_lengths_per_req is not None
+            and os.environ.get("GLM53_INDEXER_REQUEST_CHUNKS", "0") == "1"
+        ):
+            # CPContext guarantees [request0 front/back, request1 front/back,
+            # ...], including each request's padding. Only B+1 offsets cross
+            # to the host in prepare; forward never reads a CUDA scalar.
+            k_offsets = cu_kv_seqlens.tolist()
+            segments, cursor = [], 0
+            for request, length in enumerate(cp_ctx.chunk_lengths_per_req):
+                segments.append(
+                    (
+                        cursor,
+                        cursor + length,
+                        k_offsets[request],
+                        k_offsets[request + 1],
+                    )
+                )
+                cursor += length
+            if cursor != M or len(k_offsets) != len(segments) + 1:
+                raise ValueError("GLM Indexer CP request chunks do not cover local Q/K")
+            score_segments = tuple(segments)
+            score_relative_ks = torch.zeros_like(ks)
+            score_relative_ke = ke - ks
+
         indexer_cp_plan: Optional[Any] = None
         indexer_cp_local_cu: Optional[torch.Tensor] = None
         if (
@@ -1086,6 +1182,9 @@ class IndexerFP8(PoolBackedModule):
             compressor_meta=compressor_meta,
             indexer_cp_plan=indexer_cp_plan,
             indexer_cp_local_cu=indexer_cp_local_cu,
+            score_segments=score_segments,
+            score_relative_ks=score_relative_ks,
+            score_relative_ke=score_relative_ke,
         )
 
     # --------------------------------------------------------------
@@ -1192,46 +1291,15 @@ class IndexerFP8(PoolBackedModule):
             q_for_quant = q if q.dim() == 4 else q.unsqueeze(0)
             w_for_quant = weights if weights.dim() == 3 else weights.unsqueeze(0)
             with record_function_range("dsv4.fp8.indexer.prefill.quant_q"):
-                q_fp8, w_fold = indexer_q_fp8_quant_fold(
+                q_fp8, w_fold = self._quantize_q(
                     _as_bf16_contig(q_for_quant), _as_bf16_contig(w_for_quant)
                 )
 
             q_score = q_fp8.view(M, self.n_heads, INDEXER_HEAD_DIM)
             w_score = w_fold.view(M, self.n_heads)
-            score_chunk_rows = _fp8_prefill_score_chunk_rows()
-            chunked_score = score_chunk_rows > 0 and M > score_chunk_rows
-            if not chunked_score:
-                score_chunk_rows = M
-            out_buf = torch.empty((M, K), dtype=torch.int32, device=x.device)
-
-            # Vendored CUDA per-row TopK over [ks[r], ke[r]). Causal mask is
-            # implicit via ke = (q_pos+1)//ratio clamped to T; padding past
-            # per-row valid count is ``-1`` from the kernel. For long prefill,
-            # score in row chunks because DeepGEMM returns dense [rows, T].
-            for row_start in range(0, M, score_chunk_rows):
-                row_end = min(M, row_start + score_chunk_rows)
-                with record_function_range("dsv4.fp8.indexer.prefill.score"):
-                    logits = fp8_mqa_indexer_score(
-                        q_score[row_start:row_end],
-                        w_score[row_start:row_end],
-                        k_quant_flat,
-                        k_scale_flat,
-                        attention_inputs.ks[row_start:row_end],
-                        attention_inputs.ke[row_start:row_end],
-                        clean_logits=False,
-                    )  # [chunk_rows, T] fp32
-
-                with record_function_range("dsv4.fp8.indexer.prefill.topk"):
-                    _run_prefill_topk(
-                        logits,
-                        attention_inputs.ks[row_start:row_end],
-                        attention_inputs.ke[row_start:row_end],
-                        out_buf[row_start:row_end],
-                        K,
-                        self.compress_ratio,
-                        backend=self.prefill_topk_backend,
-                    )
-                del logits
+            out_buf = self._prefill_score_topk(
+                q_score, w_score, k_quant_flat, k_scale_flat, attention_inputs
+            )
 
             return out_buf.view(out_shape)
         finally:
@@ -1390,42 +1458,15 @@ class IndexerFP8(PoolBackedModule):
             q_for_quant = q if q.dim() == 4 else q.unsqueeze(0)
             w_for_quant = weights if weights.dim() == 3 else weights.unsqueeze(0)
             with record_function_range("dsv4.fp8.indexer.prefill.quant_q"):
-                q_fp8, w_fold = indexer_q_fp8_quant_fold(
+                q_fp8, w_fold = self._quantize_q(
                     _as_bf16_contig(q_for_quant), _as_bf16_contig(w_for_quant)
                 )
 
             q_score = q_fp8.view(M, self.n_heads, INDEXER_HEAD_DIM)
             w_score = w_fold.view(M, self.n_heads)
-            score_chunk_rows = _fp8_prefill_score_chunk_rows()
-            chunked_score = score_chunk_rows > 0 and M > score_chunk_rows
-            if not chunked_score:
-                score_chunk_rows = M
-            out_buf = torch.empty((M, K), dtype=torch.int32, device=x.device)
-
-            for row_start in range(0, M, score_chunk_rows):
-                row_end = min(M, row_start + score_chunk_rows)
-                with record_function_range("dsv4.fp8.indexer.prefill.score"):
-                    logits = fp8_mqa_indexer_score(
-                        q_score[row_start:row_end],
-                        w_score[row_start:row_end],
-                        k_quant_flat,
-                        k_scale_flat,
-                        attention_inputs.ks[row_start:row_end],
-                        attention_inputs.ke[row_start:row_end],
-                        clean_logits=False,
-                    )
-
-                with record_function_range("dsv4.fp8.indexer.prefill.topk"):
-                    _run_prefill_topk(
-                        logits,
-                        attention_inputs.ks[row_start:row_end],
-                        attention_inputs.ke[row_start:row_end],
-                        out_buf[row_start:row_end],
-                        K,
-                        self.compress_ratio,
-                        backend=self.prefill_topk_backend,
-                    )
-                del logits
+            out_buf = self._prefill_score_topk(
+                q_score, w_score, k_quant_flat, k_scale_flat, attention_inputs
+            )
 
             return out_buf.view(out_shape)
         finally:

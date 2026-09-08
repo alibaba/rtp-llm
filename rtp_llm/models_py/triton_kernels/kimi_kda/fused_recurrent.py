@@ -8,7 +8,6 @@ from typing import Optional
 import torch
 import triton
 import triton.language as tl
-
 from rtp_llm.models_py.triton_kernels.fla.op import exp, softplus
 
 logger = logging.getLogger(__name__)
@@ -253,11 +252,26 @@ def fused_recurrent_kda_fwd(
     allow_neg_eigval: bool = False,
     lower_bound: Optional[float] = None,
     state_v_first: bool = False,
+    decode_low_warps: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *k.shape, v.shape[-1]
     HV = v.shape[2]
     N = B if cu_seqlens is None else len(cu_seqlens) - 1
     BK, BV = triton.next_power_of_2(K), 32
+    num_warps = 4
+    if (
+        decode_low_warps
+        and block_map is not None
+        and T == 1
+        and 16 <= N <= 64
+        and H == HV == 64
+        and K == V == 128
+        and not state_v_first
+        and initial_state is not None
+        and initial_state.dtype == torch.float32
+        and torch.cuda.get_device_capability(q.device) in ((10, 0), (10, 3))
+    ):
+        BV, num_warps = 16, 1
     NK, NV = triton.cdiv(K, BK), triton.cdiv(V, BV)
     assert NK == 1, "NK > 1 is not supported yet"
 
@@ -315,7 +329,7 @@ def fused_recurrent_kda_fwd(
         APPLY_BETA_SIGMOID=use_beta_sigmoid_in_kernel,
         ALLOW_NEG_EIGVAL=allow_neg_eigval,
         STATE_V_FIRST=state_v_first,
-        num_warps=4,
+        num_warps=num_warps,
         num_stages=2,
     )
     return o, final_state
@@ -342,6 +356,7 @@ def fused_recurrent_kda(
     allow_neg_eigval: bool = False,
     lower_bound: Optional[float] = None,
     state_v_first: bool = False,
+    decode_low_warps: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if scale is None:
         scale = k.shape[-1] ** -0.5
@@ -368,5 +383,6 @@ def fused_recurrent_kda(
         allow_neg_eigval=allow_neg_eigval,
         lower_bound=lower_bound,
         state_v_first=state_v_first,
+        decode_low_warps=decode_low_warps,
     )
     return o, final_state

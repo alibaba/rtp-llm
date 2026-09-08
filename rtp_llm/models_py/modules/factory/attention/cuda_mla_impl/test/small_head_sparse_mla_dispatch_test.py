@@ -19,6 +19,55 @@ from small_head_sparse_mla_test import reference
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
 class DispatchTest(unittest.TestCase):
+    def test_native_heads_chunk_tail_and_launch_count(self):
+        from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl import (
+            flashmla_sparse_impl,
+        )
+
+        torch.manual_seed(9361)
+        kv = torch.randn(8193, 1, 512, device="cuda", dtype=torch.bfloat16)
+        for tokens, legacy_chunk in ((17, 7), (4097, 4096)):
+            lengths = torch.arange(tokens, device="cuda", dtype=torch.int32) % 8193 + 1
+            pooled = (
+                torch.randint(0, 2048, (tokens, 512), device="cuda", dtype=torch.int32)
+                .sort(dim=-1)
+                .values
+            )
+            ids = expand_indexer_group_indices(pooled, 4, raw_sequence_lengths=lengths)
+            ids = append_incomplete_tail_indices(ids, lengths, 4)
+            ids = _pad_flashmla_topk(ids.unsqueeze(1), 2176)
+            q = torch.randn(tokens, 64, 512, device="cuda", dtype=torch.bfloat16)
+            outputs = []
+            for native_chunk in (legacy_chunk, 8192):
+                with patch.dict(
+                    os.environ,
+                    {
+                        "GLM53_SPARSE_MLA_BF16_Q_CHUNK": str(legacy_chunk),
+                        "GLM53_SPARSE_MLA_NATIVE_Q_CHUNK": str(native_chunk),
+                    },
+                ):
+                    op = SparseMlaOp(
+                        64,
+                        512,
+                        0,
+                        256,
+                        128,
+                        1.0,
+                        2051,
+                        indexer_top_k=512,
+                        indexer_group_size=4,
+                    )
+                    with patch.object(
+                        flashmla_sparse_impl,
+                        "flash_mla_sparse_fwd",
+                        wraps=flashmla_sparse_impl.flash_mla_sparse_fwd,
+                    ) as kernel:
+                        outputs.append(op._forward_sparse(q, kv, ids))
+                    self.assertEqual(
+                        kernel.call_count, (tokens + native_chunk - 1) // native_chunk
+                    )
+            torch.testing.assert_close(outputs[1], outputs[0], atol=0, rtol=0)
+
     def test_pooled_tail_chunks_and_graph(self):
         from rtp_llm.models_py.triton_kernels.sparse_mla.flashinfer_bf16_small_head import (
             flashinfer_sparse_supported,

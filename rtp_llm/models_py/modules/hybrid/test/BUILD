@@ -125,3 +125,10 @@ py_test(
     tags = ["H20"],
     exec_properties = {'gpu': 'H20', 'gpu_count': '1'},
 )
+
+py_test(
+    name = "glm53_shared_overlap_test",
+    srcs = ["glm53_shared_overlap_test.py"],
+    deps = py_test_deps,
+    tags = ["L20A_DEV"],
+)

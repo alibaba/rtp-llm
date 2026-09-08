@@ -2,8 +2,6 @@ import os
 from typing import Any, Dict, Optional
 
 import torch
-from torch import nn
-
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.distributed.collective_torch import Group, all_gather, all_reduce
@@ -40,6 +38,7 @@ from rtp_llm.ops import HWKernelConfig, MoeConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import KVCache, LayerKVCache, PyModelInputs, PyModelOutputs
 from rtp_llm.utils.dsa_indexing import dsa_layer_has_indexer, dsa_layer_skips_topk
 from rtp_llm.utils.model_weight import W
+from torch import nn
 
 try:
     from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_gemm_linear import (
@@ -53,6 +52,9 @@ except ImportError:
     CudaFp8GEMMLinear = None
     fused_add_rmsnorm_fp8_quant = None
     fused_add_rmsnorm_fp8_quant_with_bf16_output = None
+
+
+_GLM53_SHARED_STREAMS: dict[torch.device, torch.cuda.Stream] = {}
 
 
 class _FusedSharedExpertSentinel(nn.Module):
@@ -278,6 +280,23 @@ class GenericMoeLayer(nn.Module):
             self.shared_expert_gate = None
             self.sigmoid_gate_scale_add = None
 
+        self._shared_expert_stream = None
+        if (
+            config.model_type == "glm5_3_flash"
+            and is_decode_role
+            and self.ffn_tp_size == 1
+            and self.ep_size > 1
+            and self.shared_expert is not None
+            and self.shared_expert_gate is None
+            and not self._use_mega_moe_fused_shared
+            and os.environ.get("GLM53_MOE_SHARED_OVERLAP", "0") == "1"
+        ):
+            device = self.shared_expert.up_proj.weight.device
+            if device.type == "cuda":
+                if device not in _GLM53_SHARED_STREAMS:
+                    _GLM53_SHARED_STREAMS[device] = torch.cuda.Stream(device=device)
+                self._shared_expert_stream = _GLM53_SHARED_STREAMS[device]
+
         # for group topk
         self.correction_bias = weights.get(W.e_score_correction_b, None)
 
@@ -308,11 +327,32 @@ class GenericMoeLayer(nn.Module):
         clone.routed_tp_size = self.routed_tp_size
         clone.routed_tp_rank = self.routed_tp_rank
         clone.shared_expert = self.shared_expert
+        clone._shared_expert_stream = getattr(self, "_shared_expert_stream", None)
         clone.shared_expert_gate = self.shared_expert_gate
         clone.sigmoid_gate_scale_add = self.sigmoid_gate_scale_add
         clone.correction_bias = self.correction_bias
         clone._use_mega_moe_fused_shared = self._use_mega_moe_fused_shared
         return clone
+
+    def _start_shared_overlap(self, hidden_states, x_fp8=None, x_scale=None):
+        stream = getattr(self, "_shared_expert_stream", None)
+        if stream is None or hidden_states.shape[0] > 64:
+            return None
+        main = torch.cuda.current_stream(hidden_states.device)
+        stream.wait_stream(main)
+        if not torch.cuda.is_current_stream_capturing():
+            for tensor in (hidden_states, x_fp8, x_scale):
+                if tensor is not None:
+                    tensor.record_stream(stream)
+        with torch.cuda.stream(stream):
+            return self.shared_expert(hidden_states, x_fp8=x_fp8, x_scale=x_scale)
+
+    def _finish_shared_overlap(self, output):
+        main = torch.cuda.current_stream(output.device)
+        main.wait_stream(self._shared_expert_stream)
+        if not torch.cuda.is_current_stream_capturing():
+            output.record_stream(main)
+        return output
 
     def forward_prepacked(
         self,
@@ -323,9 +363,12 @@ class GenericMoeLayer(nn.Module):
         """Consume router/quant resources already prepared by GLM5 CMP."""
         if self.fake_balance_expert is not None:
             self.fake_balance_expert(topk_ids, topk_weights)
+        shared = self._start_shared_overlap(hidden_states)
         experts_output = self.fused_moe.forward_prepacked(hidden_states)
         if self._use_mega_moe_fused_shared:
             return experts_output
+        if shared is not None:
+            return experts_output + self._finish_shared_overlap(shared)
         return experts_output + self.shared_expert(hidden_states)
 
     def forward(
@@ -427,6 +470,7 @@ class GenericMoeLayer(nn.Module):
                 self.routed_tp_rank,
                 self.routed_tp_size,
             )
+        shared_expert_output = self._start_shared_overlap(hidden_states, x_fp8, x_scale)
         experts_output = self.fused_moe(
             hidden_states=routed_hidden,
             topk_weights=routed_weights,
@@ -440,12 +484,15 @@ class GenericMoeLayer(nn.Module):
         if use_mega_moe_fused_shared:
             return experts_output
         if self.shared_expert is not None:
-            shared_expert_output = self.shared_expert(
-                hidden_states,
-                x_fp8=x_fp8,
-                x_scale=x_scale,
-                skip_allreduce=use_ep_shared_allreduce,
-            )
+            if shared_expert_output is None:
+                shared_expert_output = self.shared_expert(
+                    hidden_states,
+                    x_fp8=x_fp8,
+                    x_scale=x_scale,
+                    skip_allreduce=use_ep_shared_allreduce,
+                )
+            else:
+                shared_expert_output = self._finish_shared_overlap(shared_expert_output)
             if use_ep_shared_allreduce:
                 # EP mode: routed expert output is already complete
                 # (EP combine via all_to_all / all_gather aggregated across ranks).
