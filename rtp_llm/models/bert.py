@@ -47,13 +47,15 @@ class Bert(BaseModel):
         return config
 
     def support_cuda_graph(self) -> bool:
-        if os.environ.get("USE_VISION_BERT_UQI_BLOCK_MASK", "0") == "1":
-            return False
         return True
 
-    def _create_python_model(self):
+    @staticmethod
+    def get_python_model_cls():
         from rtp_llm.models_py.model_desc.bert import BertModel
 
+        return BertModel
+
+    def _create_python_model(self):
         model_config = self.model_config
         parallelism_config = self.parallelism_config
         quant_config = self.model_config.quant_config
@@ -61,7 +63,7 @@ class Bert(BaseModel):
         py_hw_kernel_config = self.hw_kernel_config
         max_generate_batch_size = self.max_generate_batch_size
 
-        self.py_model = BertModel(
+        self.py_model = self.get_python_model_cls()(
             model_config,
             parallelism_config,
             self.weight,

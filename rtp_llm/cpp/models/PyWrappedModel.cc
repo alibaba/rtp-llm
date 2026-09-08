@@ -642,6 +642,9 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
 torch_ext::PyEmbeddingInputs PyWrappedModel::buildPyEmbeddingInputs(const GptModelInputs& inputs) {
     DevicePerfWrapper            wrapper(enable_device_perf_, "py model buildPyEmbeddingInputs");
     torch_ext::PyEmbeddingInputs embedding_inputs;
+    embedding_inputs.input_ids_host = inputs.input_ids_host;
+    embedding_inputs.input_lengths_host = inputs.input_lengths_host;
+    embedding_inputs.text_tokens_mask_host = inputs.text_tokens_mask;
     if (inputs.combo_tokens_type_ids.defined()) {
         embedding_inputs.combo_tokens_type_ids = inputs.combo_tokens_type_ids.cuda();
     }
@@ -1354,6 +1357,8 @@ PyWrappedModel::splitInputsIntoMicroBatches(const GptModelInputs& inputs, const 
 }
 
 void PyWrappedModel::holdInputsHostBuffers(const GptModelInputs& inputs) {
+    buffer_holder_.hold_host(inputs.input_ids_host);
+    buffer_holder_.hold_host(inputs.input_lengths_host);
     buffer_holder_.hold_host(inputs.combo_tokens);
     buffer_holder_.hold_host(inputs.input_lengths);
     buffer_holder_.hold_host(inputs.sequence_lengths);

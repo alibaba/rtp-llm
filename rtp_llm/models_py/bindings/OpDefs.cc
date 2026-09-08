@@ -188,6 +188,9 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readwrite(
             "combo_tokens_type_ids", &PyEmbeddingInputs::combo_tokens_type_ids, "Combined token type IDs tensor")
         .def_readwrite("text_tokens_mask", &PyEmbeddingInputs::text_tokens_mask, "Text tokens mask tensor")
+        .def_readwrite("input_ids_host", &PyEmbeddingInputs::input_ids_host)
+        .def_readwrite("input_lengths_host", &PyEmbeddingInputs::input_lengths_host)
+        .def_readwrite("text_tokens_mask_host", &PyEmbeddingInputs::text_tokens_mask_host)
         .def("__repr__", [](const PyEmbeddingInputs& self) { return "PyEmbeddingInputs"; });
 
     pybind11::class_<PyMultimodalInputs>(m, "PyMultimodalInputs")
