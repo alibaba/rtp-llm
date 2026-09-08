@@ -10,11 +10,15 @@ import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
+import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
@@ -34,6 +38,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.anyLong;
 import static org.mockito.Mockito.anyString;
 import static org.mockito.Mockito.eq;
 import static org.mockito.Mockito.mock;
@@ -45,6 +50,7 @@ class RequestLifecycleDeliveryLockContractTest {
 
     private FlexlbConfig config;
     private RequestRegistry lifecycle;
+    private BatchSchedulerReporter batchReporter;
 
     @BeforeEach
     void setUp() {
@@ -52,9 +58,10 @@ class RequestLifecycleDeliveryLockContractTest {
         SchedulingTestConfig.usePriorityQueue(config);
         ConfigService configService = mock(ConfigService.class);
         when(configService.loadBalanceConfig()).thenReturn(config);
+        batchReporter = mock(BatchSchedulerReporter.class);
         lifecycle = new RequestRegistry(
                 configService,
-                mock(BatchSchedulerReporter.class),
+                batchReporter,
                 mock(RequestSchedulerReporter.class),
                 mock(EngineCancelChannel.class));
     }
@@ -419,6 +426,35 @@ class RequestLifecycleDeliveryLockContractTest {
         assertEquals(701L, snapshot.batchId());
         assertTrue(lifecycle.requestSlot(registered.item().requestId())
                 .getBatchEnqueueStartedAtMs() > 0L);
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+            "0, 1, 127.0.0.1:8080",
+            "1, 2, 127.0.0.1:8080@1"
+    })
+    void batchDispatchAckUsesMetricWorkerIdentity(
+            int engineIndex,
+            int multiEngineNum,
+            String expectedMetricIpPort) {
+        WorkerStatus status = WorkerStatus.createDiscovered(
+                RoleType.PREFILL, "group-a", "127.0.0.1", 8080, 9090,
+                "site-a", "deployment-a", engineIndex, multiEngineNum);
+        PrefillEndpoint prefill = mock(PrefillEndpoint.class);
+        when(prefill.getIp()).thenReturn("127.0.0.1");
+        when(prefill.getStatus()).thenReturn(status);
+        Registered registered = registerItem(207L + engineIndex, prefill);
+        bind(lifecycle, registered);
+
+        RequestRegistry.DeliveryClaim claim = lifecycle.tryClaimBatchDelivery(
+                registered.item(), 710L + engineIndex, () -> true);
+
+        assertNotNull(claim);
+        lifecycle.complete(claim, DeliveryResult.delivered());
+
+        assertTrue(registered.future().join().isSuccess());
+        verify(batchReporter).reportDispatchAckTimeMs(
+                eq(RoleType.PREFILL.name()), eq(expectedMetricIpPort), anyLong());
     }
 
     @Test

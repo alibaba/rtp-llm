@@ -19,6 +19,7 @@ import org.flexlb.dao.loadbalance.DebugInfo;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
+import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
@@ -2206,13 +2207,14 @@ public class RequestRegistry {
                     0L,
                     System.currentTimeMillis()
                             - confirmation.batchEnqueueStartedAtMs());
+            WorkerStatus prefillStatus = item.prefillEp() == null
+                    ? null
+                    : item.prefillEp().getStatus();
             preparationFailure = runTerminalLeaf(
                     preparationFailure,
                     () -> reporter.reportDispatchAckTimeMs(
                             RoleType.PREFILL.name(),
-                            item.prefillEp() == null
-                                    ? ""
-                                    : item.prefillEp().getIp(),
+                            prefillStatus == null ? "" : prefillStatus.getMetricIpPort(),
                             latencyMs));
         }
         if (preparationFailure != null) {

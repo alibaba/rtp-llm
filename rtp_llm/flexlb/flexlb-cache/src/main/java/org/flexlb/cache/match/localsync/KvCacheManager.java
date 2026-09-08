@@ -108,21 +108,6 @@ public class KvCacheManager implements EngineCacheInvalidator {
                 engineIpPorts, blockCacheKeys);
     }
 
-    /**
-     * Update engine cache status
-     *
-     * @param identity       Worker identity
-     * @param role           Engine role
-     * @param newCacheBlocks New cache block set (blockCacheKeys)
-     */
-    public void updateEngineCache(WorkerIdentity identity, String role, Set<Long> newCacheBlocks) {
-        updateEngineCache(
-                identity,
-                identity == null ? null : identity.getLogicalIpPort(),
-                role,
-                newCacheBlocks);
-    }
-
     public void updateEngineCache(WorkerStatus workerStatus, String role, Set<Long> newCacheBlocks) {
         if (workerStatus == null) {
             return;

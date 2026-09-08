@@ -832,9 +832,7 @@ public class WorkerStatus {
 
     @JsonIgnore
     public String getMetricIpPort() {
-        return getMultiEngineNum() == 1
-                ? workerIdentity.getPhysicalIpPort()
-                : workerIdentity.getLogicalIpPort();
+        return workerIdentity.getMetricIpPort(getMultiEngineNum());
     }
 
     public int getEngineIndex() {

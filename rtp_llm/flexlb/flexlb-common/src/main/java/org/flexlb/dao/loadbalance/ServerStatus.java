@@ -123,9 +123,7 @@ public class ServerStatus {
 
     @JsonIgnore
     public String getMetricIpPort() {
-        return routingMultiEngineNum == 1
-                ? workerIdentity.getPhysicalIpPort()
-                : workerIdentity.getLogicalIpPort();
+        return workerIdentity.getMetricIpPort(routingMultiEngineNum);
     }
 
     public void setServerIp(String serverIp) {

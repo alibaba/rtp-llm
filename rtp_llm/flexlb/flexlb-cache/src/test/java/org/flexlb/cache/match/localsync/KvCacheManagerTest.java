@@ -2,7 +2,6 @@ package org.flexlb.cache.match.localsync;
 
 import org.flexlb.cache.domain.DiffResult;
 import org.flexlb.cache.telemetry.CacheMetricsReporter;
-import org.flexlb.dao.master.WorkerIdentity;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusProvider;
 import org.flexlb.dao.route.RoleType;
@@ -46,12 +45,9 @@ class KvCacheManagerTest {
     @Test
     void findsRtpSingleEngineCacheByLogicalWorkerStatusIdentity() {
         KvCacheManager manager = kvCacheManagerWithRealIndexes();
-        WorkerIdentity identity = new WorkerIdentity("10.0.0.1", 8080, 0);
-        manager.updateEngineCache(identity, "PREFILL", Set.of(11L, 22L));
+        manager.updateEngineCache(workerStatus(0, 1), "PREFILL", Set.of(11L, 22L));
         when(workerStatusProvider.getWorkerStatuses(RoleType.PREFILL, "rtp"))
-                .thenReturn(List.of(WorkerStatus.createDiscovered(
-                        RoleType.PREFILL, "rtp", "10.0.0.1", 8080, 9090,
-                        "test-site", "rtp-deploy", 0, 1)));
+                .thenReturn(List.of(workerStatus(0, 1)));
 
         Map<String, Integer> matches = manager.findMatchingEngines(
                 List.of(11L, 22L, 33L), RoleType.PREFILL, "rtp");
@@ -62,9 +58,7 @@ class KvCacheManagerTest {
 
     @Test
     void reportsRtpSingleEngineCacheMetricsWithPhysicalAddress() {
-        WorkerStatus status = WorkerStatus.createDiscovered(
-                RoleType.PREFILL, "rtp", "10.0.0.1", 8080, 9090,
-                "test-site", "rtp-deploy", 0, 1);
+        WorkerStatus status = workerStatus(0, 1);
         when(engineLocalView.calculateDiff("10.0.0.1:8080@0", Set.of()))
                 .thenReturn(DiffResult.empty("10.0.0.1:8080@0"));
 
@@ -93,7 +87,7 @@ class KvCacheManagerTest {
         when(engineLocalView.calculateDiff("10.0.0.1:8080@0", Set.of()))
                 .thenReturn(DiffResult.empty("10.0.0.1:8080@0"));
         kvCacheManager.updateEngineCache(
-                new WorkerIdentity("10.0.0.1", 8080, 0), "PREFILL", Set.of());
+                workerStatus(0, 1), "PREFILL", Set.of());
 
         kvCacheManager.removeStaleEngineCaches(List.of("10.0.0.1:8080"));
 
@@ -108,7 +102,7 @@ class KvCacheManagerTest {
         when(engineLocalView.calculateDiff("10.0.0.1:8080@0", Set.of()))
                 .thenReturn(DiffResult.empty("10.0.0.1:8080@0"));
         kvCacheManager.updateEngineCache(
-                new WorkerIdentity("10.0.0.1", 8080, 0), "PREFILL", Set.of());
+                workerStatus(0, 1), "PREFILL", Set.of());
 
         kvCacheManager.removeStaleEngineCaches(List.of("10.0.0.2:8080"));
 
@@ -122,7 +116,7 @@ class KvCacheManagerTest {
         when(engineLocalView.calculateDiff(logicalIpPort, Set.of()))
                 .thenReturn(DiffResult.empty(logicalIpPort));
         kvCacheManager.updateEngineCache(
-                new WorkerIdentity("10.0.0.1", 8080, 0), "PREFILL", Set.of());
+                workerStatus(0, 1), "PREFILL", Set.of());
 
         kvCacheManager.removeEngineCache(logicalIpPort);
         when(engineLocalView.getAllEngineIpPorts()).thenReturn(Set.of(logicalIpPort));
@@ -141,9 +135,9 @@ class KvCacheManagerTest {
         when(engineLocalView.calculateDiff("10.0.0.1:8080@1", Set.of()))
                 .thenReturn(DiffResult.empty("10.0.0.1:8080@1"));
         kvCacheManager.updateEngineCache(
-                new WorkerIdentity("10.0.0.1", 8080, 0), "PREFILL", Set.of());
+                workerStatus(0, 2), "PREFILL", Set.of());
         kvCacheManager.updateEngineCache(
-                new WorkerIdentity("10.0.0.1", 8080, 1), "PREFILL", Set.of());
+                workerStatus(1, 2), "PREFILL", Set.of());
 
         kvCacheManager.removeStaleEngineCaches(List.of("10.0.0.1:8080"));
 
@@ -162,9 +156,9 @@ class KvCacheManagerTest {
         when(engineLocalView.calculateDiff("10.0.0.1:8080@1", Set.of()))
                 .thenReturn(DiffResult.empty("10.0.0.1:8080@1"));
         kvCacheManager.updateEngineCache(
-                new WorkerIdentity("10.0.0.1", 8080, 0), "PREFILL", Set.of());
+                workerStatus(0, 2), "PREFILL", Set.of());
         kvCacheManager.updateEngineCache(
-                new WorkerIdentity("10.0.0.1", 8080, 1), "PREFILL", Set.of());
+                workerStatus(1, 2), "PREFILL", Set.of());
 
         kvCacheManager.removeStaleEngineCaches(List.of("10.0.0.2:8080"));
 
@@ -190,6 +184,12 @@ class KvCacheManagerTest {
         kvCacheManager.removeStaleEngineCaches(null);
 
         verifyNoInteractions(engineLocalView, globalCacheIndex);
+    }
+
+    private static WorkerStatus workerStatus(int engineIndex, int multiEngineNum) {
+        return WorkerStatus.createDiscovered(
+                RoleType.PREFILL, "rtp", "10.0.0.1", 8080, 9090,
+                "test-site", "rtp-deploy", engineIndex, multiEngineNum);
     }
 
     private KvCacheManager kvCacheManagerWithRealIndexes() {
