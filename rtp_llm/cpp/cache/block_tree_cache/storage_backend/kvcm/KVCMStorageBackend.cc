@@ -7,6 +7,7 @@
 #include <string>
 #include <type_traits>
 #include <utility>
+#include <unordered_map>
 #include <variant>
 
 #include "autil/EnvUtil.h"
@@ -68,10 +69,6 @@ public:
               StorageBackend::BufferResolver         buffer_resolver,
               const std::vector<DeviceBlockPoolPtr>& device_pools) {
         RTP_LLM_LOG_INFO("start init BlockTree KVCM storage backend");
-        if (cache_config_.use_independent_block_pools) {
-            RTP_LLM_LOG_ERROR("BlockTree KVCM does not support independent device block pools");
-            return false;
-        }
         if (parallelism_config_.tp_rank == 0 && parallelism_config_.tp_size > 1 && !broadcast_manager_) {
             RTP_LLM_LOG_ERROR("BlockTree KVCM rank 0 requires a broadcast manager for tp_size=%ld",
                               parallelism_config_.tp_size);
@@ -116,31 +113,30 @@ public:
             return false;
         }
 
-        const auto registration_pool = chooseRegistrationPool(device_pools);
-        if (!registration_pool || !registration_pool->getBaseAddress() || registration_pool->getTotalSizeBytes() == 0) {
-            RTP_LLM_LOG_ERROR("BlockTree KVCM has no valid device registration pool");
+        const auto registrations = makePoolRegistrations(device_pools);
+        if (registrations.empty()) {
             return false;
         }
-        RTP_LLM_CHECK_WITH_INFO(!group_policy_->groups().empty(), "KVCM requires at least one cache group");
-        const auto registration_group = std::min_element(
-            group_policy_->groups().begin(), group_policy_->groups().end(), [](const auto& lhs, const auto& rhs) {
-                return std::make_pair(!lhs.second.is_full, lhs.second.group_name)
-                       < std::make_pair(!rhs.second.is_full, rhs.second.group_name);
-            });
-        kv_cache_manager::RegistSpan regist_span{registration_pool->getBaseAddress(),
-                                                 registration_pool->getTotalSizeBytes()};
-        const int64_t                tp_rank = parallelism_config_.tp_rank;
-        kv_cache_manager::InitParams client_init_params{
-            tp_rank == 0 ? kv_cache_manager::RoleType::HYBRID : kv_cache_manager::RoleType::WORKER,
-            &regist_span,
-            kvcm::genLocationSpecName(static_cast<int>(tp_rank), registration_group->second.group_name)};
+        transfer_pool_count_ = registrations.size();
+        const auto role =
+            parallelism_config_.tp_rank == 0 ? kv_cache_manager::RoleType::HYBRID : kv_cache_manager::RoleType::WORKER;
         if (!client_wrapper_) {
             client_wrapper_ = std::make_shared<kvcm::ClientWrapper>();
         }
-        if (!client_wrapper_->init(client_config_map, client_init_params)) {
-            RTP_LLM_LOG_ERROR("create BlockTree KVCM client failed");
+        bool initialized;
+        if (registrations.size() == 1) {
+            auto                               span = registrations.front().span;
+            const kv_cache_manager::InitParams params{role, &span, registrations.front().location_spec_name};
+            initialized = client_wrapper_->init(client_config_map, params);
+        } else {
+            initialized = client_wrapper_->initForPools(client_config_map, role, registrations);
+        }
+        if (!initialized) {
+            client_wrapper_->shutdown();
+            RTP_LLM_LOG_ERROR("create BlockTree KVCM clients failed");
             return false;
         }
+        const auto tp_rank = parallelism_config_.tp_rank;
         RTP_LLM_LOG_INFO("BlockTree KVCM storage backend initialized, tp_rank=%ld tp_size=%ld policy={%s}",
                          tp_rank,
                          parallelism_config_.tp_size,
@@ -326,6 +322,9 @@ public:
         if (!group_policy_->genBlockBuffersByTag(tags, blocks, buffers)) {
             return false;
         }
+        if (transfer_pool_count_ > 1) {
+            return executePoolTransfers(request.op(), tags, blocks, uris, buffers, response);
+        }
         const auto trace_info = makeTransferTraceInfo(blocks);
         if (request.op() == REMOTE_OPERATION_READ) {
             return client_wrapper_->loadKvCaches(uris, buffers, trace_info);
@@ -435,19 +434,90 @@ private:
         return {{"", std::move(config)}};
     }
 
-    DeviceBlockPoolPtr chooseRegistrationPool(const std::vector<DeviceBlockPoolPtr>& pools) const {
-        if (pools.empty()) {
-            return nullptr;
+    std::vector<kvcm::ClientWrapper::PoolRegistration>
+    makePoolRegistrations(const std::vector<DeviceBlockPoolPtr>& pools) {
+        const auto&          groups = group_policy_->groups();
+        std::vector<int32_t> ordered_groups;
+        for (const auto& [id, group] : groups) {
+            ordered_groups.push_back(id);
         }
-        const auto* expected_pool = pools.front().get();
-        if (expected_pool == nullptr
-            || std::any_of(pools.begin(), pools.end(), [expected_pool](const DeviceBlockPoolPtr& pool) {
-                   return pool.get() != expected_pool;
-               })) {
-            RTP_LLM_LOG_ERROR("BlockTree KVCM requires one shared contiguous device pool");
-            return nullptr;
+        // Preserve the legacy primary registration identity for shared pools.
+        std::sort(ordered_groups.begin(), ordered_groups.end(), [&](int32_t left, int32_t right) {
+            const auto& lhs = groups.at(left);
+            const auto& rhs = groups.at(right);
+            return std::make_pair(!lhs.is_full, lhs.group_name) < std::make_pair(!rhs.is_full, rhs.group_name);
+        });
+        group_to_pool_.resize(pools.size());
+        std::unordered_map<const DeviceBlockPool*, size_t> pool_indices;
+        std::vector<kvcm::ClientWrapper::PoolRegistration> registrations;
+        for (int32_t group_id : ordered_groups) {
+            const auto& pool          = pools.at(group_id);
+            const auto [it, inserted] = pool_indices.emplace(pool.get(), registrations.size());
+            group_to_pool_[group_id]  = it->second;
+            if (!inserted) {
+                continue;
+            }
+            if (!pool->getBaseAddress() || pool->getTotalSizeBytes() == 0) {
+                RTP_LLM_LOG_ERROR("KVCM group %d has no valid registration span", group_id);
+                return {};
+            }
+            registrations.push_back({{pool->getBaseAddress(), pool->getTotalSizeBytes()},
+                                     kvcm::genLocationSpecName(static_cast<int>(parallelism_config_.tp_rank),
+                                                               groups.at(group_id).group_name)});
         }
-        return pools.front();
+        return registrations;
+    }
+
+    bool executePoolTransfers(RemoteOpType                       operation,
+                              const std::vector<std::string>&    tags,
+                              const std::vector<int32_t>&        blocks,
+                              const kv_cache_manager::UriStrVec& uris,
+                              kv_cache_manager::BlockBuffers&    buffers,
+                              RemoteOperationResponsePB&         response) {
+        if (operation != REMOTE_OPERATION_READ && operation != REMOTE_OPERATION_WRITE) {
+            RTP_LLM_LOG_WARNING("KVCM transfer has invalid operation [%d]", operation);
+            return false;
+        }
+        std::vector<std::vector<size_t>> indices(transfer_pool_count_);
+        for (size_t index = 0; index < tags.size(); ++index) {
+            const auto group_id = cache_config_.topology().groupIdForTag(tags[index]);
+            indices[group_to_pool_[group_id]].push_back(index);
+        }
+        auto actual_uris = uris;
+        for (size_t pool = 0; pool < indices.size(); ++pool) {
+            if (indices[pool].empty()) {
+                continue;
+            }
+            kv_cache_manager::UriStrVec    batch_uris;
+            kv_cache_manager::BlockBuffers batch_buffers;
+            std::vector<int32_t>           batch_blocks;
+            for (size_t index : indices[pool]) {
+                batch_uris.push_back(uris[index]);
+                batch_buffers.push_back(std::move(buffers[index]));
+                batch_blocks.push_back(blocks[index]);
+            }
+            const auto trace_info = makeTransferTraceInfo(batch_blocks);
+            if (operation == REMOTE_OPERATION_READ) {
+                if (!client_wrapper_->loadKvCachesForPool(pool, batch_uris, batch_buffers, trace_info)) {
+                    return false;
+                }
+            } else {
+                auto [success, result] =
+                    client_wrapper_->saveKvCachesForPool(pool, batch_uris, batch_buffers, trace_info);
+                if (!success || (!result.empty() && result.size() != batch_uris.size())) {
+                    return false;
+                }
+                for (size_t index = 0; index < result.size(); ++index) {
+                    actual_uris[indices[pool][index]] = std::move(result[index]);
+                }
+            }
+        }
+        if (operation == REMOTE_OPERATION_WRITE && actual_uris != uris) {
+            for (auto& uri : actual_uris) {
+                *response.add_actual_uris() = std::move(uri);
+            }
+        }
+        return true;
     }
 
     void initializeRequests(std::vector<FunctionRequestPB>& requests,
@@ -537,6 +607,8 @@ private:
     std::shared_ptr<BroadcastManager>    broadcast_manager_;
     std::unique_ptr<kvcm::GroupPolicy>   group_policy_;
     std::shared_ptr<kvcm::ClientWrapper> client_wrapper_;
+    std::vector<size_t>                  group_to_pool_;
+    size_t                               transfer_pool_count_{0};
     // Preserve KVCM's operation-local, one-based request
     // order. Abort and finish share a sequence because both call FinishWrite.
     std::atomic<uint64_t> match_trace_sequence_{1};
