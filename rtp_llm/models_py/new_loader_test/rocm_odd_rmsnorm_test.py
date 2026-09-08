@@ -73,6 +73,8 @@ class RocmOddRmsNormTest(unittest.TestCase):
                     output, residual_out = layer(hidden_states, residual)
 
                 opus.assert_called_once()
+                self.assertIs(output, hidden_states)
+                self.assertIs(residual_out, residual)
                 torch.testing.assert_close(
                     output, expected_output, rtol=2e-2, atol=2e-2
                 )

@@ -301,12 +301,14 @@ class MoEWeightDispatchTest(unittest.TestCase):
         layer = RMSResNorm(2, eps=1e-6, params_dtype=torch.float32)
         hidden = torch.tensor([[1.0, 2.0]])
         residual = torch.tensor([[3.0, 4.0]])
-
-        normalized, residual_out = layer(hidden, residual)
-
         expected_residual = hidden + residual
         variance = expected_residual.float().pow(2).mean(-1, keepdim=True)
         expected = expected_residual * torch.rsqrt(variance + 1e-6)
+
+        normalized, residual_out = layer(hidden, residual)
+
+        self.assertIs(normalized, hidden)
+        self.assertIs(residual_out, residual)
         torch.testing.assert_close(residual_out, expected_residual)
         torch.testing.assert_close(normalized, expected)
 
