@@ -1,5 +1,7 @@
 package org.flexlb.cache.hash;
 
+import org.flexlb.dao.loadbalance.TokenIds;
+
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
@@ -12,7 +14,7 @@ public final class SglangBlockHashStrategy implements BlockHashStrategy {
             ThreadLocal.withInitial(SglangBlockHashStrategy::newSha256Digest);
 
     @Override
-    public List<Long> calculate(int[] inputIds, long blockSize, int lookaheadTokens) {
+    public List<Long> calculate(TokenIds inputIds, long blockSize, int lookaheadTokens) {
         if (inputIds == null) {
             throw new IllegalArgumentException("input_ids must not be null");
         }
@@ -22,7 +24,7 @@ public final class SglangBlockHashStrategy implements BlockHashStrategy {
         if (lookaheadTokens < 0 || lookaheadTokens > 1) {
             throw new IllegalArgumentException("SGLang block hashing supports only 0 or 1 lookahead token");
         }
-        int logicalLength = inputIds.length - lookaheadTokens;
+        int logicalLength = inputIds.size() - lookaheadTokens;
         if (logicalLength <= 0) {
             return Collections.emptyList();
         }
@@ -40,9 +42,9 @@ public final class SglangBlockHashStrategy implements BlockHashStrategy {
             }
             int tokenEnd = tokenOffset + pageSize;
             for (int tokenIndex = tokenOffset; tokenIndex < tokenEnd; tokenIndex++) {
-                updateLittleEndianInt(digest, inputIds[tokenIndex]);
+                updateLittleEndianInt(digest, inputIds.getInt(tokenIndex));
                 if (lookaheadTokens == 1) {
-                    updateLittleEndianInt(digest, inputIds[tokenIndex + 1]);
+                    updateLittleEndianInt(digest, inputIds.getInt(tokenIndex + 1));
                 }
             }
             parentHash = digest.digest();
