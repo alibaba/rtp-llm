@@ -1,186 +1,93 @@
 # Worker Sync and KV Cache
 
-worker 健康与容量信息由后台线程高频异步同步；KV cache 元数据用于 cache 感知路由。
-本分支（feature/flexlb-kvcm）支持三种 cache 匹配源：LOCAL_SYNC（本地全量索引）、
-KVCM（外部 KV Cache Manager）、LOCAL_STANDBY（KVCM 的本地兜底）。
-
-主要代码：`flexlb-sync/src/main/java/org/flexlb/sync/`、`service/grpc/`，
-`flexlb-cache/src/main/java/org/flexlb/cache/`，`flexlb-grpc/.../KvcmGrpcClient.java`。
+worker 状态同步与 cache 元数据采用不同的提交边界：WorkerDirectory / EndpointRegistry 负责
+可路由的 worker generation；CacheAwareService 编排 cache 查询和元数据更新。两者都使用
+logical worker identity ip:httpPort@engineIndex。
 
 ## Worker 状态同步
 
-### 调度拓扑
+MasterEngineSynchronizer 在进程启动时读取 workerRegistry 配置，并以
+statusPollIntervalMs（默认 20ms）启动定时轮询。它为模型拓扑中的每个 required role 提交
+EngineSyncRunner；同步和 status-check executor 的线程数来自 internalRuntime（默认各 32），
+队列容量为 15,000。status RPC timeout 默认 5,000ms，worker status 超过默认 10,000ms 未更新
+会被视为陈旧。
 
-- `MasterEngineSynchronizer`：`ScheduledThreadPoolExecutor(5)` 每 **20ms**
-  （`SYNC_STATUS_INTERVAL`）触发一轮，单次 gRPC 超时 200ms。每轮按 模型×角色 提交
-  `EngineSyncRunner` 到共享线程池。
-- `AbstractEngineStatusSynchronizer`：两个静态线程池（core 500 / max 1000 / 队列 15000 /
-  AbortPolicy）——`engine-sync-executor`（状态同步）与 `status-checker-executor`。
-- `EngineSyncRunner`：从服务发现拉 worker 列表（陈旧条目要过 `max(3×同步间隔, 1s)` 宽限期
-  才移除），然后对每个 worker：
-  - 提交 `GrpcWorkerStatusRunner`，用 `statusCheckInProgress` CAS 保证**每 worker 同时至多
-    一个在途状态检查**；
-  - **仅当 `!kvcmEnabled`** 时提交 `GrpcCacheStatusCheckRunner`（`cacheCheckInProgress` CAS）。
+EngineSyncRunner 每轮执行以下工作：
 
-一个服务发现 frontend 会按 Endpoint `multi_engine_num` 展开为 N 个逻辑 worker，map key
-统一为 `ip:httpPort@index`（N=1 也是 `@0`）。frontend HTTP/gRPC 地址保持共享；第 i 个
-`GrpcWorkerStatusRunner` 在 N>1 时独立连接 `worker_status_port + i`；N=1 使用发现到的
-legacy gRPC port。N>1 必须显式配置 status base，配置加载时同时校验 count、base 和
-`base + N - 1 <= 65535`。
+1. 通过 WorkerAddressService 获取 role 的发现结果。一个 frontend 按 endpoint 的
+   multi_engine_num 展开为 N 个 logical worker；N>1 使用 worker_status_port + index，
+   N=1 未配置该端口时使用发现到的引擎 gRPC port。
+2. 对每个逻辑地址在 WorkerDirectory 中取得或创建 WorkerStatus generation。发现本身不创建
+   可路由 endpoint。
+3. 以 WorkerStatus.PollLease 的 CAS gate 确保同一 worker 同时至多一个 status poll；KVCM
+   未启用时，cache poll 另有独立 gate。
+4. 对消失的发现条目保留一个与轮询间隔相关的宽限期；宽限期后启动该 generation 的 retirement。
 
-worker 地址表示由不可变 `WorkerIdentity` 一次性预计算并保存，调用方不再解析或临时拼接：
+GrpcWorkerStatusRunner 将响应先冻结为 WorkerStatus.StatusObservation。严格更大的
+statusVersion 才会生成 PreparedStatus；endpoint reducer 用该不可变 observation 更新自己的
+账本，全部 reducer 成功后才通过 publishPreparedStatus() 原子提交新的 EngineObservation 和
+cursor。相同版本的 heartbeat 只投影活跃任务事实，不重放版本化的 mutation。
 
-| 表示 | 格式 | 用途 |
-|---|---|---|
-| raw IP | `ip` | 网络连接与服务发现 |
-| raw port | `port` | 共享 frontend 端口 |
-| raw engine index | `engineIndex` | 逻辑引擎序号 |
-| physical IP-port | `ip:port` | 共享 frontend 身份、物理健康分组 |
-| logical IP-port | `ip:port@index` | 路由、rollback、KVCM 与 cache key |
-| metrics logical IP-port | `ip:port@index` | 所有可归属具体引擎的 `engineIp` 指标标签 |
+连续三次 status RPC transport failure、空/非法状态或 reducer 失败都会使该 generation 退役。
+retirement 先从 EndpointRegistry 移除路由入口，等待已发出的 GenerationPin，再清理目录和本地
+cache。状态同步成功后，physical-group health 要求一个共享 frontend 的所有 engine sibling
+都已发布且 reportedAlive，才能被路由器使用。
 
-`WorkerHost` 在服务发现展开时持有该 identity；`WorkerStatus` 更新任一 raw 字段时原子替换
-整份 identity，保证三种派生表示来自同一个快照。N=1 也保留 `@0`。
+WorkerStatus 公开的并不是可变的 localTaskMap。它分别发布 topology、不可变
+CommittedWorkerStatus（引擎容量、KV、运行任务和 cursor）与 PollHealth。调度的本地请求、
+Prefill 队列和 Decode fence 由 endpoint / RequestRegistry 持有，详见
+[03-resource-management](03-resource-management.md)。
 
-### GrpcWorkerStatusRunner
+## LOCAL_SYNC cache 元数据
 
-gRPC `getWorkerStatus`（VIT 走 multimodal 变体）携带 `latest_finished_version` 做增量拉取。
-响应字段（`WorkerStatusResponse`）：`alive`、`available_concurrency`、running/waiting/finished
-任务表（Map<requestId, TaskInfo>）、`status_version`、`step_latency_ms`、`iterate_count`、
-dp/tp size、内嵌 `cache_status`、`block_hash_lookahead_tokens`、`cache_match_rollback_blocks`、
-`kv_cache_group_mode` 等。没有显式 TTFT 字段——负载估计由 `stepLatencyMs` 与本地
-`runningQueueTime` 组成。
+当 cacheMatching.type=LOCAL_SYNC 时，GrpcCacheStatusCheckRunner 按动态间隔获取
+PREFILL/PDFUSION 的 cache status。它仍受独立 poll lease 保护，且只将版本变化的 cached keys
+交给 CacheAwareService.updateFromWorkerStatus()。
 
-处理逻辑：版本号新才全量更新（并发/任务表/队列时间）；版本号旧也更新 alive、时间戳并做任务
-对账；`cache_status` 总量恒更新（used = total − available）。带 `CacheHitFeedback` 的完成
-任务会异步送 `CacheAwareService.buildCacheHitComparison`（预测 vs 实际命中对比，出指标 + pv 日志）。
-连续 3 次 RPC 失败会把该逻辑 worker 标为不健康并移除其 endpoint；公共 physical AND
-gate 同时将所有 siblings 排除出路由候选，成功状态恢复且整组健康后才重新可路由。
-新发现的 worker 在首次接受有效状态前不可路由。空响应标为不健康；未初始化状态
-（`status_version=0`）与响应处理异常跳过本轮更新。
+LocalSyncCacheMatchProvider 的实现由以下两级索引组成：
 
-### WorkerStatus 的本地预测与对账
+- GlobalCacheIndex：block hash 到 logical worker 集合的倒排索引；
+- EngineLocalView：logical worker 到 block hash 集合的正排索引；
+- KvCacheManager：对两级索引执行 diff、更新、移除与前缀匹配。
 
-`WorkerStatus`（flexlb-common）的原子性是**字段级**（AtomicLong/AtomicBoolean +
-ConcurrentHashMap），不是快照级：
+匹配依请求 block 链顺序进行：候选 worker 在第一个 miss 后被淘汰，结果是连续前缀长度。动态
+间隔服务根据 cache diff 大小调整下一次轮询，默认目标 diff 为 30，间隔范围 50ms 到 3,000ms。
+KVCM 启用时 LOCAL_SYNC 元数据轮询和更新关闭。
 
-- 路由选中 → `putLocalTask()`：任务记为 IN_TRANSIT，`runningQueueTime` 加上估算 prefill
-  时间，`availableKvCacheTokens`/`usedKvCacheTokens` 预扣 `inputLength − prefixLength`；
-- 引擎状态到达 → `updateTaskStates()` 状态机对账：IN_TRANSIT→CONFIRMED→RUNNING→FINISHED，
-  超时未确认判 LOST；`updateKvCacheTokens()` 在 `getAndSet` 引擎值前**加回在途任务的
-  cache-miss 部分**，避免双重计数。
-- 状态转变耗时：`updateTaskStates()` 顺带产出 `TaskStateUpdateResult` 里的延迟列表——
-  FlexLB 观测值（dispatch→waiting confirm、waiting confirm→running）与引擎侧真实值
-  （received→waiting、waiting→running，取自 TaskInfoPB 的 `request_received_time_ms`/
-  `waiting_entered_time_ms`/`running_entered_time_ms`，`0` 视为未知跳过），由
-  `GrpcWorkerStatusRunner` 分别上报供对账。
-- `ExpirationCleaner`（`@Scheduled(fixedRate=3000)`）：移除 `statusLastUpdateTime` 超过
-  3s 的 worker；按 `taskConfirmTimeoutMs`（默认 300,000ms）清理确认超时/LOST 任务并出
-  pv 日志。
+## KVCM 与 Local Standby
 
-## Cache 状态同步（LOCAL_SYNC 路径，仅 KVCM 关闭时）
+cacheMatching.type=KVCM 时，KvcmCacheMatchProvider 使用 KvcmGrpcClient 访问当前 KVCM leader，
+按 role、group、block size 和 worker kvCacheGroupMode 查询 host 前缀命中。leader 刷新、请求
+timeout、重试、心跳和恢复阈值都由 KVCM 配置控制；默认请求 timeout 为 500ms，leader 刷新为
+10 秒。
 
-`GrpcCacheStatusCheckRunner`：挂在 20ms 同步 tick 上，但 PREFILL/PDFUSION 按
-`DynamicCacheIntervalService.getCurrentIntervalMs()` 降频（跳 tick 实现）。请求携带当前
-cache 版本做增量；响应恒更新 KV token 总量，版本更新时把 `cached_keys`（block hash 集合）
-经 `CacheAwareService.updateFromWorkerStatus()` 喂给本地索引（仅 PREFILL/PDFUSION）。
+KVCM 模式仍维护 Local Standby，但它不是 worker cache status 的副本：
 
-**动态间隔**：`DefaultDynamicCacheIntervalService` 维护 30 样本滚动平均 diff 大小，目标
-`CACHE_STATUS_DIFF_SIZE(30)`；偏差 >10% 时按 ±30% 调整间隔，钳制在
-[`CACHE_STATUS_MIN_INTERVAL_MS(50)`, `CACHE_STATUS_MAX_INTERVAL_MS(3000)`]——diff 大则加快
-同步，diff 小则放慢。
+- LocalStandbyCacheMatchProvider 只从已经成功路由的 PREFILL/PDFUSION 请求异步写入映射；
+- 映射有容量上限和 TTL，接近容量时缩短 TTL；可按 Local Standby 的 block size 异步补算 hash；
+- LocalStandbyComparisonService 把 standby 预测和之后的 engine feedback 对比，用于在切换前
+  评估质量。
 
-## flexlb-cache：三种匹配源
+CacheMatchQueryOrchestrator 的查询顺序是：
 
-### LOCAL_SYNC 两级索引
+1. LOCAL_SYNC 模式直接查本地全量索引。
+2. KVCM 模式且 active source 为 LOCAL_STANDBY 时，直接查 standby。
+3. 否则查 KVCM；若查询异常，本次请求同步降级查 standby，但 active source 仍保持 KVCM。
+4. CacheMatchFailoverManager 依据 KVCM 健康自动切换，或响应 ACTIVATE_FALLBACK /
+   RECOVER_PRIMARY 手动操作。控制入口是 GET /flexlb/cache_match/status 和
+   POST /flexlb/cache_match/failover。
 
-- **大表** `GlobalCacheIndex`：`ConcurrentHashMap<Long blockHash, Set<String engineIpPort>>`，
-  变更加单把 `ReentrantLock`。`batchCalculatePrefixMatchLength`：按序遍历请求 block 链，
-  用候选集过滤 + 首个未命中即淘汰该引擎（早停），返回每引擎的前缀匹配块数。
-- **小表** `EngineLocalView`：`ConcurrentHashMap<String engineIpPort, Set<Long>>`。
-  `calculateDiff` 在专用 ForkJoinPool 上并行算 added/removed，diff 大小回馈动态间隔服务。
-- `KvCacheManager`：门面——`findMatchingEngines`（候选来自 `WorkerStatusProvider`）、
-  `updateEngineCache`（diff 后双表应用）、`removeStaleEngineCaches`、`clear`。
+CacheMatchResult 携带产生该结果的 block size；路由器用 block size × 连续命中块数换算 token，
+并限制在请求 token 数内。KVCM 对 N=1 仅在 logical key 不命中时兼容查询旧 physical key；其余
+路径要求 exact logical identity。
 
-上述 LOCAL_SYNC key、KVCM `host_ip_port`、LOCAL_STANDBY 映射与 cache-hit comparison 均使用
-逻辑 `ip:httpPort@index`。KVCM 对 N=1 worker 兼容旧 physical `ip:httpPort` key：logical key
-未命中时才回退查询 physical key；N>1 或非 KVCM source 仍要求 exact match，无法匹配时按零命中忽略。
+## Block hash
 
-### KVCM（外部 KV Cache Manager）
+RequestBlockHashService 在 schedule 的路由前准备 block_cache_keys。请求已携带 keys 时直接使用；
+否则必须提供 input_ids，服务根据当前存活 PREFILL（没有时 PDFUSION）worker 的
+BlockHashConfig 计算。没有任一种输入时，调度请求无效。
 
-- 开关：`FLEXLB_CONFIG.cacheMatching.type=KVCM`；`MODEL_SERVICE_CONFIG.kvcm` 只提供
-  KVCM address/namespace/port/discovery 定位信息；
-  `CacheMatchConfiguration` 推导不变量 **`localSyncEnabled = !kvcmEnabled`、
-  `localStandbyEnabled = kvcmEnabled`**。
-- `KvcmGrpcClient`（flexlb-grpc）：向 KVCM **leader** 发 `GetHostCacheState`
-  （namespace = `deploymentName_blockSize`，QueryType 按 worker `kvCacheGroupMode` 映射
-  QT_PREFIX_MATCH / QT_PREFIX_MATCH_WITH_MAMBA），响应 `HostCacheMatch{host_ip_port,
-  prefix_match_blocks}`；`p2pHostCount` 默认 0，只对 local 命中最长的前 N 个 host 计算
-  P2P，配置为 0 时跳过 P2P；查询失败重试至 `maxQueryRetryCount`。
-- 健康管理：daemon 线程每 `leaderRefreshIntervalMs(10s)` 刷 leader（`GetClusterInfo`）与
-  worker 元数据；心跳/查询失败计数对 `heartbeatFailureThreshold(3)` /
-  `queryFailureThreshold(10)` 判不健康，连续 `recoverySuccessThreshold(3)` 次心跳成功恢复；
-  预热期（warmup）失败忽略。健康变化通知监听者。
-
-### LOCAL_STANDBY（兜底索引）
-
-- 近似索引，**只由已路由请求写入**（write-on-route）：PREFILL/PDFUSION 路由成功后
-  `HttpLoadBalanceServer` 调 `updateFromRoutedRequest` 异步落库。master/follower 之间不复制。
-- `LocalStandbyCacheIndex`：`ConcurrentHashMap<Long blockHash, ConcurrentHashMap<worker,
-  lastUpdatedNanos>>`，TTL 过期（用量超 `ttlReductionStartRatio(0.8)` 后 TTL 从
-  `ttlMs(300s)` 线性降至 `minimumTtlMs(100s)`），容量上限
-  `min(存活 worker HBM 估算块数 × capacityMultiplier(10), maximumEntries(200万))`，
-  达到上限拒绝新映射；daemon 清理线程每 10s 增量扫描。
-- 匹配时对每个 worker 的命中块数**减去其 `cacheMatchRollbackBlocks`**（下限 0）。
-- `LocalStandbyComparisonService`：KVCM 为主时持续影子预测，与引擎实际命中
-  （`CacheHitFeedback`）对比出 delta 指标——failover 前即可评估兜底质量。
-
-### 查询编排与 failover
-
-`CacheMatchQueryOrchestrator.findMatchingEngines()`：
-
-1. KVCM 关闭 → LOCAL_SYNC。
-2. KVCM 开启：`CacheMatchFailoverManager.activeSource()` 为 LOCAL_STANDBY → 查兜底
-   （指标 `standby_fallback{active_source}`）。
-3. 否则查 KVCM；成功时同步做一次 standby 影子预测记录；**内部重试耗尽后查询抛异常时当前请求同步降级
-   查 standby，但 active source 保持 KVCM**（`standby_fallback{kvcm_query_failure}`）。KVCM gRPC client 同时报告
-   `app.cache.kvcm.query.failure.qps`。
-   每个实际走 Local Standby 的结果都会登记 resolved standby prediction，以便后续 engine feedback 产出
-   同一 `cacheMatchSource=LOCAL_STANDBY` 标签下的 cache-hit comparison 指标和 PV。Standby prediction
-   登记的异常只影响 comparison，不触发 KVCM 降级或 Local Standby 路由失败。
-
-`CacheMatchFailoverManager`：监听 KVCM 健康——不健康且 `autoSwitch` 开 → 切 LOCAL_STANDBY；恢复健康 →
-切回 KVCM；手动 `ACTIVATE_FALLBACK` 覆盖一切，
-`RECOVER_PRIMARY` 要求 KVCM 已健康
-（HTTP 入口 `POST /flexlb/cache_match/failover`，非 master 会转发给 master；状态查询
-`GET /flexlb/cache_match/status`）。
-
-`CacheMatchResult` 恒携带**应答源自己的 blockSize**（KVCM/standby 的块大小可能与请求主
-hash 不同），路由侧统一用 `blockSize × 匹配块数` 折算 token，并以请求 token 数作为上限。
-
-## Block hash 计算
-
-- 策略：`BlockHashStrategy`（flexlb-cache）由 `FlexlbConfig.blockHashStrategy` 选择，默认
-  `VLLM`；只能通过 `FLEXLB_CONFIG` 切换为 `SGLANG`。
-- `VllmBlockHashStrategy` 委托 `BlockCacheKeyCalculator`（flexlb-common）计算 vLLM 兼容的
-  `sha256_cbor` 链式块哈希（`PYTHONHASHSEED=0` 语义）：每满块 CBOR 编码
-  `[parentHash, tokens, null]` → SHA-256 → 取低 64 位为 Long key；末尾不满块丢弃。
-- `SglangBlockHashStrategy`：每页计算
-  `SHA256(parentFullDigest || tokenIdsAsUint32LittleEndian)`，用完整 32-byte digest 串联下一页，
-  取 digest 高 64 位作为有符号 Long key；与 SGLang page_size 对齐，末尾不满页不计算。
-  `block_hash_lookahead_tokens=0`
-  时每个逻辑单元是单 token；值为 1 时匹配 SGLang EAGLE，把 N 个 raw tokens 表示为 N-1 个
-  overlapping `(t_i, t_{i+1})`，每个 pair 的两个 token 都写入 hash。其他 lookahead 值请求失败。
-  可缓存前缀同样按完整页截取：普通模式按 `floor(N/blockSize)`、EAGLE 按
-  `floor((N-1)/blockSize)`。
-- 配置解析：`WorkerBlockHashConfigResolver` 每 1 分钟从存活 PREFILL（退化 PDFUSION）worker
-  的 `blockSize` + `blockHashLookaheadTokens` 刷新，不可用时保留上次有效值。
-- 执行：`BlockHashExecutor` 专用线程池（默认 core 8 / max 32 / 队列 16384，
-  `flexlb.block-hash.*` 可调），出队等待/执行耗时指标，完成后 `publishOn(parallel)` 不占
-  hash 线程。调度请求必须提供 `block_cache_keys` 或 `input_ids` 至少一种；前者直接采用不再
-  计算，后者由 Master 按当前 worker hash 配置生成，两者都为空时返回 `INVALID_REQUEST`。
-- Local Standby 块大小与主请求不同时，由 `LocalStandbyHashService`（低优先级独立线程池 +
-  Caffeine 60s 结果缓存）异步补算，路由只等主 hash；主 hash 与 standby 共用同一个
-  `BlockHashStrategy` bean。
-- LOCAL_SYNC、Local Standby 与 KVCM 查询都消费有序 block key 链，按请求顺序连续匹配并在
-  首个 miss 停止；这与 SGLang HashTree 的前缀匹配语义一致，不按算法拆分 matcher。
+BlockHashExecutor 在专用线程池执行计算，默认 core=8、max=32、队列=16,384。VLLM 策略使用
+链式 sha256_cbor block hash；SGLANG 策略使用 parent digest 与 little-endian token 页哈希，
+支持 lookahead 为 0 或 1。三种 cache matcher 都消费有序 hash 链并在首个 miss 截断，不因 hash
+算法改变前缀匹配语义。

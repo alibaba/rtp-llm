@@ -1,66 +1,83 @@
 # Scheduling and Request Lifecycle
 
-`FLEXLB_CONFIG.scheduler` 是带 `type` 的联合配置：
+FLEXLB_CONFIG.scheduler 是带 type 的配置：
 
-- `DIRECT`：`RouteService` 在调用链中执行 `DefaultRouter.route()`，返回已完成的
-  `CompletableFuture<Response>`。
-- `QUEUE`（默认）：请求交给 `PriorityScheduler`，由调度器持有请求生命周期、
-  endpoint 预留和对外发布权。
+- DIRECT：RouteService 在调用线程执行 DefaultRouter.routeDirect()；没有队列和 endpoint
+  batcher 工作线程。
+- QUEUE（默认）：RequestScheduler 是唯一公共入口，RequestRegistry 拥有请求生命周期，
+  GlobalQueueCoordinator 决定全局顺序与选址，WorkerBatcher 只处理已经选定 endpoint 的
+  分组及交付。
 
-QUEUE 模式下，`ordering.type` 和 `dispatcher.type` 是两个正交维度：
+QUEUE 下有三个彼此独立的配置维度：
 
-- ordering：`FIFO`（默认）或 `PRIORITY`；PRIORITY 由 `PriorityAdmissionScheduler`
-  进行优先级准入、状态快照和可选抢占。
-- dispatcher：`BATCH`（默认）或 `NON_BATCH`；前者通过引擎 enqueue RPC
-  发布 batch，后者将路由决策返回调用方，由调用方向引擎发请求。
+| 维度 | 配置 | 责任 |
+|---|---|---|
+| 排序 | scheduler.ordering：FIFO 或 PRIORITY | GlobalQueueCoordinator 的全局队列顺序；PRIORITY 可配置 preemption |
+| 决策分组 | scheduler.decision：SINGLE 或 FIXED_WINDOW | 每个 Prefill WorkerBatcher 如何形成一份交付决策 |
+| 交付 | dispatcher：BATCH 或 NON_BATCH | EnqueueBatch，或向调用方交付单个 route decision |
 
-主要代码：`RouteService`、`PriorityScheduler`、`PriorityAdmissionScheduler`、
-`WorkerBatcher`、`DefaultBatchDispatcher` 和 `RouteDecisionDelivery`。
+## 准入与全局决策
 
-## 提交与准入
+RequestScheduler.submit() 在 ingress 线程只做同步注册和入队，不在此处扫描 worker：
 
-`RouteService.route()` 先将当前不可变的 `FlexlbConfig` 快照绑定到
-`BalanceContext`，再按 scheduler 类型分流。QUEUE 路径的关键边界是：
+1. 读取当前配置，拒绝非 QUEUE 配置或在启动后才切换到 QUEUE 的实例。
+2. RequestRegistry.register() 以 request_id 建立唯一 RequestSlot，检查重复 id 和绝对 deadline，
+   并取得 maxOutstandingRequestsGlobal 限制的全局准入 permit。容量满时，PRIORITY 可以用
+   符合配置的可逆 victim 转移 permit；否则返回 QUEUE_FULL。
+3. 将同一个 future 和 context 写入 GlobalQueueCoordinator。future 被取消或完成会 O(1) 移除
+   对应队列节点，不能留下阻塞后缀的历史节点。
 
-1. `request_id` 是请求代际标识；活跃或已终态的重复 ID 会被拒绝。
-2. `QueueCapacityConfig.maxOutstandingRequestsGlobal`（默认 100000）精确限制
-   Master 当前持有的请求数，包括还未注册进 inflight map 的准入中请求。
-3. 调度器在可能向引擎或调用方发布前装配唯一的绝对过期事件。
-4. PRIORITY ordering 进入优先级 plan/commit；FIFO ordering 先调用
-   `DefaultRouter`，提交 endpoint 预留后才把请求放入目标 Prefill 的
-   `WorkerBatcher`。
+GlobalQueueCoordinator 使用一个决策线程和受 internalRuntime.queuePlannerThreads 限制的规划池：
 
-路由、预留、inflight 注册和发布都属于同一 request generation。失败或
-取消只能通过调度器的单一 reducer 收敛，避免重复回滚和重复完成 future。
+- FIFO 以入队序列排序；PRIORITY 以 priority 降序、入队序列升序、request id 为最终稳定 tie-break。
+- 决策线程从全局队列提取有限 planning frontier，在锁外调用 DefaultRouter.routeForQueue()。
+  路由和 RPC 不在队列锁内执行。
+- 计划必须按队列顺序提交。若高优先级请求在计划期间抵达，当前 frontier 会丢弃并重新捕获。
+- 无法提交的请求按精确 PlacementKey 停放；仅当对应 endpoint 容量事件变化时才重新参与决策。
+  不重试不相关的 blocked request，且不同 endpoint/group 可以独立前进。
+- 计划在 endpoint 提交时再次验证 generation、容量和 deadline。陈旧计划关闭自己的 pins 并重规划，
+  不会把旧快照发布到 endpoint。
 
-## WorkerBatcher 与发布
+## Endpoint 运行时与交付
 
-`WorkerBatcher` 是每个 Prefill endpoint 的决策组组织者。BATCH dispatcher 使用
-`FixedWindowBatcherAlgorithm`，按 `maxRequests`、`maxCollectionWaitMs`、预测执行时间
-与 endpoint 容量触发发送；NON_BATCH dispatcher 使用
-`ImmediateNonBatchAlgorithm`，一个决策组只包含一个请求。
+每个已发布 Prefill generation 有一个 WorkerBatcher。它不是 route selector，而是该 endpoint 的
+活动请求索引、分组和交付所有者：
 
-在任何模式下，调度器都在对外可见前提交 endpoint 账本和
-`RequestLifecycle`。BATCH 路径记录引擎 ACK/执行状态；NON_BATCH 路径记录
-路由决策的交付与调用方确认。
+- SINGLE 每份决策只包含一个请求；FIXED_WINDOW 在 maxRequests、maxCollectionWaitMs 或可选
+  maxPredictedExecutionMs 条件满足时形成决策组。
+- BATCH 由 BatchDeliveryStrategy 和 DefaultBatchDispatcher 准备 EnqueueBatch，并在引擎 ACK
+  后把 batch delivery 状态交给 RequestRegistry。
+- NON_BATCH 由 RouteDeliveryStrategy 交付 route decision；调用方确认或 lifecycle 超时决定后续
+  资源归属。
+- dispatcher 的 per-Prefill in-flight 限制区分 batch 和 request；队列长度硬上限位于
+  scheduler.capacity.maxWaitingRequestsPerPrefillWorker。
 
-## 取消、过期与状态查询
+在 QUEUE 路径中，Prefill/Decode 的 reservation、delivery claim 与完成 future 都由
+RequestRegistry 的精确 RequestSlot reducer 连接。batcher 不拥有全局 admission、request id
+去重、取消或终态回收。
 
-- `cancelRequest(requestId, expectedBatchId, reason)` 由 scheduler 作为生命周期和资源的
-  唯一拥有者执行；`expectedBatchId` 防止旧取消请求命中重用 ID 的新代际。
-- 若请求可能已到达引擎，本地资源在引擎终态或取消 fence 收敛前不会被
-  乐观释放。
-- `getRequestState()` 同时查询活跃 inflight 和最近终态快照；gRPC 转发也带
-  单跳 fence，避免跟随者间循环代理。
-- `queueTimeoutMs`（默认 3600000）给 QUEUE 所有权提供上界；
-  `RequestLifecycleConfig` 另外约束 stale inflight 和已交付未确认请求。
+## 取消、过期和状态查询
+
+RequestRegistry 是以下状态变化的唯一 reducer：
+
+- client cancel、deadline、排队超时、delivery ACK/拒绝、引擎接受/运行/终态；
+- priority preemption 与可能的引擎取消 fence；
+- stale inflight 和已交付未确认请求的清理；
+- 关闭时停止新准入、等待已跨过 admission 边界的 mutation，然后终止剩余 request generation。
+
+每个 request generation 都有绝对 deadline；队列决策点与 endpoint 发布点都会再次检查，防止
+延迟定时器将已过期请求交付给引擎。取消携带 expectedBatchId 作为 generation fence，避免旧
+取消命中复用 request id 的新请求。
+
+FlexLB gRPC 还提供 GetRequestState 和 Cancel。启用一致性时，follower 对这两个调用同样尝试
+单跳转发到 master；没有 master 地址时才本地处理。见
+[05-lifecycle-and-consistency](05-lifecycle-and-consistency.md)。
 
 ## 默认配置
 
-- scheduler：`QUEUE` + `FIFO`，`queueTimeoutMs=3600000`，
-  `maxOutstandingRequestsGlobal=100000`。
-- dispatcher：`BATCH`，`maxRequests=8`，`maxCollectionWaitMs=300`，
-  `maxWaitingRequestsPerPrefillWorker=1024`，`enqueueRpcTimeoutMs=5000`。
-- lifecycle：`staleInflightTimeoutMs=300000`，
-  `deliveredNotAcceptedTimeoutMs=30000`，
-  `maxDeliveredNotAcceptedRequestsGlobal=200`。
+- scheduler：QUEUE、FIFO、queueTimeoutMs=3,600,000；全局准入为 100,000。
+- decision：FIXED_WINDOW，maxRequests=8，maxCollectionWaitMs=300。
+- dispatcher：BATCH，enqueueRpcTimeoutMs=5,000；未设置时 per-Prefill in-flight 限制不额外收紧。
+- lifecycle：staleInflightTimeoutMs=300,000，deliveredNotAcceptedTimeoutMs=30,000，
+  maxDeliveredNotAcceptedRequestsGlobal=200。
+- 每个 Prefill endpoint 等待队列上限：1,024。

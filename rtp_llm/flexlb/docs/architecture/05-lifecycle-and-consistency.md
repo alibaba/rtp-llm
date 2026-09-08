@@ -1,119 +1,67 @@
 # Lifecycle and Consistency
 
-FlexLB 的优雅上下线不靠 Spring 生命周期或 JVM 信号，而由**同机 sidecar 通过本机 HTTP hook
-端点驱动**；高可用由 ZooKeeper LeaderSelector 主选举 + slave 请求转发实现。
+FlexLB 的上线和下线由本机 sidecar 调用 HTTP hook 驱动；高可用是可选的 ZooKeeper
+LeaderSelector 选举，并通过 FlexLB 自己的 gRPC 服务把 follower 请求交给 master。
 
-主要代码：`flexlb-sync/src/main/java/org/flexlb/service/grace/`、`consistency/`，
-`flexlb-api/.../AppStateHookServer.java`、`HealthCheckServer.java`。
+## 生命周期 hook
 
-## 生命周期 Hook
-
-### 接口（flexlb-common `listener/`）
-
-| 接口 | 方法 | 备注 |
-|---|---|---|
-| `AppOnlineHooker` | `afterStartUp()` + `priority()` | `priority()` 已声明但**无调用方**——实际执行顺序硬编码在编排服务里 |
-| `AppShutDownHooker` | `beforeShutdown()` | 无优先级方法 |
-| `ApplicationWarmupState` | `isWarmupFinished()` | 供健康检查与 gRPC 客户端预热判断 |
-
-失败语义：各 Hook 内部自行 catch（`LbConsistencyHooker` 上线 catch Exception、下线 catch
-Throwable；`ActiveRequestShutdownHooker` catch InterruptedException），实践中单个 Hook 失败
-不会中断链；若真有未捕获异常，`AppStateHookServer` 返回 HTTP 500。
-
-### 编排与触发
-
-**触发点是三个仅限本机调用的 HTTP 端点**（`AppStateHookServer`，非 loopback/本机地址一律 403）：
+AppStateHookServer 只接受 loopback 或与本机地址相同的调用方，其他远端地址返回 403。
 
 | 端点 | 行为 |
 |---|---|
-| `GET /hook/process_ok` | `ApplicationReadyEvent` 后返回 200，否则 503 |
-| `GET /hook/after_start` | 同步执行 `GracefulOnlineService.online()`（故意阻塞事件循环），上报 `online_complete` |
-| `GET /hook/pre_stop` | 在 boundedElastic 上执行 `GracefulShutdownService.offline()`；活跃请求排干成功返回 200，否则 503 |
+| GET /hook/process_ok | ApplicationReadyEvent 后返回 200；此前返回 503 |
+| GET /hook/after_start | 同步执行 ApplicationLifecycle.online()，完成后才返回 200 |
+| GET /hook/pre_stop | 在 boundedElastic 执行 ApplicationLifecycle.offline()；排干成功返回 200，否则 503 或 500 |
 
-**上线顺序**（`GracefulOnlineService.online()`，`test` profile 下整体跳过）：
-1. `LbConsistencyHooker.afterStartUp()`——`LBStatusConsistencyService.start()` → ZK
-   LeaderSelector 启动（`zk_node_online`）；
-2. `QueryWarmerHooker.afterStartUp()`——**固定 sleep 10 秒**等依赖就绪（并有 10s 兜底
-   Timer 强制置位），完成后 `warmupFinished=true`（`warmer_complete`）。名字里的
-   "warm" 目前不预热任何查询路径。
+ApplicationLifecycle 是固定编排器，不再遍历 AppOnlineHooker/AppShutDownHooker 列表：
 
-**下线顺序**（`GracefulShutdownService.offline()`）：
-1. `HealthCheckHooker`——置静态 volatile `isShutDownSignalReceived=true`，`/health` 立即
-   开始返回 404，摘除流量（`health_check_offline`）；
-2. `LbConsistencyHooker`——ZK 下线/让主（`zk_node_offline`）；
-3. `ActiveRequestShutdownHooker`——排干在途请求：每 500ms 轮询
-   `ActiveRequestCounter.getCount()`，需要**连续 5s 静默**（quietPeriodMs，期间任何活跃请求
-   重置窗口）才算成功；硬超时 300s（`shutdown_timeout`）。计数来源：每个
-   `/rtp_llm/schedule` 请求通过 `Mono.using(activeRequestCounter::acquire, ...,
-   RequestToken::close)` 包裹（token 幂等关闭）。
+1. online：test profile 整体跳过；其他 profile 启动 LBStatusConsistencyService，随后等待
+   固定 3 秒初始 worker 同步并设置 warmUpFinished。
+2. health：GET /health 只有 warmUpFinished 且尚未收到 shutdown 时返回 200；其他情况返回 404。
+3. offline：先设置 shutdownReceived 并立即让 health 失败，再执行一致性 offline；然后每
+   500ms 观察 ActiveRequestCounter，要求连续 5 秒没有活跃请求。硬超时为 300 秒。
 
-### 健康检查
+ActiveRequestCounter 的 token 在每个 gRPC Schedule 调用完成、取消或出错时幂等关闭。它衡量的是
+FlexLB 接收中的 gRPC 请求，不是 endpoint 队列深度或引擎运行请求数。GracefulLifecycleReporter
+记录 process_ok、zk_node_online/offline、warmer_complete、online_complete、health_check_offline、
+shutdown_complete 和 shutdown_timeout 事件。
 
-`GET /health`（`HealthCheckServer`）：`isShutDownSignalReceived` → 404 "shutdown received"；
-warmup 未完成 → 404 "warm not finish"；否则 200 "success"。
+## 一致性配置与主选举
 
-### 指标
+FLEXLB_CONFIG.consistency 是 tagged union：
 
-`GracefulLifecycleReporter`：gauge `graceful.lifecycle.event`，tag `type`
-（`process_ok`/`zk_node_online`/`warmer_complete`/`online_complete`/`health_check_offline`/
-`zk_node_offline`/`shutdown_complete`/`shutdown_timeout`）+ `duration_ms`，值为时间戳。
+- NONE（默认）：LBStatusConsistencyService 的 start/offline 为 no-op，isMaster() 返回 false。
+- ZOOKEEPER：ZookeeperConsistencyConfig 保存连接、session/connection timeout 和
+  masterRefreshIntervalMs；该对象在 Bean 创建时读取，切换类型或连接参数需要重启。当前
+  ZookeeperMasterElectService 的实际缓存刷新任务固定为 5 秒。
 
-## 主选举与一致性
+ZookeeperMasterElectService 使用 Curator LeaderSelector，namespace 为 whale-master，路径为
+/master_lb_leader/{deploymentId}，selector id 是本机 IP，retry policy 是
+ExponentialBackoffRetry(1000, 3)，并启用 autoRequeue。
 
-### 配置
+获得领导权后服务将 isMaster 置为 true，异步 HTTP 通知其他 participant 的
+/rtp_llm/notify_master，然后阻塞在 latch 上保持领导权。SUSPENDED 或 LOST 会抛
+CancelLeadershipException；LOST 同时清空缓存 master。缓存 leader 每 5 秒刷新，master 节点
+指标每 2 秒上报。
 
-一致性行为已收拢到 `FLEXLB_CONFIG.consistency` tagged union。默认
-`{"type":"NONE"}`，相关 start/offline/destroy 都是 no-op、`isMaster()` 恒 false；启用时使用：
+offline 会禁止 rejoin 并释放 leader latch。多节点时最多等待约 30 秒确认本机不再是 leader；
+单节点或查询 participant 失败时不等待转移。GET /rtp_llm/schedule_snapshot 返回当前的领导权
+诊断快照（是否启用、是否 master、本机与缓存 master），不是调度队列的状态复制。
 
-```json
-{
-  "consistency": {
-    "type": "ZOOKEEPER",
-    "connectString": "zk-1:2181,zk-2:2181",
-    "sessionTimeoutMs": 30000,
-    "connectionTimeoutMs": 30000,
-    "masterRefreshIntervalMs": 5000
-  }
-}
-```
+## follower gRPC 转发
 
-一致性组件在 Bean 初始化时取得配置，因此 Nacos 可以保存和替换这部分字段，但当前进程
-是否启用一致性及 ZooKeeper 客户端参数在重启后生效。选举路径使用 `HIPPO_ROLE`；端口取
-Spring `server.port`，再回退 JVM `-Dserver.port` 和默认 7001（假定所有副本同端口）。
+Schedule、GetRequestState 和 Cancel 的权威生命周期在 master。启用一致性且本机不是 master 时：
 
-### ZookeeperMasterElectService
+1. FlexlbServiceImpl 通过 FlexlbGrpcForwarder 读取 cached master，并在 gRPC 端口
+   server.port + 2 上转发调用。
+2. 请求携带 forward_hop，最大只允许一次转发；self-target 或 hop limit 会拒绝再次转发。
+3. 没有 master 地址且尚未尝试 RPC 时，Schedule、状态查询和取消可本地处理。
+4. 一旦已选择 master 并尝试 Schedule/Cancel RPC，超时或连接失败都是不确定交付：
+   不在 follower 本地执行相同 reducer。Schedule 会尽力向 master 发送取消协调，以免 master
+   已提交请求后调用方已离开。
 
-- Curator recipe：**LeaderSelector**（非 LeaderLatch），namespace `whale-master`，路径
-  `/master_lb_leader/<deploymentId>`，`setId(本机IP)`，`autoRequeue()`，重试
-  `ExponentialBackoffRetry(1000, 3)`。
-- `takeLeadership()`：置 `isMaster=true`，**主动 HTTP 通知所有非 leader 参与者**
-  `POST http://<ip>:<port>/rtp_llm/notify_master`（1s 超时）；然后阻塞在 CountDownLatch 上
-  保持领导权。
-- `stateChanged()`：`SUSPENDED`/`LOST` → 抛 `CancelLeadershipException` 放弃领导权
-  （LOST 同时清空 master 缓存）。
-- master 缓存：每 5s `updateLatestMaster()` 从 `leaderSelector.getLeader().getId()` 刷新
-  `cachedMasterHostIp`；每 1s 上报 master 节点指标。
-- **优雅让主**：`offline()` 置 `markOffline`、关闭 autoRejoin；若自己是 master，释放 latch
-  后（多节点时）**每 1s 轮询直到 leader 变成别的 IP 才返回**——pre_stop 会等领导权实际转移。
+因此一致性是“有可达 master 时单一调度所有者”的保证；master 缓存缺失时优先可用性。本地
+fallback 只发生在没有选中 master 的早期边界，不能把 RPC 失败解释为安全的本地重试。
 
-### LBStatusConsistencyService（Spring 门面，实现 MasterElectService）
-
-- `handleMasterChange(req)`：`/rtp_llm/notify_master` 的接收端——校验 `roleId` 匹配后
-  `refreshMasterHost(true)` 强刷缓存。
-- `getMasterHostIpPort()`：master IP + 本机 serverPort。
-- `syncLBStatusFromMaster`（每 500ms 调度）与 `dumpLBStatus()` 目前是 **TODO 空实现**
-  （`/rtp_llm/schedule_snapshot` 恒返回成功占位）。
-
-### "只有 master 路由"的实际语义
-
-靠 **slave 转发而非拒绝**，只有两处检查 `isMaster()`：
-
-1. `HttpLoadBalanceServer.processScheduledRequest`：启用一致性且非 master →
-   `forwardRequestToMaster()` 把原始请求代理到 `http://master:port/rtp_llm/schedule`；
-   **master 为空/不可达/超时时降级为本地路由**（`fallbackToLocalRouting`，上报
-   `MASTER_NULL`/`TIMEOUT`/`CONNECT_FAILED`）。所有响应都携带 `realMasterHost` 供客户端
-   感知真正的 master。
-2. `FlexlbControlServer`：cache-match failover 操作非 master 时转发给 master（master 不可用
-   返回 503）。
-
-因此该保证是 best-effort：网络分区或 master 缺位时 slave 会自行路由（可用性优先）。
+Cache match failover 的 HTTP 控制操作也在 follower 转发给 master；没有 master 或转发失败返回
+503，而不是在 follower 改变 local active source。
