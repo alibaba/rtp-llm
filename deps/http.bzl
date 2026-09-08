@@ -114,6 +114,15 @@ def http_deps():
         sha256 = "658122cfb1f25be76ea212b00f5eb047d8e2adc8bcf923b918461f2b1e37cdf2",
     )
 
+    # CUDA 12 internal builds enable the ACCL Expert Parallel backend via
+    # use_accl_ep=1. Keep the prebuilt runtime available even when rtp_deps
+    # resolves to this repository instead of internal_source/deps.
+    http_file(
+        name = "accl_ep_rpm",
+        urls = ["http://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/pkg%2Facclep%2FAcclEP-1.1.0.9-f02e709c.alios7.x86_64.rpm"],
+        sha256 = "553ef1ad72f4e52d679c84b1795ee44e4a0571aa4c7fb0d3c362be01bd54c807",
+    )
+
     http_file(
         name = "hf3fs_rpm",
         urls = ["https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/package/3fs/hf3fs-1.3.0-1.alios7.x86_64.rpm"],
