@@ -202,6 +202,55 @@ def apply_rope_reference(
     return q_rope, k_rope
 
 
+@unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
+class TestPartialMrope(unittest.TestCase):
+    def test_scalar_positions_preserve_non_rotary_dimensions(self):
+        # Qwen3.5 uses 64 rotary dimensions within each 256-dimensional head.
+        # Position 64 is the first uncached token after reusing a full block.
+        head_dim, rotary_dim = 256, 64
+        positions = torch.tensor([0, 64, 65], dtype=torch.int32, device="cuda")
+        config = create_test_attn_config(size_per_head=head_dim)
+        config.rope_config.style = RopeStyle.Mrope
+        config.rope_config.dim = rotary_dim
+        config.rope_config.base = 10000000
+        op = MhaRotaryEmbeddingOp(config)
+        # Exercise the uncached path independently of the process-global RopeCache.
+        op.cos_sin_cache = None
+        op.set_params(SimpleNamespace(positions_d=positions))
+        reference_cache = create_cos_sin_cache(
+            rotary_dim, max_seq_len=66, base=config.rope_config.base
+        )
+
+        for dtype in (torch.float16, torch.bfloat16):
+            with self.subTest(dtype=dtype):
+                torch.manual_seed(42)
+                qkv = torch.randn(3, 16, head_dim, dtype=dtype, device="cuda")
+                original_q, original_k, original_v = qkv.clone().split([8, 4, 4], dim=1)
+                expected_q, expected_k = apply_rope_reference(
+                    original_q[..., :rotary_dim].float(),
+                    original_k[..., :rotary_dim].float(),
+                    reference_cache,
+                    positions,
+                )
+
+                query, key, value = op.forward(qkv)
+
+                for actual, expected, original in (
+                    (query, expected_q, original_q),
+                    (key, expected_k, original_k),
+                ):
+                    torch.testing.assert_close(
+                        actual[..., :rotary_dim], expected.to(dtype)
+                    )
+                    torch.testing.assert_close(
+                        actual[..., rotary_dim:],
+                        original[..., rotary_dim:],
+                        rtol=0,
+                        atol=0,
+                    )
+                torch.testing.assert_close(value, original_v, rtol=0, atol=0)
+
+
 class TestMhaRotaryEmbeddingOp(unittest.TestCase):
     """Test suite for MhaRotaryEmbeddingOp"""
 
