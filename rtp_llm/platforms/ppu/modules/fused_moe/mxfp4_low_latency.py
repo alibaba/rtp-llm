@@ -33,12 +33,17 @@ def low_latency_mxfp4_moe(
     max_dispatch_tokens,
     expected_m,
     swiglu_limit=None,
+    output_dtype=torch.float32,
 ):
     """Dispatch and combine every valid row, with no compact-prefix capacity.
 
     This adapter borrows the engine's existing buffer/communicator. The handle
     and payload stay alive through combine. Padded/inactive routes remain -1.
+    BF16 output preserves the combine result for consumers that promote in
+    registers; the FP32 default retains the existing adapter contract.
     """
+    if output_dtype not in (torch.float32, torch.bfloat16):
+        raise ValueError("PPU routed output must be FP32 or BF16")
     if (
         x.ndim != 2
         or x.dtype != torch.bfloat16
@@ -96,4 +101,6 @@ def low_latency_mxfp4_moe(
         async_finish=False,
         return_recv_hook=False,
     )
-    return combined.float()
+    if combined.dtype != torch.bfloat16:
+        raise RuntimeError("PPU DeepEP LL combine must return BF16")
+    return combined.to(output_dtype)

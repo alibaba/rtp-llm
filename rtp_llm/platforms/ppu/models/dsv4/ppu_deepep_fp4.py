@@ -71,8 +71,13 @@ class PpuDeepEPFP4Strategy(RoutedExpertsStrategy):
             and cfg.max_tokens_per_rank > 0
         )
 
-    def __init__(self, cfg, *, expected_m_policy="capacity"):
+    def __init__(
+        self, cfg, *, expected_m_policy="capacity", output_dtype=torch.float32
+    ):
         super().__init__(cfg)
+        if output_dtype not in (torch.float32, torch.bfloat16):
+            raise ValueError("PPU routed output must be FP32 or BF16")
+        self.output_dtype = output_dtype
         if expected_m_policy not in ("capacity", "batch"):
             raise ValueError("PPU MoE expected rows policy must be capacity or batch")
         self._expected_m_policy = expected_m_policy
@@ -154,4 +159,5 @@ class PpuDeepEPFP4Strategy(RoutedExpertsStrategy):
             max_dispatch_tokens=wrapper.ll_num_max_token_per_rank,
             expected_m=self.expected_rows(x.shape[0]),
             swiglu_limit=self.cfg.swiglu_limit if self.cfg.swiglu_limit > 0 else None,
+            output_dtype=self.output_dtype,
         )

@@ -697,7 +697,7 @@ class MoE(nn.Module):
                 )
         if _dbg:
             with record_function_range("dsv4.moe.add_shared"):
-                y = y + shared_y
+                y = y.float() + shared_y.float()
             if dbg_pos_mask is not None:
                 _rt.record_if_level(
                     2,

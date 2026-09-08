@@ -8,6 +8,7 @@ fixtures; this small arithmetic case runs without SGLang or a checkpoint.
 import unittest
 
 import torch
+
 from rtp_llm.platforms.ppu.kernels.ppu_mxfp4_masked import mxfp4_experts_masked
 from rtp_llm.platforms.ppu.modules.fused_moe.mxfp4_low_latency import (
     low_latency_mxfp4_moe,
@@ -118,7 +119,8 @@ class Mxfp4MaskedTest(unittest.TestCase):
 
             def low_latency_combine(self, **kwargs):
                 self.combine = kwargs
-                return kwargs["x"][2, :2].clone(), None, None
+                self.combined = kwargs["x"][2, :2].clone()
+                return self.combined, None, None
 
         for alias in (False, True):
             with self.subTest(alias=alias):
@@ -127,7 +129,7 @@ class Mxfp4MaskedTest(unittest.TestCase):
                 weights = torch.ones((2, 6), dtype=torch.float32, device="cuda")
                 indices = torch.arange(6, device="cuda").expand(2, -1).contiguous()
 
-                def run():
+                def run(output_dtype=torch.float32):
                     return low_latency_mxfp4_moe(
                         buffer,
                         x,
@@ -138,11 +140,16 @@ class Mxfp4MaskedTest(unittest.TestCase):
                         num_experts=8,
                         max_dispatch_tokens=256,
                         expected_m=1,
+                        output_dtype=output_dtype,
                     )
 
                 result = run()
                 self.assertEqual(result.dtype, torch.float32)
                 self.assertTrue(torch.equal(result, torch.full_like(result, 2**-9)))
+                native = run(torch.bfloat16)
+                self.assertIs(native, buffer.combined)
+                self.assertEqual(native.dtype, torch.bfloat16)
+                self.assertTrue(torch.equal(native.float(), result))
                 valid = (
                     torch.arange(self.m, device="cuda")[None, :] < self.counts[:, None]
                 )

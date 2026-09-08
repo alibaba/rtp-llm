@@ -27,9 +27,13 @@ class DecodeMoeHintTest(unittest.TestCase):
             local_expert_end=32,
             max_tokens_per_rank=128,
         )
-        options = {"DSV4_PPU_DECODE_MOE_HINT": "batch"}
+        options = {
+            "DSV4_PPU_DECODE_MOE_HINT": "batch",
+            "DSV4_PPU_DECODE_MOE_OUTPUT": "bf16",
+        }
         provider = PpuDecodeProvider(options)
         options["DSV4_PPU_DECODE_MOE_HINT"] = "capacity"
+        options["DSV4_PPU_DECODE_MOE_OUTPUT"] = "fp32"
 
         def factory(**kwargs):
             return kwargs["strategy_type"](cfg, **kwargs["strategy_kwargs"])
@@ -38,6 +42,8 @@ class DecodeMoeHintTest(unittest.TestCase):
             factory, tp_size=1, ep_size=8, is_decode_role=True
         )
         capacity = PpuDeepEPFP4Strategy(cfg)
+        self.assertEqual(capacity.output_dtype, torch.float32)
+        self.assertEqual(strategy.output_dtype, torch.bfloat16)
         buffer = object()
         strategy._wrapper = SimpleNamespace(
             buffer=buffer, ll_num_max_token_per_rank=256
@@ -55,11 +61,16 @@ class DecodeMoeHintTest(unittest.TestCase):
             self.assertIs(launch.call_args.args[3], indices)
             self.assertEqual(launch.call_args.kwargs["max_dispatch_tokens"], 256)
             self.assertEqual(launch.call_args.kwargs["expected_m"], expected)
+            self.assertEqual(launch.call_args.kwargs["output_dtype"], torch.bfloat16)
             self.assertEqual(capacity.expected_rows(batch), 24)
         with self.assertRaisesRegex(ValueError, "MoE hint"):
             PpuDecodeProvider({"DSV4_PPU_DECODE_MOE_HINT": "unknown"})
         with self.assertRaisesRegex(ValueError, "rows policy"):
             PpuDeepEPFP4Strategy(cfg, expected_m_policy="unknown")
+        with self.assertRaisesRegex(ValueError, "MoE output"):
+            PpuDecodeProvider({"DSV4_PPU_DECODE_MOE_OUTPUT": "fp16"})
+        with self.assertRaisesRegex(ValueError, "routed output"):
+            PpuDeepEPFP4Strategy(cfg, output_dtype=torch.float16)
 
 
 if __name__ == "__main__":

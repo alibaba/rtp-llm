@@ -321,6 +321,31 @@ class Dsv4PlanTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "No compatible"):
             unsupported.prepare([request_for("model", unsupported.selection)])
 
+    def test_decode_moe_output_storage_is_part_of_rank_protocol(self):
+        digests = set()
+        for rank in range(8):
+            ctx = self.decode_context(
+                rank,
+                execution_options={
+                    "DSV4_PPU_SGLANG_MOE": "1",
+                    "DSV4_PPU_DECODE_MOE_OUTPUT": "bf16",
+                },
+            )
+            digests.add(ctx.prepare([request_for("model", ctx.selection)]))
+        self.assertEqual(len(digests), 1)
+        default = self.decode_context()
+        self.assertNotIn(
+            default.prepare([request_for("model", default.selection)]), digests
+        )
+        unsupported = self.decode_context(
+            execution_options={
+                "DSV4_PPU_SGLANG_MOE": "1",
+                "DSV4_PPU_DECODE_MOE_OUTPUT": "fp16",
+            }
+        )
+        with self.assertRaisesRegex(ValueError, "No compatible"):
+            unsupported.prepare([request_for("model", unsupported.selection)])
+
     def test_selected_plan_controls_actual_forward_phase(self):
         from rtp_llm.models_py.pluggable.dsv4_specs import (
             forward_capabilities,

@@ -187,6 +187,10 @@ def supports_ppu_fp4_decode(selection, request):
             "requires capacity or batch MoE launch hint",
         ),
         (
+            options.get("DSV4_PPU_DECODE_MOE_OUTPUT", "fp32") in ("fp32", "bf16"),
+            "requires fp32 or bf16 MoE output storage",
+        ),
+        (
             options.get("DSV4_PPU_SGLANG_MOE", "0") == "1"
             and options.get("DSV4_MOE_SHARED_EXPERT_OVERLAP", "0") == "0"
             and options.get("DSV4_SHARED_EXPERT_MODE", "sequential")

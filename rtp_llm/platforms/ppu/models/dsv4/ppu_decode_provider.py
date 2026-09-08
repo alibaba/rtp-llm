@@ -1,5 +1,7 @@
 """Explicit TP1/DP8/EP8 Decode candidate using engine-owned communication."""
 
+import torch
+
 from rtp_llm.models_py.modules.dsv4.platform_provider import Dsv4ProviderCapability
 
 from .ppu_module_provider import PpuModuleProvider
@@ -26,6 +28,12 @@ class PpuDecodeProvider(PpuModuleProvider):
         )
         if self._moe_hint not in ("capacity", "batch"):
             raise ValueError("PPU Decode MoE hint must be capacity or batch")
+        moe_output = self.execution_options.get("DSV4_PPU_DECODE_MOE_OUTPUT", "fp32")
+        if moe_output not in ("fp32", "bf16"):
+            raise ValueError("PPU Decode MoE output must be fp32 or bf16")
+        self._moe_output_dtype = (
+            torch.bfloat16 if moe_output == "bf16" else torch.float32
+        )
         self._metadata_mode = self.execution_options.get(
             "DSV4_PPU_DECODE_METADATA", "eager"
         )
@@ -109,7 +117,10 @@ class PpuDecodeProvider(PpuModuleProvider):
             platform_provider=self,
             execution_options=self.execution_options,
             strategy_type=PpuDeepEPFP4Strategy,
-            strategy_kwargs={"expected_m_policy": self._moe_hint},
+            strategy_kwargs={
+                "expected_m_policy": self._moe_hint,
+                "output_dtype": self._moe_output_dtype,
+            },
             **kwargs,
         )
 

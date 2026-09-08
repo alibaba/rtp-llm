@@ -76,7 +76,7 @@ class RoutedExpertsStrategy(nn.Module):
 
     A strategy is responsible for:
       - holding its own slice of routed-expert weights (loaded in ``setup_weights``)
-      - producing ``[N, D] fp32`` per-token routed-sum from
+      - producing ``[N, D]`` per-token routed-sum in ``output_dtype`` from
         ``(x: [N, D] BF16, weights: [N, topk] FP32, indices: [N, topk] int64)``
 
     A strategy MUST handle cuda-graph capture state internally (e.g.
@@ -100,6 +100,10 @@ class RoutedExpertsStrategy(nn.Module):
     # Mega variants that fuse the shared expert set this True.
     routed_includes_shared: ClassVar[bool] = False
 
+    # A BF16 communication result may stay BF16 until the shared epilogue
+    # promotes it to FP32. This describes storage, not accumulation precision.
+    output_dtype: torch.dtype = torch.float32
+
     def __init__(self, cfg: MoeCfg):
         super().__init__()
         self.cfg = cfg
@@ -120,8 +124,8 @@ class RoutedExpertsStrategy(nn.Module):
         x: torch.Tensor,  # [N, D] BF16
         weights: torch.Tensor,  # [N, topk] FP32
         indices: torch.Tensor,  # [N, topk] int64 GLOBAL expert id
-    ) -> torch.Tensor:  # [N, D] FP32
-        """Route + compute. Returns per-token routed-expert sum in fp32."""
+    ) -> torch.Tensor:  # [N, D], output_dtype
+        """Route + compute. Return the sum in the declared output storage dtype."""
         raise NotImplementedError
 
     def can_use_gate_pack_static(self, gate) -> bool:
@@ -290,12 +294,15 @@ def select_strategy(
         for cls in _STRATEGY_PRIORITY:
             if cls.name == forced:
                 if cls.can_handle(cfg):
-                    if cfg.ep_size > 1 and cls.name not in (
-                        "mega",
-                        "mega_fused",
-                        "mega_se",
-                    ) and not (
-                        cls.name == "deepep" and _platform_allows_deepep_moe()
+                    if (
+                        cfg.ep_size > 1
+                        and cls.name
+                        not in (
+                            "mega",
+                            "mega_fused",
+                            "mega_se",
+                        )
+                        and not (cls.name == "deepep" and _platform_allows_deepep_moe())
                     ):
                         raise RuntimeError(
                             "DSV4 EP MoE requires MegaMoEStrategy. "
@@ -358,6 +365,5 @@ def _platform_allows_deepep_moe() -> bool:
     )
 
     return (
-        Dsv4ProviderCapability.DEEPEP_MOE
-        in get_dsv4_platform_provider_capabilities()
+        Dsv4ProviderCapability.DEEPEP_MOE in get_dsv4_platform_provider_capabilities()
     )
