@@ -158,7 +158,22 @@ class _PrefillPagedCudaGraphTestMixin:
         normal_op.prepare(normal_inp)
         normal_out = normal_op.forward(q, kv_cache)
 
-        # CUDA graph path: capture then replay
+        # CUDA graph path: capture then replay.
+        #
+        # Scope, because this test has already been over-trusted once: it exercises
+        # the *contract* the graph path depends on -- persistent buffers, plan()
+        # under forbid_realloc, prepare-then-forward with updated inputs, compared
+        # against the eager result -- but it does not create a torch CUDAGraph and
+        # replay it, and it does not reproduce how the engine captures.
+        #
+        # The engine drives capture from C++ across 16 decode graphs plus a prefill
+        # graph sharing one at::cuda::graph_pool_handle(). A commit that made these
+        # buffers device-resident passed this test and then broke both cudagraph
+        # eagle smoke cases -- measured 12/12 passing at main's file state versus
+        # 0/12 with the change -- so passing here is not evidence about the engine.
+        # Adding a single-graph Python capture would not close that gap either; it
+        # would just look like it had. Engine-level coverage belongs in the smoke
+        # cases, which is where that regression was actually caught.
         capture_input_lengths = capture_input_lengths or input_lengths
         capture_prefix_lengths = capture_prefix_lengths or prefix_lengths
         cg_init = self._make_inputs(
