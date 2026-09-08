@@ -52,7 +52,7 @@ class Backend:
                     completed=0,
                     waiting=1,
                     running=0,
-                    available_kv_tokens=10000,
+                    available_kv_tokens=3072000,
                     active_kv_tokens=0,
                     port=1234,
                 )
@@ -231,6 +231,71 @@ class BalanceTests(unittest.TestCase):
                 result = self.execute(plan)
                 self.assertEqual(result["status"], "PASS", result)
                 self.assertTrue(all(r["status"] == "PASS" for r in result["cleanup"]))
+
+    def test_pressure_preserves_reported_capacity_and_clears_it(self):
+        for available, active in ((3072000, 0), (2000000, 1072000), ((1 << 63) - 1, 0)):
+            with self.subTest(
+                available=available, active=active
+            ), tempfile.TemporaryDirectory() as tmp:
+                cleanups, calls = [], []
+                fleet = dict(
+                    role="decode",
+                    engines={
+                        "decode-0": dict(
+                            available_kv_tokens=available, active_kv_tokens=active
+                        )
+                    },
+                )
+                ctx = NS(
+                    resource=lambda ref, kind: fleet,
+                    resolve=lambda ref: "decode-0",
+                    ops=NS(),
+                    artifact_dir=Path(tmp),
+                    add_cleanup=lambda name, callback: cleanups.append(callback),
+                )
+
+                def http(ops, endpoint, deadline, body):
+                    calls.append((endpoint, body))
+                    return dict(status="ok", engine="decode-0")
+
+                with patch.object(b, "_http", http):
+                    b._pressure(ctx, dict(fleet={}, target={}), None)
+                    self.assertEqual(
+                        calls[0][1]["active_kv_tokens"], available + active
+                    )
+                    cleanups[0](None)
+                    self.assertEqual(calls[1][1]["active_kv_tokens"], 0)
+
+    def test_invalid_pressure_capacity_fails_before_http_or_cleanup_registration(self):
+        for available, active in (
+            (None, 0),
+            (True, 0),
+            (-1, 0),
+            (float("nan"), 0),
+            (float("inf"), 0),
+            ((1 << 63), 0),
+            ((1 << 63) - 1, 1),
+            (0, 0),
+        ):
+            with self.subTest(available=available, active=active):
+                fleet = dict(
+                    role="decode",
+                    engines={
+                        "decode-0": dict(
+                            available_kv_tokens=available, active_kv_tokens=active
+                        )
+                    },
+                )
+                cleanups = []
+                ctx = NS(
+                    resource=lambda ref, kind: fleet,
+                    resolve=lambda ref: "decode-0",
+                    add_cleanup=lambda *args: cleanups.append(args),
+                )
+                with patch.object(b, "_http") as http, self.assertRaises(ValueError):
+                    b._pressure(ctx, dict(fleet={}, target={}), None)
+                http.assert_not_called()
+                self.assertEqual(cleanups, [])
 
     def test_business_failure_remains_fail_not_finding(self):
         plan = next(p for p in self.plans() if p["variant_id"] == "uniform_serial")

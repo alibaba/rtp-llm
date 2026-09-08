@@ -447,9 +447,13 @@ def _pressure(ctx, params, deadline):
     fleet = ctx.resource(params["fleet"], "snapshot")
     name = ctx.resolve(params["target"])
     row = fleet["engines"][name]
-    total = _number(row.get("available_kv_tokens")) + _number(
-        row.get("active_kv_tokens")
+    # These are observed KV capacities, not bounded scenario input knobs.
+    # /set_kv_pressure consumes a Java long; preserve the full reported pool.
+    max_tokens = (1 << 63) - 1
+    total = _number(row.get("available_kv_tokens"), maximum=max_tokens) + _number(
+        row.get("active_kv_tokens"), maximum=max_tokens
     )
+    _number(total, maximum=max_tokens)
     if total <= 0 or fleet["role"] != "decode":
         raise ValueError("decode KV capacity missing")
 
