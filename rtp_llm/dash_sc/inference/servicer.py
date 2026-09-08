@@ -27,10 +27,7 @@ from rtp_llm.config.exceptions import (
     FtRuntimeException,
 )
 from rtp_llm.config.generate_config import GenerateConfig
-from rtp_llm.config.kimi_k3_request_contract import (
-    apply_kimi_k3_request_contract,
-    validate_kimi_k3_tool_history,
-)
+from rtp_llm.config.kimi_k3_request_contract import apply_kimi_k3_request_contract
 from rtp_llm.dash_sc.access_log import emit_access_log, emit_query_log
 from rtp_llm.dash_sc.access_record import GrpcAccessRecord, to_optional_int
 from rtp_llm.dash_sc.codec import (
@@ -52,7 +49,6 @@ from rtp_llm.dash_sc.codec import (
     build_stream_response_from_generate_outputs,
     iter_fake_model_stream_infer,
     parse_dash_sc_grpc_request,
-    parse_messages_from_request,
     parse_multimodal_parts_from_request,
     prepend_to_generated_ids_tensor,
 )
@@ -716,10 +712,6 @@ async def iter_real_model_stream_infer(
     should_echo = bool(matched_echo_ids)
     echoed = False
     try:
-        if is_kimi_k3:
-            messages = parse_messages_from_request(request)
-            if messages is not None:
-                validate_kimi_k3_tool_history(messages)
         if mm_inputs is None:
             input_ids_list, mm_inputs = await _prepare_multimodal_request(
                 request,

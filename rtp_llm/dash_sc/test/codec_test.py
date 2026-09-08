@@ -13,6 +13,9 @@ import torch
 from rtp_llm.dash_sc.client import build_model_infer_request
 from rtp_llm.dash_sc.codec import (
     _PACK_EOS_FOR_EMPTY_GENERATED_IDS_ENV,
+    DASH_ERROR_BAD_REQUEST,
+    DASH_ERROR_TOO_LONG,
+    DASH_ERROR_UNSUPPORTED,
     DashErrorSpec,
     DashScParameterError,
     LLMFinishReason,
@@ -1439,6 +1442,40 @@ class BuildStreamResponseFromGenerateOutputsTest(TestCase):
         self.assertEqual(by_name["finished"], b"\x01")
         self.assertNotIn("generated_ids", by_name)
         self.assertNotIn("token_ids", by_name)
+
+    def test_parameter_errors_select_explicit_api_server_status(self) -> None:
+        for spec, code in (
+            (DASH_ERROR_BAD_REQUEST, 400),
+            (DASH_ERROR_TOO_LONG, 413),
+            (DASH_ERROR_UNSUPPORTED, 422),
+        ):
+            with self.subTest(code=code):
+                response = build_dash_error_response(
+                    "invalid-grammar",
+                    "kimi_k3",
+                    error_spec=spec,
+                    status_message="failed to compile grammar: enum array must not be empty",
+                )
+                infer = response.infer_response
+                outputs = dict(
+                    zip(
+                        (output.name for output in infer.outputs),
+                        infer.raw_output_contents,
+                    )
+                )
+                self.assertEqual(
+                    _unpack_int64_le(outputs["finish_reason"]),
+                    [LLMFinishReason.USE_PARAMETER_STATUS],
+                )
+                self.assertEqual(infer.parameters["error_no"].int64_param, 8)
+                self.assertEqual(infer.parameters["status_code"].int64_param, code)
+                legacy = json.loads(infer.parameters["error_msg"].string_param)
+                self.assertEqual(legacy["status_code"], code)
+                for field in ("status_name", "status_message"):
+                    self.assertEqual(
+                        infer.parameters[field].string_param, legacy[field]
+                    )
+                self.assertNotIn("generated_ids", outputs)
 
     def test_dash_error_status_code_is_json_number(self) -> None:
         for status_code in (400, 413, 422, 500, 503, 504):

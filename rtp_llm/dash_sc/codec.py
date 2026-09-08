@@ -75,19 +75,19 @@ DASHSERVING_INNER_ENGINE_ERROR_NO = 19
 
 DASH_ERROR_BAD_REQUEST = DashErrorSpec(
     error_no=LLMFinishReason.STOP_ENGINE_PARAM,
-    finish_reason=LLMFinishReason.STOP_ENGINE_PARAM,
+    finish_reason=LLMFinishReason.USE_PARAMETER_STATUS,
     status_code=400,
     status_name="InvalidParameter",
 )
 DASH_ERROR_TOO_LONG = DashErrorSpec(
     error_no=LLMFinishReason.STOP_ENGINE_PARAM,
-    finish_reason=LLMFinishReason.STOP_ENGINE_PARAM,
+    finish_reason=LLMFinishReason.USE_PARAMETER_STATUS,
     status_code=413,
     status_name="InvalidParameter",
 )
 DASH_ERROR_UNSUPPORTED = DashErrorSpec(
     error_no=LLMFinishReason.STOP_ENGINE_PARAM,
-    finish_reason=LLMFinishReason.STOP_ENGINE_PARAM,
+    finish_reason=LLMFinishReason.USE_PARAMETER_STATUS,
     status_code=422,
     status_name="InvalidParameter",
 )
@@ -1191,21 +1191,6 @@ def _load_multimodal_payload(request) -> Any:
     return None
 
 
-def parse_messages_from_request(request) -> list[Any] | None:
-    """Return original messages when a DashSc request carries its JSON payload.
-
-    Text-only callers are allowed to omit the payload because ``input_ids`` are
-    authoritative on this wire.  When the payload is present, model-specific
-    request contracts can validate the original structured conversation before
-    the engine is enqueued.
-    """
-
-    obj = _load_multimodal_payload(request)
-    if obj is None:
-        return None
-    return list(_iter_messages_from_payload(obj))
-
-
 def parse_multimodal_parts_from_request(request) -> list[MultimodalPart]:
     """Extract ``MultimodalPart`` records from a dash_sc gRPC request.
 
@@ -1607,4 +1592,7 @@ def build_dash_error_response(
     infer.parameters["incremental_output"].int64_param = 1
     infer.parameters["error_no"].int64_param = int(error_spec.error_no)
     infer.parameters["error_msg"].string_param = error_msg
+    infer.parameters["status_code"].int64_param = int(error_spec.status_code)
+    infer.parameters["status_name"].string_param = error_spec.status_name
+    infer.parameters["status_message"].string_param = status_message
     return resp

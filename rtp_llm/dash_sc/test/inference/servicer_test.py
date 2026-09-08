@@ -234,7 +234,14 @@ def _assert_parameter_error_response(
         expected_message_part,
         payload["status_message"],
     )
-    testcase.assertEqual(_finish_reason(resp), LLMFinishReason.STOP_ENGINE_PARAM)
+    testcase.assertEqual(_finish_reason(resp), LLMFinishReason.USE_PARAMETER_STATUS)
+    testcase.assertEqual(infer.parameters["status_code"].int64_param, 400)
+    testcase.assertEqual(
+        infer.parameters["status_name"].string_param, "InvalidParameter"
+    )
+    testcase.assertEqual(
+        infer.parameters["status_message"].string_param, payload["status_message"]
+    )
     testcase.assertEqual(_gen_ids(resp), [])
 
 
@@ -2027,7 +2034,8 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
                 "input": {
                     "messages": [
                         {
-                            "role": "user",
+                            "role": "tool",
+                            "tool_call_id": "watch_video_screenshot:0",
                             "content": [
                                 {
                                     "image": "https://example.com/image.jpg",
@@ -2206,47 +2214,31 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(responses), 1)
         _assert_parameter_error_response(self, responses[0], "n")
 
-    async def test_kimi_k3_rejects_invalid_tool_history_before_enqueue(self) -> None:
-        visitor = _FakeVisitor(_FakeAsyncStream([]))
-        servicer = DashScInferenceServicer(
-            backend_visitor=visitor,
-            model_type="kimi_k3",
-        )
-        req = self._valid_infer_request()
-        req.parameters["payload"].string_param = json.dumps(
-            {
-                "input": {
-                    "messages": [
-                        {
-                            "role": "assistant",
-                            "tool_calls": [
-                                {
-                                    "id": "call_1",
-                                    "type": "function",
-                                    "function": {
-                                        "name": None,
-                                        "arguments": '{"city":"杭州"}',
-                                    },
-                                }
-                            ],
-                        },
-                        {
-                            "role": "tool",
-                            "tool_call_id": "call_1",
-                            "content": "sunny",
-                        },
-                    ]
-                }
-            }
-        )
-
-        responses = await _drain(
-            servicer.ModelStreamInfer(_areq_iter([req]), MagicMock())
-        )
-
-        self.assertEqual(visitor.enqueue_called, 0)
-        self.assertEqual(len(responses), 1)
-        _assert_parameter_error_response(self, responses[0], "function.name")
+    async def test_kimi_k3_media_payload_is_not_complete_tool_history(self) -> None:
+        for key in ("payload", "__messages__"):
+            for messages in (
+                [],
+                [
+                    {
+                        "role": "tool",
+                        "tool_call_id": "watch_video_screenshot:0",
+                        "content": "media-only tool result",
+                    }
+                ],
+            ):
+                with self.subTest(key=key, messages=messages):
+                    visitor = _FakeVisitor(_FakeAsyncStream([]))
+                    servicer = DashScInferenceServicer(
+                        backend_visitor=visitor, model_type="kimi_k3"
+                    )
+                    req = self._valid_infer_request()
+                    req.parameters[key].string_param = json.dumps(
+                        {"input": {"messages": messages}}
+                    )
+                    await _drain(
+                        servicer.ModelStreamInfer(_areq_iter([req]), MagicMock())
+                    )
+                    self.assertEqual(visitor.enqueue_called, 1)
 
     async def test_kimi_k3_rejects_invalid_top_p_before_enqueue(self) -> None:
         visitor = _FakeVisitor(_FakeAsyncStream([]))
