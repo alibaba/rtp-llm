@@ -24,7 +24,10 @@ import static org.flexlb.constant.MetricConstant.CACHE_ROUTING_SELECTED_MATCH_TO
 import static org.flexlb.constant.MetricConstant.CACHE_THEORY_HIT_COUNT;
 import static org.flexlb.constant.MetricConstant.CACHE_THEORY_HIT_RATIO;
 import static org.flexlb.constant.MetricConstant.CACHE_THEORY_TOTAL_COUNT;
+import static org.flexlb.constant.MetricConstant.CACHE_UPDATE_ENGINE_BLOCK_CACHE_RT;
 import static org.junit.jupiter.api.Assertions.fail;
+import static org.mockito.ArgumentMatchers.anyDouble;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 
@@ -76,10 +79,10 @@ class CacheMetricsReporterTest {
     }
 
     @Test
-    void should_report_engine_local_metrics_without_engine_ip_port() {
-        reporter.reportEngineLocalMetrics("10.0.0.1", "PREFILL", 2);
+    void should_report_engine_local_metrics_with_logical_worker_address() {
+        reporter.reportEngineLocalMetrics("10.0.0.1:8080@0", "PREFILL", 2);
 
-        FlexMetricTags tags = FlexMetricTags.of("engineIp", "10.0.0.1", "role", "PREFILL");
+        FlexMetricTags tags = FlexMetricTags.of("engineIp", "10.0.0.1:8080@0", "role", "PREFILL");
         verify(monitor).report(CACHE_ENGINE_LOCAL_COUNT, tags, 2);
         verify(monitor).report(CACHE_ENGINE_LOCAL_BYTES, tags, 272L);
     }

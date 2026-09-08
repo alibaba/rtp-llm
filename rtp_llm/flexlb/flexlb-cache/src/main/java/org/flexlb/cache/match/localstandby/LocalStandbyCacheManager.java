@@ -76,6 +76,10 @@ public class LocalStandbyCacheManager {
                 enabled);
     }
 
+    /**
+     * Finds prefix matches keyed by logical worker identity in
+     * {@code ip:port@engineIndex} format.
+     */
     public Map<String, Integer> findMatchingEngines(List<Long> blockCacheKeys, RoleType roleType, String group) {
         if (!enabled || blockCacheKeys == null || blockCacheKeys.isEmpty()) {
             return Collections.emptyMap();
@@ -97,7 +101,7 @@ public class LocalStandbyCacheManager {
             if (workerStatus == null) {
                 continue;
             }
-            String workerIpPort = workerStatus.getIpPort();
+            String workerIpPort = workerStatus.getLogicalIpPort();
             if (StringUtils.isNotBlank(workerIpPort)) {
                 candidateWorkers.add(workerIpPort);
             }
@@ -149,7 +153,7 @@ public class LocalStandbyCacheManager {
             if (workerStatus == null || workerStatus.getCacheMatchRollbackBlocks() <= 0) {
                 continue;
             }
-            String workerIpPort = workerStatus.getIpPort();
+            String workerIpPort = workerStatus.getLogicalIpPort();
             Integer matchedBlocks = prefixMatches.get(workerIpPort);
             if (matchedBlocks != null) {
                 prefixMatches.put(workerIpPort,
@@ -158,6 +162,14 @@ public class LocalStandbyCacheManager {
         }
     }
 
+    /**
+     * Records predicted block ownership for a routed logical worker.
+     *
+     * @param workerIpPort logical worker identity in {@code ip:port@engineIndex} format; the
+     *                     index identifies one independently routable engine behind the physical
+     *                     frontend
+     * @param blockCacheKeys routed request block hashes
+     */
     public void addRoutedRequestBlocks(String workerIpPort, List<Long> blockCacheKeys) {
         int rejectedMappings = cacheIndex.addWorkerBlockMappings(workerIpPort, blockCacheKeys);
         if (rejectedMappings <= 0) {
