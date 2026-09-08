@@ -33,7 +33,7 @@ std::shared_ptr<DeviceBlockPoolConfig> makeConfig() {
                                                                                 /*size_per_head=*/64);
     auto config = std::make_shared<DeviceBlockPoolConfig>(DeviceBlockPoolConfigHelper::createConfig(cache_config));
     config->pool_name               = "device";
-    config->use_cuda_malloc_backing = false;
+    config->use_cuda_malloc_backing = true;
     return config;
 }
 
@@ -60,7 +60,7 @@ std::shared_ptr<DeviceBlockPoolConfig> makeMixedScaleConfig() {
     config->physical_block_count    = l0.block_num;
     config->total_size_bytes        = l0.total_size_bytes + l1.total_size_bytes;
     config->memory_layouts          = {l0, l1};
-    config->use_cuda_malloc_backing = false;
+    config->use_cuda_malloc_backing = true;
     return config;
 }
 
@@ -79,7 +79,8 @@ CacheConfig makeMtpCacheConfig() {
 }  // namespace
 
 TEST(DeviceBlockPoolTest, InitKeepsBlockZeroInvalid) {
-    auto            config = makeConfig();
+    auto config                     = makeConfig();
+    config->use_cuda_malloc_backing = false;
     DeviceBlockPool pool(config);
 
     ASSERT_TRUE(pool.init());
@@ -145,6 +146,7 @@ TEST(DeviceBlockPoolTest, MultiLayoutMtpConfigUsesMainBlockCountAndGlobalLayerMa
     ASSERT_EQ(cache_config.mtp_sub_configs[1]->block_num, 5u);
 
     auto config = std::make_shared<DeviceBlockPoolConfig>(DeviceBlockPoolConfigHelper::createConfig(cache_config));
+    config->use_cuda_malloc_backing = true;
     ASSERT_EQ(config->physical_block_count, 3u);
     ASSERT_EQ(config->memory_layouts.size(), 3u);
     EXPECT_EQ(config->memory_layouts[0].layer_num, 2u);

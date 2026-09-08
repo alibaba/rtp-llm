@@ -159,7 +159,7 @@ makeDevicePool(const std::vector<DeviceLayerBufferSpec>& specs, size_t usable_co
     config->pool_type               = BlockPoolType::DEVICE;
     config->pool_name               = pool_name;
     config->physical_block_count    = physical_block_count;
-    config->use_cuda_malloc_backing = false;
+    config->use_cuda_malloc_backing = true;
 
     size_t offset = 0;
     for (const auto& spec : specs) {
@@ -353,7 +353,7 @@ DeviceBlockPoolPtr makeStructuralDevicePool(size_t group_set_id) {
     config->physical_block_count    = physical_block_count;
     config->total_size_bytes        = layout.total_size_bytes;
     config->memory_layouts          = {layout};
-    config->use_cuda_malloc_backing = false;
+    config->use_cuda_malloc_backing = true;
 
     auto pool = std::make_shared<DeviceBlockPool>(config);
     // Structural tree/eviction tests only exercise block-id ownership and do not

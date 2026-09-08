@@ -108,7 +108,7 @@ inline void createDevice() {
 inline DeviceBlockPoolPtr createDeviceBlockPool() {
     createDevice();
     auto device_config                     = std::make_shared<DeviceBlockPoolConfig>(createTestConfig());
-    device_config->use_cuda_malloc_backing = false;
+    device_config->use_cuda_malloc_backing = true;
     std::shared_ptr<const DeviceBlockPoolConfig> const_config = device_config;
     return std::make_shared<DeviceBlockPool>(const_config);
 }

@@ -25,7 +25,6 @@ public:
                                size_t                                         staging_block_count,
                                BlockTreeTaskPool&                             transfer_task_pool,
                                std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter = nullptr);
-    ~DeviceDiskTransferExecutor();
 
     DeviceDiskTransferExecutor(const DeviceDiskTransferExecutor&)            = delete;
     DeviceDiskTransferExecutor& operator=(const DeviceDiskTransferExecutor&) = delete;

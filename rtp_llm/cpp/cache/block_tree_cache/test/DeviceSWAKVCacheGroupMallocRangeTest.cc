@@ -37,7 +37,7 @@ DeviceBlockPoolConfig makeDeviceBlockPoolConfig() {
     config.physical_block_count    = kBlockNum;
     config.total_size_bytes        = layout.total_size_bytes;
     config.memory_layouts          = {layout};
-    config.use_cuda_malloc_backing = false;
+    config.use_cuda_malloc_backing = true;
     return config;
 }
 

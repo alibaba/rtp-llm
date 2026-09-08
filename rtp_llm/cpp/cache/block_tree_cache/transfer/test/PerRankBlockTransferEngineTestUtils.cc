@@ -119,7 +119,7 @@ DeviceBlockPoolPtr makeTestDevicePool(const std::vector<std::pair<size_t, size_t
     config->pool_type                 = BlockPoolType::DEVICE;
     config->pool_name                 = pool_name;
     config->physical_block_count      = physical_block_count;
-    config->use_cuda_malloc_backing   = false;
+    config->use_cuda_malloc_backing   = true;
 
     size_t offset = 0;
     for (const auto& [kv_bytes, scale_bytes] : layer_bytes) {
