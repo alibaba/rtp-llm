@@ -1,3 +1,4 @@
+import numpy as np
 import torch
 
 
@@ -65,10 +66,24 @@ def bert_dual_head_scores(
     cls_uqi_token_id: int = 2,
 ) -> torch.Tensor:
     """Return independent QI/UQI distributions; missing UQI marker pools CLS_QI."""
-    qi_hidden = get_first_token_from_combo_tokens(hidden_states, input_lengths)
-    uqi_hidden = get_token_at_first_id_from_combo_tokens(
-        hidden_states, input_ids, input_lengths, cls_uqi_token_id
-    )
+    if input_ids.device.type == "cpu" and input_lengths.device.type == "cpu":
+        # Embedding requests already retain host IDs. Build both pooling indices
+        # together instead of copying every token to CUDA and reducing on GPU.
+        lengths = input_lengths.numpy()
+        starts = np.cumsum(lengths, dtype=np.int64) - lengths
+        hits = np.flatnonzero(input_ids.numpy() == cls_uqi_token_id)
+        uqi = np.full(len(lengths), len(input_ids), dtype=np.int64)
+        np.minimum.at(uqi, np.searchsorted(starts, hits, side="right") - 1, hits)
+        uqi = np.where(uqi < len(input_ids), uqi, starts)
+        indices = torch.from_numpy(np.concatenate((starts, uqi))).to(
+            hidden_states.device
+        )
+        qi_hidden, uqi_hidden = hidden_states[indices].chunk(2)
+    else:
+        qi_hidden = get_first_token_from_combo_tokens(hidden_states, input_lengths)
+        uqi_hidden = get_token_at_first_id_from_combo_tokens(
+            hidden_states, input_ids, input_lengths, cls_uqi_token_id
+        )
     return torch.cat(
         (
             torch.softmax(w_qi(qi_hidden), dim=-1),
