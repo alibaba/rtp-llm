@@ -1,5 +1,7 @@
 #include <array>
+#include <functional>
 #include <memory>
+#include <string_view>
 #include <utility>
 #include "gtest/gtest.h"
 #include "rtp_llm/cpp/multimodal_processor/MultimodalError.h"
@@ -122,6 +124,44 @@ TEST_F(MultimodalProcessorTest, testGetMMFeatures) {
     EXPECT_EQ(res.text_tokens_mask.numel(), 6);
     EXPECT_EQ(res.locs.numel(), 1);
     EXPECT_EQ(res.expanded_ids.numel(), 6);
+}
+
+TEST_F(MultimodalProcessorTest, onlyGenerationHashesFeatureContents) {
+    auto processor = FakeMultimodalProcessor::createFakeMultimodalProcessor({{1, 2}}, true, 10);
+    auto tokens    = torch::tensor({0, 1, 2, 3}, torch::kInt32);
+    auto mm_inputs = std::vector<MultimodalInput>{MultimodalInput("2")};
+    auto features  = processor.getMultimodalFeatures(tokens, mm_inputs);
+    ASSERT_TRUE(features.ok());
+    auto placeholders = torch::tensor({0, -1, -1, 3}, torch::kInt32);
+    EXPECT_TRUE(torch::equal(features.value().expanded_ids, placeholders));
+    EXPECT_TRUE(torch::equal(features.value().text_tokens_mask, torch::tensor({1, 0, 0, 1}, torch::kInt32)));
+
+    auto embedding = std::make_shared<EmbeddingInput>(
+        tokens, torch::tensor({7, 8, 9, 10}, torch::kInt32), torch::tensor({4}, torch::kInt32), 0);
+    ASSERT_TRUE(processor.updateMultimodalFeatures(embedding, mm_inputs, "").ok());
+    EXPECT_TRUE(torch::equal(embedding->token_ids, placeholders));
+    EXPECT_TRUE(torch::equal(embedding->token_type_ids, torch::tensor({7, 0, 0, 10}, torch::kInt32)));
+    EXPECT_TRUE(torch::equal(embedding->multimodal_features->locs, features.value().locs));
+    EXPECT_TRUE(torch::equal(embedding->multimodal_features->features[0], features.value().features[0]));
+
+    auto generation               = std::make_shared<GenerateInput>();
+    generation->input_ids         = tokens;
+    generation->multimodal_inputs = mm_inputs;
+    ASSERT_TRUE(processor.updateMultimodalFeatures(generation).ok());
+    const auto& feature = generation->multimodal_features.value()[0];
+    const auto hash = static_cast<int32_t>(std::hash<std::string_view>{}(
+        std::string_view(static_cast<const char*>(feature.data_ptr()), feature.element_size())));
+    EXPECT_TRUE(torch::equal(generation->input_ids, torch::tensor({0, hash, hash, 3}, torch::kInt32)));
+    EXPECT_TRUE(torch::equal(generation->text_tokens_mask.value(), features.value().text_tokens_mask));
+    EXPECT_TRUE(torch::equal(generation->mm_locs.value(), features.value().locs));
+    EXPECT_TRUE(torch::equal(tokens, torch::tensor({0, 1, 2, 3}, torch::kInt32)));
+}
+
+TEST_F(MultimodalProcessorTest, embeddingRejectsEmptyFeaturesWithoutHashing) {
+    auto processor = FakeMultimodalProcessor::createFakeMultimodalProcessor({{1}}, false, 10);
+    auto result = processor.getMultimodalFeatures(torch::tensor({0, 1, 2}, torch::kInt32), {MultimodalInput("0")});
+    ASSERT_FALSE(result.ok());
+    EXPECT_EQ(result.status().code(), ErrorCode::MM_WRONG_FORMAT_ERROR);
 }
 
 TEST(MultimodalErrorTest, validatesMultimodalErrorCodes) {

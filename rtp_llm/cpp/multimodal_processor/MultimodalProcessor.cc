@@ -25,9 +25,6 @@ ErrorInfo MultimodalProcessor::getFeatureHash(int32_t* token_ids, const torch::T
     // of avoiding one extra prefill-time D2H, or (b) fall back to URL-based hashing, which
     // would over-share cache blocks between requests whose URLs match but whose actual
     // embedding bytes differ (e.g. dynamic image transforms). Keep this sync.
-    if (mm_emb.dim() < 1 || mm_emb.size(0) <= 0) {
-        return ErrorInfo(ErrorCode::MM_WRONG_FORMAT_ERROR, "multimodal feature tensor is empty");
-    }
     auto          emb        = mm_emb.to(torch::kCPU).contiguous();
     const int64_t num_tokens = emb.size(0);
     const int64_t row_bytes  = emb.numel() / num_tokens * emb.element_size();
@@ -63,6 +60,9 @@ ErrorResult<ExpandedOutput> MultimodalProcessor::expandTokenIds(const std::vecto
         return ErrorInfo(ErrorCode::MM_WRONG_FORMAT_ERROR, exception_str.str());
     }
     for (int i = 0; i < mm_num; i++) {
+        if (mm_embedding[i].dim() < 1 || mm_embedding[i].size(0) <= 0) {
+            return ErrorInfo(ErrorCode::MM_WRONG_FORMAT_ERROR, "multimodal feature tensor is empty");
+        }
         expanded_len += mm_embedding[i].sizes()[0] - locs[i].second + locs[i].first;
     }
 
@@ -92,11 +92,6 @@ ErrorResult<ExpandedOutput> MultimodalProcessor::expandTokenIds(const std::vecto
                    sizeof(int32_t) * copy_len);
         }
         *(new_locs.data_ptr<int32_t>() + i) = copy_len + new_loc_idx;
-
-        auto hash_status = getFeatureHash(expanded_ids.data_ptr<int32_t>() + new_loc_idx + copy_len, mm_embedding[i]);
-        if (!hash_status.ok()) {
-            return hash_status;
-        }
 
         new_loc_idx += copy_len + mm_embedding[i].sizes()[0];
         old_loc_idx = loc.second;
@@ -200,6 +195,13 @@ ErrorInfo MultimodalProcessor::updateMultimodalFeatures(std::shared_ptr<rtp_llm:
         expanded_ids,
         expandTokenIds(input->multimodal_features.value(), input->input_ids, input->multimodal_inputs.value()));
     RETURN_IF_STATUS_ERROR(checkExpandLength(expanded_ids));
+    // Only generation uses content-derived IDs for KV-cache reuse. Embedding
+    // requests keep placeholders and do not download features merely to hash them.
+    for (size_t i = 0; i < input->multimodal_features->size(); ++i) {
+        RETURN_IF_STATUS_ERROR(getFeatureHash(
+            expanded_ids.expanded_ids.data_ptr<int32_t>() + expanded_ids.locs.data_ptr<int32_t>()[i],
+            input->multimodal_features.value()[i]));
+    }
     input->input_ids        = expanded_ids.expanded_ids;
     input->text_tokens_mask = expanded_ids.text_tokens_mask;
     input->mm_locs          = expanded_ids.locs;
