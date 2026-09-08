@@ -59,8 +59,6 @@ PYBIND11_MODULE(libth_transformer, m) {
     registerMultimodalInput(m);
     registerRtpEmbeddingOp(m);
     registerEmbeddingOutput(m);
-    m.def("pause_kmonitor_for_scr", &pauseKmonitorForScr);
-    m.def("resume_kmonitor_after_scr", &resumeKmonitorAfterScr);
 }
 
 }  // namespace rtp_llm

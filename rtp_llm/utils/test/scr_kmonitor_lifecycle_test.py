@@ -1,7 +1,6 @@
 """Exercise reporter sockets and both SCR lifecycle hooks without a GPU."""
 
 import importlib
-import os
 import socket
 import sys
 import unittest
@@ -53,29 +52,20 @@ class ScrKmonitorLifecycleTest(unittest.TestCase):
         order = []
         native = SimpleNamespace(
             pause_kmonitor_for_scr=lambda: order.append("native_pause") or True,
-            resume_kmonitor_after_scr=lambda: order.append("native_resume"),
+            resume_kmonitor_after_scr=lambda: order.append("native_resume") or True,
         )
         worker = SimpleNamespace(
             pause_for_checkpoint=lambda: order.append("python_pause") or True,
             resume_after_checkpoint=lambda state: order.append("python_resume"),
         )
 
-        def checkpoint(**kwargs):
-            self.assertEqual(order, ["native_pause", "python_pause"])
-            raise RuntimeError("checkpoint failed")
-
         with mock.patch.dict(
             sys.modules, {"libth_transformer": native}
-        ), mock.patch.object(reporters, "report_worker", worker), mock.patch.dict(
-            os.environ, {scr.SCR_ENABLE_ENV: "1"}
-        ), mock.patch.object(
-            scr,
-            "_load_epsilon",
-            return_value=SimpleNamespace(
-                is_snapstart_enable=lambda: True, snapstart_checkpoint=checkpoint
-            ),
-        ):
-            self.assertIsNone(scr.start_scr_checkpoint(worker_id=0, worker_num=1))
+        ), mock.patch.object(reporters, "report_worker", worker):
+            lifecycle = scr.get_template_lifecycle()
+            lifecycle.prepare_for_template("g1", "checkpoint")
+            self.assertEqual(order, ["native_pause", "python_pause"])
+            lifecycle.abort_template("g1")
         self.assertEqual(
             order, ["native_pause", "python_pause", "python_resume", "native_resume"]
         )
@@ -83,7 +73,7 @@ class ScrKmonitorLifecycleTest(unittest.TestCase):
     def test_native_resumes_if_python_cannot_quiesce(self):
         native = SimpleNamespace(
             pause_kmonitor_for_scr=mock.Mock(return_value=True),
-            resume_kmonitor_after_scr=mock.Mock(),
+            resume_kmonitor_after_scr=mock.Mock(return_value=True),
         )
         worker = SimpleNamespace(
             pause_for_checkpoint=mock.Mock(side_effect=RuntimeError("busy"))
@@ -92,13 +82,13 @@ class ScrKmonitorLifecycleTest(unittest.TestCase):
             sys.modules, {"libth_transformer": native}
         ), mock.patch.object(reporters, "report_worker", worker):
             with self.assertRaisesRegex(RuntimeError, "busy"):
-                scr._pause_kmonitor_for_scr()
+                scr.get_template_lifecycle().prepare_for_template("g2", "checkpoint")
         native.resume_kmonitor_after_scr.assert_called_once_with()
 
     def test_older_native_library_cannot_silently_skip_quiescence(self):
         with mock.patch.dict(sys.modules, {"libth_transformer": SimpleNamespace()}):
             with self.assertRaisesRegex(RuntimeError, "lacks SCR Kmonitor hooks"):
-                scr._pause_kmonitor_for_scr()
+                scr.get_template_lifecycle().prepare_for_template("g3", "checkpoint")
 
 
 if __name__ == "__main__":
