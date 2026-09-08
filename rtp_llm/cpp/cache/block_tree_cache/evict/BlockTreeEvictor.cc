@@ -101,7 +101,8 @@ EvictionHeap* BlockTreeEvictor::heapFor(size_t group_set_id, Tier tier) const {
 
 bool BlockTreeEvictor::isEvictable(TreeNode* node, size_t group_set_id, Tier source_tier) const {
     const GroupSetResource& resource = node->group_set_resources[group_set_id];
-    return resource.transfer_state == GroupSetTransferState::IDLE && resource.getTopTier() == source_tier
+    return !node->is_resident && resource.transfer_state == GroupSetTransferState::IDLE
+           && resource.getTopTier() == source_tier
            && (tree_->groupSets()[group_set_id]->groupType() != CacheGroupType::FULL
                || tree_->isLeafAtTier(node, group_set_id, source_tier));
 }
@@ -113,7 +114,7 @@ void BlockTreeEvictor::suspendCandidate(TreeNode* node, size_t group_set_id, Tie
 }
 
 void BlockTreeEvictor::admitCandidate(TreeNode* node, size_t group_set_id, Tier target_tier) {
-    if (target_tier == Tier::NONE) {
+    if (node->is_resident || target_tier == Tier::NONE) {
         return;
     }
     const GroupSetPtr& group_set = tree_->groupSets()[group_set_id];
@@ -160,6 +161,9 @@ void BlockTreeEvictor::onLoaded(TreeNode* node, size_t group_set_id) {
 
 // ---- Semantic events ----
 void BlockTreeEvictor::onInserted(const BlockTreeInsertResult& result) {
+    for (TreeNode* node : result.newly_resident_nodes) {
+        eraseNodeFromAllHeaps(node);
+    }
     for (const auto& adopted : result.adopted_nodes) {
         RTP_LLM_CHECK(adopted.group_set_ids.size() == adopted.old_top_tiers.size()
                       && adopted.group_set_ids.size() == adopted.new_top_tiers.size());
@@ -1220,7 +1224,7 @@ void BlockTreeEvictor::selectUpwardCascades(EvictionDropTask& task) {
 
     for (size_t path_index = ancestors.size(); path_index > 0; --path_index) {
         TreeNode* parent = ancestors[path_index - 1];
-        if (endpoint_matchable[path_index - 1]) {
+        if (parent->is_resident || endpoint_matchable[path_index - 1]) {
             break;
         }
 

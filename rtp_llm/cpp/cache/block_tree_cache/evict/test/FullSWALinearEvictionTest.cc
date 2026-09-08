@@ -26,7 +26,9 @@ protected:
         auto linear = std::make_shared<LinearGroupSet>(
             std::vector<DeviceBlockPoolPtr>{block_tree_cache_test::makeStructuralDevicePool(0)}, nullptr, nullptr);
         std::vector<GroupSetPtr> groups = {full, swa, linear};
-        cache_ = makeBlockTreeCacheForTest(std::move(groups), BlockTreeCacheConfig{.task_pool_size = 2});
+        BlockTreeCacheConfig config{};
+        config.task_pool_size = 2;
+        cache_ = makeBlockTreeCacheForTest(std::move(groups), config);
     }
 
     void insertPath(const CacheKeysType& keys, BlockIdxType full_b, BlockIdxType swa_b, BlockIdxType lin_b) {
@@ -36,11 +38,87 @@ protected:
             resources[i][1].device_blocks = {static_cast<BlockIdxType>(swa_b + i)};
             resources[i][2].device_blocks = {static_cast<BlockIdxType>(lin_b + i)};
         }
-        cache_->insert(keys, resources, Tier::DEVICE);
+        cache_->insert(keys, resources, Tier::DEVICE, /*write_remote=*/true, /*is_resident=*/false);
+    }
+
+    void insertResidentPath(const CacheKeysType& keys) {
+        const std::vector<TreeNode*> path = cache_->tree()->findNode(keys);
+        ASSERT_EQ(path.size(), keys.size());
+        std::vector<std::vector<GroupSetResource>> resources;
+        for (const TreeNode* node : path) {
+            resources.push_back(node->group_set_resources);
+        }
+        cache_->insert(keys, resources, Tier::DEVICE, /*write_remote=*/false, /*is_resident=*/true);
     }
 
     std::unique_ptr<BlockTreeCache> cache_;
 };
+
+TEST_F(FullSWALinearEvictionTest, PromotingExistingPrefixRemovesAllGroupCandidates) {
+    insertPath({100, 200, 300}, 10, 20, 30);
+    ASSERT_EQ(cache_->getStats().device_heap_total_size, 7u);
+    const int64_t version = cache_->getKeySnapshot().version;
+
+    insertResidentPath({100, 200, 300});
+    EXPECT_EQ(cache_->getStats().device_heap_total_size, 0u);
+    EXPECT_EQ(cache_->getKeySnapshot().version, version);
+    const std::vector<TreeNode*> path = cache_->tree()->findNode({100, 200, 300});
+    ASSERT_EQ(path.size(), 3u);
+    for (const TreeNode* node : path) {
+        EXPECT_TRUE(node->is_resident);
+    }
+    for (size_t group_set_id = 0; group_set_id < 3; ++group_set_id) {
+        EXPECT_FALSE(BlockTreeCacheTestPeer::demoteOneForGroupSetForTest(
+            *cache_, group_set_id, Tier::DEVICE, /*force_drop=*/true));
+        EXPECT_FALSE(BlockTreeCacheTestPeer::demoteOneForGroupSetForTest(
+            *cache_, group_set_id, Tier::DEVICE, /*force_drop=*/false));
+    }
+
+    BlockTreeMatchResult match = cache_->match({100, 200, 300});
+    EXPECT_EQ(match.matched_device_blocks, 3u);
+    block_tree_cache_test::releaseRequestRefsForTest(*cache_, match.matched_device_resources);
+    EXPECT_EQ(cache_->getStats().device_heap_total_size, 0u);
+}
+
+TEST_F(FullSWALinearEvictionTest, OrdinarySuffixCanBeEvictedWithoutReadmittingResidentParent) {
+    insertPath({100, 200}, 10, 20, 30);
+    insertResidentPath({100, 200});
+    insertPath({100, 200, 300}, 40, 50, 60);
+    const std::vector<TreeNode*> path = cache_->tree()->findNode({100, 200, 300});
+    ASSERT_EQ(path.size(), 3u);
+    EXPECT_TRUE(path[0]->is_resident);
+    EXPECT_TRUE(path[1]->is_resident);
+    EXPECT_FALSE(path[2]->is_resident);
+    EXPECT_EQ(cache_->getStats().device_heap_total_size, 3u);
+
+    EXPECT_EQ(BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache_, 10, Tier::DEVICE), 1);
+    BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache_);
+    EXPECT_EQ(cache_->getStats().tree_node_count, 2u);
+    EXPECT_EQ(cache_->getStats().device_heap_total_size, 0u);
+    BlockTreeMatchResult match = cache_->match({100, 200, 300});
+    EXPECT_EQ(match.matched_device_blocks, 2u);
+    EXPECT_EQ(cache_->matchedBlocksForGroup(0, match.matched_device_resources), (BlockIndicesType{10, 11}));
+    block_tree_cache_test::releaseRequestRefsForTest(*cache_, match.matched_device_resources);
+}
+
+TEST_F(FullSWALinearEvictionTest, SharedResidentPrefixesSurviveWatermarkPressure) {
+    insertPath({100, 200}, 10, 20, 30);
+    insertResidentPath({100, 200});
+    insertPath({100, 300}, 40, 50, 60);
+    insertResidentPath({100, 300});
+    insertPath({100, 400}, 70, 80, 90);
+
+    BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache_, Tier::DEVICE, 0.001, 0.002);
+    BlockTreeCacheTestPeer::runMaintenanceForTest(*cache_);
+    BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache_);
+    EXPECT_EQ(cache_->getStats().tree_node_count, 3u);
+    EXPECT_EQ(cache_->getStats().device_heap_total_size, 0u);
+    for (CacheKeyType suffix : {200, 300}) {
+        BlockTreeMatchResult match = cache_->match({100, suffix});
+        EXPECT_EQ(match.matched_device_blocks, 2u);
+        block_tree_cache_test::releaseRequestRefsForTest(*cache_, match.matched_device_resources);
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Test: Full reclaim cascades to BOTH SWA and Linear.
@@ -188,15 +266,16 @@ TEST_F(FullSWALinearEvictionTest, SWAReclaimCascadesToLinear) {
     auto linear = std::make_shared<LinearGroupSet>(
         std::vector<DeviceBlockPoolPtr>{block_tree_cache_test::makeStructuralDevicePool(0)}, nullptr, nullptr);
     std::vector<GroupSetPtr>        groups = {swa, linear};
-    std::unique_ptr<BlockTreeCache> swa_lin_cache =
-        makeBlockTreeCacheForTest(std::move(groups), BlockTreeCacheConfig{.task_pool_size = 2});
+    BlockTreeCacheConfig config{};
+    config.task_pool_size = 2;
+    std::unique_ptr<BlockTreeCache> swa_lin_cache = makeBlockTreeCacheForTest(std::move(groups), config);
 
     std::vector<std::vector<GroupSetResource>> resources(2, std::vector<GroupSetResource>(2));
     resources[0][0].device_blocks = {20};
     resources[0][1].device_blocks = {30};
     resources[1][0].device_blocks = {21};
     resources[1][1].device_blocks = {31};
-    swa_lin_cache->insert({100, 200}, resources, Tier::DEVICE);
+    swa_lin_cache->insert({100, 200}, resources, Tier::DEVICE, /*write_remote=*/true, /*is_resident=*/false);
 
     EXPECT_EQ(swa_lin_cache->getStats().tree_node_count, 2u);
     EXPECT_EQ(swa_lin_cache->getStats().device_heap_total_size, 4u);

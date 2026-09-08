@@ -225,21 +225,20 @@ TEST_F(PrefillRpcServerTest, mergeMultimodalLengthsUsesPrefillMetadata) {
     EXPECT_EQ(second_aux_info->multimodal_lengths().at(1), 64);
 }
 
-TEST_F(PrefillRpcServerTest, mergeCacheReuseInfoReportsCompletedDecodeHandoffForColdPrefill) {
+TEST_F(PrefillRpcServerTest, mergeCacheReuseInfoKeepsColdPrefillZeroDespiteDecodeHit) {
     AuxInfoPB aux_info;
     aux_info.set_total_reuse_len(2560);
     aux_info.set_local_reuse_len(2560);
 
     PrefillRpcServer::mergeCacheReuseInfo(aux_info,
-                                          /*prefill_total_reuse_len=*/0,
-                                          /*prefill_local_reuse_len=*/0,
-                                          /*prefill_remote_reuse_len=*/0,
-                                          /*prefill_memory_reuse_len=*/0,
-                                          /*prefill_disk_reuse_len=*/0,
-                                          /*use_independent_block_pools=*/true);
+                                        /*prefill_total_reuse_len=*/0,
+                                        /*prefill_local_reuse_len=*/0,
+                                        /*prefill_remote_reuse_len=*/0,
+                                        /*prefill_memory_reuse_len=*/0,
+                                        /*prefill_disk_reuse_len=*/0);
 
-    EXPECT_EQ(aux_info.total_reuse_len(), 2560);
-    EXPECT_EQ(aux_info.local_reuse_len(), 2560);
+    EXPECT_EQ(aux_info.total_reuse_len(), 0);
+    EXPECT_EQ(aux_info.local_reuse_len(), 0);
     EXPECT_EQ(aux_info.prefill_total_reuse_len(), 0);
     EXPECT_EQ(aux_info.decode_total_reuse_len(), 2560);
     EXPECT_EQ(aux_info.decode_local_reuse_len(), 2560);
@@ -251,12 +250,11 @@ TEST_F(PrefillRpcServerTest, mergeCacheReuseInfoKeepsLargerPrefillHitWithoutAddi
     aux_info.set_local_reuse_len(2560);
 
     PrefillRpcServer::mergeCacheReuseInfo(aux_info,
-                                          /*prefill_total_reuse_len=*/2688,
-                                          /*prefill_local_reuse_len=*/2688,
-                                          /*prefill_remote_reuse_len=*/0,
-                                          /*prefill_memory_reuse_len=*/2688,
-                                          /*prefill_disk_reuse_len=*/0,
-                                          /*use_independent_block_pools=*/true);
+                                        /*prefill_total_reuse_len=*/2688,
+                                        /*prefill_local_reuse_len=*/2688,
+                                        /*prefill_remote_reuse_len=*/0,
+                                        /*prefill_memory_reuse_len=*/2688,
+                                        /*prefill_disk_reuse_len=*/0);
 
     EXPECT_EQ(aux_info.total_reuse_len(), 2688);
     EXPECT_EQ(aux_info.local_reuse_len(), 2688);
@@ -272,12 +270,11 @@ TEST_F(PrefillRpcServerTest, mergeCacheReuseInfoPrefersPrefillTierOnEqualPrefix)
     aux_info.set_memory_reuse_len(0);
 
     PrefillRpcServer::mergeCacheReuseInfo(aux_info,
-                                          /*prefill_total_reuse_len=*/512,
-                                          /*prefill_local_reuse_len=*/512,
-                                          /*prefill_remote_reuse_len=*/0,
-                                          /*prefill_memory_reuse_len=*/512,
-                                          /*prefill_disk_reuse_len=*/0,
-                                          /*use_independent_block_pools=*/true);
+                                        /*prefill_total_reuse_len=*/512,
+                                        /*prefill_local_reuse_len=*/512,
+                                        /*prefill_remote_reuse_len=*/0,
+                                        /*prefill_memory_reuse_len=*/512,
+                                        /*prefill_disk_reuse_len=*/0);
 
     EXPECT_EQ(aux_info.total_reuse_len(), 512);
     EXPECT_EQ(aux_info.local_reuse_len(), 512);
@@ -286,29 +283,36 @@ TEST_F(PrefillRpcServerTest, mergeCacheReuseInfoPrefersPrefillTierOnEqualPrefix)
     EXPECT_EQ(aux_info.decode_memory_reuse_len(), 0);
 }
 
-TEST_F(PrefillRpcServerTest, mergeCacheReuseInfoKeepsLegacyTopLevelPrefillFields) {
+TEST_F(PrefillRpcServerTest, mergeCacheReuseInfoKeepsPrefillTiersDespiteLargerDecodeHit) {
     AuxInfoPB aux_info;
-    aux_info.set_total_reuse_len(8);
-    aux_info.set_local_reuse_len(8);
-    aux_info.set_memory_reuse_len(8);
+    aux_info.set_total_reuse_len(1024);
+    aux_info.set_local_reuse_len(768);
+    aux_info.set_remote_reuse_len(256);
+    aux_info.set_memory_reuse_len(256);
+    aux_info.set_disk_reuse_len(128);
 
     PrefillRpcServer::mergeCacheReuseInfo(aux_info,
-                                          /*prefill_total_reuse_len=*/0,
-                                          /*prefill_local_reuse_len=*/0,
-                                          /*prefill_remote_reuse_len=*/0,
-                                          /*prefill_memory_reuse_len=*/0,
-                                          /*prefill_disk_reuse_len=*/0,
-                                          /*use_independent_block_pools=*/false);
+                                        /*prefill_total_reuse_len=*/512,
+                                        /*prefill_local_reuse_len=*/384,
+                                        /*prefill_remote_reuse_len=*/128,
+                                        /*prefill_memory_reuse_len=*/128,
+                                        /*prefill_disk_reuse_len=*/64);
 
-    EXPECT_EQ(aux_info.total_reuse_len(), 0);
-    EXPECT_EQ(aux_info.local_reuse_len(), 0);
-    EXPECT_EQ(aux_info.remote_reuse_len(), 0);
-    EXPECT_EQ(aux_info.memory_reuse_len(), 0);
-    EXPECT_EQ(aux_info.disk_reuse_len(), 0);
-    EXPECT_EQ(aux_info.prefill_total_reuse_len(), 0);
-    EXPECT_EQ(aux_info.decode_total_reuse_len(), 8);
-    EXPECT_EQ(aux_info.decode_local_reuse_len(), 8);
-    EXPECT_EQ(aux_info.decode_memory_reuse_len(), 8);
+    EXPECT_EQ(aux_info.total_reuse_len(), 512);
+    EXPECT_EQ(aux_info.local_reuse_len(), 384);
+    EXPECT_EQ(aux_info.remote_reuse_len(), 128);
+    EXPECT_EQ(aux_info.memory_reuse_len(), 128);
+    EXPECT_EQ(aux_info.disk_reuse_len(), 64);
+    EXPECT_EQ(aux_info.prefill_total_reuse_len(), 512);
+    EXPECT_EQ(aux_info.prefill_local_reuse_len(), 384);
+    EXPECT_EQ(aux_info.prefill_remote_reuse_len(), 128);
+    EXPECT_EQ(aux_info.prefill_memory_reuse_len(), 128);
+    EXPECT_EQ(aux_info.prefill_disk_reuse_len(), 64);
+    EXPECT_EQ(aux_info.decode_total_reuse_len(), 1024);
+    EXPECT_EQ(aux_info.decode_local_reuse_len(), 768);
+    EXPECT_EQ(aux_info.decode_remote_reuse_len(), 256);
+    EXPECT_EQ(aux_info.decode_memory_reuse_len(), 256);
+    EXPECT_EQ(aux_info.decode_disk_reuse_len(), 128);
 }
 
 TEST_F(PrefillRpcServerTest, multimodalProcessMarksDeterministicErrorNonRetryable) {

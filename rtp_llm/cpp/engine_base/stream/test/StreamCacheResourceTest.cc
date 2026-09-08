@@ -285,7 +285,10 @@ protected:
             std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(1));
             resources[0][0].host_block = block;
             RTP_LLM_CHECK(cache->tree()
-                              ->insertNode({resource.batch_kv_cache_resource_->cacheKeys(0).front()}, resources, false)
+                              ->insertNode({resource.batch_kv_cache_resource_->cacheKeys(0).front()},
+                                           resources,
+                                           false,
+                                           /*is_resident=*/false)
                               .accepted_resource_count
                           == 1);
             group->releaseSingleBlock(Tier::HOST, block, BlockTreeRefType::CACHE);

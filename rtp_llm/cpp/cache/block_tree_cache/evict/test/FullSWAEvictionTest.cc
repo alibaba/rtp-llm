@@ -23,7 +23,9 @@ protected:
             nullptr,
             nullptr);
         std::vector<GroupSetPtr> groups = {full, swa};
-        cache_ = makeBlockTreeCacheForTest(std::move(groups), BlockTreeCacheConfig{.task_pool_size = 2});
+        BlockTreeCacheConfig config{};
+        config.task_pool_size = 2;
+        cache_ = makeBlockTreeCacheForTest(std::move(groups), config);
     }
 
     void insertPath(const CacheKeysType& keys, BlockIdxType full_block, BlockIdxType swa_block) {
@@ -32,7 +34,7 @@ protected:
             resources[i][0].device_blocks = {static_cast<BlockIdxType>(full_block + i)};
             resources[i][1].device_blocks = {static_cast<BlockIdxType>(swa_block + i)};
         }
-        cache_->insert(keys, resources, Tier::DEVICE);
+        cache_->insert(keys, resources, Tier::DEVICE, /*write_remote=*/true, /*is_resident=*/false);
     }
 
     std::unique_ptr<BlockTreeCache> cache_;
@@ -78,14 +80,15 @@ TEST_F(FullSWAEvictionTest, SWAOnlySequentialDrain) {
     auto swa = std::make_shared<SWAGroupSet>(
         128, 64, std::vector<DeviceBlockPoolPtr>{block_tree_cache_test::makeStructuralDevicePool(0)}, nullptr, nullptr);
     std::vector<GroupSetPtr>        groups = {swa};
-    std::unique_ptr<BlockTreeCache> swa_cache =
-        makeBlockTreeCacheForTest(std::move(groups), BlockTreeCacheConfig{.task_pool_size = 2});
+    BlockTreeCacheConfig config{};
+    config.task_pool_size = 2;
+    std::unique_ptr<BlockTreeCache> swa_cache = makeBlockTreeCacheForTest(std::move(groups), config);
 
     std::vector<std::vector<GroupSetResource>> resources(3, std::vector<GroupSetResource>(1));
     resources[0][0].device_blocks = {20};
     resources[1][0].device_blocks = {21};
     resources[2][0].device_blocks = {22};
-    swa_cache->insert({100, 200, 300}, resources, Tier::DEVICE);
+    swa_cache->insert({100, 200, 300}, resources, Tier::DEVICE, /*write_remote=*/true, /*is_resident=*/false);
 
     EXPECT_EQ(swa_cache->getStats().device_heap_total_size, 3u);
 

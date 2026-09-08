@@ -682,7 +682,7 @@ TEST_F(BlockTreeCacheIntegrationTest, HostDiskOnlyLifecycle) {
     ASSERT_FALSE(before.empty());
     ASSERT_EQ(cache->getStats().host_heap_total_size, 1u);
     const CandidateMeta before_meta     = before.back()->group_set_resources[0].candidate_meta;
-    const auto          snapshot_before = cache->getKeySnapshot(/*limit=*/8);
+    const auto          snapshot_before = cache->getKeySnapshot();
     EXPECT_EQ(snapshot_before.keys, (CacheKeysType{100}));
 
     BlockTreeMatchResult host_match = cache->match({100});
@@ -716,7 +716,7 @@ TEST_F(BlockTreeCacheIntegrationTest, HostDiskOnlyLifecycle) {
     EXPECT_EQ(failed_resource.candidate_meta.admission_seq, matched_meta.admission_seq);
     EXPECT_EQ(failed_resource.candidate_meta.hit_count, matched_meta.hit_count);
     EXPECT_EQ(failed_resource.candidate_meta.last_access_time_us, matched_meta.last_access_time_us);
-    const auto snapshot_after_failure = cache->getKeySnapshot(/*limit=*/8);
+    const auto snapshot_after_failure = cache->getKeySnapshot();
     EXPECT_EQ(snapshot_after_failure.version, snapshot_before.version);
     EXPECT_EQ(snapshot_after_failure.keys, snapshot_before.keys);
 
@@ -740,7 +740,7 @@ TEST_F(BlockTreeCacheIntegrationTest, HostDiskOnlyLifecycle) {
     EXPECT_EQ(cache->getStats().host_heap_total_size, 0u);
     EXPECT_EQ(cache->getStats().disk_heap_total_size, 1u);
 
-    const auto snapshot_after_success = cache->getKeySnapshot(/*limit=*/8);
+    const auto snapshot_after_success = cache->getKeySnapshot();
     EXPECT_GT(snapshot_after_success.version, snapshot_after_failure.version);
     EXPECT_EQ(snapshot_after_success.keys, snapshot_before.keys);
     BlockTreeMatchResult disk_match = cache->match({100});
@@ -900,7 +900,7 @@ TEST_F(BlockTreeCacheIntegrationTest, CacheShutdownWaitsForSubmitReturnedStoreCo
         ASSERT_EQ(request_blocks.front().size(), 1u);
         std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(1));
         resources[0][0].device_blocks = request_blocks.front();
-        cache->insert({100}, resources, Tier::HOST);
+        cache->insert({100}, resources, Tier::HOST, /*write_remote=*/true, /*is_resident=*/false);
         ASSERT_TRUE(manual_transfer_engine->waitUntilSubmitted(1, kRaceWaitTimeout));
         waitForCacheTasksToDrain(*cache);
         EXPECT_EQ(cache->task_pool_->pending_tasks_.load(), 0);
@@ -2288,7 +2288,7 @@ TEST_P(BlockTreeCacheLowerTierTest, AbortCommittedLoadReturnsFalseAndTransferCom
     demoteTo(*environment, GetParam());
     environment->expectPayloads();
 
-    const auto snapshot_before = environment->cache->getKeySnapshot(/*limit=*/32);
+    const auto snapshot_before = environment->cache->getKeySnapshot();
 
     BlockTreeMatchResult              result  = environment->cache->match(environment->keys);
     std::shared_ptr<LoadAsyncContext> context = takeLoadContext(result);
@@ -2337,7 +2337,7 @@ TEST_P(BlockTreeCacheLowerTierTest, AbortCommittedLoadReturnsFalseAndTransferCom
     EXPECT_TRUE(context->done());
     EXPECT_TRUE(context->success());
     EXPECT_FALSE(environment->cache->abortPendingLoad(context));
-    const auto snapshot_after = environment->cache->getKeySnapshot(/*limit=*/32);
+    const auto snapshot_after = environment->cache->getKeySnapshot();
     EXPECT_GT(snapshot_after.version, snapshot_before.version);
     EXPECT_EQ(snapshot_after.keys, snapshot_before.keys);
 

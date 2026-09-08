@@ -154,11 +154,12 @@ BlockTreeMatchResult BlockTreeCache::match(const CacheKeysType& cache_keys, cons
 void BlockTreeCache::insert(const CacheKeysType&                              cache_keys,
                             const std::vector<std::vector<GroupSetResource>>& resources,
                             Tier                                              target_tier,
-                            bool                                              write_remote) {
+                            bool                                              write_remote,
+                            bool                                              is_resident) {
     StorageWriteTask storage_write;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        storage_write = storer_.storeLocked(cache_keys, resources, target_tier, write_remote);
+        storage_write = storer_.storeLocked(cache_keys, resources, target_tier, write_remote, is_resident);
     }
     if (storage_write) {
         const bool success = storage_backend_->write(std::move(storage_write), config_.write_cache_sync);
@@ -245,13 +246,10 @@ void BlockTreeCache::reportMetrics() const {
     metrics_reporter_->reportQueueBacklog(transfer_dispatcher_->queueSizes(), "transfer");
 }
 
-BlockTreeKeySnapshot BlockTreeCache::getKeySnapshot(size_t limit) const {
+BlockTreeKeySnapshot BlockTreeCache::getKeySnapshot() const {
     std::lock_guard<std::mutex> lock(mutex_);
     BlockTreeKeySnapshot        snapshot;
     snapshot.version = mutation_version_;
-    if (limit == 0) {
-        return snapshot;
-    }
 
     std::vector<const TreeNode*> pending;
     pending.reserve(tree_->size());
@@ -261,7 +259,7 @@ BlockTreeKeySnapshot BlockTreeCache::getKeySnapshot(size_t limit) const {
             pending.push_back(child);
         }
     }
-    while (!pending.empty() && snapshot.keys.size() < limit) {
+    while (!pending.empty()) {
         const TreeNode* node = pending.back();
         pending.pop_back();
         const bool reusable = std::any_of(node->group_set_resources.begin(),

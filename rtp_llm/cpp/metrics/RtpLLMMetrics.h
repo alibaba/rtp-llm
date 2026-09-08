@@ -1032,7 +1032,6 @@ public:
     kmonitor::MutableMetric* evictable_candidate_count_metric            = nullptr;
     kmonitor::MutableMetric* eviction_trigger_qps_metric                 = nullptr;
     kmonitor::MutableMetric* eviction_blocks_count_metric                = nullptr;
-    kmonitor::MutableMetric* eviction_qps_metric                         = nullptr;
     kmonitor::MutableMetric* evicted_block_tier_residence_time_ms_metric = nullptr;
     kmonitor::MutableMetric* evicted_candidate_idle_time_ms_metric       = nullptr;
     kmonitor::MutableMetric* evicted_candidate_age_ms_metric             = nullptr;

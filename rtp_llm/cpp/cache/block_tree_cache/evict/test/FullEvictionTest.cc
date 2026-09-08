@@ -18,7 +18,9 @@ protected:
         auto full = std::make_shared<FullGroupSet>(
             std::vector<DeviceBlockPoolPtr>{block_tree_cache_test::makeStructuralDevicePool(0)}, nullptr, nullptr);
         std::vector<GroupSetPtr> groups = {full};
-        cache_ = makeBlockTreeCacheForTest(std::move(groups), BlockTreeCacheConfig{.task_pool_size = 2});
+        BlockTreeCacheConfig config{};
+        config.task_pool_size = 2;
+        cache_ = makeBlockTreeCacheForTest(std::move(groups), config);
     }
 
     // Insert a path with given device block for group 0.
@@ -27,7 +29,7 @@ protected:
         for (size_t i = 0; i < keys.size(); ++i) {
             resources[i][0].device_blocks = {static_cast<BlockIdxType>(dev_block + i)};
         }
-        cache_->insert(keys, resources, Tier::DEVICE);
+        cache_->insert(keys, resources, Tier::DEVICE, /*write_remote=*/true, /*is_resident=*/false);
     }
 
     std::unique_ptr<BlockTreeCache> cache_;

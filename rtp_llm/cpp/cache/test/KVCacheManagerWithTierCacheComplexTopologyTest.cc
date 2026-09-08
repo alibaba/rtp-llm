@@ -38,7 +38,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4CpCanonicalFullAndSwaRoundTripThroug
     EXPECT_EQ(seed.cache_keys, cp_mapper->canonicalCacheKeys(seed.full_cache_keys));
     EXPECT_EQ(seed.cache_keys.front(), seed.full_cache_keys.back());
     EXPECT_TRUE(seed.resource->lastBlockAligned());
-    const auto key_snapshot = cache->getKeySnapshot(/*limit=*/2);
+    const auto key_snapshot = cache->getKeySnapshot();
     EXPECT_EQ(key_snapshot.keys, seed.cache_keys);
     EXPECT_TRUE(cache->tree()->findNode(seed.full_cache_keys).empty())
         << "tree must be keyed by the CP canonical namespace";

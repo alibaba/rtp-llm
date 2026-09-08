@@ -873,9 +873,8 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegions)
                                                      /*partition_count=*/1,
                                                      /*partition_id=*/0,
                                                      &server_context);
-    auto                                result = server.loadCache(load_context);
-    ASSERT_TRUE(result.ok()) << result.error_info.ToString();
-    EXPECT_EQ(result.loaded_cache_block_count, 4u);
+    const ErrorInfo result = server.loadCache(load_context);
+    ASSERT_TRUE(result.ok()) << result.ToString();
 
     EXPECT_EQ(cache_store->load_buffer_requests_.size(), expected_requests);
     EXPECT_EQ(cache_store->load_request_keys_.size(), expected_requests);
@@ -1018,9 +1017,8 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4DecoupledCacheStoreTransfersPhysicalBloc
                                                      /*partition_count=*/1,
                                                      /*partition_id=*/0,
                                                      &server_context);
-    auto                                result = server.loadCache(load_context);
-    ASSERT_TRUE(result.ok()) << result.error_info.ToString();
-    EXPECT_EQ(result.loaded_cache_block_count, 2u);
+    const ErrorInfo result = server.loadCache(load_context);
+    ASSERT_TRUE(result.ok()) << result.ToString();
 
     for (int layer_id = 0; layer_id < 4; ++layer_id) {
         for (int gid : cache_config.groupIdsForLayer(layer_id)) {
@@ -1167,9 +1165,8 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegionsW
                                                      /*partition_count=*/1,
                                                      /*partition_id=*/0,
                                                      &server_context);
-    auto                                result = server.loadCache(load_context);
-    ASSERT_TRUE(result.ok()) << result.error_info.ToString();
-    EXPECT_EQ(result.loaded_cache_block_count, 4u);
+    const ErrorInfo result = server.loadCache(load_context);
+    ASSERT_TRUE(result.ok()) << result.ToString();
 
     EXPECT_EQ(cache_store->load_buffer_requests_.size(), expected_requests);
     EXPECT_EQ(cache_store->load_request_keys_.size(), expected_requests);

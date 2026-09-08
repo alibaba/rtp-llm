@@ -225,7 +225,7 @@ TEST_F(HybridKVCacheAllocatorCPShardTest, InsertIntoCacheUsesCanonicalKeysAndVir
     InsertInfo insert_info{batch_res, tokens, /*is_resident=*/false};
     allocator->insertIntoCache(insert_info);
 
-    const auto snapshot = allocator->blockTreeCacheOwner()->getKeySnapshot(10);
+    const auto snapshot = allocator->blockTreeCacheOwner()->getKeySnapshot();
     EXPECT_EQ(snapshot.keys, (CacheKeysType{101, 103}));
 
     auto match = allocator->blockTreeCacheOwner()->match(CacheKeysType{101, 103});

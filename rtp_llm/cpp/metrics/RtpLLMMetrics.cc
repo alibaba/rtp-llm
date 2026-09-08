@@ -621,7 +621,6 @@ bool RtpLLMCacheEvictionMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_GAUGE_MUTABLE_METRIC(evictable_candidate_count_metric, "rtp_llm_kv_cache_evictable_candidate_count");
     REGISTER_QPS_MUTABLE_METRIC(eviction_trigger_qps_metric, "rtp_llm_kv_cache_eviction_trigger_qps");
     REGISTER_GAUGE_MUTABLE_METRIC(eviction_blocks_count_metric, "rtp_llm_kv_cache_eviction_blocks_count");
-    REGISTER_QPS_MUTABLE_METRIC(eviction_qps_metric, "rtp_llm_kv_cache_eviction_qps");
     REGISTER_GAUGE_MUTABLE_METRIC(evicted_block_tier_residence_time_ms_metric,
                                   "rtp_llm_kv_cache_evicted_block_tier_residence_time_ms");
     REGISTER_GAUGE_MUTABLE_METRIC(evicted_candidate_idle_time_ms_metric,
@@ -660,7 +659,6 @@ void RtpLLMCacheEvictionMetrics::report(const kmonitor::MetricsTags*         tag
         kmonitor::MetricsTags eviction_tags("source_tier", collector->source_tier);
         eviction_tags.AddTag("target_tier", collector->target_tier);
         eviction_tags.AddTag("group_type", collector->group_type);
-        eviction_qps_metric->Report(&eviction_tags, 1);
         if (collector->report_tier_residence_time) {
             evicted_block_tier_residence_time_ms_metric->Report(&eviction_tags, collector->tier_residence_time_ms);
         }

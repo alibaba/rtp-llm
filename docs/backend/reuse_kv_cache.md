@@ -59,21 +59,48 @@ When MULTI_TASK_PROMPT is configured, the server automatically enables `REUSE_CA
 preserve the existing static system-prompt behavior. Disable MULTI_TASK_PROMPT when testing a pure
 L2-only or L3-only configuration.
 
-`REUSE_CACHE` remains the master switch: with it off, no tier is consulted or written.
+`REUSE_CACHE` remains the deployment master switch: with it off, no tier is consulted or written.
+By default, a request must also set `reuse_cache=true` (the default) to use prefix-cache lookup
+or store its KV for later reuse.
 
-### Lookup versus store target
-
-Lookup and store are decided separately:
-
-- **Lookup** consults every tier the deployment has enabled. A request cannot narrow it.
-- **Store target** is the highest tier that both the deployment and the request permit
-  (L1, then L2, then L3). If no tier is permitted, nothing is stored.
+### Lookup and store targets
 
 The per-request switches `enable_device_cache`, `enable_host_cache` and `enable_disk_cache`
-in `generate_config` only restrict where a request's own KV is written. All three default to `true`.
-A request that forbids L1 still benefits from an L1 hit and stores into L2
-or L3 instead. Writes into L2/L3 happen asynchronously after the request completes, so they do
-not delay releasing the request's blocks.
+in `generate_config` restrict **both lookup and storage**. All three default to `true`.
+A local tier is permitted only when both its deployment switch and its request switch are on.
+A request cannot enable a tier that the deployment has disabled.
+
+- **Lookup** can use only the permitted tiers. For example, a request with
+  `enable_device_cache=false` cannot reuse an L1 entry, even if the deployment enables L1.
+- **Storage after successful completion** selects the highest permitted local tier
+  (L1, then L2, then L3). When both L1 and L2 are permitted, it also writes to L2,
+  preserving the previous device/host write-through behavior.
+- L3 is a primary store target when neither L1 nor L2 is permitted. Enabling L3 does not add
+  a third request-completion copy alongside L1/L2; lower-tier demotion is a separate operation.
+
+With cache reuse enabled, the local-tier rules are:
+
+| Permitted local tiers (deployment AND request) | Lookup may use | Request-completion store targets |
+|-----------------------------------------------|----------------|----------------------------------|
+| None | None | None |
+| L1 | L1 | L1 |
+| L2 | L2 | L2 |
+| L3 | L3 | L3 |
+| L1, L2 | L1, L2 | L1 and L2 |
+| L1, L3 | L1, L3 | L1 |
+| L2, L3 | L2, L3 | L2 |
+| L1, L2, L3 | L1, L2, L3 | L1 and L2 |
+
+Remote-cache lookup and writes are controlled separately by the deployment's remote-cache
+switch and the request's `enable_remote_cache` switch (default `true`). An allowed remote
+write can accompany local storage; the table above describes only local tiers.
+
+### Ignoring request cache switches
+
+Setting `RTP_LLM_IGNORE_REQUEST_CACHE_SWITCHES=1` (default off) makes the deployment switches
+alone determine cache permissions. It ignores the request's `reuse_cache` and all
+`enable_*_cache` switches for both lookup and storage. It does not enable any tier disabled
+by the deployment, and deployment-level `REUSE_CACHE=0` still disables reuse entirely.
 
 # MultiTaskPrompt
 Create static cache for long-text System Prompts, directly reading KV cache from static cache in each request instead of recomputing. This method can significantly reduce the model's First Token Latency.

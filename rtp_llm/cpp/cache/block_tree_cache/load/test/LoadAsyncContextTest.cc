@@ -12,6 +12,7 @@
 #include <gtest/gtest.h>
 
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
 
 namespace rtp_llm {
 namespace {
@@ -458,8 +459,9 @@ TEST(LoadAsyncContextTest, ConcurrentCommitRunsCoordinatorCallbackOnceAndKeepsWi
             ++commits;
             entered = true;
             cv.notify_all();
-            cv.wait(lock, [&] { return released; });
-            return true;
+            const bool release_observed = cv.wait_for(lock, 10s, [&] { return released; });
+            EXPECT_TRUE(release_observed);
+            return release_observed;
         },
         [](LoadAsyncContext&) {});
     std::vector<TransferDescriptor> descriptors;
@@ -469,27 +471,34 @@ TEST(LoadAsyncContextTest, ConcurrentCommitRunsCoordinatorCallbackOnceAndKeepsWi
                              Tier::HOST,
                              Tier::DEVICE,
                              BlockIndicesType{1});
-    auto context = coordinator->create(std::move(descriptors), {false}, 1);
+    std::shared_ptr<LoadAsyncContext> context = coordinator->create(std::move(descriptors), {false}, 1);
     ASSERT_TRUE(coordinator->registerContext(context));
 
-    auto winner = std::async(std::launch::async, [&] { return context->commit(); });
+    std::future<bool> winner;
+    std::future<bool> loser;
+    // Release the callback before either async future is destroyed on an assertion failure.
+    block_tree_cache_detail::ScopeRollback release_guard([&] {
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            released = true;
+        }
+        cv.notify_all();
+    });
+    winner = std::async(std::launch::async, [&] { return context->commit(); });
     {
         std::unique_lock<std::mutex> lock(mutex);
-        cv.wait(lock, [&] { return entered; });
+        ASSERT_TRUE(cv.wait_for(lock, 5s, [&] { return entered; }));
     }
-    auto loser = std::async(std::launch::async, [&] { return context->commit(); });
+    loser = std::async(std::launch::async, [&] { return context->commit(); });
     ASSERT_EQ(loser.wait_for(100ms), std::future_status::ready);
     EXPECT_FALSE(loser.get());
-    {
-        std::lock_guard<std::mutex> lock(mutex);
-        released = true;
-    }
-    cv.notify_all();
+    release_guard.run();
 
+    ASSERT_EQ(winner.wait_for(5s), std::future_status::ready);
     EXPECT_TRUE(winner.get());
     EXPECT_EQ(commits, 1u);
-    EXPECT_TRUE(context->completeTransfers(1, true));
-    context->waitDone();
+    ASSERT_TRUE(context->completeTransfers(1, true));
+    ASSERT_TRUE(context->done());
     EXPECT_TRUE(context->success());
     EXPECT_EQ(context->mallocStatus(), MallocStatus::NONE);
     coordinator->shutdown();

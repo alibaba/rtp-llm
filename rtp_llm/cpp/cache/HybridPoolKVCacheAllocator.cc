@@ -70,10 +70,21 @@ bool HybridPoolKVCacheAllocator::doInit() {
     std::vector<DeviceBlockPoolConfig> group_pool_configs;
     group_pool_configs.reserve(static_cast<size_t>(group_nums));
     for (int group_id = 0; group_id < group_nums; ++group_id) {
-        auto pool_config  = DeviceBlockPoolConfigHelper::createConfigForGroup(config_, static_cast<size_t>(group_id));
-        const auto policy = config_.policyForGroup(static_cast<size_t>(group_id));
-        pool_config.use_pinned_cpu_backing  = policy.memory_placement == CacheMemoryPlacement::HOST_PINNED;
-        pool_config.use_cuda_malloc_backing = use_cuda_malloc_block_pool_ && !pool_config.use_pinned_cpu_backing;
+        DeviceBlockPoolConfig pool_config =
+            DeviceBlockPoolConfigHelper::createConfigForGroup(config_, static_cast<size_t>(group_id));
+        const CacheGroupPolicy policy = config_.policyForGroup(static_cast<size_t>(group_id));
+        if (policy.memory_placement == CacheMemoryPlacement::DEVICE) {
+            pool_config.use_pinned_cpu_backing  = false;
+            pool_config.use_cuda_malloc_backing = use_cuda_malloc_block_pool_;
+        } else if (policy.memory_placement == CacheMemoryPlacement::HOST_PINNED) {
+            pool_config.use_pinned_cpu_backing  = true;
+            pool_config.use_cuda_malloc_backing = false;
+        } else {
+            RTP_LLM_LOG_ERROR("unsupported cache memory placement=%d for group=%d",
+                              static_cast<int>(policy.memory_placement),
+                              group_id);
+            return false;
+        }
         const auto tag                      = config_.tagForGroup(static_cast<size_t>(group_id));
         const auto group_type               = config_.typeForGroup(static_cast<size_t>(group_id));
         appendPoolSummary(pool_summary, has_pool, group_id, tag, group_type, pool_config);

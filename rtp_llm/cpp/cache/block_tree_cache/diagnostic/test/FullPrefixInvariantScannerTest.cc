@@ -100,7 +100,7 @@ public:
                 seed[i][group_set_id].device_blocks = {next_block_++};
             }
         }
-        BlockTreeInsertResult result = tree_.insertNode(keys, seed, /*collect_path=*/false);
+        BlockTreeInsertResult result = tree_.insertNode(keys, seed, /*collect_path=*/false, /*is_resident=*/false);
         RTP_LLM_CHECK(result.inserted_nodes.size() == path.size());
         for (size_t i = 0; i < path.size(); ++i) {
             TreeNode* node = result.inserted_nodes[i];

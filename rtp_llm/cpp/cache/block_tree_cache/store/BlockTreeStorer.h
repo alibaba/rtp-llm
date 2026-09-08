@@ -38,15 +38,17 @@ public:
     StorageWriteTask storeLocked(const CacheKeysType&                              cache_keys,
                                  const std::vector<std::vector<GroupSetResource>>& resources,
                                  Tier                                              target_tier,
-                                 bool                                              write_remote);
+                                 bool                                              write_remote,
+                                 bool                                              is_resident);
     void             stopAdmissionLocked();
 
 private:
     using StoreTask    = StoreTaskRunner::Task;
     using StoreTaskPtr = std::shared_ptr<StoreTask>;
 
-    StorageWriteTask publishDeviceLocked(const CacheKeysType&                              cache_keys,
-                                         const std::vector<std::vector<GroupSetResource>>& resources);
+    void             publishDeviceLocked(const CacheKeysType&                              cache_keys,
+                                         const std::vector<std::vector<GroupSetResource>>& resources,
+                                         bool                                              is_resident);
     StorageRequest   makeStorageRequest(const CacheKeysType&                              cache_keys,
                                         const std::vector<std::vector<GroupSetResource>>& resources) const;
     void             submitLowerTierLocked(const CacheKeysType&                              cache_keys,
