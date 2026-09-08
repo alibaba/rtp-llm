@@ -99,7 +99,7 @@ class Component:
         events = next((e for suffixes, e in self.rules if rel.endswith(suffixes)), ())
         parts = rel.split("/")
         return ((event_type in events if event_type else bool(events)) and ".." not in parts
-                and not any(p == "tmp" or p.startswith("tmp.pid_") for p in parts))
+                and not any(p == "tmp" or p.startswith(("tmp.pid_", ".nvcc.")) for p in parts))
 def rule(events: frozenset[str], *suffixes: str):
     return suffixes, events
 NINJA = (".so", ".o", "build.ninja", ".ninja_log", ".ninja_deps")
@@ -111,7 +111,9 @@ COMPONENTS = (
     Component("deep_gemm", "DG_JIT_CACHE_DIR", (rule(CREATED, "kernel.cu", "kernel.cubin"),), ("accelerator", "@deep_gemm"), CUDA),
     Component("trtllm_deep_gemm", "TRTLLM_DG_CACHE_DIR", (rule(CREATED, "nvcc_kernel.cubin"),), ("accelerator", "@flashinfer-python"), CUDA),
     Component("tilelang", "TILELANG_CACHE_DIR", (rule(CLOSED, ".so", ".pkl", ".cu", ".json", ".cubin", ".py"),), ("torch", "@tilelang"), CUDA),
-    # rtp_kernel is the only producer here whose outputs are not self-keyed (TIPC content-hashes its subdir).
+    # CMP publishes flat, self-keyed CUBINs by rename; .nvcc.* intermediates are excluded above.
+    Component("rtp_kernel_glm5", "RTP_KERNEL_GLM5_JIT_CACHE_DIR", (rule(MOVED, ".cubin"),), ("accelerator", "@rtp_kernel"), CUDA),
+    # torch_extensions outputs are not all self-keyed (TIPC content-hashes its subdir).
     Component("torch_extensions", "TORCH_EXTENSIONS_DIR", (rule(CLOSED, *NINJA, ".cpp", ".cu"),), ("torch", "@rtp_kernel")),
     Component("aiter", "AITER_JIT_DIR", (rule(CLOSED, *NINJA, ".cu", ".cpp", ".hip", ".h"),), ("torch", "@aiter"), ROCM),
     Component("flydsl", "FLYDSL_RUNTIME_CACHE_DIR", (rule(MOVED, ".pkl"),), ("accelerator", "@flydsl"), ROCM),

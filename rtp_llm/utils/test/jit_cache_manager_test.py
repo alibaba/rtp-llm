@@ -448,7 +448,7 @@ class ScopeTest(JitCacheTestBase):
             triton_only = jit.resolve_scope(self.root)
         self.assertEqual([x.name for x in triton_only.components], ["triton"])
 
-    def test_torch_extensions_scope_tracks_rtp_kernel_build(self):
+    def test_rtp_kernel_scopes_track_build(self):
         def with_kernel(version):
             def resolver(name):
                 if name != "rtp_kernel":
@@ -465,14 +465,53 @@ class ScopeTest(JitCacheTestBase):
         )
         names = {c.name for c in self.resolve(pkg=with_kernel(None)).components}
         self.assertNotIn("torch_extensions", names)  # no identity -> not managed
+        self.assertNotIn("rtp_kernel_glm5", names)
         self.assertIn("triton", names)
+
+        # The CMP component needs its own build identity, even without torch_extensions.
+        cmp = next(x for x in jit.COMPONENTS if x.name == "rtp_kernel_glm5")
+        with mock.patch.object(jit, "COMPONENTS", (cmp,)):
+            self.assertNotEqual(
+                self.scope_id(pkg=with_kernel("0.1.0+aaa")),
+                self.scope_id(pkg=with_kernel("0.1.0+bbb")),
+            )
+
+    def test_glm5_cmp_toggle_keeps_cache_scope(self):
+        with mock.patch.dict(os.environ, {"RTP_LLM_GLM5_CMP": "0"}):
+            disabled = self.resolve()
+        with mock.patch.dict(os.environ, {"RTP_LLM_GLM5_CMP": "1"}):
+            enabled = self.resolve()
+        self.assertIn("rtp_kernel_glm5", {x.name for x in disabled.components})
+        self.assertEqual(disabled, enabled)
+
+    def test_glm5_cache_env_redirect_and_explicit_opt_out(self):
+        env_name = "RTP_KERNEL_GLM5_JIT_CACHE_DIR"
+        for preset in (None, "", str(self.root / "custom_cmp")):
+            with self.subTest(preset=preset), mock.patch.dict(os.environ, {}):
+                if preset is not None:
+                    os.environ[env_name] = preset
+                jit.setup_jit_cache_env.cache_clear()
+                with _fake_probes():
+                    scope = jit.setup_jit_cache_env()
+                self.assertIsNotNone(scope)
+                components = {x.name: x for x in scope.components}
+                if preset is None:
+                    cmp = components["rtp_kernel_glm5"]
+                    self.assertEqual(os.environ[env_name], str(cmp.local_dir))
+                    self.assertEqual(cmp.local_dir, scope.root / "rtp_kernel_glm5")
+                else:
+                    self.assertNotIn("rtp_kernel_glm5", components)
+                    self.assertEqual(os.environ[env_name], preset)
 
     def test_rocm_scope_and_component_selection(self):
         with _fake_probes(hip="6.2.41133", arch="gfx942"):
             scope = jit.resolve_scope(self.root)
         names = {item.name for item in scope.components}
         self.assertLessEqual({"aiter", "flydsl", "triton"}, names)
-        self.assertFalse(names & {"flashinfer", "deep_gemm", "tvm_ffi", "cute_dsl"})
+        self.assertFalse(
+            names
+            & {"flashinfer", "deep_gemm", "rtp_kernel_glm5", "tvm_ffi", "cute_dsl"}
+        )
 
     def test_setup_env_redirects_and_respects_presets(self):
         os.environ["TRITON_CACHE_DIR"] = str(self.root / "preset")
@@ -612,6 +651,25 @@ class ScopeTest(JitCacheTestBase):
         self.assertFalse(triton.should_sync("tmp/partial.cubin"))
         self.assertFalse(triton.should_sync("hash/readme.txt"))
 
+    def test_glm5_cubin_rules_exclude_compiler_intermediates(self):
+        cmp = next(x for x in jit.COMPONENTS if x.name == "rtp_kernel_glm5")
+        final = "q_b_proj.0123456789abcdef.cubin"
+        self.assertTrue(cmp.should_sync(final))
+        self.assertTrue(cmp.should_sync(final, "moved"))
+        for event_type in ("created", "closed", "modified"):
+            self.assertFalse(cmp.should_sync(final, event_type))
+        for rel in (
+            final + ".tmp.123",
+            ".nvcc.123/kernel.cubin",
+            ".nvcc.123/kernel.cu",
+            "tmp/partial.cubin",
+            "tmp.pid_123/partial.cubin",
+            "../escape.cubin",
+        ):
+            for event_type in (None, "moved", "closed", "created"):
+                with self.subTest(rel=rel, event_type=event_type):
+                    self.assertFalse(cmp.should_sync(rel, event_type))
+
     def test_probe_failure_fails_open_and_is_not_cached(self):
         outputs = [
             subprocess.TimeoutExpired(cmd="c++", timeout=5),
@@ -718,6 +776,43 @@ class ManagerTest(JitCacheTestBase):
         consumer = self.make_manager(scope)
         self.assertTrue(consumer.bootstrap(timeout_s=30))
         self.assertEqual(artifact.read_bytes(), b"payload")
+
+    def test_glm5_atomic_publish_then_restore_excludes_intermediates(self):
+        scope = self.make_scope()
+        producer = self.make_manager(scope)
+        # Drive events explicitly so the test is independent of inotify timing.
+        with mock.patch.object(producer, "_start_watch", return_value=True):
+            self.assertTrue(producer.bootstrap(timeout_s=30))
+        producer._dirty.clear()
+        rel = "rtp_kernel_glm5/q_b_proj.0123456789abcdef.cubin"
+        pending = self.write_artifact(scope, rel + ".tmp.123", b"compiled-cubin")
+        self.write_artifact(scope, rel + ".tmp.456", b"unfinished-publish")
+        self.write_artifact(scope, "rtp_kernel_glm5/.nvcc.123/kernel.cubin")
+        self.write_artifact(scope, "rtp_kernel_glm5/.nvcc.123/kernel.cu")
+        self.assertEqual(producer._snapshot_files(), {})
+
+        artifact = scope.root / rel
+        pending.rename(artifact)
+        producer.on_any_event(
+            mock.Mock(
+                event_type="moved",
+                src_path=str(pending),
+                dest_path=str(artifact),
+                is_directory=False,
+            )
+        )
+        self.assertTrue(producer._dirty.is_set())
+        self.assertEqual(producer._snapshot_files(), {rel: artifact})
+        producer.publish_pending_snapshot()
+        self.assertEqual(len(snapshots(producer.store)), 1)
+        producer.stop()
+
+        shutil.rmtree(scope.root)  # isolated fixture: simulate a fresh instance
+        consumer = self.make_manager(scope)
+        with mock.patch.object(consumer, "_start_watch", return_value=True):
+            self.assertTrue(consumer.bootstrap(timeout_s=30))
+        self.assertIsNotNone(consumer._restored)
+        self.assertEqual(contents(scope.root), {rel: b"compiled-cubin"})
 
     def test_publish_defers_and_rearms_dirty_on_pack_race(self):
         scope = self.make_scope()
@@ -856,6 +951,29 @@ class ManagerTest(JitCacheTestBase):
                 )
             )
             self.assertEqual(manager._dirty.is_set(), expect, path.name)
+
+    def test_glm5_event_handler_only_marks_final_cubin_rename(self):
+        scope = self.make_scope()
+        manager = self.make_manager(scope)
+        for rel, event_type, expected in (
+            ("q_b_proj.hash.cubin.tmp.123", "closed", False),
+            (".nvcc.123/kernel.cubin", "moved", False),
+            ("q_b_proj.hash.cubin", "created", False),
+            ("q_b_proj.hash.cubin", "closed", False),
+            ("q_b_proj.hash.cubin", "moved", True),
+        ):
+            with self.subTest(rel=rel, event_type=event_type):
+                path = self.write_artifact(scope, f"rtp_kernel_glm5/{rel}")
+                manager._dirty.clear()
+                manager.on_any_event(
+                    mock.Mock(
+                        event_type=event_type,
+                        src_path=str(path),
+                        dest_path=str(path),
+                        is_directory=False,
+                    )
+                )
+                self.assertEqual(manager._dirty.is_set(), expected)
 
     def test_restore_lock_wait_honors_setup_timeout(self):
         scope = self.make_scope()
