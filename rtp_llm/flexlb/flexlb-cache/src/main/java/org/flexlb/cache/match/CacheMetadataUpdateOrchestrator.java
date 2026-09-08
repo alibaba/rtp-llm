@@ -39,10 +39,10 @@ public class CacheMetadataUpdateOrchestrator {
             return localSyncProvider.updateFromWorkerStatus(workerStatus);
         }
 
-        String engineIpPort = workerStatus == null ? null : workerStatus.getIpPort();
+        String logicalIpPort = workerStatus == null ? null : workerStatus.getLogicalIpPort();
         return WorkerCacheUpdateResult.builder()
                 .success(false)
-                .engineIpPort(engineIpPort)
+                .logicalIpPort(logicalIpPort)
                 .errorMessage("Local Sync cache metadata updates are disabled when KVCM is enabled")
                 .build();
     }

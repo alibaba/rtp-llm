@@ -2,7 +2,6 @@ package org.flexlb.cache.match.localsync;
 
 import lombok.extern.slf4j.Slf4j;
 import org.flexlb.cache.domain.DiffResult;
-import org.flexlb.cache.telemetry.CacheMetricsReporter;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
@@ -34,12 +33,6 @@ public class EngineLocalView {
     private final ForkJoinPool customPool = new ForkJoinPool(Math.min(Runtime.getRuntime().availableProcessors(), 8));
 
     /**
-     * Cache metrics reporter
-     */
-    @Autowired
-    private CacheMetricsReporter cacheMetricsReporter;
-
-    /**
      * Dynamic sync interval manager
      */
     @Autowired
@@ -48,12 +41,11 @@ public class EngineLocalView {
     /**
      * Calculate diff result
      *
-     * @param engineIPort       Engine IP
+     * @param engineIPort    Engine IP
      * @param newCacheBlocks New cache block set
-     * @param role           Engine role
      * @return Diff calculation result
      */
-    public DiffResult calculateDiff(String engineIPort, Set<Long> newCacheBlocks, String role) {
+    public DiffResult calculateDiff(String engineIPort, Set<Long> newCacheBlocks) {
         if (engineIPort == null || newCacheBlocks == null) {
             return DiffResult.empty(engineIPort);
         }
@@ -79,8 +71,6 @@ public class EngineLocalView {
 
         addedTask.join();
         removedTask.join();
-
-        cacheMetricsReporter.reportCacheDiffMetrics(role, addedBlocks.size(), removedBlocks.size());
 
         // Update statistics in dynamic sync interval manager
         int diffSize = addedBlocks.size() + removedBlocks.size();

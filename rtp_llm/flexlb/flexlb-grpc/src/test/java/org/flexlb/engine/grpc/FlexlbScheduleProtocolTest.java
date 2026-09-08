@@ -9,8 +9,10 @@ import java.io.ByteArrayOutputStream;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class FlexlbScheduleProtocolTest {
 
@@ -45,6 +47,30 @@ class FlexlbScheduleProtocolTest {
         assertEquals(Descriptors.FieldDescriptor.Type.STRING,
                 EngineRpcService.WorkerStatusPB.getDescriptor().findFieldByNumber(1).getType());
         assertNull(FlexlbScheduleProtocol.FlexlbServerStatusPB.getDescriptor().findFieldByNumber(5));
+    }
+
+    @Test
+    void engineIndexDistinguishesAbsentFromExplicitZeroOnTheWire() throws Exception {
+        var descriptor = FlexlbScheduleProtocol.FlexlbServerStatusPB.getDescriptor();
+        var field = descriptor.findFieldByName("engine_index");
+        assertNotNull(field);
+        assertEquals(6, field.getNumber());
+        assertEquals(Descriptors.FieldDescriptor.Type.INT32, field.getType());
+        assertTrue(field.hasPresence());
+        assertNull(descriptor.findFieldByNumber(5));
+
+        var absent = FlexlbScheduleProtocol.FlexlbServerStatusPB.parseFrom(new byte[0]);
+        assertFalse(absent.hasField(field));
+        for (int index : new int[]{0, 1}) {
+            ByteArrayOutputStream output = new ByteArrayOutputStream();
+            CodedOutputStream coded = CodedOutputStream.newInstance(output);
+            coded.writeInt32(6, index);
+            coded.flush();
+            var parsed = FlexlbScheduleProtocol.FlexlbServerStatusPB.parseFrom(output.toByteArray());
+            assertTrue(parsed.hasField(field));
+            assertEquals(index, parsed.getField(field));
+            assertArrayEquals(output.toByteArray(), parsed.toByteArray());
+        }
     }
 
     @Test

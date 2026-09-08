@@ -1141,10 +1141,10 @@ class PrefillEndpointTest {
             slowEndpoint.reportBatchMetrics(reporter);
 
             // Single-report with priority tag (no global untagged series)
-            verify(reporter).reportBatcherQueueSize("PREFILL", "127.0.0.1", 2);
+            verify(reporter).reportBatcherQueueSize("PREFILL", "127.0.0.1:8080", 2);
             // Priority buckets on the same routing.queue.length metric
-            verify(reporter).reportBatcherQueueDepthByPriority("PREFILL", "127.0.0.1", 70, 1);
-            verify(reporter).reportBatcherQueueDepthByPriority("PREFILL", "127.0.0.1", 0, 1);
+            verify(reporter).reportBatcherQueueDepthByPriority("PREFILL", "127.0.0.1:8080", 70, 1);
+            verify(reporter).reportBatcherQueueDepthByPriority("PREFILL", "127.0.0.1:8080", 0, 1);
         } finally {
             slowEndpoint.close();
         }
@@ -1155,9 +1155,9 @@ class PrefillEndpointTest {
         BatchSchedulerReporter reporter = mock(BatchSchedulerReporter.class);
         endpoint.reportBatchMetrics(reporter);
 
-        verify(reporter).reportBatcherQueueSize("PREFILL", "127.0.0.1", 0);
+        verify(reporter).reportBatcherQueueSize("PREFILL", "127.0.0.1:8080", 0);
         // Empty queue fallback: single priority=0 depth=0 report so tagged panels don't gap
-        verify(reporter).reportBatcherQueueDepthByPriority("PREFILL", "127.0.0.1", 0, 0);
+        verify(reporter).reportBatcherQueueDepthByPriority("PREFILL", "127.0.0.1:8080", 0, 0);
     }
 
     // ---- WorkerEndpoint inherited behavior ----

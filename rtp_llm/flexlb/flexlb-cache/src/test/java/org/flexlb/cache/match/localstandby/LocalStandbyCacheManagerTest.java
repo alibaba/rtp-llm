@@ -39,16 +39,16 @@ class LocalStandbyCacheManagerTest {
                 workerStatusProvider,
                 mock(CacheMetricsReporter.class));
 
-        manager.addRoutedRequestBlocks(worker1.getIpPort(), List.of(11L, 22L, 33L));
-        manager.addRoutedRequestBlocks(worker2.getIpPort(), List.of(11L, 33L));
+        manager.addRoutedRequestBlocks(worker1.getLogicalIpPort(), List.of(11L, 22L, 33L));
+        manager.addRoutedRequestBlocks(worker2.getLogicalIpPort(), List.of(11L, 33L));
 
         Map<String, Integer> matches =
                 manager.findMatchingEngines(List.of(11L, 22L, 33L), RoleType.PREFILL, "default");
 
-        assertEquals(3, matches.get(worker1.getIpPort()));
-        assertEquals(1, matches.get(worker2.getIpPort()));
+        assertEquals(3, matches.get(worker1.getLogicalIpPort()));
+        assertEquals(1, matches.get(worker2.getLogicalIpPort()));
         assertEquals(
-                Map.of(worker1.getIpPort(), 1, worker2.getIpPort(), 1),
+                Map.of(worker1.getLogicalIpPort(), 1, worker2.getLogicalIpPort(), 1),
                 manager.findMatchingEngines(List.of(11L), RoleType.PREFILL, "default"));
         manager.shutdown();
     }
@@ -64,18 +64,18 @@ class LocalStandbyCacheManagerTest {
                 workerStatusProvider,
                 mock(CacheMetricsReporter.class));
 
-        manager.addRoutedRequestBlocks(worker.getIpPort(), List.of(11L, 22L, 33L));
+        manager.addRoutedRequestBlocks(worker.getLogicalIpPort(), List.of(11L, 22L, 33L));
 
         assertEquals(
                 2,
                 manager.findMatchingEngines(
                                 List.of(11L, 22L, 33L), RoleType.PDFUSION, "default")
-                        .get(worker.getIpPort()));
+                        .get(worker.getLogicalIpPort()));
         assertEquals(
                 0,
                 manager.findMatchingEngines(
                                 List.of(11L), RoleType.PDFUSION, "default")
-                        .get(worker.getIpPort()));
+                        .get(worker.getLogicalIpPort()));
         manager.shutdown();
     }
 
@@ -89,13 +89,13 @@ class LocalStandbyCacheManagerTest {
                 configuration(300_000),
                 workerStatusProvider,
                 mock(CacheMetricsReporter.class));
-        manager.addRoutedRequestBlocks(worker.getIpPort(), List.of(11L, 22L, 33L));
+        manager.addRoutedRequestBlocks(worker.getLogicalIpPort(), List.of(11L, 22L, 33L));
 
         assertEquals(
                 3,
                 manager.findMatchingEngines(
                                 List.of(11L, 22L, 33L), RoleType.PDFUSION, "default")
-                        .get(worker.getIpPort()));
+                        .get(worker.getLogicalIpPort()));
         manager.shutdown();
     }
 
@@ -109,14 +109,14 @@ class LocalStandbyCacheManagerTest {
                 configuration(20),
                 workerStatusProvider,
                 mock(CacheMetricsReporter.class));
-        manager.addRoutedRequestBlocks(worker.getIpPort(), List.of(11L));
+        manager.addRoutedRequestBlocks(worker.getLogicalIpPort(), List.of(11L));
 
         Thread.sleep(30);
 
         assertEquals(
                 0,
                 manager.findMatchingEngines(List.of(11L), RoleType.PREFILL, "default")
-                        .get(worker.getIpPort()));
+                        .get(worker.getLogicalIpPort()));
         assertEquals(0, manager.mappingCount());
         manager.shutdown();
     }
@@ -141,7 +141,7 @@ class LocalStandbyCacheManagerTest {
                 mock(CacheMetricsReporter.class));
 
         manager.refreshCapacityLimits();
-        manager.addRoutedRequestBlocks(worker.getIpPort(), List.of(11L));
+        manager.addRoutedRequestBlocks(worker.getLogicalIpPort(), List.of(11L));
 
         assertEquals(1_000, manager.maximumEntryCount());
         manager.shutdown();
@@ -202,7 +202,7 @@ class LocalStandbyCacheManagerTest {
                 cacheMetricsReporter);
 
         manager.addRoutedRequestBlocks(
-                worker.getIpPort(),
+                worker.getLogicalIpPort(),
                 List.of(1L, 2L, 3L, 4L, 5L, 6L, 7L, 8L, 9L, 10L, 11L));
 
         manager.reportMappingCount();

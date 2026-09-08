@@ -135,7 +135,7 @@ public class LocalStandbyCacheMatchProvider implements CacheMatchProvider {
                 continue;
             }
             cacheManager.addRoutedRequestBlocks(
-                    selectedWorker.getServerIp() + ":" + selectedWorker.getHttpPort(),
+                    selectedWorker.getLogicalIpPort(),
                     cacheableBlockCacheKeys);
         }
     }

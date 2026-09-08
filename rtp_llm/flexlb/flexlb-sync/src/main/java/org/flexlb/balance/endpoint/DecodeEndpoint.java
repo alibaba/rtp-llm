@@ -668,16 +668,17 @@ public class DecodeEndpoint extends WorkerEndpoint {
 
     public void reportBatchMetrics(BatchSchedulerReporter reporter) {
         DecodeState.Stats stats = state.stats();
-        reporter.reportInflightRequestCount(RoleType.DECODE.name(), getIp(), stats.inflight());
-        reporter.reportDecodeTotalLoad(getIp(), stats.totalLoad());
-        reporter.reportDecodeInflightKvReserved(getIp(), stats.expectedKv());
-        reporter.reportDecodeInflightHardKvReserved(getIp(), stats.hardKv());
-        reporter.reportInflightMaxAgeMs(RoleType.DECODE.name(), getIp(), stats.oldestAgeMs());
+        String engineIp = getStatus().getMetricIpPort();
+        reporter.reportInflightRequestCount(RoleType.DECODE.name(), engineIp, stats.inflight());
+        reporter.reportDecodeTotalLoad(engineIp, stats.totalLoad());
+        reporter.reportDecodeInflightKvReserved(engineIp, stats.expectedKv());
+        reporter.reportDecodeInflightHardKvReserved(engineIp, stats.hardKv());
+        reporter.reportInflightMaxAgeMs(RoleType.DECODE.name(), engineIp, stats.oldestAgeMs());
     }
 
     public void reportAdmissionMetrics(RequestSchedulerReporter reporter) {
         LayeredAdmissionView view = resourceSnapshot();
-        String endpoint = ipPort();
+        String endpoint = getStatus().getMetricIpPort();
         reporter.reportDecodeReservedCount(endpoint, view.reserved().size());
         reporter.reportDecodeShadowKvReserved(
                 endpoint, view.routing().inflightHardKv());

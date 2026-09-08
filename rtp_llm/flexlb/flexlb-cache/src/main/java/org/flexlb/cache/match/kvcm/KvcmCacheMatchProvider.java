@@ -27,6 +27,10 @@ public class KvcmCacheMatchProvider implements CacheMatchProvider {
         return CacheMatchSource.KVCM;
     }
 
+    /**
+     * Returns KVCM matches without rewriting their keys. KVCM {@code host_ip_port} values follow
+     * the logical {@code ip:port@engineIndex} identity reported by the Subscriber.
+     */
     @Override
     public Map<String, HostCacheMatch> findMatchingEngines(String requestId, List<Long> blockCacheKeys, long blockSize,
                                                            RoleType roleType, String group) {
