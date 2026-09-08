@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import os
 from collections.abc import Mapping, Sequence
 from typing import Any, Optional
 
@@ -140,6 +141,7 @@ def _model_geometry_reason(args: Any) -> Optional[str]:
         ("o_lora_rank", args.o_lora_rank, O_LORA_RANK),
         ("index_n_heads", args.index_n_heads, INDEX_HEADS),
         ("index_head_dim", args.index_head_dim, INDEX_HEAD_DIM),
+        ("index_topk", args.index_topk, geometry.index_topk),
         ("hc_mult", args.hc_mult, 4),
     )
     mismatches = [
@@ -332,6 +334,8 @@ def mega_decode_unavailable_reason(args: Any, device: torch.device) -> Optional[
         return "FP8 KV cache is required"
     if int(args.tp_size) != 1:
         return f"TP1 is required, got TP{args.tp_size}"
+    if os.environ.get("DSV4_GATE_FP32", "0") == "1":
+        return "DSV4_GATE_FP32=1 requires the ordinary DSV4 path"
     geometry_reason = _model_geometry_reason(args)
     if geometry_reason is not None:
         return geometry_reason

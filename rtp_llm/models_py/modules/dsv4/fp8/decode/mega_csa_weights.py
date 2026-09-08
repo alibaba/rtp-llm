@@ -23,9 +23,9 @@ MQA_SPLIT_KV = 256
 class CSAGeometry:
     """Width-class parameters that differ between DeepSeek-V4 Pro and Flash.
 
-    Everything else (HEAD_DIM, ROPE_DIM, indexer geometry, compress ratio,
-    window) is shared and stays module-level. The extension compiles both
-    geometries into one binary and dispatches by tensor shape, so these
+    Everything else (HEAD_DIM, ROPE_DIM, indexer tensor geometry, compress
+    ratio, window) is shared and stays module-level. The extension compiles
+    both geometries into one binary and dispatches by tensor shape, so these
     values only steer packing shapes and workspace sizes.
     """
 
@@ -33,6 +33,7 @@ class CSAGeometry:
     q_lora_rank: int
     main_heads: int
     o_groups: int
+    index_topk: int
 
     @property
     def n_main(self) -> int:
@@ -70,8 +71,12 @@ class CSAGeometry:
         return self.q_lora_rank // 128
 
 
-PRO_GEOMETRY = CSAGeometry(dim=7168, q_lora_rank=1536, main_heads=128, o_groups=16)
-FLASH_GEOMETRY = CSAGeometry(dim=4096, q_lora_rank=1024, main_heads=64, o_groups=8)
+PRO_GEOMETRY = CSAGeometry(
+    dim=7168, q_lora_rank=1536, main_heads=128, o_groups=16, index_topk=1024
+)
+FLASH_GEOMETRY = CSAGeometry(
+    dim=4096, q_lora_rank=1024, main_heads=64, o_groups=8, index_topk=512
+)
 GEOMETRY_BY_DIM = {g.dim: g for g in (PRO_GEOMETRY, FLASH_GEOMETRY)}
 
 # Pro aliases kept for existing imports; new code should read the geometry.

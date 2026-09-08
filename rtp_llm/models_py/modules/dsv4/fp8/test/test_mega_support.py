@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import os
 import sys
 import unittest
 from types import SimpleNamespace
@@ -100,6 +101,20 @@ def _supported_extension():
     return extension
 
 
+def _pro_args(**overrides):
+    values = {
+        "dim": 7168,
+        "q_lora_rank": 1536,
+        "n_heads": 128,
+        "o_groups": 16,
+        "index_topk": 1024,
+        "n_routed_experts": 384,
+        "ep_size": 8,
+    }
+    values.update(overrides)
+    return V4Args(**values)
+
+
 class MegaSupportTest(unittest.TestCase):
     def test_non_blackwell_device_is_rejected_before_extension_import(self) -> None:
         with patch.object(torch.cuda, "get_device_capability", return_value=(9, 0)):
@@ -122,21 +137,22 @@ class MegaSupportTest(unittest.TestCase):
         self.assertIn("missing DSV4 Mega ABI", reason or "")
         self.assertIn("geometry_moe_front", reason or "")
 
-    def test_sm100_and_sm103_share_the_same_support_path(self) -> None:
+    def test_official_geometries_support_sm100_and_sm103(self) -> None:
         fake_rtp_kernel = SimpleNamespace(dsv4_mega=_supported_extension())
         fake_deep_gemm = _module_with_symbols(_REQUIRED_DEEP_GEMM_SYMBOLS)
-        for capability in ((10, 0), (10, 3)):
-            with self.subTest(capability=capability), patch.object(
-                torch.cuda, "get_device_capability", return_value=capability
-            ), patch.dict(
-                sys.modules,
-                {"rtp_kernel": fake_rtp_kernel, "deep_gemm": fake_deep_gemm},
-            ):
-                reason = mega_decode_unavailable_reason(
-                    V4Args(ep_size=8), torch.device("cuda:0")
-                )
+        for args in (V4Args(ep_size=8), _pro_args()):
+            for capability in ((10, 0), (10, 3)):
+                with self.subTest(dim=args.dim, capability=capability), patch.object(
+                    torch.cuda, "get_device_capability", return_value=capability
+                ), patch.dict(
+                    sys.modules,
+                    {"rtp_kernel": fake_rtp_kernel, "deep_gemm": fake_deep_gemm},
+                ):
+                    reason = mega_decode_unavailable_reason(
+                        args, torch.device("cuda:0")
+                    )
 
-            self.assertIsNone(reason)
+                self.assertIsNone(reason)
 
     def test_model_geometry_is_checked_before_device(self) -> None:
         reason = mega_decode_unavailable_reason(V4Args(dim=3072), torch.device("cpu"))
@@ -148,6 +164,25 @@ class MegaSupportTest(unittest.TestCase):
 
         self.assertIn("hc_mult=2", reason or "")
         self.assertIn("expected 4", reason or "")
+
+    def test_index_topk_must_match_the_official_geometry(self) -> None:
+        for args, expected in (
+            (V4Args(index_topk=1024), 512),
+            (_pro_args(index_topk=512), 1024),
+        ):
+            with self.subTest(dim=args.dim):
+                reason = mega_decode_unavailable_reason(args, torch.device("cpu"))
+
+            self.assertIn(f"index_topk={args.index_topk}", reason or "")
+            self.assertIn(f"expected {expected}", reason or "")
+
+    def test_fp32_gate_requires_the_ordinary_path(self) -> None:
+        with patch.dict(os.environ, {"DSV4_GATE_FP32": "1"}):
+            reason = mega_decode_unavailable_reason(
+                V4Args(ep_size=8), torch.device("cuda:0")
+            )
+
+        self.assertEqual(reason, "DSV4_GATE_FP32=1 requires the ordinary DSV4 path")
 
     def test_incompatible_attention_signature_is_reported_at_startup(self) -> None:
         extension = _supported_extension()
