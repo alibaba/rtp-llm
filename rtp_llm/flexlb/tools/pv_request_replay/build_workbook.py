@@ -757,7 +757,9 @@ def build_rows(sources: Sequence[PvSource], start: datetime | str | None = None,
             "flexlb_hash_wait_us": non_negative(route.get("hashWaitUs") if route else None),
             "flexlb_hash_us": non_negative(route.get("hashUs") if route else None),
             "flexlb_cache_match_us": non_negative(route.get("cacheMatchUs") if route else None),
-            "flexlb_predicted_prefill_time": as_number(server_status.get("prefill_time") if server_status else None),
+            "flexlb_predicted_prefill_time": (as_number(selected_snapshot.get("projectedTtftMs"))
+                                              if decision.get("schema") == "routingDecisions" else
+                                              as_number(server_status.get("prefill_time") if server_status else None)),
             "_decision_workers": decision_workers,
         }
         row["time_per_uncached_token_ms"] = (prefill_engine_ttft_ms / uncache_tokens

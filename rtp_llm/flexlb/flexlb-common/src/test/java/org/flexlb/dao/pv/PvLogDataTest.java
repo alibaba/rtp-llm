@@ -48,6 +48,8 @@ class PvLogDataTest {
         context.setRequest(request);
         org.flexlb.dao.loadbalance.ServerStatus worker = new org.flexlb.dao.loadbalance.ServerStatus();
         worker.setRequestId("compact");
+        worker.setPrefillTime(42);
+        worker.setDebugInfo(new org.flexlb.dao.loadbalance.DebugInfo());
         worker.setServerIp("10.0.0.1");
         Response response = new Response();
         response.setServerStatus(List.of(worker));
@@ -62,6 +64,8 @@ class PvLogDataTest {
         var json = mapper.readTree(JsonUtils.toStringOrEmpty(new PvLogData(context)));
         assertEquals("compact", json.path("requestId").asText());
         assertFalse(json.path("response").path("server_status").get(0).has("request_id"));
+        assertFalse(json.path("response").path("server_status").get(0).has("prefill_time"));
+        assertFalse(json.path("response").path("server_status").get(0).has("debug_info"));
         assertEquals("compact", mapper.readTree(JsonUtils.toStringOrEmpty(response))
                 .path("server_status").get(0).path("request_id").asText());
         assertFalse(json.path("routingDecisions").get(0).has("prefillPolicy"));
