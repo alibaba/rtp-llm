@@ -52,9 +52,15 @@ void CompleteTokenIds::init(const std::shared_ptr<GenerateInput>& generate_input
     start_check_seq_length_ = seq_length_;
 
     size_t max_token_num = max_seq_len_ + extra_reserve_token_num;
+    if (generate_input->generate_config->max_new_tokens > 0) {
+        const size_t request_max_token_num = static_cast<size_t>(seq_length_)
+                                             + generate_input->generate_config->max_new_tokens
+                                             + extra_reserve_token_num;
+        max_token_num = std::min(max_token_num, request_max_token_num);
+    }
 
     complete_token_ids_ = torch::zeros({(int64_t)max_batch_size_, (int64_t)max_token_num}, torch::kInt32);
-    for (int i = 0; i < batch_size_; ++i) {
+    for (int i = 0; i < max_batch_size_; ++i) {
         memcpy(complete_token_ids_.data_ptr<int32_t>() + i * max_token_num,
                generate_input->input_ids.data_ptr<int32_t>(),
                generate_input->input_ids.nbytes());
@@ -162,9 +168,12 @@ bool CompleteTokenIds::update(const torch::Tensor& new_tokens,
     // # which needs to update all the generated tokens each update.
     RTP_LLM_CHECK(new_tokens.dim() == 2);
 
-    auto       new_tokens_ptr     = new_tokens.data_ptr<int>();  // [batch_size, max_num_new_tokens]
-    auto       max_num_new_tokens = new_tokens.size(1);
-    const auto get_token_id       = [&](auto batch_idx, auto token_idx) {
+    auto new_tokens_ptr     = new_tokens.data_ptr<int>();  // [batch_size, max_num_new_tokens]
+    auto max_num_new_tokens = new_tokens.size(1);
+    RTP_LLM_CHECK(num_new_tokens >= 0);
+    RTP_LLM_CHECK(seq_length_ + num_new_tokens <= complete_token_ids_.size(1));
+    RTP_LLM_CHECK((is_beam_search ? seq_length_ + num_new_tokens : num_new_tokens) <= max_num_new_tokens);
+    const auto get_token_id = [&](auto batch_idx, auto token_idx) {
         if (is_beam_search) {
             return (new_tokens_ptr + max_num_new_tokens * batch_idx)[seq_length_ + token_idx];
         } else {
@@ -181,7 +190,10 @@ bool CompleteTokenIds::update(const torch::Tensor& new_tokens,
             }
         }
         if (is_beam_search) {
-            memcpy(data(i), new_tokens_ptr + i * max_num_new_tokens, sizeof(int) * max_num_new_tokens);
+            // Sampler rows may be padded beyond this request's token capacity.
+            // Only the committed history and new tokens belong to the stream.
+            const auto committed_length = seq_length_ + num_new_tokens;
+            memcpy(data(i), new_tokens_ptr + i * max_num_new_tokens, sizeof(int) * committed_length);
         } else {
             if (batch_size_ != new_batch_size && i > 0) {
                 memcpy(data(i), data(0), sizeof(int) * seq_length_);

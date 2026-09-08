@@ -209,6 +209,93 @@ TEST_F(GenerateStreamTest, mtpCpuProposalClearsStaleGpuMirror) {
     EXPECT_EQ(stream->getSPOutputBuffer()->tokens[0][1].item<int32_t>(), 11);
 }
 
+TEST_F(GenerateStreamTest, testBatchSizeWithNumReturnSequences) {
+    ResourceContext resource_context;
+    ModelConfig     model_config;
+    model_config.max_seq_len = 2048;
+    RuntimeConfig runtime_config;
+
+    auto generate_input                                   = std::make_shared<GenerateInput>();
+    generate_input->generate_config                       = std::make_shared<GenerateConfig>();
+    generate_input->generate_config->num_return_sequences = 3;
+    generate_input->input_ids                             = torch::tensor({1, 2, 3}, torch::kInt32);
+
+    auto stream =
+        std::make_shared<NormalGenerateStream>(generate_input, model_config, runtime_config, resource_context, nullptr);
+
+    EXPECT_EQ(1, stream->batchSize(0));
+    EXPECT_EQ(3, stream->batchSize(1));
+    EXPECT_EQ(3, stream->batchSize(5));
+    EXPECT_EQ(3, stream->maxBatchSize());
+    EXPECT_TRUE(stream->needTilingForSampling());
+}
+
+TEST_F(GenerateStreamTest, testBatchSizeWithBeamSearch) {
+    ResourceContext resource_context;
+    ModelConfig     model_config;
+    model_config.max_seq_len = 2048;
+    RuntimeConfig runtime_config;
+
+    auto generate_input                        = std::make_shared<GenerateInput>();
+    generate_input->generate_config            = std::make_shared<GenerateConfig>();
+    generate_input->generate_config->num_beams = 4;
+    generate_input->input_ids                  = torch::tensor({1, 2, 3}, torch::kInt32);
+
+    auto stream =
+        std::make_shared<NormalGenerateStream>(generate_input, model_config, runtime_config, resource_context, nullptr);
+
+    EXPECT_EQ(1, stream->batchSize(0));
+    EXPECT_EQ(4, stream->batchSize(1));
+    EXPECT_EQ(4, stream->maxBatchSize());
+    EXPECT_FALSE(stream->needTilingForSampling());
+}
+
+TEST_F(GenerateStreamTest, testCompleteTokenIdsUsesRequestBoundAndInitializesAllRows) {
+    ResourceContext resource_context;
+    ModelConfig     model_config;
+    model_config.max_seq_len = 128;
+    RuntimeConfig runtime_config;
+
+    auto generate_input                             = std::make_shared<GenerateInput>();
+    generate_input->generate_config                 = std::make_shared<GenerateConfig>();
+    generate_input->generate_config->num_beams      = 2;
+    generate_input->generate_config->max_new_tokens = 4;
+    generate_input->input_ids                       = torch::tensor({7, 8, 9}, torch::kInt32);
+
+    auto stream =
+        std::make_shared<NormalGenerateStream>(generate_input, model_config, runtime_config, resource_context, nullptr);
+
+    auto token_ids = stream->completeTokenIds();
+    ASSERT_EQ(2, token_ids.size(0));
+    ASSERT_EQ(7, token_ids.size(1));
+    EXPECT_TRUE(torch::equal(token_ids[0].narrow(0, 0, 3), generate_input->input_ids));
+    EXPECT_TRUE(torch::equal(token_ids[1].narrow(0, 0, 3), generate_input->input_ids));
+}
+
+TEST_F(GenerateStreamTest, beamUpdateDoesNotCopySamplerPaddingBeyondRequestCapacity) {
+    auto input                             = std::make_shared<GenerateInput>();
+    input->generate_config                 = std::make_shared<GenerateConfig>();
+    input->generate_config->max_new_tokens = 2;
+    input->input_ids                       = torch::tensor({5}, torch::kInt32);
+    CompleteTokenIds token_ids(1, 2, 8, 1);
+    token_ids.init(input);
+    ASSERT_EQ(token_ids.completeTokenIds().size(1), 3);
+
+    // Keep a guard after the physical two-row buffer so overflow fails an
+    // assertion deterministically instead of corrupting the allocator's heap.
+    auto backing = torch::full({8}, -77, torch::kInt32);
+    auto bounded = backing.narrow(0, 0, 6).reshape({2, 3});
+    bounded.copy_(token_ids.completeTokenIds());
+    token_ids.complete_token_ids_ = bounded;
+    auto sampler_tokens           = torch::tensor({5, 1, 2, -1, 5, 3, 4, -1}, torch::kInt32).reshape({2, 4});
+    int  error_token_id           = -1;
+    ASSERT_TRUE(token_ids.update(sampler_tokens, 0, 2, 1, 3, 10, true, 0, error_token_id));
+    EXPECT_EQ(token_ids.completeTokenIdsVec(0), (std::vector<int>{5, 1, 2}));
+    EXPECT_EQ(token_ids.completeTokenIdsVec(1), (std::vector<int>{5, 3, 4}));
+    EXPECT_EQ(backing[6].item<int32_t>(), -77);
+    EXPECT_EQ(backing[7].item<int32_t>(), -77);
+}
+
 TEST_F(GenerateStreamTest, testGenerateStreamReuseCacheMethod) {
     auto builder = GenerateStreamBuilder();
     auto stream  = builder.createContextStream({1, 2, 3, 4, 5, 6});
