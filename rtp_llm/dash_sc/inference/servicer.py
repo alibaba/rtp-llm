@@ -1581,10 +1581,15 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
         )
 
     async def close(self) -> None:
-        """Hook for teardown; currently holds no resources (backend_visitor is owned by
-        the caller, sequence counter is in-memory). Kept so future handles can be flushed
-        here without changing the call-site in ``DashScGrpcServer.stop``.
+        """Release resources owned by the servicer.
+
+        The backend visitor remains caller-owned. Clear the validator reference before
+        closing it so repeated or concurrent shutdown requests cannot close it twice.
         """
+        validator = getattr(self, "_grammar_validator", None)
+        self._grammar_validator = None
+        if validator is not None:
+            await asyncio.to_thread(validator.close)
 
     def _next_rtp_llm_request_id(self) -> int:
         sequence = self._seq_counter.increment() % 4096  # 12 bits

@@ -1,5 +1,7 @@
 #include "rtp_llm/cpp/model_rpc/GenerateContext.h"
 
+#include <limits>
+
 namespace rtp_llm {
 
 GenerateContext::~GenerateContext() {
@@ -44,6 +46,48 @@ void GenerateContext::setRetryTimeoutMs(int64_t timeout_ms) {
     } else {
         retry_deadline.reset();
     }
+}
+
+GenerateContext::RequestDeadline GenerateContext::streamRpcDeadline(int64_t relative_timeout_ms) const {
+    auto deadline = request_deadline;
+    if (relative_timeout_ms > 0) {
+        const auto relative_deadline =
+            std::chrono::system_clock::now() + std::chrono::milliseconds(relative_timeout_ms);
+        if (!deadline.has_value() || relative_deadline < *deadline) {
+            deadline = relative_deadline;
+        }
+    }
+    return deadline;
+}
+
+GenerateContext::RequestDeadline GenerateContext::effectiveDeadline(int64_t relative_timeout_ms) const {
+    auto deadline = streamRpcDeadline(relative_timeout_ms);
+    if (retry_deadline.has_value() && (!deadline.has_value() || *retry_deadline < *deadline)) {
+        deadline = retry_deadline;
+    }
+    return deadline;
+}
+
+bool GenerateContext::retryDeadlineExceeded() const {
+    return retry_deadline.has_value() && std::chrono::system_clock::now() >= *retry_deadline;
+}
+
+int64_t GenerateContext::cappedRetrySleepUs(int64_t retry_interval_ms) const {
+    if (retry_interval_ms <= 0) {
+        return 0;
+    }
+    constexpr int64_t kMicrosecondsPerMillisecond = 1000;
+    int64_t           sleep_us                    = std::numeric_limits<int64_t>::max();
+    if (retry_interval_ms <= std::numeric_limits<int64_t>::max() / kMicrosecondsPerMillisecond) {
+        sleep_us = retry_interval_ms * kMicrosecondsPerMillisecond;
+    }
+    const auto deadline = effectiveDeadline();
+    if (deadline.has_value()) {
+        const auto remaining_us =
+            std::chrono::duration_cast<std::chrono::microseconds>(*deadline - std::chrono::system_clock::now()).count();
+        sleep_us = std::min(sleep_us, std::max<int64_t>(remaining_us, 0));
+    }
+    return sleep_us;
 }
 
 bool GenerateContext::cancelled() const {

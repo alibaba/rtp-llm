@@ -5,6 +5,7 @@
 #include <chrono>
 #include <memory>
 #include <optional>
+#include <thread>
 
 #include "grpc++/grpc++.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
@@ -42,6 +43,10 @@ public:
     void                                     setRetryable(bool retryable);
     void                                     setRequestTimeoutMs(int64_t request_timeout_ms);
     void                                     setRetryTimeoutMs(int64_t retry_timeout_ms);
+    RequestDeadline                          streamRpcDeadline(int64_t relative_timeout_ms = 0) const;
+    RequestDeadline                          effectiveDeadline(int64_t relative_timeout_ms = 0) const;
+    bool                                     retryDeadlineExceeded() const;
+    int64_t                                  cappedRetrySleepUs(int64_t retry_interval_ms) const;
     bool                                     cancelled() const;
     virtual bool                             isRequestCancelled() const;
     bool                                     requestDeadlineExceeded() const;
@@ -124,10 +129,15 @@ protected:
 
 // for prefill or decode retry
 #define EXECUTE_WITH_RETRY(func, generate_context, max_retries, retry_timeout_ms, retry_interval_ms)                   \
-    int64_t begin_time_us = currentTimeUs();                                                                           \
+    int64_t       begin_time_us  = currentTimeUs();                                                                    \
+    const int64_t retry_attempts = std::max<int64_t>(max_retries, 0);                                                  \
     generate_context.setRetryTimeoutMs(retry_timeout_ms);                                                              \
     auto stage = generate_context.stat_info.saveStage();                                                               \
-    for (int attempt = 0; attempt <= max_retries; ++attempt) {                                                         \
+    for (int64_t attempt = 0; attempt <= retry_attempts; ++attempt) {                                                  \
+        CHECK_REQUEST_STOP(generate_context)                                                                           \
+        if (attempt > 0 && generate_context.retryDeadlineExceeded()) {                                                 \
+            break;                                                                                                     \
+        }                                                                                                              \
         generate_context.reset();                                                                                      \
         CHECK_REQUEST_STOP(generate_context)                                                                           \
         generate_context.stat_info.restoreStage(stage);                                                                \
@@ -138,22 +148,14 @@ protected:
         }                                                                                                              \
         auto cost_time_us                   = currentTimeUs() - begin_time_us;                                         \
         generate_context.retry_cost_time_ms = cost_time_us / 1000;                                                     \
-        if (!generate_context.shouldRetry()) {                                                                         \
-            break;                                                                                                     \
-        }                                                                                                              \
-        if (retry_timeout_ms > 0 && cost_time_us >= retry_timeout_ms * 1000) {                                         \
+        if (!generate_context.shouldRetry() || generate_context.retryDeadlineExceeded()                                \
+            || attempt == retry_attempts) {                                                                            \
             break;                                                                                                     \
         }                                                                                                              \
         CHECK_REQUEST_STOP(generate_context)                                                                           \
-        int64_t retry_sleep_us = retry_interval_ms * 1000;                                                             \
-        if (generate_context.request_deadline.has_value()) {                                                           \
-            const auto remaining_us = std::chrono::duration_cast<std::chrono::microseconds>(                           \
-                                          *generate_context.request_deadline - std::chrono::system_clock::now())       \
-                                          .count();                                                                    \
-            retry_sleep_us = std::min(retry_sleep_us, std::max<int64_t>(remaining_us, 0));                             \
-        }                                                                                                              \
+        const int64_t retry_sleep_us = generate_context.cappedRetrySleepUs(retry_interval_ms);                         \
         if (retry_sleep_us > 0) {                                                                                      \
-            usleep(retry_sleep_us);                                                                                    \
+            std::this_thread::sleep_for(std::chrono::microseconds(retry_sleep_us));                                    \
         }                                                                                                              \
     }
 

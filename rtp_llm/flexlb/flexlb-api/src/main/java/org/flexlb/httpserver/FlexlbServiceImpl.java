@@ -410,7 +410,12 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
     @Override
     public void cancel(FlexlbScheduleProtocol.FlexlbCancelRequestPB request,
                        StreamObserver<FlexlbScheduleProtocol.FlexlbCancelResponsePB> responseObserver) {
-        if (!shouldForwardToMaster()) {
+        // A one-hop Cancel targets the node that accepted the corresponding
+        // Schedule. That node remains the lifecycle owner even if it has since
+        // lost leadership, so the request must terminate here rather than
+        // follow the new election view.
+        boolean addressedLifecycleOwner = request.getForwardHop() == 1;
+        if (addressedLifecycleOwner || !shouldForwardToMaster()) {
             FlexlbScheduleProtocol.FlexlbCancelResponsePB response;
             try {
                 response = cancelLocally(request);

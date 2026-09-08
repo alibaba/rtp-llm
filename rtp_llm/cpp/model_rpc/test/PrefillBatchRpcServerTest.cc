@@ -335,6 +335,38 @@ TEST(PrefillBatchRpcServerTest, ContextCapturesAdmittedEnvelopeBeforeQueryConver
               PriorityPreemptionProgress::CANCELING);
 }
 
+TEST(PrefillBatchRpcServerTest, PrepareRetryInitializesAbsoluteDeadlineBeforeAttempts) {
+    TestPrefillBatchRpcServer server;
+    auto                      deferred = makeDeferred(server, 64);
+    ASSERT_EQ(deferred->context->requestPriorityPreempt(), PriorityPreemptionRequestResult::INSTALLED);
+
+    const auto result = server.prepareSlotWithRetry(*deferred->context,
+                                                    /*max_retry_times=*/10,
+                                                    /*max_retry_timeout_ms=*/100,
+                                                    /*retry_interval_ms=*/1);
+
+    EXPECT_FALSE(result.prepared);
+    EXPECT_FALSE(result.stage_status.ok());
+    EXPECT_EQ(deferred->context->retry_times, 0);
+    EXPECT_TRUE(deferred->context->retry_deadline.has_value());
+}
+
+TEST(PrefillBatchRpcServerTest, PrepareRetryStartsNoAttemptForExpiredRequest) {
+    TestPrefillBatchRpcServer server;
+    auto                      deferred = makeDeferred(server, 65);
+    deferred->context->request_deadline = std::chrono::system_clock::now() - std::chrono::milliseconds(1);
+
+    const auto result = server.prepareSlotWithRetry(*deferred->context,
+                                                    /*max_retry_times=*/10,
+                                                    /*max_retry_timeout_ms=*/30,
+                                                    /*retry_interval_ms=*/200);
+
+    EXPECT_FALSE(result.prepared);
+    EXPECT_FALSE(result.stage_status.ok());
+    EXPECT_EQ(deferred->context->error_info.code(), ErrorCode::GENERATE_TIMEOUT);
+    EXPECT_EQ(deferred->context->retry_times, 0);
+}
+
 TEST(PrefillBatchRpcServerTest, PartialSchedulerRejectionCleansRejectedPrefillResources) {
     PrefillBatchRpcServer server;
     server.meta_   = std::make_shared<RpcServerRuntimeMeta>();

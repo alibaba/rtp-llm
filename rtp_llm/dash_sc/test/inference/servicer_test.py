@@ -2601,6 +2601,24 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         )
         return _FakeVisitor(_FakeAsyncStream([GenerateOutputs(generate_outputs=[out])]))
 
+    async def test_close_closes_grammar_validator_once_and_is_idempotent(self) -> None:
+        validator = MagicMock()
+        servicer = DashScInferenceServicer(
+            backend_visitor=self._terminal_visitor(), grammar_validator=validator
+        )
+
+        await servicer.close()
+        await servicer.close()
+
+        validator.close.assert_called_once_with()
+        self.assertIsNone(servicer._grammar_validator)
+
+        uninitialized_servicer = DashScInferenceServicer.__new__(
+            DashScInferenceServicer
+        )
+        await uninitialized_servicer.close()
+        await uninitialized_servicer.close()
+
     async def test_grammar_failures_map_to_typed_admission_statuses(self) -> None:
         cases = (
             (GrammarCompilationError("invalid"), DASH_ERROR_BAD_REQUEST),

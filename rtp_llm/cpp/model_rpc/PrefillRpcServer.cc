@@ -108,16 +108,10 @@ PrefillRpcServer::~PrefillRpcServer() = default;
 std::chrono::system_clock::time_point
 PrefillRpcServer::decodeChannelReadyDeadline(const PrefillGenerateContext& prefill_context,
                                              int64_t                       max_rpc_timeout_ms) {
-    const auto now      = std::chrono::system_clock::now();
-    auto       deadline = now + kDecodeChannelReadyTimeoutCap;
-    if (prefill_context.request_deadline.has_value()) {
-        deadline = std::min(deadline, *prefill_context.request_deadline);
-    }
-    if (prefill_context.retry_deadline.has_value()) {
-        deadline = std::min(deadline, *prefill_context.retry_deadline);
-    }
-    if (max_rpc_timeout_ms > 0) {
-        deadline = std::min(deadline, now + std::chrono::milliseconds(max_rpc_timeout_ms));
+    auto       deadline     = std::chrono::system_clock::now() + kDecodeChannelReadyTimeoutCap;
+    const auto rpc_deadline = prefill_context.effectiveDeadline(max_rpc_timeout_ms);
+    if (rpc_deadline.has_value()) {
+        deadline = std::min(deadline, *rpc_deadline);
     }
     return deadline;
 }
@@ -437,11 +431,9 @@ void PrefillRpcServer::remoteAllocateResource(PrefillGenerateContext& prefill_co
             telemetry::injectSpanToClientContext(client_context.get(), client_span);
         }
     }
-    const auto max_rpc_timeout_ms = maga_init_params_.pd_sep_config.max_rpc_timeout_ms;
-    if (prefill_context.request_deadline.has_value()) {
-        client_context->set_deadline(*prefill_context.request_deadline);
-    } else if (max_rpc_timeout_ms > 0) {
-        client_context->set_deadline(std::chrono::system_clock::now() + std::chrono::milliseconds(max_rpc_timeout_ms));
+    const auto rpc_deadline = prefill_context.streamRpcDeadline(maga_init_params_.pd_sep_config.max_rpc_timeout_ms);
+    if (rpc_deadline.has_value()) {
+        client_context->set_deadline(*rpc_deadline);
     }
     std::atomic_store(&prefill_context.client_context, client_context);
     // Close the publish-before-cancel window: either requestPriorityPreempt()

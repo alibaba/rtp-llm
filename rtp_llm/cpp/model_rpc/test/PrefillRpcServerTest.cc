@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <atomic>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <vector>
@@ -380,6 +381,33 @@ TEST_F(PrefillRpcServerTest, downstreamWithoutRequestDeadlineKeepsMaxRpcTimeout)
     EXPECT_TRUE(context->closeGrpcStream().ok());
 }
 
+TEST_F(PrefillRpcServerTest, downstreamClientContextIgnoresAllocationRetryDeadline) {
+    TestDecodeRpcServer decode_server(/*fail_first_allocate=*/false);
+    ASSERT_TRUE(decode_server.start());
+
+    GenerateInputPB request;
+    request.set_request_id(10);
+    auto context    = makeContext(&request, /*timeout_ms=*/20000);
+    auto connection = resource_.rpc_pool.getReadyConnection("127.0.0.1:" + std::to_string(decode_server.listenPort()),
+                                                            std::chrono::seconds(1));
+    ASSERT_TRUE(connection.ok()) << connection.status();
+    context->grpc_connection = *connection;
+    context->setRetryTimeoutMs(5000);
+
+    TestPrefillRpcServer server;
+    server.setProcessIdForTest("prefill-client");
+    server.setMaxRpcTimeoutForTest(0);
+    server.remoteAllocateResourceForTest(*context);
+
+    ASSERT_FALSE(context->hasError());
+    ASSERT_TRUE(context->request_deadline.has_value());
+    ASSERT_TRUE(context->retry_deadline.has_value());
+    ASSERT_NE(context->client_context, nullptr);
+    EXPECT_EQ(context->client_context->deadline(), *context->request_deadline);
+    EXPECT_GT(context->client_context->deadline(), *context->retry_deadline);
+    EXPECT_TRUE(context->closeGrpcStream().ok());
+}
+
 TEST_F(PrefillRpcServerTest, downstreamDomainErrorOverridesTransportFallback) {
     ErrorDetailsPB details;
     details.set_error_code(static_cast<int64_t>(ErrorCode::GRAMMAR_COMPILE_OVERLOADED));
@@ -434,28 +462,55 @@ TEST_F(PrefillRpcServerTest, exhaustedOrCancelledRequestStartsNoDownstreamRpc) {
     EXPECT_EQ(cancelled->client_context, nullptr);
 }
 
-TEST_F(PrefillRpcServerTest, retrySleepStopsAtAbsoluteRequestDeadline) {
+TEST_F(PrefillRpcServerTest, retryStopsAtExpiredRequestDeadlineWithoutAnotherAttempt) {
     GenerateInputPB request;
     request.set_request_id(6);
-    auto context = makeContext(&request, /*timeout_ms=*/30);
+    auto context = makeContext(&request);
 
     TestPrefillRpcServer server;
     int                  attempts  = 0;
     auto                 operation = [&attempts, &server](PrefillGenerateContext& retry_context) {
         ++attempts;
+        retry_context.request_deadline = std::chrono::system_clock::now() - std::chrono::milliseconds(1);
         server.setContextErrorForTest(retry_context, ErrorInfo(ErrorCode::GET_CONNECTION_FAILED, "retryable failure"));
     };
 
-    const auto begin = std::chrono::steady_clock::now();
-    auto       status =
+    auto status =
         server.runWithRetry(*context, operation, /*max_retries=*/10, /*retry_timeout_ms=*/0, /*retry_interval_ms=*/200);
-    const auto elapsed_ms =
-        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - begin).count();
 
     EXPECT_EQ(attempts, 1);
     EXPECT_EQ(context->error_info.code(), ErrorCode::GENERATE_TIMEOUT);
     EXPECT_FALSE(status.ok());
-    EXPECT_LT(elapsed_ms, 150);
+}
+
+TEST_F(PrefillRpcServerTest, retryStopsAtExpiredRetryDeadlineWithoutAnotherAttempt) {
+    GenerateInputPB request;
+    request.set_request_id(11);
+    auto context = makeContext(&request);
+
+    TestPrefillRpcServer server;
+    int                  attempts  = 0;
+    auto                 operation = [&attempts, &server](PrefillGenerateContext& retry_context) {
+        ++attempts;
+        retry_context.retry_deadline = std::chrono::system_clock::now() - std::chrono::milliseconds(1);
+        server.setContextErrorForTest(retry_context, ErrorInfo(ErrorCode::GET_CONNECTION_FAILED, "retryable failure"));
+    };
+
+    auto status = server.runWithRetry(
+        *context, operation, /*max_retries=*/10, /*retry_timeout_ms=*/30, /*retry_interval_ms=*/200);
+
+    EXPECT_EQ(attempts, 1);
+    EXPECT_EQ(context->error_info.code(), ErrorCode::GET_CONNECTION_FAILED);
+    EXPECT_FALSE(status.ok());
+}
+
+TEST_F(PrefillRpcServerTest, retrySleepSaturatesOverflowingInterval) {
+    GenerateInputPB request;
+    request.set_request_id(12);
+    auto context = makeContext(&request);
+
+    EXPECT_EQ(context->cappedRetrySleepUs(std::numeric_limits<int64_t>::max()),
+              std::numeric_limits<int64_t>::max());
 }
 
 TEST_F(PrefillRpcServerTest, mergeMultimodalLengthsUsesPrefillMetadata) {

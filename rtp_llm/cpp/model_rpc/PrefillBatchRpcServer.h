@@ -167,6 +167,10 @@ private:
     void         buildSlotContexts(std::vector<BatchSlot>& slots);
     // prepareAllocateResource-with-retry per slot on prepare_resource_worker_pool_.
     std::vector<PrepareResult> prepareGroup(std::vector<BatchSlot>& slots);
+    PrepareResult              prepareSlotWithRetry(PrefillGenerateContext& prefill_context,
+                                                    int64_t                 max_retry_times,
+                                                    int64_t                 max_retry_timeout_ms,
+                                                    int64_t                 retry_interval_ms = 1);
     // engine_->enqueueMultiple for the stored slots. Scheduler rejections are removed from the context map and written
     // to response; admitted slots remain for publication.
     grpc::Status enqueueGroupStreams(std::vector<ReadySlot>& ready_slots, EnqueueBatchResponsePB* response);

@@ -782,6 +782,30 @@ class BatchDecodeTest(unittest.TestCase):
         for secret in ("password", "alice", "secret-value", "signed-value"):
             self.assertNotIn(secret, serialized)
 
+    def test_redact_argv_hashes_credential_fragments_and_keeps_benign_fragments(
+        self,
+    ):
+        for credential_name in (
+            "access_token",
+            "access-token",
+            "password",
+            "key",
+            "api_key",
+        ):
+            with self.subTest(credential_name=credential_name):
+                checkpoint = (
+                    f"https://models.example.test/model#{credential_name}=fragment-secret"
+                )
+                redacted = _redact_argv(["--checkpoint_path", checkpoint])
+                self.assertRegex(redacted[1], r"^sha256:[0-9a-f]{64}$")
+                self.assertNotIn("fragment-secret", json.dumps(redacted))
+
+        benign_checkpoint = "https://models.example.test/model#revision-v2"
+        self.assertEqual(
+            _redact_argv(["--checkpoint_path", benign_checkpoint]),
+            ["--checkpoint_path", benign_checkpoint],
+        )
+
     def test_write_test_info_records_redacted_schema(self):
         with tempfile.TemporaryDirectory() as tmp:
             args, _ = parse_args(
@@ -852,7 +876,7 @@ class BatchDecodeTest(unittest.TestCase):
                 "--model_type",
                 "https://user:model-secret@example.test/model",
                 "--checkpoint_path",
-                "Server=db;User Id=alice;Password=checkpoint-secret",
+                "https://host/model#access_token=checkpoint-secret",
             ]
             with patch.dict(os.environ, {}, clear=True), patch.object(
                 sys, "argv", ["batch_decode_test.py"]

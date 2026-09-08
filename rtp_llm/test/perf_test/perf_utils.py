@@ -169,9 +169,10 @@ _SAFE_PERSISTED_ARG_NAMES = {
 }
 _HASHED_VALUE_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _CREDENTIAL_VALUE_RE = re.compile(
-    r"(?i)(?:^|[?&;,\s])(?:authorization|auth|password|passwd|pwd|secret|token|"
-    r"key|access[_-]?key|account[_-]?key|api[_-]?key|client[_-]?secret|credential|"
-    r"signature|sig|awsaccesskeyid|googleaccessid|x-amz-[^=;,&\s]+)\s*[=:]"
+    r"(?i)(?:^|[?#&;,\s])(?:authorization|auth|password|passwd|pwd|secret|token|"
+    r"key|access[_-]?token|access[_-]?key|account[_-]?key|api[_-]?key|"
+    r"client[_-]?secret|credential|signature|sig|awsaccesskeyid|googleaccessid|"
+    r"x-amz-[^=;,&\s]+)\s*[=:]"
 )
 _URI_USERINFO_RE = re.compile(r"://[^/@\s]+@", re.IGNORECASE)
 _URI_QUERY_RE = re.compile(r"[a-z][a-z0-9+.-]*:[^\s]*\?", re.IGNORECASE)
