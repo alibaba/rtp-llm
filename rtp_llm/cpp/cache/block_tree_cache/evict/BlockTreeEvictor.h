@@ -98,11 +98,18 @@ private:
         }
     };
 
+    struct WatermarkEvictionRound {
+        size_t required_count{0};
+        size_t scheduled_count{0};
+        size_t pending_count{0};
+    };
+
     struct GroupSetTierHeaps {
-        std::unique_ptr<EvictionHeap> device;
-        std::unique_ptr<EvictionHeap> host;
-        std::unique_ptr<EvictionHeap> disk;
-        std::array<bool, 3>           watermark_triggered{};
+        std::unique_ptr<EvictionHeap>         device;
+        std::unique_ptr<EvictionHeap>         host;
+        std::unique_ptr<EvictionHeap>         disk;
+        std::array<bool, 3>                   watermark_triggered{};
+        std::array<WatermarkEvictionRound, 3> watermark_rounds{};
     };
 
     EvictionHeap*                     heapFor(size_t group_set_id, Tier tier) const;
@@ -112,6 +119,7 @@ private:
     bool   batchEvictLocked(size_t group_set_id, Tier source_tier, size_t max_victim_count, size_t& scheduled_count);
     bool   batchDropLocked(size_t group_set_id, Tier source_tier, size_t max_victim_count, size_t& scheduled_count);
     bool   submitEvictionTask(std::vector<TransferDescriptor> descriptors, std::vector<EvictionTimingSnapshot> timings);
+    void   finishWatermarkRoundLocked(size_t group_set_id, Tier source_tier);
     Tier   watermarkTargetTier(Tier source_tier) const;
     size_t watermarkLogicalBatchLimit(Tier source_tier, Tier target_tier) const;
     void   runEvictionTask(std::shared_ptr<const EvictionTransferTask> task) noexcept;
