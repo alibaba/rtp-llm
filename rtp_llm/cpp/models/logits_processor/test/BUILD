@@ -7,6 +7,18 @@ test_copts = [
     "-fno-access-control",
 ] + copts()
 
+cc_import(
+    name = "cuda13_torch_nvshmem",
+    shared_library = "@pip_gpu_cuda13_torch_torch//:site-packages/torch/lib/libtorch_nvshmem.so",
+)
+
+cuda13_torch_link_deps = select({
+    "@//:using_cuda13_x86": [
+        ":cuda13_torch_nvshmem",
+    ],
+    "//conditions:default": [],
+})
+
 test_deps = [
     "//rtp_llm/cpp/testing:device_test_utils",
     "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
@@ -16,7 +28,7 @@ test_deps = [
     "@com_google_googletest//:gtest_main",
     "@local_config_cuda//cuda:cuda_headers",
     "@local_config_cuda//cuda:cudart",
-] + torch_deps()
+] + torch_deps() + cuda13_torch_link_deps
 
 cc_test(
     name = "think_mode_logits_processor_test",
@@ -29,7 +41,7 @@ cc_test(
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
-    exec_properties = {'gpu':'H20'},
+    exec_properties = {'gpu':'A10'},
 )
 
 cc_test(
@@ -45,7 +57,7 @@ cc_test(
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
-    exec_properties = {'gpu':'H20'},
+    exec_properties = {'gpu':'A10'},
 )
 
 cc_test(
@@ -59,5 +71,68 @@ cc_test(
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
-    exec_properties = {'gpu':'H20'},
+    exec_properties = {'gpu':'A10'},
+)
+
+cc_test(
+    name = "spec_logits_verify_runner_test",
+    srcs = [
+        "SpecLogitsVerifyRunnerTest.cc",
+    ],
+    copts = test_copts,
+    deps = test_deps,
+    env = {
+        "TEST_USING_DEVICE": "CUDA",
+    },
+    exec_properties = {'gpu':'A10'},
+)
+
+# The benchmark is gated behind the DISABLED_ gtest prefix; run it explicitly
+# with --test_arg=--gtest_also_run_disabled_tests.
+#
+# It is tagged manual below, so it is NOT in the default test graph: with only a
+# DISABLED_ case it ran zero tests, reported a pass, and reserved a GPU to do it.
+# manual also drops it from "..." expansion at build time, so compile coverage
+# for the runner API is kept by naming this target explicitly in the compile
+# stage's BAZEL_BUILD_TEST_TARGET rather than by leaving it testable.
+cc_test(
+    name = "spec_logits_verify_runner_perf_test",
+    srcs = [
+        "SpecLogitsVerifyRunnerPerfTest.cc",
+    ],
+    copts = test_copts,
+    deps = test_deps,
+    env = {
+        "TEST_USING_DEVICE": "CUDA",
+    },
+    # manual: the only case here is TEST(..., DISABLED_DeepSeekFlashDecodeB35P3),
+    # so gtest reports "Running 0 tests from 0 test suites" and the target passes
+    # having measured nothing -- while still reserving a GPU. The ut jobs ask for
+    # the ... wildcard and filter -manual, so this removes it from CI without
+    # deleting it: run the benchmark on demand by explicit label.
+    tags = ["manual"],
+    exec_properties = {'gpu':'A10'},
+)
+
+cc_test(
+    name = "grammar_logits_processor_test",
+    srcs = [
+        "GrammarLogitsProcessorTest.cc",
+    ],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/engine_base/grammar:grammar_cpp_lib",
+        "//rtp_llm/cpp/models:logits_processor",
+        "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
+        "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+        "@xgrammar//:xgrammar",
+    ] + torch_deps(),
+    env = {
+        "TEST_USING_DEVICE": "CUDA",
+    },
+    exec_properties = {'gpu':'A10'},
 )

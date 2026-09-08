@@ -1,29 +1,61 @@
 import logging
-from typing import Any, Dict, Optional
+import time
+from typing import Any, Dict, List, Optional, Tuple
 
 from rtp_llm.access_logger.json_util import dump_json
 from rtp_llm.access_logger.log_utils import get_handler
 from rtp_llm.access_logger.py_access_log import PyAccessLog, RequestLog, ResponseLog
-from rtp_llm.structure.request_extractor import request_id_field_name
+from rtp_llm.ops import MultimodalInput
+from rtp_llm.structure.request_constants import request_id_field_name
 
 ACCESS_LOGGER_NAME = "access_logger"
 QUERY_ACCESS_LOGGER_NAME = "query_access_logger"
+MM_ACCESS_LOGGER_NAME = "mm_access_logger"
+MM_QUERY_ACCESS_LOGGER_NAME = "mm_query_access_logger"
 
 
-def init_access_logger(log_path: str, backup_count: int, rank_id: Optional[int] = None, server_id: Optional[int] = None, async_mode: bool = True) -> None:
-    access_logger = logging.getLogger(ACCESS_LOGGER_NAME)
-    handler = get_handler("access.log", log_path, backup_count, rank_id, server_id, async_mode)
-    formatter = logging.Formatter("%(message)s")
-    access_logger.handlers.clear()
-    access_logger.parent = None
-    if handler is not None:
-        handler.setFormatter(formatter)
-        access_logger.addHandler(handler)
+def _current_trace_ids() -> Optional[Tuple[str, str]]:
+    """Returns (trace_id, span_id) hex for the current request span, or None.
+
+    Log-trace correlation (platform deployment convention): lets platform log
+    queries join access logs with traces by trace_id. Fail-open — returns None
+    when telemetry is inactive/unavailable so the log schema stays unchanged.
+    """
+    try:
+        from rtp_llm.telemetry.tracing import CURRENT_TRACE_STATE
+
+        state = CURRENT_TRACE_STATE.get()
+        if state is None or state.server_span is None:
+            return None
+        ctx = state.server_span.get_span_context()
+        if not getattr(ctx, "is_valid", False):
+            return None
+        return format(ctx.trace_id, "032x"), format(ctx.span_id, "016x")
+    except Exception:
+        return None
 
 
-def init_query_access_logger(log_path: str, backup_count: int, rank_id: Optional[int] = None, server_id: Optional[int] = None, async_mode: bool = True) -> None:
-    access_logger = logging.getLogger(QUERY_ACCESS_LOGGER_NAME)
-    handler = get_handler("query_access.log", log_path, backup_count, rank_id, server_id, async_mode)
+def _attach_trace_ids(access_log: PyAccessLog) -> PyAccessLog:
+    """Adds trace_id/span_id fields when a request span is active (fail-open)."""
+    trace_ids = _current_trace_ids()
+    if trace_ids is not None:
+        access_log.trace_id, access_log.span_id = trace_ids
+    return access_log
+
+
+def init_logger(
+    logger_name: str,
+    filename: str,
+    log_path: str,
+    backup_count: int,
+    rank_id: Optional[int] = None,
+    server_id: Optional[int] = None,
+    async_mode: bool = True,
+) -> None:
+    access_logger = logging.getLogger(logger_name)
+    handler = get_handler(
+        filename, log_path, backup_count, rank_id, server_id, async_mode
+    )
     formatter = logging.Formatter("%(message)s")
     access_logger.handlers.clear()
     access_logger.parent = None
@@ -33,15 +65,40 @@ def init_query_access_logger(log_path: str, backup_count: int, rank_id: Optional
 
 
 class AccessLogger:
-    def __init__(self, log_path: str, backup_count: int, rank_id: Optional[int] = None, server_id: Optional[int] = None, async_mode: bool = True) -> None:
-        init_access_logger(log_path, backup_count, rank_id, server_id, async_mode)
-        init_query_access_logger(log_path, backup_count, rank_id, server_id, async_mode)
+    def __init__(
+        self,
+        log_path: str,
+        backup_count: int,
+        rank_id: Optional[int] = None,
+        server_id: Optional[int] = None,
+        async_mode: bool = True,
+    ) -> None:
+        init_logger(
+            ACCESS_LOGGER_NAME,
+            "access.log",
+            log_path,
+            backup_count,
+            rank_id,
+            server_id,
+            async_mode,
+        )
+        init_logger(
+            QUERY_ACCESS_LOGGER_NAME,
+            "query_access.log",
+            log_path,
+            backup_count,
+            rank_id,
+            server_id,
+            async_mode,
+        )
         self.logger = logging.getLogger(ACCESS_LOGGER_NAME)
         self.query_logger = logging.getLogger(QUERY_ACCESS_LOGGER_NAME)
         self.async_mode = async_mode
         self.rank_id = rank_id
         self.server_id = server_id
-        logging.info(f"AccessLogger created: async_mode={async_mode}, rank_id={rank_id}, server_id={server_id}")
+        logging.info(
+            f"AccessLogger created: async_mode={async_mode}, rank_id={rank_id}, server_id={server_id}"
+        )
 
     @staticmethod
     def is_private_request(request: Dict[str, Any]):
@@ -52,7 +109,7 @@ class AccessLogger:
         access_log = PyAccessLog(
             request=request_log, response=response, id=request[request_id_field_name]
         )
-        self.logger.info(dump_json(access_log))
+        self.logger.info(dump_json(_attach_trace_ids(access_log)))
 
     def log_query_access(self, request: Dict[str, Any]) -> None:
         if not self.is_private_request(request):
@@ -63,7 +120,7 @@ class AccessLogger:
                 response=response_log,
                 id=request[request_id_field_name],
             )
-            self.query_logger.info(dump_json(access_log))
+            self.query_logger.info(dump_json(_attach_trace_ids(access_log)))
 
     def log_success_access(self, request: Dict[str, Any], response: Any) -> None:
         if not self.is_private_request(request):
@@ -72,9 +129,14 @@ class AccessLogger:
             self.log_access(request, response_log)
 
     def log_exception_access(
-        self, request: Dict[str, Any], exception: BaseException
+        self,
+        request: Dict[str, Any],
+        exception: BaseException,
+        response: Optional[Dict[str, Any]] = None,
     ) -> None:
         response_log = ResponseLog()
+        if response is not None:
+            response_log.add_response(response)
         response_log.add_exception(exception)
         if not self.is_private_request(request):
             self.log_access(request, response_log)
@@ -82,3 +144,71 @@ class AccessLogger:
             self.log_access(
                 {request_id_field_name: request[request_id_field_name]}, response_log
             )
+
+
+class MMAccessLogger(AccessLogger):
+    def __init__(
+        self,
+        log_path: str,
+        backup_count: int,
+        rank_id: Optional[int] = None,
+        server_id: Optional[int] = None,
+        async_mode: bool = True,
+    ) -> None:
+        init_logger(
+            MM_ACCESS_LOGGER_NAME,
+            "mm_access.log",
+            log_path,
+            backup_count,
+            rank_id,
+            server_id,
+            async_mode,
+        )
+        init_logger(
+            MM_QUERY_ACCESS_LOGGER_NAME,
+            "mm_query_access.log",
+            log_path,
+            backup_count,
+            rank_id,
+            server_id,
+            async_mode,
+        )
+        self.logger = logging.getLogger(MM_ACCESS_LOGGER_NAME)
+        self.query_logger = logging.getLogger(MM_QUERY_ACCESS_LOGGER_NAME)
+
+    def log(
+        self,
+        logger,
+        request: List[MultimodalInput],
+        exception: Optional[BaseException] = None,
+        response: Optional[Any] = None,
+    ) -> None:
+        current_time = time.time()
+        local_time = time.localtime(current_time)
+        log_time = (
+            time.strftime("%Y-%m-%d %H:%M:%S", local_time)
+            + f".{int((current_time % 1) * 1000):03d}"
+        )
+        logger.info(
+            dump_json(
+                {
+                    "query": [mm_input.to_string() for mm_input in request],
+                    "log_time": log_time,
+                    "exception": exception,
+                    "response": response,
+                }
+            )
+        )
+
+    def log_query_access(self, mm_inputs: List[MultimodalInput]) -> None:
+        self.log(self.query_logger, mm_inputs)
+
+    def log_exception_access(
+        self, mm_inputs: List[MultimodalInput], exception: BaseException
+    ) -> None:
+        self.log(self.logger, mm_inputs, exception=exception)
+
+    def log_success_access(
+        self, mm_inputs: List[MultimodalInput], response: Any
+    ) -> None:
+        self.log(self.logger, mm_inputs, response=response)

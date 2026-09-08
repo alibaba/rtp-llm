@@ -25,7 +25,9 @@ void WorkerStatusService::workerStatus(const std::unique_ptr<http_server::HttpRe
 
     KVCacheInfo cache_status;
     if (engine_) {
-        cache_status = engine_->getCacheStatusInfo(-1, true);
+        // /worker_status is a high-frequency health/LB probe; skip collecting the
+        // full cache key list which walks the whole cache under lock.
+        cache_status = engine_->getCacheStatusInfo(-1, false);
     } else {
         RTP_LLM_LOG_WARNING("worker status service call worker status error, engine is null");
     }

@@ -18,8 +18,10 @@ Usage example:
 
 import torch
 
+from rtp_llm.device.device_impl import is_gfx950
 from rtp_llm.device.device_type import DeviceType, get_device_type
 from rtp_llm.models_py.utils.arch import get_sm, is_cuda
+from rtp_llm.utils.backend_registry import run_backend_registrations
 
 from .defs.fused_moe import FusedMoe
 from .factory import FusedMoeFactory
@@ -49,6 +51,7 @@ if device_type == DeviceType.ROCm:
         RocmFp8PerBlockPureTPStrategy,
         RocmFp8PerChannelPureTPStrategy,
         RocmMegaMoeStrategy,
+        RocmMXFp4PureTPStrategy,
     )
 
     registry = StrategyRegistry()
@@ -60,7 +63,8 @@ if device_type == DeviceType.ROCm:
     registry.register(RocmBf16PureTPStrategy())
     registry.register(BatchedTritonStrategy())
     FusedMoeFactory.set_registry(registry)
-
+    if is_gfx950():
+        registry.register(RocmMXFp4PureTPStrategy())
 else:
     # ========== CUDA Registry ==========
 
@@ -70,6 +74,8 @@ else:
         CudaFp8PerBlockEpNormalStrategy,
         CudaFp8PerBlockNoDPMaskedStrategy,
         CudaFp8PerBlockNoDPStrategy,
+        CudaFp8PerBlockPureCPStrategy,
+        CudaFp8PerBlockPureDPStrategy,
         CudaFp8PerTensorEpLowLatencyStrategy,
         CudaFp8PerTensorEpNormalStrategy,
         CudaFp8PerTensorNoDPStrategy,
@@ -86,6 +92,8 @@ else:
     registry.register(CudaFp8PerTensorEpNormalStrategy())
     registry.register(CudaFp8PerBlockEpLowLatencyStrategy())
     registry.register(CudaFp8PerBlockEpNormalStrategy())
+    registry.register(CudaFp8PerBlockPureCPStrategy())
+    registry.register(CudaFp8PerBlockPureDPStrategy())
     registry.register(CudaFp8PerBlockNoDPMaskedStrategy())
     registry.register(CudaFp8PerBlockNoDPStrategy())
     registry.register(CudaFp8PerTensorNoDPStrategy())
@@ -108,3 +116,7 @@ else:
         registry.register(CudaFp4EpNormalStrategy())
         registry.register(CudaFp4NoDPStrategy())
     FusedMoeFactory.set_registry(registry)
+
+# Out-of-tree backends registered a hook before this module existed. Runs for
+# every device branch, after the registry is populated and installed.
+run_backend_registrations("fused_moe", registry=registry)

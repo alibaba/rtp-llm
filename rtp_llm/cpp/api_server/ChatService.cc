@@ -57,13 +57,15 @@ void ChatService::generateResponse(const std::shared_ptr<GenerateConfig>&       
     ctx->init(num_return_sequences, body, chat_render);
 
     GenerateOutputs outputs;
-    // 需要检查 !hasError(): 之前 finished() 表示完成且无错，现在 FINISHED 状态可能包含错误
-    // 如果流有错误，应该停止消费输出
-    while (stream->isActive() || stream->hasOutput()) {
+    while (true) {
         const auto result = stream->nextOutput();
         if (!result.ok()) {
-            RTP_LLM_LOG_INFO("stream nextOutput failed");
-            break;
+            const auto& status = result.status();
+            if (status.code() == ErrorCode::FINISHED) {
+                break;
+            }
+            RTP_LLM_LOG_WARNING("stream nextOutput failed: %s", status.ToString().c_str());
+            throw streamErrorToHttpException(status);
         }
         outputs = result.value();
         RTP_LLM_CHECK_WITH_INFO(outputs.generate_outputs.size() == num_return_sequences,
@@ -131,13 +133,21 @@ void ChatService::generateStreamingResponse(const std::shared_ptr<GenerateConfig
 
     writer->SetWriteType(http_server::HttpResponseWriter::WriteType::Stream);
     GenerateOutputs outputs;
-    // 需要检查 !hasError(): 之前 finished() 表示完成且无错，现在 FINISHED 状态可能包含错误
-    // 如果流有错误，应该停止消费输出
-    while (stream->isActive()) {
+    while (true) {
         const auto output_status = stream->nextOutput();
         if (!output_status.ok()) {
-            RTP_LLM_LOG_INFO("stream nextOutput failed");
-            break;
+            const auto& status = output_status.status();
+            if (status.code() == ErrorCode::FINISHED) {
+                break;
+            }
+
+            RTP_LLM_LOG_WARNING("stream nextOutput failed: %s", status.ToString().c_str());
+            const auto exception = streamErrorToHttpException(status);
+            metric_reporter_->reportErrorQpsMetric(chat_request.source.value_or("unknown"), exception.getType());
+            AccessLogWrapper::logExceptionAccess(body, request_id, exception.what());
+            write_sse_response(formatException(exception));
+            writer->WriteDone();
+            return;
         }
         outputs = output_status.value();
         RTP_LLM_CHECK_WITH_INFO(outputs.generate_outputs.size() == num_return_sequences,

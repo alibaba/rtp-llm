@@ -1,0 +1,119 @@
+{
+    "model_type": "qwen35_moe",
+    "model_path": "/mnt/nas1/hf/Qwen3.5-35B-A3B-FP8",
+    "tokenizer_path": "/mnt/nas1/hf/Qwen3.5-35B-A3B-FP8",
+    "grammar_constraint_only": true,
+    "_comment": "DashSC receives only the final JSON structural_tag. Because input_ids do not contain the think begin tag, DashSC must locally prepend the reasoning grammar and send one canonical structural_tag to xgrammar.",
+    "query_result": [
+        {
+            "endpoint": "dash://ModelStreamInfer",
+            "query": {
+                "prompt": "Create a nested user profile with identity, contact, address, and interests. Think briefly, then return only the JSON object.",
+                "generate_config": {
+                    "max_new_tokens": 256,
+                    "max_new_think_tokens": 32,
+                    "top_k": 1,
+                    "temperature": 1.0,
+                    "structural_tag": {
+                        "type": "structural_tag",
+                        "format": {
+                            "type": "json_schema",
+                            "json_schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "profile": {
+                                                "type": "object",
+                                                "properties": {
+                                                    "identity": {
+                                                        "type": "object",
+                                                        "properties": {
+                                                            "name": {
+                                                                "type": "string",
+                                                                "maxLength": 40
+                                                            },
+                                                            "age": {
+                                                                "type": "integer"
+                                                            },
+                                                            "contact": {
+                                                                "type": "object",
+                                                                "properties": {
+                                                                    "email": {
+                                                                        "type": "string",
+                                                                        "pattern": "^[a-z]+@[a-z]+\\.com$"
+                                                                    },
+                                                                    "address": {
+                                                                        "type": "object",
+                                                                        "properties": {
+                                                                            "city": {
+                                                                                "type": "string",
+                                                                                "enum": [
+                                                                                    "Hangzhou",
+                                                                                    "Shanghai",
+                                                                                    "Beijing"
+                                                                                ]
+                                                                            },
+                                                                            "postal_code": {
+                                                                                "type": "string",
+                                                                                "pattern": "^[0-9]{6}$"
+                                                                            }
+                                                                        },
+                                                                        "required": [
+                                                                            "city",
+                                                                            "postal_code"
+                                                                        ],
+                                                                        "additionalProperties": false
+                                                                    }
+                                                                },
+                                                                "required": [
+                                                                    "email",
+                                                                    "address"
+                                                                ],
+                                                                "additionalProperties": false
+                                                            }
+                                                        },
+                                                        "required": [
+                                                            "name",
+                                                            "age",
+                                                            "contact"
+                                                        ],
+                                                        "additionalProperties": false
+                                                    },
+                                                    "interests": {
+                                                        "type": "array",
+                                                        "items": {
+                                                            "type": "string",
+                                                            "enum": [
+                                                                "reading",
+                                                                "running",
+                                                                "travel"
+                                                            ]
+                                                        },
+                                                        "minItems": 2,
+                                                        "maxItems": 3
+                                                    }
+                                                },
+                                                "required": [
+                                                    "identity",
+                                                    "interests"
+                                                ],
+                                                "additionalProperties": false
+                                            }
+                                        },
+                                        "required": [
+                                            "profile"
+                                        ],
+                                        "additionalProperties": false
+                                    }
+                        }
+                    }
+                },
+                "enable_thinking": true,
+                "request_id": "smoke_dash_structural_tag_think"
+            },
+            "result": {
+                "response": ""
+            },
+            "_comment": "Constraint-only: the comparer requires </think> and validates the trailing JSON against the final schema."
+        }
+    ]
+}

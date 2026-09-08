@@ -85,19 +85,80 @@ export FLEXLB_CONFIG='{
     "batchSize":1,
     "prefillLbTimeoutMs":300,
     "prefillGenerateTimeoutMs": 5000,
-    "enableGrpcPrefillMaster": false
+    "enableGrpcPrefillMaster": false,
+    "decodeConcurrencyLimit": 32
+}'
+
+export TRAFFIC_POLICY_CONFIG='{
+    "rules": [
+        {
+            "name": "vip-api-key",
+            "api_keys": ["key-a", "key-b"],
+            "target_group": "vip-group"
+        },
+        {
+            "name": "long-context",
+            "min_seq_len": 8192,
+            "target_group": "long-context-group"
+        },
+        {
+            "name": "weighted-split",
+            "min_seq_len": 1,
+            "target_groups": [
+                {"group": "blue-group", "weight": 80},
+                {"group": "green-group", "weight": 20}
+            ]
+        }
+    ]
+}'
+
+export STRATEGY_CONFIGS='{
+    "shortestTtft": {
+        "queueTimeWeight": 0.3,
+        "candidatePool": {
+            "mode": "FIXED",
+            "size": 1
+        }
+    }
 }'
 
 export MODEL_SERVICE_CONFIG='{
-    "prefill_endpoint": {
-        "path": "/",
-        "protocol": "http",
-        "type": "SpecifiedIpPortList",
-        "address": "[\"localhost:8080\"]"
-    },
-    "service_id": "model.service"
+    "service_id": "model.service",
+    "load_balance": true,
+    "role_endpoints": [
+        {
+            "group": "blue-group",
+            "prefill_endpoint": {
+                "path": "/",
+                "protocol": "http",
+                "address": "com.blue.prefill"
+            },
+            "decode_endpoint": {
+                "path": "/",
+                "protocol": "http",
+                "address": "com.blue.decode"
+            }
+        },
+        {
+            "group": "green-group",
+            "prefill_endpoint": {
+                "path": "/",
+                "protocol": "http",
+                "address": "com.green.prefill"
+            },
+            "decode_endpoint": {
+                "path": "/",
+                "protocol": "http",
+                "address": "com.green.decode"
+            }
+        }
+    ]
 }'
 ```
+
+Traffic routing is two-layered: `TRAFFIC_POLICY_CONFIG` selects the target `group`, then each role's load balancing strategy selects the final prefill/decode host inside that group. You can also set `TRAFFIC_POLICY_CONFIG_FILE` to a JSON file path. Standalone traffic policy config takes priority over `trafficPolicy` embedded in `FLEXLB_CONFIG`, and you can replace the active policy at runtime with `POST /rtp_llm/update_traffic_policy`.
+
+Set `decodeConcurrencyLimit` to a positive number to cap each decode worker's in-flight requests. FlexLB counts reported waiting/running tasks plus local in-transit selections, deduplicated by request id. When a decode worker reaches the limit, it is not considered serviceable; values <= 0 disable this FlexLB-side limit.
 
 ### Run
 
@@ -145,8 +206,28 @@ Authorization: Bearer <token>
 FlexLB supports various configuration options through environment variables and Spring Boot properties:
 
 - **Load Balancing Strategy**: Configure through `FLEXLB_CONFIG`
+- **Strategy Parameters**: Configure strategy internals through `STRATEGY_CONFIGS`; `shortestTtft.queueTimeWeight` controls how strongly worker queue time affects scheduling (range `0.0-1.0`, default `1.0`), while `shortestTtft.candidatePool` controls the candidate pool. `mode=RATIO` uses `max(minSize, floor(workerCount * ratio))`, while `mode=FIXED` uses `size`.
 - **Backend Services**: Configure through `MODEL_SERVICE_CONFIG`
 - **ZooKeeper Settings**: Configure through `FLEXLB_SYNC_CONSISTENCY_CONFIG`
+
+Worker expiry and VIT endpoint health use startup-only environment variables:
+
+| Variable | Default | Semantics |
+| --- | ---: | --- |
+| `TASK_TIMEOUT_US` | `3000000` | Maximum idle age of a tracked task before cleanup. |
+| `WORKER_TIMEOUT_US` | `3000000` | Maximum age of the last successful non-VIT worker status update before cleanup. |
+| `VIT_SYNC_REQUEST_TIMEOUT_MS` | `2000` | Minimum timeout for a FlexLB-to-VIT status request. A larger global sync timeout still applies. |
+| `VIT_WORKER_TIMEOUT_US` | `5000000` | Maximum age of the last successful VIT status update before FlexLB removes the endpoint. |
+| `VIT_RETAIN_ALIVE_ON_TIMEOUT` | `true` | Keep the last VIT alive state after a gRPC deadline. Boolean values accept `true/false`, `1/0`, `yes/no`, and `on/off`; use any false form for immediate fail-closed behavior. |
+
+Invalid or non-positive integer values fall back to the defaults. A proxy may reject an
+individual child worker before FlexLB removes the aggregate VIT endpoint; this
+intentional layering tolerates transient proxy status timeouts while preserving a
+bounded stale endpoint window. With the defaults, the worst-case stale window is
+approximately 8 seconds: the 5-second VIT expiry plus up to one 3-second cleaner interval.
+All worker deadline failures continue to emit one `3104` (`WORKER_STATUS_GRPC_TIMEOUT`)
+event for alert compatibility. The status-sync error log includes
+`retainLastAliveStatus=true` when a VIT endpoint keeps its previous state.
 
 ## Monitoring
 

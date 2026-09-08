@@ -4,6 +4,7 @@ from typing import Any, Optional, Tuple
 import aiter
 import torch
 
+from rtp_llm.device.device_impl import is_gfx950
 from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
@@ -12,7 +13,9 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
     CombineForwardPayload,
     ExpertForwardPayload,
     ExpertTokensMetadata,
+    FinalizeArgs,
     FusedMoeDataRouter,
+    should_skip_tp_allreduce,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
     FusedMoEQuantConfig,
@@ -36,6 +39,17 @@ class PureTpRouterBase(FusedMoeDataRouter):
     @classmethod
     def router_type(cls):
         return RouterType.PURE_TP
+
+    @property
+    def supports_skip_tp_allreduce(self) -> bool:
+        return True
+
+    def _maybe_all_reduce_tp(
+        self, output: torch.Tensor, extra_finalize_args: Optional[FinalizeArgs]
+    ) -> torch.Tensor:
+        if self.tp_size > 1 and not should_skip_tp_allreduce(extra_finalize_args):
+            return all_reduce(output, group=Group.TP)
+        return output
 
     @classmethod
     def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
@@ -207,6 +221,30 @@ class PureTpRouterFp8PerBlockPassthrough(PureTpRouterBase):
         resolver = MoeConfigResolver()
         quant_method = resolver.get_quant_method(config)
         checker.check(quant_method in ("FP8_PER_BLOCK", "FP8_PER_BLOCK_QUARK"))
+
+    def _do_quant(
+        self, a1: torch.Tensor
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        return a1, None
+
+
+class PureTpRouterMXFp4Passthrough(PureTpRouterBase):
+    """Pure TP router for the MXFP4 passthrough path."""
+
+    def __init__(
+        self,
+        config: MoEConfigAdapter,
+        quant_config: FusedMoEQuantConfig,
+    ):
+        super().__init__(config, quant_config, do_recompute_topk=False)
+
+    @classmethod
+    def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
+        super().check_conditions(checker, config)
+        resolver = MoeConfigResolver()
+        quant_method = resolver.get_quant_method(config)
+        checker.check(quant_method == "QuarkMXFP4")
+        checker.check(is_gfx950())
 
     def _do_quant(
         self, a1: torch.Tensor

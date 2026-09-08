@@ -166,6 +166,31 @@ class LinearCacheConverterTest(TestCase):
         conv_view[1, 1, 3] = torch.tensor(-7, dtype=torch.bfloat16, device=self.device)
         self.assertEqual(conv_view[1, 1, 3].item(), -7)
 
+    def test_gpu_linear_cache_converter_float8_e4m3fnuz(self) -> None:
+        # ssm state is 1 * 2 * 2 * 4B = 16B, fnuz conv state (3 - 1) * 4 * 1B = 8B
+        converter = LinearCacheConverter(
+            local_num_v_heads=1,
+            head_v_dim=2,
+            head_k_dim=2,
+            ssm_state_dtype=torch.float32,
+            linear_conv_kernel_dim=3,
+            qkv_size=4,
+            conv_state_dtype=torch.float8_e4m3fnuz,
+        )
+        self.assertEqual(converter.block_size_bytes, 24)
+
+        # 2 blocks of 16 bfloat16 elements: 32B per block, 8B of them padding.
+        base = torch.arange(32, dtype=torch.bfloat16, device=self.device).reshape(2, 16)
+        self.assertEqual(converter.get_block_size_bytes(base), 32)
+
+        conv_view = converter.get_conv_state_tensor(base)
+
+        self.assertEqual(conv_view.shape, (2, 2, 4))
+        self.assertEqual(conv_view.stride(), (32, 4, 1))
+        self.assertEqual(conv_view.dtype, torch.float8_e4m3fnuz)
+        self.assertEqual(conv_view.storage_offset(), 16)
+        self._assert_view_matches_bytes(base, conv_view, (32, 4, 1), 16)
+
 
 if __name__ == "__main__":
     main()

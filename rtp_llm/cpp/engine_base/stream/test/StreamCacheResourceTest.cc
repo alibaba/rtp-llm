@@ -11,6 +11,7 @@
 #include "rtp_llm/cpp/cache/connector/AsyncContext.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnectorReadWriteContext.h"
 #include "rtp_llm/cpp/cache/connector/Meta.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorAsyncContext.h"
 #include "rtp_llm/cpp/cache/connector/test/mock/MockAsyncContext.h"
 #include "rtp_llm/cpp/cache/connector/test/mock/MockKVCacheConnectorCoordinator.h"
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
@@ -22,6 +23,7 @@
 #include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/config/RoleTypes.h"
+#include "rtp_llm/cpp/model_rpc/TensorPbConvert.h"
 
 #include <chrono>
 #include <memory>
@@ -99,7 +101,7 @@ protected:
     void checkBlockFunc(BatchKVCacheResource& batch_resource, int outter_size, int inner_size) {
         ASSERT_EQ(batch_resource.batchSize(), outter_size);
         for (int i = 0; i < outter_size; ++i) {
-            ASSERT_EQ(batch_resource.blocks(i).size(), inner_size);
+            ASSERT_EQ(batch_resource.blocks(i, 0).size(), inner_size);
         }
     };
 
@@ -114,6 +116,27 @@ protected:
     GenerateStreamPtr               stream_;
     std::shared_ptr<KVCacheManager> cache_manager_;
 };
+
+TEST_F(StreamCacheResourceTest, testWarmUpFakeInitUsesTaggedTopology) {
+    ResourceContext resource_context;
+    ModelConfig     model_config;
+    model_config.max_seq_len = 2048;
+    RuntimeConfig runtime_config;
+
+    auto generate_input             = std::make_shared<GenerateInput>();
+    generate_input->input_ids       = torch::tensor(std::vector<int32_t>{1, 2, 3}, torch::kInt32);
+    generate_input->generate_config = std::make_shared<GenerateConfig>();
+    stream_ =
+        std::make_shared<NormalGenerateStream>(generate_input, model_config, runtime_config, resource_context, nullptr);
+
+    auto& resource = stream_->streamCacheResource();
+    ASSERT_EQ(resource.kvCache().groupNums(), 1);
+    EXPECT_EQ(resource.kvCache().cacheResource().soleGroupTagForLayer(0), "__warmup__");
+    EXPECT_EQ(resource.curBlocksNum(), 0);
+
+    stream_->fakeInitKVBlock(2);
+    EXPECT_EQ(resource.kvCache().blocks(0, "__warmup__").size(), 2);
+}
 
 TEST_F(StreamCacheResourceTest, testAllocateResource) {
     prepareResource();
@@ -146,8 +169,7 @@ TEST_F(StreamCacheResourceTest, testAllocateResource) {
 //     stream_->enable_fast_gen_ = true;
 
 //     // first chunk: 分块场景下 current_chunk_len 会被设置为 >0
-//     int token_capacity = 4;
-//     ASSERT_TRUE(resource.initKVBlock(token_capacity).ok());
+//     ASSERT_TRUE(resource.initKVBlock().ok());
 //     ASSERT_EQ(cache_manager_->freeBlocksNum(), 6);
 //     ASSERT_GT(stream_->currentChunkLen(), 0);
 
@@ -165,14 +187,13 @@ TEST_F(StreamCacheResourceTest, testAllocateResource) {
 //     prepareResource();
 //     auto& resource = stream_->streamCacheResource();
 
-//     int token_capacity = 1000;
-//     ASSERT_TRUE(resource.initKVBlock(token_capacity).ok());
+//     ASSERT_TRUE(resource.initKVBlock().ok());
 //     ASSERT_EQ(cache_manager_->freeBlocksNum(), 5);
 //     ASSERT_EQ(resource.maxBlockSize(), 3);
 
 //     stream_->setSeqLength(7);
 //     stream_->setIsContextStream(false);
-//     ASSERT_TRUE(resource.incrKVBlock(token_capacity).ok());
+//     ASSERT_TRUE(resource.incrKVBlock().ok());
 //     ASSERT_EQ(cache_manager_->freeBlocksNum(), 3);
 //     ASSERT_EQ(resource.maxBlockSize(), 4);
 
@@ -188,8 +209,7 @@ TEST_F(StreamCacheResourceTest, testAllocateResource) {
 
 //     // Test with query-level reuse_cache = true
 //     stream_->generate_input_->generate_config->reuse_cache = true;
-//     int token_capacity                                     = 1000;
-//     ASSERT_TRUE(resource.initKVBlock(token_capacity).ok());
+//     ASSERT_TRUE(resource.initKVBlock().ok());
 //     ASSERT_EQ(cache_manager_->freeBlocksNum(), 5);
 //     ASSERT_EQ(resource.maxBlockSize(), 3);
 
@@ -199,7 +219,7 @@ TEST_F(StreamCacheResourceTest, testAllocateResource) {
 //     resource.init(stream_->currentBatchSize());
 //     size_t baseline_free_blocks                            = cache_manager_->freeBlocksNum();
 //     stream_->generate_input_->generate_config->reuse_cache = false;
-//     ASSERT_TRUE(resource.initKVBlock(token_capacity).ok());
+//     ASSERT_TRUE(resource.initKVBlock().ok());
 //     ASSERT_EQ(cache_manager_->freeBlocksNum(),
 //               baseline_free_blocks >= 3 ? baseline_free_blocks - 3 : baseline_free_blocks);
 //     ASSERT_EQ(resource.maxBlockSize(), 3);
@@ -214,8 +234,7 @@ TEST_F(StreamCacheResourceTest, testAllocateResource) {
 
 //     // Test with query-level reuse_cache = true, but should be ignored
 //     stream_->generate_input_->generate_config->reuse_cache = true;
-//     int token_capacity                                     = 1000;
-//     ASSERT_TRUE(resource.initKVBlock(token_capacity).ok());
+//     ASSERT_TRUE(resource.initKVBlock().ok());
 //     ASSERT_EQ(cache_manager_->freeBlocksNum(), 5);
 //     ASSERT_EQ(resource.maxBlockSize(), 3);
 
@@ -224,7 +243,7 @@ TEST_F(StreamCacheResourceTest, testAllocateResource) {
 //     // Re-initialize batch resource after release
 //     resource.init(stream_->currentBatchSize());
 //     stream_->generate_input_->generate_config->reuse_cache = false;
-//     ASSERT_TRUE(resource.initKVBlock(token_capacity).ok());
+//     ASSERT_TRUE(resource.initKVBlock().ok());
 //     ASSERT_EQ(cache_manager_->freeBlocksNum(), 5);
 //     ASSERT_EQ(resource.maxBlockSize(), 3);
 
@@ -277,7 +296,7 @@ TEST_F(StreamCacheResourceTest, testInitKVBlock_TriggersLoadCacheSync_AndUpdates
     auto fused_match = std::make_shared<FusedAsyncContext>(std::vector<std::shared_ptr<AsyncContext>>{match_child});
 
     auto kv_resource = std::make_shared<KVCacheResource>();
-    kv_resource->setDeviceReuseBlockNum(2);
+    kv_resource->setDeviceReuseBlockNum(1);
     kv_resource->setMemoryReuseBlockNum(1);
 
     std::shared_ptr<Meta> meta;
@@ -292,7 +311,7 @@ TEST_F(StreamCacheResourceTest, testInitKVBlock_TriggersLoadCacheSync_AndUpdates
             return std::static_pointer_cast<AsyncContext>(load_ctx);
         }));
 
-    ASSERT_TRUE(resource.initKVBlock(/*reserve_step=*/0).ok());
+    ASSERT_TRUE(resource.initKVBlock().ok());
     ASSERT_TRUE(resource.asyncLoadCache());
     ASSERT_TRUE(resource.loadCacheDone());
     ASSERT_NE(captured_ctx, nullptr);
@@ -300,7 +319,7 @@ TEST_F(StreamCacheResourceTest, testInitKVBlock_TriggersLoadCacheSync_AndUpdates
     EXPECT_TRUE(captured_ctx->meta()->enableMemoryCache());
 
     // seq_size_per_block = 2 in init_config()
-    const int expected_total_reuse_len  = (2 + 1) * resource.seqSizePerBlock();
+    const int expected_total_reuse_len  = (1 + 1) * resource.seqSizePerBlock();
     const int expected_memory_reuse_len = 1 * resource.seqSizePerBlock();
     EXPECT_EQ(stream_->initialReuseLength(), expected_total_reuse_len);
     EXPECT_EQ(stream_->reuseLength(), expected_total_reuse_len);
@@ -308,9 +327,36 @@ TEST_F(StreamCacheResourceTest, testInitKVBlock_TriggersLoadCacheSync_AndUpdates
     EXPECT_EQ(stream_->memoryReuseLength(), expected_memory_reuse_len);
 }
 
+TEST_F(StreamCacheResourceTest, testCPShardedConnectorReuseUsesCanonicalBlockWidth) {
+    prepareResource(/*reuse_cache=*/true);
+    auto& resource = stream_->streamCacheResource();
+
+    cache_manager_->cp_slot_mapper_ =
+        std::make_shared<CPSlotMapper>(/*cp_rank=*/0, /*cp_size=*/2, resource.seqSizePerBlock());
+
+    auto match_child = std::make_shared<testing::NiceMock<MockAsyncContext>>();
+    auto fused_match = std::make_shared<FusedAsyncContext>(std::vector<std::shared_ptr<AsyncContext>>{match_child});
+    auto kv_resource = std::make_shared<KVCacheResource>();
+    kv_resource->setDeviceReuseBlockNum(2);
+    kv_resource->setMemoryReuseBlockNum(1);
+    std::shared_ptr<Meta> meta;
+    auto                  read_context = std::make_shared<FusedAsyncReadContext>(fused_match, kv_resource, meta);
+
+    resource.updateReuseLengthsFromContext(read_context);
+
+    const int canonical_block_tokens = resource.seqSizePerBlock() * 2;
+    EXPECT_EQ(resource.reuseBlockTokens(), canonical_block_tokens);
+    EXPECT_EQ(stream_->initialReuseLength(), 3 * canonical_block_tokens);
+    EXPECT_EQ(stream_->reuseLength(), 3 * canonical_block_tokens);
+    EXPECT_EQ(stream_->localReuseLength(), 3 * canonical_block_tokens);
+    EXPECT_EQ(stream_->memoryReuseLength(), canonical_block_tokens);
+}
+
 TEST_F(StreamCacheResourceTest, testDecodeInitKVBlock_DisablesDeviceCacheOnlyForFirstMalloc) {
     prepareHybridResource(/*reuse_cache=*/true, RoleType::DECODE);
-    auto& resource = stream_->streamCacheResource();
+    cache_manager_->config_.disable_decode_first_malloc_device_reuse = true;
+    auto& resource                                                   = stream_->streamCacheResource();
+    ASSERT_GT(cache_manager_->cacheConfig().groupNums(), 1);
 
     // Enable query-level reuse/device cache, but decode initKVBlock should still force device cache off.
     stream_->generate_input_->generate_config->reuse_cache         = true;
@@ -336,13 +382,15 @@ TEST_F(StreamCacheResourceTest, testDecodeInitKVBlock_DisablesDeviceCacheOnlyFor
     testing::InSequence seq;
     EXPECT_CALL(*allocator, initMallocForCommonLen(testing::_))
         .WillOnce(testing::Invoke([&](const MallocInfo& info) -> MallocResult {
+            EXPECT_FALSE(info.reuse_cache);
             EXPECT_FALSE(info.enable_device_cache);
             return {true, 0};
         }));
 
     EXPECT_CALL(*allocator, incrMalloc(testing::_))
         .WillOnce(testing::Invoke([&](const MallocInfo& info) -> MallocResult {
-            // initKVBlock should force-disable device cache on the first malloc for decode role.
+            // initKVBlock should force-disable cache reuse on the first malloc for decode hybrid.
+            EXPECT_FALSE(info.reuse_cache);
             EXPECT_FALSE(info.enable_device_cache);
             // Simulate a successful allocation so subsequent calls go through incrMalloc path.
             for (int b = 0; b < info.batch_kv_cache_resource->batchSize(); ++b) {
@@ -357,10 +405,10 @@ TEST_F(StreamCacheResourceTest, testDecodeInitKVBlock_DisablesDeviceCacheOnlyFor
             return {true, 0};
         }));
 
-    ASSERT_TRUE(resource.initKVBlock(/*reserve_step=*/0).ok());
+    ASSERT_TRUE(resource.initKVBlock().ok());
     resource.asyncLoadCache();
     resource.loadCacheDone();
-    ASSERT_TRUE(resource.incrKVBlock(/*reserve_step=*/0).ok());
+    ASSERT_TRUE(resource.incrKVBlock().ok());
 }
 
 TEST_F(StreamCacheResourceTest, testTryReleaseKVBlock_TriggersStoreCacheAsync_WhenFinishedAndReuseCache) {
@@ -394,7 +442,7 @@ TEST_F(StreamCacheResourceTest, testTryReleaseKVBlock_TriggersStoreCacheAsync_Wh
             return store_ctx;
         }));
 
-    ASSERT_TRUE(resource.incrKVBlock(/*reserve_step=*/0).ok());
+    ASSERT_TRUE(resource.incrKVBlock().ok());
     ASSERT_GT(resource.curBlocksNum(), 0);
 
     stream_->generate_status_->status = StreamState::FINISHED;
@@ -425,7 +473,7 @@ TEST_F(StreamCacheResourceTest, testTryReleaseKVBlock_DoesNotStoreCacheAsync_Whe
 
     EXPECT_CALL(*mock_coord, asyncWrite(testing::_)).Times(0);
 
-    ASSERT_TRUE(resource.incrKVBlock(/*reserve_step=*/0).ok());
+    ASSERT_TRUE(resource.incrKVBlock().ok());
     const int blocks = resource.curBlocksNum();
     ASSERT_GT(blocks, 0);
 
@@ -463,7 +511,7 @@ TEST_F(StreamCacheResourceTest, testTryReleaseKVBlock_TieredMemoryCache_EvictsDe
                 return store_ctx;
             }));
 
-    ASSERT_TRUE(resource.incrKVBlock(/*reserve_step=*/0).ok());
+    ASSERT_TRUE(resource.incrKVBlock().ok());
     ASSERT_GT(resource.curBlocksNum(), 0);
 
     stream_->generate_status_->status = StreamState::FINISHED;
@@ -660,8 +708,8 @@ TEST_F(StreamCacheResourceTest, testAsyncLoadCache_ThenLoadCacheDone_UpdatesReus
     auto fused_match = std::make_shared<FusedAsyncContext>(std::vector<std::shared_ptr<AsyncContext>>{match_child});
 
     auto kv_resource = std::make_shared<KVCacheResource>();
-    kv_resource->setDeviceReuseBlockNum(2);
-    kv_resource->setMemoryReuseBlockNum(3);
+    kv_resource->setDeviceReuseBlockNum(1);
+    kv_resource->setMemoryReuseBlockNum(1);
 
     std::shared_ptr<Meta> meta;
     auto                  load_ctx = std::make_shared<FusedAsyncReadContext>(fused_match, kv_resource, meta);
@@ -676,11 +724,62 @@ TEST_F(StreamCacheResourceTest, testAsyncLoadCache_ThenLoadCacheDone_UpdatesReus
 
     // Verify reuse lengths are updated
     // seq_size_per_block = 2 (from init_config)
-    const int total_reuse_len  = (2 + 3) * resource.seqSizePerBlock();
-    const int memory_reuse_len = 3 * resource.seqSizePerBlock();
+    const int total_reuse_len  = (1 + 1) * resource.seqSizePerBlock();
+    const int memory_reuse_len = 1 * resource.seqSizePerBlock();
     EXPECT_EQ(stream_->initialReuseLength(), total_reuse_len);
     EXPECT_EQ(stream_->reuseLength(), total_reuse_len);
     EXPECT_EQ(stream_->memoryReuseLength(), memory_reuse_len);
+}
+
+TEST_F(StreamCacheResourceTest, testP2PSideChannelRestoresZeroFirstTokenAndMtpState) {
+    prepareResourceWithInputTokens({1, 2, 3}, /*reuse_cache=*/true);
+    stream_->vocab_size_ = 16;
+    auto& resource       = stream_->streamCacheResource();
+
+    auto kv_resource = std::make_shared<KVCacheResource>();
+    // Reuse accounting in this case comes from the P2P side-channel payload.
+    // Keep connector-local counters at zero so they do not preempt that payload.
+
+    auto server_call_result                                  = std::make_shared<PrefillLoadCaller::Result>();
+    server_call_result->side_channel_payload.has_data        = true;
+    server_call_result->side_channel_payload.first_token_id  = 0;
+    server_call_result->side_channel_payload.total_reuse_len = 2;
+    server_call_result->side_channel_payload.local_reuse_len = 2;
+    server_call_result->side_channel_payload.propose_tokens  = {0, 7};
+    TensorPbConvert::torchToPb(&server_call_result->side_channel_payload.propose_probs,
+                               torch::tensor({{0.1f, 0.2f, 0.7f}}, torch::kFloat32));
+    TensorPbConvert::torchToPb(&server_call_result->side_channel_payload.propose_hidden,
+                               torch::tensor({{0.3f, 0.4f}}, torch::kFloat32));
+
+    auto p2p_ctx      = std::make_shared<P2PConnectorAsyncReadContext>(kv_resource,
+                                                                  std::shared_ptr<P2PBroadcastClient::Result>(),
+                                                                  server_call_result,
+                                                                  std::shared_ptr<DecodeSchedulerMetricsCollector>(),
+                                                                  /*transfer_not_done_hold_ms=*/0);
+    auto read_context = std::make_shared<FusedAsyncReadContext>(
+        std::make_shared<FusedAsyncContext>(std::vector<std::shared_ptr<AsyncContext>>{}), kv_resource, nullptr);
+    read_context->setFusedReadContext(std::make_shared<FusedAsyncContext>(
+        std::vector<std::shared_ptr<AsyncContext>>{std::static_pointer_cast<AsyncContext>(p2p_ctx)}));
+
+    resource.updateReuseLengthsFromContext(read_context);
+
+    EXPECT_EQ(stream_->completeTokenIdsVec(), std::vector<int>({1, 2, 3, 0}));
+    auto sp_output_buffer = stream_->getSPOutputBuffer();
+    ASSERT_TRUE(sp_output_buffer != nullptr);
+    EXPECT_EQ(sp_output_buffer->tokens.cpu()[0][0].item<int32_t>(), 0);
+    EXPECT_EQ(sp_output_buffer->tokens.cpu()[0][1].item<int32_t>(), 7);
+    ASSERT_TRUE(sp_output_buffer->propose_tokens_gpu.defined());
+    EXPECT_EQ(sp_output_buffer->propose_tokens_gpu.sizes().vec(), (std::vector<int64_t>{1, 1}));
+    EXPECT_EQ(sp_output_buffer->propose_tokens_gpu.cpu().item<int32_t>(), 7);
+    ASSERT_TRUE(sp_output_buffer->all_probs.defined());
+    ASSERT_TRUE(sp_output_buffer->hidden_states.defined());
+    EXPECT_TRUE(stream_->getAcceptTokensGpu().defined());
+    EXPECT_TRUE(stream_->getAcceptLenGpu().defined());
+    EXPECT_TRUE(stream_->getProposeTokensGpu().defined());
+    EXPECT_EQ(stream_->getProposeTokensGpu().sizes().vec(), (std::vector<int64_t>{1, 1}));
+    EXPECT_EQ(stream_->getProposeTokensGpu().cpu().item<int32_t>(), 7);
+    EXPECT_TRUE(stream_->getDraftAllProbsGpu().defined());
+    EXPECT_TRUE(stream_->getLastHiddenStatesGpu().defined());
 }
 
 TEST_F(StreamCacheResourceTest, testInitKVBlock_SecondCallDoesNotOverwriteReuseLength) {
@@ -708,7 +807,7 @@ TEST_F(StreamCacheResourceTest, testInitKVBlock_SecondCallDoesNotOverwriteReuseL
     auto fused_match1 = std::make_shared<FusedAsyncContext>(std::vector<std::shared_ptr<AsyncContext>>{match_child1});
 
     auto kv_resource1 = std::make_shared<KVCacheResource>();
-    kv_resource1->setDeviceReuseBlockNum(2);
+    kv_resource1->setDeviceReuseBlockNum(1);
     kv_resource1->setMemoryReuseBlockNum(1);
 
     std::shared_ptr<Meta> meta1;
@@ -721,12 +820,12 @@ TEST_F(StreamCacheResourceTest, testInitKVBlock_SecondCallDoesNotOverwriteReuseL
         .WillOnce(testing::Return(std::static_pointer_cast<AsyncContext>(load_ctx1)));
 
     // First initKVBlock + asyncLoadCache + loadCacheDone: sets reuse lengths
-    ASSERT_TRUE(resource.initKVBlock(/*reserve_step=*/0).ok());
+    ASSERT_TRUE(resource.initKVBlock().ok());
     ASSERT_GT(resource.curBlocksNum(), 0);
     ASSERT_TRUE(resource.asyncLoadCache());
     ASSERT_TRUE(resource.loadCacheDone());
 
-    const int expected_total_reuse_len  = (2 + 1) * resource.seqSizePerBlock();
+    const int expected_total_reuse_len  = (1 + 1) * resource.seqSizePerBlock();
     const int expected_memory_reuse_len = 1 * resource.seqSizePerBlock();
     EXPECT_EQ(stream_->reuseLength(), expected_total_reuse_len);
     EXPECT_EQ(stream_->memoryReuseLength(), expected_memory_reuse_len);
@@ -734,7 +833,7 @@ TEST_F(StreamCacheResourceTest, testInitKVBlock_SecondCallDoesNotOverwriteReuseL
     // Second initKVBlock + asyncLoadCache + loadCacheDone: load_cache_once_ prevents re-issue.
     // The once-per-lifecycle guard means the second asyncLoadCache() returns false (skipped),
     // which inherently preserves the reuse lengths set by the first load.
-    ASSERT_TRUE(resource.initKVBlock(/*reserve_step=*/0).ok());
+    ASSERT_TRUE(resource.initKVBlock().ok());
     ASSERT_TRUE(resource.asyncLoadCache());
     ASSERT_TRUE(resource.loadCacheDone());
 
@@ -742,6 +841,7 @@ TEST_F(StreamCacheResourceTest, testInitKVBlock_SecondCallDoesNotOverwriteReuseL
     EXPECT_EQ(stream_->initialReuseLength(), expected_total_reuse_len);
     EXPECT_EQ(stream_->localReuseLength(), expected_total_reuse_len);
     EXPECT_EQ(stream_->memoryReuseLength(), expected_memory_reuse_len);
+    EXPECT_EQ(stream_->deviceReuseLength(), expected_total_reuse_len - expected_memory_reuse_len);
 }
 
 TEST_F(StreamCacheResourceTest, testWaitLoadCacheDone_ZeroReuseLen_DoesNotOverwriteExisting) {
@@ -750,12 +850,12 @@ TEST_F(StreamCacheResourceTest, testWaitLoadCacheDone_ZeroReuseLen_DoesNotOverwr
     auto& resource = stream_->streamCacheResource();
 
     // Pre-set reuse lengths on the stream (simulating a prior successful loadCacheSync)
-    stream_->setReuseLength(100);
-    stream_->setInitialReuseLength(100);
-    stream_->setLocalReuseLength(80);
-    stream_->setMemoryReuseLength(40);
-    stream_->setRemoteReuseLength(20);
-    stream_->setMtpTokenIndex(100);
+    stream_->setReuseLength(4);
+    stream_->setInitialReuseLength(4);
+    stream_->setLocalReuseLength(3);
+    stream_->setMemoryReuseLength(1);
+    stream_->setRemoteReuseLength(1);
+    stream_->setMtpTokenIndex(4);
 
     // Build a FusedAsyncReadContext with 0 reuse blocks
     auto match_child = std::make_shared<testing::NiceMock<MockAsyncContext>>();
@@ -772,12 +872,13 @@ TEST_F(StreamCacheResourceTest, testWaitLoadCacheDone_ZeroReuseLen_DoesNotOverwr
     resource.waitLoadCacheDone(load_ctx);
 
     // All values should be preserved — not overwritten with 0
-    EXPECT_EQ(stream_->reuseLength(), 100);
-    EXPECT_EQ(stream_->initialReuseLength(), 100);
-    EXPECT_EQ(stream_->localReuseLength(), 80);
-    EXPECT_EQ(stream_->memoryReuseLength(), 40);
-    EXPECT_EQ(stream_->remoteReuseLength(), 20);
-    EXPECT_EQ(stream_->getMtpTokenIndex(), 100);
+    EXPECT_EQ(stream_->reuseLength(), 4);
+    EXPECT_EQ(stream_->initialReuseLength(), 4);
+    EXPECT_EQ(stream_->localReuseLength(), 3);
+    EXPECT_EQ(stream_->deviceReuseLength(), 2);
+    EXPECT_EQ(stream_->memoryReuseLength(), 1);
+    EXPECT_EQ(stream_->remoteReuseLength(), 1);
+    EXPECT_EQ(stream_->getMtpTokenIndex(), 4);
 }
 
 }  // namespace rtp_llm

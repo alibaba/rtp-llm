@@ -12,7 +12,7 @@ from rtp_llm.ops.compute_ops import (
     preprocess_weight_scale,
 )
 from rtp_llm.utils.model_weight import W
-from rtp_llm.utils.swizzle_utils import swizzle_tensor
+from rtp_llm.utils.swizzle_utils import should_swizzle_linear_attn_ba, swizzle_tensor
 
 
 def _use_megamoe() -> bool:
@@ -915,8 +915,28 @@ class RocmImpl(GpuImpl):
             if is_gate
             else x
         )  # swap from [up, gate] to [gate, up]
-        if do_shuffle:
+
+        if do_weight_shuffle:
             x_ = shuffle_weight(x_, (16, 16))
+
+        # Quark MXFP4 stores MoE scales as uint8 E8M0 blocks. Detect that
+        # directly from the actual tensor instead of relying on the startup
+        # quantization string, which can be empty on ckpt auto-detect paths.
+        is_mxfp4_scale = do_fp4_scale_shuffle and x_.dtype == torch.uint8
+        if is_mxfp4_scale:
+            if not self._is_gfx950():
+                raise RuntimeError(
+                    "Quark MXFP4 MoE scale shuffle requires gfx950 (MI355)."
+                )
+            from aiter.utility.fp4_utils import e8m0_shuffle
+
+            if x_.dim() == 3:
+                s0, s1, _ = x_.shape
+                x_ = e8m0_shuffle(x_.contiguous().view(s0 * s1, -1)).view(s0, s1, -1)
+            else:
+                x_ = e8m0_shuffle(x_)
+            if original_ndim == 2:
+                x_ = x_.squeeze(-1)
         return x_
 
     def maybe_rewrite_weight_by_key(
@@ -947,7 +967,14 @@ class RocmImpl(GpuImpl):
             W.linear_attn_ba_w,
             W.linear_attn_out_w,
         ]:
-            if self.py_env_configs.py_hw_kernel_config.use_swizzleA:
+            use_swizzle = self.py_env_configs.py_hw_kernel_config.use_swizzleA
+            if key == W.linear_attn_ba_w:
+                # BA remains BF16 even when qkvz is quantized. Select its
+                # physical layout from the actual TP-local shape so aligned
+                # projections keep the fast path while N=24/12 safely fall
+                # back to the raw layout.
+                use_swizzle = use_swizzle and should_swizzle_linear_attn_ba(weight)
+            if use_swizzle:
                 if weight.dtype != torch.float8_e4m3fn:
                     weight = swizzle_tensor(weight.t(), False).t()
                 else:

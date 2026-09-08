@@ -102,6 +102,8 @@ class FMHAImplBase(ABC):
     所有具体的实现类都应该继承此类并实现这些方法。
     """
 
+    accepts_fmha_config = False
+
     @abstractmethod
     def forward(
         self,

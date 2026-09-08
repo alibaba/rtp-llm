@@ -127,6 +127,15 @@ struct Weights {
     std::shared_ptr<const LayerNormWeights> final_layernorm;
     std::shared_ptr<const DenseWeights>     linear_bias_slopes;
     std::shared_ptr<const DenseWeights>     lm_head;
+
+    // for sp decode prune vocab (draft<->target vocab mapping)
+    torch::Tensor d2t_map;
+    // Reserved for future target-to-draft mapping (e.g. logit projection). Loaded but not yet used at runtime.
+    torch::Tensor t2d_map;
+
+    // Replicated low-rank transition weights used by the C++ DSpARK sampler.
+    torch::Tensor dspark_markov_w1;
+    torch::Tensor dspark_markov_w2;
 };
 
 using WeightsPtr = std::shared_ptr<const Weights>;

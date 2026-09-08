@@ -20,6 +20,7 @@ from rtp_llm.models_py.modules.factory.attention.cuda_impl.trtllm_gen import (
     _prepare_cg_prefill_kernel,
     _prepare_cg_spec_decode_kernel,
 )
+from rtp_llm.models_py.utils.arch import is_sm10x
 from rtp_llm.test.utils.numeric_util import assert_close_with_mismatch_tolerance
 
 device = torch.device("cuda")
@@ -111,8 +112,7 @@ class FlashInferPythonMHATest(TestCase):
             use_prefill_op: if True, use FlashInferTRTLLMPrefillOp;
                             if False, use FlashInferTRTLLMDecodeOp.
         """
-        is_sm_100 = torch.cuda.get_device_capability()[0] in [10]
-        if not is_sm_100:
+        if not is_sm10x():
             raise SkipTest("FlashInferTRTLLM requires SM_100 (compute capability 10.0)")
 
         config = self._create_config(dtype)
@@ -148,7 +148,7 @@ class FlashInferPythonMHATest(TestCase):
             attn_inputs.input_lengths if is_prefill else attn_inputs.sequence_lengths
         )
         write_kv_cache(
-            k_ref, v_ref, kv_cache, kv_write_lengths, attn_inputs.kv_cache_block_id_host
+            k_ref, v_ref, kv_cache, kv_write_lengths, attn_inputs.kv_cache_block_id
         )
 
         out_ref = attention_prefill_ref(
@@ -173,7 +173,7 @@ class FlashInferPythonMHATest(TestCase):
             out_ref_f32 = out_ref.float()
             allowed_mismatch_rate = 1e-5
         else:
-            last_token_idx = attn_inputs.cu_seqlens[1:] - 1
+            last_token_idx = attn_inputs.cu_seqlens_device[1:] - 1
             if is_prefill:
                 q_len_per_req = 6
                 attn_inputs.prefix_lengths = attn_inputs.input_lengths - q_len_per_req

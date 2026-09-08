@@ -1,19 +1,17 @@
 #pragma once
 
-#include <functional>
-#include <algorithm>
+#include <memory>
 #include <string>
 #include <vector>
 #include <torch/python.h>
-#include "absl/status/statusor.h"
-#include "rtp_llm/cpp/multimodal_processor/MultimodalTypes.h"
-#include "rtp_llm/cpp/utils/ErrorCode.h"
-#include "rtp_llm/cpp/utils/StatusUtil.h"
-#include "rtp_llm/cpp/pybind/PyUtils.h"
-#include "rtp_llm/cpp/model_rpc/RPCPool.h"
-#include "rtp_llm/cpp/multimodal_processor/MultimodalProcessor.h"
-#include "rtp_llm/cpp/model_rpc/QueryConverter.h"
+
 #include "rtp_llm/cpp/config/ConfigModules.h"
+#include "rtp_llm/cpp/config/MMTransportMode.h"
+#include "rtp_llm/cpp/model_rpc/MultimodalPbConverter.h"
+#include "rtp_llm/cpp/multimodal_processor/MultimodalProcessor.h"
+#include "rtp_llm/cpp/multimodal_processor/MultimodalTypes.h"
+#include "rtp_llm/cpp/multimodal_processor/transport/MMRemoteOutputTransportFactory.h"
+#include "rtp_llm/cpp/utils/ErrorCode.h"
 
 namespace py = pybind11;
 
@@ -21,33 +19,37 @@ namespace rtp_llm {
 
 class RemoteMultimodalProcessor: public MultimodalProcessor {
 public:
-    RemoteMultimodalProcessor(py::object mm_process_engine, const MMModelConfig& mm_model_config, int64_t max_seq_len):
-        MultimodalProcessor(mm_process_engine, mm_model_config, max_seq_len) {}
+    // Keep the legacy EmbeddingCppEngine path on its existing inline gRPC data plane.
+    RemoteMultimodalProcessor(const MMModelConfig&         mm_model_config,
+                              int64_t                      max_seq_len,
+                              kmonitor::MetricsReporterPtr metrics_reporter = nullptr):
+        RemoteMultimodalProcessor(mm_model_config, max_seq_len, grpcOnlyTransportConfig(), metrics_reporter) {}
+
+    RemoteMultimodalProcessor(const MMModelConfig&         mm_model_config,
+                              int64_t                      max_seq_len,
+                              const MMTransportConfig&     transport_config,
+                              kmonitor::MetricsReporterPtr metrics_reporter = nullptr,
+                              int                          device_id = -1):
+        MultimodalProcessor(py::none(), mm_model_config, max_seq_len, metrics_reporter),
+        output_transport_(createMMRemoteOutputTransport(transport_config, metrics_reporter, device_id)) {}
+
+    ErrorResult<MultimodalOutput>
+    MultimodalEmbedding(const std::vector<rtp_llm::MultimodalInput> mm_inputs, std::string ip_port = "") override {
+        if (ip_port == "") {
+            return ErrorInfo(ErrorCode::MM_EMPTY_ENGINE_ERROR, "ip:port is empty in remote multimodal processing");
+        }
+        auto request_pb = MultimodalPbConverter::inputsToPb(mm_inputs);
+        return output_transport_->fetch(ip_port, request_pb);
+    }
 
 private:
-    MultimodalRpcPool pool_;
-    std::string       vit_cluster_name_;
-
-    ErrorResult<MultimodalOutput> MultimodalEmbedding(const std::vector<rtp_llm::MultimodalInput> mm_inputs,
-                                                      std::string                                 ip_port = "") {
-        if (ip_port == "") {
-            return ErrorInfo(ErrorCode::MM_NOT_SUPPORTED_ERROR, "ip:port is empty in remote multimodal processing");
-        }
-        auto connection_status = pool_.getConnection(ip_port);
-        if (!connection_status.ok()) {
-            return ErrorInfo(ErrorCode::MM_EMPTY_ENGINE_ERROR, connection_status.status().ToString());
-        }
-        auto& connection = connection_status.value();
-
-        auto                stub = connection.stub;
-        MultimodalOutputsPB output_pb;
-        grpc::ClientContext context;
-        auto status = stub->RemoteMultimodalEmbedding(&context, QueryConverter::transMMInputsPB(mm_inputs), &output_pb);
-        if (!status.ok()) {
-            return ErrorInfo(ErrorCode::MM_PROCESS_ERROR, status.error_message());
-        }
-        return QueryConverter::transMMOutput(&output_pb);
+    static MMTransportConfig grpcOnlyTransportConfig() {
+        MMTransportConfig config;
+        config.mode = kMMTransportModeGrpc;
+        return config;
     }
+
+    std::unique_ptr<MMRemoteOutputTransport> output_transport_;
 };
 
 }  // namespace rtp_llm

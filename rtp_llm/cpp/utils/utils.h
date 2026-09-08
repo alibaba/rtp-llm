@@ -61,15 +61,6 @@
     [&] {                                                                                                              \
         switch (COND) {                                                                                                \
             FT_SWITCH_ONE_CASE_T(NAME, KvCacheDataType::BASE, T, __VA_ARGS__)                                          \
-            FT_SWITCH_ONE_CASE_T(NAME, KvCacheDataType::INT8, int8_t, __VA_ARGS__)                                     \
-            ENABLE_FP8_CASE(NAME, __nv_fp8_e4m3, __VA_ARGS__)                                                          \
-        }                                                                                                              \
-    }()
-
-#define FT_SWITCH_KV_CACHE_TYPE_NON_INT8_CASE(COND, NAME, ...)                                                         \
-    [&] {                                                                                                              \
-        switch (COND) {                                                                                                \
-            FT_SWITCH_ONE_CASE_T(NAME, KvCacheDataType::BASE, T, __VA_ARGS__)                                          \
             ENABLE_FP8_CASE(NAME, __nv_fp8_e4m3, __VA_ARGS__)                                                          \
         }                                                                                                              \
     }()

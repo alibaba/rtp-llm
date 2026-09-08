@@ -4,24 +4,19 @@ rtp llm custom ops
 
 from __future__ import annotations
 
-from typing import Any, Optional
+import typing
 
 import libth_transformer
 import torch
 
-from rtp_llm.ops import KVCache, PyCacheStoreInputs
-
 __all__ = [
     "SelectTopkOp",
-    "TRTAttn",
-    "TRTAttnOp",
     "XQAAttnOp",
     "XQAParams",
     "embedding",
     "fused_add_layernorm",
     "fused_add_rmsnorm",
     "fused_qk_rmsnorm",
-    "write_cache_store",
     "FlashInferMlaAttnParams",
     "layernorm",
     "rmsnorm",
@@ -30,6 +25,12 @@ __all__ = [
 
 class FlashInferMlaAttnParams:
     def __init__(self) -> None: ...
+    def fill_decode_cuda_graph_params(
+        self,
+        sequence_lengths_plus_1_d: torch.Tensor,
+        kv_cache_block_id_device: torch.Tensor,
+        seq_size_per_block: int,
+    ) -> None: ...
 
 class SelectTopkOp:
     def __init__(
@@ -41,22 +42,6 @@ class SelectTopkOp:
         expert_ids: torch.Tensor,
         expert_scales: torch.Tensor,
     ) -> None: ...
-
-class TRTAttn:
-    def __init__(self) -> None: ...
-
-class TRTAttnOp:
-    def __init__(
-        self, attn_configs: typing.Any
-    ) -> None: ...
-    def forward(
-        self,
-        input: torch.Tensor,
-        k_cache: torch.Tensor,
-        v_cache: torch.Tensor,
-        params: TRTAttn,
-    ) -> torch.Tensor: ...
-    def prepare(self, attn_inputs: libth_transformer.PyAttentionInputs) -> TRTAttn: ...
 
 class XQAAttnOp:
     def __init__(
@@ -72,9 +57,21 @@ class XQAAttnOp:
     def prepare(
         self, attn_inputs: libth_transformer.PyAttentionInputs
     ) -> XQAParams: ...
+    def update(
+        self, params: XQAParams, attn_inputs: libth_transformer.PyAttentionInputs
+    ) -> None: ...
+    def update_kv_cache_offset(
+        self, kv_cache_offset: torch.Tensor, kv_cache_block_id_device: torch.Tensor
+    ) -> None: ...
 
 class XQAParams:
     def __init__(self) -> None: ...
+    def fill_decode_cuda_graph_params(
+        self,
+        sequence_lengths_plus_1_d: torch.Tensor,
+        kv_cache_block_id_device: torch.Tensor,
+        seq_size_per_block: int,
+    ) -> None: ...
 
 def embedding(
     output: torch.Tensor,
@@ -126,24 +123,18 @@ def fused_qk_rmsnorm(
     Fused QK RMSNorm kernel
     """
 
-def write_cache_store(
-    input_lengths: torch.Tensor,
-    prefix_lengths: torch.Tensor,
-    kv_cache_block_id_host: torch.Tensor,
-    cache_store_member: Optional[PyCacheStoreInputs],
-    kv_cache: Optional[KVCache],
-    cuda_stream: int = 0,
-) -> None:
-    """
-    WriteCacheStoreOp kernel
-    """
-
 def layernorm(
     output: torch.Tensor,
     input: torch.Tensor,
     weight: torch.Tensor,
     beta: torch.Tensor,
     eps: float,
+    def update(
+        self, params: XQAParams, attn_inputs: libth_transformer.PyAttentionInputs
+    ) -> None: ...
+    def update_kv_cache_offset(
+        self, kv_cache_offset: torch.Tensor, kv_cache_block_id_device: torch.Tensor
+    ) -> None: ...
     cuda_stream: int = 0,
 ) -> None:
     """

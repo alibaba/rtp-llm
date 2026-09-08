@@ -1,6 +1,7 @@
 import json
+import os
 import unittest
-from typing import List
+from typing import List, Optional, Tuple
 
 from rtp_llm.openai.renderers.sglang_helpers.entrypoints.openai.protocol import (
     Function,
@@ -8,10 +9,69 @@ from rtp_llm.openai.renderers.sglang_helpers.entrypoints.openai.protocol import 
 )
 from rtp_llm.openai.renderers.sglang_helpers.function_call.core_types import (
     StreamingParseResult,
+    ToolCallItem,
 )
 from rtp_llm.openai.renderers.sglang_helpers.function_call.qwen25_detector import (
     Qwen25Detector,
 )
+from rtp_llm.openai.renderers.sglang_helpers.token_normalizer import (
+    TokenNormalizer,
+    expand_prev_window,
+)
+
+# Delta token IDs per MTP step, captured from a production SSE stream
+# (Qwen3-8B fine-tune emitting a search_item tool call). The boundary
+# between steps 7→8 and 13→14 splits ' 免' across tokens, leaving an
+# orphan UTF-8 tail byte in the next step's prev-token window.
+_PRODUCTION_MTP_STEPS: List[List[int]] = [
+    [151657],
+    [198, 4913, 606, 788],
+    [330, 1836, 5634, 497],
+    [330, 16370, 788, 5212],
+    [56431, 788, 330, 113335],
+    [99364],
+    [39165, 34369],
+    [235, 105596, 80268, 497],
+    [330, 52473],
+    [2859],
+    [788],
+    [330, 113335, 99364],
+    [39165, 34369],
+    [235, 105596, 80268, 95642],
+    [151658],
+]
+_PRODUCTION_EXPECTED_ARGS = json.dumps(
+    {"intent": "快餐便当 免配送费", "rewriteQuery": "快餐便当 免配送费"},
+    ensure_ascii=False,
+)
+
+# Exact raw model output from the user's bug report. Different request
+# from _PRODUCTION_MTP_STEPS (different intent value); both exercise the
+# same UTF-8 prev-window bug class.
+_USER_REPORTED_RAW_OUTPUT = (
+    "<tool_call>\n"
+    '{"name": "search_item", '
+    '"arguments": {"intent": "快餐便当", '
+    '"rewriteQuery": "快餐便当 免配送费"}}'
+    "\n</tool_call>"
+)
+_USER_REPORTED_EXPECTED_ARGS = (
+    '{"intent": "快餐便当", "rewriteQuery": "快餐便当 免配送费"}'
+)
+
+
+def _get_qwen_tokenizer():
+    """Load a Qwen tokenizer from repo testdata. Returns None if unavailable."""
+    try:
+        from transformers import AutoTokenizer
+    except ImportError:
+        return None
+    path = "rtp_llm/test/model_test/fake_test/testdata/qwen3_30b/tokenizer"
+    if os.path.exists(path):
+        return AutoTokenizer.from_pretrained(
+            path, trust_remote_code=True, verbose=False
+        )
+    return None
 
 
 def create_tools() -> List[Tool]:
@@ -620,10 +680,6 @@ class TestQwen25DetectAndParse(unittest.TestCase):
         self.assertEqual(len(result.calls), 1)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TestStreamingStringWithSpaces(unittest.TestCase):
     """Test that string values containing spaces are not truncated during streaming.
 
@@ -775,3 +831,627 @@ class TestStreamingStringWithSpaces(unittest.TestCase):
         expected = json.dumps({"query": "hello world", "filter": "foo bar"})
 
         self.assertEqual(final_params, expected)
+
+
+class TestAdjacentValueBleedThrough(unittest.TestCase):
+    """Regression test for adjacent-value bleed-through.
+
+    Real-world bug shape: a tool call whose second string argument re-uses
+    content from the first string argument. If any boundary between the two
+    values gets dropped from the buffer, partial_json_parser reads the
+    combined content as a single key's value (because the closing quote /
+    comma / next-key prefix are missing), and the streamed args end up
+    looking like ``{"intent": "<v1> <v2-prefix>...`` -- the second value
+    bleeds into the first.
+
+    This class drives the detector through every chunk-boundary that could
+    plausibly arise in MTP / token-by-token streaming, plus several
+    pathological boundaries that exercise the diff-with-baseline,
+    is_complete=True, and partial_json_parser trailing-whitespace-strip
+    interactions.
+    """
+
+    def setUp(self):
+        self.tools = [
+            Tool(
+                type="function",
+                function=Function(
+                    name="search_item",
+                    parameters={
+                        "type": "object",
+                        "properties": {
+                            "intent": {"type": "string"},
+                            "rewriteQuery": {"type": "string"},
+                        },
+                    },
+                ),
+            )
+        ]
+        self.target_args = {
+            "intent": "快餐便当",
+            "rewriteQuery": "快餐便当 免配送费",
+        }
+        self.expected = json.dumps(self.target_args, ensure_ascii=False)
+
+    def _drive(self, detector: Qwen25Detector, chunks: List[str]) -> str:
+        for chunk in chunks:
+            detector.parse_streaming_increment(chunk, self.tools)
+        return "".join(detector.streamed_args_for_tool)
+
+    def test_token_by_token_natural_qwen_split(self):
+        """The Qwen tokenizer splits this target into ~35 tokens. Token-by-token
+        streaming must produce the full args."""
+        # These chunks mirror the actual Qwen tokenization of:
+        # <tool_call>\n{"name": "search_item", "arguments":
+        #   {"intent": "快餐便当", "rewriteQuery": "快餐便当 免配送费"}}\n</tool_call>
+        chunks = [
+            "<tool_call>",
+            "\n",
+            '{"',
+            "name",
+            '":',
+            ' "',
+            "search",
+            "_item",
+            '",',
+            ' "',
+            "arguments",
+            '":',
+            ' {"',
+            "intent",
+            '":',
+            ' "',
+            "快餐",
+            "便",
+            "当",
+            '",',
+            ' "',
+            "rewrite",
+            "Query",
+            '":',
+            ' "',
+            "快餐",
+            "便",
+            "当",
+            " ",
+            "免",
+            "配送",
+            "费",
+            '"}}',
+            "\n",
+            "</tool_call>",
+        ]
+        self.assertEqual(self._drive(Qwen25Detector(), chunks), self.expected)
+
+    def test_chunk_boundary_at_value_separator(self):
+        """Boundary lands EXACTLY between intent's closing quote and
+        rewriteQuery's opening quote -- the most likely place for
+        bleed-through if a structural char gets lost."""
+        chunks = [
+            '<tool_call>\n{"name": "search_item", "arguments": {"intent": "快餐便当',
+            '"',
+            ", ",
+            '"rewriteQuery": "',
+            "快餐便当 ",
+            "免配送费",
+            '"}}\n</tool_call>',
+        ]
+        self.assertEqual(self._drive(Qwen25Detector(), chunks), self.expected)
+
+    def test_trailing_space_at_chunk_boundary(self):
+        """Buffer ends with ``"快餐便当 `` (trailing space inside open string).
+        partial_json_parser strips the trailing space, producing
+        ``{"intent": "快餐便当", "rewriteQuery": "快餐便当"}``. The next
+        chunk extends the value past the space; the diff machinery must
+        not have already committed a ``"`` after the stripped whitespace."""
+        chunks = [
+            '<tool_call>\n{"name": "search_item", "arguments": {"intent": "快餐便当", "rewriteQuery": "快餐便当 ',
+            "免",
+            "配送",
+            "费",
+            '"}}\n</tool_call>',
+        ]
+        self.assertEqual(self._drive(Qwen25Detector(), chunks), self.expected)
+
+    def test_name_and_first_value_complete_in_same_chunk(self):
+        """A single chunk delivers the tool name AND the complete first
+        argument value. This exercises the Case-1 prev_tool_call_arr
+        seeding fix: without it, the next chunk's diff calculation has a
+        baseline of ``{}`` and must reconstruct the intent value via the
+        common-prefix machinery on the next iteration."""
+        chunks = [
+            '<tool_call>\n{"name": "search_item", "arguments": {"intent": "快餐便当", "rewriteQuery": "',
+            "快餐便当 免配送费",
+            '"}}\n</tool_call>',
+        ]
+        self.assertEqual(self._drive(Qwen25Detector(), chunks), self.expected)
+
+    def test_one_shot_complete_tool_call(self):
+        """The entire tool call arrives in one chunk (degenerate MTP=many).
+        is_current_complete fires immediately; argument_diff must equal
+        the full args JSON."""
+        chunks = [
+            '<tool_call>\n{"name": "search_item", "arguments": '
+            + self.expected
+            + "}\n</tool_call>",
+        ]
+        self.assertEqual(self._drive(Qwen25Detector(), chunks), self.expected)
+
+    def test_streamed_args_invariant_holds(self):
+        """At every step of streaming, streamed_args_for_tool must remain a
+        prefix of the eventually-correct args JSON. This is the core
+        defensive invariant: any deviation signals corrupted state."""
+        chunks = [
+            "<tool_call>",
+            "\n",
+            '{"',
+            "name",
+            '":',
+            ' "',
+            "search",
+            "_item",
+            '",',
+            ' "',
+            "arguments",
+            '":',
+            ' {"',
+            "intent",
+            '":',
+            ' "',
+            "快餐",
+            "便",
+            "当",
+            '",',
+            ' "',
+            "rewrite",
+            "Query",
+            '":',
+            ' "',
+            "快餐",
+            "便",
+            "当",
+            " ",
+            "免",
+            "配送",
+            "费",
+            '"}}',
+            "\n",
+            "</tool_call>",
+        ]
+        detector = Qwen25Detector()
+        for i, chunk in enumerate(chunks):
+            detector.parse_streaming_increment(chunk, self.tools)
+            so_far = "".join(detector.streamed_args_for_tool)
+            self.assertTrue(
+                self.expected.startswith(so_far),
+                f"After chunk {i} ({chunk!r}), streamed args {so_far!r} "
+                f"is not a prefix of expected {self.expected!r}",
+            )
+        self.assertEqual("".join(detector.streamed_args_for_tool), self.expected)
+
+    def test_value_bleed_does_not_corrupt_intent(self):
+        """The exact symptom shape from the user report: streamed args must
+        NEVER contain ``"intent": "快餐便当 免配送`` -- which would mean the
+        rewriteQuery value bled into intent's value."""
+        chunks = [
+            "<tool_call>",
+            "\n",
+            '{"',
+            "name",
+            '":',
+            ' "',
+            "search",
+            "_item",
+            '",',
+            ' "',
+            "arguments",
+            '":',
+            ' {"',
+            "intent",
+            '":',
+            ' "',
+            "快餐",
+            "便",
+            "当",
+            '",',
+            ' "',
+            "rewrite",
+            "Query",
+            '":',
+            ' "',
+            "快餐",
+            "便",
+            "当",
+            " ",
+            "免",
+            "配送",
+            "费",
+            '"}}',
+            "\n",
+            "</tool_call>",
+        ]
+        detector = Qwen25Detector()
+        # Drive streaming and snapshot at every step
+        snapshots = []
+        for chunk in chunks:
+            detector.parse_streaming_increment(chunk, self.tools)
+            snapshots.append("".join(detector.streamed_args_for_tool))
+        # Bleed-through marker: intent's value extending past 快餐便当 without
+        # a closing quote first.
+        bleed_marker = '"intent": "快餐便当 '
+        for snap in snapshots:
+            self.assertNotIn(
+                bleed_marker,
+                snap,
+                f"Detected bleed-through: {snap!r} contains "
+                f"intent value extending past its closing quote.",
+            )
+
+
+class TestUserReportedSearchItemRegression(unittest.TestCase):
+    """Drives the user-reported raw output through the real Qwen tokenizer
+    + TokenNormalizer + Qwen25Detector at multiple MTP sizes. Asserts
+    the per-step prefix invariant and that the SSE-aggregated arguments
+    equal the non-streaming canonical form."""
+
+    RAW_OUTPUT = _USER_REPORTED_RAW_OUTPUT
+    EXPECTED_ARGS = _USER_REPORTED_EXPECTED_ARGS
+    # Bleed marker: intent's value extending past its first word without
+    # a closing quote means a later value's content has leaked into it.
+    BLEED_MARKER = '"intent": "快餐便当 '
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tokenizer = _get_qwen_tokenizer()
+        cls.tools = [
+            Tool(
+                type="function",
+                function=Function(
+                    name="search_item",
+                    parameters={
+                        "type": "object",
+                        "properties": {
+                            "intent": {"type": "string"},
+                            "rewriteQuery": {"type": "string"},
+                        },
+                    },
+                ),
+            )
+        ]
+
+    def _drive_through_normalizer(
+        self, mtp_size: int
+    ) -> Tuple[List[ToolCallItem], Qwen25Detector]:
+        """Tokenize RAW_OUTPUT, deliver in fixed-size MTP chunks through
+        TokenNormalizer + Qwen25Detector, and return all emitted
+        ToolCallItems alongside the detector.
+
+        Mirrors the renderer's state model: ``output_ids`` accumulates,
+        ``last_output_ids`` only advances when the normalizer yields.
+        Skipped tokens (e.g. incomplete UTF-8)
+        stay queued in ``output_ids`` so a later chunk can resolve them.
+        """
+        if self.tokenizer is None:
+            self.skipTest("Qwen tokenizer not available")
+        ids = self.tokenizer.encode(self.RAW_OUTPUT)
+        detector = Qwen25Detector()
+        output_ids: List[int] = []  # cumulative across all chunks
+        last_output_ids: List[int] = []  # cursor; may lag if normalizer skips
+        last_token_length = 0
+        all_items = []
+        i = 0
+        while i < len(ids):
+            chunk_ids = ids[i : i + mtp_size]
+            i += mtp_size
+            output_ids = output_ids + chunk_ids
+            new_tokens = output_ids[len(last_output_ids) :]
+            prev_token_id = (
+                last_output_ids[-last_token_length:] if last_token_length > 0 else []
+            )
+            normalizer = TokenNormalizer(self.tokenizer)
+            any_yield = False
+            for delta in normalizer.normalize_tokens(prev_token_id, new_tokens):
+                any_yield = True
+                result = detector.parse_streaming_increment(delta, self.tools)
+                all_items.extend(result.calls)
+                # Per-step prefix invariant: streamed_args must remain a
+                # strict prefix of the eventual EXPECTED_ARGS.
+                streamed = "".join(detector.streamed_args_for_tool)
+                self.assertTrue(
+                    self.EXPECTED_ARGS.startswith(streamed),
+                    f"Per-step prefix invariant violated at MTP={mtp_size}: "
+                    f"streamed={streamed!r} is not a prefix of "
+                    f"expected={self.EXPECTED_ARGS!r}",
+                )
+                # Bleed marker must NEVER appear in streamed content.
+                self.assertNotIn(
+                    self.BLEED_MARKER,
+                    streamed,
+                    f"Bleed-through detected at MTP={mtp_size}: {streamed!r}",
+                )
+            if any_yield and new_tokens:
+                last_token_length = len(new_tokens)
+                last_output_ids = list(output_ids)
+                last_token_length = expand_prev_window(
+                    self.tokenizer, last_output_ids, last_token_length
+                )
+        return all_items, detector
+
+    def _assert_sse_aggregation(self, items, detector):
+        """Mirror what an OpenAI streaming client does: concatenate
+        ``parameters`` across ToolCallItems by tool_index."""
+        # Exactly one name announcement
+        names = [c for c in items if c.name]
+        self.assertEqual(
+            len(names), 1, f"Expected 1 name announcement, got {len(names)}: {items}"
+        )
+        self.assertEqual(names[0].name, "search_item")
+        # Concatenated arguments must equal the non-streaming canonical form
+        aggregated = "".join(c.parameters for c in items if c.parameters)
+        self.assertEqual(
+            aggregated,
+            self.EXPECTED_ARGS,
+            f"SSE aggregation mismatch: got {aggregated!r}, "
+            f"expected {self.EXPECTED_ARGS!r}",
+        )
+        # And the detector's internal cursor must match (same source of truth)
+        self.assertEqual("".join(detector.streamed_args_for_tool), self.EXPECTED_ARGS)
+
+    def test_real_tokenizer_token_by_token(self):
+        items, detector = self._drive_through_normalizer(mtp_size=1)
+        self._assert_sse_aggregation(items, detector)
+
+    def test_real_tokenizer_mtp_2(self):
+        items, detector = self._drive_through_normalizer(mtp_size=2)
+        self._assert_sse_aggregation(items, detector)
+
+    def test_real_tokenizer_mtp_3(self):
+        items, detector = self._drive_through_normalizer(mtp_size=3)
+        self._assert_sse_aggregation(items, detector)
+
+    def test_real_tokenizer_mtp_4(self):
+        items, detector = self._drive_through_normalizer(mtp_size=4)
+        self._assert_sse_aggregation(items, detector)
+
+    def test_real_tokenizer_mtp_5(self):
+        items, detector = self._drive_through_normalizer(mtp_size=5)
+        self._assert_sse_aggregation(items, detector)
+
+    def test_real_tokenizer_mtp_8(self):
+        """Large MTP chunks where multiple tokens cross structural
+        JSON boundaries within a single chunk."""
+        items, detector = self._drive_through_normalizer(mtp_size=8)
+        self._assert_sse_aggregation(items, detector)
+
+
+class TestProductionMTPStepBoundaries(unittest.TestCase):
+    """Detector-level reproduction: drives the production MTP token stream
+    through the normalizer + detector while inlining the renderer's
+    prev-window expansion. Asserts the streamed args equal the expected
+    JSON byte-for-byte."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tokenizer = _get_qwen_tokenizer()
+        cls.tools = [
+            Tool(
+                type="function",
+                function=Function(
+                    name="search_item",
+                    parameters={
+                        "type": "object",
+                        "properties": {
+                            "intent": {"type": "string"},
+                            "rewriteQuery": {"type": "string"},
+                        },
+                    },
+                ),
+            )
+        ]
+
+    def test_production_mtp_steps_with_prev_window_fix(self):
+        if self.tokenizer is None:
+            self.skipTest("Qwen tokenizer not available")
+
+        detector = Qwen25Detector()
+        output_ids: List[int] = []
+        last_output_ids: List[int] = []
+        last_token_length = 0
+
+        for step in _PRODUCTION_MTP_STEPS:
+            output_ids = output_ids + step
+            new_tokens = output_ids[len(last_output_ids) :]
+
+            prev_token_id = (
+                last_output_ids[-last_token_length:] if last_token_length > 0 else []
+            )
+            normalizer = TokenNormalizer(self.tokenizer)
+            any_yield = False
+            for delta in normalizer.normalize_tokens(prev_token_id, new_tokens):
+                any_yield = True
+                detector.parse_streaming_increment(delta, self.tools)
+
+            if any_yield and new_tokens:
+                last_token_length = len(new_tokens)
+                last_output_ids = list(output_ids)
+                last_token_length = expand_prev_window(
+                    self.tokenizer, last_output_ids, last_token_length
+                )
+
+        streamed = "".join(detector.streamed_args_for_tool)
+        self.assertEqual(streamed, _PRODUCTION_EXPECTED_ARGS)
+
+
+class TestRendererPrevWindowExpansion(unittest.IsolatedAsyncioTestCase):
+    """End-to-end check that the renderer (not the detector + normalizer
+    in isolation) streams the full args across MTP step boundaries with
+    orphan UTF-8 tail bytes. Uses a production debug_info token capture."""
+
+    async def _drive_renderer(self, tokenizer, token_chunks: List[List[int]]) -> str:
+        # Imports are local: keep the file importable without the renderer's
+        # transitive deps when the tokenizer (and so this test) is unavailable.
+        import torch
+
+        from rtp_llm.openai.api_datatype import (
+            ChatCompletionRequest,
+            ChatMessage,
+            GPTFunctionDefinition,
+            GPTToolDefinition,
+            RoleEnum,
+        )
+        from rtp_llm.openai.renderers.custom_renderer import RendererParams
+        from rtp_llm.openai.renderers.reasoning_tool_base_renderer import (
+            ReasoningToolBaseRenderer,
+        )
+        from rtp_llm.openai.renderers.sglang_helpers.function_call.base_format_detector import (
+            BaseFormatDetector,
+        )
+        from rtp_llm.openai.renderers.sglang_helpers.reasoning_parser import (
+            ReasoningParser,
+        )
+        from rtp_llm.utils.base_model_datatypes import AuxInfo, GenerateOutput
+
+        class _Renderer(ReasoningToolBaseRenderer):
+            def _setup_chat_template(self):
+                self.chat_template = "test"
+
+            def in_think_mode(self, request: ChatCompletionRequest) -> bool:
+                return False
+
+            def _create_detector(
+                self, request: ChatCompletionRequest
+            ) -> Optional[BaseFormatDetector]:
+                return Qwen25Detector() if request.tools else None
+
+            def _create_reasoning_parser(
+                self, request: ChatCompletionRequest
+            ) -> Optional[ReasoningParser]:
+                return None
+
+        from rtp_llm.config.py_config_modules import GenerateEnvConfig
+
+        renderer = _Renderer(
+            tokenizer=tokenizer,
+            renderer_params=RendererParams(
+                model_type="test",
+                max_seq_len=2048,
+                eos_token_id=0,
+                stop_word_ids_list=[],
+            ),
+            generate_env_config=GenerateEnvConfig(),
+        )
+        request = ChatCompletionRequest(
+            messages=[ChatMessage(role=RoleEnum.user, content="test")],
+            tools=[
+                GPTToolDefinition(
+                    type="function",
+                    function=GPTFunctionDefinition(
+                        name="search_item",
+                        description="search item",
+                        parameters={
+                            "type": "object",
+                            "properties": {
+                                "intent": {"type": "string"},
+                                "rewriteQuery": {"type": "string"},
+                            },
+                        },
+                    ),
+                )
+            ],
+        )
+
+        (status,) = await renderer._create_status_list(1, request)
+        collected_args = ""
+        # update_output() treats output.output_ids as per-iteration delta
+        # (it appends to its own accumulator), so pass per-step deltas.
+        for chunk in token_chunks:
+            aux = AuxInfo()
+            aux.input_len = 0
+            aux.output_len = len(chunk)
+            aux.reuse_len = 0
+            output = GenerateOutput()
+            output.output_ids = torch.tensor([chunk])
+            output.aux_info = aux
+
+            delta = await renderer._update_single_status(
+                status,
+                output,
+                max_new_tokens=4096,
+                stop_words_str=[],
+                stop_word_slice_list=[],
+                is_streaming=True,
+            )
+            if delta is None:
+                continue
+            msg = delta.output_str
+            if hasattr(msg, "tool_calls") and msg.tool_calls:
+                for tc in msg.tool_calls:
+                    if tc.function and tc.function.arguments:
+                        collected_args += tc.function.arguments
+        return collected_args
+
+    async def test_renderer_streams_production_mtp_capture(self):
+        """Production debug_info MTP step capture. Different request from
+        the user report; same UTF-8 prev-window bug class."""
+        tokenizer = _get_qwen_tokenizer()
+        if tokenizer is None:
+            self.skipTest("Qwen tokenizer not available")
+        collected = await self._drive_renderer(tokenizer, _PRODUCTION_MTP_STEPS)
+        self.assertEqual(
+            collected,
+            _PRODUCTION_EXPECTED_ARGS,
+            "Renderer dropped or corrupted args across MTP boundaries; "
+            "the prev-window expansion in reasoning_tool_base_renderer.py "
+            "is likely missing or broken.",
+        )
+
+    # No user-reported renderer test: the bug corrupts the field emitted
+    # AFTER the orphan boundary, and the user-reported token stream only
+    # has an orphan in the last value — so any corruption falls past the
+    # tool call's end and is invisible to the client. Detector-level
+    # user-reported coverage at MTP=1..8 lives in
+    # TestUserReportedSearchItemRegression above.
+
+
+class TestDivergenceGuard(unittest.TestCase):
+    """Negative test for the prefix-invariant divergence guard in
+    BaseFormatDetector.parse_streaming_increment (P1.3)."""
+
+    def test_diverged_streamed_args_are_dropped(self):
+        """When streamed_args_for_tool diverges from the current parse,
+        the guard must drop the diff and log an error."""
+        detector = Qwen25Detector()
+        tools = create_tools()
+
+        # Stream a partial tool call to seed streamed_args_for_tool
+        chunks = [
+            '<tool_call>\n{"name": "get_weather", "arguments": {"loca',
+            'tion": "Tokyo"',
+        ]
+        for c in chunks:
+            detector.parse_streaming_increment(c, tools)
+
+        # Mutate streamed state to simulate divergence
+        self.assertTrue(len(detector.streamed_args_for_tool) > 0)
+        detector.streamed_args_for_tool[0] = '{"location": "CORRUPTED'
+
+        # Next chunk should trigger the guard: diff is dropped, not emitted
+        with self.assertLogs(
+            "rtp_llm.openai.renderers.sglang_helpers.function_call.base_format_detector",
+            level="WARNING",
+        ) as cm:
+            result = detector.parse_streaming_increment("}}", tools)
+
+        self.assertTrue(
+            any("diverges" in msg for msg in cm.output),
+            f"Expected divergence error log, got: {cm.output}",
+        )
+        # No argument diff should have been emitted
+        arg_calls = [c for c in result.calls if c.parameters]
+        self.assertEqual(arg_calls, [], "Diverged diff must be dropped")
+        # streamed_args must not have grown
+        self.assertEqual(detector.streamed_args_for_tool[0], '{"location": "CORRUPTED')
+
+
+if __name__ == "__main__":
+    unittest.main()

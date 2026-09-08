@@ -50,6 +50,7 @@ The core features include:
    backend/server_arguments.md
    backend/sampling_params.md
    backend/attention_backend.md
+   backend/backend_registration.md
 
 .. toctree::
    :maxdepth: 1

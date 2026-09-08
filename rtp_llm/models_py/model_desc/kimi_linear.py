@@ -12,7 +12,6 @@ from typing import Any, Dict, Optional
 import torch
 from torch import nn
 
-import rtp_llm.ops.compute_ops as compute_ops
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
@@ -51,6 +50,7 @@ from rtp_llm.models_py.triton_kernels.kimi_kda import (
 from rtp_llm.models_py.utils.typed_storage_view import LinearCacheConverter
 from rtp_llm.ops import (
     AttentionConfigs,
+    HWKernelConfig,
     HybridAttentionType,
     LinearAttentionConfig,
     ParallelismConfig,
@@ -179,7 +179,7 @@ class KimiLinearKDAPrefill(KimiLinearKDABase):
         attn_inputs: PyAttentionInputs,
         metadata: Optional[CausalConv1dMetadata] = None,
     ) -> torch.Tensor:
-        cu_seqlen_without_padding = attn_inputs.cu_seqlens
+        cu_seqlen_without_padding = attn_inputs.cu_seqlens_device
         conv_states = (
             self._get_conv_states(kv_cache_tensor).transpose(1, 2)
             if kv_cache_tensor is not None
@@ -193,7 +193,7 @@ class KimiLinearKDAPrefill(KimiLinearKDABase):
             query_start_loc=cu_seqlen_without_padding,
             block_map=attn_inputs.kv_cache_kernel_block_id_device,
             seq_size_per_block=seq_size_per_block,
-            prefix_lengths=attn_inputs.prefix_lengths_d,
+            prefix_lengths=attn_inputs.prefix_lengths_device,
             metadata=metadata,
         ).transpose(0, 1)
         return out
@@ -220,7 +220,7 @@ class KimiLinearKDAPrefill(KimiLinearKDABase):
             else None
         )
         context_batch_size = attn_inputs.input_lengths.shape[0]
-        cu_seqlens_without_padding = attn_inputs.cu_seqlens
+        cu_seqlens_without_padding = attn_inputs.cu_seqlens_device
         initial_states: Optional[torch.Tensor] = None
         if ssm_states is not None:
             initial_states = torch.empty(
@@ -232,7 +232,7 @@ class KimiLinearKDAPrefill(KimiLinearKDABase):
                 dtype=self.ssm_state_dtype,
             )
             load_initial_state_from_block_map(
-                attn_inputs.prefix_lengths_d,
+                attn_inputs.prefix_lengths_device,
                 attn_inputs.kv_cache_kernel_block_id_device,
                 ssm_states,
                 initial_states,
@@ -293,7 +293,7 @@ class KimiLinearKDAPrefill(KimiLinearKDABase):
             store_ssm_state_to_block_map(
                 h_for_store,
                 final_state,
-                attn_inputs.prefix_lengths_d,
+                attn_inputs.prefix_lengths_device,
                 cu_seqlens_without_padding,
                 attn_inputs.kv_cache_kernel_block_id_device,
                 ssm_states,
@@ -334,14 +334,14 @@ class KimiLinearKDAPrefill(KimiLinearKDABase):
             seq_size_per_block,
             attn_inputs,
         )
-        if kv_cache is not None:
-            compute_ops.write_cache_store(
-                attn_inputs.input_lengths,
-                attn_inputs.prefix_lengths,
-                attn_inputs.kv_cache_block_id_host,
-                attn_inputs.cache_store_inputs,
-                kv_cache,
-            )
+        cache_store_inputs = attn_inputs.cache_store_inputs
+        cache_store_writer = attn_inputs.cache_store_writer
+        if (
+            kv_cache is not None
+            and cache_store_inputs is not None
+            and cache_store_writer is not None
+        ):
+            cache_store_writer.write(cache_store_inputs, kv_cache)
         return attn_out
 
 
@@ -370,7 +370,7 @@ class KimiLinearKDADecode(KimiLinearKDABase):
             cache_seqlens=None,
             block_map=attn_inputs.kv_cache_kernel_block_id_device,
             seq_size_per_block=seq_size_per_block,
-            sequence_lengths=attn_inputs.sequence_lengths_plus_1_d,
+            sequence_lengths=attn_inputs.sequence_lengths_plus_1_device,
         )
         out = out.transpose(1, 2).reshape(origin_shape)
         return out
@@ -431,7 +431,7 @@ class KimiLinearKDADecode(KimiLinearKDABase):
             use_gate_in_kernel=True,
             block_map=attn_inputs.kv_cache_kernel_block_id_device,
             seq_size_per_block=seq_size_per_block,
-            sequence_lengths=attn_inputs.sequence_lengths_plus_1_d,
+            sequence_lengths=attn_inputs.sequence_lengths_plus_1_device,
         )
 
         res = core_attn_out.reshape(
@@ -519,6 +519,7 @@ class KimiLinearKDA(nn.Module):
         weights: Dict[str, torch.Tensor],
         layernorm_eps: float,
         quant_config: Optional[object] = None,
+        hw_kernel_config: Optional["HWKernelConfig"] = None,
     ):
         super().__init__()
         self.linear_attn_config = linear_attn_config
@@ -526,24 +527,54 @@ class KimiLinearKDA(nn.Module):
 
         # Projections
         self.in_proj_qkv = LinearFactory.create_linear_from_weights(
-            weights, W.linear_attn_qkv_w, None, None, quant_config
+            weights,
+            W.linear_attn_qkv_w,
+            None,
+            None,
+            quant_config=quant_config,
+            hw_kernel_config=hw_kernel_config,
         )
         self.in_proj_b = LinearFactory.create_linear_from_weights(
-            weights, W.linear_attn_b_w, None, None, quant_config
+            weights,
+            W.linear_attn_b_w,
+            None,
+            None,
+            quant_config=quant_config,
+            hw_kernel_config=hw_kernel_config,
         )
         # LoRA forget gate
         self.f_a_proj = LinearFactory.create_linear_from_weights(
-            weights, W.linear_attn_f_a_w, None, None, quant_config
+            weights,
+            W.linear_attn_f_a_w,
+            None,
+            None,
+            quant_config=quant_config,
+            hw_kernel_config=hw_kernel_config,
         )
         self.f_b_proj = LinearFactory.create_linear_from_weights(
-            weights, W.linear_attn_f_b_w, None, None, quant_config
+            weights,
+            W.linear_attn_f_b_w,
+            None,
+            None,
+            quant_config=quant_config,
+            hw_kernel_config=hw_kernel_config,
         )
         # LoRA output gate
         self.g_a_proj = LinearFactory.create_linear_from_weights(
-            weights, W.linear_attn_g_a_w, None, None, quant_config
+            weights,
+            W.linear_attn_g_a_w,
+            None,
+            None,
+            quant_config=quant_config,
+            hw_kernel_config=hw_kernel_config,
         )
         self.g_b_proj = LinearFactory.create_linear_from_weights(
-            weights, W.linear_attn_g_b_w, None, None, quant_config
+            weights,
+            W.linear_attn_g_b_w,
+            None,
+            None,
+            quant_config=quant_config,
+            hw_kernel_config=hw_kernel_config,
         )
 
         self.head_k_dim = linear_attn_config.linear_key_head_dim
@@ -566,7 +597,12 @@ class KimiLinearKDA(nn.Module):
             activation="sigmoid",
         )
         self.out_proj = LinearFactory.create_linear_from_weights(
-            weights, W.linear_attn_out_w, None, None, quant_config
+            weights,
+            W.linear_attn_out_w,
+            None,
+            None,
+            quant_config=quant_config,
+            hw_kernel_config=hw_kernel_config,
         )
 
     def forward(
@@ -644,6 +680,7 @@ class KimiLinearDecoderLayer(nn.Module):
         moe_config,
         max_generate_batch_size: int = 0,
         enable_cuda_graph: bool = False,
+        hw_kernel_config: Optional["HWKernelConfig"] = None,
     ):
         super().__init__()
         self.layer_idx = layer_idx
@@ -660,6 +697,7 @@ class KimiLinearDecoderLayer(nn.Module):
                 weights,
                 config.layernorm_eps,
                 quant_config,
+                hw_kernel_config=hw_kernel_config,
             )
         else:
             # Full MLA attention layer
@@ -670,13 +708,18 @@ class KimiLinearDecoderLayer(nn.Module):
                 layer_idx,
                 config.layernorm_eps,
                 quant_config,
+                hw_kernel_config=hw_kernel_config,
             )
 
         # FFN: Dense (layer 0) or MoE (layer 1+)
         self.is_moe_layer = layer_idx in config.moe_layer_index
         if not self.is_moe_layer:
             self.mlp = DenseMLP(
-                config.activation_type, parallelism_config, weights, quant_config
+                config.activation_type,
+                parallelism_config,
+                weights,
+                quant_config,
+                hw_kernel_config=hw_kernel_config,
             )
         else:
             self.mlp = GenericMoeLayer(
@@ -686,6 +729,7 @@ class KimiLinearDecoderLayer(nn.Module):
                 moe_config,
                 max_generate_batch_size,
                 enable_cuda_graph=enable_cuda_graph,
+                hw_kernel_config=hw_kernel_config,
             )
 
         # RMSResNorm: fused residual add + layernorm
@@ -776,6 +820,7 @@ class KimiLinearModel(GptModelBase):
                     moe_config,
                     max_generate_batch_size,
                     enable_cuda_graph,
+                    hw_kernel_config=py_hw_kernel_config,
                 )
                 for idx in range(self.layer_num)
             ]
@@ -785,6 +830,16 @@ class KimiLinearModel(GptModelBase):
         )
         self.graph_padding_mask = GraphPaddingMask()
         self.graph_prefill_conv1d_metadata: Dict[int, CausalConv1dMetadata] = {}
+
+    def _get_fmha_group_tags(self) -> Optional[list[str]]:
+        if self.kv_cache is None:
+            return None
+        full_attention_layers = (
+            layer_idx
+            for layer_idx, layer in enumerate(self.layers)
+            if layer.layer_type != HybridAttentionType.LINEAR
+        )
+        return get_group_tags_for_layers(self.kv_cache, full_attention_layers)
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
         input_ids: torch.Tensor = inputs.input_ids
@@ -822,13 +877,20 @@ class KimiLinearModel(GptModelBase):
         residual = torch.zeros_like(hidden_states)
 
         for i, decoder_layer in enumerate(self.layers):
-            select_block_map_for_layer(attention_inputs, i)
+            layer_attention_inputs = select_attention_inputs_for_layer(
+                inputs, self.kv_cache, i
+            )
+            layer_fmha_impl = (
+                None
+                if decoder_layer.layer_type == HybridAttentionType.LINEAR
+                else select_fmha_impl_for_layer(fmha_impl, self.kv_cache, i)
+            )
             output = decoder_layer(
                 hidden_states,
                 residual,
-                fmha_impl,
+                layer_fmha_impl,
                 kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
-                attention_inputs=attention_inputs,
+                attention_inputs=layer_attention_inputs,
                 attn_meta=attn_meta,
                 padding_mask=padding_mask,
             )
@@ -837,4 +899,4 @@ class KimiLinearModel(GptModelBase):
 
         hidden_states, _ = self.norm(hidden_states, residual)
 
-        return PyModelOutputs(hidden_states, fmha_impl.fmha_params)
+        return PyModelOutputs(hidden_states)

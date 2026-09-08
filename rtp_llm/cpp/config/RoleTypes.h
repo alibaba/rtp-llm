@@ -11,6 +11,38 @@ enum RoleType {
     FRONTEND = 4
 };
 
+inline std::string roleTypeToString(RoleType role) {
+    switch (role) {
+        case PDFUSION:
+            return "PDFUSION";
+        case PREFILL:
+            return "PREFILL";
+        case DECODE:
+            return "DECODE";
+        case VIT:
+            return "VIT";
+        case FRONTEND:
+            return "FRONTEND";
+        default:
+            return "UNKNOWN";
+    }
+}
+
+inline RoleType stringToRoleType(const std::string& role_str) {
+    if (role_str == "PDFUSION") {
+        return PDFUSION;
+    } else if (role_str == "PREFILL") {
+        return PREFILL;
+    } else if (role_str == "DECODE") {
+        return DECODE;
+    } else if (role_str == "VIT") {
+        return VIT;
+    } else if (role_str == "FRONTEND") {
+        return FRONTEND;
+    }
+    return PDFUSION;
+}
+
 enum VitSeparation {
     VIT_SEPARATION_LOCAL  = 0,  // Local multimodal processing
     VIT_SEPARATION_ROLE   = 1,  // VIT role (separated VIT process)
@@ -29,4 +61,3 @@ public:
 };
 
 }  // namespace rtp_llm
-

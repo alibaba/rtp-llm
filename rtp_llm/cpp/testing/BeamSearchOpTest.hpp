@@ -1,6 +1,7 @@
 #pragma once
 #include "rtp_llm/cpp/testing/TestBase.h"
-#include "rtp_llm/models_py/bindings/cuda/ops/BeamSearchOp.h"
+#include "rtp_llm/models_py/bindings/core/ops/BeamSearchOp.h"
+#include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include <torch/torch.h>
 
 using namespace rtp_llm;
@@ -70,17 +71,15 @@ public:
     };
 
     TestBeamSearchOutput opRun(TestBeamSearchInput& input) {
-        torch_impl::BeamSearchOp beam_search;
-        beam_search.ptr()->to(torch::Device(torch::kCUDA));
+        auto logits     = input.logits.to(torch::kCUDA);
+        auto cuda_input = BeamSearchParams({logits,
+                                            input.token_ids.to(torch::kCUDA),
+                                            input.input_lengths.to(torch::kCUDA),
+                                            input.sequence_lengths.to(torch::kCUDA),
+                                            input.cum_log_probs.to(torch::kCUDA),
+                                            static_cast<size_t>(input.beam_width_out)});
 
-        auto cuda_input = torch_impl::BeamSearchOpInput({input.logits.to(torch::kCUDA),
-                                                         input.token_ids.to(torch::kCUDA),
-                                                         input.input_lengths.to(torch::kCUDA),
-                                                         input.sequence_lengths.to(torch::kCUDA),
-                                                         input.cum_log_probs.to(torch::kCUDA),
-                                                         input.beam_width_out});
-
-        auto result = beam_search->forward(cuda_input);
+        auto result = execSampleBeamSearch(std::move(cuda_input));
 
         return TestBeamSearchOutput({result.token_ids.cpu(),
                                      result.input_lengths.cpu(),
@@ -128,5 +127,42 @@ public:
 
         // assertTensorClose(result.token_ids, ref.token_ids);
         // assertTensorClose(result.beam_indices, ref.beam_indices);
+    }
+
+    void runSimpleTests() {
+        std::vector<int> batch_sizes  = {1, 2, 15, 32};
+        std::vector<int> beam_widths  = {1, 2, 4, 5, 64, 70, 128, 500, 1024, 2500};
+        std::vector<int> max_seq_lens = {10, 100, 1000};
+        const int        vocab_size   = 7000;
+        for (auto batch_size : batch_sizes) {
+            for (auto beam_width : beam_widths) {
+                for (auto seq_len : max_seq_lens) {
+                    std::cout << "batch_size: " << batch_size << ", beam_width: " << beam_width
+                              << ", vocab_size: " << vocab_size << ", seq_len: " << seq_len << std::endl;
+                    simpleTest(batch_size, beam_width, vocab_size, seq_len);
+                }
+            }
+        }
+    }
+
+    void runVariableBeamWidthTests() {
+        std::vector<int> batch_sizes  = {1, 2, 31};
+        std::vector<int> beam_widths  = {1, 5, 70, 500, 2500};
+        std::vector<int> max_seq_lens = {10, 500};
+        const int        vocab_size   = 7000;
+        for (auto batch_size : batch_sizes) {
+            for (auto beam_width_in : beam_widths) {
+                for (auto beam_width_out : beam_widths) {
+                    if (beam_width_in == beam_width_out)
+                        continue;
+                    for (auto seq_len : max_seq_lens) {
+                        std::cout << "batch_size: " << batch_size << ", beam_width_in: " << beam_width_in
+                                  << ", beam_width_out: " << beam_width_out << ", vocab_size: " << vocab_size
+                                  << ", seq_len: " << seq_len << std::endl;
+                        variableBeamWidthTest(batch_size, beam_width_in, beam_width_out, vocab_size, seq_len);
+                    }
+                }
+            }
+        }
     }
 };

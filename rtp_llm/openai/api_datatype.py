@@ -1,10 +1,12 @@
 import time
 from enum import Enum
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Literal, Optional, Union
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
 
-from rtp_llm.config.generate_config import GenerateConfig
+from rtp_llm.config.generate_config import GenerateConfig, ThinkingMode
+from rtp_llm.config.grammar_constraint import GRAMMAR_FIELD_NAMES
+from rtp_llm.config.response_format import ResponseFormat, parse_response_format
 from rtp_llm.utils.base_model_datatypes import AuxInfo
 
 
@@ -25,7 +27,7 @@ class ModelList(BaseModel):
 
 class FunctionCall(BaseModel):
     name: Optional[str]
-    arguments: Optional[str]
+    arguments: Optional[Union[str, Dict[str, Any], List[Any]]]
 
 
 class ToolCall(BaseModel):
@@ -61,6 +63,10 @@ class MMPreprocessConfigPart(BaseModel):
     fps: Optional[int] = None
     min_frames: Optional[int] = None
     max_frames: Optional[int] = None
+    crop_positions: Optional[str] = None
+    # Unset values inherit MM_TIMEOUT_MS (120s by default). Set MM_TIMEOUT_MS=30000
+    # to preserve the legacy 30s timeout for requests that omit this field.
+    mm_timeout_ms: int = -1
 
 
 class IgraphInfo(BaseModel):
@@ -90,6 +96,7 @@ class ContentPart(BaseModel):
 class ChatMessage(BaseModel):
     role: RoleEnum
     content: Union[str, None, List[ContentPart]] = ""
+    name: Optional[str] = None
     reasoning_content: Optional[str] = None
     function_call: Optional[FunctionCall] = None
     tool_calls: Optional[List[ToolCall]] = None
@@ -121,21 +128,58 @@ class GPTToolDefinition(BaseModel):
     function: GPTFunctionDefinition
 
 
+ToolChoice = Union[Literal["none", "auto", "required"], Dict[str, Any]]
+
+
+def get_tool_choice_function_name(tool_choice: Optional[ToolChoice]) -> Optional[str]:
+    if tool_choice is None:
+        return None
+    if isinstance(tool_choice, str):
+        if tool_choice in {"none", "auto", "required"}:
+            return None
+        raise ValueError(
+            "tool_choice must be 'none', 'auto', 'required', or a function choice"
+        )
+    if not isinstance(tool_choice, dict):
+        raise ValueError(
+            "tool_choice must be 'none', 'auto', 'required', or a function choice"
+        )
+    if tool_choice.get("type") != "function":
+        raise ValueError("tool_choice.type must be 'function'")
+
+    function = tool_choice.get("function")
+    if not isinstance(function, dict):
+        raise ValueError("tool_choice.function must be an object")
+    name = function.get("name")
+    if not isinstance(name, str) or not name:
+        raise ValueError("tool_choice.function.name must be a non-empty string")
+    return name
+
+
 class ChatCompletionRequest(BaseModel):
     model: Optional[str] = None
     messages: List[ChatMessage]
     functions: Optional[List[GPTFunctionDefinition]] = None
     tools: Optional[List[GPTToolDefinition]] = None
+    tool_choice: Optional[ToolChoice] = None
+    reasoning_effort: Optional[str] = None
     temperature: Optional[float] = 0.7
     top_p: Optional[float] = 1.0
+    top_k: Optional[int] = None
     max_tokens: Optional[int] = None
+    max_completion_tokens: Optional[int] = None
+    thinking_budget: Optional[int] = None
     stop: Optional[Union[str, List[str]]] = Field(default_factory=list)
     stream: Optional[bool] = False
     user: Optional[str] = None
     seed: Optional[int] = None
     n: Optional[int] = None
     logprobs: Optional[bool] = None
+    logprobs_mode: Optional[Literal["original", "default"]] = None
     top_logprobs: Optional[int] = None
+    prompt_logprobs: Optional[int] = None
+    response_format: Optional[ResponseFormat] = None
+    json_format: Optional[bool] = None
 
     # ---- These functions are not implemented yet.
     # presence_penalty: Optional[float] = 0.0
@@ -156,6 +200,44 @@ class ChatCompletionRequest(BaseModel):
     )
     master_info: Optional[Dict[str, Any]] = None
     chat_template_kwargs: Optional[Dict[str, Any]] = None
+    enable_thinking: Optional[bool] = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_nested_structured_output_fields(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        extra_configs = data.get("extra_configs")
+        if isinstance(extra_configs, dict):
+            forbidden = ("response_format", "json_format", *GRAMMAR_FIELD_NAMES)
+            present = [name for name in forbidden if name in extra_configs]
+            if present:
+                raise ValueError(
+                    "structured output must use top-level response_format; "
+                    f"extra_configs contains: {', '.join(present)}"
+                )
+        return data
+
+    @field_validator("response_format", mode="before")
+    @classmethod
+    def _parse_response_format(cls, value):
+        return parse_response_format(value)
+
+    @model_validator(mode="after")
+    def _check_tool_choice(self) -> "ChatCompletionRequest":
+        if self.tool_choice == "required" and not self.tools:
+            raise ValueError("tool_choice='required' requires non-empty tools")
+
+        name = get_tool_choice_function_name(self.tool_choice)
+        if name is None:
+            return self
+
+        if not self.tools:
+            raise ValueError("tool_choice function requires non-empty tools")
+        tool_names = {tool.function.name for tool in self.tools}
+        if name not in tool_names:
+            raise ValueError(f"tool_choice function {name!r} is not in tools")
+        return self
 
     @staticmethod
     def is_openai_request(request: Dict[str, Any]):
@@ -167,17 +249,86 @@ class ChatCompletionRequest(BaseModel):
             and self.extra_configs.chat_template_kwargs is not None
         ):
             return self.extra_configs.chat_template_kwargs
-        else:
-            return self.chat_template_kwargs
+        return self.chat_template_kwargs
+
+    def enable_thinking_requested(self):
+        if self.enable_thinking is True:
+            return True
+        chat_template_kwargs = self.get_chat_template_kwargs()
+        return (
+            chat_template_kwargs is not None
+            and chat_template_kwargs.get("enable_thinking") is True
+        )
+
+    def get_enable_thinking(self, default: Optional[bool] = None) -> Optional[bool]:
+        chat_template_kwargs = self.get_chat_template_kwargs()
+        if (
+            chat_template_kwargs is None
+            or "enable_thinking" not in chat_template_kwargs
+        ):
+            return default
+        enable_thinking = chat_template_kwargs["enable_thinking"]
+        if enable_thinking is True or enable_thinking is False:
+            return enable_thinking
+        raise ValueError("chat_template_kwargs.enable_thinking must be a boolean")
 
     def disable_thinking(self):
+        if self.thinking_budget == 0:
+            return True
         if (
-            self.get_chat_template_kwargs() is not None
-            and self.get_chat_template_kwargs().get("enable_thinking", True) is False
+            self.extra_configs is not None
+            and self.extra_configs.max_thinking_tokens == 0
         ):
             return True
-        else:
-            return False
+        if self.enable_thinking is False:
+            return True
+        chat_template_kwargs = self.get_chat_template_kwargs()
+        if (
+            chat_template_kwargs is not None
+            and chat_template_kwargs.get("enable_thinking", True) is False
+        ):
+            return True
+        return False
+
+    def get_explicit_thinking_mode(self) -> Optional[ThinkingMode]:
+        chat_template_kwargs = self.get_chat_template_kwargs() or {}
+        requested_mode: Optional[ThinkingMode] = None
+        if "thinking_mode" in chat_template_kwargs:
+            raw_mode = chat_template_kwargs["thinking_mode"]
+            request_modes = {
+                "disabled": ThinkingMode.DISABLED,
+                "adaptive": ThinkingMode.ADAPTIVE,
+                "enabled": ThinkingMode.ENABLED,
+            }
+            if not isinstance(raw_mode, str) or raw_mode not in request_modes:
+                raise ValueError(
+                    "chat_template_kwargs.thinking_mode must be one of: "
+                    "disabled, adaptive, enabled"
+                )
+            requested_mode = request_modes[raw_mode]
+
+        if self.disable_thinking():
+            return ThinkingMode.DISABLED
+        if self.enable_thinking is True:
+            return ThinkingMode.ENABLED
+
+        if (
+            self.extra_configs is not None
+            and "thinking_mode" in self.extra_configs.model_fields_set
+            and self.extra_configs.thinking_mode != ThinkingMode.UNSPECIFIED
+        ):
+            return self.extra_configs.thinking_mode
+
+        if requested_mode is not None:
+            return requested_mode
+        if chat_template_kwargs.get("enable_thinking") is True:
+            return ThinkingMode.ENABLED
+        return None
+
+    def resolve_thinking_mode(
+        self, default_mode: ThinkingMode = ThinkingMode.DISABLED
+    ) -> ThinkingMode:
+        return self.get_explicit_thinking_mode() or default_mode
 
 
 class BatchChatCompletionRequest(BaseModel):
@@ -196,6 +347,8 @@ class CompletionTokensDetails(BaseModel):
 class PromptTokensDetails(BaseModel):
     audio_tokens: Optional[int] = None
     cached_tokens: Optional[int] = None
+    image_tokens: Optional[int] = None
+    video_tokens: Optional[int] = None
 
 
 class UsageInfo(BaseModel):
@@ -280,6 +433,7 @@ class ChatCompletionResponse(BaseModel):
     debug_info: Optional[Union[DebugInfo, str]] = None
     aux_info: Optional[AuxInfo] = None
     extra_outputs: Optional[ChatCompletionExtraOutputs] = None
+    prompt_logprobs: Optional[Dict[str, Any]] = None
 
 
 class DeltaMessage(BaseModel):

@@ -131,9 +131,10 @@ TEST_F(MemoryAsyncContextTest, waitDone_ReturnVoid_WhenBroadcastResultNullAndCal
     EXPECT_TRUE(ctx->done());
 }
 
-TEST_F(MemoryAsyncContextTest, waitDone_ReturnsImmediately_WhenBroadcastResultNotSet_ThenCallbackOnce) {
+TEST_F(MemoryAsyncContextTest, waitDone_BlocksUntilBroadcastResultSet_ThenCallbackOnce) {
     std::atomic<int>  callback_cnt{0};
     std::atomic<bool> last_ok{true};
+    std::atomic<bool> wait_returned{false};
     auto              cb = [&](bool ok) {
         callback_cnt.fetch_add(1);
         last_ok.store(ok);
@@ -142,17 +143,24 @@ TEST_F(MemoryAsyncContextTest, waitDone_ReturnsImmediately_WhenBroadcastResultNo
     auto ctx = std::make_shared<rtp_llm::MemoryAsyncContext>(cb);
     EXPECT_FALSE(ctx->done());
 
-    std::thread t([&]() { ctx->waitDone(); });
+    std::thread t([&]() {
+        ctx->waitDone();
+        wait_returned.store(true);
+    });
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    // 如果 broadcast_result_ 还没设置，waitDone() 不会阻塞，而是按失败处理并回调一次。
-    EXPECT_TRUE(ctx->done());
-    EXPECT_EQ(callback_cnt.load(), 1);
-    EXPECT_FALSE(last_ok.load());
+    // waitDone() must not finalize before startCopyAsync() publishes its BroadcastResult.
+    EXPECT_FALSE(wait_returned.load());
+    EXPECT_FALSE(ctx->done());
+    EXPECT_EQ(callback_cnt.load(), 0);
 
-    ctx->setBroadcastResult(nullptr);
+    // Empty worker contexts => BroadcastResult::waitDone() returns immediately and marks success.
+    auto result = std::make_shared<MemoryBroadcastResultT>(std::vector<std::shared_ptr<MemoryWorkerCtxT>>{});
+    ctx->setBroadcastResult(result);
     t.join();
     EXPECT_TRUE(ctx->done());
+    EXPECT_TRUE(wait_returned.load());
     EXPECT_EQ(callback_cnt.load(), 1);
+    EXPECT_TRUE(last_ok.load());
 }
 
 TEST_F(MemoryAsyncContextTest, waitDone_ReturnVoid_WhenBroadcastResultNonNullAndCallbackReceivesSuccess) {
@@ -216,6 +224,78 @@ TEST_F(MemoryAsyncContextTest, waitDone_IsIdempotent_CallbackOnlyOnce) {
     EXPECT_TRUE(ctx->success());
     EXPECT_EQ(callback_cnt, 1);
     EXPECT_TRUE(last_ok);
+}
+
+TEST_F(MemoryAsyncContextTest, waitDone_ConcurrentCallersFinalizeOnce) {
+    std::atomic<int>  callback_cnt{0};
+    std::atomic<bool> last_ok{false};
+    auto              cb = [&](bool ok) {
+        callback_cnt.fetch_add(1);
+        last_ok.store(ok);
+    };
+
+    auto result = std::make_shared<MemoryBroadcastResultT>(std::vector<std::shared_ptr<MemoryWorkerCtxT>>{});
+    auto ctx    = std::make_shared<rtp_llm::MemoryAsyncContext>(cb);
+
+    std::vector<std::thread> waiters;
+    for (size_t i = 0; i < 8; ++i) {
+        waiters.emplace_back([&]() { ctx->waitDone(); });
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    EXPECT_FALSE(ctx->done());
+    EXPECT_EQ(callback_cnt.load(), 0);
+
+    ctx->setBroadcastResult(result);
+    for (auto& waiter : waiters) {
+        waiter.join();
+    }
+
+    EXPECT_TRUE(ctx->done());
+    EXPECT_TRUE(ctx->success());
+    EXPECT_EQ(callback_cnt.load(), 1);
+    EXPECT_TRUE(last_ok.load());
+}
+
+TEST_F(MemoryAsyncContextTest, markFailed_UnblocksWaiterAndReportsFailure) {
+    std::atomic<int>  callback_cnt{0};
+    std::atomic<bool> last_ok{true};
+    std::atomic<bool> wait_returned{false};
+    auto              cb = [&](bool ok) {
+        callback_cnt.fetch_add(1);
+        last_ok.store(ok);
+    };
+
+    auto        ctx = std::make_shared<rtp_llm::MemoryAsyncContext>(cb);
+    std::thread waiter([&]() {
+        ctx->waitDone();
+        wait_returned.store(true);
+    });
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    EXPECT_FALSE(wait_returned.load());
+
+    ctx->markFailed("send failed");
+    waiter.join();
+
+    EXPECT_TRUE(ctx->done());
+    EXPECT_FALSE(ctx->success());
+    EXPECT_TRUE(wait_returned.load());
+    EXPECT_EQ(callback_cnt.load(), 1);
+    EXPECT_FALSE(last_ok.load());
+}
+
+TEST_F(MemoryAsyncContextTest, waitDone_CallbackExceptionMarksFailure) {
+    auto result = std::make_shared<MemoryBroadcastResultT>(std::vector<std::shared_ptr<MemoryWorkerCtxT>>{});
+    auto ctx    = std::make_shared<rtp_llm::MemoryAsyncContext>([](bool ok) {
+        EXPECT_TRUE(ok);
+        throw std::runtime_error("callback failed");
+    });
+
+    ctx->setBroadcastResult(result);
+    ctx->waitDone();
+
+    EXPECT_TRUE(ctx->done());
+    EXPECT_FALSE(ctx->success());
 }
 
 }  // namespace rtp_llm::test

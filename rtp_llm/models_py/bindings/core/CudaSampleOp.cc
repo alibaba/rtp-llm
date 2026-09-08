@@ -1,13 +1,18 @@
 #include "rtp_llm/models_py/bindings/core/OpData.h"
 #include "rtp_llm/models_py/bindings/core/CommonDefines.h"
 
+#include <limits>
+
 #if USING_CUDA
 #include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDAGuard.h>
 #include "rtp_llm/models_py/bindings/cuda/cuda_host_utils.h"
 #include "rtp_llm/models_py/bindings/common/kernels/sampling_penalty_kernels.h"
 #include "rtp_llm/models_py/bindings/common/kernels/banRepeatNgram.h"
+#include "rtp_llm/models_py/bindings/common/kernels/vocab_prune/mapping.h"
+#include "rtp_llm/models_py/bindings/cuda/kernels/speculative_sampling/sampling.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
-#include "3rdparty/flashinfer/flashinfer.h"
+#include "rtp_llm/models_py/bindings/cuda/kernels/sampling/sampling.h"
 #include <cstddef>
 #include <random>
 #include <memory>
@@ -17,11 +22,158 @@ using namespace std;
 
 namespace rtp_llm {
 
+namespace {
+
+struct RejectionSamplingLaunchConfig {
+    int batch_size;
+    int num_speculative_tokens;
+    int target_vocab_size;
+    int target_token_stride;
+};
+
+void checkRejectionSamplingTensor(const torch::Tensor& tensor, const char* name, c10::ScalarType dtype, int64_t dim) {
+    RTP_LLM_CHECK_WITH_INFO(tensor.defined(), "%s must be defined", name);
+    RTP_LLM_CHECK_WITH_INFO(tensor.is_cuda(), "%s must be on CUDA/HIP device", name);
+    RTP_LLM_CHECK_WITH_INFO(tensor.scalar_type() == dtype, "%s dtype mismatch", name);
+    RTP_LLM_CHECK_WITH_INFO(tensor.dim() == dim,
+                            "%s must be %ld-D, got %ld-D",
+                            name,
+                            static_cast<long>(dim),
+                            static_cast<long>(tensor.dim()));
+    RTP_LLM_CHECK_WITH_INFO(tensor.is_contiguous(), "%s must be contiguous", name);
+}
+
+void checkSameDevice(const torch::Tensor& tensor, const char* name, const c10::Device& device) {
+    RTP_LLM_CHECK_WITH_INFO(tensor.device() == device, "%s must be on the same device as draft_token_ids_d", name);
+}
+
+RejectionSamplingLaunchConfig validateRejectionSamplingParams(const RejectionSamplingParams& params) {
+    // An in-model proposer (DSpARK) emits draft tokens, not per-vocab draft
+    // probabilities. In that case draft_probs_d is intentionally undefined and
+    // the kernel treats q(draft_token) == 1, so all shapes must be derived from
+    // draft_token_ids_d / target_probs_d instead of draft_probs_d.
+    const bool point_mass = params.draft_probs_point_mass;
+
+    checkRejectionSamplingTensor(params.draft_token_ids_d, "draft_token_ids_d", torch::kInt32, 2);
+    const auto device = params.draft_token_ids_d.device();
+
+    if (!point_mass) {
+        checkRejectionSamplingTensor(params.draft_probs_d, "draft_probs_d", torch::kFloat32, 3);
+        checkSameDevice(params.draft_probs_d, "draft_probs_d", device);
+    }
+    checkRejectionSamplingTensor(params.uniform_samples_d, "uniform_samples_d", torch::kFloat32, 2);
+    checkRejectionSamplingTensor(params.target_probs_d, "target_probs_d", torch::kFloat32, 3);
+    checkRejectionSamplingTensor(params.target_token_ids_d, "target_token_ids_d", torch::kInt32, 2);
+    checkRejectionSamplingTensor(params.output_token_ids_d, "output_token_ids_d", torch::kInt32, 2);
+    checkRejectionSamplingTensor(params.output_accepted_token_num_d, "output_accepted_token_num_d", torch::kInt32, 1);
+    checkRejectionSamplingTensor(params.do_sample_d, "do_sample_d", torch::kBool, 1);
+
+    checkSameDevice(params.uniform_samples_d, "uniform_samples_d", device);
+    checkSameDevice(params.target_probs_d, "target_probs_d", device);
+    checkSameDevice(params.target_token_ids_d, "target_token_ids_d", device);
+    checkSameDevice(params.output_token_ids_d, "output_token_ids_d", device);
+    checkSameDevice(params.output_accepted_token_num_d, "output_accepted_token_num_d", device);
+    checkSameDevice(params.do_sample_d, "do_sample_d", device);
+
+    const int64_t batch_size             = params.draft_token_ids_d.size(0);
+    const int64_t num_speculative_tokens = params.draft_token_ids_d.size(1);
+    const int64_t target_vocab_size      = params.target_probs_d.size(2);
+    const int64_t target_token_stride    = params.target_token_ids_d.size(1);
+
+    RTP_LLM_CHECK_WITH_INFO(target_vocab_size > 0, "target_vocab_size must be positive");
+    RTP_LLM_CHECK_WITH_INFO(target_token_stride > 0, "target_token_ids_d stride dimension must be positive");
+    RTP_LLM_CHECK_WITH_INFO(batch_size <= std::numeric_limits<int>::max(), "batch_size too large");
+    RTP_LLM_CHECK_WITH_INFO(num_speculative_tokens <= std::numeric_limits<int>::max(),
+                            "num_speculative_tokens too large");
+    RTP_LLM_CHECK_WITH_INFO(target_vocab_size <= std::numeric_limits<int>::max(), "target_vocab_size too large");
+    RTP_LLM_CHECK_WITH_INFO(target_token_stride <= std::numeric_limits<int>::max(), "target_token_stride too large");
+
+    const int64_t target_token_rows = batch_size * (num_speculative_tokens + 1);
+
+    if (!point_mass) {
+        RTP_LLM_CHECK_WITH_INFO(params.draft_probs_d.size(0) == batch_size, "draft_probs_d shape[0] mismatch");
+        RTP_LLM_CHECK_WITH_INFO(params.draft_probs_d.size(1) == num_speculative_tokens,
+                                "draft_probs_d shape[1] mismatch");
+        RTP_LLM_CHECK_WITH_INFO(params.draft_probs_d.size(2) == target_vocab_size, "draft_probs_d shape[2] mismatch");
+    }
+    RTP_LLM_CHECK_WITH_INFO(params.uniform_samples_d.size(0) == batch_size, "uniform_samples_d shape[0] mismatch");
+    RTP_LLM_CHECK_WITH_INFO(params.uniform_samples_d.size(1) == num_speculative_tokens + 1,
+                            "uniform_samples_d shape[1] mismatch");
+    RTP_LLM_CHECK_WITH_INFO(params.target_probs_d.size(0) == batch_size, "target_probs_d shape[0] mismatch");
+    RTP_LLM_CHECK_WITH_INFO(params.target_probs_d.size(1) == num_speculative_tokens + 1,
+                            "target_probs_d shape[1] mismatch");
+    RTP_LLM_CHECK_WITH_INFO(params.target_probs_d.size(2) == target_vocab_size, "target_probs_d shape[2] mismatch");
+    RTP_LLM_CHECK_WITH_INFO(params.target_token_ids_d.size(0) == target_token_rows,
+                            "target_token_ids_d shape[0] mismatch");
+    RTP_LLM_CHECK_WITH_INFO(params.output_token_ids_d.size(0) == batch_size, "output_token_ids_d shape[0] mismatch");
+    RTP_LLM_CHECK_WITH_INFO(params.output_token_ids_d.size(1) == num_speculative_tokens + 1,
+                            "output_token_ids_d shape[1] mismatch");
+    RTP_LLM_CHECK_WITH_INFO(params.output_accepted_token_num_d.size(0) == batch_size,
+                            "output_accepted_token_num_d shape[0] mismatch");
+    RTP_LLM_CHECK_WITH_INFO(params.do_sample_d.size(0) == batch_size, "do_sample_d shape[0] mismatch");
+
+    return {static_cast<int>(batch_size),
+            static_cast<int>(num_speculative_tokens),
+            static_cast<int>(target_vocab_size),
+            static_cast<int>(target_token_stride)};
+}
+
+}  // anonymous namespace
+
 #if USING_CUDA
 
 using SamplerT = float;
 
 namespace {
+
+torch::Tensor getSamplingHostBufferSlice(const torch::Tensor& buffer, int64_t batch_size, const char* buffer_name) {
+    RTP_LLM_CHECK_WITH_INFO(buffer.defined(), "%s is not initialized", buffer_name);
+    RTP_LLM_CHECK_WITH_INFO(buffer.device().is_cpu(), "%s must be a CPU tensor", buffer_name);
+    RTP_LLM_CHECK_WITH_INFO(buffer.scalar_type() == torch::kInt64, "%s must be an int64 tensor", buffer_name);
+    RTP_LLM_CHECK_WITH_INFO(buffer.numel() >= batch_size,
+                            "%s capacity [%ld] is smaller than batch size [%ld]",
+                            buffer_name,
+                            buffer.numel(),
+                            batch_size);
+    return buffer.narrow(0, 0, batch_size);
+}
+
+std::pair<torch::Tensor, torch::Tensor> makeSamplingSeedOffsetTensors(const std::vector<at::Generator>& generators,
+                                                                      int64_t                           batch_size,
+                                                                      int                               increment,
+                                                                      GreedySamplingBuffers* sampling_buffers) {
+    RTP_LLM_CHECK_WITH_INFO(generators.size() >= static_cast<size_t>(batch_size),
+                            "sampling generators size [%lu] is smaller than batch size [%ld]",
+                            generators.size(),
+                            batch_size);
+    const bool    use_persistent_buffers = sampling_buffers != nullptr;
+    auto          options                = torch::TensorOptions().dtype(torch::kInt64).pinned_memory(true);
+    torch::Tensor seed_h;
+    torch::Tensor offset_h;
+    if (use_persistent_buffers) {
+        seed_h   = getSamplingHostBufferSlice(sampling_buffers->seed_host, batch_size, "sampling seed buffer");
+        offset_h = getSamplingHostBufferSlice(sampling_buffers->offset_host, batch_size, "sampling offset buffer");
+    } else {
+        seed_h   = torch::empty({batch_size}, options);
+        offset_h = torch::empty({batch_size}, options);
+    }
+    auto seed_ptr = seed_h.data_ptr<int64_t>();
+    auto off_ptr  = offset_h.data_ptr<int64_t>();
+
+    for (int64_t i = 0; i < batch_size; ++i) {
+        // Undefined generator entries intentionally use PyTorch's default CUDA generator.
+        auto generator      = (i < static_cast<int64_t>(generators.size()) && generators[i].defined()) ?
+                                  std::make_optional(generators[i]) :
+                                  std::nullopt;
+        auto [seed, offset] = get_seed_and_offset(increment, generator);
+        seed_ptr[i]         = static_cast<int64_t>(seed);
+        off_ptr[i]          = static_cast<int64_t>(offset);
+    }
+
+    auto seed_d   = seed_h.to(torch::kCUDA, /*non_blocking=*/use_persistent_buffers).contiguous();
+    auto offset_d = offset_h.to(torch::kCUDA, /*non_blocking=*/use_persistent_buffers).contiguous();
+    return {seed_d, offset_d};
+}
 
 void processLogits(const GreedyParams&  params,
                    const torch::Tensor& device_tokens,
@@ -94,20 +246,31 @@ void processLogits(const GreedyParams&  params,
                    [](auto s) { return s != 0; })) {
             auto no_repeat_ngram_size_gpu = no_repeat_ngram_size.to(torch::kCUDA, true);
             // Build array of pointers to each batch's token ids
-            auto output_ids_ptrs =
-                torch::empty({(int64_t)decoder_batch_size}, torch::TensorOptions().dtype(torch::kInt64)).pin_memory();
+            const bool    use_persistent_buffers = params.sampling_buffers != nullptr;
+            torch::Tensor output_ids_ptrs;
+            if (use_persistent_buffers) {
+                output_ids_ptrs = getSamplingHostBufferSlice(params.sampling_buffers->output_ids_ptrs_host,
+                                                             decoder_batch_size,
+                                                             "sampling output ids ptrs buffer");
+            } else {
+                output_ids_ptrs = torch::empty({(int64_t)decoder_batch_size},
+                                               torch::TensorOptions().dtype(torch::kInt64).pinned_memory(true));
+            }
             for (int64_t i = 0; i < (int64_t)decoder_batch_size; i++) {
                 output_ids_ptrs.data_ptr<int64_t>()[i] = (int64_t)(device_tokens.data_ptr<int32_t>() + i * (step + 1));
             }
-            auto output_ids_ptrs_gpu  = output_ids_ptrs.to(torch::kCUDA, true);
-            auto sequence_lengths_gpu = params.sequence_lengths.to(torch::kCUDA, true);
+            auto output_ids_ptrs_gpu = output_ids_ptrs.to(torch::kCUDA, use_persistent_buffers);
+            // SamplerInputs stores real sequence lengths, while the imported
+            // TensorRT-LLM no-repeat kernel still expects the last valid
+            // token index and adds one internally.
+            auto sequence_last_indexes_gpu = params.sequence_lengths.to(torch::kCUDA, true).sub(1);
 
             tensorrt_llm::kernels::invokeBanRepeatNgram(params.logits.data_ptr<float>(),
                                                         (int32_t const**)(output_ids_ptrs_gpu.data_ptr()),
                                                         nullptr,  // finished_buf
                                                         nullptr,  // parent_ids_buf
                                                         nullptr,  // batch_slot
-                                                        sequence_lengths_gpu.data_ptr<int32_t>(),
+                                                        sequence_last_indexes_gpu.data_ptr<int32_t>(),
                                                         decoder_batch_size,
                                                         1,  // beam_width
                                                         step + 1,
@@ -135,16 +298,10 @@ static GreedyOutput flashinferSampleGreedy(const GreedyParams& params, const tor
     // [1, batch_size] — last row of transposed_tokens
     auto samples_t = transposed_tokens.slice(0, transposed_tokens.size(0) - 1, transposed_tokens.size(0));
 
-    torch::TensorOptions options          = torch::TensorOptions(probs_t.scalar_type()).device(torch::kCUDA);
-    constexpr bool       deterministic    = true;
-    constexpr int        max_top_k_rounds = 32;
-    auto                 uniform_samples  = torch::rand({max_top_k_rounds, (int)batch_size}, options);
-    for (int64_t i = 0; i < (int64_t)batch_size; i++) {
-        if (params.generator[i].defined()) {
-            uniform_samples.index({torch::indexing::Slice(), i}) =
-                torch::rand({max_top_k_rounds}, params.generator[i], nullopt, options);
-        }
-    }
+    constexpr bool deterministic       = true;
+    constexpr int  max_sampling_rounds = 32;
+    auto [seed_t, offset_t] =
+        makeSamplingSeedOffsetTensors(params.generator, batch_size, max_sampling_rounds, params.sampling_buffers);
 
     torch::Tensor success_t = success;
     torch::Tensor top_k_t   = params.top_k;
@@ -156,60 +313,102 @@ static GreedyOutput flashinferSampleGreedy(const GreedyParams& params, const tor
     if (params.cum_log_probs.has_value() && !output_all_probs_t.defined()) {
         output_all_probs_t = torch::zeros_like(probs_t);
     }
+    const auto output_width = output_all_probs_t.defined() ? output_all_probs_t.size(1) : probs_t.size(1);
+    RTP_LLM_CHECK_WITH_INFO(output_width > 0 && output_width <= probs_t.size(1),
+                            "output probability width must be in (0, padded vocab size]");
+    const bool need_full_sampling_probs = output_all_probs_t.defined() && output_width < probs_t.size(1);
+    auto       sampling_probs_t         = need_full_sampling_probs ? torch::zeros_like(probs_t) : output_all_probs_t;
 
     // top_k/top_p are CPU tensors with int32/float32 dtype
-    auto top_k_ptr = reinterpret_cast<uint32_t*>(params.top_k.data_ptr<int32_t>());
+    auto top_k_ptr = params.top_k.data_ptr<int32_t>();
     auto top_p_ptr = params.top_p.data_ptr<float>();
 
     std::transform(top_p_ptr, top_p_ptr + batch_size, top_p_ptr, [&](auto t) { return std::abs(t) < 1e-7 ? 1.0 : t; });
 
-    if (std::all_of(top_k_ptr, top_k_ptr + batch_size, [&](auto t) { return t == 1; })) {
+    const bool need_renorm_probs  = sampling_probs_t.defined() && !params.return_original_all_probs;
+    const bool all_top_k_one      = std::all_of(top_k_ptr, top_k_ptr + batch_size, [](auto t) { return t == 1; });
+    const bool all_top_k_no_limit = std::all_of(top_k_ptr, top_k_ptr + batch_size, [](auto t) { return t <= 0; });
+    const bool all_top_p_one =
+        std::all_of(top_p_ptr, top_p_ptr + batch_size, [](auto t) { return std::abs(t - 1.0f) < 1e-7; });
+
+    if (all_top_k_one) {
         torch::Tensor selected_tokens = torch::argmax(probs_t, -1, /*keepdim=*/false);
         samples_t.copy_(selected_tokens, true);
         success = torch::Tensor();  // mark as undefined — all succeeded
-        if (output_all_probs_t.defined()) {
-            top_k_renorm_probs(probs_t, output_all_probs_t, top_k_t, 0, (int64_t)cur_stream);
+        if (need_renorm_probs) {
+            top_k_renorm_probs(probs_t, sampling_probs_t, top_k_t, 0, (int64_t)cur_stream);
         }
-    } else if (std::all_of(top_k_ptr, top_k_ptr + batch_size, [&](auto t) { return t <= 0; })) {
-        top_p_sampling_from_probs(
-            probs_t, uniform_samples, samples_t, success_t, top_p_t, 1.0, deterministic, (int64_t)cur_stream);
-        if (output_all_probs_t.defined()) {
-            top_p_renorm_probs(probs_t, output_all_probs_t, top_p_t, 1.0, (int64_t)cur_stream);
-        }
-    } else if (std::all_of(top_p_ptr, top_p_ptr + batch_size, [&](auto t) { return std::abs(t - 1.0f) < 1e-7; })) {
-        std::transform(top_k_ptr, top_k_ptr + batch_size, top_k_ptr, [&](auto t) { return t <= 0 ? 1 << 30 : t; });
-        top_k_sampling_from_probs(
-            probs_t, uniform_samples, samples_t, success_t, top_k_t, 0, deterministic, (int64_t)cur_stream);
-        if (output_all_probs_t.defined()) {
-            top_k_renorm_probs(probs_t, output_all_probs_t, top_k_t, 0, (int64_t)cur_stream);
+    } else if (all_top_k_no_limit) {
+        top_p_sampling_from_probs(probs_t,
+                                  samples_t.squeeze(0),
+                                  success_t,
+                                  std::nullopt,
+                                  top_p_t,
+                                  1.0,
+                                  deterministic,
+                                  seed_t,
+                                  0,
+                                  offset_t,
+                                  0,
+                                  (int64_t)cur_stream);
+        if (need_renorm_probs) {
+            top_p_renorm_probs(probs_t, sampling_probs_t, top_p_t, 1.0, (int64_t)cur_stream);
         }
     } else {
-        std::transform(top_k_ptr, top_k_ptr + batch_size, top_k_ptr, [&](auto t) { return t <= 0 ? 1 << 30 : t; });
-        top_k_top_p_sampling_from_probs(probs_t,
-                                        uniform_samples,
-                                        samples_t,
-                                        success_t,
-                                        top_k_t,
-                                        1.0,
-                                        top_p_t,
-                                        1.0,
-                                        deterministic,
-                                        (int64_t)cur_stream);
-        if (output_all_probs_t.defined()) {
-            torch::Tensor temp_t = torch::zeros_like(output_all_probs_t);
-            top_k_renorm_probs(probs_t, temp_t, top_k_t, 1.0, (int64_t)cur_stream);
-            top_p_renorm_probs(temp_t, output_all_probs_t, top_p_t, 1.0, (int64_t)cur_stream);
+        // top_k<=0 means "no limit" in RTP config. The combined FlashInfer
+        // kernel takes a top_k array, so normalize mixed batches after the
+        // pure top-p route has been selected.
+        std::transform(top_k_ptr, top_k_ptr + batch_size, top_k_ptr, [](auto t) { return t <= 0 ? 1 << 30 : t; });
+        if (all_top_p_one) {
+            top_k_sampling_from_probs(probs_t,
+                                      samples_t.squeeze(0),
+                                      success_t,
+                                      std::nullopt,
+                                      top_k_t,
+                                      0,
+                                      deterministic,
+                                      seed_t,
+                                      0,
+                                      offset_t,
+                                      0,
+                                      (int64_t)cur_stream);
+            if (need_renorm_probs) {
+                top_k_renorm_probs(probs_t, sampling_probs_t, top_k_t, 0, (int64_t)cur_stream);
+            }
+        } else {
+            top_k_top_p_sampling_from_probs(probs_t,
+                                            samples_t.squeeze(0),
+                                            success_t,
+                                            std::nullopt,
+                                            top_k_t,
+                                            0,
+                                            top_p_t,
+                                            1.0,
+                                            deterministic,
+                                            seed_t,
+                                            0,
+                                            offset_t,
+                                            0,
+                                            (int64_t)cur_stream);
+            if (need_renorm_probs) {
+                torch::Tensor temp_t = torch::zeros_like(sampling_probs_t);
+                top_k_renorm_probs(probs_t, temp_t, top_k_t, 1.0, (int64_t)cur_stream);
+                top_p_renorm_probs(temp_t, sampling_probs_t, top_p_t, 1.0, (int64_t)cur_stream);
+            }
         }
     }
 
-    if (params.cum_log_probs.has_value()) {
+    if (params.return_original_all_probs && sampling_probs_t.defined()) {
+        sampling_probs_t.copy_(probs_t);
+    }
+    if (need_full_sampling_probs) {
+        output_all_probs_t.copy_(sampling_probs_t.slice(1, 0, output_width));
+    }
 
-        // [batch_size]
+    if (params.cum_log_probs.has_value()) {
         auto cum_log_probs_t = params.cum_log_probs.value();
-        // [batch_size]
-        auto token_probs_t     = output_all_probs_t.gather(1, samples_t.transpose(1, 0).to(torch::kLong)).squeeze(1);
-        auto token_probs_t_log = token_probs_t.log();
-        cum_log_probs_t.add_(token_probs_t_log.to(cum_log_probs_t.device()));
+        auto token_probs_t   = sampling_probs_t.gather(1, samples_t.transpose(1, 0).to(torch::kLong)).squeeze(1);
+        cum_log_probs_t.add_(token_probs_t.log().to(cum_log_probs_t.device()));
     }
 
     // Copy results back: transpose and copy to token_ids
@@ -267,17 +466,111 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
     return flashinferSampleGreedy(params, transposed_tokens);
 }
 
-void chainSpeculativeSampling(const SpeculativeSamplingParams& params) {
+torch::Tensor sampleFromProbs(const torch::Tensor& probabilities) {
+    RTP_LLM_CHECK_WITH_INFO(probabilities.defined() && probabilities.is_cuda() && probabilities.dim() == 2
+                                && probabilities.scalar_type() == torch::kFloat32 && probabilities.is_contiguous(),
+                            "probability sampling expects contiguous CUDA FP32 [batch,vocab] probabilities");
+    const auto          batch_size = probabilities.size(0);
+    at::cuda::CUDAGuard device_guard(probabilities.device());
+    auto [seed, offset] = get_seed_and_offset(/*increment_size=*/4);
+
+    auto token_ids =
+        torch::empty({batch_size}, torch::TensorOptions().dtype(torch::kInt32).device(probabilities.device()));
+    auto valid = torch::empty({batch_size}, torch::TensorOptions().dtype(torch::kBool).device(probabilities.device()));
+    sampling_from_probs(probabilities,
+                        token_ids,
+                        valid,
+                        std::nullopt,
+                        /*deterministic=*/true,
+                        std::nullopt,
+                        seed,
+                        std::nullopt,
+                        offset);
+    return token_ids;
+}
+
+void rejectionSampling(const RejectionSamplingParams& params) {
+    auto config = validateRejectionSamplingParams(params);
     auto stream = at::cuda::getCurrentCUDAStream().stream();
-    chain_speculative_sampling(params.draft_probs_d,
-                               params.draft_token_ids_d,
-                               params.uniform_samples_d,
-                               params.target_probs_d,
-                               params.output_token_ids_d,
-                               params.output_accepted_token_num_d,
-                               params.output_emitted_token_num_d,
-                               true,
-                               int64_t(stream));
+
+    // A point-mass draft distribution passes no draft_probs buffer at all; the
+    // kernel substitutes q(draft_token) == 1.
+    float* draft_probs = params.draft_probs_point_mass ? nullptr : params.draft_probs_d.data_ptr<float>();
+    check_cuda_value(invokeRejectionSampling(draft_probs,
+                                             params.draft_token_ids_d.data_ptr<int32_t>(),
+                                             params.uniform_samples_d.data_ptr<float>(),
+                                             params.target_probs_d.data_ptr<float>(),
+                                             params.target_token_ids_d.data_ptr<int32_t>(),
+                                             config.target_token_stride,
+                                             params.output_token_ids_d.data_ptr<int32_t>(),
+                                             params.output_accepted_token_num_d.data_ptr<int32_t>(),
+                                             params.do_sample_d.data_ptr<bool>(),
+                                             config.batch_size,
+                                             config.num_speculative_tokens,
+                                             config.target_vocab_size,
+                                             stream,
+                                             params.draft_probs_point_mass));
+}
+
+void mappingDraft2Target(const MappingDraft2TargetParams& params) {
+    if (!params.d2t_map.defined() || params.d2t_map.numel() == 0) {
+        return;
+    }
+
+    const int d2t_map_size = static_cast<int>(params.d2t_map.numel());
+    RTP_LLM_CHECK_WITH_INFO(params.d2t_map.dtype() == torch::kInt64, "mappingDraft2Target: d2t_map must be int64");
+
+    if (!params.tokens.is_cuda() && !params.d2t_map.is_cuda()) {
+        auto* d2t_map_ptr = params.d2t_map.data_ptr<int64_t>();
+        if (params.tokens.dtype() == torch::kInt32) {
+            auto* tokens_ptr = params.tokens.data_ptr<int32_t>();
+            for (int i = 0; i < params.batch_size; ++i) {
+                for (int j = params.token_offset; j < params.token_stride; ++j) {
+                    const int     index    = i * params.token_stride + j;
+                    const int64_t token_id = tokens_ptr[index];
+                    if (token_id >= 0 && token_id < d2t_map_size) {
+                        tokens_ptr[index] = static_cast<int32_t>(d2t_map_ptr[token_id]);
+                    }
+                }
+            }
+        } else if (params.tokens.dtype() == torch::kInt64) {
+            auto* tokens_ptr = params.tokens.data_ptr<int64_t>();
+            for (int i = 0; i < params.batch_size; ++i) {
+                for (int j = params.token_offset; j < params.token_stride; ++j) {
+                    const int     index    = i * params.token_stride + j;
+                    const int64_t token_id = tokens_ptr[index];
+                    if (token_id >= 0 && token_id < d2t_map_size) {
+                        tokens_ptr[index] = d2t_map_ptr[token_id];
+                    }
+                }
+            }
+        } else {
+            RTP_LLM_CHECK_WITH_INFO(false, "Unsupported token dtype for mappingDraft2Target");
+        }
+    } else if (params.tokens.is_cuda() && params.d2t_map.is_cuda()) {
+        auto stream = at::cuda::getCurrentCUDAStream().stream();
+        if (params.tokens.dtype() == torch::kInt32) {
+            invokeMappingDraft2Target(params.tokens.data_ptr<int32_t>(),
+                                      params.batch_size,
+                                      params.token_offset,
+                                      params.token_stride,
+                                      params.d2t_map.data_ptr<int64_t>(),
+                                      d2t_map_size,
+                                      stream);
+        } else if (params.tokens.dtype() == torch::kInt64) {
+            invokeMappingDraft2Target(params.tokens.data_ptr<int64_t>(),
+                                      params.batch_size,
+                                      params.token_offset,
+                                      params.token_stride,
+                                      params.d2t_map.data_ptr<int64_t>(),
+                                      d2t_map_size,
+                                      stream);
+        } else {
+            RTP_LLM_CHECK_WITH_INFO(false, "Unsupported token dtype for mappingDraft2Target");
+        }
+    } else {
+        RTP_LLM_CHECK_WITH_INFO(false, "tokens and d2t_map must be on the same device");
+    }
 }
 
 #else  // !USING_CUDA — ROCm platform
@@ -309,6 +602,15 @@ void invokeBatchApplyRepetitionPenalty(T*           logits,
                                        int          max_input_length,
                                        int          step,
                                        hipStream_t  stream);
+
+template<typename IdType>
+void invokeMappingDraft2Target(IdType*     tokens,
+                               int         batch_size,
+                               int         token_offset,
+                               int         token_stride,
+                               int64_t*    d2t_map,
+                               int         d2t_map_size,
+                               hipStream_t stream);
 }  // namespace rtp_llm
 
 #include <ATen/hip/HIPContext.h>
@@ -386,15 +688,17 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
         }
     }
 
-    // 3. Fast path for topk = 1
-    auto top_k_ptr = reinterpret_cast<uint32_t*>(params.top_k.data_ptr<int32_t>());
-    if (std::all_of(top_k_ptr, top_k_ptr + batch_size, [&](auto t) { return t == 1; })
-        && !params.output_all_probs.has_value()) {
+    auto       top_k_ptr     = reinterpret_cast<uint32_t*>(params.top_k.data_ptr<int32_t>());
+    const bool all_top_k_one = std::all_of(top_k_ptr, top_k_ptr + batch_size, [](auto t) { return t == 1; });
+    if (all_top_k_one && !params.cum_log_probs.has_value() && !params.return_original_all_probs
+        && (!params.output_all_probs.has_value() || params.output_all_probs->size(1) == vocab_size_padded)) {
         torch::Tensor samples_t =
             transposed_tokens.slice(0, transposed_tokens.size(0) - 1, transposed_tokens.size(0)).squeeze(0);
-        torch::Tensor probs_t         = params.logits;
-        torch::Tensor selected_tokens = torch::argmax(probs_t, -1, /*keepdim=*/false);
+        torch::Tensor selected_tokens = torch::argmax(params.logits, -1, /*keepdim=*/false);
         samples_t.copy_(selected_tokens);
+        if (params.output_all_probs.has_value()) {
+            params.output_all_probs->zero_().scatter_(1, selected_tokens.unsqueeze(1), 1.0);
+        }
 
         auto output_tokens = transposed_tokens.transpose(0, 1).contiguous();
         params.token_ids.copy_(output_tokens);
@@ -422,23 +726,31 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
     auto top_p_t   = params.top_p;
     auto top_p_ptr = params.top_p.data_ptr<float>();
 
-    bool          need_output_all_probs = params.output_all_probs.has_value();
     torch::Tensor output_all_probs_t;
-    if (need_output_all_probs) {
+    if (params.output_all_probs.has_value()) {
         output_all_probs_t = params.output_all_probs.value();
     }
     if (params.cum_log_probs.has_value() && !output_all_probs_t.defined()) {
         output_all_probs_t = torch::zeros_like(probs_t);
     }
+    const auto output_width = output_all_probs_t.defined() ? output_all_probs_t.size(1) : probs_t.size(1);
+    RTP_LLM_CHECK_WITH_INFO(output_width > 0 && output_width <= probs_t.size(1),
+                            "output probability width must be in (0, padded vocab size]");
+    const bool need_full_sampling_probs = output_all_probs_t.defined() && output_width < probs_t.size(1);
+    auto       sampling_probs_t         = need_full_sampling_probs ? torch::zeros_like(probs_t) : output_all_probs_t;
+    const bool need_renorm_probs        = sampling_probs_t.defined() && !params.return_original_all_probs;
+    if (params.return_original_all_probs && sampling_probs_t.defined()) {
+        sampling_probs_t.copy_(probs_t);
+    }
 
     std::transform(top_p_ptr, top_p_ptr + batch_size, top_p_ptr, [&](auto t) { return std::abs(t) < 1e-7 ? 1.0 : t; });
 
     // 6. Sample
-    if (std::all_of(top_k_ptr, top_k_ptr + batch_size, [&](auto t) { return t == 1; })) {
+    if (all_top_k_one) {
         torch::Tensor selected_tokens = torch::argmax(probs_t, -1, /*keepdim=*/false);
         samples_t.copy_(selected_tokens);
-        if (need_output_all_probs) {
-            top_k_renorm_probs(probs_t, output_all_probs_t, top_k_t, 0, reinterpret_cast<uintptr_t>(cur_stream));
+        if (need_renorm_probs) {
+            top_k_renorm_probs(probs_t, sampling_probs_t, top_k_t, 0, reinterpret_cast<uintptr_t>(cur_stream));
         }
     } else {
         // Use pure PyTorch sampling instead of FlashInfer ROCm kernels.
@@ -449,6 +761,7 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
         //
         // Apply top_k filtering if needed
         auto filtered_probs = probs_t;
+        auto renormalize    = [&] { filtered_probs.div_(filtered_probs.sum(-1, /*keepdim=*/true).clamp_min(1e-10)); };
         bool has_top_k      = !std::all_of(top_k_ptr, top_k_ptr + batch_size, [](auto t) { return t <= 0; });
         if (has_top_k) {
             for (int64_t b = 0; b < (int64_t)batch_size; b++) {
@@ -460,6 +773,7 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
                     row.masked_fill_(row < min_val, 0.0f);
                 }
             }
+            renormalize();
         }
         // Apply top_p (nucleus) filtering if needed
         bool has_top_p =
@@ -476,21 +790,24 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
                     row.scatter_(0, sorted_indices, sorted_probs);
                 }
             }
+            renormalize();
         }
-        // Re-normalize and sample
-        auto row_sums  = filtered_probs.sum(-1, /*keepdim=*/true);
-        filtered_probs = filtered_probs / row_sums.clamp_min(1e-10);
-        auto selected  = torch::multinomial(filtered_probs, 1, /*replacement=*/false).squeeze(-1);
+        auto selected = torch::multinomial(filtered_probs, 1, /*replacement=*/false).squeeze(-1);
         samples_t.copy_(selected);
-        if (need_output_all_probs) {
-            output_all_probs_t.copy_(filtered_probs);
+        if (need_renorm_probs) {
+            sampling_probs_t.copy_(filtered_probs);
         }
+    }
+
+    if (need_full_sampling_probs) {
+        output_all_probs_t.copy_(sampling_probs_t.slice(1, 0, output_width));
     }
 
     // 7. Update cum_log_probs
     if (params.cum_log_probs.has_value()) {
         auto cum_log_probs_t = params.cum_log_probs.value();
-        cum_log_probs_t.add_(probs_t.log());
+        auto token_probs_t   = sampling_probs_t.gather(1, samples_t.to(torch::kLong).unsqueeze(1)).squeeze(1);
+        cum_log_probs_t.add_(token_probs_t.log().to(cum_log_probs_t.device()));
     }
 
     // 8. Copy results back
@@ -499,32 +816,117 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
     return GreedyOutput{};
 }
 
+torch::Tensor sampleFromProbs(const torch::Tensor&) {
+    RTP_LLM_CHECK_WITH_INFO(false, "DSpARK stochastic probability sampling currently requires CUDA");
+    return {};
+}
+
 }  // namespace rtp_llm
 
-// Forward-declare in global namespace (matches rtp_llm/models_py/bindings/rocm/speculative_sampling/sampling.cu)
-void chain_speculative_sampling(at::Tensor draft_probs,
-                                at::Tensor draft_token_ids,
-                                at::Tensor uniform_samples,
-                                at::Tensor target_probs,
-                                at::Tensor output_token_ids,
-                                at::Tensor output_accepted_token_num,
-                                at::Tensor output_emitted_draft_token_num,
-                                bool       deterministic,
-                                int64_t    hip_stream);
+// NOTE: intentionally at global scope (not inside namespace rtp_llm) because the
+// ROCm kernel in rtp_llm/models_py/bindings/rocm/speculative_sampling/sampling.cu
+// is also defined at global scope; the call site below uses ::invokeRejectionSampling.
+template<typename DType, typename IdType>
+hipError_t invokeRejectionSampling(DType*      draft_probs,
+                                   IdType*     draft_token_ids,
+                                   DType*      uniform_samples,
+                                   DType*      target_probs,
+                                   IdType*     target_token_ids,
+                                   int         target_token_stride,
+                                   IdType*     output_token_ids,
+                                   IdType*     output_accepted_token_num,
+                                   bool*       do_sample,
+                                   int         batch_size,
+                                   int         num_speculative_tokens,
+                                   int         target_vocab_size,
+                                   hipStream_t stream,
+                                   bool        draft_probs_point_mass);
 
 namespace rtp_llm {
 
-void chainSpeculativeSampling(const SpeculativeSamplingParams& params) {
+void rejectionSampling(const RejectionSamplingParams& params) {
+    auto config = validateRejectionSamplingParams(params);
     auto stream = at::hip::getCurrentHIPStream().stream();
-    ::chain_speculative_sampling(params.draft_probs_d,
-                                 params.draft_token_ids_d,
-                                 params.uniform_samples_d,
-                                 params.target_probs_d,
-                                 params.output_token_ids_d,
-                                 params.output_accepted_token_num_d,
-                                 params.output_emitted_token_num_d,
-                                 true,
-                                 int64_t(stream));
+
+    // A point-mass draft distribution passes no draft_probs buffer at all; the
+    // kernel substitutes q(draft_token) == 1.
+    float*     draft_probs = params.draft_probs_point_mass ? nullptr : params.draft_probs_d.data_ptr<float>();
+    hipError_t err         = ::invokeRejectionSampling(draft_probs,
+                                               params.draft_token_ids_d.data_ptr<int32_t>(),
+                                               params.uniform_samples_d.data_ptr<float>(),
+                                               params.target_probs_d.data_ptr<float>(),
+                                               params.target_token_ids_d.data_ptr<int32_t>(),
+                                               config.target_token_stride,
+                                               params.output_token_ids_d.data_ptr<int32_t>(),
+                                               params.output_accepted_token_num_d.data_ptr<int32_t>(),
+                                               params.do_sample_d.data_ptr<bool>(),
+                                               config.batch_size,
+                                               config.num_speculative_tokens,
+                                               config.target_vocab_size,
+                                               stream,
+                                               params.draft_probs_point_mass);
+    RTP_LLM_CHECK_WITH_INFO(err == hipSuccess, "invokeRejectionSampling failed: %s", hipGetErrorString(err));
+}
+
+void mappingDraft2Target(const MappingDraft2TargetParams& params) {
+    if (!params.d2t_map.defined() || params.d2t_map.numel() == 0) {
+        return;
+    }
+
+    const int d2t_map_size = static_cast<int>(params.d2t_map.numel());
+    RTP_LLM_CHECK_WITH_INFO(params.d2t_map.dtype() == torch::kInt64, "mappingDraft2Target: d2t_map must be int64");
+
+    if (!params.tokens.is_cuda() && !params.d2t_map.is_cuda()) {
+        auto* d2t_map_ptr = params.d2t_map.data_ptr<int64_t>();
+        if (params.tokens.dtype() == torch::kInt32) {
+            auto* tokens_ptr = params.tokens.data_ptr<int32_t>();
+            for (int i = 0; i < params.batch_size; ++i) {
+                for (int j = params.token_offset; j < params.token_stride; ++j) {
+                    const int     index    = i * params.token_stride + j;
+                    const int64_t token_id = tokens_ptr[index];
+                    if (token_id >= 0 && token_id < d2t_map_size) {
+                        tokens_ptr[index] = static_cast<int32_t>(d2t_map_ptr[token_id]);
+                    }
+                }
+            }
+        } else if (params.tokens.dtype() == torch::kInt64) {
+            auto* tokens_ptr = params.tokens.data_ptr<int64_t>();
+            for (int i = 0; i < params.batch_size; ++i) {
+                for (int j = params.token_offset; j < params.token_stride; ++j) {
+                    const int     index    = i * params.token_stride + j;
+                    const int64_t token_id = tokens_ptr[index];
+                    if (token_id >= 0 && token_id < d2t_map_size) {
+                        tokens_ptr[index] = d2t_map_ptr[token_id];
+                    }
+                }
+            }
+        } else {
+            RTP_LLM_CHECK_WITH_INFO(false, "Unsupported token dtype for mappingDraft2Target");
+        }
+    } else if (params.tokens.is_cuda() && params.d2t_map.is_cuda()) {
+        auto stream = at::hip::getCurrentHIPStream().stream();
+        if (params.tokens.dtype() == torch::kInt32) {
+            invokeMappingDraft2Target(params.tokens.data_ptr<int32_t>(),
+                                      params.batch_size,
+                                      params.token_offset,
+                                      params.token_stride,
+                                      params.d2t_map.data_ptr<int64_t>(),
+                                      d2t_map_size,
+                                      stream);
+        } else if (params.tokens.dtype() == torch::kInt64) {
+            invokeMappingDraft2Target(params.tokens.data_ptr<int64_t>(),
+                                      params.batch_size,
+                                      params.token_offset,
+                                      params.token_stride,
+                                      params.d2t_map.data_ptr<int64_t>(),
+                                      d2t_map_size,
+                                      stream);
+        } else {
+            RTP_LLM_CHECK_WITH_INFO(false, "Unsupported token dtype for mappingDraft2Target");
+        }
+    } else {
+        RTP_LLM_CHECK_WITH_INFO(false, "tokens and d2t_map must be on the same device");
+    }
 }
 
 #endif  // USING_CUDA

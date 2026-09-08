@@ -34,6 +34,7 @@ struct RopeConfig {
     int   mrope_dim1            = 0;
     int   mrope_dim2            = 0;
     int   mrope_dim3            = 0;
+    bool  mrope_interleaved     = false;
     bool  is_neox_style         = true;
     bool  indexer_is_neox_style = true;
 

@@ -1,6 +1,5 @@
 package org.flexlb.httpserver;
 
-import lombok.Data;
 import lombok.extern.slf4j.Slf4j;
 import org.flexlb.service.grace.GracefulLifecycleReporter;
 import org.flexlb.service.grace.GracefulOnlineService;
@@ -23,7 +22,6 @@ import static org.springframework.web.reactive.function.server.RequestPredicates
 import static org.springframework.web.reactive.function.server.RouterFunctions.route;
 
 @Slf4j
-@Data
 @Component
 public class AppStateHookServer {
 

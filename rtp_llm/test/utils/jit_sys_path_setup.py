@@ -14,7 +14,9 @@ import os
 import shutil
 import subprocess
 import sys
+from contextlib import suppress
 from pathlib import Path
+from urllib.parse import urlparse
 
 from filelock import FileLock
 
@@ -58,6 +60,33 @@ def get_package_info(package_name):
         return None, None
 
 
+def _build_variant(source_path):
+    """The bazel external repo a package came from, e.g. pip_gpu_rocm_torch_torch.
+
+    A version string is not a build identity. The same version is built per
+    platform into separate external repos -- pip_gpu_cuda12_9_torch_torch,
+    pip_gpu_rocm_torch_torch, the ppu and arm variants -- while the cache below
+    lives in ~/.cache, shared by every job that lands on the host. Keyed on
+    version alone, whichever job populates the cache first decides which build
+    every later job on that host imports, and it does so silently, because the
+    staged directory is prepended to sys.path.
+
+    Returns None when the layout is unrecognised, in which case the caller keeps
+    the old version-only key rather than guessing.
+    """
+    for part in Path(source_path).parts:
+        if part.startswith("pip_"):
+            return part
+    return None
+
+
+def _cache_key(package_name, version, source_path):
+    variant = _build_variant(source_path)
+    if variant is None:
+        return "%s_python-%s" % (package_name, version)
+    return "%s_python-%s__%s" % (package_name, version, variant)
+
+
 def copy_package_with_lock(package_name, cache_dir):
     """
     Copy a Python package to cache directory with version in name.
@@ -74,13 +103,14 @@ def copy_package_with_lock(package_name, cache_dir):
 
     logging.info(f"[Package Copy] Found {package_name} v{version} at {source_path}")
 
-    # Create target directory with version
-    target_base = Path(cache_dir) / f"{package_name}_python-{version}"
+    # Keyed on version AND build variant; see _build_variant.
+    cache_key = _cache_key(package_name, version, source_path)
+    target_base = Path(cache_dir) / cache_key
     target_site_packages = target_base / "site-packages"
     target_package_path = target_site_packages / Path(source_path).name
 
     # Lock file for this specific package and version
-    lock_file = Path(cache_dir) / f".{package_name}-{version}.lock"
+    lock_file = Path(cache_dir) / f".{cache_key}.lock"
     completion_marker = target_base / ".copy_complete"
 
     # Check if already copied and complete
@@ -209,14 +239,34 @@ def modify_bazel_wrapper_pythonpath(wrapper_path):
         return False
 
 
-def setup_jit_cache(cache_dir=None, packages=None):
-    # Use defaults if not provided
-    if cache_dir is None:
-        cache_dir = Path.home().as_posix() + "/.cache"
-    if packages is None:
-        packages = ["flashinfer", "torch", "deep_gemm", "tvm_ffi"]
+def bootstrap_remote_jit_dir():
+    remote = os.environ.get("REMOTE_JIT_DIR", "").strip()
+    if not remote or urlparse(remote).scheme:
+        return
+    try:
+        root = Path(remote).expanduser()
+        if not root.is_absolute():
+            raise OSError(f"not an absolute path: {remote}")
+        if root.is_symlink() or root.parent.is_symlink():
+            raise OSError(f"symlinked path: {remote}")
+        try:
+            root.mkdir(parents=True)
+        except FileExistsError:
+            if not root.is_dir() or not os.access(root, os.R_OK | os.W_OK | os.X_OK):
+                raise OSError(f"unusable directory: {remote}")
+        else:
+            root.chmod(0o1777)  # protect direct children of a shared root
+        os.environ["REMOTE_JIT_DIR"] = str(root)
+    except (OSError, RuntimeError) as e:
+        os.environ.pop("REMOTE_JIT_DIR", None)  # child servers inherit the env
+        logging.warning(f"[JIT] REMOTE_JIT_DIR refused ({e}); cold start later")
 
-    runfiles_dir = os.environ.get("RUNFILES_DIR") or os.environ.get("TEST_SRCDIR")
+
+def setup_jit_cache():
+    bootstrap_remote_jit_dir()
+
+    cache_dir = Path.home().as_posix() + "/.cache"
+    packages = ["flashinfer", "torch", "deep_gemm", "tvm_ffi"]
 
     # Copy packages to cache with file locking
     copied_paths = []
@@ -234,16 +284,27 @@ def setup_jit_cache(cache_dir=None, packages=None):
     logging.info(
         f"[Package Setup] Set _JIT_CACHE_PATHS: {os.environ['_JIT_CACHE_PATHS']}"
     )
-    runfiles_dir = os.environ.get("RUNFILES_DIR", None)
-    test_binary = sys.argv[1]
-    bazel_wrapper_path = os.path.join(runfiles_dir, "rtp_llm/" + test_binary)
+    runfiles_dir = os.environ.get("RUNFILES_DIR")
+    test_binary = sys.argv[1] if len(sys.argv) > 1 else ""
+    if not runfiles_dir or not test_binary:
+        logging.warning(
+            "[Package Setup] Bazel wrapper unavailable; skip cache path injection"
+        )
+        return None
+    bazel_wrapper_path = Path(runfiles_dir) / "rtp_llm" / test_binary
     suffix = f"_new_{os.getpid()}"
-    bazel_wrapper_path_new = bazel_wrapper_path + suffix
+    bazel_wrapper_path_new = bazel_wrapper_path.with_name(
+        bazel_wrapper_path.name + suffix
+    )
     try:
-        os.remove(bazel_wrapper_path_new)
-    except FileNotFoundError:
-        pass
-    shutil.copy2(bazel_wrapper_path, bazel_wrapper_path_new)
+        bazel_wrapper_path_new.unlink(missing_ok=True)
+        shutil.copy2(bazel_wrapper_path, bazel_wrapper_path_new)
+        if not modify_bazel_wrapper_pythonpath(bazel_wrapper_path_new):
+            raise OSError("wrapper injection failed")
+    except Exception as error:
+        with suppress(OSError):
+            bazel_wrapper_path_new.unlink()
+        logging.warning(f"[Package Setup] wrapper setup failed ({error})")
+        return None
     logging.info(f"[Package Setup] Copied Bazel wrapper to: {bazel_wrapper_path_new}")
-    modify_bazel_wrapper_pythonpath(bazel_wrapper_path_new)
     sys.argv[1] = test_binary + suffix

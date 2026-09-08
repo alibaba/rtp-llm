@@ -16,17 +16,17 @@ public:
     LocalRpcServiceImpl() {}
     virtual ~LocalRpcServiceImpl() {}
     virtual grpc::Status init(const EngineInitParams&                                maga_init_params,
-                              py::object                                             mm_process_engine,
-                              std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params) {
+                              std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params,
+                              py::object                                             mm_process_engine) {
         local_server_ = std::make_shared<LocalRpcServer>();
-        return local_server_->init(maga_init_params, mm_process_engine, std::move(propose_params));
+        return local_server_->init(maga_init_params, std::move(propose_params), mm_process_engine);
     }
     grpc::Status init(const EngineInitParams&                                maga_init_params,
-                      py::object                                             mm_process_engine,
                       std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params,
-                      py::object                                             weight_manager) {
+                      py::object                                             weight_manager,
+                      py::object                                             mm_process_engine) {
         local_server_ = std::make_shared<LocalRpcServer>();
-        return local_server_->init(maga_init_params, mm_process_engine, std::move(propose_params));
+        return local_server_->init(maga_init_params, std::move(propose_params), mm_process_engine);
     }
 
     grpc::Status GenerateStreamCall(grpc::ServerContext*                   context,
@@ -39,6 +39,33 @@ public:
                                    const BatchGenerateInputPB* request,
                                    BatchGenerateOutputsPB*     response) override {
         return local_server_->BatchGenerateCall(context, request, response);
+    }
+
+    grpc::Status EnqueueBatch(grpc::ServerContext*         context,
+                              const EnqueueBatchRequestPB* request,
+                              EnqueueBatchResponsePB*      response) override {
+        (void)context;
+        (void)request;
+        (void)response;
+        return grpc::Status(grpc::StatusCode::UNIMPLEMENTED, "EnqueueBatch not implemented on this role");
+    }
+
+    grpc::Status EnqueueGroup(grpc::ServerContext*         context,
+                              const EnqueueGroupRequestPB* request,
+                              EnqueueBatchResponsePB*      response) override {
+        (void)context;
+        (void)request;
+        (void)response;
+        return grpc::Status(grpc::StatusCode::UNIMPLEMENTED, "EnqueueGroup not implemented on this role");
+    }
+
+    grpc::Status FetchResponse(grpc::ServerContext*                   context,
+                               const FetchRequestPB*                  request,
+                               grpc::ServerWriter<GenerateOutputsPB>* writer) override {
+        (void)context;
+        (void)request;
+        (void)writer;
+        return grpc::Status(grpc::StatusCode::UNIMPLEMENTED, "FetchResponse not implemented on this role");
     }
 
     ::grpc::Status
@@ -120,6 +147,8 @@ public:
     virtual size_t onflightRequestNum() {
         return local_server_->onflightRequestNum();
     }
+
+    virtual void beginShutdown() {}
 
     virtual void stop() {
         if (local_server_) {

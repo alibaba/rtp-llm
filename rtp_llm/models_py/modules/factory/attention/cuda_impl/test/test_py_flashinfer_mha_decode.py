@@ -6,12 +6,18 @@ from typing import List
 
 import torch
 from attention_ref import compute_flashinfer_decode_reference
-from base_attention_test import BaseAttentionTest, compare_tensors
+from base_attention_test import BaseAttentionTest
 
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
     PyFlashinferDecodeAttnOp,
 )
-from rtp_llm.ops.compute_ops import PyAttentionInputs, fill_mla_params, get_typemeta, rtp_llm_ops
+from rtp_llm.ops import KvCacheDataType
+from rtp_llm.ops.compute_ops import (
+    PyAttentionInputs,
+    fill_mla_params,
+    get_typemeta,
+    rtp_llm_ops,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 
@@ -54,7 +60,7 @@ class TestPyFlashinferDecodeAttnOp(BaseAttentionTest):
             attn_inputs.prefix_lengths,
             attn_inputs.sequence_lengths,
             attn_inputs.input_lengths,
-            attn_inputs.kv_cache_block_id_host,
+            attn_inputs.kv_cache_block_id,
             seq_size_per_block,
         )
 
@@ -155,7 +161,7 @@ class TestPyFlashinferDecodeAttnOp(BaseAttentionTest):
             config.seq_size_per_block,
             local_kv_head_num,
             config.size_per_head,
-            dtype=torch.float16,
+            dtype=self.cache_dtype(config.attn_configs),
         )
 
         # Forward pass through PyFlashinferDecodeAttnOp
@@ -166,22 +172,20 @@ class TestPyFlashinferDecodeAttnOp(BaseAttentionTest):
             attn_inputs, sequence_lengths, config.seq_size_per_block
         )
 
-        # Compute reference outputs using flashinfer's single_decode_with_kv_cache
+        # Compute reference outputs using flashinfer's single_decode_with_kv_cache (with round-trip)
         ref_output_stacked = compute_flashinfer_decode_reference(
-            q,
-            k_cache,
-            v_cache,
+            q.to(attn_op.q_dtype).to(q.dtype),
+            k_cache.to(q.dtype),
+            v_cache.to(q.dtype),
             sequence_lengths,
             block_id_list,
             config.seq_size_per_block,
         )
 
         # Compare outputs
-        compare_tensors(
+        self._assert_output_close(
             output,
             ref_output_stacked,
-            rtol=1e-2,
-            atol=1e-2,
             name=f"Decode output (batch={batch_size}, seq_lens={sequence_lengths})",
         )
 
@@ -289,12 +293,8 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
     Verifies the critical invariants that the C++ CUDA graph runner depends on:
     1. prepare() with is_cuda_graph=True sets _fixed_batch_size and wires up
        the decode_wrapper's internal buffers for graph capture.
-    2. prepare_for_cuda_graph_replay() only calls fill_params (no plan()),
-       correctly updating page tables without reallocating buffers.
-
-    Full forward correctness under CUDA graph capture/replay cannot be tested
-    at the Python UT level — that path is exercised by smoke tests with real
-    model inference via cuda_graph_runner.cc.
+    2. prepare_for_cuda_graph_replay() refreshes both page tables and, for
+       tensor-core decode, cached plan metadata without reallocating buffers.
     """
 
     def _create_cuda_graph_inputs(
@@ -311,16 +311,18 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
 
         seq_t = torch.tensor(sequence_lengths, dtype=torch.int32)
         attn_inputs.sequence_lengths = (seq_t - 1).pin_memory()
-        attn_inputs.input_lengths = torch.ones(batch_size, dtype=torch.int32).pin_memory()
+        attn_inputs.input_lengths = torch.ones(
+            batch_size, dtype=torch.int32
+        ).pin_memory()
         attn_inputs.prefix_lengths = torch.empty(0, dtype=torch.int32).pin_memory()
 
         kv_cache_block_id = self._create_kv_cache_block_ids(
             batch_size, sequence_lengths, seq_size_per_block
         )
-        attn_inputs.kv_cache_kernel_block_id_host = kv_cache_block_id
+        attn_inputs.kv_cache_kernel_block_id = kv_cache_block_id
         attn_inputs.kv_cache_kernel_block_id_device = kv_cache_block_id.cuda()
 
-        attn_inputs.cu_seqlens = torch.arange(
+        attn_inputs.cu_seqlens_device = torch.arange(
             0, batch_size + 1, dtype=torch.int32, device="cuda"
         )
         attn_inputs.dtype = get_typemeta(torch.zeros([1], dtype=dtype))
@@ -332,7 +334,9 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
         capture_bs = 4
         seq_lens = [64, 128, 256, 512]
         inputs = self._create_cuda_graph_inputs(
-            capture_bs, seq_lens, config.seq_size_per_block,
+            capture_bs,
+            seq_lens,
+            config.seq_size_per_block,
         )
 
         attn_op = PyFlashinferDecodeAttnOp(config.attn_configs, inputs)
@@ -347,46 +351,136 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
         self.assertTrue(attn_op.decode_wrapper._use_cuda_graph)
         logging.info("_fixed_batch_size correctly set after prepare()")
 
-    def test_replay_does_not_replan(self):
-        """prepare_for_cuda_graph_replay() must not call plan().
-
-        Verifies that only fill_params is called by checking that the
-        _fixed_batch_size remains unchanged (plan() would reset it).
-        """
+    def test_replay_refreshes_plan_metadata(self):
+        """Tensor-core replay must refresh FlashInfer plan metadata."""
         config = self._create_config()
         capture_bs = 8
         capture_seq_lens = [64, 128, 256, 512, 64, 128, 256, 512]
 
         capture_inputs = self._create_cuda_graph_inputs(
-            capture_bs, capture_seq_lens, config.seq_size_per_block,
+            capture_bs,
+            capture_seq_lens,
+            config.seq_size_per_block,
         )
         attn_op = PyFlashinferDecodeAttnOp(config.attn_configs, capture_inputs)
+        self.assertTrue(attn_op.use_tensor_core)
+        self.assertTrue(attn_op._requires_tensor_core_cuda_graph_replan())
         fmha_params = rtp_llm_ops.FlashInferMlaAttnParams()
         attn_op.set_params(fmha_params)
         attn_op.prepare(capture_inputs)
 
         self.assertEqual(attn_op.decode_wrapper._fixed_batch_size, capture_bs)
+        fixed_buffer_ptrs = {
+            "page_indptr": attn_op.decode_wrapper._paged_kv_indptr_buf.data_ptr(),
+            "page_indices": attn_op.decode_wrapper._paged_kv_indices_buf.data_ptr(),
+            "last_page_len": attn_op.decode_wrapper._paged_kv_last_page_len_buf.data_ptr(),
+            "qo_indptr": attn_op.decode_wrapper._qo_indptr_buf.data_ptr(),
+        }
 
-        run_bs = 3
-        run_seq_lens = [100, 200, 300]
+        original_plan = attn_op.decode_wrapper.plan
+        plan_calls = []
+
+        def counted_plan(*args, **kwargs):
+            plan_calls.append((args, kwargs))
+            return original_plan(*args, **kwargs)
+
+        attn_op.decode_wrapper.plan = counted_plan
+
+        run_seq_lens = [100, 200, 300, 400, 64, 128, 256, 512]
         run_inputs = self._create_cuda_graph_inputs(
-            run_bs, run_seq_lens, config.seq_size_per_block,
+            capture_bs,
+            run_seq_lens,
+            config.seq_size_per_block,
         )
         attn_op.prepare_for_cuda_graph_replay(run_inputs)
 
-        # _fixed_batch_size must stay at capture_bs (replay doesn't replan)
-        self.assertEqual(attn_op.decode_wrapper._fixed_batch_size, capture_bs)
+        self.assertEqual(len(plan_calls), 1)
+        plan_args, plan_kwargs = plan_calls[0]
+        self.assertFalse(plan_args[0].is_cuda)
+        self.assertFalse(plan_args[1].is_cuda)
+        self.assertFalse(plan_args[2].is_cuda)
+        self.assertTrue(plan_kwargs["non_blocking"])
+        self.assertEqual(plan_kwargs["q_data_type"], attn_op.q_dtype)
+        self.assertEqual(plan_kwargs["kv_data_type"], attn_op.kv_dtype)
+        self.assertEqual(plan_kwargs["o_data_type"], config.attn_configs.dtype)
 
-        # fill_params must have updated the page table buffers on the device
+        # Replay must preserve every address referenced by the captured graph.
+        self.assertEqual(attn_op.decode_wrapper._fixed_batch_size, capture_bs)
+        self.assertEqual(
+            attn_op.decode_wrapper._paged_kv_indptr_buf.data_ptr(),
+            fixed_buffer_ptrs["page_indptr"],
+        )
+        self.assertEqual(
+            attn_op.decode_wrapper._paged_kv_indices_buf.data_ptr(),
+            fixed_buffer_ptrs["page_indices"],
+        )
+        self.assertEqual(
+            attn_op.decode_wrapper._paged_kv_last_page_len_buf.data_ptr(),
+            fixed_buffer_ptrs["last_page_len"],
+        )
+        self.assertEqual(
+            attn_op.decode_wrapper._qo_indptr_buf.data_ptr(),
+            fixed_buffer_ptrs["qo_indptr"],
+        )
+
         page_indptr = fmha_params.decode_page_indptr_h
         self.assertIsNotNone(page_indptr)
-        # The indptr for run_bs=3 should have run_bs+1 meaningful entries
-        # (the rest is padding from capture_bs allocation)
-        self.assertGreaterEqual(len(page_indptr), run_bs + 1)
+        self.assertGreaterEqual(len(page_indptr), capture_bs + 1)
         logging.info(
             f"Replay OK: _fixed_batch_size={attn_op.decode_wrapper._fixed_batch_size}, "
-            f"page_indptr[:4]={page_indptr[:run_bs+1].tolist()}"
+            f"page_indptr={page_indptr.tolist()}"
         )
+
+    def test_cuda_core_replay_does_not_replan(self):
+        """CUDA-core replay only refreshes parameter buffers."""
+        config = self._create_config(head_num=32, head_num_kv=32)
+        capture_bs = 4
+        capture_seq_lens = [64, 128, 256, 512]
+
+        capture_inputs = self._create_cuda_graph_inputs(
+            capture_bs,
+            capture_seq_lens,
+            config.seq_size_per_block,
+        )
+        attn_op = PyFlashinferDecodeAttnOp(config.attn_configs, capture_inputs)
+        self.assertFalse(attn_op.use_tensor_core)
+        self.assertFalse(attn_op._requires_tensor_core_cuda_graph_replan())
+        fmha_params = rtp_llm_ops.FlashInferMlaAttnParams()
+        attn_op.set_params(fmha_params)
+        attn_op.prepare(capture_inputs)
+
+        self.assertTrue(attn_op.decode_wrapper._use_cuda_graph)
+        self.assertEqual(attn_op.decode_wrapper._fixed_batch_size, capture_bs)
+        self.assertEqual(
+            attn_op.decode_wrapper._paged_kv_indptr_buf.data_ptr(),
+            fmha_params.decode_page_indptr_d.data_ptr(),
+        )
+        self.assertEqual(
+            attn_op.decode_wrapper._paged_kv_indices_buf.data_ptr(),
+            fmha_params.page_indice_d.data_ptr(),
+        )
+        self.assertEqual(
+            attn_op.decode_wrapper._paged_kv_last_page_len_buf.data_ptr(),
+            fmha_params.paged_kv_last_page_len_d.data_ptr(),
+        )
+        self.assertFalse(hasattr(attn_op.decode_wrapper, "_qo_indptr_buf"))
+
+        plan_calls = []
+
+        def counted_plan(*args, **kwargs):
+            plan_calls.append((args, kwargs))
+
+        attn_op.decode_wrapper.plan = counted_plan
+
+        run_seq_lens = [100, 200, 256, 512]
+        run_inputs = self._create_cuda_graph_inputs(
+            capture_bs,
+            run_seq_lens,
+            config.seq_size_per_block,
+        )
+        attn_op.prepare_for_cuda_graph_replay(run_inputs)
+
+        self.assertEqual(len(plan_calls), 0)
 
     def test_replay_updates_page_tables(self):
         """Page table buffers must reflect the replay inputs, not capture inputs."""
@@ -395,11 +489,13 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
         config = self._create_config(seq_size_per_block=64)
         capture_bs = 4
         capture_seq_lens = [64, 128, 256, 512]
-        run_bs = 2
-        run_seq_lens = [100, 200]
+        active_bs = 2
+        run_seq_lens = [100, 200, 256, 512]
 
         capture_inputs = self._create_cuda_graph_inputs(
-            capture_bs, capture_seq_lens, config.seq_size_per_block,
+            capture_bs,
+            capture_seq_lens,
+            config.seq_size_per_block,
         )
         attn_op = PyFlashinferDecodeAttnOp(config.attn_configs, capture_inputs)
         fmha_params = rtp_llm_ops.FlashInferMlaAttnParams()
@@ -407,32 +503,54 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
         attn_op.prepare(capture_inputs)
 
         run_inputs = self._create_cuda_graph_inputs(
-            run_bs, run_seq_lens, config.seq_size_per_block,
+            capture_bs,
+            run_seq_lens,
+            config.seq_size_per_block,
         )
         attn_op.prepare_for_cuda_graph_replay(run_inputs)
 
         # Verify page_indptr matches run_seq_lens
         page_indptr = fmha_params.decode_page_indptr_h.tolist()
-        expected_blocks = [math.ceil(s / 64) for s in run_seq_lens]
+        expected_blocks = [math.ceil(s / 64) for s in run_seq_lens[:active_bs]]
         expected_indptr = [0]
         for nb in expected_blocks:
             expected_indptr.append(expected_indptr[-1] + nb)
 
-        for i in range(run_bs + 1):
+        for i in range(active_bs + 1):
             self.assertEqual(
-                page_indptr[i], expected_indptr[i],
+                page_indptr[i],
+                expected_indptr[i],
                 f"page_indptr[{i}] mismatch: expected {expected_indptr[i]}, got {page_indptr[i]}",
             )
 
         # Verify last_page_len
         last_page_len = fmha_params.paged_kv_last_page_len_h.tolist()
-        for i, seq_len in enumerate(run_seq_lens):
+        for i, seq_len in enumerate(run_seq_lens[:active_bs]):
             expected = seq_len % 64 or 64
             self.assertEqual(
-                last_page_len[i], expected,
+                last_page_len[i],
+                expected,
                 f"last_page_len[{i}] mismatch: expected {expected}, got {last_page_len[i]}",
             )
-        logging.info(f"Page table update OK: indptr={expected_indptr}, last_page_len={[s % 64 or 64 for s in run_seq_lens]}")
+        expected_last_page_lens = [s % 64 or 64 for s in run_seq_lens[:active_bs]]
+        logging.info(
+            f"Page table update OK: indptr={expected_indptr}, "
+            f"last_page_len={expected_last_page_lens}"
+        )
+
+
+class TestPyFlashinferDecodeAttnOpFP8(TestPyFlashinferDecodeAttnOp):
+    kv_cache_dtype = KvCacheDataType.FP8
+    rtol = 4e-2
+    atol = 4e-2
+    max_mismatch_rate = 1e-5
+
+
+class TestPyFlashinferDecodeCudaGraphFP8(TestPyFlashinferDecodeCudaGraph):
+    kv_cache_dtype = KvCacheDataType.FP8
+    rtol = 4e-2
+    atol = 4e-2
+    max_mismatch_rate = 1e-5
 
 
 if __name__ == "__main__":

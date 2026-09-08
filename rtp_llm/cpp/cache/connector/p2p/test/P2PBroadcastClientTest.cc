@@ -50,7 +50,7 @@ protected:
 
     // 创建测试用的 LayerCacheBuffer
     std::shared_ptr<LayerCacheBuffer> createLayerCacheBuffer(int layer_id, int num_blocks = 2) {
-        auto buffer = std::make_shared<LayerCacheBuffer>(layer_id);
+        auto buffer = std::make_shared<LayerCacheBuffer>(layer_id, "default");
         for (int i = 0; i < num_blocks; ++i) {
             int64_t cache_key = layer_id * 1000 + i;
             int     block_id  = i;

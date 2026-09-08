@@ -1,11 +1,13 @@
 
 #include "gtest/gtest.h"
+#include "gmock/gmock.h"
 
 #define private public
 #define protected public
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
+#include "rtp_llm/cpp/cache/test/mock/MockKVCacheAllocator.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
@@ -29,13 +31,15 @@ protected:
     }
 
     GenerateStreamPtr createStream(const std::vector<int>& input_tokens = {1, 2, 3, 4, 5, 6},
-                                   bool                    reuse_cache  = false) {
+                                   bool                    reuse_cache  = false,
+                                   RoleType                role_type    = RoleType::PDFUSION) {
         cache_manager_ =
             std::make_shared<KVCacheManager>(init_config(), /*warmup=*/false, /*metrics_reporter=*/nullptr);
         EXPECT_TRUE(cache_manager_->init());
         ResourceContext resource_context;
         resource_context.cache_manager = cache_manager_;
         resource_context.reuse_cache   = reuse_cache;
+        resource_context.role_type     = role_type;
 
         std::shared_ptr<GenerateInput>  generate_input(new GenerateInput());
         std::shared_ptr<GenerateConfig> generate_config(new GenerateConfig());
@@ -48,6 +52,15 @@ protected:
         model_config.max_seq_len = 2048;
         return std::make_shared<NormalGenerateStream>(
             generate_input, model_config, runtime_config, resource_context, nullptr);
+    }
+
+    void installRetryableInitMalloc() {
+        auto allocator = std::make_shared<testing::NiceMock<MockKVCacheAllocator>>(cache_manager_->config_);
+        ON_CALL(*allocator, totalBlocksNum()).WillByDefault(testing::Return(64));
+        ON_CALL(*allocator, getNeedBlocks(testing::_)).WillByDefault(testing::Return(1));
+        ON_CALL(*allocator, initMallocForCommonLen(testing::_))
+            .WillByDefault(testing::Return(MallocResult{false, 0, 0, MallocStatus::RETRYABLE_RESOURCE_EXHAUSTED}));
+        cache_manager_->allocator_ = std::move(allocator);
     }
 
 protected:
@@ -324,6 +337,57 @@ TEST_F(GenerateStreamStateTest, testLoadInitiatedSkipsAsyncLoadCache) {
 
     // Still no asyncLoadCache context
     ASSERT_FALSE(resource.load_cache_context_);
+}
+
+TEST_F(GenerateStreamStateTest, testPrefillFallbackDecodeGrowsBlocksAfterContext) {
+    auto stream = createStream({1, 2}, /*reuse_cache=*/false, RoleType::PREFILL);
+
+    stream->reportEvent(StreamEvents::CanRun);
+    ASSERT_EQ(stream->moveToNext(), StreamState::RUNNING);
+    ASSERT_TRUE(stream->isContextStream());
+    ASSERT_EQ(stream->curBlocksNum(), 1u);
+
+    // PD fallback can continue decoding in the PREFILL role. The next decode
+    // token crosses the two-token test block boundary and needs another column.
+    stream->setIsContextStream(false);
+    stream->setSeqLength(3);
+
+    ASSERT_EQ(stream->moveToNext(), StreamState::RUNNING);
+    EXPECT_EQ(stream->curBlocksNum(), 2u);
+}
+
+TEST_F(GenerateStreamStateTest, testRetryableInitMallocKeepsPrefillWaiting) {
+    auto stream = createStream({1, 2}, /*reuse_cache=*/false, RoleType::PREFILL);
+    installRetryableInitMalloc();
+
+    stream->reportEvent(StreamEvents::CanRun);
+
+    EXPECT_EQ(stream->moveToNext(), StreamState::WAITING);
+    EXPECT_FALSE(stream->hasError());
+    EXPECT_FALSE(stream->hasEvent(StreamEvents::LoadInitiated));
+    EXPECT_EQ(stream->curBlocksNum(), 0u);
+
+    auto& cache_resource = stream->kvCacheMutable();
+    ASSERT_TRUE(cache_resource.cacheKeysInitialized());
+    ASSERT_FALSE(cache_resource.cacheKeys().empty());
+    constexpr CacheKeyType sentinel_key                = 0x12345678;
+    cache_resource.cacheResource().cacheKeys().front() = sentinel_key;
+
+    EXPECT_EQ(stream->moveToNext(), StreamState::WAITING);
+    EXPECT_EQ(stream->curBlocksNum(), 0u);
+    EXPECT_EQ(cache_resource.cacheKeys().front(), sentinel_key);
+}
+
+TEST_F(GenerateStreamStateTest, testRetryableInitMallocFinishesDecode) {
+    auto stream = createStream({1, 2}, /*reuse_cache=*/false, RoleType::DECODE);
+    installRetryableInitMalloc();
+
+    stream->reportEvent(StreamEvents::CanRun);
+
+    EXPECT_EQ(stream->moveToNext(), StreamState::FINISHED);
+    EXPECT_TRUE(stream->hasError());
+    EXPECT_EQ(stream->statusInfo().code(), ErrorCode::MALLOC_FAILED);
+    EXPECT_EQ(stream->curBlocksNum(), 0u);
 }
 
 TEST_F(GenerateStreamStateTest, testNormalPathTriggersAsyncLoadCache) {

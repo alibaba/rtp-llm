@@ -9,6 +9,14 @@
 
 namespace rtp_llm {
 
+inline constexpr int64_t kAllReduceMaxBlocksPerGpu = 256;
+
+inline constexpr bool shouldUseOneStageAllReduce(int64_t token_num, int world_size, int64_t payload_bytes) {
+    return token_num <= kAllReduceMaxBlocksPerGpu / 4
+           && (world_size == 2 || (world_size == 4 && payload_bytes < 160 * 1024)
+               || (world_size == 8 && payload_bytes < 80 * 1024));
+}
+
 using fptr_t = int64_t;
 
 fptr_t init_ar_fusion(
@@ -25,6 +33,12 @@ void open_ar_fusion_barrier_handles(fptr_t fptr, std::vector<torch::Tensor> hand
 void open_ar_fusion_data_handles(fptr_t fptr, std::vector<torch::Tensor> handles);
 
 void ar_fusion_capture_clear(fptr_t fptr);
+
+void ar_fusion_invalidate_capture(fptr_t fptr);
+
+void ar_fusion_commit_capture(fptr_t fptr);
+
+void ar_fusion_begin_capture_session(fptr_t fptr);
 
 std::vector<torch::Tensor> get_ar_fusion_captured_handles(fptr_t fptr);
 

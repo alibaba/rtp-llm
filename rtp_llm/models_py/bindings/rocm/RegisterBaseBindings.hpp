@@ -1,7 +1,6 @@
 #include "rtp_llm/models_py/bindings/rocm/Norm.h"
 #include "rtp_llm/models_py/bindings/common/RtpEmbeddingLookup.h"
 #include "rtp_llm/models_py/bindings/common/FusedQKRmsNorm.h"
-#include "rtp_llm/models_py/bindings/common/WriteCacheStoreOp.h"
 #include "rtp_llm/models_py/bindings/rocm/Gemm.h"
 #include "rtp_llm/models_py/bindings/rocm/FusedRopeKVCacheOp.h"
 #include "rtp_llm/models_py/bindings/common/CudaGraphPrefillCopy.h"
@@ -13,15 +12,6 @@ namespace py = pybind11;
 namespace rtp_llm {
 
 void registerBasicRocmOps(py::module& rtp_ops_m) {
-    rtp_ops_m.def("write_cache_store",
-                  &WriteCacheStoreOp,
-                  "WriteCacheStoreOp kernel",
-                  py::arg("input_lengths"),
-                  py::arg("prefix_lengths"),
-                  py::arg("kv_cache_block_id_host"),
-                  py::arg("cache_store_member"),
-                  py::arg("kv_cache"));
-
     rtp_ops_m.def("fused_add_layernorm",
                   &fused_add_layernorm,
                   "Fused Add LayerNorm kernel",
@@ -43,8 +33,15 @@ void registerBasicRocmOps(py::module& rtp_ops_m) {
                   py::arg("eps"),
                   py::arg("hip_stream") = 0);
 
-    rtp_ops_m.def(
-        "embedding", &embedding, "Embedding lookup kernel", py::arg("output"), py::arg("input"), py::arg("weight"));
+    rtp_ops_m.def("embedding",
+                  &embedding,
+                  "Embedding lookup kernel",
+                  py::arg("output"),
+                  py::arg("input"),
+                  py::arg("weight"),
+                  py::arg("position_ids")     = py::none(),
+                  py::arg("token_type_ids")   = py::none(),
+                  py::arg("text_tokens_mask") = py::none());
 
     rtp_ops_m.def("embedding_bert",
                   &embeddingBert,
@@ -61,6 +58,19 @@ void registerBasicRocmOps(py::module& rtp_ops_m) {
     rtp_ops_m.def("fused_qk_rmsnorm",
                   &FusedQKRMSNorm,
                   "Fused QK RMSNorm kernel",
+                  py::arg("IO"),
+                  py::arg("q_gamma"),
+                  py::arg("k_gamma"),
+                  py::arg("layernorm_eps"),
+                  py::arg("q_group_num"),
+                  py::arg("k_group_num"),
+                  py::arg("m"),
+                  py::arg("n"),
+                  py::arg("norm_size"));
+
+    rtp_ops_m.def("fused_qk_rmsnorm_v2",
+                  &FusedQKRMSNormV2,
+                  "Fused QK RMSNorm V2 (warp-per-head wave64 single-pass, ROCm)",
                   py::arg("IO"),
                   py::arg("q_gamma"),
                   py::arg("k_gamma"),

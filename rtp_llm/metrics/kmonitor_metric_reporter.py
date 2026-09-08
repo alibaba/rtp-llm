@@ -2,6 +2,26 @@ import logging
 from enum import Enum
 from typing import Any, Dict, Union
 
+# Auto-TPM QoS priority header conveyed by the DashScope gateway; the same
+# value the engine forwards to FlexLB as ``Schedule.priority``.
+QOS_PRIORITY_HEADER = "x-dashscope-inner-qos-level"
+
+
+def qos_priority_tag(qos_level: Any) -> str:
+    """Normalize an ``x-dashscope-inner-qos-level`` value into the kmonitor
+    ``priority`` tag value.
+
+    Returns the raw 1-100 integer as a string, or ``"0"`` when the request
+    carries no (or an unparseable) priority — same convention as the FlexLB
+    ``auto_tpm.*`` metric family ("0" = legacy request without a budget).
+    """
+    if qos_level is None:
+        return "0"
+    try:
+        return str(int(str(qos_level).strip()))
+    except (TypeError, ValueError):
+        return "0"
+
 
 class AccMetrics(Enum):
     CANCEL_QPS_METRIC = "py_rtp_cancal_qps_metric"
@@ -22,11 +42,38 @@ class AccMetrics(Enum):
     DOMAIN_ROUTE_QPS_METRIC = "py_rtp_domain_route_qps"
     MASTER_ROUTE_ERROR_QPS_METRIC = "py_rtp_master_route_error_qps"
     MASTER_QUEUE_REJECT_QPS_METRIC = "py_rtp_master_queue_reject_qps"
+    RECENT_CACHE_KEY_HIT_COUNT_METRIC = "py_rtp_recent_cache_key_hit_count"
+    RECENT_CACHE_KEY_TOTAL_COUNT_METRIC = "py_rtp_recent_cache_key_total_count"
+    RECENT_CACHE_KEY_REQUEST_COUNT_METRIC = "py_rtp_recent_cache_key_request_count"
+    RECENT_CACHE_KEY_EMPTY_REQUEST_COUNT_METRIC = (
+        "py_rtp_recent_cache_key_empty_request_count"
+    )
 
     # igraph
     IGRAPH_QPS_METRIC = "py_rtp_igraph_qps"
     IGRAPH_ERROR_QPS_METRIC = "py_rtp_igraph_error_qps"
     IGRAPH_EMPTY_QPS_METRIC = "py_rtp_igraph_empty_qps"
+
+    VIT_QPS_METRIC = "py_rtp_vit_qps"
+    VIT_ERROR_QPS_METRIC = "py_rtp_vit_error_qps"
+    VIT_SUCCESS_QPS_METRIC = "py_rtp_vit_success_qps"
+    # Incremented when a submission is rejected because the scheduler's waiting
+    # queue is full (overload / stalled forward backpressure).
+    VIT_EMBEDDING_OVERLOAD_QPS_METRIC = "py_rtp_vit_embedding_overload_qps"
+    VIT_PROCESS_POOL_RESTART_QPS_METRIC = "py_rtp_vit_process_pool_restart_qps"
+    VIT_RPC_CLIENT_ERROR_QPS_METRIC = "rtp_llm_vit_rpc_client_error_qps"
+    VIT_RPC_SERVER_ERROR_QPS_METRIC = "rtp_llm_vit_rpc_server_error_qps"
+    VIT_RPC_PROXY_ERROR_QPS_METRIC = "rtp_llm_vit_rpc_proxy_error_qps"
+
+    # dash_sc DSV4 phase-2: incremented once per request that enters phase-2
+    # via the terminate-token-id (token 1) abort path in the think phase.
+    # One increment per request — guarded by ``phase2_triggered`` so the
+    # rate matches "requests with a think-abort", not "abort tokens seen".
+    DASH_SC_DSV4_PHASE2_QPS_METRIC = "py_rtp_dash_sc_dsv4_phase2_qps"
+
+    # Tool-call output fell into a repeated span. Reported once per request by the
+    # frontend gRPC access-log interceptor; tags intentionally avoid request_id.
+    TOOL_CALL_LOOP_QPS_METRIC = "py_rtp_tool_call_loop_qps"
 
 
 class GaugeMetrics(Enum):
@@ -54,6 +101,7 @@ class GaugeMetrics(Enum):
     DOMAIN_ROUTE_RT_METRIC = "py_rtp_domain_route_rt"
     MASTER_QUEUE_LENGTH_METRIC = "py_rtp_master_queue_length"
     MASTER_HOST_METRIC = "py_rtp_master_host"
+    RECENT_CACHE_KEY_HIT_RATIO_METRIC = "py_rtp_recent_cache_key_hit_ratio"
 
     # igraph
     IGRAPH_RT_METRIC = "py_rtp_igraph_rt"
@@ -61,6 +109,44 @@ class GaugeMetrics(Enum):
 
     # vit preprocess
     VIT_PREPROCESS_RT_METRIC = "py_rtp_vit_preprocess_rt"
+    # Per-request embedding latency = wait + forward, sampled once per request in
+    # submit_and_wait. Preserves the historical meaning (pre-scheduler this timed
+    # the forward under the embedding lock, i.e. lock-wait + forward per request)
+    # so existing dashboards/alerts are unchanged.
+    VIT_EMBEDDING_RT_METRIC = "py_rtp_vit_embedding_rt"
+    VIT_RPC_SERVER_HANDLER_RT_US_METRIC = "rtp_llm_vit_rpc_server_handler_rt_us"
+    VIT_RPC_SERVER_LIFECYCLE_RT_US_METRIC = "rtp_llm_vit_rpc_server_lifecycle_rt_us"
+    VIT_RPC_PROXY_LIFECYCLE_RT_US_METRIC = "rtp_llm_vit_rpc_proxy_lifecycle_rt_us"
+    VIT_RPC_PROXY_TO_WORKER_RT_US_METRIC = "rtp_llm_vit_rpc_proxy_to_worker_rt_us"
+    VIT_RPC_PROXY_HEALTHY_WORKER_COUNT_METRIC = (
+        "rtp_llm_vit_rpc_proxy_healthy_worker_count"
+    )
+    VIT_RPC_PROXY_TOTAL_WORKER_COUNT_METRIC = "rtp_llm_vit_rpc_proxy_total_worker_count"
+    VIT_RPC_REQUEST_BYTES_METRIC = "rtp_llm_vit_rpc_request_bytes"
+    VIT_RPC_RESPONSE_BYTES_METRIC = "rtp_llm_vit_rpc_response_bytes"
+    VIT_RESPONSE_EMBEDDING_BYTES_METRIC = "rtp_llm_vit_response_embedding_bytes"
+    VIT_RESPONSE_DEEPSTACK_BYTES_METRIC = "rtp_llm_vit_response_deepstack_bytes"
+    VIT_RESPONSE_POS_BYTES_METRIC = "rtp_llm_vit_response_pos_bytes"
+    VIT_OUTPUT_TOKEN_COUNT_METRIC = "rtp_llm_vit_output_token_count"
+    VIT_INPUT_IMAGE_COUNT_METRIC = "rtp_llm_vit_input_image_count"
+    VIT_IMAGE_FETCH_RT_US_METRIC = "rtp_llm_vit_image_fetch_rt_us"
+    VIT_IMAGE_DECODE_RT_US_METRIC = "rtp_llm_vit_image_decode_rt_us"
+    VIT_IMAGE_RESIZE_RT_US_METRIC = "rtp_llm_vit_image_resize_rt_us"
+    VIT_IMAGE_PROCESSOR_RT_US_METRIC = "rtp_llm_vit_image_processor_rt_us"
+    VIT_RESIZED_PIXEL_COUNT_METRIC = "rtp_llm_vit_resized_pixel_count"
+    # Forward-only latency of one GPU embedding forward (no wait), sampled once
+    # per merged batch in _run_embedding. A NEW name so it doesn't redefine the
+    # historical per-request VIT_EMBEDDING_RT.
+    VIT_EMBEDDING_FORWARD_RT_METRIC = "py_rtp_vit_embedding_forward_rt"
+    # Number of requests merged into one GPU forward by the MMScheduler. 1 on the
+    # serial path (gpu_max_batch_size == 1); > 1 means cross-request batching kicked in.
+    VIT_EMBEDDING_BATCH_SIZE_METRIC = "py_rtp_vit_embedding_batch_size"
+
+    TOOL_CALL_LOOP_REPEAT_COUNT_METRIC = "py_rtp_tool_call_loop_repeat_count"
+    TOOL_CALL_LOOP_CURRENT_SPAN_TOKENS_METRIC = (
+        "py_rtp_tool_call_loop_current_span_tokens"
+    )
+    TOOL_CALL_LOOP_CHECK_RT_METRIC = "py_rtp_tool_call_loop_check_rt"
 
 
 class MetricReporter(object):

@@ -24,7 +24,13 @@ public enum FlexMetricType {
      * Represents request processing rate per second, typically used to measure system throughput.
      * Characteristics: Rate value calculated based on time window
      */
-    QPS("QPS", "Queries Per Second, measures system request processing speed");
+    QPS("QPS", "Queries Per Second, measures system request processing speed"),
+    /**
+     * TIMER type - Duration distribution metric
+     * Records duration distributions (p50/p90/p95/p99) via Micrometer Timer.
+     * Characteristics: Provides histogram data (count, sum, percentiles) instead of instantaneous value
+     */
+    TIMER("TIMER", "Timer metric for recording duration distributions (p50/p90/p99)");
     private final String type;
     private final String description;
 

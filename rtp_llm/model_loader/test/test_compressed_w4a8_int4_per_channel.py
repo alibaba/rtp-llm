@@ -21,17 +21,19 @@ class TestCompressedW4A8Loader(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         try:
-            from rtp_llm.model_loader.w4a8_int4_per_channel_quant_weight import (
-                quantize_weight_to_int4b,
-            )
-
-            # Wrap as staticmethod so `self._quantize_online(...)` doesn't bind
-            # `self` as the first positional argument.
-            cls._quantize_online = staticmethod(quantize_weight_to_int4b)
-        except Exception as e:
+            import rtp_kernel.w4a8_group_gemm  # noqa: F401
+        except ImportError as e:
             raise unittest.SkipTest(
                 f"rtp_kernel.w4a8_group_gemm not available: {e}"
-            )
+            ) from e
+
+        from rtp_llm.model_loader.w4a8_int4_per_channel_quant_weight import (
+            quantize_weight_to_int4b,
+        )
+
+        # Wrap as staticmethod so `self._quantize_online(...)` doesn't bind
+        # `self` as the first positional argument.
+        cls._quantize_online = staticmethod(quantize_weight_to_int4b)
         from rtp_llm.model_loader.compressed_w4a8_int4_per_channel_weight import (
             repack_compressed_int4_to_cutlass,
         )

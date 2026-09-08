@@ -11,8 +11,8 @@ from unittest.mock import patch
 
 import torch
 
-from rtp_llm.config.server_config_setup import set_parallelism_config
 from rtp_llm.config.py_config_modules import PyEnvConfigs
+from rtp_llm.config.server_config_setup import set_parallelism_config
 
 torch.cuda.set_device = lambda x: None
 

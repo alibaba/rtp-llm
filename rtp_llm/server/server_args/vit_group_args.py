@@ -1,6 +1,14 @@
-import os
+import argparse
 import logging
+import os
+
+from rtp_llm.config.py_config_modules import (
+    MM_TRANSPORT_MODE_GRPC,
+    MM_TRANSPORT_MODES,
+    VitConfig,
+)
 from rtp_llm.ops import VitSeparation
+from rtp_llm.server.server_args.util import str2bool
 
 
 def _convert_vit_separation(value):
@@ -26,7 +34,7 @@ def _convert_vit_separation(value):
             return VitSeparation.VIT_SEPARATION_LOCAL
         elif value == "1" or value == "VitSeparation.VIT_SEPARATION_ROLE":
             return VitSeparation.VIT_SEPARATION_ROLE
-        elif  value == "2" or value == "VitSeparation.VIT_SEPARATION_REMOTE":
+        elif value == "2" or value == "VitSeparation.VIT_SEPARATION_REMOTE":
             return VitSeparation.VIT_SEPARATION_REMOTE
 
     raise ValueError(
@@ -38,6 +46,57 @@ def _convert_vit_separation(value):
         f"  'VitSeparation.VIT_SEPARATION_ROLE'\n"
         f"  'VitSeparation.VIT_SEPARATION_REMOTE'"
     )
+
+
+def _convert_mm_transport_mode(value):
+    value = str(value).strip().lower()
+    if value not in MM_TRANSPORT_MODES:
+        raise argparse.ArgumentTypeError(
+            f"invalid mm_transport_mode '{value}'; expected one of "
+            f"{', '.join(repr(mode) for mode in MM_TRANSPORT_MODES)}"
+        )
+    return value
+
+
+# Reject invalid RDMA limits and timeouts during argument parsing.
+def _positive_int(value):
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        raise argparse.ArgumentTypeError(f"must be a positive integer, got {value!r}")
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError(f"must be a positive integer, got {value!r}")
+    return parsed
+
+
+def _non_negative_int(value):
+    """For the caps where 0 is meaningful ("unlimited"), unlike the timeouts."""
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        raise argparse.ArgumentTypeError(
+            f"must be a non-negative integer, got {value!r}"
+        )
+    if parsed < 0:
+        raise argparse.ArgumentTypeError(
+            f"must be a non-negative integer, got {value!r}"
+        )
+    return parsed
+
+
+def _rdma_port(value):
+    """0 means "let the RDMA server pick a free port"; anything else must be a real port."""
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        raise argparse.ArgumentTypeError(
+            f"must be 0 (auto) or a port in [1, 65535], got {value!r}"
+        )
+    if parsed != 0 and not 1 <= parsed <= 65535:
+        raise argparse.ArgumentTypeError(
+            f"must be 0 (auto) or a port in [1, 65535], got {value!r}"
+        )
+    return parsed
 
 
 def init_vit_group_args(parser, vit_config):
@@ -86,6 +145,22 @@ def init_vit_group_args(parser, vit_config):
         help="是否需要下载headers",
     )
     vit_group.add_argument(
+        "--mm_image_max_file_size_kb",
+        env_name="MM_IMAGE_MAX_FILE_SIZE_KB",
+        bind_to=(vit_config, "mm_image_max_file_size_kb"),
+        type=int,
+        default=VitConfig.DEFAULT_MM_IMAGE_MAX_FILE_SIZE_KB,
+        help="图片及默认多模态文件大小上限，单位为KB",
+    )
+    vit_group.add_argument(
+        "--mm_video_max_file_size_kb",
+        env_name="MM_VIDEO_MAX_FILE_SIZE_KB",
+        bind_to=(vit_config, "mm_video_max_file_size_kb"),
+        type=int,
+        default=VitConfig.DEFAULT_MM_VIDEO_MAX_FILE_SIZE_KB,
+        help="视频文件大小上限，单位为KB",
+    )
+    vit_group.add_argument(
         "--mm_cache_item_num",
         env_name="MM_CACHE_ITEM_NUM",
         bind_to=(vit_config, "mm_cache_item_num"),
@@ -105,7 +180,7 @@ def init_vit_group_args(parser, vit_config):
         "--use_igraph_cache",
         env_name="USE_IGRAPH_CACHE",
         bind_to=(vit_config, "use_igraph_cache"),
-        type=bool,
+        type=str2bool,
         default=True,
         help="访问igraph是否开启cache",
     )
@@ -140,4 +215,193 @@ def init_vit_group_args(parser, vit_config):
         type=str,
         default=None,
         help="访问igraph失败时默认使用的key",
+    )
+    vit_group.add_argument(
+        "--mm_preprocess_max_workers",
+        env_name="MM_PREPROCESS_MAX_WORKERS",
+        bind_to=(vit_config, "mm_preprocess_max_workers"),
+        type=int,
+        default=4,
+        help="多模态预处理时最大线程数量",
+    )
+    vit_group.add_argument(
+        "--biencoder_preprocess",
+        env_name="BIENCODER_PREPROCESS",
+        bind_to=(vit_config, "biencoder_preprocess"),
+        type=str2bool,
+        default=False,
+        help="是否开启biencoder预处理",
+    )
+    vit_group.add_argument(
+        "--extra_input_in_mm_embedding",
+        env_name="EXTRA_INPUT_IN_MM_EMBEDDING",
+        bind_to=(vit_config, "extra_input_in_mm_embedding"),
+        type=str,
+        default=None,
+        help='在多模态嵌入中使用额外的输入，可选值"INDEX"',
+    )
+    vit_group.add_argument(
+        "--mm_timeout_ms",
+        env_name="MM_TIMEOUT_MS",
+        bind_to=(vit_config, "mm_timeout_ms"),
+        type=int,
+        default=VitConfig.DEFAULT_MM_TIMEOUT_MS,
+        help="多模态嵌入的超时时间，单位为毫秒",
+    )
+    vit_group.add_argument(
+        "--extra_data_path",
+        env_name="EXTRA_DATA_PATH",
+        bind_to=(vit_config, "extra_data_path"),
+        type=str,
+        default="",
+        help="额外的数据路径",
+    )
+    vit_group.add_argument(
+        "--local_extra_data_path",
+        env_name="LOCAL_EXTRA_DATA_PATH",
+        bind_to=(vit_config, "local_extra_data_path"),
+        type=str,
+        default="",
+        help="本地额外数据路径",
+    )
+    vit_group.add_argument(
+        "--disable_access_log",
+        env_name="DISABLE_ACCESS_LOG",
+        bind_to=(vit_config, "disable_access_log"),
+        type=str2bool,
+        default=False,
+        help="是否禁用访问日志",
+    )
+    vit_group.add_argument(
+        "--use_local_preprocess",
+        env_name="USE_LOCAL_PREPROCESS",
+        bind_to=(vit_config, "use_local_preprocess"),
+        type=str2bool,
+        default=False,
+        help="是否使用本地预处理模式（不使用子进程）",
+    )
+    vit_group.add_argument(
+        "--vit_proxy_load_balance_strategy",
+        env_name="VIT_PROXY_LOAD_BALANCE_STRATEGY",
+        bind_to=(vit_config, "vit_proxy_load_balance_strategy"),
+        type=str,
+        default="round_robin",
+        help="VIT代理服务器的负载均衡策略，可选值: 'round_robin' 或 'least_connections'",
+    )
+    transport_config = vit_config.output_transport
+    control_config = transport_config.control
+    rdma_config = transport_config.rdma
+    vit_group.add_argument(
+        "--mm_transport_mode",
+        env_name="MM_TRANSPORT_MODE",
+        bind_to=(transport_config, "mode"),
+        type=_convert_mm_transport_mode,
+        choices=list(MM_TRANSPORT_MODES),
+        default=MM_TRANSPORT_MODE_GRPC,
+        help="多模态输出传输模式：grpc 使用内联传输，rdma 强制使用 RDMA 且失败时直接报错",
+    )
+    vit_group.add_argument(
+        "--mm_rdma_bind_ip",
+        env_name="MM_RDMA_BIND_IP",
+        bind_to=(rdma_config, "bind_ip"),
+        type=str,
+        default="",
+        help="encoder 侧 RDMA server 的 OOB 监听 IP，空表示自动探测（getBindIp）；多网卡机器可显式指定。仅在链接了真实 RDMA transport 的构建中生效",
+    )
+    vit_group.add_argument(
+        "--mm_rdma_port",
+        env_name="MM_RDMA_PORT",
+        bind_to=(rdma_config, "port"),
+        type=_rdma_port,
+        default=0,
+        help="encoder 侧 RDMA server 监听端口，0 表示随机端口。仅在链接了真实 RDMA transport 的构建中生效",
+    )
+    vit_group.add_argument(
+        "--mm_rdma_connect_timeout_ms",
+        env_name="MM_RDMA_CONNECT_TIMEOUT_MS",
+        bind_to=(rdma_config, "connect_timeout_ms"),
+        type=_positive_int,
+        default=250,
+        help="RDMA 连接超时（毫秒）。仅在链接了真实 RDMA transport 的构建中生效",
+    )
+    vit_group.add_argument(
+        "--mm_rdma_read_timeout_ms",
+        env_name="MM_RDMA_READ_TIMEOUT_MS",
+        bind_to=(rdma_config, "read_timeout_ms"),
+        type=_positive_int,
+        default=3000,
+        help="LLM 侧单次 RDMA READ 的上限（毫秒），实际预算取 min(请求剩余时间, 该值)。仅在链接了真实 RDMA transport 的构建中生效",
+    )
+    vit_group.add_argument(
+        "--mm_rdma_qp_count",
+        env_name="MM_RDMA_QP_COUNT",
+        bind_to=(rdma_config, "qp_count"),
+        type=_positive_int,
+        default=8,
+        help="LLM 侧每个 ViT endpoint 的并行 RDMA QP 数，必须为正整数",
+    )
+    vit_group.add_argument(
+        "--mm_rdma_release_timeout_ms",
+        env_name="MM_RDMA_RELEASE_TIMEOUT_MS",
+        bind_to=(control_config, "release_timeout_ms"),
+        type=_positive_int,
+        default=1000,
+        help="读取侧 ReleaseRdmaLease RPC 的 deadline（毫秒），位于推理路径上需保持较短，超时由导出侧 slot GC 兜底",
+    )
+    vit_group.add_argument(
+        "--mm_rdma_slot_gc_timeout_ms",
+        env_name="MM_RDMA_SLOT_GC_TIMEOUT_MS",
+        bind_to=(rdma_config, "slot_gc_timeout_ms"),
+        type=_positive_int,
+        default=60 * 1000,
+        help="encoder 侧 slot 在无 Release 时强制回收的超时（毫秒）",
+    )
+    vit_group.add_argument(
+        "--mm_rdma_max_slot_bytes",
+        env_name="MM_RDMA_MAX_SLOT_BYTES",
+        bind_to=(rdma_config, "max_slot_bytes"),
+        type=_non_negative_int,
+        default=1024 * 1024 * 1024,
+        help="encoder 侧单个 RDMA slot 的字节上限，默认 1GiB；更大的输出自动分块；0 表示不限制。"
+        "分块时按 256B 对齐向下取整后计算，因此实际生效上限是不超过该值的最大 256 倍数",
+    )
+    vit_group.add_argument(
+        "--mm_rdma_max_receipt_bytes",
+        env_name="MM_RDMA_MAX_RECEIPT_BYTES",
+        bind_to=(rdma_config, "max_receipt_bytes"),
+        type=_positive_int,
+        default=8 * 1024 * 1024 * 1024,
+        help="LLM 侧单个 RDMA receipt 的总载荷上限，默认 8GiB，与 RDMA 总显存池大小一致",
+    )
+    vit_group.add_argument(
+        "--gpu_batch_wait_ms",
+        env_name="VIT_GPU_BATCH_WAIT_MS",
+        bind_to=(vit_config, "gpu_batch_wait_ms"),
+        type=int,
+        default=10,
+        help="GPU batch调度收集窗口(ms)；仅在 gpu_max_batch_size>1 时生效，串行(=1)时被强制为0",
+    )
+    vit_group.add_argument(
+        "--gpu_max_batch_size",
+        env_name="VIT_GPU_MAX_BATCH_SIZE",
+        bind_to=(vit_config, "gpu_max_batch_size"),
+        type=int,
+        default=1,
+        help="GPU batch调度最大batch大小(请求数)；=1 为串行(每forward一个请求，不合批)，>1 开启跨请求合批",
+    )
+    vit_group.add_argument(
+        "--gpu_max_batch_images",
+        env_name="VIT_GPU_MAX_BATCH_IMAGES",
+        bind_to=(vit_config, "gpu_max_batch_images"),
+        type=int,
+        default=200,
+        help="防止单次forward OOM。单个batch内的最大原始图片/媒体数；同时限制单个请求的最大图片数，",
+    )
+    vit_group.add_argument(
+        "--mm_max_queue_size",
+        env_name="MM_MAX_QUEUE_SIZE",
+        bind_to=(vit_config, "mm_max_queue_size"),
+        type=int,
+        default=1024,
+        help="mm embedding调度器等待队列容量上限；超出时提交快速失败并返回过载错误，防止forward卡住时内存无界增长",
     )

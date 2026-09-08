@@ -1,5 +1,7 @@
 #pragma once
 
+#include <utility>
+
 #include "absl/status/status.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/engine_base/schedulers/SchedulerBase.h"
@@ -52,7 +54,8 @@ public:
 
     virtual void enqueue(std::shared_ptr<GenerateStream>& stream) = 0;
 
-    virtual std::vector<GenerateStreamPtr> batchEnqueue(const std::vector<std::shared_ptr<GenerateInput>>& inputs);
+    virtual std::pair<std::vector<bool>, std::vector<GenerateStreamPtr>>
+    enqueueMultiple(const std::vector<std::shared_ptr<GenerateInput>>& inputs);
 
     virtual std::shared_ptr<GenerateStream> makeStream(const std::shared_ptr<GenerateInput>& input);
 
@@ -83,6 +86,10 @@ public:
         return false;
     }
 
+    virtual bool isDSpark() {
+        return false;
+    }
+
     virtual bool updateEplbConfig(const EPLBConfig& config) {
         return false;
     }
@@ -94,9 +101,8 @@ protected:
     ResourceContext                resource_context_;
     MlaOpsType                     mla_ops_type_       = MlaOpsType::AUTO;
     int32_t                        kv_cache_group_num_ = 1;
-    std::vector<int32_t>           kv_cache_layer_to_group_;
-    std::unique_ptr<SchedulerBase> scheduler_ = nullptr;
-    bool                           pause_     = false;
+    std::unique_ptr<SchedulerBase> scheduler_          = nullptr;
+    bool                           pause_              = false;
 };
 
 }  // namespace rtp_llm

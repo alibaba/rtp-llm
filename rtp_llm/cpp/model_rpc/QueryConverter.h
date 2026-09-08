@@ -13,17 +13,13 @@ class QueryConverter {
 public:
     static std::shared_ptr<GenerateInput> transQuery(const GenerateInputPB* input);
 
+    static RequestInfo transRequestInfo(const RequestInfoPB& request_info_pb);
+
     static void transResponse(GenerateOutputsPB*     outputs,
                               const GenerateOutputs* response,
                               bool                   dump_aux_info,
                               const std::string&     aux_string,
                               const int32_t          eos_token_id);
-
-    static std::vector<MultimodalInput> transMMInput(const MultimodalInputsPB* mm_inputs);
-
-    static MultimodalInputsPB transMMInputsPB(const std::vector<MultimodalInput> mm_inputs);
-
-    static MultimodalOutput transMMOutput(const MultimodalOutputsPB* outputs_pb);
 
     static std::vector<RoleAddr> getRoleAddrs(const GenerateConfigPB* config_proto);
 
@@ -33,8 +29,6 @@ public:
 
 private:
     static std::shared_ptr<GenerateConfig> transGenerateConfig(const GenerateConfigPB* config_proto);
-
-    static void transMMPreprocessConfig(MMPreprocessConfigPB* config_pb, const MMPreprocessConfig config);
 
     template<typename Container, typename Accessor>
     static void

@@ -1,3 +1,5 @@
+load("@arch_config//:arch_select.bzl", "telemetry_test_deps")
+
 py_test(
     name = "incremental_decode_test",
     srcs = [
@@ -14,7 +16,7 @@ py_test(
         "//rtp_llm:testlib",
         "//rtp_llm:_ft_pickler",
     ],
-    exec_properties = {'gpu':'H20'},
+    exec_properties = {'gpu':'A10'},
 )
 
 py_test(
@@ -24,8 +26,34 @@ py_test(
     ],
     deps = [
         "//rtp_llm:testlib",
+    ] + telemetry_test_deps(),
+    exec_properties = {'gpu':'A10'},
+)
+
+py_test(
+    name = "frontend_shutdown_test",
+    srcs = [
+        "frontend_shutdown_test.py",
     ],
-    exec_properties = {'gpu':'H20'},
+    deps = [
+        "//rtp_llm:fastapi",
+        "//rtp_llm:frontend",
+        "//rtp_llm:testlib",
+        "//rtp_llm:uvicorn",
+    ],
+)
+
+py_test(
+    name = "frontend_graceful_shutdown_business_test",
+    srcs = [
+        "frontend_graceful_shutdown_business_test.py",
+    ],
+    deps = [
+        "//rtp_llm:fastapi",
+        "//rtp_llm:frontend",
+        "//rtp_llm:testlib",
+        "//rtp_llm:uvicorn",
+    ],
 )
 
 py_test(
@@ -38,7 +66,7 @@ py_test(
         "//rtp_llm:testlib",
         "//rtp_llm:frontend",
     ],
-    exec_properties = {'gpu':'H20'},
+    exec_properties = {'gpu':'A10'},
 )
 
 py_test(

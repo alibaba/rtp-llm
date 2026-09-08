@@ -72,6 +72,8 @@ static std::string quantMethodToString(QuantMethod quant_method) {
             return "FP8PTPC";
         case QuantMethod::W4A8INT4PTPC:
             return "W4A8INT4PTPC";
+        case QuantMethod::W8A8INT8PTPC:
+            return "W8A8INT8PTPC";
         case QuantMethod::ModelOptFP4:
             return "ModelOptFP4";
         default:
@@ -149,14 +151,14 @@ bool ModelConfig::isGatedActivation() const {
 }
 
 bool ModelConfig::isKvCacheQuant() const {
-    return attn_config.kv_cache_dtype == KvCacheDataType::FP8 || attn_config.kv_cache_dtype == KvCacheDataType::INT8;
+    return attn_config.kv_cache_dtype == KvCacheDataType::FP8;
 }
 
 AttentionConfigs ModelConfig::getAttentionConfigs(int64_t tp_size) const {
     AttentionConfigs config = attn_config;
 
     if (tp_size > 1) {
-        /* 
+        /*
         KV head partitioning logic for tensor parallelism:
         Case 1: If kv_head_num % tp_size == 0,
             then each rank gets kv_head_num / tp_size KV heads.
@@ -167,24 +169,28 @@ AttentionConfigs ModelConfig::getAttentionConfigs(int64_t tp_size) const {
             and each rank gets kv_head_num / gcd KV heads.
         */
         if (config.head_num % config.kv_head_num != 0) {
-        throw std::runtime_error("head_num must be divisible by kv_head_num for attention config");
+            throw std::runtime_error("head_num must be divisible by kv_head_num for attention config");
         }
         if (config.kv_head_num % tp_size == 0) {
             config.kv_head_num = config.kv_head_num / tp_size;
         } else {
-            int64_t gcd = std::gcd(config.kv_head_num, tp_size);
+            int64_t gcd        = std::gcd(config.kv_head_num, tp_size);
             config.kv_head_num = config.kv_head_num / gcd;
         }
         config.head_num = config.head_num / tp_size;
     }
-    
+
     if (config.kernel_tokens_per_block == 0) {
         config.kernel_tokens_per_block = config.tokens_per_block;
     }
 
     // if qk_norm or use embedding model, fuse add bias in gemm
     config.fuse_qkv_add_bias = qk_norm || (config.rope_config.style == RopeStyle::No && !use_kvcache) ? false : true;
-
+    // Skip rope+bias+transpose kernel entirely for embedding models (no RoPE, no KV cache).
+    // The GEMM epilogue already handles bias, and PACKED_QKV layout matches FMHA input directly.
+    if (config.rope_config.style == RopeStyle::No && !use_kvcache) {
+        config.need_rope_kv_cache = false;
+    }
     // Set dtype from model data type
     config.dtype = dataTypeToTorchType(data_type);
 
@@ -226,6 +232,8 @@ std::string ModelConfig::to_string() const {
         << "use_norm_attn_out_residual: " << use_norm_attn_out_residual << "\n"
         << "max_seq_len: " << max_seq_len << "\n"
         << "vocab_size: " << vocab_size << "\n"
+        << "output_vocab_size: " << output_vocab_ids.size() << "\n"
+        << "output_vocab_padded_size: " << output_vocab_padded_size << "\n"
         << "input_vocab_size: " << input_vocab_size << "\n"
         << "type_vocab_size: " << type_vocab_size << "\n"
         << "embedding_size: " << embedding_size << "\n"

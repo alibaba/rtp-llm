@@ -34,10 +34,10 @@ class _InspectingAttention:
         self.model.last_graph_inputs = {
             "input_lengths": inputs.input_lengths.clone(),
             "prefix_lengths": inputs.prefix_lengths.clone(),
-            "cu_seqlens": inputs.cu_seqlens.cpu(),
-            "cu_kv_seqlens": inputs.cu_kv_seqlens.cpu(),
+            "cu_seqlens": inputs.cu_seqlens.clone(),
+            "cu_kv_seqlens": inputs.cu_kv_seqlens_device.cpu(),
             "padding_offset": inputs.padding_offset.clone(),
-            "block_ids_host": inputs.kv_cache_kernel_block_id_host.clone(),
+            "block_ids_host": inputs.kv_cache_kernel_block_id.clone(),
             "block_ids_device": inputs.kv_cache_kernel_block_id_device.cpu(),
         }
 
@@ -118,7 +118,7 @@ class TestCudaGraphLazyCapture(unittest.TestCase):
         inputs.input_hiddens = torch.full(
             (batch_size, self.hidden_size),
             value,
-            dtype=torch.float16,
+            dtype=torch.bfloat16,
             device="cuda",
         )
 
@@ -129,29 +129,29 @@ class TestCudaGraphLazyCapture(unittest.TestCase):
             batch_size, dtype=torch.int32, pin_memory=True
         )
         attention.prefix_lengths = torch.empty(0, dtype=torch.int32, pin_memory=True)
-        attention.sequence_lengths_plus_1_d = torch.full(
+        attention.sequence_lengths_plus_1_device = torch.full(
             (batch_size,), 2, dtype=torch.int32, device="cuda"
         )
-        attention.decode_cu_seqlens_d = torch.arange(
+        attention.decode_cu_seqlens_device = torch.arange(
             batch_size + 1, dtype=torch.int32, device="cuda"
         )
 
         block_ids = torch.zeros((batch_size, 1), dtype=torch.int32, device="cuda")
         attention.kv_cache_kernel_block_id_device = block_ids
-        attention.kv_cache_kernel_block_id_host = block_ids.cpu().pin_memory()
+        attention.kv_cache_kernel_block_id = block_ids.cpu().pin_memory()
         attention.kv_cache_block_id_device = block_ids
-        attention.kv_cache_block_id_host = attention.kv_cache_kernel_block_id_host
+        attention.kv_cache_block_id = attention.kv_cache_kernel_block_id
 
-        attention.cu_seqlens_host = torch.arange(
+        attention.cu_seqlens = torch.arange(
             batch_size + 1, dtype=torch.int32, pin_memory=True
         )
-        attention.cu_seqlens = attention.cu_seqlens_host.cuda()
-        attention.cu_kv_seqlens = attention.cu_seqlens.clone()
+        attention.cu_seqlens_device = attention.cu_seqlens.cuda()
+        attention.cu_kv_seqlens_device = attention.cu_seqlens_device.clone()
         attention.padding_offset = torch.zeros(
             self.max_seq_len, dtype=torch.int32, pin_memory=True
         )
         attention.is_prefill = False
-        attention.dtype = get_typemeta(torch.empty(1, dtype=torch.float16))
+        attention.dtype = get_typemeta(torch.empty(1, dtype=torch.bfloat16))
         attention.context_total_kv_length = batch_size
         attention.total_tokens = batch_size
         inputs.attention_inputs = attention
@@ -189,20 +189,20 @@ class TestCudaGraphLazyCapture(unittest.TestCase):
         for input_len, prefix_len in zip(input_lengths, prefix_lengths):
             cu_seqlens.append(cu_seqlens[-1] + input_len)
             cu_kv_seqlens.append(cu_kv_seqlens[-1] + input_len + prefix_len)
-        attention.cu_seqlens_host = torch.tensor(
+        attention.cu_seqlens = torch.tensor(
             cu_seqlens, dtype=torch.int32, pin_memory=True
         )
-        attention.cu_seqlens = attention.cu_seqlens_host.cuda()
-        attention.cu_kv_seqlens = torch.tensor(
+        attention.cu_seqlens_device = attention.cu_seqlens.cuda()
+        attention.cu_kv_seqlens_device = torch.tensor(
             cu_kv_seqlens, dtype=torch.int32, device="cuda"
         )
 
         block_ids_host = torch.arange(
             1, len(input_lengths) + 1, dtype=torch.int32
         ).reshape(-1, 1)
-        attention.kv_cache_kernel_block_id_host = block_ids_host.pin_memory()
+        attention.kv_cache_kernel_block_id = block_ids_host.pin_memory()
         attention.kv_cache_kernel_block_id_device = block_ids_host.cuda()
-        attention.kv_cache_block_id_host = attention.kv_cache_kernel_block_id_host
+        attention.kv_cache_block_id = attention.kv_cache_kernel_block_id
         attention.kv_cache_block_id_device = attention.kv_cache_kernel_block_id_device
         attention.padding_offset = torch.arange(
             token_num, dtype=torch.int32, pin_memory=True

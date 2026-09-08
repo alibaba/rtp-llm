@@ -10,16 +10,18 @@ from . import rtp_llm_ops
 __all__: list[str] = [
     "BertEmbeddingInputs",
     "CacheGroupType",
+    "CacheStoreWriter",
     "LayerKVCache",
     "KVCache",
     "ParamsBase",
     "PyAttentionInputs",
     "PyCacheStoreInputs",
-    "PyCaptureMetaData",
     "PyContextParallelParams",
+    "PyEmbeddingInputs",
     "PyModelInitResources",
     "PyModelInputs",
     "PyModelOutputs",
+    "PyMultimodalInputs",
     "PyPrefillCudaGaphCopyParams",
     "TypeMeta",
     "get_device_id",
@@ -28,9 +30,12 @@ __all__: list[str] = [
     "get_scalar_type",
     "get_typemeta",
     "init_exec_ctx",
+    "register_comm_ops",
+    "clear_comm_ops",
+    "init_cpu_tp_broadcaster",
+    "destroy_cpu_tp_broadcaster",
     "rtp_llm_ops",
 ]
-
 class BertEmbeddingInputs:
     @typing.overload
     def __init__(self) -> None: ...
@@ -92,10 +97,13 @@ class CacheGroupType:
       LINEAR
 
       FULL
+
+      SWA
     """
 
     FULL: typing.ClassVar[CacheGroupType]
     LINEAR: typing.ClassVar[CacheGroupType]
+    SWA: typing.ClassVar[CacheGroupType]
     __members__: typing.ClassVar[dict[str, CacheGroupType]]
     def __eq__(self, other: typing.Any) -> bool: ...
     def __getstate__(self) -> int: ...
@@ -115,11 +123,22 @@ class CacheGroupType:
 class LayerKVCache:
     """Per-layer KV cache view. Returned by KVCache.get_layer_cache()."""
 
+    @typing.overload
     def __init__(self) -> None: ...
+    @typing.overload
+    def __init__(
+        self,
+        kv_cache_base: torch.Tensor,
+        seq_size_per_block: int,
+        layer_id: int = -1,
+        group_id: int = -1,
+        tag: str = "default",
+        kv_scale_base: torch.Tensor | None = None,
+    ) -> None: ...
     @property
     def kv_cache_base(self) -> torch.Tensor:
         """
-        Key/value cache tensor
+        Key/value cache tensor (per-layer view)
         """
 
     @kv_cache_base.setter
@@ -139,26 +158,46 @@ class LayerKVCache:
         """
 
     @property
+    def group_id(self) -> int:
+        """
+        Cache group id (-1 = default)
+        """
+
+    @property
+    def tag(self) -> str:
+        """
+        Cache group tag
+        """
+
+    @property
     def seq_size_per_block(self) -> int:
         """
         Sequence size per block
         """
 
 class KVCache:
-    """Whole-model KV cache holding tensors for all layers."""
+    """Read-only whole-model KV cache created by the C++ runtime."""
 
-    kv_cache_base_by_layer: list[torch.Tensor]
-    kv_scale_base_by_layer: list[torch.Tensor]
-    seq_size_per_block: int
-    kernel_seq_size_per_block: int
-    num_kv_heads: int
-    head_dim: int
-    use_mla: bool
-    kv_lora_rank: int
-    rope_head_dim: int
-    def __init__(self) -> None: ...
+    @property
+    def group_tags(self) -> list[str]: ...
+    @property
+    def layer_count(self) -> int: ...
+    @typing.overload
     def get_layer_cache(self, arg0: int) -> LayerKVCache:
         """Return a per-layer LayerKVCache for the given global layer id."""
+        ...
+    @typing.overload
+    def get_layer_cache(self, arg0: int, arg1: str) -> LayerKVCache:
+        """Return a LayerKVCache for the given layer and tag."""
+        ...
+    def get_layer_cache_groups(self, arg0: int) -> list[LayerKVCache]:
+        """Return all LayerKVCache objects for every group the layer owns."""
+        ...
+    def get_seq_size_per_block(self, arg0: str) -> int:
+        """Return the physical sequence size per block for a cache tag."""
+        ...
+    def get_kernel_seq_size_per_block(self, arg0: str) -> int:
+        """Return the kernel sequence size per block for a cache tag."""
         ...
 
 class ParamsBase:
@@ -175,48 +214,52 @@ class ParamsBase:
         Fill parameters for CUDA graph execution
         """
 
+class CacheStoreWriter:
+    def write(
+        self,
+        cache_store_inputs: PyCacheStoreInputs,
+        kv_cache: LayerKVCache,
+    ) -> None: ...
+
 class PyAttentionInputs:
-    cache_store_inputs: PyCacheStoreInputs | None
+    def __init__(self) -> None: ...
+    @property
+    def cache_store_inputs(self) -> PyCacheStoreInputs | None: ...
+    @property
+    def cache_store_writer(self) -> CacheStoreWriter | None: ...
+    combo_position_ids: torch.Tensor
     context_parallel_info: PyContextParallelParams | None
     context_total_kv_length: int
-    cu_kv_seqlens: torch.Tensor
+    cu_kv_seqlens_device: torch.Tensor
+    cu_seqlens_device: torch.Tensor
     cu_seqlens: torch.Tensor
-    decode_cu_seqlens_d: torch.Tensor
+    decode_cu_seqlens_device: torch.Tensor
+    decode_cu_seqlens: torch.Tensor
     dtype: TypeMeta
     input_lengths: torch.Tensor
     is_cuda_graph: bool
     is_prefill: bool
     is_s_padded: bool
     is_target_verify: bool
-    kv_cache_block_id_device: torch.Tensor
-    kv_cache_kernel_block_id_device_by_group: list[torch.Tensor]
-    kv_cache_block_id_host: torch.Tensor
-    kv_cache_kernel_block_id_host_by_group: list[torch.Tensor]
-    kv_cache_kernel_block_id_device: torch.Tensor
-    kv_cache_kernel_block_id_host: torch.Tensor
-    kv_cache_layer_to_group: torch.Tensor
     padding_offset: torch.Tensor
-    position_ids: torch.Tensor
     prefill_cuda_graph_copy_params: PyPrefillCudaGaphCopyParams | None
     prefix_lengths: torch.Tensor
     sequence_lengths: torch.Tensor
-    sequence_lengths_plus_1_d: torch.Tensor
+    sequence_lengths_plus_1_device: torch.Tensor
     total_tokens: int
     headwise_config: dict | None
-    def __init__(self) -> None: ...
+    kv_cache_kernel_block_id: torch.Tensor
+    kv_cache_kernel_block_id_device: torch.Tensor
+    kv_cache_block_id: torch.Tensor
+    kv_cache_block_id_device: torch.Tensor
+    @property
+    def input_lengths_device(self) -> torch.Tensor: ...
+    @property
+    def prefix_lengths_device(self) -> torch.Tensor: ...
     def __repr__(self) -> str: ...
     def __copy__(self) -> PyAttentionInputs: ...
-    @property
-    def decode_cu_seqlens_host(self) -> torch.Tensor: ...
-    @property
-    def input_lengths_d(self) -> torch.Tensor: ...
-    @property
-    def prefix_lengths_d(self) -> torch.Tensor: ...
 
 class PyCacheStoreInputs:
-    def __init__(self) -> None: ...
-
-class PyCaptureMetaData:
     def __init__(self) -> None: ...
 
 class PyContextParallelParams:
@@ -228,6 +271,26 @@ class PyContextParallelParams:
     prefill_shuffle_indices: torch.Tensor
     def __init__(self) -> None: ...
 
+class PyEmbeddingInputs:
+    def __init__(self) -> None: ...
+    def __repr__(self) -> str: ...
+    @property
+    def combo_tokens_type_ids(self) -> torch.Tensor:
+        """
+        Combined token type IDs tensor
+        """
+
+    @combo_tokens_type_ids.setter
+    def combo_tokens_type_ids(self, arg0: torch.Tensor) -> None: ...
+    @property
+    def text_tokens_mask(self) -> torch.Tensor:
+        """
+        Text tokens mask tensor
+        """
+
+    @text_tokens_mask.setter
+    def text_tokens_mask(self, arg0: torch.Tensor) -> None: ...
+
 class PyModelInitResources:
     def __init__(self) -> None: ...
     @property
@@ -235,6 +298,12 @@ class PyModelInitResources:
         """
         Layered kv cache for all layers
         """
+    @property
+    def is_speculative(self) -> bool: ...
+    @property
+    def is_decode_role(self) -> bool: ...
+    @property
+    def max_context_batch_size(self) -> int: ...
 
 class PyModelInputs:
     @typing.overload
@@ -244,17 +313,20 @@ class PyModelInputs:
         self,
         input_ids: torch.Tensor = ...,
         input_hiddens: torch.Tensor = ...,
-        attention_inputs: PyAttentionInputs = ...,
+        combo_position_ids: torch.Tensor = ...,
+        embedding_inputs: PyEmbeddingInputs = ...,
+        multimodal_inputs: PyMultimodalInputs = ...,
+        attention_inputs: PyAttentionInputs | dict[str, PyAttentionInputs] = ...,
         bert_embedding_inputs: BertEmbeddingInputs = ...,
     ) -> None: ...
     @property
-    def attention_inputs(self) -> PyAttentionInputs:
+    def attention_inputs(self) -> PyAttentionInputs | dict[str, PyAttentionInputs]:
         """
         Attention inputs structure
         """
 
     @attention_inputs.setter
-    def attention_inputs(self, arg0: PyAttentionInputs) -> None: ...
+    def attention_inputs(self, arg0: PyAttentionInputs | dict[str, PyAttentionInputs]) -> None: ...
     @property
     def bert_embedding_inputs(self) -> BertEmbeddingInputs:
         """
@@ -263,6 +335,22 @@ class PyModelInputs:
 
     @bert_embedding_inputs.setter
     def bert_embedding_inputs(self, arg0: BertEmbeddingInputs) -> None: ...
+    @property
+    def combo_position_ids(self) -> torch.Tensor:
+        """
+        Combo position IDs tensor
+        """
+
+    @combo_position_ids.setter
+    def combo_position_ids(self, arg0: torch.Tensor) -> None: ...
+    @property
+    def embedding_inputs(self) -> PyEmbeddingInputs:
+        """
+        Embedding inputs structure
+        """
+
+    @embedding_inputs.setter
+    def embedding_inputs(self, arg0: PyEmbeddingInputs) -> None: ...
     @property
     def input_hiddens(self) -> torch.Tensor:
         """
@@ -279,6 +367,14 @@ class PyModelInputs:
 
     @input_ids.setter
     def input_ids(self, arg0: torch.Tensor) -> None: ...
+    @property
+    def multimodal_inputs(self) -> PyMultimodalInputs:
+        """
+        Multimodal inputs structure
+        """
+
+    @multimodal_inputs.setter
+    def multimodal_inputs(self, arg0: PyMultimodalInputs) -> None: ...
 
 class PyModelOutputs:
     @typing.overload
@@ -290,13 +386,7 @@ class PyModelOutputs:
     @typing.overload
     def __init__(self, hidden_states: torch.Tensor) -> None:
         """
-        Initialize with hidden states tensor only (params_ptr defaults to nullptr)
-        """
-
-    @typing.overload
-    def __init__(self, hidden_states: torch.Tensor, params_ptr: typing.Any) -> None:
-        """
-        Initialize with hidden states tensor and params pointer
+        Initialize with hidden states tensor
         """
 
     @property
@@ -307,14 +397,34 @@ class PyModelOutputs:
 
     @hidden_states.setter
     def hidden_states(self, arg0: torch.Tensor) -> None: ...
+
+class PyMultimodalInputs:
+    def __init__(self) -> None: ...
+    def __repr__(self) -> str: ...
     @property
-    def params_ptr(self) -> ParamsBase:
+    def mm_extra_input(self) -> list[torch.Tensor]:
         """
-        Parameters pointer
+        Multimodal model-specific extra input tensor
         """
 
-    @params_ptr.setter
-    def params_ptr(self, arg0: ParamsBase) -> None: ...
+    @mm_extra_input.setter
+    def mm_extra_input(self, arg0: list[torch.Tensor]) -> None: ...
+    @property
+    def mm_features_locs(self) -> torch.Tensor:
+        """
+        Multimodal features locations tensor
+        """
+    @mm_features_locs.setter
+    def mm_features_locs(self, arg0: torch.Tensor) -> None:
+        ...
+    @property
+    def multimodal_features(self) -> list[torch.Tensor]:
+        """
+        Multimodal features tensor
+        """
+
+    @multimodal_features.setter
+    def multimodal_features(self, arg0: list[torch.Tensor]) -> None: ...
 
 class PyPrefillCudaGaphCopyParams:
     cuda_graph_prefill_batch_size: torch.Tensor
@@ -345,6 +455,15 @@ def init_exec_ctx(
     mla_ops_type: int,
 ) -> None: ...
 
-def register_comm_ops(broadcast_fn: typing.Callable, allreduce_fn: typing.Callable, allgather_fn: typing.Callable) -> None: ...
+def register_comm_ops(broadcast_fn: typing.Callable, allreduce_fn: typing.Callable, allgather_fn: typing.Callable) -> None:
+    """
+    Register Python callbacks for C++ communication ops.
+    """
 
-def clear_comm_ops() -> None: ...
+def clear_comm_ops() -> None:
+    """
+    Clear registered Python communication callbacks.
+    """
+
+def init_cpu_tp_broadcaster(tp_rank: int, tp_size: int, base_path: str) -> None: ...
+def destroy_cpu_tp_broadcaster() -> None: ...

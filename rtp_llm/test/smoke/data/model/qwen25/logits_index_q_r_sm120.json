@@ -1,0 +1,155 @@
+{
+    "model_type": "qwen_tool",
+    "model_path": "/mnt/nas1/hf/Qwen2.5-0.5B-Instruct",
+    "query_result": [
+        {
+            "query": {
+                "prompt": "$prompt:s1",
+                "generate_config": {
+                    "max_new_tokens": 10,
+                    "top_k": 1,
+                    "top_p": 0,
+                    "return_logits": true,
+                    "select_tokens_id": [
+                        1,
+                        2
+                    ],
+                    "logits_index": 2,
+                    "return_incremental": true,
+                    "is_streaming": true
+                }
+            },
+            "result": {
+                "response": " The CAP theorem is a fundamental result in the field",
+                "response_alternatives": null,
+                "hidden_states": null,
+                "logits": [
+                    [
+                        5.465275287628174,
+                        2.522678852081299
+                    ]
+                ],
+                "loss": null,
+                "input_ids": null,
+                "output_ids": null,
+                "aux_info": {
+                    "input_len": 6,
+                    "prefix_len": 0,
+                    "reuse_len": 0,
+                    "local_reuse_len": 0,
+                    "remote_reuse_len": 0,
+                    "memory_reuse_len": 0,
+                    "prefill_total_reuse_len": 0,
+                    "prefill_local_reuse_len": 0,
+                    "prefill_remote_reuse_len": 0,
+                    "prefill_memory_reuse_len": 0,
+                    "decode_total_reuse_len": 0,
+                    "decode_local_reuse_len": 0,
+                    "decode_remote_reuse_len": 0,
+                    "decode_memory_reuse_len": 0,
+                    "output_len": 10,
+                    "step_output_len": 1,
+                    "iter_count": 10,
+                    "cum_log_probs": [],
+                    "beam_responses": [],
+                    "pd_sep": false,
+                    "softmax_probs": []
+                }
+            }
+        },
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "what is CAP Theorem ?"
+                    },
+                    {
+                        "role": "user",
+                        "content": "$prompt:s1"
+                    }
+                ],
+                "extra_configs": {
+                    "max_new_tokens": 10,
+                    "top_k": 1,
+                    "top_p": 0,
+                    "return_logits": true,
+                    "select_tokens_id": [
+                        1,
+                        2
+                    ],
+                    "logits_index": 2,
+                    "return_incremental": true,
+                    "is_streaming": true
+                },
+                "stream": false
+            },
+            "result": {
+                "id": "chat-",
+                "object": "chat.completion",
+                "created": 1777196861,
+                "model": "",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "The CAP theorem is a fundamental result in network design"
+                        },
+                        "finish_reason": "length"
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 25,
+                    "total_tokens": 35,
+                    "completion_tokens": 10,
+                    "completion_tokens_details": null,
+                    "prompt_tokens_details": null
+                },
+                "debug_info": null,
+                "aux_info": {
+                    "cost_time": 46.319,
+                    "iter_count": 10,
+                    "prefix_len": 0,
+                    "input_len": 25,
+                    "output_len": 10,
+                    "step_output_len": 1,
+                    "first_token_cost_time": 9.243,
+                    "wait_time": 0.0,
+                    "pd_sep": false,
+                    "cum_log_probs": [],
+                    "beam_responses": [],
+                    "softmax_probs": [],
+                    "reuse_len": 0,
+                    "local_reuse_len": 0,
+                    "remote_reuse_len": 0,
+                    "memory_reuse_len": 0,
+                    "prefill_total_reuse_len": 0,
+                    "prefill_local_reuse_len": 0,
+                    "prefill_remote_reuse_len": 0,
+                    "prefill_memory_reuse_len": 0,
+                    "decode_total_reuse_len": 0,
+                    "decode_local_reuse_len": 0,
+                    "decode_remote_reuse_len": 0,
+                    "decode_memory_reuse_len": 0,
+                    "role_addrs": [],
+                    "aux_string": ""
+                },
+                "extra_outputs": {
+                    "hidden_states": null,
+                    "all_hidden_states": null,
+                    "loss": null,
+                    "logits": [
+                        [
+                            5.973734378814697,
+                            2.3883185386657715
+                        ]
+                    ],
+                    "output_ids": null,
+                    "input_ids": null
+                }
+            }
+        }
+    ]
+}

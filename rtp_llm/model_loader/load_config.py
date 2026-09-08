@@ -49,9 +49,6 @@ class LoadConfig(BaseModel):
     bit: int = 16
     merge_lora: bool = False
 
-    vit_separation: VitSeparation = (
-        VitSeparation.VIT_SEPARATION_LOCAL
-    )  # VitSeparation enum
     compute_dtype: Any = torch.float16
 
     quant_algo: Any = None
@@ -63,19 +60,12 @@ class LoadConfig(BaseModel):
     phy2log: Optional[List[List[int]]] = None
     use_swizzleA: bool = False
     force_cpu_load_weights: bool = False
+    moe_pure_tp_preshard: bool = False
 
-    @field_validator("database", "compute_dtype", "quant_algo", "vit_separation")
+    @field_validator("database", "compute_dtype", "quant_algo")
     @classmethod
     def validate_custom_types(cls, value: Any, info) -> Any:
         field_name = info.field_name
-        if field_name == "vit_separation":
-            if value is None:
-                return VitSeparation.VIT_SEPARATION_LOCAL
-            if not isinstance(value, VitSeparation):
-                raise TypeError(
-                    f"Field 'vit_separation' expects type VitSeparation, got {type(value)}"
-                )
-            return value
 
         expected_types = {
             "database": BaseDatabase,

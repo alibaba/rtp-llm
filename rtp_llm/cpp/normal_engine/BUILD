@@ -12,8 +12,11 @@ cc_library(
         "speculative/*.cc",
     ]),
     deps = [
+        "//rtp_llm/cpp/config:role_types",
         "//rtp_llm/cpp/models:models",
+        "//rtp_llm/cpp/models:logits_processor",
         "//rtp_llm/cpp/engine_base:engine_base",
+        "//rtp_llm/cpp/utils:device_pin",
         "//rtp_llm/cpp/engine_base/stream:generate_config",
         "//rtp_llm/cpp/engine_base:worker_status_info",
         "//rtp_llm/cpp/engine_base:profiler",
@@ -25,9 +28,11 @@ cc_library(
         "//rtp_llm/cpp/cuda_graph:cuda_graph_base",
         "//rtp_llm/cpp/utils:tensor_debug_utils",
         "//rtp_llm/cpp/utils:profiling_scope",
+        "//rtp_llm/cpp/multimodal_processor:multimodal_input_utils",
     ] + select({
         "//:using_cuda": [
             "//rtp_llm/models_py/bindings/cuda/ops:standalone_ops",
+            "//rtp_llm/models_py/bindings/cuda/kernels:mtp_target_verify_prepare",
             "//rtp_llm/cpp/cuda_graph:cuda_graph_impl",
         ],
         "@//:using_rocm": [

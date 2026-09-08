@@ -97,22 +97,28 @@ public:
         }
         json.Jsonize("local_reuse_len", local_reuse_len, local_reuse_len);
         json.Jsonize("remote_reuse_len", remote_reuse_len, remote_reuse_len);
+        json.Jsonize("speculative_draft_rounds", speculative_draft_rounds, speculative_draft_rounds);
+        json.Jsonize("speculative_accepted_tokens_per_pos",
+                     speculative_accepted_tokens_per_pos,
+                     speculative_accepted_tokens_per_pos);
     }
     AuxInfoAdapter() {
         AuxInfo();
     }
     AuxInfoAdapter(const AuxInfo& base) {
-        cost_time_us     = base.cost_time_us;
-        iter_count       = base.iter_count;
-        input_len        = base.input_len;
-        prefix_len       = base.prefix_len;
-        reuse_len        = base.reuse_len;
-        output_len       = base.output_len;
-        step_output_len  = base.step_output_len;
-        pd_sep           = base.pd_sep;
-        cum_log_probs    = base.cum_log_probs;
-        local_reuse_len  = base.local_reuse_len;
-        remote_reuse_len = base.remote_reuse_len;
+        cost_time_us                        = base.cost_time_us;
+        iter_count                          = base.iter_count;
+        input_len                           = base.input_len;
+        prefix_len                          = base.prefix_len;
+        reuse_len                           = base.reuse_len;
+        output_len                          = base.output_len;
+        step_output_len                     = base.step_output_len;
+        pd_sep                              = base.pd_sep;
+        cum_log_probs                       = base.cum_log_probs;
+        local_reuse_len                     = base.local_reuse_len;
+        remote_reuse_len                    = base.remote_reuse_len;
+        speculative_draft_rounds            = base.speculative_draft_rounds;
+        speculative_accepted_tokens_per_pos = base.speculative_accepted_tokens_per_pos;
 
         cost_time_ms = cost_time_us / 1000.0;
     }

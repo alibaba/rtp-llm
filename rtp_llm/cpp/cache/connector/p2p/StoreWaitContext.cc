@@ -48,7 +48,7 @@ void StoreWaitContextChecker::checkOnce() {
         }
 
         // check event readiness
-        if (!context.event.has_value() || context.event->query()) {
+        if (!context.event || context.event->query()) {
             if (computed_buffers_) {
                 computed_buffers_->addBuffer(context.request_id, context.layer_cache_buffer, context.deadline_ms);
             }

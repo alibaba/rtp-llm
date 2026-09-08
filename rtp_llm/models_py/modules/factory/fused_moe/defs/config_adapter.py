@@ -32,6 +32,11 @@ class MoEConfigAdapter:
         # Provide shortcut access to commonly used attributes
         self.ep_size = parallelism_config.ep_size
         self.ep_rank = parallelism_config.ep_rank
+        # tp_size/tp_rank reflect the attention/MoE-input view: when CP is
+        # enabled, get_attn_tp_size() returns 1, so MoE input slicing
+        # (deepep narrow/allgather) stays a no-op. Router selectors that
+        # need the physical TP topology (e.g. pure_cp_router) read raw
+        # parallelism_config.tp_size via is_cp_equal_ep().
         self.tp_size = parallelism_config.get_attn_tp_size()
         self.tp_rank = parallelism_config.get_attn_tp_rank()
         self.dp_size = parallelism_config.dp_size

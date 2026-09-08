@@ -1,6 +1,18 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union, final
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Final,
+    List,
+    Literal,
+    Optional,
+    Tuple,
+    TypedDict,
+    Union,
+    final,
+)
 
 import torch
 
@@ -14,6 +26,16 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.type import (
     ExecutorType,
     RouterType,
 )
+
+SKIP_TP_ALLREDUCE_ARG: Final[Literal["skip_tp_allreduce"]] = "skip_tp_allreduce"
+
+
+class FinalizeArgs(TypedDict, total=False):
+    """Private, optional arguments passed from ``FusedMoe`` to routers."""
+
+    a1_shape: torch.Size
+    original_num_tokens: int
+    skip_tp_allreduce: bool
 
 
 @dataclass
@@ -71,6 +93,9 @@ class FusedMoeDataRouter(ABC):
         """
         self.config = config
         self.quant_config = quant_config
+        # Keep the legacy field for router-local logic. Callers that need the
+        # size of the Group.TP collective must use tp_collective_size below.
+        self.tp_size = config.tp_size
 
     @classmethod
     def router_type(cls) -> RouterType:
@@ -259,7 +284,6 @@ class FusedMoe(torch.nn.Module):
             topk_weights,
             topk_ids,
         )
-
         if expert_payload.expert_topk_ids is None:
             expert_payload.expert_topk_ids = topk_ids
         if expert_payload.expert_topk_weights is None:
@@ -280,6 +304,7 @@ class FusedMoe(torch.nn.Module):
                 apply_router_weight_on_input=apply_router_weight_on_input,
                 extra_expert_args=extra_expert_args,
             )
+        combine_payload.router_context = expert_payload.router_context
 
         if combine_payload.combine_indices is None:
             combine_payload.combine_indices = expert_payload.combine_indices
@@ -289,7 +314,15 @@ class FusedMoe(torch.nn.Module):
         else:
             extra_finalize_args.update({"a1_shape": a1.shape})
 
-        extra_finalize_args.update({"original_num_tokens": hidden_states.size(0)})
+        # Pure-TP routers normally reduce their routed output in finalize().
+        # GenericMoeLayer can set this flag to combine routed and shared-expert
+        # partial outputs first, reducing the number of small TP collectives.
+        finalize_args.update(
+            {
+                "original_num_tokens": hidden_states.size(0),
+                SKIP_TP_ALLREDUCE_ARG: skip_tp_allreduce,
+            }
+        )
 
         output = self.router.finalize(
             combine_payload,

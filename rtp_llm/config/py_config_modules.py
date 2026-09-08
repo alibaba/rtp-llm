@@ -1,7 +1,8 @@
-import logging
 import os
+import sys
 import time
-from typing import Optional
+from dataclasses import dataclass
+from typing import Dict, Optional
 
 from rtp_llm.config.kv_cache_config import KVCacheConfig
 from rtp_llm.config.model_args import ModelArgs
@@ -11,10 +12,12 @@ from rtp_llm.ops import (
     ArpcConfig,
     CacheStoreConfig,
     ConcurrencyConfig,
+    DashScGrpcConfig,
     DeviceResourceConfig,
     EPLBConfig,
     FfnDisAggregateConfig,
     FMHAConfig,
+    GrammarConfig,
     GrpcConfig,
     HWKernelConfig,
     MiscellaneousConfig,
@@ -33,28 +36,33 @@ from rtp_llm.ops import (
 consume_s = time.time() - st
 print(f"import rtp_llm.ops took {consume_s:.2f}s")
 
-
 DEFAULT_START_PORT = 8088
 COORDINATOR_INFO_PORT_NUM = 11
-MIN_WORKER_INFO_PORT_NUM = 8
+MIN_WORKER_INFO_PORT_NUM = 9
 WORKER_INFO_PORT_NUM = MIN_WORKER_INFO_PORT_NUM
+DASH_SC_GRPC_SERVER_PORT_OFFSET = 8
 
 
 class ServerConfig:
-    """Port layout : base = start_port + rank_id * worker_info_port_num, then +0..+7."""
+    """Port layout: base = start_port + rank_id * worker_info_port_num."""
 
     def __init__(self):
         self.frontend_server_count = 4
+        self.vit_server_count = 1
         self.start_port = DEFAULT_START_PORT
         self.timeout_keep_alive = 5
         self.frontend_server_id = 0
+        self.vit_server_id = 0
         self.rank_id = 0
         self.ip: str = ""
         self.worker_info_port_num: int = MIN_WORKER_INFO_PORT_NUM
-        self.shutdown_timeout: int = (
-            50  # Default timeout in seconds, -1 means wait indefinitely
-        )
+        self.shutdown_timeout: int = 600  # graceful drain budget (seconds)
         self.monitor_interval: int = 1  # Monitor interval in seconds
+        self.frontend_pre_stop_drain_seconds: float = 120.0
+        self.dash_sc_grpc_pre_stop_drain_seconds: float = 120.0
+        self.pre_stop_drain_headroom_seconds: float = -1.0
+        self.pre_stop_drain_signal: bool = True
+        self.backend_post_frontend_drain_seconds: float = -1.0
 
     def _server_base(self) -> int:
         return self.start_port + self.rank_id * self.worker_info_port_num
@@ -84,9 +92,24 @@ class ServerConfig:
     def embedding_rpc_server_port(self) -> int:
         return self._server_base() + 7
 
+    @property
+    def dash_sc_grpc_server_port(self) -> int:
+        """DashSc gRPC listen port (ModelStreamInfer, wire: predict_v2.proto)."""
+        return self._server_base() + DASH_SC_GRPC_SERVER_PORT_OFFSET
+
     def set_local_rank(self, local_rank: int):
         """Update rank_id in place; server_port-related properties reflect new values."""
         self.rank_id = local_rank
+
+    def validate_port_layout(self, *, dash_sc_enabled: bool) -> None:
+        if dash_sc_enabled and self.worker_info_port_num < MIN_WORKER_INFO_PORT_NUM:
+            raise ValueError(
+                "worker_info_port_num must be at least "
+                f"{MIN_WORKER_INFO_PORT_NUM} when DashSc gRPC is enabled; "
+                f"got {self.worker_info_port_num}. DashSc uses port offset "
+                f"{DASH_SC_GRPC_SERVER_PORT_OFFSET}, which overlaps the next "
+                "rank's port block with a smaller stride."
+            )
 
     # update_from_args 方法已不再需要
     # 配置绑定现在通过声明式 bind_to 参数在 add_argument 时自动处理
@@ -94,19 +117,27 @@ class ServerConfig:
     def to_string(self):
         return (
             f"frontend_server_count: {self.frontend_server_count}\n"
+            f"vit_server_count: {self.vit_server_count}\n"
             f"start_port: {self.start_port}\n"
             f"timeout_keep_alive: {self.timeout_keep_alive}\n"
             f"frontend_server_id: {self.frontend_server_id}\n"
+            f"vit_server_id: {self.vit_server_id}\n"
             f"rank_id: {self.rank_id}\n"
             f"worker_info_port_num: {self.worker_info_port_num}\n"
             f"shutdown_timeout: {self.shutdown_timeout}\n"
             f"monitor_interval: {self.monitor_interval}\n"
+            f"frontend_pre_stop_drain_seconds: {self.frontend_pre_stop_drain_seconds}\n"
+            f"dash_sc_grpc_pre_stop_drain_seconds: {self.dash_sc_grpc_pre_stop_drain_seconds}\n"
+            f"pre_stop_drain_headroom_seconds: {self.pre_stop_drain_headroom_seconds}\n"
+            f"pre_stop_drain_signal: {self.pre_stop_drain_signal}\n"
+            f"backend_post_frontend_drain_seconds: {self.backend_post_frontend_drain_seconds}\n"
             f"server_port: {self.server_port}\n"
             f"rpc_server_port: {self.rpc_server_port}\n"
             f"cache_store_listen_port: {self.cache_store_listen_port}\n"
             f"cache_store_rdma_listen_port: {self.cache_store_rdma_listen_port}\n"
             f"http_port: {self.http_port}\n"
-            f"embedding_rpc_server_port: {self.embedding_rpc_server_port}"
+            f"embedding_rpc_server_port: {self.embedding_rpc_server_port}\n"
+            f"dash_sc_grpc_server_port: {self.dash_sc_grpc_server_port}"
         )
 
 
@@ -146,9 +177,16 @@ class LoadConfig:
     def __init__(self):
         self.load_method: str = "auto"
         self.force_cpu_load_weights: bool = False
+        self.loader_recycle_handles: bool = True
+        self.moe_pure_tp_preshard: bool = False
 
     def to_string(self):
-        return f"load_method: {self.load_method}\nforce_cpu_load_weights: {self.force_cpu_load_weights}"
+        return (
+            f"load_method: {self.load_method}\n"
+            f"force_cpu_load_weights: {self.force_cpu_load_weights}\n"
+            f"loader_recycle_handles: {self.loader_recycle_handles}\n"
+            f"moe_pure_tp_preshard: {self.moe_pure_tp_preshard}"
+        )
 
 
 class RenderConfig:
@@ -225,13 +263,54 @@ class DistributeConfig:
         )
 
 
+# Keep these transport defaults aligned with cpp/config/ConfigModules.h::MMTransportConfig.
+MM_TRANSPORT_MODE_GRPC = "grpc"
+MM_TRANSPORT_MODE_RDMA = "rdma"
+MM_TRANSPORT_MODES = (MM_TRANSPORT_MODE_GRPC, MM_TRANSPORT_MODE_RDMA)
+DEFAULT_MM_TIMEOUT_MS = 120000
+
+
+class MMRdmaConfig:
+    def __init__(self):
+        self.bind_ip: str = ""
+        self.port: int = 0
+        self.connect_timeout_ms: int = 250
+        self.read_timeout_ms: int = 3000
+        self.qp_count: int = 8
+        self.slot_gc_timeout_ms: int = 60 * 1000
+        self.max_slot_bytes: int = 1024 * 1024 * 1024
+        self.max_receipt_bytes: int = 8 * 1024 * 1024 * 1024
+
+
+class MMControlConfig:
+    def __init__(self):
+        self.release_timeout_ms: int = 1000
+
+
+class MMTransportConfig:
+    def __init__(self):
+        self.mode: str = MM_TRANSPORT_MODE_GRPC
+        self.control = MMControlConfig()
+        self.rdma = MMRdmaConfig()
+
+
 class VitConfig:
+    DEFAULT_MM_TIMEOUT_MS: int = DEFAULT_MM_TIMEOUT_MS
+    DEFAULT_MM_IMAGE_MAX_FILE_SIZE_KB: int = 100 * 1024
+    DEFAULT_MM_VIDEO_MAX_FILE_SIZE_KB: int = 2 * 1024 * 1024
+
     def __init__(self):
         self.vit_separation: VitSeparation = VitSeparation.VIT_SEPARATION_LOCAL
         self.vit_trt: int = 0
         self.trt_cache_enabled: int = 0
         self.trt_cache_path: Optional[str] = None
         self.download_headers: str = ""
+        self.mm_image_max_file_size_kb: int = (
+            VitConfig.DEFAULT_MM_IMAGE_MAX_FILE_SIZE_KB
+        )
+        self.mm_video_max_file_size_kb: int = (
+            VitConfig.DEFAULT_MM_VIDEO_MAX_FILE_SIZE_KB
+        )
         self.mm_cache_item_num: int = 10
         self.url_cache_item_num: int = 100
         self.use_igraph_cache: bool = True
@@ -239,21 +318,105 @@ class VitConfig:
         self.igraph_vipserver: int = 0
         self.igraph_table_name: str = ""
         self.default_key: Optional[str] = None
+        self.mm_preprocess_max_workers: int = 4
+        self.biencoder_preprocess: bool = False
+        self.extra_input_in_mm_embedding = ""
+        self.mm_timeout_ms: int = VitConfig.DEFAULT_MM_TIMEOUT_MS
+        self.extra_data_path: str = ""
+        self.local_extra_data_path: str = ""
+        self.disable_access_log: bool = False
+        self.use_local_preprocess: bool = False
+        self.vit_proxy_load_balance_strategy: str = "round_robin"
+        self.output_transport = MMTransportConfig()
+        # Cross-request GPU batching is inferred from gpu_max_batch_size alone:
+        # == 1 -> serial (one request per forward, no wait window); > 1 -> merge
+        # compatible requests within gpu_batch_wait_ms. Default 1 keeps the old
+        # serial behavior (there is no separate on/off switch).
+        self.gpu_batch_wait_ms: int = 10
+        self.gpu_max_batch_size: int = 1
+        self.gpu_max_batch_images: int = 200
+        # Bound on the mm embedding scheduler's waiting queue. Caps memory when a
+        # forward stalls and requests pile up; over capacity, submit fails fast
+        # with an overload error instead of growing unbounded. Scheduler-level
+        # (like mm_timeout_ms): applies to serial and batch alike.
+        self.mm_max_queue_size: int = 1024
+
+    def embedding_scheduler_args(self) -> Dict[str, int]:
+        """Resolved MMScheduler kwargs, inferred from gpu_max_batch_size alone.
+
+        gpu_max_batch_size > 1 -> cross-request GPU batching with the gpu_* limits;
+        gpu_max_batch_images then caps both the batch and (since a request is never
+        split) the single-request image count; gpu_batch_wait_ms is the collect
+        window.
+        gpu_max_batch_size == 1 -> serial: one request per forward, no wait window
+        (effective batch_wait_ms forced to 0 regardless of the configured value),
+        and no image cap (sys.maxsize) — matches the old serial path, which never
+        bounded a single request's image count.
+        max_queue_size bounds the waiting queue in both modes.
+        """
+        if self.gpu_max_batch_size <= 0:
+            raise ValueError(
+                f"gpu_max_batch_size must be > 0, got {self.gpu_max_batch_size}"
+            )
+        if self.gpu_batch_wait_ms < 0:
+            raise ValueError(
+                f"gpu_batch_wait_ms must be >= 0, got {self.gpu_batch_wait_ms}"
+            )
+
+        is_serial = self.gpu_max_batch_size == 1
+        return {
+            # Serial ignores the collect window: a single-request forward never
+            # waits, so the configured gpu_batch_wait_ms has no effect.
+            "batch_wait_ms": 0 if is_serial else self.gpu_batch_wait_ms,
+            "max_batch_size": self.gpu_max_batch_size,
+            "max_batch_images": (
+                sys.maxsize if is_serial else self.gpu_max_batch_images
+            ),
+            "max_queue_size": self.mm_max_queue_size,
+        }
 
     def to_string(self):
+        transport = self.output_transport
+        control = transport.control
+        rdma = transport.rdma
         return (
             f"vit_separation: {self.vit_separation}\n"
             f"vit_trt: {self.vit_trt}\n"
             f"trt_cache_enabled: {self.trt_cache_enabled}\n"
             f"trt_cache_path: {self.trt_cache_path}\n"
             f"download_headers: {self.download_headers}\n"
+            f"mm_image_max_file_size_kb: {self.mm_image_max_file_size_kb}\n"
+            f"mm_video_max_file_size_kb: {self.mm_video_max_file_size_kb}\n"
             f"mm_cache_item_num: {self.mm_cache_item_num}\n"
             f"url_cache_item_num: {self.url_cache_item_num}\n"
             f"use_igraph_cache: {self.use_igraph_cache}\n"
             f"igraph_search_dom: {self.igraph_search_dom}\n"
             f"igraph_vipserver: {self.igraph_vipserver}\n"
             f"igraph_table_name: {self.igraph_table_name}\n"
-            f"igraph_default_key: {self.default_key}"
+            f"igraph_default_key: {self.default_key}\n"
+            f"mm_preprocess_max_workers: {self.mm_preprocess_max_workers}\n"
+            f"biencoder_preprocess: {self.biencoder_preprocess}\n"
+            f"extra_input_in_mm_embedding: {self.extra_input_in_mm_embedding}\n"
+            f"mm_timeout_ms: {self.mm_timeout_ms}\n"
+            f"extra_data_path: {self.extra_data_path}\n"
+            f"local_extra_data_path: {self.local_extra_data_path}\n"
+            f"disable_access_log: {self.disable_access_log}\n"
+            f"use_local_preprocess: {self.use_local_preprocess}\n"
+            f"vit_proxy_load_balance_strategy: {self.vit_proxy_load_balance_strategy}\n"
+            f"mm_transport_mode: {transport.mode}\n"
+            f"mm_rdma_bind_ip: {rdma.bind_ip}\n"
+            f"mm_rdma_port: {rdma.port}\n"
+            f"mm_rdma_connect_timeout_ms: {rdma.connect_timeout_ms}\n"
+            f"mm_rdma_read_timeout_ms: {rdma.read_timeout_ms}\n"
+            f"mm_rdma_qp_count: {rdma.qp_count}\n"
+            f"mm_rdma_release_timeout_ms: {control.release_timeout_ms}\n"
+            f"mm_rdma_slot_gc_timeout_ms: {rdma.slot_gc_timeout_ms}\n"
+            f"mm_rdma_max_slot_bytes: {rdma.max_slot_bytes}\n"
+            f"mm_rdma_max_receipt_bytes: {rdma.max_receipt_bytes}\n"
+            f"gpu_batch_wait_ms: {self.gpu_batch_wait_ms}\n"
+            f"gpu_max_batch_size: {self.gpu_max_batch_size}\n"
+            f"gpu_max_batch_images: {self.gpu_max_batch_images}\n"
+            f"mm_max_queue_size: {self.mm_max_queue_size}"
         )
 
 
@@ -261,11 +424,12 @@ class GenerateEnvConfig:
     def __init__(self):
         self.think_end_tag: str = "</think>\n\n"
         self.think_end_token_id: int = -1
-        self.think_mode: int = 0
+        self.think_mode: str = "disabled"
         self.force_stop_words: bool = False
         self.stop_words_list: Optional[str] = None
         self.stop_words_str: Optional[str] = None
         self.think_start_tag: str = "<think>\n"
+        self.think_terminate_token_id: int = 1
         self.generation_config_path: Optional[str] = None
 
     def to_string(self):
@@ -277,7 +441,26 @@ class GenerateEnvConfig:
             f"stop_words_list: {self.stop_words_list}\n"
             f"stop_words_str: {self.stop_words_str}\n"
             f"think_start_tag: {self.think_start_tag}\n"
+            f"think_terminate_token_id: {self.think_terminate_token_id}\n"
             f"generation_config_path: {self.generation_config_path}"
+        )
+
+
+class RepetitionDetectionConfig:
+    def __init__(self):
+        self.tool_call_loop_monitor: bool = True
+        self.tool_call_loop_threshold: int = 5
+        self.tool_call_loop_max_span_tokens: int = 16384
+        self.tool_call_loop_begin_marker: str = ""
+        self.tool_call_loop_end_marker: str = ""
+
+    def to_string(self):
+        return (
+            f"tool_call_loop_monitor: {self.tool_call_loop_monitor}\n"
+            f"tool_call_loop_threshold: {self.tool_call_loop_threshold}\n"
+            f"tool_call_loop_max_span_tokens: {self.tool_call_loop_max_span_tokens}\n"
+            f"tool_call_loop_begin_marker: {self.tool_call_loop_begin_marker}\n"
+            f"tool_call_loop_end_marker: {self.tool_call_loop_end_marker}"
         )
 
 
@@ -311,13 +494,9 @@ class QuantizationConfig:
 class EmbeddingConfig:
     def __init__(self):
         self.embedding_model: int = 0
-        self.extra_input_in_mm_embedding = ""
 
     def to_string(self):
-        return (
-            f"embedding_model: {self.embedding_model}\n"
-            f"extra_input_in_mm_embedding: {self.extra_input_in_mm_embedding}"
-        )
+        return f"embedding_model: {self.embedding_model}"
 
 
 class RoleConfig:
@@ -381,9 +560,15 @@ class MasterConfig:
 class JITConfig:
     def __init__(self):
         self.remote_jit_dir: str = ""
+        self.jit_cache_setup_timeout_s: int = 180
+        self.manage_jit_cache: bool = True
 
     def to_string(self):
-        return f"remote_jit_dir: {self.remote_jit_dir}"
+        return (
+            f"remote_jit_dir: {self.remote_jit_dir}\n"
+            f"jit_cache_setup_timeout_s: {self.jit_cache_setup_timeout_s}\n"
+            f"manage_jit_cache: {self.manage_jit_cache}"
+        )
 
 
 class DeepEPConfig:
@@ -422,13 +607,16 @@ class PyEnvConfigs:
         self.distribute_config: DistributeConfig = DistributeConfig()
         self.vit_config: VitConfig = VitConfig()
         self.generate_env_config: GenerateEnvConfig = GenerateEnvConfig()
+        self.repetition_detection_config: RepetitionDetectionConfig = (
+            RepetitionDetectionConfig()
+        )
         self.quantization_config: QuantizationConfig = QuantizationConfig()
         self.eplb_config: EPLBConfig = EPLBConfig()
         self.kv_cache_config: KVCacheConfig = KVCacheConfig()
         self.device_resource_config: DeviceResourceConfig = DeviceResourceConfig()
         self.runtime_config: RuntimeConfig = RuntimeConfig()
         # EngineConfig has been merged into RuntimeConfig and ModelConfig
-        # warm_up and warm_up_with_loss are in RuntimeConfig
+        # warm_up, warm_up_with_loss, and model_warm_up are in RuntimeConfig
         # max_seq_len is in ModelConfig
         self.embedding_config: EmbeddingConfig = EmbeddingConfig()
         self.role_config: RoleConfig = RoleConfig()
@@ -447,6 +635,9 @@ class PyEnvConfigs:
         self.cache_store_config = CacheStoreConfig()
         self.arpc_config = ArpcConfig()
         self.grpc_config = GrpcConfig()
+        self.dash_sc_grpc_config = DashScGrpcConfig()
+        self.grammar_config = GrammarConfig()
+        self.grammar_admission_config = GrammarAdmissionConfig()
         self.deep_ep_config = DeepEPConfig()
         self.prefill_cp_config = PrefillCPConfig()
 
@@ -464,6 +655,9 @@ class PyEnvConfigs:
             "[distribute_config]\n" + self.distribute_config.to_string() + "\n\n"
             "[vit_config]\n" + self.vit_config.to_string() + "\n\n"
             "[generate_env_config]\n" + self.generate_env_config.to_string() + "\n\n"
+            "[repetition_detection_config]\n"
+            + self.repetition_detection_config.to_string()
+            + "\n\n"
             "[quantization_config]\n" + self.quantization_config.to_string() + "\n\n"
             "[eplb_config]\n" + self.eplb_config.to_string() + "\n\n"
             "[kv_cache_config]\n" + self.kv_cache_config.to_string() + "\n\n"
@@ -498,5 +692,10 @@ class PyEnvConfigs:
             + self.runtime_config.fifo_scheduler_config.to_string()
             + "\n\n"
             "[grpc_config]\n" + self.grpc_config.to_string() + "\n\n"
+            "[dash_sc_grpc_config]\n" + self.dash_sc_grpc_config.to_string() + "\n\n"
+            "[grammar_config]\n" + self.grammar_config.to_string() + "\n\n"
+            "[grammar_admission_config]\n"
+            + self.grammar_admission_config.to_string()
+            + "\n\n"
             "[prefill_cp_config]\n" + self.prefill_cp_config.to_string() + "\n\n"
         )

@@ -81,8 +81,9 @@ __global__ void cudaGraphCopySmall2LargeKernel(T*         input_tensor,
         // Calculate source index in compact tensor (linear index)
         const int source_idx = idx;
 
-        // Calculate destination index in aligned tensor
-        const int dest_idx = batch_idx * max_seq_len * hidden_size + seq_idx * hidden_size + hidden_idx;
+        // Calculate destination index in right-aligned tensor
+        const int padding  = max_seq_len - input_lengths[batch_idx];
+        const int dest_idx = batch_idx * max_seq_len * hidden_size + (padding + seq_idx) * hidden_size + hidden_idx;
 
         // Perform the copy
         output_tensor[dest_idx] = input_tensor[source_idx];
@@ -148,8 +149,9 @@ __global__ void cudaGraphCopyLarge2SmallKernel(T*         input_tensor,
         // Calculate sequence index within this batch
         const int seq_idx = token_idx - cu_seq_len[batch_idx];
 
-        // Calculate source index in aligned tensor
-        const int source_idx = batch_idx * max_seq_len * hidden_size + seq_idx * hidden_size + hidden_idx;
+        // Read back the valid suffix from the right-aligned tensor.
+        const int padding    = max_seq_len - input_lengths[batch_idx];
+        const int source_idx = batch_idx * max_seq_len * hidden_size + (padding + seq_idx) * hidden_size + hidden_idx;
 
         // Calculate destination index in compact tensor (linear index)
         const int dest_idx = idx;

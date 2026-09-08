@@ -53,6 +53,9 @@ class CudaNoQuantCppStrategy(MoeStrategy):
 
     @classmethod
     def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
+        resolver = MoeConfigResolver()
+        quant_method = resolver.get_quant_method(config)
+        checker.check(quant_method is None)
         checker.check(
             config.moe_strategy == "no_auant_cpp" or config.moe_strategy == "auto"
         )
@@ -78,6 +81,9 @@ class CudaNoQuantDpNormalStrategy(MoeStrategy):
 
     @classmethod
     def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
+        resolver = MoeConfigResolver()
+        quant_method = resolver.get_quant_method(config)
+        checker.check(quant_method is None)
         checker.check(
             config.moe_strategy == "no_auant_dp_normal" or config.moe_strategy == "auto"
         )

@@ -168,7 +168,7 @@ class CudaFp8DeepGEMMLinear(LinearBase):
             f"successfully cached {self.cached_scales_max_len} scales, shape: {self.cached_scales.shape}"
         )
 
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
+    def _validate_input(self, input: torch.Tensor) -> tuple[int, int]:
         # Check input dtype - only accept bfloat16
         if input.dtype != torch.bfloat16 and input.dtype != torch.float8_e4m3fn:
             error_msg = f"Input tensor dtype must be bfloat16 or float8_e4m3fn, got {input.dtype}"
@@ -185,7 +185,42 @@ class CudaFp8DeepGEMMLinear(LinearBase):
             error_msg = f"Input tensor inner dimension expected to be {self.K}, got {K}"
             logger.error(error_msg)
             raise ValueError(error_msg)
+        return M, K
 
+    def _prepare_output(
+        self, input: torch.Tensor, M: int, out: Optional[torch.Tensor]
+    ) -> torch.Tensor:
+        output = None
+        if out is not None:
+            if out.shape != (M, self.N):
+                error_msg = (
+                    f"Output tensor shape must be {(M, self.N)}, got {tuple(out.shape)}"
+                )
+                logger.error(error_msg)
+                raise ValueError(error_msg)
+            if out.dtype != torch.bfloat16:
+                error_msg = f"Output tensor dtype must be bfloat16, got {out.dtype}"
+                logger.error(error_msg)
+                raise ValueError(error_msg)
+            if out.device != input.device:
+                error_msg = (
+                    f"Output tensor device must match input device {input.device}, "
+                    f"got {out.device}"
+                )
+                logger.error(error_msg)
+                raise ValueError(error_msg)
+            if not out.is_contiguous():
+                error_msg = "Output tensor must be contiguous"
+                logger.error(error_msg)
+                raise ValueError(error_msg)
+            output = out
+        if output is None:
+            output = torch.empty(M, self.N, dtype=torch.bfloat16, device=input.device)
+        return output
+
+    def quantize_input(self, input: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Quantize a 2D BF16 input once for reuse across compatible FP8 GEMMs."""
+        M, _ = self._validate_input(input)
         if input.dtype == torch.float8_e4m3fn:
             if not self.scale_ue8m0:
                 error_msg = "Scale UE8M0 is required for float8_e4m3fn input"
@@ -220,10 +255,21 @@ class CudaFp8DeepGEMMLinear(LinearBase):
                 scale_tma_aligned=True,
                 scale_ue8m0=self.scale_ue8m0,
             )
+        return input_fp8, input_scales
 
-        # Prepare output tensor
-        output = torch.empty(M, self.N, dtype=torch.bfloat16, device=input.device)
-        # Invoke DeepGEMM
+    def forward_quantized(
+        self,
+        input_fp8: torch.Tensor,
+        input_scales: torch.Tensor,
+        out: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Run DeepGEMM with a caller-provided FP8 input and matching scales."""
+        if input_fp8.dtype != torch.float8_e4m3fn:
+            error_msg = f"Quantized input dtype must be float8_e4m3fn, got {input_fp8.dtype}"
+            logger.error(error_msg)
+            raise ValueError(error_msg)
+        M, _ = self._validate_input(input_fp8)
+        output = self._prepare_output(input_fp8, M, out)
         fp8_gemm_nt(
             (input_fp8, input_scales),
             (self.weight, self.weight_scales),
@@ -232,5 +278,14 @@ class CudaFp8DeepGEMMLinear(LinearBase):
             disable_ue8m0_cast=not self.scale_ue8m0,
         )
         if self.bias is not None:
-            output = output + self.bias.to(output.dtype)
+            output.add_(self.bias.to(output.dtype))
         return output
+
+    def forward(
+        self, input: torch.Tensor, out: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        M, _ = self._validate_input(input)
+        input_fp8, input_scales = self.quantize_input(input)
+
+        # Prepare output tensor
+        return self.forward_quantized(input_fp8, input_scales, out=out)

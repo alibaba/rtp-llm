@@ -16,7 +16,7 @@ bool ApiServerMetricReporter::init() {
 #define LOCAL_REGISTER_QPS_MUTABLE_METRIC(target, name)                                                                \
     do {                                                                                                               \
         std::string metricName = (name);                                                                               \
-        target.reset(kMonitor->RegisterMetric(metricName, kmonitor::QPS, kmonitor::FATAL));                           \
+        target.reset(kMonitor->RegisterMetric(metricName, kmonitor::QPS, kmonitor::FATAL));                            \
         if (nullptr == target) {                                                                                       \
             AUTIL_LOG(ERROR, "failed to register metric:[%s]", metricName.c_str());                                    \
             return false;                                                                                              \
@@ -26,7 +26,7 @@ bool ApiServerMetricReporter::init() {
 #define LOCAL_REGISTER_GAUGE_MUTABLE_METRIC(target, name)                                                              \
     do {                                                                                                               \
         std::string metricName = (name);                                                                               \
-        target.reset(kMonitor->RegisterMetric(metricName, kmonitor::GAUGE, kmonitor::FATAL));                         \
+        target.reset(kMonitor->RegisterMetric(metricName, kmonitor::GAUGE, kmonitor::FATAL));                          \
         if (nullptr == target) {                                                                                       \
             AUTIL_LOG(ERROR, "failed to register metric:[%s]", metricName.c_str());                                    \
             return false;                                                                                              \
@@ -64,50 +64,54 @@ bool ApiServerMetricReporter::init() {
     return true;
 }
 
-#define REPORT_QPS_METRIC_IF_INITED(metric, source, errorMessage)                                                      \
+// Single-report: every QPS counter carries the ``priority`` tag (Auto-TPM
+// qos level, 0 when the caller has no qos context).
+#define REPORT_QPS_METRIC_IF_INITED(metric, source, priority, errorMessage)                                            \
     do {                                                                                                               \
         if (!inited) {                                                                                                 \
             AUTIL_LOG(ERROR, errorMessage);                                                                            \
             return;                                                                                                    \
         }                                                                                                              \
-        kmonitor::MetricsTags tags;                                                                                    \
+        kmonitor::MetricsTags priority_tags;                                                                           \
         if (source.empty()) {                                                                                          \
-            tags.AddTag("source", "unknown");                                                                          \
+            priority_tags.AddTag("source", "unknown");                                                                 \
         } else {                                                                                                       \
-            tags.AddTag("source", source);                                                                             \
+            priority_tags.AddTag("source", source);                                                                    \
         }                                                                                                              \
-        metric->Report(&tags, 1);                                                                                      \
+        priority_tags.AddTag("priority", std::to_string(priority));                                                    \
+        metric->Report(&priority_tags, 1);                                                                             \
     } while (0)
 
-void ApiServerMetricReporter::reportQpsMetric(const std::string& source) {
-    REPORT_QPS_METRIC_IF_INITED(framework_qps_metric_, source, "report qps metric failed, not inited");
+void ApiServerMetricReporter::reportQpsMetric(const std::string& source, int priority) {
+    REPORT_QPS_METRIC_IF_INITED(framework_qps_metric_, source, priority, "report qps metric failed, not inited");
 }
 
-void ApiServerMetricReporter::reportCancelQpsMetric(const std::string& source) {
-    REPORT_QPS_METRIC_IF_INITED(cancel_qps_metric_, source, "report cancel qps metric failed, not inited");
+void ApiServerMetricReporter::reportCancelQpsMetric(const std::string& source, int priority) {
+    REPORT_QPS_METRIC_IF_INITED(cancel_qps_metric_, source, priority, "report cancel qps metric failed, not inited");
 }
 
-void ApiServerMetricReporter::reportSuccessQpsMetric(const std::string& source) {
-    REPORT_QPS_METRIC_IF_INITED(success_qps_metric_, source, "report success qps metric failed, not inited");
+void ApiServerMetricReporter::reportSuccessQpsMetric(const std::string& source, int priority) {
+    REPORT_QPS_METRIC_IF_INITED(success_qps_metric_, source, priority, "report success qps metric failed, not inited");
 }
 
 #undef REPORT_QPS_METRIC_IF_INITED
 
-void ApiServerMetricReporter::reportErrorQpsMetric(const std::string& source, int error_code) {
+void ApiServerMetricReporter::reportErrorQpsMetric(const std::string& source, int error_code, int priority) {
     if (!inited) {
         AUTIL_LOG(ERROR, "report error qps metric failed, not inited");
         return;
     }
 
-    kmonitor::MetricsTags tags;
-    tags.AddTag("error_code", std::to_string(error_code));
+    kmonitor::MetricsTags priority_tags;
+    priority_tags.AddTag("error_code", std::to_string(error_code));
     if (source.empty()) {
-        tags.AddTag("source", "unknown");
+        priority_tags.AddTag("source", "unknown");
     } else {
-        tags.AddTag("source", source);
+        priority_tags.AddTag("source", source);
     }
+    priority_tags.AddTag("priority", std::to_string(priority));
 
-    framework_error_qps_metric_->Report(&tags, 1);
+    framework_error_qps_metric_->Report(&priority_tags, 1);
 }
 
 #define REPORT_METRIC_IF_INITED(metric, value, errorMessage)                                                           \

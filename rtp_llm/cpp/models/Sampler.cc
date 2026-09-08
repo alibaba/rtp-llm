@@ -4,6 +4,8 @@
 #include "rtp_llm/cpp/models/logits_processor/BaseLogitsProcessor.h"
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorStates.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
+#include <algorithm>
+#include <exception>
 #include <unordered_set>
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 
@@ -11,11 +13,89 @@ using namespace std;
 
 namespace rtp_llm {
 
-Sampler::Sampler(const SamplerInitParams& params) {}
+Sampler::Sampler(const SamplerInitParams& params):
+    fixed_max_batch_size_(params.max_batch_size > 0 && params.fixed_max_batch_size),
+    copy_stream_(cuda_graph::graphGetStreamFromPool(false)) {
+    if (params.max_batch_size > 0) {
+        allocateGreedySamplingBuffers(params.max_batch_size);
+    }
+}
 
+void Sampler::allocateGreedySamplingBuffers(size_t max_batch_size) {
+    waitGreedySamplingBufferEvents();
+    max_batch_size_ = max_batch_size;
+    auto pinned_i64 = torch::TensorOptions().dtype(torch::kInt64).pinned_memory(true);
+    for (auto& slot : greedy_sampling_buffer_slots_) {
+        auto& buffers                = slot.buffers;
+        buffers.seed_host            = torch::empty({(int64_t)max_batch_size_}, pinned_i64);
+        buffers.offset_host          = torch::empty({(int64_t)max_batch_size_}, pinned_i64);
+        buffers.output_ids_ptrs_host = torch::empty({(int64_t)max_batch_size_}, pinned_i64);
+        buffers.max_batch_size       = max_batch_size_;
+        slot.ready_event.reset();
+    }
+}
+
+void Sampler::ensureGreedySamplingBuffers(size_t batch_size) {
+    if (batch_size <= max_batch_size_) {
+        return;
+    }
+    // Fixed users fail fast on impossible batch sizes. Dynamic users wait for all
+    // pending slot events before rebuilding every slot together.
+    RTP_LLM_CHECK_WITH_INFO(!fixed_max_batch_size_,
+                            "sampler batch size [%lu] exceeds initialized max batch size [%lu]",
+                            batch_size,
+                            max_batch_size_);
+    RTP_LLM_LOG_INFO("grow greedy sampling buffers from batch size [%lu] to [%lu]", max_batch_size_, batch_size);
+    allocateGreedySamplingBuffers(batch_size);
+}
+
+void Sampler::waitGreedySamplingBufferEvents() {
+    for (auto& slot : greedy_sampling_buffer_slots_) {
+        if (slot.ready_event) {
+            slot.ready_event->synchronize();
+            slot.ready_event.reset();
+        }
+    }
+}
+
+GreedySamplingBuffers& Sampler::nextGreedySamplingBuffers(size_t batch_size) {
+    ensureGreedySamplingBuffers(batch_size);
+    auto& slot = greedy_sampling_buffer_slots_[greedy_sampling_buffer_index_];
+    if (slot.ready_event) {
+        slot.ready_event->synchronize();
+        slot.ready_event.reset();
+    }
+    current_greedy_sampling_slot_ = &slot;
+    greedy_sampling_buffer_index_ = (greedy_sampling_buffer_index_ + 1) % greedy_sampling_buffer_slots_.size();
+    return slot.buffers;
+}
+
+void Sampler::markGreedySamplingBufferReady() {
+    if (current_greedy_sampling_slot_ != nullptr) {
+        auto* slot = current_greedy_sampling_slot_;
+        try {
+            slot->ready_event             = runtimeCreateEvent();
+            current_greedy_sampling_slot_ = nullptr;
+        } catch (...) {
+            current_greedy_sampling_slot_ = nullptr;
+            slot->ready_event.reset();
+            runtimeSyncAndCheck();
+            throw;
+        }
+    }
+}
 SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
     RTP_LLM_PROFILE_SCOPE("sampler.forward");
+    RTP_LLM_CHECK_WITH_INFO(!forward_in_progress_.exchange(true),
+                            "Sampler::forward is single-threaded and must not be called concurrently or reentrantly");
+    struct SamplerForwardGuard {
+        std::atomic<bool>& forward_in_progress;
+        ~SamplerForwardGuard() {
+            forward_in_progress.store(false);
+        }
+    } sampler_forward_guard{forward_in_progress_};
+
     // Helper: narrow a tensor if defined, else return undefined tensor
     auto mayNarrow = [](const torch::Tensor& t, int64_t offset, int64_t size) -> torch::Tensor {
         return t.defined() ? t.narrow(0, offset, size) : torch::Tensor();
@@ -26,7 +106,7 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
         return t.defined() ? std::optional<torch::Tensor>(t.narrow(0, offset, size)) : std::nullopt;
     };
 
-    preprocessLogits(inputs);
+    auto processor_errors = preprocessLogits(inputs);
 
     uint64_t max_seq_len   = inputs.token_ids.size(1);
     auto     num_beams_in  = inputs.num_beams_in.data_ptr<int64_t>();
@@ -34,7 +114,7 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
 
     bool has_num_beams = std::any_of(num_beams_in, num_beams_in + inputs.batch_size, [](auto n) { return n > 1; })
                          || std::any_of(num_beams_out, num_beams_out + inputs.batch_size, [](auto n) { return n > 1; });
-    bool variable_num_beams = inputs.batch_size != inputs.batch_size_out;
+    const bool requires_independent_output = !std::equal(num_beams_in, num_beams_in + inputs.batch_size, num_beams_out);
 
     // allocate output tensors
     // Keep success on CUDA to avoid a blocking D2H copy: the GPU sampling kernel writes success
@@ -43,21 +123,52 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
         torch::empty({(int64_t)inputs.batch_size}, torch::TensorOptions().dtype(torch::kBool).device(torch::kCUDA));
     auto all_beam_indices =
         has_num_beams ? torch::empty({(int64_t)inputs.batch_size_out}, torch::kInt32) : torch::Tensor();
-    // Move token_ids to CUDA once so sampleGreedy writes GPU→GPU (no blocking D2H sync).
-    // Callers that need CPU access should call .cpu() explicitly.
-    // Use blocking transfer: on ROCm, hipMemcpyAsync from pageable memory is truly async
-    // and can cause memory access faults if a kernel reads the buffer before transfer completes.
+#if USING_ROCM
+    // ROCm: hipMemcpyAsync from pageable memory is truly async, and
+    // Tensor::record_stream() rejects at::hip streams (aborts with a device
+    // type check), so keep the blocking transfer here.
     auto inputs_token_ids_cuda = inputs.token_ids.to(torch::kCUDA);
-    auto all_token_ids_out     = variable_num_beams ?
+#else
+    torch::Tensor inputs_token_ids_cuda;
+    {
+        auto main_stream     = cuda_graph::graphGetCurrentStream();
+        auto copy_done_event = cuda_graph::makeGraphEvent();
+        {
+            cuda_graph::GraphStreamGuard guard(copy_stream_);
+            inputs_token_ids_cuda = inputs.token_ids.to(torch::kCUDA, /*non_blocking=*/true);
+            copy_done_event.record(copy_stream_);
+        }
+        copy_done_event.block(main_stream);
+        inputs_token_ids_cuda.record_stream(main_stream);
+    }
+#endif
+
+    auto all_token_ids_out     = requires_independent_output ?
                                      torch::empty({(int64_t)inputs.batch_size_out, (int64_t)max_seq_len},
                                               torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA)) :
                                      inputs_token_ids_cuda;
-    auto all_cum_log_probs_out = variable_num_beams && inputs.cum_log_probs.defined() ?
+    auto all_cum_log_probs_out = requires_independent_output && inputs.cum_log_probs.defined() ?
                                      torch::empty({(int64_t)inputs.batch_size_out}, torch::kFloat32) :
                                      inputs.cum_log_probs;
 
     size_t from_batch_idx_in = 0, to_batch_idx_in = 0;
-    size_t from_batch_idx_out = 0;
+    size_t from_batch_idx_out      = 0;
+    auto&  greedy_sampling_buffers = nextGreedySamplingBuffers(inputs.batch_size);
+    struct GreedySamplingBufferGuard {
+        Sampler* sampler = nullptr;
+        ~GreedySamplingBufferGuard() {
+            if (sampler == nullptr) {
+                return;
+            }
+            try {
+                sampler->markGreedySamplingBufferReady();
+            } catch (const std::exception& e) {
+                RTP_LLM_LOG_WARNING("failed to record greedy sampling buffer event: %s", e.what());
+            } catch (...) {
+                RTP_LLM_LOG_WARNING("failed to record greedy sampling buffer event");
+            }
+        }
+    } greedy_sampling_buffer_guard{this};
 
     while (from_batch_idx_in < inputs.batch_size) {
         auto cur_num_beams_in  = num_beams_in[from_batch_idx_in];
@@ -110,6 +221,13 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
             auto generator            = std::vector<at::Generator>{inputs.generator.begin() + from_batch_idx_in,
                                                                    inputs.generator.begin() + from_batch_idx_in + batch_size_in};
 
+            GreedySamplingBuffers greedy_sampling_buffer_slice{
+                greedy_sampling_buffers.seed_host.narrow(0, from_batch_idx_in, batch_size_in),
+                greedy_sampling_buffers.offset_host.narrow(0, from_batch_idx_in, batch_size_in),
+                greedy_sampling_buffers.output_ids_ptrs_host.narrow(0, from_batch_idx_in, batch_size_in),
+                batch_size_in};
+            GreedySamplingBuffers* greedy_sampling_buffer_ptr = &greedy_sampling_buffer_slice;
+
             RTP_LLM_PROFILE_SCOPE("sampler.forward.execSampleGreedy");
             auto greedy_output = execSampleGreedy(
                 {logits,
@@ -124,19 +242,22 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
                  no_repeat_ngram_size,
                  cum_log_probs_out.defined() ? std::optional<torch::Tensor>(cum_log_probs_out) : std::nullopt,
                  std::nullopt,  // output_log_probs
+                 inputs.return_original_all_probs,
                  all_probs,
                  presence_penalty,
                  frequency_penalty,
                  do_sample,
-                 generator});
+                 generator,
+                 greedy_sampling_buffer_ptr});
             if (greedy_output.success.defined()) {
                 success.copy_(greedy_output.success);
-                // TODO(zhangjianning.zjn): would be better to eliminate the copy
-                if (variable_num_beams) {
-                    token_ids_out.copy_(token_ids_in);
-                }
             } else {
                 success.fill_(true);
+            }
+            // execSampleGreedy updates token_ids_in in place. Mixed beam transitions use a
+            // separate output tensor even when the aggregate input/output row counts match.
+            if (requires_independent_output) {
+                token_ids_out.copy_(token_ids_in);
             }
         } else {
             RTP_LLM_LOG_DEBUG("current_num_beams_in is %d", cur_num_beams_in);
@@ -201,13 +322,15 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
                           std::move(all_cum_log_probs_out),
                           std::move(inputs.all_probs),
                           std::move(all_beam_indices),
-                          std::move(all_success)});
+                          std::move(all_success),
+                          std::move(processor_errors)});
 }
 
-void Sampler::preprocessLogits(const SamplerInputs& inputs) {
+std::vector<std::optional<ErrorInfo>> Sampler::preprocessLogits(const SamplerInputs& inputs) {
     if (inputs.logits_processor_states_ptr != nullptr) {
-        inputs.logits_processor_states_ptr->batchProcess(inputs);
+        return inputs.logits_processor_states_ptr->batchProcess(inputs);
     }
+    return {};
 }
 
 }  // namespace rtp_llm

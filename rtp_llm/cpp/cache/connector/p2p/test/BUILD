@@ -66,6 +66,7 @@ cc_test(
         ":mock_generate_stream",
         "//rtp_llm/cpp/cache/connector/p2p:connector",
         "//rtp_llm/cpp/cache/connector/p2p/transfer:basic_types",
+        "//rtp_llm/cpp/cache/test:cache_config_test_utils",
         "//rtp_llm/cpp/engine_base/stream:stream",
         "@com_google_googletest//:gtest",
         "//rtp_llm/cpp/testing:device_test_utils",
@@ -85,6 +86,7 @@ cc_test(
         ":mock_generate_stream",
         "//rtp_llm/cpp/cache/connector/p2p:connector",
         "//rtp_llm/cpp/cache/connector/p2p/transfer:basic_types",
+        "//rtp_llm/cpp/cache/test:cache_config_test_utils",
         "@com_google_googletest//:gtest",
         "//rtp_llm/cpp/testing:device_test_utils",
     ] + device_impl_target(),
@@ -101,6 +103,7 @@ cc_test(
     deps = [
         "//rtp_llm/cpp/cache/connector/p2p:connector",
         "//rtp_llm/cpp/cache/connector/p2p/transfer:basic_types",
+        "//rtp_llm/cpp/cache/test:cache_config_test_utils",
         "@com_google_googletest//:gtest",
         "//rtp_llm/cpp/testing:device_test_utils",
     ] + device_impl_target(),

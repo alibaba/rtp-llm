@@ -8,15 +8,25 @@
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 #include "3rdparty/trt_beam_search/beamSearch.h"
 #include "3rdparty/trt_beam_search/beamSearchKernels.h"
+#elif USING_ROCM
+#include <ATen/hip/HIPContext.h>
+#include "rtp_llm/models_py/bindings/rocm/hip_host_utils.h"
+#include "rtp_llm/cpp/utils/DebugUtils.h"
+#include "3rdparty/trt_beam_search/beamSearch.h"
+#include "3rdparty/trt_beam_search/beamSearchKernels.h"
 #endif
 
 using namespace std;
 namespace rtp_llm {
 
-#if USING_CUDA
+#if USING_CUDA || USING_ROCM
 
-BeamSearchOutput sampleBeamSearch(const BeamSearchParams& params) {
+BeamSearchOutput sampleBeamSearch(BeamSearchParams params) {
+#if USING_CUDA
     auto cur_stream = at::cuda::getCurrentCUDAStream().stream();
+#elif USING_ROCM
+    auto cur_stream = at::hip::getCurrentHIPStream(at::hip::current_device()).stream();
+#endif
 
     const int batch_size     = params.logits.size(0);
     const int beam_width_in  = params.logits.size(1);
@@ -63,7 +73,9 @@ BeamSearchOutput sampleBeamSearch(const BeamSearchParams& params) {
     } while (0)
 
     // compute log softmax for probability calculation
-    at::Tensor log_softmax_logits_tsr = params.logits.log_softmax(-1);
+    // note the computation here is intentionally performed inplace to reduce memory usage
+    at::Tensor log_softmax_logits_tsr = params.logits;
+    at::log_softmax_out(log_softmax_logits_tsr, params.logits, -1);
 
     // beam search heuristic
     auto                           logits_dtype = torchDTypeToDataType(params.logits.dtype());
@@ -137,13 +149,13 @@ BeamSearchOutput sampleBeamSearch(const BeamSearchParams& params) {
 #undef DISPATCH_BOOL
 }
 
-#else  // !USING_CUDA — ROCm platform
+#else  // Any other devices
 
-BeamSearchOutput sampleBeamSearch(const BeamSearchParams& params) {
-    RTP_LLM_CHECK_WITH_INFO(false, "beam search is not supported on ROCm yet");
+BeamSearchOutput sampleBeamSearch(BeamSearchParams params) {
+    RTP_LLM_CHECK_WITH_INFO(false, "beam search is not supported on the device yet");
     return BeamSearchOutput({});
 }
 
-#endif  // USING_CUDA
+#endif  // USING_CUDA || USING_ROCM
 
 }  // namespace rtp_llm

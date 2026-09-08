@@ -4,7 +4,9 @@
 #include <sstream>
 #include <map>
 #include <vector>
+#include "rtp_llm/cpp/config/MMTransportMode.h"
 #include "rtp_llm/cpp/config/RoleTypes.h"
+#include "rtp_llm/cpp/config/RdmaConfig.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
 
 namespace rtp_llm {
@@ -29,6 +31,12 @@ enum class CPRotateMethod {
 struct PrefillCPConfig {
     CPRotateMethod method           = CPRotateMethod::DISABLED;
     size_t         comm_buffer_size = 512 * 1024 * 1024;  // 512MB
+    // When true + tp_size > 1, KV cache uses page-level round-robin sharding
+    // across the CP (== TP) group. Each rank physically holds only owned blocks
+    // (block_idx % cp_size == cp_rank); see rtp_llm/cpp/cache/CPSlotMapper.h.
+    bool kv_cache_sharded = false;
+    // Explicit prefill CP size for decode-side fixed/SWA ring sizing; 0 = unset.
+    int64_t prefill_cp_size = 0;
     bool           is_enabled() const {
         return method != CPRotateMethod::DISABLED && method != CPRotateMethod::UNKNOWN
                && method != CPRotateMethod::PREFILL_CP;
@@ -69,6 +77,12 @@ struct ParallelismConfig {
     bool    enable_sp        = false;
     bool    use_ub_comm      = false;
 
+    // Mirror of py_env_configs.role_config.role_type, plumbed in
+    // engine_config.setup_engine_config so model construction (e.g.
+    // DeepSeekV4Model's mega-MoE token bound cap) does not have to read
+    // os.environ["ROLE_TYPE"] anymore.
+    RoleType role_type = RoleType::PDFUSION;
+
     FfnDisAggregateConfig ffn_disaggregate_config;  // FFN disaggregate configuration
 
     // Context Parallel configuration
@@ -100,9 +114,8 @@ enum class FMHAType {
     NONE,
     OPEN_SOURCE,
     PAGED_OPEN_SOURCE,
-    PAGED_TRT_V2,
-    TRT_V1,
-    TRT_V2,
+    PAGED_FLASHINFER_TRT_FMHA_V2,
+    FLASHINFER_TRT_FMHA_V2,
     XQA,
     AITER_PREFILL,
     AITER_ASM_PREFILL,
@@ -122,16 +135,17 @@ enum class FMHAType {
 };
 
 struct FMHAConfig {
-    bool enable_fmha                   = true;
-    bool enable_trt_fmha               = true;
-    bool enable_paged_trt_fmha         = true;
-    bool enable_open_source_fmha       = true;
-    bool enable_paged_open_source_fmha = true;
-    bool enable_trtv1_fmha             = true;
-    bool disable_flash_infer           = false;
-    bool enable_xqa                    = true;
-    bool use_aiter_pa                  = true;
-    bool use_asm_pa                    = true;
+    bool enable_fmha                         = true;
+    bool enable_flashinfer_trtllm_gen        = true;
+    bool enable_flashinfer_trt_fmha_v2       = true;
+    bool enable_paged_flashinfer_trt_fmha_v2 = true;
+    bool enable_open_source_fmha             = true;
+    bool enable_paged_open_source_fmha       = true;
+    bool disable_flashinfer_native           = false;
+    bool disable_flashinfer_hybrid_prefill   = true;
+    bool enable_xqa                          = true;
+    bool use_aiter_pa                        = true;
+    bool use_asm_pa                          = true;
     // Default off: Triton PA on ROCm regressed vs ASM PA after the rocm_impl
     // refactor; ASM/NonAsm now own the default decode path. Set to true to opt
     // back into the Triton kernel.
@@ -145,13 +159,17 @@ struct KVCacheConfig {
     std::string                             multi_task_prompt     = "";
     std::string                             multi_task_prompt_str = "";
     std::map<std::string, std::vector<int>> multi_task_prompt_tokens;
-    int64_t                                 reserve_block_ratio          = 5;
-    int                                     max_block_size_per_item      = 16;
-    int64_t                                 memory_cache_size_mb         = 0;
-    int64_t                                 memory_cache_sync_timeout_ms = 10000;
-    int                                     linear_step                  = 1;  // for linear attention cache reuse
+    int64_t                                 reserve_block_ratio               = 5;
+    int                                     max_block_size_per_item           = 16;
+    int64_t                                 memory_cache_size_mb              = 0;
+    int64_t                                 memory_cache_sync_timeout_ms      = 10000;
+    bool                                    enable_memory_cache_disk          = false;
+    std::string                             memory_cache_disk_paths           = "";
+    int64_t                                 memory_cache_disk_size_mb         = 0;
+    bool                                    memory_cache_disk_buffered_io     = true;
+    int64_t                                 memory_cache_disk_sync_timeout_ms = 30000;
+    int                                     linear_step                       = 1;  // for linear attention cache reuse
     // Fields merged from PyKvCacheConfig
-    int         int8_kv_cache             = 0;
     int         fp8_kv_cache              = 0;
     std::string ssm_state_dtype           = "bf16";
     int64_t     kv_cache_mem_mb           = -1;
@@ -162,12 +180,31 @@ struct KVCacheConfig {
     bool        enable_device_cache       = true;
     bool        enable_memory_cache       = false;
     // When true, memory-cache H2D/D2H may use split-KV SM scatter/gather (CUDA) when layout is eligible.
-    bool    enable_memory_cache_sm_copy  = false;
-    bool    enable_remote_cache          = false;
-    bool    write_cache_sync             = false;
-    bool    enable_tiered_memory_cache   = false;
-    int64_t device_cache_min_free_blocks = 0;
-    int     load_cache_retry_times       = 1;  // Maximum retry attempts for load cache transfer failures
+    bool    enable_memory_cache_sm_copy             = false;
+    bool    enable_remote_cache                     = false;
+    bool    write_cache_sync                        = false;
+    bool    enable_tiered_memory_cache              = false;
+    bool    enable_gpu_prefix_tree                  = false;
+    bool    enable_prefix_tree_memory_cache         = false;
+    bool    enable_legacy_memory_connector_fallback = true;
+    int64_t prefix_tree_memory_state_swa_pool_ratio = 0;
+    bool    enable_independent_group_eviction       = false;
+    int64_t device_cache_min_free_blocks            = 0;
+    int     load_cache_retry_times                  = 1;  // Maximum retry attempts for load cache transfer failures
+
+
+    // DSV4 fixed-allocation pool block count. 0 means the fixed regions
+    // (INDEXER_STATE / CSA_STATE / HCA_STATE / SWA_KV) use the normal
+    // linear-step-derived block count.
+    uint32_t dsv4_fixed_pool_blocks = 0;
+
+    // Optional DSV4 HCA_STATE pool block count override. 0 means HCA_STATE
+    // follows dsv4_fixed_pool_blocks or the normal linear-step-derived count.
+    uint32_t dsv4_hca_state_pool_blocks = 0;
+
+    // DSV4 fixed-pool residency switch. false = GPU BlockPool; true = pinned
+    // CPU BlockPool for INDEXER_STATE / CSA_STATE / HCA_STATE / SWA_KV.
+    bool dsv4_fixed_pool_use_memory = false;
 
     // Remote connector configuration fields
     bool        reco_enable_vipserver                = false;
@@ -200,6 +237,9 @@ struct ProfilingDebugLoggingConfig {
     bool        ft_core_dump_on_exception = false;
     std::string ft_alog_conf_path         = "";
     bool        gen_timeline_sync         = false;
+    int         timeline_start_step       = 0;
+    int         timeline_num_steps        = 3;
+    std::string timeline_trace_name       = "profiler";
     std::string torch_cuda_profiler_dir   = "";
     int         log_file_backup_count     = 16;
     bool        debug_load_server         = false;
@@ -207,6 +247,7 @@ struct ProfilingDebugLoggingConfig {
     bool        debug_start_fake_process  = false;
     bool        enable_detail_log         = false;
     bool        check_nan                 = false;
+    bool        enable_model_inputs_log   = false;
 
     std::string to_string() const;
 };
@@ -269,7 +310,8 @@ enum SpeculativeType {
     SP_TYPE_MTP           = 2,  // Multi-token prediction (DeepSeek-V3)
     SP_TYPE_EAGLE3        = 3,  // EAGLE-3
     SP_TYPE_EAGLE         = 4,  // EAGLE
-    SP_TYPE_DETERMINISTIC = 5   // Deterministic (Prompt-Lookup)
+    SP_TYPE_DETERMINISTIC = 5,  // Deterministic (Prompt-Lookup)
+    SP_TYPE_DSPARK        = 6   // DSpARK block-diffusion draft
 };
 
 struct SpeculativeExecutionConfig {
@@ -283,29 +325,49 @@ struct SpeculativeExecutionConfig {
     bool            force_score_context_attention = true;
     std::string     quantization                  = "";
     std::string     checkpoint_path               = "";
-    std::string     to_string() const;
+    // DSpARK noise/mask token used to build each fixed-width draft block.
+    // Filled from the draft checkpoint by ModelFactory.
+    int64_t     sp_dspark_mask_token_id = -1;
+    std::string to_string() const;
 
     // Helper functions for enum conversion
     static SpeculativeType from_string(const std::string& str);
     static std::string     to_string(SpeculativeType type);
 };
 
+struct MMControlConfig {
+    // Best-effort release RPC deadline.
+    int64_t release_timeout_ms = 1000;
+};
+
+struct MMTransportConfig {
+    std::string     mode = kMMTransportModeGrpc;
+    MMControlConfig control;
+    RdmaConfig      rdma;
+    // LLM-to-ViT RPC budget when no request input sets mm_timeout_ms.
+    int64_t default_rpc_timeout_ms = 125 * 1000;
+    // Let the ViT worker return its structured timeout before the client deadline.
+    int64_t rpc_timeout_margin_ms = 5 * 1000;
+};
+
 struct VitConfig {
-    VitSeparation vit_separation = VitSeparation::VIT_SEPARATION_LOCAL;
-    std::string   to_string() const;
+    VitSeparation     vit_separation = VitSeparation::VIT_SEPARATION_LOCAL;
+    MMTransportConfig output_transport;
+
+    std::string to_string() const;
 };
 
 struct CacheStoreConfig {
     bool    cache_store_rdma_mode               = false;
     int     wrr_available_ratio                 = 80;
     int     rank_factor                         = 0;
-    int     thread_count                        = 16;
+    int     thread_count                        = 32;
     int     rdma_connect_timeout_ms             = 250;
     int     rdma_qp_count_per_connection        = 2;
     int     rdma_io_thread_count                = 4;
     int     rdma_worker_thread_count            = 2;
     int     messager_io_thread_count            = 2;
-    int     messager_worker_thread_count        = 16;
+    int     messager_worker_thread_count        = 32;
     int64_t rdma_transfer_wait_timeout_ms       = 180 * 1000;  // RDMA 传输完成最大等待超时时间，默认 180 秒
     int     rdma_max_block_pairs_per_connection = 0;  // 每条 RDMA 连接可处理的最大 block_pair 数量，0 表示不限制
     int64_t p2p_read_steal_before_deadline_ms =
@@ -331,9 +393,41 @@ struct BatchDecodeSchedulerConfig {
     std::string to_string() const;
 };
 
+enum class PDFusionSchedulerMode {
+    DEFAULT = 0,
+    RATIO   = 1,
+    UNKNOWN = 2,
+};
+
+PDFusionSchedulerMode parsePDFusionSchedulerMode(const std::string& mode);
+
 struct FIFOSchedulerConfig {
-    int64_t     max_context_batch_size = 1;
-    int64_t     max_batch_tokens_size  = 0;
+    int64_t max_context_batch_size = 1;
+    int64_t max_batch_tokens_size  = 0;
+    // PDFUSION scheduler mode. Supported values:
+    //   ""      -> default FIFO/decode-first scheduler
+    //   "ratio" -> PDFusionRatioScheduler with decode_prefill_ratio
+    std::string pdfusion_scheduler_mode = "";
+    // PDFusionRatioScheduler cadence knob, as a decode:prefill round ratio string.
+    //   "0"   -> always try PREFILL first when a waiting stream exists.
+    //   "N"   -> 1 prefill : N decode (decode-heavy); "1" = strict alternation.
+    //   "1/X" -> X prefill : 1 decode (prefill-heavy).
+    //   invalid input falls back to "1".
+    std::string decode_prefill_ratio = "1";
+    bool        cp_force_single_prefill        = true;
+    int64_t     max_inited_kv_cache_streams    = 0;
+    int64_t     max_batch_tokens_without_cache = 0;
+    std::string to_string() const;
+};
+
+struct GrammarConfig {
+    bool constrained_json_disable_any_whitespace = false;
+    // Service-level xgrammar matcher policy. Requests cannot override it.
+    bool                 terminate_without_stop_token = false;
+    int                  num_workers                  = 8;
+    std::string          tokenizer_info_json;
+    // Byte cap on xgrammar's internal compiled-grammar cache; <=0 = unlimited.
+    int64_t     compiler_cache_bytes = 512 * 1024 * 1024;
     std::string to_string() const;
 };
 
@@ -345,6 +439,7 @@ struct RuntimeConfig {
     int64_t reserve_runtime_mem_mb = 0;
     bool    warm_up                = false;
     bool    warm_up_with_loss      = false;
+    bool    model_warm_up          = true;
 
     // Scheduler configuration
     bool                       use_batch_decode_scheduler = false;
@@ -379,9 +474,16 @@ struct PDSepConfig {
     int64_t  decode_polling_call_prefill_ms  = 30;
     int64_t  rdma_connect_retry_times        = 0;
     int64_t  load_cache_timeout_ms           = 5000;
-    int64_t  max_rpc_timeout_ms              = 0;
+    int64_t  max_rpc_timeout_ms              = 2 * 3600 * 1000;  // 2h default
     int64_t  worker_port_offset              = 0;
     bool     decode_entrance                 = false;
+    // ========== Prefill Thread Pool Configuration ==========
+    // prepare-resource pool size. 0 = concurrency_limit * 2; effective minimum is 128.
+    int64_t prefill_prepare_resource_pool_size = 0;
+    // Max wait time in stopStream() for Engine Loop to call finish_internal().
+    // When GenerateDone is set and stream has no error, stopStream() waits up to
+    // this many ms for Engine Loop's advance() to detect GenerateDone and set FINISHED.
+    int64_t prefill_stop_stream_wait_timeout_ms = 2000;
 
     std::string to_string() const;
 };
@@ -505,19 +607,34 @@ struct ArpcConfig {
     std::string to_string() const;
 };
 
-struct GrpcConfig {
+/// Shared ``client_config`` / ``server_config`` maps for gRPC channel options (JSON root keys).
+struct GrpcMapsConfig {
     std::map<std::string, int> client_config;
     std::map<std::string, int> server_config;
-    GrpcConfig() {};
-    GrpcConfig(const std::string& json_str);
-    std::string                to_string() const;
-    void                       from_json(const std::string& json_str);
     std::map<std::string, int> get_client_config() const {
         return client_config;
     }
     std::map<std::string, int> get_server_config() const {
         return server_config;
     }
+};
+
+struct GrpcConfig: GrpcMapsConfig {
+    /// If > 0, passed to gRPC sync server as ``MAX_POLLERS`` (per completion queue).
+    int max_server_pollers = 0;
+    GrpcConfig() {};
+    GrpcConfig(const std::string& json_str);
+    std::string to_string() const;
+    void        from_json(const std::string& json_str);
+};
+
+/// DashSc gRPC (predict_v2.proto) Python client/server channel options.
+struct DashScGrpcConfig: GrpcMapsConfig {
+    int max_server_workers = 4;
+    DashScGrpcConfig() {};
+    DashScGrpcConfig(const std::string& json_str);
+    std::string to_string() const;
+    void        from_json(const std::string& json_str);
 };
 
 struct LinearAttentionConfig {
@@ -538,7 +655,8 @@ enum class HybridAttentionType {
 };
 
 struct HybridAttentionConfig {
-    bool                             enable_hybrid_attention = false;
+    bool                             enable_hybrid_attention           = false;
+    bool                             enable_independent_kv_cache_pools = false;
     std::vector<HybridAttentionType> hybrid_attention_types;
     std::string                      to_string() const;
 };

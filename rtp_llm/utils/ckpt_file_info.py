@@ -4,13 +4,16 @@ import logging
 import os
 import struct
 from pathlib import PosixPath
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple, Union
 
 import torch
 from safetensors import safe_open
 
 import rtp_llm.utils.meta_pickler as meta_pickler
 from rtp_llm.utils.time_util import Timer
+
+# ROCm DMA pinning COWs MAP_PRIVATE pages; copying out keeps them file-backed.
+ROCM_COPY_OUT = torch.version.hip is not None
 
 
 class CkptType(enum.Enum):
@@ -148,6 +151,18 @@ class CkptFileInfo:
             self._st_handle.__exit__(None, None, None)
             self._st_handle = None
 
+    def get_tensor_shape(self, name: str) -> torch.Size:
+        return torch.Size(self._get_safetensor_handle().get_slice(name).get_shape())
+
+    def load_tensor_slice(
+        self,
+        name: str,
+        tensor_slice: Tuple[Union[int, slice], ...],
+        datatype: torch.dtype,
+    ) -> torch.Tensor:
+        tensor = self._get_safetensor_handle().get_slice(name)[tensor_slice]
+        return tensor.to(datatype, copy=ROCM_COPY_OUT)
+
     def load_tensor(self, name: str, datatype: str = torch.float16) -> torch.Tensor:
         """Load a single tensor by name.
 
@@ -157,7 +172,7 @@ class CkptFileInfo:
         path: str = self.file_name
         if self.is_safetensor():
             f = self._get_safetensor_handle()
-            return f.get_tensor(name).to(datatype)
+            return f.get_tensor(name).to(datatype, copy=ROCM_COPY_OUT)
         else:
             meta = self.metadata[name]
 

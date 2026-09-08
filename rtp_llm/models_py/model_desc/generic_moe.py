@@ -1,3 +1,4 @@
+import logging
 from typing import Any, Dict, Optional
 
 import torch
@@ -6,7 +7,7 @@ from torch import nn
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
-from rtp_llm.models_py.model_desc.block_map import select_block_map_for_layer
+from rtp_llm.models_py.model_desc.block_map import select_fmha_impl_for_layer
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules import (
     CausalAttention,
@@ -29,6 +30,8 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
 from rtp_llm.ops import HWKernelConfig, MoeConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import LayerKVCache, PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
+
+logger = logging.getLogger(__name__)
 
 
 class GraphPaddingMask:
@@ -68,6 +71,8 @@ class GenericMoeLayer(nn.Module):
         super().__init__()
         self.config = config
         self.parallelism_config = parallelism_config
+        self.ffn_tp_size = parallelism_config.get_ffn_tp_size()
+        self.ep_size = parallelism_config.ep_size
 
         self.hidden_dim = config.hidden_size
         self.ffn_dim = config.inter_size
@@ -98,6 +103,8 @@ class GenericMoeLayer(nn.Module):
             enable_cuda_graph=enable_cuda_graph,
         )
         self.fused_moe = FusedMoeFactory().create_fused_moe(config_adapter, weights)
+        router = self.fused_moe.router
+        router_tp_size = router.tp_collective_size
 
         self.w1 = weights.get(W.moe_w1, None)
         self.w2 = weights.get(W.moe_w2, None)
@@ -120,12 +127,41 @@ class GenericMoeLayer(nn.Module):
             self.shared_expert = None
         if weights.get(W.shared_expert_gate, None) is not None:
             self.shared_expert_gate = LinearFactory.create_linear_from_weights(
-                weights, W.shared_expert_gate, None, None, config
+                weights,
+                W.shared_expert_gate,
+                None,
+                None,
+                quant_config=quant_config,
+                # For ROCm devices shared_expert_gate is not pre-swizzled during weight
+                # loading and its single output column does not satisfy the SwizzleA
+                # layout. Keep this scalar projection on the no-swizzle backend.
+                hw_kernel_config=None,
             )
             self.sigmoid_gate_scale_add = SigmoidGateScaleAdd()
         else:
             self.shared_expert_gate = None
             self.sigmoid_gate_scale_add = None
+
+        self.use_ep_shared_allreduce = (
+            self.shared_expert is not None and self.ffn_tp_size > 1 and self.ep_size > 1
+        )
+        self.use_unified_tp_allreduce = (
+            self.shared_expert is not None
+            and self.ffn_tp_size > 1
+            and self.ep_size == 1
+            and self.ffn_tp_size == router_tp_size
+            and router.supports_skip_tp_allreduce
+        )
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "GenericMoE unified TP all-reduce %s "
+                "(router=%s, ffn_tp_size=%d, router_tp_size=%d, ep_size=%d)",
+                "enabled" if self.use_unified_tp_allreduce else "disabled",
+                type(router).__name__,
+                self.ffn_tp_size,
+                router_tp_size,
+                self.ep_size,
+            )
 
         # for group topk
         self.correction_bias = weights.get(W.e_score_correction_b, None)
@@ -139,7 +175,6 @@ class GenericMoeLayer(nn.Module):
         if padding_mask is not None:
             hidden_states.masked_fill_(padding_mask.unsqueeze(1), 0)
         router_logits = self.gate(hidden_states)
-        router_logits_fp32 = router_logits.float()
 
         topk_weights = torch.empty(
             (num_tokens, self.top_k),
@@ -165,7 +200,7 @@ class GenericMoeLayer(nn.Module):
             self.group_topk(
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
-                scores=router_logits_fp32,
+                scores=router_logits,
                 correction_bias=self.correction_bias,
                 n_group=self.num_expert_group,
                 topk_group=self.topk_group,
@@ -174,8 +209,7 @@ class GenericMoeLayer(nn.Module):
                 routed_scaling_factor=self.routed_scaling_factor,
             )
         else:
-            # Top-K selection using C++ SelectTopkOp
-            self.select_topk(router_logits_fp32, topk_ids, topk_weights)
+            self.select_topk(router_logits, topk_ids, topk_weights)
 
         if self.fake_balance_expert is not None:
             self.fake_balance_expert(topk_ids, topk_weights)
@@ -284,7 +318,11 @@ class GenericMoeDecoderLayer(nn.Module):
         self.is_moe_layer = layer_idx in config.moe_layer_index
         if not self.is_moe_layer:
             self.mlp = DenseMLP(
-                config.activation_type, parallelism_config, weights, quant_config
+                config.activation_type,
+                parallelism_config,
+                weights,
+                quant_config,
+                hw_kernel_config=hw_kernel_config,
             )
         else:
             self.mlp = GenericMoeLayer(
@@ -316,7 +354,9 @@ class GenericMoeDecoderLayer(nn.Module):
         hidden_states, residual = self.input_layernorm(hidden_states, residual)
 
         hidden_states = self.self_attn(
-            hidden_states=hidden_states, fmha_impl=fmha_impl, kv_cache=kv_cache
+            hidden_states=hidden_states,
+            fmha_impl=fmha_impl,
+            kv_cache=kv_cache,
         )
 
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
@@ -396,11 +436,11 @@ class GenericMoeModel(GptModelBase):
             )  # pyright: ignore[reportUnreachable]
         residual = torch.zeros_like(hidden_states)
         for i, decoder_layer in enumerate(self.layers[: self.layer_num]):
-            select_block_map_for_layer(inputs.attention_inputs, i)
+            layer_fmha_impl = select_fmha_impl_for_layer(fmha_impl, self.kv_cache, i)
             output = decoder_layer(
                 hidden_states,
                 residual,
-                fmha_impl,
+                layer_fmha_impl,
                 kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
                 padding_mask=padding_mask,
             )
@@ -409,7 +449,7 @@ class GenericMoeModel(GptModelBase):
 
         hidden_states, _ = self.norm(hidden_states, residual)
 
-        return PyModelOutputs(hidden_states, fmha_impl.fmha_params)
+        return PyModelOutputs(hidden_states)
 
 
 __all__ = [

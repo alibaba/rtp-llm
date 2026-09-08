@@ -2,6 +2,7 @@ from .attn_weight import AttnAtomicWeight, AttnConfig, MlaAttnAtomicWeight, MlaC
 from .compressed_w4a8_int4_per_channel_weight import (
     LoadCompressedW4A8Int4PerGroupQuantWeight,
 )
+from .compressed_w8a8_int8_per_channel_weight import CompressedW8A8Int8PerChannelWeight
 from .dynamic_fp8_quant_weight import LoadQuantDynamicPerTensorFp8Weight
 from .ffn_weight import (
     FfnAtomicWeight,

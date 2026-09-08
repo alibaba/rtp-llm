@@ -203,5 +203,6 @@ class KimiK2Renderer(ReasoningToolBaseRenderer):
 
 
 register_renderer("kimi_k2", KimiK2Renderer)
+register_renderer("kimi_linear", KimiK2Renderer)
 # `kimi_k25` is registered by `kimi_k25_renderer.KimiK25Renderer`, which adds
 # multimodal handling on top of this text-only renderer.

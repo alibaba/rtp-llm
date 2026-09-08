@@ -1,0 +1,151 @@
+package org.flexlb.mockengine;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.schedule.grpc.FlexlbScheduleProtocol;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+/**
+ * Auto-TPM priority support in {@link JavaLoadClient}: per-record priority
+ * parsing (trace field beats the PRIORITY env default), propagation onto
+ * FlexlbScheduleRequestPB.priority (field 14; 0 keeps it off the wire), and
+ * the per-priority stats view used by priority-dimension assertions.
+ */
+class LoadClientPriorityTest {
+
+    private static final ObjectMapper MAPPER = new ObjectMapper();
+
+    @TempDir
+    Path tempDir;
+
+    private JavaLoadClient dryRunClient(int priority) {
+        JavaLoadClient.Config config = new JavaLoadClient.Config(
+                "trace.jsonl", "127.0.0.1:7001", "127.0.0.1:7003",
+                0, 16, 10.0, 1, tempDir.resolve("out").toString(), 1, 0, 0,
+                120_000L, 500.0, "skip", false, false, 1, 1, 0L, 120, true,
+                "engine_service", "", false,
+                false, 10, 1000, 0, 0, "", false, "", true,
+                priority);
+        return new JavaLoadClient(config);
+    }
+
+    private static JavaLoadClient.TraceRecord record(long requestId, int priority) {
+        return new JavaLoadClient.TraceRecord(requestId, "rid-" + requestId,
+                "trace-" + requestId, 1000L, 2048, 10,
+                List.of(1L, 2L), List.of(1, 2, 3), priority);
+    }
+
+    private static EngineRpcService.GenerateInputPB input(long requestId) {
+        return EngineRpcService.GenerateInputPB.newBuilder()
+                .setRequestId(requestId)
+                .setGenerateConfig(EngineRpcService.GenerateConfigPB.newBuilder()
+                        .setMaxNewTokens(10)
+                        .build())
+                .build();
+    }
+
+    // ---- priority propagation onto the schedule request ----
+
+    @Test
+    void scheduleRequestCarriesRecordPriority() {
+        JavaLoadClient client = dryRunClient(0);
+        FlexlbScheduleProtocol.FlexlbScheduleRequestPB request =
+                client.buildScheduleRequest(record(1L, 70), input(1L));
+        assertEquals(70, request.getPriority());
+    }
+
+    @Test
+    void priorityZeroStaysOffTheWire() {
+        JavaLoadClient client = dryRunClient(0);
+        FlexlbScheduleProtocol.FlexlbScheduleRequestPB request =
+                client.buildScheduleRequest(record(2L, 0), input(2L));
+        assertEquals(0, request.getPriority());
+        // proto3 scalar default: value 0 must not be serialized.
+        FlexlbScheduleProtocol.FlexlbScheduleRequestPB withPriority =
+                client.buildScheduleRequest(record(2L, 30), input(2L));
+        assertTrue(withPriority.getSerializedSize() > request.getSerializedSize());
+    }
+
+    // ---- trace parsing: record field beats env default ----
+
+    @Test
+    void traceRecordFieldOverridesConfigDefault() throws Exception {
+        JavaLoadClient client = dryRunClient(40);
+
+        ObjectNode withField = MAPPER.createObjectNode()
+                .put("il", 100).put("ol", 10).put("ts", 1L)
+                .put("request_id", "r1").put("priority", 70);
+        JavaLoadClient.TraceRecord parsed = client.parseTraceRecord(withField);
+        assertNotNull(parsed);
+        assertEquals(70, parsed.priority);
+
+        ObjectNode withoutField = MAPPER.createObjectNode()
+                .put("il", 100).put("ol", 10).put("ts", 1L)
+                .put("request_id", "r2");
+        JavaLoadClient.TraceRecord defaulted = client.parseTraceRecord(withoutField);
+        assertNotNull(defaulted);
+        assertEquals(40, defaulted.priority);
+    }
+
+    @Test
+    void loopAndTruncationPreservePriority() {
+        JavaLoadClient.TraceRecord original = new JavaLoadClient.TraceRecord(
+                1L, "rid-1", "trace-1", 1000L, 4096, 500,
+                List.of(1L), List.of(1, 2, 3), 60);
+        List<JavaLoadClient.TraceRecord> truncated =
+                JavaLoadClient.truncateRecords(List.of(original), 1024, 100);
+        assertEquals(1, truncated.size());
+        assertEquals(60, truncated.get(0).priority);
+        assertEquals(1024, truncated.get(0).inputLen);
+        assertEquals(100, truncated.get(0).outputLen);
+    }
+
+    // ---- per-priority stats view ----
+
+    @Test
+    void priorityBreakdownGroupsCompletedRejectedAndLatency() {
+        List<JavaLoadClient.RequestResult> rows = new ArrayList<>();
+        rows.add(result(70, "ok", 10.0));
+        rows.add(result(70, "scheduled", 20.0));
+        rows.add(result(70, "schedule_error", 5.0));
+        rows.add(result(30, "ok", 40.0));
+        rows.add(result(30, "exception", 0.0));
+        rows.add(result(0, "ok", 8.0));
+
+        ObjectNode stats = JavaLoadClient.priorityBreakdown(rows);
+
+        assertEquals(3, stats.get("70").get("total").asInt());
+        assertEquals(2, stats.get("70").get("completed").asInt());
+        assertEquals(1, stats.get("70").get("rejected").asInt());
+        assertEquals(15.0, stats.get("70").get("avg_schedule_ms").asDouble(), 1e-9);
+
+        assertEquals(2, stats.get("30").get("total").asInt());
+        assertEquals(1, stats.get("30").get("completed").asInt());
+        assertEquals(1, stats.get("30").get("rejected").asInt());
+        assertEquals(40.0, stats.get("30").get("avg_schedule_ms").asDouble(), 1e-9);
+
+        assertEquals(1, stats.get("0").get("total").asInt());
+        assertEquals(1, stats.get("0").get("completed").asInt());
+        assertEquals(0, stats.get("0").get("rejected").asInt());
+        assertFalse(stats.has("40"), "unobserved priorities must not appear");
+    }
+
+    private static JavaLoadClient.RequestResult result(int priority, String status, double scheduleMs) {
+        JavaLoadClient.RequestResult result = new JavaLoadClient.RequestResult();
+        result.priority = priority;
+        result.status = status;
+        result.scheduleMs = scheduleMs;
+        return result;
+    }
+}

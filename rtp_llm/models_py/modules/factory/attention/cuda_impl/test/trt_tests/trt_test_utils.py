@@ -8,12 +8,51 @@ import torch.nn.functional as F
 from rtp_llm.ops.compute_ops import PyAttentionInputs
 
 
+def apply_base_rope_to_qkv_reference(
+    qkv: torch.Tensor,
+    input_lengths: List[int],
+    num_q_heads: int,
+    num_kv_heads: int,
+    head_dim: int,
+    rope_base: float = 10000.0,
+) -> torch.Tensor:
+    """Apply non-interleaved Base RoPE to packed QKV in float32."""
+    q_size = num_q_heads * head_dim
+    kv_size = num_kv_heads * head_dim
+    q = qkv[:, :q_size].reshape(-1, num_q_heads, head_dim).float()
+    k = qkv[:, q_size : q_size + kv_size].reshape(-1, num_kv_heads, head_dim).float()
+    v = qkv[:, q_size + kv_size :]
+
+    positions = torch.cat(
+        [torch.arange(length, device=qkv.device) for length in input_lengths]
+    ).float()
+    inv_freq = 1.0 / (
+        rope_base
+        ** (
+            torch.arange(0, head_dim, 2, device=qkv.device, dtype=torch.float32)
+            / head_dim
+        )
+    )
+    freqs = torch.outer(positions, inv_freq)
+    cos = torch.cat([freqs.cos(), freqs.cos()], dim=-1).unsqueeze(1)
+    sin = torch.cat([freqs.sin(), freqs.sin()], dim=-1).unsqueeze(1)
+
+    def rotate_half(x: torch.Tensor) -> torch.Tensor:
+        x1, x2 = x.chunk(2, dim=-1)
+        return torch.cat([-x2, x1], dim=-1)
+
+    q = q * cos + rotate_half(q) * sin
+    k = k * cos + rotate_half(k) * sin
+    return torch.cat([q.flatten(1), k.flatten(1), v.float()], dim=-1).to(qkv.dtype)
+
+
 def compute_pytorch_prefill_reference(
     qkv: torch.Tensor,
     input_lengths: List[int],
     num_q_heads: int,
     num_kv_heads: int,
     head_dim: int,
+    is_causal: bool = True,
 ) -> torch.Tensor:
     """Compute reference prefill attention outputs using PyTorch SDPA
 
@@ -23,6 +62,7 @@ def compute_pytorch_prefill_reference(
         num_q_heads: Number of query heads
         num_kv_heads: Number of key/value heads
         head_dim: Dimension per head
+        is_causal: Whether to apply a causal mask
 
     Returns:
         Reference attention output [total_tokens, num_q_heads * head_dim]
@@ -81,7 +121,7 @@ def compute_pytorch_prefill_reference(
             v,
             attn_mask=None,
             dropout_p=0.0,
-            is_causal=True,  # Use causal masking for autoregressive generation
+            is_causal=is_causal,
         )  # [1, num_q_heads, seq_len, head_dim]
 
         # Remove batch dimension and transpose back
@@ -134,28 +174,28 @@ def print_attn_inputs_detail(attn_inputs: PyAttentionInputs, qkv: torch.Tensor =
     print(f"  values: {attn_inputs.input_lengths.cpu().tolist()}", flush=True)
 
     print(
-        f"cu_seqlens: shape={attn_inputs.cu_seqlens.shape}, dtype={attn_inputs.cu_seqlens.dtype}",
+        f"cu_seqlens: shape={attn_inputs.cu_seqlens_device.shape}, dtype={attn_inputs.cu_seqlens_device.dtype}",
         flush=True,
     )
-    print(f"  tensor: {attn_inputs.cu_seqlens}", flush=True)
-    print(f"  values: {attn_inputs.cu_seqlens.cpu().tolist()}", flush=True)
+    print(f"  tensor: {attn_inputs.cu_seqlens_device}", flush=True)
+    print(f"  values: {attn_inputs.cu_seqlens_device.cpu().tolist()}", flush=True)
 
     print(
-        f"cu_kv_seqlens: shape={attn_inputs.cu_kv_seqlens.shape}, dtype={attn_inputs.cu_kv_seqlens.dtype}",
+        f"cu_kv_seqlens: shape={attn_inputs.cu_kv_seqlens_device.shape}, dtype={attn_inputs.cu_kv_seqlens_device.dtype}",
         flush=True,
     )
-    print(f"  tensor: {attn_inputs.cu_kv_seqlens}", flush=True)
-    print(f"  values: {attn_inputs.cu_kv_seqlens.cpu().tolist()}", flush=True)
+    print(f"  tensor: {attn_inputs.cu_kv_seqlens_device}", flush=True)
+    print(f"  values: {attn_inputs.cu_kv_seqlens_device.cpu().tolist()}", flush=True)
 
     print(f"context_total_kv_length: {attn_inputs.context_total_kv_length}", flush=True)
     print(f"total_tokens: {attn_inputs.total_tokens}", flush=True)
 
     print(
-        f"kv_cache_block_id_host: shape={attn_inputs.kv_cache_block_id_host.shape}, dtype={attn_inputs.kv_cache_block_id_host.dtype}",
+        f"kv_cache_block_id: shape={attn_inputs.kv_cache_block_id.shape}, dtype={attn_inputs.kv_cache_block_id.dtype}",
         flush=True,
     )
-    print(f"  tensor:\n{attn_inputs.kv_cache_block_id_host}", flush=True)
-    print(f"  values: {attn_inputs.kv_cache_block_id_host.cpu().tolist()}", flush=True)
+    print(f"  tensor:\n{attn_inputs.kv_cache_block_id}", flush=True)
+    print(f"  values: {attn_inputs.kv_cache_block_id.cpu().tolist()}", flush=True)
 
     print(
         f"kv_cache_kernel_block_id_device: shape={attn_inputs.kv_cache_kernel_block_id_device.shape}, device={attn_inputs.kv_cache_kernel_block_id_device.device}",

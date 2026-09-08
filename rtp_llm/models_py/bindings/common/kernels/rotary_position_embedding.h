@@ -1015,7 +1015,7 @@ __device__ inline void context_rope(RopeConfig    rope_config,
         input_len = input_len + prefix_prompt_length;
         seqidx    = seqidx + prefix_prompt_length;
     }
-    if (position_id > 0) {
+    if (position_id > 0 || (position_id == 0 && rope_config.style == RopeStyle::Mrope)) {
         seqidx = position_id;
     }
 
@@ -1046,7 +1046,7 @@ __device__ inline void attention_rope(RopeConfig rope_config,
         prefix_prompt_length = 0;
     }
 
-    if (position_id > 0) {
+    if (position_id > 0 || (position_id == 0 && rope_config.style == RopeStyle::Mrope)) {
         tlength = position_id;
     }
 

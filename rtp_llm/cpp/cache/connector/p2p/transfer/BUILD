@@ -1,6 +1,6 @@
 package(default_visibility = ["//visibility:public"])
 
-load("@arch_config//:arch_select.bzl", "transfer_backend_deps")
+load("@//bazel:arch_select.bzl", "transfer_backend_deps")
 
 transfer_backend_deps()
 

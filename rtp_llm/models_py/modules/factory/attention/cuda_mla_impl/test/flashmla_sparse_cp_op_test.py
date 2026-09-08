@@ -185,9 +185,9 @@ def _tp2_worker(rank: int, nccl_port: int, result_queue: mp.Queue) -> None:
         ai.context_parallel_info = cp
         block_table_host = _make_block_table(1, T, page, cpu)
         block_table_device = block_table_host.to(dev)
-        ai.kv_cache_block_id_host = block_table_host
+        ai.kv_cache_block_id = block_table_host
         ai.kv_cache_block_id_device = block_table_device
-        ai.kv_cache_kernel_block_id_host = block_table_host
+        ai.kv_cache_kernel_block_id = block_table_host
         ai.kv_cache_kernel_block_id_device = block_table_device
         bt = block_table_device
         mla = rtp_llm_ops.SparseMlaParams()
@@ -349,9 +349,9 @@ class SparseMlaFp8CPOpTest(TestCase):
             1, n_restore, page_size, torch.device("cpu")
         )
         block_table_device = block_table_host.to(device)
-        attn_inputs.kv_cache_block_id_host = block_table_host
+        attn_inputs.kv_cache_block_id = block_table_host
         attn_inputs.kv_cache_block_id_device = block_table_device
-        attn_inputs.kv_cache_kernel_block_id_host = block_table_host
+        attn_inputs.kv_cache_kernel_block_id = block_table_host
         attn_inputs.kv_cache_kernel_block_id_device = block_table_device
 
         mla_params = rtp_llm_ops.SparseMlaParams()
@@ -515,9 +515,9 @@ class SparseMlaFp8CPOpTest(TestCase):
             1, n_restore, page_size, torch.device("cpu")
         )
         block_table_device = block_table_host.to(device)
-        attn_inputs.kv_cache_block_id_host = block_table_host
+        attn_inputs.kv_cache_block_id = block_table_host
         attn_inputs.kv_cache_block_id_device = block_table_device
-        attn_inputs.kv_cache_kernel_block_id_host = block_table_host
+        attn_inputs.kv_cache_kernel_block_id = block_table_host
         attn_inputs.kv_cache_kernel_block_id_device = block_table_device
 
         mla_params = rtp_llm_ops.SparseMlaParams()
@@ -779,9 +779,9 @@ class SparseMlaFp8CPOpTest(TestCase):
             [prefix_length], dtype=torch.int32, device=torch.device("cpu")
         )
         attn_inputs.context_parallel_info = cp_params
-        attn_inputs.kv_cache_block_id_host = block_table_host
+        attn_inputs.kv_cache_block_id = block_table_host
         attn_inputs.kv_cache_block_id_device = block_table_device
-        attn_inputs.kv_cache_kernel_block_id_host = block_table_host
+        attn_inputs.kv_cache_kernel_block_id = block_table_host
         attn_inputs.kv_cache_kernel_block_id_device = block_table_device
 
         mla_params = rtp_llm_ops.SparseMlaParams()
@@ -811,9 +811,9 @@ class SparseMlaFp8CPOpTest(TestCase):
         attn_inputs_write.prefix_lengths = torch.tensor(
             [0], dtype=torch.int32, device=torch.device("cpu")
         )
-        attn_inputs_write.kv_cache_block_id_host = block_table_host
+        attn_inputs_write.kv_cache_block_id = block_table_host
         attn_inputs_write.kv_cache_block_id_device = block_table_device
-        attn_inputs_write.kv_cache_kernel_block_id_host = block_table_host
+        attn_inputs_write.kv_cache_kernel_block_id = block_table_host
         attn_inputs_write.kv_cache_kernel_block_id_device = block_table_device
 
         mla_params_write = rtp_llm_ops.SparseMlaParams()
@@ -840,9 +840,9 @@ class SparseMlaFp8CPOpTest(TestCase):
         attn_inputs_ref.prefix_lengths = torch.tensor(
             [prefix_length], dtype=torch.int32, device=torch.device("cpu")
         )
-        attn_inputs_ref.kv_cache_block_id_host = block_table_host
+        attn_inputs_ref.kv_cache_block_id = block_table_host
         attn_inputs_ref.kv_cache_block_id_device = block_table_device
-        attn_inputs_ref.kv_cache_kernel_block_id_host = block_table_host
+        attn_inputs_ref.kv_cache_kernel_block_id = block_table_host
         attn_inputs_ref.kv_cache_kernel_block_id_device = block_table_device
 
         mla_params_ref = rtp_llm_ops.SparseMlaParams()
@@ -891,9 +891,9 @@ class SparseMlaFp8CPOpTest(TestCase):
         attn_inputs_prefix.prefix_lengths = torch.tensor(
             [0], dtype=torch.int32, device=torch.device("cpu")
         )
-        attn_inputs_prefix.kv_cache_block_id_host = block_table_host
+        attn_inputs_prefix.kv_cache_block_id = block_table_host
         attn_inputs_prefix.kv_cache_block_id_device = block_table_device
-        attn_inputs_prefix.kv_cache_kernel_block_id_host = block_table_host
+        attn_inputs_prefix.kv_cache_kernel_block_id = block_table_host
         attn_inputs_prefix.kv_cache_kernel_block_id_device = block_table_device
 
         mla_params_prefix = rtp_llm_ops.SparseMlaParams()

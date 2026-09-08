@@ -9,8 +9,10 @@ import org.flexlb.domain.consistency.MasterChangeNotifyResp;
 import org.flexlb.domain.consistency.SyncLBStatusResp;
 import org.flexlb.util.JsonUtils;
 import org.flexlb.util.Logger;
+import org.springframework.core.env.Environment;
 import org.springframework.stereotype.Component;
 
+import javax.annotation.PreDestroy;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
 import java.util.concurrent.ScheduledExecutorService;
@@ -30,25 +32,33 @@ public class LBStatusConsistencyService implements MasterElectService {
     );
 
     private final ZookeeperMasterElectService zookeeperMasterElectService;
+    private final Environment environment;
     private LBConsistencyConfig lbConsistencyConfig;
     private String serverPort;
     private String roleId;
+    private String localHostIp;
 
-    public LBStatusConsistencyService(ZookeeperMasterElectService zookeeperMasterElectService) {
+    public LBStatusConsistencyService(ZookeeperMasterElectService zookeeperMasterElectService,
+                                      Environment environment) {
         this.zookeeperMasterElectService = zookeeperMasterElectService;
+        this.environment = environment;
         this.init();
     }
 
     public void init() {
         log.info("start init LBStatusConsistencyService.");
-        String hostIp;
         try {
-            hostIp = InetAddress.getLocalHost().getHostAddress();
+            localHostIp = InetAddress.getLocalHost().getHostAddress();
         } catch (UnknownHostException e) {
             throw new RuntimeException(e);
         }
-        serverPort = System.getProperty("server.port", "7001");
-        log.info("hostIp:{}, serverPort:{}.", hostIp, serverPort);
+        // Read from Spring Environment to respect --server.port= CLI args;
+        // fall back to JVM system property.
+        serverPort = environment.getProperty("server.port");
+        if (serverPort == null) {
+            serverPort = System.getProperty("server.port", "7001");
+        }
+        log.info("hostIp:{}, serverPort:{}.", localHostIp, serverPort);
         roleId = System.getenv("HIPPO_ROLE");
         if (StringUtils.isBlank(roleId)) {
             throw new RuntimeException("HIPPO_ROLE env is blank");
@@ -66,7 +76,6 @@ public class LBStatusConsistencyService implements MasterElectService {
         }
         log.info("start init ZookeeperMasterElectService.");
 
-        SCHEDULED_EXECUTOR_SERVICE.scheduleWithFixedDelay(this::syncLBStatusFromMaster, 1000, 500, TimeUnit.MILLISECONDS);
     }
 
     @Override
@@ -128,6 +137,10 @@ public class LBStatusConsistencyService implements MasterElectService {
         return masterHostIp + ":" + serverPort;
     }
 
+    public String getLocalHostIp() {
+        return localHostIp;
+    }
+
     /**
      * Handle master change
      *
@@ -155,10 +168,17 @@ public class LBStatusConsistencyService implements MasterElectService {
         return resp;
     }
 
-    /**
-     * Slave node syncs LB status from master node
-     */
-    private void syncLBStatusFromMaster() {
-        // TODO Get master status
+    @PreDestroy
+    public void shutdown() {
+        log.info("Shutting down LBStatusConsistencyService executor.");
+        SCHEDULED_EXECUTOR_SERVICE.shutdown();
+        try {
+            if (!SCHEDULED_EXECUTOR_SERVICE.awaitTermination(5, TimeUnit.SECONDS)) {
+                SCHEDULED_EXECUTOR_SERVICE.shutdownNow();
+            }
+        } catch (InterruptedException e) {
+            SCHEDULED_EXECUTOR_SERVICE.shutdownNow();
+            Thread.currentThread().interrupt();
+        }
     }
 }

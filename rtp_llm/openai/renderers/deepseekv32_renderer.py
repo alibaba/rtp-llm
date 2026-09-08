@@ -109,21 +109,9 @@ class DeepseekV32Renderer(ReasoningToolBaseRenderer):
 
     @override
     def in_think_mode(self, request: ChatCompletionRequest) -> bool:
-        """
-        Check if thinking mode is enabled.
+        """Check whether this request uses the renderer's thinking path."""
 
-        Supports both parent class logic and per-request enable_thinking parameter.
-
-        Args:
-            request: Chat completion request
-
-        Returns:
-            True if thinking mode is enabled, False otherwise
-        """
-        # Check parent class logic first
         thinking_enabled = super().in_think_mode(request)
-
-        # Check if enable_thinking is explicitly set in request kwargs
         if request.chat_template_kwargs and request.chat_template_kwargs.get(
             "enable_thinking"
         ):
@@ -135,7 +123,6 @@ class DeepseekV32Renderer(ReasoningToolBaseRenderer):
             and request.extra_configs.chat_template_kwargs.get("enable_thinking")
         ):
             thinking_enabled = True
-
         return thinking_enabled
 
     def _build_prompt(self, request: ChatCompletionRequest) -> str:

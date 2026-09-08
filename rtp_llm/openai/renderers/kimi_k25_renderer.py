@@ -28,7 +28,7 @@ from rtp_llm.openai.renderer_factory_register import register_renderer
 from rtp_llm.openai.renderers.basic_renderer import PromptWithMMInput
 from rtp_llm.openai.renderers.custom_renderer import RenderedInputs
 from rtp_llm.openai.renderers.kimik2_renderer import KimiK2Renderer
-from rtp_llm.utils.multimodal_util import MMUrlType
+from rtp_llm.utils.base_model_datatypes import MMUrlType
 
 
 class KimiK25Renderer(KimiK2Renderer):
@@ -74,9 +74,7 @@ class KimiK25Renderer(KimiK2Renderer):
             new_msg.content = new_parts
             rewritten.append(new_msg)
 
-        return rewritten, PromptWithMMInput(
-            prompt="", urls=urls, mm_types=types
-        )
+        return rewritten, PromptWithMMInput(prompt="", urls=urls, mm_types=types)
 
     @override
     def render_chat(self, request: ChatCompletionRequest) -> RenderedInputs:

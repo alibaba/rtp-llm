@@ -37,6 +37,13 @@ struct MemoryLayoutConfig {
     size_t local_head_num_kv  = 0;
     size_t seq_size_per_block = 0;
 
+    // Number of kernel blocks packed inside one BlockPool block.  When > 1,
+    // BlockPool allocates physical blocks (each = bpk × kernel block bytes), but
+    // kernels still address by kernel-block id; MemoryLayoutStrategy reshapes the
+    // KV tensor as (layer, block_num × bpk, kv_block_stride_bytes / bpk) so the
+    // kernel view sees per-kernel-block strides.
+    size_t kernel_blocks_per_kv_block = 1;
+
     bool enable_kv_scale         = false;
     bool enable_hybrid_attention = false;
 

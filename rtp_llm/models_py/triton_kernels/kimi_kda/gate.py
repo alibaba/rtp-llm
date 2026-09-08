@@ -13,15 +13,15 @@ import torch.nn.functional as F
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.triton_kernels.autotune_cache import (
+    autotune_cache_kwargs,
+    cuda_cached_autotune,
+)
 from rtp_llm.models_py.triton_kernels.fla.index import prepare_chunk_indices
 from rtp_llm.models_py.triton_kernels.fla.op import exp, softplus
-from rtp_llm.models_py.triton_kernels.fla.utils import (
-    autotune_cache_kwargs,
-    check_shared_mem,
-)
 from rtp_llm.models_py.triton_kernels.fla.utils import is_amd as IS_AMD
 
-BS_LIST = [32, 64] if check_shared_mem() else [16, 32]
+BS_LIST = [32, 64]
 BT_LIST_AUTOTUNE = [32, 64, 128]
 NUM_WARPS_AUTOTUNE = [2, 4, 8, 16] if IS_AMD else [4, 8, 16, 32]
 
@@ -33,7 +33,7 @@ NUM_WARPS_AUTOTUNE = [2, 4, 8, 16] if IS_AMD else [4, 8, 16, 32]
         "USE_LOWER_BOUND": lambda args: args["lower_bound"] is not None,
     }
 )
-@triton.autotune(
+@cuda_cached_autotune(
     configs=[
         triton.Config({"BT": BT}, num_warps=num_warps, num_stages=num_stages)
         for BT in BT_LIST_AUTOTUNE
@@ -159,7 +159,7 @@ def fused_kda_gate(
         "USE_LOWER_BOUND": lambda args: args["lower_bound"] is not None,
     }
 )
-@triton.autotune(
+@cuda_cached_autotune(
     configs=[
         triton.Config({"BS": BS}, num_warps=num_warps)
         for BS in BS_LIST

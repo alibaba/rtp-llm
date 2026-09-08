@@ -11,8 +11,7 @@ fi
 CURL_BIN=/usr/bin/curl
 SPACE_STR="........................................................................"
 
-OUTIF=`/sbin/route -n | tail -1  | sed -e 's/.* \([^ ]*$\)/\1/'`
-HTTP_IP="http://`/sbin/ifconfig | grep -A1 ${OUTIF} | grep inet | awk '{print $2}' | sed 's/addr://g'`:${CHECK_PORT}"
+HTTP_IP="http://localhost:${CHECK_PORT}"
 
 #####################################
 checkpage() {

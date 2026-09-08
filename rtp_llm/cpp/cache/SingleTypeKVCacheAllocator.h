@@ -25,23 +25,36 @@ public:
     std::shared_ptr<KVCacheResource> incrKVCacheRef(const KVCacheResource& kvcache_resource,
                                                     const CacheKeysType&   cache_keys,
                                                     bool                   is_connector = false) override;
-    CacheLayerLayout                 allLayerCacheBase() const override;
+    GroupedCacheLayerLayout          allLayerCacheBase() const override;
 
-    bool updateKVBlock(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
-                       const std::vector<int>&        block_src_batch,
-                       bool                           copy_last_block,
-                       std::vector<BlockIdPair>&      block_update_mapping) override;
+    bool updateKVBlock(const BatchKVCacheResourcePtr&  batch_kv_cache_resource,
+                       const std::vector<int>&         block_src_batch,
+                       bool                            copy_last_block,
+                       std::vector<TaggedBlockIdPair>& block_update_mapping) override;
 
     int seqSizePerBlock() const override;
     int singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
                               int                            seq_len,
                               int                            reserve_step) const override;
 
+protected:
+    int estimatePeakNeedBlocks(const KVCacheResource& kv_cache_resource,
+                               int                    seq_len,
+                               int                    remaining_tokens,
+                               int                    reserve_step,
+                               bool                   enable_reuse_cache) const override;
+
 private:
     bool         doInit() override;
     MallocResult incrMalloc(const MallocInfo& malloc_info) override;
     MallocResult initMallocForCommonLen(const MallocInfo& malloc_info) override;
     int          getNeedBlocks(const MallocInfo& malloc_info) const override;
+    int          estimateInitialBatchPeakNeedBlocks(int  seq_len,
+                                                    int  common_seq_len,
+                                                    int  remaining_tokens,
+                                                    int  reserve_step,
+                                                    bool enable_reuse_cache,
+                                                    int  target_batch_size) const override;
     void         decrKVCacheRef(const KVCacheResource& kvcache_resource, bool is_connector = false) override;
 
 private:

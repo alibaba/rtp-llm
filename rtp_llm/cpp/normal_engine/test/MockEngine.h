@@ -12,6 +12,7 @@
 #include "rtp_llm/cpp/normal_engine/NormalExecutor.h"
 #include "rtp_llm/cpp/engine_base/schedulers/FIFOScheduler.h"
 #include "rtp_llm/cpp/engine_base/WeightsConverter.h"
+#include "rtp_llm/cpp/cache/KVCacheSpecDesc.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/cpp/models/models_weight/W.h"
@@ -44,7 +45,16 @@ struct CustomConfig {
     bool                                    reuse_cache        = false;
     DataType                                kv_cache_data_type = DataType::TYPE_FP16;
     std::map<std::string, std::vector<int>> multi_task_prompt_tokens;
+    std::vector<int64_t>                    output_vocab_ids;  // non-empty enables output-vocab pruning
+    bool                                    prefill_cp_enabled  = false;
+    bool                                    speculative_enabled = false;
+    bool                                    warm_up_with_loss   = false;
 };
+
+inline void setDefaultMhaKVCacheSpecDescs(rtp_llm::ModelConfig& model_config) {
+    model_config.kv_cache_spec_descs.assign(static_cast<size_t>(model_config.num_layers),
+                                            {KVCacheSpecDesc{"full", KVCacheSpecType::MultiHeadAttention}});
+}
 
 rtp_llm::EngineInitParams createEngineInitParams(const CustomConfig&     config,
                                                  rtp_llm::ModelConfig&   model_config,
@@ -65,14 +75,15 @@ rtp_llm::EngineInitParams createEngineInitParams(const CustomConfig&     config,
     runtime_config.fifo_scheduler_config.max_context_batch_size = 128;
     runtime_config.fifo_scheduler_config.max_batch_tokens_size  = 4096;
     model_config.attn_config.kv_cache_dtype =
-        config.kv_cache_data_type == DataType::TYPE_INT8 ?
-            KvCacheDataType::INT8 :
-            (config.kv_cache_data_type == DataType::TYPE_FP8_E4M3 ? KvCacheDataType::FP8 : KvCacheDataType::BASE);
+        config.kv_cache_data_type == DataType::TYPE_FP8_E4M3 ? KvCacheDataType::FP8 : KvCacheDataType::BASE;
     model_config.special_tokens.eos_token_id = -1;  // never eos
+    setDefaultMhaKVCacheSpecDescs(model_config);
 
     const size_t inter_size = 512;
     // inter_size is now calculated in ModelDeployWeightInfo, not in ModelConfig
     model_config.attn_config.tokens_per_block = 2;
+    kv_cache_config.seq_size_per_block        = model_config.attn_config.tokens_per_block;
+    kv_cache_config.kernel_seq_size_per_block = model_config.attn_config.tokens_per_block;
     runtime_config.reserve_runtime_mem_mb     = 1024;
     const size_t hidden_units                 = 128;
 
@@ -119,7 +130,14 @@ rtp_llm::EngineInitParams createEngineInitParams(const CustomConfig&     config,
     // Create all config objects with defaults
     rtp_llm::MMModelConfig mm_model_config;
     model_config.mm_model_config = mm_model_config;
-    rtp_llm::ParallelismConfig           parallelism_config;
+    rtp_llm::ParallelismConfig parallelism_config;
+    model_config.output_vocab_ids = config.output_vocab_ids;
+    if (!config.output_vocab_ids.empty()) {
+        model_config.output_vocab_padded_size = static_cast<int64_t>(config.output_vocab_ids.size());
+    }
+    if (config.prefill_cp_enabled) {
+        parallelism_config.prefill_cp_config.method = CPRotateMethod::ALL_GATHER;
+    }
     rtp_llm::PDSepConfig                 pd_sep_config;
     rtp_llm::ConcurrencyConfig           concurrency_config;
     rtp_llm::FMHAConfig                  fmha_config;
@@ -129,12 +147,14 @@ rtp_llm::EngineInitParams createEngineInitParams(const CustomConfig&     config,
     rtp_llm::MoeConfig                   moe_config;
     rtp_llm::ModelSpecificConfig         model_specific_config;
     rtp_llm::SpeculativeExecutionConfig  sp_config;
-    rtp_llm::CacheStoreConfig            cache_store_config;
-    rtp_llm::MiscellaneousConfig         misc_config;
-    rtp_llm::ArpcConfig                  arpc_config;
-    rtp_llm::GrpcConfig                  grpc_config;
-    rtp_llm::FfnDisAggregateConfig       ffn_disaggregate_config;
-    rtp_llm::VitConfig                   vit_config;
+    sp_config.type                   = config.speculative_enabled ? SP_TYPE_VANILLA : SP_TYPE_NONE;
+    runtime_config.warm_up_with_loss = config.warm_up_with_loss;
+    rtp_llm::CacheStoreConfig      cache_store_config;
+    rtp_llm::MiscellaneousConfig   misc_config;
+    rtp_llm::ArpcConfig            arpc_config;
+    rtp_llm::GrpcConfig            grpc_config;
+    rtp_llm::FfnDisAggregateConfig ffn_disaggregate_config;
+    rtp_llm::VitConfig             vit_config;
 
     rtp_llm::EngineInitParams rtp_llm_params(0,
                                              model_config,
@@ -170,9 +190,12 @@ std::shared_ptr<NormalEngine> createMockEngine(const CustomConfig& config) {
     NormalExecutor::test_model_factory = [vocab](const GptModelInitParams&) {
         return std::make_unique<MockModel>(vocab);
     };
-    std::shared_ptr<NormalEngine> engine = make_shared<NormalEngine>(rtp_llm_params, nullptr);
-    NormalExecutor::test_model_factory   = nullptr;
-    return engine;
+    struct FactoryResetGuard {
+        ~FactoryResetGuard() {
+            NormalExecutor::test_model_factory = nullptr;
+        }
+    } factory_reset_guard;
+    return make_shared<NormalEngine>(rtp_llm_params, nullptr);
 }
 
 }  // namespace rtp_llm

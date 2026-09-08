@@ -1,6 +1,7 @@
 {
     "model_type": "qwen_3",
     "model_path": "/mnt/nas1/hf/models--Qwen--Qwen3-1.7B-FP8/snapshots/98342881667bac235ed8605b5ffd8a64a5b99aec",
+    "_comment": "H20 baseline; qwen3/q_r_block_fp8_sm100_arm.json is the SM100 fork with the same query but a different expected completion. The query payload (messages + fcst_result_white_box tools schema) must stay byte-identical across both files. Nothing enforces this, so edit both together.",
     "query_result": [
         {
             "endpoint": "/v1/chat/completions",

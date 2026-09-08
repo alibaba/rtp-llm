@@ -67,6 +67,8 @@ EmbeddingExecutor::EmbeddingExecutor(const EngineInitParams& params, py::object 
 
     RTP_LLM_CHECK_WITH_INFO(!params.py_model.is_none(), "py_model must be provided, legacy C++ GptModel path removed");
     RTP_LLM_LOG_INFO("init executor with python model");
+    // Model-input dumps target autoregressive Normal/MTP replay. Embedding and
+    // rerank use a different input contract and intentionally do not need it.
     model_.reset(new PyWrappedModel(model_init_params, params.py_model, true));
 
     init_position_ids(model_config_.max_seq_len);
@@ -87,6 +89,24 @@ EmbeddingExecutor::EmbeddingExecutor(const EngineInitParams& params, py::object 
 void EmbeddingExecutor::init_position_ids(int max_seq_len) {
     max_position_ids_tensor_ = torch::arange(max_seq_len, torch::kInt32);
 }
+
+namespace {
+#if USING_CUDA
+torch::Tensor toCudaInt32ModelInput(const torch::Tensor& tensor) {
+    if (!tensor.defined()) {
+        return tensor;
+    }
+    auto options = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    if (tensor.is_cuda() && tensor.scalar_type() == torch::kInt32) {
+        return tensor;
+    }
+    if (tensor.numel() == 0) {
+        return torch::empty(tensor.sizes(), options);
+    }
+    return tensor.to(options, /*non_blocking=*/true);
+}
+#endif
+}  // namespace
 
 absl::StatusOr<GptModelInputs> EmbeddingExecutor::gatherModelInput(const std::list<EmbeddingStreamPtr>& streams) const {
     int64_t token_num  = 0;
@@ -190,19 +210,34 @@ absl::StatusOr<GptModelInputs> EmbeddingExecutor::gatherModelInput(const std::li
         model_input.need_moe_gating = true;
     }
     reportMetrics(batch_size, token_num, max_seq_len);
+#if USING_CUDA
+    // TODO(async): embedding streams are still gathered through CPU pointers,
+    // but the model-facing GptModelInputs metadata should be CUDA resident.
+    // Non-CUDA platforms keep the host pipeline: buildPyAttentionInputs's
+    // device-metadata branch requires the CUDA-only metadata kernel.
+    model_input.combo_tokens     = toCudaInt32ModelInput(model_input.combo_tokens);
+    model_input.input_lengths    = toCudaInt32ModelInput(model_input.input_lengths);
+    model_input.sequence_lengths = toCudaInt32ModelInput(model_input.sequence_lengths);
+    model_input.prefix_lengths   = toCudaInt32ModelInput(model_input.prefix_lengths);
+#endif
     return model_input;
 }
 
 ModelRequest EmbeddingExecutor::generateOldModelRequest(GptModelInputs& model_input) {
+    // Python handlers (extend_forward) expect these metadata tensors on CPU,
+    // while gatherModelInput now keeps the model-facing copies CUDA resident.
+    auto to_cpu = [](const torch::Tensor& tensor) {
+        return tensor.defined() && tensor.is_cuda() ? tensor.cpu() : tensor;
+    };
     ModelRequest model_request;
     model_request.generate_batch_size  = 0;
     model_request.context_batch_size   = model_input.input_lengths.size(0);
-    model_request.combo_tokens         = model_input.combo_tokens;
-    model_request.combo_position_ids   = model_input.combo_position_ids;
-    model_request.combo_token_type_ids = model_input.combo_tokens_type_ids;
-    model_request.input_lengths        = model_input.input_lengths;
-    model_request.sequence_lengths     = model_input.sequence_lengths;
-    model_request.prefix_lengths       = model_input.prefix_lengths;
+    model_request.combo_tokens         = to_cpu(model_input.combo_tokens);
+    model_request.combo_position_ids   = to_cpu(model_input.combo_position_ids);
+    model_request.combo_token_type_ids = to_cpu(model_input.combo_tokens_type_ids);
+    model_request.input_lengths        = to_cpu(model_input.input_lengths);
+    model_request.sequence_lengths     = to_cpu(model_input.sequence_lengths);
+    model_request.prefix_lengths       = to_cpu(model_input.prefix_lengths);
     model_request.attention_mask       = model_input.attention_mask;
     return model_request;
 }

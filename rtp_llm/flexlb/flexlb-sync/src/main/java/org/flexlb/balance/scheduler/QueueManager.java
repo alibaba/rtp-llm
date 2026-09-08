@@ -1,6 +1,5 @@
 package org.flexlb.balance.scheduler;
 
-import lombok.Getter;
 import org.flexlb.config.ConfigService;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.QueueSnapshot;
@@ -10,6 +9,7 @@ import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.service.monitor.RoutingQueueReporter;
 import org.flexlb.util.JsonUtils;
 import org.flexlb.util.Logger;
+import org.flexlb.util.PriorityOrdering;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 import reactor.core.publisher.Mono;
@@ -21,12 +21,10 @@ import java.nio.file.Paths;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.BlockingDeque;
 import java.util.concurrent.BlockingQueue;
-import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
-import java.util.concurrent.LinkedBlockingDeque;
+import java.util.concurrent.PriorityBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicLong;
@@ -37,7 +35,6 @@ import java.util.concurrent.atomic.AtomicLong;
  * @author saichen.sm
  * @since 2025/12/22
  */
-@Getter
 @Component
 public class QueueManager {
 
@@ -48,12 +45,19 @@ public class QueueManager {
 
     private final AtomicLong sequenceGenerator = new AtomicLong(0);
 
-    // Request queue
-    private final BlockingDeque<BalanceContext> queue;
+    /**
+     * Hard capacity bound for the unbounded {@link PriorityBlockingQueue}.
+     * Checked before every {@code offer} since PBQ grows without limit.
+     */
+    private final int maxQueueSize;
+
+    // Request queue — priority-ordered (priority desc → enqueue-seq asc)
+    private final PriorityBlockingQueue<BalanceContext> queue;
 
     public QueueManager(RoutingQueueReporter routingQueueReporter, ConfigService configService) {
         this.metrics = routingQueueReporter;
-        this.queue = new LinkedBlockingDeque<>(configService.loadBalanceConfig().getMaxQueueSize());
+        this.maxQueueSize = configService.loadBalanceConfig().getMaxQueueSize();
+        this.queue = new PriorityBlockingQueue<>(64, PriorityOrdering.<BalanceContext>strict());
     }
 
     /**
@@ -68,15 +72,15 @@ public class QueueManager {
         CompletableFuture<Response> future = new CompletableFuture<>();
         ctx.setFuture(future);
 
-        // Add to queue tail
+        // Add to queue (PBQ is unbounded; size guard is pre-checked)
         ctx.setEnqueueTime(System.currentTimeMillis());
         ctx.setSequenceId(sequenceGenerator.incrementAndGet());
-        boolean added = queue.offerLast(ctx);
-        if (!added) {
+        if (queue.size() >= maxQueueSize) {
             Logger.warn("Queue is full for request id: {}, current size: {}", ctx.getRequestId(), queue.size());
             metrics.reportRejected();
             return Mono.just(Response.error(StrategyErrorType.QUEUE_FULL));
         }
+        queue.offer(ctx);
         metrics.reportQueueEntry();
 
         return Mono.fromFuture(future)
@@ -91,49 +95,53 @@ public class QueueManager {
     }
 
     /**
-     * Offer to queue head (for retry on failure)
+     * Re-offer a previously dequeued request (for retry on failure).
+     *
+     * <p>The request keeps its original {@code sequenceId} — it is NOT
+     * re-issued — so the {@link PriorityBlockingQueue} sorts it back to its
+     * priority-correct position among same-priority items (first among
+     * equals if its sequenceId is older than all current occupants).
      *
      * @param ctx Load balancing context
      */
     public void offerToHead(BalanceContext ctx) {
-        boolean added = queue.offerFirst(ctx);
-        if (!added) {
+        if (queue.size() >= maxQueueSize) {
             Logger.warn("Failed to re-queue request id: {} (queue full), completing with error", ctx.getRequestId());
             ctx.getFuture().complete(Response.error(StrategyErrorType.QUEUE_FULL));
+            return;
         }
+        queue.offer(ctx);
+    }
+
+    public int queueSize() {
+        return queue.size();
     }
 
     /**
-     * Take request from queue (blocking/non-blocking)
+     * Take request from the queue, waiting up to {@code blockTimeoutMs}.
      *
-     * @param isBlock          Whether to block and wait
-     * @param blockTimeoutMs   Block timeout in milliseconds
-     * @return Request context, null if queue is empty
+     * @return request context, or null when no request arrives before the timeout
      */
-    public BalanceContext takeRequest(boolean isBlock, long blockTimeoutMs) {
-        return takeValidRequest(queue, isBlock, blockTimeoutMs);
+    public BalanceContext takeRequest(long blockTimeoutMs) {
+        return takeValidRequest(queue, blockTimeoutMs);
     }
 
     /**
      * Take a single valid request from queue
      * <p>
-     * Checks for cancelled and timed-out requests, completes future for invalid requests
+     * Checks for timed-out requests and completes the future for invalid requests.
      *
      * @param sourceQueue Source queue
      * @return Request context, null if queue is empty
      */
-    private BalanceContext takeValidRequest(BlockingQueue<BalanceContext> sourceQueue, boolean isBlock, long blockTimeoutMs) {
+    private BalanceContext takeValidRequest(BlockingQueue<BalanceContext> sourceQueue, long blockTimeoutMs) {
         try {
             while (true) {
-                BalanceContext ctx = isBlock ? sourceQueue.poll(blockTimeoutMs, TimeUnit.MILLISECONDS) : sourceQueue.poll();
+                BalanceContext ctx = sourceQueue.poll(blockTimeoutMs, TimeUnit.MILLISECONDS);
                 if (ctx == null) {
                     return null;
                 }
                 ctx.setDequeueTime(System.currentTimeMillis());
-                if (ctx.isCancelled()) {
-                    ctx.getFuture().completeExceptionally(new CancellationException("Request cancelled by client"));
-                    continue;
-                }
                 long waitTimeMs = System.currentTimeMillis() - ctx.getEnqueueTime();
                 long maxQueueWaitTimeMs = ctx.getRequest().getGenerateTimeout();
                 if (waitTimeMs > maxQueueWaitTimeMs) {
@@ -158,14 +166,6 @@ public class QueueManager {
         Logger.warn("Request timeout in queue for id: {}, wait time: {}ms", ctx.getRequestId(), waitTimeMs);
     }
 
-    private void handleCanceled(BalanceContext ctx) {
-        remove(ctx);
-        metrics.reportCancelled();
-
-        long waitTimeMs = System.currentTimeMillis() - ctx.getEnqueueTime();
-        Logger.warn("Request canceled in queue for id: {}, wait time: {}ms", ctx.getRequestId(), waitTimeMs);
-    }
-
     private void handleInterruption(BalanceContext ctx) {
         remove(ctx);
         Thread.currentThread().interrupt();
@@ -185,9 +185,6 @@ public class QueueManager {
         if (cause instanceof TimeoutException) {
             handleTimeout(BalanceContext);
             return Mono.just(Response.error(StrategyErrorType.QUEUE_TIMEOUT));
-        } else if (cause instanceof CancellationException) {
-            handleCanceled(BalanceContext);
-            return Mono.just(Response.error(StrategyErrorType.REQUEST_CANCELLED));
         } else if (cause instanceof InterruptedException) {
             handleInterruption(BalanceContext);
             return Mono.just(Response.error(StrategyErrorType.QUEUE_TIMEOUT));
@@ -197,7 +194,7 @@ public class QueueManager {
         return Mono.just(Response.error(StrategyErrorType.NO_AVAILABLE_WORKER));
     }
 
-    @Scheduled(fixedRate = 1000)
+    @Scheduled(fixedRate = 2000L)
     public void reportQueueSize() {
         metrics.reportQueueSize(queue.size());
     }

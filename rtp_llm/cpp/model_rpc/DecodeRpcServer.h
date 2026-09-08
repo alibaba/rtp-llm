@@ -5,6 +5,7 @@
 #include "rtp_llm/cpp/model_rpc/DecodeGenerateContext.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
+#include "rtp_llm/cpp/cache/CacheGroupType.h"
 
 namespace rtp_llm {
 
@@ -13,8 +14,8 @@ public:
     DecodeRpcServer() {}
     ~DecodeRpcServer();
     grpc::Status init(const EngineInitParams&                                maga_init_params,
-                      py::object                                             mm_process_engine,
-                      std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params);
+                      std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params,
+                      py::object                                             mm_process_engine);
 
     grpc::Status RemoteGenerate(grpc::ServerContext* server_context, ServerStream* stream);
 
@@ -33,7 +34,8 @@ public:
                            int64_t                          timeout_ms,
                            int                              partition_count,
                            int                              partition_id,
-                           grpc::ServerContext*             server_context):
+                           grpc::ServerContext*             server_context,
+                           int32_t                          prefill_cp_size = 1):
             request_id(request_id),
             request_key(request_key),
             peer_addrs(peer_addrs),
@@ -43,7 +45,8 @@ public:
             timeout_ms(timeout_ms),
             partition_count(partition_count),
             partition_id(partition_id),
-            server_context(server_context) {}
+            server_context(server_context),
+            prefill_cp_size(prefill_cp_size) {}
         int64_t                          request_id;
         const std::string&               request_key;
         const std::vector<std::string>&  peer_addrs;
@@ -55,15 +58,27 @@ public:
         int                              partition_id;
 
         grpc::ServerContext* server_context;
+        int32_t              prefill_cp_size;
     };
 
 private:
+    struct MTPModuleLoadPlan {
+        size_t                  module_index;
+        const EngineInitParams* engine_init_params;
+        size_t                  cache_model_id;
+    };
+
     void         initThreadPool();
     void         prepareGenerateContext(DecodeGenerateContext& decode_context);
     void         allocateResource(DecodeGenerateContext& decode_context);
     grpc::Status allocateResourceFunc(DecodeGenerateContext& decode_context);
     void         loadCacheFromPrefill(DecodeGenerateContext& decode_context);
     void         localGenerate(DecodeGenerateContext& decode_context);
+    // Report a terminal early failure to FlexLB via meta_->finishTask(); guaranteed at most once per
+    // request. MUST NOT be called inside functions driven by EXECUTE_WITH_RETRY (would report while
+    // retries could still succeed); only call at final failure points.
+    void
+    reportEarlyFinishTask(DecodeGenerateContext& decode_context, int64_t error_code, const std::string& error_message);
 
     ErrorInfo              loadCache(const LoadKVCacheContext& load_context);
     ErrorInfo              loadCacheForAllRank(DecodeGenerateContext& decode_context);
@@ -75,6 +90,34 @@ private:
     BroadcastLoadRequestPB constructRemoteLoadRequestForMla(const LoadKVCacheContext&       load_context,
                                                             int                             index,
                                                             const std::vector<std::string>& peer_ips) const;
+    static GroupBlockIds   decodeGroupBlockIds(const BroadcastLoadRequestPB& request, const CacheTopology& topology);
+    static std::string     makeTaggedRequestKey(int64_t request_id, size_t layer_id, const std::string& tag);
+    static std::string
+    makeMTPModuleCacheKey(size_t mtp_base_model_id, const std::string& token_id_str, size_t layer_id);
+    static std::vector<MTPModuleLoadPlan> makeMTPModuleLoadPlan(const ProposeModelEngineInitParams* propose_params);
+    // Projects the producer's buildCacheStorePlan onto one group's decode block
+    // table: key_index indexes the global cache keys, offset_index the group-local
+    // BlockIds::blocks(). Derived from group policy plus block geometry only, never
+    // from how many prefill peers answered this load. Static so it is testable.
+    static std::vector<CacheStoreBlockPair> buildGroupLoadPlan(const CacheGroupPolicy& policy,
+                                                               size_t                  local_block_num,
+                                                               size_t                  cache_key_count,
+                                                               size_t                  reuse_block_size,
+                                                               bool                    use_hybrid,
+                                                               size_t                  group_seq_size_per_block,
+                                                               size_t                  base_seq_size_per_block);
+    static grpc::Status                   generateRequestReadFailureStatus(bool cancelled);
+    // Classifies error.type for the synthesized Decode phase spans. Static and
+    // side-effect free so the classification itself is unit testable.
+    static const char* phaseErrorType(bool                         request_ok,
+                                      DecodeStatInfo::ExecuteStage stage,
+                                      const ErrorInfo&             error_info,
+                                      const grpc::Status&          error_status);
+    static void        logReadFailures(int64_t                         request_id,
+                                       const std::string&              peer_addr,
+                                       ErrorCode                       error_code,
+                                       const std::string&              error_message,
+                                       const std::vector<std::string>& buffer_debug_infos);
 
 private:
     autil::ThreadPoolBasePtr thread_pool_;

@@ -1,4 +1,4 @@
-load("@arch_config//:arch_select.bzl", "no_block_copy_link_deps", "torch_deps")
+load("//bazel:arch_select.bzl", "no_block_copy_link_deps", "torch_deps")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -23,8 +23,8 @@ cc_library(
         "//rtp_llm/cpp/cache/connector/p2p/transfer:transfer_metric",
         "//rtp_llm/cpp/cache/connector/p2p/transfer:basic_types",
         "//rtp_llm/cpp/cache/connector/p2p/transfer/tcp/proto:tcp_service_cc_proto",
-        "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/utils:time_util",
+        "//rtp_llm/cpp/utils:core_utils",
     ],
     visibility = ["//visibility:public"],
 )

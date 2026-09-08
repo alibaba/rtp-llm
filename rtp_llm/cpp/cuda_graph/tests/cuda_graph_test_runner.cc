@@ -14,13 +14,14 @@ namespace rtp_llm {
 // depending on torch's registered CustomClassHolder type.
 class CudaGraphTestRunner {
 public:
-    void init_prefill(py::object       py_instance,
-                      int64_t          max_context_batch_size,
-                      int64_t          max_seq_len,
-                      int64_t          tokens_per_block,
-                      int64_t          kernel_tokens_per_block,
-                      std::vector<int> prefill_capture_seq_lens,
-                      int64_t          hidden_size) {
+    void init_prefill(py::object               py_instance,
+                      int64_t                  max_context_batch_size,
+                      int64_t                  max_seq_len,
+                      int64_t                  tokens_per_block,
+                      int64_t                  kernel_tokens_per_block,
+                      std::vector<int>         prefill_capture_seq_lens,
+                      int64_t                  hidden_size,
+                      std::vector<std::string> group_tags) {
         reset_runner();
         GraphParams params;
         params.enable_cuda_graph_debug_mode = true;
@@ -31,10 +32,10 @@ public:
         params.num_tokens_per_bs            = static_cast<int>(max_seq_len);
         params.max_context_batch_size       = static_cast<size_t>(max_context_batch_size);
         params.hidden_size                  = static_cast<size_t>(hidden_size);
+        params.input_hidden_size            = static_cast<size_t>(hidden_size);
         params.model_data_type              = c10::ScalarType::BFloat16;
         params.prefill_capture_seq_lens     = std::move(prefill_capture_seq_lens);
-        params.kv_cache_layer_to_group      = {};  // test: no hybrid kv cache
-        params.kv_cache_group_num           = 0;
+        params.kv_cache_group_tags          = std::move(group_tags);
 
         runner_ = CudaGraphRunner::createForPrefill(std::move(py_instance), std::move(params));
     }
@@ -58,6 +59,7 @@ public:
         params.kernel_tokens_per_block      = static_cast<int>(kernel_tokens_per_block);
         params.num_tokens_per_bs            = 1;
         params.hidden_size                  = static_cast<size_t>(hidden_size);
+        params.input_hidden_size            = static_cast<size_t>(hidden_size);
         params.max_context_batch_size       = static_cast<size_t>(max_context_batch_size);
         params.prefill_capture_seq_lens     = std::move(prefill_capture_seq_lens);
         params.mori_max_tokens              = static_cast<int>(mori_max_tokens);
@@ -81,13 +83,12 @@ public:
         params.max_seq_len                  = static_cast<int>(max_seq_len);
         params.tokens_per_block             = static_cast<int>(tokens_per_block);
         params.kernel_tokens_per_block      = static_cast<int>(kernel_tokens_per_block);
+        params.input_hidden_size            = static_cast<size_t>(hidden_size);
         params.num_tokens_per_bs            = 1;
         params.hidden_size                  = static_cast<size_t>(hidden_size);
-        params.model_data_type              = c10::ScalarType::Half;
+        params.model_data_type              = c10::ScalarType::BFloat16;
         params.max_context_batch_size       = 128;
         params.decode_capture_batch_sizes   = std::move(decode_capture_batch_sizes);
-        params.kv_cache_layer_to_group      = {};
-        params.kv_cache_group_num           = 0;
 
         runner_ = CudaGraphRunner::createForDecode(std::move(py_instance), std::move(params));
     }
@@ -116,6 +117,12 @@ public:
     }
 
     torch_ext::PyModelOutputs forward(torch_ext::PyModelInputs& inputs) {
+        // Production PyWrappedModel creates these device mirrors. Python tests
+        // cannot assign them because the bindings intentionally expose them as
+        // read-only, so reproduce that input-building step in the test wrapper.
+        inputs.attention_inputs.input_lengths_device  = inputs.attention_inputs.input_lengths.cuda();
+        inputs.attention_inputs.prefix_lengths_device = inputs.attention_inputs.prefix_lengths.cuda();
+        refreshTaggedAttentionInputs(inputs);
         return runner_->forward(inputs, state_);
     }
 
@@ -157,7 +164,8 @@ PYBIND11_MODULE(libtest_cuda_graph_runner, m) {
              py::arg("tokens_per_block"),
              py::arg("kernel_tokens_per_block"),
              py::arg("prefill_capture_seq_lens"),
-             py::arg("hidden_size"))
+             py::arg("hidden_size"),
+             py::arg("group_tags") = std::vector<std::string>{})
         .def("init_generation_prefill",
              &CudaGraphTestRunner::init_generation_prefill,
              py::arg("py_instance"),

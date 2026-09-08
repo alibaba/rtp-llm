@@ -1,8 +1,11 @@
 #pragma once
 
+#include <optional>
+#include <vector>
 #include <torch/all.h>
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/models_py/bindings/core/OpData.h"
+#include "rtp_llm/cpp/utils/ErrorCode.h"
 #include "rtp_llm/cpp/utils/TensorDebugUtils.h"
 
 namespace rtp_llm {
@@ -10,7 +13,13 @@ namespace rtp_llm {
 class LogitsProcessorStates;
 typedef std::shared_ptr<LogitsProcessorStates> LogitsProcessorStatesPtr;
 
-struct SamplerInitParams {};
+struct SamplerInitParams {
+    // max_batch_size is an initial capacity. Set fixed_max_batch_size=false when callers can legally
+    // fan out beyond that capacity, e.g. num_return_sequences or variable beam requests. When
+    // max_batch_size == 0, fixed_max_batch_size is ignored and buffers grow dynamically.
+    size_t max_batch_size       = 0;
+    bool   fixed_max_batch_size = true;
+};
 
 struct SamplerInputs {
 public:
@@ -51,6 +60,8 @@ public:
     torch::Tensor do_sample;             // shape: [batch_size], dtype via Buffer (BOOL)
     torch::Tensor finished_mask;         // shape: [batch_size], dtype via Buffer (BOOL)
 
+    bool return_original_all_probs = false;
+
     mutable torch::Tensor cum_log_probs;  // shape: [batch_size]
     mutable torch::Tensor all_probs;      // shape: [batch_size, vocab_size]
 
@@ -59,11 +70,15 @@ public:
 
 struct SamplerOutput {
 public:
-    torch::Tensor token_ids;
-    torch::Tensor cum_log_probs;
-    torch::Tensor all_probs;
-    torch::Tensor beam_index;
-    torch::Tensor success;
+    torch::Tensor                         token_ids;
+    torch::Tensor                         cum_log_probs;
+    torch::Tensor                         all_probs;
+    torch::Tensor                         beam_index;
+    torch::Tensor                         success;
+    std::vector<std::optional<ErrorInfo>> processor_errors;
+    // The draft distribution is a one-hot at token_ids and need not be
+    // materialized as [batch, speculative_steps, vocab].
+    bool                                  token_ids_are_point_mass = false;
 };
 
 struct MergedOutput {

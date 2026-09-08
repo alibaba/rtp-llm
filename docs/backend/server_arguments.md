@@ -6,6 +6,7 @@ This page lists server arguments used to configure the behavior and performance 
 
 | Arguments | Description | Defaults |
 |-----------|-------------|----------|
+| `--worker_info_port_num` | Stride between port **bases** for each `rank_id`: `base = start_port + rank_id * worker_info_port_num`. Offsets under each base include RPC, HTTP, DashSc gRPC (`base + 8`), etc. **Breaking change:** default was **8**, now **9**. Services with DashSc gRPC enabled require this value to be at least `9`; multi-rank deployments that relied on the old stride must re-check ports. See [breaking-changes.md](../release/breaking-changes.md). | 9 |
 | `--tp-size` | Specifies the tensor parallelism degree. | None |
 | `--ep-size` | Defines the number of model instances for expert parallelism. | None |
 | `--dp-size` | Sets the number of replicas or group size for data parallelism. | None |
@@ -25,16 +26,26 @@ This page lists server arguments used to configure the behavior and performance 
 
 | Arguments | Description | Defaults |
 |-----------|-------------|----------|
-| `--enable-fmha` | Enables Fused Multi-Head Attention (FMHA) feature. | True |
-| `--enable-trt-fmha` | Enables TensorRT optimized FMHA feature. | True |
-| `--enable-paged-trt-fmha` | Enables Paged TensorRT FMHA. | True |
-| `--enable-open-source-fmha` | Enables open-source FMHA implementation. | True |
-| `--enable-paged-open-source-fmha` | Enables Paged open-source FMHA implementation. | True |
-| `--enable-trtv1-fmha` | Enables TRTv1-style FMHA. | True |
-| `--fmha-perf-instrument` | Enables NVTX performance profiling for FMHA. | False |
-| `--fmha-show-params` | Displays FMHA parameter information. | False |
-| `--disable-flash-infer` | Disables FlashInfer Attention mechanism. | False |
-| `--enable-xqa` | Enables XQA feature (requires SM90+ GPU). | True |
+| `--enable_fmha` | Enables Fused Multi-Head Attention (FMHA) feature. | True |
+| `--enable_flashinfer_trtllm_gen` | Enables FlashInfer TRT-LLM Gen attention on SM100. | True |
+| `--enable_flashinfer_trt_fmha_v2` | Enables FlashInfer TRT-LLM FMHA v2 contiguous prefill. | True |
+| `--enable_paged_flashinfer_trt_fmha_v2` | Enables FlashInfer TRT-LLM FMHA v2 paged prefill. | True |
+| `--enable_open_source_fmha` | Enables open-source FMHA implementation. | True |
+| `--enable_paged_open_source_fmha` | Enables Paged open-source FMHA implementation. | True |
+| `--disable_flashinfer_native` | Disables FlashInfer native attention backends. | False |
+| `--disable_flashinfer_hybrid_prefill` | Disables FlashInfer native Hybrid Prefill implementation. | True |
+| `--enable_xqa` | Enables XQA feature (requires SM90+ GPU). | True |
+
+### Removed FMHA options
+
+The following legacy options and environment variables were removed and must no longer be used:
+
+| Removed CLI option | Removed environment variable | Replacement |
+|--------------------|------------------------------|-------------|
+| `--enable_trt_fmha` | `ENABLE_TRT_FMHA` | `--enable_flashinfer_trt_fmha_v2` / `ENABLE_FLASHINFER_TRT_FMHA_V2` for contiguous prefill |
+| `--enable_paged_trt_fmha` | `ENABLE_PAGED_TRT_FMHA` | `--enable_paged_flashinfer_trt_fmha_v2` / `ENABLE_PAGED_FLASHINFER_TRT_FMHA_V2` for paged prefill |
+| `--enable_trtv1_fmha` | `ENABLE_TRTV1_FMHA` | None; select another supported attention backend |
+| `--disable_flash_infer` | `DISABLE_FLASH_INFER` | To preserve global disable behavior, set `--disable_flashinfer_native=true`, `--enable_flashinfer_trtllm_gen=false`, `--enable_flashinfer_trt_fmha_v2=false`, and `--enable_paged_flashinfer_trt_fmha_v2=false` |
 
 ## KV Cache Configuration
 
@@ -187,4 +198,7 @@ This page lists server arguments used to configure the behavior and performance 
 
 | Arguments | Description | Defaults |
 |-----------|-------------|----------|
-| `--load_method` | Specify the weight loading method.<br>Options: auto, fastsafetensors, scratch | auto |
+| `--load_method` | Specify the weight loading method.<br>Options: auto, fastsafetensors, scratch (`LOAD_METHOD`) | auto |
+| `--force_cpu_load_weights` | Load weights on CPU to reduce device memory usage (`FORCE_CPU_LOAD_WEIGHTS`) | False |
+| `--loader_recycle_handles` | ROCm + safetensors only: close consumed main-model shard handles to release mmap memory. Requires layer-numbered tensors and copies safetensors data out before closing; no effect on fastsafetensors, ViT, EPLB, or .bin weights. (`LOADER_RECYCLE_HANDLES`) | True |
+| `--moe_pure_tp_preshard` | Disabled by default. Set true to pre-shard supported Qwen3-Next / Qwen3.5 MoE and offline FP8 weights under pure TP (`tp>1, dp=1, ep=1`) before device copy. Unsupported sources or layouts warn and use legacy full reads. (`MOE_PURE_TP_PRESHARD`) | False |

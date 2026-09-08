@@ -101,16 +101,24 @@ class MoeConfigResolver:
 
     @staticmethod
     def is_tp_equal_ep(config: MoEConfigAdapter) -> bool:
-        """Check if TP size equals EP size
+        """Check if attention TP size equals EP size.
 
-        Args:
-            config: MOE configuration adapter
-
-        Returns:
-            Whether TP size equals EP size
+        Uses MoEConfigAdapter.tp_size, which reflects the attention/MoE-input
+        view (= get_attn_tp_size(), == 1 when CP is enabled). In CP mode this
+        returns False even if physical TP equals EP — use is_cp_equal_ep for
+        the physical-topology check.
         """
-        # in cp mode, tp_size is set to 1
         return config.tp_size == config.ep_size
+
+    @staticmethod
+    def is_cp_equal_ep(config: MoEConfigAdapter) -> bool:
+        """Check if physical TP (= CP size when CP is enabled) equals EP size.
+
+        Reads raw parallelism_config.tp_size, bypassing the adapter's tp_size
+        which is squashed to 1 in CP mode. Used by router selectors that need
+        to know the underlying TP topology (e.g. pure_cp_router).
+        """
+        return config.parallelism_config.tp_size == config.ep_size
 
     @staticmethod
     def is_pure_tp_mode(config: MoEConfigAdapter) -> bool:

@@ -115,7 +115,6 @@ class DynamicWorkerManagerTest {
         WorkerStatus ws = new WorkerStatus();
         ws.setAlive(true);
         ws.setAvailableKvCacheTokens(new AtomicLong(100));
-        ws.setUsedKvCacheTokens(new AtomicLong(0));
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().put("127.0.0.1:8080", ws);
 
         lenient().when(resourceMeasureFactory.getMeasure(any())).thenReturn(resourceMeasure);

@@ -1,0 +1,10 @@
+{
+  "kernel_name": "chunk_kda_fwd_kernel_intra_sub_chunk",
+  "triton_version": "3.4.0",
+  "default_config": {
+    "kwargs": {},
+    "num_warps": 4,
+    "num_ctas": 1,
+    "num_stages": 3
+  }
+}

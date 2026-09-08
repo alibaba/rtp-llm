@@ -74,7 +74,7 @@ download() {
     git update-index --assume-unchanged "$target" 2>/dev/null || true
 }
 
-# ---- Manifest: 45 entries ------------------------------------------------
+# ---- Manifest: 37 entries ------------------------------------------------
 # Each line: download <local-path> <sha256> & pids+=($!)
 pids=()
 
@@ -116,14 +116,6 @@ download "rtp_llm/test/smoke/data/model/bert/sparse_roberta_expect_0.pt" "9d1d56
 download "rtp_llm/test/smoke/data/model/bert/sparse_roberta_expect_1.pt" "8fe7d940180cd0e993f04a11d292d0fb9322fa3dbd926a2d26e06673248153a9" & pids+=($!)
 download "rtp_llm/test/smoke/data/model/bert/sparse_roberta_expect_2.pt" "e05412706cba0fa8b0e147fa663541e6668aeb6796e2fdb226fca2b3e25c43b4" & pids+=($!)
 download "rtp_llm/test/smoke/data/model/bert/sparse_roberta_expect_3.pt" "e0bb7cf792941c6b4e98d6a0706d8da24200d1acc0f2e6da6fe3d7af9af09d10" & pids+=($!)
-download "rtp_llm/test/smoke/data/model/deepseek_v2/expect_3090.pt" "d1a0c913d1280c06f991247ba27a7a75c124c70e42fe114453ab9e8f9c68e091" & pids+=($!)
-download "rtp_llm/test/smoke/data/model/deepseek_v2/expect_int8_3090.pt" "c87e6c72cff97398a4e5c6926350edc1daee35c515de7cb62fc726a2beafc593" & pids+=($!)
-download "rtp_llm/test/smoke/data/model/deepseek_v2/expect_int8_ppu.pt" "463aa21076c452d1cd2b1cb14b7e75b00fefeff1dd8543bd7b33a250b025be9c" & pids+=($!)
-download "rtp_llm/test/smoke/data/model/deepseek_v2/expect_ppu.pt" "f6f53507911b2175fdcbfc909c7d7aeea7fec136b877d26a7e24edfca8031953" & pids+=($!)
-download "rtp_llm/test/smoke/data/model/deepseek_v2/logits_3090.pt" "bb771f1d370f91ab0b41a2317573045ff7d359a19f00cf5ae1a0c96acb5309bc" & pids+=($!)
-download "rtp_llm/test/smoke/data/model/deepseek_v2/logits_int8_3090.pt" "6add21cb7aa1f9b142c3526d7c19beeb889c871317a8effa1e0b4dd34aa8c329" & pids+=($!)
-download "rtp_llm/test/smoke/data/model/deepseek_v2/logits_int8_ppu.pt" "ac067643fbf674ea63f1c957b7fd4a2809951cff5221bd79e6ffa5ab98107948" & pids+=($!)
-download "rtp_llm/test/smoke/data/model/deepseek_v2/logits_ppu.pt" "ce93670d6b9395bf0f2a556abd8f8fe293fad0b2096dd146e7dfc5d7d6bf5390" & pids+=($!)
 download "rtp_llm/test/smoke/data/model/qwen25/expect_embedding.pt" "5010b0c9e225b0195ee67f128e5994bfd930ce2ae65b6cf98e5e87350d7d04a3" & pids+=($!)
 download "rtp_llm/test/smoke/data/model/qwen25/expect.pt" "5b979bd25cd417c76d5ce532e03468c589ddfa8c18cf4a427aa7706c21c665b6" & pids+=($!)
 download "rtp_llm/test/smoke/data/model/qwen25/expect_select_tokens_logits.pt" "21d784c2066cb38855980c6c2fae0d9a63dbdb80bd3c42f9c88df3ae35dbac16" & pids+=($!)

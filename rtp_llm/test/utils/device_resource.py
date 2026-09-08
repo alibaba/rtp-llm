@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import shutil
 import signal
 import socket
 import subprocess
@@ -8,7 +9,7 @@ import sys
 import time
 import traceback
 from contextlib import ExitStack
-from typing import Any, List, Set
+from typing import Any, Dict, List, Optional, Set
 
 from filelock import FileLock, Timeout
 
@@ -81,6 +82,31 @@ def get_gpu_ids():
     return total_gpus
 
 
+get_smoke_gpu_pool = get_gpu_ids
+
+
+_nvidia_smi_path: Optional[str] = None
+_nvidia_smi_resolved = False
+
+
+def _nvidia_smi() -> Optional[str]:
+    """Path to nvidia-smi, or None on machines that do not have it.
+
+    PPU and ROCm workers have no nvidia-smi at all, so a failed query there says
+    nothing about device health -- unlike an NVIDIA box, where a failing query is
+    itself a symptom.
+    """
+    global _nvidia_smi_path, _nvidia_smi_resolved
+    if not _nvidia_smi_resolved:
+        _nvidia_smi_path = shutil.which("nvidia-smi")
+        _nvidia_smi_resolved = True
+        if _nvidia_smi_path is None:
+            logging.info(
+                "nvidia-smi not present; skipping NVIDIA zombie-context checks"
+            )
+    return _nvidia_smi_path
+
+
 class DeviceResource:
     def __init__(self, required_gpu_count: int):
         self.required_gpu_count = required_gpu_count
@@ -90,24 +116,56 @@ class DeviceResource:
                 f"required gpu count {required_gpu_count} is greater than total gpu count {len(self.total_gpus)}"
             )
         self.gpu_ids: List[int] = []
+        self.candidate_groups: Optional[List[List[int]]] = None
         self.gpu_locks = ExitStack()
         self.global_lock_file = "/tmp/rtp_llm/smoke/test/gpu_status_lock"
         self.gpu_status_root_path = "/tmp/rtp_llm/smoke/test/gpu_status"
+        # Bound the wait for a GPU group. Unbounded, a test that can never
+        # assemble its group -- e.g. required_gpu_count equal to the node's card
+        # count, where any co-tenant blocks it -- silently consumes the whole
+        # bazel test timeout (7200s in CI) and reports "timed out" with no hint
+        # that it never got a device.
+        self.acquire_timeout = int(os.environ.get("RTP_GPU_ACQUIRE_TIMEOUT", 1800))
 
-    def _get_gpu_pids(self, gpu_id: str) -> List[int]:
-        """Return PIDs of compute processes on a physical GPU via nvidia-smi."""
+    def _get_gpu_pids(self, gpu_id: str) -> Optional[List[int]]:
+        """PIDs of compute processes on a physical GPU, or None if unknowable.
+
+        None means nvidia-smi could not answer -- it errored, or timed out. That
+        must not be confused with "no processes": a wedged or degraded device is
+        precisely the case where the query fails, and reporting it as idle keeps
+        handing it to tests.
+        """
         try:
             result = subprocess.run(
-                ["nvidia-smi", "--query-compute-apps=pid",
-                 "--format=csv,noheader", f"--id={gpu_id}"],
-                capture_output=True, text=True, timeout=10,
+                [
+                    "nvidia-smi",
+                    "--query-compute-apps=pid",
+                    "--format=csv,noheader",
+                    f"--id={gpu_id}",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
             )
-            if result.returncode == 0 and result.stdout.strip():
-                return [int(p.strip()) for p in result.stdout.strip().splitlines()
-                        if p.strip()]
-        except Exception:
-            pass
-        return []
+            if result.returncode != 0:
+                logging.warning(
+                    "nvidia-smi failed for gpu %s (rc=%s): %s",
+                    gpu_id,
+                    result.returncode,
+                    (result.stderr or "").strip()[:200],
+                )
+                return None
+            return [
+                int(p.strip())
+                for p in result.stdout.strip().splitlines()
+                if p.strip()
+            ]
+        except subprocess.TimeoutExpired:
+            logging.warning("nvidia-smi timed out querying gpu %s", gpu_id)
+            return None
+        except Exception as e:
+            logging.warning("nvidia-smi query failed for gpu %s: %s", gpu_id, e)
+            return None
 
     @staticmethod
     def _pid_alive(pid: int) -> bool:
@@ -115,13 +173,24 @@ class DeviceResource:
         return os.path.exists(f"/proc/{pid}")
 
     def _has_zombie_gpu_contexts(self, gpu_id: str) -> bool:
-        """Check if a GPU has zombie CUDA contexts (dead processes still holding memory).
+        """Whether this GPU should be considered unusable.
 
-        When CUDA processes are SIGKILLed, the driver may fail to reclaim
-        GPU memory, leaving permanent zombie contexts. These GPUs are unusable
-        until a GPU reset or reboot.
+        Covers two cases: dead processes still holding memory (the driver
+        sometimes fails to reclaim after a SIGKILL, leaving contexts that survive
+        until a reset), and a device we cannot query at all -- treated as bad, so
+        a degraded GPU is skipped rather than handed out repeatedly.
+
+        "Cannot query" only means anything where nvidia-smi exists. On PPU and
+        ROCm workers it never does, and treating that as a zombie rejected all 16
+        PPUs in run 69752178, so no device could be locked and every PPU smoke
+        test failed at the acquisition bound with nothing actually held.
         """
+        if _nvidia_smi() is None:
+            return False
         pids = self._get_gpu_pids(gpu_id)
+        if pids is None:
+            logging.warning("gpu %s is not queryable; treating as unusable", gpu_id)
+            return True
         if not pids:
             return False
         return all(not self._pid_alive(p) for p in pids)
@@ -143,7 +212,12 @@ class DeviceResource:
         while time.time() < deadline:
             all_clear = True
             for gpu_id in self.gpu_ids:
-                stale = [p for p in self._get_gpu_pids(gpu_id) if p != my_pid]
+                pids = self._get_gpu_pids(gpu_id)
+                if pids is None:
+                    # Unknowable: no nvidia-smi, or it failed. Nothing to clean up
+                    # and nothing to conclude. Iterating None here used to raise.
+                    continue
+                stale = [p for p in pids if p != my_pid]
                 live_stale = [p for p in stale if self._pid_alive(p)]
 
                 if not stale:
@@ -179,33 +253,122 @@ class DeviceResource:
                 return True
             time.sleep(1)
 
-        logging.warning(f"GPU cleanup timed out after {timeout}s for GPUs {self.gpu_ids}")
+        logging.warning(
+            f"GPU cleanup timed out after {timeout}s for GPUs {self.gpu_ids}"
+        )
         return False
+
+    def _locked_gpu_ids(self) -> List[int]:
+        """Visible GPUs currently held by someone else, for diagnostics only."""
+        held = []
+        for id in self.total_gpus:
+            probe = FileLock(f"{self.gpu_status_root_path}/{id}")
+            try:
+                with probe.acquire(timeout=0):
+                    pass
+            except Timeout:
+                held.append(id)
+            except Exception:
+                pass
+        return held
 
     def _lock_gpus(self):
+        candidate_groups = self._candidate_gpu_groups()
         with ExitStack() as stack:
-            gpu_ids = []
-            for id in self.total_gpus:
-                if self._has_zombie_gpu_contexts(str(id)):
-                    logging.info(f"skip GPU {id}: zombie CUDA contexts detected")
-                    continue
-                lock_device = FileLock(f"{self.gpu_status_root_path}/{id}")
-                try:
-                    stack.enter_context(lock_device.acquire(timeout=1))
-                except Timeout as _:
-                    logging.info(f"lock device {id} failed")
-                    continue
-                gpu_ids.append(str(id))
-                logging.info(f"{get_ip()} lock device {id} done")
-                if len(gpu_ids) >= self.required_gpu_count:
-                    logging.info(f"use gpus:[{gpu_ids}]")
-                    self.gpu_locks = stack.pop_all()
-                    self.gpu_ids = gpu_ids
-                    return True
+            for group in candidate_groups:
+                gpu_ids = []
+                with ExitStack() as group_stack:
+                    for id in group:
+                        lock_device = FileLock(f"{self.gpu_status_root_path}/{id}")
+                        try:
+                            group_stack.enter_context(lock_device.acquire(timeout=0))
+                        except Timeout as _:
+                            logging.info(f"lock device {id} failed")
+                            break
+                        if self._has_zombie_gpu_contexts(str(id)):
+                            logging.info(f"skip GPU {id}: zombie CUDA contexts detected")
+                            break
+                        gpu_ids.append(str(id))
+                        logging.info(f"{get_ip()} lock device {id} done")
+                    if len(gpu_ids) == self.required_gpu_count:
+                        logging.info(f"use gpus:[{gpu_ids}]")
+                        stack.enter_context(group_stack.pop_all())
+                        self.gpu_locks = stack.pop_all()
+                        self.gpu_ids = gpu_ids
+                        return True
         return False
 
+    def _candidate_gpu_groups(self) -> List[List[int]]:
+        if self.candidate_groups is not None:
+            return self.candidate_groups
+        if self.required_gpu_count <= 1:
+            self.candidate_groups = [[id] for id in self.total_gpus]
+            return self.candidate_groups
+
+        numa_groups = self._get_topology_numa_groups()
+        candidates: List[List[int]] = []
+        seen = set()
+        total_gpu_set = set(self.total_gpus)
+        for group in numa_groups:
+            visible_group = [id for id in group if id in total_gpu_set]
+            for start in range(0, len(visible_group) - self.required_gpu_count + 1):
+                candidate = visible_group[start : start + self.required_gpu_count]
+                key = tuple(candidate)
+                if key not in seen:
+                    seen.add(key)
+                    candidates.append(candidate)
+
+        # NUMA grouping is only a preference: fall back to every window over the
+        # visible GPUs so a busy NUMA node can never starve the whole request.
+        for start in range(0, len(self.total_gpus) - self.required_gpu_count + 1):
+            candidate = self.total_gpus[start : start + self.required_gpu_count]
+            key = tuple(candidate)
+            if key not in seen:
+                seen.add(key)
+                candidates.append(candidate)
+        if candidates:
+            logging.info(f"candidate gpu groups: {candidates}")
+        self.candidate_groups = candidates
+        return candidates
+
+    def _get_topology_numa_groups(self) -> List[List[int]]:
+        try:
+            result = subprocess.run(
+                ["nvidia-smi", "topo", "-m"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if result.returncode != 0:
+                return []
+            numa_column = -1
+            groups: Dict[str, List[int]] = {}
+            for raw_line in result.stdout.splitlines():
+                columns = [column.strip() for column in raw_line.split("\t")]
+                if numa_column < 0:
+                    if "NUMA Affinity" in columns:
+                        numa_column = columns.index("NUMA Affinity")
+                    continue
+                name = columns[0]
+                if not name.startswith("GPU") or not name[3:].isdigit():
+                    continue
+                if numa_column >= len(columns):
+                    continue
+                numa_id = columns[numa_column]
+                if not numa_id.isdigit():
+                    continue
+                groups.setdefault(numa_id, []).append(int(name[3:]))
+            return [sorted(group) for _, group in sorted(groups.items())]
+        except Exception:
+            return []
+
     def __enter__(self):
-        logging.info(f"waiting for gpu count:[{self.required_gpu_count}]")
+        logging.info(
+            f"waiting for gpu count:[{self.required_gpu_count}] "
+            f"of {len(self.total_gpus)} visible, timeout={self.acquire_timeout}s"
+        )
+        deadline = time.time() + self.acquire_timeout
+        next_report = time.time() + 60
         while True:
             with FileLock(self.global_lock_file):
                 try:
@@ -214,11 +377,30 @@ class DeviceResource:
                         if gpus_clean:
                             break
                         # Zombie contexts found — release these GPUs and retry
-                        logging.warning(f"GPUs {self.gpu_ids} have zombie contexts, retrying")
+                        logging.warning(
+                            f"GPUs {self.gpu_ids} have zombie contexts, retrying"
+                        )
                         self.gpu_ids = []
                         self.gpu_locks.close()
                 except Exception as e:
                     logging.warn(f"{traceback.format_exc()}")
+            now = time.time()
+            if now >= deadline:
+                raise TimeoutError(
+                    f"could not acquire {self.required_gpu_count} of "
+                    f"{len(self.total_gpus)} visible GPUs within "
+                    f"{self.acquire_timeout}s; currently held: "
+                    f"{sorted(self._locked_gpu_ids())}. Waiting longer would just "
+                    f"burn the bazel test timeout and report a timeout with no "
+                    f"cause. Set RTP_GPU_ACQUIRE_TIMEOUT to change the budget."
+                )
+            if now >= next_report:
+                logging.info(
+                    f"still waiting for {self.required_gpu_count} GPUs after "
+                    f"{int(now - (deadline - self.acquire_timeout))}s; "
+                    f"held: {sorted(self._locked_gpu_ids())}"
+                )
+                next_report = now + 60
             time.sleep(1)
         return self
 

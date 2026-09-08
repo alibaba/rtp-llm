@@ -380,6 +380,10 @@ __device__ void topk_with_k2(T*                               output,
 
     if (num_experts_per_group > WARP_SIZE) {
         for (int i = lane_id; i < num_experts_per_group; i += WARP_SIZE) {
+            // Ignore invalid inputs so they cannot poison the group score reduction.
+            if (!isfinite(cuda_cast<float, T>(input[i]))) {
+                continue;
+            }
             T value = input[i];
             if (value > largest) {
                 second_largest = largest;
@@ -390,6 +394,9 @@ __device__ void topk_with_k2(T*                               output,
         }
     } else {
         for (int i = lane_id; i < num_experts_per_group; i += WARP_SIZE) {
+            if (!isfinite(cuda_cast<float, T>(input[i]))) {
+                continue;
+            }
             largest = input[i];
         }
     }
@@ -544,11 +551,17 @@ __global__ void group_idx_and_topk_idx_kernel(T*            scores,
 
     // Load the valid score value
     // Calculate the summation
-    float topk_sum = norm_node == 0 ? 1.0 : 1e-20;
+    float topk_sum       = norm_node == 0 ? 1.0 : 1e-20;
+    bool  has_non_finite = false;
     if (case_id < num_tokens && if_proceed_next_topk) {
         for (int i = lane_id; i < warp_topk::round_up_to_multiple_of<WARP_SIZE>(topk); i += WARP_SIZE) {
-            T value = i < topk ? scores[s_topk_idx[i]] : cuda_cast<T, float>(0.0f);  // Load the valid value of expert
+            T value = cuda_cast<T, float>(0.0f);
             if (i < topk) {
+                value = scores[s_topk_idx[i]];
+                if (!isfinite(cuda_cast<float, T>(value))) {
+                    has_non_finite = true;
+                    value          = cuda_cast<T, float>(0.0f);
+                }
                 s_topk_value[i] = value;
             }
             if (norm_node == 1) {
@@ -556,10 +569,11 @@ __global__ void group_idx_and_topk_idx_kernel(T*            scores,
             }
         }
     }
+    has_non_finite = __any_sync(FULL_WARP_MASK, has_non_finite ? 1 : 0) != 0;
     __syncthreads();
 
     if (case_id < num_tokens) {
-        if (if_proceed_next_topk) {
+        if (if_proceed_next_topk && !has_non_finite) {
             for (int i = lane_id; i < topk; i += WARP_SIZE) {
                 float value     = cuda_cast<float, T>(s_topk_value[i]) / topk_sum * routed_scaling_factor;
                 topk_indices[i] = s_topk_idx[i];
@@ -571,7 +585,7 @@ __global__ void group_idx_and_topk_idx_kernel(T*            scores,
                 topk_values[i]  = cuda_cast<T, float>(1.0f / topk);
             }
         }
-        // Note: when if_proceed_next_topk==false, choose the first 8 experts as the default result.
+        // Use the first `topk` experts as a safe result when routing cannot proceed.
         //@TODO: check if this default strategy is acceptable. Might need to leave it as nan array.
     }
 #if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))

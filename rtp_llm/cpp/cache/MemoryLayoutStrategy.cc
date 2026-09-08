@@ -3,6 +3,8 @@
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/cache/KVCacheSpec.h"
 
+#include <algorithm>
+
 namespace rtp_llm {
 
 // Initialization function
@@ -74,7 +76,8 @@ void MemoryLayoutStrategy::processKVTensor(torch::Tensor& kv_cache_tensor) {
                               torch::str(layer_kv_tensors_[layer_id].sizes()).c_str());
         }
     } else {
-        // MHA: [layer_num, block_num, kv_block_stride_elems], per layer 2D
+        // MHA and linear/SSM cache storage are exposed at physical BlockPool block granularity.
+        // Full-attention layer views are reshaped to kernel-block granularity at LayerKVCache boundaries.
         torch::Tensor reshaped_tensor = kv_cache_typed.reshape({static_cast<int64_t>(config_.layer_num),
                                                                 static_cast<int64_t>(config_.block_num),
                                                                 static_cast<int64_t>(kv_block_stride_elems)});
@@ -198,14 +201,13 @@ MemoryLayoutStrategy::convertIndexToBuffer(int layer_id, int block_id, int parti
     return createPartitionedBlockInfo(layer_id, block_id, partition_count, partition_id);
 }
 
-static inline void* getBlockPtr(const torch::Tensor& layer_tensor, int block_id) {
-    size_t block_num = layer_tensor.size(0);
-    RTP_LLM_CHECK_WITH_INFO(block_id >= 0 && static_cast<size_t>(block_id) < block_num,
-                            "Block ID %d out of range (max: %zu)",
-                            block_id,
-                            block_num);
+static inline void* getBlockPtr(const torch::Tensor& layer_tensor, int block_id, size_t block_id_multiplier = 1) {
+    size_t block_num        = layer_tensor.size(0);
+    size_t storage_block_id = static_cast<size_t>(block_id) * std::max<size_t>(1, block_id_multiplier);
+    RTP_LLM_CHECK_WITH_INFO(
+        block_id >= 0 && storage_block_id < block_num, "Block ID %d out of range (max: %zu)", block_id, block_num);
     return static_cast<char*>(layer_tensor.data_ptr())
-           + block_id * layer_tensor.stride(0) * layer_tensor.element_size();
+           + storage_block_id * layer_tensor.stride(0) * layer_tensor.element_size();
 }
 
 // Helper functions for creating block info
@@ -242,27 +244,27 @@ std::vector<BlockInfo> MemoryLayoutStrategy::createPartitionedBlockInfo(int laye
 
     const int heads = static_cast<int>(config_.local_head_num_kv);
 
-    auto kv_parts = MHAKVCacheSpec::splitKVPartitionBytes(static_cast<size_t>(config_.kv_block_stride_bytes),
-                                                          static_cast<size_t>(config_.kv_block_stride_bytes / 2),
-                                                          static_cast<size_t>(config_.kv_block_stride_bytes / 2),
-                                                          heads,
-                                                          partition_count,
-                                                          partition_id,
-                                                          "kv_cache");
+    auto kv_parts = splitKVPartitionBytes(static_cast<size_t>(config_.kv_block_stride_bytes),
+                                          static_cast<size_t>(config_.kv_block_stride_bytes / 2),
+                                          static_cast<size_t>(config_.kv_block_stride_bytes / 2),
+                                          heads,
+                                          partition_count,
+                                          partition_id,
+                                          "kv_cache");
 
     std::vector<BlockInfo> out = createPartitionedSubBlocks(layer_tensor, kv_addr, kv_parts);
 
     if (config_.hasScale()) {
         auto& layer_scale_tensor = layer_kv_scale_tensors_[layer_id];
         void* scale_addr         = getBlockPtr(layer_scale_tensor, block_id);
-        auto  sc_parts     = MHAKVCacheSpec::splitKVPartitionBytes(static_cast<size_t>(config_.kv_scale_stride_bytes),
-                                                              static_cast<size_t>(config_.kv_scale_stride_bytes / 2),
-                                                              static_cast<size_t>(config_.kv_scale_stride_bytes / 2),
-                                                              heads,
-                                                              partition_count,
-                                                              partition_id,
-                                                              "kv_cache_scale");
-        auto  scale_blocks = createPartitionedSubBlocks(layer_scale_tensor, scale_addr, sc_parts);
+        auto  sc_parts           = splitKVPartitionBytes(static_cast<size_t>(config_.kv_scale_stride_bytes),
+                                              static_cast<size_t>(config_.kv_scale_stride_bytes / 2),
+                                              static_cast<size_t>(config_.kv_scale_stride_bytes / 2),
+                                              heads,
+                                              partition_count,
+                                              partition_id,
+                                              "kv_cache_scale");
+        auto  scale_blocks       = createPartitionedSubBlocks(layer_scale_tensor, scale_addr, sc_parts);
         out.insert(out.end(), scale_blocks.begin(), scale_blocks.end());
     }
 

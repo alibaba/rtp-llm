@@ -1,19 +1,46 @@
 #include "rtp_llm/cpp/engine_base/stream/StreamCacheResource.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
+#include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/HashUtil.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
+#include "rtp_llm/cpp/cache/CacheTopology.h"
+#include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/cache/connector/AsyncContext.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnectorReadWriteContext.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorAsyncContext.h"
 #include "rtp_llm/cpp/config/RoleTypes.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
+#include "rtp_llm/cpp/model_rpc/TensorPbConvert.h"
 #include <thread>
 #include <torch/extension.h>
 
 using namespace std;
 
 namespace rtp_llm {
+
+namespace {
+
+std::shared_ptr<const CacheTopology> warmupCacheTopology() {
+    static const auto topology = []() {
+        constexpr auto kWarmupCacheTag = "__warmup__";
+        auto           spec            = std::make_shared<MHAKVCacheSpec>();
+        spec->tag                      = kWarmupCacheTag;
+
+        GroupBase group;
+        group.tag                       = kWarmupCacheTag;
+        group.spec                      = std::move(spec);
+        group.policy                    = defaultCacheGroupPolicy(CacheGroupType::FULL);
+        group.layer_ids                 = {0};
+        group.seq_size_per_block        = 1;
+        group.kernel_seq_size_per_block = 1;
+
+        return CacheTopology::create({std::move(group)}, {{0, {kWarmupCacheTag}}});
+    }();
+    return topology;
+}
+
+}  // namespace
 
 // ----------------------------- KVCacheConnectorReadWriteContextImpl -----------------------------
 
@@ -100,6 +127,11 @@ private:
 
 // Extract P2P side-channel payload from FusedAsyncReadContext and apply to GenerateStream.
 // Returns true if P2P payload was found and applied, false otherwise.
+static bool tensorPbHasPayload(const TensorPB& tensor_pb) {
+    return !tensor_pb.fp32_data().empty() || !tensor_pb.fp16_data().empty() || !tensor_pb.bf16_data().empty()
+           || !tensor_pb.int32_data().empty();
+}
+
 static bool applyP2PSideChannelToStream(const std::shared_ptr<FusedAsyncReadContext>& read_context,
                                         GenerateStream*                               stream) {
     if (!read_context || !stream) {
@@ -128,7 +160,7 @@ static bool applyP2PSideChannelToStream(const std::shared_ptr<FusedAsyncReadCont
 
     // Apply side-channel data to GenerateStream
     // 1. First token: append to stream
-    if (payload->first_token_id > 0) {
+    if (payload->first_token_id >= 0) {
         stream->setIsContextStream(false);
         stream->step();
         auto new_tokens                   = torch::zeros({(int64_t)stream->nextBatchSize(), 1}, torch::kInt32);
@@ -144,6 +176,14 @@ static bool applyP2PSideChannelToStream(const std::shared_ptr<FusedAsyncReadCont
                         .loss              = {},
                         .src_batch_indices = {},
                         .all_hidden_states = {}});
+        if (stream->nextBatchSize() == 1) {
+            const auto cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+            stream->setNormalAsyncDeviceState(GenerateStream::NormalAsyncDeviceState{
+                .epoch                 = 0,
+                .last_sample_token_gpu = new_tokens.reshape({1}).to(cuda_i32),
+                .next_seq_len_gpu      = torch::full({1}, static_cast<int64_t>(stream->seqLength()), cuda_i32),
+            });
+        }
         RTP_LLM_LOG_DEBUG("applyP2PSideChannel: appended first_token_id=%ld, stream_id=%ld",
                           payload->first_token_id,
                           stream->streamId());
@@ -164,21 +204,53 @@ static bool applyP2PSideChannelToStream(const std::shared_ptr<FusedAsyncReadCont
                           payload->memory_reuse_len);
     }
 
-    // 3. Speculative proposal info
+    // 3. Speculative proposal info. Unlike the gRPC handoff, this channel
+    // carries real reuse accounting (block 2) and initKVBlock refreshes the
+    // positions after allocation, so proposal-less streams keep them intact.
     if (!payload->propose_tokens.empty()) {
-        stream->setReuseLength(stream->seqLength() - 1);
-        stream->setSpEditRun(false);
-        stream->setMtpTokenIndex(stream->seqLength() - 1);
+        stream->initSpeculativeHandoffPositions();
         stream->setContainProposeToken(true);
         stream->setProposeToken(payload->propose_tokens);
 
-        auto sp_output_buffer    = std::make_shared<SpeculativeExecutorStreamOutput>();
-        sp_output_buffer->tokens = torch::zeros({1, (int64_t)payload->propose_tokens.size()}, torch::kInt32);
+        auto sp_output_buffer          = std::make_shared<SpeculativeExecutorStreamOutput>();
+        sp_output_buffer->propose_step = payload->propose_tokens.size() > 0 ? payload->propose_tokens.size() - 1 : 0;
+        sp_output_buffer->tokens       = torch::zeros({1, (int64_t)payload->propose_tokens.size()}, torch::kInt32);
         memcpy(sp_output_buffer->tokens.data_ptr<int>(),
                payload->propose_tokens.data(),
                payload->propose_tokens.size() * sizeof(int));
 
+        const auto cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+        if (tensorPbHasPayload(payload->propose_probs)) {
+            sp_output_buffer->all_probs = TensorPbConvert::pbToTorch(payload->propose_probs).to(torch::kCUDA);
+        }
+        if (tensorPbHasPayload(payload->propose_hidden)) {
+            sp_output_buffer->hidden_states = TensorPbConvert::pbToTorch(payload->propose_hidden).to(torch::kCUDA);
+        }
+
         stream->setSPOutputBuffer(sp_output_buffer);
+
+        if (payload->propose_tokens.size() >= 2) {
+            // Both the stream mirror and async state use the same draft-only
+            // contract: target column 0 is excluded and every draft is kept.
+            auto propose_tokens_gpu              = sp_output_buffer->draftTokens().to(cuda_i32, /*non_blocking=*/true);
+            sp_output_buffer->propose_tokens_gpu = propose_tokens_gpu;
+            auto accept_len                      = torch::ones({1}, cuda_i32);
+            auto accept_tokens  = torch::zeros({1, static_cast<int64_t>(payload->propose_tokens.size())}, cuda_i32);
+            accept_tokens[0][0] = sp_output_buffer->tokens[0][0];
+            auto next_seq_len   = torch::full({1}, static_cast<int64_t>(stream->seqLength()), cuda_i32);
+
+            stream->setMtpAsyncDeviceState(GenerateStream::MtpAsyncDeviceState{
+                .epoch                  = 0,
+                .accept_len_gpu         = std::move(accept_len),
+                .accept_tokens_gpu      = std::move(accept_tokens),
+                .next_seq_len_gpu       = std::move(next_seq_len),
+                .propose_tokens_gpu     = std::move(propose_tokens_gpu),
+                .last_hidden_states_gpu = sp_output_buffer->hidden_states,
+                .draft_all_probs_gpu    = sp_output_buffer->all_probs,
+                .last_real_seq_len      = stream->seqLength(),
+                .next_real_seq_len      = stream->seqLength(),
+            });
+        }
         RTP_LLM_LOG_DEBUG("applyP2PSideChannel: propose_tokens count=%zu", payload->propose_tokens.size());
     }
 
@@ -196,25 +268,11 @@ static bool applyP2PSideChannelToStream(const std::shared_ptr<FusedAsyncReadCont
 
 void StreamCacheResource::init(int batch_size) {
     batch_kv_cache_resource_->resetBatchSize(batch_size);
-    int                         group_nums     = 1;
-    int                         layer_all_num  = 0;
-    std::vector<int>            layer_to_group = {};
-    std::vector<CacheGroupType> group_types    = {};
-
-    size_t kernel_blocks_per_kv_block = 1;
-    if (resource_context_.cache_manager) {  // cache manager is null when warmup
-        const auto& cache_config = resource_context_.cache_manager->cacheConfig();
-        group_nums               = cache_config.groupNums();
-        layer_all_num            = static_cast<int>(cache_config.layer_all_num);
-        layer_to_group           = cache_config.layer_to_group_id;
-        group_types              = cache_config.group_types;
-        if (cache_config.kernel_seq_size_per_block > 0 && cache_config.seq_size_per_block > 0) {
-            kernel_blocks_per_kv_block = cache_config.seq_size_per_block / cache_config.kernel_seq_size_per_block;
-        }
-    }
-
-    batch_kv_cache_resource_->initGroups(
-        group_nums, layer_all_num, layer_to_group, kernel_blocks_per_kv_block, group_types);
+    // cache manager is null when warmup
+    const auto topology = resource_context_.cache_manager ?
+                              resource_context_.cache_manager->cacheConfig().topologyPtr() :
+                              warmupCacheTopology();
+    batch_kv_cache_resource_->initGroups(topology);
     resource_released_ = false;
 }
 
@@ -230,10 +288,10 @@ void StreamCacheResource::releaseResource() {
         RTP_LLM_LOG_ERROR("  stream alive (magic check):    %s",
                           stream_->isStreamAlive() ? "YES" : "NO (stream already destroyed!)");
         if (stream_->isStreamAlive()) {
-            RTP_LLM_LOG_ERROR("  stream id:                     %ld", stream_->streamId());
+            RTP_LLM_LOG_ERROR("  stream id:                     %s", stream_->streamLogTag().c_str());
             RTP_LLM_LOG_ERROR("  stream state:                  %s",
                               StreamStateToString(stream_->generate_status_->status).c_str());
-            RTP_LLM_LOG_ERROR("  stream hasError:                %d", stream_->hasError());
+            RTP_LLM_LOG_ERROR("  stream hasError:                %d", stream_->hasErrorWithoutLock());
             RTP_LLM_LOG_ERROR("  stream hasNumBeams:            %d", stream_->hasNumBeams());
         }
         RTP_LLM_LOG_ERROR("  batch_kv_cache_resource_ use_count: %ld", batch_kv_cache_resource_.use_count());
@@ -246,7 +304,7 @@ void StreamCacheResource::releaseResource() {
         abort();
     }
     // do not reuse cache from stopped beam search streams, whose states are likely corrupted
-    if (!need_release_resource_ && (!stream_->hasNumBeams() || !stream_->hasError())) {
+    if (!need_release_resource_ && (!stream_->hasNumBeams() || !stream_->hasErrorWithoutLock())) {
         return;
     }
     RTP_LLM_LOG_DEBUG("releaseResource: stream=%ld, curBlocksNum=%d, pd_kvcache_ref=%p",
@@ -261,7 +319,7 @@ void StreamCacheResource::releaseResource() {
 
 int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
     RTP_LLM_PROFILE_FUNCTION();
-    RTP_LLM_LOG_DEBUG("stream [%ld] try release [%lu] blocks", stream_->streamId(), nums);
+    RTP_LLM_LOG_DEBUG("stream [%s] try release [%lu] blocks", stream_->streamLogTag().c_str(), nums);
 
     if (fake_inited_) {
         int max_blocks_num = curBlocksNum();
@@ -278,7 +336,7 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
     RTP_LLM_CHECK(nums == total_blocks);
 
     if (total_blocks > 0) {
-        if (reuseCache() && !stream_->hasError() && stream_->getStatus() == StreamState::FINISHED) {
+        if (reuseCache() && !stream_->hasErrorWithoutLock() && stream_->getStatus() == StreamState::FINISHED) {
             RTP_LLM_LOG_DEBUG(
                 "tryReleaseKVBlock: stream=%ld, storing cache, curBlocksNum=%d", stream_->streamId(), total_blocks);
             // save cache to gpu
@@ -297,7 +355,7 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
             RTP_LLM_LOG_DEBUG("tryReleaseKVBlock: stream=%ld, NOT storing cache, reuseCache=%d, hasError=%d, status=%s",
                               stream_->streamId(),
                               reuseCache(),
-                              stream_->hasError(),
+                              stream_->hasErrorWithoutLock(),
                               StreamStateToString(stream_->getStatus()).c_str());
         }
 
@@ -315,8 +373,19 @@ int StreamCacheResource::singleBatchNeedBlocks(int seq_len, int reserve_step) co
     return resource_context_.cache_manager->singleBatchNeedBlocks(batch_kv_cache_resource_, seq_len, reserve_step);
 }
 
+int StreamCacheResource::estimatePeakNeedBlocks(
+    int seq_len, int common_seq_len, int remaining_tokens, int reserve_step, int target_batch_size) const {
+    return resource_context_.cache_manager->estimatePeakNeedBlocks(batch_kv_cache_resource_,
+                                                                   seq_len,
+                                                                   common_seq_len,
+                                                                   remaining_tokens,
+                                                                   reserve_step,
+                                                                   reuseCache(),
+                                                                   target_batch_size);
+}
+
 // TODO(xinfei.sxf) 保证这个函数的原子性
-absl::Status StreamCacheResource::initKVBlock(size_t reserve_step) {
+absl::Status StreamCacheResource::initKVBlock() {
     RTP_LLM_PROFILE_FUNCTION();
     // Decode side: first malloc should NOT use device cache, regardless of runtime config.
     // Follow-up allocations (incrKVBlock) will respect reuseCache() && enableDeviceCache().
@@ -330,11 +399,12 @@ absl::Status StreamCacheResource::initKVBlock(size_t reserve_step) {
     malloc_info.request_id              = stream_->streamId();
     malloc_info.verbose                 = malloc_failed_times_ >= 10 ? malloc_failed_times_ % 100 == 0 : true;
 
-    const bool is_hybrid       = resource_context_.cache_manager->cacheConfig().groupNums() > 1;
+    const bool disable_first_malloc_reuse =
+        resource_context_.cache_manager->cacheConfig().disable_decode_first_malloc_device_reuse;
     const bool is_decode_role  = (resource_context_.role_type == RoleType::DECODE);
     const bool is_first_malloc = (batch_kv_cache_resource_->curBlocksNum() == 0);
 
-    if (is_hybrid && is_decode_role && is_first_malloc) {
+    if (disable_first_malloc_reuse && is_decode_role && is_first_malloc) {
         malloc_info.reuse_cache         = false;
         malloc_info.enable_device_cache = false;
     } else {
@@ -343,11 +413,25 @@ absl::Status StreamCacheResource::initKVBlock(size_t reserve_step) {
     }
     malloc_info.enable_remove_skipped_blocks = false;
 
-    malloc_info.complete_token_ids->setReserveStep(reserve_step);
     auto result = resource_context_.cache_manager->malloc(malloc_info);
     if (!result.success) {
         malloc_failed_times_++;
-        return absl::InternalError("malloc failed");
+        switch (result.status) {
+            case MallocStatus::RETRYABLE_RESOURCE_EXHAUSTED:
+                return absl::UnavailableError("kv cache is temporarily unavailable");
+            case MallocStatus::PERMANENT_RESOURCE_EXHAUSTED:
+                return absl::ResourceExhaustedError("request exceeds usable kv cache capacity");
+            case MallocStatus::INTERNAL_ERROR:
+                return absl::InternalError("malloc failed");
+            case MallocStatus::NONE:
+                RTP_LLM_LOG_ERROR("malloc returned failure without an error status, request_id=%ld",
+                                  malloc_info.request_id);
+                return absl::InternalError("malloc failed without an error status");
+        }
+        RTP_LLM_LOG_ERROR("malloc returned failure with unknown status=%d, request_id=%ld",
+                          static_cast<int>(result.status),
+                          malloc_info.request_id);
+        return absl::InternalError("malloc failed with unknown status");
     }
 
     if (result.reuse_len > 0) {
@@ -359,7 +443,7 @@ absl::Status StreamCacheResource::initKVBlock(size_t reserve_step) {
     return absl::OkStatus();
 }
 
-absl::Status StreamCacheResource::incrKVBlock(size_t reserve_step) {
+absl::Status StreamCacheResource::incrKVBlock(int seq_len_override) {
     RTP_LLM_PROFILE_FUNCTION();
     // TODO(xinfei.sxf) add reserver_blocks
     if (fake_inited_) {
@@ -367,15 +451,15 @@ absl::Status StreamCacheResource::incrKVBlock(size_t reserve_step) {
     }
 
     MallocInfo malloc_info;
-    malloc_info.batch_kv_cache_resource = batch_kv_cache_resource_;
-    malloc_info.complete_token_ids      = stream_->completeTokenIdsPtr();
-    malloc_info.request_id              = stream_->streamId();
-    malloc_info.verbose                 = malloc_failed_times_ >= 10 ? malloc_failed_times_ % 100 == 0 : true;
-    malloc_info.reuse_cache             = reuseCache();
-    malloc_info.enable_device_cache     = reuseCache() && enableDeviceCache();
-    malloc_info.enable_remove_skipped_blocks   = true;
+    malloc_info.batch_kv_cache_resource      = batch_kv_cache_resource_;
+    malloc_info.complete_token_ids           = stream_->completeTokenIdsPtr();
+    malloc_info.request_id                   = stream_->streamId();
+    malloc_info.verbose                      = malloc_failed_times_ >= 10 ? malloc_failed_times_ % 100 == 0 : true;
+    malloc_info.reuse_cache                  = reuseCache();
+    malloc_info.enable_device_cache          = reuseCache() && enableDeviceCache();
+    malloc_info.enable_remove_skipped_blocks = true;
+    malloc_info.incr_seq_len_override        = seq_len_override;
 
-    malloc_info.complete_token_ids->setReserveStep(reserve_step);
     auto result = resource_context_.cache_manager->malloc(malloc_info);
     if (!result.success) {
         malloc_failed_times_++;
@@ -492,6 +576,11 @@ int StreamCacheResource::curBlocksNum() const {
     return batch_kv_cache_resource_->curBlocksNum();
 }
 
+bool StreamCacheResource::isContextStream() const {
+    RTP_LLM_CHECK_WITH_INFO(stream_ != nullptr, "StreamCacheResource::isContextStream called with null stream");
+    return stream_->isContextStream();
+}
+
 const BatchKVCacheResource& StreamCacheResource::kvCache() const {
     batch_kv_cache_resource_->check();
     return *batch_kv_cache_resource_;
@@ -522,22 +611,10 @@ const CacheKeysType& StreamCacheResource::cacheKeys(int32_t batch_id) const {
 void StreamCacheResource::fakeInitKVBlock(size_t reserved_blocks) {
     fake_inited_ = true;
     batch_kv_cache_resource_->resetBatchSize(stream_->maxBatchSize());
-    int                         group_nums                 = 1;
-    int                         layer_all_num              = 0;
-    size_t                      kernel_blocks_per_kv_block = 1;
-    std::vector<int>            layer_to_group             = {};
-    std::vector<CacheGroupType> group_types                = {};
-
-    if (resource_context_.cache_manager) {
-        const auto& cache_config   = resource_context_.cache_manager->cacheConfig();
-        group_nums                 = cache_config.groupNums();
-        layer_all_num              = static_cast<int>(cache_config.layer_all_num);
-        layer_to_group             = cache_config.layer_to_group_id;
-        group_types                = cache_config.group_types;
-        kernel_blocks_per_kv_block = cache_config.kernelBlocksPerKvBlock();
-    }
-    batch_kv_cache_resource_->initGroups(
-        group_nums, layer_all_num, layer_to_group, kernel_blocks_per_kv_block, group_types);
+    const auto topology = resource_context_.cache_manager ?
+                              resource_context_.cache_manager->cacheConfig().topologyPtr() :
+                              warmupCacheTopology();
+    batch_kv_cache_resource_->initGroups(topology);
 
     reserved_blocks = std::max(1ul, reserved_blocks);
     batch_kv_cache_resource_->resizeBlocks(reserved_blocks, 0);
@@ -548,6 +625,8 @@ int StreamCacheResource::mallocFailedTimes() const {
 }
 
 bool StreamCacheResource::reuseCache() const {
+    // AND logic: global REUSE_CACHE=1 AND per-request reuse_cache both must be true.
+    // Per-request field flows frontend → FlexLB → engine via protobuf.
     return resource_context_.reuse_cache && stream_->reuseCache();
 }
 
@@ -605,26 +684,39 @@ void StreamCacheResource::waitLoadCacheDone(const std::shared_ptr<AsyncContext>&
     load_context->waitDone();
     if (!(load_context->success())) {
         auto error = load_context->errorInfo();
-        RTP_LLM_LOG_WARNING(
-            "load cache done but not success, stream: [%ld], error: %s", stream_->streamId(), error.ToString().c_str());
+        RTP_LLM_LOG_WARNING("load cache done but not success, stream: [%s], error: %s",
+                            stream_->streamLogTag().c_str(),
+                            error.ToString().c_str());
         if (error.hasError()) {
-            stream_->reportError(error.code(), error.ToString());
+            // loadCacheDone() is called from moveToNext(), which already holds the stream mutex.
+            stream_->reportErrorWithoutLock(error.code(), error.ToString());
         }
         return;
     }
     auto read_context = std::dynamic_pointer_cast<FusedAsyncReadContext>(load_context);
     if (!read_context) {
-        RTP_LLM_LOG_WARNING("load cache success but cast context failed, stream: [%ld]", stream_->streamId());
+        RTP_LLM_LOG_WARNING("load cache success but cast context failed, stream: [%s]",
+                            stream_->streamLogTag().c_str());
         return;
     }
     updateReuseLengthsFromContext(read_context);
 }
 
 void StreamCacheResource::updateReuseLengthsFromContext(const std::shared_ptr<FusedAsyncReadContext>& read_context) {
-    const int total_reuse_len  = read_context->resource()->reuseBlockNum() * seqSizePerBlock();
-    const int memory_reuse_len = read_context->resource()->memoryReuseBlockNum() * seqSizePerBlock();
-    const int remote_reuse_len = read_context->resource()->remoteReuseBlockNum() * seqSizePerBlock();
-    const int device_reuse_len = read_context->resource()->deviceReuseBlockNum() * seqSizePerBlock();
+    const int block_tokens     = reuseBlockTokens();
+    const int total_reuse_len  = read_context->resource()->reuseBlockNum() * block_tokens;
+    const int memory_reuse_len = read_context->resource()->memoryReuseBlockNum() * block_tokens;
+    const int remote_reuse_len = read_context->resource()->remoteReuseBlockNum() * block_tokens;
+    const int device_reuse_len = read_context->resource()->deviceReuseBlockNum() * block_tokens;
+    RTP_LLM_LOG_DEBUG("CACHE_REUSE_BLOCK_CONVERSION stream_id=%ld block_tokens=%d total_blocks=%zu device_blocks=%zu "
+                      "memory_blocks=%zu remote_blocks=%zu total_tokens=%d",
+                      stream_->streamId(),
+                      block_tokens,
+                      read_context->resource()->reuseBlockNum(),
+                      read_context->resource()->deviceReuseBlockNum(),
+                      read_context->resource()->memoryReuseBlockNum(),
+                      read_context->resource()->remoteReuseBlockNum(),
+                      total_reuse_len);
     if (total_reuse_len > 0) {
         stream_->setInitialReuseLength(total_reuse_len);
         stream_->setReuseLength(total_reuse_len);
@@ -671,8 +763,8 @@ void StreamCacheResource::evictDeviceCacheToMemory() {
     auto       evicted_resource = resource_context_.cache_manager->popBlocksFromCache(need_blocks);
     if (!evicted_resource || !evicted_resource->hasCacheKeys()) {
         RTP_LLM_LOG_INFO(
-            "tiered memory cache skip eviction, stream[%ld], not_in_use_blocks=%zu, min_free_blocks=%ld, need_blocks=%zu",
-            stream_->streamId(),
+            "tiered memory cache skip eviction, stream[%s], not_in_use_blocks=%zu, min_free_blocks=%ld, need_blocks=%zu",
+            stream_->streamLogTag().c_str(),
             not_in_use_blocks,
             min_free_blocks,
             need_blocks);
@@ -680,8 +772,8 @@ void StreamCacheResource::evictDeviceCacheToMemory() {
     }
 
     RTP_LLM_LOG_INFO(
-        "tiered memory cache evict, stream[%ld], not_in_use_blocks=%zu, min_free_blocks=%ld, need_blocks=%zu, evict_keys=%zu",
-        stream_->streamId(),
+        "tiered memory cache evict, stream[%s], not_in_use_blocks=%zu, min_free_blocks=%ld, need_blocks=%zu, evict_keys=%zu",
+        stream_->streamLogTag().c_str(),
         not_in_use_blocks,
         min_free_blocks,
         need_blocks,
@@ -705,7 +797,7 @@ void StreamCacheResource::swapLinearBlocks(int32_t batch_id, size_t rhs, size_t 
         return;
     }
 
-    auto type_list = resource_context_.cache_manager->cacheConfig().group_types;
+    auto type_list = resource_context_.cache_manager->cacheConfig().groupTypesSnapshot();
 
     for (size_t i = 0; i < type_list.size(); i++) {
         if (type_list[i] == CacheGroupType::LINEAR) {

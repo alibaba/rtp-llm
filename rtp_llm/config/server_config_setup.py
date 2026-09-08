@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import socket
+import subprocess
 from typing import Optional
 
 import torch
@@ -16,6 +17,8 @@ from rtp_llm.ops import (
     SpeculativeType,
 )
 from rtp_llm.utils.fuser import fetch_remote_file_to_local
+
+RUN_AFFINITY_TIMEOUT_SEC = 10
 
 
 def auto_configure_deepep(
@@ -53,9 +56,12 @@ def auto_configure_deepep(
     - PD separation + Decode node + Multi-node multi-GPU (>=9 GPUs): 1, 1, 1
     """
 
-    # in cp mode, do not use all gather, tp_size set to 1
-    tp_size = parallelism_config.get_attn_tp_size()
+    # MoE uses physical TP topology, not attention TP. get_attn_tp_size()
+    # returns 1 when CP is enabled, which would incorrectly disable
+    # use_all_gather for ep_size == tp_size configurations.
+    tp_size = parallelism_config.tp_size
     ep_size = parallelism_config.ep_size
+    dp_size = parallelism_config.dp_size
     moe_config.ll_num_max_token = ll_num_max_token
 
     # Explicit MoriEP is incompatible with use_all_gather (PURE_TP router).
@@ -70,7 +76,8 @@ def auto_configure_deepep(
     moe_config.use_all_gather = (
         moe_config.use_all_gather
         and not deep_ep_config.use_deepep_low_latency
-        and (ep_size == tp_size or ep_size == 1)
+        and (is_single_gpu or not deep_ep_config.use_deepep_moe)
+        and (is_single_gpu or is_pure_tp or explicit_pure_dp or explicit_pure_cp)
     )
     if moe_config.use_all_gather:
         moe_config.use_deepep_moe = False
@@ -306,6 +313,21 @@ def set_parallelism_config(
         parallelism_config.prefill_cp_config.comm_buffer_size = (
             py_prefill_cp_config.comm_buffer_size
         )
+        parallelism_config.prefill_cp_config.kv_cache_sharded = (
+            py_prefill_cp_config.kv_cache_sharded
+        )
+        if hasattr(py_prefill_cp_config, "prefill_cp_size") and hasattr(
+            parallelism_config.prefill_cp_config, "prefill_cp_size"
+        ):
+            parallelism_config.prefill_cp_config.prefill_cp_size = (
+                py_prefill_cp_config.prefill_cp_size
+            )
+        elif py_prefill_cp_config.kv_cache_sharded:
+            logging.warning(
+                "PREFILL_CP_SIZE is not available in this rtp_llm.ops build; "
+                "prefill_cp_kv_cache_sharded was enabled but explicit CP size "
+                "cannot be propagated."
+            )
     logging.info(
         f"set_parallelism_config: rank {world_rank}\nparallelism_config={parallelism_config.to_string()}world_rank={world_rank}\n"
     )
@@ -314,8 +336,8 @@ def set_parallelism_config(
 def _infer_model_type(ckpt_path: str) -> Optional[str]:
     """Infer ``model_type`` by reading config.json from a local checkpoint directory.
 
-    Importing ``rtp_llm.models`` triggers all ``register_model`` calls so that
-    the architecture / repo lookup tables are populated before we query them.
+    ModelDict owns lightweight architecture / repo mappings, so this does not
+    import every model implementation during startup.
     """
     if not ckpt_path or not os.path.isdir(ckpt_path):
         return None
@@ -323,8 +345,6 @@ def _infer_model_type(ckpt_path: str) -> Optional[str]:
     if not os.path.isfile(config_path):
         return None
     try:
-        import rtp_llm.models  # noqa: F401  — trigger model registrations
-
         with open(config_path, "r", encoding="utf-8") as f:
             config = json.load(f)
         return ModelDict.get_ft_model_type_by_config(config)
@@ -430,10 +450,11 @@ def fetch_model_files_to_local(py_env_configs: PyEnvConfigs):
     if tokenizer_path:
         model_args.tokenizer_path = fetch_remote_file_to_local(tokenizer_path)
 
-    # Fetch extra_data_path from model_args
-    if model_args.extra_data_path:
-        local_extra_data_path = fetch_remote_file_to_local(model_args.extra_data_path)
-        model_args.local_extra_data_path = local_extra_data_path
+    # Fetch extra_data_path from vit_config
+    vit_config = py_env_configs.vit_config
+    if vit_config.extra_data_path:
+        local_extra_data_path = fetch_remote_file_to_local(vit_config.extra_data_path)
+        vit_config.local_extra_data_path = local_extra_data_path
 
     # Fetch ptuning_path from model_args
     if model_args.ptuning_path:
@@ -467,9 +488,71 @@ def fetch_model_files_to_local(py_env_configs: PyEnvConfigs):
         f"Fetched model files - checkpoint_path: {model_args.ckpt_path}, "
         f"tokenizer_path: {model_args.tokenizer_path}, "
         f"ptuning_path: {model_args.ptuning_path}, "
-        f"extra_data_path: {model_args.local_extra_data_path}, "
+        f"extra_data_path: {vit_config.local_extra_data_path}, "
         f"phy2log_path: {model_args.phy2log_path}"
     )
+
+
+def load_gpu_nic_affinity() -> bool:
+    if os.environ.get("ACCL_NIC_GPU_AFFINITY") is not None:
+        return True
+
+    run_affinity_path = "/usr/local/bin/run_affinity"
+    if not os.path.exists(run_affinity_path):
+        logging.info("get gpu nic affinity failed, %s not exist", run_affinity_path)
+        return False
+
+    try:
+        subprocess.run(
+            [run_affinity_path],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=RUN_AFFINITY_TIMEOUT_SEC,
+        )
+    except subprocess.TimeoutExpired:
+        logging.warning(
+            "get gpu nic affinity timed out after %ss while running %s; continue without affinity",
+            RUN_AFFINITY_TIMEOUT_SEC,
+            run_affinity_path,
+        )
+        return False
+    except (subprocess.CalledProcessError, OSError) as e:
+        logging.warning(
+            "get gpu nic affinity failed, run %s failed, exception is %s",
+            run_affinity_path,
+            e,
+        )
+        return False
+    except Exception as e:
+        logging.warning(
+            "get gpu nic affinity failed unexpectedly while running %s: %s",
+            run_affinity_path,
+            e,
+        )
+        return False
+
+    json_path = "npu_nic_affinity.json"
+    if not os.path.exists(json_path):
+        logging.info("get gpu nic affinity failed, %s does not exist", json_path)
+        return False
+
+    try:
+        with open(json_path) as affinity_file:
+            content = affinity_file.read().strip()
+        os.environ["ACCL_NIC_GPU_AFFINITY"] = content
+        logging.info(
+            "get gpu nic affinity success, set env ACCL_NIC_GPU_AFFINITY to %s",
+            content,
+        )
+        return True
+    except Exception as e:
+        logging.info(
+            "get gpu nic affinity failed, load %s failed, exception is %s",
+            json_path,
+            e,
+        )
+        return False
 
 
 def setup_cuda_device_and_accl_env(local_rank: int) -> None:

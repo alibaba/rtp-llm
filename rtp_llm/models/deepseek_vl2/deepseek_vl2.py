@@ -2,40 +2,16 @@ import json
 import os
 from typing import Any, Dict, Optional
 
+from transformers import AutoTokenizer
+
 from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.frontend.tokenizer_factory.tokenizer_factory import TokenizerFactory
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.models.base_model import BaseModel
-from rtp_llm.models.deepseek_vl2.deepseek_vl2_vit import DeepSeekVLV2ImageEmbedding
-from rtp_llm.models.deepseek_vl2.deepseek_vl2_weight import (
-    DeepSeekVLV2VitWeight,
-    DeepSeekVLV2Weight,
-)
-from rtp_llm.models.multimodal.multimodal_mixin import MultiModalMixin
+from rtp_llm.models.deepseek_vl2.deepseek_vl2_weight import DeepSeekVLV2Weight
 
 
-class DeepSeekVLV2(BaseModel, MultiModalMixin):
-
-    def _init_multimodal(self, mm_model_config, vit_config):
-        # mm_related_params is in model_config, not mm_model_config
-        mm_related_params = self.model_config.mm_related_params
-        self.ignore_id = -100
-        self.mm_part = DeepSeekVLV2ImageEmbedding(
-            mm_related_params,
-            model_config=self.model_config,
-            ignore_id=self.ignore_id,
-        )
-        mm_related_params.vit_weights = DeepSeekVLV2VitWeight(
-            {"vision": self.mm_part.vision, "projector": self.mm_part.projector}, True
-        )
-        # must use add_special_tokens=False
-        self.image_id = self.tokenizer.tokenizer.encode(
-            "<image>", add_special_tokens=False
-        )[0]
-        mm_related_params.special_token_ids.update(
-            {"ignore_token_index": self.ignore_id, "image_token_index": self.image_id}
-        )
-        self.model_config.mm_model_config.mm_sep_tokens = [[self.image_id]]
-
+class DeepSeekVLV2(BaseModel):
     @classmethod
     def _create_config(cls, ckpt_path: str) -> ModelConfig:
         config = ModelConfig()
@@ -164,6 +140,14 @@ class DeepSeekVLV2(BaseModel, MultiModalMixin):
         config.mm_related_params.config["global_view_pos"] = top_config_json.get(
             "global_view_pos", "head"
         )
+
+        tokenizer = AutoTokenizer.from_pretrained(config.ckpt_path)
+        image_id = tokenizer.encode("<image>", add_special_tokens=False)[0]
+        config.mm_related_params.special_token_ids.update(
+            {"ignore_token_index": -100, "image_token_index": image_id}
+        )
+        config.mm_model_config.mm_sep_tokens = [[image_id]]
+        config.mm_model_config.is_multimodal = True
 
     @staticmethod
     def get_weight_cls():

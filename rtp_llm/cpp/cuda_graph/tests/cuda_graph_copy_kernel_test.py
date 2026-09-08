@@ -120,10 +120,11 @@ class CudaGraphCopyKernelTest(unittest.TestCase):
         offset = 0
         for b in range(batch_size):
             seq_len = input_lengths[b]
+            batch_start = b * max_seq_len + max_seq_len - seq_len
             # Copy entire sequence at once (vectorized)
-            h_expected[b * max_seq_len : b * max_seq_len + seq_len, :] = (
-                h_input_compact[offset : offset + seq_len, :]
-            )
+            h_expected[batch_start : batch_start + seq_len, :] = h_input_compact[
+                offset : offset + seq_len, :
+            ]
             offset += seq_len
         # Calculate cu_seq_len
         cu_seq_len = self._calculate_cu_seq_len(input_lengths)
@@ -182,7 +183,7 @@ class CudaGraphCopyKernelTest(unittest.TestCase):
         valid_actual = []
         valid_expected = []
         for b in range(batch_size):
-            batch_start = b * max_seq_len
+            batch_start = b * max_seq_len + max_seq_len - input_lengths[b]
             batch_end = batch_start + input_lengths[b]
             valid_actual.append(h_output_aligned[batch_start:batch_end])
             valid_expected.append(h_expected[batch_start:batch_end])
@@ -293,8 +294,9 @@ class CudaGraphCopyKernelTest(unittest.TestCase):
         # Fill only the valid sequence lengths for each batch (vectorized)
         for b in range(batch_size):
             seq_len = input_lengths[b]
-            h_input_aligned[b * max_seq_len : b * max_seq_len + seq_len, :] = (
-                torch.randn(seq_len, hidden_size, dtype=dtype)
+            batch_start = b * max_seq_len + max_seq_len - seq_len
+            h_input_aligned[batch_start : batch_start + seq_len, :] = torch.randn(
+                seq_len, hidden_size, dtype=dtype
             )
 
         # Calculate expected output manually using vectorized operations
@@ -304,9 +306,10 @@ class CudaGraphCopyKernelTest(unittest.TestCase):
         offset = 0
         for b in range(batch_size):
             seq_len = input_lengths[b]
+            batch_start = b * max_seq_len + max_seq_len - seq_len
             # Copy from aligned to compact (vectorized)
             h_expected[offset : offset + seq_len, :] = h_input_aligned[
-                b * max_seq_len : b * max_seq_len + seq_len, :
+                batch_start : batch_start + seq_len, :
             ]
             offset += seq_len
 

@@ -12,7 +12,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
 from rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver import (
     MoeConfigResolver,
 )
-from rtp_llm.ops import MoeConfig, ParallelismConfig
+from rtp_llm.ops import CPRotateMethod, MoeConfig, ParallelismConfig
 
 
 def create_config_adapter(
@@ -22,6 +22,7 @@ def create_config_adapter(
     quant_config=None,
     use_deepep_low_latency: bool = False,
     data_type: str = "fp16",
+    cp_enabled: bool = False,
 ) -> MoEConfigAdapter:
     """Helper function to create MoEConfigAdapter for testing"""
     model_config = ModelConfig()
@@ -42,6 +43,8 @@ def create_config_adapter(
     parallelism_config.world_rank = 0
     parallelism_config.local_rank = 0
     parallelism_config.local_world_size = 1
+    if cp_enabled:
+        parallelism_config.prefill_cp_config.method = CPRotateMethod.ALL_GATHER
 
     moe_config = MoeConfig()
     moe_config.use_deepep_low_latency = use_deepep_low_latency
@@ -125,6 +128,29 @@ class TestMoeConfigResolver(unittest.TestCase):
         """Test TP equals EP"""
         config = create_config_adapter(ep_size=4, tp_size=4)
         self.assertTrue(self.resolver.is_tp_equal_ep(config))
+
+    def test_is_tp_equal_ep_false_in_cp_mode(self):
+        """Adapter tp_size collapses to attn_tp (=1) when CP is enabled, so
+        is_tp_equal_ep returns False even though physical tp == ep. This is
+        the expected behavior — CP topologies should select via is_cp_equal_ep
+        and route to pure_cp_router instead of pure_tp_router."""
+        config = create_config_adapter(ep_size=2, tp_size=2, cp_enabled=True)
+        self.assertFalse(self.resolver.is_tp_equal_ep(config))
+
+    def test_is_cp_equal_ep_true_in_cp_mode(self):
+        """is_cp_equal_ep reads raw parallelism_config.tp_size, so it returns
+        True in CP+EP topologies regardless of the adapter's collapsed tp_size."""
+        config = create_config_adapter(ep_size=2, tp_size=2, cp_enabled=True)
+        self.assertTrue(self.resolver.is_cp_equal_ep(config))
+
+    def test_is_cp_equal_ep_true_without_cp(self):
+        """Without CP, is_cp_equal_ep behaves the same as is_tp_equal_ep."""
+        config = create_config_adapter(ep_size=4, tp_size=4)
+        self.assertTrue(self.resolver.is_cp_equal_ep(config))
+
+    def test_is_cp_equal_ep_false_when_mismatch(self):
+        config = create_config_adapter(ep_size=4, tp_size=2, cp_enabled=True)
+        self.assertFalse(self.resolver.is_cp_equal_ep(config))
 
     def test_is_pure_tp_mode_single_gpu(self):
         """Test pure TP mode with single GPU (tp=1, dp=1, ep=1)"""

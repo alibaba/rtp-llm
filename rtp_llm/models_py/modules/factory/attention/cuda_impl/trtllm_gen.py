@@ -6,8 +6,8 @@ import triton
 import triton.language as tl
 
 from rtp_llm.models_py.modules.factory.attention import common
-from rtp_llm.models_py.modules.factory.attention.cuda_impl.utils import is_sm_100
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
+from rtp_llm.models_py.utils.arch import is_blackwell, is_sm12x
 from rtp_llm.ops import AttentionConfigs, FMHAType, ParallelismConfig
 from rtp_llm.ops.compute_ops import (
     FusedRopeKVCacheDecodeOp,
@@ -331,8 +331,15 @@ class FlashInferTRTLLMPrefillOp(object):
         release_trt_workspace_buffer(self.workspace_buffer)
 
     def support(self, attention_inputs: PyAttentionInputs):
+        # TllmGenFmhaRunner cubin covers sm_90a / sm_100a only; sm_120a
+        # (Blackwell consumer, e.g. RTX 5000 Pro) has no binding and the
+        # runner throws "Unsupported architecture" (fmhaRunner.cuh:37) on
+        # forward. Fall through so dispatch picks the paged
+        # PyFlashinferPagedPrefillImpl instead.
+        if is_sm12x():
+            return False
         return (
-            is_sm_100()
+            is_blackwell()
             and attention_inputs.is_prefill
             and attention_inputs.kv_cache_kernel_block_id_device is not None
         )
@@ -370,7 +377,7 @@ class FlashInferTRTLLMPrefillOp(object):
             seq_lens=sequence_lengths,
             input_lens=attention_inputs.input_lengths,
             block_tables=attention_inputs.kv_cache_kernel_block_id_device,
-            cu_seqlens=attention_inputs.cu_seqlens,
+            cu_seqlens=attention_inputs.cu_seqlens_device,
             cu_kv_seqlens=cu_kv_seqlens,
         )
 
@@ -438,7 +445,14 @@ class FlashInferTRTLLMDecodeOp(object):
         release_trt_workspace_buffer(self.workspace_buffer)
 
     def support(self, attention_inputs: PyAttentionInputs):
-        if not is_sm_100():
+        if not is_blackwell():
+            return False
+        # TllmGenFmhaRunner cubin covers sm_90a / sm_100a only; sm_120a
+        # (Blackwell consumer, e.g. RTX 5000 Pro) has no binding and the
+        # runner throws "Unsupported architecture" (fmhaRunner.cuh:37) on
+        # the first decode forward. Fall through so dispatch picks the
+        # ragged PyFlashinferPaged path instead.
+        if is_sm12x():
             return False
         # Note: this max q length is used for mtp decode verification.
         decode_kernel_max_q_len = 11
@@ -588,8 +602,8 @@ class FlashInferTRTLLMPrefillImpl(FMHAImplBase):
     def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs):
         p = self._cg
         _prepare_cg_prefill_kernel[p.grid](
-            attn_inputs.input_lengths_d,
-            attn_inputs.prefix_lengths_d,
+            attn_inputs.input_lengths_device,
+            attn_inputs.prefix_lengths_device,
             p.seq_lens,
             p.cu_kv_seqlens,
             attn_inputs.kv_cache_kernel_block_id_device,
@@ -655,7 +669,7 @@ class FlashInferTRTLLMSpecDecodeImpl(FMHAImplBase):
         p = self._cg
         if not attn_inputs.is_prefill:
             _prepare_cg_decode_kernel[p.grid](
-                attn_inputs.sequence_lengths_plus_1_d,
+                attn_inputs.sequence_lengths_plus_1_device,
                 p.seq_lens,
                 attn_inputs.kv_cache_kernel_block_id_device,
                 p.kv_cache_offset,
@@ -666,8 +680,8 @@ class FlashInferTRTLLMSpecDecodeImpl(FMHAImplBase):
             )
         else:
             _prepare_cg_spec_decode_kernel[p.grid](
-                attn_inputs.prefix_lengths_d,
-                attn_inputs.input_lengths_d,
+                attn_inputs.prefix_lengths_device,
+                attn_inputs.input_lengths_device,
                 p.seq_lens,
                 attn_inputs.kv_cache_kernel_block_id_device,
                 p.kv_cache_offset,
@@ -730,7 +744,7 @@ class FlashInferTRTLLMDecodeImpl(FMHAImplBase):
     def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs):
         p = self._cg
         _prepare_cg_decode_kernel[p.grid](
-            attn_inputs.sequence_lengths_plus_1_d,
+            attn_inputs.sequence_lengths_plus_1_device,
             p.seq_lens,
             attn_inputs.kv_cache_kernel_block_id_device,
             p.kv_cache_offset,

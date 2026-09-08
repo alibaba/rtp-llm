@@ -17,6 +17,7 @@ from rtp_llm.model_loader.model_weight_info import (
 )
 from rtp_llm.model_loader.weight_module import AtomicWeight, WeightModule
 from rtp_llm.models.qwen import QWen
+from rtp_llm.ops import KVCacheSpecDesc, KVCacheSpecType
 from rtp_llm.utils.model_weight import (
     CkptWeightInfo,
     W,
@@ -60,7 +61,7 @@ class QWenV2Weight(ModelDeployWeightInfo):
             self.weight_style = WeightStyle.TRT_ENGINE
         if self._exist(weight_keys, "layers.0.input_layernorm.weight"):
             self.model_prefix = ""
-        self.transformer_prefix = self.prefix + self.model_prefix
+        self.transformer_prefix = self.model_prefix + self.prefix
         logging.info(f"weight_style: {self.weight_style}")
 
     def _get_weight_info(self):
@@ -311,7 +312,7 @@ class QWenV2Weight(ModelDeployWeightInfo):
                 ),
                 AtomicWeight(
                     W.lm_head,
-                    [CkptWeightInfo(self.prefix + "lm_head.weight", identity)],
+                    [CkptWeightInfo("lm_head.weight", identity)],
                     identity,
                 ),
                 AtomicWeight(
@@ -349,7 +350,7 @@ class QWenV2(QWen):
         # <|im_start|> and <|im_end|>
         config.special_tokens.stop_words_id_list = [[151645], [151644]]
 
-        cls._from_hf(config, ckpt_path)
+        QWenV2._from_hf(config, ckpt_path)
         assert (
             config.attn_config.head_num > 0
             and config.attn_config.kv_head_num > 0
@@ -411,8 +412,15 @@ class QWenV2Embedding(QWenV2):
 
 
 class QwenV2MTPWeight(QWenV2Weight):
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self.vocab_prune = False
+
+    def _process_meta(self, meta_dicts: Any, weight_keys: List[str]):
+        super()._process_meta(meta_dicts, weight_keys)
+        if "model.d2t" in weight_keys:
+            self.vocab_prune = True
 
     def _get_weight_info(self):
         weights = [
@@ -427,6 +435,25 @@ class QwenV2MTPWeight(QWenV2Weight):
                 identity,
             ),
         ]
+
+        if self.vocab_prune:
+            weights.extend(
+                [
+                    AtomicWeight(
+                        W.multi_tokens_predict_d2t_map,
+                        [CkptWeightInfo(self.prefix + "model.d2t", identity)],
+                        identity,
+                        data_type=torch.int64,
+                    ),
+                    AtomicWeight(
+                        W.multi_tokens_predict_t2d_map,
+                        [CkptWeightInfo(self.prefix + "model.t2d", identity)],
+                        identity,
+                        data_type=torch.int64,
+                    ),
+                ]
+            )
+
         layer_weights: List[List[AtomicWeight]] = []
         for layer in range(self._num_layers):
             w = self._get_hf_layer_weight_info(layer)
@@ -488,6 +515,15 @@ class QwenV2MTP(QWenV2):
         config.moe_layer_index = [i for i in range(config.num_layers)]
         config.is_mtp = True
         return config
+
+    @classmethod
+    def _post_build_model_config(cls, model_config: ModelConfig) -> None:
+        desc = KVCacheSpecDesc()
+        desc.cache_type = KVCacheSpecType.MHA
+        desc.tag = "default"
+        model_config.kv_cache_spec_descs = [
+            [desc] for _ in range(model_config.num_layers)
+        ]
 
     def _create_python_model(self):
         model_config = self.model_config

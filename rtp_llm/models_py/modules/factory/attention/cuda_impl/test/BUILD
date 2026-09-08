@@ -1,5 +1,9 @@
 # Test configuration for PyFlashinferDecodeAttnOp
 
+load("@arch_config//:arch_select.bzl", "requirement")
+
+requirement(["filelock"])
+
 py_test_deps = [
     "//rtp_llm/models_py/standalone:py_standalone_testlib",
 ]
@@ -25,8 +29,6 @@ py_test (
     srcs = ["trtllm_gen_test.py"],
     deps = [
         ":atten_test_util",
-        "//rtp_llm/models_py:modules",
-        "//rtp_llm:config",
         "//rtp_llm:testlib",
     ],
     env = {"GPU_COUNT": "1"},
@@ -34,24 +36,68 @@ py_test (
     exec_properties = {'gpu':'SM100_ARM', 'gpu_count':'1'}
 )
 
-# Test for PyFlashinferDecodeAttnOp decode attention implementation
-py_test(
-    name = "test_py_flashinfer_mha_decode",
-    srcs = [
-        "test_py_flashinfer_mha_decode.py",
-        "attention_ref.py",
-        "base_attention_test.py"
-    ],
-    deps = py_test_deps + select({
-        "@//:using_cuda12_9_x86": flashinfer_deps,
-        "@//:cuda_pre_12_9": flashinfer_deps,
-        "//conditions:default": []
-    }),
-    tags = ["H20"],
-    exec_properties = {
-        'gpu': 'H20',
+flashinfer_test_deps = py_test_deps + select({
+    "@//:using_cuda12_9_x86": flashinfer_deps,
+    "@//:cuda_pre_12_9": flashinfer_deps,
+    "//conditions:default": [],
+})
+
+flashinfer_platforms = [
+    {"sm": "sm90", "gpu": "H20"},
+    {"sm": "sm8x", "gpu": "L20"},
+    {"sm": "sm12x", "gpu": "RTX_5000_PRO"},
+]
+
+flashinfer_attention_tests = [
+    {
+        "name": "test_py_flashinfer_mha_decode",
+        "main": "test_py_flashinfer_mha_decode.py",
+        "extra_srcs": [
+            "attention_ref.py",
+            "base_attention_test.py",
+        ],
     },
-)
+    {
+        "name": "test_py_flashinfer_ragged_mha_prefill",
+        "main": "test_flashinfer_prefill/test_py_flashinfer_ragged_mha_prefill.py",
+        "extra_srcs": [
+            "attention_ref.py",
+            "base_attention_test.py",
+        ],
+    },
+    {
+        "name": "test_py_flashinfer_paged_mha_prefill",
+        "main": "test_flashinfer_prefill/test_py_flashinfer_paged_mha_prefill.py",
+        "extra_srcs": [
+            "attention_ref.py",
+            "base_attention_test.py",
+        ],
+    },
+    {
+        "name": "test_py_flashinfer_hybrid_mha_prefill",
+        "main": "test_flashinfer_prefill/test_py_flashinfer_hybrid_mha_prefill.py",
+        "extra_srcs": [
+            "base_attention_test.py",
+        ],
+    },
+]
+
+# Generates one py_test per (test, platform): <test name>_<sm>,
+# e.g. test_py_flashinfer_hybrid_mha_prefill_sm90.
+[
+    py_test(
+        name = test["name"] + "_" + platform["sm"],
+        main = test["main"],
+        srcs = [test["main"]] + test["extra_srcs"],
+        deps = flashinfer_test_deps,
+        tags = [platform["gpu"]],
+        exec_properties = {
+            "gpu": platform["gpu"],
+        },
+    )
+    for test in flashinfer_attention_tests
+    for platform in flashinfer_platforms
+]
 
 py_test(
     name = "test_xqa",
@@ -67,52 +113,92 @@ py_test(
     },
 )
 
-# TRT attention tests - organized in trt_tests/ subdirectory
+# FlashInfer TRT-LLM FMHA v2 tests
 py_test(
-    name = "test_trt_nonpadded",
+    name = "test_trtllm_fmha_v2_paged_prefill_sm90",
+    main = "test_trtllm_fmha_v2_paged_prefill.py",
     srcs = [
-        "trt_tests/test_trt_nonpadded.py",
+        "test_trtllm_fmha_v2_paged_prefill.py",
         "trt_tests/test_trt_base.py",
         "trt_tests/trt_test_utils.py",
         "attention_ref.py",
-        "base_attention_test.py"
+        "base_attention_test.py",
     ],
-    deps = py_test_deps,
-    tags = ["H20"],
+    deps = py_test_deps + [
+        "//rtp_llm/test/utils:test_util",
+    ] + select({
+        "@//:using_cuda12_9_x86": flashinfer_deps,
+        "//conditions:default": []
+    }),
+    tags = ["H20", "cuda12_9"],
     exec_properties = {
         'gpu': 'H20',
     },
 )
 
 py_test(
-    name = "test_trt_padded",
+    name = "test_trtllm_fmha_v2_paged_prefill_sm12x",
+    main = "test_trtllm_fmha_v2_paged_prefill.py",
     srcs = [
-        "trt_tests/test_trt_padded.py",
+        "test_trtllm_fmha_v2_paged_prefill.py",
         "trt_tests/test_trt_base.py",
         "trt_tests/trt_test_utils.py",
         "attention_ref.py",
-        "base_attention_test.py"
+        "base_attention_test.py",
     ],
-    deps = py_test_deps,
-    tags = ["H20"],
+    deps = py_test_deps + [
+        "//rtp_llm/test/utils:test_util",
+    ] + select({
+        "@//:using_cuda12_9_x86": flashinfer_deps,
+        "//conditions:default": []
+    }),
+    tags = ["RTX_5000_PRO"],
+    exec_properties = {
+        'gpu': 'RTX_5000_PRO',
+    },
+)
+
+py_test(
+    name = "test_trtllm_fmha_v2_prefill_sm90",
+    main = "test_trtllm_fmha_v2_prefill.py",
+    srcs = [
+        "test_trtllm_fmha_v2_prefill.py",
+        "trt_tests/test_trt_base.py",
+        "trt_tests/trt_test_utils.py",
+        "attention_ref.py",
+        "base_attention_test.py",
+    ],
+    deps = py_test_deps + [
+        "//rtp_llm/test/utils:test_util",
+    ] + select({
+        "@//:using_cuda12_9_x86": flashinfer_deps,
+        "//conditions:default": []
+    }),
+    tags = ["H20", "cuda12_9"],
     exec_properties = {
         'gpu': 'H20',
     },
 )
 
 py_test(
-    name = "test_trt_paged_nonpadded",
+    name = "test_trtllm_fmha_v2_prefill_sm12x",
+    main = "test_trtllm_fmha_v2_prefill.py",
     srcs = [
-        "trt_tests/test_trt_paged_nonpadded.py",
+        "test_trtllm_fmha_v2_prefill.py",
         "trt_tests/test_trt_base.py",
         "trt_tests/trt_test_utils.py",
         "attention_ref.py",
-        "base_attention_test.py"
+        "base_attention_test.py",
     ],
-    deps = py_test_deps,
-    tags = ["H20"],
+    deps = py_test_deps + [
+        "//rtp_llm/test/utils:test_util",
+    ] + select({
+        "@//:using_cuda12_9_x86": flashinfer_deps,
+        "//conditions:default": []
+    }),
+    tags = ["RTX_5000_PRO"],
     exec_properties = {
-        'gpu': 'H20',
+        'gpu': 'RTX_5000_PRO',
     },
 )
 
@@ -130,58 +216,18 @@ py_test(
     },
 )
 
-# FlashInfer Prefill Tests - organized in test_flashinfer_prefill/ subdirectory
-
-# Test for PyFlashinferPrefillAttnOp ragged prefill attention implementation
-py_test(
-    name = "test_py_flashinfer_ragged_mha_prefill",
-    srcs = [
-        "test_flashinfer_prefill/test_py_flashinfer_ragged_mha_prefill.py",
-        "attention_ref.py",
-        "base_attention_test.py"
-    ],
-    deps = py_test_deps + select({
-        "@//:using_cuda12_9_x86": flashinfer_deps,
-        "@//:cuda_pre_12_9": flashinfer_deps,
-        "//conditions:default": []
-    }),
-    tags = ["H20"],
-    exec_properties = {
-        'gpu': 'H20',
-    },
-)
-
-# Test for PyFlashinferPrefillPagedAttnOp paged prefill attention implementation
-py_test(
-    name = "test_py_flashinfer_paged_mha_prefill",
-    srcs = [
-        "test_flashinfer_prefill/test_py_flashinfer_paged_mha_prefill.py",
-        "attention_ref.py",
-        "base_attention_test.py"
-    ],
-    deps = py_test_deps + select({
-        "@//:using_cuda12_9_x86": flashinfer_deps,
-        "@//:cuda_pre_12_9": flashinfer_deps,
-        "//conditions:default": []
-    }),
-    tags = ["H20"],
-    exec_properties = {
-        'gpu': 'H20',
-    },
-)
-
 # Test for PyFlashinferPrefillPagedAttnOp CUDA graph path vs normal path
+# Must stay on H20: verified on sm86 as 23 tests / 22 pass / 1 fail
+# (test_q_cast_buffer_reused_across_replay), because attn_q_dtype gates the FA3
+# FP8-Q path on is_sm90() (py_flashinfer_mha.py:133-139). This is the only
+# coverage of that path.
 py_test(
     name = "test_py_flashinfer_paged_prefill_cuda_graph",
     srcs = [
         "test_flashinfer_prefill/test_py_flashinfer_paged_prefill_cuda_graph.py",
         "base_attention_test.py"
     ],
-    deps = py_test_deps + select({
-        "@//:using_cuda12_9_x86": flashinfer_deps,
-        "@//:cuda_pre_12_9": flashinfer_deps,
-        "//conditions:default": []
-    }),
+    deps = flashinfer_test_deps,
     tags = ["H20"],
     exec_properties = {
         'gpu': 'H20',
@@ -189,15 +235,55 @@ py_test(
 )
 
 # Test for MhaRotaryEmbeddingOp - RoPE implementation for MHA
+# Verified on sm86: 1 test, 1 pass, 0 skips. RoPE is arch-agnostic and the
+# FlashInfer fa2 fallback works, so this runs on the default A10 worker.
 py_test(
     name = "test_mha_rotary_emb",
     srcs = [
         "test_flashinfer_prefill/test_mha_rotary_emb.py",
     ],
     deps = py_test_deps,
-    tags = ["H20"],
-    exec_properties = {
-        'gpu': 'H20',
-    },
+    exec_properties = {'gpu':'A10'},
 )
 
+# PrefillImpl BenchTest
+# Manual developer benchmark; correctness is covered by the test matrix above.
+py_test(
+    name = "bench_prefill_impls",
+    main = "bench/bench_prefill_impls.py",
+    srcs = [
+        "base_attention_test.py",
+        "bench/bench_prefill_impls.py",
+        "bench/core.py",
+        "bench/prefill_benches.py",
+        "bench/scheduler.py",
+        "bench_utils.py",
+    ],
+    args = [
+        "--q-dtype=bf16",
+        "--kv-cache-dtype=bf16,fp8",
+        "--input-len=4096,8192,16384,65536,131072",
+        "--reuse-cache-ratio=0,0.3,0.7,0.9",
+        "--batch-size=1",
+        "--preset=qwen3-8b",
+        "--page-size=64",
+        "--repeat=15",
+    ],
+    env = {"GPU_COUNT": "1"},
+    deps = py_test_deps + [
+        ":filelock",
+        "//rtp_llm/test/utils:test_util",
+    ] + select({
+        "@//:using_cuda12_9_x86": flashinfer_deps + ["//rtp_llm:rtp-kernel"],
+        "//conditions:default": [],
+    }),
+    tags = ["manual", "H20", "cuda12_9"],
+    target_compatible_with = select({
+        "@//:using_cuda12_9_x86": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    exec_properties = {
+        'gpu': 'H20',
+        'gpu_count': '1',
+    },
+)

@@ -7,22 +7,6 @@ def init_model_group_args(parser, model_args):
     ##############################################################################################################
     model_group = parser.add_argument_group("Model Configuration")
     model_group.add_argument(
-        "--extra_data_path",
-        env_name="EXTRA_DATA_PATH",
-        bind_to=(model_args, "extra_data_path"),
-        type=str,
-        default="",
-        help="额外的数据路径",
-    )
-    model_group.add_argument(
-        "--local_extra_data_path",
-        env_name="LOCAL_EXTRA_DATA_PATH",
-        bind_to=(model_args, "local_extra_data_path"),
-        type=str,
-        default="",
-        help="本地额外数据路径",
-    )
-    model_group.add_argument(
         "--tokenizer_path",
         env_name="TOKENIZER_PATH",
         bind_to=(model_args, "tokenizer_path"),
@@ -100,4 +84,17 @@ def init_model_group_args(parser, model_args):
         type=str2bool,
         default=None,
         help="是否将lm_head权重加载为fp32精度，默认为true",
+    )
+    model_group.add_argument(
+        "--enable_output_vocab_pruning",
+        env_name="ENABLE_OUTPUT_VOCAB_PRUNING",
+        bind_to=(model_args, "enable_output_vocab_pruning"),
+        type=str2bool,
+        nargs="?",
+        const=True,
+        default=False,
+        help=(
+            "Use output_tokens.json from the checkpoint directory to prune the "
+            "LM head. Flat or grouped token strings/IDs form one static set."
+        ),
     )

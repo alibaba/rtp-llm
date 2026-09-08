@@ -10,6 +10,8 @@ struct MessagerInitParams {
     uint32_t server_port         = 0;
     uint32_t io_thread_count     = 2;
     uint32_t worker_thread_count = 4;
+    uint32_t worker_queue_size   = 100;
+    int      device_id           = -1;
 
     uint32_t rdma_server_port         = 0;
     uint32_t rdma_io_thread_count     = 1;
@@ -43,6 +45,7 @@ public:
     uint32_t messager_worker_thread_count = 32;
 
     kmonitor::MetricsReporterPtr metrics_reporter;
+    int                          device_id{-1};
 
     // for test
     std::shared_ptr<MemoryUtil> memory_util;

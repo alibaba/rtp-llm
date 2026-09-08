@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <cstring>
+#include <limits>
 #include "torch/all.h"
 #include "rtp_llm/cpp/normal_engine/NormalSamplerInputGatherer.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
@@ -14,10 +15,10 @@ absl::StatusOr<SamplerInputs> NormalSamplerInputGatherer::gather(const StreamGro
     (void)model_inputs;
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
     RTP_LLM_CHECK(!stream_groups.empty());
-    auto all_streams          = stream_groups.allStreams();
-    auto total_batch_size_in  = stream_groups.totalSamplerBatchSizeIn();
-    auto total_batch_size_out = stream_groups.totalSamplerBatchSizeOut();
-    bool return_all_probs     = stream_groups.needReturnAllProbs();
+    auto               all_streams          = stream_groups.allStreams();
+    auto               total_batch_size_in  = stream_groups.totalSamplerBatchSizeIn();
+    auto               total_batch_size_out = stream_groups.totalSamplerBatchSizeOut();
+    ReturnAllProbsMode return_all_probs     = stream_groups.needReturnAllProbs();
 
     SamplerInputs sampler_inputs = allocateSamplerInputs(stream_groups, total_batch_size_in, total_batch_size_out);
     fillSamplerCommonInputs(sampler_inputs, all_streams);
@@ -57,11 +58,25 @@ absl::StatusOr<SamplerInputs> NormalSamplerInputGatherer::gather(const StreamGro
                           tensorDebugStringWithData<int32_t>(sampler_inputs.token_ids).c_str());
     }
 
-    auto vocab_size           = (size_t)model_output.logits.size(1);
-    sampler_inputs.vocab_size = vocab_size;
-    if (return_all_probs) {
+    auto       vocab_size            = (size_t)model_output.logits.size(1);
+    const auto output_vocab_size     = all_streams.front()->outputVocabSize();
+    const auto configured_vocab_size = output_vocab_size > 0 ? output_vocab_size : all_streams.front()->vocabSize();
+    const auto valid_vocab_size      = std::min(vocab_size, configured_vocab_size);
+    sampler_inputs.vocab_size        = vocab_size;
+    if (output_vocab_size > 0) {
+        auto* top_k_values = sampler_inputs.top_k.data_ptr<int32_t>();
+        for (size_t index = 0; index < sampler_inputs.batch_size; ++index) {
+            if (top_k_values[index] > 0) {
+                top_k_values[index] = std::min<int32_t>(top_k_values[index], static_cast<int32_t>(valid_vocab_size));
+            }
+        }
+    }
+    if (return_all_probs != ReturnAllProbsMode::NONE) {
         sampler_inputs.all_probs = torch::zeros({(int64_t)total_batch_size_in, (int64_t)vocab_size},
                                                 torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+        if (return_all_probs == ReturnAllProbsMode::ORIGINAL) {
+            sampler_inputs.return_original_all_probs = true;
+        }
     }
 
     // copy logits when needs tiling or returning logits
@@ -89,6 +104,10 @@ absl::StatusOr<SamplerInputs> NormalSamplerInputGatherer::gather(const StreamGro
         logits_tensor = model_output.logits.clone();
     } else {
         logits_tensor = model_output.logits;
+    }
+    if (vocab_size > valid_vocab_size) {
+        logits_tensor.narrow(1, valid_vocab_size, vocab_size - valid_vocab_size)
+            .fill_(-std::numeric_limits<float>::infinity());
     }
     sampler_inputs.logits = logits_tensor;
 
@@ -131,8 +150,12 @@ SamplerInputs NormalSamplerInputGatherer::allocateSamplerInputs(const StreamGrou
     if (stream_groups.needReturnCumLogProbs()) {
         sampler_inputs.cum_log_probs = torch::empty({(int64_t)total_batch_size_in}, torch::kFloat32);
     }
+    // Pin token_ids so Sampler::forward can non_blocking=true the H2D copy.
+    // Without pinning, the .to(kCUDA) becomes a blocking pageable memcpy that
+    // shows up as Memcpy Pageable→Device on the timeline (~33 MiB/rank/step
+    // at bs=128 / step=65552).
     sampler_inputs.token_ids =
-        torch::empty({(int64_t)total_batch_size_in, (int64_t)(sampler_inputs.step + 1)}, torch::kInt32);
+        torch::empty({(int64_t)total_batch_size_in, (int64_t)(sampler_inputs.step + 1)}, pinned_i32);
     sampler_inputs.generator.resize(total_batch_size_in);
     return sampler_inputs;
 }
@@ -172,7 +195,7 @@ void NormalSamplerInputGatherer::fillSamplerCommonInputs(SamplerInputs&         
         }
         for (int i = 0; i < sampler_batch_size; ++i) {
             input_lengths[batch_idx]      = stream->inputLength();
-            sequence_lengths[batch_idx]   = stream->seqLength() + propose_step;
+            sequence_lengths[batch_idx]   = stream->seqLength() + (score_batch ? i : propose_step);
             num_beams_in[batch_idx]       = stream->currentNumBeams();
             num_beams_out[batch_idx]      = stream->nextNumBeams();
             top_k[batch_idx]              = stream->generateConfig()->top_k;
@@ -198,12 +221,20 @@ void NormalSamplerInputGatherer::setLogitsProcessorInputs(SamplerInputs&        
                                                           std::list<GenerateStreamPtr>& all_streams,
                                                           bool                          score_batch) const {
     LogitsProcessorStatesPtr state_ptr = std::make_shared<LogitsProcessorStates>();
-    std::for_each(all_streams.begin(), all_streams.end(), [&state_ptr, idx = 0](auto& stream) mutable {
+    size_t                   idx       = 0;
+    std::for_each(all_streams.begin(), all_streams.end(), [&state_ptr, &idx](auto& stream) {
+        const size_t batch_size = stream->currentBatchSize();
         for (const auto& processor : stream->getAllLogitsProcessorPtr()) {
-            state_ptr->insert(processor, idx, idx + stream->currentBatchSize());
+            if (processor) {
+                state_ptr->insert(processor, idx, idx + batch_size);
+            }
         }
-        idx += stream->currentBatchSize();
+        idx += batch_size;
     });
+    RTP_LLM_CHECK_WITH_INFO(idx == sampler_inputs.batch_size,
+                            "logits processor rows mismatch: got %zu, expected %zu",
+                            idx,
+                            sampler_inputs.batch_size);
     sampler_inputs.logits_processor_states_ptr = state_ptr;
 }
 

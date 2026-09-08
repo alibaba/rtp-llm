@@ -101,4 +101,25 @@ class ServiceRouteTest {
         decodeEndpoint.setPath("/");
         Assertions.assertEquals(decodeEndpoint, serviceRoute.getRoleEndpoints().getFirst().getDecodeEndpoint());
     }
+
+    @Test
+    void should_load_pd_fusion_and_vit_endpoints() throws Exception {
+        String json = """
+                {
+                  "service_id": "test.service",
+                  "role_endpoints": [{
+                    "group": "g1",
+                    "pd_fusion_endpoint": {"address": "pd", "protocol": "http", "path": "/"},
+                    "vit_endpoint": {"address": "vit", "protocol": "http", "path": "/"}
+                  }]
+                }
+                """;
+
+        ServiceRoute serviceRoute = objectMapper.readValue(json, ServiceRoute.class);
+
+        Assertions.assertTrue(serviceRoute.getAllRoleTypes().containsAll(
+                List.of(RoleType.PDFUSION, RoleType.VIT)));
+        Assertions.assertEquals(1, serviceRoute.getRoleEndpoints(RoleType.PDFUSION).size());
+        Assertions.assertEquals(1, serviceRoute.getRoleEndpoints(RoleType.VIT).size());
+    }
 }

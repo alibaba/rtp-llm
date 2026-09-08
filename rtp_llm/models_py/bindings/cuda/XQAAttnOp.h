@@ -17,6 +17,9 @@ public:
 
     ParamsBasePtr prepare(torch_ext::PyAttentionInputs attn_inputs);
 
+    void update(const XQAParamsPtr& params, torch_ext::PyAttentionInputs attn_inputs);
+    void updateKvCacheOffset(const torch::Tensor& kv_cache_offset, const torch::Tensor& kv_cache_block_id_device);
+
     torch::Tensor
     forward(const torch::Tensor& input, std::optional<torch_ext::LayerKVCache> kv_cache, const XQAParamsPtr& params);
 

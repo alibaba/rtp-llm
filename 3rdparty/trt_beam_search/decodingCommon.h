@@ -16,10 +16,33 @@
 
 #pragma once
 
+#if USING_ROCM
+#include "rtp_llm/models_py/bindings/rocm/cuda_shims.h"
+#include "rtp_llm/models_py/bindings/rocm/hip_host_utils.h"
+#include "rtp_llm/cpp/utils/Logger.h"
+#include "rtp_llm/cpp/utils/AssertUtils.h"
+#include "rtp_llm/cpp/utils/math_utils.h"
+#ifndef TLLM_CUDA_CHECK
+#define TLLM_CUDA_CHECK check_cuda_value
+#define TLLM_CHECK RTP_LLM_CHECK
+#define TLLM_CHECK_WITH_INFO RTP_LLM_CHECK_WITH_INFO
+#define TLLM_LOG_TRACE RTP_LLM_LOG_TRACE
+#define TLLM_LOG_DEBUG RTP_LLM_LOG_DEBUG
+#define TLLM_LOG_WARNING RTP_LLM_LOG_WARNING
+#endif
+namespace tensorrt_llm::common {
+using rtp_llm::ceilDiv;
+}
+#else
 #include "rtp_llm/models_py/bindings/cuda/trt_utils.h"
+#endif
 #include "common.h"
 #include <cstdint>
+#if USING_ROCM
+#include <hiprand/hiprand_kernel_rocm.h>
+#else
 #include <curand_kernel.h>
+#endif
 
 namespace tensorrt_llm::kernels
 {

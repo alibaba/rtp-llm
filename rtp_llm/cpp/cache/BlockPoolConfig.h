@@ -1,5 +1,6 @@
 #pragma once
 
+#include <string>
 #include <vector>
 
 #include "rtp_llm/cpp/cache/MemoryLayoutConfig.h"
@@ -7,6 +8,8 @@
 namespace rtp_llm {
 
 struct BlockPoolConfig {
+    std::string pool_name = "unnamed";
+
     // all memory layouts share the same block id space
     uint32_t block_num = 0;
 

@@ -32,3 +32,7 @@ def is_cuda() -> bool:
 
 def is_hip() -> bool:
     return get_device_type() == DeviceType.ROCm
+
+
+def is_ppu() -> bool:
+    return get_device_type() == DeviceType.Ppu

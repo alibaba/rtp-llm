@@ -46,9 +46,9 @@ public:
                                                                   int32_t                        num);
 
 public:
-    void process(const SamplerInputs& inputs, size_t start_idx, size_t finish_idx) override;
-    void updateMultiSeqStatus(const std::vector<int>& src_batch_indices) override;
-    void updateStatus(const torch::Tensor& new_tokens, int32_t num_new_tokens) override;
+    std::optional<ErrorInfo> process(const SamplerInputs& inputs, size_t start_idx, size_t finish_idx) override;
+    void                     updateMultiSeqStatus(const std::vector<int>& src_batch_indices) override;
+    std::optional<ErrorInfo> updateStatus(const torch::Tensor& new_tokens, int32_t num_new_tokens) override;
 
 public:
     std::vector<std::string> getStatus();

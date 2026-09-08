@@ -1,4 +1,5 @@
 #pragma once
+#include <algorithm>
 #include <cstdint>
 #include <optional>
 #include <sstream>
@@ -19,6 +20,26 @@ namespace rtp_llm {
 //       e.g. beam_size, max_seq_len, etc.
 //       For the second part, different samplers should be created for different params.
 //       So they can not be batched together for now.
+
+enum class ReturnAllProbsMode {
+    NONE     = 0,
+    DEFAULT  = 1,
+    ORIGINAL = 2
+};
+
+enum class ThinkingMode {
+    UNSPECIFIED = 0,
+    DISABLED    = 1,
+    ADAPTIVE    = 2,
+    ENABLED     = 3,
+};
+
+inline ThinkingMode normalizeThinkingMode(int value) {
+    if (value < static_cast<int>(ThinkingMode::UNSPECIFIED) || value > static_cast<int>(ThinkingMode::ENABLED)) {
+        return ThinkingMode::UNSPECIFIED;
+    }
+    return static_cast<ThinkingMode>(value);
+}
 
 class GenerateConfig: public autil::legacy::Jsonizable {
 public:
@@ -42,14 +63,25 @@ public:
     std::optional<float>       top_p_min;
     std::optional<int>         top_p_reset_ids;
     std::optional<std::string> task_id;
-    std::string                adapter_name = "";
-    std::vector<std::string>   adapter_names;
+    std::optional<std::string> json_schema;
+    std::optional<std::string> regex;
+    std::optional<std::string> ebnf;
+    std::optional<std::string> structural_tag;
+    // Legacy raw-request compatibility only. Matcher behavior is controlled by GrammarConfig.
+    bool                     grammar_terminate_without_stop_token = false;
+    std::string              adapter_name                         = "";
+    std::vector<std::string> adapter_names;
 
     std::vector<int>              select_tokens_id;
     std::vector<std::string>      select_tokens_str;
     int                           calculate_loss           = 0;
     int                           hidden_states_cut_dim    = 0;
     bool                          return_logits            = false;
+    bool                          return_prompt_logits     = false;
+    int                           prompt_logits_top_k      = 64;
+    int                           prompt_logits_start      = -1;
+    int                           prompt_logits_end        = -1;
+    bool                          return_target_logprob    = true;
     bool                          return_cum_log_probs     = false;
     bool                          return_incremental       = false;
     bool                          return_hidden_states     = false;
@@ -62,7 +94,7 @@ public:
     bool                          sp_edit                  = false;
     bool                          force_disable_sp_run     = false;
     bool                          force_sp_accept          = false;
-    bool                          return_all_probs         = false;
+    ReturnAllProbsMode            return_all_probs         = ReturnAllProbsMode::NONE;
     bool                          return_softmax_probs     = false;
     bool                          aux_info                 = true;
     std::vector<std::vector<int>> stop_words_list;
@@ -76,7 +108,9 @@ public:
     bool pd_separation         = false;
 
     bool               in_think_mode       = false;
+    ThinkingMode       thinking_mode       = ThinkingMode::UNSPECIFIED;
     int                max_thinking_tokens = 0;
+    std::vector<int>   begin_think_token_ids;
     std::vector<int>   end_think_token_ids;
     bool               gen_timeline = false;
     int                profile_step = 3;
@@ -87,18 +121,30 @@ public:
     bool               enable_memory_cache = true;
     bool               enable_remote_cache = true;
     std::string        trace_id;
-    bool               force_batch = false;  // If true, streams with same batch_group_id must be scheduled together
-    std::optional<int> batch_group_timeout;
-    std::string      unique_key;
+    std::optional<int> group_timeout;
+    std::string        unique_key;
 
     // 生成式推荐：组合 token 粒度去重与曝光过滤
     // combo_token_size 表示一个商品由多少个连续 token 组成（0 表示关闭该功能）
-    int                           combo_token_size = 0;
+    int combo_token_size = 0;
     // banned_combo_token_ids 是禁止生成的商品 token 组合列表，每项长度应等于 combo_token_size
     std::vector<std::vector<int>> banned_combo_token_ids;
+    // 跨序列 combo 去重：当 num_return_sequences > 1 时，任一序列生成完整 combo 后
+    // 自动广播到其他序列的 banned_combos，尽力降低多条序列输出重复（best-effort）。默认关闭。
+    // 启用后采用主序列保护模式：序列 0 不接收其他序列的 ban，补充序列接收所有。
+    // 限制：同一 decode step 内并发生成的相同 combo、以及 diverge_start 之前的 greedy
+    // 一致前缀，不在去重保证范围内。
+    bool enable_cross_sequence_ban = false;
+    // 跨序列分叉起始商品位置：前 N 个商品所有序列保持 greedy 一致，
+    // 从第 N+1 个商品开始对非主序列施加 top-K 遮蔽制造分叉。默认 0（立即分叉）。
+    int cross_seq_diverge_start_combo = 0;
 
-    bool top1() {
+    bool top1() const {
         return top_k == 1;
+    }
+
+    bool stochastic() const {
+        return do_sample && !top1();
     }
 
     std::vector<RoleAddr> role_addrs;
@@ -115,6 +161,11 @@ public:
         return maxNumBeams() > 1;
     }
 
+    bool hasStructuredOutputRequest() const noexcept {
+        // response_format envelope is projected to typed fields by Python ResponseFormatBuilder.
+        return json_schema.has_value() || regex.has_value() || ebnf.has_value() || structural_tag.has_value();
+    }
+
     void addSpecialTokens(const rtp_llm::SpecialTokens& special_tokens) {
         for (const auto& vec : special_tokens.stop_words_id_list) {
             std::vector<int> tmpVec;
@@ -128,6 +179,9 @@ public:
     }
 
     std::string debugString() const {
+        auto summarize_optional_string = [](const std::optional<std::string>& field) {
+            return field.has_value() ? "len=" + std::to_string(field->size()) : std::string("<unset>");
+        };
         std::stringstream debug_string;
         debug_string << "GenerateConfig {"
                      << "max_new_tokens:" << max_new_tokens << ", min_new_tokens:" << min_new_tokens
@@ -141,17 +195,26 @@ public:
                      << ", return_output_ids:" << return_output_ids << ", return_input_ids:" << return_input_ids
                      << ", is_streaming:" << is_streaming << ", timeout_ms:" << timeout_ms << ", top_k:" << top_k
                      << ", top_p:" << top_p << ", force_disable_sp_run: " << force_disable_sp_run
-                     << ", force_sp_accept: " << force_sp_accept << ", return_all_probs: " << return_all_probs
+                     << ", force_sp_accept: " << force_sp_accept
+                     << ", return_all_probs: " << static_cast<int>(return_all_probs)
+                     << ", json_schema: " << summarize_optional_string(json_schema)
+                     << ", regex: " << summarize_optional_string(regex) << ", ebnf: " << summarize_optional_string(ebnf)
+                     << ", structural_tag: " << summarize_optional_string(structural_tag)
                      << ", stop_words_list:" << vectorsToString(stop_words_list)
+                     << ", grammar_terminate_without_stop_token: " << grammar_terminate_without_stop_token
                      << ", can_use_pd_separation: " << can_use_pd_separation << ", pd_separation: " << pd_separation
-                     << ", in_think_mode: " << in_think_mode << ", max_thinking_tokens: " << max_thinking_tokens
+                     << ", in_think_mode: " << in_think_mode << ", thinking_mode: " << static_cast<int>(thinking_mode)
+                     << ", max_thinking_tokens: " << max_thinking_tokens
+                     << ", begin_think_token_ids: " << vectorToString(begin_think_token_ids)
                      << ", end_think_token_ids: " << vectorToString(end_think_token_ids)
                      << ", gen_timeline: " << gen_timeline << ", profile_step: " << profile_step
                      << ", reuse_cache: " << reuse_cache << ", enable_device_cache: " << enable_device_cache
                      << ", enable_memory_cache: " << enable_memory_cache
-                     << ", enable_remote_cache: " << enable_remote_cache << ", force_batch: " << force_batch << ", unique_key: " << unique_key
-                     << ", combo_token_size: " << combo_token_size
-                     << ", banned_combo_token_ids_size: " << banned_combo_token_ids.size() << "}";
+                     << ", enable_remote_cache: " << enable_remote_cache
+                     << ", unique_key: " << unique_key << ", combo_token_size: " << combo_token_size
+                     << ", banned_combo_token_ids_size: " << banned_combo_token_ids.size()
+                     << ", enable_cross_sequence_ban: " << enable_cross_sequence_ban
+                     << ", cross_seq_diverge_start_combo: " << cross_seq_diverge_start_combo << "}";
         return debug_string.str();
     }
 
@@ -186,6 +249,11 @@ public:
         JSONIZE_OPTIONAL(top_p_min);
         JSONIZE_OPTIONAL(top_p_reset_ids);
         JSONIZE_OPTIONAL(task_id);
+        JSONIZE_OPTIONAL(json_schema);
+        JSONIZE_OPTIONAL(regex);
+        JSONIZE_OPTIONAL(ebnf);
+        JSONIZE_OPTIONAL(structural_tag);
+        JSONIZE(grammar_terminate_without_stop_token);
         try {
             std::string adapter_name_;
             json.Jsonize("adapter_name", adapter_name_);
@@ -203,6 +271,11 @@ public:
         JSONIZE(select_tokens_str);
         JSONIZE(calculate_loss);
         JSONIZE(return_logits);
+        JSONIZE(return_prompt_logits);
+        JSONIZE(prompt_logits_top_k);
+        JSONIZE(prompt_logits_start);
+        JSONIZE(prompt_logits_end);
+        JSONIZE(return_target_logprob);
         JSONIZE(return_incremental);
         JSONIZE(return_hidden_states);
         JSONIZE(return_all_hidden_states);
@@ -218,11 +291,39 @@ public:
         JSONIZE(sp_edit);
         JSONIZE(force_disable_sp_run);
         JSONIZE(force_sp_accept);
-        JSONIZE(return_all_probs);
+        // autil JSONIZE doesn't handle enum class; round-trip through int.
+        // Back-compat: old SDK clients send return_all_probs as a JSON bool. Try int
+        // first (new wire format); on parse failure, fall back to bool: true→DEFAULT,
+        // false→NONE. Without this fallback an old bool payload raises
+        // autil::legacy::ExceptionBase and the surrounding catch nulls the entire
+        // generate_config (see ApiDataType.cc).
+        int return_all_probs_int = static_cast<int>(return_all_probs);
+        try {
+            json.Jsonize("return_all_probs", return_all_probs_int, return_all_probs_int);
+            // Validate enum range before casting — a malformed payload could send
+            // an out-of-range int that would otherwise produce an undefined enum value.
+            if (return_all_probs_int < static_cast<int>(ReturnAllProbsMode::NONE)
+                || return_all_probs_int > static_cast<int>(ReturnAllProbsMode::ORIGINAL)) {
+                return_all_probs_int = static_cast<int>(ReturnAllProbsMode::NONE);
+            }
+            return_all_probs = static_cast<ReturnAllProbsMode>(return_all_probs_int);
+        } catch (autil::legacy::ExceptionBase& e) {
+            try {
+                bool return_all_probs_bool = (return_all_probs != ReturnAllProbsMode::NONE);
+                json.Jsonize("return_all_probs", return_all_probs_bool, return_all_probs_bool);
+                return_all_probs = return_all_probs_bool ? ReturnAllProbsMode::DEFAULT : ReturnAllProbsMode::NONE;
+            } catch (autil::legacy::ExceptionBase& e2) {
+                // field absent or other parse error — keep prior value
+            }
+        }
         JSONIZE(sp_advice_prompt);
         JSONIZE(sp_advice_prompt_token_ids);
         JSONIZE(in_think_mode);
+        int thinking_mode_int = static_cast<int>(thinking_mode);
+        json.Jsonize("thinking_mode", thinking_mode_int, thinking_mode_int);
+        thinking_mode = normalizeThinkingMode(thinking_mode_int);
         JSONIZE(max_thinking_tokens);
+        JSONIZE(begin_think_token_ids);
         JSONIZE(end_think_token_ids);
         JSONIZE(gen_timeline);
         JSONIZE(profile_step);
@@ -231,12 +332,13 @@ public:
         JSONIZE(enable_device_cache);
         JSONIZE(enable_memory_cache);
         JSONIZE(enable_remote_cache);
-        JSONIZE(force_batch);
         JSONIZE(aux_info);
-        JSONIZE_OPTIONAL(batch_group_timeout);
+        JSONIZE_OPTIONAL(group_timeout);
         JSONIZE(unique_key);
         JSONIZE(combo_token_size);
         JSONIZE(banned_combo_token_ids);
+        JSONIZE(enable_cross_sequence_ban);
+        JSONIZE(cross_seq_diverge_start_combo);
 #undef JSONIZE
 #undef JSONIZE_OPTIONAL
     }

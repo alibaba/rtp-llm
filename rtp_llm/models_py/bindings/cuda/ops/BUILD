@@ -6,6 +6,12 @@ cuda_register()
 flashinfer_deps()
 flashmla_deps()
 
+cc_library(
+    name = "flashinfer_runtime",
+    deps = [":flashinfer"],
+    visibility = ["//visibility:public"],
+)
+
 config_setting(
     name = "use_accl_ep",
     values = {
@@ -85,14 +91,6 @@ cc_library(
 )
 
 cc_library(
-    name = "torch_beam_search_op_impl",
-    hdrs = ["BeamSearchOp.h"],
-    deps = torch_deps(),
-    visibility = ["//visibility:public"],
-    copts = copts(),
-)
-
-cc_library(
     name = "standalone_ops",
     hdrs = ["StandaloneOps.h"],
     srcs = ["StandaloneOps.cc"],
@@ -111,8 +109,12 @@ cc_library(
     srcs = ["//rtp_llm/models_py/bindings/core:exec_ctx_impl_srcs"],
     deps = [
         ":gpu_base",
-        ":torch_beam_search_op_impl",
+        "//rtp_llm/models_py/bindings/core/ops:torch_beam_search_op_impl",
+        "//rtp_llm/models_py/bindings/cuda/kernels/sampling:sampling",
         "//rtp_llm/models_py/bindings/cuda/kernels:scaled_fp8_quant",
+        "//rtp_llm/models_py/bindings/cuda/kernels:kernels_speculative_sampling",
+        "//rtp_llm/models_py/bindings/common/kernels:vocab_prune_kernels",
+        "//rtp_llm/models_py/bindings/core:tensor_holder",
         "//rtp_llm/cpp/utils:debug_utils",
         ":flashinfer",
         "//3rdparty/flashinfer:flashinfer",

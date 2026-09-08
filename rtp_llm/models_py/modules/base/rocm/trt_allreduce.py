@@ -2,17 +2,21 @@
 # Copyright (C) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
 # Adapted from atrex trt_allreduce for rtp-llm ROCm backend.
 
-from typing import Optional, Tuple
+import logging
 from contextlib import contextmanager
+from typing import Optional, Tuple
 
 import torch
-from torch import Tensor
 import torch.distributed as dist
+from torch import Tensor
 from torch.distributed import ProcessGroup
+
 
 def _get_handle_class():
     from rtp_llm.ops.compute_ops import rtp_llm_ops
+
     return rtp_llm_ops.TrtllmArFusionHandle
+
 
 FP8_DTYPE = torch.float8_e4m3fnuz
 
@@ -31,7 +35,7 @@ FP8_QUANT_TYPE_ID = FP8_QUANT_TYPE_IDS[FP8_DTYPE]
 
 # Supported hidden_size for trtllm allreduce kernels (pure allreduce).
 # Must match the switch cases in allreduce_kernel_launcher_hd (trtllm_allreduce_fusion.cu).
-ALLREDUCE_SUPPORTED_HIDDEN_SIZES = frozenset({1024, 2048, 2560, 4096, 5120})
+ALLREDUCE_SUPPORTED_HIDDEN_SIZES = frozenset({1024, 2048, 2560, 3072, 4096, 5120})
 
 # Supported hidden_size for fused allreduce + residual + rmsnorm kernels.
 # Must match the switch cases in allreduce_fusion_kernel_launcher_hd (trtllm_allreduce_fusion.cu).
@@ -57,6 +61,7 @@ class TrtllmDistEnv:
     ) -> None:
         self.group = group
         self.device_id = device_id
+        self.max_size_in_bytes = max_size_in_bytes
         self.rank = dist.get_rank(group=self.group)
         self.world_size = dist.get_world_size(group=self.group)
         self.handle = None
@@ -72,36 +77,61 @@ class TrtllmDistEnv:
         if self.world_size not in self._SUPPORTED_WORLD_SIZES:
             return
 
+        candidate = None
         try:
             TrtllmArFusionHandle = _get_handle_class()
-            self.handle = TrtllmArFusionHandle(
-                self.device_id, self.rank, self.world_size,
-                max_size_in_bytes, comm_ptrs_buf_len
+            candidate = TrtllmArFusionHandle(
+                self.device_id,
+                self.rank,
+                self.world_size,
+                max_size_in_bytes,
+                comm_ptrs_buf_len,
             )
-
-            barrier_handle = self.handle.get_barrier_handle()
-            data_handle = self.handle.get_data_handle()
+            barrier_handle = candidate.get_barrier_handle()
+            data_handle = candidate.get_data_handle()
+            local_success = True
         except Exception as e:
-            import logging
             logging.warning(
                 "TRT-LLM AllReduce initialization failed (likely insufficient GPU memory, "
                 "requested %d bytes for data buffer). Falling back to RCCL. Error: %s",
-                max_size_in_bytes * 2, e,
+                max_size_in_bytes * 2,
+                e,
             )
-            self.handle = None
-            self.disabled = True
-            return
+            local_success = False
 
-        self._barrier()
+        success_flags = [None] * self.world_size
+        dist.all_gather_object(success_flags, local_success, group=self.group)
+        if not all(success_flags):
+            candidate = None
+            self.disabled = True
+            self._barrier()
+            return
 
         barrier_handle_list = [None] * self.world_size
         data_handle_list = [None] * self.world_size
         dist.all_gather_object(barrier_handle_list, barrier_handle, group=self.group)
         dist.all_gather_object(data_handle_list, data_handle, group=self.group)
 
-        self.handle.open_barrier_handles(barrier_handle_list)
-        self.handle.open_data_handles(data_handle_list)
+        try:
+            candidate.open_barrier_handles(barrier_handle_list)
+            candidate.open_data_handles(data_handle_list)
+            local_success = True
+        except Exception as e:
+            logging.warning(
+                "TRT-LLM AllReduce IPC open failed on rank %d. Falling back to RCCL: %s",
+                self.rank,
+                e,
+            )
+            local_success = False
 
+        dist.all_gather_object(success_flags, local_success, group=self.group)
+        if not all(success_flags):
+            candidate = None
+            self.disabled = True
+            self._barrier()
+            return
+
+        self.handle = candidate
         self._barrier()
 
     def _barrier(self):
@@ -113,18 +143,123 @@ class TrtllmDistEnv:
         if not self._capture_handles_pending:
             return
         self._barrier()
-        handles = self.handle.get_captured_handles()
-        offsets = self.handle.get_captured_offsets()
-        for idx in range(len(handles)):
+        try:
+            handles = self.handle.get_captured_handles()
+            offsets = self.handle.get_captured_offsets()
+            local_success = True
+        except Exception as e:
+            handles = []
+            offsets = torch.tensor([], dtype=torch.int64)
+            local_success = False
+            import logging
+
+            logging.warning(
+                "[TrtllmAllreduce] get_captured_handles failed on rank %d: %s. "
+                "Will coordinate with other ranks to discard this capture.",
+                self.rank,
+                e,
+            )
+
+        # All ranks must agree on success; if any rank failed, everyone must
+        # discard. This prevents used_comm_ptrs_ from diverging across ranks.
+        success_flags = [None] * self.world_size
+        dist.all_gather_object(success_flags, local_success, group=self.group)
+
+        if not all(success_flags):
+            failed_ranks = [r for r, ok in enumerate(success_flags) if not ok]
+            # Only capture_clear here — no open_captured_handles has executed
+            # yet, so there are no IPC slots to roll back.  Calling
+            # invalidate_capture() without a prior begin_capture_session()
+            # would rewind to snapshot=0 and destroy base IPC slots.
+            self.handle.capture_clear()
+            self._barrier()
+            self._capture_handles_pending = False
+            raise RuntimeError(
+                f"[TrtllmAllreduce] get_captured_handles failed on rank(s) "
+                f"{failed_ranks}. All ranks are discarding this graph capture. "
+                f"The caller should re-capture the graph."
+            )
+
+        # All ranks must agree on the number of handles before entering the
+        # per-handle loop; otherwise a rank with fewer handles exits early
+        # while others block on the next all_gather_object, causing a hang.
+        local_count = len(handles)
+        count_list = [None] * self.world_size
+        dist.all_gather_object(count_list, local_count, group=self.group)
+        if len(set(count_list)) != 1:
+            # Same reasoning: no IPC slots opened yet, only clear graph state.
+            self.handle.capture_clear()
+            self._barrier()
+            self._capture_handles_pending = False
+            raise RuntimeError(
+                f"[TrtllmAllreduce] Handle count mismatch across ranks: "
+                f"{count_list}. All ranks are discarding this graph capture. "
+                f"The caller should re-capture the graph."
+            )
+        num_handles = local_count
+
+        # Snapshot the current used_comm_ptrs_ / IPC handle watermarks so
+        # that invalidate_capture() can roll back to exactly this point
+        # if any handle registration fails mid-loop.
+        self.handle.begin_capture_session()
+
+        open_error = None
+        for idx in range(num_handles):
             handle_list = [None] * self.world_size
             offset_list = [None] * self.world_size
             dist.all_gather_object(handle_list, handles[idx], group=self.group)
-            dist.all_gather_object(offset_list, int(offsets[idx].item()), group=self.group)
+            dist.all_gather_object(
+                offset_list, int(offsets[idx].item()), group=self.group
+            )
             self._barrier()
-            self.handle.open_captured_handles(handle_list, offset_list, idx)
+
+            # open_captured_handles may TORCH_CHECK-fail on some ranks (e.g.
+            # stale pointer).  Wrap in try so we can synchronise the failure
+            # across all ranks instead of letting the failing rank exit the
+            # loop while others block on the next collective.
+            local_open_ok = True
+            if open_error is None:
+                try:
+                    self.handle.open_captured_handles(handle_list, offset_list, idx)
+                except Exception as e:
+                    local_open_ok = False
+                    open_error = e
+            else:
+                # Already failed on a previous iteration — skip but keep
+                # participating in collectives so other ranks don't hang.
+                local_open_ok = False
+
+            open_ok_flags = [None] * self.world_size
+            dist.all_gather_object(open_ok_flags, local_open_ok, group=self.group)
+
+            if not all(open_ok_flags):
+                failed_ranks = [r for r, ok in enumerate(open_ok_flags) if not ok]
+                if open_error is None:
+                    open_error = RuntimeError(
+                        f"[TrtllmAllreduce] open_captured_handles failed on "
+                        f"rank(s) {failed_ranks} at idx={idx}."
+                    )
+                # Continue the loop so remaining iterations' collectives are
+                # not orphaned — but mark that we need to bail out afterwards.
+
         self.handle.capture_clear()
+        if open_error is not None:
+            # Roll back only this session's slots (used_comm_ptrs_, map
+            # entries, IPC handles).  Previously committed sessions are safe.
+            self.handle.invalidate_capture()
+        else:
+            # All handles registered successfully — promote pending slots to
+            # committed state so future invalidate_capture() won't touch them.
+            self.handle.commit_capture()
         self._barrier()
         self._capture_handles_pending = False
+
+        if open_error is not None:
+            raise RuntimeError(
+                f"[TrtllmAllreduce] Captured IPC handle registration failed. "
+                f"All ranks have cleaned up. The caller should discard the "
+                f"captured graph and re-capture. Original error: {open_error}"
+            )
 
     @contextmanager
     def capture(self):
@@ -173,7 +308,10 @@ class TrtllmDistEnv:
         fp8_out: bool = False,
     ) -> Tuple[Tensor, Tensor, Tensor]:
         """Reference implementation using standard ops (for correctness testing)."""
-        def rms_norm_forward(hidden_states: Tensor, weight: Tensor, epsilon: float) -> Tensor:
+
+        def rms_norm_forward(
+            hidden_states: Tensor, weight: Tensor, epsilon: float
+        ) -> Tensor:
             input_dtype = hidden_states.dtype
             variance = hidden_states.float().pow(2).mean(-1, keepdim=True)
             hidden_states = hidden_states * torch.rsqrt(variance + epsilon)
@@ -193,8 +331,10 @@ class TrtllmDistEnv:
             return residual_out, norm_out, norm_out_scale
         else:
             scale_out = torch.empty(
-                allreduce_in.shape[0], 1,
-                dtype=torch.float32, device=allreduce_in.device,
+                allreduce_in.shape[0],
+                1,
+                dtype=torch.float32,
+                device=allreduce_in.device,
             )
             return residual_out, norm_out, scale_out
 
@@ -207,14 +347,19 @@ class TrtllmDistEnv:
         fp8_out: bool = False,
     ) -> Tuple[Tensor, Tensor, Tensor]:
         """Fused AllReduce + Residual Add + RMSNorm kernel."""
+        hidden_size = allreduce_in.size(-1)
+        if hidden_size not in ALLREDUCE_FUSION_SUPPORTED_HIDDEN_SIZES:
+            raise ValueError(f"Unsupported fused AllReduce hidden size: {hidden_size}")
         self._prepare_capture(allreduce_in)
         residual_out = torch.empty_like(allreduce_in)
 
         if fp8_out:
             norm_out = torch.empty_like(allreduce_in, dtype=FP8_DTYPE)
             scale_out = torch.empty(
-                allreduce_in.shape[0], 1,
-                dtype=torch.float32, device=allreduce_in.device,
+                allreduce_in.shape[0],
+                1,
+                dtype=torch.float32,
+                device=allreduce_in.device,
             )
         else:
             norm_out = torch.empty_like(allreduce_in)
@@ -267,7 +412,8 @@ class TrtllmCommManager:
         self.group = group
         self.device_id = device_id
         self.dist_env = TrtllmDistEnv(
-            group=self.group, device_id=self.device_id,
+            group=self.group,
+            device_id=self.device_id,
         )
         self.initialized = True
 
@@ -290,7 +436,8 @@ def ensure_trtllm_comm_initialized(
         or _trtllm_comm_manager.device_id != device_id
     ):
         _trtllm_comm_manager.initialize(
-            group=group, device_id=device_id,
+            group=group,
+            device_id=device_id,
         )
 
     if _trtllm_comm_manager.initialized and _trtllm_comm_manager.dist_env.disabled:
@@ -350,9 +497,7 @@ def consume_capture() -> None:
     the internal capture flag.
     """
     if torch.cuda.is_current_stream_capturing():
-        raise RuntimeError(
-            "consume_capture must not run during stream capture."
-        )
+        raise RuntimeError("consume_capture must not run during stream capture.")
     if (
         _trtllm_comm_manager is not None
         and _trtllm_comm_manager.initialized
@@ -400,7 +545,9 @@ def allreduce_residual_rmsnorm(
     if not ensure_trtllm_comm_initialized(group, device_id):
         raise RuntimeError("TRT-LLM AllReduce Fusion workspace is not initialized")
     return _trtllm_comm_manager.dist_env.allreduce_add_rms_fused(
-        allreduce_in, residual_in, rms_weight, eps, fp8_out,
+        allreduce_in,
+        residual_in,
+        rms_weight,
+        eps,
+        fp8_out,
     )
-
-

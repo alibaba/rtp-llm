@@ -5,6 +5,7 @@ import aiter
 import torch
 from aiter.fused_moe import fused_moe
 
+from rtp_llm.device.device_impl import is_gfx950
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )

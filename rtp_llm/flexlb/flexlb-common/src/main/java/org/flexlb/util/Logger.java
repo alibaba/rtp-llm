@@ -1,76 +1,86 @@
 package org.flexlb.util;
 
-import lombok.Getter;
-import lombok.Setter;
+import ch.qos.logback.classic.Level;
 import org.flexlb.enums.LogLevel;
 import org.slf4j.LoggerFactory;
 
 /**
- * Logging utility class, in order to log when enable global switch or set log level in master request
+ * Logging utility wrapping SLF4J with runtime log-level control via logback.
  *
- * <p>The {@code info} {@code warn} and {@code error} level in enabled by default.</p>
+ * <p>All filtering is delegated to logback — there is no custom gating.
+ * {@link #setLevel(LogLevel)} directly updates the {@code flexlbLogger} logback logger,
+ * so the {@code update_log_level} API and the logback configuration stay in sync.</p>
  *
- * @see LogLevel
+ * <p>{@code INFO}, {@code WARN} and {@code ERROR} are enabled by default (logback
+ * {@code flexlbLogger} starts at {@code INFO}).</p>
  */
 public class Logger {
 
     private static final org.slf4j.Logger log = LoggerFactory.getLogger("flexlbLogger");
 
-    @Getter
-    @Setter
-    private static LogLevel globalLogLevel;
-
     static {
         String logLevelStr = System.getenv("LOG_LEVEL");
         if (logLevelStr != null) {
             try {
-                globalLogLevel = LogLevel.valueOf(logLevelStr.toUpperCase().trim());
+                setLevel(LogLevel.valueOf(logLevelStr.toUpperCase().trim()));
             } catch (IllegalArgumentException e) {
                 log.warn("Invalid LOG_LEVEL value: '{}'. Valid values are: TRACE, DEBUG, INFO, WARN, ERROR.", logLevelStr);
             }
         }
     }
 
+    // ---- Logging methods (delegate directly to SLF4J) ----
+
     public static void trace(String format, Object... args) {
-        log(LogLevel.TRACE, () -> log.trace(format, args));
+        log.trace(format, args);
     }
 
     public static void debug(String format, Object... args) {
-        log(LogLevel.DEBUG, () -> log.debug(format, args));
+        log.debug(format, args);
     }
 
     public static void info(String format, Object... args) {
-        log(LogLevel.INFO, () -> log.info(format, args), false);
+        log.info(format, args);
     }
 
     public static void warn(String format, Object... args) {
-        log(LogLevel.WARN, () -> log.warn(format, args), false);
+        log.warn(format, args);
     }
 
     public static void error(String format, Object... args) {
-        log(LogLevel.ERROR, () -> log.error(format, args), false);
+        log.error(format, args);
     }
 
-    private static void log(LogLevel targetLevel, Runnable logAction) {
-        log(targetLevel, logAction, true);
-    }
+    // ---- Runtime level control ----
 
-    private static void log(LogLevel targetLevel, Runnable logAction, boolean checkGlobalLevel) {
-        boolean shouldLog = shouldLog(targetLevel, checkGlobalLevel);
-
-        if (shouldLog) {
-            logAction.run();
+    /**
+     * Returns the effective log level of the underlying logback logger.
+     */
+    public static LogLevel getLevel() {
+        ch.qos.logback.classic.Logger lbLogger = logbackLogger();
+        Level level = lbLogger.getLevel();
+        if (level == null) {
+            return null;
+        }
+        try {
+            return LogLevel.valueOf(level.levelStr.toUpperCase());
+        } catch (IllegalArgumentException e) {
+            return null;
         }
     }
 
-    private static boolean shouldLog(LogLevel targetLevel, boolean checkGlobalLevel) {
-        boolean shouldLog;
-        if (checkGlobalLevel) {
-            shouldLog = globalLogLevel != null && globalLogLevel.compareTo(targetLevel) <= 0;
-        } else {
-            // warn and error are enabled by default
-            shouldLog = globalLogLevel == null || globalLogLevel.compareTo(targetLevel) <= 0;
-        }
-        return shouldLog;
+    /**
+     * Sets the log level of the underlying {@code flexlbLogger}.
+     * A {@code null} level resets the logger to {@code INFO} (the safe production default).
+     */
+    public static void setLevel(LogLevel level) {
+        Level lbLevel = level != null
+                ? Level.toLevel(level.name(), Level.INFO)
+                : Level.INFO;
+        logbackLogger().setLevel(lbLevel);
+    }
+
+    private static ch.qos.logback.classic.Logger logbackLogger() {
+        return (ch.qos.logback.classic.Logger) LoggerFactory.getLogger("flexlbLogger");
     }
 }

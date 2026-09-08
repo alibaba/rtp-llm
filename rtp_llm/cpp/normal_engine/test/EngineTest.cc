@@ -22,9 +22,9 @@ class NormalEngineTest: public DeviceTestBase {
 public:
 };
 
-TEST_F(NormalEngineTest, testInt8KVCache) {
+TEST_F(NormalEngineTest, testFp8KVCache) {
     CustomConfig config;
-    config.kv_cache_data_type = DataType::TYPE_INT8;
+    config.kv_cache_data_type = DataType::TYPE_FP8_E4M3;
     auto engine               = createMockEngine(config);
 
     std::shared_ptr<GenerateInput> query   = make_shared<GenerateInput>();
@@ -33,22 +33,18 @@ TEST_F(NormalEngineTest, testInt8KVCache) {
     query->generate_config->max_new_tokens = 5;
     query->generate_config->is_streaming   = false;
 
-    try {
-        shared_ptr<GenerateStream> stream = engine->enqueue(query);
+    shared_ptr<GenerateStream> stream = engine->enqueue(query);
 
-        ASSERT_TRUE(stream != nullptr);
-        auto output = stream->nextOutput();
-        ASSERT_TRUE(output.ok());
-        ASSERT_EQ(output.value().generate_outputs[0].aux_info.output_len, 5);
-        ASSERT_EQ(output.value().generate_outputs[0].aux_info.input_len, 7);
-        ASSERT_EQ(output.value().generate_outputs[0].aux_info.iter_count, 5);
+    ASSERT_TRUE(stream != nullptr);
+    auto output = stream->nextOutput();
+    ASSERT_TRUE(output.ok());
+    ASSERT_EQ(output.value().generate_outputs[0].aux_info.output_len, 5);
+    ASSERT_EQ(output.value().generate_outputs[0].aux_info.input_len, 7);
+    ASSERT_EQ(output.value().generate_outputs[0].aux_info.iter_count, 5);
 
-        ASSERT_TRUE(stream->hasEvent(StreamEvents::GenerateDone));
-        auto output2 = stream->nextOutput();
-        ASSERT_TRUE(!output2.ok());
-    } catch (const std::exception& e) {
-        std::cout << e.what() << std::endl;
-    }
+    ASSERT_TRUE(stream->hasEvent(StreamEvents::GenerateDone));
+    auto output2 = stream->nextOutput();
+    ASSERT_TRUE(!output2.ok());
 }
 
 TEST_F(NormalEngineTest, testSimple) {
@@ -369,6 +365,57 @@ TEST_F(NormalEngineTest, testQueryReuseCacheWhenSwitchIsOff) {
         auto output2 = stream->nextOutput();
         ASSERT_TRUE(!output2.ok());
     }
+}
+
+TEST_F(NormalEngineTest, testRejectOutputVocabWithPrefillCP) {
+    CustomConfig config;
+    config.output_vocab_ids   = {0, 2, 7};
+    config.prefill_cp_enabled = true;
+    EXPECT_THROW(createMockEngine(config), std::exception);
+}
+
+TEST_F(NormalEngineTest, testRejectOutputVocabWithDeviceInput) {
+    CustomConfig config;
+    config.output_vocab_ids = {0, 2, 7};
+    setenv("RTP_LLM_DEVICE_INPUT", "1", 1);
+    EXPECT_THROW(createMockEngine(config), std::exception);
+    unsetenv("RTP_LLM_DEVICE_INPUT");
+}
+
+TEST_F(NormalEngineTest, testRejectOutputVocabWithSpeculative) {
+    CustomConfig config;
+    config.output_vocab_ids    = {0, 2, 7};
+    config.speculative_enabled = true;
+    EXPECT_THROW(createMockEngine(config), std::exception);
+}
+
+TEST_F(NormalEngineTest, testRejectOutputVocabWithWarmUpWithLoss) {
+    CustomConfig config;
+    config.output_vocab_ids  = {0, 2, 7};
+    config.warm_up_with_loss = true;
+    EXPECT_THROW(createMockEngine(config), std::exception);
+}
+
+TEST_F(NormalEngineTest, testRejectInvalidOutputVocabIds) {
+    CustomConfig unsorted;
+    unsorted.output_vocab_ids = {7, 2, 0};
+    EXPECT_THROW(createMockEngine(unsorted), std::exception);
+
+    CustomConfig duplicated;
+    duplicated.output_vocab_ids = {0, 2, 2, 7};
+    EXPECT_THROW(createMockEngine(duplicated), std::exception);
+
+    CustomConfig out_of_range;
+    out_of_range.output_vocab_ids = {0, 2, 100};  // vocab_size is 100
+    EXPECT_THROW(createMockEngine(out_of_range), std::exception);
+}
+
+TEST_F(NormalEngineTest, testAllowsUnsupportedCombosWithoutOutputVocab) {
+    CustomConfig config;
+    config.prefill_cp_enabled  = true;
+    config.speculative_enabled = true;
+    config.warm_up_with_loss   = true;
+    EXPECT_NO_THROW(createMockEngine(config));
 }
 
 }  // namespace rtp_llm

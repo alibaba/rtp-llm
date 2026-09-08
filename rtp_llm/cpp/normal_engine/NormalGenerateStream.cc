@@ -1,28 +1,73 @@
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 
+#include <algorithm>
+#include <chrono>
+
 namespace rtp_llm {
 
-ErrorResult<GenerateOutputs> NormalGenerateStream::nextOutput() {
-    // TODO(xinfei.sxf) 某些case下会出现1s的等待
-    while ((!hasError()) && getStatus() != StreamState::FINISHED && generate_outputs_queue_.isEmpty()) {
-        checkTimeout();
-        generate_outputs_queue_.waitNotEmpty();
+ErrorResult<GenerateOutputs> NormalGenerateStream::nextOutput(int64_t wait_timeout_ms) {
+    RTP_LLM_CHECK_WITH_INFO(wait_timeout_ms >= 0, "nextOutput wait_timeout_ms must be non-negative");
+
+    const auto stream_timeout_ms = getTimeoutMs();
+    auto       stream_deadline   = std::chrono::steady_clock::time_point::max();
+
+    std::unique_lock<std::mutex> lock(*mutex_);
+
+    if (stream_timeout_ms > 0) {
+        const auto elapsed_us   = autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_;
+        const auto remaining_us = std::max<int64_t>(stream_timeout_ms * 1000 - elapsed_us, 0);
+        stream_deadline         = std::chrono::steady_clock::now() + std::chrono::microseconds(remaining_us);
     }
-    if (hasError()) {
-        return statusInfo();
-    }
-    if (generate_outputs_queue_.isEmpty()) {
-        if (isFinished()) {
-            return ErrorInfo(ErrorCode::FINISHED, "finished");
+
+    if (!consumerReadyWithoutLock()) {
+        if (wait_timeout_ms == 0 && stream_timeout_ms <= 0) {
+            consumer_cv_->wait(lock, [this] { return consumerReadyWithoutLock(); });
         } else {
-            return ErrorInfo(ErrorCode::OUTPUT_QUEUE_IS_EMPTY, "output queue is empty");
+            auto wait_deadline = stream_deadline;
+            if (wait_timeout_ms > 0) {
+                wait_deadline = std::min(stream_deadline,
+                                         std::chrono::steady_clock::now() + std::chrono::milliseconds(wait_timeout_ms));
+            }
+
+            if (!consumer_cv_->wait_until(lock, wait_deadline, [this] { return consumerReadyWithoutLock(); })) {
+                if (stream_timeout_ms > 0 && std::chrono::steady_clock::now() >= stream_deadline) {
+                    const auto running_time_ms =
+                        (autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_) / 1000;
+                    reportTimeoutWithoutLock(running_time_ms, stream_timeout_ms);
+                } else {
+                    return ErrorInfo(ErrorCode::OUTPUT_QUEUE_NO_UPDATE,
+                                     "output queue has no update within " + std::to_string(wait_timeout_ms) + " ms");
+                }
+            }
         }
     }
-    return generate_outputs_queue_.getAndPopFront();
+
+    // Preserve existing precedence: terminal errors override queued output.
+    if (hasErrorWithoutLock()) {
+        return statusInfoWithoutLock();
+    }
+
+    // Normal completion is reported only after the final output is drained.
+    if (!generate_outputs_.empty()) {
+        auto output = std::move(generate_outputs_.front());
+        generate_outputs_.pop_front();
+        return output;
+    }
+
+    if (consumerFinishedWithoutLock()) {
+        return ErrorInfo(ErrorCode::FINISHED, "finished");
+    }
+
+    RTP_LLM_FAIL("consumer is ready without an error, output, or finished state");
 }
 
 bool NormalGenerateStream::hasOutput() {
-    return !generate_outputs_queue_.isEmpty();
+    std::lock_guard<std::mutex> lock(*mutex_);
+    return !generate_outputs_.empty();
+}
+
+bool NormalGenerateStream::consumerReadyWithoutLock() const {
+    return hasErrorWithoutLock() || !generate_outputs_.empty() || consumerFinishedWithoutLock();
 }
 
 GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateInfo& update_info) {
@@ -30,7 +75,8 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
     GenerateOutputs generate_results;
     generate_results.request_id = request_id_;
 
-    for (int i = 0; i < nextBatchSize(); i++) {
+    // CompleteTokenIds has already applied this step, so currentBatchSize is the output row count.
+    for (int i = 0; i < currentBatchSize(); i++) {
         GenerateOutput generate_output;
         generate_output.aux_info.iter_count = iter_count_;
         generate_output.output_ids          = torch::empty({1, (int64_t)output_len}, torch::kInt32);
@@ -91,6 +137,10 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
             }
         }
 
+        if (update_info.prompt_logits.has_value()) {
+            generate_output.prompt_logits = update_info.prompt_logits;
+        }
+
         generate_output.finished = isSubGenerateDoneWithoutLock(i);
         if (generate_input_->generate_config->aux_info) {
             generate_output.aux_info.iter_count   = iter_count_;
@@ -107,14 +157,20 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
             generate_output.aux_info.local_reuse_len  = local_reuse_length_;
             generate_output.aux_info.remote_reuse_len = remote_reuse_length_;
             generate_output.aux_info.memory_reuse_len = memory_reuse_length_;
-            if (generate_input_->generate_config->return_softmax_probs && softmax_probs_.defined()) {
+
+            generate_output.aux_info.multimodal_lengths = generate_input_->multimodalLengths();
+
+            generate_output.aux_info.speculative_draft_rounds            = sp_iter_count_;
+            generate_output.aux_info.speculative_accepted_tokens_per_pos = speculative_accepted_tokens_per_pos_;
+
+            if (calculateSoftmaxProbs() && softmax_probs_.defined()) {
                 generate_output.aux_info.softmax_probs =
                     softmax_probs_[i].narrow(0, last_output_pos_, output_len).clone();
             }
             if (update_info.cum_log_probs.defined()) {
                 generate_output.aux_info.cum_log_probs = cum_log_probs_.narrow(0, i, 1).cpu().clone();
             }
-            if (generate_input_->generate_config->return_all_probs) {
+            if (generate_input_->generate_config->return_all_probs != ReturnAllProbsMode::NONE) {
                 if (!update_info.all_probs.defined()) {
                     throw std::runtime_error("all_probs is not while generate_config return_all_probs is true");
                 }
@@ -145,12 +201,13 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
 }
 
 void NormalGenerateStream::enqueueGenerateOutput(GenerateOutputs&& generate_results) {
-    if (generate_outputs_queue_.getSize() >= generate_outputs_queue_.getCapacity()) {
+    if (generate_outputs_.size() >= kOutputCapacity) {
         /* No matter if the queue is full for any reason,
            the stream will be set to stop directly to prevent the push to queue from getting stuck. */
         reportEventWithoutLock(StreamEvents::Error, ErrorCode::OUTPUT_QUEUE_FULL, "output queue is full");
     } else {
-        generate_outputs_queue_.push(std::move(generate_results));
+        generate_outputs_.push_back(std::move(generate_results));
+        consumer_cv_->notify_all();
     }
 }
 
@@ -167,10 +224,11 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
         last_hidden_states_ = update_info.all_hidden_states;
     }
 
-    if (generate_input_->generate_config->return_softmax_probs && update_info.softmax_probs.defined()) {
+    if (calculateSoftmaxProbs() && update_info.softmax_probs.defined()) {
         RTP_LLM_CHECK(update_info.softmax_probs.dim() == 2);
         RTP_LLM_CHECK(update_info.softmax_probs.size(1) == update_info.num_new_tokens);
-        setSoftmaxProbs(update_info.softmax_probs, seqLength() - update_info.num_new_tokens);
+        setSoftmaxProbs(
+            update_info.softmax_probs, seqLength() - update_info.num_new_tokens, update_info.src_batch_indices);
     }
 
     finished_ = needFinish();
@@ -186,17 +244,24 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
     }
 
     // TODO: move it to better position
-    RTP_LLM_LOG_DEBUG("stream [%ld] finished: %d, pd_sep: %d, is_streaming: %d, need_remote_generate: %d",
-                      streamId(),
+    RTP_LLM_LOG_DEBUG("stream [%s] finished: %d, pd_sep: %d, is_streaming: %d, need_remote_generate: %d",
+                      streamLogTag().c_str(),
                       finished_,
                       queryPdSep(),
                       isStreaming(),
                       update_info.update_remote_generate);
 
-    if (!finished_ && queryPdSep() && update_info.update_remote_generate) {
+    if (queryPdSep() && update_info.update_remote_generate) {
+        // Hold KV cache even when the stream already finished in prefill
+        // (e.g. stop words hit): the decode role still issues RemoteLoad for
+        // these blocks and would hang if they were freed here.
+        RTP_LLM_LOG_DEBUG("stream [%s] hold kv cache for pd-sep", streamLogTag().c_str());
         holdKVCacheForPDSep();
-        reportEventWithoutLock(StreamEvents::NeedRemoteGenerate);
-        reportEventWithoutLock(StreamEvents::GenerateDone);
+        if (!finished_) {
+            RTP_LLM_LOG_DEBUG("stream [%s] set need_remote_generate", streamLogTag().c_str());
+            reportEventWithoutLock(StreamEvents::NeedRemoteGenerate);
+            reportEventWithoutLock(StreamEvents::GenerateDone);
+        }
     }
 
     bool pd_sep_first_token = queryPdSep();
@@ -209,10 +274,10 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
         return;
     }
 
-    RTP_LLM_LOG_DEBUG("stream [%ld] enqueue generate output", streamId());
+    RTP_LLM_LOG_DEBUG("stream [%s] enqueue generate output", streamLogTag().c_str());
     enqueueGenerateOutput(prepareGenerateOutput(update_info));
 
-    if (hasError()) {
+    if (hasErrorWithoutLock()) {
         return;
     }
 
