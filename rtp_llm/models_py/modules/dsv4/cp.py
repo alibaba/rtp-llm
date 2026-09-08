@@ -30,6 +30,9 @@ single-rank path unchanged.
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional, Tuple, Union
 
+import os
+import re
+
 import torch
 import triton
 import triton.language as tl
@@ -286,9 +289,25 @@ class CudaAsyncCPGatherImpl:
                 f"CudaAsyncCPGatherImpl.wait expected CPCudaAsyncGatherHandle, got {type(handle)!r}"
             )
         current_stream = torch.cuda.current_stream(handle.gathered.device)
-        with record_function_range(f"{handle.profile_name}.wait_host"):
-            current_stream.wait_event(handle.completion_event)
-            handle.work.wait()
+        if _CP_GATHER_STATS:
+            # Events on the CURRENT stream bracket the wait + restore. Since
+            # wait_event makes the main stream wait on the gather's completion
+            # event, this measures exactly the stall the gather exposes to
+            # compute -- host timers cannot, because Work.wait() only enqueues a
+            # stream dependency and returns immediately.
+            _cp_gather_stats_drain()
+            ev0 = torch.cuda.Event(enable_timing=True)
+            ev1 = torch.cuda.Event(enable_timing=True)
+            ev2 = torch.cuda.Event(enable_timing=True)
+            ev0.record(current_stream)
+            with record_function_range(f"{handle.profile_name}.wait_host"):
+                current_stream.wait_event(handle.completion_event)
+                handle.work.wait()
+            ev1.record(current_stream)
+        else:
+            with record_function_range(f"{handle.profile_name}.wait_host"):
+                current_stream.wait_event(handle.completion_event)
+                handle.work.wait()
         # Restore destination: the per-forward workspace restore scratch
         # (non-prefix path) instead of a fresh per-layer ``index_select``
         # output. The prefix fast-path returns a view of ``gathered`` and
@@ -306,6 +325,16 @@ class CudaAsyncCPGatherImpl:
         with record_function_range(f"{handle.profile_name}.restore"):
             full = _cp_restore_gathered_full_2d(
                 handle.gathered, handle.cp_ctx, out=out_buf
+            )
+        if _CP_GATHER_STATS:
+            ev2.record(current_stream)
+            nbytes = handle.gathered.numel() * handle.gathered.element_size()
+            _cp_gather_record(
+                _cp_gather_kind(f"{handle.profile_name}.async_wait"),
+                ev0,
+                ev1,
+                ev2,
+                nbytes,
             )
         # Compressor gather/restore buffers come from the per-forward
         # ``PrefillWorkspace`` union — they are reused across layers (never
@@ -626,6 +655,21 @@ def cp_all_gather_full(
     """
     profile_name = profile_name or f"{_DEFAULT_CP_PROFILE_NAME}.sync"
     local_2d = _cp_gather_2d(local_2d, cp_ctx)
+    if _CP_GATHER_STATS:
+        _cp_gather_stats_drain()
+        kind = _cp_gather_kind(profile_name)
+        nbytes = local_2d.numel() * local_2d.element_size() * cp_ctx.cp_size
+        ev0 = torch.cuda.Event(enable_timing=True)
+        ev2 = torch.cuda.Event(enable_timing=True)
+        ev0.record()
+        with record_function_range(f"{profile_name}.launch"):
+            gathered = all_gather(local_2d, group=Group.TP)
+        # gathered: [cp_size * chunk_length, H]
+        with record_function_range(f"{profile_name}.restore"):
+            full = _cp_restore_gathered_full_2d(gathered, cp_ctx)
+        ev2.record()
+        _cp_gather_record(kind, ev0, ev2, nbytes)
+        return full
     with record_function_range(f"{profile_name}.launch"):
         gathered = all_gather(local_2d, group=Group.TP)
     # gathered: [cp_size * chunk_length, H]
@@ -693,6 +737,102 @@ def _cp_all_gather_into_empty(tensor: torch.Tensor, group: Group) -> torch.Tenso
     return gathered
 
 
+# ---------------------------------------------------------------------------
+# Env-gated CP gather timing (task #38). Measured scaling efficiency says a CP2
+# rank costs 1.738x per token what a tp1 rank costs, i.e. ~43% of t_stage is CP
+# overhead, while payload-halving, channel count and the tree's own overlap
+# orchestrator all measured null. So the question is how long these
+# full-sequence gathers actually hold the stream. CUDA events, not host timers:
+# the gather is enqueued on the calling stream, so an event pair around it
+# measures the time the main stream is really held. Pairs are drained with the
+# non-blocking Event.query() on later calls, so measuring does not serialize the
+# thing being measured. Inert unless DSV4_CP_GATHER_STATS=1.
+# ---------------------------------------------------------------------------
+_CP_GATHER_STATS = os.environ.get("DSV4_CP_GATHER_STATS", "0") == "1"
+_CP_GATHER_STATS_EVERY = int(os.environ.get("DSV4_CP_GATHER_STATS_EVERY", "200"))
+_cp_gather_stats: dict = {
+    "calls": 0,
+    "launch_ms": 0.0,
+    "restore_ms": 0.0,
+    "total_ms": 0.0,
+    "bytes": 0,
+    "pending": [],
+    "by_kind": {},
+    "announced": False,
+}
+if _CP_GATHER_STATS:
+    import atexit as _cp_atexit
+
+    _cp_atexit.register(lambda: _cp_gather_stats_report())
+
+
+def _cp_gather_kind(profile_name: Optional[str]) -> str:
+    """Gather kind with the per-layer id stripped, so totals aggregate."""
+    name = profile_name or _DEFAULT_CP_PROFILE_NAME
+    return re.sub(r"\.L\d+\.", ".L*.", name)
+
+
+def _cp_gather_record(kind: str, ev_start, ev_mid, ev_end, nbytes: int) -> None:
+    """Accumulate one timed region. ``ev_mid`` may be None when the caller does
+    not split launch from restore (the sync and async-wait paths)."""
+    if not _cp_gather_stats["announced"]:
+        _cp_gather_stats["announced"] = True
+        import sys
+
+        print(
+            f"[CPGATHER] instrumentation live; first timed call kind={kind} "
+            f"bytes={nbytes / 1e6:.2f}MB report_every={_CP_GATHER_STATS_EVERY}",
+            file=sys.stderr,
+            flush=True,
+        )
+    _cp_gather_stats["calls"] += 1
+    _cp_gather_stats["pending"].append((kind, ev_start, ev_mid, ev_end, nbytes))
+    if _cp_gather_stats["calls"] % _CP_GATHER_STATS_EVERY == 0:
+        _cp_gather_stats_report()
+
+
+def _cp_gather_stats_drain(force: bool = False) -> None:
+    keep = []
+    for name, ev0, ev1, ev2, nbytes in _cp_gather_stats["pending"]:
+        if not (force or ev2.query()):
+            keep.append((name, ev0, ev1, ev2, nbytes))
+            continue
+        total = ev0.elapsed_time(ev2)
+        if ev1 is not None:
+            launch = ev0.elapsed_time(ev1)
+            restore = ev1.elapsed_time(ev2)
+            _cp_gather_stats["launch_ms"] += launch
+            _cp_gather_stats["restore_ms"] += restore
+        _cp_gather_stats["total_ms"] += total
+        _cp_gather_stats["bytes"] += nbytes
+        agg = _cp_gather_stats["by_kind"].setdefault(name, [0, 0.0, 0])
+        agg[0] += 1
+        agg[1] += total
+        agg[2] += nbytes
+    _cp_gather_stats["pending"] = keep
+
+
+def _cp_gather_stats_report() -> None:
+    import sys
+
+    _cp_gather_stats_drain(force=True)
+    s = _cp_gather_stats
+    print(
+        f"[CPGATHER] calls={s['calls']} launch={s['launch_ms']:.1f}ms "
+        f"restore={s['restore_ms']:.1f}ms total={s['total_ms']:.1f}ms "
+        f"bytes={s['bytes'] / 1e6:.1f}MB mean={s['total_ms'] / max(s['calls'], 1):.3f}ms",
+        file=sys.stderr,
+        flush=True,
+    )
+    for kind, (n, ms, nbytes) in sorted(s["by_kind"].items(), key=lambda kv: -kv[1][1]):
+        print(
+            f"[CPGATHER]   {kind}: n={n} total={ms:.1f}ms "
+            f"mean={ms / max(n, 1):.3f}ms bytes={nbytes / 1e6:.1f}MB",
+            file=sys.stderr,
+            flush=True,
+        )
+
+
 def cp_all_gather_full_varlen(
     local_flat: torch.Tensor,
     cp_ctx: CPContext,
@@ -720,6 +860,22 @@ def cp_all_gather_full_varlen(
     ), f"local_flat.size(0)={local_flat.size(0)} != chunk_length={cp_ctx.chunk_length}"
     trailing = local_flat.shape[1:]
     local_2d = local_flat.reshape(cp_ctx.chunk_length, -1).contiguous()
+    if _CP_GATHER_STATS:
+        _cp_gather_stats_drain()
+        kind = _cp_gather_kind(profile_name)
+        nbytes = local_2d.numel() * local_2d.element_size() * cp_ctx.cp_size
+        ev0 = torch.cuda.Event(enable_timing=True)
+        ev1 = torch.cuda.Event(enable_timing=True)
+        ev2 = torch.cuda.Event(enable_timing=True)
+        ev0.record()
+        with record_function_range(f"{profile_name}.launch"):
+            gathered = _cp_all_gather_into_empty(local_2d, group=Group.TP)
+        ev1.record()
+        with record_function_range(f"{profile_name}.restore"):
+            full = _cp_restore_gathered_full_2d(gathered, cp_ctx)
+        ev2.record()
+        _cp_gather_record(kind, ev0, ev1, ev2, nbytes)
+        return full.view((cp_ctx.seq_len_full,) + trailing)
     with record_function_range(f"{profile_name}.launch"):
         gathered = _cp_all_gather_into_empty(local_2d, group=Group.TP)
     with record_function_range(f"{profile_name}.restore"):
