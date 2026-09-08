@@ -362,6 +362,27 @@ class FoundationLoaderTest(unittest.TestCase):
                 NewModelLoader._validate_loaded_weights(model)
                 self.assertTrue(torch.equal(model.canonical, expected))
 
+    def test_duplicate_checkpoint_aliases_for_one_target_fail(self):
+        class TiedAliases(RtpModule):
+            def __init__(self):
+                super().__init__()
+                shared = nn.Parameter(torch.empty(2))
+                self.canonical = shared
+                self.checkpoint_alias = shared
+
+        model = TiedAliases()
+        with self.assertRaisesRegex(
+            RuntimeError, "Multiple checkpoint tensors target the same runtime weight"
+        ):
+            model.load_weights(
+                iter(
+                    (
+                        ("canonical", torch.tensor([1.0, 2.0])),
+                        ("checkpoint_alias", torch.tensor([3.0, 4.0])),
+                    )
+                )
+            )
+
     def test_non_recursive_apply_preserves_shared_parameter_identity(self):
         class Parent(RtpModule):
             def __init__(self):

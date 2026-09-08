@@ -83,7 +83,8 @@ public:
                              torch::Tensor t_kv_cache_block_id_device,
                              int           seq_size_per_block,
                              bool          forbid_realloc     = false,
-                             int           planned_batch_size = -1);
+                             int           planned_batch_size = -1,
+                             int           input_token_count  = -1);
 
     // Tensor views into buf_h and buf_d
     torch::Tensor batch_indice_h;
