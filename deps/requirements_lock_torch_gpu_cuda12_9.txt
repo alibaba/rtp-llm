@@ -4203,12 +4203,12 @@ xfastertransformer-devel==1.8.1.1 ; platform_machine == "x86_64" \
 xfastertransformer-devel-icx==1.8.1.1 ; platform_machine == "x86_64" \
     --hash=sha256:dfd1714815d38dfea89532365fbe36d502f0bb3baf37c0b472c16743a8cbe352
     # via -r requirements_base.txt
-xgrammar==0.2.5 \
-    --hash=sha256:4833b7a5c267c64fe17e1bac5410f39c0555f7411d9cdc3d09bd07dee872c569 \
-    --hash=sha256:5c84032e8c67f5e02ea8e920ee0d12fc1fce47a3f6b69e3165b1e2264e9f2f18 \
-    --hash=sha256:69901bd7469127b59e22668a41efc25e9062a591b4596e5a8877fae18bd10832 \
-    --hash=sha256:7038525ffb1f3f2c5cf2dc200332e79f6f2fd836a106e7147d8c6b9c63d787a4 \
-    --hash=sha256:a0e49cfd0d447247c72f10505c7d6b84696296f68dd03ca294fc1d961db4e786
+xgrammar==0.2.6rc2 \
+    --hash=sha256:be41888d0486d3ee7c32f0fcc110cffb7f76e1b1c15e768e9b0a3c0a5c57d73a \
+    --hash=sha256:e1dad3fb77382d9c8a698c6be6314516f4171b38a6205389065b6f5ba02343c6 \
+    --hash=sha256:a4b2c441637e54460b96fb0a54ab09253c72a03ca6fad95044dfe1676fc6c86f \
+    --hash=sha256:db82526c46e98475292e408e2d9530e4eb5cbe1ff5e3e6625be7d813772d017d \
+    --hash=sha256:6045e54b8f8cb8d89ee8b3997fc58b4872e1253f6dedfa31039c6951f95deb13
     # via -r deps/requirements_base.txt
 xxhash==3.6.0 \
     --hash=sha256:01262da8798422d0685f7cef03b2bd3f4f46511b02830861df548d7def4402ad \
