@@ -49,6 +49,30 @@ ClientWrapper::~ClientWrapper() {
 }
 
 bool ClientWrapper::init(const ConfigMap& config_map, const kv_cache_manager::InitParams& init_params) {
+    return initImpl(config_map, init_params, {});
+}
+
+bool ClientWrapper::initForPools(const ConfigMap&                     config_map,
+                                 kv_cache_manager::RoleType           role,
+                                 const std::vector<PoolRegistration>& registrations) {
+    if (registrations.empty()) {
+        RTP_LLM_LOG_ERROR("KVCM requires at least one pool registration");
+        return false;
+    }
+    for (const auto& registration : registrations) {
+        if (!registration.span.base || registration.span.size == 0 || registration.location_spec_name.empty()) {
+            RTP_LLM_LOG_ERROR("KVCM pool registration requires a valid span and location spec name");
+            return false;
+        }
+    }
+    auto                               first_span = registrations.front().span;
+    const kv_cache_manager::InitParams params{role, &first_span, registrations.front().location_spec_name};
+    return initImpl(config_map, params, registrations);
+}
+
+bool ClientWrapper::initImpl(const ConfigMap&                     config_map,
+                             const kv_cache_manager::InitParams&  init_params,
+                             const std::vector<PoolRegistration>& registrations) {
     std::lock_guard<std::mutex> shutdown_lock(shutdown_mutex_);
     if (config_map.size() != 1) {
         RTP_LLM_LOG_ERROR("KVCM requires exactly one endpoint config, got %zu", config_map.size());
@@ -70,14 +94,19 @@ bool ClientWrapper::init(const ConfigMap& config_map, const kv_cache_manager::In
             return false;
         }
     }
-    if (transfer_client_ || !config_map_.empty() || !meta_client_map_.empty()) {
+    if (!transfer_clients_.empty() || !config_map_.empty() || !meta_client_map_.empty()) {
         RTP_LLM_LOG_ERROR("ClientWrapper cannot be initialized more than once");
         return false;
     }
-    init_params_ = init_params;
+    init_params_        = init_params;
+    pool_registrations_ = registrations;
+    if (pool_registrations_.empty()) {
+        pool_registrations_.push_back(
+            {init_params.regist_span ? *init_params.regist_span : kv_cache_manager::RegistSpan{},
+             init_params.self_location_spec_name});
+    }
     if (init_params.regist_span != nullptr) {
-        registration_span_       = *init_params.regist_span;
-        init_params_.regist_span = &registration_span_;
+        init_params_.regist_span = &pool_registrations_.front().span;
     }
     if (init_params_.role_type != kv_cache_manager::RoleType::HYBRID) {
         init_params_.role_type = kv_cache_manager::RoleType::SCHEDULER;
@@ -91,17 +120,29 @@ bool ClientWrapper::init(const ConfigMap& config_map, const kv_cache_manager::In
         meta_client_map_.clear();
         init_params_.role_type = kv_cache_manager::RoleType::WORKER;
     }
-    transfer_client_ =
-        client_factory_->createTransferClient(autil::legacy::ToJsonString(config_map_.begin()->second), init_params_);
-    if (!transfer_client_) {
-        RTP_LLM_LOG_ERROR("init trasfer client failed");
-        return false;
+    const auto config_json = autil::legacy::ToJsonString(config_map_.begin()->second);
+    std::vector<std::unique_ptr<kv_cache_manager::TransferClient>> clients;
+    clients.reserve(pool_registrations_.size());
+    for (size_t index = 0; index < pool_registrations_.size(); ++index) {
+        auto params = init_params_;
+        if (index != 0) {
+            params.role_type               = kv_cache_manager::RoleType::WORKER;
+            params.regist_span             = &pool_registrations_[index].span;
+            params.self_location_spec_name = pool_registrations_[index].location_spec_name;
+        }
+        auto client = client_factory_->createTransferClient(config_json, params);
+        if (!client) {
+            RTP_LLM_LOG_ERROR("init KVCM transfer client failed for pool %zu", index);
+            return false;
+        }
+        clients.push_back(std::move(client));
     }
+    transfer_clients_ = std::move(clients);
     try {
         reinit_worker_ = std::thread([this] { reinitWorkerLoop(); });
     } catch (const std::exception& error) {
         RTP_LLM_LOG_ERROR("start KVCM re-registration worker failed: %s", error.what());
-        transfer_client_.reset();
+        transfer_clients_.clear();
         return false;
     }
     return true;
@@ -120,7 +161,7 @@ void ClientWrapper::shutdown() noexcept {
     }
     {
         std::unique_lock<std::shared_mutex> transfer_guard(transfer_mutex_);
-        transfer_client_.reset();
+        transfer_clients_.clear();
     }
     {
         std::unique_lock<std::shared_mutex> metadata_guard(rr_mutex_);
@@ -128,6 +169,7 @@ void ClientWrapper::shutdown() noexcept {
         subscriber_.reset();
         config_map_.clear();
         init_params_.regist_span = nullptr;
+        pool_registrations_.clear();
     }
 }
 
@@ -412,12 +454,19 @@ bool ClientWrapper::waitForRetry(int sleep_time_ms) {
 bool ClientWrapper::loadKvCaches(const kv_cache_manager::UriStrVec&                          uri_str_vec,
                                  kv_cache_manager::BlockBuffers&                             block_buffers,
                                  const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace_info) {
+    return loadKvCachesForPool(0, uri_str_vec, block_buffers, trace_info);
+}
+
+bool ClientWrapper::loadKvCachesForPool(size_t                                                      pool_index,
+                                        const kv_cache_manager::UriStrVec&                          uri_str_vec,
+                                        kv_cache_manager::BlockBuffers&                             block_buffers,
+                                        const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace_info) {
     std::shared_lock read_guard(transfer_mutex_);
-    if (transfer_client_ == nullptr) {
+    if (pool_index >= transfer_clients_.size()) {
         RTP_LLM_LOG_ERROR("kvcm client not find transfer client");
         return false;
     }
-    auto ec = transfer_client_->LoadKvCaches(uri_str_vec, block_buffers, trace_info);
+    auto ec = transfer_clients_[pool_index]->LoadKvCaches(uri_str_vec, block_buffers, trace_info);
     if (ec != kv_cache_manager::ClientErrorCode::ER_OK) {
         RTP_LLM_LOG_ERROR("kvcm client loadKvCaches fail, ec [%d]", ec);
         return false;
@@ -429,12 +478,20 @@ std::pair<bool, kv_cache_manager::UriStrVec>
 ClientWrapper::saveKvCaches(const kv_cache_manager::UriStrVec&                          uri_str_vec,
                             const kv_cache_manager::BlockBuffers&                       block_buffers,
                             const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace_info) {
+    return saveKvCachesForPool(0, uri_str_vec, block_buffers, trace_info);
+}
+
+std::pair<bool, kv_cache_manager::UriStrVec>
+ClientWrapper::saveKvCachesForPool(size_t                                                      pool_index,
+                                   const kv_cache_manager::UriStrVec&                          uri_str_vec,
+                                   const kv_cache_manager::BlockBuffers&                       block_buffers,
+                                   const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace_info) {
     std::shared_lock read_guard(transfer_mutex_);
-    if (transfer_client_ == nullptr) {
+    if (pool_index >= transfer_clients_.size()) {
         RTP_LLM_LOG_ERROR("kvcm client not find transfer client");
         return {false, {}};
     }
-    auto [ec, result] = transfer_client_->SaveKvCaches(uri_str_vec, block_buffers, trace_info);
+    auto [ec, result] = transfer_clients_[pool_index]->SaveKvCaches(uri_str_vec, block_buffers, trace_info);
     if (ec != kv_cache_manager::ClientErrorCode::ER_OK) {
         RTP_LLM_LOG_ERROR("kvcm client saveKvCaches fail, ec [%d]", ec);
         return {false, {}};

@@ -24,6 +24,13 @@ public:
     explicit ClientWrapper(std::unique_ptr<ClientFactory> client_factory = std::make_unique<ClientFactory>());
     virtual ~ClientWrapper();
     virtual bool init(const ConfigMap& config_str_map, const kv_cache_manager::InitParams& init_params);
+    struct PoolRegistration {
+        kv_cache_manager::RegistSpan span;
+        std::string                  location_spec_name;
+    };
+    bool         initForPools(const ConfigMap&                     config_map,
+                              kv_cache_manager::RoleType           role,
+                              const std::vector<PoolRegistration>& registrations);
     virtual void shutdown() noexcept;
     // for meta client
     virtual std::pair<bool, kv_cache_manager::Locations> match(const std::string&                      unique_id,
@@ -57,7 +64,20 @@ public:
                  const kv_cache_manager::BlockBuffers&                       block_buffers,
                  const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace_info = nullptr);
 
+    bool loadKvCachesForPool(size_t                                                      pool_index,
+                             const kv_cache_manager::UriStrVec&                          uris,
+                             kv_cache_manager::BlockBuffers&                             buffers,
+                             const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace_info);
+    std::pair<bool, kv_cache_manager::UriStrVec>
+    saveKvCachesForPool(size_t                                                      pool_index,
+                        const kv_cache_manager::UriStrVec&                          uris,
+                        const kv_cache_manager::BlockBuffers&                       buffers,
+                        const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace_info);
+
 private:
+    bool initImpl(const ConfigMap&                     config_map,
+                  const kv_cache_manager::InitParams&  init_params,
+                  const std::vector<PoolRegistration>& registrations);
     using MetaClientMap = std::map<std::string, std::shared_ptr<kv_cache_manager::MetaClient>>;
     bool initMetaClient(const std::string& unique_id, KVCMConfigPtr config);
     // reinit if address_snapshot_ change
@@ -74,7 +94,7 @@ private:
     kv_cache_manager::InitParams init_params_;
     // InitParams carries a pointer, so retain the descriptor for every later
     // meta-client re-registration performed by this wrapper.
-    kv_cache_manager::RegistSpan registration_span_;
+    std::vector<PoolRegistration> pool_registrations_;
     // keys of config_map_/meta_client_map_ will not change after init
     ConfigMap                config_map_;
     MetaClientMap            meta_client_map_;
@@ -87,15 +107,15 @@ private:
     // for re-registration
     std::shared_mutex rr_mutex_;
     // Transfer I/O remains available while metadata clients are re-registering.
-    // Shutdown takes this lock exclusively before destroying transfer_client_.
+    // Shutdown takes this lock exclusively before destroying the pool transfer clients.
     std::shared_mutex transfer_mutex_;
 
     // when slaver reaches 3, need reinitAllMetaClients
     std::atomic<int> grpc_error_count_{0};
 
-    std::unique_ptr<ClientFactory>                    client_factory_;
-    std::unique_ptr<kv_cache_manager::TransferClient> transfer_client_;
-    std::unique_ptr<kvcm::Subscriber>                 subscriber_;
+    std::unique_ptr<ClientFactory>                                 client_factory_;
+    std::vector<std::unique_ptr<kv_cache_manager::TransferClient>> transfer_clients_;
+    std::unique_ptr<kvcm::Subscriber>                              subscriber_;
 
     std::mutex              reinit_worker_mutex_;
     std::mutex              shutdown_mutex_;
