@@ -21,6 +21,7 @@ from rtp_llm.config.py_config_modules import (
 )
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.model_loader.load_config import LoadMethod
+from rtp_llm.models_py.distributed.rank_layout import RankLayout
 from rtp_llm.ops import (
     DeviceResourceConfig,
     FMHAConfig,
@@ -201,8 +202,9 @@ class WeightConverter:
                 f"tp_size={pc.tp_size}, dp_size={pc.dp_size}"
             )
 
-        pc.tp_rank = _env_int("TP_RANK", pc.world_rank % pc.tp_size)
-        pc.dp_rank = _env_int("DP_RANK", pc.world_rank // pc.tp_size)
+        coord = RankLayout.from_parallelism_config(pc).coord_of_unchecked(pc.world_rank)
+        pc.tp_rank = _env_int("TP_RANK", coord.tp)
+        pc.dp_rank = _env_int("DP_RANK", coord.dp)
         pc.ep_rank = pc.world_rank % pc.ep_size
         pc.local_rank = pc.world_rank % pc.local_world_size
         pc.ffn_tp_size = pc.tp_size // pc.ffn_sp_size

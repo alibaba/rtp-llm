@@ -482,6 +482,7 @@ py_library(
     ],
     deps = [
         "//rtp_llm/server:server",
+        "//rtp_llm/models_py/distributed:rank_layout",
         ":uvicorn",
         ":fastapi",
         ":psutil",

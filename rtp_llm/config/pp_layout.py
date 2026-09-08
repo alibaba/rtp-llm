@@ -13,6 +13,8 @@ re-derive the partition rule (see stage_layer_range).
 
 from typing import Callable, List, Optional
 
+from rtp_llm.models_py.distributed.rank_layout import RankLayout
+
 
 def even_split_counts(num_layers: int, pp_size: int) -> List[int]:
     """Default partition: even split, remainder to the earlier stages.
@@ -116,12 +118,10 @@ def stage_layer_range(
 
 def derive_pp_rank(world_rank: int, dp_size: int, tp_size: int) -> int:
     """Fallback pp_rank for configs that only carry sizes (fake configs in
-    tests). PP is the outermost dim of the world-rank layout:
-    world_rank = pp_rank * (dp_size * tp_size) + dp_rank * tp_size + tp_rank.
-    Production configs carry pp_rank directly and never need this."""
-    dp_size = max(int(dp_size or 1), 1)
-    tp_size = max(int(tp_size or 1), 1)
-    return int(world_rank or 0) // (dp_size * tp_size)
+    tests). Production configs carry pp_rank directly and never need this;
+    the rank formula itself lives solely in RankLayout."""
+    layout = RankLayout(dp_size=int(dp_size or 1), tp_size=int(tp_size or 1))
+    return layout.coord_of_unchecked(int(world_rank or 0)).pp
 
 
 def stage_has_embedding(pp_rank: int) -> bool:

@@ -22,6 +22,7 @@ from rtp_llm.config.server_config_setup import (
     set_parallelism_config,
     setup_cuda_device_and_accl_env,
 )
+from rtp_llm.models_py.distributed.rank_layout import RankLayout
 from rtp_llm.utils.concurrency_controller import (
     ConcurrencyController,
     set_global_controller,
@@ -153,7 +154,8 @@ def _validate_dp_configuration(py_env_configs: PyEnvConfigs):
     pc = py_env_configs.parallelism_config
     if pc.dp_size > 1:
         # tp must on one device when dp
-        assert pc.world_rank % pc.tp_size == 0
+        layout = RankLayout.from_parallelism_config(pc)
+        assert layout.coord_of_unchecked(pc.world_rank).tp == 0
 
 
 def _create_rank_processes(

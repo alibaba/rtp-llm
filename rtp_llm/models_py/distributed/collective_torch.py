@@ -264,7 +264,7 @@ def _create_process_groups(
 
     if tp_size > 1 and world_size != tp_size:
         # Create all TP groups - all ranks must participate in creating all TP groups
-        # TP group: ranks with the same (pp_rank, dp_rank); key suffix == world_rank // tp_size.
+        # TP group: ranks with the same (pp_rank, dp_rank); key suffix encodes that pinned pair.
         for tp_ranks in layout.groups(Group.TP):
             first = layout.coord_of(tp_ranks[0])
             logging.info(

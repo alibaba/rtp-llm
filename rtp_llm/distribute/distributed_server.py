@@ -11,7 +11,6 @@ from typing import Any, Dict, List, NamedTuple, Optional
 
 from torch.distributed import TCPStore
 
-from rtp_llm.config.pp_layout import derive_pp_rank
 from rtp_llm.config.py_config_modules import (
     COORDINATOR_INFO_PORT_NUM,
     DistributeConfig,
@@ -19,6 +18,7 @@ from rtp_llm.config.py_config_modules import (
     ServerConfig,
 )
 from rtp_llm.distribute.worker_info import WorkerInfo
+from rtp_llm.models_py.distributed.rank_layout import RankLayout
 from rtp_llm.ops import NcclCommConfig, ParallelismConfig
 
 
@@ -111,17 +111,13 @@ def get_dp_addrs_from_world_info(
         )
     else:
         """Only the leading stage admits requests (downstream stages never run the scheduler);
-        the pp_rank filter is a no-op at pp_size=1."""
+        the pp filter is a no-op at pp_size=1."""
+        layout = RankLayout.from_parallelism_config(parallelism_config)
         members = [
             member
             for member in world_info.members
-            if (member.world_rank % parallelism_config.tp_size) == 0
-            and derive_pp_rank(
-                member.world_rank,
-                parallelism_config.dp_size,
-                parallelism_config.tp_size,
-            )
-            == 0
+            if (coord := layout.coord_of_unchecked(member.world_rank)).tp == 0
+            and coord.pp == 0
         ]
 
     addresses = [f"{member.ip}:{member.rpc_server_port}" for member in members]

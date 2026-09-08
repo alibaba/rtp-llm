@@ -740,9 +740,8 @@ absl::Status NormalEngine::step() {
 absl::Status NormalEngine::pp_step() {
     RTP_LLM_PROFILE_SCOPE("engine.normal.pp_step_work");
 
-    const int64_t ranks_per_stage          = parallelism_config.dp_size * parallelism_config.tp_size;
-    const int64_t pp_rank                  = parallelism_config.world_rank / ranks_per_stage;
-    const bool    is_first_stage_scheduler = pp_rank == 0 && parallelism_config.tp_rank == 0;
+    // pp_rank is materialized by the Python-side RankLayout at startup.
+    const bool is_first_stage_scheduler = parallelism_config.pp_rank == 0 && parallelism_config.tp_rank == 0;
 
     // Pauses only new pipeline admission so other ranks can continue draining
     // batches that have already entered the pipeline.
