@@ -2,44 +2,29 @@
 
 #include <exception>
 
-#include "rtp_llm/cpp/utils/Logger.h"
+#include "rtp_llm/cpp/utils/AssertUtils.h"
 
 namespace rtp_llm {
 
-AlignedHostMemory::AlignedHostMemory(size_t             usable_bytes,
-                                     size_t             alignment,
-                                     bool               try_pin_memory,
-                                     const std::string& allocation_name) {
-    auto cpu = torch::empty({static_cast<int64_t>(usable_bytes + alignment)},
-                            torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU));
-    if (try_pin_memory) {
-        try {
-            backing_ = cpu.pin_memory();
-            if (!backing_.is_pinned()) {
-                RTP_LLM_LOG_WARNING("pin host memory unavailable, fallback to pageable CPU memory, allocation=%s",
-                                    allocation_name.c_str());
-            }
-        } catch (const std::exception& e) {
-            RTP_LLM_LOG_WARNING("pin host memory failed, fallback to pageable CPU memory, allocation=%s error=%s",
-                                allocation_name.c_str(),
-                                e.what());
-        }
+AlignedHostMemory::AlignedHostMemory(size_t usable_bytes, size_t alignment, const std::string& allocation_name) {
+    try {
+        backing_ = torch::empty({static_cast<int64_t>(usable_bytes + alignment)},
+                                torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU).pinned_memory(true));
+    } catch (const std::exception& e) {
+        RTP_LLM_FAIL("allocate pinned host memory failed, allocation=%s usable_bytes=%zu error=%s",
+                     allocation_name.c_str(),
+                     usable_bytes,
+                     e.what());
     }
-    if (!backing_.defined() || !backing_.is_pinned()) {
-        backing_ = cpu;
-    }
+    RTP_LLM_CHECK_WITH_INFO(
+        backing_.is_pinned(), "host allocation [%s] must use pinned CPU memory", allocation_name.c_str());
 
-    pinned_             = backing_.is_pinned();
     const auto raw_base = reinterpret_cast<uintptr_t>(backing_.data_ptr<uint8_t>());
     data_               = reinterpret_cast<uint8_t*>((raw_base + alignment - 1) / alignment * alignment);
 }
 
 uint8_t* AlignedHostMemory::data() const {
     return data_;
-}
-
-bool AlignedHostMemory::isPinned() const {
-    return pinned_;
 }
 
 }  // namespace rtp_llm

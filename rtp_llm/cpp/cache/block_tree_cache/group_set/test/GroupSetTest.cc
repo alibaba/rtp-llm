@@ -83,7 +83,7 @@ TEST(GroupSetTest, ForwardsTreeReferencesToDevicePools) {
 TEST(GroupSetTest, ReleasesLowerTierTreeReferencesInBatch) {
     const auto topology    = makeTestTopology({makeGroupBase({0})});
     const auto device_pool = makeTestDevicePool({{64, 16}}, 2, "group_set_batch_release_device");
-    const auto host_pool   = makeHostPool(/*payload_bytes=*/80, /*usable_count=*/2, /*enable_pinned=*/false);
+    const auto host_pool   = makeHostPool(/*payload_bytes=*/80, /*usable_count=*/2);
     const auto group       = makeTestGroupSet(0, topology, {0}, {device_pool}, host_pool);
     const auto blocks      = group->allocateBlocks(2, Tier::HOST, BlockTreeRefType::EVICTION);
     ASSERT_TRUE(blocks.has_value());

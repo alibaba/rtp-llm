@@ -694,7 +694,6 @@ class HybridAttentionType:
 class KVCacheConfig:
     enable_device_cache: bool
     enable_host_cache: bool
-    enable_host_cache_pinned: bool
     enable_disk_cache: bool
     enable_remote_cache: bool
     write_cache_sync: bool
