@@ -122,7 +122,7 @@ class DecodeEndpointTest {
 
     @Test
     void ipPort_format() {
-        assertEquals("10.0.0.1:8080", endpoint.ipPort());
+        assertEquals("10.0.0.1:8080@0", endpoint.ipPort());
     }
 
     // ==================== PR-C: getEngineLoad O(1) + queuedPhaseCount drift ===========

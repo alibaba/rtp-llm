@@ -11,7 +11,6 @@ import org.flexlb.service.grpc.EngineGrpcService;
 import org.flexlb.service.grpc.EngineStatusConverter;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.sync.status.WorkerDirectory;
-import org.flexlb.util.CommonUtils;
 import org.flexlb.util.IdUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -63,11 +62,32 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
                                       boolean fullSnapshotDebugMode,
                                       Executor callbackExecutor) {
 
+        this(modelName, ipPort, workerStatus.getGrpcPort(), site, roleType,
+                workerStatus, pollLease, workerDirectory, engineHealthReporter,
+                engineGrpcService, cacheAwareService, cacheIntervalService,
+                requestTimeoutMs, syncCount, syncEngineStatusInterval,
+                fullSnapshotDebugMode, callbackExecutor);
+    }
+
+    public GrpcCacheStatusCheckRunner(String modelName, String ipPort, int workerStatusPort,
+                                      String site, RoleType roleType,
+                                      WorkerStatus workerStatus,
+                                      WorkerStatus.PollLease pollLease,
+                                      WorkerDirectory workerDirectory,
+                                      EngineHealthReporter engineHealthReporter,
+                                      EngineGrpcService engineGrpcService,
+                                      CacheAwareService cacheAwareService,
+                                      DynamicCacheIntervalService cacheIntervalService,
+                                      long requestTimeoutMs,
+                                      LongAdder syncCount,
+                                      Long syncEngineStatusInterval,
+                                      boolean fullSnapshotDebugMode,
+                                      Executor callbackExecutor) {
+
         this.ipPort = ipPort;
-        String[] split = ipPort.split(":");
-        this.ip = split[0];
+        this.ip = workerStatus.getIp();
         this.roleType = roleType;
-        this.grpcPort = CommonUtils.toGrpcPort(Integer.parseInt(split[1]));
+        this.grpcPort = workerStatusPort;
         this.modelName = modelName;
         this.workerStatus = workerStatus;
         this.workerDirectory = java.util.Objects.requireNonNull(

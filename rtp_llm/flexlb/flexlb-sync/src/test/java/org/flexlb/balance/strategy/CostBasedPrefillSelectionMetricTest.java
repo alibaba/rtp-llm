@@ -157,7 +157,7 @@ class CostBasedPrefillSelectionMetricTest {
         try (SelectedRole selected = select()) {
             assertEquals("10.0.0.2", selected.serverStatus().getServerIp());
             verify(reporter).reportCacheHitMetrics(
-                    RoleType.PREFILL, 200L, 0.2);
+                    RoleType.PREFILL, "10.0.0.2@0", 200L, 0.2);
         }
     }
 
@@ -219,7 +219,7 @@ class CostBasedPrefillSelectionMetricTest {
             assertEquals("10.0.0.2", selected.serverStatus().getServerIp());
         }
         PrefillEndpoint cacheEndpoint = (PrefillEndpoint)
-                registry.get(RoleType.PREFILL, "10.0.0.2:8080");
+                registry.get(RoleType.PREFILL, "10.0.0.2:8080@0");
         cacheEndpoint.getLastSelectedTime().set(Long.MAX_VALUE);
         context.getRequest().setRequestId("20002");
 
@@ -269,7 +269,7 @@ class CostBasedPrefillSelectionMetricTest {
     private static CacheMatchResult localCacheMatch(
             String workerIpPort, long matchedBlocks) {
         return new CacheMatchResult(
-                Map.of(workerIpPort, HostCacheMatch.local(matchedBlocks)),
+                Map.of(workerIpPort + "@0", HostCacheMatch.local(matchedBlocks)),
                 CacheMatchSource.LOCAL_SYNC,
                 0L,
                 100L);
@@ -280,6 +280,6 @@ class CostBasedPrefillSelectionMetricTest {
                 RoleType.PREFILL, null, ip, port, port + 1,
                 true, 1_000_000L, 1_000_000L);
         StrategyTestSupport.publishEndpoint(
-                registry, RoleType.PREFILL, ip + ":" + port, status);
+                registry, RoleType.PREFILL, status.getLogicalIpPort(), status);
     }
 }

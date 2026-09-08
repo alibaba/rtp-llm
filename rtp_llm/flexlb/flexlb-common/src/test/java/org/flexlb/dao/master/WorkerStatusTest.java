@@ -44,6 +44,21 @@ class WorkerStatusTest {
                 RoleType.PREFILL, "group-a", "10.0.0.1", 8080, 9090, "site-a");
     }
 
+    @Test
+    @DisplayName("Discovery identity keeps a physical transport address and logical engine key")
+    void discoveredWorkerSeparatesPhysicalAndLogicalIdentity() {
+        WorkerStatus status = WorkerStatus.createDiscovered(
+                RoleType.PREFILL, "group-a", "10.0.0.1", 8080, 9090,
+                "site-a", "deployment-a", 1, 2);
+
+        assertEquals("10.0.0.1:8080", status.getIpPort());
+        assertEquals("10.0.0.1:8080", status.getPhysicalIpPort());
+        assertEquals("10.0.0.1:8080@1", status.getLogicalIpPort());
+        assertEquals("10.0.0.1@1", status.getIpIndex());
+        assertEquals(1, status.getEngineIndex());
+        assertEquals(2, status.getMultiEngineNum());
+    }
+
     /**
      * Run one whole status transaction exactly as the production reducers do:
      * freeze the RPC response, prepare a strictly-newer committed holder under

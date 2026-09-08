@@ -12,6 +12,7 @@ import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.CacheStatus;
+import org.flexlb.dao.master.WorkerIdentity;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
@@ -409,7 +410,8 @@ class EngineHealthReporterTest {
     @Test
     void shouldReportCacheHitComparisonTokenMetricsWithStableDimensions() {
         CacheHitComparisonResult comparison = new CacheHitComparisonResult(
-                "cache_hit_comparison", "request-1", "KVCM", "PREFILL", "test-group", "10.0.0.1",
+                "cache_hit_comparison", "request-1", "KVCM", "PREFILL", "test-group",
+                new WorkerIdentity("10.0.0.1", 8080, 0),
                 "running", 200,
                 new CacheHitComparisonResult.Actual(120),
                 new CacheHitComparisonResult.HitComparison(100, 20),
@@ -420,7 +422,7 @@ class EngineHealthReporterTest {
 
         FlexMetricTags expectedTags = FlexMetricTags.of(
                 "model", "test-model",
-                "engineIp", "10.0.0.1",
+                "engineIp", "10.0.0.1@0",
                 "role", "PREFILL",
                 "group", "test-group",
                 "taskState", "running",
@@ -435,7 +437,7 @@ class EngineHealthReporterTest {
         verify(monitor).report("app.cache.hit.comparison.local.standby.predicted.ratio", expectedTags, 0.4);
         assertEquals(Map.of(
                 "model", "test-model",
-                "engineIp", "10.0.0.1",
+                "engineIp", "10.0.0.1@0",
                 "role", "PREFILL",
                 "group", "test-group",
                 "taskState", "running",
@@ -465,7 +467,8 @@ class EngineHealthReporterTest {
     @Test
     void shouldNotReportLocalStandbyMetricsWhenPredictionIsUnavailable() {
         CacheHitComparisonResult comparison = new CacheHitComparisonResult(
-                "cache_hit_comparison", "request-1", "LOCAL_SYNC", "PREFILL", "test-group", "10.0.0.1",
+                "cache_hit_comparison", "request-1", "LOCAL_SYNC", "PREFILL", "test-group",
+                new WorkerIdentity("10.0.0.1", 8080, 0),
                 "running", 200,
                 new CacheHitComparisonResult.Actual(120),
                 new CacheHitComparisonResult.HitComparison(100, 20),
@@ -476,7 +479,7 @@ class EngineHealthReporterTest {
 
         FlexMetricTags expectedTags = FlexMetricTags.of(
                 "model", "test-model",
-                "engineIp", "10.0.0.1",
+                "engineIp", "10.0.0.1@0",
                 "role", "PREFILL",
                 "group", "test-group",
                 "taskState", "running",
@@ -509,7 +512,8 @@ class EngineHealthReporterTest {
     @Test
     void shouldReportKvcmLocalAndP2pDeltasWhenAvailable() {
         CacheHitComparisonResult comparison = new CacheHitComparisonResult(
-                "cache_hit_comparison", "request-1", "KVCM", "PREFILL", "test-group", "10.0.0.1",
+                "cache_hit_comparison", "request-1", "KVCM", "PREFILL", "test-group",
+                new WorkerIdentity("10.0.0.1", 8080, 0),
                 "running", 200,
                 new CacheHitComparisonResult.Actual(120),
                 new CacheHitComparisonResult.HitComparison(60, 60),
@@ -522,7 +526,7 @@ class EngineHealthReporterTest {
 
         FlexMetricTags expectedTags = FlexMetricTags.of(
                 "model", "test-model",
-                "engineIp", "10.0.0.1",
+                "engineIp", "10.0.0.1@0",
                 "role", "PREFILL",
                 "group", "test-group",
                 "taskState", "running",
@@ -534,7 +538,8 @@ class EngineHealthReporterTest {
     @Test
     void shouldNotReportRatiosWithoutInputTokens() {
         CacheHitComparisonResult comparison = new CacheHitComparisonResult(
-                "cache_hit_comparison", "request-1", "KVCM", "PREFILL", "test-group", "10.0.0.1",
+                "cache_hit_comparison", "request-1", "KVCM", "PREFILL", "test-group",
+                new WorkerIdentity("10.0.0.1", 8080, 0),
                 "running", 0,
                 new CacheHitComparisonResult.Actual(120),
                 new CacheHitComparisonResult.HitComparison(100, 20),

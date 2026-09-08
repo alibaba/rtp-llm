@@ -89,7 +89,7 @@ public final class WorkerDirectory implements WorkerStatusProvider {
             WorkerStatus discovered = Objects.requireNonNull(
                     discoveredFactory.get(), "discovered status");
             if (discovered.getRole() != role
-                    || !address.equals(discovered.getIpPort())) {
+                    || !address.equals(discovered.getLogicalIpPort())) {
                 throw new IllegalArgumentException(
                         "Discovered WorkerStatus identity does not match directory key");
             }
@@ -237,7 +237,19 @@ public final class WorkerDirectory implements WorkerStatusProvider {
 
     /** Immutable, non-owning address snapshot for lazy selection. */
     public List<String> endpointAddressSnapshot(RoleType role) {
-        return endpointRegistry.endpointAddressSnapshot(role);
+        List<String> addresses = endpointRegistry.endpointAddressSnapshot(role);
+        if (addresses.isEmpty()) {
+            return addresses;
+        }
+        List<String> routable = new ArrayList<>(addresses.size());
+        for (String address : addresses) {
+            WorkerEndpoint endpoint = endpointRegistry.get(role, address);
+            if (isPhysicalGroupHealthy(endpoint)) {
+                routable.add(address);
+            }
+        }
+        return routable.size() == addresses.size()
+                ? addresses : List.copyOf(routable);
     }
 
     /**
@@ -246,7 +258,20 @@ public final class WorkerDirectory implements WorkerStatusProvider {
      */
     public List<EndpointRegistry.PrefillRoutingEntry> prefillRoutingSnapshot(
             RoleType role) {
-        return endpointRegistry.prefillRoutingSnapshot(role);
+        List<EndpointRegistry.PrefillRoutingEntry> entries =
+                endpointRegistry.prefillRoutingSnapshot(role);
+        if (entries.isEmpty()) {
+            return entries;
+        }
+        List<EndpointRegistry.PrefillRoutingEntry> routable =
+                new ArrayList<>(entries.size());
+        for (EndpointRegistry.PrefillRoutingEntry entry : entries) {
+            if (isPhysicalGroupHealthy(entry.endpoint())) {
+                routable.add(entry);
+            }
+        }
+        return routable.size() == entries.size()
+                ? entries : List.copyOf(routable);
     }
 
     /** Capture one exact currently published endpoint generation by address. */
@@ -263,18 +288,65 @@ public final class WorkerDirectory implements WorkerStatusProvider {
         // group filter is needed.
         List<DecodeEndpoint.DecodeRoutingView> snapshots =
                 endpointRegistry.decodeRoutingSnapshot();
-        if (group == null || snapshots.isEmpty()) {
+        if (snapshots.isEmpty()) {
             return snapshots;
         }
         ArrayList<DecodeEndpoint.DecodeRoutingView> matching =
                 new ArrayList<>(snapshots.size());
         for (int index = 0; index < snapshots.size(); index++) {
             DecodeEndpoint.DecodeRoutingView snapshot = snapshots.get(index);
-            if (group.equals(snapshot.topology().group())) {
+            WorkerEndpoint endpoint = endpointRegistry.get(
+                    RoleType.DECODE, snapshot.address());
+            if (isPhysicalGroupHealthy(endpoint)
+                    && (group == null
+                    || group.equals(snapshot.topology().group()))) {
                 matching.add(snapshot);
             }
         }
-        return List.copyOf(matching);
+        return matching.size() == snapshots.size()
+                ? snapshots : List.copyOf(matching);
+    }
+
+    /**
+     * A logical worker behind a shared frontend is routable only when every
+     * expected sibling is currently published and alive. Single-engine RTP-LLM
+     * workers keep their existing one-worker health behavior.
+     */
+    public boolean isPhysicalGroupHealthy(WorkerEndpoint endpoint) {
+        WorkerStatus worker = endpoint == null ? null : endpoint.getStatus();
+        if (worker == null || !worker.isAlive()) {
+            return false;
+        }
+        int expected = worker.getMultiEngineNum();
+        if (expected == 1) {
+            return true;
+        }
+        if (expected < 1) {
+            return false;
+        }
+
+        boolean[] observedIndexes = new boolean[expected];
+        int count = 0;
+        Map<String, WorkerStatus> statuses = statusesByRole.get(worker.getRole());
+        for (Map.Entry<String, WorkerStatus> entry : statuses.entrySet()) {
+            WorkerStatus sibling = entry.getValue();
+            if (!worker.getPhysicalIpPort().equals(sibling.getPhysicalIpPort())) {
+                continue;
+            }
+            int engineIndex = sibling.getEngineIndex();
+            if (sibling.getMultiEngineNum() != expected
+                    || engineIndex < 0
+                    || engineIndex >= expected
+                    || observedIndexes[engineIndex]
+                    || !sibling.isAlive()
+                    || endpointRegistry.get(
+                    worker.getRole(), entry.getKey(), sibling) == null) {
+                return false;
+            }
+            observedIndexes[engineIndex] = true;
+            count++;
+        }
+        return count == expected;
     }
 
     /** Pin the exact generation represented by a Decode routing snapshot. */
@@ -294,7 +366,8 @@ public final class WorkerDirectory implements WorkerStatusProvider {
                 WorkerEndpoint.GenerationPin pin = captured.get(index);
                 WorkerStatus.TopologySnapshot topology =
                         pin.endpoint().getStatus().topologySnapshot();
-                if (group != null && !group.equals(topology.group())) {
+                if (!isPhysicalGroupHealthy(pin.endpoint())
+                        || group != null && !group.equals(topology.group())) {
                     pin.close();
                     captured.set(index, null);
                     continue;

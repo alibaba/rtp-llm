@@ -47,6 +47,9 @@ public final class RandomStrategy {
                 continue;
             }
             try {
+                if (!workerDirectory.isPhysicalGroupHealthy(pin.endpoint())) {
+                    continue;
+                }
                 WorkerStatus status = pin.endpoint().getStatus();
                 WorkerStatus.TopologySnapshot topology =
                         status.topologySnapshot();

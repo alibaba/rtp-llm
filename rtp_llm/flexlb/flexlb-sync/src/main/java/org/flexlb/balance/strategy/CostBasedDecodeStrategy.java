@@ -33,10 +33,14 @@ public class CostBasedDecodeStrategy {
     private static final ThreadLocal<CandidateBuffer> CANDIDATES =
             ThreadLocal.withInitial(CandidateBuffer::new);
 
-    private final WorkerDirectory workerDirectory;
+    private final DecodeDirectoryView workerDirectory;
     private final AtomicLong equalCostCursor = new AtomicLong();
 
     public CostBasedDecodeStrategy(WorkerDirectory workerDirectory) {
+        this(new WorkerDirectoryDecodeView(workerDirectory));
+    }
+
+    CostBasedDecodeStrategy(DecodeDirectoryView workerDirectory) {
         this.workerDirectory = workerDirectory;
     }
 
@@ -101,6 +105,10 @@ public class CostBasedDecodeStrategy {
             WorkerEndpoint.GenerationPin pin =
                     workerDirectory.captureDecodeGeneration(selected);
             if (pin != null) {
+                if (!workerDirectory.isPhysicalGroupHealthy(pin.endpoint())) {
+                    pin.close();
+                    continue;
+                }
                 return PlacementResult.success(buildSelectedRole(
                         selected, pin, roleType, balanceContext));
             }
@@ -629,5 +637,35 @@ public class CostBasedDecodeStrategy {
             tierCounts = java.util.Arrays.copyOf(
                     tierCounts, capacity);
         }
+    }
+
+    private record WorkerDirectoryDecodeView(
+            WorkerDirectory delegate) implements DecodeDirectoryView {
+
+        @Override
+        public List<DecodeRoutingView> decodeRoutingSnapshot(String group) {
+            return delegate.decodeRoutingSnapshot(group);
+        }
+
+        @Override
+        public WorkerEndpoint.GenerationPin captureDecodeGeneration(
+                DecodeRoutingView expected) {
+            return delegate.captureDecodeGeneration(expected);
+        }
+
+        @Override
+        public boolean isPhysicalGroupHealthy(WorkerEndpoint endpoint) {
+            return delegate.isPhysicalGroupHealthy(endpoint);
+        }
+    }
+
+    private interface DecodeDirectoryView {
+
+        List<DecodeRoutingView> decodeRoutingSnapshot(String group);
+
+        WorkerEndpoint.GenerationPin captureDecodeGeneration(
+                DecodeRoutingView expected);
+
+        boolean isPhysicalGroupHealthy(WorkerEndpoint endpoint);
     }
 }

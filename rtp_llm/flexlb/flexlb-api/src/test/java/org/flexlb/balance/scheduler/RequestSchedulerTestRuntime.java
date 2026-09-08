@@ -213,7 +213,7 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
                 if (status == null) {
                     continue;
                 }
-                String address = status.getServerIp() + ":" + status.getHttpPort();
+                String address = status.getLogicalIpPort();
                 WorkerEndpoint.GenerationPin pin = registry.capture(
                         status.getRole(), address);
                 if (pin == null) {

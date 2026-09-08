@@ -120,13 +120,15 @@ class CostBasedDecodeStrategyTest {
                 decodeEndpoint(registry, replacement.address()));
         Mockito.when(replacementPin.generationId()).thenReturn(
                 replacement.generationId());
-        WorkerDirectory racing = Mockito.mock(WorkerDirectory.class);
+        DecodeDirectoryView racing = Mockito.mock(DecodeDirectoryView.class);
         Mockito.when(racing.decodeRoutingSnapshot(null))
                 .thenReturn(List.of(stale))
                 .thenReturn(List.of(replacement));
         Mockito.when(racing.captureDecodeGeneration(stale)).thenReturn(null);
         Mockito.when(racing.captureDecodeGeneration(replacement))
                 .thenReturn(replacementPin);
+        Mockito.when(racing.isPhysicalGroupHealthy(Mockito.any()))
+                .thenReturn(true);
 
         PlacementResult<SelectedRole, RoleType> result =
                 new CostBasedDecodeStrategy(racing).select(
@@ -227,12 +229,14 @@ class CostBasedDecodeStrategyTest {
         ordered.add(globalMinimum);
         Assertions.assertEquals(workerCount, ordered.size(),
                 "the decode selector must retain the complete live fleet");
-        WorkerDirectory fullFleet = Mockito.mock(WorkerDirectory.class);
+        DecodeDirectoryView fullFleet = Mockito.mock(DecodeDirectoryView.class);
         Mockito.when(fullFleet.decodeRoutingSnapshot(null)).thenReturn(ordered);
         Mockito.when(fullFleet.captureDecodeGeneration(any()))
                 .thenAnswer(invocation -> actual.captureDecodeGeneration(
                         invocation.getArgument(
                                 0, DecodeEndpoint.DecodeRoutingView.class)));
+        Mockito.when(fullFleet.isPhysicalGroupHealthy(Mockito.any()))
+                .thenReturn(true);
         CostBasedDecodeStrategy costBasedDecodeStrategy =
                 new CostBasedDecodeStrategy(fullFleet);
         BalanceContext balanceContext = context(1, 10_000L);

@@ -680,8 +680,9 @@ public class EngineHealthReporter {
         monitor.report(org.flexlb.constant.MetricConstant.ENGINE_BALANCING_EVENT_LOOP_GROUP_INFO, FlexMetricTags.of(metricMap), totalPendingTask);
     }
 
-    public void reportCacheHitMetrics(RoleType roleType, long hitTokens, double hitRatio) {
-        cacheMetricsReporter.reportCacheHitMetrics(roleType, hitTokens, hitRatio);
+    public void reportCacheHitMetrics(
+            RoleType roleType, String ipIndex, long hitTokens, double hitRatio) {
+        cacheMetricsReporter.reportCacheHitMetrics(roleType, ipIndex, hitTokens, hitRatio);
     }
 
     /**
@@ -745,7 +746,7 @@ public class EngineHealthReporter {
         CacheHitComparisonResult.KvcmDetails kvcmDetails = comparison.kvcmDetails();
         FlexMetricTags metricTags = FlexMetricTags.of(
                 "model", modelName,
-                "engineIp", comparison.worker(),
+                "engineIp", comparison.ipIndex(),
                 "role", comparison.role(),
                 "group", comparison.group(),
                 "taskState", comparison.state(),

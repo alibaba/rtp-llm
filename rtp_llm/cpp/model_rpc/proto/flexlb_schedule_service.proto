@@ -72,6 +72,8 @@ message FlexlbServerStatusPB {
     int32 http_port = 3;
     int32 grpc_port = 4;
     reserved 5;
+    // Present only for a multi-engine frontend; zero is a valid selected index.
+    optional int32 engine_index = 6;
 }
 
 // Why an incoming request was rejected by the admission decision.  This is

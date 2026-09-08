@@ -350,12 +350,12 @@ public abstract class FlexLBMockTestBase {
 
     protected PrefillEndpoint getPrefillEndpoint() {
         return (PrefillEndpoint) endpointRegistry.get(
-                RoleType.PREFILL, prefillIpPort);
+                RoleType.PREFILL, logicalWorkerIpPort(prefillIpPort));
     }
 
     protected DecodeEndpoint getDecodeEndpoint() {
         return (DecodeEndpoint) endpointRegistry.get(
-                RoleType.DECODE, decodeIpPort);
+                RoleType.DECODE, logicalWorkerIpPort(decodeIpPort));
     }
 
     // ==================== Helper: multi-worker support ====================
@@ -405,10 +405,31 @@ public abstract class FlexLBMockTestBase {
     }
 
     /**
-     * Get the {@code ip:httpPort} string for a mock worker (for routing/endpoint lookup).
+     * Get the {@code ip:httpPort} string for a mock worker.
      */
     protected static String workerIpPort(MockWorker worker) {
         return "127.0.0.1:" + worker.getHttpPort();
+    }
+
+    protected static String logicalWorkerIpPort(String ipPort) {
+        return ipPort.contains("@") ? ipPort : ipPort + "@0";
+    }
+
+    /**
+     * Get the physical {@code ip:httpPort} address exposed by the RTP-LLM mock frontend.
+     */
+    protected static String physicalWorkerIpPort(MockWorker worker) {
+        return "127.0.0.1:" + worker.getHttpPort();
+    }
+
+    /** Get a physical frontend address from its independent host and port fields. */
+    protected static String physicalIpPort(String ip, int httpPort) {
+        return ip + ":" + httpPort;
+    }
+
+    protected static String physicalIpPort(String ipPort) {
+        int separator = ipPort.indexOf('@');
+        return separator >= 0 ? ipPort.substring(0, separator) : ipPort;
     }
 
     /**
@@ -523,7 +544,7 @@ public abstract class FlexLBMockTestBase {
 
     private void discover(WorkerStatus status) {
         engineWorkerStatus.currentOrDiscover(
-                status.getRole(), status.getIpPort(), () -> status);
+                status.getRole(), status.getLogicalIpPort(), () -> status);
     }
 
     /** Apply one already immutable gRPC status observation. */
@@ -561,8 +582,10 @@ public abstract class FlexLBMockTestBase {
         try {
             WorkerStatus.PreparedStatus prepared = status.prepareNewStatus(
                     status.freezeStatusResponse(initial));
-            return endpointRegistry.publishPreparedEndpoint(
-                    status.getIpPort(), status, prepared).endpoint();
+            WorkerEndpoint endpoint = endpointRegistry.publishPreparedEndpoint(
+                    status.getLogicalIpPort(), status, prepared).endpoint();
+            status.recordSuccessfulPoll(initial.isAlive());
+            return endpoint;
         } finally {
             status.lock.unlock();
         }

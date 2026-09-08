@@ -100,7 +100,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
         this.maximumDirectRequests = configuredLimit == null ? 0 : configuredLimit;
         this.predictor = createPredictor(config);
         this.runtime = new WorkerBatcher(
-                status.getIpPort(), this, config,
+                status.getLogicalIpPort(), this, config,
                 deliveryStrategy, endpointEvents);
         this.prefillState = runtime.ownedState();
     }

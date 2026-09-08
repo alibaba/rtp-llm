@@ -102,7 +102,7 @@ class PdfusionSchedulingTest {
         status.setMaxBatchTokensSize(10000L);
         worker.lock.lock();
         try {
-            endpoints.publishPreparedEndpoint(worker.getIpPort(), worker,
+            endpoints.publishPreparedEndpoint(worker.getLogicalIpPort(), worker,
                     worker.prepareNewStatus(worker.freezeStatusResponse(status)));
         } finally {
             worker.lock.unlock();

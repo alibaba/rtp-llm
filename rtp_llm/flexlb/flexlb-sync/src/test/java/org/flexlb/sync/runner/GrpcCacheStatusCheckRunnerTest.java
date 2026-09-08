@@ -39,10 +39,10 @@ class GrpcCacheStatusCheckRunnerTest {
     void testGrpcCacheStatusCheckRunner() {
         // Arrange
         String modelName = "test-model";
-        String ipPort = "127.0.0.1:8080";
         String site = "test-site";
 
         WorkerStatus workerStatus = workerStatus();
+        String ipPort = workerStatus.getLogicalIpPort();
         WorkerDirectory directory = directory(workerStatus);
 
         EngineRpcService.CacheStatusPB cacheStatusPB = EngineRpcService.CacheStatusPB.newBuilder()
@@ -76,8 +76,8 @@ class GrpcCacheStatusCheckRunnerTest {
 
     @Test
     void staleGenerationCallbackCannotPublishAddressCache() {
-        String ipPort = "127.0.0.1:8080";
         WorkerStatus oldStatus = workerStatus();
+        String ipPort = oldStatus.getLogicalIpPort();
         WorkerDirectory directory = Mockito.mock(WorkerDirectory.class);
         when(directory.isCurrentStatus(
                 RoleType.PREFILL, ipPort, oldStatus)).thenReturn(false);
@@ -116,7 +116,7 @@ class GrpcCacheStatusCheckRunnerTest {
         WorkerDirectory directory = new WorkerDirectory(
                 Mockito.mock(EndpointRegistry.class));
         directory.currentOrDiscover(
-                status.getRole(), status.getIpPort(), () -> status);
+                status.getRole(), status.getLogicalIpPort(), () -> status);
         return directory;
     }
 
