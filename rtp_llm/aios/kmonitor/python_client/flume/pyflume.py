@@ -79,3 +79,6 @@ class FlumeClient(object):
 
     def close(self):
         self._transObj.close()
+
+    def reconnect(self):
+        self._transObj.reconnect()

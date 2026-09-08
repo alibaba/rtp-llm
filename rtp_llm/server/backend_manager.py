@@ -1,5 +1,6 @@
 import gc
 import logging
+import os
 import threading
 import time
 from typing import TYPE_CHECKING, Optional
@@ -14,6 +15,8 @@ from rtp_llm.model_factory import ModelFactory
 from rtp_llm.models_py.distributed.collective_torch import init_distributed_environment
 from rtp_llm.ops import TaskType
 from rtp_llm.utils.concurrency_controller import get_global_controller
+from rtp_llm.utils.scr_endpoint_provider import resolve_world_info
+from rtp_llm.utils.scr_template_lifecycle import get_template_lifecycle
 
 if TYPE_CHECKING:
     from rtp_llm.async_decoder_engine.base_engine import BaseEngine
@@ -37,6 +40,8 @@ class BackendManager(object):
         if py_env_configs.parallelism_config.world_rank == 0:
             kmonitor.init()
         self.engine: Optional["BaseEngine"] = None
+        self._engine_config = None
+        self._world_info = None
         self._shutdown_requested = threading.Event()
 
     def start(self, defer_service_start: bool = False):
@@ -67,6 +72,8 @@ class BackendManager(object):
             engine_config.parallelism_config,
             world_info,
         )
+        self._engine_config = engine_config
+        self._world_info = world_info
         # Build main model_config
         model_config = ModelFactory.create_model_config(
             model_args=self.py_env_configs.model_args,
@@ -124,6 +131,55 @@ class BackendManager(object):
             "engine created successfully: self.engine.task_type=%s",
             self.engine.task_type,
         )
+        get_template_lifecycle().register(
+            f"backend-endpoints:{id(self)}", self
+        )
+
+    def prepare_for_template(self, generation: str) -> None:
+        # Listener and remote cache initialization are already deferred by the
+        # engine when this participant is in template mode.  This hook is the
+        # common place for future request-drain checks.
+        return None
+
+    def restore_fixup(self, generation: str) -> None:
+        if self._engine_config is None or self._world_info is None:
+            raise RuntimeError("backend endpoint fixup requested before start")
+        current = get_world_info(
+            self.py_env_configs.server_config,
+            self.py_env_configs.distribute_config,
+            self.py_env_configs.parallelism_config,
+            distributed_server=self._distributed_server,
+        )
+        phase = os.environ.get("SCR_PHASE", "").strip().lower()
+        role_type = self.py_env_configs.pd_sep_config.role_type
+        pd_role = str(getattr(role_type, "name", role_type)).lower() in {
+            "prefill",
+            "decode",
+            "role_type.prefill",
+            "role_type.decode",
+        }
+        world_info = resolve_world_info(
+            current,
+            generation=generation,
+            require_manifest=phase == "restore" and (current.num_nodes > 1 or pd_role),
+            require_transport=phase == "restore" and (current.num_nodes > 1 or pd_role),
+        )
+        update_worker_addrs(
+            self._engine_config.runtime_config,
+            self._engine_config.parallelism_config,
+            world_info,
+        )
+        self._world_info = world_info
+        refresh = getattr(self.engine, "update_runtime_endpoints", None)
+        if refresh is None:
+            raise RuntimeError("engine does not support template endpoint fixup")
+        refresh(self._engine_config.runtime_config, world_info)
+
+    def release_template(self, generation: str) -> None:
+        return None
+
+    def abort_template(self, generation: str) -> None:
+        return None
 
     def start_service(self) -> None:
         """Release listeners deferred for a pre-service SCR barrier."""

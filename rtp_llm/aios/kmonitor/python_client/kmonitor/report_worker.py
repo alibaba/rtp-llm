@@ -13,6 +13,7 @@ from rtp_llm.aios.kmonitor.python_client.kmonitor.metrics.metric_base import (
     MetricDataPoint,
 )
 from rtp_llm.aios.kmonitor.python_client.kmonitor.utils.hippo_helper import HippoHelper
+from rtp_llm.utils.scr_template_lifecycle import get_template_lifecycle
 
 _ReportWorker__REPORT_HOST = os.getenv("HIPPO_SLAVE_IP", "localhost")
 _ReportWorker__REPORT_PORT = 4141
@@ -35,6 +36,8 @@ class ReportWorker(object):
         self.metrics: Dict[str, MetricBase] = {}
         self.metric_lock: Lock = Lock()
         self.started = False
+        self._report_thread: Thread | None = None
+        self._template_was_started = False
         if HippoHelper.is_hippo_env():
             self.flume = FlumeClient(
                 _ReportWorker__REPORT_HOST,
@@ -50,6 +53,7 @@ class ReportWorker(object):
             self.flume = None
             self.start()
             logging.info("test mode, kmonitor metrics not reported.")
+        get_template_lifecycle().register(f"python-kmonitor:{id(self)}", self)
 
     def parse_kmon_tags(self, kmon_tags_str: str) -> Dict[str, str]:
         kmon_tags: Dict[str, str] = {}
@@ -114,13 +118,45 @@ class ReportWorker(object):
         logging.warn("kmonitor report process exited.")
 
     def start(self) -> None:
+        if self.started:
+            return
         self.started = True
         report_thread = Thread(target=self.report_cycle)
         report_thread.daemon = True
+        self._report_thread = report_thread
         report_thread.start()
 
     def stop(self) -> None:
         self.started = False
+
+    def prepare_for_template(self, generation: str) -> None:
+        self._template_was_started = self.started
+        self.stop()
+        thread = self._report_thread
+        if thread is not None:
+            thread.join(timeout=5)
+            if thread.is_alive():
+                self.started = self._template_was_started
+                raise RuntimeError("Python Kmonitor reporter did not quiesce")
+        if self.flume is not None:
+            self.flume.close()
+        logging.info("Python Kmonitor paused for template generation=%s", generation)
+
+    def restore_fixup(self, generation: str) -> None:
+        return None
+
+    def release_template(self, generation: str) -> None:
+        if self._template_was_started:
+            if self.flume is not None:
+                self.flume.reconnect()
+            self.start()
+        logging.info("Python Kmonitor released for template generation=%s", generation)
+
+    def abort_template(self, generation: str) -> None:
+        if self._template_was_started:
+            if self.flume is not None:
+                self.flume.reconnect()
+            self.start()
 
 
 report_worker = ReportWorker()

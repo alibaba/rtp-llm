@@ -38,7 +38,7 @@ from rtp_llm.utils.process_manager import (
 )
 from rtp_llm.utils.scr_template_utils import (
     ScrParticipantManifest,
-    arrive_scr_checkpoint_barrier,
+    arrive_scr_template_barrier,
     configure_scr_environment,
     is_scr_enabled,
     is_scr_template_phase_active,
@@ -242,7 +242,7 @@ def _start_scr_rank_arrival(backend_manager, py_env_configs, scr_manifest=None, 
             os.environ.get(SCR_TIMEOUT_ENV, "<default>"),
             os.environ.get(SCR_INACTIVITY_TIMEOUT_ENV, "<default>"),
         )
-        result = arrive_scr_checkpoint_barrier(
+        result = arrive_scr_template_barrier(
             worker_id=worker_id,
             worker_num=worker_num,
             generation=(scr_manifest.generation if scr_manifest is not None else None),
@@ -270,7 +270,7 @@ def _start_scr_manager_arrival(manager, scr_manifest):
     if scr_manifest is None or not is_scr_template_phase_active():
         return None
     worker_id = scr_manifest.worker_id("backend_manager", "0")
-    result = arrive_scr_checkpoint_barrier(
+    result = arrive_scr_template_barrier(
         worker_id=worker_id,
         worker_num=scr_manifest.worker_num,
         generation=scr_manifest.generation or None,
@@ -824,7 +824,7 @@ def start_backend_server(
         def _on_vit_prebind():
             if scr_manifest is None or not is_scr_template_phase_active():
                 return
-            result = arrive_scr_checkpoint_barrier(
+            result = arrive_scr_template_barrier(
                 worker_id=scr_manifest.worker_id("backend_vit", "0"),
                 worker_num=scr_manifest.worker_num,
                 generation=scr_manifest.generation or None,

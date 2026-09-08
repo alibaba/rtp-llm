@@ -21,6 +21,16 @@ from rtp_llm.distribute.worker_info import WorkerInfo
 from rtp_llm.ops import NcclCommConfig, ParallelismConfig
 
 
+def _template_loopback_enabled(parallelism_config: ParallelismConfig) -> bool:
+    """Use loopback only for an explicitly single-network-namespace template."""
+    return (
+        os.environ.get("RTP_LLM_SCR_LOCAL_COMM") == "1"
+        and os.environ.get("RTPLLM_ENABLE_SCR", "").strip().lower() in {"1", "true", "yes", "on"}
+        and os.environ.get("SCR_PHASE", "").strip().lower() in {"checkpoint", "restore"}
+        and parallelism_config.world_size == parallelism_config.local_world_size
+    )
+
+
 @dataclass
 class WorldInfo:
     members: List[WorkerInfo]
@@ -242,7 +252,9 @@ class DistributedServer(object):
             self.master_server_port = int(master_server_port)
 
         self._nccl_comm_config = _build_nccl_comm_config(
-            self.master_ip, self.master_server_port, pc.dp_rank
+            "127.0.0.1" if _template_loopback_enabled(pc) else self.master_ip,
+            self.master_server_port,
+            pc.dp_rank,
         )
 
         logging.info(
@@ -321,8 +333,9 @@ class DistributedServer(object):
 
     def regist(self) -> None:
         key = self.REGISTRY_RANK_ADDRESS_KEY + str(self.rank)
+        ip = "127.0.0.1" if _template_loopback_enabled(self.py_env_configs.parallelism_config) else self.worker_info.ip
         self.safe_store_set(
-            key, f"{self.worker_info.ip}:{self.worker_info.server_port}"
+            key, f"{ip}:{self.worker_info.server_port}"
         )
 
     def bootstrap(self) -> None:

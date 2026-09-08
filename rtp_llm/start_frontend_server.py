@@ -20,7 +20,7 @@ from rtp_llm.utils.concurrency_controller import (
 )
 from rtp_llm.utils.scr_template_utils import (
     ScrParticipantManifest,
-    arrive_scr_checkpoint_barrier,
+    arrive_scr_template_barrier,
     is_scr_template_phase_active,
 )
 
@@ -80,7 +80,7 @@ def start_frontend_server(
             if scr_manifest is None or not is_scr_template_phase_active():
                 return
             worker_id = scr_manifest.worker_id("frontend", f"{rank_id}:{server_id}")
-            result = arrive_scr_checkpoint_barrier(
+            result = arrive_scr_template_barrier(
                 worker_id=worker_id,
                 worker_num=scr_manifest.worker_num,
                 generation=scr_manifest.generation or None,

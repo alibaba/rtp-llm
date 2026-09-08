@@ -26,7 +26,7 @@ from rtp_llm.utils.process_manager import (
 )
 from rtp_llm.utils.scr_template_utils import (
     ScrParticipantManifest,
-    arrive_scr_checkpoint_barrier,
+    arrive_scr_template_barrier,
     build_scr_participant_manifest,
     configure_scr_environment,
     is_scr_template_phase_active,
@@ -491,7 +491,7 @@ def _start_parent_scr_arrival(
     if scr_manifest is None or not is_scr_template_phase_active():
         return None
     worker_id = scr_manifest.worker_id("start_server", "0")
-    result = arrive_scr_checkpoint_barrier(
+    result = arrive_scr_template_barrier(
         worker_id=worker_id,
         worker_num=scr_manifest.worker_num,
         generation=scr_manifest.generation or None,

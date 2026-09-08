@@ -74,6 +74,16 @@ class GrpcHostChannelPool:
         except Exception as e:
             logging.warning("Failed to close GrpcHostChannelPool: %s", e)
 
+    def reset(self) -> None:
+        """Forget channels whose peer addresses belong to a previous host.
+
+        The lifecycle barrier guarantees no new request is admitted while this
+        runs.  The cleanup loop owns eventual channel close; clearing the map
+        prevents a restored process from selecting a stale endpoint.
+        """
+        self._channels.clear()
+        self._closed_channels.clear()
+
     async def get(self, target: str) -> aio.Channel:
         """
         Get or create a channel for `target`.

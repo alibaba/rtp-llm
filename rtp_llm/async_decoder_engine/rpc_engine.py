@@ -89,6 +89,11 @@ class LanguageCppEngine(BaseEngine):
             )
         self._service_started = True
 
+    def update_runtime_endpoints(self, runtime_config, world_info) -> None:
+        """Apply restore-time endpoint discovery before deferred listeners start."""
+        self.world_info = world_info
+        self.rtp_llm_op_.update_runtime_endpoints(runtime_config)
+
     @override
     def _stop(self) -> None:
         self.rtp_llm_op_.stop()

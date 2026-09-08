@@ -144,6 +144,10 @@ class BackendRPCServerVisitor:
         self.pd_route_retry_on_unavailable = self._pd_route_retry_on_unavailable()
         self.request_id_factory: Optional[Callable[[], int]] = None
 
+    def update_addresses(self, addresses: list[str]) -> None:
+        """Replace backend peers after a template restore fixup."""
+        self.model_rpc_client.update_addresses(addresses)
+
     async def close(self):
         await self.model_rpc_client.close()
         await self.master_client.close()
