@@ -185,8 +185,9 @@ def supports_ppu_fp4_decode(selection, request):
             "requires sequential Indexer or Indexer overlap with Attention overlap",
         ),
         (
-            options.get("DSV4_PPU_DECODE_METADATA", "eager") in ("eager", "graph"),
-            "requires eager or graph Decode metadata",
+            options.get("DSV4_PPU_DECODE_METADATA", "eager")
+            in ("eager", "graph", "graph_fused"),
+            "requires eager, graph or graph_fused Decode metadata",
         ),
         (
             options.get("DSV4_PPU_DECODE_SHARED_SCHEDULE", "after_route")

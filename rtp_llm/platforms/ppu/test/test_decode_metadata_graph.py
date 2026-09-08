@@ -23,13 +23,14 @@ class MetadataFactoryTest(unittest.TestCase):
             )
         with self.assertRaisesRegex(ValueError, "metadata mode"):
             PpuDecodeProvider({"DSV4_PPU_DECODE_METADATA": "unknown"})
-        with self.assertRaisesRegex(ValueError, "FP8 Decode factory"):
-            build_dsv4_decode_metadata(
-                lambda: value,
-                platform_provider=PpuDecodeProvider(
-                    {"DSV4_PPU_DECODE_METADATA": "graph"}
-                ),
-            )
+        for mode in ("graph", "graph_fused"):
+            with self.assertRaisesRegex(ValueError, "FP8 Decode factory"):
+                build_dsv4_decode_metadata(
+                    lambda: value,
+                    platform_provider=PpuDecodeProvider(
+                        {"DSV4_PPU_DECODE_METADATA": mode}
+                    ),
+                )
 
 
 def _tensors(value, prefix=""):
@@ -47,6 +48,13 @@ def _tensors(value, prefix=""):
 class MetadataGraphTest(unittest.TestCase):
     @torch.inference_mode()
     def test_actual_model_factory_and_dynamic_metadata(self):
+        self._check_model_metadata("graph")
+
+    @torch.inference_mode()
+    def test_actual_model_factory_and_fused_metadata(self):
+        self._check_model_metadata("graph_fused")
+
+    def _check_model_metadata(self, mode):
         from rtp_llm.models_py.model_desc.deepseek_v4_model import DeepSeekV4Model
         from rtp_llm.models_py.modules.dsv4.fp8.decode.decode_fmha_impl import (
             DSv4DecodeFmhaImplFP8,
@@ -98,7 +106,7 @@ class MetadataGraphTest(unittest.TestCase):
                 )
                 for tag, (_, _, count) in specs.items()
             }
-            options = {"DSV4_PPU_DECODE_METADATA": "graph"}
+            options = {"DSV4_PPU_DECODE_METADATA": mode}
             provider = PpuDecodeProvider(options)
             options["DSV4_PPU_DECODE_METADATA"] = "eager"
             model = SimpleNamespace(
@@ -127,6 +135,16 @@ class MetadataGraphTest(unittest.TestCase):
                 )
             self.assertIsInstance(candidate, PpuDecodeMetadataGraph)
             self.assertIsNone(candidate._metadata_graph)
+            if mode == "graph_fused":
+                from rtp_llm.platforms.ppu.kernels.ppu_decode_state_slots import (
+                    update_compressor_state_slots,
+                )
+
+                self.assertIs(
+                    candidate._state_slot_updater, update_compressor_state_slots
+                )
+            else:
+                self.assertIsNone(candidate._state_slot_updater)
             reference = DSv4DecodeFmhaImplFP8(
                 candidate.config, candidate.device, inputs[SWA_KV]
             )

@@ -31,7 +31,7 @@ class PpuDecodeMetadataGraph(DSv4DecodeFmhaImplFP8):
     by the base class and shared with the model's captured attention kernels.
     """
 
-    def __init__(self, config, device, attn_inputs):
+    def __init__(self, config, device, attn_inputs, *, fused_state_slots=False):
         device = torch.device(device)
         if (
             device.type != "cuda"
@@ -47,6 +47,13 @@ class PpuDecodeMetadataGraph(DSv4DecodeFmhaImplFP8):
         self._source_identity = None
         self._capture_stream = None
         self._positions = torch.empty_like(self.metadata.start_pos)
+        self._state_slot_updater = None
+        if fused_state_slots:
+            from rtp_llm.platforms.ppu.kernels.ppu_decode_state_slots import (
+                update_compressor_state_slots,
+            )
+
+            self._state_slot_updater = update_compressor_state_slots
 
     def _validate_inputs(self, attn_inputs):
         primary = primary_attention_inputs(attn_inputs)
@@ -94,6 +101,7 @@ class PpuDecodeMetadataGraph(DSv4DecodeFmhaImplFP8):
             paged_block_tables=self._source_tables,
             paged_pool_entries_per_block=self._paged_entries_per_block,
             paged_pool_tokens_per_block=self._paged_tokens_per_block,
+            compressor_state_slot_updater=self._state_slot_updater,
         )
 
     def prepare_cuda_graph(self, attn_inputs):

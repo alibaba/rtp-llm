@@ -244,22 +244,22 @@ class Dsv4PlanTest(unittest.TestCase):
         )
 
     def test_decode_metadata_graph_preserves_rank_protocol(self):
-        digests = set()
-        for rank in range(8):
-            ctx = self.decode_context(
-                rank,
-                execution_options={
-                    "DSV4_PPU_SGLANG_MOE": "1",
-                    "DSV4_PPU_DECODE_METADATA": "graph",
-                },
-            )
-            digests.add(ctx.prepare([request_for("model", ctx.selection)]))
-            self.assertEqual(len(ctx.bindings), 130)
-        self.assertEqual(len(digests), 1)
-        sequential = self.decode_context()
-        self.assertNotIn(
-            sequential.prepare([request_for("model", sequential.selection)]), digests
-        )
+        modes = set()
+        for mode in ("eager", "graph", "graph_fused"):
+            digests = set()
+            for rank in range(8):
+                ctx = self.decode_context(
+                    rank,
+                    execution_options={
+                        "DSV4_PPU_SGLANG_MOE": "1",
+                        "DSV4_PPU_DECODE_METADATA": mode,
+                    },
+                )
+                digests.add(ctx.prepare([request_for("model", ctx.selection)]))
+                self.assertEqual(len(ctx.bindings), 130)
+            self.assertEqual(len(digests), 1)
+            modes.update(digests)
+        self.assertEqual(len(modes), 3)
         unsupported = self.decode_context(
             execution_options={
                 "DSV4_PPU_SGLANG_MOE": "1",

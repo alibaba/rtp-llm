@@ -57,8 +57,10 @@ class PpuDecodeProvider(PpuModuleProvider):
         self._metadata_mode = self.execution_options.get(
             "DSV4_PPU_DECODE_METADATA", "eager"
         )
-        if self._metadata_mode not in ("eager", "graph"):
-            raise ValueError("PPU Decode metadata mode must be eager or graph")
+        if self._metadata_mode not in ("eager", "graph", "graph_fused"):
+            raise ValueError(
+                "PPU Decode metadata mode must be eager, graph or graph_fused"
+            )
         self._shared_schedule = self.execution_options.get(
             "DSV4_PPU_DECODE_SHARED_SCHEDULE", "after_route"
         )
@@ -83,7 +85,9 @@ class PpuDecodeProvider(PpuModuleProvider):
 
         if default_factory is not DSv4DecodeFmhaImplFP8:
             raise ValueError("PPU metadata Graph requires the FP8 Decode factory")
-        return PpuDecodeMetadataGraph(*args, **kwargs)
+        return PpuDecodeMetadataGraph(
+            *args, fused_state_slots=self._metadata_mode == "graph_fused", **kwargs
+        )
 
     def build_fp8_linear(self, default_factory, *args, **kwargs):
         return super().build_fp8_linear(
