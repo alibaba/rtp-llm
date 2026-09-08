@@ -1,3 +1,5 @@
+#include "autil/Scope.h"
+#include <exception>
 #include <algorithm>
 #include <cstdlib>
 #include <mutex>
@@ -148,12 +150,12 @@ DecodeRpcServer::makeMTPModuleLoadPlan(const ProposeModelEngineInitParams* propo
 }
 
 std::vector<CacheStoreBlockPair> DecodeRpcServer::buildGroupLoadPlan(const CacheGroupPolicy& policy,
-                                                                    size_t                  local_block_num,
-                                                                    size_t                  cache_key_count,
-                                                                    size_t                  reuse_block_size,
-                                                                    bool                    use_hybrid,
-                                                                    size_t                  group_seq_size_per_block,
-                                                                    size_t                  base_seq_size_per_block) {
+                                                                     size_t                  local_block_num,
+                                                                     size_t                  cache_key_count,
+                                                                     size_t                  reuse_block_size,
+                                                                     bool                    use_hybrid,
+                                                                     size_t                  group_seq_size_per_block,
+                                                                     size_t                  base_seq_size_per_block) {
     std::vector<CacheStoreBlockPair> plan;
     if (local_block_num == 0 || cache_key_count == 0) {
         return plan;
@@ -1159,7 +1161,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                             size_t      model_id  = module_plan.cache_model_id;
 
                             CacheGroupType group_type = groupType(mtp_cache_cfg, mtp_use_hybrid, gid);
-                            const auto load_plan = groupLoadPlan(mtp_cache_cfg, mtp_use_hybrid, gid, block_num);
+                            const auto     load_plan  = groupLoadPlan(mtp_cache_cfg, mtp_use_hybrid, gid, block_num);
 
                             if (!shouldLoadGroupFromPeer(mtp_cache_cfg, group_type, gid, i)) {
                                 continue;
@@ -1388,6 +1390,12 @@ grpc::Status DecodeRpcServer::RemoteGenerate(grpc::ServerContext* server_context
     auto decode_context              = DecodeGenerateContext(rpc_context, 0, server_context, metrics_reporter_, meta_);
     decode_context.onflight_requests = onflight_requests_;
     decode_context.loading_cache_requests = loading_cache_requests_;
+    const int         uncaught_exceptions = std::uncaught_exceptions();
+    autil::ScopeGuard rpc_completion_guard([&decode_context, uncaught_exceptions] {
+        if (std::uncaught_exceptions() == uncaught_exceptions) {
+            decode_context.markRpcHandlingCompleted();
+        }
+    });
 
     // Decode SERVER span: wrapping the handler covers the whole decode
     // lifecycle of this request; RemoteLoad fan-out stays span-free

@@ -1,3 +1,5 @@
+#include "autil/Scope.h"
+#include <exception>
 #include <memory>
 #include <chrono>
 #include <c10/core/InferenceMode.h>
@@ -61,15 +63,14 @@ grpc::Status LocalRpcServer::init(const EngineInitParams&                       
         }
     }
 
-    const auto mm_decision = resolveAndLogMMProcessorKind(
-        maga_init_params.model_config_.mm_model_config.is_multimodal,
-        maga_init_params.vit_config.vit_separation,
-        !mm_process_engine.is_none(),
-        maga_init_params.pd_sep_config.role_type,
-        maga_init_params.parallelism_config.tp_rank,
-        maga_init_params.model_config_.model_type,
-        "LocalRpcServer");
-    const auto mm_kind = mm_decision.kind;
+    const auto mm_decision = resolveAndLogMMProcessorKind(maga_init_params.model_config_.mm_model_config.is_multimodal,
+                                                          maga_init_params.vit_config.vit_separation,
+                                                          !mm_process_engine.is_none(),
+                                                          maga_init_params.pd_sep_config.role_type,
+                                                          maga_init_params.parallelism_config.tp_rank,
+                                                          maga_init_params.model_config_.model_type,
+                                                          "LocalRpcServer");
+    const auto mm_kind     = mm_decision.kind;
     if (!mm_decision.ok()) {
         RTP_LLM_LOG_ERROR("%s", mm_decision.error.c_str());
         return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, mm_decision.error);
@@ -212,6 +213,12 @@ grpc::Status LocalRpcServer::GenerateStreamCall(grpc::ServerContext*            
     RTP_LLM_LOG_DEBUG("receive request %ld", request_id);
     auto generate_context =
         GenerateContext(request_id, request->generate_config().timeout_ms(), context, metrics_reporter_, meta_);
+    const int         uncaught_exceptions = std::uncaught_exceptions();
+    autil::ScopeGuard rpc_completion_guard([&generate_context, uncaught_exceptions] {
+        if (std::uncaught_exceptions() == uncaught_exceptions) {
+            generate_context.markRpcHandlingCompleted();
+        }
+    });
     // gRPC SERVER span doubles as the request span on the fusion path; guard
     // destruction covers CHECK_ERROR_STATUS early returns.
     if (telemetry::TelemetryRuntime::isActive()) {
@@ -248,8 +255,8 @@ grpc::Status LocalRpcServer::GenerateStreamCall(grpc::ServerContext*            
             // Beam rows are an internal search width; Fusion exposes one primary
             // sequence (the remaining candidates live in beam_responses). Only
             // ordinary multi-return requests aggregate all active rows.
-            const auto returned_sequence_count = stream->hasNumBeams() ? std::max(stream->numReturnSequences(), 1) :
-                                                                            stream->currentBatchSize();
+            const auto returned_sequence_count =
+                stream->hasNumBeams() ? std::max(stream->numReturnSequences(), 1) : stream->currentBatchSize();
             telemetry::setUsageTokenAttributes(*generate_context.trace_span_guard,
                                                (int64_t)stream->inputLength(),
                                                (int64_t)(stream->outputTokenLen() * returned_sequence_count));
@@ -286,6 +293,9 @@ grpc::Status LocalRpcServer::GenerateStreamCall(grpc::ServerContext*            
 
     generate_context.error_status =
         pollStreamOutput(context, generate_context.request_key, writer, generate_context.getStream());
+    if (generate_context.hasError() && generate_context.getStream() && generate_context.getStream()->hasError()) {
+        generate_context.error_info = generate_context.getStream()->statusInfo();
+    }
 
     meta_->dequeue(generate_context.request_id, generate_context.getStream());
     return generate_context.error_status;

@@ -86,6 +86,7 @@ cc_library(
         "//rtp_llm/cpp/engine_base/stream:generate_types",
         "//rtp_llm/cpp/metrics",
         "//rtp_llm/cpp/utils:kv_cache_utils",
+        "@havenask//aios/autil:scope",
         "//rtp_llm/cpp/utils:hash_util",
         "//rtp_llm/cpp/multimodal_processor",
         "//rtp_llm/cpp/multimodal_processor:mm_processor_config",
