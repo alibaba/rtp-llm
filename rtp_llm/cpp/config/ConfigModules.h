@@ -91,17 +91,25 @@ struct ParallelismConfig {
     // Context Parallel configuration
     PrefillCPConfig prefill_cp_config;
 
+    // CP repurposes the physical TP group for sequence parallelism, so the
+    // attention/FFN-facing TP size is 1 under ANY CP mode. is_enabled() excludes
+    // PREFILL_CP (which has is_prefill_enabled()), and gating on it alone leaves
+    // the weights TP-sharded while the tokens are sequence-split -- a hybrid that
+    // runs but produces wrong tokens.
+    bool prefill_cp_active() const {
+        return prefill_cp_config.is_enabled() || prefill_cp_config.is_prefill_enabled();
+    }
     int64_t get_attn_tp_size() const {
-        return prefill_cp_config.is_enabled() ? 1 : tp_size;
+        return prefill_cp_active() ? 1 : tp_size;
     }
     int64_t get_attn_tp_rank() const {
-        return prefill_cp_config.is_enabled() ? 0 : tp_rank;
+        return prefill_cp_active() ? 0 : tp_rank;
     }
     int64_t get_ffn_tp_size() const {
-        return prefill_cp_config.is_enabled() ? 1 : ffn_tp_size;
+        return prefill_cp_active() ? 1 : ffn_tp_size;
     }
     int64_t get_ffn_tp_rank() const {
-        return prefill_cp_config.is_enabled() ? 0 : ffn_tp_rank;
+        return prefill_cp_active() ? 0 : ffn_tp_rank;
     }
     std::string to_string() const;
 };

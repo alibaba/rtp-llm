@@ -273,7 +273,17 @@ def set_cp_info(
     cp_enabled = (
         parallelism_config is not None
         and getattr(parallelism_config, "prefill_cp_config", None) is not None
-        and parallelism_config.prefill_cp_config.is_enabled()
+        # is_enabled() deliberately EXCLUDES CPRotateMethod.PREFILL_CP, which has
+        # its own is_prefill_enabled() predicate. Gating on is_enabled() alone
+        # means DSV4 can never build a CPContext in PREFILL_CP mode: the C++
+        # ContextParallelProcessor splits the batch to rank-local tokens while
+        # this side still assumes the full sequence, which trips a device-side
+        # assert in the SWA Triton kernel. The python config layer already treats
+        # the two as alternatives (backend_rpc_server_visitor.py:131).
+        and (
+            parallelism_config.prefill_cp_config.is_enabled()
+            or parallelism_config.prefill_cp_config.is_prefill_enabled()
+        )
         and is_prefill
         and attn is not None
         and getattr(attn, "context_parallel_info", None) is not None
@@ -350,6 +360,38 @@ def forward_layers(
             kv_cache_sharded=bool(getattr(v4, "_kv_cache_sharded", False)),
         )
     v4._propagate_cp_ctx(cp_ctx)
+    if os.environ.get("DSV4_CP_PROBE"):
+        # Report the first few DISTINCT large token counts. A one-shot probe is
+        # useless here: the 5-token warm-up request legitimately has CP cleared
+        # (set_cp_info falls through to (None, 1, 0) when
+        # attn.context_parallel_info is None), so it says nothing about whether
+        # CP splits a real 32K chunk.
+        _seen = getattr(forward_layers, "_cp_probe_seen", None)
+        if _seen is None:
+            _seen = forward_layers._cp_probe_seen = set()
+        _T = int(input_ids.size(0))
+        if _T >= 1024 and len(_seen) < 4 and _T not in _seen:
+            _seen.add(_T)
+            import sys as _sys
+
+            _il = getattr(attn_inputs, "input_lengths", None)
+            _pl = getattr(attn_inputs, "prefix_lengths", None)
+            print(
+                "[CPPROBE] T={T} cp_info={ci} cp_size={cs} cp_rank={cr} cp_ctx={cc} "
+                "chunk_len={cl} seq_len_full={sf} input_lengths={il} prefix_lengths={pl}".format(
+                    T=_T,
+                    ci=cp_info is not None,
+                    cs=cp_size,
+                    cr=cp_rank,
+                    cc="None(CP CLEARED)" if cp_ctx is None else "set",
+                    cl=getattr(cp_ctx, "chunk_length", None),
+                    sf=getattr(cp_ctx, "seq_len_full", None),
+                    il=_il.flatten()[:4].tolist() if _il is not None else None,
+                    pl=_pl.flatten()[:4].tolist() if _pl is not None else None,
+                ),
+                file=_sys.stderr,
+                flush=True,
+            )
     if cp_ctx is not None:
         # The framework's fallback position_ids are rank-local contiguous
         # after ZigZagProcessor rewrites input_lengths to CP chunk lengths.

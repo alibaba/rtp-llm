@@ -414,7 +414,17 @@ class DeepSeekV4Model(GptModelBase):
             and getattr(parallelism_config, "prefill_cp_config", None) is not None
         ):
             try:
-                if parallelism_config.prefill_cp_config.is_enabled():
+                # is_enabled() excludes CPRotateMethod.PREFILL_CP (that mode has
+                # its own is_prefill_enabled()). Gating on it alone leaves
+                # cp_size=1 here, so _prefill_cp_size=1, so full_rows below is 0
+                # and the per-forward PrefillWorkspace never reserves its CP
+                # gather/restore region -- which then asserts "cp_gather_idx
+                # region not reserved (reserve_cp=False)" the moment the
+                # compressor's async CP gather runs.
+                if (
+                    parallelism_config.prefill_cp_config.is_enabled()
+                    or parallelism_config.prefill_cp_config.is_prefill_enabled()
+                ):
                     cp_size = int(getattr(parallelism_config, "tp_size", 1) or 1)
             except Exception:  # pyi-only stub or non-CP build
                 pass
@@ -713,7 +723,11 @@ class DeepSeekV4Model(GptModelBase):
         cp_config = self.parallelism_config.prefill_cp_config
         cp_enabled = bool(
             cp_config is not None
-            and cp_config.is_enabled()
+            # is_enabled() excludes PREFILL_CP; see the C++ prefill_cp_active()
+            # for the same fix. Without this, moe_cp_enabled stays False and
+            # moe_cp_size stays 1 while the tokens ARE sequence-split, so the
+            # routed MoE runs its non-CP path on CP-sharded tokens.
+            and (cp_config.is_enabled() or cp_config.is_prefill_enabled())
             and not self._is_decode_role
         )
         self._v4_args.moe_tp_size = physical_tp_size
