@@ -3,7 +3,6 @@ package org.flexlb.sync.status;
 import lombok.extern.slf4j.Slf4j;
 import org.flexlb.cache.domain.BlockHashConfig;
 import org.flexlb.cache.hash.BlockHashConfigResolver;
-import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusProvider;
 import org.flexlb.dao.route.RoleType;
@@ -112,11 +111,11 @@ public class WorkerBlockHashConfigResolver implements BlockHashConfigResolver {
             if (workerStatus == null || !workerStatus.isAlive()) {
                 continue;
             }
-            CacheStatus cacheStatus = workerStatus.getCacheStatus();
-            if (cacheStatus == null || cacheStatus.getBlockSize() <= 0) {
+            WorkerStatus.EngineObservation observation = workerStatus.committedEngineObservation();
+            if (observation.blockSize() <= 0) {
                 continue;
             }
-            configs.add(new BlockHashConfig(cacheStatus.getBlockSize(), workerStatus.getBlockHashLookaheadTokens()));
+            configs.add(new BlockHashConfig(observation.blockSize(), observation.blockHashLookaheadTokens()));
         }
         return configs;
     }

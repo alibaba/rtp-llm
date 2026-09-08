@@ -116,6 +116,7 @@ public class WorkerStatus {
             long dpSize,
             long tpSize,
             long dpRank,
+            long blockSize,
             int blockHashLookaheadTokens,
             int cacheMatchRollbackBlocks,
             KvCacheGroupMode kvCacheGroupMode,
@@ -131,21 +132,20 @@ public class WorkerStatus {
             runningTaskList = Map.copyOf(runningTaskList);
         }
 
-        public EngineObservation(
-                RoleType role,
-                Long availableConcurrency,
-                long availableKvCacheTokens,
-                long totalKvCacheTokens,
-                Map<String, TaskObservation> runningTaskList,
-                double stepLatencyMs,
-                long iterateCount,
-                long dpSize,
-                long tpSize,
-                long dpRank,
-                long maxSeqLen,
-                long maxBatchTokensSize,
-                long runningQueryLen,
-                long waitingQueryLen) {
+        public EngineObservation(RoleType role,
+                                 Long availableConcurrency,
+                                 long availableKvCacheTokens,
+                                 long totalKvCacheTokens,
+                                 Map<String, TaskObservation> runningTaskList,
+                                 double stepLatencyMs,
+                                 long iterateCount,
+                                 long dpSize,
+                                 long tpSize,
+                                 long dpRank,
+                                 long maxSeqLen,
+                                 long maxBatchTokensSize,
+                                 long runningQueryLen,
+                                 long waitingQueryLen) {
             this(role,
                     availableConcurrency,
                     availableKvCacheTokens,
@@ -156,6 +156,7 @@ public class WorkerStatus {
                     dpSize,
                     tpSize,
                     dpRank,
+                    0L,
                     0,
                     0,
                     KvCacheGroupMode.UNSPECIFIED,
@@ -419,8 +420,7 @@ public class WorkerStatus {
      * Deep-freeze one RPC response. Finished tasks remain response-local and
      * are never copied into the committed Engine observation.
      */
-    public StatusObservation freezeStatusResponse(
-            WorkerStatusResponse response) {
+    public StatusObservation freezeStatusResponse(WorkerStatusResponse response) {
         Objects.requireNonNull(response, "response");
         Map<String, TaskObservation> runningTasks = freezeTaskMap(
                 response.getRunningTaskInfo());
@@ -437,6 +437,7 @@ public class WorkerStatus {
                 response.getDpSize(),
                 response.getTpSize(),
                 response.getDpRank(),
+                response.getCacheStatus() == null ? 0L : response.getCacheStatus().getBlockSize(),
                 response.getBlockHashLookaheadTokens(),
                 response.getCacheMatchRollbackBlocks(),
                 response.getKvCacheGroupMode(),
