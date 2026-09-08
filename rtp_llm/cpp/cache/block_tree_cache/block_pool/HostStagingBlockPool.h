@@ -57,8 +57,7 @@ public:
     using HostStagingBlockBatch = std::vector<HostStagingBlockLease>;
     using BatchReadyCallback    = std::function<void(std::optional<HostStagingBlockBatch>)>;
 
-    // try_pin_memory=false is a test seam to force pageable backing.
-    HostStagingBlockPool(size_t block_count, size_t stride_bytes, bool try_pin_memory = true);
+    HostStagingBlockPool(size_t block_count, size_t stride_bytes);
 
     // Test seam: no production caller; lets tests occupy staging blocks atomically.
     std::optional<HostStagingBlockBatch> tryMallocBatch(size_t count);

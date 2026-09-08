@@ -287,7 +287,7 @@ protected:
         host_block_size_ = 300;
 
         // Create host pool — 10 usable blocks
-        host_pool_ = makeHostPool(host_block_size_, 10, true);
+        host_pool_ = makeHostPool(host_block_size_, 10);
 
         device_pool_  = makeDevicePool({{100, 0}, {200, 0}, {150, 0}}, 10, "per_rank_transfer_engine_device");
         device_block_ = poolMalloc(*device_pool_);
@@ -403,7 +403,7 @@ TEST_F(PerRankBlockTransferEngineTest, DeviceHostExecutorReportsTaskPoolSubmissi
 
 TEST_F(PerRankBlockTransferEngineTest, SharedDevicePoolGroupsIsolateByBlockId) {
     auto shared_pool = makeDevicePool({{64, 0}, {32, 0}}, 4, "per_rank_transfer_engine_shared_pool");
-    auto host_pool   = makeHostPool(128, 4, true);
+    auto host_pool   = makeHostPool(128, 4);
     auto group       = makeDeviceHostGroup(
         0, {shared_pool, shared_pool}, host_pool, {makeGroupBase({0, 1}, 32), makeGroupBase({0, 1}, 32)});
     auto engine = makeEngine({group});
@@ -719,7 +719,7 @@ class PerRankBlockTransferEngineMultiMemberTest: public ::testing::Test {
 protected:
     void SetUp() override {
         ASSERT_TRUE(torch::cuda::is_available()) << "CUDA not available, cannot run GPU tests";
-        host_pool_ = makeHostPool(240, 4, true);
+        host_pool_ = makeHostPool(240, 4);
         disk_pool_ = makeDiskPool(240, 4, temp_dir_.path);
         pools_     = {
             makeDevicePool({{64, 16}}, 4, "per_rank_transfer_engine_multi_member_0"),
@@ -812,7 +812,7 @@ TEST(PerRankBlockTransferEngineIntegrationTest, DeviceHostDiskHostDeviceRoundTri
     ASSERT_TRUE(torch::cuda::is_available()) << "CUDA not available, cannot run GPU tests";
     TempDirGuard     temp_dir("per_rank_transfer_engine_three_tier");
     constexpr size_t payload_bytes = 80;
-    auto             host_pool     = makeHostPool(payload_bytes, 2, true);
+    auto             host_pool     = makeHostPool(payload_bytes, 2);
     auto             disk_pool     = makeDiskPool(payload_bytes, 2, temp_dir.path);
     auto             device_pool   = makeDevicePool({{64, 16}}, 2, "per_rank_transfer_engine_three_tier_device");
     auto             device_block  = poolMalloc(*device_pool);
@@ -1176,7 +1176,7 @@ TEST(PerRankBlockTransferEngineIntegrationTest, DiskDeviceWaitingForStagingDoesN
     constexpr size_t payload_bytes = 80;
     auto             disk_pool =
         makeDiskPool(payload_bytes, 1, temp_dir.path, std::make_unique<StatusDiskBlockIO>(DiskBlockIOStatus::OK));
-    auto host_pool   = makeHostPool(payload_bytes, 1, true);
+    auto host_pool   = makeHostPool(payload_bytes, 1);
     auto device_pool = makeDevicePool({{64, 16}}, 2, "per_rank_staging_admission_device");
     auto group =
         makeDeviceHostGroup(0, {device_pool}, host_pool, {makeGroupBase(CacheGroupType::FULL, {0}, 64, 16)}, disk_pool);
@@ -1213,7 +1213,7 @@ TEST(PerRankBlockTransferEngineIntegrationTest, DeviceDiskWaitingForStagingDoesN
     constexpr size_t payload_bytes = 80;
     auto             disk_pool =
         makeDiskPool(payload_bytes, 1, temp_dir.path, std::make_unique<StatusDiskBlockIO>(DiskBlockIOStatus::OK));
-    auto host_pool   = makeHostPool(payload_bytes, 1, true);
+    auto host_pool   = makeHostPool(payload_bytes, 1);
     auto device_pool = makeDevicePool({{64, 16}}, 2, "per_rank_device_disk_staging_admission_device");
     auto group =
         makeDeviceHostGroup(0, {device_pool}, host_pool, {makeGroupBase(CacheGroupType::FULL, {0}, 64, 16)}, disk_pool);
@@ -1376,7 +1376,7 @@ protected:
         layer_bytes_     = {128, 128};
         host_block_size_ = 256;
 
-        host_pool_    = makeHostPool(host_block_size_, 10, true);
+        host_pool_    = makeHostPool(host_block_size_, 10);
         device_pool_  = makeDevicePool({{128, 0}, {256, 0}}, 10, "strategy_test_device");
         device_block_ = poolMalloc(*device_pool_);
         ASSERT_NE(device_block_, NULL_BLOCK_IDX);

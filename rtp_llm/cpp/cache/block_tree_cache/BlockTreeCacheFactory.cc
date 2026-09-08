@@ -173,8 +173,7 @@ std::vector<KVCacheGroupPtr> alignAllocatorGroups(const CacheConfig&         cac
     return aligned;
 }
 
-std::shared_ptr<HostBlockPool>
-createHostPool(const std::string& name, size_t payload_bytes, size_t usable_blocks, bool enable_pinned) {
+std::shared_ptr<HostBlockPool> createHostPool(const std::string& name, size_t payload_bytes, size_t usable_blocks) {
     if (payload_bytes == 0 || usable_blocks == 0) {
         return nullptr;
     }
@@ -184,7 +183,6 @@ createHostPool(const std::string& name, size_t payload_bytes, size_t usable_bloc
     config->physical_block_count = usable_blocks + 1;
     config->payload_bytes        = payload_bytes;
     config->stride_bytes         = alignUp(payload_bytes, kPoolAlignment);
-    config->enable_pinned        = enable_pinned;
     config->alignment            = kPoolAlignment;
     auto pool                    = std::make_shared<HostBlockPool>(config);
     return pool->init() ? pool : nullptr;
@@ -443,8 +441,7 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
             const GroupBase&        first   = cache_config.topology().groupById(static_cast<size_t>(members.front()));
             const std::string       pool_name =
                 "block_tree_host_" + std::string(metricCacheGroupTypeName(first.policy.group_type));
-            host_pools[group_set_id] = createHostPool(
-                pool_name, group_set_payload_bytes[group_set_id], usable, kv_cache_config.enable_host_cache_pinned);
+            host_pools[group_set_id] = createHostPool(pool_name, group_set_payload_bytes[group_set_id], usable);
             if (!host_pools[group_set_id]) {
                 return nullptr;
             }

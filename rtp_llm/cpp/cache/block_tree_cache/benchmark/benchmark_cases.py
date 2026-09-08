@@ -77,7 +77,6 @@ SMOKE_CASES = [
             "--transfer-operation-count": "64",
             "--transfer-concurrency": "2",
             "--transfer-descriptor-batch-size": "2",
-            "--host-memory": "pinned",
             "--min-measured-seconds": "5",
         },
     ),
@@ -115,7 +114,6 @@ def _transfer_case(
         "--transfer-operation-count": "4096",
         "--transfer-concurrency": str(concurrency),
         "--transfer-descriptor-batch-size": str(descriptor_batch_size),
-        "--host-memory": "pinned",
         "--transfer-worker-count": str(transfer_worker_count),
     }
     if business_concurrency > 0:
