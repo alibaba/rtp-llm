@@ -174,8 +174,8 @@ class BaseMoEExperts(RtpModule):
 
         # Shard expert intermediate dimensions only in pure TP mode. In EP or
         # DP topologies each rank owns a local expert subset and keeps it full.
-        dp_size = getattr(parallelism_config, "dp_size", 1)
-        dp_rank = getattr(parallelism_config, "dp_rank", 0)
+        dp_size = parallelism_config.dp_size
+        dp_rank = parallelism_config.dp_rank
         if isinstance(dp_size, bool) or not isinstance(dp_size, int) or dp_size <= 0:
             raise ValueError(f"dp_size must be a positive integer, got {dp_size!r}")
         if (
@@ -663,6 +663,23 @@ class BaseMoEExperts(RtpModule):
                 return flat[0:1], flat[0:1]
             if flat.numel() == 2:
                 return flat[0:1], flat[1:2]
+
+        if param_name == "weight_scale" and self._quant_family == "fp8_per_channel":
+            # Per-channel scales may be stored as [2M], [1, 2M], or [2M, 1].
+            # Normalize these equivalent row/column-vector layouts before
+            # splitting the fused gate/up metadata.
+            flat = tensor.reshape(-1)
+            expected = 2 * self.moe_inter
+            if flat.numel() != expected:
+                raise ValueError(
+                    f"gate_up_proj.{param_name} must contain {expected} values "
+                    f"for FP8 per-channel quantization, got shape "
+                    f"{tuple(tensor.shape)} with {flat.numel()} values"
+                )
+            return (
+                flat[: self.moe_inter].contiguous(),
+                flat[self.moe_inter :].contiguous(),
+            )
 
         if param_name != "weight_scale_inv":
             try:
