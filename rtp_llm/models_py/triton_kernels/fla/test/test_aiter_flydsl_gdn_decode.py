@@ -285,6 +285,32 @@ class AiterFlydslGdnDecodeCommonTest(unittest.TestCase):
     def setUp(self):
         _reset_adapter_process_state(self)
 
+    def test_output_allocation_tracks_padding_write_capability(self):
+        kwargs = _make_decode_kwargs(batch=2)
+        original_empty = torch.empty
+        original_zeros = torch.zeros
+
+        for zeroes_invalid_output, expected_allocator in (
+            (False, "zeros"),
+            (True, "empty"),
+        ):
+            with self.subTest(zeroes_invalid_output=zeroes_invalid_output):
+                flydsl_decode = _mock_flydsl_decode()
+                if zeroes_invalid_output:
+                    flydsl_decode.zeroes_invalid_output = True
+                with (
+                    mock.patch.object(
+                        torch, "empty", side_effect=original_empty
+                    ) as empty,
+                    mock.patch.object(
+                        torch, "zeros", side_effect=original_zeros
+                    ) as zeros,
+                ):
+                    _call_mock_decode(kwargs, flydsl_decode)
+
+                self.assertEqual(empty.call_count, expected_allocator == "empty")
+                self.assertEqual(zeros.call_count, expected_allocator == "zeros")
+
     def test_host_validation_accepts_padding_and_rejects_invalid_real_row(self):
         device_block_map = torch.tensor(
             [[1, 2], [0, 0]], device="cuda", dtype=torch.int32

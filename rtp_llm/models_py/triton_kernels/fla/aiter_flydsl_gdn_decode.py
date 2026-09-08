@@ -724,9 +724,15 @@ def aiter_flydsl_gdn_decode(
 
     batch, query_length = q.shape[:2]
     value_heads = v.shape[2]
-    # AITER skips negative-index graph-padding rows. Zero initialization makes
-    # those outputs deterministic instead of exposing uninitialized memory.
-    output = torch.zeros(v.shape, dtype=v.dtype, device=v.device)
+    # New AITER kernels write +0 for negative-index Graph-padding rows and can
+    # avoid a separate memset in every captured replay. Retain zero-init for an
+    # older wheel whose kernel skips those rows without writing the output.
+    output_factory = (
+        torch.empty
+        if getattr(flydsl_gdr_decode, "zeroes_invalid_output", False)
+        else torch.zeros
+    )
+    output = output_factory(v.shape, dtype=v.dtype, device=v.device)
     flydsl_gdr_decode(
         query=q,
         key=k,
