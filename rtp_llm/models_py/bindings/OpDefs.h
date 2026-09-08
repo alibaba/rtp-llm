@@ -337,12 +337,16 @@ struct BertEmbeddingInputs {
 struct PyEmbeddingInputs {
     torch::Tensor combo_tokens_type_ids;
     torch::Tensor text_tokens_mask;
+    torch::Tensor input_ids_host;
+    torch::Tensor input_lengths_host;
+    torch::Tensor text_tokens_mask_host;
 };
 
 struct PyMultimodalInputs {
     std::vector<torch::Tensor> multimodal_features;
     torch::Tensor              mm_features_locs;
     std::vector<torch::Tensor> mm_extra_input;
+    torch::Tensor              mm_features_locs_host;
 };
 
 using AttentionInputsByTag = std::map<std::string, PyAttentionInputs>;

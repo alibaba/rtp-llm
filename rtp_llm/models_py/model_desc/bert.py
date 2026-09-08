@@ -130,9 +130,8 @@ class BertModel(GptModelBase):
             ]
         )
 
-    def forward(
-        self, inputs: PyModelInputs, fmha_impl: FMHAImplBase = None
-    ) -> PyModelOutputs:
+    def embed_inputs(self, inputs: PyModelInputs) -> torch.Tensor:
+        """Build the first decoder layer's input; subclasses may supply embeddings."""
         input_ids: torch.Tensor = inputs.input_ids
         bert_embedding_inputs = inputs.bert_embedding_inputs
         inputs_embeds = self.embed_tokens(
@@ -143,7 +142,12 @@ class BertModel(GptModelBase):
             bert_embedding_inputs.token_type_embedding,
             bert_embedding_inputs.input_embedding_scalar,
         )
-        hidden_states = self.pre_decoder_layernorm(inputs_embeds)
+        return self.pre_decoder_layernorm(inputs_embeds)
+
+    def forward(
+        self, inputs: PyModelInputs, fmha_impl: FMHAImplBase = None
+    ) -> PyModelOutputs:
+        hidden_states = self.embed_inputs(inputs)
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(inputs)
         for i, decoder_layer in enumerate(self.layers[: self.layer_num]):
