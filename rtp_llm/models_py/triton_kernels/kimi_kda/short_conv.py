@@ -510,6 +510,8 @@ def _kimi_kda_short_conv_paged_decode_kernel(
         other=0,
     )
     b_new_history = tl.where((o_w == W - 2)[None, :], b_x[:, None], b_shifted_history)
+    # Complete all history reads before any warp overwrites aliased state.
+    tl.debug_barrier()
     tl.store(
         conv_state
         + write_block_id * stride_s_block
@@ -630,10 +632,7 @@ def _kimi_kda_short_conv_paged_target_verify_kernel(
             & (checkpoint_block_id < physical_block_count)
         )
 
-        # Publish the old loop's destination copy before any shifted-history
-        # reload. This is the only inter-warp read-after-write dependency in a
-        # non-initial step, so one barrier here is sufficient; the final
-        # checkpoint store is ordered by the next iteration's barrier.
+        # Complete the destination copy before any warp reloads its history.
         if i_t > 0:
             tl.store(
                 conv_state
@@ -694,6 +693,8 @@ def _kimi_kda_short_conv_paged_target_verify_kernel(
         previous_checkpoint = tl.where(
             (o_w == W - 2)[None, :], b_x[:, None], b_shifted_history
         )
+        # Complete all history reads before any warp overwrites aliased state.
+        tl.debug_barrier()
         tl.store(
             conv_state
             + checkpoint_block_id * stride_s_block
