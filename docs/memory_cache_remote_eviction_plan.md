@@ -12,8 +12,8 @@ Task B：evictDeviceCacheToMemory
 
 第一版只覆盖 `cache_config.groupNums() == 1` 的模型，重点适配 MiniMax-M3。要求：
 
-- Memory cache 空间不足时，先选择已有 Memory victim 并写入 Remote。
-- Task A 完成后才能启动完整的 `evictDeviceCacheToMemory()`。
+- 预计本次 D2H 后 Memory cache 会超过高水位时，先选择已有 Memory victim 并写入 Remote。
+- 当水位计算需要 Task A 时，Task A 完成后才能启动完整的 `evictDeviceCacheToMemory()`；无需 Remote spill 时直接启动 Task B。
 - Task B 内再次发现 Memory 空间不足时，直接淘汰 Memory LRU，不再递归写 Remote。
 - Remote 写失败不能阻断 Device cache 回收；失败只降低缓存命中率。
 - Remote 写期间，Memory victim 不得被重新匹配、释放或覆盖。
@@ -96,11 +96,13 @@ finishWrite()
 ## 4. 目标时序
 
 ```text
-创建 DeviceEvictionPlan，预计写入 N 个 Memory blocks
+请求成为串行队列队首，计算预计写入量 N
     ↓
-查询 Memory free blocks F
-    ├── F >= N：直接启动 Task B
-    └── F < N：选择并 detach N-F 个 Memory victims
+读取 Memory 当前使用量 U 和高水位容量 H
+    ↓
+计算 R = max(0, U + N - H)
+    ├── R == 0：直接启动 Task B
+    └── R > 0：选择并 detach R 个 Memory victims
                      ↓
               Task A：Memory → Remote
                      ├── getWriteLocation
@@ -228,7 +230,7 @@ memory_to_remote_evict_blocks = std::max<int64_t>(
 这一个公式同时包含两个条件：
 
 1. 当前 Memory cache 的占用是否已经接近或超过水位。
-2. 本次 Task B 的实际 D2H block 数会带来多少新增占用。
+2. Task A 估计的本次 D2H block 数会带来多少新增占用。
 
 不能只写成当前超水位量：
 
@@ -305,23 +307,39 @@ struct MemoryRemoteEvictionItem {
 ```cpp
 struct MemoryRemoteEvictionPlan {
     std::vector<MemoryRemoteEvictionItem> items;
-    std::shared_ptr<Meta>                 meta;
+    // 请求级追踪字段可保留，但token_ids必须允许为空。
+    std::shared_ptr<Meta>                 remote_meta;
 };
 ```
 
-### 5.3 Device eviction plan
+### 5.3 Device→Memory 容量预估
 
-优先复用现有 Device cache 淘汰参数；如当前没有统一对象，可抽取：
+Task A 不构造 Task B 的执行 plan，只保存计算 Memory 水位所需的轻量预估和请求引用：
 
 ```cpp
-struct DeviceEvictionPlan {
+struct DeviceToMemoryEvictionEstimate {
     std::shared_ptr<KVCacheResource> resource;
     std::shared_ptr<Meta>            meta;
-    size_t                           block_num{0};
+    size_t                           estimated_d2h_block_num{0};
 };
 ```
 
-该 plan 必须持有 Device resource，确保 Task B 启动前 Device block 不被复用。
+这里不保存 `CopyInfoPerKey`、Device block ID、Memory backing 或 D2H layout。`resource` 引用只保证请求在 Task A 期间仍可由 Task B 重新分析；最终复制范围和 `actual_d2h_block_num` 由 Task B 启动时独立生成。
+
+`estimated_d2h_block_num` 默认取 Device 高水位计算出的本轮 `need_evict`，作为尚未执行 Memory match 前的保守估计。允许实现使用只读统计进一步收紧该值，但不得因此冻结具体 Device blocks 或 CopyInfo。
+
+`actual_d2h_block_num` 的统一语义是：Task B 完成实时 match/裁剪后，需要新分配 Memory backing 并执行 D2H 的逻辑 block 数。已经命中 Memory、被裁掉或不再需要淘汰的 blocks 不计入该值。
+
+### 5.4 Memory eviction lease
+
+```cpp
+struct MemoryEvictionLease {
+    std::vector<MemoryRemoteEvictionItem> items;
+    // 持有Memory pool/backing所需的强引用。
+};
+```
+
+该 lease 只负责保证 Remote 异步读取期间 host backing 有效，不自行执行 cache 状态迁移或释放。`finishRemoteEviction()` 是唯一完成 `REMOTE_EVICTING → FREE` 和归还 backing 的入口，必须保证只调用一次。
 
 ## 6. MemoryBlockCache 修改
 
@@ -342,7 +360,7 @@ std::vector<CacheItem> detachForRemoteEviction(int n);
 
 行为：
 
-1. 在 LRU 锁内选择 `!is_resident` 的 victim。
+1. 在 LRU 锁内只选择 `!is_resident && is_complete` 的 victim；第一版不把 incomplete tail 写入 Remote。
 2. 从可匹配索引中删除。
 3. 返回完整 `CacheItem`。
 4. 不执行 `blockCacheFree()`。
@@ -388,10 +406,11 @@ rtp_llm/cpp/cache/connector/memory/KVCacheMemoryConnector.cc
 ### 7.1 空间查询
 
 ```cpp
-size_t freeMemoryBlocks(CacheBlockKind kind) const;
+size_t totalMemoryBlocks() const;
+size_t freeMemoryBlocks() const;
 ```
 
-第一版主要处理 `CacheBlockKind::COMPLETE`。
+两个值必须使用同一个 Memory backing pool 的口径，并与 `MemoryBlockCache::freeBlocksNum()` 一致。第一版只处理单 group，因此不额外传 group/kind；未来支持多 pool 时再显式增加 pool ID。
 
 ### 7.2 准备 victim
 
@@ -400,19 +419,21 @@ std::vector<MemoryRemoteEvictionItem>
 prepareRemoteEviction(size_t block_num);
 ```
 
-该接口负责 detach 并 pin victim，但不释放 host backing。
+该接口最多返回 `block_num` 个 victims，负责 detach 并 pin，但不释放 host backing。由于 resident、in-flight 或 incomplete blocks 不可选，返回数量允许小于请求数量；未预腾出的差额由 Task B 根据 `actual_d2h_block_num` 直接淘汰兜底。
 
 ### 7.3 构造 CPU BlockBuffers
 
 ```cpp
 bool buildHostBlockBuffers(
     const std::vector<MemoryRemoteEvictionItem>& items,
+    const std::vector<size_t>& selected_indices,
     kv_cache_manager::BlockBuffers& buffers) const;
 ```
 
 规则：
 
-- 一个 cache key 对应一个 `BlockBuffer`。
+- 只为 `selected_indices` 指向的远端缺失 keys 构造 buffers。
+- 一个被选中的 cache key 对应一个 `BlockBuffer`。
 - 一个 `BlockBuffer` 包含该 block 所有层的 IOV。
 - 所有 IOV 的类型均为 `kv_cache_manager::MemoryType::CPU`。
 - IOV 顺序与当前 Device Remote 写入顺序完全一致。
@@ -463,17 +484,16 @@ rtp_llm/cpp/cache/connector/remote_connector/RemoteConnector.h
 rtp_llm/cpp/cache/connector/remote_connector/RemoteConnector.cc
 ```
 
-### 8.1 新增 CPU buffer 写入口
+### 8.1 新增 Memory block 写入口
 
 ```cpp
-std::shared_ptr<AsyncContext> asyncWriteMemoryBlocks(
-    const CacheKeysType&                   cache_keys,
-    kv_cache_manager::BlockBuffers         block_buffers,
-    const std::shared_ptr<Meta>&            meta,
-    std::shared_ptr<void>                   backing_lease);
+std::shared_ptr<AsyncContext> asyncWriteMemory(
+    const std::vector<MemoryRemoteEvictionItem>& victims,
+    const std::shared_ptr<Meta>& remote_meta,
+    const std::shared_ptr<MemoryEvictionLease>& lease);
 ```
 
-`backing_lease` 代表 victim 生命周期，必须一直保留到异步任务结束。也可以使用强类型的 `MemoryEvictionLease`。
+`lease` 代表 victim backing 生命周期，必须一直保留到异步任务结束。该入口不预先接收完整 `BlockBuffers`；它先用 `cache_keys` 查询 Remote，仅对 `block_mask` 标记为缺失的 blocks 延迟构造 CPU buffers。
 
 ### 8.2 统一 Device/Memory 写入入口
 
@@ -554,11 +574,11 @@ Memory 入口：
 ```cpp
 std::shared_ptr<AsyncContext> RemoteConnector::asyncWriteMemory(
     const std::vector<MemoryRemoteEvictionItem>& victims,
-    const std::shared_ptr<Meta>& meta,
+    const std::shared_ptr<Meta>& remote_meta,
     const std::shared_ptr<MemoryEvictionLease>& lease) {
     RemoteWriteInput input;
     input.cache_keys   = extractCacheKeys(victims);
-    input.meta         = makeRemoteWriteMeta(meta, /* token_ids = */ {});
+    input.meta         = remote_meta;
     input.buffer_lease = lease;
     input.build_buffers = makeMemoryBufferProvider(victims, lease);
     return asyncWriteCommon(std::move(input));
@@ -587,6 +607,7 @@ Memory→Remote 调用的额外接口约束：
 - `getWriteLocation()`、`genWriteRequest()` 和公共写入流程不得从 token IDs 重新生成 cache keys。
 - token IDs 为空不代表没有 blocks；是否为空写由 `cache_keys.empty()` 判断。
 - 不得把触发本次 Device→Memory 淘汰请求的 token IDs 填到历史 Memory victims 上。
+- 空 token `remote_meta` 由上层每次调用构造一次；RemoteConnector 不再复制或二次改写 Meta。
 
 ### 8.3 抽取公共控制面
 
@@ -610,8 +631,8 @@ writeBlockBuffers()      // 公共KVCM写流程
 区别仅在数据来源：
 
 ```text
-Device：group_id + device block_id → GPU IOV
-Memory：预构造的 host BlockBuffers → CPU IOV
+Device：group_id + device block_id → 按block_mask延迟构造GPU IOV
+Memory：memory block id + host layout → 按block_mask延迟构造CPU IOV
 ```
 
 ### 8.4 Block mask 对齐
@@ -624,15 +645,27 @@ locations[i]
 block_buffers[i]
 ```
 
-建议增加：
+公共控制面先把 mask 转成原始 key 下标，再交给对应 provider：
 
 ```cpp
-bool selectNeedWriteBuffers(
-    const CacheKeysType& all_keys,
-    const kv_cache_manager::BlockBuffers& all_buffers,
-    const kv_cache_manager::BlockMask& mask,
-    CacheKeysType& selected_keys,
-    kv_cache_manager::BlockBuffers& selected_buffers);
+std::vector<size_t> selectNeedWriteIndices(
+    size_t key_count,
+    const kv_cache_manager::BlockMask& mask);
+
+auto selected_indices = selectNeedWriteIndices(cache_keys.size(), mask);
+build_buffers(selected_indices, selected_buffers);
+```
+
+`selected_buffers[j]` 必须对应 `cache_keys[selected_indices[j]]`；禁止先构造全部 buffers 再过滤，否则会抵消 provider 的延迟构造收益。
+
+如果 `selected_indices.empty()`，表示所有 victims 已经存在于 Remote。公共流程应将 Task A 作为成功的 no-op write 完成，不调用空的 `saveKvCaches()`；随后仍执行 `finishRemoteEviction()` 释放这些本地 victims，并启动 Task B。
+
+需要区分两个“空”条件：
+
+```text
+cache_keys.empty()        → 没有Memory victims，本次不创建Task A
+selected_indices.empty()  → victims均已在Remote，Task A成功完成
+token_ids.empty()         → 合法metadata，不影响上述判断
 ```
 
 ### 8.5 KVCM CPU buffer 前提
@@ -744,7 +777,7 @@ DONE
 
 ```cpp
 std::shared_ptr<AsyncContext> asyncTieredEvictDeviceCache(
-    const DeviceEvictionPlan& plan);
+    const DeviceToMemoryEvictionEstimate& estimate);
 ```
 
 伪代码：
@@ -752,49 +785,50 @@ std::shared_ptr<AsyncContext> asyncTieredEvictDeviceCache(
 ```cpp
 std::shared_ptr<AsyncContext>
 TieredCacheManager::asyncTieredEvictDeviceCache(
-    const DeviceEvictionPlan& plan) {
+    const DeviceToMemoryEvictionEstimate& estimate) {
     RTP_LLM_CHECK_WITH_INFO(cache_config_.groupNums() == 1,
                             "only one cache group is supported");
 
-    const size_t incoming = plan.block_num;
-    const size_t free = memory_connector_->freeMemoryBlocks(
-        CacheBlockKind::COMPLETE);
+    const size_t total = memory_connector_->totalMemoryBlocks();
+    const size_t free = memory_connector_->freeMemoryBlocks();
+    const size_t used = total - std::min(total, free);
+    const size_t high = total * memory_high_watermark_ratio_ / 100;
+    const size_t incoming = estimate.estimated_d2h_block_num;
+    const size_t remote_evict_num =
+        used + incoming > high ? used + incoming - high : 0;
 
-    if (free >= incoming) {
-        return evictDeviceCacheToMemory(plan);
+    if (remote_evict_num == 0) {
+        return evictDeviceCacheToMemory(estimate.resource,
+                                        estimate.meta);
     }
 
     auto victims = memory_connector_->prepareRemoteEviction(
-        incoming - free);
+        remote_evict_num);
     if (victims.empty()) {
-        return evictDeviceCacheToMemory(plan);
-    }
-
-    kv_cache_manager::BlockBuffers host_buffers;
-    if (!memory_connector_->buildHostBlockBuffers(victims,
-                                                   host_buffers)) {
-        memory_connector_->finishRemoteEviction(victims, false);
-        return evictDeviceCacheToMemory(plan);
+        return evictDeviceCacheToMemory(estimate.resource,
+                                        estimate.meta);
     }
 
     auto lease = makeMemoryEvictionLease(victims);
-    auto remote_ctx = remote_connector_->asyncWriteMemoryBlocks(
-        extractCacheKeys(victims),
-        std::move(host_buffers),
-        plan.meta,
-        lease);
+    auto remote_meta = makeRemoteWriteMeta(
+        estimate.meta, /* token_ids = */ {});
+    auto remote_ctx = remote_connector_->asyncWriteMemory(
+        victims, remote_meta, lease);
 
     if (!remote_ctx) {
         memory_connector_->finishRemoteEviction(victims, false);
-        return evictDeviceCacheToMemory(plan);
+        return evictDeviceCacheToMemory(estimate.resource,
+                                        estimate.meta);
     }
 
     return makeChainedAsyncContext(
         remote_ctx,
-        [this, victims, plan](bool remote_success) {
+        [this, victims, estimate](bool remote_success) {
             memory_connector_->finishRemoteEviction(
                 victims, remote_success);
-            return evictDeviceCacheToMemory(plan);
+            // Task B调用完整入口并在此时独立构造最终D2H plan。
+            return evictDeviceCacheToMemory(estimate.resource,
+                                            estimate.meta);
         });
 }
 ```
@@ -804,7 +838,7 @@ TieredCacheManager::asyncTieredEvictDeviceCache(
 Task B 必须调用完整的：
 
 ```cpp
-evictDeviceCacheToMemory(plan)
+evictDeviceCacheToMemory(resource, meta)
 ```
 
 不能直接把它替换为 `memory_connector_->asyncWrite()`，因为完整 Device 淘汰还可能负责：
@@ -816,11 +850,14 @@ evictDeviceCacheToMemory(plan)
 - 释放 Device cache 引用和 block。
 - 处理失败回滚。
 
-Task B 内部的 Memory 空间不足路径保持现状：
+Task B 在形成最终 plan、得到 `actual_d2h_block_num` 后，必须先按 Memory 高水位计算实际缺口。直接淘汰可以复用现有逐 block 释放机制，但触发数量改为水位公式，而不是仅在 allocation 失败时被动释放：
 
 ```cpp
-auto victim = block_cache_->popOldestEvictable(kind);
-releaseCacheBacking(*victim);  // 直接释放，不写Remote
+const size_t immediate_evict_num = std::max<int64_t>(
+    0,
+    current_used + actual_d2h_block_num - memory_high_watermark_blocks);
+auto victims = block_cache_->popForImmediateEviction(immediate_evict_num);
+releaseCacheBackings(victims);  // 直接释放，不写Remote
 ```
 
 建议通过不同接口明确区分：
@@ -837,14 +874,14 @@ popForImmediateEviction()  // Task B：直接释放
 第一版不允许多个两级淘汰事务并行执行。串行化粒度为同一个 Memory pool 上的完整事务：
 
 ```text
-Q1：prepare plan
+Q1：计算estimate
     → Task A：Memory→Remote
-    → Task B：evictDeviceCacheToMemory
+    → Task B：实时构造plan并evictDeviceCacheToMemory
     → Q1完成
     ↓
-Q2：重新prepare plan
+Q2：重新计算estimate
     → Task A：Memory→Remote
-    → Task B：evictDeviceCacheToMemory
+    → Task B：实时构造plan并evictDeviceCacheToMemory
     → Q2完成
 ```
 
@@ -951,15 +988,7 @@ Task A之前保存：请求/resource引用、estimated_d2h_block_num
 Task B开始后执行：重新分析、构造plan、Memory backing分配、必要的直接淘汰、D2H、commit
 ```
 
-建议的数据结构只需表达预估：
-
-```cpp
-struct DeviceToMemoryEvictionEstimate {
-    std::shared_ptr<KVCacheResource> resource;
-    std::shared_ptr<Meta>            meta;
-    size_t                           estimated_d2h_block_num{0};
-};
-```
+预估对象统一使用第 5.3 节定义的 `DeviceToMemoryEvictionEstimate`，不得在编排层再定义另一种 plan 类型。
 
 Task A 完成并释放 Memory victims 后，Task B 调用原始完整入口：
 
@@ -986,7 +1015,7 @@ Memory victim列表
 
 这些容量相关信息必须等 Q2 真正成为队首后重新计算。
 
-如果 Device victim 在请求入队时已经从 Device cache 中选定，则 request 必须持有对应 resource/ref，禁止等待期间重新分配这些 Device blocks。如果允许延迟选择 Device victim，则优先在请求成为队首时再选择，以减少长时间占用 Device cache。
+请求入队和 Task A 阶段都不得冻结具体 Device victims、Device block IDs 或 CopyInfo。Task B 启动时重新计算 Device 水位并选择 victims；如果压力已经消失，Task B 可以形成空 plan 并成功 no-op。estimate 与实际数量的差异只影响 Task A 的 Remote spill 收益，不影响 Task B 正确性。
 
 串行化边界必须覆盖 Task A 和 Task B，而不是只串行 Task A：
 
@@ -1004,7 +1033,7 @@ Memory victim列表
 链式 context 必须持有：
 
 ```text
-DeviceEvictionPlan
+DeviceToMemoryEvictionEstimate
 ├── Device KV resource
 ├── Meta
 └── MemoryEvictionLease
@@ -1016,7 +1045,7 @@ Task A 完成前：
 - Memory victim 不可匹配。
 - Memory victim 不可被第二次淘汰。
 - Host backing 不可释放或重新分配。
-- Device victim 不可覆盖或释放。
+- 请求级 `resource`/`meta` 引用必须有效；此时尚未选定具体 Device victims，因此不持有 Device block lease。
 
 Task A 完成后的顺序必须是：
 
@@ -1048,7 +1077,7 @@ cache keys
 location spec group names
 ```
 
-`unique_id`、`trace_id` 等请求级字段继续用于追踪和幂等控制；block 的内容身份由显式 `cache_keys` 表达。`Meta::tokens()` 不是 Memory→Remote 写入的必要字段，可以传空数组。
+`unique_id`、`trace_id` 等请求级字段只用于调用追踪；block 的内容身份和远端存在性判断由显式 `cache_keys` 表达。`Meta::tokens()` 不是 Memory→Remote 写入的必要字段，可以传空数组。
 
 RemoteConnector 必须提供按 cache key 写入的语义：
 
@@ -1175,7 +1204,8 @@ layer1 idx_K
 - IOV 顺序与 Device 路径一致。
 - 所有 IOV 均为 `MemoryType::CPU`。
 - IOV 总大小等于逻辑 block 大小。
-- 多个 victim 能批量生成多个 BlockBuffer。
+- provider 只为 `selected_indices` 对应的 victims 构造 BlockBuffers。
+- 多个被选中 victim 能批量生成多个 BlockBuffer。
 
 ### 17.3 Block mask 单测
 
@@ -1193,6 +1223,19 @@ uris = [B_uri, C_uri]
 buffers = [B_buffer, C_buffer]
 ```
 
+并验证 A 对应的 host IOV 没有被构造。
+
+增加空 token IDs 用例：
+
+```text
+token_ids = []
+keys = [A, B]
+```
+
+预期仍根据 keys 调用 `getWriteLocation()`；不得因 `token_ids.empty()` 提前返回空写。
+
+增加全部已存在用例：mask 表示 A、B 均已在 Remote 时，不构造 CPU buffers、不调用空 `saveKvCaches()`，Task A 成功完成并正常启动 Task B。
+
 ### 17.4 Task 依赖单测
 
 - Task A 未完成时，Task B 启动次数为 0。
@@ -1208,6 +1251,9 @@ buffers = [B_buffer, C_buffer]
 - Memory total=1000、used=920、incoming=50、ratio=95，Task A预期选择20个 victims。
 - Memory projected used 恰好95%，Task A预期不淘汰。
 - Task A后发生实际空间偏差时，Task B通过直接淘汰恢复到95%以内，并且不新增Remote调用。
+- Task A需要20个但只有12个可Remote淘汰victims时，先写出12个；Task B对最终实际缺口直接淘汰。
+- Task A估计有D2H、但Task B重算后无需Device淘汰时，Task B成功no-op。
+- Task B的最终plan不复用Task A阶段的Device block IDs或CopyInfo。
 - 验证百分比向上/向下取整不会导致最终使用率高于配置水位。
 - `incoming > max_used` 时不死循环，最终保留量不超过目标容量。
 - Q2必须等待Q1完整事务结束后再读取当前used/free并计算水位。
