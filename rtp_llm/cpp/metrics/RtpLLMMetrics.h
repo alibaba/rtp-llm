@@ -279,6 +279,26 @@ private:
     AUTIL_LOG_DECLARE();
 };
 
+// Tokenizer/vision are measured per request; result processing is measured per batch.
+class RtpEmbeddingStageMetricsCollector final {
+public:
+    // Negative means this stage was not measured by this reporter. Zero is a valid sample.
+    double tokenizer_latency_us      = -1;
+    double vision_latency_us         = -1;
+    double result_process_latency_us = -1;
+};
+
+class RtpEmbeddingStageMetrics: public kmonitor::MetricsGroup {
+public:
+    bool init(kmonitor::MetricsGroupManager* manager) override;
+    void report(const kmonitor::MetricsTags* tags, RtpEmbeddingStageMetricsCollector* collector);
+
+private:
+    kmonitor::MutableMetric* tokenizer_latency_us_metric      = nullptr;
+    kmonitor::MutableMetric* vision_latency_us_metric         = nullptr;
+    kmonitor::MutableMetric* result_process_latency_us_metric = nullptr;
+};
+
 class RtpEmbeddingStreamMetricsCollector final {
 public:
     int64_t total_latency_us   = 0;
