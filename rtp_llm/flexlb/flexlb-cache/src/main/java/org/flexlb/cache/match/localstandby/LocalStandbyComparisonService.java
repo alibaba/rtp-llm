@@ -18,6 +18,7 @@ import java.util.Collections;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Function;
 
 /**
  * Compares local standby predictions with KVCM and eventual engine results off the routing path.
@@ -68,31 +69,31 @@ public class LocalStandbyComparisonService {
                 new StandbyPrediction(matchResult.hostMatches(), matchResult.blockSize())));
     }
 
-    public CompletableFuture<CacheHitComparisonResult> buildCacheHitComparison(CacheHitFeedback feedback) {
-        if (!enabled || feedback == null || feedback.requestId() == null) {
-            return CompletableFuture.completedFuture(withoutLocalStandbyPrediction(feedback));
-        }
-        RoleType roleType = resolveRoleType(feedback.role());
-        if (roleType == null) {
-            return CompletableFuture.completedFuture(withoutLocalStandbyPrediction(feedback));
-        }
-        CompletableFuture<StandbyPrediction> prediction = pendingLocalStandbyPredictions.asMap()
-                .remove(new LocalStandbyPredictionKey(feedback.requestId(), roleType));
-        if (prediction == null) {
-            return CompletableFuture.completedFuture(withoutLocalStandbyPrediction(feedback));
-        }
-
-        return prediction.handle((standbyPrediction, error) -> {
-            if (error != null || standbyPrediction == null) {
-                log.warn("Failed to compare local standby cache prediction, requestId={}",
-                        feedback.requestId(), error);
-                return withoutLocalStandbyPrediction(feedback);
+    public Function<CacheHitFeedback, CompletableFuture<CacheHitComparisonResult>> captureComparison(String requestId,
+                                                                                                     RoleType role) {
+        CompletableFuture<StandbyPrediction> prediction = enabled
+                ? pendingLocalStandbyPredictions.asMap().remove(new LocalStandbyPredictionKey(requestId, role))
+                : null;
+        return feedback -> {
+            if (prediction == null) {
+                return CompletableFuture.completedFuture(withoutLocalStandbyPrediction(feedback));
             }
-            return withLocalStandbyPrediction(feedback, standbyPrediction);
-        });
+            return prediction.thenApply(value -> value).completeOnTimeout(null, 1, TimeUnit.SECONDS)
+                    .handle((standbyPrediction, error) -> {
+                        if (error != null || standbyPrediction == null) {
+                            log.warn("Local Standby comparison unavailable, requestId={}", requestId, error);
+                            return withoutLocalStandbyPrediction(feedback);
+                        }
+                        return withLocalStandbyPrediction(feedback, standbyPrediction);
+                    });
+        };
     }
 
-    private CacheHitComparisonResult withLocalStandbyPrediction(CacheHitFeedback feedback, StandbyPrediction standbyPrediction) {
+    private CacheHitComparisonResult withLocalStandbyPrediction(CacheHitFeedback feedback,
+                                                                StandbyPrediction standbyPrediction) {
+        if (standbyPrediction.blockSize() <= 0) {
+            return withoutLocalStandbyPrediction(feedback);
+        }
         String workerIpPort = feedback.logicalWorkerId();
         HostCacheMatch match = standbyPrediction.matches().get(workerIpPort);
         long localStandbyPredictedHitTokens = match == null
@@ -148,17 +149,13 @@ public class LocalStandbyComparisonService {
                 kvcmDetails);
     }
 
-    private RoleType resolveRoleType(String role) {
-        return RoleType.fromString(role);
-    }
-
     private record LocalStandbyPredictionKey(String requestId, RoleType roleType) {
     }
 
     private record StandbyPrediction(Map<String, HostCacheMatch> matches, long blockSize) {
 
         private StandbyPrediction {
-            matches = matches == null ? Collections.emptyMap() : matches;
+            matches = matches == null ? Collections.emptyMap() : Map.copyOf(matches);
         }
     }
 }

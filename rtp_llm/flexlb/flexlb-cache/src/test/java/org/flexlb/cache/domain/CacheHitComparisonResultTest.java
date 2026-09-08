@@ -40,7 +40,7 @@ class CacheHitComparisonResultTest {
         assertEquals(20, comparison.kvcm().delta());
         assertSame(comparison.kvcmDetails().local(), comparison.kvcm().local());
         assertSame(comparison.kvcmDetails().p2pTotal(), comparison.kvcm().p2pTotal());
-        assertFalse(json.contains("\"routing\""));
+        assertTrue(json.contains("\"routing\":{\"hit\":100,\"delta\":20}"));
         assertFalse(json.contains("\"kvcmDetails\""));
         assertTrue(json.indexOf("\"actual\"") < json.indexOf("\"kvcm\""));
         assertTrue(json.indexOf("\"kvcm\"") < json.indexOf("\"localStandby\""));

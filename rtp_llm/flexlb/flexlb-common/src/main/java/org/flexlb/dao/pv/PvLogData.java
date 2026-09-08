@@ -1,26 +1,36 @@
 package org.flexlb.dao.pv;
 
+import com.fasterxml.jackson.annotation.JsonInclude;
 import lombok.Data;
 import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
+import org.flexlb.dao.route.RoleType;
 
+import java.util.List;
 import java.util.Map;
 
 /** One completed FlexLB scheduling decision written to {@code pv.log}. */
 @Data
 public class PvLogData {
 
-    // Keep the historical PV fields for downstream compatibility.
-    private long requestId;
-    private long seqLen;
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    private String requestId;
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    private Long seqLen;
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    private Long inputIdsCount;
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    private Long requestBodyBytes;
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    private Long requestTimeMs;
+    private Long requestMessageBytes;
+
     private Response response;
     private String error;
     private boolean success;
     private long enqueueTime;
     private long startTime;
-    private long requestTimeMs;
-
-    // Minimal gRPC scheduling fields needed for incident correlation.
     private int code;
     private String admissionRejectReason;
     private String scheduleOrigin;
@@ -32,6 +42,26 @@ public class PvLogData {
     private String realMasterHost;
     private Map<String, Object> schedulingDiagnostics;
 
+    private long totalUs;
+    private Long arrivalMs;
+    private Long reqParseUs;
+    private DecisionGroup decisionGroup;
+    @JsonInclude(JsonInclude.Include.NON_EMPTY)
+    private List<RoutingDecision> routingDecisions;
+    private long hashWaitUs;
+    private long hashUs;
+    private String cacheMatchSource;
+    private long cacheMatchUs;
+    private int cacheMatchCount;
+    @JsonInclude(JsonInclude.Include.NON_EMPTY)
+    private List<BalanceContext.CacheMatchSelection> cacheMatchSelections;
+    @JsonInclude(JsonInclude.Include.NON_EMPTY)
+    private Map<RoleType, String> selectionReasons;
+
+    public PvLogData(BalanceContext ctx) {
+        populateCommonFields(ctx);
+    }
+
     public PvLogData(BalanceContext ctx,
                      int code,
                      String admissionRejectReason,
@@ -40,17 +70,7 @@ public class PvLogData {
                      String requestState,
                      String realMasterHost,
                      long completedAtMs) {
-        this.requestId = ctx.getRequestId();
-        this.seqLen = ctx.getRequest().getSeqLen();
-        this.response = ctx.getResponse();
-        this.error = ctx.getErrorMessage();
-        this.success = ctx.isSuccess();
-        if (!success) {
-            this.schedulingDiagnostics = ctx.getSchedulingDiagnostics();
-        }
-        this.enqueueTime = ctx.getEnqueueTime();
-        this.startTime = ctx.getStartTime();
-        this.requestTimeMs = ctx.getRequest().getRequestTimeMs();
+        populateCommonFields(ctx);
         this.code = code;
         this.admissionRejectReason = admissionRejectReason;
         this.scheduleOrigin = scheduleOrigin;
@@ -60,5 +80,44 @@ public class PvLogData {
         this.batchId = batchId;
         this.requestState = requestState;
         this.realMasterHost = realMasterHost;
+    }
+
+    private void populateCommonFields(BalanceContext ctx) {
+        BalanceContext.RoutingTelemetry telemetry = ctx.getRoutingTelemetry();
+        Request request = ctx.getRequest();
+        if (request != null) {
+            this.requestId = String.valueOf(request.getRequestId());
+            this.seqLen = request.getSeqLen();
+            this.requestTimeMs = request.getRequestTimeMs();
+        }
+        this.inputIdsCount = ctx.getInputIdsCount();
+        this.requestBodyBytes = ctx.getRequestBodyBytes();
+        this.requestMessageBytes = ctx.getRequestMessageBytes();
+        this.decisionGroup = ctx.getDecisionGroup();
+        this.routingDecisions = telemetry.routingDecisions().entrySet().stream()
+                .sorted(Map.Entry.comparingByKey())
+                .map(Map.Entry::getValue)
+                .toList();
+        this.response = ctx.getResponse();
+        this.error = ctx.getErrorMessage();
+        this.success = ctx.isSuccess();
+        if (!success) {
+            this.schedulingDiagnostics = ctx.getSchedulingDiagnostics();
+        }
+        this.enqueueTime = ctx.getEnqueueTime();
+        this.startTime = ctx.getStartTime();
+        this.totalUs = ctx.getTotalTimeUs();
+        this.arrivalMs = ctx.getRequestArrivalDelayMs();
+        this.reqParseUs = ctx.getRequestBodyReadAndDeserializeTimeUs();
+        this.hashWaitUs = telemetry.hashWaitUs();
+        this.hashUs = telemetry.hashUs();
+        this.cacheMatchSource = telemetry.cacheSource();
+        this.cacheMatchUs = telemetry.cacheQueryUs();
+        this.cacheMatchCount = telemetry.cacheQueryCount();
+        this.cacheMatchSelections = telemetry.cacheSelections().entrySet().stream()
+                .sorted(Map.Entry.comparingByKey())
+                .map(Map.Entry::getValue)
+                .toList();
+        this.selectionReasons = Map.copyOf(telemetry.selectionReasons());
     }
 }

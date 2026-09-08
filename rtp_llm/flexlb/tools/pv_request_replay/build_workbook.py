@@ -276,7 +276,7 @@ def get_prefill_equivalent_role(route: dict[str, Any] | None) -> str | None:
     for role in PREFILL_EQUIVALENT_ROLES:
         if isinstance(selection_reasons, dict) and role in selection_reasons:
             return role
-        for field in ("server_status", "cacheMatchSelections", "shortestTtftDecisions"):
+        for field in ("server_status", "cacheMatchSelections", "routingDecisions", "shortestTtftDecisions"):
             if any(item.get("role") == role for item in _role_items(route, field)):
                 return role
     return None
@@ -308,6 +308,21 @@ def get_route_cache_selection(route: dict[str, Any] | None) -> dict[str, Any]:
 def get_prefill_decision(route: dict[str, Any] | None) -> dict[str, Any]:
     """Return the PREFILL/PDFUSION decision snapshot from a routing PV."""
 
+    current = _prefill_equivalent_item(route, "routingDecisions")
+    if current:
+        # Only normalize identity. Current millisecond estimates must never populate
+        # legacy token-work columns, even when their names look similar.
+        workers = []
+        for candidate in current.get("candidates", []):
+            if not isinstance(candidate, dict):
+                continue
+            endpoint = candidate.get("endpoint", "")
+            physical_endpoint, engine_separator, engine_index = endpoint.partition("@")
+            host, separator, port = physical_endpoint.rpartition(":")
+            workers.append({**candidate, "ip": host.strip("[]") if separator else endpoint,
+                            "port": int(port) if separator and port.isdigit() else None,
+                            "engineIndex": int(engine_index) if engine_separator and engine_index.isdigit() else None})
+        return {**current, "workers": workers, "schema": "routingDecisions"}
     return _prefill_equivalent_item(route, "shortestTtftDecisions")
 
 
@@ -560,14 +575,24 @@ def build_rows(sources: Sequence[PvSource], start: datetime | str | None = None,
         input_tokens = as_number(cache.get("inputTokens") if cache else None)
         if input_tokens is None:
             input_tokens = as_number(route.get("inputIdsCount") if route else None)
-        if input_tokens is None:
+        if input_tokens is None or input_tokens <= 0:
             input_tokens = as_number(route.get("seqLen") if route else None)
 
+        cache_payload = cache or {}
+        kvcm_comparison = cache_payload.get("kvcm") or {}
+        standby_comparison = cache_payload.get("localStandby") or {}
+        routing_comparison = cache_payload.get("routing") or {}
+        local_comparison = kvcm_comparison.get("local") or {}
+        p2p_comparison = kvcm_comparison.get("p2pTotal") or {}
         route_predicted_hit_tokens = as_number(cache_selection.get("hitCacheTokens"))
-        predicted_hit_tokens = as_number(cache.get("kvcm", {}).get("hit") if cache else None)
+        predicted_hit_tokens = as_number(routing_comparison.get("hit"))
+        if predicted_hit_tokens is None:
+            predicted_hit_tokens = as_number(kvcm_comparison.get("hit"))
         if predicted_hit_tokens is None:
             predicted_hit_tokens = route_predicted_hit_tokens
-        actual_hit_tokens = as_number(cache.get("actual", {}).get("hit") if cache else None)
+        actual_hit_tokens = as_number((cache_payload.get("actual") or {}).get("hit"))
+        if actual_hit_tokens is None and status and status.get("prefixLengthValid") is not False:
+            actual_hit_tokens = as_number(status.get("actualHitTokens"))
         hbm_local_match_tokens = non_negative(status.get("hbmLocalMatchTokens") if status else None)
         remote_kv_added_match_tokens = non_negative(status.get("remoteKvAddedMatchTokens") if status else None)
 
@@ -632,7 +657,15 @@ def build_rows(sources: Sequence[PvSource], start: datetime | str | None = None,
             "route_pv_event_time": route_event_time,
             "request_time_ms": request_time_ms,
             "selection_reason": selection_reason,
-            "decision_snapshot_status": ("TOP5" if decision_workers else "NOT_RECORDED"),
+            "decision_snapshot_status": ("COST_BASED" if decision.get("schema") == "routingDecisions"
+                                         else "TOP5" if decision_workers else "NOT_RECORDED"),
+            "selected_projected_ttft_ms": as_number(selected_snapshot.get("projectedTtftMs")),
+            "selected_projected_drain_ms": as_number(selected_snapshot.get("projectedDrainMs")),
+            "selected_incoming_prefill_ms": as_number(selected_snapshot.get("incomingPrefillMs")),
+            "selected_effective_hit_tokens": as_number(selected_snapshot.get("effectiveHitTokens")),
+            "selected_pending_requests": as_number(selected_snapshot.get("pendingRequests")),
+            "_routing_decisions": _role_items(route or {}, "routingDecisions"),
+            "_decision_group": (route or {}).get("decisionGroup", {}),
             "decision_time": epoch_ms_to_text(non_negative(decision.get("decisionTimeMs"))),
             "decision_routing_attempt": non_negative(decision.get("routingAttempt")),
             "decision_total_worker_count": non_negative(decision.get("totalWorkerCount")),
@@ -682,6 +715,19 @@ def build_rows(sources: Sequence[PvSource], start: datetime | str | None = None,
             "predicted_hit_tokens": predicted_hit_tokens,
             "route_predicted_hit_tokens": route_predicted_hit_tokens,
             "actual_hit_tokens": actual_hit_tokens,
+            "cache_comparison_source": cache_payload.get("source"),
+            "kvcm_hit_tokens": as_number(kvcm_comparison.get("hit")),
+            "kvcm_delta_tokens": as_number(kvcm_comparison.get("delta")),
+            "kvcm_local_hit_tokens": as_number(local_comparison.get("hit")),
+            "kvcm_local_delta_tokens": as_number(local_comparison.get("delta")),
+            "kvcm_p2p_total_hit_tokens": as_number(p2p_comparison.get("hit")),
+            "kvcm_p2p_total_delta_tokens": as_number(p2p_comparison.get("delta")),
+            "local_standby_hit_tokens": as_number(standby_comparison.get("hit")),
+            "local_standby_delta_tokens": as_number(standby_comparison.get("delta")),
+            "local_standby_hit_rate_pct": pct(standby_comparison.get("hit"), input_tokens),
+            "kvcm_minus_standby_tokens": (as_number(kvcm_comparison.get("hit")) - as_number(standby_comparison.get("hit"))
+                                           if as_number(kvcm_comparison.get("hit")) is not None
+                                           and as_number(standby_comparison.get("hit")) is not None else None),
             "actual_minus_predicted_tokens": actual_minus_predicted_tokens,
             "predicted_hit_rate_pct": predicted_hit_rate,
             "actual_hit_rate_pct": actual_hit_rate,
@@ -759,6 +805,11 @@ LEFT_COLUMNS = [
     Column("route_log_time", "route_log_time (decision)", 24),
     Column("selection_reason", "selection_reason", 20),
     Column("decision_snapshot_status", "decision_snapshot_status", 18),
+    Column("selected_projected_ttft_ms", "selected projected TTFT ms", 28, "ms"),
+    Column("selected_projected_drain_ms", "selected projected drain ms", 28, "ms"),
+    Column("selected_incoming_prefill_ms", "selected incoming prefill ms", 28, "ms"),
+    Column("selected_effective_hit_tokens", "selected effective hit tokens", 28, "integer"),
+    Column("selected_pending_requests", "selected pending requests", 28, "integer"),
     Column("decision_routing_attempt", "decision_routing_attempt", 18, "integer"),
     Column("decision_cache_leader_ip_port", "decision cache leader", 23),
     Column("decision_shortest_ttft_ip_port", "decision shortest TTFT", 23),
@@ -808,6 +859,17 @@ REFERENCE_AND_EVIDENCE_COLUMNS = [
     Column("predicted_hit_tokens", "predicted_hit_tokens", 21, "integer"),
     Column("route_predicted_hit_tokens", "route_predicted_hit_tokens", 25, "integer"),
     Column("actual_hit_tokens", "actual_hit_tokens", 18, "integer"),
+    Column("cache_comparison_source", "cache comparison source", 25),
+    Column("kvcm_hit_tokens", "kvcm_hit_tokens", 30, "integer"),
+    Column("kvcm_delta_tokens", "kvcm_delta_tokens", 30, "integer"),
+    Column("kvcm_local_hit_tokens", "kvcm_local_hit_tokens", 30, "integer"),
+    Column("kvcm_local_delta_tokens", "kvcm_local_delta_tokens", 30, "integer"),
+    Column("kvcm_p2p_total_hit_tokens", "kvcm_p2p_total_hit_tokens", 30, "integer"),
+    Column("kvcm_p2p_total_delta_tokens", "kvcm_p2p_total_delta_tokens", 30, "integer"),
+    Column("local_standby_hit_tokens", "local_standby_hit_tokens", 30, "integer"),
+    Column("local_standby_delta_tokens", "local_standby_delta_tokens", 30, "integer"),
+    Column("local_standby_hit_rate_pct", "local_standby_hit_rate_pct", 28, "pct"),
+    Column("kvcm_minus_standby_tokens", "kvcm_minus_standby_tokens", 28, "integer"),
     Column("actual_minus_predicted_tokens", "actual_minus_predicted_tokens", 27, "integer"),
     Column("hbm_plus_remote_tokens", "hbm + remote added tokens", 25, "integer"),
     Column("actual_minus_hbm_remote_tokens", "actual - (hbm + remote)", 26, "integer"),
@@ -907,12 +969,24 @@ def formats(workbook: xlsxwriter.Workbook) -> dict[str, xlsxwriter.format.Format
 
 
 def write_requests_sheet(workbook: xlsxwriter.Workbook, rows: list[dict[str, Any]], threshold: dict[str, float | None]) -> None:
+    columns = ALL_COLUMNS
+    if any(row.get("_routing_decisions") for row in rows):
+        promoted = {"selected_projected_ttft_ms", "selected_projected_drain_ms", "selected_incoming_prefill_ms",
+                    "selected_effective_hit_tokens", "selected_pending_requests"}
+        has_legacy = any(row.get("decision_snapshot_status") == "TOP5" for row in rows)
+        columns = [column for column in columns if has_legacy or not (
+            column.key.startswith("selected_snapshot_") or column.key.startswith("decision_cache_")
+            or column.key in {"decision_extra_work_tokens", "decision_tolerated_extra_work_tokens",
+                              "decision_outstanding_threshold_tokens", "decision_shortest_ttft_ip_port"})]
+        prefix = columns[:6]
+        columns = prefix + [column for column in columns if column.key in promoted] + [
+            column for column in columns if column not in prefix and column.key not in promoted]
     worksheet = workbook.add_worksheet("Requests")
     fmt = formats(workbook)
-    last_col = len(ALL_COLUMNS) - 1
+    last_col = len(columns) - 1
     worksheet.hide_gridlines(2)
     worksheet.set_zoom(78)
-    for col, column in enumerate(ALL_COLUMNS):
+    for col, column in enumerate(columns):
         worksheet.write(0, col, column.label, fmt["header"])
         worksheet.set_column(col, col, column.width)
     worksheet.set_row(0, 38)
@@ -967,7 +1041,7 @@ def write_requests_sheet(workbook: xlsxwriter.Workbook, rows: list[dict[str, Any
             band = row["prefill_ttft_band"]
             is_incomplete_or_error = (band == "NO_TTFT" or not row.get("route_success"))
             row_formats = error_formats if is_incomplete_or_error else formats_by_band[band]
-            for col, column in enumerate(ALL_COLUMNS):
+            for col, column in enumerate(columns):
                 kind = column.kind if column.kind in row_formats else "text"
                 write_cell(worksheet, current_row, col, row.get(column.key), row_formats[kind])
             worksheet.set_row(current_row, 30)
@@ -982,7 +1056,7 @@ def write_requests_sheet(workbook: xlsxwriter.Workbook, rows: list[dict[str, Any
     # Put the essential definitions next to the main data, not only in a
     # separate README, so a copied sheet does not lose interpretation.
     worksheet.set_comments_author("Codex")
-    column_index = {column.key: index for index, column in enumerate(ALL_COLUMNS)}
+    column_index = {column.key: index for index, column in enumerate(columns)}
     worksheet.write_comment(0, column_index["prefill_engine_ttft_ms"], "P bands use firstTokenTimeMs - inputQueueEnqueueTimeMs. This source has no Chat/Decode E2E completion.")
     worksheet.write_comment(0, column_index["hbm_local_match_tokens"], "HBM-local cache hits. Together with remote_kv_added_match_tokens it equals engine actual cache-hit tokens for joined rows.")
     worksheet.write_comment(0, column_index["remote_kv_wait_ms"], "A component of scheduler_to_running_ms; do not add remote_kv_wait_ms to scheduler_to_running_ms again.")
@@ -1039,6 +1113,45 @@ def write_p99_focus_sheet(workbook: xlsxwriter.Workbook, rows: list[dict[str, An
         worksheet.set_row(out_row, 30)
 
 
+def write_routing_decisions_sheet(workbook: xlsxwriter.Workbook, rows: list[dict[str, Any]]) -> None:
+    """Display every current role, retaining explicit units and unknown values."""
+    worksheet = workbook.add_worksheet("Routing Decisions")
+    common = ["request_id", "flexlb_instance", "role", "group", "strategy", "selectionReason", "decisionTimeMs", "routingAttempt",
+              "selectedEndpoint", "totalWorkerCount", "candidateWorkerCount", "snapshotTruncated"]
+    fields = ["endpoint", "selected", "predictionState", "projectedTtftMs", "projectedDrainMs",
+              "incomingPrefillMs", "effectiveHitTokens", "routingMatchTokens", "pendingRequests",
+              "usedKvTokens", "availableKvTokens", "logWeight", "ownershipVersion"]
+    policy_fields = ["requestInputTokens", "candidateChoice", "minimumTtftMs", "relativeTolerance",
+                     "minimumToleranceMs", "shortestTtftPoolSize", "cacheAffinityMaxExtraTtftMs",
+                     "cacheAffinityMinPrefixHitPercent", "p2pHitDiscount", "maxOutstandingUncachedTokens",
+                     "minimumEffectiveHitTokens", "maximumEffectiveHitTokens",
+                     "maxPendingVsAverageMultiplier", "maxDrainVsAverageMultiplier"]
+    group_fields = ["id", "policy", "dispatcher", "worker", "committedSize", "reason", "committedAtMs", "requestWaitMs"]
+    headers = common + fields + ["policy." + field for field in policy_fields]
+    headers += ["decisionGroup." + field for field in group_fields] + ["rejections"]
+    bold = workbook.add_format({"bold": True, "bg_color": "#DCE6F1"})
+    worksheet.write_row(0, 0, headers, bold)
+    worksheet.freeze_panes(1, 2)
+    worksheet.set_column(0, len(headers) - 1, 24)
+    worksheet.set_column(len(headers) - 3, len(headers) - 1, 55)
+    index = 1
+    for row in rows:
+        for decision in row.get("_routing_decisions", []):
+            for candidate in decision.get("candidates", []) or [{}]:
+                values = [row["request_id"], row.get("flexlb_instance")] + [decision.get(key) for key in common[2:]]
+                values += [candidate.get(key) for key in fields]
+                values += [(decision.get("prefillPolicy") or {}).get(key) for key in policy_fields]
+                values += [(row.get("_decision_group") or {}).get(key) for key in group_fields]
+                values.append(json.dumps(decision.get("rejections", {}), ensure_ascii=False))
+                for column, value in enumerate(values):
+                    if isinstance(value, str):
+                        worksheet.write_string(index, column, value)
+                    else:
+                        worksheet.write(index, column, value)
+                index += 1
+    worksheet.autofilter(0, 0, max(1, index - 1), len(headers) - 1)
+
+
 def write_decision_snapshot_sheet(workbook: xlsxwriter.Workbook, rows: list[dict[str, Any]]) -> None:
     """Write the recorded top-five candidate cut for each route decision.
 
@@ -1090,7 +1203,7 @@ def write_decision_snapshot_sheet(workbook: xlsxwriter.Workbook, rows: list[dict
     worksheet.hide_gridlines(2)
     worksheet.set_zoom(78)
     fill_row(worksheet, 0, last_col, fmt["title"])
-    worksheet.write(0, 0, "FlexLB decision-time top-5 candidate snapshots", fmt["title"])
+    worksheet.write(0, 0, "Historical decision snapshots (token-work schema)", fmt["title"])
     fill_row(worksheet, 1, last_col, fmt["note"])
     worksheet.write(1, 0, "Scope", fmt["note"])
     worksheet.write(1, 1, "Every row is one candidate from the top-5 snapshot recorded at the route decision. queue/TTFT values are FlexLB token-work estimates, not observed wall-clock milliseconds.", fmt["note"])
@@ -1113,7 +1226,8 @@ def write_decision_snapshot_sheet(workbook: xlsxwriter.Workbook, rows: list[dict
     }
     snapshot_rows: list[tuple[dict[str, Any], dict[str, Any]]] = []
     for row in rows:
-        for candidate in row.get("_decision_workers", []):
+        for candidate in ([] if row.get("decision_snapshot_status") == "COST_BASED"
+                          else row.get("_decision_workers", [])):
             if isinstance(candidate, dict):
                 snapshot_rows.append((row, candidate))
     snapshot_rows.sort(key=lambda item: (
@@ -1226,7 +1340,7 @@ def write_data_scope_sheet(workbook: xlsxwriter.Workbook, sources: Sequence[PvSo
         ("Cache tiers", "hbm_local_match_tokens + remote_kv_added_match_tokens = actual_hit_tokens for every complete joined record. This lets the table distinguish HBM-local hits from remote-KV supplied hits."),
         ("Same-host predecessor columns", "They count earlier route decisions on the same host whose first token timestamp is later than the current request's route decision time. low_hit_predecessor_* points to the most recent such request with actual hit rate < 90%. This is correlation evidence, not proof of queueing or causality."),
         ("Selection reasons", "; ".join(f"{reason}={count:,}" for reason, count in sorted(selection_counts.items()))),
-        ("Decision snapshot", "The Decision Snapshot Top5 sheet is the top-five candidate set sampled by FlexLB at each route decision. Its queue/estimated-TTFT fields are routing token-work estimates, not observed latency. Selected snapshot fields are also at the left of Requests."),
+        ("Decision snapshot", "Routing Decisions shows current CostBased candidates for all roles, with explicit millisecond estimates, policy parameters and decision groups. Decision Snapshot Top5 retains historical token-work snapshots. Its queue/estimated-TTFT fields are routing token-work estimates, not observed latency. Selected snapshot fields are also at the left of Requests."),
         ("Row colors", "P0–P50 green; P50–P90 blue; P90–P95 yellow; P95–P99 orange; P99–P100 purple; missing TTFT / incomplete telemetry red."),
     ]
     for row, (key, value) in enumerate(entries, start=2):
@@ -1273,6 +1387,7 @@ def build_workbook(sources: str | Path | PvSource | Sequence[str | Path | PvSour
     write_requests_sheet(workbook, rows, threshold)
     write_p99_focus_sheet(workbook, rows, threshold)
     write_decision_snapshot_sheet(workbook, rows)
+    write_routing_decisions_sheet(workbook, rows)
     write_host_summary_sheet(workbook, rows)
     write_data_scope_sheet(workbook, normalized_sources, rows, event_counts, selection_counts,
                            threshold, start, end)

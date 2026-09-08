@@ -19,15 +19,18 @@ public final class DeliveryMetrics {
         this.reporter = Objects.requireNonNull(reporter, "reporter");
     }
 
-    public void routesDelivered(
-            int remainingQueueDepth,
-            List<ScheduledRequest> exactItems) {
+    public void routesDelivered( int remainingQueueDepth, List<ScheduledRequest> exactItems) {
         try {
             if (exactItems.isEmpty()) {
                 return;
             }
             ScheduledRequest head = exactItems.get(0);
             String engineIp = prefillIp(head);
+            var decisionGroup = head.ctx().getDecisionGroup();
+            if (decisionGroup != null) {
+                reporter.reportDispatchReason(PREFILL_ROLE, engineIp, decisionGroup.reason());
+                reporter.reportBatchSize(PREFILL_ROLE, engineIp, decisionGroup.reason(), exactItems.size());
+            }
             reporter.reportBatcherQueueSize(
                     PREFILL_ROLE, engineIp,
                     remainingQueueDepth);

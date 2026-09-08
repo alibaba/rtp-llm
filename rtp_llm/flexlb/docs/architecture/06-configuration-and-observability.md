@@ -189,6 +189,52 @@ logger group `flexlb` 包含 `org.flexlb`、`flexlbLogger`、`syncLogger`、
 
 `/flexlb/update_log_level` 继续提供显式 HTTP 调级入口。
 
+### 请求 PV 与回放
+
+gRPC Schedule 在校验请求 ID 前创建基础上下文，记录入口时间、请求大小和 arrival。
+请求 ID 在入口解析一次，业务请求、调度回调和转发补偿复用解析结果。缺少 ID 的请求返回
+`INVALID_ARGUMENT`，不获取活跃请求计数 token；拒绝分支记录 completion 和 `ENTRY_ERROR` PV，
+即使响应 observer 抛出异常也执行收尾。业务请求初始化失败时，基础上下文仍用于完成统计与 PV。
+
+本地 Schedule 的正常完成、异常、取消和 RPC deadline 到期统一经过处理链完成回调。
+`completeOnce` 的完成门闩保证收尾只执行一次，`finally` 负责耗时记录、PV 输出、取消监听器
+移除和请求计数释放。取消监听器只触发取消；处理链完成前不读取 PV。哈希阶段收到取消时，
+哈希回调完成后跳过选路；选路阶段的取消由调度器在释放处理权后完成结果 Future。
+已取消的 RPC 不发送响应，PV 保留取消或超时结果及收尾前完成的遥测。
+
+`totalUs` 是入口到记录 PV 前的单调时钟耗时；`arrivalMs` 是服务入口时间减调用方
+`requestTimeMs`，受两端时钟偏差影响。gRPC 路径记录收到的 `inputIdsCount` 与
+`requestMessageBytes`（protobuf 序列化大小，不含 gRPC framing/compression）。
+`cacheMatchCount/cacheMatchUs`累计实际缓存查询尝试，角色的缓存选择和决策记录反映最近一次路由尝试。
+
+哈希和路由遥测由串行处理阶段在请求独立的 `RoutingTelemetryState` 中原地累计。
+终态读取依赖处理链的完成发布，不与写入并发；字段记录和角色 Map 操作不使用同步锁。
+PV 读取时创建不可变 `RoutingTelemetry` 快照，选路中的次数与原因读取不创建快照。
+WorkerBatcher 的 `decisionGroup` 独立发布，包含提交组 ID、policy、dispatcher、
+worker、committedSize、reason、提交时间及请求等待时长；提交组大小不等于保证交付数量，
+Engine 的 `batchId` 标识交付批次。
+
+`routingDecisions` 记录 CostBased 的实际候选值。每个角色最多记录 5 个候选并标注截断，
+Prefill 包含选中、最短 TTFT、最高有效缓存命中候选。`projectedTtftMs`、`projectedDrainMs`、
+`incomingPrefillMs` 的单位为毫秒；无法建模的估计省略。Prefill 记录策略参数、缓存亲和阈值、
+候选总体最小/最大命中、pending 和 ownershipVersion；Decode 记录 KV 用量、可用量与采样 logWeight。
+
+缓存反馈以请求 ID、角色和 Worker 实例代次关联路由预测，`worker` 使用完整的
+`ip:port@engineIndex` 逻辑身份；`prefill_worker_status` 同时记录 `workerIp` 和 `engineIndex`。
+Engine 的 `prefixLengthValid`
+表示实际命中值有效；有效的 0 表示零命中，无效值不参与差异计算。每个关联记录最多生成一次
+`cache_hit_comparison` 和一次 `prefill_worker_status`。比较事件包含实际命中、路由预测、
+KVCM 本地匹配、KVCM 本地加 P2P 总匹配，以及 Local Standby 预测；差值统一为实际值减预测值。
+预测关联最多保留 100,000 条，保存期限为一小时。Local Standby 对照异步完成，反馈等待上限
+为一秒；不可用时省略 Standby 对照，其余比较正常输出。观测回调在 Worker 状态锁外执行。
+
+`tools/pv_request_replay/build_workbook.py` 支持 `routingDecisions` 和
+`shortestTtftDecisions` 两种日志结构，以及包含两种结构的日志窗口。Requests 展示请求与缓存
+证据；Routing Decisions 展示 CostBased 候选、策略参数、拒绝统计和决策组；Decision Snapshot
+Top5 展示 `shortestTtftDecisions` 的 token-work 估计。预测耗时与 Engine 实测耗时分别展示。
+空值表示未记录，零表示已记录且数值为零。HTML 回放通过工作簿读取这些数据，按请求展示候选
+及缓存对照。回归测试验证原始 PV 到工作簿、HTML 的字段传递、单位、角色和实例隔离。
+
 ## 指标
 
 `FlexMonitor` 提供 GAUGE、COUNTER、QPS 与优先级窗口抽象。opensource 默认使用

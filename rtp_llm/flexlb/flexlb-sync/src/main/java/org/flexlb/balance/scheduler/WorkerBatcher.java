@@ -1183,6 +1183,20 @@ public final class WorkerBatcher {
             WorkSnapshot precedingWork) {
         Throwable deliveryFailure = null;
         try {
+            String groupId = java.util.UUID.randomUUID().toString();
+            long committedAtMs = System.currentTimeMillis();
+            for (ScheduledRequest item : transaction.items()) {
+                var context = item.ctx();
+                context.setDecisionGroup(new org.flexlb.dao.pv.DecisionGroup(
+                        groupId,
+                        context.getConfig().decisionPolicy().getType().name(),
+                        context.getConfig().getDispatcher().getType().name(),
+                        item.prefillEp().getStatus().getMetricIpPort(),
+                        transaction.items().size(),
+                        decisionReason,
+                        committedAtMs,
+                        Math.max(0L, committedAtMs - item.enqueuedAtMs())));
+            }
             transaction.handoff(decisionReason, remainingQueueDepth, precedingWork);
         } catch (Throwable failure) {
             deliveryFailure = failure;

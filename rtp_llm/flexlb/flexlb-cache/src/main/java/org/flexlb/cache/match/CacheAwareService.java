@@ -12,8 +12,8 @@ import org.flexlb.cache.telemetry.CacheMetricsReporter;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
-import org.flexlb.dao.master.CacheHitFeedback;
 import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.dao.route.RoleType;
 import org.springframework.stereotype.Service;
 
 import java.util.List;
@@ -26,19 +26,18 @@ public class CacheAwareService {
 
     private final CacheMetricsReporter cacheMetricsReporter;
     private final CacheMatchQueryOrchestrator queryOrchestrator;
-    private final LocalStandbyComparisonService comparisonService;
+    private final CacheHitFeedbackTracker feedbackTracker;
     private final CacheMetadataUpdateOrchestrator updateOrchestrator;
     private final RequestBlockHashService requestBlockHashService;
 
-    public CacheAwareService(
-            CacheMetricsReporter cacheMetricsReporter,
-            CacheMatchQueryOrchestrator queryOrchestrator,
-            LocalStandbyComparisonService comparisonService,
-            CacheMetadataUpdateOrchestrator updateOrchestrator,
-            RequestBlockHashService requestBlockHashService) {
+    public CacheAwareService(CacheMetricsReporter cacheMetricsReporter,
+                             CacheMatchQueryOrchestrator queryOrchestrator,
+                             LocalStandbyComparisonService comparisonService,
+                             CacheMetadataUpdateOrchestrator updateOrchestrator,
+                             RequestBlockHashService requestBlockHashService) {
         this.cacheMetricsReporter = cacheMetricsReporter;
         this.queryOrchestrator = queryOrchestrator;
-        this.comparisonService = comparisonService;
+        this.feedbackTracker = new CacheHitFeedbackTracker(comparisonService);
         this.updateOrchestrator = updateOrchestrator;
         this.requestBlockHashService = requestBlockHashService;
     }
@@ -78,8 +77,22 @@ public class CacheAwareService {
         updateOrchestrator.updateFromRoutedRequest(request, selectedWorkers);
     }
 
-    public CompletableFuture<CacheHitComparisonResult> buildCacheHitComparison(
-            CacheHitFeedback feedback) {
-        return comparisonService.buildCacheHitComparison(feedback);
+    public void trackRoutingPrediction(String requestId,
+                                       RoleType role,
+                                       String group,
+                                       WorkerStatus worker,
+                                       long inputTokens,
+                                       long predictedHitTokens,
+                                       CacheMatchResult result) {
+        try {
+            feedbackTracker.track(requestId, role, group, worker, inputTokens, predictedHitTokens, result);
+        } catch (RuntimeException error) {
+            log.warn("Cache prediction telemetry failed, requestId={}", requestId, error);
+        }
+    }
+
+    public List<CompletableFuture<CacheHitComparisonResult>> observeCacheHitFeedback(WorkerStatus worker,
+                                                                                     WorkerStatus.StatusObservation status) {
+        return feedbackTracker.observe(worker, status);
     }
 }
