@@ -29,6 +29,7 @@ py_test(
     name = "test_deepseek_newloader",
     exec_properties = {"gpu": "H20"},
     srcs = ["test_deepseek_newloader.py"],
+    tags = ["H20"],
     data = [
         "//:rtp_compute_ops",
         "//:th_transformer_config",

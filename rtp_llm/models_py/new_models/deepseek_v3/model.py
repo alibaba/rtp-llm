@@ -138,6 +138,20 @@ class DeepSeekV32Indexer(RtpModule):
             is_neox_style=is_neox_style,
         )
 
+    def validate_runtime_device(self, device: torch.device) -> None:
+        device = torch.device(device)
+        if device.type != "cuda" or torch.version.hip is not None:
+            raise RuntimeError(
+                "DeepSeek V3.2 DSA Indexer is currently supported only on CUDA"
+            )
+        try:
+            self.indexer_op.validate_runtime_dependencies()
+        except (ImportError, OSError, RuntimeError, AttributeError) as error:
+            raise RuntimeError(
+                "DeepSeek V3.2 DSA Indexer runtime backend validation failed: "
+                f"{error}"
+            ) from error
+
     def bind_rope_cache(self, cos_sin_cache: torch.Tensor) -> None:
         self.indexer_op.bind_rope_cache(cos_sin_cache)
 

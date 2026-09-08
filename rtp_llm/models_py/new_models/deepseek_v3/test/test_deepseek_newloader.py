@@ -17,6 +17,7 @@ from rtp_llm.models_py.distributed.collective_torch import Group
 from rtp_llm.models_py.model_loader import NewLoaderConfig, NewModelLoader
 from rtp_llm.models_py.module_base import RtpModule
 from rtp_llm.models_py.modules.base.common.moe_topk import group_topk_supported
+from rtp_llm.models_py.modules.base.cuda import indexer_op as indexer_op_module
 from rtp_llm.models_py.modules.base.cuda.select_topk import GroupTopK
 from rtp_llm.models_py.new_models.deepseek_v3.attention import (
     DeepSeekV32MlaAttention,
@@ -398,6 +399,24 @@ def _uninitialized_model(model_type, *, layer_count=0, checkpoint_prefix=None):
 
 
 class DeepSeekNewloaderTest(unittest.TestCase):
+    @staticmethod
+    def _runtime_preflight_indexer() -> DeepSeekV32Indexer:
+        indexer = object.__new__(DeepSeekV32Indexer)
+        torch.nn.Module.__init__(indexer)
+        indexer.indexer_op = indexer_op_module.IndexerOp(
+            index_n_heads=1,
+            index_head_dim=2,
+            index_topk=1,
+            rope_head_dim=1,
+        )
+        return indexer
+
+    @staticmethod
+    def _clear_indexer_runtime_dependency_caches() -> None:
+        indexer_op_module._resolve_deep_gemm.cache_clear()
+        indexer_op_module._resolve_flashinfer_rope.cache_clear()
+        indexer_op_module.validate_indexer_runtime_dependencies.cache_clear()
+
     def test_local_rope_cache_preserves_reference_numerics(self):
         max_seq_len = 32
         rope_dim = 8
@@ -1316,6 +1335,105 @@ class DeepSeekNewloaderTest(unittest.TestCase):
                 _load_config(),
                 _raw_config(),
             )
+
+    def test_sparse_indexer_load_fails_when_deep_gemm_is_missing(self):
+        indexer = self._runtime_preflight_indexer()
+        self._clear_indexer_runtime_dependency_caches()
+        self.addCleanup(self._clear_indexer_runtime_dependency_caches)
+        with (
+            mock.patch.object(
+                indexer_op_module.importlib,
+                "import_module",
+                side_effect=ModuleNotFoundError("No module named 'deep_gemm'"),
+            ),
+            mock.patch.object(torch.version, "hip", None),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "optional deep_gemm backend"):
+                NewModelLoader._validate_runtime_backends(indexer, "cuda")
+
+    def test_sparse_indexer_load_fails_on_backend_import_error(self):
+        indexer = self._runtime_preflight_indexer()
+        self._clear_indexer_runtime_dependency_caches()
+        self.addCleanup(self._clear_indexer_runtime_dependency_caches)
+        with (
+            mock.patch.object(
+                indexer_op_module.importlib,
+                "import_module",
+                side_effect=OSError("undefined symbol: deep_gemm_abi"),
+            ),
+            mock.patch.object(torch.version, "hip", None),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "optional deep_gemm backend"):
+                NewModelLoader._validate_runtime_backends(indexer, "cuda")
+
+    def test_sparse_indexer_load_fails_on_flashinfer_import_error(self):
+        indexer = self._runtime_preflight_indexer()
+        complete_deep_gemm = types.SimpleNamespace(
+            get_num_sms=mock.Mock(),
+            get_paged_mqa_logits_metadata=mock.Mock(),
+            fp8_paged_mqa_logits=mock.Mock(),
+            fp8_mqa_logits=mock.Mock(),
+        )
+        self._clear_indexer_runtime_dependency_caches()
+        self.addCleanup(self._clear_indexer_runtime_dependency_caches)
+        with (
+            mock.patch.object(
+                indexer_op_module,
+                "_resolve_deep_gemm",
+                return_value=complete_deep_gemm,
+            ),
+            mock.patch.object(
+                indexer_op_module.importlib,
+                "import_module",
+                side_effect=OSError("undefined symbol: flashinfer_rope_abi"),
+            ),
+            mock.patch.object(torch.version, "hip", None),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "optional flashinfer backend"):
+                NewModelLoader._validate_runtime_backends(indexer, "cuda")
+
+    def test_sparse_indexer_load_fails_when_backend_symbols_are_missing(self):
+        complete_deep_gemm = types.SimpleNamespace(
+            get_num_sms=mock.Mock(),
+            get_paged_mqa_logits_metadata=mock.Mock(),
+            fp8_paged_mqa_logits=mock.Mock(),
+            fp8_mqa_logits=mock.Mock(),
+        )
+        complete_rope = types.SimpleNamespace(
+            _apply_rope_pos_ids_cos_sin_cache=mock.Mock()
+        )
+        cases = (
+            (
+                types.SimpleNamespace(
+                    get_num_sms=mock.Mock(),
+                    get_paged_mqa_logits_metadata=mock.Mock(),
+                    fp8_paged_mqa_logits=mock.Mock(),
+                ),
+                complete_rope,
+                "fp8_mqa_logits",
+            ),
+            (complete_deep_gemm, types.SimpleNamespace(), "flashinfer.rope"),
+        )
+        for deep_gemm, rope, expected in cases:
+            with self.subTest(missing=expected):
+                indexer = self._runtime_preflight_indexer()
+                self._clear_indexer_runtime_dependency_caches()
+                with (
+                    mock.patch.object(
+                        indexer_op_module,
+                        "_resolve_deep_gemm",
+                        return_value=deep_gemm,
+                    ),
+                    mock.patch.object(
+                        indexer_op_module,
+                        "_resolve_flashinfer_rope",
+                        return_value=rope,
+                    ),
+                    mock.patch.object(torch.version, "hip", None),
+                ):
+                    with self.assertRaisesRegex(RuntimeError, expected):
+                        NewModelLoader._validate_runtime_backends(indexer, "cuda")
+        self._clear_indexer_runtime_dependency_caches()
 
     def test_config_rejects_legacy_expanded_mha_fallback(self):
         config = _model_config()

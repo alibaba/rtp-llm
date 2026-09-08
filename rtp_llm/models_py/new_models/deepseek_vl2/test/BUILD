@@ -2,6 +2,7 @@ py_test(
     name = "test_deepseek_vl2_load",
     exec_properties = {"gpu": "H20"},
     srcs = ["test_deepseek_vl2_load.py"],
+    tags = ["H20"],
     deps = [
         "//rtp_llm:safetensors",
         "//rtp_llm:torch",
