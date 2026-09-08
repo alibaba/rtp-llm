@@ -181,14 +181,14 @@ const size_t need_evict =
 
 ### Memory cache 水位
 
-Memory 水位必须考虑 Task B 即将写入的准确 D2H block 数，而不是只看当前使用率：
+Memory 水位必须同时考虑当前占用和本次 Device 淘汰预计产生的 D2H block 数，而不是只看当前使用率。这里 Task A 使用的是容量预估 `estimated_d2h_block_num`；Task B 启动时会重新构造自己的执行 plan，并得到最终的 `actual_d2h_block_num`：
 
 ```cpp
 const size_t total = memory_pool->totalBlocksNum();
 const size_t free = memory_pool->freeBlocksNum();
 const size_t used = total - std::min(total, free);
 const size_t max_used = total * memory_high_watermark_ratio / 100;
-const size_t incoming = prepared_plan.actual_d2h_block_num;
+const size_t incoming = eviction_estimate.estimated_d2h_block_num;
 
 const size_t projected_used = used + incoming;
 const size_t need_remote_evict =
@@ -197,22 +197,31 @@ const size_t need_remote_evict =
         : 0;
 ```
 
-Memory→Remote 的硬性容量不变量为：
+Task A 的预腾空间目标为：
 
 ```text
 current_used
 - memory_to_remote_evicted
++ estimated_d2h_block_num
+<= memory_high_watermark_blocks
+```
+
+Task B 构造最终 plan 后，必须按照 `actual_d2h_block_num` 再次检查，并通过直接淘汰 Memory LRU 保证最终硬性不变量：
+
+```text
+current_used_after_task_a
+- task_b_immediate_evicted
 + actual_d2h_block_num
 <= memory_high_watermark_blocks
 ```
 
-所以淘汰量统一定义为：
+所以 Task A 的远端淘汰量定义为：
 
 ```cpp
 memory_to_remote_evict_blocks = std::max<int64_t>(
     0,
     current_used
-        + prepared_plan.actual_d2h_block_num
+        + eviction_estimate.estimated_d2h_block_num
         - memory_high_watermark_blocks);
 ```
 
@@ -232,10 +241,10 @@ max(0, current_used - max_used);
 
 ```cpp
 // 错误：只能避免OOM，不能保证D2H完成后仍低于95%水位。
-max(0, actual_d2h_block_num - current_free);
+max(0, estimated_d2h_block_num - current_free);
 ```
 
-Task A 的 victim 数量必须来自冻结后的 `PreparedDeviceToMemoryPlan::actual_d2h_block_num`。Task A 完成后释放这些 victim，Task B 再消费同一份 prepared plan。
+Task A 的 victim 数量来自队首请求的 `DeviceToMemoryEvictionEstimate::estimated_d2h_block_num`。该 estimate 只用于容量预留，不是 Task B 的可执行 plan。Task A 完成并释放 victims 后，Task B 必须基于当时的实时状态重新形成自己的 plan。
 
 例如 Memory pool 共 1000 blocks、当前已经使用 920、Task B 将写入 50 blocks：
 
@@ -273,7 +282,7 @@ Task B：执行时仍超过Memory水位的部分，直接淘汰后释放
 
 如果 `incoming > max_used`，单次 Device 淘汰量本身已经超过 Memory 的目标容量。Memory cache 是可丢弃缓存，不应为了满足水位阻塞推理。第一版应限制本轮实际写入 Memory 的 block 数，或允许 Task B 写入时持续淘汰旧块，使最终 retained blocks 不超过 `max_used`；不能形成无法满足的等待循环。
 
-推荐优先保留 Device eviction plan 中较新的连续后缀，同时保证 prefix-tree 依赖和 complete-tail 约束；具体裁剪必须发生在 `PreparedDeviceToMemoryPlan` 冻结之前，使 Task A 与 Task B 仍消费同一份数量。
+推荐 Task B 在形成最终 plan 时优先保留 Device eviction candidates 中较新的连续后缀，同时保证 prefix-tree 依赖和 complete-tail 约束。Task A 的 estimate 不承担这些执行正确性约束；估计偏差由 Task B 的实时水位复查兜底。
 
 ## 5. 数据结构
 
@@ -874,113 +883,87 @@ TieredCacheEvictionQueue::enqueue(DeviceEvictionRequest request) {
 单飞规则：
 
 1. `running_ == false` 时取出队首请求，并设置 `running_ = true`。
-2. 真正轮到请求时才生成 `PreparedDeviceToMemoryPlan`。
-3. 完成 Task A 后启动 Task B。
+2. 真正轮到请求时只生成 Task A 所需的 `DeviceToMemoryEvictionEstimate`。
+3. 完成 Task A 后启动 Task B，由 Task B 基于实时状态独立生成执行 plan。
 4. Task B 完成或失败后才设置 `running_ = false`。
 5. 然后重新读取 Memory pool 状态并启动下一请求。
 
-### 12.1.1 Task B plan 必须在 Task A 前构造并冻结
+### 12.1.1 Task B 独立构造实时执行 plan
 
-当某个请求成为队首后，应先完整构造 Task B 将要消费的 `PreparedDeviceToMemoryPlan`，然后才创建 Task A：
+当某个请求成为队首后，Task A 之前只计算容量预估；Task A 完成后，Task B 重新读取实时状态并独立构造最终执行 plan：
 
 ```text
 请求成为队首
     ↓
-prepareDeviceCacheToMemoryPlan()
+estimateDeviceCacheToMemoryBlocks()
     ↓
-得到不可变的 PreparedDeviceToMemoryPlan
-    ├── 最终 cache keys
-    ├── 裁剪后的 CopyInfoPerKey
-    ├── 每个 key 的 Device block IDs
-    ├── layer/region slots
-    ├── complete/incomplete 属性
-    └── actual_d2h_block_num
+得到轻量 DeviceToMemoryEvictionEstimate
+    └── estimated_d2h_block_num
     ↓
-根据同一份 plan 计算 Memory 缺口和 Task A victims
+根据 estimate 计算 Memory 水位缺口和 Task A victims
     ↓
 Task A：Memory→Remote
     ↓
-Task B：evictDeviceCacheToMemory(prepared_plan)
+Task B：evictDeviceCacheToMemory(resource, meta)
+    ├── 重新读取实时 cache 状态
+    ├── 独立完成 match/裁剪
+    ├── 生成最终 CopyInfoPerKey/CopyPlan
+    ├── 得到 actual_d2h_block_num
+    ├── 按实际数量再次检查 Memory 水位
+    └── 分配 backing、D2H、commit
 ```
 
 这里的关键约束是：
 
 ```text
-Task A 用哪份 plan 计算缺口，Task B 就必须原样消费哪份 plan。
+Task A 的 estimate 只决定预先写 Remote 的数量；
+Task B 自己形成的实时 plan 才决定真正复制哪些 blocks。
 ```
 
-Task B 启动时禁止再次执行以下分析：
+Task B 启动时必须重新执行以下分析：
 
-- 重新读取 `resource->cacheKeys()` 并改变 key 范围。
-- 重新计算 Memory matched prefix。
-- 重新判断最后一个 complete block。
-- 重新裁剪 incomplete tail。
-- 重新生成不同的 `CopyInfoPerKey` 数量。
+- 读取 `resource->cacheKeys()` 并确定当前有效 key 范围。
+- 计算 Memory matched prefix。
+- 判断最后一个 complete block。
+- 裁剪 incomplete tail。
+- 生成最终 `CopyInfoPerKey` 和 CopyPlan。
 
-否则 Task A 可能按 6 个 D2H blocks 腾出空间，而 Task B 重新分析后变成 8 个或 4 个，导致空间估计与实际执行不一致。
+Task A 可能按 6 个 D2H blocks 预腾空间，而 Task B 实际形成 8 个或 4 个：
 
-计划中保存的是“D2H 数据和布局快照”，不提前分配 Memory backing：
+- 实际为 8：Task B 对额外 2 个 block 所需空间直接淘汰 Memory LRU，不再写 Remote。
+- 实际为 4：Task A 多腾出的 2 个 block 保持为空闲空间，不影响正确性。
+
+estimate 不保存 D2H 数据和布局快照，也不提前分配 Memory backing：
 
 ```text
-Task A之前冻结：cache keys、Device block IDs、slots、copy infos、block数量
-Task B开始后执行：Memory backing分配、必要的直接淘汰、D2H、commit
+Task A之前保存：请求/resource引用、estimated_d2h_block_num
+Task B开始后执行：重新分析、构造plan、Memory backing分配、必要的直接淘汰、D2H、commit
 ```
 
-因此 `CopyInfoPerKey::mem_block` 在 prepared plan 中保持：
+建议的数据结构只需表达预估：
 
 ```cpp
-mem_block = NULL_BLOCK_IDX;
-```
-
-Task A 完成并释放 Memory victims 后，Task B 才调用：
-
-```cpp
-allocateBackingsForWrite(prepared_plan.copy_infos);
-```
-
-随后创建并执行 D2H `CopyPlan`。
-
-为了使 plan 在 Task A 异步运行期间保持有效，`PreparedDeviceToMemoryPlan` 必须持有 Device resource/block lease：
-
-```cpp
-struct PreparedDeviceToMemoryPlan {
-    std::vector<CopyInfoPerKey>        copy_infos;
-    std::vector<LayerRegionSlot>       slots;
-    std::shared_ptr<KVCacheResource>   resource;
-    std::shared_ptr<Meta>              meta;
-    std::shared_ptr<DeviceBlockLease>  device_lease;
-    size_t                             actual_d2h_block_num{0};
+struct DeviceToMemoryEvictionEstimate {
+    std::shared_ptr<KVCacheResource> resource;
+    std::shared_ptr<Meta>            meta;
+    size_t                           estimated_d2h_block_num{0};
 };
 ```
 
-`device_lease` 至少保证：
-
-- 计划中的 Device block 不会被释放或重新分配。
-- block 内容在 Task A 期间不会被覆盖。
-- Task B 完成、失败或取消前引用一直有效。
-
-Task B 应提供消费 prepared plan 的正式入口，例如：
+Task A 完成并释放 Memory victims 后，Task B 调用原始完整入口：
 
 ```cpp
-std::shared_ptr<AsyncContext> evictDeviceCacheToMemory(
-    std::shared_ptr<PreparedDeviceToMemoryPlan> plan);
-```
-
-不能退化成重新调用原始入口并再次构造计划：
-
-```cpp
-// 不推荐：内部可能重新match、重新裁剪、重新生成copy infos。
 evictDeviceCacheToMemory(resource, meta);
 ```
 
-计划只能在以下时机生成：
+最终执行 plan 只能在以下时机生成：
 
 ```text
-Q1：Q1成为队首后、Q1 Task A之前生成
-Q2：等待Q1的Task B结束；Q2成为队首后再生成
+Q1：Q1的Task A完成后，由Q1的Task B生成
+Q2：等待Q1的Task B结束，且Q2的Task A完成后，由Q2的Task B生成
 ```
 
-因此既保证 Q1 的 Task A/Task B 使用同一数据快照，也避免 Q2 在排队期间基于过期的 Memory 容量提前构造计划。
+因此 Task B 不会消费在异步等待期间过期的数据快照，也避免 Q2 在排队期间基于过期状态提前构造执行 plan。
 
 Q2 入队时只保存生成 plan 所需的最小请求描述，不读取或缓存：
 
