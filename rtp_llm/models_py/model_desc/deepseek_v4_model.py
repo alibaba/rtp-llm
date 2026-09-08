@@ -1400,12 +1400,17 @@ if _PREFILL_CAPTURE and not globals().get("_PREFILL_CAPTURE_PATCHED", False):
 
     def _capturing_forward(self, inputs, fmha_impl=None):
         try:
-            sig, ptrs = _p4_signature(inputs)
-        except Exception:
+            return _p4_body(inputs, fmha_impl, self)
+        except Exception as ex:  # noqa: BLE001 — probe must NEVER break serving
+            _p4_state["broken"] = repr(ex)[:300]
+            print("[P4CAP] probe internal error (probe disabled, eager): %s" % repr(ex)[:200], flush=True)
             return _orig_forward(self, inputs, fmha_impl)
-        st = _p4_state.get(sig)
+
+    def _p4_body(inputs, fmha_impl, self):
+        sig, ptrs = _p4_signature(inputs)
+        st = _p4_state.get("sigs", {}).get(sig)
         if st is None:
-            _p4_state[sig] = {"n": 1, "ptrs": ptrs, "sig": sig}
+            _p4_state.setdefault("sigs", {})[sig] = {"n": 1, "ptrs": ptrs, "sig": sig}
             print("[P4CAP] call#1 signature tensors=%d" % len(sig), flush=True)
             return _orig_forward(self, inputs, fmha_impl)
         st["n"] += 1
@@ -1416,8 +1421,10 @@ if _PREFILL_CAPTURE and not globals().get("_PREFILL_CAPTURE_PATCHED", False):
                 st["unstable"] = True
                 # v2: inventory for the copy-in design — which tensors move,
                 # their shapes/dtypes, and old->new ptrs (capped dump).
+                # NOTE: sig entries are (path, shape, dtype) 3-tuples — a plain
+                # dict() raises 'length 3; 2 is required' (the Sep-9 wedge).
                 p1 = dict(st["ptrs"])
-                shape_of = dict(st["sig"])
+                shape_of = {p: s for (p, s, _dt) in st["sig"]}
                 moved = [p for p, q in ptrs if p1.get(p) != q]
                 print(
                     "[P4CAP] call#2 ptrs UNSTABLE: %d/%d moved"
@@ -1454,6 +1461,5 @@ if _PREFILL_CAPTURE and not globals().get("_PREFILL_CAPTURE_PATCHED", False):
             st["dead"] = True
             print("[P4CAP] CAPTURE FAILED (first blocker): %s" % repr(ex)[:400], flush=True)
         return _orig_forward(self, inputs, fmha_impl)
-
     DeepSeekV4Model.forward = _capturing_forward
     print("[P4CAP] capture probe installed (DSV4_PREFILL_CAPTURE=1)", flush=True)
