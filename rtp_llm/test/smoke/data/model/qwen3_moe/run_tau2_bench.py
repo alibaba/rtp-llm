@@ -54,9 +54,57 @@ _install_typing_compat()
 os.environ.setdefault("LOGURU_LEVEL", "INFO")   # 想看细节:LOGURU_LEVEL=DEBUG python ...
 # tqdm 进度条每步刷新也很吵,至少 30s 才更新一次
 os.environ.setdefault("TQDM_MININTERVAL", "30")
+# litellm 在 import 时会去 raw.githubusercontent.com 拉 model cost map
+# (litellm_core_utils/get_model_cost_map.py, 5s 超时后回退到 wheel 里自带的
+# model_prices_and_context_window_backup.json)。同样的内容,少一个外网 host。
+os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "True")
 
 # evalscope 自己走 stdlib logging,压到 WARNING
 logging.getLogger("evalscope").setLevel(logging.WARNING)
+
+
+# ======================================================================
+# 本地数据集
+# ======================================================================
+# evalscope 的 Tau2BenchAdapter.load() 默认会
+#     dataset_snapshot_download('evalscope/tau2-bench-data')
+# 然后把结果塞进 TAU2_DATA_DIR;只有当 dataset id 本身就是一个已存在的路径时才跳过
+# (evalscope/api/benchmark/meta.py 里 dataset_args 的 local_path 会覆盖 dataset_id)。
+# 这次 modelscope.cn 的读超时就是这么来的。镜像
+# (internal_source/cuda_arm_docker/smoke_eval.Dockerfile) 会预置同一份数据并导出
+# TAU2_BENCH_DATA_DIR;没有预置时返回 None,照旧走下载,开源用户不受影响。
+TAU2_BENCH_DATA_DIR_ENV = "TAU2_BENCH_DATA_DIR"
+
+
+def resolve_local_dataset() -> str | None:
+    """Return a usable local tau2 domain-data root, or None to let evalscope download."""
+    staged = os.environ.get(TAU2_BENCH_DATA_DIR_ENV, "").strip()
+    if not staged:
+        return None
+    root = os.path.abspath(staged)
+    # Both subdirectories are required, and for different reasons: tau2 loads the
+    # task sets and policies from tau2/domains, and reads the simulation
+    # guidelines from tau2/user_simulator only once a conversation starts. A stage
+    # carrying just one of them would pass a domains-only check here and then fail
+    # mid-benchmark. This is the same contract Tau2BenchComparer._is_tau2_data_root
+    # enforces; the two must agree or the harness and this script disagree about
+    # what "staged" means.
+    missing = [
+        sub
+        for sub in ("domains", "user_simulator")
+        if not os.path.isdir(os.path.join(root, "tau2", sub))
+    ]
+    if missing:
+        print(
+            f"[WARN] {TAU2_BENCH_DATA_DIR_ENV}={staged} is missing "
+            f"{', '.join('tau2/' + m for m in missing)}, "
+            f"falling back to downloading the dataset"
+        )
+        return None
+    # tau2 resolves its data root from TAU2_DATA_DIR at import time; the adapter
+    # sets this itself after downloading, so set it before any tau2 import.
+    os.environ["TAU2_DATA_DIR"] = root
+    return root
 
 
 # ======================================================================
@@ -205,6 +253,11 @@ def main() -> None:
     args = parse_args()
     api_base = f"http://{args.host}:{args.port}/v1"
 
+    # Before preflight, which imports tau2: tau2 resolves its data root from
+    # TAU2_DATA_DIR at import time, so resolving after the import would leave it
+    # pinned to the default and silently ignore the staged data.
+    local_dataset = resolve_local_dataset()
+
     if not args.skip_preflight:
         preflight(api_base, args.model)
 
@@ -238,6 +291,14 @@ def main() -> None:
             "extra_params": extra_params,
         },
     }
+
+    # local_path 覆盖 BenchmarkMeta.dataset_id(evalscope/api/benchmark/meta.py),
+    # 于是 Tau2BenchAdapter.load() 走 os.path.exists 分支,不碰 modelscope。
+    if local_dataset:
+        dataset_args["tau2_bench"]["local_path"] = local_dataset
+        print(f"[INFO] 使用本地 tau2 数据集: {local_dataset}(不访问 modelscope)")
+    else:
+        print("[WARN] 未预置 tau2 数据集,evalscope 将从 modelscope.cn 下载")
 
     # 用 evalscope Python API 跑(不需要拼 CLI 字符串,JSON 类型安全)
     from evalscope import TaskConfig, run_task

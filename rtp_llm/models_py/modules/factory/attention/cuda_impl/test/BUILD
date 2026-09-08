@@ -217,6 +217,10 @@ py_test(
 )
 
 # Test for PyFlashinferPrefillPagedAttnOp CUDA graph path vs normal path
+# Must stay on H20: verified on sm86 as 23 tests / 22 pass / 1 fail
+# (test_q_cast_buffer_reused_across_replay), because attn_q_dtype gates the FA3
+# FP8-Q path on is_sm90() (py_flashinfer_mha.py:133-139). This is the only
+# coverage of that path.
 py_test(
     name = "test_py_flashinfer_paged_prefill_cuda_graph",
     srcs = [
@@ -231,16 +235,15 @@ py_test(
 )
 
 # Test for MhaRotaryEmbeddingOp - RoPE implementation for MHA
+# Verified on sm86: 1 test, 1 pass, 0 skips. RoPE is arch-agnostic and the
+# FlashInfer fa2 fallback works, so this runs on the default A10 worker.
 py_test(
     name = "test_mha_rotary_emb",
     srcs = [
         "test_flashinfer_prefill/test_mha_rotary_emb.py",
     ],
     deps = py_test_deps,
-    tags = ["H20"],
-    exec_properties = {
-        'gpu': 'H20',
-    },
+    exec_properties = {'gpu':'A10'},
 )
 
 # PrefillImpl BenchTest

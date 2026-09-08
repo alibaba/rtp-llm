@@ -9,8 +9,9 @@ py_test(
         "//rtp_llm:testlib",
         "//rtp_llm/models_py:modules",
     ],
-    tags = ["H20"],
-    exec_properties = {'gpu':'H20'},
+    # Mocked contract test: CPU tensors only, fp8_gemm_nt and
+    # sgl_per_token_group_quant_fp8 are patched out, so no DeepGEMM kernel runs.
+    exec_properties = {'gpu':'A10'},
 )
 
 py_test(

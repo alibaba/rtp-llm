@@ -29,6 +29,42 @@ def _actual_to_json_serializable(obj: Any) -> Any:
     return str(obj)
 
 
+_COLD_CACHE_AUX_FIELDS = (
+    "reuse_len",
+    "local_reuse_len",
+    "remote_reuse_len",
+    "memory_reuse_len",
+    "prefill_total_reuse_len",
+    "prefill_local_reuse_len",
+    "prefill_remote_reuse_len",
+    "prefill_memory_reuse_len",
+    "decode_total_reuse_len",
+    "decode_local_reuse_len",
+    "decode_remote_reuse_len",
+    "decode_memory_reuse_len",
+)
+
+
+def _asserts_cold_cache(qr_info: Dict[str, Any]) -> bool:
+    """True when this query's golden encodes a COLD prefix cache.
+
+    Such a query cannot be retried: the first attempt's prefill publishes its
+    blocks into the reuse cache even when the request later fails (e.g. the
+    decode-side cache-store load times out), so re-sending the same query
+    legitimately reports non-zero reuse and the cold-start golden can never
+    match again. Only meaningful when the case actually runs with reuse on --
+    plenty of non-reuse goldens carry ``reuse_len: 0`` simply because reuse is
+    off, and those stay freely retryable.
+    """
+    if not qr_info.get("_reuse_cache_enabled"):
+        return False
+    aux = (qr_info.get("result") or {}).get("aux_info") or {}
+    if not isinstance(aux, dict):
+        return False
+    present = [f for f in _COLD_CACHE_AUX_FIELDS if f in aux]
+    return bool(present) and all(aux[f] == 0 for f in present)
+
+
 class BaseComparer(object):
     def __init__(
         self,
@@ -125,6 +161,18 @@ class BaseComparer(object):
         query_info: BaseModel = self.format_query(self.qr_info["query"])
         self.tracer.query = query_info
         visit_retry_time = int(os.environ.get("VISIT_RETRY_TIME", 4))
+        if visit_retry_time > 1 and not save_response() and _asserts_cold_cache(self.qr_info):
+            # Retrying here can only ever produce a *warm* cache result, which
+            # the cold-start golden rejects with a confusing "N differences in
+            # aux_info.*reuse_len" diff, burying the real error (e.g. an HTTP 500
+            # CACHE_STORE_LOAD_BUFFER_TIMEOUT) that caused the first attempt to
+            # fail. Fail on the first attempt so the actual cause is reported.
+            logging.info(
+                "query %s golden asserts a cold prefix cache; disabling visit "
+                "retry (a retry would hit the cache the failed attempt warmed)",
+                self.qr_info.get("_query_idx"),
+            )
+            visit_retry_time = 1
         request_info = query_info.model_dump(exclude_defaults=True)
         self.maybe_set_concurrency(query_info)
         ret, res = self.server_manager.visit(

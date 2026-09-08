@@ -1,10 +1,12 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <fstream>
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <unistd.h>
 
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -47,6 +49,25 @@ public:
         std::ostringstream content;
         content << input.rdbuf();
         return content.str();
+    }
+
+    // Poll until `needle` appears in the captured log, or the timeout elapses.
+    // Log records are emitted asynchronously with respect to the test thread, so
+    // synchronising on them with a fixed sleep races as soon as the machine is
+    // loaded: the test moves on before the line it later asserts on exists.
+    bool waitFor(const std::string&        needle,
+                 std::chrono::milliseconds timeout  = std::chrono::seconds(10),
+                 std::chrono::milliseconds interval = std::chrono::milliseconds(20)) const {
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        while (true) {
+            if (content().find(needle) != std::string::npos) {
+                return true;
+            }
+            if (std::chrono::steady_clock::now() >= deadline) {
+                return false;
+            }
+            std::this_thread::sleep_for(interval);
+        }
     }
 
 private:

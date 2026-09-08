@@ -16,7 +16,7 @@ py_test(
         "//rtp_llm:testlib",
         "//rtp_llm:_ft_pickler",
     ],
-    exec_properties = {'gpu':'H20'},
+    exec_properties = {'gpu':'A10'},
 )
 
 py_test(
@@ -27,7 +27,7 @@ py_test(
     deps = [
         "//rtp_llm:testlib",
     ] + telemetry_test_deps(),
-    exec_properties = {'gpu':'H20'},
+    exec_properties = {'gpu':'A10'},
 )
 
 py_test(
@@ -66,7 +66,7 @@ py_test(
         "//rtp_llm:testlib",
         "//rtp_llm:frontend",
     ],
-    exec_properties = {'gpu':'H20'},
+    exec_properties = {'gpu':'A10'},
 )
 
 py_test(

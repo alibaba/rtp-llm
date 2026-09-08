@@ -51,5 +51,5 @@ py_test(
     deps = [
         "//rtp_llm:torch"
     ],
-    exec_properties = {'gpu':'H20'},
+    exec_properties = {'gpu':'A10'},
 )
