@@ -232,6 +232,7 @@ class FrontendShutdownManagerTest(unittest.TestCase):
         )
 
         server.handle_exit(signal.SIGTERM, None)
+        self.assertTrue(server.wait_for_signal_dispatch())
 
         self.assertTrue(manager.is_draining())
         self.assertTrue(server.should_exit)
@@ -279,6 +280,7 @@ class FrontendShutdownManagerTest(unittest.TestCase):
         server.set_server(FakeFrontendServer(), manager)
 
         server.handle_pre_stop_drain_signal(signal.SIGUSR1, None)
+        self.assertTrue(server.wait_for_signal_dispatch())
 
         self.assertTrue(manager.is_unavailable())
         self.assertFalse(manager.is_draining())
@@ -293,6 +295,7 @@ class FrontendShutdownManagerTest(unittest.TestCase):
         server.set_server(FakeFrontendServer(), manager, pre_stop_drain_seconds=0.01)
 
         server.handle_pre_stop_drain_signal(signal.SIGUSR1, None)
+        self.assertTrue(server.wait_for_signal_dispatch())
         self.assertTrue(manager.is_unavailable())
         self.assertFalse(manager.is_draining())
         self.assertFalse(server.should_exit)
@@ -311,6 +314,7 @@ class FrontendShutdownManagerTest(unittest.TestCase):
         with patch.object(manager, "drain_elapsed_seconds", return_value=7.0):
             server.handle_pre_stop_drain_signal(signal.SIGUSR1, None)
             server.handle_exit(signal.SIGTERM, None)
+            self.assertTrue(server.wait_for_signal_dispatch())
 
         self.assertTrue(manager.is_unavailable())
         self.assertFalse(manager.is_draining())
@@ -328,6 +332,7 @@ class FrontendShutdownManagerTest(unittest.TestCase):
 
         server.handle_pre_stop_drain_signal(signal.SIGUSR1, None)
         server.handle_exit(signal.SIGINT, None)
+        self.assertTrue(server.wait_for_signal_dispatch())
         server._begin_shutdown(signal.SIGUSR1, None, "SIGUSR1", False)
 
         self.assertTrue(server.should_exit)
@@ -341,11 +346,13 @@ class FrontendShutdownManagerTest(unittest.TestCase):
             FakeFrontendServer(), manager, pre_stop_drain_seconds=10
         )
         server.handle_pre_stop_drain_signal(signal.SIGUSR1, None)
+        self.assertTrue(server.wait_for_signal_dispatch())
         pre_stop_timer = server._pre_stop_timer
         self.assertIsNotNone(pre_stop_timer)
 
         with patch.object(manager, "drain_elapsed_seconds", return_value=7.0):
             server.handle_exit(signal.SIGTERM, None)
+            self.assertTrue(server.wait_for_signal_dispatch())
 
         self.assertTrue(manager.is_unavailable())
         self.assertFalse(manager.is_draining())
@@ -362,9 +369,11 @@ class FrontendShutdownManagerTest(unittest.TestCase):
             FakeFrontendServer(), manager, pre_stop_drain_seconds=10
         )
         server.handle_pre_stop_drain_signal(signal.SIGUSR1, None)
+        self.assertTrue(server.wait_for_signal_dispatch())
 
         with patch.object(manager, "drain_elapsed_seconds", return_value=10.0):
             server.handle_exit(signal.SIGTERM, None)
+            self.assertTrue(server.wait_for_signal_dispatch())
 
         self.assertTrue(manager.is_unavailable())
         self.assertTrue(manager.is_draining())
@@ -379,6 +388,7 @@ class FrontendShutdownManagerTest(unittest.TestCase):
         )
 
         server.handle_exit(signal.SIGTERM, None)
+        self.assertTrue(server.wait_for_signal_dispatch())
         self.assertTrue(manager.is_unavailable())
         self.assertFalse(manager.is_draining())
         self.assertFalse(manager.try_begin_request())
@@ -396,10 +406,12 @@ class FrontendShutdownManagerTest(unittest.TestCase):
         )
 
         server.handle_exit(signal.SIGTERM, None)
+        self.assertTrue(server.wait_for_signal_dispatch())
         self.assertTrue(manager.is_unavailable())
         self.assertFalse(manager.is_draining())
         self.assertFalse(server.should_exit)
         server.handle_exit(signal.SIGTERM, None)
+        self.assertTrue(server.wait_for_signal_dispatch())
 
         self.assertFalse(manager.is_draining())
         self.assertFalse(server.should_exit)
@@ -416,10 +428,12 @@ class FrontendShutdownManagerTest(unittest.TestCase):
         )
 
         server.handle_exit(signal.SIGTERM, None)
+        self.assertTrue(server.wait_for_signal_dispatch())
         self.assertTrue(
             self.wait_until(lambda: manager.is_draining() and server.should_exit)
         )
         server.handle_exit(signal.SIGTERM, None)
+        self.assertTrue(server.wait_for_signal_dispatch())
 
         self.assertTrue(manager.is_draining())
         self.assertTrue(server.should_exit)

@@ -132,22 +132,34 @@ class GracefulShutdownServer(Server):
         while True:
             kind, sig, frame = self._signal_events.get()
             try:
+                if kind == "barrier":
+                    sig.set()
+                    continue
                 sig_name = self._signal_name(sig)
                 if kind == "exit":
-                    if not self._defer_sigterm_for_pre_stop_drain(
-                        sig, frame, sig_name
-                    ):
+                    if not self._defer_sigterm_for_pre_stop_drain(sig, frame, sig_name):
                         self._begin_shutdown(sig, frame, sig_name)
                 else:
                     self.shutdown_manager.start_unavailable(f"signal {sig_name}")
-                    if not self._schedule_shutdown_after_pre_stop(
-                        sig, frame, sig_name
-                    ):
+                    if not self._schedule_shutdown_after_pre_stop(sig, frame, sig_name):
                         self._begin_shutdown(sig, frame, sig_name)
             except Exception:
                 # Never let the dispatcher die: a lost signal means a frontend
                 # that ignores SIGTERM.
                 logging.exception("Frontend signal dispatch failed for %s", sig)
+
+    def wait_for_signal_dispatch(self, timeout: float = 5.0) -> bool:
+        """Block until every signal handed over before this call was dispatched.
+
+        The queue is FIFO with a single consumer, so a barrier that has been
+        processed proves everything enqueued ahead of it was processed too. That
+        is what makes it sound to assert a *negative* post-condition after
+        signalling -- polling the positive one would let the negative pass while
+        the dispatcher simply had not run yet.
+        """
+        done = threading.Event()
+        self._signal_events.put(("barrier", done, None))
+        return done.wait(timeout)
 
     def install_pre_stop_drain_signal_handler(self) -> None:
         pre_stop_signal = getattr(signal, "SIGUSR1", None)
