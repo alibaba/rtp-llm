@@ -82,15 +82,36 @@ without starting services. Each role records and checks the supplied settings
 against its service process in `service.env`; these environment checks alone do
 not prove FP8 kernel execution.
 
-The smoke prefix budget defaults to `4294967296`; set `0` to disable it.
-Outside this smoke the model default remains `0`. The budget splits historical KV
+The smoke prefix budget defaults to `4294967296`. The full `all` suite requires
+a positive budget so its long-prefix case can exercise multiple historical
+blocks. Outside this smoke the model default remains `0` (disabled). The budget splits historical KV
 expansion into page-aligned blocks, runs attention on each block, and merges
 output/LSE. It does not cap the current chunk's expanded KV or FP8 temporary
 buffers; use `SMOKE_CHUNK_TOKENS` to control the current input chunk. A positive
 budget only exercises the split route when the request exceeds its capacity
-and has a historical prefix. The full suite includes prefix-hit and chunk
-cases, but setting a budget alone is not evidence that multiple prefix blocks
-were executed.
+and has a historical prefix.
+
+The `all` suite now includes `long_prefix_seed` and `long_prefix_hit`. It uses the
+service tokenizer to construct a roughly 600k-token archive with records near
+20k, 300k and 580k, stores it with an acknowledgment-only reply, then appends the
+actual assistant reply and a new retrieval question. It requires correct record
+values and `37² = 1369`, PD separation, a long common token prefix, page-aligned
+cache reuse larger than one expansion buffer, and nonzero uncached input.
+
+At TP8 with the default 4 GiB budget, 4096-token cache pages and 128-token MLA
+kernel pages, the expansion capacity is 559232 tokens. A reuse length of 598016
+therefore plans historical blocks of 559232 and 38784 tokens. The test reads
+checkpoint dimensions and the configured TP size, budget and page sizes; it
+fails if the selected configuration cannot exercise multiple historical blocks.
+It also works with BF16 precision switches, and does not change model execution.
+The four-layer `flow` preflight does not run this full-model case.
+
+Both requests count toward `accuracy.json`; a failed answer or missing prefix
+coverage fails the suite. Full request/response payloads, token IDs, hashes and
+`RESULT.json` are retained in `prefill/long-prefix/`, including on failure.
+Ordinary smoke does not arm a profiler or perform timed warmups. Its
+`planned_prefix_blocks` describes coverage computed from cache metadata; actual
+FP8 kernel launches and output/LSE merges require the separate timeline audit.
 
 The rebased implementation uses the upstream expanded-KV byte budget and forward
 planner. FP8 historical chunks restore the cache into bounded BF16 latent/RoPE

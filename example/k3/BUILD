@@ -5,7 +5,10 @@ exports_files([
 
 py_library(
     name = "kimi_k3_full_model_pd_cases_lib",
-    srcs = ["kimi_k3_full_model_pd_cases.py"],
+    srcs = [
+        "kimi_k3_full_model_pd_cases.py",
+        "kimi_k3_long_prefix_case.py",
+    ],
 )
 
 py_test(
@@ -47,6 +50,7 @@ sh_binary(
     srcs = ["kimi_k3_full_model_two_host_pd_smoke.sh"],
     data = [
         "kimi_k3_full_model_pd_cases.py",
+        "kimi_k3_long_prefix_case.py",
         "kimi_k3_full_model_pd_nic_selection.py",
         "start_kimi_k3_pd.sh",
         "//rtp_llm:rtp_llm_server",
@@ -85,4 +89,10 @@ py_test(
     name = "kimi_k3_logits_compare_test",
     srcs = ["kimi_k3_logits_compare_test.py"],
     deps = [":kimi_k3_logits_compare_lib"],
+)
+
+py_test(
+    name = "kimi_k3_long_prefix_case_test",
+    srcs = ["kimi_k3_long_prefix_case_test.py"],
+    deps = [":kimi_k3_full_model_pd_cases_lib"],
 )

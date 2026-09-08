@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import json
 import pathlib
+import tempfile
 import unittest
 from unittest import mock
 
@@ -9,6 +11,7 @@ from example.k3.kimi_k3_full_model_pd_cases import (
     Case,
     Runner,
     SmokeFailure,
+    main,
     numbered_answer_pattern,
 )
 
@@ -31,10 +34,39 @@ def make_args() -> argparse.Namespace:
         rdma_prewarm_backoff_s=0,
         rdma_prewarm_settle_s=0,
         timeout=900,
+        long_prefix_checkpoint=None,
+        long_prefix_tp_size=8,
+        long_prefix_kernel_page_size=128,
+        expanded_kv_budget_bytes=4294967296,
     )
 
 
 class KimiK3FullModelPdCasesTest(unittest.TestCase):
+    def test_long_prefix_failure_marks_the_entire_suite_failed(self) -> None:
+        args = make_args()
+        with tempfile.TemporaryDirectory() as tmp:
+            args.output = pathlib.Path(tmp) / "accuracy.json"
+            module = "example.k3.kimi_k3_full_model_pd_cases"
+            with (
+                mock.patch(module + ".parse_args", return_value=args),
+                mock.patch.object(Runner, "run_stage"),
+                mock.patch.object(Runner, "health"),
+                mock.patch(module + ".LongPrefixCase") as case_class,
+            ):
+                case_class.return_value.run.side_effect = ValueError(
+                    "historical prefix too short"
+                )
+                case_class.return_value.records = [
+                    {"name": "long_prefix_seed", "effective_reuse_len": 0}
+                ]
+                with self.assertRaisesRegex(ValueError, "historical prefix too short"):
+                    main()
+            saved = json.loads(args.output.read_text())
+            self.assertFalse(saved["passed"])
+            self.assertEqual(saved["stages"][-1]["name"], "long_prefix_cached_dialog")
+            self.assertFalse(saved["stages"][-1]["passed"])
+            self.assertEqual(saved["cases"][-1]["name"], "long_prefix_seed")
+
     def test_rdma_prewarm_retries_then_fills_batch_sized_pool(self) -> None:
         args = make_args()
         args.rdma_prewarm_attempts = 2
@@ -93,8 +125,12 @@ class KimiK3FullModelPdCasesTest(unittest.TestCase):
             del concurrent
             stages[name] = cases
 
-        with mock.patch.object(runner, "run_stage", side_effect=capture_stage):
+        with (
+            mock.patch.object(runner, "run_stage", side_effect=capture_stage),
+            mock.patch.object(runner, "run_long_prefix_case") as long_prefix,
+        ):
             runner.run_all()
+        long_prefix.assert_called_once_with()
 
         identity = stages["identity_miss"][0]
         self.assertEqual(identity.max_tokens, 256)

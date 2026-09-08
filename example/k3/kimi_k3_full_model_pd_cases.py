@@ -15,6 +15,11 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any
 
+try:
+    from .kimi_k3_long_prefix_case import LongPrefixCase, expanded_bytes_per_token
+except ImportError:  # Direct script entry from the role launcher.
+    from kimi_k3_long_prefix_case import LongPrefixCase, expanded_bytes_per_token
+
 
 @dataclass(frozen=True)
 class Case:
@@ -63,6 +68,10 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--rdma-prewarm-backoff-s", type=float, default=5.0)
     parser.add_argument("--rdma-prewarm-settle-s", type=float, default=2.0)
+    parser.add_argument("--long-prefix-checkpoint", type=pathlib.Path)
+    parser.add_argument("--long-prefix-tp-size", type=int, default=8)
+    parser.add_argument("--long-prefix-kernel-page-size", type=int, default=128)
+    parser.add_argument("--expanded-kv-budget-bytes", type=int, default=4294967296)
     parser.add_argument("--timeout", type=int, default=900)
     args = parser.parse_args()
     if args.batch_size < 4:
@@ -75,9 +84,13 @@ def parse_args() -> argparse.Namespace:
         "single_exact_max_tokens",
         "mtp_chunk_max_tokens",
         "timeout",
+        "long_prefix_tp_size",
+        "long_prefix_kernel_page_size",
     ):
         if getattr(args, key) <= 0:
             parser.error(f"--{key.replace('_', '-')} must be positive")
+    if args.suite == "all" and args.expanded_kv_budget_bytes <= 0:
+        parser.error("all suite needs a positive expansion budget for the long prefix case")
     if args.rdma_prewarm_attempts < 0:
         parser.error("--rdma-prewarm-attempts must be non-negative")
     for key in ("rdma_prewarm_backoff_s", "rdma_prewarm_settle_s"):
@@ -747,6 +760,36 @@ class Runner:
             ],
             concurrent=True,
         )
+        self.run_long_prefix_case()
+
+    def run_long_prefix_case(self) -> None:
+        self.health()
+        stage = dict(name="long_prefix_cached_dialog", concurrent=False, passed=False)
+        self.stages.append(stage)
+        case = LongPrefixCase(
+            self.args.base_url,
+            self.args.output.parent / "long-prefix",
+            self.args.namespace,
+            timeout=self.args.timeout,
+            budget=self.args.expanded_kv_budget_bytes,
+            page_size=self.args.block_size,
+            kernel_page_size=self.args.long_prefix_kernel_page_size,
+            bytes_per_token=expanded_bytes_per_token(
+                self.args.long_prefix_checkpoint, self.args.long_prefix_tp_size
+            ),
+        )
+        try:
+            result = case.run()
+            stage.update(
+                passed=True,
+                case_names=[row["name"] for row in result["cases"]],
+                planned_prefix_blocks=result["planned_prefix_blocks"],
+                evidence=str(case.output / "RESULT.json"),
+            )
+        finally:
+            self.records.extend(case.records)
+        self.health()
+
 
 def main() -> int:
     args = parse_args()

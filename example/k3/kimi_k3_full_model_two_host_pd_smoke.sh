@@ -85,6 +85,10 @@ and result channel. The default result channel is DECODE host at DECODE port +
 Weight FP8 and MLA FP8 are enabled by default. Set attention quantization to
 none and MLA FP8 to 0 for BF16; use the same precision and scales on both roles.
 The smoke always uses Eagle3 MTP. See example/k3/FP8_MLA.md for FP8 examples.
+The all suite also seeds a ~600k-token conversation, then appends a retrieval
+question. It checks the answer, PD metadata and a historical prefix larger than
+one expanded-KV budget. This correctness case runs by default without profiling;
+its request, token IDs and results are saved under prefill/long-prefix/.
 
 Merge-gate accuracy validation must use SMOKE_SUITE=all. SMOKE_SUITE=flow is
 only a four-layer RDMA connectivity/multi-round preflight and does not satisfy
@@ -839,6 +843,10 @@ python3 "${case_runner}" \
     --rdma-prewarm-attempts "${smoke_rdma_prewarm_attempts}" \
     --rdma-prewarm-backoff-s "${smoke_rdma_prewarm_backoff_s}" \
     --rdma-prewarm-settle-s "${smoke_rdma_prewarm_settle_s}" \
+    --long-prefix-checkpoint "${CHECKPOINT_PATH}" \
+    --long-prefix-tp-size "${TP_SIZE:-8}" \
+    --long-prefix-kernel-page-size "${KERNEL_SEQ_SIZE_PER_BLOCK}" \
+    --expanded-kv-budget-bytes "${KIMI_K3_MLA_PREFILL_EXPANDED_KV_BUDGET_BYTES}" \
     --timeout "${request_timeout}"
 
 verify_rdma_selected_devices
