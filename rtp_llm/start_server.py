@@ -23,6 +23,7 @@ from rtp_llm.config.server_config_setup import (
 from rtp_llm.ops import RoleType, SpeculativeType, VitSeparation
 from rtp_llm.server.server_args.server_args import setup_args
 from rtp_llm.utils.concurrency_controller import init_controller
+from rtp_llm.utils.import_util import has_internal_source
 from rtp_llm.utils.process_manager import (
     DEFER_FIRST_SIGTERM_ENV,
     DEFER_FIRST_SIGTERM_SECONDS_ENV,
@@ -32,6 +33,51 @@ from rtp_llm.utils.process_manager import (
 from rtp_llm.utils.warmup import configure_warmup
 
 setup_logging()
+
+
+def normalize_prompt_generator_config(py_env_configs: PyEnvConfigs):
+    server_config = py_env_configs.server_config
+    if (
+        server_config.enable_prompt_generator_mps
+        and not server_config.enable_prompt_generator
+    ):
+        logging.warning(
+            "disable prompt generator mps because prompt generator is disabled"
+        )
+        server_config.enable_prompt_generator_mps = False
+    if not server_config.enable_prompt_generator:
+        return
+    if not has_internal_source():
+        logging.warning(
+            "prompt generator is unavailable in this build; fallback to frontend server"
+        )
+        server_config.enable_prompt_generator = False
+        server_config.enable_prompt_generator_mps = False
+        return
+
+    import importlib
+
+    required = [
+        (
+            "internal_source.rtp_llm.prompt_generator.service.start_server",
+            "start_prompt_generator",
+        )
+    ]
+    if server_config.enable_prompt_generator_mps:
+        required.append(
+            ("internal_source.rtp_llm.prompt_generator.service.start_mps", "start_mps")
+        )
+    for module_path, symbol in required:
+        try:
+            module = importlib.import_module(module_path)
+        except ImportError as e:
+            raise NotImplementedError(
+                f"prompt generator is enabled and internal_source exists, but {module_path} failed to import: {e}"
+            ) from e
+        if not hasattr(module, symbol):
+            raise NotImplementedError(
+                f"prompt generator is enabled and internal_source exists, but {module_path} does not define {symbol!r}"
+            )
 
 
 def _install_hot_hook_runtime(role: str) -> None:
@@ -480,7 +526,7 @@ def start_frontend_server_impl(
     frontend_server_count = py_env_configs.server_config.frontend_server_count
     if frontend_server_count < 1:
         logging.info(
-            "frontend server's count is {frontend_server_count}, this may be a mistake"
+            f"frontend server's count is {frontend_server_count}, this may be a mistake"
         )
 
     frontend_processes = []
@@ -535,6 +581,43 @@ def start_frontend_server_impl(
         )
 
     return frontend_processes
+
+
+def start_prompt_generator_impl(
+    global_controller, py_env_configs: PyEnvConfigs, process_manager=None
+):
+    from internal_source.rtp_llm.prompt_generator.service.start_server import (
+        start_prompt_generator,
+    )
+
+    pg_server_count = py_env_configs.server_config.prompt_generator_server_count
+    if pg_server_count < 1:
+        raise ValueError(
+            f"prompt generator server count must be greater than 0, but got {pg_server_count}"
+        )
+    pc = py_env_configs.parallelism_config
+    local_world_size = int(os.environ.get("LOCAL_WORLD_SIZE", pc.world_size))
+    prompt_processes = []
+    for rank in range(local_world_size):
+        for i in range(pg_server_count):
+            if rank == 0 or (pc.world_rank + rank) % pc.tp_size == 0:
+                process = multiprocessing.Process(
+                    target=start_prompt_generator,
+                    args=(py_env_configs, rank, i, global_controller),
+                    name=f"prompt_generator_rank{rank}_server{i}",
+                )
+                prompt_processes.append(process)
+                process.start()
+    if process_manager and prompt_processes:
+        process_manager.register_health_check(
+            processes=prompt_processes,
+            process_name="prompt_generator_server",
+            check_ready_fn=lambda: check_server_health(
+                py_env_configs.server_config.start_port
+            ),
+            retry_interval_seconds=1,
+        )
+    return prompt_processes
 
 
 def _role_is_prefill(py_env_configs: PyEnvConfigs) -> bool:
@@ -622,6 +705,7 @@ def main():
 
 def start_server(py_env_configs: PyEnvConfigs):
     logging.info(f"[PROCESS_START]Start server")
+    normalize_prompt_generator_config(py_env_configs)
     configure_warmup(
         py_env_configs.runtime_config.warm_up,
         py_env_configs.runtime_config.model_warm_up,
@@ -678,8 +762,20 @@ def start_server(py_env_configs: PyEnvConfigs):
         )
         py_env_configs.role_config.role_type = RoleType.VIT
 
-    dash_sc_enabled = py_env_configs.role_config.role_type != RoleType.VIT
+    dash_sc_enabled = (
+        py_env_configs.role_config.role_type != RoleType.VIT
+        and not py_env_configs.server_config.enable_prompt_generator
+    )
     py_env_configs.server_config.validate_port_layout(dash_sc_enabled=dash_sc_enabled)
+
+    if (
+        py_env_configs.server_config.enable_prompt_generator
+        and py_env_configs.server_config.enable_prompt_generator_mps
+    ):
+        from internal_source.rtp_llm.prompt_generator.service.start_mps import start_mps
+
+        logging.info("starting prompt generator mps...")
+        start_mps()
 
     # Initialize backend_process to None in case role_type is FRONTEND
     backend_process = None
@@ -704,20 +800,30 @@ def start_server(py_env_configs: PyEnvConfigs):
 
         if py_env_configs.role_config.role_type != RoleType.VIT:
             # vit has its own frontend server
-            logging.info("start frontend server")
-            frontend_process = start_frontend_server_impl(
-                global_controller, py_env_configs, process_manager
-            )
-            process_manager.add_processes(frontend_process, shutdown_group="frontend")
-
-            logging.info("start dash_sc server")
-            dash_sc_processes = start_dash_sc_server_impl(
-                global_controller, py_env_configs, process_manager
-            )
-            if dash_sc_processes:
-                process_manager.add_processes(
-                    dash_sc_processes, shutdown_group="frontend"
+            if py_env_configs.server_config.enable_prompt_generator:
+                logging.info("starting prompt generator server...")
+                prompt_processes = start_prompt_generator_impl(
+                    global_controller, py_env_configs, process_manager
                 )
+                process_manager.add_processes(
+                    prompt_processes, shutdown_group="frontend"
+                )
+            else:
+                logging.info("start frontend server")
+                frontend_process = start_frontend_server_impl(
+                    global_controller, py_env_configs, process_manager
+                )
+                process_manager.add_processes(
+                    frontend_process, shutdown_group="frontend"
+                )
+                logging.info("start dash_sc server")
+                dash_sc_processes = start_dash_sc_server_impl(
+                    global_controller, py_env_configs, process_manager
+                )
+                if dash_sc_processes:
+                    process_manager.add_processes(
+                        dash_sc_processes, shutdown_group="frontend"
+                    )
 
         # Start parallel health checks and wait for completion
         if not process_manager.run_health_checks():
