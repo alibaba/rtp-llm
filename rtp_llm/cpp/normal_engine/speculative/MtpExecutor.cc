@@ -2352,6 +2352,21 @@ static void seedDsparkFreshRoundState(const GenerateStreamPtr& stream, int64_t p
     });
 }
 
+// [TOPO] marker (Sep 10 decode-topology comparison). RTP_LLM_TOPO_MARKER=1 arms
+// it (default off, inert). Prints the REAL-vs-FAKE decode stream split per rank,
+// but ONLY on rounds that carry a real stream — the [CADS]/[CADS1] budgets above
+// are burned by idle fake-mirror rounds in ~40 s, which is why they cannot answer
+// "does the DP dispatcher spread concurrent requests across DP groups, or pin
+// them all to one rank?". That question decides whether a dp_size>1 shape can
+// serve B streams at bs=1 per group (cheap rounds) or must batch them.
+static bool topoMarkerEnabled() {
+    static const bool enabled = [] {
+        const char* e = getenv("RTP_LLM_TOPO_MARKER");
+        return e && std::string(e) == "1";
+    }();
+    return enabled;
+}
+
 void MtpExecutor::prepareStreams(const std::list<GenerateStreamPtr>& streams,
                                  std::list<GenerateStreamPtr>&       prefill_streams,
                                  std::list<GenerateStreamPtr>&       decode_streams) {
@@ -2442,6 +2457,32 @@ void MtpExecutor::prepareStreams(const std::list<GenerateStreamPtr>& streams,
                 prefill_streams.size(),
                 decode_streams.size());
         fflush(stderr);
+    }
+
+    // [TOPO] real-vs-fake split, only on rounds carrying real work (see above).
+    if (topoMarkerEnabled()) {
+        size_t real_dec = 0, fake_dec = 0;
+        for (const auto& s : decode_streams) {
+            if (s->isFakeStream()) {
+                ++fake_dec;
+            } else {
+                ++real_dec;
+            }
+        }
+        if (real_dec > 0) {
+            static std::atomic<int> topo_budget{6000};
+            if (topo_budget.fetch_sub(1, std::memory_order_relaxed) > 0) {
+                fprintf(stderr,
+                        "[TOPO] r=%d tp=%d dp=%d real=%zu fake=%zu ctx=%zu\n",
+                        (int)parallelism_config_.world_rank,
+                        (int)parallelism_config_.tp_rank,
+                        (int)parallelism_config_.dp_rank,
+                        real_dec,
+                        fake_dec,
+                        prefill_streams.size());
+                fflush(stderr);
+            }
+        }
     }
 }
 
