@@ -172,6 +172,11 @@ class _BackendVisitorTemplateHook:
         self.visitor.update_addresses(
             get_dp_addrs_from_world_info(world_info, self.configs.parallelism_config)
         )
+        from rtp_llm.utils.scr_local_comm import current_pod_ip, local_comm_enabled
+
+        if local_comm_enabled():
+            # Request correlation must identify the restored frontend, not its seed.
+            self.visitor.source_ip = current_pod_ip()
 
     def release_template(self, generation: str) -> None:
         return None
