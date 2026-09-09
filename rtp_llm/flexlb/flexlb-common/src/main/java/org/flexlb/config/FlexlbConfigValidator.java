@@ -1,5 +1,8 @@
 package org.flexlb.config;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import org.flexlb.balance.strategy.DecodeCostFormula;
+import org.flexlb.config.RoutingConfig.DecodeCostEstimatorConfig;
 import org.flexlb.balance.strategy.PrefillTimeFormula;
 import org.flexlb.config.RoutingConfig.BestOnlyConfig;
 import org.flexlb.config.RoutingConfig.CacheAffinityConfig;
@@ -16,6 +19,15 @@ import org.flexlb.config.RoutingConfig.RatioCandidatePoolConfig;
 
 /** Cross-field validation for the public configuration contract. */
 final class FlexlbConfigValidator {
+
+    static void validateDocumentShape(JsonNode document) {
+        JsonNode decodeCostEstimator = document.path("router").path("roles")
+                .path("decode").path("costEstimator");
+        if (decodeCostEstimator.isObject() && decodeCostEstimator.has("expression")) {
+            require(decodeCostEstimator.path("expression").isTextual(),
+                    "router.roles.decode.costEstimator.expression", "must be a string");
+        }
+    }
 
     static void validate(FlexlbConfig config) {
         require(config.getSchemaVersion() == FlexlbConfig.CURRENT_SCHEMA_VERSION,
@@ -172,10 +184,27 @@ final class FlexlbConfigValidator {
 
         require(routing.getRoles().getDecode() != null,
                 "router.roles.decode", "is required");
+        DecodeCostEstimatorConfig costEstimator = routing.getRoles().getDecode().getCostEstimator();
+        require(costEstimator != null, "router.roles.decode.costEstimator", "is required");
+        require(costEstimator.getExpression() != null && !costEstimator.getExpression().isBlank(),
+                "router.roles.decode.costEstimator.expression", "must not be blank");
+        DecodeCostFormula costFormula;
+        try {
+            costFormula = costEstimator.compiledFormula();
+        } catch (IllegalArgumentException error) {
+            throw new ConfigValidationException(
+                    "router.roles.decode.costEstimator.expression",
+                    "contains an invalid formula: " + error.getMessage(), error);
+        }
         DecodeAvailabilityConfig decodeAvailability =
                 routing.getRoles().getDecode().getAvailability();
         require(decodeAvailability != null,
                 "router.roles.decode.availability", "is required");
+        if (costFormula.requiresMaxRunningSize()) {
+            require(decodeAvailability.getMaxEngineRequests() != null,
+                    "router.roles.decode.availability.maxEngineRequests",
+                    "is required when costEstimator.expression uses max_running_size");
+        }
         range(decodeAvailability.getMaxKvUsagePercent(), 0, 100,
                 "router.roles.decode.availability.maxKvUsagePercent");
         if (decodeAvailability.getMaxEngineRequests() != null) {

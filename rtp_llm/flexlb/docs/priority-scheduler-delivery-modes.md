@@ -267,3 +267,17 @@ The role-local prefill, decode, and VIT selectors shown in the top-level
 | `QUEUE` | `PRIORITY` | `BATCH` | Priority admission/preemption | Master `EnqueueBatch` |
 
 `DIRECT + BATCH` is rejected during configuration validation.
+
+## Decode cost selection
+
+The default Decode selector is `MIN_COST`. It minimizes
+`router.roles.decode.costEstimator.expression` (default `kvcache_used_ratio`)
+after the existing resource-availability and prompt-KV checks. Request load includes
+local queued reservations. Equal scores are selected randomly; non-finite scores
+are excluded, and no finite candidate causes a formula error. Using
+`max_running_size` in an expression requires a positive configured
+`router.roles.decode.availability.maxEngineRequests`.
+
+Explicit `KV_USAGE_WEIGHTED_RANDOM` and `RANDOM` retain their existing selection
+behavior. The formula does not change lifecycle, reservation or dispatcher rules.
+See the [formula variables and JSON example](../README.md) for configuration details.

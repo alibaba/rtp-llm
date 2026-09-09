@@ -153,3 +153,10 @@ Configuration is injected via `ConfigService` interface (implementation in flexl
 Do what is asked; no more, no less.
 Always prefer editing existing files over creating new ones.
 Do not proactively create documentation files (*.md) or README files unless explicitly requested.
+
+### Decode cost selection
+
+`CostBasedDecodeStrategy` supports the default `MIN_COST` selector, evaluating the
+compiled formula from `router.roles.decode.costEstimator.expression`. It selects
+the lowest finite cost after availability and prompt-KV checks, with random ties.
+Explicit `KV_USAGE_WEIGHTED_RANDOM` retains its legacy weighting and outlier filters.

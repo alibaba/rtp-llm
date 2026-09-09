@@ -174,14 +174,8 @@ export FLEXLB_CONFIG='{
         "kvReservation": {
           "maxOutputTokensForEstimate": 1000
         },
-        "selector": {
-          "type": "KV_USAGE_WEIGHTED_RANDOM",
-          "decayPerToken": 0.001,
-          "outlierRejection": {
-            "maxEngineLoadVsAverageMultiplier": 3.0,
-            "maxKvUsedVsAverageMultiplier": 3.0
-          }
-        }
+        "costEstimator": {"expression": "kvcache_used_ratio"},
+        "selector": {"type": "MIN_COST"}
       },
       "vit": {
         "selector": {"type": "RANDOM"}
@@ -307,7 +301,7 @@ PREFILL and PDFUSION share the prefill selector. Prefill selector types are
 `RANDOM_WITHIN_TOLERANCE`, or `LEAST_RECENTLY_USED_IN_POOL` candidate choice.
 The candidate pool for `LEAST_RECENTLY_USED_IN_POOL` is tagged as either
 `{"type":"RATIO","ratio":0.3,"minimumWorkers":1}` or
-`{"type":"FIXED","workers":2}`. Decode selector types are `RANDOM` and
+`{"type":"FIXED","workers":2}`. Decode selector types are `MIN_COST` (the default), `RANDOM`, and
 `KV_USAGE_WEIGHTED_RANDOM`; VIT currently supports `RANDOM`.
 
 Cache affinity is enabled by including `router.roles.prefill.cacheAffinity` and is
@@ -315,6 +309,45 @@ valid only with `ESTIMATED_TTFT`. Omit the object to disable it. Decode admissio
 controlled by the optional positive
 `router.roles.decode.availability.maxEngineRequests`; omit it for no FlexLB-side
 request-count cap.
+
+Decode `MIN_COST` selects the available worker with the lowest
+`router.roles.decode.costEstimator.expression`, defaulting to `kvcache_used_ratio`.
+Equal costs are selected uniformly at random. Non-finite scores exclude a worker;
+if all available workers have non-finite scores, routing fails with a formula error.
+Availability and prompt KV capacity checks still apply. Explicit
+`KV_USAGE_WEIGHTED_RANDOM` retains its existing KV token weighting, `decayPerToken`,
+and outlier filters; `RANDOM` also retains its existing behavior. These two legacy
+selectors do not evaluate the cost formula.
+
+Formulas support `+`, `-`, `*`, `/`, `^`, parentheses, `sqrt`, `log`, `exp`,
+`abs`, `max`, `min`, `pow`, and `param(name, initialValue)`. Decode does not support `sum`.
+
+| Variable | Meaning |
+| --- | --- |
+| `running_size` | Endpoint total load: confirmed engine requests plus local reservations, including queued requests |
+| `max_running_size` | Fixed `availability.maxEngineRequests`; must be configured and positive when referenced |
+| `kvcache_used` | Engine-reported used KV plus local predicted reservations and retained EngineFence demand |
+| `kvcache_capacity` | Total KV token capacity reported by the engine |
+| `kvcache_used_ratio` | Used KV divided by capacity; zero for unknown capacity of zero, with no cap at one |
+
+For request load alone, use `running_size`. To combine normalized load and KV usage:
+
+```json
+{
+  "schemaVersion": 1,
+  "router": {
+    "roles": {
+      "decode": {
+        "selector": {"type": "MIN_COST"},
+        "costEstimator": {
+          "expression": "0.3 * running_size / max_running_size + 0.7 * kvcache_used_ratio"
+        },
+        "availability": {"maxEngineRequests": 128}
+      }
+    }
+  }
+}
+```
 
 See [QUEUE ordering and dispatcher modes](docs/priority-scheduler-delivery-modes.md)
 for the QUEUE lifecycle, accounting invariants, complete scheduler/dispatcher

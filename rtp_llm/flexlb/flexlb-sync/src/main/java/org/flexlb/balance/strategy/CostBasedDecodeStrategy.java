@@ -43,9 +43,12 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
         long seqLen = request.getSeqLen();
         long maxNewTokens = request.getMaxNewTokens();
         FlexlbConfig config = balanceContext.getConfig();
-        RoutingConfig.KvUsageWeightedRandomConfig selector =
-                (RoutingConfig.KvUsageWeightedRandomConfig) config.getRouter().getRoles()
-                        .getDecode().getSelector();
+        RoutingConfig.DecodeConfig decode = config.getRouter().getRoles().getDecode();
+        RoutingConfig.KvUsageWeightedRandomConfig weighted =
+                decode.getSelector() instanceof RoutingConfig.KvUsageWeightedRandomConfig legacy
+                        ? legacy : null;
+        DecodeCostFormula costFormula = weighted == null
+                ? decode.getCostEstimator().compiledFormula() : null;
 
         EndpointFilterResult filterResult = getAvailableEndpoints(
                 roleType, group, config.resourceMeasureFor(roleType));
@@ -56,11 +59,14 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
             return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
         }
 
-        FilterResult hardFilterResult = applyHardFilters(eligible, seqLen, selector);
+        FilterResult hardFilterResult = applyHardFilters(eligible, seqLen,
+                weighted == null ? null : weighted.getOutlierRejection());
         List<DecodeEndpoint> survivors = hardFilterResult.endpoints();
 
-        DecodeEndpoint selectedEndpoint = weightedRandomSelection(
-                survivors, selector.getDecayPerToken());
+        Long maxRequests = decode.getAvailability().getMaxEngineRequests();
+        DecodeEndpoint selectedEndpoint = weighted == null
+                ? minimumCostSelection(survivors, costFormula, maxRequests == null ? 0L : maxRequests)
+                : weightedRandomSelection(survivors, weighted.getDecayPerToken());
 
         if (selectedEndpoint != null) {
             return buildServerStatus(selectedEndpoint, seqLen, maxNewTokens,
@@ -116,8 +122,7 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
     private FilterResult applyHardFilters(
             List<DecodeEndpoint> eligible,
             long seqLen,
-            RoutingConfig.KvUsageWeightedRandomConfig selector) {
-        RoutingConfig.DecodeOutlierRejectionConfig outlier = selector.getOutlierRejection();
+            RoutingConfig.DecodeOutlierRejectionConfig outlier) {
         double hotspotMultiplier = outlier == null
                 ? 0.0 : outlier.getMaxEngineLoadVsAverageMultiplier();
         double imbalanceMultiplier = outlier == null
@@ -163,6 +168,35 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
         }
 
         return new FilterResult(survivors, rejections);
+    }
+
+    private DecodeEndpoint minimumCostSelection(
+            List<DecodeEndpoint> candidates, DecodeCostFormula formula, long maxRequests) {
+        if (candidates.isEmpty()) {
+            return null;
+        }
+        DecodeEndpoint selected = null;
+        double minimum = Double.POSITIVE_INFINITY;
+        int ties = 0;
+        for (DecodeEndpoint endpoint : candidates) {
+            double cost = formula.evaluate(endpoint.getTotalLoad(), maxRequests,
+                    endpoint.realKvUsed(), endpoint.realKvTotal());
+            if (!Double.isFinite(cost)) {
+                continue;
+            }
+            if (cost < minimum) {
+                minimum = cost;
+                selected = endpoint;
+                ties = 1;
+            } else if (cost == minimum && ThreadLocalRandom.current().nextInt(++ties) == 0) {
+                selected = endpoint;
+            }
+        }
+        if (selected == null) {
+            throw new IllegalStateException("Decode cost formula produced no finite score: "
+                    + formula.expression());
+        }
+        return selected;
     }
 
     private DecodeEndpoint weightedRandomSelection(

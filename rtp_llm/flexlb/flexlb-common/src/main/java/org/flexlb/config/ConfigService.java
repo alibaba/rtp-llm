@@ -47,6 +47,7 @@ public class ConfigService {
         try {
             JsonNode tree = STRICT_MAPPER.readTree(document);
             rejectJsonNull(tree, "$");
+            FlexlbConfigValidator.validateDocumentShape(tree);
             FlexlbConfig config = STRICT_MAPPER.treeToValue(tree, FlexlbConfig.class);
             FlexlbConfigValidator.validate(config);
             return config;
@@ -95,10 +96,11 @@ public class ConfigService {
                 : config.isPriorityOrdering() ? "PRIORITY" : "FIFO";
         String dispatcher = config.isBatchDispatch() ? "BATCH" : "NON_BATCH";
         log.info("FlexLB config loaded: schemaVersion={}, scheduler={}, ordering={}, dispatcher={}, "
-                        + "prefillSelector={}, decodeSelector={}, groupRules={}",
+                        + "prefillSelector={}, decodeSelector={}, decodeCostExpression={}, groupRules={}",
                 config.getSchemaVersion(), scheduler, ordering, dispatcher,
                 config.getRouter().getRoles().getPrefill().getSelector().getClass().getSimpleName(),
                 config.getRouter().getRoles().getDecode().getSelector().getClass().getSimpleName(),
+                config.getRouter().getRoles().getDecode().getCostEstimator().getExpression(),
                 config.getRouter().getGroupSelector() == null ? 0
                         : config.getRouter().getGroupSelector().getRules().size());
     }

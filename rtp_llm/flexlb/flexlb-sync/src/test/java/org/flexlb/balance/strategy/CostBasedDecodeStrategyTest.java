@@ -34,6 +34,8 @@ class CostBasedDecodeStrategyTest {
     @BeforeEach
     void setUp() {
         configService = new ConfigService();
+        configService.loadBalanceConfig().getRouter().getRoles().getDecode()
+                .setSelector(new org.flexlb.config.RoutingConfig.KvUsageWeightedRandomConfig());
     }
 
     @org.junit.jupiter.api.AfterEach

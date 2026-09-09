@@ -179,7 +179,7 @@ Four baseline strategies are available (registered with `LoadBalanceStrategyFact
 
 Each `RoleType` can use a different compatible strategy. The public choices are tagged
 selectors under `FLEXLB_CONFIG.router.roles`: PREFILL/PDFUSION use `RANDOM` or
-`ESTIMATED_TTFT`, DECODE uses `RANDOM` or `KV_USAGE_WEIGHTED_RANDOM`, and VIT uses
+`ESTIMATED_TTFT`, DECODE defaults to `MIN_COST` and also supports `RANDOM` or `KV_USAGE_WEIGHTED_RANDOM`, and VIT uses
 `RANDOM`. Under `ESTIMATED_TTFT`, `LEAST_RECENTLY_USED_IN_POOL` maps to the shortest-TTFT
 candidate-pool path; the other candidate choices map to cost-based prefill selection.
 Cache affinity is enabled only by including `router.roles.prefill.cacheAffinity`, with
@@ -403,3 +403,13 @@ private final BlockingDeque<BalanceContext> queue;
 The parenthetical content in such comments is unnecessary because it makes readers wonder about a problem X they weren't aware of. The code should look naturally correct from the beginning.
 5. To run Maven commands, use the Maven wrapper from rtp_llm/flexlb directory: `./mvnw`
 6. **IMPORTANT**: Do not repeatedly read the same file multiple times. Once you have sufficient context from a file read, proceed to edit directly. Avoid excessive redundant Read operations on the same file or code snippets.
+
+### Decode cost formulas
+
+`router.roles.decode.costEstimator.expression` defaults to `kvcache_used_ratio`.
+`MIN_COST` selects the lowest finite score after availability and KV capacity filtering,
+with random ties. Variables: `running_size`, `max_running_size`, `kvcache_used`,
+`kvcache_capacity`, `kvcache_used_ratio`. Referencing `max_running_size` requires
+a positive `availability.maxEngineRequests`. `ArithmeticFormula` in the common
+`balance.strategy` package is shared with `PrefillTimeFormula`; Decode excludes `sum`.
+Explicit legacy `KV_USAGE_WEIGHTED_RANDOM` and `RANDOM` selectors retain their behavior.

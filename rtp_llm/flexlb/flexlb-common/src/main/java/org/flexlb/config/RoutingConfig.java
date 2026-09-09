@@ -2,6 +2,9 @@ package org.flexlb.config;
 
 import com.fasterxml.jackson.annotation.JsonSubTypes;
 import com.fasterxml.jackson.annotation.JsonTypeInfo;
+import com.fasterxml.jackson.annotation.JsonIgnore;
+import lombok.AccessLevel;
+import org.flexlb.balance.strategy.DecodeCostFormula;
 import lombok.Getter;
 import lombok.Setter;
 import org.flexlb.dao.route.RoleType;
@@ -168,12 +171,42 @@ public final class RoutingConfig {
     @Getter
     @Setter
     public static final class DecodeConfig {
+        private DecodeCostEstimatorConfig costEstimator = new DecodeCostEstimatorConfig();
         private DecodeAvailabilityConfig availability = new DecodeAvailabilityConfig();
         private KvReservationConfig kvReservation = new KvReservationConfig();
-        private DecodeSelectorConfig selector = new KvUsageWeightedRandomConfig();
+        private DecodeSelectorConfig selector = new MinCostDecodeSelectorConfig();
 
         private LoadBalanceStrategyEnum strategy() {
             return selector instanceof RandomDecodeSelectorConfig ? RANDOM : COST_BASED_DECODE;
+        }
+    }
+
+    @Getter
+    @Setter
+    public static final class DecodeCostEstimatorConfig {
+        private volatile String expression = "kvcache_used_ratio";
+
+        @JsonIgnore
+        @Getter(AccessLevel.NONE)
+        @Setter(AccessLevel.NONE)
+        private volatile DecodeCostFormula compiledCost;
+
+        @JsonIgnore
+        public DecodeCostFormula compiledFormula() {
+            String currentExpression = expression;
+            DecodeCostFormula cached = compiledCost;
+            if (cached != null && cached.expression().equals(currentExpression)) {
+                return cached;
+            }
+            synchronized (this) {
+                currentExpression = expression;
+                cached = compiledCost;
+                if (cached == null || !cached.expression().equals(currentExpression)) {
+                    cached = DecodeCostFormula.parse(currentExpression);
+                    compiledCost = cached;
+                }
+                return cached;
+            }
         }
     }
 
@@ -193,11 +226,15 @@ public final class RoutingConfig {
     @JsonTypeInfo(use = JsonTypeInfo.Id.NAME, property = "type")
     @JsonSubTypes({
             @JsonSubTypes.Type(value = RandomDecodeSelectorConfig.class, name = "RANDOM"),
+            @JsonSubTypes.Type(value = MinCostDecodeSelectorConfig.class, name = "MIN_COST"),
             @JsonSubTypes.Type(value = KvUsageWeightedRandomConfig.class,
                     name = "KV_USAGE_WEIGHTED_RANDOM")
     })
     public sealed interface DecodeSelectorConfig
-            permits RandomDecodeSelectorConfig, KvUsageWeightedRandomConfig {
+            permits RandomDecodeSelectorConfig, MinCostDecodeSelectorConfig, KvUsageWeightedRandomConfig {
+    }
+
+    public static final class MinCostDecodeSelectorConfig implements DecodeSelectorConfig {
     }
 
     public static final class RandomDecodeSelectorConfig implements DecodeSelectorConfig {
