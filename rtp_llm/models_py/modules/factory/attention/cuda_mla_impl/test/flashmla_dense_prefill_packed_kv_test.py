@@ -1,4 +1,7 @@
+import os
+import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Sequence
 from unittest import mock
@@ -19,6 +22,7 @@ from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.test.flashmla_for
     make_op,
     output_and_lse,
 )
+from rtp_llm.utils.k3_model_trace import ModelTrace
 
 
 class FlashMLADensePrefillPackedKVTest(unittest.TestCase):
@@ -161,6 +165,72 @@ class FlashMLADensePrefillPackedKVTest(unittest.TestCase):
                     if op._forward_plan.route is FlashMLAForwardRoute.HYBRID:
                         workspace = op._forward_workspace
                         self.assertLessEqual(workspace.packed_kv.shape[0], capacity)
+
+    def test_trace_retains_context_results_across_workspace_reuse(self) -> None:
+        inputs = self._make_inputs((2, 3, 1), (384, 0, 384))
+        op = make_op(expanded_kv_capacity_tokens=256)
+        op.plan(inputs.params)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with mock.patch.dict(
+                os.environ,
+                {"K3_TRACE_ROOT": str(root), "K3_TRACE_RUN_ID": "mla-workspace"},
+            ), mock.patch.object(
+                op, "_create_kv_b_proj", return_value=DeterministicPackedProjection()
+            ):
+                trace = ModelTrace("mla", directory=root / "frames")
+                try:
+                    first, _ = trace.forward(lambda x: output_and_lse(op, x), inputs)
+                    inputs.compressed_kv.add_(0.25)
+                    second, _ = trace.forward(lambda x: output_and_lse(op, x), inputs)
+                finally:
+                    trace.close()
+
+            frames = sorted((root / "frames").glob("frame-*.pt"))
+            self.assertEqual(len(frames), 2)
+            self.assertFalse(torch.equal(first, second))
+            for path, expected in zip(frames, (first, second), strict=True):
+                frame = torch.load(path, weights_only=True)
+                events = frame["tensors"]
+                outputs = [
+                    event["value"]
+                    for event in events
+                    if event["name"] == "mla.layers.0.prefill.output"
+                ]
+                self.assertEqual(len(outputs), 1)
+                torch.testing.assert_close(outputs[0], expected.cpu(), rtol=0, atol=0)
+                chunks = []
+                for event in events:
+                    prefix = "mla.layers.0.prefill.context."
+                    if not event["name"].startswith(prefix):
+                        continue
+                    key = event["name"][len(prefix) :]
+                    if key == "q":
+                        chunks.append({})
+                    chunks[-1][key] = event["value"]
+                self.assertGreater(len(chunks), 1)
+                for chunk in chunks:
+                    qo, kv = chunk["qo_indptr"], chunk["kv_indptr"]
+                    for i in range(qo.numel() - 1):
+                        q_slice = slice(int(qo[i]), int(qo[i + 1]))
+                        kv_slice = slice(int(kv[i]), int(kv[i + 1]))
+                        q = chunk["q"][q_slice].float()
+                        k = chunk["k"][kv_slice].float()
+                        v = chunk["v"][kv_slice].float()
+                        scores = torch.einsum("qhd,khd->hqk", q, k) * (192**-0.5)
+                        reference = torch.einsum("hqk,khd->qhd", scores.softmax(-1), v)
+                        torch.testing.assert_close(
+                            chunk["result.output"][q_slice].float(),
+                            reference,
+                            rtol=2e-2,
+                            atol=1e-3,
+                        )
+                        torch.testing.assert_close(
+                            chunk["result.lse"][q_slice],
+                            scores.logsumexp(-1).T,
+                            rtol=2e-4,
+                            atol=2e-4,
+                        )
 
     def test_workspace_reuse_and_replan_preserve_results(self) -> None:
         inputs = self._make_inputs((2, 3, 1), (384, 0, 384))
