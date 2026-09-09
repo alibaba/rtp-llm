@@ -11,6 +11,7 @@ from rtp_llm.models_py.modules.factory.attention.attn_factory import MlaImplBase
 from rtp_llm.models_py.modules.hybrid.indexer import Indexer
 from rtp_llm.ops import AttentionConfigs, HWKernelConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import LayerKVCache
+from rtp_llm.utils.k3_model_trace import record_module
 from rtp_llm.utils.model_weight import W
 
 
@@ -172,11 +173,13 @@ class MlaAttention(nn.Module):
         fmha_impl: MlaImplBase,
         kv_cache: Optional[LayerKVCache] = None,
     ) -> torch.Tensor:
+        record_module(self, "attention_input", hidden_states)
         output_gate = None
         q_c = None
         if self.q_lora_rank > 0:
             with self._profile_stage("q_kv_down_projection", hidden_states):
                 fused_qkv, output_gate = self._project_qkv_a_input(hidden_states)
+            record_module(self, "projection.qkv_latent", fused_qkv)
             kv_offset = self.q_lora_rank
             q, compressed_kv = torch.split(
                 fused_qkv,
@@ -192,6 +195,7 @@ class MlaAttention(nn.Module):
                     if getattr(self, "_perf_accepts_strided_latent", False)
                     else q.contiguous()
                 )
+            record_module(self, "latent_q_normalized", q_c)
             with self._profile_stage("q_up_projection_local_heads", q_c):
                 q = self.q_b_proj(q_c)
         else:
@@ -219,6 +223,10 @@ class MlaAttention(nn.Module):
                 if getattr(self, "_perf_accepts_strided_latent", False)
                 else compressed_kv.contiguous()
             )
+        record_module(self, "latent_kv_normalized", compressed_kv)
+        record_module(self, "attention.q", q_view)
+        record_module(self, "attention.latent_kv", compressed_kv)
+        record_module(self, "attention.k_suffix", k_pe)
 
         with self._profile_stage("sparse_indexer_or_dense_noop", q_view):
             topk_indices = self._run_sparse_indexer(
@@ -237,7 +245,12 @@ class MlaAttention(nn.Module):
                 dtype=q.dtype,
                 device=q.device,
             )
+        record_module(self, "attention_before_gate", attn_output)
+        record_module(self, "raw_output_gate", output_gate)
         with self._profile_stage("sigmoid_output_gate", attn_output):
             attn_output = self._apply_output_gate(attn_output, output_gate)
+        record_module(self, "attention_after_gate", attn_output)
         with self._profile_stage("o_projection_then_token_reduce_scatter", attn_output):
-            return self._project_output(attn_output)
+            output = self._project_output(attn_output)
+        record_module(self, "output_projection", output)
+        return output
