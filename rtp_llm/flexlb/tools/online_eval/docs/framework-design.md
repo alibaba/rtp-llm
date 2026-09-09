@@ -135,7 +135,7 @@ flowchart TD
 | single-nonbatch | single | non_batch |
 | window-nonbatch | fixed_window | non_batch |
 
-`profiles` 必须显式配置；variant 的列表覆盖根列表。Python 不维护重复的 profile 白名单，实际能力匹配由编译器验证。
+`profiles` 必须显式配置；根列表约束整份配置的范围，variant 可从中选择或省略以继承。未设根列表时，各 variant 独立声明。Python 不维护重复的用例 profile 白名单，实际能力匹配由编译器验证。
 环境是根 `environment` 加该行 `environment`；`config_overrides` 在这一层按字段合并。
 用例参数和参数约束分别由根与变体的 `parameters`、`parameter_schema` 递归合并；列表和标量整体替换，每个 builder 得到独立副本。
 必填参数缺失、参数越界或能力不匹配在启动前失败。共享配置节可以包含其他变体使用的数据。

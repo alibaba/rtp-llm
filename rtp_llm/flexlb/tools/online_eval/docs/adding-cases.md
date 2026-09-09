@@ -92,7 +92,7 @@ variants:
 `case.params("path", dynamic)` 把 YAML 数据与 Python 运行结果引用递归合并；
 动态引用由 Python 绑定，不能在 YAML 中填写 `$ref`。
 
-`profiles` 必须在根或变体行给出，变体行覆盖根列表；没有 Python 隐藏的 profile 列表。
+`profiles` 必须在根或变体行给出。根列表约束整份配置的运行范围；变体行可从中选择，省略时继承根列表。没有根列表时，各变体独立声明；没有 Python 隐藏的用例 profile 列表。
 元数据、能力要求和 finding 标记也在 YAML 的 `metadata` 中配置，可按变体覆盖。
 实际能力仍由编译器验证，例如需要 batch 接口的流程不能在 non_batch 环境运行。
 
