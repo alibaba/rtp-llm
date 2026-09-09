@@ -126,7 +126,8 @@ protected:
     SpecLogitsVerifyRunner::LaunchResult
          buildSpecLogitsVerifyInline(const std::list<GenerateStreamPtr>& streams,
                                      const torch::Tensor&                draft_tokens,
-                                     std::shared_ptr<torch::Event>       draft_tokens_ready_event);
+                                     std::shared_ptr<torch::Event>       draft_tokens_ready_event,
+                                     std::shared_ptr<SpecLogitsVerifyRunner::DraftTokensTransfer> draft_transfer = nullptr);
     void collectDecodeMetrics(const StreamGroups&                          stream_groups,
                               torch::Event&                                accept_len_ready_event,
                               const speculative::SpeculativeSamplerOutput& speculative_sampler_output,
@@ -186,6 +187,10 @@ protected:
 
     bool useAsyncPrepare() const;
 
+    // Pre-enqueue SpecLogits pack/D2H before target verify. Defaults to HY4
+    // CMP; RTP_LLM_MTP_EARLY_SPEC_LOGITS_D2H independently overrides it.
+    bool useEarlySpecLogitsD2H() const;
+
     // Opt-in gate to skip the broad sync at decodeStep start.
     // Device state, epoch-guarded clears, and single-slotted workers preserve
     // correctness while bookkeeping overlaps the next step.
@@ -234,6 +239,7 @@ private:
     size_t   hidden_size_;
     size_t   propose_step_;
     size_t   draft_vocab_size_;
+    bool     early_spec_logits_d2h_enabled_ = false;
     bool     mtp_indexer_share_enabled_ = false;
     // MegaMoE symmetric buffers form a peer collective outside a single TP
     // group. Seed/reuse graph selection must therefore be identical across

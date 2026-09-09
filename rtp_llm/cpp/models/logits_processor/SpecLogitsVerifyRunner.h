@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <memory>
 #include <vector>
 
@@ -10,6 +11,12 @@
 namespace rtp_llm {
 
 class SpecLogitsVerifyRunner {
+    struct DraftTokenSlot {
+        torch::Tensor storage;
+        // Set only after the worker's existing D2H wait has succeeded.
+        std::atomic<bool> copy_completed{false};
+    };
+
 public:
     struct ActiveProcessor {
         SpecLogitsProcessorPtr processor;
@@ -18,6 +25,22 @@ public:
         uint64_t               stream_id       = 0;
         int64_t                base_seq_len    = 0;
         int64_t                base_output_len = 0;
+    };
+
+    struct DraftTokensTransfer {
+        // Per-launch ownership: no worker or later decode round may overwrite
+        // this pinned destination while the asynchronous D2H is in flight.
+        torch::Tensor                 cpu_tokens;     // contiguous int32 [B, P]
+        torch::Tensor                 source_tokens;  // original producer storage
+        torch::Tensor                 packed_tokens;  // contiguous int32 D2H source
+        std::shared_ptr<torch::Event> ready_event;    // absent for synchronous CPU input
+        size_t                       total_streams = 0;
+        int                          propose_step  = 0;
+
+    private:
+        friend class SpecLogitsVerifyRunner;
+        // The lease lasts until all owners of this transfer have released it.
+        std::shared_ptr<DraftTokenSlot> slot;
     };
 
     struct LaunchTask {
@@ -29,6 +52,7 @@ public:
         // Shape [B, P], dtype int32/int64, CPU or CUDA.
         torch::Tensor                 draft_tokens;
         std::shared_ptr<torch::Event> draft_tokens_ready_event;
+        std::shared_ptr<DraftTokensTransfer> draft_transfer;
     };
 
     struct LaunchResult {
@@ -55,9 +79,13 @@ public:
 
     SpecLogitsVerifyRunner();
 
+    // Caller-side submission only: does not inspect processors or wait for GPU
+    // completion. The worker later consumes the owned transfer in buildInline.
+    void enqueueDraftTokensToCpu(LaunchTask& task);
     LaunchResult buildInline(const LaunchTask& task);
 
 private:
+    std::shared_ptr<DraftTokenSlot> acquireDraftTokenSlot(int64_t elements);
     void ensureBuffersFit(size_t total_streams,
                           size_t active_streams,
                           int    propose_step,
@@ -82,6 +110,10 @@ private:
     torch::Tensor merged_bitmask_cpu_;
     torch::Tensor spec_cap_cpu_;
     std::vector<CpuArtifactSlot> cpu_artifact_slots_;
+    // Accessed only by enqueue's producer thread, never by the worker.
+    // Two cached slots cover producer/consumer overlap; additional live
+    // transfers fall back to independent allocations instead of growing a pool.
+    std::vector<std::shared_ptr<DraftTokenSlot>> draft_token_slots_;
 };
 
 }  // namespace rtp_llm

@@ -1,6 +1,8 @@
 #include <algorithm>
 #include <memory>
 #include <chrono>
+#include <atomic>
+#include <future>
 #include "torch/all.h"
 #include "gtest/gtest.h"
 
@@ -8,6 +10,7 @@
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/models/logits_processor/BaseLogitsProcessor.h"
 #include "rtp_llm/cpp/models/logits_processor/SpecLogitsProcessor.h"
+#include "rtp_llm/cpp/normal_engine/speculative/Hy4CmpConfig.h"
 
 #define private public
 #include "rtp_llm/cpp/normal_engine/speculative/MtpBatchStreamProcessor.h"
@@ -30,6 +33,26 @@ namespace rtp_llm {
 
 using namespace std;
 namespace spec = speculative;
+
+TEST(Hy4CmpConfigTest, BooleanAliasesMatchPython) {
+    EXPECT_TRUE(spec::parseHy4CmpBool("CMP", nullptr, true));
+    EXPECT_FALSE(spec::parseHy4CmpBool("CMP", nullptr, false));
+    for (const char* value : {"1", "true", "yes", "on", " TRUE ", "\tOn\n"}) {
+        EXPECT_TRUE(spec::parseHy4CmpBool("CMP", value, false));
+    }
+    for (const char* value : {"0", "false", "no", "off", "", "  ", " OFF "}) {
+        EXPECT_FALSE(spec::parseHy4CmpBool("CMP", value, true));
+    }
+    EXPECT_THROW(spec::parseHy4CmpBool("CMP", "invalid", true), std::invalid_argument);
+}
+
+TEST(Hy4CmpConfigTest, EarlyD2HOverrideDoesNotDependOnCmp) {
+    EXPECT_TRUE(spec::resolveHy4EarlyD2H(true, nullptr));
+    EXPECT_FALSE(spec::resolveHy4EarlyD2H(false, nullptr));
+    EXPECT_TRUE(spec::resolveHy4EarlyD2H(false, "on"));
+    EXPECT_FALSE(spec::resolveHy4EarlyD2H(true, "off"));
+    EXPECT_THROW(spec::resolveHy4EarlyD2H(true, "auto"), std::invalid_argument);
+}
 
 struct MtpExecutorTestConfig {
     size_t max_seq_len         = 2048;
@@ -270,8 +293,11 @@ private:
 
 class RejectDraftTokenSpecProcessor: public BaseLogitsProcessor, public SpecLogitsProcessor {
 public:
-    explicit RejectDraftTokenSpecProcessor(int32_t rejected_token, int64_t accepted_token_len):
-        rejected_token_(rejected_token), accepted_token_len_(accepted_token_len) {}
+    explicit RejectDraftTokenSpecProcessor(int32_t rejected_token,
+                                          int64_t accepted_token_len,
+                                          std::function<void()> verify_callback = {}):
+        rejected_token_(rejected_token), accepted_token_len_(accepted_token_len),
+        verify_callback_(std::move(verify_callback)) {}
 
     void process(const SamplerInputs& inputs, size_t start_idx, size_t finish_idx) override {
         inputs.logits.narrow(0, start_idx, finish_idx - start_idx).fill_(BaseLogitsProcessor::neg_inf);
@@ -294,6 +320,9 @@ public:
     }
 
     int tryAcceptAndFillBitmask(const SpecLogitsProcessorRequest& request) override {
+        if (verify_callback_) {
+            verify_callback_();
+        }
         if (request.propose_step <= 0 || request.bitmask_cpu_out == nullptr) {
             return request.propose_step;
         }
@@ -313,6 +342,7 @@ public:
 private:
     int32_t rejected_token_;
     int64_t accepted_token_len_;
+    std::function<void()> verify_callback_;
 };
 
 struct MtpExecutorComponents {
@@ -1309,14 +1339,30 @@ TEST_F(MtpExecutorTest, testSingleBatchDecode) {
     checkOutput(stream1, {0, 1, 2, 3, 2, 0}, {0, 1}, {0.0, 1.0, 0.0, 0.0}, {0.3, 0.33});
 }
 
-TEST_F(MtpExecutorTest, testDecodeSpecLogitsCapReplacesInvalidDraftWithTargetToken) {
+class MtpSpecLogitsSchedulingTest: public MtpExecutorTest, public testing::WithParamInterface<int> {};
+
+// 0: legacy launch, 1: early launch, 2: target throws with an early worker active.
+TEST_P(MtpSpecLogitsSchedulingTest, DecodeCapAndWorkerLifetime) {
     size_t propose_step = 2;
     size_t vocab_size   = 4;
+    const bool early_worker = GetParam() != 0;
+    const bool target_throws = GetParam() == 2;
+#if !USING_CUDA
+    if (early_worker) {
+        GTEST_SKIP() << "Early SpecLogits transfer requires CUDA";
+    }
+#endif
+    auto worker_started = std::make_shared<std::promise<void>>();
+    auto worker_started_future = worker_started->get_future();
+    auto target_entered = std::make_shared<std::promise<void>>();
+    auto target_entered_future = target_entered->get_future().share();
+    auto verify_calls = std::make_shared<std::atomic<int>>(0);
 
     MtpExecutorTestConfig test_config;
     test_config.gen_num_per_cycle   = propose_step;
     test_config.vocab_size_override = vocab_size;
     auto components                 = createMtpExecutorComponents(test_config);
+    components.executor->early_spec_logits_d2h_enabled_ = early_worker;
 
     auto                 stream_new_tokens        = torch::tensor({{2}}, torch::kInt32);
     auto                 stream_hidden_states     = torch::tensor({{0.03f, 0.04f}});
@@ -1326,7 +1372,27 @@ TEST_F(MtpExecutorTest, testDecodeSpecLogitsCapReplacesInvalidDraftWithTargetTok
     GenerateStreamPtr stream = createDecodeStream(
         components.model_config, components.runtime_config, components.resource_context, {0, 1}, spec_update_info);
     stream->logits_processor_list_.push_back(
-        std::make_shared<RejectDraftTokenSpecProcessor>(3, stream->outputTokenLen()));
+        std::make_shared<RejectDraftTokenSpecProcessor>(
+            3, stream->outputTokenLen(),
+            [worker_started, target_entered_future, verify_calls, target_throws]() {
+                worker_started->set_value();
+                if (target_throws) {
+                    EXPECT_EQ(target_entered_future.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+                }
+                ++*verify_calls;
+            }));
+    components.fake_target_model->setForwardCallback([&]() {
+        if (early_worker) {
+            // A worker submitted only after target forward cannot satisfy this.
+            EXPECT_EQ(worker_started_future.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+        } else {
+            EXPECT_EQ(worker_started_future.wait_for(std::chrono::seconds(0)), std::future_status::timeout);
+        }
+        target_entered->set_value();
+        if (target_throws) {
+            throw std::runtime_error("injected target forward failure");
+        }
+    });
 
     auto draft_input_1               = GptModelInputs{};
     auto draft_output_1              = GptModelOutputs{};
@@ -1394,11 +1460,24 @@ TEST_F(MtpExecutorTest, testDecodeSpecLogitsCapReplacesInvalidDraftWithTargetTok
                     std::move(components.fake_speculative_sampler),
                     std::move(components.fake_sampler));
 
+    if (target_throws) {
+        try {
+            components.executor->process({stream});
+            FAIL() << "Expected the original target exception";
+        } catch (const std::runtime_error& e) {
+            EXPECT_STREQ(e.what(), "injected target forward failure");
+        }
+        EXPECT_EQ(verify_calls->load(), 1);
+        return;
+    }
     auto status = components.executor->process({stream});
     ASSERT_TRUE(status.ok());
 
+    EXPECT_EQ(verify_calls->load(), 1);
     checkOutput(stream, {0, 1, 2, 1}, {1, 2}, {0.0, 0.0, 1.0, 0.0}, {0.21, 0.22});
 }
+
+INSTANTIATE_TEST_SUITE_P(LaunchOrder, MtpSpecLogitsSchedulingTest, testing::Values(0, 1, 2));
 
 TEST_F(MtpExecutorTest, testDecodeOneStepSpecLogitsCapReplacesInvalidDraftWithTargetToken) {
     size_t propose_step = 1;

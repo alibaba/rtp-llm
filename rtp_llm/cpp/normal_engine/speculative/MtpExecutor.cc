@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/normal_engine/speculative/MtpExecutor.h"
+#include "rtp_llm/cpp/normal_engine/speculative/Hy4CmpConfig.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/engine_base/EngineBase.h"
@@ -93,6 +94,11 @@ const CachedEnvFlag kDropBroadSyncFlag = cacheEnvFlag("RTP_LLM_DROP_BROAD_SYNC",
 const CachedEnvFlag kAsyncPrepareFlag  = cacheEnvFlag("RTP_LLM_MTP_ASYNC_PREPARE", "async-prepare", "enabled");
 const CachedEnvFlag kMtpIndexerShareFlag =
     cacheEnvFlag("RTP_LLM_ENABLE_MTP_INDEXER_SHARE", "mtp-indexer-share", "enabled");
+const CachedEnvFlag kHy4CmpFlag = []() {
+    const char* value = std::getenv("RTP_LLM_HY4_CMP");
+    return CachedEnvFlag{"RTP_LLM_HY4_CMP", "hy4-cmp", "enabled",
+                         speculative::parseHy4CmpBool("RTP_LLM_HY4_CMP", value, true), value ? value : "(unset)"};
+}();
 const bool kDebugTargetVerifyInputEnabled  = cacheDebugFlag("RTP_LLM_DEBUG_TARGET_VERIFY_INPUT");
 const bool kDebugCompareSpPrefillEnabled   = cacheDebugFlag("RTP_LLM_COMPARE_SP_PREFILL");
 const bool kDebugMtpPrefillDataEnabled     = cacheDebugFlag("RTP_LLM_DEBUG_MTP_PREFILL_DATA");
@@ -1305,6 +1311,14 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
 
     const auto& draft_engine_params    = propose_params->getEngineInitParams();
     const auto& draft_model_config     = draft_engine_params.model_config_;
+    const bool hy4_cmp_enabled = kHy4CmpFlag.on
+                                && (params.model_config_.model_type == "hy_v4"
+                                    || draft_model_config.model_type == "hy_v4_mtp");
+    const char* early_d2h_override = std::getenv("RTP_LLM_MTP_EARLY_SPEC_LOGITS_D2H");
+    early_spec_logits_d2h_enabled_ = speculative::resolveHy4EarlyD2H(hy4_cmp_enabled, early_d2h_override);
+    RTP_LLM_LOG_INFO("[mtp-early-spec-logits-d2h] override=%s hy4_cmp=%d resolved=%d",
+                     early_d2h_override ? early_d2h_override : "(inherit)",
+                     static_cast<int>(hy4_cmp_enabled), static_cast<int>(early_spec_logits_d2h_enabled_));
     const bool  has_python_draft_model = !params.py_sp_model.is_none();
     const bool  python_draft_share_capable =
         kMtpIndexerShareFlag.on && has_python_draft_model && pythonDraftSupportsMtpIndexerShare(params.py_sp_model);
@@ -2063,9 +2077,25 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     // guards all_probs cloning. They stay null when stream-async is off.
     std::shared_ptr<torch::Event> rejection_event;
     std::shared_ptr<torch::Event> draft_event;
-    bool                          prev_bookkeeping_synced_for_spec_logits = false;
     bool                          spec_logits_async_launched              = false;
     bool                          spec_logits_processor_present           = false;
+
+    // An early worker may still be using processor state if target forward
+    // throws. Drain it before unwinding this step, preserving the first error.
+    auto drain_spec_logits = [&](AsyncRunner* runner) noexcept {
+        if (!spec_logits_async_launched) {
+            return;
+        }
+        try {
+            runner->sync(cuda_graph::graphGetCurrentStream());
+        } catch (const std::exception& e) {
+            RTP_LLM_LOG_ERROR("spec logits worker also failed while unwinding decode: %s", e.what());
+        } catch (...) {
+            RTP_LLM_LOG_ERROR("spec logits worker also failed while unwinding decode");
+        }
+    };
+    std::unique_ptr<AsyncRunner, decltype(drain_spec_logits)> spec_logits_guard(
+        &spec_logits_verify_async_runner_, drain_spec_logits);
 
     // REBASE CONFLICT CONTEXT(518707c73): wait/order prior async bookkeeping
     // before gathering host-derived state, then keep the new base grpc MTP
@@ -2157,11 +2187,53 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
 
     auto draft_tokens_ready_event = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
     draft_tokens_ready_event->record(cuda_graph::graphGetCurrentStream());
+    std::shared_ptr<SpecLogitsVerifyRunner::DraftTokensTransfer> early_draft_transfer;
+
+    auto launch_spec_logits = [&]() {
+        RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(launch_spec_logits_verify_async)");
+        // The entry bookkeeping wait has already published host stream state.
+        // No new bookkeeping task is launched before rejection sampling.
+        auto spec_streams = streams;
+        auto draft_tokens = draft_token_ids_t;
+        spec_logits_verify_async_runner_.launch([this,
+                                                 spec_streams = std::move(spec_streams),
+                                                 draft_tokens,
+                                                 draft_tokens_ready_event,
+                                                 early_draft_transfer = std::move(early_draft_transfer),
+                                                 spec_logits_result]() mutable {
+            RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(spec_logits_verify_async_worker)");
+            *spec_logits_result = buildSpecLogitsVerifyInline(spec_streams,
+                                                             draft_tokens,
+                                                             std::move(draft_tokens_ready_event),
+                                                             std::move(early_draft_transfer));
+        });
+        spec_logits_async_launched = true;
+    };
 
     {
         if (shouldSkipFakeStreamForStop(model_input, "target verify forward")) {
             releaseAllModelBuffers();
             return absl::OkStatus();
+        }
+        if (spec_logits_processor_present && propose_step_ > 1 && draft_token_ids_t.defined()
+            && draft_token_ids_t.is_cuda() && useEarlySpecLogitsD2H()) {
+            // Queue the actual copy before the multi-stream target graph.
+            // Do not inspect mutable processor state or wait for bookkeeping
+            // here: only the immutable batch layout and draft tensor are needed.
+            RTP_LLM_CHECK_WITH_INFO(draft_token_ids_t.dim() == 2
+                                       && draft_token_ids_t.size(0) == static_cast<int64_t>(streams.size())
+                                       && draft_token_ids_t.size(1) == static_cast<int64_t>(propose_step_ + 1),
+                                   "MTP early spec D2H expects one [P+1] draft row per stream");
+            SpecLogitsVerifyRunner::LaunchTask transfer_task;
+            transfer_task.total_streams            = streams.size();
+            transfer_task.propose_step             = static_cast<int>(propose_step_);
+            transfer_task.draft_tokens             = draft_token_ids_t;
+            transfer_task.draft_tokens_ready_event = draft_tokens_ready_event;
+            spec_logits_verify_runner_->enqueueDraftTokensToCpu(transfer_task);
+            early_draft_transfer = std::move(transfer_task.draft_transfer);
+            // D2H is already queued ahead of target. Start its CPU consumer
+            // now as well, rather than after the potentially long graph launch.
+            launch_spec_logits();
         }
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
         model_output          = runTargetVerifyForward(model_input, stream_groups);
@@ -2195,47 +2267,13 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         }
     }
 
-    if (spec_logits_processor_present && propose_step_ > 1 && draft_token_ids_t.defined()) {
-        RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(launch_spec_logits_verify_async)");
-        if (useStreamAsync() && useDropBroadSync()) {
-            RTP_LLM_PROFILE_SCOPE_DYNAMIC(
-                "executor.mtp.decode_step(wait_prev_bookkeeping_pre_spec_logits,stream_count=%zu)", streams.size());
-            spec_bookkeeping_runner_.sync(cuda_graph::graphGetCurrentStream());
-            stream_groups                           = StreamGroups(streams);
-            prev_bookkeeping_synced_for_spec_logits = true;
-        }
-
-        auto spec_streams = streams;
-        auto draft_tokens = draft_token_ids_t;
-        spec_logits_verify_async_runner_.launch([this,
-                                                 spec_streams = std::move(spec_streams),
-                                                 draft_tokens,
-                                                 draft_tokens_ready_event,
-                                                 spec_logits_result]() mutable {
-            RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(spec_logits_verify_async_worker)");
-            try {
-                *spec_logits_result =
-                    buildSpecLogitsVerifyInline(spec_streams, draft_tokens, std::move(draft_tokens_ready_event));
-            } catch (const std::exception& e) {
-                RTP_LLM_LOG_ERROR("spec logits async worker failed: %s", e.what());
-                throw;
-            } catch (...) {
-                RTP_LLM_LOG_ERROR("spec logits async worker failed with unknown exception");
-                throw;
-            }
-        });
-        spec_logits_async_launched = true;
+    if (spec_logits_processor_present && propose_step_ > 1 && draft_token_ids_t.defined()
+        && !spec_logits_async_launched) {
+        launch_spec_logits();
     }
 
     if (spec_logits_processor_present && !spec_logits_async_launched) {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(spec_logits_verify_inline)");
-        if (useStreamAsync() && useDropBroadSync()) {
-            RTP_LLM_PROFILE_SCOPE_DYNAMIC(
-                "executor.mtp.decode_step(wait_prev_bookkeeping_pre_spec_logits,stream_count=%zu)", streams.size());
-            spec_bookkeeping_runner_.sync(cuda_graph::graphGetCurrentStream());
-            stream_groups                           = StreamGroups(streams);
-            prev_bookkeeping_synced_for_spec_logits = true;
-        }
         std::shared_ptr<torch::Event> draft_tokens_ready_event;
         if (draft_sampler_output.token_ids.defined() && draft_sampler_output.token_ids.is_cuda()) {
             draft_tokens_ready_event = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
@@ -2247,6 +2285,9 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
 
     if (spec_logits_async_launched) {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(wait_spec_logits_verify_async)");
+        // sync waits for task completion even when it rethrows a worker error;
+        // the unwinding guard must not wait on the same task a second time.
+        spec_logits_async_launched = false;
         spec_logits_verify_async_runner_.sync(cuda_graph::graphGetCurrentStream());
     }
     if (spec_logits_processor_present && !spec_logits_result->has_active_processor
@@ -2273,18 +2314,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
             speculative_sampler_output.accept_tokens = torch::zeros(
                 {1, (int64_t)(propose_step_ + 1)}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
         } else {
-            // gatherSpecSamplerInput reads host stream state updated by the previous
-            // bookkeeping worker. DROP_BROAD_SYNC therefore needs this narrow sync
-            // unless the broad sync at decodeStep start already waited.
-            if (useStreamAsync() && useDropBroadSync() && !prev_bookkeeping_synced_for_spec_logits) {
-                RTP_LLM_PROFILE_SCOPE_DYNAMIC(
-                    "executor.mtp.decode_step(wait_prev_bookkeeping_pre_sampler,stream_count=%zu)", streams.size());
-                spec_bookkeeping_runner_.sync(cuda_graph::graphGetCurrentStream());
-                // Rebuild after waiting so cached maxSeqLen/batch sizes reflect
-                // the host stream state that sampler input is about to read.
-                stream_groups = StreamGroups(streams);
-            }
-
+            // StreamGroups was constructed after the entry bookkeeping wait.
             // target model sample
             CHECK_AND_RETURN_REF(sampler_input,
                                  batch_stream_processor_->gatherSpecSamplerInput(
@@ -2594,17 +2624,15 @@ void MtpExecutor::launchDraftPrefillPrepareAsync(const GptModelInputs& model_inp
 // replace broad cudaStreamSynchronize with targeted bookkeeping stream/event
 // ordering. Keep it after the new base async prepare helpers.
 void MtpExecutor::waitPreviousBookkeepingAndKvSwaps(const std::list<GenerateStreamPtr>& streams) {
-    // Cap outstanding stream-async bookkeeping to one step unless DROP_BROAD_SYNC
-    // is on. Device state handles host staleness; swap events handle linear KV.
+    // Both AsyncRunner sync APIs wait for the worker to publish the current
+    // event generation and host state. Neither synchronizes the GPU here.
     if (useStreamAsync() && !useDropBroadSync()) {
         RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.mtp.decode_step(wait_prev_bookkeeping,stream_count=%zu)",
                                       streams.size());
         spec_bookkeeping_runner_.sync(cuda_graph::graphGetCurrentStream());
     } else if (useStreamAsync()) {
-        // DROP_BROAD_SYNC: skip CPU wait but still ensure GPU stream ordering.
-        // The bookkeeping runner may have launched GPU kernels (D2H staging,
-        // block table updates) on its own stream; the compute stream must wait
-        // for those before reading the same buffers in forward().
+        // streamWait also joins CPU bookkeeping before enqueueing the GPU
+        // dependency; it is not safe to snapshot StreamGroups before this.
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(stream_wait_prev_bookkeeping)");
         spec_bookkeeping_runner_.streamWait(cuda_graph::graphGetCurrentStream());
     }
@@ -2675,13 +2703,15 @@ GptModelOutputs MtpExecutor::runTargetVerifyForward(GptModelInputs& model_input,
 SpecLogitsVerifyRunner::LaunchResult
 MtpExecutor::buildSpecLogitsVerifyInline(const std::list<GenerateStreamPtr>& streams,
                                          const torch::Tensor&                draft_tokens,
-                                         std::shared_ptr<torch::Event>       draft_tokens_ready_event) {
+                                         std::shared_ptr<torch::Event>       draft_tokens_ready_event,
+                                         std::shared_ptr<SpecLogitsVerifyRunner::DraftTokensTransfer> draft_transfer) {
     SpecLogitsVerifyRunner::LaunchTask task;
     task.total_streams            = streams.size();
     task.propose_step             = static_cast<int>(propose_step_);
     task.vocab_size               = vocab_size_;
     task.draft_tokens             = draft_tokens;
     task.draft_tokens_ready_event = std::move(draft_tokens_ready_event);
+    task.draft_transfer           = std::move(draft_transfer);
 
     size_t stream_idx = 0;
     for (const auto& stream : streams) {
@@ -3542,6 +3572,20 @@ bool MtpExecutor::useAsyncPrepare() const {
     }();
     (void)logged;
     return kAsyncPrepareFlag.on;
+}
+
+bool MtpExecutor::useEarlySpecLogitsD2H() const {
+#if USING_CUDA
+    static const bool logged = []() {
+        logCachedEnvFlag(kHy4CmpFlag);
+        return true;
+    }();
+    (void)logged;
+    return early_spec_logits_d2h_enabled_;
+#else
+    // The producer-side allocator contract is CUDA-only for now.
+    return false;
+#endif
 }
 
 bool MtpExecutor::useDropBroadSync() const {
