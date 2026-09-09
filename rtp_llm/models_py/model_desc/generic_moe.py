@@ -32,6 +32,10 @@ from rtp_llm.models_py.modules.hybrid.glm5_cmp import (
     resolve_glm5_cmp_enabled,
     should_enable_glm5_cmp,
 )
+from rtp_llm.models_py.modules.hybrid.hy4_cmp import (
+    Hy4Cmp,
+    resolve_hy4_cmp_enabled,
+)
 from rtp_llm.ops import HWKernelConfig, MoeConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import LayerKVCache, PyModelInputs, PyModelOutputs
 from rtp_llm.utils.dsa_indexing import dsa_layer_has_indexer, dsa_layer_skips_topk
@@ -60,8 +64,6 @@ class _FusedSharedExpertSentinel(nn.Module):
         raise RuntimeError("shared expert is fused into MegaMoE")
 
 
-
-
 class GenericMoeLayer(nn.Module):
     """Generic MoE layer supporting both Qwen3 and internal model."""
 
@@ -77,6 +79,7 @@ class GenericMoeLayer(nn.Module):
         layer_idx: int = 0,
     ):
         super().__init__()
+        self.layer_idx = int(layer_idx)
         self.config = config
         self.parallelism_config = parallelism_config
 
@@ -291,11 +294,33 @@ class GenericMoeLayer(nn.Module):
                     f"{self.correction_bias.numel()} for {config.expert_num} experts"
                 )
 
+        routed_prefix = (
+            "model.mtp_layers.0.mlp.experts"
+            if config.model_type == "hy_v4_mtp"
+            else f"model.layers.{self.layer_idx}.mlp.experts"
+        )
+        resolve_quant_algo = getattr(quant_config, "resolve_module_quant_algo", None)
+        routed_quant_algo = (
+            resolve_quant_algo(routed_prefix) if callable(resolve_quant_algo) else None
+        )
+        self._hy4_mega_moe_prepack = bool(
+            self._hy4_fp32_router
+            and routed_quant_algo == "MXFP4"
+            and moe_config.moe_strategy == "mega_moe"
+            and self.shared_expert is not None
+            and getattr(self.shared_expert, "accepts_mxfp8_input", False)
+            and self.shared_expert_gate is None
+            and self.ffn_tp_size == 1
+            and callable(getattr(self.fused_moe, "prepacked_input_views", None))
+            and callable(getattr(self.fused_moe, "forward_prepacked", None))
+        )
+
     def clone_for_cuda_graph(self) -> "GenericMoeLayer":
         clone = object.__new__(type(self))
         nn.Module.__init__(clone)
 
         clone.config = self.config
+        clone.layer_idx = self.layer_idx
         clone.parallelism_config = self.parallelism_config
         clone.hidden_dim = self.hidden_dim
         clone.ffn_dim = self.ffn_dim
@@ -322,21 +347,83 @@ class GenericMoeLayer(nn.Module):
         clone.sigmoid_gate_scale_add = self.sigmoid_gate_scale_add
         clone.correction_bias = self.correction_bias
         clone._use_mega_moe_fused_shared = self._use_mega_moe_fused_shared
+        clone._hy4_mega_moe_prepack = self._hy4_mega_moe_prepack
         return clone
+
+    def hy4_prepacked_input_views(self, rows: int) -> tuple[
+        Optional[torch.Tensor],
+        Optional[torch.Tensor],
+        Optional[torch.Tensor],
+        Optional[torch.Tensor],
+    ]:
+        """Return validated plain-MegaMoE views for the HY4 iHC producer."""
+        if not self._hy4_mega_moe_prepack:
+            return None, None, None, None
+        try:
+            views = self.fused_moe.prepacked_input_views(int(rows))
+        except (AttributeError, TypeError, ValueError, RuntimeError):
+            return None, None, None, None
+        if not isinstance(views, (tuple, list)) or len(views) != 4:
+            return None, None, None, None
+        activation, scale, topk_ids, topk_weights = views
+        if not all(isinstance(value, torch.Tensor) for value in views):
+            return None, None, None, None
+        expected = (
+            (activation, torch.float8_e4m3fn, (rows, self.hidden_dim)),
+            (scale, torch.int32, (rows, self.hidden_dim // 128)),
+            (topk_ids, self.fused_moe.topk_ids_dtype, (rows, self.top_k)),
+            (topk_weights, torch.float32, (rows, self.top_k)),
+        )
+        if any(
+            value.dtype != dtype
+            or tuple(value.shape) != shape
+            or not value.is_contiguous()
+            or value.device != activation.device
+            for value, dtype, shape in expected
+        ):
+            return None, None, None, None
+        return activation, scale, topk_ids, topk_weights
+
+    def prepare_hy4_prepacked_router(
+        self,
+        hidden_states: torch.Tensor,
+        topk_ids: torch.Tensor,
+        topk_weights: torch.Tensor,
+    ) -> None:
+        """Write HY4 FP32 routing results directly into MegaMoE buffers."""
+        if not self._hy4_mega_moe_prepack:
+            raise RuntimeError("HY4 MegaMoE prepack is unsupported")
+        router_logits = torch.matmul(hidden_states.float(), self.gate_weight)
+        group_topk = GroupTopK()
+        group_topk(
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            scores=router_logits,
+            correction_bias=self.correction_bias,
+            n_group=self.config.moe_n_group,
+            topk_group=self.config.moe_topk_group,
+            topk=self.top_k,
+            renormalize=self.config.has_moe_norm,
+            routed_scaling_factor=self.config.routed_scaling_factor,
+        )
 
     def forward_prepacked(
         self,
         hidden_states: torch.Tensor,
         topk_ids: torch.Tensor,
         topk_weights: torch.Tensor,
+        x_fp8: Optional[torch.Tensor] = None,
+        x_scale: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        """Consume router/quant resources already prepared by GLM5 CMP."""
+        """Consume router/quant resources prepared by GLM5 or HY4 CMP."""
         if self.fake_balance_expert is not None:
             self.fake_balance_expert(topk_ids, topk_weights)
         experts_output = self.fused_moe.forward_prepacked(hidden_states)
         if self._use_mega_moe_fused_shared:
             return experts_output
-        return experts_output + self.shared_expert(hidden_states)
+        return experts_output + self.shared_expert(
+            hidden_states, x_fp8=x_fp8, x_scale=x_scale
+        )
 
     def forward(
         self,
@@ -417,8 +504,7 @@ class GenericMoeLayer(nn.Module):
             extra_expert_args={
                 "swiglu_limit": (
                     float(getattr(self.config, "swiglu_limit", 0.0))
-                    if getattr(self.config, "model_type", "")
-                    in ("hy_v4", "hy_v4_mtp")
+                    if getattr(self.config, "model_type", "") in ("hy_v4", "hy_v4_mtp")
                     else 0.0
                 )
             },
@@ -501,13 +587,9 @@ class GenericMoeDecoderLayer(nn.Module):
                 global_weights=global_weights,
                 has_indexer=dsa_layer_has_indexer(config, layer_idx),
                 reuse_topk_indices=dsa_layer_skips_topk(config, layer_idx),
-                indexer_layernorm_eps=getattr(
-                    config, "indexer_layernorm_eps", None
-                ),
+                indexer_layernorm_eps=getattr(config, "indexer_layernorm_eps", None),
                 indexer_scale_fmt=getattr(config, "indexer_scale_fmt", None),
-                indexer_use_hadamard=getattr(
-                    config, "indexer_use_hadamard", True
-                ),
+                indexer_use_hadamard=getattr(config, "indexer_use_hadamard", True),
             )
         else:
             attn_configs = config.getAttentionConfigs(
@@ -560,6 +642,15 @@ class GenericMoeDecoderLayer(nn.Module):
             if resolve_glm5_cmp_enabled()
             else None
         )
+        self.hy4_cmp = (
+            Hy4Cmp(
+                config=config,
+                parallelism_config=parallelism_config,
+                self_attn=self.self_attn,
+            )
+            if config.model_type == "hy_v4_mtp" and resolve_hy4_cmp_enabled()
+            else None
+        )
 
         # Fuse input_layernorm + fp8_quant → pass fp8 directly to first linear,
         # AND emit a bf16 normed output so downstream consumers (e.g. Indexer)
@@ -604,6 +695,30 @@ class GenericMoeDecoderLayer(nn.Module):
             and self.mlp.shared_expert.accepts_fp8_input
         )
 
+        # HY4 MTP uses the generic residual decoder rather than target-model
+        # iHC.  Match CMP's G2 boundary by producing the BF16 normalized state
+        # and its exact group-32 MXFP8 representation in the same launch.  The
+        # caller passes that one FP8/scale pair to both MLA and Indexer-K.
+        self._fuse_hy4_cmp_input_norm_quant = bool(
+            _fuse_on
+            and config.model_type == "hy_v4_mtp"
+            and fused_add_rmsnorm_fp8_quant_with_bf16_output is not None
+            and isinstance(self.self_attn, MlaAttention)
+            and getattr(self.self_attn, "accepts_mxfp8_input", False)
+        )
+        # HY4 MTP has no target-model iHC producer at the post-attention MoE
+        # boundary.  Under CMP, derive the shared-expert DeepGEMM MXFP8 view
+        # and the plain-MegaMoE row-major view in the residual+RMSNorm launch.
+        self._fuse_hy4_cmp_post_norm_quant_moe = bool(
+            _fuse_on
+            and config.model_type == "hy_v4_mtp"
+            and fused_add_rmsnorm_fp8_quant_with_bf16_output is not None
+            and isinstance(self.mlp, GenericMoeLayer)
+            and self.mlp.shared_expert is not None
+            and getattr(self.mlp.shared_expert, "accepts_mxfp8_input", False)
+            and self.mlp._hy4_mega_moe_prepack
+        )
+
     def clone_for_cuda_graph(
         self, *, draft_prefill: bool = False
     ) -> "GenericMoeDecoderLayer":
@@ -621,6 +736,8 @@ class GenericMoeDecoderLayer(nn.Module):
         clone._fuse_input_scale_ue8m0 = self._fuse_input_scale_ue8m0
         clone._fuse_post_norm_quant = self._fuse_post_norm_quant
         clone._fuse_post_norm_quant_moe = self._fuse_post_norm_quant_moe
+        clone._fuse_hy4_cmp_input_norm_quant = self._fuse_hy4_cmp_input_norm_quant
+        clone._fuse_hy4_cmp_post_norm_quant_moe = self._fuse_hy4_cmp_post_norm_quant_moe
         clone.cmp = (
             None
             if self.cmp is None
@@ -629,14 +746,51 @@ class GenericMoeDecoderLayer(nn.Module):
                 draft_prefill=draft_prefill,
             )
         )
+        clone.hy4_cmp = (
+            None
+            if self.hy4_cmp is None
+            else self.hy4_cmp.clone_for_cuda_graph(self_attn=clone.self_attn)
+        )
         return clone
 
     def _fwd_mlp_or_moe(
         self,
         hidden_states: torch.Tensor,
         residual: torch.Tensor,
+        *,
+        enable_hy4_cmp: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Run residual add, RMSNorm, then the dense MLP or MoE."""
+        if (
+            enable_hy4_cmp
+            and self._fuse_hy4_cmp_post_norm_quant_moe
+            and hidden_states.dim() == 2
+        ):
+            mega_fp8, mega_scale, topk_ids, topk_weights = (
+                self.mlp.hy4_prepacked_input_views(int(hidden_states.size(0)))
+            )
+            if mega_fp8 is not None and mega_scale is not None:
+                assert topk_ids is not None and topk_weights is not None
+                bf16_hs, fp8_hs, scale = fused_add_rmsnorm_fp8_quant_with_bf16_output(
+                    hidden_states,
+                    residual,
+                    self.post_attention_layernorm.weight.data,
+                    self.post_attention_layernorm.variance_epsilon,
+                    group_size=32,
+                    scale_ue8m0=True,
+                    mxfp8_semantics=True,
+                    mega_mxfp8_out=mega_fp8,
+                    mega_mxfp8_scale_out=mega_scale,
+                )
+                self.mlp.prepare_hy4_prepacked_router(bf16_hs, topk_ids, topk_weights)
+                hidden_states = self.mlp.forward_prepacked(
+                    bf16_hs,
+                    topk_ids,
+                    topk_weights,
+                    x_fp8=fp8_hs,
+                    x_scale=scale,
+                )
+                return hidden_states, residual
         # Dense MLP: fuse add + RMSNorm + FP8 quant; up_proj consumes FP8 directly.
         if self._fuse_post_norm_quant and hidden_states.dim() == 2:
             fp8_hs, scale = fused_add_rmsnorm_fp8_quant(
@@ -733,6 +887,68 @@ class GenericMoeDecoderLayer(nn.Module):
 
         return DecodeLayerOutput(hidden_states, output_residual, topk_indices)
 
+    def _forward_hy4_cmp(
+        self,
+        hidden_states,
+        residual,
+        fmha_impl,
+        kv_cache,
+        prev_topk_indices,
+        force_reuse_topk_indices,
+    ) -> DecodeLayerOutput:
+        """MTP CMP entry; keep HY4 fusion and shared inputs on the caller stream."""
+        fp8_hs = scale = fp32_hs = None
+        if self._fuse_hy4_cmp_input_norm_quant and hidden_states.dim() == 2:
+            emit_head_gate_fp32 = bool(
+                self.hy4_cmp is not None
+                and self.self_attn.indexer is not None
+                and not self.self_attn.reuse_topk_indices
+                and not force_reuse_topk_indices
+            )
+            norm_outputs = fused_add_rmsnorm_fp8_quant_with_bf16_output(
+                hidden_states,
+                residual,
+                self.input_layernorm.weight.data,
+                self.input_layernorm.variance_epsilon,
+                group_size=32,
+                scale_ue8m0=True,
+                mxfp8_semantics=True,
+                emit_fp32_output=emit_head_gate_fp32,
+            )
+            if emit_head_gate_fp32:
+                bf16_hs, fp8_hs, scale, fp32_hs = norm_outputs
+            else:
+                bf16_hs, fp8_hs, scale = norm_outputs
+                fp32_hs = None
+        elif self._fuse_input_norm_quant and hidden_states.dim() == 2:
+            bf16_hs, fp8_hs, scale = fused_add_rmsnorm_fp8_quant_with_bf16_output(
+                hidden_states,
+                residual,
+                self.input_layernorm.weight.data,
+                self.input_layernorm.variance_epsilon,
+                group_size=128,
+                scale_ue8m0=self._fuse_input_scale_ue8m0,
+            )
+        else:
+            bf16_hs, residual = self.input_layernorm(hidden_states, residual)
+        hidden_states, topk_indices = self.hy4_cmp.forward_attention(
+            bf16_hs,
+            fmha_impl,
+            kv_cache,
+            x_fp8=fp8_hs,
+            x_scale=scale,
+            x_fp32=fp32_hs,
+            prev_topk_indices=prev_topk_indices,
+            force_reuse_topk_indices=force_reuse_topk_indices,
+            return_topk=True,
+        )
+        hidden_states, residual = self._fwd_mlp_or_moe(
+            hidden_states,
+            residual,
+            enable_hy4_cmp=True,
+        )
+        return DecodeLayerOutput(hidden_states, residual, topk_indices)
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -741,6 +957,7 @@ class GenericMoeDecoderLayer(nn.Module):
         kv_cache: Optional[LayerKVCache] = None,
         prev_topk_indices: Optional[torch.Tensor] = None,
         enable_cmp: bool = False,
+        enable_hy4_cmp: bool = False,
         force_reuse_topk_indices: bool = False,
     ) -> DecodeLayerOutput:
         if enable_cmp:
@@ -751,6 +968,20 @@ class GenericMoeDecoderLayer(nn.Module):
                 kv_cache,
                 prev_topk_indices,
                 force_reuse_topk_indices=force_reuse_topk_indices,
+            )
+
+        if (
+            enable_hy4_cmp
+            and self.hy4_cmp is not None
+            and self.hy4_cmp.can_run(hidden_states, fmha_impl, kv_cache)
+        ):
+            return self._forward_hy4_cmp(
+                hidden_states,
+                residual,
+                fmha_impl,
+                kv_cache,
+                prev_topk_indices,
+                force_reuse_topk_indices,
             )
 
         topk_indices = None

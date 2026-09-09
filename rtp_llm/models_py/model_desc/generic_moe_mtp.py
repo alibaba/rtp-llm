@@ -11,6 +11,7 @@ from rtp_llm.models_py.model_desc.generic_moe import GenericMoeDecoderLayer
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules import Embedding, LinearFactory, RMSNorm, RMSResNorm
 from rtp_llm.models_py.modules.hybrid.glm5_cmp import should_enable_glm5_cmp
+from rtp_llm.models_py.modules.hybrid.hy4_cmp import should_enable_hy4_cmp
 from rtp_llm.ops import MoeConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
@@ -304,6 +305,13 @@ class GenericMoeMTPModel(GptModelBase):
             self.kv_cache,
             force_reuse_topk_indices=reuse_topk_indices,
         )
+        enable_hy4_cmp = should_enable_hy4_cmp(
+            self.layers,
+            self.layer_num,
+            hidden_states,
+            fmha_impl,
+            self.kv_cache,
+        )
         for i, decoder_layer in enumerate(self.layers[: self.layer_num]):
             select_block_map_for_layer(inputs.attention_inputs, i)
             output = decoder_layer(
@@ -313,6 +321,7 @@ class GenericMoeMTPModel(GptModelBase):
                 kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
                 prev_topk_indices=prev_topk_indices,
                 enable_cmp=enable_cmp,
+                enable_hy4_cmp=enable_hy4_cmp,
                 force_reuse_topk_indices=reuse_topk_indices,
             )
             hidden_states = output.hidden_states

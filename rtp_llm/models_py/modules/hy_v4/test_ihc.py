@@ -59,6 +59,8 @@ class _AttentionOracleStub(torch.nn.Module):
         super().__init__()
         self.topk_indices = topk_indices
         self.prev_topk_indices = None
+        self.x_fp8 = None
+        self.x_scale = None
 
     @staticmethod
     def block(hidden_states: torch.Tensor) -> torch.Tensor:
@@ -73,9 +75,13 @@ class _AttentionOracleStub(torch.nn.Module):
         kv_cache=None,
         prev_topk_indices=None,
         return_topk=False,
+        x_fp8=None,
+        x_scale=None,
     ):
         del fmha_impl, kv_cache
         self.prev_topk_indices = prev_topk_indices
+        self.x_fp8 = x_fp8
+        self.x_scale = x_scale
         output = self.block(hidden_states)
         if return_topk:
             return output, self.topk_indices
@@ -85,6 +91,11 @@ class _AttentionOracleStub(torch.nn.Module):
 class _MlpOracleStub(torch.nn.Module):
     """Deterministic MLP stand-in used to check decoder-layer wiring."""
 
+    def __init__(self):
+        super().__init__()
+        self.x_fp8 = None
+        self.x_scale = None
+
     @staticmethod
     def block(hidden_states: torch.Tensor) -> torch.Tensor:
         values = hidden_states.float()
@@ -92,10 +103,33 @@ class _MlpOracleStub(torch.nn.Module):
             hidden_states.dtype
         )
 
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        x_fp8=None,
+        x_scale=None,
+    ) -> torch.Tensor:
+        self.x_fp8 = x_fp8
+        self.x_scale = x_scale
         return self.block(hidden_states)
 
 
+class _IhcMxfp8BoundaryStub(torch.nn.Module):
+    """Expose fixed BF16/MXFP8 pairs to verify decoder-layer plumbing."""
+
+    def __init__(self, read, post_gate, read_fp8, read_scale):
+        super().__init__()
+        self.read = read
+        self.post_gate = post_gate
+        self.read_fp8 = read_fp8
+        self.read_scale = read_scale
+
+    def pre_normed_mxfp8(self, channels, norm):
+        del channels, norm
+        return self.read, self.post_gate, self.read_fp8, self.read_scale
+
+    def post(self, block_output, channels, post_gate):
+        return channels + post_gate.unsqueeze(-1).to(channels.dtype) * block_output.unsqueeze(1)
 
 
 class Hy4IhcTest(unittest.TestCase):
@@ -276,6 +310,43 @@ class Hy4IhcTest(unittest.TestCase):
         )
         torch.testing.assert_close(actual_hidden, expected_hidden, rtol=0, atol=0)
 
+    def test_decoder_layer_passes_exact_mxfp8_boundaries(self):
+        tokens, hidden, hc = 3, 8, 4
+        channels = torch.randn(tokens, hc, hidden, dtype=torch.bfloat16)
+        attn_read = torch.randn(tokens, hidden, dtype=torch.bfloat16)
+        mlp_read = torch.randn(tokens, hidden, dtype=torch.bfloat16)
+        attn_fp8 = torch.randn(tokens, hidden).to(torch.float8_e4m3fn)
+        mlp_fp8 = torch.randn(tokens, hidden).to(torch.float8_e4m3fn)
+        attn_scale = torch.randint(0, 255, (tokens, 1), dtype=torch.int32)
+        mlp_scale = torch.randint(0, 255, (tokens, 1), dtype=torch.int32)
+        attn_gate = torch.randn(tokens, hc)
+        mlp_gate = torch.randn(tokens, hc)
+
+        layer = object.__new__(Hy4DecoderLayer)
+        torch.nn.Module.__init__(layer)
+        layer.layer_idx = 0
+        layer.input_layernorm = torch.nn.Identity()
+        layer.post_attention_layernorm = torch.nn.Identity()
+        layer.attn_ihc = _IhcMxfp8BoundaryStub(
+            attn_read, attn_gate, attn_fp8, attn_scale
+        )
+        layer.mlp_ihc = _IhcMxfp8BoundaryStub(
+            mlp_read, mlp_gate, mlp_fp8, mlp_scale
+        )
+        layer.self_attn = _AttentionOracleStub(torch.arange(tokens))
+        layer.mlp = _MlpOracleStub()
+        layer._fuse_attn_ihc_mxfp8 = True
+        layer._fuse_mlp_ihc_mxfp8 = True
+
+        layer(channels, fmha_impl=object())
+        self.assertIs(layer.self_attn.x_fp8, attn_fp8)
+        self.assertIs(layer.self_attn.x_scale, attn_scale)
+        self.assertIs(layer.mlp.x_fp8, mlp_fp8)
+        self.assertIs(layer.mlp.x_scale, mlp_scale)
+
+        clone = layer.clone_for_cuda_graph()
+        self.assertTrue(clone._fuse_attn_ihc_mxfp8)
+        self.assertTrue(clone._fuse_mlp_ihc_mxfp8)
 
     def test_pre_post_match_fp32_reference(self):
         torch.manual_seed(7)
