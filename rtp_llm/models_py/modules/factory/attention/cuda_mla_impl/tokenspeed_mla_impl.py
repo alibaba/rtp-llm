@@ -16,10 +16,12 @@ from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.mla_kv_cache_writ
 )
 from rtp_llm.ops import AttentionConfigs, FMHAConfig, KvCacheDataType, ParallelismConfig
 from rtp_llm.ops.compute_ops import LayerKVCache, PyAttentionInputs
+from rtp_llm.utils.k3_model_trace import record_model
 from rtp_llm.utils.model_weight import W
 
-from .rope_emb_new import NewMlaRotaryEmbeddingOp
 from .mla_fp8_kernels import quantize_fp8
+from .rope_emb_new import NewMlaRotaryEmbeddingOp
+
 
 class _TokenSpeedDecodeMetadata:
     """Stable block-table and sequence-length buffers for TokenSpeed MLA kernels."""
@@ -529,9 +531,16 @@ class TokenSpeedMlaDecodeOp:
         if self.fp8_compute:
             if self._q_fp8 is None or self._q_fp8.size(0) < num_tokens:
                 if self.use_cuda_graph:
-                    raise RuntimeError("FP8 MLA query buffer cannot grow during graph replay")
+                    raise RuntimeError(
+                        "FP8 MLA query buffer cannot grow during graph replay"
+                    )
                 self._q_fp8 = torch.empty_like(q_absorbed, dtype=self._dtype)
-            return quantize_fp8(q_absorbed, self.q_scale, self._q_fp8[:num_tokens], name="decode_absorbed_q")
+            return quantize_fp8(
+                q_absorbed,
+                self.q_scale,
+                self._q_fp8[:num_tokens],
+                name="decode_absorbed_q",
+            )
         return q_absorbed
 
     def _view_paged_kv(self, kv_cache: Optional[LayerKVCache]) -> torch.Tensor:
@@ -647,6 +656,7 @@ class TokenSpeedMlaDecodeOp:
         if self._batch_size <= 0:
             raise RuntimeError("plan() must be called before TokenSpeed MLA forward")
         q_absorbed = self._absorb_query(q_nope, q_pe, layer_id)
+        record_model(f"mla.layers.{layer_id}.decode.query", q_absorbed)
         num_tokens = q_absorbed.size(0)
         if num_tokens % self._batch_size != 0:
             raise RuntimeError(
@@ -694,6 +704,15 @@ class TokenSpeedMlaDecodeOp:
             if self.use_cuda_graph
             else max(self._max_seq_len, self.token_per_block)
         )
+        record_model(
+            f"mla.layers.{layer_id}.decode.metadata",
+            {
+                "block_tables": self._block_tables[
+                    : self._batch_size, : self._padded_blocks
+                ],
+                "seq_lens": self._seq_lens[: self._batch_size],
+            },
+        )
         attn_output = _TOKENSPEED_MLA_API(
             query=q_absorbed.view(
                 self._batch_size, q_len, self.num_heads, q_absorbed.size(-1)
@@ -712,7 +731,10 @@ class TokenSpeedMlaDecodeOp:
             causal_mask=True,
             enable_pdl=False,
         )
-        return self._project_output(attn_output, layer_id)
+        record_model(f"mla.layers.{layer_id}.decode.latent_output", attn_output)
+        projected = self._project_output(attn_output, layer_id)
+        record_model(f"mla.layers.{layer_id}.decode.value_projection", projected)
+        return projected
 
 
 class TokenSpeedMlaDecodeImpl(MlaFlashInferImplBase):
@@ -818,7 +840,9 @@ class TokenSpeedMlaDecodeImpl(MlaFlashInferImplBase):
         if attn_configs.is_sparse:
             return unsupported("does not support sparse MLA")
         expected_cache_dtype = (
-            KvCacheDataType.FP8 if attn_configs.mla_fp8_compute else KvCacheDataType.BASE
+            KvCacheDataType.FP8
+            if attn_configs.mla_fp8_compute
+            else KvCacheDataType.BASE
         )
         if attn_configs.kv_cache_dtype != expected_cache_dtype:
             return unsupported(
