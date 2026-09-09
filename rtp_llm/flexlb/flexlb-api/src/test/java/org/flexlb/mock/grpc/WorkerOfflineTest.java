@@ -2,6 +2,7 @@ package org.flexlb.mock.grpc;
 
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.loadbalance.Response;
+import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.mock.FlexLBMockTestBase;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -15,72 +16,43 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/**
- * Worker offline: stop the mock prefill worker's gRPC server while requests
- * are in-flight, verifying that the master detects the connection failure and
- * retains resources behind an Engine ownership fence.
- *
- * <p>Flow:
- * 1. Start mock prefill worker (normal config)
- * 2. Submit request → ACK succeeds (proves the gRPC link works)
- * 4. Stop the mock prefill worker's gRPC server (simulates worker crash)
- * 5. Submit a new request → gRPC call fails (connection refused / channel broken)
- * 6. Verify: the post-send outcome remains pending and inflight ownership is retained
- *
- * <p>Key mechanism:
- * <ul>
- *   <li>After {@code server.shutdown()}, the TCP port is no longer listening</li>
- *   <li>The gRPC client channel may still be "open" from the client's perspective,
- *       but the next call will fail because:</li>
- *   <li>The server sends a GOAWAY frame during graceful shutdown, and/or</li>
- *   <li>The TCP connection attempt fails with "Connection refused" (20ms timeout)</li>
- *   <li>{@link org.flexlb.engine.grpc.EngineGrpcClient} completes the asynchronous
- *       EnqueueBatch call exceptionally and deliberately does not replay an
- *       invocation whose acceptance is ambiguous.</li>
- *   <li>The asynchronous invocation is ambiguous after it starts, so the scheduler
- *       cannot safely publish failure or release ownership without Engine proof</li>
- * </ul>
- *
- * <p>Note: {@code MockWorker.stop()} already supports graceful gRPC server shutdown
- * (up to 5 seconds wait). The test calls it explicitly mid-test; the base class
- * {@code @AfterEach} calls it again, which is safe (no-op on an already-terminated server).
- */
+/** An offline worker cannot retain scheduler or endpoint accounting past request inactivity TTL. */
 class WorkerOfflineTest extends FlexLBMockTestBase {
 
     @Override
     protected FlexlbConfig createConfig() {
-        return super.createConfig();
+        FlexlbConfig config = super.createConfig();
+        config.queueScheduler().getLifecycle().setStaleInflightTimeoutMs(1_800L);
+        return config;
     }
 
     @Test
     @Timeout(20)
-    void workerOffline_uncertainDispatchRetainsFenceUntilAuthoritativeStatus() throws Exception {
-        // 1. Submit request with normal worker — should succeed
-        CompletableFuture<Response> future1 = submitRequest(20001);
-        Response ackResponse = future1.get(5, TimeUnit.SECONDS);
-        assertTrue(ackResponse.isSuccess(), "First request should succeed while worker is online");
-        assertTrue(ackResponse.isEnqueuedByMaster(), "Should be enqueued by master");
-        int existingBatches = getPrefillEndpoint().getInflightBatchCount();
+    void workerOffline_uncertainDispatchExpiresWithoutAuthoritativeStatus() throws Exception {
+        CompletableFuture<Response> first = submitRequest(20001);
+        Response acknowledged = first.get(5, TimeUnit.SECONDS);
+        assertTrue(acknowledged.isSuccess());
+        assertTrue(acknowledged.isEnqueuedByMaster());
 
-        // 2. Stop the mock prefill worker's gRPC server (simulates worker crash)
         mockPrefillWorker.stop();
+        Thread.sleep(500); // Let the gRPC channel process the worker's GOAWAY.
 
-        // 3. Brief pause to let the gRPC client detect the connection loss
-        //    (GOAWAY processing / keepalive detection is async)
-        Thread.sleep(500);
-
-        // 4. Submit a new request — gRPC call should fail (connection refused)
-        CompletableFuture<Response> future2 = submitRequest(20002);
+        CompletableFuture<Response> offline = submitRequest(20002);
         assertThrows(TimeoutException.class,
-                () -> future2.get(2, TimeUnit.SECONDS));
-        assertFalse(future2.isDone(),
-                "offline post-send ambiguity must wait for authoritative Engine status");
+                () -> offline.get(600, TimeUnit.MILLISECONDS));
+        assertFalse(offline.isDone(), "post-send uncertainty stays pending before request TTL");
+        assertTrue(getPrefillEndpoint().getInflightBatchCount() >= 1);
+        assertTrue(getDecodeEndpoint().getInflightCount() >= 1);
+        assertEquals(0, mockDecodeWorker.getEnqueueCount());
 
-        // 6. The uncertain request remains charged; releasing it here could double-admit.
-        assertTrue(getPrefillEndpoint().getInflightBatchCount() >= existingBatches + 1);
-
-        // 7. Verify: decode worker never received any enqueue request (PD-separated)
-        assertEquals(0, mockDecodeWorker.getEnqueueCount(),
-                "Decode worker should not have received any request");
+        Response expired = offline.get(5, TimeUnit.SECONDS);
+        assertFalse(expired.isSuccess());
+        assertEquals(StrategyErrorType.BATCH_SLO_EXPIRED.getErrorCode(), expired.getCode());
+        assertTrue(expired.getErrorMessage().contains("REQUEST_INACTIVE"));
+        assertEquals(0, scheduler.getInflightSize());
+        assertEquals(0, getPrefillEndpoint().getInflightBatchCount());
+        assertEquals(0, getPrefillEndpoint().getLocallyOwnedRequestCount());
+        assertEquals(0, getDecodeEndpoint().getInflightCount());
+        assertTrue(first.join().isSuccess(), "cleanup does not replace an already published ACK");
     }
 }

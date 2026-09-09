@@ -168,8 +168,11 @@ class PreemptionPhasesE2ETest {
                 assertFalse(low.isDone(),
                         "victim must NOT get its terminal before the engine confirms the release (iron rule 4)");
 
-                // 泵回真实 WorkerStatus：CANCELLED completion → 释放确认 + 8429 归因
-                h.pumpPrefillOnce(0);
+                // Poll until Prefill publishes its authoritative priority terminal.
+                AutoTpmE2EHarness.await(() -> {
+                    h.pumpPrefillOnce(0);
+                    return low.isDone();
+                }, 2_000, "Prefill confirms the priority cancellation");
 
                 submitter.join(5_000);
                 high = highRef.get();

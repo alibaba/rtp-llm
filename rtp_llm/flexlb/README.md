@@ -83,6 +83,14 @@ startup. Optional fields must be omitted rather than set to `null`. If the envir
 variable is absent, schema v2 defaults directly to
 `QUEUE + FIFO + FIXED_WINDOW + BATCH` and the remaining model defaults.
 
+Only priority preemption may send an Engine Cancel RPC. Uncertain delivery,
+ordinary client cancellation, and inactivity expiry never send Engine Cancel.
+A request with no matching Engine status for
+`scheduler.lifecycle.staleInflightTimeoutMs` is removed from Master tracking,
+and its exact Prefill/Decode accounting is released locally. Matching Engine
+status renews this inactivity deadline; delivery acknowledgements do not.
+Cleanup does not wait for Engine cancellation or terminal evidence.
+
 The following example activates every major configuration section:
 
 ```bash

@@ -71,21 +71,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
     private final AtomicLong priorityPreemptionHeldExpectedKv = new AtomicLong();
 
     /**
-     * Request-scoped ownership retained by a generic scheduler EngineFence.
-     *
-     * <p>All map and entry mutations are serialized by {@link #admissionLock}.
-     * A protection initially pins an existing shadow or confirmed owner. If a
-     * confirmed request temporarily disappears from WorkerStatus, ownership is
-     * transferred to a synthetic slot plus local KV hold until the exact fence
-     * clears or an ordinary authoritative terminal arrives. The two atomic KV
-     * totals are read lock-free by routing; they do not own entry lifecycle.
-     */
-    private final AtomicLong engineFenceHeldKv = new AtomicLong();
-    private final AtomicLong engineFenceHeldExpectedKv = new AtomicLong();
-    /** Number of generic synthetic slots; guarded by {@link #admissionLock}. */
-    private int engineFenceHeldSlotCount;
-
-    /**
      * O(1) mirror of reservations whose request is still waiting in a Prefill
      * queue. Such reservations protect KV, but do not consume Decode engine
      * concurrency until delivery obtains an {@link EngineDispatchPermit}.
@@ -161,7 +146,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
         private EngineDispatchPermit dispatchPermit;
         /** Current protocol owners for this exact request generation. */
         private PreemptionClaim preemptionClaim;
-        private EngineFenceProtection engineFenceProtection;
         /** Non-zero while stale WorkerStatus must not resurrect this request id. */
         private long settledAtMs;
 
@@ -260,8 +244,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
 
         long releasableKvTokens() { return kvTokens; }
 
-        boolean hasProtocolOwner() { return preemptionClaim != null
-                || engineFenceProtection != null; }
+        boolean hasProtocolOwner() { return preemptionClaim != null; }
 
         void clearRequestOwnership() {
             phase = null;
@@ -289,17 +272,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
             return false;
         }
         state.preemptionClaim = null;
-        pruneRequestStateLocked(requestId, state);
-        return true;
-    }
-
-    private boolean removeEngineFenceProtectionLocked(
-            long requestId, EngineFenceProtection expected) {
-        DecodeRequestState state = requestState(requestId);
-        if (state == null || state.engineFenceProtection != expected) {
-            return false;
-        }
-        state.engineFenceProtection = null;
         pruneRequestStateLocked(requestId, state);
         return true;
     }
@@ -455,73 +427,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
         }
     }
 
-    /**
-     * Exact ownership retained while an asynchronous Engine fence is pending.
-     *
-     * <p>The endpoint, reservation and protection object together form the
-     * capability. Closing an old lease cannot clear a protection installed for
-     * a reused request id.</p>
-     */
-    public static final class EngineFenceLease implements AutoCloseable {
-        private final DecodeEndpoint endpoint;
-        private final ReservationHandle reservation;
-        private final EngineFenceProtection protection;
-
-        private EngineFenceLease(
-                DecodeEndpoint endpoint,
-                ReservationHandle reservation,
-                EngineFenceProtection protection) {
-            this.endpoint = endpoint;
-            this.reservation = reservation;
-            this.protection = protection;
-        }
-
-        /**
-         * Convert the exact fence owner into an opaque terminal capability.
-         * The caller may do this only after validating an authoritative Engine
-         * terminal response; the endpoint revalidates the exact owner on use.
-         */
-        public AuthoritativeTerminalProof authoritativeTerminalProof() {
-            return new AuthoritativeTerminalProof(
-                    endpoint, reservation, protection,
-                    AuthoritativeTerminalOwner.ENGINE_FENCE);
-        }
-
-        @Override
-        public void close() {
-            endpoint.closeEngineFenceExact(this);
-        }
-    }
-
-    /**
-     * Opaque proof bound to one exact Decode reservation and Engine-fence
-     * owner. It cannot be constructed from a request id or by arbitrary
-     * callers; only the exact {@link EngineFenceLease} can issue it.
-     */
-    public static final class AuthoritativeTerminalProof {
-        private final DecodeEndpoint endpoint;
-        private final ReservationHandle reservation;
-        private final EngineFenceProtection protection;
-        private final AuthoritativeTerminalOwner owner;
-
-        private AuthoritativeTerminalProof(
-                DecodeEndpoint endpoint,
-                ReservationHandle reservation,
-                EngineFenceProtection protection,
-                AuthoritativeTerminalOwner owner) {
-            this.endpoint = endpoint;
-            this.reservation = reservation;
-            this.protection = protection;
-            this.owner = owner;
-        }
-    }
-
-    private enum AuthoritativeTerminalOwner {
-        ENGINE_FENCE,
-        DISPATCH_REJECTION,
-        WORKER_STATUS
-    }
-
     /** Stop this exact endpoint generation and retire all generation-local ownership. */
     @Override
     protected void closeEndpoint() {
@@ -598,10 +503,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
         preemptionAttempts.clear();
         priorityPreemptionHeldKv.set(0L);
         priorityPreemptionHeldExpectedKv.set(0L);
-
-        engineFenceHeldKv.set(0L);
-        engineFenceHeldExpectedKv.set(0L);
-        engineFenceHeldSlotCount = 0;
 
         return retiredReservations;
     }
@@ -725,11 +626,10 @@ public class DecodeEndpoint extends WorkerEndpoint {
         }
     }
 
-    /** Remove every local owner for one request. Caller holds admissionLock. */
+    /** Release an aborted attempt's incoming shadow. Caller holds admissionLock. */
     private boolean releaseLocked(long requestId) {
-        boolean changed = clearEngineFenceProtectionLocked(requestId);
         DecodeRequestState removed = shadowReservation(requestId);
-        changed = removeShadowExactLocked(requestId, removed) || changed;
+        boolean changed = removeShadowExactLocked(requestId, removed);
         if (changed) {
             admissionVersion.incrementAndGet();
         }
@@ -770,7 +670,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
      * Release one exact reservation that never crossed into Engine ownership.
      *
      * <p>A missing or replaced handle is an idempotent success. If the exact
-     * identity is still present but has an Engine lifecycle, generic fence or
+     * identity is still present but has an Engine lifecycle or
      * priority-protocol owner, local release is a caller invariant violation:
      * that owner must consume an authoritative terminal instead.</p>
      */
@@ -797,15 +697,12 @@ public class DecodeEndpoint extends WorkerEndpoint {
                     ? state : null;
             boolean exactRequest = isExactReservation(current, reservation);
             boolean exactState = isExactReservation(state, reservation);
-            EngineFenceProtection protection = state == null
-                    ? null : state.engineFenceProtection;
             PreemptionClaim claim = state == null
                     ? null : state.preemptionClaim;
             EngineDispatchPermit dispatchPermit = current == null
                     || current.confirmed()
                     ? null : current.dispatchPermit();
 
-            boolean exactProtection = exactState && protection != null;
             boolean exactClaim = exactState && claim != null;
             boolean exactAttempt = hasExactIncomingAttemptLocked(reservation);
             boolean exactDispatchPermit = dispatchPermit != null
@@ -815,7 +712,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
                     hasEngineLifecycleReservationExactLocked(reservation);
 
             if (!exactRequest) {
-                if (exactProtection || exactClaim
+                if (exactClaim
                         || exactAttempt || exactDispatchPermit
                         || exactEngineLifecycle) {
                     throw localReleaseInvariant(reservation,
@@ -823,7 +720,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 }
                 return false;
             }
-            if (current.confirmed() || exactEngineLifecycle || exactProtection
+            if (current.confirmed() || exactEngineLifecycle
                     || exactClaim || exactAttempt) {
                 throw localReleaseInvariant(reservation,
                         "exact ownership is held by Engine/protocol lifecycle");
@@ -849,6 +746,87 @@ public class DecodeEndpoint extends WorkerEndpoint {
     }
 
     /**
+     * Expire one exact local request lease without asserting an Engine terminal.
+     * The last physical KV sample remains unchanged; only local reservations,
+     * dispatch permits, and priority protocol ownership are released. A bounded
+     * tombstone prevents delayed request-id-only WorkerStatus from recreating the
+     * expired generation. Duplicate and stale handles are total no-ops.
+     */
+    public boolean expireReservationExact(ReservationHandle reservation) {
+        if (reservation == null
+                || reservation.endpointGenerationId()
+                        != getStatus().getGenerationId()) {
+            return false;
+        }
+        boolean expired = false;
+        admissionLock.lock();
+        try {
+            long requestId = reservation.requestId();
+            DecodeRequestState state = requestState(requestId);
+            if (!isExactReservation(state, reservation)
+                    || (!state.ownsRequest() && !state.hasProtocolOwner()
+                        && !hasExactIncomingAttemptLocked(reservation))) {
+                return false;
+            }
+
+            // An expired incoming request cannot retain an admission attempt.
+            // Other victims keep ambiguous Engine ownership until their own
+            // status or inactivity deadline settles it.
+            java.util.Iterator<Map.Entry<Long, EndpointPreemptionAttempt>> attempts =
+                    preemptionAttempts.entrySet().iterator();
+            while (attempts.hasNext()) {
+                Map.Entry<Long, EndpointPreemptionAttempt> entry = attempts.next();
+                EndpointPreemptionAttempt attempt = entry.getValue();
+                if (attempt.incomingRequestId != requestId
+                        || attempt.incomingReservationToken
+                                != reservation.reservationToken()) {
+                    continue;
+                }
+                attempts.remove();
+                for (ReservationHandle victim : attempt.remainingVictims.values()) {
+                    PreemptionClaim victimClaim = exactPreemptionClaimLocked(
+                            entry.getKey(), victim);
+                    if (victimClaim != null && victimClaim.phase.isLocallyReleasable()) {
+                        releaseHeldKv(victimClaim);
+                        removePreemptionClaimLocked(victim.requestId(), victimClaim);
+                    }
+                }
+            }
+
+            PreemptionClaim claim = state.preemptionClaim;
+            boolean confirmedSlot = state.confirmed()
+                    || claim != null && claim.owner == ClaimOwner.ENGINE_CONFIRMED;
+            if (claim != null) {
+                EndpointPreemptionAttempt attempt = preemptionAttempts.get(claim.attemptToken);
+                if (attempt != null) {
+                    attempt.remainingVictims.remove(requestId, reservation);
+                }
+                releaseHeldKv(claim);
+                removePreemptionClaimLocked(requestId, claim);
+            }
+            if (state.confirmed()) {
+                removeConfirmedExactLocked(requestId, state);
+            } else if (state.ownsRequest()) {
+                removeShadowExactLocked(requestId, state);
+            }
+            if (confirmedSlot) {
+                confirmedEngineOwnedCount = Math.max(0, confirmedEngineOwnedCount - 1);
+            }
+            // Use a history-only entry, so no old exact token remains live.
+            decodeRequests.remove(requestId, state);
+            rememberSettledLocked(requestId, System.currentTimeMillis());
+            admissionVersion.incrementAndGet();
+            expired = true;
+        } finally {
+            admissionLock.unlock();
+        }
+        if (expired) {
+            publishCapacityRelease();
+        }
+        return expired;
+    }
+
+    /**
      * Total counterpart cleanup for a terminal observed on another role. Only
      * an exact local shadow may be removed; Engine/protocol ownership makes the
      * operation a no-op and remains with its canonical reducer.
@@ -868,8 +846,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
                     || hasEngineLifecycleReservationExactLocked(reservation)) {
                 return false;
             }
-            if (shadow.engineFenceProtection != null
-                    || shadow.preemptionClaim != null
+            if (shadow.preemptionClaim != null
                     || hasExactIncomingAttemptLocked(reservation)) {
                 return false;
             }
@@ -958,144 +935,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
     }
 
     /**
-     * Retain the request's current Decode accounting while an EngineFence
-     * reconciles ambiguous delivery ownership.
-     *
-     * <p>The protection is exact-reservation scoped and idempotent. It may
-     * attach to a shadow reservation, an engine-confirmed entry, or an existing
-     * priority claim carrying the same token. A missing or replaced identity is
-     * not materialized. Callers may hold a scheduler request-entry monitor;
-     * this method only acquires {@link #admissionLock} and never calls back into
-     * scheduler/batcher code.
-     *
-     * @return an opaque exact lease, or {@code null} when that reservation no
-     *         longer owns Decode accounting
-     */
-    public EngineFenceLease beginEngineFenceProtection(
-            ReservationHandle reservation) {
-        if (reservation == null) {
-            throw new IllegalArgumentException(
-                    "Decode reservation is required for Engine fencing");
-        }
-        if (reservation.endpointGenerationId()
-                != getStatus().getGenerationId()) {
-            return null;
-        }
-        GenerationPin generationPin = tryPinGeneration();
-        if (generationPin == null) {
-            return null;
-        }
-        long requestId = reservation.requestId();
-        try (generationPin) {
-            admissionLock.lock();
-            try {
-                DecodeRequestState state = requestState(requestId);
-                EngineFenceProtection existing = state == null
-                        ? null : state.engineFenceProtection;
-                if (existing != null) {
-                    return isExactReservation(state, reservation)
-                            ? new EngineFenceLease(this, reservation, existing)
-                            : null;
-                }
-                DecodeRequestState request = state != null && state.ownsRequest()
-                        ? state : null;
-                PreemptionClaim priorityClaim = state == null
-                        ? null : state.preemptionClaim;
-                boolean priorityOwnsAccounting = priorityClaim != null;
-                boolean exactRequest = isExactReservation(request, reservation);
-                boolean exactPriorityClaim = priorityOwnsAccounting
-                        && isExactReservation(state, reservation);
-                if (!exactRequest && !exactPriorityClaim) {
-                    return null;
-                }
-
-                long hardKvTokens = exactRequest ? request.kvTokens()
-                        : priorityClaim.hardKvTokens;
-                long expectedKvTokens = exactRequest
-                        && !request.confirmed() ? request.expectedKvTokens()
-                        : exactPriorityClaim ? priorityClaim.expectedKvTokens
-                        : hardKvTokens;
-                boolean confirmedOwner = exactRequest && request.confirmed()
-                        || (exactPriorityClaim
-                            && priorityClaim.owner == ClaimOwner.ENGINE_CONFIRMED);
-                EngineFenceProtection protection = new EngineFenceProtection(
-                        hardKvTokens, expectedKvTokens, confirmedOwner);
-                state.engineFenceProtection = protection;
-                admissionVersion.incrementAndGet();
-                return new EngineFenceLease(this, reservation, protection);
-            } finally {
-                admissionLock.unlock();
-            }
-        }
-    }
-
-    /**
-     * Release only the generic EngineFence owner. An overlapping token-fenced
-     * priority owner remains charged independently; WorkerStatus or the exact
-     * priority settlement path decides its lifetime.
-     *
-     */
-    private void closeEngineFenceExact(EngineFenceLease lease) {
-        boolean capacityChanged = false;
-        admissionLock.lock();
-        try {
-            if (lease == null || lease.endpoint != this
-                    || lease.reservation.endpointGenerationId()
-                            != getStatus().getGenerationId()
-                    || !removeEngineFenceProtectionLocked(
-                            lease.reservation.requestId(), lease.protection)) {
-                return;
-            }
-            releaseEngineFenceSyntheticHoldLocked(lease.protection);
-            if (!decodeRequests.containsKey(lease.reservation.requestId())) {
-                rememberSettledLocked(
-                        lease.reservation.requestId(), System.currentTimeMillis());
-            }
-            admissionVersion.incrementAndGet();
-            capacityChanged = true;
-        } finally {
-            admissionLock.unlock();
-        }
-        if (capacityChanged) {
-            publishCapacityRelease();
-        }
-    }
-
-    /**
-     * Atomically consume one exact authoritative Engine terminal proof.
-     * Normal return guarantees that no owner for the proof's reservation token
-     * remains; a reused request id is left untouched.
-     */
-    public void settleAuthoritativeTerminal(
-            AuthoritativeTerminalProof proof) {
-        if (proof == null) {
-            throw new IllegalArgumentException(
-                    "Authoritative Decode terminal proof is required");
-        }
-        if (proof.endpoint != this
-                || proof.reservation.endpointGenerationId()
-                        != getStatus().getGenerationId()) {
-            throw new IllegalArgumentException(
-                    "Authoritative Decode terminal proof belongs to another endpoint generation");
-        }
-        boolean capacityChanged = false;
-        admissionLock.lock();
-        try {
-            boolean changed = settleAuthoritativeTerminalLocked(
-                    proof, System.currentTimeMillis());
-            if (changed) {
-                admissionVersion.incrementAndGet();
-            }
-            capacityChanged = changed;
-        } finally {
-            admissionLock.unlock();
-        }
-        if (capacityChanged) {
-            publishCapacityRelease();
-        }
-    }
-
-    /**
      * Settle a definitive transport rejection without treating an ambiguous
      * Engine outcome as a local rollback. The reservation token and endpoint
      * generation fence request-id reuse; a concurrent WorkerStatus acceptance
@@ -1142,13 +981,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
                     return DispatchRejectionSettlement.CONFLICT;
                 }
 
-                EngineFenceProtection protection =
-                        state == null ? null : state.engineFenceProtection;
-                boolean exactProtection = protection != null && exactState;
-                if (exactProtection && protection.confirmedOwner) {
-                    return DispatchRejectionSettlement.ENGINE_ACCEPTED;
-                }
-
                 DecodeRequestState shadow = shadowReservation(requestId);
                 EngineDispatchPermit dispatchPermit = shadow == null
                         ? null : shadow.dispatchPermit();
@@ -1159,18 +991,12 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 boolean exactEngineLifecycle =
                         hasEngineLifecycleReservationExactLocked(reservation);
                 if (!exactShadow && !exactDispatchPermit
-                        && !exactEngineLifecycle && !exactProtection) {
+                        && !exactEngineLifecycle) {
                     return DispatchRejectionSettlement.STALE;
                 }
 
-                AuthoritativeTerminalProof proof =
-                        new AuthoritativeTerminalProof(
-                                this,
-                                reservation,
-                                null,
-                                AuthoritativeTerminalOwner.DISPATCH_REJECTION);
                 capacityChanged = settleAuthoritativeTerminalLocked(
-                        proof, System.currentTimeMillis());
+                        reservation, true, System.currentTimeMillis());
                 if (capacityChanged) {
                     admissionVersion.incrementAndGet();
                 }
@@ -1187,9 +1013,9 @@ public class DecodeEndpoint extends WorkerEndpoint {
 
     /** Caller holds {@link #admissionLock}. */
     private boolean settleAuthoritativeTerminalLocked(
-            AuthoritativeTerminalProof proof,
+            ReservationHandle reservation,
+            boolean retainTombstone,
             long settledAtMs) {
-        ReservationHandle reservation = proof.reservation;
         long requestId = reservation.requestId();
         DecodeRequestState state = requestState(requestId);
         boolean exactState = isExactReservation(state, reservation);
@@ -1205,25 +1031,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
         }
 
         boolean changed = false;
-        EngineFenceProtection currentProtection = state == null
-                ? null : state.engineFenceProtection;
-        boolean exactProtection = currentProtection != null && exactState;
-        if (proof.owner == AuthoritativeTerminalOwner.ENGINE_FENCE
-                && exactProtection
-                && currentProtection != proof.protection) {
-            throw terminalInvariant(reservation,
-                    "another Engine fence owns the same reservation generation");
-        }
-
-        boolean syntheticSlotRemoved = exactProtection
-                && currentProtection.syntheticHeld;
-        if (exactProtection
-                && removeEngineFenceProtectionLocked(
-                        requestId, currentProtection)) {
-            releaseEngineFenceSyntheticHoldLocked(currentProtection);
-            changed = true;
-        }
-
         DecodeRequestState request = state != null && state.ownsRequest()
                 ? state : null;
         EngineDispatchPermit dispatchPermit = request == null
@@ -1237,21 +1044,15 @@ public class DecodeEndpoint extends WorkerEndpoint {
         if (isExactReservation(request, reservation)) {
             if (request.confirmed()
                     && removeConfirmedExactLocked(requestId, request)) {
-                if (!syntheticSlotRemoved) {
-                    confirmedEngineOwnedCount = Math.max(
-                            0, confirmedEngineOwnedCount - 1);
-                }
+                confirmedEngineOwnedCount = Math.max(
+                        0, confirmedEngineOwnedCount - 1);
                 changed = true;
             } else if (!request.confirmed()
                     && removeShadowExactLocked(requestId, request)) {
                 changed = true;
             }
         }
-        if (!decodeRequests.containsKey(requestId)
-                && (proof.owner == AuthoritativeTerminalOwner.ENGINE_FENCE
-                    || proof.owner
-                        == AuthoritativeTerminalOwner.DISPATCH_REJECTION
-                    || exactProtection)) {
+        if (!decodeRequests.containsKey(requestId) && retainTombstone) {
             changed = rememberSettledLocked(requestId, settledAtMs) || changed;
         }
 
@@ -1260,24 +1061,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
                     "exact accounting remains after authoritative settlement");
         }
         return changed;
-    }
-
-    /** Caller holds {@link #admissionLock} after validating a finished status. */
-    private AuthoritativeTerminalProof workerStatusTerminalProofLocked(
-            long requestId) {
-        DecodeRequestState request = ownedRequest(requestId);
-        long reservationToken = request == null
-                ? 0L : request.reservationToken();
-        if (reservationToken <= 0L) {
-            return null;
-        }
-        return new AuthoritativeTerminalProof(
-                this,
-                new ReservationHandle(
-                        getStatus().getGenerationId(),
-                        requestId, reservationToken),
-                null,
-                AuthoritativeTerminalOwner.WORKER_STATUS);
     }
 
     /**
@@ -1670,13 +1453,10 @@ public class DecodeEndpoint extends WorkerEndpoint {
         long expectedInflight = inflightExpectedKvReservedTotal.get();
         long used = saturatedAddNonNegative(
                 saturatedAddNonNegative(reportedUsed, expectedInflight),
-                saturatedAddNonNegative(
-                        priorityPreemptionHeldExpectedKv.get(),
-                        engineFenceHeldExpectedKv.get()));
+                priorityPreemptionHeldExpectedKv.get());
         long available = Math.max(0L, fields.availableKvCacheTokens()
                 - hardInflight
-                - priorityPreemptionHeldKv.get()
-                - engineFenceHeldKv.get());
+                - priorityPreemptionHeldKv.get());
         long engineFacingUsed = engineFacingKvUsed(fields);
         long engineFacingAvailable = engineFacingKvAvailable(fields);
         return new DecodeRoutingView(
@@ -1998,47 +1778,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
         return settlePriorityClaimTerminal(
                 attemptToken,
                 reservation,
-                claim -> !claim.engineFenceTransferred
-                        && claim.phase.acceptsTombstone());
-    }
-
-    /**
-     * Transfer a NOT_FOUND priority claim to the scheduler's post-delivery
-     * Engine fence without releasing any victim accounting.
-     *
-     * <p>The original attempt token becomes the exact endpoint-side fence
-     * generation. In particular, {@code kvHeldAfterWorkerRelease} remains
-     * charged when Decode has already stopped reporting an ENGINE_CONFIRMED
-     * victim; dropping that synthetic hold here would oversell KV before the
-     * new Cancel observes TOMBSTONED or another authoritative terminal.</p>
-     */
-    public boolean transferPriorityNotFoundClaimToEngineFence(
-            long attemptToken,
-            long requestId) {
-        admissionLock.lock();
-        try {
-            PreemptionClaim claim = preemptionClaim(requestId);
-            if (claim == null || claim.attemptToken != attemptToken
-                    || claim.engineFenceTransferred
-                    || claim.phase != PreemptionCancelPhase.NOT_FOUND_STALE) {
-                return false;
-            }
-            claim.engineFenceTransferred = true;
-            admissionVersion.incrementAndGet();
-            return true;
-        } finally {
-            admissionLock.unlock();
-        }
-    }
-
-    /** Authoritative terminal settlement for an exact transferred fence generation. */
-    public boolean settleEngineFenceClaim(
-            long attemptToken,
-            ReservationHandle reservation) {
-        return settlePriorityClaimTerminal(
-                attemptToken,
-                reservation,
-                claim -> claim.engineFenceTransferred);
+                claim -> claim.phase.acceptsTombstone());
     }
 
     private boolean settlePriorityClaimTerminal(
@@ -2085,7 +1825,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
         DecodeRequestState request = state.ownsRequest() ? state : null;
         EngineDispatchPermit dispatchPermit = request == null
                 || request.confirmed() ? null : request.dispatchPermit();
-        EngineFenceProtection protection = state.engineFenceProtection;
         if ((request != null && !isExactReservation(request, reservation))
                 || (dispatchPermit != null
                     && !isExactReservation(
@@ -2101,20 +1840,13 @@ public class DecodeEndpoint extends WorkerEndpoint {
             return false;
         }
 
-        boolean syntheticSlotRemoved = protection != null
-                && protection.syntheticHeld;
-        if (protection != null
-                && removeEngineFenceProtectionLocked(requestId, protection)) {
-            releaseEngineFenceSyntheticHoldLocked(protection);
-        }
         if (dispatchPermit != null) {
             removeEngineDispatchPermitLocked(requestId);
         }
         if (request != null && request.confirmed()) {
             removeConfirmedExactLocked(requestId, request);
         }
-        if (claim.owner == ClaimOwner.ENGINE_CONFIRMED
-                && !syntheticSlotRemoved) {
+        if (claim.owner == ClaimOwner.ENGINE_CONFIRMED) {
             confirmedEngineOwnedCount = Math.max(0, confirmedEngineOwnedCount - 1);
         }
         if (request != null && !request.confirmed()) {
@@ -2207,7 +1939,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
             PreemptionClaim claim = exactPreemptionClaimLocked(
                     attemptToken, reservation);
             if (claim == null
-                    || claim.engineFenceTransferred
                     || claim.phase != PreemptionCancelPhase.NOT_FOUND_STALE) {
                 return false;
             }
@@ -2245,23 +1976,15 @@ public class DecodeEndpoint extends WorkerEndpoint {
             PreemptionClaim claim = exactPreemptionClaimLocked(
                     attemptToken, reservation);
             if (claim == null
-                    || claim.engineFenceTransferred
                     || !claim.phase.requiresOrdinaryReconciliation()) {
                 return false;
             }
-            // An ordinary finished sample is authoritative. Unlike an
-            // ambiguous priority ACK, it must clear the generic fence rather
-            // than transfer accounting into it.
+            // An ordinary finished sample settles the exact priority owner.
             releaseHeldKv(claim);
             removePreemptionClaimLocked(requestId, claim);
             if (reservation.reservationToken() > 0L) {
                 settleAuthoritativeTerminalLocked(
-                        new AuthoritativeTerminalProof(
-                                this,
-                                reservation,
-                                null,
-                                AuthoritativeTerminalOwner.WORKER_STATUS),
-                        System.currentTimeMillis());
+                        reservation, false, System.currentTimeMillis());
             } else {
                 settleUntrackedWorkerTerminalLocked(requestId);
             }
@@ -2415,7 +2138,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 }
                 PreemptionClaim claim = preemptionClaim(requestId);
                 if (claim != null
-                        && !claim.engineFenceTransferred
                         && claim.phase == PreemptionCancelPhase.NOT_FOUND_STALE
                         && !preemptionAttempts.containsKey(claim.attemptToken)) {
                     releaseHeldKv(claim);
@@ -2428,7 +2150,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 }
                 confirmedNow.add(requestId);
                 trackConfirmed(task, phase, now);
-                observeEngineFenceConfirmedLocked(requestId);
                 ReservationHandle accepted = workerStatusHandleLocked(requestId);
                 if (accepted != null) {
                     facts.add(WorkerStatusFact.accepted(accepted));
@@ -2472,15 +2193,8 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 facts.add(WorkerStatusFact.terminal(
                         terminal, task.errorCode()));
             }
-            AuthoritativeTerminalProof proof = terminal == null
-                    ? workerStatusTerminalProofLocked(requestId)
-                    : new AuthoritativeTerminalProof(
-                            this,
-                            terminal,
-                            null,
-                            AuthoritativeTerminalOwner.WORKER_STATUS);
-            if (proof != null) {
-                settleAuthoritativeTerminalLocked(proof, now);
+            if (terminal != null) {
+                settleAuthoritativeTerminalLocked(terminal, false, now);
             } else {
                 settleUntrackedWorkerTerminalLocked(requestId);
             }
@@ -2499,11 +2213,8 @@ public class DecodeEndpoint extends WorkerEndpoint {
             }
         }
 
-        // Preserve one union accounting owner for a confirmed request that
-        // temporarily vanished. Priority claims take precedence while live;
-        // the generic fence takes over only when no priority owner exists.
-        // This replaces the prior removeIf traversal, so the generic protection
-        // adds no extra per-status collection or wrapper allocation.
+        // Priority claims retain confirmed accounting until their exact
+        // settlement or local request expiration. Ordinary absent tasks are pruned.
         java.util.Iterator<Map.Entry<Long, DecodeRequestState>> confirmedIt =
                 decodeRequests.entrySet().iterator();
         while (confirmedIt.hasNext()) {
@@ -2516,18 +2227,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
             if (confirmedNow.contains(requestId)) {
                 continue;
             }
-            EngineFenceProtection protection =
-                    entry.getValue().engineFenceProtection;
-            PreemptionClaim priorityClaim = entry.getValue().preemptionClaim;
-            if (priorityClaim != null) {
-                if (protection != null) {
-                    releaseEngineFenceSyntheticHoldLocked(protection, true);
-                }
-                continue;
-            }
-            if (protection != null) {
-                protection.confirmedOwner = true;
-                ensureEngineFenceSyntheticHoldLocked(protection, true);
+            if (entry.getValue().preemptionClaim != null) {
                 continue;
             }
             confirmedIt.remove();
@@ -2535,8 +2235,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 rememberSettledLocked(requestId, now);
             }
         }
-        this.confirmedEngineOwnedCount = actualConfirmed + syntheticallyHeldSlots
-                + engineFenceHeldSlotCount;
+        this.confirmedEngineOwnedCount = actualConfirmed + syntheticallyHeldSlots;
 
         return facts;
     }
@@ -2597,98 +2296,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
             return false;
         }
         state.settledAtMs = settledAtMs;
-        return true;
-    }
-
-    /** Called with {@link #admissionLock} held after a fresh active observation. */
-    private void observeEngineFenceConfirmedLocked(long requestId) {
-        DecodeRequestState confirmed = confirmedRequest(requestId);
-        if (confirmed == null || confirmed.engineFenceProtection == null) {
-            return;
-        }
-        EngineFenceProtection protection = confirmed.engineFenceProtection;
-        retainEngineFenceDemandLocked(
-                protection, confirmed.kvTokens(), confirmed.kvTokens());
-        protection.confirmedOwner = true;
-        // The fresh engine report owns both slot and KV again. Any prior
-        // generic synthetic owner must disappear before the aggregate count is
-        // recomputed for this status round.
-        releaseEngineFenceSyntheticHoldLocked(protection, true);
-    }
-
-    /**
-     * Install the generic synthetic owner without replacing an existing slot
-     * count. When {@code slotAlreadyCounted} is false this is a shadow-to-
-     * synthetic transfer, so move the slot into confirmedEngineOwnedCount before
-     * the shadow map entry is removed.
-     */
-    private void ensureEngineFenceSyntheticHoldLocked(
-            EngineFenceProtection protection,
-            boolean slotAlreadyCounted) {
-        if (protection.syntheticHeld) {
-            return;
-        }
-        engineFenceHeldKv.addAndGet(protection.hardKvTokens);
-        engineFenceHeldExpectedKv.addAndGet(protection.expectedKvTokens);
-        engineFenceHeldSlotCount++;
-        protection.syntheticHeld = true;
-        if (!slotAlreadyCounted) {
-            confirmedEngineOwnedCount++;
-        }
-    }
-
-    /** Grow a conservative demand estimate without corrupting a live hold. */
-    private void retainEngineFenceDemandLocked(
-            EngineFenceProtection protection,
-            long hardKvTokens,
-            long expectedKvTokens) {
-        long previousHardKv = protection.hardKvTokens;
-        long previousExpectedKv = protection.expectedKvTokens;
-        protection.retainAtLeast(hardKvTokens, expectedKvTokens);
-        if (protection.syntheticHeld) {
-            engineFenceHeldKv.addAndGet(protection.hardKvTokens - previousHardKv);
-            engineFenceHeldExpectedKv.addAndGet(
-                    protection.expectedKvTokens - previousExpectedKv);
-        }
-    }
-
-    /** Called with {@link #admissionLock} held. */
-    private void releaseEngineFenceSyntheticHoldLocked(EngineFenceProtection protection) {
-        releaseEngineFenceSyntheticHoldLocked(protection, false);
-    }
-
-    /**
-     * Drop a synthetic hold. Calibration passes {@code preservePublishedSlot}
-     * when a fresh engine/priority owner replaces the slot later in the same
-     * critical section; keeping the old volatile count published until the
-     * final aggregate assignment prevents lock-free routing from observing a
-     * transient zero-load gap.
-     */
-    private void releaseEngineFenceSyntheticHoldLocked(
-            EngineFenceProtection protection,
-            boolean preservePublishedSlot) {
-        if (!protection.syntheticHeld) {
-            return;
-        }
-        engineFenceHeldKv.addAndGet(-protection.hardKvTokens);
-        engineFenceHeldExpectedKv.addAndGet(-protection.expectedKvTokens);
-        engineFenceHeldSlotCount--;
-        if (!preservePublishedSlot) {
-            confirmedEngineOwnedCount = Math.max(0, confirmedEngineOwnedCount - 1);
-        }
-        protection.syntheticHeld = false;
-    }
-
-    /** Called with {@link #admissionLock} held. */
-    private boolean clearEngineFenceProtectionLocked(long requestId) {
-        DecodeRequestState state = requestState(requestId);
-        EngineFenceProtection protection = state == null
-                ? null : state.engineFenceProtection;
-        if (protection == null) {
-            return false;
-        }
-        removeEngineFenceProtectionLocked(requestId, protection);
-        releaseEngineFenceSyntheticHoldLocked(protection);
         return true;
     }
 
@@ -2798,14 +2405,12 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 + engineDispatchPermitExpectedKvReservedTotal.get();
         return saturatedAddNonNegative(
                 saturatedAddNonNegative(reportedUsed, localEngineFacing),
-                saturatedAddNonNegative(
-                        priorityPreemptionHeldExpectedKv.get(),
-                        engineFenceHeldExpectedKv.get()));
+                priorityPreemptionHeldExpectedKv.get());
     }
 
     /**
      * Real KV available: engine-reported available minus local shadow,
-     * priority-fence, and generic EngineFence hard reservations.
+     * and priority preemption hard reservations.
      *
      * <p>Uses {@link #inflightHardKvReserved()} (prompt-only KV) rather than
      * {@link #inflightKvReserved()} (expected KV with generation) so that the
@@ -2821,8 +2426,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 getStatus().committedWorkerStatus().fields();
         return Math.max(0, fields.availableKvCacheTokens()
                 - inflightHardKvReserved()
-                - priorityPreemptionHeldKv.get()
-                - engineFenceHeldKv.get());
+                - priorityPreemptionHeldKv.get());
     }
 
     private long engineFacingKvAvailable(
@@ -2832,8 +2436,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 + engineDispatchPermitHardKvReservedTotal.get();
         return Math.max(0, fields.availableKvCacheTokens()
                 - localEngineFacing
-                - priorityPreemptionHeldKv.get()
-                - engineFenceHeldKv.get());
+                - priorityPreemptionHeldKv.get());
     }
 
     // ==================== Metrics ====================
@@ -2881,9 +2484,8 @@ public class DecodeEndpoint extends WorkerEndpoint {
         boolean capacityChanged;
         admissionLock.lock();
         try {
-            // A priority claim or generic EngineFence is a stronger accounting
-            // owner than age-only cleanup. In particular, an ambiguous
-            // ENGINE_MAY_HAVE_SEEN shadow remains charged until reconciliation.
+            // Scheduler-owned requests expire through their exact local lease.
+            // This pass only sweeps endpoint orphans.
             evicted = evictExpiredInflightLocked(
                     ttlMs, schedulerOwnsRequest);
             long cutoff = System.currentTimeMillis() - ttlMs;
@@ -2895,8 +2497,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 if (entry.getValue().confirmed()
                         && entry.getValue().lastSeenMs() < cutoff
                         && !schedulerOwnsRequest.test(entry.getKey())
-                        && entry.getValue().preemptionClaim == null
-                        && entry.getValue().engineFenceProtection == null) {
+                        && entry.getValue().preemptionClaim == null) {
                     trackedEvictIt.remove();
                     trackedPurged++;
                 }
@@ -2937,7 +2538,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
                     || nowMs - request.createdAtMs() <= ttlMs
                     || schedulerOwnsRequest.test(requestId)
                     || request.preemptionClaim != null
-                    || request.engineFenceProtection != null
                     || request.confirmed()
                     || !removeShadowExactLocked(requestId, request)) {
                 continue;
@@ -3409,8 +3009,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 0L,
                 status.availableKvCacheTokens()
                         - inflightKvReservedTotal.get()
-                        - priorityPreemptionHeldKv.get()
-                        - engineFenceHeldKv.get());
+                        - priorityPreemptionHeldKv.get());
         if (hardKvTokens > hardAvailable) {
             return true;
         }
@@ -3422,9 +3021,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
         long expectedUsed = saturatedAddNonNegative(
                 saturatedAddNonNegative(
                         reportedUsed, inflightExpectedKvReservedTotal.get()),
-                saturatedAddNonNegative(
-                        priorityPreemptionHeldExpectedKv.get(),
-                        engineFenceHeldExpectedKv.get()));
+                priorityPreemptionHeldExpectedKv.get());
         long projected = saturatedAddNonNegative(
                 expectedUsed, expectedKvTokens);
         return (double) projected * RoutingConfig.PERCENTAGE_SCALE
@@ -3483,10 +3080,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
         requirePriorityPreemptionHoldInvariant(
                 priorityHeldHardKv, priorityHeldExpectedKv);
         long currentHardCharges = saturatedAddNonNegative(
-                saturatedAddNonNegative(
-                        inflightKvReservedTotal.get(),
-                        priorityHeldHardKv),
-                engineFenceHeldKv.get());
+                inflightKvReservedTotal.get(), priorityHeldHardKv);
         long projectedHardSupply = saturatedAddNonNegative(
                 Math.max(0L, fields.availableKvCacheTokens()), freedHardKv);
         long projectedHardDemand = saturatedAddNonNegative(
@@ -3503,9 +3097,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
         long currentExpectedUsage = saturatedAddNonNegative(
                 saturatedAddNonNegative(
                         reportedUsed, inflightExpectedKvReservedTotal.get()),
-                saturatedAddNonNegative(
-                        priorityHeldExpectedKv,
-                        engineFenceHeldExpectedKv.get()));
+                priorityHeldExpectedKv);
         long usageAfterVictims = Math.max(
                 0L, currentExpectedUsage - freedExpectedUsage);
         long projectedExpectedUsage = saturatedAddNonNegative(
@@ -3613,33 +3205,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
         return OptionalLong.of(getTotalLoad());
     }
 
-    /**
-     * Mutable generic-fence owner. Every field is accessed only while holding
-     * {@link #admissionLock}; routing reads only the aggregate atomics/volatile
-     * counters, never these entries.
-     */
-    private static final class EngineFenceProtection {
-        private long hardKvTokens;
-        private long expectedKvTokens;
-        private boolean confirmedOwner;
-        private boolean syntheticHeld;
-
-        private EngineFenceProtection(long hardKvTokens,
-                                      long expectedKvTokens,
-                                      boolean confirmedOwner) {
-            this.hardKvTokens = Math.max(0, hardKvTokens);
-            this.expectedKvTokens = Math.max(this.hardKvTokens, expectedKvTokens);
-            this.confirmedOwner = confirmedOwner;
-        }
-
-        private void retainAtLeast(long hardKvTokens, long expectedKvTokens) {
-            this.hardKvTokens = Math.max(this.hardKvTokens, Math.max(0, hardKvTokens));
-            this.expectedKvTokens = Math.max(
-                    this.expectedKvTokens,
-                    Math.max(this.hardKvTokens, expectedKvTokens));
-        }
-    }
-
     private enum ClaimOwner {
         SHADOW_IN_FLIGHT,
         ENGINE_CONFIRMED
@@ -3651,8 +3216,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
         private final long hardKvTokens;
         private final long expectedKvTokens;
         private PreemptionCancelPhase phase = PreemptionCancelPhase.CLAIMED;
-        /** Endpoint accounting moved from this attempt to the Engine fence. */
-        private boolean engineFenceTransferred;
         private boolean kvHeldAfterWorkerRelease;
 
         private PreemptionClaim(long attemptToken, ClaimOwner owner,

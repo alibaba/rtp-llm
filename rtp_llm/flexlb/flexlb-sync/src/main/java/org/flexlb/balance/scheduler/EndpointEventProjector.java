@@ -218,7 +218,6 @@ public final class EndpointEventProjector {
             return;
         }
         DecodeAcceptance acceptance;
-        Runnable work = null;
         synchronized (slot) {
             if (!scheduler.isCurrentSlot(slot)
                     || !slot.ownsDecodeFact(source, fact.reservation())) {
@@ -226,29 +225,14 @@ public final class EndpointEventProjector {
             }
             slot.observeWorkerStatus(observedAtMs);
             acceptance = slot.markDecodeAccepted();
-            if (acceptance.releasableFence() != null) {
-                work = scheduler.materializePostLockActionLocked(
-                        slot,
-                        slot.reduceDeliveryConfirmed(
-                                slot.snapshot().batchId()),
-                        null);
-            }
         }
         releaseDecodeAcceptance(acceptance, fact.reservation().requestId());
-        scheduler.runPostLock(work);
     }
 
     private void releaseDecodeAcceptance(
             DecodeAcceptance acceptance,
             long requestId) {
         Throwable failure = null;
-        if (acceptance.releasableFence() != null) {
-            try {
-                acceptance.releasableFence().release();
-            } catch (Throwable cleanupFailure) {
-                failure = cleanupFailure;
-            }
-        }
         try {
             scheduler.releaseAdmissionCleanup(acceptance.admissionCleanup());
         } catch (Throwable cleanupFailure) {

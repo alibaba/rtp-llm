@@ -38,7 +38,6 @@ import java.util.concurrent.atomic.AtomicReference;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
@@ -200,30 +199,36 @@ class PrefillEndpointTest {
     }
 
     @Test
-    void releaseBatchRetainsOnlyProtectedMembers() {
-        ScheduledRequest protectedItem = createScheduledRequest(101L, 500, 200);
+    void expireBatchMemberReleasesOnlyItsExactOwnership() {
+        ScheduledRequest first = createScheduledRequest(101L, 500, 200);
         ScheduledRequest sibling = createScheduledRequest(102L, 300, 100);
-        registerBatch(endpoint, 7L, 100, List.of(protectedItem, sibling));
-        PrefillState.Protection protection =
-                endpoint.acquireBatchMemberProtection(7L, protectedItem);
-        assertNotNull(protection);
+        registerBatch(endpoint, 7L, 100, List.of(first, sibling));
 
-        assertTrue(endpoint.releaseCommittedItem(sibling));
-        assertTrue(endpoint.releaseCommittedItem(protectedItem));
-
+        assertTrue(endpoint.expireCommittedItem(first));
+        assertFalse(endpoint.expireCommittedItem(first));
         assertEquals(1, endpoint.getInflightBatchCount());
-        assertEquals(1,
-                endpoint.captureRouteProjectionInputs().work().batches().size(),
-                "partial repack must retain the registered group slot");
-        assertEquals(1, endpoint.admissionPendingRequestCount(),
-                "a delivery failure must not reopen capacity owned by an Engine fence");
+        assertEquals(1, endpoint.admissionPendingRequestCount());
+        assertEquals(1, endpoint.captureRouteProjectionInputs().work().batches().size());
 
-        endpoint.releaseEngineFenceProtection(protection);
+        assertTrue(endpoint.expireCommittedItem(sibling));
         assertEquals(0, endpoint.getInflightBatchCount());
-        assertEquals(0,
-                endpoint.captureRouteProjectionInputs().work().batches().size(),
-                "the last member releases the registered group slot");
+        assertEquals(0, endpoint.captureRouteProjectionInputs().work().batches().size());
         assertEquals(0, endpoint.admissionPendingRequestCount());
+    }
+
+    @Test
+    void staleExpirationCannotReleaseReusedRequestId() {
+        ScheduledRequest original = createScheduledRequest(101L, 500, 200);
+        registerBatch(endpoint, 7L, 100, List.of(original));
+        assertTrue(endpoint.expireCommittedItem(original));
+
+        ScheduledRequest replacement = createScheduledRequest(101L, 300, 100);
+        registerBatch(endpoint, 8L, 100, List.of(replacement));
+        assertFalse(endpoint.expireCommittedItem(original));
+        assertEquals(1, endpoint.getInflightBatchCount());
+        assertEquals(1, endpoint.admissionPendingRequestCount());
+        assertTrue(endpoint.expireCommittedItem(replacement));
+        assertEquals(0, endpoint.getInflightBatchCount());
     }
 
     @Test
@@ -576,11 +581,6 @@ class PrefillEndpointTest {
 
         calibrate(Map.of("101", priorityCanceledTask(101L, -1L)), Map.of());
 
-        // A terminal that carries no valid batch id (batchId <= 0) can no longer
-        // be attributed to a committed batch member: the canonical ledger only
-        // settles a batch member from a terminal that names the exact batch id.
-        // The member therefore stays committed until an exact-batch terminal,
-        // protection release, or TTL eviction reconciles it.
         assertEquals(1, endpoint.getInflightBatchCount());
         assertEquals(1, endpoint.admissionPendingRequestCount());
     }
@@ -691,17 +691,12 @@ class PrefillEndpointTest {
     }
 
     @Test
-    void calibrateMissingBatchIdPreservesProtectedBatchMember() {
-        ScheduledRequest protectedItem = createScheduledRequest(101L, 500, 200);
+    void calibrateMissingBatchIdPreservesExactBatchMember() {
+        ScheduledRequest firstItem = createScheduledRequest(101L, 500, 200);
         ScheduledRequest sibling = createScheduledRequest(102L, 300, 100);
         registerBatch(endpoint, 700L, 100,
-                List.of(protectedItem, sibling));
-        PrefillState.Protection protection =
-                endpoint.acquireBatchMemberProtection(700L, protectedItem);
-        assertNotNull(protection);
+                List.of(firstItem, sibling));
 
-        // Missing-batch-id terminals cannot be attributed to the batch, so
-        // neither the sibling nor the protected member is retired.
         calibrate(Map.of("102", priorityCanceledTask(102L, -1L)), Map.of());
         assertEquals(1, endpoint.getInflightBatchCount());
         assertEquals(2, endpoint.admissionPendingRequestCount());
@@ -712,39 +707,27 @@ class PrefillEndpointTest {
                 "generic endpoint calibration must not bypass the exact-batch reducer");
         assertEquals(2, endpoint.admissionPendingRequestCount());
 
-        // The protection never captured a deferred terminal (both missing-batch
-        // -id terminals were dropped), so releasing it settles nothing.
-        endpoint.releaseEngineFenceProtection(protection);
         assertEquals(1, endpoint.getInflightBatchCount());
         assertEquals(2, endpoint.admissionPendingRequestCount());
     }
 
     @Test
-    void authoritativeWorkerTerminalSettlesProtectedBatchMemberImmediately() {
-        ScheduledRequest protectedItem = createScheduledRequest(101L, 500, 200);
+    void authoritativeWorkerTerminalSettlesBatchMemberImmediately() {
+        ScheduledRequest firstItem = createScheduledRequest(101L, 500, 200);
         registerBatch(
                 endpoint,
                 700L,
                 100,
-                List.of(protectedItem));
-        PrefillState.Protection protection =
-                endpoint.acquireBatchMemberProtection(700L, protectedItem);
-        assertNotNull(protection);
+                List.of(firstItem));
 
         calibrate(Map.of(
                 "101", taskInfo(101L, 700L, null, 0, 10)), Map.of());
 
-        // A WorkerStatus terminal is an authoritative Engine reducer: it settles
-        // the exact-batch member immediately and invalidates the protection.
-        // Protection only fences external/TTL cleanup, so it no longer defers a
-        // canonical Engine terminal.
         assertEquals(0, endpoint.getInflightBatchCount());
         assertEquals(0,
                 endpoint.captureRouteProjectionInputs().work().batches().size());
         assertEquals(0, endpoint.admissionPendingRequestCount());
 
-        // Releasing the already-invalidated protection is a graceful no-op.
-        endpoint.releaseEngineFenceProtection(protection);
         assertEquals(0, endpoint.getInflightBatchCount());
         assertEquals(0,
                 endpoint.captureRouteProjectionInputs().work().batches().size());
@@ -752,7 +735,7 @@ class PrefillEndpointTest {
     }
 
     @Test
-    void authoritativeWorkerTerminalAppliesLearningImmediatelyDespiteProtection() {
+    void authoritativeWorkerTerminalAppliesLearningImmediately() {
         PrefillEndpoint learningEndpoint = createLearningEndpoint();
         try {
             PrefillTimePredictor.Evaluator initialEvaluator =
@@ -776,22 +759,14 @@ class PrefillEndpointTest {
 
             long batchId = 8_004L;
             long requestId = 9_004L;
-            ScheduledRequest protectedItem = createScheduledRequest(
+            ScheduledRequest firstItem = createScheduledRequest(
                     learningEndpoint, requestId, 500L, 200L);
             registerBatch(
                     learningEndpoint,
                     batchId,
                     100L,
-                    List.of(protectedItem));
-            PrefillState.Protection protection =
-                    learningEndpoint.acquireBatchMemberProtection(
-                            batchId, protectedItem);
-            assertNotNull(protection);
+                    List.of(firstItem));
 
-            // The WorkerStatus terminal is authoritative: it settles the member
-            // and feeds the predictor immediately, without waiting for the
-            // protection to end. The fourth valid sample publishes a new model
-            // revision at report time.
             reportSuccessfulBatchMember(
                     learningEndpoint, batchId, requestId, 104L);
             assertNotSame(initialEvaluator,
@@ -799,8 +774,6 @@ class PrefillEndpointTest {
                     "the authoritative terminal reaches predictor learning immediately");
             assertEquals(0, learningEndpoint.getInflightBatchCount());
 
-            // Releasing the already-invalidated protection changes nothing more.
-            learningEndpoint.releaseEngineFenceProtection(protection);
             assertNotSame(initialEvaluator,
                     learningEndpoint.getPredictor().evaluator());
             assertEquals(0, learningEndpoint.getInflightBatchCount());
@@ -810,31 +783,25 @@ class PrefillEndpointTest {
     }
 
     @Test
-    void deferredUnchangedLearningAddsNoSignalBeyondWorkerStatus() {
+    void unchangedLearningAddsNoSignalBeyondWorkerStatus() {
         PrefillEndpoint learningEndpoint = createLearningEndpoint();
         try {
             PrefillTimePredictor.Evaluator initialEvaluator =
                     learningEndpoint.getPredictor().evaluator();
             long batchId = 8_101L;
             long requestId = 9_101L;
-            ScheduledRequest protectedItem = createScheduledRequest(
+            ScheduledRequest firstItem = createScheduledRequest(
                     learningEndpoint, requestId, 500L, 200L);
             registerBatch(
                     learningEndpoint,
                     batchId,
                     100L,
-                    List.of(protectedItem));
-            PrefillState.Protection protection =
-                    learningEndpoint.acquireBatchMemberProtection(
-                            batchId, protectedItem);
-            assertNotNull(protection);
+                    List.of(firstItem));
 
             reportSuccessfulBatchMember(
                     learningEndpoint, batchId, requestId, 101L);
             assertSame(initialEvaluator,
                     learningEndpoint.getPredictor().evaluator());
-
-            learningEndpoint.releaseEngineFenceProtection(protection);
 
             assertSame(initialEvaluator,
                     learningEndpoint.getPredictor().evaluator(),
@@ -846,7 +813,7 @@ class PrefillEndpointTest {
     }
 
     @Test
-    void finishedSettlementRemovesMemberBeforeLateProtection() {
+    void finishedSettlementMakesLateExpirationANoOp() {
         ScheduledRequest item = createScheduledRequest(101L, 500, 200);
         registerBatch(
                 endpoint,
@@ -857,7 +824,7 @@ class PrefillEndpointTest {
         calibrate(Map.of(
                 "101", taskInfo(101L, 700L, null, 0, 10)), Map.of());
 
-        assertTrue(endpoint.acquireBatchMemberProtection(700L, item) == null);
+        assertFalse(endpoint.expireCommittedItem(item));
         assertEquals(0, endpoint.getInflightBatchCount());
         assertEquals(0,
                 endpoint.captureRouteProjectionInputs().work().batches().size());
@@ -922,9 +889,6 @@ class PrefillEndpointTest {
         ScheduledRequest reconciling = createScheduledRequest(101L, 500, 200);
         ScheduledRequest sibling = createScheduledRequest(102L, 300, 100);
         registerBatch(endpoint, 7L, 100, List.of(reconciling, sibling));
-        PrefillState.Protection protection =
-                endpoint.acquireBatchMemberProtection(7L, reconciling);
-        assertNotNull(protection);
 
         TaskInfo siblingSuccess = new TaskInfo();
         siblingSuccess.setBatchId(7L);
@@ -941,48 +905,33 @@ class PrefillEndpointTest {
         ambiguousMemberSuccess.setRequestId(101L);
         ambiguousMemberSuccess.setErrorCode(0);
         calibrate(Map.of("101", ambiguousMemberSuccess), Map.of());
-        // The exact-batch success terminal is an authoritative Engine reducer:
-        // it settles the protected member immediately and invalidates the
-        // protection, emptying the batch.
         assertEquals(0, endpoint.getInflightBatchCount(),
-                "an exact-batch terminal settles even a protected member");
+                "an exact-batch terminal settles the remaining member");
         assertEquals(0, endpoint.admissionPendingRequestCount());
 
-        // Releasing the already-invalidated protection is a graceful no-op.
-        endpoint.releaseEngineFenceProtection(protection);
         assertEquals(0, endpoint.getInflightBatchCount());
         assertEquals(0, endpoint.admissionPendingRequestCount());
     }
 
     @Test
-    void protectedAndSiblingFailuresSettleFromOneWorkerSnapshot() {
-        ScheduledRequest protectedItem = createScheduledRequest(101L, 500, 200);
+    void batchMemberFailuresSettleFromOneWorkerSnapshot() {
+        ScheduledRequest firstItem = createScheduledRequest(101L, 500, 200);
         ScheduledRequest sibling = createScheduledRequest(102L, 300, 100);
         registerBatch(endpoint, 7L, 100,
-                List.of(protectedItem, sibling));
-        PrefillState.Protection protection =
-                endpoint.acquireBatchMemberProtection(7L, protectedItem);
-        assertNotNull(protection);
+                List.of(firstItem, sibling));
 
-        TaskInfo protectedFailure = taskInfo(101L, 7L, null, 500, 40);
+        TaskInfo firstFailure = taskInfo(101L, 7L, null, 500, 40);
         TaskInfo siblingFailure = taskInfo(102L, 7L, null, 501, 50);
-        calibrate(Map.of("101", protectedFailure, "102", siblingFailure), Map.of());
+        calibrate(Map.of("101", firstFailure, "102", siblingFailure), Map.of());
 
-        // Both exact-batch failures settle from one authoritative worker
-        // snapshot: the protected member is not deferred, so the batch empties
-        // immediately and the protection is invalidated.
         assertEquals(0, endpoint.getInflightBatchCount());
         assertEquals(0, endpoint.admissionPendingRequestCount());
 
-        endpoint.releaseEngineFenceProtection(protection);
         assertEquals(0, endpoint.getInflightBatchCount());
         assertEquals(0, endpoint.admissionPendingRequestCount());
         verify(endpointReporter, never()).reportBatchPredictedTimeMs(
                 anyString(), anyString(), org.mockito.ArgumentMatchers.anyLong());
 
-        // Releasing the already-invalidated protection again is an idempotent
-        // no-op rather than a double-free error.
-        endpoint.releaseEngineFenceProtection(protection);
         assertEquals(0, endpoint.admissionPendingRequestCount());
     }
 
@@ -1057,31 +1006,20 @@ class PrefillEndpointTest {
     }
 
     @Test
-    void evictExpiredBatchesRetainsAckAmbiguousBatchUntilReconciled()
-            throws InterruptedException {
+    void expireUnobservedBatchDoesNotWaitForAnEngineReply() {
         ScheduledRequest item = createScheduledRequest(1L, 500, 200);
         registerBatch(endpoint, 1L, 100, List.of(item));
-        PrefillState.Protection protection =
-                endpoint.acquireBatchMemberProtection(1L, item);
-        assertNotNull(protection);
-        Thread.sleep(10);
 
-        assertEquals(0, endpoint.evictExpiredBatches(1));
-        assertEquals(1, endpoint.getInflightBatchCount());
-
-        endpoint.releaseEngineFenceProtection(protection);
-        // The protection captured no deferred terminal, so releasing it does
-        // not refresh batch activity. The already-aged batch therefore becomes
-        // immediately evictable once the fence is gone.
-        assertEquals(1, endpoint.evictExpiredBatches(1),
-                "releasing an unreconciled protection does not refresh activity");
+        assertTrue(endpoint.expireCommittedItem(item));
         assertEquals(0, endpoint.getInflightBatchCount());
+        assertEquals(0, endpoint.admissionPendingRequestCount());
+        assertFalse(endpoint.expireCommittedItem(item));
     }
 
-    // ---- admissionPendingRequestCount ----
+    // ---- observedRequestCount ----
 
     @Test
-    void admissionPendingRequestCountUnionsEngineTasksWithLocalLedger() {
+    void observedRequestCountUnionsEngineTasksWithLocalLedger() {
         registerBatch(endpoint, 1L, 100, List.of(
                 createScheduledRequest(101L, 500, 0),
                 createScheduledRequest(102L, 500, 0)));

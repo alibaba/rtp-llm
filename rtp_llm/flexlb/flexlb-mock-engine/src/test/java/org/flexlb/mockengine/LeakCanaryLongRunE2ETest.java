@@ -36,9 +36,6 @@ class LeakCanaryLongRunE2ETest {
     @Test
     @Timeout(115)
     void d_long_run_mixed_traffic_with_transient_faults_leaks_nothing() throws Exception {
-        // Use the mock's authoritative Cancel channel. An unsupported channel
-        // intentionally retains post-delivery ambiguous ownership behind an
-        // EngineFence, which is a production safety property rather than a leak.
         try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(BASE_PORT, 2, 1, "5", 1.0, true)) {
             h.allowPreemption(VictimStage.PREFILL_QUEUED);
             // PR-D: rescue removed — reducer deadline + exact ownership cleanup

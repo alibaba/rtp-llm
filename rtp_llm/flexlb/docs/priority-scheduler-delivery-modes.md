@@ -193,6 +193,14 @@ timeout. The caller's protobuf `generate_timeout` remains a transport/engine
 field and does not control FlexLB scheduling. Consequently there are no SLO
 length buckets, SLO budgets, or priority TTL multipliers to configure.
 
+Only priority preemption may send an Engine Cancel RPC. Uncertain delivery,
+ordinary client cancellation, and inactivity expiry never send Engine Cancel.
+A request with no matching Engine status for
+`scheduler.lifecycle.staleInflightTimeoutMs` is removed from Master tracking,
+and its exact Prefill/Decode accounting is released locally. Matching Engine
+status renews this inactivity deadline; delivery acknowledgements do not.
+Cleanup does not wait for Engine cancellation or terminal evidence.
+
 ## Configuration reference
 
 Only `FLEXLB_CONFIG` controls these behaviors. The parser rejects unknown and
@@ -214,7 +222,7 @@ accepted.
 | `scheduler.decision.maxPredictedExecutionMs` | `QUEUE + FIXED_WINDOW` | omitted | Optional positive inclusive group-growth cap; reaching it dispatches immediately, and an indivisible singleton may exceed it |
 | `scheduler.capacity.maxOutstandingRequestsGlobal` | `QUEUE` | `100000` | Exact cluster-wide cap on requests owned by QUEUE |
 | `scheduler.capacity.maxWaitingRequestsPerPrefillWorker` | `QUEUE` | `1024` | Positive hard bound for each Prefill waiting queue |
-| `scheduler.lifecycle.staleInflightTimeoutMs` | `QUEUE` | `300000` ms | Stale inflight reconciliation bound |
+| `scheduler.lifecycle.staleInflightTimeoutMs` | `QUEUE` | `300000` ms | Maximum request inactivity before exact local cleanup |
 | `scheduler.lifecycle.deliveredNotAcceptedTimeoutMs` | `QUEUE` | `30000` ms | Bound before reconciling work delivered but not accepted by Decode |
 | `scheduler.lifecycle.maxDeliveredNotAcceptedRequestsGlobal` | `QUEUE` | `200` | Global Decode acceptance guard, acquired during delivery preparation |
 

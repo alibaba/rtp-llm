@@ -6,6 +6,7 @@ import org.flexlb.util.Logger;
 
 import java.util.List;
 import java.util.Objects;
+import java.util.OptionalLong;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
@@ -42,7 +43,8 @@ final class ExpirationTimer implements AutoCloseable {
     /** Exact capabilities detached together from one slot during shutdown. */
     record DetachedDeadlines(
             RequestDeadline requestDeadline,
-            AcceptanceDeadline acceptanceDeadline) {
+            AcceptanceDeadline acceptanceDeadline,
+            InactivityDeadline inactivityDeadline) {
     }
 
     private enum CloseState {
@@ -130,6 +132,13 @@ final class ExpirationTimer implements AutoCloseable {
     /** Exact one-shot capability for one delivered request's acceptance deadline. */
     static final class AcceptanceDeadline extends DeadlineRegistration {
         private AcceptanceDeadline(ExpirationTimer owner) {
+            super(owner);
+        }
+    }
+
+    /** Exact one-shot wake-up for this generation's inactivity deadline. */
+    static final class InactivityDeadline extends DeadlineRegistration {
+        private InactivityDeadline(ExpirationTimer owner) {
             super(owner);
         }
     }
@@ -226,6 +235,54 @@ final class ExpirationTimer implements AutoCloseable {
             }
             throw timerStopped;
         }
+    }
+
+    InactivityDeadline attachInactivityDeadline(RequestSlot slot) {
+        if (lifecycle.isShuttingDown()) {
+            return null;
+        }
+        OptionalLong deadlineAtMs;
+        synchronized (slot) {
+            if (!lifecycle.isCurrentSlot(slot)) {
+                return null;
+            }
+            deadlineAtMs = slot.inactivityDeadlineAtMs();
+        }
+        if (deadlineAtMs.isEmpty()) {
+            return null;
+        }
+        try {
+            return register(slot, new InactivityDeadline(this), delayUntil(deadlineAtMs.getAsLong()),
+                    (owner, exact) -> {
+                        synchronized (owner) {
+                            return lifecycle.isCurrentSlot(owner) && owner.installInactivityDeadline(exact);
+                        }
+                    }, this::inactivityDeadlineExpired);
+        } catch (RuntimeException timerStopped) {
+            if (lifecycle.isShuttingDown()) {
+                return null;
+            }
+            throw timerStopped;
+        }
+    }
+
+    private void inactivityDeadlineExpired(RequestSlot slot, InactivityDeadline exact) {
+        synchronized (slot) {
+            if (!slot.expireInactivityDeadline(exact)) {
+                return;
+            }
+        }
+        try {
+            lifecycle.cancelForRequestInactivity(slot, clock.getAsLong());
+        } finally {
+            // Engine facts only renew the timestamp. Rearm when the old wake-up
+            // fires, so frequent status reports do not create new timer tasks.
+            attachInactivityDeadline(slot);
+        }
+    }
+
+    boolean cancel(InactivityDeadline exactDeadline) {
+        return requireOwner(exactDeadline).cancel();
     }
 
     boolean cancel(RequestDeadline exactDeadline) {
@@ -548,6 +605,8 @@ final class ExpirationTimer implements AutoCloseable {
                     detached.requestDeadline(), failure);
             failure = cancelDetached(
                     detached.acceptanceDeadline(), failure);
+            failure = cancelDetached(
+                    detached.inactivityDeadline(), failure);
         }
         return failure;
     }
