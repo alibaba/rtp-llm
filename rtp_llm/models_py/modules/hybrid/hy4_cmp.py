@@ -582,12 +582,12 @@ class Hy4Cmp:
         index_fp8 = x_fp8 if attn._reuse_mxfp8_hidden_quant else None
         index_scale = x_scale if attn._reuse_mxfp8_hidden_quant else None
         indexed = attn.indexer is not None and not reuse_topk
-        parallel_tail = indexed and str(self.config.model_type) == "hy_v4"
+        parallel_tail = indexed
         parallel_frontend = parallel_tail and self._indexer_frontend_parallel
         defer_score = indexed and self._serialize_score_after_q_path(fmha_impl)
         buffers = self._allocate_buffers(hidden, indexed)
-        # Serial MTP/frontend-off retains the joint launch; splitting it would
-        # add a launch without opening an overlap window.
+        # Frontend-off retains the joint launch; splitting it would add a
+        # launch without opening an overlap window.
         split_indexer = parallel_frontend and self._prepare_split_indexer(
             buffers, fmha_impl, kv_cache
         )

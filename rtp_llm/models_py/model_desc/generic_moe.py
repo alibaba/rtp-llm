@@ -810,7 +810,7 @@ class GenericMoeDecoderLayer(nn.Module):
         prev_topk_indices,
         force_reuse_topk_indices,
     ) -> DecodeLayerOutput:
-        """MTP CMP entry; keep HY4 fusion and shared inputs on the caller stream."""
+        """MTP CMP entry; publish caller-produced inputs to HY4's three streams."""
         fp8_hs = scale = fp32_hs = None
         if self._fuse_hy4_cmp_input_norm_quant and hidden_states.dim() == 2:
             emit_head_gate_fp32 = bool(

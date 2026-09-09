@@ -1122,12 +1122,21 @@ class Hy4IndependentCmpTest(unittest.TestCase):
         self.assertIn(("score", "index"), case.log)
         self.assertFalse(any(x[1] == "index_q" for x in case.log))
 
-    def test_mtp_and_topk_reuse_do_not_create_streams_or_events(self):
-        for model, reuse in (
-            ("hy_v4_mtp", False),
-            ("hy_v4", True),
-            ("hy_v4_mtp", True),
-        ):
+    def test_mtp_indexer_uses_streams_and_topk_reuse_stays_serial(self):
+        case = self._case("hy_v4_mtp")
+        with self._queues(case) as queues:
+            _, topk = case.cmp.forward_attention(
+                case.hidden, case.fmha, case.cache, return_topk=True
+            )
+        queues.streams.assert_called_once()
+        queues.events.assert_called_once()
+        queues.lifetime.assert_called()
+        self.assertIsNotNone(topk)
+        self.assertIn(("index_k", "index"), case.log)
+        self.assertIn(("index_q", "index_q"), case.log)
+        self.assertIn(("score", "index"), case.log)
+
+        for model in ("hy_v4", "hy_v4_mtp"):
             case = self._case(model)
             previous = torch.zeros(2, 1, dtype=torch.int32)
             with self._queues(case) as queues:
@@ -1135,21 +1144,20 @@ class Hy4IndependentCmpTest(unittest.TestCase):
                     case.hidden,
                     case.fmha,
                     case.cache,
-                    force_reuse_topk_indices=reuse,
+                    force_reuse_topk_indices=True,
                     prev_topk_indices=previous,
                     return_topk=True,
                 )
             queues.streams.assert_not_called()
             queues.events.assert_not_called()
             queues.lifetime.assert_not_called()
-            if reuse:
-                self.assertIs(topk, previous)
-                self.assertFalse(
-                    any(
-                        x[0] in ("index_k", "index_q", "post", "score")
-                        for x in case.log
-                    )
+            self.assertIs(topk, previous)
+            self.assertFalse(
+                any(
+                    x[0] in ("index_k", "index_q", "post", "score")
+                    for x in case.log
                 )
+            )
 
     def test_shared_quantization_and_q_norm_inputs_are_not_recomputed(self):
         case = self._case()
