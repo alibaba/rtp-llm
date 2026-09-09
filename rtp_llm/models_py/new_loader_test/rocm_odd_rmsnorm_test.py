@@ -2,6 +2,7 @@ import unittest
 from unittest import mock
 
 import torch
+import rtp_llm.models_py.layers.norm as norm_module
 from rtp_llm.models_py.layers.norm import RMSNorm, RMSResNorm
 
 
@@ -14,8 +15,22 @@ class RocmOddRmsNormTest(unittest.TestCase):
                 "RocmOddRmsNormTest requires the ROCm accelerator assigned by CI"
             )
 
+    def setUp(self):
+        norm_module._RMSNORM_FUSED_ENABLED = True
+
+    def tearDown(self):
+        norm_module._RMSNORM_FUSED_ENABLED = True
+
+    @staticmethod
+    def _load_aiter():
+        try:
+            import aiter
+        except (ImportError, OSError, RuntimeError):
+            return None
+        return aiter
+
     def test_rmsnorm_odd_hidden_sizes_use_opus_and_match_reference(self):
-        import aiter
+        aiter = self._load_aiter()
 
         for hidden_size in (769, 771):
             with self.subTest(hidden_size=hidden_size):
@@ -30,22 +45,25 @@ class RocmOddRmsNormTest(unittest.TestCase):
                     * torch.rsqrt(inputs_fp32.pow(2).mean(-1, keepdim=True) + layer.eps)
                 ).to(inputs.dtype)
 
-                with mock.patch.object(
-                    aiter,
-                    "rmsnorm2d_fwd_opus",
-                    wraps=aiter.rmsnorm2d_fwd_opus,
-                ) as opus, mock.patch.object(
-                    aiter,
-                    "rms_norm",
-                    side_effect=AssertionError("unsafe RMSNorm path selected"),
-                ):
+                if aiter is None:
                     output = layer(inputs)
-
-                opus.assert_called_once()
+                    self.assertFalse(norm_module._RMSNORM_FUSED_ENABLED)
+                else:
+                    with mock.patch.object(
+                        aiter,
+                        "rmsnorm2d_fwd_opus",
+                        wraps=aiter.rmsnorm2d_fwd_opus,
+                    ) as opus, mock.patch.object(
+                        aiter,
+                        "rms_norm",
+                        side_effect=AssertionError("unsafe RMSNorm path selected"),
+                    ):
+                        output = layer(inputs)
+                    opus.assert_called_once()
                 torch.testing.assert_close(output, expected, rtol=2e-2, atol=2e-2)
 
     def test_rmsresnorm_odd_hidden_sizes_use_opus_and_match_reference(self):
-        import aiter
+        aiter = self._load_aiter()
 
         for hidden_size in (769, 771):
             with self.subTest(hidden_size=hidden_size):
@@ -64,18 +82,21 @@ class RocmOddRmsNormTest(unittest.TestCase):
                     )
                 ).to(hidden_states.dtype)
 
-                with mock.patch.object(
-                    aiter,
-                    "rmsnorm2d_fwd_with_add_opus",
-                    wraps=aiter.rmsnorm2d_fwd_with_add_opus,
-                ) as opus, mock.patch.object(
-                    aiter,
-                    "rmsnorm2d_fwd_with_add",
-                    side_effect=AssertionError("unsafe RMSResNorm path selected"),
-                ):
+                if aiter is None:
                     output, residual_out = layer(hidden_states, residual)
-
-                opus.assert_called_once()
+                    self.assertFalse(norm_module._RMSNORM_FUSED_ENABLED)
+                else:
+                    with mock.patch.object(
+                        aiter,
+                        "rmsnorm2d_fwd_with_add_opus",
+                        wraps=aiter.rmsnorm2d_fwd_with_add_opus,
+                    ) as opus, mock.patch.object(
+                        aiter,
+                        "rmsnorm2d_fwd_with_add",
+                        side_effect=AssertionError("unsafe RMSResNorm path selected"),
+                    ):
+                        output, residual_out = layer(hidden_states, residual)
+                    opus.assert_called_once()
                 self.assertIs(output, hidden_states)
                 self.assertIs(residual_out, residual)
                 torch.testing.assert_close(

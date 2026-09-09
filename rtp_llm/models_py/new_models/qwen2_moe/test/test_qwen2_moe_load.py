@@ -42,7 +42,7 @@ def _moe_config():
     return types.SimpleNamespace(
         ll_num_max_token=1,
         masked_max_token_num=1,
-        moe_strategy=0,
+        moe_strategy="auto",
         use_mori_ep=False,
         use_deepep_moe=False,
         use_deepep_low_latency=False,
@@ -352,9 +352,11 @@ class Qwen2MoeLoadTest(unittest.TestCase):
             [[0.5, -1.0, 0.75, 1.5], [-0.25, 1.25, -0.5, 0.75]]
         )
         residual = torch.tensor([[0.1, 0.2, -0.3, 0.4], [0.5, -0.25, 0.75, -1.0]])
+        original_hidden_states = hidden_states.clone()
+        original_residual = residual.clone()
         actual_hidden, actual_residual = layer(hidden_states, residual, fmha_impl=None)
 
-        first_residual = hidden_states + residual
+        first_residual = original_hidden_states + original_residual
         attention_input = _rms_norm_reference(
             first_residual,
             weights["model.layers.0.input_layernorm.weight"],

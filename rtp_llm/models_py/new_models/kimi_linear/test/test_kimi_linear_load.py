@@ -3,6 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 from unittest.mock import patch
 
 import torch
@@ -113,6 +114,35 @@ def _load_config(**overrides):
         ep_rank=0,
         compute_dtype=torch.float32,
         device="cpu",
+        parallelism_config=SimpleNamespace(
+            tp_size=1,
+            tp_rank=0,
+            ep_size=1,
+            ep_rank=0,
+            dp_size=1,
+            dp_rank=0,
+            world_size=1,
+            local_rank=0,
+            get_attn_tp_size=lambda: 1,
+            get_attn_tp_rank=lambda: 0,
+            get_ffn_tp_size=lambda: 1,
+            get_ffn_tp_rank=lambda: 0,
+            prefill_cp_config=SimpleNamespace(
+                is_enabled=lambda: False,
+                is_prefill_enabled=lambda: False,
+            ),
+            ffn_disaggregate_config=SimpleNamespace(enable_ffn_disaggregate=False),
+        ),
+        moe_config=SimpleNamespace(
+            ll_num_max_token=1,
+            masked_max_token_num=1,
+            moe_strategy="auto",
+            use_mori_ep=False,
+            use_deepep_moe=False,
+            use_deepep_low_latency=False,
+            use_all_gather=True,
+            fake_balance_expert=False,
+        ),
     )
     values.update(overrides)
     return NewLoaderConfig(**values)
