@@ -17,7 +17,12 @@ from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
 from rtp_llm.models_py.modules.base import GroupTopK, RMSNorm
 from rtp_llm.models_py.triton_kernels.common.activation import situ_and_mul
 from rtp_llm.ops import ParallelismConfig
+from rtp_llm.utils.k3_megamoe_trace import (
+    expert_output_tensors,
+    prepare_expert_output_view,
+)
 from rtp_llm.utils.k3_model_trace import record_module
+from rtp_llm.utils.k3_tensor_trace import enabled as trace_enabled
 
 if TYPE_CHECKING:
     from rtp_llm.models.kimi_k3.kimi_k3 import KimiK3ModelConfig
@@ -374,6 +379,11 @@ class KimiK3LatentMoE(nn.Module):
             use_fp8_dispatch=True,
             activation="situ",
         )
+        self._k3_expert_output_view = (
+            prepare_expert_output_view(self._mega_buf, deep_gemm)
+            if trace_enabled()
+            else None
+        )
         output_capacity = max(
             max_tokens_per_rank,
             int(getattr(self._mega_buf, "num_max_tokens_per_rank", 0)),
@@ -471,6 +481,15 @@ class KimiK3LatentMoE(nn.Module):
             fast_math=True,
         )
         record_module(self, "dispatch.output", output)
+        if self._k3_expert_output_view is not None:
+            record_module(
+                self,
+                "experts.fc2",
+                expert_output_tensors(
+                    self._k3_expert_output_view,
+                    self._mega_buf.topk_idx[:token_count],
+                ),
+            )
         return output
 
     def _maybe_pre_kernel_barrier(

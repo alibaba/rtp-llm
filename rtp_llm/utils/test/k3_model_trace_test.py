@@ -24,6 +24,7 @@ def load(name, filename):
 
 
 recorder = load("k3_model_test_recorder", "k3_tensor_trace.py")
+megamoe_trace = load("k3_megamoe_under_test", "k3_megamoe_trace.py")
 with patch.dict(sys.modules, {"rtp_llm.utils.k3_tensor_trace": recorder}):
     tracing = load("k3_model_under_test", "k3_model_trace.py")
 
@@ -99,6 +100,40 @@ class ModelTraceTest(unittest.TestCase):
         model(inputs(torch.ones(1, 2)))
         tracing.close_models()
         self.assertEqual(len(self.frames()), 1)
+
+    def test_expert_outputs_keep_slots_and_mask_stale_padding(self):
+        model = ToyModel("main")
+        manager = model._k3_trace_replay.__self__
+        view = torch.tensor(
+            [[[1, 2], [3, 4], [99, 99]], [[5, 6], [float("nan"), 8], [99, 99]]],
+            dtype=torch.bfloat16,
+        )
+        ids = torch.tensor([[7, 9], [4, -1]])
+
+        def operation(value):
+            tracing.record_module(
+                model.projection,
+                "fc2",
+                megamoe_trace.expert_output_tensors(view, ids),
+            )
+            view.fill_(-100)
+            ids.fill_(-1)
+            return value
+
+        manager.forward(operation, inputs(torch.ones(2, 2)))
+        tracing.close_models()
+        tensors = {item["name"]: item["value"] for item in self.frames()[0]["tensors"]}
+        torch.testing.assert_close(
+            tensors["main.projection.fc2.values"],
+            torch.tensor([[[1, 2], [5, 6]], [[3, 4], [0, 0]]], dtype=torch.bfloat16),
+        )
+        torch.testing.assert_close(
+            tensors["main.projection.fc2.expert_ids"], torch.tensor([[7, 9], [4, -1]])
+        )
+        torch.testing.assert_close(
+            tensors["main.projection.fc2.valid"],
+            torch.tensor([[True, True], [True, False]]),
+        )
 
     def test_cache_pages_preserve_mapping_and_values_before_reuse(self):
         model = ToyModel("main")
