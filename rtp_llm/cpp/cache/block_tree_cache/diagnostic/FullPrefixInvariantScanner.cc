@@ -82,6 +82,8 @@ const char* invalidResourceReasonName(InvalidResourceReason reason) {
     switch (reason) {
         case InvalidResourceReason::NONE:
             return "none";
+        case InvalidResourceReason::MULTI_TIER:
+            return "multi_tier";
         case InvalidResourceReason::PARTIAL_DEVICE:
             return "partial_device";
         case InvalidResourceReason::IDLE_DETACHED:
@@ -93,6 +95,9 @@ const char* invalidResourceReasonName(InvalidResourceReason reason) {
 }
 
 InvalidResourceReason invalidResourceReason(const GroupSetResource& resource) {
+    if (resource.servingTierCount() > 1) {
+        return InvalidResourceReason::MULTI_TIER;
+    }
     if (resource.hasTier(Tier::DEVICE) && !resource.hasCompleteDeviceValue()) {
         return InvalidResourceReason::PARTIAL_DEVICE;
     }

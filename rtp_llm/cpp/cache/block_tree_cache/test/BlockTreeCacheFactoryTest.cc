@@ -1324,7 +1324,7 @@ TEST_F(BlockTreeCacheFactoryTest, PhysicallyDifferentGroupsShareGroupSetResource
     releaseInsertedRequestBlocks(allocator, blocks);
 }
 
-TEST_F(BlockTreeCacheFactoryTest, ReinsertMergesMissingTierOnlyForIdleGroupSetResource) {
+TEST_F(BlockTreeCacheFactoryTest, ReinsertRefillsOnlyEmptyIdleGroupSetResource) {
     const CacheConfig config    = makeHybridConfig(/*independent_pools=*/true);
     auto              allocator = initAllocator<HybridPoolKVCacheAllocator>(config);
     KVCacheConfig     kv_cache_config;
@@ -1445,22 +1445,15 @@ TEST_F(BlockTreeCacheFactoryTest, ReinsertMergesMissingTierOnlyForIdleGroupSetRe
                   Tier::DEVICE,
                   /*write_remote=*/true,
                   /*is_resident=*/false);
-    EXPECT_EQ(cache->getKeySnapshot().version, before_host.version + 1);
+    EXPECT_EQ(cache->getKeySnapshot().version, before_host.version);
+    EXPECT_EQ(node->group_set_resources[0].candidate_meta.last_access_seq, host_meta_before.last_access_seq);
+    EXPECT_EQ(node->group_set_resources[0].candidate_meta.admission_seq, host_meta_before.admission_seq);
+    EXPECT_EQ(node->group_set_resources[0].candidate_meta.hit_count, host_meta_before.hit_count);
     EXPECT_EQ(node->group_set_resources[0].host_block, host_a);
-    EXPECT_EQ(node->group_set_resources[0].device_blocks, (BlockIndicesType{host_replacement->front()}));
-    EXPECT_EQ(node->group_set_resources[0].servingTierCount(), 2u);
-    EXPECT_EQ(group_set_a->devicePools()[0]->refCount(host_replacement->front()), 2u);
+    EXPECT_FALSE(node->group_set_resources[0].hasTier(Tier::DEVICE));
     EXPECT_EQ(group_set_a->hostPool()->treeRefCount(host_a), 1u);
-    EXPECT_EQ(cache->getStats().device_heap_total_size, 2u);
-    EXPECT_GT(node->group_set_resources[0].candidate_meta.last_access_seq, host_meta_before.last_access_seq);
-    EXPECT_GT(node->group_set_resources[0].candidate_meta.admission_seq, host_meta_before.admission_seq);
-
-    clear_group_set_a(host_replacement->front());
-    EXPECT_EQ(group_set_a->devicePools()[0]->refCount(host_replacement->front()), 1u);
     node->group_set_resources[0].host_block = NULL_BLOCK_IDX;
     group_set_a->releaseSingleBlock(Tier::HOST, host_a, BlockTreeRefType::CACHE);
-    ASSERT_TRUE(node->group_set_resources[0].is_empty());
-
     for (const auto state : {GroupSetTransferState::DEMOTING, GroupSetTransferState::LOADING}) {
         SCOPED_TRACE(state == GroupSetTransferState::DEMOTING ? "demoting" : "loading");
         node->group_set_resources[0].transfer_state = state;

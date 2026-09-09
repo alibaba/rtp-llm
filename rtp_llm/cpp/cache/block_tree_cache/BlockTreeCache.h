@@ -123,7 +123,7 @@ public:
     ~BlockTreeCache();
     bool init();
 
-    BlockTreeMatchResult match(const CacheKeysType& cache_keys, const BlockTreeMatchPolicy& policy = {});
+    BlockTreeMatchResult match(const CacheKeysType& cache_keys);
     void                 insert(const CacheKeysType&                              cache_keys,
                                 const std::vector<std::vector<GroupSetResource>>& resources,
                                 Tier                                              target_tier,

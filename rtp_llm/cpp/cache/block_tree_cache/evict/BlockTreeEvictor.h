@@ -134,8 +134,6 @@ private:
     void                            collectFullPrune(const TransferDescriptor&                  eviction_desc,
                                                      EvictionDropTask&                          task,
                                                      std::vector<std::pair<TreeNode*, size_t>>& detached_resources) const;
-    void                            normalizeFullPruneRoot(EvictionDropTask&                          task,
-                                                           std::vector<std::pair<TreeNode*, size_t>>& detached_resources) const;
     void                            reserveSource(const std::vector<TransferDescriptor>& eviction_descs);
     std::vector<TransferDescriptor> restoreSource(const std::vector<TransferDescriptor>& eviction_descs);
     void                            releaseTargetBlocks(const std::vector<TransferDescriptor>& descs);

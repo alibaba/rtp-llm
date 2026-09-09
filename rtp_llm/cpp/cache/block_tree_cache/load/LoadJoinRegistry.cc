@@ -1,9 +1,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/load/LoadJoinRegistry.h"
 
-#include <algorithm>
 #include <utility>
 
-#include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
@@ -11,12 +9,10 @@ namespace rtp_llm {
 bool LoadJoinRegistry::start(TreeNode*                                node,
                              size_t                                   group_set_id,
                              const std::vector<BlockIdxType>&         target_blocks,
-                             const std::shared_ptr<LoadAsyncContext>& context,
-                             bool                                     install_target_in_cache) {
+                             const std::shared_ptr<LoadAsyncContext>& context) {
     Record record;
     record.target_blocks                 = target_blocks;
     record.owner_context_id              = context->contextId();
-    record.owner_install_target_in_cache = install_target_in_cache;
     const std::pair<decltype(records_)::iterator, bool> insert_result =
         records_.emplace(Key{node, group_set_id}, std::move(record));
     return insert_result.second;
@@ -37,7 +33,7 @@ bool LoadJoinRegistry::join(const std::shared_ptr<LoadAsyncContext>& context) {
             return false;
         }
         if (record_it->second.joined_contexts.find(context_id) == record_it->second.joined_contexts.end()) {
-            record_it->second.joined_contexts[context_id] = {context, desc.install_target_in_cache};
+            record_it->second.joined_contexts[context_id] = context;
         }
         context->setTargetBlocks(desc_index, record_it->second.target_blocks);
         tree_->groupSets()[desc.group_set_id]->referenceBlocks(
@@ -57,7 +53,7 @@ bool LoadJoinRegistry::finish(TreeNode*                                       no
     records_.erase(record_it);
 
     for (const auto& context_entry : contexts) {
-        const std::shared_ptr<LoadAsyncContext> context = context_entry.second.context.lock();
+        const std::shared_ptr<LoadAsyncContext> context = context_entry.second.lock();
         if (context != nullptr) {
             joined_contexts.push_back(context);
         }
@@ -65,15 +61,6 @@ bool LoadJoinRegistry::finish(TreeNode*                                       no
     return true;
 }
 
-bool LoadJoinRegistry::installTargetInCache(TreeNode* node, size_t group_set_id) const {
-    const auto record_it = records_.find(Key{node, group_set_id});
-    RTP_LLM_CHECK_WITH_INFO(
-        record_it != records_.end(), "missing load join record during settlement, group_set_id=%zu", group_set_id);
-    return record_it->second.owner_install_target_in_cache
-           || std::any_of(record_it->second.joined_contexts.begin(),
-                          record_it->second.joined_contexts.end(),
-                          [](const auto& context_entry) { return context_entry.second.install_target_in_cache; });
-}
 
 bool LoadJoinRegistry::eraseForContext(TreeNode* node, size_t group_set_id, uint64_t context_id) {
     const auto record_it = records_.find(Key{node, group_set_id});
