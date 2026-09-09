@@ -1,3 +1,4 @@
+import importlib
 import json
 import logging
 import os
@@ -22,12 +23,55 @@ from rtp_llm.utils.fuser import fetch_remote_file_to_local
 RUN_AFFINITY_TIMEOUT_SEC = 10
 
 
+def _backend_module_available(module_name: str, required_attributes=()) -> bool:
+    try:
+        module = importlib.import_module(module_name)
+    except (ImportError, OSError):
+        return False
+    return all(hasattr(module, attribute) for attribute in required_attributes)
+
+
+def is_deepep_available() -> bool:
+    """Return whether the installed DeepEP package can be imported and used."""
+    return _backend_module_available("deep_ep", ("Buffer", "Config"))
+
+
+def is_moriep_available() -> bool:
+    """Return whether the installed MoriEP package can be imported."""
+    return _backend_module_available("mori")
+
+
+def _collective_moe_topology(parallelism_config: ParallelismConfig) -> Optional[str]:
+    """Return the collective MoE backend supported by the physical topology."""
+    tp_size = parallelism_config.tp_size
+    ep_size = parallelism_config.ep_size
+    dp_size = parallelism_config.dp_size
+    prefill_cp_enabled = parallelism_config.prefill_cp_config.is_enabled()
+
+    if ep_size == 1 or (
+        tp_size > 1 and dp_size == 1 and ep_size == tp_size and not prefill_cp_enabled
+    ):
+        return "all-gather"
+    if tp_size == 1 and dp_size > 1 and ep_size == dp_size:
+        return "PureDP"
+    if tp_size > 1 and dp_size == 1 and ep_size == tp_size and prefill_cp_enabled:
+        return "PureCP"
+    return None
+
+
+def _disable_deepep(moe_config) -> None:
+    moe_config.use_deepep_moe = False
+    moe_config.use_deepep_low_latency = False
+    moe_config.use_deepep_internode = False
+
+
 def auto_configure_deepep(
     moe_config,
     deep_ep_config,
     parallelism_config: ParallelismConfig,
     role_type: RoleType,
     ll_num_max_token: int = 0,
+    deepep_available: Optional[bool] = None,
 ):
     """
     Automatically configure DeepEP settings based on deployment scenario.
@@ -42,8 +86,9 @@ def auto_configure_deepep(
         parallelism_config: ParallelismConfig containing tp_size, ep_size, world_size, local_world_size
         role_type: Role type (PREFILL, DECODE, or PDFUSION)
 
-    Note: USE_ALL_GATHER should be enabled for pure TP scenarios (ep_size == tp_size).
-    When USE_ALL_GATHER is enabled, DeepEP should not be used.
+    When DeepEP is unavailable, automatic configuration selects a collective
+    backend for compatible all-gather, PureDP, or PureCP topologies. Model-specific
+    constraints are validated after ModelConfig is available.
 
     Configuration rules (for 8-GPU machine):
     - Non-PD separation + Inference node + Single GPU (1TP): 0, 0, 0
@@ -64,6 +109,8 @@ def auto_configure_deepep(
     ep_size = parallelism_config.ep_size
     dp_size = parallelism_config.dp_size
     moe_config.ll_num_max_token = ll_num_max_token
+    if deepep_available is None:
+        deepep_available = is_deepep_available()
 
     # Explicit MoriEP is incompatible with use_all_gather (PURE_TP router).
     # Disable use_all_gather when user explicitly requests MoriEP.
@@ -74,32 +121,26 @@ def auto_configure_deepep(
             "to allow MoriEP router selection"
         )
 
-    # allgather default applies only to single GPU and pure TP (no CP).
-    # PureCP / PureDP routers exist but must be opted in via --moe_strategy
-    # (auto-selection falls back to DeepEP). CP-enabled topologies share the
-    # tp>1 / dp==1 / ep==tp shape with pure TP, so they must be excluded here
-    # to avoid silently disabling DeepEP without selecting PureCP.
-    prefill_cp_enabled = parallelism_config.prefill_cp_config.is_enabled()
+    collective_topology = _collective_moe_topology(parallelism_config)
     is_single_gpu = ep_size == 1
-    is_pure_tp = (
-        tp_size > 1 and dp_size == 1 and ep_size == tp_size and not prefill_cp_enabled
-    )
     # Explicit opt-in via --moe_strategy must preserve use_all_gather, otherwise
     # the matching strategy's check_conditions (which requires use_all_gather)
     # will never be satisfied. Topology is validated here to keep the auto path
     # falling back to DeepEP when --moe_strategy and shape disagree.
     explicit_pure_dp = (
         moe_config.moe_strategy == MoeStrategyName.FP8_PER_BLOCK_PURE_DP.value
-        and tp_size == 1
-        and dp_size > 1
-        and ep_size == dp_size
+        and collective_topology == "PureDP"
     )
     explicit_pure_cp = (
         moe_config.moe_strategy == MoeStrategyName.FP8_PER_BLOCK_PURE_CP.value
-        and tp_size > 1
-        and dp_size == 1
-        and ep_size == tp_size
-        and prefill_cp_enabled
+        and collective_topology == "PureCP"
+    )
+    auto_strategy = moe_config.moe_strategy == MoeStrategyName.AUTO.value
+    auto_pure_dp = (
+        not deepep_available and auto_strategy and collective_topology == "PureDP"
+    )
+    auto_pure_cp = (
+        not deepep_available and auto_strategy and collective_topology == "PureCP"
     )
 
     # use_deepep_moe disables use_all_gather only when a viable DeepEP path
@@ -109,15 +150,24 @@ def auto_configure_deepep(
         moe_config.use_all_gather
         and not deep_ep_config.use_deepep_low_latency
         and (is_single_gpu or not deep_ep_config.use_deepep_moe)
-        and (is_single_gpu or is_pure_tp or explicit_pure_dp or explicit_pure_cp)
+        and (
+            collective_topology == "all-gather"
+            or explicit_pure_dp
+            or explicit_pure_cp
+            or auto_pure_dp
+            or auto_pure_cp
+        )
     )
     if moe_config.use_all_gather:
-        moe_config.use_deepep_moe = False
-        moe_config.use_deepep_low_latency = False
-        moe_config.use_deepep_internode = False
+        if auto_pure_dp:
+            moe_config.moe_strategy = MoeStrategyName.FP8_PER_BLOCK_PURE_DP.value
+        elif auto_pure_cp:
+            moe_config.moe_strategy = MoeStrategyName.FP8_PER_BLOCK_PURE_CP.value
+        _disable_deepep(moe_config)
         logging.info(
-            f"USE_ALL_GATHER is enabled (use_all_gather={moe_config.use_all_gather}), "
-            f"all DeepEP settings are disabled (0, 0, 0)"
+            "Selected %s MoE collective backend; all DeepEP settings are "
+            "disabled (0, 0, 0)",
+            collective_topology,
         )
         return
 
@@ -128,13 +178,23 @@ def auto_configure_deepep(
         and deep_ep_config.use_deepep_low_latency is None
         and deep_ep_config.use_mori_ep is None
     ):
-        # All are None, use auto configuration
-        _apply_auto_deepep_config(
-            moe_config=moe_config,
-            world_size=parallelism_config.world_size,
-            local_world_size=parallelism_config.local_world_size,
-            role_type=role_type,
-        )
+        if deepep_available:
+            _apply_auto_deepep_config(
+                moe_config=moe_config,
+                world_size=parallelism_config.world_size,
+                local_world_size=parallelism_config.local_world_size,
+                role_type=role_type,
+            )
+        else:
+            _disable_deepep(moe_config)
+            logging.warning(
+                "DeepEP is unavailable and topology tp=%s, dp=%s, ep=%s has "
+                "no enabled collective MoE fallback; a MoE model will be "
+                "rejected after its model configuration is loaded",
+                tp_size,
+                dp_size,
+                ep_size,
+            )
     else:
         # User has set at least one value, copy them to moe_config
         if deep_ep_config.use_deepep_moe is not None:
@@ -145,6 +205,25 @@ def auto_configure_deepep(
             moe_config.use_deepep_low_latency = deep_ep_config.use_deepep_low_latency
         if deep_ep_config.use_mori_ep is not None:
             moe_config.use_mori_ep = deep_ep_config.use_mori_ep
+
+        deepep_requested = any(
+            value is True
+            for value in (
+                deep_ep_config.use_deepep_moe,
+                deep_ep_config.use_deepep_internode,
+                deep_ep_config.use_deepep_low_latency,
+            )
+        )
+        if deepep_requested and not deepep_available:
+            raise ValueError(
+                "DeepEP was explicitly enabled, but the deep_ep package cannot "
+                "be imported in this runtime"
+            )
+        if moe_config.use_mori_ep and not is_moriep_available():
+            raise ValueError(
+                "MoriEP was explicitly enabled, but the mori package cannot be "
+                "imported in this runtime"
+            )
 
         # MoriEP does not support low-latency mode. When use_mori_ep is
         # explicitly enabled and use_deepep_low_latency was not explicitly set
@@ -166,6 +245,89 @@ def auto_configure_deepep(
             f"  USE_MORI_EP: {moe_config.use_mori_ep}\n"
             f"  ll_num_max_token: {moe_config.ll_num_max_token}"
         )
+
+
+def validate_moe_backend_config(
+    moe_config,
+    parallelism_config: ParallelismConfig,
+    model_config,
+    *,
+    enable_cuda_graph: bool = False,
+    deepep_available: Optional[bool] = None,
+    moriep_available: Optional[bool] = None,
+) -> None:
+    """Reject a MoE configuration before backend/model initialization."""
+    if model_config.expert_num <= 0:
+        return
+
+    if deepep_available is None:
+        deepep_available = is_deepep_available()
+    if moriep_available is None:
+        moriep_available = is_moriep_available()
+
+    if moe_config.use_deepep_moe:
+        if not deepep_available:
+            raise ValueError(
+                "Invalid MoE configuration: DeepEP is enabled but unavailable "
+                "in this runtime"
+            )
+        return
+    if moe_config.use_mori_ep:
+        if not moriep_available:
+            raise ValueError(
+                "Invalid MoE configuration: MoriEP is enabled but unavailable "
+                "in this runtime"
+            )
+        return
+
+    topology = _collective_moe_topology(parallelism_config)
+    quant_method = (
+        model_config.quant_config.get_method()
+        if model_config.quant_config is not None
+        else None
+    )
+    if moe_config.use_all_gather and topology == "all-gather":
+        return
+    if moe_config.use_all_gather and topology == "PureDP":
+        if moe_config.moe_strategy != MoeStrategyName.FP8_PER_BLOCK_PURE_DP.value:
+            raise ValueError(
+                "Invalid MoE configuration: PureDP topology requires "
+                "moe_strategy=fp8_per_block_pure_dp when DeepEP is unavailable"
+            )
+        if quant_method != "FP8_PER_BLOCK":
+            raise ValueError(
+                "Invalid MoE configuration: PureDP fallback requires "
+                f"FP8_PER_BLOCK weights, got {quant_method!r}"
+            )
+        if enable_cuda_graph:
+            raise ValueError(
+                "Invalid MoE configuration: PureDP fallback does not support "
+                "CUDA Graph; disable CUDA Graph or use an available EP backend"
+            )
+        return
+    if moe_config.use_all_gather and topology == "PureCP":
+        if moe_config.moe_strategy != MoeStrategyName.FP8_PER_BLOCK_PURE_CP.value:
+            raise ValueError(
+                "Invalid MoE configuration: PureCP topology requires "
+                "moe_strategy=fp8_per_block_pure_cp when DeepEP is unavailable"
+            )
+        if quant_method != "FP8_PER_BLOCK":
+            raise ValueError(
+                "Invalid MoE configuration: PureCP fallback requires "
+                f"FP8_PER_BLOCK weights, got {quant_method!r}"
+            )
+        return
+
+    raise ValueError(
+        "Invalid MoE configuration: no available communication backend for "
+        f"tp_size={parallelism_config.tp_size}, "
+        f"dp_size={parallelism_config.dp_size}, "
+        f"ep_size={parallelism_config.ep_size}, "
+        f"prefill_cp={parallelism_config.prefill_cp_config.is_enabled()}; "
+        f"DeepEP available={deepep_available}, MoriEP available={moriep_available}. "
+        "Supported collective fallbacks are all-gather, FP8_PER_BLOCK PureDP, "
+        "and FP8_PER_BLOCK PureCP."
+    )
 
 
 def _apply_auto_deepep_config(

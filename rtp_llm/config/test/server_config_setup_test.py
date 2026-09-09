@@ -309,6 +309,12 @@ class GenerateConfigTest(TestCase):
         )
         cuda_available.start()
         self.addCleanup(cuda_available.stop)
+        deepep_available = patch(
+            "rtp_llm.config.server_config_setup.is_deepep_available",
+            return_value=True,
+        )
+        deepep_available.start()
+        self.addCleanup(deepep_available.stop)
 
     # EnvArgumentParser in setup_args() reads these env vars (START_PORT, TP_SIZE, etc.)
     # and binds them to py_env_configs; server_port = start_port + rank_id * worker_info_port_num (rank_id=0 here).

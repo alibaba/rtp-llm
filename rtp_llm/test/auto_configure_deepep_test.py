@@ -1,7 +1,13 @@
+from types import SimpleNamespace
 from unittest import TestCase, main
+from unittest.mock import patch
 
+from rtp_llm.config.moe_config import MoeStrategyName
 from rtp_llm.config.py_config_modules import DeepEPConfig
-from rtp_llm.config.server_config_setup import auto_configure_deepep
+from rtp_llm.config.server_config_setup import (
+    auto_configure_deepep,
+    validate_moe_backend_config,
+)
 from rtp_llm.ops import CPRotateMethod, MoeConfig, ParallelismConfig, RoleType
 
 
@@ -14,6 +20,18 @@ class AutoConfigureDeepepTest(TestCase):
         self.moe_config = MoeConfig()
         self.deep_ep_config = DeepEPConfig()
         self.parallel_config = ParallelismConfig()
+        deepep_available = patch(
+            "rtp_llm.config.server_config_setup.is_deepep_available",
+            return_value=True,
+        )
+        moriep_available = patch(
+            "rtp_llm.config.server_config_setup.is_moriep_available",
+            return_value=True,
+        )
+        deepep_available.start()
+        moriep_available.start()
+        self.addCleanup(deepep_available.stop)
+        self.addCleanup(moriep_available.stop)
 
     def _setup_parallel_info(
         self,
@@ -33,6 +51,11 @@ class AutoConfigureDeepepTest(TestCase):
         self.assertEqual(self.moe_config.use_deepep_moe, moe)
         self.assertEqual(self.moe_config.use_deepep_low_latency, low_latency)
         self.assertEqual(self.moe_config.use_deepep_internode, internode)
+
+    @staticmethod
+    def _model_config(expert_num=8, quant_method="FP8_PER_BLOCK"):
+        quant_config = SimpleNamespace(get_method=lambda: quant_method)
+        return SimpleNamespace(expert_num=expert_num, quant_config=quant_config)
 
     def test_use_all_gather_disables_all_deepep(self):
         """Test: USE_ALL_GATHER enabled should disable all DeepEP settings"""
@@ -895,6 +918,172 @@ class AutoConfigureDeepepTest(TestCase):
 
         self.assertFalse(self.moe_config.use_all_gather)
         self._assert_deepep_config(moe=True, low_latency=False, internode=False)
+
+    def test_missing_deepep_selects_allgather(self):
+        self._setup_parallel_info(
+            world_size=2, tp_size=2, ep_size=2, local_world_size=2
+        )
+        self.parallel_config.dp_size = 1
+        self.moe_config.use_all_gather = True
+
+        auto_configure_deepep(
+            moe_config=self.moe_config,
+            deep_ep_config=self.deep_ep_config,
+            parallelism_config=self.parallel_config,
+            role_type=RoleType.PDFUSION,
+            deepep_available=False,
+        )
+
+        self.assertTrue(self.moe_config.use_all_gather)
+        self.assertEqual(self.moe_config.moe_strategy, MoeStrategyName.AUTO.value)
+        self._assert_deepep_config(moe=False, low_latency=False, internode=False)
+
+    def test_missing_deepep_selects_pure_dp(self):
+        self._setup_parallel_info(
+            world_size=2, tp_size=1, ep_size=2, local_world_size=2
+        )
+        self.parallel_config.dp_size = 2
+        self.moe_config.use_all_gather = True
+
+        auto_configure_deepep(
+            moe_config=self.moe_config,
+            deep_ep_config=self.deep_ep_config,
+            parallelism_config=self.parallel_config,
+            role_type=RoleType.PDFUSION,
+            deepep_available=False,
+        )
+
+        self.assertTrue(self.moe_config.use_all_gather)
+        self.assertEqual(
+            self.moe_config.moe_strategy,
+            MoeStrategyName.FP8_PER_BLOCK_PURE_DP.value,
+        )
+        validate_moe_backend_config(
+            self.moe_config,
+            self.parallel_config,
+            self._model_config(),
+            deepep_available=False,
+            moriep_available=False,
+        )
+
+    def test_missing_deepep_selects_pure_cp(self):
+        self._setup_parallel_info(
+            world_size=2, tp_size=2, ep_size=2, local_world_size=2
+        )
+        self.parallel_config.dp_size = 1
+        self.parallel_config.prefill_cp_config.method = CPRotateMethod.ALL_GATHER
+        self.moe_config.use_all_gather = True
+
+        auto_configure_deepep(
+            moe_config=self.moe_config,
+            deep_ep_config=self.deep_ep_config,
+            parallelism_config=self.parallel_config,
+            role_type=RoleType.PDFUSION,
+            deepep_available=False,
+        )
+
+        self.assertTrue(self.moe_config.use_all_gather)
+        self.assertEqual(
+            self.moe_config.moe_strategy,
+            MoeStrategyName.FP8_PER_BLOCK_PURE_CP.value,
+        )
+        validate_moe_backend_config(
+            self.moe_config,
+            self.parallel_config,
+            self._model_config(),
+            deepep_available=False,
+            moriep_available=False,
+        )
+
+    def test_missing_deepep_rejects_unsupported_moe_topology(self):
+        self._setup_parallel_info(
+            world_size=4, tp_size=2, ep_size=4, local_world_size=4
+        )
+        self.parallel_config.dp_size = 2
+        self.moe_config.use_all_gather = True
+
+        auto_configure_deepep(
+            moe_config=self.moe_config,
+            deep_ep_config=self.deep_ep_config,
+            parallelism_config=self.parallel_config,
+            role_type=RoleType.PDFUSION,
+            deepep_available=False,
+        )
+
+        with self.assertRaisesRegex(ValueError, "no available communication backend"):
+            validate_moe_backend_config(
+                self.moe_config,
+                self.parallel_config,
+                self._model_config(),
+                deepep_available=False,
+                moriep_available=False,
+            )
+
+    def test_missing_deepep_does_not_reject_dense_model(self):
+        self._setup_parallel_info(
+            world_size=4, tp_size=2, ep_size=4, local_world_size=4
+        )
+        self.parallel_config.dp_size = 2
+
+        validate_moe_backend_config(
+            self.moe_config,
+            self.parallel_config,
+            self._model_config(expert_num=0),
+            deepep_available=False,
+            moriep_available=False,
+        )
+
+    def test_pure_dp_rejects_non_fp8_per_block_model(self):
+        self._setup_parallel_info(
+            world_size=2, tp_size=1, ep_size=2, local_world_size=2
+        )
+        self.parallel_config.dp_size = 2
+        self.moe_config.use_all_gather = True
+        self.moe_config.moe_strategy = MoeStrategyName.FP8_PER_BLOCK_PURE_DP.value
+
+        with self.assertRaisesRegex(ValueError, "requires FP8_PER_BLOCK weights"):
+            validate_moe_backend_config(
+                self.moe_config,
+                self.parallel_config,
+                self._model_config(quant_method="modelopt_fp4"),
+                deepep_available=False,
+                moriep_available=False,
+            )
+
+    def test_pure_dp_rejects_cuda_graph(self):
+        self._setup_parallel_info(
+            world_size=2, tp_size=1, ep_size=2, local_world_size=2
+        )
+        self.parallel_config.dp_size = 2
+        self.moe_config.use_all_gather = True
+        self.moe_config.moe_strategy = MoeStrategyName.FP8_PER_BLOCK_PURE_DP.value
+
+        with self.assertRaisesRegex(ValueError, "does not support CUDA Graph"):
+            validate_moe_backend_config(
+                self.moe_config,
+                self.parallel_config,
+                self._model_config(),
+                enable_cuda_graph=True,
+                deepep_available=False,
+                moriep_available=False,
+            )
+
+    def test_explicit_deepep_rejected_when_package_is_unavailable(self):
+        self._setup_parallel_info(
+            world_size=4, tp_size=2, ep_size=4, local_world_size=4
+        )
+        self.parallel_config.dp_size = 2
+        self.deep_ep_config.use_deepep_moe = True
+        self.moe_config.use_all_gather = False
+
+        with self.assertRaisesRegex(ValueError, "DeepEP was explicitly enabled"):
+            auto_configure_deepep(
+                moe_config=self.moe_config,
+                deep_ep_config=self.deep_ep_config,
+                parallelism_config=self.parallel_config,
+                role_type=RoleType.PDFUSION,
+                deepep_available=False,
+            )
 
 
 if __name__ == "__main__":
