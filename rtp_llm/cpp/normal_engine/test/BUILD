@@ -102,3 +102,12 @@ cc_test(
     },
     exec_properties = {'gpu':'H20'},
 )
+
+cc_test(
+    name = "deferred_engine_start_test",
+    srcs = ["DeferredEngineStartTest.cc"],
+    copts = test_copts,
+    deps = [":mock_engine"] + cuda13_torch_link_deps,
+    env = {"TEST_USING_DEVICE": "CUDA"},
+    exec_properties = {"gpu": "H20"},
+)

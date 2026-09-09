@@ -59,6 +59,11 @@ public:
 
     virtual std::shared_ptr<GenerateStream> makeStream(const std::shared_ptr<GenerateInput>& input);
 
+    // Template initialization may prepare model state before starting computation.
+    virtual absl::Status startLoop() {
+        return absl::UnimplementedError("deferred engine start is not supported");
+    }
+
     virtual absl::Status stop() = 0;
 
     virtual absl::StatusOr<GenerateStreamPtr> preRun(const std::shared_ptr<GenerateInput>& generate_input,

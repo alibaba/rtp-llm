@@ -63,7 +63,7 @@ grpc::Status LocalRpcServer::init(const EngineInitParams&                       
         pybind11::gil_scoped_release release;
         RTP_LLM_CHECK_WITH_INFO(!PyGILState_Check(),
                                 "running engine init with gil held may cause program hang, please check");
-        engine_.reset(new NormalEngine(maga_init_params, std::move(propose_params)));
+        engine_.reset(new NormalEngine(maga_init_params, std::move(propose_params), defer_engine_loop_));
     }
     if (!mm_process_engine.is_none()) {
         auto vit_separation = maga_init_params.vit_config.vit_separation;
@@ -92,6 +92,13 @@ void LocalRpcServer::updateRuntimeEndpoints(const RuntimeConfig& runtime_config)
 }
 
 void LocalRpcServer::startDeferredServices() {
+    // Every rank must start, including TP followers and ranks without a
+    // broadcaster. Do this before the broadcaster-specific early returns.
+    if (defer_engine_loop_) {
+        RTP_LLM_CHECK_WITH_INFO(engine_ != nullptr, "deferred engine is missing");
+        THROW_IF_STATUS_ERROR(engine_->startLoop());
+        defer_engine_loop_ = false;
+    }
     if (!defer_tp_broadcaster_ || tp_broadcaster_ || maga_init_params_.parallelism_config.tp_rank != 0
         || maga_init_params_.runtime_config.worker_grpc_addrs.empty()) {
         return;

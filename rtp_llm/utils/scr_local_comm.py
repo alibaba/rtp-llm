@@ -1,10 +1,36 @@
 """Opt-in communication for SCR ranks sharing one Pod network namespace."""
 
+import ipaddress
 import os
+import socket
 
 
 def local_comm_enabled():
     return os.environ.get("RTP_LLM_SCR_LOCAL_COMM") == "1"
+
+
+def current_pod_ip():
+    """Resolve the current network namespace, never a checkpoint-cached IP."""
+    address = socket.gethostbyname(socket.gethostname())
+    parsed = ipaddress.IPv4Address(address)
+    if parsed.is_loopback or parsed.is_unspecified or parsed.is_multicast:
+        raise ValueError("SCR external endpoints require a non-loopback Pod IP")
+    return address
+
+
+def cache_store_advertise_ip(world_info, parallelism_config):
+    """Keep local control addresses separate from cross-Pod KV advertisements.
+
+    Return an override only for the opt-in single-Pod loopback topology. Explicit
+    routable manifest addresses retain their authority. Resolve on every fixup
+    because both the seed environment and server configuration survive CRIU.
+    """
+    if not local_comm_enabled():
+        return None
+    validate_local_members(world_info, parallelism_config)
+    if world_info.members[0].ip != "127.0.0.1":
+        return None
+    return current_pod_ip()
 
 
 def validate_local_world(world_size, local_world_size, num_nodes):
