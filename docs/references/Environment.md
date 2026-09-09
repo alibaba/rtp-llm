@@ -10,6 +10,23 @@ In `rtp_llm/server/server_args.py`, all user-configurable environment variables 
 
 When adding new parameter information, you need to specify the parameter type, variable name, default value, and its corresponding specific meaning. The processing logic here is actually to use the parsed parameters to update environment variables. The current priority is: `args > env > default`.
 
+## FastSafeTensors memory reserve
+
+`--fastsafetensors_reserve_mb` (environment variable
+`RTP_FASTSAFETENSORS_RESERVE_MB`) is a nonnegative integer in MiB, defaulting to
+`2048`. The standard service parser applies command-line > environment > default
+precedence and rejects malformed or negative values before model loading.
+The parsed value flows through the service and model `LoadConfig` objects.
+
+This reserve only affects `LOAD_METHOD=auto`: FastSafeTensors is selected when
+free device memory exceeds the estimated per-rank model memory, three times the
+largest checkpoint shard, and this reserve. The reserve is empirical headroom
+for overlapping collector inputs and final tensors, not a peak-memory guarantee.
+Set it to `0` to restore the previous decision threshold without this extra
+headroom. Explicit `fastsafetensors` and `scratch` modes bypass this selection
+check. Programmatic callers can pass `fastsafetensors_reserve_mb` through model
+creation or loader construction; the loader does not read the environment itself.
+
 ## Parameter Propagation
 
 **We have collected and organized all config-related information and classified it for processing on both the C++ and Python sides. At the top level of the C++ side is `GptInitParameter`, which categorizes various environment variables in C++ into different configuration types. On the Python side, everything is summarized in `EnvArgs` under `rtp_llm/config/py_config_modules.py`. `EnvArgs` also categorizes various configurations, and throughout the system, various configurations are gradually propagated down to specified locations for use.**
