@@ -19,6 +19,9 @@ public:
 
     torch::Tensor accept_tokens_cpu;
     torch::Tensor accept_len_cpu;
+    // Target sampling distributions after top-k/top-p renormalization, by verify
+    // position; includes the bonus/replacement token.
+    torch::Tensor target_probs_cpu;
 
     std::shared_ptr<torch::Event> transfer_done_event;
 

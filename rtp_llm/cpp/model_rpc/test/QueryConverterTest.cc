@@ -98,6 +98,7 @@ TEST_F(QueryConverterTest, testTransOutput) {
         hidden_states_data[i] = i;
     }
     res.hidden_states.emplace(hidden_states_tensor);
+    res.aux_info.all_probs.emplace(torch::tensor({0.25f, 0.75f}, torch::kFloat32).reshape({1, 2}));
     outputs.generate_outputs.push_back(res);
 
     GenerateOutputsPB outputs_pb;
@@ -136,6 +137,16 @@ TEST_F(QueryConverterTest, testTransOutput) {
     for (int i = 0; i < 6; ++i) {
         ASSERT_FLOAT_EQ(hidden_states_vector[i], i);
     }
+    ASSERT_TRUE(output_pb.has_all_probs());
+    const auto& all_probs_pb = output_pb.all_probs();
+    ASSERT_EQ(all_probs_pb.data_type(), TensorPB_DataType::TensorPB_DataType_FP32);
+    ASSERT_EQ(all_probs_pb.shape_size(), 3);
+    ASSERT_EQ(all_probs_pb.shape(0), 1);
+    ASSERT_EQ(all_probs_pb.shape(1), 1);
+    ASSERT_EQ(all_probs_pb.shape(2), 2);
+    const auto* all_probs_data = reinterpret_cast<const float*>(all_probs_pb.fp32_data().data());
+    ASSERT_FLOAT_EQ(all_probs_data[0], 0.25f);
+    ASSERT_FLOAT_EQ(all_probs_data[1], 0.75f);
 }
 
 TEST_F(QueryConverterTest, TransTensorPB_FP32) {

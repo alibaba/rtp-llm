@@ -12,6 +12,7 @@
 #include <functional>
 #include <iostream>
 #include <string>
+#include <utility>
 #include <vector>
 using namespace std;
 using namespace rtp_llm;
@@ -926,6 +927,40 @@ TEST_F(CudaSamplerTest, testPenalty) {
                             batch_size,
                             step,
                             10);
+}
+
+TEST_F(CudaSamplerTest, testLogprobsPreserveSamplingDistribution) {
+    // The serving contract uses the same filtered, normalized distribution as sampling.
+    for (const auto& config : std::vector<std::pair<int, float>>{{1, 1.0f}, {2, 1.0f}, {0, 0.7f}, {2, 0.7f}}) {
+        SCOPED_TRACE(::testing::Message() << "top_k=" << config.first << ", top_p=" << config.second);
+        GreedyParams params{};
+        params.logits           = cudaTensor({1, 2, 3, 4}, {1, 4});
+        auto expected           = torch::softmax(params.logits.clone(), -1);
+        params.token_ids        = cudaIntTensor({0, 0}, {1, 2});
+        params.input_lengths    = pinnedIntTensor({1});
+        params.sequence_lengths = pinnedIntTensor({1});
+        params.step             = 1;
+        params.top_k            = pinnedIntTensor({config.first});
+        params.top_p            = pinnedFloatTensor({config.second});
+        params.temperature      = pinnedFloatTensor({1});
+        params.generator.resize(1);
+        params.output_all_probs = torch::empty_like(params.logits);
+        if (config.first == 1 || (config.first == 2 && config.second < 1.0f)) {
+            expected = cudaTensor({0, 0, 0, 1}, {1, 4});
+        } else {
+            // Top-2 keeps logits 3 and 4. Pure top-p=0.7 also keeps these two:
+            // their original cumulative probability is about 0.88 (top-1 is 0.64).
+            expected.slice(1, 0, 2).zero_();
+            expected = expected / expected.sum(-1, true);
+        }
+        execSampleGreedy(params);
+        EXPECT_TRUE(torch::allclose(params.output_all_probs.value(), expected));
+        const auto selected = toHostInt(params.token_ids)[1];
+        EXPECT_TRUE(selected == 2 || selected == 3);
+        if (config.first == 1) {
+            EXPECT_EQ(selected, 3);
+        }
+    }
 }
 
 TEST_F(CudaSamplerTest, testDoSample) {

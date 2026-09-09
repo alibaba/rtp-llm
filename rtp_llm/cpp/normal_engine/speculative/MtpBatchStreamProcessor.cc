@@ -1017,6 +1017,10 @@ void MtpBatchStreamProcessor::preparePrefillSpecUpdateInfo(const StreamGroups&  
         }
 
         spec_update_infos.push_back({new_tokens, 1, -1, std::move(last_hidden_states), std::move(propose_all_probs)});
+        if (stream->generateConfig()->return_all_probs) {
+            spec_update_infos.back().all_probs =
+                sampler_output.all_probs.narrow(0, batch_idx_out, next_batch_size).unsqueeze(1).cpu();
+        }
 
         batch_idx_in += cur_batch_size;
         batch_idx_out += next_batch_size;
@@ -1064,6 +1068,11 @@ void MtpBatchStreamProcessor::prepareDecodeSpecUpdateInfo(
             accept_tokens.narrow(0, batch_idx_out, next_batch_size).narrow(1, 0, cur_accept_len).contiguous();
         spec_update_infos.push_back(
             {accept_tokens_tensor, cur_accept_len, -1, std::move(last_hidden_states), std::move(propose_all_probs)});
+        if (stream->generateConfig()->return_all_probs) {
+            spec_update_infos.back().all_probs =
+                spec_decode_output.target_probs_cpu.narrow(0, batch_idx_out, next_batch_size)
+                    .narrow(1, 0, cur_accept_len);
+        }
 
         token_offset += propose_step_ + 1;
         batch_idx_in += cur_batch_size;

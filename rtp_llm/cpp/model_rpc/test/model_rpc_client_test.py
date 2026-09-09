@@ -39,7 +39,11 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     GenerateOutputsPB,
     TensorPB,
 )
-from rtp_llm.utils.base_model_datatypes import GenerateInput, GenerateOutputs, RequestInfo
+from rtp_llm.utils.base_model_datatypes import (
+    GenerateInput,
+    GenerateOutputs,
+    RequestInfo,
+)
 from rtp_llm.multimodal.multimodal_util import MMUrlType
 
 
@@ -206,6 +210,57 @@ class ModelRpcClientTest(TestCase):
         self.assertEqual(input_pb.request_info.trace_id, "trace-from-info")
         self.assertEqual(input_pb.request_info.request_id, "source-request-id")
         self.assertEqual(input_pb.request_info.source_role, "frontend")
+
+    def test_trans_output_preserves_all_probs(self):
+        input_py = GenerateInput(
+            token_ids=torch.tensor([1, 2, 3]),
+            generate_config=GenerateConfig(return_all_probs=True),
+            request_id=123,
+            mm_inputs=[],
+        )
+        outputs_pb = GenerateOutputsPB()
+        output_pb = outputs_pb.flatten_output
+        output_pb.output_ids.data_type = TensorPB.DataType.INT32
+        output_pb.output_ids.shape.extend([1, 1])
+        output_pb.output_ids.int32_data = struct.pack("<i", 2)
+        output_pb.all_probs.data_type = TensorPB.DataType.FP32
+        output_pb.all_probs.shape.extend([1, 1, 3])
+        output_pb.all_probs.fp32_data = struct.pack("<fff", 0.1, 0.2, 0.7)
+        output_pb.aux_info.add()
+        output_pb.finished.append(True)
+
+        outputs = trans_output(input_py, outputs_pb, StreamState())
+
+        self.assertEqual(len(outputs.generate_outputs), 1)
+        all_probs = outputs.generate_outputs[0].all_probs
+        self.assertIsNotNone(all_probs)
+        assert all_probs is not None
+        self.assertEqual(list(all_probs.shape), [1, 3])
+        self.assertTrue(torch.allclose(all_probs, torch.tensor([[0.1, 0.2, 0.7]])))
+
+    def test_trans_output_preserves_mtp_probability_positions(self):
+        input_py = GenerateInput(
+            token_ids=torch.tensor([1]),
+            generate_config=GenerateConfig(return_all_probs=True),
+            request_id=123,
+            mm_inputs=[],
+        )
+        probabilities = torch.tensor(
+            [[[[0.1, 0.8, 0.1], [0.6, 0.2, 0.2], [0.2, 0.3, 0.5]]]]
+        )
+        outputs_pb = GenerateOutputsPB()
+        output_pb = outputs_pb.flatten_output
+        output_pb.output_ids.data_type = TensorPB.DataType.INT32
+        output_pb.output_ids.shape.extend([1, 1, 3])
+        output_pb.output_ids.int32_data = struct.pack("<iii", 1, 0, 2)
+        output_pb.all_probs.data_type = TensorPB.DataType.FP32
+        output_pb.all_probs.shape.extend(probabilities.shape)
+        output_pb.all_probs.fp32_data = probabilities.numpy().tobytes()
+        output_pb.aux_info.add().step_output_len = 3
+        output_pb.finished.append(True)
+        output = trans_output(input_py, outputs_pb, StreamState()).generate_outputs[0]
+        self.assertEqual(output.output_ids.tolist(), [[1, 0, 2]])
+        self.assertTrue(torch.allclose(output.all_probs, probabilities[0]))
 
     def test_trans_input_request_info_fallback(self):
         input_pb = trans_input(

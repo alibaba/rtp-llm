@@ -287,7 +287,7 @@ TEST_F(MtpBatchStreamProcessorTest, testPrefillDispatch) {
     target_output.model_output.all_hidden_states =
         torch::tensor({0.1f, 0.2f, 1.1f, 1.2f, 1.3f, 1.4f}, torch::kFloat32).reshape({3, 2});
     target_output.sampler_output.token_ids = torch::tensor({2, -1, 1, 1, 2, 3}, torch::kInt32).reshape({2, 3});
-    target_output.sampler_output.all_probs = torch::tensor({0.1f, 0.9f, 0.2f, 0.8f}, torch::kFloat32).reshape({2, 2});
+    target_output.sampler_output.all_probs = torch::tensor({{0.0f, 0.75f, 0.25f, 0.0f}, {0.0f, 0.0f, 0.2f, 0.8f}});
 
     MergedOutput draft_output;
     draft_output.model_output.all_hidden_states =
@@ -296,10 +296,17 @@ TEST_F(MtpBatchStreamProcessorTest, testPrefillDispatch) {
     draft_output.sampler_output.all_probs =
         torch::tensor({0.2f, 0.1f, 0.3f, 0.5f, 0.3f, 0.1f, 0.4f, 0.2f}, torch::kFloat32).reshape({2, 4});
 
+    stream1->generateConfig()->return_all_probs = true;
+    stream1->generateConfig()->is_streaming     = true;
     auto status = processor.dispatchPrefill(stream_groups, target_output, draft_output);
     EXPECT_TRUE(status.ok());
     draft_output.model_output.all_hidden_states.fill_(9.0f);
 
+    ASSERT_TRUE(stream1->hasOutput());
+    auto prefill_result = stream1->nextOutput();
+    ASSERT_TRUE(prefill_result.ok());
+    EXPECT_TRUE(torch::allclose(prefill_result.value().generate_outputs[0].aux_info.all_probs.value(),
+                                target_output.sampler_output.all_probs.narrow(0, 0, 1)));
     checkOutput(stream1, {2, 1}, {1, 2}, {0.2, 0.1, 0.3, 0.5}, {0.3, 0.4});
     checkOutput(stream2, {1, 2, 3}, {3, 0}, {0.3, 0.1, 0.4, 0.2}, {1.7, 1.8});
 }
@@ -396,10 +403,26 @@ TEST_F(MtpBatchStreamProcessorTest, testDispatchDecodeStream) {
     MtpBatchStreamProcessor processor(
         model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
 
+    stream1->generateConfig()->return_all_probs = true;
+    stream1->generateConfig()->is_streaming     = true;
+    stream2->generateConfig()->return_all_probs = true;
+    stream2->generateConfig()->is_streaming     = true;
+    spec_decode_output.target_probs_cpu =
+        torch::softmax(torch::arange(40, torch::kFloat32).reshape({2, 5, 4}) / 20, -1);
     auto status = processor.dispatchDecode(stream_groups, spec_decode_output, draft_prefill_output);
     EXPECT_TRUE(status.ok());
     draft_prefill_output.model_output.all_hidden_states.fill_(9.0f);
 
+    ASSERT_TRUE(stream1->hasOutput());
+    ASSERT_TRUE(stream2->hasOutput());
+    auto output1 = stream1->nextOutput();
+    auto output2 = stream2->nextOutput();
+    ASSERT_TRUE(output1.ok());
+    ASSERT_TRUE(output2.ok());
+    EXPECT_TRUE(torch::allclose(output1.value().generate_outputs[0].aux_info.all_probs.value(),
+                                spec_decode_output.target_probs_cpu.narrow(0, 0, 1)));
+    EXPECT_TRUE(torch::allclose(output2.value().generate_outputs[0].aux_info.all_probs.value(),
+                                spec_decode_output.target_probs_cpu.narrow(0, 1, 1).select(1, 0)));
     checkOutput(stream1, {1, 2, 3, 1, 3, 2}, {2, 0}, {0.2, 0.1, 0.3, 0.5}, {0.6, 0.06});
     checkOutput(stream2, {2, 1, 2}, {2, 3}, {0.3, 0.1, 0.4, 0.2}, {1.3, 0.13});
     EXPECT_EQ(stream1->getMtpAsyncDeviceState().last_real_seq_len, stream1->seqLength());

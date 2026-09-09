@@ -18,6 +18,8 @@ from dataclasses import dataclass, field
 from enum import IntEnum
 from typing import Any, NamedTuple
 
+import torch
+
 from rtp_llm.dash_sc.proto import predict_v2_pb2
 from rtp_llm.dash_sc.structural_tag import (
     DashScStructuralTagError,
@@ -194,6 +196,21 @@ def _parse_optional_scalar_float(request, tensor_name: str) -> float | None:
         return float(struct.unpack_from("<i", raw, 0)[0])
     if dt == "INT64" and len(raw) >= 8:
         return float(struct.unpack_from("<q", raw, 0)[0])
+    return None
+
+
+def _parse_optional_scalar_bool(request, tensor_name: str) -> bool | None:
+    inp, raw = _find_input_raw(request, tensor_name)
+    if inp is None or raw is None or not raw:
+        return None
+    if inp.datatype == "BOOL":
+        return raw[0] != 0
+    value = _parse_optional_scalar_int(request, tensor_name)
+    if value is not None:
+        return value != 0
+    value_float = _parse_optional_scalar_float(request, tensor_name)
+    if value_float is not None:
+        return value_float != 0.0
     return None
 
 
@@ -672,6 +689,8 @@ class SamplingParams:
     repetition_penalty: float = 1.0
     frequency_penalty: float = 0.0
     presence_penalty: float = 0.0
+    logprobs: bool = False
+    top_logprobs: int = 0
     stop_words_list: tuple[tuple[int, ...], ...] = field(default_factory=tuple)
     max_new_think_tokens: int | None = None
     response_format: str | None = None
@@ -723,6 +742,7 @@ class SamplingParams:
             repetition_penalty=self.repetition_penalty,
             frequency_penalty=self.frequency_penalty,
             presence_penalty=self.presence_penalty,
+            return_all_probs=self.logprobs,
             stop_words_list=self.stop_words_list_py(),
             max_thinking_tokens=max_thinking_tokens,
             return_input_ids=return_input_ids,
@@ -773,6 +793,8 @@ def parse_sampling_params(
     repetition_penalty = 1.0
     frequency_penalty = 0.0
     presence_penalty = 0.0
+    logprobs = False
+    top_logprobs = 0
     specified_fields: set[str] = set()
     max_new_think_tokens: int | None = None
     stop_words_list: tuple[tuple[int, ...], ...] = tuple()
@@ -833,6 +855,30 @@ def parse_sampling_params(
         presence_penalty = vf
         specified_fields.add("presence_penalty")
 
+    vb = _parse_optional_scalar_bool(request, "logprobs")
+    if vb is None:
+        vb = _parse_optional_parameter_bool(request, "logprobs")
+    if vb is None:
+        vb = _parse_optional_bool(_lookup_ds_request_control(ds_attrs, "logprobs"))
+    if vb is not None:
+        logprobs = vb
+        specified_fields.add("logprobs")
+
+    v = _parse_optional_scalar_int(request, "top_logprobs")
+    if v is None:
+        v = _parse_optional_parameter_int(request, "top_logprobs")
+    if v is None:
+        v = _parse_optional_int_value(
+            _lookup_ds_request_control(ds_attrs, "top_logprobs")
+        )
+    if v is not None:
+        top_logprobs = v
+        specified_fields.add("top_logprobs")
+    if top_logprobs < 0:
+        raise DashScParameterError("top_logprobs must be non-negative")
+    if top_logprobs > 0 and not logprobs:
+        raise DashScParameterError("top_logprobs requires logprobs=true")
+
     for tensor_name in ("max_think_length", "max_new_think_tokens"):
         v = _parse_optional_scalar_int(request, tensor_name)
         if v is not None:
@@ -860,6 +906,8 @@ def parse_sampling_params(
         repetition_penalty=repetition_penalty,
         frequency_penalty=frequency_penalty,
         presence_penalty=presence_penalty,
+        logprobs=logprobs,
+        top_logprobs=top_logprobs,
         max_new_think_tokens=max_new_think_tokens,
         stop_words_list=stop_words_list,
         response_format=response_format,
@@ -1440,6 +1488,103 @@ def _append_multimodal_usage_parameters(
             infer.parameters[parameter_name].int64_param = token_count
 
 
+def _log_probability(probability: torch.Tensor) -> float:
+    value = float(probability.item())
+    # Keep the payload valid JSON. OpenAI-compatible implementations commonly
+    # use -9999 for a token whose probability underflowed to zero.
+    if value <= 0.0:
+        return -9999.0
+    return float(torch.log(probability).item())
+
+
+def _token_logprobs_payload(
+    out_py: Any,
+    emitted_token_ids: list[int],
+    top_logprobs: int,
+) -> list[dict[str, float]] | None:
+    """Compact engine probabilities into dashscope-serving's JSON contract.
+
+    ``all_probs`` is a full-vocabulary probability tensor.  The wire only needs
+    the selected token plus the requested top candidates for each generated
+    token, so never serialize the dense tensor. Rows must match output_ids
+    exactly; token rewrites must slice the probabilities at the same time.
+    """
+    if not emitted_token_ids:
+        return []
+    all_probs = getattr(out_py, "all_probs", None)
+    if all_probs is None:
+        return None
+
+    probabilities = all_probs.detach().to(device="cpu", dtype=torch.float32)
+    while probabilities.dim() > 2 and probabilities.shape[0] == 1:
+        probabilities = probabilities.squeeze(0)
+    if probabilities.dim() == 1:
+        probabilities = probabilities.unsqueeze(0)
+    if probabilities.dim() != 2 or probabilities.shape[-1] <= 0:
+        return None
+
+    source_token_ids = _token_ids_list_from_generate_output(out_py)
+    row_count = len(source_token_ids)
+    if row_count <= 0 or probabilities.shape[0] != row_count:
+        return None
+    rows = probabilities
+
+    # The phase-1 terminate-token path emits a prefix. Phase-2 suffixes are
+    # sliced explicitly before reaching the codec (never search by token value).
+    if source_token_ids[: len(emitted_token_ids)] != emitted_token_ids:
+        return None
+
+    payload: list[dict[str, float]] = []
+    candidate_count = max(0, min(int(top_logprobs), int(rows.shape[-1])))
+    for offset, selected_id in enumerate(emitted_token_ids):
+        row = rows[offset]
+        if selected_id < 0 or selected_id >= int(row.shape[-1]):
+            return None
+        token_scores: dict[str, float] = {}
+        if candidate_count > 0:
+            candidate_probs, candidate_ids = row.topk(
+                candidate_count, largest=True, sorted=True
+            )
+            for candidate_id, probability in zip(
+                candidate_ids.tolist(), candidate_probs
+            ):
+                token_scores[str(int(candidate_id))] = _log_probability(probability)
+        token_scores[str(int(selected_id))] = _log_probability(row[selected_id])
+        payload.append(token_scores)
+    return payload or None
+
+
+def slice_generate_output_tokens(out_py: Any, start: int, stop: int) -> None:
+    """Slice tokens and probability rows together when removing thinking markers."""
+    ids = _token_ids_list_from_generate_output(out_py)
+    if not 0 <= start <= stop <= len(ids):
+        raise ValueError("invalid generated token slice")
+    probabilities = getattr(out_py, "all_probs", None)
+    if probabilities is not None:
+        rows = probabilities.reshape(-1, probabilities.shape[-1])
+        if rows.shape[0] != len(ids):
+            raise ValueError("all_probs must contain one row per generated token")
+        out_py.all_probs = rows[start:stop]
+    out_py.output_ids = torch.tensor(ids[start:stop], dtype=torch.int32)
+
+
+def _append_logprobs_parameter(
+    infer: predict_v2_pb2.ModelInferResponse,
+    out_py: Any,
+    generated_ids: list[int],
+    *,
+    top_logprobs: int,
+) -> None:
+    payload = _token_logprobs_payload(out_py, generated_ids, top_logprobs)
+    if payload is None:
+        raise RuntimeError(
+            "all_probs is missing or cannot be aligned while logprobs is requested"
+        )
+    infer.parameters["logprobs"].string_param = json.dumps(
+        payload, ensure_ascii=False, separators=(",", ":"), allow_nan=False
+    )
+
+
 def _append_aux_info_metrics_outputs(
     infer: predict_v2_pb2.ModelInferResponse,
     out_py: Any,
@@ -1474,6 +1619,8 @@ def build_stream_response_from_generate_outputs(
     *,
     stream_finished: bool | None = None,
     token_ids: list[int] | None = None,
+    top_logprobs: int = 0,
+    emit_logprobs: bool = True,
 ) -> predict_v2_pb2.ModelStreamInferResponse:
     """Build ``ModelStreamInferResponse`` from one ``GenerateOutputs`` chunk.
 
@@ -1505,6 +1652,7 @@ def build_stream_response_from_generate_outputs(
         if eos_token_id is None:
             raise RuntimeError("eos_token_id is required for terminal response")
         generated_ids = [int(eos_token_id)]
+        emit_logprobs = False  # Synthetic EOS has no model probability.
 
     if return_input_ids and request_input_ids is not None:
         _append_prompt_token_ids_output(infer, request_input_ids)
@@ -1517,6 +1665,13 @@ def build_stream_response_from_generate_outputs(
         out_py,
         prompt_token_fallback=len(request_input_ids or []),
     )
+    if emit_logprobs and bool(getattr(generate_config, "return_all_probs", False)):
+        _append_logprobs_parameter(
+            infer,
+            out_py,
+            generated_ids,
+            top_logprobs=top_logprobs,
+        )
     infer.parameters["incremental_output"].int64_param = 1 if is_streaming else 0
     _append_dashllm_limit_parameters(
         infer,

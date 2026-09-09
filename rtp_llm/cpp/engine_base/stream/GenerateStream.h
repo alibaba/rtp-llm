@@ -60,6 +60,8 @@ struct StreamSpecUpdateInfo {
     // worker carries it explicitly because a newer state may be published
     // before the single-slot worker starts this task.
     uint64_t mtp_async_epoch = 0;
+    // [batch, accepted token count, vocabulary], owned by this update.
+    torch::Tensor all_probs;
 };
 
 struct SpeculativeExecutorStreamOutput {

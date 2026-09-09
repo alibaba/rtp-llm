@@ -51,6 +51,7 @@ from rtp_llm.dash_sc.codec import (
     parse_dash_sc_grpc_request,
     parse_multimodal_parts_from_request,
     prepend_to_generated_ids_tensor,
+    slice_generate_output_tokens,
 )
 from rtp_llm.dash_sc.grpc_metrics import (
     report_arrival,
@@ -902,6 +903,7 @@ async def iter_real_model_stream_infer(
                         _request_shape=request_shape,
                         stream_finished=False,
                         token_ids=generated_ids,
+                        top_logprobs=sampling.top_logprobs,
                     )
                     if should_echo and not echoed:
                         if prepend_to_generated_ids_tensor(
@@ -937,6 +939,8 @@ async def iter_real_model_stream_infer(
                         _request_shape=request_shape,
                         stream_finished=not will_do_phase2,
                         token_ids=list(runtime.eos_tokens),
+                        top_logprobs=sampling.top_logprobs,
+                        emit_logprobs=False,
                     )
                     eos_finished = not will_do_phase2
                     eos_finish_reason = (
@@ -979,6 +983,7 @@ async def iter_real_model_stream_infer(
                 generate_think_token_num=generate_think_token_num,
                 finish_reason_override=finish_reason_override,
                 _request_shape=request_shape,
+                top_logprobs=sampling.top_logprobs,
             )
             if should_echo and not echoed and generated_ids:
                 if prepend_to_generated_ids_tensor(
@@ -1153,6 +1158,7 @@ async def iter_real_model_stream_infer(
                     generate_think_token_num=generate_think_token_num,
                     finish_reason_override=finish_reason_override,
                     _request_shape=request_shape,
+                    top_logprobs=sampling.top_logprobs,
                 )
                 stats = (
                     len(resp_ids),
@@ -1200,9 +1206,7 @@ async def iter_real_model_stream_infer(
                         buf_ids = _token_ids_list_from_generate_output(buf_out)
                         cleaned = _strip_trailing_eos(buf_ids, runtime.eos_tokens)
                         if cleaned != buf_ids:
-                            buf_out.output_ids = torch.tensor(
-                                cleaned, dtype=torch.int32
-                            )
+                            slice_generate_output_tokens(buf_out, 0, len(cleaned))
                     resp, stats = _build_phase2_response(buf_go)
                     yield (resp, stats) if yield_access_stats else resp
 
@@ -1221,9 +1225,7 @@ async def iter_real_model_stream_infer(
                         cleaned = _strip_trailing_eos(generated_ids, runtime.eos_tokens)
                         if cleaned != generated_ids:
                             generated_ids = cleaned
-                            out_py.output_ids = torch.tensor(
-                                generated_ids, dtype=torch.int32
-                            )
+                            slice_generate_output_tokens(out_py, 0, len(generated_ids))
                     if generated_ids or out_py.finished:
                         resp, stats = _build_phase2_response(go)
                         yield (resp, stats) if yield_access_stats else resp
@@ -1245,16 +1247,19 @@ async def iter_real_model_stream_infer(
                     # Case A: discard pending + emit post-close.
                     phase2_pending = []
                     phase2_seen_close = True
+                    post_start = len(generated_ids) - len(post_close)
                     if out_py.finished and runtime.eos_tokens:
                         post_close = _strip_trailing_eos(post_close, runtime.eos_tokens)
-                    out_py.output_ids = torch.tensor(post_close, dtype=torch.int32)
+                    slice_generate_output_tokens(
+                        out_py, post_start, post_start + len(post_close)
+                    )
                     if post_close or out_py.finished:
                         resp, stats = _build_phase2_response(go)
                         yield (resp, stats) if yield_access_stats else resp
                 elif out_py.finished:
                     # Case B: pre-close is real content; keep it, drop close.
                     pre_close = list(generated_ids[:close_idx])
-                    out_py.output_ids = torch.tensor(pre_close, dtype=torch.int32)
+                    slice_generate_output_tokens(out_py, 0, len(pre_close))
                     phase2_pending.append(go)
                     for item in _flush_phase2_pending():
                         yield item
@@ -1341,9 +1346,7 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
         )
         self._tokenizer = tokenizer
         self._generate_env_config = generate_env_config
-        self._is_kimi_k3 = (
-            str(model_type or "").replace("-", "_").lower() == "kimi_k3"
-        )
+        self._is_kimi_k3 = str(model_type or "").replace("-", "_").lower() == "kimi_k3"
         self._vit_config = vit_config or VitConfig()
         # Empty runtime is a safe default — phase-2 disabled, all dashllm limit
         # params null. Production callers (``DashScApp``) pre-build via

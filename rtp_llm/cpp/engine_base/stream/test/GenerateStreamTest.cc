@@ -198,4 +198,49 @@ TEST_F(GenerateStreamTest, testMtpAsyncDeviceStateBackCompatWrappers) {
     ASSERT_FALSE(stream->getProposeTokensGpu().defined());
 }
 
+TEST_F(GenerateStreamTest, testLogprobsTrimAcceptedBlockAtTokenLimit) {
+    auto input                               = std::make_shared<GenerateInput>();
+    input->input_ids                         = torch::tensor({1}, torch::kInt32);
+    input->generate_config                   = std::make_shared<GenerateConfig>();
+    input->generate_config->return_all_probs = true;
+    input->generate_config->is_streaming     = true;
+    input->generate_config->max_new_tokens   = 2;
+    ModelConfig model;
+    model.max_seq_len = 128;
+    model.vocab_size  = 4;
+    auto stream = std::make_shared<NormalGenerateStream>(input, model, RuntimeConfig{}, ResourceContext{}, nullptr);
+    auto probabilities =
+        torch::tensor({{{0.1f, 0.2f, 0.6f, 0.1f}, {0.1f, 0.1f, 0.2f, 0.6f}, {0.1f, 0.6f, 0.2f, 0.1f}}});
+    stream->update({torch::tensor({{2, 3, 1}}, torch::kInt32), 3, {}, {}, {}, {}, probabilities, {}, {}, {}});
+    ASSERT_TRUE(stream->hasOutput());
+    auto result = stream->nextOutput();
+    ASSERT_TRUE(result.ok());
+    const auto& output = result.value().generate_outputs[0];
+    EXPECT_EQ(output.output_ids.numel(), 2);
+    EXPECT_TRUE(torch::allclose(output.aux_info.all_probs.value(), probabilities.narrow(1, 0, 2)));
+}
+
+TEST_F(GenerateStreamTest, testLogprobsSkipPrefillTokenReplayedOnDecode) {
+    auto input                               = std::make_shared<GenerateInput>();
+    input->input_ids                         = torch::tensor({1}, torch::kInt32);
+    input->generate_config                   = std::make_shared<GenerateConfig>();
+    input->generate_config->return_all_probs = true;
+    input->generate_config->is_streaming     = true;
+    input->generate_config->max_new_tokens   = 4;
+    ModelConfig model;
+    model.max_seq_len = 128;
+    model.vocab_size  = 4;
+    auto stream = std::make_shared<NormalGenerateStream>(input, model, RuntimeConfig{}, ResourceContext{}, nullptr);
+    // DecodeRpcServer replays a token already emitted by prefill, with no probabilities.
+    stream->incLastOutputPos();
+    stream->update({torch::tensor({{2}}, torch::kInt32), 1, {}, {}, {}, {}, {}, {}, {}, {}});
+    EXPECT_FALSE(stream->hasOutput());
+    auto probabilities = torch::tensor({{0.1f, 0.1f, 0.2f, 0.6f}});
+    stream->update({torch::tensor({{3}}, torch::kInt32), 1, {}, {}, {}, {}, probabilities, {}, {}, {}});
+    ASSERT_TRUE(stream->hasOutput());
+    auto result = stream->nextOutput();
+    ASSERT_TRUE(result.ok());
+    EXPECT_TRUE(torch::allclose(result.value().generate_outputs[0].aux_info.all_probs.value(), probabilities));
+}
+
 }  // namespace rtp_llm

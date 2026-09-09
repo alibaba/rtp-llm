@@ -399,3 +399,9 @@ py_test(
     srcs = ["kimi_k3_request_contract_test.py"],
     deps = ["//rtp_llm:testlib"],
 )
+
+py_test(
+    name = "renderer_logprobs_test",
+    srcs = ["renderer_logprobs_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)

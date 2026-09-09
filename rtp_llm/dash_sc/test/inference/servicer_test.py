@@ -894,6 +894,72 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
             3,
         )
 
+    async def test_thinking_logprobs_skip_injected_close_and_resume_in_phase2(
+        self,
+    ) -> None:
+        phase1_probs = torch.zeros((2, 32), dtype=torch.float32)
+        phase1_probs[0, 10] = 0.8
+        phase1_probs[0, 11] = 0.2
+        phase1_probs[1, 1] = 1.0
+        phase2_probs = torch.zeros((1, 32), dtype=torch.float32)
+        phase2_probs[0, 20] = 0.7
+        phase2_probs[0, 21] = 0.3
+        phase1 = GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor([10, 1], dtype=torch.int32),
+                    all_probs=phase1_probs,
+                    finished=False,
+                    aux_info=AuxInfo(input_len=2, reuse_len=0),
+                )
+            ]
+        )
+        phase2 = GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor([20], dtype=torch.int32),
+                    all_probs=phase2_probs,
+                    finished=True,
+                    aux_info=AuxInfo(input_len=4, reuse_len=0),
+                )
+            ]
+        )
+        visitor = _MultiStreamVisitor(
+            [_FakeAsyncStream([phase1]), _FakeAsyncStream([phase2])]
+        )
+        tok = _dsv4_tokenizer()
+        env_cfg = _GenerateEnvCfg()
+
+        chunks = await _drain(
+            iter_real_model_stream_infer(
+                self._minimal_request(),
+                [7, 8],
+                SamplingParams(logprobs=True, top_logprobs=2),
+                OtherParams(enable_thinking=True),
+                visitor,
+                rtp_llm_request_id=100,
+                tokenizer=tok,
+                generate_env_config=env_cfg,
+                think_runtime=build_think_runtime(tok, env_cfg, "deepseek_v4"),
+                phase2_request_id_factory=lambda: 200,
+            )
+        )
+
+        self.assertEqual(
+            [_gen_ids(chunk) for chunk in chunks], [[10], [128822, 271], [20]]
+        )
+        phase1_logprobs = json.loads(
+            chunks[0].infer_response.parameters["logprobs"].string_param
+        )
+        self.assertEqual(set(phase1_logprobs[0]), {"10", "11"})
+        self.assertNotIn("logprobs", chunks[1].infer_response.parameters)
+        phase2_logprobs = json.loads(
+            chunks[2].infer_response.parameters["logprobs"].string_param
+        )
+        self.assertEqual(set(phase2_logprobs[0]), {"20", "21"})
+        self.assertTrue(visitor.generate_inputs[0].generate_config.return_all_probs)
+        self.assertTrue(visitor.generate_inputs[1].generate_config.return_all_probs)
+
     async def test_phase2_finished_at_max_new_tokens_reports_length(self) -> None:
         req = self._minimal_request()
         phase1 = GenerateOutputs(
@@ -1803,6 +1869,33 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
             for i in range(len(infer.outputs))
         }
         self.assertEqual(_unpack_int32_le(by_name["generated_ids"]), [142])
+
+    async def test_logprobs_request_reaches_engine_and_response(self) -> None:
+        out = GenerateOutput(
+            output_ids=torch.tensor([2], dtype=torch.int32),
+            all_probs=torch.tensor([0.1, 0.2, 0.7], dtype=torch.float32),
+            finished=True,
+            aux_info=AuxInfo(input_len=1, reuse_len=0),
+        )
+        visitor = _FakeVisitor(
+            _FakeAsyncStream([GenerateOutputs(generate_outputs=[out])])
+        )
+        servicer = DashScInferenceServicer(backend_visitor=visitor)
+        req = self._valid_infer_request()
+        req.parameters["logprobs"].bool_param = True
+        req.parameters["top_logprobs"].int64_param = 2
+
+        responses = await _drain(
+            servicer.ModelStreamInfer(_areq_iter([req]), MagicMock())
+        )
+
+        self.assertEqual(len(responses), 1)
+        self.assertTrue(visitor.last_generate_input.generate_config.return_all_probs)
+        payload = json.loads(
+            responses[0].infer_response.parameters["logprobs"].string_param
+        )
+        self.assertEqual(len(payload), 1)
+        self.assertEqual(set(payload[0]), {"1", "2"})
 
     async def test_access_log_records_input_and_generated_ids(self) -> None:
         # Frontend struct path: the emitted access line carries the real token

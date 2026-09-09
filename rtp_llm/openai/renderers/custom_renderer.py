@@ -107,6 +107,8 @@ class StreamStatus:
 
     def __init__(self, request: ChatCompletionRequest):
         self.request = request
+        self.pending_logprobs: List[ChatCompletionTokenLogprob] = []
+        self.emitted_logprobs = 0
 
     def update_output(
         self,
@@ -180,6 +182,8 @@ class StreamStatusSync:
 
     def __init__(self, request: ChatCompletionRequest):
         self.request = request
+        self.pending_logprobs: List[ChatCompletionTokenLogprob] = []
+        self.emitted_logprobs = 0
 
     def update_output_sync(
         self,
@@ -189,7 +193,7 @@ class StreamStatusSync:
         remove_stop_word_ids_func,
     ):
         self.index += 1
-        delta_output_ids = output.output_ids.cpu().flatten().tolist()
+        delta_output_ids = output_ids.cpu().flatten().tolist()
         self.output_ids_list = copy.deepcopy(self.output_ids_list + delta_output_ids)
         self.finish_reason = check_finish_func(self.output_ids_list, input_len)
         self.output_ids = remove_stop_word_ids_func(
@@ -246,7 +250,7 @@ class RendererParams:
 @dataclass
 class OutputDelta:
     output_str: Union[str, DeltaMessage]
-    logprobs: Optional[ChatCompletionTokenLogprob]
+    logprobs: Optional[List[ChatCompletionTokenLogprob]]
     input_length: int
     output_length: int
     reuse_length: int
@@ -307,9 +311,7 @@ class RenderedInputs:
         for url, type, tensor, config in zip(
             input_urls, input_urls_type, input_tensors, preprocess_configs
         ):
-            self.multimodal_inputs.append(
-                MultimodalInput(url, type, tensor, config)
-            )
+            self.multimodal_inputs.append(MultimodalInput(url, type, tensor, config))
 
 
 class CustomChatRenderer:
@@ -436,9 +438,7 @@ class CustomChatRenderer:
     def render_chat(self, request: ChatCompletionRequest) -> RenderedInputs:
         raise NotImplementedError
 
-    async def render_chat_async(
-        self, request: ChatCompletionRequest
-    ) -> RenderedInputs:
+    async def render_chat_async(self, request: ChatCompletionRequest) -> RenderedInputs:
         return self.render_chat(request)
 
     def apply_chat_completion_constraints(
@@ -572,51 +572,59 @@ class CustomChatRenderer:
             multimodal_lengths=aux_info.multimodal_lengths,
         )
 
-    async def _generate_log_probs(
-        self, status: StreamStatus, output: Optional[GenerateOutput]
-    ) -> Optional[ChatCompletionTokenLogprob]:
-        assert output is not None
-        if not status.request.logprobs:
-            return None
-        prob_return_num = status.request.top_logprobs or 1
-        all_probs = output.all_probs
-        output_id = output.output_ids
-        if output_id == None:
-            return None
-        selected_id = output_id[-1].item()
-        if all_probs == None:
-            raise Exception(
-                "all_probs is None when logprobs is true. There should be a internal bug."
-            )
-        all_probs = all_probs.squeeze()
-        non_zero_size = all_probs.nonzero().shape[0]
-        prob_return_num = min(prob_return_num, non_zero_size)
-        # 使用 topk 提高计算效率，只计算需要的前 k 个值
-        probs, tokens = all_probs.topk(
-            prob_return_num, dim=-1, largest=True, sorted=True
-        )
-        log_values = probs.log()
-
-        selected_token = self.tokenizer.decode([selected_id])
-        chat_logprob = ChatCompletionTokenLogprob(
-            token=selected_token,
-            bytes=list(selected_token.encode("utf-8", errors="replace")),
-            logprob=all_probs[output_id].log().item(),
-            top_logprobs=[],
-        )
-        for i in range(prob_return_num):
-            token = self.tokenizer.decode(tokens[i].item())
-            chat_logprob.top_logprobs.append(
-                TopLogprob(
-                    token=token,
-                    logprob=log_values[i].item(),
-                    bytes=list(token.encode("utf-8", errors="replace")),
+    def _append_log_probs(self, status, all_probs, output_ids) -> None:
+        if not status.request.logprobs or output_ids is None or output_ids.numel() == 0:
+            return
+        if all_probs is None or all_probs.numel() == 0:
+            raise ValueError("all_probs is missing while logprobs is requested")
+        ids = output_ids.reshape(-1).tolist()
+        rows = all_probs.reshape(-1, all_probs.shape[-1]).float()
+        if rows.shape[0] != len(ids):
+            raise ValueError("all_probs must contain one row per generated token")
+        # Preserve the existing API behavior: omitted and zero both request
+        # one candidate, and filtered-out tokens are excluded from candidates.
+        requested_count = status.request.top_logprobs or 1
+        for selected_id, row in zip(ids, rows):
+            if not torch.isfinite(row).all() or (row < 0).any():
+                raise ValueError("invalid model probabilities")
+            count = min(requested_count, row.nonzero().shape[0])
+            log_row = torch.where(row > 0, row.log(), -9999.0)
+            _, tokens = row.topk(count, sorted=True)
+            selected_token = self.tokenizer.decode([selected_id])
+            candidates = []
+            for token_id in tokens.tolist():
+                token = self.tokenizer.decode([token_id])
+                candidates.append(
+                    TopLogprob(
+                        token=token,
+                        logprob=log_row[token_id].item(),
+                        bytes=list(token.encode("utf-8", errors="replace")),
+                    )
+                )
+            status.pending_logprobs.append(
+                ChatCompletionTokenLogprob(
+                    token=selected_token,
+                    logprob=log_row[selected_id].item(),
+                    bytes=list(selected_token.encode("utf-8", errors="replace")),
+                    top_logprobs=candidates,
                 )
             )
 
-        logging.debug("chat_logprob: %s", chat_logprob.model_dump_json(indent=4))
+    def _take_log_probs(self, status) -> Optional[List[ChatCompletionTokenLogprob]]:
+        if not status.request.logprobs:
+            return None
+        # Buffer probabilities along with text across incomplete UTF-8 and stop
+        # prefixes. output_ids excludes stop/EOS ids, so their scores stay hidden.
+        count = max(0, len(status.output_ids) - status.emitted_logprobs)
+        result = status.pending_logprobs[:count]
+        del status.pending_logprobs[:count]
+        status.emitted_logprobs += len(result)
+        return result or None
 
-        return chat_logprob
+    async def _generate_log_probs(
+        self, status: StreamStatus, output: Optional[GenerateOutput]
+    ) -> Optional[List[ChatCompletionTokenLogprob]]:
+        return self._take_log_probs(status)
 
     async def _generate_extra_outputs(
         self, output: GenerateOutput, generate_config: GenerateConfig
@@ -726,6 +734,7 @@ class CustomChatRenderer:
             functools.partial(self._check_finish_reason, max_new_tokens=max_new_tokens),
             self._remove_stop_word_ids,
         )
+        self._append_log_probs(status, output.all_probs, output.output_ids)
         decoded_prev_token = self.tokenizer.decode(status.prev_token_id)
         decoded_string = self.tokenizer.decode(status.tokens_to_decode)
         # For some tokenizers (e.g. ChatGLM), decode a single token differs from decode a list of tokens.
@@ -868,7 +877,7 @@ class CustomChatRenderer:
                     delta=delta,
                     logprobs=(
                         ChoiceLogprobs(
-                            content=[item.logprobs] if item.logprobs != None else None,
+                            content=item.logprobs,
                             refusal=None,
                         )
                         if item.logprobs != None
@@ -1098,48 +1107,8 @@ class CustomChatRenderer:
         status: StreamStatusSync,
         all_probs: Optional[torch.Tensor],
         output_ids: Optional[torch.Tensor],
-    ) -> Optional[ChatCompletionTokenLogprob]:
-        if not status.request.logprobs:
-            return None
-        prob_return_num = status.request.top_logprobs or 1
-        all_probs = all_probs
-        output_id = output_ids
-        if output_id == None:
-            return None
-        selected_id = output_id[-1].item()
-        if all_probs == None:
-            raise Exception(
-                "all_probs is None when logprobs is true. There should be a internal bug."
-            )
-        all_probs = all_probs.squeeze()
-        non_zero_size = all_probs.nonzero().shape[0]
-        prob_return_num = min(prob_return_num, non_zero_size)
-        # 使用 topk 提高计算效率，只计算需要的前 k 个值
-        probs, tokens = all_probs.topk(
-            prob_return_num, dim=-1, largest=True, sorted=True
-        )
-        log_values = probs.log()
-
-        selected_token = self.tokenizer.decode([selected_id])
-        chat_logprob = ChatCompletionTokenLogprob(
-            token=selected_token,
-            bytes=list(selected_token.encode("utf-8", errors="replace")),
-            logprob=all_probs[output_id].log().item(),
-            top_logprobs=[],
-        )
-        for i in range(prob_return_num):
-            token = self.tokenizer.decode(tokens[i].item())
-            chat_logprob.top_logprobs.append(
-                TopLogprob(
-                    token=token,
-                    logprob=log_values[i].item(),
-                    bytes=list(token.encode("utf-8", errors="replace")),
-                )
-            )
-
-        logging.debug("chat_logprob: %s", chat_logprob.model_dump_json(indent=4))
-
-        return chat_logprob
+    ) -> Optional[List[ChatCompletionTokenLogprob]]:
+        return self._take_log_probs(status)
 
     def _update_single_status_sync(
         self,
@@ -1162,6 +1131,7 @@ class CustomChatRenderer:
             functools.partial(self._check_finish_reason, max_new_tokens=max_new_tokens),
             self._remove_stop_word_ids,
         )
+        self._append_log_probs(status, all_probs, output_ids)
         decoded_prev_token = self.tokenizer.decode(status.prev_token_id)
         decoded_string = self.tokenizer.decode(status.tokens_to_decode)
         # For some tokenizers (e.g. ChatGLM), decode a single token differs from decode a list of tokens.
@@ -1235,7 +1205,7 @@ class CustomChatRenderer:
                     ),
                     logprobs=(
                         ChoiceLogprobs(
-                            content=[item.logprobs] if item.logprobs != None else None,
+                            content=item.logprobs,
                             refusal=None,
                         )
                         if item.logprobs != None

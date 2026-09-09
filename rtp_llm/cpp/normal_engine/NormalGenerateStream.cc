@@ -118,10 +118,12 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
                 generate_output.aux_info.cum_log_probs = cum_log_probs_.narrow(0, i, 1).cpu().clone();
             }
             if (generate_input_->generate_config->return_all_probs) {
-                if (!update_info.all_probs.defined()) {
-                    throw std::runtime_error("all_probs is not while generate_config return_all_probs is true");
-                }
-                generate_output.aux_info.all_probs = all_probs_.narrow(0, i, 1).clone();
+                RTP_LLM_CHECK_WITH_INFO(all_probs_.defined() && all_probs_.size(1) == (int64_t)output_len,
+                                        "all_probs must contain one row per emitted token");
+                auto probabilities = all_probs_.narrow(0, i, 1);
+                // Preserve the legacy [1, vocabulary] shape for single-token chunks.
+                generate_output.aux_info.all_probs =
+                    (output_len == 1 ? probabilities.squeeze(1) : probabilities).clone();
             }
         }
         // hidden_states post process
@@ -184,8 +186,27 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
     if (update_info.cum_log_probs.defined()) {
         cum_log_probs_ = update_info.cum_log_probs.cpu();
     }
-    if (update_info.all_probs.defined()) {
-        all_probs_ = update_info.all_probs.cpu();
+    if (generate_input_->generate_config->return_all_probs && update_info.num_new_tokens > 0
+        && seqLength() > last_output_pos_) {
+        RTP_LLM_CHECK_WITH_INFO(update_info.all_probs.defined(),
+                                "return_all_probs requires probabilities in each update");
+        auto probabilities = update_info.all_probs.cpu();
+        if (probabilities.dim() == 2) {
+            probabilities = probabilities.unsqueeze(1);
+        }
+        RTP_LLM_CHECK_WITH_INFO(probabilities.dim() == 3 && probabilities.size(0) == (int64_t)nextBatchSize(),
+                                "all_probs must have shape [batch, tokens, vocabulary]");
+        // max_new_tokens can truncate an accepted MTP block. Retain only committed rows.
+        const auto pending_tokens  = (int64_t)(seqLength() - last_output_pos_);
+        const auto buffered_tokens = all_probs_.defined() ? all_probs_.size(1) : 0;
+        const auto new_tokens      = pending_tokens - buffered_tokens;
+        RTP_LLM_CHECK_WITH_INFO(new_tokens >= 0 && new_tokens <= probabilities.size(1),
+                                "all_probs token count does not match stream progress");
+        probabilities = probabilities.narrow(1, 0, new_tokens);
+        if (all_probs_.defined() && update_info.src_batch_indices.defined()) {
+            all_probs_ = all_probs_.index_select(0, update_info.src_batch_indices.to(torch::kCPU, torch::kLong));
+        }
+        all_probs_ = all_probs_.defined() ? torch::cat({all_probs_, probabilities}, 1) : probabilities.clone();
     }
 
     // TODO: move it to better position
@@ -224,5 +245,6 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
     }
 
     last_output_pos_ = seqLength();
+    all_probs_       = torch::Tensor();
 }
 };  // namespace rtp_llm
