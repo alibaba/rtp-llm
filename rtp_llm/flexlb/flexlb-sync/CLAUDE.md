@@ -5,7 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Module Overview
 
 flexlb-sync is the core load balancing module of FlexLB. It handles:
-- Full-fleet Prefill cost selection and Decode capacity selection and VIT random selection
+- Full-fleet Prefill and Decode cost selection and VIT random selection
 - Worker node status synchronization via gRPC
 - Master election using ZooKeeper
 - Request routing across different role types (PREFILL, DECODE, PDFUSION, VIT)
@@ -94,7 +94,7 @@ flexlb-sync/
 │   └── strategy/
 │       ├── RandomStrategy.java             # VIT selection
 │       ├── CostBasedPrefillStrategy.java   # Predicted Prefill cost strategy
-│       └── DecodeSelector.java    # Capacity-filtered Decode rotation
+│       └── DecodeSelector.java    # Capacity-filtered Decode cost selection
 ├── consistency/
 │   ├── MasterElectService.java      # Master election interface
 │   └── ZookeeperMasterElectService.java  # ZK implementation

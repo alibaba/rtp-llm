@@ -3,6 +3,7 @@ package org.flexlb.balance.scheduler;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
+import org.flexlb.balance.prediction.DecodeCostFormula;
 import org.flexlb.config.DispatcherConfig;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
@@ -215,10 +216,12 @@ public final class ScheduledRequest implements Prioritized {
             long hardKvTokens,
             long expectedKvTokens,
             DecodeEndpoint.AdmissionCapacity capacity,
-            DecodeMode mode) {
+            DecodeMode mode,
+            DecodeCostFormula costFormula) {
         public DecodeBinding {
             Objects.requireNonNull(capacity, "capacity");
             Objects.requireNonNull(mode, "mode");
+            Objects.requireNonNull(costFormula, "costFormula");
             if (reservation != null && reservation.requestId() != requestId) {
                 throw new IllegalArgumentException("Decode reservation belongs to another request");
             }
@@ -227,7 +230,8 @@ public final class ScheduledRequest implements Prioritized {
         public static DecodeBinding capture(BalanceContext context) {
             var request = Objects.requireNonNull(context.getRequest(), "request");
             var config = Objects.requireNonNull(context.getConfig(), "request config");
-            var availability = config.getRouter().getRoles().getDecode().getAvailability();
+            var decode = config.getRouter().getRoles().getDecode();
+            var availability = decode.getAvailability();
             long promptTokens = Math.max(0L, request.getSeqLen());
             long outputTokens = Math.max(0L, request.getMaxNewTokens());
             long expectedTokens = promptTokens > Long.MAX_VALUE - outputTokens
@@ -236,13 +240,15 @@ public final class ScheduledRequest implements Prioritized {
                     promptTokens, expectedTokens,
                     new DecodeEndpoint.AdmissionCapacity(
                             availability.getMaxEngineRequests() == null ? 0L : availability.getMaxEngineRequests(),
-                            availability.getMaxKvUsagePercent()), DecodeMode.from(config));
+                            availability.getMaxKvUsagePercent()), DecodeMode.from(config),
+                    decode.getCostEstimator().compiledFormula());
         }
 
         DecodeBinding bind(ServerStatus selectedStatus, DecodeEndpoint selectedEndpoint,
                            DecodeEndpoint.ReservationHandle selectedReservation) {
             return new DecodeBinding(selectedStatus, selectedEndpoint, selectedReservation,
-                    requestId, priority, hardKvTokens, expectedKvTokens, capacity, mode);
+                    requestId, priority, hardKvTokens, expectedKvTokens, capacity, mode,
+                    costFormula);
         }
 
         /** Absence is a topology choice; a partial binding is still an error. */

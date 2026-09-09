@@ -62,8 +62,27 @@ public class DecodeSelector {
                 return PlacementResult.blocked(RoleType.DECODE);
             }
             Availability selectedAvailability = preferredAvailability;
+            double[] costByWorker = new double[snapshots.size()];
+            double minimumCost = Double.POSITIVE_INFINITY;
+            for (int index = 0; index < snapshots.size(); index++) {
+                if (availabilityByWorker[index] == selectedAvailability) {
+                    DecodeRoutingView view = snapshots.get(index);
+                    double cost = request.costFormula().evaluate(view.totalLoad(),
+                            request.capacity().maxEngineRequests(), view.realKvUsed(), view.totalKv());
+                    costByWorker[index] = cost;
+                    if (Double.isFinite(cost)) {
+                        minimumCost = Math.min(minimumCost, cost);
+                    }
+                }
+            }
+            if (!Double.isFinite(minimumCost)) {
+                throw new IllegalStateException("Decode cost formula produced no finite score: "
+                        + request.costFormula().expression());
+            }
+            double selectedCost = minimumCost;
             int selectedIndex = rotation.next(RoleType.DECODE, group, snapshots.size(),
-                    i -> availabilityByWorker[i] == selectedAvailability, i -> snapshots.get(i).address());
+                    i -> availabilityByWorker[i] == selectedAvailability && costByWorker[i] == selectedCost,
+                    i -> snapshots.get(i).address());
             if (selectedIndex < 0) { throw new IllegalStateException("Decode snapshot candidate disappeared"); }
             DecodeRoutingView selected = snapshots.get(selectedIndex);
             WorkerEndpoint.GenerationPin pin = workerDirectory.captureDecodeGeneration(selected);

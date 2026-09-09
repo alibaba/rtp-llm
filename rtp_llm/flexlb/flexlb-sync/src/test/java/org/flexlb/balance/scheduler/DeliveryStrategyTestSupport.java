@@ -7,6 +7,7 @@ import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
+import org.flexlb.balance.prediction.DecodeCostFormula;
 import org.flexlb.balance.prediction.PrefillBatchFeatures;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.projection.RouteProjection;
@@ -177,7 +178,8 @@ final class DeliveryStrategyTestSupport {
                 ScheduledRequest.DecodeBinding binding = new ScheduledRequest.DecodeBinding(
                         null, decode, reservation, requestId, item.priority(), item.seqLen(), item.seqLen(),
                         new DecodeEndpoint.AdmissionCapacity(0L, 100L),
-                        ScheduledRequest.DecodeMode.WAIT_AT_DISPATCH);
+                        ScheduledRequest.DecodeMode.WAIT_AT_DISPATCH,
+                        DecodeCostFormula.parse("kvcache_used_ratio"));
                 Mockito.when(item.decodeBinding()).thenReturn(binding);
             }
         }

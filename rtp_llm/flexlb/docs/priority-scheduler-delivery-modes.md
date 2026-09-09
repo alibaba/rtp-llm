@@ -66,8 +66,9 @@ For DIRECT use `"scheduler":{"type":"DIRECT"}` and
 | `router.roles.prefill.cacheAffinity` | Omitted | Enables cache-leader preference within the configured TTFT penalty |
 | `router.roles.prefill.cacheAffinity.maxExtraTtftMs` | `0` ms | Non-negative; only when cacheAffinity exists |
 | `router.roles.prefill.cacheAffinity.minPrefixHitPercent` | `5` | Percentage in `[0,100]`; only when cacheAffinity exists |
+| `router.roles.decode.costEstimator.expression` | `kvcache_used_ratio` | Valid, non-empty Decode cost formula; lowest cost wins within each availability tier |
 | `router.roles.decode.availability.maxKvUsagePercent` | `90` | Percentage in `[0,100]`; `0` means zero usage is allowed, not disabled admission |
-| `router.roles.decode.availability.maxEngineRequests` | Omitted | Optional positive Decode request cap; dispatch counts Engine ownership and permits, while preemptive placement also counts queued reservations |
+| `router.roles.decode.availability.maxEngineRequests` | Omitted | Positive Decode request cap; required when the cost expression uses `max_running_size`, otherwise optional. Dispatch counts Engine ownership and permits, while preemptive placement also counts queued reservations |
 | `router.groupSelector` | Omitted | First matching rule wins; no match uses `defaultTargets` |
 | `workerRegistry.health.statusPollIntervalMs` | `20` ms | Positive |
 | `workerRegistry.health.statusRpcTimeoutMs` | `5000` ms | Positive |
@@ -140,8 +141,46 @@ the route on the selected Prefill and waits for an exact Decode permit at delive
 with Decode preemption it checks capacity or reclaims victims before Prefill
 publication. DIRECT requires current capacity and atomically checks and registers
 Prefill ownership under the endpoint lock. Concurrent ownership changes alone do
-not reject a DIRECT request. There are no mean-relative outlier filters or
-configurable load/KV selection weights.
+not reject a DIRECT request. There are no mean-relative outlier filters.
+
+`router.roles.decode.costEstimator.expression` defaults to `kvcache_used_ratio`.
+The expression supports arithmetic `+`, `-`, `*`, `/`, `^`,
+parentheses and `sqrt`, `log`, `exp`, `abs`, `max`, `min`, `pow`, and `param(name, initialValue)` functions.
+Decode expressions do not support `sum`.
+
+| Variable | Value |
+| --- | --- |
+| `running_size` | Engine-owned requests, including accepted and running requests, plus local request reservations |
+| `max_running_size` | Fixed `router.roles.decode.availability.maxEngineRequests`; using this variable requires a positive configured value |
+| `kvcache_used` | Used KV tokens plus local predicted KV reservations |
+| `kvcache_capacity` | Total KV token capacity |
+| `kvcache_used_ratio` | `kvcache_used / kvcache_capacity`; unknown capacity of zero yields zero, and reservations above capacity can produce ratios above one |
+
+Request and KV measurements include queued reservations and ownership retained during
+preemption. Workers with current dispatch capacity remain preferred over workers that
+must wait; lower formula cost wins within that tier, and equal costs rotate. A non-finite
+formula result excludes that worker; if the preferred tier has no finite results, routing
+fails with a formula error. The formula does not change KV/request admission limits.
+For request load alone, use `running_size`. A nonlinear expression such as
+`sqrt(running_size) + pow(kvcache_used_ratio, 2)` is also supported.
+This complete `FLEXLB_CONFIG` example combines normalized request load and KV usage:
+
+```json
+{
+  "schemaVersion": 3,
+  "requestLifecycle": {"request": {"timeoutMs": 60000}},
+  "router": {
+    "roles": {
+      "decode": {
+        "costEstimator": {
+          "expression": "0.3 * running_size / max_running_size + 0.7 * kvcache_used_ratio"
+        },
+        "availability": {"maxEngineRequests": 128}
+      }
+    }
+  }
+}
+```
 
 ## Preemption and RPC settings
 

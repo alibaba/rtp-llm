@@ -87,7 +87,8 @@ The online loader accepts schema 3 only. Duplicate keys, unknown or inactive fie
 | `requestLifecycle.decision.lifetime` | Finite number ≥ 1, default 2.0. At delivery, remaining Prefill time (including waiting) × lifetime + 10000 ms sets the deadline. Only observed running predecessors consume elapsed time; unstarted work keeps its full estimate. Independent of request age. |
 | `scheduler.queueTimeoutMs` | QUEUE only, positive, default 3600000 ms; actual queue TTL. DIRECT has no queue timer and rejects this field. |
 | Removed capacity controls | `scheduler.capacity` and delivered-not-accepted count limits are removed. Per-Prefill concurrency uses the single dispatcher limit; lifetimes bound waiting. The old `maxUncachedTokens` field is rejected. |
-| Removed routing controls | Prefill candidate randomization/LRU and outlier filters, Decode weights/outlier filters, and output-estimate truncation are rejected. |
+| Removed routing controls | Prefill candidate randomization/LRU and outlier filters, legacy Decode decay controls/outlier filters, and output-estimate truncation are rejected. |
+| `router.roles.decode.costEstimator.expression` | Default `kvcache_used_ratio`; smallest cost wins within the same availability tier. Using `max_running_size` requires a positive `availability.maxEngineRequests`. |
 | Transport timeout | `flexlb.engine-grpc.enqueue-timeout-ms`, default 5000; outside the scheduling JSON. |
 | `scheduler.ordering.preemption.timeoutMs` | Default 1000 ms, positive; Engine-owned Decode preemption only. Starts after the Cancel ACK phase and bounds the wait for the Engine terminal. ACK timeout stays internal, 50 ms. |
 | `scheduler.ordering.preemption.allowedVictimStages` | PRIORITY defaults to all three stages: `PREFILL_QUEUED`, `DECODE_RESERVED`, `DECODE_ENGINE_OWNED`, including when `preemption` is omitted. An explicit non-empty list replaces the defaults. |
@@ -111,10 +112,33 @@ export FLEXLB_CONFIG='{
   "router": {
     "roles": {
       "prefill": {},
-      "decode": {"availability": {"maxKvUsagePercent": 90, "maxEngineRequests": 128}}
+      "decode": {
+        "costEstimator": {"expression": "kvcache_used_ratio"},
+        "availability": {"maxKvUsagePercent": 90, "maxEngineRequests": 128}
+      }
     }
   }
 }'
+```
+
+Omit `router.roles.decode.costEstimator` to balance by KV usage ratio. Set its
+`expression` to `running_size` to balance by request load, or use a formula to combine metrics:
+
+```json
+{
+  "schemaVersion": 3,
+  "requestLifecycle": {"request": {"timeoutMs": 60000}},
+  "router": {
+    "roles": {
+      "decode": {
+        "costEstimator": {
+          "expression": "0.3 * running_size / max_running_size + 0.7 * kvcache_used_ratio"
+        },
+        "availability": {"maxEngineRequests": 128}
+      }
+    }
+  }
+}
 ```
 
 `workerRegistry`, `observability.cacheHit`, and `router.groupSelector` remain available.
@@ -256,9 +280,26 @@ demand, capacity limits and admission mode before selecting workers. DIRECT requ
 immediately available dispatch capacity. QUEUE without reclamation can retain a physically
 feasible route while Decode is busy and wait for a permit at delivery. With Decode reclamation
 enabled, placement also counts queued reservations and can reclaim allowed lower-priority owners.
-Selection rotates among eligible workers; reservation and delivery always recheck current
+Selection prefers workers with current dispatch capacity over feasible workers that must wait.
+Within that availability tier, Decode minimizes `router.roles.decode.costEstimator.expression`,
+which defaults to `kvcache_used_ratio`. Formulas support `+`, `-`, `*`, `/`, `^`,
+parentheses and `sqrt`, `log`, `exp`, `abs`, `max`, `min`, `pow`, and `param(name, initialValue)` functions.
+Decode formulas do not use `sum`. Available variables are:
+
+| Variable | Meaning |
+| --- | --- |
+| `running_size` | Engine-owned requests, including accepted and running requests, plus local request reservations |
+| `max_running_size` | Fixed `router.roles.decode.availability.maxEngineRequests`; must be configured as a positive value when the expression uses this variable |
+| `kvcache_used` | Used KV tokens plus local predicted KV reservations |
+| `kvcache_capacity` | Total KV token capacity |
+| `kvcache_used_ratio` | `kvcache_used / kvcache_capacity`; zero for unknown capacity of zero, without capping ratios above one |
+
+Request and KV measurements include queued reservations and ownership retained during preemption.
+Equal costs rotate. Workers with a non-finite formula result are excluded from the preferred
+availability tier; if that tier has no finite result, routing fails with a formula error.
+Reservation and delivery always recheck current
 inventory under the selected generation's lock. `maxKvUsagePercent` defaults to 90.
-Optional `maxEngineRequests` covers the ownership scope of the current admission stage,
+`maxEngineRequests`, when configured, covers the ownership scope of the current admission stage,
 including dispatch shadows and permits; it is not the Engine's physical RUNNING concurrency.
 
 ### Run
@@ -309,8 +350,8 @@ Authorization: Bearer <token>
   `router.roles.prefill.executionTimeEstimator.expression` when estimator type is
   `FORMULA`. The default expression is
   `sum(computeTokens) + 0.3*sum(hitCacheTokens)`, returning predicted milliseconds.
-- **Routing parameters**: Prefill concurrency/cache affinity and Decode admission
-  thresholds under `router.roles`.
+- **Routing parameters**: Prefill concurrency/cache affinity and Decode cost
+  formulas/admission thresholds under `router.roles`.
 - **Traffic group selection**: `router.groupSelector` inside the same document.
 - **Backend topology**: `MODEL_SERVICE_CONFIG`.
 - **ZooKeeper consistency**: `FLEXLB_SYNC_CONSISTENCY_CONFIG`.

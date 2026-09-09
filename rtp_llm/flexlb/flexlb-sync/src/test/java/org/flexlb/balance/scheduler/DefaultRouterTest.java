@@ -38,6 +38,7 @@ import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -286,7 +287,7 @@ class DefaultRouterTest {
     @CsvSource({"32,16,32,48", "500,10000,500,10500",
             "9223372036854775806,100,9223372036854775806,9223372036854775807",
             "-1,100,0,100", "500,-1,500,500"})
-    void queuedRouteRetainsSelectedDemandAndLimitsAcrossLaterContextChanges(
+    void queuedRouteRetainsSelectedDemandLimitsAndCostFormulaAcrossLaterContextChanges(
             long prompt, int output, long hardKv, long expectedKv) {
         var config = SchedulingTestConfig.newConfig();
         var context = RequestLifecycleTestSupport.context(config, 701L);
@@ -296,6 +297,8 @@ class DefaultRouterTest {
         var limits = config.getRouter().getRoles().getDecode().getAvailability();
         limits.setMaxEngineRequests(1L);
         limits.setMaxKvUsagePercent(90L);
+        var estimator = config.getRouter().getRoles().getDecode().getCostEstimator();
+        estimator.setExpression("2 * running_size / max_running_size + 3 * kvcache_used_ratio");
         var frozen = DecodeBinding.capture(context);
         var prefill = selection(RoleType.PREFILL, 701L, "10.0.0.1", 8080, "g1");
         var selectedDecode = selection(RoleType.DECODE, 701L, "10.0.0.2", 8080, "g1");
@@ -307,10 +310,14 @@ class DefaultRouterTest {
                 new DecodeEndpoint.EngineDispatchPermitAcquisition(
                         DecodeEndpoint.EngineDispatchPermitAcquireStatus.CAPACITY_FULL, null));
 
-        // Changes after selection must not change this request's publication mode or demand.
+        // Changes after selection must not change this request's publication mode, demand or cost.
         SchedulingTestConfig.allowVictim(config, VictimStage.DECODE_RESERVED);
         limits.setMaxEngineRequests(99L);
         limits.setMaxKvUsagePercent(1L);
+        estimator.setExpression("7 * running_size / max_running_size + 11 * kvcache_used_ratio");
+        assertNotSame(estimator.compiledFormula(), frozen.costFormula());
+        assertEquals("2 * running_size / max_running_size + 3 * kvcache_used_ratio",
+                frozen.costFormula().expression());
         context.getRequest().setSeqLen(4_096L);
         context.getRequest().setMaxNewTokens(1_024);
         context.setSchedulingMetadata(SchedulingMetadata.explicit(4, Long.MAX_VALUE));
@@ -321,6 +328,8 @@ class DefaultRouterTest {
             var item = route.createScheduledRequest(context, new CompletableFuture<>(), System.currentTimeMillis());
             assertSame(frozen.capacity(), route.decodeBinding().capacity());
             assertSame(frozen.capacity(), item.decodeBinding().capacity());
+            assertSame(frozen.costFormula(), route.decodeBinding().costFormula());
+            assertSame(frozen.costFormula(), item.decodeBinding().costFormula());
             assertSame(reservation, item.decodeBinding().reservation());
             assertSame(decode, item.decodeBinding().endpoint());
             assertEquals(hardKv, item.seqLen());

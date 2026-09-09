@@ -8,7 +8,9 @@ import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -71,6 +73,8 @@ class ConfigServiceTest {
                 prefill.getExecutionTimeEstimator().getExpression());
         assertNull(prefill.getCacheAffinity());
         assertNull(config.getRouter().getGroupSelector());
+        assertEquals("kvcache_used_ratio",
+                config.getRouter().getRoles().getDecode().getCostEstimator().getExpression());
         var decode = config.getRouter().getRoles().getDecode().getAvailability();
         assertEquals(90, decode.getMaxKvUsagePercent());
         assertNull(decode.getMaxEngineRequests());
@@ -124,6 +128,88 @@ class ConfigServiceTest {
         assertEquals(1, config.getRouter().getGroupSelector().getRules().size());
         assertEquals("/home/admin/ai-whale/logs/master_theory_hit.log",
                 config.getObservability().getCacheHit().getTheoryLog().getPath());
+    }
+
+    @Test
+    void decode_cost_estimator_accepts_custom_formulas() {
+        for (String expression : new String[]{"kvcache_used_ratio", "running_size",
+                "sqrt(running_size) + pow(kvcache_used_ratio, 2)",
+                "0.3 * running_size / max_running_size + 0.7 * kvcache_used_ratio", "-2"}) {
+            FlexlbConfig config = ConfigTestFixtures.parse("""
+                    {"router":{"roles":{"decode":{"costEstimator":{"expression":"%s"},
+                      "availability":{"maxEngineRequests":128}}}}}
+                    """.formatted(expression));
+            assertEquals(expression, config.getRouter().getRoles().getDecode().getCostEstimator().getExpression());
+            assertEquals(90, config.getRouter().getRoles().getDecode().getAvailability().getMaxKvUsagePercent());
+        }
+        FlexlbConfig config = ConfigTestFixtures.parse("""
+                {"router":{"roles":{"decode":{"costEstimator":{"expression":"running_size"}}}}}
+                """);
+        assertNull(config.getRouter().getRoles().getDecode().getAvailability().getMaxEngineRequests());
+    }
+
+    @Test
+    void decode_max_running_size_variable_requires_positive_max_engine_requests() {
+        assertInvalid("""
+                {"router":{"roles":{"decode":{"costEstimator":{"expression":"running_size / max_running_size"}}}}}
+                """, "maxEngineRequests");
+        for (int maxRequests : new int[]{0, -1}) {
+            assertInvalid("""
+                    {"router":{"roles":{"decode":{"costEstimator":{"expression":"max_running_size"},
+                      "availability":{"maxEngineRequests":%s}}}}}
+                    """.formatted(maxRequests), "maxEngineRequests");
+        }
+        FlexlbConfig config = ConfigTestFixtures.parse("{}");
+        assertNull(config.getRouter().getRoles().getDecode().getAvailability().getMaxEngineRequests());
+        config.getRouter().getRoles().getDecode().getCostEstimator().setExpression("max_running_size");
+        var error = assertThrows(ConfigValidationException.class, () -> FlexlbConfigValidator.validate(config));
+        assertTrue(error.getMessage().contains("maxEngineRequests"), error.getMessage());
+    }
+
+    @Test
+    void decode_cost_estimator_rejects_invalid_formulas_and_json_coercion() {
+        for (String expression : new String[]{"", "   ", "running_size +", "unknown_variable",
+                "sum(running_size)", "sqrt()"}) {
+            assertInvalid("""
+                    {"router":{"roles":{"decode":{"costEstimator":{"expression":"%s"}}}}}
+                    """.formatted(expression), "expression");
+        }
+        for (String value : new String[]{"0", "1.5", "true", "null", "[]", "{}"}) {
+            assertInvalid("""
+                    {"router":{"roles":{"decode":{"costEstimator":{"expression":%s}}}}}
+                    """.formatted(value), "expression");
+        }
+        assertInvalid("{\"router\":{\"roles\":{\"decode\":{\"costEstimator\":null}}}}", "costEstimator");
+    }
+
+    @Test
+    void decode_cost_estimator_validates_programmatic_values() {
+        FlexlbConfig config = ConfigTestFixtures.parse("{}");
+        var estimator = config.getRouter().getRoles().getDecode().getCostEstimator();
+        for (String invalid : new String[]{null, "", "   ", "running_size +", "unknown_variable"}) {
+            estimator.setExpression(invalid);
+            assertThrows(ConfigValidationException.class, () -> FlexlbConfigValidator.validate(config));
+        }
+        config.getRouter().getRoles().getDecode().setCostEstimator(null);
+        assertThrows(ConfigValidationException.class, () -> FlexlbConfigValidator.validate(config));
+    }
+
+    @Test
+    void decode_cost_estimator_reuses_compiled_expression_without_exposing_its_cache() {
+        FlexlbConfig config = ConfigTestFixtures.parse("{}");
+        var estimator = config.getRouter().getRoles().getDecode().getCostEstimator();
+        var original = estimator.compiledFormula();
+        assertSame(original, estimator.compiledFormula());
+        FlexlbConfigValidator.validate(config);
+        assertSame(original, estimator.compiledFormula());
+        estimator.setExpression("running_size");
+        var changed = estimator.compiledFormula();
+        assertNotSame(original, changed);
+        assertSame(changed, estimator.compiledFormula());
+        assertFalse(new ObjectMapper().valueToTree(estimator).has("compiledCost"));
+        assertInvalid("""
+                {"router":{"roles":{"decode":{"costEstimator":{"compiledCost":{}}}}}}
+                """, "compiledCost");
     }
 
     @Test

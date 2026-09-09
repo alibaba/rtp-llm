@@ -102,8 +102,10 @@ public class ConfigService {
                 : config.isFixedWindowDecision() ? "FIXED_WINDOW" : "SINGLE";
         String dispatcher = config.getDispatcher().typeName();
         log.info("FlexLB config loaded: schemaVersion={}, scheduler={}, ordering={}, decision={}, "
-                        + "dispatcher={}, prefillSelection=BEST_ONLY, groupRules={}",
+                        + "dispatcher={}, prefillSelection=BEST_ONLY, "
+                        + "decodeCostExpression={}, groupRules={}",
                 config.getSchemaVersion(), scheduler, ordering, decision, dispatcher,
+                config.getRouter().getRoles().getDecode().getCostEstimator().getExpression(),
                 config.getRouter().getGroupSelector() == null ? 0
                         : config.getRouter().getGroupSelector().getRules().size());
     }
