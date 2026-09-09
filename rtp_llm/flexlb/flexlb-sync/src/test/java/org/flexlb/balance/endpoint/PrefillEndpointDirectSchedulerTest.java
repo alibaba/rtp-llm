@@ -31,8 +31,9 @@ class PrefillEndpointDirectSchedulerTest {
         var runtime = EndpointTestSupport.requestRuntime();
         PrefillEndpoint endpoint = new PrefillEndpoint(
                 EndpointTestSupport.workerStatus(role, "127.0.0.82", 8082, 9082),
-                config, EndpointTestSupport.routeStrategy(runtime), runtime.events(),
-                mock(BatchSchedulerReporter.class));
+                () -> config, EndpointTestSupport.routeStrategy(runtime), runtime.events(),
+                mock(BatchSchedulerReporter.class),
+                new org.flexlb.balance.scheduler.PlacementAvailability());
         endpoint.startGeneration();
         try (var executor = Executors.newFixedThreadPool(8)) {
             List<Future<PrefillState.ReservationResult<PrefillState.DirectRegistration>>> futures =
@@ -81,10 +82,11 @@ class PrefillEndpointDirectSchedulerTest {
         PrefillEndpoint endpoint = assertDoesNotThrow(() -> {
             PrefillEndpoint created = new PrefillEndpoint(
                     workerStatus(),
-                    config,
+                    () -> config,
                     EndpointTestSupport.routeStrategy(requestRuntime),
                     requestRuntime.events(),
-                    mock(BatchSchedulerReporter.class));
+                    mock(BatchSchedulerReporter.class),
+                new org.flexlb.balance.scheduler.PlacementAvailability());
             created.startGeneration();
             return created;
         });

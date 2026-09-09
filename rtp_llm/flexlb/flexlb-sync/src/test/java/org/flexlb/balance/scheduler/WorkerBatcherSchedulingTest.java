@@ -27,6 +27,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -222,12 +223,63 @@ class WorkerBatcherSchedulingTest {
         }
     }
 
-    private WorkerBatcher runningRuntime(
-            FlexlbConfig config,
-            PrefillEndpoint endpoint,
-            DeliveryStrategy delivery) {
+    @Test
+    void windowUpdateInvalidatesProjectionWithoutQueueMutation() {
+        FlexlbConfig initial = fixedConfig();
+        initial.decisionPolicy().setMaxCollectionWaitMs(100L);
+        AtomicReference<FlexlbConfig> current = new AtomicReference<>(initial);
+        WorkerBatcher runtime = new WorkerBatcher("hot-window-projection", stableEndpoint(stableStatus()),
+                current::get, mock(DeliveryStrategy.class), mock(EndpointEventProjector.class));
+        runtimes.add(runtime);
+        runtime.start();
+
+        var before = runtime.captureRouteProjectionInputs();
+        assertEquals(100L, before.queue().constraints().collectionWindowMs());
+        assertSame(before, runtime.captureRouteProjectionInputs());
+        FlexlbConfig updated = fixedConfig();
+        updated.decisionPolicy().setMaxCollectionWaitMs(500L);
+        current.set(updated);
+        var after = runtime.captureRouteProjectionInputs();
+        assertEquals(500L, after.queue().constraints().collectionWindowMs());
+        assertSame(after, runtime.captureRouteProjectionInputs());
+        assertEquals(before.queue().activeItems(), after.queue().activeItems());
+        assertEquals(100L, before.queue().constraints().collectionWindowMs());
+
+        current.set(initial);
+        assertEquals(100L, runtime.captureRouteProjectionInputs().queue().constraints().collectionWindowMs());
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
+    @Timeout(value = 10, unit = TimeUnit.SECONDS)
+    void existingRuntimeUsesUpdatedWindowOnNextDecision(boolean increaseWindow) throws Exception {
+        FlexlbConfig initial = fixedConfig();
+        initial.decisionPolicy().setMaxPredictedExecutionMs(null);
+        initial.decisionPolicy().setMaxCollectionWaitMs(increaseWindow ? 0L : 60_000L);
+        AtomicReference<FlexlbConfig> current = new AtomicReference<>(initial);
+        PrefillEndpoint endpoint = stableEndpoint(stableStatus());
+        EventDrivenBlock delivery = new EventDrivenBlock();
+        WorkerBatcher runtime = new WorkerBatcher("hot-window-delivery", endpoint, current::get, delivery,
+                mock(EndpointEventProjector.class));
+        runtimes.add(runtime);
+        runtime.start();
+
+        FlexlbConfig updated = fixedConfig();
+        updated.decisionPolicy().setMaxPredictedExecutionMs(null);
+        updated.decisionPolicy().setMaxCollectionWaitMs(increaseWindow ? 60_000L : 0L);
+        current.set(updated);
+        assertTrue(runtime.offer(item(initial, endpoint, 77L, 50, System.currentTimeMillis())));
+        if (increaseWindow) {
+            org.junit.jupiter.api.Assertions.assertFalse(delivery.firstAttempt.await(100L, TimeUnit.MILLISECONDS));
+            current.set(initial);
+            runtime.signalSchedulingInputsChanged();
+        }
+        await(delivery.firstAttempt);
+    }
+
+    private WorkerBatcher runningRuntime(FlexlbConfig config, PrefillEndpoint endpoint, DeliveryStrategy delivery) {
         WorkerBatcher runtime = new WorkerBatcher(
-                "scheduling-test", endpoint, config, delivery,
+                "scheduling-test", endpoint, () -> config, delivery,
                 mock(EndpointEventProjector.class));
         runtimes.add(runtime);
         runtime.start();

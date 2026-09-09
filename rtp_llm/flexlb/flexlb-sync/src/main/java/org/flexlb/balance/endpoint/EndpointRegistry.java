@@ -738,10 +738,9 @@ public class EndpointRegistry {
         }
     }
 
-    private WorkerEndpoint createEndpoint(
-            WorkerStatus status,
-            RoleType role,
-            WorkerStatus.EngineObservation engineStatus) {
+    private WorkerEndpoint createEndpoint(WorkerStatus status,
+                                          RoleType role,
+                                          WorkerStatus.EngineObservation engineStatus) {
         if (role == RoleType.FRONTEND) {
             throw new IllegalArgumentException("Unsupported role: " + role);
         }
@@ -757,7 +756,7 @@ public class EndpointRegistry {
         return switch (role) {
             case PREFILL, PDFUSION -> new PrefillEndpoint(
                     status,
-                    configService.loadBalanceConfig(),
+                    configService::loadBalanceConfig,
                     deliveryStrategy,
                     endpointEvents,
                     reporter,

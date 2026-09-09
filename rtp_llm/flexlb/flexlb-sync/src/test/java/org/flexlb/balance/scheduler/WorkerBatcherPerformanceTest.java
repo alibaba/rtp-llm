@@ -129,8 +129,7 @@ class WorkerBatcherPerformanceTest {
         }
     }
 
-    private static WorkerBatcher runtimeWithDepth(int depth)
-            throws InterruptedException {
+    private static WorkerBatcher runtimeWithDepth(int depth) throws InterruptedException {
         FlexlbConfig config = new FlexlbConfig();
         SchedulingTestConfig.usePriorityQueue(config);
         SchedulingTestConfig.useSingleDecision(config);
@@ -141,7 +140,7 @@ class WorkerBatcherPerformanceTest {
         WorkerBatcher runtime = new WorkerBatcher(
                 "perf-worker-" + depth,
                 endpoint,
-                config,
+                () -> config,
                 delivery,
                 mock(EndpointEventProjector.class));
         runtime.start();

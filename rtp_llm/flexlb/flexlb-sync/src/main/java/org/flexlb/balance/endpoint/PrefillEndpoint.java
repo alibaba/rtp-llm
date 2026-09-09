@@ -23,6 +23,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.OptionalLong;
 import java.util.function.Predicate;
+import java.util.function.Supplier;
 
 public class PrefillEndpoint extends WorkerEndpoint {
 
@@ -74,22 +75,13 @@ public class PrefillEndpoint extends WorkerEndpoint {
     private final PlacementAvailability placementAvailability;
 
     PrefillEndpoint(WorkerStatus status,
-                    FlexlbConfig config,
-                    DeliveryStrategy deliveryStrategy,
-                    EndpointEventProjector endpointEvents,
-                    BatchSchedulerReporter reporter) {
-        this(status, config, deliveryStrategy,
-                endpointEvents, reporter,
-                new PlacementAvailability());
-    }
-
-    PrefillEndpoint(WorkerStatus status,
-                    FlexlbConfig config,
+                    Supplier<FlexlbConfig> configSupplier,
                     DeliveryStrategy deliveryStrategy,
                     EndpointEventProjector endpointEvents,
                     BatchSchedulerReporter reporter,
                     PlacementAvailability placementAvailability) {
         super(status);
+        FlexlbConfig config = configSupplier.get();
         this.reporter = java.util.Objects.requireNonNull(reporter, "reporter");
         this.endpointEvents = java.util.Objects.requireNonNull(
                 endpointEvents, "endpointEvents");
@@ -99,7 +91,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
         this.maximumDirectRequests = configuredLimit == null ? 0 : configuredLimit;
         this.predictor = createPredictor(config);
         this.runtime = new WorkerBatcher(
-                status.getLogicalIpPort(), this, config,
+                status.getLogicalIpPort(), this, configSupplier,
                 deliveryStrategy, endpointEvents);
         this.prefillState = runtime.ownedState();
     }

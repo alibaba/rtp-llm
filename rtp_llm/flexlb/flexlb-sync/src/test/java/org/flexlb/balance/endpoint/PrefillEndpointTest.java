@@ -70,10 +70,11 @@ class PrefillEndpointTest {
         requestRuntime = EndpointTestSupport.requestRuntime();
         endpoint = new PrefillEndpoint(
                 status,
-                config,
+                () -> config,
                 EndpointTestSupport.routeStrategy(requestRuntime),
                 requestRuntime.events(),
-                endpointReporter);
+                endpointReporter,
+                new org.flexlb.balance.scheduler.PlacementAvailability());
         endpoint.startGeneration();
     }
 
@@ -91,10 +92,11 @@ class PrefillEndpointTest {
         PrefillEndpoint fixedWindowEndpoint = new PrefillEndpoint(
                 EndpointTestSupport.workerStatus(
                         RoleType.PREFILL, "127.0.0.2", 8080, 8090),
-                batchConfig,
+                () -> batchConfig,
                 EndpointTestSupport.routeStrategy(requestRuntime),
                 requestRuntime.events(),
-                endpointReporter);
+                endpointReporter,
+                new org.flexlb.balance.scheduler.PlacementAvailability());
         try {
             assertEquals(6, fixedWindowEndpoint.availableDeliveryCredits());
         } finally {
@@ -106,10 +108,11 @@ class PrefillEndpointTest {
         PrefillEndpoint singleEndpoint = new PrefillEndpoint(
                 EndpointTestSupport.workerStatus(
                         RoleType.PREFILL, "127.0.0.3", 8080, 8090),
-                batchConfig,
+                () -> batchConfig,
                 EndpointTestSupport.routeStrategy(requestRuntime),
                 requestRuntime.events(),
-                endpointReporter);
+                endpointReporter,
+                new org.flexlb.balance.scheduler.PlacementAvailability());
         try {
             assertEquals(2, singleEndpoint.availableDeliveryCredits());
         } finally {
@@ -168,10 +171,11 @@ class PrefillEndpointTest {
         PrefillEndpoint routeEndpoint = new PrefillEndpoint(
                 EndpointTestSupport.workerStatus(
                         RoleType.PREFILL, ip, 8080, 8090),
-                routeConfig,
+                () -> routeConfig,
                 EndpointTestSupport.routeStrategy(requestRuntime),
                 requestRuntime.events(),
-                endpointReporter);
+                endpointReporter,
+                new org.flexlb.balance.scheduler.PlacementAvailability());
         routeEndpoint.startGeneration();
         return routeEndpoint;
     }
@@ -1254,8 +1258,7 @@ class PrefillEndpointTest {
     // ---- close ----
 
     @Test
-    void retirementOwnerCanReenterCloseFromSynchronousShutdownCallback()
-            throws Exception {
+    void retirementOwnerCanReenterCloseFromSynchronousShutdownCallback() throws Exception {
         FlexlbConfig retirementConfig = new FlexlbConfig();
         configureBatch(retirementConfig, 100, 1, 0, null);
         retirementConfig.setDispatcher(DispatcherConfig.nonBatch());
@@ -1284,10 +1287,11 @@ class PrefillEndpointTest {
         };
         PrefillEndpoint retirementEndpoint = new PrefillEndpoint(
                 status,
-                retirementConfig,
+                () -> retirementConfig,
                 EndpointTestSupport.routeStrategy(runtime),
                 runtime.events(),
-                mock(BatchSchedulerReporter.class));
+                mock(BatchSchedulerReporter.class),
+                new org.flexlb.balance.scheduler.PlacementAvailability());
         retirementEndpointRef.set(retirementEndpoint);
         retirementEndpoint.startGeneration();
         ExecutorService executor = Executors.newSingleThreadExecutor();
@@ -1322,8 +1326,7 @@ class PrefillEndpointTest {
     }
 
     @Test
-    void admittedCallbackCanCloseEndpointBeforeItsHandoffPermitIsReleased()
-            throws Exception {
+    void admittedCallbackCanCloseEndpointBeforeItsHandoffPermitIsReleased() throws Exception {
         FlexlbConfig retirementConfig = new FlexlbConfig();
         configureBatch(retirementConfig, 100, 1, 0, null);
         retirementConfig.setDispatcher(DispatcherConfig.nonBatch());
@@ -1352,10 +1355,11 @@ class PrefillEndpointTest {
         };
         PrefillEndpoint retirementEndpoint = new PrefillEndpoint(
                 status,
-                retirementConfig,
+                () -> retirementConfig,
                 EndpointTestSupport.liveRouteStrategy(runtime),
                 runtime.events(),
-                mock(BatchSchedulerReporter.class));
+                mock(BatchSchedulerReporter.class),
+                new org.flexlb.balance.scheduler.PlacementAvailability());
         retirementEndpointRef.set(retirementEndpoint);
         retirementEndpoint.startGeneration();
         try {
@@ -1460,10 +1464,11 @@ class PrefillEndpointTest {
                 EndpointTestSupport.requestRuntime();
         PrefillEndpoint created = new PrefillEndpoint(
                 status,
-                slowConfig,
+                () -> slowConfig,
                 EndpointTestSupport.routeStrategy(runtime),
                 runtime.events(),
-                mock(BatchSchedulerReporter.class));
+                mock(BatchSchedulerReporter.class),
+                new org.flexlb.balance.scheduler.PlacementAvailability());
         created.startGeneration();
         return created;
     }
@@ -1484,10 +1489,11 @@ class PrefillEndpointTest {
                 EndpointTestSupport.requestRuntime();
         PrefillEndpoint created = new PrefillEndpoint(
                 status,
-                endpointConfig,
+                () -> endpointConfig,
                 EndpointTestSupport.routeStrategy(runtime),
                 runtime.events(),
-                mock(BatchSchedulerReporter.class));
+                mock(BatchSchedulerReporter.class),
+                new org.flexlb.balance.scheduler.PlacementAvailability());
         created.startGeneration();
         return created;
     }
@@ -1547,10 +1553,11 @@ class PrefillEndpointTest {
                 EndpointTestSupport.requestRuntime();
         PrefillEndpoint created = new PrefillEndpoint(
                 status,
-                learningConfig,
+                () -> learningConfig,
                 EndpointTestSupport.routeStrategy(runtime),
                 runtime.events(),
-                mock(BatchSchedulerReporter.class));
+                mock(BatchSchedulerReporter.class),
+                new org.flexlb.balance.scheduler.PlacementAvailability());
         created.startGeneration();
         return created;
     }

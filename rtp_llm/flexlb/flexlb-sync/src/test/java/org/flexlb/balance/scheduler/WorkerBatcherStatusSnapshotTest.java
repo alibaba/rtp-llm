@@ -31,7 +31,7 @@ class WorkerBatcherStatusSnapshotTest {
         PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
         when(endpoint.getStatus()).thenReturn(status);
         WorkerBatcher runtime = new WorkerBatcher(
-                "snapshot-test", endpoint, config,
+                "snapshot-test", endpoint, () -> config,
                 mock(DeliveryStrategy.class),
                 mock(EndpointEventProjector.class));
 
@@ -52,7 +52,7 @@ class WorkerBatcherStatusSnapshotTest {
         PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
         when(endpoint.getStatus()).thenReturn(status);
         WorkerBatcher runtime = new WorkerBatcher(
-                "snapshot-test", endpoint, new FlexlbConfig(),
+                "snapshot-test", endpoint, () -> new FlexlbConfig(),
                 mock(DeliveryStrategy.class),
                 mock(EndpointEventProjector.class));
 
@@ -87,7 +87,7 @@ class WorkerBatcherStatusSnapshotTest {
         WorkerBatcher runtime = new WorkerBatcher(
                 "snapshot-test",
                 endpoint,
-                new FlexlbConfig(),
+                () -> new FlexlbConfig(),
                 mock(DeliveryStrategy.class),
                 mock(EndpointEventProjector.class));
 

@@ -176,8 +176,9 @@ class TwinOverloadAdmissionTest {
         EndpointTestSupport.TestRequestRuntime runtime = EndpointTestSupport.requestRuntime();
         PrefillEndpoint endpoint = new PrefillEndpoint(
                 EndpointTestSupport.workerStatus(RoleType.PREFILL, "127.0.0.1", 8080, 8090),
-                config, EndpointTestSupport.routeStrategy(runtime), runtime.events(),
-                mock(BatchSchedulerReporter.class));
+                () -> config, EndpointTestSupport.routeStrategy(runtime), runtime.events(),
+                mock(BatchSchedulerReporter.class),
+                new org.flexlb.balance.scheduler.PlacementAvailability());
         endpoints.add(endpoint);
         endpoint.startGeneration();
         return endpoint;

@@ -186,6 +186,7 @@ public final class WorkerBatcher {
     private final PrefillEndpoint prefillEndpoint;
     private final EndpointEventProjector endpointEvents;
     private final FlexlbConfig config;
+    private final Supplier<FlexlbConfig> configSupplier;
     private final DecisionPolicyConfig fixedWindowDecision;
     private final boolean singleDecision;
     private final boolean queueScheduling;
@@ -243,12 +244,13 @@ public final class WorkerBatcher {
     /** Exact active head for which this worker is waiting on a capacity event. */
     private BatcherCycleResult capacityBlockedHead;
 
-    public WorkerBatcher(
-            String key,
-            PrefillEndpoint prefillEp,
-            FlexlbConfig config,
-            DeliveryStrategy deliveryStrategy,
-            EndpointEventProjector endpointEvents) {
+    public WorkerBatcher(String key,
+                         PrefillEndpoint prefillEp,
+                         Supplier<FlexlbConfig> configSupplier,
+                         DeliveryStrategy deliveryStrategy,
+                         EndpointEventProjector endpointEvents) {
+        this.configSupplier = configSupplier;
+        FlexlbConfig config = configSupplier.get();
         this.key = key;
         this.prefillEndpoint = prefillEp;
         this.config = config;
@@ -949,7 +951,7 @@ public final class WorkerBatcher {
     private long collectionWindowMs() {
         return fixedWindowDecision == null
                 ? 0L : Math.max(0L,
-                fixedWindowDecision.getMaxCollectionWaitMs());
+                configSupplier.get().decisionPolicy().getMaxCollectionWaitMs());
     }
 
     private long predictedExecutionBudgetMs() {
@@ -1094,11 +1096,12 @@ public final class WorkerBatcher {
             long queueVersion,
             long schedulingInputVersion,
             long ownershipVersion,
+            long collectionWindowMs,
             RouteProjection.Inputs inputs) {
     }
 
-    private RouteProjection.Inputs captureRouteProjectionInputs(
-            Supplier<AdmissionBlock> admissionBlockSnapshot) {
+    private RouteProjection.Inputs captureRouteProjectionInputs(Supplier<AdmissionBlock> admissionBlockSnapshot) {
+        long fixedWaitMs = collectionWindowMs();
         long observedQueueVersion = queueVersion.get();
         long observedInputVersion = schedulingInputVersion.get();
         long observedOwnershipVersion = prefillState.mutationVersion();
@@ -1106,7 +1109,8 @@ public final class WorkerBatcher {
         if (observed != null
                 && observed.queueVersion() == observedQueueVersion
                 && observed.schedulingInputVersion() == observedInputVersion
-                && observed.ownershipVersion() == observedOwnershipVersion) {
+                && observed.ownershipVersion() == observedOwnershipVersion
+                && observed.collectionWindowMs() == fixedWaitMs) {
             return observed.inputs();
         }
         long currentQueueVersion;
@@ -1128,7 +1132,8 @@ public final class WorkerBatcher {
                     && cached.schedulingInputVersion()
                             == currentSchedulingInputVersion
                     && cached.ownershipVersion()
-                            == currentOwnershipVersion) {
+                            == currentOwnershipVersion
+                    && cached.collectionWindowMs() == fixedWaitMs) {
                 return cached.inputs();
             }
             capacity = batchCapacitySnapshot();
@@ -1151,7 +1156,7 @@ public final class WorkerBatcher {
                                 capacity.batchTokenCapacity(),
                                 capacity.batchKvCapacity(),
                                 predictedExecutionBudgetMs(),
-                                collectionWindowMs()),
+                                fixedWaitMs),
                         items,
                         admissionBlock);
         RouteProjection.Inputs captured = new RouteProjection.Inputs(
@@ -1166,6 +1171,7 @@ public final class WorkerBatcher {
                     currentQueueVersion,
                     currentSchedulingInputVersion,
                     currentOwnershipVersion,
+                    fixedWaitMs,
                     captured);
         }
         return captured;
@@ -1665,7 +1671,6 @@ public final class WorkerBatcher {
         }
 
         nowMs = now();
-        fixedWaitMs = collectionWindowMs();
         batchMaxCount = maxDecisionRequests();
         predictThresholdMs = predictedExecutionBudgetMs();
         capacity = batchCapacitySnapshot();
