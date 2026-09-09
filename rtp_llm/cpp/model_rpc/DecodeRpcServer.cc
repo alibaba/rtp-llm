@@ -1479,7 +1479,8 @@ void DecodeRpcServer::reportEarlyFinishTask(DecodeGenerateContext& decode_contex
                       stream ? stream->inputLength() : 0,
                       /*prefix_length=*/0,
                       error_code,
-                      error_message);
+                      error_message,
+                      decode_context.allocate_request.input().priority());
     RTP_LLM_LOG_DEBUG("request [%s] reported early finished task to master, error_code [%ld]",
                       decode_context.request_key.c_str(),
                       error_code);

@@ -893,6 +893,7 @@ def build_model_config(
     """
     model_config.ckpt_path = model_args.ckpt_path
     model_config.tokenizer_path = model_args.tokenizer_path
+    model_config.ptuning_path = model_args.ptuning_path
     model_config.model_type = model_args.model_type
     model_config.use_new_loader = model_args.use_new_loader
     model_config.require_weight_update = model_args.require_weight_update
