@@ -501,6 +501,7 @@ grpc::Status LocalRpcServer::GetWorkerStatus(grpc::ServerContext*   context,
         task_info->set_execution_time_ms(task.execution_time_ms);
         task_info->set_priority_preemption_progress(
             static_cast<PriorityPreemptionProgressPB>(task.priority_preemption_progress));
+        task_info->set_priority(task.priority);
         if (task.error_code != 0) {
             task_info->mutable_error_info()->set_error_code(task.error_code);
             task_info->mutable_error_info()->set_error_message(task.error_message);
@@ -522,6 +523,7 @@ grpc::Status LocalRpcServer::GetWorkerStatus(grpc::ServerContext*   context,
         task_info->set_execution_time_ms(task.execution_time_ms);
         task_info->set_priority_preemption_progress(
             static_cast<PriorityPreemptionProgressPB>(task.priority_preemption_progress));
+        task_info->set_priority(task.priority);
         if (task.error_code != 0) {
             task_info->mutable_error_info()->set_error_code(task.error_code);
             task_info->mutable_error_info()->set_error_message(task.error_message);

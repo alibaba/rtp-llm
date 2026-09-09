@@ -197,6 +197,33 @@ class ServerArgsSetTest(TestCase):
 
         self.assertIs(py_env_configs.model_args.require_weight_update, False)
 
+    def test_ptuning_env_reaches_final_model_config(self):
+        os.environ.update(
+            {
+                "ACT_TYPE": "BF16",
+                "CHECKPOINT_PATH": "/tmp/test-model",
+                "MODEL_TYPE": "fake_model",
+                "PTUNING_PATH": "/tmp/test-model/ptuning",
+            }
+        )
+
+        from rtp_llm.config.model_config import ModelConfig, build_model_config
+        from rtp_llm.server.server_args.server_args import setup_args
+
+        py_env_configs = setup_args([])
+        model_config = ModelConfig()
+        build_model_config(
+            model_config,
+            py_env_configs.model_args,
+            py_env_configs.kv_cache_config,
+            py_env_configs.profiling_debug_logging_config,
+        )
+
+        self.assertEqual(
+            py_env_configs.model_args.ptuning_path, "/tmp/test-model/ptuning"
+        )
+        self.assertEqual(model_config.ptuning_path, "/tmp/test-model/ptuning")
+
     def test_env_vars_set_to_py_env_configs(self):
         """Test that environment variables are correctly set to py_env_configs."""
         # Set environment variables
