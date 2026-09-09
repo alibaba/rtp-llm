@@ -240,6 +240,7 @@ public final class WorkerBatcher {
     private final PrefillEndpoint prefillEndpoint;
     private final EndpointEventProjector endpointEvents;
     private final FlexlbConfig config;
+    private final Supplier<FlexlbConfig> configSupplier;
     /** Zero disables request counting for BATCH; fixed for this endpoint generation. */
     private final long maxOutstandingRequests;
     private final DecisionPolicyConfig fixedWindowDecision;
@@ -308,6 +309,18 @@ public final class WorkerBatcher {
             FlexlbConfig config,
             DeliveryStrategy deliveryStrategy,
             EndpointEventProjector endpointEvents) {
+        this(key, prefillEp, () -> config, deliveryStrategy, endpointEvents);
+    }
+
+    public WorkerBatcher(
+            String key,
+            PrefillEndpoint prefillEp,
+            Supplier<FlexlbConfig> configSupplier,
+            DeliveryStrategy deliveryStrategy,
+            EndpointEventProjector endpointEvents) {
+        this.configSupplier = Objects.requireNonNull(configSupplier, "configSupplier");
+        FlexlbConfig config = Objects.requireNonNull(
+                configSupplier.get(), "loadBalanceConfig");
         this.key = key;
         this.prefillEndpoint = prefillEp;
         this.config = config;
@@ -898,7 +911,7 @@ public final class WorkerBatcher {
     private long collectionWindowMs() {
         return fixedWindowDecision == null
                 ? 0L : Math.max(0L,
-                fixedWindowDecision.getMaxCollectionWaitMs());
+                configSupplier.get().decisionPolicy().getMaxCollectionWaitMs());
     }
 
     private long predictedExecutionBudgetMs() {
@@ -1037,7 +1050,8 @@ public final class WorkerBatcher {
     private record ProjectionVersion(
             long queue,
             long schedulingInputs,
-            long ownership) {
+            long ownership,
+            long collectionWindowMs) {
     }
 
     /** Captured under queueLock; the shared result is built without that lock. */
@@ -1098,14 +1112,16 @@ public final class WorkerBatcher {
     private boolean isCurrentProjection(ProjectionVersion version) {
         return version.queue() == queueVersion.get()
                 && version.schedulingInputs() == schedulingInputVersion
-                && version.ownership() == prefillState.mutationVersion();
+                && version.ownership() == prefillState.mutationVersion()
+                && version.collectionWindowMs() == collectionWindowMs();
     }
 
     /** Caller holds queueLock. */
     private ProjectionSource captureProjectionSourceUnderLock() {
+        long fixedWaitMs = collectionWindowMs();
         ProjectionVersion version = new ProjectionVersion(
                 queueVersion.get(), schedulingInputVersion,
-                prefillState.mutationVersionUnderLock());
+                prefillState.mutationVersionUnderLock(), fixedWaitMs);
         BatchCapacitySnapshot capacity = batchCapacitySnapshot();
         PrefillState.Snapshot ownership = prefillState.snapshotUnderLock();
         return new ProjectionSource(
@@ -1113,7 +1129,7 @@ public final class WorkerBatcher {
                 new GroupPlanner.Constraints(
                         maxDecisionRequests(), capacity.batchTokenCapacity(),
                         capacity.batchKvCapacity(), predictedExecutionBudgetMs(),
-                        collectionWindowMs()),
+                        fixedWaitMs),
                 ownership.activeItems().isEmpty() ? null : admissionBlockUnderLock());
     }
 
@@ -1604,7 +1620,6 @@ public final class WorkerBatcher {
         }
 
         nowMs = now();
-        fixedWaitMs = collectionWindowMs();
         capacity = batchCapacitySnapshot();
         batchMaxCount = maxDecisionRequests();
         predictThresholdMs = predictedExecutionBudgetMs();
