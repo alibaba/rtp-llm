@@ -486,6 +486,32 @@ class FoundationLoaderTest(unittest.TestCase):
             with self.assertRaisesRegex(TypeError, "Dtype mismatch"):
                 self._loader(model_path).load()
 
+    @unittest.skipUnless(
+        hasattr(torch, "float8_e4m3fn"),
+        "requires PyTorch float8 dtype support",
+    )
+    def test_float8_dtype_mismatch_never_uses_implicit_conversion(self):
+        cases = (
+            (torch.bfloat16, torch.float8_e4m3fn),
+            (torch.float8_e4m3fn, torch.bfloat16),
+        )
+        for target_dtype, checkpoint_dtype in cases:
+            with self.subTest(
+                target_dtype=target_dtype,
+                checkpoint_dtype=checkpoint_dtype,
+            ):
+                module = RtpModule()
+                module.register_parameter(
+                    "weight",
+                    nn.Parameter(
+                        torch.zeros(2, dtype=target_dtype),
+                        requires_grad=False,
+                    ),
+                )
+                checkpoint = torch.ones(2, dtype=checkpoint_dtype)
+                with self.assertRaisesRegex(TypeError, "Dtype mismatch"):
+                    module.load_weights({"weight": checkpoint})
+
     def test_explicit_fastsafetensors_is_rejected(self):
         with tempfile.TemporaryDirectory() as model_path:
             save_file(_weights(), os.path.join(model_path, "model.safetensors"))

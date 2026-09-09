@@ -20,6 +20,7 @@ _DEEP_GEMM_REQUIRED_SYMBOLS = (
     "fp8_mqa_logits",
 )
 _FLASHINFER_ROPE_REQUIRED_SYMBOLS = ("_apply_rope_pos_ids_cos_sin_cache",)
+_FAST_HADAMARD_REQUIRED_SYMBOLS = ("hadamard_transform",)
 
 
 @lru_cache(maxsize=1)
@@ -39,6 +40,17 @@ def _resolve_flashinfer_rope() -> ModuleType:
     except (ImportError, OSError) as exc:
         raise ImportError(
             "DeepSeek indexer RoPE requires the optional flashinfer backend"
+        ) from exc
+
+
+@lru_cache(maxsize=1)
+def _resolve_fast_hadamard_transform() -> ModuleType:
+    try:
+        return importlib.import_module("fast_hadamard_transform")
+    except (ImportError, OSError) as exc:
+        raise ImportError(
+            "DeepSeek indexer rotation requires the optional "
+            "fast_hadamard_transform backend"
         ) from exc
 
 
@@ -65,6 +77,12 @@ def validate_indexer_runtime_dependencies() -> None:
         flashinfer_rope,
         "flashinfer.rope",
         _FLASHINFER_ROPE_REQUIRED_SYMBOLS,
+    )
+    fast_hadamard = _resolve_fast_hadamard_transform()
+    _require_callable_symbols(
+        fast_hadamard,
+        "fast_hadamard_transform",
+        _FAST_HADAMARD_REQUIRED_SYMBOLS,
     )
 
 
@@ -98,14 +116,14 @@ def _rotate_activation(x: torch.Tensor) -> torch.Tensor:
         Rotated activation tensor
     """
     assert x.dtype == torch.bfloat16
-    from fast_hadamard_transform import hadamard_transform
-
     hidden_size = x.size(-1)
     assert (
         hidden_size & (hidden_size - 1)
     ) == 0, "Hidden size must be a power of 2 for Hadamard transform."
 
-    return hadamard_transform(x, scale=hidden_size**-0.5)
+    return _resolve_fast_hadamard_transform().hadamard_transform(
+        x, scale=hidden_size**-0.5
+    )
 
 
 class IndexerOp(nn.Module):
