@@ -52,10 +52,7 @@ from rtp_llm.models_py.modules.hybrid.dense_mlp import (
     DenseMLP,
     DenseMLPParallelExecutor,
 )
-from rtp_llm.models_py.modules.kimi_k3.all_gather_gemm import (
-    configure_all_gather_gemm,
-    should_use_all_gather_gemm,
-)
+from rtp_llm.models_py.modules.kimi_k3.all_gather_gemm import configure_all_gather_gemm
 from rtp_llm.models_py.modules.kimi_k3.chunk_prefill import (
     KimiK3ChunkCachePublisher,
     KimiK3ChunkPublishContext,
@@ -70,7 +67,6 @@ from rtp_llm.models_py.modules.kimi_k3.chunk_prefill import (
 )
 from rtp_llm.models_py.modules.kimi_k3.gemm_reduce_scatter import (
     configure_gemm_reduce_scatter,
-    should_use_gemm_reduce_scatter,
 )
 from rtp_llm.models_py.modules.kimi_k3.kda import KDAExecutionMode, KimiK3KDA
 from rtp_llm.models_py.modules.kimi_k3.kda.prefill import (
@@ -187,7 +183,17 @@ class KimiK3DecoderLayer(nn.Module):
         self.layer_type = config.hybrid_attention_config.hybrid_attention_types[
             layer_idx
         ]
-        self.self_attention_residual = KimiK3AttentionResidual(
+        from rtp_llm.models_py.modules.kimi_k3.fp8_producers import (
+            Fp8AttentionResidual,
+            Fp8RMSNorm,
+        )
+
+        attention_fp8 = getattr(config, "k3_attention_quant_config", None) is not None
+        residual_impl = (
+            Fp8AttentionResidual if attention_fp8 else KimiK3AttentionResidual
+        )
+        norm_impl = Fp8RMSNorm if attention_fp8 else RMSNorm
+        self.self_attention_residual = residual_impl(
             weights[K3W.SELF_ATTN_RES_NORM],
             weights[K3W.SELF_ATTN_RES_PROJ],
             self.eps,
@@ -197,7 +203,7 @@ class KimiK3DecoderLayer(nn.Module):
             weights[K3W.MLP_RES_PROJ],
             self.eps,
         )
-        self.attention_norm = RMSNorm(weights[W.pre_ln_gamma], self.eps)
+        self.attention_norm = norm_impl(weights[W.pre_ln_gamma], self.eps)
         self.mlp_norm = RMSNorm(weights[W.post_ln_gamma], self.eps)
         self.self_attn: nn.Module = (
             KimiK3KDA(config, parallelism_config, weights, layer_idx)
@@ -451,7 +457,10 @@ class KimiK3Model(GptModelBase):
 
         super().initialize(init_resource)
         self._is_decode_role = bool(init_resource.is_decode_role)
-        if self._is_decode_role and os.environ.get("SP_TYPE", "").lower() in ("eagle3", "mtp"):
+        if self._is_decode_role and os.environ.get("SP_TYPE", "").lower() in (
+            "eagle3",
+            "mtp",
+        ):
             tokens_per_batch = max(int(self.config.gen_num_per_cycle) + 1, 1)
             graph_batch_capacity = int(
                 getattr(init_resource, "max_decode_graph_batch_size", 1)
@@ -466,7 +475,8 @@ class KimiK3Model(GptModelBase):
             ):
                 self._mtp_hidden_buffer = self.embedding_weight.new_empty(
                     token_capacity,
-                    (1 if os.environ.get("SP_TYPE", "").lower() == "mtp" else 3) * int(self.config.hidden_size),
+                    (1 if os.environ.get("SP_TYPE", "").lower() == "mtp" else 3)
+                    * int(self.config.hidden_size),
                 )
                 logging.info(
                     "[K3_EAGLE3] allocated Decode hidden buffer shape=%s",
@@ -483,25 +493,18 @@ class KimiK3Model(GptModelBase):
         fp8_attention = (
             getattr(self.config, "k3_attention_quant_config", None) is not None
         )
-        fp8_collective_mode = os.environ.get("KIMI_K3_FP8_COLLECTIVE_GEMM", "1")
-        if fp8_attention and fp8_collective_mode not in ("0", "1"):
-            raise ValueError("KIMI_K3_FP8_COLLECTIVE_GEMM must be 0 or 1")
-        collective_enabled = not fp8_attention or fp8_collective_mode == "1"
         fp8_kwargs = {"fp8": True} if fp8_attention else {}
         if not getattr(self, "_all_gather_gemm_configured", False):
             all_gather_gemm_requested = (
                 not init_resource.is_decode_role
-                and collective_enabled
                 and tp_size > 1
                 and self.embedding_weight.is_cuda
                 and self.embedding_weight.dtype == torch.bfloat16
-                and should_use_all_gather_gemm(max_physical_tokens)
             )
             if all_gather_gemm_requested:
                 configure_all_gather_gemm(
                     get_process_group(Group.TP),
                     self.embedding_weight.device,
-                    enabled=True,
                     max_m=max_physical_tokens,
                     k=int(self.config.hidden_size),
                     dtype=self.embedding_weight.dtype,
@@ -512,17 +515,14 @@ class KimiK3Model(GptModelBase):
         if not getattr(self, "_gemm_reduce_scatter_configured", False):
             gemm_reduce_scatter_requested = (
                 not init_resource.is_decode_role
-                and collective_enabled
                 and tp_size > 1
                 and self.embedding_weight.is_cuda
                 and self.embedding_weight.dtype == torch.bfloat16
-                and should_use_gemm_reduce_scatter(max_physical_tokens)
             )
             if gemm_reduce_scatter_requested:
                 configure_gemm_reduce_scatter(
                     get_process_group(Group.TP),
                     self.embedding_weight.device,
-                    enabled=True,
                     max_m=max_physical_tokens,
                     n=int(self.config.hidden_size),
                     **fp8_kwargs,
@@ -616,7 +616,9 @@ class KimiK3Model(GptModelBase):
                 return
             tp_size = int(self.parallelism_config.get_attn_tp_size())
             token_capacity = ((int(chunk_tokens) + tp_size - 1) // tp_size) * tp_size
-            hidden_width = (1 if os.environ.get("SP_TYPE", "").lower() == "mtp" else 3) * int(self.config.hidden_size)
+            hidden_width = (
+                1 if os.environ.get("SP_TYPE", "").lower() == "mtp" else 3
+            ) * int(self.config.hidden_size)
             self._prefill_mtp_hidden_workspace = self.embedding_weight.new_empty(
                 token_capacity,
                 hidden_width,
@@ -964,6 +966,9 @@ class KimiK3Model(GptModelBase):
                 )
             chunk_cache_publisher.commit_round(chunk_publish_context)
             if chunk_prefill_round_hook is not None:
+                # Target projections have consumed MLA's aliased output. Its
+                # historical KV scratch must not overlap the draft's expansion.
+                fmha_impl.release_forward_workspace()
                 round_mtp_hidden = self.get_mtp_target_hidden_states(-1)
                 if round_mtp_hidden is None:
                     raise RuntimeError(

@@ -30,7 +30,9 @@ from rtp_llm.models_py.modules.kimi_k3.kda.prefill import (
     KimiKDAPrefillMetadata,
 )
 from rtp_llm.models_py.triton_kernels.kimi_kda import kimi_kda_rms_norm_sigmoid_gate
-from rtp_llm.models_py.triton_kernels.kimi_kda.fp8_quant import quantize_forget_latent_fp8
+from rtp_llm.models_py.triton_kernels.kimi_kda.fp8_quant import (
+    quantize_forget_latent_fp8,
+)
 from rtp_llm.models_py.utils.typed_storage_view import LinearCacheConverter
 from rtp_llm.ops import ParallelismConfig, RoleType
 from rtp_llm.ops.compute_ops import LayerKVCache, PyAttentionInputs
@@ -133,6 +135,13 @@ class KimiK3KDA(nn.Module):
                 self.add_module(
                     "fp8_" + name.replace(".", "_"), self._fp8_projections[name]
                 )
+        from rtp_llm.models_py.modules.kimi_k3.fp8_producers import (
+            Fp8KdaOutputNorm,
+            KdaOutputNorm,
+        )
+
+        output_norm_impl = Fp8KdaOutputNorm if self._fp8_enabled else KdaOutputNorm
+        self.output_norm = output_norm_impl(weights[W.linear_attn_norm_w], self.eps)
         fused_projection = weights[W.linear_attn_qkvg_fa_beta_w]
         self.forget_latent_size = (
             self._fp8_projections[W.linear_attn_f_b_w].K
@@ -142,7 +151,9 @@ class KimiK3KDA(nn.Module):
         self._fp8_strided_forget = (
             self._fp8_enabled
             and self.forget_latent_size == 128
-            and getattr(self._fp8_projections[W.linear_attn_f_b_w], "scale_ue8m0", False)
+            and getattr(
+                self._fp8_projections[W.linear_attn_f_b_w], "scale_ue8m0", False
+            )
         )
         if self._fp8_strided_forget:
             logging.info(
@@ -316,24 +327,7 @@ class KimiK3KDA(nn.Module):
         # Decode and target-verify must use the same numerics. Mixing the fused
         # projection path with this explicit path can change near-tied logits.
         use_explicit_output = mode == "decode"
-        if use_explicit_output:
-            output_dtype = output.dtype
-            norm_weight = self.weights[W.linear_attn_norm_w]
-            output_float = output.float()
-            rms = torch.rsqrt(
-                output_float.square().mean(dim=-1, keepdim=True) + self.eps
-            )
-            output = output_float * rms
-            output = output * norm_weight.float()
-            output = output * torch.sigmoid(output_gate.float())
-            output = output.to(dtype=output_dtype)
-        else:
-            output = kimi_kda_rms_norm_sigmoid_gate(
-                output,
-                output_gate,
-                self.weights[W.linear_attn_norm_w],
-                self.eps,
-            )
+        output = self.output_norm(output, output_gate, mode)
 
         projection_input = output.reshape(token_count, self.projection_size)
         output_weight = getattr(self, "_fp8_projections", {}).get(
@@ -365,14 +359,12 @@ class KimiK3KDA(nn.Module):
             mode == "decode" or token_count % self.attn_tp_size != 0
         )
         if mode == "prefill" and use_reduce_scatter:
-            fused = gemm_reduce_scatter(
+            return gemm_reduce_scatter(
                 projection_input,
                 output_weight,
                 get_process_group(Group.TP),
                 pad_rows=pad_reduce_scatter,
             )
-            if fused is not None:
-                return fused
         return row_parallel_linear(
             projection_input,
             output_weight,

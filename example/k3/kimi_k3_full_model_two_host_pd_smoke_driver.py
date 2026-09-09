@@ -216,7 +216,6 @@ def forwarded_optional_environment(role: str) -> dict[str, str]:
         "SMOKE_KEEP_CLUSTER_ON_SUCCESS",
         "RTP_LLM_SKIP_BUILD",
         "KIMI_K3_ATTENTION_QUANTIZATION",
-        "KIMI_K3_FP8_COLLECTIVE_GEMM",
         "KIMI_K3_MLA_FP8",
         "KIMI_K3_MLA_FP8_Q_SCALE",
         "KIMI_K3_MLA_FP8_KV_SCALE",
@@ -461,10 +460,21 @@ def run_short_ssh(
 
 def container_control_command(args: argparse.Namespace, role: str, command: str) -> str:
     runtime = (
-        args.prefill_container_runtime if role == "prefill" else args.decode_container_runtime
+        args.prefill_container_runtime
+        if role == "prefill"
+        else args.decode_container_runtime
     )
     return shlex.join(
-        (runtime, "exec", "-u", args.container_user, args.container, "bash", "-lc", command)
+        (
+            runtime,
+            "exec",
+            "-u",
+            args.container_user,
+            args.container,
+            "bash",
+            "-lc",
+            command,
+        )
     )
 
 
@@ -518,8 +528,7 @@ def wait_for_decode_ready(args: argparse.Namespace) -> None:
     deadline = time.monotonic() + args.decode_ready_timeout_s
     last_error = ""
     probe = (
-        "curl -fsS --max-time 2 "
-        f"http://127.0.0.1:{decode_port}/health >/dev/null"
+        "curl -fsS --max-time 2 " f"http://127.0.0.1:{decode_port}/health >/dev/null"
     )
     if args.remote_detached:
         status = shlex.quote(detached_control_paths(args, "decode")["status"])
@@ -559,7 +568,10 @@ def wait_for_decode_ready(args: argparse.Namespace) -> None:
 
 def wait_before_prefill(args: argparse.Namespace) -> None:
     if args.parallel_start:
-        print("Starting Prefill concurrently; role scripts retain all readiness gates", flush=True)
+        print(
+            "Starting Prefill concurrently; role scripts retain all readiness gates",
+            flush=True,
+        )
         return
     if args.prefill_start_delay_s:
         time.sleep(args.prefill_start_delay_s)
@@ -620,10 +632,14 @@ def run_detached(args: argparse.Namespace, run_dir: pathlib.Path) -> int:
                     result = run_short_ssh(
                         args,
                         role,
-                        container_control_command(args, role, (
-                            f"if test -f {shlex.quote(status_path)}; then "
-                            f"cat {shlex.quote(status_path)}; else exit 3; fi"
-                        )),
+                        container_control_command(
+                            args,
+                            role,
+                            (
+                                f"if test -f {shlex.quote(status_path)}; then "
+                                f"cat {shlex.quote(status_path)}; else exit 3; fi"
+                            ),
+                        ),
                     )
                 except (OSError, subprocess.TimeoutExpired) as exc:
                     poll_failures[role] += 1

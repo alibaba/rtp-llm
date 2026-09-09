@@ -16,6 +16,9 @@ from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
     sgl_per_token_group_quant_fp8,
 )
 from rtp_llm.models_py.modules.factory.linear import LinearBase
+from rtp_llm.models_py.modules.factory.linear.quantized_activation import (
+    QuantizedActivation,
+)
 from rtp_llm.ops import HWKernelConfig
 
 logger = logging.getLogger(__name__)
@@ -152,7 +155,9 @@ class CudaFp8DeepGEMMLinear(LinearBase):
             and self.N % (left + right) == 0
             and input.ndim == 2
             and input.shape[1] == self.K
-            and input.dtype == torch.bfloat16
+            and (
+                input.dtype == torch.bfloat16 or isinstance(input, QuantizedActivation)
+            )
             and input.is_cuda
             and input.device == self.weight.device
         )
@@ -176,7 +181,7 @@ class CudaFp8DeepGEMMLinear(LinearBase):
         heads = self.N // (left + right)
         shape = (input.shape[0], heads * (left + middle + right))
         if output is None:
-            output = input.new_empty(shape)
+            output = torch.empty(shape, dtype=torch.bfloat16, device=input.device)
         elif (
             tuple(output.shape) != shape
             or output.dtype != torch.bfloat16
@@ -186,7 +191,11 @@ class CudaFp8DeepGEMMLinear(LinearBase):
             raise ValueError(
                 "FP8 skip-head-mid output buffer shape/dtype/layout mismatch"
             )
-        for source in (input, self.weight, self.weight_scales):
+        for source in (
+            input.values if isinstance(input, QuantizedActivation) else input,
+            self.weight,
+            self.weight_scales,
+        ):
             if (
                 output.untyped_storage().data_ptr()
                 == source.untyped_storage().data_ptr()
@@ -280,6 +289,11 @@ class CudaFp8DeepGEMMLinear(LinearBase):
 
     def quantize_input(self, input: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Quantize a 2D BF16 input once for reuse across compatible FP8 GEMMs."""
+        if isinstance(input, QuantizedActivation):
+            if not self.scale_ue8m0:
+                raise ValueError("prequantized producer requires UE8M0 weights")
+            self._validate_input(input.values)
+            return input.values, input.scales
         M, _ = self._validate_input(input)
         if input.dtype == torch.float8_e4m3fn:
             if not self.scale_ue8m0:
@@ -332,6 +346,8 @@ class CudaFp8DeepGEMMLinear(LinearBase):
             raise ValueError(error_msg)
         M, _ = self._validate_input(input_fp8)
         output = self._prepare_output(input_fp8, M, out)
+        if M == 0:
+            return output
         fp8_gemm_nt(
             (input_fp8, input_scales),
             (self.weight, self.weight_scales),

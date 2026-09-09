@@ -139,7 +139,6 @@ Important optional variables:
   KIMI_K3_MLA_FP8           1 (default) or 0 for target FP8 cache and attention
   KIMI_K3_MLA_FP8_Q_SCALE   fixed Q scale; defaults to 1
   KIMI_K3_MLA_FP8_KV_SCALE  fixed cache scale; defaults to 1
-  KIMI_K3_FP8_COLLECTIVE_GEMM
                             1 (default) enables FP8 AG/GEMM and GEMM/RS;
                             0 selects explicit communication for comparison
   KIMI_K3_MLA_PREFILL_EXPANDED_KV_BUDGET_BYTES
@@ -651,7 +650,7 @@ else:
         "MEMORY_CACHE_SIZE_MB",
     ])
 
-for key in ("KIMI_K3_ATTENTION_QUANTIZATION", "KIMI_K3_FP8_COLLECTIVE_GEMM",
+for key in ("KIMI_K3_ATTENTION_QUANTIZATION",
             "KIMI_K3_MLA_FP8", "KIMI_K3_MLA_FP8_Q_SCALE", "KIMI_K3_MLA_FP8_KV_SCALE",
             "KIMI_K3_MLA_PREFILL_EXPANDED_KV_BUDGET_BYTES",
             "KIMI_K3_MLA_FP8_DIAGNOSTICS", "RTP_LLM_MTP_ACCEPTANCE_DIAGNOSTICS"):
@@ -686,7 +685,6 @@ apply_validated_common_profile() {
     export KIMI_K3_MLA_FP8="${KIMI_K3_MLA_FP8:-1}"
     export KIMI_K3_MLA_FP8_Q_SCALE="${KIMI_K3_MLA_FP8_Q_SCALE:-1}"
     export KIMI_K3_MLA_FP8_KV_SCALE="${KIMI_K3_MLA_FP8_KV_SCALE:-1}"
-    export KIMI_K3_FP8_COLLECTIVE_GEMM="${KIMI_K3_FP8_COLLECTIVE_GEMM:-1}"
     export KIMI_K3_MLA_PREFILL_EXPANDED_KV_BUDGET_BYTES="${KIMI_K3_MLA_PREFILL_EXPANDED_KV_BUDGET_BYTES:-4294967296}"
     export SEQ_SIZE_PER_BLOCK="${smoke_block_size}"
     export KERNEL_SEQ_SIZE_PER_BLOCK="${smoke_kernel_block_size}"

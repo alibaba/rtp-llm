@@ -514,6 +514,9 @@ class MlaFlashMLAPrefillImpl(MlaFlashInferPrefillImpl):
         self.absorb_opt_len = 0
         self.absorb_fmha = None
 
+    def release_forward_workspace(self) -> None:
+        self.fmha_impl.release_forward_workspace()
+
     def create_params(self, attn_inputs: PyAttentionInputs):
         if self.fmha_impl is not None:
             self.prepare(attn_inputs)

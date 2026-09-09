@@ -21,6 +21,7 @@ from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_state_me
 )
 from rtp_llm.models_py.modules.factory.linear.factory import LinearFactory
 from rtp_llm.models_py.modules.factory.linear.linear_base import LinearBase
+from rtp_llm.models_py.modules.factory.linear.quantized_activation import retained_bf16
 from rtp_llm.ops import KvCacheDataType
 from rtp_llm.ops.compute_ops import LayerKVCache, rtp_llm_ops
 from rtp_llm.utils.model_weight import W
@@ -86,6 +87,7 @@ class _FlashMLAForwardWorkspace:
         v_head_dim: int,
         packed_q_tokens: int,
     ) -> "_FlashMLAForwardWorkspace":
+        compressed_kv = retained_bf16(compressed_kv)
         q_tokens = q.shape[0]
         packed_features = num_heads * (qk_head_dim + v_head_dim)
         expanded_kv_tokens = max(q_tokens, plan.max_expanded_kv_tokens)
@@ -331,26 +333,33 @@ class MlaFlashMLAPrefillOp:
             if kv_cache_dtype != KvCacheDataType.FP8:
                 raise ValueError("FP8 MLA Prefill requires ordinary E4M3 cache")
             from .tokenspeed_mla_impl import (
-                _ensure_tokenspeed_cutlass_compat, _is_tokenspeed_blackwell,
+                _ensure_tokenspeed_cutlass_compat,
+                _is_tokenspeed_blackwell,
             )
+
             if not _is_tokenspeed_blackwell():
                 raise RuntimeError("K3 FP8 MLA Prefill requires SM100 or SM103")
             _ensure_tokenspeed_cutlass_compat()
             from tokenspeed_mla.mla_prefill import (
-                tokenspeed_mla_prefill, warmup_compile_prefill,
+                tokenspeed_mla_prefill,
+                warmup_compile_prefill,
             )
+
             # Cached by the dependency; prepare causal and prefix variants
             # during initialization, before a real request can reach either.
             warmup_compile_prefill(
                 q_dtype=torch.float8_e4m3fn,
                 d_qk=qk_nope_head_dim + qk_rope_head_dim,
-                d_v=v_head_dim, enable_pdl=False,
+                d_v=v_head_dim,
+                enable_pdl=False,
             )
             self.tokenspeed_prefill = tokenspeed_mla_prefill
             self.flash_mla_cuda = None
         else:
             if kv_cache_dtype != KvCacheDataType.BASE:
-                raise ValueError("dense FlashMLA Prefill currently requires BF16 KV cache")
+                raise ValueError(
+                    "dense FlashMLA Prefill currently requires BF16 KV cache"
+                )
             try:
                 import flash_mla.cuda as flash_mla_cuda
             except ImportError as error:
@@ -370,6 +379,11 @@ class MlaFlashMLAPrefillOp:
         ) * softmax_extra_scale
         self.weights = weights
         self.quant_config = quant_config
+        self._prefix_producer = None
+        if quant_config is not None and quant_config.get_method() == "FP8_PER_BLOCK":
+            from .mla_prefix_fp8_producer import Fp8MlaPrefixGather
+
+            self._prefix_producer = Fp8MlaPrefixGather(kv_scale if fp8_compute else 1.0)
         self.use_mla = use_mla
         self.qo_indptr: Optional[torch.Tensor] = None
         self.kv_indptr: Optional[torch.Tensor] = None
@@ -386,6 +400,15 @@ class MlaFlashMLAPrefillOp:
         self._q_offsets: tuple[int, ...] = ()
         self._prefix_runtime_launches: tuple[_FlashMLAPrefixRuntimeLaunch, ...] = ()
         self._forward_workspace: Optional[_FlashMLAForwardWorkspace] = None
+
+    def release_forward_workspace(self) -> None:
+        """Drop per-plan scratch once all target layers have consumed it.
+
+        The plan and cache metadata remain usable. Subsequent forwards can
+        allocate fresh scratch; stream-ordered allocator reuse needs no flush.
+        """
+        self._forward_workspace = None
+        self._fp8_prefix_rope = None
 
     def plan(self, mla_params: FlashMLADeviceParams) -> None:
         self.q_lens = list(mla_params.q_lens_host)
@@ -411,9 +434,7 @@ class MlaFlashMLAPrefillOp:
         )
         self._q_offsets = ()
         self._prefix_runtime_launches = ()
-        self._forward_workspace = None
-        if self.fp8_compute:
-            self._fp8_prefix_rope = None
+        self.release_forward_workspace()
         if self._forward_plan.route is FlashMLAForwardRoute.HYBRID:
             self._materialize_prefix_runtime_launches(mla_params.qo_indptr_d.device)
 
@@ -501,10 +522,15 @@ class MlaFlashMLAPrefillOp:
         return reuse_cache_page_indice
 
     def _gather_cache(self, *args):
+        if self._prefix_producer is not None:
+            return self._prefix_producer(*args)
         if self.fp8_compute:
             from .mla_fp8_kernels import gather_fp8_prefix
-            return gather_fp8_prefix(*args, scale=self.kv_scale)
-        return rtp_llm_ops.reuse_kv_cache_indexed_batched(*args)
+
+            gather_fp8_prefix(*args, scale=self.kv_scale)
+            return args[0]
+        rtp_llm_ops.reuse_kv_cache_indexed_batched(*args)
+        return args[0]
 
     def _gather_reused_kv(
         self,
@@ -519,7 +545,7 @@ class MlaFlashMLAPrefillOp:
 
         final_compressed_kv = torch.empty(
             (self.total_kv_lens, self.kv_lora_rank),
-            dtype=compressed_kv.dtype,
+            dtype=torch.bfloat16,
             device=compressed_kv.device,
         )
         final_k_pe = torch.empty(
@@ -527,7 +553,7 @@ class MlaFlashMLAPrefillOp:
             dtype=flat_k_pe.dtype,
             device=flat_k_pe.device,
         )
-        self._gather_cache(
+        final_compressed_kv = self._gather_cache(
             final_compressed_kv,
             final_k_pe,
             compressed_kv,
@@ -557,7 +583,12 @@ class MlaFlashMLAPrefillOp:
         """Use the fused paged KPE gather before the packed KV projection."""
 
         fused_gather = getattr(rtp_llm_ops, "_gather_mla_latent_and_fill_k_pe", None)
-        if self.fp8_compute or not self.has_reuse_cache or not callable(fused_gather):
+        if (
+            self._prefix_producer is not None
+            or self.fp8_compute
+            or not self.has_reuse_cache
+            or not callable(fused_gather)
+        ):
             return None
 
         flat_k_pe = k_pe.view(-1, self.qk_rope_head_dim)
@@ -570,12 +601,12 @@ class MlaFlashMLAPrefillOp:
         packed_head_dim = sum(head_splits)
         final_compressed_kv = torch.empty(
             (self.total_kv_lens, self.kv_lora_rank),
-            dtype=compressed_kv.dtype,
+            dtype=torch.bfloat16,
             device=compressed_kv.device,
         )
         packed_kv = torch.empty(
             (self.total_kv_lens, self.num_heads * packed_head_dim),
-            dtype=compressed_kv.dtype,
+            dtype=torch.bfloat16,
             device=compressed_kv.device,
         )
         fused_gather(
@@ -660,8 +691,8 @@ class MlaFlashMLAPrefillOp:
         k_nope = kv[..., : self.qk_nope_head_dim]
         value_states = kv[..., self.qk_nope_head_dim :]
 
-        k = compressed_kv.new_empty(
-            compressed_kv.shape[0],
+        k = kv.new_empty(
+            num_tokens,
             self.num_heads,
             self.qk_nope_head_dim + self.qk_rope_head_dim,
         )
@@ -712,6 +743,7 @@ class MlaFlashMLAPrefillOp:
             lse = cast(torch.Tensor, lse)
         if self.fp8_compute:
             from .mla_fp8_kernels import quantize_fp8
+
             # Expanded K/V have their own ordinary unit-scale quantization.
             # Historical compressed KV was restored with kv_scale at gather.
             result, result_lse = self.tokenspeed_prefill(
@@ -833,15 +865,23 @@ class MlaFlashMLAPrefillOp:
             kv_tokens = launch.spec.expanded_kv_tokens
             launch_compressed = workspace.compressed_kv_buffer(kv_tokens)
             launch_packed_kv = workspace.packed_kv_buffer(kv_tokens)
-            if self.fp8_compute:
+            if self.fp8_compute or self._prefix_producer is not None:
                 launch_rope = self._fp8_prefix_rope[:kv_tokens]
-                self._gather_cache(
-                    launch_compressed, launch_rope, compressed_kv, flat_k_pe,
-                    kv_cache_base, reuse_cache_page_indice,
-                    launch.batch_reuse_info, launch.gather_qo_indptr, self.page_size,
+                launch_compressed = self._gather_cache(
+                    launch_compressed,
+                    launch_rope,
+                    compressed_kv,
+                    flat_k_pe,
+                    kv_cache_base,
+                    reuse_cache_page_indice,
+                    launch.batch_reuse_info,
+                    launch.gather_qo_indptr,
+                    self.page_size,
                 )
                 launch_packed_kv.view(kv_tokens, self.num_heads, packed_head_dim)[
-                    ..., self.qk_nope_head_dim:self.qk_nope_head_dim + self.qk_rope_head_dim
+                    ...,
+                    self.qk_nope_head_dim : self.qk_nope_head_dim
+                    + self.qk_rope_head_dim,
                 ].copy_(launch_rope[:, None, :])
             else:
                 fused_gather(
@@ -926,9 +966,14 @@ class MlaFlashMLAPrefillOp:
                 packed_q_tokens=packed_q_tokens,
             )
             self._forward_workspace = workspace
-            if self.fp8_compute:
-                self._fp8_prefix_rope = compressed_kv.new_empty(
-                    (cast(FlashMLAForwardPlan, self._forward_plan).max_expanded_kv_tokens, self.qk_rope_head_dim)
+            if self.fp8_compute or self._prefix_producer is not None:
+                self._fp8_prefix_rope = retained_bf16(compressed_kv).new_empty(
+                    (
+                        cast(
+                            FlashMLAForwardPlan, self._forward_plan
+                        ).max_expanded_kv_tokens,
+                        self.qk_rope_head_dim,
+                    )
                 )
         current_packed_kv = workspace.packed_kv_buffer(expected_tokens)
         current_k, current_v = self._project_kv(

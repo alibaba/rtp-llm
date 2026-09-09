@@ -83,3 +83,26 @@ py_test(
     tags = ["B300"],
     visibility = ["//visibility:public"],
 )
+
+py_test(
+    name = "producer_fp8_test",
+    srcs = ["producer_fp8_test.py"],
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+    tags = ["manual", "B300"],
+    exec_properties = {"gpu": "B300"},
+)
+
+py_test(
+    name = "collective_fp8_test",
+    srcs = ["collective_fp8_test.py"],
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib", "//rtp_llm/models_py/modules/hybrid/test:collective_gemm_reference"],
+    tags = ["manual", "B300"],
+    exec_properties = {"gpu": "B300"},
+)
+
+py_binary(
+    name = "producer_fp8_benchmark",
+    srcs = ["producer_fp8_benchmark.py"],
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+    tags = ["manual", "B300"],
+)

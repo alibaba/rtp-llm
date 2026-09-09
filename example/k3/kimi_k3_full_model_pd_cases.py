@@ -75,7 +75,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--timeout", type=int, default=900)
     args = parser.parse_args()
     if args.batch_size < 4:
-        parser.error("--batch-size must be at least 4 to cover hit/partial-hit/miss mixing")
+        parser.error(
+            "--batch-size must be at least 4 to cover hit/partial-hit/miss mixing"
+        )
     for key in (
         "block_size",
         "chunk_tokens",
@@ -90,7 +92,9 @@ def parse_args() -> argparse.Namespace:
         if getattr(args, key) <= 0:
             parser.error(f"--{key.replace('_', '-')} must be positive")
     if args.suite == "all" and args.expanded_kv_budget_bytes <= 0:
-        parser.error("all suite needs a positive expansion budget for the long prefix case")
+        parser.error(
+            "all suite needs a positive expansion budget for the long prefix case"
+        )
     if args.rdma_prewarm_attempts < 0:
         parser.error("--rdma-prewarm-attempts must be non-negative")
     for key in ("rdma_prewarm_backoff_s", "rdma_prewarm_settle_s"):
@@ -103,7 +107,9 @@ def numbered_answer_pattern(value: int) -> str:
     return rf"(?<!\d){value}(?!\d)"
 
 
-def make_cache_prompt(namespace: str, case_name: str, value: int, repeats: int = 900) -> str:
+def make_cache_prompt(
+    namespace: str, case_name: str, value: int, repeats: int = 900
+) -> str:
     marker = f"缓存测试标识：{namespace}/{case_name}。"
     filler = (
         "这是一段用于验证长上下文缓存边界的固定材料，请保持阅读但不要复述。"
@@ -120,8 +126,10 @@ def make_partial_prompt(
         "这是两次请求共同拥有的前缀材料，用于验证完整缓存页能够被后续请求复用。"
         "请忽略材料内容并继续阅读。"
     )
-    return marker + filler * repeats + (
-        f"\n分支标识：{suffix_name}。只回答数字：{value} 的平方是多少？"
+    return (
+        marker
+        + filler * repeats
+        + (f"\n分支标识：{suffix_name}。只回答数字：{value} 的平方是多少？")
     )
 
 
@@ -201,18 +209,22 @@ class Runner:
             "elapsed_s": round(time.time() - self.started_at, 3),
             "summary": {
                 "case_count": len(self.records),
-                "hit_count": sum(r.get("effective_reuse_len", 0) > 0 for r in self.records),
-                "miss_count": sum(r.get("effective_reuse_len") == 0 for r in self.records),
+                "hit_count": sum(
+                    r.get("effective_reuse_len", 0) > 0 for r in self.records
+                ),
+                "miss_count": sum(
+                    r.get("effective_reuse_len") == 0 for r in self.records
+                ),
                 "reasoning_count": sum(
                     bool(r.get("reasoning_content", "").strip()) for r in self.records
                 ),
-                "mtp_case_count": sum(
-                    bool(r.get("require_mtp")) for r in self.records
-                ),
+                "mtp_case_count": sum(bool(r.get("require_mtp")) for r in self.records),
                 "multimodal_case_count": sum(
                     bool(r.get("require_multimodal")) for r in self.records
                 ),
-                "concurrent_stages": sum(s.get("concurrent", False) for s in self.stages),
+                "concurrent_stages": sum(
+                    s.get("concurrent", False) for s in self.stages
+                ),
             },
             "stages": self.stages,
             "cases": self.records,
@@ -241,7 +253,9 @@ class Runner:
                     f"{role} health check before {stage} failed: {exc}"
                 ) from exc
 
-    def request(self, case: Case, barrier: threading.Barrier | None = None) -> dict[str, Any]:
+    def request(
+        self, case: Case, barrier: threading.Barrier | None = None
+    ) -> dict[str, Any]:
         if barrier is not None:
             barrier.wait(timeout=30)
         request_max_tokens = case.max_tokens or self.args.max_tokens
@@ -258,7 +272,9 @@ class Runner:
         }
         request = urllib.request.Request(
             self.endpoint,
-            data=json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode(),
+            data=json.dumps(
+                payload, ensure_ascii=False, separators=(",", ":")
+            ).encode(),
             headers={"Content-Type": "application/json"},
             method="POST",
         )
@@ -269,7 +285,9 @@ class Runner:
                 status = response.status
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
-            raise SmokeFailure(f"{case.name}: HTTP {exc.code}: {detail[:1000]}") from exc
+            raise SmokeFailure(
+                f"{case.name}: HTTP {exc.code}: {detail[:1000]}"
+            ) from exc
         except Exception as exc:
             raise SmokeFailure(f"{case.name}: request failed: {exc}") from exc
         if status != 200:
@@ -298,7 +316,9 @@ class Runner:
             reasoning_content = message.get("reasoning_content", "") or ""
             aux = response["aux_info"]
         except (KeyError, IndexError, TypeError) as exc:
-            raise SmokeFailure(f"{case.name}: malformed response: {response!r}") from exc
+            raise SmokeFailure(
+                f"{case.name}: malformed response: {response!r}"
+            ) from exc
         debug_info = response.get("debug_info") or {}
         output_ids = debug_info.get("output_ids")
         if not isinstance(content, str) or not isinstance(reasoning_content, str):
@@ -346,9 +366,13 @@ class Runner:
                 f"block_size={self.args.block_size}"
             )
         if case.reuse == "miss" and effective_reuse != 0:
-            raise SmokeFailure(f"{case.name}: expected miss, got reuse={effective_reuse}")
+            raise SmokeFailure(
+                f"{case.name}: expected miss, got reuse={effective_reuse}"
+            )
         if case.reuse == "hit" and effective_reuse <= 0:
-            raise SmokeFailure(f"{case.name}: expected hit, got reuse={effective_reuse}")
+            raise SmokeFailure(
+                f"{case.name}: expected hit, got reuse={effective_reuse}"
+            )
         if case.reuse == "partial" and not (0 < effective_reuse < input_len):
             raise SmokeFailure(
                 f"{case.name}: expected partial hit, got reuse={effective_reuse}, "
@@ -399,7 +423,9 @@ class Runner:
             "output_ids": output_ids,
         }
 
-    def request_cases(self, cases: list[Case], concurrent: bool) -> list[dict[str, Any]]:
+    def request_cases(
+        self, cases: list[Case], concurrent: bool
+    ) -> list[dict[str, Any]]:
         if concurrent:
             barrier = threading.Barrier(len(cases))
             with ThreadPoolExecutor(max_workers=len(cases)) as pool:
@@ -550,15 +576,33 @@ class Runner:
             ],
         )
 
-        partial_seed = make_partial_prompt(self.args.namespace, "partial-common", "seed", 29)
-        partial_query = make_partial_prompt(self.args.namespace, "partial-common", "query", 31)
+        partial_seed = make_partial_prompt(
+            self.args.namespace, "partial-common", "seed", 29
+        )
+        partial_query = make_partial_prompt(
+            self.args.namespace, "partial-common", "query", 31
+        )
         self.run_stage(
             "partial_prefix_seed",
-            [Case("partial_prefix_seed", partial_seed, numbered_answer_pattern(841), "miss")],
+            [
+                Case(
+                    "partial_prefix_seed",
+                    partial_seed,
+                    numbered_answer_pattern(841),
+                    "miss",
+                )
+            ],
         )
         self.run_stage(
             "partial_prefix_hit",
-            [Case("partial_prefix_hit", partial_query, numbered_answer_pattern(961), "partial")],
+            [
+                Case(
+                    "partial_prefix_hit",
+                    partial_query,
+                    numbered_answer_pattern(961),
+                    "partial",
+                )
+            ],
         )
 
         cold_prompts = [
@@ -574,8 +618,10 @@ class Runner:
             "batch_all_miss",
             [
                 Case(
-                    f"batch_all_miss_{idx}", prompt,
-                    numbered_answer_pattern((40 + idx) ** 2), "miss"
+                    f"batch_all_miss_{idx}",
+                    prompt,
+                    numbered_answer_pattern((40 + idx) ** 2),
+                    "miss",
                 )
                 for idx, prompt in enumerate(cold_prompts)
             ],
@@ -585,8 +631,10 @@ class Runner:
             "batch_all_hit",
             [
                 Case(
-                    f"batch_all_hit_{idx}", prompt,
-                    numbered_answer_pattern((40 + idx) ** 2), "hit"
+                    f"batch_all_hit_{idx}",
+                    prompt,
+                    numbered_answer_pattern((40 + idx) ** 2),
+                    "hit",
                 )
                 for idx, prompt in enumerate(cold_prompts)
             ],
@@ -624,8 +672,10 @@ class Runner:
             "mixed_seed_hits",
             [
                 Case(
-                    f"mixed_seed_{idx}", mixed_prompts[idx],
-                    numbered_answer_pattern((50 + idx) ** 2), "miss"
+                    f"mixed_seed_{idx}",
+                    mixed_prompts[idx],
+                    numbered_answer_pattern((50 + idx) ** 2),
+                    "miss",
                 )
                 for idx in range(exact_hit_count)
             ]
@@ -642,14 +692,13 @@ class Runner:
             "batch_mixed_hit_miss",
             [
                 Case(
-                    f"batch_mixed_{idx}", prompt,
+                    f"batch_mixed_{idx}",
+                    prompt,
                     numbered_answer_pattern((50 + idx) ** 2),
                     (
                         "hit"
                         if idx < exact_hit_count
-                        else "partial"
-                        if idx == partial_idx
-                        else "miss"
+                        else "partial" if idx == partial_idx else "miss"
                     ),
                 )
                 for idx, prompt in enumerate(mixed_prompts)
@@ -660,8 +709,10 @@ class Runner:
             "batch_mixed_then_all_hit",
             [
                 Case(
-                    f"batch_mixed_all_hit_{idx}", prompt,
-                    numbered_answer_pattern((50 + idx) ** 2), "hit"
+                    f"batch_mixed_all_hit_{idx}",
+                    prompt,
+                    numbered_answer_pattern((50 + idx) ** 2),
+                    "hit",
                 )
                 for idx, prompt in enumerate(mixed_prompts)
             ],
@@ -720,30 +771,45 @@ class Runner:
         )
         self.run_stage(
             "whole_chunk_single_miss",
-            [Case(
-                "whole_chunk_single_miss", single_prompt, numbered_answer_pattern(3721),
-                "miss", require_chunk=True
-            )],
+            [
+                Case(
+                    "whole_chunk_single_miss",
+                    single_prompt,
+                    numbered_answer_pattern(3721),
+                    "miss",
+                    require_chunk=True,
+                )
+            ],
         )
         self.run_stage(
             "whole_chunk_single_hit",
-            [Case(
-                "whole_chunk_single_hit", single_prompt, numbered_answer_pattern(3721),
-                "hit", require_chunk=True
-            )],
+            [
+                Case(
+                    "whole_chunk_single_hit",
+                    single_prompt,
+                    numbered_answer_pattern(3721),
+                    "hit",
+                    require_chunk=True,
+                )
+            ],
         )
 
         chunk_batch_size = min(2, self.args.batch_size)
         chunk_prompts = [
-            make_whole_chunk_prompt(self.args.namespace, f"whole-chunk-batch-{idx}", 70 + idx)
+            make_whole_chunk_prompt(
+                self.args.namespace, f"whole-chunk-batch-{idx}", 70 + idx
+            )
             for idx in range(chunk_batch_size)
         ]
         self.run_stage(
             "whole_chunk_batch_miss",
             [
                 Case(
-                    f"whole_chunk_batch_miss_{idx}", prompt,
-                    numbered_answer_pattern((70 + idx) ** 2), "miss", require_chunk=True
+                    f"whole_chunk_batch_miss_{idx}",
+                    prompt,
+                    numbered_answer_pattern((70 + idx) ** 2),
+                    "miss",
+                    require_chunk=True,
                 )
                 for idx, prompt in enumerate(chunk_prompts)
             ],
@@ -753,8 +819,11 @@ class Runner:
             "whole_chunk_batch_hit",
             [
                 Case(
-                    f"whole_chunk_batch_hit_{idx}", prompt,
-                    numbered_answer_pattern((70 + idx) ** 2), "hit", require_chunk=True
+                    f"whole_chunk_batch_hit_{idx}",
+                    prompt,
+                    numbered_answer_pattern((70 + idx) ** 2),
+                    "hit",
+                    require_chunk=True,
                 )
                 for idx, prompt in enumerate(chunk_prompts)
             ],
@@ -763,7 +832,7 @@ class Runner:
         self.run_long_prefix_case()
 
     def run_long_prefix_case(self) -> None:
-        self.health()
+        self.health("long_prefix_cached_dialog")
         stage = dict(name="long_prefix_cached_dialog", concurrent=False, passed=False)
         self.stages.append(stage)
         case = LongPrefixCase(
@@ -788,7 +857,7 @@ class Runner:
             )
         finally:
             self.records.extend(case.records)
-        self.health()
+        self.health("long_prefix_cached_dialog_complete")
 
 
 def main() -> int:
@@ -801,7 +870,9 @@ def main() -> int:
         }
         suites[args.suite]()
         runner.save(passed=True)
-        print(f"PASS: suite={args.suite} cases={len(runner.records)} artifacts={args.output}")
+        print(
+            f"PASS: suite={args.suite} cases={len(runner.records)} artifacts={args.output}"
+        )
         return 0
     except Exception as exc:
         error = f"{type(exc).__name__}: {exc}"

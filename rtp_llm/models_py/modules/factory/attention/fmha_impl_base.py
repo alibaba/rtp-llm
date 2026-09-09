@@ -67,6 +67,10 @@ class MlaImplBase(object):
         """Prepare for attention computation."""
         pass
 
+    def release_forward_workspace(self) -> None:
+        """Release temporary storage after the caller has consumed the output."""
+        pass
+
     @classmethod
     def support_parallelism_config(
         cls, parallelism_config: Optional[ParallelismConfig]
@@ -134,6 +138,10 @@ class FMHAImplBase(ABC):
             bool: 如果支持则返回 True，否则返回 False
         """
         return False
+
+    def release_forward_workspace(self) -> None:
+        """Release temporary storage after the caller has consumed the output."""
+        pass
 
     @classmethod
     def support_parallelism_config(

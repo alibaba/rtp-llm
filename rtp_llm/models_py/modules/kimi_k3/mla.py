@@ -92,6 +92,9 @@ class KimiK3MLA(MlaAttention):
         self._kv_a_norm = weights[W.mla_kv_a_ln_gamma]
         quant_config = getattr(config, "k3_attention_quant_config", None)
         self._fp8_enabled = quant_config is not None
+        self._perf_accepts_strided_latent = (
+            self._fp8_enabled and parallelism_config.role_type == RoleType.PREFILL
+        )
         self._fp8_gate = (
             LinearFactory.create_linear_from_weights(
                 weights, W.attn_gate_w, W.attn_gate_s, None, quant_config=quant_config
@@ -105,6 +108,19 @@ class KimiK3MLA(MlaAttention):
         # the framework kernel.
         self.q_a_layernorm = RMSNorm(self._q_a_norm, latent_norm_eps)
         self.kv_a_layernorm = RMSNorm(self._kv_a_norm, latent_norm_eps)
+        from rtp_llm.models_py.modules.kimi_k3.fp8_producers import (
+            Fp8RMSNorm,
+            Fp8SigmoidGate,
+            SigmoidGate,
+        )
+
+        if self._fp8_enabled:
+            self.q_a_layernorm = Fp8RMSNorm(self._q_a_norm, latent_norm_eps)
+            if parallelism_config.role_type == RoleType.PREFILL:
+                self.kv_a_layernorm = Fp8RMSNorm(
+                    self._kv_a_norm, latent_norm_eps, retain_bf16=True
+                )
+        self.output_gate_op = Fp8SigmoidGate() if self._fp8_enabled else SigmoidGate()
         self._sp_active_for_forward = False
         self._sp_padded_for_forward = False
         self._sp_prefill_input_is_sharded = False
@@ -177,7 +193,7 @@ class KimiK3MLA(MlaAttention):
         if not self.use_output_gate:
             return attn_output
         assert output_gate is not None
-        return attn_output * torch.sigmoid(output_gate.reshape_as(attn_output))
+        return self.output_gate_op(attn_output, output_gate)
 
     def _project_output(self, attn_output: torch.Tensor) -> torch.Tensor:
         if self._sp_active_for_forward:
@@ -187,14 +203,12 @@ class KimiK3MLA(MlaAttention):
                 and attn_output.shape[0] % tp_size != 0
             )
             if self._sp_prefill_input_is_sharded:
-                fused = gemm_reduce_scatter(
+                return gemm_reduce_scatter(
                     attn_output,
                     self._o_w,
                     get_process_group(Group.TP),
                     pad_rows=pad_reduce_scatter,
                 )
-                if fused is not None:
-                    return fused
             return row_parallel_linear(
                 attn_output,
                 self._o_w,

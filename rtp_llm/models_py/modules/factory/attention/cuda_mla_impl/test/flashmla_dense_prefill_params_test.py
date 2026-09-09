@@ -1,4 +1,5 @@
 import os
+import weakref
 from types import SimpleNamespace
 from typing import Sequence
 from unittest import TestCase, main, skipUnless
@@ -29,6 +30,32 @@ if _TEST_TMPDIR:
     os.environ.setdefault("DG_JIT_CACHE_DIR", os.path.join(_TEST_TMPDIR, "deep_gemm"))
 
 CUDA_AVAILABLE = torch.cuda.is_available()
+
+
+class FlashMlaWorkspaceLifetimeTest(TestCase):
+    def test_release_drops_scratch_but_keeps_plan_and_consumed_output(self) -> None:
+        op = object.__new__(MlaFlashMLAPrefillOp)
+        op._forward_workspace = SimpleNamespace(
+            packed_kv=torch.empty(128), attention_output=torch.arange(16)
+        )
+        op._fp8_prefix_rope = torch.empty(64)
+        plan = object()
+        op._forward_plan = plan
+        consumed_output = op._forward_workspace.attention_output.clone()
+        refs = [
+            weakref.ref(op._forward_workspace.packed_kv),
+            weakref.ref(op._forward_workspace.attention_output),
+            weakref.ref(op._fp8_prefix_rope),
+        ]
+        wrapper = object.__new__(MlaFlashMLAPrefillImpl)
+        wrapper.fmha_impl = op
+        with patch("torch.cuda.empty_cache") as flush:
+            wrapper.release_forward_workspace()
+            wrapper.release_forward_workspace()
+        flush.assert_not_called()
+        self.assertTrue(all(ref() is None for ref in refs))
+        self.assertIs(op._forward_plan, plan)
+        torch.testing.assert_close(consumed_output, torch.arange(16))
 
 
 class FlashMlaDensePrefillConfigForwardingTest(TestCase):
@@ -151,6 +178,8 @@ class FlashMlaDensePrefillParamsTest(TestCase):
         op.page_size = self.page_size
         op.expanded_kv_budget_bytes = expanded_kv_budget_bytes
         op.flash_mla_cuda = SimpleNamespace(dense_prefill_fwd=lambda *args: None)
+        op.fp8_compute = False
+        op._prefix_producer = None
         op._forward_plan = None
         op._prefix_runtime_launches = ()
         op._forward_workspace = None

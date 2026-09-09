@@ -7,6 +7,7 @@ from torch import nn
 
 import rtp_llm.models_py.model_desc.kimi_k3 as kimi_k3
 import rtp_llm.models_py.modules.factory.linear.parallel as sequence_parallel
+import rtp_llm.models_py.modules.hybrid.test.collective_gemm_reference as reference
 import rtp_llm.models_py.modules.kimi_k3.all_gather_gemm as kimi_k3_ag_gemm
 import rtp_llm.models_py.modules.kimi_k3.gemm_reduce_scatter as kimi_k3_gemm_reduce_scatter
 import rtp_llm.models_py.modules.kimi_k3.kda.module as kimi_k3_kda
@@ -277,13 +278,9 @@ class KimiK3CollectiveGemmUnitTest(unittest.TestCase):
         hidden_states = torch.empty((4, 16), dtype=torch.bfloat16, device="cuda")
         fused_output = torch.empty((4, 16), dtype=torch.bfloat16, device="cuda")
         group = object()
+        module.output_norm = Mock(return_value=projection_input)
 
         with (
-            patch.object(
-                kimi_k3_kda,
-                "kimi_kda_rms_norm_sigmoid_gate",
-                return_value=projection_input,
-            ),
             patch.object(kimi_k3_kda, "get_process_group", return_value=group),
             patch.object(
                 kimi_k3_kda,
@@ -342,82 +339,54 @@ class KimiK3CollectiveGemmUnitTest(unittest.TestCase):
         self.assertEqual(gemm_rs.call_args.kwargs, {"pad_rows": False})
         fallback.assert_not_called()
 
-    def test_all_gather_gemm_uses_fused_path_above_threshold(self) -> None:
+    def test_all_gather_gemm_fuses_small_and_large_prefill(self):
         if not torch.cuda.is_available():
             self.skipTest("CUDA is required")
-
         device = torch.device("cuda", torch.cuda.current_device())
-        local_input = torch.empty((8192, 1), dtype=torch.bfloat16, device=device)
-        weight = torch.empty((1, 1), dtype=torch.bfloat16, device=device)
-        output = torch.empty((65536, 1), dtype=torch.bfloat16, device=device)
         group = Mock(group_name="tp-test")
         group.size.return_value = 8
         state = kimi_k3_ag_gemm._AllGatherGemmState(
-            enabled=True,
-            group=group,
-            device=device,
-            world_size=8,
-            max_m=65536,
-            k=1,
-            dtype=torch.bfloat16,
-            workspace_bytes=8192 * 2,
+            False, group, device, 8, 65536, 1, torch.bfloat16, 16384
         )
-        key = (group, device.index)
-        with (
-            patch.object(kimi_k3_ag_gemm, "get_process_group", return_value=group),
-            patch.object(
-                kimi_k3_ag_gemm,
-                "fused_all_gather_matmul",
-                return_value=(None, [output]),
-            ) as fused,
-            patch.dict(kimi_k3_ag_gemm._STATES, {key: state}, clear=True),
-        ):
-            actual = kimi_k3_ag_gemm.all_gather_gemm(
-                local_input,
-                [weight],
-                logical_m=65536,
-            )[0]
+        weight = torch.empty((1, 1), dtype=torch.bfloat16, device=device)
+        for logical in (1, 7, 8, 9, 32767, 32768, 65536):
+            with self.subTest(logical=logical):
+                rows = (logical + 7) // 8
+                x = torch.empty((rows, 1), dtype=torch.bfloat16, device=device)
+                out = torch.empty((rows * 8, 1), dtype=torch.bfloat16, device=device)
+                with (
+                    patch.object(
+                        kimi_k3_ag_gemm, "get_process_group", return_value=group
+                    ),
+                    patch.dict(
+                        kimi_k3_ag_gemm._STATES,
+                        {(group, device.index, False): state},
+                        clear=True,
+                    ),
+                    patch.object(
+                        kimi_k3_ag_gemm,
+                        "fused_all_gather_matmul",
+                        return_value=(None, [out]),
+                    ) as fused,
+                ):
+                    actual = kimi_k3_ag_gemm.all_gather_gemm(
+                        x, [weight], logical_m=logical
+                    )[0]
+                fused.assert_called_once_with(x, [weight], group, return_gathered=False)
+                self.assertEqual(actual.shape, (logical, 1))
 
-        fused.assert_called_once_with(
-            local_input,
-            [weight],
-            group,
-            return_gathered=False,
-        )
-        self.assertIs(actual, output)
+    def test_unconfigured_ag_does_not_fall_back_to_separate_ops(self):
+        group = Mock()
+        group.size.return_value = 2
+        with patch.object(kimi_k3_ag_gemm, "get_process_group", return_value=group):
+            with self.assertRaisesRegex(ValueError, "CUDA"):
+                kimi_k3_ag_gemm.all_gather_gemm(
+                    torch.randn(2, 3), [torch.randn(3, 5)], logical_m=4
+                )
 
-    def test_small_prefill_uses_all_gather_then_gemm(self) -> None:
-        local_input = torch.randn(2, 3)
-        gathered_input = torch.randn(4, 3)
-        weight = torch.randn(3, 5)
-        group = SimpleNamespace(size=lambda: 2)
-        with (
-            patch.object(
-                kimi_k3_ag_gemm,
-                "get_process_group",
-                return_value=group,
-            ),
-            patch.object(
-                kimi_k3_ag_gemm,
-                "all_gather_into",
-                return_value=gathered_input,
-            ) as gather,
-            patch.object(kimi_k3_ag_gemm, "fused_all_gather_matmul") as fused,
-            patch.dict(kimi_k3_ag_gemm._STATES, {}, clear=True),
-        ):
-            actual = kimi_k3_ag_gemm.all_gather_gemm(
-                local_input,
-                [weight],
-                logical_m=4,
-            )[0]
-
-        gather.assert_called_once_with(local_input, ANY, kimi_k3_ag_gemm.Group.TP)
-        fused.assert_not_called()
-        torch.testing.assert_close(actual, torch.mm(gathered_input, weight))
-
-    def test_all_gather_gemm_policy_starts_at_32k_physical_m(self) -> None:
-        self.assertFalse(kimi_k3_ag_gemm.should_use_all_gather_gemm(32767))
-        self.assertTrue(kimi_k3_ag_gemm.should_use_all_gather_gemm(32768))
+    def test_ag_has_no_length_policy_or_reference_switch(self):
+        self.assertFalse(hasattr(kimi_k3_ag_gemm, "should_use_all_gather_gemm"))
+        self.assertFalse(hasattr(kimi_k3_ag_gemm, "all_gather_into"))
 
     def test_configure_all_gather_gemm_reserves_local_input_bytes(self) -> None:
         group = Mock()
@@ -433,98 +402,72 @@ class KimiK3CollectiveGemmUnitTest(unittest.TestCase):
             enabled = kimi_k3_ag_gemm.configure_all_gather_gemm(
                 group,
                 device,
-                enabled=True,
-                max_m=32768,
+                max_m=8,
                 k=16,
                 dtype=torch.bfloat16,
             )
 
         self.assertTrue(enabled)
-        reserve.assert_called_once_with(group, 4096 * 16 * 2)
+        reserve.assert_called_once_with(group, 1 * 16 * 2)
 
-    def test_gemm_reduce_scatter_policy_starts_at_32k_physical_m(self) -> None:
+    def test_rs_has_no_length_policy_or_backend_switch(self):
         self.assertFalse(
-            kimi_k3_gemm_reduce_scatter.should_use_gemm_reduce_scatter(32767)
+            hasattr(kimi_k3_gemm_reduce_scatter, "should_use_gemm_reduce_scatter")
         )
-        self.assertTrue(
-            kimi_k3_gemm_reduce_scatter.should_use_gemm_reduce_scatter(32768)
+        self.assertFalse(
+            hasattr(kimi_k3_gemm_reduce_scatter, "gemm_reduce_scatter_backend")
         )
 
-        with self.assertRaisesRegex(ValueError, "physical_m"):
-            kimi_k3_gemm_reduce_scatter.should_use_gemm_reduce_scatter(-1)
-
-    def test_gemm_reduce_scatter_dispatches_from_current_physical_m(self) -> None:
+    def test_gemm_reduce_scatter_fuses_all_nonempty_prefill_sizes(self):
         if not torch.cuda.is_available():
             self.skipTest("CUDA is required")
-
         device = torch.device("cuda", torch.cuda.current_device())
         group = object()
         launch = Mock()
         workspace = object()
         state = kimi_k3_gemm_reduce_scatter._GemmReduceScatterState(
-            enabled=True,
-            group=group,
-            device=device,
-            world_size=8,
-            max_m=32768,
-            n=16,
-            deep_gemm=SimpleNamespace(bf16_gemm_rs_nn=launch),
-            workspace=workspace,
+            group,
+            device,
+            8,
+            32768,
+            16,
+            SimpleNamespace(bf16_gemm_rs_nn=launch),
+            workspace,
         )
         weight = torch.empty((8, 16), dtype=torch.bfloat16, device=device)
-        key = (group, device.index)
-
-        with patch.dict(
-            kimi_k3_gemm_reduce_scatter._STATES,
-            {key: state},
-            clear=True,
-        ):
-            below_threshold = torch.empty(
-                (32760, 8), dtype=torch.bfloat16, device=device
-            )
-            self.assertIsNone(
-                kimi_k3_gemm_reduce_scatter.gemm_reduce_scatter(
-                    below_threshold,
-                    weight,
-                    group,
-                    pad_rows=False,
+        for m in (0, 1, 7, 8, 9, 32760, 32768):
+            with (
+                self.subTest(m=m),
+                patch.dict(
+                    kimi_k3_gemm_reduce_scatter._STATES,
+                    {(group, device.index): state},
+                    clear=True,
+                ),
+            ):
+                launch.reset_mock()
+                x = torch.ones((m, 16), dtype=torch.bfloat16, device=device)[:, ::2]
+                out = kimi_k3_gemm_reduce_scatter.gemm_reduce_scatter(
+                    x, weight, group, pad_rows=True
                 )
-            )
-            launch.assert_not_called()
+                physical = (m + 7) // 8 * 8
+                self.assertEqual(out.shape, (physical // 8, 16))
+                if m == 0:
+                    launch.assert_not_called()
+                    continue
+                launch.assert_called_once()
+                actual_x = launch.call_args.args[0]
+                self.assertTrue(actual_x.is_contiguous())
+                torch.testing.assert_close(actual_x[:m], x, atol=0, rtol=0)
+                self.assertEqual(torch.count_nonzero(actual_x[m:]).item(), 0)
 
-            at_threshold = torch.zeros(
-                (32768, 16), dtype=torch.bfloat16, device=device
-            )[:, ::2]
-            self.assertFalse(at_threshold.is_contiguous())
-            output = kimi_k3_gemm_reduce_scatter.gemm_reduce_scatter(
-                at_threshold,
-                weight,
-                group,
-                pad_rows=False,
-            )
-
-        assert output is not None
-        self.assertEqual(tuple(output.shape), (4096, 16))
-        launch.assert_called_once()
-        launch_input, launch_weight, launch_output, launch_workspace = (
-            launch.call_args.args
-        )
-        self.assertTrue(launch_input.is_contiguous())
-        torch.testing.assert_close(launch_input, at_threshold, rtol=0, atol=0)
-        self.assertIs(launch_weight, weight)
-        self.assertIs(launch_output, output)
-        self.assertIs(launch_workspace, workspace)
-        self.assertEqual(launch.call_args.kwargs, {"compiled_dims": "nk"})
-
-    def test_gemm_reduce_scatter_cpu_input_uses_fallback(self) -> None:
-        self.assertIsNone(
+    def test_gemm_reduce_scatter_rejects_cpu_instead_of_falling_back(self):
+        with self.assertRaisesRegex(TypeError, "CUDA"):
             kimi_k3_gemm_reduce_scatter.gemm_reduce_scatter(
-                torch.empty((32768, 8), dtype=torch.bfloat16),
+                torch.empty((1, 8), dtype=torch.bfloat16),
                 torch.empty((8, 16), dtype=torch.bfloat16),
                 object(),
-                pad_rows=False,
+                pad_rows=True,
             )
-        )
 
     def test_padded_shards_cover_logical_tokens_for_tp2_tp4_tp8(self) -> None:
         for tp_size in (2, 4, 8):
@@ -570,7 +513,7 @@ class KimiK3CollectiveGemmUnitTest(unittest.TestCase):
         group = Mock(group_name="tp-test")
         group.size.return_value = 8
         state = kimi_k3_ag_gemm._AllGatherGemmState(
-            enabled=True,
+            fp8=False,
             group=group,
             device=device,
             world_size=8,
@@ -579,7 +522,7 @@ class KimiK3CollectiveGemmUnitTest(unittest.TestCase):
             dtype=torch.bfloat16,
             workspace_bytes=4096 * 2,
         )
-        key = (group, device.index)
+        key = (group, device.index, False)
         with (
             patch.object(kimi_k3_ag_gemm, "get_process_group", return_value=group),
             patch.object(
@@ -610,18 +553,17 @@ class KimiK3CollectiveGemmUnitTest(unittest.TestCase):
         group = SimpleNamespace(size=lambda: 2)
         with (
             patch.object(
-                kimi_k3_ag_gemm,
+                reference,
                 "get_process_group",
                 return_value=group,
             ),
             patch.object(
-                kimi_k3_ag_gemm,
+                reference,
                 "all_gather_into",
                 return_value=gathered_input,
             ),
-            patch.dict(kimi_k3_ag_gemm._STATES, {}, clear=True),
         ):
-            actual = kimi_k3_ag_gemm.all_gather_gemm(
+            actual = reference.all_gather_gemm_reference(
                 local_input,
                 [weight],
                 logical_m=3,
@@ -948,7 +890,7 @@ class KimiK3CollectiveGemmUnitTest(unittest.TestCase):
 
         model = KimiK3Model.__new__(KimiK3Model)
         nn.Module.__init__(model)
-        max_global_tokens = 32761
+        max_global_tokens = 3
         model.config = SimpleNamespace(
             max_seq_len=max_global_tokens,
             hidden_size=16,
@@ -979,8 +921,7 @@ class KimiK3CollectiveGemmUnitTest(unittest.TestCase):
         configure.assert_called_once_with(
             group,
             torch.device("cuda", 0),
-            enabled=True,
-            max_m=32768,
+            max_m=8,
             k=16,
             dtype=torch.bfloat16,
         )
@@ -998,7 +939,7 @@ class KimiK3CollectiveGemmUnitTest(unittest.TestCase):
 
         model = KimiK3Model.__new__(KimiK3Model)
         nn.Module.__init__(model)
-        model.config = SimpleNamespace(max_seq_len=32761, hidden_size=7168)
+        model.config = SimpleNamespace(max_seq_len=3, hidden_size=7168)
         model.parallelism_config = SimpleNamespace(
             get_attn_tp_size=lambda: 8,
         )
@@ -1025,8 +966,7 @@ class KimiK3CollectiveGemmUnitTest(unittest.TestCase):
         configure.assert_called_once_with(
             group,
             torch.device("cuda", 0),
-            enabled=True,
-            max_m=32768,
+            max_m=8,
             n=7168,
         )
         self.assertTrue(model._gemm_reduce_scatter_configured)
@@ -1072,7 +1012,6 @@ class KimiK3CollectiveGemmUnitTest(unittest.TestCase):
         configure_ag_gemm.assert_called_once_with(
             group,
             torch.device("cuda", 0),
-            enabled=True,
             max_m=1 << 16,
             k=7168,
             dtype=torch.bfloat16,
@@ -1080,7 +1019,6 @@ class KimiK3CollectiveGemmUnitTest(unittest.TestCase):
         configure_gemm_rs.assert_called_once_with(
             group,
             torch.device("cuda", 0),
-            enabled=True,
             max_m=1 << 16,
             n=7168,
         )
@@ -1185,6 +1123,66 @@ class KimiK3CollectiveGemmUnitTest(unittest.TestCase):
                 rtol=0,
                 atol=0,
             )
+
+    def test_cached_bf16_rs_workspace_validates_fp8_abi(self):
+        import rtp_llm.models_py.modules.kimi_k3.gemm_reduce_scatter as rs
+
+        for tp in (2, 4, 8):
+            group = Mock()
+            group.size.return_value = tp
+            workspace = SimpleNamespace()
+            state = rs._GemmReduceScatterState(
+                group,
+                torch.device("cuda", 0),
+                tp,
+                32768,
+                7168,
+                SimpleNamespace(_C=SimpleNamespace(bf16_gemm_rs_reduce=Mock())),
+                workspace,
+            )
+            with patch.dict(rs._STATES, {(group, 0): state}, clear=True):
+                kwargs = dict(max_m=32768, n=7168)
+                self.assertTrue(
+                    rs.configure_gemm_reduce_scatter(group, "cuda:0", **kwargs)
+                )
+                with self.assertRaisesRegex(RuntimeError, "FP8 peer-output RS ABI"):
+                    rs.configure_gemm_reduce_scatter(
+                        group, "cuda:0", fp8=True, **kwargs
+                    )
+                workspace._data_offset_bytes = 128
+                workspace._mapping_handle = object()
+                workspace._launch_lock = object()
+                workspace._last_stream = None
+                workspace._barrier = Mock()
+                self.assertTrue(
+                    rs.configure_gemm_reduce_scatter(
+                        group, "cuda:0", fp8=True, **kwargs
+                    )
+                )
+
+    def test_missing_fp8_workspace_is_an_error_not_a_reference_path(self):
+        import rtp_llm.models_py.modules.kimi_k3.all_gather_gemm as ag
+        import rtp_llm.models_py.modules.kimi_k3.gemm_reduce_scatter as rs
+        from rtp_llm.models_py.modules.factory.linear.quantized_activation import (
+            QuantizedActivation,
+        )
+
+        group = Mock()
+        group.size.return_value = 8
+        payload = Mock(
+            spec=QuantizedActivation, shape=(1, 512), device=torch.device("cuda", 0)
+        )
+        projection = Mock(K=512, N=512, scale_ue8m0=True)
+        with (
+            patch.object(ag, "get_process_group", return_value=group),
+            patch.dict(ag._STATES, {}, clear=True),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "initialized"):
+                ag._all_gather_quantized(payload, [projection], logical_m=1, group=None)
+        source = Mock(is_cuda=True, device=torch.device("cuda", 0))
+        with patch.dict(rs._STATES, {}, clear=True):
+            with self.assertRaisesRegex(RuntimeError, "initialized"):
+                rs.gemm_reduce_scatter(source, projection, group, pad_rows=True)
 
 
 if __name__ == "__main__":

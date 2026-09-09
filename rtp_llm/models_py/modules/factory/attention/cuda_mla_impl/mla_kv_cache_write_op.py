@@ -8,8 +8,10 @@ from typing import Any, Optional
 
 import torch
 
+from rtp_llm.models_py.modules.factory.linear.quantized_activation import retained_bf16
 from rtp_llm.ops import KvCacheDataType, compute_ops
 from rtp_llm.ops.compute_ops import LayerKVCache
+
 from .mla_fp8_kernels import _FP8_DIAGNOSTICS, observe_fp8_input
 
 
@@ -60,6 +62,7 @@ class MlaKVCacheWriteOp:
             key_pe: Position-encoded key tensor [num_tokens, rope_head_dim]
             kv_cache: MLA KV cache with compressed layout
         """
+        append_ckv_t = retained_bf16(append_ckv_t)
         if kv_cache is not None:
             if self.fp8_diagnostics:
                 observe_fp8_input(append_ckv_t, self.kv_scale, "cache_latent")

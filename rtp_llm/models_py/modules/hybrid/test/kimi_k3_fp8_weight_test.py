@@ -109,7 +109,9 @@ class KimiK3Fp8WeightTest(unittest.TestCase):
                     )
 
     def test_kvb_derived_weights_use_final_quantized_values(self):
-        cfg = MlaConfig(head_num=32, nope_head_dim=128, v_head_dim=128, kv_lora_rank=128)
+        cfg = MlaConfig(
+            head_num=32, nope_head_dim=128, v_head_dim=128, kv_lora_rank=128
+        )
         source = MlaAttnAtomicWeight(W.mla_kv_b_w, [], config=cfg)
         wrapper = KimiK3LoadFp8Weight(
             source, Fp8BlockWiseQuantConfig(), derive_mla=True
@@ -134,43 +136,6 @@ class KimiK3Fp8WeightTest(unittest.TestCase):
                     result[W.mla_vc], local[:, 128:].transpose(1, 2), rtol=0, atol=0
                 )
 
-    def test_cached_bf16_rs_workspace_validates_fp8_abi(self):
-        import importlib.util
-        import sys
-        from pathlib import Path
-
-        root = Path(__file__).resolve().parents[2] / "kimi_k3"
-        with patch.dict(sys.modules):
-            for name, filename in (
-                ("rtp_llm.models_py.modules.kimi_k3._collective_gemm", "_collective_gemm.py"),
-                ("_k3_fp8_rs_abi_test", "gemm_reduce_scatter.py"),
-            ):
-                spec = importlib.util.spec_from_file_location(name, root / filename)
-                module = importlib.util.module_from_spec(spec)
-                sys.modules[name] = module
-                spec.loader.exec_module(module)
-            rs = module
-        for tp in (2, 4, 8):
-            group = Mock()
-            group.size.return_value = tp
-            workspace = SimpleNamespace()
-            state = rs._GemmReduceScatterState(
-                True, group, torch.device("cuda", 0), tp, 32768, 7168,
-                SimpleNamespace(_C=SimpleNamespace(bf16_gemm_rs_reduce=Mock())),
-                workspace,
-            )
-            with patch.dict(rs._STATES, {(group, 0): state}, clear=True):
-                kwargs = dict(enabled=True, max_m=32768, n=7168)
-                self.assertTrue(rs.configure_gemm_reduce_scatter(group, "cuda:0", **kwargs))
-                with self.assertRaisesRegex(RuntimeError, "FP8 peer-output RS ABI"):
-                    rs.configure_gemm_reduce_scatter(group, "cuda:0", fp8=True, **kwargs)
-                workspace._data_offset_bytes = 128
-                workspace._mapping_handle = object()
-                workspace._launch_lock = object()
-                workspace._last_stream = None
-                workspace._barrier = Mock()
-                self.assertTrue(rs.configure_gemm_reduce_scatter(group, "cuda:0", fp8=True, **kwargs))
-
     def test_attention_config_enables_mtp_but_not_eagle3_or_global_quantization(self):
         from rtp_llm.config.model_config import ModelConfig
         from rtp_llm.models.kimi_k3.kimi_k3 import KimiK3ModelConfig
@@ -182,67 +147,27 @@ class KimiK3Fp8WeightTest(unittest.TestCase):
             config.attn_config.use_mla = True
             config.quant_config = None
             with patch.dict(
-                os.environ, {"KIMI_K3_ATTENTION_QUANTIZATION": "fp8_per_block", "KIMI_K3_MLA_FP8": "1"}
+                os.environ,
+                {
+                    "KIMI_K3_ATTENTION_QUANTIZATION": "fp8_per_block",
+                    "KIMI_K3_MLA_FP8": "1",
+                },
             ):
                 with patch.object(
                     ModelConfig, "init_precision_config", return_value=None
                 ):
                     config.init_precision_config(None, None)
             self.assertIsNone(config.quant_config)
-            self.assertEqual(config.attn_config.mla_fp8_compute, "eagle3" not in model_type)
+            self.assertEqual(
+                config.attn_config.mla_fp8_compute, "eagle3" not in model_type
+            )
             if "eagle3" not in model_type:
                 from rtp_llm.ops import KvCacheDataType
+
                 self.assertEqual(config.attn_config.kv_cache_dtype, KvCacheDataType.FP8)
             self.assertEqual(
                 config.k3_attention_quant_config is not None, "eagle3" not in model_type
             )
-
-    def test_reference_mode_ignores_workspace_created_by_bf16_draft(self):
-        import importlib.util
-        import sys
-        from pathlib import Path
-
-        # Test the CPU control flow without importing the CUDA factory registry.
-        # The real collective functions are loaded; only their I/O is mocked below.
-        root = Path(__file__).resolve().parents[2] / "kimi_k3"
-        def load(name, filename):
-            spec = importlib.util.spec_from_file_location(name, root / filename)
-            module = importlib.util.module_from_spec(spec)
-            sys.modules[name] = module
-            spec.loader.exec_module(module)
-            return module
-
-        with patch.dict(sys.modules):
-            load("rtp_llm.models_py.modules.kimi_k3._collective_gemm", "_collective_gemm.py")
-            ag = load("_k3_fp8_test_ag", "all_gather_gemm.py")
-            rs = load("_k3_fp8_test_rs", "gemm_reduce_scatter.py")
-        group = Mock()
-        group.size.return_value = 8
-        source = Mock(is_cuda=True, device=torch.device("cuda", 0), shape=(4096, 1))
-        source.new_empty.side_effect = lambda shape: torch.empty(shape)
-        gathered = torch.zeros(32768, 1)
-        expected = torch.ones(32768, 1)
-        projection = Mock()
-        projection.quantize_input.return_value = (gathered, torch.ones(1))
-        projection.forward_quantized.return_value = expected
-        with (
-            patch.dict(os.environ, {"KIMI_K3_FP8_COLLECTIVE_GEMM": "0"}),
-            patch.object(ag, "get_process_group", return_value=group),
-            patch.dict(
-                ag._STATES, {(group, 0): SimpleNamespace(enabled=True)}, clear=True
-            ),
-            patch.object(ag, "all_gather_into", return_value=gathered) as gather,
-            patch.object(ag, "fused_all_gather_fp8_linear") as fused_ag,
-            patch.object(rs, "_fp8_remote_gemm_reduce_scatter") as fused_rs,
-        ):
-            actual = ag.all_gather_gemm(source, [projection], logical_m=32768)[0]
-            torch.testing.assert_close(actual, expected)
-            gather.assert_called_once()
-            fused_ag.assert_not_called()
-            self.assertIsNone(
-                rs.gemm_reduce_scatter(source, projection, group, pad_rows=False)
-            )
-            fused_rs.assert_not_called()
 
     def test_native_moe_cannot_enter_attention_policy(self):
         self.assertNotIn(W.moe_w1, KimiK3LoadFp8Weight.w8a8_weight_list)

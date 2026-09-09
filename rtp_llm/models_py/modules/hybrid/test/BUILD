@@ -39,6 +39,7 @@ py_test(
     name = "kimi_k3_ag_gemm_unit_test",
     srcs = ["kimi_k3_ag_gemm_unit_test.py"],
     deps = [
+        ":collective_gemm_reference",
         "//rtp_llm/models_py:models",
         "//rtp_llm:testlib",
     ],
@@ -157,4 +158,12 @@ py_test(
     srcs = ["kimi_k3_fp8_weight_test.py"],
     deps = ["//rtp_llm/models_py:models", "//rtp_llm:testlib"],
     timeout = "short",
+)
+
+py_library(
+    name = "collective_gemm_reference",
+    testonly = True,
+    srcs = ["collective_gemm_reference.py"],
+    deps = ["//rtp_llm/models_py:modules"],
+    visibility = ["//visibility:public"],
 )

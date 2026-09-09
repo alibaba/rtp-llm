@@ -308,38 +308,43 @@ def fused_all_gather_matmul(
 
 
 def fused_all_gather_fp8_linear(local_a, projections, group):
-    """Consume each arriving BF16 shard with scale-aware FP8 projections.
-
-    The PyTorch pipeline owns the copy/consumer stream handshakes. Quantization
-    temporaries are private to each consumer invocation, never global caches.
-    """
-    pipeline = getattr(torch_symm_mem, "_pipelined_all_gather_and_consume", None)
+    """Pair FP8 values and scales on the existing PyTorch copy/consumer streams."""
+    pipeline = getattr(torch_symm_mem, "_pipelined_multi_all_gather_and_consume", None)
     if pipeline is None:
-        raise RuntimeError("installed PyTorch lacks the FP8 AG consumer pipeline")
-    if not projections:
-        return []
-    for projection in projections:
-        if (
-            projection.K != local_a.shape[1]
-            or projection.scale_ue8m0 != projections[0].scale_ue8m0
-        ):
-            raise ValueError(
-                "FP8 AG projections must share the activation quantization recipe"
-            )
-    local_m = local_a.shape[0]
-    physical_m = local_m * group.size()
+        raise RuntimeError("installed PyTorch lacks the FP8 pair AG pipeline")
+    local_m, k = local_a.shape
+    size = group.size()
     outputs = [
-        torch.empty((physical_m, p.N), device=local_a.device, dtype=torch.bfloat16)
+        torch.empty((local_m * size, p.N), dtype=torch.bfloat16, device=local_a.device)
         for p in projections
     ]
-    gathered = local_a.new_empty((physical_m, local_a.shape[1]))
+    # Communicate FP8 bytes without imposing NCCL FP8 arithmetic support.
+    # Views preserve the exact bits; the consumer restores E4M3 storage.
+    values_wire = local_a.values.view(torch.uint8)
+    gathered = torch.empty(
+        (local_m * size, k), dtype=torch.uint8, device=local_a.device
+    )
+    scale_wire = local_a.scale_wire
+    gathered_scale = torch.empty(
+        (size * scale_wire.shape[0], scale_wire.shape[1]),
+        dtype=torch.int32,
+        device=local_a.device,
+    )
 
-    def consume(shard, rank):
-        quantized = projections[0].quantize_input(shard)
+    def consume(pair, rank):
+        values, scales = pair
+        values = values.view(torch.float8_e4m3fn)
+        gemm_scales = scales.T[:local_m]
         for projection, output in zip(projections, outputs):
             projection.forward_quantized(
-                *quantized, out=output.narrow(0, rank * local_m, local_m)
+                values, gemm_scales, out=output.narrow(0, rank * local_m, local_m)
             )
 
-    pipeline(local_a, consume, gathered, group.group_name, ag_out_needed=False)
+    pipeline(
+        [values_wire, scale_wire],
+        consume,
+        [gathered, gathered_scale],
+        group.group_name,
+        ag_out_needed=False,
+    )
     return outputs

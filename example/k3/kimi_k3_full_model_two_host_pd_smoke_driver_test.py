@@ -1,8 +1,8 @@
-import os
 import argparse
+import os
 import shlex
-import unittest
 import subprocess
+import unittest
 from types import SimpleNamespace
 from unittest import mock
 
@@ -12,13 +12,21 @@ import kimi_k3_full_model_two_host_pd_smoke_driver as driver
 class ForwardedOptionalEnvironmentTest(unittest.TestCase):
     def test_precision_modes_and_prefix_budget_reach_both_role_commands(self) -> None:
         args = argparse.Namespace(
-            prefill_repo_root="/data1/prefill", decode_repo_root="/data1/decode",
-            prefill_checkpoint_path="/data1/target", decode_checkpoint_path="/data1/target",
-            prefill_sp_checkpoint_path="/data1/draft", decode_sp_checkpoint_path="/data1/draft",
-            prefill_container_runtime="docker", decode_container_runtime="docker",
-            container="lhc_GPU", container_user="luohaocheng.lhc",
-            prefill_endpoint="prefill:27188", decode_endpoint="decode:28188",
-            run_id="precision-test", suite="all", result_endpoint=None,
+            prefill_repo_root="/data1/prefill",
+            decode_repo_root="/data1/decode",
+            prefill_checkpoint_path="/data1/target",
+            decode_checkpoint_path="/data1/target",
+            prefill_sp_checkpoint_path="/data1/draft",
+            decode_sp_checkpoint_path="/data1/draft",
+            prefill_container_runtime="docker",
+            decode_container_runtime="docker",
+            container="lhc_GPU",
+            container_user="luohaocheng.lhc",
+            prefill_endpoint="prefill:27188",
+            decode_endpoint="decode:28188",
+            run_id="precision-test",
+            suite="all",
+            result_endpoint=None,
         )
         for weight in ("none", "fp8_per_block"):
             for mla in ("0", "1"):
@@ -29,10 +37,11 @@ class ForwardedOptionalEnvironmentTest(unittest.TestCase):
                         "KIMI_K3_MLA_FP8_Q_SCALE": "0.5",
                         "KIMI_K3_MLA_FP8_KV_SCALE": "0.5",
                         "KIMI_K3_MLA_PREFILL_EXPANDED_KV_BUDGET_BYTES": budget,
-                        "KIMI_K3_FP8_COLLECTIVE_GEMM": "1",
                         "LOAD_METHOD": "fastsafetensors",
                     }
-                    with self.subTest(weight=weight, mla=mla, budget=budget), mock.patch.dict(os.environ, settings, clear=True):
+                    with self.subTest(
+                        weight=weight, mla=mla, budget=budget
+                    ), mock.patch.dict(os.environ, settings, clear=True):
                         for role in ("prefill", "decode"):
                             command = driver.build_remote_command(args, role)
                             inner = shlex.split(command)[-1]
@@ -43,14 +52,18 @@ class ForwardedOptionalEnvironmentTest(unittest.TestCase):
 
     def test_parallel_start_defers_readiness_to_role_scripts(self):
         args = SimpleNamespace(parallel_start=True, prefill_start_delay_s=15)
-        with mock.patch.object(driver, "wait_for_decode_ready") as ready, mock.patch.object(driver.time, "sleep") as sleep:
+        with mock.patch.object(
+            driver, "wait_for_decode_ready"
+        ) as ready, mock.patch.object(driver.time, "sleep") as sleep:
             driver.wait_before_prefill(args)
         ready.assert_not_called()
         sleep.assert_not_called()
 
     def test_sequential_start_retains_decode_readiness_gate(self):
         args = SimpleNamespace(parallel_start=False, prefill_start_delay_s=15)
-        with mock.patch.object(driver, "wait_for_decode_ready") as ready, mock.patch.object(driver.time, "sleep") as sleep:
+        with mock.patch.object(
+            driver, "wait_for_decode_ready"
+        ) as ready, mock.patch.object(driver.time, "sleep") as sleep:
             driver.wait_before_prefill(args)
         sleep.assert_called_once_with(15)
         ready.assert_called_once_with(args)
@@ -74,7 +87,9 @@ class ForwardedOptionalEnvironmentTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "Decode role exited"):
                 driver.wait_for_decode_ready(self.readiness_args())
         self.assertIn("controller/decode.status", run.call_args.args[2])
-        self.assertTrue(run.call_args.args[2].startswith("pouch exec -u luohaocheng.lhc lhc_GPU "))
+        self.assertTrue(
+            run.call_args.args[2].startswith("pouch exec -u luohaocheng.lhc lhc_GPU ")
+        )
 
     def test_readiness_retries_observation_failure_without_restarting_role(self):
         ready = subprocess.CompletedProcess([], 0, "", "")
@@ -85,10 +100,15 @@ class ForwardedOptionalEnvironmentTest(unittest.TestCase):
         self.assertEqual(run.call_count, 2)
 
     def test_forwards_mtp_mode_to_both_roles(self) -> None:
-        mode = {"SP_TYPE": "mtp", "SP_MODEL_TYPE": "kimi_k3_mtp",
-                "TP_SIZE": "4", "EP_SIZE": "4",
-                "KIMI_K3_TP_SIZE": "4", "KIMI_K3_EP_SIZE": "4",
-                "GEN_NUM_PER_CIRCLE": "1"}
+        mode = {
+            "SP_TYPE": "mtp",
+            "SP_MODEL_TYPE": "kimi_k3_mtp",
+            "TP_SIZE": "4",
+            "EP_SIZE": "4",
+            "KIMI_K3_TP_SIZE": "4",
+            "KIMI_K3_EP_SIZE": "4",
+            "GEN_NUM_PER_CIRCLE": "1",
+        }
         with mock.patch.dict(os.environ, mode, clear=True):
             for role in ("prefill", "decode"):
                 forwarded = driver.forwarded_optional_environment(role)
@@ -117,15 +137,11 @@ class ForwardedOptionalEnvironmentTest(unittest.TestCase):
         value = "mlx5_bond_0,mlx5_bond_1"
         with mock.patch.dict(os.environ, {"SMOKE_ACCL_USE_NICS": value}, clear=True):
             self.assertEqual(
-                driver.forwarded_optional_environment("prefill")[
-                    "SMOKE_ACCL_USE_NICS"
-                ],
+                driver.forwarded_optional_environment("prefill")["SMOKE_ACCL_USE_NICS"],
                 value,
             )
             self.assertEqual(
-                driver.forwarded_optional_environment("decode")[
-                    "SMOKE_ACCL_USE_NICS"
-                ],
+                driver.forwarded_optional_environment("decode")["SMOKE_ACCL_USE_NICS"],
                 value,
             )
 

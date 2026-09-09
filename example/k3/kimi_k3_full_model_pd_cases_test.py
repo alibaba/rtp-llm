@@ -50,7 +50,7 @@ class KimiK3FullModelPdCasesTest(unittest.TestCase):
             with (
                 mock.patch(module + ".parse_args", return_value=args),
                 mock.patch.object(Runner, "run_stage"),
-                mock.patch.object(Runner, "health"),
+                mock.patch.object(Runner, "health", autospec=True),
                 mock.patch(module + ".LongPrefixCase") as case_class,
             ):
                 case_class.return_value.run.side_effect = ValueError(
@@ -66,6 +66,32 @@ class KimiK3FullModelPdCasesTest(unittest.TestCase):
             self.assertEqual(saved["stages"][-1]["name"], "long_prefix_cached_dialog")
             self.assertFalse(saved["stages"][-1]["passed"])
             self.assertEqual(saved["cases"][-1]["name"], "long_prefix_seed")
+
+    def test_long_prefix_checks_both_services_before_and_after(self) -> None:
+        args = make_args()
+        with tempfile.TemporaryDirectory() as tmp:
+            args.output = pathlib.Path(tmp) / "accuracy.json"
+            runner = Runner(args)
+            opener = mock.MagicMock()
+            opener.open.return_value.__enter__.return_value.status = 200
+            runner.opener = opener
+            with mock.patch(
+                "example.k3.kimi_k3_full_model_pd_cases.LongPrefixCase"
+            ) as case_class:
+                case = case_class.return_value
+                case.records = [{"name": "long_prefix_followup"}]
+                case.output = pathlib.Path(tmp) / "long-prefix"
+                case.run.return_value = {
+                    "cases": case.records,
+                    "planned_prefix_blocks": 146,
+                }
+                runner.run_long_prefix_case()
+            self.assertEqual(
+                [call.args[0].full_url for call in opener.open.call_args_list],
+                [runner.health_endpoint, runner.decode_health_endpoint] * 2,
+            )
+            self.assertTrue(runner.stages[-1]["passed"])
+            self.assertEqual(runner.records, case.records)
 
     def test_rdma_prewarm_retries_then_fills_batch_sized_pool(self) -> None:
         args = make_args()
