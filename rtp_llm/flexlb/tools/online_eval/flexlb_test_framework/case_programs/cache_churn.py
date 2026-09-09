@@ -1746,16 +1746,8 @@ def referenced_occupancy(case):
     case.step("holder", "kv_landing", params={"requests": output("prime", "requests")})
     case.step(
         "cache_sync",
-        "balance_pause",
+        "kv_snapshot",
         params=case.value("referenced_occupancy.cache_sync"),
-    )
-    case.step(
-        "slow_holder",
-        "engine_control",
-        params=case.params(
-            "referenced_occupancy.slow_holder",
-            {"targets": [output("holder", "engine")]},
-        ),
     )
     case.step(
         "pin",
@@ -1768,7 +1760,10 @@ def referenced_occupancy(case):
         "kv_landing",
         params=case.params(
             "referenced_occupancy.pinned_holder",
-            {"requests": output("pin", "requests")},
+            {
+                "requests": output("pin", "requests"),
+                "identity_snapshot": output("cache_sync", "snapshot"),
+            },
         ),
     )
     case.step(
@@ -1804,15 +1799,15 @@ def referenced_occupancy(case):
         params=case.value("referenced_occupancy.probe"),
     )
     case.step(
-        "probe_success",
-        "kv_capacity_outcome",
+        "probe_holder",
+        "kv_landing",
         params=case.params(
-            "referenced_occupancy.probe_success",
-            {"requests": [output("probe", "requests")]},
+            "referenced_occupancy.probe_holder",
+            {
+                "requests": output("probe", "requests"),
+                "identity_snapshot": output("cache_sync", "snapshot"),
+            },
         ),
-    )
-    case.step(
-        "probe_holder", "kv_landing", params={"requests": output("probe", "requests")}
     )
     case.step(
         "overflow",
@@ -1843,6 +1838,20 @@ def referenced_occupancy(case):
         if baseline:
             params["baseline"] = output("pinned", "observation")
         case.step(name, "kv_capacity_counter", params=params)
+    case.step(
+        "probe_finished",
+        "kv_capacity_wait",
+        timeout_s=case.value("referenced_occupancy.probe_finished_timeout_s"),
+        params={"requests": [output("probe", "requests")]},
+    )
+    case.step(
+        "probe_success",
+        "kv_capacity_outcome",
+        params=case.params(
+            "referenced_occupancy.probe_success",
+            {"requests": [output("probe", "requests")]},
+        ),
+    )
     case.step(
         "pin_finished",
         "kv_capacity_wait",

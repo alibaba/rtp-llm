@@ -60,73 +60,57 @@ def uniform_serial(case):
         ),
     )
     case.step(
-        "slow_second",
-        "engine_control",
-        timeout_s=case.value("uniform_serial.slow_second_timeout_s"),
-        params=case.params(
-            "uniform_serial.slow_second", {"targets": [output("fleet", "second")]}
-        ),
-    )
-    case.step(
         "perf_sync",
         "balance_pause",
         timeout_s=case.value("uniform_serial.perf_sync_timeout_s"),
         params=case.value("uniform_serial.perf_sync"),
     )
     case.step(
-        "speed_hetero",
+        "idle_replay",
         "balance_start",
-        timeout_s=case.value("uniform_serial.speed_hetero_timeout_s"),
-        params=case.value("uniform_serial.speed_hetero"),
+        timeout_s=case.value("uniform_serial.idle_replay_timeout_s"),
+        params=case.value("uniform_serial.idle_replay"),
     )
     case.step(
-        "speed_hetero_terminal",
+        "idle_replay_terminal",
         "balance_wait",
-        timeout_s=case.value("uniform_serial.speed_hetero_terminal_timeout_s"),
-        params={"requests": output("speed_hetero", "requests")},
+        timeout_s=case.value("uniform_serial.idle_replay_terminal_timeout_s"),
+        params={"requests": output("idle_replay", "requests")},
     )
     case.step(
-        "speed_hetero_p6",
+        "idle_replay_p6",
         "balance_check",
-        timeout_s=case.value("uniform_serial.speed_hetero_p6_timeout_s"),
+        timeout_s=case.value("uniform_serial.idle_replay_p6_timeout_s"),
         params=case.params(
-            "uniform_serial.speed_hetero_p6",
+            "uniform_serial.idle_replay_p6",
             {
-                "requests": [output("speed_hetero", "requests")],
+                "requests": [output("idle_replay", "requests")],
                 "fleet": output("fleet", "snapshot"),
             },
         ),
     )
     case.step(
-        "speed_hetero_p1",
+        "idle_replay_p1",
         "balance_check",
-        timeout_s=case.value("uniform_serial.speed_hetero_p1_timeout_s"),
+        timeout_s=case.value("uniform_serial.idle_replay_p1_timeout_s"),
         params=case.params(
-            "uniform_serial.speed_hetero_p1",
+            "uniform_serial.idle_replay_p1",
             {
-                "requests": [output("speed_hetero", "requests")],
+                "requests": [output("idle_replay", "requests")],
                 "fleet": output("fleet", "snapshot"),
             },
         ),
     )
     case.step(
-        "speed_hetero_p2",
+        "idle_replay_p2",
         "balance_check",
-        timeout_s=case.value("uniform_serial.speed_hetero_p2_timeout_s"),
+        timeout_s=case.value("uniform_serial.idle_replay_p2_timeout_s"),
         params=case.params(
-            "uniform_serial.speed_hetero_p2",
+            "uniform_serial.idle_replay_p2",
             {
-                "requests": [output("speed_hetero", "requests")],
+                "requests": [output("idle_replay", "requests")],
                 "fleet": output("fleet", "snapshot"),
             },
-        ),
-    )
-    case.step(
-        "restore_speed",
-        "engine_control",
-        timeout_s=case.value("uniform_serial.restore_speed_timeout_s"),
-        params=case.params(
-            "uniform_serial.restore_speed", {"targets": [output("fleet", "second")]}
         ),
     )
     case.step(

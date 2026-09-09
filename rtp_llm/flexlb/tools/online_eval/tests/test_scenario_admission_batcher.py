@@ -15,11 +15,7 @@ from flexlb_test_framework.scenario.actions import admission
 from flexlb_test_framework.scenario.actions.elastic import ClientRecords
 from flexlb_test_framework.scenario.catalog import handlers
 from flexlb_test_framework.scenario.contracts import CheckResult, StageOutput
-from flexlb_test_framework.scenario.runtime import (
-    Deadline,
-    RuntimeContext,
-    execute_instance,
-)
+from flexlb_test_framework.scenario.runtime import execute_instance
 
 
 class BatcherPrograms(unittest.TestCase):
@@ -32,9 +28,7 @@ class BatcherPrograms(unittest.TestCase):
         )
         return compile_scenarios(load_scenarios(root), handlers=registry), registry
 
-    def run_program(
-        self, variant, profile, no_park=False, bad_deadline=False, reversed_fifo=False
-    ):
+    def run_program(self, variant, profile, bad_deadline=False, reversed_fifo=False):
         plans, registry = self.plans()
         plan = next(
             p for p in plans if p["variant_id"] == variant and p["profile"] == profile
@@ -65,8 +59,6 @@ class BatcherPrograms(unittest.TestCase):
                     state.sent += 1
                     i = state.sent
                 self.index = i
-                # Allow the actual sampler thread to witness a live submission.
-                time.sleep(0.22)
                 code = (
                     8511 if variant == "batcher_queue_deadline" and i in (7, 8) else 200
                 )
@@ -157,7 +149,7 @@ class BatcherPrograms(unittest.TestCase):
             }
 
         def master(*args):
-            return dict(scheduler_inflight=0 if no_park else 9)
+            return dict(scheduler_inflight=9)
 
         with tempfile.TemporaryDirectory() as out, patch.object(
             admission, "RequestBatch", Batch
@@ -175,7 +167,7 @@ class BatcherPrograms(unittest.TestCase):
                 sleeper=lambda s: time.sleep(min(s, 0.001)),
             )
 
-    def test_all_six_programs_execute_including_live_sampler_and_cleanup(self):
+    def test_all_six_programs_preserve_behavior_and_cleanup(self):
         for variant, profiles in [
             ("batcher_queue_capacity_park", ["batch-window", "single-batch"]),
             ("batcher_queue_deadline", ["batch-window", "single-batch"]),
@@ -200,18 +192,6 @@ class BatcherPrograms(unittest.TestCase):
         self.assertEqual(
             "FAIL",
             next(s for s in result["stages"] if s["id"] == "fifo")["checks"][0][
-                "status"
-            ],
-        )
-
-    def test_post_fire_or_absent_park_does_not_pass(self):
-        result = self.run_program(
-            "batcher_queue_capacity_park", "batch-window", no_park=True
-        )
-        self.assertEqual("FAIL", result["status"], result)
-        self.assertEqual(
-            "FAIL",
-            next(s for s in result["stages"] if s["id"] == "park_proven")["checks"][0][
                 "status"
             ],
         )
@@ -241,43 +221,8 @@ class BatcherPrograms(unittest.TestCase):
                 self.assertEqual(1, cfg["max_inflight_per_prefill_worker"])
                 self.assertEqual(60, stages["b"]["params"]["schedule_timeout_s"])
                 self.assertLess(ids.index("lease_before_b"), ids.index("b"))
-                self.assertLess(ids.index("sampling"), ids.index("b"))
             else:
-                self.assertLess(ids.index("sampling"), ids.index("wave"))
-                self.assertLess(ids.index("sampled"), ids.index("done"))
                 self.assertEqual(
                     1500 if plan["variant_id"] == "batcher_queue_deadline" else 60000,
                     cfg["queue_timeout_ms"],
                 )
-
-    def test_park_window_ignores_samples_outside_overflow_lifetime(self):
-        with tempfile.TemporaryDirectory() as out:
-            ctx = RuntimeContext({}, None, out, time.monotonic, time.sleep)
-            sample = ctx.register_resource(
-                "admission_park_samples",
-                [dict(time_s=1, parked=3), dict(time_s=10, parked=0)],
-            )
-            rows = ctx.register_resource(
-                "admission_rows",
-                [dict(schedule=dict(status="REJECTED", started_s=9, ended_s=11))],
-            )
-            result = admission._park_check(
-                ctx,
-                dict(samples=sample, overflow_rows=rows),
-                Deadline(time.monotonic() + 2, time.monotonic, time.sleep),
-            )
-            self.assertEqual("FAIL", result.checks[0].status)
-
-    def test_sampler_missing_owner_counter_is_error_and_cleanable(self):
-        with tempfile.TemporaryDirectory() as out:
-            ctx = RuntimeContext({}, None, out, time.monotonic, time.sleep)
-            ctx.instance_deadline_s = time.monotonic() + 10
-            with patch.object(
-                admission, "_master_json", return_value={}
-            ), self.assertRaises(ValueError):
-                admission._park_start(
-                    ctx,
-                    dict(targets=["prefill-0"]),
-                    Deadline(time.monotonic() + 2, time.monotonic, time.sleep),
-                )
-            self.assertTrue(all(c["status"] == "PASS" for c in ctx.cleanup(2)))

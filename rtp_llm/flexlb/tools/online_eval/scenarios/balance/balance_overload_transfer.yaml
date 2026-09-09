@@ -70,11 +70,6 @@ parameters:
     fleet_timeout_s: 60
     fleet:
       role: prefill
-    slow_both_timeout_s: 60
-    slow_both:
-      operation: set_perf
-      perf:
-        prefill_fixed_ms: 5000
     perf_sync_timeout_s: 6.5
     perf_sync:
       seconds: 1.5
@@ -85,14 +80,9 @@ parameters:
       defer_batch: true
       stream_timeout_s: 20
     seed_pending_timeout_s: 6
-    restore_cool_timeout_s: 60
-    restore_cool:
-      operation: set_perf
-      perf:
-        prefill_fixed_ms: 100
     cool_sync_timeout_s: 5.3
     cool_sync:
-      seconds: 0.3
+      seconds: 0
     baseline_timeout_s: 60
     baseline:
       unique_keys: false
@@ -106,7 +96,7 @@ parameters:
       count: 5
       unique_keys: false
       await_completion: false
-      interval_s: 0.12
+      interval_s: 0.3
     wave_terminal_timeout_s: 120
     p6_timeout_s: 60
     p6:
@@ -120,10 +110,5 @@ parameters:
     p7:
       metric: latency_ratio
       property: P7
-    restore_perf_timeout_s: 60
-    restore_perf:
-      operation: set_perf
-      perf:
-        prefill_fixed_ms: 100
     seed_terminal_timeout_s: 120
     teardown_timeout_s: 120

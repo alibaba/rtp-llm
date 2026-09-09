@@ -23,6 +23,26 @@ from flexlb_test_framework.scenario.runtime import execute_instance
 
 
 class CapacityPrograms(unittest.TestCase):
+    def test_spacing_subtracts_schedule_latency_and_never_replays_missed_ticks(self):
+        from flexlb_test_framework.scenario.runtime import Deadline
+
+        for now, expected in ((10.12, 10.45), (10.8, 10.8)):
+            clock = [now]
+            records = SimpleNamespace(snapshot_records=lambda: [{"issued_s": 10.0}])
+            with tempfile.TemporaryDirectory() as tmp:
+                ctx = SimpleNamespace(
+                    clock=lambda: clock[0],
+                    resource=lambda ref, kind: records,
+                    artifact_dir=Path(tmp),
+                    outputs={},
+                    _resources={},
+                )
+                deadline = Deadline(
+                    20, ctx.clock, lambda n: clock.__setitem__(0, clock[0] + n)
+                )
+                capacity.spacing(ctx, {"requests": {}, "interval_s": 0.45}, deadline)
+                self.assertAlmostEqual(expected, clock[0])
+
     def test_decode_load_ownership_and_validation(self):
         for row, expected in (
             ({"total_load": 7, "reserved_total": 2}, 7),

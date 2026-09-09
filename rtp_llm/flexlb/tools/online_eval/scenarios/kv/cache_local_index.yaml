@@ -566,16 +566,29 @@ parameters:
         normal: 0.75
         loose: 0.85
   isolation_batch:
+    filler:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 815000
+      - 815001
+      - 815002
+      - 815003
+      - 815004
+      - 815005
+      - 815006
+      - 815007
+      - 815008
+      - 815009
+      consume: immediate
+      stream_timeout_s: 15
+    filler_holder:
+      phase: scheduled
+    filler_terminal_timeout_s: 15
     setup_timeout_s: 180
     fleet:
       role: prefill
-    slow:
-      operation: set_perf
-      targets:
-      - prefill-0
-      - prefill-1
-      perf:
-        prefill_fixed_ms: 2000
     perf_sync:
       seconds: 1.5
     seed_a:
@@ -619,17 +632,6 @@ parameters:
     b_terminal_timeout_s: 15
     b_holder:
       phase: terminal
-    restore_perf:
-      operation: set_perf
-      targets:
-      - prefill-0
-      - prefill-1
-      perf:
-        prefill_fixed_ms: 100
-    slow_b:
-      operation: set_perf
-      perf:
-        prefill_fixed_ms: 5000
     b_perf_sync:
       seconds: 1.5
     admit_0:
@@ -712,10 +714,6 @@ parameters:
     admit_3_terminal_timeout_s: 15
     admit_3_holder:
       phase: terminal
-    restore_b:
-      operation: set_perf
-      perf:
-        prefill_fixed_ms: 100
     admission_quiet_timeout_s: 8
     admission_quiet:
       targets:
@@ -1152,16 +1150,29 @@ parameters:
         normal: 0.75
         loose: 0.85
   isolation_nonbatch:
+    filler:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 815000
+      - 815001
+      - 815002
+      - 815003
+      - 815004
+      - 815005
+      - 815006
+      - 815007
+      - 815008
+      - 815009
+      consume: immediate
+      stream_timeout_s: 15
+    filler_holder:
+      phase: scheduled
+    filler_terminal_timeout_s: 15
     setup_timeout_s: 180
     fleet:
       role: prefill
-    slow:
-      operation: set_perf
-      targets:
-      - prefill-0
-      - prefill-1
-      perf:
-        prefill_fixed_ms: 2000
     perf_sync:
       seconds: 1.5
     seed_a:
@@ -1205,17 +1216,6 @@ parameters:
     b_terminal_timeout_s: 15
     b_holder:
       phase: terminal
-    restore_perf:
-      operation: set_perf
-      targets:
-      - prefill-0
-      - prefill-1
-      perf:
-        prefill_fixed_ms: 100
-    slow_b:
-      operation: set_perf
-      perf:
-        prefill_fixed_ms: 5000
     b_perf_sync:
       seconds: 1.5
     admit_0:
@@ -1298,10 +1298,6 @@ parameters:
     admit_3_terminal_timeout_s: 15
     admit_3_holder:
       phase: terminal
-    restore_b:
-      operation: set_perf
-      perf:
-        prefill_fixed_ms: 100
     admission_quiet_timeout_s: 8
     admission_quiet:
       targets:

@@ -66,37 +66,27 @@ parameters:
       metric: workers
       property: P2
       diagnostic_reason: Schema 3 uses deterministic BEST_ONLY; random landing spread is no longer a product contract.
-    slow_second_timeout_s: 60
-    slow_second:
-      operation: set_perf
-      perf:
-        prefill_fixed_ms: 200
     perf_sync_timeout_s: 6.5
     perf_sync:
       seconds: 1.5
-    speed_hetero_timeout_s: 60
-    speed_hetero:
+    idle_replay_timeout_s: 60
+    idle_replay:
       count: 20
-    speed_hetero_terminal_timeout_s: 120
-    speed_hetero_p6_timeout_s: 60
-    speed_hetero_p6:
+    idle_replay_terminal_timeout_s: 120
+    idle_replay_p6_timeout_s: 60
+    idle_replay_p6:
       metric: complete
       property: P6
-    speed_hetero_p1_timeout_s: 60
-    speed_hetero_p1:
+    idle_replay_p1_timeout_s: 60
+    idle_replay_p1:
       metric: max_share
       property: P1
       diagnostic_reason: Schema 3 uses deterministic BEST_ONLY; random landing spread is no longer a product contract.
-    speed_hetero_p2_timeout_s: 60
-    speed_hetero_p2:
+    idle_replay_p2_timeout_s: 60
+    idle_replay_p2:
       metric: workers
       property: P2
       diagnostic_reason: Schema 3 uses deterministic BEST_ONLY; random landing spread is no longer a product contract.
-    restore_speed_timeout_s: 60
-    restore_speed:
-      operation: set_perf
-      perf:
-        prefill_fixed_ms: 100
     teardown_timeout_s: 120
   concurrent_mix:
     setup_timeout_s: 180

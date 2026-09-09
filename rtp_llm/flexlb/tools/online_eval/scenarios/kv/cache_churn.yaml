@@ -2094,11 +2094,10 @@ parameters:
       - 820002
       - 820003
     cache_sync:
-      seconds: 2
-    slow_holder:
-      operation: set_perf
-      perf:
-        prefill_fixed_ms: 15000
+      quiet_s: 2
+      targets:
+      - prefill-0
+      - prefill-1
     pin_timeout_s: 40
     pin:
       input_len: 3056
@@ -2124,12 +2123,16 @@ parameters:
       expected: 3
     probe_timeout_s: 6
     probe:
+      mode: fire
       input_len: 1008
       output_len: 2
       block_keys:
       - 820010
       schedule_timeout_s: 3
       stream_timeout_s: 3
+    probe_holder:
+      phase: scheduled
+    probe_finished_timeout_s: 6
     probe_success:
       metric: success
     params:
