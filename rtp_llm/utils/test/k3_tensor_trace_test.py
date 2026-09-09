@@ -81,6 +81,61 @@ class TensorTraceTest(unittest.TestCase):
             trace.close()
         self.assertFalse((self.root / "recorder_closed.json").exists())
 
+    def test_long_frame_spills_without_losing_order_or_snapshot_ownership(self):
+        trace = self.trace(max_pending_bytes=16)
+        value = torch.zeros(4)
+        trace.begin({"case": "long-prefill", "step": 0})
+        for layer in range(7):
+            value.fill_(layer)
+            trace.record(f"layer.{layer}", value)
+        value.fill_(-1)
+        trace.end()
+        trace.close()
+        fragments = [self.read(i) for i in range(7)]
+        observations = {f["metadata"]["observation_id"] for f in fragments}
+        self.assertEqual(len(observations), 1)
+        for layer, frame in enumerate(fragments):
+            self.assertEqual(
+                frame["metadata"]["trace_fragment"],
+                {
+                    "index": layer,
+                    "final": layer == 6,
+                },
+            )
+            self.assertEqual(frame["tensors"][0]["name"], f"layer.{layer}")
+            torch.testing.assert_close(
+                frame["tensors"][0]["value"], torch.full((4,), float(layer))
+            )
+        self.assertEqual(trace._pending, 0)
+
+    def test_writer_failure_during_backpressure_aborts_incomplete_observation(self):
+        trace = self.trace(max_pending_bytes=8)
+        trace.begin({"case": "writer-failure"})
+        trace.record("layer.0", torch.ones(2))
+        with patch.object(torch, "save", side_effect=OSError("test disk full")):
+            with self.assertRaisesRegex(RuntimeError, "disk full"):
+                trace.record("layer.1", torch.ones(2))
+        with self.assertRaisesRegex(RuntimeError, "disk full"):
+            trace.close()
+        self.assertFalse((self.root / "recorder_closed.json").exists())
+
+    @unittest.skipUnless(torch.cuda.is_available(), "requires pinned D2H")
+    def test_cuda_long_frame_spills_before_device_and_host_budget_is_exhausted(self):
+        trace = self.trace(max_pending_bytes=128)
+        trace.begin({"case": "cuda-long-prefill"})
+        value = torch.zeros(16, device="cuda")
+        for layer in range(5):
+            value.fill_(layer)
+            trace.record(f"layer.{layer}", value)
+        value.fill_(-1)
+        trace.end()
+        trace.close()
+        for layer in range(5):
+            torch.testing.assert_close(
+                self.read(layer)["tensors"][0]["value"], torch.full((16,), float(layer))
+            )
+        self.assertEqual(trace._pending, 0)
+
     def test_writer_error_is_returned_to_runner(self):
         trace = self.trace()
         trace.begin({})

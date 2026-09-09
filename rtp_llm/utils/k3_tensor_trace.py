@@ -40,6 +40,7 @@ class _Frame:
     metadata: dict[str, Any]
     capture_key: str | None = None
     snapshots: list[_Snapshot] = field(default_factory=list)
+    fragment: int = 0
 
 
 def _json_copy(value: Any) -> Any:
@@ -51,8 +52,9 @@ def _json_copy(value: Any) -> Any:
 class TensorTrace:
     """One producer thread and one asynchronous, lossless file writer.
 
-    CUDA record() only takes device snapshots on the producer stream. end()
-    stages D2H copies with events; the writer waits outside the model thread.
+    CUDA record() takes device snapshots on the producer stream. Frames spill
+    into ordered fragments as the pending budget fills; the producer waits for
+    the writer before taking further snapshots. end() marks the final fragment.
     max_pending_bytes bounds live snapshots plus staged CPU copies. Exhaustion
     aborts the trace explicitly instead of dropping or truncating tensors.
 
@@ -140,6 +142,34 @@ class TensorTrace:
         with self._lock:
             self._pending -= count
 
+    def _make_room(self, count: int) -> None:
+        """Drain spillable data before reserving an eager snapshot and its D2H."""
+        if count > self._limit:
+            self._fail("tensor trace pending-byte budget exceeded by one tensor")
+        with self._lock:
+            fits = self._pending + count <= self._limit
+        if fits:
+            return
+        if self._frame.snapshots:
+            self._flush_fragment(final=False)
+        # The writer never needs the producer lock or the inference stream to
+        # enqueue new work: every queued D2H already has its completion event.
+        self._queue.join()
+        self._check()
+
+    def _flush_fragment(self, *, final: bool) -> None:
+        frame = self._frame
+        fragment = _Frame(
+            {
+                **frame.metadata,
+                "trace_fragment": {"index": frame.fragment, "final": final},
+            },
+            snapshots=frame.snapshots,
+        )
+        frame.snapshots = []
+        frame.fragment += 1
+        self._enqueue(fragment)
+
     def begin(self, metadata: dict[str, Any]) -> None:
         self._check()
         if self._frame is not None:
@@ -185,7 +215,12 @@ class TensorTrace:
         nbytes = tensor.numel() * tensor.element_size()
         # Contiguous snapshots avoid retaining holes in a view's storage. The
         # original strides remain in metadata for layout reconstruction.
-        self._reserve(nbytes)
+        # Reserve staging storage up front so flushing cannot itself overflow.
+        capturing = self._frame.capture_key is not None
+        reserved = nbytes * (2 if tensor.is_cuda and not capturing else 1)
+        if not capturing:
+            self._make_room(reserved)
+        self._reserve(reserved)
         try:
             value = tensor.detach().clone(memory_format=torch.contiguous_format)
             ready = None
@@ -194,7 +229,7 @@ class TensorTrace:
                     ready = torch.cuda.Event()
                     ready.record(torch.cuda.current_stream(tensor.device))
         except BaseException:
-            self._release(nbytes)
+            self._release(reserved)
             self._fail(f"failed to snapshot {name}")
         self._frame.snapshots.append(_Snapshot(name, value, meta, nbytes, ready))
 
@@ -202,9 +237,8 @@ class TensorTrace:
         self._check()
         if self._frame is None or self._frame.capture_key is not None:
             self._fail("end() requires an eager/replay frame")
-        frame = self._frame
+        self._flush_fragment(final=True)
         self._frame = None
-        self._enqueue(frame)
 
     def _enqueue(self, frame: _Frame) -> None:
         sequence = self._next_id
@@ -212,7 +246,6 @@ class TensorTrace:
         staged = []
         events = []
         reserve = sum(s.nbytes for s in frame.snapshots if s.value.is_cuda)
-        self._reserve(reserve)
         try:
             for snapshot in frame.snapshots:
                 value = snapshot.value
