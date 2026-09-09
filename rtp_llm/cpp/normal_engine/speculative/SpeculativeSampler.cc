@@ -191,6 +191,11 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
 
     sample_output.accept_tokens_cpu = sample_output.accept_tokens.to(torch::kCPU, true);
     sample_output.accept_len_cpu    = sample_output.accept_len.to(torch::kCPU, true);
+    if (std::any_of(streams.begin(), streams.end(), [](const auto& stream) {
+            return stream->generateConfig()->return_all_probs;
+        })) {
+        sample_output.target_probs_cpu = target_sampler_output.all_probs.to(torch::kCPU, true);
+    }
     sample_output.transfer_done_event->record(cuda_graph::graphGetCurrentStream());
 }
 
