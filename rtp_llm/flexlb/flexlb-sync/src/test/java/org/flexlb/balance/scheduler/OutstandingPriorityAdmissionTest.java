@@ -1,7 +1,6 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.endpoint.DecodeEndpoint;
-import org.flexlb.balance.eviction.EngineCancelChannel;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.VictimStage;
@@ -45,7 +44,7 @@ class OutstandingPriorityAdmissionTest {
         ConfigService configs = mock(ConfigService.class);
         when(configs.loadBalanceConfig()).thenReturn(config);
         registry = new RequestRegistry(configs, mock(BatchSchedulerReporter.class),
-                mock(RequestSchedulerReporter.class), mock(EngineCancelChannel.class));
+                mock(RequestSchedulerReporter.class));
     }
 
     @AfterEach

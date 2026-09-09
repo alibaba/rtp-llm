@@ -406,7 +406,7 @@ class DecodeEndpointLayeredViewTest {
     }
 
     @Test
-    void notFoundTransferRetainsSyntheticKvUntilExactEngineFenceSettlement() {
+    void notFoundRetainsSyntheticKvUntilExactLeaseExpiration() {
         reserve(1L, 500, 508, 30);
         updateStatus(Map.of("1", runningTask(1L, TaskPhase.RUNNING, 500)), null, 10_000);
         assertEquals(DecodeEndpoint.PreemptionBeginResult.SUCCESS,
@@ -424,32 +424,20 @@ class DecodeEndpointLayeredViewTest {
         assertEquals(2, endpoint.routingView().totalLoad(),
                 "victim and provisional incoming must both remain charged before abort");
         assertEquals(8_800, endpoint.realKvAvailable());
-        assertTrue(endpoint.transferPriorityNotFoundClaimToEngineFence(104L, 1L));
-        assertFalse(endpoint.reconcilePriorityVictimActive(
-                104L, reservations.get(1L)),
-                "a transferred fence cannot return to ordinary active reconciliation");
-        assertFalse(endpoint.reconcilePriorityVictimFinished(
-                104L, reservations.get(1L)),
-                "a transferred fence requires its exact fence settlement");
-        assertFalse(endpoint.settlePriorityTombstoned(
-                104L, reservations.get(1L)),
-                "the original attempt cannot settle a transferred fence");
         endpoint.abortPriorityPreemption(104L);
 
         assertEquals(0, endpoint.routingView().inflightHardKv(),
                 "aborting the attempt releases only its provisional incoming reservation");
         assertEquals(9_500, endpoint.realKvAvailable(),
-                "control-owner transfer must not release the synthetic KV hold");
+                "aborting incoming work must not release the victim KV hold");
         assertEquals(1, endpoint.routingView().totalLoad(),
                 "the disappeared confirmed victim remains a synthetic slot");
 
-        assertTrue(endpoint.settleEngineFenceClaim(
-                104L, reservations.get(1L)));
+        assertTrue(endpoint.expireReservationExact(reservations.get(1L)));
         assertEquals(10_000, endpoint.realKvAvailable());
         assertEquals(0, endpoint.routingView().totalLoad());
-        assertFalse(endpoint.settleEngineFenceClaim(
-                104L, reservations.get(1L)),
-                "the exact fence generation settles accounting at most once");
+        assertFalse(endpoint.expireReservationExact(reservations.get(1L)),
+                "the exact local lease expires at most once");
         assertEquals(10_000, endpoint.realKvAvailable());
     }
 
