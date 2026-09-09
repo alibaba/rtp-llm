@@ -25,6 +25,9 @@ from rtp_llm.utils.model_weight import W
 
 
 class GptModelBase(nn.Module):
+    # Opt in only when forward returns selected rows from immediately before
+    # the final norm. Existence of a .norm attribute alone is not sufficient.
+    supports_pre_final_norm = False
 
     def __init__(
         self,
@@ -201,6 +204,20 @@ class GptModelBase(nn.Module):
             raise RuntimeError(
                 f"{type(self).__name__} does not support input_embeddings."
             )
+
+    def final_norm_outputs(
+        self, hidden_states: Tensor, inputs: PyModelInputs
+    ) -> PyModelOutputs:
+        indexes = inputs.pre_final_norm_output_indexes
+        # index_select owns only [context_batch, hidden] storage. Do this before
+        # norm: some kernels may modify their input in place.
+        selected = (
+            torch.index_select(hidden_states, 0, indexes) if indexes is not None else None
+        )
+        outputs = PyModelOutputs(self.norm(hidden_states))
+        if selected is not None:
+            outputs.pre_final_norm_hidden_states = selected
+        return outputs
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
         raise NotImplementedError("forward method must be implemented in subclass")

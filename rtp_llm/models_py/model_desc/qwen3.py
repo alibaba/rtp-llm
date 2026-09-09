@@ -80,6 +80,7 @@ class Qwen3DecoderLayer(nn.Module):
 
 
 class Qwen3Model(GptModelBase):
+    supports_pre_final_norm = True
 
     def __init__(
         self,
@@ -135,8 +136,7 @@ class Qwen3Model(GptModelBase):
                 layer_fmha_impl,
                 kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
             )
-        hidden_states = self.norm(hidden_states)
-        return PyModelOutputs(hidden_states)
+        return self.final_norm_outputs(hidden_states, inputs)
 
 
 __all__ = [

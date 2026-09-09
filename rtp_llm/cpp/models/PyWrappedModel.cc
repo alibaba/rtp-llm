@@ -477,7 +477,8 @@ torch_ext::BertEmbeddingInputs PyWrappedModel::buildBertEmbeddingInputs(const Gp
 GptModelOutputs PyWrappedModel::callForwardPostLayers(torch::Tensor         hidden_states,
                                                       const GptModelInputs& inputs,
                                                       bool                  skip_final_layernorm,
-                                                      size_t                num_valid_tokens) {
+                                                      size_t                num_valid_tokens,
+                                                      torch::Tensor         pre_final_norm_hidden) {
     RTP_LLM_PROFILE_SCOPE("py_model.callForwardPostLayers");
     size_t num_input_tokens = num_valid_tokens != -1 ? num_valid_tokens : inputs.combo_tokens.size(0);
     return forwardPostLayers(hidden_states,
@@ -488,13 +489,43 @@ GptModelOutputs PyWrappedModel::callForwardPostLayers(torch::Tensor         hidd
                              num_input_tokens,
                              inputs,
                              torch::Tensor(),
-                             skip_final_layernorm);
+                             skip_final_layernorm,
+                             std::move(pre_final_norm_hidden));
+}
+
+torch::Tensor PyWrappedModel::customOutputIndexes(const GptModelInputs& inputs) {
+    const auto decode_batch_size  = inputs.sequence_lengths.size(0);
+    const auto context_batch_size = inputs.input_lengths.size(0) - decode_batch_size;
+    auto       indexes            = inputs.custom_output_indexes;
+    if (!indexes.defined() || indexes.numel() == 0) {
+        // Last-token mode (also used for model warmup's synthetic requests).
+        indexes = inputs.lm_output_indexes.narrow(0, decode_batch_size, context_batch_size);
+    }
+    TORCH_CHECK(indexes.dim() == 1 && indexes.size(0) == context_batch_size,
+                "custom output indexes must contain one row per context request");
+    buffer_holder_.hold_host(indexes);
+    return indexes.to(torch::kCUDA, /*non_blocking=*/true).to(torch::kLong);
 }
 
 void PyWrappedModel::setPostLayersProcessor(const std::shared_ptr<PostLayersProcessor>& processor) {
     post_layers_processor_ = processor;
     if (post_layers_processor_ && post_layers_processor_->hasHandler()) {
         RTP_LLM_CHECK_WITH_INFO(bool(weights_.lm_head), "post-layers handler requires a model with lm_head");
+        if (post_layers_processor_->usesPreFinalNorm()) {
+            // CP changes token layout and requires a separate selected-row
+            // gather protocol. Never silently feed rank-local/wrong-stage rows.
+            TORCH_CHECK(!device_props_.enable_prefill_cp,
+                        "pre_final_norm custom output does not support context parallel yet");
+            if (!int(device_props_.enable_layer_micro_batch)) {
+                py::gil_scoped_acquire gil;
+                TORCH_CHECK(py::hasattr(py_model_, "supports_pre_final_norm")
+                                && py::cast<bool>(py_model_.attr("supports_pre_final_norm")),
+                            "Python model does not support pre_final_norm custom output; "
+                            "implement selected-row capture before its final norm");
+            }
+            // The layer-microbatch path returns pre-norm activations and applies
+            // final norm in forwardPostLayers, so it needs no Python capture.
+        }
         // Eat the handler's lazy initialization (cuBLAS handles, imports)
         // before traffic; a handler that cannot run fails startup here.
         post_layers_processor_->warmup(weights_.lm_head->kernel.size(1),
@@ -846,11 +877,16 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             py_model_inputs.input_embeddings      = inputs.input_embeddings;
             py_model_inputs.input_embeddings_locs = inputs.input_embeddings_locs;
         }
+        if (post_layers_processor_ && post_layers_processor_->usesPreFinalNorm()
+            && post_layers_processor_->shouldRunOnContext(has_context_request)) {
+            py_model_inputs.pre_final_norm_output_indexes = customOutputIndexes(inputs);
+        }
         PyModelOutputs py_model_outputs;
         torch::Tensor  hidden_states;
 
         // Cast the Python object to PyModelOutputs and extract hidden states
-        if (enable_cuda_graph_ && graph_runner_->canRun(py_model_inputs, graph_state_)) {
+        if (enable_cuda_graph_ && !py_model_inputs.pre_final_norm_output_indexes.defined()
+            && graph_runner_->canRun(py_model_inputs, graph_state_)) {
             py::gil_scoped_acquire gil;
             RTP_LLM_PROFILE_SCOPE("py_model.forward(cuda_graph)");
             DevicePerfWrapper wrapper(enable_device_perf_, "cuda graph python forward");
@@ -888,7 +924,8 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             size_t num_valid_tokens = context_parallel_processor_->handleOutputs(hidden_states, inputs, cp_params);
             return callForwardPostLayers(hidden_states, inputs, true, num_valid_tokens);
         }
-        return callForwardPostLayers(hidden_states, inputs, true);
+        return callForwardPostLayers(
+            hidden_states, inputs, true, -1, std::move(py_model_outputs.pre_final_norm_hidden_states));
 
     } catch (const py::error_already_set& e) {
         RTP_LLM_LOG_ERROR("Python error during forward call on Python instance: %s", e.what());
@@ -949,7 +986,8 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
                                                   size_t                token_num,
                                                   const GptModelInputs& inputs,
                                                   torch::Tensor         merged_eagle3_hidden,
-                                                  bool                  skip_final_layernorm) {
+                                                  bool                  skip_final_layernorm,
+                                                  torch::Tensor         pre_final_norm_hidden) {
     DevicePerfWrapper wrapper(enable_device_perf_, "forwardPostLayers");
     if (enable_sp && device_props_.tp_size > 1) {
         auto ag_tensor =
@@ -983,6 +1021,14 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
         } else {
             hidden = ag_tensor;
         }
+    }
+
+    const bool run_custom = post_layers_processor_ && post_layers_processor_->shouldRunOnContext(has_context_request);
+    const bool use_pre_final_norm = run_custom && post_layers_processor_->usesPreFinalNorm();
+    if (use_pre_final_norm && !skip_final_layernorm) {
+        // Layer microbatches have already been merged into original token order.
+        // Retain only requested rows, before any final normalization takes place.
+        pre_final_norm_hidden = torch::index_select(hidden, 0, customOutputIndexes(inputs));
     }
 
     if (weights_.final_layernorm && !skip_final_layernorm) {
@@ -1048,19 +1094,30 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
 
         torch::Tensor custom_output;
         std::string   custom_output_error;
-        if (post_layers_processor_ && post_layers_processor_->shouldRunOnContext(has_context_request)) {
-            // lm_output rows: decode rows first, context rows at the tail.
-            torch::Tensor lm_rows = need_all_logits ?
-                                        torch::index_select(hidden, 0, lm_output_indexes_device.to(torch::kLong)) :
-                                        last_hidden;
+        if (run_custom) {
             try {
-                if (inputs.custom_output_indexes.defined() && inputs.custom_output_indexes.numel() > 0) {
-                    buffer_holder_.hold_host(inputs.custom_output_indexes);
-                    auto indexes =
-                        inputs.custom_output_indexes.to(torch::kCUDA, /*non_blocking=*/true).to(torch::kLong);
-                    auto selected = torch::index_select(hidden, 0, indexes);
+                if (use_pre_final_norm) {
+                    // Missing output is a protocol error, never a post-norm fallback.
+                    TORCH_CHECK(pre_final_norm_hidden.defined(),
+                                "model did not return requested pre_final_norm hidden states");
+                    TORCH_CHECK(pre_final_norm_hidden.dim() == 2
+                                    && pre_final_norm_hidden.size(0)
+                                           == inputs.input_lengths.size(0) - inputs.sequence_lengths.size(0)
+                                    && pre_final_norm_hidden.size(1) == hidden.size(1),
+                                "pre_final_norm hidden states must have shape [context_batch, hidden_size]");
+                    TORCH_CHECK(pre_final_norm_hidden.device() == hidden.device()
+                                    && pre_final_norm_hidden.scalar_type()
+                                           == dataTypeToTorchType(description_.data_type),
+                                "pre_final_norm hidden states must retain the model activation device and dtype");
+                    custom_output = post_layers_processor_->runOnContext(pre_final_norm_hidden, 0);
+                } else if (inputs.custom_output_indexes.defined() && inputs.custom_output_indexes.numel() > 0) {
+                    auto selected = torch::index_select(hidden, 0, customOutputIndexes(inputs));
                     custom_output = post_layers_processor_->runOnContext(selected, 0);
                 } else {
+                    // Reuse existing LM rows on the default last-token path.
+                    auto lm_rows = need_all_logits ?
+                                       torch::index_select(hidden, 0, lm_output_indexes_device.to(torch::kLong)) :
+                                       last_hidden;
                     custom_output =
                         post_layers_processor_->runOnContext(lm_rows, inputs.sequence_lengths.size(0));
                 }

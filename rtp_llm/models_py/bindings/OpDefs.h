@@ -360,6 +360,9 @@ struct PyModelInputs {
     BertEmbeddingInputs                       bert_embedding_inputs;
     std::optional<std::vector<torch::Tensor>> input_embeddings;
     torch::Tensor                             input_embeddings_locs;
+    // Optional device int64 indexes, one per context request. Undefined on
+    // decode/default post-norm paths. Select BEFORE applying the final norm.
+    torch::Tensor pre_final_norm_output_indexes;
 
     bool hasAttentionInputsByTag() const {
         return !attention_inputs_by_tag.empty();
@@ -368,6 +371,9 @@ struct PyModelInputs {
 
 struct PyModelOutputs {
     torch::Tensor hidden_states;
+    // Selected rows only [context_batch, hidden], NOT the full token activation.
+    // hidden_states always keeps its existing semantics for generation.
+    torch::Tensor pre_final_norm_hidden_states;
 
     PyModelOutputs() = default;
 
