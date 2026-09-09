@@ -3,7 +3,6 @@ package org.flexlb.balance.scheduler;
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.eviction.EngineCancelChannel;
 import org.flexlb.balance.scheduler.RequestLifecycleTestSupport.Registered;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
@@ -54,8 +53,7 @@ class RequestLifecycleDeliveryLockContractTest {
         lifecycle = new RequestRegistry(
                 configService,
                 mock(BatchSchedulerReporter.class),
-                mock(RequestSchedulerReporter.class),
-                mock(EngineCancelChannel.class));
+                mock(RequestSchedulerReporter.class));
     }
 
     @AfterEach

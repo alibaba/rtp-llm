@@ -21,7 +21,9 @@ import java.util.function.Supplier;
  * cross the synchronous lifecycle-owner boundary; only an exact
  * lifecycle-owned publication permit may mutate its public future. Internal
  * Delivery and terminal reducers call the kind-specific submit method only
- * after releasing the exact slot lock.
+ * after releasing the exact slot lock. Claiming the permit briefly re-enters
+ * that lock to select the single frontend result; future completion and all
+ * user continuations run only after the lock is released.
  */
 final class RequestCompletionPublisher implements AutoCloseable {
 

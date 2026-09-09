@@ -4,7 +4,6 @@ import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
-import org.flexlb.balance.eviction.EngineCancelChannel;
 import org.flexlb.balance.eviction.EvictionManager;
 import org.flexlb.balance.scheduler.RequestLifecycleTestSupport.Registered;
 import org.flexlb.config.ConfigService;
@@ -57,8 +56,7 @@ class RequestAdmissionResourceLeakTest {
         lifecycle = new RequestRegistry(
                 configService,
                 batchReporter,
-                mock(RequestSchedulerReporter.class),
-                mock(EngineCancelChannel.class));
+                mock(RequestSchedulerReporter.class));
     }
 
     @AfterEach

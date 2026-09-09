@@ -32,7 +32,7 @@ class PreemptionRegistrationTest {
     }
 
     @Test
-    void notFoundCanTransferToAnEngineFenceOrSettle() {
+    void notFoundRetainsTheAttemptUntilEvidenceOrRequestExpirySettlesIt() {
         PreemptionRegistration registration = registration();
 
         assertTrue(registration.advanceTo(
@@ -42,8 +42,11 @@ class PreemptionRegistrationTest {
         assertFalse(registration.advanceTo(
                 PreemptionCancelPhase.CANCEL_UNKNOWN));
         assertTrue(registration.isNotFound());
-        assertTrue(registration.isFenceTransferable());
+        assertFalse(registration.isReleasable());
         assertTrue(registration.canSettleTombstone());
+        assertTrue(registration.settle());
+        assertFalse(registration.canSettleTombstone());
+        assertFalse(registration.advanceTo(PreemptionCancelPhase.CANCEL_IN_FLIGHT));
     }
 
     @Test

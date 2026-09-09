@@ -163,16 +163,6 @@ public final class PrefillState {
         }
     }
 
-    /** Exact one-shot Engine-fence guard for one canonical request generation. */
-    public final class Protection {
-        private final PrefillState owner = PrefillState.this;
-        private final RequestEntry entry;
-
-        private Protection(RequestEntry entry) {
-            this.entry = entry;
-        }
-    }
-
     /**
      * One-shot rollback right for one provisional DIRECT registration. The
      * capability is bound to the canonical RequestEntry identity, so its close
@@ -470,8 +460,6 @@ public final class PrefillState {
         /** Canonical callback identity for either queued delivery mode. */
         private ScheduledRequest committedItem;
         private Reservation reservation;
-        private Protection protection;
-        private TerminalObservation deferredTerminal;
         /**
          * The queue index has been detached for generation stop, while this
          * exact ACTIVE identity remains canonical until its terminal callback
@@ -1378,18 +1366,12 @@ public final class PrefillState {
             } else {
                 TerminalObservation terminal =
                         TerminalObservation.external(requestId);
-                if (entry.protection != null) {
-                    entry.deferredTerminal = entry.deferredTerminal == null
-                            ? terminal
-                            : entry.deferredTerminal.merge(terminal);
-                } else {
-                    BatchReduction reduction = entry.batchWork == null
-                            ? null
-                            : batchReductionUnderLock(entry.batchWork);
-                    capacityReleased = settleUnderLock(
-                            entry, terminal, reduction, new ArrayList<>(1));
-                    invalidateRemainingBatchPredictionUnderLock(reduction);
-                }
+                BatchReduction reduction = entry.batchWork == null
+                        ? null
+                        : batchReductionUnderLock(entry.batchWork);
+                capacityReleased = settleUnderLock(
+                        entry, terminal, reduction, new ArrayList<>(1));
+                invalidateRemainingBatchPredictionUnderLock(reduction);
                 terminalized = true;
                 committedWorkCapture = null;
                 mutationVersion++;
@@ -1399,82 +1381,6 @@ public final class PrefillState {
             notifyCapacityAvailable(capacityReleased);
         }
         return terminalized;
-    }
-
-    public Protection tryAcquireProtection(ScheduledRequest exactItem) {
-        ScheduledRequest item = exactItem;
-        lock.lock();
-        try {
-            RequestEntry entry = requests.get(item.requestId());
-            if (entry == null || entry.isActive()
-                    || entry.batchWork != null
-                    || entry.committedItem != item
-                    || entry.protection != null) {
-                return null;
-            }
-            Protection protection = new Protection(entry);
-            entry.protection = protection;
-            return protection;
-        } finally {
-            lock.unlock();
-        }
-    }
-
-    public Protection tryAcquireBatchProtection(
-            long batchId, ScheduledRequest exactItem) {
-        ScheduledRequest item = exactItem;
-        lock.lock();
-        try {
-            RequestEntry entry = requests.get(item.requestId());
-            if (entry == null || entry.isActive()
-                    || entry.batchWork == null
-                    || entry.batchWork.lease.batchId != batchId
-                    || entry.committedItem != item
-                    || entry.protection != null) {
-                return null;
-            }
-            Protection protection = new Protection(entry);
-            entry.protection = protection;
-            return protection;
-        } finally {
-            lock.unlock();
-        }
-    }
-
-    public List<BatchCompletion> releaseProtection(
-            Protection exactProtection,
-            Function<List<ScheduledRequest>, OptionalLong> repredictor) {
-        Protection protection = exactProtection;
-        if (protection.owner != this) {
-            throw new IllegalArgumentException(
-                    "protection belongs to another Prefill ledger");
-        }
-        List<BatchCompletion> completions = new ArrayList<>(1);
-        boolean capacityReleased = false;
-        lock.lock();
-        try {
-            RequestEntry entry = protection.entry;
-            if (requests.get(entry.requestId) != entry
-                    || entry.protection != protection) {
-                return List.of();
-            }
-            entry.protection = null;
-            mutationVersion++;
-            TerminalObservation deferred = entry.deferredTerminal;
-            if (deferred != null) {
-                BatchReduction reduction = entry.batchWork == null
-                        ? null
-                        : batchReductionUnderLock(entry.batchWork);
-                capacityReleased = settleUnderLock(
-                        entry, deferred, reduction, completions);
-                refreshRemainingBatchPredictionUnderLock(
-                        reduction, repredictor);
-            }
-        } finally {
-            lock.unlock();
-            notifyCapacityAvailable(capacityReleased);
-        }
-        return List.copyOf(completions);
     }
 
     /**
@@ -1761,11 +1667,6 @@ public final class PrefillState {
             for (Map.Entry<RequestEntry, TerminalObservation> settlement
                     : settlements.entrySet()) {
                 RequestEntry entry = settlement.getKey();
-                // WorkerStatus is an authoritative Engine terminal. Protection
-                // only fences TTL/external cleanup while ownership is ambiguous;
-                // it must not defer the canonical Engine reducer. Invalidating
-                // the exact lease here makes its later release a total no-op.
-                entry.protection = null;
                 capacityReleased |= settleUnderLock(
                         entry,
                         settlement.getValue(),
@@ -1978,8 +1879,6 @@ public final class PrefillState {
                 entry.committedItem = null;
                 entry.reservation = null;
                 entry.batchWork = null;
-                entry.protection = null;
-                entry.deferredTerminal = null;
                 entry.individualPhase = null;
                 entry.stopTerminalPending = false;
             }
@@ -2036,7 +1935,6 @@ public final class PrefillState {
             for (RequestEntry entry : requests.values()) {
                 if (entry.batchWork == null
                         && !entry.isActive()
-                        && entry.protection == null
                         && nowMs - entry.lastObservedAtMs >= Math.max(0L, ttlMs)
                         && !schedulerOwnsRequest.test(entry.requestId)) {
                     candidates.add(entry);
@@ -2069,8 +1967,7 @@ public final class PrefillState {
                 boolean retained = nowMs - reduction.batch.lastObservedAtMs
                         < Math.max(0L, ttlMs);
                 for (RequestEntry entry : reduction.members) {
-                    retained |= entry.protection != null
-                            || schedulerOwnsRequest.test(entry.requestId);
+                    retained |= schedulerOwnsRequest.test(entry.requestId);
                 }
                 if (retained) {
                     continue;
@@ -2253,7 +2150,6 @@ public final class PrefillState {
             batch.observeTerminal(terminal, nowMs);
             reduction.remove(entry);
         }
-        entry.deferredTerminal = null;
         if (!requests.remove(entry.requestId, entry)) {
             throw new IllegalStateException(
                     "terminal request is not canonical request_id="

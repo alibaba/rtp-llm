@@ -54,7 +54,7 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
         Objects.requireNonNull(
                 prepareBatchSubmission, "prepareBatchSubmission");
         this.lifecycle = new RequestRegistry(
-                configService, batchReporter, requestReporter, cancelChannel);
+                configService, batchReporter, requestReporter);
         this.endpointEvents = new EndpointEventProjector(lifecycle);
         AtomicLong batchIds = new AtomicLong();
         this.registry = new EndpointRegistry(

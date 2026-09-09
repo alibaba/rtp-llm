@@ -321,46 +321,9 @@ public class PrefillEndpoint extends WorkerEndpoint {
         return prefillState.terminalizeCommittedItem(exactItem);
     }
 
-    /**
-     * Protect one route request while an EngineFence reconciles
-     * ambiguous delivery ownership.
-     *
-     * <p>The flag lives on the request entry and is mutated under the same fixed
-     * lock as progress, terminal settlement, and TTL eviction. There is no
-     * auxiliary set to leak after an authoritative release/status terminal. This
-     * method never acquires the batcher queue lock or calls back into the scheduler.
-     *
-     * @return an opaque guard bound to the exact committed item, or {@code null}
-     *         when that exact generation is no longer protectable
-     */
-    public PrefillState.Protection acquireEngineFenceProtection(
-            ScheduledRequest exactItem) {
-        return prefillState.tryAcquireProtection(exactItem);
-    }
-
-    /**
-     * Acquire an exact batch-member guard. A stale batch id cannot protect a
-     * newer generation which reused the same request id.
-     */
-    public PrefillState.Protection acquireBatchMemberProtection(
-            long batchId,
-            ScheduledRequest exactItem) {
-        return prefillState.tryAcquireBatchProtection(batchId, exactItem);
-    }
-
-    /** Release one exact Engine-fence guard and apply any deferred terminal. */
-    public void releaseEngineFenceProtection(
-            PrefillState.Protection protection) {
-        List<PrefillState.BatchCompletion> completions =
-                prefillState.releaseProtection(
-                        protection,
-                        this::predictRepackedBatchMs);
-        try {
-            reportBatchCompletions(completions);
-        } catch (Throwable reportingFailure) {
-            logger.warn("Engine-fence protection released but batch completion"
-                    + " reporting failed: engine={}", getIp(), reportingFailure);
-        }
+    /** Expire an exact local committed lease without claiming Engine completion. */
+    public boolean expireCommittedItem(ScheduledRequest exactItem) {
+        return prefillState.terminalizeCommittedItem(exactItem);
     }
 
     /**
