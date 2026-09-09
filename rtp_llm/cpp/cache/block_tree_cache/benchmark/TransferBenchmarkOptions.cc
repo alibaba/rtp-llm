@@ -1,7 +1,6 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/benchmark/TransferBenchmarkOptions.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/benchmark/BenchmarkArgumentParser.h"
 
-#include <cstdlib>
 #include <iostream>
 #include <stdexcept>
 
@@ -51,10 +50,7 @@ TransferOptions TransferOptions::parse(int& argc, char**& argv) {
             opts.working_set_blocks = parseUnsigned(key, next);
         else if (key == "device-disk-staging-block-count")
             opts.device_disk_staging_block_count = parseUnsigned(key, next);
-        else if (key == "help") {
-            printHelp();
-            std::exit(0);
-        } else
+        else
             return false;
         return true;
     });
