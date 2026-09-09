@@ -438,7 +438,9 @@ class Hy4CmpTest(unittest.TestCase):
             ),
         )
 
-        valid_views = GenericMoeLayer.hy4_prepacked_input_views(layer, 4)
+        cmp = object.__new__(bridge.Hy4Cmp)
+        cmp.mlp = layer
+        valid_views = cmp.moe_prepacked_input_views(4)
         self.assertTrue(
             all(
                 actual is expected
@@ -455,7 +457,7 @@ class Hy4CmpTest(unittest.TestCase):
             weights,
         )
         self.assertEqual(
-            GenericMoeLayer.hy4_prepacked_input_views(layer, 4),
+            cmp.moe_prepacked_input_views(4),
             (None, None, None, None),
         )
 

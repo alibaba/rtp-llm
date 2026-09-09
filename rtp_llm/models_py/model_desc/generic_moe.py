@@ -350,63 +350,6 @@ class GenericMoeLayer(nn.Module):
         clone._hy4_mega_moe_prepack = self._hy4_mega_moe_prepack
         return clone
 
-    def hy4_prepacked_input_views(self, rows: int) -> tuple[
-        Optional[torch.Tensor],
-        Optional[torch.Tensor],
-        Optional[torch.Tensor],
-        Optional[torch.Tensor],
-    ]:
-        """Return validated plain-MegaMoE views for the HY4 iHC producer."""
-        if not self._hy4_mega_moe_prepack:
-            return None, None, None, None
-        try:
-            views = self.fused_moe.prepacked_input_views(int(rows))
-        except (AttributeError, TypeError, ValueError, RuntimeError):
-            return None, None, None, None
-        if not isinstance(views, (tuple, list)) or len(views) != 4:
-            return None, None, None, None
-        activation, scale, topk_ids, topk_weights = views
-        if not all(isinstance(value, torch.Tensor) for value in views):
-            return None, None, None, None
-        expected = (
-            (activation, torch.float8_e4m3fn, (rows, self.hidden_dim)),
-            (scale, torch.int32, (rows, self.hidden_dim // 128)),
-            (topk_ids, self.fused_moe.topk_ids_dtype, (rows, self.top_k)),
-            (topk_weights, torch.float32, (rows, self.top_k)),
-        )
-        if any(
-            value.dtype != dtype
-            or tuple(value.shape) != shape
-            or not value.is_contiguous()
-            or value.device != activation.device
-            for value, dtype, shape in expected
-        ):
-            return None, None, None, None
-        return activation, scale, topk_ids, topk_weights
-
-    def prepare_hy4_prepacked_router(
-        self,
-        hidden_states: torch.Tensor,
-        topk_ids: torch.Tensor,
-        topk_weights: torch.Tensor,
-    ) -> None:
-        """Write HY4 FP32 routing results directly into MegaMoE buffers."""
-        if not self._hy4_mega_moe_prepack:
-            raise RuntimeError("HY4 MegaMoE prepack is unsupported")
-        router_logits = torch.matmul(hidden_states.float(), self.gate_weight)
-        group_topk = GroupTopK()
-        group_topk(
-            topk_weights=topk_weights,
-            topk_ids=topk_ids,
-            scores=router_logits,
-            correction_bias=self.correction_bias,
-            n_group=self.config.moe_n_group,
-            topk_group=self.config.moe_topk_group,
-            topk=self.top_k,
-            renormalize=self.config.has_moe_norm,
-            routed_scaling_factor=self.config.routed_scaling_factor,
-        )
-
     def forward_prepacked(
         self,
         hidden_states: torch.Tensor,
@@ -647,6 +590,7 @@ class GenericMoeDecoderLayer(nn.Module):
                 config=config,
                 parallelism_config=parallelism_config,
                 self_attn=self.self_attn,
+                mlp=self.mlp,
             )
             if config.model_type == "hy_v4_mtp" and resolve_hy4_cmp_enabled()
             else None
@@ -749,7 +693,9 @@ class GenericMoeDecoderLayer(nn.Module):
         clone.hy4_cmp = (
             None
             if self.hy4_cmp is None
-            else self.hy4_cmp.clone_for_cuda_graph(self_attn=clone.self_attn)
+            else self.hy4_cmp.clone_for_cuda_graph(
+                self_attn=clone.self_attn, mlp=clone.mlp
+            )
         )
         return clone
 
@@ -757,40 +703,8 @@ class GenericMoeDecoderLayer(nn.Module):
         self,
         hidden_states: torch.Tensor,
         residual: torch.Tensor,
-        *,
-        enable_hy4_cmp: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Run residual add, RMSNorm, then the dense MLP or MoE."""
-        if (
-            enable_hy4_cmp
-            and self._fuse_hy4_cmp_post_norm_quant_moe
-            and hidden_states.dim() == 2
-        ):
-            mega_fp8, mega_scale, topk_ids, topk_weights = (
-                self.mlp.hy4_prepacked_input_views(int(hidden_states.size(0)))
-            )
-            if mega_fp8 is not None and mega_scale is not None:
-                assert topk_ids is not None and topk_weights is not None
-                bf16_hs, fp8_hs, scale = fused_add_rmsnorm_fp8_quant_with_bf16_output(
-                    hidden_states,
-                    residual,
-                    self.post_attention_layernorm.weight.data,
-                    self.post_attention_layernorm.variance_epsilon,
-                    group_size=32,
-                    scale_ue8m0=True,
-                    mxfp8_semantics=True,
-                    mega_mxfp8_out=mega_fp8,
-                    mega_mxfp8_scale_out=mega_scale,
-                )
-                self.mlp.prepare_hy4_prepacked_router(bf16_hs, topk_ids, topk_weights)
-                hidden_states = self.mlp.forward_prepacked(
-                    bf16_hs,
-                    topk_ids,
-                    topk_weights,
-                    x_fp8=fp8_hs,
-                    x_scale=scale,
-                )
-                return hidden_states, residual
         # Dense MLP: fuse add + RMSNorm + FP8 quant; up_proj consumes FP8 directly.
         if self._fuse_post_norm_quant and hidden_states.dim() == 2:
             fp8_hs, scale = fused_add_rmsnorm_fp8_quant(
@@ -942,10 +856,16 @@ class GenericMoeDecoderLayer(nn.Module):
             force_reuse_topk_indices=force_reuse_topk_indices,
             return_topk=True,
         )
-        hidden_states, residual = self._fwd_mlp_or_moe(
+        moe_output = self.hy4_cmp.forward_mtp_moe(
             hidden_states,
             residual,
-            enable_hy4_cmp=True,
+            self.post_attention_layernorm,
+            fuse_mxfp8=self._fuse_hy4_cmp_post_norm_quant_moe,
+        )
+        hidden_states, residual = (
+            self._fwd_mlp_or_moe(hidden_states, residual)
+            if moe_output is None
+            else moe_output
         )
         return DecodeLayerOutput(hidden_states, residual, topk_indices)
 

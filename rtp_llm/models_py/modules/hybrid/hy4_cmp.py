@@ -81,19 +81,22 @@ class Hy4Cmp:
         config: Any,
         parallelism_config: Any,
         self_attn: Any,
+        mlp: Any = None,
     ) -> None:
         self.config = config
         self.parallelism_config = parallelism_config
         self.self_attn = self_attn
+        self.mlp = mlp
         self._indexer_frontend_parallel = _resolve_bool_env(_INDEXER_FRONTEND_ENV)
         self._events: Optional[_Events] = None
         self._disabled_reason = self._static_disabled_reason()
 
-    def clone_for_cuda_graph(self, *, self_attn: Any) -> "Hy4Cmp":
+    def clone_for_cuda_graph(self, *, self_attn: Any, mlp: Any = None) -> "Hy4Cmp":
         clone = object.__new__(type(self))
         clone.config = self.config
         clone.parallelism_config = self.parallelism_config
         clone.self_attn = self_attn
+        clone.mlp = mlp
         clone._indexer_frontend_parallel = self._indexer_frontend_parallel
         # Each captured graph owns its event nodes.  Streams are device-global
         # and must be created before capture, so sharing them is intentional.
@@ -521,6 +524,168 @@ class Hy4Cmp:
         if reuse_topk:
             topk = prev_topk_indices
         return mla_inputs, gate, topk
+
+    def moe_prepacked_input_views(self, rows: int) -> tuple[
+        Optional[torch.Tensor],
+        Optional[torch.Tensor],
+        Optional[torch.Tensor],
+        Optional[torch.Tensor],
+    ]:
+        """Return validated plain-MegaMoE views for the HY4 iHC producer."""
+        if not getattr(self.mlp, "_hy4_mega_moe_prepack", False):
+            return None, None, None, None
+        try:
+            views = self.mlp.fused_moe.prepacked_input_views(int(rows))
+        except (AttributeError, TypeError, ValueError, RuntimeError):
+            return None, None, None, None
+        if not isinstance(views, (tuple, list)) or len(views) != 4:
+            return None, None, None, None
+        activation, scale, topk_ids, topk_weights = views
+        if not all(isinstance(value, torch.Tensor) for value in views):
+            return None, None, None, None
+        expected = (
+            (activation, torch.float8_e4m3fn, (rows, self.mlp.hidden_dim)),
+            (scale, torch.int32, (rows, self.mlp.hidden_dim // 128)),
+            (topk_ids, self.mlp.fused_moe.topk_ids_dtype, (rows, self.mlp.top_k)),
+            (topk_weights, torch.float32, (rows, self.mlp.top_k)),
+        )
+        if any(
+            value.dtype != dtype
+            or tuple(value.shape) != shape
+            or not value.is_contiguous()
+            or value.device != activation.device
+            for value, dtype, shape in expected
+        ):
+            return None, None, None, None
+        return activation, scale, topk_ids, topk_weights
+
+    def _prepare_router(
+        self,
+        hidden_states: torch.Tensor,
+        topk_ids: torch.Tensor,
+        topk_weights: torch.Tensor,
+    ) -> None:
+        """Write HY4 FP32 routing results directly into MegaMoE buffers."""
+        if not getattr(self.mlp, "_hy4_mega_moe_prepack", False):
+            raise RuntimeError("HY4 MegaMoE prepack is unsupported")
+        from rtp_llm.models_py.modules import GroupTopK
+
+        router_logits = torch.matmul(hidden_states.float(), self.mlp.gate_weight)
+        group_topk = GroupTopK()
+        group_topk(
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            scores=router_logits,
+            correction_bias=self.mlp.correction_bias,
+            n_group=self.mlp.config.moe_n_group,
+            topk_group=self.mlp.config.moe_topk_group,
+            topk=self.mlp.top_k,
+            renormalize=self.mlp.config.has_moe_norm,
+            routed_scaling_factor=self.mlp.config.routed_scaling_factor,
+        )
+
+    def forward_target_moe(
+        self, channels: torch.Tensor, ihc: Any, norm: Any, *, fuse_mxfp8: bool
+    ) -> torch.Tensor:
+        """Prepare iHC, shared-expert quantization and routed MoE inputs together."""
+        mlp_input_fp8 = None
+        mlp_input_scale = None
+        mega_activation = None
+        mega_scale = None
+        routed_indices = None
+        routed_weights = None
+        prepacked_ihc = None
+        prepacked_views = self.moe_prepacked_input_views
+        if fuse_mxfp8 and callable(prepacked_views):
+            (
+                mega_activation,
+                mega_scale,
+                routed_indices,
+                routed_weights,
+            ) = prepacked_views(int(channels.size(0)))
+            if mega_activation is not None and mega_scale is not None:
+                prepacked_ihc = ihc.pre_normed_mxfp8_to_mega_moe(
+                    channels,
+                    norm,
+                    mega_activation,
+                    mega_scale,
+                )
+
+        if prepacked_ihc is not None:
+            (
+                mlp_input,
+                mlp_post_gate,
+                mlp_input_fp8,
+                mlp_input_scale,
+            ) = prepacked_ihc
+        elif fuse_mxfp8:
+            (
+                mlp_input,
+                mlp_post_gate,
+                mlp_input_fp8,
+                mlp_input_scale,
+            ) = ihc.pre_normed_mxfp8(channels, norm)
+        else:
+            mlp_input, mlp_post_gate = ihc.pre_normed(channels, norm)
+        if prepacked_ihc is not None:
+            assert routed_indices is not None and routed_weights is not None
+            self._prepare_router(mlp_input, routed_indices, routed_weights)
+            mlp_output = self.mlp.forward_prepacked(
+                mlp_input,
+                routed_indices,
+                routed_weights,
+                x_fp8=mlp_input_fp8,
+                x_scale=mlp_input_scale,
+            )
+        elif mlp_input_fp8 is not None and mlp_input_scale is not None:
+            mlp_output = self.mlp(
+                mlp_input, x_fp8=mlp_input_fp8, x_scale=mlp_input_scale
+            )
+        else:
+            mlp_output = self.mlp(mlp_input)
+        channels = ihc.post(mlp_output, channels, mlp_post_gate)
+        return channels
+
+    def forward_mtp_moe(
+        self,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor,
+        norm: Any,
+        *,
+        fuse_mxfp8: bool,
+    ) -> Optional[tuple[torch.Tensor, torch.Tensor]]:
+        """Prepare MTP residual/norm and MoE buffers, or select normal fallback."""
+        from rtp_llm.models_py.triton_kernels.common.fused_add_rmsnorm_fp8_quant import (
+            fused_add_rmsnorm_fp8_quant_with_bf16_output,
+        )
+
+        if fuse_mxfp8 and hidden_states.dim() == 2:
+            mega_fp8, mega_scale, topk_ids, topk_weights = (
+                self.moe_prepacked_input_views(int(hidden_states.size(0)))
+            )
+            if mega_fp8 is not None and mega_scale is not None:
+                assert topk_ids is not None and topk_weights is not None
+                bf16_hs, fp8_hs, scale = fused_add_rmsnorm_fp8_quant_with_bf16_output(
+                    hidden_states,
+                    residual,
+                    norm.weight.data,
+                    norm.variance_epsilon,
+                    group_size=32,
+                    scale_ue8m0=True,
+                    mxfp8_semantics=True,
+                    mega_mxfp8_out=mega_fp8,
+                    mega_mxfp8_scale_out=mega_scale,
+                )
+                self._prepare_router(bf16_hs, topk_ids, topk_weights)
+                hidden_states = self.mlp.forward_prepacked(
+                    bf16_hs,
+                    topk_ids,
+                    topk_weights,
+                    x_fp8=fp8_hs,
+                    x_scale=scale,
+                )
+                return hidden_states, residual
+        return None
 
     def mla_epilogue(self, output: torch.Tensor, gate: torch.Tensor) -> torch.Tensor:
         from rtp_llm.models_py.modules.hybrid import mla_attention as kernels

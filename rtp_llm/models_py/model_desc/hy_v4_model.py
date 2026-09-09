@@ -189,6 +189,7 @@ class Hy4DecoderLayer(nn.Module):
                 config=config,
                 parallelism_config=parallelism_config,
                 self_attn=self.self_attn,
+                mlp=self.mlp,
             )
             if resolve_hy4_cmp_enabled()
             else None
@@ -214,7 +215,7 @@ class Hy4DecoderLayer(nn.Module):
         clone.hy4_cmp = (
             None
             if hy4_cmp is None
-            else hy4_cmp.clone_for_cuda_graph(self_attn=clone.self_attn)
+            else hy4_cmp.clone_for_cuda_graph(self_attn=clone.self_attn, mlp=clone.mlp)
         )
         return clone
 
@@ -282,64 +283,25 @@ class Hy4DecoderLayer(nn.Module):
         )
         channels = self.attn_ihc.post(attn_output, channels, attn_post_gate)
 
-        mlp_input_fp8 = None
-        mlp_input_scale = None
-        mega_activation = None
-        mega_scale = None
-        routed_indices = None
-        routed_weights = None
-        prepacked_ihc = None
-        prepacked_views = getattr(self.mlp, "hy4_prepacked_input_views", None)
-        if (
-            enable_cmp
-            and getattr(self, "_fuse_mlp_ihc_mxfp8", False)
-            and callable(prepacked_views)
-        ):
-            (
-                mega_activation,
-                mega_scale,
-                routed_indices,
-                routed_weights,
-            ) = prepacked_views(int(channels.size(0)))
-            if mega_activation is not None and mega_scale is not None:
-                prepacked_ihc = self.mlp_ihc.pre_normed_mxfp8_to_mega_moe(
-                    channels,
-                    self.post_attention_layernorm,
-                    mega_activation,
-                    mega_scale,
-                )
+        if enable_cmp and self.hy4_cmp is not None:
+            channels = self.hy4_cmp.forward_target_moe(
+                channels,
+                self.mlp_ihc,
+                self.post_attention_layernorm,
+                fuse_mxfp8=self._fuse_mlp_ihc_mxfp8,
+            )
+            return Hy4LayerOutput(channels, topk_indices)
 
-        if prepacked_ihc is not None:
-            (
-                mlp_input,
-                mlp_post_gate,
-                mlp_input_fp8,
-                mlp_input_scale,
-            ) = prepacked_ihc
-        elif getattr(self, "_fuse_mlp_ihc_mxfp8", False):
-            (
-                mlp_input,
-                mlp_post_gate,
-                mlp_input_fp8,
-                mlp_input_scale,
-            ) = self.mlp_ihc.pre_normed_mxfp8(channels, self.post_attention_layernorm)
+        mlp_input_fp8 = mlp_input_scale = None
+        if self._fuse_mlp_ihc_mxfp8:
+            mlp_input, mlp_post_gate, mlp_input_fp8, mlp_input_scale = (
+                self.mlp_ihc.pre_normed_mxfp8(channels, self.post_attention_layernorm)
+            )
         else:
             mlp_input, mlp_post_gate = self.mlp_ihc.pre_normed(
                 channels, self.post_attention_layernorm
             )
-        if prepacked_ihc is not None:
-            assert routed_indices is not None and routed_weights is not None
-            self.mlp.prepare_hy4_prepacked_router(
-                mlp_input, routed_indices, routed_weights
-            )
-            mlp_output = self.mlp.forward_prepacked(
-                mlp_input,
-                routed_indices,
-                routed_weights,
-                x_fp8=mlp_input_fp8,
-                x_scale=mlp_input_scale,
-            )
-        elif mlp_input_fp8 is not None and mlp_input_scale is not None:
+        if mlp_input_fp8 is not None:
             mlp_output = self.mlp(
                 mlp_input, x_fp8=mlp_input_fp8, x_scale=mlp_input_scale
             )
