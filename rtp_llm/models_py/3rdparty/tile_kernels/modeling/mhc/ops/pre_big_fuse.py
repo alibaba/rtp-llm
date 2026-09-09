@@ -87,6 +87,8 @@ def mhc_pre_big_fuse(
     *,
     backend: str | None = None,
     prenorm_gemm=None,
+    prenorm_output: str = "partials",
+    stabilize_atomic: bool = False,
     prenorm_partials=None,
     norm_weight=None,
     norm_eps=None,
@@ -126,6 +128,10 @@ def mhc_pre_big_fuse(
     fn_flat = fn
 
     backend = _requested_backend() if backend is None else backend
+    if prenorm_output not in ("partials", "reduced"):
+        raise ValueError("HC prenorm_output must be partials or reduced")
+    if prenorm_output == "reduced" and prenorm_gemm is None:
+        raise ValueError("Reduced HC output requires an explicit prenorm adapter")
     deepgemm_backend = backend in ("deepgemm", "deepgemm_deterministic")
     block_k = 64
     block_m = 64
@@ -162,11 +168,13 @@ def mhc_pre_big_fuse(
             for tensor in (gemm_out_mul, gemm_out_sqrsum)
         )
     else:
-        # The PPU DeepGEMM implementation performs its split-K reduction inside
-        # HcPrenormGemm and writes a single reduced plane. Its current ABI accepts
-        # [1, M, N] / [1, M], unlike the old exposed-partials caller contract.
+        # CUDA exposes one plane per split. A selected adapter may instead
+        # reduce internally; its declared output contract also drives the
+        # consumer's reduction, independently of the producer's split count.
         output_splits = (
-            1 if deepgemm_backend or backend == "tilelang_single" else n_splits
+            1
+            if prenorm_output == "reduced" or backend == "tilelang_single"
+            else n_splits
         )
         gemm_out_mul = torch.empty(
             output_splits,
@@ -182,11 +190,9 @@ def mhc_pre_big_fuse(
             if prenorm_gemm is not None:
                 run_gemm = prenorm_gemm
             elif backend == "deepgemm_deterministic":
-                from rtp_llm.models_py.modules.dsv4.platform_provider import (
-                    run_dsv4_hc_prenorm,
+                raise ValueError(
+                    "Deterministic HC requires an explicit prenorm adapter"
                 )
-
-                run_gemm = run_dsv4_hc_prenorm
             else:
                 run_gemm = _run_deepgemm_splitk_gemm
             run_gemm(
@@ -196,8 +202,7 @@ def mhc_pre_big_fuse(
                 gemm_out_sqrsum,
                 n_splits,
             )
-            # Both implementations return one reduced plane.
-            n_splits = 1
+            n_splits = output_splits
         elif backend == "tilelang_single":
             n_splits = _run_tilelang_single_gemm(
                 residual_flat,
@@ -233,8 +238,9 @@ def mhc_pre_big_fuse(
         # The deterministic reduction needs no BF16 canonicalization. Keep
         # these small vectors in FP32, matching SGLang's HC/Sinkhorn semantics.
         # Retain the legacy atomic backend's behavior for explicit A/B runs.
-        stabilize_mixes=backend == "deepgemm",
-        stabilize_comb=backend == "deepgemm",
+        stabilize_mixes=stabilize_atomic,
+        stabilize_comb=stabilize_atomic,
+        parallel_reduction=prenorm_partials is not None,
         fuse_norm=norm_weight is not None,
         norm_eps=norm_eps if norm_eps is not None else 1e-6,
     )(

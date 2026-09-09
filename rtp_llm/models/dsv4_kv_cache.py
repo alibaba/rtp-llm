@@ -32,9 +32,9 @@ true of ``ModelConfig.kv_cache_spec_descs`` (a ``std::vector<std::vector<...>>``
 mutate the Python list first, then assign it once.
 """
 
-from enum import Enum
 from typing import Optional, Sequence
 
+from rtp_llm.models.dsv4.cache_mode import Dsv4IndexerCacheMode
 from rtp_llm.ops import (
     CacheCapacityPolicyDesc,
     CacheCpPolicyDesc,
@@ -91,14 +91,6 @@ DSV4_FIXED_POOL_TAGS: tuple[str, ...] = (
     HCA_STATE_TAG,
     SWA_KV_TAG,
 )
-
-
-class Dsv4IndexerCacheMode(Enum):
-    """Explicit indexer representation, independent of the attention KV dtype."""
-
-    FOLLOW_KV = "follow_kv"
-    FP8 = "fp8"
-    FP4 = "fp4"
 
 
 def _make_dsv4_desc(

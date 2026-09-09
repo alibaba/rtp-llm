@@ -21,10 +21,6 @@ public class IdUtils {
         return formatUuid(mostSigBits, leastSigBits);
     }
 
-    public static String getServiceIdByModelName(String modelName) {
-        return CommonConstants.FUNCTION + "." + modelName;
-    }
-
     public static String getModelNameByServiceId(String physicalServiceId) {
         return physicalServiceId.substring(CommonConstants.FUNCTION.length() + 1);
     }

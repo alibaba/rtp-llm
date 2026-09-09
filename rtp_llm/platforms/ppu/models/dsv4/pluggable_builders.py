@@ -1,6 +1,6 @@
 """PPU construction entrypoints; selected after the worker protocol barrier."""
 
-from rtp_llm.models_py.pluggable import dsv4_builders as baseline
+from rtp_llm.models.dsv4 import builders as baseline
 
 
 def build_model(*, build_ctx, request, **kwargs):
@@ -35,8 +35,48 @@ def build_attention(*, build_ctx, request, **kwargs):
     return baseline.build_attention(build_ctx=build_ctx, request=request, **kwargs)
 
 
-def build_moe(*, build_ctx, request, **kwargs):
-    return baseline.build_moe(build_ctx=build_ctx, request=request, **kwargs)
+def build_moe(*, build_ctx, request, platform_provider, **kwargs):
+    from .ppu_grouped_fp4 import PpuGroupedFP4Strategy
+
+    if kwargs.get("tp_size") != 4 or kwargs.get("ep_size") != 1:
+        raise ValueError("PPU grouped MoE requires TP4/EP1")
+    return baseline.build_moe(
+        build_ctx=build_ctx,
+        request=request,
+        platform_provider=platform_provider,
+        execution_options=build_ctx.selection.model_metadata["execution_options"],
+        strategy_type=PpuGroupedFP4Strategy,
+        strategy_kwargs={
+            "sglang_moe": platform_provider._bool("DSV4_PPU_SGLANG_MOE", False),
+            "fused_scale_gather": platform_provider._bool(
+                "DSV4_MOE_SCALE_GATHER_FUSED", False
+            ),
+        },
+        **kwargs,
+    )
+
+
+def build_decode_moe(*, build_ctx, request, platform_provider, **kwargs):
+    from .ppu_deepep_fp4 import PpuDeepEPFP4Strategy
+
+    if (
+        kwargs.get("tp_size") != 1
+        or kwargs.get("ep_size") != 8
+        or not kwargs.get("is_decode_role")
+    ):
+        raise ValueError("PPU Decode MoE requires TP1/EP8 Decode resources")
+    return baseline.build_moe(
+        build_ctx=build_ctx,
+        request=request,
+        platform_provider=platform_provider,
+        execution_options=build_ctx.selection.model_metadata["execution_options"],
+        strategy_type=PpuDeepEPFP4Strategy,
+        strategy_kwargs={
+            "expected_m_policy": platform_provider._moe_hint,
+            "output_dtype": platform_provider._moe_output_dtype,
+        },
+        **kwargs,
+    )
 
 
 def build_moe_tp(*, build_ctx, request, **kwargs):

@@ -8,8 +8,10 @@ from pathlib import Path
 import torch
 
 from rtp_llm.models_py.modules.dsv4.moe.strategies.base import MoeCfg
-from rtp_llm.models_py.modules.dsv4.moe.strategies.deepep import (
-    DeepEPStrategy,
+from rtp_llm.platforms.ppu.models.dsv4.ppu_legacy_deepep import (
+    PpuLegacyDeepEPStrategy as DeepEPStrategy,
+)
+from rtp_llm.platforms.ppu.models.dsv4.ppu_legacy_deepep import (
     _select_ppu_grouped_fp4_capacity,
 )
 from rtp_llm.utils.model_weight import W
@@ -125,9 +127,7 @@ def main() -> None:
     padded_capacity = capacity + 128
 
     def run_selected() -> torch.Tensor:
-        return grouped._forward_ppu_grouped_fp4(
-            x, route_weights, indices, capacity
-        )
+        return grouped._forward_ppu_grouped_fp4(x, route_weights, indices, capacity)
 
     def run_padded() -> torch.Tensor:
         return grouped._forward_ppu_grouped_fp4(
@@ -176,9 +176,10 @@ def main() -> None:
                 expert_counts.view(-1, 1)
             )
             ll_diff = (
-                compact_packed_y[valid_rows]
-                - ll_packed_y[:, :capacity][valid_rows]
-            ).float().abs()
+                (compact_packed_y[valid_rows] - ll_packed_y[:, :capacity][valid_rows])
+                .float()
+                .abs()
+            )
             ll_rel = ll_diff.mean().item() / (
                 compact_packed_y[valid_rows].float().abs().mean().item() + 1e-6
             )
@@ -209,7 +210,10 @@ def main() -> None:
         "finite": bool(torch.isfinite(selected_y).all().item()),
         "low_latency_compaction": ll_result,
     }
-    if ll_result is not None and ll_result["compact_prefix_relative_mean_error"] >= 0.001:
+    if (
+        ll_result is not None
+        and ll_result["compact_prefix_relative_mean_error"] >= 0.001
+    ):
         result["result"] = "fail"
     Path(args.output).write_text(json.dumps(result, indent=2) + "\n")
     print(json.dumps(result, indent=2))

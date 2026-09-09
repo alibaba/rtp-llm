@@ -111,16 +111,14 @@ class TestHCImpl(unittest.TestCase):
             sinkhorn_iters=3,
             eps=1e-6,
         )
-        y_ref = torch.sum(
-            pre_ref.unsqueeze(-1) * residual.float(), dim=-2
-        ).to(torch.bfloat16)
+        y_ref = torch.sum(pre_ref.unsqueeze(-1) * residual.float(), dim=-2).to(
+            torch.bfloat16
+        )
         torch.testing.assert_close(y, y_ref, rtol=0, atol=0)
 
         sublayer = (torch.randn(5, dim) * 5).to(torch.bfloat16)
         actual = unit.post(sublayer, residual, post, comb)
-        expected = torch.matmul(
-            comb_ref.transpose(-1, -2), residual.float()
-        )
+        expected = torch.matmul(comb_ref.transpose(-1, -2), residual.float())
         expected.add_(post_ref.unsqueeze(-1) * sublayer.float().unsqueeze(-2))
         torch.testing.assert_close(actual, expected.to(torch.bfloat16), rtol=0, atol=0)
 
@@ -216,11 +214,12 @@ class TestHCImpl(unittest.TestCase):
 
         def rank0_contribution(combined, *, use_fp32):
             output_count = combined.shape[-1] - 1
-            weight = fn[:output_count].to(
-                torch.float32 if use_fp32 else torch.bfloat16
-            ).view(
-                output_count, hc, global_dim
-            )[..., :local_dim].reshape(output_count, hc * local_dim)
+            weight = (
+                fn[:output_count]
+                .to(torch.float32 if use_fp32 else torch.bfloat16)
+                .view(output_count, hc, global_dim)[..., :local_dim]
+                .reshape(output_count, hc * local_dim)
+            )
             rank0_input = rank0.float() if use_fp32 else rank0
             rank0_part = torch.cat(
                 (
@@ -362,9 +361,7 @@ class TestHCImpl(unittest.TestCase):
 
         sublayer = torch.randn(5, dim, dtype=torch.bfloat16)
         actual_post = unit.post(sublayer, residual, post, comb)
-        expected_post = FallbackHCUnit._post_impl(
-            unit, sublayer, residual, post, comb
-        )
+        expected_post = FallbackHCUnit._post_impl(unit, sublayer, residual, post, comb)
         torch.testing.assert_close(actual_post, expected_post, atol=0, rtol=0)
 
     def test_factory_hybrid_routes_fallback_pre_tilelang_post_and_fallback_head(
@@ -494,9 +491,7 @@ class TestHCImpl(unittest.TestCase):
             tilelang_pre.assert_called_once_with(cuda_x, dbg_tag="eager")
             fallback_pre.assert_not_called()
 
-        with _env(
-            "DSV4_MHC_PRE_GEMM_BACKEND", "deepgemm_deterministic"
-        ), mock.patch(
+        with _env("DSV4_MHC_PRE_GEMM_BACKEND", "deepgemm_deterministic"), mock.patch(
             "torch.cuda.is_current_stream_capturing", return_value=True
         ), mock.patch.object(FallbackHCUnit, "_pre_impl") as fallback_pre:
             with self.assertRaisesRegex(RuntimeError, "capture has not been validated"):
@@ -519,8 +514,7 @@ class TestHCImpl(unittest.TestCase):
         x_flat = object()
         expected = object()
         with _env("DSV4_MHC_PRE_GEMM_BACKEND", "deepgemm"), mock.patch(
-            "rtp_llm.models_py.modules.dsv4.hc.fallback_impl."
-            "_ppu_deepgemm_linear_mixes",
+            "rtp_llm.models_py.modules.dsv4.hc.fallback_impl." "_deepgemm_linear_mixes",
             return_value=expected,
         ) as deepgemm, mock.patch(
             "rtp_llm.models_py.modules.dsv4.hc.fallback_impl._tp_linear_mixes"
@@ -581,9 +575,7 @@ class TestHCImpl(unittest.TestCase):
             fallback_pre.assert_not_called()
 
         post_args = tuple(object() for _ in range(4))
-        with _env(
-            "DSV4_MHC_POST_BACKEND", " typo "
-        ), mock.patch.object(
+        with _env("DSV4_MHC_POST_BACKEND", " typo "), mock.patch.object(
             TileLangHCUnit, "_post_impl"
         ) as tilelang_post, mock.patch.object(
             FallbackHCUnit, "_post_impl"

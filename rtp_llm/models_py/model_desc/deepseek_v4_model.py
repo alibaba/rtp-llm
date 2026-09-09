@@ -39,6 +39,7 @@ import torch
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
+from rtp_llm.models.dsv4.specs import forward_capabilities, validate_forward_phase
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules.dsv4.chunk_env import (
     DSV4_CHUNK_TOKENS_ENV,
@@ -63,10 +64,6 @@ from rtp_llm.models_py.modules.dsv4.platform_provider import (
 from rtp_llm.models_py.modules.dsv4.prefill.forward import forward_prefill
 from rtp_llm.models_py.modules.dsv4.prefill_workspace import tp_local_prefill_q_dim
 from rtp_llm.models_py.modules.dsv4.transformer import V4Args, V4Transformer
-from rtp_llm.models_py.pluggable.dsv4_specs import (
-    forward_capabilities,
-    validate_forward_phase,
-)
 from rtp_llm.ops import RoleType
 from rtp_llm.utils.warmup import model_warm_up_enabled
 
@@ -327,6 +324,10 @@ class DeepSeekV4Model(GptModelBase):
                 module_build_context.selection.model_metadata["execution_options"]
             )
         )
+        if platform_provider is None and module_build_context is not None:
+            raise ValueError(
+                "ModuleFactory builder must bind an instance operator provider"
+            )
         if platform_provider is None:
             from rtp_llm.utils.backend_registry import run_backend_registrations
 
@@ -518,43 +519,7 @@ class DeepSeekV4Model(GptModelBase):
 
     def initialize(self, init_resource: PyModelInitResources) -> bool:
         try:
-            ctx = self.module_build_context
-            if ctx is not None:
-                metadata = ctx.selection.model_metadata
-                from rtp_llm.models_py.pluggable.dsv4_specs import validate_runtime_role
-
-                validate_runtime_role(
-                    metadata,
-                    is_decode_role=init_resource.is_decode_role,
-                    is_speculative=init_resource.is_speculative,
-                )
-                if bool(self._v4_args.fp8_kv_cache) != metadata["fp8_kv_cache"]:
-                    raise ValueError("KV dtype differs from the module preflight")
-                from rtp_llm.models_py.pluggable.dsv4_resources import (
-                    validate_bound_cache,
-                )
-
-                resource_record = validate_bound_cache(
-                    init_resource.kv_cache,
-                    metadata,
-                    device=torch.device("cuda", ctx.selection.platform.local_rank),
-                )
-                logging.info(
-                    "module_dispatch resources: %s",
-                    json.dumps(
-                        {
-                            "model_instance_id": ctx.model_instance_id,
-                            "protocol_digest": ctx.protocol_digest,
-                            **resource_record,
-                        },
-                        sort_keys=True,
-                    ),
-                )
-            result = self._initialize_impl(init_resource)
-            if result and ctx is not None:
-                ctx.validate_built_tree(self, root_path="v4")
-                ctx.close()
-            return result
+            return self._initialize_impl(init_resource)
         except BaseException as e:
             import traceback
 
@@ -632,6 +597,33 @@ class DeepSeekV4Model(GptModelBase):
         main_w = 2 * 2 * head_dim
         idx_w = 2 * 2 * index_head_dim
         return main_w, idx_w
+
+    def _initialize_commit_only(
+        self, init_resource: PyModelInitResources, device_str: str
+    ) -> bool:
+        """Initialize an attention-only DSpARK PREFILL commit model."""
+        logging.info(
+            "[DeepSeekV4Model] building DSpARK commit-only transformer "
+            "(layers=%d, globals=%d)",
+            len(self.weight.weights),
+            len(self.weight.global_weights),
+        )
+        prev_dtype = torch.get_default_dtype()
+        torch.set_default_dtype(torch.bfloat16)
+        try:
+            with torch.device("meta"):
+                self.v4 = V4Transformer(self._v4_args, mw=self.weight)
+        finally:
+            torch.set_default_dtype(prev_dtype)
+
+        for layer in self.v4.layers:
+            layer.attn.init_rope_cache(device=device_str)
+
+        self._load_extra_weights(self.weight)
+        del self.weight
+        self._bind_runtime_buffers(torch.device(device_str))
+        self._materialized = True
+        return True
 
     def _bind_runtime_buffers(self, device: torch.device) -> None:
         assert self.v4 is not None
@@ -760,6 +752,9 @@ class DeepSeekV4Model(GptModelBase):
             )
             self._v4_args.max_tokens_per_rank = runtime_resolved_max_tokens_per_rank
 
+        if bool(getattr(self._v4_args, "commit_only", False)):
+            return self._initialize_commit_only(init_resource, device_str)
+
         # ``self.weight`` is a framework ``ModelWeights`` populated by the
         # ``DeepSeekV4Weight`` descriptor (see ``rtp_llm/models/deepseek_v4.py``)
         # via the fastsafetensors loader.  Each dsv4 sub-module's factory
@@ -796,10 +791,10 @@ class DeepSeekV4Model(GptModelBase):
         if self._captures_aux_hidden:
             self.v4.set_aux_hidden_capture_layer_ids(self._capture_aux_hidden_layer_ids)
 
-        # Recompute RoPE cache on real device (precompute_freqs_cis under
-        # meta context yields zeros; we need real values).
+        # Recompute RoPE on the real device and prebuild the compressors'
+        # shared cos_sin_cache before runtime memory allocation starts.
         for layer in self.v4.layers:
-            layer.attn.reset_rope_cache(device=device_str)
+            layer.attn.init_rope_cache(device=device_str)
 
         # Subclass hook: lift any model-level weights (e.g. MTP fusion
         # norms / projections) off the ModelWeights wrapper before we
@@ -1123,6 +1118,11 @@ class DeepSeekV4Model(GptModelBase):
                         kv_cache=self.kv_cache,
                         cp_size=_prefill_cp_size,
                         device=_jit_device,
+                        max_batch_size=max(
+                            int(self._max_context_batch_size),
+                            int(self._max_generate_batch_size),
+                            1,
+                        ),
                     )
                 _fp8_mqa_logits_shapes = _collect_dsv4_fp8_mqa_logits_shapes(self.v4)
                 warmup_fp8_mqa_logits_jit(

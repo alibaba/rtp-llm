@@ -23,6 +23,10 @@ def register_backend_hooks():
 
 
 def register_modules(registry):
+    # A model adapter registers its full module contract before platform
+    # discovery. Other model registries must not acquire V4 implementations.
+    if not registry.has_module("rtp.dsv4.model"):
+        return
     from .models.dsv4.manifest import register_modules as register_dsv4
 
     register_dsv4(registry)

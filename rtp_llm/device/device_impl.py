@@ -145,6 +145,26 @@ class GpuImpl(DeviceBase):
     def get_device_id(self) -> int:
         return torch.cuda.current_device()
 
+    def device_string(self, local_rank: int) -> str:
+        return f"cuda:{local_rank}"
+
+    def runtime_context(self, local_rank: int):
+        from rtp_llm.device.runtime import DeviceRuntimeContext
+
+        if self.get_device_id() != local_rank:
+            raise RuntimeError("Capture platform only after setting the worker device")
+        return DeviceRuntimeContext(
+            self.get_device_type(),
+            torch.cuda.get_device_name(local_rank),
+            local_rank,
+            evidence=(
+                ("runtime", type(self).__name__),
+                ("torch_version", str(torch.__version__)),
+            ),
+            device_string=self.device_string(local_rank),
+            capabilities={"torch_cuda", "nccl", "cuda_graph"},
+        )
+
     def unpack_int32_into_int16(self, w_packed: torch.Tensor, int8: bool):
         if int8:
             return w_packed.contiguous().view(torch.uint8).to(torch.int16)
@@ -688,6 +708,16 @@ class CudaImpl(GpuImpl):
 
 
 class PpuImpl(CudaImpl):
+    def prepare_model_runtime(self, model_config, engine_config) -> None:
+        from rtp_llm.platforms.ppu.runtime import prepare_model_runtime
+
+        prepare_model_runtime(model_config, engine_config)
+
+    def configure_model_weight_loader(self, model_config, loader) -> None:
+        from rtp_llm.platforms.ppu.runtime import configure_model_weight_loader
+
+        configure_model_weight_loader(model_config, loader)
+
     @property
     def support_dio_load(self) -> bool:
         return False
@@ -917,6 +947,7 @@ class RocmImpl(GpuImpl):
                     "Quark MXFP4 MoE scale shuffle requires gfx950 (MI355)."
                 )
             from aiter.utility.fp4_utils import e8m0_shuffle
+
             if x_.dim() == 3:
                 s0, s1, _ = x_.shape
                 x_ = e8m0_shuffle(x_.contiguous().view(s0 * s1, -1)).view(s0, s1, -1)

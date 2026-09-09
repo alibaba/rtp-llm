@@ -575,10 +575,11 @@ def generate_report(results: list[dict]) -> str:
         f"5. **Queue saturation ceiling**: Max inflight converges to ~528-531 across all speeds,"
     )
     lines.append(
-        f"   indicating a hard limit from scheduler configuration (MAX_QUEUE_SIZE=5000,"
+        f"   indicating a hard limit from scheduler configuration "
+        f"(scheduler.capacity.maxOutstandingRequestsGlobal=5000,"
     )
     lines.append(
-        f"   FLEXLB_BATCH_FIXED_MAX_INFLIGHT_BATCHES=2). Beyond this, requests are rejected"
+        f"   dispatcher.maxInflightBatchesPerPrefillWorker=2). Beyond this, requests are rejected"
     )
     lines.append(f"   (schedule_error) rather than queued.")
     lines.append("")

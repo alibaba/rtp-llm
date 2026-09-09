@@ -30,6 +30,8 @@ import os
 from typing import List
 
 import torch
+
+from rtp_llm.config.kv_cache_config import KVCacheConfig
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.model_loader.attn_weight import AttnAtomicWeight, AttnConfig
@@ -43,10 +45,13 @@ from rtp_llm.models.deepseek_v2 import (
     DeepSeekV3MtpWeight,
 )
 from rtp_llm.models.dsv4_kv_cache import (
+    DSV4_FIXED_POOL_TAGS,
+    HCA_STATE_TAG,
+    apply_dsv4_explicit_pool_blocks,
     build_dsv4_kv_cache_spec_descs,
     resolve_dsv4_tokens_per_block,
 )
-from rtp_llm.ops import HybridAttentionType, KvCacheDataType
+from rtp_llm.ops import HybridAttentionType, KvCacheDataType, RoleType
 from rtp_llm.utils.model_weight import (
     CkptWeightInfo,
     W,
@@ -65,20 +70,37 @@ SCORING_FUNC_SQRT_SOFTPLUS = 2  # DeepSeek-V4
 _TRUTHY_ENV_VALUES = ("yes", "true", "t", "1", "on")
 
 
-def _dsv4_fixed_pool_use_host_memory() -> bool:
-    """Read ``--dsv4_fixed_pool_use_memory`` / ``DSV4_FIXED_POOL_USE_MEMORY``.
+def _is_prefill_role(role_type: object) -> bool:
+    """Accept both the production pybind enum and lightweight string configs."""
+    if role_type == RoleType.PREFILL:
+        return True
+    return str(role_type).upper().rsplit(".", 1)[-1] == "PREFILL"
 
-    ``_post_build_model_config`` only receives ``model_config``, and
-    ``KVCacheConfig`` is not reachable from it, so the env channel that backs
-    the flag (``env_name="DSV4_FIXED_POOL_USE_MEMORY"`` in
-    ``rtp_llm/server/server_args/kv_cache_group_args.py``) is read directly.
-    A CLI-only ``--dsv4_fixed_pool_use_memory`` is therefore not observed here;
-    plumbing ``kv_cache_config`` into the hook would close that gap.
-    """
+
+def _dsv4_fixed_pool_use_host_memory(
+    kv_cache_config: KVCacheConfig | None = None,
+) -> bool:
+    """Resolve DSV4 fixed-pool placement from parsed config or the legacy env."""
+    if kv_cache_config is not None:
+        return bool(kv_cache_config.dsv4_fixed_pool_use_memory)
     raw = os.environ.get("DSV4_FIXED_POOL_USE_MEMORY")
     if raw is None:
         return False
     return raw.strip().lower() in _TRUTHY_ENV_VALUES
+
+
+def _dsv4_pool_blocks(config_value: int | None, env_name: str) -> int:
+    """Resolve a positive block override while retaining direct-env callers."""
+    if config_value is not None:
+        return config_value if config_value > 0 else 0
+    raw = os.environ.get(env_name)
+    if raw is None:
+        return 0
+    try:
+        value = int(raw.strip())
+    except (TypeError, ValueError):
+        return 0
+    return value if value > 0 else 0
 
 
 class DeepSeekV4Weight(DeepSeekV2Weight):
@@ -532,15 +554,35 @@ class DeepSeekV4(DeepSeekV2):
         return config
 
     @classmethod
+    def _apply_kv_cache_config(
+        cls,
+        model_config: ModelConfig,
+        kv_cache_config: KVCacheConfig,
+        *,
+        indexer_cache_mode=None,
+    ) -> None:
+        cls._build_dsv4_kv_cache_config(
+            model_config, kv_cache_config, indexer_cache_mode=indexer_cache_mode
+        )
+
+    @classmethod
     def _post_build_model_config(
         cls, model_config: ModelConfig, *, indexer_cache_mode=None
     ) -> None:
-        """Declare the seven-pool DSv4 cache topology.
+        """Preserve direct callers that configure DSV4 through environment variables."""
+        cls._build_dsv4_kv_cache_config(
+            model_config, None, indexer_cache_mode=indexer_cache_mode
+        )
 
-        Runs after ``build_model_config``, so the CLI-derived
-        ``attn_config.tokens_per_block`` is already in place and can be
-        promoted here without being clobbered.
-        """
+    @classmethod
+    def _build_dsv4_kv_cache_config(
+        cls,
+        model_config: ModelConfig,
+        kv_cache_config: KVCacheConfig | None,
+        *,
+        indexer_cache_mode=None,
+    ) -> None:
+        """Declare the seven-pool DSV4 cache topology after runtime config parsing."""
         if model_config.kv_cache_spec_descs:
             return
 
@@ -586,33 +628,55 @@ class DeepSeekV4(DeepSeekV2):
         # and falls back to a single homogeneous pool.
         hybrid_config.enable_independent_kv_cache_pools = True
 
-        model_config.kv_cache_spec_descs = build_dsv4_kv_cache_spec_descs(
+        descs = build_dsv4_kv_cache_spec_descs(
             layer_num=layer_num,
             layer_compress_ratios=list(attn_config.layer_compress_ratios),
             fp8_kv=attn_config.kv_cache_dtype == KvCacheDataType.FP8,
             head_dim=int(attn_config.size_per_head),
             indexer_head_dim=int(attn_config.indexer_head_dim),
-            fixed_pool_use_host_memory=_dsv4_fixed_pool_use_host_memory(),
+            fixed_pool_use_host_memory=_dsv4_fixed_pool_use_host_memory(
+                kv_cache_config
+            ),
             indexer_cache_mode=indexer_cache_mode,
         )
 
-    def _create_python_model(self):
-        if self.module_build_context is not None:
-            from rtp_llm.models_py.pluggable.dsv4_specs import request_for
-
-            ctx = self.module_build_context
-            self.py_model = ctx.factory.build(
-                request_for("model", ctx.selection),
-                model_config=self.model_config,
-                parallelism_config=self.parallelism_config,
-                weights=self.weight,
-                moe_config=self.moe_config,
-                max_generate_batch_size=self.max_generate_batch_size,
-                fmha_config=self.fmha_config,
-                py_hw_kernel_config=self.hw_kernel_config,
-                device_resource_config=self.device_resource_config,
+        fixed_pool_blocks = _dsv4_pool_blocks(
+            None if kv_cache_config is None else kv_cache_config.dsv4_fixed_pool_blocks,
+            "DSV4_FIXED_POOL_BLOCKS",
+        )
+        if fixed_pool_blocks > 0:
+            for tag in DSV4_FIXED_POOL_TAGS:
+                apply_dsv4_explicit_pool_blocks(descs, tag, fixed_pool_blocks)
+            logging.info(
+                "DeepSeek-V4 pinned fixed pools %s to %d blocks",
+                DSV4_FIXED_POOL_TAGS,
+                fixed_pool_blocks,
             )
-            return
+        # HCA_STATE takes a dedicated override that wins over the shared value.
+        hca_state_pool_blocks = _dsv4_pool_blocks(
+            (
+                None
+                if kv_cache_config is None
+                else kv_cache_config.dsv4_hca_state_pool_blocks
+            ),
+            "DSV4_HCA_STATE_POOL_BLOCKS",
+        )
+        if hca_state_pool_blocks > 0:
+            apply_dsv4_explicit_pool_blocks(descs, HCA_STATE_TAG, hca_state_pool_blocks)
+            logging.info(
+                "DeepSeek-V4 pinned HCA_STATE pool to %d blocks",
+                hca_state_pool_blocks,
+            )
+
+        model_config.kv_cache_spec_descs = descs
+
+    @classmethod
+    def get_module_adapter(cls):
+        from rtp_llm.models.dsv4.adapter import Dsv4ModelAdapter
+
+        return Dsv4ModelAdapter()
+
+    def _create_python_model(self):
         from rtp_llm.models_py.model_desc.deepseek_v4_model import DeepSeekV4Model
 
         self.py_model = DeepSeekV4Model(
@@ -948,6 +1012,47 @@ class DeepSeekV4DSparkWeight(DeepSeekV4Weight):
         # DSpARK stages use the regular learned noaux_tc router rather than
         # the target model's initial hash-router schedule.
         self._num_hash_layers = 0
+
+    @property
+    def prefill_commit_only(self) -> bool:
+        """Whether this descriptor belongs to a dedicated prefill worker."""
+        return _is_prefill_role(getattr(self, "role_type", None))
+
+    def get_weight_info(self) -> ModelWeightInfo:
+        """Retain only tensors reachable from PREFILL's DSpARK commit graph.
+
+        Filtering after the common normalization/quantization pipeline keeps
+        each retained FP8 descriptor composite intact, including its generated
+        scale sibling.
+        """
+        info = super().get_weight_info()
+        if not self.prefill_commit_only:
+            return info
+
+        layer_names = {W.v4_attn_wkv_w, W.v4_attn_kv_norm}
+        global_names = {
+            # Embedding and LM head preserve the target/draft alias contract;
+            # they do not allocate duplicate tensors in production.
+            W.embedding,
+            W.lm_head,
+            W.v4_dspark_main_norm,
+            W.v4_dspark_main_proj_w,
+        }
+        info.layer_weights = [
+            [weight for weight in layer if weight.name in layer_names]
+            for layer in info.layer_weights
+        ]
+        info.weights = [
+            weight for weight in info.weights if weight.name in global_names
+        ]
+        logging.info(
+            "[DeepSeekV4DSparkWeight] PREFILL commit-only descriptors: "
+            "layers=%d per-layer=%s globals=%s",
+            len(info.layer_weights),
+            sorted(layer_names),
+            sorted(global_names),
+        )
+        return info
 
     def _get_weight_info(self) -> ModelWeightInfo:
         layer_weights: List[List[WeightModule]] = [

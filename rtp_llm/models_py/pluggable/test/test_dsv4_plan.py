@@ -7,14 +7,14 @@ from types import SimpleNamespace
 
 from rtp_llm.config.module_dispatch_config import ModuleDispatchConfig
 from rtp_llm.device.device_type import DeviceType
-from rtp_llm.models_py.pluggable.bootstrap import get_module_registry
-from rtp_llm.models_py.pluggable.dsv4_specs import CONTRACTS, request_for
+from rtp_llm.models.dsv4.adapter import execution_options_snapshot
+from rtp_llm.models.dsv4.adapter import get_registry as get_module_registry
+from rtp_llm.models.dsv4.specs import CONTRACTS, request_for
 from rtp_llm.models_py.pluggable.factory import (
     ModuleBuildContext,
     ModuleSelectionContext,
 )
 from rtp_llm.models_py.pluggable.platform import PlatformContext
-from rtp_llm.models_py.pluggable.worker import execution_options_snapshot
 
 
 def selection(rank=0, **changed):
@@ -89,7 +89,7 @@ class Dsv4PlanTest(unittest.TestCase):
         )
 
     def test_decode_plan_covers_ep_world_before_runtime_imports(self):
-        from rtp_llm.models_py.pluggable.worker import validate_parallelism
+        from rtp_llm.models.dsv4.adapter import validate_parallelism
 
         pc = SimpleNamespace(
             tp_size=1,
@@ -440,7 +440,7 @@ class Dsv4PlanTest(unittest.TestCase):
                 ctx.prepare([request_for("model", ctx.selection)])
 
     def test_selected_plan_controls_actual_forward_phase(self):
-        from rtp_llm.models_py.pluggable.dsv4_specs import (
+        from rtp_llm.models.dsv4.specs import (
             forward_capabilities,
             validate_forward_phase,
         )
@@ -472,7 +472,7 @@ class Dsv4PlanTest(unittest.TestCase):
                         validate_forward_phase(capabilities, **args)
 
     def test_decode_rejects_mismatched_runtime_and_communication(self):
-        from rtp_llm.models_py.pluggable.dsv4_specs import validate_runtime_role
+        from rtp_llm.models.dsv4.specs import validate_runtime_role
 
         ctx = self.decode_context()
         validate_runtime_role(
@@ -511,7 +511,7 @@ class Dsv4PlanTest(unittest.TestCase):
                     ctx.prepare([request_for("model", ctx.selection)])
 
     def test_fp4_requires_consistent_explicit_state_contracts(self):
-        from rtp_llm.models_py.pluggable.dsv4_specs import STATE_FORMAT_FP4
+        from rtp_llm.models.dsv4.specs import STATE_FORMAT_FP4
 
         config = json.loads(explicit_config().to_string())
         config["impl_overrides"] = {
@@ -547,7 +547,7 @@ class Dsv4PlanTest(unittest.TestCase):
             ctx.prepare([request_for("model", ctx.selection)])
 
     def test_root_descriptor_declares_allocator_without_device_probe(self):
-        from rtp_llm.models_py.pluggable.dsv4_specs import declared_indexer_cache_mode
+        from rtp_llm.models.dsv4.specs import declared_indexer_cache_mode
 
         self.assertEqual(declared_indexer_cache_mode(explicit_config()).value, "fp8")
         config = ModuleDispatchConfig(
@@ -702,7 +702,7 @@ class RejectRuntime(importlib.abc.MetaPathFinder):
         if fullname.split('.')[0] in ('torch','triton','deep_gemm','flashinfer') or fullname.startswith('rtp_llm.ops'):
             raise AssertionError(fullname)
 sys.meta_path.insert(0, RejectRuntime())
-from rtp_llm.models_py.pluggable.bootstrap import get_module_registry
+from rtp_llm.models.dsv4.adapter import get_registry as get_module_registry
 registry=get_module_registry()
 assert registry.frozen
 assert get_module_registry() is registry

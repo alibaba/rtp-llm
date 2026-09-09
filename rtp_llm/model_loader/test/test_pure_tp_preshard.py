@@ -185,6 +185,8 @@ class PureTpPreshardTest(unittest.TestCase):
                 )
 
     def test_dsv4_fp4_routed_layouts_match_legacy_on_both_ranks(self):
+        from rtp_llm.platforms.ppu.models.dsv4.resources import routed_tp_preparation
+
         specs = (
             (W.v4_routed_w1_w, "w1.weight", torch.int8, (8, 8)),
             (W.v4_routed_w1_s, "w1.scale", torch.float8_e8m0fnu, (8, 4)),
@@ -214,12 +216,38 @@ class PureTpPreshardTest(unittest.TestCase):
                     values = torch.ones_like(values).to(dtype)
                 else:
                     values = values.to(dtype)
-                tensors[
-                    f"layers.0.ffn.experts.{expert}.{suffix}"
-                ] = values
+                tensors[f"layers.0.ffn.experts.{expert}.{suffix}"] = values
+            full = torch.stack(list(tensors.values()))
+            # CUDA consumes full routed weights even at TP>1. Only the chosen
+            # PPU plan shards the intermediate dimension, including its scales.
             for rank in (0, 1):
-                with self.subTest(name=name, rank=rank):
-                    self._assert_parity(weight, tensors, rank=rank)
+                for preparation in (None, routed_tp_preparation()):
+                    with self.subTest(
+                        name=name, rank=rank, ppu=preparation is not None
+                    ):
+                        self._assert_parity(
+                            weight,
+                            tensors,
+                            rank=rank,
+                            preshard=preparation is not None,
+                            weight_preparation=preparation,
+                        )
+                        actual = weight._split(
+                            full, _config(rank, weight_preparation=preparation)
+                        )[name]
+                        axis = 2 if suffix.startswith("w2") else 1
+                        expected = (
+                            full
+                            if preparation is None
+                            else full.chunk(2, dim=axis)[rank]
+                        )
+                        self.assertEqual(actual.shape, expected.shape)
+                        self.assertTrue(
+                            torch.equal(
+                                actual.view(torch.uint8),
+                                expected.contiguous().view(torch.uint8),
+                            )
+                        )
 
 
 if __name__ == "__main__":

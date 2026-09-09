@@ -840,6 +840,10 @@ def _get_startup_real_warmup_speculative_reserve_step(
     if sp_type in (None, "", SpeculativeType.NONE):
         return 0
     gamma = int(getattr(sp_config, "gen_num_per_cycle", 0) or 0)
+    if sp_type == SpeculativeType.DSPARK:
+        # Keep startup request sizing identical to NormalEngine's fixed DSpARK
+        # reserve, including async rounds whose host bookkeeping can lag.
+        return 3 * gamma
     # Match GenerateStream::useStreamAsyncReserveTokens(): one verify window
     # in synchronous mode, or two in-flight proposal windows when async
     # bookkeeping is on.

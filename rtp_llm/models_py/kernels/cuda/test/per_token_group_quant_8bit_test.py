@@ -324,10 +324,40 @@ class PerTokenGroupQuantTest(TestCase):
             column_major_scales=column_major_scales,
             scale_tma_aligned=scale_tma_aligned,
         )
-        print(f"x_q_triton = {x_q_triton}")
-        print(f"x_s_triton = {x_s_triton}")
-        print(f"x_q_sglang = {x_q_sglang}")
-        print(f"x_s_sglang = {x_s_sglang}")
+        # Compare, do not just print. This target runs on L20 rather than A10
+        # precisely so the Triton reference above can execute (it stores fp8e4nv,
+        # which Triton only permits at capability >= 89), and printing both
+        # results meant the reference cost a GPU slot while gating nothing -- the
+        # two could disagree completely and the test would still pass.
+        #
+        # Quantized values are compared to within one fp8 ULP, not exactly. Both
+        # paths round the same fp16 input to the same fp8 grid with a per-group
+        # scale that agrees to the tolerance asserted below, but they are
+        # independent implementations and round half-way cases at the grid
+        # boundary differently. That shows up as a data-dependent handful of
+        # elements off by a single code (observed greatest relative difference
+        # 0.125, i.e. exactly one e4m3 mantissa step), so an exact comparison is
+        # flaky across GPU archs while a >= 2 ULP disagreement is still caught.
+        # finfo.eps is one mantissa step; finfo.tiny*eps is one subnormal step,
+        # which bounds the near-zero region where the relative term vanishes.
+        q_finfo = torch.finfo(dst_dtype)
+        torch.testing.assert_close(
+            x_q_sglang.to(torch.float32),
+            x_q_triton.to(torch.float32),
+            rtol=q_finfo.eps,
+            atol=q_finfo.tiny * q_finfo.eps,
+            msg=lambda m: (
+                "quantized values differ from the Triton reference by more "
+                f"than one fp8 ULP: {m}"
+            ),
+        )
+        torch.testing.assert_close(
+            x_s_sglang.to(torch.float32),
+            x_s_triton.to(torch.float32),
+            rtol=1e-6,
+            atol=1e-8,
+            msg=lambda m: f"scales differ from the Triton reference: {m}",
+        )
 
     def test_per_token_group_quant(self):
         for params in itertools.product(

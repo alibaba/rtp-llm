@@ -75,6 +75,27 @@ class ServerArgsSetTest(TestCase):
         os.environ.update(self._environ_backup)
         sys.argv = self._argv_backup
 
+    def test_allocator_dump_config_requires_secret_and_valid_cooldown(self):
+        from rtp_llm.config.py_config_modules import ServerConfig
+
+        config = ServerConfig()
+        config.enable_torch_allocator_dump = True
+        with self.assertRaisesRegex(ValueError, "auth_token"):
+            config.validate_allocator_dump_config()
+
+        config.torch_allocator_dump_auth_token = "secret"
+        for cooldown in (-1.0, float("nan"), float("inf"), float("-inf")):
+            config.torch_allocator_dump_cooldown_seconds = cooldown
+            with self.subTest(cooldown=cooldown), self.assertRaisesRegex(
+                ValueError, "finite and non-negative"
+            ):
+                config.validate_allocator_dump_config()
+
+        config.torch_allocator_dump_cooldown_seconds = 0
+        config.torch_allocator_dump_auth_header = "bad header"
+        with self.assertRaisesRegex(ValueError, "valid HTTP header"):
+            config.validate_allocator_dump_config()
+
     def test_env_vars_set_to_py_env_configs(self):
         """Test that environment variables are correctly set to py_env_configs."""
         # Set environment variables
@@ -94,6 +115,10 @@ class ServerArgsSetTest(TestCase):
         os.environ["REMOTE_JIT_DIR"] = "dfs://bucket/jit/cache"
         os.environ["FRONTEND_PRE_STOP_DRAIN_SECONDS"] = "2.5"
         os.environ["DASH_SC_GRPC_PRE_STOP_DRAIN_SECONDS"] = "9"
+        os.environ["RTP_LLM_ENABLE_TORCH_ALLOCATOR_DUMP"] = "true"
+        os.environ["RTP_LLM_TORCH_ALLOCATOR_DUMP_AUTH_TOKEN"] = "test-secret"
+        os.environ["RTP_LLM_TORCH_ALLOCATOR_DUMP_AUTH_HEADER"] = "X-Test-Dump-Token"
+        os.environ["RTP_LLM_TORCH_ALLOCATOR_DUMP_COOLDOWN_SECONDS"] = "30"
         os.environ["LOADER_RECYCLE_HANDLES"] = "false"
         os.environ["MOE_PURE_TP_PRESHARD"] = "true"
         os.environ["MM_IMAGE_MAX_FILE_SIZE_KB"] = "2048"
@@ -166,6 +191,20 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(
             py_env_configs.server_config.dash_sc_grpc_pre_stop_drain_seconds, 9.0
         )
+        self.assertTrue(py_env_configs.server_config.enable_torch_allocator_dump)
+        self.assertEqual(
+            py_env_configs.server_config.torch_allocator_dump_auth_token,
+            "test-secret",
+        )
+        self.assertEqual(
+            py_env_configs.server_config.torch_allocator_dump_auth_header,
+            "X-Test-Dump-Token",
+        )
+        self.assertEqual(
+            py_env_configs.server_config.torch_allocator_dump_cooldown_seconds,
+            30.0,
+        )
+        self.assertNotIn("test-secret", py_env_configs.server_config.to_string())
 
         # Verify runtime_config (warm_up is now in RuntimeConfig)
         self.assertEqual(py_env_configs.runtime_config.warm_up, True)  # bool in C++
@@ -573,6 +612,33 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(cfg.tool_call_loop_begin_marker, "<tool_call>")
         self.assertEqual(cfg.tool_call_loop_end_marker, "</tool_call>")
 
+    def test_output_repetition_max_period_cli_boundaries(self):
+        from rtp_llm.config.py_config_modules import PyEnvConfigs
+        from rtp_llm.server.server_args.repetition_detection_group_args import (
+            MAX_OUTPUT_REPETITION_PERIOD,
+            init_repetition_detection_group_args,
+        )
+        from rtp_llm.server.server_args.server_args import EnvArgumentParser
+
+        def parse_period(value: int):
+            configs = PyEnvConfigs()
+            parser = EnvArgumentParser()
+            parser.set_root_config(configs)
+            init_repetition_detection_group_args(
+                parser, configs.repetition_detection_config
+            )
+            parser.parse_args(["--output_repetition_max_period", str(value)])
+            return configs.repetition_detection_config.output_repetition_max_period
+
+        self.assertEqual(parse_period(0), 1)
+        self.assertEqual(parse_period(-7), 1)
+        self.assertEqual(
+            parse_period(MAX_OUTPUT_REPETITION_PERIOD),
+            MAX_OUTPUT_REPETITION_PERIOD,
+        )
+        with self.assertRaises(SystemExit):
+            parse_period(MAX_OUTPUT_REPETITION_PERIOD + 1)
+
     def test_dash_sc_default_allows_large_requests_on_both_ends(self):
         from rtp_llm.server.server_args.grpc_group_args import (
             default_dash_sc_grpc_config_json,
@@ -624,8 +690,11 @@ class ServerArgsGrammarConfigTest(TestCase):
 
         self.assertEqual(g.constrained_json_disable_any_whitespace, False)
         self.assertEqual(g.terminate_without_stop_token, False)
-        self.assertEqual(g.num_workers, 8)
-        self.assertEqual(g.compiler_cache_bytes, 512 * 1024 * 1024)
+        self.assertEqual(g.num_workers, 0)
+        self.assertEqual(g.compile_timeout_ms, 2000)
+        self.assertEqual(g.compile_concurrency, 1)
+        self.assertEqual(g.compile_queue_size, 2)
+        self.assertEqual(g.compiler_cache_bytes, 2 * 1024 * 1024 * 1024)
 
     def test_grammar_parser_defaults_override_config_initial_values(self):
         """The CLI declaration is the source of truth for grammar defaults."""
@@ -640,6 +709,9 @@ class ServerArgsGrammarConfigTest(TestCase):
         g.constrained_json_disable_any_whitespace = True
         g.terminate_without_stop_token = True
         g.num_workers = 17
+        g.compile_timeout_ms = 1
+        g.compile_concurrency = 2
+        g.compile_queue_size = 3
         g.compiler_cache_bytes = 1
 
         parser = EnvArgumentParser()
@@ -649,8 +721,11 @@ class ServerArgsGrammarConfigTest(TestCase):
 
         self.assertEqual(g.constrained_json_disable_any_whitespace, False)
         self.assertEqual(g.terminate_without_stop_token, False)
-        self.assertEqual(g.num_workers, 8)
-        self.assertEqual(g.compiler_cache_bytes, 512 * 1024 * 1024)
+        self.assertEqual(g.num_workers, 0)
+        self.assertEqual(g.compile_timeout_ms, 2000)
+        self.assertEqual(g.compile_concurrency, 1)
+        self.assertEqual(g.compile_queue_size, 2)
+        self.assertEqual(g.compiler_cache_bytes, 2 * 1024 * 1024 * 1024)
 
     def test_grammar_cmd_args(self):
         """Every CLI flag binds to the right config field, with correct types."""
@@ -662,6 +737,12 @@ class ServerArgsGrammarConfigTest(TestCase):
             "1",
             "--grammar_num_workers",
             "7",
+            "--grammar_compile_timeout_ms",
+            "1234",
+            "--grammar_compile_concurrency",
+            "3",
+            "--grammar_compile_queue_size",
+            "5",
             "--grammar_compiler_cache_bytes",
             "67108864",
         ]
@@ -671,7 +752,39 @@ class ServerArgsGrammarConfigTest(TestCase):
         self.assertEqual(g.constrained_json_disable_any_whitespace, True)
         self.assertEqual(g.terminate_without_stop_token, True)
         self.assertEqual(g.num_workers, 7)
+        self.assertEqual(g.compile_timeout_ms, 1234)
+        self.assertEqual(g.compile_concurrency, 3)
+        self.assertEqual(g.compile_queue_size, 5)
         self.assertEqual(g.compiler_cache_bytes, 67108864)
+
+    def test_grammar_env_args(self):
+        os.environ.update(
+            {
+                "GRAMMAR_NUM_WORKERS": "9",
+                "GRAMMAR_COMPILE_TIMEOUT_MS": "3456",
+                "GRAMMAR_COMPILE_CONCURRENCY": "4",
+                "GRAMMAR_COMPILE_QUEUE_SIZE": "6",
+                "GRAMMAR_COMPILER_CACHE_BYTES": "33554432",
+            }
+        )
+
+        g = self._setup().grammar_config
+        self.assertEqual(g.num_workers, 9)
+        self.assertEqual(g.compile_timeout_ms, 3456)
+        self.assertEqual(g.compile_concurrency, 4)
+        self.assertEqual(g.compile_queue_size, 6)
+        self.assertEqual(g.compiler_cache_bytes, 33554432)
+
+    def test_non_positive_bounded_compile_args_are_rejected(self):
+        for flag in (
+            "--grammar_compile_timeout_ms",
+            "--grammar_compile_concurrency",
+            "--grammar_compile_queue_size",
+        ):
+            with self.subTest(flag=flag):
+                sys.argv = ["prog", flag, "0"]
+                with self.assertRaises(SystemExit):
+                    self._setup()
 
 
 if __name__ == "__main__":

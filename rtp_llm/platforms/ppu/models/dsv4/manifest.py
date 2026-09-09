@@ -1,7 +1,7 @@
 """Public PPU module descriptions; no PPU kernel or model imports."""
 
 from rtp_llm.device.device_type import DeviceType
-from rtp_llm.models_py.pluggable.dsv4_specs import (
+from rtp_llm.models.dsv4.specs import (
     CONTRACTS,
     STATE_FORMAT,
     STATE_FORMAT_FP4,
@@ -243,6 +243,7 @@ def register_modules(registry):
         builder = {
             "model": "build_decode_model",
             "attention": "build_attention_fp4",
+            "moe": "build_decode_moe",
         }.get(kind, "build_" + kind)
         registry.register_implementation(
             ModuleImplSpec(
@@ -257,13 +258,21 @@ def register_modules(registry):
                 contract_id=contract,
                 weight_format_id=WEIGHT_FORMAT,
                 state_format_id=STATE_FORMAT_FP4,
+                validate_initialized=(
+                    "rtp_llm.models.dsv4.builders:validate_initialized"
+                    if kind == "model"
+                    else None
+                ),
+                describe_resources=(
+                    "rtp_llm.models.dsv4.resources:fp4_allocator_inputs"
+                    if kind == "model"
+                    else None
+                ),
                 collective_protocol_id="ppu.dsv4.decode.tp1-dp8-ep8-mxfp4-ll.v1",
                 capabilities={"decode"},
                 auto_selectable=False,
                 describe_build_requests=(
-                    "rtp_llm.models_py.pluggable.dsv4_specs:" + describe
-                    if describe
-                    else None
+                    "rtp_llm.models.dsv4.specs:" + describe if describe else None
                 ),
             )
         )
@@ -290,6 +299,21 @@ def register_modules(registry):
                 contract_id=contract,
                 weight_format_id=WEIGHT_FORMAT,
                 state_format_id=STATE_FORMAT_FP4,
+                validate_initialized=(
+                    "rtp_llm.models.dsv4.builders:validate_initialized"
+                    if kind == "model"
+                    else None
+                ),
+                describe_resources=(
+                    "rtp_llm.models.dsv4.resources:fp4_allocator_inputs"
+                    if kind == "model"
+                    else None
+                ),
+                prepare_weights=(
+                    "rtp_llm.platforms.ppu.models.dsv4.resources:routed_tp_preparation"
+                    if kind == "moe"
+                    else None
+                ),
                 collective_protocol_id=(
                     "ppu.dsv4.moe.tp4-shared-sharded-bf16-reduce.v2"
                     if kind == "moe"
@@ -298,9 +322,7 @@ def register_modules(registry):
                 capabilities={"prefill"},
                 auto_selectable=False,
                 describe_build_requests=(
-                    "rtp_llm.models_py.pluggable.dsv4_specs:" + describe
-                    if describe
-                    else None
+                    "rtp_llm.models.dsv4.specs:" + describe if describe else None
                 ),
             )
         )
@@ -318,13 +340,26 @@ def register_modules(registry):
                 contract_id=contract,
                 weight_format_id=WEIGHT_FORMAT,
                 state_format_id=STATE_FORMAT,
+                validate_initialized=(
+                    "rtp_llm.models.dsv4.builders:validate_initialized"
+                    if kind == "model"
+                    else None
+                ),
+                describe_resources=(
+                    "rtp_llm.models.dsv4.resources:fp8_allocator_inputs"
+                    if kind == "model"
+                    else None
+                ),
+                prepare_weights=(
+                    "rtp_llm.platforms.ppu.models.dsv4.resources:routed_tp_preparation"
+                    if kind == "moe"
+                    else None
+                ),
                 collective_protocol_id="ppu.dsv4.tp4-fp32-routed-replicated-shared.v1",
                 capabilities={"prefill"},
                 auto_selectable=False,
                 describe_build_requests=(
-                    ("rtp_llm.models_py.pluggable.dsv4_specs:" + describe)
-                    if describe
-                    else None
+                    ("rtp_llm.models.dsv4.specs:" + describe) if describe else None
                 ),
             )
         )
@@ -340,6 +375,7 @@ def register_modules(registry):
             contract_id=CONTRACTS["moe"],
             weight_format_id=WEIGHT_FORMAT,
             state_format_id=STATE_FORMAT,
+            prepare_weights="rtp_llm.platforms.ppu.models.dsv4.resources:routed_tp_preparation",
             collective_protocol_id="ppu.dsv4.moe.tp4-shared-sharded-bf16-reduce.v2",
             capabilities={"prefill"},
             auto_selectable=False,

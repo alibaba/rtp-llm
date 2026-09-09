@@ -4,7 +4,7 @@ import copy
 import unittest
 from types import SimpleNamespace
 
-from rtp_llm.models_py.pluggable.dsv4_resources import (
+from rtp_llm.models.dsv4.resources import (
     cache_geometry_snapshot,
     opaque_cache_layouts,
     validate_bound_cache,
@@ -51,11 +51,11 @@ class CacheGeometryTest(unittest.TestCase):
 @unittest.skipIf(torch is None, "requires Torch and native cache descriptors")
 class CacheResourceTest(unittest.TestCase):
     def setUp(self):
+        from rtp_llm.models.dsv4.specs import cache_description_snapshot
         from rtp_llm.models.dsv4_kv_cache import (
             Dsv4IndexerCacheMode,
             build_dsv4_kv_cache_spec_descs,
         )
-        from rtp_llm.models_py.pluggable.dsv4_specs import cache_description_snapshot
 
         descs = build_dsv4_kv_cache_spec_descs(
             3,

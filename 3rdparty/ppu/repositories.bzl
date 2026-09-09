@@ -83,4 +83,3 @@ def ppu_sdk_repositories():
             "@rtp_llm//3rdparty/ppu/flashinfer:0001-cuda13-cub-reduce-ops.patch",
         ],
     )
-

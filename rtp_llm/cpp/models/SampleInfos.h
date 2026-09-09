@@ -37,8 +37,6 @@ public:
 
 public:
     torch::Tensor         logits;         // shape: [batch_size, vocab_size]
-    torch::Tensor         numerical_failure_mask; // shape: [batch_size], dtype: bool
-    std::shared_ptr<void> numerical_failure_lease;
     mutable torch::Tensor token_ids;      // shape: [batch_size, max_length]
     torch::Tensor         input_lengths;  // shape: [batch_size]
     // shape: [decoder_batch_size]
@@ -68,6 +66,10 @@ public:
     mutable torch::Tensor all_probs;      // shape: [batch_size, vocab_size]
 
     std::vector<at::Generator> generator;
+
+    // Append optional execution status to preserve positional aggregate callers.
+    torch::Tensor         numerical_failure_mask; // shape: [batch_size], dtype: bool
+    std::shared_ptr<void> numerical_failure_lease;
 };
 
 struct SamplerOutput {

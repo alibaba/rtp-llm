@@ -13,7 +13,7 @@ py_test(
 
     ] + [":triton", ":torch", ":numpy"],
     visibility = ["//visibility:public"],
-    exec_properties = {'gpu':'H20'},
+    exec_properties = {'gpu':'A10'},
 )
 
 py_test(
@@ -26,5 +26,5 @@ py_test(
         "//rtp_llm/test/utils:test_util",
     ] + [":triton", ":torch", ":numpy"],
     visibility = ["//visibility:public"],
-    exec_properties = {'gpu':'H20'},
+    exec_properties = {'gpu':'A10'},
 )

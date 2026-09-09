@@ -66,3 +66,12 @@ py_test(
     deps = ["//rtp_llm/models_py:models", "//rtp_llm:torch"],
     tags = ["manual", "gpu", "ppu"],
 )
+
+py_test(
+    name = "test_ppu_grouped_fp4_strategy_source",
+    srcs = ["ppu/models/dsv4/test/test_ppu_grouped_fp4_strategy_source.py"],
+    main = "ppu/models/dsv4/test/test_ppu_grouped_fp4_strategy_source.py",
+    data = [":platform_sources", "//rtp_llm/models_py:dsv4_moe_registry_source"],
+    tags = ["source-only"],
+    visibility = ["//visibility:public"],
+)

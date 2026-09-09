@@ -52,6 +52,29 @@ class ActualModule:
         return module
 
 
+class RegistryDiscoveryTest(unittest.TestCase):
+    def test_other_model_registry_does_not_acquire_v4_implementations(self):
+        from unittest.mock import patch
+
+        from rtp_llm.models_py.pluggable.bootstrap import get_module_registry
+
+        with patch(
+            "rtp_llm.models_py.pluggable.bootstrap.import_optional_internal_source_entrypoint",
+            return_value=False,
+        ):
+            registry = get_module_registry(lambda registry: None)
+        self.assertTrue(registry.frozen)
+        self.assertFalse(registry.has_module("rtp.dsv4.model"))
+        with self.assertRaisesRegex(ValueError, "Unknown implementation"):
+            registry.implementation("rtp.dsv4.model", "ppu.dsv4.model.v1")
+
+    def test_unknown_implementation_module_still_rejected(self):
+        registry = ModuleRegistry()
+        registry.register_implementation(impl_for())
+        with self.assertRaisesRegex(ValueError, "Unknown module"):
+            registry.freeze()
+
+
 def build(*, build_ctx, request, weight):
     BUILD_CALLS.append(request.path)
     return ActualModule(weight, build_ctx)

@@ -39,6 +39,23 @@ class DeviceBase:
     def get_device_id(self) -> int:
         return get_device_id()
 
+    def device_string(self, local_rank: int) -> str:
+        return "cpu"
+
+    def runtime_context(self, local_rank: int):
+        from rtp_llm.device.runtime import DeviceRuntimeContext
+
+        kind = self.get_device_type()
+        return DeviceRuntimeContext(
+            kind, kind.name, local_rank, device_string=self.device_string(local_rank)
+        )
+
+    def prepare_model_runtime(self, model_config, engine_config) -> None:
+        """Prepare backend-owned workspaces after base groups, before allocation."""
+
+    def configure_model_weight_loader(self, model_config, loader) -> None:
+        """Legacy backend preparation; explicit module plans bypass this hook."""
+
     @property
     def support_dio_load(self) -> bool:
         return False

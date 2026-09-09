@@ -1,0 +1,12 @@
+{
+  "block_size": 1024,
+  "sleep_scale": 1.0,
+  "prefill": {
+    "scale": 0.40
+  },
+  "decode": {
+    "step_base_ms": 126.3,
+    "step_per_running_ms": 5.0,
+    "tokens_per_step": 2.6
+  }
+}

@@ -25,6 +25,7 @@ def _mhc_pre_big_fuse(
     stabilize_comb: bool = False,
     fuse_norm: bool = False,
     norm_eps: float = 1e-6,
+    parallel_reduction: bool = False,
 ):
     num_tokens = T.dynamic("num_tokens")
     mhc_mult3 = mhc_mult * (2 + mhc_mult)
@@ -50,7 +51,7 @@ def _mhc_pre_big_fuse(
             if T.get_thread_binding() < 32:
                 rms = T.alloc_fragment(1, T.float32)
                 mixes = T.alloc_fragment(mhc_mult3, T.float32)
-                if n_splits > 1:
+                if parallel_reduction and n_splits > 1:
                     # Parallel reduction avoids a dependent global-memory load
                     # for each split. Keep the small HC projections in FP32.
                     partial_sqrsum = T.alloc_fragment(n_splits, T.float32)
@@ -61,6 +62,15 @@ def _mhc_pre_big_fuse(
                         partial_mixes[j, split] = gemm_out_mul[split, pid, j]
                     T.reduce_sum(partial_sqrsum, rms, dim=0)
                     T.reduce_sum(partial_mixes, mixes, dim=1)
+                elif n_splits > 1:
+                    # Preserve the CUDA consumer's ordered split reduction.
+                    rms[0] = 0
+                    for split in T.serial(n_splits):
+                        rms[0] += gemm_out_sqrsum[split, pid]
+                    for j in T.Parallel(mhc_mult3):
+                        mixes[j] = 0
+                        for split in T.serial(n_splits):
+                            mixes[j] += gemm_out_mul[split, pid, j]
                 else:
                     rms[0] = gemm_out_sqrsum[0, pid]
                     for j in T.Parallel(mhc_mult3):

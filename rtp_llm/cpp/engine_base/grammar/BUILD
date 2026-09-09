@@ -46,10 +46,12 @@ cc_library(
     deps = [
         "//rtp_llm/cpp/config:config_modules",
         "//rtp_llm/cpp/config:special_tokens",
+        "//rtp_llm/cpp/metrics:metrics",
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/utils:error_code",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
+        "@havenask//aios/autil:lock_free",
         "@xgrammar//:xgrammar",
     ] + torch_deps(),
     copts = copts(),

@@ -7,6 +7,29 @@ import sys
 from functools import wraps
 
 
+def prepare_model_runtime(model_config, engine_config):
+    if model_config.model_type == "deepseek_v4":
+        from .models.dsv4.communication import maybe_warmup_ppu_tp_communication
+
+        context = engine_config.module_build_context
+        options = (
+            context.selection.model_metadata["execution_options"]
+            if context is not None
+            else os.environ
+        )
+        maybe_warmup_ppu_tp_communication(
+            engine_config.parallelism_config, options=options
+        )
+
+
+def configure_model_weight_loader(model_config, loader):
+    config = loader.get_load_config()
+    if model_config.model_type == "deepseek_v4" and config.moe_pure_tp_mode:
+        from .models.dsv4.resources import routed_tp_preparation
+
+        config.weight_preparation = routed_tp_preparation()
+
+
 class PpuStreamPool:
     """Auxiliary streams owned by one model provider, shared across its layers.
 

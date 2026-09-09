@@ -13,6 +13,7 @@
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/DevicePin.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
+#include "rtp_llm/cpp/utils/TorchCudaOom.h"
 #include "autil/TimeUtility.h"
 #include "rtp_llm/cpp/normal_engine/speculative/MtpExecutor.h"
 #include <c10/core/InferenceMode.h>
@@ -20,6 +21,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <list>
 #include <memory>
 #include <thread>
@@ -131,7 +133,20 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
                                 "output_vocab_padded_size must be >= output_vocab_ids.size()");
     }
     if (propose_params_) {
-        reserve_step_ = propose_params_->gen_num_per_circle + 1;
+        const auto gamma = propose_params_->gen_num_per_circle;
+        if (propose_params_->sp_type == SP_TYPE_DSPARK) {
+            RTP_LLM_CHECK_WITH_INFO(gamma <= static_cast<size_t>(std::numeric_limits<int>::max()) / 3,
+                                    "DSpARK gen_num_per_circle is too large: %zu",
+                                    gamma);
+            // An async DSpark round can expose one extra accepted window before
+            // host bookkeeping catches up, then seed the next gamma-wide block.
+            reserve_step_ = static_cast<int>(3 * gamma);
+        } else {
+            RTP_LLM_CHECK_WITH_INFO(gamma < static_cast<size_t>(std::numeric_limits<int>::max()),
+                                    "gen_num_per_circle is too large: %zu",
+                                    gamma);
+            reserve_step_ = static_cast<int>(gamma + 1);
+        }
     } else {
         reserve_step_ = 0;
     }
@@ -243,6 +258,16 @@ NormalEngine::~NormalEngine() {
     (void)stop();
 }
 
+size_t NormalEngine::warmUpReservedBlockCount(size_t seq_len, size_t reserve_tokens, size_t tokens_per_block) {
+    RTP_LLM_CHECK_WITH_INFO(tokens_per_block > 0, "decode warmup tokens_per_block must be positive");
+    RTP_LLM_CHECK_WITH_INFO(reserve_tokens <= std::numeric_limits<size_t>::max() - seq_len,
+                            "decode warmup token count overflow: seq_len=%zu reserve_tokens=%zu",
+                            seq_len,
+                            reserve_tokens);
+    const size_t reserved_tokens = seq_len + reserve_tokens;
+    return reserved_tokens / tokens_per_block + (reserved_tokens % tokens_per_block != 0);
+}
+
 absl::StatusOr<GenerateStreamPtr> NormalEngine::preRun(const std::shared_ptr<GenerateInput>& generate_input,
                                                        preRunMode                            mode) {
     c10::InferenceMode inference_guard(true);
@@ -257,8 +282,10 @@ absl::StatusOr<GenerateStreamPtr> NormalEngine::preRun(const std::shared_ptr<Gen
     stream->setReserveStep(reserve_step_);
     if (mode == preRunMode::decode_warm_up) {
         stream->setIsContextStream(false);
-        size_t seq_size_per_block = model_config_.attn_config.tokens_per_block;
-        size_t reserved_blocks    = (stream->seqLength() + seq_size_per_block - 1) / seq_size_per_block + reserve_step_;
+        const size_t seq_size_per_block = model_config_.attn_config.tokens_per_block;
+        const size_t reserve_tokens     = reserve_step_ > 0 ? static_cast<size_t>(reserve_step_) : 0;
+        const size_t reserved_blocks =
+            warmUpReservedBlockCount(stream->seqLength(), reserve_tokens, seq_size_per_block);
         stream->fakeInitKVBlock(reserved_blocks);
     } else if (mode == preRunMode::build_system_prompt) {
         THROW_IF_STATUS_ERROR(stream->initKVBlock());
@@ -579,7 +606,7 @@ NormalEngine::enqueueMultiple(const std::vector<std::shared_ptr<GenerateInput>>&
     return scheduler_->enqueueGroup(streams);
 }
 
-absl::Status NormalEngine::step() {
+absl::Status NormalEngine::step() try {
     RTP_LLM_PROFILE_SCOPE("engine.normal.step_work");
     while (pause_) {
         // wait 50ms if system paused.
@@ -653,6 +680,11 @@ absl::Status NormalEngine::step() {
     }
 
     return status;
+} catch (const std::exception& exception) {
+    if (isTorchCudaOom(exception)) {
+        dumpFatalTorchCudaOomDiagnostics(parallelism_config.local_rank, exception);
+    }
+    throw;
 }
 
 bool NormalEngine::updateEplbConfig(const EPLBConfig& config) {

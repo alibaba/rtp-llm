@@ -334,23 +334,6 @@ def sp_moe_w1(
         return t
 
 
-def sp_v4_moe_out(
-    t: torch.Tensor,
-    tp: int,
-    tp_rank: int,
-    ep: int,
-    ep_rank: int,
-    dp: int,
-    dp_rank: int,
-    moe_pure_tp_mode: bool = False,
-    **kwargs: Any,
-) -> torch.Tensor:
-    """Shard a standalone DSV4 routed W1/W3 intermediate dimension."""
-    if moe_pure_tp_mode:
-        return t.split(t.shape[1] // tp, dim=1)[tp_rank]
-    return t
-
-
 def stack_(ts: List[torch.Tensor]):
     return stack_0(ts)
 
@@ -1669,12 +1652,12 @@ class W:
         v4_shared_w3_s: sp_id,
         v4_shared_w13_w: sp_id,
         v4_shared_w13_s: sp_id,
-        v4_routed_w1_w: sp_v4_moe_out,
-        v4_routed_w1_s: sp_v4_moe_out,
-        v4_routed_w2_w: sp_moe_neg1,
-        v4_routed_w2_s: sp_moe_neg1,
-        v4_routed_w3_w: sp_v4_moe_out,
-        v4_routed_w3_s: sp_v4_moe_out,
+        v4_routed_w1_w: sp_id,
+        v4_routed_w1_s: sp_id,
+        v4_routed_w2_w: sp_id,
+        v4_routed_w2_s: sp_id,
+        v4_routed_w3_w: sp_id,
+        v4_routed_w3_s: sp_id,
         v4_mtp_enorm: sp_id,
         v4_mtp_hnorm: sp_id,
         v4_mtp_norm: sp_id,

@@ -8,7 +8,12 @@
 
 #include <memory>
 #include <atomic>
+#include <cstddef>
+#include <cstdint>
+#include <exception>
+#include <functional>
 #include <mutex>
+#include <vector>
 
 #if USING_ROCM
 #include <hip/hip_runtime.h>
@@ -24,6 +29,10 @@ namespace rtp_llm {
 
 class CacheConfig;
 class CacheStore;
+
+using CacheStoreCompletionCallback = std::function<void(std::exception_ptr)>;
+using CacheStoreCompletionRegistrar = std::function<CacheStoreCompletionCallback(
+    const std::vector<int64_t>&, const std::vector<int32_t>&, size_t)>;
 
 // ===================================================================
 // Runtime lifecycle
@@ -140,7 +149,8 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
                             size_t                               cache_model_id,
                             int                                  cp_rank,
                             int                                  cp_size,
-                            std::shared_ptr<torch::Event>        pre_created_event);
+                            std::shared_ptr<torch::Event>        pre_created_event,
+                            CacheStoreCompletionRegistrar        register_store_completion = nullptr);
 
 // ===================================================================
 // Static ops (weight preprocessing)

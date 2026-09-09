@@ -54,6 +54,10 @@ class ModuleRegistry:
         except KeyError:
             raise ValueError(f"Unknown module {module_id!r}") from None
 
+    def has_module(self, module_id):
+        """Let platform discovery attach only to registered model contracts."""
+        return module_id in self._modules
+
     def implementation(self, module_id, impl_id):
         """Read a frozen descriptor without importing its builder or probing a device."""
         if not self._frozen:

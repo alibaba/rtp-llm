@@ -120,13 +120,12 @@ public class ServerScheduleLatencyRecorder {
 
     /**
      * Normalized priority used as the batch-wait histogram bucket key.
-     * Delegates to {@link BalanceContext#getPriority()} (Auto-TPM budget
-     * first, then {@code request.priority}); falls back to 0 when neither
-     * budget nor request is present, matching the proto3 pre-normalization
-     * default carried by legacy requests.
+     * Delegates to {@link BalanceContext#getPriority()} (immutable scheduling
+     * metadata first, then {@code request.priority}); falls back to 0 when
+     * neither source is present.
      */
     private static int resolvePriority(BalanceContext context) {
-        if (context.budget() == null && context.getRequest() == null) {
+        if (context.schedulingMetadata() == null && context.getRequest() == null) {
             return 0;
         }
         return context.getPriority();

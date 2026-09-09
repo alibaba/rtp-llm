@@ -194,12 +194,4 @@ public class EngineLocalView {
         return engineViews.size();
     }
 
-    /**
-     * Get all engine IP:Port set
-     *
-     * @return All engine IP:Port set
-     */
-    public Set<String> getAllEngineIpPorts() {
-        return engineViews.keySet();
-    }
 }

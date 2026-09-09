@@ -216,7 +216,7 @@ fused_permute_kernel(
             int local_vec_s = threadIdx.x - d1_local * VECS_PER_D1_SFA;
             int d1_s = d1_start + d1_local;
             int byte_offset = local_vec_s * SFA_VEC;
-            
+
             #pragma unroll
             for (int d0_offset = 0; d0_offset < ROWS_PER_ITER; ++d0_offset) {
                 int d0 = d0_base + d0_offset;

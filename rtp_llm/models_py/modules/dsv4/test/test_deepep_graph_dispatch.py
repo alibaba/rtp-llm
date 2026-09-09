@@ -4,10 +4,12 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
+
 from rtp_llm.models_py.distributed.deepep_wrapper import DeepEPMode, DeepEPWrapper
 from rtp_llm.models_py.modules.dsv4.moe.strategies.base import MoeCfg
-from rtp_llm.models_py.modules.dsv4.moe.strategies.deepep import (
-    DeepEPStrategy,
+from rtp_llm.models_py.modules.dsv4.moe.strategies.deepep import DeepEPStrategy
+from rtp_llm.platforms.ppu.models.dsv4.ppu_legacy_deepep import (
+    PpuLegacyDeepEPStrategy,
     _select_ppu_grouped_fp4_capacity,
 )
 
@@ -184,7 +186,7 @@ class DeepEPGraphDispatchTest(unittest.TestCase):
             use_accl_ep=True,
         )
         strategy = _strategy(max_tokens_per_rank=4)
-        strategy._ppu_grouped_fp4 = True
+        strategy = PpuLegacyDeepEPStrategy(strategy.cfg, options={})
         for name in ("_ppu_w13", "_ppu_s13", "_ppu_w2", "_ppu_s2"):
             setattr(strategy, name, torch.empty(0))
         expected = torch.full((1, 4), 3, dtype=torch.float32)
@@ -222,14 +224,14 @@ class DeepEPGraphDispatchTest(unittest.TestCase):
             },
         )
 
-    def test_low_latency_fails_closed_without_grouped_fp4(self) -> None:
+    def test_normal_strategy_rejects_low_latency_dispatch(self) -> None:
         DeepEPWrapper._instance = SimpleNamespace(
             mode=DeepEPMode.LOW_LATENCY,
             buffer=_FakeLowLatencyBuffer(),
             ll_num_max_token_per_rank=4,
             use_accl_ep=True,
         )
-        with self.assertRaisesRegex(RuntimeError, "requires the M890P grouped-FP4"):
+        with self.assertRaisesRegex(RuntimeError, "requires normal-mode dispatch"):
             _strategy()(self.x, self.weights, self.indices)
 
 

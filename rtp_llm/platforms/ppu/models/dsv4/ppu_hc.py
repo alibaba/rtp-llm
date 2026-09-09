@@ -122,6 +122,8 @@ class PpuHCUnit(TileLangHCUnit):
                 sinkhorn_repeat=self.hc_sinkhorn_iters,
                 backend=self._backend,
                 prenorm_gemm=self._prenorm_gemm,
+                prenorm_output="reduced",
+                stabilize_atomic=self._backend == "deepgemm",
                 prenorm_partials=self._prenorm_partials,
                 norm_weight=weight,
                 norm_eps=norm.variance_epsilon,
@@ -166,6 +168,8 @@ class PpuHCUnit(TileLangHCUnit):
             sinkhorn_repeat=sinkhorn_iters,
             backend=self._backend,
             prenorm_gemm=self._prenorm_gemm,
+            prenorm_output="reduced",
+            stabilize_atomic=self._backend == "deepgemm",
             prenorm_partials=self._prenorm_partials,
         )
         return layer_input, post, comb

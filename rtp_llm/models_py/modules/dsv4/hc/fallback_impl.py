@@ -26,9 +26,7 @@ def _tp_linear_mixes(
     if local_k == global_k:
         # Standard tensor parallelism keeps the residual hidden dimension
         # replicated after the embedding gather and output all-reduce.
-        rsqrt = torch.rsqrt(
-            rms_input.square().mean(-1, keepdim=True) + module.norm_eps
-        )
+        rsqrt = torch.rsqrt(rms_input.square().mean(-1, keepdim=True) + module.norm_eps)
         if not use_fp32:
             rsqrt = rsqrt.to(x_flat.dtype)
         return (F.linear(linear_input, weight) * rsqrt).float()
@@ -51,11 +49,9 @@ def _tp_linear_mixes(
             f"local={local_k}, global={global_k}"
         )
     start = tp_rank * local_dim
-    weight_shard = (
-        weight.view(weight.shape[0], hc_mult, global_dim)
-        [:, :, start : start + local_dim]
-        .reshape(weight.shape[0], local_k)
-    )
+    weight_shard = weight.view(weight.shape[0], hc_mult, global_dim)[
+        :, :, start : start + local_dim
+    ].reshape(weight.shape[0], local_k)
     local_square_sum = rms_input.square().sum(-1, keepdim=True)
     local_mixes = F.linear(linear_input, weight_shard).float()
     combined = torch.cat((local_square_sum, local_mixes), dim=-1)
@@ -75,29 +71,27 @@ def _hc_fallback_chunk_tokens(options: Optional[Mapping[str, str]] = None) -> in
         return 16384
 
 
-def _ppu_deepgemm_linear_mixes(module, x_flat: torch.Tensor) -> torch.Tensor:
-    """Run only the SGLang PPU PRE projection leaf.
+def _deepgemm_linear_mixes(module, x_flat: torch.Tensor) -> torch.Tensor:
+    """Single-split HC projection shared by CUDA and PPU SDKs.
 
-    ``tf32_hc_prenorm_gemm`` returns the FP32 projection and input square sum;
-    normalization and all subsequent Sinkhorn/PRE/POST math remain in the
-    accepted fallback implementation.  PPU uses a single reduced output plane
-    and requires zero-initialized outputs for stable precision.
+    With one producer split both ABIs expose one output plane. The norm and
+    mixing operations remain the PyTorch reference implementation.
     """
 
     if x_flat.dim() < 2 or not x_flat.is_contiguous():
         raise ValueError(
-            "PPU DeepGEMM mHC PRE requires a contiguous [...,K] tensor; "
+            "DeepGEMM mHC PRE requires a contiguous [...,K] tensor; "
             f"got shape={tuple(x_flat.shape)}, stride={tuple(x_flat.stride())}"
         )
     if not x_flat.is_cuda or x_flat.dtype != torch.bfloat16:
         raise ValueError(
-            "PPU DeepGEMM mHC PRE requires CUDA bfloat16 input; "
+            "DeepGEMM mHC PRE requires CUDA bfloat16 input; "
             f"got device={x_flat.device}, dtype={x_flat.dtype}"
         )
     weight = module.fn
     if weight.dtype != torch.float32 or not weight.is_contiguous():
         raise ValueError(
-            "PPU DeepGEMM mHC PRE requires contiguous FP32 fn weight; "
+            "DeepGEMM mHC PRE requires contiguous FP32 fn weight; "
             f"got shape={tuple(weight.shape)}, stride={tuple(weight.stride())}, "
             f"dtype={weight.dtype}"
         )
@@ -107,13 +101,11 @@ def _ppu_deepgemm_linear_mixes(module, x_flat: torch.Tensor) -> torch.Tensor:
     x_2d = x_flat.view(m, k)
     n, weight_k = (int(v) for v in weight.shape)
     if k != weight_k:
-        raise ValueError(f"PPU DeepGEMM mHC PRE K mismatch: input={k}, weight={weight_k}")
+        raise ValueError(f"DeepGEMM mHC PRE K mismatch: input={k}, weight={weight_k}")
 
     gemm_out = torch.zeros((1, m, n), dtype=torch.float32, device=x_flat.device)
     square_sum = torch.zeros((1, m), dtype=torch.float32, device=x_flat.device)
-    from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
-        tf32_hc_prenorm_gemm,
-    )
+    from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import tf32_hc_prenorm_gemm
 
     tf32_hc_prenorm_gemm(x_2d, weight, gemm_out, square_sum, 1)
     rsqrt = torch.rsqrt(square_sum[0].unsqueeze(-1) / k + module.norm_eps)
@@ -176,7 +168,7 @@ class FallbackHCUnit(HCUnitBase):
         if backend in ("", "fallback"):
             return _tp_linear_mixes(self, x_flat, use_fp32=True)
         if backend == "deepgemm":
-            return _ppu_deepgemm_linear_mixes(self, x_flat)
+            return _deepgemm_linear_mixes(self, x_flat)
         raise ValueError(
             "fallback mHC supports DSV4_MHC_PRE_GEMM_BACKEND in "
             f"{{'', 'fallback', 'deepgemm'}}, got {backend!r}"
@@ -225,9 +217,7 @@ class FallbackHCUnit(HCUnitBase):
                 ).to(dtype)
             y = y.view(*shape[:-2], shape[-1])
         else:
-            y = torch.sum(
-                pre.unsqueeze(-1) * x.view(*shape).float(), dim=-2
-            ).to(dtype)
+            y = torch.sum(pre.unsqueeze(-1) * x.view(*shape).float(), dim=-2).to(dtype)
         return y.to(dtype), post.unsqueeze(-1), comb
 
     def _post_impl(
@@ -252,13 +242,12 @@ class FallbackHCUnit(HCUnitBase):
             else int(torch.tensor(residual.shape[:-2]).prod().item())
         )
         chunk = _hc_fallback_chunk_tokens()
+
         def _compose_chunk(_x, _res, _post_b, _comb):
             # SGLang's TileLang mHC post kernel loads BF16 x/residual into
             # FP32 fragments and performs both products plus the HC reduction
             # in FP32.  Preserve that contract in the reference fallback.
-            y = torch.matmul(
-                _comb.float().transpose(-1, -2), _res.float()
-            )
+            y = torch.matmul(_comb.float().transpose(-1, -2), _res.float())
             y.add_(_post_b.float().unsqueeze(-1) * _x.float().unsqueeze(-2))
             return y.to(x.dtype)
 

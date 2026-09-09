@@ -14,13 +14,12 @@ import io.netty.channel.EventLoopGroup;
 import io.netty.channel.WriteBufferWaterMark;
 import io.netty.channel.socket.nio.NioSocketChannel;
 import lombok.Getter;
-import org.flexlb.cache.core.EngineLocalView;
-import org.flexlb.cache.core.GlobalCacheIndex;
 import org.flexlb.engine.grpc.monitor.GrpcReporter;
 import org.flexlb.engine.grpc.nameresolver.CustomNameResolver;
-import org.flexlb.util.CommonUtils;
 import org.flexlb.util.Logger;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 import java.util.concurrent.CompletableFuture;
@@ -33,84 +32,35 @@ import java.util.function.Function;
  * Engine gRPC client for worker status queries
  */
 @Component
-public class EngineGrpcClient extends AbstractGrpcClient<AbstractGrpcClient.GrpcStubWrapper> {
+public class EngineGrpcClient extends AbstractGrpcClient {
+
+    private static final int DEFAULT_CONNECT_TIMEOUT_MILLIS = 20;
+    public static final String CONNECT_TIMEOUT_PROPERTY =
+            "flexlb.engine-grpc.connect-timeout-ms";
 
     @Getter
     private final Executor executor;
     @Getter
     private final EventLoopGroup eventLoopGroup;
+    private final int connectTimeoutMillis;
 
+    @Autowired
     public EngineGrpcClient(CustomNameResolver nameResolver,
                             @Qualifier("managedChannelThreadPoolExecutor") ThreadPoolExecutor executor,
                             @Qualifier("managedChannelEventLoopGroup") EventLoopGroup eventLoopGroup,
-                            EngineLocalView engineLocalView,
-                            GlobalCacheIndex globalCacheIndex,
-                            GrpcReporter grpcReporter) {
-        super(engineLocalView, globalCacheIndex, grpcReporter);
+                            GrpcReporter grpcReporter,
+                            @Value("${" + CONNECT_TIMEOUT_PROPERTY + ":"
+                                    + DEFAULT_CONNECT_TIMEOUT_MILLIS + "}")
+                            int connectTimeoutMillis) {
+        super(grpcReporter);
+        if (connectTimeoutMillis <= 0) {
+            throw new IllegalArgumentException(
+                    "connectTimeoutMillis must be positive");
+        }
         this.executor = executor;
         this.eventLoopGroup = eventLoopGroup;
+        this.connectTimeoutMillis = connectTimeoutMillis;
         nameResolver.start(this);
-    }
-
-    /**
-     * Common method to execute gRPC calls with proper channel management and error handling
-     *
-     * @param requestTimeoutMs request timeout in milliseconds.
-     * @param serviceType      the service type for channel selection
-     */
-    private <R> R executeGrpcCall(String ip, int port,
-                                  Function<GrpcStubWrapper, R> grpcCall,
-                                  long requestTimeoutMs,
-                                  ServiceType serviceType) {
-
-        String channelKey = createKey(ip, port, serviceType);
-        Invoker invoker = getInvoker(channelKey);
-
-        if (invoker == null) {
-            Logger.warn("ip:{} {} grpc channel not found, creating and adding to pool", ip, serviceType);
-            ManagedChannel newChannel = createChannel(channelKey);
-            invoker = putInvokerIfAbsent(channelKey, newChannel);
-        } else if (invoker.getChannel().isShutdown() || invoker.getChannel().isTerminated()) {
-            Logger.warn("ip:{} {} grpc channel is shutdown or terminated, recreating and updating pool", ip, serviceType);
-            ManagedChannel newChannel = createChannel(channelKey);
-            invoker = replaceInvoker(channelKey, invoker, newChannel);
-        }
-
-        try {
-            invoker.updateLastUsedTime();
-            GrpcStubWrapper stubWrapper = invoker.getRpcServiceStub()
-                    .withDeadlineAfter(requestTimeoutMs, TimeUnit.MILLISECONDS);
-
-            long startTime = System.nanoTime();
-            R response = grpcCall.apply(stubWrapper);
-            long endTime = System.nanoTime();
-
-            // Calculate response body size in bytes
-            int responseSize = 0;
-            if (response instanceof MessageLite messageLite) {
-                responseSize = messageLite.getSerializedSize();
-            }
-
-            // Record statistics
-            long duration = TimeUnit.NANOSECONDS.toMillis(endTime - startTime);
-            grpcReporter.reportCallMetrics(serviceType.getOperationName(), duration, responseSize, false);
-
-            return response;
-        } catch (StatusRuntimeException e) {
-            if (isConnectionBrokenError(e)) {
-                invoker.markExpired();
-                long connectionDuration = invoker.getConnectionDuration();
-                grpcReporter.reportConnectionDuration(serviceType.getOperationName(), connectionDuration);
-                Logger.warn("Connection broken for {}:{} {}, duration: {}μs, recreating channel and retrying once, msh:{}",
-                        ip, port, serviceType, connectionDuration, e.getMessage());
-                return retryWithNewChannel(channelKey, invoker, grpcCall, requestTimeoutMs, ip, port, serviceType);
-            }
-            Logger.error("Exception during {} gRPC call for {}:{}", serviceType.getOperationName(), ip, port, e);
-            throw e;
-        } catch (Exception e) {
-            Logger.error("Exception during {} gRPC call for {}:{}", serviceType.getOperationName(), ip, port, e);
-            throw e;
-        }
     }
 
     private <R> CompletableFuture<R> executeGrpcCallAsync(String ip, int port,
@@ -257,37 +207,6 @@ public class EngineGrpcClient extends AbstractGrpcClient<AbstractGrpcClient.Grpc
                 message.contains("Incomplete header block fragment"));
     }
 
-    private <R> R retryWithNewChannel(String channelKey,
-                                      Invoker staleInvoker,
-                                      Function<GrpcStubWrapper, R> grpcCall,
-                                      long requestTimeoutMs,
-                                      String ip, int port,
-                                      ServiceType serviceType) {
-        ManagedChannel newChannel = createChannel(channelKey);
-        Invoker newInvoker = replaceInvoker(channelKey, staleInvoker, newChannel);
-
-        Logger.info("Retrying gRPC call with new channel for {}:{} {}", ip, port, serviceType);
-
-        GrpcStubWrapper stubWrapper = newInvoker.getRpcServiceStub()
-                .withDeadlineAfter(requestTimeoutMs, TimeUnit.MILLISECONDS);
-
-        long startTime = System.nanoTime();
-        R response = grpcCall.apply(stubWrapper);
-        long endTime = System.nanoTime();
-
-        // Calculate response body size in bytes
-        int responseSize = 0;
-        if (response instanceof MessageLite messageLite) {
-            responseSize = messageLite.getSerializedSize();
-        }
-
-        // Record retry statistics
-        long duration = TimeUnit.NANOSECONDS.toMillis(endTime - startTime);
-        grpcReporter.reportCallMetrics(serviceType.getOperationName(), duration, responseSize, true);
-
-        return response;
-    }
-
     /**
      * Get worker status via gRPC (async)
      */
@@ -355,7 +274,8 @@ public class EngineGrpcClient extends AbstractGrpcClient<AbstractGrpcClient.Grpc
                 .withOption(ChannelOption.SO_KEEPALIVE, true)
                 .withOption(ChannelOption.ALLOCATOR, PooledByteBufAllocator.DEFAULT)
                 // Connection timeout in milliseconds
-                .withOption(ChannelOption.CONNECT_TIMEOUT_MILLIS, 20)
+                .withOption(ChannelOption.CONNECT_TIMEOUT_MILLIS,
+                        connectTimeoutMillis)
                 // Write buffer water mark: prevents memory accumulation and pendingTasks buildup
                 .withOption(ChannelOption.WRITE_BUFFER_WATER_MARK, new WriteBufferWaterMark(64 * 1024, 128 * 1024))
                 // Receive/send buffer size
@@ -377,11 +297,4 @@ public class EngineGrpcClient extends AbstractGrpcClient<AbstractGrpcClient.Grpc
                 .build();
     }
 
-    @Override
-    protected GrpcStubWrapper createStub(ManagedChannel channel) {
-        return new GrpcStubWrapper(
-                RpcServiceGrpc.newBlockingStub(channel),
-                MultimodalRpcServiceGrpc.newBlockingStub(channel)
-        );
-    }
 }

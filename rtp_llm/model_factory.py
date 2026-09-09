@@ -361,20 +361,17 @@ class ModelFactory:
             vit_config=vit_config,
         )
         if module_dispatch_config is not None and module_dispatch_config.mode == "auto":
-            if model_args.model_type != "deepseek_v4":
-                raise ValueError("Module dispatch has no state contract for this model")
-            from rtp_llm.models_py.pluggable.dsv4_specs import (
-                declared_indexer_cache_mode,
-            )
-
-            # Declare the current module contract without probing this process's
-            # device. Worker selection later validates the actual platform and KV.
-            model_cls._post_build_model_config(
-                model_config,
-                indexer_cache_mode=declared_indexer_cache_mode(module_dispatch_config),
+            adapter = model_cls.get_module_adapter()
+            if adapter is None:
+                raise ValueError(
+                    f"Model {model_args.model_type!r} has no module adapter"
+                )
+            adapter.configure_model(
+                model_cls, model_config, kv_cache_config, module_dispatch_config
             )
         else:
-            model_cls._post_build_model_config(model_config)
+            model_cls._apply_kv_cache_config(model_config, kv_cache_config)
+        model_cls._post_build_model_config(model_config)
 
         # Set model metadata fields
         # Set lora_infos from lora_config (direct assignment)
@@ -496,6 +493,9 @@ class ModelFactory:
             kv_cache_config=engine_config.kv_cache_config,
             profiling_debug_logging_config=engine_config.profiling_debug_logging_config,
             embedding_config=None,  # Propose model doesn't need embedding_config
+        )
+        propose_model_cls._apply_kv_cache_config(
+            propose_model_config, engine_config.kv_cache_config
         )
         propose_model_cls._post_build_model_config(propose_model_config)
 

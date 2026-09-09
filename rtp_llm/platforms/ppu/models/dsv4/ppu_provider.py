@@ -14,6 +14,7 @@ from types import MappingProxyType
 from typing import Any, Callable, FrozenSet
 
 import torch
+
 from rtp_llm.models_py.modules.dsv4.platform_provider import (
     Dsv4AttentionLayout,
     Dsv4PlatformProvider,
@@ -195,6 +196,21 @@ class M890PDsv4Provider:
                 decision="fail_closed",
             )
             _fail_closed(f"MoE construction for ep_size={ep_size!r}")
+        if ep_size == 8 and self._bool("DSV4_PPU_GROUPED_FP4", False):
+            from .ppu_legacy_deepep import PpuLegacyDeepEPStrategy
+
+            if kwargs.pop("strategy", None) not in (None, "deepep"):
+                raise ValueError(
+                    "PPU grouped DeepEP conflicts with the requested strategy"
+                )
+            return default_factory(
+                *args,
+                strategy_type=PpuLegacyDeepEPStrategy,
+                strategy_kwargs={"options": self.execution_options},
+                platform_provider=self,
+                execution_options=self.execution_options,
+                **kwargs,
+            )
         forced_strategy = None
         if ep_size == 1 and type(tp_size) is int and tp_size == 4:
             forced_strategy = "ppu_grouped_fp4"

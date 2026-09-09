@@ -64,6 +64,7 @@ EmbeddingExecutor::EmbeddingExecutor(const EngineInitParams& params, py::object 
         0,
         parallelism_config,
     });
+    model_init_params.metrics_reporter = metrics_reporter_;
 
     RTP_LLM_CHECK_WITH_INFO(!params.py_model.is_none(), "py_model must be provided, legacy C++ GptModel path removed");
     RTP_LLM_LOG_INFO("init executor with python model");

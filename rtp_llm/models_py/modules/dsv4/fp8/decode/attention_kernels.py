@@ -21,19 +21,17 @@ from typing import Any, Optional
 
 import torch
 
-from rtp_llm.models_py.modules.dsv4.fp8.decode.fp8_sparse_attn_decode_op import (
-    SparseAttnV4DecodeFp8Op,
+from rtp_llm.models_py.modules.dsv4.fp8.decode.decode_attn_metadata import (
+    RICH_CSA_INDEX_WIDTH,
+    RICH_HCA_INDEX_WIDTH,
+    RICH_SWA_INDEX_WIDTH,
+    RICH_SWA_PAGE,
 )
 from rtp_llm.models_py.modules.dsv4.fp8.decode.fp8_kv_quant_decode_op import (
     _validate_model1_cache_tensor,
 )
-from rtp_llm.models_py.modules.dsv4.fp8.decode.decode_attn_metadata import (
-    RICH_CSA_INDEX_WIDTH,
-    RICH_CSA_PAGE,
-    RICH_HCA_INDEX_WIDTH,
-    RICH_HCA_PAGE,
-    RICH_SWA_INDEX_WIDTH,
-    RICH_SWA_PAGE,
+from rtp_llm.models_py.modules.dsv4.fp8.decode.fp8_sparse_attn_decode_op import (
+    SparseAttnV4DecodeFp8Op,
 )
 
 # opt_flash_mla diagnostic: when ``DSV4_TOPK_DEBUG=1`` assert each effective
@@ -45,11 +43,19 @@ _TOPK_DEBUG = os.environ.get("DSV4_TOPK_DEBUG", "0") not in ("0", "", "false", "
 
 
 def _validate_rich_pool(
-    *, q: torch.Tensor, pool: torch.Tensor, indices: torch.Tensor,
-    sink: torch.Tensor, page: int, index_width: int, name: str,
-    allowed_widths=None, multiple_of=None, allow_ring_extension=False,
+    *,
+    q: torch.Tensor,
+    pool: torch.Tensor,
+    indices: torch.Tensor,
+    sink: torch.Tensor,
+    page: int,
+    index_width: int,
+    name: str,
+    allowed_widths=None,
+    multiple_of=None,
+    allow_ring_extension=False,
 ) -> None:
-    """Fail closed on the installed rich ABI's fixed geometry."""
+    """Validate the declared cache geometry and sparse attention ABI."""
     if q.ndim != 4 or int(q.shape[1]) < 1 or int(q.shape[-1]) != 512:
         raise ValueError(f"{name}: q must be [B, q_len, H, D], q_len must be positive")
     if pool.device != q.device:
@@ -112,8 +118,7 @@ def _validate_rich_pool_page(
     ):
         return
     raise ValueError(
-        f"{name}: unsupported MODEL1 page {actual_page}; "
-        f"expected {expected_page}"
+        f"{name}: unsupported MODEL1 page {actual_page}; " f"expected {expected_page}"
     )
 
 
@@ -182,8 +187,13 @@ def attn_fp8_swa_paged(
         ``None`` keeps the legacy full-capture-width scan.
     """
     _validate_rich_pool(
-        q=q, pool=swa_pool_3d, indices=swa_topk_3d, sink=attn_sink,
-        page=RICH_SWA_PAGE, index_width=RICH_SWA_INDEX_WIDTH, name="swa",
+        q=q,
+        pool=swa_pool_3d,
+        indices=swa_topk_3d,
+        sink=attn_sink,
+        page=RICH_SWA_PAGE,
+        index_width=RICH_SWA_INDEX_WIDTH,
+        name="swa",
         allowed_widths=(RICH_SWA_INDEX_WIDTH,),
         allow_ring_extension=True,
     )
@@ -205,6 +215,8 @@ def attn_fp8_dual_paged(
     q: torch.Tensor,  # [B, 1, H, D] bf16
     swa_pool_3d: torch.Tensor,  # [num_blocks, eb_swa, 584] uint8
     cmp_pool_3d: torch.Tensor,  # [num_blocks, eb_cmp, 584] uint8
+    compress_ratio: int,
+    cmp_tokens_per_block: int,
     attn_sink: torch.Tensor,
     swa_topk_3d: torch.Tensor,  # [B, 1, win] int32 global slots into SWA pool
     cmp_topk_3d: torch.Tensor,  # [B, 1, K_cmp] int32 global slots into cmp pool
@@ -235,27 +247,36 @@ def attn_fp8_dual_paged(
     ``None`` keeps the legacy full-capture-width scan.
     """
     _validate_rich_pool(
-        q=q, pool=swa_pool_3d, indices=swa_topk_3d, sink=attn_sink,
-        page=RICH_SWA_PAGE, index_width=RICH_SWA_INDEX_WIDTH, name="dual.swa",
+        q=q,
+        pool=swa_pool_3d,
+        indices=swa_topk_3d,
+        sink=attn_sink,
+        page=RICH_SWA_PAGE,
+        index_width=RICH_SWA_INDEX_WIDTH,
+        name="dual.swa",
         allow_ring_extension=True,
     )
     _validate_lengths(topk_length, q=q, name="dual.topk_length")
     _validate_lengths(extra_topk_length, q=q, name="dual.extra_topk_length")
-    extra_page = (
-        RICH_CSA_PAGE
-        if int(cmp_pool_3d.shape[1]) == RICH_CSA_PAGE
-        else RICH_HCA_PAGE
-    )
-    extra_width = (
-        RICH_CSA_INDEX_WIDTH
-        if extra_page == RICH_CSA_PAGE
-        else RICH_HCA_INDEX_WIDTH
-    )
+    # Pool identity comes from the layer contract, not its physical page size.
+    # CUDA block128 has CSA32/HCA1; block256 has CSA64/HCA2.
+    if compress_ratio not in (4, 128):
+        raise ValueError("Compressed attention requires CSA ratio 4 or HCA ratio 128")
+    if cmp_tokens_per_block <= 0 or cmp_tokens_per_block % compress_ratio:
+        raise ValueError("Compressed cache block size must be divisible by its ratio")
+    extra_page = cmp_tokens_per_block // compress_ratio
+    is_csa = compress_ratio == 4
+    extra_width = RICH_CSA_INDEX_WIDTH if is_csa else RICH_HCA_INDEX_WIDTH
     _validate_rich_pool(
-        q=q, pool=cmp_pool_3d, indices=cmp_topk_3d, sink=attn_sink,
-        page=extra_page, index_width=extra_width, name="dual.extra",
-        allowed_widths=(512, 1024) if extra_page == RICH_CSA_PAGE else None,
-        multiple_of=64 if extra_page == RICH_HCA_PAGE else None,
+        q=q,
+        pool=cmp_pool_3d,
+        indices=cmp_topk_3d,
+        sink=attn_sink,
+        page=extra_page,
+        index_width=extra_width,
+        name="dual.extra",
+        allowed_widths=(512, 1024) if is_csa else None,
+        multiple_of=64 if not is_csa else None,
     )
     _debug_check_topk_length("dual.swa", topk_length, swa_topk_3d)
     _debug_check_topk_length("dual.extra", extra_topk_length, cmp_topk_3d)

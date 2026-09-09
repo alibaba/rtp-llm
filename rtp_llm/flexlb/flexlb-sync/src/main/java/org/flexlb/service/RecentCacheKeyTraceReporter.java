@@ -32,7 +32,6 @@ import java.util.Locale;
 @Component
 public class RecentCacheKeyTraceReporter {
 
-    private static final String CACHE_HIT_THEORY_LOG_PATH_ENV = "CACHE_HIT_THEORY_LOG_PATH";
     private static final String DEFAULT_MASTER_THEORY_LOG_PATH = "/home/admin/ai-whale/logs/master_theory_hit.log";
     private static final Object THEORY_LOG_LOCK = new Object();
     private static final DateTimeFormatter THEORY_LOG_TIME_FORMATTER =
@@ -52,6 +51,7 @@ public class RecentCacheKeyTraceReporter {
     private static volatile BufferedWriter theoryLogWriter;
     private static volatile boolean theoryLogOpenFailed;
     private static volatile boolean theoryLogFlushFailed;
+    private static volatile String theoryLogPath = DEFAULT_MASTER_THEORY_LOG_PATH;
 
     private static final long FNV_OFFSET_BASIS = 0xcbf29ce484222325L;
     private static final long FNV_PRIME = 0x100000001b3L;
@@ -61,7 +61,8 @@ public class RecentCacheKeyTraceReporter {
             return;
         }
         FlexlbConfig config = balanceContext.getConfig();
-        if (config != null && !config.isCacheHitWindowWriteEnabled()) {
+        if (config != null && !config.getObservability().getCacheHit()
+                .getRecentKeyWindow().isWriteEnabled()) {
             return;
         }
 
@@ -84,7 +85,8 @@ public class RecentCacheKeyTraceReporter {
         logTraceIfEnabled(balanceContext, request, snapshot, hitTokens, inputTokens, config);
         logTheoryIfEnabled(balanceContext, request, theorySnapshot, config);
 
-        if (cacheMetricsReporter == null || (config != null && !config.isCacheHitMetricReportEnabled())) {
+        if (cacheMetricsReporter == null || (config != null
+                && !config.getObservability().getCacheHit().isMetricsEnabled())) {
             return;
         }
 
@@ -108,9 +110,10 @@ public class RecentCacheKeyTraceReporter {
     @PostConstruct
     public void initializeTheoryLog() {
         FlexlbConfig config = configService == null ? null : configService.loadBalanceConfig();
-        if (config == null || !config.isCacheHitTheoryLogEnabled()) {
+        if (!theoryLogEnabled(config)) {
             return;
         }
+        theoryLogPath = config.getObservability().getCacheHit().getTheoryLog().getPath();
         synchronized (THEORY_LOG_LOCK) {
             getTheoryLogWriterLocked();
         }
@@ -122,16 +125,16 @@ public class RecentCacheKeyTraceReporter {
                                    long hitTokens,
                                    long inputTokens,
                                    FlexlbConfig config) {
-        if (config == null || !config.isCacheHitTraceLogEnabled()) {
+        if (config == null || !config.getObservability().getCacheHit()
+                .isRequestTraceLogEnabled()) {
             return;
         }
         List<Long> cacheKeys = request.getBlockCacheKeys();
-        Logger.info("Master cache-key trace: masterRequestId={}, requestId={}, retryCount={}, "
+        Logger.info("Master cache-key trace: masterRequestId={}, requestId={}, "
                         + "seqLen={}, requestTimeMs={}, requestCacheKeys={}, hitCacheKeys={}, hitRatio={}, "
                         + "hitTokens={}, inputTokens={}, tokenHitRatio={}, cacheKeyDigest={}, selectedServers={}, cacheKeys={}",
                 balanceContext.getRequestId(),
                 request.getRequestId(),
-                balanceContext.getRetryCount(),
                 request.getSeqLen(),
                 request.getRequestTimeMs(),
                 snapshot.getRequestOccurrences(),
@@ -156,7 +159,7 @@ public class RecentCacheKeyTraceReporter {
                                     Request request,
                                     CacheHitTheoryStats.Snapshot snapshot,
                                     FlexlbConfig config) {
-        if (config == null || !config.isCacheHitTheoryLogEnabled()) {
+        if (!theoryLogEnabled(config)) {
             return;
         }
         if (snapshot == null || snapshot.getRequestTotalCount() <= 0L) {
@@ -212,9 +215,7 @@ public class RecentCacheKeyTraceReporter {
         if (theoryLogWriter != null || theoryLogOpenFailed) {
             return theoryLogWriter;
         }
-        String configuredPath = System.getenv(CACHE_HIT_THEORY_LOG_PATH_ENV);
-        Path logPath = Path.of(configuredPath == null || configuredPath.isBlank() ?
-                DEFAULT_MASTER_THEORY_LOG_PATH : configuredPath);
+        Path logPath = Path.of(theoryLogPath);
         try {
             Path parent = logPath.getParent();
             if (parent != null) {
@@ -230,6 +231,11 @@ public class RecentCacheKeyTraceReporter {
             Logger.warn("Failed to open master theory hit log path {}: {}", logPath, e.getMessage());
         }
         return theoryLogWriter;
+    }
+
+    private static boolean theoryLogEnabled(FlexlbConfig config) {
+        return config != null
+                && config.getObservability().getCacheHit().getTheoryLog() != null;
     }
 
     @Scheduled(fixedDelay = 1000L)

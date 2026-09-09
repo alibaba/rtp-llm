@@ -65,6 +65,11 @@ class ModuleImplSpec:
     capabilities: FrozenSet[str] = frozenset()
     auto_selectable: bool = False
     describe_build_requests: Optional[str] = None
+    # Model/backend-owned descriptors; evaluated before allocation or loading.
+    describe_resources: Optional[str] = None
+    prepare_weights: Optional[str] = None
+    # Implementation-owned readiness checks after each engine resource binding.
+    validate_initialized: Optional[str] = None
 
     def __post_init__(self):
         for field in (
@@ -138,4 +143,7 @@ class ModuleBinding:
             "capabilities": sorted(impl.capabilities),
             "required_capabilities": sorted(self.request.required_capabilities),
             "metadata": self.request.metadata,
+            "describe_resources": impl.describe_resources,
+            "prepare_weights": impl.prepare_weights,
+            "validate_initialized": impl.validate_initialized,
         }

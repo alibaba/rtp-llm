@@ -25,9 +25,13 @@ _MMA_TYPE = "fp8xfp4"
 
 
 def mega_moe_se_requested() -> bool:
-    """Return whether the operator explicitly opted into fused SE execution."""
+    """Return whether automatic fused-SE selection is enabled.
 
-    return os.environ.get(_USE_MEGA_MOE_SE_ENV, "0") == "1"
+    The compatible EP path defaults on.  Operators can set
+    ``DSV4_USE_MEGA_MOE_SE=0`` to retain the routed-only/legacy fused paths.
+    """
+
+    return os.environ.get(_USE_MEGA_MOE_SE_ENV, "1") == "1"
 
 
 def estimate_mega_moe_se_symm_buffer_bytes(
@@ -233,7 +237,7 @@ def _mega_moe_se_enabled() -> bool:
 
 def _mega_moe_se_disabled_or_unavailable_reason() -> str:
     if not mega_moe_se_requested():
-        return f"{_USE_MEGA_MOE_SE_ENV} is not set to 1"
+        return f"{_USE_MEGA_MOE_SE_ENV}=0 disables Mega MoE SE"
     return (
         _mega_moe_se_unavailable_reason()
         or "unknown Mega MoE fused-SE availability failure"

@@ -3,14 +3,14 @@
 import ast
 import importlib.util
 import os
-from pathlib import Path
 import sys
-from types import SimpleNamespace
 import unittest
-from unittest.mock import Mock, MagicMock, patch
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import MagicMock, Mock, patch
 
-
-SOURCE = Path(__file__).resolve().parents[1] / "prefill" / "communication.py"
+PACKAGE = Path(__file__).resolve().parents[4]
+SOURCE = PACKAGE / "platforms" / "ppu" / "models" / "dsv4" / "communication.py"
 
 
 class PrefillCommunicationTest(unittest.TestCase):
@@ -40,11 +40,16 @@ class PrefillCommunicationTest(unittest.TestCase):
             ),
         }
         with patch.dict(sys.modules, replacements):
-            spec = importlib.util.spec_from_file_location("ppu_comm_startup_test", SOURCE)
+            spec = importlib.util.spec_from_file_location(
+                "ppu_comm_startup_test", SOURCE
+            )
             self.module = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(self.module)
         self.cfg = SimpleNamespace(
-            role_type="prefill", tp_size=4, world_size=4, local_rank=2,
+            role_type="prefill",
+            tp_size=4,
+            world_size=4,
+            local_rank=2,
             prefill_cp_config=SimpleNamespace(prefill_cp_size=1),
         )
 
@@ -118,24 +123,42 @@ class PrefillCommunicationTest(unittest.TestCase):
 
     def test_startup_call_precedes_model_engine_allocation(self):
         # Structural integration check, not a substitute for the real service gate.
-        package = SOURCE.parents[4]
+        package = PACKAGE
         tree = ast.parse((package / "server" / "backend_manager.py").read_text())
-        manager = next(n for n in tree.body if isinstance(n, ast.ClassDef)
-                       and n.name == "BackendManager")
-        start = next(n for n in manager.body if isinstance(n, ast.FunctionDef)
-                     and n.name == "start")
-        warm = next(n for n in ast.walk(start) if isinstance(n, ast.Call)
-                    and isinstance(n.func, ast.Name)
-                    and n.func.id == "maybe_warmup_ppu_tp_communication")
+        manager = next(
+            n
+            for n in tree.body
+            if isinstance(n, ast.ClassDef) and n.name == "BackendManager"
+        )
+        start = next(
+            n
+            for n in manager.body
+            if isinstance(n, ast.FunctionDef) and n.name == "start"
+        )
+        warm = next(
+            n
+            for n in ast.walk(start)
+            if isinstance(n, ast.Call)
+            and isinstance(n.func, ast.Attribute)
+            and n.func.attr == "prepare_model_runtime"
+        )
+
         def line(method):
-            return next(n.lineno for n in ast.walk(start) if isinstance(n, ast.Call)
-                        and isinstance(n.func, ast.Attribute) and n.func.attr == method)
+            return next(
+                n.lineno
+                for n in ast.walk(start)
+                if isinstance(n, ast.Call)
+                and isinstance(n.func, ast.Attribute)
+                and n.func.attr == method
+            )
+
         self.assertLess(line("update_engine_config_from_model_config"), warm.lineno)
         self.assertLess(warm.lineno, line("from_model_configs"))
-        guard = next(n for n in start.body if isinstance(n, ast.If)
-                     and warm in list(ast.walk(n)))
-        self.assertEqual(ast.unparse(guard.test),
-                         "model_config.model_type == 'deepseek_v4'")
+        self.assertEqual(ast.unparse(warm.func.value), "get_current_device()")
+        self.assertEqual(
+            [ast.unparse(arg) for arg in warm.args],
+            ["model_config", "engine_config"],
+        )
 
 
 if __name__ == "__main__":

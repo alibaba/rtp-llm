@@ -6,6 +6,9 @@ import torch
 from torch import nn
 
 from rtp_llm.models_py.model_desc.block_map import get_group_tags_for_layers
+from rtp_llm.models_py.model_desc.deepseek_v4_dspark_model import (
+    DeepSeekV4DSparkModel,
+)
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.model_desc.qwen3_next import (
     Qwen3NextGatedDeltaNetDecode,
@@ -159,6 +162,49 @@ class AttentionInputRoutingTest(unittest.TestCase):
 
         self.assertEqual(fmha_impl, inputs_by_tag)
         self.assertEqual(factory.call_count, 2)
+
+    def test_dspark_commit_publishes_only_with_swa_inputs(self):
+        model = object.__new__(DeepSeekV4DSparkModel)
+        nn.Module.__init__(model)
+        model.v4 = SimpleNamespace(layers=[object(), object()])
+        published = []
+
+        class DraftKVCache:
+            group_tags = ["csa_kv", "swa_kv"]
+
+            def get_layer_cache(self, layer_idx, tag):
+                return SimpleNamespace(layer_idx=layer_idx, tag=tag)
+
+        model.kv_cache = DraftKVCache()
+        model._swa_block_table = Mock(return_value=torch.ones(1, 1, dtype=torch.int32))
+        model._commit_layer_features = Mock()
+        csa_inputs = SimpleNamespace(tag="csa_kv")
+        swa_inputs = SimpleNamespace(tag="swa_kv")
+        inputs = SimpleNamespace(
+            attention_inputs={"csa_kv": csa_inputs, "swa_kv": swa_inputs}
+        )
+
+        def make_writer(group_inputs, kv_cache):
+            self.assertIs(group_inputs, swa_inputs)
+            self.assertIs(kv_cache, model.kv_cache)
+            return lambda layer_cache: published.append(layer_cache)
+
+        module = "rtp_llm.models_py.model_desc.deepseek_v4_dspark_model"
+        with patch(f"{module}.require_pool_tokens_per_block", return_value=16), patch(
+            f"{module}.create_write_cache_store_impl", side_effect=make_writer
+        ):
+            model.commit_feature_rows(
+                torch.zeros(1, 4),
+                torch.zeros(1, dtype=torch.int32),
+                torch.zeros(1, dtype=torch.int32),
+                torch.ones(1, dtype=torch.int32),
+                inputs,
+            )
+
+        self.assertEqual(
+            [(cache.layer_idx, cache.tag) for cache in published],
+            [(0, "swa_kv"), (1, "swa_kv")],
+        )
 
 
 if __name__ == "__main__":

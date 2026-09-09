@@ -115,11 +115,35 @@ def per_custom_dims_cast_to_fp8(
     return x_scaled, sf.squeeze()
 
 
-def calc_diff(x: torch.Tensor, y: torch.Tensor) -> float:
-    x, y = x.double() + 1, y.double() + 1
-    denominator = (x * x + y * y).sum()
-    sim = 2 * (x * y).sum() / denominator
-    return (1 - sim).item()
+def calc_diff(x: torch.Tensor, y: torch.Tensor, chunk_numel: int = 1 << 24) -> float:
+    """1 - cosine-style similarity between x and y, each shifted by one.
+
+    Accumulated over chunks rather than over whole tensors. The direct form
+    (`x.double() + 1` then `(x * x + y * y).sum()`) needs roughly six full-size
+    float64 temporaries; on a 128k x 6144 GEMM output that is tens of GB and
+    raises torch.OutOfMemoryError. Chunking bounds the transient at chunk_numel
+    elements per operand while keeping the accumulation in float64.
+
+    Both self-products use the same chunk boundaries, so identical inputs still
+    give exactly 0.0 and callers asserting tolerances as tight as 1e-9 keep
+    working.
+    """
+    if x.numel() != y.numel():
+        raise ValueError(f"calc_diff size mismatch: {x.numel()} vs {y.numel()}")
+    xf, yf = x.flatten(), y.flatten()
+    if xf.numel() == 0:
+        return 0.0
+    xx = yy = xy = 0.0
+    for start in range(0, xf.numel(), chunk_numel):
+        a = xf[start : start + chunk_numel].double() + 1
+        b = yf[start : start + chunk_numel].double() + 1
+        xx += torch.dot(a, a).item()
+        yy += torch.dot(b, b).item()
+        xy += torch.dot(a, b).item()
+    denominator = xx + yy
+    if denominator == 0.0:
+        return 0.0
+    return 1 - 2 * xy / denominator
 
 
 def count_bytes(*tensors):

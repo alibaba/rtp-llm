@@ -23,5 +23,5 @@ cc_test(
         "//rtp_llm/models_py/bindings/common/kernels:fuse_copy_kernel",
         "@com_google_googletest//:gtest",
     ],
-    exec_properties = {"gpu": "H20"},
+    exec_properties = {'gpu':'A10'},
 )

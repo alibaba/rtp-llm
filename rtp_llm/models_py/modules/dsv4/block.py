@@ -12,7 +12,10 @@ import torch
 import torch.nn as nn
 
 from rtp_llm.models_py.modules import RMSNorm
-from rtp_llm.models_py.modules.dsv4.fp8.attention import AttentionFP8
+from rtp_llm.models_py.modules.dsv4.fp8.attention import (
+    AttentionFP8,
+    CommitOnlyAttentionFP8,
+)
 from rtp_llm.models_py.modules.dsv4.hc import build_hc_unit
 from rtp_llm.models_py.modules.dsv4.moe import MoE
 from rtp_llm.models_py.modules.dsv4.platform_provider import (
@@ -100,6 +103,7 @@ class Block(nn.Module):
         fp8_kv_cache: bool = False,
         platform_provider: Optional[Dsv4PlatformProvider] = None,
         module_build_context=None,
+        commit_only: bool = False,
     ):
         super().__init__()
         self.layer_id = layer_id
@@ -113,7 +117,7 @@ class Block(nn.Module):
             else DefaultDsv4PlatformProvider()
         )
 
-        attn_cls = AttentionFP8
+        attn_cls = CommitOnlyAttentionFP8 if commit_only else AttentionFP8
         attn_kwargs = dict(
             layer_id=layer_id,
             dim=dim,
@@ -142,7 +146,7 @@ class Block(nn.Module):
             tp_rank=tp_rank,
         )
         if module_build_context is not None:
-            from rtp_llm.models_py.pluggable.dsv4_specs import request_for
+            from rtp_llm.models.dsv4.specs import request_for
 
             self.attn = module_build_context.factory.build(
                 request_for("attention", module_build_context.selection, layer_id),
@@ -157,6 +161,15 @@ class Block(nn.Module):
                 else attn_cls(**attn_kwargs)
             )
         self._cp_sync_after_attn_done = False
+        if commit_only:
+            self.ffn = None
+            self.attn_norm = None
+            self.ffn_norm = None
+            self.attn_hc = None
+            self.ffn_hc = None
+            self._prefill_fast_hc_impls_cached = None
+            return
+
         moe_kwargs = dict(
             layer_id=layer_id,
             dim=dim,

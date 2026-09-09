@@ -1,5 +1,7 @@
 package org.flexlb.sync.worker;
 
+import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.dao.master.WorkerStatus.StatusObservation;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineRpcService;
@@ -34,11 +36,11 @@ class WorkerStatusResponseTest {
                 .setMaxBatchTokensSize(262144L)
                 .build();
 
-        WorkerStatusResponse response = EngineStatusConverter.convertToWorkerStatusResponse(proto);
+        StatusObservation response = convert(proto);
 
-        Assertions.assertEquals(RoleType.PREFILL, response.getRole());
-        Assertions.assertEquals(131072L, response.getMaxSeqLen());
-        Assertions.assertEquals(262144L, response.getMaxBatchTokensSize());
+        Assertions.assertEquals(RoleType.PREFILL, response.role());
+        Assertions.assertEquals(131072L, response.engine().maxSeqLen());
+        Assertions.assertEquals(262144L, response.engine().maxBatchTokensSize());
     }
 
     @Test
@@ -58,13 +60,13 @@ class WorkerStatusResponseTest {
                 .addRunningTaskInfo(oldRunning)
                 .build();
 
-        WorkerStatusResponse response = EngineStatusConverter.convertToWorkerStatusResponse(proto);
+        StatusObservation response = convert(proto);
 
-        assertEquals(RoleType.PREFILL, response.getRole());
+        assertEquals(RoleType.PREFILL, response.role());
         assertEquals(org.flexlb.enums.TaskPhase.PENDING,
-                response.getRunningTaskInfo().get("1").getPhase());
+                response.runningTasks().get("1").phase());
         assertEquals(org.flexlb.enums.TaskPhase.RUNNING,
-                response.getRunningTaskInfo().get("2").getPhase());
+                response.runningTasks().get("2").phase());
     }
 
     @Test
@@ -80,11 +82,11 @@ class WorkerStatusResponseTest {
                 .addRunningTaskInfo(task)
                 .build();
 
-        WorkerStatusResponse response = EngineStatusConverter.convertToWorkerStatusResponse(proto);
+        StatusObservation response = convert(proto);
 
-        assertEquals(RoleType.DECODE, response.getRole());
+        assertEquals(RoleType.DECODE, response.role());
         assertEquals(org.flexlb.enums.TaskPhase.KV_ALLOCATED,
-                response.getRunningTaskInfo().get("3").getPhase());
+                response.runningTasks().get("3").phase());
     }
 
     @Test
@@ -94,7 +96,7 @@ class WorkerStatusResponseTest {
                 .setRoleType(EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE)
                 .build();
         assertThrows(IllegalArgumentException.class,
-                () -> EngineStatusConverter.convertToWorkerStatusResponse(roleConflict));
+                () -> convert(roleConflict));
     }
 
     @Test
@@ -120,12 +122,12 @@ class WorkerStatusResponseTest {
                 .addRunningTaskInfo(kvAllocatedFromE0)
                 .build();
 
-        WorkerStatusResponse response = EngineStatusConverter.convertToWorkerStatusResponse(status);
+        StatusObservation response = convert(status);
 
         assertEquals(org.flexlb.enums.TaskPhase.RECEIVED,
-                response.getRunningTaskInfo().get("4").getPhase());
+                response.runningTasks().get("4").phase());
         assertEquals(org.flexlb.enums.TaskPhase.KV_ALLOCATED,
-                response.getRunningTaskInfo().get("5").getPhase());
+                response.runningTasks().get("5").phase());
     }
 
     @Test
@@ -140,10 +142,10 @@ class WorkerStatusResponseTest {
                 .addRunningTaskInfo(runningButWaiting)
                 .build();
 
-        WorkerStatusResponse response = EngineStatusConverter.convertToWorkerStatusResponse(status);
+        StatusObservation response = convert(status);
 
         assertEquals(org.flexlb.enums.TaskPhase.RUNNING,
-                response.getRunningTaskInfo().get("6").getPhase());
+                response.runningTasks().get("6").phase());
     }
 
     @Test
@@ -161,13 +163,26 @@ class WorkerStatusResponseTest {
                 .addFinishedTaskList(canceled)
                 .build();
 
-        WorkerStatusResponse response = EngineStatusConverter.convertToWorkerStatusResponse(proto);
-        var converted = response.getFinishedTaskInfo().get("8429001");
+        StatusObservation response = convert(proto);
+        var converted = response.finishedTasks().get("8429001");
 
-        Assertions.assertEquals(RoleType.PREFILL, response.getRole());
+        Assertions.assertEquals(RoleType.PREFILL, response.role());
         Assertions.assertNotNull(converted);
         Assertions.assertEquals(PriorityPreemptionProgress.CANCELED,
-                converted.getPriorityPreemptionProgress());
-        Assertions.assertEquals(8429L, converted.getErrorCode());
+                converted.priorityPreemptionProgress());
+        Assertions.assertEquals(8429L, converted.errorCode());
+    }
+
+    private static StatusObservation convert(
+            EngineRpcService.WorkerStatusPB response) {
+        WorkerStatus owner = WorkerStatus.createDiscovered(
+                RoleType.PREFILL,
+                "test-group",
+                "127.0.0.1",
+                8080,
+                8081,
+                "test-site");
+        return EngineStatusConverter.convertToStatusObservation(
+                owner, response);
     }
 }

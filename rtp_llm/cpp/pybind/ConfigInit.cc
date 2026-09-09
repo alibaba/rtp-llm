@@ -1366,6 +1366,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                        &GrammarConfig::constrained_json_disable_any_whitespace)
         .def_readwrite("terminate_without_stop_token", &GrammarConfig::terminate_without_stop_token)
         .def_readwrite("num_workers", &GrammarConfig::num_workers)
+        .def_readwrite("compile_timeout_ms", &GrammarConfig::compile_timeout_ms)
+        .def_readwrite("compile_concurrency", &GrammarConfig::compile_concurrency)
+        .def_readwrite("compile_queue_size", &GrammarConfig::compile_queue_size)
         .def_readwrite("tokenizer_info_json", &GrammarConfig::tokenizer_info_json)
         .def_readwrite("compiler_cache_bytes", &GrammarConfig::compiler_cache_bytes)
         .def("to_string", &GrammarConfig::to_string)
@@ -1375,7 +1378,10 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                  oss << "GrammarConfig(constrained_json_disable_any_whitespace="
                      << c.constrained_json_disable_any_whitespace
                      << ", terminate_without_stop_token=" << c.terminate_without_stop_token
-                     << ", num_workers=" << c.num_workers << ", compiler_cache_bytes=" << c.compiler_cache_bytes << ")";
+                     << ", num_workers=" << c.num_workers << ", compile_timeout_ms=" << c.compile_timeout_ms
+                     << ", compile_concurrency=" << c.compile_concurrency
+                     << ", compile_queue_size=" << c.compile_queue_size
+                     << ", compiler_cache_bytes=" << c.compiler_cache_bytes << ")";
                  return oss.str();
              })
         .def(py::pickle(
@@ -1384,10 +1390,13 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.num_workers,
                                       self.tokenizer_info_json,
                                       self.compiler_cache_bytes,
-                                      self.terminate_without_stop_token);
+                                      self.terminate_without_stop_token,
+                                      self.compile_timeout_ms,
+                                      self.compile_concurrency,
+                                      self.compile_queue_size);
             },
             [](py::tuple t) {
-                if (t.size() != 5 && t.size() != 6)
+                if (t.size() != 5 && t.size() != 6 && t.size() != 8)
                     throw std::runtime_error("Invalid state!");
                 GrammarConfig c;
                 try {
@@ -1405,7 +1414,14 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                         c.constrained_json_disable_any_whitespace = t[0].cast<bool>();
                         c.num_workers                             = t[1].cast<int>();
                         c.tokenizer_info_json                     = t[2].cast<std::string>();
-                        if (t.size() == 6) {
+                        if (t.size() == 8) {
+                            // Current layout appends compile controls after the prior five-field state.
+                            c.compiler_cache_bytes         = t[3].cast<int64_t>();
+                            c.terminate_without_stop_token = t[4].cast<bool>();
+                            c.compile_timeout_ms           = t[5].cast<int>();
+                            c.compile_concurrency          = t[6].cast<int>();
+                            c.compile_queue_size           = t[7].cast<int>();
+                        } else if (t.size() == 6) {
                             // Previous layout:
                             // (disable_any_whitespace, num_workers, tokenizer_info_json, override_stop_tokens,
                             //  compiler_cache_bytes, terminate_without_stop_token).

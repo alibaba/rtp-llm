@@ -45,7 +45,9 @@ class ModuleBuildContext:
     shared across contexts. This object is confined to the model startup thread.
     """
 
-    def __init__(self, registry, selection, config, *, world_size=1):
+    def __init__(
+        self, registry, selection, config, *, world_size=1, model_adapter=None
+    ):
         if not registry.frozen:
             raise RuntimeError("Build context requires a frozen registry")
         if config.mode != "auto":
@@ -71,6 +73,49 @@ class ModuleBuildContext:
         self._instance_refs = {}
         self._instance_records = {}
         self._class_sources = {}
+        self.model_adapter = model_adapter
+        self.resource_plan = None
+        self.weights_loaded = False
+        self._weight_loader = None
+        self._weight_preparation = None
+
+    def fail(self):
+        """Poison this context; resource owners retain teardown responsibility."""
+        self._state = "failed"
+
+    def configure_weight_loader(self, loader):
+        if (
+            self.state != "verified"
+            or self.resource_plan is None
+            or self._weight_loader is not None
+        ):
+            raise RuntimeError(
+                "Weight preparation requires an unused verified resource plan"
+            )
+        try:
+            entry = self.resource_plan.weight_preparation
+            preparation = load_entrypoint(entry)() if entry else None
+            loader.get_load_config().weight_preparation = preparation
+            self._weight_preparation = preparation
+            self._weight_loader = weakref.ref(loader)
+        except BaseException:
+            self.fail()
+            raise
+
+    def finish_weight_loading(self, loader):
+        if (
+            self.state != "verified"
+            or self.weights_loaded
+            or self._weight_loader is None
+            or self._weight_loader() is not loader
+            or loader.get_load_config().weight_preparation
+            is not self._weight_preparation
+        ):
+            self.fail()
+            raise RuntimeError(
+                "Weight loader did not consume the frozen preparation plan"
+            )
+        self.weights_loaded = True
 
     @property
     def bindings(self):
@@ -115,6 +160,13 @@ class ModuleBuildContext:
         }
         self._instance_refs[binding.request.path] = weakref.ref(module)
         self._instance_records[binding.request.path] = record
+        if (
+            self.model_adapter is not None
+            and binding.request == self.model_adapter.root_request(self.selection)
+        ):
+            from .lifecycle import bind_model_context
+
+            bind_model_context(module, self)
         logging.info("module_dispatch bound: %s", canonical_json(record))
 
     def validate_built_tree(self, root, *, root_path):
@@ -199,12 +251,23 @@ class ModuleBuildContext:
                 )
             if not self._bindings:
                 raise ValueError("Module plan must contain at least one request")
+            if self.model_adapter is not None:
+                from .resources import ResourcePlan
+
+                self.resource_plan = self.model_adapter.plan_resources(
+                    self.selection, self.bindings
+                )
+                if not isinstance(self.resource_plan, ResourcePlan):
+                    raise TypeError("Model adapter must return a ResourcePlan")
             protocol = {
                 "schema": 1,
                 "world_size": self.world_size,
                 "device_type": self.selection.platform.device_type.name,
                 "model_metadata": self.selection.model_metadata,
                 "bindings": [binding.protocol_record() for binding in self.bindings],
+                "resources": (
+                    self.resource_plan.record() if self.resource_plan else None
+                ),
             }
             self._digest = hashlib.sha256(canonical_json(protocol).encode()).hexdigest()
             self._state = "planned"

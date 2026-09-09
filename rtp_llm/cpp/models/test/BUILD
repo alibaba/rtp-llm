@@ -42,7 +42,7 @@ cc_test(
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
-    exec_properties = {'gpu':'H20'},
+    exec_properties = {'gpu':'A10'},
 )
 
 cc_test(
@@ -54,7 +54,7 @@ cc_test(
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
     ] + torch_deps(),
-    exec_properties = {"gpu": "H20"},
+    exec_properties = {'gpu':'A10'},
 )
 
 py_test(
@@ -93,9 +93,9 @@ py_test(
     name = "pywrapped_model_cache_store_integration_test",
     srcs = ["pywrapped_model_cache_store_integration_test.py"],
     data = [":th_pywrapped_model_cache_store_integration_test"],
-    deps = ["//rtp_llm:torch"],
+    deps = ["//rtp_llm:torch", "//rtp_llm/models_py:model_lifecycle"],
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
-    exec_properties = {"gpu": "H20"},
+    exec_properties = {'gpu':'A10'},
 )

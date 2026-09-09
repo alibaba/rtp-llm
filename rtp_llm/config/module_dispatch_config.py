@@ -15,16 +15,9 @@ class ModuleDispatchConfig:
     def __post_init__(self):
         if self.mode not in ("legacy", "auto"):
             raise ValueError(f"Unknown module dispatch mode {self.mode!r}")
-        if self.platform not in (
-            "auto",
-            "cpu",
-            "cuda",
-            "yitian",
-            "armcpu",
-            "rocm",
-            "ppu",
-        ):
-            raise ValueError(f"Unknown module dispatch platform {self.platform!r}")
+        from rtp_llm.device.runtime import validate_requested_device
+
+        validate_requested_device(self.platform)
         for field in ("impl_overrides", "path_overrides"):
             entries = tuple(getattr(self, field))
             normalized = dict(entries)

@@ -16,6 +16,7 @@ pool failures are raised and never cached.
 
 from __future__ import annotations
 
+import faulthandler
 import functools
 import json
 import logging
@@ -23,34 +24,64 @@ import multiprocessing
 import os
 import queue
 import resource
+import signal
+import tempfile
 import threading
 import time
 from collections import OrderedDict
 from concurrent.futures import Future
 from enum import Enum
-from typing import Any, NamedTuple
+from multiprocessing.reduction import DupFd
+from typing import Any, BinaryIO, NamedTuple
 
 from jsonschema import Draft7Validator
 
 from rtp_llm.config.py_config_modules import GrammarAdmissionConfig
+from rtp_llm.dash_sc.inference.core_dump_control import (
+    _configure_xgrammar_sandbox_core_dump_for_current_process,
+)
 from rtp_llm.ops import GrammarConfig
 
 logger = logging.getLogger(__name__)
 
-_CRASH_CONFIRMATION_ATTEMPTS = 2
 _MAX_COMPILE_ERROR_MESSAGE_LENGTH = 4096
+_MAX_WORKER_FAULT_TRACE_BYTES = 16 * 1024
+_MAX_AUTO_SANDBOX_POOL_SIZE = 8
+_CRASH_CIRCUIT_MAX_ENTRIES = 256
+_CRASH_CIRCUIT_TTL_S = 10.0
+_REPLACEMENT_BACKOFF_INITIAL_S = 0.1
+_REPLACEMENT_BACKOFF_MAX_S = 2.0
 _JSON_OBJECT_RESPONSE_SCHEMA = {"anyOf": [{"type": "object"}, {"type": "array"}]}
 
 
 class _WorkerStatus(Enum):
     VALID = "valid"
     INVALID = "invalid"
+    OVERLOADED = "overloaded"
     UNAVAILABLE = "unavailable"
 
 
 class _GrammarCheckResult(NamedTuple):
     ok: bool
     compile_error: str = ""
+    cacheable: bool = False
+
+
+def _rebuild_dup_fd(dup_fd: Any) -> Any:
+    return dup_fd
+
+
+class _DeferredDupFd:
+    """Create DupFd only while multiprocessing owns process serialization."""
+
+    def __init__(self, fd: int) -> None:
+        self._fd = fd
+
+    def __reduce__(self) -> tuple[Any, tuple[Any]]:
+        # Calling DupFd before Process.start() registers an extra descriptor with
+        # resource_sharer, which has no public cancellation API if startup fails.
+        # During spawn serialization it instead uses Popen's child-owned fd wrapper.
+        return _rebuild_dup_fd, (DupFd(self._fd),)
 
 
 # Per-thread request id for log correlation (dashserving is thread-per-request): validate_*
@@ -69,27 +100,154 @@ def _with_request_id(message: str) -> str:
 
 
 def _is_resource_exhaustion(error: BaseException) -> bool:
-    return isinstance(error, MemoryError) or "bad_alloc" in str(error).lower()
+    message = str(error).lower()
+    return isinstance(error, MemoryError) or any(
+        marker in message
+        for marker in (
+            "bad_alloc",
+            "out of memory",
+            "resource exhausted",
+            "cannot allocate memory",
+            "memoryallocation",
+        )
+    )
+
+
+# Keep this list synchronized with isExplicitGrammarParseError() in
+# rtp_llm/cpp/engine_base/grammar/XGrammarBackend.cc.
+_DETERMINISTIC_GRAMMAR_ERROR_MARKERS = (
+    "invalid json",
+    "json parse",
+    "json parsing error",
+    "failed to parse json",
+    "json syntax error",
+    "json lexer error",
+    "invalid regex",
+    "regex parse",
+    "regex parsing error",
+    "failed to parse regex",
+    "regex syntax error",
+    "regex lexer error",
+    "invalid ebnf",
+    "ebnf parse",
+    "ebnf parsing error",
+    "ebnf lexer error",
+    "failed to parse ebnf",
+    "ebnf syntax error",
+    "invalid grammar",
+    "grammar parse",
+    "grammar parsing error",
+    "grammar lexer error",
+    "grammar syntax error",
+    "invalid structural tag",
+    "structural tag parse",
+    "structural tag parsing error",
+    "structural tag syntax error",
+    "structural tag lexer error",
+)
+
+
+def _is_deterministic_grammar_error(error: BaseException) -> bool:
+    if isinstance(error, (json.JSONDecodeError, ValueError, TypeError)):
+        return True
+    error_name = type(error).__name__.lower()
+    message = str(error).lower()
+    if "invalid" in error_name and any(
+        subject in error_name for subject in ("json", "regex", "grammar", "structural")
+    ):
+        return True
+    return any(marker in message for marker in _DETERMINISTIC_GRAMMAR_ERROR_MARKERS)
 
 
 def _compile_exception_reply(error: Exception) -> tuple[_WorkerStatus, bool, str]:
-    """Classify every catchable exception raised by an xgrammar compile call.
-
-    xgrammar may expose its registered InvalidJSON/InvalidStructuralTag errors,
-    built-in TypeError/ValueError/RuntimeError through TVM FFI, or JSON decoding
-    errors from the structural-tag adapter.  They are all deterministic input
-    rejections.  Resource exhaustion is not deterministic evidence against the
-    grammar: it can be caused by transient sandbox memory pressure, so it is
-    reported as UNAVAILABLE (never cached as a 400) and the contaminated worker
-    is retired before serving another request.
-    """
-    if _is_resource_exhaustion(error):
-        message = (str(error) or type(error).__name__)[
-            :_MAX_COMPILE_ERROR_MESSAGE_LENGTH
-        ]
-        return _WorkerStatus.UNAVAILABLE, True, message
+    """Classify a caught worker compile failure without poisoning invalid caches."""
     message = (str(error) or type(error).__name__)[:_MAX_COMPILE_ERROR_MESSAGE_LENGTH]
-    return _WorkerStatus.INVALID, False, message
+    if _is_resource_exhaustion(error):
+        return _WorkerStatus.OVERLOADED, True, message
+    if _is_deterministic_grammar_error(error):
+        return _WorkerStatus.INVALID, False, message
+    # Ordinary runtime/transport failures are not evidence that the grammar is bad.
+    return _WorkerStatus.UNAVAILABLE, True, message
+
+
+def _format_worker_exitcode(exitcode: int | None) -> str:
+    if exitcode is None:
+        return "exit status unavailable"
+    if exitcode < 0:
+        signal_number = -exitcode
+        try:
+            signal_name = signal.Signals(signal_number).name
+        except ValueError:
+            signal_name = "UNKNOWN_SIGNAL"
+        return f"terminated by {signal_name} (signal {signal_number})"
+    return f"exited with code {exitcode}"
+
+
+def _describe_worker_exit(process: Any) -> str:
+    try:
+        process.join(timeout=0.2)
+        exitcode = process.exitcode
+    except Exception:
+        exitcode = None
+    return _format_worker_exitcode(exitcode)
+
+
+def _worker_died_from_signal(process: Any) -> bool:
+    try:
+        exitcode = process.exitcode
+        return isinstance(exitcode, int) and exitcode < 0
+    except Exception:
+        return False
+
+
+def _terminate_and_join_process(process: Any) -> None:
+    """Stop a worker and reap it, escalating to kill when termination stalls."""
+    if process is None:
+        return
+    try:
+        if process.is_alive():
+            process.terminate()
+    except Exception:
+        pass
+    try:
+        process.join(timeout=1.0)
+    except Exception:
+        pass
+    try:
+        if process.is_alive():
+            process.kill()
+            process.join(timeout=1.0)
+    except Exception:
+        pass
+
+
+def _read_worker_fault_trace(fault_file: BinaryIO | None) -> str:
+    if fault_file is None:
+        return ""
+    try:
+        fault_file.seek(0)
+        raw_trace = fault_file.read(_MAX_WORKER_FAULT_TRACE_BYTES + 1)
+    except (OSError, ValueError):
+        return ""
+    truncated = len(raw_trace) > _MAX_WORKER_FAULT_TRACE_BYTES
+    trace = raw_trace[:_MAX_WORKER_FAULT_TRACE_BYTES].decode(
+        "utf-8", errors="replace"
+    )
+    trace = trace.strip()
+    if truncated:
+        trace += "\n[worker fatal traceback truncated]"
+    return trace
+
+
+def _with_worker_fault_trace(message: str, fault_trace: str) -> str:
+    if not fault_trace:
+        return message
+    return f"{message}\nworker fatal traceback:\n{fault_trace}"
+
+
+def _enable_worker_faulthandler(fault_file: BinaryIO) -> None:
+    """Route fatal Python signal diagnostics into the sandbox fault file."""
+    faulthandler.enable(file=fault_file, all_threads=True)
 
 
 class GrammarCheckUnavailable(RuntimeError):
@@ -97,8 +255,16 @@ class GrammarCheckUnavailable(RuntimeError):
     Callers may reject the request, but this result must not be cached as invalid."""
 
 
+class GrammarCheckOverloaded(GrammarCheckUnavailable):
+    """Grammar validation capacity or worker resources are temporarily exhausted."""
+
+
+class GrammarCheckTimeout(GrammarCheckUnavailable):
+    """A checked-out grammar sandbox exceeded its compilation deadline."""
+
+
 class GrammarCompilationError(ValueError):
-    """Any catchable xgrammar compiler error returned by a sandbox worker."""
+    """Any deterministic xgrammar compiler error returned by a sandbox worker."""
 
 
 class GrammarValidator:
@@ -119,6 +285,8 @@ class GrammarValidator:
         self._result_cache: OrderedDict[
             tuple[str, str], _GrammarCheckResult
         ] = OrderedDict()
+        self._crash_circuit_lock = threading.Lock()
+        self._crash_circuit: OrderedDict[tuple[str, str], float] = OrderedDict()
         self._initialize_compiler(
             tokenizer_info_json, grammar_config, admission_config
         )
@@ -146,8 +314,10 @@ class GrammarValidator:
         if configured_pool_size > 0:
             self._pool_target = configured_pool_size
         else:
+            cores = len(os.sched_getaffinity(0))
             self._pool_target = max(
-                1, (os.cpu_count() or 8) // (2 * self._compile_threads)
+                1,
+                min(_MAX_AUTO_SANDBOX_POOL_SIZE, cores // (2 * self._compile_threads)),
             )
 
         # Persistent pool of N spawned workers, each compiling one spec at a time, so
@@ -156,8 +326,9 @@ class GrammarValidator:
         # pipe recv (~0 CPU), so the standing cost is memory, not CPU.
         #
         self._mp: Any = None
-        self._idle: Any = None  # queue.Queue of idle (proc, conn)
-        self._pool_lock = threading.Lock()  # guards _live / _spawning
+        self._idle: Any = None  # queue.Queue of idle (proc, conn, fault_file)
+        self._pool_lock = threading.Lock()  # guards worker/replacement state
+        self._close_lock = threading.Lock()
         # functools.lru_cache protects its own state but allows concurrent cache misses
         # for the same key to execute more than once. Keep one in-flight Future per exact
         # grammar so duplicate requests share the leader's compile result.
@@ -168,6 +339,12 @@ class GrammarValidator:
         self._live = 0
         self._spawning = 0
         self._coordinator_running = False
+        self._coordinator_thread: threading.Thread | None = None
+        self._replacement_timer: threading.Timer | None = None
+        self._replacement_failures = 0
+        self._replacement_not_before = 0.0
+        self._last_spawn_error = ""
+        self._closed = False
         self._mp = multiprocessing.get_context("spawn")
         self._idle = queue.Queue()
         self._ensure_pool()  # warm N workers in the background; never blocks init
@@ -306,7 +483,8 @@ class GrammarValidator:
             result = self._get_cached_result(key)
             if result is None:
                 result = self._check_grammar_uncached(kind, spec_str)
-                self._cache_result(key, result)
+                if result.cacheable:
+                    self._cache_result(key, result)
         except BaseException as e:
             # Followers receive the same transient/deterministic failure. Exceptions
             # are not stored, so a later request can become a fresh leader.
@@ -342,6 +520,28 @@ class GrammarValidator:
             while len(self._result_cache) > self._result_cache_max_entries:
                 self._result_cache.popitem(last=False)
 
+    def _raise_if_crash_circuit_open(self, key: tuple[str, str]) -> None:
+        now = time.monotonic()
+        with self._crash_circuit_lock:
+            expiry = self._crash_circuit.get(key)
+            if expiry is None:
+                return
+            if expiry <= now:
+                del self._crash_circuit[key]
+                return
+            self._crash_circuit.move_to_end(key)
+        raise GrammarCheckUnavailable(
+            "sandbox worker previously crashed compiling this grammar; retry later"
+        )
+
+    def _record_native_crash(self, key: tuple[str, str]) -> None:
+        expiry = time.monotonic() + _CRASH_CIRCUIT_TTL_S
+        with self._crash_circuit_lock:
+            self._crash_circuit[key] = expiry
+            self._crash_circuit.move_to_end(key)
+            while len(self._crash_circuit) > _CRASH_CIRCUIT_MAX_ENTRIES:
+                self._crash_circuit.popitem(last=False)
+
     def _check_grammar_uncached(self, kind: str, spec_str: str) -> _GrammarCheckResult:
         """Full admission result for one exact grammar string.
         The result contains whether shape/support checks and compilation passed, plus
@@ -367,11 +567,13 @@ class GrammarValidator:
                 raise ValueError(f"unsupported grammar kind {kind!r}")
 
             try:
-                result = _GrammarCheckResult(self._compile_in_worker(kind, spec_str))
+                result = _GrammarCheckResult(
+                    self._compile_in_worker(kind, spec_str), cacheable=True
+                )
             except GrammarCompilationError as e:
-                # Cache deterministic compiler rejections together with xgrammar's
-                # diagnostic so cache hits return the same client-visible detail.
-                result = _GrammarCheckResult(False, str(e))
+                # GrammarCompilationError is raised only for an explicit INVALID reply
+                # from a healthy worker, so this deterministic verdict is cacheable.
+                result = _GrammarCheckResult(False, str(e), cacheable=True)
             return result
         finally:
             if result is None:
@@ -468,16 +670,29 @@ class GrammarValidator:
         """Compile with independent checkout and execution budgets.
 
         A checked-out worker is always either returned healthy or retired. Queue/compile
-        timeouts and transport failures are transient unavailable outcomes. Catchable
-        resource-exhaustion exceptions are cacheable input rejections, but their worker is
-        retired after replying.
+        timeouts, transport failures, and catchable resource-exhaustion exceptions are
+        transient unavailable outcomes and are never cached as invalid input. A worker that
+        reports resource exhaustion is retired after replying.
         """
+        key = (kind, spec_str)
+        self._raise_if_crash_circuit_open(key)
+        if self._closed:
+            raise GrammarCheckUnavailable("grammar sandbox is closed")
         checkout_deadline = time.monotonic() + self._queue_timeout_s
         queue_wait_s = 0.0
         last_error: Exception | None = None
-        crash_attempts = 0
-        owned_worker: tuple[Any, Any] | None = None
+        owned_worker: tuple[Any, Any, BinaryIO] | None = None
         self._ensure_pool()
+
+        def checkout_failure(message: str) -> GrammarCheckUnavailable:
+            with self._pool_lock:
+                unavailable = self._live == 0 and bool(self._last_spawn_error)
+                spawn_error = self._last_spawn_error
+            if unavailable:
+                return GrammarCheckUnavailable(
+                    f"grammar sandbox unavailable: {spawn_error}"
+                )
+            return GrammarCheckOverloaded(message)
 
         def retire_owned() -> None:
             nonlocal owned_worker
@@ -492,15 +707,17 @@ class GrammarValidator:
             owned_worker = None
             if worker is None:
                 return
-            proc, conn = worker
+            proc, conn, _ = worker
             try:
                 healthy = proc is not None and proc.is_alive()
             except Exception:
                 healthy = False
-            if healthy:
-                self._idle.put(worker)
-            else:
-                self._retire(proc, conn)
+            with self._pool_lock:
+                return_to_pool = healthy and not self._closed
+                if return_to_pool:
+                    self._idle.put(worker)
+            if not return_to_pool:
+                self._retire(*worker)
 
         try:
             while True:
@@ -511,7 +728,7 @@ class GrammarValidator:
                         if last_error is not None
                         else ""
                     )
-                    raise GrammarCheckUnavailable(
+                    raise checkout_failure(
                         f"no idle sandbox worker within {self._queue_timeout_s:g}s{detail}"
                     )
                 try:
@@ -520,16 +737,27 @@ class GrammarValidator:
                     queue_wait_s += time.monotonic() - checkout_started
                 except queue.Empty as e:
                     queue_wait_s += time.monotonic() - checkout_started
-                    raise GrammarCheckUnavailable(
+                    raise checkout_failure(
                         f"no idle sandbox worker within {self._queue_timeout_s:g}s"
                     ) from e
 
-                proc, conn = owned_worker
+                proc, conn, fault_file = owned_worker
                 try:
                     alive = proc is not None and proc.is_alive()
                 except Exception:
                     alive = False
                 if not alive:
+                    exit_detail = _describe_worker_exit(proc)
+                    fault_trace = _read_worker_fault_trace(fault_file)
+                    logger.warning(
+                        _with_worker_fault_trace(
+                            _with_request_id(
+                                "GrammarValidator: sandbox worker died while idle "
+                                f"({exit_detail})"
+                            ),
+                            fault_trace,
+                        )
+                    )
                     retire_owned()
                     continue
 
@@ -550,29 +778,30 @@ class GrammarValidator:
                         )
                     )
                     retire_owned()
-                    raise GrammarCheckUnavailable("sandbox grammar compile timed out")
+                    raise GrammarCheckTimeout("sandbox grammar compile timed out")
 
                 try:
                     reply = conn.recv()
                 except (EOFError, OSError, BrokenPipeError, ValueError) as e:
-                    crash_attempts += 1
+                    exit_detail = _describe_worker_exit(proc)
+                    native_crash = _worker_died_from_signal(proc)
+                    fault_trace = _read_worker_fault_trace(fault_file)
+                    if native_crash:
+                        self._record_native_crash(key)
                     retire_owned()
-                    if crash_attempts >= _CRASH_CONFIRMATION_ATTEMPTS:
-                        logger.warning(
-                            _with_request_id(
-                                "GrammarValidator: independent sandbox workers reproducibly "
-                                f"died compiling this spec ({e}); rejecting it"
-                            )
-                        )
-                        return False
                     logger.warning(
-                        _with_request_id(
-                            "GrammarValidator: sandbox worker died compiling this spec; "
-                            "retrying once in an independent worker"
+                        _with_worker_fault_trace(
+                            _with_request_id(
+                                "GrammarValidator: sandbox worker died or disconnected while "
+                                f"compiling this spec ({exit_detail}; transport_error={e}); "
+                                "treating the result as transient"
+                            ),
+                            fault_trace,
                         )
                     )
-                    checkout_deadline = time.monotonic() + self._queue_timeout_s
-                    continue
+                    raise GrammarCheckUnavailable(
+                        f"sandbox worker unavailable while compiling grammar ({exit_detail})"
+                    ) from e
 
                 if (
                     not isinstance(reply, tuple)
@@ -597,82 +826,139 @@ class GrammarValidator:
                         f"compile_ms={compile_ms:.3f}{error_log}"
                     )
                 )
+                if status is _WorkerStatus.OVERLOADED:
+                    retire_owned()
+                    detail = compile_error or "worker resources exhausted"
+                    raise GrammarCheckOverloaded(
+                        f"sandbox grammar compiler overloaded: {detail}"
+                    )
                 if status is _WorkerStatus.UNAVAILABLE:
                     retire_owned()
+                    detail = compile_error or "worker runtime failure"
                     raise GrammarCheckUnavailable(
-                        "sandbox grammar compiler exhausted worker resources"
+                        f"sandbox grammar compiler unavailable: {detail}"
                     )
                 if retire_after_reply:
                     retire_owned()
                 else:
                     release_owned()
-                if status is _WorkerStatus.INVALID and compile_error:
-                    raise GrammarCompilationError(compile_error)
+                if status is _WorkerStatus.INVALID:
+                    raise GrammarCompilationError(
+                        compile_error or "sandbox compiler rejected the grammar"
+                    )
                 return status is _WorkerStatus.VALID
         finally:
             # Covers future early returns/exceptions: checkout ownership must never vanish.
             if owned_worker is not None:
                 retire_owned()
 
-    def _retire(self, proc: Any, conn: Any) -> None:
-        """Kill a dead/bad worker, drop it from the live count, and schedule a background
-        replacement so the pool self-heals to its target."""
+    def close(self) -> None:
+        """Stop idle workers and prevent any background replacement from restarting them."""
+        with self._close_lock:
+            with self._pool_lock:
+                if self._closed:
+                    return
+                self._closed = True
+                self._pool_target = 0
+                replacement_timer = self._replacement_timer
+                self._replacement_timer = None
+                coordinator_thread = self._coordinator_thread
+            if replacement_timer is not None:
+                replacement_timer.cancel()
+            if (
+                coordinator_thread is not None
+                and coordinator_thread is not threading.current_thread()
+            ):
+                coordinator_thread.join(timeout=self._compile_timeout_s + 1.0)
+            while True:
+                try:
+                    worker = self._idle.get_nowait()
+                except queue.Empty:
+                    break
+                self._retire(*worker)
+
+    def _retire(
+        self, proc: Any, conn: Any, fault_file: BinaryIO | None = None
+    ) -> None:
+        """Kill a dead/bad worker and schedule a bounded-rate replacement."""
         if conn is not None:
             try:
                 conn.close()
             except Exception:
                 pass
-        if proc is not None:
+        _terminate_and_join_process(proc)
+        if fault_file is not None:
             try:
-                if proc.is_alive():
-                    proc.terminate()
-                    proc.join(timeout=1.0)
-                    if proc.is_alive():
-                        proc.kill()
-                proc.join(timeout=1.0)  # a segfaulted worker joins instantly
+                fault_file.close()
             except Exception:
                 pass
         with self._pool_lock:
             self._live = max(0, self._live - 1)
         self._ensure_pool()
 
-    def _ensure_pool(self) -> None:
-        """Top the pool up through one background coordinator.
+    def _schedule_replacement_locked(self, delay_s: float) -> None:
+        if self._closed or self._replacement_timer is not None:
+            return
+        timer = threading.Timer(delay_s, self._replacement_timer_fired)
+        timer.name = "grammar-sandbox-replacement-backoff"
+        timer.daemon = True
+        self._replacement_timer = timer
+        timer.start()
 
-        The coordinator starts workers sequentially. Combined with the ``spawn`` context,
-        this avoids concurrent process creation from arbitrary request threads.
-        """
+    def _replacement_timer_fired(self) -> None:
         with self._pool_lock:
-            if self._coordinator_running:
+            self._replacement_timer = None
+        self._ensure_pool()
+
+    def _ensure_pool(self) -> None:
+        """Top up the pool through one coordinator, backing off failed replacements."""
+        with self._pool_lock:
+            if self._closed or self._coordinator_running:
                 return
             deficit = self._pool_target - self._live - self._spawning
             if deficit <= 0:
                 return
+            delay_s = self._replacement_not_before - time.monotonic()
+            if delay_s > 0:
+                self._schedule_replacement_locked(delay_s)
+                return
             self._spawning += deficit
             self._coordinator_running = True
-        threading.Thread(
-            target=self._spawn_many,
-            args=(deficit,),
-            name="grammar-sandbox-coordinator",
-            daemon=True,
-        ).start()
+            coordinator = threading.Thread(
+                target=self._spawn_many,
+                args=(deficit,),
+                name="grammar-sandbox-coordinator",
+                daemon=True,
+            )
+            self._coordinator_thread = coordinator
+            coordinator.start()
 
     def _spawn_many(self, count: int) -> None:
+        unattempted = 0
         try:
-            for _ in range(count):
-                self._spawn_one()
+            for index in range(count):
+                if not self._spawn_one():
+                    unattempted = count - index - 1
+                    break
         finally:
             with self._pool_lock:
+                if unattempted:
+                    self._spawning = max(0, self._spawning - unattempted)
                 self._coordinator_running = False
+                self._coordinator_thread = None
+            self._ensure_pool()
 
-    def _spawn_one(self) -> None:
-        """Spawn one worker, wait for its readiness handshake, add it to the idle pool. Off
-        the request path; on failure the pool stays smaller until the next _ensure_pool.
-        """
+    def _spawn_one(self) -> bool:
+        """Spawn one worker and return whether it joined the idle pool."""
         proc = None
         parent_conn = None
+        child_conn = None
+        fault_file: BinaryIO | None = None
         try:
             parent_conn, child_conn = self._mp.Pipe()
+            fault_file = tempfile.TemporaryFile(
+                mode="w+b", prefix="rtp_llm_xgrammar_fault_"
+            )
             proc = self._mp.Process(
                 target=_spawned_sandbox_worker,
                 args=(
@@ -681,12 +967,14 @@ class GrammarValidator:
                     self._worker_grammar_config,
                     self._worker_admission_config,
                     self._worker_memory_limit_bytes,
+                    _DeferredDupFd(fault_file.fileno()),
                 ),
                 name="grammar-sandbox-worker",
                 daemon=True,
             )
             proc.start()
             child_conn.close()  # parent keeps only its end -> sees EOF when worker dies
+            child_conn = None
             if not parent_conn.poll(self._compile_timeout_s):
                 raise TimeoutError("worker readiness handshake timed out")
             handshake = parent_conn.recv()
@@ -701,33 +989,60 @@ class GrammarValidator:
                     f"sandbox worker failed to initialize its compiler backend{detail}"
                 )
             with self._pool_lock:
-                self._live += 1
-                self._spawning -= 1
-            self._idle.put((proc, parent_conn))
-            proc = parent_conn = None  # owned by the pool now
+                self._spawning = max(0, self._spawning - 1)
+                accepted = not self._closed
+                if accepted:
+                    self._live += 1
+                    self._replacement_failures = 0
+                    self._replacement_not_before = 0.0
+                    self._last_spawn_error = ""
+                    self._idle.put((proc, parent_conn, fault_file))
+                    proc = parent_conn = fault_file = None  # pool owns them now
+            if not accepted:
+                raise RuntimeError("grammar sandbox closed during worker startup")
             logger.debug("GrammarValidator sandbox worker ready (backend=on)")
+            return True
         except Exception as e:
             with self._pool_lock:
-                self._spawning -= 1
+                self._spawning = max(0, self._spawning - 1)
+                if not self._closed:
+                    self._replacement_failures += 1
+                    backoff_step = min(self._replacement_failures - 1, 16)
+                    delay_s = min(
+                        _REPLACEMENT_BACKOFF_INITIAL_S * (2**backoff_step),
+                        _REPLACEMENT_BACKOFF_MAX_S,
+                    )
+                    self._replacement_not_before = time.monotonic() + delay_s
+                    self._last_spawn_error = str(e) or type(e).__name__
+            for conn in (parent_conn, child_conn):
+                if conn is not None:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+            _terminate_and_join_process(proc)
+            exit_detail = _describe_worker_exit(proc) if proc is not None else ""
+            fault_trace = _read_worker_fault_trace(fault_file)
+            detail = f"; {exit_detail}" if exit_detail else ""
             logger.warning(
-                f"GrammarValidator: sandbox worker spawn failed ({e}); pool smaller until retry"
+                _with_worker_fault_trace(
+                    f"GrammarValidator: sandbox worker spawn failed ({e}{detail}); "
+                    "retrying with backoff",
+                    fault_trace,
+                )
             )
-            if parent_conn is not None:
+            if fault_file is not None:
                 try:
-                    parent_conn.close()
+                    fault_file.close()
                 except Exception:
                     pass
-            if proc is not None:
-                try:
-                    proc.terminate()
-                except Exception:
-                    pass
+            return False
 
     def _worker_loop(self, conn: Any) -> None:
         """Spawned worker: announce its local compiler, then serve compile requests.
 
-        A bad-case compile may SIGSEGV this process; the parent confirms such crashes
-        independently before caching rejection.
+        A bad-case compile may SIGSEGV this process. The parent always treats process
+        death as transient infrastructure failure and never caches it as a rejection.
         """
         if self._worker_memory_limit_bytes > 0:
             # RLIMIT_AS is absolute, so add the configured headroom to the spawned
@@ -758,6 +1073,11 @@ class GrammarValidator:
             status = _WorkerStatus.INVALID
             exit_after_reply = False
             compile_error = ""
+            try:
+                self._worker_fault_file.seek(0)
+                self._worker_fault_file.truncate(0)
+            except (OSError, ValueError):
+                pass
             try:
                 self._compile(kind, spec_str)
                 status = _WorkerStatus.VALID
@@ -948,9 +1268,15 @@ def _spawned_sandbox_worker(
     grammar_config: GrammarConfig,
     admission_config: GrammarAdmissionConfig,
     worker_memory_limit_bytes: int,
+    fault_trace_fd: Any,
 ) -> None:
     """Spawn entry point: construct all Python/xgrammar state inside the child."""
+    fault_file: BinaryIO | None = None
     try:
+        _configure_xgrammar_sandbox_core_dump_for_current_process()
+        fault_file = os.fdopen(fault_trace_fd.detach(), "wb", buffering=0)
+        os.dup2(fault_file.fileno(), 2)
+        _enable_worker_faulthandler(fault_file)
         # Do not call GrammarValidator.__init__ here: the public validator always owns a
         # sandbox pool, while a worker only needs its local compiler and request loop.
         validator = GrammarValidator.__new__(GrammarValidator)
@@ -958,6 +1284,7 @@ def _spawned_sandbox_worker(
             tokenizer_info_json, grammar_config, admission_config
         )
         validator._worker_memory_limit_bytes = worker_memory_limit_bytes
+        validator._worker_fault_file = fault_file
     except BaseException as e:
         try:
             detail = f"{type(e).__name__}: {e}"[:512]
@@ -966,9 +1293,14 @@ def _spawned_sandbox_worker(
             pass
         finally:
             conn.close()
+            if fault_file is not None:
+                faulthandler.disable()
+                fault_file.close()
         return
 
     try:
         validator._worker_loop(conn)
     finally:
         conn.close()
+        faulthandler.disable()
+        fault_file.close()

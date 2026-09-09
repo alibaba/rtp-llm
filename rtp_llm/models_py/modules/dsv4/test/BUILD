@@ -21,13 +21,9 @@ py_test(
     ],
 )
 
-py_test(
+alias(
     name = "test_ppu_grouped_fp4_strategy_source",
-    srcs = ["test_ppu_grouped_fp4_strategy_source.py"],
-    # Source-only: parses the strategy and runs isolated helpers without
-    # importing torch, deep_gemm, or any native runtime.
-    data = ["//rtp_llm/models_py:modules"],
-    tags = ["source-only"],
+    actual = "//rtp_llm/platforms:test_ppu_grouped_fp4_strategy_source",
 )
 
 py_test(
@@ -381,6 +377,15 @@ py_test(
 )
 
 py_test(
+    name = "test_hc_cuda_splitk",
+    srcs = ["test_hc_cuda_splitk.py"],
+    deps = ["//rtp_llm/models_py:modules", "//rtp_llm:testlib"],
+    tags = ["manual", "SM100"],
+    exec_properties = {"gpu": "SM100", "gpu_count": "1"},
+    target_compatible_with = _DSV4_CUDA13_ONLY,
+)
+
+py_test(
     name = "test_mega_moe_input_packer_perf",
     srcs = ["test_mega_moe_input_packer_perf.py"],
     deps = ["//rtp_llm/models_py:dsv4_fused_kernel_sources"],
@@ -502,5 +507,5 @@ py_test(
 py_test(
     name = "test_prefill_communication",
     srcs = ["test_prefill_communication.py"],
-    data = ["//rtp_llm/models_py:modules", "//rtp_llm/server:backend_manager.py"],
+    data = ["//rtp_llm/platforms:platform_sources", "//rtp_llm/server:backend_manager.py"],
 )

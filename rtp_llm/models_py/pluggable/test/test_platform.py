@@ -10,21 +10,23 @@ from rtp_llm.models_py.pluggable.platform import PlatformContext
 
 class PlatformSelectionTest(unittest.TestCase):
     def _detect(self, kind, *, current=0, **kwargs):
-        runtime = types.SimpleNamespace(
-            __version__="test-runtime",
-            cuda=types.SimpleNamespace(
-                current_device=lambda: current,
-                get_device_name=lambda rank: (
-                    "ZW-M890P" if kind == DeviceType.Ppu else "test-device"
-                ),
-            ),
-        )
+        def context(local_rank):
+            if current != local_rank:
+                raise RuntimeError(
+                    "Capture platform only after setting the worker device"
+                )
+            return PlatformContext(
+                kind,
+                "ZW-M890P" if kind == DeviceType.Ppu else "test-device",
+                local_rank,
+                device_string=f"device:{local_rank}",
+                capabilities={"test-runtime"},
+            )
+
+        fake_device = types.SimpleNamespace(runtime_context=context)
         with (
-            patch.dict(sys.modules, {"torch": runtime}),
-            patch(
-                "rtp_llm.models_py.pluggable.platform.get_device_type",
-                return_value=kind,
-            ),
+            patch("rtp_llm.device.runtime.get_device_type", return_value=kind),
+            patch.object(device, "get_current_device", return_value=fake_device),
         ):
             return PlatformContext.detect(local_rank=0, **kwargs)
 

@@ -12,6 +12,7 @@ from pathlib import Path
 from unittest import mock
 
 import torch
+
 from rtp_llm.platforms.ppu import runtime as RUNTIME
 from rtp_llm.platforms.ppu.models.dsv4 import ppu_wo_a as WO_A
 from rtp_llm.platforms.ppu.modules.linear import fp8_linear as MODULE
@@ -21,6 +22,7 @@ class Fp8CpuContractTest(unittest.TestCase):
     def scale(self, shape=(1, 1)):
         return torch.full(shape, 127, dtype=torch.uint8).view(torch.float8_e8m0fnu)
 
+    @unittest.skipUnless(hasattr(torch, "float8_e8m0fnu"), "Torch lacks UE8M0 dtype")
     def test_checkpoint_scale_preserves_encoded_power_of_two(self):
         raw = torch.tensor([[0, 120, 127, 130, 254]], dtype=torch.uint8)
         with mock.patch.object(MODULE, "_require_m890p"):
@@ -33,6 +35,7 @@ class Fp8CpuContractTest(unittest.TestCase):
         self.assertTrue(actual.is_contiguous())
         self.assertTrue(torch.equal(actual, expected))
 
+    @unittest.skipUnless(hasattr(torch, "float8_e8m0fnu"), "Torch lacks UE8M0 dtype")
     def test_scale_shape_dtype_and_weight_alignment_rejected(self):
         for scale, shape, error in [
             (self.scale(), (127, 128), ValueError),
@@ -43,6 +46,7 @@ class Fp8CpuContractTest(unittest.TestCase):
                 with self.assertRaises(error):
                     MODULE.checkpoint_ue8m0_scale_to_fp32(scale, shape)
 
+    @unittest.skipUnless(hasattr(torch, "float8_e8m0fnu"), "Torch lacks UE8M0 dtype")
     def test_cpu_tensors_are_rejected_before_native_resolution(self):
         with mock.patch.object(MODULE, "_resolve_deep_gemm_symbol") as native:
             with self.assertRaisesRegex(ValueError, "CUDA/PPU"):
@@ -51,6 +55,7 @@ class Fp8CpuContractTest(unittest.TestCase):
                 )
         native.assert_not_called()
 
+    @unittest.skipUnless(hasattr(torch, "float8_e8m0fnu"), "Torch lacks UE8M0 dtype")
     def test_dense_receives_fp32_scales_and_reuses_them(self):
         weight = torch.zeros((128, 128), dtype=torch.float8_e4m3fn)
         activation = torch.zeros((2, 128), dtype=torch.bfloat16)
@@ -81,6 +86,7 @@ class Fp8CpuContractTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "alias"):
                 layer(activation, out=activation)
 
+    @unittest.skipUnless(hasattr(torch, "float8_e8m0fnu"), "Torch lacks UE8M0 dtype")
     def test_empty_batch_does_not_quantize_or_launch(self):
         with mock.patch.object(MODULE, "_require_m890p"), mock.patch.object(
             MODULE, "_resolve_deep_gemm_symbol"
@@ -95,6 +101,7 @@ class Fp8CpuContractTest(unittest.TestCase):
             resolver.return_value.assert_not_called()
             quant.assert_not_called()
 
+    @unittest.skipUnless(hasattr(torch, "float8_e8m0fnu"), "Torch lacks UE8M0 dtype")
     def test_wo_a_tp4_group_geometry_and_einsum_abi(self):
         calls = []
 
