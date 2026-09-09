@@ -508,6 +508,64 @@ class MegaCSAWeightsTest(unittest.TestCase):
         self.assertEqual(tuple(packed.wq_b_sf.shape), (576, 12))
         self.assertEqual(packed.front_sf.dtype, torch.float8_e8m0fnu)
 
+    @staticmethod
+    def _distinct_scale(shape: tuple[int, int], offset: int) -> torch.Tensor:
+        rows = torch.arange(shape[0], dtype=torch.int64).unsqueeze(1)
+        columns = torch.arange(shape[1], dtype=torch.int64).unsqueeze(0)
+        return (
+            (124 + (offset + rows * 3 + columns * 5) % 7)
+            .to(torch.uint8)
+            .view(torch.float8_e8m0fnu)
+        )
+
+    @staticmethod
+    def _pack_scale(scale: torch.Tensor) -> torch.Tensor:
+        return (
+            scale.view(torch.uint8)
+            .repeat_interleave(128, dim=0)
+            .contiguous()
+            .view(torch.int32)
+        )
+
+    def test_raw_and_packed_scales_preserve_source_and_block_order(self) -> None:
+        weights = self._layer_weights()
+        scales = {
+            W.v4_attn_wq_a_s: self._distinct_scale((12, 56), 0),
+            W.v4_attn_wkv_s: self._distinct_scale((4, 56), 1),
+            W.v4_attn_wq_b_s: self._distinct_scale((512, 12), 2),
+            W.v4_indexer_wq_b_s: self._distinct_scale((64, 12), 3),
+        }
+        weights.update(scales)
+        raw = MegaCSAWeights.from_layer_weights(weights)
+
+        weights.update({key: self._pack_scale(value) for key, value in scales.items()})
+        packed = MegaCSAWeights.from_layer_weights(weights)
+
+        expected_front = torch.cat(
+            (scales[W.v4_attn_wq_a_s], scales[W.v4_attn_wkv_s]), dim=0
+        )
+        expected_wq_b = torch.cat(
+            (scales[W.v4_indexer_wq_b_s], scales[W.v4_attn_wq_b_s]), dim=0
+        )
+        self.assertTrue(
+            torch.equal(
+                raw.front_sf.view(torch.uint8), expected_front.view(torch.uint8)
+            )
+        )
+        self.assertTrue(
+            torch.equal(raw.wq_b_sf.view(torch.uint8), expected_wq_b.view(torch.uint8))
+        )
+        self.assertTrue(
+            torch.equal(
+                packed.front_sf.view(torch.uint8), expected_front.view(torch.uint8)
+            )
+        )
+        self.assertTrue(
+            torch.equal(
+                packed.wq_b_sf.view(torch.uint8), expected_wq_b.view(torch.uint8)
+            )
+        )
+
     def test_row_concatenation_preserves_declared_order(self) -> None:
         first = torch.tensor([[1.0], [2.0]])
         second = torch.tensor([[3.0]])

@@ -240,6 +240,24 @@ class MegaHCAWeightsTest(unittest.TestCase):
         )
         self.assertEqual(packed.front_sf.dtype, torch.float8_e8m0fnu)
 
+    def test_deep_gemm_packed_scales_are_accepted(self) -> None:
+        weights = self._layer_weights()
+        for key, shape in (
+            (W.v4_attn_wq_a_s, (12, 56)),
+            (W.v4_attn_wkv_s, (4, 56)),
+            (W.v4_attn_wq_b_s, (512, 12)),
+        ):
+            raw = torch.full(shape, 127, dtype=torch.uint8)
+            weights[key] = (
+                raw.repeat_interleave(128, dim=0).contiguous().view(torch.int32)
+            )
+
+        packed = MegaHCAWeights.from_layer_weights(weights)
+
+        self.assertEqual(tuple(packed.front_sf.shape), (16, 56))
+        self.assertEqual(tuple(packed.wq_b_sf.shape), (512, 12))
+        self.assertEqual(packed.front_sf.dtype, torch.float8_e8m0fnu)
+
     def test_csa_shaped_compressor_is_rejected(self) -> None:
         weights = self._layer_weights()
         weights[W.v4_compressor_wkv] = self._meta((1024, DIM), torch.bfloat16)

@@ -144,3 +144,8 @@ dsv4_py_test(
     name = "test_mega_moe_front_adapter",
     deps = _DSV4_TEST_DEPS,
 )
+
+dsv4_sm100_py_test(
+    name = "test_mega_inv_rope_fp8_quant",
+    deps = _DSV4_TEST_DEPS,
+)
