@@ -1256,6 +1256,17 @@ public:
     bool    from_gpu   = false;
 };
 
+class RtpLLMMemoryCache3DCopyMetricsCollector final {
+public:
+    bool    failed      = false;
+    bool    from_gpu    = false;
+    int64_t block_count = 0;
+    int64_t tile_count  = 0;
+    int64_t op_count    = 0;
+    int64_t bytes       = 0;
+    int64_t latency_us  = 0;
+};
+
 class RtpLLMMemoryCacheStatusMetricsCollector final {
 public:
     int64_t item_num            = 0;
@@ -1272,6 +1283,7 @@ public:
     void report(const kmonitor::MetricsTags* tags, RtpLLMMemoryCacheReadMetricsCollector* collector);
     void report(const kmonitor::MetricsTags* tags, RtpLLMMemoryCacheWriteMetricsCollector* collector);
     void report(const kmonitor::MetricsTags* tags, RtpLLMMemoryCacheCopyMetricsCollector* collector);
+    void report(const kmonitor::MetricsTags* tags, RtpLLMMemoryCache3DCopyMetricsCollector* collector);
     void report(const kmonitor::MetricsTags* tags, RtpLLMMemoryCacheStatusMetricsCollector* collector);
 
 public:
@@ -1299,6 +1311,14 @@ public:
     kmonitor::MutableMetric* kv_cache_memory_cache_copy_qps_metric        = nullptr;
     kmonitor::MutableMetric* kv_cache_memory_cache_copy_failed_qps_metric = nullptr;
     kmonitor::MutableMetric* kv_cache_memory_cache_copy_latency_metric    = nullptr;
+
+    kmonitor::MutableMetric* kv_cache_memory_cache_3d_copy_qps_metric         = nullptr;
+    kmonitor::MutableMetric* kv_cache_memory_cache_3d_copy_failed_qps_metric  = nullptr;
+    kmonitor::MutableMetric* kv_cache_memory_cache_3d_copy_block_count_metric = nullptr;
+    kmonitor::MutableMetric* kv_cache_memory_cache_3d_copy_tile_count_metric  = nullptr;
+    kmonitor::MutableMetric* kv_cache_memory_cache_3d_copy_op_count_metric    = nullptr;
+    kmonitor::MutableMetric* kv_cache_memory_cache_3d_copy_bytes_metric       = nullptr;
+    kmonitor::MutableMetric* kv_cache_memory_cache_3d_copy_latency_us_metric  = nullptr;
 
     kmonitor::MutableMetric* kv_cache_memory_cache_status_item_num_metric        = nullptr;
     kmonitor::MutableMetric* kv_cache_memory_cache_status_total_block_num_metric     = nullptr;

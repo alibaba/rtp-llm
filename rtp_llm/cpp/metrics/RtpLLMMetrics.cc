@@ -878,6 +878,22 @@ bool RtpLLMMemoryCacheMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_memory_cache_copy_latency_metric,
                                   "rtp_llm_kv_cache_memory_cache_copy_latency_us");
 
+    // cudaMemcpy3D batch copy metrics, split by copy_direction tag.
+    REGISTER_QPS_MUTABLE_METRIC(kv_cache_memory_cache_3d_copy_qps_metric,
+                                "rtp_llm_kv_cache_memory_cache_3d_copy_qps");
+    REGISTER_QPS_MUTABLE_METRIC(kv_cache_memory_cache_3d_copy_failed_qps_metric,
+                                "rtp_llm_kv_cache_memory_cache_3d_copy_failed_qps");
+    REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_memory_cache_3d_copy_block_count_metric,
+                                  "rtp_llm_kv_cache_memory_cache_3d_copy_block_count");
+    REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_memory_cache_3d_copy_tile_count_metric,
+                                  "rtp_llm_kv_cache_memory_cache_3d_copy_tile_count");
+    REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_memory_cache_3d_copy_op_count_metric,
+                                  "rtp_llm_kv_cache_memory_cache_3d_copy_op_count");
+    REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_memory_cache_3d_copy_bytes_metric,
+                                  "rtp_llm_kv_cache_memory_cache_3d_copy_bytes");
+    REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_memory_cache_3d_copy_latency_us_metric,
+                                  "rtp_llm_kv_cache_memory_cache_3d_copy_latency_us");
+
     // Status 相关指标
     REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_memory_cache_status_item_num_metric,
                                   "rtp_llm_kv_cache_memory_cache_status_item_num");
@@ -954,6 +970,20 @@ void RtpLLMMemoryCacheMetrics::report(const kmonitor::MetricsTags*           tag
     // 如果失败，上报失败 QPS
     if (collector->failed) {
         kv_cache_memory_cache_copy_failed_qps_metric->Report(&copy_tag, 1);
+    }
+}
+
+void RtpLLMMemoryCacheMetrics::report(const kmonitor::MetricsTags*             tags,
+                                      RtpLLMMemoryCache3DCopyMetricsCollector* collector) {
+    kmonitor::MetricsTags copy_tag("copy_direction", collector->from_gpu ? "FROM_GPU" : "TO_GPU");
+    kv_cache_memory_cache_3d_copy_qps_metric->Report(&copy_tag, 1);
+    kv_cache_memory_cache_3d_copy_block_count_metric->Report(&copy_tag, collector->block_count);
+    kv_cache_memory_cache_3d_copy_tile_count_metric->Report(&copy_tag, collector->tile_count);
+    kv_cache_memory_cache_3d_copy_op_count_metric->Report(&copy_tag, collector->op_count);
+    kv_cache_memory_cache_3d_copy_bytes_metric->Report(&copy_tag, collector->bytes);
+    kv_cache_memory_cache_3d_copy_latency_us_metric->Report(&copy_tag, collector->latency_us);
+    if (collector->failed) {
+        kv_cache_memory_cache_3d_copy_failed_qps_metric->Report(&copy_tag, 1);
     }
 }
 

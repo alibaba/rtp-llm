@@ -284,6 +284,13 @@ private:
     void reportReadMetrics(bool success, int64_t latency_us, int64_t input_block_num, int64_t read_block_num);
     void reportWriteMetrics(bool success, int64_t latency_us, int64_t input_block_num, int64_t write_block_num);
     void reportCopyMetrics(bool success, int64_t latency_us, CopyDirection direction);
+    void report3DCopyMetrics(bool          success,
+                             int64_t       latency_us,
+                             CopyDirection direction,
+                             int64_t       block_count,
+                             int64_t       tile_count,
+                             int64_t       op_count,
+                             int64_t       bytes);
     void reportDiskMatchMetrics(bool success, int64_t latency_us, int64_t input_block_num, int64_t matched_block_num);
     void reportDiskReadMetrics(bool success, int64_t latency_us, int64_t input_block_num, int64_t read_block_num);
     void reportDiskWriteMetrics(bool success, int64_t latency_us, int64_t input_block_num, int64_t write_block_num);
