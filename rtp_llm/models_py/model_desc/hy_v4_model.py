@@ -236,6 +236,13 @@ class Hy4DecoderLayer(nn.Module):
                 and self.hy4_cmp is not None
                 and self.self_attn.indexer is not None
                 and not self.self_attn.reuse_topk_indices
+                and (
+                    channels.shape[0] > 32
+                    or getattr(
+                        self.self_attn.indexer, "_hy4_small_t_head_gate_weight", None
+                    )
+                    is None
+                )
             )
             if emit_head_gate_fp32:
                 (

@@ -818,6 +818,13 @@ class GenericMoeDecoderLayer(nn.Module):
                 and self.self_attn.indexer is not None
                 and not self.self_attn.reuse_topk_indices
                 and not force_reuse_topk_indices
+                and (
+                    hidden_states.shape[0] > 32
+                    or getattr(
+                        self.self_attn.indexer, "_hy4_small_t_head_gate_weight", None
+                    )
+                    is None
+                )
             )
             norm_outputs = fused_add_rmsnorm_fp8_quant_with_bf16_output(
                 hidden_states,

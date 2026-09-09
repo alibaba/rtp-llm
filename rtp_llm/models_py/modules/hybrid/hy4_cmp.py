@@ -1,8 +1,8 @@
-"""Independent HY4 CMP attention path.
+"""Independent HY4 CMP attention and MoE preparation path.
 
 Target Query/cache preparation and output Gate use a dedicated high-priority
-main stream. Indexer K and Q use separate streams and join at the existing fused
-Q/K epilogue. All branches join back to the caller before sparse MLA. Score/TopK
+main stream. Indexer K and Q finish their own RoPE/quantization and join only
+before score. Raw FP32 head gates overlap QKV-A on the Indexer-Q stream. All branches join back to the caller before sparse MLA. Score/TopK
 stays on the K stream; long KV waits for complete main Query preparation. MTP
 and TopK-reuse layers stay on the caller without side-stream work.
 """
@@ -71,7 +71,7 @@ def _record_stream(value: Any, stream: Any) -> None:
 
 
 class Hy4Cmp:
-    """Overlap independent HY4 attention branches without changing formulas."""
+    """Own HY4 stream scheduling, output buffers and prepacked MoE preparation."""
 
     _streams_by_device: dict[int, tuple[Any, Any, Any]] = {}
 
@@ -226,15 +226,171 @@ class Hy4Cmp:
             is None
         )
 
-    def _qkv_a(self, hidden: torch.Tensor, x_fp8: Any, x_scale: Any) -> tuple:
+    @staticmethod
+    def _project(
+        linear: Any,
+        hidden: torch.Tensor,
+        scale: Any = None,
+        out: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        kwargs = {} if out is None else {"out": out}
+        if scale is not None:
+            kwargs["input_scales"] = scale
+        return linear(hidden, **kwargs)
+
+    def _allocate_buffers(self, hidden: torch.Tensor, indexed: bool) -> dict[str, Any]:
+        """Allocate explicit outputs on caller; the final event joins every use."""
+        attn = self.self_attn
+        rows = hidden.shape[0]
+        projections = {
+            "qkv": attn.fused_qkv_a_proj,
+            "main_q": attn.q_b_proj,
+            "gate": attn.gate_proj,
+        }
+        if indexed:
+            projections.update(
+                index_q=attn.indexer.wq_b,
+                index_k=attn.indexer.wk,
+            )
+        buffers = {}
+        for name, linear in projections.items():
+            if getattr(linear, "supports_out", False):
+                dtype = linear.weight.dtype
+                if dtype not in (torch.bfloat16, torch.float16, torch.float32):
+                    dtype = torch.bfloat16
+                buffers[name] = torch.empty(
+                    (rows, linear.weight.shape[0]), device=hidden.device, dtype=dtype
+                )
+            else:
+                buffers[name] = None
+        if (
+            indexed
+            and buffers["index_k"] is not None
+            and getattr(attn.indexer.k_norm, "supports_out", False)
+        ):
+            buffers["index_k_norm"] = torch.empty_like(buffers["index_k"])
+        buffers["absorbed_q"] = torch.empty(
+            (rows, attn.num_heads, attn.kv_lora_rank + attn.qk_rope_head_dim),
+            device=hidden.device,
+            dtype=(
+                buffers["main_q"].dtype
+                if buffers["main_q"] is not None
+                else hidden.dtype
+            ),
+        )
+        if (
+            attn._fuse_q_a_norm_mode == "mxfp8"
+            and attn.q_lora_rank <= 8192
+            and attn.q_lora_rank % 128 == 0
+        ):
+            from rtp_llm.models_py.triton_kernels.common.fused_strided_rmsnorm import (
+                _allocate_mxfp8_scale,
+            )
+
+            buffers["q_a"] = (
+                torch.empty(
+                    (rows, attn.q_lora_rank),
+                    device=hidden.device,
+                    dtype=torch.float8_e4m3fn,
+                ),
+                _allocate_mxfp8_scale(rows, attn.q_lora_rank, hidden.device),
+            )
+        return buffers
+
+    def _prepare_split_indexer(
+        self, buffers: dict[str, Any], fmha_impl: Any, kv_cache: Any
+    ) -> bool:
+        """Select the independent path before launching either Q or K."""
+        indexer = self.self_attn.indexer
+        q, k = buffers.get("index_q"), buffers.get("index_k")
+        if q is None or k is None:
+            return False
+        from rtp_llm.models_py.triton_kernels.sparse_mla.fused_hy4_indexer_rope_quant import (
+            can_fuse_hy4_indexer_rope_quant_cache,
+        )
+
+        q = q.view(-1, indexer.index_n_heads, indexer.index_head_dim)
+        op = indexer.indexer_op
+        params = fmha_impl.fmha_params
+        cache = op._kv_cache_blocks(kv_cache)
+        if not can_fuse_hy4_indexer_rope_quant_cache(
+            q,
+            k,
+            params.positions_d,
+            op.cos_sin_cache,
+            params.slot_mapping,
+            cache,
+            is_neox_style=op.is_neox_style,
+        ):
+            return False
+        # Only the existing FP32 head-gate path may be moved early.
+        weight = getattr(indexer.weights_proj, "weight", None)
+        if (
+            not isinstance(weight, torch.Tensor)
+            or weight.dtype != torch.float32
+            or weight.shape != (indexer.index_n_heads, indexer.wk.weight.shape[1])
+        ):
+            return False
+        buffers["raw_gate"] = (
+            torch.empty(q.shape[:2], device=q.device, dtype=torch.float32)
+            if getattr(indexer.weights_proj, "supports_out", False)
+            else None
+        )
+        buffers["index_q"] = q
+        buffers["index_cache"] = cache
+        buffers["index_fp8"] = torch.empty_like(q, dtype=torch.float8_e4m3fn)
+        buffers["index_scale"] = torch.empty(
+            q.shape[:2], device=q.device, dtype=torch.float32
+        )
+        buffers["head_weights"] = torch.empty_like(buffers["index_scale"])
+        return True
+
+    def _indexer_rope_quant(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        fmha_impl: Any,
+        buffers: dict[str, Any],
+        branch: str,
+        raw_gate: Optional[torch.Tensor] = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        from rtp_llm.models_py.triton_kernels.sparse_mla.fused_hy4_indexer_rope_quant import (
+            fused_hy4_indexer_rope_quant_cache,
+        )
+
+        indexer = self.self_attn.indexer
+        op = indexer.indexer_op
+        params = fmha_impl.fmha_params
+        result = fused_hy4_indexer_rope_quant_cache(
+            q,
+            k,
+            params.positions_d,
+            op.cos_sin_cache,
+            params.slot_mapping,
+            buffers["index_cache"],
+            is_neox_style=op.is_neox_style,
+            branch=branch,
+            out=(buffers["index_fp8"], buffers["index_scale"]),
+            raw_head_gate=raw_gate,
+            head_weights=buffers["head_weights"] if raw_gate is not None else None,
+            head_scale=indexer.softmax_scale * indexer.weights_scale,
+        )
+        if result is None:
+            raise RuntimeError("HY4 Indexer inputs changed after CMP preflight")
+        return buffers["index_fp8"], buffers["head_weights"].unsqueeze(-1)
+
+    def _qkv_a(
+        self, hidden: torch.Tensor, x_fp8: Any, x_scale: Any, buffers: dict
+    ) -> tuple:
         """Keep the existing HY4 projection and Q-A normalization numerics."""
         from rtp_llm.models_py.modules.hybrid import mla_attention as kernels
 
         attn = self.self_attn
-        projected = (
-            attn.fused_qkv_a_proj(x_fp8, input_scales=x_scale)
-            if x_fp8 is not None and x_scale is not None
-            else attn.fused_qkv_a_proj(hidden)
+        projected = self._project(
+            attn.fused_qkv_a_proj,
+            x_fp8 if x_fp8 is not None else hidden,
+            x_scale,
+            buffers.get("qkv"),
         )
         q, kv = projected.split(
             [attn.q_lora_rank, attn.kv_lora_rank + attn.qk_rope_head_dim], dim=-1
@@ -249,6 +405,7 @@ class Hy4Cmp:
                 group_size=32,
                 scale_ue8m0=True,
                 mxfp8_semantics=True,
+                out=buffers.get("q_a"),
             )
         elif attn._fuse_q_a_norm_mode == "fp8_dual":
             q_c, q_fp8, q_scale = (
@@ -275,20 +432,22 @@ class Hy4Cmp:
         kv: torch.Tensor,
         fmha_impl: Any,
         kv_cache: Any,
+        buffers: dict,
     ) -> tuple:
         """Main Q-B, output Gate, and complete Query/cache preparation."""
         from rtp_llm.models_py.modules.hybrid import mla_attention as kernels
 
         attn = self.self_attn
         q_c, q_fp8, q_scale = q_inputs
-        q = (
-            attn.q_b_proj(q_fp8, input_scales=q_scale)
-            if q_fp8 is not None
-            else attn.q_b_proj(q_c)
+        q = self._project(
+            attn.q_b_proj,
+            q_fp8 if q_fp8 is not None else q_c,
+            q_scale if q_fp8 is not None else None,
+            buffers.get("main_q"),
         )
         q = q.reshape(-1, attn.num_heads, attn.q_head_dim)
         # Keep the measured policy: no output Gate stream or overlap with MLA.
-        gate = attn.gate_proj(hidden)
+        gate = self._project(attn.gate_proj, hidden, out=buffers.get("gate"))
         kv, k_pe = kv.split([attn.kv_lora_rank, attn.qk_rope_head_dim], dim=-1)
         norm = attn.kv_a_layernorm
         norm_kwargs = {}
@@ -315,28 +474,37 @@ class Hy4Cmp:
             kv_cache,
             attn.layer_idx,
             attn.attn_sink,
+            q_transformed=buffers["absorbed_q"],
             **norm_kwargs,
         )
         return prepared, gate
 
     def _indexer_k(
-        self, hidden: torch.Tensor, x_fp8: Any, x_scale: Any
+        self,
+        hidden: torch.Tensor,
+        x_fp8: Any,
+        x_scale: Any,
+        out: Optional[torch.Tensor] = None,
+        norm_out: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         indexer = self.self_attn.indexer
-        k = (
-            indexer.wk(x_fp8, input_scales=x_scale)
-            if x_fp8 is not None and x_scale is not None
-            else indexer.wk(hidden)
+        k = self._project(
+            indexer.wk, x_fp8 if x_fp8 is not None else hidden, x_scale, out
         )
-        return indexer.k_norm(k)
+        return (
+            indexer.k_norm(k) if norm_out is None else indexer.k_norm(k, out=norm_out)
+        )
 
-    def _indexer_q(self, q_inputs: tuple) -> torch.Tensor:
+    def _indexer_q(
+        self, q_inputs: tuple, out: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
         indexer = self.self_attn.indexer
         q_c, q_fp8, q_scale = q_inputs
-        q = (
-            indexer.wq_b(q_fp8, input_scales=q_scale)
-            if q_fp8 is not None
-            else indexer.wq_b(q_c)
+        q = self._project(
+            indexer.wq_b,
+            q_fp8 if q_fp8 is not None else q_c,
+            q_scale if q_fp8 is not None else None,
+            out.view(out.shape[0], -1) if out is not None else None,
         )
         return q.view(-1, indexer.index_n_heads, indexer.index_head_dim)
 
@@ -417,6 +585,12 @@ class Hy4Cmp:
         parallel_tail = indexed and str(self.config.model_type) == "hy_v4"
         parallel_frontend = parallel_tail and self._indexer_frontend_parallel
         defer_score = indexed and self._serialize_score_after_q_path(fmha_impl)
+        buffers = self._allocate_buffers(hidden, indexed)
+        # Serial MTP/frontend-off retains the joint launch; splitting it would
+        # add a launch without opening an overlap window.
+        split_indexer = parallel_frontend and self._prepare_split_indexer(
+            buffers, fmha_impl, kv_cache
+        )
         main_stream = index_stream = indexer_q_stream = events = None
         caller = None
         if parallel_tail:
@@ -433,7 +607,7 @@ class Hy4Cmp:
 
         with torch.cuda.stream(main_stream) if parallel_tail else nullcontext():
             # K only needs normalized hidden; Q will wait for the Q-A result.
-            k = None
+            k = raw_gate = None
             if indexed:
                 if parallel_frontend:
                     events.frontend_ready.record()
@@ -446,9 +620,43 @@ class Hy4Cmp:
                     if parallel_frontend
                     else nullcontext()
                 ):
-                    k = self._indexer_k(hidden, index_fp8, index_scale)
+                    k = self._indexer_k(
+                        hidden,
+                        index_fp8,
+                        index_scale,
+                        buffers.get("index_k"),
+                        buffers.get("index_k_norm"),
+                    )
+                    if split_indexer:
+                        self._indexer_rope_quant(
+                            buffers["index_q"], k, fmha_impl, buffers, "k"
+                        )
+                if split_indexer:
+                    from rtp_llm.models_py.triton_kernels.sparse_mla.fused_logits_head_gate import (
+                        project_fp32_logits_head_gate,
+                    )
 
-            q_c, q_fp8, q_scale, kv = self._qkv_a(hidden, x_fp8, x_scale)
+                    if parallel_frontend:
+                        indexer_q_stream.wait_event(events.frontend_ready)
+                        _record_stream((hidden, x_fp32), indexer_q_stream)
+                    with (
+                        torch.cuda.stream(indexer_q_stream)
+                        if parallel_frontend
+                        else nullcontext()
+                    ):
+                        # Independent of Q-A: overlap FP32 raw head gates with
+                        # main-stream QKV-A. Only the final scale fold waits Q.
+                        raw_gate = project_fp32_logits_head_gate(
+                            hidden,
+                            attn.indexer.weights_proj,
+                            x_fp32=x_fp32,
+                            out=buffers.get("raw_gate"),
+                            small_t_weight=getattr(
+                                attn.indexer, "_hy4_small_t_head_gate_weight", None
+                            ),
+                        )
+
+            q_c, q_fp8, q_scale, kv = self._qkv_a(hidden, x_fp8, x_scale, buffers)
             q_inputs = (q_c, q_fp8, q_scale)
             indexer_prepared = topk = None
             if indexed:
@@ -461,27 +669,39 @@ class Hy4Cmp:
                     if parallel_frontend
                     else nullcontext()
                 ):
-                    indexer_q = self._indexer_q(q_inputs)
+                    indexer_q = self._indexer_q(q_inputs, buffers.get("index_q"))
+                    if split_indexer:
+                        indexer_prepared = self._indexer_rope_quant(
+                            indexer_q,
+                            buffers["index_k"],
+                            fmha_impl,
+                            buffers,
+                            "q",
+                            raw_gate,
+                        )
                     if parallel_frontend:
                         events.indexer_q_ready.record()
                 if parallel_frontend:
-                    # Q projection does NOT wait for K. Only the fused Q/K
-                    # consumer joins the branches; K is already on this stream.
+                    # Q-ready includes RoPE, quantization and head weights.
+                    # K cache is already complete on index; join before score.
                     index_stream.wait_event(events.indexer_q_ready)
-                    _record_stream(indexer_q, index_stream)
+                    _record_stream(
+                        indexer_prepared if split_indexer else indexer_q, index_stream
+                    )
                 with (
                     torch.cuda.stream(index_stream)
                     if parallel_frontend
                     else nullcontext()
                 ):
-                    indexer_prepared = self._indexer_post(
-                        hidden,
-                        indexer_q,
-                        k,
-                        fmha_impl,
-                        kv_cache,
-                        x_fp32,
-                    )
+                    if not split_indexer:
+                        indexer_prepared = self._indexer_post(
+                            hidden,
+                            indexer_q,
+                            k,
+                            fmha_impl,
+                            kv_cache,
+                            x_fp32,
+                        )
                 if parallel_tail and not parallel_frontend:
                     events.frontend_ready.record()
                     index_stream.wait_event(events.frontend_ready)
@@ -499,7 +719,7 @@ class Hy4Cmp:
             # At long KV the score tail waits for the complete main path. The
             # dependency includes absorbed-Q, cache preparation, and Gate.
             mla_inputs, gate = self._main_query(
-                hidden, q_inputs, kv, fmha_impl, kv_cache
+                hidden, q_inputs, kv, fmha_impl, kv_cache, buffers
             )
             if defer_score:
                 if parallel_tail:
@@ -516,8 +736,8 @@ class Hy4Cmp:
                 events.side_streams_complete.record()
         if parallel_tail:
             caller.wait_event(events.side_streams_complete)
-            # The prepared Query and Gate were allocated on main; TopK was
-            # allocated on index. Keep their storage alive for caller consumers.
+            # TopK and unsupported Linear fallbacks may still allocate on a
+            # side stream. Explicit caller-owned buffers were joined above.
             _record_stream(
                 (getattr(mla_inputs, "q_transformed", mla_inputs), gate, topk), caller
             )
@@ -595,14 +815,13 @@ class Hy4Cmp:
         routed_indices = None
         routed_weights = None
         prepacked_ihc = None
-        prepacked_views = self.moe_prepacked_input_views
-        if fuse_mxfp8 and callable(prepacked_views):
+        if fuse_mxfp8:
             (
                 mega_activation,
                 mega_scale,
                 routed_indices,
                 routed_weights,
-            ) = prepacked_views(int(channels.size(0)))
+            ) = self.moe_prepacked_input_views(int(channels.size(0)))
             if mega_activation is not None and mega_scale is not None:
                 prepacked_ihc = ihc.pre_normed_mxfp8_to_mega_moe(
                     channels,

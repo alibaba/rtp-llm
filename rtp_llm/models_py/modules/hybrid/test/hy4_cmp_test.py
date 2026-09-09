@@ -574,6 +574,53 @@ class Hy4CmpIndexerFusionTest(unittest.TestCase):
         self.assertTrue(torch.equal(q_ref_scale, q_out_scale))
         self.assertTrue(torch.equal(cache_ref, cache_out))
 
+        # K-only must not touch Q outputs; Q-only must not touch the cache.
+        split_cache = torch.full_like(cache_out, 0xA5)
+        split_q = torch.zeros_like(q_out_fp8)
+        split_scale = torch.full_like(q_out_scale, -1)
+        fused_hy4_indexer_rope_quant_cache(
+            q,
+            k,
+            positions,
+            cos_sin,
+            slots,
+            split_cache,
+            is_neox_style=False,
+            branch="k",
+            out=(split_q, split_scale),
+        )
+        self.assertTrue(
+            torch.equal(
+                split_q.view(torch.uint8), torch.zeros_like(split_q).view(torch.uint8)
+            )
+        )
+        self.assertTrue(torch.equal(split_scale, torch.full_like(split_scale, -1)))
+        self.assertTrue(torch.equal(split_cache, cache_ref))
+        raw_gate = torch.randn(rows, 32, device="cuda", dtype=torch.float32)
+        head_weights = torch.empty_like(raw_gate)
+        fused_hy4_indexer_rope_quant_cache(
+            q,
+            k,
+            positions,
+            cos_sin,
+            slots,
+            split_cache,
+            is_neox_style=False,
+            branch="q",
+            out=(split_q, split_scale),
+            raw_head_gate=raw_gate,
+            head_weights=head_weights,
+            head_scale=1 / 64,
+        )
+        self.assertTrue(
+            torch.equal(split_q.view(torch.uint8), q_out_fp8.view(torch.uint8))
+        )
+        self.assertTrue(torch.equal(split_scale, q_out_scale))
+        self.assertTrue(torch.equal(split_cache, cache_ref))
+        self.assertTrue(
+            torch.equal(head_weights, (raw_gate * q_out_scale.squeeze(-1)) * (1 / 64))
+        )
+
     @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
     def test_matches_existing_hy4_operator_chain_byte_exact(self) -> None:
         for seed in (0, 7, 1234):
@@ -716,11 +763,12 @@ class Hy4IndependentCmpTest(unittest.TestCase):
         def linear(name, inp, out):
             weight = torch.randn(inp, out, device=device) * 0.2
 
-            def run(x, input_scales=None):
+            def run(x, input_scales=None, out=None):
                 log.append((name, current[0]))
                 if input_scales is not None:
                     x = x * input_scales
-                return x @ weight
+                result = x @ weight
+                return result if out is None else out.copy_(result)
 
             return _Callable(run)
 
@@ -771,6 +819,7 @@ class Hy4IndependentCmpTest(unittest.TestCase):
 
         def prepare(q, kv, k_pe, cache, layer, sink, **kwargs):
             log.append(("main_ready", current[0]))
+            kwargs.pop("q_transformed", None)
             if kwargs:
                 self.assertIn("kv_norm_weight", kwargs)
                 kv = kv + 0.1
@@ -944,6 +993,65 @@ class Hy4IndependentCmpTest(unittest.TestCase):
             case.log.index(("gate", "main_stream")),
         )
 
+    def test_split_qk_join_only_after_q_post_and_k_cache(self):
+        case = self._case()
+        expected, expected_topk = case.attn(
+            case.hidden, case.fmha, case.cache, return_topk=True
+        )
+        expected_cache = case.cache.clone()
+        case.cache.zero_()
+        case.log.clear()
+
+        def split(buffers, fmha, cache):
+            buffers["index_q"] = torch.empty(2, 1, 2)
+            buffers["index_k"] = torch.empty(2, 2)
+            return True
+
+        def post(q, k, fmha, buffers, branch, raw_gate=None):
+            case.log.append(("post_" + branch, case.current[0]))
+            if branch == "k":
+                case.cache.copy_(k + 0.01)
+                return None
+            return q + 0.01, (raw_gate * 0.5).unsqueeze(-1)
+
+        with (
+            self._queues(case),
+            patch.object(case.cmp, "_prepare_split_indexer", side_effect=split),
+            patch.object(case.cmp, "_indexer_rope_quant", side_effect=post),
+            patch(
+                "rtp_llm.models_py.triton_kernels.sparse_mla.fused_logits_head_gate.project_fp32_logits_head_gate",
+                side_effect=lambda hidden, linear, **kw: linear(hidden),
+            ),
+        ):
+            output, topk = case.cmp.forward_attention(
+                case.hidden, case.fmha, case.cache, return_topk=True
+            )
+        torch.testing.assert_close(output, expected, rtol=0, atol=0)
+        self.assertTrue(torch.equal(topk, expected_topk))
+        self.assertTrue(torch.equal(case.cache, expected_cache))
+        self.assertIn(("head", "index_q"), case.log)
+        self.assertIn(("post_q", "index_q"), case.log)
+        self.assertIn(("post_k", "index"), case.log)
+        self.assertLess(
+            case.log.index(("head", "index_q")), case.log.index(("qkv", "main_stream"))
+        )
+        self.assertLess(
+            case.log.index(("post_q", "index_q")),
+            case.log.index(("record", "index_q", "q_ready")),
+        )
+        self.assertLess(
+            case.log.index(("post_k", "index")),
+            case.log.index(("wait", "index", "q_ready")),
+        )
+        self.assertLess(
+            case.log.index(("wait", "index", "q_ready")),
+            case.log.index(("score", "index")),
+        )
+        self.assertEqual(
+            [x for x in case.log if x[:2] == ("wait", "index_q")],
+            [("wait", "index_q", "input"), ("wait", "index_q", "qc")],
+        )
+
     def test_main_stream_joins_caller_and_publishes_all_outputs(self):
         case = self._case()
         with self._queues(case) as queues:
@@ -1102,15 +1210,18 @@ class Hy4IndependentCmpTest(unittest.TestCase):
 
     def test_capture_requires_warmup_and_clone_gets_fresh_events(self):
         case = self._case()
-        with patch.object(bridge.Hy4Cmp, "_streams_by_device", {}), patch.object(
-            bridge, "_is_capturing", return_value=True
+        with (
+            patch.object(bridge.Hy4Cmp, "_streams_by_device", {}),
+            patch.object(bridge, "_is_capturing", return_value=True),
         ):
             with self.assertRaisesRegex(RuntimeError, "before capture"):
                 case.cmp._side_streams(torch.device("cuda:0"))
             with self.assertRaisesRegex(RuntimeError, "before capture"):
                 case.cmp._new_events(torch.device("cuda:0"))
         case.cmp._events = object()
-        clone = case.cmp.clone_for_cuda_graph(self_attn=case.attn)
+        cloned_mlp = object()
+        clone = case.cmp.clone_for_cuda_graph(self_attn=case.attn, mlp=cloned_mlp)
+        self.assertIs(clone.mlp, cloned_mlp)
         self.assertIsNone(clone._events)
         self.assertIs(clone.self_attn, case.attn)
 

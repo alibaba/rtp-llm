@@ -177,6 +177,7 @@ def _fused_logits_head_gate_small_t_kernel(
     stride_qs_t,
     stride_o_t,
     BLOCK_K: tl.constexpr,  # power-of-2 padded K (whole row in registers)
+    APPLY_SCALE: tl.constexpr = True,
 ):
     """Small-T variant: one program per (token, head_n).
 
@@ -199,8 +200,10 @@ def _fused_logits_head_gate_small_t_kernel(
 
     acc = tl.sum(x * w, axis=0)  # scalar fp32
 
-    qs = tl.load(qs_ptr + t * stride_qs_t + n).to(tl.float32)
-    out = acc * qs * scale_const
+    out = acc
+    if APPLY_SCALE:
+        qs = tl.load(qs_ptr + t * stride_qs_t + n).to(tl.float32)
+        out = (acc * qs) * scale_const
 
     tl.store(out_ptr + t * stride_o_t + n, out)
 
@@ -243,8 +246,51 @@ def project_fp32_logits_head_gate(
     x: torch.Tensor,
     weights_proj: torch.nn.Module,
     x_fp32: Optional[torch.Tensor] = None,
+    *,
+    out: Optional[torch.Tensor] = None,
+    small_t_weight: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """Compute raw FP32 head weights; this stage does not depend on Q."""
+    if out is not None and (
+        out.shape != (x.shape[0], weights_proj.weight.shape[0])
+        or out.dtype != torch.float32
+        or out.device != x.device
+        or not out.is_contiguous()
+    ):
+        raise ValueError("invalid raw head-gate output buffer")
+    if (
+        small_t_weight is not None
+        and x.is_cuda
+        and x.dim() == 2
+        and 1 <= x.shape[0] <= 32
+        and x.shape[1] == HY4_HIDDEN_SIZE
+        and x.dtype in (torch.bfloat16, torch.float16)
+        and x.is_contiguous()
+        and small_t_weight.device == x.device
+    ):
+        if out is None:
+            out = torch.empty(
+                (x.shape[0], small_t_weight.shape[0]),
+                device=x.device,
+                dtype=torch.float32,
+            )
+        _fused_logits_head_gate_small_t_kernel[(x.shape[0], small_t_weight.shape[0])](
+            x,
+            small_t_weight,
+            out,
+            out,
+            1.0,
+            x.shape[1],
+            x.stride(0),
+            small_t_weight.stride(0),
+            small_t_weight.stride(1),
+            out.stride(0),
+            out.stride(0),
+            BLOCK_K=triton.next_power_of_2(x.shape[1]),
+            APPLY_SCALE=False,
+            num_warps=4,
+        )
+        return out
     use_precomputed_fp32 = (
         x_fp32 is not None
         and x_fp32.is_cuda
@@ -267,6 +313,10 @@ def project_fp32_logits_head_gate(
         if use_precomputed_fp32
         else (_hy4_cast_fp32(x) if use_hy4_cast else x.float())
     )
+    if out is not None:
+        if not getattr(weights_proj, "supports_out", False):
+            raise ValueError("head-gate Linear does not support output buffers")
+        return weights_proj(linear_input, out=out)
     return weights_proj(linear_input).float()
 
 
