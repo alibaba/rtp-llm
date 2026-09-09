@@ -6,8 +6,10 @@ import torch
 
 from rtp_llm.models_py.modules.dsv4.block import Block
 from rtp_llm.models_py.modules.dsv4.moe.mega_front import (
+    MEGA_MOE_FRONT_CAPACITY,
     MegaMoeFrontAdapter,
     _capture_tokens_for_batches,
+    _validate_extension_contract,
 )
 
 
@@ -195,6 +197,46 @@ class MegaMoeFrontAdapterTest(unittest.TestCase):
         adapter.strategy._mega_buf.num_max_tokens_per_rank = 32
         self.assertTrue(adapter.supports(torch.empty(16, 2, 4, adapter.dim)))
         self.assertFalse(adapter.supports(torch.empty(17, 2, 4, adapter.dim)))
+
+    def test_validates_v3_sm103_extension_contract(self) -> None:
+        geometry = {
+            "abi_version": 1,
+            "kernel_contract_version": 3,
+            "hidden": 4096,
+            "hc_mult": 4,
+            "hc_width": 24,
+            "experts": 256,
+            "topk": 6,
+            "max_m": MEGA_MOE_FRONT_CAPACITY,
+            "scale_cols": 32,
+            "collapse_ssq_bits": 32,
+        }
+        ops = SimpleNamespace(
+            geometry_moe_front=lambda _hidden: geometry,
+            build_info_moe_front=lambda: {
+                "source_commit": "8bb15d3b",
+                "source_sha256": "7" * 64,
+                "target_arches": "sm_100a,sm_103a",
+                "production_arch": "sm_100a,sm_103a",
+                "kernel_count": 4,
+            },
+        )
+        with mock.patch("torch.cuda.get_device_capability", return_value=(10, 3)):
+            self.assertIs(
+                _validate_extension_contract(
+                    ops, 4096, 256, 6, torch.device("cuda:0")
+                ),
+                geometry,
+            )
+
+        ops.geometry_moe_front = lambda _hidden: dict(
+            geometry, kernel_contract_version=2
+        )
+        with mock.patch("torch.cuda.get_device_capability", return_value=(10, 3)):
+            with self.assertRaisesRegex(RuntimeError, "geometry mismatch"):
+                _validate_extension_contract(
+                    ops, 4096, 256, 6, torch.device("cuda:0")
+                )
 
     def test_learned_front_stages_and_launches_prepacked_mega(self) -> None:
         adapter, plan = _fake_adapter()
