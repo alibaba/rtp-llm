@@ -32,6 +32,29 @@ public:
     MOCK_METHOD(void, updateOutput, (const StreamUpdateInfo&), (override));
 };
 
+class WorkerStatusTestEngine: public EngineBase {
+public:
+    WorkerStatusTestEngine(): EngineBase(EngineInitParams()) {}
+
+    std::shared_ptr<GenerateStream> enqueue(const std::shared_ptr<GenerateInput>&) override {
+        return nullptr;
+    }
+
+    void enqueue(std::shared_ptr<GenerateStream>&) override {}
+
+    absl::Status stop() override {
+        return absl::OkStatus();
+    }
+
+    absl::StatusOr<GenerateStreamPtr> preRun(const std::shared_ptr<GenerateInput>&, preRunMode) override {
+        return absl::UnimplementedError("unused in WorkerStatus tests");
+    }
+
+    KVCacheInfo getCacheStatusInfo(int64_t, bool) override {
+        return KVCacheInfo{};
+    }
+};
+
 class TestLocalRpcServer: public LocalRpcServer {
 public:
     void setWeightManager(const py::object& manager) {
@@ -84,6 +107,14 @@ public:
         return torch_allocator_dump_ids_.size();
     }
 
+    void configureWorkerStatus(EngineScheduleInfo schedule_info) {
+        worker_status_schedule_info_                 = std::move(schedule_info);
+        engine_                                      = std::make_shared<WorkerStatusTestEngine>();
+        maga_init_params_.parallelism_config.dp_size = 1;
+        maga_init_params_.parallelism_config.tp_size = 1;
+        maga_init_params_.parallelism_config.dp_rank = 0;
+    }
+
     grpc::Status aggregateAllocatorDumpResults(const std::string&                             dump_id,
                                                const std::vector<TorchAllocatorDumpResultPB>& results,
                                                TorchAllocatorDumpResponsePB*                  response) const {
@@ -101,6 +132,10 @@ public:
     std::atomic<bool> cancelled{false};
 
 protected:
+    EngineScheduleInfo getEngineScheduleInfo(int64_t) override {
+        return worker_status_schedule_info_;
+    }
+
     bool isCancelled(grpc::ServerContext*) const override {
         std::call_once(cancellation_check_once_, [this] { cancellation_checked_.set_value(); });
         return cancelled.load();
@@ -121,6 +156,7 @@ protected:
     }
 
 private:
+    EngineScheduleInfo                                           worker_status_schedule_info_;
     std::function<TorchAllocatorDumpResultPB(const std::string&)> allocator_dump_callback_;
     bool                                                          internal_allocator_dump_peer_allowed_{false};
     mutable std::once_flag                                        cancellation_check_once_;
@@ -162,6 +198,36 @@ std::shared_ptr<MockGenerateStream> createMockStream() {
     ModelConfig model_config;
     model_config.max_seq_len = 3;
     return std::make_shared<MockGenerateStream>(input, model_config, RuntimeConfig{});
+}
+
+TEST(LocalRpcServerTest, WorkerStatusSerializesNonzeroPriorityForRunningAndFinishedTasks) {
+    EngineScheduleInfo schedule_info;
+    EngineScheduleInfo::TaskInfo running_task;
+    running_task.request_id = 101;
+    running_task.priority   = 37;
+    schedule_info.running_task_info_list.push_back(running_task);
+
+    EngineScheduleInfo::TaskInfo finished_task;
+    finished_task.request_id = 102;
+    finished_task.priority   = 83;
+    schedule_info.finished_task_info_list.push_back(finished_task);
+
+    TestLocalRpcServer server;
+    server.configureWorkerStatus(std::move(schedule_info));
+    grpc::ServerContext context;
+    StatusVersionPB     request;
+    WorkerStatusPB      response;
+    request.set_latest_finished_version(-1);
+
+    const auto status = server.GetWorkerStatus(&context, &request, &response);
+
+    ASSERT_TRUE(status.ok());
+    ASSERT_EQ(response.running_task_info_size(), 1);
+    EXPECT_EQ(response.running_task_info(0).request_id(), 101);
+    EXPECT_EQ(response.running_task_info(0).priority(), 37);
+    ASSERT_EQ(response.finished_task_list_size(), 1);
+    EXPECT_EQ(response.finished_task_list(0).request_id(), 102);
+    EXPECT_EQ(response.finished_task_list(0).priority(), 83);
 }
 
 std::shared_ptr<NormalGenerateStream> createNormalStream() {
