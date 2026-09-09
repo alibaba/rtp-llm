@@ -151,7 +151,7 @@ public final class BucketSidReader {
                 } catch (Exception e) {
                     future.cancel(true);
                     if (attempt >= settings.retries()) {
-                        throw new IllegalStateException("failed reading bucket " + key, e);
+                        throw new IllegalStateException("failed reading bucket " + key + ": " + failureSummary(e), e);
                     }
                     check(mayContinue, deadline);
                     future = start(key);
@@ -160,6 +160,20 @@ public final class BucketSidReader {
         } finally {
             future.cancel(true);
         }
+    }
+
+    /** Keep status actionable without copying the SDK's full request context/query into it. */
+    static String failureSummary(Throwable error) {
+        var seen = new HashSet<Throwable>();
+        while (error.getCause() != null && seen.add(error) && !seen.contains(error.getCause())) {
+            error = error.getCause();
+        }
+        String message = error.getMessage();
+        if (message == null || message.isBlank()) { return error.getClass().getSimpleName(); }
+        int context = message.indexOf("requestContext");
+        if (context >= 0) { message = message.substring(0, context); }
+        message = message.replace('\n', ' ').replace('\r', ' ').strip();
+        return error.getClass().getSimpleName() + ": " + message.substring(0, Math.min(message.length(), 240));
     }
 
     private static void check(BooleanSupplier mayContinue, long deadline) {

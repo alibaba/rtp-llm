@@ -16,6 +16,20 @@ import static org.junit.jupiter.api.Assertions.*;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 class BucketSidReaderTest {
+    @Test
+    void failureSummaryIncludesRootCauseWithoutSdkRequestContext() {
+        var reader = new BucketSidReader((k, l, t) -> CompletableFuture.failedFuture(
+                new RuntimeException("wait response exception with requestContext [query=private]",
+                        new java.io.IOException("Too many connections 4"))), numericSettings(4000, 2000));
+        var error = assertThrows(IllegalStateException.class, () -> reader.read(() -> true));
+        assertEquals("failed reading bucket 0: IOException: Too many connections 4", error.getMessage());
+        assertNotNull(error.getCause());
+        assertFalse(BucketSidReader.failureSummary(new RuntimeException("failed with requestContext [query=private]"))
+                .contains("private"));
+        assertEquals("TimeoutException", BucketSidReader.failureSummary(new java.util.concurrent.TimeoutException()));
+        assertTrue(BucketSidReader.failureSummary(new java.io.IOException("x".repeat(1000))).length() < 300);
+    }
+
     static BucketSidReader.Settings skipEmptySettings(int buckets, int sourceLimit) {
         return new BucketSidReader.Settings("", buckets, 4, 2000, Duration.ofSeconds(5),
                 Duration.ofMinutes(5), 0, BucketSidReader.BucketAlgorithm.ITEM_ID_MOD, sourceLimit,

@@ -1,5 +1,36 @@
 # iGraph bucket input for the CSR constraint-tree Master
 
+## SDK connection-pool correction (2026-09-09)
+
+Live Master logs at 14:06/14:16 showed `failed reading bucket 4`, rooted in
+`java.io.IOException: Too many connections 4`. The adapter incorrectly used the
+bucket query concurrency as the HTTP global/per-route connection capacity.
+The pool also retains idle connections to previously queried proxies, so limiting
+it to four connections can reject a new proxy even with four in-flight queries.
+
+The adapter now leaves SDK 2.1.7's pool defaults intact (global 1024, per-host 200).
+These are connection ceilings, not preallocation or query-concurrency settings.
+`CONSTRAINT_TREE_IGRAPH_CONCURRENCY=4` continues to bound actual bucket queries.
+No new queue, discovery layer, reconnect/retry workaround or pool setting is added.
+Read failures expose a bounded root-cause summary in source status, while retaining
+the full cause in logs and omitting the SDK request context from the summary.
+
+Local container acceptance passed 74 tests, zero failures/errors/skips:
+`build_logs/igraph_pool_acceptance_v2_20260909.log`. The new test uses the real
+SDK requester/HTTP pool against eight local HTTP servers: old cap reproduces the
+failure on the fifth distinct address; production defaults pass 128 requests in
+two bounded rounds, plus an HTTP error/recovery sequence. This transport test
+does not simulate VIP discovery or iGraph's storage/query engine. Existing native
+Master-to-Worker E2Es and synthetic scale cases also passed. A first compilation
+attempt used `var` in the Java-8-targeted internal test module; it was corrected
+to explicit types without changing the compiler/CI configuration.
+
+Online checks sampled one Worker per IDC from the actual Master container:
+both mapping HTTP endpoints responded with the same fingerprint. A separate
+Worker gRPC status-check timeout remains to investigate; this change does not
+alter gRPC timeouts or claim all Workers have passed publication acceptance.
+Complete live 4000-bucket validation and actual tree publication remain required.
+
 ## Empty SID policy (2026-09-09)
 
 Local acceptance: 72 tests passed, zero failures/errors/skips, in the non-root
