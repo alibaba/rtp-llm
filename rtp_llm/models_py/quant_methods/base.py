@@ -6,6 +6,7 @@ from rtp_llm.models_py.quantization_exclusion import (
     canonical_module_parts,
     collect_quantization_exclusions,
     is_module_ignored,
+    moe_projection_exclusion_states,
     normalize_module_patterns,
 )
 
@@ -307,13 +308,11 @@ class QuantizationConfig:
     def is_moe_layer_ignored(self, layer, prefix: str) -> bool:
         if not prefix:
             raise ValueError("MoE quantization requires a stable module prefix")
-        projection_prefixes = [
-            f"{prefix}.{projection}" for projection in layer.PROJ_NAMES
-        ]
         root_ignored = self.is_layer_ignored(prefix)
-        projection_ignored = [
-            self.is_layer_ignored(candidate) for candidate in projection_prefixes
-        ]
+        projection_ignored = moe_projection_exclusion_states(
+            prefix,
+            self.ignored_layers,
+        )
         if root_ignored or all(projection_ignored):
             return True
         if any(projection_ignored):

@@ -446,9 +446,7 @@ class Qwen3NextLoadTest(unittest.TestCase):
         attention_inputs = PyAttentionInputs()
         attention_inputs.is_prefill = False
         attention_inputs.is_target_verify = True
-        inputs = types.SimpleNamespace(
-            attention_inputs={"linear": attention_inputs}
-        )
+        inputs = types.SimpleNamespace(attention_inputs={"linear": attention_inputs})
         metadata = _build_qwen3_next_metadata(inputs, torch.zeros(1, 4))
         self.assertTrue(metadata.is_target_verify)
 
@@ -525,6 +523,38 @@ class Qwen3NextLoadTest(unittest.TestCase):
         self.assertIsNotNone(moe.select_topk)
         torch.testing.assert_close(moe.shared_expert_gate.weight, torch.ones(1, 4))
         torch.testing.assert_close(model.lm_head.weight, model.embed_tokens.weight)
+
+    def test_moe_router_gates_stay_unquantized_for_fp8_model(self):
+        source_quant = types.SimpleNamespace(
+            get_runtime_method_key=lambda: "FP8_PER_BLOCK",
+            get_method=lambda: "FP8_PER_BLOCK",
+            weight_block_size=[128, 128],
+            modules_to_not_convert=[],
+        )
+        quant_config = QuantizationConfig(
+            "FP8_PER_BLOCK",
+            source_config=source_quant,
+        )
+        config = _config()
+        config.moe_layer_index = [0]
+        config.moe_inter_size = 128
+        config.quant_config = source_quant
+
+        model = Qwen3NextForCausalLM(
+            config,
+            _load_config(quant_config=quant_config),
+        )
+        moe = model.layers[0].mlp
+
+        self.assertEqual(
+            type(moe.gate.quant_method).__name__,
+            "UnquantizedLinearMethod",
+        )
+        self.assertEqual(
+            type(moe.shared_expert_gate.quant_method).__name__,
+            "UnquantizedLinearMethod",
+        )
+        self.assertEqual(moe.experts._quant_family, "fp8_per_block")
 
     def test_untied_missing_lm_head_fails_integrity(self):
         model = Qwen3NextForCausalLM(_config(tie=False), _load_config())

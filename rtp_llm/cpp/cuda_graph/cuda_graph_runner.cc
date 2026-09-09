@@ -597,30 +597,38 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
     // which initCaptureAttentionInputs allocated prefix_lengths{,_device} at all.
     // Clear graph padding so rounded-up batch slots do not retain capture-time
     // max sequence lengths and trigger unnecessary attention work.
-    if ((is_prefill_cuda_graph_mode_ || num_tokens_per_bs_ > 1)
-        && state.current_batch_size < selected_graph_batch_size) {
-        py_model_inputs_.attention_inputs.prefix_lengths.slice(0, state.current_batch_size, selected_graph_batch_size)
-            .fill_(0);
+    if (state.current_batch_size < selected_graph_batch_size) {
+        // input_lengths is the authoritative active-slot mask for fixed-size
+        // graph metadata. Decode otherwise cannot distinguish an inactive
+        // padded slot from a real first-token request whose sequence length is
+        // also zero.
         py_model_inputs_.attention_inputs.input_lengths.slice(0, state.current_batch_size, selected_graph_batch_size)
-            .fill_(0);
-        py_model_inputs_.attention_inputs.prefix_lengths_device
-            .slice(0, state.current_batch_size, selected_graph_batch_size)
             .fill_(0);
         py_model_inputs_.attention_inputs.input_lengths_device
             .slice(0, state.current_batch_size, selected_graph_batch_size)
             .fill_(0);
 
-        const int last_valid_q  = is_prefill_cuda_graph_mode_ ? state.current_seq_len : state.seq_len_sum;
-        const int last_valid_kv = inputs.attention_inputs.context_total_kv_length;
-        py_model_inputs_.attention_inputs.cu_seqlens
-            .slice(0, state.current_batch_size + 1, selected_graph_batch_size + 1)
-            .fill_(last_valid_q);
-        py_model_inputs_.attention_inputs.cu_seqlens_device
-            .slice(0, state.current_batch_size + 1, selected_graph_batch_size + 1)
-            .fill_(last_valid_q);
-        py_model_inputs_.attention_inputs.cu_kv_seqlens_device
-            .slice(0, state.current_batch_size + 1, selected_graph_batch_size + 1)
-            .fill_(last_valid_kv);
+        if (is_prefill_cuda_graph_mode_ || num_tokens_per_bs_ > 1) {
+            py_model_inputs_.attention_inputs.prefix_lengths
+                .slice(0, state.current_batch_size, selected_graph_batch_size)
+                .fill_(0);
+            py_model_inputs_.attention_inputs.prefix_lengths_device
+                .slice(0, state.current_batch_size, selected_graph_batch_size)
+                .fill_(0);
+
+            const int last_valid_q =
+                is_prefill_cuda_graph_mode_ ? state.current_seq_len : state.seq_len_sum;
+            const int last_valid_kv = inputs.attention_inputs.context_total_kv_length;
+            py_model_inputs_.attention_inputs.cu_seqlens
+                .slice(0, state.current_batch_size + 1, selected_graph_batch_size + 1)
+                .fill_(last_valid_q);
+            py_model_inputs_.attention_inputs.cu_seqlens_device
+                .slice(0, state.current_batch_size + 1, selected_graph_batch_size + 1)
+                .fill_(last_valid_q);
+            py_model_inputs_.attention_inputs.cu_kv_seqlens_device
+                .slice(0, state.current_batch_size + 1, selected_graph_batch_size + 1)
+                .fill_(last_valid_kv);
+        }
     }
 
     // launch prepare_cuda_graph when attention inputs are ready.

@@ -1515,7 +1515,9 @@ class Qwen3NextMoEBlock(RtpModule):
             output_size=expert_num,
             tp_size=1,
             tp_rank=0,
-            quant_config=quant_config,
+            # Router logits determine expert selection and must remain in the
+            # checkpoint dtype. Quantization is applied only to expert weights.
+            quant_config=None,
             prefix=f"{prefix}.gate",
             bias=False,
             params_dtype=params_dtype,
@@ -1575,7 +1577,9 @@ class Qwen3NextMoEBlock(RtpModule):
                 output_size=1,
                 tp_size=1,
                 tp_rank=0,
-                quant_config=quant_config,
+                # The shared-expert gate is routing state, not an expert
+                # projection, and must retain checkpoint precision as well.
+                quant_config=None,
                 prefix=f"{prefix}.shared_expert_gate",
                 bias=False,
                 params_dtype=params_dtype,

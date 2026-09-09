@@ -90,9 +90,13 @@ _tf32_hc_prenorm_gemm_impl: Callable[..., Any] | None = None
 _runtime_probe_error: Optional[str] = None
 
 
-@functools.cache
 def has_deep_gemm(required_symbols: Tuple[str, ...] = ()) -> bool:
-    """Whether DeepGEMM exports every callable needed by one execution path."""
+    """Whether DeepGEMM exports every callable needed by one execution path.
+
+    Failed probes are deliberately not cached: optional backends can become
+    available after import-path initialization, and a transient failure must
+    not disable DeepGEMM for the lifetime of the process.
+    """
     if not has_module("deep_gemm"):
         return False
     if not required_symbols:
@@ -190,9 +194,7 @@ def _lazy_init_deep_gemm(symbols: List[str]) -> None:
     # check if the symbols are valid
     if any(symbol not in _deep_gemm_impl_new_map for symbol in symbols):
         raise ValueError(f"Invalid symbols: {symbols}")
-    if all(
-        globals().get(symbol_impl) is not None for symbol_impl in symbol_impls
-    ):
+    if all(globals().get(symbol_impl) is not None for symbol_impl in symbol_impls):
         # already initialized
         return
     if not has_deep_gemm():

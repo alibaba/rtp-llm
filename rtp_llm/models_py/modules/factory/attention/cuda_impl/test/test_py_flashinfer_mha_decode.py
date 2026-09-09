@@ -311,8 +311,9 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
 
         seq_t = torch.tensor(sequence_lengths, dtype=torch.int32)
         attn_inputs.sequence_lengths = (seq_t - 1).pin_memory()
-        attn_inputs.input_lengths = torch.ones(
-            batch_size, dtype=torch.int32
+        attn_inputs.input_lengths = torch.tensor(
+            [1 if seq_len > 0 else 0 for seq_len in sequence_lengths],
+            dtype=torch.int32,
         ).pin_memory()
         attn_inputs.prefix_lengths = torch.empty(0, dtype=torch.int32).pin_memory()
 

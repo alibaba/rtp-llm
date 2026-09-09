@@ -138,6 +138,29 @@ class DeepSeekV32Indexer(RtpModule):
             is_neox_style=is_neox_style,
         )
 
+    def _apply(self, fn, recurse: bool = True):
+        source_weight = self.weights_proj.weight
+        source_fp32 = (
+            source_weight.detach().clone()
+            if source_weight is not None and source_weight.dtype == torch.float32
+            else None
+        )
+        result = super()._apply(fn, recurse)
+        migrated_weight = self.weights_proj.weight
+        if source_fp32 is not None and migrated_weight.dtype != torch.float32:
+            # Router logits are intentionally computed in FP32. Preserve the
+            # original FP32 values across model.to(dtype=...) while still
+            # adopting the destination device selected by ``fn``.
+            corrected = source_fp32.to(
+                device=migrated_weight.device,
+                dtype=torch.float32,
+            )
+            self.weights_proj._parameters["weight"] = nn.Parameter(
+                corrected,
+                requires_grad=migrated_weight.requires_grad,
+            )
+        return result
+
     def validate_runtime_device(self, device: torch.device) -> None:
         device = torch.device(device)
         if device.type != "cuda" or torch.version.hip is not None:
