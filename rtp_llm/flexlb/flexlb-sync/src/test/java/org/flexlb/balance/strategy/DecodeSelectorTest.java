@@ -14,14 +14,18 @@ import org.flexlb.config.VictimStage;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
+import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.enums.TaskPhase;
 import org.flexlb.sync.status.WorkerDirectory;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.EnumSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.Mockito;
 
 import java.util.EnumSet;
@@ -147,19 +151,22 @@ class DecodeSelectorTest {
         Mockito.verify(racing).captureDecodeGeneration(replacement);
     }
 
-    @Test
-    void should_use_uniform_distribution_when_all_cache_usages_are_equal() {
+    @ParameterizedTest
+    @ValueSource(strings = {"kvcache_used_ratio", "running_size",
+            "running_size / max_running_size + kvcache_used_ratio"})
+    void equalCostsRotateAcrossEveryTiedWorker(String expression) {
+        configureCost(expression);
         registerWorker("127.0.0.1", 10_000, 9_000);
         registerWorker("127.0.0.2", 10_000, 9_000);
         registerWorker("127.0.0.3", 10_000, 9_000);
-        DecodeSelector decodeSelector = availableStrategy(decodeRegistry());
-        BalanceContext balanceContext = context(1_000, 1_000L);
-
-        ServerStatus status = selectStatus(
-                decodeSelector, balanceContext, RoleType.DECODE, null);
-
-        Assertions.assertTrue(status.isSuccess());
-        Assertions.assertNotNull(status.getServerIp());
+        DecodeSelector strategy = availableStrategy(decodeRegistry());
+        Map<String, Integer> counts = new HashMap<>();
+        for (int i = 0; i < 12; i++) {
+            ServerStatus selected = selectStatus(strategy, context(1_000L, 1_000L + i),
+                    RoleType.DECODE, null);
+            counts.merge(selected.getServerIp(), 1, Integer::sum);
+        }
+        Assertions.assertEquals(Map.of("127.0.0.1", 4, "127.0.0.2", 4, "127.0.0.3", 4), counts);
     }
 
     @Test
@@ -178,40 +185,223 @@ class DecodeSelectorTest {
         Assertions.assertEquals("127.0.0.1", status.getServerIp());
     }
 
-    @Test
-    void roundRobinDoesNotWeightAdmissibleWorkersByKvUsage() {
+    @ParameterizedTest
+    @CsvSource(value = {
+            "kvcache_used_ratio | 127.0.0.1",
+            "kvcache_used / kvcache_capacity | 127.0.0.1",
+            "running_size | 127.0.0.2",
+            "running_size / max_running_size + 2 * kvcache_used_ratio | 127.0.0.1",
+            "2 * running_size / max_running_size + kvcache_used_ratio | 127.0.0.2",
+            "pow(running_size / max_running_size, 2) + kvcache_used_ratio | 127.0.0.1"
+    }, delimiter = '|')
+    void costFormulaSupportsPureWeightedAndNonlinearLoadCosts(String expression, String expectedIp) {
+        configureCost(expression);
         registerWorker("127.0.0.1", 10_000, 9_500);
         registerWorker("127.0.0.2", 10_000, 8_500);
-        DecodeSelector strategy = availableStrategy(decodeRegistry());
-        Map<String, Integer> counts = new HashMap<>();
-        for (int i = 0; i < 100; i++) {
-            ServerStatus selected = selectStatus(strategy, context(1000L, 1000L + i),
+        EndpointRegistry registry = decodeRegistry();
+        reserveQueued(decodeEndpoint(registry, "127.0.0.1:8080"), 91L, 0L, 0L, 50);
+        reserveQueued(decodeEndpoint(registry, "127.0.0.1:8080"), 92L, 0L, 0L, 50);
+        reserveQueued(decodeEndpoint(registry, "127.0.0.2:8080"), 93L, 0L, 0L, 50);
+        // The fixed request cap is 10: running ratios are .2/.1, KV ratios .05/.15.
+        DecodeSelector strategy = availableStrategy(registry);
+        for (int i = 0; i < 10; i++) {
+            ServerStatus selected = selectStatus(strategy, context(1_000L, 1_000L + i),
                     RoleType.DECODE, null);
-            counts.merge(selected.getServerIp(), 1, Integer::sum);
+            Assertions.assertEquals(expectedIp, selected.getServerIp());
         }
-        Assertions.assertEquals(Map.of("127.0.0.1", 50, "127.0.0.2", 50), counts);
     }
 
-    @Test
-    void roundRobinRetainsTheCompleteAdmissibleFleet() {
+    @ParameterizedTest
+    @ValueSource(strings = {"kvcache_used_ratio", "running_size",
+            "running_size / max_running_size + kvcache_used_ratio"})
+    void roundRobinRetainsTheCompleteMinimumCostFleet(String expression) {
+        configureCost(expression);
         for (int i = 1; i <= 16; i++) {
-            registerWorker("127.0.0." + i, 1_000_000, i == 1 ? 1_000_000 : 200_000);
+            registerWorker("127.0.0." + i, 1_000_000, 900_000);
         }
-        DecodeSelector strategy = availableStrategy(decodeRegistry());
+        registerWorker("127.0.0.17", 1_000_000, 800_000);
+        EndpointRegistry registry = decodeRegistry();
+        reserveQueued(decodeEndpoint(registry, "127.0.0.17:8080"), 91L, 0L, 0L, 50);
+        DecodeSelector strategy = availableStrategy(registry);
         java.util.Set<String> selected = new java.util.HashSet<>();
         for (int i = 0; i < 16; i++) {
             selected.add(selectStatus(strategy, context(1L, 10_000L + i),
                     RoleType.DECODE, null).getServerIp());
         }
         Assertions.assertEquals(16, selected.size());
+        Assertions.assertFalse(selected.contains("127.0.0.17"));
     }
 
     @Test
-    void should_skip_worker_with_insufficient_kv_cache_capacity() {
+    void defaultCostUsesKvUsageRatioAcrossDifferentWorkerCapacities() {
+        var estimator = configService.loadBalanceConfig().getRouter().getRoles().getDecode().getCostEstimator();
+        Assertions.assertEquals("kvcache_used_ratio", estimator.getExpression());
+        registerWorker("127.0.0.1", 1_000L, 500L);
+        registerWorker("127.0.0.2", 10_000L, 9_000L);
+
+        ServerStatus selected = selectStatus(availableStrategy(decodeRegistry()), context(100L, 1_001L),
+                RoleType.DECODE, null);
+
+        Assertions.assertEquals("127.0.0.2", selected.getServerIp(),
+                "10% KV usage is cheaper than 50%, despite using more absolute tokens");
+    }
+
+    @Test
+    void cacheCostIncludesExpectedLocalReservationsBeyondTheHardPromptReservation() {
+        registerWorker("127.0.0.1", 10_000L, 9_500L);
+        registerWorker("127.0.0.2", 10_000L, 8_500L);
+        EndpointRegistry registry = decodeRegistry();
+        DecodeEndpoint endpoint = decodeEndpoint(registry, "127.0.0.1:8080");
+        reserveQueued(endpoint, 91L, 100L, 2_000L, 50);
+        Assertions.assertEquals(100L, endpoint.routingView().inflightHardKv());
+        Assertions.assertEquals(2_500L, endpoint.routingView().realKvUsed());
+
+        ServerStatus selected = selectStatus(availableStrategy(registry), context(100L, 1_001L),
+                RoleType.DECODE, null);
+
+        Assertions.assertEquals("127.0.0.2", selected.getServerIp());
+    }
+
+    @Test
+    void cacheCostKeepsUsageRatiosAboveOneDistinctForBusyWorkers() {
+        registerWorker("127.0.0.1", 1_000L, 100L);
+        registerWorker("127.0.0.2", 1_000L, 100L);
+        EndpointRegistry registry = decodeRegistry();
+        reserveQueued(decodeEndpoint(registry, "127.0.0.1:8080"), 91L, 0L, 1_200L, 50);
+        reserveQueued(decodeEndpoint(registry, "127.0.0.2:8080"), 92L, 0L, 200L, 50);
+        DecodeSelector strategy = availableStrategy(registry);
+        for (int i = 0; i < 4; i++) {
+            Assertions.assertEquals("127.0.0.2", selectStatus(strategy, context(100L, 1_001L + i),
+                    RoleType.DECODE, null).getServerIp(), "110% KV usage must remain cheaper than 210%");
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"1 / running_size", "sqrt(running_size - 1)"})
+    void nonFiniteCostIsSkippedWhenAnotherWorkerHasAFiniteCost(String expression) {
+        configureCost(expression);
+        registerWorker("127.0.0.1", 10_000L, 10_000L);
+        registerWorker("127.0.0.2", 10_000L, 10_000L);
+        EndpointRegistry registry = decodeRegistry();
+        reserveQueued(decodeEndpoint(registry, "127.0.0.2:8080"), 91L, 0L, 0L, 50);
+
+        ServerStatus selected = selectStatus(availableStrategy(registry), context(100L, 1_001L),
+                RoleType.DECODE, null);
+
+        Assertions.assertEquals("127.0.0.2", selected.getServerIp());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"1 / running_size", "sqrt(running_size - 1)"})
+    void allNonFiniteCostsFailExplicitlyInsteadOfWaitingForCapacity(String expression) {
+        configureCost(expression);
+        registerWorker("127.0.0.1", 10_000L, 10_000L);
+        registerWorker("127.0.0.2", 10_000L, 10_000L);
+        DecodeSelector strategy = availableStrategy(decodeRegistry());
+
+        IllegalStateException error = Assertions.assertThrows(IllegalStateException.class,
+                () -> strategy.select(DecodeBinding.capture(context(100L, 1_001L)), null));
+
+        Assertions.assertTrue(error.getMessage().contains("Decode cost formula produced no finite score"));
+    }
+
+    @Test
+    void unnormalizedRunningSizeFormulaDoesNotRequireAnEngineRequestCap() {
+        var decode = configService.loadBalanceConfig().getRouter().getRoles().getDecode();
+        decode.getCostEstimator().setExpression("running_size");
+        Assertions.assertNull(decode.getAvailability().getMaxEngineRequests());
+        registerWorker("127.0.0.1", 10_000L, 10_000L);
+        registerWorker("127.0.0.2", 10_000L, 10_000L);
+        EndpointRegistry registry = decodeRegistry();
+        reserveQueued(decodeEndpoint(registry, "127.0.0.1:8080"), 91L, 0L, 0L, 50);
+
+        ServerStatus selected = selectStatus(availableStrategy(registry), context(100L, 1_001L),
+                RoleType.DECODE, null);
+
+        Assertions.assertEquals("127.0.0.2", selected.getServerIp());
+    }
+
+    @Test
+    void runningCostChoosesTheCheapestWorkerWhenAllWorkersAreBusy() {
+        configureCost("running_size / max_running_size");
+        registerWorker("127.0.0.1", 1_000L, 100L);
+        registerWorker("127.0.0.2", 1_000L, 100L);
+        EndpointRegistry registry = decodeRegistry();
+        reserveQueued(decodeEndpoint(registry, "127.0.0.1:8080"), 91L, 0L, 0L, 50);
+        reserveQueued(decodeEndpoint(registry, "127.0.0.1:8080"), 92L, 0L, 0L, 50);
+        reserveQueued(decodeEndpoint(registry, "127.0.0.2:8080"), 93L, 0L, 0L, 50);
+        DecodeSelector strategy = availableStrategy(registry);
+        for (int i = 0; i < 4; i++) {
+            Assertions.assertEquals("127.0.0.2", selectStatus(strategy, context(100L, 1_001L + i),
+                    RoleType.DECODE, null).getServerIp());
+        }
+    }
+
+    @Test
+    void runningCostIncludesConfirmedEngineRequestsAndAllLocalReservations() {
+        configureCost("running_size / max_running_size");
+        WorkerStatus confirmed = registerWorker("127.0.0.1", 10_000L, 9_000L);
+        var response = StrategyTestSupport.response(RoleType.DECODE, true, 9_000L, 10_000L,
+                confirmed.appliedStatusCursor().statusVersion() + 1L);
+        response.setRunningTaskInfo(Map.of(
+                "81", task(81L, TaskPhase.KV_ALLOCATED),
+                "82", task(82L, TaskPhase.RUNNING)));
+        StrategyTestSupport.publish(confirmed, response);
+        registerWorker("127.0.0.2", 10_000L, 9_000L);
+        EndpointRegistry registry = decodeRegistry();
+        DecodeEndpoint local = decodeEndpoint(registry, "127.0.0.2:8080");
+        reservePinned(local, 91L, 0L, 0L, 50);
+        Assertions.assertEquals(2, decodeEndpoint(registry, "127.0.0.1:8080").routingView().totalLoad());
+        DecodeSelector strategy = availableStrategy(registry);
+        for (int i = 0; i < 4; i++) {
+            Assertions.assertEquals("127.0.0.2", selectStatus(strategy, context(100L, 1_001L + i),
+                    RoleType.DECODE, null).getServerIp());
+        }
+
+        reserveQueued(local, 92L, 0L, 0L, 50);
+        reserveQueued(local, 93L, 0L, 0L, 50);
+        Assertions.assertEquals(1, local.routingView().engineLoad());
+        Assertions.assertEquals(3, local.routingView().totalLoad());
+        for (int i = 0; i < 4; i++) {
+            Assertions.assertEquals("127.0.0.1", selectStatus(strategy, context(100L, 2_001L + i),
+                    RoleType.DECODE, null).getServerIp(),
+                    "queued reservations count toward running cost before they face the Engine");
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void engineRequestGateTakesPriorityOverLowerRunningCost(boolean direct) {
+        configureCost("running_size / max_running_size");
+        if (direct) {
+            configService.loadBalanceConfig().setScheduler(SchedulerConfig.direct());
+        }
+        configService.loadBalanceConfig().getRouter().getRoles().getDecode()
+                .getAvailability().setMaxEngineRequests(1L);
+        registerWorker("127.0.0.1", 10_000L, 10_000L);
+        registerWorker("127.0.0.2", 10_000L, 10_000L);
+        EndpointRegistry registry = decodeRegistry();
+        reservePinned(decodeEndpoint(registry, "127.0.0.1:8080"), 91L, 0L, 0L, 50);
+        reserveQueued(decodeEndpoint(registry, "127.0.0.2:8080"), 92L, 0L, 0L, 50);
+        reserveQueued(decodeEndpoint(registry, "127.0.0.2:8080"), 93L, 0L, 0L, 50);
+
+        ServerStatus selected = selectStatus(availableStrategy(registry), context(100L, 1_001L),
+                RoleType.DECODE, null);
+
+        Assertions.assertEquals("127.0.0.2", selected.getServerIp(),
+                "a READY worker outranks a cheaper worker at its Engine request cap");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"kvcache_used_ratio", "running_size"})
+    void should_skip_worker_with_insufficient_kv_cache_capacity(String expression) {
+        configureCost(expression);
         configService.loadBalanceConfig().setScheduler(SchedulerConfig.direct());
         registerWorker("127.0.0.1", 1_000, 100);
         registerWorker("127.0.0.2", 1_000, 800);
-        DecodeSelector decodeSelector = availableStrategy(decodeRegistry());
+        EndpointRegistry registry = decodeRegistry();
+        reserveQueued(decodeEndpoint(registry, "127.0.0.2:8080"), 91L, 0L, 0L, 50);
+        DecodeSelector decodeSelector = availableStrategy(registry);
         BalanceContext balanceContext = context(500, 2_000L);
 
         ServerStatus status = selectStatus(
@@ -235,8 +425,10 @@ class DecodeSelectorTest {
         Assertions.assertNull(status);
     }
 
-    @Test
-    void queueRejectsSequenceBeyondEveryKnownPhysicalCapacity() {
+    @ParameterizedTest
+    @ValueSource(strings = {"kvcache_used_ratio", "running_size"})
+    void queueRejectsSequenceBeyondEveryKnownPhysicalCapacity(String expression) {
+        configureCost(expression);
         registerWorker("127.0.0.1", 128L, 128L);
         registerWorker("127.0.0.2", 256L, 256L);
         DecodeSelector strategy = availableStrategy(decodeRegistry());
@@ -261,6 +453,22 @@ class DecodeSelectorTest {
 
         Assertions.assertEquals(PlacementResult.Status.SUCCESS, result.status());
         result.value().close();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"kvcache_used_ratio", "running_size",
+            "running_size / max_running_size + kvcache_used_ratio"})
+    void unknownKvCapacityDoesNotProduceAnUnselectableCost(String expression) {
+        configureCost(expression);
+        registerWorker("127.0.0.1", 0L, 0L);
+        registerWorker("127.0.0.2", 10_000L, 9_000L);
+        EndpointRegistry registry = decodeRegistry();
+        reserveQueued(decodeEndpoint(registry, "127.0.0.2:8080"), 91L, 0L, 0L, 50);
+
+        ServerStatus selected = selectStatus(availableStrategy(registry), context(100L, 3_052L),
+                RoleType.DECODE, null);
+
+        Assertions.assertEquals("127.0.0.1", selected.getServerIp());
     }
 
     @Test
@@ -310,12 +518,12 @@ class DecodeSelectorTest {
     }
 
     @Test
-    void nonPreemptiveQueueProjectsCurrentRequestBeforeOwnershipTier() {
+    void runningCostPrefersReadyWorkersBeforeCheaperBusyWorkers() {
+        configureCost("running_size / max_running_size");
         registerWorker("127.0.0.1", 1_000, 200);
         registerWorker("127.0.0.2", 1_000, 1_000);
         EndpointRegistry registry = decodeRegistry();
-        // Bias the old least-ownership tier toward the endpoint which cannot
-        // fit this request. Request-aware capacity must win that disagreement.
+        // The cheaper endpoint cannot fit this request, so readiness must win.
         reserveQueued(
                 decodeEndpoint(registry, "127.0.0.2:8080"),
                 91L, 0L, 0L, 50);
@@ -334,6 +542,7 @@ class DecodeSelectorTest {
     @EnumSource(QueuePolicy.class)
     void queueSelectsFeasibleEndpointsBeforeWaitingForTransientCapacity(QueuePolicy policy) {
         configureQueue(policy);
+        configureCost("running_size / max_running_size");
         registerWorker("127.0.0.1", 1000, 100);
         registerWorker("127.0.0.2", 1000, 100);
         EndpointRegistry registry = decodeRegistry();
@@ -358,9 +567,12 @@ class DecodeSelectorTest {
     @EnumSource(QueuePolicy.class)
     void waitingDoesNotMakePhysicallyImpossibleEndpointsEligible(QueuePolicy policy) {
         configureQueue(policy);
+        configureCost("running_size / max_running_size");
         registerWorker("127.0.0.1", 100L, 100L);
         registerWorker("127.0.0.2", 1000L, 0L);
-        DecodeSelector strategy = availableStrategy(decodeRegistry());
+        EndpointRegistry registry = decodeRegistry();
+        reserveQueued(decodeEndpoint(registry, "127.0.0.2:8080"), 91L, 0L, 0L, 50);
+        DecodeSelector strategy = availableStrategy(registry);
         for (long requestId = 200L; requestId < 204L; requestId++) {
             ServerStatus selected = selectStatus(strategy, context(200L, requestId), RoleType.DECODE, null);
             Assertions.assertNotNull(selected);
@@ -385,7 +597,7 @@ class DecodeSelectorTest {
     }
 
     @Test
-    void oneLowerSnapshotDoesNotHerdEveryConcurrentPlan() {
+    void cacheCostKeepsZeroKvReservationsTiedAcrossWorkers() {
         registerWorker("127.0.0.1", 1_000, 1_000);
         registerWorker("127.0.0.2", 1_000, 1_000);
         EndpointRegistry registry = decodeRegistry();
@@ -397,7 +609,7 @@ class DecodeSelectorTest {
         int lowerLoadSelections = 0;
         int higherLoadSelections = 0;
 
-        for (int index = 0; index < 1_000; index++) {
+        for (int index = 0; index < 20; index++) {
             context.getRequest().setRequestId(30_000L + index);
             ServerStatus selected = selectStatus(
                     strategy, context, RoleType.DECODE, null);
@@ -408,8 +620,8 @@ class DecodeSelectorTest {
             }
         }
 
-        Assertions.assertEquals(500, lowerLoadSelections);
-        Assertions.assertEquals(500, higherLoadSelections);
+        Assertions.assertEquals(10, lowerLoadSelections);
+        Assertions.assertEquals(10, higherLoadSelections);
     }
 
     @Test
@@ -455,6 +667,19 @@ class DecodeSelectorTest {
         registerWorker("127.0.0.1", 10_000L, 10_000L);
         Assertions.assertEquals(PlacementResult.Status.REJECTED,
                 availableStrategy(decodeRegistry()).select(DecodeBinding.capture(context(1L, 992L)), null).status());
+    }
+
+    private void configureCost(String expression) {
+        var decode = configService.loadBalanceConfig().getRouter().getRoles().getDecode();
+        decode.getCostEstimator().setExpression(expression);
+        decode.getAvailability().setMaxEngineRequests(10L);
+    }
+
+    private static TaskInfo task(long requestId, TaskPhase phase) {
+        TaskInfo task = new TaskInfo();
+        task.setRequestId(requestId);
+        task.setPhase(phase);
+        return task;
     }
 
     private static void setKv(

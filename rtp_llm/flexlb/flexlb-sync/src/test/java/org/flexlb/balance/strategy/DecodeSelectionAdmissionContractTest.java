@@ -124,6 +124,7 @@ class DecodeSelectionAdmissionContractTest {
         private final DecodeEndpoint.AdmissionCapacity limits;
 
         private Fixture(Policy policy, CapacityDimension dimension) {
+            config.getRouter().getRoles().getDecode().getCostEstimator().setExpression("0");
             if (policy == Policy.DIRECT) {
                 config.setScheduler(SchedulerConfig.direct());
             } else if (policy != Policy.FIFO) {
