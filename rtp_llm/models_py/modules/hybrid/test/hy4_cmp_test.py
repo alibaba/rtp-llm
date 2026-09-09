@@ -826,9 +826,14 @@ class Hy4IndependentCmpTest(unittest.TestCase):
             def record(self):
                 case.log.append(("record", case.current[0], self.name))
 
-        caller, k, q = (Stream(n) for n in ("caller", "index", "index_q"))
+        caller, main, k, q = (
+            Stream(n) for n in ("caller", "main_stream", "index", "index_q")
+        )
         events = bridge._Events(
-            *(Event(n) for n in ("input", "qc", "q_ready", "main", "done"))
+            *(
+                Event(n)
+                for n in ("entry", "exit", "input", "qc", "q_ready", "main", "done")
+            )
         )
 
         @contextmanager
@@ -843,7 +848,7 @@ class Hy4IndependentCmpTest(unittest.TestCase):
         with patch.object(
             case.cmp, "_dynamic_disabled_reason", return_value=None
         ), patch.object(
-            case.cmp, "_side_streams", return_value=(k, q)
+            case.cmp, "_side_streams", return_value=(main, k, q)
         ) as streams, patch.object(
             case.cmp, "_new_events", return_value=events
         ) as create_events, patch.object(
@@ -929,11 +934,58 @@ class Hy4IndependentCmpTest(unittest.TestCase):
             case.log.index(("post", "index")),
         )
         self.assertLess(
-            case.log.index(("wait", "caller", "done")),
+            case.log.index(("wait", "caller", "exit")),
             case.log.index(("mla", "caller")),
         )
         self.assertLess(
-            case.log.index(("qb", "caller")), case.log.index(("gate", "caller"))
+            case.log.index(("qb", "main_stream")),
+            case.log.index(("gate", "main_stream")),
+        )
+
+    def test_main_stream_joins_caller_and_publishes_all_outputs(self):
+        case = self._case()
+        with self._queues(case) as queues:
+            case.cmp.forward_attention(case.hidden, case.fmha, case.cache)
+        for name in ("qkv", "qb", "gate", "main_ready"):
+            self.assertIn((name, "main_stream"), case.log)
+        for name in ("mla", "output"):
+            self.assertIn((name, "caller"), case.log)
+        self.assertLess(
+            case.log.index(("record", "caller", "entry")),
+            case.log.index(("wait", "main_stream", "entry")),
+        )
+        self.assertLess(
+            case.log.index(("wait", "main_stream", "entry")),
+            case.log.index(("qkv", "main_stream")),
+        )
+        self.assertLess(
+            case.log.index(("wait", "main_stream", "done")),
+            case.log.index(("record", "main_stream", "exit")),
+        )
+        self.assertLess(
+            case.log.index(("record", "main_stream", "exit")),
+            case.log.index(("wait", "caller", "exit")),
+        )
+        outputs, consumer = queues.lifetime.call_args.args
+        self.assertEqual(consumer.name, "caller")
+        self.assertEqual(len(outputs), 3)
+        self.assertTrue(all(isinstance(x, torch.Tensor) for x in outputs))
+
+    def test_device_streams_use_glm5_priorities_and_are_reused(self):
+        streams = (object(), object(), object())
+        with patch.object(bridge.Hy4Cmp, "_streams_by_device", {}), patch.object(
+            bridge, "_is_capturing", return_value=False
+        ), patch.object(
+            bridge.torch.cuda, "device", return_value=nullcontext()
+        ), patch.object(
+            bridge.torch.cuda, "Stream", side_effect=streams
+        ) as create:
+            first = bridge.Hy4Cmp._side_streams(torch.device("cuda:0"))
+            second = bridge.Hy4Cmp._side_streams(torch.device("cuda:0"))
+        self.assertIs(first, second)
+        self.assertEqual(first, streams)
+        self.assertEqual(
+            [call.kwargs for call in create.call_args_list], [{"priority": -1}, {}, {}]
         )
 
     def test_long_kv_delays_score_until_complete_main_query(self):
@@ -943,8 +995,8 @@ class Hy4IndependentCmpTest(unittest.TestCase):
         ):
             case.cmp.forward_attention(case.hidden, case.fmha, case.cache)
         self.assertLess(
-            case.log.index(("main_ready", "caller")),
-            case.log.index(("record", "caller", "main")),
+            case.log.index(("main_ready", "main_stream")),
+            case.log.index(("record", "main_stream", "main")),
         )
         self.assertLess(
             case.log.index(("wait", "index", "main")),
@@ -956,7 +1008,7 @@ class Hy4IndependentCmpTest(unittest.TestCase):
         with self._queues(case):
             case.cmp.forward_attention(case.hidden, case.fmha, case.cache)
         for name in ("index_k", "index_q", "post", "head"):
-            self.assertIn((name, "caller"), case.log)
+            self.assertIn((name, "main_stream"), case.log)
         self.assertIn(("score", "index"), case.log)
         self.assertFalse(any(x[1] == "index_q" for x in case.log))
 

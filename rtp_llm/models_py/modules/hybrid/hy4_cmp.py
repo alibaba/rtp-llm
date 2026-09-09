@@ -1,9 +1,10 @@
 """Independent HY4 CMP attention path.
 
-The caller owns main Query/cache preparation and output Gate. Target Indexer K
-and Q projections use separate side streams and join at the existing fused Q/K
-epilogue. Score/TopK stays on the K stream; long KV waits for the complete main
-Query. MTP and TopK-reuse layers create no side-stream work.
+Target Query/cache preparation and output Gate use a dedicated high-priority
+main stream. Indexer K and Q use separate streams and join at the existing fused
+Q/K epilogue. All branches join back to the caller before sparse MLA. Score/TopK
+stays on the K stream; long KV waits for complete main Query preparation. MTP
+and TopK-reuse layers stay on the caller without side-stream work.
 """
 
 from __future__ import annotations
@@ -51,7 +52,9 @@ def _mxfp8_quantize_hidden(
 
 @dataclass
 class _Events:
-    caller_ready: torch.cuda.Event
+    caller_to_main: torch.cuda.Event
+    side_streams_complete: torch.cuda.Event
+    frontend_ready: torch.cuda.Event
     q_inputs_ready: torch.cuda.Event
     indexer_q_ready: torch.cuda.Event
     q_path_complete: torch.cuda.Event
@@ -70,7 +73,7 @@ def _record_stream(value: Any, stream: Any) -> None:
 class Hy4Cmp:
     """Overlap independent HY4 attention branches without changing formulas."""
 
-    _streams_by_device: dict[int, tuple[Any, Any]] = {}
+    _streams_by_device: dict[int, tuple[Any, Any, Any]] = {}
 
     def __init__(
         self,
@@ -150,7 +153,7 @@ class Hy4Cmp:
         return None
 
     @classmethod
-    def _side_streams(cls, device: torch.device) -> tuple[Any, Any]:
+    def _side_streams(cls, device: torch.device) -> tuple[Any, Any, Any]:
         device_index = (
             torch.cuda.current_device() if device.index is None else int(device.index)
         )
@@ -159,7 +162,11 @@ class Hy4Cmp:
             if _is_capturing():
                 raise RuntimeError("HY4 CMP streams must be created before capture")
             with torch.cuda.device(device):
-                streams = (torch.cuda.Stream(), torch.cuda.Stream())
+                streams = (
+                    torch.cuda.Stream(priority=-1),
+                    torch.cuda.Stream(),
+                    torch.cuda.Stream(),
+                )
             cls._streams_by_device[device_index] = streams
         return streams
 
@@ -167,7 +174,7 @@ class Hy4Cmp:
     def _new_events(device: torch.device) -> _Events:
         if _is_capturing():
             raise RuntimeError("HY4 CMP events must be created before capture")
-        events = _Events(*(torch.cuda.Event() for _ in range(5)))
+        events = _Events(*(torch.cuda.Event() for _ in range(7)))
         with torch.cuda.device(device):
             for event in vars(events).values():
                 event.record()
@@ -266,7 +273,7 @@ class Hy4Cmp:
         fmha_impl: Any,
         kv_cache: Any,
     ) -> tuple:
-        """Main Q-B, caller-stream Gate, and complete Query/cache preparation."""
+        """Main Q-B, output Gate, and complete Query/cache preparation."""
         from rtp_llm.models_py.modules.hybrid import mla_attention as kernels
 
         attn = self.self_attn
@@ -407,84 +414,110 @@ class Hy4Cmp:
         parallel_tail = indexed and str(self.config.model_type) == "hy_v4"
         parallel_frontend = parallel_tail and self._indexer_frontend_parallel
         defer_score = indexed and self._serialize_score_after_q_path(fmha_impl)
-        index_stream = indexer_q_stream = events = None
+        main_stream = index_stream = indexer_q_stream = events = None
+        caller = None
         if parallel_tail:
-            index_stream, indexer_q_stream = self._side_streams(hidden.device)
+            main_stream, index_stream, indexer_q_stream = self._side_streams(
+                hidden.device
+            )
             if self._events is None:
                 self._events = self._new_events(hidden.device)
             events = self._events
+            caller = torch.cuda.current_stream(hidden.device)
+            events.caller_to_main.record()
+            main_stream.wait_event(events.caller_to_main)
+            _record_stream((hidden, x_fp8, x_scale, x_fp32), main_stream)
 
-        # K only needs normalized hidden; Q will wait for the Q-A result.
-        k = None
-        if indexed:
-            if parallel_frontend:
-                events.caller_ready.record()
-                index_stream.wait_event(events.caller_ready)
-                _record_stream((hidden, index_fp8, index_scale, x_fp32), index_stream)
-            with (
-                torch.cuda.stream(index_stream) if parallel_frontend else nullcontext()
-            ):
-                k = self._indexer_k(hidden, index_fp8, index_scale)
-
-        q_c, q_fp8, q_scale, kv = self._qkv_a(hidden, x_fp8, x_scale)
-        q_inputs = (q_c, q_fp8, q_scale)
-        indexer_prepared = topk = None
-        if indexed:
-            if parallel_frontend:
-                events.q_inputs_ready.record()
-                indexer_q_stream.wait_event(events.q_inputs_ready)
-                _record_stream(q_inputs, indexer_q_stream)
-            with (
-                torch.cuda.stream(indexer_q_stream)
-                if parallel_frontend
-                else nullcontext()
-            ):
-                indexer_q = self._indexer_q(q_inputs)
+        with torch.cuda.stream(main_stream) if parallel_tail else nullcontext():
+            # K only needs normalized hidden; Q will wait for the Q-A result.
+            k = None
+            if indexed:
                 if parallel_frontend:
-                    events.indexer_q_ready.record()
-            if parallel_frontend:
-                # Q projection does NOT wait for K. Only the fused Q/K
-                # consumer joins the branches; K is already on this stream.
-                index_stream.wait_event(events.indexer_q_ready)
-                _record_stream(indexer_q, index_stream)
-            with (
-                torch.cuda.stream(index_stream) if parallel_frontend else nullcontext()
-            ):
-                indexer_prepared = self._indexer_post(
-                    hidden,
-                    indexer_q,
-                    k,
-                    fmha_impl,
-                    kv_cache,
-                    x_fp32,
-                )
-            if parallel_tail and not parallel_frontend:
-                events.caller_ready.record()
-                index_stream.wait_event(events.caller_ready)
-                _record_stream(indexer_prepared, index_stream)
-            if not defer_score:
+                    events.frontend_ready.record()
+                    index_stream.wait_event(events.frontend_ready)
+                    _record_stream(
+                        (hidden, index_fp8, index_scale, x_fp32), index_stream
+                    )
+                with (
+                    torch.cuda.stream(index_stream)
+                    if parallel_frontend
+                    else nullcontext()
+                ):
+                    k = self._indexer_k(hidden, index_fp8, index_scale)
+
+            q_c, q_fp8, q_scale, kv = self._qkv_a(hidden, x_fp8, x_scale)
+            q_inputs = (q_c, q_fp8, q_scale)
+            indexer_prepared = topk = None
+            if indexed:
+                if parallel_frontend:
+                    events.q_inputs_ready.record()
+                    indexer_q_stream.wait_event(events.q_inputs_ready)
+                    _record_stream(q_inputs, indexer_q_stream)
+                with (
+                    torch.cuda.stream(indexer_q_stream)
+                    if parallel_frontend
+                    else nullcontext()
+                ):
+                    indexer_q = self._indexer_q(q_inputs)
+                    if parallel_frontend:
+                        events.indexer_q_ready.record()
+                if parallel_frontend:
+                    # Q projection does NOT wait for K. Only the fused Q/K
+                    # consumer joins the branches; K is already on this stream.
+                    index_stream.wait_event(events.indexer_q_ready)
+                    _record_stream(indexer_q, index_stream)
+                with (
+                    torch.cuda.stream(index_stream)
+                    if parallel_frontend
+                    else nullcontext()
+                ):
+                    indexer_prepared = self._indexer_post(
+                        hidden,
+                        indexer_q,
+                        k,
+                        fmha_impl,
+                        kv_cache,
+                        x_fp32,
+                    )
+                if parallel_tail and not parallel_frontend:
+                    events.frontend_ready.record()
+                    index_stream.wait_event(events.frontend_ready)
+                    _record_stream(indexer_prepared, index_stream)
+                if not defer_score:
+                    with (
+                        torch.cuda.stream(index_stream)
+                        if parallel_tail
+                        else nullcontext()
+                    ):
+                        topk = self._score_topk(indexer_prepared, fmha_impl, kv_cache)
+                        if parallel_tail:
+                            events.indexer_complete.record()
+
+            # At long KV the score tail waits for the complete main path. The
+            # dependency includes absorbed-Q, cache preparation, and Gate.
+            mla_inputs, gate = self._main_query(
+                hidden, q_inputs, kv, fmha_impl, kv_cache
+            )
+            if defer_score:
+                if parallel_tail:
+                    events.q_path_complete.record()
+                    index_stream.wait_event(events.q_path_complete)
                 with (
                     torch.cuda.stream(index_stream) if parallel_tail else nullcontext()
                 ):
                     topk = self._score_topk(indexer_prepared, fmha_impl, kv_cache)
                     if parallel_tail:
                         events.indexer_complete.record()
-
-        # Caller stream stays responsible for the main path. At long KV the
-        # score tail cannot start until this includes absorbed-Q and Gate.
-        mla_inputs, gate = self._main_query(hidden, q_inputs, kv, fmha_impl, kv_cache)
-        if defer_score:
             if parallel_tail:
-                events.q_path_complete.record()
-                index_stream.wait_event(events.q_path_complete)
-            with torch.cuda.stream(index_stream) if parallel_tail else nullcontext():
-                topk = self._score_topk(indexer_prepared, fmha_impl, kv_cache)
-                if parallel_tail:
-                    events.indexer_complete.record()
+                main_stream.wait_event(events.indexer_complete)
+                events.side_streams_complete.record()
         if parallel_tail:
-            caller = torch.cuda.current_stream(hidden.device)
-            caller.wait_event(events.indexer_complete)
-            _record_stream(topk, caller)
+            caller.wait_event(events.side_streams_complete)
+            # The prepared Query and Gate were allocated on main; TopK was
+            # allocated on index. Keep their storage alive for caller consumers.
+            _record_stream(
+                (getattr(mla_inputs, "q_transformed", mla_inputs), gate, topk), caller
+            )
         if reuse_topk:
             topk = prev_topk_indices
         return mla_inputs, gate, topk
