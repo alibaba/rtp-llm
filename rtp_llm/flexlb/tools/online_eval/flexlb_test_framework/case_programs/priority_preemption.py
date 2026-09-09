@@ -2,100 +2,77 @@
 
 from ..case_config import output
 
-METADATA = {
-    "id": "priority_preemption",
-    "description": "Explicit preemption cohorts and legacy design-final predicates.",
-    "category": "priority",
-}
-
-PROFILES = ["single-nonbatch", "single-batch", "batch-window"]
-
 
 def same_priority_zero_eviction(case):
-    case.step("setup", "setup", timeout_s=180)
+    case.step(
+        "setup",
+        "setup",
+        timeout_s=case.value("same_priority_zero_eviction.setup_timeout_s"),
+    )
     case.step("fleet", "priority_fleet")
     case.step(
         "slow",
         "engine_control",
-        params={
-            "operation": "set_perf",
-            "targets": [output("fleet", "prefill")],
-            "perf": {"prefill_fixed_ms": 4000},
-        },
+        params=case.params(
+            "same_priority_zero_eviction.slow",
+            {"targets": [output("fleet", "prefill")]},
+        ),
     )
-    case.step("sync", "balance_pause", params={"seconds": 1.5})
+    case.step(
+        "sync", "balance_pause", params=case.value("same_priority_zero_eviction.sync")
+    )
     case.step(
         "placeholder",
         "priority_start",
-        timeout_s=5,
-        params={
-            "gap_s": 0,
-            "requests": [
-                {
-                    "tag": "placeholder",
-                    "priority": 50,
-                    "input_len": 2048,
-                    "output_len": 2,
-                }
-            ],
-        },
+        timeout_s=case.value("same_priority_zero_eviction.placeholder_timeout_s"),
+        params=case.value("same_priority_zero_eviction.placeholder"),
     )
     case.step(
         "placeholder_settled",
         "preemption_settled",
-        timeout_s=90,
+        timeout_s=case.value(
+            "same_priority_zero_eviction.placeholder_settled_timeout_s"
+        ),
         params={"requests": output("placeholder", "requests")},
     )
     case.step(
         "placeholder_admitted",
         "check",
-        params={
-            "actual": output("placeholder_settled", "admitted"),
-            "op": "eq",
-            "expected": True,
-        },
+        params=case.params(
+            "same_priority_zero_eviction.placeholder_admitted",
+            {"actual": output("placeholder_settled", "admitted")},
+        ),
     )
     case.step(
         "placeholder_pending",
         "preemption_pending",
-        timeout_s=6,
+        timeout_s=case.value(
+            "same_priority_zero_eviction.placeholder_pending_timeout_s"
+        ),
         params={"target": output("fleet", "prefill")},
     )
     case.step(
         "wave",
         "priority_start",
-        timeout_s=15,
-        params={
-            "gap_s": 0.15,
-            "requests": [
-                {"tag": "peer0", "priority": 50, "input_len": 2048, "output_len": 2},
-                {"tag": "peer1", "priority": 50, "input_len": 2048, "output_len": 2},
-                {"tag": "peer2", "priority": 50, "input_len": 2048, "output_len": 2},
-                {"tag": "peer3", "priority": 50, "input_len": 2048, "output_len": 2},
-                {"tag": "peer4", "priority": 50, "input_len": 2048, "output_len": 2},
-                {"tag": "peer5", "priority": 50, "input_len": 2048, "output_len": 2},
-                {"tag": "peer6", "priority": 50, "input_len": 2048, "output_len": 2},
-                {"tag": "peer7", "priority": 50, "input_len": 2048, "output_len": 2},
-                {"tag": "incoming", "priority": 50, "input_len": 2048, "output_len": 2},
-            ],
-        },
+        timeout_s=case.value("same_priority_zero_eviction.wave_timeout_s"),
+        params=case.value("same_priority_zero_eviction.wave"),
     )
     case.step(
         "wave_settled",
         "preemption_settled",
-        timeout_s=90,
+        timeout_s=case.value("same_priority_zero_eviction.wave_settled_timeout_s"),
         params={"requests": output("wave", "requests")},
     )
     case.step(
         "placeholder_drain",
         "preemption_wait",
-        timeout_s=35,
+        timeout_s=case.value("same_priority_zero_eviction.placeholder_drain_timeout_s"),
         params={"requests": output("placeholder", "requests")},
     )
     case.step(
         "wave_drain",
         "preemption_wait",
-        timeout_s=315,
+        timeout_s=case.value("same_priority_zero_eviction.wave_drain_timeout_s"),
         params={"requests": output("wave", "requests")},
     )
     case.step(
@@ -106,809 +83,678 @@ def same_priority_zero_eviction(case):
             "wave": output("wave", "requests"),
         },
     )
-    case.step("master_clean", "balance_clean", timeout_s=30)
+    case.step(
+        "master_clean",
+        "balance_clean",
+        timeout_s=case.value("same_priority_zero_eviction.master_clean_timeout_s"),
+    )
     case.step(
         "restore",
         "engine_control",
-        params={
-            "operation": "set_perf",
-            "targets": [output("fleet", "prefill")],
-            "perf": {"prefill_fixed_ms": 100},
-        },
+        params=case.params(
+            "same_priority_zero_eviction.restore",
+            {"targets": [output("fleet", "prefill")]},
+        ),
     )
-    case.step("teardown", "teardown", timeout_s=120)
+    case.step(
+        "teardown",
+        "teardown",
+        timeout_s=case.value("same_priority_zero_eviction.teardown_timeout_s"),
+    )
 
 
 def prefill_queued(case):
-    case.step("setup", "setup", timeout_s=180)
+    case.step("setup", "setup", timeout_s=case.value("prefill_queued.setup_timeout_s"))
     case.step("fleet", "priority_fleet")
     case.step(
         "slow",
         "engine_control",
-        params={
-            "operation": "set_perf",
-            "targets": [output("fleet", "prefill")],
-            "perf": {"prefill_fixed_ms": 4000},
-        },
+        params=case.params(
+            "prefill_queued.slow", {"targets": [output("fleet", "prefill")]}
+        ),
     )
-    case.step("sync", "balance_pause", params={"seconds": 1.5})
+    case.step("sync", "balance_pause", params=case.value("prefill_queued.sync"))
     case.step(
         "r1_placeholder",
         "priority_start",
-        timeout_s=5,
-        params={
-            "gap_s": 0,
-            "requests": [
-                {
-                    "tag": "placeholder",
-                    "priority": 50,
-                    "input_len": 2048,
-                    "output_len": 2,
-                }
-            ],
-        },
+        timeout_s=case.value("prefill_queued.r1_placeholder_timeout_s"),
+        params=case.value("prefill_queued.r1_placeholder"),
     )
     case.step(
         "r1_placeholder_settled",
         "preemption_settled",
-        timeout_s=90,
+        timeout_s=case.value("prefill_queued.r1_placeholder_settled_timeout_s"),
         params={"requests": output("r1_placeholder", "requests")},
     )
     case.step(
         "r1_placeholder_admitted",
         "check",
-        params={
-            "actual": output("r1_placeholder_settled", "admitted"),
-            "op": "eq",
-            "expected": True,
-        },
+        params=case.params(
+            "prefill_queued.r1_placeholder_admitted",
+            {"actual": output("r1_placeholder_settled", "admitted")},
+        ),
     )
     case.step(
         "r1_placeholder_pending",
         "preemption_pending",
-        timeout_s=6,
+        timeout_s=case.value("prefill_queued.r1_placeholder_pending_timeout_s"),
         params={"target": output("fleet", "prefill")},
     )
     case.step(
         "r1_wave",
         "priority_start",
-        timeout_s=15,
-        params={
-            "gap_s": 0.15,
-            "requests": [
-                {"tag": "peer0", "priority": 30, "input_len": 2048, "output_len": 2},
-                {"tag": "peer1", "priority": 30, "input_len": 2048, "output_len": 2},
-                {"tag": "peer2", "priority": 40, "input_len": 2048, "output_len": 2},
-                {"tag": "peer3", "priority": 40, "input_len": 2048, "output_len": 2},
-                {"tag": "peer4", "priority": 30, "input_len": 2048, "output_len": 2},
-                {"tag": "peer5", "priority": 30, "input_len": 2048, "output_len": 2},
-                {"tag": "peer6", "priority": 30, "input_len": 2048, "output_len": 2},
-                {"tag": "peer7", "priority": 30, "input_len": 2048, "output_len": 2},
-                {"tag": "incoming", "priority": 70, "input_len": 2048, "output_len": 2},
-            ],
-        },
+        timeout_s=case.value("prefill_queued.r1_wave_timeout_s"),
+        params=case.value("prefill_queued.r1_wave"),
     )
     case.step(
         "r1_wave_settled",
         "preemption_settled",
-        timeout_s=90,
+        timeout_s=case.value("prefill_queued.r1_wave_settled_timeout_s"),
         params={"requests": output("r1_wave", "requests")},
     )
     case.step(
         "r1_placeholder_drain",
         "preemption_wait",
-        timeout_s=35,
+        timeout_s=case.value("prefill_queued.r1_placeholder_drain_timeout_s"),
         params={"requests": output("r1_placeholder", "requests")},
     )
     case.step(
         "r1_wave_drain",
         "preemption_wait",
-        timeout_s=315,
+        timeout_s=case.value("prefill_queued.r1_wave_drain_timeout_s"),
         params={"requests": output("r1_wave", "requests")},
     )
     case.step(
         "r1_same_priority",
         "preemption_queued_first",
-        params={
-            "placeholder": output("r1_placeholder", "requests"),
-            "wave": output("r1_wave", "requests"),
-            "round": 1,
-        },
+        params=case.params(
+            "prefill_queued.r1_same_priority",
+            {
+                "placeholder": output("r1_placeholder", "requests"),
+                "wave": output("r1_wave", "requests"),
+            },
+        ),
     )
-    case.step("r1_master_clean", "balance_clean", timeout_s=30)
+    case.step(
+        "r1_master_clean",
+        "balance_clean",
+        timeout_s=case.value("prefill_queued.r1_master_clean_timeout_s"),
+    )
     case.step(
         "r2_placeholder",
         "priority_start",
-        timeout_s=5,
-        params={
-            "gap_s": 0,
-            "requests": [
-                {
-                    "tag": "placeholder",
-                    "priority": 70,
-                    "input_len": 2048,
-                    "output_len": 2,
-                }
-            ],
-        },
+        timeout_s=case.value("prefill_queued.r2_placeholder_timeout_s"),
+        params=case.value("prefill_queued.r2_placeholder"),
     )
     case.step(
         "r2_placeholder_settled",
         "preemption_settled",
-        timeout_s=90,
+        timeout_s=case.value("prefill_queued.r2_placeholder_settled_timeout_s"),
         params={"requests": output("r2_placeholder", "requests")},
     )
     case.step(
         "r2_placeholder_admitted",
         "check",
-        params={
-            "actual": output("r2_placeholder_settled", "admitted"),
-            "op": "eq",
-            "expected": True,
-        },
+        params=case.params(
+            "prefill_queued.r2_placeholder_admitted",
+            {"actual": output("r2_placeholder_settled", "admitted")},
+        ),
     )
     case.step(
         "r2_placeholder_pending",
         "preemption_pending",
-        timeout_s=6,
+        timeout_s=case.value("prefill_queued.r2_placeholder_pending_timeout_s"),
         params={"target": output("fleet", "prefill")},
     )
     case.step(
         "r2_wave",
         "priority_start",
-        timeout_s=15,
-        params={
-            "gap_s": 0.15,
-            "requests": [
-                {"tag": "peer0", "priority": 70, "input_len": 2048, "output_len": 2},
-                {"tag": "peer1", "priority": 70, "input_len": 2048, "output_len": 2},
-                {"tag": "peer2", "priority": 70, "input_len": 2048, "output_len": 2},
-                {"tag": "peer3", "priority": 70, "input_len": 2048, "output_len": 2},
-                {"tag": "peer4", "priority": 70, "input_len": 2048, "output_len": 2},
-                {"tag": "peer5", "priority": 70, "input_len": 2048, "output_len": 2},
-                {"tag": "peer6", "priority": 70, "input_len": 2048, "output_len": 2},
-                {"tag": "peer7", "priority": 70, "input_len": 2048, "output_len": 2},
-                {"tag": "incoming", "priority": 90, "input_len": 2048, "output_len": 2},
-            ],
-        },
+        timeout_s=case.value("prefill_queued.r2_wave_timeout_s"),
+        params=case.value("prefill_queued.r2_wave"),
     )
     case.step(
         "r2_wave_settled",
         "preemption_settled",
-        timeout_s=90,
+        timeout_s=case.value("prefill_queued.r2_wave_settled_timeout_s"),
         params={"requests": output("r2_wave", "requests")},
     )
     case.step(
         "r2_placeholder_drain",
         "preemption_wait",
-        timeout_s=35,
+        timeout_s=case.value("prefill_queued.r2_placeholder_drain_timeout_s"),
         params={"requests": output("r2_placeholder", "requests")},
     )
     case.step(
         "r2_wave_drain",
         "preemption_wait",
-        timeout_s=315,
+        timeout_s=case.value("prefill_queued.r2_wave_drain_timeout_s"),
         params={"requests": output("r2_wave", "requests")},
     )
     case.step(
         "r2_same_priority",
         "preemption_queued_second",
-        params={
-            "placeholder": output("r2_placeholder", "requests"),
-            "wave": output("r2_wave", "requests"),
-            "round": 2,
-        },
+        params=case.params(
+            "prefill_queued.r2_same_priority",
+            {
+                "placeholder": output("r2_placeholder", "requests"),
+                "wave": output("r2_wave", "requests"),
+            },
+        ),
     )
-    case.step("r2_master_clean", "balance_clean", timeout_s=30)
+    case.step(
+        "r2_master_clean",
+        "balance_clean",
+        timeout_s=case.value("prefill_queued.r2_master_clean_timeout_s"),
+    )
     case.step(
         "restore",
         "engine_control",
-        params={
-            "operation": "set_perf",
-            "targets": [output("fleet", "prefill")],
-            "perf": {"prefill_fixed_ms": 100},
-        },
+        params=case.params(
+            "prefill_queued.restore", {"targets": [output("fleet", "prefill")]}
+        ),
     )
-    case.step("teardown", "teardown", timeout_s=120)
+    case.step(
+        "teardown",
+        "teardown",
+        timeout_s=case.value("prefill_queued.teardown_timeout_s"),
+    )
 
 
 def timeout_attribution(case):
-    case.step("setup", "setup", timeout_s=180)
+    case.step(
+        "setup", "setup", timeout_s=case.value("timeout_attribution.setup_timeout_s")
+    )
     case.step("fleet", "priority_fleet")
     case.step(
         "slow",
         "engine_control",
-        params={
-            "operation": "set_perf",
-            "targets": [output("fleet", "prefill")],
-            "perf": {"prefill_fixed_ms": 12000},
-        },
+        params=case.params(
+            "timeout_attribution.slow", {"targets": [output("fleet", "prefill")]}
+        ),
     )
-    case.step("sync", "balance_pause", params={"seconds": 1.5})
+    case.step("sync", "balance_pause", params=case.value("timeout_attribution.sync"))
     case.step(
         "r1_placeholder",
         "priority_start",
-        timeout_s=5,
-        params={
-            "gap_s": 0,
-            "requests": [
-                {
-                    "tag": "placeholder",
-                    "priority": 90,
-                    "input_len": 2048,
-                    "output_len": 2,
-                }
-            ],
-        },
+        timeout_s=case.value("timeout_attribution.r1_placeholder_timeout_s"),
+        params=case.value("timeout_attribution.r1_placeholder"),
     )
     case.step(
         "r1_placeholder_settled",
         "preemption_settled",
-        timeout_s=90,
+        timeout_s=case.value("timeout_attribution.r1_placeholder_settled_timeout_s"),
         params={"requests": output("r1_placeholder", "requests")},
     )
     case.step(
         "r1_placeholder_admitted",
         "check",
-        params={
-            "actual": output("r1_placeholder_settled", "admitted"),
-            "op": "eq",
-            "expected": True,
-        },
+        params=case.params(
+            "timeout_attribution.r1_placeholder_admitted",
+            {"actual": output("r1_placeholder_settled", "admitted")},
+        ),
     )
     case.step(
         "r1_placeholder_pending",
         "preemption_pending",
-        timeout_s=6,
+        timeout_s=case.value("timeout_attribution.r1_placeholder_pending_timeout_s"),
         params={"target": output("fleet", "prefill")},
     )
     case.step(
         "r1_wave",
         "priority_start",
-        timeout_s=15,
-        params={
-            "gap_s": 0.15,
-            "requests": [
-                {"tag": "peer0", "priority": 30, "input_len": 2048, "output_len": 2},
-                {"tag": "peer1", "priority": 30, "input_len": 2048, "output_len": 2},
-                {"tag": "peer2", "priority": 30, "input_len": 2048, "output_len": 2},
-                {"tag": "peer3", "priority": 30, "input_len": 2048, "output_len": 2},
-                {"tag": "peer4", "priority": 30, "input_len": 2048, "output_len": 2},
-                {"tag": "peer5", "priority": 30, "input_len": 2048, "output_len": 2},
-                {"tag": "peer6", "priority": 30, "input_len": 2048, "output_len": 2},
-                {"tag": "peer7", "priority": 30, "input_len": 2048, "output_len": 2},
-                {"tag": "peer8", "priority": 70, "input_len": 2048, "output_len": 2},
-                {"tag": "peer9", "priority": 90, "input_len": 2048, "output_len": 2},
-                {"tag": "peer10", "priority": 90, "input_len": 2048, "output_len": 2},
-            ],
-        },
+        timeout_s=case.value("timeout_attribution.r1_wave_timeout_s"),
+        params=case.value("timeout_attribution.r1_wave"),
     )
     case.step(
         "r1_wave_settled",
         "preemption_settled",
-        timeout_s=90,
+        timeout_s=case.value("timeout_attribution.r1_wave_settled_timeout_s"),
         params={"requests": output("r1_wave", "requests")},
     )
     case.step(
         "r1_placeholder_drain",
         "preemption_wait",
-        timeout_s=35,
+        timeout_s=case.value("timeout_attribution.r1_placeholder_drain_timeout_s"),
         params={"requests": output("r1_placeholder", "requests")},
     )
     case.step(
         "r1_wave_drain",
         "preemption_wait",
-        timeout_s=385,
+        timeout_s=case.value("timeout_attribution.r1_wave_drain_timeout_s"),
         params={"requests": output("r1_wave", "requests")},
     )
     case.step(
         "r1_same_priority",
         "preemption_expiry",
-        params={
-            "placeholder": output("r1_placeholder", "requests"),
-            "wave": output("r1_wave", "requests"),
-            "round": 1,
-        },
+        params=case.params(
+            "timeout_attribution.r1_same_priority",
+            {
+                "placeholder": output("r1_placeholder", "requests"),
+                "wave": output("r1_wave", "requests"),
+            },
+        ),
     )
-    case.step("r1_master_clean", "balance_clean", timeout_s=30)
+    case.step(
+        "r1_master_clean",
+        "balance_clean",
+        timeout_s=case.value("timeout_attribution.r1_master_clean_timeout_s"),
+    )
     case.step(
         "round2_slow",
         "engine_control",
-        params={
-            "operation": "set_perf",
-            "targets": [output("fleet", "prefill")],
-            "perf": {"prefill_fixed_ms": 10000},
-        },
+        params=case.params(
+            "timeout_attribution.round2_slow", {"targets": [output("fleet", "prefill")]}
+        ),
     )
-    case.step("round2_sync", "balance_pause", params={"seconds": 1.5})
+    case.step(
+        "round2_sync",
+        "balance_pause",
+        params=case.value("timeout_attribution.round2_sync"),
+    )
     case.step(
         "r2_placeholder",
         "priority_start",
-        timeout_s=5,
-        params={
-            "gap_s": 0,
-            "requests": [
-                {
-                    "tag": "placeholder",
-                    "priority": 70,
-                    "input_len": 2048,
-                    "output_len": 2,
-                }
-            ],
-        },
+        timeout_s=case.value("timeout_attribution.r2_placeholder_timeout_s"),
+        params=case.value("timeout_attribution.r2_placeholder"),
     )
     case.step(
         "r2_placeholder_settled",
         "preemption_settled",
-        timeout_s=90,
+        timeout_s=case.value("timeout_attribution.r2_placeholder_settled_timeout_s"),
         params={"requests": output("r2_placeholder", "requests")},
     )
     case.step(
         "r2_placeholder_admitted",
         "check",
-        params={
-            "actual": output("r2_placeholder_settled", "admitted"),
-            "op": "eq",
-            "expected": True,
-        },
+        params=case.params(
+            "timeout_attribution.r2_placeholder_admitted",
+            {"actual": output("r2_placeholder_settled", "admitted")},
+        ),
     )
     case.step(
         "r2_placeholder_pending",
         "preemption_pending",
-        timeout_s=6,
+        timeout_s=case.value("timeout_attribution.r2_placeholder_pending_timeout_s"),
         params={"target": output("fleet", "prefill")},
     )
     case.step(
         "r2_wave",
         "priority_start",
-        timeout_s=15,
-        params={
-            "gap_s": 0.15,
-            "requests": [
-                {"tag": "peer0", "priority": 30, "input_len": 2048, "output_len": 2},
-                {"tag": "peer1", "priority": 30, "input_len": 2048, "output_len": 2},
-                {"tag": "peer2", "priority": 30, "input_len": 2048, "output_len": 2},
-                {"tag": "peer3", "priority": 30, "input_len": 2048, "output_len": 2},
-                {"tag": "peer4", "priority": 30, "input_len": 2048, "output_len": 2},
-                {"tag": "peer5", "priority": 30, "input_len": 2048, "output_len": 2},
-                {"tag": "peer6", "priority": 30, "input_len": 2048, "output_len": 2},
-                {"tag": "peer7", "priority": 30, "input_len": 2048, "output_len": 2},
-                {"tag": "peer8", "priority": 70, "input_len": 2048, "output_len": 2},
-            ],
-        },
+        timeout_s=case.value("timeout_attribution.r2_wave_timeout_s"),
+        params=case.value("timeout_attribution.r2_wave"),
     )
     case.step(
         "r2_wave_settled",
         "preemption_settled",
-        timeout_s=90,
+        timeout_s=case.value("timeout_attribution.r2_wave_settled_timeout_s"),
         params={"requests": output("r2_wave", "requests")},
     )
     case.step(
         "r2_placeholder_drain",
         "preemption_wait",
-        timeout_s=35,
+        timeout_s=case.value("timeout_attribution.r2_placeholder_drain_timeout_s"),
         params={"requests": output("r2_placeholder", "requests")},
     )
     case.step(
         "r2_wave_drain",
         "preemption_wait",
-        timeout_s=315,
+        timeout_s=case.value("timeout_attribution.r2_wave_drain_timeout_s"),
         params={"requests": output("r2_wave", "requests")},
     )
     case.step(
         "r2_same_priority",
         "preemption_expiry",
-        params={
-            "placeholder": output("r2_placeholder", "requests"),
-            "wave": output("r2_wave", "requests"),
-            "round": 2,
-        },
+        params=case.params(
+            "timeout_attribution.r2_same_priority",
+            {
+                "placeholder": output("r2_placeholder", "requests"),
+                "wave": output("r2_wave", "requests"),
+            },
+        ),
     )
-    case.step("r2_master_clean", "balance_clean", timeout_s=30)
+    case.step(
+        "r2_master_clean",
+        "balance_clean",
+        timeout_s=case.value("timeout_attribution.r2_master_clean_timeout_s"),
+    )
     case.step(
         "restore",
         "engine_control",
-        params={
-            "operation": "set_perf",
-            "targets": [output("fleet", "prefill")],
-            "perf": {"prefill_fixed_ms": 100},
-        },
+        params=case.params(
+            "timeout_attribution.restore", {"targets": [output("fleet", "prefill")]}
+        ),
     )
-    case.step("teardown", "teardown", timeout_s=120)
+    case.step(
+        "teardown",
+        "teardown",
+        timeout_s=case.value("timeout_attribution.teardown_timeout_s"),
+    )
 
 
 def disabled_zero_eviction(case):
-    case.step("setup", "setup", timeout_s=180)
+    case.step(
+        "setup", "setup", timeout_s=case.value("disabled_zero_eviction.setup_timeout_s")
+    )
     case.step("fleet", "priority_fleet")
     case.step(
         "slow",
         "engine_control",
-        params={
-            "operation": "set_perf",
-            "targets": [output("fleet", "prefill")],
-            "perf": {"prefill_fixed_ms": 3000},
-        },
+        params=case.params(
+            "disabled_zero_eviction.slow", {"targets": [output("fleet", "prefill")]}
+        ),
     )
-    case.step("sync", "balance_pause", params={"seconds": 1.5})
+    case.step("sync", "balance_pause", params=case.value("disabled_zero_eviction.sync"))
     case.step(
         "r1_placeholder",
         "priority_start",
-        timeout_s=5,
-        params={
-            "gap_s": 0,
-            "requests": [
-                {
-                    "tag": "placeholder",
-                    "priority": 30,
-                    "input_len": 2048,
-                    "output_len": 2,
-                }
-            ],
-        },
+        timeout_s=case.value("disabled_zero_eviction.r1_placeholder_timeout_s"),
+        params=case.value("disabled_zero_eviction.r1_placeholder"),
     )
     case.step(
         "r1_placeholder_settled",
         "preemption_settled",
-        timeout_s=90,
+        timeout_s=case.value("disabled_zero_eviction.r1_placeholder_settled_timeout_s"),
         params={"requests": output("r1_placeholder", "requests")},
     )
     case.step(
         "r1_placeholder_admitted",
         "check",
-        params={
-            "actual": output("r1_placeholder_settled", "admitted"),
-            "op": "eq",
-            "expected": True,
-        },
+        params=case.params(
+            "disabled_zero_eviction.r1_placeholder_admitted",
+            {"actual": output("r1_placeholder_settled", "admitted")},
+        ),
     )
     case.step(
         "r1_placeholder_pending",
         "preemption_pending",
-        timeout_s=6,
+        timeout_s=case.value("disabled_zero_eviction.r1_placeholder_pending_timeout_s"),
         params={"target": output("fleet", "prefill")},
     )
     case.step(
         "r1_wave",
         "priority_start",
-        timeout_s=15,
-        params={
-            "gap_s": 0.15,
-            "requests": [
-                {"tag": "peer0", "priority": 30, "input_len": 2048, "output_len": 2},
-                {"tag": "peer1", "priority": 30, "input_len": 2048, "output_len": 2},
-                {"tag": "peer2", "priority": 30, "input_len": 2048, "output_len": 2},
-                {"tag": "peer3", "priority": 30, "input_len": 2048, "output_len": 2},
-                {"tag": "peer4", "priority": 30, "input_len": 2048, "output_len": 2},
-                {"tag": "peer5", "priority": 30, "input_len": 2048, "output_len": 2},
-                {"tag": "peer6", "priority": 30, "input_len": 2048, "output_len": 2},
-                {"tag": "peer7", "priority": 30, "input_len": 2048, "output_len": 2},
-                {"tag": "incoming", "priority": 70, "input_len": 2048, "output_len": 2},
-            ],
-        },
+        timeout_s=case.value("disabled_zero_eviction.r1_wave_timeout_s"),
+        params=case.value("disabled_zero_eviction.r1_wave"),
     )
     case.step(
         "r1_wave_settled",
         "preemption_settled",
-        timeout_s=90,
+        timeout_s=case.value("disabled_zero_eviction.r1_wave_settled_timeout_s"),
         params={"requests": output("r1_wave", "requests")},
     )
     case.step(
         "r1_placeholder_drain",
         "preemption_wait",
-        timeout_s=35,
+        timeout_s=case.value("disabled_zero_eviction.r1_placeholder_drain_timeout_s"),
         params={"requests": output("r1_placeholder", "requests")},
     )
     case.step(
         "r1_wave_drain",
         "preemption_wait",
-        timeout_s=315,
+        timeout_s=case.value("disabled_zero_eviction.r1_wave_drain_timeout_s"),
         params={"requests": output("r1_wave", "requests")},
     )
     case.step(
         "r1_same_priority",
         "preemption_disabled",
-        params={
-            "placeholder": output("r1_placeholder", "requests"),
-            "wave": output("r1_wave", "requests"),
-            "round": 1,
-        },
+        params=case.params(
+            "disabled_zero_eviction.r1_same_priority",
+            {
+                "placeholder": output("r1_placeholder", "requests"),
+                "wave": output("r1_wave", "requests"),
+            },
+        ),
     )
-    case.step("r1_master_clean", "balance_clean", timeout_s=30)
+    case.step(
+        "r1_master_clean",
+        "balance_clean",
+        timeout_s=case.value("disabled_zero_eviction.r1_master_clean_timeout_s"),
+    )
     case.step(
         "r2_placeholder",
         "priority_start",
-        timeout_s=5,
-        params={
-            "gap_s": 0,
-            "requests": [
-                {
-                    "tag": "placeholder",
-                    "priority": 70,
-                    "input_len": 2048,
-                    "output_len": 2,
-                }
-            ],
-        },
+        timeout_s=case.value("disabled_zero_eviction.r2_placeholder_timeout_s"),
+        params=case.value("disabled_zero_eviction.r2_placeholder"),
     )
     case.step(
         "r2_placeholder_settled",
         "preemption_settled",
-        timeout_s=90,
+        timeout_s=case.value("disabled_zero_eviction.r2_placeholder_settled_timeout_s"),
         params={"requests": output("r2_placeholder", "requests")},
     )
     case.step(
         "r2_placeholder_admitted",
         "check",
-        params={
-            "actual": output("r2_placeholder_settled", "admitted"),
-            "op": "eq",
-            "expected": True,
-        },
+        params=case.params(
+            "disabled_zero_eviction.r2_placeholder_admitted",
+            {"actual": output("r2_placeholder_settled", "admitted")},
+        ),
     )
     case.step(
         "r2_placeholder_pending",
         "preemption_pending",
-        timeout_s=6,
+        timeout_s=case.value("disabled_zero_eviction.r2_placeholder_pending_timeout_s"),
         params={"target": output("fleet", "prefill")},
     )
     case.step(
         "r2_wave",
         "priority_start",
-        timeout_s=15,
-        params={
-            "gap_s": 0.15,
-            "requests": [
-                {"tag": "peer0", "priority": 70, "input_len": 2048, "output_len": 2},
-                {"tag": "peer1", "priority": 70, "input_len": 2048, "output_len": 2},
-                {"tag": "peer2", "priority": 70, "input_len": 2048, "output_len": 2},
-                {"tag": "peer3", "priority": 70, "input_len": 2048, "output_len": 2},
-                {"tag": "peer4", "priority": 70, "input_len": 2048, "output_len": 2},
-                {"tag": "peer5", "priority": 70, "input_len": 2048, "output_len": 2},
-                {"tag": "peer6", "priority": 70, "input_len": 2048, "output_len": 2},
-                {"tag": "peer7", "priority": 70, "input_len": 2048, "output_len": 2},
-                {"tag": "incoming", "priority": 90, "input_len": 2048, "output_len": 2},
-            ],
-        },
+        timeout_s=case.value("disabled_zero_eviction.r2_wave_timeout_s"),
+        params=case.value("disabled_zero_eviction.r2_wave"),
     )
     case.step(
         "r2_wave_settled",
         "preemption_settled",
-        timeout_s=90,
+        timeout_s=case.value("disabled_zero_eviction.r2_wave_settled_timeout_s"),
         params={"requests": output("r2_wave", "requests")},
     )
     case.step(
         "r2_placeholder_drain",
         "preemption_wait",
-        timeout_s=35,
+        timeout_s=case.value("disabled_zero_eviction.r2_placeholder_drain_timeout_s"),
         params={"requests": output("r2_placeholder", "requests")},
     )
     case.step(
         "r2_wave_drain",
         "preemption_wait",
-        timeout_s=315,
+        timeout_s=case.value("disabled_zero_eviction.r2_wave_drain_timeout_s"),
         params={"requests": output("r2_wave", "requests")},
     )
     case.step(
         "r2_same_priority",
         "preemption_disabled",
-        params={
-            "placeholder": output("r2_placeholder", "requests"),
-            "wave": output("r2_wave", "requests"),
-            "round": 2,
-        },
+        params=case.params(
+            "disabled_zero_eviction.r2_same_priority",
+            {
+                "placeholder": output("r2_placeholder", "requests"),
+                "wave": output("r2_wave", "requests"),
+            },
+        ),
     )
-    case.step("r2_master_clean", "balance_clean", timeout_s=30)
+    case.step(
+        "r2_master_clean",
+        "balance_clean",
+        timeout_s=case.value("disabled_zero_eviction.r2_master_clean_timeout_s"),
+    )
     case.step(
         "restore",
         "engine_control",
-        params={
-            "operation": "set_perf",
-            "targets": [output("fleet", "prefill")],
-            "perf": {"prefill_fixed_ms": 100},
-        },
+        params=case.params(
+            "disabled_zero_eviction.restore", {"targets": [output("fleet", "prefill")]}
+        ),
     )
-    case.step("teardown", "teardown", timeout_s=120)
+    case.step(
+        "teardown",
+        "teardown",
+        timeout_s=case.value("disabled_zero_eviction.teardown_timeout_s"),
+    )
 
 
 def comparator_frozen_weak(case):
-    case.step("setup", "setup", timeout_s=180)
+    case.step(
+        "setup", "setup", timeout_s=case.value("comparator_frozen_weak.setup_timeout_s")
+    )
     case.step("fleet", "priority_fleet")
     case.step(
         "slow",
         "engine_control",
-        params={
-            "operation": "set_perf",
-            "targets": [output("fleet", "prefill")],
-            "perf": {"prefill_fixed_ms": 3000},
-        },
+        params=case.params(
+            "comparator_frozen_weak.slow", {"targets": [output("fleet", "prefill")]}
+        ),
     )
-    case.step("sync", "balance_pause", params={"seconds": 1.5})
+    case.step("sync", "balance_pause", params=case.value("comparator_frozen_weak.sync"))
     case.step(
         "r1_placeholder",
         "priority_start",
-        timeout_s=5,
-        params={
-            "gap_s": 0,
-            "requests": [
-                {
-                    "tag": "placeholder",
-                    "priority": 30,
-                    "input_len": 2048,
-                    "output_len": 2,
-                }
-            ],
-        },
+        timeout_s=case.value("comparator_frozen_weak.r1_placeholder_timeout_s"),
+        params=case.value("comparator_frozen_weak.r1_placeholder"),
     )
     case.step(
         "r1_placeholder_settled",
         "preemption_settled",
-        timeout_s=90,
+        timeout_s=case.value("comparator_frozen_weak.r1_placeholder_settled_timeout_s"),
         params={"requests": output("r1_placeholder", "requests")},
     )
     case.step(
         "r1_placeholder_admitted",
         "check",
-        params={
-            "actual": output("r1_placeholder_settled", "admitted"),
-            "op": "eq",
-            "expected": True,
-        },
+        params=case.params(
+            "comparator_frozen_weak.r1_placeholder_admitted",
+            {"actual": output("r1_placeholder_settled", "admitted")},
+        ),
     )
     case.step(
         "r1_placeholder_pending",
         "preemption_pending",
-        timeout_s=6,
+        timeout_s=case.value("comparator_frozen_weak.r1_placeholder_pending_timeout_s"),
         params={"target": output("fleet", "prefill")},
     )
     case.step(
         "r1_wave",
         "priority_start",
-        timeout_s=15,
-        params={
-            "gap_s": 0.15,
-            "requests": [
-                {"tag": "peer0", "priority": 30, "input_len": 2048, "output_len": 2},
-                {"tag": "peer1", "priority": 30, "input_len": 2048, "output_len": 2},
-                {"tag": "peer2", "priority": 70, "input_len": 2048, "output_len": 2},
-                {"tag": "peer3", "priority": 70, "input_len": 2048, "output_len": 2},
-                {"tag": "peer4", "priority": 70, "input_len": 2048, "output_len": 2},
-            ],
-        },
+        timeout_s=case.value("comparator_frozen_weak.r1_wave_timeout_s"),
+        params=case.value("comparator_frozen_weak.r1_wave"),
     )
     case.step(
         "r1_wave_settled",
         "preemption_settled",
-        timeout_s=90,
+        timeout_s=case.value("comparator_frozen_weak.r1_wave_settled_timeout_s"),
         params={"requests": output("r1_wave", "requests")},
     )
     case.step(
         "r1_placeholder_drain",
         "preemption_wait",
-        timeout_s=35,
+        timeout_s=case.value("comparator_frozen_weak.r1_placeholder_drain_timeout_s"),
         params={"requests": output("r1_placeholder", "requests")},
     )
     case.step(
         "r1_wave_drain",
         "preemption_wait",
-        timeout_s=175,
+        timeout_s=case.value("comparator_frozen_weak.r1_wave_drain_timeout_s"),
         params={"requests": output("r1_wave", "requests")},
     )
     case.step(
         "r1_same_priority",
         "preemption_comparator_half",
-        params={
-            "placeholder": output("r1_placeholder", "requests"),
-            "wave": output("r1_wave", "requests"),
-            "ordering": "priority",
-        },
+        params=case.params(
+            "comparator_frozen_weak.r1_same_priority",
+            {
+                "placeholder": output("r1_placeholder", "requests"),
+                "wave": output("r1_wave", "requests"),
+            },
+        ),
     )
-    case.step("r1_master_clean", "balance_clean", timeout_s=30)
+    case.step(
+        "r1_master_clean",
+        "balance_clean",
+        timeout_s=case.value("comparator_frozen_weak.r1_master_clean_timeout_s"),
+    )
     case.step(
         "fifo_environment",
         "environment_reconfigure",
-        timeout_s=300,
-        params={
-            "config_overrides": {
-                "ordering": "fifo",
-                "decision": "single",
-                "dispatcher": "non_batch",
-                "queue_timeout_ms": {"omit": True},
-                "max_inflight_requests_per_worker": 1,
-                "max_waiting_requests_per_prefill_worker": 8,
-            }
-        },
+        timeout_s=case.value("comparator_frozen_weak.fifo_environment_timeout_s"),
+        params=case.value("comparator_frozen_weak.fifo_environment"),
     )
     case.step("fifo_fleet", "priority_fleet")
     case.step(
         "fifo_slow",
         "engine_control",
-        params={
-            "operation": "set_perf",
-            "targets": [output("fifo_fleet", "prefill")],
-            "perf": {"prefill_fixed_ms": 3000},
-        },
+        params=case.params(
+            "comparator_frozen_weak.fifo_slow",
+            {"targets": [output("fifo_fleet", "prefill")]},
+        ),
     )
-    case.step("fifo_sync", "balance_pause", params={"seconds": 1.5})
+    case.step(
+        "fifo_sync",
+        "balance_pause",
+        params=case.value("comparator_frozen_weak.fifo_sync"),
+    )
     case.step(
         "r2_placeholder",
         "priority_start",
-        timeout_s=5,
-        params={
-            "gap_s": 0,
-            "requests": [
-                {
-                    "tag": "placeholder",
-                    "priority": 30,
-                    "input_len": 2048,
-                    "output_len": 2,
-                }
-            ],
-        },
+        timeout_s=case.value("comparator_frozen_weak.r2_placeholder_timeout_s"),
+        params=case.value("comparator_frozen_weak.r2_placeholder"),
     )
     case.step(
         "r2_placeholder_settled",
         "preemption_settled",
-        timeout_s=90,
+        timeout_s=case.value("comparator_frozen_weak.r2_placeholder_settled_timeout_s"),
         params={"requests": output("r2_placeholder", "requests")},
     )
     case.step(
         "r2_placeholder_admitted",
         "check",
-        params={
-            "actual": output("r2_placeholder_settled", "admitted"),
-            "op": "eq",
-            "expected": True,
-        },
+        params=case.params(
+            "comparator_frozen_weak.r2_placeholder_admitted",
+            {"actual": output("r2_placeholder_settled", "admitted")},
+        ),
     )
     case.step(
         "r2_placeholder_pending",
         "preemption_pending",
-        timeout_s=6,
+        timeout_s=case.value("comparator_frozen_weak.r2_placeholder_pending_timeout_s"),
         params={"target": output("fifo_fleet", "prefill")},
     )
     case.step(
         "r2_wave",
         "priority_start",
-        timeout_s=15,
-        params={
-            "gap_s": 0.15,
-            "requests": [
-                {"tag": "peer0", "priority": 30, "input_len": 2048, "output_len": 2},
-                {"tag": "peer1", "priority": 30, "input_len": 2048, "output_len": 2},
-                {"tag": "peer2", "priority": 70, "input_len": 2048, "output_len": 2},
-                {"tag": "peer3", "priority": 70, "input_len": 2048, "output_len": 2},
-                {"tag": "peer4", "priority": 70, "input_len": 2048, "output_len": 2},
-            ],
-        },
+        timeout_s=case.value("comparator_frozen_weak.r2_wave_timeout_s"),
+        params=case.value("comparator_frozen_weak.r2_wave"),
     )
     case.step(
         "r2_wave_settled",
         "preemption_settled",
-        timeout_s=90,
+        timeout_s=case.value("comparator_frozen_weak.r2_wave_settled_timeout_s"),
         params={"requests": output("r2_wave", "requests")},
     )
     case.step(
         "r2_placeholder_drain",
         "preemption_wait",
-        timeout_s=35,
+        timeout_s=case.value("comparator_frozen_weak.r2_placeholder_drain_timeout_s"),
         params={"requests": output("r2_placeholder", "requests")},
     )
     case.step(
         "r2_wave_drain",
         "preemption_wait",
-        timeout_s=175,
+        timeout_s=case.value("comparator_frozen_weak.r2_wave_drain_timeout_s"),
         params={"requests": output("r2_wave", "requests")},
     )
     case.step(
         "r2_same_priority",
         "preemption_comparator_half",
-        params={
-            "placeholder": output("r2_placeholder", "requests"),
-            "wave": output("r2_wave", "requests"),
-            "ordering": "fifo",
-        },
+        params=case.params(
+            "comparator_frozen_weak.r2_same_priority",
+            {
+                "placeholder": output("r2_placeholder", "requests"),
+                "wave": output("r2_wave", "requests"),
+            },
+        ),
     )
-    case.step("r2_master_clean", "balance_clean", timeout_s=30)
+    case.step(
+        "r2_master_clean",
+        "balance_clean",
+        timeout_s=case.value("comparator_frozen_weak.r2_master_clean_timeout_s"),
+    )
     case.step(
         "comparator_verdict",
         "preemption_comparator_pair",
@@ -920,71 +766,41 @@ def comparator_frozen_weak(case):
     case.step(
         "restore",
         "engine_control",
-        params={
-            "operation": "set_perf",
-            "targets": [output("fifo_fleet", "prefill")],
-            "perf": {"prefill_fixed_ms": 100},
-        },
+        params=case.params(
+            "comparator_frozen_weak.restore",
+            {"targets": [output("fifo_fleet", "prefill")]},
+        ),
     )
-    case.step("teardown", "teardown", timeout_s=120)
+    case.step(
+        "teardown",
+        "teardown",
+        timeout_s=case.value("comparator_frozen_weak.teardown_timeout_s"),
+    )
 
 
 def config_strict_reject(case):
-    case.step("setup", "setup", timeout_s=180)
+    case.step(
+        "setup", "setup", timeout_s=case.value("config_strict_reject.setup_timeout_s")
+    )
     case.step(
         "removed_auto_tpm",
         "environment_startup_probe",
-        timeout_s=300,
-        params={
-            "config_overrides": {
-                "ordering": "priority",
-                "decision": "single",
-                "dispatcher": "non_batch",
-                "queue_timeout_ms": {"omit": True},
-                "max_inflight_requests_per_worker": 1,
-                "max_waiting_requests_per_prefill_worker": 8,
-            },
-            "mutation": "removed_auto_tpm",
-        },
+        timeout_s=case.value("config_strict_reject.removed_auto_tpm_timeout_s"),
+        params=case.value("config_strict_reject.removed_auto_tpm"),
     )
     case.step(
         "fifo_default_priority",
         "environment_startup_probe",
-        timeout_s=300,
-        params={
-            "config_overrides": {
-                "ordering": "fifo",
-                "decision": "single",
-                "dispatcher": "non_batch",
-                "queue_timeout_ms": {"omit": True},
-                "max_inflight_requests_per_worker": 1,
-                "max_waiting_requests_per_prefill_worker": 8,
-            },
-            "mutation": "fifo_default_priority",
-        },
+        timeout_s=case.value("config_strict_reject.fifo_default_priority_timeout_s"),
+        params=case.value("config_strict_reject.fifo_default_priority"),
     )
     case.step(
         "owned_without_cancellation",
         "environment_startup_probe",
-        timeout_s=300,
-        params={
-            "config_overrides": {
-                "ordering": "priority",
-                "decision": "single",
-                "dispatcher": "non_batch",
-                "queue_timeout_ms": {"omit": True},
-                "max_inflight_requests_per_worker": 1,
-                "max_waiting_requests_per_prefill_worker": 8,
-                "preemption": {
-                    "allowed_victim_stages": ["DECODE_RESERVED", "DECODE_ENGINE_OWNED"],
-                    "engine_cancellation": {
-                        "ack_timeout_ms": 50,
-                        "completion_timeout_ms": 1000,
-                    },
-                },
-            },
-            "mutation": "owned_without_cancellation",
-        },
+        timeout_s=case.value(
+            "config_strict_reject.owned_without_cancellation_timeout_s"
+        ),
+        params=case.value("config_strict_reject.owned_without_cancellation"),
     )
     case.step(
         "strict_rejection",
@@ -1004,72 +820,51 @@ def config_strict_reject(case):
 
 
 def decode_engine_owned(case):
-    case.step("setup", "setup", timeout_s=180)
+    case.step(
+        "setup", "setup", timeout_s=case.value("decode_engine_owned.setup_timeout_s")
+    )
     case.step("fleet", "preemption_decode_fleet")
     case.step(
         "slow",
         "engine_control",
-        params={
-            "operation": "set_perf",
-            "targets": [output("fleet", "prefill0"), output("fleet", "prefill1")],
-            "perf": {"prefill_fixed_ms": 4000},
-        },
+        params=case.params(
+            "decode_engine_owned.slow",
+            {"targets": [output("fleet", "prefill0"), output("fleet", "prefill1")]},
+        ),
     )
-    case.step("sync", "balance_pause", params={"seconds": 1.5})
+    case.step("sync", "balance_pause", params=case.value("decode_engine_owned.sync"))
     case.step(
         "r1_occupants",
         "priority_start",
-        timeout_s=15,
-        params={
-            "gap_s": 0.15,
-            "requests": [
-                {
-                    "tag": "occupant0",
-                    "priority": 30,
-                    "input_len": 2048,
-                    "output_len": 500,
-                },
-                {
-                    "tag": "occupant1",
-                    "priority": 30,
-                    "input_len": 2048,
-                    "output_len": 500,
-                },
-                {
-                    "tag": "occupant2",
-                    "priority": 30,
-                    "input_len": 2048,
-                    "output_len": 500,
-                },
-                {
-                    "tag": "occupant3",
-                    "priority": 30,
-                    "input_len": 2048,
-                    "output_len": 500,
-                },
-            ],
-        },
+        timeout_s=case.value("decode_engine_owned.r1_occupants_timeout_s"),
+        params=case.value("decode_engine_owned.r1_occupants"),
     )
     case.step(
         "r1_settled",
         "preemption_settled",
-        timeout_s=90,
+        timeout_s=case.value("decode_engine_owned.r1_settled_timeout_s"),
         params={"requests": output("r1_occupants", "requests")},
     )
     case.step(
         "r1_pressure",
         "preemption_decode_pressure",
-        params={
-            "targets": [
-                output("fleet", "decode0"),
-                output("fleet", "decode1"),
-                output("fleet", "decode2"),
-                output("fleet", "decode3"),
-            ],
-            "tokens": 6291456,
-        },
+        params=case.params(
+            "decode_engine_owned.r1_pressure",
+            {
+                "targets": [
+                    output("fleet", "decode0"),
+                    output("fleet", "decode1"),
+                    output("fleet", "decode2"),
+                    output("fleet", "decode3"),
+                ]
+            },
+        ),
     )
-    case.step("r1_pressure_sync", "balance_pause", params={"seconds": 1.5})
+    case.step(
+        "r1_pressure_sync",
+        "balance_pause",
+        params=case.value("decode_engine_owned.r1_pressure_sync"),
+    )
     case.step(
         "r1_guard",
         "preemption_decode_guard",
@@ -1085,116 +880,101 @@ def decode_engine_owned(case):
     case.step(
         "r1_incoming",
         "priority_start",
-        timeout_s=5,
-        params={
-            "gap_s": 0,
-            "requests": [
-                {"tag": "incoming", "priority": 70, "input_len": 2048, "output_len": 2}
-            ],
-        },
+        timeout_s=case.value("decode_engine_owned.r1_incoming_timeout_s"),
+        params=case.value("decode_engine_owned.r1_incoming"),
     )
     case.step(
         "r1_incoming_settled",
         "preemption_settled",
-        timeout_s=90,
+        timeout_s=case.value("decode_engine_owned.r1_incoming_settled_timeout_s"),
         params={"requests": output("r1_incoming", "requests")},
     )
     case.step(
         "r1_occupants_drain",
         "preemption_wait",
-        timeout_s=140,
+        timeout_s=case.value("decode_engine_owned.r1_occupants_drain_timeout_s"),
         params={"requests": output("r1_occupants", "requests")},
     )
     case.step(
         "r1_incoming_drain",
         "preemption_wait",
-        timeout_s=35,
+        timeout_s=case.value("decode_engine_owned.r1_incoming_drain_timeout_s"),
         params={"requests": output("r1_incoming", "requests")},
     )
     case.step(
         "r1_verdict",
         "preemption_decode_half",
-        params={
-            "occupants": output("r1_occupants", "requests"),
-            "incoming": output("r1_incoming", "requests"),
-            "phase": "reserved",
-        },
+        params=case.params(
+            "decode_engine_owned.r1_verdict",
+            {
+                "occupants": output("r1_occupants", "requests"),
+                "incoming": output("r1_incoming", "requests"),
+            },
+        ),
     )
-    case.step("r1_master_clean", "balance_clean", timeout_s=30)
+    case.step(
+        "r1_master_clean",
+        "balance_clean",
+        timeout_s=case.value("decode_engine_owned.r1_master_clean_timeout_s"),
+    )
     case.step(
         "release_pressure",
         "preemption_decode_pressure",
-        params={
-            "targets": [
-                output("fleet", "decode0"),
-                output("fleet", "decode1"),
-                output("fleet", "decode2"),
-                output("fleet", "decode3"),
-            ],
-            "tokens": 0,
-        },
+        params=case.params(
+            "decode_engine_owned.release_pressure",
+            {
+                "targets": [
+                    output("fleet", "decode0"),
+                    output("fleet", "decode1"),
+                    output("fleet", "decode2"),
+                    output("fleet", "decode3"),
+                ]
+            },
+        ),
     )
-    case.step("release_sync", "balance_pause", params={"seconds": 1.5})
+    case.step(
+        "release_sync",
+        "balance_pause",
+        params=case.value("decode_engine_owned.release_sync"),
+    )
     case.step(
         "r2_occupants",
         "priority_start",
-        timeout_s=15,
-        params={
-            "gap_s": 0.15,
-            "requests": [
-                {
-                    "tag": "occupant0",
-                    "priority": 30,
-                    "input_len": 2048,
-                    "output_len": 500,
-                },
-                {
-                    "tag": "occupant1",
-                    "priority": 30,
-                    "input_len": 2048,
-                    "output_len": 500,
-                },
-                {
-                    "tag": "occupant2",
-                    "priority": 30,
-                    "input_len": 2048,
-                    "output_len": 500,
-                },
-                {
-                    "tag": "occupant3",
-                    "priority": 30,
-                    "input_len": 2048,
-                    "output_len": 500,
-                },
-            ],
-        },
+        timeout_s=case.value("decode_engine_owned.r2_occupants_timeout_s"),
+        params=case.value("decode_engine_owned.r2_occupants"),
     )
     case.step(
         "r2_settled",
         "preemption_settled",
-        timeout_s=90,
+        timeout_s=case.value("decode_engine_owned.r2_settled_timeout_s"),
         params={"requests": output("r2_occupants", "requests")},
     )
     case.step(
         "r2_running",
         "preemption_decode_running",
-        timeout_s=80,
+        timeout_s=case.value("decode_engine_owned.r2_running_timeout_s"),
         params={"requests": output("r2_occupants", "requests")},
     )
     case.step(
         "r2_pressure",
         "preemption_decode_pressure",
-        params={
-            "targets": [
-                output("fleet", "decode0"),
-                output("fleet", "decode1"),
-                output("fleet", "decode2"),
-                output("fleet", "decode3"),
-            ],
-            "tokens": 6291456,
-        },
+        params=case.params(
+            "decode_engine_owned.r2_pressure",
+            {
+                "targets": [
+                    output("fleet", "decode0"),
+                    output("fleet", "decode1"),
+                    output("fleet", "decode2"),
+                    output("fleet", "decode3"),
+                ]
+            },
+        ),
     )
-    case.step("r2_pressure_sync", "balance_pause", params={"seconds": 1.5})
+    case.step(
+        "r2_pressure_sync",
+        "balance_pause",
+        params=case.value("decode_engine_owned.r2_pressure_sync"),
+    )
     case.step(
         "r2_guard",
         "preemption_decode_guard",
@@ -1210,42 +990,43 @@ def decode_engine_owned(case):
     case.step(
         "r2_incoming",
         "priority_start",
-        timeout_s=5,
-        params={
-            "gap_s": 0,
-            "requests": [
-                {"tag": "incoming", "priority": 70, "input_len": 2048, "output_len": 2}
-            ],
-        },
+        timeout_s=case.value("decode_engine_owned.r2_incoming_timeout_s"),
+        params=case.value("decode_engine_owned.r2_incoming"),
     )
     case.step(
         "r2_incoming_settled",
         "preemption_settled",
-        timeout_s=90,
+        timeout_s=case.value("decode_engine_owned.r2_incoming_settled_timeout_s"),
         params={"requests": output("r2_incoming", "requests")},
     )
     case.step(
         "r2_occupants_drain",
         "preemption_wait",
-        timeout_s=140,
+        timeout_s=case.value("decode_engine_owned.r2_occupants_drain_timeout_s"),
         params={"requests": output("r2_occupants", "requests")},
     )
     case.step(
         "r2_incoming_drain",
         "preemption_wait",
-        timeout_s=35,
+        timeout_s=case.value("decode_engine_owned.r2_incoming_drain_timeout_s"),
         params={"requests": output("r2_incoming", "requests")},
     )
     case.step(
         "r2_verdict",
         "preemption_decode_half",
-        params={
-            "occupants": output("r2_occupants", "requests"),
-            "incoming": output("r2_incoming", "requests"),
-            "phase": "owned",
-        },
+        params=case.params(
+            "decode_engine_owned.r2_verdict",
+            {
+                "occupants": output("r2_occupants", "requests"),
+                "incoming": output("r2_incoming", "requests"),
+            },
+        ),
     )
-    case.step("r2_master_clean", "balance_clean", timeout_s=30)
+    case.step(
+        "r2_master_clean",
+        "balance_clean",
+        timeout_s=case.value("decode_engine_owned.r2_master_clean_timeout_s"),
+    )
     case.step(
         "decode_verdict",
         "preemption_decode_final",
@@ -1259,152 +1040,125 @@ def decode_engine_owned(case):
     case.step(
         "clear_pressure",
         "preemption_decode_pressure",
-        params={
-            "targets": [
-                output("fleet", "decode0"),
-                output("fleet", "decode1"),
-                output("fleet", "decode2"),
-                output("fleet", "decode3"),
-            ],
-            "tokens": 0,
-        },
+        params=case.params(
+            "decode_engine_owned.clear_pressure",
+            {
+                "targets": [
+                    output("fleet", "decode0"),
+                    output("fleet", "decode1"),
+                    output("fleet", "decode2"),
+                    output("fleet", "decode3"),
+                ]
+            },
+        ),
     )
     case.step(
         "restore",
         "engine_control",
-        params={
-            "operation": "set_perf",
-            "targets": [output("fleet", "prefill0"), output("fleet", "prefill1")],
-            "perf": {"prefill_fixed_ms": 100},
-        },
+        params=case.params(
+            "decode_engine_owned.restore",
+            {"targets": [output("fleet", "prefill0"), output("fleet", "prefill1")]},
+        ),
     )
     case.step("teardown", "teardown")
 
 
 def error_code_family(case):
-    case.step("setup", "setup", timeout_s=180)
-    case.step("s1_fleet", "balance_snapshot", params={"role": "prefill"})
+    case.step(
+        "setup", "setup", timeout_s=case.value("error_code_family.setup_timeout_s")
+    )
+    case.step(
+        "s1_fleet", "balance_snapshot", params=case.value("error_code_family.s1_fleet")
+    )
     case.step(
         "s1_slow",
         "engine_control",
-        params={
-            "operation": "set_perf",
-            "targets": [output("s1_fleet", "first"), output("s1_fleet", "second")],
-            "perf": {"prefill_fixed_ms": 4000},
-        },
+        params=case.params(
+            "error_code_family.s1_slow",
+            {"targets": [output("s1_fleet", "first"), output("s1_fleet", "second")]},
+        ),
     )
-    case.step("s1_sync", "balance_pause", params={"seconds": 1.5})
+    case.step(
+        "s1_sync", "balance_pause", params=case.value("error_code_family.s1_sync")
+    )
     case.step(
         "s1_placeholder",
         "priority_start",
-        timeout_s=15,
-        params={
-            "gap_s": 0.15,
-            "requests": [
-                {
-                    "tag": "placeholder0",
-                    "priority": 50,
-                    "input_len": 2048,
-                    "output_len": 2,
-                },
-                {
-                    "tag": "placeholder1",
-                    "priority": 50,
-                    "input_len": 2048,
-                    "output_len": 2,
-                },
-            ],
-        },
+        timeout_s=case.value("error_code_family.s1_placeholder_timeout_s"),
+        params=case.value("error_code_family.s1_placeholder"),
     )
     case.step(
         "s1_placeholder_settled",
         "preemption_settled",
-        timeout_s=90,
+        timeout_s=case.value("error_code_family.s1_placeholder_settled_timeout_s"),
         params={"requests": output("s1_placeholder", "requests")},
     )
     case.step(
         "s1_admitted",
         "check",
-        params={
-            "actual": output("s1_placeholder_settled", "admitted"),
-            "op": "eq",
-            "expected": True,
-        },
+        params=case.params(
+            "error_code_family.s1_admitted",
+            {"actual": output("s1_placeholder_settled", "admitted")},
+        ),
     )
     case.step(
         "s1_pending",
         "preemption_pending",
-        timeout_s=6,
+        timeout_s=case.value("error_code_family.s1_pending_timeout_s"),
         params={"target": output("s1_fleet", "first")},
     )
     case.step(
         "s1_wave",
         "priority_start",
-        timeout_s=15,
-        params={
-            "gap_s": 0.15,
-            "requests": [
-                {"tag": "wave0", "priority": 30, "input_len": 2048, "output_len": 2},
-                {"tag": "wave1", "priority": 70, "input_len": 2048, "output_len": 2},
-            ],
-        },
+        timeout_s=case.value("error_code_family.s1_wave_timeout_s"),
+        params=case.value("error_code_family.s1_wave"),
     )
     case.step(
         "s1_wave_settled",
         "preemption_settled",
-        timeout_s=90,
+        timeout_s=case.value("error_code_family.s1_wave_settled_timeout_s"),
         params={"requests": output("s1_wave", "requests")},
     )
     case.step(
         "s1_placeholder_drain",
         "preemption_wait",
-        timeout_s=70,
+        timeout_s=case.value("error_code_family.s1_placeholder_drain_timeout_s"),
         params={"requests": output("s1_placeholder", "requests")},
     )
     case.step(
         "s1_wave_drain",
         "preemption_wait",
-        timeout_s=70,
+        timeout_s=case.value("error_code_family.s1_wave_drain_timeout_s"),
         params={"requests": output("s1_wave", "requests")},
     )
     case.step(
         "s1_segment",
         "preemption_error_segment",
-        params={
-            "placeholder": output("s1_placeholder", "requests"),
-            "wave": output("s1_wave", "requests"),
-            "segment": "outstanding",
-        },
+        params=case.params(
+            "error_code_family.s1_segment",
+            {
+                "placeholder": output("s1_placeholder", "requests"),
+                "wave": output("s1_wave", "requests"),
+            },
+        ),
     )
     case.step(
         "s1_restore",
         "engine_control",
-        params={
-            "operation": "set_perf",
-            "targets": [output("s1_fleet", "first"), output("s1_fleet", "second")],
-            "perf": {"prefill_fixed_ms": 100},
-        },
+        params=case.params(
+            "error_code_family.s1_restore",
+            {"targets": [output("s1_fleet", "first"), output("s1_fleet", "second")]},
+        ),
     )
     case.step(
         "recovery_prepare",
         "recovery_prepare",
-        params={
-            "count": 1,
-            "concurrency": 1,
-            "input_len": 2048,
-            "output_len": 2,
-            "consume": "immediate",
-            "schedule_timeout_s": 30,
-            "stream_timeout_s": 30,
-            "unique_key_count": 1,
-            "unique_key_start": 1,
-            "generate_payload": "match_schedule",
-        },
+        params=case.value("error_code_family.recovery_prepare"),
     )
     case.step(
         "recovery_dispatch",
         "recovery_dispatch",
-        timeout_s=60,
+        timeout_s=case.value("error_code_family.recovery_dispatch_timeout_s"),
         params={"requests": output("recovery_prepare", "requests")},
     )
     case.step(
@@ -1412,250 +1166,190 @@ def error_code_family(case):
         "preemption_error_recovery",
         params={"requests": output("recovery_prepare", "requests")},
     )
-    case.step("s1_clean", "balance_clean", timeout_s=30)
+    case.step(
+        "s1_clean",
+        "balance_clean",
+        timeout_s=case.value("error_code_family.s1_clean_timeout_s"),
+    )
     case.step(
         "s2_environment",
         "environment_reconfigure",
-        timeout_s=300,
-        params={
-            "config_overrides": {
-                "ordering": "priority",
-                "decision": "single",
-                "dispatcher": "non_batch",
-                "queue_timeout_ms": 60000,
-                "max_inflight_requests_per_worker": 1,
-                "max_waiting_requests_per_prefill_worker": 8,
-                "preemption": {"allowed_victim_stages": ["PREFILL_QUEUED"]},
-            },
-            "n_prefill": 1,
-            "n_decode": 4,
-        },
+        timeout_s=case.value("error_code_family.s2_environment_timeout_s"),
+        params=case.value("error_code_family.s2_environment"),
     )
     case.step("s2_fleet", "priority_fleet")
     case.step(
         "s2_slow",
         "engine_control",
-        params={
-            "operation": "set_perf",
-            "targets": [output("s2_fleet", "prefill")],
-            "perf": {"prefill_fixed_ms": 3000},
-        },
+        params=case.params(
+            "error_code_family.s2_slow", {"targets": [output("s2_fleet", "prefill")]}
+        ),
     )
-    case.step("s2_sync", "balance_pause", params={"seconds": 1.5})
+    case.step(
+        "s2_sync", "balance_pause", params=case.value("error_code_family.s2_sync")
+    )
     case.step(
         "s2_placeholder",
         "priority_start",
-        timeout_s=15,
-        params={
-            "gap_s": 0,
-            "requests": [
-                {
-                    "tag": "placeholder0",
-                    "priority": 70,
-                    "input_len": 2048,
-                    "output_len": 2,
-                }
-            ],
-        },
+        timeout_s=case.value("error_code_family.s2_placeholder_timeout_s"),
+        params=case.value("error_code_family.s2_placeholder"),
     )
     case.step(
         "s2_placeholder_settled",
         "preemption_settled",
-        timeout_s=90,
+        timeout_s=case.value("error_code_family.s2_placeholder_settled_timeout_s"),
         params={"requests": output("s2_placeholder", "requests")},
     )
     case.step(
         "s2_admitted",
         "check",
-        params={
-            "actual": output("s2_placeholder_settled", "admitted"),
-            "op": "eq",
-            "expected": True,
-        },
+        params=case.params(
+            "error_code_family.s2_admitted",
+            {"actual": output("s2_placeholder_settled", "admitted")},
+        ),
     )
     case.step(
         "s2_pending",
         "preemption_pending",
-        timeout_s=6,
+        timeout_s=case.value("error_code_family.s2_pending_timeout_s"),
         params={"target": output("s2_fleet", "prefill")},
     )
     case.step(
         "s2_wave",
         "priority_start",
-        timeout_s=15,
-        params={
-            "gap_s": 0.15,
-            "requests": [
-                {"tag": "wave0", "priority": 70, "input_len": 2048, "output_len": 2},
-                {"tag": "wave1", "priority": 70, "input_len": 2048, "output_len": 2},
-                {"tag": "wave2", "priority": 70, "input_len": 2048, "output_len": 2},
-                {"tag": "wave3", "priority": 70, "input_len": 2048, "output_len": 2},
-                {"tag": "wave4", "priority": 70, "input_len": 2048, "output_len": 2},
-                {"tag": "wave5", "priority": 70, "input_len": 2048, "output_len": 2},
-                {"tag": "wave6", "priority": 70, "input_len": 2048, "output_len": 2},
-                {"tag": "wave7", "priority": 70, "input_len": 2048, "output_len": 2},
-                {"tag": "wave8", "priority": 90, "input_len": 2048, "output_len": 2},
-            ],
-        },
+        timeout_s=case.value("error_code_family.s2_wave_timeout_s"),
+        params=case.value("error_code_family.s2_wave"),
     )
     case.step(
         "s2_wave_settled",
         "preemption_settled",
-        timeout_s=90,
+        timeout_s=case.value("error_code_family.s2_wave_settled_timeout_s"),
         params={"requests": output("s2_wave", "requests")},
     )
     case.step(
         "s2_placeholder_drain",
         "preemption_wait",
-        timeout_s=35,
+        timeout_s=case.value("error_code_family.s2_placeholder_drain_timeout_s"),
         params={"requests": output("s2_placeholder", "requests")},
     )
     case.step(
         "s2_wave_drain",
         "preemption_wait",
-        timeout_s=315,
+        timeout_s=case.value("error_code_family.s2_wave_drain_timeout_s"),
         params={"requests": output("s2_wave", "requests")},
     )
     case.step(
         "s2_segment",
         "preemption_error_segment",
-        params={
-            "placeholder": output("s2_placeholder", "requests"),
-            "wave": output("s2_wave", "requests"),
-            "segment": "park",
-        },
+        params=case.params(
+            "error_code_family.s2_segment",
+            {
+                "placeholder": output("s2_placeholder", "requests"),
+                "wave": output("s2_wave", "requests"),
+            },
+        ),
     )
-    case.step("s2_clean", "balance_clean", timeout_s=30)
+    case.step(
+        "s2_clean",
+        "balance_clean",
+        timeout_s=case.value("error_code_family.s2_clean_timeout_s"),
+    )
     case.step(
         "s2_restore",
         "engine_control",
-        params={
-            "operation": "set_perf",
-            "targets": [output("s2_fleet", "prefill")],
-            "perf": {"prefill_fixed_ms": 100},
-        },
+        params=case.params(
+            "error_code_family.s2_restore", {"targets": [output("s2_fleet", "prefill")]}
+        ),
     )
     case.step(
         "s3_environment",
         "environment_reconfigure",
-        timeout_s=300,
-        params={
-            "config_overrides": {
-                "ordering": "priority",
-                "decision": "single",
-                "dispatcher": "non_batch",
-                "queue_timeout_ms": 7000,
-                "max_inflight_requests_per_worker": 1,
-                "max_waiting_requests_per_prefill_worker": 8,
-                "preemption": {"allowed_victim_stages": ["PREFILL_QUEUED"]},
-            },
-            "n_prefill": 1,
-            "n_decode": 4,
-        },
+        timeout_s=case.value("error_code_family.s3_environment_timeout_s"),
+        params=case.value("error_code_family.s3_environment"),
     )
     case.step("s3_fleet", "priority_fleet")
     case.step(
         "s3_slow",
         "engine_control",
-        params={
-            "operation": "set_perf",
-            "targets": [output("s3_fleet", "prefill")],
-            "perf": {"prefill_fixed_ms": 10000},
-        },
+        params=case.params(
+            "error_code_family.s3_slow", {"targets": [output("s3_fleet", "prefill")]}
+        ),
     )
-    case.step("s3_sync", "balance_pause", params={"seconds": 1.5})
+    case.step(
+        "s3_sync", "balance_pause", params=case.value("error_code_family.s3_sync")
+    )
     case.step(
         "s3_placeholder",
         "priority_start",
-        timeout_s=15,
-        params={
-            "gap_s": 0,
-            "requests": [
-                {
-                    "tag": "placeholder0",
-                    "priority": 70,
-                    "input_len": 2048,
-                    "output_len": 2,
-                }
-            ],
-        },
+        timeout_s=case.value("error_code_family.s3_placeholder_timeout_s"),
+        params=case.value("error_code_family.s3_placeholder"),
     )
     case.step(
         "s3_placeholder_settled",
         "preemption_settled",
-        timeout_s=90,
+        timeout_s=case.value("error_code_family.s3_placeholder_settled_timeout_s"),
         params={"requests": output("s3_placeholder", "requests")},
     )
     case.step(
         "s3_admitted",
         "check",
-        params={
-            "actual": output("s3_placeholder_settled", "admitted"),
-            "op": "eq",
-            "expected": True,
-        },
+        params=case.params(
+            "error_code_family.s3_admitted",
+            {"actual": output("s3_placeholder_settled", "admitted")},
+        ),
     )
     case.step(
         "s3_pending",
         "preemption_pending",
-        timeout_s=6,
+        timeout_s=case.value("error_code_family.s3_pending_timeout_s"),
         params={"target": output("s3_fleet", "prefill")},
     )
     case.step(
         "s3_wave",
         "priority_start",
-        timeout_s=15,
-        params={
-            "gap_s": 0.15,
-            "requests": [
-                {"tag": "wave0", "priority": 30, "input_len": 2048, "output_len": 2},
-                {"tag": "wave1", "priority": 30, "input_len": 2048, "output_len": 2},
-                {"tag": "wave2", "priority": 30, "input_len": 2048, "output_len": 2},
-                {"tag": "wave3", "priority": 30, "input_len": 2048, "output_len": 2},
-                {"tag": "wave4", "priority": 30, "input_len": 2048, "output_len": 2},
-                {"tag": "wave5", "priority": 30, "input_len": 2048, "output_len": 2},
-                {"tag": "wave6", "priority": 30, "input_len": 2048, "output_len": 2},
-                {"tag": "wave7", "priority": 30, "input_len": 2048, "output_len": 2},
-                {"tag": "wave8", "priority": 90, "input_len": 2048, "output_len": 2},
-            ],
-        },
+        timeout_s=case.value("error_code_family.s3_wave_timeout_s"),
+        params=case.value("error_code_family.s3_wave"),
     )
     case.step(
         "s3_wave_settled",
         "preemption_settled",
-        timeout_s=90,
+        timeout_s=case.value("error_code_family.s3_wave_settled_timeout_s"),
         params={"requests": output("s3_wave", "requests")},
     )
     case.step(
         "s3_placeholder_drain",
         "preemption_wait",
-        timeout_s=35,
+        timeout_s=case.value("error_code_family.s3_placeholder_drain_timeout_s"),
         params={"requests": output("s3_placeholder", "requests")},
     )
     case.step(
         "s3_wave_drain",
         "preemption_wait",
-        timeout_s=315,
+        timeout_s=case.value("error_code_family.s3_wave_drain_timeout_s"),
         params={"requests": output("s3_wave", "requests")},
     )
     case.step(
         "s3_segment",
         "preemption_error_segment",
-        params={
-            "placeholder": output("s3_placeholder", "requests"),
-            "wave": output("s3_wave", "requests"),
-            "segment": "expiry",
-        },
+        params=case.params(
+            "error_code_family.s3_segment",
+            {
+                "placeholder": output("s3_placeholder", "requests"),
+                "wave": output("s3_wave", "requests"),
+            },
+        ),
     )
-    case.step("s3_clean", "balance_clean", timeout_s=30)
+    case.step(
+        "s3_clean",
+        "balance_clean",
+        timeout_s=case.value("error_code_family.s3_clean_timeout_s"),
+    )
     case.step(
         "s3_restore",
         "engine_control",
-        params={
-            "operation": "set_perf",
-            "targets": [output("s3_fleet", "prefill")],
-            "perf": {"prefill_fixed_ms": 100},
-        },
+        params=case.params(
+            "error_code_family.s3_restore", {"targets": [output("s3_fleet", "prefill")]}
+        ),
     )
     case.step(
         "error_family_verdict",
@@ -1673,359 +1367,333 @@ def error_code_family(case):
 
 
 def decode_reservation_priority(case):
-    case.step("setup", "setup", timeout_s=180)
+    case.step(
+        "setup",
+        "setup",
+        timeout_s=case.value("decode_reservation_priority.setup_timeout_s"),
+    )
     case.step("fleet", "preemption_decode_fleet")
     case.step(
         "slow",
         "engine_control",
-        params={
-            "operation": "set_perf",
-            "targets": [output("fleet", "prefill0"), output("fleet", "prefill1")],
-            "perf": {"prefill_fixed_ms": 4000},
-        },
+        params=case.params(
+            "decode_reservation_priority.slow",
+            {"targets": [output("fleet", "prefill0"), output("fleet", "prefill1")]},
+        ),
     )
-    case.step("sync", "balance_pause", params={"seconds": 1.5})
+    case.step(
+        "sync", "balance_pause", params=case.value("decode_reservation_priority.sync")
+    )
     case.step(
         "r1_occupants",
         "priority_start",
-        timeout_s=15,
-        params={
-            "gap_s": 0.15,
-            "requests": [
-                {
-                    "tag": "occupant0",
-                    "priority": 30,
-                    "input_len": 2048,
-                    "output_len": 500,
-                },
-                {
-                    "tag": "occupant1",
-                    "priority": 30,
-                    "input_len": 2048,
-                    "output_len": 500,
-                },
-                {
-                    "tag": "occupant2",
-                    "priority": 30,
-                    "input_len": 2048,
-                    "output_len": 500,
-                },
-                {
-                    "tag": "occupant3",
-                    "priority": 30,
-                    "input_len": 2048,
-                    "output_len": 500,
-                },
-            ],
-        },
+        timeout_s=case.value("decode_reservation_priority.r1_occupants_timeout_s"),
+        params=case.value("decode_reservation_priority.r1_occupants"),
     )
     case.step(
         "r1_settled",
         "preemption_settled",
-        timeout_s=90,
+        timeout_s=case.value("decode_reservation_priority.r1_settled_timeout_s"),
         params={"requests": output("r1_occupants", "requests")},
     )
     case.step(
         "r1_running",
         "preemption_decode_running",
-        timeout_s=80,
+        timeout_s=case.value("decode_reservation_priority.r1_running_timeout_s"),
         params={"requests": output("r1_occupants", "requests")},
     )
     case.step(
         "r1_baseline",
         "preemption_reservation_metric",
-        params={"labels": {"victim_priority": "30", "incoming_priority": "70"}},
+        params=case.value("decode_reservation_priority.r1_baseline"),
     )
     case.step(
         "r1_pressure",
         "preemption_decode_pressure",
-        params={
-            "targets": [
-                output("fleet", "decode0"),
-                output("fleet", "decode1"),
-                output("fleet", "decode2"),
-                output("fleet", "decode3"),
-            ],
-            "tokens": 6291456,
-        },
+        params=case.params(
+            "decode_reservation_priority.r1_pressure",
+            {
+                "targets": [
+                    output("fleet", "decode0"),
+                    output("fleet", "decode1"),
+                    output("fleet", "decode2"),
+                    output("fleet", "decode3"),
+                ]
+            },
+        ),
     )
-    case.step("r1_pressure_sync", "balance_pause", params={"seconds": 1.5})
+    case.step(
+        "r1_pressure_sync",
+        "balance_pause",
+        params=case.value("decode_reservation_priority.r1_pressure_sync"),
+    )
     case.step(
         "r1_incoming",
         "priority_start",
-        timeout_s=5,
-        params={
-            "gap_s": 0,
-            "requests": [
-                {"tag": "incoming", "priority": 70, "input_len": 2048, "output_len": 2}
-            ],
-        },
+        timeout_s=case.value("decode_reservation_priority.r1_incoming_timeout_s"),
+        params=case.value("decode_reservation_priority.r1_incoming"),
     )
     case.step(
         "r1_incoming_settled",
         "preemption_settled",
-        timeout_s=90,
+        timeout_s=case.value(
+            "decode_reservation_priority.r1_incoming_settled_timeout_s"
+        ),
         params={"requests": output("r1_incoming", "requests")},
     )
     case.step(
         "r1_occupants_drain",
         "preemption_wait",
-        timeout_s=140,
+        timeout_s=case.value(
+            "decode_reservation_priority.r1_occupants_drain_timeout_s"
+        ),
         params={"requests": output("r1_occupants", "requests")},
     )
     case.step(
         "r1_incoming_drain",
         "preemption_wait",
-        timeout_s=35,
+        timeout_s=case.value("decode_reservation_priority.r1_incoming_drain_timeout_s"),
         params={"requests": output("r1_incoming", "requests")},
     )
     case.step(
         "r1_after",
         "preemption_reservation_metric",
-        params={"labels": {"victim_priority": "30", "incoming_priority": "70"}},
+        params=case.value("decode_reservation_priority.r1_after"),
     )
     case.step(
         "r1_verdict",
         "preemption_reservation_half",
-        params={
-            "occupants": output("r1_occupants", "requests"),
-            "incoming": output("r1_incoming", "requests"),
-            "wave": "lower",
-            "baseline": output("r1_baseline", "snapshot"),
-            "after": output("r1_after", "snapshot"),
-        },
+        params=case.params(
+            "decode_reservation_priority.r1_verdict",
+            {
+                "occupants": output("r1_occupants", "requests"),
+                "incoming": output("r1_incoming", "requests"),
+                "baseline": output("r1_baseline", "snapshot"),
+                "after": output("r1_after", "snapshot"),
+            },
+        ),
     )
-    case.step("r1_clean", "balance_clean", timeout_s=30)
+    case.step(
+        "r1_clean",
+        "balance_clean",
+        timeout_s=case.value("decode_reservation_priority.r1_clean_timeout_s"),
+    )
     case.step(
         "r2_release",
         "preemption_decode_pressure",
-        params={
-            "targets": [
-                output("fleet", "decode0"),
-                output("fleet", "decode1"),
-                output("fleet", "decode2"),
-                output("fleet", "decode3"),
-            ],
-            "tokens": 0,
-        },
+        params=case.params(
+            "decode_reservation_priority.r2_release",
+            {
+                "targets": [
+                    output("fleet", "decode0"),
+                    output("fleet", "decode1"),
+                    output("fleet", "decode2"),
+                    output("fleet", "decode3"),
+                ]
+            },
+        ),
     )
-    case.step("r2_release_sync", "balance_pause", params={"seconds": 1.5})
+    case.step(
+        "r2_release_sync",
+        "balance_pause",
+        params=case.value("decode_reservation_priority.r2_release_sync"),
+    )
     case.step(
         "r2_occupants",
         "priority_start",
-        timeout_s=15,
-        params={
-            "gap_s": 0.15,
-            "requests": [
-                {
-                    "tag": "occupant0",
-                    "priority": 50,
-                    "input_len": 2048,
-                    "output_len": 500,
-                },
-                {
-                    "tag": "occupant1",
-                    "priority": 50,
-                    "input_len": 2048,
-                    "output_len": 500,
-                },
-                {
-                    "tag": "occupant2",
-                    "priority": 50,
-                    "input_len": 2048,
-                    "output_len": 500,
-                },
-                {
-                    "tag": "occupant3",
-                    "priority": 50,
-                    "input_len": 2048,
-                    "output_len": 500,
-                },
-            ],
-        },
+        timeout_s=case.value("decode_reservation_priority.r2_occupants_timeout_s"),
+        params=case.value("decode_reservation_priority.r2_occupants"),
     )
     case.step(
         "r2_settled",
         "preemption_settled",
-        timeout_s=90,
+        timeout_s=case.value("decode_reservation_priority.r2_settled_timeout_s"),
         params={"requests": output("r2_occupants", "requests")},
     )
     case.step(
         "r2_running",
         "preemption_decode_running",
-        timeout_s=80,
+        timeout_s=case.value("decode_reservation_priority.r2_running_timeout_s"),
         params={"requests": output("r2_occupants", "requests")},
     )
-    case.step("r2_baseline", "preemption_reservation_metric", params={"labels": {}})
+    case.step(
+        "r2_baseline",
+        "preemption_reservation_metric",
+        params=case.value("decode_reservation_priority.r2_baseline"),
+    )
     case.step(
         "r2_pressure",
         "preemption_decode_pressure",
-        params={
-            "targets": [
-                output("fleet", "decode0"),
-                output("fleet", "decode1"),
-                output("fleet", "decode2"),
-                output("fleet", "decode3"),
-            ],
-            "tokens": 6291456,
-        },
+        params=case.params(
+            "decode_reservation_priority.r2_pressure",
+            {
+                "targets": [
+                    output("fleet", "decode0"),
+                    output("fleet", "decode1"),
+                    output("fleet", "decode2"),
+                    output("fleet", "decode3"),
+                ]
+            },
+        ),
     )
-    case.step("r2_pressure_sync", "balance_pause", params={"seconds": 1.5})
+    case.step(
+        "r2_pressure_sync",
+        "balance_pause",
+        params=case.value("decode_reservation_priority.r2_pressure_sync"),
+    )
     case.step(
         "r2_incoming",
         "priority_start",
-        timeout_s=5,
-        params={
-            "gap_s": 0,
-            "requests": [
-                {"tag": "incoming", "priority": 50, "input_len": 2048, "output_len": 2}
-            ],
-        },
+        timeout_s=case.value("decode_reservation_priority.r2_incoming_timeout_s"),
+        params=case.value("decode_reservation_priority.r2_incoming"),
     )
     case.step(
         "r2_incoming_settled",
         "preemption_settled",
-        timeout_s=90,
+        timeout_s=case.value(
+            "decode_reservation_priority.r2_incoming_settled_timeout_s"
+        ),
         params={"requests": output("r2_incoming", "requests")},
     )
     case.step(
         "r2_occupants_drain",
         "preemption_wait",
-        timeout_s=140,
+        timeout_s=case.value(
+            "decode_reservation_priority.r2_occupants_drain_timeout_s"
+        ),
         params={"requests": output("r2_occupants", "requests")},
     )
     case.step(
         "r2_incoming_drain",
         "preemption_wait",
-        timeout_s=35,
+        timeout_s=case.value("decode_reservation_priority.r2_incoming_drain_timeout_s"),
         params={"requests": output("r2_incoming", "requests")},
     )
-    case.step("r2_after", "preemption_reservation_metric", params={"labels": {}})
+    case.step(
+        "r2_after",
+        "preemption_reservation_metric",
+        params=case.value("decode_reservation_priority.r2_after"),
+    )
     case.step(
         "r2_verdict",
         "preemption_reservation_half",
-        params={
-            "occupants": output("r2_occupants", "requests"),
-            "incoming": output("r2_incoming", "requests"),
-            "wave": "same",
-            "baseline": output("r2_baseline", "snapshot"),
-            "after": output("r2_after", "snapshot"),
-        },
+        params=case.params(
+            "decode_reservation_priority.r2_verdict",
+            {
+                "occupants": output("r2_occupants", "requests"),
+                "incoming": output("r2_incoming", "requests"),
+                "baseline": output("r2_baseline", "snapshot"),
+                "after": output("r2_after", "snapshot"),
+            },
+        ),
     )
-    case.step("r2_clean", "balance_clean", timeout_s=30)
+    case.step(
+        "r2_clean",
+        "balance_clean",
+        timeout_s=case.value("decode_reservation_priority.r2_clean_timeout_s"),
+    )
     case.step(
         "r3_release",
         "preemption_decode_pressure",
-        params={
-            "targets": [
-                output("fleet", "decode0"),
-                output("fleet", "decode1"),
-                output("fleet", "decode2"),
-                output("fleet", "decode3"),
-            ],
-            "tokens": 0,
-        },
+        params=case.params(
+            "decode_reservation_priority.r3_release",
+            {
+                "targets": [
+                    output("fleet", "decode0"),
+                    output("fleet", "decode1"),
+                    output("fleet", "decode2"),
+                    output("fleet", "decode3"),
+                ]
+            },
+        ),
     )
-    case.step("r3_release_sync", "balance_pause", params={"seconds": 1.5})
+    case.step(
+        "r3_release_sync",
+        "balance_pause",
+        params=case.value("decode_reservation_priority.r3_release_sync"),
+    )
     case.step(
         "r3_occupants",
         "priority_start",
-        timeout_s=15,
-        params={
-            "gap_s": 0.15,
-            "requests": [
-                {
-                    "tag": "occupant0",
-                    "priority": 30,
-                    "input_len": 2048,
-                    "output_len": 500,
-                },
-                {
-                    "tag": "occupant1",
-                    "priority": 30,
-                    "input_len": 2048,
-                    "output_len": 500,
-                },
-                {
-                    "tag": "occupant2",
-                    "priority": 30,
-                    "input_len": 16384,
-                    "output_len": 500,
-                },
-                {
-                    "tag": "occupant3",
-                    "priority": 30,
-                    "input_len": 16384,
-                    "output_len": 500,
-                },
-            ],
-        },
+        timeout_s=case.value("decode_reservation_priority.r3_occupants_timeout_s"),
+        params=case.value("decode_reservation_priority.r3_occupants"),
     )
     case.step(
         "r3_settled",
         "preemption_settled",
-        timeout_s=90,
+        timeout_s=case.value("decode_reservation_priority.r3_settled_timeout_s"),
         params={"requests": output("r3_occupants", "requests")},
     )
     case.step(
         "r3_running",
         "preemption_decode_running",
-        timeout_s=80,
+        timeout_s=case.value("decode_reservation_priority.r3_running_timeout_s"),
         params={"requests": output("r3_occupants", "requests")},
     )
     case.step(
         "r3_pressure",
         "preemption_decode_pressure",
-        params={
-            "targets": [
-                output("fleet", "decode0"),
-                output("fleet", "decode1"),
-                output("fleet", "decode2"),
-                output("fleet", "decode3"),
-            ],
-            "tokens": 6291456,
-        },
+        params=case.params(
+            "decode_reservation_priority.r3_pressure",
+            {
+                "targets": [
+                    output("fleet", "decode0"),
+                    output("fleet", "decode1"),
+                    output("fleet", "decode2"),
+                    output("fleet", "decode3"),
+                ]
+            },
+        ),
     )
-    case.step("r3_pressure_sync", "balance_pause", params={"seconds": 1.5})
+    case.step(
+        "r3_pressure_sync",
+        "balance_pause",
+        params=case.value("decode_reservation_priority.r3_pressure_sync"),
+    )
     case.step(
         "r3_incoming",
         "priority_start",
-        timeout_s=5,
-        params={
-            "gap_s": 0,
-            "requests": [
-                {"tag": "incoming", "priority": 70, "input_len": 8192, "output_len": 2}
-            ],
-        },
+        timeout_s=case.value("decode_reservation_priority.r3_incoming_timeout_s"),
+        params=case.value("decode_reservation_priority.r3_incoming"),
     )
     case.step(
         "r3_incoming_settled",
         "preemption_settled",
-        timeout_s=90,
+        timeout_s=case.value(
+            "decode_reservation_priority.r3_incoming_settled_timeout_s"
+        ),
         params={"requests": output("r3_incoming", "requests")},
     )
     case.step(
         "r3_occupants_drain",
         "preemption_wait",
-        timeout_s=140,
+        timeout_s=case.value(
+            "decode_reservation_priority.r3_occupants_drain_timeout_s"
+        ),
         params={"requests": output("r3_occupants", "requests")},
     )
     case.step(
         "r3_incoming_drain",
         "preemption_wait",
-        timeout_s=35,
+        timeout_s=case.value("decode_reservation_priority.r3_incoming_drain_timeout_s"),
         params={"requests": output("r3_incoming", "requests")},
     )
     case.step(
         "r3_verdict",
         "preemption_reservation_half",
-        params={
-            "occupants": output("r3_occupants", "requests"),
-            "incoming": output("r3_incoming", "requests"),
-            "wave": "kvbucket",
-        },
+        params=case.params(
+            "decode_reservation_priority.r3_verdict",
+            {
+                "occupants": output("r3_occupants", "requests"),
+                "incoming": output("r3_incoming", "requests"),
+            },
+        ),
     )
-    case.step("r3_clean", "balance_clean", timeout_s=30)
+    case.step(
+        "r3_clean",
+        "balance_clean",
+        timeout_s=case.value("decode_reservation_priority.r3_clean_timeout_s"),
+    )
     case.step(
         "reservation_verdict",
         "preemption_reservation_final",
@@ -2040,119 +1708,100 @@ def decode_reservation_priority(case):
     case.step(
         "clear_pressure",
         "preemption_decode_pressure",
-        params={
-            "targets": [
-                output("fleet", "decode0"),
-                output("fleet", "decode1"),
-                output("fleet", "decode2"),
-                output("fleet", "decode3"),
-            ],
-            "tokens": 0,
-        },
+        params=case.params(
+            "decode_reservation_priority.clear_pressure",
+            {
+                "targets": [
+                    output("fleet", "decode0"),
+                    output("fleet", "decode1"),
+                    output("fleet", "decode2"),
+                    output("fleet", "decode3"),
+                ]
+            },
+        ),
     )
     case.step(
         "restore",
         "engine_control",
-        params={
-            "operation": "set_perf",
-            "targets": [output("fleet", "prefill0"), output("fleet", "prefill1")],
-            "perf": {"prefill_fixed_ms": 100},
-        },
+        params=case.params(
+            "decode_reservation_priority.restore",
+            {"targets": [output("fleet", "prefill0"), output("fleet", "prefill1")]},
+        ),
     )
     case.step("teardown", "teardown")
 
 
 def observability_integrity(case):
-    case.step("setup", "setup", timeout_s=180)
+    case.step(
+        "setup",
+        "setup",
+        timeout_s=case.value("observability_integrity.setup_timeout_s"),
+    )
     case.step("fleet", "priority_fleet")
     case.step(
         "slow",
         "engine_control",
-        params={
-            "operation": "set_perf",
-            "targets": [output("fleet", "prefill")],
-            "perf": {"prefill_fixed_ms": 3000},
-        },
+        params=case.params(
+            "observability_integrity.slow", {"targets": [output("fleet", "prefill")]}
+        ),
     )
-    case.step("sync", "balance_pause", params={"seconds": 1.5})
+    case.step(
+        "sync", "balance_pause", params=case.value("observability_integrity.sync")
+    )
     case.step(
         "placeholder",
         "priority_start",
-        timeout_s=5,
-        params={
-            "gap_s": 0,
-            "requests": [
-                {
-                    "tag": "placeholder",
-                    "priority": 50,
-                    "input_len": 2048,
-                    "output_len": 2,
-                }
-            ],
-        },
+        timeout_s=case.value("observability_integrity.placeholder_timeout_s"),
+        params=case.value("observability_integrity.placeholder"),
     )
     case.step(
         "placeholder_settled",
         "preemption_settled",
-        timeout_s=90,
+        timeout_s=case.value("observability_integrity.placeholder_settled_timeout_s"),
         params={"requests": output("placeholder", "requests")},
     )
     case.step(
         "placeholder_admitted",
         "check",
-        params={
-            "actual": output("placeholder_settled", "admitted"),
-            "op": "eq",
-            "expected": True,
-        },
+        params=case.params(
+            "observability_integrity.placeholder_admitted",
+            {"actual": output("placeholder_settled", "admitted")},
+        ),
     )
     case.step(
         "placeholder_pending",
         "preemption_pending",
-        timeout_s=6,
+        timeout_s=case.value("observability_integrity.placeholder_pending_timeout_s"),
         params={"target": output("fleet", "prefill")},
     )
     case.step(
         "duplicate",
         "preemption_observability_duplicate",
-        timeout_s=35,
+        timeout_s=case.value("observability_integrity.duplicate_timeout_s"),
         params={"requests": output("placeholder", "requests")},
     )
     case.step(
         "wave",
         "priority_start",
-        timeout_s=15,
-        params={
-            "gap_s": 0.15,
-            "requests": [
-                {"tag": "30a", "priority": 30, "input_len": 2048, "output_len": 2},
-                {"tag": "30b", "priority": 30, "input_len": 2048, "output_len": 2},
-                {"tag": "50a", "priority": 50, "input_len": 2048, "output_len": 2},
-                {"tag": "50b", "priority": 50, "input_len": 2048, "output_len": 2},
-                {"tag": "70a", "priority": 70, "input_len": 2048, "output_len": 2},
-                {"tag": "70b", "priority": 70, "input_len": 2048, "output_len": 2},
-                {"tag": "30c", "priority": 30, "input_len": 2048, "output_len": 2},
-                {"tag": "30d", "priority": 30, "input_len": 2048, "output_len": 2},
-                {"tag": "90", "priority": 90, "input_len": 2048, "output_len": 2},
-            ],
-        },
+        timeout_s=case.value("observability_integrity.wave_timeout_s"),
+        params=case.value("observability_integrity.wave"),
     )
     case.step(
         "wave_settled",
         "preemption_settled",
-        timeout_s=90,
+        timeout_s=case.value("observability_integrity.wave_settled_timeout_s"),
         params={"requests": output("wave", "requests")},
     )
     case.step(
         "placeholder_drain",
         "preemption_wait",
-        timeout_s=35,
+        timeout_s=case.value("observability_integrity.placeholder_drain_timeout_s"),
         params={"requests": output("placeholder", "requests")},
     )
     case.step(
         "wave_drain",
         "preemption_wait",
-        timeout_s=315,
+        timeout_s=case.value("observability_integrity.wave_drain_timeout_s"),
         params={"requests": output("wave", "requests")},
     )
     case.step(
@@ -2163,7 +1812,11 @@ def observability_integrity(case):
             "wave": output("wave", "requests"),
         },
     )
-    case.step("master_clean", "balance_clean", timeout_s=30)
+    case.step(
+        "master_clean",
+        "balance_clean",
+        timeout_s=case.value("observability_integrity.master_clean_timeout_s"),
+    )
     case.step(
         "observability_verdict",
         "preemption_observability_final",
@@ -2176,100 +1829,93 @@ def observability_integrity(case):
     case.step(
         "restore",
         "engine_control",
-        params={
-            "operation": "set_perf",
-            "targets": [output("fleet", "prefill")],
-            "perf": {"prefill_fixed_ms": 100},
-        },
+        params=case.params(
+            "observability_integrity.restore", {"targets": [output("fleet", "prefill")]}
+        ),
     )
-    case.step("teardown", "teardown", timeout_s=120)
+    case.step(
+        "teardown",
+        "teardown",
+        timeout_s=case.value("observability_integrity.teardown_timeout_s"),
+    )
 
 
 def prefill_queued_live_single(case):
-    case.step("setup", "setup", timeout_s=180)
+    case.step(
+        "setup",
+        "setup",
+        timeout_s=case.value("prefill_queued_live_single.setup_timeout_s"),
+    )
     case.step("fleet", "priority_fleet")
     case.step(
         "slow",
         "engine_control",
-        params={
-            "operation": "set_perf",
-            "targets": [output("fleet", "prefill")],
-            "perf": {"prefill_fixed_ms": 4000},
-        },
+        params=case.params(
+            "prefill_queued_live_single.slow", {"targets": [output("fleet", "prefill")]}
+        ),
     )
-    case.step("sync", "balance_pause", params={"seconds": 1.5})
+    case.step(
+        "sync", "balance_pause", params=case.value("prefill_queued_live_single.sync")
+    )
     case.step(
         "placeholder",
         "preemption_live_start",
-        timeout_s=5,
-        params={
-            "gap_s": 0,
-            "requests": [
-                {
-                    "tag": "placeholder",
-                    "priority": 50,
-                    "input_len": 2048,
-                    "output_len": 2,
-                }
-            ],
-            "defer_batch": True,
-        },
+        timeout_s=case.value("prefill_queued_live_single.placeholder_timeout_s"),
+        params=case.value("prefill_queued_live_single.placeholder"),
     )
     case.step(
         "placeholder_settled",
         "preemption_settled",
-        timeout_s=90,
+        timeout_s=case.value(
+            "prefill_queued_live_single.placeholder_settled_timeout_s"
+        ),
         params={"requests": output("placeholder", "requests")},
     )
     case.step(
         "placeholder_admitted",
         "check",
-        params={
-            "actual": output("placeholder_settled", "admitted"),
-            "op": "eq",
-            "expected": True,
-        },
+        params=case.params(
+            "prefill_queued_live_single.placeholder_admitted",
+            {"actual": output("placeholder_settled", "admitted")},
+        ),
     )
     case.step(
         "placeholder_pending",
         "preemption_pending",
-        timeout_s=6,
+        timeout_s=case.value(
+            "prefill_queued_live_single.placeholder_pending_timeout_s"
+        ),
         params={"target": output("fleet", "prefill")},
     )
     case.step(
         "wave",
         "preemption_live_start",
-        timeout_s=15,
-        params={
-            "gap_s": 0.15,
-            "requests": [
-                {"tag": "victim_a", "priority": 30, "input_len": 2048, "output_len": 2},
-                {"tag": "victim_b", "priority": 30, "input_len": 2048, "output_len": 2},
-                {"tag": "incoming", "priority": 70, "input_len": 2048, "output_len": 2},
-            ],
-            "defer_batch": True,
-        },
+        timeout_s=case.value("prefill_queued_live_single.wave_timeout_s"),
+        params=case.value("prefill_queued_live_single.wave"),
     )
     case.step(
         "wave_settled",
         "preemption_settled",
-        timeout_s=90,
+        timeout_s=case.value("prefill_queued_live_single.wave_settled_timeout_s"),
         params={"requests": output("wave", "requests")},
     )
     case.step(
         "placeholder_drain",
         "preemption_live_drain",
-        timeout_s=50,
-        params={"requests": output("placeholder", "requests"), "tags": ["placeholder"]},
+        timeout_s=case.value("prefill_queued_live_single.placeholder_drain_timeout_s"),
+        params=case.params(
+            "prefill_queued_live_single.placeholder_drain",
+            {"requests": output("placeholder", "requests")},
+        ),
     )
     case.step(
         "wave_drain",
         "preemption_live_drain",
-        timeout_s=100,
-        params={
-            "requests": output("wave", "requests"),
-            "tags": ["victim_a", "incoming"],
-        },
+        timeout_s=case.value("prefill_queued_live_single.wave_drain_timeout_s"),
+        params=case.params(
+            "prefill_queued_live_single.wave_drain",
+            {"requests": output("wave", "requests")},
+        ),
     )
     case.step(
         "live_verdict",
@@ -2279,28 +1925,25 @@ def prefill_queued_live_single(case):
             "wave": output("wave", "requests"),
         },
     )
-    case.step("master_clean", "balance_clean", timeout_s=30)
-    case.step("engine_clean", "preemption_live_engine_clean", timeout_s=35)
+    case.step(
+        "master_clean",
+        "balance_clean",
+        timeout_s=case.value("prefill_queued_live_single.master_clean_timeout_s"),
+    )
+    case.step(
+        "engine_clean",
+        "preemption_live_engine_clean",
+        timeout_s=case.value("prefill_queued_live_single.engine_clean_timeout_s"),
+    )
     case.step(
         "recovery_prepare",
         "recovery_prepare",
-        params={
-            "count": 1,
-            "concurrency": 1,
-            "input_len": 2048,
-            "output_len": 2,
-            "consume": "immediate",
-            "schedule_timeout_s": 30,
-            "stream_timeout_s": 30,
-            "unique_key_count": 1,
-            "unique_key_start": 1,
-            "generate_payload": "match_schedule",
-        },
+        params=case.value("prefill_queued_live_single.recovery_prepare"),
     )
     case.step(
         "recovery_dispatch",
         "recovery_dispatch",
-        timeout_s=60,
+        timeout_s=case.value("prefill_queued_live_single.recovery_dispatch_timeout_s"),
         params={"requests": output("recovery_prepare", "requests")},
     )
     case.step(
@@ -2322,100 +1965,94 @@ def prefill_queued_live_single(case):
     case.step(
         "restore",
         "engine_control",
-        params={
-            "operation": "set_perf",
-            "targets": [output("fleet", "prefill")],
-            "perf": {"prefill_fixed_ms": 100},
-        },
+        params=case.params(
+            "prefill_queued_live_single.restore",
+            {"targets": [output("fleet", "prefill")]},
+        ),
     )
-    case.step("teardown", "teardown", timeout_s=120)
+    case.step(
+        "teardown",
+        "teardown",
+        timeout_s=case.value("prefill_queued_live_single.teardown_timeout_s"),
+    )
 
 
 def prefill_queued_live_window(case):
-    case.step("setup", "setup", timeout_s=180)
+    case.step(
+        "setup",
+        "setup",
+        timeout_s=case.value("prefill_queued_live_window.setup_timeout_s"),
+    )
     case.step("fleet", "priority_fleet")
     case.step(
         "slow",
         "engine_control",
-        params={
-            "operation": "set_perf",
-            "targets": [output("fleet", "prefill")],
-            "perf": {"prefill_fixed_ms": 4000},
-        },
+        params=case.params(
+            "prefill_queued_live_window.slow", {"targets": [output("fleet", "prefill")]}
+        ),
     )
-    case.step("sync", "balance_pause", params={"seconds": 1.5})
+    case.step(
+        "sync", "balance_pause", params=case.value("prefill_queued_live_window.sync")
+    )
     case.step(
         "placeholder",
         "preemption_live_start",
-        timeout_s=5,
-        params={
-            "gap_s": 0,
-            "requests": [
-                {
-                    "tag": "placeholder",
-                    "priority": 50,
-                    "input_len": 2048,
-                    "output_len": 2,
-                }
-            ],
-            "defer_batch": True,
-        },
+        timeout_s=case.value("prefill_queued_live_window.placeholder_timeout_s"),
+        params=case.value("prefill_queued_live_window.placeholder"),
     )
     case.step(
         "placeholder_settled",
         "preemption_settled",
-        timeout_s=90,
+        timeout_s=case.value(
+            "prefill_queued_live_window.placeholder_settled_timeout_s"
+        ),
         params={"requests": output("placeholder", "requests")},
     )
     case.step(
         "placeholder_admitted",
         "check",
-        params={
-            "actual": output("placeholder_settled", "admitted"),
-            "op": "eq",
-            "expected": True,
-        },
+        params=case.params(
+            "prefill_queued_live_window.placeholder_admitted",
+            {"actual": output("placeholder_settled", "admitted")},
+        ),
     )
     case.step(
         "placeholder_pending",
         "preemption_pending",
-        timeout_s=6,
+        timeout_s=case.value(
+            "prefill_queued_live_window.placeholder_pending_timeout_s"
+        ),
         params={"target": output("fleet", "prefill")},
     )
     case.step(
         "wave",
         "preemption_live_start",
-        timeout_s=15,
-        params={
-            "gap_s": 0.15,
-            "requests": [
-                {"tag": "victim_a", "priority": 30, "input_len": 2048, "output_len": 2},
-                {"tag": "victim_b", "priority": 30, "input_len": 2048, "output_len": 2},
-                {"tag": "incoming", "priority": 70, "input_len": 2048, "output_len": 2},
-            ],
-            "defer_batch": True,
-        },
+        timeout_s=case.value("prefill_queued_live_window.wave_timeout_s"),
+        params=case.value("prefill_queued_live_window.wave"),
     )
     case.step(
         "wave_settled",
         "preemption_settled",
-        timeout_s=90,
+        timeout_s=case.value("prefill_queued_live_window.wave_settled_timeout_s"),
         params={"requests": output("wave", "requests")},
     )
     case.step(
         "placeholder_drain",
         "preemption_live_drain",
-        timeout_s=50,
-        params={"requests": output("placeholder", "requests"), "tags": ["placeholder"]},
+        timeout_s=case.value("prefill_queued_live_window.placeholder_drain_timeout_s"),
+        params=case.params(
+            "prefill_queued_live_window.placeholder_drain",
+            {"requests": output("placeholder", "requests")},
+        ),
     )
     case.step(
         "wave_drain",
         "preemption_live_drain",
-        timeout_s=100,
-        params={
-            "requests": output("wave", "requests"),
-            "tags": ["victim_a", "incoming"],
-        },
+        timeout_s=case.value("prefill_queued_live_window.wave_drain_timeout_s"),
+        params=case.params(
+            "prefill_queued_live_window.wave_drain",
+            {"requests": output("wave", "requests")},
+        ),
     )
     case.step(
         "live_verdict",
@@ -2425,28 +2062,25 @@ def prefill_queued_live_window(case):
             "wave": output("wave", "requests"),
         },
     )
-    case.step("master_clean", "balance_clean", timeout_s=30)
-    case.step("engine_clean", "preemption_live_engine_clean", timeout_s=35)
+    case.step(
+        "master_clean",
+        "balance_clean",
+        timeout_s=case.value("prefill_queued_live_window.master_clean_timeout_s"),
+    )
+    case.step(
+        "engine_clean",
+        "preemption_live_engine_clean",
+        timeout_s=case.value("prefill_queued_live_window.engine_clean_timeout_s"),
+    )
     case.step(
         "recovery_prepare",
         "recovery_prepare",
-        params={
-            "count": 1,
-            "concurrency": 1,
-            "input_len": 2048,
-            "output_len": 2,
-            "consume": "immediate",
-            "schedule_timeout_s": 30,
-            "stream_timeout_s": 30,
-            "unique_key_count": 1,
-            "unique_key_start": 1,
-            "generate_payload": "match_schedule",
-        },
+        params=case.value("prefill_queued_live_window.recovery_prepare"),
     )
     case.step(
         "recovery_dispatch",
         "recovery_dispatch",
-        timeout_s=60,
+        timeout_s=case.value("prefill_queued_live_window.recovery_dispatch_timeout_s"),
         params={"requests": output("recovery_prepare", "requests")},
     )
     case.step(
@@ -2468,64 +2102,64 @@ def prefill_queued_live_window(case):
     case.step(
         "restore",
         "engine_control",
-        params={
-            "operation": "set_perf",
-            "targets": [output("fleet", "prefill")],
-            "perf": {"prefill_fixed_ms": 100},
-        },
+        params=case.params(
+            "prefill_queued_live_window.restore",
+            {"targets": [output("fleet", "prefill")]},
+        ),
     )
-    case.step("teardown", "teardown", timeout_s=120)
+    case.step(
+        "teardown",
+        "teardown",
+        timeout_s=case.value("prefill_queued_live_window.teardown_timeout_s"),
+    )
 
 
 def decode_reserved_live_single(case):
-    case.step("setup", "setup", timeout_s=180)
+    case.step(
+        "setup",
+        "setup",
+        timeout_s=case.value("decode_reserved_live_single.setup_timeout_s"),
+    )
     case.step("fleet", "priority_fleet")
     case.step(
         "slow",
         "engine_control",
-        params={
-            "operation": "set_perf",
-            "targets": [output("fleet", "prefill")],
-            "perf": {"prefill_fixed_ms": 4000},
-        },
+        params=case.params(
+            "decode_reserved_live_single.slow",
+            {"targets": [output("fleet", "prefill")]},
+        ),
     )
-    case.step("sync", "balance_pause", params={"seconds": 1.5})
+    case.step(
+        "sync", "balance_pause", params=case.value("decode_reserved_live_single.sync")
+    )
     case.step(
         "placeholder",
         "preemption_live_start",
-        timeout_s=5,
-        params={
-            "gap_s": 0,
-            "requests": [
-                {
-                    "tag": "placeholder",
-                    "priority": 90,
-                    "input_len": 512,
-                    "output_len": 2,
-                }
-            ],
-            "defer_batch": True,
-        },
+        timeout_s=case.value("decode_reserved_live_single.placeholder_timeout_s"),
+        params=case.value("decode_reserved_live_single.placeholder"),
     )
     case.step(
         "placeholder_settled",
         "preemption_settled",
-        timeout_s=90,
+        timeout_s=case.value(
+            "decode_reserved_live_single.placeholder_settled_timeout_s"
+        ),
         params={"requests": output("placeholder", "requests")},
     )
     case.step(
         "placeholder_admitted",
         "check",
-        params={
-            "actual": output("placeholder_settled", "admitted"),
-            "op": "eq",
-            "expected": True,
-        },
+        params=case.params(
+            "decode_reserved_live_single.placeholder_admitted",
+            {"actual": output("placeholder_settled", "admitted")},
+        ),
     )
     case.step(
         "placeholder_pending",
         "preemption_pending",
-        timeout_s=6,
+        timeout_s=case.value(
+            "decode_reserved_live_single.placeholder_pending_timeout_s"
+        ),
         params={"target": output("fleet", "prefill")},
     )
     # Release the placeholder before waiting for incoming admission; otherwise
@@ -2533,44 +2167,54 @@ def decode_reserved_live_single(case):
     case.step(
         "placeholder_drain",
         "preemption_live_drain",
-        timeout_s=50,
-        params={"requests": output("placeholder", "requests"), "tags": ["placeholder"]},
+        timeout_s=case.value("decode_reserved_live_single.placeholder_drain_timeout_s"),
+        params=case.params(
+            "decode_reserved_live_single.placeholder_drain",
+            {"requests": output("placeholder", "requests")},
+        ),
     )
-    case.step("placeholder_master_clean", "balance_clean", timeout_s=30)
-    case.step("placeholder_engine_clean", "preemption_live_engine_clean", timeout_s=35)
+    case.step(
+        "placeholder_master_clean",
+        "balance_clean",
+        timeout_s=case.value(
+            "decode_reserved_live_single.placeholder_master_clean_timeout_s"
+        ),
+    )
+    case.step(
+        "placeholder_engine_clean",
+        "preemption_live_engine_clean",
+        timeout_s=case.value(
+            "decode_reserved_live_single.placeholder_engine_clean_timeout_s"
+        ),
+    )
     case.step(
         "placeholder_released",
         "check",
-        params={
-            "actual": output("placeholder_engine_clean", "passed"),
-            "op": "eq",
-            "expected": True,
-        },
+        params=case.params(
+            "decode_reserved_live_single.placeholder_released",
+            {"actual": output("placeholder_engine_clean", "passed")},
+        ),
     )
     case.step(
         "wave",
         "preemption_live_start",
-        timeout_s=15,
-        params={
-            "gap_s": 0.15,
-            "requests": [
-                {"tag": "victim", "priority": 30, "input_len": 512, "output_len": 2},
-                {"tag": "incoming", "priority": 70, "input_len": 3500, "output_len": 2},
-            ],
-            "defer_batch": True,
-        },
+        timeout_s=case.value("decode_reserved_live_single.wave_timeout_s"),
+        params=case.value("decode_reserved_live_single.wave"),
     )
     case.step(
         "wave_settled",
         "preemption_settled",
-        timeout_s=90,
+        timeout_s=case.value("decode_reserved_live_single.wave_settled_timeout_s"),
         params={"requests": output("wave", "requests")},
     )
     case.step(
         "wave_drain",
         "preemption_live_drain",
-        timeout_s=50,
-        params={"requests": output("wave", "requests"), "tags": ["incoming"]},
+        timeout_s=case.value("decode_reserved_live_single.wave_drain_timeout_s"),
+        params=case.params(
+            "decode_reserved_live_single.wave_drain",
+            {"requests": output("wave", "requests")},
+        ),
     )
     case.step(
         "live_verdict",
@@ -2580,28 +2224,25 @@ def decode_reserved_live_single(case):
             "wave": output("wave", "requests"),
         },
     )
-    case.step("master_clean", "balance_clean", timeout_s=30)
-    case.step("engine_clean", "preemption_live_engine_clean", timeout_s=35)
+    case.step(
+        "master_clean",
+        "balance_clean",
+        timeout_s=case.value("decode_reserved_live_single.master_clean_timeout_s"),
+    )
+    case.step(
+        "engine_clean",
+        "preemption_live_engine_clean",
+        timeout_s=case.value("decode_reserved_live_single.engine_clean_timeout_s"),
+    )
     case.step(
         "recovery_prepare",
         "recovery_prepare",
-        params={
-            "count": 1,
-            "concurrency": 1,
-            "input_len": 2048,
-            "output_len": 2,
-            "consume": "immediate",
-            "schedule_timeout_s": 30,
-            "stream_timeout_s": 30,
-            "unique_key_count": 1,
-            "unique_key_start": 1,
-            "generate_payload": "match_schedule",
-        },
+        params=case.value("decode_reserved_live_single.recovery_prepare"),
     )
     case.step(
         "recovery_dispatch",
         "recovery_dispatch",
-        timeout_s=60,
+        timeout_s=case.value("decode_reserved_live_single.recovery_dispatch_timeout_s"),
         params={"requests": output("recovery_prepare", "requests")},
     )
     case.step(
@@ -2623,64 +2264,64 @@ def decode_reserved_live_single(case):
     case.step(
         "restore",
         "engine_control",
-        params={
-            "operation": "set_perf",
-            "targets": [output("fleet", "prefill")],
-            "perf": {"prefill_fixed_ms": 100},
-        },
+        params=case.params(
+            "decode_reserved_live_single.restore",
+            {"targets": [output("fleet", "prefill")]},
+        ),
     )
-    case.step("teardown", "teardown", timeout_s=120)
+    case.step(
+        "teardown",
+        "teardown",
+        timeout_s=case.value("decode_reserved_live_single.teardown_timeout_s"),
+    )
 
 
 def decode_reserved_live_window(case):
-    case.step("setup", "setup", timeout_s=180)
+    case.step(
+        "setup",
+        "setup",
+        timeout_s=case.value("decode_reserved_live_window.setup_timeout_s"),
+    )
     case.step("fleet", "priority_fleet")
     case.step(
         "slow",
         "engine_control",
-        params={
-            "operation": "set_perf",
-            "targets": [output("fleet", "prefill")],
-            "perf": {"prefill_fixed_ms": 4000},
-        },
+        params=case.params(
+            "decode_reserved_live_window.slow",
+            {"targets": [output("fleet", "prefill")]},
+        ),
     )
-    case.step("sync", "balance_pause", params={"seconds": 1.5})
+    case.step(
+        "sync", "balance_pause", params=case.value("decode_reserved_live_window.sync")
+    )
     case.step(
         "placeholder",
         "preemption_live_start",
-        timeout_s=5,
-        params={
-            "gap_s": 0,
-            "requests": [
-                {
-                    "tag": "placeholder",
-                    "priority": 90,
-                    "input_len": 512,
-                    "output_len": 2,
-                }
-            ],
-            "defer_batch": True,
-        },
+        timeout_s=case.value("decode_reserved_live_window.placeholder_timeout_s"),
+        params=case.value("decode_reserved_live_window.placeholder"),
     )
     case.step(
         "placeholder_settled",
         "preemption_settled",
-        timeout_s=90,
+        timeout_s=case.value(
+            "decode_reserved_live_window.placeholder_settled_timeout_s"
+        ),
         params={"requests": output("placeholder", "requests")},
     )
     case.step(
         "placeholder_admitted",
         "check",
-        params={
-            "actual": output("placeholder_settled", "admitted"),
-            "op": "eq",
-            "expected": True,
-        },
+        params=case.params(
+            "decode_reserved_live_window.placeholder_admitted",
+            {"actual": output("placeholder_settled", "admitted")},
+        ),
     )
     case.step(
         "placeholder_pending",
         "preemption_pending",
-        timeout_s=6,
+        timeout_s=case.value(
+            "decode_reserved_live_window.placeholder_pending_timeout_s"
+        ),
         params={"target": output("fleet", "prefill")},
     )
     # Release the placeholder before waiting for incoming admission; otherwise
@@ -2688,44 +2329,54 @@ def decode_reserved_live_window(case):
     case.step(
         "placeholder_drain",
         "preemption_live_drain",
-        timeout_s=50,
-        params={"requests": output("placeholder", "requests"), "tags": ["placeholder"]},
+        timeout_s=case.value("decode_reserved_live_window.placeholder_drain_timeout_s"),
+        params=case.params(
+            "decode_reserved_live_window.placeholder_drain",
+            {"requests": output("placeholder", "requests")},
+        ),
     )
-    case.step("placeholder_master_clean", "balance_clean", timeout_s=30)
-    case.step("placeholder_engine_clean", "preemption_live_engine_clean", timeout_s=35)
+    case.step(
+        "placeholder_master_clean",
+        "balance_clean",
+        timeout_s=case.value(
+            "decode_reserved_live_window.placeholder_master_clean_timeout_s"
+        ),
+    )
+    case.step(
+        "placeholder_engine_clean",
+        "preemption_live_engine_clean",
+        timeout_s=case.value(
+            "decode_reserved_live_window.placeholder_engine_clean_timeout_s"
+        ),
+    )
     case.step(
         "placeholder_released",
         "check",
-        params={
-            "actual": output("placeholder_engine_clean", "passed"),
-            "op": "eq",
-            "expected": True,
-        },
+        params=case.params(
+            "decode_reserved_live_window.placeholder_released",
+            {"actual": output("placeholder_engine_clean", "passed")},
+        ),
     )
     case.step(
         "wave",
         "preemption_live_start",
-        timeout_s=15,
-        params={
-            "gap_s": 0.15,
-            "requests": [
-                {"tag": "victim", "priority": 30, "input_len": 512, "output_len": 2},
-                {"tag": "incoming", "priority": 70, "input_len": 3500, "output_len": 2},
-            ],
-            "defer_batch": True,
-        },
+        timeout_s=case.value("decode_reserved_live_window.wave_timeout_s"),
+        params=case.value("decode_reserved_live_window.wave"),
     )
     case.step(
         "wave_settled",
         "preemption_settled",
-        timeout_s=90,
+        timeout_s=case.value("decode_reserved_live_window.wave_settled_timeout_s"),
         params={"requests": output("wave", "requests")},
     )
     case.step(
         "wave_drain",
         "preemption_live_drain",
-        timeout_s=50,
-        params={"requests": output("wave", "requests"), "tags": ["incoming"]},
+        timeout_s=case.value("decode_reserved_live_window.wave_drain_timeout_s"),
+        params=case.params(
+            "decode_reserved_live_window.wave_drain",
+            {"requests": output("wave", "requests")},
+        ),
     )
     case.step(
         "live_verdict",
@@ -2735,28 +2386,25 @@ def decode_reserved_live_window(case):
             "wave": output("wave", "requests"),
         },
     )
-    case.step("master_clean", "balance_clean", timeout_s=30)
-    case.step("engine_clean", "preemption_live_engine_clean", timeout_s=35)
+    case.step(
+        "master_clean",
+        "balance_clean",
+        timeout_s=case.value("decode_reserved_live_window.master_clean_timeout_s"),
+    )
+    case.step(
+        "engine_clean",
+        "preemption_live_engine_clean",
+        timeout_s=case.value("decode_reserved_live_window.engine_clean_timeout_s"),
+    )
     case.step(
         "recovery_prepare",
         "recovery_prepare",
-        params={
-            "count": 1,
-            "concurrency": 1,
-            "input_len": 2048,
-            "output_len": 2,
-            "consume": "immediate",
-            "schedule_timeout_s": 30,
-            "stream_timeout_s": 30,
-            "unique_key_count": 1,
-            "unique_key_start": 1,
-            "generate_payload": "match_schedule",
-        },
+        params=case.value("decode_reserved_live_window.recovery_prepare"),
     )
     case.step(
         "recovery_dispatch",
         "recovery_dispatch",
-        timeout_s=60,
+        timeout_s=case.value("decode_reserved_live_window.recovery_dispatch_timeout_s"),
         params={"requests": output("recovery_prepare", "requests")},
     )
     case.step(
@@ -2778,88 +2426,87 @@ def decode_reserved_live_window(case):
     case.step(
         "restore",
         "engine_control",
-        params={
-            "operation": "set_perf",
-            "targets": [output("fleet", "prefill")],
-            "perf": {"prefill_fixed_ms": 100},
-        },
+        params=case.params(
+            "decode_reserved_live_window.restore",
+            {"targets": [output("fleet", "prefill")]},
+        ),
     )
-    case.step("teardown", "teardown", timeout_s=120)
+    case.step(
+        "teardown",
+        "teardown",
+        timeout_s=case.value("decode_reserved_live_window.teardown_timeout_s"),
+    )
 
 
 def cancel_not_found(case):
-    case.step("setup", "setup", timeout_s=180)
+    case.step(
+        "setup", "setup", timeout_s=case.value("cancel_not_found.setup_timeout_s")
+    )
     case.step(
         "victim",
         "priority_start",
-        timeout_s=5,
-        params={
-            "gap_s": 0,
-            "requests": [
-                {"tag": "victim", "priority": 30, "input_len": 512, "output_len": 200}
-            ],
-        },
+        timeout_s=case.value("cancel_not_found.victim_timeout_s"),
+        params=case.value("cancel_not_found.victim"),
     )
     case.step(
         "victim_settled",
         "preemption_settled",
-        timeout_s=90,
+        timeout_s=case.value("cancel_not_found.victim_settled_timeout_s"),
         params={"requests": output("victim", "requests")},
     )
     case.step(
         "victim_admitted",
         "check",
-        params={
-            "actual": output("victim_settled", "admitted"),
-            "op": "eq",
-            "expected": True,
-        },
+        params=case.params(
+            "cancel_not_found.victim_admitted",
+            {"actual": output("victim_settled", "admitted")},
+        ),
     )
     case.step(
         "victim_running",
         "preemption_nf_state",
-        timeout_s=10,
-        params={"requests": output("victim", "requests"), "state": "running"},
+        timeout_s=case.value("cancel_not_found.victim_running_timeout_s"),
+        params=case.params(
+            "cancel_not_found.victim_running",
+            {"requests": output("victim", "requests")},
+        ),
     )
-    case.step("before_freeze_pause", "balance_pause", params={"seconds": 0.6})
+    case.step(
+        "before_freeze_pause",
+        "balance_pause",
+        params=case.value("cancel_not_found.before_freeze_pause"),
+    )
     case.step("baseline_cancel", "preemption_cancel_census")
     case.step(
         "freeze_status",
         "status_control",
-        params={
-            "role": "decode",
-            "selection": "first",
-            "fault": "status_no_respond",
-            "enabled": True,
-        },
+        params=case.value("cancel_not_found.freeze_status"),
     )
     case.step(
         "victim_engine_finished",
         "preemption_nf_state",
-        timeout_s=3,
-        params={"requests": output("victim", "requests"), "state": "finished"},
+        timeout_s=case.value("cancel_not_found.victim_engine_finished_timeout_s"),
+        params=case.params(
+            "cancel_not_found.victim_engine_finished",
+            {"requests": output("victim", "requests")},
+        ),
     )
     case.step(
         "incoming",
         "priority_start",
-        timeout_s=5,
-        params={
-            "gap_s": 0,
-            "requests": [
-                {"tag": "incoming", "priority": 70, "input_len": 512, "output_len": 2}
-            ],
-        },
+        timeout_s=case.value("cancel_not_found.incoming_timeout_s"),
+        params=case.value("cancel_not_found.incoming"),
     )
     case.step(
         "incoming_settled",
         "preemption_settled",
-        timeout_s=90,
+        timeout_s=case.value("cancel_not_found.incoming_settled_timeout_s"),
         params={"requests": output("incoming", "requests")},
     )
     case.step(
         "victim_drain",
         "preemption_wait",
-        timeout_s=35,
+        timeout_s=case.value("cancel_not_found.victim_drain_timeout_s"),
         params={"requests": output("victim", "requests")},
     )
     case.step("after_cancel", "preemption_cancel_census")
@@ -2876,35 +2523,27 @@ def cancel_not_found(case):
     case.step(
         "clear_status",
         "status_control",
-        params={
-            "role": "decode",
-            "selection": "first",
-            "fault": "status_no_respond",
-            "enabled": False,
-        },
+        params=case.value("cancel_not_found.clear_status"),
     )
-    case.step("master_clean", "balance_clean", timeout_s=30)
-    case.step("engine_clean", "preemption_nf_engine_clean", timeout_s=25)
+    case.step(
+        "master_clean",
+        "balance_clean",
+        timeout_s=case.value("cancel_not_found.master_clean_timeout_s"),
+    )
+    case.step(
+        "engine_clean",
+        "preemption_nf_engine_clean",
+        timeout_s=case.value("cancel_not_found.engine_clean_timeout_s"),
+    )
     case.step(
         "recovery_prepare",
         "recovery_prepare",
-        params={
-            "count": 1,
-            "concurrency": 1,
-            "input_len": 2048,
-            "output_len": 2,
-            "consume": "immediate",
-            "schedule_timeout_s": 30,
-            "stream_timeout_s": 30,
-            "unique_key_count": 1,
-            "unique_key_start": 1,
-            "generate_payload": "match_schedule",
-        },
+        params=case.value("cancel_not_found.recovery_prepare"),
     )
     case.step(
         "recovery_dispatch",
         "recovery_dispatch",
-        timeout_s=60,
+        timeout_s=case.value("cancel_not_found.recovery_dispatch_timeout_s"),
         params={"requests": output("recovery_prepare", "requests")},
     )
     case.step(
@@ -2926,95 +2565,93 @@ def cancel_not_found(case):
 
 
 def cancel_tombstoned(case):
-    case.step("setup", "setup", timeout_s=180)
+    case.step(
+        "setup", "setup", timeout_s=case.value("cancel_tombstoned.setup_timeout_s")
+    )
     case.step(
         "victim",
         "preemption_live_start",
-        timeout_s=5,
-        params={
-            "gap_s": 0,
-            "defer_batch": True,
-            "requests": [
-                {"tag": "victim", "priority": 30, "input_len": 512, "output_len": 5000}
-            ],
-        },
+        timeout_s=case.value("cancel_tombstoned.victim_timeout_s"),
+        params=case.value("cancel_tombstoned.victim"),
     )
     case.step(
         "victim_settled",
         "preemption_settled",
-        timeout_s=90,
+        timeout_s=case.value("cancel_tombstoned.victim_settled_timeout_s"),
         params={"requests": output("victim", "requests")},
     )
     case.step(
         "victim_admitted",
         "check",
-        params={
-            "actual": output("victim_settled", "admitted"),
-            "op": "eq",
-            "expected": True,
-        },
+        params=case.params(
+            "cancel_tombstoned.victim_admitted",
+            {"actual": output("victim_settled", "admitted")},
+        ),
     )
     case.step(
         "first_output",
         "preemption_ts_first_output",
-        timeout_s=15,
+        timeout_s=case.value("cancel_tombstoned.first_output_timeout_s"),
         params={"requests": output("victim", "requests")},
     )
     case.step(
         "crash_fault",
         "engine_inject",
-        params={"type": "crash_after", "targets": ["prefill-0"], "options": {"n": 1}},
+        params=case.value("cancel_tombstoned.crash_fault"),
     )
     case.step("restore_guard", "preemption_ts_restore_guard")
-    case.step("crash_trigger", "preemption_ts_trigger", timeout_s=10)
+    case.step(
+        "crash_trigger",
+        "preemption_ts_trigger",
+        timeout_s=case.value("cancel_tombstoned.crash_trigger_timeout_s"),
+    )
     case.step(
         "prefill_dropped",
         "preemption_ts_health",
-        timeout_s=45,
-        params={"state": "dropped"},
+        timeout_s=case.value("cancel_tombstoned.prefill_dropped_timeout_s"),
+        params=case.value("cancel_tombstoned.prefill_dropped"),
     )
     case.step(
         "prefill_restart",
         "engine_control",
-        params={"operation": "start", "targets": ["prefill-0"]},
+        params=case.value("cancel_tombstoned.prefill_restart"),
     )
     case.step(
         "prefill_restored",
         "preemption_ts_health",
-        timeout_s=45,
-        params={"state": "restored"},
+        timeout_s=case.value("cancel_tombstoned.prefill_restored_timeout_s"),
+        params=case.value("cancel_tombstoned.prefill_restored"),
     )
-    case.step("reconnect", "balance_pause", params={"seconds": 3})
+    case.step(
+        "reconnect", "balance_pause", params=case.value("cancel_tombstoned.reconnect")
+    )
     case.step(
         "victim_cut",
         "preemption_ts_cut",
-        timeout_s=10,
+        timeout_s=case.value("cancel_tombstoned.victim_cut_timeout_s"),
         params={"requests": output("victim", "requests")},
     )
     case.step("baseline_cancel", "preemption_cancel_census")
     case.step(
         "incoming",
         "preemption_live_start",
-        timeout_s=5,
-        params={
-            "gap_s": 0,
-            "defer_batch": True,
-            "requests": [
-                {"tag": "incoming", "priority": 70, "input_len": 512, "output_len": 2}
-            ],
-        },
+        timeout_s=case.value("cancel_tombstoned.incoming_timeout_s"),
+        params=case.value("cancel_tombstoned.incoming"),
     )
     case.step(
         "incoming_settled",
         "preemption_settled",
-        timeout_s=90,
+        timeout_s=case.value("cancel_tombstoned.incoming_settled_timeout_s"),
         params={"requests": output("incoming", "requests")},
     )
     case.step(
         "incoming_drain",
         "preemption_live_drain",
-        timeout_s=50,
-        params={"requests": output("incoming", "requests"), "tags": ["incoming"]},
+        timeout_s=case.value("cancel_tombstoned.incoming_drain_timeout_s"),
+        params=case.params(
+            "cancel_tombstoned.incoming_drain",
+            {"requests": output("incoming", "requests")},
+        ),
     )
     case.step(
         "incoming_completed",
@@ -3024,37 +2661,34 @@ def cancel_tombstoned(case):
     case.step(
         "cancel_arrival",
         "preemption_ts_cancel",
-        timeout_s=30,
+        timeout_s=case.value("cancel_tombstoned.cancel_arrival_timeout_s"),
         params={"before": output("baseline_cancel", "snapshot")},
     )
     case.step(
         "fence_probe",
         "preemption_ts_fence",
-        timeout_s=15,
+        timeout_s=case.value("cancel_tombstoned.fence_probe_timeout_s"),
         params={"requests": output("victim", "requests")},
     )
-    case.step("engine_clean", "preemption_ts_engine_clean", timeout_s=80)
-    case.step("residue", "preemption_ts_residue", timeout_s=45)
+    case.step(
+        "engine_clean",
+        "preemption_ts_engine_clean",
+        timeout_s=case.value("cancel_tombstoned.engine_clean_timeout_s"),
+    )
+    case.step(
+        "residue",
+        "preemption_ts_residue",
+        timeout_s=case.value("cancel_tombstoned.residue_timeout_s"),
+    )
     case.step(
         "recovery_prepare",
         "recovery_prepare",
-        params={
-            "count": 1,
-            "concurrency": 1,
-            "input_len": 2048,
-            "output_len": 2,
-            "consume": "immediate",
-            "schedule_timeout_s": 30,
-            "stream_timeout_s": 30,
-            "unique_key_count": 1,
-            "unique_key_start": 1,
-            "generate_payload": "match_schedule",
-        },
+        params=case.value("cancel_tombstoned.recovery_prepare"),
     )
     case.step(
         "recovery_dispatch",
         "recovery_dispatch",
-        timeout_s=60,
+        timeout_s=case.value("cancel_tombstoned.recovery_dispatch_timeout_s"),
         params={"requests": output("recovery_prepare", "requests")},
     )
     case.step(
@@ -3077,97 +2711,3 @@ def cancel_tombstoned(case):
         },
     )
     case.step("teardown", "teardown")
-
-
-VARIANTS = {
-    "same_priority_zero_eviction": {
-        "build": same_priority_zero_eviction,
-        "profiles": ["single-nonbatch"],
-        "metadata": {},
-    },
-    "prefill_queued": {
-        "build": prefill_queued,
-        "profiles": ["single-nonbatch"],
-        "metadata": {},
-    },
-    "timeout_attribution": {
-        "build": timeout_attribution,
-        "profiles": ["single-nonbatch"],
-        "metadata": {},
-    },
-    "disabled_zero_eviction": {
-        "build": disabled_zero_eviction,
-        "profiles": ["single-nonbatch"],
-        "metadata": {},
-    },
-    "comparator_frozen_weak": {
-        "build": comparator_frozen_weak,
-        "profiles": ["single-nonbatch"],
-        "metadata": {},
-    },
-    "config_strict_reject": {
-        "build": config_strict_reject,
-        "profiles": ["single-nonbatch"],
-        "metadata": {},
-    },
-    "decode_engine_owned": {
-        "build": decode_engine_owned,
-        "profiles": ["single-nonbatch"],
-        "metadata": {},
-    },
-    "error_code_family": {
-        "build": error_code_family,
-        "profiles": ["single-nonbatch"],
-        "metadata": {},
-    },
-    "decode_reservation_priority": {
-        "build": decode_reservation_priority,
-        "profiles": ["single-nonbatch"],
-        "metadata": {},
-    },
-    "observability_integrity": {
-        "build": observability_integrity,
-        "profiles": ["single-nonbatch"],
-        "metadata": {},
-    },
-    "prefill_queued_live_single": {
-        "build": prefill_queued_live_single,
-        "profiles": ["single-batch"],
-        "metadata": {
-            "requires": ["enqueue_batch"],
-        },
-    },
-    "prefill_queued_live_window": {
-        "build": prefill_queued_live_window,
-        "profiles": ["batch-window"],
-        "metadata": {
-            "requires": ["enqueue_batch"],
-        },
-    },
-    "decode_reserved_live_single": {
-        "build": decode_reserved_live_single,
-        "profiles": ["single-batch"],
-        "metadata": {
-            "requires": ["enqueue_batch"],
-        },
-    },
-    "decode_reserved_live_window": {
-        "build": decode_reserved_live_window,
-        "profiles": ["batch-window"],
-        "metadata": {
-            "requires": ["enqueue_batch"],
-        },
-    },
-    "cancel_not_found": {
-        "build": cancel_not_found,
-        "profiles": ["single-nonbatch"],
-        "metadata": {},
-    },
-    "cancel_tombstoned": {
-        "build": cancel_tombstoned,
-        "profiles": ["single-batch", "batch-window"],
-        "metadata": {
-            "requires": ["enqueue_batch"],
-        },
-    },
-}

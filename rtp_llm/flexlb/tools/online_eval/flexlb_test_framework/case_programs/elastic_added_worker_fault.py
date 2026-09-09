@@ -2,41 +2,22 @@
 
 from ..case_config import output
 
-METADATA = {
-    "id": "elastic_added_worker_fault",
-    "description": "A newly added worker serves traffic, stops, and serves fresh traffic after "
-    "restart.",
-    "category": "elastic",
-    "requires": ["queue"],
-    "estimated_duration_s": 100,
-}
-
-PROFILES = ["batch-window", "single-batch", "single-nonbatch", "window-nonbatch"]
-
 
 def default(case):
-    case.step("setup", "setup", timeout_s=180)
-    case.step("add", "elastic_add", params={"role": "prefill"})
+    case.step("setup", "setup", timeout_s=case.value("default.setup_timeout_s"))
+    case.step("add", "elastic_add", params=case.value("default.add"))
     case.step(
         "added_topology",
         "elastic_topology",
-        params={
-            "role": "PREFILL",
-            "discovered": 3,
-            "alive": 3,
-            "port": output("add", "port"),
-            "present": True,
-        },
+        params=case.params("default.added_topology", {"port": output("add", "port")}),
     )
     case.step(
         "first_traffic",
         "elastic_added_probe",
-        timeout_s=60,
-        params={
-            "engine": output("add", "engine"),
-            "window_s": 15,
-            "method": "FetchResponse",
-        },
+        timeout_s=case.value("default.first_traffic_timeout_s"),
+        params=case.params(
+            "default.first_traffic", {"engine": output("add", "engine")}
+        ),
     )
     case.step(
         "before_stop",
@@ -46,30 +27,17 @@ def default(case):
     case.step(
         "stop",
         "engine_control",
-        params={"operation": "stop", "targets": [output("add", "engine")]},
+        params=case.params("default.stop", {"targets": [output("add", "engine")]}),
     )
     case.step(
         "stopped_topology",
         "elastic_topology",
-        params={
-            "role": "PREFILL",
-            "discovered": 3,
-            "alive": 2,
-            "port": output("add", "port"),
-            "present": True,
-        },
+        params=case.params("default.stopped_topology", {"port": output("add", "port")}),
     )
     case.step(
         "survivor_request",
         "request",
-        params={
-            "input_len": 2048,
-            "output_len": 2,
-            "count": 1,
-            "block_keys": [7],
-            "schedule_timeout_s": 30,
-            "stream_timeout_s": 10,
-        },
+        params=case.value("default.survivor_request"),
     )
     case.step(
         "survivor_terminal",
@@ -79,46 +47,38 @@ def default(case):
     case.step(
         "survivor_completed",
         "check",
-        params={
-            "actual": output("survivor_terminal", "completed"),
-            "op": "eq",
-            "expected": True,
-        },
+        params=case.params(
+            "default.survivor_completed",
+            {"actual": output("survivor_terminal", "completed")},
+        ),
     )
     case.step(
         "survivor_no_errors",
         "check",
-        params={
-            "actual": output("survivor_terminal", "error_count"),
-            "op": "eq",
-            "expected": 0,
-        },
+        params=case.params(
+            "default.survivor_no_errors",
+            {"actual": output("survivor_terminal", "error_count")},
+        ),
     )
     case.step(
         "restart",
         "engine_control",
-        params={"operation": "start", "targets": [output("add", "engine")]},
+        params=case.params("default.restart", {"targets": [output("add", "engine")]}),
     )
     case.step(
         "restored_topology",
         "elastic_topology",
-        params={
-            "role": "PREFILL",
-            "discovered": 3,
-            "alive": 3,
-            "port": output("add", "port"),
-            "present": True,
-        },
+        params=case.params(
+            "default.restored_topology", {"port": output("add", "port")}
+        ),
     )
     case.step(
         "resumed_traffic",
         "elastic_added_probe",
-        timeout_s=65,
-        params={
-            "engine": output("add", "engine"),
-            "window_s": 20,
-            "method": "FetchResponse",
-        },
+        timeout_s=case.value("default.resumed_traffic_timeout_s"),
+        params=case.params(
+            "default.resumed_traffic", {"engine": output("add", "engine")}
+        ),
     )
     case.step(
         "after_restart",
@@ -137,28 +97,22 @@ def default(case):
 
 
 def single_batch(case):
-    case.step("setup", "setup", timeout_s=180)
-    case.step("add", "elastic_add", params={"role": "prefill"})
+    case.step("setup", "setup", timeout_s=case.value("single_batch.setup_timeout_s"))
+    case.step("add", "elastic_add", params=case.value("single_batch.add"))
     case.step(
         "added_topology",
         "elastic_topology",
-        params={
-            "role": "PREFILL",
-            "discovered": 3,
-            "alive": 3,
-            "port": output("add", "port"),
-            "present": True,
-        },
+        params=case.params(
+            "single_batch.added_topology", {"port": output("add", "port")}
+        ),
     )
     case.step(
         "first_traffic",
         "elastic_added_probe",
-        timeout_s=60,
-        params={
-            "engine": output("add", "engine"),
-            "window_s": 15,
-            "method": "FetchResponse",
-        },
+        timeout_s=case.value("single_batch.first_traffic_timeout_s"),
+        params=case.params(
+            "single_batch.first_traffic", {"engine": output("add", "engine")}
+        ),
     )
     case.step(
         "before_stop",
@@ -168,30 +122,19 @@ def single_batch(case):
     case.step(
         "stop",
         "engine_control",
-        params={"operation": "stop", "targets": [output("add", "engine")]},
+        params=case.params("single_batch.stop", {"targets": [output("add", "engine")]}),
     )
     case.step(
         "stopped_topology",
         "elastic_topology",
-        params={
-            "role": "PREFILL",
-            "discovered": 3,
-            "alive": 2,
-            "port": output("add", "port"),
-            "present": True,
-        },
+        params=case.params(
+            "single_batch.stopped_topology", {"port": output("add", "port")}
+        ),
     )
     case.step(
         "survivor_request",
         "request",
-        params={
-            "input_len": 2048,
-            "output_len": 2,
-            "count": 1,
-            "block_keys": [7],
-            "schedule_timeout_s": 30,
-            "stream_timeout_s": 10,
-        },
+        params=case.value("single_batch.survivor_request"),
     )
     case.step(
         "survivor_terminal",
@@ -201,46 +144,40 @@ def single_batch(case):
     case.step(
         "survivor_completed",
         "check",
-        params={
-            "actual": output("survivor_terminal", "completed"),
-            "op": "eq",
-            "expected": True,
-        },
+        params=case.params(
+            "single_batch.survivor_completed",
+            {"actual": output("survivor_terminal", "completed")},
+        ),
     )
     case.step(
         "survivor_no_errors",
         "check",
-        params={
-            "actual": output("survivor_terminal", "error_count"),
-            "op": "eq",
-            "expected": 0,
-        },
+        params=case.params(
+            "single_batch.survivor_no_errors",
+            {"actual": output("survivor_terminal", "error_count")},
+        ),
     )
     case.step(
         "restart",
         "engine_control",
-        params={"operation": "start", "targets": [output("add", "engine")]},
+        params=case.params(
+            "single_batch.restart", {"targets": [output("add", "engine")]}
+        ),
     )
     case.step(
         "restored_topology",
         "elastic_topology",
-        params={
-            "role": "PREFILL",
-            "discovered": 3,
-            "alive": 3,
-            "port": output("add", "port"),
-            "present": True,
-        },
+        params=case.params(
+            "single_batch.restored_topology", {"port": output("add", "port")}
+        ),
     )
     case.step(
         "resumed_traffic",
         "elastic_added_probe",
-        timeout_s=65,
-        params={
-            "engine": output("add", "engine"),
-            "window_s": 20,
-            "method": "FetchResponse",
-        },
+        timeout_s=case.value("single_batch.resumed_traffic_timeout_s"),
+        params=case.params(
+            "single_batch.resumed_traffic", {"engine": output("add", "engine")}
+        ),
     )
     case.step(
         "after_restart",
@@ -259,28 +196,22 @@ def single_batch(case):
 
 
 def single_nonbatch(case):
-    case.step("setup", "setup", timeout_s=180)
-    case.step("add", "elastic_add", params={"role": "prefill"})
+    case.step("setup", "setup", timeout_s=case.value("single_nonbatch.setup_timeout_s"))
+    case.step("add", "elastic_add", params=case.value("single_nonbatch.add"))
     case.step(
         "added_topology",
         "elastic_topology",
-        params={
-            "role": "PREFILL",
-            "discovered": 3,
-            "alive": 3,
-            "port": output("add", "port"),
-            "present": True,
-        },
+        params=case.params(
+            "single_nonbatch.added_topology", {"port": output("add", "port")}
+        ),
     )
     case.step(
         "first_traffic",
         "elastic_added_probe",
-        timeout_s=60,
-        params={
-            "engine": output("add", "engine"),
-            "window_s": 15,
-            "method": "GenerateStreamCall",
-        },
+        timeout_s=case.value("single_nonbatch.first_traffic_timeout_s"),
+        params=case.params(
+            "single_nonbatch.first_traffic", {"engine": output("add", "engine")}
+        ),
     )
     case.step(
         "before_stop",
@@ -290,30 +221,21 @@ def single_nonbatch(case):
     case.step(
         "stop",
         "engine_control",
-        params={"operation": "stop", "targets": [output("add", "engine")]},
+        params=case.params(
+            "single_nonbatch.stop", {"targets": [output("add", "engine")]}
+        ),
     )
     case.step(
         "stopped_topology",
         "elastic_topology",
-        params={
-            "role": "PREFILL",
-            "discovered": 3,
-            "alive": 2,
-            "port": output("add", "port"),
-            "present": True,
-        },
+        params=case.params(
+            "single_nonbatch.stopped_topology", {"port": output("add", "port")}
+        ),
     )
     case.step(
         "survivor_request",
         "request",
-        params={
-            "input_len": 2048,
-            "output_len": 2,
-            "count": 1,
-            "block_keys": [7],
-            "schedule_timeout_s": 30,
-            "stream_timeout_s": 10,
-        },
+        params=case.value("single_nonbatch.survivor_request"),
     )
     case.step(
         "survivor_terminal",
@@ -323,46 +245,40 @@ def single_nonbatch(case):
     case.step(
         "survivor_completed",
         "check",
-        params={
-            "actual": output("survivor_terminal", "completed"),
-            "op": "eq",
-            "expected": True,
-        },
+        params=case.params(
+            "single_nonbatch.survivor_completed",
+            {"actual": output("survivor_terminal", "completed")},
+        ),
     )
     case.step(
         "survivor_no_errors",
         "check",
-        params={
-            "actual": output("survivor_terminal", "error_count"),
-            "op": "eq",
-            "expected": 0,
-        },
+        params=case.params(
+            "single_nonbatch.survivor_no_errors",
+            {"actual": output("survivor_terminal", "error_count")},
+        ),
     )
     case.step(
         "restart",
         "engine_control",
-        params={"operation": "start", "targets": [output("add", "engine")]},
+        params=case.params(
+            "single_nonbatch.restart", {"targets": [output("add", "engine")]}
+        ),
     )
     case.step(
         "restored_topology",
         "elastic_topology",
-        params={
-            "role": "PREFILL",
-            "discovered": 3,
-            "alive": 3,
-            "port": output("add", "port"),
-            "present": True,
-        },
+        params=case.params(
+            "single_nonbatch.restored_topology", {"port": output("add", "port")}
+        ),
     )
     case.step(
         "resumed_traffic",
         "elastic_added_probe",
-        timeout_s=65,
-        params={
-            "engine": output("add", "engine"),
-            "window_s": 20,
-            "method": "GenerateStreamCall",
-        },
+        timeout_s=case.value("single_nonbatch.resumed_traffic_timeout_s"),
+        params=case.params(
+            "single_nonbatch.resumed_traffic", {"engine": output("add", "engine")}
+        ),
     )
     case.step(
         "after_restart",
@@ -381,28 +297,22 @@ def single_nonbatch(case):
 
 
 def window_nonbatch(case):
-    case.step("setup", "setup", timeout_s=180)
-    case.step("add", "elastic_add", params={"role": "prefill"})
+    case.step("setup", "setup", timeout_s=case.value("window_nonbatch.setup_timeout_s"))
+    case.step("add", "elastic_add", params=case.value("window_nonbatch.add"))
     case.step(
         "added_topology",
         "elastic_topology",
-        params={
-            "role": "PREFILL",
-            "discovered": 3,
-            "alive": 3,
-            "port": output("add", "port"),
-            "present": True,
-        },
+        params=case.params(
+            "window_nonbatch.added_topology", {"port": output("add", "port")}
+        ),
     )
     case.step(
         "first_traffic",
         "elastic_added_probe",
-        timeout_s=60,
-        params={
-            "engine": output("add", "engine"),
-            "window_s": 15,
-            "method": "GenerateStreamCall",
-        },
+        timeout_s=case.value("window_nonbatch.first_traffic_timeout_s"),
+        params=case.params(
+            "window_nonbatch.first_traffic", {"engine": output("add", "engine")}
+        ),
     )
     case.step(
         "before_stop",
@@ -412,30 +322,21 @@ def window_nonbatch(case):
     case.step(
         "stop",
         "engine_control",
-        params={"operation": "stop", "targets": [output("add", "engine")]},
+        params=case.params(
+            "window_nonbatch.stop", {"targets": [output("add", "engine")]}
+        ),
     )
     case.step(
         "stopped_topology",
         "elastic_topology",
-        params={
-            "role": "PREFILL",
-            "discovered": 3,
-            "alive": 2,
-            "port": output("add", "port"),
-            "present": True,
-        },
+        params=case.params(
+            "window_nonbatch.stopped_topology", {"port": output("add", "port")}
+        ),
     )
     case.step(
         "survivor_request",
         "request",
-        params={
-            "input_len": 2048,
-            "output_len": 2,
-            "count": 1,
-            "block_keys": [7],
-            "schedule_timeout_s": 30,
-            "stream_timeout_s": 10,
-        },
+        params=case.value("window_nonbatch.survivor_request"),
     )
     case.step(
         "survivor_terminal",
@@ -445,46 +346,40 @@ def window_nonbatch(case):
     case.step(
         "survivor_completed",
         "check",
-        params={
-            "actual": output("survivor_terminal", "completed"),
-            "op": "eq",
-            "expected": True,
-        },
+        params=case.params(
+            "window_nonbatch.survivor_completed",
+            {"actual": output("survivor_terminal", "completed")},
+        ),
     )
     case.step(
         "survivor_no_errors",
         "check",
-        params={
-            "actual": output("survivor_terminal", "error_count"),
-            "op": "eq",
-            "expected": 0,
-        },
+        params=case.params(
+            "window_nonbatch.survivor_no_errors",
+            {"actual": output("survivor_terminal", "error_count")},
+        ),
     )
     case.step(
         "restart",
         "engine_control",
-        params={"operation": "start", "targets": [output("add", "engine")]},
+        params=case.params(
+            "window_nonbatch.restart", {"targets": [output("add", "engine")]}
+        ),
     )
     case.step(
         "restored_topology",
         "elastic_topology",
-        params={
-            "role": "PREFILL",
-            "discovered": 3,
-            "alive": 3,
-            "port": output("add", "port"),
-            "present": True,
-        },
+        params=case.params(
+            "window_nonbatch.restored_topology", {"port": output("add", "port")}
+        ),
     )
     case.step(
         "resumed_traffic",
         "elastic_added_probe",
-        timeout_s=65,
-        params={
-            "engine": output("add", "engine"),
-            "window_s": 20,
-            "method": "GenerateStreamCall",
-        },
+        timeout_s=case.value("window_nonbatch.resumed_traffic_timeout_s"),
+        params=case.params(
+            "window_nonbatch.resumed_traffic", {"engine": output("add", "engine")}
+        ),
     )
     case.step(
         "after_restart",
@@ -500,23 +395,3 @@ def window_nonbatch(case):
         },
     )
     case.step("teardown", "teardown")
-
-
-VARIANTS = {
-    "default": {"build": default, "profiles": ["batch-window"], "metadata": {}},
-    "single_batch": {
-        "build": single_batch,
-        "profiles": ["single-batch"],
-        "metadata": {},
-    },
-    "single_nonbatch": {
-        "build": single_nonbatch,
-        "profiles": ["single-nonbatch"],
-        "metadata": {},
-    },
-    "window_nonbatch": {
-        "build": window_nonbatch,
-        "profiles": ["window-nonbatch"],
-        "metadata": {},
-    },
-}

@@ -4,48 +4,37 @@
 术语、profile、资源所有权与结果状态见 [框架设计](framework-design.md)。
 以下命令从仓库根目录运行；真实 Java 测试使用已分配的远端端口与运行目录。
 
-## 1. 只改变 P/D 规模或输入：添加 YAML 配置
+## 1. 只改变配置：修改 YAML
 
-复用现有 `request_completion` 程序，无须新增 Python 文件。例如保存为
-`rtp_llm/flexlb/tools/online_eval/scenarios/core/completion_large.yaml`：
+复制最接近的 `scenarios/` 配置文件，修改顶层 `id`，保留程序所需的参数节，
+再按目标测试修改环境、输入、时间预算和断言数据。Python 不提供缺失参数的默认值。
+
+每行 `variants` 通过 `program` 选择 Python 函数；同一函数可以配出多种规模。
+例如在现有 `request_completion.yaml` 中增加：
 
 ```yaml
-schema_version: 2
-case: request_completion
-id: completion_large
-profiles: [batch-window, single-batch]
-environment:
-  backend: java_mock
-  n_prefill: 4
-  n_decode: 8
-parameters:
-  input_len: 4096
-  output_len: 8
-  count: 4
-execution:
-  timeout_s: 300
-  stage_timeout_s: 60
-  cleanup_timeout_s: 120
-variants:
-  - id: immediate
-  - id: delayed
-    use: deferred_fetch
-    environment:
-      n_prefill: 2
-      n_decode: 4
-    parameters:
-      count: 2
+- id: completion_4p8d
+  program: immediate
+  profiles: [batch-window, single-batch]
+  environment:
+    n_prefill: 4
+    n_decode: 8
+  parameters:
+    count: 4
+    input_len: 4096
+    output_len: 8
+    completion:
+      setup_timeout_s: 240
 ```
 
-这里生成 4 个实例。`immediate` 调用已有 Python 函数，`delayed` 调用 `deferred_fetch`；
-后者在 wait 时才开始 Fetch。各行的环境和参数互相独立。
-配置中没有请求步骤、wait、分支或断言；完成且零错误的契约仍在 Python 中。
+该行生成两个实例。根 `parameters` 与本行参数递归合并，列表和标量整体替换；
+本行只覆盖 `completion.setup_timeout_s`，其余 completion 配置仍继承根配置。
+每个实例取得独立副本，不会污染其他变体。
 
-改变输入前先查看目标 Python 程序支持哪些 `case.number(...)` 参数。
-目前 completion 支持上述三个参数，其他程序按各自声明接受参数。
-`environment.n_prefill/n_decode` 属于公共环境配置；并非每条业务逻辑都适合任意规模，
-例如“恰好两个 worker 的 90:10 分布”还依赖 Python 中的固定构造，需要一起审查。
-拼错、未使用或越界参数会在编译时直接失败。
+所有用例配置写在 YAML：`environment`、`profiles`、`execution`、`metadata`、
+`parameters` 和数值约束 `parameter_schema`。Python 不再维护 `VARIANTS`、
+`PROFILES`、`METADATA`，也不通过 `case.number()` 提供默认值或上下界。
+改变阈值会改变测试含义，应说明依据；不能为了得到 PASS 放宽期望。
 
 ## 2. 需要新的业务流程：添加 Python 程序
 
@@ -54,71 +43,74 @@ variants:
 ```python
 from ..case_config import output
 
-METADATA = {
-    "description": "All submitted requests reach terminal without errors.",
-    "category": "status",
-    "tags": ["smoke"],
-}
-PROFILES = ["batch-window", "single-batch"]
-
 
 def normal(case):
-    count = case.number("count", 2, maximum=1000)
-    case.step("setup", "setup", timeout_s=180)
-    case.step("submit", "request", params={
-        "input_len": 2048, "output_len": 2, "count": count,
-    })
+    case.step("setup", "setup", timeout_s=case.value("setup_timeout_s"))
+    case.step("submit", "request", params=case.value("request"))
     case.step("terminal", "wait", params={
         "requests": output("submit", "requests"),
     })
-    for name, field, expected in (
-        ("completed", "completed", True),
-        ("no_errors", "error_count", 0),
-    ):
-        case.step(name, "check", params={
-            "actual": output("terminal", field), "op": "eq", "expected": expected,
-        })
+    case.step("completed", "check", params=case.params("completed", {
+        "actual": output("terminal", "completed"),
+    }))
+    case.step("no_errors", "check", params=case.params("no_errors", {
+        "actual": output("terminal", "error_count"),
+    }))
     case.step("cleanup", "teardown")
-
-
-VARIANTS = {
-    "normal": {"build": normal, "profiles": PROFILES, "metadata": {}},
-}
 ```
 
-然后在 `case_programs/__init__.py` 的 `PROGRAMS` 中显式注册：
+在 `case_programs/__init__.py` 的 `PROGRAMS` 中注册模块入口：
 
 ```python
 "my_completion": "flexlb_test_framework.case_programs.my_completion",
 ```
 
-配套 YAML 只需给出程序名、环境与参数：
+配套 YAML 定义全部用例数据：
 
 ```yaml
 schema_version: 2
 case: my_completion
+metadata:
+  description: All submitted requests complete without stream errors.
+  category: status
+  tags: [smoke]
+profiles: [batch-window, single-batch]
 environment: {backend: java_mock, n_prefill: 2, n_decode: 2}
-parameters: {count: 2}
-variants: [{id: normal}]
+execution: {timeout_s: 300, stage_timeout_s: 60, cleanup_timeout_s: 120}
+parameters:
+  setup_timeout_s: 180
+  request: {input_len: 2048, output_len: 2, count: 2}
+  completed: {op: eq, expected: true}
+  no_errors: {op: eq, expected: 0}
+variants:
+- id: normal
+  program: normal
 ```
 
-没有根 profiles 时，默认采用该 Python 变体声明的 profiles。
-Python 构造器负责产生计划，此时不要发请求或启动服务。根据配置数据选择 Python 分支，
-或用 Python 循环构造重复步骤；运行中的动态观测放在 action 中处理。
-不要把 `steps`、`action`、`$ref` 等编排字段重新塞进 YAML。
+`case.value("path.to.value")` 读取必填参数；`case.number("count")` 额外按 YAML
+`parameter_schema.count` 中的 `minimum/maximum/integer` 校验数值。
+`case.params("path", dynamic)` 把 YAML 数据与 Python 运行结果引用递归合并；
+动态引用由 Python 绑定，不能在 YAML 中填写 `$ref`。
+
+`profiles` 必须在根或变体行给出，变体行覆盖根列表；没有 Python 隐藏的 profile 列表。
+元数据、能力要求和 finding 标记也在 YAML 的 `metadata` 中配置，可按变体覆盖。
+实际能力仍由编译器验证，例如需要 batch 接口的流程不能在 non_batch 环境运行。
+
+Python 构造器只决定操作顺序、分支、循环、结果绑定与计算，此时不发请求或启动服务。
+运行中的动态观测放在 action 中处理；不要把 `steps`、`action`、`$ref` 等编排字段放进 YAML。
 
 ## 3. 检查配置并执行
 
 先列出实例，核对程序哈希、配置哈希和资源预算：
 
 ```bash
-python3 rtp_llm/flexlb/tools/online_eval/scenario_runner.py   --source rtp_llm/flexlb/tools/online_eval/scenarios/core/completion_large.yaml   --list-json
+python3 rtp_llm/flexlb/tools/online_eval/scenario_runner.py   --source rtp_llm/flexlb/tools/online_eval/scenarios/core/my_completion.yaml   --list-json
 ```
 
 再预览父进程分配：
 
 ```bash
-python3 rtp_llm/flexlb/tools/online_eval/parallel_runner.py   --source yaml   --case-dir rtp_llm/flexlb/tools/online_eval/scenarios/core/completion_large.yaml   --instances 'completion_large::immediate::batch-window'   --profile batch-window --grade normal --parallel 1 --shard case   --out-dir /tmp/completion-large-review --dry-run
+python3 rtp_llm/flexlb/tools/online_eval/parallel_runner.py   --source yaml   --case-dir rtp_llm/flexlb/tools/online_eval/scenarios/core/my_completion.yaml   --instances 'my_completion::normal::batch-window'   --profile batch-window --grade normal --parallel 1 --shard case   --out-dir /tmp/completion-large-review --dry-run
 ```
 
 在已分配的远端开发容器中先构建同一源码版本的 Java API 与 Mock JAR，
@@ -149,7 +141,7 @@ python3 rtp_llm/flexlb/tools/online_eval/parallel_runner.py   --source yaml   --
 
 ## 5. Finding 和验证
 
-已确认的 finding 也只能由 Python 元数据声明，例如 `findings: [completed.comparison]`。
+已确认的 finding 由 YAML 的 `metadata` 声明，例如 `findings: [completed.comparison]`。
 它仅承接该检查的普通 FAIL；新失败不能自动标为 finding，ERROR/TIMEOUT/清理错误仍阻断交付。
 
 验证应覆盖新增行为或错误边界，并运行选中的真实 Java 实例。

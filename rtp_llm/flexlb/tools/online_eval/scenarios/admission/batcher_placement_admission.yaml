@@ -1,4 +1,4 @@
-# Configuration for the registered Python case; execution and assertions live in Python.
+# YAML owns all case data; Python owns execution order and result references.
 schema_version: 2
 case: batcher_placement_admission
 profiles:
@@ -24,6 +24,10 @@ variants:
   profiles:
   - batch-window
   - single-batch
+  program: batcher_queue_capacity_park
+  metadata:
+    requires:
+    - enqueue_batch
 - id: batcher_queue_deadline
   profiles:
   - batch-window
@@ -31,6 +35,10 @@ variants:
   environment:
     config_overrides:
       queue_timeout_ms: 1500
+  program: batcher_queue_deadline
+  metadata:
+    requires:
+    - enqueue_batch
 - id: placement_pool_wait
   profiles:
   - single-nonbatch
@@ -39,3 +47,278 @@ variants:
     config_overrides:
       ordering: fifo
       max_inflight_requests_per_worker: 1
+  program: placement_pool_wait
+  metadata:
+    requires:
+    - generate_stream
+metadata:
+  description: Master queue and placement backlog, sampled during Schedule; explicit old deadline, FIFO
+    wait-return and recovery contracts.
+  category: admission
+parameters:
+  batcher_queue_capacity_park:
+    setup_timeout_s: 180
+    slow:
+      operation: set_perf
+      targets:
+      - prefill-0
+      perf:
+        prefill_fixed_ms: 3000
+    sampling_timeout_s: 15
+    sampling:
+      targets:
+      - prefill-0
+      - decode-0
+      - decode-1
+    wave_timeout_s: 90
+    wave:
+      count: 7
+      consume: immediate
+      input_len: 512
+      output_len: 2
+      request_timeout_s: 45
+      schedule_timeout_s: 30
+      spacing_s: 0.4
+    sampled_timeout_s: 15
+    all_admitted:
+      metric: admitted_count
+      expected: 7
+      op: eq
+      scope: all
+    done_timeout_s: 45
+    all_completed:
+      metric: success_count
+      expected: 7
+      op: eq
+      scope: all
+    fifo:
+      metric: await_fifo
+      expected: true
+      op: eq
+      scope: all
+    empty_timeout_s: 15
+    empty:
+      targets:
+      - prefill-0
+      fields:
+      - waiting
+      - prefill_waiting_batches
+      duration_s: 10
+      until_op: eq
+      until_value: 0
+    park_empty:
+      fields:
+      - waiting
+      - prefill_waiting_batches
+      stat: max_latest
+      op: eq
+      expected: 0
+    master_clean_timeout_s: 30
+    master_clean:
+      target: single
+      inflight_zero: true
+    recovery:
+      count: 1
+      input_len: 2048
+      output_len: 2
+      request_timeout_s: 30
+    recovery_done_timeout_s: 40
+    recovered:
+      metric: success_count
+      expected: 1
+      op: eq
+      scope: all
+    relieve:
+      operation: set_perf
+      targets:
+      - prefill-0
+      perf:
+        prefill_fixed_ms: 100
+  batcher_queue_deadline:
+    setup_timeout_s: 180
+    slow:
+      operation: set_perf
+      targets:
+      - prefill-0
+      perf:
+        prefill_fixed_ms: 3000
+    sampling_timeout_s: 15
+    sampling:
+      targets:
+      - prefill-0
+      - decode-0
+      - decode-1
+    wave_timeout_s: 90
+    wave:
+      count: 8
+      consume: immediate
+      input_len: 512
+      output_len: 2
+      request_timeout_s: 30
+      schedule_timeout_s: 30
+      spacing_s: 0.15
+    sampled_timeout_s: 15
+    six_admitted:
+      metric: admitted_count
+      expected: 6
+      op: eq
+      scope: all
+    two_rejected:
+      metric: reject_count
+      expected: 2
+      op: eq
+      scope: all
+    deadline_family:
+      metric: deadline_reject_family
+      expected: true
+      op: eq
+      scope: rejected
+    deadline_min:
+      metric: schedule_latency_min
+      expected: 1
+      op: ge
+      scope: rejected
+    deadline_max:
+      metric: schedule_latency_max
+      expected: 5
+      op: le
+      scope: rejected
+    done_timeout_s: 30
+    six_completed:
+      metric: success_count
+      expected: 6
+      op: eq
+      scope: all
+    no_serving_errors:
+      metric: serve_error_count
+      expected: 0
+      op: eq
+      scope: all
+    relieve:
+      operation: set_perf
+      targets:
+      - prefill-0
+      perf:
+        prefill_fixed_ms: 100
+    master_clean_timeout_s: 30
+    master_clean:
+      target: single
+      inflight_zero: true
+    recovery:
+      count: 1
+      input_len: 2048
+      output_len: 2
+      request_timeout_s: 30
+    recovery_done_timeout_s: 40
+    recovered:
+      metric: success_count
+      expected: 1
+      op: eq
+      scope: all
+  placement_pool_wait:
+    setup_timeout_s: 180
+    slow:
+      operation: set_perf
+      targets:
+      - prefill-0
+      perf:
+        prefill_fixed_ms: 5000
+    a_timeout_s: 90
+    a:
+      count: 1
+      consume: immediate
+      input_len: 512
+      output_len: 2
+      request_timeout_s: 30
+      schedule_timeout_s: 30
+      spacing_s: 0
+    a_admitted:
+      metric: admitted_count
+      expected: 1
+      op: eq
+      scope: all
+    running_timeout_s: 15
+    running:
+      targets:
+      - prefill-0
+      fields:
+      - running
+      duration_s: 10
+      until_op: ge
+      until_value: 1
+    a_running:
+      fields:
+      - running
+      stat: max_seen
+      op: ge
+      expected: 1
+    lease_before_b_timeout_s: 15
+    lease_before_b:
+      targets:
+      - prefill-0
+      - decode-0
+      - decode-1
+    sampling_timeout_s: 15
+    sampling:
+      targets:
+      - prefill-0
+      - decode-0
+      - decode-1
+    b_timeout_s: 90
+    b:
+      count: 1
+      consume: immediate
+      input_len: 512
+      output_len: 2
+      request_timeout_s: 30
+      schedule_timeout_s: 60
+      spacing_s: 0
+    sampled_timeout_s: 15
+    b_admitted:
+      metric: admitted_count
+      expected: 1
+      op: eq
+      scope: all
+    b_rpc_parked:
+      metric: schedule_latency_min
+      expected: 0.5
+      op: gt
+      scope: all
+    done_timeout_s: 30
+    both_completed:
+      metric: success_count
+      expected: 2
+      op: eq
+      scope: all
+    b_after_a:
+      metric: await_strict_fifo
+      expected: true
+      op: eq
+      scope: all
+    master_clean_timeout_s: 30
+    master_clean:
+      target: single
+      inflight_zero: true
+    engine_clean_timeout_s: 15
+    engine_clean:
+      targets:
+      - prefill-0
+      - decode-0
+      - decode-1
+    recovery:
+      count: 1
+      input_len: 2048
+      output_len: 2
+      request_timeout_s: 30
+    recovery_done_timeout_s: 40
+    recovered:
+      metric: success_count
+      expected: 1
+      op: eq
+      scope: all
+    relieve:
+      operation: set_perf
+      targets:
+      - prefill-0
+      perf:
+        prefill_fixed_ms: 100

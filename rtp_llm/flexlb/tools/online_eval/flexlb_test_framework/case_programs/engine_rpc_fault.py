@@ -2,208 +2,184 @@
 
 from ..case_config import output
 
-METADATA = {
-    "id": "engine_rpc_fault",
-    "description": "Explicit request baselines, controlled RPC faults, consumer-complete outcomes, "
-    "recovery and applicable scheduler-owner cleanup.",
-    "category": "engine_fault",
-}
-
-PROFILES = ["batch-window", "single-nonbatch", "single-batch", "window-nonbatch"]
-
 
 def enqueue_delay_batch(case):
-    case.step("setup", "setup", timeout_s=180)
+    case.step(
+        "setup", "setup", timeout_s=case.value("enqueue_delay_batch.setup_timeout_s")
+    )
     case.step(
         "baseline",
         "rpc_latency_sample",
-        timeout_s=125,
-        params={"mode": "request_total", "input_len": 2048, "output_len": 10},
+        timeout_s=case.value("enqueue_delay_batch.baseline_timeout_s"),
+        params=case.value("enqueue_delay_batch.baseline"),
     )
     case.step(
         "baseline_ready",
         "check",
-        params={
-            "actual": output("baseline", "legacy_success"),
-            "op": "eq",
-            "expected": True,
-        },
+        params=case.params(
+            "enqueue_delay_batch.baseline_ready",
+            {"actual": output("baseline", "legacy_success")},
+        ),
     )
     case.step(
         "inject",
         "engine_inject",
-        params={
-            "targets": ["prefill-0", "prefill-1"],
-            "type": "enqueue_delay",
-            "options": {"delay_ms": 1500},
-        },
+        params=case.value("enqueue_delay_batch.inject"),
     )
     case.step(
         "delayed",
         "rpc_latency_sample",
-        timeout_s=125,
-        params={"mode": "request_total", "input_len": 2048, "output_len": 10},
+        timeout_s=case.value("enqueue_delay_batch.delayed_timeout_s"),
+        params=case.value("enqueue_delay_batch.delayed"),
     )
     case.step("clear", "engine_clear", params={"fault": output("inject", "fault")})
     case.step(
         "recovery",
         "rpc_latency_sample",
-        timeout_s=125,
-        params={"mode": "request_total", "input_len": 2048, "output_len": 10},
+        timeout_s=case.value("enqueue_delay_batch.recovery_timeout_s"),
+        params=case.value("enqueue_delay_batch.recovery"),
     )
     case.step(
         "latency",
         "rpc_latency_check",
-        params={
-            "baseline": output("baseline", "requests"),
-            "delayed": output("delayed", "requests"),
-            "recovery": output("recovery", "requests"),
-            "metric": "request_total",
-            "min_delta_s": 1.2,
-            "recovery_slack_s": 1.0,
-        },
+        params=case.params(
+            "enqueue_delay_batch.latency",
+            {
+                "baseline": output("baseline", "requests"),
+                "delayed": output("delayed", "requests"),
+                "recovery": output("recovery", "requests"),
+            },
+        ),
     )
-    case.step("owner_clean", "rpc_owner_clean", timeout_s=10)
+    case.step(
+        "owner_clean",
+        "rpc_owner_clean",
+        timeout_s=case.value("enqueue_delay_batch.owner_clean_timeout_s"),
+    )
     case.step("cleanup", "teardown")
 
 
 def generate_delay_batch(case):
-    case.step("setup", "setup", timeout_s=180)
+    case.step(
+        "setup", "setup", timeout_s=case.value("generate_delay_batch.setup_timeout_s")
+    )
     case.step(
         "baseline",
         "rpc_latency_sample",
-        timeout_s=125,
-        params={"mode": "stream_ttft", "input_len": 2048, "output_len": 10},
+        timeout_s=case.value("generate_delay_batch.baseline_timeout_s"),
+        params=case.value("generate_delay_batch.baseline"),
     )
     case.step(
         "baseline_ready",
         "check",
-        params={
-            "actual": output("baseline", "legacy_success"),
-            "op": "eq",
-            "expected": True,
-        },
+        params=case.params(
+            "generate_delay_batch.baseline_ready",
+            {"actual": output("baseline", "legacy_success")},
+        ),
     )
     case.step(
         "inject",
         "engine_inject",
-        params={
-            "targets": ["prefill-0", "prefill-1"],
-            "type": "generate_delay",
-            "options": {"delay_ms": 1500},
-        },
+        params=case.value("generate_delay_batch.inject"),
     )
     case.step(
         "delayed",
         "rpc_latency_sample",
-        timeout_s=125,
-        params={"mode": "stream_ttft", "input_len": 2048, "output_len": 10},
+        timeout_s=case.value("generate_delay_batch.delayed_timeout_s"),
+        params=case.value("generate_delay_batch.delayed"),
     )
     case.step("clear", "engine_clear", params={"fault": output("inject", "fault")})
     case.step(
         "recovery",
         "rpc_latency_sample",
-        timeout_s=125,
-        params={"mode": "stream_ttft", "input_len": 2048, "output_len": 10},
+        timeout_s=case.value("generate_delay_batch.recovery_timeout_s"),
+        params=case.value("generate_delay_batch.recovery"),
     )
     case.step(
         "latency",
         "rpc_latency_check",
-        params={
-            "baseline": output("baseline", "requests"),
-            "delayed": output("delayed", "requests"),
-            "recovery": output("recovery", "requests"),
-            "metric": "stream_ttft",
-            "min_delta_s": 1.2,
-            "recovery_slack_s": 1.0,
-        },
+        params=case.params(
+            "generate_delay_batch.latency",
+            {
+                "baseline": output("baseline", "requests"),
+                "delayed": output("delayed", "requests"),
+                "recovery": output("recovery", "requests"),
+            },
+        ),
     )
-    case.step("owner_clean", "rpc_owner_clean", timeout_s=10)
+    case.step(
+        "owner_clean",
+        "rpc_owner_clean",
+        timeout_s=case.value("generate_delay_batch.owner_clean_timeout_s"),
+    )
     case.step("cleanup", "teardown")
 
 
 def generate_delay_nonbatch(case):
-    case.step("setup", "setup", timeout_s=180)
+    case.step(
+        "setup",
+        "setup",
+        timeout_s=case.value("generate_delay_nonbatch.setup_timeout_s"),
+    )
     case.step(
         "baseline",
         "rpc_latency_sample",
-        timeout_s=125,
-        params={"mode": "stream_ttft", "input_len": 2048, "output_len": 10},
+        timeout_s=case.value("generate_delay_nonbatch.baseline_timeout_s"),
+        params=case.value("generate_delay_nonbatch.baseline"),
     )
     case.step(
         "baseline_ready",
         "check",
-        params={
-            "actual": output("baseline", "legacy_success"),
-            "op": "eq",
-            "expected": True,
-        },
+        params=case.params(
+            "generate_delay_nonbatch.baseline_ready",
+            {"actual": output("baseline", "legacy_success")},
+        ),
     )
     case.step(
         "inject",
         "engine_inject",
-        params={
-            "targets": ["prefill-0", "prefill-1"],
-            "type": "generate_delay",
-            "options": {"delay_ms": 1500},
-        },
+        params=case.value("generate_delay_nonbatch.inject"),
     )
     case.step(
         "delayed",
         "rpc_latency_sample",
-        timeout_s=125,
-        params={"mode": "stream_ttft", "input_len": 2048, "output_len": 10},
+        timeout_s=case.value("generate_delay_nonbatch.delayed_timeout_s"),
+        params=case.value("generate_delay_nonbatch.delayed"),
     )
     case.step("clear", "engine_clear", params={"fault": output("inject", "fault")})
     case.step(
         "recovery",
         "rpc_latency_sample",
-        timeout_s=125,
-        params={"mode": "stream_ttft", "input_len": 2048, "output_len": 10},
+        timeout_s=case.value("generate_delay_nonbatch.recovery_timeout_s"),
+        params=case.value("generate_delay_nonbatch.recovery"),
     )
     case.step(
         "latency",
         "rpc_latency_check",
-        params={
-            "baseline": output("baseline", "requests"),
-            "delayed": output("delayed", "requests"),
-            "recovery": output("recovery", "requests"),
-            "metric": "stream_ttft",
-            "min_delta_s": 1.2,
-            "recovery_slack_s": 1.0,
-        },
+        params=case.params(
+            "generate_delay_nonbatch.latency",
+            {
+                "baseline": output("baseline", "requests"),
+                "delayed": output("delayed", "requests"),
+                "recovery": output("recovery", "requests"),
+            },
+        ),
     )
     case.step("cleanup", "teardown")
 
 
 def enqueue_error(case):
-    case.step("setup", "setup", timeout_s=180)
+    case.step("setup", "setup", timeout_s=case.value("enqueue_error.setup_timeout_s"))
     case.step(
         "inject",
         "engine_inject",
-        params={
-            "targets": ["prefill-0", "prefill-1"],
-            "type": "enqueue_error",
-            "options": {},
-        },
+        params=case.value("enqueue_error.inject"),
     )
     case.step(
         "probe",
         "rpc_fault_probe",
-        timeout_s=45,
-        params={
-            "input_len": 2048,
-            "output_len": 10,
-            "schedule_timeout_s": 30,
-            "stream_timeout_s": 10,
-            "expected_rpc_statuses": [
-                "UNKNOWN",
-                "INTERNAL",
-                "UNAVAILABLE",
-                "DEADLINE_EXCEEDED",
-            ],
-            "require_error_detail": True,
-        },
+        timeout_s=case.value("enqueue_error.probe_timeout_s"),
+        params=case.value("enqueue_error.probe"),
     )
     case.step("clear", "engine_clear", params={"fault": output("inject", "fault")})
     case.step(
@@ -211,72 +187,34 @@ def enqueue_error(case):
         "rpc_probe_cancel",
         params={"requests": output("probe", "requests")},
     )
-    case.step("recovery_settle", "balance_pause", params={"seconds": 3})
+    case.step(
+        "recovery_settle",
+        "balance_pause",
+        params=case.value("enqueue_error.recovery_settle"),
+    )
     case.step(
         "recovery",
         "request",
-        params={
-            "count": 1,
-            "input_len": 2048,
-            "output_len": 2,
-            "schedule_timeout_s": 30,
-            "stream_timeout_s": 30,
-        },
+        params=case.value("enqueue_error.recovery"),
     )
     case.step(
         "recovery_terminal",
         "wait",
-        timeout_s=30,
+        timeout_s=case.value("enqueue_error.recovery_terminal_timeout_s"),
         params={"requests": output("recovery", "requests")},
     )
     case.step(
         "recovery_success",
         "check",
-        params={
-            "actual": output("recovery_terminal", "completed"),
-            "op": "eq",
-            "expected": True,
-        },
+        params=case.params(
+            "enqueue_error.recovery_success",
+            {"actual": output("recovery_terminal", "completed")},
+        ),
     )
     case.step(
         "owner_clean",
         "rpc_probe_owner_clean",
-        timeout_s=95,
+        timeout_s=case.value("enqueue_error.owner_clean_timeout_s"),
         params={"requests": output("probe", "requests")},
     )
     case.step("cleanup", "teardown")
-
-
-VARIANTS = {
-    "enqueue_delay_batch": {
-        "build": enqueue_delay_batch,
-        "profiles": ["batch-window", "single-batch"],
-        "metadata": {
-            "requires": ["enqueue_batch"],
-        },
-    },
-    "generate_delay_batch": {
-        "build": generate_delay_batch,
-        "profiles": ["batch-window", "single-batch"],
-        "metadata": {
-            "requires": ["enqueue_batch"],
-        },
-    },
-    "generate_delay_nonbatch": {
-        "build": generate_delay_nonbatch,
-        "profiles": ["single-nonbatch", "window-nonbatch"],
-        "metadata": {
-            "requires": [],
-        },
-    },
-    "enqueue_error": {
-        "build": enqueue_error,
-        "profiles": [
-            "batch-window",
-            "single-nonbatch",
-            "single-batch",
-            "window-nonbatch",
-        ],
-        "metadata": {},
-    },
-}

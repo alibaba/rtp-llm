@@ -1,4 +1,4 @@
-# Configuration for the registered Python case; execution and assertions live in Python.
+# YAML owns all case data; Python owns execution order and result references.
 schema_version: 2
 case: cache_capacity_recovery
 profiles:
@@ -21,18 +21,1441 @@ variants:
     n_prefill: 2
     n_decode: 1
     decode_cache_blocks: 3
+  program: decode_pool_exhaustion_terminal
 - id: decode_capacity_park
   environment:
     n_prefill: 2
     n_decode: 4
+  program: decode_capacity_park
 - id: pool_saturation_evict_reject_recover
   environment:
     n_prefill: 1
     n_decode: 2
     prefill_cache_blocks: 27
     decode_cache_blocks: 32
+  program: pool_saturation_evict_reject_recover
 - id: capacity_conflict_overflow
   environment:
     n_prefill: 2
     n_decode: 2
     decode_cache_blocks: 180
+  program: capacity_conflict_overflow
+metadata:
+  description: Explicit P/D pool ownership, capacity WAIT versus terminal rejection, pressure eviction
+    and affinity overflow.
+  category: kv
+parameters:
+  decode_pool_exhaustion_terminal:
+    setup_timeout_s: 180
+    d_base_timeout_s: 10
+    d_base:
+      targets:
+      - decode-0
+      fields:
+      - lack_mem_rejects
+      - kv_admission_fails
+      duration_s: 0
+      interval_s: 0.5
+    p_base_timeout_s: 10
+    p_base:
+      targets:
+      - prefill-0
+      - prefill-1
+      fields:
+      - lack_mem_rejects
+      - held_blocks
+      duration_s: 0
+      interval_s: 0.5
+    probe_timeout_s: 70
+    probe:
+      input_len: 2560
+      output_len: 2
+      mode: complete
+      stream_timeout_s: 15
+      schedule_timeout_s: 30
+      expected_rpc_statuses:
+      - UNKNOWN
+      - INTERNAL
+      - RESOURCE_EXHAUSTED
+      block_keys:
+      - 1400000
+      - 1400001
+    decode_error:
+      metric: typed_error
+      tokens:
+      - lack_mem
+      - decode-side
+      max_s: 3
+    d_grew_timeout_s: 15
+    d_grew:
+      targets:
+      - decode-0
+      fields:
+      - lack_mem_rejects
+      duration_s: 10
+      interval_s: 0.5
+      until_field: lack_mem_rejects
+      until_op: eq
+      until_value: 1
+    exact_once:
+      field: lack_mem_rejects
+      op: eq
+      expected: 1
+      stat: latest
+    counter_sync:
+      wait_s: 0.5
+    d_after_timeout_s: 10
+    d_after:
+      targets:
+      - decode-0
+      fields:
+      - kv_admission_fails
+      duration_s: 0
+      interval_s: 0.5
+    retry_counter_flat:
+      field: kv_admission_fails
+      op: eq
+      expected: 0
+      stat: all
+    p_after_timeout_s: 10
+    p_after:
+      targets:
+      - prefill-0
+      - prefill-1
+      fields:
+      - lack_mem_rejects
+      duration_s: 0
+      interval_s: 0.5
+    prefill_rejects_flat:
+      field: lack_mem_rejects
+      op: eq
+      expected: 0
+      stat: all
+    released_timeout_s: 15
+    released:
+      targets:
+      - prefill-0
+      - prefill-1
+      fields:
+      - held_blocks
+      duration_s: 10
+      interval_s: 0.5
+      until_field: held_blocks
+      until_op: eq
+      until_value: 0
+    p_leases_released:
+      field: held_blocks
+      op: eq
+      expected: 0
+      stat: latest
+    d_recovery_base_timeout_s: 10
+    d_recovery_base:
+      targets:
+      - decode-0
+      fields:
+      - lack_mem_rejects
+      - kv_admission_fails
+      duration_s: 0
+      interval_s: 0.5
+    headroom_timeout_s: 70
+    headroom:
+      input_len: 1024
+      output_len: 2
+      mode: complete
+      stream_timeout_s: 15
+      schedule_timeout_s: 30
+      expected_rpc_statuses: []
+      block_keys:
+      - 1410000
+      - 1410001
+    headroom_succeeded:
+      metric: success
+    recovery_sync:
+      wait_s: 0.5
+    d_stable_timeout_s: 10
+    d_stable:
+      targets:
+      - decode-0
+      fields:
+      - lack_mem_rejects
+      - kv_admission_fails
+      duration_s: 0
+      interval_s: 0.5
+    terminal_counter_stable:
+      field: lack_mem_rejects
+      op: eq
+      expected: 0
+      stat: all
+    retry_counter_stable:
+      field: kv_admission_fails
+      op: eq
+      expected: 0
+      stat: all
+    master_clean_timeout_s: 30
+    master_clean:
+      target: single
+      inflight_zero: true
+    engine_clean_timeout_s: 30
+    engine_clean:
+      targets:
+      - prefill-0
+      - prefill-1
+      - decode-0
+    recovery_timeout_s: 70
+    recovery:
+      input_len: 2048
+      output_len: 2
+      mode: complete
+      stream_timeout_s: 30
+      schedule_timeout_s: 30
+      expected_rpc_statuses: []
+    recovered:
+      metric: success
+  decode_capacity_park:
+    setup_timeout_s: 180
+    pressure:
+      targets:
+      - decode-0
+      - decode-1
+      - decode-2
+      - decode-3
+    status_sync:
+      wait_s: 1.5
+    probe_timeout_s: 70
+    probe:
+      input_len: 2048
+      output_len: 10
+      mode: complete
+      stream_timeout_s: 15
+      schedule_timeout_s: 5
+      expected_rpc_statuses:
+      - DEADLINE_EXCEEDED
+    schedule_stayed_pending:
+      metric: schedule_deadline
+    delivery_sync:
+      wait_s: 0.5
+    delivery_timeout_s: 10
+    delivery:
+      targets:
+      - prefill-0
+      - prefill-1
+      - decode-0
+      - decode-1
+      - decode-2
+      - decode-3
+      fields:
+      - request_lifecycle
+      duration_s: 0
+      interval_s: 0.5
+    cancel_sync:
+      wait_s: 0.5
+    watermark_restored_timeout_s: 10
+    recovery_status_sync:
+      wait_s: 2
+    fresh_timeout_s: 70
+    fresh:
+      input_len: 2048
+      output_len: 2
+      mode: complete
+      stream_timeout_s: 15
+      schedule_timeout_s: 30
+      expected_rpc_statuses: []
+    fresh_succeeded:
+      metric: success
+    recovery_timeout_s: 70
+    recovery:
+      input_len: 2048
+      output_len: 2
+      mode: complete
+      stream_timeout_s: 30
+      schedule_timeout_s: 30
+      expected_rpc_statuses: []
+    recovered:
+      metric: success
+  pool_saturation_evict_reject_recover:
+    setup_timeout_s: 180
+    base_timeout_s: 10
+    base:
+      targets:
+      - prefill-0
+      fields:
+      - cache_evictions
+      - lack_mem_rejects
+      duration_s: 0
+      interval_s: 0.5
+    evict_wave_0_timeout_s: 70
+    evict_wave_0:
+      input_len: 2048
+      output_len: 2
+      mode: complete
+      stream_timeout_s: 15
+      schedule_timeout_s: 30
+      expected_rpc_statuses: []
+      block_keys:
+      - 500000
+      - 500001
+      - 500002
+      - 500003
+      - 500004
+      - 500005
+      - 500006
+      - 500007
+    evict_wave_0_ok:
+      metric: success
+    pool_0_timeout_s: 10
+    pool_0:
+      targets:
+      - prefill-0
+      fields:
+      - cache_blocks
+      - held_blocks
+      - referenced_blocks
+      - available_blocks
+      duration_s: 0
+      interval_s: 0.5
+    evict_wave_1_timeout_s: 70
+    evict_wave_1:
+      input_len: 2048
+      output_len: 2
+      mode: complete
+      stream_timeout_s: 15
+      schedule_timeout_s: 30
+      expected_rpc_statuses: []
+      block_keys:
+      - 501000
+      - 501001
+      - 501002
+      - 501003
+      - 501004
+      - 501005
+      - 501006
+      - 501007
+    evict_wave_1_ok:
+      metric: success
+    pool_1_timeout_s: 10
+    pool_1:
+      targets:
+      - prefill-0
+      fields:
+      - cache_blocks
+      - held_blocks
+      - referenced_blocks
+      - available_blocks
+      duration_s: 0
+      interval_s: 0.5
+    evict_wave_2_timeout_s: 70
+    evict_wave_2:
+      input_len: 2048
+      output_len: 2
+      mode: complete
+      stream_timeout_s: 15
+      schedule_timeout_s: 30
+      expected_rpc_statuses: []
+      block_keys:
+      - 502000
+      - 502001
+      - 502002
+      - 502003
+      - 502004
+      - 502005
+      - 502006
+      - 502007
+    evict_wave_2_ok:
+      metric: success
+    pool_2_timeout_s: 10
+    pool_2:
+      targets:
+      - prefill-0
+      fields:
+      - cache_blocks
+      - held_blocks
+      - referenced_blocks
+      - available_blocks
+      duration_s: 0
+      interval_s: 0.5
+    evict_wave_3_timeout_s: 70
+    evict_wave_3:
+      input_len: 2048
+      output_len: 2
+      mode: complete
+      stream_timeout_s: 15
+      schedule_timeout_s: 30
+      expected_rpc_statuses: []
+      block_keys:
+      - 503000
+      - 503001
+      - 503002
+      - 503003
+      - 503004
+      - 503005
+      - 503006
+      - 503007
+    evict_wave_3_ok:
+      metric: success
+    pool_3_timeout_s: 10
+    pool_3:
+      targets:
+      - prefill-0
+      fields:
+      - cache_blocks
+      - held_blocks
+      - referenced_blocks
+      - available_blocks
+      duration_s: 0
+      interval_s: 0.5
+    evict_wave_4_timeout_s: 70
+    evict_wave_4:
+      input_len: 2048
+      output_len: 2
+      mode: complete
+      stream_timeout_s: 15
+      schedule_timeout_s: 30
+      expected_rpc_statuses: []
+      block_keys:
+      - 504000
+      - 504001
+      - 504002
+      - 504003
+      - 504004
+      - 504005
+      - 504006
+      - 504007
+    evict_wave_4_ok:
+      metric: success
+    pool_4_timeout_s: 10
+    pool_4:
+      targets:
+      - prefill-0
+      fields:
+      - cache_blocks
+      - held_blocks
+      - referenced_blocks
+      - available_blocks
+      duration_s: 0
+      interval_s: 0.5
+    evict_wave_5_timeout_s: 70
+    evict_wave_5:
+      input_len: 2048
+      output_len: 2
+      mode: complete
+      stream_timeout_s: 15
+      schedule_timeout_s: 30
+      expected_rpc_statuses: []
+      block_keys:
+      - 505000
+      - 505001
+      - 505002
+      - 505003
+      - 505004
+      - 505005
+      - 505006
+      - 505007
+    evict_wave_5_ok:
+      metric: success
+    pool_5_timeout_s: 10
+    pool_5:
+      targets:
+      - prefill-0
+      fields:
+      - cache_blocks
+      - held_blocks
+      - referenced_blocks
+      - available_blocks
+      duration_s: 0
+      interval_s: 0.5
+    evict_wave_6_timeout_s: 70
+    evict_wave_6:
+      input_len: 2048
+      output_len: 2
+      mode: complete
+      stream_timeout_s: 15
+      schedule_timeout_s: 30
+      expected_rpc_statuses: []
+      block_keys:
+      - 506000
+      - 506001
+      - 506002
+      - 506003
+      - 506004
+      - 506005
+      - 506006
+      - 506007
+    evict_wave_6_ok:
+      metric: success
+    pool_6_timeout_s: 10
+    pool_6:
+      targets:
+      - prefill-0
+      fields:
+      - cache_blocks
+      - held_blocks
+      - referenced_blocks
+      - available_blocks
+      duration_s: 0
+      interval_s: 0.5
+    evict_wave_7_timeout_s: 70
+    evict_wave_7:
+      input_len: 2048
+      output_len: 2
+      mode: complete
+      stream_timeout_s: 15
+      schedule_timeout_s: 30
+      expected_rpc_statuses: []
+      block_keys:
+      - 507000
+      - 507001
+      - 507002
+      - 507003
+      - 507004
+      - 507005
+      - 507006
+      - 507007
+    evict_wave_7_ok:
+      metric: success
+    pool_7_timeout_s: 10
+    pool_7:
+      targets:
+      - prefill-0
+      fields:
+      - cache_blocks
+      - held_blocks
+      - referenced_blocks
+      - available_blocks
+      duration_s: 0
+      interval_s: 0.5
+    evict_wave_8_timeout_s: 70
+    evict_wave_8:
+      input_len: 2048
+      output_len: 2
+      mode: complete
+      stream_timeout_s: 15
+      schedule_timeout_s: 30
+      expected_rpc_statuses: []
+      block_keys:
+      - 508000
+      - 508001
+      - 508002
+      - 508003
+      - 508004
+      - 508005
+      - 508006
+      - 508007
+    evict_wave_8_ok:
+      metric: success
+    pool_8_timeout_s: 10
+    pool_8:
+      targets:
+      - prefill-0
+      fields:
+      - cache_blocks
+      - held_blocks
+      - referenced_blocks
+      - available_blocks
+      duration_s: 0
+      interval_s: 0.5
+    evict_wave_9_timeout_s: 70
+    evict_wave_9:
+      input_len: 2048
+      output_len: 2
+      mode: complete
+      stream_timeout_s: 15
+      schedule_timeout_s: 30
+      expected_rpc_statuses: []
+      block_keys:
+      - 509000
+      - 509001
+      - 509002
+      - 509003
+      - 509004
+      - 509005
+      - 509006
+      - 509007
+    evict_wave_9_ok:
+      metric: success
+    pool_9_timeout_s: 10
+    pool_9:
+      targets:
+      - prefill-0
+      fields:
+      - cache_blocks
+      - held_blocks
+      - referenced_blocks
+      - available_blocks
+      duration_s: 0
+      interval_s: 0.5
+    evicted_timeout_s: 10
+    evicted:
+      targets:
+      - prefill-0
+      fields:
+      - cache_evictions
+      - cache_key_set
+      duration_s: 0
+      interval_s: 0.5
+    capacity_evictions:
+      field: cache_evictions
+      op: ge
+      expected: 1
+      stat: all
+    key_cap:
+      field: key_count
+      op: le
+      expected: 27
+      stat: all
+    eviction_conservation:
+      field: conservation
+      op: eq
+      expected: 0
+      stat: all
+    slow:
+      operation: set_perf
+      targets:
+      - prefill-0
+      perf:
+        prefill_fixed_ms: 3000
+    perf_sync:
+      wait_s: 1.5
+    occupant_0_timeout_s: 70
+    occupant_0:
+      input_len: 2048
+      output_len: 2
+      mode: fire
+      stream_timeout_s: 30
+      schedule_timeout_s: 30
+      expected_rpc_statuses: []
+      block_keys:
+      - 600000
+      - 600001
+      - 600002
+      - 600003
+      - 600004
+      - 600005
+      - 600006
+      - 600007
+    occupant_0_admitted:
+      metric: admitted
+    occupant_spacing_0:
+      wait_s: 0.4
+    occupant_1_timeout_s: 70
+    occupant_1:
+      input_len: 2048
+      output_len: 2
+      mode: fire
+      stream_timeout_s: 30
+      schedule_timeout_s: 30
+      expected_rpc_statuses: []
+      block_keys:
+      - 601000
+      - 601001
+      - 601002
+      - 601003
+      - 601004
+      - 601005
+      - 601006
+      - 601007
+    occupant_1_admitted:
+      metric: admitted
+    occupant_spacing_1:
+      wait_s: 0.4
+    occupant_2_timeout_s: 70
+    occupant_2:
+      input_len: 2048
+      output_len: 2
+      mode: fire
+      stream_timeout_s: 30
+      schedule_timeout_s: 30
+      expected_rpc_statuses: []
+      block_keys:
+      - 602000
+      - 602001
+      - 602002
+      - 602003
+      - 602004
+      - 602005
+      - 602006
+      - 602007
+    occupant_2_admitted:
+      metric: admitted
+    occupant_spacing_2:
+      wait_s: 0.4
+    enqueues_landed:
+      wait_s: 0.3
+    await_saturation_timeout_s: 10
+    await_saturation:
+      targets:
+      - prefill-0
+      fields:
+      - held_blocks
+      duration_s: 2
+      interval_s: 0.05
+      until_field: held_blocks
+      until_op: ge
+      until_value: 24
+    leading_pool_timeout_s: 10
+    leading_pool:
+      targets:
+      - prefill-0
+      fields:
+      - cache_blocks
+      - held_blocks
+      - referenced_blocks
+      - available_blocks
+      duration_s: 0
+      interval_s: 0.5
+    probe_timeout_s: 70
+    probe:
+      input_len: 2048
+      output_len: 2
+      mode: complete
+      stream_timeout_s: 15
+      schedule_timeout_s: 30
+      expected_rpc_statuses:
+      - UNKNOWN
+      - INTERNAL
+      - RESOURCE_EXHAUSTED
+      block_keys:
+      - 690000
+      - 690001
+      - 690002
+      - 690003
+      - 690004
+      - 690005
+      - 690006
+      - 690007
+    probe_typed_fast:
+      metric: typed_error
+      tokens:
+      - lack_mem
+      - insufficient kv cache
+      max_s: 3
+    burst_0_timeout_s: 70
+    burst_0:
+      input_len: 2048
+      output_len: 2
+      mode: complete
+      stream_timeout_s: 15
+      schedule_timeout_s: 30
+      expected_rpc_statuses:
+      - UNKNOWN
+      - INTERNAL
+      - RESOURCE_EXHAUSTED
+      block_keys:
+      - 680000
+      - 680001
+      - 680002
+      - 680003
+      - 680004
+      - 680005
+      - 680006
+      - 680007
+    burst_1_timeout_s: 70
+    burst_1:
+      input_len: 2048
+      output_len: 2
+      mode: complete
+      stream_timeout_s: 15
+      schedule_timeout_s: 30
+      expected_rpc_statuses:
+      - UNKNOWN
+      - INTERNAL
+      - RESOURCE_EXHAUSTED
+      block_keys:
+      - 681000
+      - 681001
+      - 681002
+      - 681003
+      - 681004
+      - 681005
+      - 681006
+      - 681007
+    burst_typed_fast:
+      metric: bounded_errors
+      tokens:
+      - lack_mem
+      max_s: 3
+    failure_share:
+      minimum: 1
+      maximum: 3
+    saturation_window_timeout_s: 10
+    saturation_window:
+      targets:
+      - prefill-0
+      fields:
+      - cache_blocks
+      - held_blocks
+      - referenced_blocks
+      - available_blocks
+      duration_s: 3
+      interval_s: 0.1
+    held_peak:
+      field: held_blocks
+      op: ge
+      expected: 24
+      stat: max
+    available_floor:
+      field: available_blocks
+      op: le
+      expected: 3
+      stat: min
+    saturation_conservation:
+      field: conservation
+      op: eq
+      expected: 0
+      stat: all
+    lack_after_timeout_s: 10
+    lack_after:
+      targets:
+      - prefill-0
+      fields:
+      - lack_mem_rejects
+      duration_s: 0
+      interval_s: 0.5
+    rejections_accounted:
+      field: lack_mem_rejects
+      op: ge
+      expected: 1
+      stat: all
+    occupants_done_timeout_s: 90
+    occupants_complete:
+      metric: success
+    available_again_timeout_s: 15
+    available_again:
+      targets:
+      - prefill-0
+      fields:
+      - available_blocks
+      duration_s: 10
+      interval_s: 0.5
+      until_field: available_blocks
+      until_op: ge
+      until_value: 8
+    capacity_recovered:
+      field: available_blocks
+      op: ge
+      expected: 8
+      stat: latest
+    fresh_timeout_s: 70
+    fresh:
+      input_len: 2048
+      output_len: 2
+      mode: complete
+      stream_timeout_s: 15
+      schedule_timeout_s: 30
+      expected_rpc_statuses: []
+      block_keys:
+      - 1000000
+      - 1000001
+      - 1000002
+      - 1000003
+      - 1000004
+      - 1000005
+      - 1000006
+      - 1000007
+    fresh_succeeded:
+      metric: success
+    master_clean_timeout_s: 30
+    master_clean:
+      target: single
+      inflight_zero: true
+    engine_clean_timeout_s: 30
+    engine_clean:
+      targets:
+      - prefill-0
+      - decode-0
+      - decode-1
+    recovery_timeout_s: 70
+    recovery:
+      input_len: 2048
+      output_len: 2
+      mode: complete
+      stream_timeout_s: 30
+      schedule_timeout_s: 30
+      expected_rpc_statuses: []
+    recovered:
+      metric: success
+    restore_perf:
+      operation: set_perf
+      targets:
+      - prefill-0
+      perf:
+        prefill_fixed_ms: 100
+  capacity_conflict_overflow:
+    setup_timeout_s: 180
+    prime_timeout_s: 70
+    prime:
+      input_len: 40960
+      output_len: 2
+      mode: complete
+      stream_timeout_s: 15
+      schedule_timeout_s: 30
+      expected_rpc_statuses: []
+      block_keys:
+      - 500000
+      - 500001
+      - 500002
+      - 500003
+      - 500004
+      - 500005
+      - 500006
+      - 500007
+      - 500008
+      - 500009
+      - 500010
+      - 500011
+      - 500012
+      - 500013
+      - 500014
+      - 500015
+      - 500016
+      - 500017
+      - 500018
+      - 500019
+      - 500020
+      - 500021
+      - 500022
+      - 500023
+      - 500024
+      - 500025
+      - 500026
+      - 500027
+      - 500028
+      - 500029
+      - 500030
+      - 500031
+      - 500032
+      - 500033
+      - 500034
+      - 500035
+      - 500036
+      - 500037
+      - 500038
+      - 500039
+    prime_succeeded:
+      metric: success
+    holder:
+      phase: terminal
+    cool:
+      targets:
+      - prefill-0
+      - prefill-1
+    cache_sync_timeout_s: 8
+    cache_sync:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 3.5
+    slow_all:
+      operation: set_perf
+      targets:
+      - prefill-0
+      - prefill-1
+      perf:
+        prefill_fixed_ms: 5000
+    perf_sync:
+      wait_s: 1.5
+    seed_timeout_s: 70
+    seed:
+      input_len: 147456
+      output_len: 2
+      mode: fire
+      stream_timeout_s: 30
+      schedule_timeout_s: 30
+      expected_rpc_statuses: []
+      block_keys:
+      - 500000
+      - 500001
+      - 500002
+      - 500003
+      - 500004
+      - 500005
+      - 500006
+      - 500007
+      - 500008
+      - 500009
+      - 500010
+      - 500011
+      - 500012
+      - 500013
+      - 500014
+      - 500015
+      - 500016
+      - 500017
+      - 500018
+      - 500019
+      - 500020
+      - 500021
+      - 500022
+      - 500023
+      - 500024
+      - 500025
+      - 500026
+      - 500027
+      - 500028
+      - 500029
+      - 500030
+      - 500031
+      - 500032
+      - 500033
+      - 500034
+      - 500035
+      - 500036
+      - 500037
+      - 500038
+      - 500039
+      - 509000
+      - 509001
+      - 509002
+      - 509003
+      - 509004
+      - 509005
+      - 509006
+      - 509007
+      - 509008
+      - 509009
+      - 509010
+      - 509011
+      - 509012
+      - 509013
+      - 509014
+      - 509015
+      - 509016
+      - 509017
+      - 509018
+      - 509019
+      - 509020
+      - 509021
+      - 509022
+      - 509023
+      - 509024
+      - 509025
+      - 509026
+      - 509027
+      - 509028
+      - 509029
+      - 509030
+      - 509031
+      - 509032
+      - 509033
+      - 509034
+      - 509035
+      - 509036
+      - 509037
+      - 509038
+      - 509039
+      - 509040
+      - 509041
+      - 509042
+      - 509043
+      - 509044
+      - 509045
+      - 509046
+      - 509047
+      - 509048
+      - 509049
+      - 509050
+      - 509051
+      - 509052
+      - 509053
+      - 509054
+      - 509055
+      - 509056
+      - 509057
+      - 509058
+      - 509059
+      - 509060
+      - 509061
+      - 509062
+      - 509063
+      - 509064
+      - 509065
+      - 509066
+      - 509067
+      - 509068
+      - 509069
+      - 509070
+      - 509071
+      - 509072
+      - 509073
+      - 509074
+      - 509075
+      - 509076
+      - 509077
+      - 509078
+      - 509079
+      - 509080
+      - 509081
+      - 509082
+      - 509083
+      - 509084
+      - 509085
+      - 509086
+      - 509087
+      - 509088
+      - 509089
+      - 509090
+      - 509091
+      - 509092
+      - 509093
+      - 509094
+      - 509095
+      - 509096
+      - 509097
+      - 509098
+      - 509099
+      - 509100
+      - 509101
+      - 509102
+      - 509103
+    seed_admitted:
+      metric: admitted
+    seed_holder:
+      phase: scheduled
+    seed_pending_timeout_s: 11
+    seed_pending:
+      fields:
+      - pending
+      duration_s: 6
+      interval_s: 0.1
+      until_field: pending
+      until_op: ge
+      until_value: 1
+    seed_seen:
+      field: pending
+      op: ge
+      expected: 1
+      stat: latest
+    cool_fast:
+      operation: set_perf
+      perf:
+        prefill_fixed_ms: 100
+    cool_sync:
+      wait_s: 0.3
+    baseline_timeout_s: 70
+    baseline:
+      input_len: 2048
+      output_len: 2
+      mode: complete
+      stream_timeout_s: 15
+      schedule_timeout_s: 30
+      expected_rpc_statuses: []
+    baseline_ok:
+      metric: success
+    wave_0_timeout_s: 70
+    wave_0:
+      input_len: 40960
+      output_len: 2
+      mode: fire
+      stream_timeout_s: 30
+      schedule_timeout_s: 30
+      expected_rpc_statuses: []
+      block_keys:
+      - 500000
+      - 500001
+      - 500002
+      - 500003
+      - 500004
+      - 500005
+      - 500006
+      - 500007
+      - 500008
+      - 500009
+      - 500010
+      - 500011
+      - 500012
+      - 500013
+      - 500014
+      - 500015
+      - 500016
+      - 500017
+      - 500018
+      - 500019
+      - 500020
+      - 500021
+      - 500022
+      - 500023
+      - 500024
+      - 500025
+      - 500026
+      - 500027
+      - 500028
+      - 500029
+      - 500030
+      - 500031
+      - 500032
+      - 500033
+      - 500034
+      - 500035
+      - 500036
+      - 500037
+      - 500038
+      - 500039
+    wave_spacing_0:
+      wait_s: 0.12
+    wave_1_timeout_s: 70
+    wave_1:
+      input_len: 40960
+      output_len: 2
+      mode: fire
+      stream_timeout_s: 30
+      schedule_timeout_s: 30
+      expected_rpc_statuses: []
+      block_keys:
+      - 500000
+      - 500001
+      - 500002
+      - 500003
+      - 500004
+      - 500005
+      - 500006
+      - 500007
+      - 500008
+      - 500009
+      - 500010
+      - 500011
+      - 500012
+      - 500013
+      - 500014
+      - 500015
+      - 500016
+      - 500017
+      - 500018
+      - 500019
+      - 500020
+      - 500021
+      - 500022
+      - 500023
+      - 500024
+      - 500025
+      - 500026
+      - 500027
+      - 500028
+      - 500029
+      - 500030
+      - 500031
+      - 500032
+      - 500033
+      - 500034
+      - 500035
+      - 500036
+      - 500037
+      - 500038
+      - 500039
+    wave_spacing_1:
+      wait_s: 0.12
+    wave_2_timeout_s: 70
+    wave_2:
+      input_len: 40960
+      output_len: 2
+      mode: fire
+      stream_timeout_s: 30
+      schedule_timeout_s: 30
+      expected_rpc_statuses: []
+      block_keys:
+      - 500000
+      - 500001
+      - 500002
+      - 500003
+      - 500004
+      - 500005
+      - 500006
+      - 500007
+      - 500008
+      - 500009
+      - 500010
+      - 500011
+      - 500012
+      - 500013
+      - 500014
+      - 500015
+      - 500016
+      - 500017
+      - 500018
+      - 500019
+      - 500020
+      - 500021
+      - 500022
+      - 500023
+      - 500024
+      - 500025
+      - 500026
+      - 500027
+      - 500028
+      - 500029
+      - 500030
+      - 500031
+      - 500032
+      - 500033
+      - 500034
+      - 500035
+      - 500036
+      - 500037
+      - 500038
+      - 500039
+    wave_spacing_2:
+      wait_s: 0.12
+    wave_3_timeout_s: 70
+    wave_3:
+      input_len: 40960
+      output_len: 2
+      mode: fire
+      stream_timeout_s: 30
+      schedule_timeout_s: 30
+      expected_rpc_statuses: []
+      block_keys:
+      - 500000
+      - 500001
+      - 500002
+      - 500003
+      - 500004
+      - 500005
+      - 500006
+      - 500007
+      - 500008
+      - 500009
+      - 500010
+      - 500011
+      - 500012
+      - 500013
+      - 500014
+      - 500015
+      - 500016
+      - 500017
+      - 500018
+      - 500019
+      - 500020
+      - 500021
+      - 500022
+      - 500023
+      - 500024
+      - 500025
+      - 500026
+      - 500027
+      - 500028
+      - 500029
+      - 500030
+      - 500031
+      - 500032
+      - 500033
+      - 500034
+      - 500035
+      - 500036
+      - 500037
+      - 500038
+      - 500039
+    wave_spacing_3:
+      wait_s: 0.12
+    wave_4_timeout_s: 70
+    wave_4:
+      input_len: 40960
+      output_len: 2
+      mode: fire
+      stream_timeout_s: 30
+      schedule_timeout_s: 30
+      expected_rpc_statuses: []
+      block_keys:
+      - 500000
+      - 500001
+      - 500002
+      - 500003
+      - 500004
+      - 500005
+      - 500006
+      - 500007
+      - 500008
+      - 500009
+      - 500010
+      - 500011
+      - 500012
+      - 500013
+      - 500014
+      - 500015
+      - 500016
+      - 500017
+      - 500018
+      - 500019
+      - 500020
+      - 500021
+      - 500022
+      - 500023
+      - 500024
+      - 500025
+      - 500026
+      - 500027
+      - 500028
+      - 500029
+      - 500030
+      - 500031
+      - 500032
+      - 500033
+      - 500034
+      - 500035
+      - 500036
+      - 500037
+      - 500038
+      - 500039
+    drained_timeout_s: 180
+    probe_timeout_s: 70
+    probe:
+      input_len: 40960
+      output_len: 2
+      mode: complete
+      stream_timeout_s: 15
+      schedule_timeout_s: 30
+      expected_rpc_statuses: []
+      block_keys:
+      - 500000
+      - 500001
+      - 500002
+      - 500003
+      - 500004
+      - 500005
+      - 500006
+      - 500007
+      - 500008
+      - 500009
+      - 500010
+      - 500011
+      - 500012
+      - 500013
+      - 500014
+      - 500015
+      - 500016
+      - 500017
+      - 500018
+      - 500019
+      - 500020
+      - 500021
+      - 500022
+      - 500023
+      - 500024
+      - 500025
+      - 500026
+      - 500027
+      - 500028
+      - 500029
+      - 500030
+      - 500031
+      - 500032
+      - 500033
+      - 500034
+      - 500035
+      - 500036
+      - 500037
+      - 500038
+      - 500039
+    protection:
+      share_bands:
+        strict: 0
+        normal: 0.05
+        loose: 0.1
+      ratio_bands:
+        strict: 2
+        normal: 3
+        loose: 5
+    restore_perf:
+      operation: set_perf
+      targets:
+      - prefill-0
+      - prefill-1
+      perf:
+        prefill_fixed_ms: 100

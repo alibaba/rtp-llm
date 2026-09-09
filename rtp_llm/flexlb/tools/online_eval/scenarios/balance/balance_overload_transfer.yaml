@@ -1,4 +1,4 @@
-# Configuration for the registered Python case; execution and assertions live in Python.
+# YAML owns all case data; Python owns execution order and result references.
 schema_version: 2
 case: balance_overload_transfer
 environment:
@@ -11,4 +11,119 @@ execution:
   cleanup_timeout_s: 120
 variants:
 - id: decode_pressure
+  program: decode_pressure
+  profiles:
+  - batch-window
+  - single-nonbatch
+  - single-batch
+  - window-nonbatch
 - id: prefill_pressure
+  program: prefill_pressure
+  profiles:
+  - batch-window
+  - single-nonbatch
+  - single-batch
+  - window-nonbatch
+metadata:
+  category: balance
+  description: Explicit balance stages preserving client landing, token share, Decode deltas and latency
+    contracts.
+parameters:
+  decode_pressure:
+    setup_timeout_s: 180
+    fleet_timeout_s: 60
+    fleet:
+      role: decode
+    pressure_timeout_s: 60
+    status_sync_timeout_s: 6
+    status_sync:
+      seconds: 1
+    before_timeout_s: 60
+    before:
+      role: decode
+    traffic_timeout_s: 60
+    traffic:
+      count: 10
+    terminal_timeout_s: 120
+    after_timeout_s: 60
+    after:
+      role: decode
+    p6_timeout_s: 60
+    p6:
+      metric: decode_complete
+      property: P6
+    p5_timeout_s: 60
+    p5:
+      metric: target_delta
+      property: P5
+      bands:
+        strict: 0
+        normal: 1
+        loose: 2
+    p2_timeout_s: 60
+    p2:
+      metric: takeover
+      property: P2
+    teardown_timeout_s: 120
+  prefill_pressure:
+    setup_timeout_s: 180
+    fleet_timeout_s: 60
+    fleet:
+      role: prefill
+    slow_both_timeout_s: 60
+    slow_both:
+      operation: set_perf
+      perf:
+        prefill_fixed_ms: 5000
+    perf_sync_timeout_s: 6.5
+    perf_sync:
+      seconds: 1.5
+    seed_timeout_s: 60
+    seed:
+      input_len: 147456
+      unique_keys: false
+      defer_batch: true
+      stream_timeout_s: 20
+    seed_pending_timeout_s: 6
+    restore_cool_timeout_s: 60
+    restore_cool:
+      operation: set_perf
+      perf:
+        prefill_fixed_ms: 100
+    cool_sync_timeout_s: 5.3
+    cool_sync:
+      seconds: 0.3
+    baseline_timeout_s: 60
+    baseline:
+      unique_keys: false
+    baseline_terminal_timeout_s: 120
+    baseline_p6_timeout_s: 60
+    baseline_p6:
+      metric: complete
+      property: P6
+    wave_timeout_s: 60
+    wave:
+      count: 5
+      unique_keys: false
+      await_completion: false
+      interval_s: 0.12
+    wave_terminal_timeout_s: 120
+    p6_timeout_s: 60
+    p6:
+      metric: complete
+      property: P6
+    p5_timeout_s: 60
+    p5:
+      metric: target_share
+      property: P5
+    p7_timeout_s: 60
+    p7:
+      metric: latency_ratio
+      property: P7
+    restore_perf_timeout_s: 60
+    restore_perf:
+      operation: set_perf
+      perf:
+        prefill_fixed_ms: 100
+    seed_terminal_timeout_s: 120
+    teardown_timeout_s: 120

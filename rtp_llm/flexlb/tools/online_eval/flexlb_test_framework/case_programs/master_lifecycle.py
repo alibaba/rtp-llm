@@ -2,124 +2,137 @@
 
 from ..case_config import output
 
-METADATA = {
-    "id": "master_lifecycle",
-    "description": "Cold restart of the owned master, clean scheduler state, topology and request "
-    "recovery.",
-    "category": "master",
-}
-
-PROFILES = ["batch-window", "single-nonbatch", "single-batch", "window-nonbatch"]
-
 
 def kill_single(case):
-    case.step("setup", "setup", timeout_s=180)
-    case.step("baseline", "request", params={"count": 1, "output_len": 2})
+    case.step("setup", "setup", timeout_s=case.value("kill_single.setup_timeout_s"))
+    case.step("baseline", "request", params=case.value("kill_single.baseline"))
     case.step(
         "baseline_done", "wait", params={"requests": output("baseline", "requests")}
     )
     case.step(
         "baseline_complete",
         "check",
-        params={
-            "actual": output("baseline_done", "completed"),
-            "op": "eq",
-            "expected": True,
-        },
+        params=case.params(
+            "kill_single.baseline_complete",
+            {"actual": output("baseline_done", "completed")},
+        ),
     )
     case.step(
         "baseline_no_errors",
         "check",
-        params={
-            "actual": output("baseline_done", "error_count"),
-            "op": "eq",
-            "expected": 0,
-        },
+        params=case.params(
+            "kill_single.baseline_no_errors",
+            {"actual": output("baseline_done", "error_count")},
+        ),
     )
-    case.step("kill", "master_fault", params={"mode": "kill", "target": "single"})
+    case.step("kill", "master_fault", params=case.value("kill_single.kill"))
     case.step(
         "restart",
         "master_restore",
-        timeout_s=180,
+        timeout_s=case.value("kill_single.restart_timeout_s"),
         params={"fault": output("kill", "fault")},
     )
     case.step(
         "restored_topology",
         "master_ready",
-        timeout_s=60,
-        params={"target": "single", "inflight_zero": False},
+        timeout_s=case.value("kill_single.restored_topology_timeout_s"),
+        params=case.value("kill_single.restored_topology"),
     )
     case.step(
         "restored_inflight",
         "master_ready",
-        timeout_s=10,
-        params={"target": "single", "inflight_zero": True},
+        timeout_s=case.value("kill_single.restored_inflight_timeout_s"),
+        params=case.value("kill_single.restored_inflight"),
     )
-    case.step("recovery", "request", params={"count": 1, "output_len": 2})
+    case.step("recovery", "request", params=case.value("kill_single.recovery"))
     case.step(
         "recovery_done", "wait", params={"requests": output("recovery", "requests")}
     )
     case.step(
         "recovery_complete",
         "check",
-        params={
-            "actual": output("recovery_done", "completed"),
-            "op": "eq",
-            "expected": True,
-        },
+        params=case.params(
+            "kill_single.recovery_complete",
+            {"actual": output("recovery_done", "completed")},
+        ),
     )
     case.step(
         "recovery_no_errors",
         "check",
-        params={
-            "actual": output("recovery_done", "error_count"),
-            "op": "eq",
-            "expected": 0,
-        },
+        params=case.params(
+            "kill_single.recovery_no_errors",
+            {"actual": output("recovery_done", "error_count")},
+        ),
     )
     case.step("cleanup", "teardown")
 
 
 def freeze_short_long(case):
-    case.step("setup", "setup", timeout_s=180)
     case.step(
-        "flow", "master_client_start", params={"targets": ["B", "A"], "duration_s": 100}
+        "setup", "setup", timeout_s=case.value("freeze_short_long.setup_timeout_s")
     )
-    case.step("short_begin", "master_mark", params={"wait_s": 12})
-    case.step("short_freeze", "master_fault", params={"mode": "freeze", "target": "B"})
-    case.step("short_end", "master_mark", params={"wait_s": 6})
+    case.step(
+        "flow", "master_client_start", params=case.value("freeze_short_long.flow")
+    )
+    case.step(
+        "short_begin", "master_mark", params=case.value("freeze_short_long.short_begin")
+    )
+    case.step(
+        "short_freeze",
+        "master_fault",
+        params=case.value("freeze_short_long.short_freeze"),
+    )
+    case.step(
+        "short_end", "master_mark", params=case.value("freeze_short_long.short_end")
+    )
     case.step(
         "short_restore",
         "master_restore",
         params={"fault": output("short_freeze", "fault")},
     )
-    case.step("post_short_end", "master_mark", params={"wait_s": 8})
-    case.step("before", "master_state", params={"target": "B"})
-    case.step("long_begin", "master_mark", params={"wait_s": 0})
-    case.step("long_freeze", "master_fault", params={"mode": "freeze", "target": "B"})
+    case.step(
+        "post_short_end",
+        "master_mark",
+        params=case.value("freeze_short_long.post_short_end"),
+    )
+    case.step("before", "master_state", params=case.value("freeze_short_long.before"))
+    case.step(
+        "long_begin", "master_mark", params=case.value("freeze_short_long.long_begin")
+    )
+    case.step(
+        "long_freeze",
+        "master_fault",
+        params=case.value("freeze_short_long.long_freeze"),
+    )
     # The HA flow may succeed through A; use a no-fallback request to frozen B
     # to exercise the deadline path deterministically.
     case.step(
         "deadline_probe",
         "master_request_batch",
-        timeout_s=10,
-        params={
-            "target": "B",
-            "count": 1,
-            "concurrency": 1,
-            "request_timeout_s": 2,
-            "sample_topology": False,
-        },
+        timeout_s=case.value("freeze_short_long.deadline_probe_timeout_s"),
+        params=case.value("freeze_short_long.deadline_probe"),
     )
-    case.step("long_end", "master_mark", params={"wait_s": 46})
+    case.step(
+        "long_end", "master_mark", params=case.value("freeze_short_long.long_end")
+    )
     case.step(
         "long_restore",
         "master_restore",
         params={"fault": output("long_freeze", "fault")},
     )
-    case.step("after", "master_scheduler_state", params={"target": "B"})
-    case.step("post_long_end", "master_mark", params={"wait_s": 10})
-    case.step("ready_b", "master_topology_state", params={"target": "B"})
+    case.step(
+        "after", "master_scheduler_state", params=case.value("freeze_short_long.after")
+    )
+    case.step(
+        "post_long_end",
+        "master_mark",
+        params=case.value("freeze_short_long.post_long_end"),
+    )
+    case.step(
+        "ready_b",
+        "master_topology_state",
+        params=case.value("freeze_short_long.ready_b"),
+    )
     case.step(
         "continuity",
         "master_continuity",
@@ -132,7 +145,7 @@ def freeze_short_long(case):
     case.step(
         "finish",
         "master_client_finish",
-        timeout_s=120,
+        timeout_s=case.value("freeze_short_long.finish_timeout_s"),
         params={"client": output("flow", "client")},
     )
     case.step(
@@ -147,63 +160,74 @@ def freeze_short_long(case):
     case.step(
         "short_post",
         "master_client_window",
-        params={
-            "rows": output("finish", "rows"),
-            "from": output("short_end", "epoch_s"),
-            "until": output("post_short_end", "epoch_s"),
-            # Match the burst guard: tail requests can straddle the long freeze.
-            "until_offset_s": -0.5,
-        },
+        params=case.params(
+            "freeze_short_long.short_post",
+            {
+                "rows": output("finish", "rows"),
+                "from": output("short_end", "epoch_s"),
+                "until": output("post_short_end", "epoch_s"),
+            },
+        ),
     )
     case.step(
         "short_burst",
         "master_client_window",
-        params={
-            "rows": output("finish", "rows"),
-            "from": output("short_end", "epoch_s"),
-            "until": output("long_begin", "epoch_s"),
-            "until_offset_s": -0.5,
-        },
+        params=case.params(
+            "freeze_short_long.short_burst",
+            {
+                "rows": output("finish", "rows"),
+                "from": output("short_end", "epoch_s"),
+                "until": output("long_begin", "epoch_s"),
+            },
+        ),
     )
     case.step(
         "short_verdict",
         "master_short_hang_check",
-        params={
-            "hang": output("short_hang", "rows"),
-            "burst": output("short_burst", "rows"),
-            "post": output("short_post", "rows"),
-            "target": "B",
-        },
+        params=case.params(
+            "freeze_short_long.short_verdict",
+            {
+                "hang": output("short_hang", "rows"),
+                "burst": output("short_burst", "rows"),
+                "post": output("short_post", "rows"),
+            },
+        ),
     )
     case.step(
         "judged",
         "master_client_window",
-        params={
-            "rows": output("finish", "rows"),
-            "from": output("long_begin", "epoch_s"),
-            "from_offset_s": 29,
-            "until": output("long_end", "epoch_s"),
-        },
+        params=case.params(
+            "freeze_short_long.judged",
+            {
+                "rows": output("finish", "rows"),
+                "from": output("long_begin", "epoch_s"),
+                "until": output("long_end", "epoch_s"),
+            },
+        ),
     )
     case.step(
         "pre_freeze",
         "master_client_window",
-        params={
-            "rows": output("finish", "rows"),
-            "from": output("long_begin", "epoch_s"),
-            "from_offset_s": -2,
-            "until": output("long_begin", "epoch_s"),
-        },
+        params=case.params(
+            "freeze_short_long.pre_freeze",
+            {
+                "rows": output("finish", "rows"),
+                "from": output("long_begin", "epoch_s"),
+                "until": output("long_begin", "epoch_s"),
+            },
+        ),
     )
     case.step(
         "deadline_straddle",
         "master_client_window",
-        params={
-            "rows": output("finish", "rows"),
-            "from": output("long_begin", "epoch_s"),
-            "from_offset_s": -4,
-            "until": output("long_end", "epoch_s"),
-        },
+        params=case.params(
+            "freeze_short_long.deadline_straddle",
+            {
+                "rows": output("finish", "rows"),
+                "from": output("long_begin", "epoch_s"),
+                "until": output("long_end", "epoch_s"),
+            },
+        ),
     )
     case.step(
         "post_long",
@@ -217,33 +241,24 @@ def freeze_short_long(case):
     case.step(
         "retry_seen",
         "master_client_check",
-        params={
-            "rows": output("deadline_straddle", "rows"),
-            "metric": "failover_count",
-            "op": "ge",
-            "expected": 1,
-        },
+        params=case.params(
+            "freeze_short_long.retry_seen",
+            {"rows": output("deadline_straddle", "rows")},
+        ),
     )
     case.step(
         "switch_to_a",
         "master_client_check",
-        params={
-            "rows": output("judged", "rows"),
-            "metric": "target_count",
-            "op": "ge",
-            "expected": 1,
-            "target": "A",
-        },
+        params=case.params(
+            "freeze_short_long.switch_to_a", {"rows": output("judged", "rows")}
+        ),
     )
     case.step(
         "visible_terminal",
         "master_client_check",
-        params={
-            "rows": output("pre_freeze", "rows"),
-            "metric": "visible_terminal_share",
-            "op": "eq",
-            "expected": 1,
-        },
+        params=case.params(
+            "freeze_short_long.visible_terminal", {"rows": output("pre_freeze", "rows")}
+        ),
     )
     case.step(
         "deadline_visible",
@@ -253,102 +268,94 @@ def freeze_short_long(case):
     case.step(
         "post_success",
         "master_client_check",
-        params={
-            "rows": output("post_long", "rows"),
-            "metric": "success_rate",
-            "op": "ge",
-            "expected": 0.9,
-        },
+        params=case.params(
+            "freeze_short_long.post_success", {"rows": output("post_long", "rows")}
+        ),
     )
     case.step(
         "post_on_a",
         "master_client_check",
-        params={
-            "rows": output("post_long", "rows"),
-            "metric": "target_share",
-            "op": "ge",
-            "expected": 0.8,
-            "target": "A",
-        },
+        params=case.params(
+            "freeze_short_long.post_on_a", {"rows": output("post_long", "rows")}
+        ),
     )
     case.step(
         "unique_requests",
         "master_client_check",
-        params={
-            "rows": output("finish", "rows"),
-            "metric": "duplicate_ids",
-            "op": "eq",
-            "expected": 0,
-        },
+        params=case.params(
+            "freeze_short_long.unique_requests", {"rows": output("finish", "rows")}
+        ),
     )
     case.step("cleanup", "teardown")
 
 
 def kill_dual_b_to_a(case):
-    case.step("setup", "setup", timeout_s=180)
     case.step(
-        "flow", "master_client_start", params={"targets": ["B", "A"], "duration_s": 90}
+        "setup", "setup", timeout_s=case.value("kill_dual_b_to_a.setup_timeout_s")
     )
-    case.step("kill_time", "master_mark", params={"wait_s": 12})
-    case.step("kill_b", "master_fault", params={"target": "B", "mode": "kill"})
-    case.step("switched", "master_mark", params={"wait_s": 10})
+    case.step("flow", "master_client_start", params=case.value("kill_dual_b_to_a.flow"))
+    case.step(
+        "kill_time", "master_mark", params=case.value("kill_dual_b_to_a.kill_time")
+    )
+    case.step("kill_b", "master_fault", params=case.value("kill_dual_b_to_a.kill_b"))
+    case.step("switched", "master_mark", params=case.value("kill_dual_b_to_a.switched"))
     case.step(
         "restart_b",
         "master_restore",
-        timeout_s=180,
+        timeout_s=case.value("kill_dual_b_to_a.restart_b_timeout_s"),
         params={"fault": output("kill_b", "fault")},
     )
     case.step(
         "ready_b",
         "master_ready",
-        timeout_s=60,
-        params={"target": "B", "inflight_zero": False},
+        timeout_s=case.value("kill_dual_b_to_a.ready_b_timeout_s"),
+        params=case.value("kill_dual_b_to_a.ready_b"),
     )
     case.step(
         "clean_b",
         "master_ready",
-        timeout_s=10,
-        params={"target": "B", "inflight_zero": True},
+        timeout_s=case.value("kill_dual_b_to_a.clean_b_timeout_s"),
+        params=case.value("kill_dual_b_to_a.clean_b"),
     )
     case.step(
         "recovery_a",
         "master_request_batch",
-        timeout_s=630,
-        params={"target": "A", "count": 20, "concurrency": 1, "request_timeout_s": 30},
+        timeout_s=case.value("kill_dual_b_to_a.recovery_a_timeout_s"),
+        params=case.value("kill_dual_b_to_a.recovery_a"),
     )
     case.step(
         "recovery_rate",
         "check",
-        params={
-            "actual": output("recovery_a", "success_rate"),
-            "op": "ge",
-            "expected": 0.95,
-        },
+        params=case.params(
+            "kill_dual_b_to_a.recovery_rate",
+            {"actual": output("recovery_a", "success_rate")},
+        ),
     )
     case.step(
         "finish",
         "master_client_finish",
-        timeout_s=120,
+        timeout_s=case.value("kill_dual_b_to_a.finish_timeout_s"),
         params={"client": output("flow", "client")},
     )
     case.step(
         "steady_plain",
         "master_client_window",
-        params={
-            "rows": output("finish", "rows"),
-            "until": output("kill_time", "epoch_s"),
-            "failover": False,
-        },
+        params=case.params(
+            "kill_dual_b_to_a.steady_plain",
+            {"rows": output("finish", "rows"), "until": output("kill_time", "epoch_s")},
+        ),
     )
     case.step(
         "straddle",
         "master_client_window",
-        params={
-            "rows": output("finish", "rows"),
-            "from": output("kill_time", "epoch_s"),
-            "from_offset_s": -10,
-            "until": output("switched", "epoch_s"),
-        },
+        params=case.params(
+            "kill_dual_b_to_a.straddle",
+            {
+                "rows": output("finish", "rows"),
+                "from": output("kill_time", "epoch_s"),
+                "until": output("switched", "epoch_s"),
+            },
+        ),
     )
     case.step(
         "switch",
@@ -370,104 +377,50 @@ def kill_dual_b_to_a(case):
     case.step(
         "steady_b",
         "master_client_check",
-        params={
-            "rows": output("steady_plain", "rows"),
-            "metric": "target_share",
-            "op": "eq",
-            "expected": 1,
-            "target": "B",
-            "min_samples": 10,
-        },
+        params=case.params(
+            "kill_dual_b_to_a.steady_b", {"rows": output("steady_plain", "rows")}
+        ),
     )
     case.step(
         "retry_seen",
         "master_client_check",
-        params={
-            "rows": output("straddle", "rows"),
-            "metric": "failover_count",
-            "op": "ge",
-            "expected": 1,
-        },
+        params=case.params(
+            "kill_dual_b_to_a.retry_seen", {"rows": output("straddle", "rows")}
+        ),
     )
     case.step(
         "switch_to_a",
         "master_client_check",
-        params={
-            "rows": output("switch", "rows"),
-            "metric": "target_count",
-            "op": "ge",
-            "expected": 1,
-            "target": "A",
-        },
+        params=case.params(
+            "kill_dual_b_to_a.switch_to_a", {"rows": output("switch", "rows")}
+        ),
     )
     case.step(
         "switch_errors",
         "master_client_check",
-        params={
-            "rows": output("switch", "rows"),
-            "metric": "failed_rate_above_one",
-            "op": "le",
-            "expected": 0.05,
-        },
+        params=case.params(
+            "kill_dual_b_to_a.switch_errors", {"rows": output("switch", "rows")}
+        ),
     )
     case.step(
         "after_a",
         "master_client_check",
-        params={
-            "rows": output("after", "rows"),
-            "metric": "target_share",
-            "op": "ge",
-            "expected": 0.95,
-            "target": "A",
-        },
+        params=case.params(
+            "kill_dual_b_to_a.after_a", {"rows": output("after", "rows")}
+        ),
     )
     case.step(
         "after_success",
         "master_client_check",
-        params={
-            "rows": output("after", "rows"),
-            "metric": "success_rate",
-            "op": "ge",
-            "expected": 0.9,
-        },
+        params=case.params(
+            "kill_dual_b_to_a.after_success", {"rows": output("after", "rows")}
+        ),
     )
     case.step(
         "unique_requests",
         "master_client_check",
-        params={
-            "rows": output("finish", "rows"),
-            "metric": "duplicate_ids",
-            "op": "eq",
-            "expected": 0,
-        },
+        params=case.params(
+            "kill_dual_b_to_a.unique_requests", {"rows": output("finish", "rows")}
+        ),
     )
     case.step("cleanup", "teardown")
-
-
-VARIANTS = {
-    "kill_single": {
-        "build": kill_single,
-        "profiles": [
-            "batch-window",
-            "single-nonbatch",
-            "single-batch",
-            "window-nonbatch",
-        ],
-        "metadata": {},
-    },
-    "freeze_short_long": {
-        "build": freeze_short_long,
-        "profiles": [
-            "batch-window",
-            "single-nonbatch",
-            "single-batch",
-            "window-nonbatch",
-        ],
-        "metadata": {},
-    },
-    "kill_dual_b_to_a": {
-        "build": kill_dual_b_to_a,
-        "profiles": ["batch-window"],
-        "metadata": {},
-    },
-}

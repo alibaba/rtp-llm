@@ -1,4 +1,4 @@
-# Configuration for the registered Python case; execution and assertions live in Python.
+# YAML owns all case data; Python owns execution order and result references.
 schema_version: 2
 case: master_coldstart
 profiles:
@@ -18,3 +18,18 @@ execution:
   cleanup_timeout_s: 120
 variants:
 - id: burst_twenty
+  program: burst_twenty
+metadata:
+  description: Twenty requests with ten concurrent clients immediately after readiness, retaining topology
+    samples and placement evidence.
+  category: master
+parameters:
+  burst_twenty:
+    setup_timeout_s: 180
+    burst:
+      target: single
+      count: 20
+      concurrency: 10
+      request_timeout_s: 15
+      sample_after_s: 10
+      coldstart: true

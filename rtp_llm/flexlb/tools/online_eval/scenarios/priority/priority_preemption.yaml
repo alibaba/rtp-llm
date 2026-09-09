@@ -1,4 +1,4 @@
-# Configuration for the registered Python case; execution and assertions live in Python.
+# YAML owns all case data; Python owns execution order and result references.
 schema_version: 2
 case: priority_preemption
 profiles:
@@ -30,6 +30,7 @@ variants:
       preemption:
         allowed_victim_stages:
         - PREFILL_QUEUED
+  program: same_priority_zero_eviction
 - id: prefill_queued
   profiles:
   - single-nonbatch
@@ -38,6 +39,7 @@ variants:
       preemption:
         allowed_victim_stages:
         - PREFILL_QUEUED
+  program: prefill_queued
 - id: timeout_attribution
   profiles:
   - single-nonbatch
@@ -47,12 +49,14 @@ variants:
       preemption:
         allowed_victim_stages:
         - PREFILL_QUEUED
+  program: timeout_attribution
 - id: disabled_zero_eviction
   profiles:
   - single-nonbatch
   environment:
     config_overrides:
       queue_timeout_ms: 8000
+  program: disabled_zero_eviction
 - id: comparator_frozen_weak
   profiles:
   - single-nonbatch
@@ -61,6 +65,7 @@ variants:
       preemption:
         allowed_victim_stages:
         - PREFILL_QUEUED
+  program: comparator_frozen_weak
 - id: config_strict_reject
   profiles:
   - single-nonbatch
@@ -73,6 +78,7 @@ variants:
         omit: true
       max_inflight_requests_per_worker: 1
       max_waiting_requests_per_prefill_worker: 8
+  program: config_strict_reject
 - id: decode_engine_owned
   profiles:
   - single-nonbatch
@@ -89,6 +95,7 @@ variants:
           ack_timeout_ms: 50
           completion_timeout_ms: 1000
     metric_whitelist: flexlb_auto_tpm
+  program: decode_engine_owned
 - id: error_code_family
   profiles:
   - single-nonbatch
@@ -106,6 +113,7 @@ variants:
         omit: true
       max_waiting_requests_per_prefill_worker:
         omit: true
+  program: error_code_family
 - id: decode_reservation_priority
   profiles:
   - single-nonbatch
@@ -122,6 +130,7 @@ variants:
           ack_timeout_ms: 50
           completion_timeout_ms: 1000
     metric_whitelist: flexlb_auto_tpm
+  program: decode_reservation_priority
 - id: observability_integrity
   profiles:
   - single-nonbatch
@@ -133,6 +142,7 @@ variants:
       preemption:
         allowed_victim_stages:
         - PREFILL_QUEUED
+  program: observability_integrity
 - id: prefill_queued_live_single
   profiles:
   - single-batch
@@ -148,6 +158,10 @@ variants:
       preemption:
         allowed_victim_stages:
         - PREFILL_QUEUED
+  program: prefill_queued_live_single
+  metadata:
+    requires:
+    - enqueue_batch
 - id: prefill_queued_live_window
   profiles:
   - batch-window
@@ -164,6 +178,10 @@ variants:
         allowed_victim_stages:
         - PREFILL_QUEUED
       max_collection_wait_ms: 400
+  program: prefill_queued_live_window
+  metadata:
+    requires:
+    - enqueue_batch
 - id: decode_reserved_live_single
   profiles:
   - single-batch
@@ -182,6 +200,10 @@ variants:
         - DECODE_RESERVED
     n_decode: 1
     decode_cache_blocks: 5
+  program: decode_reserved_live_single
+  metadata:
+    requires:
+    - enqueue_batch
 - id: decode_reserved_live_window
   profiles:
   - batch-window
@@ -201,6 +223,10 @@ variants:
       max_collection_wait_ms: 400
     n_decode: 1
     decode_cache_blocks: 5
+  program: decode_reserved_live_window
+  metadata:
+    requires:
+    - enqueue_batch
 - id: cancel_not_found
   profiles:
   - single-nonbatch
@@ -216,6 +242,7 @@ variants:
         engine_cancellation:
           ack_timeout_ms: 50
           completion_timeout_ms: 1000
+  program: cancel_not_found
 - id: cancel_tombstoned
   profiles:
   - single-batch
@@ -236,3 +263,1588 @@ variants:
         engine_cancellation:
           ack_timeout_ms: 50
           completion_timeout_ms: 1000
+  program: cancel_tombstoned
+  metadata:
+    requires:
+    - enqueue_batch
+metadata:
+  description: Explicit preemption cohorts and legacy design-final predicates.
+  category: priority
+parameters:
+  same_priority_zero_eviction:
+    setup_timeout_s: 180
+    slow:
+      operation: set_perf
+      perf:
+        prefill_fixed_ms: 4000
+    sync:
+      seconds: 1.5
+    placeholder_timeout_s: 5
+    placeholder:
+      gap_s: 0
+      requests:
+      - tag: placeholder
+        priority: 50
+        input_len: 2048
+        output_len: 2
+    placeholder_settled_timeout_s: 90
+    placeholder_admitted:
+      op: eq
+      expected: true
+    placeholder_pending_timeout_s: 6
+    wave_timeout_s: 15
+    wave:
+      gap_s: 0.15
+      requests:
+      - tag: peer0
+        priority: 50
+        input_len: 2048
+        output_len: 2
+      - tag: peer1
+        priority: 50
+        input_len: 2048
+        output_len: 2
+      - tag: peer2
+        priority: 50
+        input_len: 2048
+        output_len: 2
+      - tag: peer3
+        priority: 50
+        input_len: 2048
+        output_len: 2
+      - tag: peer4
+        priority: 50
+        input_len: 2048
+        output_len: 2
+      - tag: peer5
+        priority: 50
+        input_len: 2048
+        output_len: 2
+      - tag: peer6
+        priority: 50
+        input_len: 2048
+        output_len: 2
+      - tag: peer7
+        priority: 50
+        input_len: 2048
+        output_len: 2
+      - tag: incoming
+        priority: 50
+        input_len: 2048
+        output_len: 2
+    wave_settled_timeout_s: 90
+    placeholder_drain_timeout_s: 35
+    wave_drain_timeout_s: 315
+    master_clean_timeout_s: 30
+    restore:
+      operation: set_perf
+      perf:
+        prefill_fixed_ms: 100
+    teardown_timeout_s: 120
+  prefill_queued:
+    setup_timeout_s: 180
+    slow:
+      operation: set_perf
+      perf:
+        prefill_fixed_ms: 4000
+    sync:
+      seconds: 1.5
+    r1_placeholder_timeout_s: 5
+    r1_placeholder:
+      gap_s: 0
+      requests:
+      - tag: placeholder
+        priority: 50
+        input_len: 2048
+        output_len: 2
+    r1_placeholder_settled_timeout_s: 90
+    r1_placeholder_admitted:
+      op: eq
+      expected: true
+    r1_placeholder_pending_timeout_s: 6
+    r1_wave_timeout_s: 15
+    r1_wave:
+      gap_s: 0.15
+      requests:
+      - tag: peer0
+        priority: 30
+        input_len: 2048
+        output_len: 2
+      - tag: peer1
+        priority: 30
+        input_len: 2048
+        output_len: 2
+      - tag: peer2
+        priority: 40
+        input_len: 2048
+        output_len: 2
+      - tag: peer3
+        priority: 40
+        input_len: 2048
+        output_len: 2
+      - tag: peer4
+        priority: 30
+        input_len: 2048
+        output_len: 2
+      - tag: peer5
+        priority: 30
+        input_len: 2048
+        output_len: 2
+      - tag: peer6
+        priority: 30
+        input_len: 2048
+        output_len: 2
+      - tag: peer7
+        priority: 30
+        input_len: 2048
+        output_len: 2
+      - tag: incoming
+        priority: 70
+        input_len: 2048
+        output_len: 2
+    r1_wave_settled_timeout_s: 90
+    r1_placeholder_drain_timeout_s: 35
+    r1_wave_drain_timeout_s: 315
+    r1_same_priority:
+      round: 1
+    r1_master_clean_timeout_s: 30
+    r2_placeholder_timeout_s: 5
+    r2_placeholder:
+      gap_s: 0
+      requests:
+      - tag: placeholder
+        priority: 70
+        input_len: 2048
+        output_len: 2
+    r2_placeholder_settled_timeout_s: 90
+    r2_placeholder_admitted:
+      op: eq
+      expected: true
+    r2_placeholder_pending_timeout_s: 6
+    r2_wave_timeout_s: 15
+    r2_wave:
+      gap_s: 0.15
+      requests:
+      - tag: peer0
+        priority: 70
+        input_len: 2048
+        output_len: 2
+      - tag: peer1
+        priority: 70
+        input_len: 2048
+        output_len: 2
+      - tag: peer2
+        priority: 70
+        input_len: 2048
+        output_len: 2
+      - tag: peer3
+        priority: 70
+        input_len: 2048
+        output_len: 2
+      - tag: peer4
+        priority: 70
+        input_len: 2048
+        output_len: 2
+      - tag: peer5
+        priority: 70
+        input_len: 2048
+        output_len: 2
+      - tag: peer6
+        priority: 70
+        input_len: 2048
+        output_len: 2
+      - tag: peer7
+        priority: 70
+        input_len: 2048
+        output_len: 2
+      - tag: incoming
+        priority: 90
+        input_len: 2048
+        output_len: 2
+    r2_wave_settled_timeout_s: 90
+    r2_placeholder_drain_timeout_s: 35
+    r2_wave_drain_timeout_s: 315
+    r2_same_priority:
+      round: 2
+    r2_master_clean_timeout_s: 30
+    restore:
+      operation: set_perf
+      perf:
+        prefill_fixed_ms: 100
+    teardown_timeout_s: 120
+  timeout_attribution:
+    setup_timeout_s: 180
+    slow:
+      operation: set_perf
+      perf:
+        prefill_fixed_ms: 12000
+    sync:
+      seconds: 1.5
+    r1_placeholder_timeout_s: 5
+    r1_placeholder:
+      gap_s: 0
+      requests:
+      - tag: placeholder
+        priority: 90
+        input_len: 2048
+        output_len: 2
+    r1_placeholder_settled_timeout_s: 90
+    r1_placeholder_admitted:
+      op: eq
+      expected: true
+    r1_placeholder_pending_timeout_s: 6
+    r1_wave_timeout_s: 15
+    r1_wave:
+      gap_s: 0.15
+      requests:
+      - tag: peer0
+        priority: 30
+        input_len: 2048
+        output_len: 2
+      - tag: peer1
+        priority: 30
+        input_len: 2048
+        output_len: 2
+      - tag: peer2
+        priority: 30
+        input_len: 2048
+        output_len: 2
+      - tag: peer3
+        priority: 30
+        input_len: 2048
+        output_len: 2
+      - tag: peer4
+        priority: 30
+        input_len: 2048
+        output_len: 2
+      - tag: peer5
+        priority: 30
+        input_len: 2048
+        output_len: 2
+      - tag: peer6
+        priority: 30
+        input_len: 2048
+        output_len: 2
+      - tag: peer7
+        priority: 30
+        input_len: 2048
+        output_len: 2
+      - tag: peer8
+        priority: 70
+        input_len: 2048
+        output_len: 2
+      - tag: peer9
+        priority: 90
+        input_len: 2048
+        output_len: 2
+      - tag: peer10
+        priority: 90
+        input_len: 2048
+        output_len: 2
+    r1_wave_settled_timeout_s: 90
+    r1_placeholder_drain_timeout_s: 35
+    r1_wave_drain_timeout_s: 385
+    r1_same_priority:
+      round: 1
+    r1_master_clean_timeout_s: 30
+    round2_slow:
+      operation: set_perf
+      perf:
+        prefill_fixed_ms: 10000
+    round2_sync:
+      seconds: 1.5
+    r2_placeholder_timeout_s: 5
+    r2_placeholder:
+      gap_s: 0
+      requests:
+      - tag: placeholder
+        priority: 70
+        input_len: 2048
+        output_len: 2
+    r2_placeholder_settled_timeout_s: 90
+    r2_placeholder_admitted:
+      op: eq
+      expected: true
+    r2_placeholder_pending_timeout_s: 6
+    r2_wave_timeout_s: 15
+    r2_wave:
+      gap_s: 0.15
+      requests:
+      - tag: peer0
+        priority: 30
+        input_len: 2048
+        output_len: 2
+      - tag: peer1
+        priority: 30
+        input_len: 2048
+        output_len: 2
+      - tag: peer2
+        priority: 30
+        input_len: 2048
+        output_len: 2
+      - tag: peer3
+        priority: 30
+        input_len: 2048
+        output_len: 2
+      - tag: peer4
+        priority: 30
+        input_len: 2048
+        output_len: 2
+      - tag: peer5
+        priority: 30
+        input_len: 2048
+        output_len: 2
+      - tag: peer6
+        priority: 30
+        input_len: 2048
+        output_len: 2
+      - tag: peer7
+        priority: 30
+        input_len: 2048
+        output_len: 2
+      - tag: peer8
+        priority: 70
+        input_len: 2048
+        output_len: 2
+    r2_wave_settled_timeout_s: 90
+    r2_placeholder_drain_timeout_s: 35
+    r2_wave_drain_timeout_s: 315
+    r2_same_priority:
+      round: 2
+    r2_master_clean_timeout_s: 30
+    restore:
+      operation: set_perf
+      perf:
+        prefill_fixed_ms: 100
+    teardown_timeout_s: 120
+  disabled_zero_eviction:
+    setup_timeout_s: 180
+    slow:
+      operation: set_perf
+      perf:
+        prefill_fixed_ms: 3000
+    sync:
+      seconds: 1.5
+    r1_placeholder_timeout_s: 5
+    r1_placeholder:
+      gap_s: 0
+      requests:
+      - tag: placeholder
+        priority: 30
+        input_len: 2048
+        output_len: 2
+    r1_placeholder_settled_timeout_s: 90
+    r1_placeholder_admitted:
+      op: eq
+      expected: true
+    r1_placeholder_pending_timeout_s: 6
+    r1_wave_timeout_s: 15
+    r1_wave:
+      gap_s: 0.15
+      requests:
+      - tag: peer0
+        priority: 30
+        input_len: 2048
+        output_len: 2
+      - tag: peer1
+        priority: 30
+        input_len: 2048
+        output_len: 2
+      - tag: peer2
+        priority: 30
+        input_len: 2048
+        output_len: 2
+      - tag: peer3
+        priority: 30
+        input_len: 2048
+        output_len: 2
+      - tag: peer4
+        priority: 30
+        input_len: 2048
+        output_len: 2
+      - tag: peer5
+        priority: 30
+        input_len: 2048
+        output_len: 2
+      - tag: peer6
+        priority: 30
+        input_len: 2048
+        output_len: 2
+      - tag: peer7
+        priority: 30
+        input_len: 2048
+        output_len: 2
+      - tag: incoming
+        priority: 70
+        input_len: 2048
+        output_len: 2
+    r1_wave_settled_timeout_s: 90
+    r1_placeholder_drain_timeout_s: 35
+    r1_wave_drain_timeout_s: 315
+    r1_same_priority:
+      round: 1
+    r1_master_clean_timeout_s: 30
+    r2_placeholder_timeout_s: 5
+    r2_placeholder:
+      gap_s: 0
+      requests:
+      - tag: placeholder
+        priority: 70
+        input_len: 2048
+        output_len: 2
+    r2_placeholder_settled_timeout_s: 90
+    r2_placeholder_admitted:
+      op: eq
+      expected: true
+    r2_placeholder_pending_timeout_s: 6
+    r2_wave_timeout_s: 15
+    r2_wave:
+      gap_s: 0.15
+      requests:
+      - tag: peer0
+        priority: 70
+        input_len: 2048
+        output_len: 2
+      - tag: peer1
+        priority: 70
+        input_len: 2048
+        output_len: 2
+      - tag: peer2
+        priority: 70
+        input_len: 2048
+        output_len: 2
+      - tag: peer3
+        priority: 70
+        input_len: 2048
+        output_len: 2
+      - tag: peer4
+        priority: 70
+        input_len: 2048
+        output_len: 2
+      - tag: peer5
+        priority: 70
+        input_len: 2048
+        output_len: 2
+      - tag: peer6
+        priority: 70
+        input_len: 2048
+        output_len: 2
+      - tag: peer7
+        priority: 70
+        input_len: 2048
+        output_len: 2
+      - tag: incoming
+        priority: 90
+        input_len: 2048
+        output_len: 2
+    r2_wave_settled_timeout_s: 90
+    r2_placeholder_drain_timeout_s: 35
+    r2_wave_drain_timeout_s: 315
+    r2_same_priority:
+      round: 2
+    r2_master_clean_timeout_s: 30
+    restore:
+      operation: set_perf
+      perf:
+        prefill_fixed_ms: 100
+    teardown_timeout_s: 120
+  comparator_frozen_weak:
+    setup_timeout_s: 180
+    slow:
+      operation: set_perf
+      perf:
+        prefill_fixed_ms: 3000
+    sync:
+      seconds: 1.5
+    r1_placeholder_timeout_s: 5
+    r1_placeholder:
+      gap_s: 0
+      requests:
+      - tag: placeholder
+        priority: 30
+        input_len: 2048
+        output_len: 2
+    r1_placeholder_settled_timeout_s: 90
+    r1_placeholder_admitted:
+      op: eq
+      expected: true
+    r1_placeholder_pending_timeout_s: 6
+    r1_wave_timeout_s: 15
+    r1_wave:
+      gap_s: 0.15
+      requests:
+      - tag: peer0
+        priority: 30
+        input_len: 2048
+        output_len: 2
+      - tag: peer1
+        priority: 30
+        input_len: 2048
+        output_len: 2
+      - tag: peer2
+        priority: 70
+        input_len: 2048
+        output_len: 2
+      - tag: peer3
+        priority: 70
+        input_len: 2048
+        output_len: 2
+      - tag: peer4
+        priority: 70
+        input_len: 2048
+        output_len: 2
+    r1_wave_settled_timeout_s: 90
+    r1_placeholder_drain_timeout_s: 35
+    r1_wave_drain_timeout_s: 175
+    r1_same_priority:
+      ordering: priority
+    r1_master_clean_timeout_s: 30
+    fifo_environment_timeout_s: 300
+    fifo_environment:
+      config_overrides:
+        ordering: fifo
+        decision: single
+        dispatcher: non_batch
+        queue_timeout_ms:
+          omit: true
+        max_inflight_requests_per_worker: 1
+        max_waiting_requests_per_prefill_worker: 8
+    fifo_slow:
+      operation: set_perf
+      perf:
+        prefill_fixed_ms: 3000
+    fifo_sync:
+      seconds: 1.5
+    r2_placeholder_timeout_s: 5
+    r2_placeholder:
+      gap_s: 0
+      requests:
+      - tag: placeholder
+        priority: 30
+        input_len: 2048
+        output_len: 2
+    r2_placeholder_settled_timeout_s: 90
+    r2_placeholder_admitted:
+      op: eq
+      expected: true
+    r2_placeholder_pending_timeout_s: 6
+    r2_wave_timeout_s: 15
+    r2_wave:
+      gap_s: 0.15
+      requests:
+      - tag: peer0
+        priority: 30
+        input_len: 2048
+        output_len: 2
+      - tag: peer1
+        priority: 30
+        input_len: 2048
+        output_len: 2
+      - tag: peer2
+        priority: 70
+        input_len: 2048
+        output_len: 2
+      - tag: peer3
+        priority: 70
+        input_len: 2048
+        output_len: 2
+      - tag: peer4
+        priority: 70
+        input_len: 2048
+        output_len: 2
+    r2_wave_settled_timeout_s: 90
+    r2_placeholder_drain_timeout_s: 35
+    r2_wave_drain_timeout_s: 175
+    r2_same_priority:
+      ordering: fifo
+    r2_master_clean_timeout_s: 30
+    restore:
+      operation: set_perf
+      perf:
+        prefill_fixed_ms: 100
+    teardown_timeout_s: 120
+  config_strict_reject:
+    setup_timeout_s: 180
+    removed_auto_tpm_timeout_s: 300
+    removed_auto_tpm:
+      config_overrides:
+        ordering: priority
+        decision: single
+        dispatcher: non_batch
+        queue_timeout_ms:
+          omit: true
+        max_inflight_requests_per_worker: 1
+        max_waiting_requests_per_prefill_worker: 8
+      mutation: removed_auto_tpm
+    fifo_default_priority_timeout_s: 300
+    fifo_default_priority:
+      config_overrides:
+        ordering: fifo
+        decision: single
+        dispatcher: non_batch
+        queue_timeout_ms:
+          omit: true
+        max_inflight_requests_per_worker: 1
+        max_waiting_requests_per_prefill_worker: 8
+      mutation: fifo_default_priority
+    owned_without_cancellation_timeout_s: 300
+    owned_without_cancellation:
+      config_overrides:
+        ordering: priority
+        decision: single
+        dispatcher: non_batch
+        queue_timeout_ms:
+          omit: true
+        max_inflight_requests_per_worker: 1
+        max_waiting_requests_per_prefill_worker: 8
+        preemption:
+          allowed_victim_stages:
+          - DECODE_RESERVED
+          - DECODE_ENGINE_OWNED
+          engine_cancellation:
+            ack_timeout_ms: 50
+            completion_timeout_ms: 1000
+      mutation: owned_without_cancellation
+  decode_engine_owned:
+    setup_timeout_s: 180
+    slow:
+      operation: set_perf
+      perf:
+        prefill_fixed_ms: 4000
+    sync:
+      seconds: 1.5
+    r1_occupants_timeout_s: 15
+    r1_occupants:
+      gap_s: 0.15
+      requests:
+      - tag: occupant0
+        priority: 30
+        input_len: 2048
+        output_len: 500
+      - tag: occupant1
+        priority: 30
+        input_len: 2048
+        output_len: 500
+      - tag: occupant2
+        priority: 30
+        input_len: 2048
+        output_len: 500
+      - tag: occupant3
+        priority: 30
+        input_len: 2048
+        output_len: 500
+    r1_settled_timeout_s: 90
+    r1_pressure:
+      tokens: 6291456
+    r1_pressure_sync:
+      seconds: 1.5
+    r1_incoming_timeout_s: 5
+    r1_incoming:
+      gap_s: 0
+      requests:
+      - tag: incoming
+        priority: 70
+        input_len: 2048
+        output_len: 2
+    r1_incoming_settled_timeout_s: 90
+    r1_occupants_drain_timeout_s: 140
+    r1_incoming_drain_timeout_s: 35
+    r1_verdict:
+      phase: reserved
+    r1_master_clean_timeout_s: 30
+    release_pressure:
+      tokens: 0
+    release_sync:
+      seconds: 1.5
+    r2_occupants_timeout_s: 15
+    r2_occupants:
+      gap_s: 0.15
+      requests:
+      - tag: occupant0
+        priority: 30
+        input_len: 2048
+        output_len: 500
+      - tag: occupant1
+        priority: 30
+        input_len: 2048
+        output_len: 500
+      - tag: occupant2
+        priority: 30
+        input_len: 2048
+        output_len: 500
+      - tag: occupant3
+        priority: 30
+        input_len: 2048
+        output_len: 500
+    r2_settled_timeout_s: 90
+    r2_running_timeout_s: 80
+    r2_pressure:
+      tokens: 6291456
+    r2_pressure_sync:
+      seconds: 1.5
+    r2_incoming_timeout_s: 5
+    r2_incoming:
+      gap_s: 0
+      requests:
+      - tag: incoming
+        priority: 70
+        input_len: 2048
+        output_len: 2
+    r2_incoming_settled_timeout_s: 90
+    r2_occupants_drain_timeout_s: 140
+    r2_incoming_drain_timeout_s: 35
+    r2_verdict:
+      phase: owned
+    r2_master_clean_timeout_s: 30
+    clear_pressure:
+      tokens: 0
+    restore:
+      operation: set_perf
+      perf:
+        prefill_fixed_ms: 100
+  error_code_family:
+    setup_timeout_s: 180
+    s1_fleet:
+      role: prefill
+    s1_slow:
+      operation: set_perf
+      perf:
+        prefill_fixed_ms: 4000
+    s1_sync:
+      seconds: 1.5
+    s1_placeholder_timeout_s: 15
+    s1_placeholder:
+      gap_s: 0.15
+      requests:
+      - tag: placeholder0
+        priority: 50
+        input_len: 2048
+        output_len: 2
+      - tag: placeholder1
+        priority: 50
+        input_len: 2048
+        output_len: 2
+    s1_placeholder_settled_timeout_s: 90
+    s1_admitted:
+      op: eq
+      expected: true
+    s1_pending_timeout_s: 6
+    s1_wave_timeout_s: 15
+    s1_wave:
+      gap_s: 0.15
+      requests:
+      - tag: wave0
+        priority: 30
+        input_len: 2048
+        output_len: 2
+      - tag: wave1
+        priority: 70
+        input_len: 2048
+        output_len: 2
+    s1_wave_settled_timeout_s: 90
+    s1_placeholder_drain_timeout_s: 70
+    s1_wave_drain_timeout_s: 70
+    s1_segment:
+      segment: outstanding
+    s1_restore:
+      operation: set_perf
+      perf:
+        prefill_fixed_ms: 100
+    recovery_prepare:
+      count: 1
+      concurrency: 1
+      input_len: 2048
+      output_len: 2
+      consume: immediate
+      schedule_timeout_s: 30
+      stream_timeout_s: 30
+      unique_key_count: 1
+      unique_key_start: 1
+      generate_payload: match_schedule
+    recovery_dispatch_timeout_s: 60
+    s1_clean_timeout_s: 30
+    s2_environment_timeout_s: 300
+    s2_environment:
+      config_overrides:
+        ordering: priority
+        decision: single
+        dispatcher: non_batch
+        queue_timeout_ms: 60000
+        max_inflight_requests_per_worker: 1
+        max_waiting_requests_per_prefill_worker: 8
+        preemption:
+          allowed_victim_stages:
+          - PREFILL_QUEUED
+      n_prefill: 1
+      n_decode: 4
+    s2_slow:
+      operation: set_perf
+      perf:
+        prefill_fixed_ms: 3000
+    s2_sync:
+      seconds: 1.5
+    s2_placeholder_timeout_s: 15
+    s2_placeholder:
+      gap_s: 0
+      requests:
+      - tag: placeholder0
+        priority: 70
+        input_len: 2048
+        output_len: 2
+    s2_placeholder_settled_timeout_s: 90
+    s2_admitted:
+      op: eq
+      expected: true
+    s2_pending_timeout_s: 6
+    s2_wave_timeout_s: 15
+    s2_wave:
+      gap_s: 0.15
+      requests:
+      - tag: wave0
+        priority: 70
+        input_len: 2048
+        output_len: 2
+      - tag: wave1
+        priority: 70
+        input_len: 2048
+        output_len: 2
+      - tag: wave2
+        priority: 70
+        input_len: 2048
+        output_len: 2
+      - tag: wave3
+        priority: 70
+        input_len: 2048
+        output_len: 2
+      - tag: wave4
+        priority: 70
+        input_len: 2048
+        output_len: 2
+      - tag: wave5
+        priority: 70
+        input_len: 2048
+        output_len: 2
+      - tag: wave6
+        priority: 70
+        input_len: 2048
+        output_len: 2
+      - tag: wave7
+        priority: 70
+        input_len: 2048
+        output_len: 2
+      - tag: wave8
+        priority: 90
+        input_len: 2048
+        output_len: 2
+    s2_wave_settled_timeout_s: 90
+    s2_placeholder_drain_timeout_s: 35
+    s2_wave_drain_timeout_s: 315
+    s2_segment:
+      segment: park
+    s2_clean_timeout_s: 30
+    s2_restore:
+      operation: set_perf
+      perf:
+        prefill_fixed_ms: 100
+    s3_environment_timeout_s: 300
+    s3_environment:
+      config_overrides:
+        ordering: priority
+        decision: single
+        dispatcher: non_batch
+        queue_timeout_ms: 7000
+        max_inflight_requests_per_worker: 1
+        max_waiting_requests_per_prefill_worker: 8
+        preemption:
+          allowed_victim_stages:
+          - PREFILL_QUEUED
+      n_prefill: 1
+      n_decode: 4
+    s3_slow:
+      operation: set_perf
+      perf:
+        prefill_fixed_ms: 10000
+    s3_sync:
+      seconds: 1.5
+    s3_placeholder_timeout_s: 15
+    s3_placeholder:
+      gap_s: 0
+      requests:
+      - tag: placeholder0
+        priority: 70
+        input_len: 2048
+        output_len: 2
+    s3_placeholder_settled_timeout_s: 90
+    s3_admitted:
+      op: eq
+      expected: true
+    s3_pending_timeout_s: 6
+    s3_wave_timeout_s: 15
+    s3_wave:
+      gap_s: 0.15
+      requests:
+      - tag: wave0
+        priority: 30
+        input_len: 2048
+        output_len: 2
+      - tag: wave1
+        priority: 30
+        input_len: 2048
+        output_len: 2
+      - tag: wave2
+        priority: 30
+        input_len: 2048
+        output_len: 2
+      - tag: wave3
+        priority: 30
+        input_len: 2048
+        output_len: 2
+      - tag: wave4
+        priority: 30
+        input_len: 2048
+        output_len: 2
+      - tag: wave5
+        priority: 30
+        input_len: 2048
+        output_len: 2
+      - tag: wave6
+        priority: 30
+        input_len: 2048
+        output_len: 2
+      - tag: wave7
+        priority: 30
+        input_len: 2048
+        output_len: 2
+      - tag: wave8
+        priority: 90
+        input_len: 2048
+        output_len: 2
+    s3_wave_settled_timeout_s: 90
+    s3_placeholder_drain_timeout_s: 35
+    s3_wave_drain_timeout_s: 315
+    s3_segment:
+      segment: expiry
+    s3_clean_timeout_s: 30
+    s3_restore:
+      operation: set_perf
+      perf:
+        prefill_fixed_ms: 100
+  decode_reservation_priority:
+    setup_timeout_s: 180
+    slow:
+      operation: set_perf
+      perf:
+        prefill_fixed_ms: 4000
+    sync:
+      seconds: 1.5
+    r1_occupants_timeout_s: 15
+    r1_occupants:
+      gap_s: 0.15
+      requests:
+      - tag: occupant0
+        priority: 30
+        input_len: 2048
+        output_len: 500
+      - tag: occupant1
+        priority: 30
+        input_len: 2048
+        output_len: 500
+      - tag: occupant2
+        priority: 30
+        input_len: 2048
+        output_len: 500
+      - tag: occupant3
+        priority: 30
+        input_len: 2048
+        output_len: 500
+    r1_settled_timeout_s: 90
+    r1_running_timeout_s: 80
+    r1_baseline:
+      labels:
+        victim_priority: '30'
+        incoming_priority: '70'
+    r1_pressure:
+      tokens: 6291456
+    r1_pressure_sync:
+      seconds: 1.5
+    r1_incoming_timeout_s: 5
+    r1_incoming:
+      gap_s: 0
+      requests:
+      - tag: incoming
+        priority: 70
+        input_len: 2048
+        output_len: 2
+    r1_incoming_settled_timeout_s: 90
+    r1_occupants_drain_timeout_s: 140
+    r1_incoming_drain_timeout_s: 35
+    r1_after:
+      labels:
+        victim_priority: '30'
+        incoming_priority: '70'
+    r1_verdict:
+      wave: lower
+    r1_clean_timeout_s: 30
+    r2_release:
+      tokens: 0
+    r2_release_sync:
+      seconds: 1.5
+    r2_occupants_timeout_s: 15
+    r2_occupants:
+      gap_s: 0.15
+      requests:
+      - tag: occupant0
+        priority: 50
+        input_len: 2048
+        output_len: 500
+      - tag: occupant1
+        priority: 50
+        input_len: 2048
+        output_len: 500
+      - tag: occupant2
+        priority: 50
+        input_len: 2048
+        output_len: 500
+      - tag: occupant3
+        priority: 50
+        input_len: 2048
+        output_len: 500
+    r2_settled_timeout_s: 90
+    r2_running_timeout_s: 80
+    r2_baseline:
+      labels: {}
+    r2_pressure:
+      tokens: 6291456
+    r2_pressure_sync:
+      seconds: 1.5
+    r2_incoming_timeout_s: 5
+    r2_incoming:
+      gap_s: 0
+      requests:
+      - tag: incoming
+        priority: 50
+        input_len: 2048
+        output_len: 2
+    r2_incoming_settled_timeout_s: 90
+    r2_occupants_drain_timeout_s: 140
+    r2_incoming_drain_timeout_s: 35
+    r2_after:
+      labels: {}
+    r2_verdict:
+      wave: same
+    r2_clean_timeout_s: 30
+    r3_release:
+      tokens: 0
+    r3_release_sync:
+      seconds: 1.5
+    r3_occupants_timeout_s: 15
+    r3_occupants:
+      gap_s: 0.15
+      requests:
+      - tag: occupant0
+        priority: 30
+        input_len: 2048
+        output_len: 500
+      - tag: occupant1
+        priority: 30
+        input_len: 2048
+        output_len: 500
+      - tag: occupant2
+        priority: 30
+        input_len: 16384
+        output_len: 500
+      - tag: occupant3
+        priority: 30
+        input_len: 16384
+        output_len: 500
+    r3_settled_timeout_s: 90
+    r3_running_timeout_s: 80
+    r3_pressure:
+      tokens: 6291456
+    r3_pressure_sync:
+      seconds: 1.5
+    r3_incoming_timeout_s: 5
+    r3_incoming:
+      gap_s: 0
+      requests:
+      - tag: incoming
+        priority: 70
+        input_len: 8192
+        output_len: 2
+    r3_incoming_settled_timeout_s: 90
+    r3_occupants_drain_timeout_s: 140
+    r3_incoming_drain_timeout_s: 35
+    r3_verdict:
+      wave: kvbucket
+    r3_clean_timeout_s: 30
+    clear_pressure:
+      tokens: 0
+    restore:
+      operation: set_perf
+      perf:
+        prefill_fixed_ms: 100
+  observability_integrity:
+    setup_timeout_s: 180
+    slow:
+      operation: set_perf
+      perf:
+        prefill_fixed_ms: 3000
+    sync:
+      seconds: 1.5
+    placeholder_timeout_s: 5
+    placeholder:
+      gap_s: 0
+      requests:
+      - tag: placeholder
+        priority: 50
+        input_len: 2048
+        output_len: 2
+    placeholder_settled_timeout_s: 90
+    placeholder_admitted:
+      op: eq
+      expected: true
+    placeholder_pending_timeout_s: 6
+    duplicate_timeout_s: 35
+    wave_timeout_s: 15
+    wave:
+      gap_s: 0.15
+      requests:
+      - tag: 30a
+        priority: 30
+        input_len: 2048
+        output_len: 2
+      - tag: 30b
+        priority: 30
+        input_len: 2048
+        output_len: 2
+      - tag: 50a
+        priority: 50
+        input_len: 2048
+        output_len: 2
+      - tag: 50b
+        priority: 50
+        input_len: 2048
+        output_len: 2
+      - tag: 70a
+        priority: 70
+        input_len: 2048
+        output_len: 2
+      - tag: 70b
+        priority: 70
+        input_len: 2048
+        output_len: 2
+      - tag: 30c
+        priority: 30
+        input_len: 2048
+        output_len: 2
+      - tag: 30d
+        priority: 30
+        input_len: 2048
+        output_len: 2
+      - tag: '90'
+        priority: 90
+        input_len: 2048
+        output_len: 2
+    wave_settled_timeout_s: 90
+    placeholder_drain_timeout_s: 35
+    wave_drain_timeout_s: 315
+    master_clean_timeout_s: 30
+    restore:
+      operation: set_perf
+      perf:
+        prefill_fixed_ms: 100
+    teardown_timeout_s: 120
+  prefill_queued_live_single:
+    setup_timeout_s: 180
+    slow:
+      operation: set_perf
+      perf:
+        prefill_fixed_ms: 4000
+    sync:
+      seconds: 1.5
+    placeholder_timeout_s: 5
+    placeholder:
+      gap_s: 0
+      requests:
+      - tag: placeholder
+        priority: 50
+        input_len: 2048
+        output_len: 2
+      defer_batch: true
+    placeholder_settled_timeout_s: 90
+    placeholder_admitted:
+      op: eq
+      expected: true
+    placeholder_pending_timeout_s: 6
+    wave_timeout_s: 15
+    wave:
+      gap_s: 0.15
+      requests:
+      - tag: victim_a
+        priority: 30
+        input_len: 2048
+        output_len: 2
+      - tag: victim_b
+        priority: 30
+        input_len: 2048
+        output_len: 2
+      - tag: incoming
+        priority: 70
+        input_len: 2048
+        output_len: 2
+      defer_batch: true
+    wave_settled_timeout_s: 90
+    placeholder_drain_timeout_s: 50
+    placeholder_drain:
+      tags:
+      - placeholder
+    wave_drain_timeout_s: 100
+    wave_drain:
+      tags:
+      - victim_a
+      - incoming
+    master_clean_timeout_s: 30
+    engine_clean_timeout_s: 35
+    recovery_prepare:
+      count: 1
+      concurrency: 1
+      input_len: 2048
+      output_len: 2
+      consume: immediate
+      schedule_timeout_s: 30
+      stream_timeout_s: 30
+      unique_key_count: 1
+      unique_key_start: 1
+      generate_payload: match_schedule
+    recovery_dispatch_timeout_s: 60
+    restore:
+      operation: set_perf
+      perf:
+        prefill_fixed_ms: 100
+    teardown_timeout_s: 120
+  prefill_queued_live_window:
+    setup_timeout_s: 180
+    slow:
+      operation: set_perf
+      perf:
+        prefill_fixed_ms: 4000
+    sync:
+      seconds: 1.5
+    placeholder_timeout_s: 5
+    placeholder:
+      gap_s: 0
+      requests:
+      - tag: placeholder
+        priority: 50
+        input_len: 2048
+        output_len: 2
+      defer_batch: true
+    placeholder_settled_timeout_s: 90
+    placeholder_admitted:
+      op: eq
+      expected: true
+    placeholder_pending_timeout_s: 6
+    wave_timeout_s: 15
+    wave:
+      gap_s: 0.15
+      requests:
+      - tag: victim_a
+        priority: 30
+        input_len: 2048
+        output_len: 2
+      - tag: victim_b
+        priority: 30
+        input_len: 2048
+        output_len: 2
+      - tag: incoming
+        priority: 70
+        input_len: 2048
+        output_len: 2
+      defer_batch: true
+    wave_settled_timeout_s: 90
+    placeholder_drain_timeout_s: 50
+    placeholder_drain:
+      tags:
+      - placeholder
+    wave_drain_timeout_s: 100
+    wave_drain:
+      tags:
+      - victim_a
+      - incoming
+    master_clean_timeout_s: 30
+    engine_clean_timeout_s: 35
+    recovery_prepare:
+      count: 1
+      concurrency: 1
+      input_len: 2048
+      output_len: 2
+      consume: immediate
+      schedule_timeout_s: 30
+      stream_timeout_s: 30
+      unique_key_count: 1
+      unique_key_start: 1
+      generate_payload: match_schedule
+    recovery_dispatch_timeout_s: 60
+    restore:
+      operation: set_perf
+      perf:
+        prefill_fixed_ms: 100
+    teardown_timeout_s: 120
+  decode_reserved_live_single:
+    setup_timeout_s: 180
+    slow:
+      operation: set_perf
+      perf:
+        prefill_fixed_ms: 4000
+    sync:
+      seconds: 1.5
+    placeholder_timeout_s: 5
+    placeholder:
+      gap_s: 0
+      requests:
+      - tag: placeholder
+        priority: 90
+        input_len: 512
+        output_len: 2
+      defer_batch: true
+    placeholder_settled_timeout_s: 90
+    placeholder_admitted:
+      op: eq
+      expected: true
+    placeholder_pending_timeout_s: 6
+    placeholder_drain_timeout_s: 50
+    placeholder_drain:
+      tags:
+      - placeholder
+    placeholder_master_clean_timeout_s: 30
+    placeholder_engine_clean_timeout_s: 35
+    placeholder_released:
+      op: eq
+      expected: true
+    wave_timeout_s: 15
+    wave:
+      gap_s: 0.15
+      requests:
+      - tag: victim
+        priority: 30
+        input_len: 512
+        output_len: 2
+      - tag: incoming
+        priority: 70
+        input_len: 3500
+        output_len: 2
+      defer_batch: true
+    wave_settled_timeout_s: 90
+    wave_drain_timeout_s: 50
+    wave_drain:
+      tags:
+      - incoming
+    master_clean_timeout_s: 30
+    engine_clean_timeout_s: 35
+    recovery_prepare:
+      count: 1
+      concurrency: 1
+      input_len: 2048
+      output_len: 2
+      consume: immediate
+      schedule_timeout_s: 30
+      stream_timeout_s: 30
+      unique_key_count: 1
+      unique_key_start: 1
+      generate_payload: match_schedule
+    recovery_dispatch_timeout_s: 60
+    restore:
+      operation: set_perf
+      perf:
+        prefill_fixed_ms: 100
+    teardown_timeout_s: 120
+  decode_reserved_live_window:
+    setup_timeout_s: 180
+    slow:
+      operation: set_perf
+      perf:
+        prefill_fixed_ms: 4000
+    sync:
+      seconds: 1.5
+    placeholder_timeout_s: 5
+    placeholder:
+      gap_s: 0
+      requests:
+      - tag: placeholder
+        priority: 90
+        input_len: 512
+        output_len: 2
+      defer_batch: true
+    placeholder_settled_timeout_s: 90
+    placeholder_admitted:
+      op: eq
+      expected: true
+    placeholder_pending_timeout_s: 6
+    placeholder_drain_timeout_s: 50
+    placeholder_drain:
+      tags:
+      - placeholder
+    placeholder_master_clean_timeout_s: 30
+    placeholder_engine_clean_timeout_s: 35
+    placeholder_released:
+      op: eq
+      expected: true
+    wave_timeout_s: 15
+    wave:
+      gap_s: 0.15
+      requests:
+      - tag: victim
+        priority: 30
+        input_len: 512
+        output_len: 2
+      - tag: incoming
+        priority: 70
+        input_len: 3500
+        output_len: 2
+      defer_batch: true
+    wave_settled_timeout_s: 90
+    wave_drain_timeout_s: 50
+    wave_drain:
+      tags:
+      - incoming
+    master_clean_timeout_s: 30
+    engine_clean_timeout_s: 35
+    recovery_prepare:
+      count: 1
+      concurrency: 1
+      input_len: 2048
+      output_len: 2
+      consume: immediate
+      schedule_timeout_s: 30
+      stream_timeout_s: 30
+      unique_key_count: 1
+      unique_key_start: 1
+      generate_payload: match_schedule
+    recovery_dispatch_timeout_s: 60
+    restore:
+      operation: set_perf
+      perf:
+        prefill_fixed_ms: 100
+    teardown_timeout_s: 120
+  cancel_not_found:
+    setup_timeout_s: 180
+    victim_timeout_s: 5
+    victim:
+      gap_s: 0
+      requests:
+      - tag: victim
+        priority: 30
+        input_len: 512
+        output_len: 200
+    victim_settled_timeout_s: 90
+    victim_admitted:
+      op: eq
+      expected: true
+    victim_running_timeout_s: 10
+    victim_running:
+      state: running
+    before_freeze_pause:
+      seconds: 0.6
+    freeze_status:
+      role: decode
+      selection: first
+      fault: status_no_respond
+      enabled: true
+    victim_engine_finished_timeout_s: 3
+    victim_engine_finished:
+      state: finished
+    incoming_timeout_s: 5
+    incoming:
+      gap_s: 0
+      requests:
+      - tag: incoming
+        priority: 70
+        input_len: 512
+        output_len: 2
+    incoming_settled_timeout_s: 90
+    victim_drain_timeout_s: 35
+    clear_status:
+      role: decode
+      selection: first
+      fault: status_no_respond
+      enabled: false
+    master_clean_timeout_s: 30
+    engine_clean_timeout_s: 25
+    recovery_prepare:
+      count: 1
+      concurrency: 1
+      input_len: 2048
+      output_len: 2
+      consume: immediate
+      schedule_timeout_s: 30
+      stream_timeout_s: 30
+      unique_key_count: 1
+      unique_key_start: 1
+      generate_payload: match_schedule
+    recovery_dispatch_timeout_s: 60
+  cancel_tombstoned:
+    setup_timeout_s: 180
+    victim_timeout_s: 5
+    victim:
+      gap_s: 0
+      defer_batch: true
+      requests:
+      - tag: victim
+        priority: 30
+        input_len: 512
+        output_len: 5000
+    victim_settled_timeout_s: 90
+    victim_admitted:
+      op: eq
+      expected: true
+    first_output_timeout_s: 15
+    crash_fault:
+      type: crash_after
+      targets:
+      - prefill-0
+      options:
+        n: 1
+    crash_trigger_timeout_s: 10
+    prefill_dropped_timeout_s: 45
+    prefill_dropped:
+      state: dropped
+    prefill_restart:
+      operation: start
+      targets:
+      - prefill-0
+    prefill_restored_timeout_s: 45
+    prefill_restored:
+      state: restored
+    reconnect:
+      seconds: 3
+    victim_cut_timeout_s: 10
+    incoming_timeout_s: 5
+    incoming:
+      gap_s: 0
+      defer_batch: true
+      requests:
+      - tag: incoming
+        priority: 70
+        input_len: 512
+        output_len: 2
+    incoming_settled_timeout_s: 90
+    incoming_drain_timeout_s: 50
+    incoming_drain:
+      tags:
+      - incoming
+    cancel_arrival_timeout_s: 30
+    fence_probe_timeout_s: 15
+    engine_clean_timeout_s: 80
+    residue_timeout_s: 45
+    recovery_prepare:
+      count: 1
+      concurrency: 1
+      input_len: 2048
+      output_len: 2
+      consume: immediate
+      schedule_timeout_s: 30
+      stream_timeout_s: 30
+      unique_key_count: 1
+      unique_key_start: 1
+      generate_payload: match_schedule
+    recovery_dispatch_timeout_s: 60

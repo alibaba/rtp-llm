@@ -1,4 +1,4 @@
-# Configuration for the registered Python case; execution and assertions live in Python.
+# YAML owns all case data; Python owns execution order and result references.
 schema_version: 2
 case: cache_global_holders
 profiles:
@@ -21,26 +21,41 @@ variants:
   profiles:
   - batch-window
   - single-batch
+  program: shared_batch
+  metadata:
+    requires:
+    - enqueue_batch
 - id: shared_nonbatch
   profiles:
   - single-nonbatch
   - window-nonbatch
+  program: shared_nonbatch
 - id: release_batch
   profiles:
   - batch-window
   - single-batch
+  program: release_batch
+  metadata:
+    requires:
+    - enqueue_batch
 - id: release_nonbatch
   profiles:
   - single-nonbatch
   - window-nonbatch
+  program: release_nonbatch
 - id: redirect_batch
   profiles:
   - batch-window
   - single-batch
+  program: redirect_batch
+  metadata:
+    requires:
+    - enqueue_batch
 - id: redirect_nonbatch
   profiles:
   - single-nonbatch
   - window-nonbatch
+  program: redirect_nonbatch
 - id: down_batch
   profiles:
   - batch-window
@@ -48,6 +63,10 @@ variants:
   environment:
     n_prefill: 3
     discovery: discovery_file
+  program: down_batch
+  metadata:
+    requires:
+    - enqueue_batch
 - id: down_nonbatch
   profiles:
   - single-nonbatch
@@ -55,11 +74,3042 @@ variants:
   environment:
     n_prefill: 3
     discovery: discovery_file
+  program: down_nonbatch
 - id: mixed_batch
   profiles:
   - batch-window
   - single-batch
+  program: mixed_batch
+  metadata:
+    requires:
+    - enqueue_batch
 - id: mixed_nonbatch
   profiles:
   - single-nonbatch
   - window-nonbatch
+  program: mixed_nonbatch
+metadata:
+  description: Shared holder sets, partial and full eviction, graceful holder removal, and interleaved
+    admit/evict routing evidence.
+  category: kv
+parameters:
+  shared_batch:
+    setup_timeout_s: 180
+    fleet:
+      role: prefill
+    slow:
+      operation: set_perf
+      targets:
+      - prefill-0
+      - prefill-1
+      perf:
+        prefill_fixed_ms: 2000
+    perf_sync:
+      seconds: 1.5
+    seed_first:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 30
+      consume: deferred
+    first_pending_timeout_s: 6
+    first_holder:
+      phase: scheduled
+    seed_second:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+    second_terminal_timeout_s: 15
+    first_terminal_timeout_s: 30
+    restore_perf:
+      operation: set_perf
+      targets:
+      - prefill-0
+      - prefill-1
+      perf:
+        prefill_fixed_ms: 100
+    seed_quiet_timeout_s: 8
+    seed_quiet:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 3.5
+    shared_holders:
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      match: full_family
+    continuation_0:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+    continuation_0_terminal_timeout_s: 15
+    continuation_1:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+    continuation_1_terminal_timeout_s: 15
+    continuation_2:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+    continuation_2_terminal_timeout_s: 15
+    continuation_3:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+    continuation_3_terminal_timeout_s: 15
+    continuation_4:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+    continuation_4_terminal_timeout_s: 15
+    continuation_5:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+    continuation_5_terminal_timeout_s: 15
+    continuation_6:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+    continuation_6_terminal_timeout_s: 15
+    continuation_7:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+    continuation_7_terminal_timeout_s: 15
+    continuation_8:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+    continuation_8_terminal_timeout_s: 15
+    continuation_9:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+    continuation_9_terminal_timeout_s: 15
+    continuation_10:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+    continuation_10_terminal_timeout_s: 15
+    continuation_11:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+    continuation_11_terminal_timeout_s: 15
+    continuation_12:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+    continuation_12_terminal_timeout_s: 15
+    continuation_13:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+    continuation_13_terminal_timeout_s: 15
+    continuation_14:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+    continuation_14_terminal_timeout_s: 15
+    continuation_15:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+    continuation_15_terminal_timeout_s: 15
+    continuation_16:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+    continuation_16_terminal_timeout_s: 15
+    continuation_17:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+    continuation_17_terminal_timeout_s: 15
+    continuation_18:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+    continuation_18_terminal_timeout_s: 15
+    continuation_19:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+    continuation_19_terminal_timeout_s: 15
+    spread:
+      min_samples: 20
+      bands:
+        strict: 0.65
+        normal: 0.75
+        loose: 0.85
+    holder_union:
+      min_samples: 20
+      min_used: 2
+  shared_nonbatch:
+    setup_timeout_s: 180
+    fleet:
+      role: prefill
+    slow:
+      operation: set_perf
+      targets:
+      - prefill-0
+      - prefill-1
+      perf:
+        prefill_fixed_ms: 2000
+    perf_sync:
+      seconds: 1.5
+    seed_first:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 30
+      consume: immediate
+    first_pending_timeout_s: 6
+    first_holder:
+      phase: scheduled
+    seed_second:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+    second_terminal_timeout_s: 15
+    first_terminal_timeout_s: 30
+    restore_perf:
+      operation: set_perf
+      targets:
+      - prefill-0
+      - prefill-1
+      perf:
+        prefill_fixed_ms: 100
+    seed_quiet_timeout_s: 8
+    seed_quiet:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 3.5
+    shared_holders:
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      match: full_family
+    continuation_0:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+    continuation_0_terminal_timeout_s: 15
+    continuation_1:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+    continuation_1_terminal_timeout_s: 15
+    continuation_2:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+    continuation_2_terminal_timeout_s: 15
+    continuation_3:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+    continuation_3_terminal_timeout_s: 15
+    continuation_4:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+    continuation_4_terminal_timeout_s: 15
+    continuation_5:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+    continuation_5_terminal_timeout_s: 15
+    continuation_6:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+    continuation_6_terminal_timeout_s: 15
+    continuation_7:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+    continuation_7_terminal_timeout_s: 15
+    continuation_8:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+    continuation_8_terminal_timeout_s: 15
+    continuation_9:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+    continuation_9_terminal_timeout_s: 15
+    continuation_10:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+    continuation_10_terminal_timeout_s: 15
+    continuation_11:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+    continuation_11_terminal_timeout_s: 15
+    continuation_12:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+    continuation_12_terminal_timeout_s: 15
+    continuation_13:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+    continuation_13_terminal_timeout_s: 15
+    continuation_14:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+    continuation_14_terminal_timeout_s: 15
+    continuation_15:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+    continuation_15_terminal_timeout_s: 15
+    continuation_16:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+    continuation_16_terminal_timeout_s: 15
+    continuation_17:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+    continuation_17_terminal_timeout_s: 15
+    continuation_18:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+    continuation_18_terminal_timeout_s: 15
+    continuation_19:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+    continuation_19_terminal_timeout_s: 15
+    spread:
+      min_samples: 20
+      bands:
+        strict: 0.65
+        normal: 0.75
+        loose: 0.85
+    holder_union:
+      min_samples: 20
+      min_used: 2
+  release_batch:
+    setup_timeout_s: 180
+    fleet:
+      role: prefill
+    slow:
+      operation: set_perf
+      targets:
+      - prefill-0
+      - prefill-1
+      perf:
+        prefill_fixed_ms: 2000
+    perf_sync:
+      seconds: 1.5
+    seed_first:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 30
+      consume: deferred
+    first_pending_timeout_s: 6
+    first_holder:
+      phase: scheduled
+    seed_second:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+    second_terminal_timeout_s: 15
+    first_terminal_timeout_s: 30
+    restore_perf:
+      operation: set_perf
+      targets:
+      - prefill-0
+      - prefill-1
+      perf:
+        prefill_fixed_ms: 100
+    seed_quiet_timeout_s: 8
+    seed_quiet:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 3.5
+    shared_holders:
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      match: full_family
+    release_first:
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+    release_second:
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+    released_quiet_timeout_s: 8
+    released_quiet:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 3.5
+    no_ghost:
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      holders: []
+      match: any_key
+    wave_timeout_s: 90
+    wave:
+      count: 20
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 30
+      consume: deferred
+      post_issue_delay_s: 0.12
+    wave_terminal_timeout_s: 30
+    spread:
+      min_samples: 20
+      bands:
+        strict: 0.65
+        normal: 0.75
+        loose: 0.85
+  release_nonbatch:
+    setup_timeout_s: 180
+    fleet:
+      role: prefill
+    slow:
+      operation: set_perf
+      targets:
+      - prefill-0
+      - prefill-1
+      perf:
+        prefill_fixed_ms: 2000
+    perf_sync:
+      seconds: 1.5
+    seed_first:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 30
+      consume: immediate
+    first_pending_timeout_s: 6
+    first_holder:
+      phase: scheduled
+    seed_second:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+    second_terminal_timeout_s: 15
+    first_terminal_timeout_s: 30
+    restore_perf:
+      operation: set_perf
+      targets:
+      - prefill-0
+      - prefill-1
+      perf:
+        prefill_fixed_ms: 100
+    seed_quiet_timeout_s: 8
+    seed_quiet:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 3.5
+    shared_holders:
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      match: full_family
+    release_first:
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+    release_second:
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+    released_quiet_timeout_s: 8
+    released_quiet:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 3.5
+    no_ghost:
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      holders: []
+      match: any_key
+    wave_timeout_s: 90
+    wave:
+      count: 20
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 30
+      consume: immediate
+      post_issue_delay_s: 0.12
+    wave_terminal_timeout_s: 30
+    spread:
+      min_samples: 20
+      bands:
+        strict: 0.65
+        normal: 0.75
+        loose: 0.85
+  redirect_batch:
+    setup_timeout_s: 180
+    fleet:
+      role: prefill
+    slow:
+      operation: set_perf
+      targets:
+      - prefill-0
+      - prefill-1
+      perf:
+        prefill_fixed_ms: 2000
+    perf_sync:
+      seconds: 1.5
+    seed_first:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 30
+      consume: deferred
+    first_pending_timeout_s: 6
+    first_holder:
+      phase: scheduled
+    seed_second:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+    second_terminal_timeout_s: 15
+    first_terminal_timeout_s: 30
+    restore_perf:
+      operation: set_perf
+      targets:
+      - prefill-0
+      - prefill-1
+      perf:
+        prefill_fixed_ms: 100
+    seed_quiet_timeout_s: 8
+    seed_quiet:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 3.5
+    shared_holders:
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      match: full_family
+    release_first:
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+    released_quiet_timeout_s: 8
+    released_quiet:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 3.5
+    first_empty:
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      relation: none
+    sole_holder:
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      match: full_family
+    continuation_0:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+    continuation_0_terminal_timeout_s: 15
+    continuation_1:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+    continuation_1_terminal_timeout_s: 15
+    continuation_2:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+    continuation_2_terminal_timeout_s: 15
+    continuation_3:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+    continuation_3_terminal_timeout_s: 15
+    continuation_4:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+    continuation_4_terminal_timeout_s: 15
+    continuation_5:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+    continuation_5_terminal_timeout_s: 15
+    continuation_6:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+    continuation_6_terminal_timeout_s: 15
+    continuation_7:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+    continuation_7_terminal_timeout_s: 15
+    continuation_8:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+    continuation_8_terminal_timeout_s: 15
+    continuation_9:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+    continuation_9_terminal_timeout_s: 15
+    redirect:
+      min_samples: 10
+      bands:
+        strict: 0.95
+        normal: 0.9
+        loose: 0.8
+  redirect_nonbatch:
+    setup_timeout_s: 180
+    fleet:
+      role: prefill
+    slow:
+      operation: set_perf
+      targets:
+      - prefill-0
+      - prefill-1
+      perf:
+        prefill_fixed_ms: 2000
+    perf_sync:
+      seconds: 1.5
+    seed_first:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 30
+      consume: immediate
+    first_pending_timeout_s: 6
+    first_holder:
+      phase: scheduled
+    seed_second:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+    second_terminal_timeout_s: 15
+    first_terminal_timeout_s: 30
+    restore_perf:
+      operation: set_perf
+      targets:
+      - prefill-0
+      - prefill-1
+      perf:
+        prefill_fixed_ms: 100
+    seed_quiet_timeout_s: 8
+    seed_quiet:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 3.5
+    shared_holders:
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      match: full_family
+    release_first:
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+    released_quiet_timeout_s: 8
+    released_quiet:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 3.5
+    first_empty:
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      relation: none
+    sole_holder:
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      match: full_family
+    continuation_0:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+    continuation_0_terminal_timeout_s: 15
+    continuation_1:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+    continuation_1_terminal_timeout_s: 15
+    continuation_2:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+    continuation_2_terminal_timeout_s: 15
+    continuation_3:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+    continuation_3_terminal_timeout_s: 15
+    continuation_4:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+    continuation_4_terminal_timeout_s: 15
+    continuation_5:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+    continuation_5_terminal_timeout_s: 15
+    continuation_6:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+    continuation_6_terminal_timeout_s: 15
+    continuation_7:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+    continuation_7_terminal_timeout_s: 15
+    continuation_8:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+    continuation_8_terminal_timeout_s: 15
+    continuation_9:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+    continuation_9_terminal_timeout_s: 15
+    redirect:
+      min_samples: 10
+      bands:
+        strict: 0.95
+        normal: 0.9
+        loose: 0.8
+  down_batch:
+    setup_timeout_s: 180
+    fleet:
+      role: prefill
+    slow:
+      operation: set_perf
+      targets:
+      - prefill-0
+      - prefill-1
+      - prefill-2
+      perf:
+        prefill_fixed_ms: 2000
+    perf_sync:
+      seconds: 1.5
+    seed_first:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 30
+      consume: deferred
+    first_pending_timeout_s: 6
+    first_holder:
+      phase: scheduled
+    seed_second:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+    second_terminal_timeout_s: 15
+    first_terminal_timeout_s: 30
+    restore_perf:
+      operation: set_perf
+      targets:
+      - prefill-0
+      - prefill-1
+      - prefill-2
+      perf:
+        prefill_fixed_ms: 100
+    seed_quiet_timeout_s: 8
+    seed_quiet:
+      targets:
+      - prefill-0
+      - prefill-1
+      - prefill-2
+      quiet_s: 3.5
+    shared_holders:
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      match: full_family
+    third_worker_timeout_s: 10
+    third_worker:
+      targets:
+      - prefill-0
+      - prefill-1
+      - prefill-2
+      quiet_s: 0
+    third_empty:
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      holders: []
+      match: any_key
+    remove_holder_timeout_s: 70
+    remove_holder:
+      drain_timeout_ms: 60000
+    master_converged_timeout_s: 30
+    master_converged:
+      role: PREFILL
+      count: 2
+    continuation_0:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+    continuation_0_terminal_timeout_s: 15
+    continuation_1:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+    continuation_1_terminal_timeout_s: 15
+    continuation_2:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+    continuation_2_terminal_timeout_s: 15
+    continuation_3:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+    continuation_3_terminal_timeout_s: 15
+    continuation_4:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+    continuation_4_terminal_timeout_s: 15
+    survivor_snapshot_timeout_s: 10
+    survivor_snapshot:
+      targets:
+      - prefill-0
+      - prefill-1
+      - prefill-2
+      quiet_s: 0
+    survivor_kept:
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      relation: all
+    survivor_fidelity:
+      min_samples: 5
+      bands:
+        strict: 0.95
+        normal: 0.9
+        loose: 0.8
+  down_nonbatch:
+    setup_timeout_s: 180
+    fleet:
+      role: prefill
+    slow:
+      operation: set_perf
+      targets:
+      - prefill-0
+      - prefill-1
+      - prefill-2
+      perf:
+        prefill_fixed_ms: 2000
+    perf_sync:
+      seconds: 1.5
+    seed_first:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 30
+      consume: immediate
+    first_pending_timeout_s: 6
+    first_holder:
+      phase: scheduled
+    seed_second:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+    second_terminal_timeout_s: 15
+    first_terminal_timeout_s: 30
+    restore_perf:
+      operation: set_perf
+      targets:
+      - prefill-0
+      - prefill-1
+      - prefill-2
+      perf:
+        prefill_fixed_ms: 100
+    seed_quiet_timeout_s: 8
+    seed_quiet:
+      targets:
+      - prefill-0
+      - prefill-1
+      - prefill-2
+      quiet_s: 3.5
+    shared_holders:
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      match: full_family
+    third_worker_timeout_s: 10
+    third_worker:
+      targets:
+      - prefill-0
+      - prefill-1
+      - prefill-2
+      quiet_s: 0
+    third_empty:
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      holders: []
+      match: any_key
+    remove_holder_timeout_s: 70
+    remove_holder:
+      drain_timeout_ms: 60000
+    master_converged_timeout_s: 30
+    master_converged:
+      role: PREFILL
+      count: 2
+    continuation_0:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+    continuation_0_terminal_timeout_s: 15
+    continuation_1:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+    continuation_1_terminal_timeout_s: 15
+    continuation_2:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+    continuation_2_terminal_timeout_s: 15
+    continuation_3:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+    continuation_3_terminal_timeout_s: 15
+    continuation_4:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+    continuation_4_terminal_timeout_s: 15
+    survivor_snapshot_timeout_s: 10
+    survivor_snapshot:
+      targets:
+      - prefill-0
+      - prefill-1
+      - prefill-2
+      quiet_s: 0
+    survivor_kept:
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      relation: all
+    survivor_fidelity:
+      min_samples: 5
+      bands:
+        strict: 0.95
+        normal: 0.9
+        loose: 0.8
+  mixed_batch:
+    setup_timeout_s: 180
+    fleet:
+      role: prefill
+    slow:
+      operation: set_perf
+      targets:
+      - prefill-0
+      - prefill-1
+      perf:
+        prefill_fixed_ms: 2000
+    perf_sync:
+      seconds: 1.5
+    seed_first:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 30
+      consume: deferred
+    first_pending_timeout_s: 6
+    first_holder:
+      phase: scheduled
+    seed_second:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+    second_terminal_timeout_s: 15
+    first_terminal_timeout_s: 30
+    restore_perf:
+      operation: set_perf
+      targets:
+      - prefill-0
+      - prefill-1
+      perf:
+        prefill_fixed_ms: 100
+    first_release:
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+    family_one_0:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      stream_timeout_s: 15
+    family_one_0_terminal_timeout_s: 15
+    second_release:
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+    family_two_fleet:
+      role: prefill
+    family_two_slow:
+      operation: set_perf
+      targets:
+      - prefill-0
+      - prefill-1
+      perf:
+        prefill_fixed_ms: 2000
+    family_two_perf_sync:
+      seconds: 1.5
+    family_two_seed_first:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 812000
+      - 812001
+      - 812002
+      - 812003
+      - 812004
+      - 812005
+      - 812006
+      - 812007
+      - 812008
+      - 812009
+      stream_timeout_s: 30
+      consume: deferred
+    family_two_first_pending_timeout_s: 6
+    family_two_first_holder:
+      phase: scheduled
+    family_two_seed_second:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 812000
+      - 812001
+      - 812002
+      - 812003
+      - 812004
+      - 812005
+      - 812006
+      - 812007
+      - 812008
+      - 812009
+      stream_timeout_s: 15
+    family_two_second_terminal_timeout_s: 15
+    family_two_first_terminal_timeout_s: 30
+    family_two_restore_perf:
+      operation: set_perf
+      targets:
+      - prefill-0
+      - prefill-1
+      perf:
+        prefill_fixed_ms: 100
+    family_two_release:
+      keys:
+      - 812000
+      - 812001
+      - 812002
+      - 812003
+      - 812004
+      - 812005
+      - 812006
+      - 812007
+      - 812008
+      - 812009
+    mixed_quiet_timeout_s: 8
+    mixed_quiet:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 3.5
+    family_zero_empty:
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      holders: []
+      match: any_key
+    family_one_sole:
+      keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      match: full_family
+    family_two_sole:
+      keys:
+      - 812000
+      - 812001
+      - 812002
+      - 812003
+      - 812004
+      - 812005
+      - 812006
+      - 812007
+      - 812008
+      - 812009
+      match: full_family
+    wave_timeout_s: 90
+    wave:
+      count: 20
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 30
+      consume: deferred
+      post_issue_delay_s: 0.12
+    wave_terminal_timeout_s: 30
+    spread:
+      min_samples: 20
+      bands:
+        strict: 0.65
+        normal: 0.75
+        loose: 0.85
+    continuation_f1_0:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      stream_timeout_s: 15
+    continuation_f1_0_terminal_timeout_s: 15
+    continuation_f1_1:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      stream_timeout_s: 15
+    continuation_f1_1_terminal_timeout_s: 15
+    continuation_f1_2:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      stream_timeout_s: 15
+    continuation_f1_2_terminal_timeout_s: 15
+    continuation_f1_3:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      stream_timeout_s: 15
+    continuation_f1_3_terminal_timeout_s: 15
+    continuation_f1_4:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      stream_timeout_s: 15
+    continuation_f1_4_terminal_timeout_s: 15
+    fidelity_f1:
+      min_samples: 5
+      bands:
+        strict: 0.95
+        normal: 0.9
+        loose: 0.8
+    continuation_f2_0:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 812000
+      - 812001
+      - 812002
+      - 812003
+      - 812004
+      - 812005
+      - 812006
+      - 812007
+      - 812008
+      - 812009
+      stream_timeout_s: 15
+    continuation_f2_0_terminal_timeout_s: 15
+    continuation_f2_1:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 812000
+      - 812001
+      - 812002
+      - 812003
+      - 812004
+      - 812005
+      - 812006
+      - 812007
+      - 812008
+      - 812009
+      stream_timeout_s: 15
+    continuation_f2_1_terminal_timeout_s: 15
+    continuation_f2_2:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 812000
+      - 812001
+      - 812002
+      - 812003
+      - 812004
+      - 812005
+      - 812006
+      - 812007
+      - 812008
+      - 812009
+      stream_timeout_s: 15
+    continuation_f2_2_terminal_timeout_s: 15
+    continuation_f2_3:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 812000
+      - 812001
+      - 812002
+      - 812003
+      - 812004
+      - 812005
+      - 812006
+      - 812007
+      - 812008
+      - 812009
+      stream_timeout_s: 15
+    continuation_f2_3_terminal_timeout_s: 15
+    continuation_f2_4:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 812000
+      - 812001
+      - 812002
+      - 812003
+      - 812004
+      - 812005
+      - 812006
+      - 812007
+      - 812008
+      - 812009
+      stream_timeout_s: 15
+    continuation_f2_4_terminal_timeout_s: 15
+    fidelity_f2:
+      min_samples: 5
+      bands:
+        strict: 0.95
+        normal: 0.9
+        loose: 0.8
+  mixed_nonbatch:
+    setup_timeout_s: 180
+    fleet:
+      role: prefill
+    slow:
+      operation: set_perf
+      targets:
+      - prefill-0
+      - prefill-1
+      perf:
+        prefill_fixed_ms: 2000
+    perf_sync:
+      seconds: 1.5
+    seed_first:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 30
+      consume: immediate
+    first_pending_timeout_s: 6
+    first_holder:
+      phase: scheduled
+    seed_second:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+    second_terminal_timeout_s: 15
+    first_terminal_timeout_s: 30
+    restore_perf:
+      operation: set_perf
+      targets:
+      - prefill-0
+      - prefill-1
+      perf:
+        prefill_fixed_ms: 100
+    first_release:
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+    family_one_0:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      stream_timeout_s: 15
+    family_one_0_terminal_timeout_s: 15
+    second_release:
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+    family_two_fleet:
+      role: prefill
+    family_two_slow:
+      operation: set_perf
+      targets:
+      - prefill-0
+      - prefill-1
+      perf:
+        prefill_fixed_ms: 2000
+    family_two_perf_sync:
+      seconds: 1.5
+    family_two_seed_first:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 812000
+      - 812001
+      - 812002
+      - 812003
+      - 812004
+      - 812005
+      - 812006
+      - 812007
+      - 812008
+      - 812009
+      stream_timeout_s: 30
+      consume: immediate
+    family_two_first_pending_timeout_s: 6
+    family_two_first_holder:
+      phase: scheduled
+    family_two_seed_second:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 812000
+      - 812001
+      - 812002
+      - 812003
+      - 812004
+      - 812005
+      - 812006
+      - 812007
+      - 812008
+      - 812009
+      stream_timeout_s: 15
+    family_two_second_terminal_timeout_s: 15
+    family_two_first_terminal_timeout_s: 30
+    family_two_restore_perf:
+      operation: set_perf
+      targets:
+      - prefill-0
+      - prefill-1
+      perf:
+        prefill_fixed_ms: 100
+    family_two_release:
+      keys:
+      - 812000
+      - 812001
+      - 812002
+      - 812003
+      - 812004
+      - 812005
+      - 812006
+      - 812007
+      - 812008
+      - 812009
+    mixed_quiet_timeout_s: 8
+    mixed_quiet:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 3.5
+    family_zero_empty:
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      holders: []
+      match: any_key
+    family_one_sole:
+      keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      match: full_family
+    family_two_sole:
+      keys:
+      - 812000
+      - 812001
+      - 812002
+      - 812003
+      - 812004
+      - 812005
+      - 812006
+      - 812007
+      - 812008
+      - 812009
+      match: full_family
+    wave_timeout_s: 90
+    wave:
+      count: 20
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 30
+      consume: immediate
+      post_issue_delay_s: 0.12
+    wave_terminal_timeout_s: 30
+    spread:
+      min_samples: 20
+      bands:
+        strict: 0.65
+        normal: 0.75
+        loose: 0.85
+    continuation_f1_0:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      stream_timeout_s: 15
+    continuation_f1_0_terminal_timeout_s: 15
+    continuation_f1_1:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      stream_timeout_s: 15
+    continuation_f1_1_terminal_timeout_s: 15
+    continuation_f1_2:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      stream_timeout_s: 15
+    continuation_f1_2_terminal_timeout_s: 15
+    continuation_f1_3:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      stream_timeout_s: 15
+    continuation_f1_3_terminal_timeout_s: 15
+    continuation_f1_4:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      stream_timeout_s: 15
+    continuation_f1_4_terminal_timeout_s: 15
+    fidelity_f1:
+      min_samples: 5
+      bands:
+        strict: 0.95
+        normal: 0.9
+        loose: 0.8
+    continuation_f2_0:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 812000
+      - 812001
+      - 812002
+      - 812003
+      - 812004
+      - 812005
+      - 812006
+      - 812007
+      - 812008
+      - 812009
+      stream_timeout_s: 15
+    continuation_f2_0_terminal_timeout_s: 15
+    continuation_f2_1:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 812000
+      - 812001
+      - 812002
+      - 812003
+      - 812004
+      - 812005
+      - 812006
+      - 812007
+      - 812008
+      - 812009
+      stream_timeout_s: 15
+    continuation_f2_1_terminal_timeout_s: 15
+    continuation_f2_2:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 812000
+      - 812001
+      - 812002
+      - 812003
+      - 812004
+      - 812005
+      - 812006
+      - 812007
+      - 812008
+      - 812009
+      stream_timeout_s: 15
+    continuation_f2_2_terminal_timeout_s: 15
+    continuation_f2_3:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 812000
+      - 812001
+      - 812002
+      - 812003
+      - 812004
+      - 812005
+      - 812006
+      - 812007
+      - 812008
+      - 812009
+      stream_timeout_s: 15
+    continuation_f2_3_terminal_timeout_s: 15
+    continuation_f2_4:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 812000
+      - 812001
+      - 812002
+      - 812003
+      - 812004
+      - 812005
+      - 812006
+      - 812007
+      - 812008
+      - 812009
+      stream_timeout_s: 15
+    continuation_f2_4_terminal_timeout_s: 15
+    fidelity_f2:
+      min_samples: 5
+      bands:
+        strict: 0.95
+        normal: 0.9
+        loose: 0.8

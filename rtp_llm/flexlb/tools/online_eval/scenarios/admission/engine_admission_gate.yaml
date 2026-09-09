@@ -1,4 +1,4 @@
-# Configuration for the registered Python case; execution and assertions live in Python.
+# YAML owns all case data; Python owns execution order and result references.
 schema_version: 2
 case: engine_admission_gate
 profiles:
@@ -18,13 +18,446 @@ execution:
   cleanup_timeout_s: 120
 variants:
 - id: prefill_concurrency
+  program: prefill_concurrency
 - id: decode_hard_gate
   environment:
     n_prefill: 2
     n_decode: 1
     config_overrides:
       decode_max_engine_requests: 5000
+  program: decode_hard_gate
 - id: prefill_waiting_cap
+  program: prefill_waiting_cap
 - id: kv_pool_capacity
   environment:
     prefill_cache_blocks: 17
+  program: kv_pool_capacity
+metadata:
+  description: Separate prefill concurrency, decode hard gate, prefill waiting cap and KV pool capacity
+    programs.
+  category: admission
+  requires:
+  - enqueue_batch
+parameters:
+  prefill_concurrency:
+    setup_timeout_s: 180
+    slow:
+      targets:
+      - prefill-0
+      operation: set_perf
+      perf:
+        prefill_fixed_ms: 3000
+    fired_timeout_s: 180
+    fired:
+      count: 4
+      concurrency: 1
+      input_len: 512
+      output_len: 2
+      consume: deferred
+      request_timeout_s: 45
+      spacing_s: 0.4
+      spacing_every: 1
+      keys_per_request: 0
+    all_admitted:
+      metric: admitted_count
+      expected: 4
+      op: eq
+    park_timeout_s: 20
+    park:
+      targets:
+      - prefill-0
+      fields:
+      - prefill_waiting_batches
+      - waiting
+      duration_s: 10
+      reduce: any
+      until_value: 1
+      until_op: ge
+    park_seen:
+      fields:
+      - prefill_waiting_batches
+      - waiting
+      stat: max_seen
+      op: ge
+      expected: 1
+    drained_timeout_s: 120
+    all_completed:
+      metric: success_count
+      expected: 4
+      op: eq
+    empty_timeout_s: 20
+    empty:
+      targets:
+      - prefill-0
+      fields:
+      - prefill_waiting_batches
+      - waiting
+      duration_s: 10
+      reduce: all
+      until_value: 0
+      until_op: eq
+    park_empty:
+      fields:
+      - prefill_waiting_batches
+      - waiting
+      stat: max_latest
+      op: eq
+      expected: 0
+    master_clean_timeout_s: 30
+    master_clean:
+      target: single
+      inflight_zero: true
+    recovery:
+      count: 1
+      concurrency: 1
+      input_len: 2048
+      output_len: 2
+      request_timeout_s: 30
+    recovery_done_timeout_s: 120
+    recovered:
+      metric: success_count
+      expected: 1
+      op: eq
+    normal_perf:
+      targets:
+      - prefill-0
+      operation: set_perf
+      perf:
+        prefill_fixed_ms: 100
+  decode_hard_gate:
+    setup_timeout_s: 180
+    slow_decode:
+      targets:
+      - decode-0
+      operation: set_perf
+      perf:
+        decode_scale: 10
+    fired_timeout_s: 180
+    fired:
+      count: 280
+      concurrency: 1
+      input_len: 512
+      output_len: 64
+      consume: immediate
+      request_timeout_s: 45
+      spacing_s: 0.05
+      spacing_every: 25
+      keys_per_request: 0
+    all_admitted:
+      metric: admitted_count
+      expected: 280
+      op: eq
+    park_timeout_s: 28
+    park:
+      targets:
+      - decode-0
+      fields:
+      - active_decode_requests
+      - waiting
+      duration_s: 18
+      reduce: all
+    conditional_park:
+      gate: 128
+    drained_timeout_s: 300
+    completed_95pct:
+      metric: success_count
+      expected: 266
+      op: ge
+    empty_timeout_s: 25
+    empty:
+      targets:
+      - decode-0
+      fields:
+      - waiting
+      duration_s: 15
+      reduce: all
+      until_value: 0
+      until_op: eq
+    park_empty:
+      fields:
+      - waiting
+      stat: max_latest
+      op: eq
+      expected: 0
+    master_clean_timeout_s: 60
+    master_clean:
+      target: single
+      inflight_zero: true
+    recovery:
+      count: 1
+      concurrency: 1
+      input_len: 2048
+      output_len: 2
+      request_timeout_s: 30
+    recovery_done_timeout_s: 120
+    recovered:
+      metric: success_count
+      expected: 1
+      op: eq
+    normal_perf:
+      targets:
+      - decode-0
+      operation: set_perf
+      perf:
+        decode_scale: 1
+  prefill_waiting_cap:
+    setup_timeout_s: 180
+    limited:
+      targets:
+      - prefill-0
+      operation: set_perf
+      perf:
+        prefill_fixed_ms: 3000
+        max_waiting_batches: 1
+    occupants_timeout_s: 180
+    occupants:
+      count: 2
+      concurrency: 1
+      input_len: 512
+      output_len: 2
+      consume: immediate
+      request_timeout_s: 45
+      spacing_s: 0.4
+      spacing_every: 1
+      keys_per_request: 0
+    occupants_admitted:
+      metric: admitted_count
+      expected: 2
+      op: eq
+    saturated_timeout_s: 18
+    saturated:
+      targets:
+      - prefill-0
+      fields:
+      - prefill_waiting_batches
+      duration_s: 8
+      reduce: all
+      until_value: 1
+      until_op: ge
+    cap_seen:
+      fields:
+      - prefill_waiting_batches
+      stat: min_latest
+      op: ge
+      expected: 1
+    probe:
+      count: 1
+      concurrency: 1
+      input_len: 512
+      output_len: 2
+      request_timeout_s: 10
+      keys_per_request: 0
+    probe_done_timeout_s: 120
+    backpressure_error:
+      metric: all_error_contains
+      expected: true
+      op: eq
+      text:
+      - prefill waiting queue full
+      - backpressure
+    fast_reject:
+      metric: latency_max
+      expected: 3
+      op: lt
+    unbounded:
+      targets:
+      - prefill-0
+      operation: set_perf
+      perf:
+        max_waiting_batches: 0
+    before_fourth_timeout_s: 10
+    before_fourth:
+      targets:
+      - prefill-0
+      fields:
+      - prefill_waiting_batches
+      duration_s: 0
+      reduce: all
+    fourth_timeout_s: 180
+    fourth:
+      count: 1
+      concurrency: 1
+      input_len: 512
+      output_len: 2
+      consume: immediate
+      request_timeout_s: 45
+      spacing_s: 0
+      spacing_every: 1
+      keys_per_request: 0
+    fourth_admitted:
+      metric: admitted_count
+      expected: 1
+      op: eq
+    occupants_done_timeout_s: 120
+    occupants_complete:
+      metric: success_count
+      expected: 2
+      op: eq
+    fourth_done_timeout_s: 120
+    pressure_recovery:
+      metric: success_count
+      expected: 1
+      op: eq
+    empty_timeout_s: 20
+    empty:
+      targets:
+      - prefill-0
+      fields:
+      - prefill_waiting_batches
+      - waiting
+      duration_s: 10
+      reduce: all
+      until_value: 0
+      until_op: eq
+    park_empty:
+      fields:
+      - prefill_waiting_batches
+      - waiting
+      stat: max_latest
+      op: eq
+      expected: 0
+    master_clean_timeout_s: 30
+    master_clean:
+      target: single
+      inflight_zero: true
+    recovery:
+      count: 1
+      concurrency: 1
+      input_len: 2048
+      output_len: 2
+      request_timeout_s: 30
+    recovery_done_timeout_s: 120
+    recovered:
+      metric: success_count
+      expected: 1
+      op: eq
+    normal_perf:
+      targets:
+      - prefill-0
+      operation: set_perf
+      perf:
+        prefill_fixed_ms: 100
+        max_waiting_batches: 0
+  kv_pool_capacity:
+    setup_timeout_s: 180
+    slow:
+      targets:
+      - prefill-0
+      operation: set_perf
+      perf:
+        prefill_fixed_ms: 3000
+    occupants_timeout_s: 180
+    occupants:
+      count: 2
+      concurrency: 1
+      input_len: 512
+      output_len: 2
+      consume: immediate
+      request_timeout_s: 45
+      spacing_s: 0.4
+      spacing_every: 1
+      keys_per_request: 8
+    occupants_admitted:
+      metric: admitted_count
+      expected: 2
+      op: eq
+    saturated_timeout_s: 18
+    saturated:
+      targets:
+      - prefill-0
+      fields:
+      - held_blocks
+      duration_s: 8
+      reduce: all
+      until_value: 16
+      until_op: ge
+    pool_full:
+      fields:
+      - held_blocks
+      stat: min_latest
+      op: ge
+      expected: 16
+    probe:
+      count: 1
+      concurrency: 1
+      input_len: 512
+      output_len: 2
+      request_timeout_s: 10
+      keys_per_request: 8
+    probe_done_timeout_s: 120
+    lack_mem_error:
+      metric: all_error_contains
+      expected: true
+      op: eq
+      text:
+      - lack_mem
+      - insufficient kv cache
+      - enqueuebatch rejected
+    fast_reject:
+      metric: latency_max
+      expected: 3
+      op: lt
+    occupants_done_timeout_s: 120
+    occupants_complete:
+      metric: success_count
+      expected: 2
+      op: eq
+    available_timeout_s: 20
+    available:
+      targets:
+      - prefill-0
+      fields:
+      - available_blocks
+      duration_s: 10
+      reduce: all
+      until_value: 8
+      until_op: ge
+    pool_recovered:
+      fields:
+      - available_blocks
+      stat: min_latest
+      op: ge
+      expected: 8
+    fresh_lease_timeout_s: 180
+    fresh_lease:
+      count: 1
+      concurrency: 1
+      input_len: 512
+      output_len: 2
+      consume: immediate
+      request_timeout_s: 15
+      spacing_s: 0
+      spacing_every: 1
+      keys_per_request: 8
+    fresh_done_timeout_s: 120
+    fresh_succeeded:
+      metric: success_count
+      expected: 1
+      op: eq
+    master_clean_timeout_s: 30
+    master_clean:
+      target: single
+      inflight_zero: true
+    engine_clean_timeout_s: 15
+    engine_clean:
+      targets:
+      - prefill-0
+      - decode-0
+      - decode-1
+    recovery:
+      count: 1
+      concurrency: 1
+      input_len: 2048
+      output_len: 2
+      request_timeout_s: 30
+    recovery_done_timeout_s: 120
+    recovered:
+      metric: success_count
+      expected: 1
+      op: eq
+    normal_perf:
+      targets:
+      - prefill-0
+      operation: set_perf
+      perf:
+        prefill_fixed_ms: 100

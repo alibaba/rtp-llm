@@ -159,12 +159,11 @@ child.handlers = lambda: {'grade_probe': StageHandler('grade_probe', validate, e
 from flexlb_test_framework.case_programs import PROGRAMS
 fixture = ModuleType('grade_protocol_fixture')
 fixture.__file__ = __file__
-fixture.METADATA = {'description': 'Grade protocol fixture', 'category': 'status'}
-fixture.PROFILES = ['batch-window']
 def build(case):
     for name, action in [('setup', 'setup'), ('probe', 'grade_probe'), ('cleanup', 'teardown')]:
         case.step(name, action)
-fixture.VARIANTS = {'default': {'build': build, 'profiles': fixture.PROFILES, 'metadata': {}}}
+build.__module__ = fixture.__name__
+fixture.default = build
 sys.modules[fixture.__name__] = fixture
 PROGRAMS['grade_protocol'] = fixture.__name__
 raise SystemExit(child.main())
@@ -176,6 +175,7 @@ raise SystemExit(child.main())
             """
 schema_version: 2
 case: grade_protocol
+metadata: {description: Grade protocol fixture, category: status}
 profiles: [batch-window]
 environment: {backend: java_mock, n_prefill: 1, n_decode: 1}
 variants: [{id: default}]

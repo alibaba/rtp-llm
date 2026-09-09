@@ -1,5 +1,6 @@
 """Configuration changes data; Python retains the execution and acceptance contracts."""
 
+import ast
 import copy
 import json
 import sys
@@ -70,7 +71,7 @@ class CaseConfigTest(unittest.TestCase):
         config["variants"] = [
             {
                 "id": "large_pd",
-                "use": "immediate",
+                "program": "immediate",
                 "profiles": ["single-nonbatch"],
                 "environment": {"n_prefill": 4, "n_decode": 8},
                 "parameters": {"input_len": 8192, "output_len": 16, "count": 3},
@@ -85,7 +86,7 @@ class CaseConfigTest(unittest.TestCase):
 
     def test_parameters_are_scoped_to_their_configuration(self):
         config = self.config()
-        config["parameters"] = {"count": 2}
+        config["parameters"]["count"] = 2
         config["variants"][0]["parameters"] = {"count": 4}
         original = copy.deepcopy(config)
         plans = self.compile(config)
@@ -142,7 +143,7 @@ class CaseConfigTest(unittest.TestCase):
                 with self.assertRaisesRegex(ScenarioError, "cannot orchestrate"):
                     self.compile(config)
 
-    def test_rejects_unknown_parameter_and_invalid_numeric_values(self):
+    def test_rejects_missing_parameters_and_invalid_numeric_values(self):
         for parameters in (
             {"coutn": 2},
             {"count": True},
@@ -156,7 +157,7 @@ class CaseConfigTest(unittest.TestCase):
                 with self.assertRaises(ScenarioError):
                     self.compile(config)
 
-    def test_configuration_cannot_import_or_override_assertions(self):
+    def test_configuration_cannot_import_or_orchestrate(self):
         for patch in (
             {"case": "os.system"},
             {"findings": ["no_errors.comparison"]},
@@ -168,11 +169,10 @@ class CaseConfigTest(unittest.TestCase):
                 with self.assertRaises(ScenarioError):
                     self.compile(config)
 
-    def test_rejects_unknown_duplicate_and_incompatible_variants(self):
+    def test_rejects_unknown_and_duplicate_programs(self):
         variants = (
             [{"id": "unknown"}],
             [{"id": "immediate"}, {"id": "immediate"}],
-            [{"id": "deferred_fetch", "profiles": ["single-nonbatch"]}],
         )
         for value in variants:
             with self.subTest(variants=value):
@@ -187,6 +187,61 @@ class CaseConfigTest(unittest.TestCase):
             path.write_text("schema_version: 1\nid: old\nstages: []\n")
             with self.assertRaisesRegex(ScenarioError, "cannot orchestrate"):
                 load_scenarios(path)
+
+    def test_yaml_controls_timeouts_expectations_and_metadata(self):
+        config = self.config()
+        config["metadata"]["description"] = "Configured in YAML"
+        config["parameters"]["completion"]["setup_timeout_s"] = 211
+        config["parameters"]["completion"]["expected"]["no_errors"] = 7
+        for plan in self.compile(config):
+            self.assertEqual(plan["description"], "Configured in YAML")
+            self.assertEqual(plan["stages"][0]["timeout_s"], 211)
+            self.assertEqual(plan["stages"][4]["params"]["expected"], 7)
+
+    def test_missing_yaml_data_has_no_python_fallback(self):
+        config = self.config()
+        del config["parameters"]["completion"]["setup_timeout_s"]
+        with self.assertRaisesRegex(ScenarioError, "missing YAML parameter"):
+            self.compile(config)
+
+    def test_numeric_constraints_and_profiles_are_yaml_owned(self):
+        config = self.config()
+        config["variants"] = [{"id": "custom", "program": "immediate"}]
+        config["profiles"] = ["single-nonbatch"]
+        config["parameters"]["count"] = 10001
+        config["parameter_schema"]["count"]["maximum"] = 10001
+        (plan,) = self.compile(config)
+        self.assertEqual(plan["stages"][1]["params"]["count"], 10001)
+        del config["profiles"]
+        with self.assertRaisesRegex(ScenarioError, "profiles must"):
+            self.compile(config)
+
+    def test_nested_variant_data_is_isolated(self):
+        config = self.config()
+        config["variants"][0]["parameters"] = {
+            "completion": {"expected": {"no_errors": 3}}
+        }
+        for plan in self.compile(config):
+            expected = 3 if plan["variant_id"] == "immediate" else 0
+            self.assertEqual(plan["stages"][4]["params"]["expected"], expected)
+            self.assertTrue(plan["stages"][3]["params"]["expected"])
+
+    def test_programs_do_not_declare_configuration_tables_or_defaults(self):
+        for path in (ROOT / "flexlb_test_framework/case_programs").glob("*.py"):
+            tree = ast.parse(path.read_text())
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Assign):
+                    for target in node.targets:
+                        if isinstance(target, ast.Name):
+                            self.assertNotIn(
+                                target.id,
+                                {"VARIANTS", "PROFILES", "METADATA"},
+                                str(path),
+                            )
+                if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+                    if node.func.attr == "number":
+                        self.assertEqual(len(node.args), 1, str(path))
+                        self.assertEqual(node.keywords, [], str(path))
 
     def test_shipped_inventory_is_data_only_and_keeps_all_checks(self):
         documents = load_scenarios(ROOT / "scenarios")

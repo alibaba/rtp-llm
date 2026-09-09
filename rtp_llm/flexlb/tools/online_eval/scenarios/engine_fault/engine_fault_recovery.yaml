@@ -1,4 +1,4 @@
-# Configuration for the registered Python case; execution and assertions live in Python.
+# YAML owns all case data; Python owns execution order and result references.
 schema_version: 2
 case: engine_fault_recovery
 profiles:
@@ -23,21 +23,27 @@ execution:
   cleanup_timeout_s: 120
 variants:
 - id: generation_bump
+  program: generation_bump
 - id: status_gap_no_bump
+  program: status_gap_no_bump
 - id: down_phases
   environment:
     n_decode: 4
     master_sync_log: false
+  program: down_phases
 - id: flap
   environment:
     n_decode: 4
     master_sync_log: false
+  program: flap
 - id: kv_resync
   profiles:
   - batch-window
   - single-batch
   - window-nonbatch
+  program: kv_resync
 - id: kv_usage_reset
+  program: kv_usage_reset
 - id: crash_after
   profiles:
   - batch-window
@@ -50,8 +56,1358 @@ variants:
       ordering: priority
       queue_timeout_ms: 60000
       stale_inflight_ms: 30000
+  program: crash_after
+  metadata:
+    requires:
+    - enqueue_batch
 - id: no_resurrect
   profiles:
   - batch-window
   - single-batch
+  program: no_resurrect
+  metadata:
+    requires:
+    - enqueue_batch
 - id: status_gap_long_retire
+  program: status_gap_long_retire
+metadata:
+  description: Nine engine recovery contracts with explicit generation, cache, transport and resource-owner
+    evidence.
+  category: engine_fault
+parameters:
+  generation_bump:
+    setup_timeout_s: 180
+    prior_drain_observed_timeout_s: 110
+    prior_drain_observed:
+      duration_s: 95
+      until:
+        metric: cleanup_inflight
+        op: eq
+        value: 0
+      interval_s: 0.5
+    target:
+      targets:
+      - prefill-0
+    generation_before_timeout_s: 30
+    generation_before:
+      duration_s: 0
+      include:
+      - log
+    baseline:
+      count: 6
+      concurrency: 6
+      unique_key_count: 3
+    baseline_dispatch_timeout_s: 120
+    baseline_state_timeout_s: 30
+    baseline_state:
+      duration_s: 0
+      include:
+      - client_records
+    baseline_succeeds:
+      metric: success
+      op: eq
+      expected: 6
+    outage:
+      operation: stop
+      targets:
+      - prefill-0
+    retirement_timeout_s: 45
+    retirement:
+      duration_s: 30
+      until:
+        metric: retired
+        op: ge
+        value: 1
+      include:
+      - log
+      interval_s: 0.2
+    transport_retired:
+      metric: retired
+      op: ge
+      expected: 1
+    restart:
+      operation: start
+      targets:
+      - prefill-0
+    alive_restored_timeout_s: 45
+    alive_restored:
+      duration_s: 30
+      until:
+        metric: alive_prefill
+        op: ge
+        value: 2
+      include:
+      - info
+      interval_s: 0.5
+    alive_back:
+      metric: alive_prefill
+      op: ge
+      expected: 2
+    reconnect_timeout_s: 30
+    reconnect:
+      duration_s: 3
+    recovered_generation_timeout_s: 30
+    recovered_generation:
+      duration_s: 0
+      include:
+      - log
+      - inflight
+    generation_is_new:
+      metric: created
+      op: ge
+      expected: 1
+    recovered_prefill_batch_ledger_zero:
+      metric: target_prefill_batches
+      op: eq
+      expected: 0
+    recovered_prefill_member_ledger_zero:
+      metric: target_prefill_requests
+      op: eq
+      expected: 0
+    recovery:
+      count: 1
+      concurrency: 1
+      stream_timeout_s: 30
+    recovery_dispatch_timeout_s: 120
+    recovery_state_timeout_s: 30
+    recovery_state:
+      duration_s: 0
+      include:
+      - client_records
+    recovery_succeeds:
+      metric: success
+      op: eq
+      expected: 1
+  status_gap_no_bump:
+    setup_timeout_s: 180
+    prior_drain_observed_timeout_s: 110
+    prior_drain_observed:
+      duration_s: 95
+      until:
+        metric: cleanup_inflight
+        op: eq
+        value: 0
+      interval_s: 0.5
+    target:
+      targets:
+      - prefill-0
+    generation_before_timeout_s: 30
+    generation_before:
+      duration_s: 0
+      include:
+      - log
+    baseline:
+      count: 4
+      concurrency: 4
+      unique_key_count: 3
+    baseline_dispatch_timeout_s: 120
+    baseline_state_timeout_s: 30
+    baseline_state:
+      duration_s: 0
+      include:
+      - client_records
+    baseline_succeeds:
+      metric: success
+      op: eq
+      expected: 4
+    short_gap:
+      fault: status_no_respond
+      selection: first
+    two_poll_ticks_timeout_s: 30
+    two_poll_ticks:
+      duration_s: 0.045
+    resume_status:
+      fault: status_no_respond
+      selection: first
+      enabled: false
+    hung_rpc_deadline_and_resume_timeout_s: 30
+    hung_rpc_deadline_and_resume:
+      duration_s: 2
+    post_gap_generation_timeout_s: 30
+    post_gap_generation:
+      duration_s: 0
+      include:
+      - log
+      - info
+    no_new_generation:
+      metric: created
+      op: le
+      expected: 0
+    discovered_intact:
+      metric: discovered_prefill
+      op: eq
+      expected: 2
+    alive_intact:
+      metric: alive_prefill
+      op: eq
+      expected: 2
+    post_gap:
+      count: 4
+      concurrency: 4
+      unique_key_count: 3
+    post_gap_dispatch_timeout_s: 120
+    post_gap_state_timeout_s: 30
+    post_gap_state:
+      duration_s: 0
+      include:
+      - client_records
+    post_gap_succeeds:
+      metric: success
+      op: eq
+      expected: 4
+  down_phases:
+    setup_timeout_s: 180
+    prior_drain_observed_timeout_s: 110
+    prior_drain_observed:
+      duration_s: 95
+      until:
+        metric: cleanup_inflight
+        op: eq
+        value: 0
+      interval_s: 0.5
+    baseline:
+      count: 20
+      concurrency: 10
+      unique_key_count: 3
+      generate_payload: legacy_default
+      stream_timeout_s: 15
+      measure_ttft: true
+    baseline_dispatch_timeout_s: 150
+    baseline_state_timeout_s: 30
+    baseline_state:
+      duration_s: 0
+      include:
+      - client_records
+    baseline_succeeds:
+      metric: success
+      op: eq
+      expected: 20
+    baseline_health_timeout_s: 30
+    baseline_health:
+      duration_s: 0
+      include:
+      - inflight
+    baseline_health_http_200:
+      metric: master_http
+      op: eq
+      expected: 200
+    outage:
+      operation: stop
+      targets:
+      - prefill-0
+    eviction_timeout_s: 45
+    eviction:
+      duration_s: 30
+      until:
+        metric: alive_prefill
+        op: le
+        value: 1
+      include:
+      - info
+      interval_s: 0.5
+    survivor_only_alive:
+      metric: alive_prefill
+      op: le
+      expected: 1
+    takeover:
+      count: 20
+      concurrency: 10
+      unique_key_count: 3
+    takeover_dispatch_timeout_s: 120
+    takeover_state_timeout_s: 30
+    takeover_state:
+      duration_s: 0
+      include:
+      - client_records
+    downtime_health_timeout_s: 30
+    downtime_health:
+      duration_s: 0
+      include:
+      - inflight
+    downtime_health_http_200:
+      metric: master_http
+      op: eq
+      expected: 200
+    takeover_at_least_ninety_percent:
+      metric: success
+      op: ge
+      expected: 18
+    restart:
+      operation: start
+      targets:
+      - prefill-0
+    alive_restored_timeout_s: 45
+    alive_restored:
+      duration_s: 30
+      until:
+        metric: alive_prefill
+        op: ge
+        value: 2
+      include:
+      - info
+      interval_s: 0.5
+    alive_back:
+      metric: alive_prefill
+      op: ge
+      expected: 2
+    reconnect_timeout_s: 30
+    reconnect:
+      duration_s: 3
+    recovery_batch:
+      count: 20
+      concurrency: 10
+      unique_key_count: 3
+      generate_payload: legacy_default
+      stream_timeout_s: 15
+      measure_ttft: true
+    recovery_batch_dispatch_timeout_s: 150
+    recovery_batch_state_timeout_s: 30
+    recovery_batch_state:
+      duration_s: 0
+      include:
+      - client_records
+    recovery_at_least_ninety_five_percent:
+      metric: success
+      op: ge
+      expected: 19
+    recovered_health_timeout_s: 30
+    recovered_health:
+      duration_s: 0
+      include:
+      - inflight
+    recovered_health_http_200:
+      metric: master_http
+      op: eq
+      expected: 200
+    closing_drain_timeout_s: 110
+    closing_drain:
+      duration_s: 95
+      until:
+        metric: cleanup_inflight
+        op: eq
+        value: 0
+      interval_s: 0.5
+    closing_drain_scheduler:
+      metric: scheduler
+      op: eq
+      expected: 0
+    closing_drain_prefill_batches:
+      metric: prefill_batches
+      op: eq
+      expected: 0
+    closing_drain_decode_load:
+      metric: decode_total_load
+      op: eq
+      expected: 0
+  flap:
+    setup_timeout_s: 180
+    flow_ramp_timeout_s: 30
+    flow_ramp:
+      duration_s: 1
+    stop_1:
+      operation: stop
+      targets:
+      - prefill-0
+    down_window_1_timeout_s: 30
+    down_window_1:
+      duration_s: 0.8
+    alive_during_1_timeout_s: 30
+    alive_during_1:
+      duration_s: 0
+      include:
+      - info
+    master_cycle_1_timeout_s: 30
+    master_cycle_1:
+      duration_s: 0
+      include:
+      - inflight
+    master_cycle_1_http_200:
+      metric: master_http
+      op: eq
+      expected: 200
+    start_1:
+      operation: start
+      targets:
+      - prefill-0
+    up_gap_1_timeout_s: 30
+    up_gap_1:
+      duration_s: 0.4
+    stop_2:
+      operation: stop
+      targets:
+      - prefill-0
+    down_window_2_timeout_s: 30
+    down_window_2:
+      duration_s: 0.8
+    alive_during_2_timeout_s: 30
+    alive_during_2:
+      duration_s: 0
+      include:
+      - info
+    master_cycle_2_timeout_s: 30
+    master_cycle_2:
+      duration_s: 0
+      include:
+      - inflight
+    master_cycle_2_http_200:
+      metric: master_http
+      op: eq
+      expected: 200
+    start_2:
+      operation: start
+      targets:
+      - prefill-0
+    up_gap_2_timeout_s: 30
+    up_gap_2:
+      duration_s: 0.4
+    stop_3:
+      operation: stop
+      targets:
+      - prefill-0
+    down_window_3_timeout_s: 30
+    down_window_3:
+      duration_s: 0.8
+    alive_during_3_timeout_s: 30
+    alive_during_3:
+      duration_s: 0
+      include:
+      - info
+    master_cycle_3_timeout_s: 30
+    master_cycle_3:
+      duration_s: 0
+      include:
+      - inflight
+    master_cycle_3_http_200:
+      metric: master_http
+      op: eq
+      expected: 200
+    start_3:
+      operation: start
+      targets:
+      - prefill-0
+    up_gap_3_timeout_s: 30
+    up_gap_3:
+      duration_s: 0.4
+    stop_4:
+      operation: stop
+      targets:
+      - prefill-0
+    down_window_4_timeout_s: 30
+    down_window_4:
+      duration_s: 0.8
+    alive_during_4_timeout_s: 30
+    alive_during_4:
+      duration_s: 0
+      include:
+      - info
+    master_cycle_4_timeout_s: 30
+    master_cycle_4:
+      duration_s: 0
+      include:
+      - inflight
+    master_cycle_4_http_200:
+      metric: master_http
+      op: eq
+      expected: 200
+    start_4:
+      operation: start
+      targets:
+      - prefill-0
+    up_gap_4_timeout_s: 30
+    up_gap_4:
+      duration_s: 0.4
+    stop_5:
+      operation: stop
+      targets:
+      - prefill-0
+    down_window_5_timeout_s: 30
+    down_window_5:
+      duration_s: 0.8
+    alive_during_5_timeout_s: 30
+    alive_during_5:
+      duration_s: 0
+      include:
+      - info
+    master_cycle_5_timeout_s: 30
+    master_cycle_5:
+      duration_s: 0
+      include:
+      - inflight
+    master_cycle_5_http_200:
+      metric: master_http
+      op: eq
+      expected: 200
+    start_5:
+      operation: start
+      targets:
+      - prefill-0
+    up_gap_5_timeout_s: 30
+    up_gap_5:
+      duration_s: 0.4
+    stop_6:
+      operation: stop
+      targets:
+      - prefill-0
+    down_window_6_timeout_s: 30
+    down_window_6:
+      duration_s: 0.8
+    alive_during_6_timeout_s: 30
+    alive_during_6:
+      duration_s: 0
+      include:
+      - info
+    master_cycle_6_timeout_s: 30
+    master_cycle_6:
+      duration_s: 0
+      include:
+      - inflight
+    master_cycle_6_http_200:
+      metric: master_http
+      op: eq
+      expected: 200
+    start_6:
+      operation: start
+      targets:
+      - prefill-0
+    up_gap_6_timeout_s: 30
+    up_gap_6:
+      duration_s: 0.4
+    stop_flow_timeout_s: 50
+    flow_availability:
+      min_success_rate: 0.5
+    topology_timeout_s: 45
+    topology:
+      duration_s: 30
+      until:
+        metric: topology_mismatch
+        op: eq
+        value: 0
+      include:
+      - info
+      interval_s: 0.2
+    topology_discovered:
+      metric: discovered_prefill
+      op: eq
+      expected: 2
+    topology_alive:
+      metric: alive_prefill
+      op: eq
+      expected: 2
+    post_flap:
+      count: 20
+      concurrency: 10
+      unique_key_count: 3
+    post_flap_dispatch_timeout_s: 120
+    post_flap_state_timeout_s: 30
+    post_flap_state:
+      duration_s: 0
+      include:
+      - client_records
+    post_flap_recovers:
+      metric: success
+      op: ge
+      expected: 19
+    closing_drain_timeout_s: 110
+    closing_drain:
+      duration_s: 95
+      until:
+        metric: cleanup_inflight
+        op: eq
+        value: 0
+      interval_s: 0.5
+    closing_drain_scheduler:
+      metric: scheduler
+      op: eq
+      expected: 0
+    closing_drain_prefill_batches:
+      metric: prefill_batches
+      op: eq
+      expected: 0
+    closing_drain_decode_load:
+      metric: decode_total_load
+      op: eq
+      expected: 0
+  kv_resync:
+    setup_timeout_s: 180
+    prior_drain_observed_timeout_s: 110
+    prior_drain_observed:
+      duration_s: 95
+      until:
+        metric: cleanup_inflight
+        op: eq
+        value: 0
+      interval_s: 0.5
+    seed:
+      count: 1
+      concurrency: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 900001
+      - 900002
+      - 900003
+      - 900004
+      - 900005
+      - 900006
+      - 900007
+      - 900008
+      - 900009
+      - 900010
+    seed_dispatch_timeout_s: 120
+    seed_state_timeout_s: 30
+    seed_state:
+      duration_s: 0
+      include:
+      - client_records
+    seed_succeeds:
+      metric: success
+      op: eq
+      expected: 1
+    seed_ownership_timeout_s: 30
+    seed_ownership:
+      duration_s: 8
+      keys:
+      - 900001
+      - 900002
+      - 900003
+      - 900004
+      - 900005
+      - 900006
+      - 900007
+      - 900008
+      - 900009
+      - 900010
+      until:
+        metric: target_family_overlap
+        op: eq
+        value: 10
+      include:
+      - mock
+      interval_s: 0.5
+    holder_has_whole_family:
+      metric: target_family_overlap
+      op: eq
+      expected: 10
+    cache_sync_before_outage_timeout_s: 30
+    cache_sync_before_outage:
+      duration_s: 4.5
+    generation_before_timeout_s: 30
+    generation_before:
+      duration_s: 0
+      include:
+      - log
+    stop_holder:
+      operation: stop
+    retirement_timeout_s: 45
+    retirement:
+      duration_s: 30
+      until:
+        metric: retired
+        op: ge
+        value: 1
+      include:
+      - log
+      interval_s: 0.2
+    holder_retired:
+      metric: retired
+      op: ge
+      expected: 1
+    restart_holder:
+      operation: start
+    alive_restored_timeout_s: 45
+    alive_restored:
+      duration_s: 30
+      until:
+        metric: alive_prefill
+        op: ge
+        value: 2
+      include:
+      - info
+      interval_s: 0.5
+    holder_alive_back:
+      metric: alive_prefill
+      op: ge
+      expected: 2
+    reconnect_timeout_s: 30
+    reconnect:
+      duration_s: 3
+    new_generation_timeout_s: 30
+    new_generation:
+      duration_s: 0
+      include:
+      - log
+    holder_generation_bumped:
+      metric: created
+      op: ge
+      expected: 1
+    intact_wave:
+      count: 5
+      concurrency: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 900001
+      - 900002
+      - 900003
+      - 900004
+      - 900005
+      - 900006
+      - 900007
+      - 900008
+      - 900009
+      - 900010
+    intact_wave_dispatch_timeout_s: 255
+    intact_wave_state_timeout_s: 30
+    intact_wave_state:
+      duration_s: 0
+      include:
+      - client_records
+    intact_routes_timeout_s: 30
+    intact_routes:
+      duration_s: 0
+      include:
+      - client_records
+    memory_intact_holder_survives:
+      metric: target_success_landings
+      op: ge
+      expected: 4
+    wipe_family:
+      operation: evict
+      keys:
+      - 900001
+      - 900002
+      - 900003
+      - 900004
+      - 900005
+      - 900006
+      - 900007
+      - 900008
+      - 900009
+      - 900010
+    family_gone_timeout_s: 30
+    family_gone:
+      duration_s: 8
+      keys:
+      - 900001
+      - 900002
+      - 900003
+      - 900004
+      - 900005
+      - 900006
+      - 900007
+      - 900008
+      - 900009
+      - 900010
+      until:
+        metric: target_family_overlap
+        op: eq
+        value: 0
+      include:
+      - mock
+      interval_s: 0.5
+    wiped_family_absent:
+      metric: target_family_overlap
+      op: eq
+      expected: 0
+    cache_sync_after_wipe_timeout_s: 30
+    cache_sync_after_wipe:
+      duration_s: 4.5
+    wiped_wave:
+      count: 5
+      concurrency: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 900001
+      - 900002
+      - 900003
+      - 900004
+      - 900005
+      - 900006
+      - 900007
+      - 900008
+      - 900009
+      - 900010
+    wiped_wave_dispatch_timeout_s: 255
+    wiped_wave_state_timeout_s: 30
+    wiped_wave_state:
+      duration_s: 0
+      include:
+      - client_records
+    wiped_routes_timeout_s: 30
+    wiped_routes:
+      duration_s: 0
+      include:
+      - client_records
+    memory_lost_old_holder_spreads:
+      metric: target_success_landings
+      op: le
+      expected: 3
+  kv_usage_reset:
+    setup_timeout_s: 180
+    prior_drain_observed_timeout_s: 110
+    prior_drain_observed:
+      duration_s: 95
+      until:
+        metric: cleanup_inflight
+        op: eq
+        value: 0
+      interval_s: 0.5
+    target:
+      targets:
+      - prefill-0
+    evict_current_cache:
+      operation: evict
+    empty_cache_sync_timeout_s: 30
+    empty_cache_sync:
+      duration_s: 4.5
+    empty_usage_timeout_s: 30
+    empty_usage:
+      duration_s: 0
+      include:
+      - mock
+    baseline_usage_zero:
+      metric: target_kv_tokens
+      op: eq
+      expected: 0
+    set_pressure:
+      operation: absolute_pressure
+      tokens: 4000000
+    pressure_reported_timeout_s: 30
+    pressure_reported:
+      duration_s: 8
+      until:
+        metric: target_kv_tokens
+        op: ge
+        value: 4000000
+      include:
+      - mock
+      interval_s: 0.5
+    pressure_construction_observed:
+      metric: target_kv_tokens
+      op: ge
+      expected: 4000000
+    generation_before_timeout_s: 30
+    generation_before:
+      duration_s: 0
+      include:
+      - log
+    outage:
+      operation: stop
+      targets:
+      - prefill-0
+    retirement_timeout_s: 45
+    retirement:
+      duration_s: 30
+      until:
+        metric: retired
+        op: ge
+        value: 1
+      include:
+      - log
+      interval_s: 0.2
+    pressure_generation_retired:
+      metric: retired
+      op: ge
+      expected: 1
+    restart:
+      operation: start
+      targets:
+      - prefill-0
+    alive_restored_timeout_s: 45
+    alive_restored:
+      duration_s: 30
+      until:
+        metric: alive_prefill
+        op: ge
+        value: 2
+      include:
+      - info
+      interval_s: 0.5
+    alive_back:
+      metric: alive_prefill
+      op: ge
+      expected: 2
+    reconnect_timeout_s: 30
+    reconnect:
+      duration_s: 3
+    recovered_generation_timeout_s: 30
+    recovered_generation:
+      duration_s: 0
+      include:
+      - log
+      - mock
+    new_capacity_generation:
+      metric: created
+      op: ge
+      expected: 1
+    lack_mem_baseline_timeout_s: 30
+    lack_mem_baseline:
+      duration_s: 0
+      include:
+      - mock
+    first_wave:
+      count: 3
+      concurrency: 1
+      unique_key_count: 1
+      unique_key_start: 1
+      stream_timeout_s: 10
+    first_wave_dispatch_timeout_s: 150
+    first_wave_state_timeout_s: 30
+    first_wave_state:
+      duration_s: 0
+      include:
+      - client_records
+    first_wave_succeeds:
+      metric: success
+      op: eq
+      expected: 3
+    lack_mem_after_timeout_s: 30
+    lack_mem_after:
+      duration_s: 0
+      include:
+      - mock
+    first_wave_no_lack_mem:
+      metric: prefill_lack_mem
+      op: eq
+      expected: 0
+    target_receives_traffic_timeout_s: 90
+    target_receives_traffic:
+      duration_s: 15
+    recovery:
+      count: 1
+      concurrency: 1
+      stream_timeout_s: 30
+    recovery_dispatch_timeout_s: 120
+    recovery_state_timeout_s: 30
+    recovery_state:
+      duration_s: 0
+      include:
+      - client_records
+    recovery_succeeds:
+      metric: success
+      op: eq
+      expected: 1
+  crash_after:
+    setup_timeout_s: 180
+    prefills:
+      targets:
+      - prefill-0
+      - prefill-1
+    arm_first_enqueue:
+      mode: first_enqueue
+    trigger:
+      count: 1
+      concurrency: 1
+      stream_timeout_s: 12
+      output_len: 10
+    trigger_dispatch_timeout_s: 120
+    trigger_state_timeout_s: 30
+    trigger_state:
+      duration_s: 0
+      include:
+      - client_records
+    crash_state_timeout_s: 30
+    crash_state:
+      duration_s: 0
+      include:
+      - mock
+    crashed:
+      stopped: true
+    survivors:
+      stopped: false
+    exactly_one_crashed:
+      op: eq
+      expected: 1
+    disarm_survivors:
+      mode: disarm
+    alive_dropped_timeout_s: 45
+    alive_dropped:
+      duration_s: 30
+      until:
+        metric: alive_prefill
+        op: le
+        value: 1
+      include:
+      - info
+      interval_s: 0.5
+    master_observed_loss:
+      metric: alive_prefill
+      op: le
+      expected: 1
+    routable_set_settle_timeout_s: 30
+    routable_set_settle:
+      duration_s: 2
+    takeover:
+      count: 5
+      concurrency: 5
+      stream_timeout_s: 12
+      output_len: 10
+    takeover_dispatch_timeout_s: 120
+    takeover_state_timeout_s: 30
+    takeover_state:
+      duration_s: 0
+      include:
+      - client_records
+    survivor_serves_sixty_percent:
+      metric: success
+      op: ge
+      expected: 3
+    restart_crashed:
+      operation: start
+    alive_restored_timeout_s: 45
+    alive_restored:
+      duration_s: 30
+      until:
+        metric: alive_prefill
+        op: ge
+        value: 2
+      include:
+      - info
+      interval_s: 0.5
+    crashed_engine_rediscovers:
+      metric: alive_prefill
+      op: ge
+      expected: 2
+    reconnect_timeout_s: 30
+    reconnect:
+      duration_s: 3
+    recovery:
+      count: 1
+      concurrency: 1
+      stream_timeout_s: 12
+      output_len: 10
+    recovery_dispatch_timeout_s: 120
+    recovery_state_timeout_s: 30
+    recovery_state:
+      duration_s: 0
+      include:
+      - client_records
+    recovery_succeeds:
+      metric: success
+      op: eq
+      expected: 1
+    residue_window_timeout_s: 40
+    residue_window:
+      base_residue: 1
+      settle_s: 20
+      stable_s: 8
+    prefill_engines_clean_timeout_s: 30
+    prefill_engines_clean:
+      duration_s: 10
+      until:
+        metric: target_engine_clean_total
+        op: eq
+        value: 0
+      include:
+      - mock
+      interval_s: 0.5
+    prefill_engines_clean_inflight:
+      metric: target_inflight
+      op: eq
+      expected: 0
+    prefill_engines_clean_leaks:
+      metric: target_leaks
+      op: eq
+      expected: 0
+  no_resurrect:
+    setup_timeout_s: 180
+    prior_drain_observed_timeout_s: 110
+    prior_drain_observed:
+      duration_s: 95
+      until:
+        metric: cleanup_inflight
+        op: eq
+        value: 0
+      interval_s: 0.5
+    prefills:
+      targets:
+      - prefill-0
+      - prefill-1
+    slow_prefill:
+      operation: set_perf
+      perf:
+        prefill_fixed_ms: 2000
+      restore_perf:
+        prefill_fixed_ms: 100
+    perf_sync_timeout_s: 30
+    perf_sync:
+      duration_s: 1.5
+    fired:
+      count: 8
+      concurrency: 1
+      input_len: 512
+      output_len: 2
+      consume: manual
+      stream_timeout_s: 60
+      generate_payload: legacy_default
+    fired_dispatch_timeout_s: 300
+    fired_state_timeout_s: 30
+    fired_state:
+      duration_s: 0
+      include:
+      - client_records
+    routed_payload_minimum:
+      metric: schedule_ok
+      op: ge
+      expected: 4
+    batch_dispatch_timeout_s: 30
+    batch_dispatch:
+      duration_s: 0.5
+    arm_next_enqueue:
+      mode: next_enqueue
+    trigger_all_targets_timeout_s: 50
+    trigger_all_targets:
+      duration_s: 15
+    all_targets_crashed:
+      metric: target_stopped
+    retire_all_timeout_s: 90
+    retire_all:
+      per_target_s: 30
+    restart_targets:
+      operation: start
+    alive_restored_timeout_s: 45
+    alive_restored:
+      duration_s: 30
+      until:
+        metric: alive_prefill
+        op: ge
+        value: 2
+      include:
+      - info
+      interval_s: 0.5
+    all_prefills_alive:
+      metric: alive_prefill
+      op: ge
+      expected: 2
+    reconnect_timeout_s: 30
+    reconnect:
+      duration_s: 3
+    pretraffic_reset_timeout_s: 30
+    pretraffic_reset:
+      duration_s: 0
+      include:
+      - inflight
+      - mock
+    new_prefill_batches_zero:
+      metric: target_prefill_batches
+      op: eq
+      expected: 0
+    new_prefill_members_zero:
+      metric: target_prefill_requests
+      op: eq
+      expected: 0
+    wiped_running:
+      metric: target_running
+      op: eq
+      expected: 0
+    wiped_inflight:
+      metric: target_inflight
+      op: eq
+      expected: 0
+    wiped_cache_keys:
+      metric: target_cache_keys
+      op: eq
+      expected: 0
+    wiped_held_blocks:
+      metric: target_held_blocks
+      op: eq
+      expected: 0
+    wiped_accepted:
+      metric: target_accepted
+      op: eq
+      expected: 0
+    consume_old_payload_timeout_s: 180
+    consume_old_payload:
+      wait_s: 2
+    old_requests_never_complete:
+      metric: observed_completed
+      op: eq
+      expected: 0
+    engine_drain_timeout_s: 30
+    engine_drain:
+      duration_s: 10
+      until:
+        metric: target_engine_clean_total
+        op: eq
+        value: 0
+      include:
+      - mock
+      interval_s: 0.5
+    engine_drain_inflight:
+      metric: target_inflight
+      op: eq
+      expected: 0
+    engine_drain_leaks:
+      metric: target_leaks
+      op: eq
+      expected: 0
+    master_drain_timeout_s: 110
+    master_drain:
+      duration_s: 95
+      until:
+        metric: cleanup_inflight
+        op: eq
+        value: 0
+      interval_s: 0.5
+    master_drain_scheduler:
+      metric: scheduler
+      op: eq
+      expected: 0
+    master_drain_prefill_batches:
+      metric: prefill_batches
+      op: eq
+      expected: 0
+    master_drain_decode_load:
+      metric: decode_total_load
+      op: eq
+      expected: 0
+    recovery:
+      count: 1
+      concurrency: 1
+      stream_timeout_s: 30
+    recovery_dispatch_timeout_s: 120
+    recovery_state_timeout_s: 30
+    recovery_state:
+      duration_s: 0
+      include:
+      - client_records
+    recovery_succeeds:
+      metric: success
+      op: eq
+      expected: 1
+  status_gap_long_retire:
+    setup_timeout_s: 180
+    prior_drain_observed_timeout_s: 110
+    prior_drain_observed:
+      duration_s: 95
+      until:
+        metric: cleanup_inflight
+        op: eq
+        value: 0
+      interval_s: 0.5
+    target:
+      targets:
+      - prefill-0
+    generation_before_timeout_s: 30
+    generation_before:
+      duration_s: 0
+      include:
+      - log
+    prefills:
+      targets:
+      - prefill-0
+      - prefill-1
+    slow_prefill:
+      operation: set_perf
+      perf:
+        prefill_fixed_ms: 2000
+      restore_perf:
+        prefill_fixed_ms: 100
+    perf_sync_timeout_s: 30
+    perf_sync:
+      duration_s: 1.5
+    fired:
+      count: 8
+      concurrency: 1
+      input_len: 512
+      output_len: 2
+      consume: manual
+      stream_timeout_s: 60
+      generate_payload: legacy_default
+    fired_dispatch_timeout_s: 300
+    fired_state_timeout_s: 30
+    fired_state:
+      duration_s: 0
+      include:
+      - client_records
+    batch_dispatch_timeout_s: 30
+    batch_dispatch:
+      duration_s: 0.5
+    long_gap:
+      fault: status_no_respond
+      selection: first
+    retirement_timeout_s: 30
+    retirement:
+      duration_s: 15
+      until:
+        metric: retired
+        op: ge
+        value: 1
+      include:
+      - log
+      interval_s: 0.2
+    long_gap_retires:
+      metric: retired
+      op: ge
+      expected: 1
+    post_retire_hold_timeout_s: 30
+    post_retire_hold:
+      duration_s: 1
+    resume_status:
+      fault: status_no_respond
+      selection: first
+      enabled: false
+    alive_restored_timeout_s: 45
+    alive_restored:
+      duration_s: 30
+      until:
+        metric: alive_prefill
+        op: ge
+        value: 2
+      include:
+      - info
+      interval_s: 0.5
+    prefill_alive_back:
+      metric: alive_prefill
+      op: ge
+      expected: 2
+    reconnect_timeout_s: 30
+    reconnect:
+      duration_s: 3
+    generation_after_timeout_s: 30
+    generation_after:
+      duration_s: 0
+      include:
+      - log
+    long_gap_creates_generation:
+      metric: created
+      op: ge
+      expected: 1
+    consume_fence_payload_observed_timeout_s: 210
+    consume_fence_payload_observed:
+      wait_s: 5
+    master_drain_timeout_s: 110
+    master_drain:
+      duration_s: 95
+      until:
+        metric: cleanup_inflight
+        op: eq
+        value: 0
+      interval_s: 0.5
+    master_drain_scheduler:
+      metric: scheduler
+      op: eq
+      expected: 0
+    master_drain_prefill_batches:
+      metric: prefill_batches
+      op: eq
+      expected: 0
+    master_drain_decode_load:
+      metric: decode_total_load
+      op: eq
+      expected: 0
+    recovery:
+      count: 1
+      concurrency: 1
+      stream_timeout_s: 30
+    recovery_dispatch_timeout_s: 120
+    recovery_state_timeout_s: 30
+    recovery_state:
+      duration_s: 0
+      include:
+      - client_records
+    recovery_succeeds:
+      metric: success
+      op: eq
+      expected: 1

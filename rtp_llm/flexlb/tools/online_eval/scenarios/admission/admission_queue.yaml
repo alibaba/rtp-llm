@@ -1,4 +1,4 @@
-# Configuration for the registered Python case; execution and assertions live in Python.
+# YAML owns all case data; Python owns execution order and result references.
 schema_version: 2
 case: admission_queue
 profiles:
@@ -17,14 +17,213 @@ variants:
 - id: queue_depth
   environment:
     n_decode: 4
+  program: queue_depth
+  metadata:
+    requires:
+    - enqueue_batch
 - id: slo_deadline
   environment:
     config_overrides:
       ordering: priority
       queue_timeout_ms: 1500
+  program: slo_deadline
 - id: master_capacity
   environment:
     config_overrides:
       ordering: priority
       queue_timeout_ms: 60000
       max_outstanding: 2
+  program: master_capacity
+metadata:
+  description: Distinct queue-depth, KV wait/deadline, and global outstanding-capacity admission contracts.
+  category: admission
+parameters:
+  queue_depth:
+    setup_timeout_s: 180
+    slow:
+      targets:
+      - prefill-0
+      - prefill-1
+      operation: set_perf
+      perf:
+        prefill_fixed_ms: 4000
+    depth_gate:
+      targets:
+      - prefill-0
+      - prefill-1
+      type: queue_depth
+      options:
+        depth: 1
+    occupants_timeout_s: 15
+    occupants:
+      targets:
+      - prefill-0
+      - prefill-1
+    probe:
+      count: 1
+      concurrency: 1
+      input_len: 512
+      output_len: 2
+      request_timeout_s: 20
+    probe_done_timeout_s: 60
+    depth_error:
+      metric: all_error_contains
+      expected: true
+      op: eq
+      text:
+      - queue depth
+      case_sensitive: true
+    fast_reject:
+      metric: latency_max
+      expected: 3
+      op: lt
+    occupants_done_timeout_s: 60
+    recovery:
+      count: 1
+      concurrency: 1
+      input_len: 512
+      output_len: 2
+      request_timeout_s: 15
+    recovery_done_timeout_s: 60
+    recovered:
+      metric: success_count
+      expected: 1
+      op: eq
+    master_clean_timeout_s: 30
+    master_clean:
+      target: single
+      inflight_zero: true
+    engine_clean_timeout_s: 10
+    normal_perf:
+      targets:
+      - prefill-0
+      - prefill-1
+      operation: set_perf
+      perf:
+        prefill_fixed_ms: 100
+  slo_deadline:
+    setup_timeout_s: 180
+    kv_squeeze:
+      targets:
+      - prefill-0
+      - prefill-1
+      type: kv_pressure
+      options:
+        tokens: 6291456
+    poll_squeeze:
+      wait_s: 1
+    probe:
+      count: 1
+      concurrency: 1
+      input_len: 512
+      output_len: 2
+      request_timeout_s: 12
+    probe_done_timeout_s: 60
+    deadline_error_family:
+      metric: any_error_contains
+      expected: true
+      op: eq
+      text:
+      - deadline
+      - expired
+      - exhaust
+      - '8400'
+      - '8511'
+      - '8431'
+    waited:
+      metric: latency_min
+      expected: 1
+      op: ge
+    bounded_deadline:
+      metric: latency_max
+      expected: 8
+      op: le
+    poll_recovery:
+      wait_s: 1
+    recovery:
+      count: 1
+      concurrency: 1
+      input_len: 512
+      output_len: 2
+      request_timeout_s: 15
+    recovery_done_timeout_s: 60
+    recovered:
+      metric: success_count
+      expected: 1
+      op: eq
+    master_clean_timeout_s: 20
+    master_clean:
+      target: single
+      inflight_zero: true
+  master_capacity:
+    setup_timeout_s: 180
+    slow:
+      targets:
+      - prefill-0
+      - prefill-1
+      operation: set_perf
+      perf:
+        prefill_fixed_ms: 4000
+    wave:
+      count: 4
+      concurrency: 4
+      input_len: 512
+      output_len: 2
+      request_timeout_s: 15
+    wave_done_timeout_s: 60
+    at_least_one_reject:
+      metric: reject_count
+      expected: 1
+      op: ge
+    at_most_two_rejects:
+      metric: reject_count
+      expected: 2
+      op: le
+    at_least_two_served:
+      metric: success_count
+      expected: 2
+      op: ge
+    no_serving_error:
+      metric: serve_error_count
+      expected: 0
+      op: eq
+    typed_code:
+      metric: all_reject_code
+      expected: 8502
+      op: eq
+      scope: rejected
+    typed_detail:
+      metric: all_error_contains
+      expected: true
+      op: eq
+      text:
+      - toomanyrequests
+      - queue_full
+      scope: rejected
+    reject_fast:
+      metric: latency_max
+      expected: 3
+      op: lt
+      scope: rejected
+    normal_perf:
+      targets:
+      - prefill-0
+      - prefill-1
+      operation: set_perf
+      perf:
+        prefill_fixed_ms: 100
+    recovery:
+      count: 1
+      concurrency: 1
+      input_len: 512
+      output_len: 2
+      request_timeout_s: 15
+    recovery_done_timeout_s: 60
+    recovered:
+      metric: success_count
+      expected: 1
+      op: eq
+    master_clean_timeout_s: 30
+    master_clean:
+      target: single
+      inflight_zero: true

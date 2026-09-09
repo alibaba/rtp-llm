@@ -2,109 +2,84 @@
 
 from ..case_config import output
 
-METADATA = {
-    "id": "master_dispatch_quota",
-    "description": "Fill one batch quota, stop its prefill, observe blocked traffic and independent "
-    "scheduler TTL cleanup, then recover.",
-    "category": "master",
-    "requires": ["enqueue_batch"],
-}
-
-PROFILES = ["batch-window", "single-batch"]
-
 
 def single_prefill_ttl(case):
-    case.step("setup", "setup", timeout_s=180)
+    case.step(
+        "setup", "setup", timeout_s=case.value("single_prefill_ttl.setup_timeout_s")
+    )
     case.step(
         "slow",
         "engine_control",
-        params={
-            "operation": "set_perf",
-            "targets": ["prefill-0"],
-            "perf": {"prefill_fixed_ms": 10000},
-        },
+        params=case.value("single_prefill_ttl.slow"),
     )
-    case.step(
-        "fill", "request", params={"count": 4, "output_len": 10, "consume": "deferred"}
-    )
+    case.step("fill", "request", params=case.value("single_prefill_ttl.fill"))
     case.step(
         "all_fill_admitted",
         "master_admission_check",
-        params={"requests": output("fill", "requests"), "count": 4},
+        params=case.params(
+            "single_prefill_ttl.all_fill_admitted",
+            {"requests": output("fill", "requests")},
+        ),
     )
     case.step(
         "quota_held",
         "master_wait_inflight",
-        timeout_s=15,
-        params={"op": "ge", "value": 1},
+        timeout_s=case.value("single_prefill_ttl.quota_held_timeout_s"),
+        params=case.value("single_prefill_ttl.quota_held"),
     )
+    case.step("stop", "engine_control", params=case.value("single_prefill_ttl.stop"))
     case.step(
-        "stop", "engine_control", params={"operation": "stop", "targets": ["prefill-0"]}
+        "eviction_begin",
+        "master_mark",
+        params=case.value("single_prefill_ttl.eviction_begin"),
     )
-    case.step("eviction_begin", "master_mark", params={"wait_s": 3})
     case.step(
         "blocked",
         "master_request_batch",
-        params={
-            "count": 10,
-            "concurrency": 10,
-            "request_timeout_s": 12,
-            "sample_topology": False,
-        },
+        params=case.value("single_prefill_ttl.blocked"),
     )
     case.step(
         "block_verdict",
         "check",
-        params={
-            "actual": output("blocked", "success_rate"),
-            "op": "le",
-            "expected": 0.5,
-        },
+        params=case.params(
+            "single_prefill_ttl.block_verdict",
+            {"actual": output("blocked", "success_rate")},
+        ),
     )
     case.step(
         "ttl_empty",
         "master_wait_inflight",
-        timeout_s=95,
-        params={"op": "eq", "value": 0},
+        timeout_s=case.value("single_prefill_ttl.ttl_empty_timeout_s"),
+        params=case.value("single_prefill_ttl.ttl_empty"),
     )
     case.step(
         "start",
         "engine_control",
-        params={"operation": "start", "targets": ["prefill-0"]},
+        params=case.value("single_prefill_ttl.start"),
     )
     case.step(
         "normal_perf",
         "engine_control",
-        params={
-            "operation": "set_perf",
-            "targets": ["prefill-0"],
-            "perf": {"prefill_fixed_ms": 100},
-        },
+        params=case.value("single_prefill_ttl.normal_perf"),
     )
-    case.step("ready", "master_prefill_alive", timeout_s=30)
-    case.step("settle", "master_mark", params={"wait_s": 2})
+    case.step(
+        "ready",
+        "master_prefill_alive",
+        timeout_s=case.value("single_prefill_ttl.ready_timeout_s"),
+    )
+    case.step("settle", "master_mark", params=case.value("single_prefill_ttl.settle"))
     case.step(
         "recovery",
         "master_request_batch",
-        timeout_s=330,
-        params={"count": 20, "concurrency": 1, "request_timeout_s": 15},
+        timeout_s=case.value("single_prefill_ttl.recovery_timeout_s"),
+        params=case.value("single_prefill_ttl.recovery"),
     )
     case.step(
         "recovered",
         "check",
-        params={
-            "actual": output("recovery", "success_rate"),
-            "op": "ge",
-            "expected": 0.9,
-        },
+        params=case.params(
+            "single_prefill_ttl.recovered",
+            {"actual": output("recovery", "success_rate")},
+        ),
     )
     case.step("cleanup", "teardown")
-
-
-VARIANTS = {
-    "single_prefill_ttl": {
-        "build": single_prefill_ttl,
-        "profiles": ["batch-window", "single-batch"],
-        "metadata": {},
-    },
-}

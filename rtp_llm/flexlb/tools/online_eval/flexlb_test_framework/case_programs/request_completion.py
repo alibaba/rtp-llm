@@ -2,39 +2,33 @@
 
 from ..case_config import output
 
-METADATA = {
-    "id": "request_completion",
-    "description": "Submitted requests reach a business terminal without stream errors.",
-    "category": "status",
-    "tags": ["smoke", "lifecycle"],
-}
-PROFILES = ["batch-window", "single-nonbatch", "single-batch", "window-nonbatch"]
-
 
 def completion(case, *, deferred=False):
     """Both consumption modes share the same terminal and zero-error contract."""
     request = {
-        "input_len": case.number("input_len", 2048, maximum=2**31 - 1),
-        "output_len": case.number("output_len", 2, maximum=2**31 - 1),
-        "count": case.number("count", 1, maximum=10000),
+        "input_len": case.number("input_len"),
+        "output_len": case.number("output_len"),
+        "count": case.number("count"),
     }
     if deferred:
-        request["consume"] = "deferred"
-    case.step("setup", "setup", timeout_s=180)
+        request["consume"] = case.value("completion.deferred_consume")
+    case.step("setup", "setup", timeout_s=case.value("completion.setup_timeout_s"))
     case.step("submit", "request", params=request)
     case.step("terminal", "wait", params={"requests": output("submit", "requests")})
-    for name, field, expected in (
-        ("completed", "completed", True),
-        ("no_errors", "error_count", 0),
+    for name, field in (
+        ("completed", "completed"),
+        ("no_errors", "error_count"),
     ):
         case.step(
             name,
             "check",
-            params={
-                "actual": output("terminal", field),
-                "op": "eq",
-                "expected": expected,
-            },
+            params=case.params(
+                "completion.step_5",
+                {
+                    "actual": output("terminal", field),
+                    "expected": case.value(f"completion.expected.{name}"),
+                },
+            ),
         )
     case.step("cleanup", "teardown")
 
@@ -49,42 +43,28 @@ def deferred_fetch(case):
 
 def client_no_fetch(case):
     shape = dict(
-        input_len=case.number("input_len", 2048, maximum=2**31 - 1),
-        output_len=case.number("output_len", 8, maximum=2**31 - 1),
-        observe_s=case.number(
-            "observe_s", 0.2, minimum=0.01, maximum=10, integer=False
-        ),
+        input_len=case.number("input_len"),
+        output_len=case.number("output_len"),
+        observe_s=case.number("observe_s"),
     )
-    case.step("setup", "setup", timeout_s=180)
+    case.step("setup", "setup", timeout_s=case.value("client_no_fetch.setup_timeout_s"))
     for mode in ("late", "missing"):
         case.step(
-            mode, "client_fetch_probe", params=dict(shape, mode=mode), timeout_s=30
+            mode,
+            "client_fetch_probe",
+            params=dict(shape, mode=mode),
+            timeout_s=case.value("client_no_fetch.step_5_timeout_s"),
         )
     case.step(
         "automatic_environment",
         "environment_reconfigure",
-        timeout_s=240,
-        params={"config_overrides": {}, "mock_auto_fetch": True},
+        timeout_s=case.value("client_no_fetch.automatic_environment_timeout_s"),
+        params=case.value("client_no_fetch.automatic_environment"),
     )
     case.step(
         "automatic",
         "client_auto_fetch_probe",
-        params=dict(shape, mode="automatic"),
-        timeout_s=30,
+        params=dict(shape, mode=case.value("client_no_fetch.automatic.mode")),
+        timeout_s=case.value("client_no_fetch.automatic_timeout_s"),
     )
     case.step("cleanup", "teardown")
-
-
-VARIANTS = {
-    "client_no_fetch": {
-        "build": client_no_fetch,
-        "profiles": ["batch-window", "single-batch"],
-        "metadata": {},
-    },
-    "immediate": {"build": immediate, "profiles": PROFILES, "metadata": {}},
-    "deferred_fetch": {
-        "build": deferred_fetch,
-        "profiles": ["batch-window", "single-batch"],
-        "metadata": {},
-    },
-}

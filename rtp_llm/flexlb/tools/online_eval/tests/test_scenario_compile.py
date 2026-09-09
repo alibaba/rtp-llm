@@ -221,12 +221,11 @@ class CompileTest(unittest.TestCase):
 
 class LoaderTest(unittest.TestCase):
     def config(self):
-        return {
-            "schema_version": 2,
-            "case": "request_completion",
-            "environment": {"backend": "java_mock", "n_prefill": 1, "n_decode": 1},
-            "variants": [{"id": "immediate"}],
-        }
+        config = load_document(TOOLS / "scenarios/core/request_completion.yaml")
+        config["environment"].update(n_prefill=1, n_decode=1)
+        config["profiles"] = ["batch-window", "single-batch"]
+        config["variants"] = [{"id": "immediate", "program": "immediate"}]
+        return config
 
     def test_json_yaml_same_compile_plan(self):
         import yaml

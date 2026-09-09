@@ -2,56 +2,25 @@
 
 from ..case_config import output
 
-METADATA = {
-    "id": "cache_global_holders",
-    "description": "Shared holder sets, partial and full eviction, graceful holder removal, and "
-    "interleaved admit/evict routing evidence.",
-    "category": "kv",
-}
-
-PROFILES = ["batch-window", "single-nonbatch", "single-batch", "window-nonbatch"]
-
 
 def shared_batch(case):
-    case.step("setup", "setup", timeout_s=180)
-    case.step("fleet", "balance_snapshot", params={"role": "prefill"})
+    case.step("setup", "setup", timeout_s=case.value("shared_batch.setup_timeout_s"))
+    case.step("fleet", "balance_snapshot", params=case.value("shared_batch.fleet"))
     case.step(
         "slow",
         "engine_control",
-        params={
-            "operation": "set_perf",
-            "targets": ["prefill-0", "prefill-1"],
-            "perf": {"prefill_fixed_ms": 2000},
-        },
+        params=case.value("shared_batch.slow"),
     )
-    case.step("perf_sync", "balance_pause", params={"seconds": 1.5})
+    case.step("perf_sync", "balance_pause", params=case.value("shared_batch.perf_sync"))
     case.step(
         "seed_first",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "stream_timeout_s": 30,
-            "consume": "deferred",
-        },
+        params=case.value("shared_batch.seed_first"),
     )
     case.step(
         "first_pending",
         "balance_pending",
-        timeout_s=6,
+        timeout_s=case.value("shared_batch.first_pending_timeout_s"),
         params={
             "requests": output("seed_first", "requests"),
             "fleet": output("fleet", "snapshot"),
@@ -60,34 +29,19 @@ def shared_batch(case):
     case.step(
         "first_holder",
         "kv_landing",
-        params={"requests": output("seed_first", "requests"), "phase": "scheduled"},
+        params=case.params(
+            "shared_batch.first_holder", {"requests": output("seed_first", "requests")}
+        ),
     )
     case.step(
         "seed_second",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "stream_timeout_s": 15,
-        },
+        params=case.value("shared_batch.seed_second"),
     )
     case.step(
         "second_terminal",
         "wait",
-        timeout_s=15,
+        timeout_s=case.value("shared_batch.second_terminal_timeout_s"),
         params={"requests": output("seed_second", "requests")},
     )
     case.step(
@@ -106,715 +60,343 @@ def shared_batch(case):
     case.step(
         "first_terminal",
         "wait",
-        timeout_s=30,
+        timeout_s=case.value("shared_batch.first_terminal_timeout_s"),
         params={"requests": output("seed_first", "requests")},
     )
     case.step(
         "restore_perf",
         "engine_control",
-        params={
-            "operation": "set_perf",
-            "targets": ["prefill-0", "prefill-1"],
-            "perf": {"prefill_fixed_ms": 100},
-        },
+        params=case.value("shared_batch.restore_perf"),
     )
     case.step(
         "seed_quiet",
         "kv_snapshot",
-        timeout_s=8,
-        params={"targets": ["prefill-0", "prefill-1"], "quiet_s": 3.5},
+        timeout_s=case.value("shared_batch.seed_quiet_timeout_s"),
+        params=case.value("shared_batch.seed_quiet"),
     )
     case.step(
         "shared_holders",
         "kv_holders_check",
-        params={
-            "snapshot": output("seed_quiet", "snapshot"),
-            "keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "holders": [
-                output("first_holder", "engine"),
-                output("second_holder", "engine"),
-            ],
-            "match": "full_family",
-        },
+        params=case.params(
+            "shared_batch.shared_holders",
+            {
+                "snapshot": output("seed_quiet", "snapshot"),
+                "holders": [
+                    output("first_holder", "engine"),
+                    output("second_holder", "engine"),
+                ],
+            },
+        ),
     )
     case.step(
         "continuation_0",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "stream_timeout_s": 15,
-        },
+        params=case.value("shared_batch.continuation_0"),
     )
     case.step(
         "continuation_0_terminal",
         "wait",
-        timeout_s=15,
+        timeout_s=case.value("shared_batch.continuation_0_terminal_timeout_s"),
         params={"requests": output("continuation_0", "requests")},
     )
     case.step(
         "continuation_1",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "stream_timeout_s": 15,
-        },
+        params=case.value("shared_batch.continuation_1"),
     )
     case.step(
         "continuation_1_terminal",
         "wait",
-        timeout_s=15,
+        timeout_s=case.value("shared_batch.continuation_1_terminal_timeout_s"),
         params={"requests": output("continuation_1", "requests")},
     )
     case.step(
         "continuation_2",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "stream_timeout_s": 15,
-        },
+        params=case.value("shared_batch.continuation_2"),
     )
     case.step(
         "continuation_2_terminal",
         "wait",
-        timeout_s=15,
+        timeout_s=case.value("shared_batch.continuation_2_terminal_timeout_s"),
         params={"requests": output("continuation_2", "requests")},
     )
     case.step(
         "continuation_3",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "stream_timeout_s": 15,
-        },
+        params=case.value("shared_batch.continuation_3"),
     )
     case.step(
         "continuation_3_terminal",
         "wait",
-        timeout_s=15,
+        timeout_s=case.value("shared_batch.continuation_3_terminal_timeout_s"),
         params={"requests": output("continuation_3", "requests")},
     )
     case.step(
         "continuation_4",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "stream_timeout_s": 15,
-        },
+        params=case.value("shared_batch.continuation_4"),
     )
     case.step(
         "continuation_4_terminal",
         "wait",
-        timeout_s=15,
+        timeout_s=case.value("shared_batch.continuation_4_terminal_timeout_s"),
         params={"requests": output("continuation_4", "requests")},
     )
     case.step(
         "continuation_5",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "stream_timeout_s": 15,
-        },
+        params=case.value("shared_batch.continuation_5"),
     )
     case.step(
         "continuation_5_terminal",
         "wait",
-        timeout_s=15,
+        timeout_s=case.value("shared_batch.continuation_5_terminal_timeout_s"),
         params={"requests": output("continuation_5", "requests")},
     )
     case.step(
         "continuation_6",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "stream_timeout_s": 15,
-        },
+        params=case.value("shared_batch.continuation_6"),
     )
     case.step(
         "continuation_6_terminal",
         "wait",
-        timeout_s=15,
+        timeout_s=case.value("shared_batch.continuation_6_terminal_timeout_s"),
         params={"requests": output("continuation_6", "requests")},
     )
     case.step(
         "continuation_7",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "stream_timeout_s": 15,
-        },
+        params=case.value("shared_batch.continuation_7"),
     )
     case.step(
         "continuation_7_terminal",
         "wait",
-        timeout_s=15,
+        timeout_s=case.value("shared_batch.continuation_7_terminal_timeout_s"),
         params={"requests": output("continuation_7", "requests")},
     )
     case.step(
         "continuation_8",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "stream_timeout_s": 15,
-        },
+        params=case.value("shared_batch.continuation_8"),
     )
     case.step(
         "continuation_8_terminal",
         "wait",
-        timeout_s=15,
+        timeout_s=case.value("shared_batch.continuation_8_terminal_timeout_s"),
         params={"requests": output("continuation_8", "requests")},
     )
     case.step(
         "continuation_9",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "stream_timeout_s": 15,
-        },
+        params=case.value("shared_batch.continuation_9"),
     )
     case.step(
         "continuation_9_terminal",
         "wait",
-        timeout_s=15,
+        timeout_s=case.value("shared_batch.continuation_9_terminal_timeout_s"),
         params={"requests": output("continuation_9", "requests")},
     )
     case.step(
         "continuation_10",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "stream_timeout_s": 15,
-        },
+        params=case.value("shared_batch.continuation_10"),
     )
     case.step(
         "continuation_10_terminal",
         "wait",
-        timeout_s=15,
+        timeout_s=case.value("shared_batch.continuation_10_terminal_timeout_s"),
         params={"requests": output("continuation_10", "requests")},
     )
     case.step(
         "continuation_11",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "stream_timeout_s": 15,
-        },
+        params=case.value("shared_batch.continuation_11"),
     )
     case.step(
         "continuation_11_terminal",
         "wait",
-        timeout_s=15,
+        timeout_s=case.value("shared_batch.continuation_11_terminal_timeout_s"),
         params={"requests": output("continuation_11", "requests")},
     )
     case.step(
         "continuation_12",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "stream_timeout_s": 15,
-        },
+        params=case.value("shared_batch.continuation_12"),
     )
     case.step(
         "continuation_12_terminal",
         "wait",
-        timeout_s=15,
+        timeout_s=case.value("shared_batch.continuation_12_terminal_timeout_s"),
         params={"requests": output("continuation_12", "requests")},
     )
     case.step(
         "continuation_13",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "stream_timeout_s": 15,
-        },
+        params=case.value("shared_batch.continuation_13"),
     )
     case.step(
         "continuation_13_terminal",
         "wait",
-        timeout_s=15,
+        timeout_s=case.value("shared_batch.continuation_13_terminal_timeout_s"),
         params={"requests": output("continuation_13", "requests")},
     )
     case.step(
         "continuation_14",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "stream_timeout_s": 15,
-        },
+        params=case.value("shared_batch.continuation_14"),
     )
     case.step(
         "continuation_14_terminal",
         "wait",
-        timeout_s=15,
+        timeout_s=case.value("shared_batch.continuation_14_terminal_timeout_s"),
         params={"requests": output("continuation_14", "requests")},
     )
     case.step(
         "continuation_15",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "stream_timeout_s": 15,
-        },
+        params=case.value("shared_batch.continuation_15"),
     )
     case.step(
         "continuation_15_terminal",
         "wait",
-        timeout_s=15,
+        timeout_s=case.value("shared_batch.continuation_15_terminal_timeout_s"),
         params={"requests": output("continuation_15", "requests")},
     )
     case.step(
         "continuation_16",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "stream_timeout_s": 15,
-        },
+        params=case.value("shared_batch.continuation_16"),
     )
     case.step(
         "continuation_16_terminal",
         "wait",
-        timeout_s=15,
+        timeout_s=case.value("shared_batch.continuation_16_terminal_timeout_s"),
         params={"requests": output("continuation_16", "requests")},
     )
     case.step(
         "continuation_17",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "stream_timeout_s": 15,
-        },
+        params=case.value("shared_batch.continuation_17"),
     )
     case.step(
         "continuation_17_terminal",
         "wait",
-        timeout_s=15,
+        timeout_s=case.value("shared_batch.continuation_17_terminal_timeout_s"),
         params={"requests": output("continuation_17", "requests")},
     )
     case.step(
         "continuation_18",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "stream_timeout_s": 15,
-        },
+        params=case.value("shared_batch.continuation_18"),
     )
     case.step(
         "continuation_18_terminal",
         "wait",
-        timeout_s=15,
+        timeout_s=case.value("shared_batch.continuation_18_terminal_timeout_s"),
         params={"requests": output("continuation_18", "requests")},
     )
     case.step(
         "continuation_19",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "stream_timeout_s": 15,
-        },
+        params=case.value("shared_batch.continuation_19"),
     )
     case.step(
         "continuation_19_terminal",
         "wait",
-        timeout_s=15,
+        timeout_s=case.value("shared_batch.continuation_19_terminal_timeout_s"),
         params={"requests": output("continuation_19", "requests")},
     )
     case.step(
         "spread",
         "kv_spread_check",
-        params={
-            "requests": [
-                output("continuation_0", "requests"),
-                output("continuation_1", "requests"),
-                output("continuation_2", "requests"),
-                output("continuation_3", "requests"),
-                output("continuation_4", "requests"),
-                output("continuation_5", "requests"),
-                output("continuation_6", "requests"),
-                output("continuation_7", "requests"),
-                output("continuation_8", "requests"),
-                output("continuation_9", "requests"),
-                output("continuation_10", "requests"),
-                output("continuation_11", "requests"),
-                output("continuation_12", "requests"),
-                output("continuation_13", "requests"),
-                output("continuation_14", "requests"),
-                output("continuation_15", "requests"),
-                output("continuation_16", "requests"),
-                output("continuation_17", "requests"),
-                output("continuation_18", "requests"),
-                output("continuation_19", "requests"),
-            ],
-            "min_samples": 20,
-            "bands": {"strict": 0.65, "normal": 0.75, "loose": 0.85},
-        },
+        params=case.params(
+            "shared_batch.spread",
+            {
+                "requests": [
+                    output("continuation_0", "requests"),
+                    output("continuation_1", "requests"),
+                    output("continuation_2", "requests"),
+                    output("continuation_3", "requests"),
+                    output("continuation_4", "requests"),
+                    output("continuation_5", "requests"),
+                    output("continuation_6", "requests"),
+                    output("continuation_7", "requests"),
+                    output("continuation_8", "requests"),
+                    output("continuation_9", "requests"),
+                    output("continuation_10", "requests"),
+                    output("continuation_11", "requests"),
+                    output("continuation_12", "requests"),
+                    output("continuation_13", "requests"),
+                    output("continuation_14", "requests"),
+                    output("continuation_15", "requests"),
+                    output("continuation_16", "requests"),
+                    output("continuation_17", "requests"),
+                    output("continuation_18", "requests"),
+                    output("continuation_19", "requests"),
+                ]
+            },
+        ),
     )
     case.step(
         "holder_union",
         "kv_union_check",
-        params={
-            "requests": [
-                output("continuation_0", "requests"),
-                output("continuation_1", "requests"),
-                output("continuation_2", "requests"),
-                output("continuation_3", "requests"),
-                output("continuation_4", "requests"),
-                output("continuation_5", "requests"),
-                output("continuation_6", "requests"),
-                output("continuation_7", "requests"),
-                output("continuation_8", "requests"),
-                output("continuation_9", "requests"),
-                output("continuation_10", "requests"),
-                output("continuation_11", "requests"),
-                output("continuation_12", "requests"),
-                output("continuation_13", "requests"),
-                output("continuation_14", "requests"),
-                output("continuation_15", "requests"),
-                output("continuation_16", "requests"),
-                output("continuation_17", "requests"),
-                output("continuation_18", "requests"),
-                output("continuation_19", "requests"),
-            ],
-            "holders": [
-                output("first_holder", "engine"),
-                output("second_holder", "engine"),
-            ],
-            "min_samples": 20,
-            "min_used": 2,
-        },
+        params=case.params(
+            "shared_batch.holder_union",
+            {
+                "requests": [
+                    output("continuation_0", "requests"),
+                    output("continuation_1", "requests"),
+                    output("continuation_2", "requests"),
+                    output("continuation_3", "requests"),
+                    output("continuation_4", "requests"),
+                    output("continuation_5", "requests"),
+                    output("continuation_6", "requests"),
+                    output("continuation_7", "requests"),
+                    output("continuation_8", "requests"),
+                    output("continuation_9", "requests"),
+                    output("continuation_10", "requests"),
+                    output("continuation_11", "requests"),
+                    output("continuation_12", "requests"),
+                    output("continuation_13", "requests"),
+                    output("continuation_14", "requests"),
+                    output("continuation_15", "requests"),
+                    output("continuation_16", "requests"),
+                    output("continuation_17", "requests"),
+                    output("continuation_18", "requests"),
+                    output("continuation_19", "requests"),
+                ],
+                "holders": [
+                    output("first_holder", "engine"),
+                    output("second_holder", "engine"),
+                ],
+            },
+        ),
     )
     case.step("cleanup", "teardown")
 
 
 def shared_nonbatch(case):
-    case.step("setup", "setup", timeout_s=180)
-    case.step("fleet", "balance_snapshot", params={"role": "prefill"})
+    case.step("setup", "setup", timeout_s=case.value("shared_nonbatch.setup_timeout_s"))
+    case.step("fleet", "balance_snapshot", params=case.value("shared_nonbatch.fleet"))
     case.step(
         "slow",
         "engine_control",
-        params={
-            "operation": "set_perf",
-            "targets": ["prefill-0", "prefill-1"],
-            "perf": {"prefill_fixed_ms": 2000},
-        },
+        params=case.value("shared_nonbatch.slow"),
     )
-    case.step("perf_sync", "balance_pause", params={"seconds": 1.5})
+    case.step(
+        "perf_sync", "balance_pause", params=case.value("shared_nonbatch.perf_sync")
+    )
     case.step(
         "seed_first",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "stream_timeout_s": 30,
-            "consume": "immediate",
-        },
+        params=case.value("shared_nonbatch.seed_first"),
     )
     case.step(
         "first_pending",
         "balance_pending",
-        timeout_s=6,
+        timeout_s=case.value("shared_nonbatch.first_pending_timeout_s"),
         params={
             "requests": output("seed_first", "requests"),
             "fleet": output("fleet", "snapshot"),
@@ -823,34 +405,20 @@ def shared_nonbatch(case):
     case.step(
         "first_holder",
         "kv_landing",
-        params={"requests": output("seed_first", "requests"), "phase": "scheduled"},
+        params=case.params(
+            "shared_nonbatch.first_holder",
+            {"requests": output("seed_first", "requests")},
+        ),
     )
     case.step(
         "seed_second",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "stream_timeout_s": 15,
-        },
+        params=case.value("shared_nonbatch.seed_second"),
     )
     case.step(
         "second_terminal",
         "wait",
-        timeout_s=15,
+        timeout_s=case.value("shared_nonbatch.second_terminal_timeout_s"),
         params={"requests": output("seed_second", "requests")},
     )
     case.step(
@@ -869,715 +437,343 @@ def shared_nonbatch(case):
     case.step(
         "first_terminal",
         "wait",
-        timeout_s=30,
+        timeout_s=case.value("shared_nonbatch.first_terminal_timeout_s"),
         params={"requests": output("seed_first", "requests")},
     )
     case.step(
         "restore_perf",
         "engine_control",
-        params={
-            "operation": "set_perf",
-            "targets": ["prefill-0", "prefill-1"],
-            "perf": {"prefill_fixed_ms": 100},
-        },
+        params=case.value("shared_nonbatch.restore_perf"),
     )
     case.step(
         "seed_quiet",
         "kv_snapshot",
-        timeout_s=8,
-        params={"targets": ["prefill-0", "prefill-1"], "quiet_s": 3.5},
+        timeout_s=case.value("shared_nonbatch.seed_quiet_timeout_s"),
+        params=case.value("shared_nonbatch.seed_quiet"),
     )
     case.step(
         "shared_holders",
         "kv_holders_check",
-        params={
-            "snapshot": output("seed_quiet", "snapshot"),
-            "keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "holders": [
-                output("first_holder", "engine"),
-                output("second_holder", "engine"),
-            ],
-            "match": "full_family",
-        },
+        params=case.params(
+            "shared_nonbatch.shared_holders",
+            {
+                "snapshot": output("seed_quiet", "snapshot"),
+                "holders": [
+                    output("first_holder", "engine"),
+                    output("second_holder", "engine"),
+                ],
+            },
+        ),
     )
     case.step(
         "continuation_0",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "stream_timeout_s": 15,
-        },
+        params=case.value("shared_nonbatch.continuation_0"),
     )
     case.step(
         "continuation_0_terminal",
         "wait",
-        timeout_s=15,
+        timeout_s=case.value("shared_nonbatch.continuation_0_terminal_timeout_s"),
         params={"requests": output("continuation_0", "requests")},
     )
     case.step(
         "continuation_1",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "stream_timeout_s": 15,
-        },
+        params=case.value("shared_nonbatch.continuation_1"),
     )
     case.step(
         "continuation_1_terminal",
         "wait",
-        timeout_s=15,
+        timeout_s=case.value("shared_nonbatch.continuation_1_terminal_timeout_s"),
         params={"requests": output("continuation_1", "requests")},
     )
     case.step(
         "continuation_2",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "stream_timeout_s": 15,
-        },
+        params=case.value("shared_nonbatch.continuation_2"),
     )
     case.step(
         "continuation_2_terminal",
         "wait",
-        timeout_s=15,
+        timeout_s=case.value("shared_nonbatch.continuation_2_terminal_timeout_s"),
         params={"requests": output("continuation_2", "requests")},
     )
     case.step(
         "continuation_3",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "stream_timeout_s": 15,
-        },
+        params=case.value("shared_nonbatch.continuation_3"),
     )
     case.step(
         "continuation_3_terminal",
         "wait",
-        timeout_s=15,
+        timeout_s=case.value("shared_nonbatch.continuation_3_terminal_timeout_s"),
         params={"requests": output("continuation_3", "requests")},
     )
     case.step(
         "continuation_4",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "stream_timeout_s": 15,
-        },
+        params=case.value("shared_nonbatch.continuation_4"),
     )
     case.step(
         "continuation_4_terminal",
         "wait",
-        timeout_s=15,
+        timeout_s=case.value("shared_nonbatch.continuation_4_terminal_timeout_s"),
         params={"requests": output("continuation_4", "requests")},
     )
     case.step(
         "continuation_5",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "stream_timeout_s": 15,
-        },
+        params=case.value("shared_nonbatch.continuation_5"),
     )
     case.step(
         "continuation_5_terminal",
         "wait",
-        timeout_s=15,
+        timeout_s=case.value("shared_nonbatch.continuation_5_terminal_timeout_s"),
         params={"requests": output("continuation_5", "requests")},
     )
     case.step(
         "continuation_6",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "stream_timeout_s": 15,
-        },
+        params=case.value("shared_nonbatch.continuation_6"),
     )
     case.step(
         "continuation_6_terminal",
         "wait",
-        timeout_s=15,
+        timeout_s=case.value("shared_nonbatch.continuation_6_terminal_timeout_s"),
         params={"requests": output("continuation_6", "requests")},
     )
     case.step(
         "continuation_7",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "stream_timeout_s": 15,
-        },
+        params=case.value("shared_nonbatch.continuation_7"),
     )
     case.step(
         "continuation_7_terminal",
         "wait",
-        timeout_s=15,
+        timeout_s=case.value("shared_nonbatch.continuation_7_terminal_timeout_s"),
         params={"requests": output("continuation_7", "requests")},
     )
     case.step(
         "continuation_8",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "stream_timeout_s": 15,
-        },
+        params=case.value("shared_nonbatch.continuation_8"),
     )
     case.step(
         "continuation_8_terminal",
         "wait",
-        timeout_s=15,
+        timeout_s=case.value("shared_nonbatch.continuation_8_terminal_timeout_s"),
         params={"requests": output("continuation_8", "requests")},
     )
     case.step(
         "continuation_9",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "stream_timeout_s": 15,
-        },
+        params=case.value("shared_nonbatch.continuation_9"),
     )
     case.step(
         "continuation_9_terminal",
         "wait",
-        timeout_s=15,
+        timeout_s=case.value("shared_nonbatch.continuation_9_terminal_timeout_s"),
         params={"requests": output("continuation_9", "requests")},
     )
     case.step(
         "continuation_10",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "stream_timeout_s": 15,
-        },
+        params=case.value("shared_nonbatch.continuation_10"),
     )
     case.step(
         "continuation_10_terminal",
         "wait",
-        timeout_s=15,
+        timeout_s=case.value("shared_nonbatch.continuation_10_terminal_timeout_s"),
         params={"requests": output("continuation_10", "requests")},
     )
     case.step(
         "continuation_11",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "stream_timeout_s": 15,
-        },
+        params=case.value("shared_nonbatch.continuation_11"),
     )
     case.step(
         "continuation_11_terminal",
         "wait",
-        timeout_s=15,
+        timeout_s=case.value("shared_nonbatch.continuation_11_terminal_timeout_s"),
         params={"requests": output("continuation_11", "requests")},
     )
     case.step(
         "continuation_12",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "stream_timeout_s": 15,
-        },
+        params=case.value("shared_nonbatch.continuation_12"),
     )
     case.step(
         "continuation_12_terminal",
         "wait",
-        timeout_s=15,
+        timeout_s=case.value("shared_nonbatch.continuation_12_terminal_timeout_s"),
         params={"requests": output("continuation_12", "requests")},
     )
     case.step(
         "continuation_13",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "stream_timeout_s": 15,
-        },
+        params=case.value("shared_nonbatch.continuation_13"),
     )
     case.step(
         "continuation_13_terminal",
         "wait",
-        timeout_s=15,
+        timeout_s=case.value("shared_nonbatch.continuation_13_terminal_timeout_s"),
         params={"requests": output("continuation_13", "requests")},
     )
     case.step(
         "continuation_14",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "stream_timeout_s": 15,
-        },
+        params=case.value("shared_nonbatch.continuation_14"),
     )
     case.step(
         "continuation_14_terminal",
         "wait",
-        timeout_s=15,
+        timeout_s=case.value("shared_nonbatch.continuation_14_terminal_timeout_s"),
         params={"requests": output("continuation_14", "requests")},
     )
     case.step(
         "continuation_15",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "stream_timeout_s": 15,
-        },
+        params=case.value("shared_nonbatch.continuation_15"),
     )
     case.step(
         "continuation_15_terminal",
         "wait",
-        timeout_s=15,
+        timeout_s=case.value("shared_nonbatch.continuation_15_terminal_timeout_s"),
         params={"requests": output("continuation_15", "requests")},
     )
     case.step(
         "continuation_16",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "stream_timeout_s": 15,
-        },
+        params=case.value("shared_nonbatch.continuation_16"),
     )
     case.step(
         "continuation_16_terminal",
         "wait",
-        timeout_s=15,
+        timeout_s=case.value("shared_nonbatch.continuation_16_terminal_timeout_s"),
         params={"requests": output("continuation_16", "requests")},
     )
     case.step(
         "continuation_17",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "stream_timeout_s": 15,
-        },
+        params=case.value("shared_nonbatch.continuation_17"),
     )
     case.step(
         "continuation_17_terminal",
         "wait",
-        timeout_s=15,
+        timeout_s=case.value("shared_nonbatch.continuation_17_terminal_timeout_s"),
         params={"requests": output("continuation_17", "requests")},
     )
     case.step(
         "continuation_18",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "stream_timeout_s": 15,
-        },
+        params=case.value("shared_nonbatch.continuation_18"),
     )
     case.step(
         "continuation_18_terminal",
         "wait",
-        timeout_s=15,
+        timeout_s=case.value("shared_nonbatch.continuation_18_terminal_timeout_s"),
         params={"requests": output("continuation_18", "requests")},
     )
     case.step(
         "continuation_19",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "stream_timeout_s": 15,
-        },
+        params=case.value("shared_nonbatch.continuation_19"),
     )
     case.step(
         "continuation_19_terminal",
         "wait",
-        timeout_s=15,
+        timeout_s=case.value("shared_nonbatch.continuation_19_terminal_timeout_s"),
         params={"requests": output("continuation_19", "requests")},
     )
     case.step(
         "spread",
         "kv_spread_check",
-        params={
-            "requests": [
-                output("continuation_0", "requests"),
-                output("continuation_1", "requests"),
-                output("continuation_2", "requests"),
-                output("continuation_3", "requests"),
-                output("continuation_4", "requests"),
-                output("continuation_5", "requests"),
-                output("continuation_6", "requests"),
-                output("continuation_7", "requests"),
-                output("continuation_8", "requests"),
-                output("continuation_9", "requests"),
-                output("continuation_10", "requests"),
-                output("continuation_11", "requests"),
-                output("continuation_12", "requests"),
-                output("continuation_13", "requests"),
-                output("continuation_14", "requests"),
-                output("continuation_15", "requests"),
-                output("continuation_16", "requests"),
-                output("continuation_17", "requests"),
-                output("continuation_18", "requests"),
-                output("continuation_19", "requests"),
-            ],
-            "min_samples": 20,
-            "bands": {"strict": 0.65, "normal": 0.75, "loose": 0.85},
-        },
+        params=case.params(
+            "shared_nonbatch.spread",
+            {
+                "requests": [
+                    output("continuation_0", "requests"),
+                    output("continuation_1", "requests"),
+                    output("continuation_2", "requests"),
+                    output("continuation_3", "requests"),
+                    output("continuation_4", "requests"),
+                    output("continuation_5", "requests"),
+                    output("continuation_6", "requests"),
+                    output("continuation_7", "requests"),
+                    output("continuation_8", "requests"),
+                    output("continuation_9", "requests"),
+                    output("continuation_10", "requests"),
+                    output("continuation_11", "requests"),
+                    output("continuation_12", "requests"),
+                    output("continuation_13", "requests"),
+                    output("continuation_14", "requests"),
+                    output("continuation_15", "requests"),
+                    output("continuation_16", "requests"),
+                    output("continuation_17", "requests"),
+                    output("continuation_18", "requests"),
+                    output("continuation_19", "requests"),
+                ]
+            },
+        ),
     )
     case.step(
         "holder_union",
         "kv_union_check",
-        params={
-            "requests": [
-                output("continuation_0", "requests"),
-                output("continuation_1", "requests"),
-                output("continuation_2", "requests"),
-                output("continuation_3", "requests"),
-                output("continuation_4", "requests"),
-                output("continuation_5", "requests"),
-                output("continuation_6", "requests"),
-                output("continuation_7", "requests"),
-                output("continuation_8", "requests"),
-                output("continuation_9", "requests"),
-                output("continuation_10", "requests"),
-                output("continuation_11", "requests"),
-                output("continuation_12", "requests"),
-                output("continuation_13", "requests"),
-                output("continuation_14", "requests"),
-                output("continuation_15", "requests"),
-                output("continuation_16", "requests"),
-                output("continuation_17", "requests"),
-                output("continuation_18", "requests"),
-                output("continuation_19", "requests"),
-            ],
-            "holders": [
-                output("first_holder", "engine"),
-                output("second_holder", "engine"),
-            ],
-            "min_samples": 20,
-            "min_used": 2,
-        },
+        params=case.params(
+            "shared_nonbatch.holder_union",
+            {
+                "requests": [
+                    output("continuation_0", "requests"),
+                    output("continuation_1", "requests"),
+                    output("continuation_2", "requests"),
+                    output("continuation_3", "requests"),
+                    output("continuation_4", "requests"),
+                    output("continuation_5", "requests"),
+                    output("continuation_6", "requests"),
+                    output("continuation_7", "requests"),
+                    output("continuation_8", "requests"),
+                    output("continuation_9", "requests"),
+                    output("continuation_10", "requests"),
+                    output("continuation_11", "requests"),
+                    output("continuation_12", "requests"),
+                    output("continuation_13", "requests"),
+                    output("continuation_14", "requests"),
+                    output("continuation_15", "requests"),
+                    output("continuation_16", "requests"),
+                    output("continuation_17", "requests"),
+                    output("continuation_18", "requests"),
+                    output("continuation_19", "requests"),
+                ],
+                "holders": [
+                    output("first_holder", "engine"),
+                    output("second_holder", "engine"),
+                ],
+            },
+        ),
     )
     case.step("cleanup", "teardown")
 
 
 def release_batch(case):
-    case.step("setup", "setup", timeout_s=180)
-    case.step("fleet", "balance_snapshot", params={"role": "prefill"})
+    case.step("setup", "setup", timeout_s=case.value("release_batch.setup_timeout_s"))
+    case.step("fleet", "balance_snapshot", params=case.value("release_batch.fleet"))
     case.step(
         "slow",
         "engine_control",
-        params={
-            "operation": "set_perf",
-            "targets": ["prefill-0", "prefill-1"],
-            "perf": {"prefill_fixed_ms": 2000},
-        },
+        params=case.value("release_batch.slow"),
     )
-    case.step("perf_sync", "balance_pause", params={"seconds": 1.5})
+    case.step(
+        "perf_sync", "balance_pause", params=case.value("release_batch.perf_sync")
+    )
     case.step(
         "seed_first",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "stream_timeout_s": 30,
-            "consume": "deferred",
-        },
+        params=case.value("release_batch.seed_first"),
     )
     case.step(
         "first_pending",
         "balance_pending",
-        timeout_s=6,
+        timeout_s=case.value("release_batch.first_pending_timeout_s"),
         params={
             "requests": output("seed_first", "requests"),
             "fleet": output("fleet", "snapshot"),
@@ -1586,34 +782,19 @@ def release_batch(case):
     case.step(
         "first_holder",
         "kv_landing",
-        params={"requests": output("seed_first", "requests"), "phase": "scheduled"},
+        params=case.params(
+            "release_batch.first_holder", {"requests": output("seed_first", "requests")}
+        ),
     )
     case.step(
         "seed_second",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "stream_timeout_s": 15,
-        },
+        params=case.value("release_batch.seed_second"),
     )
     case.step(
         "second_terminal",
         "wait",
-        timeout_s=15,
+        timeout_s=case.value("release_batch.second_terminal_timeout_s"),
         params={"requests": output("seed_second", "requests")},
     )
     case.step(
@@ -1632,196 +813,106 @@ def release_batch(case):
     case.step(
         "first_terminal",
         "wait",
-        timeout_s=30,
+        timeout_s=case.value("release_batch.first_terminal_timeout_s"),
         params={"requests": output("seed_first", "requests")},
     )
     case.step(
         "restore_perf",
         "engine_control",
-        params={
-            "operation": "set_perf",
-            "targets": ["prefill-0", "prefill-1"],
-            "perf": {"prefill_fixed_ms": 100},
-        },
+        params=case.value("release_batch.restore_perf"),
     )
     case.step(
         "seed_quiet",
         "kv_snapshot",
-        timeout_s=8,
-        params={"targets": ["prefill-0", "prefill-1"], "quiet_s": 3.5},
+        timeout_s=case.value("release_batch.seed_quiet_timeout_s"),
+        params=case.value("release_batch.seed_quiet"),
     )
     case.step(
         "shared_holders",
         "kv_holders_check",
-        params={
-            "snapshot": output("seed_quiet", "snapshot"),
-            "keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "holders": [
-                output("first_holder", "engine"),
-                output("second_holder", "engine"),
-            ],
-            "match": "full_family",
-        },
+        params=case.params(
+            "release_batch.shared_holders",
+            {
+                "snapshot": output("seed_quiet", "snapshot"),
+                "holders": [
+                    output("first_holder", "engine"),
+                    output("second_holder", "engine"),
+                ],
+            },
+        ),
     )
     case.step(
         "release_first",
         "kv_evict",
-        params={
-            "engine": output("first_holder", "engine"),
-            "keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-        },
+        params=case.params(
+            "release_batch.release_first", {"engine": output("first_holder", "engine")}
+        ),
     )
     case.step(
         "release_second",
         "kv_evict",
-        params={
-            "engine": output("second_holder", "engine"),
-            "keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-        },
+        params=case.params(
+            "release_batch.release_second",
+            {"engine": output("second_holder", "engine")},
+        ),
     )
     case.step(
         "released_quiet",
         "kv_snapshot",
-        timeout_s=8,
-        params={"targets": ["prefill-0", "prefill-1"], "quiet_s": 3.5},
+        timeout_s=case.value("release_batch.released_quiet_timeout_s"),
+        params=case.value("release_batch.released_quiet"),
     )
     case.step(
         "no_ghost",
         "kv_holders_check",
-        params={
-            "snapshot": output("released_quiet", "snapshot"),
-            "keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "holders": [],
-            "match": "any_key",
-        },
+        params=case.params(
+            "release_batch.no_ghost", {"snapshot": output("released_quiet", "snapshot")}
+        ),
     )
     case.step(
         "wave",
         "request",
-        timeout_s=90,
-        params={
-            "count": 20,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "stream_timeout_s": 30,
-            "consume": "deferred",
-            "post_issue_delay_s": 0.12,
-        },
+        timeout_s=case.value("release_batch.wave_timeout_s"),
+        params=case.value("release_batch.wave"),
     )
     case.step(
         "wave_terminal",
         "wait",
-        timeout_s=30,
+        timeout_s=case.value("release_batch.wave_terminal_timeout_s"),
         params={"requests": output("wave", "requests")},
     )
     case.step(
         "spread",
         "kv_spread_check",
-        params={
-            "requests": [output("wave", "requests")],
-            "min_samples": 20,
-            "bands": {"strict": 0.65, "normal": 0.75, "loose": 0.85},
-        },
+        params=case.params(
+            "release_batch.spread", {"requests": [output("wave", "requests")]}
+        ),
     )
     case.step("cleanup", "teardown")
 
 
 def release_nonbatch(case):
-    case.step("setup", "setup", timeout_s=180)
-    case.step("fleet", "balance_snapshot", params={"role": "prefill"})
+    case.step(
+        "setup", "setup", timeout_s=case.value("release_nonbatch.setup_timeout_s")
+    )
+    case.step("fleet", "balance_snapshot", params=case.value("release_nonbatch.fleet"))
     case.step(
         "slow",
         "engine_control",
-        params={
-            "operation": "set_perf",
-            "targets": ["prefill-0", "prefill-1"],
-            "perf": {"prefill_fixed_ms": 2000},
-        },
+        params=case.value("release_nonbatch.slow"),
     )
-    case.step("perf_sync", "balance_pause", params={"seconds": 1.5})
+    case.step(
+        "perf_sync", "balance_pause", params=case.value("release_nonbatch.perf_sync")
+    )
     case.step(
         "seed_first",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "stream_timeout_s": 30,
-            "consume": "immediate",
-        },
+        params=case.value("release_nonbatch.seed_first"),
     )
     case.step(
         "first_pending",
         "balance_pending",
-        timeout_s=6,
+        timeout_s=case.value("release_nonbatch.first_pending_timeout_s"),
         params={
             "requests": output("seed_first", "requests"),
             "fleet": output("fleet", "snapshot"),
@@ -1830,34 +921,20 @@ def release_nonbatch(case):
     case.step(
         "first_holder",
         "kv_landing",
-        params={"requests": output("seed_first", "requests"), "phase": "scheduled"},
+        params=case.params(
+            "release_nonbatch.first_holder",
+            {"requests": output("seed_first", "requests")},
+        ),
     )
     case.step(
         "seed_second",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "stream_timeout_s": 15,
-        },
+        params=case.value("release_nonbatch.seed_second"),
     )
     case.step(
         "second_terminal",
         "wait",
-        timeout_s=15,
+        timeout_s=case.value("release_nonbatch.second_terminal_timeout_s"),
         params={"requests": output("seed_second", "requests")},
     )
     case.step(
@@ -1876,196 +953,106 @@ def release_nonbatch(case):
     case.step(
         "first_terminal",
         "wait",
-        timeout_s=30,
+        timeout_s=case.value("release_nonbatch.first_terminal_timeout_s"),
         params={"requests": output("seed_first", "requests")},
     )
     case.step(
         "restore_perf",
         "engine_control",
-        params={
-            "operation": "set_perf",
-            "targets": ["prefill-0", "prefill-1"],
-            "perf": {"prefill_fixed_ms": 100},
-        },
+        params=case.value("release_nonbatch.restore_perf"),
     )
     case.step(
         "seed_quiet",
         "kv_snapshot",
-        timeout_s=8,
-        params={"targets": ["prefill-0", "prefill-1"], "quiet_s": 3.5},
+        timeout_s=case.value("release_nonbatch.seed_quiet_timeout_s"),
+        params=case.value("release_nonbatch.seed_quiet"),
     )
     case.step(
         "shared_holders",
         "kv_holders_check",
-        params={
-            "snapshot": output("seed_quiet", "snapshot"),
-            "keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "holders": [
-                output("first_holder", "engine"),
-                output("second_holder", "engine"),
-            ],
-            "match": "full_family",
-        },
+        params=case.params(
+            "release_nonbatch.shared_holders",
+            {
+                "snapshot": output("seed_quiet", "snapshot"),
+                "holders": [
+                    output("first_holder", "engine"),
+                    output("second_holder", "engine"),
+                ],
+            },
+        ),
     )
     case.step(
         "release_first",
         "kv_evict",
-        params={
-            "engine": output("first_holder", "engine"),
-            "keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-        },
+        params=case.params(
+            "release_nonbatch.release_first",
+            {"engine": output("first_holder", "engine")},
+        ),
     )
     case.step(
         "release_second",
         "kv_evict",
-        params={
-            "engine": output("second_holder", "engine"),
-            "keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-        },
+        params=case.params(
+            "release_nonbatch.release_second",
+            {"engine": output("second_holder", "engine")},
+        ),
     )
     case.step(
         "released_quiet",
         "kv_snapshot",
-        timeout_s=8,
-        params={"targets": ["prefill-0", "prefill-1"], "quiet_s": 3.5},
+        timeout_s=case.value("release_nonbatch.released_quiet_timeout_s"),
+        params=case.value("release_nonbatch.released_quiet"),
     )
     case.step(
         "no_ghost",
         "kv_holders_check",
-        params={
-            "snapshot": output("released_quiet", "snapshot"),
-            "keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "holders": [],
-            "match": "any_key",
-        },
+        params=case.params(
+            "release_nonbatch.no_ghost",
+            {"snapshot": output("released_quiet", "snapshot")},
+        ),
     )
     case.step(
         "wave",
         "request",
-        timeout_s=90,
-        params={
-            "count": 20,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "stream_timeout_s": 30,
-            "consume": "immediate",
-            "post_issue_delay_s": 0.12,
-        },
+        timeout_s=case.value("release_nonbatch.wave_timeout_s"),
+        params=case.value("release_nonbatch.wave"),
     )
     case.step(
         "wave_terminal",
         "wait",
-        timeout_s=30,
+        timeout_s=case.value("release_nonbatch.wave_terminal_timeout_s"),
         params={"requests": output("wave", "requests")},
     )
     case.step(
         "spread",
         "kv_spread_check",
-        params={
-            "requests": [output("wave", "requests")],
-            "min_samples": 20,
-            "bands": {"strict": 0.65, "normal": 0.75, "loose": 0.85},
-        },
+        params=case.params(
+            "release_nonbatch.spread", {"requests": [output("wave", "requests")]}
+        ),
     )
     case.step("cleanup", "teardown")
 
 
 def redirect_batch(case):
-    case.step("setup", "setup", timeout_s=180)
-    case.step("fleet", "balance_snapshot", params={"role": "prefill"})
+    case.step("setup", "setup", timeout_s=case.value("redirect_batch.setup_timeout_s"))
+    case.step("fleet", "balance_snapshot", params=case.value("redirect_batch.fleet"))
     case.step(
         "slow",
         "engine_control",
-        params={
-            "operation": "set_perf",
-            "targets": ["prefill-0", "prefill-1"],
-            "perf": {"prefill_fixed_ms": 2000},
-        },
+        params=case.value("redirect_batch.slow"),
     )
-    case.step("perf_sync", "balance_pause", params={"seconds": 1.5})
+    case.step(
+        "perf_sync", "balance_pause", params=case.value("redirect_batch.perf_sync")
+    )
     case.step(
         "seed_first",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "stream_timeout_s": 30,
-            "consume": "deferred",
-        },
+        params=case.value("redirect_batch.seed_first"),
     )
     case.step(
         "first_pending",
         "balance_pending",
-        timeout_s=6,
+        timeout_s=case.value("redirect_batch.first_pending_timeout_s"),
         params={
             "requests": output("seed_first", "requests"),
             "fleet": output("fleet", "snapshot"),
@@ -2074,34 +1061,20 @@ def redirect_batch(case):
     case.step(
         "first_holder",
         "kv_landing",
-        params={"requests": output("seed_first", "requests"), "phase": "scheduled"},
+        params=case.params(
+            "redirect_batch.first_holder",
+            {"requests": output("seed_first", "requests")},
+        ),
     )
     case.step(
         "seed_second",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "stream_timeout_s": 15,
-        },
+        params=case.value("redirect_batch.seed_second"),
     )
     case.step(
         "second_terminal",
         "wait",
-        timeout_s=15,
+        timeout_s=case.value("redirect_batch.second_terminal_timeout_s"),
         params={"requests": output("seed_second", "requests")},
     )
     case.step(
@@ -2120,459 +1093,226 @@ def redirect_batch(case):
     case.step(
         "first_terminal",
         "wait",
-        timeout_s=30,
+        timeout_s=case.value("redirect_batch.first_terminal_timeout_s"),
         params={"requests": output("seed_first", "requests")},
     )
     case.step(
         "restore_perf",
         "engine_control",
-        params={
-            "operation": "set_perf",
-            "targets": ["prefill-0", "prefill-1"],
-            "perf": {"prefill_fixed_ms": 100},
-        },
+        params=case.value("redirect_batch.restore_perf"),
     )
     case.step(
         "seed_quiet",
         "kv_snapshot",
-        timeout_s=8,
-        params={"targets": ["prefill-0", "prefill-1"], "quiet_s": 3.5},
+        timeout_s=case.value("redirect_batch.seed_quiet_timeout_s"),
+        params=case.value("redirect_batch.seed_quiet"),
     )
     case.step(
         "shared_holders",
         "kv_holders_check",
-        params={
-            "snapshot": output("seed_quiet", "snapshot"),
-            "keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "holders": [
-                output("first_holder", "engine"),
-                output("second_holder", "engine"),
-            ],
-            "match": "full_family",
-        },
+        params=case.params(
+            "redirect_batch.shared_holders",
+            {
+                "snapshot": output("seed_quiet", "snapshot"),
+                "holders": [
+                    output("first_holder", "engine"),
+                    output("second_holder", "engine"),
+                ],
+            },
+        ),
     )
     case.step(
         "release_first",
         "kv_evict",
-        params={
-            "engine": output("first_holder", "engine"),
-            "keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-        },
+        params=case.params(
+            "redirect_batch.release_first", {"engine": output("first_holder", "engine")}
+        ),
     )
     case.step(
         "released_quiet",
         "kv_snapshot",
-        timeout_s=8,
-        params={"targets": ["prefill-0", "prefill-1"], "quiet_s": 3.5},
+        timeout_s=case.value("redirect_batch.released_quiet_timeout_s"),
+        params=case.value("redirect_batch.released_quiet"),
     )
     case.step(
         "first_empty",
         "kv_membership_check",
-        params={
-            "snapshot": output("released_quiet", "snapshot"),
-            "engine": output("first_holder", "engine"),
-            "keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "relation": "none",
-        },
+        params=case.params(
+            "redirect_batch.first_empty",
+            {
+                "snapshot": output("released_quiet", "snapshot"),
+                "engine": output("first_holder", "engine"),
+            },
+        ),
     )
     case.step(
         "sole_holder",
         "kv_holders_check",
-        params={
-            "snapshot": output("released_quiet", "snapshot"),
-            "keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "holders": [output("second_holder", "engine")],
-            "match": "full_family",
-        },
+        params=case.params(
+            "redirect_batch.sole_holder",
+            {
+                "snapshot": output("released_quiet", "snapshot"),
+                "holders": [output("second_holder", "engine")],
+            },
+        ),
     )
     case.step(
         "continuation_0",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "stream_timeout_s": 15,
-        },
+        params=case.value("redirect_batch.continuation_0"),
     )
     case.step(
         "continuation_0_terminal",
         "wait",
-        timeout_s=15,
+        timeout_s=case.value("redirect_batch.continuation_0_terminal_timeout_s"),
         params={"requests": output("continuation_0", "requests")},
     )
     case.step(
         "continuation_1",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "stream_timeout_s": 15,
-        },
+        params=case.value("redirect_batch.continuation_1"),
     )
     case.step(
         "continuation_1_terminal",
         "wait",
-        timeout_s=15,
+        timeout_s=case.value("redirect_batch.continuation_1_terminal_timeout_s"),
         params={"requests": output("continuation_1", "requests")},
     )
     case.step(
         "continuation_2",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "stream_timeout_s": 15,
-        },
+        params=case.value("redirect_batch.continuation_2"),
     )
     case.step(
         "continuation_2_terminal",
         "wait",
-        timeout_s=15,
+        timeout_s=case.value("redirect_batch.continuation_2_terminal_timeout_s"),
         params={"requests": output("continuation_2", "requests")},
     )
     case.step(
         "continuation_3",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "stream_timeout_s": 15,
-        },
+        params=case.value("redirect_batch.continuation_3"),
     )
     case.step(
         "continuation_3_terminal",
         "wait",
-        timeout_s=15,
+        timeout_s=case.value("redirect_batch.continuation_3_terminal_timeout_s"),
         params={"requests": output("continuation_3", "requests")},
     )
     case.step(
         "continuation_4",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "stream_timeout_s": 15,
-        },
+        params=case.value("redirect_batch.continuation_4"),
     )
     case.step(
         "continuation_4_terminal",
         "wait",
-        timeout_s=15,
+        timeout_s=case.value("redirect_batch.continuation_4_terminal_timeout_s"),
         params={"requests": output("continuation_4", "requests")},
     )
     case.step(
         "continuation_5",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "stream_timeout_s": 15,
-        },
+        params=case.value("redirect_batch.continuation_5"),
     )
     case.step(
         "continuation_5_terminal",
         "wait",
-        timeout_s=15,
+        timeout_s=case.value("redirect_batch.continuation_5_terminal_timeout_s"),
         params={"requests": output("continuation_5", "requests")},
     )
     case.step(
         "continuation_6",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "stream_timeout_s": 15,
-        },
+        params=case.value("redirect_batch.continuation_6"),
     )
     case.step(
         "continuation_6_terminal",
         "wait",
-        timeout_s=15,
+        timeout_s=case.value("redirect_batch.continuation_6_terminal_timeout_s"),
         params={"requests": output("continuation_6", "requests")},
     )
     case.step(
         "continuation_7",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "stream_timeout_s": 15,
-        },
+        params=case.value("redirect_batch.continuation_7"),
     )
     case.step(
         "continuation_7_terminal",
         "wait",
-        timeout_s=15,
+        timeout_s=case.value("redirect_batch.continuation_7_terminal_timeout_s"),
         params={"requests": output("continuation_7", "requests")},
     )
     case.step(
         "continuation_8",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "stream_timeout_s": 15,
-        },
+        params=case.value("redirect_batch.continuation_8"),
     )
     case.step(
         "continuation_8_terminal",
         "wait",
-        timeout_s=15,
+        timeout_s=case.value("redirect_batch.continuation_8_terminal_timeout_s"),
         params={"requests": output("continuation_8", "requests")},
     )
     case.step(
         "continuation_9",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "stream_timeout_s": 15,
-        },
+        params=case.value("redirect_batch.continuation_9"),
     )
     case.step(
         "continuation_9_terminal",
         "wait",
-        timeout_s=15,
+        timeout_s=case.value("redirect_batch.continuation_9_terminal_timeout_s"),
         params={"requests": output("continuation_9", "requests")},
     )
     case.step(
         "redirect",
         "kv_fidelity_check",
-        params={
-            "requests": [
-                output("continuation_0", "requests"),
-                output("continuation_1", "requests"),
-                output("continuation_2", "requests"),
-                output("continuation_3", "requests"),
-                output("continuation_4", "requests"),
-                output("continuation_5", "requests"),
-                output("continuation_6", "requests"),
-                output("continuation_7", "requests"),
-                output("continuation_8", "requests"),
-                output("continuation_9", "requests"),
-            ],
-            "min_samples": 10,
-            "holder": output("second_holder", "engine"),
-            "bands": {"strict": 0.95, "normal": 0.9, "loose": 0.8},
-        },
+        params=case.params(
+            "redirect_batch.redirect",
+            {
+                "requests": [
+                    output("continuation_0", "requests"),
+                    output("continuation_1", "requests"),
+                    output("continuation_2", "requests"),
+                    output("continuation_3", "requests"),
+                    output("continuation_4", "requests"),
+                    output("continuation_5", "requests"),
+                    output("continuation_6", "requests"),
+                    output("continuation_7", "requests"),
+                    output("continuation_8", "requests"),
+                    output("continuation_9", "requests"),
+                ],
+                "holder": output("second_holder", "engine"),
+            },
+        ),
     )
     case.step("cleanup", "teardown")
 
 
 def redirect_nonbatch(case):
-    case.step("setup", "setup", timeout_s=180)
-    case.step("fleet", "balance_snapshot", params={"role": "prefill"})
+    case.step(
+        "setup", "setup", timeout_s=case.value("redirect_nonbatch.setup_timeout_s")
+    )
+    case.step("fleet", "balance_snapshot", params=case.value("redirect_nonbatch.fleet"))
     case.step(
         "slow",
         "engine_control",
-        params={
-            "operation": "set_perf",
-            "targets": ["prefill-0", "prefill-1"],
-            "perf": {"prefill_fixed_ms": 2000},
-        },
+        params=case.value("redirect_nonbatch.slow"),
     )
-    case.step("perf_sync", "balance_pause", params={"seconds": 1.5})
+    case.step(
+        "perf_sync", "balance_pause", params=case.value("redirect_nonbatch.perf_sync")
+    )
     case.step(
         "seed_first",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "stream_timeout_s": 30,
-            "consume": "immediate",
-        },
+        params=case.value("redirect_nonbatch.seed_first"),
     )
     case.step(
         "first_pending",
         "balance_pending",
-        timeout_s=6,
+        timeout_s=case.value("redirect_nonbatch.first_pending_timeout_s"),
         params={
             "requests": output("seed_first", "requests"),
             "fleet": output("fleet", "snapshot"),
@@ -2581,34 +1321,20 @@ def redirect_nonbatch(case):
     case.step(
         "first_holder",
         "kv_landing",
-        params={"requests": output("seed_first", "requests"), "phase": "scheduled"},
+        params=case.params(
+            "redirect_nonbatch.first_holder",
+            {"requests": output("seed_first", "requests")},
+        ),
     )
     case.step(
         "seed_second",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "stream_timeout_s": 15,
-        },
+        params=case.value("redirect_nonbatch.seed_second"),
     )
     case.step(
         "second_terminal",
         "wait",
-        timeout_s=15,
+        timeout_s=case.value("redirect_nonbatch.second_terminal_timeout_s"),
         params={"requests": output("seed_second", "requests")},
     )
     case.step(
@@ -2627,459 +1353,223 @@ def redirect_nonbatch(case):
     case.step(
         "first_terminal",
         "wait",
-        timeout_s=30,
+        timeout_s=case.value("redirect_nonbatch.first_terminal_timeout_s"),
         params={"requests": output("seed_first", "requests")},
     )
     case.step(
         "restore_perf",
         "engine_control",
-        params={
-            "operation": "set_perf",
-            "targets": ["prefill-0", "prefill-1"],
-            "perf": {"prefill_fixed_ms": 100},
-        },
+        params=case.value("redirect_nonbatch.restore_perf"),
     )
     case.step(
         "seed_quiet",
         "kv_snapshot",
-        timeout_s=8,
-        params={"targets": ["prefill-0", "prefill-1"], "quiet_s": 3.5},
+        timeout_s=case.value("redirect_nonbatch.seed_quiet_timeout_s"),
+        params=case.value("redirect_nonbatch.seed_quiet"),
     )
     case.step(
         "shared_holders",
         "kv_holders_check",
-        params={
-            "snapshot": output("seed_quiet", "snapshot"),
-            "keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "holders": [
-                output("first_holder", "engine"),
-                output("second_holder", "engine"),
-            ],
-            "match": "full_family",
-        },
+        params=case.params(
+            "redirect_nonbatch.shared_holders",
+            {
+                "snapshot": output("seed_quiet", "snapshot"),
+                "holders": [
+                    output("first_holder", "engine"),
+                    output("second_holder", "engine"),
+                ],
+            },
+        ),
     )
     case.step(
         "release_first",
         "kv_evict",
-        params={
-            "engine": output("first_holder", "engine"),
-            "keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-        },
+        params=case.params(
+            "redirect_nonbatch.release_first",
+            {"engine": output("first_holder", "engine")},
+        ),
     )
     case.step(
         "released_quiet",
         "kv_snapshot",
-        timeout_s=8,
-        params={"targets": ["prefill-0", "prefill-1"], "quiet_s": 3.5},
+        timeout_s=case.value("redirect_nonbatch.released_quiet_timeout_s"),
+        params=case.value("redirect_nonbatch.released_quiet"),
     )
     case.step(
         "first_empty",
         "kv_membership_check",
-        params={
-            "snapshot": output("released_quiet", "snapshot"),
-            "engine": output("first_holder", "engine"),
-            "keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "relation": "none",
-        },
+        params=case.params(
+            "redirect_nonbatch.first_empty",
+            {
+                "snapshot": output("released_quiet", "snapshot"),
+                "engine": output("first_holder", "engine"),
+            },
+        ),
     )
     case.step(
         "sole_holder",
         "kv_holders_check",
-        params={
-            "snapshot": output("released_quiet", "snapshot"),
-            "keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "holders": [output("second_holder", "engine")],
-            "match": "full_family",
-        },
+        params=case.params(
+            "redirect_nonbatch.sole_holder",
+            {
+                "snapshot": output("released_quiet", "snapshot"),
+                "holders": [output("second_holder", "engine")],
+            },
+        ),
     )
     case.step(
         "continuation_0",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "stream_timeout_s": 15,
-        },
+        params=case.value("redirect_nonbatch.continuation_0"),
     )
     case.step(
         "continuation_0_terminal",
         "wait",
-        timeout_s=15,
+        timeout_s=case.value("redirect_nonbatch.continuation_0_terminal_timeout_s"),
         params={"requests": output("continuation_0", "requests")},
     )
     case.step(
         "continuation_1",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "stream_timeout_s": 15,
-        },
+        params=case.value("redirect_nonbatch.continuation_1"),
     )
     case.step(
         "continuation_1_terminal",
         "wait",
-        timeout_s=15,
+        timeout_s=case.value("redirect_nonbatch.continuation_1_terminal_timeout_s"),
         params={"requests": output("continuation_1", "requests")},
     )
     case.step(
         "continuation_2",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "stream_timeout_s": 15,
-        },
+        params=case.value("redirect_nonbatch.continuation_2"),
     )
     case.step(
         "continuation_2_terminal",
         "wait",
-        timeout_s=15,
+        timeout_s=case.value("redirect_nonbatch.continuation_2_terminal_timeout_s"),
         params={"requests": output("continuation_2", "requests")},
     )
     case.step(
         "continuation_3",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "stream_timeout_s": 15,
-        },
+        params=case.value("redirect_nonbatch.continuation_3"),
     )
     case.step(
         "continuation_3_terminal",
         "wait",
-        timeout_s=15,
+        timeout_s=case.value("redirect_nonbatch.continuation_3_terminal_timeout_s"),
         params={"requests": output("continuation_3", "requests")},
     )
     case.step(
         "continuation_4",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "stream_timeout_s": 15,
-        },
+        params=case.value("redirect_nonbatch.continuation_4"),
     )
     case.step(
         "continuation_4_terminal",
         "wait",
-        timeout_s=15,
+        timeout_s=case.value("redirect_nonbatch.continuation_4_terminal_timeout_s"),
         params={"requests": output("continuation_4", "requests")},
     )
     case.step(
         "continuation_5",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "stream_timeout_s": 15,
-        },
+        params=case.value("redirect_nonbatch.continuation_5"),
     )
     case.step(
         "continuation_5_terminal",
         "wait",
-        timeout_s=15,
+        timeout_s=case.value("redirect_nonbatch.continuation_5_terminal_timeout_s"),
         params={"requests": output("continuation_5", "requests")},
     )
     case.step(
         "continuation_6",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "stream_timeout_s": 15,
-        },
+        params=case.value("redirect_nonbatch.continuation_6"),
     )
     case.step(
         "continuation_6_terminal",
         "wait",
-        timeout_s=15,
+        timeout_s=case.value("redirect_nonbatch.continuation_6_terminal_timeout_s"),
         params={"requests": output("continuation_6", "requests")},
     )
     case.step(
         "continuation_7",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "stream_timeout_s": 15,
-        },
+        params=case.value("redirect_nonbatch.continuation_7"),
     )
     case.step(
         "continuation_7_terminal",
         "wait",
-        timeout_s=15,
+        timeout_s=case.value("redirect_nonbatch.continuation_7_terminal_timeout_s"),
         params={"requests": output("continuation_7", "requests")},
     )
     case.step(
         "continuation_8",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "stream_timeout_s": 15,
-        },
+        params=case.value("redirect_nonbatch.continuation_8"),
     )
     case.step(
         "continuation_8_terminal",
         "wait",
-        timeout_s=15,
+        timeout_s=case.value("redirect_nonbatch.continuation_8_terminal_timeout_s"),
         params={"requests": output("continuation_8", "requests")},
     )
     case.step(
         "continuation_9",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "stream_timeout_s": 15,
-        },
+        params=case.value("redirect_nonbatch.continuation_9"),
     )
     case.step(
         "continuation_9_terminal",
         "wait",
-        timeout_s=15,
+        timeout_s=case.value("redirect_nonbatch.continuation_9_terminal_timeout_s"),
         params={"requests": output("continuation_9", "requests")},
     )
     case.step(
         "redirect",
         "kv_fidelity_check",
-        params={
-            "requests": [
-                output("continuation_0", "requests"),
-                output("continuation_1", "requests"),
-                output("continuation_2", "requests"),
-                output("continuation_3", "requests"),
-                output("continuation_4", "requests"),
-                output("continuation_5", "requests"),
-                output("continuation_6", "requests"),
-                output("continuation_7", "requests"),
-                output("continuation_8", "requests"),
-                output("continuation_9", "requests"),
-            ],
-            "min_samples": 10,
-            "holder": output("second_holder", "engine"),
-            "bands": {"strict": 0.95, "normal": 0.9, "loose": 0.8},
-        },
+        params=case.params(
+            "redirect_nonbatch.redirect",
+            {
+                "requests": [
+                    output("continuation_0", "requests"),
+                    output("continuation_1", "requests"),
+                    output("continuation_2", "requests"),
+                    output("continuation_3", "requests"),
+                    output("continuation_4", "requests"),
+                    output("continuation_5", "requests"),
+                    output("continuation_6", "requests"),
+                    output("continuation_7", "requests"),
+                    output("continuation_8", "requests"),
+                    output("continuation_9", "requests"),
+                ],
+                "holder": output("second_holder", "engine"),
+            },
+        ),
     )
     case.step("cleanup", "teardown")
 
 
 def down_batch(case):
-    case.step("setup", "setup", timeout_s=180)
-    case.step("fleet", "balance_snapshot", params={"role": "prefill"})
+    case.step("setup", "setup", timeout_s=case.value("down_batch.setup_timeout_s"))
+    case.step("fleet", "balance_snapshot", params=case.value("down_batch.fleet"))
     case.step(
         "slow",
         "engine_control",
-        params={
-            "operation": "set_perf",
-            "targets": ["prefill-0", "prefill-1", "prefill-2"],
-            "perf": {"prefill_fixed_ms": 2000},
-        },
+        params=case.value("down_batch.slow"),
     )
-    case.step("perf_sync", "balance_pause", params={"seconds": 1.5})
+    case.step("perf_sync", "balance_pause", params=case.value("down_batch.perf_sync"))
     case.step(
         "seed_first",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "stream_timeout_s": 30,
-            "consume": "deferred",
-        },
+        params=case.value("down_batch.seed_first"),
     )
     case.step(
         "first_pending",
         "balance_pending",
-        timeout_s=6,
+        timeout_s=case.value("down_batch.first_pending_timeout_s"),
         params={
             "requests": output("seed_first", "requests"),
             "fleet": output("fleet", "snapshot"),
@@ -3088,34 +1578,19 @@ def down_batch(case):
     case.step(
         "first_holder",
         "kv_landing",
-        params={"requests": output("seed_first", "requests"), "phase": "scheduled"},
+        params=case.params(
+            "down_batch.first_holder", {"requests": output("seed_first", "requests")}
+        ),
     )
     case.step(
         "seed_second",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "stream_timeout_s": 15,
-        },
+        params=case.value("down_batch.seed_second"),
     )
     case.step(
         "second_terminal",
         "wait",
-        timeout_s=15,
+        timeout_s=case.value("down_batch.second_terminal_timeout_s"),
         params={"requests": output("seed_second", "requests")},
     )
     case.step(
@@ -3134,324 +1609,184 @@ def down_batch(case):
     case.step(
         "first_terminal",
         "wait",
-        timeout_s=30,
+        timeout_s=case.value("down_batch.first_terminal_timeout_s"),
         params={"requests": output("seed_first", "requests")},
     )
     case.step(
         "restore_perf",
         "engine_control",
-        params={
-            "operation": "set_perf",
-            "targets": ["prefill-0", "prefill-1", "prefill-2"],
-            "perf": {"prefill_fixed_ms": 100},
-        },
+        params=case.value("down_batch.restore_perf"),
     )
     case.step(
         "seed_quiet",
         "kv_snapshot",
-        timeout_s=8,
-        params={"targets": ["prefill-0", "prefill-1", "prefill-2"], "quiet_s": 3.5},
+        timeout_s=case.value("down_batch.seed_quiet_timeout_s"),
+        params=case.value("down_batch.seed_quiet"),
     )
     case.step(
         "shared_holders",
         "kv_holders_check",
-        params={
-            "snapshot": output("seed_quiet", "snapshot"),
-            "keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "holders": [
-                output("first_holder", "engine"),
-                output("second_holder", "engine"),
-            ],
-            "match": "full_family",
-        },
+        params=case.params(
+            "down_batch.shared_holders",
+            {
+                "snapshot": output("seed_quiet", "snapshot"),
+                "holders": [
+                    output("first_holder", "engine"),
+                    output("second_holder", "engine"),
+                ],
+            },
+        ),
     )
     case.step(
         "third_worker",
         "kv_snapshot",
-        timeout_s=10,
-        params={
-            "targets": ["prefill-0", "prefill-1", "prefill-2"],
-            "quiet_s": 0,
-            "exclude": [
-                output("first_holder", "engine"),
-                output("second_holder", "engine"),
-            ],
-        },
+        timeout_s=case.value("down_batch.third_worker_timeout_s"),
+        params=case.params(
+            "down_batch.third_worker",
+            {
+                "exclude": [
+                    output("first_holder", "engine"),
+                    output("second_holder", "engine"),
+                ]
+            },
+        ),
     )
     case.step(
         "third_empty",
         "kv_holders_check",
-        params={
-            "snapshot": output("third_worker", "snapshot"),
-            "keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "holders": [],
-            "match": "any_key",
-        },
+        params=case.params(
+            "down_batch.third_empty", {"snapshot": output("third_worker", "snapshot")}
+        ),
     )
     case.step(
         "remove_holder",
         "elastic_remove",
-        timeout_s=70,
-        params={"engine": output("first_holder", "engine"), "drain_timeout_ms": 60000},
+        timeout_s=case.value("down_batch.remove_holder_timeout_s"),
+        params=case.params(
+            "down_batch.remove_holder", {"engine": output("first_holder", "engine")}
+        ),
     )
     case.step(
         "master_converged",
         "kv_master_alive",
-        timeout_s=30,
-        params={"role": "PREFILL", "count": 2},
+        timeout_s=case.value("down_batch.master_converged_timeout_s"),
+        params=case.value("down_batch.master_converged"),
     )
     case.step(
         "continuation_0",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "stream_timeout_s": 15,
-        },
+        params=case.value("down_batch.continuation_0"),
     )
     case.step(
         "continuation_0_terminal",
         "wait",
-        timeout_s=15,
+        timeout_s=case.value("down_batch.continuation_0_terminal_timeout_s"),
         params={"requests": output("continuation_0", "requests")},
     )
     case.step(
         "continuation_1",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "stream_timeout_s": 15,
-        },
+        params=case.value("down_batch.continuation_1"),
     )
     case.step(
         "continuation_1_terminal",
         "wait",
-        timeout_s=15,
+        timeout_s=case.value("down_batch.continuation_1_terminal_timeout_s"),
         params={"requests": output("continuation_1", "requests")},
     )
     case.step(
         "continuation_2",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "stream_timeout_s": 15,
-        },
+        params=case.value("down_batch.continuation_2"),
     )
     case.step(
         "continuation_2_terminal",
         "wait",
-        timeout_s=15,
+        timeout_s=case.value("down_batch.continuation_2_terminal_timeout_s"),
         params={"requests": output("continuation_2", "requests")},
     )
     case.step(
         "continuation_3",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "stream_timeout_s": 15,
-        },
+        params=case.value("down_batch.continuation_3"),
     )
     case.step(
         "continuation_3_terminal",
         "wait",
-        timeout_s=15,
+        timeout_s=case.value("down_batch.continuation_3_terminal_timeout_s"),
         params={"requests": output("continuation_3", "requests")},
     )
     case.step(
         "continuation_4",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "stream_timeout_s": 15,
-        },
+        params=case.value("down_batch.continuation_4"),
     )
     case.step(
         "continuation_4_terminal",
         "wait",
-        timeout_s=15,
+        timeout_s=case.value("down_batch.continuation_4_terminal_timeout_s"),
         params={"requests": output("continuation_4", "requests")},
     )
     case.step(
         "survivor_snapshot",
         "kv_snapshot",
-        timeout_s=10,
-        params={
-            "targets": ["prefill-0", "prefill-1", "prefill-2"],
-            "quiet_s": 0,
-            "exclude": [output("first_holder", "engine")],
-        },
+        timeout_s=case.value("down_batch.survivor_snapshot_timeout_s"),
+        params=case.params(
+            "down_batch.survivor_snapshot",
+            {"exclude": [output("first_holder", "engine")]},
+        ),
     )
     case.step(
         "survivor_kept",
         "kv_membership_check",
-        params={
-            "snapshot": output("survivor_snapshot", "snapshot"),
-            "engine": output("second_holder", "engine"),
-            "keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "relation": "all",
-        },
+        params=case.params(
+            "down_batch.survivor_kept",
+            {
+                "snapshot": output("survivor_snapshot", "snapshot"),
+                "engine": output("second_holder", "engine"),
+            },
+        ),
     )
     case.step(
         "survivor_fidelity",
         "kv_fidelity_check",
-        params={
-            "requests": [
-                output("continuation_0", "requests"),
-                output("continuation_1", "requests"),
-                output("continuation_2", "requests"),
-                output("continuation_3", "requests"),
-                output("continuation_4", "requests"),
-            ],
-            "min_samples": 5,
-            "holder": output("second_holder", "engine"),
-            "bands": {"strict": 0.95, "normal": 0.9, "loose": 0.8},
-        },
+        params=case.params(
+            "down_batch.survivor_fidelity",
+            {
+                "requests": [
+                    output("continuation_0", "requests"),
+                    output("continuation_1", "requests"),
+                    output("continuation_2", "requests"),
+                    output("continuation_3", "requests"),
+                    output("continuation_4", "requests"),
+                ],
+                "holder": output("second_holder", "engine"),
+            },
+        ),
     )
     case.step("cleanup", "teardown")
 
 
 def down_nonbatch(case):
-    case.step("setup", "setup", timeout_s=180)
-    case.step("fleet", "balance_snapshot", params={"role": "prefill"})
+    case.step("setup", "setup", timeout_s=case.value("down_nonbatch.setup_timeout_s"))
+    case.step("fleet", "balance_snapshot", params=case.value("down_nonbatch.fleet"))
     case.step(
         "slow",
         "engine_control",
-        params={
-            "operation": "set_perf",
-            "targets": ["prefill-0", "prefill-1", "prefill-2"],
-            "perf": {"prefill_fixed_ms": 2000},
-        },
+        params=case.value("down_nonbatch.slow"),
     )
-    case.step("perf_sync", "balance_pause", params={"seconds": 1.5})
+    case.step(
+        "perf_sync", "balance_pause", params=case.value("down_nonbatch.perf_sync")
+    )
     case.step(
         "seed_first",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "stream_timeout_s": 30,
-            "consume": "immediate",
-        },
+        params=case.value("down_nonbatch.seed_first"),
     )
     case.step(
         "first_pending",
         "balance_pending",
-        timeout_s=6,
+        timeout_s=case.value("down_nonbatch.first_pending_timeout_s"),
         params={
             "requests": output("seed_first", "requests"),
             "fleet": output("fleet", "snapshot"),
@@ -3460,34 +1795,19 @@ def down_nonbatch(case):
     case.step(
         "first_holder",
         "kv_landing",
-        params={"requests": output("seed_first", "requests"), "phase": "scheduled"},
+        params=case.params(
+            "down_nonbatch.first_holder", {"requests": output("seed_first", "requests")}
+        ),
     )
     case.step(
         "seed_second",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "stream_timeout_s": 15,
-        },
+        params=case.value("down_nonbatch.seed_second"),
     )
     case.step(
         "second_terminal",
         "wait",
-        timeout_s=15,
+        timeout_s=case.value("down_nonbatch.second_terminal_timeout_s"),
         params={"requests": output("seed_second", "requests")},
     )
     case.step(
@@ -3506,324 +1826,183 @@ def down_nonbatch(case):
     case.step(
         "first_terminal",
         "wait",
-        timeout_s=30,
+        timeout_s=case.value("down_nonbatch.first_terminal_timeout_s"),
         params={"requests": output("seed_first", "requests")},
     )
     case.step(
         "restore_perf",
         "engine_control",
-        params={
-            "operation": "set_perf",
-            "targets": ["prefill-0", "prefill-1", "prefill-2"],
-            "perf": {"prefill_fixed_ms": 100},
-        },
+        params=case.value("down_nonbatch.restore_perf"),
     )
     case.step(
         "seed_quiet",
         "kv_snapshot",
-        timeout_s=8,
-        params={"targets": ["prefill-0", "prefill-1", "prefill-2"], "quiet_s": 3.5},
+        timeout_s=case.value("down_nonbatch.seed_quiet_timeout_s"),
+        params=case.value("down_nonbatch.seed_quiet"),
     )
     case.step(
         "shared_holders",
         "kv_holders_check",
-        params={
-            "snapshot": output("seed_quiet", "snapshot"),
-            "keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "holders": [
-                output("first_holder", "engine"),
-                output("second_holder", "engine"),
-            ],
-            "match": "full_family",
-        },
+        params=case.params(
+            "down_nonbatch.shared_holders",
+            {
+                "snapshot": output("seed_quiet", "snapshot"),
+                "holders": [
+                    output("first_holder", "engine"),
+                    output("second_holder", "engine"),
+                ],
+            },
+        ),
     )
     case.step(
         "third_worker",
         "kv_snapshot",
-        timeout_s=10,
-        params={
-            "targets": ["prefill-0", "prefill-1", "prefill-2"],
-            "quiet_s": 0,
-            "exclude": [
-                output("first_holder", "engine"),
-                output("second_holder", "engine"),
-            ],
-        },
+        timeout_s=case.value("down_nonbatch.third_worker_timeout_s"),
+        params=case.params(
+            "down_nonbatch.third_worker",
+            {
+                "exclude": [
+                    output("first_holder", "engine"),
+                    output("second_holder", "engine"),
+                ]
+            },
+        ),
     )
     case.step(
         "third_empty",
         "kv_holders_check",
-        params={
-            "snapshot": output("third_worker", "snapshot"),
-            "keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "holders": [],
-            "match": "any_key",
-        },
+        params=case.params(
+            "down_nonbatch.third_empty",
+            {"snapshot": output("third_worker", "snapshot")},
+        ),
     )
     case.step(
         "remove_holder",
         "elastic_remove",
-        timeout_s=70,
-        params={"engine": output("first_holder", "engine"), "drain_timeout_ms": 60000},
+        timeout_s=case.value("down_nonbatch.remove_holder_timeout_s"),
+        params=case.params(
+            "down_nonbatch.remove_holder", {"engine": output("first_holder", "engine")}
+        ),
     )
     case.step(
         "master_converged",
         "kv_master_alive",
-        timeout_s=30,
-        params={"role": "PREFILL", "count": 2},
+        timeout_s=case.value("down_nonbatch.master_converged_timeout_s"),
+        params=case.value("down_nonbatch.master_converged"),
     )
     case.step(
         "continuation_0",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "stream_timeout_s": 15,
-        },
+        params=case.value("down_nonbatch.continuation_0"),
     )
     case.step(
         "continuation_0_terminal",
         "wait",
-        timeout_s=15,
+        timeout_s=case.value("down_nonbatch.continuation_0_terminal_timeout_s"),
         params={"requests": output("continuation_0", "requests")},
     )
     case.step(
         "continuation_1",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "stream_timeout_s": 15,
-        },
+        params=case.value("down_nonbatch.continuation_1"),
     )
     case.step(
         "continuation_1_terminal",
         "wait",
-        timeout_s=15,
+        timeout_s=case.value("down_nonbatch.continuation_1_terminal_timeout_s"),
         params={"requests": output("continuation_1", "requests")},
     )
     case.step(
         "continuation_2",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "stream_timeout_s": 15,
-        },
+        params=case.value("down_nonbatch.continuation_2"),
     )
     case.step(
         "continuation_2_terminal",
         "wait",
-        timeout_s=15,
+        timeout_s=case.value("down_nonbatch.continuation_2_terminal_timeout_s"),
         params={"requests": output("continuation_2", "requests")},
     )
     case.step(
         "continuation_3",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "stream_timeout_s": 15,
-        },
+        params=case.value("down_nonbatch.continuation_3"),
     )
     case.step(
         "continuation_3_terminal",
         "wait",
-        timeout_s=15,
+        timeout_s=case.value("down_nonbatch.continuation_3_terminal_timeout_s"),
         params={"requests": output("continuation_3", "requests")},
     )
     case.step(
         "continuation_4",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "stream_timeout_s": 15,
-        },
+        params=case.value("down_nonbatch.continuation_4"),
     )
     case.step(
         "continuation_4_terminal",
         "wait",
-        timeout_s=15,
+        timeout_s=case.value("down_nonbatch.continuation_4_terminal_timeout_s"),
         params={"requests": output("continuation_4", "requests")},
     )
     case.step(
         "survivor_snapshot",
         "kv_snapshot",
-        timeout_s=10,
-        params={
-            "targets": ["prefill-0", "prefill-1", "prefill-2"],
-            "quiet_s": 0,
-            "exclude": [output("first_holder", "engine")],
-        },
+        timeout_s=case.value("down_nonbatch.survivor_snapshot_timeout_s"),
+        params=case.params(
+            "down_nonbatch.survivor_snapshot",
+            {"exclude": [output("first_holder", "engine")]},
+        ),
     )
     case.step(
         "survivor_kept",
         "kv_membership_check",
-        params={
-            "snapshot": output("survivor_snapshot", "snapshot"),
-            "engine": output("second_holder", "engine"),
-            "keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "relation": "all",
-        },
+        params=case.params(
+            "down_nonbatch.survivor_kept",
+            {
+                "snapshot": output("survivor_snapshot", "snapshot"),
+                "engine": output("second_holder", "engine"),
+            },
+        ),
     )
     case.step(
         "survivor_fidelity",
         "kv_fidelity_check",
-        params={
-            "requests": [
-                output("continuation_0", "requests"),
-                output("continuation_1", "requests"),
-                output("continuation_2", "requests"),
-                output("continuation_3", "requests"),
-                output("continuation_4", "requests"),
-            ],
-            "min_samples": 5,
-            "holder": output("second_holder", "engine"),
-            "bands": {"strict": 0.95, "normal": 0.9, "loose": 0.8},
-        },
+        params=case.params(
+            "down_nonbatch.survivor_fidelity",
+            {
+                "requests": [
+                    output("continuation_0", "requests"),
+                    output("continuation_1", "requests"),
+                    output("continuation_2", "requests"),
+                    output("continuation_3", "requests"),
+                    output("continuation_4", "requests"),
+                ],
+                "holder": output("second_holder", "engine"),
+            },
+        ),
     )
     case.step("cleanup", "teardown")
 
 
 def mixed_batch(case):
-    case.step("setup", "setup", timeout_s=180)
-    case.step("fleet", "balance_snapshot", params={"role": "prefill"})
+    case.step("setup", "setup", timeout_s=case.value("mixed_batch.setup_timeout_s"))
+    case.step("fleet", "balance_snapshot", params=case.value("mixed_batch.fleet"))
     case.step(
         "slow",
         "engine_control",
-        params={
-            "operation": "set_perf",
-            "targets": ["prefill-0", "prefill-1"],
-            "perf": {"prefill_fixed_ms": 2000},
-        },
+        params=case.value("mixed_batch.slow"),
     )
-    case.step("perf_sync", "balance_pause", params={"seconds": 1.5})
+    case.step("perf_sync", "balance_pause", params=case.value("mixed_batch.perf_sync"))
     case.step(
         "seed_first",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "stream_timeout_s": 30,
-            "consume": "deferred",
-        },
+        params=case.value("mixed_batch.seed_first"),
     )
     case.step(
         "first_pending",
         "balance_pending",
-        timeout_s=6,
+        timeout_s=case.value("mixed_batch.first_pending_timeout_s"),
         params={
             "requests": output("seed_first", "requests"),
             "fleet": output("fleet", "snapshot"),
@@ -3832,34 +2011,19 @@ def mixed_batch(case):
     case.step(
         "first_holder",
         "kv_landing",
-        params={"requests": output("seed_first", "requests"), "phase": "scheduled"},
+        params=case.params(
+            "mixed_batch.first_holder", {"requests": output("seed_first", "requests")}
+        ),
     )
     case.step(
         "seed_second",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "stream_timeout_s": 15,
-        },
+        params=case.value("mixed_batch.seed_second"),
     )
     case.step(
         "second_terminal",
         "wait",
-        timeout_s=15,
+        timeout_s=case.value("mixed_batch.second_terminal_timeout_s"),
         params={"requests": output("seed_second", "requests")},
     )
     case.step(
@@ -3878,63 +2042,30 @@ def mixed_batch(case):
     case.step(
         "first_terminal",
         "wait",
-        timeout_s=30,
+        timeout_s=case.value("mixed_batch.first_terminal_timeout_s"),
         params={"requests": output("seed_first", "requests")},
     )
     case.step(
         "restore_perf",
         "engine_control",
-        params={
-            "operation": "set_perf",
-            "targets": ["prefill-0", "prefill-1"],
-            "perf": {"prefill_fixed_ms": 100},
-        },
+        params=case.value("mixed_batch.restore_perf"),
     )
     case.step(
         "first_release",
         "kv_evict",
-        params={
-            "engine": output("first_holder", "engine"),
-            "keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-        },
+        params=case.params(
+            "mixed_batch.first_release", {"engine": output("first_holder", "engine")}
+        ),
     )
     case.step(
         "family_one_0",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                811000,
-                811001,
-                811002,
-                811003,
-                811004,
-                811005,
-                811006,
-                811007,
-                811008,
-                811009,
-            ],
-            "stream_timeout_s": 15,
-        },
+        params=case.value("mixed_batch.family_one_0"),
     )
     case.step(
         "family_one_0_terminal",
         "wait",
-        timeout_s=15,
+        timeout_s=case.value("mixed_batch.family_one_0_terminal_timeout_s"),
         params={"requests": output("family_one_0", "requests")},
     )
     case.step(
@@ -3945,60 +2076,34 @@ def mixed_batch(case):
     case.step(
         "second_release",
         "kv_evict",
-        params={
-            "engine": output("second_holder", "engine"),
-            "keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-        },
+        params=case.params(
+            "mixed_batch.second_release", {"engine": output("second_holder", "engine")}
+        ),
     )
-    case.step("family_two_fleet", "balance_snapshot", params={"role": "prefill"})
+    case.step(
+        "family_two_fleet",
+        "balance_snapshot",
+        params=case.value("mixed_batch.family_two_fleet"),
+    )
     case.step(
         "family_two_slow",
         "engine_control",
-        params={
-            "operation": "set_perf",
-            "targets": ["prefill-0", "prefill-1"],
-            "perf": {"prefill_fixed_ms": 2000},
-        },
+        params=case.value("mixed_batch.family_two_slow"),
     )
-    case.step("family_two_perf_sync", "balance_pause", params={"seconds": 1.5})
+    case.step(
+        "family_two_perf_sync",
+        "balance_pause",
+        params=case.value("mixed_batch.family_two_perf_sync"),
+    )
     case.step(
         "family_two_seed_first",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                812000,
-                812001,
-                812002,
-                812003,
-                812004,
-                812005,
-                812006,
-                812007,
-                812008,
-                812009,
-            ],
-            "stream_timeout_s": 30,
-            "consume": "deferred",
-        },
+        params=case.value("mixed_batch.family_two_seed_first"),
     )
     case.step(
         "family_two_first_pending",
         "balance_pending",
-        timeout_s=6,
+        timeout_s=case.value("mixed_batch.family_two_first_pending_timeout_s"),
         params={
             "requests": output("family_two_seed_first", "requests"),
             "fleet": output("family_two_fleet", "snapshot"),
@@ -4007,37 +2112,20 @@ def mixed_batch(case):
     case.step(
         "family_two_first_holder",
         "kv_landing",
-        params={
-            "requests": output("family_two_seed_first", "requests"),
-            "phase": "scheduled",
-        },
+        params=case.params(
+            "mixed_batch.family_two_first_holder",
+            {"requests": output("family_two_seed_first", "requests")},
+        ),
     )
     case.step(
         "family_two_seed_second",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                812000,
-                812001,
-                812002,
-                812003,
-                812004,
-                812005,
-                812006,
-                812007,
-                812008,
-                812009,
-            ],
-            "stream_timeout_s": 15,
-        },
+        params=case.value("mixed_batch.family_two_seed_second"),
     )
     case.step(
         "family_two_second_terminal",
         "wait",
-        timeout_s=15,
+        timeout_s=case.value("mixed_batch.family_two_second_terminal_timeout_s"),
         params={"requests": output("family_two_seed_second", "requests")},
     )
     case.step(
@@ -4056,501 +2144,244 @@ def mixed_batch(case):
     case.step(
         "family_two_first_terminal",
         "wait",
-        timeout_s=30,
+        timeout_s=case.value("mixed_batch.family_two_first_terminal_timeout_s"),
         params={"requests": output("family_two_seed_first", "requests")},
     )
     case.step(
         "family_two_restore_perf",
         "engine_control",
-        params={
-            "operation": "set_perf",
-            "targets": ["prefill-0", "prefill-1"],
-            "perf": {"prefill_fixed_ms": 100},
-        },
+        params=case.value("mixed_batch.family_two_restore_perf"),
     )
     case.step(
         "family_two_release",
         "kv_evict",
-        params={
-            "engine": output("family_two_first_holder", "engine"),
-            "keys": [
-                812000,
-                812001,
-                812002,
-                812003,
-                812004,
-                812005,
-                812006,
-                812007,
-                812008,
-                812009,
-            ],
-        },
+        params=case.params(
+            "mixed_batch.family_two_release",
+            {"engine": output("family_two_first_holder", "engine")},
+        ),
     )
     case.step(
         "mixed_quiet",
         "kv_snapshot",
-        timeout_s=8,
-        params={"targets": ["prefill-0", "prefill-1"], "quiet_s": 3.5},
+        timeout_s=case.value("mixed_batch.mixed_quiet_timeout_s"),
+        params=case.value("mixed_batch.mixed_quiet"),
     )
     case.step(
         "family_zero_empty",
         "kv_holders_check",
-        params={
-            "snapshot": output("mixed_quiet", "snapshot"),
-            "keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "holders": [],
-            "match": "any_key",
-        },
+        params=case.params(
+            "mixed_batch.family_zero_empty",
+            {"snapshot": output("mixed_quiet", "snapshot")},
+        ),
     )
     case.step(
         "family_one_sole",
         "kv_holders_check",
-        params={
-            "snapshot": output("mixed_quiet", "snapshot"),
-            "keys": [
-                811000,
-                811001,
-                811002,
-                811003,
-                811004,
-                811005,
-                811006,
-                811007,
-                811008,
-                811009,
-            ],
-            "holders": [output("family_one_holder", "engine")],
-            "match": "full_family",
-        },
+        params=case.params(
+            "mixed_batch.family_one_sole",
+            {
+                "snapshot": output("mixed_quiet", "snapshot"),
+                "holders": [output("family_one_holder", "engine")],
+            },
+        ),
     )
     case.step(
         "family_two_sole",
         "kv_holders_check",
-        params={
-            "snapshot": output("mixed_quiet", "snapshot"),
-            "keys": [
-                812000,
-                812001,
-                812002,
-                812003,
-                812004,
-                812005,
-                812006,
-                812007,
-                812008,
-                812009,
-            ],
-            "holders": [output("family_two_second_holder", "engine")],
-            "match": "full_family",
-        },
+        params=case.params(
+            "mixed_batch.family_two_sole",
+            {
+                "snapshot": output("mixed_quiet", "snapshot"),
+                "holders": [output("family_two_second_holder", "engine")],
+            },
+        ),
     )
     case.step(
         "wave",
         "request",
-        timeout_s=90,
-        params={
-            "count": 20,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "stream_timeout_s": 30,
-            "consume": "deferred",
-            "post_issue_delay_s": 0.12,
-        },
+        timeout_s=case.value("mixed_batch.wave_timeout_s"),
+        params=case.value("mixed_batch.wave"),
     )
     case.step(
         "wave_terminal",
         "wait",
-        timeout_s=30,
+        timeout_s=case.value("mixed_batch.wave_terminal_timeout_s"),
         params={"requests": output("wave", "requests")},
     )
     case.step(
         "spread",
         "kv_spread_check",
-        params={
-            "requests": [output("wave", "requests")],
-            "min_samples": 20,
-            "bands": {"strict": 0.65, "normal": 0.75, "loose": 0.85},
-        },
+        params=case.params(
+            "mixed_batch.spread", {"requests": [output("wave", "requests")]}
+        ),
     )
     case.step(
         "continuation_f1_0",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                811000,
-                811001,
-                811002,
-                811003,
-                811004,
-                811005,
-                811006,
-                811007,
-                811008,
-                811009,
-            ],
-            "stream_timeout_s": 15,
-        },
+        params=case.value("mixed_batch.continuation_f1_0"),
     )
     case.step(
         "continuation_f1_0_terminal",
         "wait",
-        timeout_s=15,
+        timeout_s=case.value("mixed_batch.continuation_f1_0_terminal_timeout_s"),
         params={"requests": output("continuation_f1_0", "requests")},
     )
     case.step(
         "continuation_f1_1",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                811000,
-                811001,
-                811002,
-                811003,
-                811004,
-                811005,
-                811006,
-                811007,
-                811008,
-                811009,
-            ],
-            "stream_timeout_s": 15,
-        },
+        params=case.value("mixed_batch.continuation_f1_1"),
     )
     case.step(
         "continuation_f1_1_terminal",
         "wait",
-        timeout_s=15,
+        timeout_s=case.value("mixed_batch.continuation_f1_1_terminal_timeout_s"),
         params={"requests": output("continuation_f1_1", "requests")},
     )
     case.step(
         "continuation_f1_2",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                811000,
-                811001,
-                811002,
-                811003,
-                811004,
-                811005,
-                811006,
-                811007,
-                811008,
-                811009,
-            ],
-            "stream_timeout_s": 15,
-        },
+        params=case.value("mixed_batch.continuation_f1_2"),
     )
     case.step(
         "continuation_f1_2_terminal",
         "wait",
-        timeout_s=15,
+        timeout_s=case.value("mixed_batch.continuation_f1_2_terminal_timeout_s"),
         params={"requests": output("continuation_f1_2", "requests")},
     )
     case.step(
         "continuation_f1_3",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                811000,
-                811001,
-                811002,
-                811003,
-                811004,
-                811005,
-                811006,
-                811007,
-                811008,
-                811009,
-            ],
-            "stream_timeout_s": 15,
-        },
+        params=case.value("mixed_batch.continuation_f1_3"),
     )
     case.step(
         "continuation_f1_3_terminal",
         "wait",
-        timeout_s=15,
+        timeout_s=case.value("mixed_batch.continuation_f1_3_terminal_timeout_s"),
         params={"requests": output("continuation_f1_3", "requests")},
     )
     case.step(
         "continuation_f1_4",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                811000,
-                811001,
-                811002,
-                811003,
-                811004,
-                811005,
-                811006,
-                811007,
-                811008,
-                811009,
-            ],
-            "stream_timeout_s": 15,
-        },
+        params=case.value("mixed_batch.continuation_f1_4"),
     )
     case.step(
         "continuation_f1_4_terminal",
         "wait",
-        timeout_s=15,
+        timeout_s=case.value("mixed_batch.continuation_f1_4_terminal_timeout_s"),
         params={"requests": output("continuation_f1_4", "requests")},
     )
     case.step(
         "fidelity_f1",
         "kv_fidelity_check",
-        params={
-            "requests": [
-                output("continuation_f1_0", "requests"),
-                output("continuation_f1_1", "requests"),
-                output("continuation_f1_2", "requests"),
-                output("continuation_f1_3", "requests"),
-                output("continuation_f1_4", "requests"),
-            ],
-            "min_samples": 5,
-            "holder": output("family_one_holder", "engine"),
-            "bands": {"strict": 0.95, "normal": 0.9, "loose": 0.8},
-        },
+        params=case.params(
+            "mixed_batch.fidelity_f1",
+            {
+                "requests": [
+                    output("continuation_f1_0", "requests"),
+                    output("continuation_f1_1", "requests"),
+                    output("continuation_f1_2", "requests"),
+                    output("continuation_f1_3", "requests"),
+                    output("continuation_f1_4", "requests"),
+                ],
+                "holder": output("family_one_holder", "engine"),
+            },
+        ),
     )
     case.step(
         "continuation_f2_0",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                812000,
-                812001,
-                812002,
-                812003,
-                812004,
-                812005,
-                812006,
-                812007,
-                812008,
-                812009,
-            ],
-            "stream_timeout_s": 15,
-        },
+        params=case.value("mixed_batch.continuation_f2_0"),
     )
     case.step(
         "continuation_f2_0_terminal",
         "wait",
-        timeout_s=15,
+        timeout_s=case.value("mixed_batch.continuation_f2_0_terminal_timeout_s"),
         params={"requests": output("continuation_f2_0", "requests")},
     )
     case.step(
         "continuation_f2_1",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                812000,
-                812001,
-                812002,
-                812003,
-                812004,
-                812005,
-                812006,
-                812007,
-                812008,
-                812009,
-            ],
-            "stream_timeout_s": 15,
-        },
+        params=case.value("mixed_batch.continuation_f2_1"),
     )
     case.step(
         "continuation_f2_1_terminal",
         "wait",
-        timeout_s=15,
+        timeout_s=case.value("mixed_batch.continuation_f2_1_terminal_timeout_s"),
         params={"requests": output("continuation_f2_1", "requests")},
     )
     case.step(
         "continuation_f2_2",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                812000,
-                812001,
-                812002,
-                812003,
-                812004,
-                812005,
-                812006,
-                812007,
-                812008,
-                812009,
-            ],
-            "stream_timeout_s": 15,
-        },
+        params=case.value("mixed_batch.continuation_f2_2"),
     )
     case.step(
         "continuation_f2_2_terminal",
         "wait",
-        timeout_s=15,
+        timeout_s=case.value("mixed_batch.continuation_f2_2_terminal_timeout_s"),
         params={"requests": output("continuation_f2_2", "requests")},
     )
     case.step(
         "continuation_f2_3",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                812000,
-                812001,
-                812002,
-                812003,
-                812004,
-                812005,
-                812006,
-                812007,
-                812008,
-                812009,
-            ],
-            "stream_timeout_s": 15,
-        },
+        params=case.value("mixed_batch.continuation_f2_3"),
     )
     case.step(
         "continuation_f2_3_terminal",
         "wait",
-        timeout_s=15,
+        timeout_s=case.value("mixed_batch.continuation_f2_3_terminal_timeout_s"),
         params={"requests": output("continuation_f2_3", "requests")},
     )
     case.step(
         "continuation_f2_4",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                812000,
-                812001,
-                812002,
-                812003,
-                812004,
-                812005,
-                812006,
-                812007,
-                812008,
-                812009,
-            ],
-            "stream_timeout_s": 15,
-        },
+        params=case.value("mixed_batch.continuation_f2_4"),
     )
     case.step(
         "continuation_f2_4_terminal",
         "wait",
-        timeout_s=15,
+        timeout_s=case.value("mixed_batch.continuation_f2_4_terminal_timeout_s"),
         params={"requests": output("continuation_f2_4", "requests")},
     )
     case.step(
         "fidelity_f2",
         "kv_fidelity_check",
-        params={
-            "requests": [
-                output("continuation_f2_0", "requests"),
-                output("continuation_f2_1", "requests"),
-                output("continuation_f2_2", "requests"),
-                output("continuation_f2_3", "requests"),
-                output("continuation_f2_4", "requests"),
-            ],
-            "min_samples": 5,
-            "holder": output("family_two_second_holder", "engine"),
-            "bands": {"strict": 0.95, "normal": 0.9, "loose": 0.8},
-        },
+        params=case.params(
+            "mixed_batch.fidelity_f2",
+            {
+                "requests": [
+                    output("continuation_f2_0", "requests"),
+                    output("continuation_f2_1", "requests"),
+                    output("continuation_f2_2", "requests"),
+                    output("continuation_f2_3", "requests"),
+                    output("continuation_f2_4", "requests"),
+                ],
+                "holder": output("family_two_second_holder", "engine"),
+            },
+        ),
     )
     case.step("cleanup", "teardown")
 
 
 def mixed_nonbatch(case):
-    case.step("setup", "setup", timeout_s=180)
-    case.step("fleet", "balance_snapshot", params={"role": "prefill"})
+    case.step("setup", "setup", timeout_s=case.value("mixed_nonbatch.setup_timeout_s"))
+    case.step("fleet", "balance_snapshot", params=case.value("mixed_nonbatch.fleet"))
     case.step(
         "slow",
         "engine_control",
-        params={
-            "operation": "set_perf",
-            "targets": ["prefill-0", "prefill-1"],
-            "perf": {"prefill_fixed_ms": 2000},
-        },
+        params=case.value("mixed_nonbatch.slow"),
     )
-    case.step("perf_sync", "balance_pause", params={"seconds": 1.5})
+    case.step(
+        "perf_sync", "balance_pause", params=case.value("mixed_nonbatch.perf_sync")
+    )
     case.step(
         "seed_first",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "stream_timeout_s": 30,
-            "consume": "immediate",
-        },
+        params=case.value("mixed_nonbatch.seed_first"),
     )
     case.step(
         "first_pending",
         "balance_pending",
-        timeout_s=6,
+        timeout_s=case.value("mixed_nonbatch.first_pending_timeout_s"),
         params={
             "requests": output("seed_first", "requests"),
             "fleet": output("fleet", "snapshot"),
@@ -4559,34 +2390,20 @@ def mixed_nonbatch(case):
     case.step(
         "first_holder",
         "kv_landing",
-        params={"requests": output("seed_first", "requests"), "phase": "scheduled"},
+        params=case.params(
+            "mixed_nonbatch.first_holder",
+            {"requests": output("seed_first", "requests")},
+        ),
     )
     case.step(
         "seed_second",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "stream_timeout_s": 15,
-        },
+        params=case.value("mixed_nonbatch.seed_second"),
     )
     case.step(
         "second_terminal",
         "wait",
-        timeout_s=15,
+        timeout_s=case.value("mixed_nonbatch.second_terminal_timeout_s"),
         params={"requests": output("seed_second", "requests")},
     )
     case.step(
@@ -4605,63 +2422,30 @@ def mixed_nonbatch(case):
     case.step(
         "first_terminal",
         "wait",
-        timeout_s=30,
+        timeout_s=case.value("mixed_nonbatch.first_terminal_timeout_s"),
         params={"requests": output("seed_first", "requests")},
     )
     case.step(
         "restore_perf",
         "engine_control",
-        params={
-            "operation": "set_perf",
-            "targets": ["prefill-0", "prefill-1"],
-            "perf": {"prefill_fixed_ms": 100},
-        },
+        params=case.value("mixed_nonbatch.restore_perf"),
     )
     case.step(
         "first_release",
         "kv_evict",
-        params={
-            "engine": output("first_holder", "engine"),
-            "keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-        },
+        params=case.params(
+            "mixed_nonbatch.first_release", {"engine": output("first_holder", "engine")}
+        ),
     )
     case.step(
         "family_one_0",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                811000,
-                811001,
-                811002,
-                811003,
-                811004,
-                811005,
-                811006,
-                811007,
-                811008,
-                811009,
-            ],
-            "stream_timeout_s": 15,
-        },
+        params=case.value("mixed_nonbatch.family_one_0"),
     )
     case.step(
         "family_one_0_terminal",
         "wait",
-        timeout_s=15,
+        timeout_s=case.value("mixed_nonbatch.family_one_0_terminal_timeout_s"),
         params={"requests": output("family_one_0", "requests")},
     )
     case.step(
@@ -4672,60 +2456,35 @@ def mixed_nonbatch(case):
     case.step(
         "second_release",
         "kv_evict",
-        params={
-            "engine": output("second_holder", "engine"),
-            "keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-        },
+        params=case.params(
+            "mixed_nonbatch.second_release",
+            {"engine": output("second_holder", "engine")},
+        ),
     )
-    case.step("family_two_fleet", "balance_snapshot", params={"role": "prefill"})
+    case.step(
+        "family_two_fleet",
+        "balance_snapshot",
+        params=case.value("mixed_nonbatch.family_two_fleet"),
+    )
     case.step(
         "family_two_slow",
         "engine_control",
-        params={
-            "operation": "set_perf",
-            "targets": ["prefill-0", "prefill-1"],
-            "perf": {"prefill_fixed_ms": 2000},
-        },
+        params=case.value("mixed_nonbatch.family_two_slow"),
     )
-    case.step("family_two_perf_sync", "balance_pause", params={"seconds": 1.5})
+    case.step(
+        "family_two_perf_sync",
+        "balance_pause",
+        params=case.value("mixed_nonbatch.family_two_perf_sync"),
+    )
     case.step(
         "family_two_seed_first",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                812000,
-                812001,
-                812002,
-                812003,
-                812004,
-                812005,
-                812006,
-                812007,
-                812008,
-                812009,
-            ],
-            "stream_timeout_s": 30,
-            "consume": "immediate",
-        },
+        params=case.value("mixed_nonbatch.family_two_seed_first"),
     )
     case.step(
         "family_two_first_pending",
         "balance_pending",
-        timeout_s=6,
+        timeout_s=case.value("mixed_nonbatch.family_two_first_pending_timeout_s"),
         params={
             "requests": output("family_two_seed_first", "requests"),
             "fleet": output("family_two_fleet", "snapshot"),
@@ -4734,37 +2493,20 @@ def mixed_nonbatch(case):
     case.step(
         "family_two_first_holder",
         "kv_landing",
-        params={
-            "requests": output("family_two_seed_first", "requests"),
-            "phase": "scheduled",
-        },
+        params=case.params(
+            "mixed_nonbatch.family_two_first_holder",
+            {"requests": output("family_two_seed_first", "requests")},
+        ),
     )
     case.step(
         "family_two_seed_second",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                812000,
-                812001,
-                812002,
-                812003,
-                812004,
-                812005,
-                812006,
-                812007,
-                812008,
-                812009,
-            ],
-            "stream_timeout_s": 15,
-        },
+        params=case.value("mixed_nonbatch.family_two_seed_second"),
     )
     case.step(
         "family_two_second_terminal",
         "wait",
-        timeout_s=15,
+        timeout_s=case.value("mixed_nonbatch.family_two_second_terminal_timeout_s"),
         params={"requests": output("family_two_seed_second", "requests")},
     )
     case.step(
@@ -4783,520 +2525,219 @@ def mixed_nonbatch(case):
     case.step(
         "family_two_first_terminal",
         "wait",
-        timeout_s=30,
+        timeout_s=case.value("mixed_nonbatch.family_two_first_terminal_timeout_s"),
         params={"requests": output("family_two_seed_first", "requests")},
     )
     case.step(
         "family_two_restore_perf",
         "engine_control",
-        params={
-            "operation": "set_perf",
-            "targets": ["prefill-0", "prefill-1"],
-            "perf": {"prefill_fixed_ms": 100},
-        },
+        params=case.value("mixed_nonbatch.family_two_restore_perf"),
     )
     case.step(
         "family_two_release",
         "kv_evict",
-        params={
-            "engine": output("family_two_first_holder", "engine"),
-            "keys": [
-                812000,
-                812001,
-                812002,
-                812003,
-                812004,
-                812005,
-                812006,
-                812007,
-                812008,
-                812009,
-            ],
-        },
+        params=case.params(
+            "mixed_nonbatch.family_two_release",
+            {"engine": output("family_two_first_holder", "engine")},
+        ),
     )
     case.step(
         "mixed_quiet",
         "kv_snapshot",
-        timeout_s=8,
-        params={"targets": ["prefill-0", "prefill-1"], "quiet_s": 3.5},
+        timeout_s=case.value("mixed_nonbatch.mixed_quiet_timeout_s"),
+        params=case.value("mixed_nonbatch.mixed_quiet"),
     )
     case.step(
         "family_zero_empty",
         "kv_holders_check",
-        params={
-            "snapshot": output("mixed_quiet", "snapshot"),
-            "keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "holders": [],
-            "match": "any_key",
-        },
+        params=case.params(
+            "mixed_nonbatch.family_zero_empty",
+            {"snapshot": output("mixed_quiet", "snapshot")},
+        ),
     )
     case.step(
         "family_one_sole",
         "kv_holders_check",
-        params={
-            "snapshot": output("mixed_quiet", "snapshot"),
-            "keys": [
-                811000,
-                811001,
-                811002,
-                811003,
-                811004,
-                811005,
-                811006,
-                811007,
-                811008,
-                811009,
-            ],
-            "holders": [output("family_one_holder", "engine")],
-            "match": "full_family",
-        },
+        params=case.params(
+            "mixed_nonbatch.family_one_sole",
+            {
+                "snapshot": output("mixed_quiet", "snapshot"),
+                "holders": [output("family_one_holder", "engine")],
+            },
+        ),
     )
     case.step(
         "family_two_sole",
         "kv_holders_check",
-        params={
-            "snapshot": output("mixed_quiet", "snapshot"),
-            "keys": [
-                812000,
-                812001,
-                812002,
-                812003,
-                812004,
-                812005,
-                812006,
-                812007,
-                812008,
-                812009,
-            ],
-            "holders": [output("family_two_second_holder", "engine")],
-            "match": "full_family",
-        },
+        params=case.params(
+            "mixed_nonbatch.family_two_sole",
+            {
+                "snapshot": output("mixed_quiet", "snapshot"),
+                "holders": [output("family_two_second_holder", "engine")],
+            },
+        ),
     )
     case.step(
         "wave",
         "request",
-        timeout_s=90,
-        params={
-            "count": 20,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                810000,
-                810001,
-                810002,
-                810003,
-                810004,
-                810005,
-                810006,
-                810007,
-                810008,
-                810009,
-            ],
-            "stream_timeout_s": 30,
-            "consume": "immediate",
-            "post_issue_delay_s": 0.12,
-        },
+        timeout_s=case.value("mixed_nonbatch.wave_timeout_s"),
+        params=case.value("mixed_nonbatch.wave"),
     )
     case.step(
         "wave_terminal",
         "wait",
-        timeout_s=30,
+        timeout_s=case.value("mixed_nonbatch.wave_terminal_timeout_s"),
         params={"requests": output("wave", "requests")},
     )
     case.step(
         "spread",
         "kv_spread_check",
-        params={
-            "requests": [output("wave", "requests")],
-            "min_samples": 20,
-            "bands": {"strict": 0.65, "normal": 0.75, "loose": 0.85},
-        },
+        params=case.params(
+            "mixed_nonbatch.spread", {"requests": [output("wave", "requests")]}
+        ),
     )
     case.step(
         "continuation_f1_0",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                811000,
-                811001,
-                811002,
-                811003,
-                811004,
-                811005,
-                811006,
-                811007,
-                811008,
-                811009,
-            ],
-            "stream_timeout_s": 15,
-        },
+        params=case.value("mixed_nonbatch.continuation_f1_0"),
     )
     case.step(
         "continuation_f1_0_terminal",
         "wait",
-        timeout_s=15,
+        timeout_s=case.value("mixed_nonbatch.continuation_f1_0_terminal_timeout_s"),
         params={"requests": output("continuation_f1_0", "requests")},
     )
     case.step(
         "continuation_f1_1",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                811000,
-                811001,
-                811002,
-                811003,
-                811004,
-                811005,
-                811006,
-                811007,
-                811008,
-                811009,
-            ],
-            "stream_timeout_s": 15,
-        },
+        params=case.value("mixed_nonbatch.continuation_f1_1"),
     )
     case.step(
         "continuation_f1_1_terminal",
         "wait",
-        timeout_s=15,
+        timeout_s=case.value("mixed_nonbatch.continuation_f1_1_terminal_timeout_s"),
         params={"requests": output("continuation_f1_1", "requests")},
     )
     case.step(
         "continuation_f1_2",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                811000,
-                811001,
-                811002,
-                811003,
-                811004,
-                811005,
-                811006,
-                811007,
-                811008,
-                811009,
-            ],
-            "stream_timeout_s": 15,
-        },
+        params=case.value("mixed_nonbatch.continuation_f1_2"),
     )
     case.step(
         "continuation_f1_2_terminal",
         "wait",
-        timeout_s=15,
+        timeout_s=case.value("mixed_nonbatch.continuation_f1_2_terminal_timeout_s"),
         params={"requests": output("continuation_f1_2", "requests")},
     )
     case.step(
         "continuation_f1_3",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                811000,
-                811001,
-                811002,
-                811003,
-                811004,
-                811005,
-                811006,
-                811007,
-                811008,
-                811009,
-            ],
-            "stream_timeout_s": 15,
-        },
+        params=case.value("mixed_nonbatch.continuation_f1_3"),
     )
     case.step(
         "continuation_f1_3_terminal",
         "wait",
-        timeout_s=15,
+        timeout_s=case.value("mixed_nonbatch.continuation_f1_3_terminal_timeout_s"),
         params={"requests": output("continuation_f1_3", "requests")},
     )
     case.step(
         "continuation_f1_4",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                811000,
-                811001,
-                811002,
-                811003,
-                811004,
-                811005,
-                811006,
-                811007,
-                811008,
-                811009,
-            ],
-            "stream_timeout_s": 15,
-        },
+        params=case.value("mixed_nonbatch.continuation_f1_4"),
     )
     case.step(
         "continuation_f1_4_terminal",
         "wait",
-        timeout_s=15,
+        timeout_s=case.value("mixed_nonbatch.continuation_f1_4_terminal_timeout_s"),
         params={"requests": output("continuation_f1_4", "requests")},
     )
     case.step(
         "fidelity_f1",
         "kv_fidelity_check",
-        params={
-            "requests": [
-                output("continuation_f1_0", "requests"),
-                output("continuation_f1_1", "requests"),
-                output("continuation_f1_2", "requests"),
-                output("continuation_f1_3", "requests"),
-                output("continuation_f1_4", "requests"),
-            ],
-            "min_samples": 5,
-            "holder": output("family_one_holder", "engine"),
-            "bands": {"strict": 0.95, "normal": 0.9, "loose": 0.8},
-        },
+        params=case.params(
+            "mixed_nonbatch.fidelity_f1",
+            {
+                "requests": [
+                    output("continuation_f1_0", "requests"),
+                    output("continuation_f1_1", "requests"),
+                    output("continuation_f1_2", "requests"),
+                    output("continuation_f1_3", "requests"),
+                    output("continuation_f1_4", "requests"),
+                ],
+                "holder": output("family_one_holder", "engine"),
+            },
+        ),
     )
     case.step(
         "continuation_f2_0",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                812000,
-                812001,
-                812002,
-                812003,
-                812004,
-                812005,
-                812006,
-                812007,
-                812008,
-                812009,
-            ],
-            "stream_timeout_s": 15,
-        },
+        params=case.value("mixed_nonbatch.continuation_f2_0"),
     )
     case.step(
         "continuation_f2_0_terminal",
         "wait",
-        timeout_s=15,
+        timeout_s=case.value("mixed_nonbatch.continuation_f2_0_terminal_timeout_s"),
         params={"requests": output("continuation_f2_0", "requests")},
     )
     case.step(
         "continuation_f2_1",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                812000,
-                812001,
-                812002,
-                812003,
-                812004,
-                812005,
-                812006,
-                812007,
-                812008,
-                812009,
-            ],
-            "stream_timeout_s": 15,
-        },
+        params=case.value("mixed_nonbatch.continuation_f2_1"),
     )
     case.step(
         "continuation_f2_1_terminal",
         "wait",
-        timeout_s=15,
+        timeout_s=case.value("mixed_nonbatch.continuation_f2_1_terminal_timeout_s"),
         params={"requests": output("continuation_f2_1", "requests")},
     )
     case.step(
         "continuation_f2_2",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                812000,
-                812001,
-                812002,
-                812003,
-                812004,
-                812005,
-                812006,
-                812007,
-                812008,
-                812009,
-            ],
-            "stream_timeout_s": 15,
-        },
+        params=case.value("mixed_nonbatch.continuation_f2_2"),
     )
     case.step(
         "continuation_f2_2_terminal",
         "wait",
-        timeout_s=15,
+        timeout_s=case.value("mixed_nonbatch.continuation_f2_2_terminal_timeout_s"),
         params={"requests": output("continuation_f2_2", "requests")},
     )
     case.step(
         "continuation_f2_3",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                812000,
-                812001,
-                812002,
-                812003,
-                812004,
-                812005,
-                812006,
-                812007,
-                812008,
-                812009,
-            ],
-            "stream_timeout_s": 15,
-        },
+        params=case.value("mixed_nonbatch.continuation_f2_3"),
     )
     case.step(
         "continuation_f2_3_terminal",
         "wait",
-        timeout_s=15,
+        timeout_s=case.value("mixed_nonbatch.continuation_f2_3_terminal_timeout_s"),
         params={"requests": output("continuation_f2_3", "requests")},
     )
     case.step(
         "continuation_f2_4",
         "request",
-        params={
-            "count": 1,
-            "input_len": 10240,
-            "output_len": 2,
-            "block_keys": [
-                812000,
-                812001,
-                812002,
-                812003,
-                812004,
-                812005,
-                812006,
-                812007,
-                812008,
-                812009,
-            ],
-            "stream_timeout_s": 15,
-        },
+        params=case.value("mixed_nonbatch.continuation_f2_4"),
     )
     case.step(
         "continuation_f2_4_terminal",
         "wait",
-        timeout_s=15,
+        timeout_s=case.value("mixed_nonbatch.continuation_f2_4_terminal_timeout_s"),
         params={"requests": output("continuation_f2_4", "requests")},
     )
     case.step(
         "fidelity_f2",
         "kv_fidelity_check",
-        params={
-            "requests": [
-                output("continuation_f2_0", "requests"),
-                output("continuation_f2_1", "requests"),
-                output("continuation_f2_2", "requests"),
-                output("continuation_f2_3", "requests"),
-                output("continuation_f2_4", "requests"),
-            ],
-            "min_samples": 5,
-            "holder": output("family_two_second_holder", "engine"),
-            "bands": {"strict": 0.95, "normal": 0.9, "loose": 0.8},
-        },
+        params=case.params(
+            "mixed_nonbatch.fidelity_f2",
+            {
+                "requests": [
+                    output("continuation_f2_0", "requests"),
+                    output("continuation_f2_1", "requests"),
+                    output("continuation_f2_2", "requests"),
+                    output("continuation_f2_3", "requests"),
+                    output("continuation_f2_4", "requests"),
+                ],
+                "holder": output("family_two_second_holder", "engine"),
+            },
+        ),
     )
     case.step("cleanup", "teardown")
-
-
-VARIANTS = {
-    "shared_batch": {
-        "build": shared_batch,
-        "profiles": ["batch-window", "single-batch"],
-        "metadata": {
-            "requires": ["enqueue_batch"],
-        },
-    },
-    "shared_nonbatch": {
-        "build": shared_nonbatch,
-        "profiles": ["single-nonbatch", "window-nonbatch"],
-        "metadata": {},
-    },
-    "release_batch": {
-        "build": release_batch,
-        "profiles": ["batch-window", "single-batch"],
-        "metadata": {
-            "requires": ["enqueue_batch"],
-        },
-    },
-    "release_nonbatch": {
-        "build": release_nonbatch,
-        "profiles": ["single-nonbatch", "window-nonbatch"],
-        "metadata": {},
-    },
-    "redirect_batch": {
-        "build": redirect_batch,
-        "profiles": ["batch-window", "single-batch"],
-        "metadata": {
-            "requires": ["enqueue_batch"],
-        },
-    },
-    "redirect_nonbatch": {
-        "build": redirect_nonbatch,
-        "profiles": ["single-nonbatch", "window-nonbatch"],
-        "metadata": {},
-    },
-    "down_batch": {
-        "build": down_batch,
-        "profiles": ["batch-window", "single-batch"],
-        "metadata": {
-            "requires": ["enqueue_batch"],
-        },
-    },
-    "down_nonbatch": {
-        "build": down_nonbatch,
-        "profiles": ["single-nonbatch", "window-nonbatch"],
-        "metadata": {},
-    },
-    "mixed_batch": {
-        "build": mixed_batch,
-        "profiles": ["batch-window", "single-batch"],
-        "metadata": {
-            "requires": ["enqueue_batch"],
-        },
-    },
-    "mixed_nonbatch": {
-        "build": mixed_nonbatch,
-        "profiles": ["single-nonbatch", "window-nonbatch"],
-        "metadata": {},
-    },
-}

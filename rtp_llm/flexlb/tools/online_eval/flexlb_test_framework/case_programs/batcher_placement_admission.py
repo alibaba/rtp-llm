@@ -2,63 +2,42 @@
 
 from ..case_config import output
 
-METADATA = {
-    "id": "batcher_placement_admission",
-    "description": "Master queue and placement backlog, sampled during Schedule; explicit old "
-    "deadline, FIFO wait-return and recovery contracts.",
-    "category": "admission",
-}
-
-PROFILES = ["batch-window", "single-batch", "single-nonbatch", "window-nonbatch"]
-
 
 def batcher_queue_capacity_park(case):
-    case.step("setup", "setup", timeout_s=180)
+    case.step(
+        "setup",
+        "setup",
+        timeout_s=case.value("batcher_queue_capacity_park.setup_timeout_s"),
+    )
     case.step(
         "slow",
         "engine_control",
-        params={
-            "operation": "set_perf",
-            "targets": ["prefill-0"],
-            "perf": {"prefill_fixed_ms": 3000},
-        },
+        params=case.value("batcher_queue_capacity_park.slow"),
     )
     case.step(
         "sampling",
         "admission_park_start",
-        timeout_s=15,
-        params={"targets": ["prefill-0", "decode-0", "decode-1"]},
+        timeout_s=case.value("batcher_queue_capacity_park.sampling_timeout_s"),
+        params=case.value("batcher_queue_capacity_park.sampling"),
     )
     case.step(
         "wave",
         "admission_tracked_fire",
-        timeout_s=90,
-        params={
-            "count": 7,
-            "consume": "immediate",
-            "input_len": 512,
-            "output_len": 2,
-            "request_timeout_s": 45,
-            "schedule_timeout_s": 30,
-            "spacing_s": 0.4,
-        },
+        timeout_s=case.value("batcher_queue_capacity_park.wave_timeout_s"),
+        params=case.value("batcher_queue_capacity_park.wave"),
     )
     case.step(
         "sampled",
         "admission_park_stop",
-        timeout_s=15,
+        timeout_s=case.value("batcher_queue_capacity_park.sampled_timeout_s"),
         params={"sampler": output("sampling", "sampler")},
     )
     case.step(
         "all_admitted",
         "admission_check",
-        params={
-            "rows": output("wave", "rows"),
-            "metric": "admitted_count",
-            "expected": 7,
-            "op": "eq",
-            "scope": "all",
-        },
+        params=case.params(
+            "batcher_queue_capacity_park.all_admitted", {"rows": output("wave", "rows")}
+        ),
     )
     case.step(
         "park_proven",
@@ -68,190 +47,132 @@ def batcher_queue_capacity_park(case):
     case.step(
         "done",
         "admission_drain",
-        timeout_s=45,
+        timeout_s=case.value("batcher_queue_capacity_park.done_timeout_s"),
         params={"waves": [output("wave", "wave")]},
     )
     case.step(
         "all_completed",
         "admission_check",
-        params={
-            "rows": output("done", "rows"),
-            "metric": "success_count",
-            "expected": 7,
-            "op": "eq",
-            "scope": "all",
-        },
+        params=case.params(
+            "batcher_queue_capacity_park.all_completed",
+            {"rows": output("done", "rows")},
+        ),
     )
     case.step(
         "fifo",
         "admission_check",
-        params={
-            "rows": output("done", "rows"),
-            "metric": "await_fifo",
-            "expected": True,
-            "op": "eq",
-            "scope": "all",
-        },
+        params=case.params(
+            "batcher_queue_capacity_park.fifo", {"rows": output("done", "rows")}
+        ),
     )
     case.step(
         "empty",
         "admission_observe",
-        timeout_s=15,
-        params={
-            "targets": ["prefill-0"],
-            "fields": ["waiting", "prefill_waiting_batches"],
-            "duration_s": 10,
-            "until_op": "eq",
-            "until_value": 0,
-        },
+        timeout_s=case.value("batcher_queue_capacity_park.empty_timeout_s"),
+        params=case.value("batcher_queue_capacity_park.empty"),
     )
     case.step(
         "park_empty",
         "admission_gauge_check",
-        params={
-            "snapshot": output("empty", "snapshot"),
-            "fields": ["waiting", "prefill_waiting_batches"],
-            "stat": "max_latest",
-            "op": "eq",
-            "expected": 0,
-        },
+        params=case.params(
+            "batcher_queue_capacity_park.park_empty",
+            {"snapshot": output("empty", "snapshot")},
+        ),
     )
     case.step(
         "master_clean",
         "master_ready",
-        timeout_s=30,
-        params={"target": "single", "inflight_zero": True},
+        timeout_s=case.value("batcher_queue_capacity_park.master_clean_timeout_s"),
+        params=case.value("batcher_queue_capacity_park.master_clean"),
     )
     case.step(
         "recovery",
         "admission_wave",
-        params={
-            "count": 1,
-            "input_len": 2048,
-            "output_len": 2,
-            "request_timeout_s": 30,
-        },
+        params=case.value("batcher_queue_capacity_park.recovery"),
     )
     case.step(
         "recovery_done",
         "admission_wait",
-        timeout_s=40,
+        timeout_s=case.value("batcher_queue_capacity_park.recovery_done_timeout_s"),
         params={"wave": output("recovery", "wave")},
     )
     case.step(
         "recovered",
         "admission_check",
-        params={
-            "rows": output("recovery_done", "rows"),
-            "metric": "success_count",
-            "expected": 1,
-            "op": "eq",
-            "scope": "all",
-        },
+        params=case.params(
+            "batcher_queue_capacity_park.recovered",
+            {"rows": output("recovery_done", "rows")},
+        ),
     )
     case.step(
         "relieve",
         "engine_control",
-        params={
-            "operation": "set_perf",
-            "targets": ["prefill-0"],
-            "perf": {"prefill_fixed_ms": 100},
-        },
+        params=case.value("batcher_queue_capacity_park.relieve"),
     )
     case.step("cleanup", "teardown")
 
 
 def batcher_queue_deadline(case):
-    case.step("setup", "setup", timeout_s=180)
+    case.step(
+        "setup", "setup", timeout_s=case.value("batcher_queue_deadline.setup_timeout_s")
+    )
     case.step(
         "slow",
         "engine_control",
-        params={
-            "operation": "set_perf",
-            "targets": ["prefill-0"],
-            "perf": {"prefill_fixed_ms": 3000},
-        },
+        params=case.value("batcher_queue_deadline.slow"),
     )
     case.step(
         "sampling",
         "admission_park_start",
-        timeout_s=15,
-        params={"targets": ["prefill-0", "decode-0", "decode-1"]},
+        timeout_s=case.value("batcher_queue_deadline.sampling_timeout_s"),
+        params=case.value("batcher_queue_deadline.sampling"),
     )
     case.step(
         "wave",
         "admission_tracked_fire",
-        timeout_s=90,
-        params={
-            "count": 8,
-            "consume": "immediate",
-            "input_len": 512,
-            "output_len": 2,
-            "request_timeout_s": 30,
-            "schedule_timeout_s": 30,
-            "spacing_s": 0.15,
-        },
+        timeout_s=case.value("batcher_queue_deadline.wave_timeout_s"),
+        params=case.value("batcher_queue_deadline.wave"),
     )
     case.step(
         "sampled",
         "admission_park_stop",
-        timeout_s=15,
+        timeout_s=case.value("batcher_queue_deadline.sampled_timeout_s"),
         params={"sampler": output("sampling", "sampler")},
     )
     case.step(
         "six_admitted",
         "admission_check",
-        params={
-            "rows": output("wave", "rows"),
-            "metric": "admitted_count",
-            "expected": 6,
-            "op": "eq",
-            "scope": "all",
-        },
+        params=case.params(
+            "batcher_queue_deadline.six_admitted", {"rows": output("wave", "rows")}
+        ),
     )
     case.step(
         "two_rejected",
         "admission_check",
-        params={
-            "rows": output("wave", "rows"),
-            "metric": "reject_count",
-            "expected": 2,
-            "op": "eq",
-            "scope": "all",
-        },
+        params=case.params(
+            "batcher_queue_deadline.two_rejected", {"rows": output("wave", "rows")}
+        ),
     )
     case.step(
         "deadline_family",
         "admission_check",
-        params={
-            "rows": output("wave", "rows"),
-            "metric": "deadline_reject_family",
-            "expected": True,
-            "op": "eq",
-            "scope": "rejected",
-        },
+        params=case.params(
+            "batcher_queue_deadline.deadline_family", {"rows": output("wave", "rows")}
+        ),
     )
     case.step(
         "deadline_min",
         "admission_check",
-        params={
-            "rows": output("wave", "rows"),
-            "metric": "schedule_latency_min",
-            "expected": 1,
-            "op": "ge",
-            "scope": "rejected",
-        },
+        params=case.params(
+            "batcher_queue_deadline.deadline_min", {"rows": output("wave", "rows")}
+        ),
     )
     case.step(
         "deadline_max",
         "admission_check",
-        params={
-            "rows": output("wave", "rows"),
-            "metric": "schedule_latency_max",
-            "expected": 5,
-            "op": "le",
-            "scope": "rejected",
-        },
+        params=case.params(
+            "batcher_queue_deadline.deadline_max", {"rows": output("wave", "rows")}
+        ),
     )
     case.step(
         "park_proven",
@@ -264,188 +185,128 @@ def batcher_queue_deadline(case):
     case.step(
         "done",
         "admission_drain",
-        timeout_s=30,
+        timeout_s=case.value("batcher_queue_deadline.done_timeout_s"),
         params={"waves": [output("wave", "wave")]},
     )
     case.step(
         "six_completed",
         "admission_check",
-        params={
-            "rows": output("done", "rows"),
-            "metric": "success_count",
-            "expected": 6,
-            "op": "eq",
-            "scope": "all",
-        },
+        params=case.params(
+            "batcher_queue_deadline.six_completed", {"rows": output("done", "rows")}
+        ),
     )
     case.step(
         "no_serving_errors",
         "admission_check",
-        params={
-            "rows": output("done", "rows"),
-            "metric": "serve_error_count",
-            "expected": 0,
-            "op": "eq",
-            "scope": "all",
-        },
+        params=case.params(
+            "batcher_queue_deadline.no_serving_errors", {"rows": output("done", "rows")}
+        ),
     )
     case.step(
         "relieve",
         "engine_control",
-        params={
-            "operation": "set_perf",
-            "targets": ["prefill-0"],
-            "perf": {"prefill_fixed_ms": 100},
-        },
+        params=case.value("batcher_queue_deadline.relieve"),
     )
     case.step(
         "master_clean",
         "master_ready",
-        timeout_s=30,
-        params={"target": "single", "inflight_zero": True},
+        timeout_s=case.value("batcher_queue_deadline.master_clean_timeout_s"),
+        params=case.value("batcher_queue_deadline.master_clean"),
     )
     case.step(
         "recovery",
         "admission_wave",
-        params={
-            "count": 1,
-            "input_len": 2048,
-            "output_len": 2,
-            "request_timeout_s": 30,
-        },
+        params=case.value("batcher_queue_deadline.recovery"),
     )
     case.step(
         "recovery_done",
         "admission_wait",
-        timeout_s=40,
+        timeout_s=case.value("batcher_queue_deadline.recovery_done_timeout_s"),
         params={"wave": output("recovery", "wave")},
     )
     case.step(
         "recovered",
         "admission_check",
-        params={
-            "rows": output("recovery_done", "rows"),
-            "metric": "success_count",
-            "expected": 1,
-            "op": "eq",
-            "scope": "all",
-        },
+        params=case.params(
+            "batcher_queue_deadline.recovered",
+            {"rows": output("recovery_done", "rows")},
+        ),
     )
     case.step("cleanup", "teardown")
 
 
 def placement_pool_wait(case):
-    case.step("setup", "setup", timeout_s=180)
+    case.step(
+        "setup", "setup", timeout_s=case.value("placement_pool_wait.setup_timeout_s")
+    )
     case.step(
         "slow",
         "engine_control",
-        params={
-            "operation": "set_perf",
-            "targets": ["prefill-0"],
-            "perf": {"prefill_fixed_ms": 5000},
-        },
+        params=case.value("placement_pool_wait.slow"),
     )
     case.step(
         "a",
         "admission_tracked_fire",
-        timeout_s=90,
-        params={
-            "count": 1,
-            "consume": "immediate",
-            "input_len": 512,
-            "output_len": 2,
-            "request_timeout_s": 30,
-            "schedule_timeout_s": 30,
-            "spacing_s": 0,
-        },
+        timeout_s=case.value("placement_pool_wait.a_timeout_s"),
+        params=case.value("placement_pool_wait.a"),
     )
     case.step(
         "a_admitted",
         "admission_check",
-        params={
-            "rows": output("a", "rows"),
-            "metric": "admitted_count",
-            "expected": 1,
-            "op": "eq",
-            "scope": "all",
-        },
+        params=case.params(
+            "placement_pool_wait.a_admitted", {"rows": output("a", "rows")}
+        ),
     )
     case.step(
         "running",
         "admission_observe",
-        timeout_s=15,
-        params={
-            "targets": ["prefill-0"],
-            "fields": ["running"],
-            "duration_s": 10,
-            "until_op": "ge",
-            "until_value": 1,
-        },
+        timeout_s=case.value("placement_pool_wait.running_timeout_s"),
+        params=case.value("placement_pool_wait.running"),
     )
     case.step(
         "a_running",
         "admission_gauge_check",
-        params={
-            "snapshot": output("running", "snapshot"),
-            "fields": ["running"],
-            "stat": "max_seen",
-            "op": "ge",
-            "expected": 1,
-        },
+        params=case.params(
+            "placement_pool_wait.a_running", {"snapshot": output("running", "snapshot")}
+        ),
     )
     case.step(
         "lease_before_b",
         "admission_lease_precondition",
-        timeout_s=15,
-        params={"targets": ["prefill-0", "decode-0", "decode-1"]},
+        timeout_s=case.value("placement_pool_wait.lease_before_b_timeout_s"),
+        params=case.value("placement_pool_wait.lease_before_b"),
     )
     case.step(
         "sampling",
         "admission_park_start",
-        timeout_s=15,
-        params={"targets": ["prefill-0", "decode-0", "decode-1"]},
+        timeout_s=case.value("placement_pool_wait.sampling_timeout_s"),
+        params=case.value("placement_pool_wait.sampling"),
     )
     case.step(
         "b",
         "admission_tracked_fire",
-        timeout_s=90,
-        params={
-            "count": 1,
-            "consume": "immediate",
-            "input_len": 512,
-            "output_len": 2,
-            "request_timeout_s": 30,
-            "schedule_timeout_s": 60,
-            "spacing_s": 0,
-        },
+        timeout_s=case.value("placement_pool_wait.b_timeout_s"),
+        params=case.value("placement_pool_wait.b"),
     )
     case.step(
         "sampled",
         "admission_park_stop",
-        timeout_s=15,
+        timeout_s=case.value("placement_pool_wait.sampled_timeout_s"),
         params={"sampler": output("sampling", "sampler")},
     )
     case.step(
         "b_admitted",
         "admission_check",
-        params={
-            "rows": output("b", "rows"),
-            "metric": "admitted_count",
-            "expected": 1,
-            "op": "eq",
-            "scope": "all",
-        },
+        params=case.params(
+            "placement_pool_wait.b_admitted", {"rows": output("b", "rows")}
+        ),
     )
     case.step(
         "b_rpc_parked",
         "admission_check",
-        params={
-            "rows": output("b", "rows"),
-            "metric": "schedule_latency_min",
-            "expected": 0.5,
-            "op": "gt",
-            "scope": "all",
-        },
+        params=case.params(
+            "placement_pool_wait.b_rpc_parked", {"rows": output("b", "rows")}
+        ),
     )
     case.step(
         "park_proven",
@@ -455,102 +316,56 @@ def placement_pool_wait(case):
     case.step(
         "done",
         "admission_drain",
-        timeout_s=30,
+        timeout_s=case.value("placement_pool_wait.done_timeout_s"),
         params={"waves": [output("a", "wave"), output("b", "wave")]},
     )
     case.step(
         "both_completed",
         "admission_check",
-        params={
-            "rows": output("done", "rows"),
-            "metric": "success_count",
-            "expected": 2,
-            "op": "eq",
-            "scope": "all",
-        },
+        params=case.params(
+            "placement_pool_wait.both_completed", {"rows": output("done", "rows")}
+        ),
     )
     case.step(
         "b_after_a",
         "admission_check",
-        params={
-            "rows": output("done", "rows"),
-            "metric": "await_strict_fifo",
-            "expected": True,
-            "op": "eq",
-            "scope": "all",
-        },
+        params=case.params(
+            "placement_pool_wait.b_after_a", {"rows": output("done", "rows")}
+        ),
     )
     case.step(
         "master_clean",
         "master_ready",
-        timeout_s=30,
-        params={"target": "single", "inflight_zero": True},
+        timeout_s=case.value("placement_pool_wait.master_clean_timeout_s"),
+        params=case.value("placement_pool_wait.master_clean"),
     )
     case.step(
         "engine_clean",
         "admission_engine_clean",
-        timeout_s=15,
-        params={"targets": ["prefill-0", "decode-0", "decode-1"]},
+        timeout_s=case.value("placement_pool_wait.engine_clean_timeout_s"),
+        params=case.value("placement_pool_wait.engine_clean"),
     )
     case.step(
         "recovery",
         "admission_wave",
-        params={
-            "count": 1,
-            "input_len": 2048,
-            "output_len": 2,
-            "request_timeout_s": 30,
-        },
+        params=case.value("placement_pool_wait.recovery"),
     )
     case.step(
         "recovery_done",
         "admission_wait",
-        timeout_s=40,
+        timeout_s=case.value("placement_pool_wait.recovery_done_timeout_s"),
         params={"wave": output("recovery", "wave")},
     )
     case.step(
         "recovered",
         "admission_check",
-        params={
-            "rows": output("recovery_done", "rows"),
-            "metric": "success_count",
-            "expected": 1,
-            "op": "eq",
-            "scope": "all",
-        },
+        params=case.params(
+            "placement_pool_wait.recovered", {"rows": output("recovery_done", "rows")}
+        ),
     )
     case.step(
         "relieve",
         "engine_control",
-        params={
-            "operation": "set_perf",
-            "targets": ["prefill-0"],
-            "perf": {"prefill_fixed_ms": 100},
-        },
+        params=case.value("placement_pool_wait.relieve"),
     )
     case.step("cleanup", "teardown")
-
-
-VARIANTS = {
-    "batcher_queue_capacity_park": {
-        "build": batcher_queue_capacity_park,
-        "profiles": ["batch-window", "single-batch"],
-        "metadata": {
-            "requires": ["enqueue_batch"],
-        },
-    },
-    "batcher_queue_deadline": {
-        "build": batcher_queue_deadline,
-        "profiles": ["batch-window", "single-batch"],
-        "metadata": {
-            "requires": ["enqueue_batch"],
-        },
-    },
-    "placement_pool_wait": {
-        "build": placement_pool_wait,
-        "profiles": ["single-nonbatch", "window-nonbatch"],
-        "metadata": {
-            "requires": ["generate_stream"],
-        },
-    },
-}

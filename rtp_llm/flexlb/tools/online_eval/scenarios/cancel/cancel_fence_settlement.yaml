@@ -1,4 +1,4 @@
-# Configuration for the registered Python case; execution and assertions live in Python.
+# YAML owns all case data; Python owns execution order and result references.
 schema_version: 2
 case: cancel_fence_settlement
 profiles:
@@ -22,6 +22,7 @@ variants:
   environment:
     n_prefill: 2
     n_decode: 4
+  program: engine_notfound_settle_batch
 - id: engine_notfound_settle_nonbatch
   profiles:
   - single-nonbatch
@@ -29,15 +30,1029 @@ variants:
   environment:
     n_prefill: 2
     n_decode: 4
+  program: engine_notfound_settle_nonbatch
 - id: prefill_dead_await_terminal
+  program: prefill_dead_await_terminal
 - id: decode_retire_closes_fence
+  program: decode_retire_closes_fence
 - id: transport_failure_one_shot
+  program: transport_failure_one_shot
 - id: unexpected_status_await_terminal
+  program: unexpected_status_await_terminal
 - id: engine_restarted_tombstoned_settle
   profiles:
   - batch-window
   - single-batch
+  program: engine_restarted_tombstoned_settle
+  metadata:
+    requires:
+    - enqueue_batch
 - id: fencing_lost_on_engine_restart
   profiles:
   - batch-window
   - single-batch
+  program: fencing_lost_on_engine_restart
+  metadata:
+    requires:
+    - enqueue_batch
+metadata:
+  description: Cancel locality, terminal settlement and explicit Engine tombstone contracts; restart faults
+    require EnqueueBatch.
+  category: cancel
+  tags:
+  - migration
+  - cancel
+parameters:
+  engine_notfound_settle_batch:
+    setup_timeout_s: 180
+    target:
+      count: 1
+      concurrency: 1
+      output_len: 1
+    target_dispatch_timeout_s: 60
+    completion_window_timeout_s: 45
+    completion_window:
+      duration_s: 30
+      until:
+        metric: business_finished
+        op: eq
+        value: 1
+      include:
+      - client_records
+    completed_before_cancel:
+      metric: business_finished
+      expected: 1
+      op: eq
+    cancel_master_timeout_s: 30
+    cancel_master:
+      destination: master
+    direct_original_prefill_cancel_timeout_s: 30
+    direct_original_prefill_cancel:
+      destination: prefill
+    terminal_ack_is_not_found:
+      metric: engine_not_found
+      expected: 1
+      op: eq
+    old_extra_wait_observed_timeout_s: 30
+    old_extra_wait_observed:
+      duration_s: 2
+      until:
+        metric: stream_ended
+        op: eq
+        value: 1
+      include:
+      - client_records
+    post_terminal_timeout_s: 30
+    post_terminal:
+      duration_s: 0
+    terminal_not_rewritten:
+      metric: engine_cancelled
+      expected: 0
+      op: eq
+    master_drain_timeout_s: 30
+    master_drain:
+      duration_s: 10
+      until:
+        metric: cleanup_inflight
+        op: eq
+        value: 0
+    master_drain_scheduler:
+      metric: scheduler
+      expected: 0
+      op: eq
+    master_drain_prefill_batches:
+      metric: prefill_batches
+      expected: 0
+      op: eq
+    master_drain_decode_load:
+      metric: decode_total_load
+      expected: 0
+      op: eq
+    recovery:
+      count: 1
+      concurrency: 1
+      output_len: 2
+    recovery_dispatch_timeout_s: 60
+    recovery_window_timeout_s: 45
+    recovery_window:
+      duration_s: 30
+      until:
+        metric: success
+        op: eq
+        value: 1
+      include:
+      - client_records
+    recovery_succeeds:
+      metric: success
+      expected: 1
+      op: eq
+  engine_notfound_settle_nonbatch:
+    setup_timeout_s: 180
+    target:
+      count: 1
+      concurrency: 1
+      output_len: 1
+    target_dispatch_timeout_s: 60
+    completion_window_timeout_s: 45
+    completion_window:
+      duration_s: 30
+      until:
+        metric: business_finished
+        op: eq
+        value: 1
+      include:
+      - client_records
+    completed_before_cancel:
+      metric: business_finished
+      expected: 1
+      op: eq
+    cancel_master_timeout_s: 30
+    cancel_master:
+      destination: master
+    cancel_worker_timeout_s: 30
+    cancel_worker:
+      destination: prefill
+    direct_original_prefill_cancel_timeout_s: 30
+    direct_original_prefill_cancel:
+      destination: prefill
+    terminal_ack_is_not_found:
+      metric: engine_not_found
+      expected: 1
+      op: eq
+    old_extra_wait_observed_timeout_s: 30
+    old_extra_wait_observed:
+      duration_s: 2
+      until:
+        metric: stream_ended
+        op: eq
+        value: 1
+      include:
+      - client_records
+    post_terminal_timeout_s: 30
+    post_terminal:
+      duration_s: 0
+    terminal_not_rewritten:
+      metric: engine_cancelled
+      expected: 0
+      op: eq
+    recovery:
+      count: 1
+      concurrency: 1
+      output_len: 2
+    recovery_dispatch_timeout_s: 60
+    recovery_window_timeout_s: 45
+    recovery_window:
+      duration_s: 30
+      until:
+        metric: success
+        op: eq
+        value: 1
+      include:
+      - client_records
+    recovery_succeeds:
+      metric: success
+      expected: 1
+      op: eq
+  prefill_dead_await_terminal:
+    setup_timeout_s: 180
+    target:
+      count: 1
+      concurrency: 1
+      output_len: 500
+      expected_stream_statuses:
+      - CANCELLED
+      - UNAVAILABLE
+    target_dispatch_timeout_s: 60
+    first_output_window_timeout_s: 30
+    first_output_window:
+      duration_s: 15
+      until:
+        metric: first_output
+        op: eq
+        value: 1
+      include:
+      - client_records
+    first_output_received:
+      metric: first_output
+      expected: 1
+      op: eq
+    stop_prefill:
+      operation: stop
+      targets:
+      - prefill-0
+    master_cancel_timeout_s: 30
+    master_cancel:
+      destination: master
+    terminal_window_timeout_s: 45
+    terminal_window:
+      duration_s: 30
+      until:
+        metric: stream_ended
+        op: eq
+        value: 1
+      include:
+      - client_records
+    terminal_ended:
+      metric: stream_ended
+      expected: 1
+      op: eq
+    master_drain_timeout_s: 45
+    master_drain:
+      duration_s: 30
+      until:
+        metric: cleanup_inflight
+        op: eq
+        value: 0
+    master_drain_scheduler:
+      metric: scheduler
+      expected: 0
+      op: eq
+    master_drain_prefill_batches:
+      metric: prefill_batches
+      expected: 0
+      op: eq
+    master_drain_decode_load:
+      metric: decode_total_load
+      expected: 0
+      op: eq
+    engine_drain_timeout_s: 35
+    engine_drain:
+      duration_s: 20
+      until:
+        metric: engine_clean_total
+        op: eq
+        value: 0
+    engine_drain_inflight:
+      metric: engine_inflight
+      expected: 0
+      op: eq
+    engine_drain_leaks:
+      metric: engine_leaks
+      expected: 0
+      op: eq
+    restore_topology:
+      operation: start
+      targets:
+      - prefill-0
+    recovery:
+      count: 1
+      concurrency: 1
+      output_len: 2
+    recovery_dispatch_timeout_s: 60
+    recovery_window_timeout_s: 45
+    recovery_window:
+      duration_s: 30
+      until:
+        metric: success
+        op: eq
+        value: 1
+      include:
+      - client_records
+    recovery_succeeds:
+      metric: success
+      expected: 1
+      op: eq
+  decode_retire_closes_fence:
+    setup_timeout_s: 180
+    target:
+      count: 1
+      concurrency: 1
+      output_len: 1000
+      expected_stream_statuses:
+      - CANCELLED
+      - UNAVAILABLE
+    target_dispatch_timeout_s: 60
+    first_output_window_timeout_s: 30
+    first_output_window:
+      duration_s: 15
+      until:
+        metric: first_output
+        op: eq
+        value: 1
+      include:
+      - client_records
+    first_output_received:
+      metric: first_output
+      expected: 1
+      op: eq
+    stop_prefill:
+      operation: stop
+      targets:
+      - prefill-0
+    master_cancel_timeout_s: 30
+    master_cancel:
+      destination: master
+    stop_decode:
+      operation: stop
+      targets:
+      - decode-0
+    terminal_window_timeout_s: 60
+    terminal_window:
+      duration_s: 45
+      until:
+        metric: stream_ended
+        op: eq
+        value: 1
+      include:
+      - client_records
+    terminal_ended:
+      metric: stream_ended
+      expected: 1
+      op: eq
+    retirement_does_not_complete_business:
+      metric: business_finished
+      expected: 0
+      op: eq
+    master_drain_timeout_s: 60
+    master_drain:
+      duration_s: 45
+      until:
+        metric: cleanup_inflight
+        op: eq
+        value: 0
+    master_drain_scheduler:
+      metric: scheduler
+      expected: 0
+      op: eq
+    master_drain_prefill_batches:
+      metric: prefill_batches
+      expected: 0
+      op: eq
+    master_drain_decode_load:
+      metric: decode_total_load
+      expected: 0
+      op: eq
+    engine_drain_timeout_s: 45
+    engine_drain:
+      duration_s: 30
+      until:
+        metric: engine_clean_total
+        op: eq
+        value: 0
+    engine_drain_inflight:
+      metric: engine_inflight
+      expected: 0
+      op: eq
+    engine_drain_leaks:
+      metric: engine_leaks
+      expected: 0
+      op: eq
+    restore_topology:
+      operation: start
+      targets:
+      - prefill-0
+      - decode-0
+    restore_ready_timeout_s: 45
+    restore_ready:
+      inflight_zero: true
+    recovery:
+      count: 1
+      concurrency: 1
+      output_len: 2
+    recovery_dispatch_timeout_s: 60
+    recovery_window_timeout_s: 45
+    recovery_window:
+      duration_s: 30
+      until:
+        metric: success
+        op: eq
+        value: 1
+      include:
+      - client_records
+    recovery_succeeds:
+      metric: success
+      expected: 1
+      op: eq
+    step_26_timeout_s: 45
+    step_26:
+      duration_s: 30
+      include:
+      - info
+      until:
+        op: eq
+        value: 0
+    step_27:
+      expected: 0
+      op: eq
+  transport_failure_one_shot:
+    setup_timeout_s: 180
+    target:
+      count: 1
+      concurrency: 1
+      output_len: 500
+    target_dispatch_timeout_s: 60
+    first_output_window_timeout_s: 30
+    first_output_window:
+      duration_s: 15
+      until:
+        metric: first_output
+        op: eq
+        value: 1
+      include:
+      - client_records
+    first_output_received:
+      metric: first_output
+      expected: 1
+      op: eq
+    cancel_fault:
+      type: cancel_no_respond
+      targets:
+      - prefill-0
+      options: {}
+    cancel_baseline_timeout_s: 30
+    cancel_baseline:
+      duration_s: 0
+    master_cancel_timeout_s: 30
+    master_cancel:
+      destination: master
+    terminal_window_timeout_s: 45
+    terminal_window:
+      duration_s: 30
+      until:
+        metric: stream_ended
+        op: eq
+        value: 1
+      include:
+      - client_records
+    terminal_ended:
+      metric: stream_ended
+      expected: 1
+      op: eq
+    post_settle_counter_timeout_s: 30
+    post_settle_counter:
+      duration_s: 2
+    ordinary_cancel_not_forwarded:
+      metric: cancel_rpc_count
+      expected: 0
+      op: eq
+    master_drain_timeout_s: 45
+    master_drain:
+      duration_s: 30
+      until:
+        metric: cleanup_inflight
+        op: eq
+        value: 0
+    master_drain_scheduler:
+      metric: scheduler
+      expected: 0
+      op: eq
+    master_drain_prefill_batches:
+      metric: prefill_batches
+      expected: 0
+      op: eq
+    master_drain_decode_load:
+      metric: decode_total_load
+      expected: 0
+      op: eq
+    engine_drain_timeout_s: 35
+    engine_drain:
+      duration_s: 20
+      until:
+        metric: engine_clean_total
+        op: eq
+        value: 0
+    engine_drain_inflight:
+      metric: engine_inflight
+      expected: 0
+      op: eq
+    engine_drain_leaks:
+      metric: engine_leaks
+      expected: 0
+      op: eq
+    recovery:
+      count: 1
+      concurrency: 1
+      output_len: 2
+    recovery_dispatch_timeout_s: 60
+    recovery_window_timeout_s: 45
+    recovery_window:
+      duration_s: 30
+      until:
+        metric: success
+        op: eq
+        value: 1
+      include:
+      - client_records
+    recovery_succeeds:
+      metric: success
+      expected: 1
+      op: eq
+  unexpected_status_await_terminal:
+    setup_timeout_s: 180
+    target:
+      count: 1
+      concurrency: 1
+      output_len: 500
+    target_dispatch_timeout_s: 60
+    first_output_window_timeout_s: 30
+    first_output_window:
+      duration_s: 15
+      until:
+        metric: first_output
+        op: eq
+        value: 1
+      include:
+      - client_records
+    first_output_received:
+      metric: first_output
+      expected: 1
+      op: eq
+    cancel_fault:
+      type: cancel_unexpected_status
+      targets:
+      - prefill-0
+      options: {}
+    cancel_baseline_timeout_s: 30
+    cancel_baseline:
+      duration_s: 0
+    master_cancel_timeout_s: 30
+    master_cancel:
+      destination: master
+    terminal_window_timeout_s: 45
+    terminal_window:
+      duration_s: 30
+      until:
+        metric: stream_ended
+        op: eq
+        value: 1
+      include:
+      - client_records
+    terminal_ended:
+      metric: stream_ended
+      expected: 1
+      op: eq
+    post_settle_counter_timeout_s: 30
+    post_settle_counter:
+      duration_s: 2
+    ordinary_cancel_not_forwarded:
+      metric: cancel_rpc_count
+      expected: 0
+      op: eq
+    master_drain_timeout_s: 45
+    master_drain:
+      duration_s: 30
+      until:
+        metric: cleanup_inflight
+        op: eq
+        value: 0
+    master_drain_scheduler:
+      metric: scheduler
+      expected: 0
+      op: eq
+    master_drain_prefill_batches:
+      metric: prefill_batches
+      expected: 0
+      op: eq
+    master_drain_decode_load:
+      metric: decode_total_load
+      expected: 0
+      op: eq
+    engine_drain_timeout_s: 35
+    engine_drain:
+      duration_s: 20
+      until:
+        metric: engine_clean_total
+        op: eq
+        value: 0
+    engine_drain_inflight:
+      metric: engine_inflight
+      expected: 0
+      op: eq
+    engine_drain_leaks:
+      metric: engine_leaks
+      expected: 0
+      op: eq
+    recovery:
+      count: 1
+      concurrency: 1
+      output_len: 2
+    recovery_dispatch_timeout_s: 60
+    recovery_window_timeout_s: 45
+    recovery_window:
+      duration_s: 30
+      until:
+        metric: success
+        op: eq
+        value: 1
+      include:
+      - client_records
+    recovery_succeeds:
+      metric: success
+      expected: 1
+      op: eq
+  engine_restarted_tombstoned_settle:
+    setup_timeout_s: 180
+    target:
+      count: 1
+      concurrency: 1
+      output_len: 5000
+      expected_stream_statuses:
+      - CANCELLED
+      - UNAVAILABLE
+    target_dispatch_timeout_s: 60
+    first_output_window_timeout_s: 30
+    first_output_window:
+      duration_s: 15
+      until:
+        metric: first_output
+        op: eq
+        value: 1
+      include:
+      - client_records
+    first_output_received:
+      metric: first_output
+      expected: 1
+      op: eq
+    first_crash_fault:
+      type: crash_after
+      targets:
+      - prefill-0
+      options:
+        n: 1
+    first_crash_trigger:
+      count: 1
+      concurrency: 1
+      consume: manual
+      schedule_timeout_s: 8
+      expected_rpc_statuses:
+      - DEADLINE_EXCEEDED
+      - UNAVAILABLE
+      - UNKNOWN
+      - INTERNAL
+    first_crash_trigger_dispatch_timeout_s: 60
+    first_crash_dropped_timeout_s: 45
+    first_crash_dropped:
+      duration_s: 30
+      until:
+        metric: alive_prefill
+        op: le
+        value: 0
+      include:
+      - info
+    first_crash_health_dropped:
+      metric: alive_prefill
+      expected: 0
+      op: eq
+    first_crash_restart:
+      operation: start
+      targets:
+      - prefill-0
+    first_crash_restored_timeout_s: 45
+    first_crash_restored:
+      duration_s: 30
+      until:
+        metric: alive_prefill
+        op: ge
+        value: 1
+      include:
+      - info
+    first_crash_health_restored:
+      metric: alive_prefill
+      expected: 1
+      op: ge
+    first_crash_reconnect_timeout_s: 30
+    first_crash_reconnect:
+      duration_s: 3
+      include:
+      - info
+    cancel_baseline_timeout_s: 30
+    cancel_baseline:
+      duration_s: 0
+    master_cancel_timeout_s: 30
+    master_cancel:
+      destination: master
+    fast_terminal_timeout_s: 30
+    fast_terminal:
+      duration_s: 5
+      until:
+        metric: stream_ended
+        op: eq
+        value: 1
+      include:
+      - client_records
+    settled_in_five_second_wait:
+      metric: stream_ended
+      expected: 1
+      op: eq
+    cancel_did_not_complete_business:
+      metric: business_finished
+      expected: 0
+      op: eq
+    master_no_forward_timeout_s: 30
+    master_no_forward:
+      duration_s: 0
+    ordinary_cancel_not_forwarded:
+      metric: cancel_rpc_count
+      expected: 0
+      op: eq
+    explicit_engine_cancel_timeout_s: 30
+    explicit_engine_cancel:
+      destination: prefill
+    cancel_arrival_timeout_s: 30
+    cancel_arrival:
+      duration_s: 15
+      until:
+        metric: cancel_rpc_count
+        op: ge
+        value: 1
+    explicit_cancel_reached_fresh_engine:
+      metric: cancel_rpc_count
+      expected: 1
+      op: ge
+    armed_fence_probe:
+      output_len: 2
+      attempt: 1
+    armed_fence_rejects_exact_rid_8429:
+      metric: fence_rejected_8429
+      expected: 1
+      op: eq
+    engine_drain_timeout_s: 60
+    engine_drain:
+      duration_s: 45
+      until:
+        metric: engine_clean_total
+        op: eq
+        value: 0
+    engine_drain_inflight:
+      metric: engine_inflight
+      expected: 0
+      op: eq
+    engine_drain_leaks:
+      metric: engine_leaks
+      expected: 0
+      op: eq
+    residue_bound_timeout_s: 35
+    residue_bound:
+      duration_s: 20
+      until:
+        metric: scheduler
+        op: le
+        value: 1
+    residue_within_crash_trigger_bound:
+      metric: scheduler
+      expected: 1
+      op: le
+    residue_later_timeout_s: 30
+    residue_later:
+      duration_s: 8
+    residue_does_not_grow:
+      metric: scheduler
+      expected: 0
+      op: le
+    recovery:
+      count: 1
+      concurrency: 1
+      output_len: 2
+    recovery_dispatch_timeout_s: 60
+    recovery_window_timeout_s: 45
+    recovery_window:
+      duration_s: 30
+      until:
+        metric: success
+        op: eq
+        value: 1
+      include:
+      - client_records
+    recovery_succeeds:
+      metric: success
+      expected: 1
+      op: eq
+  fencing_lost_on_engine_restart:
+    setup_timeout_s: 180
+    target:
+      count: 1
+      concurrency: 1
+      output_len: 5000
+      expected_stream_statuses:
+      - CANCELLED
+      - UNAVAILABLE
+    target_dispatch_timeout_s: 60
+    first_output_window_timeout_s: 30
+    first_output_window:
+      duration_s: 15
+      until:
+        metric: first_output
+        op: eq
+        value: 1
+      include:
+      - client_records
+    first_output_received:
+      metric: first_output
+      expected: 1
+      op: eq
+    first_crash_fault:
+      type: crash_after
+      targets:
+      - prefill-0
+      options:
+        n: 1
+    first_crash_trigger:
+      count: 1
+      concurrency: 1
+      consume: manual
+      schedule_timeout_s: 8
+      expected_rpc_statuses:
+      - DEADLINE_EXCEEDED
+      - UNAVAILABLE
+      - UNKNOWN
+      - INTERNAL
+    first_crash_trigger_dispatch_timeout_s: 60
+    first_crash_dropped_timeout_s: 45
+    first_crash_dropped:
+      duration_s: 30
+      until:
+        metric: alive_prefill
+        op: le
+        value: 0
+      include:
+      - info
+    first_crash_health_dropped:
+      metric: alive_prefill
+      expected: 0
+      op: eq
+    first_crash_restart:
+      operation: start
+      targets:
+      - prefill-0
+    first_crash_restored_timeout_s: 45
+    first_crash_restored:
+      duration_s: 30
+      until:
+        metric: alive_prefill
+        op: ge
+        value: 1
+      include:
+      - info
+    first_crash_health_restored:
+      metric: alive_prefill
+      expected: 1
+      op: ge
+    first_crash_reconnect_timeout_s: 30
+    first_crash_reconnect:
+      duration_s: 3
+      include:
+      - info
+    cancel_baseline_timeout_s: 30
+    cancel_baseline:
+      duration_s: 0
+    master_cancel_timeout_s: 30
+    master_cancel:
+      destination: master
+    fast_terminal_timeout_s: 30
+    fast_terminal:
+      duration_s: 5
+      until:
+        metric: stream_ended
+        op: eq
+        value: 1
+      include:
+      - client_records
+    settled_in_five_second_wait:
+      metric: stream_ended
+      expected: 1
+      op: eq
+    cancel_did_not_complete_business:
+      metric: business_finished
+      expected: 0
+      op: eq
+    master_no_forward_timeout_s: 30
+    master_no_forward:
+      duration_s: 0
+    ordinary_cancel_not_forwarded:
+      metric: cancel_rpc_count
+      expected: 0
+      op: eq
+    explicit_engine_cancel_timeout_s: 30
+    explicit_engine_cancel:
+      destination: prefill
+    cancel_arrival_timeout_s: 30
+    cancel_arrival:
+      duration_s: 15
+      until:
+        metric: cancel_rpc_count
+        op: ge
+        value: 1
+    explicit_cancel_reached_fresh_engine:
+      metric: cancel_rpc_count
+      expected: 1
+      op: ge
+    armed_fence_probe:
+      output_len: 100
+      scope: prefill_only
+      attempt: 1
+    armed_fence_rejects_exact_rid_8429:
+      metric: fence_rejected_8429
+      expected: 1
+      op: eq
+    second_crash_fault:
+      type: crash_after
+      targets:
+      - prefill-0
+      options:
+        n: 1
+    second_crash_trigger:
+      count: 1
+      concurrency: 1
+      consume: manual
+      schedule_timeout_s: 8
+      expected_rpc_statuses:
+      - DEADLINE_EXCEEDED
+      - UNAVAILABLE
+      - UNKNOWN
+      - INTERNAL
+    second_crash_trigger_dispatch_timeout_s: 60
+    second_crash_dropped_timeout_s: 45
+    second_crash_dropped:
+      duration_s: 30
+      until:
+        metric: alive_prefill
+        op: le
+        value: 0
+      include:
+      - info
+    second_crash_health_dropped:
+      metric: alive_prefill
+      expected: 0
+      op: eq
+    second_crash_restart:
+      operation: start
+      targets:
+      - prefill-0
+    second_crash_restored_timeout_s: 45
+    second_crash_restored:
+      duration_s: 30
+      until:
+        metric: alive_prefill
+        op: ge
+        value: 1
+      include:
+      - info
+    second_crash_health_restored:
+      metric: alive_prefill
+      expected: 1
+      op: ge
+    second_crash_reconnect_timeout_s: 30
+    second_crash_reconnect:
+      duration_s: 3
+      include:
+      - info
+    lost_fence_probe:
+      output_len: 100
+      scope: prefill_only
+      attempt: 2
+      wait_port_s: 10
+    memory_only_fence_is_lost:
+      metric: probe_accepted
+      expected: 1
+      op: ge
+    engine_drain_timeout_s: 75
+    engine_drain:
+      duration_s: 60
+      until:
+        metric: engine_clean_total
+        op: eq
+        value: 0
+    engine_drain_inflight:
+      metric: engine_inflight
+      expected: 0
+      op: eq
+    engine_drain_leaks:
+      metric: engine_leaks
+      expected: 0
+      op: eq
+    residue_bound_timeout_s: 35
+    residue_bound:
+      duration_s: 20
+      until:
+        metric: scheduler
+        op: le
+        value: 2
+    residue_within_crash_trigger_bound:
+      metric: scheduler
+      expected: 2
+      op: le
+    residue_later_timeout_s: 30
+    residue_later:
+      duration_s: 8
+    residue_does_not_grow:
+      metric: scheduler
+      expected: 0
+      op: le
+    recovery:
+      count: 1
+      concurrency: 1
+      output_len: 2
+    recovery_dispatch_timeout_s: 60
+    recovery_window_timeout_s: 45
+    recovery_window:
+      duration_s: 30
+      until:
+        metric: success
+        op: eq
+        value: 1
+      include:
+      - client_records
+    recovery_succeeds:
+      metric: success
+      expected: 1
+      op: eq

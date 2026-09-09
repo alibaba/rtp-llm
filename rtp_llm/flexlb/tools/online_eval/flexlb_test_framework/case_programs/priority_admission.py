@@ -2,187 +2,136 @@
 
 from ..case_config import output
 
-METADATA = {
-    "id": "priority_admission",
-    "description": "No preemption: after the victim reaches decode running, its acceptance permit is "
-    "free and a higher-priority incomer is admitted alongside it.",
-    "category": "admission",
-    "requires": ["enqueue_batch"],
-}
-
-PROFILES = ["batch-window"]
-
 
 def permit_released_without_preemption(case):
-    case.step("setup", "setup", timeout_s=180)
+    case.step(
+        "setup",
+        "setup",
+        timeout_s=case.value("permit_released_without_preemption.setup_timeout_s"),
+    )
     case.step(
         "victim",
         "admission_fire",
-        params={
-            "count": 1,
-            "consume": "immediate",
-            "input_len": 512,
-            "output_len": 200,
-            "priority": 30,
-            "keys_per_request": 1,
-            "spacing_s": 0,
-            "request_timeout_s": 30,
-        },
+        params=case.value("permit_released_without_preemption.victim"),
     )
     case.step(
         "victim_admitted",
         "admission_check",
-        params={
-            "rows": output("victim", "rows"),
-            "metric": "admitted_count",
-            "expected": 1,
-            "op": "eq",
-        },
+        params=case.params(
+            "permit_released_without_preemption.victim_admitted",
+            {"rows": output("victim", "rows")},
+        ),
     )
     case.step(
         "running",
         "admission_observe",
-        timeout_s=15,
-        params={
-            "targets": ["decode-0"],
-            "fields": ["running"],
-            "duration_s": 10,
-            "until_op": "ge",
-            "until_value": 1,
-        },
+        timeout_s=case.value("permit_released_without_preemption.running_timeout_s"),
+        params=case.value("permit_released_without_preemption.running"),
     )
     case.step(
         "victim_running",
         "admission_gauge_check",
-        params={
-            "snapshot": output("running", "snapshot"),
-            "fields": ["running"],
-            "stat": "max_seen",
-            "op": "ge",
-            "expected": 1,
-        },
+        params=case.params(
+            "permit_released_without_preemption.victim_running",
+            {"snapshot": output("running", "snapshot")},
+        ),
     )
     case.step(
         "incomer",
         "admission_fire",
-        params={
-            "count": 1,
-            "consume": "immediate",
-            "input_len": 512,
-            "output_len": 2,
-            "priority": 70,
-            "keys_per_request": 1,
-            "spacing_s": 0,
-            "request_timeout_s": 30,
-        },
+        params=case.value("permit_released_without_preemption.incomer"),
     )
     case.step(
         "incomer_admitted",
         "admission_check",
-        params={
-            "rows": output("incomer", "rows"),
-            "metric": "admitted_count",
-            "expected": 1,
-            "op": "eq",
-        },
+        params=case.params(
+            "permit_released_without_preemption.incomer_admitted",
+            {"rows": output("incomer", "rows")},
+        ),
     )
     case.step(
         "incomer_code",
         "admission_check",
-        params={
-            "rows": output("incomer", "rows"),
-            "metric": "all_schedule_code",
-            "expected": 200,
-            "op": "eq",
-        },
+        params=case.params(
+            "permit_released_without_preemption.incomer_code",
+            {"rows": output("incomer", "rows")},
+        ),
     )
     case.step(
         "accepted_fast",
         "admission_check",
-        params={
-            "rows": output("incomer", "rows"),
-            "metric": "schedule_latency_max",
-            "expected": 3,
-            "op": "lt",
-        },
+        params=case.params(
+            "permit_released_without_preemption.accepted_fast",
+            {"rows": output("incomer", "rows")},
+        ),
     )
     case.step(
         "victim_done",
         "admission_wait",
-        timeout_s=40,
+        timeout_s=case.value(
+            "permit_released_without_preemption.victim_done_timeout_s"
+        ),
         params={"wave": output("victim", "wave")},
     )
     case.step(
         "victim_unmolested",
         "admission_check",
-        params={
-            "rows": output("victim_done", "rows"),
-            "metric": "success_count",
-            "expected": 1,
-            "op": "eq",
-        },
+        params=case.params(
+            "permit_released_without_preemption.victim_unmolested",
+            {"rows": output("victim_done", "rows")},
+        ),
     )
     case.step(
         "incomer_done",
         "admission_wait",
-        timeout_s=40,
+        timeout_s=case.value(
+            "permit_released_without_preemption.incomer_done_timeout_s"
+        ),
         params={"wave": output("incomer", "wave")},
     )
     case.step(
         "incomer_completed",
         "admission_check",
-        params={
-            "rows": output("incomer_done", "rows"),
-            "metric": "success_count",
-            "expected": 1,
-            "op": "eq",
-        },
+        params=case.params(
+            "permit_released_without_preemption.incomer_completed",
+            {"rows": output("incomer_done", "rows")},
+        ),
     )
     case.step(
         "recovery",
         "admission_wave",
-        params={
-            "count": 1,
-            "input_len": 2048,
-            "output_len": 2,
-            "request_timeout_s": 30,
-        },
+        params=case.value("permit_released_without_preemption.recovery"),
     )
     case.step(
         "recovery_done",
         "admission_wait",
-        timeout_s=40,
+        timeout_s=case.value(
+            "permit_released_without_preemption.recovery_done_timeout_s"
+        ),
         params={"wave": output("recovery", "wave")},
     )
     case.step(
         "recovered",
         "admission_check",
-        params={
-            "rows": output("recovery_done", "rows"),
-            "metric": "success_count",
-            "expected": 1,
-            "op": "eq",
-        },
+        params=case.params(
+            "permit_released_without_preemption.recovered",
+            {"rows": output("recovery_done", "rows")},
+        ),
     )
     case.step(
         "master_clean",
         "master_ready",
-        timeout_s=30,
-        params={"target": "single", "inflight_zero": True},
+        timeout_s=case.value(
+            "permit_released_without_preemption.master_clean_timeout_s"
+        ),
+        params=case.value("permit_released_without_preemption.master_clean"),
     )
     case.step(
         "engine_clean",
         "admission_engine_clean",
-        timeout_s=15,
-        params={"targets": ["prefill-0", "decode-0"]},
+        timeout_s=case.value(
+            "permit_released_without_preemption.engine_clean_timeout_s"
+        ),
+        params=case.value("permit_released_without_preemption.engine_clean"),
     )
     case.step("cleanup", "teardown")
-
-
-VARIANTS = {
-    "permit_released_without_preemption": {
-        "build": permit_released_without_preemption,
-        "profiles": ["batch-window"],
-        "metadata": {},
-    },
-}

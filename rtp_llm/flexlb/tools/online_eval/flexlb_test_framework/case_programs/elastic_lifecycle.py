@@ -2,72 +2,63 @@
 
 from ..case_config import output
 
-METADATA = {
-    "id": "elastic_lifecycle",
-    "description": "Ordered scale-out, measured preference and rebalance, graceful removal and three "
-    "complete cycles.",
-    "category": "elastic",
-    "requires": ["queue"],
-    "estimated_duration_s": 420,
-}
-
-PROFILES = ["batch-window", "single-batch", "single-nonbatch", "window-nonbatch"]
-
 
 def normal(case):
-    case.step("setup", "setup", timeout_s=180)
+    case.step("setup", "setup", timeout_s=case.value("normal.setup_timeout_s"))
     case.step(
         "initial_topology",
         "elastic_topology",
-        timeout_s=35,
-        params={"role": "PREFILL", "discovered": 2, "alive": 2},
+        timeout_s=case.value("normal.initial_topology_timeout_s"),
+        params=case.value("normal.initial_topology"),
     )
     case.step("preference_flow", "elastic_cold_flow")
-    case.step("ramp", "elastic_pause", params={"seconds": 1})
+    case.step("ramp", "elastic_pause", params=case.value("normal.ramp"))
     case.step(
         "baseline_window",
         "elastic_timeline",
-        timeout_s=25,
-        params={"engines": ["prefill-0", "prefill-1"], "offsets_s": [0, 15]},
+        timeout_s=case.value("normal.baseline_window_timeout_s"),
+        params=case.value("normal.baseline_window"),
     )
-    case.step("add", "elastic_add", params={"role": "prefill"})
+    case.step("add", "elastic_add", params=case.value("normal.add"))
     case.step(
         "first_traffic",
         "elastic_accepted_timed",
-        timeout_s=15,
-        params={"engine": output("add", "engine"), "baseline": 0, "window_s": 10},
+        timeout_s=case.value("normal.first_traffic_timeout_s"),
+        params=case.params("normal.first_traffic", {"engine": output("add", "engine")}),
     )
     case.step(
         "added_topology",
         "elastic_topology",
-        timeout_s=35,
-        params={
-            "role": "PREFILL",
-            "discovered": 3,
-            "alive": 3,
-            "port": output("add", "port"),
-            "present": True,
-        },
+        timeout_s=case.value("normal.added_topology_timeout_s"),
+        params=case.params("normal.added_topology", {"port": output("add", "port")}),
     )
     case.step(
         "post_window",
         "elastic_timeline",
-        timeout_s=55,
-        params={
-            "engines": ["prefill-0", "prefill-1", output("add", "engine")],
-            "offsets_s": [0, 5, 10, 17, 24, 31, 38, 45],
-        },
+        timeout_s=case.value("normal.post_window_timeout_s"),
+        params=case.params(
+            "normal.post_window",
+            {
+                "engines": [
+                    case.value("normal.post_window.engines.item_0"),
+                    case.value("normal.post_window.engines.item_1"),
+                    output("add", "engine"),
+                ]
+            },
+        ),
     )
     case.step(
         "preference_flow_stop",
         "elastic_flow_stop",
-        timeout_s=45,
+        timeout_s=case.value("normal.preference_flow_stop_timeout_s"),
         params={"flow": output("preference_flow", "flow")},
     )
     case.step(
         "preference_protocol",
         "elastic_lifecycle_flow_protocol",
-        params={"flow": output("preference_flow", "flow"), "method": "FetchResponse"},
+        params=case.params(
+            "normal.preference_protocol", {"flow": output("preference_flow", "flow")}
+        ),
     )
     case.step(
         "add_availability",
@@ -90,316 +81,309 @@ def normal(case):
     case.step(
         "preference_shares",
         "elastic_share",
-        params={
-            "series": output("post_window", "series"),
-            "engine": output("add", "engine"),
-            "max_share": 0.6,
-            "old_floor": 0.1,
-            "exclusive": False,
-            "require_new": False,
-        },
+        params=case.params(
+            "normal.preference_shares",
+            {
+                "series": output("post_window", "series"),
+                "engine": output("add", "engine"),
+            },
+        ),
     )
     case.step(
         "preference_availability",
         "elastic_flow_assert",
-        params={
-            "result": output("preference_flow_stop", "result"),
-            "min_success_rate": 0.9,
-        },
+        params=case.params(
+            "normal.preference_availability",
+            {"result": output("preference_flow_stop", "result")},
+        ),
     )
     case.step("remove_flow", "elastic_cold_flow")
     case.step(
         "remove_traffic",
         "elastic_lifecycle_probe",
-        timeout_s=60,
-        params={
-            "engine": output("add", "engine"),
-            "window_s": 10,
-            "method": "FetchResponse",
-        },
+        timeout_s=case.value("normal.remove_traffic_timeout_s"),
+        params=case.params(
+            "normal.remove_traffic", {"engine": output("add", "engine")}
+        ),
     )
     case.step(
         "remove",
         "elastic_remove",
-        timeout_s=75,
-        params={"engine": output("add", "engine"), "drain_timeout_ms": 60000},
+        timeout_s=case.value("normal.remove_timeout_s"),
+        params=case.params("normal.remove", {"engine": output("add", "engine")}),
     )
-    case.step("remove_hold", "elastic_pause", params={"seconds": 3})
+    case.step("remove_hold", "elastic_pause", params=case.value("normal.remove_hold"))
     case.step(
         "remove_flow_stop",
         "elastic_flow_stop",
-        timeout_s=45,
+        timeout_s=case.value("normal.remove_flow_stop_timeout_s"),
         params={"flow": output("remove_flow", "flow")},
     )
     case.step(
         "remove_protocol",
         "elastic_lifecycle_flow_protocol",
-        params={"flow": output("remove_flow", "flow"), "method": "FetchResponse"},
+        params=case.params(
+            "normal.remove_protocol", {"flow": output("remove_flow", "flow")}
+        ),
     )
     case.step(
         "removed_topology",
         "elastic_topology",
-        timeout_s=35,
-        params={
-            "role": "PREFILL",
-            "discovered": 2,
-            "alive": 2,
-            "port": output("add", "port"),
-            "present": False,
-        },
+        timeout_s=case.value("normal.removed_topology_timeout_s"),
+        params=case.params("normal.removed_topology", {"port": output("add", "port")}),
     )
-    case.step("remove_accounting", "elastic_accounting", timeout_s=105)
+    case.step(
+        "remove_accounting",
+        "elastic_accounting",
+        timeout_s=case.value("normal.remove_accounting_timeout_s"),
+    )
     case.step(
         "remove_zero_errors",
         "elastic_flow_assert",
-        params={"result": output("remove_flow_stop", "result"), "min_success_rate": 1},
+        params=case.params(
+            "normal.remove_zero_errors",
+            {"result": output("remove_flow_stop", "result")},
+        ),
     )
-    case.step("cycle1_add", "elastic_add", params={"role": "prefill"})
+    case.step("cycle1_add", "elastic_add", params=case.value("normal.cycle1_add"))
     case.step(
         "cycle1_added_topology",
         "elastic_topology",
-        timeout_s=35,
-        params={
-            "role": "PREFILL",
-            "discovered": 3,
-            "alive": 3,
-            "port": output("cycle1_add", "port"),
-            "present": True,
-        },
+        timeout_s=case.value("normal.cycle1_added_topology_timeout_s"),
+        params=case.params(
+            "normal.cycle1_added_topology", {"port": output("cycle1_add", "port")}
+        ),
     )
     case.step(
         "cycle1_traffic",
         "elastic_lifecycle_probe",
-        timeout_s=60,
-        params={
-            "engine": output("cycle1_add", "engine"),
-            "window_s": 15,
-            "method": "FetchResponse",
-        },
+        timeout_s=case.value("normal.cycle1_traffic_timeout_s"),
+        params=case.params(
+            "normal.cycle1_traffic", {"engine": output("cycle1_add", "engine")}
+        ),
     )
     case.step("cycle1_flow", "elastic_cold_flow")
-    case.step("cycle1_ramp", "elastic_pause", params={"seconds": 0.5})
+    case.step("cycle1_ramp", "elastic_pause", params=case.value("normal.cycle1_ramp"))
     case.step(
         "cycle1_remove",
         "elastic_remove",
-        timeout_s=75,
-        params={"engine": output("cycle1_add", "engine"), "drain_timeout_ms": 60000},
+        timeout_s=case.value("normal.cycle1_remove_timeout_s"),
+        params=case.params(
+            "normal.cycle1_remove", {"engine": output("cycle1_add", "engine")}
+        ),
     )
     case.step(
         "cycle1_flow_stop",
         "elastic_flow_stop",
-        timeout_s=45,
+        timeout_s=case.value("normal.cycle1_flow_stop_timeout_s"),
         params={"flow": output("cycle1_flow", "flow")},
     )
     case.step(
         "cycle1_protocol",
         "elastic_lifecycle_flow_protocol",
-        params={"flow": output("cycle1_flow", "flow"), "method": "FetchResponse"},
+        params=case.params(
+            "normal.cycle1_protocol", {"flow": output("cycle1_flow", "flow")}
+        ),
     )
     case.step(
         "cycle1_removed_topology",
         "elastic_topology",
-        timeout_s=35,
-        params={
-            "role": "PREFILL",
-            "discovered": 2,
-            "alive": 2,
-            "port": output("cycle1_add", "port"),
-            "present": False,
-        },
+        timeout_s=case.value("normal.cycle1_removed_topology_timeout_s"),
+        params=case.params(
+            "normal.cycle1_removed_topology", {"port": output("cycle1_add", "port")}
+        ),
     )
     case.step(
         "cycle1_zero_errors",
         "elastic_flow_assert",
-        params={"result": output("cycle1_flow_stop", "result"), "min_success_rate": 1},
+        params=case.params(
+            "normal.cycle1_zero_errors",
+            {"result": output("cycle1_flow_stop", "result")},
+        ),
     )
-    case.step("cycle2_add", "elastic_add", params={"role": "prefill"})
+    case.step("cycle2_add", "elastic_add", params=case.value("normal.cycle2_add"))
     case.step(
         "cycle2_added_topology",
         "elastic_topology",
-        timeout_s=35,
-        params={
-            "role": "PREFILL",
-            "discovered": 3,
-            "alive": 3,
-            "port": output("cycle2_add", "port"),
-            "present": True,
-        },
+        timeout_s=case.value("normal.cycle2_added_topology_timeout_s"),
+        params=case.params(
+            "normal.cycle2_added_topology", {"port": output("cycle2_add", "port")}
+        ),
     )
     case.step(
         "cycle2_traffic",
         "elastic_lifecycle_probe",
-        timeout_s=60,
-        params={
-            "engine": output("cycle2_add", "engine"),
-            "window_s": 15,
-            "method": "FetchResponse",
-        },
+        timeout_s=case.value("normal.cycle2_traffic_timeout_s"),
+        params=case.params(
+            "normal.cycle2_traffic", {"engine": output("cycle2_add", "engine")}
+        ),
     )
     case.step("cycle2_flow", "elastic_cold_flow")
-    case.step("cycle2_ramp", "elastic_pause", params={"seconds": 0.5})
+    case.step("cycle2_ramp", "elastic_pause", params=case.value("normal.cycle2_ramp"))
     case.step(
         "cycle2_remove",
         "elastic_remove",
-        timeout_s=75,
-        params={"engine": output("cycle2_add", "engine"), "drain_timeout_ms": 60000},
+        timeout_s=case.value("normal.cycle2_remove_timeout_s"),
+        params=case.params(
+            "normal.cycle2_remove", {"engine": output("cycle2_add", "engine")}
+        ),
     )
     case.step(
         "cycle2_flow_stop",
         "elastic_flow_stop",
-        timeout_s=45,
+        timeout_s=case.value("normal.cycle2_flow_stop_timeout_s"),
         params={"flow": output("cycle2_flow", "flow")},
     )
     case.step(
         "cycle2_protocol",
         "elastic_lifecycle_flow_protocol",
-        params={"flow": output("cycle2_flow", "flow"), "method": "FetchResponse"},
+        params=case.params(
+            "normal.cycle2_protocol", {"flow": output("cycle2_flow", "flow")}
+        ),
     )
     case.step(
         "cycle2_removed_topology",
         "elastic_topology",
-        timeout_s=35,
-        params={
-            "role": "PREFILL",
-            "discovered": 2,
-            "alive": 2,
-            "port": output("cycle2_add", "port"),
-            "present": False,
-        },
+        timeout_s=case.value("normal.cycle2_removed_topology_timeout_s"),
+        params=case.params(
+            "normal.cycle2_removed_topology", {"port": output("cycle2_add", "port")}
+        ),
     )
     case.step(
         "cycle2_zero_errors",
         "elastic_flow_assert",
-        params={"result": output("cycle2_flow_stop", "result"), "min_success_rate": 1},
+        params=case.params(
+            "normal.cycle2_zero_errors",
+            {"result": output("cycle2_flow_stop", "result")},
+        ),
     )
-    case.step("cycle3_add", "elastic_add", params={"role": "prefill"})
+    case.step("cycle3_add", "elastic_add", params=case.value("normal.cycle3_add"))
     case.step(
         "cycle3_added_topology",
         "elastic_topology",
-        timeout_s=35,
-        params={
-            "role": "PREFILL",
-            "discovered": 3,
-            "alive": 3,
-            "port": output("cycle3_add", "port"),
-            "present": True,
-        },
+        timeout_s=case.value("normal.cycle3_added_topology_timeout_s"),
+        params=case.params(
+            "normal.cycle3_added_topology", {"port": output("cycle3_add", "port")}
+        ),
     )
     case.step(
         "cycle3_traffic",
         "elastic_lifecycle_probe",
-        timeout_s=60,
-        params={
-            "engine": output("cycle3_add", "engine"),
-            "window_s": 15,
-            "method": "FetchResponse",
-        },
+        timeout_s=case.value("normal.cycle3_traffic_timeout_s"),
+        params=case.params(
+            "normal.cycle3_traffic", {"engine": output("cycle3_add", "engine")}
+        ),
     )
     case.step("cycle3_flow", "elastic_cold_flow")
-    case.step("cycle3_ramp", "elastic_pause", params={"seconds": 0.5})
+    case.step("cycle3_ramp", "elastic_pause", params=case.value("normal.cycle3_ramp"))
     case.step(
         "cycle3_remove",
         "elastic_remove",
-        timeout_s=75,
-        params={"engine": output("cycle3_add", "engine"), "drain_timeout_ms": 60000},
+        timeout_s=case.value("normal.cycle3_remove_timeout_s"),
+        params=case.params(
+            "normal.cycle3_remove", {"engine": output("cycle3_add", "engine")}
+        ),
     )
     case.step(
         "cycle3_flow_stop",
         "elastic_flow_stop",
-        timeout_s=45,
+        timeout_s=case.value("normal.cycle3_flow_stop_timeout_s"),
         params={"flow": output("cycle3_flow", "flow")},
     )
     case.step(
         "cycle3_protocol",
         "elastic_lifecycle_flow_protocol",
-        params={"flow": output("cycle3_flow", "flow"), "method": "FetchResponse"},
+        params=case.params(
+            "normal.cycle3_protocol", {"flow": output("cycle3_flow", "flow")}
+        ),
     )
     case.step(
         "cycle3_removed_topology",
         "elastic_topology",
-        timeout_s=35,
-        params={
-            "role": "PREFILL",
-            "discovered": 2,
-            "alive": 2,
-            "port": output("cycle3_add", "port"),
-            "present": False,
-        },
+        timeout_s=case.value("normal.cycle3_removed_topology_timeout_s"),
+        params=case.params(
+            "normal.cycle3_removed_topology", {"port": output("cycle3_add", "port")}
+        ),
     )
     case.step(
         "cycle3_zero_errors",
         "elastic_flow_assert",
-        params={"result": output("cycle3_flow_stop", "result"), "min_success_rate": 1},
+        params=case.params(
+            "normal.cycle3_zero_errors",
+            {"result": output("cycle3_flow_stop", "result")},
+        ),
     )
     case.step(
         "recovery",
         "elastic_cycle_recovery",
-        timeout_s=65,
-        params={"method": "FetchResponse"},
+        timeout_s=case.value("normal.recovery_timeout_s"),
+        params=case.value("normal.recovery"),
     )
     case.step(
         "final_topology",
         "elastic_topology",
-        timeout_s=35,
-        params={"role": "PREFILL", "discovered": 2, "alive": 2},
+        timeout_s=case.value("normal.final_topology_timeout_s"),
+        params=case.value("normal.final_topology"),
     )
     case.step("teardown", "teardown")
 
 
 def strict(case):
-    case.step("setup", "setup", timeout_s=180)
+    case.step("setup", "setup", timeout_s=case.value("strict.setup_timeout_s"))
     case.step(
         "initial_topology",
         "elastic_topology",
-        timeout_s=35,
-        params={"role": "PREFILL", "discovered": 2, "alive": 2},
+        timeout_s=case.value("strict.initial_topology_timeout_s"),
+        params=case.value("strict.initial_topology"),
     )
     case.step("preference_flow", "elastic_cold_flow")
-    case.step("ramp", "elastic_pause", params={"seconds": 1})
+    case.step("ramp", "elastic_pause", params=case.value("strict.ramp"))
     case.step(
         "baseline_window",
         "elastic_timeline",
-        timeout_s=25,
-        params={"engines": ["prefill-0", "prefill-1"], "offsets_s": [0, 15]},
+        timeout_s=case.value("strict.baseline_window_timeout_s"),
+        params=case.value("strict.baseline_window"),
     )
-    case.step("add", "elastic_add", params={"role": "prefill"})
+    case.step("add", "elastic_add", params=case.value("strict.add"))
     case.step(
         "first_traffic",
         "elastic_accepted_timed",
-        timeout_s=15,
-        params={"engine": output("add", "engine"), "baseline": 0, "window_s": 10},
+        timeout_s=case.value("strict.first_traffic_timeout_s"),
+        params=case.params("strict.first_traffic", {"engine": output("add", "engine")}),
     )
     case.step(
         "added_topology",
         "elastic_topology",
-        timeout_s=35,
-        params={
-            "role": "PREFILL",
-            "discovered": 3,
-            "alive": 3,
-            "port": output("add", "port"),
-            "present": True,
-        },
+        timeout_s=case.value("strict.added_topology_timeout_s"),
+        params=case.params("strict.added_topology", {"port": output("add", "port")}),
     )
     case.step(
         "post_window",
         "elastic_timeline",
-        timeout_s=55,
-        params={
-            "engines": ["prefill-0", "prefill-1", output("add", "engine")],
-            "offsets_s": [0, 5, 10, 17, 24, 31, 38, 45],
-        },
+        timeout_s=case.value("strict.post_window_timeout_s"),
+        params=case.params(
+            "strict.post_window",
+            {
+                "engines": [
+                    case.value("strict.post_window.engines.item_0"),
+                    case.value("strict.post_window.engines.item_1"),
+                    output("add", "engine"),
+                ]
+            },
+        ),
     )
     case.step(
         "preference_flow_stop",
         "elastic_flow_stop",
-        timeout_s=45,
+        timeout_s=case.value("strict.preference_flow_stop_timeout_s"),
         params={"flow": output("preference_flow", "flow")},
     )
     case.step(
         "preference_protocol",
         "elastic_lifecycle_flow_protocol",
-        params={"flow": output("preference_flow", "flow"), "method": "FetchResponse"},
+        params=case.params(
+            "strict.preference_protocol", {"flow": output("preference_flow", "flow")}
+        ),
     )
     case.step(
         "add_availability",
@@ -422,301 +406,292 @@ def strict(case):
     case.step(
         "preference_shares",
         "elastic_share",
-        params={
-            "series": output("post_window", "series"),
-            "engine": output("add", "engine"),
-            "max_share": 0.5,
-            "old_floor": 0.1,
-            "exclusive": False,
-            "require_new": False,
-        },
+        params=case.params(
+            "strict.preference_shares",
+            {
+                "series": output("post_window", "series"),
+                "engine": output("add", "engine"),
+            },
+        ),
     )
     case.step(
         "preference_availability",
         "elastic_flow_assert",
-        params={
-            "result": output("preference_flow_stop", "result"),
-            "min_success_rate": 0.9,
-        },
+        params=case.params(
+            "strict.preference_availability",
+            {"result": output("preference_flow_stop", "result")},
+        ),
     )
     case.step("remove_flow", "elastic_cold_flow")
     case.step(
         "remove_traffic",
         "elastic_lifecycle_probe",
-        timeout_s=60,
-        params={
-            "engine": output("add", "engine"),
-            "window_s": 10,
-            "method": "FetchResponse",
-        },
+        timeout_s=case.value("strict.remove_traffic_timeout_s"),
+        params=case.params(
+            "strict.remove_traffic", {"engine": output("add", "engine")}
+        ),
     )
     case.step(
         "remove",
         "elastic_remove",
-        timeout_s=75,
-        params={"engine": output("add", "engine"), "drain_timeout_ms": 60000},
+        timeout_s=case.value("strict.remove_timeout_s"),
+        params=case.params("strict.remove", {"engine": output("add", "engine")}),
     )
-    case.step("remove_hold", "elastic_pause", params={"seconds": 3})
+    case.step("remove_hold", "elastic_pause", params=case.value("strict.remove_hold"))
     case.step(
         "remove_flow_stop",
         "elastic_flow_stop",
-        timeout_s=45,
+        timeout_s=case.value("strict.remove_flow_stop_timeout_s"),
         params={"flow": output("remove_flow", "flow")},
     )
     case.step(
         "remove_protocol",
         "elastic_lifecycle_flow_protocol",
-        params={"flow": output("remove_flow", "flow"), "method": "FetchResponse"},
+        params=case.params(
+            "strict.remove_protocol", {"flow": output("remove_flow", "flow")}
+        ),
     )
     case.step(
         "removed_topology",
         "elastic_topology",
-        timeout_s=35,
-        params={
-            "role": "PREFILL",
-            "discovered": 2,
-            "alive": 2,
-            "port": output("add", "port"),
-            "present": False,
-        },
+        timeout_s=case.value("strict.removed_topology_timeout_s"),
+        params=case.params("strict.removed_topology", {"port": output("add", "port")}),
     )
-    case.step("remove_accounting", "elastic_accounting", timeout_s=105)
+    case.step(
+        "remove_accounting",
+        "elastic_accounting",
+        timeout_s=case.value("strict.remove_accounting_timeout_s"),
+    )
     case.step(
         "remove_zero_errors",
         "elastic_flow_assert",
-        params={"result": output("remove_flow_stop", "result"), "min_success_rate": 1},
+        params=case.params(
+            "strict.remove_zero_errors",
+            {"result": output("remove_flow_stop", "result")},
+        ),
     )
-    case.step("cycle1_add", "elastic_add", params={"role": "prefill"})
+    case.step("cycle1_add", "elastic_add", params=case.value("strict.cycle1_add"))
     case.step(
         "cycle1_added_topology",
         "elastic_topology",
-        timeout_s=35,
-        params={
-            "role": "PREFILL",
-            "discovered": 3,
-            "alive": 3,
-            "port": output("cycle1_add", "port"),
-            "present": True,
-        },
+        timeout_s=case.value("strict.cycle1_added_topology_timeout_s"),
+        params=case.params(
+            "strict.cycle1_added_topology", {"port": output("cycle1_add", "port")}
+        ),
     )
     case.step(
         "cycle1_traffic",
         "elastic_lifecycle_probe",
-        timeout_s=60,
-        params={
-            "engine": output("cycle1_add", "engine"),
-            "window_s": 15,
-            "method": "FetchResponse",
-        },
+        timeout_s=case.value("strict.cycle1_traffic_timeout_s"),
+        params=case.params(
+            "strict.cycle1_traffic", {"engine": output("cycle1_add", "engine")}
+        ),
     )
     case.step("cycle1_flow", "elastic_cold_flow")
-    case.step("cycle1_ramp", "elastic_pause", params={"seconds": 0.5})
+    case.step("cycle1_ramp", "elastic_pause", params=case.value("strict.cycle1_ramp"))
     case.step(
         "cycle1_remove",
         "elastic_remove",
-        timeout_s=75,
-        params={"engine": output("cycle1_add", "engine"), "drain_timeout_ms": 60000},
+        timeout_s=case.value("strict.cycle1_remove_timeout_s"),
+        params=case.params(
+            "strict.cycle1_remove", {"engine": output("cycle1_add", "engine")}
+        ),
     )
     case.step(
         "cycle1_flow_stop",
         "elastic_flow_stop",
-        timeout_s=45,
+        timeout_s=case.value("strict.cycle1_flow_stop_timeout_s"),
         params={"flow": output("cycle1_flow", "flow")},
     )
     case.step(
         "cycle1_protocol",
         "elastic_lifecycle_flow_protocol",
-        params={"flow": output("cycle1_flow", "flow"), "method": "FetchResponse"},
+        params=case.params(
+            "strict.cycle1_protocol", {"flow": output("cycle1_flow", "flow")}
+        ),
     )
     case.step(
         "cycle1_removed_topology",
         "elastic_topology",
-        timeout_s=35,
-        params={
-            "role": "PREFILL",
-            "discovered": 2,
-            "alive": 2,
-            "port": output("cycle1_add", "port"),
-            "present": False,
-        },
+        timeout_s=case.value("strict.cycle1_removed_topology_timeout_s"),
+        params=case.params(
+            "strict.cycle1_removed_topology", {"port": output("cycle1_add", "port")}
+        ),
     )
     case.step(
         "cycle1_zero_errors",
         "elastic_flow_assert",
-        params={"result": output("cycle1_flow_stop", "result"), "min_success_rate": 1},
+        params=case.params(
+            "strict.cycle1_zero_errors",
+            {"result": output("cycle1_flow_stop", "result")},
+        ),
     )
-    case.step("cycle2_add", "elastic_add", params={"role": "prefill"})
+    case.step("cycle2_add", "elastic_add", params=case.value("strict.cycle2_add"))
     case.step(
         "cycle2_added_topology",
         "elastic_topology",
-        timeout_s=35,
-        params={
-            "role": "PREFILL",
-            "discovered": 3,
-            "alive": 3,
-            "port": output("cycle2_add", "port"),
-            "present": True,
-        },
+        timeout_s=case.value("strict.cycle2_added_topology_timeout_s"),
+        params=case.params(
+            "strict.cycle2_added_topology", {"port": output("cycle2_add", "port")}
+        ),
     )
     case.step(
         "cycle2_traffic",
         "elastic_lifecycle_probe",
-        timeout_s=60,
-        params={
-            "engine": output("cycle2_add", "engine"),
-            "window_s": 15,
-            "method": "FetchResponse",
-        },
+        timeout_s=case.value("strict.cycle2_traffic_timeout_s"),
+        params=case.params(
+            "strict.cycle2_traffic", {"engine": output("cycle2_add", "engine")}
+        ),
     )
     case.step("cycle2_flow", "elastic_cold_flow")
-    case.step("cycle2_ramp", "elastic_pause", params={"seconds": 0.5})
+    case.step("cycle2_ramp", "elastic_pause", params=case.value("strict.cycle2_ramp"))
     case.step(
         "cycle2_remove",
         "elastic_remove",
-        timeout_s=75,
-        params={"engine": output("cycle2_add", "engine"), "drain_timeout_ms": 60000},
+        timeout_s=case.value("strict.cycle2_remove_timeout_s"),
+        params=case.params(
+            "strict.cycle2_remove", {"engine": output("cycle2_add", "engine")}
+        ),
     )
     case.step(
         "cycle2_flow_stop",
         "elastic_flow_stop",
-        timeout_s=45,
+        timeout_s=case.value("strict.cycle2_flow_stop_timeout_s"),
         params={"flow": output("cycle2_flow", "flow")},
     )
     case.step(
         "cycle2_protocol",
         "elastic_lifecycle_flow_protocol",
-        params={"flow": output("cycle2_flow", "flow"), "method": "FetchResponse"},
+        params=case.params(
+            "strict.cycle2_protocol", {"flow": output("cycle2_flow", "flow")}
+        ),
     )
     case.step(
         "cycle2_removed_topology",
         "elastic_topology",
-        timeout_s=35,
-        params={
-            "role": "PREFILL",
-            "discovered": 2,
-            "alive": 2,
-            "port": output("cycle2_add", "port"),
-            "present": False,
-        },
+        timeout_s=case.value("strict.cycle2_removed_topology_timeout_s"),
+        params=case.params(
+            "strict.cycle2_removed_topology", {"port": output("cycle2_add", "port")}
+        ),
     )
     case.step(
         "cycle2_zero_errors",
         "elastic_flow_assert",
-        params={"result": output("cycle2_flow_stop", "result"), "min_success_rate": 1},
+        params=case.params(
+            "strict.cycle2_zero_errors",
+            {"result": output("cycle2_flow_stop", "result")},
+        ),
     )
-    case.step("cycle3_add", "elastic_add", params={"role": "prefill"})
+    case.step("cycle3_add", "elastic_add", params=case.value("strict.cycle3_add"))
     case.step(
         "cycle3_added_topology",
         "elastic_topology",
-        timeout_s=35,
-        params={
-            "role": "PREFILL",
-            "discovered": 3,
-            "alive": 3,
-            "port": output("cycle3_add", "port"),
-            "present": True,
-        },
+        timeout_s=case.value("strict.cycle3_added_topology_timeout_s"),
+        params=case.params(
+            "strict.cycle3_added_topology", {"port": output("cycle3_add", "port")}
+        ),
     )
     case.step(
         "cycle3_traffic",
         "elastic_lifecycle_probe",
-        timeout_s=60,
-        params={
-            "engine": output("cycle3_add", "engine"),
-            "window_s": 15,
-            "method": "FetchResponse",
-        },
+        timeout_s=case.value("strict.cycle3_traffic_timeout_s"),
+        params=case.params(
+            "strict.cycle3_traffic", {"engine": output("cycle3_add", "engine")}
+        ),
     )
     case.step("cycle3_flow", "elastic_cold_flow")
-    case.step("cycle3_ramp", "elastic_pause", params={"seconds": 0.5})
+    case.step("cycle3_ramp", "elastic_pause", params=case.value("strict.cycle3_ramp"))
     case.step(
         "cycle3_remove",
         "elastic_remove",
-        timeout_s=75,
-        params={"engine": output("cycle3_add", "engine"), "drain_timeout_ms": 60000},
+        timeout_s=case.value("strict.cycle3_remove_timeout_s"),
+        params=case.params(
+            "strict.cycle3_remove", {"engine": output("cycle3_add", "engine")}
+        ),
     )
     case.step(
         "cycle3_flow_stop",
         "elastic_flow_stop",
-        timeout_s=45,
+        timeout_s=case.value("strict.cycle3_flow_stop_timeout_s"),
         params={"flow": output("cycle3_flow", "flow")},
     )
     case.step(
         "cycle3_protocol",
         "elastic_lifecycle_flow_protocol",
-        params={"flow": output("cycle3_flow", "flow"), "method": "FetchResponse"},
+        params=case.params(
+            "strict.cycle3_protocol", {"flow": output("cycle3_flow", "flow")}
+        ),
     )
     case.step(
         "cycle3_removed_topology",
         "elastic_topology",
-        timeout_s=35,
-        params={
-            "role": "PREFILL",
-            "discovered": 2,
-            "alive": 2,
-            "port": output("cycle3_add", "port"),
-            "present": False,
-        },
+        timeout_s=case.value("strict.cycle3_removed_topology_timeout_s"),
+        params=case.params(
+            "strict.cycle3_removed_topology", {"port": output("cycle3_add", "port")}
+        ),
     )
     case.step(
         "cycle3_zero_errors",
         "elastic_flow_assert",
-        params={"result": output("cycle3_flow_stop", "result"), "min_success_rate": 1},
+        params=case.params(
+            "strict.cycle3_zero_errors",
+            {"result": output("cycle3_flow_stop", "result")},
+        ),
     )
     case.step(
         "recovery",
         "elastic_cycle_recovery",
-        timeout_s=65,
-        params={"method": "FetchResponse"},
+        timeout_s=case.value("strict.recovery_timeout_s"),
+        params=case.value("strict.recovery"),
     )
     case.step(
         "final_topology",
         "elastic_topology",
-        timeout_s=35,
-        params={"role": "PREFILL", "discovered": 2, "alive": 2},
+        timeout_s=case.value("strict.final_topology_timeout_s"),
+        params=case.value("strict.final_topology"),
     )
     case.step("teardown", "teardown")
 
 
 def rebalance(case):
-    case.step("setup", "setup", timeout_s=180)
+    case.step("setup", "setup", timeout_s=case.value("rebalance.setup_timeout_s"))
     case.step(
         "initial_topology",
         "elastic_topology",
-        timeout_s=35,
-        params={"role": "PREFILL", "discovered": 2, "alive": 2},
+        timeout_s=case.value("rebalance.initial_topology_timeout_s"),
+        params=case.value("rebalance.initial_topology"),
     )
     case.step(
         "rebalance_baseline",
         "elastic_rebalance_batch",
-        timeout_s=240,
-        params={"method": "FetchResponse"},
+        timeout_s=case.value("rebalance.rebalance_baseline_timeout_s"),
+        params=case.value("rebalance.rebalance_baseline"),
     )
     case.step(
         "baseline_after",
         "elastic_timeline",
-        params={"engines": ["prefill-0", "prefill-1"], "offsets_s": [0]},
+        params=case.value("rebalance.baseline_after"),
     )
-    case.step("add", "elastic_add", params={"role": "prefill"})
+    case.step("add", "elastic_add", params=case.value("rebalance.add"))
     case.step(
         "added_topology",
         "elastic_topology",
-        timeout_s=35,
-        params={
-            "role": "PREFILL",
-            "discovered": 3,
-            "alive": 3,
-            "port": output("add", "port"),
-            "present": True,
-        },
+        timeout_s=case.value("rebalance.added_topology_timeout_s"),
+        params=case.params("rebalance.added_topology", {"port": output("add", "port")}),
     )
     case.step(
         "rebalance_before",
         "elastic_timeline",
-        params={
-            "engines": ["prefill-0", "prefill-1", output("add", "engine")],
-            "offsets_s": [0],
-        },
+        params=case.params(
+            "rebalance.rebalance_before",
+            {
+                "engines": [
+                    case.value("rebalance.rebalance_before.engines.item_0"),
+                    case.value("rebalance.rebalance_before.engines.item_1"),
+                    output("add", "engine"),
+                ]
+            },
+        ),
     )
     case.step(
         "rebalance_anchor",
@@ -730,36 +705,43 @@ def rebalance(case):
     case.step(
         "rebalance_after_add",
         "elastic_rebalance_batch",
-        timeout_s=240,
-        params={"method": "FetchResponse"},
+        timeout_s=case.value("rebalance.rebalance_after_add_timeout_s"),
+        params=case.value("rebalance.rebalance_after_add"),
     )
     case.step(
         "rebalance_after",
         "elastic_timeline",
-        params={
-            "engines": ["prefill-0", "prefill-1", output("add", "engine")],
-            "offsets_s": [0],
-        },
+        params=case.params(
+            "rebalance.rebalance_after",
+            {
+                "engines": [
+                    case.value("rebalance.rebalance_after.engines.item_0"),
+                    case.value("rebalance.rebalance_after.engines.item_1"),
+                    output("add", "engine"),
+                ]
+            },
+        ),
     )
     case.step(
         "rebalance_share",
         "elastic_share",
-        params={
-            "before": output("rebalance_anchor", "before"),
-            "after": output("rebalance_after", "last"),
-            "engine": output("add", "engine"),
-            "max_share": 0.6,
-            "old_floor": 0,
-            "exclusive": True,
-            "require_new": True,
-        },
+        params=case.params(
+            "rebalance.rebalance_share",
+            {
+                "before": output("rebalance_anchor", "before"),
+                "after": output("rebalance_after", "last"),
+                "engine": output("add", "engine"),
+            },
+        ),
     )
     case.step("teardown", "teardown")
 
 
 def kv_skew_hot(case):
-    case.step("setup", "setup", timeout_s=180)
-    case.step("seed", "elastic_seed", timeout_s=120)
+    case.step("setup", "setup", timeout_s=case.value("kv_skew_hot.setup_timeout_s"))
+    case.step(
+        "seed", "elastic_seed", timeout_s=case.value("kv_skew_hot.seed_timeout_s")
+    )
     case.step("metrics", "elastic_metrics_start")
     case.step(
         "flow", "elastic_flow_start", params={"families": output("seed", "families")}
@@ -767,72 +749,82 @@ def kv_skew_hot(case):
     case.step(
         "baseline",
         "elastic_baseline",
-        timeout_s=30,
-        params={"observation": output("metrics", "observation"), "phase": "baseline"},
+        timeout_s=case.value("kv_skew_hot.baseline_timeout_s"),
+        params=case.params(
+            "kv_skew_hot.baseline", {"observation": output("metrics", "observation")}
+        ),
     )
     case.step(
         "scale",
         "elastic_scale",
-        timeout_s=75,
-        params={
-            "families": output("seed", "families"),
-            "victim": "hot",
-            "drain_timeout_ms": 60000,
-        },
+        timeout_s=case.value("kv_skew_hot.scale_timeout_s"),
+        params=case.params(
+            "kv_skew_hot.scale", {"families": output("seed", "families")}
+        ),
     )
     case.step(
         "transient",
         "elastic_window",
-        timeout_s=30,
-        params={
-            "observation": output("metrics", "observation"),
-            "baseline": output("baseline", "window"),
-            "scale": output("scale", "scale"),
-            "families": output("seed", "families"),
-            "victim": "hot",
-            "phase": "transient",
-        },
+        timeout_s=case.value("kv_skew_hot.transient_timeout_s"),
+        params=case.params(
+            "kv_skew_hot.transient",
+            {
+                "observation": output("metrics", "observation"),
+                "baseline": output("baseline", "window"),
+                "scale": output("scale", "scale"),
+                "families": output("seed", "families"),
+            },
+        ),
     )
     case.step(
         "steady",
         "elastic_window",
-        timeout_s=95,
-        params={
-            "observation": output("metrics", "observation"),
-            "baseline": output("baseline", "window"),
-            "scale": output("scale", "scale"),
-            "families": output("seed", "families"),
-            "victim": "hot",
-            "transient": output("transient", "window"),
-            "phase": "steady",
-        },
+        timeout_s=case.value("kv_skew_hot.steady_timeout_s"),
+        params=case.params(
+            "kv_skew_hot.steady",
+            {
+                "observation": output("metrics", "observation"),
+                "baseline": output("baseline", "window"),
+                "scale": output("scale", "scale"),
+                "families": output("seed", "families"),
+                "transient": output("transient", "window"),
+            },
+        ),
     )
     case.step(
         "flow_stop",
         "elastic_flow_stop",
-        timeout_s=65,
+        timeout_s=case.value("kv_skew_hot.flow_stop_timeout_s"),
         params={"flow": output("flow", "flow")},
     )
-    case.step("recovery", "elastic_recovery", timeout_s=240)
+    case.step(
+        "recovery",
+        "elastic_recovery",
+        timeout_s=case.value("kv_skew_hot.recovery_timeout_s"),
+    )
     case.step(
         "verdict",
         "elastic_verdict",
-        params={
-            "baseline": output("baseline", "window"),
-            "transient": output("transient", "window"),
-            "steady": output("steady", "window"),
-            "scale": output("scale", "scale"),
-            "flow_result": output("flow_stop", "result"),
-            "recovery": output("recovery", "requests"),
-            "victim": "hot",
-        },
+        params=case.params(
+            "kv_skew_hot.verdict",
+            {
+                "baseline": output("baseline", "window"),
+                "transient": output("transient", "window"),
+                "steady": output("steady", "window"),
+                "scale": output("scale", "scale"),
+                "flow_result": output("flow_stop", "result"),
+                "recovery": output("recovery", "requests"),
+            },
+        ),
     )
     case.step("teardown", "teardown")
 
 
 def kv_skew_cold(case):
-    case.step("setup", "setup", timeout_s=180)
-    case.step("seed", "elastic_seed", timeout_s=120)
+    case.step("setup", "setup", timeout_s=case.value("kv_skew_cold.setup_timeout_s"))
+    case.step(
+        "seed", "elastic_seed", timeout_s=case.value("kv_skew_cold.seed_timeout_s")
+    )
     case.step("metrics", "elastic_metrics_start")
     case.step(
         "flow", "elastic_flow_start", params={"families": output("seed", "families")}
@@ -840,84 +832,95 @@ def kv_skew_cold(case):
     case.step(
         "baseline",
         "elastic_baseline",
-        timeout_s=30,
-        params={"observation": output("metrics", "observation"), "phase": "baseline"},
+        timeout_s=case.value("kv_skew_cold.baseline_timeout_s"),
+        params=case.params(
+            "kv_skew_cold.baseline", {"observation": output("metrics", "observation")}
+        ),
     )
     case.step(
         "scale",
         "elastic_scale",
-        timeout_s=75,
-        params={
-            "families": output("seed", "families"),
-            "victim": "cold",
-            "drain_timeout_ms": 60000,
-        },
+        timeout_s=case.value("kv_skew_cold.scale_timeout_s"),
+        params=case.params(
+            "kv_skew_cold.scale", {"families": output("seed", "families")}
+        ),
     )
     case.step(
         "transient",
         "elastic_window",
-        timeout_s=30,
-        params={
-            "observation": output("metrics", "observation"),
-            "baseline": output("baseline", "window"),
-            "scale": output("scale", "scale"),
-            "families": output("seed", "families"),
-            "victim": "cold",
-            "phase": "transient",
-        },
+        timeout_s=case.value("kv_skew_cold.transient_timeout_s"),
+        params=case.params(
+            "kv_skew_cold.transient",
+            {
+                "observation": output("metrics", "observation"),
+                "baseline": output("baseline", "window"),
+                "scale": output("scale", "scale"),
+                "families": output("seed", "families"),
+            },
+        ),
     )
     case.step(
         "steady",
         "elastic_window",
-        timeout_s=95,
-        params={
-            "observation": output("metrics", "observation"),
-            "baseline": output("baseline", "window"),
-            "scale": output("scale", "scale"),
-            "families": output("seed", "families"),
-            "victim": "cold",
-            "transient": output("transient", "window"),
-            "phase": "steady",
-        },
+        timeout_s=case.value("kv_skew_cold.steady_timeout_s"),
+        params=case.params(
+            "kv_skew_cold.steady",
+            {
+                "observation": output("metrics", "observation"),
+                "baseline": output("baseline", "window"),
+                "scale": output("scale", "scale"),
+                "families": output("seed", "families"),
+                "transient": output("transient", "window"),
+            },
+        ),
     )
     case.step(
         "flow_stop",
         "elastic_flow_stop",
-        timeout_s=65,
+        timeout_s=case.value("kv_skew_cold.flow_stop_timeout_s"),
         params={"flow": output("flow", "flow")},
     )
-    case.step("recovery", "elastic_recovery", timeout_s=240)
+    case.step(
+        "recovery",
+        "elastic_recovery",
+        timeout_s=case.value("kv_skew_cold.recovery_timeout_s"),
+    )
     case.step(
         "verdict",
         "elastic_verdict",
-        params={
-            "baseline": output("baseline", "window"),
-            "transient": output("transient", "window"),
-            "steady": output("steady", "window"),
-            "scale": output("scale", "scale"),
-            "flow_result": output("flow_stop", "result"),
-            "recovery": output("recovery", "requests"),
-            "victim": "cold",
-        },
+        params=case.params(
+            "kv_skew_cold.verdict",
+            {
+                "baseline": output("baseline", "window"),
+                "transient": output("transient", "window"),
+                "steady": output("steady", "window"),
+                "scale": output("scale", "scale"),
+                "flow_result": output("flow_stop", "result"),
+                "recovery": output("recovery", "requests"),
+            },
+        ),
     )
     case.step("teardown", "teardown")
 
 
 def steady_recovery(case):
-    case.step("setup", "setup", timeout_s=180)
+    case.step("setup", "setup", timeout_s=case.value("steady_recovery.setup_timeout_s"))
     case.step(
         "initial_topology",
         "elastic_topology",
-        timeout_s=35,
-        params={"role": "DECODE", "discovered": 4, "alive": 4},
+        timeout_s=case.value("steady_recovery.initial_topology_timeout_s"),
+        params=case.value("steady_recovery.initial_topology"),
     )
     case.step("observe", "elastic_balance_observe")
-    case.step("flow", "elastic_balance_flow", params={"interval_s": 0.2})
+    case.step("flow", "elastic_balance_flow", params=case.value("steady_recovery.flow"))
     case.step(
         "baseline",
         "elastic_balance_window",
-        timeout_s=25,
-        params={"observation": output("observe", "observation"), "duration_s": 20},
+        timeout_s=case.value("steady_recovery.baseline_timeout_s"),
+        params=case.params(
+            "steady_recovery.baseline",
+            {"observation": output("observe", "observation")},
+        ),
     )
     case.step(
         "baseline_guard",
@@ -927,38 +930,43 @@ def steady_recovery(case):
     case.step(
         "remove",
         "elastic_balance_remove",
-        timeout_s=110,
-        params={"engine": "decode-0", "drain_timeout_ms": 60000},
+        timeout_s=case.value("steady_recovery.remove_timeout_s"),
+        params=case.value("steady_recovery.remove"),
     )
     case.step(
         "transient",
         "elastic_balance_window",
-        timeout_s=25,
-        params={"observation": output("observe", "observation"), "duration_s": 20},
+        timeout_s=case.value("steady_recovery.transient_timeout_s"),
+        params=case.params(
+            "steady_recovery.transient",
+            {"observation": output("observe", "observation")},
+        ),
     )
     case.step(
         "settled_topology",
         "elastic_topology",
-        timeout_s=35,
-        params={
-            "role": "DECODE",
-            "discovered": 3,
-            "alive": 3,
-            "port": output("remove", "port"),
-            "present": False,
-        },
+        timeout_s=case.value("steady_recovery.settled_topology_timeout_s"),
+        params=case.params(
+            "steady_recovery.settled_topology", {"port": output("remove", "port")}
+        ),
     )
     case.step(
         "steady",
         "elastic_balance_window",
-        timeout_s=65,
-        params={"observation": output("observe", "observation"), "duration_s": 60},
+        timeout_s=case.value("steady_recovery.steady_timeout_s"),
+        params=case.params(
+            "steady_recovery.steady", {"observation": output("observe", "observation")}
+        ),
     )
-    case.step("recovery", "elastic_pending_recovery", timeout_s=100)
+    case.step(
+        "recovery",
+        "elastic_pending_recovery",
+        timeout_s=case.value("steady_recovery.recovery_timeout_s"),
+    )
     case.step(
         "flow_stop",
         "elastic_flow_stop",
-        timeout_s=65,
+        timeout_s=case.value("steady_recovery.flow_stop_timeout_s"),
         params={"flow": output("flow", "flow")},
     )
     case.step(
@@ -973,102 +981,112 @@ def steady_recovery(case):
 
 
 def kv_full_shrink(case):
-    case.step("setup", "setup", timeout_s=180)
+    case.step("setup", "setup", timeout_s=case.value("kv_full_shrink.setup_timeout_s"))
     case.step(
         "initial_topology",
         "elastic_topology",
-        timeout_s=35,
-        params={"role": "DECODE", "discovered": 2, "alive": 2},
+        timeout_s=case.value("kv_full_shrink.initial_topology_timeout_s"),
+        params=case.value("kv_full_shrink.initial_topology"),
     )
     case.step("observe", "elastic_balance_observe")
     case.step(
         "baseline_flow",
         "elastic_balance_flow",
-        params={"interval_s": 0.5, "stream_timeout_s": 10},
+        params=case.value("kv_full_shrink.baseline_flow"),
     )
-    case.step("baseline_ramp", "elastic_pause", params={"seconds": 1})
+    case.step(
+        "baseline_ramp",
+        "elastic_pause",
+        params=case.value("kv_full_shrink.baseline_ramp"),
+    )
     case.step(
         "baseline",
         "elastic_balance_window",
-        timeout_s=25,
-        params={
-            "observation": output("observe", "observation"),
-            "since": output("observe", "started_s"),
-            "duration_s": 20,
-        },
+        timeout_s=case.value("kv_full_shrink.baseline_timeout_s"),
+        params=case.params(
+            "kv_full_shrink.baseline",
+            {
+                "observation": output("observe", "observation"),
+                "since": output("observe", "started_s"),
+            },
+        ),
     )
     case.step(
         "baseline_stop",
         "elastic_flow_stop",
-        timeout_s=65,
+        timeout_s=case.value("kv_full_shrink.baseline_stop_timeout_s"),
         params={"flow": output("baseline_flow", "flow")},
     )
     case.step(
         "slow_both",
         "engine_control",
-        params={
-            "operation": "set_perf",
-            "targets": ["decode-0", "decode-1"],
-            "perf": {"decode_scale": 60},
-        },
+        params=case.value("kv_full_shrink.slow_both"),
     )
-    case.step("slow_sync", "elastic_pause", params={"seconds": 1})
+    case.step(
+        "slow_sync", "elastic_pause", params=case.value("kv_full_shrink.slow_sync")
+    )
     case.step(
         "fill_ok",
         "elastic_decode_fill",
-        timeout_s=70,
-        params={"victim": "decode-0", "survivor": "decode-1"},
+        timeout_s=case.value("kv_full_shrink.fill_ok_timeout_s"),
+        params=case.value("kv_full_shrink.fill_ok"),
     )
     case.step(
         "remove_ok",
         "elastic_balance_remove",
-        timeout_s=110,
-        params={"engine": "decode-0", "drain_timeout_ms": 60000},
+        timeout_s=case.value("kv_full_shrink.remove_ok_timeout_s"),
+        params=case.value("kv_full_shrink.remove_ok"),
     )
     case.step(
         "collect_ok",
         "elastic_full_collect",
-        timeout_s=100,
+        timeout_s=case.value("kv_full_shrink.collect_ok_timeout_s"),
         params={
             "requests": output("fill_ok", "requests"),
             "mutation": output("remove_ok", "mutation"),
         },
     )
-    case.step("accounting_ok", "elastic_pending_accounting", timeout_s=60)
-    case.step("add_decode", "elastic_add", params={"role": "decode"})
+    case.step(
+        "accounting_ok",
+        "elastic_pending_accounting",
+        timeout_s=case.value("kv_full_shrink.accounting_ok_timeout_s"),
+    )
+    case.step(
+        "add_decode", "elastic_add", params=case.value("kv_full_shrink.add_decode")
+    )
     case.step(
         "restored_topology",
         "elastic_topology",
-        timeout_s=35,
-        params={
-            "role": "DECODE",
-            "discovered": 2,
-            "alive": 2,
-            "port": output("add_decode", "port"),
-            "present": True,
-        },
+        timeout_s=case.value("kv_full_shrink.restored_topology_timeout_s"),
+        params=case.params(
+            "kv_full_shrink.restored_topology", {"port": output("add_decode", "port")}
+        ),
     )
     case.step("settled", "elastic_balance_mark")
     case.step(
         "steady_flow",
         "elastic_balance_flow",
-        params={"interval_s": 0.5, "stream_timeout_s": 10},
+        params=case.value("kv_full_shrink.steady_flow"),
     )
-    case.step("steady_ramp", "elastic_pause", params={"seconds": 1})
+    case.step(
+        "steady_ramp", "elastic_pause", params=case.value("kv_full_shrink.steady_ramp")
+    )
     case.step(
         "steady",
         "elastic_balance_window",
-        timeout_s=65,
-        params={
-            "observation": output("observe", "observation"),
-            "since": output("settled", "time_s"),
-            "duration_s": 60,
-        },
+        timeout_s=case.value("kv_full_shrink.steady_timeout_s"),
+        params=case.params(
+            "kv_full_shrink.steady",
+            {
+                "observation": output("observe", "observation"),
+                "since": output("settled", "time_s"),
+            },
+        ),
     )
     case.step(
         "steady_stop",
         "elastic_flow_stop",
-        timeout_s=65,
+        timeout_s=case.value("kv_full_shrink.steady_stop_timeout_s"),
         params={"flow": output("steady_flow", "flow")},
     )
     case.step(
@@ -1100,43 +1118,46 @@ def kv_full_shrink(case):
     case.step(
         "terminal_ok",
         "elastic_full_terminal",
-        params={"result": output("collect_ok", "result"), "branch": "drain_ok"},
+        params=case.params(
+            "kv_full_shrink.terminal_ok", {"result": output("collect_ok", "result")}
+        ),
     )
     case.step(
         "slow_victim",
         "engine_control",
-        params={
-            "operation": "set_perf",
-            "targets": ["decode-1"],
-            "perf": {"decode_scale": 1000},
-        },
+        params=case.value("kv_full_shrink.slow_victim"),
     )
     case.step(
         "slow_survivor",
         "engine_control",
-        params={
-            "operation": "set_perf",
-            "targets": [output("add_decode", "engine")],
-            "perf": {"decode_scale": 60},
-        },
+        params=case.params(
+            "kv_full_shrink.slow_survivor",
+            {"targets": [output("add_decode", "engine")]},
+        ),
     )
-    case.step("timeout_sync", "elastic_pause", params={"seconds": 1})
+    case.step(
+        "timeout_sync",
+        "elastic_pause",
+        params=case.value("kv_full_shrink.timeout_sync"),
+    )
     case.step(
         "fill_timeout",
         "elastic_decode_fill",
-        timeout_s=70,
-        params={"victim": "decode-1", "survivor": output("add_decode", "engine")},
+        timeout_s=case.value("kv_full_shrink.fill_timeout_timeout_s"),
+        params=case.params(
+            "kv_full_shrink.fill_timeout", {"survivor": output("add_decode", "engine")}
+        ),
     )
     case.step(
         "remove_timeout",
         "elastic_balance_remove",
-        timeout_s=110,
-        params={"engine": "decode-1", "drain_timeout_ms": 5000},
+        timeout_s=case.value("kv_full_shrink.remove_timeout_timeout_s"),
+        params=case.value("kv_full_shrink.remove_timeout"),
     )
     case.step(
         "collect_timeout",
         "elastic_full_collect",
-        timeout_s=100,
+        timeout_s=case.value("kv_full_shrink.collect_timeout_timeout_s"),
         params={
             "requests": output("fill_timeout", "requests"),
             "mutation": output("remove_timeout", "mutation"),
@@ -1145,8 +1166,11 @@ def kv_full_shrink(case):
     case.step(
         "observe_full_transient",
         "elastic_balance_window",
-        timeout_s=25,
-        params={"observation": output("observe", "observation"), "duration_s": 20},
+        timeout_s=case.value("kv_full_shrink.observe_full_transient_timeout_s"),
+        params=case.params(
+            "kv_full_shrink.observe_full_transient",
+            {"observation": output("observe", "observation")},
+        ),
     )
     case.step(
         "transient_timeout",
@@ -1160,84 +1184,101 @@ def kv_full_shrink(case):
     case.step(
         "terminal_timeout",
         "elastic_full_terminal",
-        params={
-            "result": output("collect_timeout", "result"),
-            "branch": "drain_timeout",
-        },
+        params=case.params(
+            "kv_full_shrink.terminal_timeout",
+            {"result": output("collect_timeout", "result")},
+        ),
     )
     case.step(
         "restore_survivor",
         "engine_control",
-        params={
-            "operation": "set_perf",
-            "targets": [output("add_decode", "engine")],
-            "perf": {"decode_scale": 1},
-        },
+        params=case.params(
+            "kv_full_shrink.restore_survivor",
+            {"targets": [output("add_decode", "engine")]},
+        ),
     )
-    case.step("recovery", "elastic_pending_recovery", timeout_s=100)
+    case.step(
+        "recovery",
+        "elastic_pending_recovery",
+        timeout_s=case.value("kv_full_shrink.recovery_timeout_s"),
+    )
     case.step("teardown", "teardown")
 
 
 def transient_imbalance(case):
-    case.step("setup", "setup", timeout_s=180)
+    case.step(
+        "setup", "setup", timeout_s=case.value("transient_imbalance.setup_timeout_s")
+    )
     case.step(
         "initial_topology",
         "elastic_topology",
-        timeout_s=35,
-        params={"role": "PREFILL", "discovered": 3, "alive": 3},
+        timeout_s=case.value("transient_imbalance.initial_topology_timeout_s"),
+        params=case.value("transient_imbalance.initial_topology"),
     )
     case.step("observe", "elastic_transient_observe")
-    case.step("flow", "elastic_balance_flow", params={"interval_s": 0.1})
+    case.step(
+        "flow", "elastic_balance_flow", params=case.value("transient_imbalance.flow")
+    )
     case.step(
         "baseline",
         "elastic_balance_window",
-        timeout_s=30,
-        params={
-            "observation": output("observe", "observation"),
-            "duration_s": 20,
-            "since": output("observe", "started_s"),
-        },
+        timeout_s=case.value("transient_imbalance.baseline_timeout_s"),
+        params=case.params(
+            "transient_imbalance.baseline",
+            {
+                "observation": output("observe", "observation"),
+                "since": output("observe", "started_s"),
+            },
+        ),
     )
     case.step("pre_event", "elastic_transient_prepare")
-    case.step("burst", "elastic_transient_burst", timeout_s=10)
+    case.step(
+        "burst",
+        "elastic_transient_burst",
+        timeout_s=case.value("transient_imbalance.burst_timeout_s"),
+    )
     case.step(
         "remove",
         "elastic_transient_remove",
-        timeout_s=15,
+        timeout_s=case.value("transient_imbalance.remove_timeout_s"),
         params={"requests": output("burst", "requests")},
     )
     case.step(
         "burst_settled",
         "elastic_transient_collect",
-        timeout_s=160,
+        timeout_s=case.value("transient_imbalance.burst_settled_timeout_s"),
         params={"requests": output("burst", "requests")},
     )
     case.step(
         "transient",
         "elastic_balance_window",
-        timeout_s=30,
-        params={
-            "observation": output("observe", "observation"),
-            "duration_s": 20,
-            "since": output("remove", "started_s"),
-        },
+        timeout_s=case.value("transient_imbalance.transient_timeout_s"),
+        params=case.params(
+            "transient_imbalance.transient",
+            {
+                "observation": output("observe", "observation"),
+                "since": output("remove", "started_s"),
+            },
+        ),
     )
     case.step(
         "survivor_topology",
         "elastic_topology",
-        timeout_s=35,
-        params={"role": "PREFILL", "discovered": 2, "alive": 2},
+        timeout_s=case.value("transient_imbalance.survivor_topology_timeout_s"),
+        params=case.value("transient_imbalance.survivor_topology"),
     )
     case.step("settled", "elastic_balance_mark")
     case.step(
         "steady",
         "elastic_balance_window",
-        timeout_s=70,
-        params={
-            "observation": output("observe", "observation"),
-            "duration_s": 60,
-            "since": output("settled", "time_s"),
-        },
+        timeout_s=case.value("transient_imbalance.steady_timeout_s"),
+        params=case.params(
+            "transient_imbalance.steady",
+            {
+                "observation": output("observe", "observation"),
+                "since": output("settled", "time_s"),
+            },
+        ),
     )
     case.step(
         "transient_bounds",
@@ -1257,11 +1298,15 @@ def transient_imbalance(case):
             "steady": output("steady", "window"),
         },
     )
-    case.step("recovery", "elastic_pending_recovery", timeout_s=60)
+    case.step(
+        "recovery",
+        "elastic_pending_recovery",
+        timeout_s=case.value("transient_imbalance.recovery_timeout_s"),
+    )
     case.step(
         "flow_stop",
         "elastic_flow_stop",
-        timeout_s=65,
+        timeout_s=case.value("transient_imbalance.flow_stop_timeout_s"),
         params={"flow": output("flow", "flow")},
     )
     case.step(
@@ -1277,44 +1322,52 @@ def transient_imbalance(case):
 
 
 def rebalance_single_batch(case):
-    case.step("setup", "setup", timeout_s=180)
+    case.step(
+        "setup", "setup", timeout_s=case.value("rebalance_single_batch.setup_timeout_s")
+    )
     case.step(
         "initial_topology",
         "elastic_topology",
-        timeout_s=35,
-        params={"role": "PREFILL", "discovered": 2, "alive": 2},
+        timeout_s=case.value("rebalance_single_batch.initial_topology_timeout_s"),
+        params=case.value("rebalance_single_batch.initial_topology"),
     )
     case.step(
         "rebalance_baseline",
         "elastic_rebalance_batch",
-        timeout_s=240,
-        params={"method": "FetchResponse"},
+        timeout_s=case.value("rebalance_single_batch.rebalance_baseline_timeout_s"),
+        params=case.value("rebalance_single_batch.rebalance_baseline"),
     )
     case.step(
         "baseline_after",
         "elastic_timeline",
-        params={"engines": ["prefill-0", "prefill-1"], "offsets_s": [0]},
+        params=case.value("rebalance_single_batch.baseline_after"),
     )
-    case.step("add", "elastic_add", params={"role": "prefill"})
+    case.step("add", "elastic_add", params=case.value("rebalance_single_batch.add"))
     case.step(
         "added_topology",
         "elastic_topology",
-        timeout_s=35,
-        params={
-            "role": "PREFILL",
-            "discovered": 3,
-            "alive": 3,
-            "port": output("add", "port"),
-            "present": True,
-        },
+        timeout_s=case.value("rebalance_single_batch.added_topology_timeout_s"),
+        params=case.params(
+            "rebalance_single_batch.added_topology", {"port": output("add", "port")}
+        ),
     )
     case.step(
         "rebalance_before",
         "elastic_timeline",
-        params={
-            "engines": ["prefill-0", "prefill-1", output("add", "engine")],
-            "offsets_s": [0],
-        },
+        params=case.params(
+            "rebalance_single_batch.rebalance_before",
+            {
+                "engines": [
+                    case.value(
+                        "rebalance_single_batch.rebalance_before.engines.item_0"
+                    ),
+                    case.value(
+                        "rebalance_single_batch.rebalance_before.engines.item_1"
+                    ),
+                    output("add", "engine"),
+                ]
+            },
+        ),
     )
     case.step(
         "rebalance_anchor",
@@ -1328,72 +1381,87 @@ def rebalance_single_batch(case):
     case.step(
         "rebalance_after_add",
         "elastic_rebalance_batch",
-        timeout_s=240,
-        params={"method": "FetchResponse"},
+        timeout_s=case.value("rebalance_single_batch.rebalance_after_add_timeout_s"),
+        params=case.value("rebalance_single_batch.rebalance_after_add"),
     )
     case.step(
         "rebalance_after",
         "elastic_timeline",
-        params={
-            "engines": ["prefill-0", "prefill-1", output("add", "engine")],
-            "offsets_s": [0],
-        },
+        params=case.params(
+            "rebalance_single_batch.rebalance_after",
+            {
+                "engines": [
+                    case.value("rebalance_single_batch.rebalance_after.engines.item_0"),
+                    case.value("rebalance_single_batch.rebalance_after.engines.item_1"),
+                    output("add", "engine"),
+                ]
+            },
+        ),
     )
     case.step(
         "rebalance_share",
         "elastic_share",
-        params={
-            "before": output("rebalance_anchor", "before"),
-            "after": output("rebalance_after", "last"),
-            "engine": output("add", "engine"),
-            "max_share": 0.6,
-            "old_floor": 0,
-            "exclusive": True,
-            "require_new": True,
-        },
+        params=case.params(
+            "rebalance_single_batch.rebalance_share",
+            {
+                "before": output("rebalance_anchor", "before"),
+                "after": output("rebalance_after", "last"),
+                "engine": output("add", "engine"),
+            },
+        ),
     )
     case.step("teardown", "teardown")
 
 
 def rebalance_single_nonbatch(case):
-    case.step("setup", "setup", timeout_s=180)
+    case.step(
+        "setup",
+        "setup",
+        timeout_s=case.value("rebalance_single_nonbatch.setup_timeout_s"),
+    )
     case.step(
         "initial_topology",
         "elastic_topology",
-        timeout_s=35,
-        params={"role": "PREFILL", "discovered": 2, "alive": 2},
+        timeout_s=case.value("rebalance_single_nonbatch.initial_topology_timeout_s"),
+        params=case.value("rebalance_single_nonbatch.initial_topology"),
     )
     case.step(
         "rebalance_baseline",
         "elastic_rebalance_batch",
-        timeout_s=240,
-        params={"method": "GenerateStreamCall"},
+        timeout_s=case.value("rebalance_single_nonbatch.rebalance_baseline_timeout_s"),
+        params=case.value("rebalance_single_nonbatch.rebalance_baseline"),
     )
     case.step(
         "baseline_after",
         "elastic_timeline",
-        params={"engines": ["prefill-0", "prefill-1"], "offsets_s": [0]},
+        params=case.value("rebalance_single_nonbatch.baseline_after"),
     )
-    case.step("add", "elastic_add", params={"role": "prefill"})
+    case.step("add", "elastic_add", params=case.value("rebalance_single_nonbatch.add"))
     case.step(
         "added_topology",
         "elastic_topology",
-        timeout_s=35,
-        params={
-            "role": "PREFILL",
-            "discovered": 3,
-            "alive": 3,
-            "port": output("add", "port"),
-            "present": True,
-        },
+        timeout_s=case.value("rebalance_single_nonbatch.added_topology_timeout_s"),
+        params=case.params(
+            "rebalance_single_nonbatch.added_topology", {"port": output("add", "port")}
+        ),
     )
     case.step(
         "rebalance_before",
         "elastic_timeline",
-        params={
-            "engines": ["prefill-0", "prefill-1", output("add", "engine")],
-            "offsets_s": [0],
-        },
+        params=case.params(
+            "rebalance_single_nonbatch.rebalance_before",
+            {
+                "engines": [
+                    case.value(
+                        "rebalance_single_nonbatch.rebalance_before.engines.item_0"
+                    ),
+                    case.value(
+                        "rebalance_single_nonbatch.rebalance_before.engines.item_1"
+                    ),
+                    output("add", "engine"),
+                ]
+            },
+        ),
     )
     case.step(
         "rebalance_anchor",
@@ -1407,72 +1475,91 @@ def rebalance_single_nonbatch(case):
     case.step(
         "rebalance_after_add",
         "elastic_rebalance_batch",
-        timeout_s=240,
-        params={"method": "GenerateStreamCall"},
+        timeout_s=case.value("rebalance_single_nonbatch.rebalance_after_add_timeout_s"),
+        params=case.value("rebalance_single_nonbatch.rebalance_after_add"),
     )
     case.step(
         "rebalance_after",
         "elastic_timeline",
-        params={
-            "engines": ["prefill-0", "prefill-1", output("add", "engine")],
-            "offsets_s": [0],
-        },
+        params=case.params(
+            "rebalance_single_nonbatch.rebalance_after",
+            {
+                "engines": [
+                    case.value(
+                        "rebalance_single_nonbatch.rebalance_after.engines.item_0"
+                    ),
+                    case.value(
+                        "rebalance_single_nonbatch.rebalance_after.engines.item_1"
+                    ),
+                    output("add", "engine"),
+                ]
+            },
+        ),
     )
     case.step(
         "rebalance_share",
         "elastic_share",
-        params={
-            "before": output("rebalance_anchor", "before"),
-            "after": output("rebalance_after", "last"),
-            "engine": output("add", "engine"),
-            "max_share": 0.6,
-            "old_floor": 0,
-            "exclusive": True,
-            "require_new": True,
-        },
+        params=case.params(
+            "rebalance_single_nonbatch.rebalance_share",
+            {
+                "before": output("rebalance_anchor", "before"),
+                "after": output("rebalance_after", "last"),
+                "engine": output("add", "engine"),
+            },
+        ),
     )
     case.step("teardown", "teardown")
 
 
 def rebalance_window_nonbatch(case):
-    case.step("setup", "setup", timeout_s=180)
+    case.step(
+        "setup",
+        "setup",
+        timeout_s=case.value("rebalance_window_nonbatch.setup_timeout_s"),
+    )
     case.step(
         "initial_topology",
         "elastic_topology",
-        timeout_s=35,
-        params={"role": "PREFILL", "discovered": 2, "alive": 2},
+        timeout_s=case.value("rebalance_window_nonbatch.initial_topology_timeout_s"),
+        params=case.value("rebalance_window_nonbatch.initial_topology"),
     )
     case.step(
         "rebalance_baseline",
         "elastic_rebalance_batch",
-        timeout_s=240,
-        params={"method": "GenerateStreamCall"},
+        timeout_s=case.value("rebalance_window_nonbatch.rebalance_baseline_timeout_s"),
+        params=case.value("rebalance_window_nonbatch.rebalance_baseline"),
     )
     case.step(
         "baseline_after",
         "elastic_timeline",
-        params={"engines": ["prefill-0", "prefill-1"], "offsets_s": [0]},
+        params=case.value("rebalance_window_nonbatch.baseline_after"),
     )
-    case.step("add", "elastic_add", params={"role": "prefill"})
+    case.step("add", "elastic_add", params=case.value("rebalance_window_nonbatch.add"))
     case.step(
         "added_topology",
         "elastic_topology",
-        timeout_s=35,
-        params={
-            "role": "PREFILL",
-            "discovered": 3,
-            "alive": 3,
-            "port": output("add", "port"),
-            "present": True,
-        },
+        timeout_s=case.value("rebalance_window_nonbatch.added_topology_timeout_s"),
+        params=case.params(
+            "rebalance_window_nonbatch.added_topology", {"port": output("add", "port")}
+        ),
     )
     case.step(
         "rebalance_before",
         "elastic_timeline",
-        params={
-            "engines": ["prefill-0", "prefill-1", output("add", "engine")],
-            "offsets_s": [0],
-        },
+        params=case.params(
+            "rebalance_window_nonbatch.rebalance_before",
+            {
+                "engines": [
+                    case.value(
+                        "rebalance_window_nonbatch.rebalance_before.engines.item_0"
+                    ),
+                    case.value(
+                        "rebalance_window_nonbatch.rebalance_before.engines.item_1"
+                    ),
+                    output("add", "engine"),
+                ]
+            },
+        ),
     )
     case.step(
         "rebalance_anchor",
@@ -1486,87 +1573,105 @@ def rebalance_window_nonbatch(case):
     case.step(
         "rebalance_after_add",
         "elastic_rebalance_batch",
-        timeout_s=240,
-        params={"method": "GenerateStreamCall"},
+        timeout_s=case.value("rebalance_window_nonbatch.rebalance_after_add_timeout_s"),
+        params=case.value("rebalance_window_nonbatch.rebalance_after_add"),
     )
     case.step(
         "rebalance_after",
         "elastic_timeline",
-        params={
-            "engines": ["prefill-0", "prefill-1", output("add", "engine")],
-            "offsets_s": [0],
-        },
+        params=case.params(
+            "rebalance_window_nonbatch.rebalance_after",
+            {
+                "engines": [
+                    case.value(
+                        "rebalance_window_nonbatch.rebalance_after.engines.item_0"
+                    ),
+                    case.value(
+                        "rebalance_window_nonbatch.rebalance_after.engines.item_1"
+                    ),
+                    output("add", "engine"),
+                ]
+            },
+        ),
     )
     case.step(
         "rebalance_share",
         "elastic_share",
-        params={
-            "before": output("rebalance_anchor", "before"),
-            "after": output("rebalance_after", "last"),
-            "engine": output("add", "engine"),
-            "max_share": 0.6,
-            "old_floor": 0,
-            "exclusive": True,
-            "require_new": True,
-        },
+        params=case.params(
+            "rebalance_window_nonbatch.rebalance_share",
+            {
+                "before": output("rebalance_anchor", "before"),
+                "after": output("rebalance_after", "last"),
+                "engine": output("add", "engine"),
+            },
+        ),
     )
     case.step("teardown", "teardown")
 
 
 def normal_single_batch(case):
-    case.step("setup", "setup", timeout_s=180)
+    case.step(
+        "setup", "setup", timeout_s=case.value("normal_single_batch.setup_timeout_s")
+    )
     case.step(
         "initial_topology",
         "elastic_topology",
-        timeout_s=35,
-        params={"role": "PREFILL", "discovered": 2, "alive": 2},
+        timeout_s=case.value("normal_single_batch.initial_topology_timeout_s"),
+        params=case.value("normal_single_batch.initial_topology"),
     )
     case.step("preference_flow", "elastic_cold_flow")
-    case.step("ramp", "elastic_pause", params={"seconds": 1})
+    case.step("ramp", "elastic_pause", params=case.value("normal_single_batch.ramp"))
     case.step(
         "baseline_window",
         "elastic_timeline",
-        timeout_s=25,
-        params={"engines": ["prefill-0", "prefill-1"], "offsets_s": [0, 15]},
+        timeout_s=case.value("normal_single_batch.baseline_window_timeout_s"),
+        params=case.value("normal_single_batch.baseline_window"),
     )
-    case.step("add", "elastic_add", params={"role": "prefill"})
+    case.step("add", "elastic_add", params=case.value("normal_single_batch.add"))
     case.step(
         "first_traffic",
         "elastic_accepted_timed",
-        timeout_s=15,
-        params={"engine": output("add", "engine"), "baseline": 0, "window_s": 10},
+        timeout_s=case.value("normal_single_batch.first_traffic_timeout_s"),
+        params=case.params(
+            "normal_single_batch.first_traffic", {"engine": output("add", "engine")}
+        ),
     )
     case.step(
         "added_topology",
         "elastic_topology",
-        timeout_s=35,
-        params={
-            "role": "PREFILL",
-            "discovered": 3,
-            "alive": 3,
-            "port": output("add", "port"),
-            "present": True,
-        },
+        timeout_s=case.value("normal_single_batch.added_topology_timeout_s"),
+        params=case.params(
+            "normal_single_batch.added_topology", {"port": output("add", "port")}
+        ),
     )
     case.step(
         "post_window",
         "elastic_timeline",
-        timeout_s=55,
-        params={
-            "engines": ["prefill-0", "prefill-1", output("add", "engine")],
-            "offsets_s": [0, 5, 10, 17, 24, 31, 38, 45],
-        },
+        timeout_s=case.value("normal_single_batch.post_window_timeout_s"),
+        params=case.params(
+            "normal_single_batch.post_window",
+            {
+                "engines": [
+                    case.value("normal_single_batch.post_window.engines.item_0"),
+                    case.value("normal_single_batch.post_window.engines.item_1"),
+                    output("add", "engine"),
+                ]
+            },
+        ),
     )
     case.step(
         "preference_flow_stop",
         "elastic_flow_stop",
-        timeout_s=45,
+        timeout_s=case.value("normal_single_batch.preference_flow_stop_timeout_s"),
         params={"flow": output("preference_flow", "flow")},
     )
     case.step(
         "preference_protocol",
         "elastic_lifecycle_flow_protocol",
-        params={"flow": output("preference_flow", "flow"), "method": "FetchResponse"},
+        params=case.params(
+            "normal_single_batch.preference_protocol",
+            {"flow": output("preference_flow", "flow")},
+        ),
     )
     case.step(
         "add_availability",
@@ -1589,316 +1694,358 @@ def normal_single_batch(case):
     case.step(
         "preference_shares",
         "elastic_share",
-        params={
-            "series": output("post_window", "series"),
-            "engine": output("add", "engine"),
-            "max_share": 0.6,
-            "old_floor": 0.1,
-            "exclusive": False,
-            "require_new": False,
-        },
+        params=case.params(
+            "normal_single_batch.preference_shares",
+            {
+                "series": output("post_window", "series"),
+                "engine": output("add", "engine"),
+            },
+        ),
     )
     case.step(
         "preference_availability",
         "elastic_flow_assert",
-        params={
-            "result": output("preference_flow_stop", "result"),
-            "min_success_rate": 0.9,
-        },
+        params=case.params(
+            "normal_single_batch.preference_availability",
+            {"result": output("preference_flow_stop", "result")},
+        ),
     )
     case.step("remove_flow", "elastic_cold_flow")
     case.step(
         "remove_traffic",
         "elastic_lifecycle_probe",
-        timeout_s=60,
-        params={
-            "engine": output("add", "engine"),
-            "window_s": 10,
-            "method": "FetchResponse",
-        },
+        timeout_s=case.value("normal_single_batch.remove_traffic_timeout_s"),
+        params=case.params(
+            "normal_single_batch.remove_traffic", {"engine": output("add", "engine")}
+        ),
     )
     case.step(
         "remove",
         "elastic_remove",
-        timeout_s=75,
-        params={"engine": output("add", "engine"), "drain_timeout_ms": 60000},
+        timeout_s=case.value("normal_single_batch.remove_timeout_s"),
+        params=case.params(
+            "normal_single_batch.remove", {"engine": output("add", "engine")}
+        ),
     )
-    case.step("remove_hold", "elastic_pause", params={"seconds": 3})
+    case.step(
+        "remove_hold",
+        "elastic_pause",
+        params=case.value("normal_single_batch.remove_hold"),
+    )
     case.step(
         "remove_flow_stop",
         "elastic_flow_stop",
-        timeout_s=45,
+        timeout_s=case.value("normal_single_batch.remove_flow_stop_timeout_s"),
         params={"flow": output("remove_flow", "flow")},
     )
     case.step(
         "remove_protocol",
         "elastic_lifecycle_flow_protocol",
-        params={"flow": output("remove_flow", "flow"), "method": "FetchResponse"},
+        params=case.params(
+            "normal_single_batch.remove_protocol",
+            {"flow": output("remove_flow", "flow")},
+        ),
     )
     case.step(
         "removed_topology",
         "elastic_topology",
-        timeout_s=35,
-        params={
-            "role": "PREFILL",
-            "discovered": 2,
-            "alive": 2,
-            "port": output("add", "port"),
-            "present": False,
-        },
+        timeout_s=case.value("normal_single_batch.removed_topology_timeout_s"),
+        params=case.params(
+            "normal_single_batch.removed_topology", {"port": output("add", "port")}
+        ),
     )
-    case.step("remove_accounting", "elastic_accounting", timeout_s=105)
+    case.step(
+        "remove_accounting",
+        "elastic_accounting",
+        timeout_s=case.value("normal_single_batch.remove_accounting_timeout_s"),
+    )
     case.step(
         "remove_zero_errors",
         "elastic_flow_assert",
-        params={"result": output("remove_flow_stop", "result"), "min_success_rate": 1},
+        params=case.params(
+            "normal_single_batch.remove_zero_errors",
+            {"result": output("remove_flow_stop", "result")},
+        ),
     )
-    case.step("cycle1_add", "elastic_add", params={"role": "prefill"})
+    case.step(
+        "cycle1_add", "elastic_add", params=case.value("normal_single_batch.cycle1_add")
+    )
     case.step(
         "cycle1_added_topology",
         "elastic_topology",
-        timeout_s=35,
-        params={
-            "role": "PREFILL",
-            "discovered": 3,
-            "alive": 3,
-            "port": output("cycle1_add", "port"),
-            "present": True,
-        },
+        timeout_s=case.value("normal_single_batch.cycle1_added_topology_timeout_s"),
+        params=case.params(
+            "normal_single_batch.cycle1_added_topology",
+            {"port": output("cycle1_add", "port")},
+        ),
     )
     case.step(
         "cycle1_traffic",
         "elastic_lifecycle_probe",
-        timeout_s=60,
-        params={
-            "engine": output("cycle1_add", "engine"),
-            "window_s": 15,
-            "method": "FetchResponse",
-        },
+        timeout_s=case.value("normal_single_batch.cycle1_traffic_timeout_s"),
+        params=case.params(
+            "normal_single_batch.cycle1_traffic",
+            {"engine": output("cycle1_add", "engine")},
+        ),
     )
     case.step("cycle1_flow", "elastic_cold_flow")
-    case.step("cycle1_ramp", "elastic_pause", params={"seconds": 0.5})
+    case.step(
+        "cycle1_ramp",
+        "elastic_pause",
+        params=case.value("normal_single_batch.cycle1_ramp"),
+    )
     case.step(
         "cycle1_remove",
         "elastic_remove",
-        timeout_s=75,
-        params={"engine": output("cycle1_add", "engine"), "drain_timeout_ms": 60000},
+        timeout_s=case.value("normal_single_batch.cycle1_remove_timeout_s"),
+        params=case.params(
+            "normal_single_batch.cycle1_remove",
+            {"engine": output("cycle1_add", "engine")},
+        ),
     )
     case.step(
         "cycle1_flow_stop",
         "elastic_flow_stop",
-        timeout_s=45,
+        timeout_s=case.value("normal_single_batch.cycle1_flow_stop_timeout_s"),
         params={"flow": output("cycle1_flow", "flow")},
     )
     case.step(
         "cycle1_protocol",
         "elastic_lifecycle_flow_protocol",
-        params={"flow": output("cycle1_flow", "flow"), "method": "FetchResponse"},
+        params=case.params(
+            "normal_single_batch.cycle1_protocol",
+            {"flow": output("cycle1_flow", "flow")},
+        ),
     )
     case.step(
         "cycle1_removed_topology",
         "elastic_topology",
-        timeout_s=35,
-        params={
-            "role": "PREFILL",
-            "discovered": 2,
-            "alive": 2,
-            "port": output("cycle1_add", "port"),
-            "present": False,
-        },
+        timeout_s=case.value("normal_single_batch.cycle1_removed_topology_timeout_s"),
+        params=case.params(
+            "normal_single_batch.cycle1_removed_topology",
+            {"port": output("cycle1_add", "port")},
+        ),
     )
     case.step(
         "cycle1_zero_errors",
         "elastic_flow_assert",
-        params={"result": output("cycle1_flow_stop", "result"), "min_success_rate": 1},
+        params=case.params(
+            "normal_single_batch.cycle1_zero_errors",
+            {"result": output("cycle1_flow_stop", "result")},
+        ),
     )
-    case.step("cycle2_add", "elastic_add", params={"role": "prefill"})
+    case.step(
+        "cycle2_add", "elastic_add", params=case.value("normal_single_batch.cycle2_add")
+    )
     case.step(
         "cycle2_added_topology",
         "elastic_topology",
-        timeout_s=35,
-        params={
-            "role": "PREFILL",
-            "discovered": 3,
-            "alive": 3,
-            "port": output("cycle2_add", "port"),
-            "present": True,
-        },
+        timeout_s=case.value("normal_single_batch.cycle2_added_topology_timeout_s"),
+        params=case.params(
+            "normal_single_batch.cycle2_added_topology",
+            {"port": output("cycle2_add", "port")},
+        ),
     )
     case.step(
         "cycle2_traffic",
         "elastic_lifecycle_probe",
-        timeout_s=60,
-        params={
-            "engine": output("cycle2_add", "engine"),
-            "window_s": 15,
-            "method": "FetchResponse",
-        },
+        timeout_s=case.value("normal_single_batch.cycle2_traffic_timeout_s"),
+        params=case.params(
+            "normal_single_batch.cycle2_traffic",
+            {"engine": output("cycle2_add", "engine")},
+        ),
     )
     case.step("cycle2_flow", "elastic_cold_flow")
-    case.step("cycle2_ramp", "elastic_pause", params={"seconds": 0.5})
+    case.step(
+        "cycle2_ramp",
+        "elastic_pause",
+        params=case.value("normal_single_batch.cycle2_ramp"),
+    )
     case.step(
         "cycle2_remove",
         "elastic_remove",
-        timeout_s=75,
-        params={"engine": output("cycle2_add", "engine"), "drain_timeout_ms": 60000},
+        timeout_s=case.value("normal_single_batch.cycle2_remove_timeout_s"),
+        params=case.params(
+            "normal_single_batch.cycle2_remove",
+            {"engine": output("cycle2_add", "engine")},
+        ),
     )
     case.step(
         "cycle2_flow_stop",
         "elastic_flow_stop",
-        timeout_s=45,
+        timeout_s=case.value("normal_single_batch.cycle2_flow_stop_timeout_s"),
         params={"flow": output("cycle2_flow", "flow")},
     )
     case.step(
         "cycle2_protocol",
         "elastic_lifecycle_flow_protocol",
-        params={"flow": output("cycle2_flow", "flow"), "method": "FetchResponse"},
+        params=case.params(
+            "normal_single_batch.cycle2_protocol",
+            {"flow": output("cycle2_flow", "flow")},
+        ),
     )
     case.step(
         "cycle2_removed_topology",
         "elastic_topology",
-        timeout_s=35,
-        params={
-            "role": "PREFILL",
-            "discovered": 2,
-            "alive": 2,
-            "port": output("cycle2_add", "port"),
-            "present": False,
-        },
+        timeout_s=case.value("normal_single_batch.cycle2_removed_topology_timeout_s"),
+        params=case.params(
+            "normal_single_batch.cycle2_removed_topology",
+            {"port": output("cycle2_add", "port")},
+        ),
     )
     case.step(
         "cycle2_zero_errors",
         "elastic_flow_assert",
-        params={"result": output("cycle2_flow_stop", "result"), "min_success_rate": 1},
+        params=case.params(
+            "normal_single_batch.cycle2_zero_errors",
+            {"result": output("cycle2_flow_stop", "result")},
+        ),
     )
-    case.step("cycle3_add", "elastic_add", params={"role": "prefill"})
+    case.step(
+        "cycle3_add", "elastic_add", params=case.value("normal_single_batch.cycle3_add")
+    )
     case.step(
         "cycle3_added_topology",
         "elastic_topology",
-        timeout_s=35,
-        params={
-            "role": "PREFILL",
-            "discovered": 3,
-            "alive": 3,
-            "port": output("cycle3_add", "port"),
-            "present": True,
-        },
+        timeout_s=case.value("normal_single_batch.cycle3_added_topology_timeout_s"),
+        params=case.params(
+            "normal_single_batch.cycle3_added_topology",
+            {"port": output("cycle3_add", "port")},
+        ),
     )
     case.step(
         "cycle3_traffic",
         "elastic_lifecycle_probe",
-        timeout_s=60,
-        params={
-            "engine": output("cycle3_add", "engine"),
-            "window_s": 15,
-            "method": "FetchResponse",
-        },
+        timeout_s=case.value("normal_single_batch.cycle3_traffic_timeout_s"),
+        params=case.params(
+            "normal_single_batch.cycle3_traffic",
+            {"engine": output("cycle3_add", "engine")},
+        ),
     )
     case.step("cycle3_flow", "elastic_cold_flow")
-    case.step("cycle3_ramp", "elastic_pause", params={"seconds": 0.5})
+    case.step(
+        "cycle3_ramp",
+        "elastic_pause",
+        params=case.value("normal_single_batch.cycle3_ramp"),
+    )
     case.step(
         "cycle3_remove",
         "elastic_remove",
-        timeout_s=75,
-        params={"engine": output("cycle3_add", "engine"), "drain_timeout_ms": 60000},
+        timeout_s=case.value("normal_single_batch.cycle3_remove_timeout_s"),
+        params=case.params(
+            "normal_single_batch.cycle3_remove",
+            {"engine": output("cycle3_add", "engine")},
+        ),
     )
     case.step(
         "cycle3_flow_stop",
         "elastic_flow_stop",
-        timeout_s=45,
+        timeout_s=case.value("normal_single_batch.cycle3_flow_stop_timeout_s"),
         params={"flow": output("cycle3_flow", "flow")},
     )
     case.step(
         "cycle3_protocol",
         "elastic_lifecycle_flow_protocol",
-        params={"flow": output("cycle3_flow", "flow"), "method": "FetchResponse"},
+        params=case.params(
+            "normal_single_batch.cycle3_protocol",
+            {"flow": output("cycle3_flow", "flow")},
+        ),
     )
     case.step(
         "cycle3_removed_topology",
         "elastic_topology",
-        timeout_s=35,
-        params={
-            "role": "PREFILL",
-            "discovered": 2,
-            "alive": 2,
-            "port": output("cycle3_add", "port"),
-            "present": False,
-        },
+        timeout_s=case.value("normal_single_batch.cycle3_removed_topology_timeout_s"),
+        params=case.params(
+            "normal_single_batch.cycle3_removed_topology",
+            {"port": output("cycle3_add", "port")},
+        ),
     )
     case.step(
         "cycle3_zero_errors",
         "elastic_flow_assert",
-        params={"result": output("cycle3_flow_stop", "result"), "min_success_rate": 1},
+        params=case.params(
+            "normal_single_batch.cycle3_zero_errors",
+            {"result": output("cycle3_flow_stop", "result")},
+        ),
     )
     case.step(
         "recovery",
         "elastic_cycle_recovery",
-        timeout_s=65,
-        params={"method": "FetchResponse"},
+        timeout_s=case.value("normal_single_batch.recovery_timeout_s"),
+        params=case.value("normal_single_batch.recovery"),
     )
     case.step(
         "final_topology",
         "elastic_topology",
-        timeout_s=35,
-        params={"role": "PREFILL", "discovered": 2, "alive": 2},
+        timeout_s=case.value("normal_single_batch.final_topology_timeout_s"),
+        params=case.value("normal_single_batch.final_topology"),
     )
     case.step("teardown", "teardown")
 
 
 def strict_single_batch(case):
-    case.step("setup", "setup", timeout_s=180)
+    case.step(
+        "setup", "setup", timeout_s=case.value("strict_single_batch.setup_timeout_s")
+    )
     case.step(
         "initial_topology",
         "elastic_topology",
-        timeout_s=35,
-        params={"role": "PREFILL", "discovered": 2, "alive": 2},
+        timeout_s=case.value("strict_single_batch.initial_topology_timeout_s"),
+        params=case.value("strict_single_batch.initial_topology"),
     )
     case.step("preference_flow", "elastic_cold_flow")
-    case.step("ramp", "elastic_pause", params={"seconds": 1})
+    case.step("ramp", "elastic_pause", params=case.value("strict_single_batch.ramp"))
     case.step(
         "baseline_window",
         "elastic_timeline",
-        timeout_s=25,
-        params={"engines": ["prefill-0", "prefill-1"], "offsets_s": [0, 15]},
+        timeout_s=case.value("strict_single_batch.baseline_window_timeout_s"),
+        params=case.value("strict_single_batch.baseline_window"),
     )
-    case.step("add", "elastic_add", params={"role": "prefill"})
+    case.step("add", "elastic_add", params=case.value("strict_single_batch.add"))
     case.step(
         "first_traffic",
         "elastic_accepted_timed",
-        timeout_s=15,
-        params={"engine": output("add", "engine"), "baseline": 0, "window_s": 10},
+        timeout_s=case.value("strict_single_batch.first_traffic_timeout_s"),
+        params=case.params(
+            "strict_single_batch.first_traffic", {"engine": output("add", "engine")}
+        ),
     )
     case.step(
         "added_topology",
         "elastic_topology",
-        timeout_s=35,
-        params={
-            "role": "PREFILL",
-            "discovered": 3,
-            "alive": 3,
-            "port": output("add", "port"),
-            "present": True,
-        },
+        timeout_s=case.value("strict_single_batch.added_topology_timeout_s"),
+        params=case.params(
+            "strict_single_batch.added_topology", {"port": output("add", "port")}
+        ),
     )
     case.step(
         "post_window",
         "elastic_timeline",
-        timeout_s=55,
-        params={
-            "engines": ["prefill-0", "prefill-1", output("add", "engine")],
-            "offsets_s": [0, 5, 10, 17, 24, 31, 38, 45],
-        },
+        timeout_s=case.value("strict_single_batch.post_window_timeout_s"),
+        params=case.params(
+            "strict_single_batch.post_window",
+            {
+                "engines": [
+                    case.value("strict_single_batch.post_window.engines.item_0"),
+                    case.value("strict_single_batch.post_window.engines.item_1"),
+                    output("add", "engine"),
+                ]
+            },
+        ),
     )
     case.step(
         "preference_flow_stop",
         "elastic_flow_stop",
-        timeout_s=45,
+        timeout_s=case.value("strict_single_batch.preference_flow_stop_timeout_s"),
         params={"flow": output("preference_flow", "flow")},
     )
     case.step(
         "preference_protocol",
         "elastic_lifecycle_flow_protocol",
-        params={"flow": output("preference_flow", "flow"), "method": "FetchResponse"},
+        params=case.params(
+            "strict_single_batch.preference_protocol",
+            {"flow": output("preference_flow", "flow")},
+        ),
     )
     case.step(
         "add_availability",
@@ -1921,319 +2068,358 @@ def strict_single_batch(case):
     case.step(
         "preference_shares",
         "elastic_share",
-        params={
-            "series": output("post_window", "series"),
-            "engine": output("add", "engine"),
-            "max_share": 0.5,
-            "old_floor": 0.1,
-            "exclusive": False,
-            "require_new": False,
-        },
+        params=case.params(
+            "strict_single_batch.preference_shares",
+            {
+                "series": output("post_window", "series"),
+                "engine": output("add", "engine"),
+            },
+        ),
     )
     case.step(
         "preference_availability",
         "elastic_flow_assert",
-        params={
-            "result": output("preference_flow_stop", "result"),
-            "min_success_rate": 0.9,
-        },
+        params=case.params(
+            "strict_single_batch.preference_availability",
+            {"result": output("preference_flow_stop", "result")},
+        ),
     )
     case.step("remove_flow", "elastic_cold_flow")
     case.step(
         "remove_traffic",
         "elastic_lifecycle_probe",
-        timeout_s=60,
-        params={
-            "engine": output("add", "engine"),
-            "window_s": 10,
-            "method": "FetchResponse",
-        },
+        timeout_s=case.value("strict_single_batch.remove_traffic_timeout_s"),
+        params=case.params(
+            "strict_single_batch.remove_traffic", {"engine": output("add", "engine")}
+        ),
     )
     case.step(
         "remove",
         "elastic_remove",
-        timeout_s=75,
-        params={"engine": output("add", "engine"), "drain_timeout_ms": 60000},
+        timeout_s=case.value("strict_single_batch.remove_timeout_s"),
+        params=case.params(
+            "strict_single_batch.remove", {"engine": output("add", "engine")}
+        ),
     )
-    case.step("remove_hold", "elastic_pause", params={"seconds": 3})
+    case.step(
+        "remove_hold",
+        "elastic_pause",
+        params=case.value("strict_single_batch.remove_hold"),
+    )
     case.step(
         "remove_flow_stop",
         "elastic_flow_stop",
-        timeout_s=45,
+        timeout_s=case.value("strict_single_batch.remove_flow_stop_timeout_s"),
         params={"flow": output("remove_flow", "flow")},
     )
     case.step(
         "remove_protocol",
         "elastic_lifecycle_flow_protocol",
-        params={"flow": output("remove_flow", "flow"), "method": "FetchResponse"},
+        params=case.params(
+            "strict_single_batch.remove_protocol",
+            {"flow": output("remove_flow", "flow")},
+        ),
     )
     case.step(
         "removed_topology",
         "elastic_topology",
-        timeout_s=35,
-        params={
-            "role": "PREFILL",
-            "discovered": 2,
-            "alive": 2,
-            "port": output("add", "port"),
-            "present": False,
-        },
+        timeout_s=case.value("strict_single_batch.removed_topology_timeout_s"),
+        params=case.params(
+            "strict_single_batch.removed_topology", {"port": output("add", "port")}
+        ),
     )
-    case.step("remove_accounting", "elastic_accounting", timeout_s=105)
+    case.step(
+        "remove_accounting",
+        "elastic_accounting",
+        timeout_s=case.value("strict_single_batch.remove_accounting_timeout_s"),
+    )
     case.step(
         "remove_zero_errors",
         "elastic_flow_assert",
-        params={"result": output("remove_flow_stop", "result"), "min_success_rate": 1},
+        params=case.params(
+            "strict_single_batch.remove_zero_errors",
+            {"result": output("remove_flow_stop", "result")},
+        ),
     )
-    case.step("cycle1_add", "elastic_add", params={"role": "prefill"})
+    case.step(
+        "cycle1_add", "elastic_add", params=case.value("strict_single_batch.cycle1_add")
+    )
     case.step(
         "cycle1_added_topology",
         "elastic_topology",
-        timeout_s=35,
-        params={
-            "role": "PREFILL",
-            "discovered": 3,
-            "alive": 3,
-            "port": output("cycle1_add", "port"),
-            "present": True,
-        },
+        timeout_s=case.value("strict_single_batch.cycle1_added_topology_timeout_s"),
+        params=case.params(
+            "strict_single_batch.cycle1_added_topology",
+            {"port": output("cycle1_add", "port")},
+        ),
     )
     case.step(
         "cycle1_traffic",
         "elastic_lifecycle_probe",
-        timeout_s=60,
-        params={
-            "engine": output("cycle1_add", "engine"),
-            "window_s": 15,
-            "method": "FetchResponse",
-        },
+        timeout_s=case.value("strict_single_batch.cycle1_traffic_timeout_s"),
+        params=case.params(
+            "strict_single_batch.cycle1_traffic",
+            {"engine": output("cycle1_add", "engine")},
+        ),
     )
     case.step("cycle1_flow", "elastic_cold_flow")
-    case.step("cycle1_ramp", "elastic_pause", params={"seconds": 0.5})
+    case.step(
+        "cycle1_ramp",
+        "elastic_pause",
+        params=case.value("strict_single_batch.cycle1_ramp"),
+    )
     case.step(
         "cycle1_remove",
         "elastic_remove",
-        timeout_s=75,
-        params={"engine": output("cycle1_add", "engine"), "drain_timeout_ms": 60000},
+        timeout_s=case.value("strict_single_batch.cycle1_remove_timeout_s"),
+        params=case.params(
+            "strict_single_batch.cycle1_remove",
+            {"engine": output("cycle1_add", "engine")},
+        ),
     )
     case.step(
         "cycle1_flow_stop",
         "elastic_flow_stop",
-        timeout_s=45,
+        timeout_s=case.value("strict_single_batch.cycle1_flow_stop_timeout_s"),
         params={"flow": output("cycle1_flow", "flow")},
     )
     case.step(
         "cycle1_protocol",
         "elastic_lifecycle_flow_protocol",
-        params={"flow": output("cycle1_flow", "flow"), "method": "FetchResponse"},
+        params=case.params(
+            "strict_single_batch.cycle1_protocol",
+            {"flow": output("cycle1_flow", "flow")},
+        ),
     )
     case.step(
         "cycle1_removed_topology",
         "elastic_topology",
-        timeout_s=35,
-        params={
-            "role": "PREFILL",
-            "discovered": 2,
-            "alive": 2,
-            "port": output("cycle1_add", "port"),
-            "present": False,
-        },
+        timeout_s=case.value("strict_single_batch.cycle1_removed_topology_timeout_s"),
+        params=case.params(
+            "strict_single_batch.cycle1_removed_topology",
+            {"port": output("cycle1_add", "port")},
+        ),
     )
     case.step(
         "cycle1_zero_errors",
         "elastic_flow_assert",
-        params={"result": output("cycle1_flow_stop", "result"), "min_success_rate": 1},
+        params=case.params(
+            "strict_single_batch.cycle1_zero_errors",
+            {"result": output("cycle1_flow_stop", "result")},
+        ),
     )
-    case.step("cycle2_add", "elastic_add", params={"role": "prefill"})
+    case.step(
+        "cycle2_add", "elastic_add", params=case.value("strict_single_batch.cycle2_add")
+    )
     case.step(
         "cycle2_added_topology",
         "elastic_topology",
-        timeout_s=35,
-        params={
-            "role": "PREFILL",
-            "discovered": 3,
-            "alive": 3,
-            "port": output("cycle2_add", "port"),
-            "present": True,
-        },
+        timeout_s=case.value("strict_single_batch.cycle2_added_topology_timeout_s"),
+        params=case.params(
+            "strict_single_batch.cycle2_added_topology",
+            {"port": output("cycle2_add", "port")},
+        ),
     )
     case.step(
         "cycle2_traffic",
         "elastic_lifecycle_probe",
-        timeout_s=60,
-        params={
-            "engine": output("cycle2_add", "engine"),
-            "window_s": 15,
-            "method": "FetchResponse",
-        },
+        timeout_s=case.value("strict_single_batch.cycle2_traffic_timeout_s"),
+        params=case.params(
+            "strict_single_batch.cycle2_traffic",
+            {"engine": output("cycle2_add", "engine")},
+        ),
     )
     case.step("cycle2_flow", "elastic_cold_flow")
-    case.step("cycle2_ramp", "elastic_pause", params={"seconds": 0.5})
+    case.step(
+        "cycle2_ramp",
+        "elastic_pause",
+        params=case.value("strict_single_batch.cycle2_ramp"),
+    )
     case.step(
         "cycle2_remove",
         "elastic_remove",
-        timeout_s=75,
-        params={"engine": output("cycle2_add", "engine"), "drain_timeout_ms": 60000},
+        timeout_s=case.value("strict_single_batch.cycle2_remove_timeout_s"),
+        params=case.params(
+            "strict_single_batch.cycle2_remove",
+            {"engine": output("cycle2_add", "engine")},
+        ),
     )
     case.step(
         "cycle2_flow_stop",
         "elastic_flow_stop",
-        timeout_s=45,
+        timeout_s=case.value("strict_single_batch.cycle2_flow_stop_timeout_s"),
         params={"flow": output("cycle2_flow", "flow")},
     )
     case.step(
         "cycle2_protocol",
         "elastic_lifecycle_flow_protocol",
-        params={"flow": output("cycle2_flow", "flow"), "method": "FetchResponse"},
+        params=case.params(
+            "strict_single_batch.cycle2_protocol",
+            {"flow": output("cycle2_flow", "flow")},
+        ),
     )
     case.step(
         "cycle2_removed_topology",
         "elastic_topology",
-        timeout_s=35,
-        params={
-            "role": "PREFILL",
-            "discovered": 2,
-            "alive": 2,
-            "port": output("cycle2_add", "port"),
-            "present": False,
-        },
+        timeout_s=case.value("strict_single_batch.cycle2_removed_topology_timeout_s"),
+        params=case.params(
+            "strict_single_batch.cycle2_removed_topology",
+            {"port": output("cycle2_add", "port")},
+        ),
     )
     case.step(
         "cycle2_zero_errors",
         "elastic_flow_assert",
-        params={"result": output("cycle2_flow_stop", "result"), "min_success_rate": 1},
+        params=case.params(
+            "strict_single_batch.cycle2_zero_errors",
+            {"result": output("cycle2_flow_stop", "result")},
+        ),
     )
-    case.step("cycle3_add", "elastic_add", params={"role": "prefill"})
+    case.step(
+        "cycle3_add", "elastic_add", params=case.value("strict_single_batch.cycle3_add")
+    )
     case.step(
         "cycle3_added_topology",
         "elastic_topology",
-        timeout_s=35,
-        params={
-            "role": "PREFILL",
-            "discovered": 3,
-            "alive": 3,
-            "port": output("cycle3_add", "port"),
-            "present": True,
-        },
+        timeout_s=case.value("strict_single_batch.cycle3_added_topology_timeout_s"),
+        params=case.params(
+            "strict_single_batch.cycle3_added_topology",
+            {"port": output("cycle3_add", "port")},
+        ),
     )
     case.step(
         "cycle3_traffic",
         "elastic_lifecycle_probe",
-        timeout_s=60,
-        params={
-            "engine": output("cycle3_add", "engine"),
-            "window_s": 15,
-            "method": "FetchResponse",
-        },
+        timeout_s=case.value("strict_single_batch.cycle3_traffic_timeout_s"),
+        params=case.params(
+            "strict_single_batch.cycle3_traffic",
+            {"engine": output("cycle3_add", "engine")},
+        ),
     )
     case.step("cycle3_flow", "elastic_cold_flow")
-    case.step("cycle3_ramp", "elastic_pause", params={"seconds": 0.5})
+    case.step(
+        "cycle3_ramp",
+        "elastic_pause",
+        params=case.value("strict_single_batch.cycle3_ramp"),
+    )
     case.step(
         "cycle3_remove",
         "elastic_remove",
-        timeout_s=75,
-        params={"engine": output("cycle3_add", "engine"), "drain_timeout_ms": 60000},
+        timeout_s=case.value("strict_single_batch.cycle3_remove_timeout_s"),
+        params=case.params(
+            "strict_single_batch.cycle3_remove",
+            {"engine": output("cycle3_add", "engine")},
+        ),
     )
     case.step(
         "cycle3_flow_stop",
         "elastic_flow_stop",
-        timeout_s=45,
+        timeout_s=case.value("strict_single_batch.cycle3_flow_stop_timeout_s"),
         params={"flow": output("cycle3_flow", "flow")},
     )
     case.step(
         "cycle3_protocol",
         "elastic_lifecycle_flow_protocol",
-        params={"flow": output("cycle3_flow", "flow"), "method": "FetchResponse"},
+        params=case.params(
+            "strict_single_batch.cycle3_protocol",
+            {"flow": output("cycle3_flow", "flow")},
+        ),
     )
     case.step(
         "cycle3_removed_topology",
         "elastic_topology",
-        timeout_s=35,
-        params={
-            "role": "PREFILL",
-            "discovered": 2,
-            "alive": 2,
-            "port": output("cycle3_add", "port"),
-            "present": False,
-        },
+        timeout_s=case.value("strict_single_batch.cycle3_removed_topology_timeout_s"),
+        params=case.params(
+            "strict_single_batch.cycle3_removed_topology",
+            {"port": output("cycle3_add", "port")},
+        ),
     )
     case.step(
         "cycle3_zero_errors",
         "elastic_flow_assert",
-        params={"result": output("cycle3_flow_stop", "result"), "min_success_rate": 1},
+        params=case.params(
+            "strict_single_batch.cycle3_zero_errors",
+            {"result": output("cycle3_flow_stop", "result")},
+        ),
     )
     case.step(
         "recovery",
         "elastic_cycle_recovery",
-        timeout_s=65,
-        params={"method": "FetchResponse"},
+        timeout_s=case.value("strict_single_batch.recovery_timeout_s"),
+        params=case.value("strict_single_batch.recovery"),
     )
     case.step(
         "final_topology",
         "elastic_topology",
-        timeout_s=35,
-        params={"role": "PREFILL", "discovered": 2, "alive": 2},
+        timeout_s=case.value("strict_single_batch.final_topology_timeout_s"),
+        params=case.value("strict_single_batch.final_topology"),
     )
     case.step("teardown", "teardown")
 
 
 def normal_single_nonbatch(case):
-    case.step("setup", "setup", timeout_s=180)
+    case.step(
+        "setup", "setup", timeout_s=case.value("normal_single_nonbatch.setup_timeout_s")
+    )
     case.step(
         "initial_topology",
         "elastic_topology",
-        timeout_s=35,
-        params={"role": "PREFILL", "discovered": 2, "alive": 2},
+        timeout_s=case.value("normal_single_nonbatch.initial_topology_timeout_s"),
+        params=case.value("normal_single_nonbatch.initial_topology"),
     )
     case.step("preference_flow", "elastic_cold_flow")
-    case.step("ramp", "elastic_pause", params={"seconds": 1})
+    case.step("ramp", "elastic_pause", params=case.value("normal_single_nonbatch.ramp"))
     case.step(
         "baseline_window",
         "elastic_timeline",
-        timeout_s=25,
-        params={"engines": ["prefill-0", "prefill-1"], "offsets_s": [0, 15]},
+        timeout_s=case.value("normal_single_nonbatch.baseline_window_timeout_s"),
+        params=case.value("normal_single_nonbatch.baseline_window"),
     )
-    case.step("add", "elastic_add", params={"role": "prefill"})
+    case.step("add", "elastic_add", params=case.value("normal_single_nonbatch.add"))
     case.step(
         "first_traffic",
         "elastic_accepted_timed",
-        timeout_s=15,
-        params={"engine": output("add", "engine"), "baseline": 0, "window_s": 10},
+        timeout_s=case.value("normal_single_nonbatch.first_traffic_timeout_s"),
+        params=case.params(
+            "normal_single_nonbatch.first_traffic", {"engine": output("add", "engine")}
+        ),
     )
     case.step(
         "added_topology",
         "elastic_topology",
-        timeout_s=35,
-        params={
-            "role": "PREFILL",
-            "discovered": 3,
-            "alive": 3,
-            "port": output("add", "port"),
-            "present": True,
-        },
+        timeout_s=case.value("normal_single_nonbatch.added_topology_timeout_s"),
+        params=case.params(
+            "normal_single_nonbatch.added_topology", {"port": output("add", "port")}
+        ),
     )
     case.step(
         "post_window",
         "elastic_timeline",
-        timeout_s=55,
-        params={
-            "engines": ["prefill-0", "prefill-1", output("add", "engine")],
-            "offsets_s": [0, 5, 10, 17, 24, 31, 38, 45],
-        },
+        timeout_s=case.value("normal_single_nonbatch.post_window_timeout_s"),
+        params=case.params(
+            "normal_single_nonbatch.post_window",
+            {
+                "engines": [
+                    case.value("normal_single_nonbatch.post_window.engines.item_0"),
+                    case.value("normal_single_nonbatch.post_window.engines.item_1"),
+                    output("add", "engine"),
+                ]
+            },
+        ),
     )
     case.step(
         "preference_flow_stop",
         "elastic_flow_stop",
-        timeout_s=45,
+        timeout_s=case.value("normal_single_nonbatch.preference_flow_stop_timeout_s"),
         params={"flow": output("preference_flow", "flow")},
     )
     case.step(
         "preference_protocol",
         "elastic_lifecycle_flow_protocol",
-        params={
-            "flow": output("preference_flow", "flow"),
-            "method": "GenerateStreamCall",
-        },
+        params=case.params(
+            "normal_single_nonbatch.preference_protocol",
+            {"flow": output("preference_flow", "flow")},
+        ),
     )
     case.step(
         "add_availability",
@@ -2256,319 +2442,370 @@ def normal_single_nonbatch(case):
     case.step(
         "preference_shares",
         "elastic_share",
-        params={
-            "series": output("post_window", "series"),
-            "engine": output("add", "engine"),
-            "max_share": 0.6,
-            "old_floor": 0.1,
-            "exclusive": False,
-            "require_new": False,
-        },
+        params=case.params(
+            "normal_single_nonbatch.preference_shares",
+            {
+                "series": output("post_window", "series"),
+                "engine": output("add", "engine"),
+            },
+        ),
     )
     case.step(
         "preference_availability",
         "elastic_flow_assert",
-        params={
-            "result": output("preference_flow_stop", "result"),
-            "min_success_rate": 0.9,
-        },
+        params=case.params(
+            "normal_single_nonbatch.preference_availability",
+            {"result": output("preference_flow_stop", "result")},
+        ),
     )
     case.step("remove_flow", "elastic_cold_flow")
     case.step(
         "remove_traffic",
         "elastic_lifecycle_probe",
-        timeout_s=60,
-        params={
-            "engine": output("add", "engine"),
-            "window_s": 10,
-            "method": "GenerateStreamCall",
-        },
+        timeout_s=case.value("normal_single_nonbatch.remove_traffic_timeout_s"),
+        params=case.params(
+            "normal_single_nonbatch.remove_traffic", {"engine": output("add", "engine")}
+        ),
     )
     case.step(
         "remove",
         "elastic_remove",
-        timeout_s=75,
-        params={"engine": output("add", "engine"), "drain_timeout_ms": 60000},
+        timeout_s=case.value("normal_single_nonbatch.remove_timeout_s"),
+        params=case.params(
+            "normal_single_nonbatch.remove", {"engine": output("add", "engine")}
+        ),
     )
-    case.step("remove_hold", "elastic_pause", params={"seconds": 3})
+    case.step(
+        "remove_hold",
+        "elastic_pause",
+        params=case.value("normal_single_nonbatch.remove_hold"),
+    )
     case.step(
         "remove_flow_stop",
         "elastic_flow_stop",
-        timeout_s=45,
+        timeout_s=case.value("normal_single_nonbatch.remove_flow_stop_timeout_s"),
         params={"flow": output("remove_flow", "flow")},
     )
     case.step(
         "remove_protocol",
         "elastic_lifecycle_flow_protocol",
-        params={"flow": output("remove_flow", "flow"), "method": "GenerateStreamCall"},
+        params=case.params(
+            "normal_single_nonbatch.remove_protocol",
+            {"flow": output("remove_flow", "flow")},
+        ),
     )
     case.step(
         "removed_topology",
         "elastic_topology",
-        timeout_s=35,
-        params={
-            "role": "PREFILL",
-            "discovered": 2,
-            "alive": 2,
-            "port": output("add", "port"),
-            "present": False,
-        },
+        timeout_s=case.value("normal_single_nonbatch.removed_topology_timeout_s"),
+        params=case.params(
+            "normal_single_nonbatch.removed_topology", {"port": output("add", "port")}
+        ),
     )
-    case.step("remove_accounting", "elastic_literal_nonbatch_accounting", timeout_s=105)
+    case.step(
+        "remove_accounting",
+        "elastic_literal_nonbatch_accounting",
+        timeout_s=case.value("normal_single_nonbatch.remove_accounting_timeout_s"),
+    )
     case.step(
         "remove_zero_errors",
         "elastic_flow_assert",
-        params={"result": output("remove_flow_stop", "result"), "min_success_rate": 1},
+        params=case.params(
+            "normal_single_nonbatch.remove_zero_errors",
+            {"result": output("remove_flow_stop", "result")},
+        ),
     )
-    case.step("cycle1_add", "elastic_add", params={"role": "prefill"})
+    case.step(
+        "cycle1_add",
+        "elastic_add",
+        params=case.value("normal_single_nonbatch.cycle1_add"),
+    )
     case.step(
         "cycle1_added_topology",
         "elastic_topology",
-        timeout_s=35,
-        params={
-            "role": "PREFILL",
-            "discovered": 3,
-            "alive": 3,
-            "port": output("cycle1_add", "port"),
-            "present": True,
-        },
+        timeout_s=case.value("normal_single_nonbatch.cycle1_added_topology_timeout_s"),
+        params=case.params(
+            "normal_single_nonbatch.cycle1_added_topology",
+            {"port": output("cycle1_add", "port")},
+        ),
     )
     case.step(
         "cycle1_traffic",
         "elastic_lifecycle_probe",
-        timeout_s=60,
-        params={
-            "engine": output("cycle1_add", "engine"),
-            "window_s": 15,
-            "method": "GenerateStreamCall",
-        },
+        timeout_s=case.value("normal_single_nonbatch.cycle1_traffic_timeout_s"),
+        params=case.params(
+            "normal_single_nonbatch.cycle1_traffic",
+            {"engine": output("cycle1_add", "engine")},
+        ),
     )
     case.step("cycle1_flow", "elastic_cold_flow")
-    case.step("cycle1_ramp", "elastic_pause", params={"seconds": 0.5})
+    case.step(
+        "cycle1_ramp",
+        "elastic_pause",
+        params=case.value("normal_single_nonbatch.cycle1_ramp"),
+    )
     case.step(
         "cycle1_remove",
         "elastic_remove",
-        timeout_s=75,
-        params={"engine": output("cycle1_add", "engine"), "drain_timeout_ms": 60000},
+        timeout_s=case.value("normal_single_nonbatch.cycle1_remove_timeout_s"),
+        params=case.params(
+            "normal_single_nonbatch.cycle1_remove",
+            {"engine": output("cycle1_add", "engine")},
+        ),
     )
     case.step(
         "cycle1_flow_stop",
         "elastic_flow_stop",
-        timeout_s=45,
+        timeout_s=case.value("normal_single_nonbatch.cycle1_flow_stop_timeout_s"),
         params={"flow": output("cycle1_flow", "flow")},
     )
     case.step(
         "cycle1_protocol",
         "elastic_lifecycle_flow_protocol",
-        params={"flow": output("cycle1_flow", "flow"), "method": "GenerateStreamCall"},
+        params=case.params(
+            "normal_single_nonbatch.cycle1_protocol",
+            {"flow": output("cycle1_flow", "flow")},
+        ),
     )
     case.step(
         "cycle1_removed_topology",
         "elastic_topology",
-        timeout_s=35,
-        params={
-            "role": "PREFILL",
-            "discovered": 2,
-            "alive": 2,
-            "port": output("cycle1_add", "port"),
-            "present": False,
-        },
+        timeout_s=case.value(
+            "normal_single_nonbatch.cycle1_removed_topology_timeout_s"
+        ),
+        params=case.params(
+            "normal_single_nonbatch.cycle1_removed_topology",
+            {"port": output("cycle1_add", "port")},
+        ),
     )
     case.step(
         "cycle1_zero_errors",
         "elastic_flow_assert",
-        params={"result": output("cycle1_flow_stop", "result"), "min_success_rate": 1},
+        params=case.params(
+            "normal_single_nonbatch.cycle1_zero_errors",
+            {"result": output("cycle1_flow_stop", "result")},
+        ),
     )
-    case.step("cycle2_add", "elastic_add", params={"role": "prefill"})
+    case.step(
+        "cycle2_add",
+        "elastic_add",
+        params=case.value("normal_single_nonbatch.cycle2_add"),
+    )
     case.step(
         "cycle2_added_topology",
         "elastic_topology",
-        timeout_s=35,
-        params={
-            "role": "PREFILL",
-            "discovered": 3,
-            "alive": 3,
-            "port": output("cycle2_add", "port"),
-            "present": True,
-        },
+        timeout_s=case.value("normal_single_nonbatch.cycle2_added_topology_timeout_s"),
+        params=case.params(
+            "normal_single_nonbatch.cycle2_added_topology",
+            {"port": output("cycle2_add", "port")},
+        ),
     )
     case.step(
         "cycle2_traffic",
         "elastic_lifecycle_probe",
-        timeout_s=60,
-        params={
-            "engine": output("cycle2_add", "engine"),
-            "window_s": 15,
-            "method": "GenerateStreamCall",
-        },
+        timeout_s=case.value("normal_single_nonbatch.cycle2_traffic_timeout_s"),
+        params=case.params(
+            "normal_single_nonbatch.cycle2_traffic",
+            {"engine": output("cycle2_add", "engine")},
+        ),
     )
     case.step("cycle2_flow", "elastic_cold_flow")
-    case.step("cycle2_ramp", "elastic_pause", params={"seconds": 0.5})
+    case.step(
+        "cycle2_ramp",
+        "elastic_pause",
+        params=case.value("normal_single_nonbatch.cycle2_ramp"),
+    )
     case.step(
         "cycle2_remove",
         "elastic_remove",
-        timeout_s=75,
-        params={"engine": output("cycle2_add", "engine"), "drain_timeout_ms": 60000},
+        timeout_s=case.value("normal_single_nonbatch.cycle2_remove_timeout_s"),
+        params=case.params(
+            "normal_single_nonbatch.cycle2_remove",
+            {"engine": output("cycle2_add", "engine")},
+        ),
     )
     case.step(
         "cycle2_flow_stop",
         "elastic_flow_stop",
-        timeout_s=45,
+        timeout_s=case.value("normal_single_nonbatch.cycle2_flow_stop_timeout_s"),
         params={"flow": output("cycle2_flow", "flow")},
     )
     case.step(
         "cycle2_protocol",
         "elastic_lifecycle_flow_protocol",
-        params={"flow": output("cycle2_flow", "flow"), "method": "GenerateStreamCall"},
+        params=case.params(
+            "normal_single_nonbatch.cycle2_protocol",
+            {"flow": output("cycle2_flow", "flow")},
+        ),
     )
     case.step(
         "cycle2_removed_topology",
         "elastic_topology",
-        timeout_s=35,
-        params={
-            "role": "PREFILL",
-            "discovered": 2,
-            "alive": 2,
-            "port": output("cycle2_add", "port"),
-            "present": False,
-        },
+        timeout_s=case.value(
+            "normal_single_nonbatch.cycle2_removed_topology_timeout_s"
+        ),
+        params=case.params(
+            "normal_single_nonbatch.cycle2_removed_topology",
+            {"port": output("cycle2_add", "port")},
+        ),
     )
     case.step(
         "cycle2_zero_errors",
         "elastic_flow_assert",
-        params={"result": output("cycle2_flow_stop", "result"), "min_success_rate": 1},
+        params=case.params(
+            "normal_single_nonbatch.cycle2_zero_errors",
+            {"result": output("cycle2_flow_stop", "result")},
+        ),
     )
-    case.step("cycle3_add", "elastic_add", params={"role": "prefill"})
+    case.step(
+        "cycle3_add",
+        "elastic_add",
+        params=case.value("normal_single_nonbatch.cycle3_add"),
+    )
     case.step(
         "cycle3_added_topology",
         "elastic_topology",
-        timeout_s=35,
-        params={
-            "role": "PREFILL",
-            "discovered": 3,
-            "alive": 3,
-            "port": output("cycle3_add", "port"),
-            "present": True,
-        },
+        timeout_s=case.value("normal_single_nonbatch.cycle3_added_topology_timeout_s"),
+        params=case.params(
+            "normal_single_nonbatch.cycle3_added_topology",
+            {"port": output("cycle3_add", "port")},
+        ),
     )
     case.step(
         "cycle3_traffic",
         "elastic_lifecycle_probe",
-        timeout_s=60,
-        params={
-            "engine": output("cycle3_add", "engine"),
-            "window_s": 15,
-            "method": "GenerateStreamCall",
-        },
+        timeout_s=case.value("normal_single_nonbatch.cycle3_traffic_timeout_s"),
+        params=case.params(
+            "normal_single_nonbatch.cycle3_traffic",
+            {"engine": output("cycle3_add", "engine")},
+        ),
     )
     case.step("cycle3_flow", "elastic_cold_flow")
-    case.step("cycle3_ramp", "elastic_pause", params={"seconds": 0.5})
+    case.step(
+        "cycle3_ramp",
+        "elastic_pause",
+        params=case.value("normal_single_nonbatch.cycle3_ramp"),
+    )
     case.step(
         "cycle3_remove",
         "elastic_remove",
-        timeout_s=75,
-        params={"engine": output("cycle3_add", "engine"), "drain_timeout_ms": 60000},
+        timeout_s=case.value("normal_single_nonbatch.cycle3_remove_timeout_s"),
+        params=case.params(
+            "normal_single_nonbatch.cycle3_remove",
+            {"engine": output("cycle3_add", "engine")},
+        ),
     )
     case.step(
         "cycle3_flow_stop",
         "elastic_flow_stop",
-        timeout_s=45,
+        timeout_s=case.value("normal_single_nonbatch.cycle3_flow_stop_timeout_s"),
         params={"flow": output("cycle3_flow", "flow")},
     )
     case.step(
         "cycle3_protocol",
         "elastic_lifecycle_flow_protocol",
-        params={"flow": output("cycle3_flow", "flow"), "method": "GenerateStreamCall"},
+        params=case.params(
+            "normal_single_nonbatch.cycle3_protocol",
+            {"flow": output("cycle3_flow", "flow")},
+        ),
     )
     case.step(
         "cycle3_removed_topology",
         "elastic_topology",
-        timeout_s=35,
-        params={
-            "role": "PREFILL",
-            "discovered": 2,
-            "alive": 2,
-            "port": output("cycle3_add", "port"),
-            "present": False,
-        },
+        timeout_s=case.value(
+            "normal_single_nonbatch.cycle3_removed_topology_timeout_s"
+        ),
+        params=case.params(
+            "normal_single_nonbatch.cycle3_removed_topology",
+            {"port": output("cycle3_add", "port")},
+        ),
     )
     case.step(
         "cycle3_zero_errors",
         "elastic_flow_assert",
-        params={"result": output("cycle3_flow_stop", "result"), "min_success_rate": 1},
+        params=case.params(
+            "normal_single_nonbatch.cycle3_zero_errors",
+            {"result": output("cycle3_flow_stop", "result")},
+        ),
     )
     case.step(
         "recovery",
         "elastic_cycle_recovery",
-        timeout_s=65,
-        params={"method": "GenerateStreamCall"},
+        timeout_s=case.value("normal_single_nonbatch.recovery_timeout_s"),
+        params=case.value("normal_single_nonbatch.recovery"),
     )
     case.step(
         "final_topology",
         "elastic_topology",
-        timeout_s=35,
-        params={"role": "PREFILL", "discovered": 2, "alive": 2},
+        timeout_s=case.value("normal_single_nonbatch.final_topology_timeout_s"),
+        params=case.value("normal_single_nonbatch.final_topology"),
     )
     case.step("teardown", "teardown")
 
 
 def strict_single_nonbatch(case):
-    case.step("setup", "setup", timeout_s=180)
+    case.step(
+        "setup", "setup", timeout_s=case.value("strict_single_nonbatch.setup_timeout_s")
+    )
     case.step(
         "initial_topology",
         "elastic_topology",
-        timeout_s=35,
-        params={"role": "PREFILL", "discovered": 2, "alive": 2},
+        timeout_s=case.value("strict_single_nonbatch.initial_topology_timeout_s"),
+        params=case.value("strict_single_nonbatch.initial_topology"),
     )
     case.step("preference_flow", "elastic_cold_flow")
-    case.step("ramp", "elastic_pause", params={"seconds": 1})
+    case.step("ramp", "elastic_pause", params=case.value("strict_single_nonbatch.ramp"))
     case.step(
         "baseline_window",
         "elastic_timeline",
-        timeout_s=25,
-        params={"engines": ["prefill-0", "prefill-1"], "offsets_s": [0, 15]},
+        timeout_s=case.value("strict_single_nonbatch.baseline_window_timeout_s"),
+        params=case.value("strict_single_nonbatch.baseline_window"),
     )
-    case.step("add", "elastic_add", params={"role": "prefill"})
+    case.step("add", "elastic_add", params=case.value("strict_single_nonbatch.add"))
     case.step(
         "first_traffic",
         "elastic_accepted_timed",
-        timeout_s=15,
-        params={"engine": output("add", "engine"), "baseline": 0, "window_s": 10},
+        timeout_s=case.value("strict_single_nonbatch.first_traffic_timeout_s"),
+        params=case.params(
+            "strict_single_nonbatch.first_traffic", {"engine": output("add", "engine")}
+        ),
     )
     case.step(
         "added_topology",
         "elastic_topology",
-        timeout_s=35,
-        params={
-            "role": "PREFILL",
-            "discovered": 3,
-            "alive": 3,
-            "port": output("add", "port"),
-            "present": True,
-        },
+        timeout_s=case.value("strict_single_nonbatch.added_topology_timeout_s"),
+        params=case.params(
+            "strict_single_nonbatch.added_topology", {"port": output("add", "port")}
+        ),
     )
     case.step(
         "post_window",
         "elastic_timeline",
-        timeout_s=55,
-        params={
-            "engines": ["prefill-0", "prefill-1", output("add", "engine")],
-            "offsets_s": [0, 5, 10, 17, 24, 31, 38, 45],
-        },
+        timeout_s=case.value("strict_single_nonbatch.post_window_timeout_s"),
+        params=case.params(
+            "strict_single_nonbatch.post_window",
+            {
+                "engines": [
+                    case.value("strict_single_nonbatch.post_window.engines.item_0"),
+                    case.value("strict_single_nonbatch.post_window.engines.item_1"),
+                    output("add", "engine"),
+                ]
+            },
+        ),
     )
     case.step(
         "preference_flow_stop",
         "elastic_flow_stop",
-        timeout_s=45,
+        timeout_s=case.value("strict_single_nonbatch.preference_flow_stop_timeout_s"),
         params={"flow": output("preference_flow", "flow")},
     )
     case.step(
         "preference_protocol",
         "elastic_lifecycle_flow_protocol",
-        params={
-            "flow": output("preference_flow", "flow"),
-            "method": "GenerateStreamCall",
-        },
+        params=case.params(
+            "strict_single_nonbatch.preference_protocol",
+            {"flow": output("preference_flow", "flow")},
+        ),
     )
     case.step(
         "add_availability",
@@ -2591,319 +2828,370 @@ def strict_single_nonbatch(case):
     case.step(
         "preference_shares",
         "elastic_share",
-        params={
-            "series": output("post_window", "series"),
-            "engine": output("add", "engine"),
-            "max_share": 0.5,
-            "old_floor": 0.1,
-            "exclusive": False,
-            "require_new": False,
-        },
+        params=case.params(
+            "strict_single_nonbatch.preference_shares",
+            {
+                "series": output("post_window", "series"),
+                "engine": output("add", "engine"),
+            },
+        ),
     )
     case.step(
         "preference_availability",
         "elastic_flow_assert",
-        params={
-            "result": output("preference_flow_stop", "result"),
-            "min_success_rate": 0.9,
-        },
+        params=case.params(
+            "strict_single_nonbatch.preference_availability",
+            {"result": output("preference_flow_stop", "result")},
+        ),
     )
     case.step("remove_flow", "elastic_cold_flow")
     case.step(
         "remove_traffic",
         "elastic_lifecycle_probe",
-        timeout_s=60,
-        params={
-            "engine": output("add", "engine"),
-            "window_s": 10,
-            "method": "GenerateStreamCall",
-        },
+        timeout_s=case.value("strict_single_nonbatch.remove_traffic_timeout_s"),
+        params=case.params(
+            "strict_single_nonbatch.remove_traffic", {"engine": output("add", "engine")}
+        ),
     )
     case.step(
         "remove",
         "elastic_remove",
-        timeout_s=75,
-        params={"engine": output("add", "engine"), "drain_timeout_ms": 60000},
+        timeout_s=case.value("strict_single_nonbatch.remove_timeout_s"),
+        params=case.params(
+            "strict_single_nonbatch.remove", {"engine": output("add", "engine")}
+        ),
     )
-    case.step("remove_hold", "elastic_pause", params={"seconds": 3})
+    case.step(
+        "remove_hold",
+        "elastic_pause",
+        params=case.value("strict_single_nonbatch.remove_hold"),
+    )
     case.step(
         "remove_flow_stop",
         "elastic_flow_stop",
-        timeout_s=45,
+        timeout_s=case.value("strict_single_nonbatch.remove_flow_stop_timeout_s"),
         params={"flow": output("remove_flow", "flow")},
     )
     case.step(
         "remove_protocol",
         "elastic_lifecycle_flow_protocol",
-        params={"flow": output("remove_flow", "flow"), "method": "GenerateStreamCall"},
+        params=case.params(
+            "strict_single_nonbatch.remove_protocol",
+            {"flow": output("remove_flow", "flow")},
+        ),
     )
     case.step(
         "removed_topology",
         "elastic_topology",
-        timeout_s=35,
-        params={
-            "role": "PREFILL",
-            "discovered": 2,
-            "alive": 2,
-            "port": output("add", "port"),
-            "present": False,
-        },
+        timeout_s=case.value("strict_single_nonbatch.removed_topology_timeout_s"),
+        params=case.params(
+            "strict_single_nonbatch.removed_topology", {"port": output("add", "port")}
+        ),
     )
-    case.step("remove_accounting", "elastic_literal_nonbatch_accounting", timeout_s=105)
+    case.step(
+        "remove_accounting",
+        "elastic_literal_nonbatch_accounting",
+        timeout_s=case.value("strict_single_nonbatch.remove_accounting_timeout_s"),
+    )
     case.step(
         "remove_zero_errors",
         "elastic_flow_assert",
-        params={"result": output("remove_flow_stop", "result"), "min_success_rate": 1},
+        params=case.params(
+            "strict_single_nonbatch.remove_zero_errors",
+            {"result": output("remove_flow_stop", "result")},
+        ),
     )
-    case.step("cycle1_add", "elastic_add", params={"role": "prefill"})
+    case.step(
+        "cycle1_add",
+        "elastic_add",
+        params=case.value("strict_single_nonbatch.cycle1_add"),
+    )
     case.step(
         "cycle1_added_topology",
         "elastic_topology",
-        timeout_s=35,
-        params={
-            "role": "PREFILL",
-            "discovered": 3,
-            "alive": 3,
-            "port": output("cycle1_add", "port"),
-            "present": True,
-        },
+        timeout_s=case.value("strict_single_nonbatch.cycle1_added_topology_timeout_s"),
+        params=case.params(
+            "strict_single_nonbatch.cycle1_added_topology",
+            {"port": output("cycle1_add", "port")},
+        ),
     )
     case.step(
         "cycle1_traffic",
         "elastic_lifecycle_probe",
-        timeout_s=60,
-        params={
-            "engine": output("cycle1_add", "engine"),
-            "window_s": 15,
-            "method": "GenerateStreamCall",
-        },
+        timeout_s=case.value("strict_single_nonbatch.cycle1_traffic_timeout_s"),
+        params=case.params(
+            "strict_single_nonbatch.cycle1_traffic",
+            {"engine": output("cycle1_add", "engine")},
+        ),
     )
     case.step("cycle1_flow", "elastic_cold_flow")
-    case.step("cycle1_ramp", "elastic_pause", params={"seconds": 0.5})
+    case.step(
+        "cycle1_ramp",
+        "elastic_pause",
+        params=case.value("strict_single_nonbatch.cycle1_ramp"),
+    )
     case.step(
         "cycle1_remove",
         "elastic_remove",
-        timeout_s=75,
-        params={"engine": output("cycle1_add", "engine"), "drain_timeout_ms": 60000},
+        timeout_s=case.value("strict_single_nonbatch.cycle1_remove_timeout_s"),
+        params=case.params(
+            "strict_single_nonbatch.cycle1_remove",
+            {"engine": output("cycle1_add", "engine")},
+        ),
     )
     case.step(
         "cycle1_flow_stop",
         "elastic_flow_stop",
-        timeout_s=45,
+        timeout_s=case.value("strict_single_nonbatch.cycle1_flow_stop_timeout_s"),
         params={"flow": output("cycle1_flow", "flow")},
     )
     case.step(
         "cycle1_protocol",
         "elastic_lifecycle_flow_protocol",
-        params={"flow": output("cycle1_flow", "flow"), "method": "GenerateStreamCall"},
+        params=case.params(
+            "strict_single_nonbatch.cycle1_protocol",
+            {"flow": output("cycle1_flow", "flow")},
+        ),
     )
     case.step(
         "cycle1_removed_topology",
         "elastic_topology",
-        timeout_s=35,
-        params={
-            "role": "PREFILL",
-            "discovered": 2,
-            "alive": 2,
-            "port": output("cycle1_add", "port"),
-            "present": False,
-        },
+        timeout_s=case.value(
+            "strict_single_nonbatch.cycle1_removed_topology_timeout_s"
+        ),
+        params=case.params(
+            "strict_single_nonbatch.cycle1_removed_topology",
+            {"port": output("cycle1_add", "port")},
+        ),
     )
     case.step(
         "cycle1_zero_errors",
         "elastic_flow_assert",
-        params={"result": output("cycle1_flow_stop", "result"), "min_success_rate": 1},
+        params=case.params(
+            "strict_single_nonbatch.cycle1_zero_errors",
+            {"result": output("cycle1_flow_stop", "result")},
+        ),
     )
-    case.step("cycle2_add", "elastic_add", params={"role": "prefill"})
+    case.step(
+        "cycle2_add",
+        "elastic_add",
+        params=case.value("strict_single_nonbatch.cycle2_add"),
+    )
     case.step(
         "cycle2_added_topology",
         "elastic_topology",
-        timeout_s=35,
-        params={
-            "role": "PREFILL",
-            "discovered": 3,
-            "alive": 3,
-            "port": output("cycle2_add", "port"),
-            "present": True,
-        },
+        timeout_s=case.value("strict_single_nonbatch.cycle2_added_topology_timeout_s"),
+        params=case.params(
+            "strict_single_nonbatch.cycle2_added_topology",
+            {"port": output("cycle2_add", "port")},
+        ),
     )
     case.step(
         "cycle2_traffic",
         "elastic_lifecycle_probe",
-        timeout_s=60,
-        params={
-            "engine": output("cycle2_add", "engine"),
-            "window_s": 15,
-            "method": "GenerateStreamCall",
-        },
+        timeout_s=case.value("strict_single_nonbatch.cycle2_traffic_timeout_s"),
+        params=case.params(
+            "strict_single_nonbatch.cycle2_traffic",
+            {"engine": output("cycle2_add", "engine")},
+        ),
     )
     case.step("cycle2_flow", "elastic_cold_flow")
-    case.step("cycle2_ramp", "elastic_pause", params={"seconds": 0.5})
+    case.step(
+        "cycle2_ramp",
+        "elastic_pause",
+        params=case.value("strict_single_nonbatch.cycle2_ramp"),
+    )
     case.step(
         "cycle2_remove",
         "elastic_remove",
-        timeout_s=75,
-        params={"engine": output("cycle2_add", "engine"), "drain_timeout_ms": 60000},
+        timeout_s=case.value("strict_single_nonbatch.cycle2_remove_timeout_s"),
+        params=case.params(
+            "strict_single_nonbatch.cycle2_remove",
+            {"engine": output("cycle2_add", "engine")},
+        ),
     )
     case.step(
         "cycle2_flow_stop",
         "elastic_flow_stop",
-        timeout_s=45,
+        timeout_s=case.value("strict_single_nonbatch.cycle2_flow_stop_timeout_s"),
         params={"flow": output("cycle2_flow", "flow")},
     )
     case.step(
         "cycle2_protocol",
         "elastic_lifecycle_flow_protocol",
-        params={"flow": output("cycle2_flow", "flow"), "method": "GenerateStreamCall"},
+        params=case.params(
+            "strict_single_nonbatch.cycle2_protocol",
+            {"flow": output("cycle2_flow", "flow")},
+        ),
     )
     case.step(
         "cycle2_removed_topology",
         "elastic_topology",
-        timeout_s=35,
-        params={
-            "role": "PREFILL",
-            "discovered": 2,
-            "alive": 2,
-            "port": output("cycle2_add", "port"),
-            "present": False,
-        },
+        timeout_s=case.value(
+            "strict_single_nonbatch.cycle2_removed_topology_timeout_s"
+        ),
+        params=case.params(
+            "strict_single_nonbatch.cycle2_removed_topology",
+            {"port": output("cycle2_add", "port")},
+        ),
     )
     case.step(
         "cycle2_zero_errors",
         "elastic_flow_assert",
-        params={"result": output("cycle2_flow_stop", "result"), "min_success_rate": 1},
+        params=case.params(
+            "strict_single_nonbatch.cycle2_zero_errors",
+            {"result": output("cycle2_flow_stop", "result")},
+        ),
     )
-    case.step("cycle3_add", "elastic_add", params={"role": "prefill"})
+    case.step(
+        "cycle3_add",
+        "elastic_add",
+        params=case.value("strict_single_nonbatch.cycle3_add"),
+    )
     case.step(
         "cycle3_added_topology",
         "elastic_topology",
-        timeout_s=35,
-        params={
-            "role": "PREFILL",
-            "discovered": 3,
-            "alive": 3,
-            "port": output("cycle3_add", "port"),
-            "present": True,
-        },
+        timeout_s=case.value("strict_single_nonbatch.cycle3_added_topology_timeout_s"),
+        params=case.params(
+            "strict_single_nonbatch.cycle3_added_topology",
+            {"port": output("cycle3_add", "port")},
+        ),
     )
     case.step(
         "cycle3_traffic",
         "elastic_lifecycle_probe",
-        timeout_s=60,
-        params={
-            "engine": output("cycle3_add", "engine"),
-            "window_s": 15,
-            "method": "GenerateStreamCall",
-        },
+        timeout_s=case.value("strict_single_nonbatch.cycle3_traffic_timeout_s"),
+        params=case.params(
+            "strict_single_nonbatch.cycle3_traffic",
+            {"engine": output("cycle3_add", "engine")},
+        ),
     )
     case.step("cycle3_flow", "elastic_cold_flow")
-    case.step("cycle3_ramp", "elastic_pause", params={"seconds": 0.5})
+    case.step(
+        "cycle3_ramp",
+        "elastic_pause",
+        params=case.value("strict_single_nonbatch.cycle3_ramp"),
+    )
     case.step(
         "cycle3_remove",
         "elastic_remove",
-        timeout_s=75,
-        params={"engine": output("cycle3_add", "engine"), "drain_timeout_ms": 60000},
+        timeout_s=case.value("strict_single_nonbatch.cycle3_remove_timeout_s"),
+        params=case.params(
+            "strict_single_nonbatch.cycle3_remove",
+            {"engine": output("cycle3_add", "engine")},
+        ),
     )
     case.step(
         "cycle3_flow_stop",
         "elastic_flow_stop",
-        timeout_s=45,
+        timeout_s=case.value("strict_single_nonbatch.cycle3_flow_stop_timeout_s"),
         params={"flow": output("cycle3_flow", "flow")},
     )
     case.step(
         "cycle3_protocol",
         "elastic_lifecycle_flow_protocol",
-        params={"flow": output("cycle3_flow", "flow"), "method": "GenerateStreamCall"},
+        params=case.params(
+            "strict_single_nonbatch.cycle3_protocol",
+            {"flow": output("cycle3_flow", "flow")},
+        ),
     )
     case.step(
         "cycle3_removed_topology",
         "elastic_topology",
-        timeout_s=35,
-        params={
-            "role": "PREFILL",
-            "discovered": 2,
-            "alive": 2,
-            "port": output("cycle3_add", "port"),
-            "present": False,
-        },
+        timeout_s=case.value(
+            "strict_single_nonbatch.cycle3_removed_topology_timeout_s"
+        ),
+        params=case.params(
+            "strict_single_nonbatch.cycle3_removed_topology",
+            {"port": output("cycle3_add", "port")},
+        ),
     )
     case.step(
         "cycle3_zero_errors",
         "elastic_flow_assert",
-        params={"result": output("cycle3_flow_stop", "result"), "min_success_rate": 1},
+        params=case.params(
+            "strict_single_nonbatch.cycle3_zero_errors",
+            {"result": output("cycle3_flow_stop", "result")},
+        ),
     )
     case.step(
         "recovery",
         "elastic_cycle_recovery",
-        timeout_s=65,
-        params={"method": "GenerateStreamCall"},
+        timeout_s=case.value("strict_single_nonbatch.recovery_timeout_s"),
+        params=case.value("strict_single_nonbatch.recovery"),
     )
     case.step(
         "final_topology",
         "elastic_topology",
-        timeout_s=35,
-        params={"role": "PREFILL", "discovered": 2, "alive": 2},
+        timeout_s=case.value("strict_single_nonbatch.final_topology_timeout_s"),
+        params=case.value("strict_single_nonbatch.final_topology"),
     )
     case.step("teardown", "teardown")
 
 
 def normal_window_nonbatch(case):
-    case.step("setup", "setup", timeout_s=180)
+    case.step(
+        "setup", "setup", timeout_s=case.value("normal_window_nonbatch.setup_timeout_s")
+    )
     case.step(
         "initial_topology",
         "elastic_topology",
-        timeout_s=35,
-        params={"role": "PREFILL", "discovered": 2, "alive": 2},
+        timeout_s=case.value("normal_window_nonbatch.initial_topology_timeout_s"),
+        params=case.value("normal_window_nonbatch.initial_topology"),
     )
     case.step("preference_flow", "elastic_cold_flow")
-    case.step("ramp", "elastic_pause", params={"seconds": 1})
+    case.step("ramp", "elastic_pause", params=case.value("normal_window_nonbatch.ramp"))
     case.step(
         "baseline_window",
         "elastic_timeline",
-        timeout_s=25,
-        params={"engines": ["prefill-0", "prefill-1"], "offsets_s": [0, 15]},
+        timeout_s=case.value("normal_window_nonbatch.baseline_window_timeout_s"),
+        params=case.value("normal_window_nonbatch.baseline_window"),
     )
-    case.step("add", "elastic_add", params={"role": "prefill"})
+    case.step("add", "elastic_add", params=case.value("normal_window_nonbatch.add"))
     case.step(
         "first_traffic",
         "elastic_accepted_timed",
-        timeout_s=15,
-        params={"engine": output("add", "engine"), "baseline": 0, "window_s": 10},
+        timeout_s=case.value("normal_window_nonbatch.first_traffic_timeout_s"),
+        params=case.params(
+            "normal_window_nonbatch.first_traffic", {"engine": output("add", "engine")}
+        ),
     )
     case.step(
         "added_topology",
         "elastic_topology",
-        timeout_s=35,
-        params={
-            "role": "PREFILL",
-            "discovered": 3,
-            "alive": 3,
-            "port": output("add", "port"),
-            "present": True,
-        },
+        timeout_s=case.value("normal_window_nonbatch.added_topology_timeout_s"),
+        params=case.params(
+            "normal_window_nonbatch.added_topology", {"port": output("add", "port")}
+        ),
     )
     case.step(
         "post_window",
         "elastic_timeline",
-        timeout_s=55,
-        params={
-            "engines": ["prefill-0", "prefill-1", output("add", "engine")],
-            "offsets_s": [0, 5, 10, 17, 24, 31, 38, 45],
-        },
+        timeout_s=case.value("normal_window_nonbatch.post_window_timeout_s"),
+        params=case.params(
+            "normal_window_nonbatch.post_window",
+            {
+                "engines": [
+                    case.value("normal_window_nonbatch.post_window.engines.item_0"),
+                    case.value("normal_window_nonbatch.post_window.engines.item_1"),
+                    output("add", "engine"),
+                ]
+            },
+        ),
     )
     case.step(
         "preference_flow_stop",
         "elastic_flow_stop",
-        timeout_s=45,
+        timeout_s=case.value("normal_window_nonbatch.preference_flow_stop_timeout_s"),
         params={"flow": output("preference_flow", "flow")},
     )
     case.step(
         "preference_protocol",
         "elastic_lifecycle_flow_protocol",
-        params={
-            "flow": output("preference_flow", "flow"),
-            "method": "GenerateStreamCall",
-        },
+        params=case.params(
+            "normal_window_nonbatch.preference_protocol",
+            {"flow": output("preference_flow", "flow")},
+        ),
     )
     case.step(
         "add_availability",
@@ -2926,319 +3214,370 @@ def normal_window_nonbatch(case):
     case.step(
         "preference_shares",
         "elastic_share",
-        params={
-            "series": output("post_window", "series"),
-            "engine": output("add", "engine"),
-            "max_share": 0.6,
-            "old_floor": 0.1,
-            "exclusive": False,
-            "require_new": False,
-        },
+        params=case.params(
+            "normal_window_nonbatch.preference_shares",
+            {
+                "series": output("post_window", "series"),
+                "engine": output("add", "engine"),
+            },
+        ),
     )
     case.step(
         "preference_availability",
         "elastic_flow_assert",
-        params={
-            "result": output("preference_flow_stop", "result"),
-            "min_success_rate": 0.9,
-        },
+        params=case.params(
+            "normal_window_nonbatch.preference_availability",
+            {"result": output("preference_flow_stop", "result")},
+        ),
     )
     case.step("remove_flow", "elastic_cold_flow")
     case.step(
         "remove_traffic",
         "elastic_lifecycle_probe",
-        timeout_s=60,
-        params={
-            "engine": output("add", "engine"),
-            "window_s": 10,
-            "method": "GenerateStreamCall",
-        },
+        timeout_s=case.value("normal_window_nonbatch.remove_traffic_timeout_s"),
+        params=case.params(
+            "normal_window_nonbatch.remove_traffic", {"engine": output("add", "engine")}
+        ),
     )
     case.step(
         "remove",
         "elastic_remove",
-        timeout_s=75,
-        params={"engine": output("add", "engine"), "drain_timeout_ms": 60000},
+        timeout_s=case.value("normal_window_nonbatch.remove_timeout_s"),
+        params=case.params(
+            "normal_window_nonbatch.remove", {"engine": output("add", "engine")}
+        ),
     )
-    case.step("remove_hold", "elastic_pause", params={"seconds": 3})
+    case.step(
+        "remove_hold",
+        "elastic_pause",
+        params=case.value("normal_window_nonbatch.remove_hold"),
+    )
     case.step(
         "remove_flow_stop",
         "elastic_flow_stop",
-        timeout_s=45,
+        timeout_s=case.value("normal_window_nonbatch.remove_flow_stop_timeout_s"),
         params={"flow": output("remove_flow", "flow")},
     )
     case.step(
         "remove_protocol",
         "elastic_lifecycle_flow_protocol",
-        params={"flow": output("remove_flow", "flow"), "method": "GenerateStreamCall"},
+        params=case.params(
+            "normal_window_nonbatch.remove_protocol",
+            {"flow": output("remove_flow", "flow")},
+        ),
     )
     case.step(
         "removed_topology",
         "elastic_topology",
-        timeout_s=35,
-        params={
-            "role": "PREFILL",
-            "discovered": 2,
-            "alive": 2,
-            "port": output("add", "port"),
-            "present": False,
-        },
+        timeout_s=case.value("normal_window_nonbatch.removed_topology_timeout_s"),
+        params=case.params(
+            "normal_window_nonbatch.removed_topology", {"port": output("add", "port")}
+        ),
     )
-    case.step("remove_accounting", "elastic_literal_nonbatch_accounting", timeout_s=105)
+    case.step(
+        "remove_accounting",
+        "elastic_literal_nonbatch_accounting",
+        timeout_s=case.value("normal_window_nonbatch.remove_accounting_timeout_s"),
+    )
     case.step(
         "remove_zero_errors",
         "elastic_flow_assert",
-        params={"result": output("remove_flow_stop", "result"), "min_success_rate": 1},
+        params=case.params(
+            "normal_window_nonbatch.remove_zero_errors",
+            {"result": output("remove_flow_stop", "result")},
+        ),
     )
-    case.step("cycle1_add", "elastic_add", params={"role": "prefill"})
+    case.step(
+        "cycle1_add",
+        "elastic_add",
+        params=case.value("normal_window_nonbatch.cycle1_add"),
+    )
     case.step(
         "cycle1_added_topology",
         "elastic_topology",
-        timeout_s=35,
-        params={
-            "role": "PREFILL",
-            "discovered": 3,
-            "alive": 3,
-            "port": output("cycle1_add", "port"),
-            "present": True,
-        },
+        timeout_s=case.value("normal_window_nonbatch.cycle1_added_topology_timeout_s"),
+        params=case.params(
+            "normal_window_nonbatch.cycle1_added_topology",
+            {"port": output("cycle1_add", "port")},
+        ),
     )
     case.step(
         "cycle1_traffic",
         "elastic_lifecycle_probe",
-        timeout_s=60,
-        params={
-            "engine": output("cycle1_add", "engine"),
-            "window_s": 15,
-            "method": "GenerateStreamCall",
-        },
+        timeout_s=case.value("normal_window_nonbatch.cycle1_traffic_timeout_s"),
+        params=case.params(
+            "normal_window_nonbatch.cycle1_traffic",
+            {"engine": output("cycle1_add", "engine")},
+        ),
     )
     case.step("cycle1_flow", "elastic_cold_flow")
-    case.step("cycle1_ramp", "elastic_pause", params={"seconds": 0.5})
+    case.step(
+        "cycle1_ramp",
+        "elastic_pause",
+        params=case.value("normal_window_nonbatch.cycle1_ramp"),
+    )
     case.step(
         "cycle1_remove",
         "elastic_remove",
-        timeout_s=75,
-        params={"engine": output("cycle1_add", "engine"), "drain_timeout_ms": 60000},
+        timeout_s=case.value("normal_window_nonbatch.cycle1_remove_timeout_s"),
+        params=case.params(
+            "normal_window_nonbatch.cycle1_remove",
+            {"engine": output("cycle1_add", "engine")},
+        ),
     )
     case.step(
         "cycle1_flow_stop",
         "elastic_flow_stop",
-        timeout_s=45,
+        timeout_s=case.value("normal_window_nonbatch.cycle1_flow_stop_timeout_s"),
         params={"flow": output("cycle1_flow", "flow")},
     )
     case.step(
         "cycle1_protocol",
         "elastic_lifecycle_flow_protocol",
-        params={"flow": output("cycle1_flow", "flow"), "method": "GenerateStreamCall"},
+        params=case.params(
+            "normal_window_nonbatch.cycle1_protocol",
+            {"flow": output("cycle1_flow", "flow")},
+        ),
     )
     case.step(
         "cycle1_removed_topology",
         "elastic_topology",
-        timeout_s=35,
-        params={
-            "role": "PREFILL",
-            "discovered": 2,
-            "alive": 2,
-            "port": output("cycle1_add", "port"),
-            "present": False,
-        },
+        timeout_s=case.value(
+            "normal_window_nonbatch.cycle1_removed_topology_timeout_s"
+        ),
+        params=case.params(
+            "normal_window_nonbatch.cycle1_removed_topology",
+            {"port": output("cycle1_add", "port")},
+        ),
     )
     case.step(
         "cycle1_zero_errors",
         "elastic_flow_assert",
-        params={"result": output("cycle1_flow_stop", "result"), "min_success_rate": 1},
+        params=case.params(
+            "normal_window_nonbatch.cycle1_zero_errors",
+            {"result": output("cycle1_flow_stop", "result")},
+        ),
     )
-    case.step("cycle2_add", "elastic_add", params={"role": "prefill"})
+    case.step(
+        "cycle2_add",
+        "elastic_add",
+        params=case.value("normal_window_nonbatch.cycle2_add"),
+    )
     case.step(
         "cycle2_added_topology",
         "elastic_topology",
-        timeout_s=35,
-        params={
-            "role": "PREFILL",
-            "discovered": 3,
-            "alive": 3,
-            "port": output("cycle2_add", "port"),
-            "present": True,
-        },
+        timeout_s=case.value("normal_window_nonbatch.cycle2_added_topology_timeout_s"),
+        params=case.params(
+            "normal_window_nonbatch.cycle2_added_topology",
+            {"port": output("cycle2_add", "port")},
+        ),
     )
     case.step(
         "cycle2_traffic",
         "elastic_lifecycle_probe",
-        timeout_s=60,
-        params={
-            "engine": output("cycle2_add", "engine"),
-            "window_s": 15,
-            "method": "GenerateStreamCall",
-        },
+        timeout_s=case.value("normal_window_nonbatch.cycle2_traffic_timeout_s"),
+        params=case.params(
+            "normal_window_nonbatch.cycle2_traffic",
+            {"engine": output("cycle2_add", "engine")},
+        ),
     )
     case.step("cycle2_flow", "elastic_cold_flow")
-    case.step("cycle2_ramp", "elastic_pause", params={"seconds": 0.5})
+    case.step(
+        "cycle2_ramp",
+        "elastic_pause",
+        params=case.value("normal_window_nonbatch.cycle2_ramp"),
+    )
     case.step(
         "cycle2_remove",
         "elastic_remove",
-        timeout_s=75,
-        params={"engine": output("cycle2_add", "engine"), "drain_timeout_ms": 60000},
+        timeout_s=case.value("normal_window_nonbatch.cycle2_remove_timeout_s"),
+        params=case.params(
+            "normal_window_nonbatch.cycle2_remove",
+            {"engine": output("cycle2_add", "engine")},
+        ),
     )
     case.step(
         "cycle2_flow_stop",
         "elastic_flow_stop",
-        timeout_s=45,
+        timeout_s=case.value("normal_window_nonbatch.cycle2_flow_stop_timeout_s"),
         params={"flow": output("cycle2_flow", "flow")},
     )
     case.step(
         "cycle2_protocol",
         "elastic_lifecycle_flow_protocol",
-        params={"flow": output("cycle2_flow", "flow"), "method": "GenerateStreamCall"},
+        params=case.params(
+            "normal_window_nonbatch.cycle2_protocol",
+            {"flow": output("cycle2_flow", "flow")},
+        ),
     )
     case.step(
         "cycle2_removed_topology",
         "elastic_topology",
-        timeout_s=35,
-        params={
-            "role": "PREFILL",
-            "discovered": 2,
-            "alive": 2,
-            "port": output("cycle2_add", "port"),
-            "present": False,
-        },
+        timeout_s=case.value(
+            "normal_window_nonbatch.cycle2_removed_topology_timeout_s"
+        ),
+        params=case.params(
+            "normal_window_nonbatch.cycle2_removed_topology",
+            {"port": output("cycle2_add", "port")},
+        ),
     )
     case.step(
         "cycle2_zero_errors",
         "elastic_flow_assert",
-        params={"result": output("cycle2_flow_stop", "result"), "min_success_rate": 1},
+        params=case.params(
+            "normal_window_nonbatch.cycle2_zero_errors",
+            {"result": output("cycle2_flow_stop", "result")},
+        ),
     )
-    case.step("cycle3_add", "elastic_add", params={"role": "prefill"})
+    case.step(
+        "cycle3_add",
+        "elastic_add",
+        params=case.value("normal_window_nonbatch.cycle3_add"),
+    )
     case.step(
         "cycle3_added_topology",
         "elastic_topology",
-        timeout_s=35,
-        params={
-            "role": "PREFILL",
-            "discovered": 3,
-            "alive": 3,
-            "port": output("cycle3_add", "port"),
-            "present": True,
-        },
+        timeout_s=case.value("normal_window_nonbatch.cycle3_added_topology_timeout_s"),
+        params=case.params(
+            "normal_window_nonbatch.cycle3_added_topology",
+            {"port": output("cycle3_add", "port")},
+        ),
     )
     case.step(
         "cycle3_traffic",
         "elastic_lifecycle_probe",
-        timeout_s=60,
-        params={
-            "engine": output("cycle3_add", "engine"),
-            "window_s": 15,
-            "method": "GenerateStreamCall",
-        },
+        timeout_s=case.value("normal_window_nonbatch.cycle3_traffic_timeout_s"),
+        params=case.params(
+            "normal_window_nonbatch.cycle3_traffic",
+            {"engine": output("cycle3_add", "engine")},
+        ),
     )
     case.step("cycle3_flow", "elastic_cold_flow")
-    case.step("cycle3_ramp", "elastic_pause", params={"seconds": 0.5})
+    case.step(
+        "cycle3_ramp",
+        "elastic_pause",
+        params=case.value("normal_window_nonbatch.cycle3_ramp"),
+    )
     case.step(
         "cycle3_remove",
         "elastic_remove",
-        timeout_s=75,
-        params={"engine": output("cycle3_add", "engine"), "drain_timeout_ms": 60000},
+        timeout_s=case.value("normal_window_nonbatch.cycle3_remove_timeout_s"),
+        params=case.params(
+            "normal_window_nonbatch.cycle3_remove",
+            {"engine": output("cycle3_add", "engine")},
+        ),
     )
     case.step(
         "cycle3_flow_stop",
         "elastic_flow_stop",
-        timeout_s=45,
+        timeout_s=case.value("normal_window_nonbatch.cycle3_flow_stop_timeout_s"),
         params={"flow": output("cycle3_flow", "flow")},
     )
     case.step(
         "cycle3_protocol",
         "elastic_lifecycle_flow_protocol",
-        params={"flow": output("cycle3_flow", "flow"), "method": "GenerateStreamCall"},
+        params=case.params(
+            "normal_window_nonbatch.cycle3_protocol",
+            {"flow": output("cycle3_flow", "flow")},
+        ),
     )
     case.step(
         "cycle3_removed_topology",
         "elastic_topology",
-        timeout_s=35,
-        params={
-            "role": "PREFILL",
-            "discovered": 2,
-            "alive": 2,
-            "port": output("cycle3_add", "port"),
-            "present": False,
-        },
+        timeout_s=case.value(
+            "normal_window_nonbatch.cycle3_removed_topology_timeout_s"
+        ),
+        params=case.params(
+            "normal_window_nonbatch.cycle3_removed_topology",
+            {"port": output("cycle3_add", "port")},
+        ),
     )
     case.step(
         "cycle3_zero_errors",
         "elastic_flow_assert",
-        params={"result": output("cycle3_flow_stop", "result"), "min_success_rate": 1},
+        params=case.params(
+            "normal_window_nonbatch.cycle3_zero_errors",
+            {"result": output("cycle3_flow_stop", "result")},
+        ),
     )
     case.step(
         "recovery",
         "elastic_cycle_recovery",
-        timeout_s=65,
-        params={"method": "GenerateStreamCall"},
+        timeout_s=case.value("normal_window_nonbatch.recovery_timeout_s"),
+        params=case.value("normal_window_nonbatch.recovery"),
     )
     case.step(
         "final_topology",
         "elastic_topology",
-        timeout_s=35,
-        params={"role": "PREFILL", "discovered": 2, "alive": 2},
+        timeout_s=case.value("normal_window_nonbatch.final_topology_timeout_s"),
+        params=case.value("normal_window_nonbatch.final_topology"),
     )
     case.step("teardown", "teardown")
 
 
 def strict_window_nonbatch(case):
-    case.step("setup", "setup", timeout_s=180)
+    case.step(
+        "setup", "setup", timeout_s=case.value("strict_window_nonbatch.setup_timeout_s")
+    )
     case.step(
         "initial_topology",
         "elastic_topology",
-        timeout_s=35,
-        params={"role": "PREFILL", "discovered": 2, "alive": 2},
+        timeout_s=case.value("strict_window_nonbatch.initial_topology_timeout_s"),
+        params=case.value("strict_window_nonbatch.initial_topology"),
     )
     case.step("preference_flow", "elastic_cold_flow")
-    case.step("ramp", "elastic_pause", params={"seconds": 1})
+    case.step("ramp", "elastic_pause", params=case.value("strict_window_nonbatch.ramp"))
     case.step(
         "baseline_window",
         "elastic_timeline",
-        timeout_s=25,
-        params={"engines": ["prefill-0", "prefill-1"], "offsets_s": [0, 15]},
+        timeout_s=case.value("strict_window_nonbatch.baseline_window_timeout_s"),
+        params=case.value("strict_window_nonbatch.baseline_window"),
     )
-    case.step("add", "elastic_add", params={"role": "prefill"})
+    case.step("add", "elastic_add", params=case.value("strict_window_nonbatch.add"))
     case.step(
         "first_traffic",
         "elastic_accepted_timed",
-        timeout_s=15,
-        params={"engine": output("add", "engine"), "baseline": 0, "window_s": 10},
+        timeout_s=case.value("strict_window_nonbatch.first_traffic_timeout_s"),
+        params=case.params(
+            "strict_window_nonbatch.first_traffic", {"engine": output("add", "engine")}
+        ),
     )
     case.step(
         "added_topology",
         "elastic_topology",
-        timeout_s=35,
-        params={
-            "role": "PREFILL",
-            "discovered": 3,
-            "alive": 3,
-            "port": output("add", "port"),
-            "present": True,
-        },
+        timeout_s=case.value("strict_window_nonbatch.added_topology_timeout_s"),
+        params=case.params(
+            "strict_window_nonbatch.added_topology", {"port": output("add", "port")}
+        ),
     )
     case.step(
         "post_window",
         "elastic_timeline",
-        timeout_s=55,
-        params={
-            "engines": ["prefill-0", "prefill-1", output("add", "engine")],
-            "offsets_s": [0, 5, 10, 17, 24, 31, 38, 45],
-        },
+        timeout_s=case.value("strict_window_nonbatch.post_window_timeout_s"),
+        params=case.params(
+            "strict_window_nonbatch.post_window",
+            {
+                "engines": [
+                    case.value("strict_window_nonbatch.post_window.engines.item_0"),
+                    case.value("strict_window_nonbatch.post_window.engines.item_1"),
+                    output("add", "engine"),
+                ]
+            },
+        ),
     )
     case.step(
         "preference_flow_stop",
         "elastic_flow_stop",
-        timeout_s=45,
+        timeout_s=case.value("strict_window_nonbatch.preference_flow_stop_timeout_s"),
         params={"flow": output("preference_flow", "flow")},
     )
     case.step(
         "preference_protocol",
         "elastic_lifecycle_flow_protocol",
-        params={
-            "flow": output("preference_flow", "flow"),
-            "method": "GenerateStreamCall",
-        },
+        params=case.params(
+            "strict_window_nonbatch.preference_protocol",
+            {"flow": output("preference_flow", "flow")},
+        ),
     )
     case.step(
         "add_availability",
@@ -3261,258 +3600,303 @@ def strict_window_nonbatch(case):
     case.step(
         "preference_shares",
         "elastic_share",
-        params={
-            "series": output("post_window", "series"),
-            "engine": output("add", "engine"),
-            "max_share": 0.5,
-            "old_floor": 0.1,
-            "exclusive": False,
-            "require_new": False,
-        },
+        params=case.params(
+            "strict_window_nonbatch.preference_shares",
+            {
+                "series": output("post_window", "series"),
+                "engine": output("add", "engine"),
+            },
+        ),
     )
     case.step(
         "preference_availability",
         "elastic_flow_assert",
-        params={
-            "result": output("preference_flow_stop", "result"),
-            "min_success_rate": 0.9,
-        },
+        params=case.params(
+            "strict_window_nonbatch.preference_availability",
+            {"result": output("preference_flow_stop", "result")},
+        ),
     )
     case.step("remove_flow", "elastic_cold_flow")
     case.step(
         "remove_traffic",
         "elastic_lifecycle_probe",
-        timeout_s=60,
-        params={
-            "engine": output("add", "engine"),
-            "window_s": 10,
-            "method": "GenerateStreamCall",
-        },
+        timeout_s=case.value("strict_window_nonbatch.remove_traffic_timeout_s"),
+        params=case.params(
+            "strict_window_nonbatch.remove_traffic", {"engine": output("add", "engine")}
+        ),
     )
     case.step(
         "remove",
         "elastic_remove",
-        timeout_s=75,
-        params={"engine": output("add", "engine"), "drain_timeout_ms": 60000},
+        timeout_s=case.value("strict_window_nonbatch.remove_timeout_s"),
+        params=case.params(
+            "strict_window_nonbatch.remove", {"engine": output("add", "engine")}
+        ),
     )
-    case.step("remove_hold", "elastic_pause", params={"seconds": 3})
+    case.step(
+        "remove_hold",
+        "elastic_pause",
+        params=case.value("strict_window_nonbatch.remove_hold"),
+    )
     case.step(
         "remove_flow_stop",
         "elastic_flow_stop",
-        timeout_s=45,
+        timeout_s=case.value("strict_window_nonbatch.remove_flow_stop_timeout_s"),
         params={"flow": output("remove_flow", "flow")},
     )
     case.step(
         "remove_protocol",
         "elastic_lifecycle_flow_protocol",
-        params={"flow": output("remove_flow", "flow"), "method": "GenerateStreamCall"},
+        params=case.params(
+            "strict_window_nonbatch.remove_protocol",
+            {"flow": output("remove_flow", "flow")},
+        ),
     )
     case.step(
         "removed_topology",
         "elastic_topology",
-        timeout_s=35,
-        params={
-            "role": "PREFILL",
-            "discovered": 2,
-            "alive": 2,
-            "port": output("add", "port"),
-            "present": False,
-        },
+        timeout_s=case.value("strict_window_nonbatch.removed_topology_timeout_s"),
+        params=case.params(
+            "strict_window_nonbatch.removed_topology", {"port": output("add", "port")}
+        ),
     )
-    case.step("remove_accounting", "elastic_literal_nonbatch_accounting", timeout_s=105)
+    case.step(
+        "remove_accounting",
+        "elastic_literal_nonbatch_accounting",
+        timeout_s=case.value("strict_window_nonbatch.remove_accounting_timeout_s"),
+    )
     case.step(
         "remove_zero_errors",
         "elastic_flow_assert",
-        params={"result": output("remove_flow_stop", "result"), "min_success_rate": 1},
+        params=case.params(
+            "strict_window_nonbatch.remove_zero_errors",
+            {"result": output("remove_flow_stop", "result")},
+        ),
     )
-    case.step("cycle1_add", "elastic_add", params={"role": "prefill"})
+    case.step(
+        "cycle1_add",
+        "elastic_add",
+        params=case.value("strict_window_nonbatch.cycle1_add"),
+    )
     case.step(
         "cycle1_added_topology",
         "elastic_topology",
-        timeout_s=35,
-        params={
-            "role": "PREFILL",
-            "discovered": 3,
-            "alive": 3,
-            "port": output("cycle1_add", "port"),
-            "present": True,
-        },
+        timeout_s=case.value("strict_window_nonbatch.cycle1_added_topology_timeout_s"),
+        params=case.params(
+            "strict_window_nonbatch.cycle1_added_topology",
+            {"port": output("cycle1_add", "port")},
+        ),
     )
     case.step(
         "cycle1_traffic",
         "elastic_lifecycle_probe",
-        timeout_s=60,
-        params={
-            "engine": output("cycle1_add", "engine"),
-            "window_s": 15,
-            "method": "GenerateStreamCall",
-        },
+        timeout_s=case.value("strict_window_nonbatch.cycle1_traffic_timeout_s"),
+        params=case.params(
+            "strict_window_nonbatch.cycle1_traffic",
+            {"engine": output("cycle1_add", "engine")},
+        ),
     )
     case.step("cycle1_flow", "elastic_cold_flow")
-    case.step("cycle1_ramp", "elastic_pause", params={"seconds": 0.5})
+    case.step(
+        "cycle1_ramp",
+        "elastic_pause",
+        params=case.value("strict_window_nonbatch.cycle1_ramp"),
+    )
     case.step(
         "cycle1_remove",
         "elastic_remove",
-        timeout_s=75,
-        params={"engine": output("cycle1_add", "engine"), "drain_timeout_ms": 60000},
+        timeout_s=case.value("strict_window_nonbatch.cycle1_remove_timeout_s"),
+        params=case.params(
+            "strict_window_nonbatch.cycle1_remove",
+            {"engine": output("cycle1_add", "engine")},
+        ),
     )
     case.step(
         "cycle1_flow_stop",
         "elastic_flow_stop",
-        timeout_s=45,
+        timeout_s=case.value("strict_window_nonbatch.cycle1_flow_stop_timeout_s"),
         params={"flow": output("cycle1_flow", "flow")},
     )
     case.step(
         "cycle1_protocol",
         "elastic_lifecycle_flow_protocol",
-        params={"flow": output("cycle1_flow", "flow"), "method": "GenerateStreamCall"},
+        params=case.params(
+            "strict_window_nonbatch.cycle1_protocol",
+            {"flow": output("cycle1_flow", "flow")},
+        ),
     )
     case.step(
         "cycle1_removed_topology",
         "elastic_topology",
-        timeout_s=35,
-        params={
-            "role": "PREFILL",
-            "discovered": 2,
-            "alive": 2,
-            "port": output("cycle1_add", "port"),
-            "present": False,
-        },
+        timeout_s=case.value(
+            "strict_window_nonbatch.cycle1_removed_topology_timeout_s"
+        ),
+        params=case.params(
+            "strict_window_nonbatch.cycle1_removed_topology",
+            {"port": output("cycle1_add", "port")},
+        ),
     )
     case.step(
         "cycle1_zero_errors",
         "elastic_flow_assert",
-        params={"result": output("cycle1_flow_stop", "result"), "min_success_rate": 1},
+        params=case.params(
+            "strict_window_nonbatch.cycle1_zero_errors",
+            {"result": output("cycle1_flow_stop", "result")},
+        ),
     )
-    case.step("cycle2_add", "elastic_add", params={"role": "prefill"})
+    case.step(
+        "cycle2_add",
+        "elastic_add",
+        params=case.value("strict_window_nonbatch.cycle2_add"),
+    )
     case.step(
         "cycle2_added_topology",
         "elastic_topology",
-        timeout_s=35,
-        params={
-            "role": "PREFILL",
-            "discovered": 3,
-            "alive": 3,
-            "port": output("cycle2_add", "port"),
-            "present": True,
-        },
+        timeout_s=case.value("strict_window_nonbatch.cycle2_added_topology_timeout_s"),
+        params=case.params(
+            "strict_window_nonbatch.cycle2_added_topology",
+            {"port": output("cycle2_add", "port")},
+        ),
     )
     case.step(
         "cycle2_traffic",
         "elastic_lifecycle_probe",
-        timeout_s=60,
-        params={
-            "engine": output("cycle2_add", "engine"),
-            "window_s": 15,
-            "method": "GenerateStreamCall",
-        },
+        timeout_s=case.value("strict_window_nonbatch.cycle2_traffic_timeout_s"),
+        params=case.params(
+            "strict_window_nonbatch.cycle2_traffic",
+            {"engine": output("cycle2_add", "engine")},
+        ),
     )
     case.step("cycle2_flow", "elastic_cold_flow")
-    case.step("cycle2_ramp", "elastic_pause", params={"seconds": 0.5})
+    case.step(
+        "cycle2_ramp",
+        "elastic_pause",
+        params=case.value("strict_window_nonbatch.cycle2_ramp"),
+    )
     case.step(
         "cycle2_remove",
         "elastic_remove",
-        timeout_s=75,
-        params={"engine": output("cycle2_add", "engine"), "drain_timeout_ms": 60000},
+        timeout_s=case.value("strict_window_nonbatch.cycle2_remove_timeout_s"),
+        params=case.params(
+            "strict_window_nonbatch.cycle2_remove",
+            {"engine": output("cycle2_add", "engine")},
+        ),
     )
     case.step(
         "cycle2_flow_stop",
         "elastic_flow_stop",
-        timeout_s=45,
+        timeout_s=case.value("strict_window_nonbatch.cycle2_flow_stop_timeout_s"),
         params={"flow": output("cycle2_flow", "flow")},
     )
     case.step(
         "cycle2_protocol",
         "elastic_lifecycle_flow_protocol",
-        params={"flow": output("cycle2_flow", "flow"), "method": "GenerateStreamCall"},
+        params=case.params(
+            "strict_window_nonbatch.cycle2_protocol",
+            {"flow": output("cycle2_flow", "flow")},
+        ),
     )
     case.step(
         "cycle2_removed_topology",
         "elastic_topology",
-        timeout_s=35,
-        params={
-            "role": "PREFILL",
-            "discovered": 2,
-            "alive": 2,
-            "port": output("cycle2_add", "port"),
-            "present": False,
-        },
+        timeout_s=case.value(
+            "strict_window_nonbatch.cycle2_removed_topology_timeout_s"
+        ),
+        params=case.params(
+            "strict_window_nonbatch.cycle2_removed_topology",
+            {"port": output("cycle2_add", "port")},
+        ),
     )
     case.step(
         "cycle2_zero_errors",
         "elastic_flow_assert",
-        params={"result": output("cycle2_flow_stop", "result"), "min_success_rate": 1},
+        params=case.params(
+            "strict_window_nonbatch.cycle2_zero_errors",
+            {"result": output("cycle2_flow_stop", "result")},
+        ),
     )
-    case.step("cycle3_add", "elastic_add", params={"role": "prefill"})
+    case.step(
+        "cycle3_add",
+        "elastic_add",
+        params=case.value("strict_window_nonbatch.cycle3_add"),
+    )
     case.step(
         "cycle3_added_topology",
         "elastic_topology",
-        timeout_s=35,
-        params={
-            "role": "PREFILL",
-            "discovered": 3,
-            "alive": 3,
-            "port": output("cycle3_add", "port"),
-            "present": True,
-        },
+        timeout_s=case.value("strict_window_nonbatch.cycle3_added_topology_timeout_s"),
+        params=case.params(
+            "strict_window_nonbatch.cycle3_added_topology",
+            {"port": output("cycle3_add", "port")},
+        ),
     )
     case.step(
         "cycle3_traffic",
         "elastic_lifecycle_probe",
-        timeout_s=60,
-        params={
-            "engine": output("cycle3_add", "engine"),
-            "window_s": 15,
-            "method": "GenerateStreamCall",
-        },
+        timeout_s=case.value("strict_window_nonbatch.cycle3_traffic_timeout_s"),
+        params=case.params(
+            "strict_window_nonbatch.cycle3_traffic",
+            {"engine": output("cycle3_add", "engine")},
+        ),
     )
     case.step("cycle3_flow", "elastic_cold_flow")
-    case.step("cycle3_ramp", "elastic_pause", params={"seconds": 0.5})
+    case.step(
+        "cycle3_ramp",
+        "elastic_pause",
+        params=case.value("strict_window_nonbatch.cycle3_ramp"),
+    )
     case.step(
         "cycle3_remove",
         "elastic_remove",
-        timeout_s=75,
-        params={"engine": output("cycle3_add", "engine"), "drain_timeout_ms": 60000},
+        timeout_s=case.value("strict_window_nonbatch.cycle3_remove_timeout_s"),
+        params=case.params(
+            "strict_window_nonbatch.cycle3_remove",
+            {"engine": output("cycle3_add", "engine")},
+        ),
     )
     case.step(
         "cycle3_flow_stop",
         "elastic_flow_stop",
-        timeout_s=45,
+        timeout_s=case.value("strict_window_nonbatch.cycle3_flow_stop_timeout_s"),
         params={"flow": output("cycle3_flow", "flow")},
     )
     case.step(
         "cycle3_protocol",
         "elastic_lifecycle_flow_protocol",
-        params={"flow": output("cycle3_flow", "flow"), "method": "GenerateStreamCall"},
+        params=case.params(
+            "strict_window_nonbatch.cycle3_protocol",
+            {"flow": output("cycle3_flow", "flow")},
+        ),
     )
     case.step(
         "cycle3_removed_topology",
         "elastic_topology",
-        timeout_s=35,
-        params={
-            "role": "PREFILL",
-            "discovered": 2,
-            "alive": 2,
-            "port": output("cycle3_add", "port"),
-            "present": False,
-        },
+        timeout_s=case.value(
+            "strict_window_nonbatch.cycle3_removed_topology_timeout_s"
+        ),
+        params=case.params(
+            "strict_window_nonbatch.cycle3_removed_topology",
+            {"port": output("cycle3_add", "port")},
+        ),
     )
     case.step(
         "cycle3_zero_errors",
         "elastic_flow_assert",
-        params={"result": output("cycle3_flow_stop", "result"), "min_success_rate": 1},
+        params=case.params(
+            "strict_window_nonbatch.cycle3_zero_errors",
+            {"result": output("cycle3_flow_stop", "result")},
+        ),
     )
     case.step(
         "recovery",
         "elastic_cycle_recovery",
-        timeout_s=65,
-        params={"method": "GenerateStreamCall"},
+        timeout_s=case.value("strict_window_nonbatch.recovery_timeout_s"),
+        params=case.value("strict_window_nonbatch.recovery"),
     )
     case.step(
         "final_topology",
         "elastic_topology",
-        timeout_s=35,
-        params={"role": "PREFILL", "discovered": 2, "alive": 2},
+        timeout_s=case.value("strict_window_nonbatch.final_topology_timeout_s"),
+        params=case.value("strict_window_nonbatch.final_topology"),
     )
     case.step("teardown", "teardown")
 
@@ -3521,22 +3905,33 @@ def decode_scale_out_protection(case):
     """Keep a newly discovered Decode alive and progressing under existing load."""
     env = case.environment
     limit = env.get("config_overrides", {}).get("decode_max_engine_requests")
-    if type(limit) is not int or not 2 <= limit <= 64:
-        raise ValueError("Decode protection requires an explicit capacity of 2..64")
+    capacity = case.value("decode_scale_out_protection.capacity")
+    if (
+        type(limit) is not int
+        or not capacity["minimum"] <= limit <= capacity["maximum"]
+    ):
+        raise ValueError("Decode protection capacity is outside the YAML range")
     old_count = env["n_decode"]
-    concurrency = case.number("concurrency", 24, minimum=2, maximum=128)
-    output_len = case.number("output_len", 128, minimum=64, maximum=512)
-    window_s = case.number("window_s", 20, minimum=20, maximum=60)
+    concurrency = case.number("concurrency")
+    output_len = case.number("output_len")
+    window_s = case.number("window_s")
     if concurrency <= old_count * limit:
         raise ValueError("traffic concurrency must exceed the old Decode pool capacity")
     if env.get("discovery") != "discovery_file":
         raise ValueError("Decode scale-out requires dynamic discovery_file")
-    case.step("setup", "setup", timeout_s=180)
+    case.step(
+        "setup",
+        "setup",
+        timeout_s=case.value("decode_scale_out_protection.setup_timeout_s"),
+    )
     case.step(
         "initial_topology",
         "elastic_topology",
-        timeout_s=35,
-        params={"role": "DECODE", "discovered": old_count, "alive": old_count},
+        timeout_s=case.value("decode_scale_out_protection.initial_topology_timeout_s"),
+        params=case.params(
+            "decode_scale_out_protection.initial_topology",
+            {"discovered": old_count, "alive": old_count},
+        ),
     )
     case.step(
         "traffic",
@@ -3547,42 +3942,55 @@ def decode_scale_out_protection(case):
     case.step(
         "old_decodes_loaded",
         "decode_scale_loaded",
-        timeout_s=20,
+        timeout_s=case.value(
+            "decode_scale_out_protection.old_decodes_loaded_timeout_s"
+        ),
         params={"flow": flow, "limit": limit},
     )
-    case.step("add_decode", "elastic_add", params={"role": "decode"})
+    case.step(
+        "add_decode",
+        "elastic_add",
+        params=case.value("decode_scale_out_protection.add_decode"),
+    )
     case.step(
         "added_topology",
         "elastic_topology",
-        timeout_s=35,
-        params={
-            "role": "DECODE",
-            "discovered": old_count + 1,
-            "alive": old_count + 1,
-            "port": output("add_decode", "port"),
-            "present": True,
-        },
+        timeout_s=case.value("decode_scale_out_protection.added_topology_timeout_s"),
+        params=case.params(
+            "decode_scale_out_protection.added_topology",
+            {
+                "discovered": old_count + 1,
+                "alive": old_count + 1,
+                "port": output("add_decode", "port"),
+            },
+        ),
     )
     case.step(
         "loaded_window",
         "decode_scale_window",
-        timeout_s=window_s + 5,
+        timeout_s=window_s
+        + case.value("decode_scale_out_protection.window_timeout_margin_s"),
         params={"flow": flow, "seconds": window_s},
     )
-    case.step("stop_traffic", "elastic_flow_stop", timeout_s=50, params={"flow": flow})
+    case.step(
+        "stop_traffic",
+        "elastic_flow_stop",
+        timeout_s=case.value("decode_scale_out_protection.stop_traffic_timeout_s"),
+        params={"flow": flow},
+    )
     case.step(
         "all_requests_complete",
         "elastic_flow_assert",
-        params={
-            "result": output("stop_traffic", "result"),
-            "min_success_rate": 1,
-        },
+        params=case.params(
+            "decode_scale_out_protection.all_requests_complete",
+            {"result": output("stop_traffic", "result")},
+        ),
     )
     case.step(
         "master_drained",
         "master_inflight_clean",
-        timeout_s=40,
-        params={"target": "single"},
+        timeout_s=case.value("decode_scale_out_protection.master_drained_timeout_s"),
+        params=case.value("decode_scale_out_protection.master_drained"),
     )
     case.step(
         "new_decode_protected",
@@ -3595,123 +4003,3 @@ def decode_scale_out_protection(case):
             "window_s": window_s,
         },
     )
-
-
-VARIANTS = {
-    "decode_scale_out_protection": {
-        "build": decode_scale_out_protection,
-        "profiles": PROFILES,
-        "metadata": {},
-    },
-    "normal": {
-        "build": normal,
-        "profiles": ["batch-window"],
-        "metadata": {
-            "requires": ["enqueue_batch"],
-        },
-    },
-    "strict": {
-        "build": strict,
-        "profiles": ["batch-window"],
-        "metadata": {
-            "requires": ["enqueue_batch"],
-        },
-    },
-    "rebalance": {
-        "build": rebalance,
-        "profiles": ["batch-window"],
-        "metadata": {},
-    },
-    "kv_skew_hot": {
-        "build": kv_skew_hot,
-        "profiles": ["batch-window"],
-        "metadata": {
-            "requires": ["enqueue_batch"],
-        },
-    },
-    "kv_skew_cold": {
-        "build": kv_skew_cold,
-        "profiles": ["batch-window"],
-        "metadata": {
-            "requires": ["enqueue_batch"],
-        },
-    },
-    "steady_recovery": {
-        "build": steady_recovery,
-        "profiles": ["batch-window"],
-        "metadata": {
-            "requires": ["enqueue_batch"],
-        },
-    },
-    "kv_full_shrink": {
-        "build": kv_full_shrink,
-        "profiles": ["batch-window"],
-        "metadata": {
-            "requires": ["enqueue_batch"],
-        },
-    },
-    "transient_imbalance": {
-        "build": transient_imbalance,
-        "profiles": ["batch-window"],
-        "metadata": {
-            "requires": ["enqueue_batch"],
-        },
-    },
-    "rebalance_single_batch": {
-        "build": rebalance_single_batch,
-        "profiles": ["single-batch"],
-        "metadata": {},
-    },
-    "rebalance_single_nonbatch": {
-        "build": rebalance_single_nonbatch,
-        "profiles": ["single-nonbatch"],
-        "metadata": {},
-    },
-    "rebalance_window_nonbatch": {
-        "build": rebalance_window_nonbatch,
-        "profiles": ["window-nonbatch"],
-        "metadata": {},
-    },
-    "normal_single_batch": {
-        "build": normal_single_batch,
-        "profiles": ["single-batch"],
-        "metadata": {
-            "requires": ["queue"],
-        },
-    },
-    "strict_single_batch": {
-        "build": strict_single_batch,
-        "profiles": ["single-batch"],
-        "metadata": {
-            "requires": ["queue"],
-        },
-    },
-    "normal_single_nonbatch": {
-        "build": normal_single_nonbatch,
-        "profiles": ["single-nonbatch"],
-        "metadata": {
-            "requires": ["queue"],
-        },
-    },
-    "strict_single_nonbatch": {
-        "build": strict_single_nonbatch,
-        "profiles": ["single-nonbatch"],
-        "metadata": {
-            "requires": ["queue"],
-        },
-    },
-    "normal_window_nonbatch": {
-        "build": normal_window_nonbatch,
-        "profiles": ["window-nonbatch"],
-        "metadata": {
-            "requires": ["queue"],
-        },
-    },
-    "strict_window_nonbatch": {
-        "build": strict_window_nonbatch,
-        "profiles": ["window-nonbatch"],
-        "metadata": {
-            "requires": ["queue"],
-        },
-    },
-}

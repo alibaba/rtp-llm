@@ -1,4 +1,4 @@
-# Configuration for the registered Python case; execution and assertions live in Python.
+# YAML owns all case data; Python owns execution order and result references.
 schema_version: 2
 case: elastic_concurrent_mutation
 profiles:
@@ -24,12 +24,50 @@ variants:
 - id: default
   profiles:
   - batch-window
+  program: default
 - id: single_batch
   profiles:
   - single-batch
+  program: single_batch
 - id: single_nonbatch
   profiles:
   - single-nonbatch
+  program: single_nonbatch
 - id: window_nonbatch
   profiles:
   - window-nonbatch
+  program: window_nonbatch
+metadata:
+  description: Four concurrent add/remove workers and serial health probes, followed by quiescent discovery
+    validation.
+  category: elastic
+  requires:
+  - queue
+  estimated_duration_s: 90
+parameters:
+  default:
+    setup_timeout_s: 180
+    crossfire_timeout_s: 120
+    health:
+      min_success_rate: 0.5
+  single_batch:
+    setup_timeout_s: 180
+    crossfire_timeout_s: 120
+    protocol:
+      method: FetchResponse
+    health:
+      min_success_rate: 0.5
+  single_nonbatch:
+    setup_timeout_s: 180
+    crossfire_timeout_s: 120
+    protocol:
+      method: GenerateStreamCall
+    health:
+      min_success_rate: 0.5
+  window_nonbatch:
+    setup_timeout_s: 180
+    crossfire_timeout_s: 120
+    protocol:
+      method: GenerateStreamCall
+    health:
+      min_success_rate: 0.5

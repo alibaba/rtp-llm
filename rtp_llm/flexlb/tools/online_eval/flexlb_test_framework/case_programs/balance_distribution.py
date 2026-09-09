@@ -2,291 +2,354 @@
 
 from ..case_config import output
 
-METADATA = {
-    "id": "balance_distribution",
-    "category": "balance",
-    "description": "Explicit balance stages preserving client landing, token share, Decode deltas and "
-    "latency contracts.",
-}
-
-PROFILES = ["batch-window", "single-nonbatch", "single-batch", "window-nonbatch"]
-
 
 def uniform_serial(case):
-    case.step("setup", "setup", timeout_s=180)
-    case.step("fleet", "balance_snapshot", timeout_s=60, params={"role": "prefill"})
-    case.step("plain", "balance_start", timeout_s=60, params={"count": 20})
+    case.step("setup", "setup", timeout_s=case.value("uniform_serial.setup_timeout_s"))
+    case.step(
+        "fleet",
+        "balance_snapshot",
+        timeout_s=case.value("uniform_serial.fleet_timeout_s"),
+        params=case.value("uniform_serial.fleet"),
+    )
+    case.step(
+        "plain",
+        "balance_start",
+        timeout_s=case.value("uniform_serial.plain_timeout_s"),
+        params=case.value("uniform_serial.plain"),
+    )
     case.step(
         "plain_terminal",
         "balance_wait",
-        timeout_s=120,
+        timeout_s=case.value("uniform_serial.plain_terminal_timeout_s"),
         params={"requests": output("plain", "requests")},
     )
     case.step(
         "plain_p6",
         "balance_check",
-        timeout_s=60,
-        params={
-            "requests": [output("plain", "requests")],
-            "fleet": output("fleet", "snapshot"),
-            "metric": "complete",
-            "property": "P6",
-        },
+        timeout_s=case.value("uniform_serial.plain_p6_timeout_s"),
+        params=case.params(
+            "uniform_serial.plain_p6",
+            {
+                "requests": [output("plain", "requests")],
+                "fleet": output("fleet", "snapshot"),
+            },
+        ),
     )
     case.step(
         "plain_p1",
         "balance_check",
-        timeout_s=60,
-        params={
-            "requests": [output("plain", "requests")],
-            "fleet": output("fleet", "snapshot"),
-            "metric": "max_share",
-            "property": "P1",
-        },
+        timeout_s=case.value("uniform_serial.plain_p1_timeout_s"),
+        params=case.params(
+            "uniform_serial.plain_p1",
+            {
+                "requests": [output("plain", "requests")],
+                "fleet": output("fleet", "snapshot"),
+            },
+        ),
     )
     case.step(
         "plain_p2",
         "balance_check",
-        timeout_s=60,
-        params={
-            "requests": [output("plain", "requests")],
-            "fleet": output("fleet", "snapshot"),
-            "metric": "workers",
-            "property": "P2",
-        },
+        timeout_s=case.value("uniform_serial.plain_p2_timeout_s"),
+        params=case.params(
+            "uniform_serial.plain_p2",
+            {
+                "requests": [output("plain", "requests")],
+                "fleet": output("fleet", "snapshot"),
+            },
+        ),
     )
     case.step(
         "slow_second",
         "engine_control",
-        timeout_s=60,
-        params={
-            "operation": "set_perf",
-            "targets": [output("fleet", "second")],
-            "perf": {"prefill_fixed_ms": 200},
-        },
+        timeout_s=case.value("uniform_serial.slow_second_timeout_s"),
+        params=case.params(
+            "uniform_serial.slow_second", {"targets": [output("fleet", "second")]}
+        ),
     )
-    case.step("perf_sync", "balance_pause", timeout_s=6.5, params={"seconds": 1.5})
-    case.step("speed_hetero", "balance_start", timeout_s=60, params={"count": 20})
+    case.step(
+        "perf_sync",
+        "balance_pause",
+        timeout_s=case.value("uniform_serial.perf_sync_timeout_s"),
+        params=case.value("uniform_serial.perf_sync"),
+    )
+    case.step(
+        "speed_hetero",
+        "balance_start",
+        timeout_s=case.value("uniform_serial.speed_hetero_timeout_s"),
+        params=case.value("uniform_serial.speed_hetero"),
+    )
     case.step(
         "speed_hetero_terminal",
         "balance_wait",
-        timeout_s=120,
+        timeout_s=case.value("uniform_serial.speed_hetero_terminal_timeout_s"),
         params={"requests": output("speed_hetero", "requests")},
     )
     case.step(
         "speed_hetero_p6",
         "balance_check",
-        timeout_s=60,
-        params={
-            "requests": [output("speed_hetero", "requests")],
-            "fleet": output("fleet", "snapshot"),
-            "metric": "complete",
-            "property": "P6",
-        },
+        timeout_s=case.value("uniform_serial.speed_hetero_p6_timeout_s"),
+        params=case.params(
+            "uniform_serial.speed_hetero_p6",
+            {
+                "requests": [output("speed_hetero", "requests")],
+                "fleet": output("fleet", "snapshot"),
+            },
+        ),
     )
     case.step(
         "speed_hetero_p1",
         "balance_check",
-        timeout_s=60,
-        params={
-            "requests": [output("speed_hetero", "requests")],
-            "fleet": output("fleet", "snapshot"),
-            "metric": "max_share",
-            "property": "P1",
-        },
+        timeout_s=case.value("uniform_serial.speed_hetero_p1_timeout_s"),
+        params=case.params(
+            "uniform_serial.speed_hetero_p1",
+            {
+                "requests": [output("speed_hetero", "requests")],
+                "fleet": output("fleet", "snapshot"),
+            },
+        ),
     )
     case.step(
         "speed_hetero_p2",
         "balance_check",
-        timeout_s=60,
-        params={
-            "requests": [output("speed_hetero", "requests")],
-            "fleet": output("fleet", "snapshot"),
-            "metric": "workers",
-            "property": "P2",
-        },
+        timeout_s=case.value("uniform_serial.speed_hetero_p2_timeout_s"),
+        params=case.params(
+            "uniform_serial.speed_hetero_p2",
+            {
+                "requests": [output("speed_hetero", "requests")],
+                "fleet": output("fleet", "snapshot"),
+            },
+        ),
     )
     case.step(
         "restore_speed",
         "engine_control",
-        timeout_s=60,
-        params={
-            "operation": "set_perf",
-            "targets": [output("fleet", "second")],
-            "perf": {"prefill_fixed_ms": 100},
-        },
+        timeout_s=case.value("uniform_serial.restore_speed_timeout_s"),
+        params=case.params(
+            "uniform_serial.restore_speed", {"targets": [output("fleet", "second")]}
+        ),
     )
-    case.step("teardown", "teardown", timeout_s=120)
+    case.step(
+        "teardown",
+        "teardown",
+        timeout_s=case.value("uniform_serial.teardown_timeout_s"),
+    )
 
 
 def concurrent_mix(case):
-    case.step("setup", "setup", timeout_s=180)
-    case.step("fleet", "balance_snapshot", timeout_s=60, params={"role": "prefill"})
+    case.step("setup", "setup", timeout_s=case.value("concurrent_mix.setup_timeout_s"))
     case.step(
-        "burst", "balance_start", timeout_s=60, params={"count": 20, "concurrency": 20}
+        "fleet",
+        "balance_snapshot",
+        timeout_s=case.value("concurrent_mix.fleet_timeout_s"),
+        params=case.value("concurrent_mix.fleet"),
+    )
+    case.step(
+        "burst",
+        "balance_start",
+        timeout_s=case.value("concurrent_mix.burst_timeout_s"),
+        params=case.value("concurrent_mix.burst"),
     )
     case.step(
         "terminal",
         "balance_wait",
-        timeout_s=120,
+        timeout_s=case.value("concurrent_mix.terminal_timeout_s"),
         params={"requests": output("burst", "requests")},
     )
     case.step(
         "p6",
         "balance_check",
-        timeout_s=60,
-        params={
-            "requests": [output("burst", "requests")],
-            "fleet": output("fleet", "snapshot"),
-            "metric": "complete",
-            "property": "P6",
-            "min_success": 8,
-            "allow_admission": True,
-        },
+        timeout_s=case.value("concurrent_mix.p6_timeout_s"),
+        params=case.params(
+            "concurrent_mix.p6",
+            {
+                "requests": [output("burst", "requests")],
+                "fleet": output("fleet", "snapshot"),
+            },
+        ),
     )
     case.step(
         "p1",
         "balance_check",
-        timeout_s=60,
-        params={
-            "requests": [output("burst", "requests")],
-            "fleet": output("fleet", "snapshot"),
-            "metric": "max_share",
-            "property": "P1",
-            "relax": 1,
-        },
+        timeout_s=case.value("concurrent_mix.p1_timeout_s"),
+        params=case.params(
+            "concurrent_mix.p1",
+            {
+                "requests": [output("burst", "requests")],
+                "fleet": output("fleet", "snapshot"),
+            },
+        ),
     )
     case.step(
         "p2",
         "balance_check",
-        timeout_s=60,
-        params={
-            "requests": [output("burst", "requests")],
-            "fleet": output("fleet", "snapshot"),
-            "metric": "workers",
-            "property": "P2",
-        },
+        timeout_s=case.value("concurrent_mix.p2_timeout_s"),
+        params=case.params(
+            "concurrent_mix.p2",
+            {
+                "requests": [output("burst", "requests")],
+                "fleet": output("fleet", "snapshot"),
+            },
+        ),
     )
-    case.step("teardown", "teardown", timeout_s=120)
+    case.step(
+        "teardown",
+        "teardown",
+        timeout_s=case.value("concurrent_mix.teardown_timeout_s"),
+    )
 
 
 def decode_spread(case):
-    case.step("setup", "setup", timeout_s=180)
-    case.step("n10_before", "balance_snapshot", timeout_s=60, params={"role": "decode"})
-    case.step("n10", "balance_start", timeout_s=60, params={"count": 10})
+    case.step("setup", "setup", timeout_s=case.value("decode_spread.setup_timeout_s"))
+    case.step(
+        "n10_before",
+        "balance_snapshot",
+        timeout_s=case.value("decode_spread.n10_before_timeout_s"),
+        params=case.value("decode_spread.n10_before"),
+    )
+    case.step(
+        "n10",
+        "balance_start",
+        timeout_s=case.value("decode_spread.n10_timeout_s"),
+        params=case.value("decode_spread.n10"),
+    )
     case.step(
         "n10_terminal",
         "balance_wait",
-        timeout_s=120,
+        timeout_s=case.value("decode_spread.n10_terminal_timeout_s"),
         params={"requests": output("n10", "requests")},
     )
-    case.step("n10_after", "balance_snapshot", timeout_s=60, params={"role": "decode"})
+    case.step(
+        "n10_after",
+        "balance_snapshot",
+        timeout_s=case.value("decode_spread.n10_after_timeout_s"),
+        params=case.value("decode_spread.n10_after"),
+    )
     case.step(
         "n10_p6",
         "balance_check",
-        timeout_s=60,
-        params={
-            "requests": [output("n10", "requests")],
-            "fleet": output("n10_before", "snapshot"),
-            "metric": "decode_complete",
-            "property": "P6",
-            "after": output("n10_after", "snapshot"),
-        },
+        timeout_s=case.value("decode_spread.n10_p6_timeout_s"),
+        params=case.params(
+            "decode_spread.n10_p6",
+            {
+                "requests": [output("n10", "requests")],
+                "fleet": output("n10_before", "snapshot"),
+                "after": output("n10_after", "snapshot"),
+            },
+        ),
     )
     case.step(
         "n10_p2",
         "balance_check",
-        timeout_s=60,
-        params={
-            "requests": [output("n10", "requests")],
-            "fleet": output("n10_before", "snapshot"),
-            "metric": "decode_workers",
-            "property": "P2",
-            "after": output("n10_after", "snapshot"),
-            "min_workers": 2,
-        },
+        timeout_s=case.value("decode_spread.n10_p2_timeout_s"),
+        params=case.params(
+            "decode_spread.n10_p2",
+            {
+                "requests": [output("n10", "requests")],
+                "fleet": output("n10_before", "snapshot"),
+                "after": output("n10_after", "snapshot"),
+            },
+        ),
     )
     case.step(
         "n10_p1",
         "balance_check",
-        timeout_s=60,
-        params={
-            "requests": [output("n10", "requests")],
-            "fleet": output("n10_before", "snapshot"),
-            "metric": "decode_share",
-            "property": "P1",
-            "after": output("n10_after", "snapshot"),
-            "bands": {"strict": 0.6, "normal": 0.7, "loose": 0.8},
-        },
+        timeout_s=case.value("decode_spread.n10_p1_timeout_s"),
+        params=case.params(
+            "decode_spread.n10_p1",
+            {
+                "requests": [output("n10", "requests")],
+                "fleet": output("n10_before", "snapshot"),
+                "after": output("n10_after", "snapshot"),
+            },
+        ),
     )
-    case.step("n50_before", "balance_snapshot", timeout_s=60, params={"role": "decode"})
-    case.step("n50", "balance_start", timeout_s=60, params={"count": 50})
+    case.step(
+        "n50_before",
+        "balance_snapshot",
+        timeout_s=case.value("decode_spread.n50_before_timeout_s"),
+        params=case.value("decode_spread.n50_before"),
+    )
+    case.step(
+        "n50",
+        "balance_start",
+        timeout_s=case.value("decode_spread.n50_timeout_s"),
+        params=case.value("decode_spread.n50"),
+    )
     case.step(
         "n50_terminal",
         "balance_wait",
-        timeout_s=120,
+        timeout_s=case.value("decode_spread.n50_terminal_timeout_s"),
         params={"requests": output("n50", "requests")},
     )
-    case.step("n50_after", "balance_snapshot", timeout_s=60, params={"role": "decode"})
+    case.step(
+        "n50_after",
+        "balance_snapshot",
+        timeout_s=case.value("decode_spread.n50_after_timeout_s"),
+        params=case.value("decode_spread.n50_after"),
+    )
     case.step(
         "n50_p6",
         "balance_check",
-        timeout_s=60,
-        params={
-            "requests": [output("n50", "requests")],
-            "fleet": output("n50_before", "snapshot"),
-            "metric": "decode_complete",
-            "property": "P6",
-            "after": output("n50_after", "snapshot"),
-        },
+        timeout_s=case.value("decode_spread.n50_p6_timeout_s"),
+        params=case.params(
+            "decode_spread.n50_p6",
+            {
+                "requests": [output("n50", "requests")],
+                "fleet": output("n50_before", "snapshot"),
+                "after": output("n50_after", "snapshot"),
+            },
+        ),
     )
     case.step(
         "n50_p2",
         "balance_check",
-        timeout_s=60,
-        params={
-            "requests": [output("n50", "requests")],
-            "fleet": output("n50_before", "snapshot"),
-            "metric": "decode_workers",
-            "property": "P2",
-            "after": output("n50_after", "snapshot"),
-            "min_workers": 3,
-        },
+        timeout_s=case.value("decode_spread.n50_p2_timeout_s"),
+        params=case.params(
+            "decode_spread.n50_p2",
+            {
+                "requests": [output("n50", "requests")],
+                "fleet": output("n50_before", "snapshot"),
+                "after": output("n50_after", "snapshot"),
+            },
+        ),
     )
     case.step(
         "n50_p1",
         "balance_check",
-        timeout_s=60,
-        params={
-            "requests": [output("n50", "requests")],
-            "fleet": output("n50_before", "snapshot"),
-            "metric": "decode_share",
-            "property": "P1",
-            "after": output("n50_after", "snapshot"),
-            "bands": {"strict": 0.4, "normal": 0.5, "loose": 0.6},
-        },
+        timeout_s=case.value("decode_spread.n50_p1_timeout_s"),
+        params=case.params(
+            "decode_spread.n50_p1",
+            {
+                "requests": [output("n50", "requests")],
+                "fleet": output("n50_before", "snapshot"),
+                "after": output("n50_after", "snapshot"),
+            },
+        ),
     )
-    case.step("teardown", "teardown", timeout_s=120)
+    case.step(
+        "teardown", "teardown", timeout_s=case.value("decode_spread.teardown_timeout_s")
+    )
 
 
 def length_mixed(case):
-    case.step("setup", "setup", timeout_s=180)
-    case.step("fleet", "balance_snapshot", timeout_s=60, params={"role": "prefill"})
+    case.step("setup", "setup", timeout_s=case.value("length_mixed.setup_timeout_s"))
+    case.step(
+        "fleet",
+        "balance_snapshot",
+        timeout_s=case.value("length_mixed.fleet_timeout_s"),
+        params=case.value("length_mixed.fleet"),
+    )
     case.step(
         "wave1_long1",
         "balance_start",
-        timeout_s=60,
-        params={
-            "input_len": 131072,
-            "unique_keys": False,
-            "defer_batch": True,
-            "stream_timeout_s": 30,
-        },
+        timeout_s=case.value("length_mixed.wave1_long1_timeout_s"),
+        params=case.value("length_mixed.wave1_long1"),
     )
     case.step(
         "wave1_long1_pending",
         "balance_pending",
-        timeout_s=6,
+        timeout_s=case.value("length_mixed.wave1_long1_pending_timeout_s"),
         params={
             "requests": output("wave1_long1", "requests"),
             "fleet": output("fleet", "snapshot"),
@@ -295,18 +358,13 @@ def length_mixed(case):
     case.step(
         "wave1_long2",
         "balance_start",
-        timeout_s=60,
-        params={
-            "input_len": 135168,
-            "unique_keys": False,
-            "defer_batch": True,
-            "stream_timeout_s": 30,
-        },
+        timeout_s=case.value("length_mixed.wave1_long2_timeout_s"),
+        params=case.value("length_mixed.wave1_long2"),
     )
     case.step(
         "wave1_long2_pending",
         "balance_pending",
-        timeout_s=6,
+        timeout_s=case.value("length_mixed.wave1_long2_pending_timeout_s"),
         params={
             "requests": output("wave1_long2", "requests"),
             "fleet": output("fleet", "snapshot"),
@@ -315,64 +373,59 @@ def length_mixed(case):
     case.step(
         "wave1_short",
         "balance_start",
-        timeout_s=60,
-        params={
-            "count": 6,
-            "input_len": 512,
-            "unique_keys": False,
-            "defer_batch": True,
-            "stream_timeout_s": 30,
-        },
+        timeout_s=case.value("length_mixed.wave1_short_timeout_s"),
+        params=case.value("length_mixed.wave1_short"),
     )
     case.step(
         "wave1_long1_terminal",
         "balance_wait",
-        timeout_s=120,
+        timeout_s=case.value("length_mixed.wave1_long1_terminal_timeout_s"),
         params={"requests": output("wave1_long1", "requests")},
     )
     case.step(
         "wave1_long2_terminal",
         "balance_wait",
-        timeout_s=120,
+        timeout_s=case.value("length_mixed.wave1_long2_terminal_timeout_s"),
         params={"requests": output("wave1_long2", "requests")},
     )
     case.step(
         "wave1_short_terminal",
         "balance_wait",
-        timeout_s=120,
+        timeout_s=case.value("length_mixed.wave1_short_terminal_timeout_s"),
         params={"requests": output("wave1_short", "requests")},
     )
     case.step(
         "wave1_p6",
         "balance_check",
-        timeout_s=60,
-        params={
-            "requests": [
-                output("wave1_long1", "requests"),
-                output("wave1_long2", "requests"),
-                output("wave1_short", "requests"),
-            ],
-            "fleet": output("fleet", "snapshot"),
-            "metric": "complete",
-            "property": "P6",
-        },
+        timeout_s=case.value("length_mixed.wave1_p6_timeout_s"),
+        params=case.params(
+            "length_mixed.wave1_p6",
+            {
+                "requests": [
+                    output("wave1_long1", "requests"),
+                    output("wave1_long2", "requests"),
+                    output("wave1_short", "requests"),
+                ],
+                "fleet": output("fleet", "snapshot"),
+            },
+        ),
     )
-    case.step("wave1_master_clean", "balance_clean", timeout_s=30, params={})
+    case.step(
+        "wave1_master_clean",
+        "balance_clean",
+        timeout_s=case.value("length_mixed.wave1_master_clean_timeout_s"),
+        params=case.value("length_mixed.wave1_master_clean"),
+    )
     case.step(
         "wave2_long1",
         "balance_start",
-        timeout_s=60,
-        params={
-            "input_len": 139264,
-            "unique_keys": False,
-            "defer_batch": True,
-            "stream_timeout_s": 30,
-        },
+        timeout_s=case.value("length_mixed.wave2_long1_timeout_s"),
+        params=case.value("length_mixed.wave2_long1"),
     )
     case.step(
         "wave2_long1_pending",
         "balance_pending",
-        timeout_s=6,
+        timeout_s=case.value("length_mixed.wave2_long1_pending_timeout_s"),
         params={
             "requests": output("wave2_long1", "requests"),
             "fleet": output("fleet", "snapshot"),
@@ -381,18 +434,13 @@ def length_mixed(case):
     case.step(
         "wave2_long2",
         "balance_start",
-        timeout_s=60,
-        params={
-            "input_len": 143360,
-            "unique_keys": False,
-            "defer_batch": True,
-            "stream_timeout_s": 30,
-        },
+        timeout_s=case.value("length_mixed.wave2_long2_timeout_s"),
+        params=case.value("length_mixed.wave2_long2"),
     )
     case.step(
         "wave2_long2_pending",
         "balance_pending",
-        timeout_s=6,
+        timeout_s=case.value("length_mixed.wave2_long2_pending_timeout_s"),
         params={
             "requests": output("wave2_long2", "requests"),
             "fleet": output("fleet", "snapshot"),
@@ -401,64 +449,59 @@ def length_mixed(case):
     case.step(
         "wave2_short",
         "balance_start",
-        timeout_s=60,
-        params={
-            "count": 6,
-            "input_len": 512,
-            "unique_keys": False,
-            "defer_batch": True,
-            "stream_timeout_s": 30,
-        },
+        timeout_s=case.value("length_mixed.wave2_short_timeout_s"),
+        params=case.value("length_mixed.wave2_short"),
     )
     case.step(
         "wave2_long1_terminal",
         "balance_wait",
-        timeout_s=120,
+        timeout_s=case.value("length_mixed.wave2_long1_terminal_timeout_s"),
         params={"requests": output("wave2_long1", "requests")},
     )
     case.step(
         "wave2_long2_terminal",
         "balance_wait",
-        timeout_s=120,
+        timeout_s=case.value("length_mixed.wave2_long2_terminal_timeout_s"),
         params={"requests": output("wave2_long2", "requests")},
     )
     case.step(
         "wave2_short_terminal",
         "balance_wait",
-        timeout_s=120,
+        timeout_s=case.value("length_mixed.wave2_short_terminal_timeout_s"),
         params={"requests": output("wave2_short", "requests")},
     )
     case.step(
         "wave2_p6",
         "balance_check",
-        timeout_s=60,
-        params={
-            "requests": [
-                output("wave2_long1", "requests"),
-                output("wave2_long2", "requests"),
-                output("wave2_short", "requests"),
-            ],
-            "fleet": output("fleet", "snapshot"),
-            "metric": "complete",
-            "property": "P6",
-        },
+        timeout_s=case.value("length_mixed.wave2_p6_timeout_s"),
+        params=case.params(
+            "length_mixed.wave2_p6",
+            {
+                "requests": [
+                    output("wave2_long1", "requests"),
+                    output("wave2_long2", "requests"),
+                    output("wave2_short", "requests"),
+                ],
+                "fleet": output("fleet", "snapshot"),
+            },
+        ),
     )
-    case.step("wave2_master_clean", "balance_clean", timeout_s=30, params={})
+    case.step(
+        "wave2_master_clean",
+        "balance_clean",
+        timeout_s=case.value("length_mixed.wave2_master_clean_timeout_s"),
+        params=case.value("length_mixed.wave2_master_clean"),
+    )
     case.step(
         "wave3_long1",
         "balance_start",
-        timeout_s=60,
-        params={
-            "input_len": 147456,
-            "unique_keys": False,
-            "defer_batch": True,
-            "stream_timeout_s": 30,
-        },
+        timeout_s=case.value("length_mixed.wave3_long1_timeout_s"),
+        params=case.value("length_mixed.wave3_long1"),
     )
     case.step(
         "wave3_long1_pending",
         "balance_pending",
-        timeout_s=6,
+        timeout_s=case.value("length_mixed.wave3_long1_pending_timeout_s"),
         params={
             "requests": output("wave3_long1", "requests"),
             "fleet": output("fleet", "snapshot"),
@@ -467,18 +510,13 @@ def length_mixed(case):
     case.step(
         "wave3_long2",
         "balance_start",
-        timeout_s=60,
-        params={
-            "input_len": 131072,
-            "unique_keys": False,
-            "defer_batch": True,
-            "stream_timeout_s": 30,
-        },
+        timeout_s=case.value("length_mixed.wave3_long2_timeout_s"),
+        params=case.value("length_mixed.wave3_long2"),
     )
     case.step(
         "wave3_long2_pending",
         "balance_pending",
-        timeout_s=6,
+        timeout_s=case.value("length_mixed.wave3_long2_pending_timeout_s"),
         params={
             "requests": output("wave3_long2", "requests"),
             "fleet": output("fleet", "snapshot"),
@@ -487,64 +525,59 @@ def length_mixed(case):
     case.step(
         "wave3_short",
         "balance_start",
-        timeout_s=60,
-        params={
-            "count": 6,
-            "input_len": 512,
-            "unique_keys": False,
-            "defer_batch": True,
-            "stream_timeout_s": 30,
-        },
+        timeout_s=case.value("length_mixed.wave3_short_timeout_s"),
+        params=case.value("length_mixed.wave3_short"),
     )
     case.step(
         "wave3_long1_terminal",
         "balance_wait",
-        timeout_s=120,
+        timeout_s=case.value("length_mixed.wave3_long1_terminal_timeout_s"),
         params={"requests": output("wave3_long1", "requests")},
     )
     case.step(
         "wave3_long2_terminal",
         "balance_wait",
-        timeout_s=120,
+        timeout_s=case.value("length_mixed.wave3_long2_terminal_timeout_s"),
         params={"requests": output("wave3_long2", "requests")},
     )
     case.step(
         "wave3_short_terminal",
         "balance_wait",
-        timeout_s=120,
+        timeout_s=case.value("length_mixed.wave3_short_terminal_timeout_s"),
         params={"requests": output("wave3_short", "requests")},
     )
     case.step(
         "wave3_p6",
         "balance_check",
-        timeout_s=60,
-        params={
-            "requests": [
-                output("wave3_long1", "requests"),
-                output("wave3_long2", "requests"),
-                output("wave3_short", "requests"),
-            ],
-            "fleet": output("fleet", "snapshot"),
-            "metric": "complete",
-            "property": "P6",
-        },
+        timeout_s=case.value("length_mixed.wave3_p6_timeout_s"),
+        params=case.params(
+            "length_mixed.wave3_p6",
+            {
+                "requests": [
+                    output("wave3_long1", "requests"),
+                    output("wave3_long2", "requests"),
+                    output("wave3_short", "requests"),
+                ],
+                "fleet": output("fleet", "snapshot"),
+            },
+        ),
     )
-    case.step("wave3_master_clean", "balance_clean", timeout_s=30, params={})
+    case.step(
+        "wave3_master_clean",
+        "balance_clean",
+        timeout_s=case.value("length_mixed.wave3_master_clean_timeout_s"),
+        params=case.value("length_mixed.wave3_master_clean"),
+    )
     case.step(
         "wave4_long1",
         "balance_start",
-        timeout_s=60,
-        params={
-            "input_len": 135168,
-            "unique_keys": False,
-            "defer_batch": True,
-            "stream_timeout_s": 30,
-        },
+        timeout_s=case.value("length_mixed.wave4_long1_timeout_s"),
+        params=case.value("length_mixed.wave4_long1"),
     )
     case.step(
         "wave4_long1_pending",
         "balance_pending",
-        timeout_s=6,
+        timeout_s=case.value("length_mixed.wave4_long1_pending_timeout_s"),
         params={
             "requests": output("wave4_long1", "requests"),
             "fleet": output("fleet", "snapshot"),
@@ -553,18 +586,13 @@ def length_mixed(case):
     case.step(
         "wave4_long2",
         "balance_start",
-        timeout_s=60,
-        params={
-            "input_len": 139264,
-            "unique_keys": False,
-            "defer_batch": True,
-            "stream_timeout_s": 30,
-        },
+        timeout_s=case.value("length_mixed.wave4_long2_timeout_s"),
+        params=case.value("length_mixed.wave4_long2"),
     )
     case.step(
         "wave4_long2_pending",
         "balance_pending",
-        timeout_s=6,
+        timeout_s=case.value("length_mixed.wave4_long2_pending_timeout_s"),
         params={
             "requests": output("wave4_long2", "requests"),
             "fleet": output("fleet", "snapshot"),
@@ -573,64 +601,59 @@ def length_mixed(case):
     case.step(
         "wave4_short",
         "balance_start",
-        timeout_s=60,
-        params={
-            "count": 6,
-            "input_len": 512,
-            "unique_keys": False,
-            "defer_batch": True,
-            "stream_timeout_s": 30,
-        },
+        timeout_s=case.value("length_mixed.wave4_short_timeout_s"),
+        params=case.value("length_mixed.wave4_short"),
     )
     case.step(
         "wave4_long1_terminal",
         "balance_wait",
-        timeout_s=120,
+        timeout_s=case.value("length_mixed.wave4_long1_terminal_timeout_s"),
         params={"requests": output("wave4_long1", "requests")},
     )
     case.step(
         "wave4_long2_terminal",
         "balance_wait",
-        timeout_s=120,
+        timeout_s=case.value("length_mixed.wave4_long2_terminal_timeout_s"),
         params={"requests": output("wave4_long2", "requests")},
     )
     case.step(
         "wave4_short_terminal",
         "balance_wait",
-        timeout_s=120,
+        timeout_s=case.value("length_mixed.wave4_short_terminal_timeout_s"),
         params={"requests": output("wave4_short", "requests")},
     )
     case.step(
         "wave4_p6",
         "balance_check",
-        timeout_s=60,
-        params={
-            "requests": [
-                output("wave4_long1", "requests"),
-                output("wave4_long2", "requests"),
-                output("wave4_short", "requests"),
-            ],
-            "fleet": output("fleet", "snapshot"),
-            "metric": "complete",
-            "property": "P6",
-        },
+        timeout_s=case.value("length_mixed.wave4_p6_timeout_s"),
+        params=case.params(
+            "length_mixed.wave4_p6",
+            {
+                "requests": [
+                    output("wave4_long1", "requests"),
+                    output("wave4_long2", "requests"),
+                    output("wave4_short", "requests"),
+                ],
+                "fleet": output("fleet", "snapshot"),
+            },
+        ),
     )
-    case.step("wave4_master_clean", "balance_clean", timeout_s=30, params={})
+    case.step(
+        "wave4_master_clean",
+        "balance_clean",
+        timeout_s=case.value("length_mixed.wave4_master_clean_timeout_s"),
+        params=case.value("length_mixed.wave4_master_clean"),
+    )
     case.step(
         "wave5_long1",
         "balance_start",
-        timeout_s=60,
-        params={
-            "input_len": 143360,
-            "unique_keys": False,
-            "defer_batch": True,
-            "stream_timeout_s": 30,
-        },
+        timeout_s=case.value("length_mixed.wave5_long1_timeout_s"),
+        params=case.value("length_mixed.wave5_long1"),
     )
     case.step(
         "wave5_long1_pending",
         "balance_pending",
-        timeout_s=6,
+        timeout_s=case.value("length_mixed.wave5_long1_pending_timeout_s"),
         params={
             "requests": output("wave5_long1", "requests"),
             "fleet": output("fleet", "snapshot"),
@@ -639,18 +662,13 @@ def length_mixed(case):
     case.step(
         "wave5_long2",
         "balance_start",
-        timeout_s=60,
-        params={
-            "input_len": 147456,
-            "unique_keys": False,
-            "defer_batch": True,
-            "stream_timeout_s": 30,
-        },
+        timeout_s=case.value("length_mixed.wave5_long2_timeout_s"),
+        params=case.value("length_mixed.wave5_long2"),
     )
     case.step(
         "wave5_long2_pending",
         "balance_pending",
-        timeout_s=6,
+        timeout_s=case.value("length_mixed.wave5_long2_pending_timeout_s"),
         params={
             "requests": output("wave5_long2", "requests"),
             "fleet": output("fleet", "snapshot"),
@@ -659,145 +677,105 @@ def length_mixed(case):
     case.step(
         "wave5_short",
         "balance_start",
-        timeout_s=60,
-        params={
-            "count": 6,
-            "input_len": 512,
-            "unique_keys": False,
-            "defer_batch": True,
-            "stream_timeout_s": 30,
-        },
+        timeout_s=case.value("length_mixed.wave5_short_timeout_s"),
+        params=case.value("length_mixed.wave5_short"),
     )
     case.step(
         "wave5_long1_terminal",
         "balance_wait",
-        timeout_s=120,
+        timeout_s=case.value("length_mixed.wave5_long1_terminal_timeout_s"),
         params={"requests": output("wave5_long1", "requests")},
     )
     case.step(
         "wave5_long2_terminal",
         "balance_wait",
-        timeout_s=120,
+        timeout_s=case.value("length_mixed.wave5_long2_terminal_timeout_s"),
         params={"requests": output("wave5_long2", "requests")},
     )
     case.step(
         "wave5_short_terminal",
         "balance_wait",
-        timeout_s=120,
+        timeout_s=case.value("length_mixed.wave5_short_terminal_timeout_s"),
         params={"requests": output("wave5_short", "requests")},
     )
     case.step(
         "wave5_p6",
         "balance_check",
-        timeout_s=60,
-        params={
-            "requests": [
-                output("wave5_long1", "requests"),
-                output("wave5_long2", "requests"),
-                output("wave5_short", "requests"),
-            ],
-            "fleet": output("fleet", "snapshot"),
-            "metric": "complete",
-            "property": "P6",
-        },
+        timeout_s=case.value("length_mixed.wave5_p6_timeout_s"),
+        params=case.params(
+            "length_mixed.wave5_p6",
+            {
+                "requests": [
+                    output("wave5_long1", "requests"),
+                    output("wave5_long2", "requests"),
+                    output("wave5_short", "requests"),
+                ],
+                "fleet": output("fleet", "snapshot"),
+            },
+        ),
     )
-    case.step("wave5_master_clean", "balance_clean", timeout_s=30, params={})
+    case.step(
+        "wave5_master_clean",
+        "balance_clean",
+        timeout_s=case.value("length_mixed.wave5_master_clean_timeout_s"),
+        params=case.value("length_mixed.wave5_master_clean"),
+    )
     case.step(
         "token_p3",
         "balance_check",
-        timeout_s=60,
-        params={
-            "requests": [
-                output("wave1_long1", "requests"),
-                output("wave1_long2", "requests"),
-                output("wave1_short", "requests"),
-                output("wave2_long1", "requests"),
-                output("wave2_long2", "requests"),
-                output("wave2_short", "requests"),
-                output("wave3_long1", "requests"),
-                output("wave3_long2", "requests"),
-                output("wave3_short", "requests"),
-                output("wave4_long1", "requests"),
-                output("wave4_long2", "requests"),
-                output("wave4_short", "requests"),
-                output("wave5_long1", "requests"),
-                output("wave5_long2", "requests"),
-                output("wave5_short", "requests"),
-            ],
-            "fleet": output("fleet", "snapshot"),
-            "metric": "token_share",
-            "property": "P3",
-        },
+        timeout_s=case.value("length_mixed.token_p3_timeout_s"),
+        params=case.params(
+            "length_mixed.token_p3",
+            {
+                "requests": [
+                    output("wave1_long1", "requests"),
+                    output("wave1_long2", "requests"),
+                    output("wave1_short", "requests"),
+                    output("wave2_long1", "requests"),
+                    output("wave2_long2", "requests"),
+                    output("wave2_short", "requests"),
+                    output("wave3_long1", "requests"),
+                    output("wave3_long2", "requests"),
+                    output("wave3_short", "requests"),
+                    output("wave4_long1", "requests"),
+                    output("wave4_long2", "requests"),
+                    output("wave4_short", "requests"),
+                    output("wave5_long1", "requests"),
+                    output("wave5_long2", "requests"),
+                    output("wave5_short", "requests"),
+                ],
+                "fleet": output("fleet", "snapshot"),
+            },
+        ),
     )
     case.step(
         "short_p2",
         "balance_check",
-        timeout_s=60,
-        params={
-            "requests": [
-                output("wave1_long1", "requests"),
-                output("wave1_long2", "requests"),
-                output("wave1_short", "requests"),
-                output("wave2_long1", "requests"),
-                output("wave2_long2", "requests"),
-                output("wave2_short", "requests"),
-                output("wave3_long1", "requests"),
-                output("wave3_long2", "requests"),
-                output("wave3_short", "requests"),
-                output("wave4_long1", "requests"),
-                output("wave4_long2", "requests"),
-                output("wave4_short", "requests"),
-                output("wave5_long1", "requests"),
-                output("wave5_long2", "requests"),
-                output("wave5_short", "requests"),
-            ],
-            "fleet": output("fleet", "snapshot"),
-            "metric": "short_workers",
-            "property": "P2",
-        },
+        timeout_s=case.value("length_mixed.short_p2_timeout_s"),
+        params=case.params(
+            "length_mixed.short_p2",
+            {
+                "requests": [
+                    output("wave1_long1", "requests"),
+                    output("wave1_long2", "requests"),
+                    output("wave1_short", "requests"),
+                    output("wave2_long1", "requests"),
+                    output("wave2_long2", "requests"),
+                    output("wave2_short", "requests"),
+                    output("wave3_long1", "requests"),
+                    output("wave3_long2", "requests"),
+                    output("wave3_short", "requests"),
+                    output("wave4_long1", "requests"),
+                    output("wave4_long2", "requests"),
+                    output("wave4_short", "requests"),
+                    output("wave5_long1", "requests"),
+                    output("wave5_long2", "requests"),
+                    output("wave5_short", "requests"),
+                ],
+                "fleet": output("fleet", "snapshot"),
+            },
+        ),
     )
-    case.step("teardown", "teardown", timeout_s=120)
-
-
-VARIANTS = {
-    "uniform_serial": {
-        "build": uniform_serial,
-        "profiles": [
-            "batch-window",
-            "single-nonbatch",
-            "single-batch",
-            "window-nonbatch",
-        ],
-        "metadata": {},
-    },
-    "concurrent_mix": {
-        "build": concurrent_mix,
-        "profiles": [
-            "batch-window",
-            "single-nonbatch",
-            "single-batch",
-            "window-nonbatch",
-        ],
-        "metadata": {},
-    },
-    "decode_spread": {
-        "build": decode_spread,
-        "profiles": [
-            "batch-window",
-            "single-nonbatch",
-            "single-batch",
-            "window-nonbatch",
-        ],
-        "metadata": {},
-    },
-    "length_mixed": {
-        "build": length_mixed,
-        "profiles": [
-            "batch-window",
-            "single-nonbatch",
-            "single-batch",
-            "window-nonbatch",
-        ],
-        "metadata": {},
-    },
-}
+    case.step(
+        "teardown", "teardown", timeout_s=case.value("length_mixed.teardown_timeout_s")
+    )

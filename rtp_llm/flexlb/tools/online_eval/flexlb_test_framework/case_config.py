@@ -22,19 +22,36 @@ def output(stage, field):
 class CaseBuilder:
     """Python owns ordering, branches and checks; YAML supplies declared parameters."""
 
-    def __init__(self, environment, parameters):
+    def __init__(self, environment, parameters, parameter_schema=None):
         self.environment = copy.deepcopy(environment)
         self.parameters = copy.deepcopy(parameters)
+        self.parameter_schema = copy.deepcopy(parameter_schema or {})
         self.steps = []
-        self._used = set()
 
-    def number(self, name, default, *, minimum=1, maximum=None, integer=True):
-        self._used.add(name)
-        value = self.parameters.get(name, default)
+    def value(self, path):
+        """Read required YAML data; programs provide no hidden fallback values."""
+        value = self.parameters
+        for part in path.split("."):
+            if not isinstance(value, dict) or part not in value:
+                raise ScenarioError(f"missing YAML parameter {path!r}")
+            value = value[part]
+        return copy.deepcopy(value)
+
+    def params(self, path, dynamic):
+        values = self.value(path)
+        if not isinstance(values, dict):
+            raise ScenarioError(f"YAML parameter {path!r} must be a mapping")
+        return _merge_data(values, dynamic)
+
+    def number(self, name):
+        value = self.value(name)
+        rule = self.parameter_schema.get(name, {})
+        integer = rule.get("integer", True)
+        minimum, maximum = rule.get("minimum"), rule.get("maximum")
         if (
             type(value) not in ((int,) if integer else (int, float))
             or (isinstance(value, float) and not math.isfinite(value))
-            or value < minimum
+            or (minimum is not None and value < minimum)
             or (maximum is not None and value > maximum)
         ):
             raise ScenarioError(f"parameter {name!r}: invalid value {value!r}")
@@ -49,12 +66,18 @@ class CaseBuilder:
         self.steps.append(step)
 
     def finish(self):
-        unused = set(self.parameters) - self._used
-        if unused:
-            raise ScenarioError(
-                f"Python case does not declare parameters {sorted(unused)}"
-            )
         return copy.deepcopy(self.steps)
+
+
+def _merge_data(base, patch):
+    """Mappings inherit recursively; lists and scalars are replaced by YAML."""
+    result = copy.deepcopy(base)
+    for key, value in patch.items():
+        if isinstance(result.get(key), dict) and isinstance(value, dict):
+            result[key] = _merge_data(result[key], value)
+        else:
+            result[key] = copy.deepcopy(value)
+    return result
 
 
 def _mapping(value, allowed, path):
@@ -120,6 +143,8 @@ def configure_program(config, source):
             "execution",
             "parameters",
             "variants",
+            "metadata",
+            "parameter_schema",
         },
         source,
     )
@@ -136,10 +161,13 @@ def configure_program(config, source):
     parameters = config.get("parameters", {})
     if not isinstance(parameters, dict):
         raise ScenarioError(f"{source}.parameters: expected mapping")
-    variants = config.get("variants", [{"id": key} for key in module.VARIANTS])
+    variants = config.get("variants")
     if not isinstance(variants, list) or not variants:
         raise ScenarioError(f"{source}.variants: expected a nonempty list")
-    document = ProgramDocument(copy.deepcopy(module.METADATA))
+    metadata = config.get("metadata", {})
+    if not isinstance(metadata, dict):
+        raise ScenarioError(f"{source}.metadata: expected mapping")
+    document = ProgramDocument(copy.deepcopy(metadata))
     document.update(
         schema_version=1, environment=copy.deepcopy(environment), variants=[]
     )
@@ -147,12 +175,21 @@ def configure_program(config, source):
     for key in ("profiles", "execution"):
         if key in config:
             document[key] = copy.deepcopy(config[key])
-    selected_profiles = document.get("profiles", module.PROFILES)
+    selected_profiles = document.get("profiles")
     seen = set()
     for row in variants:
         _mapping(
             row,
-            {"id", "use", "profiles", "environment", "execution", "parameters"},
+            {
+                "id",
+                "program",
+                "profiles",
+                "environment",
+                "execution",
+                "parameters",
+                "metadata",
+                "parameter_schema",
+            },
             source + ".variants",
         )
         identity = row.get("id")
@@ -161,31 +198,37 @@ def configure_program(config, source):
                 f"{source}: missing or duplicate configuration id {identity!r}"
             )
         seen.add(identity)
-        use = row.get("use", identity)
-        if not isinstance(use, str) or use not in module.VARIANTS:
-            raise ScenarioError(f"{source}: unknown Python case variant {use!r}")
-        definition = module.VARIANTS[use]
-        profiles = row.get(
-            "profiles",
-            selected_profiles if "profiles" in config else definition["profiles"],
-        )
-        if not isinstance(profiles, list) or any(
-            not isinstance(p, str) for p in profiles
+        program = row.get("program", identity)
+        build = vars(module).get(program) if isinstance(program, str) else None
+        if (
+            not isinstance(program, str)
+            or program.startswith("_")
+            or not callable(build)
+            or getattr(build, "__module__", None) != module.__name__
         ):
-            raise ScenarioError(f"{source}: profiles must be a string list")
-        if set(profiles) - set(definition["profiles"]):
+            raise ScenarioError(f"{source}: unknown Python case program {program!r}")
+        profiles = row.get("profiles", selected_profiles)
+        if (
+            not isinstance(profiles, list)
+            or not profiles
+            or any(not isinstance(p, str) for p in profiles)
+        ):
             raise ScenarioError(
-                f"{source}: variant {use!r} supports only {definition['profiles']}"
+                f"{source}: profiles must be a nonempty string list in YAML"
             )
         variant_parameters = row.get("parameters", {})
         if not isinstance(variant_parameters, dict):
             raise ScenarioError(f"{source}: variant parameters must be a mapping")
         patch = row.get("environment", {})
         builder = CaseBuilder(
-            _merge_environment(environment, patch), {**parameters, **variant_parameters}
+            _merge_environment(environment, patch),
+            _merge_data(parameters, variant_parameters),
+            _merge_data(
+                config.get("parameter_schema", {}), row.get("parameter_schema", {})
+            ),
         )
-        definition["build"](builder)
-        variant = copy.deepcopy(definition["metadata"])
+        build(builder)
+        variant = copy.deepcopy(row.get("metadata", {}))
         variant.update(
             id=identity, profiles=copy.deepcopy(profiles), stages=builder.finish()
         )

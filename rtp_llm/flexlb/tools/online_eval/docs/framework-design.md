@@ -1,7 +1,7 @@
 # FlexLB case 框架设计
 
 框架采用 **YAML 配置 → Python case → 公共执行器 → Java Master / Mock engine**。
-YAML 提供 P/D 规模、配置档、输入数据和时间预算；Python 决定步骤顺序、分支、循环和断言。
+YAML 保存全部用例配置：P/D 规模、profile、输入数据、时间预算、元数据、断言阈值和参数约束。Python 保留步骤顺序、分支、循环、结果绑定和判定算法，不提供用例配置默认值。
 添加配置或新逻辑的具体步骤见 [添加新 case](adding-cases.md)。
 
 ## 1. 术语解释
@@ -15,16 +15,16 @@ YAML 提供 P/D 规模、配置档、输入数据和时间预算；Python 决定
 | configuration（配置） | 传给 Python case 的数据；没有流程控制功能。 | 一份 YAML 描述 2P/4D、输入长度与适用 profile。 |
 | scenario_id / id | 一份配置的公开名称。默认等于 `case`；可用 `id` 为同一程序增加另一组配置。 | `id: completion_4p8d`。 |
 | variant（变体） | Python 已定义的一个测试入口，加上本行配置数据。YAML 不能创造新的执行流程。 | `immediate` 与 `deferred_fetch` 是两个 Python 函数。 |
-| use | 为配置行另取名字时，选择已有 Python 变体。省略时等于该行 `id`。 | `id: large_pd, use: immediate`。 |
+| program | 选择注册模块中的公开 Python 执行函数。省略时等于该行 `id`。 | `id: large_pd, program: immediate`。 |
 | instance（运行实例） | 配置名称、变体名称与 profile 的组合。每个实例独立记录结果与清理。 | `request_completion::immediate::single-batch`。 |
 | profile（运行形态） | 调度决策与请求投递路径的命名组合。 | `single-batch` 是逐请求决策、batch 投递。 |
 | environment / env（环境） | Master、P/D worker 数量、KV 容量、性能预设等环境描述。运行后的 `ctx.env` 是环境对象。 | `environment: {backend: java_mock, n_prefill: 2, n_decode: 4}`。 |
-| parameters（用例参数） | Python 明确声明并消费的数据。拼错或未声明的参数会报错。 | completion 支持 `input_len`、`output_len`、`count`。 |
+| parameters（用例参数） | YAML 提供、Python 读取的数据；缺少被读取的参数会报错。 | completion 支持 `input_len`、`output_len`、`count`。 |
 | config_overrides | `environment` 内受类型检查的 Master 配置项。 | 调度 ordering、decision、dispatcher、配额等。 |
 | schema_version | 配置格式版本，当前为整数 `2`；与 Git 版本无关。 | 旧版带 stages 的 YAML 会在启动前报错。 |
 | grade（断言档位） | `normal/strict/loose`；只有明确支持分档的检查才按档位取阈值。 | `--grade normal` 不改变 profile。 |
-| category / tags | Python 元数据中的业务类别、标签，用于分类。 | `category: status`、`tags: [smoke]`，不执行检查。 |
-| capability / requires | 实际环境提供的能力及 Python 声明的能力要求。启动前校验。 | deferred Fetch 要求 `enqueue_batch`。 |
+| category / tags | YAML metadata中的业务类别、标签，用于分类。 | `category: status`、`tags: [smoke]`，不执行检查。 |
+| capability / requires | 实际环境提供的能力及 YAML 声明的能力要求。启动前校验。 | deferred Fetch 要求 `enqueue_batch`。 |
 
 操作系统环境变量与 `environment` 是不同概念。例如 `FLEXLB_FT_PARALLEL_MASTER_BASE`
 是 runner 的端口输入，不是 YAML 的 worker 配置。
@@ -33,7 +33,7 @@ YAML 提供 P/D 规模、配置档、输入数据和时间预算；Python 决定
 
 | 术语 | 含义 |
 |---|---|
-| CaseBuilder | Python case 的计划构造器。通过 `case.number()` 读取并校验参数，通过 `case.step()` 添加操作。构造计划时不启动进程。 |
+| CaseBuilder | Python case 的计划构造器。通过 `case.value()` 读取数据、`case.number()` 按 YAML 约束校验数值、`case.params()` 绑定运行结果，通过 `case.step()` 添加操作。构造计划时不启动进程。 |
 | stage / step（阶段 / 步骤） | 一次具名操作，包含自己的输入与时间预算；步骤按 Python 构造的顺序执行。 |
 | action（操作） | 可复用的 Python 执行能力。如 `request` 提交请求、`wait` 等待、`check` 比较结果。多个步骤可调用同一 action。 |
 | params | Python 给某次 action 的输入；与 YAML 顶层 `parameters` 不同。 |
@@ -45,11 +45,11 @@ YAML 提供 P/D 规模、配置档、输入数据和时间预算；Python 决定
 | RuntimeContext / ctx | 执行阶段上下文，保存环境、输出、资源句柄和清理回调。 |
 | StageOutput / CheckResult | action 返回的输出、检查及制品；每项检查记录 ID、状态、实际值、期望值和证据。 |
 | resource handle / epoch | 活动资源的受控引用及环境代次。环境重建后，旧活动句柄不能操作新环境。 |
-| finding（已知问题） | Python 元数据中明确列出的 `stage_id.check_id`。只承接该检查的普通 FAIL，不能吞掉异常、超时或清理失败。 |
+| finding（已知问题） | YAML metadata中明确列出的 `stage_id.check_id`。只承接该检查的普通 FAIL，不能吞掉异常、超时或清理失败。 |
 
 步骤引用在内部计划中仍编码成 `$ref`，这是执行器的数据协议。
 **YAML 不接受 `stages`、`stage_overrides`、`steps`、`action`、`$ref`、`needs` 或 `when`。**
-检查谓词、finding、旧 case 映射和任意模块路径也不能由 YAML 覆盖。
+比较运算和阈值属于 YAML 数据；Python 决定检查顺序与实际值来源。finding 在 YAML metadata 中声明，任意模块路径不能由 YAML 指定。
 
 ### 运行与证据
 
@@ -104,7 +104,7 @@ flowchart TD
 |---|---|
 | `scenarios/` | 数据配置：P/D、profile、预设、Python 变体选择与参数 |
 | `flexlb_test_framework/case_config.py` | 配置白名单、参数注入、Python 注册入口调用与来源哈希 |
-| `flexlb_test_framework/case_programs/` | 流程、分支、循环、断言与业务元数据 |
+| `flexlb_test_framework/case_programs/` | 流程、分支、循环、结果绑定与计算 |
 | `flexlb_test_framework/scenario/compiler.py` | 编译内部计划并检查类型、能力、有效配置、预算 |
 | `flexlb_test_framework/scenario/actions/` | 复用的请求、故障、观测及专用判定能力 |
 | `flexlb_test_framework/scenario/runtime.py` | 统一执行、超时、结果和资源清理 |
@@ -122,7 +122,7 @@ flowchart TD
 ## 3. 配置展开与 profile
 
 一个 Python 程序可以被多份 YAML 复用。配置根 `id` 默认等于 `case`。
-每行 variant 的 `id` 是配置名称，`use` 默认等于该名称；各行按适用 profile 展开：
+每行 variant 的 `id` 是配置名称，`program` 默认等于该名称；各行按适用 profile 展开：
 
 ```text
 配置 id::variant id::profile
@@ -135,13 +135,13 @@ flowchart TD
 | single-nonbatch | single | non_batch |
 | window-nonbatch | fixed_window | non_batch |
 
-根 `profiles` 约束该配置的运行范围；variant 可以进一步缩小，不能扩展 Python 声明的能力范围。
+`profiles` 必须显式配置；variant 的列表覆盖根列表。Python 不维护重复的 profile 白名单，实际能力匹配由编译器验证。
 环境是根 `environment` 加该行 `environment`；`config_overrides` 在这一层按字段合并。
-用例参数是根 `parameters` 加该行 `parameters`；每个 builder 得到独立副本。
-Python 未声明的参数、参数越界或不兼容的 profile 在启动前失败。
+用例参数和参数约束分别由根与变体的 `parameters`、`parameter_schema` 递归合并；列表和标量整体替换，每个 builder 得到独立副本。
+必填参数缺失、参数越界或能力不匹配在启动前失败。共享配置节可以包含其他变体使用的数据。
 
 新增别名配置仍需验证其参数与预期行为。
-目前有 31 个 Python 程序、31 份配置、188 个变体、394 个实例。
+本次配置迁移保持原有 32 份配置、395 个实例；完整计划与迁移前逐项对照一致。
 
 [缓存热点 Leader 饱和溢出测试](cache-hotspot-storm.md)在同一个程序内声明 P=2/3/4 变体，独立校准健康 band，并将已知问题的确认/恢复与构造失败分开裁决。
 
@@ -151,8 +151,8 @@ ABA 切换与 KV 淘汰的具体检查边界见 [HA 与 KV 检查说明](ha-kv-c
 
 ## 4. 配置边界与 Mock 语义
 
-配置仅接受受校验的环境字段和用例声明的参数。重复键、非有限数、YAML anchor/alias/tag、
-目录外符号链接及未知字段均拒绝；不提供任意 Python import、表达式或环境变量注入。
+配置接受受校验的环境字段和 YAML 用例参数。重复键、非有限数、YAML anchor/alias/tag、
+目录外符号链接及未知顶层字段均拒绝；不提供任意 Python import、表达式或环境变量注入。
 Python 输出引用只能指向前序步骤且类型必须匹配；零检查不能产生 PASS。
 
 Java debug API 由 `environment.debug_enabled: true` 显式启用，提供有界快照和请求查询；

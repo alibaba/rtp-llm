@@ -1,4 +1,4 @@
-# Configuration for the registered Python case; execution and assertions live in Python.
+# YAML owns all case data; Python owns execution order and result references.
 schema_version: 2
 case: elastic_lifecycle
 profiles:
@@ -36,15 +36,25 @@ variants:
   execution:
     timeout_s: 480
     cleanup_timeout_s: 120
+  program: decode_scale_out_protection
 - id: normal
   profiles:
   - batch-window
+  program: normal
+  metadata:
+    requires:
+    - enqueue_batch
 - id: strict
   profiles:
   - batch-window
+  program: strict
+  metadata:
+    requires:
+    - enqueue_batch
 - id: rebalance
   profiles:
   - batch-window
+  program: rebalance
 - id: kv_skew_hot
   profiles:
   - batch-window
@@ -54,6 +64,10 @@ variants:
     cleanup_timeout_s: 120
   environment:
     n_decode: 2
+  program: kv_skew_hot
+  metadata:
+    requires:
+    - enqueue_batch
 - id: kv_skew_cold
   profiles:
   - batch-window
@@ -63,6 +77,10 @@ variants:
     cleanup_timeout_s: 120
   environment:
     n_decode: 2
+  program: kv_skew_cold
+  metadata:
+    requires:
+    - enqueue_batch
 - id: steady_recovery
   profiles:
   - batch-window
@@ -70,6 +88,10 @@ variants:
     timeout_s: 900
     stage_timeout_s: 40
     cleanup_timeout_s: 120
+  program: steady_recovery
+  metadata:
+    requires:
+    - enqueue_batch
 - id: kv_full_shrink
   profiles:
   - batch-window
@@ -81,6 +103,10 @@ variants:
     n_prefill: 2
     n_decode: 2
     decode_cache_blocks: 24
+  program: kv_full_shrink
+  metadata:
+    requires:
+    - enqueue_batch
 - id: transient_imbalance
   profiles:
   - batch-window
@@ -92,30 +118,1797 @@ variants:
       ordering: priority
       queue_timeout_ms: 60000
       max_waiting_requests_per_prefill_worker: 64
+  program: transient_imbalance
+  metadata:
+    requires:
+    - enqueue_batch
 - id: rebalance_single_batch
   profiles:
   - single-batch
+  program: rebalance_single_batch
 - id: rebalance_single_nonbatch
   profiles:
   - single-nonbatch
+  program: rebalance_single_nonbatch
 - id: rebalance_window_nonbatch
   profiles:
   - window-nonbatch
+  program: rebalance_window_nonbatch
 - id: normal_single_batch
   profiles:
   - single-batch
+  program: normal_single_batch
+  metadata:
+    requires:
+    - queue
 - id: strict_single_batch
   profiles:
   - single-batch
+  program: strict_single_batch
+  metadata:
+    requires:
+    - queue
 - id: normal_single_nonbatch
   profiles:
   - single-nonbatch
+  program: normal_single_nonbatch
+  metadata:
+    requires:
+    - queue
 - id: strict_single_nonbatch
   profiles:
   - single-nonbatch
+  program: strict_single_nonbatch
+  metadata:
+    requires:
+    - queue
 - id: normal_window_nonbatch
   profiles:
   - window-nonbatch
+  program: normal_window_nonbatch
+  metadata:
+    requires:
+    - queue
 - id: strict_window_nonbatch
   profiles:
   - window-nonbatch
+  program: strict_window_nonbatch
+  metadata:
+    requires:
+    - queue
+metadata:
+  description: Ordered scale-out, measured preference and rebalance, graceful removal and three complete
+    cycles.
+  category: elastic
+  requires:
+  - queue
+  estimated_duration_s: 420
+parameters:
+  normal:
+    setup_timeout_s: 180
+    initial_topology_timeout_s: 35
+    initial_topology:
+      role: PREFILL
+      discovered: 2
+      alive: 2
+    ramp:
+      seconds: 1
+    baseline_window_timeout_s: 25
+    baseline_window:
+      engines:
+      - prefill-0
+      - prefill-1
+      offsets_s:
+      - 0
+      - 15
+    add:
+      role: prefill
+    first_traffic_timeout_s: 15
+    first_traffic:
+      baseline: 0
+      window_s: 10
+    added_topology_timeout_s: 35
+    added_topology:
+      role: PREFILL
+      discovered: 3
+      alive: 3
+      present: true
+    post_window_timeout_s: 55
+    post_window:
+      engines:
+        item_0: prefill-0
+        item_1: prefill-1
+      offsets_s:
+      - 0
+      - 5
+      - 10
+      - 17
+      - 24
+      - 31
+      - 38
+      - 45
+    preference_flow_stop_timeout_s: 45
+    preference_protocol:
+      method: FetchResponse
+    preference_shares:
+      max_share: 0.6
+      old_floor: 0.1
+      exclusive: false
+      require_new: false
+    preference_availability:
+      min_success_rate: 0.9
+    remove_traffic_timeout_s: 60
+    remove_traffic:
+      window_s: 10
+      method: FetchResponse
+    remove_timeout_s: 75
+    remove:
+      drain_timeout_ms: 60000
+    remove_hold:
+      seconds: 3
+    remove_flow_stop_timeout_s: 45
+    remove_protocol:
+      method: FetchResponse
+    removed_topology_timeout_s: 35
+    removed_topology:
+      role: PREFILL
+      discovered: 2
+      alive: 2
+      present: false
+    remove_accounting_timeout_s: 105
+    remove_zero_errors:
+      min_success_rate: 1
+    cycle1_add:
+      role: prefill
+    cycle1_added_topology_timeout_s: 35
+    cycle1_added_topology:
+      role: PREFILL
+      discovered: 3
+      alive: 3
+      present: true
+    cycle1_traffic_timeout_s: 60
+    cycle1_traffic:
+      window_s: 15
+      method: FetchResponse
+    cycle1_ramp:
+      seconds: 0.5
+    cycle1_remove_timeout_s: 75
+    cycle1_remove:
+      drain_timeout_ms: 60000
+    cycle1_flow_stop_timeout_s: 45
+    cycle1_protocol:
+      method: FetchResponse
+    cycle1_removed_topology_timeout_s: 35
+    cycle1_removed_topology:
+      role: PREFILL
+      discovered: 2
+      alive: 2
+      present: false
+    cycle1_zero_errors:
+      min_success_rate: 1
+    cycle2_add:
+      role: prefill
+    cycle2_added_topology_timeout_s: 35
+    cycle2_added_topology:
+      role: PREFILL
+      discovered: 3
+      alive: 3
+      present: true
+    cycle2_traffic_timeout_s: 60
+    cycle2_traffic:
+      window_s: 15
+      method: FetchResponse
+    cycle2_ramp:
+      seconds: 0.5
+    cycle2_remove_timeout_s: 75
+    cycle2_remove:
+      drain_timeout_ms: 60000
+    cycle2_flow_stop_timeout_s: 45
+    cycle2_protocol:
+      method: FetchResponse
+    cycle2_removed_topology_timeout_s: 35
+    cycle2_removed_topology:
+      role: PREFILL
+      discovered: 2
+      alive: 2
+      present: false
+    cycle2_zero_errors:
+      min_success_rate: 1
+    cycle3_add:
+      role: prefill
+    cycle3_added_topology_timeout_s: 35
+    cycle3_added_topology:
+      role: PREFILL
+      discovered: 3
+      alive: 3
+      present: true
+    cycle3_traffic_timeout_s: 60
+    cycle3_traffic:
+      window_s: 15
+      method: FetchResponse
+    cycle3_ramp:
+      seconds: 0.5
+    cycle3_remove_timeout_s: 75
+    cycle3_remove:
+      drain_timeout_ms: 60000
+    cycle3_flow_stop_timeout_s: 45
+    cycle3_protocol:
+      method: FetchResponse
+    cycle3_removed_topology_timeout_s: 35
+    cycle3_removed_topology:
+      role: PREFILL
+      discovered: 2
+      alive: 2
+      present: false
+    cycle3_zero_errors:
+      min_success_rate: 1
+    recovery_timeout_s: 65
+    recovery:
+      method: FetchResponse
+    final_topology_timeout_s: 35
+    final_topology:
+      role: PREFILL
+      discovered: 2
+      alive: 2
+  strict:
+    setup_timeout_s: 180
+    initial_topology_timeout_s: 35
+    initial_topology:
+      role: PREFILL
+      discovered: 2
+      alive: 2
+    ramp:
+      seconds: 1
+    baseline_window_timeout_s: 25
+    baseline_window:
+      engines:
+      - prefill-0
+      - prefill-1
+      offsets_s:
+      - 0
+      - 15
+    add:
+      role: prefill
+    first_traffic_timeout_s: 15
+    first_traffic:
+      baseline: 0
+      window_s: 10
+    added_topology_timeout_s: 35
+    added_topology:
+      role: PREFILL
+      discovered: 3
+      alive: 3
+      present: true
+    post_window_timeout_s: 55
+    post_window:
+      engines:
+        item_0: prefill-0
+        item_1: prefill-1
+      offsets_s:
+      - 0
+      - 5
+      - 10
+      - 17
+      - 24
+      - 31
+      - 38
+      - 45
+    preference_flow_stop_timeout_s: 45
+    preference_protocol:
+      method: FetchResponse
+    preference_shares:
+      max_share: 0.5
+      old_floor: 0.1
+      exclusive: false
+      require_new: false
+    preference_availability:
+      min_success_rate: 0.9
+    remove_traffic_timeout_s: 60
+    remove_traffic:
+      window_s: 10
+      method: FetchResponse
+    remove_timeout_s: 75
+    remove:
+      drain_timeout_ms: 60000
+    remove_hold:
+      seconds: 3
+    remove_flow_stop_timeout_s: 45
+    remove_protocol:
+      method: FetchResponse
+    removed_topology_timeout_s: 35
+    removed_topology:
+      role: PREFILL
+      discovered: 2
+      alive: 2
+      present: false
+    remove_accounting_timeout_s: 105
+    remove_zero_errors:
+      min_success_rate: 1
+    cycle1_add:
+      role: prefill
+    cycle1_added_topology_timeout_s: 35
+    cycle1_added_topology:
+      role: PREFILL
+      discovered: 3
+      alive: 3
+      present: true
+    cycle1_traffic_timeout_s: 60
+    cycle1_traffic:
+      window_s: 15
+      method: FetchResponse
+    cycle1_ramp:
+      seconds: 0.5
+    cycle1_remove_timeout_s: 75
+    cycle1_remove:
+      drain_timeout_ms: 60000
+    cycle1_flow_stop_timeout_s: 45
+    cycle1_protocol:
+      method: FetchResponse
+    cycle1_removed_topology_timeout_s: 35
+    cycle1_removed_topology:
+      role: PREFILL
+      discovered: 2
+      alive: 2
+      present: false
+    cycle1_zero_errors:
+      min_success_rate: 1
+    cycle2_add:
+      role: prefill
+    cycle2_added_topology_timeout_s: 35
+    cycle2_added_topology:
+      role: PREFILL
+      discovered: 3
+      alive: 3
+      present: true
+    cycle2_traffic_timeout_s: 60
+    cycle2_traffic:
+      window_s: 15
+      method: FetchResponse
+    cycle2_ramp:
+      seconds: 0.5
+    cycle2_remove_timeout_s: 75
+    cycle2_remove:
+      drain_timeout_ms: 60000
+    cycle2_flow_stop_timeout_s: 45
+    cycle2_protocol:
+      method: FetchResponse
+    cycle2_removed_topology_timeout_s: 35
+    cycle2_removed_topology:
+      role: PREFILL
+      discovered: 2
+      alive: 2
+      present: false
+    cycle2_zero_errors:
+      min_success_rate: 1
+    cycle3_add:
+      role: prefill
+    cycle3_added_topology_timeout_s: 35
+    cycle3_added_topology:
+      role: PREFILL
+      discovered: 3
+      alive: 3
+      present: true
+    cycle3_traffic_timeout_s: 60
+    cycle3_traffic:
+      window_s: 15
+      method: FetchResponse
+    cycle3_ramp:
+      seconds: 0.5
+    cycle3_remove_timeout_s: 75
+    cycle3_remove:
+      drain_timeout_ms: 60000
+    cycle3_flow_stop_timeout_s: 45
+    cycle3_protocol:
+      method: FetchResponse
+    cycle3_removed_topology_timeout_s: 35
+    cycle3_removed_topology:
+      role: PREFILL
+      discovered: 2
+      alive: 2
+      present: false
+    cycle3_zero_errors:
+      min_success_rate: 1
+    recovery_timeout_s: 65
+    recovery:
+      method: FetchResponse
+    final_topology_timeout_s: 35
+    final_topology:
+      role: PREFILL
+      discovered: 2
+      alive: 2
+  rebalance:
+    setup_timeout_s: 180
+    initial_topology_timeout_s: 35
+    initial_topology:
+      role: PREFILL
+      discovered: 2
+      alive: 2
+    rebalance_baseline_timeout_s: 240
+    rebalance_baseline:
+      method: FetchResponse
+    baseline_after:
+      engines:
+      - prefill-0
+      - prefill-1
+      offsets_s:
+      - 0
+    add:
+      role: prefill
+    added_topology_timeout_s: 35
+    added_topology:
+      role: PREFILL
+      discovered: 3
+      alive: 3
+      present: true
+    rebalance_before:
+      engines:
+        item_0: prefill-0
+        item_1: prefill-1
+      offsets_s:
+      - 0
+    rebalance_after_add_timeout_s: 240
+    rebalance_after_add:
+      method: FetchResponse
+    rebalance_after:
+      engines:
+        item_0: prefill-0
+        item_1: prefill-1
+      offsets_s:
+      - 0
+    rebalance_share:
+      max_share: 0.6
+      old_floor: 0
+      exclusive: true
+      require_new: true
+  kv_skew_hot:
+    setup_timeout_s: 180
+    seed_timeout_s: 120
+    baseline_timeout_s: 30
+    baseline:
+      phase: baseline
+    scale_timeout_s: 75
+    scale:
+      victim: hot
+      drain_timeout_ms: 60000
+    transient_timeout_s: 30
+    transient:
+      victim: hot
+      phase: transient
+    steady_timeout_s: 95
+    steady:
+      victim: hot
+      phase: steady
+    flow_stop_timeout_s: 65
+    recovery_timeout_s: 240
+    verdict:
+      victim: hot
+  kv_skew_cold:
+    setup_timeout_s: 180
+    seed_timeout_s: 120
+    baseline_timeout_s: 30
+    baseline:
+      phase: baseline
+    scale_timeout_s: 75
+    scale:
+      victim: cold
+      drain_timeout_ms: 60000
+    transient_timeout_s: 30
+    transient:
+      victim: cold
+      phase: transient
+    steady_timeout_s: 95
+    steady:
+      victim: cold
+      phase: steady
+    flow_stop_timeout_s: 65
+    recovery_timeout_s: 240
+    verdict:
+      victim: cold
+  steady_recovery:
+    setup_timeout_s: 180
+    initial_topology_timeout_s: 35
+    initial_topology:
+      role: DECODE
+      discovered: 4
+      alive: 4
+    flow:
+      interval_s: 0.2
+    baseline_timeout_s: 25
+    baseline:
+      duration_s: 20
+    remove_timeout_s: 110
+    remove:
+      engine: decode-0
+      drain_timeout_ms: 60000
+    transient_timeout_s: 25
+    transient:
+      duration_s: 20
+    settled_topology_timeout_s: 35
+    settled_topology:
+      role: DECODE
+      discovered: 3
+      alive: 3
+      present: false
+    steady_timeout_s: 65
+    steady:
+      duration_s: 60
+    recovery_timeout_s: 100
+    flow_stop_timeout_s: 65
+  kv_full_shrink:
+    setup_timeout_s: 180
+    initial_topology_timeout_s: 35
+    initial_topology:
+      role: DECODE
+      discovered: 2
+      alive: 2
+    baseline_flow:
+      interval_s: 0.5
+      stream_timeout_s: 10
+    baseline_ramp:
+      seconds: 1
+    baseline_timeout_s: 25
+    baseline:
+      duration_s: 20
+    baseline_stop_timeout_s: 65
+    slow_both:
+      operation: set_perf
+      targets:
+      - decode-0
+      - decode-1
+      perf:
+        decode_scale: 60
+    slow_sync:
+      seconds: 1
+    fill_ok_timeout_s: 70
+    fill_ok:
+      victim: decode-0
+      survivor: decode-1
+    remove_ok_timeout_s: 110
+    remove_ok:
+      engine: decode-0
+      drain_timeout_ms: 60000
+    collect_ok_timeout_s: 100
+    accounting_ok_timeout_s: 60
+    add_decode:
+      role: decode
+    restored_topology_timeout_s: 35
+    restored_topology:
+      role: DECODE
+      discovered: 2
+      alive: 2
+      present: true
+    steady_flow:
+      interval_s: 0.5
+      stream_timeout_s: 10
+    steady_ramp:
+      seconds: 1
+    steady_timeout_s: 65
+    steady:
+      duration_s: 60
+    steady_stop_timeout_s: 65
+    terminal_ok:
+      branch: drain_ok
+    slow_victim:
+      operation: set_perf
+      targets:
+      - decode-1
+      perf:
+        decode_scale: 1000
+    slow_survivor:
+      operation: set_perf
+      perf:
+        decode_scale: 60
+    timeout_sync:
+      seconds: 1
+    fill_timeout_timeout_s: 70
+    fill_timeout:
+      victim: decode-1
+    remove_timeout_timeout_s: 110
+    remove_timeout:
+      engine: decode-1
+      drain_timeout_ms: 5000
+    collect_timeout_timeout_s: 100
+    observe_full_transient_timeout_s: 25
+    observe_full_transient:
+      duration_s: 20
+    terminal_timeout:
+      branch: drain_timeout
+    restore_survivor:
+      operation: set_perf
+      perf:
+        decode_scale: 1
+    recovery_timeout_s: 100
+  transient_imbalance:
+    setup_timeout_s: 180
+    initial_topology_timeout_s: 35
+    initial_topology:
+      role: PREFILL
+      discovered: 3
+      alive: 3
+    flow:
+      interval_s: 0.1
+    baseline_timeout_s: 30
+    baseline:
+      duration_s: 20
+    burst_timeout_s: 10
+    remove_timeout_s: 15
+    burst_settled_timeout_s: 160
+    transient_timeout_s: 30
+    transient:
+      duration_s: 20
+    survivor_topology_timeout_s: 35
+    survivor_topology:
+      role: PREFILL
+      discovered: 2
+      alive: 2
+    steady_timeout_s: 70
+    steady:
+      duration_s: 60
+    recovery_timeout_s: 60
+    flow_stop_timeout_s: 65
+  rebalance_single_batch:
+    setup_timeout_s: 180
+    initial_topology_timeout_s: 35
+    initial_topology:
+      role: PREFILL
+      discovered: 2
+      alive: 2
+    rebalance_baseline_timeout_s: 240
+    rebalance_baseline:
+      method: FetchResponse
+    baseline_after:
+      engines:
+      - prefill-0
+      - prefill-1
+      offsets_s:
+      - 0
+    add:
+      role: prefill
+    added_topology_timeout_s: 35
+    added_topology:
+      role: PREFILL
+      discovered: 3
+      alive: 3
+      present: true
+    rebalance_before:
+      engines:
+        item_0: prefill-0
+        item_1: prefill-1
+      offsets_s:
+      - 0
+    rebalance_after_add_timeout_s: 240
+    rebalance_after_add:
+      method: FetchResponse
+    rebalance_after:
+      engines:
+        item_0: prefill-0
+        item_1: prefill-1
+      offsets_s:
+      - 0
+    rebalance_share:
+      max_share: 0.6
+      old_floor: 0
+      exclusive: true
+      require_new: true
+  rebalance_single_nonbatch:
+    setup_timeout_s: 180
+    initial_topology_timeout_s: 35
+    initial_topology:
+      role: PREFILL
+      discovered: 2
+      alive: 2
+    rebalance_baseline_timeout_s: 240
+    rebalance_baseline:
+      method: GenerateStreamCall
+    baseline_after:
+      engines:
+      - prefill-0
+      - prefill-1
+      offsets_s:
+      - 0
+    add:
+      role: prefill
+    added_topology_timeout_s: 35
+    added_topology:
+      role: PREFILL
+      discovered: 3
+      alive: 3
+      present: true
+    rebalance_before:
+      engines:
+        item_0: prefill-0
+        item_1: prefill-1
+      offsets_s:
+      - 0
+    rebalance_after_add_timeout_s: 240
+    rebalance_after_add:
+      method: GenerateStreamCall
+    rebalance_after:
+      engines:
+        item_0: prefill-0
+        item_1: prefill-1
+      offsets_s:
+      - 0
+    rebalance_share:
+      max_share: 0.6
+      old_floor: 0
+      exclusive: true
+      require_new: true
+  rebalance_window_nonbatch:
+    setup_timeout_s: 180
+    initial_topology_timeout_s: 35
+    initial_topology:
+      role: PREFILL
+      discovered: 2
+      alive: 2
+    rebalance_baseline_timeout_s: 240
+    rebalance_baseline:
+      method: GenerateStreamCall
+    baseline_after:
+      engines:
+      - prefill-0
+      - prefill-1
+      offsets_s:
+      - 0
+    add:
+      role: prefill
+    added_topology_timeout_s: 35
+    added_topology:
+      role: PREFILL
+      discovered: 3
+      alive: 3
+      present: true
+    rebalance_before:
+      engines:
+        item_0: prefill-0
+        item_1: prefill-1
+      offsets_s:
+      - 0
+    rebalance_after_add_timeout_s: 240
+    rebalance_after_add:
+      method: GenerateStreamCall
+    rebalance_after:
+      engines:
+        item_0: prefill-0
+        item_1: prefill-1
+      offsets_s:
+      - 0
+    rebalance_share:
+      max_share: 0.6
+      old_floor: 0
+      exclusive: true
+      require_new: true
+  normal_single_batch:
+    setup_timeout_s: 180
+    initial_topology_timeout_s: 35
+    initial_topology:
+      role: PREFILL
+      discovered: 2
+      alive: 2
+    ramp:
+      seconds: 1
+    baseline_window_timeout_s: 25
+    baseline_window:
+      engines:
+      - prefill-0
+      - prefill-1
+      offsets_s:
+      - 0
+      - 15
+    add:
+      role: prefill
+    first_traffic_timeout_s: 15
+    first_traffic:
+      baseline: 0
+      window_s: 10
+    added_topology_timeout_s: 35
+    added_topology:
+      role: PREFILL
+      discovered: 3
+      alive: 3
+      present: true
+    post_window_timeout_s: 55
+    post_window:
+      engines:
+        item_0: prefill-0
+        item_1: prefill-1
+      offsets_s:
+      - 0
+      - 5
+      - 10
+      - 17
+      - 24
+      - 31
+      - 38
+      - 45
+    preference_flow_stop_timeout_s: 45
+    preference_protocol:
+      method: FetchResponse
+    preference_shares:
+      max_share: 0.6
+      old_floor: 0.1
+      exclusive: false
+      require_new: false
+    preference_availability:
+      min_success_rate: 0.9
+    remove_traffic_timeout_s: 60
+    remove_traffic:
+      window_s: 10
+      method: FetchResponse
+    remove_timeout_s: 75
+    remove:
+      drain_timeout_ms: 60000
+    remove_hold:
+      seconds: 3
+    remove_flow_stop_timeout_s: 45
+    remove_protocol:
+      method: FetchResponse
+    removed_topology_timeout_s: 35
+    removed_topology:
+      role: PREFILL
+      discovered: 2
+      alive: 2
+      present: false
+    remove_accounting_timeout_s: 105
+    remove_zero_errors:
+      min_success_rate: 1
+    cycle1_add:
+      role: prefill
+    cycle1_added_topology_timeout_s: 35
+    cycle1_added_topology:
+      role: PREFILL
+      discovered: 3
+      alive: 3
+      present: true
+    cycle1_traffic_timeout_s: 60
+    cycle1_traffic:
+      window_s: 15
+      method: FetchResponse
+    cycle1_ramp:
+      seconds: 0.5
+    cycle1_remove_timeout_s: 75
+    cycle1_remove:
+      drain_timeout_ms: 60000
+    cycle1_flow_stop_timeout_s: 45
+    cycle1_protocol:
+      method: FetchResponse
+    cycle1_removed_topology_timeout_s: 35
+    cycle1_removed_topology:
+      role: PREFILL
+      discovered: 2
+      alive: 2
+      present: false
+    cycle1_zero_errors:
+      min_success_rate: 1
+    cycle2_add:
+      role: prefill
+    cycle2_added_topology_timeout_s: 35
+    cycle2_added_topology:
+      role: PREFILL
+      discovered: 3
+      alive: 3
+      present: true
+    cycle2_traffic_timeout_s: 60
+    cycle2_traffic:
+      window_s: 15
+      method: FetchResponse
+    cycle2_ramp:
+      seconds: 0.5
+    cycle2_remove_timeout_s: 75
+    cycle2_remove:
+      drain_timeout_ms: 60000
+    cycle2_flow_stop_timeout_s: 45
+    cycle2_protocol:
+      method: FetchResponse
+    cycle2_removed_topology_timeout_s: 35
+    cycle2_removed_topology:
+      role: PREFILL
+      discovered: 2
+      alive: 2
+      present: false
+    cycle2_zero_errors:
+      min_success_rate: 1
+    cycle3_add:
+      role: prefill
+    cycle3_added_topology_timeout_s: 35
+    cycle3_added_topology:
+      role: PREFILL
+      discovered: 3
+      alive: 3
+      present: true
+    cycle3_traffic_timeout_s: 60
+    cycle3_traffic:
+      window_s: 15
+      method: FetchResponse
+    cycle3_ramp:
+      seconds: 0.5
+    cycle3_remove_timeout_s: 75
+    cycle3_remove:
+      drain_timeout_ms: 60000
+    cycle3_flow_stop_timeout_s: 45
+    cycle3_protocol:
+      method: FetchResponse
+    cycle3_removed_topology_timeout_s: 35
+    cycle3_removed_topology:
+      role: PREFILL
+      discovered: 2
+      alive: 2
+      present: false
+    cycle3_zero_errors:
+      min_success_rate: 1
+    recovery_timeout_s: 65
+    recovery:
+      method: FetchResponse
+    final_topology_timeout_s: 35
+    final_topology:
+      role: PREFILL
+      discovered: 2
+      alive: 2
+  strict_single_batch:
+    setup_timeout_s: 180
+    initial_topology_timeout_s: 35
+    initial_topology:
+      role: PREFILL
+      discovered: 2
+      alive: 2
+    ramp:
+      seconds: 1
+    baseline_window_timeout_s: 25
+    baseline_window:
+      engines:
+      - prefill-0
+      - prefill-1
+      offsets_s:
+      - 0
+      - 15
+    add:
+      role: prefill
+    first_traffic_timeout_s: 15
+    first_traffic:
+      baseline: 0
+      window_s: 10
+    added_topology_timeout_s: 35
+    added_topology:
+      role: PREFILL
+      discovered: 3
+      alive: 3
+      present: true
+    post_window_timeout_s: 55
+    post_window:
+      engines:
+        item_0: prefill-0
+        item_1: prefill-1
+      offsets_s:
+      - 0
+      - 5
+      - 10
+      - 17
+      - 24
+      - 31
+      - 38
+      - 45
+    preference_flow_stop_timeout_s: 45
+    preference_protocol:
+      method: FetchResponse
+    preference_shares:
+      max_share: 0.5
+      old_floor: 0.1
+      exclusive: false
+      require_new: false
+    preference_availability:
+      min_success_rate: 0.9
+    remove_traffic_timeout_s: 60
+    remove_traffic:
+      window_s: 10
+      method: FetchResponse
+    remove_timeout_s: 75
+    remove:
+      drain_timeout_ms: 60000
+    remove_hold:
+      seconds: 3
+    remove_flow_stop_timeout_s: 45
+    remove_protocol:
+      method: FetchResponse
+    removed_topology_timeout_s: 35
+    removed_topology:
+      role: PREFILL
+      discovered: 2
+      alive: 2
+      present: false
+    remove_accounting_timeout_s: 105
+    remove_zero_errors:
+      min_success_rate: 1
+    cycle1_add:
+      role: prefill
+    cycle1_added_topology_timeout_s: 35
+    cycle1_added_topology:
+      role: PREFILL
+      discovered: 3
+      alive: 3
+      present: true
+    cycle1_traffic_timeout_s: 60
+    cycle1_traffic:
+      window_s: 15
+      method: FetchResponse
+    cycle1_ramp:
+      seconds: 0.5
+    cycle1_remove_timeout_s: 75
+    cycle1_remove:
+      drain_timeout_ms: 60000
+    cycle1_flow_stop_timeout_s: 45
+    cycle1_protocol:
+      method: FetchResponse
+    cycle1_removed_topology_timeout_s: 35
+    cycle1_removed_topology:
+      role: PREFILL
+      discovered: 2
+      alive: 2
+      present: false
+    cycle1_zero_errors:
+      min_success_rate: 1
+    cycle2_add:
+      role: prefill
+    cycle2_added_topology_timeout_s: 35
+    cycle2_added_topology:
+      role: PREFILL
+      discovered: 3
+      alive: 3
+      present: true
+    cycle2_traffic_timeout_s: 60
+    cycle2_traffic:
+      window_s: 15
+      method: FetchResponse
+    cycle2_ramp:
+      seconds: 0.5
+    cycle2_remove_timeout_s: 75
+    cycle2_remove:
+      drain_timeout_ms: 60000
+    cycle2_flow_stop_timeout_s: 45
+    cycle2_protocol:
+      method: FetchResponse
+    cycle2_removed_topology_timeout_s: 35
+    cycle2_removed_topology:
+      role: PREFILL
+      discovered: 2
+      alive: 2
+      present: false
+    cycle2_zero_errors:
+      min_success_rate: 1
+    cycle3_add:
+      role: prefill
+    cycle3_added_topology_timeout_s: 35
+    cycle3_added_topology:
+      role: PREFILL
+      discovered: 3
+      alive: 3
+      present: true
+    cycle3_traffic_timeout_s: 60
+    cycle3_traffic:
+      window_s: 15
+      method: FetchResponse
+    cycle3_ramp:
+      seconds: 0.5
+    cycle3_remove_timeout_s: 75
+    cycle3_remove:
+      drain_timeout_ms: 60000
+    cycle3_flow_stop_timeout_s: 45
+    cycle3_protocol:
+      method: FetchResponse
+    cycle3_removed_topology_timeout_s: 35
+    cycle3_removed_topology:
+      role: PREFILL
+      discovered: 2
+      alive: 2
+      present: false
+    cycle3_zero_errors:
+      min_success_rate: 1
+    recovery_timeout_s: 65
+    recovery:
+      method: FetchResponse
+    final_topology_timeout_s: 35
+    final_topology:
+      role: PREFILL
+      discovered: 2
+      alive: 2
+  normal_single_nonbatch:
+    setup_timeout_s: 180
+    initial_topology_timeout_s: 35
+    initial_topology:
+      role: PREFILL
+      discovered: 2
+      alive: 2
+    ramp:
+      seconds: 1
+    baseline_window_timeout_s: 25
+    baseline_window:
+      engines:
+      - prefill-0
+      - prefill-1
+      offsets_s:
+      - 0
+      - 15
+    add:
+      role: prefill
+    first_traffic_timeout_s: 15
+    first_traffic:
+      baseline: 0
+      window_s: 10
+    added_topology_timeout_s: 35
+    added_topology:
+      role: PREFILL
+      discovered: 3
+      alive: 3
+      present: true
+    post_window_timeout_s: 55
+    post_window:
+      engines:
+        item_0: prefill-0
+        item_1: prefill-1
+      offsets_s:
+      - 0
+      - 5
+      - 10
+      - 17
+      - 24
+      - 31
+      - 38
+      - 45
+    preference_flow_stop_timeout_s: 45
+    preference_protocol:
+      method: GenerateStreamCall
+    preference_shares:
+      max_share: 0.6
+      old_floor: 0.1
+      exclusive: false
+      require_new: false
+    preference_availability:
+      min_success_rate: 0.9
+    remove_traffic_timeout_s: 60
+    remove_traffic:
+      window_s: 10
+      method: GenerateStreamCall
+    remove_timeout_s: 75
+    remove:
+      drain_timeout_ms: 60000
+    remove_hold:
+      seconds: 3
+    remove_flow_stop_timeout_s: 45
+    remove_protocol:
+      method: GenerateStreamCall
+    removed_topology_timeout_s: 35
+    removed_topology:
+      role: PREFILL
+      discovered: 2
+      alive: 2
+      present: false
+    remove_accounting_timeout_s: 105
+    remove_zero_errors:
+      min_success_rate: 1
+    cycle1_add:
+      role: prefill
+    cycle1_added_topology_timeout_s: 35
+    cycle1_added_topology:
+      role: PREFILL
+      discovered: 3
+      alive: 3
+      present: true
+    cycle1_traffic_timeout_s: 60
+    cycle1_traffic:
+      window_s: 15
+      method: GenerateStreamCall
+    cycle1_ramp:
+      seconds: 0.5
+    cycle1_remove_timeout_s: 75
+    cycle1_remove:
+      drain_timeout_ms: 60000
+    cycle1_flow_stop_timeout_s: 45
+    cycle1_protocol:
+      method: GenerateStreamCall
+    cycle1_removed_topology_timeout_s: 35
+    cycle1_removed_topology:
+      role: PREFILL
+      discovered: 2
+      alive: 2
+      present: false
+    cycle1_zero_errors:
+      min_success_rate: 1
+    cycle2_add:
+      role: prefill
+    cycle2_added_topology_timeout_s: 35
+    cycle2_added_topology:
+      role: PREFILL
+      discovered: 3
+      alive: 3
+      present: true
+    cycle2_traffic_timeout_s: 60
+    cycle2_traffic:
+      window_s: 15
+      method: GenerateStreamCall
+    cycle2_ramp:
+      seconds: 0.5
+    cycle2_remove_timeout_s: 75
+    cycle2_remove:
+      drain_timeout_ms: 60000
+    cycle2_flow_stop_timeout_s: 45
+    cycle2_protocol:
+      method: GenerateStreamCall
+    cycle2_removed_topology_timeout_s: 35
+    cycle2_removed_topology:
+      role: PREFILL
+      discovered: 2
+      alive: 2
+      present: false
+    cycle2_zero_errors:
+      min_success_rate: 1
+    cycle3_add:
+      role: prefill
+    cycle3_added_topology_timeout_s: 35
+    cycle3_added_topology:
+      role: PREFILL
+      discovered: 3
+      alive: 3
+      present: true
+    cycle3_traffic_timeout_s: 60
+    cycle3_traffic:
+      window_s: 15
+      method: GenerateStreamCall
+    cycle3_ramp:
+      seconds: 0.5
+    cycle3_remove_timeout_s: 75
+    cycle3_remove:
+      drain_timeout_ms: 60000
+    cycle3_flow_stop_timeout_s: 45
+    cycle3_protocol:
+      method: GenerateStreamCall
+    cycle3_removed_topology_timeout_s: 35
+    cycle3_removed_topology:
+      role: PREFILL
+      discovered: 2
+      alive: 2
+      present: false
+    cycle3_zero_errors:
+      min_success_rate: 1
+    recovery_timeout_s: 65
+    recovery:
+      method: GenerateStreamCall
+    final_topology_timeout_s: 35
+    final_topology:
+      role: PREFILL
+      discovered: 2
+      alive: 2
+  strict_single_nonbatch:
+    setup_timeout_s: 180
+    initial_topology_timeout_s: 35
+    initial_topology:
+      role: PREFILL
+      discovered: 2
+      alive: 2
+    ramp:
+      seconds: 1
+    baseline_window_timeout_s: 25
+    baseline_window:
+      engines:
+      - prefill-0
+      - prefill-1
+      offsets_s:
+      - 0
+      - 15
+    add:
+      role: prefill
+    first_traffic_timeout_s: 15
+    first_traffic:
+      baseline: 0
+      window_s: 10
+    added_topology_timeout_s: 35
+    added_topology:
+      role: PREFILL
+      discovered: 3
+      alive: 3
+      present: true
+    post_window_timeout_s: 55
+    post_window:
+      engines:
+        item_0: prefill-0
+        item_1: prefill-1
+      offsets_s:
+      - 0
+      - 5
+      - 10
+      - 17
+      - 24
+      - 31
+      - 38
+      - 45
+    preference_flow_stop_timeout_s: 45
+    preference_protocol:
+      method: GenerateStreamCall
+    preference_shares:
+      max_share: 0.5
+      old_floor: 0.1
+      exclusive: false
+      require_new: false
+    preference_availability:
+      min_success_rate: 0.9
+    remove_traffic_timeout_s: 60
+    remove_traffic:
+      window_s: 10
+      method: GenerateStreamCall
+    remove_timeout_s: 75
+    remove:
+      drain_timeout_ms: 60000
+    remove_hold:
+      seconds: 3
+    remove_flow_stop_timeout_s: 45
+    remove_protocol:
+      method: GenerateStreamCall
+    removed_topology_timeout_s: 35
+    removed_topology:
+      role: PREFILL
+      discovered: 2
+      alive: 2
+      present: false
+    remove_accounting_timeout_s: 105
+    remove_zero_errors:
+      min_success_rate: 1
+    cycle1_add:
+      role: prefill
+    cycle1_added_topology_timeout_s: 35
+    cycle1_added_topology:
+      role: PREFILL
+      discovered: 3
+      alive: 3
+      present: true
+    cycle1_traffic_timeout_s: 60
+    cycle1_traffic:
+      window_s: 15
+      method: GenerateStreamCall
+    cycle1_ramp:
+      seconds: 0.5
+    cycle1_remove_timeout_s: 75
+    cycle1_remove:
+      drain_timeout_ms: 60000
+    cycle1_flow_stop_timeout_s: 45
+    cycle1_protocol:
+      method: GenerateStreamCall
+    cycle1_removed_topology_timeout_s: 35
+    cycle1_removed_topology:
+      role: PREFILL
+      discovered: 2
+      alive: 2
+      present: false
+    cycle1_zero_errors:
+      min_success_rate: 1
+    cycle2_add:
+      role: prefill
+    cycle2_added_topology_timeout_s: 35
+    cycle2_added_topology:
+      role: PREFILL
+      discovered: 3
+      alive: 3
+      present: true
+    cycle2_traffic_timeout_s: 60
+    cycle2_traffic:
+      window_s: 15
+      method: GenerateStreamCall
+    cycle2_ramp:
+      seconds: 0.5
+    cycle2_remove_timeout_s: 75
+    cycle2_remove:
+      drain_timeout_ms: 60000
+    cycle2_flow_stop_timeout_s: 45
+    cycle2_protocol:
+      method: GenerateStreamCall
+    cycle2_removed_topology_timeout_s: 35
+    cycle2_removed_topology:
+      role: PREFILL
+      discovered: 2
+      alive: 2
+      present: false
+    cycle2_zero_errors:
+      min_success_rate: 1
+    cycle3_add:
+      role: prefill
+    cycle3_added_topology_timeout_s: 35
+    cycle3_added_topology:
+      role: PREFILL
+      discovered: 3
+      alive: 3
+      present: true
+    cycle3_traffic_timeout_s: 60
+    cycle3_traffic:
+      window_s: 15
+      method: GenerateStreamCall
+    cycle3_ramp:
+      seconds: 0.5
+    cycle3_remove_timeout_s: 75
+    cycle3_remove:
+      drain_timeout_ms: 60000
+    cycle3_flow_stop_timeout_s: 45
+    cycle3_protocol:
+      method: GenerateStreamCall
+    cycle3_removed_topology_timeout_s: 35
+    cycle3_removed_topology:
+      role: PREFILL
+      discovered: 2
+      alive: 2
+      present: false
+    cycle3_zero_errors:
+      min_success_rate: 1
+    recovery_timeout_s: 65
+    recovery:
+      method: GenerateStreamCall
+    final_topology_timeout_s: 35
+    final_topology:
+      role: PREFILL
+      discovered: 2
+      alive: 2
+  normal_window_nonbatch:
+    setup_timeout_s: 180
+    initial_topology_timeout_s: 35
+    initial_topology:
+      role: PREFILL
+      discovered: 2
+      alive: 2
+    ramp:
+      seconds: 1
+    baseline_window_timeout_s: 25
+    baseline_window:
+      engines:
+      - prefill-0
+      - prefill-1
+      offsets_s:
+      - 0
+      - 15
+    add:
+      role: prefill
+    first_traffic_timeout_s: 15
+    first_traffic:
+      baseline: 0
+      window_s: 10
+    added_topology_timeout_s: 35
+    added_topology:
+      role: PREFILL
+      discovered: 3
+      alive: 3
+      present: true
+    post_window_timeout_s: 55
+    post_window:
+      engines:
+        item_0: prefill-0
+        item_1: prefill-1
+      offsets_s:
+      - 0
+      - 5
+      - 10
+      - 17
+      - 24
+      - 31
+      - 38
+      - 45
+    preference_flow_stop_timeout_s: 45
+    preference_protocol:
+      method: GenerateStreamCall
+    preference_shares:
+      max_share: 0.6
+      old_floor: 0.1
+      exclusive: false
+      require_new: false
+    preference_availability:
+      min_success_rate: 0.9
+    remove_traffic_timeout_s: 60
+    remove_traffic:
+      window_s: 10
+      method: GenerateStreamCall
+    remove_timeout_s: 75
+    remove:
+      drain_timeout_ms: 60000
+    remove_hold:
+      seconds: 3
+    remove_flow_stop_timeout_s: 45
+    remove_protocol:
+      method: GenerateStreamCall
+    removed_topology_timeout_s: 35
+    removed_topology:
+      role: PREFILL
+      discovered: 2
+      alive: 2
+      present: false
+    remove_accounting_timeout_s: 105
+    remove_zero_errors:
+      min_success_rate: 1
+    cycle1_add:
+      role: prefill
+    cycle1_added_topology_timeout_s: 35
+    cycle1_added_topology:
+      role: PREFILL
+      discovered: 3
+      alive: 3
+      present: true
+    cycle1_traffic_timeout_s: 60
+    cycle1_traffic:
+      window_s: 15
+      method: GenerateStreamCall
+    cycle1_ramp:
+      seconds: 0.5
+    cycle1_remove_timeout_s: 75
+    cycle1_remove:
+      drain_timeout_ms: 60000
+    cycle1_flow_stop_timeout_s: 45
+    cycle1_protocol:
+      method: GenerateStreamCall
+    cycle1_removed_topology_timeout_s: 35
+    cycle1_removed_topology:
+      role: PREFILL
+      discovered: 2
+      alive: 2
+      present: false
+    cycle1_zero_errors:
+      min_success_rate: 1
+    cycle2_add:
+      role: prefill
+    cycle2_added_topology_timeout_s: 35
+    cycle2_added_topology:
+      role: PREFILL
+      discovered: 3
+      alive: 3
+      present: true
+    cycle2_traffic_timeout_s: 60
+    cycle2_traffic:
+      window_s: 15
+      method: GenerateStreamCall
+    cycle2_ramp:
+      seconds: 0.5
+    cycle2_remove_timeout_s: 75
+    cycle2_remove:
+      drain_timeout_ms: 60000
+    cycle2_flow_stop_timeout_s: 45
+    cycle2_protocol:
+      method: GenerateStreamCall
+    cycle2_removed_topology_timeout_s: 35
+    cycle2_removed_topology:
+      role: PREFILL
+      discovered: 2
+      alive: 2
+      present: false
+    cycle2_zero_errors:
+      min_success_rate: 1
+    cycle3_add:
+      role: prefill
+    cycle3_added_topology_timeout_s: 35
+    cycle3_added_topology:
+      role: PREFILL
+      discovered: 3
+      alive: 3
+      present: true
+    cycle3_traffic_timeout_s: 60
+    cycle3_traffic:
+      window_s: 15
+      method: GenerateStreamCall
+    cycle3_ramp:
+      seconds: 0.5
+    cycle3_remove_timeout_s: 75
+    cycle3_remove:
+      drain_timeout_ms: 60000
+    cycle3_flow_stop_timeout_s: 45
+    cycle3_protocol:
+      method: GenerateStreamCall
+    cycle3_removed_topology_timeout_s: 35
+    cycle3_removed_topology:
+      role: PREFILL
+      discovered: 2
+      alive: 2
+      present: false
+    cycle3_zero_errors:
+      min_success_rate: 1
+    recovery_timeout_s: 65
+    recovery:
+      method: GenerateStreamCall
+    final_topology_timeout_s: 35
+    final_topology:
+      role: PREFILL
+      discovered: 2
+      alive: 2
+  strict_window_nonbatch:
+    setup_timeout_s: 180
+    initial_topology_timeout_s: 35
+    initial_topology:
+      role: PREFILL
+      discovered: 2
+      alive: 2
+    ramp:
+      seconds: 1
+    baseline_window_timeout_s: 25
+    baseline_window:
+      engines:
+      - prefill-0
+      - prefill-1
+      offsets_s:
+      - 0
+      - 15
+    add:
+      role: prefill
+    first_traffic_timeout_s: 15
+    first_traffic:
+      baseline: 0
+      window_s: 10
+    added_topology_timeout_s: 35
+    added_topology:
+      role: PREFILL
+      discovered: 3
+      alive: 3
+      present: true
+    post_window_timeout_s: 55
+    post_window:
+      engines:
+        item_0: prefill-0
+        item_1: prefill-1
+      offsets_s:
+      - 0
+      - 5
+      - 10
+      - 17
+      - 24
+      - 31
+      - 38
+      - 45
+    preference_flow_stop_timeout_s: 45
+    preference_protocol:
+      method: GenerateStreamCall
+    preference_shares:
+      max_share: 0.5
+      old_floor: 0.1
+      exclusive: false
+      require_new: false
+    preference_availability:
+      min_success_rate: 0.9
+    remove_traffic_timeout_s: 60
+    remove_traffic:
+      window_s: 10
+      method: GenerateStreamCall
+    remove_timeout_s: 75
+    remove:
+      drain_timeout_ms: 60000
+    remove_hold:
+      seconds: 3
+    remove_flow_stop_timeout_s: 45
+    remove_protocol:
+      method: GenerateStreamCall
+    removed_topology_timeout_s: 35
+    removed_topology:
+      role: PREFILL
+      discovered: 2
+      alive: 2
+      present: false
+    remove_accounting_timeout_s: 105
+    remove_zero_errors:
+      min_success_rate: 1
+    cycle1_add:
+      role: prefill
+    cycle1_added_topology_timeout_s: 35
+    cycle1_added_topology:
+      role: PREFILL
+      discovered: 3
+      alive: 3
+      present: true
+    cycle1_traffic_timeout_s: 60
+    cycle1_traffic:
+      window_s: 15
+      method: GenerateStreamCall
+    cycle1_ramp:
+      seconds: 0.5
+    cycle1_remove_timeout_s: 75
+    cycle1_remove:
+      drain_timeout_ms: 60000
+    cycle1_flow_stop_timeout_s: 45
+    cycle1_protocol:
+      method: GenerateStreamCall
+    cycle1_removed_topology_timeout_s: 35
+    cycle1_removed_topology:
+      role: PREFILL
+      discovered: 2
+      alive: 2
+      present: false
+    cycle1_zero_errors:
+      min_success_rate: 1
+    cycle2_add:
+      role: prefill
+    cycle2_added_topology_timeout_s: 35
+    cycle2_added_topology:
+      role: PREFILL
+      discovered: 3
+      alive: 3
+      present: true
+    cycle2_traffic_timeout_s: 60
+    cycle2_traffic:
+      window_s: 15
+      method: GenerateStreamCall
+    cycle2_ramp:
+      seconds: 0.5
+    cycle2_remove_timeout_s: 75
+    cycle2_remove:
+      drain_timeout_ms: 60000
+    cycle2_flow_stop_timeout_s: 45
+    cycle2_protocol:
+      method: GenerateStreamCall
+    cycle2_removed_topology_timeout_s: 35
+    cycle2_removed_topology:
+      role: PREFILL
+      discovered: 2
+      alive: 2
+      present: false
+    cycle2_zero_errors:
+      min_success_rate: 1
+    cycle3_add:
+      role: prefill
+    cycle3_added_topology_timeout_s: 35
+    cycle3_added_topology:
+      role: PREFILL
+      discovered: 3
+      alive: 3
+      present: true
+    cycle3_traffic_timeout_s: 60
+    cycle3_traffic:
+      window_s: 15
+      method: GenerateStreamCall
+    cycle3_ramp:
+      seconds: 0.5
+    cycle3_remove_timeout_s: 75
+    cycle3_remove:
+      drain_timeout_ms: 60000
+    cycle3_flow_stop_timeout_s: 45
+    cycle3_protocol:
+      method: GenerateStreamCall
+    cycle3_removed_topology_timeout_s: 35
+    cycle3_removed_topology:
+      role: PREFILL
+      discovered: 2
+      alive: 2
+      present: false
+    cycle3_zero_errors:
+      min_success_rate: 1
+    recovery_timeout_s: 65
+    recovery:
+      method: GenerateStreamCall
+    final_topology_timeout_s: 35
+    final_topology:
+      role: PREFILL
+      discovered: 2
+      alive: 2
+  decode_scale_out_protection:
+    setup_timeout_s: 180
+    initial_topology_timeout_s: 35
+    initial_topology:
+      role: DECODE
+    old_decodes_loaded_timeout_s: 20
+    add_decode:
+      role: decode
+    added_topology_timeout_s: 35
+    added_topology:
+      role: DECODE
+      present: true
+    stop_traffic_timeout_s: 50
+    all_requests_complete:
+      min_success_rate: 1
+    master_drained_timeout_s: 40
+    master_drained:
+      target: single
+    capacity:
+      minimum: 2
+      maximum: 64
+    window_timeout_margin_s: 5
+  concurrency: 24
+  output_len: 128
+  window_s: 20
+parameter_schema:
+  concurrency:
+    minimum: 2
+    maximum: 128
+    integer: true
+  output_len:
+    minimum: 64
+    maximum: 512
+    integer: true
+  window_s:
+    minimum: 20
+    maximum: 60
+    integer: true

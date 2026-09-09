@@ -2,30 +2,29 @@
 
 from ..case_config import output
 
-METADATA = {
-    "id": "master_ha_failover",
-    "description": "Actual dual standalone masters: sticky A to B through same-request failover, with "
-    "per-request route evidence.",
-    "category": "master",
-}
-
-PROFILES = ["batch-window"]
-
 
 def standalone_a_to_b(case):
-    case.step("setup", "setup", timeout_s=180)
     case.step(
-        "flow", "master_client_start", params={"targets": ["A", "B"], "duration_s": 60}
+        "setup", "setup", timeout_s=case.value("standalone_a_to_b.setup_timeout_s")
     )
-    case.step("lookback", "master_mark", params={"wait_s": 2})
-    case.step("kill_time", "master_mark", params={"wait_s": 10})
-    case.step("kill_a", "master_fault", params={"mode": "kill", "target": "A"})
-    case.step("switched", "master_mark", params={"wait_s": 10})
-    case.step("b_ready", "master_ready", params={"target": "B", "inflight_zero": False})
+    case.step(
+        "flow", "master_client_start", params=case.value("standalone_a_to_b.flow")
+    )
+    case.step(
+        "lookback", "master_mark", params=case.value("standalone_a_to_b.lookback")
+    )
+    case.step(
+        "kill_time", "master_mark", params=case.value("standalone_a_to_b.kill_time")
+    )
+    case.step("kill_a", "master_fault", params=case.value("standalone_a_to_b.kill_a"))
+    case.step(
+        "switched", "master_mark", params=case.value("standalone_a_to_b.switched")
+    )
+    case.step("b_ready", "master_ready", params=case.value("standalone_a_to_b.b_ready"))
     case.step(
         "finish",
         "master_client_finish",
-        timeout_s=90,
+        timeout_s=case.value("standalone_a_to_b.finish_timeout_s"),
         params={"client": output("flow", "client")},
     )
     case.step(
@@ -65,86 +64,50 @@ def standalone_a_to_b(case):
     case.step(
         "steady_a",
         "master_client_check",
-        params={
-            "rows": output("steady", "rows"),
-            "metric": "target_share",
-            "op": "eq",
-            "expected": 1,
-            "target": "A",
-            "min_samples": 10,
-        },
+        params=case.params(
+            "standalone_a_to_b.steady_a", {"rows": output("steady", "rows")}
+        ),
     )
     case.step(
         "failover_seen",
         "master_client_check",
-        params={
-            "rows": output("straddle", "rows"),
-            "metric": "failover_count",
-            "op": "ge",
-            "expected": 1,
-        },
+        params=case.params(
+            "standalone_a_to_b.failover_seen", {"rows": output("straddle", "rows")}
+        ),
     )
     case.step(
         "switch_to_b",
         "master_client_check",
-        params={
-            "rows": output("switch", "rows"),
-            "metric": "target_count",
-            "op": "ge",
-            "expected": 1,
-            "target": "B",
-        },
+        params=case.params(
+            "standalone_a_to_b.switch_to_b", {"rows": output("switch", "rows")}
+        ),
     )
     case.step(
         "switch_errors",
         "master_client_check",
-        params={
-            "rows": output("switch", "rows"),
-            "metric": "failed_rate_above_one",
-            "op": "le",
-            "expected": 0.05,
-        },
+        params=case.params(
+            "standalone_a_to_b.switch_errors", {"rows": output("switch", "rows")}
+        ),
     )
     case.step(
         "after_b",
         "master_client_check",
-        params={
-            "rows": output("after", "rows"),
-            "metric": "target_share",
-            "op": "ge",
-            "expected": 0.95,
-            "target": "B",
-            "min_samples": 20,
-        },
+        params=case.params(
+            "standalone_a_to_b.after_b", {"rows": output("after", "rows")}
+        ),
     )
     case.step(
         "after_success",
         "master_client_check",
-        params={
-            "rows": output("after", "rows"),
-            "metric": "success_rate",
-            "op": "ge",
-            "expected": 0.9,
-            "min_samples": 20,
-        },
+        params=case.params(
+            "standalone_a_to_b.after_success", {"rows": output("after", "rows")}
+        ),
     )
     case.step(
         "unique_requests",
         "master_client_check",
-        params={
-            "rows": output("finish", "rows"),
-            "metric": "duplicate_ids",
-            "op": "eq",
-            "expected": 0,
-        },
+        params=case.params(
+            "standalone_a_to_b.unique_requests", {"rows": output("finish", "rows")}
+        ),
     )
     case.step("cleanup", "teardown")
-
-
-VARIANTS = {
-    "standalone_a_to_b": {
-        "build": standalone_a_to_b,
-        "profiles": ["batch-window"],
-        "metadata": {},
-    },
-}
