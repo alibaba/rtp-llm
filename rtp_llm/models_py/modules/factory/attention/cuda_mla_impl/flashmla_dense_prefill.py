@@ -24,6 +24,7 @@ from rtp_llm.models_py.modules.factory.linear.linear_base import LinearBase
 from rtp_llm.models_py.modules.factory.linear.quantized_activation import retained_bf16
 from rtp_llm.ops import KvCacheDataType
 from rtp_llm.ops.compute_ops import LayerKVCache, rtp_llm_ops
+from rtp_llm.utils.k3_model_trace import record_model
 from rtp_llm.utils.model_weight import W
 
 _FLASHMLA_WORKSPACES: Dict[int, torch.Tensor] = {}
@@ -825,7 +826,12 @@ class MlaFlashMLAPrefillOp:
                 kv_b_proj,
                 packed_projection=packed_projection,
             )
-        return self._dense_attention(q, projected_kv[0], projected_kv[1])
+        record_model(f"mla.layers.{layer_id}.prefill.q", q)
+        record_model(f"mla.layers.{layer_id}.prefill.k", projected_kv[0])
+        record_model(f"mla.layers.{layer_id}.prefill.v", projected_kv[1])
+        output = self._dense_attention(q, projected_kv[0], projected_kv[1])
+        record_model(f"mla.layers.{layer_id}.prefill.output", output)
+        return output
 
     def _pack_prefix_q(
         self,
@@ -855,6 +861,7 @@ class MlaFlashMLAPrefillOp:
         kv_cache: Optional[LayerKVCache],
         packed_projection: LinearBase,
         canonical_output: torch.Tensor,
+        layer_id: int,
     ) -> None:
         fused_gather = rtp_llm_ops._gather_mla_latent_and_fill_k_pe
         flat_k_pe = k_pe.view(-1, self.qk_rope_head_dim)
@@ -908,6 +915,17 @@ class MlaFlashMLAPrefillOp:
             launch_k = packed_kv[..., : -self.v_head_dim]
             launch_v = packed_kv[..., -self.v_head_dim :]
             launch_q = self._pack_prefix_q(q, launch, workspace)
+            record_model(
+                f"mla.layers.{layer_id}.prefill.context",
+                {
+                    "q": launch_q,
+                    "k": launch_k,
+                    "v": launch_v,
+                    "qo_indptr": launch.qo_indptr,
+                    "kv_indptr": launch.kv_indptr,
+                    "destination_starts": launch.destination_starts,
+                },
+            )
             partial_buffers = workspace.attention_buffers(launch.spec.packed_q_tokens)
             partial_output, partial_lse = self._run_dense_attention(
                 launch_q,
@@ -920,6 +938,10 @@ class MlaFlashMLAPrefillOp:
                 causal=False,
                 out=partial_buffers[0],
                 lse=partial_buffers[1],
+            )
+            record_model(
+                f"mla.layers.{layer_id}.prefill.context.result",
+                {"output": partial_output, "lse": partial_lse},
             )
             merge_attention_states_segmented_in_place(
                 canonical_output,
@@ -984,7 +1006,10 @@ class MlaFlashMLAPrefillOp:
             packed_projection=packed_projection,
             packed_output=current_packed_kv,
         )
-        current_output, _ = self._run_dense_attention(
+        record_model(f"mla.layers.{layer_id}.prefill.q", q)
+        record_model(f"mla.layers.{layer_id}.prefill.k", current_k)
+        record_model(f"mla.layers.{layer_id}.prefill.v", current_v)
+        current_output, current_lse = self._run_dense_attention(
             q,
             current_k,
             current_v,
@@ -995,6 +1020,10 @@ class MlaFlashMLAPrefillOp:
             causal=True,
             out=workspace.output_bf16,
             lse=workspace.canonical_lse,
+        )
+        record_model(
+            f"mla.layers.{layer_id}.prefill.new_tokens",
+            {"output": current_output, "lse": current_lse},
         )
         canonical_output = (
             workspace.fp32_output
@@ -1011,9 +1040,11 @@ class MlaFlashMLAPrefillOp:
             kv_cache,
             packed_projection,
             canonical_output,
+            layer_id,
         )
         if workspace.fp32_output is not None:
             workspace.output_bf16.copy_(workspace.fp32_output)
+        record_model(f"mla.layers.{layer_id}.prefill.output", workspace.output_bf16)
         return workspace.output_bf16
 
     def forward(

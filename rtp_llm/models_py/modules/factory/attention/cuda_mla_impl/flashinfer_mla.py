@@ -21,6 +21,7 @@ from rtp_llm.models_py.modules.factory.linear.factory import LinearFactory
 from rtp_llm.models_py.utils.arch import is_cuda
 from rtp_llm.ops import AttentionConfigs, KvCacheDataType
 from rtp_llm.ops.compute_ops import LayerKVCache, PyAttentionInputs, rtp_llm_ops
+from rtp_llm.utils.k3_model_trace import record_model
 from rtp_llm.utils.model_weight import W
 
 g_workspace_buffer = None
@@ -639,6 +640,8 @@ class MlaFlashInferDecodeOp(object):
 
         q_nope = torch.bmm(q_nope.transpose(0, 1), k_weight)
         q_nope = q_nope.transpose(0, 1)
+        record_model(f"mla.layers.{layer_id}.decode.absorbed_query", q_nope)
+        record_model(f"mla.layers.{layer_id}.decode.query_suffix", q_pe)
 
         compressed_kv, k_pe = torch.split(
             compressed_kv, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
@@ -646,9 +649,11 @@ class MlaFlashInferDecodeOp(object):
 
         attn_output = torch.empty_like(q_nope)
         self.mla_wrapper.run(q_nope, q_pe, compressed_kv, k_pe, attn_output)
+        record_model(f"mla.layers.{layer_id}.decode.latent_output", attn_output)
 
         attn_output = attn_output.view(-1, self.num_heads, self.kv_lora_rank)
         attn_bmm_output = torch.bmm(attn_output.transpose(0, 1), v_weight)
         attn_bmm_output = attn_bmm_output.transpose(0, 1)
+        record_model(f"mla.layers.{layer_id}.decode.value_projection", attn_bmm_output)
 
         return attn_bmm_output
