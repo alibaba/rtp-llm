@@ -19,6 +19,7 @@ from rtp_llm.dash_sc.codec import (
     MultimodalPart,
     OtherParams,
     SamplingParams,
+    _token_logprobs_payload,
     build_dash_error_response,
     build_stream_response_from_generate_outputs,
     parse_dash_sc_grpc_request,
@@ -27,6 +28,7 @@ from rtp_llm.dash_sc.codec import (
     parse_other_params,
     parse_sampling_params,
     prepend_to_generated_ids_tensor,
+    slice_generate_output_tokens,
 )
 from rtp_llm.dash_sc.inference.servicer import stream_log_tag
 from rtp_llm.dash_sc.proto import predict_v2_pb2
@@ -207,11 +209,31 @@ class DashScGrpcRequestTest(TestCase):
         self.assertEqual(sp.min_new_tokens, 2)
         self.assertEqual(sp.specified_fields, frozenset({"n"}))
 
+    def test_parse_sampling_logprobs_from_parameters(self) -> None:
+        req = predict_v2_pb2.ModelInferRequest()
+        req.parameters["logprobs"].bool_param = True
+        req.parameters["top_logprobs"].int64_param = 5
+
+        sp = parse_sampling_params(req)
+
+        self.assertTrue(sp.logprobs)
+        self.assertEqual(sp.top_logprobs, 5)
+        self.assertEqual(sp.specified_fields, frozenset({"logprobs", "top_logprobs"}))
+        self.assertTrue(sp.to_generate_config().return_all_probs)
+
+    def test_parse_sampling_logprobs_from_tensors(self) -> None:
+        req = predict_v2_pb2.ModelInferRequest()
+        _add_tensor(req, "logprobs", "BOOL", [1], b"\x01")
+        _add_tensor(req, "top_logprobs", "INT32", [1], struct.pack("<i", 3))
+
+        sp = parse_sampling_params(req)
+
+        self.assertTrue(sp.logprobs)
+        self.assertEqual(sp.top_logprobs, 3)
+
     def test_parse_sampling_zero_return_count_is_unspecified_sentinel(self) -> None:
         req = predict_v2_pb2.ModelInferRequest()
-        _add_tensor(
-            req, "num_return_sequences", "INT32", [1], struct.pack("<i", 0)
-        )
+        _add_tensor(req, "num_return_sequences", "INT32", [1], struct.pack("<i", 0))
 
         sp = parse_sampling_params(req)
 
@@ -883,6 +905,8 @@ class DashScGrpcRequestTest(TestCase):
         sp = SamplingParams(
             max_new_tokens=64,
             top_k=1,
+            logprobs=True,
+            top_logprobs=5,
             max_new_think_tokens=128,
             stop_words_list=((42,),),
         )
@@ -892,6 +916,7 @@ class DashScGrpcRequestTest(TestCase):
         self.assertEqual(gc.max_thinking_tokens, 128)
         self.assertEqual(gc.stop_words_list, [[42]])
         self.assertTrue(gc.return_input_ids)
+        self.assertTrue(gc.return_all_probs)
 
     @staticmethod
     def _set_payload(
@@ -1357,6 +1382,82 @@ class BuildStreamResponseFromGenerateOutputsTest(TestCase):
         )
         self.assertEqual(infer.parameters["prompt_token_num"].int64_param, 10)
 
+    def test_logprobs_parameter_contains_compact_per_token_top_scores(self) -> None:
+        all_probs = torch.tensor(
+            [
+                [0.05, 0.10, 0.70, 0.15],
+                [0.60, 0.20, 0.05, 0.15],
+            ],
+            dtype=torch.float32,
+        )
+        out = GenerateOutput(
+            output_ids=torch.tensor([2, 3], dtype=torch.int32),
+            all_probs=all_probs,
+            finished=True,
+            aux_info=AuxInfo(input_len=4, reuse_len=0),
+        )
+
+        resp = build_stream_response_from_generate_outputs(
+            dash_sc_request_id="req-logprobs",
+            model_name="kimi-k3",
+            go=GenerateOutputs(generate_outputs=[out]),
+            request_log_tag=stream_log_tag(
+                request_id_numeric=102, trace_id="req-logprobs"
+            ),
+            generate_config=SamplingParams(logprobs=True).to_generate_config(),
+            top_logprobs=2,
+        )
+
+        payload = json.loads(resp.infer_response.parameters["logprobs"].string_param)
+        self.assertEqual(len(payload), 2)
+        self.assertEqual(set(payload[0]), {"2", "3"})
+        # Selected token 3 is outside the second row's top-2, but must be
+        # present so dashscope-serving can build its token-level logprob.
+        self.assertEqual(set(payload[1]), {"0", "1", "3"})
+        self.assertAlmostEqual(payload[0]["2"], float(torch.log(all_probs[0, 2])))
+        self.assertAlmostEqual(payload[1]["3"], float(torch.log(all_probs[1, 3])))
+
+    def test_logprobs_parameter_rejects_missing_engine_probabilities(self) -> None:
+        out = GenerateOutput(
+            output_ids=torch.tensor([2], dtype=torch.int32),
+            all_probs=None,
+            finished=True,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "all_probs is missing"):
+            build_stream_response_from_generate_outputs(
+                dash_sc_request_id="req-logprobs-missing",
+                model_name="kimi-k3",
+                go=GenerateOutputs(generate_outputs=[out]),
+                request_log_tag=stream_log_tag(
+                    request_id_numeric=103, trace_id="req-logprobs-missing"
+                ),
+                generate_config=SamplingParams(logprobs=True).to_generate_config(),
+                top_logprobs=5,
+            )
+
+    def test_artificial_thinking_eos_does_not_emit_logprobs(self) -> None:
+        out = GenerateOutput(
+            output_ids=torch.tensor([1], dtype=torch.int32),
+            all_probs=torch.tensor([0.1, 0.8, 0.1], dtype=torch.float32),
+            finished=False,
+        )
+
+        resp = build_stream_response_from_generate_outputs(
+            dash_sc_request_id="req-artificial-eos",
+            model_name="kimi-k3",
+            go=GenerateOutputs(generate_outputs=[out]),
+            request_log_tag=stream_log_tag(
+                request_id_numeric=104, trace_id="req-artificial-eos"
+            ),
+            generate_config=SamplingParams(logprobs=True).to_generate_config(),
+            token_ids=[2],
+            top_logprobs=2,
+            emit_logprobs=False,
+        )
+
+        self.assertNotIn("logprobs", resp.infer_response.parameters)
+
     def test_multimodal_usage_parameters_from_aux_info(self) -> None:
         out = GenerateOutput(
             output_ids=torch.tensor([7], dtype=torch.int32),
@@ -1712,6 +1813,76 @@ class StreamLogTagTest(TestCase):
             stream_log_tag(request_id_numeric=-1, trace_id="tid"),
             "request_id=-1 trace_id=tid",
         )
+
+
+class LogprobsAlignmentTest(TestCase):
+    def output(self):
+        return GenerateOutput(
+            output_ids=torch.tensor([[1, 2, 1]], dtype=torch.int32),
+            all_probs=torch.tensor(
+                [[[0.1, 0.8, 0.1], [0.2, 0.2, 0.6], [0.3, 0.4, 0.3]]]
+            ),
+        )
+
+    def test_mtp_returns_one_score_per_position(self):
+        result = _token_logprobs_payload(self.output(), [1, 2, 1], 2)
+        self.assertEqual(len(result), 3)
+        self.assertAlmostEqual(result[0]["1"], torch.tensor(0.8).log().item())
+        self.assertAlmostEqual(result[2]["1"], torch.tensor(0.4).log().item())
+
+    def test_repeated_token_suffix_uses_explicit_position(self):
+        output = self.output()
+        slice_generate_output_tokens(output, 2, 3)
+        result = _token_logprobs_payload(output, [1], 0)
+        self.assertEqual(len(result), 1)
+        self.assertAlmostEqual(result[0]["1"], torch.tensor(0.4).log().item())
+
+    def test_trailing_marker_removal_keeps_prefix_probabilities(self):
+        output = self.output()
+        slice_generate_output_tokens(output, 0, 2)
+        result = _token_logprobs_payload(output, [1, 2], 0)
+        self.assertEqual(len(result), 2)
+        self.assertAlmostEqual(result[0]["1"], torch.tensor(0.8).log().item())
+
+    def test_missing_probability_rows_cannot_silently_drop_tokens(self):
+        output = self.output()
+        output.all_probs = output.all_probs[:, -1:]
+        self.assertIsNone(_token_logprobs_payload(output, [1, 2, 1], 2))
+
+    def test_empty_terminal_has_empty_logprobs(self):
+        self.assertEqual(_token_logprobs_payload(self.output(), [], 2), [])
+
+    def test_top_logprobs_does_not_enable_or_require_logprobs(self):
+        req = predict_v2_pb2.ModelInferRequest()
+        req.parameters["top_logprobs"].int64_param = 5
+        sampling = parse_sampling_params(req)
+        self.assertFalse(sampling.logprobs)
+        self.assertEqual(sampling.top_logprobs, 5)
+        self.assertFalse(sampling.to_generate_config().return_all_probs)
+
+    def test_zero_probability_preserves_negative_infinity(self):
+        output = self.output()
+        output.all_probs = torch.tensor(
+            [[[0.0, 1.0, 0.0], [0.5, 0.5, 0.0], [0.0, 1.0, 0.0]]]
+        )
+        result = _token_logprobs_payload(output, [1, 2, 1], 3)
+        self.assertEqual(result[0]["0"], float("-inf"))
+        self.assertEqual(result[1]["2"], float("-inf"))
+
+    def test_top_logprobs_above_twenty_is_preserved(self):
+        for value in (21, 50):
+            with self.subTest(value=value):
+                req = predict_v2_pb2.ModelInferRequest()
+                req.parameters["logprobs"].bool_param = True
+                req.parameters["top_logprobs"].int64_param = value
+                sampling = parse_sampling_params(req)
+                self.assertEqual(sampling.top_logprobs, value)
+                result = _token_logprobs_payload(
+                    self.output(), [1, 2, 1], sampling.top_logprobs
+                )
+                self.assertEqual(len(result), 3)
+                for scores in result:
+                    self.assertEqual(set(scores), {"0", "1", "2"})
 
 
 if __name__ == "__main__":

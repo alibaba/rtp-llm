@@ -19,6 +19,8 @@ public:
 
     torch::Tensor accept_tokens_cpu;
     torch::Tensor accept_len_cpu;
+    // [batch, propose_step + 1, vocabulary], including the bonus/replacement position.
+    torch::Tensor target_probs_cpu;
 
     std::shared_ptr<torch::Event> transfer_done_event;
 
