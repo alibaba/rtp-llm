@@ -3,8 +3,9 @@ import logging
 import os
 import re
 import time
+from contextlib import nullcontext
 from pathlib import Path
-from typing import Any, Dict, Generator, List, Optional
+from typing import Any, Callable, ContextManager, Dict, Generator, List, Optional
 
 import torch
 from tqdm.auto import tqdm
@@ -265,6 +266,8 @@ class CkptDatabase(BaseDatabase):
         device: str,
         use_tqdm_on_load: bool,
         stacked_key_config: Optional[Dict[str, str]] = None,
+        allocation_context: Optional[Callable[[], ContextManager[Any]]] = None,
+        force_nogds: bool = False,
     ):
         from fastsafetensors import ParallelLoader, SingleGroup
 
@@ -290,7 +293,14 @@ class CkptDatabase(BaseDatabase):
             # 0.1.20+ali wheel is installed without the underscore-named
             # native helper (e.g. dev environments where torch ABI does not
             # match the prebuilt fast_safetensors).
-            use_nogds = os.environ.get("FASTSAFETENSORS_NOGDS", "0") == "1"
+            #
+            # force_nogds remains an explicit deployment/debug override. Normal
+            # cold load and level-2 wake both keep the default SHM copier; the
+            # repeated-wakeup regression was localized to downstream Mega
+            # pageable-D2H staging rather than this file copier.
+            use_nogds = (
+                force_nogds or os.environ.get("FASTSAFETENSORS_NOGDS", "0") == "1"
+            )
             loader_kwargs: Dict[str, Any] = dict(
                 pg=pg,
                 hf_weights_files=hf_weights_files,
@@ -305,7 +315,13 @@ class CkptDatabase(BaseDatabase):
             else:
                 loader = ParallelLoader(**loader_kwargs)
             try:
-                yield from loader.iterate_weights()
+                context = (
+                    allocation_context
+                    if allocation_context is not None
+                    else nullcontext
+                )
+                with context():
+                    yield from loader.iterate_weights()
             finally:
                 loader.loader.close()
 

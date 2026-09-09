@@ -580,6 +580,35 @@ def test_state_pool_clear_pool_context() -> None:
     print("  [warmup]      no-pool forward OK")
 
 
+def test_reload_fused_weights_preserves_storage() -> None:
+    """Level-2 reload must not invalidate CUDA-graph-captured weight pointers."""
+    cmp = _build_compressor(
+        dim=64, head_dim=INDEXER_HEAD_DIM, rope_head_dim=64, compress_ratio=4
+    )
+    pointers = (
+        cmp._wkv_wgate_fused.data_ptr(),
+        cmp.wkv.weight.data_ptr(),
+        cmp.wgate.weight.data_ptr(),
+    )
+
+    cmp._raw_wkv_src.fill_(1.25)
+    cmp._raw_wgate_src.fill_(-0.75)
+    expected = torch.cat(
+        [cmp._raw_wkv_src.to(torch.bfloat16), cmp._raw_wgate_src.to(torch.bfloat16)],
+        dim=0,
+    )
+    cmp.reload_fused_weights()
+    torch.cuda.synchronize()
+
+    assert pointers == (
+        cmp._wkv_wgate_fused.data_ptr(),
+        cmp.wkv.weight.data_ptr(),
+        cmp.wgate.weight.data_ptr(),
+    )
+    assert torch.equal(cmp._wkv_wgate_fused, expected)
+    print("  [level2 reload] fused weight storage preserved")
+
+
 if __name__ == "__main__":
     if not torch.cuda.is_available():
         raise SystemExit("CUDA required for CompressorFP8 UT")
@@ -592,4 +621,5 @@ if __name__ == "__main__":
     test_prepared_metadata_path()
     test_decode_strided_kv_score_matches_contiguous_path()
     test_state_pool_clear_pool_context()
+    test_reload_fused_weights_preserves_storage()
     print("\nOK")

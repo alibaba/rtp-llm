@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -41,6 +42,9 @@ public:
                                RtpLLMTokenPSMetricsCollector&             tps_collector,
                                int64_t                                    tps_execute_time_us,
                                const StreamGroups::TokenCountsByPriority& token_counts_by_priority);
+    absl::Status processForPause() override;
+    bool         consumeLastPauseSignal() override;
+    void         drainAsyncRunners() override;
 
     void setBatchProcessor(std::unique_ptr<NormalBatchStreamProcessor> processor) {
         batch_stream_processor_ = std::move(processor);
@@ -93,6 +97,9 @@ protected:
     void checkModelInputsOnCuda(const GptModelInputs& model_input, const char* tag) const;
 
 private:
+    absl::Status processImpl(const std::list<GenerateStreamPtr>& streams, int64_t schedule_time_us, bool pause_signal);
+
+private:
     std::unique_ptr<ModelBase>                                               model_;
     std::unique_ptr<Sampler>                                                 sampler_;
     std::unique_ptr<NormalBatchStreamProcessor>                              batch_stream_processor_;
@@ -114,6 +121,7 @@ private:
     ParallelismConfig     parallelism_config_;
     std::function<void()> profile_step_start_;
     std::function<void()> profile_step_finish_;
+    std::atomic<bool>     last_pause_signal_{false};
 
     // Stream-async worker owns a CUDA stream/thread for pinned D2H,
     // per-stream update, and KV release off the main thread.

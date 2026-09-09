@@ -1,10 +1,14 @@
 #include <algorithm>
+#include <chrono>
+#include <future>
 #include <memory>
+#include <thread>
 #include "torch/all.h"
 #include "gmock/gmock-actions.h"
 #include "gmock/gmock-function-mocker.h"
 #include "gtest/gtest.h"
 #include "autil/TimeUtility.h"
+#include "rtp_llm/cpp/engine_base/schedulers/BatchDecodeScheduler.h"
 #include "rtp_llm/cpp/engine_base/schedulers/FIFOScheduler.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
@@ -18,9 +22,8 @@ namespace rtp_llm {
 namespace {
 
 bool enqueueIndividually(FIFOScheduler& scheduler, const vector<GenerateStreamPtr>& streams) {
-    return std::all_of(streams.begin(), streams.end(), [&scheduler](const auto& stream) {
-        return scheduler.enqueue(stream).ok();
-    });
+    return std::all_of(
+        streams.begin(), streams.end(), [&scheduler](const auto& stream) { return scheduler.enqueue(stream).ok(); });
 }
 
 }  // namespace
@@ -73,6 +76,47 @@ TEST_F(FIFOSchedulerTest, testSimple) {
     ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
     ASSERT_EQ(scheduler.runningStreamsSize(), 0);
     ASSERT_EQ(cache_manager->freeBlocksNum(), 3);
+}
+
+TEST_F(FIFOSchedulerTest, testWakeUnblocksIdleSchedule) {
+    CacheConfig                     cache_config  = makeMhaCacheConfig(1, 4, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
+    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    ASSERT_TRUE(cache_manager->init());
+
+    ModelConfig model_config;
+    model_config.max_seq_len = 8192;
+    RuntimeConfig runtime_config;
+    runtime_config.max_generate_batch_size                     = 100;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
+    PDSepConfig         pd_sep_config;
+    ParallelismConfig   parallelism_config;
+    ModelSpecificConfig model_specific_config;
+    FIFOScheduler       scheduler(
+        runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
+
+    auto schedule_future = std::async(std::launch::async, [&scheduler]() { return scheduler.schedule(); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    scheduler.wake();
+
+    ASSERT_EQ(schedule_future.wait_for(std::chrono::seconds(1)), std::future_status::ready);
+    auto result = schedule_future.get();
+    ASSERT_TRUE(result.ok());
+    EXPECT_TRUE(result.value().empty());
+}
+
+TEST_F(FIFOSchedulerTest, testBatchDecodeWakeUnblocksIdleSchedule) {
+    RuntimeConfig runtime_config;
+    runtime_config.batch_decode_scheduler_config.batch_decode_scheduler_batch_size = 8;
+    BatchDecodeScheduler scheduler(runtime_config, nullptr, nullptr);
+
+    auto schedule_future = std::async(std::launch::async, [&scheduler]() { return scheduler.schedule(); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    scheduler.wake();
+
+    ASSERT_EQ(schedule_future.wait_for(std::chrono::seconds(1)), std::future_status::ready);
+    auto result = schedule_future.get();
+    ASSERT_TRUE(result.ok());
+    EXPECT_TRUE(result.value().empty());
 }
 
 TEST_F(FIFOSchedulerTest, testInitKVCacheLackMem) {
@@ -569,8 +613,8 @@ TEST_F(FIFOSchedulerTest, withoutCacheQuotaUsesPostAllocationContextLengthAndSto
     auto tail_stream               = make_stream(1);
     auto errored_tail_stream       = make_stream(1);
     errored_tail_stream->reportError(ErrorCode::CANCELLED, "cancelled before admission");
-    ASSERT_TRUE(enqueueIndividually(
-        scheduler, {cached_stream, threshold_crossing_stream, tail_stream, errored_tail_stream}));
+    ASSERT_TRUE(
+        enqueueIndividually(scheduler, {cached_stream, threshold_crossing_stream, tail_stream, errored_tail_stream}));
 
     auto result = scheduler.schedule();
     ASSERT_TRUE(result.ok());
@@ -1225,8 +1269,7 @@ TEST_F(FIFOSchedulerTest, prefillShapeIncludesReusedPrefixLength) {
     FIFOScheduler       scheduler(
         runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
 
-    auto cached_stream =
-        makeSingleStream(model_config, runtime_config, resource_context, std::vector<int>(60, 1));
+    auto cached_stream = makeSingleStream(model_config, runtime_config, resource_context, std::vector<int>(60, 1));
     cached_stream->reportEvent(StreamEvents::CanRun);
     ASSERT_EQ(cached_stream->moveToNext(), StreamState::RUNNING);
     cached_stream->setReuseLength(59);
@@ -1234,8 +1277,7 @@ TEST_F(FIFOSchedulerTest, prefillShapeIncludesReusedPrefixLength) {
     ASSERT_EQ(cached_stream->contextLength(), 1);
     ASSERT_EQ(cached_stream->prefixLength(), 59);
 
-    auto short_stream =
-        makeSingleStream(model_config, runtime_config, resource_context, std::vector<int>(39, 1));
+    auto short_stream = makeSingleStream(model_config, runtime_config, resource_context, std::vector<int>(39, 1));
     ASSERT_TRUE(enqueueIndividually(scheduler, {cached_stream, short_stream}));
 
     auto result = scheduler.schedule();
@@ -1263,9 +1305,8 @@ TEST_F(FIFOSchedulerTest, prefillShapeUsesCurrentBatchSizeAsWidth) {
     FIFOScheduler       scheduler(
         runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
 
-    auto long_single =
-        makeSingleStream(model_config, runtime_config, resource_context, std::vector<int>(40, 1));
-    auto batched_query                                   = std::make_shared<GenerateInput>();
+    auto long_single   = makeSingleStream(model_config, runtime_config, resource_context, std::vector<int>(40, 1));
+    auto batched_query = std::make_shared<GenerateInput>();
     batched_query->input_ids                             = torch::ones({10}, torch::kInt32);
     batched_query->generate_config                       = std::make_shared<GenerateConfig>();
     batched_query->generate_config->num_return_sequences = 3;
@@ -1919,8 +1960,7 @@ TEST_F(FIFOSchedulerTest, blockedNormalLaneLeavesResidualCapacityToExplicitGroup
 
     // This ordinary stream is permanently too large for the per-round token
     // budget but valid against the Engine's total KV capacity.
-    auto blocked_normal = makeSingleStream(
-        model_config, runtime_config, resource_context, std::vector<int>(6, 1));
+    auto blocked_normal = makeSingleStream(model_config, runtime_config, resource_context, std::vector<int>(6, 1));
     vector<GenerateStreamPtr> small_group = {
         makeSingleStream(model_config, runtime_config, resource_context, {1}),
         makeSingleStream(model_config, runtime_config, resource_context, {2}),

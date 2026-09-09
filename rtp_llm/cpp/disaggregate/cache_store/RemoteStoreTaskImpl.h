@@ -8,9 +8,9 @@ namespace rtp_llm {
 
 class RemoteStoreTaskImpl: public RemoteStoreTask, public std::enable_shared_from_this<RemoteStoreTaskImpl> {
 public:
-    RemoteStoreTaskImpl(const std::shared_ptr<RemoteStoreRequest>& request, 
-                        const std::shared_ptr<CacheStoreRemoteStoreMetricsCollector >& collector,
-                        CheckCancelFunc check_cancel_func);
+    RemoteStoreTaskImpl(const std::shared_ptr<RemoteStoreRequest>&                    request,
+                        const std::shared_ptr<CacheStoreRemoteStoreMetricsCollector>& collector,
+                        CheckCancelFunc                                               check_cancel_func);
     ~RemoteStoreTaskImpl();
 
 public:
@@ -23,19 +23,19 @@ public:
     std::shared_ptr<TransferRequest> makeAvailableRequest(const std::vector<std::shared_ptr<BlockBuffer>>& blocks);
     void notifyRequestDone(const std::map<std::string, std::string>& block_keys, bool success);
     bool done() const {
+        std::shared_lock<std::shared_mutex> lock(buffers_mutex_);
         return done_;
     }
 
 private:
-    std::shared_mutex                  buffers_mutex_;
+    mutable std::shared_mutex          buffers_mutex_;
     std::map<std::string, std::string> to_load_buffers_;
     std::map<std::string, std::string> loading_buffers_;
     std::map<std::string, std::string> done_buffers_;
 
     std::shared_ptr<CacheStoreRemoteStoreMetricsCollector> collector_;
 
-    mutable std::mutex      mutex_;
-    std::condition_variable cond_;
+    std::condition_variable_any cond_;
 
     int  expect_done_buffer_count_ = 0;
     bool all_success_              = true;

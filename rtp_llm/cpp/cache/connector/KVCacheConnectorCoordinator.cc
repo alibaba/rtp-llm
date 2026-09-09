@@ -33,9 +33,9 @@ bool isCpCompactFixedGroup(const CacheConfig& cache_config, int group_id, int cp
     return row_tokens > 0 && row_tokens == cache_config.seq_size_per_block * static_cast<size_t>(cp_size);
 }
 
-bool isCompactFullBlockList(const KVCacheResource& source,
+bool isCompactFullBlockList(const KVCacheResource&  source,
                             const BlockIndicesType& src_blocks,
-                            const CacheKeysType& selected_keys) {
+                            const CacheKeysType&    selected_keys) {
     return src_blocks.size() <= selected_keys.size() || src_blocks.size() < source.cacheKeys().size();
 }
 
@@ -183,6 +183,11 @@ bool KVCacheConnectorCoordinator::hasActiveConnectors() const {
 
 bool KVCacheConnectorCoordinator::hasP2PConnector() const {
     return p2p_connector_ != nullptr;
+}
+
+size_t KVCacheConnectorCoordinator::inflightTransferCount() const {
+    std::lock_guard<std::mutex> lock(update_mutex_);
+    return fused_async_read_context_list_.size() + fused_async_write_context_list_.size();
 }
 
 bool KVCacheConnectorCoordinator::init() {
@@ -536,6 +541,20 @@ std::vector<CacheKeyType> KVCacheConnectorCoordinator::memoryCacheKeysForStatus(
         return {};
     }
     return memory_connector_->cacheKeysForStatus();
+}
+
+bool KVCacheConnectorCoordinator::releaseMemoryCacheBacking() {
+    if (!memory_connector_) {
+        return true;
+    }
+    return memory_connector_->releaseMemoryCacheBacking();
+}
+
+bool KVCacheConnectorCoordinator::restoreMemoryCacheBacking() {
+    if (!memory_connector_) {
+        return true;
+    }
+    return memory_connector_->restoreMemoryCacheBacking();
 }
 
 }  // namespace rtp_llm

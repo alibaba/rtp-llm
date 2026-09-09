@@ -57,6 +57,18 @@ py_test(
 )
 
 py_test(
+    name = "database_fastsafetensors_region_test",
+    srcs = [
+        "database_fastsafetensors_region_test.py",
+    ],
+    deps = [
+        "//rtp_llm:lora",
+        "//rtp_llm:utils",
+    ],
+)
+
+
+py_test(
     name = "util_test",
     srcs = [
         "util_test.py",
@@ -167,6 +179,16 @@ py_test(
         "//:rtp_compute_ops",
     ],
     exec_properties = {'gpu':'A10'}
+)
+
+py_test(
+    name = "nccl_memory_test",
+    srcs = [
+        "nccl_memory_test.py",
+    ],
+    deps = [
+        "//rtp_llm:utils",
+    ],
 )
 
 py_test(

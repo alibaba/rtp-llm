@@ -34,6 +34,7 @@ from deep_gemm.utils.layout import (  # noqa: E402
 )
 
 from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
+from rtp_llm.model_loader.weight_memory_saver import feature_weights_region
 from rtp_llm.models_py.modules.dsv4._fused_inv_rope_fp8_quant_triton import (
     fused_inv_rope_fp8_quant,
 )
@@ -395,11 +396,12 @@ def _prepare_wo_a_stacked(
     floor-log2 bitcasts each block scale and packs 4 UE8M0 bytes per
     int32; output shape ``[G, R, K/512]`` matches
     ``deep_gemm.fp8_einsum(..., recipe=(1, 1, 128))`` expectations."""
-    w_stk = weight_fp8.view(G, R, K).contiguous()
-    scale_fp32 = scale_raw.float().view(G, R // 128, K // 128)
-    idx = torch.arange(R, device=scale_raw.device) // 128
-    scale_rep = scale_fp32.index_select(-2, idx).contiguous()  # [G, R, K/128]
-    s_stk = get_mn_major_tma_aligned_packed_ue8m0_tensor(scale_rep)
+    with feature_weights_region():
+        w_stk = weight_fp8.view(G, R, K).contiguous()
+        scale_fp32 = scale_raw.float().view(G, R // 128, K // 128)
+        idx = torch.arange(R, device=scale_raw.device) // 128
+        scale_rep = scale_fp32.index_select(-2, idx).contiguous()  # [G, R, K/128]
+        s_stk = get_mn_major_tma_aligned_packed_ue8m0_tensor(scale_rep)
     return w_stk, s_stk
 
 
@@ -409,18 +411,21 @@ def _v4_fp8_linear(w: torch.Tensor, s: torch.Tensor):
     Repacks the UE8M0 ``float8_e8m0fnu`` scale into DeepGEMM's int32
     TMA-aligned packed layout when needed. Framework descriptor path may
     deliver the scale already packed (dtype int32) — we no-op then."""
-    if s.dtype == torch.float8_e8m0fnu:
-        s = _repack_v4_fp8_scale_to_int32(s)
-    # LinearFactory.create_linear_from_weights consumes a (weights_dict,
-    # weight_key, scale_key) triple — feed it a one-shot dict so the
-    # factory plumbing is unchanged.
-    local = {"_w": w, "_s": s}
-    return LinearFactory.create_linear_from_weights(
-        local,
-        "_w",
-        "_s",
-        quant_config=_V4_FP8_BLOCK_CFG,
-    )
+    # The repacked scale is a resident kernel layout, not a forward
+    # workspace. Keep its allocation VMM-owned so level-2 sleep can unmap it.
+    with feature_weights_region():
+        if s.dtype == torch.float8_e8m0fnu:
+            s = _repack_v4_fp8_scale_to_int32(s)
+        # LinearFactory.create_linear_from_weights consumes a (weights_dict,
+        # weight_key, scale_key) triple — feed it a one-shot dict so the
+        # factory plumbing is unchanged.
+        local = {"_w": w, "_s": s}
+        return LinearFactory.create_linear_from_weights(
+            local,
+            "_w",
+            "_s",
+            quant_config=_V4_FP8_BLOCK_CFG,
+        )
 
 
 def _v4_fp8_linear_from_dict(weights: dict, weight_key: str, scale_key: str):
