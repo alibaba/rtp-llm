@@ -97,6 +97,9 @@ def _parallelism_config():
         tp_rank=0,
         ep_size=1,
         ep_rank=0,
+        dp_size=1,
+        dp_rank=0,
+        world_size=1,
         local_rank=0,
         world_rank=0,
         prefill_cp_config=types.SimpleNamespace(
@@ -144,6 +147,7 @@ class Qwen3BaseModelIntegrationTest(unittest.TestCase):
                 probe.device_resource_config = kwargs["device_resource_config"]
                 probe.load_method = kwargs["load_method"]
                 probe.force_cpu_load_weights = kwargs["force_cpu_load_weights"]
+                probe.moe_config = kwargs["moe_config"]
                 probe.keep_mla_checkpoint_weights = False
                 probe.custom_module = None
                 uses_new_loader = probe._use_new_loader()
@@ -885,7 +889,7 @@ class Qwen3BaseModelIntegrationTest(unittest.TestCase):
         base_model = _base_model(config)
 
         with self.assertLogs(level="WARNING") as captured_logs, patch(
-            "rtp_llm.models.base_model.kmonitor.report"
+            "rtp_llm.metrics.kmonitor.report"
         ) as report_metric:
             with tempfile.TemporaryDirectory() as model_path:
                 config.ckpt_path = model_path
@@ -925,6 +929,7 @@ class Qwen3BaseModelIntegrationTest(unittest.TestCase):
         base_model.parallelism_config = _parallelism_config()
         base_model.force_cpu_load_weights = False
         base_model.device_resource_config = None
+        base_model.moe_config = None
 
         with self.assertRaisesRegex(ValueError, "p-tuning is not supported"):
             base_model._load_with_new_loader()
@@ -937,6 +942,7 @@ class Qwen3BaseModelIntegrationTest(unittest.TestCase):
         base_model.parallelism_config = _parallelism_config()
         base_model.force_cpu_load_weights = False
         base_model.device_resource_config = None
+        base_model.moe_config = None
 
         with self.assertRaisesRegex(ValueError, "EPLB is not supported"):
             base_model._load_with_new_loader()
@@ -949,6 +955,7 @@ class Qwen3BaseModelIntegrationTest(unittest.TestCase):
         base_model.parallelism_config = _parallelism_config()
         base_model.force_cpu_load_weights = False
         base_model.device_resource_config = None
+        base_model.moe_config = None
 
         with self.assertRaisesRegex(
             ValueError, "output vocabulary pruning is not supported"
@@ -962,6 +969,7 @@ class Qwen3BaseModelIntegrationTest(unittest.TestCase):
         base_model.parallelism_config = _parallelism_config()
         base_model.force_cpu_load_weights = False
         base_model.load_method = LoadMethod.SCRATCH
+        base_model.moe_config = None
         base_model.fmha_config = None
         base_model.tokenizer = None
         base_model.hw_kernel_config = types.SimpleNamespace(enable_cuda_graph=False)

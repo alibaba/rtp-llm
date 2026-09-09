@@ -315,7 +315,9 @@ py_library(
     srcs = glob([
         "models/*.py",
         "models/**/*.py",
-    ], exclude=["models/test/*.py"]),
+    ], exclude=["models/test/*.py"]) + [
+        "model_factory_register.py",
+    ],
     deps = [
         ":sentencepiece",
         ":sentence-transformers",

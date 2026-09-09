@@ -67,7 +67,7 @@ def _moe_config():
         fake_balance_expert=False,
         ll_num_max_token=1,
         masked_max_token_num=1,
-        moe_strategy=0,
+        moe_strategy="auto",
         use_mori_ep=False,
         use_deepep_moe=False,
         use_deepep_low_latency=False,

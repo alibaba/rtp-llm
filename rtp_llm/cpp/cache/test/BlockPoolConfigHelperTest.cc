@@ -198,16 +198,14 @@ TEST_F(BlockPoolConfigHelperTest, RejectsMTPSubConfigWithoutGroups) {
                                "cache groups must not be empty");
 }
 
-TEST_F(BlockPoolConfigHelperTest, RejectsMTPSubConfigWithoutLayerOwningGroup) {
-    auto score_config = makeSparseMlaConfig(2, 4, 4, 4, 32);
+TEST_F(BlockPoolConfigHelperTest, RejectsCacheTopologyWithoutLayerOwningGroup) {
     auto empty_layers = std::make_shared<CacheConfig>(makeSparseMlaConfig(1, 4, 4, 2, 32));
     auto placeholder  = makeMhaSpec("placeholder", 8, DataType::TYPE_BF16, 1, 1);
-    empty_layers->fromGroupedSpecs(
-        {placeholder}, {{}}, {CacheGroupType::FULL}, {"placeholder"});
-    score_config.mtp_sub_configs = {empty_layers};
-
-    expectRuntimeErrorContains([&score_config] { BlockPoolConfigHelper::createConfig(score_config); },
-                               "has no cache group containing layers");
+    expectRuntimeErrorContains(
+        [&empty_layers, &placeholder] {
+            empty_layers->fromGroupedSpecs({placeholder}, {{}}, {CacheGroupType::FULL}, {"placeholder"});
+        },
+        "has no cache group");
 }
 
 TEST_F(BlockPoolConfigHelperTest, RejectsMTPSubConfigWithMultipleLayerOwningGroups) {
