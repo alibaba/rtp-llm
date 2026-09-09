@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/normal_engine/speculative/MtpBatchStreamProcessor.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
+#include "rtp_llm/models_py/bindings/core/K3Trace.h"
 #include "rtp_llm/models_py/bindings/cuda/kernels/mtp_target_verify_prepare.h"
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorStates.h"
 #include "rtp_llm/cpp/utils/TensorDebugUtils.h"
@@ -466,6 +467,7 @@ MtpBatchStreamProcessor::gatherSpecSamplerInput(const StreamGroups&             
                                                 const GptModelOutputs&                      model_output,
                                                 const SpecLogitsVerifyRunner::LaunchResult& spec_logits_result) const {
     RTP_LLM_PROFILE_SCOPE("mtp_batch_stream_processor.gather_spec_sampler_input");
+    K3TraceScope trace("mtp.gather_verify_sampler");
     (void)model_inputs;
     RTP_LLM_CHECK(!stream_groups.empty());
     auto all_streams      = stream_groups.allStreams();
@@ -499,6 +501,12 @@ MtpBatchStreamProcessor::gatherSpecSamplerInput(const StreamGroups&             
 
         copyScoreSamplerTokenIds(
             sampler_inputs.token_ids, complete_token_ids, batch_idx, static_cast<int64_t>(score_len), seq_len);
+        k3TraceEvent("mtp.verify_history_rows",
+                     {{"committed_token_ids", complete_token_ids}},
+                     {{"stream_id", stream->streamId()},
+                      {"first_row", batch_idx},
+                      {"row_count", static_cast<int64_t>(score_len)},
+                      {"committed_length", seq_len}});
         batch_idx += static_cast<int64_t>(score_len);
         RTP_LLM_LOG_DEBUG("stream [%s], sampler inputs token ids = [%s]",
                           stream->streamLogTag().c_str(),
@@ -520,6 +528,14 @@ MtpBatchStreamProcessor::gatherSpecSamplerInput(const StreamGroups&             
                       tensorDebugStringWithData<float>(sampler_inputs.logits.cpu(), 10).c_str());
 
     RTP_LLM_LOG_DEBUG("gatherSamplerInput done");
+    k3TraceEvent("mtp.verify_sampler_gathered",
+                 {{"history", sampler_inputs.token_ids},
+                  {"sequence_lengths", sampler_inputs.sequence_lengths},
+                  {"input_lengths", sampler_inputs.input_lengths},
+                  {"model_input_tokens", model_inputs.combo_tokens},
+                  {"logits", sampler_inputs.logits}},
+                 {{"propose_step", static_cast<int64_t>(propose_step_)}});
+    trace.finish();
     return std::move(sampler_inputs);
 }
 
@@ -1066,6 +1082,14 @@ void MtpBatchStreamProcessor::prepareDecodeSpecUpdateInfo(
 
         torch::Tensor accept_tokens_tensor =
             accept_tokens.narrow(0, batch_idx_out, next_batch_size).narrow(1, 0, cur_accept_len).contiguous();
+        k3TraceEvent("mtp.prepare_stream_update",
+                     {{"accepted_tokens", accept_tokens_tensor},
+                      {"next_hidden_states", last_hidden_states},
+                      {"next_proposal_probs", propose_all_probs}},
+                     {{"stream_id", stream->streamId()},
+                      {"first_row", batch_idx_out},
+                      {"accepted_length_including_bonus", cur_accept_len},
+                      {"verify_token_offset", token_offset}});
         spec_update_infos.push_back(
             {accept_tokens_tensor, cur_accept_len, -1, std::move(last_hidden_states), std::move(propose_all_probs)});
         if (stream->generateConfig()->return_all_probs) {

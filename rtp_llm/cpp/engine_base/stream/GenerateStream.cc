@@ -13,6 +13,7 @@
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
+#include "rtp_llm/models_py/bindings/core/K3Trace.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorFactory.h"
 #include "rtp_llm/cpp/utils/LinearBlocksUtil.h"
@@ -857,118 +858,167 @@ void GenerateStream::matchStopWordsList(int batch_id) {
 }
 
 void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
-    // Worker-thread MTP bookkeeping updates tokens/output and finish checks
-    // before the next async dispatch. The speculative propose_step+1 window
-    // already covers stop/EOS/max-token boundaries.
     RTP_LLM_PROFILE_FUNCTION();
-    std::lock_guard<std::mutex> lock(*mutex_);
-    RTP_LLM_LOG_DEBUG("stream [%s] spec update", streamLogTag().c_str());
-    *is_context_stream_ = false;
-    if (hasError() && !update_info.force_update_info) {
-        return;
-    }
-    // Ignore stale worker updates after finish; committing them would duplicate
-    // tokens and touch KV blocks only deferred until this worker exits.
-    if (isFinished() && !update_info.force_update_info) {
-        return;
-    }
+    K3TraceScope     trace_scope("stream.specUpdate");
+    K3CpuTraceBuffer trace_buffer;
+    auto             run_update = [&]() {
+        // Worker-thread MTP bookkeeping updates tokens/output and finish checks
+        // before the next async dispatch. The speculative propose_step+1 window
+        // already covers stop/EOS/max-token boundaries.
+        std::lock_guard<std::mutex> lock(*mutex_);
+        RTP_LLM_LOG_DEBUG("stream [%s] spec update", streamLogTag().c_str());
+        if (k3TraceEnabled()) {
+            trace_buffer.record("stream.update.before",
+                                {{"committed_token_ids", completeTokenIds()}, {"new_tokens", update_info.new_tokens}},
+                                {{"stream_id", streamId()},
+                                 {"seq_length", static_cast<int64_t>(seqLength())},
+                                 {"input_length", inputLength()},
+                                 {"requested_new_tokens", update_info.num_new_tokens},
+                                 {"max_token_num", static_cast<int64_t>(maxTokenNum())},
+                                 {"max_new_tokens", generate_input_->generate_config->max_new_tokens},
+                                 {"max_thinking_tokens", generate_input_->generate_config->max_thinking_tokens},
+                                 {"finished", isFinished()},
+                                 {"has_error", hasError()},
+                                 {"force_update", update_info.force_update_info}});
+        }
+        *is_context_stream_ = false;
+        if (hasError() && !update_info.force_update_info) {
+            return;
+        }
+        // Ignore stale worker updates after finish; committing them would duplicate
+        // tokens and touch KV blocks only deferred until this worker exits.
+        if (isFinished() && !update_info.force_update_info) {
+            return;
+        }
 
-    const auto& new_tokens = update_info.new_tokens;
+        const auto& new_tokens = update_info.new_tokens;
 
-    if (isPerfTest()) {
-        const_cast<torch::Tensor&>(new_tokens).zero_();
-    }
+        if (isPerfTest()) {
+            const_cast<torch::Tensor&>(new_tokens).zero_();
+        }
 
-    const int old_seq_length = seqLength();
-    auto      num_new_tokens = update_info.num_new_tokens;
-    int       cur_cached_len = seqLength() - 1;
+        const int old_seq_length = seqLength();
+        auto      num_new_tokens = update_info.num_new_tokens;
+        int       cur_cached_len = seqLength() - 1;
 
-    int error_token_id = 0;
-    if (!complete_token_ids_->update(new_tokens,
-                                     begin_time_us_,
-                                     num_new_tokens,
-                                     generate_input_->inputLength(),
-                                     maxTokenNum(),
-                                     vocab_size_,
-                                     hasNumBeams(),
-                                     streamId(),
-                                     error_token_id)) {
-        reportEventWithoutLock(StreamEvents::Error,
-                               ErrorCode::OUT_OF_VOCAB_RANGE,
-                               "output token id:" + std::to_string(error_token_id)
-                                   + " out of vocab size: " + std::to_string(vocab_size_));
-        return;
-    }
+        int error_token_id = 0;
+        if (!complete_token_ids_->update(new_tokens,
+                                         begin_time_us_,
+                                         num_new_tokens,
+                                         generate_input_->inputLength(),
+                                         maxTokenNum(),
+                                         vocab_size_,
+                                         hasNumBeams(),
+                                         streamId(),
+                                         error_token_id)) {
+            reportEventWithoutLock(StreamEvents::Error,
+                                   ErrorCode::OUT_OF_VOCAB_RANGE,
+                                   "output token id:" + std::to_string(error_token_id)
+                                       + " out of vocab size: " + std::to_string(vocab_size_));
+            return;
+        }
 
-    // update speculative output buffer
-    int  target_last_token = new_tokens.data_ptr<int>()[num_new_tokens - 1];
-    int* spec_tokens       = sp_output_buffer_->tokens.data_ptr<int>();
-    spec_tokens[0]         = target_last_token;
-    spec_tokens[1]         = update_info.draft_token;
-    propose_token_         = {target_last_token, update_info.draft_token};
+        if (k3TraceEnabled()) {
+            trace_buffer.record("stream.update.after_token_commit",
+                                {{"committed_token_ids", completeTokenIds()}},
+                                {{"stream_id", streamId()},
+                                 {"seq_length", static_cast<int64_t>(seqLength())},
+                                 {"old_seq_length", old_seq_length},
+                                 {"effective_new_tokens", num_new_tokens}});
+        }
 
-    sp_output_buffer_->hidden_states = update_info.draft_hidden_states;
-    sp_output_buffer_->all_probs     = update_info.draft_token_probs;
-    // Cache the per-stream GPU propose tokens for the next decode step.
-    // PDFUSION path provides this; PD-disaggregate path leaves it undefined and
-    // readers fall back to the CPU `tokens` tensor.
-    sp_output_buffer_->propose_tokens_gpu = update_info.draft_token_gpu;
+        // update speculative output buffer
+        int  target_last_token = new_tokens.data_ptr<int>()[num_new_tokens - 1];
+        int* spec_tokens       = sp_output_buffer_->tokens.data_ptr<int>();
+        spec_tokens[0]         = target_last_token;
+        spec_tokens[1]         = update_info.draft_token;
+        propose_token_         = {target_last_token, update_info.draft_token};
 
-    // for spec-decode linear attention, we need to adjust cache blocks
-    int nxt_cached_len   = seqLength() - 1;
-    int accept_token_num = nxt_cached_len - cur_cached_len;
-    if (accept_token_num > 1 && stream_cache_resource_) {
-        int seq_size_per_block = seqSizePerBlock();
+        sp_output_buffer_->hidden_states = update_info.draft_hidden_states;
+        sp_output_buffer_->all_probs     = update_info.draft_token_probs;
+        // Cache the per-stream GPU propose tokens for the next decode step.
+        // PDFUSION path provides this; PD-disaggregate path leaves it undefined and
+        // readers fall back to the CPU `tokens` tensor.
+        sp_output_buffer_->propose_tokens_gpu = update_info.draft_token_gpu;
 
-        // 1. swap cache blocks of accept tokens to corresponding blocks
-        auto [cached_src_block_idx, cached_des_block_idx] =
-            getCachedTokenBlockSwapIdx(cur_cached_len, nxt_cached_len, seq_size_per_block);
-        stream_cache_resource_->swapLinearBlocks(0, cached_src_block_idx, cached_des_block_idx);
+        // for spec-decode linear attention, we need to adjust cache blocks
+        int nxt_cached_len   = seqLength() - 1;
+        int accept_token_num = nxt_cached_len - cur_cached_len;
+        if (accept_token_num > 1 && stream_cache_resource_) {
+            int seq_size_per_block = seqSizePerBlock();
 
-        // 2. swap final block of accept tokens to the next sequence block
-        auto [src_block_idx, des_block_idx] =
-            getFinalTokenBlockSwapIdx(cur_cached_len, nxt_cached_len, seq_size_per_block);
-        stream_cache_resource_->swapLinearBlocks(0, src_block_idx, des_block_idx);
+            // 1. swap cache blocks of accept tokens to corresponding blocks
+            auto [cached_src_block_idx, cached_des_block_idx] =
+                getCachedTokenBlockSwapIdx(cur_cached_len, nxt_cached_len, seq_size_per_block);
+            stream_cache_resource_->swapLinearBlocks(0, cached_src_block_idx, cached_des_block_idx);
 
-        RTP_LLM_LOG_DEBUG("[stream %s (%d -> %d)] swap cache blocks: %d -> %d, %d -> %d",
-                          streamLogTag().c_str(),
-                          cur_cached_len + 1,
-                          nxt_cached_len + 1,
-                          cached_src_block_idx,
-                          cached_des_block_idx,
-                          src_block_idx,
-                          des_block_idx);
-    } else {
-        RTP_LLM_LOG_DEBUG("[stream %s (%d -> %d)] no swap cache blocks",
-                          streamLogTag().c_str(),
-                          cur_cached_len + 1,
-                          nxt_cached_len + 1);
-    }
+            // 2. swap final block of accept tokens to the next sequence block
+            auto [src_block_idx, des_block_idx] =
+                getFinalTokenBlockSwapIdx(cur_cached_len, nxt_cached_len, seq_size_per_block);
+            trace_buffer.record("mtp.linear_cache.block_swap",
+                                {},
+                                {{"stream_id", streamId()},
+                                 {"cached_length_before", cur_cached_len},
+                                 {"cached_length_after", nxt_cached_len},
+                                 {"cached_src_block", cached_src_block_idx},
+                                 {"cached_dest_block", cached_des_block_idx},
+                                 {"final_src_block", src_block_idx},
+                                 {"final_dest_block", des_block_idx}});
+            stream_cache_resource_->swapLinearBlocks(0, src_block_idx, des_block_idx);
 
-    // Publish completion while still holding mutex_. A concurrent block-table
-    // snapshot therefore sees either the pre-swap table with a pending epoch,
-    // or the post-swap table with the completed epoch, never a mixed state.
-    mtp_linear_swap_completed_epoch_ = std::max(mtp_linear_swap_completed_epoch_, update_info.mtp_async_epoch);
+            RTP_LLM_LOG_DEBUG("[stream %s (%d -> %d)] swap cache blocks: %d -> %d, %d -> %d",
+                              streamLogTag().c_str(),
+                              cur_cached_len + 1,
+                              nxt_cached_len + 1,
+                              cached_src_block_idx,
+                              cached_des_block_idx,
+                              src_block_idx,
+                              des_block_idx);
+        } else {
+            RTP_LLM_LOG_DEBUG("[stream %s (%d -> %d)] no swap cache blocks",
+                              streamLogTag().c_str(),
+                              cur_cached_len + 1,
+                              nxt_cached_len + 1);
+        }
 
-    // update normal output buffer
-    updateOutput({new_tokens,
-                  num_new_tokens,
-                  torch::Tensor(),
-                  torch::Tensor(),
-                  torch::Tensor(),
-                  torch::Tensor(),
-                  update_info.all_probs,
-                  torch::Tensor(),
-                  torch::Tensor(),
-                  torch::Tensor(),
-                  update_info.update_remote_generate,
-                  update_info.force_update_info});
+        // Publish completion while still holding mutex_. A concurrent block-table
+        // snapshot therefore sees either the pre-swap table with a pending epoch,
+        // or the post-swap table with the completed epoch, never a mixed state.
+        mtp_linear_swap_completed_epoch_ = std::max(mtp_linear_swap_completed_epoch_, update_info.mtp_async_epoch);
 
-    const int committed_num_new_tokens = std::max(0, seqLength() - old_seq_length);
-    if (committed_num_new_tokens > 0) {
-        updateLogitProcessorStatus(new_tokens, committed_num_new_tokens, torch::Tensor(), true);
-    }
-    validateStatefulLogitsProcessorState();
+        // update normal output buffer
+        updateOutput({new_tokens,
+                      num_new_tokens,
+                      torch::Tensor(),
+                      torch::Tensor(),
+                      torch::Tensor(),
+                      torch::Tensor(),
+                      update_info.all_probs,
+                      torch::Tensor(),
+                      torch::Tensor(),
+                      torch::Tensor(),
+                      update_info.update_remote_generate,
+                      update_info.force_update_info});
+
+        if (k3TraceEnabled()) {
+            trace_buffer.record("stream.update.after_output",
+                                {{"committed_token_ids", completeTokenIds()}},
+                                {{"stream_id", streamId()},
+                                 {"seq_length", static_cast<int64_t>(seqLength())},
+                                 {"old_seq_length", old_seq_length},
+                                 {"finished", isFinished()},
+                                 {"has_error", hasError()}});
+        }
+
+        const int committed_num_new_tokens = std::max(0, seqLength() - old_seq_length);
+        if (committed_num_new_tokens > 0) {
+            updateLogitProcessorStatus(new_tokens, committed_num_new_tokens, torch::Tensor(), true);
+        }
+        validateStatefulLogitsProcessorState();
+    };
+    run_update();
+    trace_buffer.flush();
+    trace_scope.finish();
 }
 
 GenerateStream::KVCacheBlockSnapshot GenerateStream::snapshotKVCacheBlocks() {
@@ -999,66 +1049,106 @@ GenerateStream::KVCacheBlockSnapshot GenerateStream::snapshotKVCacheBlocks() {
 
 void GenerateStream::update(const StreamUpdateInfo& update_info) {
     RTP_LLM_PROFILE_FUNCTION();
-    std::lock_guard<std::mutex> lock(*mutex_);
-    RTP_LLM_LOG_DEBUG("stream [%s] update", streamLogTag().c_str());
-    *is_context_stream_ = false;
-    if (hasError() && !update_info.force_update_info) {
-        return;
-    }
-    // Ignore stale worker updates after finish; committing them would duplicate
-    // tokens and touch KV blocks only deferred until this worker exits.
-    if (isFinished() && !update_info.force_update_info) {
-        return;
-    }
-
-    const auto& new_tokens     = update_info.new_tokens;
-    auto        num_new_tokens = update_info.num_new_tokens;
-
-    const int old_seq_length = seqLength();
-    int       error_token_id = 0;
-    if (!complete_token_ids_->update(new_tokens,
-                                     begin_time_us_,
-                                     num_new_tokens,
-                                     generate_input_->inputLength(),
-                                     maxTokenNum(),
-                                     vocab_size_,
-                                     hasNumBeams(),
-                                     streamId(),
-                                     error_token_id)) {
-        reportEventWithoutLock(StreamEvents::Error,
-                               ErrorCode::OUT_OF_VOCAB_RANGE,
-                               "output token id:" + std::to_string(error_token_id)
-                                   + " out of vocab size: " + std::to_string(vocab_size_));
-        return;
-    }
-
-    resizeSubGenerateStatus(update_info.new_tokens.size(0));
-
-    // TODO(xinfei.sxf) fix this (update_queue)
-    updateOutput(update_info);
-
-    bool is_done = getStatus() == StreamState::FINISHED;
-
-    const int committed_num_new_tokens = std::max(0, seqLength() - old_seq_length);
-    if (committed_num_new_tokens > 0) {
-        updateLogitProcessorStatus(update_info.new_tokens,
-                                   committed_num_new_tokens,
-                                   update_info.src_batch_indices,
-                                   /*stateful_only=*/is_done);
-        validateStatefulLogitsProcessorState();
-        if (hasError()) {
+    K3TraceScope     trace_scope("stream.update");
+    K3CpuTraceBuffer trace_buffer;
+    auto             run_update = [&]() {
+        std::lock_guard<std::mutex> lock(*mutex_);
+        RTP_LLM_LOG_DEBUG("stream [%s] update", streamLogTag().c_str());
+        if (k3TraceEnabled()) {
+            trace_buffer.record("stream.update.before",
+                                {{"committed_token_ids", completeTokenIds()}, {"new_tokens", update_info.new_tokens}},
+                                {{"stream_id", streamId()},
+                                 {"seq_length", static_cast<int64_t>(seqLength())},
+                                 {"input_length", inputLength()},
+                                 {"requested_new_tokens", update_info.num_new_tokens},
+                                 {"max_token_num", static_cast<int64_t>(maxTokenNum())},
+                                 {"max_new_tokens", generate_input_->generate_config->max_new_tokens},
+                                 {"max_thinking_tokens", generate_input_->generate_config->max_thinking_tokens},
+                                 {"finished", isFinished()},
+                                 {"has_error", hasError()},
+                                 {"force_update", update_info.force_update_info}});
+        }
+        *is_context_stream_ = false;
+        if (hasError() && !update_info.force_update_info) {
             return;
         }
-    }
-
-    if (!is_done || reuseCache()) {
-        // kv cache blocks must be updated if REUSE_CACHE is on, even the stream is done
-        auto update_res = updateKvCacheBlocks(update_info.src_batch_indices);
-        if (!update_res) {
-            reportEventWithoutLock(StreamEvents::Error, ErrorCode::MALLOC_FAILED, "update kv cache blocks failed");
+        // Ignore stale worker updates after finish; committing them would duplicate
+        // tokens and touch KV blocks only deferred until this worker exits.
+        if (isFinished() && !update_info.force_update_info) {
             return;
         }
-    }
+
+        const auto& new_tokens     = update_info.new_tokens;
+        auto        num_new_tokens = update_info.num_new_tokens;
+
+        const int old_seq_length = seqLength();
+        int       error_token_id = 0;
+        if (!complete_token_ids_->update(new_tokens,
+                                         begin_time_us_,
+                                         num_new_tokens,
+                                         generate_input_->inputLength(),
+                                         maxTokenNum(),
+                                         vocab_size_,
+                                         hasNumBeams(),
+                                         streamId(),
+                                         error_token_id)) {
+            reportEventWithoutLock(StreamEvents::Error,
+                                   ErrorCode::OUT_OF_VOCAB_RANGE,
+                                   "output token id:" + std::to_string(error_token_id)
+                                       + " out of vocab size: " + std::to_string(vocab_size_));
+            return;
+        }
+
+        if (k3TraceEnabled()) {
+            trace_buffer.record("stream.update.after_token_commit",
+                                {{"committed_token_ids", completeTokenIds()}},
+                                {{"stream_id", streamId()},
+                                 {"seq_length", static_cast<int64_t>(seqLength())},
+                                 {"old_seq_length", old_seq_length},
+                                 {"effective_new_tokens", num_new_tokens}});
+        }
+
+        resizeSubGenerateStatus(update_info.new_tokens.size(0));
+
+        // TODO(xinfei.sxf) fix this (update_queue)
+        updateOutput(update_info);
+
+        bool is_done = getStatus() == StreamState::FINISHED;
+
+        if (k3TraceEnabled()) {
+            trace_buffer.record("stream.update.after_output",
+                                {{"committed_token_ids", completeTokenIds()}},
+                                {{"stream_id", streamId()},
+                                 {"seq_length", static_cast<int64_t>(seqLength())},
+                                 {"old_seq_length", old_seq_length},
+                                 {"finished", isFinished()},
+                                 {"has_error", hasError()}});
+        }
+
+        const int committed_num_new_tokens = std::max(0, seqLength() - old_seq_length);
+        if (committed_num_new_tokens > 0) {
+            updateLogitProcessorStatus(update_info.new_tokens,
+                                       committed_num_new_tokens,
+                                       update_info.src_batch_indices,
+                                       /*stateful_only=*/is_done);
+            validateStatefulLogitsProcessorState();
+            if (hasError()) {
+                return;
+            }
+        }
+
+        if (!is_done || reuseCache()) {
+            // kv cache blocks must be updated if REUSE_CACHE is on, even the stream is done
+            auto update_res = updateKvCacheBlocks(update_info.src_batch_indices);
+            if (!update_res) {
+                reportEventWithoutLock(StreamEvents::Error, ErrorCode::MALLOC_FAILED, "update kv cache blocks failed");
+                return;
+            }
+        }
+    };
+    run_update();
+    trace_buffer.flush();
+    trace_scope.finish();
 }
 
 // src_batch_indices: [batch_size] int, the element must less than the batch_size of last step.

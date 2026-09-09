@@ -116,6 +116,7 @@ cc_library(
     name = "cuda_impl",
     srcs = ["//rtp_llm/models_py/bindings/core:exec_ctx_impl_srcs"],
     deps = [
+        "//rtp_llm/models_py/bindings/core:k3_trace",
         ":gpu_base",
         ":torch_beam_search_op_impl",
         "//rtp_llm/models_py/bindings/cuda/kernels/sampling:sampling",

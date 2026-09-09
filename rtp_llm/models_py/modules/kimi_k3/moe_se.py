@@ -25,6 +25,7 @@ from rtp_llm.models_py.modules.kimi_k3.mega_se_buf import (
 )
 from rtp_llm.models_py.modules.kimi_k3.moe import KimiK3LatentMoE
 from rtp_llm.ops import ParallelismConfig
+from rtp_llm.utils.k3_model_trace import record_module
 
 if TYPE_CHECKING:
     from rtp_llm.models.kimi_k3.kimi_k3 import KimiK3ModelConfig
@@ -394,6 +395,9 @@ class KimiK3LatentMoESE(KimiK3LatentMoE):
             hidden_states,
             self.weights[K3W.MOE_ROUTED_DOWN],
         )
+        record_module(self, "routing.expert_ids", expert_ids)
+        record_module(self, "routing.weights", routing_weights)
+        record_module(self, "routed_input", routed_input)
         routed_output, shared_output = self._mega_expert_sum_with_shared(
             routed_input,
             hidden_states,
@@ -401,12 +405,15 @@ class KimiK3LatentMoESE(KimiK3LatentMoE):
             routing_weights,
             sequence_parallel=sp_active,
         )
+        record_module(self, "experts.combined_output", routed_output)
+        record_module(self, "shared.output", shared_output)
         if self.routed_norm is not None:
             routed_output = self.routed_norm(routed_output.contiguous())
         routed_output = torch.matmul(
             routed_output,
             self.weights[K3W.MOE_ROUTED_UP],
         )
+        record_module(self, "routed_up", routed_output)
         output = routed_output + shared_output
         if valid_token_count is not None and valid_token_count < hidden_states.shape[0]:
             output = output.clone()

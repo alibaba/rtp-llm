@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/normal_engine/speculative/SpeculativeSampler.h"
 #include <algorithm>
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
+#include "rtp_llm/models_py/bindings/core/K3Trace.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 
@@ -8,6 +9,8 @@ namespace rtp_llm {
 namespace speculative {
 
 FastTopKSamplerOutput FastTopKSampler::forward(const torch::Tensor& logits, int top_k) {
+    K3TraceScope trace("mtp.draft_sample");
+    k3TraceEvent("mtp.draft_sample.logits", {{"logits", logits}}, {{"top_k", top_k}});
     FastTopKSamplerOutput output;
     auto                  draft_probs = torch::softmax(logits, -1);
 
@@ -30,7 +33,11 @@ FastTopKSamplerOutput FastTopKSampler::forward(const torch::Tensor& logits, int 
     }
 
     int batch_size = output.token_ids.size(0);
+    k3TraceEvent("mtp.draft_sample.before_vocab_mapping",
+                 {{"token_ids", output.token_ids}, {"proposal_probs", output.all_probs}, {"d2t_map", d2t_map_}});
     execMappingDraft2Target({output.token_ids, d2t_map_, batch_size, 0, 1});
+    k3TraceEvent("mtp.draft_sample.output", {{"target_vocab_token_ids", output.token_ids}});
+    trace.finish();
 
     return output;
 }
@@ -52,6 +59,7 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
                                      SamplerOutput&                      draft_sampler_output,
                                      SamplerOutput&                      target_sampler_output) const {
     RTP_LLM_PROFILE_SCOPE("speculative_sampler.batchSample");
+    K3TraceScope  trace("mtp.rejection_sample");
     torch::Device target_device = getTorchCudaDevice();
 
     int batch_size = streams.size();
@@ -75,6 +83,13 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
         torch::zeros({(long)batch_size}, torch::TensorOptions().dtype(torch::kBool).pinned_memory(true));
     int stream_idx = 0;
     for (const GenerateStreamPtr& stream : streams) {
+        k3TraceEvent("mtp.rejection_sample.row",
+                     {},
+                     {{"stream_id", stream->streamId()},
+                      {"row", stream_idx},
+                      {"force_accept", stream->forceSpAccept()},
+                      {"top1", stream->generateConfig()->top1()},
+                      {"propose_step", static_cast<int64_t>(propose_step_)}});
         do_sample[stream_idx] = !stream->generateConfig()->top1();
         stream_idx++;
     }
@@ -134,6 +149,13 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
         draft_token_probs_d_t = draft_probs_padding;
     }
 
+    k3TraceEvent("mtp.rejection_sample.inputs",
+                 {{"draft_probs", draft_token_probs_d_t},
+                  {"draft_tokens", draft_token_ids_d_t},
+                  {"target_probs", target_token_probs_d_t},
+                  {"target_tokens", target_token_ids_d_t},
+                  {"uniform_samples", uniform_samples_d},
+                  {"do_sample", do_sample_d}});
     {
         RTP_LLM_PROFILE_SCOPE("speculative_sampler.batchSample.execRejectionSampling");
         execRejectionSampling({
@@ -149,6 +171,9 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
     }
 
     RTP_LLM_PROFILE_SCOPE("speculative_sampler.batchSample.post_rejection_sampling");
+    k3TraceEvent(
+        "mtp.rejection_sample.kernel_output",
+        {{"accepted_tokens", output_token_ids_d}, {"accepted_length_including_bonus", output_accepted_token_num_d}});
 
     // forceSpAccept: override rejection sampling results for streams that requested
     // forced acceptance — accept all draft tokens plus the target bonus token.
@@ -185,9 +210,15 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
 
     // use async sample here, we assume accept all tokens
     // so we need to reset -1 to 0 in output_token_ids_d
+    k3TraceEvent(
+        "mtp.rejection_sample.after_force_accept",
+        {{"accepted_tokens", output_token_ids_d}, {"accepted_length_including_bonus", output_accepted_token_num_d}});
     output_token_ids_d.index_put_({output_token_ids_d == -1}, 0);
     sample_output.accept_tokens = output_token_ids_d;
     sample_output.accept_len    = output_accepted_token_num_d;
+    k3TraceEvent("mtp.rejection_sample.output",
+                 {{"accepted_tokens", sample_output.accept_tokens},
+                  {"accepted_length_including_bonus", sample_output.accept_len}});
 
     sample_output.accept_tokens_cpu = sample_output.accept_tokens.to(torch::kCPU, true);
     sample_output.accept_len_cpu    = sample_output.accept_len.to(torch::kCPU, true);
@@ -199,6 +230,7 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
         sample_output.target_probs_cpu = target_sampler_output.all_probs.to(torch::kCPU, true);
     }
     sample_output.transfer_done_event->record(cuda_graph::graphGetCurrentStream());
+    trace.finish();
 }
 
 void SpeculativeSampler::streamSample(SpeculativeSamplerOutput&           sample_output,

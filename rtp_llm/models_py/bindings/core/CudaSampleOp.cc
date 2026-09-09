@@ -1,6 +1,7 @@
 #include "rtp_llm/models_py/bindings/core/OpData.h"
 #include "rtp_llm/models_py/bindings/core/CommonDefines.h"
 #include "rtp_llm/models_py/bindings/core/TensorHolder.h"
+#include "rtp_llm/models_py/bindings/core/K3Trace.h"
 
 #if USING_CUDA
 #include <ATen/cuda/CUDAContext.h>
@@ -105,6 +106,7 @@ void processLogits(const GreedyParams&  params,
                                            cur_stream);
     }
 
+    k3TraceEvent("sampling.after_temperature", {{"logits", params.logits}});
     if (params.repetition_penalty.has_value()) {
         RTP_LLM_CHECK(params.presence_penalty.has_value() && params.frequency_penalty.has_value());
         const auto& repetition_penalty = params.repetition_penalty.value();
@@ -130,6 +132,14 @@ void processLogits(const GreedyParams&  params,
             auto repetition_penalty_gpu = repetition_penalty.to(torch::kCUDA, true);
             auto presence_penalty_gpu   = presence_penalty.to(torch::kCUDA, true);
             auto frequency_penalty_gpu  = frequency_penalty.to(torch::kCUDA, true);
+            k3TraceEvent("sampling.penalty_inputs",
+                         {{"logits", params.logits},
+                          {"history_transposed", transposed_tokens},
+                          {"effective_sequence_lengths", sequence_lengths_gpu},
+                          {"repetition_penalty", repetition_penalty_gpu},
+                          {"presence_penalty", presence_penalty_gpu},
+                          {"frequency_penalty", frequency_penalty_gpu}},
+                         {{"step", static_cast<int64_t>(step)}, {"max_input_length", static_cast<int64_t>(step + 1)}});
             invokeBatchApplyRepetitionPenalty(params.logits.data_ptr<float>(),
                                               penalty_ws.data_ptr<int32_t>(),
                                               repetition_penalty_gpu.data_ptr<float>(),
@@ -143,10 +153,12 @@ void processLogits(const GreedyParams&  params,
                                               step + 1,  // max_input_length
                                               step + 1,  // step
                                               cur_stream);
+            k3TraceEvent("sampling.penalty_output", {{"logits", params.logits}, {"penalty_workspace", penalty_ws}});
             // NOTE: here step is max_len - 1
         }
     }
 
+    k3TraceEvent("sampling.after_penalty", {{"logits", params.logits}});
     if (decoder_batch_size && params.no_repeat_ngram_size.has_value()) {
         const auto& no_repeat_ngram_size = params.no_repeat_ngram_size.value();
         if (any_of(no_repeat_ngram_size.data_ptr<int32_t>(),
@@ -180,6 +192,7 @@ void processLogits(const GreedyParams&  params,
                                                         cur_stream);
         }
     }
+    k3TraceEvent("sampling.after_ngram", {{"logits", params.logits}});
 }
 
 }  // anonymous namespace
@@ -310,6 +323,20 @@ static GreedyOutput flashinferSampleGreedy(const GreedyParams& params, const tor
 }
 
 GreedyOutput sampleGreedy(const GreedyParams& params) {
+    K3TraceScope trace("sampling.greedy");
+    k3TraceEvent("sampling.inputs",
+                 {{"logits", params.logits},
+                  {"history", params.token_ids},
+                  {"input_lengths", params.input_lengths},
+                  {"sequence_lengths", params.sequence_lengths},
+                  {"temperature", params.temperature},
+                  {"top_k", params.top_k},
+                  {"top_p", params.top_p},
+                  {"repetition_penalty", params.repetition_penalty.value_or(torch::Tensor())},
+                  {"presence_penalty", params.presence_penalty.value_or(torch::Tensor())},
+                  {"frequency_penalty", params.frequency_penalty.value_or(torch::Tensor())},
+                  {"do_sample", params.do_sample.value_or(torch::Tensor())}},
+                 {{"step", static_cast<int64_t>(params.step)}});
     // [batch_size, step + 1] — clone to GPU
     auto device_tokens = params.token_ids.to(torch::kCUDA, true);
     // [step + 1, batch_size]
@@ -338,6 +365,9 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
         }
     }
 
+    k3TraceEvent("sampling.processed_logits",
+                 {{"logits", params.logits}},
+                 {{"need_do_sample", need_do_sample}, {"has_not_do_sample", has_not_do_sample}});
     // fast path for topk = 1
     auto top_k_ptr = reinterpret_cast<uint32_t*>(params.top_k.data_ptr<int32_t>());
     if (std::all_of(top_k_ptr, top_k_ptr + batch_size, [&](auto t) { return t == 1; })
@@ -350,11 +380,18 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
 
         auto output_tokens = transposed_tokens.transpose(0, 1).contiguous();
         params.token_ids.copy_(output_tokens, true);
-
+        k3TraceEvent("sampling.output", {{"token_ids", params.token_ids}});
+        trace.finish();
         return GreedyOutput{};
     }
 
-    return flashinferSampleGreedy(params, transposed_tokens);
+    auto output = flashinferSampleGreedy(params, transposed_tokens);
+    k3TraceEvent("sampling.output",
+                 {{"token_ids", params.token_ids},
+                  {"success", output.success},
+                  {"all_probs", params.output_all_probs.value_or(torch::Tensor())}});
+    trace.finish();
+    return output;
 }
 
 void chainSpeculativeSampling(const SpeculativeSamplingParams& params) {

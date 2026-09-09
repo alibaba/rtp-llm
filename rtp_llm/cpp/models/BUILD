@@ -128,6 +128,7 @@ cc_library(
         "*.cc",
     ]),
     deps = [
+        "//rtp_llm/models_py/bindings/core:k3_trace",
         ":sample_infos",
         ":logits_processor",
         ":dfa_utils",

@@ -604,6 +604,11 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs& inputs, CudaGraphSt
             graph_instances_[state.current_real_graph_bs].mem_hold_.decoder_layer_hidden_states_.slice(
                 0, 0, state.seq_len_sum);
     }
+    if (k3_trace_enabled_) {
+        py::gil_scoped_acquire gil;
+        const int key = is_prefill_cuda_graph_mode_ ? state.current_real_graph_seq_len : state.current_real_graph_bs;
+        py_instance_.attr("_k3_trace_replay")(k3TraceKey(key), inputs);
+    }
     // record forward done event
     forward_event_.record(cuda_graph::graphGetCurrentStream());
     RTP_LLM_LOG_DEBUG("Replay End");
@@ -1036,12 +1041,21 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
     // WarmUp twice (params already prepared in attn impl __init__/create_params when instance was created)
     RTP_LLM_LOG_INFO("WarmUp for %s %d start.", key_type, key);
     auto attn_pyobj = graph_instances_[key].mem_hold_.attn_pyobj_;
+    if (k3_trace_enabled_) {
+        py_instance_.attr("_k3_trace_warmup")(true);
+    }
     try {
         py_forward_method_(inputs, attn_pyobj);
         py_forward_method_(inputs, attn_pyobj);
     } catch (const py::error_already_set& e) {
+        if (k3_trace_enabled_) {
+            py_instance_.attr("_k3_trace_warmup")(false);
+        }
         RTP_LLM_LOG_ERROR("WarmUp forward failed for %s %d: %s", key_type, key, e.what());
         throw;
+    }
+    if (k3_trace_enabled_) {
+        py_instance_.attr("_k3_trace_warmup")(false);
     }
     RTP_LLM_LOG_INFO("WarmUp for %s %d successfully.", key_type, key);
 
@@ -1062,6 +1076,21 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
         }
         RTP_LLM_LOG_INFO("Capture for %s %d begin.", key_type, key);
         PyModelOutputs outputs;
+        struct TraceCaptureGuard {
+            py::object& instance;
+            bool        active;
+            ~TraceCaptureGuard() noexcept {
+                if (active) {
+                    try {
+                        instance.attr("_k3_trace_capture_abort")();
+                    } catch (...) {}
+                }
+            }
+        } trace_guard{py_instance_, false};
+        if (k3_trace_enabled_) {
+            py_instance_.attr("_k3_trace_capture_begin")(k3TraceKey(key));
+            trace_guard.active = true;
+        }
         {
             cuda_graph::graphCaptureBegin(graph, shared_graph_pool_);
             CudaGraphCaptureGuard capture_guard;
@@ -1081,6 +1110,10 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
             }
             graph_instances_[key].mem_hold_.decoder_layer_hidden_states_.copy_(outputs.hidden_states);
             graph.capture_end();
+        }
+        if (k3_trace_enabled_) {
+            py_instance_.attr("_k3_trace_capture_end")();
+            trace_guard.active = false;
         }
 
         if (enable_cuda_graph_debug_mode_) {

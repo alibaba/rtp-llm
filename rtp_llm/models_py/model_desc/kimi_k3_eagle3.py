@@ -7,7 +7,13 @@ from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models.kimi_k3.kimi_k3 import KimiK3ModelConfig
 from rtp_llm.models_py.model_desc.block_map import select_block_map_for_layer
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
-from rtp_llm.models_py.modules import DenseMLP, Embedding, LinearFactory, MlaAttention, RMSNorm
+from rtp_llm.models_py.modules import (
+    DenseMLP,
+    Embedding,
+    LinearFactory,
+    MlaAttention,
+    RMSNorm,
+)
 from rtp_llm.models_py.modules.base.common.multimodal_embedding import (
     MultimodalEmbeddingInjector,
 )
@@ -17,6 +23,11 @@ from rtp_llm.models_py.modules.kimi_k3.utils import (
 )
 from rtp_llm.ops import ParallelismConfig
 from rtp_llm.ops.compute_ops import PyModelInputs, PyModelOutputs
+from rtp_llm.utils.k3_model_trace import (
+    install_model_trace,
+    record_model,
+    record_module,
+)
 from rtp_llm.utils.model_weight import W
 
 
@@ -35,10 +46,12 @@ class _GatedEagle3MLA(MlaAttention):
             layernorm_eps=config.layernorm_eps,
             quant_config=config.quant_config,
         )
+
     def _project_qkv_a_input(
         self, hidden_states: torch.Tensor
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         fused_qkv_gate = self.fused_qkv_a_proj(hidden_states)
+        record_module(self, "qkv_gate_projection", fused_qkv_gate)
         qkv_width = self.q_lora_rank + self.kv_lora_rank + self.qk_rope_head_dim
         return fused_qkv_gate[..., :qkv_width], fused_qkv_gate[..., qkv_width:]
 
@@ -47,7 +60,11 @@ class _GatedEagle3MLA(MlaAttention):
     ) -> torch.Tensor:
         if output_gate is None:
             raise RuntimeError("Kimi K3 Eagle3 MLA requires an output gate")
-        return attn_output * torch.sigmoid(output_gate.reshape_as(attn_output))
+        record_module(self, "attention_before_gate", attn_output)
+        record_module(self, "raw_output_gate", output_gate)
+        output = attn_output * torch.sigmoid(output_gate.reshape_as(attn_output))
+        record_module(self, "attention_after_gate", output)
+        return output
 
 
 class _KimiK3Eagle3Layer(nn.Module):
@@ -79,9 +96,11 @@ class _KimiK3Eagle3Layer(nn.Module):
         attention_input = torch.cat(
             (self.embedding_norm(embedding), self.hidden_norm(hidden_states)), dim=-1
         )
+        record_module(self, "attention_input", attention_input)
         hidden_states = hidden_states + self.attention(
             attention_input, fmha_impl, kv_cache
         )
+        record_module(self, "attention_residual", hidden_states)
         return hidden_states + self.mlp(self.post_attention_norm(hidden_states))
 
 
@@ -121,6 +140,7 @@ class KimiK3Eagle3Model(GptModelBase):
         self.final_norm = RMSNorm(
             weights.get_global_weight(W.final_ln_gamma), eps=model_config.layernorm_eps
         )
+        install_model_trace(self, "eagle3")
 
     def _embed_shifted_multimodal(self, inputs: PyModelInputs) -> torch.Tensor:
         input_ids = inputs.input_ids
@@ -164,6 +184,7 @@ class KimiK3Eagle3Model(GptModelBase):
         if inputs.input_hiddens is None:
             raise ValueError("Kimi K3 EAGLE-3 requires merged auxiliary hidden states")
         embedding = self._embed_shifted_multimodal(inputs)
+        record_model("eagle3.shifted_embedding", embedding)
         hidden_width = inputs.input_hiddens.shape[-1]
         if hidden_width == self.hidden_size * 3:
             # The teacher/target pass supplies the three selected target-layer
@@ -189,7 +210,10 @@ class KimiK3Eagle3Model(GptModelBase):
             fmha_impl,
             self.kv_cache.get_layer_cache(0) if self.kv_cache else None,
         )
-        return PyModelOutputs(self.final_norm(hidden_states), fmha_impl.fmha_params)
+        record_model("eagle3.hidden_prenorm", hidden_states)
+        output = self.final_norm(hidden_states)
+        record_model("eagle3.hidden_postnorm", output)
+        return PyModelOutputs(output, fmha_impl.fmha_params)
 
 
 __all__ = ["KimiK3Eagle3Model"]

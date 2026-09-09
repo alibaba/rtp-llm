@@ -2,6 +2,14 @@ load("//:def.bzl", "rpm_library", "copts")
 load("//bazel:arch_select.bzl", "torch_deps")
 
 cc_library(
+    name = "k3_trace",
+    hdrs = ["K3Trace.h"],
+    deps = torch_deps(),
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "types_hdr",
     hdrs = [
         "Types.h",
@@ -257,6 +265,7 @@ cc_library(
         "CudaBeamSearchOp.cc",
     ],
     deps = [
+        ":k3_trace",
         ":exec_ops_hdr",
         ":device_data",
         ":op_data",

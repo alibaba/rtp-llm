@@ -4,6 +4,7 @@
 #include "rtp_llm/cpp/models/logits_processor/BaseLogitsProcessor.h"
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorStates.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
+#include "rtp_llm/models_py/bindings/core/K3Trace.h"
 #include <unordered_set>
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 
@@ -37,7 +38,17 @@ Sampler::Sampler(const SamplerInitParams& params): copy_stream_(cuda_graph::grap
 SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
     RTP_LLM_PROFILE_SCOPE("sampler.forward");
+    K3TraceScope trace("sampler.forward");
+    k3TraceEvent("sampler.inputs",
+                 {{"logits", inputs.logits},
+                  {"history", inputs.token_ids},
+                  {"input_lengths", inputs.input_lengths},
+                  {"sequence_lengths", inputs.sequence_lengths}},
+                 {{"phase", static_cast<int64_t>(inputs.phase)},
+                  {"spec_propose_step", inputs.spec_propose_step},
+                  {"step", static_cast<int64_t>(inputs.step)}});
     preprocessLogits(inputs);
+    k3TraceEvent("sampler.after_logits_processors", {{"logits", inputs.logits}});
 
     uint64_t max_seq_len   = inputs.token_ids.size(1);
     auto     num_beams_in  = inputs.num_beams_in.data_ptr<int64_t>();
@@ -219,6 +230,9 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
     }
 
     buffer_holder_.release();
+    k3TraceEvent("sampler.output",
+                 {{"token_ids", all_token_ids_out}, {"all_probs", inputs.all_probs}, {"success", all_success}});
+    trace.finish();
     return SamplerOutput({std::move(all_token_ids_out),
                           std::move(all_cum_log_probs_out),
                           std::move(inputs.all_probs),

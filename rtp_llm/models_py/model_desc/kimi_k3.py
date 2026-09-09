@@ -83,6 +83,11 @@ from rtp_llm.ops.compute_ops import (
     PyModelInputs,
     PyModelOutputs,
 )
+from rtp_llm.utils.k3_model_trace import (
+    install_model_trace,
+    record_model,
+    record_model_inputs,
+)
 from rtp_llm.utils.model_weight import W
 
 if TYPE_CHECKING:
@@ -262,6 +267,7 @@ class KimiK3DecoderLayer(nn.Module):
         attention_inputs: Optional[PyAttentionInputs] = None,
         fmha_impl: Any = None,
     ) -> KimiK3DecoderOutput:
+        record_model(f"main.layers.{self.layer_idx}.input", hidden_states)
         cu_seqlens = attn_meta.cu_seqlens
         mode = attn_meta.mode
         sequence_parallel = attn_meta.sequence_parallel
@@ -304,6 +310,10 @@ class KimiK3DecoderLayer(nn.Module):
             prefix_sum = None
         active_blocks = previous_blocks + int(writes_block)
         active_block_residual = block_residual[:, :active_blocks]
+        record_model(f"main.layers.{self.layer_idx}.attention_input", attention_input)
+        record_model(
+            f"main.layers.{self.layer_idx}.active_residual_bank", active_block_residual
+        )
         if self.is_kda:
             attention_output = self.self_attn(
                 attention_input,
@@ -360,12 +370,15 @@ class KimiK3DecoderLayer(nn.Module):
             delta=attention_delta,
             num_blocks=active_blocks,
         )
+        record_model(f"main.layers.{self.layer_idx}.mlp_input", normalized_mlp_input)
+        record_model(f"main.layers.{self.layer_idx}.prefix_sum", prefix_sum)
         mlp_output = self.mlp(
             normalized_mlp_input,
             sequence_parallel=sequence_parallel,
             valid_token_count=local_valid_tokens,
         )
         output = prefix_sum + mlp_output
+        record_model(f"main.layers.{self.layer_idx}.output_before_gather", output)
         if decode_sp:
             output = all_gather_trim(output, logical_tokens, group=Group.TP)
         return KimiK3DecoderOutput(output, block_residual)
@@ -451,6 +464,7 @@ class KimiK3Model(GptModelBase):
         self._prefill_mtp_draft_workspace: Optional[torch.Tensor] = None
         self._whole_chunk_prefill_active = False
         self._prefill_static_attn_res_bank: Optional[torch.Tensor] = None
+        install_model_trace(self, "main")
 
     def initialize(self, init_resource: PyModelInitResources) -> bool:
         """Bind runtime resources and reserve Prefill collective workspaces."""
@@ -1051,6 +1065,7 @@ class KimiK3Model(GptModelBase):
         round_plan: Optional[KimiK3ChunkRound] = None,
         chunk_publish_context: Optional[KimiK3ChunkPublishContext] = None,
     ) -> PyModelOutputs:
+        record_model_inputs("main.round.inputs", inputs)
         attention_inputs = inputs.attention_inputs
         if attention_inputs is None:
             raise ValueError("Kimi K3 requires PyAttentionInputs")

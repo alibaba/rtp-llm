@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <cstdint>
 #include <unordered_map>
 #include <vector>
 #include <pybind11/embed.h>
@@ -50,6 +51,7 @@ public:
         max_bs_               = graph_params.max_context_batch_size;
         py_attn_pyobj_method_ = py_instance_.attr("prepare_fmha_impl");
         py_forward_method_    = py_instance_.attr("forward");
+        k3_trace_enabled_     = py::hasattr(py_instance_, "_k3_trace_capture_begin");
         options_cuda_int32_   = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA).requires_grad(false);
         options_cpu_int32_    = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU).requires_grad(false);
         options_cuda_float_ = torch::TensorOptions().dtype(model_data_type_).device(torch::kCUDA).requires_grad(false);
@@ -98,6 +100,9 @@ public:
 private:
     // Common capture logic for both prefill and decode
     void captureOneGraphInstance(int key, const char* key_type);
+    std::string k3TraceKey(int key) const {
+        return std::to_string(reinterpret_cast<uintptr_t>(this)) + ":" + std::to_string(key);
+    }
     // Common replay and sync check logic
     void replayAndSyncCheck(int key, const char* key_type);
     // Common input preparation logic for capture
@@ -122,6 +127,7 @@ private:
     void                    initCaptureAttentionInputsPost();
     py::object              py_forward_method_;
     py::object              py_attn_pyobj_method_;
+    bool                    k3_trace_enabled_{false};
     bool                    enable_cuda_graph_{false};
     bool                    is_prefill_cuda_graph_mode_{false};
     bool                    is_target_verify_{false};

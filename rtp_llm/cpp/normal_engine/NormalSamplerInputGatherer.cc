@@ -5,6 +5,7 @@
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorStates.h"
 #include "rtp_llm/cpp/utils/TensorDebugUtils.h"
+#include "rtp_llm/models_py/bindings/core/K3Trace.h"
 
 namespace rtp_llm {
 
@@ -12,6 +13,7 @@ absl::StatusOr<SamplerInputs> NormalSamplerInputGatherer::gather(const StreamGro
                                                                  const GptModelInputs&  model_inputs,
                                                                  const GptModelOutputs& model_output) const {
     (void)model_inputs;
+    K3TraceScope trace("sampler.gather");
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
     RTP_LLM_CHECK(!stream_groups.empty());
     auto all_streams          = stream_groups.allStreams();
@@ -36,6 +38,14 @@ absl::StatusOr<SamplerInputs> NormalSamplerInputGatherer::gather(const StreamGro
         auto current_batch_size = stream->currentBatchSize();
         auto sampler_batch_size =
             stream->needTilingForSampling() ? stream->nextBatchSize() : stream->currentBatchSize();
+
+        k3TraceEvent("sampler.history_rows",
+                     {{"committed_token_ids", complete_token_ids}},
+                     {{"stream_id", stream->streamId()},
+                      {"first_row", batch_idx},
+                      {"row_count", sampler_batch_size},
+                      {"committed_length", static_cast<int64_t>(seq_len)},
+                      {"is_prefill", stream->isContextStream()}});
 
         for (int i = 0; i < sampler_batch_size; ++i) {
             int cur_batch = std::min(i, current_batch_size - 1);
@@ -96,6 +106,12 @@ absl::StatusOr<SamplerInputs> NormalSamplerInputGatherer::gather(const StreamGro
                       tensorDebugStringWithData<float>(sampler_inputs.logits.cpu(), 10).c_str());
 
     RTP_LLM_LOG_DEBUG("gatherSamplerInput done");
+    k3TraceEvent("sampler.gathered",
+                 {{"history", sampler_inputs.token_ids},
+                  {"logits", sampler_inputs.logits},
+                  {"input_lengths", sampler_inputs.input_lengths},
+                  {"sequence_lengths", sampler_inputs.sequence_lengths}});
+    trace.finish();
     return std::move(sampler_inputs);
 }
 

@@ -16,6 +16,7 @@ from rtp_llm.models_py.modules.kimi_k3.utils import (
     sequence_offsets,
 )
 from rtp_llm.ops.compute_ops import PyModelOutputs
+from rtp_llm.utils.k3_model_trace import install_model_trace, record_model
 from rtp_llm.utils.model_weight import W
 
 
@@ -81,6 +82,7 @@ class KimiK3MtpLayer(nn.Module):
         self, embedding, previous_h, positions, fmha_impl, kv_cache, attention_inputs
     ):
         embedding = torch.where(positions.reshape(-1, 1) == 0, 0, embedding)
+        record_model("mtp.embedding_position_mask", embedding)
         x = self.eh_proj(
             torch.cat(
                 (self.enorm(embedding), self.hnorm(previous_h.contiguous())), dim=-1
@@ -89,6 +91,7 @@ class KimiK3MtpLayer(nn.Module):
         a = x + self.attention(
             self.input_norm(x), fmha_impl, kv_cache, attention_inputs=attention_inputs
         )
+        record_model("mtp.attention_residual", a)
         return a + self.moe(self.post_norm(a))
 
 
@@ -134,6 +137,7 @@ class KimiK3MtpModel(GptModelBase):
         self._decode_role = False
         self._recurrent: Optional[torch.Tensor] = None
         self._recurrent_valid_tokens = 0
+        install_model_trace(self, "mtp")
 
     def initialize(self, init_resource):
         super().initialize(init_resource)
@@ -198,6 +202,7 @@ class KimiK3MtpModel(GptModelBase):
                 "K3 MTP requires one pre-norm hidden state of width H per token"
             )
         positions = mtp_positions(inputs)
+        record_model("mtp.positions", positions)
         embedding = self._embed_shifted_tokens(inputs)
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(inputs)

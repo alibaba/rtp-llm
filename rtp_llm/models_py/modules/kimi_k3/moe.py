@@ -17,6 +17,7 @@ from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
 from rtp_llm.models_py.modules.base import GroupTopK, RMSNorm
 from rtp_llm.models_py.triton_kernels.common.activation import situ_and_mul
 from rtp_llm.ops import ParallelismConfig
+from rtp_llm.utils.k3_model_trace import record_module
 
 if TYPE_CHECKING:
     from rtp_llm.models.kimi_k3.kimi_k3 import KimiK3ModelConfig
@@ -177,6 +178,7 @@ class KimiK3LatentMoE(nn.Module):
                 self.ffn_tp_size,
             )
         shared_gate_up = F.linear(hidden_states, shared_gate_up_weight)
+        record_module(self, "shared.gate_up", shared_gate_up)
         if self.shared_expert_weight_shard:
             del shared_gate_up_weight
 
@@ -191,6 +193,7 @@ class KimiK3LatentMoE(nn.Module):
             self.linear_beta,
         )
         del shared_gate, shared_up, shared_gate_up
+        record_module(self, "shared.activation", shared_activation)
 
         shared_down_weight = self.weights[K3W.MOE_SHARED_DOWN]
         if self.shared_expert_weight_shard:
@@ -199,6 +202,7 @@ class KimiK3LatentMoE(nn.Module):
                 self.ffn_tp_size,
             )
         shared_output = torch.matmul(shared_activation, shared_down_weight)
+        record_module(self, "shared.down", shared_output)
         if self.shared_expert_weight_shard:
             del shared_down_weight
         return shared_output
@@ -498,9 +502,8 @@ class KimiK3LatentMoE(nn.Module):
                 hidden_states, router_weight, out_dtype=torch.float32
             )
         else:
-            router_logits = torch.matmul(
-                hidden_states.float(), router_weight.float()
-            )
+            router_logits = torch.matmul(hidden_states.float(), router_weight.float())
+        record_module(self, "router_logits", router_logits)
         if self._group_topk.fused_sigmoid_supported(
             router_logits,
             correction_bias,
@@ -649,15 +652,20 @@ class KimiK3LatentMoE(nn.Module):
                 expert_ids[valid_token_count:] = 0
                 routing_weights[valid_token_count:] = 0
         routed_input = torch.matmul(hidden_states, self.weights[K3W.MOE_ROUTED_DOWN])
+        record_module(self, "routing.expert_ids", expert_ids)
+        record_module(self, "routing.weights", routing_weights)
+        record_module(self, "routed_input", routed_input)
         routed_output = self._mega_expert_sum(
             routed_input,
             expert_ids,
             routing_weights,
             sequence_parallel=sp_active,
         )
+        record_module(self, "experts.combined_output", routed_output)
         if self.routed_norm is not None:
             routed_output = self.routed_norm(routed_output.contiguous())
         routed_output = torch.matmul(routed_output, self.weights[K3W.MOE_ROUTED_UP])
+        record_module(self, "routed_up", routed_output)
         shared_output = self._shared_expert_forward(hidden_states)
         output = routed_output + shared_output
         if valid_token_count is not None and valid_token_count < hidden_states.shape[0]:

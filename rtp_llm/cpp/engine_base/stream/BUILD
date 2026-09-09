@@ -52,6 +52,7 @@ cc_library(
         ":generate_types",
         ":generate_config",
         ":complete_token_ids",
+        "//rtp_llm/models_py/bindings/core:k3_trace",
         "//rtp_llm/cpp/engine_base/system_prompt:system_prompt",
         "//rtp_llm/cpp/models:models",
         "//rtp_llm/cpp/cache:cache",

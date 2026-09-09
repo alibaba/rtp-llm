@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/models/PyWrappedModel.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
+#include "rtp_llm/models_py/bindings/core/K3Trace.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 #include "rtp_llm/cpp/utils/utils.h"
 #include "rtp_llm/cpp/model_utils/AttentionConfig.h"
@@ -1251,6 +1252,9 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
             }
         }
 
+        k3TraceEvent("model.lm_head.local",
+                     {{"hidden", last_hidden}, {"logits", logits}, {"lm_output_indexes", inputs.lm_output_indexes}},
+                     {{"tp_rank", device_props_.tp_rank}, {"tp_size", device_props_.tp_size}});
         printTorchTensorData(logits, "logits");
         if (device_props_.tp_size > 1) {
             RTP_LLM_PROFILE_SCOPE("py_model.forwardPostLayers(tp_sync_logits)");
@@ -1262,6 +1266,7 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
             // FP32. The BF16 rounding point is observable for tied argmaxes.
             logits = logits.to(dataTypeToTorchType(description_.data_type)).to(torch::kFloat32);
         }
+        k3TraceEvent("model.lm_head.output", {{"logits", logits}});
         if (check_nan_) {
             RTP_LLM_CHECK_WITH_INFO(!torch::isnan(last_hidden).any().item<bool>(), "NAN detected in last_hidden");
             RTP_LLM_CHECK_WITH_INFO(!torch::isnan(logits).any().item<bool>(), "NAN detected in logits");
@@ -1308,6 +1313,9 @@ GptModelOutputs PyWrappedModel::forwardPostLayersLastHidden(torch::Tensor hidden
             logits = torch::mm(last_hidden.to(lm_head->kernel.dtype()), lm_head->kernel.t()).to(torch::kFloat32);
         }
     }
+    k3TraceEvent("model.lm_head_selected.local",
+                 {{"hidden", last_hidden}, {"logits", logits}, {"lm_output_indexes", inputs.lm_output_indexes}},
+                 {{"tp_rank", device_props_.tp_rank}, {"tp_size", device_props_.tp_size}});
     printTorchTensorData(logits, "logits");
     if (device_props_.tp_size > 1) {
         RTP_LLM_PROFILE_SCOPE("py_model.forwardPostLayersLastHidden(tp_sync_logits)");
@@ -1323,6 +1331,7 @@ GptModelOutputs PyWrappedModel::forwardPostLayersLastHidden(torch::Tensor hidden
     }
     // 3rd field (all_hidden_states) is the small [num_lm, hidden_size] — the whole
     // point of this path is to never materialize the full [seq, hidden] sequence.
+    k3TraceEvent("model.lm_head_selected.output", {{"logits", logits}});
     return {logits, last_hidden, last_hidden, torch::Tensor(), torch::Tensor()};
 }
 
