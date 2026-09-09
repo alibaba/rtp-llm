@@ -45,7 +45,7 @@ class KimiK3Fp8WeightTest(unittest.TestCase):
         width = 4 * 12288 + 128 + 96
         weight = torch.arange(width, dtype=torch.float32)[:, None].expand(width, 128)
         scales = torch.arange((width + 127) // 128, dtype=torch.float32)[:, None]
-        for tp in (1, 2, 4, 8):
+        for tp in (1, 2, 4, 8, 16):
             for rank in range(tp):
                 out = wrapper._split(
                     {wrapper.kernel.name: weight, wrapper.scale.name: scales},
@@ -67,7 +67,7 @@ class KimiK3Fp8WeightTest(unittest.TestCase):
 
     def test_bounded_scratch_quantization_is_bitwise_equal(self):
         torch.manual_seed(19)
-        for rows in (96, 2112, 6368):
+        for rows in (96, 2112, 3296, 6368):
             raw = torch.randn(rows, 256, dtype=torch.bfloat16)
             raw[: min(rows, 128)] = 0
             for ue8m0 in (False, True):
@@ -88,7 +88,7 @@ class KimiK3Fp8WeightTest(unittest.TestCase):
             wrapper = KimiK3LoadFp8Weight(source, Fp8BlockWiseQuantConfig())
             raw = torch.ones(rows, 128, dtype=torch.bfloat16)
             q, scales = per_block_cast_to_fp8(raw, 128, use_ue8m0=True)
-            for tp in (1, 2, 4, 8):
+            for tp in (1, 2, 4, 8, 16):
                 for rank in range(tp):
                     out = wrapper._split(
                         {wrapper.kernel.name: q, wrapper.scale.name: scales},
@@ -109,24 +109,24 @@ class KimiK3Fp8WeightTest(unittest.TestCase):
                     )
 
     def test_kvb_derived_weights_use_final_quantized_values(self):
-        cfg = MlaConfig(head_num=8, nope_head_dim=128, v_head_dim=128, kv_lora_rank=128)
+        cfg = MlaConfig(head_num=32, nope_head_dim=128, v_head_dim=128, kv_lora_rank=128)
         source = MlaAttnAtomicWeight(W.mla_kv_b_w, [], config=cfg)
         wrapper = KimiK3LoadFp8Weight(
             source, Fp8BlockWiseQuantConfig(), derive_mla=True
         )
         wrapper.use_ue8m0 = False
         torch.manual_seed(7)
-        raw = torch.randn(2048, 128, dtype=torch.bfloat16)
+        raw = torch.randn(8192, 128, dtype=torch.bfloat16)
         q, scale = per_block_cast_to_fp8(raw, 128)
         dense = (q.float() * scale.repeat_interleave(128, 0)).to(torch.bfloat16)
-        for tp in (1, 2, 4, 8):
+        for tp in (1, 2, 4, 8, 16):
             for rank in range(tp):
                 load = SimpleNamespace(tp_size=tp, tp_rank=rank)
                 split = wrapper._split(
                     {wrapper.kernel.name: q, wrapper.scale.name: scale}, load
                 )
                 result = wrapper._postprocess(split, "cpu", load)
-                local = dense.chunk(tp)[rank].reshape(8 // tp, 256, 128)
+                local = dense.chunk(tp)[rank].reshape(32 // tp, 256, 128)
                 torch.testing.assert_close(
                     result[W.mla_kc], local[:, :128], rtol=0, atol=0
                 )

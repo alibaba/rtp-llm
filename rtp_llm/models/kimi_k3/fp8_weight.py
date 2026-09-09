@@ -85,8 +85,8 @@ class KimiK3LoadFp8Weight(LoadQuantPerBlockFp8Weight):
         tp, rank = load_config.tp_size, load_config.tp_rank
         if not 0 <= rank < tp:
             raise ValueError(f"invalid K3 FP8 TP rank: {rank}/{tp}")
-        if tp not in (1, 2, 4, 8):
-            raise ValueError(f"K3 FP8 supports TP1/2/4/8, got {tp}")
+        if tp not in (1, 2, 4, 8, 16):
+            raise ValueError(f"K3 FP8 supports TP1/2/4/8/16, got {tp}")
         name = self.kernel.name
         if name == W.linear_attn_qkvg_fa_beta_w:
             cfg = self.source.config

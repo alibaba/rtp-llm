@@ -52,7 +52,7 @@ class StartKimiK3PdTest(unittest.TestCase):
             return result.stdout
 
     def test_configurable_parallelism_reaches_launcher(self):
-        for tp in (1, 2, 4, 8):
+        for tp in (1, 2, 4, 8, 16):
             for role in ("prefill", "decode"):
                 with self.subTest(tp=tp, role=role):
                     output = self.run_dry_run(role, KIMI_K3_TP_SIZE=str(tp), KIMI_K3_EP_SIZE=str(tp))

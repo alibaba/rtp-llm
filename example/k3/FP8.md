@@ -38,7 +38,7 @@ weight padding is used by this implementation.
 
 The loader subclasses the existing `LoadQuantPerBlockFp8Weight`, but is only
 selected by the K3 attention manifest. LoRA merging and TP sizes outside
-1/2/4/8 fail explicitly. It does not join the global quantizer registry.
+1/2/4/8/16 fail explicitly. It does not join the global quantizer registry.
 `K3_FP8_WEIGHT` log entries describe logical shapes, packed scales, TP rank,
 derivation and weight padding; retain them with each run.
 
@@ -76,7 +76,7 @@ Build on 115 in lhc_GPU as the normal user with
 `--config=cuda13 --config=sm10x`.
 
 * `//rtp_llm/models_py/modules/hybrid/test:kimi_k3_fp8_weight_test` covers tails,
-  TP1/2/4/8 KDA layout, final-quantized KV_B derivation and policy isolation.
+  TP1/2/4/8/16 KDA layout, final-quantized KV_B derivation and policy isolation.
 * `fp8_shape_probe.py` checks logical dimensions against independently
   dequantized operands on the installed DeepGEMM.
 * `//example/k3:fp8_runtime_probe` exercises the actual loader, packing, Linear factory,
