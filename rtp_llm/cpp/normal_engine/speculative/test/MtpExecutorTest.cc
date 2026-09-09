@@ -1268,6 +1268,89 @@ TEST_F(MtpExecutorTest, testMultiBatchPrefill) {
     checkOutput(stream2, {2, 3, 0}, {0, 1}, {0.0, 0.0, 1.0, 0.0}, {1.13, 1.14});
 }
 
+TEST_F(MtpExecutorTest, testDispatchDecodeStreamPublishesProbabilitiesAndDeviceState) {
+    MtpExecutorTestConfig config;
+    config.gen_num_per_cycle = 4;
+    auto components          = createMtpExecutorComponents(config);
+    ASSERT_FALSE(components.executor->useStreamAsync());
+
+    auto stream1 =
+        createContextStream(components.model_config, components.runtime_config, components.resource_context, {1});
+    auto stream2 =
+        createContextStream(components.model_config, components.runtime_config, components.resource_context, {2, 1});
+    int block_id = 1;
+    for (const auto& stream : {stream1, stream2}) {
+        BatchKVCacheResource resource;
+        resource.resetBatchSize(1);
+        resource.initGroups(1, 1, {0});
+        resource.setBatchBlocks(0, 0, {block_id++});
+        stream->setKVCache(resource);
+        auto sp_buffer    = std::make_shared<SpeculativeExecutorStreamOutput>();
+        sp_buffer->tokens = torch::full({1, 2}, -1, torch::kInt32);
+        stream->setSPOutputBuffer(sp_buffer);
+        stream->setReturnAllProbs(true);
+        stream->generate_status_->status = StreamState::RUNNING;
+        stream->setNeedReleaseResource(false);
+    }
+
+    auto stream_groups = StreamGroups({stream1, stream2});
+
+    speculative::SpeculativeSamplerOutput spec_decode_output;
+    spec_decode_output.accept_len_cpu    = torch::tensor({5, 1}, torch::kInt32);
+    spec_decode_output.accept_tokens_cpu = torch::tensor({{2, 3, 1, 3, 2}, {2, 0, 0, 0, 0}}, torch::kInt32);
+    spec_decode_output.accept_len        = spec_decode_output.accept_len_cpu.to(torch::kCUDA);
+    spec_decode_output.accept_tokens     = spec_decode_output.accept_tokens_cpu.to(torch::kCUDA);
+
+    MergedOutput draft_prefill_output;
+    draft_prefill_output.model_output.all_hidden_states =
+        torch::tensor({0.2f, 0.02f, 0.3f, 0.03f, 0.4f, 0.04f, 0.5f, 0.05f, 0.6f, 0.06f,
+                       1.3f, 0.13f, 9.0f, 9.0f,  9.0f, 9.0f,  9.0f, 9.0f,  9.0f, 9.0f},
+                      torch::kFloat32)
+            .reshape({10, 2});
+    draft_prefill_output.sampler_output.token_ids = torch::tensor({0L, 3L}, torch::kInt64).reshape({2, 1});
+    draft_prefill_output.sampler_output.all_probs =
+        torch::tensor({0.2f, 0.1f, 0.3f, 0.5f, 0.3f, 0.1f, 0.4f, 0.2f}, torch::kFloat32).reshape({2, 4});
+
+    stream1->generateConfig()->return_all_probs = true;
+    stream1->generateConfig()->is_streaming     = true;
+    stream2->generateConfig()->return_all_probs = true;
+    stream2->generateConfig()->is_streaming     = true;
+    spec_decode_output.target_probs_cpu =
+        torch::softmax(torch::arange(40, torch::kFloat32).remainder(7).reshape({2, 5, 4}) / 2, -1);
+    auto status = components.executor->dispatchDecodeOutput(stream_groups,
+                                                            {stream1, stream2},
+                                                            spec_decode_output,
+                                                            draft_prefill_output.model_output,
+                                                            draft_prefill_output.sampler_output,
+                                                            {},
+                                                            {},
+                                                            {},
+                                                            nullptr,
+                                                            nullptr);
+    ASSERT_TRUE(status.ok()) << status.ToString();
+    // Wait for publication H2D copies before overwriting the source buffer.
+    EXPECT_EQ(6, stream1->getMtpAsyncDeviceState().next_seq_len_gpu.item<int32_t>());
+    EXPECT_EQ(3, stream2->getMtpAsyncDeviceState().next_seq_len_gpu.item<int32_t>());
+    draft_prefill_output.model_output.all_hidden_states.fill_(9.0f);
+
+    ASSERT_TRUE(stream1->hasOutput());
+    ASSERT_TRUE(stream2->hasOutput());
+    auto output1 = stream1->nextOutput();
+    auto output2 = stream2->nextOutput();
+    ASSERT_TRUE(output1.ok());
+    ASSERT_TRUE(output2.ok());
+    EXPECT_TRUE(torch::allclose(output1.value().generate_outputs[0].aux_info.all_probs.value(),
+                                spec_decode_output.target_probs_cpu.narrow(0, 0, 1)));
+    EXPECT_TRUE(torch::allclose(output2.value().generate_outputs[0].aux_info.all_probs.value(),
+                                spec_decode_output.target_probs_cpu.narrow(0, 1, 1).select(1, 0)));
+    checkOutput(stream1, {1, 2, 3, 1, 3, 2}, {2, 0}, {0.2, 0.1, 0.3, 0.5}, {0.6, 0.06});
+    checkOutput(stream2, {2, 1, 2}, {2, 3}, {0.3, 0.1, 0.4, 0.2}, {1.3, 0.13});
+    EXPECT_EQ(stream1->getMtpAsyncDeviceState().last_real_seq_len, stream1->seqLength());
+    EXPECT_EQ(stream1->getMtpAsyncDeviceState().next_real_seq_len, stream1->seqLength());
+    EXPECT_EQ(stream2->getMtpAsyncDeviceState().last_real_seq_len, stream2->seqLength());
+    EXPECT_EQ(stream2->getMtpAsyncDeviceState().next_real_seq_len, stream2->seqLength());
+}
+
 TEST_F(MtpExecutorTest, testSingleBatchDecode) {
     // test single batch decode accept partial
     // input [0, 1, 2] + [3]
