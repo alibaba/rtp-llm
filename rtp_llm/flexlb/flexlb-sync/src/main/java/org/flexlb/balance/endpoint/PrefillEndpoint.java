@@ -15,7 +15,6 @@ import org.flexlb.balance.scheduler.WorkerBatcher;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.RoutingConfig;
 import org.flexlb.dao.master.WorkerStatus;
-import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -568,21 +567,21 @@ public class PrefillEndpoint extends WorkerEndpoint {
     public void reportBatchMetrics(BatchSchedulerReporter reporter) {
         String engineIp = getStatus().getMetricIpPort();
         int queueSize = runtime.queueSize();
-        reporter.reportBatcherQueueSize(RoleType.PREFILL.name(), engineIp, queueSize);
+        reporter.reportBatcherQueueSize(getStatus().getRole().name(), engineIp, queueSize);
         // Priority-bucketed batch queue length — single-report with priority tag.
         // Empty queue fallback: report priority=0 depth=0 so tagged panels don't gap.
         Map<Integer, Integer> sizeByPriority =
                 runtime.queueSizeByPriority();
         if (sizeByPriority.isEmpty()) {
-            reporter.reportBatcherQueueDepthByPriority(RoleType.PREFILL.name(), engineIp, 0, 0);
+            reporter.reportBatcherQueueDepthByPriority(getStatus().getRole().name(), engineIp, 0, 0);
         } else {
             sizeByPriority.forEach((priority, size) ->
-                    reporter.reportBatcherQueueDepthByPriority(RoleType.PREFILL.name(), engineIp, priority, size));
+                    reporter.reportBatcherQueueDepthByPriority(getStatus().getRole().name(), engineIp, priority, size));
         }
-        reporter.reportInflightBatchCount(RoleType.PREFILL.name(), engineIp, getInflightBatchCount());
-        reporter.reportInflightRequestCount(RoleType.PREFILL.name(), engineIp, getLocallyOwnedRequestCount());
+        reporter.reportInflightBatchCount(getStatus().getRole().name(), engineIp, getInflightBatchCount());
+        reporter.reportInflightRequestCount(getStatus().getRole().name(), engineIp, getLocallyOwnedRequestCount());
         reporter.reportInflightMaxAgeMs(
-                RoleType.PREFILL.name(),
+                getStatus().getRole().name(),
                 engineIp,
                 prefillState.stats().maxObservedAgeMs());
     }
@@ -597,8 +596,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
         completions.forEach(this::reportBatchCompletion);
     }
 
-    private void reportBatchCompletion(
-            PrefillState.BatchCompletion completion) {
+    private void reportBatchCompletion(PrefillState.BatchCompletion completion) {
         long batchId = completion.batchId();
         long actualMs = completion.actualWorkMs();
         if (!completion.successfulCompletion() || actualMs <= 0) {
@@ -635,21 +633,21 @@ public class PrefillEndpoint extends WorkerEndpoint {
         // reducer or prevent the remaining observations.
         try {
             reporter.reportBatchPredictedTimeMs(
-                    RoleType.PREFILL.name(), getStatus().getMetricIpPort(), predictedMs);
+                    getStatus().getRole().name(), getStatus().getMetricIpPort(), predictedMs);
         } catch (RuntimeException telemetryFailure) {
             logger.warn("batch predicted-time metric failed: batchId={} engine={}",
                     batchId, getIp(), telemetryFailure);
         }
         try {
             reporter.reportBatchActualTimeMs(
-                    RoleType.PREFILL.name(), getStatus().getMetricIpPort(), actualMs);
+                    getStatus().getRole().name(), getStatus().getMetricIpPort(), actualMs);
         } catch (RuntimeException telemetryFailure) {
             logger.warn("batch actual-time metric failed: batchId={} engine={}",
                     batchId, getIp(), telemetryFailure);
         }
         try {
             reporter.reportBatchPredictGapMs(
-                    RoleType.PREFILL.name(), getStatus().getMetricIpPort(), gapMs);
+                    getStatus().getRole().name(), getStatus().getMetricIpPort(), gapMs);
         } catch (RuntimeException telemetryFailure) {
             logger.warn("batch prediction-gap metric failed: batchId={} engine={}",
                     batchId, getIp(), telemetryFailure);

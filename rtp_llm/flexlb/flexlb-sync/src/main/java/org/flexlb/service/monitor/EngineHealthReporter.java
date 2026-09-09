@@ -292,6 +292,35 @@ public class EngineHealthReporter {
                 lifecycleTags(modelName, engineIp, role, group), latencyMs);
     }
 
+    public void reportFinishedWorkerTask(String modelName,
+                                         WorkerStatus worker,
+                                         WorkerStatus.TaskObservation observation) {
+        if (worker.getRole() != RoleType.PREFILL && worker.getRole() != RoleType.PDFUSION) {
+            return;
+        }
+        WorkerStatus.TaskTelemetry telemetry = observation.telemetry();
+        TaskInfo task = new TaskInfo();
+        task.setHbmLocalMatchTokens(telemetry.hbmLocalMatchTokens());
+        task.setRemoteKvAddedMatchTokens(telemetry.remoteKvAddedMatchTokens());
+        task.setPrefillStepCount(telemetry.prefillStepCount());
+        task.setPrefillNonfinalChunkTokensMin(telemetry.prefillNonfinalChunkTokensMin());
+        task.setPrefillNonfinalChunkTokensMax(telemetry.prefillNonfinalChunkTokensMax());
+        task.setInputQueueEnqueueTimeMs(telemetry.inputQueueEnqueueTimeMs());
+        task.setInputQueueDrainTimeMs(telemetry.inputQueueDrainTimeMs());
+        task.setWaitingEnteredTimeMs(telemetry.waitingEnteredTimeMs());
+        task.setRunningEnteredTimeMs(telemetry.runningEnteredTimeMs());
+        task.setRemoteKvWaitMs(telemetry.remoteKvWaitMs());
+        task.setFirstTokenTimeMs(telemetry.firstTokenTimeMs());
+        String role = worker.getRole().name();
+        String group = worker.topologySnapshot().group();
+        reportPrefillWorkerStatusTask(modelName, worker.getMetricIpPort(), role, group, task);
+        FlexMetricTags tags = lifecycleTags(modelName, worker.getMetricIpPort(), role, group);
+        reportDuration(ENGINE_WORKER_STATUS_ENGINE_OBSERVED_WAITING_TO_RUNNING_MS, tags,
+                telemetry.runningEnteredTimeMs(), telemetry.waitingEnteredTimeMs());
+        reportDuration(ENGINE_WORKER_STATUS_ENGINE_OBSERVED_RECEIVED_TO_WAITING_MS, tags,
+                telemetry.waitingEnteredTimeMs(), telemetry.requestReceivedTimeMs());
+    }
+
     public void reportPrefillWorkerStatusTask(String modelName,
                                                String engineIp,
                                                String role,
@@ -509,12 +538,18 @@ public class EngineHealthReporter {
 
         monitor.report(ENGINE_FINISHED_TASK_LIST_SIZE, metricTags, finishedTaskListSize);
         monitor.report(ENGINE_RUNNING_TASK_INFO_SIZE, metricTags, runningTaskInfoSize);
+        monitor.report(ENGINE_WAITING_TASK_INFO_SIZE, metricTags, status.waitingQueryLen());
+        reportKvCapacity(status, metricTags);
+        if (status.blockSize() > 0) {
+            monitor.report(CACHE_BLOCK_SIZE,
+                    FlexMetricTags.of("model", modelName, "role", status.role().name()), status.blockSize());
+        }
+        reportLocalStandbyBlockSize(metricTags, status.blockSize());
     }
 
-    public void reportCacheStatusCheckerSuccess(
-            String modelName,
-            WorkerStatus workerStatus,
-            long successfulPollIntervalUs) {
+    public void reportCacheStatusCheckerSuccess(String modelName,
+                                                WorkerStatus workerStatus,
+                                                long successfulPollIntervalUs) {
         WorkerStatus.EngineObservation status =
                 workerStatus.committedEngineObservation();
         CacheStatus cacheStatus = workerStatus.getCacheStatus();
@@ -542,24 +577,16 @@ public class EngineHealthReporter {
             reportLocalStandbyBlockSize(engineMetricTags, blockSize);
             monitor.report(CACHE_KEY_SIZE, engineMetricTags, cacheKeySize);
         }
+    }
 
-        long totalKvCacheTokens = status.totalKvCacheTokens();
-        long availableKvCacheTokens = status.availableKvCacheTokens();
-        long usedKvCacheTokens = totalKvCacheTokens - availableKvCacheTokens;
-
-        FlexMetricTags kvCacheMetricTags = FlexMetricTags.of(
-                "model", modelName,
-                "engineIp", workerStatus.getMetricIpPort(),
-                "role", status.role().name());
-
-        monitor.report(CACHE_USED_KV_CACHE_TOKENS, kvCacheMetricTags, usedKvCacheTokens);
-        monitor.report(CACHE_AVAILABLE_KV_CACHE_TOKENS, kvCacheMetricTags, availableKvCacheTokens);
-        monitor.report(CACHE_TOTAL_KV_CACHE_TOKENS,
-                FlexMetricTags.of("model", modelName, "role", status.role().name()),
-                totalKvCacheTokens);
-        if (totalKvCacheTokens > 0) {
-            double usedRatio = (usedKvCacheTokens * 1.0 / totalKvCacheTokens) * 100;
-            monitor.report(CACHE_USED_KV_CACHE_RATIO, kvCacheMetricTags, usedRatio);
+    private void reportKvCapacity(WorkerStatus.EngineObservation status, FlexMetricTags tags) {
+        long total = status.totalKvCacheTokens();
+        long available = status.availableKvCacheTokens();
+        monitor.report(CACHE_TOTAL_KV_CACHE_TOKENS, tags, total);
+        monitor.report(CACHE_AVAILABLE_KV_CACHE_TOKENS, tags, available);
+        monitor.report(CACHE_USED_KV_CACHE_TOKENS, tags, total - available);
+        if (total > 0) {
+            monitor.report(CACHE_USED_KV_CACHE_RATIO, tags, 100.0 * (total - available) / total);
         }
     }
 
@@ -795,7 +822,7 @@ public class EngineHealthReporter {
     }
 
     public void reportArriveDelayTime(BalanceContext ctx) {
-        if (ctx.getRequest().getRequestTimeMs() == 0) {
+        if (ctx.getRequest() == null || ctx.getRequest().getRequestTimeMs() <= 0) {
             return;
         }
         long grpcEntryTime = ctx.getGrpcEntryTime();

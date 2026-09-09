@@ -162,6 +162,16 @@ public class CostBasedPrefillStrategy {
                 selectedPin);
         cacheAwareService.trackRoutingPrediction(requestId, roleType, group, best.getStatus(),
                 seqLen, bestCacheHit, cacheMatchResult);
+        var selectedMatch = cacheMatchResult.hostMatch(best.getStatus());
+        if (cacheMatchResult.source() == org.flexlb.cache.domain.CacheMatchSource.KVCM) {
+            engineHealthReporter.reportKvcmSelectedMatch(roleType, best.getStatus().getMetricIpPort(),
+                    selectedMatch == null ? 0 : CacheMatchResult.matchedTokens(
+                            selectedMatch.localMatchBlocks(), cacheMatchResult.blockSize(), seqLen),
+                    selectedMatch == null ? 0 : CacheMatchResult.matchedTokens(
+                            selectedMatch.p2pFetchBlocks(), cacheMatchResult.blockSize(), seqLen),
+                    selectedMatch == null ? 0 : CacheMatchResult.matchedTokens(
+                            selectedMatch.p2pTotalMatchBlocks(), cacheMatchResult.blockSize(), seqLen), true);
+        }
         balanceContext.recordCacheSelection(roleType, best.getIp(), bestCacheHit);
         recordDecision(balanceContext, roleType, group, discovery.registeredCount(), survivors,
                 selectedIndex, balanceContext.selectionReason(roleType), rejections);

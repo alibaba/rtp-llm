@@ -198,6 +198,7 @@ class FlexlbServiceImplTest {
         assertFalse(json.path("response").has("admission_reject_reason"));
         ArgumentCaptor<BalanceContext> payloadContext = ArgumentCaptor.forClass(BalanceContext.class);
         verify(engineHealthReporter).reportRequestPayload(payloadContext.capture());
+        verify(engineHealthReporter).reportArriveDelayTime(payloadContext.getValue());
         assertEquals((long) request.getSerializedSize(), payloadContext.getValue().getRequestMessageBytes());
         assertEquals(2L, payloadContext.getValue().getInputIdsCount());
         assertNull(FlexlbScheduleProtocol.FlexlbScheduleResponsePB.getDescriptor()

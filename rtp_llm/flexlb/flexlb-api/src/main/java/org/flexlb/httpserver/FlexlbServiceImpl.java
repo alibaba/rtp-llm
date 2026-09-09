@@ -367,6 +367,11 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
             Logger.warn("FlexlbService.schedule completion metric failed, request_id={}", requestId, error);
         }
         try {
+            engineHealthReporter.reportArriveDelayTime(context);
+        } catch (Exception error) {
+            Logger.warn("FlexlbService.schedule arrival metric failed, request_id={}", requestId, error);
+        }
+        try {
             engineHealthReporter.reportRequestPayload(context);
         } catch (Exception error) {
             Logger.warn("FlexlbService.schedule payload metric failed, request_id={}", requestId, error);

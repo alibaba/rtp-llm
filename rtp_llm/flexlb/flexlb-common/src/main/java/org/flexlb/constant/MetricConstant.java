@@ -538,9 +538,13 @@ public class MetricConstant {
 
     /* ------------------------ Request Queue Monitoring -------------------------- */
 
-    /**
-     * Current queue length
-     */
+    /** Requests accepted into the global scheduling queue. */
+    public static final String ROUTING_QUEUE_ENTRY_QPS = "app.routing.queue.entry.qps";
+
+    /** Requests waiting in the global queue or a worker delivery queue. */
+    public static final String SCHEDULER_QUEUE_SIZE = "app.flexlb.scheduler.queue.size";
+
+    /** Per-worker delivery queue length by priority. */
     public static final String ROUTING_QUEUE_LENGTH = "app.routing.queue.length";
 
     /**

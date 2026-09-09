@@ -249,6 +249,13 @@ PV 不输出 `inputIdsCount`、`requestMessageBytes`、`hashWaitUs`、`hashUs`�
 
 ## 指标
 
+全局调度队列成功接收请求时上报 `app.routing.queue.entry.qps`，容量拒绝和关闭后的提交不计入。
+`app.flexlb.scheduler.queue.size` 周期性记录全局队列与 Worker 交付队列的等待请求总数，空队列记录 0。
+Prefill 与 PDFUSION 均参与周期性队列和在途观测，角色标签使用 Worker 实际角色。
+KV 容量与 Waiting 数来自 WorkerStatus；CacheStatus 查询负责缓存键数量和查询周期。
+KVCM 选中节点指标记录本地、P2P 拉取和 P2P 后总匹配 Token 数，使用与路由一致的逻辑 Worker 身份。
+
+
 `FlexMonitor` 提供 GAUGE、COUNTER、QPS 与优先级窗口抽象。opensource 默认使用
 `NoOpFlexMonitor`；internal profile 可启用 KMonitor/Prometheus provider。
 

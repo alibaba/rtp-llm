@@ -1,7 +1,6 @@
 package org.flexlb.balance.delivery;
 
 import org.flexlb.balance.scheduler.ScheduledRequest;
-import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.util.Logger;
 
@@ -11,33 +10,32 @@ import java.util.Objects;
 /** No-throw metrics emitted after a delivery decision has committed. */
 public final class DeliveryMetrics {
 
-    private static final String PREFILL_ROLE = RoleType.PREFILL.name();
-
     private final BatchSchedulerReporter reporter;
 
     public DeliveryMetrics(BatchSchedulerReporter reporter) {
         this.reporter = Objects.requireNonNull(reporter, "reporter");
     }
 
-    public void routesDelivered( int remainingQueueDepth, List<ScheduledRequest> exactItems) {
+    public void routesDelivered(int remainingQueueDepth, List<ScheduledRequest> exactItems) {
         try {
             if (exactItems.isEmpty()) {
                 return;
             }
             ScheduledRequest head = exactItems.get(0);
             String engineIp = prefillIp(head);
+            String role = head.prefillEp().getStatus().getRole().name();
             var decisionGroup = head.ctx().getDecisionGroup();
             if (decisionGroup != null) {
-                reporter.reportDispatchReason(PREFILL_ROLE, engineIp, decisionGroup.reason());
-                reporter.reportBatchSize(PREFILL_ROLE, engineIp, decisionGroup.reason(), exactItems.size());
+                reporter.reportDispatchReason(role, engineIp, decisionGroup.reason());
+                reporter.reportBatchSize(role, engineIp, decisionGroup.reason(), exactItems.size());
             }
             reporter.reportBatcherQueueSize(
-                    PREFILL_ROLE, engineIp,
+                    role, engineIp,
                     remainingQueueDepth);
             long nowMs = System.currentTimeMillis();
             for (ScheduledRequest item : exactItems) {
                 reporter.reportBatchWaitTimeMs(
-                        PREFILL_ROLE,
+                        role,
                         engineIp,
                         Math.max(0L, nowMs - item.enqueuedAtMs()),
                         item.priority());
@@ -47,29 +45,29 @@ public final class DeliveryMetrics {
         }
     }
 
-    public void batchDispatched(
-            long batchId,
-            String decisionReason,
-            int remainingQueueDepth,
-            List<ScheduledRequest> dispatched,
-            long predictedMs) {
+    public void batchDispatched(long batchId,
+                                String decisionReason,
+                                int remainingQueueDepth,
+                                List<ScheduledRequest> dispatched,
+                                long predictedMs) {
         try {
             if (dispatched.isEmpty()) {
                 return;
             }
             ScheduledRequest head = dispatched.get(0);
             String engineIp = prefillIp(head);
+            String role = head.prefillEp().getStatus().getRole().name();
             reporter.reportDispatchReason(
-                    PREFILL_ROLE, engineIp, decisionReason);
+                    role, engineIp, decisionReason);
             reporter.reportBatcherQueueSize(
-                    PREFILL_ROLE, engineIp,
+                    role, engineIp,
                     remainingQueueDepth);
             long nowMs = System.currentTimeMillis();
             long hitTokens = 0L;
             long totalTokens = 0L;
             for (ScheduledRequest item : dispatched) {
                 reporter.reportBatchWaitTimeMs(
-                        PREFILL_ROLE,
+                        role,
                         engineIp,
                         Math.max(0L, nowMs - item.enqueuedAtMs()),
                         item.priority());
@@ -77,13 +75,13 @@ public final class DeliveryMetrics {
                 totalTokens = saturatedAdd(totalTokens, item.seqLen());
             }
             reporter.reportBatchCacheHitMetrics(
-                    PREFILL_ROLE, engineIp, hitTokens, totalTokens);
+                    role, engineIp, hitTokens, totalTokens);
             reporter.reportBatchSize(
-                    PREFILL_ROLE, engineIp, decisionReason, dispatched.size());
+                    role, engineIp, decisionReason, dispatched.size());
             reporter.reportBatchTotalTokens(
-                    PREFILL_ROLE, engineIp, decisionReason, totalTokens);
+                    role, engineIp, decisionReason, totalTokens);
             reporter.reportBatchPredictedTimeMs(
-                    PREFILL_ROLE, engineIp, Math.max(0L, predictedMs));
+                    role, engineIp, Math.max(0L, predictedMs));
         } catch (Throwable failure) {
             Logger.warn("Batch dispatch telemetry isolated", failure);
         }

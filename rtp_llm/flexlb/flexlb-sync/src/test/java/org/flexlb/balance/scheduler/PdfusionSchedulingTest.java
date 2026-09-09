@@ -41,7 +41,12 @@ import java.util.function.BiConsumer;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class PdfusionSchedulingTest {
@@ -134,6 +139,10 @@ class PdfusionSchedulingTest {
             PrefillEndpoint endpoint = (PrefillEndpoint) endpoints.get(
                     RoleType.PDFUSION, worker.getLogicalIpPort());
             assertEquals(1, endpoint.admissionPendingRequestCount());
+            endpoint.reportBatchMetrics(reporter);
+            verify(reporter, atLeastOnce()).reportBatcherQueueSize(
+                    eq("PDFUSION"), eq(worker.getMetricIpPort()), anyInt());
+            verify(reporter, never()).reportBatcherQueueSize(eq("PREFILL"), any(), anyInt());
             var committedWork = endpoint.captureRouteProjectionInputs().work();
             assertTrue(committedWork.containsRequest(Long.toString(requestId)));
             TaskInfo finished = new TaskInfo();

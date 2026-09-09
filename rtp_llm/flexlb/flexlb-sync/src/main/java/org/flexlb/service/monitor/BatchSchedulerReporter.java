@@ -31,9 +31,11 @@ import static org.flexlb.constant.MetricConstant.INFLIGHT_MAX_AGE_MS;
 import static org.flexlb.constant.MetricConstant.INFLIGHT_REQUEST_COUNT;
 import static org.flexlb.constant.MetricConstant.INFLIGHT_TTL_EXPIRED_QPS;
 import static org.flexlb.constant.MetricConstant.ROUTE_SUBMIT_TIME_MS;
+import static org.flexlb.constant.MetricConstant.ROUTING_QUEUE_ENTRY_QPS;
 import static org.flexlb.constant.MetricConstant.ROUTING_QUEUE_LENGTH;
 import static org.flexlb.constant.MetricConstant.ROUTING_QUEUE_WAIT_TIME_MS;
 import static org.flexlb.constant.MetricConstant.SCHEDULER_INFLIGHT_SIZE;
+import static org.flexlb.constant.MetricConstant.SCHEDULER_QUEUE_SIZE;
 
 /**
  * Batch scheduling metrics reporter for FlexLB batch dispatch path.
@@ -68,6 +70,8 @@ public class BatchSchedulerReporter {
     @PostConstruct
     public void init() {
         // Canonical per-worker scheduling queue metrics
+        monitor.register(ROUTING_QUEUE_ENTRY_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
+        monitor.register(SCHEDULER_QUEUE_SIZE, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         monitor.register(ROUTING_QUEUE_LENGTH, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         monitor.register(ROUTING_QUEUE_WAIT_TIME_MS, FlexMetricType.TIMER, FlexPriorityType.PRECISE);
 
@@ -113,7 +117,15 @@ public class BatchSchedulerReporter {
         // ACK-to-response time — from engine ACK to schedule response sent to client (timer for distribution)
         monitor.register(ACK_TO_RESPONSE_TIME_MS, FlexMetricType.TIMER, FlexPriorityType.PRECISE);
 
-        log.info("BatchSchedulerReporter initialized (20 metrics)");
+        log.info("BatchSchedulerReporter initialized");
+    }
+
+    public void reportQueueEntry() {
+        monitor.report(ROUTING_QUEUE_ENTRY_QPS, FlexMetricTags.of(), 1.0);
+    }
+
+    public void reportSchedulerQueueSize(int size) {
+        monitor.report(SCHEDULER_QUEUE_SIZE, FlexMetricTags.of(), size);
     }
 
     // ==================== Queue metrics ====================

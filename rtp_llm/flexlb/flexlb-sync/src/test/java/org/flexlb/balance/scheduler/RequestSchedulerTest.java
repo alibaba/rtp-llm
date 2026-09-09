@@ -223,20 +223,24 @@ class RequestSchedulerTest {
                 PlacementResult.rejected(RequestRegistry.buildErrorResponse(
                         StrategyErrorType.NO_PREFILL_WORKER, null)));
 
+        BatchSchedulerReporter reporter = mock(BatchSchedulerReporter.class);
         RequestScheduler scheduler = new RequestScheduler(
                 configService,
                 router,
                 endpointRegistry,
-                mock(BatchSchedulerReporter.class),
+                reporter,
                 mock(EvictionManager.class),
                 lifecycle,
                 new PlacementAvailability());
         scheduler.submit(context);
+        verify(reporter).reportQueueEntry();
 
         verify(router, timeout(1_000)).routeForQueue(context, null);
         verify(endpointRegistry, never()).availablePrefillDeliveryCredits(
                 RoleType.PREFILL);
         scheduler.closePlacement();
+        scheduler.reportQueueState();
+        verify(reporter).reportSchedulerQueueSize(0);
     }
 
     @Test

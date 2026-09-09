@@ -9,7 +9,9 @@ import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
+import org.flexlb.util.Logger;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
 import java.util.List;
@@ -31,16 +33,17 @@ public final class RequestScheduler {
     private final EndpointRegistry endpointRegistry;
     private final RequestRegistry lifecycle;
     private final GlobalQueueCoordinator globalQueue;
+    private final BatchSchedulerReporter reporter;
 
     @Autowired
-    RequestScheduler(
-            ConfigService configService,
-            DefaultRouter router,
-            EndpointRegistry endpointRegistry,
-            BatchSchedulerReporter reporter,
-            EvictionManager evictionManager,
-            RequestRegistry lifecycle,
-            PlacementAvailability placementAvailability) {
+    RequestScheduler(ConfigService configService,
+                     DefaultRouter router,
+                     EndpointRegistry endpointRegistry,
+                     BatchSchedulerReporter reporter,
+                     EvictionManager evictionManager,
+                     RequestRegistry lifecycle,
+                     PlacementAvailability placementAvailability) {
+        this.reporter = Objects.requireNonNull(reporter, "reporter");
         this.configService = Objects.requireNonNull(
                 configService, "configService");
         this.endpointRegistry = Objects.requireNonNull(
@@ -100,6 +103,12 @@ public final class RequestScheduler {
             if (!globalQueue.offer(context, future, context.getPriority())) {
                 future.complete(error(StrategyErrorType.BATCH_DISPATCH_FAILED,
                         "request scheduler is shutting down"));
+            } else {
+                try {
+                    reporter.reportQueueEntry();
+                } catch (RuntimeException failure) {
+                    Logger.warn("Failed to report scheduler queue entry", failure);
+                }
             }
         } catch (Throwable failure) {
             future.complete(error(StrategyErrorType.BATCH_DISPATCH_FAILED,
@@ -117,6 +126,17 @@ public final class RequestScheduler {
 
     public int getInflightSize() {
         return lifecycle.liveRequestCount();
+    }
+
+    @Scheduled(fixedRateString = "${report.interval.ms:2000}")
+    void reportQueueState() {
+        if (globalQueue != null) {
+            try {
+                reporter.reportSchedulerQueueSize(getQueuedRequestCount());
+            } catch (RuntimeException failure) {
+                Logger.warn("Failed to report scheduler queue size", failure);
+            }
+        }
     }
 
     public int getQueuedRequestCount() {

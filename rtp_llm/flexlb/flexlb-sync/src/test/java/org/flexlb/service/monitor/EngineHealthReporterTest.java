@@ -281,6 +281,23 @@ class EngineHealthReporterTest {
     }
 
     @Test
+    void reportsCommittedFinishedTaskTelemetryForFusionWorker() {
+        WorkerStatus worker = WorkerStatus.createDiscovered(
+                RoleType.PDFUSION, "test-group", "10.0.0.1", 8080, 8081, null, null, 0, 1);
+        var telemetry = new WorkerStatus.TaskTelemetry(true, 900, 1000, 1100,
+                1200, 1600, 200, 1900, 512, 256, 1, 3, 3, 128, 256);
+        var task = new WorkerStatus.TaskObservation("request", 768, 300, 1000, 400,
+                1, 2000, 0, 0, null, 0, null, 300, null, telemetry);
+        reporter.reportFinishedWorkerTask("test-model", worker, task);
+        FlexMetricTags tags = FlexMetricTags.of("model", "test-model", "engineIp", "10.0.0.1:8080",
+                "role", "PDFUSION", "group", "test-group");
+        verify(monitor).report("app.engine.worker.status.input.queue.wait.ms", tags, 100.0);
+        verify(monitor).report("app.engine.worker.status.running.to.first.token.ms", tags, 300.0);
+        verify(monitor).report("app.engine.worker.status.engine.waiting.to.running.ms", tags, 400.0);
+        verify(monitor).report("app.engine.worker.status.engine.received.to.waiting.ms", tags, 300.0);
+    }
+
+    @Test
     void shouldReportPrefillWorkerStatusTaskMetrics() {
         TaskInfo task = new TaskInfo();
         task.setInputQueueEnqueueTimeMs(1000);
@@ -361,6 +378,7 @@ class EngineHealthReporterTest {
     void shouldReportCacheCapacityMetricsFromSharedWorkerStatus() {
         WorkerStatus workerStatus = workerStatusWithCacheStatus();
 
+        reporter.reportStatusCheckerSuccess("test-model", workerStatus, null, 0, 0);
         reporter.reportCacheStatusCheckerSuccess("test-model", workerStatus, 0L);
 
         FlexMetricTags expectedTags = FlexMetricTags.of(
@@ -373,7 +391,7 @@ class EngineHealthReporterTest {
         verify(monitor).report("app.cache.used.kv.cache.tokens", expectedTags, 200.0);
         verify(monitor).report("app.cache.available.kv.cache.tokens", expectedTags, 800.0);
         verify(monitor).report("app.cache.total.kv.cache.tokens",
-                FlexMetricTags.of("model", "test-model", "role", "PREFILL"), 1000.0);
+                expectedTags, 1000.0);
         verify(monitor).report("app.cache.used.kv.cache.ratio", expectedTags, 20.0);
         verify(monitor).report("app.cache.key.size", expectedTags, 7.0);
     }

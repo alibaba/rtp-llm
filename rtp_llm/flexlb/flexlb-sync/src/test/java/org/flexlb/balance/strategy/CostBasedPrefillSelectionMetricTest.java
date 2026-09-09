@@ -87,6 +87,17 @@ class CostBasedPrefillSelectionMetricTest {
     }
 
     @Test
+    void reportsRawKvcmMatchesForSelectedWorker() {
+        when(cache.findMatchingEngines(any())).thenReturn(new CacheMatchResult(
+                Map.of("10.0.0.1:8080@0", new HostCacheMatch(3, 2, 5)),
+                CacheMatchSource.KVCM, 10L, 100L));
+        try (SelectedRole selected = select()) {
+            verify(reporter).reportKvcmSelectedMatch(RoleType.PREFILL,
+                    selected.serverStatus().getMetricIpPort(), 300L, 200L, 500L, true);
+        }
+    }
+
+    @Test
     void pvCapturesRealCacheQueryAndSelectionAcrossRetries() {
         when(cache.findMatchingEngines(any())).thenReturn(new CacheMatchResult(
                 Map.of(), CacheMatchSource.KVCM, 37L, 100L));

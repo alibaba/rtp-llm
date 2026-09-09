@@ -40,6 +40,17 @@ class BatchSchedulerReporterTest {
     }
 
     @Test
+    void reportsQueueAdmissionAndEmptyQueue() {
+        reporter.init();
+        reporter.reportQueueEntry();
+        reporter.reportSchedulerQueueSize(0);
+        verify(monitor).register("app.routing.queue.entry.qps", FlexMetricType.QPS, FlexPriorityType.PRECISE);
+        verify(monitor).register("app.flexlb.scheduler.queue.size", FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        verify(monitor).report("app.routing.queue.entry.qps", FlexMetricTags.of(), 1.0);
+        verify(monitor).report("app.flexlb.scheduler.queue.size", FlexMetricTags.of(), 0.0);
+    }
+
+    @Test
     void should_register_dispatch_reason_metric_on_init() {
         reporter.init();
 

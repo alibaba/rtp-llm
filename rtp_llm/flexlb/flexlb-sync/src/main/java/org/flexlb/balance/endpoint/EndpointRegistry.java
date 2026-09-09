@@ -956,11 +956,16 @@ public class EndpointRegistry {
         }
     }
 
-    /** Immutable point-in-time view; publication remains owned by this registry. */
-    @SuppressWarnings("unchecked")
+    /** PREFILL and PDFUSION delivery endpoints; colliding addresses are role-qualified. */
     public Map<String, PrefillEndpoint> snapshotPrefillEndpoints() {
-        return (Map<String, PrefillEndpoint>) (Map<?, ?>)
-                Map.copyOf(endpoints(RoleType.PREFILL));
+        Map<String, PrefillEndpoint> snapshot = new java.util.HashMap<>();
+        for (RoleType role : List.of(RoleType.PREFILL, RoleType.PDFUSION)) {
+            endpoints(role).forEach((address, endpoint) -> {
+                String key = snapshot.containsKey(address) ? role + "/" + address : address;
+                snapshot.put(key, (PrefillEndpoint) endpoint);
+            });
+        }
+        return Map.copyOf(snapshot);
     }
 
     /** Immutable point-in-time view; publication remains owned by this registry. */

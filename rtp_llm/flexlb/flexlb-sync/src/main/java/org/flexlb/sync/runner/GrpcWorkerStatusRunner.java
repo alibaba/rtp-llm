@@ -397,10 +397,9 @@ public class GrpcWorkerStatusRunner implements Runnable {
         }
     }
 
-    private void reportSuccessfulStatus(
-            WorkerStatus.StatusObservation observation,
-            long startTime,
-            WorkerEndpoint endpoint) {
+    private void reportSuccessfulStatus(WorkerStatus.StatusObservation observation,
+                                        long startTime,
+                                        WorkerEndpoint endpoint) {
         try {
             engineHealthReporter.reportStatusCheckRemoteInfo(
                     modelName, workerStatus.getMetricIpPort(),
@@ -411,6 +410,11 @@ public class GrpcWorkerStatusRunner implements Runnable {
                     endpoint,
                     observation.runningTasks().size(),
                     observation.finishedTasks().size());
+            for (WorkerStatus.TaskObservation task : observation.finishedTasks().values()) {
+                if (task.telemetry().firstTokenTimeMs() > 0) {
+                    engineHealthReporter.reportFinishedWorkerTask(modelName, workerStatus, task);
+                }
+            }
         } catch (Throwable telemetryFailure) {
             logger.warn("Worker status telemetry failed after commit for {}: {}",
                     ipPort, telemetryFailure.getMessage());

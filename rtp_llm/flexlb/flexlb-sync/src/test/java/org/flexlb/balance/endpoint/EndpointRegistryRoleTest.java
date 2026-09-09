@@ -67,6 +67,7 @@ class EndpointRegistryRoleTest {
         assertSame(prefill, registry.get(RoleType.PREFILL, "127.0.0.1:8001"));
         assertSame(decode, registry.get(RoleType.DECODE, "127.0.0.1:8002"));
         assertSame(pdFusion, registry.get(RoleType.PDFUSION, "127.0.0.1:8003"));
+        assertSame(pdFusion, registry.snapshotPrefillEndpoints().get("127.0.0.1:8003"));
         assertSame(vit, registry.get(RoleType.VIT, "127.0.0.1:8004"));
         EndpointRegistry.PrefillRoutingEntry pdFusionRoute =
                 registry.prefillRoutingSnapshot(RoleType.PDFUSION).getFirst();
