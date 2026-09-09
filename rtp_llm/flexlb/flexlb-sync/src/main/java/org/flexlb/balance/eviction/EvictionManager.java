@@ -474,13 +474,10 @@ public class EvictionManager {
         return null;
     }
 
-    private void reportPlacement(
-            BalanceContext context,
-            ScheduledRequest item,
-            String kind) {
+    private void reportPlacement(BalanceContext context, ScheduledRequest item, String kind) {
         try {
             deliveryReporter.reportRouteSubmitTimeMs(
-                    org.flexlb.dao.route.RoleType.PREFILL.name(),
+                    item.prefill().getRole().name(),
                     item.prefillEp().getStatus().getMetricIpPort(),
                     System.currentTimeMillis() - context.getStartTime());
         } catch (RuntimeException telemetryFailure) {

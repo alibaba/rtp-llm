@@ -430,15 +430,17 @@ class RequestLifecycleDeliveryLockContractTest {
 
     @ParameterizedTest
     @CsvSource({
-            "0, 1, 127.0.0.1:8080",
-            "1, 2, 127.0.0.1:8080@1"
+            "PREFILL, 0, 1, 127.0.0.1:8080",
+            "PREFILL, 1, 2, 127.0.0.1:8080@1",
+            "PDFUSION, 0, 1, 127.0.0.1:8080",
+            "PDFUSION, 1, 2, 127.0.0.1:8080@1"
     })
-    void batchDispatchAckUsesMetricWorkerIdentity(
-            int engineIndex,
-            int multiEngineNum,
-            String expectedMetricIpPort) {
+    void batchDispatchAckUsesMetricWorkerIdentity(RoleType role,
+                                                 int engineIndex,
+                                                 int multiEngineNum,
+                                                 String expectedMetricIpPort) {
         WorkerStatus status = WorkerStatus.createDiscovered(
-                RoleType.PREFILL, "group-a", "127.0.0.1", 8080, 9090,
+                role, "group-a", "127.0.0.1", 8080, 9090,
                 "site-a", "deployment-a", engineIndex, multiEngineNum);
         PrefillEndpoint prefill = mock(PrefillEndpoint.class);
         when(prefill.getIp()).thenReturn("127.0.0.1");
@@ -454,7 +456,7 @@ class RequestLifecycleDeliveryLockContractTest {
 
         assertTrue(registered.future().join().isSuccess());
         verify(batchReporter).reportDispatchAckTimeMs(
-                eq(RoleType.PREFILL.name()), eq(expectedMetricIpPort), anyLong());
+                eq(role.name()), eq(expectedMetricIpPort), anyLong());
     }
 
     @Test

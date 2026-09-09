@@ -2179,12 +2179,11 @@ public class RequestRegistry {
         }
     }
 
-    private void publishDelivery(
-            RequestSlot slot,
-            ScheduledRequest item,
-            Response response,
-            RequestSlot.DeliveryConfirmation confirmation,
-            DeliveryClaimKind deliveryKind) {
+    private void publishDelivery(RequestSlot slot,
+                                 ScheduledRequest item,
+                                 Response response,
+                                 RequestSlot.DeliveryConfirmation confirmation,
+                                 DeliveryClaimKind deliveryKind) {
         Throwable preparationFailure = null;
         preparationFailure = runTerminalLeaf(
                 preparationFailure,
@@ -2212,9 +2211,9 @@ public class RequestRegistry {
                     : item.prefillEp().getStatus();
             preparationFailure = runTerminalLeaf(
                     preparationFailure,
-                    () -> reporter.reportDispatchAckTimeMs(
-                            RoleType.PREFILL.name(),
-                            prefillStatus == null ? "" : prefillStatus.getMetricIpPort(),
+                    prefillStatus == null ? null : () -> reporter.reportDispatchAckTimeMs(
+                            prefillStatus.getRole().name(),
+                            prefillStatus.getMetricIpPort(),
                             latencyMs));
         }
         if (preparationFailure != null) {

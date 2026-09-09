@@ -451,8 +451,8 @@ public class BatchSchedulerReporter {
     // ==================== ACK-to-response latency metrics ====================
 
     /**
-     * Report ACK-to-response latency (from engine EnqueueBatch acknowledgment to schedule
-     * response sent to the client) via {@code app.flexlb.ack.to.response.time.ms}.
+     * Report delivery-confirmation-to-response latency (Engine ACK for BATCH, route
+     * publication for NON_BATCH) via {@code app.flexlb.ack.to.response.time.ms}.
      *
      * @param role             prefill / decode
      * @param engineIp         the prefill endpoint IP

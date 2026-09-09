@@ -685,20 +685,15 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         if (!response.getSuccess()) {
             ctx.setErrorMessage(response.getErrorMessage());
         }
-        // Report ACK-to-response time for BATCH path (only when engine ACK was received)
-        if (ctx.getAckAtMs() > 0) {
-            long ackToResponseMs = System.currentTimeMillis() - ctx.getAckAtMs();
-            String prefillIp = "";
-            if (ctx.getResponse() != null && ctx.getResponse().getServerStatus() != null) {
-                for (ServerStatus ss : ctx.getResponse().getServerStatus()) {
-                    if (ss.getRole() == RoleType.PREFILL) {
-                        prefillIp = ss.getMetricIpPort() != null ? ss.getMetricIpPort() : "";
-                        break;
-                    }
+        // Delivery confirmation is an Engine ACK for BATCH and route publication for NON_BATCH.
+        if (ctx.getAckAtMs() > 0 && ctx.getResponse() != null && ctx.getResponse().getServerStatus() != null) {
+            for (ServerStatus worker : ctx.getResponse().getServerStatus()) {
+                if (worker.getRole() == RoleType.PREFILL || worker.getRole() == RoleType.PDFUSION) {
+                    batchSchedulerReporter.reportAckToResponseTimeMs(worker.getRole().name(), worker.getMetricIpPort(),
+                            Math.max(0L, System.currentTimeMillis() - ctx.getAckAtMs()));
+                    break;
                 }
             }
-            batchSchedulerReporter.reportAckToResponseTimeMs(
-                    RoleType.PREFILL.name(), prefillIp, ackToResponseMs);
         }
         if (isLocalSuccessfulDecision(ctx, response, origin)) {
             updateRequestCacheMetadata(ctx);

@@ -17,7 +17,9 @@ import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.AdmissionRejectReason;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
+import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
+import org.flexlb.dao.route.RoleType;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol;
 import org.flexlb.service.RouteService;
 import org.flexlb.service.config.merger.FlexlbConfigMerger;
@@ -30,6 +32,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.ArgumentMatchers;
@@ -157,6 +160,32 @@ class FlexlbServiceImplTest {
         assertFalse(pvAppender.list.get(0).getFormattedMessage().contains("\"admissionRejectReason\""));
         verify(serverLatencyRecorder).recordArrival(anyLong());
         verify(serverLatencyRecorder).recordCompletion(any(BalanceContext.class), anyLong());
+    }
+
+    @ParameterizedTest
+    @EnumSource(value = RoleType.class, names = {"PREFILL", "PDFUSION"})
+    void deliveryToResponseMetricUsesSelectedWorker(RoleType role) {
+        ServerStatus worker = new ServerStatus();
+        worker.setRole(role);
+        worker.setServerIp("10.0.0.1");
+        worker.setHttpPort(8080);
+        Response response = new Response();
+        response.setSuccess(true);
+        response.setCode(200);
+        response.setServerStatus(List.of(worker));
+        when(routeService.route(any())).thenAnswer(invocation -> {
+            BalanceContext context = invocation.getArgument(0);
+            context.setAckAtMs(System.currentTimeMillis() - 10L);
+            context.setResponse(response);
+            return CompletableFuture.completedFuture(response);
+        });
+        var request = FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                .setRequestId("delivery-metric").addInputIds(1).setSeqLen(1).build();
+        StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer = mock(StreamObserver.class);
+        service.schedule(request, observer);
+        verify(batchSchedulerReporter).reportAckToResponseTimeMs(
+                ArgumentMatchers.eq(role.name()), ArgumentMatchers.eq(worker.getMetricIpPort()), anyLong());
+        verify(observer).onCompleted();
     }
 
     @Test
