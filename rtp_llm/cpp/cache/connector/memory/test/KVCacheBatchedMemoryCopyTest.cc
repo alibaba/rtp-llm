@@ -1,6 +1,7 @@
 // Copyright (c) RTP-LLM
 
 #include <cstring>
+#include <chrono>
 #include <map>
 #include <memory>
 #include <set>
@@ -1623,6 +1624,127 @@ TEST(MemoryCopy3DRunBuilderTest, RejectsOverlappingRanges) {
     std::string reason;
     EXPECT_FALSE(buildBatchedMemoryCopy3DRuns(tiles, runs, &reason));
     EXPECT_EQ(reason, "overlapping_tiles");
+}
+
+TEST(KVCacheBatchedMemoryCopyPerfTest, MiniMaxM3Block64CopyModes) {
+    ASSERT_EQ(cudaSetDevice(0), cudaSuccess);
+    constexpr int kMainLayers = 60;
+    constexpr int kMtpLayers = 1;
+    constexpr int kLayers = kMainLayers + kMtpLayers;
+    constexpr size_t kKvBytes = 2 * 4 * 128 * 64;       // FP8 K+V, 4 KV heads, head_dim 128.
+    constexpr size_t kScaleBytes = 2 * 4 * 64 * 4;      // FP32 K/V scales.
+    constexpr size_t kIndexBytes = 4 * 128 * 64 * 2;    // BF16 sparse index K.
+    constexpr size_t kLayerStride = kKvBytes + kScaleBytes + kIndexBytes;
+    constexpr size_t kComponentBytes[] = {kKvBytes, kScaleBytes, kIndexBytes};
+    constexpr int kWarmup = 10;
+    constexpr int kIters = 100;
+
+    std::printf("MINIMAX_M3_COPY_PERF block_tokens=64 layers=%d main=%d mtp=%d layer_stride=%zu iters=%d\n",
+                kLayers, kMainLayers, kMtpLayers, kLayerStride, kIters);
+    for (int block_count : {1, 2, 4, 8, 16}) {
+        const size_t total_bytes = static_cast<size_t>(block_count) * kLayers * kLayerStride;
+        void* host = nullptr;
+        void* device = nullptr;
+        ASSERT_EQ(cudaHostAlloc(&host, total_bytes, cudaHostAllocDefault), cudaSuccess);
+        ASSERT_EQ(cudaMalloc(&device, total_bytes), cudaSuccess);
+        std::memset(host, 0x5a, total_bytes);
+        ASSERT_EQ(cudaMemset(device, 0xa5, total_bytes), cudaSuccess);
+
+        std::vector<BatchedMemoryCopyTile> batch_h2d;
+        std::vector<BatchedMemoryCopyTile> batch_d2h;
+        std::vector<BatchedMemoryCopy3DTile> tiles_h2d;
+        std::vector<BatchedMemoryCopy3DTile> tiles_d2h;
+        std::vector<StagedMemoryCopyTile> staged_tiles;
+        for (int block = 0; block < block_count; ++block) {
+            for (int layer = 0; layer < kLayers; ++layer) {
+                size_t component_off = 0;
+                for (int component = 0; component < 3; ++component) {
+                    const size_t off = (static_cast<size_t>(block) * kLayers + layer) * kLayerStride + component_off;
+                    auto* h = static_cast<char*>(host) + off;
+                    auto* d = static_cast<char*>(device) + off;
+                    const size_t bytes = kComponentBytes[component];
+                    batch_h2d.push_back({d, h, bytes});
+                    batch_d2h.push_back({h, d, bytes});
+                    tiles_h2d.push_back({h, d, bytes, layer, component, block});
+                    tiles_d2h.push_back({d, h, bytes, layer, component, block});
+                    staged_tiles.push_back({d, off, bytes});
+                    component_off += bytes;
+                }
+            }
+        }
+        BatchedMemoryCopyParams batch_h2d_params{batch_h2d, 0};
+        BatchedMemoryCopyParams batch_d2h_params{batch_d2h, 0};
+        BatchedMemoryCopy3DParams p3_h2d;
+        BatchedMemoryCopy3DParams p3_d2h;
+        p3_h2d.device_index = 0;
+        p3_d2h.device_index = 0;
+        p3_d2h.source_is_cuda = true;
+        ASSERT_TRUE(buildBatchedMemoryCopy3DRuns(tiles_h2d, p3_h2d.runs));
+        ASSERT_TRUE(buildBatchedMemoryCopy3DRuns(tiles_d2h, p3_d2h.runs));
+        StagedMemoryCopyParams staged;
+        staged.host_base = host;
+        staged.host_bytes = total_bytes;
+        staged.tiles = staged_tiles;
+        staged.device_index = 0;
+        StagedMemoryCopyScratch staged_scratch;
+        cudaStream_t stream = nullptr;
+        ASSERT_EQ(cudaStreamCreate(&stream), cudaSuccess);
+
+        auto run = [&](const char* mode, bool d2h, auto&& fn) {
+            for (int i = 0; i < kWarmup; ++i) ASSERT_TRUE(fn());
+            const auto begin = std::chrono::steady_clock::now();
+            for (int i = 0; i < kIters; ++i) ASSERT_TRUE(fn());
+            const double us = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - begin).count()
+                              / kIters;
+            const double gbps = static_cast<double>(total_bytes) / us / 1.0e3;
+            std::printf("MINIMAX_M3_COPY_PERF direction=%s blocks=%d mode=%s us=%.3f GBps=%.3f tiles=%zu ops3d=%zu bytes=%zu\n",
+                        d2h ? "D2H" : "H2D", block_count, mode, us, gbps,
+                        batch_h2d.size(), p3_h2d.runs.size(), total_bytes);
+        };
+        for (bool d2h : {false, true}) {
+            run("1d_async", d2h, [&]() {
+                const auto& batch = d2h ? batch_d2h : batch_h2d;
+                for (const auto& t : batch) {
+                    if (cudaMemcpyAsync(t.dst, t.src, t.bytes, cudaMemcpyDefault, stream) != cudaSuccess) return false;
+                }
+                return cudaStreamSynchronize(stream) == cudaSuccess;
+            });
+            run("batch_1d", d2h, [&]() {
+                return execBatchedMemoryCopy(d2h ? batch_d2h_params : batch_h2d_params);
+            });
+            run("2d_async", d2h, [&]() {
+                for (int block = 0; block < block_count; ++block) {
+                    size_t component_off = 0;
+                    for (int component = 0; component < 3; ++component) {
+                        const size_t off = static_cast<size_t>(block) * kLayers * kLayerStride + component_off;
+                        auto* h = static_cast<char*>(host) + off;
+                        auto* d = static_cast<char*>(device) + off;
+                        void* dst = d2h ? h : d;
+                        const void* src = d2h ? d : h;
+                        if (cudaMemcpy2DAsync(dst,
+                                              kLayerStride,
+                                              src,
+                                              kLayerStride,
+                                              kComponentBytes[component],
+                                              kLayers,
+                                              d2h ? cudaMemcpyDeviceToHost : cudaMemcpyHostToDevice,
+                                              stream) != cudaSuccess) return false;
+                        component_off += kComponentBytes[component];
+                    }
+                }
+                return cudaStreamSynchronize(stream) == cudaSuccess;
+            });
+            run("batch_3d", d2h, [&]() {
+                return exec3DBatchedMemoryCopy(d2h ? p3_d2h : p3_h2d);
+            });
+            staged.direction = d2h ? StagedMemoryCopyDirection::D2H : StagedMemoryCopyDirection::H2D;
+            run("staged_sm", d2h, [&]() { return execStagedMemoryCopy(staged, &staged_scratch); });
+        }
+        releaseStagedMemoryCopyScratch(staged_scratch);
+        ASSERT_EQ(cudaStreamDestroy(stream), cudaSuccess);
+        ASSERT_EQ(cudaFree(device), cudaSuccess);
+        ASSERT_EQ(cudaFreeHost(host), cudaSuccess);
+    }
 }
 
 }  // namespace rtp_llm::test
