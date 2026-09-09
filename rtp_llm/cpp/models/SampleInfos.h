@@ -79,6 +79,7 @@ struct SamplerOutput {
 public:
     torch::Tensor token_ids;
     torch::Tensor cum_log_probs;
+    // Sampling probabilities after top-k/top-p filtering and renormalization.
     torch::Tensor all_probs;
     torch::Tensor beam_index;
     torch::Tensor success;

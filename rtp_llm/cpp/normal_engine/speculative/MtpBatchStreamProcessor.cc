@@ -1016,7 +1016,16 @@ void MtpBatchStreamProcessor::preparePrefillSpecUpdateInfo(const StreamGroups&  
             }
         }
 
-        spec_update_infos.push_back({new_tokens, 1, -1, std::move(last_hidden_states), std::move(propose_all_probs)});
+        torch::Tensor all_probs;
+        if (stream->generateConfig()->return_all_probs) {
+            all_probs = sampler_output.all_probs.narrow(0, batch_idx_out, next_batch_size).unsqueeze(1).cpu();
+        }
+        spec_update_infos.push_back({.new_tokens          = new_tokens,
+                                     .num_new_tokens      = 1,
+                                     .draft_token         = -1,
+                                     .draft_hidden_states = std::move(last_hidden_states),
+                                     .draft_token_probs   = std::move(propose_all_probs),
+                                     .all_probs           = std::move(all_probs)});
 
         batch_idx_in += cur_batch_size;
         batch_idx_out += next_batch_size;
@@ -1062,8 +1071,17 @@ void MtpBatchStreamProcessor::prepareDecodeSpecUpdateInfo(
 
         torch::Tensor accept_tokens_tensor =
             accept_tokens.narrow(0, batch_idx_out, next_batch_size).narrow(1, 0, cur_accept_len).contiguous();
-        spec_update_infos.push_back(
-            {accept_tokens_tensor, cur_accept_len, -1, std::move(last_hidden_states), std::move(propose_all_probs)});
+        torch::Tensor all_probs;
+        if (stream->generateConfig()->return_all_probs) {
+            all_probs = spec_decode_output.target_probs_cpu.narrow(0, batch_idx_out, next_batch_size)
+                            .narrow(1, 0, cur_accept_len);
+        }
+        spec_update_infos.push_back({.new_tokens          = accept_tokens_tensor,
+                                     .num_new_tokens      = cur_accept_len,
+                                     .draft_token         = -1,
+                                     .draft_hidden_states = std::move(last_hidden_states),
+                                     .draft_token_probs   = std::move(propose_all_probs),
+                                     .all_probs           = std::move(all_probs)});
 
         token_offset += propose_step_ + 1;
         batch_idx_in += cur_batch_size;

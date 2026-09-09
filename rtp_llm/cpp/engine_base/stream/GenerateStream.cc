@@ -957,7 +957,7 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
                   torch::Tensor(),
                   torch::Tensor(),
                   torch::Tensor(),
-                  torch::Tensor(),
+                  update_info.all_probs,
                   torch::Tensor(),
                   torch::Tensor(),
                   torch::Tensor(),

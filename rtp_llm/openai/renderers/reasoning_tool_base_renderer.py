@@ -279,7 +279,7 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
         for delta in deltas[1:]:
             self._merge_output_str(merged, delta)
             if delta.logprobs is not None:
-                merged.logprobs = delta.logprobs
+                merged.logprobs = (merged.logprobs or []) + delta.logprobs
 
         return merged
 
@@ -384,6 +384,7 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
             functools.partial(self._check_finish_reason, max_new_tokens=max_new_tokens),
             self._remove_stop_word_ids,
         )
+        self._append_log_probs(status, output.all_probs, output.output_ids)
 
         # NOTE: With multi-token stop words (e.g., tokenized from extra_stop_words),
         # `_remove_stop_word_ids()` may truncate `status.output_ids` to an earlier position
