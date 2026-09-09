@@ -57,8 +57,6 @@ class DeepGemmWrapperLazyTest(unittest.TestCase):
     def test_required_symbols_reject_backend_import_failure(self):
         from rtp_llm.models_py.kernels.cuda import deepgemm_wrapper
 
-        deepgemm_wrapper.has_deep_gemm.cache_clear()
-        self.addCleanup(deepgemm_wrapper.has_deep_gemm.cache_clear)
         with mock.patch.object(
             deepgemm_wrapper, "has_module", return_value=True
         ), mock.patch.dict(sys.modules, {"deep_gemm": None}):
@@ -80,8 +78,6 @@ class DeepGemmWrapperLazyTest(unittest.TestCase):
             "m_grouped_fp8_gemm_nt_contiguous",
             "m_grouped_fp8_gemm_nt_masked",
         )
-        deepgemm_wrapper.has_deep_gemm.cache_clear()
-        self.addCleanup(deepgemm_wrapper.has_deep_gemm.cache_clear)
         with mock.patch.object(
             deepgemm_wrapper, "has_module", return_value=True
         ), mock.patch.dict(
@@ -116,8 +112,6 @@ class DeepGemmWrapperLazyTest(unittest.TestCase):
             "m_grouped_fp8_gemm_nt_contiguous",
             "m_grouped_fp8_gemm_nt_masked",
         )
-        deepgemm_wrapper.has_deep_gemm.cache_clear()
-        self.addCleanup(deepgemm_wrapper.has_deep_gemm.cache_clear)
         with mock.patch.object(
             deepgemm_wrapper, "has_module", return_value=True
         ), mock.patch.dict(
@@ -137,6 +131,29 @@ class DeepGemmWrapperLazyTest(unittest.TestCase):
 
         get_num_sms.assert_called_once_with()
         set_num_sms.assert_has_calls([mock.call(64), mock.call(132)])
+
+    def test_transient_probe_failure_is_not_cached(self):
+        from rtp_llm.models_py.kernels.cuda import deepgemm_wrapper
+
+        required_symbols = ("m_grouped_fp8_gemm_nt_masked",)
+        grouped_masked = mock.Mock()
+        fake_deep_gemm = types.SimpleNamespace(
+            m_grouped_fp8_gemm_nt_masked=grouped_masked
+        )
+        with mock.patch.object(
+            deepgemm_wrapper,
+            "has_module",
+            side_effect=(False, True, True),
+        ), mock.patch.dict(
+            sys.modules,
+            {"deep_gemm": fake_deep_gemm},
+        ), mock.patch.object(
+            deepgemm_wrapper,
+            "_m_grouped_fp8_gemm_nt_masked_impl",
+            None,
+        ):
+            self.assertFalse(deepgemm_wrapper.has_deep_gemm(required_symbols))
+            self.assertTrue(deepgemm_wrapper.has_deep_gemm(required_symbols))
 
 
 if __name__ == "__main__":

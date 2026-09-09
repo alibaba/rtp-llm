@@ -511,6 +511,13 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
                                                     inputs.attention_inputs.cu_kv_seqlens_device,
                                                     state.current_batch_size);
         } else if (has_padded_rows) {
+            // Preserve NewLoader's active-slot mask for plain decode. The
+            // target-verify branch above intentionally retains dummy Q rows.
+            addCudaGraphPrepareFillRegion(fill_params,
+                                          py_model_inputs_.attention_inputs.input_lengths_device,
+                                          state.current_batch_size,
+                                          selected_graph_batch_size,
+                                          0);
             // Plain decode also captures one query per graph row. Point its
             // rounded rows at position 0 of reserved block 0.
             addCudaGraphPrepareFillRegion(fill_params,
@@ -827,6 +834,18 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
         py_model_inputs_.attention_inputs.cu_kv_seqlens_device
             .slice(0, state.current_batch_size + 1, selected_graph_batch_size + 1)
             .fill_(inputs.attention_inputs.context_total_kv_length);
+#endif
+    } else if (has_padded_rows) {
+        // input_lengths is the authoritative active-slot mask for fixed-size
+        // graph metadata. Decode otherwise cannot distinguish an inactive
+        // padded slot from a real first-token request whose sequence length is
+        // also zero.
+        py_model_inputs_.attention_inputs.input_lengths.slice(0, state.current_batch_size, selected_graph_batch_size)
+            .fill_(0);
+#if !USING_CUDA && !USING_ROCM
+        py_model_inputs_.attention_inputs.input_lengths_device
+            .slice(0, state.current_batch_size, selected_graph_batch_size)
+            .fill_(0);
 #endif
     }
 

@@ -415,6 +415,7 @@ class DeepSeekNewloaderTest(unittest.TestCase):
     def _clear_indexer_runtime_dependency_caches() -> None:
         indexer_op_module._resolve_deep_gemm.cache_clear()
         indexer_op_module._resolve_flashinfer_rope.cache_clear()
+        indexer_op_module._resolve_fast_hadamard_transform.cache_clear()
         indexer_op_module.validate_indexer_runtime_dependencies.cache_clear()
 
     def test_local_rope_cache_preserves_reference_numerics(self):
@@ -1392,6 +1393,45 @@ class DeepSeekNewloaderTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "optional flashinfer backend"):
                 NewModelLoader._validate_runtime_backends(indexer, "cuda")
 
+    def test_sparse_indexer_load_fails_on_fast_hadamard_import_error(self):
+        indexer = self._runtime_preflight_indexer()
+        complete_deep_gemm = types.SimpleNamespace(
+            get_num_sms=mock.Mock(),
+            get_paged_mqa_logits_metadata=mock.Mock(),
+            fp8_paged_mqa_logits=mock.Mock(),
+            fp8_mqa_logits=mock.Mock(),
+        )
+        complete_rope = types.SimpleNamespace(
+            _apply_rope_pos_ids_cos_sin_cache=mock.Mock()
+        )
+        self._clear_indexer_runtime_dependency_caches()
+        self.addCleanup(self._clear_indexer_runtime_dependency_caches)
+        with (
+            mock.patch.object(
+                indexer_op_module,
+                "_resolve_deep_gemm",
+                return_value=complete_deep_gemm,
+            ),
+            mock.patch.object(
+                indexer_op_module,
+                "_resolve_flashinfer_rope",
+                return_value=complete_rope,
+            ),
+            mock.patch.object(
+                indexer_op_module.importlib,
+                "import_module",
+                side_effect=ModuleNotFoundError(
+                    "No module named 'fast_hadamard_transform'"
+                ),
+            ),
+            mock.patch.object(torch.version, "hip", None),
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "optional fast_hadamard_transform backend",
+            ):
+                NewModelLoader._validate_runtime_backends(indexer, "cuda")
+
     def test_sparse_indexer_load_fails_when_backend_symbols_are_missing(self):
         complete_deep_gemm = types.SimpleNamespace(
             get_num_sms=mock.Mock(),
@@ -1402,6 +1442,7 @@ class DeepSeekNewloaderTest(unittest.TestCase):
         complete_rope = types.SimpleNamespace(
             _apply_rope_pos_ids_cos_sin_cache=mock.Mock()
         )
+        complete_hadamard = types.SimpleNamespace(hadamard_transform=mock.Mock())
         cases = (
             (
                 types.SimpleNamespace(
@@ -1410,11 +1451,23 @@ class DeepSeekNewloaderTest(unittest.TestCase):
                     fp8_paged_mqa_logits=mock.Mock(),
                 ),
                 complete_rope,
+                complete_hadamard,
                 "fp8_mqa_logits",
             ),
-            (complete_deep_gemm, types.SimpleNamespace(), "flashinfer.rope"),
+            (
+                complete_deep_gemm,
+                types.SimpleNamespace(),
+                complete_hadamard,
+                "flashinfer.rope",
+            ),
+            (
+                complete_deep_gemm,
+                complete_rope,
+                types.SimpleNamespace(),
+                "fast_hadamard_transform",
+            ),
         )
-        for deep_gemm, rope, expected in cases:
+        for deep_gemm, rope, fast_hadamard, expected in cases:
             with self.subTest(missing=expected):
                 indexer = self._runtime_preflight_indexer()
                 self._clear_indexer_runtime_dependency_caches()
@@ -1428,6 +1481,11 @@ class DeepSeekNewloaderTest(unittest.TestCase):
                         indexer_op_module,
                         "_resolve_flashinfer_rope",
                         return_value=rope,
+                    ),
+                    mock.patch.object(
+                        indexer_op_module,
+                        "_resolve_fast_hadamard_transform",
+                        return_value=fast_hadamard,
                     ),
                     mock.patch.object(torch.version, "hip", None),
                 ):
@@ -1604,6 +1662,18 @@ class DeepSeekNewloaderTest(unittest.TestCase):
         torch.testing.assert_close(
             indexer.indexer_op.cos_sin_cache,
             rebound_cache,
+            rtol=0,
+            atol=0,
+        )
+
+        router_weight = torch.tensor([[0.1234567, -0.7654321]])
+        with torch.no_grad():
+            indexer.weights_proj.weight.copy_(router_weight)
+        indexer.to(dtype=torch.bfloat16)
+        self.assertEqual(indexer.weights_proj.weight.dtype, torch.float32)
+        torch.testing.assert_close(
+            indexer.weights_proj.weight,
+            router_weight,
             rtol=0,
             atol=0,
         )
