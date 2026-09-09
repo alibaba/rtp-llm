@@ -143,6 +143,10 @@ public class WorkerStatus {
                                 long prefillNonfinalChunkTokensMax) {
     }
 
+    public record StepMetrics(long stepId, long completedTimeMs, long totalScheduledTokens,
+                              long prefillRequestCount, long prefillTokens, long tokenBudget, double budgetFillRatio) {
+    }
+
     /**
      * Immutable view of one atomically published Engine status observation.
      * {@code runningTaskList} is the exact immutable map carried by the
@@ -166,7 +170,8 @@ public class WorkerStatus {
             long maxSeqLen,
             long maxBatchTokensSize,
             long runningQueryLen,
-            long waitingQueryLen) {
+            long waitingQueryLen,
+            StepMetrics lastStepMetrics) {
 
         public EngineObservation {
             Objects.requireNonNull(role, "role");
@@ -206,7 +211,8 @@ public class WorkerStatus {
                     maxSeqLen,
                     maxBatchTokensSize,
                     runningQueryLen,
-                    waitingQueryLen);
+                    waitingQueryLen,
+                    null);
         }
     }
 
@@ -516,7 +522,8 @@ public class WorkerStatus {
                 response.getMaxSeqLen(),
                 response.getMaxBatchTokensSize(),
                 response.getRunningQueryLen(),
-                response.getWaitingQueryLen());
+                response.getWaitingQueryLen(),
+                response.getLastStepMetrics());
         return new StatusObservation(
                 this,
                 engine,

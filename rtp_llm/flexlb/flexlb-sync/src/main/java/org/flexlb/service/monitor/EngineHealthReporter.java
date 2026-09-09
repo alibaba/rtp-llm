@@ -60,6 +60,11 @@ import static org.flexlb.constant.MetricConstant.ENGINE_STATUS_VISITOR_RT;
 import static org.flexlb.constant.MetricConstant.ENGINE_STATUS_VISITOR_SUCCESS_QPS;
 import static org.flexlb.constant.MetricConstant.ENGINE_WORKER_INFO_RUNNING_QUERY_LEN_VAR;
 import static org.flexlb.constant.MetricConstant.ENGINE_WORKER_INFO_STEP_LATENCY_VAR;
+import static org.flexlb.constant.MetricConstant.ENGINE_WORKER_STEP_BUDGET_FILL_RATIO;
+import static org.flexlb.constant.MetricConstant.ENGINE_WORKER_STEP_PREFILL_REQUEST_COUNT;
+import static org.flexlb.constant.MetricConstant.ENGINE_WORKER_STEP_PREFILL_TOKENS;
+import static org.flexlb.constant.MetricConstant.ENGINE_WORKER_STEP_TOKEN_BUDGET;
+import static org.flexlb.constant.MetricConstant.ENGINE_WORKER_STEP_TOTAL_SCHEDULED_TOKENS;
 import static org.flexlb.constant.MetricConstant.ENGINE_WORKER_NUMBER;
 import static org.flexlb.constant.MetricConstant.FORWARD_TO_MASTER_RESULT;
 import static org.flexlb.constant.MetricConstant.GRPC_SERVER_PROCESS_MS;
@@ -106,6 +111,17 @@ public class EngineHealthReporter {
 
     @PostConstruct
     public void init() {
+
+        monitor.register(ENGINE_WORKER_STEP_TOTAL_SCHEDULED_TOKENS,
+                FlexMetricType.GAUGE, FlexStatisticsType.SUMMARY);
+        monitor.register(ENGINE_WORKER_STEP_PREFILL_REQUEST_COUNT,
+                FlexMetricType.GAUGE, FlexStatisticsType.SUMMARY);
+        monitor.register(ENGINE_WORKER_STEP_PREFILL_TOKENS,
+                FlexMetricType.GAUGE, FlexStatisticsType.SUMMARY);
+        monitor.register(ENGINE_WORKER_STEP_TOKEN_BUDGET,
+                FlexMetricType.GAUGE, FlexStatisticsType.SUMMARY);
+        monitor.register(ENGINE_WORKER_STEP_BUDGET_FILL_RATIO,
+                FlexMetricType.GAUGE, FlexStatisticsType.SUMMARY);
 
         this.monitor.register(ENGINE_STATUS_CHECK_SUCCESS_PERIOD, FlexMetricType.GAUGE);
         this.monitor.register(ENGINE_STATUS_AVAILABLE_CONCURRENCY, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
@@ -231,6 +247,28 @@ public class EngineHealthReporter {
                 "code", String.valueOf(errorEnum.getCode()),
                 "role", workerStatus.getRole().getCode());
         monitor.report(CACHE_STATUS_CHECK_FAIL, metricTags, 1.0);
+    }
+
+    public void reportWorkerStepMetrics(
+            String modelName,
+            WorkerStatus worker,
+            WorkerStatus.StepMetrics step) {
+        FlexMetricTags tags = FlexMetricTags.of(
+                "model", modelName,
+                "engineIp", worker.getMetricIpPort(),
+                "role", worker.getRole().name(),
+                "group", worker.topologySnapshot().group(),
+                "phase", step.prefillRequestCount() > 0 ? "prefill" : "decode");
+        monitor.report(ENGINE_WORKER_STEP_TOTAL_SCHEDULED_TOKENS,
+                tags, step.totalScheduledTokens());
+        monitor.report(ENGINE_WORKER_STEP_PREFILL_REQUEST_COUNT,
+                tags, step.prefillRequestCount());
+        monitor.report(ENGINE_WORKER_STEP_PREFILL_TOKENS,
+                tags, step.prefillTokens());
+        monitor.report(ENGINE_WORKER_STEP_TOKEN_BUDGET,
+                tags, step.tokenBudget());
+        monitor.report(ENGINE_WORKER_STEP_BUDGET_FILL_RATIO,
+                tags, step.budgetFillRatio());
     }
 
     public void reportStatusCheckerSuccess(String modelName,
