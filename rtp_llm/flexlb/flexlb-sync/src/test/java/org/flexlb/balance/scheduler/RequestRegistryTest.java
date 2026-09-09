@@ -2,7 +2,6 @@ package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
-import org.flexlb.balance.eviction.EngineCancelChannel;
 import org.flexlb.balance.scheduler.RequestLifecycleTestSupport.Registered;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
@@ -35,7 +34,6 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -44,7 +42,6 @@ class RequestRegistryTest {
 
     private FlexlbConfig config;
     private RequestRegistry lifecycle;
-    private EngineCancelChannel engineCancelChannel;
 
     @BeforeEach
     void setUp() {
@@ -52,12 +49,10 @@ class RequestRegistryTest {
         SchedulingTestConfig.usePriorityQueue(config);
         ConfigService configService = mock(ConfigService.class);
         when(configService.loadBalanceConfig()).thenReturn(config);
-        engineCancelChannel = mock(EngineCancelChannel.class);
         lifecycle = new RequestRegistry(
                 configService,
                 mock(BatchSchedulerReporter.class),
-                mock(RequestSchedulerReporter.class),
-                engineCancelChannel);
+                mock(RequestSchedulerReporter.class));
     }
 
     @AfterEach
@@ -319,10 +314,6 @@ class RequestRegistryTest {
                 slot, heartbeatAtMs + ttlMs + 1L, ttlMs));
         assertEquals(RequestState.Phase.TIMED_OUT,
                 lifecycle.getRequestState(601L, 0L).state());
-        verify(engineCancelChannel, never()).cancel(
-                org.mockito.ArgumentMatchers.any(),
-                org.mockito.ArgumentMatchers.anyLong(),
-                org.mockito.ArgumentMatchers.anyLong());
     }
 
     @Test
@@ -338,12 +329,8 @@ class RequestRegistryTest {
 
         assertEquals(RequestState.Phase.TIMED_OUT,
                 lifecycle.getRequestState(602L, 0L).state());
-        verify(registered.item().decodeEp()).releaseReservationExact(
+        verify(registered.item().decodeEp()).expireReservationExact(
                 registered.item().decodeReservation());
-        verify(engineCancelChannel, never()).cancel(
-                org.mockito.ArgumentMatchers.any(),
-                org.mockito.ArgumentMatchers.anyLong(),
-                org.mockito.ArgumentMatchers.anyLong());
     }
 
     private BalanceContext context(long requestId) {

@@ -6,7 +6,6 @@ import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.eviction.EngineCancelChannel;
 import org.flexlb.balance.eviction.EvictionManager;
 import org.flexlb.balance.strategy.CostBasedDecodeStrategy;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
@@ -72,7 +71,7 @@ class PdfusionSchedulingTest {
         when(service.loadBalanceConfig()).thenReturn(config);
         BatchSchedulerReporter reporter = mock(BatchSchedulerReporter.class);
         RequestSchedulerReporter requestReporter = mock(RequestSchedulerReporter.class);
-        RequestRegistry lifecycle = new RequestRegistry(service, reporter, requestReporter, mock(EngineCancelChannel.class));
+        RequestRegistry lifecycle = new RequestRegistry(service, reporter, requestReporter);
         PlacementAvailability availability = new PlacementAvailability();
         DeliveryStrategy delivery = batch
                 ? new BatchDeliveryStrategy(() -> CapacityBoundary.Attempt.accepted(
