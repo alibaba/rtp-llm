@@ -345,14 +345,14 @@ void FlashInferMlaAttnParams::fillParamsInternal(torch::Tensor t_prefix_lengths,
                 batch_reuse_info_vec_ptr[i * 4 + 2] = 0;
                 batch_reuse_info_vec_ptr[i * 4 + 3] = 0;
             }
-        } else if (i < input_batch_size) {
+        } else if (i < input_batch_size && input_lengths[i] > 0) {
             // Decode mode: ensure batch_size <= max_input_token_num_
             RTP_LLM_CHECK_WITH_INFO(batch_size <= max_input_token_num_,
                                     "batch_size exceed max_input_token_num_ in decode mode %d > %d",
                                     batch_size,
                                     max_input_token_num_);
-            batch_indice_ptr[i] = i;
-            positions_ptr[i]    = sequence_lengths[i];
+            batch_indice_ptr[accu_q_len] = i;
+            positions_ptr[accu_q_len]    = sequence_lengths[i];
             seq_len             = sequence_lengths[i] + 1;
             accu_q_len += 1;
             accu_kv_len += 1;
@@ -389,7 +389,7 @@ void FlashInferMlaAttnParams::fillParamsInternal(torch::Tensor t_prefix_lengths,
     // padded decode slots still need batch-indexed page metadata, but must not
     // extend batch_indice/positions or slot_mapping into uninitialized tail
     // entries.
-    input_token_num       = prefix_lengths ? offset : input_batch_size;
+    input_token_num       = accu_q_len;
     page_num              = total_page_idx;
     reuse_page_num        = reuse_page_idx;
     batch_reuse_info_size = batch_size * 4;  // 4 ints per batch entry
@@ -490,7 +490,7 @@ void FlashInferMlaAttnParams::fillParams(torch::Tensor t_prefix_lengths,
             input_token_num += input_length;
             seq_len = input_length + prefix_length;
             reuse_page_num += (prefix_length + seq_size_per_block - 1) / seq_size_per_block;
-        } else if (i < input_batch_size) {
+        } else if (i < input_batch_size && input_lengths_ptr[i] > 0) {
             input_token_num += 1;
             seq_len = sequence_lengths_ptr[i] + 1;
         }

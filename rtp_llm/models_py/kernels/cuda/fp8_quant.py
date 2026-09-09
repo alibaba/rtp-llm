@@ -286,12 +286,6 @@ def scaled_fp8_per_tensor_quant(
             f"FP8 per-tensor quantization requires 2D input, got {input.shape}"
         )
     _validate_native_quant_input(input, "FP8 per-tensor quantization", allow_empty=True)
-    vector_width = 16 // input.element_size()
-    if input.numel() % vector_width != 0:
-        raise ValueError(
-            f"FP8 per-tensor input element count {input.numel()} must be divisible "
-            f"by native vector width {vector_width}"
-        )
     shape: Union[Tuple[int, int], torch.Size] = input.shape
     out_dtype = torch.float8_e4m3fn
     if output is None:

@@ -82,3 +82,18 @@ def is_module_ignored(prefix: str, patterns: Sequence[str]) -> bool:
             if prefix_parts[: len(pattern_parts)] == pattern_parts:
                 return True
     return False
+
+
+def moe_projection_exclusion_states(prefix: str, patterns: Sequence[str]) -> List[bool]:
+    """Return effective gate/up/down exclusion states for a fused MoE layer.
+
+    Checkpoints may name the first two logical projections separately or by
+    their fused runtime name ``gate_up_proj``. Treating the fused name as an
+    unrelated module would silently leave those weights quantized.
+    """
+    gate_up_ignored = is_module_ignored(f"{prefix}.gate_up_proj", patterns)
+    return [
+        gate_up_ignored or is_module_ignored(f"{prefix}.gate_proj", patterns),
+        gate_up_ignored or is_module_ignored(f"{prefix}.up_proj", patterns),
+        is_module_ignored(f"{prefix}.down_proj", patterns),
+    ]
