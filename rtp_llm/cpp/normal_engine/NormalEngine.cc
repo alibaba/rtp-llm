@@ -77,7 +77,8 @@ bool shouldRefreshCacheStatusSnapshot(RoleType role_type, const std::list<Genera
 }  // anonymous namespace
 
 NormalEngine::NormalEngine(const EngineInitParams&                       params,
-                           std::unique_ptr<ProposeModelEngineInitParams> propose_params):
+                           std::unique_ptr<ProposeModelEngineInitParams> propose_params,
+                           bool defer_loop_start):
     EngineBase(params),
     model_config_(params.model_config_),
     parallelism_config(params.parallelism_config),
@@ -145,7 +146,13 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
     releaseHostMemoryCache();
 
     initScheduler();
-    (void)startLoop();
+    if (defer_loop_start) {
+        // DP dummy streams also launch kernels without incoming requests.
+        // Keep the loop absent until the template has been released.
+        RTP_LLM_LOG_INFO("normal engine loop deferred until SCR release");
+    } else {
+        (void)startLoop();
+    }
 }
 
 void NormalEngine::initExecutor(const EngineInitParams&                        params,
@@ -482,6 +489,9 @@ KVCacheInfo NormalEngine::getCacheStatusInfo(int64_t latest_version, bool need_c
 }
 
 absl::Status NormalEngine::startLoop() {
+    if (loop_thread_) {
+        return absl::OkStatus();
+    }
     if (parallelism_config.tp_rank == 0) {
         RTP_LLM_LOG_INFO("start init system prompt");
         THROW_IF_STATUS_ERROR(initSystemPrompt());
@@ -497,7 +507,9 @@ absl::Status NormalEngine::stop() {
     RTP_LLM_LOG_INFO("stop normal engine");
     running_ = false;
     RETURN_IF_STATUS_ERROR(scheduler_->stop());
-    loop_thread_->join();
+    if (loop_thread_) {
+        loop_thread_->join();
+    }
     return absl::OkStatus();
 }
 
