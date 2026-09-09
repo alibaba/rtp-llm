@@ -4,6 +4,37 @@
 
 ---
 
+## Cache Store server first-block-ready metric removal
+
+**Introduced in:** [PR #1390](https://github.com/alibaba/rtp-llm/pull/1390)
+(monitor metrics optimization).
+
+**Summary:** The server-load metric
+`rtp_llm.cache_store.load.server.first_block_ready_latency_us` is removed. A
+repository-wide reference audit found no in-repository consumer, while removing
+its request-path timestamp and sampling avoids collecting a value that RTP-LLM
+no longer reports. The distinct remote-store metric
+`rtp_llm.cache_store.remote_store.first_block_ready_latency_us` remains because
+that workflow still samples and reports it.
+
+**Impact and migration:** This is an observability contract change. Dashboards,
+alerts, and recording rules maintained outside this repository must be audited
+before deploying this change. Migrate consumers according to the signal they
+need:
+
+- Use `rtp_llm.cache_store.load.server.latency_us` for end-to-end server load
+  latency.
+- Use `rtp_llm.cache_store.load.server.all_block_ready_latency_us` for the time
+  until every requested block is ready.
+- Use `rtp_llm.cache_store.load.server.transfer_gap_latency_us` for the time
+  from all blocks becoming ready until transfer completes.
+
+None of these metrics is semantically equivalent to first-block readiness. If
+an external consumer has a first-block SLO, delay rollout until that dashboard
+or alert has been retired or redesigned; do not substitute the remote-store
+metric for server-load traffic. Roll back to a build before PR #1390 if the old
+signal is still required during migration.
+
 ## JIT cache unified local root and remote snapshot boundary
 
 **Introduced in:** [PR #1112](https://github.com/alibaba/rtp-llm/pull/1112) (JIT remote cache).

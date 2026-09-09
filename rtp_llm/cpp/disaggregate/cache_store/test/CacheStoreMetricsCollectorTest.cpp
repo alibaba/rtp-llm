@@ -99,4 +99,16 @@ TEST_F(CacheStoreMetricsCollectorTest, testServerLoadMetricsWithoutAllBlocksRead
     EXPECT_EQ(0, reported_metrics.transfer_gap_latency_us);
 }
 
+TEST_F(CacheStoreMetricsCollectorTest, testServerLoadMetricsReportsThroughMetricsReporter) {
+    auto kmon_tags = kmonitor::MetricsTags();
+    auto reporter  = std::make_shared<kmonitor::MetricsReporter>("", "", kmon_tags);
+    auto collector = std::make_shared<CacheStoreServerLoadMetricsCollector>(reporter, 1, 1024, 123);
+
+    collector->markAllBlocksReady();
+    collector->setWriteInfo(1, 1024, 1111);
+    collector->markEnd(true);
+
+    EXPECT_NO_THROW(collector.reset());
+}
+
 }  // namespace rtp_llm

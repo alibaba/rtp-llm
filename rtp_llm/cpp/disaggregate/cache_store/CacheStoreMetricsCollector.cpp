@@ -61,7 +61,9 @@ CacheStoreServerLoadMetricsCollector::CacheStoreServerLoadMetricsCollector(const
 CacheStoreServerLoadMetricsCollector::~CacheStoreServerLoadMetricsCollector() {
     collector_.latency_us                 = subZeroOrAbove(end_time_us_, start_time_us_);
     collector_.all_block_ready_latency_us = subZeroOrAbove(all_block_ready_time_us_, start_time_us_);
-    collector_.transfer_gap_latency_us    = subZeroOrAbove(end_time_us_, all_block_ready_time_us_);
+    // The transfer gap is undefined until all blocks are ready, so report zero when that timestamp was never set.
+    collector_.transfer_gap_latency_us =
+        all_block_ready_time_us_ > 0 ? subZeroOrAbove(end_time_us_, all_block_ready_time_us_) : 0;
 
     if (report_callback_) {
         report_callback_(collector_);
