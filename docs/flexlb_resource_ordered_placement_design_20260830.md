@@ -77,6 +77,10 @@ tombstone，也不扫描大队列。
 - cancel、terminal response 和 cleanup；
 - 已发布请求的精确 queue item / Decode reservation 释放。
 
+> 历史说明：下段记录的全局 outstanding 配额和 `PREFILL_QUEUED` 抢占配置
+> 已移除。现行策略只支持 `DECODE_RESERVED` 本地回收与 `DECODE_ENGINE_OWNED`
+> Engine Cancel；配置以 [FlexLB README](../rtp_llm/flexlb/README.md) 和其中的示例为准。
+
 全局 outstanding 配额在 RequestSlot 注册前获取；过载拒绝不创建保留五分钟的
 请求 generation。配额交给唯一 RequestSlot，并在终止时精确释放一次。
 PRIORITY 模式额度已满时，按低优先级优先查找尚未交付、可本地终止的候选，

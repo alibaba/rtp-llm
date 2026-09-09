@@ -185,23 +185,31 @@ public final class GroupPlanner {
 
         int maxRequests = constraints.maxRequests();
         T head = ordered.next();
-        Selection<T> singleton = selectSingleton(
-                head, access, constraints, predictor);
-        if (maxRequests == 1
-                || singleton.predictionBoundaryTriggered()
-                || !ordered.hasNext()) {
-            return singleton;
+        boolean mayGrow = maxRequests > 1 && ordered.hasNext();
+        List<T> picked;
+        if (mayGrow) {
+            picked = new ArrayList<>(Math.min(maxRequests, INITIAL_SELECTION_CAPACITY));
+            picked.add(head);
+        } else {
+            picked = List.of(head);
         }
-
-        List<T> picked = new ArrayList<>(Math.min(
-                maxRequests, INITIAL_SELECTION_CAPACITY));
-        picked.add(head);
-        Shape shape = singleton.shape();
-        long windowOpenedAtMs = singleton.windowOpenedAtMs();
+        long headTokens = Math.max(0L, access.seqLen(head));
+        Shape shape = new Shape(1, headTokens, headTokens, headTokens);
+        long windowOpenedAtMs = access.enqueuedAtMs(head);
         boolean predictionEnabled = predictor != null
                 && constraints.predictedExecutionBudgetMs() > 0L;
-        OptionalDouble selectedPredictionMs = singleton.selectedPredictionMs();
+        OptionalDouble selectedPredictionMs = OptionalDouble.empty();
         boolean predictionBoundaryTriggered = false;
+        if (predictionEnabled) {
+            double predictedMs = validatedPrediction(predictor, picked);
+            selectedPredictionMs = OptionalDouble.of(predictedMs);
+            predictionBoundaryTriggered = predictionDispatchBoundaryReached(
+                    predictedMs, constraints.predictedExecutionBudgetMs());
+        }
+        if (!mayGrow || predictionBoundaryTriggered) {
+            return new Selection<>(picked, shape, windowOpenedAtMs,
+                    predictionBoundaryTriggered, selectedPredictionMs);
+        }
 
         while (ordered.hasNext()
                 && picked.size() < maxRequests
@@ -278,26 +286,6 @@ public final class GroupPlanner {
             ToDoubleFunction<List<T>> predictor) {
         return evaluateReadiness(
                 select(orderedItems, access, constraints, predictor), constraints, nowMs);
-    }
-
-    private static <T> Selection<T> selectSingleton(
-            T item,
-            ItemAccess<T> access,
-            Constraints constraints,
-            ToDoubleFunction<List<T>> predictor) {
-        List<T> selected = List.of(item);
-        Shape shape = Shape.empty().add(access.seqLen(item));
-        long windowOpenedAtMs = access.enqueuedAtMs(item);
-        if (predictor == null || constraints.predictedExecutionBudgetMs() <= 0L) {
-            return new Selection<>(selected, shape, windowOpenedAtMs,
-                    false, OptionalDouble.empty());
-        }
-
-        double predictedMs = validatedPrediction(predictor, selected);
-        return new Selection<>(selected, shape, windowOpenedAtMs,
-                predictionDispatchBoundaryReached(
-                        predictedMs, constraints.predictedExecutionBudgetMs()),
-                OptionalDouble.of(predictedMs));
     }
 
     public static boolean windowElapsed(long windowOpenedAtMs,

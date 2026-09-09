@@ -14,6 +14,7 @@ import org.flexlb.balance.scheduler.RequestRegistry;
 import org.flexlb.balance.scheduler.RouteDeliveryStrategy;
 import org.flexlb.balance.scheduler.ScheduledRequest;
 import org.flexlb.config.ConfigService;
+import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
@@ -28,6 +29,13 @@ import java.util.Map;
 final class StrategyTestSupport {
 
     private StrategyTestSupport() {
+    }
+
+    static FlexlbConfig config() {
+        FlexlbConfig config = new FlexlbConfig();
+        config.getRequestLifecycle().getRequest().setTimeoutMs(60_000L);
+        config.getRequestLifecycle().getDecision().setLifetime(2.0);
+        return config;
     }
 
     static EndpointRegistry endpointRegistry(ConfigService configService) {

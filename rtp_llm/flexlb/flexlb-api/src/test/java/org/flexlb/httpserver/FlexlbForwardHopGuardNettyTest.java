@@ -11,7 +11,6 @@ import io.grpc.netty.NettyServerBuilder;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.nio.NioEventLoopGroup;
 import org.flexlb.config.ConfigService;
-import org.flexlb.config.FlexlbConfig;
 import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol;
 import org.flexlb.schedule.grpc.FlexlbServiceGrpc;
@@ -160,7 +159,7 @@ class FlexlbForwardHopGuardNettyTest {
                     invocation -> masterAddress.get());
 
             ConfigService configService = mock(ConfigService.class);
-            when(configService.loadBalanceConfig()).thenReturn(new FlexlbConfig());
+            when(configService.loadBalanceConfig()).thenReturn(org.flexlb.mock.TestFlexlbConfigs.create());
             routeService = mock(RouteService.class);
             EngineHealthReporter healthReporter = mock(EngineHealthReporter.class);
             ActiveRequestCounter activeRequestCounter = mock(ActiveRequestCounter.class);

@@ -412,7 +412,7 @@ public class DefaultBatchDispatcher {
         // Resolve every potentially fallible argument before entering the RPC
         // invocation block. A failure here is definitely pre-send and is
         // handled by doDispatch's outer guard.
-        long deadlineMs = activeBatchConfig().getEnqueueRpcTimeoutMs();
+        requireBatchDispatcher();
         String prefillIp = prefillEp.getIp();
         int prefillGrpcPort = prefillEp.getGrpcPort();
         CompletableFuture<EngineRpcService.EnqueueBatchResponsePB> rpcFuture;
@@ -423,7 +423,7 @@ public class DefaultBatchDispatcher {
             }
             attempt.rpcInvocationStarted = true;
             rpcFuture = grpcClient.batchEnqueueAsync(
-                    prefillIp, prefillGrpcPort, request, deadlineMs);
+                    prefillIp, prefillGrpcPort, request);
         } catch (Throwable invocationFailure) {
             // Once client invocation starts, a synchronous exception does not
             // prove that no bytes were written. Treat it as ambiguous.
@@ -490,11 +490,11 @@ public class DefaultBatchDispatcher {
                 ? failure.getCause() : failure;
     }
 
-    private DispatcherConfig activeBatchConfig() {
+    private void requireBatchDispatcher() {
         DispatcherConfig dispatcher =
                 configService.loadBalanceConfig().getDispatcher();
         if (dispatcher.getType() == DispatcherConfig.Type.BATCH) {
-            return dispatcher;
+            return;
         }
         throw new IllegalStateException(
                 "batch submission requires BATCH dispatcher configuration");

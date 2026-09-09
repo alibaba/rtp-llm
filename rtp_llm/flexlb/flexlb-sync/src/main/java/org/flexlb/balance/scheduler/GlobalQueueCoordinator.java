@@ -5,7 +5,6 @@ import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.eviction.EvictionManager;
 import org.flexlb.config.ConfigService;
 import org.flexlb.dao.BalanceContext;
-import org.flexlb.dao.loadbalance.AdmissionRejectReason;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
@@ -195,7 +194,7 @@ final class GlobalQueueCoordinator implements AutoCloseable {
                         closePlan(plan);
                         remove(plan.entry);
                         completeDecisionResponse(plan.entry, error(
-                                StrategyErrorType.BATCH_DISPATCH_FAILED,
+                                StrategyErrorType.DISPATCH_FAILED,
                                 "Placement failed: " + failure.getMessage()));
                         Logger.error("Global queue commit failed: request_id={}",
                                 plan.entry.context.getRequestId(), failure);
@@ -316,8 +315,8 @@ final class GlobalQueueCoordinator implements AutoCloseable {
             return Plan.done(entry, availabilitySequence);
         }
         try {
-            PlacementResult<QueueRouteAdmission, PlacementKey> result =
-                    router.routeForQueue(entry.context, entry.routingGroup);
+            PlacementResult<RouteAdmission, PlacementKey> result =
+                    router.select(entry.context, entry.routingGroup);
             if (result.status() == PlacementResult.Status.SUCCESS) {
                 return Plan.success(
                         entry, mutation, result.value(), availabilitySequence);
@@ -340,11 +339,11 @@ final class GlobalQueueCoordinator implements AutoCloseable {
         if (plan.failure != null) {
             remove(entry);
             completeDecisionResponse(entry, error(
-                    StrategyErrorType.BATCH_DISPATCH_FAILED,
+                    StrategyErrorType.DISPATCH_FAILED,
                     "Placement failed: " + plan.failure.getMessage()));
             return Outcome.DONE;
         }
-        PlacementResult<QueueRouteAdmission, PlacementKey> result = plan.result;
+        PlacementResult<RouteAdmission, PlacementKey> result = plan.result;
         if (result.status() == PlacementResult.Status.REJECTED) {
             remove(entry);
             completeDecisionResponse(entry, result.rejection());
@@ -358,23 +357,13 @@ final class GlobalQueueCoordinator implements AutoCloseable {
             remove(entry);
             return Outcome.DONE;
         }
-        if (result.status() == PlacementResult.Status.LIMIT_REACHED) {
-            remove(entry);
-            completeAcceptanceLimit(entry);
-            return Outcome.DONE;
-        }
-        QueueRouteAdmission admission = plan.admission;
+        RouteAdmission admission = plan.admission;
         try {
             PlacementResult<ScheduledRequest, PlacementKey> publication =
-                    admission.tryPublish(entry.context, entry.future, lifecycle);
+                    admission.tryEnqueue(entry.context, entry.future, lifecycle);
             if (publication.status() == PlacementResult.Status.SUCCESS) {
                 removeCommitted(entry, admission);
                 reportRouteSubmitted(entry.context, publication.value());
-                return Outcome.DONE;
-            }
-            if (publication.status() == PlacementResult.Status.LIMIT_REACHED) {
-                remove(entry);
-                completeAcceptanceLimit(entry);
                 return Outcome.DONE;
             }
             if (publication.status() == PlacementResult.Status.REJECTED
@@ -384,7 +373,7 @@ final class GlobalQueueCoordinator implements AutoCloseable {
             }
             entry.blockedKey = publication.blocker();
             plan.rememberBlockedEndpoint(admission.blockedEndpoint());
-            boolean staleSelection = admission.blockedSelectionBecameStale();
+            boolean staleSelection = admission.blockedEndpointChanged();
             if (staleSelection) {
                 return Outcome.REPLAN;
             }
@@ -405,7 +394,7 @@ final class GlobalQueueCoordinator implements AutoCloseable {
         }
         WorkerEndpoint blockedEndpoint = plan.blockedEndpoint();
         plan.closeMutation();
-        QueueRouteAdmission admission = plan.admission();
+        RouteAdmission admission = plan.admission();
         if (admission == null || !evictionManager.tryAdmit(
                 entry.context, entry.future, admission, blockedEndpoint)) {
             return false;
@@ -437,7 +426,7 @@ final class GlobalQueueCoordinator implements AutoCloseable {
      * lock, so an endpoint release cannot linearize between those operations.
      */
     private boolean parkIfConflicting(Plan plan) {
-        QueueRouteAdmission admission = plan.admission;
+        RouteAdmission admission = plan.admission;
         if (admission == null) {
             return false;
         }
@@ -519,7 +508,7 @@ final class GlobalQueueCoordinator implements AutoCloseable {
 
     private void removeCommitted(
             GlobalQueueEntry entry,
-            QueueRouteAdmission admission) {
+            RouteAdmission admission) {
         lock.lock();
         try {
             if (!orderedQueue.remove(entry)) {
@@ -555,12 +544,8 @@ final class GlobalQueueCoordinator implements AutoCloseable {
 
     /** Bound each ordered pass by admitted work; the pipeline bounds CPU concurrency. */
     private int planningFrontierSize() {
-        // Planning owns CPU slots, not endpoint capacity. In particular, zero
-        // free credits must still allow exact-route priority rescue. Publication
-        // and replacement share the endpoint's authoritative capacity check.
-        return Math.max(MIN_PLANNING_FRONTIER_SIZE,
-                configService.loadBalanceConfig().queueScheduler().getCapacity()
-                        .getMaxOutstandingRequestsGlobal());
+        // Bound concurrent planning work independently of request admission.
+        return Math.max(MIN_PLANNING_FRONTIER_SIZE, plannerCount);
     }
 
     private void awaitChanged() {
@@ -590,32 +575,17 @@ final class GlobalQueueCoordinator implements AutoCloseable {
             } else {
                 blockedRequests.capacityChanged(event.key());
             }
-            // Aggregate planning credits can become available even when no
-            // parked entry matches this exact edge.
+            // Other planning work may progress even when no parked entry
+            // matches this exact edge.
             changed.signal();
         } finally {
             lock.unlock();
         }
     }
 
-    private void completeAcceptanceLimit(GlobalQueueEntry entry) {
-        BalanceContext context = entry.context;
-        int limit = context.getConfig().queueScheduler().getLifecycle()
-                .getMaxDeliveredNotAcceptedRequestsGlobal();
-        String detail = "admission capacity is temporarily exhausted"
-                + "; active_admissions=" + lifecycle.decodeAcceptanceCount()
-                + " limit=" + limit;
-        Response failure = Response.error(
-                StrategyErrorType.RESOURCE_EXHAUSTED,
-                AdmissionRejectReason.RESOURCE_EXHAUSTED);
-        failure.setErrorMessage(
-                StrategyErrorType.RESOURCE_EXHAUSTED.buildErrorMessage(detail));
-        completeDecisionResponse(entry, failure);
-    }
-
     private void completeDecisionResponse(GlobalQueueEntry entry, Response response) {
         try {
-            lifecycle.publishQueueDecisionResponseAsync(
+            lifecycle.publishDecisionResponseAsync(
                     entry.context.getRequestId(), entry.future, response);
         } catch (Throwable failure) {
             Logger.error(
@@ -650,7 +620,7 @@ final class GlobalQueueCoordinator implements AutoCloseable {
             entry.blockedKey = null;
             entry.blockedEndpoint = null;
             completeDecisionResponse(entry, error(
-                    StrategyErrorType.BATCH_DISPATCH_FAILED,
+                    StrategyErrorType.DISPATCH_FAILED,
                     "request scheduler is shutting down"));
         }
     }
@@ -772,8 +742,8 @@ final class GlobalQueueCoordinator implements AutoCloseable {
     private static final class Plan implements AutoCloseable {
         private final GlobalQueueEntry entry;
         private AdmissionMutation mutation;
-        private QueueRouteAdmission admission;
-        private final PlacementResult<QueueRouteAdmission, PlacementKey> result;
+        private RouteAdmission admission;
+        private final PlacementResult<RouteAdmission, PlacementKey> result;
         private final Throwable failure;
         private final long availabilitySequence;
         private WorkerEndpoint blockedEndpoint;
@@ -781,8 +751,8 @@ final class GlobalQueueCoordinator implements AutoCloseable {
         private Plan(
                 GlobalQueueEntry entry,
                 AdmissionMutation mutation,
-                QueueRouteAdmission admission,
-                PlacementResult<QueueRouteAdmission, PlacementKey> result,
+                RouteAdmission admission,
+                PlacementResult<RouteAdmission, PlacementKey> result,
                 Throwable failure,
                 long availabilitySequence) {
             this.entry = entry;
@@ -794,7 +764,7 @@ final class GlobalQueueCoordinator implements AutoCloseable {
         }
 
         static Plan success(GlobalQueueEntry entry, AdmissionMutation mutation,
-                            QueueRouteAdmission admission,
+                            RouteAdmission admission,
                             long availabilitySequence) {
             return new Plan(entry, mutation, admission,
                     PlacementResult.success(admission), null,
@@ -802,7 +772,7 @@ final class GlobalQueueCoordinator implements AutoCloseable {
         }
 
         static Plan result(GlobalQueueEntry entry,
-                           PlacementResult<QueueRouteAdmission, PlacementKey> result,
+                           PlacementResult<RouteAdmission, PlacementKey> result,
                            long availabilitySequence) {
             return new Plan(entry, null, null, result, null,
                     availabilitySequence);
@@ -843,13 +813,13 @@ final class GlobalQueueCoordinator implements AutoCloseable {
             blockedEndpoint = endpoint;
         }
 
-        QueueRouteAdmission takeAdmission() {
-            QueueRouteAdmission owned = admission;
+        RouteAdmission takeAdmission() {
+            RouteAdmission owned = admission;
             admission = null;
             return owned;
         }
 
-        QueueRouteAdmission admission() {
+        RouteAdmission admission() {
             return admission;
         }
 
@@ -863,7 +833,7 @@ final class GlobalQueueCoordinator implements AutoCloseable {
 
         @Override
         public void close() {
-            QueueRouteAdmission ownedAdmission = admission;
+            RouteAdmission ownedAdmission = admission;
             admission = null;
             if (ownedAdmission != null) {
                 try {

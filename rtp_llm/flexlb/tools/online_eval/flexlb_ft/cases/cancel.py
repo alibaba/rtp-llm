@@ -64,7 +64,7 @@ from ..engine_ops import (
     inject_type_all,
 )
 from ..harness import (
-    TTL_DRAIN_TIMEOUT_S,
+    REQUEST_CLEANUP_TIMEOUT_S,
     AssertUtils,
     EnvSpec,
     default_perf,
@@ -438,19 +438,6 @@ def cancel_sibling_isolation(ctx: CaseContext):
             responses = list(pool.map(_schedule, rids))
         for i, resp in enumerate(responses):
             if resp.code != 200 or not resp.success:
-                # Drainage discipline (S4 lesson, 2026-08-27 task #63
-                # post-mortem): a sibling that was already scheduled must not
-                # be left behind as an unconsumed entry — under BATCH dispatch
-                # the leaked EnqueueBatch result sits in the engine's fetch
-                # queue and the master's inflight/ledger far past the 30s
-                # stale TTL (fence-quarantine family), poisoning later cases
-                # on the shared env (observed cascade: this case's leak
-                # -> kv_prefix_stickiness / balance_len_mixed /
-                # admission_gate_no_starvation failures in the batch-window
-                # full run, all solo-PASS). Cancel every scheduled sibling
-                # before failing the case; the streams were never opened, so
-                # the master-side cancel is a clean local release on both
-                # dispatch modes.
                 for j, sibling in enumerate(responses):
                     if j != i and sibling.code == 200 and sibling.success:
                         try:
@@ -736,11 +723,11 @@ def cancel_phase_timing(ctx: CaseContext):
         if resp_a.enqueued_by_master or resp_b.enqueued_by_master:
             # Same window-insufficient fix as the three unstable cases: the
             # cancelled A/B tasks linger on the master ledger until the
-            # stale-inflight drain (~90s physical) completes, so the default
+            # cancellation/status cleanup completes, so the default
             # 10s inflight-clean window aborts early. Aligned to the
-            # TTL_DRAIN_TIMEOUT_S standard; assertion semantics unchanged.
+            # REQUEST_CLEANUP_TIMEOUT_S standard; assertion semantics unchanged.
             inflight_ok, inflight_detail = AssertUtils.inflight_clean(
-                _master_http(ops), TTL_DRAIN_TIMEOUT_S
+                _master_http(ops), REQUEST_CLEANUP_TIMEOUT_S
             )
         else:
             inflight_ok, inflight_detail = True, "N/A"
@@ -800,14 +787,8 @@ def cancel_anomaly_path(ctx: CaseContext):
         cancel_latency = time.monotonic() - cancel_at
         recovery_ok, recovery_msg = ops.verify_recovery()
         if response.enqueued_by_master:
-            # Window-insufficient instability fix: the post-cancel ledger
-            # settle can ride the stale-TTL + ExpirationTimer drain (worst
-            # ~90s) instead of the immediate explicit-cancel release —
-            # the 10s window let a normal slow drain read as a FAIL.
-            # Aligned to the TTL_DRAIN_TIMEOUT_S standard; the all-zero
-            # assertion itself is unchanged.
             inflight_ok, inflight_detail = AssertUtils.inflight_clean(
-                _master_http(ops), TTL_DRAIN_TIMEOUT_S
+                _master_http(ops), REQUEST_CLEANUP_TIMEOUT_S
             )
         else:
             # NON_BATCH: a client Cancel on a delivered request cannot
@@ -1134,10 +1115,8 @@ def cancel_preemption_victim(ctx: CaseContext):
     master → original-Prefill weak-Cancel protocol.
 
     Scenario: dedicated 1P+1D environment, PRIORITY ordering with the
-    victim stages {PREFILL_QUEUED, DECODE_RESERVED, DECODE_ENGINE_OWNED}
-    plus the engineCancellation block (the engine-owned stage REQUIRES
-    it — FlexlbConfigValidator rejects the stage set otherwise; see
-    harness._build_preemption_cfg for the schema) and decode
+    victim stages {DECODE_RESERVED, DECODE_ENGINE_OWNED}
+    plus an explicit measured Decode TPOT profile and decode
     maxEngineRequests=1 so the single decode slot makes the capacity
     contest deterministic.  The victim (priority 30, input_len=512 /
     output_len=200 — long decode) is scheduled first and waits RUNNING
@@ -1149,7 +1128,7 @@ def cancel_preemption_victim(ctx: CaseContext):
     path can reach it (planDecodeOne gates the ENGINE_CANCEL ownership
     on preemption.allows(DECODE_ENGINE_OWNED) + the cancel channel).
     The 2026-09-04 run proved the legacy set
-    {PREFILL_QUEUED, DECODE_RESERVED} (master_fixed_window.json values)
+    {DECODE_RESERVED} (master_fixed_window.json values)
     wrong for this choreography: a RUNNING victim is invisible to both
     master-local layers, so it simply ran to completion and the weak
     cancel never fired (delta=0) — correct behaviour for THAT config,
@@ -1181,21 +1160,11 @@ def cancel_preemption_victim(ctx: CaseContext):
     config = json.loads(flexlb_config_for_profile(ctx.profile, ordering="priority"))
     ordering = config["scheduler"]["ordering"]
     ordering["defaultPriority"] = 50
-    # Victim-stage contract: the victim is polled to RUNNING on the
-    # decode engine (= engine-confirmed), so the stage set MUST include
-    # DECODE_ENGINE_OWNED — and that stage requires the engineCancellation
-    # block (ackTimeoutMs / completionTimeoutMs, the same values the
-    # priority family's _PREEMPT_DECODE spec uses).  The legacy
-    # {PREFILL_QUEUED, DECODE_RESERVED} set left the RUNNING victim
-    # unreachable by every eviction layer (see the docstring's stage-
-    # contract note).
     ordering["preemption"] = {
         "allowedVictimStages": [
-            "PREFILL_QUEUED",
             "DECODE_RESERVED",
             "DECODE_ENGINE_OWNED",
         ],
-        "engineCancellation": {"ackTimeoutMs": 50, "completionTimeoutMs": 1000},
     }
     config["router"]["roles"]["decode"]["availability"]["maxEngineRequests"] = 1
     spec = EnvSpec(
@@ -1304,8 +1273,7 @@ def cancel_preemption_victim(ctx: CaseContext):
         recovery_ok, recovery_msg = ops.verify_recovery()
         # Victim terminal hard gate: EXACTLY the typed 8429 engine-cancelled
         # terminal, not merely "not completed".  Stage discriminator 8400 vs
-        # 8429: 8400 is the master-local atomic eviction (PREFILL_QUEUED /
-        # DECODE_RESERVED victims — never engine-confirmed, settles on the
+        # 8429: 8400 is the master-local atomic eviction (DECODE_RESERVED victims — never engine-confirmed, settles on the
         # schedule RPC before any stream exists), while this RUNNING victim
         # is DECODE_ENGINE_OWNED, so eviction must ride the engine Cancel and
         # surface as the stream's in-band CANCELLED frame (raw enum 2 = the
@@ -1420,8 +1388,7 @@ def cancel_stream_break_prefill_autonomous(ctx: CaseContext):
 @case("cancel_stream_break_decode_autonomous", requires=["generate_stream"])
 def cancel_stream_break_decode_autonomous(ctx: CaseContext):
     """C2: mid-decode stream drop on the frontend-sent stream — decode
-    cleans itself up and reports the terminal early instead of waiting
-    for the stale-inflight TTL.
+    cleans itself up and reports the terminal through WorkerStatus.
 
     Scenario (NON_BATCH only): the request is delivered via
     GenerateStreamCall (frontend → engine direct); the first output has
@@ -1432,8 +1399,7 @@ def cancel_stream_break_decode_autonomous(ctx: CaseContext):
     parallel): the engine senses the broken consumer context, the
     prefill leg cleans up and cancels downstream; decode stops early,
     frees its state and reports the terminal through WorkerStatus —
-    the master reconciles without waiting for the stale-inflight TTL
-    (production 5min; the framework config keeps 30s).
+    the master settles that authoritative terminal.
 
     Expected (contract): the engine records the cancellation
     (cancelled_rids / lifecycle end_state = cancelled); no engine-side
@@ -1470,8 +1436,6 @@ def cancel_stream_break_decode_autonomous(ctx: CaseContext):
         engine_clean, engine_clean_detail = engine_inflight_clean(
             ops, _all_engine_names(ops), 15.0
         )
-        # NON_BATCH ledger residue contract: the stale-TTL is the safety
-        # net, but the C2 terminal should settle well inside it.
         inflight_ok, inflight_detail = AssertUtils.inflight_clean(
             _master_http(ops), 15.0
         )

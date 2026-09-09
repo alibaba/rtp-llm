@@ -1,6 +1,5 @@
 package org.flexlb.mockengine;
 
-import org.flexlb.config.VictimStage;
 import org.flexlb.dao.loadbalance.Response;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -17,7 +16,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * Task35 场景 D：泄漏金丝雀长跑（≥60s）—— 混合优先级流量 + 队列驱逐 +
+ * Task35 场景 D：泄漏金丝雀长跑（≥60s）—— 混合优先级队列流量 +
  * reducer deadline 超时收敛全程生效，中途注入两轮瞬态故障（enqueue 延迟 / enqueue
  * 拒绝），结束后强断言：
  * <ul>
@@ -37,18 +36,10 @@ class LeakCanaryLongRunE2ETest {
     @Timeout(115)
     void d_long_run_mixed_traffic_with_transient_faults_leaks_nothing() throws Exception {
         try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(BASE_PORT, 2, 1, "5", 1.0, true)) {
-            h.allowPreemption(VictimStage.PREFILL_QUEUED);
-            // PR-D: rescue removed — reducer deadline + exact ownership cleanup
-            // 小队列制造真实驱逐压力；小批次 + 快派发形成持续流转
-            h.config.queueScheduler().getCapacity().setMaxWaitingRequestsPerPrefillWorker(64);
+            // Priority ordering and exact terminal cleanup remain active without preemption.
+            // 小批次与快速派发维持持续流量。
             h.fixedWindowDecision().setMaxRequests(4);
             h.fixedWindowDecision().setMaxCollectionWaitMs(5);
-            // This canary verifies queue eviction and the two injected
-            // EnqueueBatch fault windows. Keep the independent post-success
-            // backpressure gate out of the way, otherwise it can reject the
-            // whole tail as 8431 before the injected 8510 path is exercised.
-            h.config.queueScheduler().getLifecycle()
-                    .setMaxDeliveredNotAcceptedRequestsGlobal(0);
             h.prefillSelector = ctx -> (int) (ctx.getRequestId() % 2);
             h.startAutoPump(10);
 
@@ -98,7 +89,7 @@ class LeakCanaryLongRunE2ETest {
                 codeTally.merge(code, 1, Integer::sum);
                 assertTrue(code == 200 || code == 8400 || code == 8429
                                 || code == 8430 || code == 8431
-                                || code == 8502 || code == 8510 || code == 8515,
+                                || code == 8510 || code == 8511 || code == 8515,
                         "unexpected terminal code " + code + ": " + response.getErrorMessage());
             }
 

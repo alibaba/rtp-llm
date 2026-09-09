@@ -165,7 +165,7 @@ class WorkerBatcherSchedulingTest {
     }
 
     private static FlexlbConfig singleConfig() {
-        FlexlbConfig config = new FlexlbConfig();
+        FlexlbConfig config = org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig();
         SchedulingTestConfig.useFifoQueue(config);
         SchedulingTestConfig.useSingleDecision(config);
         SchedulingTestConfig.useBatchDispatcher(config);
@@ -173,7 +173,7 @@ class WorkerBatcherSchedulingTest {
     }
 
     private static FlexlbConfig fixedConfig() {
-        FlexlbConfig config = new FlexlbConfig();
+        FlexlbConfig config = org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig();
         SchedulingTestConfig.useFifoQueue(config);
         DecisionPolicyConfig decision =
                 SchedulingTestConfig.useFixedWindowDecision(config);

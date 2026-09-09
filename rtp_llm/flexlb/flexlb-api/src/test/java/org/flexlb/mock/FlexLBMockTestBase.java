@@ -7,16 +7,13 @@ import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
-import org.flexlb.balance.eviction.EngineCancelChannel;
-import org.flexlb.balance.preemption.CancelTarget;
 import org.flexlb.balance.scheduler.DefaultBatchDispatcher;
 import org.flexlb.balance.scheduler.DefaultRouter;
 import org.flexlb.balance.scheduler.PlacementKey;
-import org.flexlb.balance.scheduler.QueueRouteAdmission;
 import org.flexlb.balance.scheduler.RequestScheduler;
 import org.flexlb.balance.scheduler.RequestSchedulerTestRuntime;
+import org.flexlb.balance.scheduler.RouteAdmission;
 import org.flexlb.config.ConfigService;
-import org.flexlb.config.DispatcherConfig;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.InternalRuntimeSettings;
 import org.flexlb.dao.BalanceContext;
@@ -47,7 +44,6 @@ import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 
-import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -145,12 +141,8 @@ public abstract class FlexLBMockTestBase {
 
         // 2. Create config
         config = createConfig();
-        configService = new ConfigService() {
-            @Override
-            public FlexlbConfig loadBalanceConfig() {
-                return config;
-            }
-        };
+        configService = mock(ConfigService.class);
+        when(configService.loadBalanceConfig()).thenReturn(config);
 
         // 3. Create gRPC infrastructure
         InternalRuntimeSettings runtime = config.getInternalRuntime();
@@ -164,7 +156,7 @@ public abstract class FlexLBMockTestBase {
         GrpcReporter grpcReporter = new GrpcReporter(new NoOpFlexMonitor());
         grpcClient = new EngineGrpcClient(
                 nameResolver, grpcExecutor, eventLoopGroup,
-                grpcReporter, 1_000);
+                grpcReporter, 1_000, enqueueTimeoutMillis());
 
         // 4. Create real dispatcher
         dispatcher = createDispatcher();
@@ -179,8 +171,7 @@ public abstract class FlexLBMockTestBase {
                 configService,
                 dispatcher::tryPrepareSubmission,
                 reporter,
-                createRequestSchedulerReporter(),
-                new UnsupportedCancelStub());
+                createRequestSchedulerReporter());
         endpointRegistry = schedulerRuntime.endpointRegistry();
         scheduler = schedulerRuntime.scheduler();
 
@@ -287,7 +278,7 @@ public abstract class FlexLBMockTestBase {
 
     protected DefaultRouter createRouter() {
         DefaultRouter fixedRouter = mock(DefaultRouter.class);
-        when(fixedRouter.routeForQueue(any(BalanceContext.class), any())).thenAnswer(inv -> {
+        when(fixedRouter.select(any(BalanceContext.class), any())).thenAnswer(inv -> {
             BalanceContext ctx = inv.getArgument(0);
             return schedulerRuntime.admittedRoute(
                     ctx, successRoute(ctx.getRequestId()));
@@ -296,7 +287,7 @@ public abstract class FlexLBMockTestBase {
     }
 
     /** Build the exact pinned queue admission for a fixture response. */
-    protected final PlacementResult<QueueRouteAdmission, PlacementKey> admittedRoute(
+    protected final PlacementResult<RouteAdmission, PlacementKey> admittedRoute(
             BalanceContext context, Response response) {
         return schedulerRuntime.admittedRoute(context, response);
     }
@@ -314,18 +305,18 @@ public abstract class FlexLBMockTestBase {
         return new DefaultBatchDispatcher(grpcClient, configService, null);
     }
 
-    /**
-     * Override to customize the FlexlbConfig.
-     * Default: BATCH mode, size_max=1, immediate dispatch.
-     */
+    protected org.flexlb.balance.scheduler.RequestRegistry requestRegistry() {
+        return schedulerRuntime.requestRegistry();
+    }
+
+    protected long enqueueTimeoutMillis() {
+        return 5_000L;
+    }
+
     protected FlexlbConfig createConfig() {
-        FlexlbConfig cfg = new FlexlbConfig();
+        FlexlbConfig cfg = org.flexlb.mock.TestFlexlbConfigs.create();
         cfg.fixedWindowDecision().setMaxRequests(1); // single request triggers dispatch
         cfg.fixedWindowDecision().setMaxCollectionWaitMs(300);
-        DispatcherConfig dispatcher = assertInstanceOf(
-                DispatcherConfig.class, cfg.getDispatcher());
-        dispatcher.setEnqueueRpcTimeoutMs(5_000L);
-        cfg.queueScheduler().getLifecycle().setStaleInflightTimeoutMs(300_000L);
         return cfg;
     }
 
@@ -583,22 +574,6 @@ public abstract class FlexLBMockTestBase {
         response.setStatusVersion(statusVersion);
         response.setLatestFinishedVersion(0L);
         return response;
-    }
-
-    /** Test-local fail-closed cancel transport for fixtures without preemption. */
-    private static final class UnsupportedCancelStub
-            implements EngineCancelChannel {
-        @Override
-        public boolean isSupported(DecodeEndpoint endpoint) {
-            return false;
-        }
-
-        @Override
-        public CompletableFuture<CancelAck> cancel(
-                CancelTarget target, long requestId, long timeoutMs) {
-            return CompletableFuture.completedFuture(
-                    CancelAck.UNSUPPORTED);
-        }
     }
 
     private Response successRoute(long requestId) {

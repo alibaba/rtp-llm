@@ -37,7 +37,7 @@ class WorkerEndpointTest {
                 8080,
                 8081,
                 "site-x");
-        FlexlbConfig config = new FlexlbConfig();
+        FlexlbConfig config = org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig();
         config.getRouter().getRoles().getPrefill().getExecutionTimeEstimator()
                 .setExpression("sum(computeTokens)");
         EndpointTestSupport.TestRequestRuntime requestRuntime =
@@ -171,7 +171,7 @@ class WorkerEndpointTest {
         registerBatch(5L, 9999, first, failed, third);
         assertTrue(endpoint.releaseCommittedItem(failed));
 
-        assertEquals(2, endpoint.admissionPendingRequestCount());
+        assertEquals(2, endpoint.observedRequestCount());
     }
 
     @Test
@@ -372,7 +372,7 @@ class WorkerEndpointTest {
         req.setSeqLen(seqLen);
         BalanceContext ctx = new BalanceContext();
         ctx.setRequest(req);
-        ctx.setConfig(new FlexlbConfig());
+        ctx.setConfig(org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig());
         return ctx;
     }
 

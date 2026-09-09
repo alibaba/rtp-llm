@@ -1,11 +1,11 @@
 package org.flexlb.balance.endpoint;
 
 import org.flexlb.balance.delivery.DeliveryResult;
+import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.projection.WorkSnapshot;
 import org.flexlb.balance.scheduler.RequestRegistry;
 import org.flexlb.balance.scheduler.ScheduledRequest;
-import org.flexlb.config.DecisionPolicyConfig;
 import org.flexlb.config.DispatcherConfig;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.RoutingConfig;
@@ -24,6 +24,8 @@ import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
 import java.util.HashMap;
 import java.util.List;
@@ -33,6 +35,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
@@ -60,8 +63,8 @@ class PrefillEndpointTest {
         WorkerStatus status = EndpointTestSupport.workerStatus(
                 RoleType.PREFILL, "127.0.0.1", 8080, 8090);
 
-        config = new FlexlbConfig();
-        configureBatch(config, 100, config.fixedWindowDecision().getMaxRequests(), 300, null);
+        config = org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig();
+        configureBatch(config, config.fixedWindowDecision().getMaxRequests(), 300, null);
         setFormula(config, "10 + 0.1*sum(computeTokens) + 5*batchSize");
 
         endpointReporter = mock(BatchSchedulerReporter.class);
@@ -83,80 +86,20 @@ class PrefillEndpointTest {
     // ---- batch commit / release ----
 
     @Test
-    void batchPublicationCreditsComposeBatchAndDecisionCapacity() {
-        FlexlbConfig batchConfig = new FlexlbConfig();
-        configureBatch(batchConfig, 100, 3, 300, 2);
-        PrefillEndpoint fixedWindowEndpoint = new PrefillEndpoint(
-                EndpointTestSupport.workerStatus(
-                        RoleType.PREFILL, "127.0.0.2", 8080, 8090),
-                batchConfig,
-                EndpointTestSupport.routeStrategy(requestRuntime),
-                requestRuntime.events(),
-                endpointReporter);
-        try {
-            assertEquals(6, fixedWindowEndpoint.availableDeliveryCredits());
-        } finally {
-            fixedWindowEndpoint.close();
-        }
-
-        batchConfig.queueScheduler().setDecision(
-                DecisionPolicyConfig.single());
-        PrefillEndpoint singleEndpoint = new PrefillEndpoint(
-                EndpointTestSupport.workerStatus(
-                        RoleType.PREFILL, "127.0.0.3", 8080, 8090),
-                batchConfig,
-                EndpointTestSupport.routeStrategy(requestRuntime),
-                requestRuntime.events(),
-                endpointReporter);
-        try {
-            assertEquals(2, singleEndpoint.availableDeliveryCredits());
-        } finally {
-            singleEndpoint.close();
-        }
-    }
-
-    @Test
-    void nonBatchPublishAtomicallyOwnsAndReleasesRouteCredit() {
-        FlexlbConfig routeConfig = new FlexlbConfig();
+    void nonBatchPublishOwnsOneExactQueuedIdentityUntilRemoval() {
+        FlexlbConfig routeConfig = org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig();
         routeConfig.setDispatcher(DispatcherConfig.nonBatch());
-        routeConfig.getDispatcher()
-                .setMaxInflightRequestsPerPrefillWorker(3);
         PrefillEndpoint routeEndpoint = routeEndpoint(routeConfig, "127.0.0.4");
         try {
-            assertEquals(3, routeEndpoint.availableDeliveryCredits());
+            assertEquals(0, routeEndpoint.queuedRequestCount());
 
             ScheduledRequest queued = createScheduledRequest(
                     routeEndpoint, routeConfig, 1L, 500, 200);
             assertTrue(EndpointTestSupport.offer(routeEndpoint, queued));
-            assertEquals(2, routeEndpoint.availableDeliveryCredits());
+            assertEquals(1, routeEndpoint.queuedRequestCount());
 
             assertTrue(routeEndpoint.removeQueued(queued, "test cleanup"));
-            assertEquals(3, routeEndpoint.availableDeliveryCredits());
-        } finally {
-            routeEndpoint.close();
-        }
-    }
-
-    @Test
-    void nonBatchPublishRejectsBeforeActiveWhenRouteCreditIsFull() {
-        FlexlbConfig routeConfig = new FlexlbConfig();
-        routeConfig.setDispatcher(DispatcherConfig.nonBatch());
-        routeConfig.getDispatcher()
-                .setMaxInflightRequestsPerPrefillWorker(1);
-        PrefillEndpoint routeEndpoint = routeEndpoint(routeConfig, "127.0.0.5");
-        try {
-            ScheduledRequest first = createScheduledRequest(
-                    routeEndpoint, routeConfig, 1L, 500, 200);
-            ScheduledRequest second = createScheduledRequest(
-                    routeEndpoint, routeConfig, 2L, 500, 200);
-
-            assertTrue(EndpointTestSupport.offer(routeEndpoint, first));
-            assertFalse(EndpointTestSupport.offer(routeEndpoint, second));
-            assertEquals(1, routeEndpoint.queuedRequestCount());
-            assertEquals(0, routeEndpoint.availableDeliveryCredits());
-
-            assertTrue(routeEndpoint.removeQueued(first, "test cleanup"));
-            assertEquals(1, routeEndpoint.availableDeliveryCredits());
+            assertEquals(0, routeEndpoint.queuedRequestCount());
         } finally {
             routeEndpoint.close();
         }
@@ -184,7 +127,7 @@ class PrefillEndpointTest {
         assertEquals(1, endpoint.getInflightBatchCount());
         assertEquals(1,
                 endpoint.captureRouteProjectionInputs().work().batches().size());
-        assertEquals(1, endpoint.admissionPendingRequestCount());
+        assertEquals(1, endpoint.observedRequestCount());
     }
 
     @Test
@@ -207,13 +150,13 @@ class PrefillEndpointTest {
         assertTrue(endpoint.expireCommittedItem(first));
         assertFalse(endpoint.expireCommittedItem(first));
         assertEquals(1, endpoint.getInflightBatchCount());
-        assertEquals(1, endpoint.admissionPendingRequestCount());
+        assertEquals(1, endpoint.observedRequestCount());
         assertEquals(1, endpoint.captureRouteProjectionInputs().work().batches().size());
 
         assertTrue(endpoint.expireCommittedItem(sibling));
         assertEquals(0, endpoint.getInflightBatchCount());
         assertEquals(0, endpoint.captureRouteProjectionInputs().work().batches().size());
-        assertEquals(0, endpoint.admissionPendingRequestCount());
+        assertEquals(0, endpoint.observedRequestCount());
     }
 
     @Test
@@ -226,7 +169,7 @@ class PrefillEndpointTest {
         registerBatch(endpoint, 8L, 100, List.of(replacement));
         assertFalse(endpoint.expireCommittedItem(original));
         assertEquals(1, endpoint.getInflightBatchCount());
-        assertEquals(1, endpoint.admissionPendingRequestCount());
+        assertEquals(1, endpoint.observedRequestCount());
         assertTrue(endpoint.expireCommittedItem(replacement));
         assertEquals(0, endpoint.getInflightBatchCount());
     }
@@ -241,22 +184,26 @@ class PrefillEndpointTest {
         registerBatch(endpoint, 2L, 50, List.of(item3));
 
         assertEquals(2, endpoint.getInflightBatchCount());
-        assertEquals(3, endpoint.admissionPendingRequestCount());
+        assertEquals(3, endpoint.observedRequestCount());
     }
 
     // ---- repack batch ----
 
-    @Test
-    void repackBatchRemovesFailedRequests() {
+    @ParameterizedTest
+    @CsvSource({"false", "true"})
+    void localMemberCleanupPreservesBatchPrediction(boolean expiration) {
         ScheduledRequest item1 = createScheduledRequest(1L, 500, 200);
         ScheduledRequest item2 = createScheduledRequest(2L, 300, 100);
         registerBatch(endpoint, 1L, 100, List.of(item1, item2));
 
-        assertTrue(endpoint.releaseCommittedItem(item2));
+        assertTrue(expiration ? endpoint.expireCommittedItem(item2) : endpoint.releaseCommittedItem(item2));
         assertEquals(1, endpoint.getInflightBatchCount());
         assertEquals(1,
                 endpoint.captureRouteProjectionInputs().work().batches().size());
-        assertEquals(1, endpoint.admissionPendingRequestCount());
+        assertEquals(1, endpoint.observedRequestCount());
+        WorkSnapshot remaining = endpoint.captureRouteProjectionInputs().work();
+        assertFalse(remaining.hasUnknownWork());
+        assertEquals(100L, remaining.totalRemainingWorkMs().orElseThrow());
     }
 
     @Test
@@ -270,9 +217,10 @@ class PrefillEndpointTest {
                 endpoint.captureRouteProjectionInputs().work().batches().size());
     }
 
-    @Test
-    void failedRepackPredictionSettlesMembershipAndPublishesUnknownWork() {
-        PrefillEndpoint invalidPredictorEndpoint = newEndpointWithFormula("-1");
+    @ParameterizedTest
+    @CsvSource({"-1", "-0.1", "0/0", "1/0"})
+    void invalidRepackPredictionUsesDefaultFormula(String formula) {
+        PrefillEndpoint invalidPredictorEndpoint = newEndpointWithFormula(formula);
         try {
             ScheduledRequest survivor = createScheduledRequest(
                     invalidPredictorEndpoint, 1L, 500L, 200L);
@@ -284,27 +232,60 @@ class PrefillEndpointTest {
                     100L,
                     List.of(survivor, failed));
 
-            assertDoesNotThrow(() -> reportSuccessfulBatchMember(
-                    invalidPredictorEndpoint, 1L, 2L, 30L));
+            assertDoesNotThrow(() -> reportRejectedBatchMember(
+                    invalidPredictorEndpoint, 1L, 2L));
 
             WorkSnapshot snapshot = invalidPredictorEndpoint
                     .captureRouteProjectionInputs().work();
-            assertEquals(1, invalidPredictorEndpoint.admissionPendingRequestCount(),
+            assertEquals(1, invalidPredictorEndpoint.observedRequestCount(),
                     "membership settlement must not depend on prediction");
             assertEquals(List.of(1L), snapshot.batches().getFirst().requestIds());
-            assertTrue(snapshot.batches().getFirst().remainingWorkMs().isEmpty());
-            assertTrue(snapshot.hasUnknownWork());
-            assertTrue(invalidPredictorEndpoint.getLoadMetric().isEmpty(),
-                    "monitoring must omit unknown repacked work");
+            assertEquals(360L, snapshot.batches().getFirst().remainingWorkMs().orElseThrow());
+            assertFalse(snapshot.hasUnknownWork());
+            assertEquals(360L, invalidPredictorEndpoint.getLoadMetric().orElseThrow());
 
             reportSuccessfulBatchMember(
                     invalidPredictorEndpoint, 1L, 1L, 40L);
             assertEquals(0, invalidPredictorEndpoint.getInflightBatchCount(),
-                    "unknown duration must not block later lifecycle settlement");
-            assertEquals(0, invalidPredictorEndpoint.admissionPendingRequestCount());
+                    "fallback prediction must not block later lifecycle settlement");
+            assertEquals(0, invalidPredictorEndpoint.observedRequestCount());
         } finally {
             invalidPredictorEndpoint.close();
         }
+    }
+
+    @Test
+    void throwingRepackPredictorUsesDefaultFormula() throws Exception {
+        ScheduledRequest survivor = createScheduledRequest(1L, 500L, 200L);
+        ScheduledRequest finished = createScheduledRequest(2L, 300L, 100L);
+        registerBatch(endpoint, 1L, 100L, List.of(survivor, finished));
+        PrefillTimePredictor failingPredictor = mock(PrefillTimePredictor.class);
+        org.mockito.Mockito.when(failingPredictor.evaluator()).thenThrow(new IllegalStateException("broken predictor"));
+        var field = PrefillEndpoint.class.getDeclaredField("predictor");
+        field.setAccessible(true);
+        field.set(endpoint, failingPredictor);
+
+        assertDoesNotThrow(() -> reportRejectedBatchMember(endpoint, 1L, 2L));
+        assertEquals(360L, endpoint.captureRouteProjectionInputs().work().totalRemainingWorkMs().orElseThrow());
+        assertEquals(1L, endpoint.observedRequestCount());
+        assertTrue(endpoint.releaseCommittedItem(survivor));
+        assertEquals(0L, endpoint.observedRequestCount());
+        assertEquals(0L, endpoint.getInflightBatchCount());
+    }
+
+    @ParameterizedTest
+    @CsvSource({"500,600,15", "500,-1,65", "-1,20,15"})
+    void repackNormalizesInvalidFeatures(long seqLen, long hitCache, long expectedMs) {
+        ScheduledRequest survivor = org.mockito.Mockito.spy(createScheduledRequest(1L, 500L, 200L));
+        ScheduledRequest finished = createScheduledRequest(2L, 300L, 100L);
+        registerBatch(endpoint, 1L, 100L, List.of(survivor, finished));
+        org.mockito.Mockito.doReturn(seqLen).when(survivor).seqLen();
+        org.mockito.Mockito.doReturn(hitCache).when(survivor).hitCache();
+
+        assertDoesNotThrow(() -> reportRejectedBatchMember(endpoint, 1L, 2L));
+        assertEquals(expectedMs, endpoint.captureRouteProjectionInputs().work().totalRemainingWorkMs().orElseThrow());
+        assertTrue(endpoint.releaseCommittedItem(survivor));
+        assertEquals(0L, endpoint.observedRequestCount());
     }
 
     // ---- calibrate ----
@@ -337,7 +318,7 @@ class PrefillEndpointTest {
         assertDoesNotThrow(() -> calibrate(Map.of("9", finished), Map.of()));
 
         assertEquals(0, endpoint.getInflightBatchCount());
-        assertEquals(0, endpoint.admissionPendingRequestCount());
+        assertEquals(0, endpoint.observedRequestCount());
         verify(endpointReporter).reportBatchActualTimeMs("PREFILL", "127.0.0.1", 125);
         verify(endpointReporter).reportBatchPredictGapMs("PREFILL", "127.0.0.1", 25);
     }
@@ -359,7 +340,7 @@ class PrefillEndpointTest {
         calibrate(finished, Map.of());
 
         assertEquals(1, endpoint.getInflightBatchCount());
-        assertEquals(1, endpoint.admissionPendingRequestCount());
+        assertEquals(1, endpoint.observedRequestCount());
     }
 
     @Test
@@ -374,14 +355,14 @@ class PrefillEndpointTest {
 
         assertEquals(1, endpoint.getInflightBatchCount(),
                 "one finished member must not release the whole batch");
-        assertEquals(1, endpoint.admissionPendingRequestCount(),
+        assertEquals(1, endpoint.observedRequestCount(),
                 "the still-running long member must remain in Master accounting");
 
         TaskInfo finishedLong = taskInfo(2L, 1L, null, 0, 1_900);
         calibrate(Map.of("2", finishedLong), Map.of());
 
         assertEquals(0, endpoint.getInflightBatchCount());
-        assertEquals(0, endpoint.admissionPendingRequestCount());
+        assertEquals(0, endpoint.observedRequestCount());
     }
 
     @Test
@@ -397,13 +378,13 @@ class PrefillEndpointTest {
         calibrate(Map.of("1", success, "2", failure), Map.of("3", runningTask));
 
         assertEquals(1, endpoint.getInflightBatchCount());
-        assertEquals(1, endpoint.admissionPendingRequestCount());
+        assertEquals(1, endpoint.observedRequestCount());
 
         // WorkerStatus may repeat a terminal observation in adjacent snapshots.
         // Repeating it must not decrement the survivor count again.
         calibrate(Map.of("1", success), Map.of("3", runningTask));
         assertEquals(1, endpoint.getInflightBatchCount());
-        assertEquals(1, endpoint.admissionPendingRequestCount());
+        assertEquals(1, endpoint.observedRequestCount());
     }
 
     @Test
@@ -417,13 +398,13 @@ class PrefillEndpointTest {
         calibrate(Map.of("1", firstFailure, "2", secondFailure), Map.of());
 
         assertEquals(0, endpoint.getInflightBatchCount());
-        assertEquals(0, endpoint.admissionPendingRequestCount());
+        assertEquals(0, endpoint.observedRequestCount());
         verify(endpointReporter, never()).reportBatchPredictedTimeMs(
                 anyString(), anyString(), org.mockito.ArgumentMatchers.anyLong());
 
         calibrate(Map.of("1", firstFailure, "2", secondFailure), Map.of());
         assertEquals(0, endpoint.getInflightBatchCount());
-        assertEquals(0, endpoint.admissionPendingRequestCount(),
+        assertEquals(0, endpoint.observedRequestCount(),
                 "repeated failure deltas must not decrement the ledger twice");
     }
 
@@ -435,7 +416,7 @@ class PrefillEndpointTest {
         calibrate(Map.of("1", success), Map.of());
         calibrate(Map.of("1", success), Map.of());
 
-        assertEquals(0, endpoint.admissionPendingRequestCount());
+        assertEquals(0, endpoint.observedRequestCount());
         verify(endpointReporter).reportBatchPredictedTimeMs(
                 anyString(), anyString(), org.mockito.ArgumentMatchers.anyLong());
         verify(endpointReporter).reportBatchActualTimeMs(
@@ -582,7 +563,7 @@ class PrefillEndpointTest {
         calibrate(Map.of("101", priorityCanceledTask(101L, -1L)), Map.of());
 
         assertEquals(1, endpoint.getInflightBatchCount());
-        assertEquals(1, endpoint.admissionPendingRequestCount());
+        assertEquals(1, endpoint.observedRequestCount());
     }
 
     @Test
@@ -598,15 +579,15 @@ class PrefillEndpointTest {
         calibrate(Map.of("101", finished), Map.of());
 
         assertEquals(0, endpoint.getIndividuallyTrackedRequestCount());
-        assertEquals(0, endpoint.admissionPendingRequestCount());
+        assertEquals(0, endpoint.observedRequestCount());
     }
 
     @Test
     void directRegistrationCanRollbackFromAsyncCompletionThread()
             throws Exception {
-        PrefillState.DirectRegistration registration =
-                EndpointTestSupport.registerDirect(endpoint, 102L, 100L);
-        assertEquals(1, endpoint.admissionPendingRequestCount());
+        PrefillState.RouteReservation registration =
+                EndpointTestSupport.reserveUnqueued(endpoint, createScheduledRequest(102L, 100, 0), 100L);
+        assertEquals(1, endpoint.observedRequestCount());
 
         ExecutorService executor = Executors.newSingleThreadExecutor();
         try {
@@ -615,7 +596,7 @@ class PrefillEndpointTest {
             executor.shutdownNow();
         }
 
-        assertEquals(0, endpoint.admissionPendingRequestCount());
+        assertEquals(0, endpoint.observedRequestCount());
     }
 
     @Test
@@ -629,7 +610,7 @@ class PrefillEndpointTest {
         // A missing-batch-id terminal cannot be attributed to the batch, so no
         // member is retired: both members remain committed.
         assertEquals(1, endpoint.getInflightBatchCount());
-        assertEquals(2, endpoint.admissionPendingRequestCount(),
+        assertEquals(2, endpoint.observedRequestCount(),
                 "a terminal without a valid batch id retires no batch member");
 
         TaskInfo survivingSuccess = new TaskInfo();
@@ -641,7 +622,7 @@ class PrefillEndpointTest {
         // whose only terminal named no batch id, stays with the original batch.
         assertEquals(1, endpoint.getInflightBatchCount(),
                 "the exact-batch terminal retires only its own member");
-        assertEquals(1, endpoint.admissionPendingRequestCount());
+        assertEquals(1, endpoint.observedRequestCount());
     }
 
     @Test
@@ -661,7 +642,7 @@ class PrefillEndpointTest {
         assertEquals(1,
                 endpoint.captureRouteProjectionInputs().work().batches().size());
         assertEquals(0, endpoint.getIndividuallyTrackedRequestCount());
-        assertEquals(1, endpoint.admissionPendingRequestCount());
+        assertEquals(1, endpoint.observedRequestCount());
 
         TaskInfo foreignBatchMemberSuccess = new TaskInfo();
         foreignBatchMemberSuccess.setRequestId(201L);
@@ -687,7 +668,7 @@ class PrefillEndpointTest {
                         == PrefillState.CapacityStatus.ACQUIRED,
                 "the canonical ledger rejects ambiguous duplicate live owners");
         assertEquals(1, endpoint.getInflightBatchCount());
-        assertEquals(1, endpoint.admissionPendingRequestCount());
+        assertEquals(1, endpoint.observedRequestCount());
     }
 
     @Test
@@ -699,16 +680,16 @@ class PrefillEndpointTest {
 
         calibrate(Map.of("102", priorityCanceledTask(102L, -1L)), Map.of());
         assertEquals(1, endpoint.getInflightBatchCount());
-        assertEquals(2, endpoint.admissionPendingRequestCount());
+        assertEquals(2, endpoint.observedRequestCount());
 
         TaskInfo canceled = priorityCanceledTask(101L, -1L);
         calibrate(Map.of("101", canceled), Map.of());
         assertEquals(1, endpoint.getInflightBatchCount(),
                 "generic endpoint calibration must not bypass the exact-batch reducer");
-        assertEquals(2, endpoint.admissionPendingRequestCount());
+        assertEquals(2, endpoint.observedRequestCount());
 
         assertEquals(1, endpoint.getInflightBatchCount());
-        assertEquals(2, endpoint.admissionPendingRequestCount());
+        assertEquals(2, endpoint.observedRequestCount());
     }
 
     @Test
@@ -726,12 +707,12 @@ class PrefillEndpointTest {
         assertEquals(0, endpoint.getInflightBatchCount());
         assertEquals(0,
                 endpoint.captureRouteProjectionInputs().work().batches().size());
-        assertEquals(0, endpoint.admissionPendingRequestCount());
+        assertEquals(0, endpoint.observedRequestCount());
 
         assertEquals(0, endpoint.getInflightBatchCount());
         assertEquals(0,
                 endpoint.captureRouteProjectionInputs().work().batches().size());
-        assertEquals(0, endpoint.admissionPendingRequestCount());
+        assertEquals(0, endpoint.observedRequestCount());
     }
 
     @Test
@@ -828,7 +809,7 @@ class PrefillEndpointTest {
         assertEquals(0, endpoint.getInflightBatchCount());
         assertEquals(0,
                 endpoint.captureRouteProjectionInputs().work().batches().size());
-        assertEquals(0, endpoint.admissionPendingRequestCount());
+        assertEquals(0, endpoint.observedRequestCount());
     }
 
     @Test
@@ -898,7 +879,7 @@ class PrefillEndpointTest {
 
         assertEquals(1, endpoint.getInflightBatchCount(),
                 "sibling success must not erase the reconciling batch member");
-        assertEquals(1, endpoint.admissionPendingRequestCount());
+        assertEquals(1, endpoint.observedRequestCount());
 
         TaskInfo ambiguousMemberSuccess = new TaskInfo();
         ambiguousMemberSuccess.setBatchId(7L);
@@ -907,10 +888,10 @@ class PrefillEndpointTest {
         calibrate(Map.of("101", ambiguousMemberSuccess), Map.of());
         assertEquals(0, endpoint.getInflightBatchCount(),
                 "an exact-batch terminal settles the remaining member");
-        assertEquals(0, endpoint.admissionPendingRequestCount());
+        assertEquals(0, endpoint.observedRequestCount());
 
         assertEquals(0, endpoint.getInflightBatchCount());
-        assertEquals(0, endpoint.admissionPendingRequestCount());
+        assertEquals(0, endpoint.observedRequestCount());
     }
 
     @Test
@@ -925,14 +906,14 @@ class PrefillEndpointTest {
         calibrate(Map.of("101", firstFailure, "102", siblingFailure), Map.of());
 
         assertEquals(0, endpoint.getInflightBatchCount());
-        assertEquals(0, endpoint.admissionPendingRequestCount());
+        assertEquals(0, endpoint.observedRequestCount());
 
         assertEquals(0, endpoint.getInflightBatchCount());
-        assertEquals(0, endpoint.admissionPendingRequestCount());
+        assertEquals(0, endpoint.observedRequestCount());
         verify(endpointReporter, never()).reportBatchPredictedTimeMs(
                 anyString(), anyString(), org.mockito.ArgumentMatchers.anyLong());
 
-        assertEquals(0, endpoint.admissionPendingRequestCount());
+        assertEquals(0, endpoint.observedRequestCount());
     }
 
     // ---- committed remaining work ----
@@ -1012,7 +993,7 @@ class PrefillEndpointTest {
 
         assertTrue(endpoint.expireCommittedItem(item));
         assertEquals(0, endpoint.getInflightBatchCount());
-        assertEquals(0, endpoint.admissionPendingRequestCount());
+        assertEquals(0, endpoint.observedRequestCount());
         assertFalse(endpoint.expireCommittedItem(item));
     }
 
@@ -1041,16 +1022,16 @@ class PrefillEndpointTest {
                 "999", overlayOnly));
         EndpointTestSupport.applyStatus(endpoint, response);
 
-        assertEquals(4, endpoint.admissionPendingRequestCount(),
+        assertEquals(4, endpoint.observedRequestCount(),
                 "two local requests plus two unique Engine-only tasks");
 
         response.setRunningTaskInfo(Map.of());
         EndpointTestSupport.applyStatus(endpoint, response);
-        assertEquals(2, endpoint.admissionPendingRequestCount());
+        assertEquals(2, endpoint.observedRequestCount());
     }
 
     @Test
-    void admissionPendingRequestCountFallsBackToEngineQueryLengthScalars() {
+    void observedRequestCountFallsBackToEngineQueryLengthScalars() {
         registerBatch(endpoint, 1L, 100, List.of(createScheduledRequest(101L, 500, 0)));
 
         WorkerStatusResponse response = new WorkerStatusResponse();
@@ -1060,13 +1041,14 @@ class PrefillEndpointTest {
         response.setRunningQueryLen(2);
         EndpointTestSupport.applyStatus(endpoint, response);
 
-        assertEquals(5, endpoint.admissionPendingRequestCount(),
-                "the local prefill batch is unioned with, not added on top of, the "
-                        + "scalar Engine work: pending = 1 local + max(0, 5 reported - 1 local)");
+        assertEquals(6, endpoint.observedRequestCount(),
+                "an unseen local shadow cannot prove identity with scalar Engine work");
+        assertTrue(endpoint.captureRouteProjectionInputs().work().hasUnknownWork());
+        assertTrue(endpoint.captureRouteProjectionInputs().work().totalRemainingWorkMs().isEmpty());
     }
 
     @Test
-    void admissionPendingRequestCountUsesConservativeScalarBoundForPartialTaskDetails() {
+    void observedRequestCountUsesConservativeScalarBoundForPartialTaskDetails() {
         registerBatch(endpoint, 1L, 100, List.of(createScheduledRequest(101L, 500, 0)));
 
         TaskInfo overlapping = taskInfo(101L, 1L, TaskPhase.RUNNING, 0, 0);
@@ -1077,20 +1059,20 @@ class PrefillEndpointTest {
         response.setRunningQueryLen(2);
         EndpointTestSupport.applyStatus(endpoint, response);
 
-        assertEquals(5, endpoint.admissionPendingRequestCount(),
+        assertEquals(5, endpoint.observedRequestCount(),
                 "scalar active count must cover a partial detail list without double-counting local tasks");
     }
 
     @Test
-    void admissionPendingRequestCountIncludesBatcherQueue() throws InterruptedException {
+    void observedRequestCountIncludesBatcherQueue() throws InterruptedException {
         PrefillEndpoint queuedEndpoint = newFixedWindowEndpoint(60_000L);
         try {
-            assertEquals(0, queuedEndpoint.admissionPendingRequestCount());
+            assertEquals(0, queuedEndpoint.observedRequestCount());
             ScheduledRequest item = createScheduledRequest(
                     queuedEndpoint, 1L, 500L, 200L);
             assertTrue(EndpointTestSupport.offer(queuedEndpoint, item));
 
-            assertEquals(1, queuedEndpoint.admissionPendingRequestCount(),
+            assertEquals(1, queuedEndpoint.observedRequestCount(),
                     "pending count includes the canonical ACTIVE queue owner");
         } finally {
             queuedEndpoint.close();
@@ -1098,7 +1080,7 @@ class PrefillEndpointTest {
     }
 
     @Test
-    void admissionPendingRequestCountConservativelyCoversPublishedWorkBeforeActiveRemoval() {
+    void projectionCapturesExactPublishedIdentityBeforeActiveRemoval() {
         PrefillEndpoint handoffEndpoint = newFixedWindowEndpoint(60_000);
         try {
             ScheduledRequest active = createScheduledRequest(handoffEndpoint, 111L, 500L, 0L);
@@ -1107,8 +1089,6 @@ class PrefillEndpointTest {
             org.flexlb.balance.projection.RouteProjection.Inputs snapshot =
                     handoffEndpoint.captureRouteProjectionInputs();
             assertEquals(1, snapshot.queue().activeItems().size());
-            assertEquals(1L, snapshot.pendingRequestCount(),
-                    "queue/work/pending are materialized at one ownership boundary");
             assertEquals(111L,
                     snapshot.queue().activeItems().getFirst().requestId());
         } finally {
@@ -1117,7 +1097,7 @@ class PrefillEndpointTest {
     }
 
     @Test
-    void admissionPendingRequestCountCannotMissActiveToCommittedHandoff()
+    void observedRequestCountCannotMissActiveToCommittedHandoff()
             throws Exception {
         PrefillEndpoint handoffEndpoint = newFixedWindowEndpoint(60_000);
         long requestId = 222L;
@@ -1129,7 +1109,7 @@ class PrefillEndpointTest {
                     active, "test exact ownership handoff"));
             registerDirect(handoffEndpoint, requestId, 100L);
 
-            assertEquals(1L, handoffEndpoint.admissionPendingRequestCount());
+            assertEquals(1L, handoffEndpoint.observedRequestCount());
             assertEquals(0, handoffEndpoint.queuedRequestCount());
             assertEquals(1,
                     handoffEndpoint.captureRouteProjectionInputs()
@@ -1193,8 +1173,8 @@ class PrefillEndpointTest {
     @Test
     void retirementOwnerCanReenterCloseFromSynchronousShutdownCallback()
             throws Exception {
-        FlexlbConfig retirementConfig = new FlexlbConfig();
-        configureBatch(retirementConfig, 100, 1, 0, null);
+        FlexlbConfig retirementConfig = org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig();
+        configureBatch(retirementConfig, 1, 0, null);
         retirementConfig.setDispatcher(DispatcherConfig.nonBatch());
 
         WorkerStatus status = EndpointTestSupport.workerStatus(
@@ -1243,15 +1223,14 @@ class PrefillEndpointTest {
 
             assertEquals(
                     PrefillState.CapacityStatus.ENDPOINT_RETIRED,
-                    retirementEndpoint.reservePublishedRouteCredit(
+                    retirementEndpoint.reserveRouteOwnership(
                             createScheduledRequest(
                                     retirementEndpoint,
                                     retirementConfig,
                                     8_102L,
                                     128,
                                     0),
-                            0L,
-                            1).status());
+                            0L).status());
         } finally {
             retirementEndpoint.close();
             executor.shutdownNow();
@@ -1261,10 +1240,10 @@ class PrefillEndpointTest {
     @Test
     void admittedCallbackCanCloseEndpointBeforeItsHandoffPermitIsReleased()
             throws Exception {
-        FlexlbConfig retirementConfig = new FlexlbConfig();
-        configureBatch(retirementConfig, 100, 1, 0, null);
+        FlexlbConfig retirementConfig = org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig();
+        configureBatch(retirementConfig, 1, 0, null);
         retirementConfig.setDispatcher(DispatcherConfig.nonBatch());
-        setFormula(retirementConfig, "0");
+        setFormula(retirementConfig, "1");
 
         WorkerStatus status = EndpointTestSupport.workerStatus(
                 RoleType.PREFILL, "127.0.0.6", 8080, 8090);
@@ -1299,12 +1278,12 @@ class PrefillEndpointTest {
             DecodeEndpoint decode = mock(DecodeEndpoint.class);
             DecodeEndpoint.ReservationHandle decodeReservation =
                     mock(DecodeEndpoint.ReservationHandle.class);
+            org.mockito.Mockito.when(decodeReservation.requestId()).thenReturn(8_201L);
             DecodeEndpoint.EngineDispatchPermit permit =
                     mock(DecodeEndpoint.EngineDispatchPermit.class);
             org.mockito.Mockito.when(decode.acquireEngineDispatchPermit(
-                            org.mockito.Mockito.anyLong(),
-                            org.mockito.Mockito.anyLong(),
-                            org.mockito.Mockito.anyLong()))
+                            org.mockito.Mockito.any(DecodeEndpoint.ReservationHandle.class),
+                            org.mockito.Mockito.any(DecodeEndpoint.AdmissionCapacity.class)))
                     .thenReturn(new DecodeEndpoint.EngineDispatchPermitAcquisition(
                             DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED,
                             permit));
@@ -1327,6 +1306,114 @@ class PrefillEndpointTest {
         } finally {
             retirementEndpoint.close();
         }
+    }
+
+    @Test
+    void zeroCompletionPredictionDoesNotBlockDelivery()
+            throws Exception {
+        FlexlbConfig routeConfig = org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig();
+        configureBatch(routeConfig, 1, 0, null);
+        routeConfig.setDispatcher(DispatcherConfig.nonBatch());
+        setFormula(routeConfig, "0");
+        CountDownLatch firstPreparation = new CountDownLatch(1);
+        CountDownLatch delivered = new CountDownLatch(1);
+        EndpointTestSupport.TestRequestRuntime runtime = new EndpointTestSupport.TestRequestRuntime() {
+            @Override
+            void onCompleted(RequestRegistry.DeliveryClaim claim, DeliveryResult completion) {
+                delivered.countDown();
+            }
+        };
+        DeliveryStrategy strategy = org.mockito.Mockito.spy(
+                EndpointTestSupport.liveRouteStrategy(runtime));
+        org.mockito.Mockito.doAnswer(invocation -> {
+            Object transaction = invocation.callRealMethod();
+            firstPreparation.countDown();
+            return transaction;
+        }).when(strategy).prepare(org.mockito.Mockito.anyList(),
+                org.mockito.Mockito.any(), org.mockito.Mockito.any());
+        PrefillEndpoint routeEndpoint = new PrefillEndpoint(
+                EndpointTestSupport.workerStatus(RoleType.PREFILL, "127.0.0.10", 8080, 8090),
+                routeConfig, strategy, runtime.events(), endpointReporter);
+        routeEndpoint.startGeneration();
+        try {
+            ScheduledRequest waiting = createScheduledRequest(routeEndpoint, routeConfig, 8_301L, 128, 0);
+            assertTrue(EndpointTestSupport.offer(routeEndpoint, waiting));
+            assertTrue(firstPreparation.await(2, TimeUnit.SECONDS));
+            assertTrue(delivered.await(2, TimeUnit.SECONDS),
+                    "zero predicted execution time must not require a later status update");
+            assertEquals(0, routeEndpoint.queuedRequestCount());
+            assertEquals(1, routeEndpoint.observedRequestCount(),
+                    "delivery must retain ownership until Engine completion");
+        } finally {
+            routeEndpoint.close();
+        }
+    }
+
+    @Test
+    void unknownCompletionTimeDoesNotBlockDelivery() throws Exception {
+        FlexlbConfig routeConfig = org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig();
+        configureBatch(routeConfig, 1, 0, null);
+        routeConfig.setDispatcher(DispatcherConfig.nonBatch());
+        setFormula(routeConfig, "100");
+        CountDownLatch firstPreparation = new CountDownLatch(1);
+        CountDownLatch delivered = new CountDownLatch(1);
+        AtomicInteger preparationCount = new AtomicInteger();
+        EndpointTestSupport.TestRequestRuntime runtime = new EndpointTestSupport.TestRequestRuntime() {
+            @Override
+            void onCompleted(RequestRegistry.DeliveryClaim claim, DeliveryResult completion) {
+                delivered.countDown();
+            }
+        };
+        DeliveryStrategy strategy = org.mockito.Mockito.spy(
+                EndpointTestSupport.liveRouteStrategy(runtime));
+        org.mockito.Mockito.doAnswer(invocation -> {
+            Object transaction = invocation.callRealMethod();
+            preparationCount.incrementAndGet();
+            firstPreparation.countDown();
+            return transaction;
+        }).when(strategy).prepare(org.mockito.Mockito.anyList(),
+                org.mockito.Mockito.any(), org.mockito.Mockito.any());
+        PrefillEndpoint routeEndpoint = new PrefillEndpoint(
+                EndpointTestSupport.workerStatus(RoleType.PREFILL, "127.0.0.11", 8080, 8090),
+                routeConfig, strategy, runtime.events(), endpointReporter);
+        routeEndpoint.startGeneration();
+        try {
+            TaskInfo unknown = taskInfo(8_402L, -1L, TaskPhase.RUNNING, 0, -1L);
+            unknown.setInputLength(128L);
+            WorkerStatusResponse status = new WorkerStatusResponse();
+            status.setRunningTaskInfo(Map.of("8402", unknown));
+            status.setRunningQueryLen(1L);
+            EndpointTestSupport.applyStatus(routeEndpoint, status).run();
+            ScheduledRequest waiting = createScheduledRequest(routeEndpoint, routeConfig, 8_401L, 128, 0);
+            assertTrue(EndpointTestSupport.offer(routeEndpoint, waiting));
+            assertTrue(firstPreparation.await(2, TimeUnit.SECONDS));
+            assertTrue(delivered.await(2, TimeUnit.SECONDS),
+                    "unknown preceding execution time must not become an admission gate");
+            assertEquals(0, routeEndpoint.queuedRequestCount());
+            assertEquals(2, routeEndpoint.observedRequestCount(),
+                    "Engine work and the delivered route retain separate identities");
+
+            for (int repeat = 0; repeat < 20; repeat++) {
+                applyHeartbeat(routeEndpoint, status);
+            }
+            assertEquals(1, preparationCount.get(), "identical heartbeats must not redeliver the route");
+            assertEquals(0, routeEndpoint.queuedRequestCount());
+        } finally {
+            routeEndpoint.close();
+        }
+    }
+
+    private static void applyHeartbeat(PrefillEndpoint endpoint, WorkerStatusResponse response) {
+        WorkerStatus status = endpoint.getStatus();
+        Runnable projection;
+        status.lock.lock();
+        try {
+            response.setStatusVersion(status.appliedStatusCursor().statusVersion());
+            projection = endpoint.observeStatusHeartbeat(status, status.freezeStatusResponse(response));
+        } finally {
+            status.lock.unlock();
+        }
+        projection.run();
     }
 
     @Test
@@ -1353,7 +1440,7 @@ class PrefillEndpointTest {
     }
 
     @Test
-    void closeRetiresDirectAccountingAndPreservesCommittedQueueRoute() {
+    void closeProjectsEveryCommittedRouteAcrossSchedulingModes() {
         registerDirect(endpoint, 100L, 100L);
         ScheduledRequest route = createScheduledRequest(200L, 200L, 0L);
         // A queue route can only be reserved after its canonical item has been
@@ -1373,8 +1460,10 @@ class PrefillEndpointTest {
                 requestRuntime.prefillRetirements().stream()
                         .findFirst()
                         .orElseThrow();
-        assertEquals(List.of(route), retirement.ownedItems(),
-                "only the canonical item-bearing route owner crosses retirement");
+        assertEquals(List.of(100L, 200L), retirement.ownedItems().stream()
+                .map(ScheduledRequest::requestId).sorted().toList(),
+                "both immediate and queued routes retain their canonical retirement owner");
+        assertTrue(retirement.ownedItems().contains(route));
     }
 
     @Test
@@ -1391,8 +1480,8 @@ class PrefillEndpointTest {
         WorkerStatus status = EndpointTestSupport.workerStatus(
                 RoleType.PREFILL, "127.0.0.1", 8080, 8090);
 
-        FlexlbConfig slowConfig = new FlexlbConfig();
-        configureBatch(slowConfig, 100, 100, fixedWaitMs, null);
+        FlexlbConfig slowConfig = org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig();
+        configureBatch(slowConfig, 100, fixedWaitMs, null);
         EndpointTestSupport.TestRequestRuntime runtime =
                 EndpointTestSupport.requestRuntime();
         PrefillEndpoint created = new PrefillEndpoint(
@@ -1409,10 +1498,9 @@ class PrefillEndpointTest {
         WorkerStatus status = EndpointTestSupport.workerStatus(
                 RoleType.PREFILL, "127.0.0.9", 8089, 8099);
 
-        FlexlbConfig endpointConfig = new FlexlbConfig();
+        FlexlbConfig endpointConfig = org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig();
         configureBatch(
                 endpointConfig,
-                100,
                 endpointConfig.fixedWindowDecision().getMaxRequests(),
                 300L,
                 null);
@@ -1453,6 +1541,14 @@ class PrefillEndpointTest {
         EndpointTestSupport.applyStatus(endpoint, response);
     }
 
+    private static void reportRejectedBatchMember(PrefillEndpoint target, long batchId, long requestId) {
+        WorkerStatusResponse response = new WorkerStatusResponse();
+        response.setFinishedTaskInfo(Map.of(Long.toString(requestId),
+                taskInfo(requestId, batchId, null, 500, 0)));
+        response.setRunningTaskInfo(Map.of());
+        EndpointTestSupport.applyStatus(target, response);
+    }
+
     private static void reportSuccessfulBatchMember(
             PrefillEndpoint target,
             long batchId,
@@ -1470,10 +1566,9 @@ class PrefillEndpointTest {
         WorkerStatus status = EndpointTestSupport.workerStatus(
                 RoleType.PREFILL, "127.0.0.8", 8080, 8090);
 
-        FlexlbConfig learningConfig = new FlexlbConfig();
+        FlexlbConfig learningConfig = org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig();
         configureBatch(
                 learningConfig,
-                100,
                 learningConfig.fixedWindowDecision().getMaxRequests(),
                 300,
                 null);
@@ -1509,7 +1604,7 @@ class PrefillEndpointTest {
                                              long seqLen,
                                              long hitCacheLen) {
         return createScheduledRequest(
-                owner, new FlexlbConfig(), requestId, seqLen, hitCacheLen);
+                owner, org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig(), requestId, seqLen, hitCacheLen);
     }
 
     private static ScheduledRequest createScheduledRequest(
@@ -1567,16 +1662,14 @@ class PrefillEndpointTest {
 
     private static void configureBatch(
             FlexlbConfig target,
-            int maxWaiting,
             int maxRequests,
             long maxCollectionWaitMs,
             Integer maxInflightBatches) {
-        target.queueScheduler().getCapacity()
-                .setMaxWaitingRequestsPerPrefillWorker(maxWaiting);
         target.fixedWindowDecision().setMaxRequests(maxRequests);
         target.fixedWindowDecision().setMaxCollectionWaitMs(maxCollectionWaitMs);
-        ((org.flexlb.config.DispatcherConfig) target.getDispatcher())
-                .setMaxInflightBatchesPerPrefillWorker(maxInflightBatches);
+        if (maxInflightBatches != null) {
+            target.getDispatcher().setMaxInflightPerPrefillWorker(maxInflightBatches);
+        }
     }
 
     private static void setFormula(FlexlbConfig target, String expression) {
@@ -1630,11 +1723,7 @@ class PrefillEndpointTest {
             PrefillEndpoint target,
             long requestId,
             long predictedMs) {
-        try (PrefillState.DirectRegistration registration =
-                     EndpointTestSupport.registerDirect(
-                             target, requestId, predictedMs)) {
-            registration.commit();
-        }
+        EndpointTestSupport.commitUnqueued(target, requestId, predictedMs);
     }
 
 }

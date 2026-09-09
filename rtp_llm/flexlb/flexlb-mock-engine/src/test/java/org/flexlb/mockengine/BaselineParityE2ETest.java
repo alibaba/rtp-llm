@@ -40,7 +40,6 @@ class BaselineParityE2ETest {
         try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(BASE_PORT, 1, 1, "5", 1.0, false, false)) {
             h.fixedWindowDecision().setMaxCollectionWaitMs(5);
             h.fixedWindowDecision().setMaxRequests(2);
-            h.config.queueScheduler().getCapacity().setMaxWaitingRequestsPerPrefillWorker(1024);
             h.startAutoPump(10);
 
             // 预热：首笔请求走冷 gRPC 通道 + JIT，异步发送可能被后续批次超越

@@ -24,10 +24,8 @@ public final class DecisionPolicyConfig {
     private Long maxPredictedExecutionMs;
 
     /**
-     * Request-group size for one fixed-window decision. BATCH uses the group
-     * size to refill endpoint batch windows; NON_BATCH delivery capacity is
-     * independently owned by
-     * {@code dispatcher.maxInflightRequestsPerPrefillWorker}. A decision
+     * Request-group size for one fixed-window decision, independent of the
+     * dispatcher concurrency limit. A decision
      * always contains at least one request. SINGLE keeps a one-request
      * decision and does not use this target for look-ahead.
      */

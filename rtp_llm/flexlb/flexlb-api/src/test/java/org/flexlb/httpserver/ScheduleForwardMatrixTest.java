@@ -5,9 +5,8 @@ import ch.qos.logback.core.read.ListAppender;
 import io.grpc.stub.StreamObserver;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.nio.NioEventLoopGroup;
-import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.config.ConfigService;
-import org.flexlb.config.FlexlbConfig;
+import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol;
@@ -110,7 +109,7 @@ class ScheduleForwardMatrixTest {
         grpcForwarder = mock(FlexlbGrpcForwarder.class);
 
         ConfigService configService = mock(ConfigService.class);
-        when(configService.loadBalanceConfig()).thenReturn(new FlexlbConfig());
+        when(configService.loadBalanceConfig()).thenReturn(org.flexlb.mock.TestFlexlbConfigs.create());
 
         activeRequestCounter = mock(ActiveRequestCounter.class);
         requestToken = mock(ActiveRequestCounter.RequestToken.class);
@@ -426,7 +425,7 @@ class ScheduleForwardMatrixTest {
         when(consistencyView.getMasterHostIpPort()).thenReturn(masterHostIpPort);
 
         ConfigService configService = mock(ConfigService.class);
-        when(configService.loadBalanceConfig()).thenReturn(new FlexlbConfig());
+        when(configService.loadBalanceConfig()).thenReturn(org.flexlb.mock.TestFlexlbConfigs.create());
         EngineHealthReporter healthReporter = mock(EngineHealthReporter.class);
 
         channelEventLoop = new NioEventLoopGroup(1);
