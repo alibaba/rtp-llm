@@ -67,6 +67,27 @@ class EngineHealthReporterTest {
     }
 
     @Test
+    void reportsStepSamplesWithEngineIdentityAndPhase() {
+        reporter.init();
+        WorkerStatus worker = WorkerStatus.createDiscovered(
+                RoleType.PDFUSION, "test-group", "10.0.0.1", 8080, 8081, null, null, 1, 2);
+        for (int prefillRequests : new int[]{2, 0}) {
+            var step = new WorkerStatus.StepMetrics(42, 1700000000000L, 16000,
+                    prefillRequests, prefillRequests > 0 ? 15000 : 0, 32000, 0.5);
+            reporter.reportWorkerStepMetrics("test-model", worker, step);
+            var tags = FlexMetricTags.of("model", "test-model", "engineIp", "10.0.0.1:8080@1",
+                    "role", "PDFUSION", "group", "test-group", "phase", prefillRequests > 0 ? "prefill" : "decode");
+            verify(monitor).report("app.engine.worker.step.total.scheduled.tokens", tags, 16000.0);
+            verify(monitor).report("app.engine.worker.step.prefill.request.count", tags, (double) prefillRequests);
+            verify(monitor).report("app.engine.worker.step.prefill.tokens", tags, prefillRequests > 0 ? 15000.0 : 0.0);
+            verify(monitor).report("app.engine.worker.step.token.budget", tags, 32000.0);
+            verify(monitor).report("app.engine.worker.step.budget.fill.ratio", tags, 0.5);
+        }
+        verify(monitor).register("app.engine.worker.step.budget.fill.ratio",
+                FlexMetricType.GAUGE, FlexStatisticsType.SUMMARY);
+    }
+
+    @Test
     void shouldRegisterCacheHitComparisonMetrics() {
         reporter.init();
 

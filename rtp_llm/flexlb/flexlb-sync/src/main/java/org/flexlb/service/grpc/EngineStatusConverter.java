@@ -26,8 +26,7 @@ import java.util.Set;
 public class EngineStatusConverter {
 
     /** Convert WorkerStatusPB to the mutable response DTO used by older callers. */
-    public static WorkerStatusResponse convertToWorkerStatusResponse(
-            EngineRpcService.WorkerStatusPB workerStatusPB) {
+    public static WorkerStatusResponse convertToWorkerStatusResponse(EngineRpcService.WorkerStatusPB workerStatusPB) {
         WorkerStatusResponse response = new WorkerStatusResponse();
 
         response.setRole(RoleTypeProtoConverter.fromWorkerStatus(workerStatusPB));
@@ -38,6 +37,7 @@ public class EngineStatusConverter {
         response.setWaitingQueryLen(workerStatusPB.getWaitingQueryLen());
         response.setStepLatencyMs(workerStatusPB.getStepLatencyMs());
         response.setIterateCount(workerStatusPB.getIterateCount());
+        response.setLastStepMetrics(convertStepMetrics(workerStatusPB));
         response.setDpSize(workerStatusPB.getDpSize());
         response.setTpSize(workerStatusPB.getTpSize());
         response.setDpRank(workerStatusPB.getDpRank());
@@ -101,13 +101,24 @@ public class EngineStatusConverter {
                 workerStatusPB.getMaxSeqLen(),
                 workerStatusPB.getMaxBatchTokensSize(),
                 workerStatusPB.getRunningQueryLen(),
-                workerStatusPB.getWaitingQueryLen());
+                workerStatusPB.getWaitingQueryLen(),
+                convertStepMetrics(workerStatusPB));
         return owner.bindStatusObservation(
                 engine,
                 workerStatusPB.getAlive(),
                 workerStatusPB.getStatusVersion(),
                 workerStatusPB.getLatestFinishedVersion(),
                 finishedTasks);
+    }
+
+    private static WorkerStatus.StepMetrics convertStepMetrics(EngineRpcService.WorkerStatusPB status) {
+        if (!status.hasLastStepMetrics()) {
+            return null;
+        }
+        EngineRpcService.WorkerStepMetricsPB step = status.getLastStepMetrics();
+        return new WorkerStatus.StepMetrics(step.getStepId(), step.getCompletedTimeMs(),
+                step.getTotalScheduledTokens(), step.getPrefillRequestCount(), step.getPrefillTokens(),
+                step.getTokenBudget(), step.getBudgetFillRatio());
     }
 
     private static KvCacheGroupMode convertKvCacheGroupMode(

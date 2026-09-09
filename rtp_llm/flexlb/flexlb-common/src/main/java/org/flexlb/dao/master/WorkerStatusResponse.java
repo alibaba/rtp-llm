@@ -97,6 +97,9 @@ public class WorkerStatusResponse {
     @JsonProperty("max_batch_tokens_size")
     private long maxBatchTokensSize;
 
+    @JsonProperty("last_step_metrics")
+    private WorkerStatus.StepMetrics lastStepMetrics;
+
     @JsonProperty("version")
     private long version;
 
