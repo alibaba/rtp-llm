@@ -45,6 +45,27 @@ cc_library(
 )
 
 cc_library(
+    name = "torch_cuda_oom",
+    srcs = ["TorchCudaOom.cc"],
+    hdrs = ["TorchCudaOom.h"],
+    copts = copts(),
+    deps = [
+        ":core_utils",
+    ] + torch_deps() + select({
+        "//:using_cuda": [
+            "@local_config_cuda//cuda:cuda_headers",
+            "@local_config_cuda//cuda:cudart",
+        ],
+        "@//:using_rocm": [
+            "@local_config_rocm//rocm:rocm_headers",
+            "@local_config_rocm//rocm:rocm",
+        ],
+        "//conditions:default": [],
+    }),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "profiling_scope",
     hdrs = [
         "ProfilingScope.h",

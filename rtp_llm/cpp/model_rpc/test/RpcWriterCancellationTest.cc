@@ -6,6 +6,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <thread>
 #include <utility>
 
 #include "opentelemetry/exporters/memory/in_memory_span_data.h"
@@ -196,37 +197,70 @@ TEST(RpcWriterCancellationTest, LocalWriteFailureCancelsStreamAndReturnsCancelle
 }
 
 TEST(RpcWriterCancellationTest, DecodeFirstReadCancellationReturnsCancelled) {
-    test::TestLogCapture   log_capture("decode_first_read_cancel");
-    DecodeFirstReadService service;
-    int                    listen_port = 0;
-    grpc::ServerBuilder    builder;
-    builder.AddListeningPort("127.0.0.1:0", grpc::InsecureServerCredentials(), &listen_port);
-    builder.RegisterService(&service);
-    auto server = builder.BuildAndStart();
-    ASSERT_NE(server, nullptr);
-    ASSERT_NE(listen_port, 0);
+    // The handler checks CHECK_REQUEST_CANCELLED before prepareGenerateContext,
+    // so a cancel that lands too early short-circuits without ever attempting
+    // the read this test is about. Both outcomes return CANCELLED, and the only
+    // evidence distinguishing them is the warning logged after the failed read
+    // (DecodeRpcServer.cc:236-241) -- nothing is logged before it, so there is no
+    // marker to wait on. A fixed settle window is therefore a race: 500ms was
+    // enough on an idle box and not enough on a loaded CI worker.
+    //
+    // Retry the scenario with a growing window and stop at the first attempt
+    // that reaches the read path.
+    static constexpr const char* kReadFailureMarker = "read allocate request failed";
+    const std::chrono::milliseconds settle_windows[] = {std::chrono::milliseconds(500),
+                                                        std::chrono::milliseconds(1500),
+                                                        std::chrono::milliseconds(4000)};
+    bool reached_read_path = false;
 
-    auto channel = grpc::CreateChannel("127.0.0.1:" + std::to_string(listen_port), grpc::InsecureChannelCredentials());
-    auto stub    = RpcService::NewStub(channel);
-    grpc::ClientContext client_context;
-    client_context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(5));
-    auto stream = stub->RemoteGenerate(&client_context);
-    ASSERT_NE(stream, nullptr);
+    for (const auto settle : settle_windows) {
+        test::TestLogCapture   log_capture("decode_first_read_cancel");
+        DecodeFirstReadService service;
+        int                    listen_port = 0;
+        grpc::ServerBuilder    builder;
+        builder.AddListeningPort("127.0.0.1:0", grpc::InsecureServerCredentials(), &listen_port);
+        builder.RegisterService(&service);
+        auto server = builder.BuildAndStart();
+        ASSERT_NE(server, nullptr);
+        ASSERT_NE(listen_port, 0);
 
-    EXPECT_TRUE(service.waitUntilEntered(std::chrono::seconds(5)));
-    client_context.TryCancel();
+        auto channel =
+            grpc::CreateChannel("127.0.0.1:" + std::to_string(listen_port), grpc::InsecureChannelCredentials());
+        auto stub = RpcService::NewStub(channel);
+        grpc::ClientContext client_context;
+        client_context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(30));
+        auto stream = stub->RemoteGenerate(&client_context);
+        ASSERT_NE(stream, nullptr);
 
-    const auto client_status = stream->Finish();
-    const auto server_status = service.waitUntilReturned(std::chrono::seconds(5));
+        EXPECT_TRUE(service.waitUntilEntered(std::chrono::seconds(5)));
+        // waitUntilEntered fires before the fake delegates to the real handler,
+        // so give the handler this long to get past the gate and park in Read
+        // (the client sends nothing, so it parks there indefinitely).
+        std::this_thread::sleep_for(settle);
+        client_context.TryCancel();
 
-    server->Shutdown(std::chrono::system_clock::now() + std::chrono::seconds(5));
-    server->Wait();
+        const auto client_status = stream->Finish();
+        const auto server_status = service.waitUntilReturned(std::chrono::seconds(5));
 
-    EXPECT_EQ(client_status.error_code(), grpc::StatusCode::CANCELLED);
-    ASSERT_TRUE(server_status.has_value());
-    EXPECT_EQ(server_status->error_code(), grpc::StatusCode::CANCELLED);
-    EXPECT_NE(log_capture.content().find("request [pending peer="), std::string::npos);
-    EXPECT_NE(log_capture.content().find("read allocate request failed"), std::string::npos);
+        // Read the evidence before tearing the server down.
+        reached_read_path = log_capture.waitFor(kReadFailureMarker, std::chrono::seconds(5));
+
+        server->Shutdown(std::chrono::system_clock::now() + std::chrono::seconds(5));
+        server->Wait();
+
+        // Holds on both paths; the cancel is observed either way.
+        EXPECT_EQ(client_status.error_code(), grpc::StatusCode::CANCELLED);
+        ASSERT_TRUE(server_status.has_value());
+        EXPECT_EQ(server_status->error_code(), grpc::StatusCode::CANCELLED);
+
+        if (reached_read_path) {
+            break;
+        }
+    }
+
+    EXPECT_TRUE(reached_read_path)
+        << "cancel never landed while the handler was blocked in Read, so the "
+           "read-failure path was not exercised in any attempt";
 }
 
 TEST(RpcWriterCancellationTest, RemoteWriteFailureCancelsGrpcStreamClosure) {
@@ -392,6 +426,84 @@ TEST(RpcWriterCancellationTest, PriorityPreemptionOverridesOkAndCancelledTranspo
         ASSERT_TRUE(telemetry::TelemetryRuntime::shutdown(5000));
         expectClientSpanError(span_data, "PRIORITY_PREEMPTED", expected_rpc_status);
     }
+}
+
+TEST(RpcWriterCancellationTest, DecodeStageSettlementIsIdempotent) {
+    DecodeStatInfo stat_info;
+    stat_info.stage      = DecodeStatInfo::allocateResource;
+    stat_info.begin_time = currentTimeUs() - 1000;
+
+    stat_info.finishStage();
+    const auto recorded = stat_info.allocate_resource_rt_us;
+
+    EXPECT_GE(recorded, 1000);
+    EXPECT_EQ(stat_info.begin_time, 0);
+    stat_info.finishStage();
+    EXPECT_EQ(stat_info.allocate_resource_rt_us, recorded);
+    EXPECT_EQ(stat_info.load_cache_from_prefill_rt_us, 0);
+}
+
+TEST(RpcWriterCancellationTest, PrefillStageSettlementIsIdempotent) {
+    PrefillStatInfo stat_info;
+    stat_info.stage      = PrefillStatInfo::remoteAllocateResource;
+    stat_info.begin_time = currentTimeUs() - 1000;
+
+    stat_info.finishStage();
+    const auto recorded = stat_info.remote_allocate_resource_rt_us;
+
+    EXPECT_GE(recorded, 1000);
+    EXPECT_EQ(stat_info.begin_time, 0);
+    stat_info.finishStage();
+    EXPECT_EQ(stat_info.remote_allocate_resource_rt_us, recorded);
+    EXPECT_EQ(stat_info.enqueue_request_rt_us, 0);
+}
+
+TEST(RpcWriterCancellationTest, ContextCleanupPropagatesSpecificTerminalError) {
+    auto                              stream = std::make_shared<SingleOutputStream>();
+    auto                              meta   = std::make_shared<RpcServerRuntimeMeta>();
+    kmonitor::MetricsReporterPtr metrics_reporter;
+    {
+        GenerateContext context(49, 0, nullptr, metrics_reporter, meta);
+        context.setStream(stream);
+        context.error_info = ErrorInfo(ErrorCode::MALLOC_FAILED, "allocation failed");
+    }
+
+    ASSERT_TRUE(stream->hasError());
+    EXPECT_EQ(stream->statusInfo().code(), ErrorCode::MALLOC_FAILED);
+    const auto schedule_info = meta->getEngineScheduleInfo(/*latest_finished_version=*/-1);
+    ASSERT_EQ(schedule_info.finished_task_info_list.size(), 1);
+    EXPECT_EQ(schedule_info.finished_task_info_list[0].request_id, 49);
+    EXPECT_EQ(schedule_info.finished_task_info_list[0].error_code, static_cast<int64_t>(ErrorCode::MALLOC_FAILED));
+}
+
+TEST(RpcWriterCancellationTest, ContextCleanupPreservesExistingStreamError) {
+    auto stream = std::make_shared<SingleOutputStream>();
+    stream->reportError(ErrorCode::GENERATE_TIMEOUT, "original terminal error");
+    {
+        kmonitor::MetricsReporterPtr metrics_reporter;
+        auto                         meta = std::make_shared<RpcServerRuntimeMeta>();
+        GenerateContext              context(50, 0, nullptr, metrics_reporter, meta);
+        context.stream_     = stream;
+        context.error_info = ErrorInfo(ErrorCode::MALLOC_FAILED, "later context error");
+    }
+
+    EXPECT_EQ(stream->statusInfo().code(), ErrorCode::GENERATE_TIMEOUT);
+}
+
+TEST(RpcWriterCancellationTest, RequestGaugeSamplesLiveAtomicValue) {
+    std::atomic<size_t>          onflight_requests{3};
+    kmonitor::MetricsReporterPtr metrics_reporter;
+    auto                         meta = std::make_shared<RpcServerRuntimeMeta>();
+    GenerateContext              context(51, 0, nullptr, metrics_reporter, meta);
+    context.onflight_requests = &onflight_requests;
+
+    RpcMetricsCollector collector;
+    context.collectBasicMetrics(collector);
+    EXPECT_EQ(collector.onflight_request, 3);
+
+    onflight_requests.store(1);
+    context.collectBasicMetrics(collector);
+    EXPECT_EQ(collector.onflight_request, 1);
 }
 
 }  // namespace

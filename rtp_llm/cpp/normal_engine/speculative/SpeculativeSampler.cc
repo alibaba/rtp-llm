@@ -10,23 +10,13 @@ namespace speculative {
 
 FastTopKSamplerOutput FastTopKSampler::forward(const torch::Tensor& logits, int top_k) {
     FastTopKSamplerOutput output;
-    auto                  draft_probs = torch::softmax(logits, -1);
 
-    std::tuple<torch::Tensor, torch::Tensor> sample_res;
     if (top_k == 1) {
-        sample_res = torch::max(draft_probs, -1, true);
+        output.token_ids = torch::argmax(logits, -1, true);
+        output.all_probs = torch::zeros_like(logits).scatter_(-1, output.token_ids, 1.0);
     } else {
-        sample_res = torch::topk(draft_probs, top_k, -1);
-    }
-
-    output.token_ids = std::get<1>(sample_res);
-    if (top_k == 1) {
-        // A deterministic top-1 proposal must be represented by its point-mass
-        // distribution when rejection sampling computes its acceptance ratio.
-        output.all_probs = torch::zeros_like(draft_probs).scatter_(-1, output.token_ids, 1.0);
-    } else {
-        // Preserve the existing multi-candidate behavior. This path does not
-        // describe the deterministic top-1 proposal fixed above.
+        auto draft_probs = torch::softmax(logits, -1);
+        output.token_ids = std::get<1>(torch::topk(draft_probs, top_k, -1));
         output.all_probs = std::move(draft_probs);
     }
 

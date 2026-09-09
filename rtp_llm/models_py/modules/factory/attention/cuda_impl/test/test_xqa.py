@@ -57,10 +57,26 @@ class TestXQAAttnOp(BaseAttentionTest):
         logging.info(f"XQAAttnOp support check: {is_supported}")
 
         if not is_supported:
-            logging.warning(
-                f"XQAAttnOp does not support this configuration, skipping correctness test"
+            # This target exists to check XQA correctness and is pinned to H20 for
+            # that reason, so on sm90+ support() returning False is the bug, not a
+            # reason to opt out -- skipping there would turn a broken backend into
+            # a green run. Only a genuinely unsuitable device is a skip.
+            major, minor = torch.cuda.get_device_capability()
+            sm = major * 10 + minor
+            self.assertLess(
+                sm,
+                90,
+                f"XQAAttnOp.support() returned False on sm{sm}, but XQA is "
+                f"compiled for sm_90a and XQAAttnOp::support only requires "
+                f"get_sm() >= 90 -- on this device it should be supported. "
+                f"Treating this as a failure rather than a skip, because this "
+                f"target is dedicated to XQA correctness.",
             )
-            return
+            self.skipTest(
+                f"XQA is compiled for sm_90a only and XQAAttnOp::support requires "
+                f"get_sm() >= 90; this device is sm{sm}. Skipping instead of "
+                f"returning so the missing coverage cannot masquerade as a pass."
+            )
 
         # Prepare parameters
         params_base = attn_op.prepare(attn_inputs)

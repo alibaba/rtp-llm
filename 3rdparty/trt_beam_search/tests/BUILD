@@ -43,8 +43,12 @@ cc_test(
             "@local_config_cuda//cuda:cudart",
         ],
     }),
+    # A select needs its own CUDA branch: with only the rocm branch present, CUDA
+    # falls through to "//conditions:default": {} -- empty exec_properties, which is
+    # not a GPU request at all. Both tests then landed on a CPU-only worker and died
+    # with "libcuda.so.1: cannot open shared object file" (exit 127) in run 69714248.
     exec_properties = select({
-        "@//:using_cuda": {"gpu": "H20"},
+        "@//:using_cuda": {"gpu": "A10"},
         "@//:using_rocm": {"gpu": "MI308X-ROCM7"},
         "//conditions:default": {},
     }),
@@ -69,8 +73,12 @@ cc_test(
             "@local_config_cuda//cuda:cudart",
         ],
     }),
+    # A select needs its own CUDA branch: with only the rocm branch present, CUDA
+    # falls through to "//conditions:default": {} -- empty exec_properties, which is
+    # not a GPU request at all. Both tests then landed on a CPU-only worker and died
+    # with "libcuda.so.1: cannot open shared object file" (exit 127) in run 69714248.
     exec_properties = select({
-        "@//:using_cuda": {"gpu": "H20"},
+        "@//:using_cuda": {"gpu": "A10"},
         "@//:using_rocm": {"gpu": "MI308X-ROCM7"},
         "//conditions:default": {},
     }),

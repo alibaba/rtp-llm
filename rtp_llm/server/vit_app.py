@@ -43,10 +43,11 @@ class VitEndpointApp:
         self,
         py_env_configs: PyEnvConfigs,
         vit_process_engine: Optional[MMProcessEngine],
+        local_device_id: int = 0,
     ):
         self.py_env_configs = py_env_configs
         self.vit_endpoint_server = VitEndpointServer(
-            self.py_env_configs, vit_process_engine
+            self.py_env_configs, vit_process_engine, local_device_id
         )
 
     def start(
@@ -209,6 +210,7 @@ class VitEndpointServer:
         self,
         py_env_configs: PyEnvConfigs,
         vit_process_engine: Optional[MMProcessEngine],
+        local_device_id: int = 0,
     ):
         self.rpc_server = None
         self.mm_rpc_server = None
@@ -218,7 +220,11 @@ class VitEndpointServer:
         if self.mm_process_engine is None:
             return
 
-        self.mm_rpc_server = MultimodalRpcServer(self.mm_process_engine)
+        self.mm_rpc_server = MultimodalRpcServer(
+            self.mm_process_engine,
+            py_env_configs.vit_config.output_transport,
+            local_device_id,
+        )
         self.rpc_server = create_rpc_server()
         add_MultimodalRpcServiceServicer_to_server(self.mm_rpc_server, self.rpc_server)
         kmonitor.init()

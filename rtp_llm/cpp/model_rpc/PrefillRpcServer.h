@@ -1,8 +1,10 @@
 #pragma once
 
+#include <chrono>
 #include <cstdint>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include "grpc++/grpc++.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
@@ -62,20 +64,29 @@ protected:
     }
 
 private:
-    grpc::Status      syncPrefix(PrefillGenerateContext& prefill_context);
-    ErrorInfo         waitStreamBeforeRun(std::shared_ptr<GenerateStream> stream);
-    void              prepareGenerateInput(PrefillGenerateContext& prefill_context);
-    void              getRpcConnection(PrefillGenerateContext& prefill_context);
-    void              multimodalProcess(PrefillGenerateContext& prefill_context);
-    void              remoteAllocateResource(PrefillGenerateContext& prefill_context);
-    GenerateRequestPB buildAllocateRequest(PrefillGenerateContext& prefill_context);
-    void              enqueueRequest(PrefillGenerateContext& prefill_context);
-    void              remoteLoadCacheStart(PrefillGenerateContext& prefill_context);
-    void              pollLocalOutput(PrefillGenerateContext& prefill_context);
-    void              remoteLoadCacheEnd(PrefillGenerateContext& prefill_context);
-    void              remoteGenerate(PrefillGenerateContext& prefill_context);
-    void              pollRemoteOutput(PrefillGenerateContext& prefill_context);
-    static void       mergeMultimodalLengths(GenerateOutputsPB& response, const std::map<int, int>& multimodal_lengths);
+    grpc::Status syncPrefix(PrefillGenerateContext& prefill_context);
+    ErrorInfo    waitStreamBeforeRun(std::shared_ptr<GenerateStream> stream);
+    void         prepareGenerateInput(PrefillGenerateContext& prefill_context);
+    static std::chrono::system_clock::time_point
+    decodeChannelReadyDeadline(const PrefillGenerateContext& prefill_context, int64_t max_rpc_timeout_ms);
+    static std::optional<ErrorInfo> parseDownstreamError(const grpc::Status& status);
+    void                            getRpcConnection(PrefillGenerateContext& prefill_context);
+    void                            multimodalProcess(PrefillGenerateContext& prefill_context);
+    void                            remoteAllocateResource(PrefillGenerateContext& prefill_context);
+    GenerateRequestPB               buildAllocateRequest(PrefillGenerateContext& prefill_context);
+    void                            enqueueRequest(PrefillGenerateContext& prefill_context);
+    void                            remoteLoadCacheStart(PrefillGenerateContext& prefill_context);
+    void                            pollLocalOutput(PrefillGenerateContext& prefill_context);
+    void                            remoteLoadCacheEnd(PrefillGenerateContext& prefill_context);
+    void                            remoteGenerate(PrefillGenerateContext& prefill_context);
+    void                            pollRemoteOutput(PrefillGenerateContext& prefill_context);
+    static void mergeMultimodalLengths(GenerateOutputsPB& response, const std::map<int, int>& multimodal_lengths);
+    static void mergeCacheReuseInfo(AuxInfoPB& aux_info,
+                                    int        prefill_total_reuse_len,
+                                    int        prefill_local_reuse_len,
+                                    int        prefill_remote_reuse_len,
+                                    int        prefill_memory_reuse_len,
+                                    bool       use_independent_block_pools);
 
 private:
     std::string decode_cluster_name_;

@@ -176,6 +176,50 @@ message MultimodalInputPB {
 
 message MultimodalInputsPB {
     repeated MultimodalInputPB multimodal_inputs = 1;
+    // LLM can receive the output through GPUDirect RDMA.
+    bool support_rdma = 2;
+}
+
+enum TensorDataTypePB {
+    RDMA_TENSOR_FLOAT32 = 0;
+    RDMA_TENSOR_INT32 = 1;
+    RDMA_TENSOR_FLOAT16 = 2;
+    RDMA_TENSOR_BFLOAT16 = 3;
+}
+
+message RdmaNicKeyPB {
+    uint32 nic_id = 1;
+    uint32 rkey = 2;
+}
+
+message TensorMetaPB {
+    repeated int64 shape = 1;
+    TensorDataTypePB data_type = 2;
+    uint64 offset = 3;
+    uint64 nbytes = 4;
+}
+
+message RdmaDescriptorPB {
+    uint64 remote_addr = 1;
+    repeated RdmaNicKeyPB nic_keys = 2;
+    string lease_id = 3;
+    string host = 4;
+    uint32 port = 5;
+    uint64 payload_bytes = 6;
+    repeated TensorMetaPB tensors = 7;
+}
+
+message MMRdmaSlotPB {
+    enum Role {
+        ROLE_UNSPECIFIED = 0;
+        EMBEDDING = 1;
+        POS_ID = 2;
+        EXTRA_INPUT = 3;
+    }
+    RdmaDescriptorPB rdma_descriptor = 1;
+    // Must have the same length as rdma_descriptor.tensors and match it by index.
+    // EXTRA_INPUT entries preserve their original order across all slots.
+    repeated Role roles = 2;
 }
 
 message MultimodalOutputPB {
@@ -183,6 +227,12 @@ message MultimodalOutputPB {
     TensorPB multimodal_pos_id = 2;
     repeated TensorPB multimodal_extra_input = 3;
     repeated int32 split_size = 4;
+    // Non-empty means fields 1/2/3 are stored in these slots; split_size remains inline.
+    repeated MMRdmaSlotPB output_rdma_slots = 5;
+}
+
+message ReleaseLeasePB {
+    repeated string lease_id = 1;
 }
 
 message RequestInfoPB {
@@ -362,6 +412,7 @@ message BroadcastLoadRequestPB {
 message BroadcastLoadResponsePB {
     RpcErrorPB error_info = 1;
     int64 done_time_us = 2;
+    int64 loaded_cache_block_count = 3;
 }
 
 message RemoteFinishRequestPB {
@@ -451,6 +502,27 @@ message StartProfileInternalRequestPB {
     string trace_name = 1;
     int32 start_step = 2;
     int32 num_steps = 3;
+}
+
+message TorchAllocatorDumpRequestPB {
+    string auth_token = 1;
+    string dump_id = 2;
+}
+
+message TorchAllocatorDumpResultPB {
+    int64 world_rank = 1;
+    int64 dp_rank = 2;
+    int64 tp_rank = 3;
+    int64 local_rank = 4;
+    int64 pid = 5;
+    bool success = 6;
+    string file_path = 7;
+    string error = 8;
+    string dump_id = 9;
+}
+
+message TorchAllocatorDumpResponsePB {
+    repeated TorchAllocatorDumpResultPB results = 1;
 }
 
 message CheckHealthResponsePB {
@@ -832,6 +904,8 @@ service RpcService {
     rpc SetLogLevel(SetLogLevelRequestPB) returns (EmptyPB);
     rpc StartProfile(StartProfileRequestPB) returns (EmptyPB);
     rpc StartProfileInternal(StartProfileInternalRequestPB) returns (EmptyPB);
+    rpc DumpTorchAllocator(TorchAllocatorDumpRequestPB) returns (TorchAllocatorDumpResponsePB);
+    rpc DumpTorchAllocatorInternal(TorchAllocatorDumpRequestPB) returns (TorchAllocatorDumpResultPB);
     rpc UpdateSchedulerInfo(UpdateSchedulerInfoRequestPB) returns (EmptyPB);
 
     rpc UpdateWeights(UpdateWeightsRequestPB) returns (EmptyPB);
@@ -858,4 +932,6 @@ service MultimodalRpcService {
     rpc GetWorkerStatus(StatusVersionPB) returns (WorkerStatusPB);
     rpc GetCacheStatus(CacheVersionPB) returns (CacheStatusPB);
     rpc RemoteMultimodalEmbedding(MultimodalInputsPB) returns (MultimodalOutputPB);
+    // Best-effort release after the LLM finishes reading remote slots.
+    rpc ReleaseRdmaLease(ReleaseLeasePB) returns (EmptyPB);
 }

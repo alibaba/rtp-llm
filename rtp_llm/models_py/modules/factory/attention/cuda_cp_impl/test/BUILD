@@ -37,8 +37,7 @@ py_test(
         "@//:cuda_pre_12_9": flashinfer_deps,
         "//conditions:default": []
     }),
-    tags = ["H20"],
-    exec_properties = {'gpu': 'H20'},
+    exec_properties = {'gpu':'A10'},
 )
 
 py_test(
@@ -49,8 +48,7 @@ py_test(
         "@//:cuda_pre_12_9": flashinfer_deps,
         "//conditions:default": []
     }),
-    tags = ["H20"],
-    exec_properties = {'gpu': 'H20'},
+    exec_properties = {'gpu':'A10'},
 )
 
 py_test(
@@ -61,8 +59,7 @@ py_test(
         "@//:cuda_pre_12_9": flashinfer_deps,
         "//conditions:default": []
     }),
-    tags = ["H20"],
-    exec_properties = {'gpu': 'H20'},
+    exec_properties = {'gpu':'A10'},
 )
 
 py_test(

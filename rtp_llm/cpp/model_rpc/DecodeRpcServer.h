@@ -5,6 +5,7 @@
 #include "rtp_llm/cpp/model_rpc/DecodeGenerateContext.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
+#include "rtp_llm/cpp/cache/CacheGroupType.h"
 
 namespace rtp_llm {
 
@@ -61,6 +62,15 @@ public:
     };
 
 private:
+    struct LoadCacheResult {
+        ErrorInfo error_info;
+        size_t    loaded_cache_block_count = 0;
+
+        bool ok() const {
+            return error_info.ok();
+        }
+    };
+
     struct MTPModuleLoadPlan {
         size_t                  module_index;
         const EngineInitParams* engine_init_params;
@@ -79,10 +89,9 @@ private:
     void
     reportEarlyFinishTask(DecodeGenerateContext& decode_context, int64_t error_code, const std::string& error_message);
 
-    ErrorInfo              loadCache(const LoadKVCacheContext& load_context);
-    ErrorInfo              loadCacheForAllRank(DecodeGenerateContext& decode_context);
-    ErrorInfo              loadCacheAsyncForTp(DecodeGenerateContext& decode_context, LoadKVCacheContext& load_context);
-    ErrorInfo              loadCacheSyncForTp(DecodeGenerateContext& decode_context, LoadKVCacheContext& load_context);
+    LoadCacheResult        loadCache(const LoadKVCacheContext& load_context);
+    LoadCacheResult        loadCacheForAllRank(DecodeGenerateContext& decode_context);
+    LoadCacheResult        loadCacheAsyncForTp(DecodeGenerateContext& decode_context, LoadKVCacheContext& load_context);
     BroadcastLoadRequestPB constructRemoteLoadRequest(const LoadKVCacheContext&       load_context,
                                                       int                             index,
                                                       const std::vector<std::string>& peer_ips) const;
@@ -94,7 +103,36 @@ private:
     static std::string
     makeMTPModuleCacheKey(size_t mtp_base_model_id, const std::string& token_id_str, size_t layer_id);
     static std::vector<MTPModuleLoadPlan> makeMTPModuleLoadPlan(const ProposeModelEngineInitParams* propose_params);
-    static grpc::Status                   generateRequestReadFailureStatus(bool cancelled);
+    // Projects the producer's buildCacheStorePlan onto one group's decode block
+    // table: key_index indexes the global cache keys, offset_index the group-local
+    // BlockIds::blocks(). Derived from group policy plus block geometry only, never
+    // from how many prefill peers answered this load. Static so it is testable.
+    static std::vector<CacheStoreBlockPair> buildGroupLoadPlan(const CacheGroupPolicy& policy,
+                                                               size_t                  local_block_num,
+                                                               size_t                  cache_key_count,
+                                                               size_t                  reuse_block_size,
+                                                               bool                    use_hybrid,
+                                                               size_t                  group_seq_size_per_block,
+                                                               size_t                  base_seq_size_per_block);
+    static size_t cacheKeysPerPhysicalBlock(size_t group_seq_size_per_block, size_t base_seq_size_per_block);
+    static size_t keyBlocksPerLogicalBlock(const CacheGroupPolicy& policy,
+                                           size_t                  group_seq_size_per_block,
+                                           size_t                  base_seq_size_per_block);
+    static void   markCacheKeyRange(std::vector<size_t>& cache_key_counts,
+                                    size_t               endpoint_key_index,
+                                    size_t               block_offset_index,
+                                    size_t               cache_keys_per_physical_block);
+    static size_t completedHandoffPrefixBlocks(size_t                     already_reused_blocks,
+                                               const std::vector<size_t>& required_cache_key_counts,
+                                               const std::vector<size_t>& transferred_cache_key_counts);
+    static size_t minLoadedCacheBlockCount(const std::vector<size_t>& rank_loaded_cache_block_counts);
+    static std::vector<size_t> completionQueueExpectedResponseCounts(size_t worker_size);
+    static int                 markLoadedCacheReuse(const std::shared_ptr<GenerateStream>& stream,
+                                                    const LoadCacheResult&                 load_result,
+                                                    int                                    seq_size_per_block,
+                                                    bool                                   use_independent_block_pools);
+    static grpc::Status        generateRequestReadFailureStatus(bool cancelled);
+    static ErrorInfo           cacheLoadClientError(int64_t request_id, ErrorCode error_code);
     // Classifies error.type for the synthesized Decode phase spans. Static and
     // side-effect free so the classification itself is unit testable.
     static const char* phaseErrorType(bool                         request_ok,

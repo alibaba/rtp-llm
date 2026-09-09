@@ -1,32 +1,37 @@
 package org.flexlb.httpserver;
 
+import io.grpc.Context;
+import io.grpc.Status;
 import io.grpc.stub.StreamObserver;
+import org.flexlb.balance.scheduler.CancelReason;
+import org.flexlb.balance.scheduler.RequestState;
+import org.flexlb.config.ConfigService;
 import org.flexlb.consistency.LBStatusConsistencyService;
-import org.flexlb.balance.scheduler.RequestLifecycleSnapshot;
-import org.flexlb.config.PrioritySloPolicy;
+import org.flexlb.consistency.MasterElectService;
 import org.flexlb.dao.BalanceContext;
-import org.flexlb.dao.ScheduleBudget;
-import org.flexlb.dao.pv.PvLogData;
+import org.flexlb.dao.SchedulingMetadata;
+import org.flexlb.dao.loadbalance.AdmissionRejectReason;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
-import org.flexlb.dao.loadbalance.AdmissionRejectReason;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
+import org.flexlb.dao.pv.PvLogData;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.schedule.grpc.FlexlbServiceGrpc;
-import org.flexlb.schedule.grpc.FlexlbScheduleProtocol;
+import org.flexlb.enums.StatusEnum;
 import org.flexlb.interceptor.GrpcQosHeaderInterceptor;
 import org.flexlb.interceptor.GrpcServerTimingInterceptor;
+import org.flexlb.schedule.grpc.FlexlbScheduleProtocol;
+import org.flexlb.schedule.grpc.FlexlbServiceGrpc;
 import org.flexlb.service.RouteService;
 import org.flexlb.service.grace.ActiveRequestCounter;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
-import org.flexlb.service.monitor.PrioritySchedulerReporter;
-import org.flexlb.config.ConfigService;
+import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.flexlb.util.JsonUtils;
 import org.flexlb.util.Logger;
 import org.flexlb.util.PriorityNormalizer;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.util.concurrent.CompletableFuture;
@@ -41,15 +46,16 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
             LoggerFactory.getLogger("pvLogger");
 
     private final RouteService routeService;
-    private final LBStatusConsistencyService lbStatusConsistencyService;
+    private final MasterElectService masterElectService;
     private final EngineHealthReporter engineHealthReporter;
     private final ActiveRequestCounter activeRequestCounter;
     private final FlexlbGrpcForwarder grpcForwarder;
     private final ConfigService configService;
     private final BatchSchedulerReporter batchSchedulerReporter;
     private final ServerScheduleLatencyRecorder serverLatencyRecorder;
-    private final PrioritySloPolicy prioritySloPolicy;
-    private final PrioritySchedulerReporter prioritySchedulerReporter;
+    private final RequestSchedulerReporter requestSchedulerReporter;
+
+    @Autowired
     public FlexlbServiceImpl(RouteService routeService,
                              LBStatusConsistencyService lbStatusConsistencyService,
                              EngineHealthReporter engineHealthReporter,
@@ -58,18 +64,31 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
                              ConfigService configService,
                              BatchSchedulerReporter batchSchedulerReporter,
                              ServerScheduleLatencyRecorder serverLatencyRecorder,
-                             PrioritySloPolicy prioritySloPolicy,
-                             PrioritySchedulerReporter prioritySchedulerReporter) {
+                             RequestSchedulerReporter requestSchedulerReporter) {
+        this(routeService, (MasterElectService) lbStatusConsistencyService,
+                engineHealthReporter, activeRequestCounter, grpcForwarder,
+                configService, batchSchedulerReporter, serverLatencyRecorder,
+                requestSchedulerReporter);
+    }
+
+    FlexlbServiceImpl(RouteService routeService,
+                      MasterElectService masterElectService,
+                      EngineHealthReporter engineHealthReporter,
+                      ActiveRequestCounter activeRequestCounter,
+                      FlexlbGrpcForwarder grpcForwarder,
+                      ConfigService configService,
+                      BatchSchedulerReporter batchSchedulerReporter,
+                      ServerScheduleLatencyRecorder serverLatencyRecorder,
+                      RequestSchedulerReporter requestSchedulerReporter) {
         this.routeService = routeService;
-        this.lbStatusConsistencyService = lbStatusConsistencyService;
+        this.masterElectService = masterElectService;
         this.engineHealthReporter = engineHealthReporter;
         this.activeRequestCounter = activeRequestCounter;
         this.grpcForwarder = grpcForwarder;
         this.configService = configService;
         this.batchSchedulerReporter = batchSchedulerReporter;
         this.serverLatencyRecorder = serverLatencyRecorder;
-        this.prioritySloPolicy = prioritySloPolicy;
-        this.prioritySchedulerReporter = prioritySchedulerReporter;
+        this.requestSchedulerReporter = requestSchedulerReporter;
     }
 
     @Override
@@ -79,101 +98,316 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         serverLatencyRecorder.recordArrival(
                 interceptedEntryNanos != null ? interceptedEntryNanos : System.nanoTime());
         ActiveRequestCounter.RequestToken token = activeRequestCounter.acquire();
-        AtomicBoolean responded = new AtomicBoolean(false);
-        BalanceContext ctx = null;
+        AtomicBoolean completionClaimed = new AtomicBoolean(false);
+        BalanceContext context = null;
         ScheduleOrigin errorOrigin = ScheduleOrigin.ENTRY_ERROR;
 
         try {
-            ctx = buildContext(request);
-            BalanceContext requestContext = ctx;
-            boolean consistencyEnabled = lbStatusConsistencyService.isNeedConsistency();
+            context = buildContext(request);
+            BalanceContext requestContext = context;
+            boolean consistencyEnabled = masterElectService.isNeedConsistency();
             boolean masterAtEntry = consistencyEnabled
-                    && lbStatusConsistencyService.isMaster();
+                    && masterElectService.isMaster();
             boolean forwardToMaster = consistencyEnabled && !masterAtEntry;
-            boolean localFallback = false;
             engineHealthReporter.reportArriveDelayTime(requestContext);
 
             if (forwardToMaster) {
                 errorOrigin = ScheduleOrigin.FORWARDED_TO_MASTER;
-                FlexlbGrpcForwarder.MasterForwardResult forwardResult =
-                        grpcForwarder.forwardToMaster(request);
-                FlexlbScheduleProtocol.FlexlbScheduleResponsePB forwardResponse =
-                        forwardResult == null ? null : forwardResult.response();
-                if (forwardResponse != null) {
-                    responded.set(true);
-                    completeSchedule(requestContext, forwardResponse, responseObserver,
-                            ScheduleOrigin.FORWARDED_TO_MASTER);
-                    token.close();
-                    return;
-                }
-
-                if (forwardResult != null && !forwardResult.masterFound()) {
-                    // No Master address was selected and no RPC was attempted.
-                    localFallback = true;
-                    errorOrigin = ScheduleOrigin.LOCAL_FALLBACK;
-                } else {
-                    // Once a Master was selected, delivery is ambiguous. A
-                    // local decision could dispatch the same request twice.
-                    errorOrigin = ScheduleOrigin.FORWARD_FAILED;
-                    FlexlbScheduleProtocol.FlexlbScheduleResponsePB unavailable =
-                            buildMasterForwardFailureResponse(
-                                    forwardResult == null
-                                            ? "MISSING_RESULT"
-                                            : forwardResult.failure(),
-                                    forwardResult == null
-                                            ? ""
-                                            : forwardResult.masterHost());
-                    responded.set(true);
-                    completeSchedule(requestContext, unavailable, responseObserver,
-                            ScheduleOrigin.FORWARD_FAILED);
-                    token.close();
-                    return;
-                }
+                grpcForwarder.forwardScheduleToMaster(request).whenComplete(
+                        (forwardResult, forwardError) -> handleForwardCompletion(
+                                request,
+                                requestContext,
+                                responseObserver,
+                                token,
+                                completionClaimed,
+                                forwardResult,
+                                forwardError));
+                return;
             }
 
-            ScheduleOrigin routeOrigin = localFallback
-                    ? ScheduleOrigin.LOCAL_FALLBACK
-                    : (consistencyEnabled
-                            ? ScheduleOrigin.LOCAL_MASTER
-                            : ScheduleOrigin.LOCAL_STANDALONE);
+            ScheduleOrigin routeOrigin = consistencyEnabled
+                    ? ScheduleOrigin.LOCAL_MASTER
+                    : ScheduleOrigin.LOCAL_STANDALONE;
             errorOrigin = routeOrigin;
-
-            CompletableFuture<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> routeFuture =
-                    routeLocally(requestContext);
-
-            routeFuture.whenComplete((response, ex) -> {
-                try {
-                    if (responded.compareAndSet(false, true)) {
-                        if (ex != null) {
-                            Logger.warn("FlexlbService.schedule async error, request_id={}",
-                                    request.getRequestId(), ex);
-                            completeSchedule(requestContext, buildErrorResponse(ex), responseObserver,
-                                    routeOrigin);
-                        } else {
-                            completeSchedule(requestContext, response, responseObserver, routeOrigin);
-                        }
-                    }
-                } catch (Exception e) {
-                    Logger.warn("FlexlbService.schedule callback error, request_id={}",
-                            request.getRequestId(), e);
-                } finally {
-                    token.close();
-                }
-            });
+            routeAndComplete(request, requestContext, responseObserver, token,
+                    completionClaimed, routeOrigin);
 
         } catch (Exception e) {
             Logger.error("FlexlbService.schedule error, request_id={}", request.getRequestId(), e);
-            try {
-                if (responded.compareAndSet(false, true)) {
-                    completeSchedule(ctx, buildErrorResponse(e), responseObserver, errorOrigin);
-                }
-            } catch (Exception inner) {
-                Logger.warn("FlexlbService.schedule error-response send failed, request_id={}",
-                        request.getRequestId(), inner);
-            } finally {
-                token.close();
-            }
+            completeOnce(request.getRequestId(), context, buildErrorResponse(e),
+                    responseObserver, errorOrigin, token, completionClaimed);
         }
+    }
+
+    private void handleForwardCompletion(
+            FlexlbScheduleProtocol.FlexlbScheduleRequestPB request,
+            BalanceContext context,
+            StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> responseObserver,
+            ActiveRequestCounter.RequestToken token,
+            AtomicBoolean completionClaimed,
+            FlexlbGrpcForwarder.MasterForwardResult forwardResult,
+            Throwable forwardError) {
+        try {
+            if (forwardError != null) {
+                Logger.warn("FlexlbService.schedule master forward callback error, request_id={}",
+                        request.getRequestId(), forwardError);
+                completeOnce(
+                        request.getRequestId(),
+                        context,
+                        buildMasterForwardFailureResponse(
+                                failureName(forwardError), ""),
+                        responseObserver,
+                        ScheduleOrigin.FORWARD_FAILED,
+                        token,
+                        completionClaimed);
+                return;
+            }
+
+            FlexlbScheduleProtocol.FlexlbScheduleResponsePB response =
+                    forwardResult == null ? null : forwardResult.response();
+            if (response != null) {
+                completeOnce(
+                        request.getRequestId(),
+                        context,
+                        response,
+                        responseObserver,
+                        ScheduleOrigin.FORWARDED_TO_MASTER,
+                        token,
+                        completionClaimed,
+                        forwardResult.masterHost());
+                return;
+            }
+
+            if (forwardResult != null && !forwardResult.masterFound()) {
+                // No Master address was selected and no RPC was attempted.
+                routeAndComplete(request, context, responseObserver, token,
+                        completionClaimed, ScheduleOrigin.LOCAL_FALLBACK);
+                return;
+            }
+
+            // Once a Master was selected, delivery is ambiguous. A local
+            // decision could dispatch the same request twice. The Master may
+            // also have committed the route before its response was lost, so
+            // reconcile that ownership through the existing cancel reducer.
+            reconcileAmbiguousForward(request, forwardResult);
+            completeOnce(
+                    request.getRequestId(),
+                    context,
+                    buildMasterForwardFailureResponse(
+                            forwardResult == null
+                                    ? "MISSING_RESULT"
+                                    : forwardResult.failure(),
+                            forwardResult == null
+                                    ? ""
+                                    : forwardResult.masterHost()),
+                    responseObserver,
+                    ScheduleOrigin.FORWARD_FAILED,
+                    token,
+                    completionClaimed);
+        } catch (Exception error) {
+            Logger.warn("FlexlbService.schedule master forward completion error, request_id={}",
+                    request.getRequestId(), error);
+            completeOnce(
+                    request.getRequestId(),
+                    context,
+                    buildMasterForwardFailureResponse(failureName(error), ""),
+                    responseObserver,
+                    ScheduleOrigin.FORWARD_FAILED,
+                    token,
+                    completionClaimed);
+        }
+    }
+
+    private void reconcileAmbiguousForward(
+            FlexlbScheduleProtocol.FlexlbScheduleRequestPB request,
+            FlexlbGrpcForwarder.MasterForwardResult forwardResult) {
+        if (forwardResult == null || !forwardResult.masterFound()) {
+            return;
+        }
+        if ("FORWARD_HOP_LIMIT".equals(forwardResult.failure())
+                || "SELF_FORWARD_BLOCKED".equals(forwardResult.failure())) {
+            return;
+        }
+        FlexlbScheduleProtocol.CancelReasonPB reason =
+                "DEADLINE_EXCEEDED".equals(forwardResult.failure())
+                        ? FlexlbScheduleProtocol.CancelReasonPB
+                                .CANCEL_REASON_DEADLINE_EXCEEDED
+                        : FlexlbScheduleProtocol.CancelReasonPB
+                                .CANCEL_REASON_CLIENT_CANCELLED;
+        reconcileForwardedRoute(
+                request.getRequestId(), forwardResult.masterHost(), reason);
+    }
+
+    private void reconcileForwardedRoute(
+            long requestId,
+            String masterHost,
+            FlexlbScheduleProtocol.CancelReasonPB reason) {
+        if (masterHost == null || masterHost.isBlank()) {
+            return;
+        }
+        FlexlbScheduleProtocol.FlexlbCancelRequestPB cancelRequest =
+                FlexlbScheduleProtocol.FlexlbCancelRequestPB.newBuilder()
+                        .setRequestId(requestId)
+                        .setReason(reason)
+                        .build();
+        try {
+            Context.ROOT.call(() -> grpcForwarder.forwardCompensatingCancelToMaster(
+                    cancelRequest, masterHost))
+                    .whenComplete((cancelResult, cancelError) -> {
+                        if (cancelError != null) {
+                            Logger.warn(
+                                    "FlexlbService.schedule cancellation reconciliation failed, request_id={} master={}",
+                                    requestId, masterHost, cancelError);
+                        } else if (cancelResult == null || cancelResult.response() == null) {
+                            Logger.warn(
+                                    "FlexlbService.schedule cancellation reconciliation incomplete, request_id={} master={} failure={}",
+                                    requestId, masterHost,
+                                    cancelResult == null ? "MISSING_RESULT" : cancelResult.failure());
+                        }
+                    });
+        } catch (Exception error) {
+            Logger.warn(
+                    "FlexlbService.schedule cancellation reconciliation failed to start, request_id={} master={}",
+                    requestId, masterHost, error);
+        }
+    }
+
+    private void routeAndComplete(
+            FlexlbScheduleProtocol.FlexlbScheduleRequestPB request,
+            BalanceContext context,
+            StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> responseObserver,
+            ActiveRequestCounter.RequestToken token,
+            AtomicBoolean completionClaimed,
+            ScheduleOrigin origin) {
+        CompletableFuture<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> routeFuture;
+        try {
+            // route() registers the scheduler owner synchronously. Install the
+            // cancellation listener only after that owner exists, so an
+            // already-cancelled Context cannot race ahead of registration.
+            routeFuture = routeLocally(context);
+        } catch (Exception error) {
+            Logger.warn("FlexlbService.schedule local route error, request_id={}",
+                    request.getRequestId(), error);
+            completeOnce(
+                    request.getRequestId(),
+                    context,
+                    buildErrorResponse(error),
+                    responseObserver,
+                    origin,
+                    token,
+                    completionClaimed);
+            return;
+        }
+        Context inboundContext = Context.current();
+        Context.CancellationListener cancellationListener = ignored -> {
+            if (!completionClaimed.compareAndSet(false, true)) {
+                return;
+            }
+            try {
+                cancelUndeliveredRoute(request.getRequestId());
+            } finally {
+                closeRequestToken(request.getRequestId(), token);
+            }
+        };
+        inboundContext.addListener(cancellationListener, Runnable::run);
+        Runnable removeCancellationListener =
+                () -> inboundContext.removeListener(cancellationListener);
+        routeFuture.whenComplete((response, routeError) -> {
+            if (routeError != null) {
+                Logger.warn("FlexlbService.schedule async error, request_id={}",
+                        request.getRequestId(), routeError);
+            }
+            completeOnce(
+                    request.getRequestId(),
+                    context,
+                    routeError == null ? response : buildErrorResponse(routeError),
+                    responseObserver,
+                    origin,
+                    token,
+                    completionClaimed,
+                    removeCancellationListener);
+        });
+    }
+
+    private void completeOnce(
+            long requestId,
+            BalanceContext context,
+            FlexlbScheduleProtocol.FlexlbScheduleResponsePB response,
+            StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> responseObserver,
+            ScheduleOrigin origin,
+            ActiveRequestCounter.RequestToken token,
+            AtomicBoolean completionClaimed) {
+        completeOnce(requestId, context, response, responseObserver, origin,
+                token, completionClaimed, () -> { }, "");
+    }
+
+    private void completeOnce(
+            long requestId,
+            BalanceContext context,
+            FlexlbScheduleProtocol.FlexlbScheduleResponsePB response,
+            StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> responseObserver,
+            ScheduleOrigin origin,
+            ActiveRequestCounter.RequestToken token,
+            AtomicBoolean completionClaimed,
+            String masterHost) {
+        completeOnce(requestId, context, response, responseObserver, origin,
+                token, completionClaimed, () -> { }, masterHost);
+    }
+
+    private void completeOnce(
+            long requestId,
+            BalanceContext context,
+            FlexlbScheduleProtocol.FlexlbScheduleResponsePB response,
+            StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> responseObserver,
+            ScheduleOrigin origin,
+            ActiveRequestCounter.RequestToken token,
+            AtomicBoolean completionClaimed,
+            Runnable completionCleanup) {
+        completeOnce(requestId, context, response, responseObserver, origin,
+                token, completionClaimed, completionCleanup, "");
+    }
+
+    private void completeOnce(
+            long requestId,
+            BalanceContext context,
+            FlexlbScheduleProtocol.FlexlbScheduleResponsePB response,
+            StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> responseObserver,
+            ScheduleOrigin origin,
+            ActiveRequestCounter.RequestToken token,
+            AtomicBoolean completionClaimed,
+            Runnable completionCleanup,
+            String masterHost) {
+        if (!completionClaimed.compareAndSet(false, true)) {
+            completionCleanup.run();
+            return;
+        }
+        try {
+            completeSchedule(context, response, responseObserver, origin, masterHost);
+        } catch (Exception error) {
+            Logger.warn("FlexlbService.schedule response completion error, request_id={}",
+                    requestId, error);
+        } finally {
+            completionCleanup.run();
+            closeRequestToken(requestId, token);
+        }
+    }
+
+    private void closeRequestToken(
+            long requestId, ActiveRequestCounter.RequestToken token) {
+        try {
+            token.close();
+        } catch (Exception error) {
+            Logger.warn("FlexlbService.schedule request token close failed, request_id={}",
+                    requestId, error);
+        }
+    }
+
+    private static String failureName(Throwable error) {
+        Throwable cause = error;
+        while (cause instanceof CompletionException && cause.getCause() != null) {
+            cause = cause.getCause();
+        }
+        return cause.getClass().getSimpleName();
     }
 
     @Override
@@ -188,7 +422,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
                 return;
             }
         }
-        RequestLifecycleSnapshot snapshot = routeService.getRequestState(
+        RequestState snapshot = routeService.getRequestState(
                 request.getRequestId(), request.getBatchId());
         FlexlbScheduleProtocol.GetRequestStateResponsePB.Builder response =
                 FlexlbScheduleProtocol.GetRequestStateResponsePB.newBuilder().setFound(snapshot != null);
@@ -199,11 +433,221 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         responseObserver.onCompleted();
     }
 
+    /**
+     * Reduce one request generation into its cancellation lifecycle.
+     *
+     * <p>Every node first checks its local lifecycle ownership. A found response
+     * is authoritative even after leadership changes. Only a hop-zero miss on a
+     * follower may be forwarded to the current Master.</p>
+     *
+     * <p>A found response always carries the reducer's authoritative snapshot:
+     * {@code CANCEL_REQUESTED} means accepted but still awaiting engine proof;
+     * {@code CANCELLED}/{@code TIMED_OUT} are terminal; another state means the
+     * request was found but this cancellation did not replace an earlier
+     * terminal or priority-preemption owner.</p>
+     */
+    @Override
+    public void cancel(FlexlbScheduleProtocol.FlexlbCancelRequestPB request,
+                       StreamObserver<FlexlbScheduleProtocol.FlexlbCancelResponsePB> responseObserver) {
+        FlexlbScheduleProtocol.FlexlbCancelResponsePB localResponse;
+        try {
+            localResponse = cancelLocally(request);
+        } catch (Exception error) {
+            Logger.error("FlexlbService.cancel error, request_id={}",
+                    request.getRequestId(), error);
+            try {
+                failCancel(
+                        Status.INTERNAL
+                                .withDescription("Cancellation reducer failed")
+                                .withCause(error),
+                        responseObserver);
+            } catch (Exception completionError) {
+                Logger.warn("FlexlbService.cancel error completion failed, request_id={}",
+                        request.getRequestId(), completionError);
+            }
+            return;
+        }
+
+        if (localResponse.getFound()
+                || request.getForwardHop() != 0
+                || !shouldForwardToMaster()) {
+            try {
+                completeCancel(localResponse, responseObserver);
+            } catch (Exception completionError) {
+                Logger.warn("FlexlbService.cancel response completion error, request_id={}",
+                        request.getRequestId(), completionError);
+            }
+            return;
+        }
+
+        AtomicBoolean completionClaimed = new AtomicBoolean(false);
+        try {
+            grpcForwarder.forwardCancelToMaster(request).whenComplete(
+                    (forwardResult, forwardError) -> handleCancelForwardCompletion(
+                            request,
+                            localResponse,
+                            responseObserver,
+                            completionClaimed,
+                            forwardResult,
+                            forwardError));
+        } catch (Exception error) {
+            failCancelOnce(
+                    request.getRequestId(),
+                    cancelForwardStatus(failureName(error), "", error),
+                    responseObserver,
+                    completionClaimed);
+        }
+    }
+
+    private void handleCancelForwardCompletion(
+            FlexlbScheduleProtocol.FlexlbCancelRequestPB request,
+            FlexlbScheduleProtocol.FlexlbCancelResponsePB localResponse,
+            StreamObserver<FlexlbScheduleProtocol.FlexlbCancelResponsePB> responseObserver,
+            AtomicBoolean completionClaimed,
+            FlexlbGrpcForwarder.CancelForwardResult forwardResult,
+            Throwable forwardError) {
+        try {
+            if (forwardError != null) {
+                failCancelOnce(
+                        request.getRequestId(),
+                        cancelForwardStatus(failureName(forwardError), "", forwardError),
+                        responseObserver,
+                        completionClaimed);
+                return;
+            }
+
+            FlexlbScheduleProtocol.FlexlbCancelResponsePB response =
+                    forwardResult == null ? null : forwardResult.response();
+            if (response != null) {
+                completeCancelOnce(
+                        request.getRequestId(), response, responseObserver, completionClaimed);
+                return;
+            }
+
+            if (forwardResult != null && !forwardResult.masterFound()) {
+                // No Master address was selected and no RPC was attempted.
+                completeCancelOnce(
+                        request.getRequestId(),
+                        localResponse,
+                        responseObserver,
+                        completionClaimed);
+                return;
+            }
+
+            // An attempted cancellation may already be committed by the
+            // Master. Never run the reducer locally after this point.
+            failCancelOnce(
+                    request.getRequestId(),
+                    cancelForwardStatus(
+                            forwardResult == null
+                                    ? "MISSING_RESULT"
+                                    : forwardResult.failure(),
+                            forwardResult == null
+                                    ? ""
+                                    : forwardResult.masterHost(),
+                            null),
+                    responseObserver,
+                    completionClaimed);
+        } catch (Exception error) {
+            failCancelOnce(
+                    request.getRequestId(),
+                    cancelForwardStatus(failureName(error), "", error),
+                    responseObserver,
+                    completionClaimed);
+        }
+    }
+
+    private FlexlbScheduleProtocol.FlexlbCancelResponsePB cancelLocally(
+            FlexlbScheduleProtocol.FlexlbCancelRequestPB request) {
+        RequestState snapshot = routeService.cancelRequest(
+                request.getRequestId(),
+                request.getBatchId(),
+                toCancelReason(request.getReason()));
+        FlexlbScheduleProtocol.FlexlbCancelResponsePB.Builder response =
+                FlexlbScheduleProtocol.FlexlbCancelResponsePB.newBuilder()
+                        .setFound(snapshot != null);
+        if (snapshot != null) {
+            response.setLifecycle(toLifecycleProto(snapshot));
+        }
+        return response.build();
+    }
+
+    private static CancelReason toCancelReason(
+            FlexlbScheduleProtocol.CancelReasonPB reason) {
+        return reason == FlexlbScheduleProtocol.CancelReasonPB
+                .CANCEL_REASON_DEADLINE_EXCEEDED
+                ? CancelReason.DEADLINE_EXCEEDED
+                : CancelReason.CLIENT_CANCELLED;
+    }
+
+    private void completeCancelOnce(
+            long requestId,
+            FlexlbScheduleProtocol.FlexlbCancelResponsePB response,
+            StreamObserver<FlexlbScheduleProtocol.FlexlbCancelResponsePB> responseObserver,
+            AtomicBoolean completionClaimed) {
+        if (!completionClaimed.compareAndSet(false, true)) {
+            return;
+        }
+        try {
+            completeCancel(response, responseObserver);
+        } catch (Exception error) {
+            Logger.warn("FlexlbService.cancel response completion error, request_id={}",
+                    requestId, error);
+        }
+    }
+
+    private static void completeCancel(
+            FlexlbScheduleProtocol.FlexlbCancelResponsePB response,
+            StreamObserver<FlexlbScheduleProtocol.FlexlbCancelResponsePB> responseObserver) {
+        responseObserver.onNext(response);
+        responseObserver.onCompleted();
+    }
+
+    private void failCancelOnce(
+            long requestId,
+            Status status,
+            StreamObserver<FlexlbScheduleProtocol.FlexlbCancelResponsePB> responseObserver,
+            AtomicBoolean completionClaimed) {
+        if (!completionClaimed.compareAndSet(false, true)) {
+            return;
+        }
+        try {
+            failCancel(status, responseObserver);
+        } catch (Exception error) {
+            Logger.warn("FlexlbService.cancel error completion failed, request_id={}",
+                    requestId, error);
+        }
+    }
+
+    private static void failCancel(
+            Status status,
+            StreamObserver<FlexlbScheduleProtocol.FlexlbCancelResponsePB> responseObserver) {
+        responseObserver.onError(status.asRuntimeException());
+    }
+
+    private static Status cancelForwardStatus(
+            String failure,
+            String masterHost,
+            Throwable error) {
+        Status source = error == null ? Status.UNAVAILABLE : Status.fromThrowable(error);
+        Status status = source.getCode() == Status.Code.UNKNOWN
+                || source.getCode() == Status.Code.OK
+                ? Status.UNAVAILABLE
+                : source;
+        String target = masterHost == null || masterHost.isBlank()
+                ? ""
+                : " at " + masterHost;
+        return status
+                .withDescription("Master cancellation failed" + target
+                        + " (" + failure + "); not retried locally")
+                .withCause(error);
+    }
+
     private CompletableFuture<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> routeLocally(BalanceContext ctx) {
         return routeService.route(ctx).thenApply(response -> {
             FlexlbScheduleProtocol.FlexlbScheduleResponsePB.Builder builder =
                     toProtoResponse(response).toBuilder();
-            RequestLifecycleSnapshot lifecycle = routeService.getRequestState(ctx.getRequestId(), 0);
+            RequestState lifecycle = routeService.getRequestState(ctx.getRequestId(), 0);
             if (lifecycle != null) {
                 builder.setLifecycle(toLifecycleProto(lifecycle));
             }
@@ -214,7 +658,8 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
     private void completeSchedule(BalanceContext ctx,
                                   FlexlbScheduleProtocol.FlexlbScheduleResponsePB response,
                                   StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer,
-                                  ScheduleOrigin origin) {
+                                  ScheduleOrigin origin,
+                                  String masterHost) {
         // Report ACK-to-response time for BATCH path (only when engine ACK was received)
         if (ctx != null && ctx.getAckAtMs() > 0) {
             long ackToResponseMs = System.currentTimeMillis() - ctx.getAckAtMs();
@@ -239,6 +684,19 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         try {
             observer.onNext(response);
             observer.onCompleted();
+        } catch (RuntimeException deliveryError) {
+            if (response.getSuccess() && ctx != null) {
+                if (ownsLocalRoute(origin)) {
+                    cancelUndeliveredRoute(ctx.getRequestId());
+                } else if (origin == ScheduleOrigin.FORWARDED_TO_MASTER) {
+                    reconcileForwardedRoute(
+                            ctx.getRequestId(),
+                            masterHost,
+                            FlexlbScheduleProtocol.CancelReasonPB
+                                    .CANCEL_REASON_CLIENT_CANCELLED);
+                }
+            }
+            throw deliveryError;
         } finally {
             try {
                 serverLatencyRecorder.recordCompletion(ctx, System.nanoTime());
@@ -250,8 +708,23 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         }
         if (ctx != null) {
             engineHealthReporter.reportBalancingService(ctx);
-            reportAutoTpmSchedule(ctx, response);
+            reportPrioritySchedule(ctx, response);
         }
+    }
+
+    private void cancelUndeliveredRoute(long requestId) {
+        try {
+            routeService.cancelRequest(requestId, 0L, CancelReason.CLIENT_CANCELLED);
+        } catch (Exception error) {
+            Logger.warn("FlexlbService.schedule cancellation failed, request_id={}",
+                    requestId, error);
+        }
+    }
+
+    private static boolean ownsLocalRoute(ScheduleOrigin origin) {
+        return origin == ScheduleOrigin.LOCAL_MASTER
+                || origin == ScheduleOrigin.LOCAL_FALLBACK
+                || origin == ScheduleOrigin.LOCAL_STANDALONE;
     }
 
     /** Write one PV record on the node that made the scheduling decision. */
@@ -288,27 +761,22 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
     }
 
     /**
-     * Auto-TPM Phase 0 observability: per-request one-line schedule log plus
-     * {@code auto_tpm.schedule.latency_ms}. Shared by the legacy path and the
-     * priority scheduler path (both funnel through completeSchedule).
+     * Per-request schedule summary plus
+     * {@code auto_tpm.schedule.latency_ms} for every scheduler mode.
      */
-    private void reportAutoTpmSchedule(BalanceContext ctx,
+    private void reportPrioritySchedule(BalanceContext ctx,
                                        FlexlbScheduleProtocol.FlexlbScheduleResponsePB response) {
         try {
             long now = System.currentTimeMillis();
             long latencyMs = now - ctx.getStartTime();
             boolean success = response.getSuccess();
             String result = success ? "success" : "error_" + response.getCode();
-            prioritySchedulerReporter.reportScheduleLatency(ctx.getPriority(), result, latencyMs);
+            requestSchedulerReporter.reportScheduleLatency(ctx.getPriority(), result, latencyMs);
             // Approximate TTFT: schedule-complete minus arrival, as seen by
             // FlexLB. The true TTFT (first token emitted by the engine) is not
             // observable here, so this proxy omits engine-side prefill
-            // execution time (task10 P2-8).
-            prioritySchedulerReporter.reportTtft(ctx.getPriority(), latencyMs);
-            if (ctx.getDeadlineMs() > 0 && now > ctx.getDeadlineMs()) {
-                prioritySchedulerReporter.reportDeadlineMiss(ctx.getPriority());
-            }
-
+            // execution time.
+            requestSchedulerReporter.reportTtft(ctx.getPriority(), latencyMs);
             String selectedPrefill = "";
             String selectedDecode = "";
             if (ctx.getResponse() != null && ctx.getResponse().getServerStatus() != null) {
@@ -320,23 +788,21 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
                     }
                 }
             }
-            // Metrics above stay always-on; the per-request log line drops to
-            // DEBUG when Auto-TPM is disabled to avoid INFO noise on the
-            // legacy path (task10 P2-7).
-            String logFormat = "[auto-tpm] request_id={} priority={} seq_len={} max_new_tokens={} "
-                    + "request_slo_ms={} deadline_ms={} schedule_attempt={} plan_type={} plan_cost={} "
+            // Keep request summaries at DEBUG while metrics remain always-on.
+            String logFormat = "[request-scheduler] request_id={} priority={} seq_len={} max_new_tokens={} "
+                    + "request_expires_at_ms={} plan_type={} plan_cost={} "
                     + "victim_count={} selected_prefill={} selected_decode={} failure_reason={} commit_result={}";
             Object[] logArgs = {
                     ctx.getRequestId(), ctx.getPriority(), ctx.getRequest().getSeqLen(),
                     ctx.getRequest().getMaxNewTokens(),
-                    ctx.getRequestSloMs(), ctx.getDeadlineMs(),
-                    ctx.getScheduleAttempt(), ctx.getPlanType(), ctx.getPlanCost(), ctx.getVictimCount(),
+                    ctx.getRequestExpiresAtMs(),
+                    ctx.getPlanType(), ctx.getPlanCost(), ctx.getVictimCount(),
                     selectedPrefill, selectedDecode,
                     success ? "" : response.getErrorMessage(),
                     result};
             Logger.debug(logFormat, logArgs);
         } catch (Exception e) {
-            Logger.debug("[auto-tpm] schedule observability report failed, request_id={}",
+            Logger.debug("[request-scheduler] schedule observability report failed, request_id={}",
                     ctx.getRequestId(), e);
         }
     }
@@ -347,9 +813,11 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
             cause = cause.getCause();
         }
         if (cause instanceof TimeoutException) {
-            return buildErrorResponse(8402, "NO_AVAILABLE_WORKER: schedule timeout");
+            return buildErrorResponse(
+                    StrategyErrorType.NO_PREFILL_WORKER.getErrorCode(),
+                    "NO_AVAILABLE_WORKER: schedule timeout");
         }
-        return buildErrorResponse(500,
+        return buildErrorResponse(StatusEnum.INTERNAL_ERROR.getCode(),
                 error.getMessage() != null ? error.getMessage() : "internal error");
     }
 
@@ -384,7 +852,12 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         request.setRequestId(pb.getRequestId());
         request.setBlockCacheKeys(pb.getBlockCacheKeysList());
         request.setSeqLen(pb.getSeqLen());
-        request.setGenerateTimeout(pb.getGenerateTimeout());
+        // Keep the wire values for transport compatibility and request
+        // observability. FlexLB scheduling expiration is owned by the QUEUE
+        // configuration below, not by the caller.
+        if (pb.getGenerateTimeout() > 0) {
+            request.setGenerateTimeout(pb.getGenerateTimeout());
+        }
         request.setRequestTimeMs(pb.getRequestTimeMs());
         request.setMaxNewTokens(pb.getMaxNewTokens());
         request.setNumBeams(pb.getNumBeams());
@@ -393,30 +866,29 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         request.setApiKey(pb.getApiKey());
         request.setCacheKeyBlockSize(pb.getCacheKeyBlockSize());
 
-        // Auto-TPM: construct the immutable ScheduleBudget in one shot —
-        // PriorityNormalizer.normalize + PrioritySloPolicy.requestSloMs +
-        // coarse deadline — and wire it onto the context.  normalize()
-        // always returns 1-100 (never NO_PRIORITY/0): a request carrying no
-        // priority gets the default (50) and participates in Auto-TPM at the
-        // normal level, so the budget is always constructed.
-        ScheduleBudget budget = ScheduleBudget.of(
+        var config = configService.loadBalanceConfig();
+        // QUEUE owns one absolute scheduling deadline, measured from FlexLB
+        // admission through delivery acknowledgement. DIRECT never queues and
+        // therefore has no scheduling timeout.
+        long requestExpiresAtMs = config.isQueue()
+                ? config.queueScheduler().resolveExpiresAtMs(ctx.getStartTime())
+                : Long.MAX_VALUE;
+        int defaultPriority = config.isPriorityOrdering()
+                ? config.priorityOrdering().getDefaultPriority()
+                : PriorityNormalizer.DEFAULT_PRIORITY;
+        SchedulingMetadata schedulingMetadata = SchedulingMetadata.of(
                 pb.getPriority(),
                 GrpcQosHeaderInterceptor.get(),
-                pb.getSeqLen(),
-                ctx.getStartTime(),
-                configService.loadBalanceConfig().getAutoTpmDefaultPriority(),
-                prioritySloPolicy);
-        request.setPriority(budget.priority());
+                requestExpiresAtMs,
+                defaultPriority);
+        request.setPriority(schedulingMetadata.priority());
         ctx.setRequest(request);
-        ctx.setBudget(budget);
-        prioritySchedulerReporter.reportRequest(budget.priority(),
-                prioritySloPolicy.bucketLabel(pb.getSeqLen()), budget.requestSloMs());
+        ctx.setSchedulingMetadata(schedulingMetadata);
+        requestSchedulerReporter.reportRequest(schedulingMetadata.priority());
 
         if (!pb.getGenerateInput().isEmpty()) {
-            ctx.setGenerateInputPbBytes(pb.getGenerateInput().toByteArray());
+            ctx.setGenerateInputPb(pb.getGenerateInput());
         }
-
-        ctx.setScheduleMode(configService.loadBalanceConfig().getDefaultScheduleModeEnum());
 
         // Capture gRPC server entry time from interceptor context for delay metric splitting
         Long grpcEntryTime = GrpcServerTimingInterceptor.get();
@@ -435,7 +907,10 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         FlexlbScheduleProtocol.FlexlbScheduleResponsePB.Builder builder =
                 FlexlbScheduleProtocol.FlexlbScheduleResponsePB.newBuilder();
         if (response == null) {
-            return builder.setSuccess(false).setCode(500).setErrorMessage("null response").build();
+            return builder.setSuccess(false)
+                    .setCode(StatusEnum.INTERNAL_ERROR.getCode())
+                    .setErrorMessage("null response")
+                    .build();
         }
         builder.setSuccess(response.isSuccess());
         builder.setCode(response.getCode());
@@ -482,8 +957,8 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
     }
 
     private boolean shouldForwardToMaster() {
-        return lbStatusConsistencyService.isNeedConsistency()
-                && !lbStatusConsistencyService.isMaster();
+        return masterElectService.isNeedConsistency()
+                && !masterElectService.isMaster();
     }
 
     private enum ScheduleOrigin {
@@ -496,7 +971,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
     }
 
     private static FlexlbScheduleProtocol.RequestLifecyclePB toLifecycleProto(
-            RequestLifecycleSnapshot snapshot) {
+            RequestState snapshot) {
         FlexlbScheduleProtocol.RequestLifecyclePB.Builder lifecycle =
                 FlexlbScheduleProtocol.RequestLifecyclePB.newBuilder()
                         .setRequestId(snapshot.requestId())

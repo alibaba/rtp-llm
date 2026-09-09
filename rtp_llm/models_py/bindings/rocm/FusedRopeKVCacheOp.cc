@@ -166,6 +166,16 @@ void updateKvCacheOffset(CKAttn& params, const torch::Tensor& kv_cache_block_id_
     const int   batch_size        = kv_cache_block_id_device.size(0);
     const int   max_blocks_per_bs = kv_cache_block_id_device.size(1);
     hipStream_t stream            = GET_CURRENT_STREAM();
+    TORCH_CHECK(batch_size <= params.kv_block_array.mMaxSeqs,
+                "runtime batch_size ",
+                batch_size,
+                " exceeds captured mMaxSeqs ",
+                params.kv_block_array.mMaxSeqs);
+    TORCH_CHECK(max_blocks_per_bs == params.kv_block_array.mMaxBlocksPerSeq,
+                "runtime max_blocks_per_bs ",
+                max_blocks_per_bs,
+                " must equal captured mMaxBlocksPerSeq ",
+                params.kv_block_array.mMaxBlocksPerSeq);
     invokeConvertOffsetToBlockArrayData(params.kv_cache_offset.data_ptr<int>(),
                                         kv_cache_block_id_device.data_ptr<int>(),
                                         batch_size,
@@ -561,6 +571,13 @@ torch::Tensor FusedRopeKVCacheDecodeOpBase::forward(const torch::Tensor&        
     bool   store_q     = true;
     bool   store_kv    = false;
     bool   store_cache = kv_cache.has_value();
+
+    // The decode kernel indexes one sequence length per token.
+    RTP_LLM_CHECK_WITH_INFO(token_num <= batch_size,
+                            "FusedRopeKVCacheDecodeOp: token_num=%d exceeds batch_size=%d, "
+                            "the kernel would index sequence_lengths out of range",
+                            token_num,
+                            batch_size);
 
     // Always use aiter_pa for ROCm
     hipStream_t stream_ = GET_CURRENT_STREAM();

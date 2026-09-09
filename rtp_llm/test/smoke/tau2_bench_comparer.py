@@ -1,4 +1,5 @@
 import glob
+import importlib.metadata
 import json
 import logging
 import os
@@ -18,12 +19,30 @@ TAU2_TARBALL_URL = os.environ.get(
     "TAU2_TARBALL_URL",
     "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/tau2-bench.tar.gz",
 )
+# Set by the dedicated smoke image (internal_source/cuda_arm_docker/
+# smoke_eval.Dockerfile), which bakes the tarball and preinstalls
+# evalscope/litellm/tau2. When it points at a populated directory the test
+# performs no network I/O: downloading a tarball from OSS inside a
+# merge-blocking job made the gate depend on bucket availability.
+TAU2_BENCH_HOME_ENV = "TAU2_BENCH_HOME"
+# Also set by that image: the tau2 domain data (task sets, policies, domain DBs,
+# user simulator guidelines) that evalscope's Tau2BenchAdapter otherwise fetches
+# with dataset_snapshot_download('evalscope/tau2-bench-data') on every run. That
+# call is the modelscope.cn ReadTimeoutError which killed 8 of 15 observed
+# failures of this job before it scored anything.
+TAU2_BENCH_DATA_DIR_ENV = "TAU2_BENCH_DATA_DIR"
 
 DEFAULT_THRESHOLD = 0.76
 DEFAULT_MODEL_ARG = "Qwen3-30B"
 DEFAULT_TASK_IDS_FILE = "passing_tasks.json"
 DEFAULT_SCRIPT_FILE = "run_tau2_bench.py"
 EVALSCOPE_PINNED_VERSION = "1.6.0"
+# tau2-bench only declares `litellm>=1.65.0`; its pdm.lock resolves 1.65.1, which
+# is the version the benchmark's reward numbers were established against. Left
+# unpinned, pip drags in whatever litellm is newest, and newer releases both drop
+# python 3.10 support and shift agent tool-calling behaviour enough to move the
+# score by double digits.
+LITELLM_PINNED_VERSION = "1.65.1"
 
 _REPORT_PATH_RE = re.compile(r"Dump report to:\s*(\S+\.json)")
 
@@ -39,9 +58,11 @@ class Tau2BenchComparer(BaseComparer):
         task_ids_file = self.qr_info.get("tau2_task_ids_file", DEFAULT_TASK_IDS_FILE)
         script_file = self.qr_info.get("tau2_script_file", DEFAULT_SCRIPT_FILE)
 
-        extract_root = self._download_and_extract(out_dir)
+        extract_root = self._prepare_tau2(out_dir)
         self._install_evalscope()
         self._install_tau2_from_tarball(extract_root)
+        self._install_litellm()
+        data_dir = self._prepare_tau2_data(extract_root)
         task_ids_path = self._resolve_task_ids_file(extract_root, task_ids_file)
         script_path = self._resolve_script_file(extract_root, script_file)
 
@@ -49,7 +70,14 @@ class Tau2BenchComparer(BaseComparer):
         port = int(self.server_manager.port)
         log_path = os.path.join(out_dir, "tau2_regression.log")
         stdout_text = self._run_tau2_script(
-            extract_root, script_path, model_arg, task_ids_path, host, port, log_path
+            extract_root,
+            script_path,
+            model_arg,
+            task_ids_path,
+            host,
+            port,
+            log_path,
+            data_dir,
         )
 
         report_path = self._resolve_report_path(stdout_text, extract_root)
@@ -133,6 +161,86 @@ class Tau2BenchComparer(BaseComparer):
         raise SmokeException(
             QueryStatus.OTHERS,
             f"no installable tau2 package (wheel/setup.py/pyproject.toml) found under {extract_root}",
+        )
+
+    def _install_litellm(self) -> None:
+        # Read the version through metadata, not `import litellm`: a litellm that
+        # is too new for this interpreter raises on import, which is exactly the
+        # case this pin exists to repair.
+        try:
+            current = importlib.metadata.version("litellm")
+        except importlib.metadata.PackageNotFoundError:
+            current = None
+        if current == LITELLM_PINNED_VERSION:
+            logging.info(f"[TAU2] litellm=={current} matches pinned, skip install")
+            return
+        logging.info(
+            f"[TAU2] litellm=={current} != pinned {LITELLM_PINNED_VERSION}, install pinned"
+        )
+        self._pip_install([f"litellm=={LITELLM_PINNED_VERSION}"])
+
+    def _prepare_tau2(self, work_dir: str) -> str:
+        """Return the tau2-bench root, preferring a copy baked into the image.
+
+        Falls back to downloading so environments without the prepared image
+        (open-source checkouts, local runs) keep working.
+        """
+        preinstalled = os.environ.get(TAU2_BENCH_HOME_ENV, "").strip()
+        if preinstalled and os.path.isdir(preinstalled) and os.listdir(preinstalled):
+            root = self._resolve_extract_root(preinstalled)
+            logging.info(f"[TAU2] using preinstalled tau2-bench at {root}")
+            return root
+        if preinstalled:
+            logging.warning(
+                f"[TAU2] {TAU2_BENCH_HOME_ENV}={preinstalled} is unset/empty on disk, "
+                f"falling back to download"
+            )
+        return self._download_and_extract(work_dir)
+
+    def _prepare_tau2_data(self, extract_root: str) -> Optional[str]:
+        """Return a local tau2 domain-data root, or None to let evalscope download it.
+
+        evalscope's Tau2BenchAdapter calls
+        ``dataset_snapshot_download('evalscope/tau2-bench-data')`` and exports the
+        result as ``TAU2_DATA_DIR`` unless its dataset id already resolves to an
+        existing path. That download is the modelscope.cn read timeout this job
+        kept dying on, so prefer anything local.
+        """
+        staged = os.environ.get(TAU2_BENCH_DATA_DIR_ENV, "").strip()
+        if staged and self._is_tau2_data_root(staged):
+            root = os.path.abspath(staged)
+            logging.info(f"[TAU2] using preinstalled tau2 domain data at {root}")
+            return root
+        if staged:
+            logging.warning(
+                f"[TAU2] {TAU2_BENCH_DATA_DIR_ENV}={staged} does not hold "
+                f"tau2/domains + tau2/user_simulator, looking elsewhere"
+            )
+
+        # The tarball ships the same data under <tau2-bench>/data: the tau2/
+        # subtree of the modelscope dataset is byte-identical to it. This is what
+        # keeps the modelscope fetch away on an image that only has
+        # TAU2_BENCH_HOME, and for open-source runs off the downloaded tarball.
+        in_tarball = os.path.join(extract_root, "data")
+        if self._is_tau2_data_root(in_tarball):
+            root = os.path.abspath(in_tarball)
+            logging.info(
+                f"[TAU2] using tau2 domain data shipped in the tarball: {root}"
+            )
+            return root
+
+        logging.warning(
+            "[TAU2] no local tau2 domain data found, evalscope will download it "
+            "from modelscope.cn"
+        )
+        return None
+
+    @staticmethod
+    def _is_tau2_data_root(path: str) -> bool:
+        """tau2 reads DATA_DIR/tau2/{domains,user_simulator}; both must be there."""
+        return all(
+            os.path.isdir(os.path.join(path, "tau2", sub))
+            for sub in ("domains", "user_simulator")
         )
 
     def _download_and_extract(self, work_dir: str) -> str:
@@ -223,6 +331,7 @@ class Tau2BenchComparer(BaseComparer):
         host: str,
         port: int,
         log_path: str,
+        data_dir: Optional[str] = None,
     ) -> str:
 
         cmd = [
@@ -240,6 +349,16 @@ class Tau2BenchComparer(BaseComparer):
         ]
         logging.info(f"[TAU2] running: {' '.join(cmd)} (cwd={extract_root})")
 
+        # Passed explicitly rather than inherited: bazel controls what reaches a
+        # test through --test_env, and a silently absent variable here means a
+        # modelscope download mid-benchmark.
+        env = os.environ.copy()
+        if data_dir:
+            env[TAU2_BENCH_DATA_DIR_ENV] = data_dir
+            # tau2 resolves its own data root from this at import time; evalscope
+            # sets it after downloading, so set it up front for the local case.
+            env["TAU2_DATA_DIR"] = data_dir
+
         captured: list = []
         with open(log_path, "w", encoding="utf-8") as log_fp:
             proc = subprocess.Popen(
@@ -249,6 +368,7 @@ class Tau2BenchComparer(BaseComparer):
                 stderr=subprocess.STDOUT,
                 bufsize=1,
                 universal_newlines=True,
+                env=env,
             )
             assert proc.stdout is not None
             for line in proc.stdout:

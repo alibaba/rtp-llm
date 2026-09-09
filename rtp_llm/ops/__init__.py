@@ -244,12 +244,16 @@ _ENGINE_SYMBOLS = {
     "RtpEmbeddingOp",
     "RtpLLMOp",
 }
+_RDMA_SYMBOLS = {"MMRdmaExporter"}
 _compute_ops_lock = threading.RLock()
 _compute_ops_loaded = False
 _compute_ops_error: Optional[BaseException] = None
 _engine_ops_lock = threading.RLock()
 _engine_ops_loaded = False
 _engine_ops_error: Optional[BaseException] = None
+_rdma_ops_lock = threading.RLock()
+_rdma_ops_loaded = False
+_rdma_ops_error: Optional[BaseException] = None
 
 
 def _set_compute_fallbacks() -> None:
@@ -300,11 +304,43 @@ def _load_compute_ops(required: bool = False) -> None:
         _compute_ops_loaded = True
 
 
+class DisabledMMRdmaExporter(EmptyClass):
+    """Stand-in for optional RDMA capability probes."""
+
+    @staticmethod
+    def available() -> bool:
+        return False
+
+    def enabled(self) -> bool:
+        return False
+
+
 def _set_engine_fallbacks() -> None:
     globals()["MultimodalInputCpp"] = EmptyClass
     globals()["EmbeddingCppOutput"] = EmptyClass
     globals()["RtpEmbeddingOp"] = EmptyClass
     globals()["RtpLLMOp"] = EmptyClass
+
+
+def _load_rdma_ops(required: bool = False) -> None:
+    global _rdma_ops_error, _rdma_ops_loaded
+    with _rdma_ops_lock:
+        if _rdma_ops_loaded:
+            if required and _rdma_ops_error is not None:
+                _raise_required_load_error("RDMA exporter", _rdma_ops_error)
+            return
+        try:
+            from libmm_rdma_exporter import MMRdmaExporter
+
+            globals()["MMRdmaExporter"] = MMRdmaExporter
+            _rdma_ops_error = None
+        except BaseException as e:
+            _rdma_ops_error = e
+            globals()["MMRdmaExporter"] = DisabledMMRdmaExporter
+            logging.warning("libmm_rdma_exporter could not be imported: %s", e)
+            if required:
+                _raise_required_load_error("RDMA exporter", e)
+        _rdma_ops_loaded = True
 
 
 def _load_engine_ops(required: bool = False) -> None:
@@ -351,6 +387,10 @@ def ensure_engine_ops_loaded() -> None:
     _load_engine_ops(required=True)
 
 
+def ensure_rdma_ops_loaded() -> None:
+    _load_rdma_ops(required=True)
+
+
 def __getattr__(name: str):
     if name in _COMPUTE_SYMBOLS:
         _load_compute_ops()
@@ -358,6 +398,10 @@ def __getattr__(name: str):
             return globals()[name]
     if name in _ENGINE_SYMBOLS:
         _load_engine_ops()
+        if name in globals():
+            return globals()[name]
+    if name in _RDMA_SYMBOLS:
+        _load_rdma_ops()
         if name in globals():
             return globals()[name]
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

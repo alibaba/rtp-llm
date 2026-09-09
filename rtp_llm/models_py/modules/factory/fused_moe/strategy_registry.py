@@ -76,6 +76,14 @@ class StrategyRegistry:
                 if config.model_config.quant_config is not None
                 else None
             )
+            # Strategies dropped by can_handle() for an unimportable router or
+            # executor record why. Surface it: otherwise this reads as a config
+            # problem when the real cause is a missing dependency.
+            skipped = [
+                f"{s.__class__.__name__}: {s.skip_reason}"
+                for s in self._strategies
+                if getattr(s, "skip_reason", None)
+            ]
             logger.error(
                 f"No suitable MOE strategy found. Config details: "
                 f"quant_config={config.model_config.quant_config}, "
@@ -83,6 +91,7 @@ class StrategyRegistry:
                 f"world_size={config.world_size}, "
                 f"tp_size={config.tp_size}, "
                 f"use_deepep_low_latency={config.moe_config.use_deepep_low_latency if config.moe_config else False}"
+                + (f", skipped_for_missing_deps={skipped}" if skipped else "")
             )
             if quant_method == "W8A8_INT8_PER_CHANNEL_COMPRESSED":
                 raise ValueError(
@@ -90,6 +99,13 @@ class StrategyRegistry:
                     "no registered MOE compute backend can consume them; install "
                     "or register a backend with W8A8 INT8 per-channel execution "
                     "support"
+                )
+            if skipped:
+                raise ValueError(
+                    "No suitable MOE strategy found: every candidate was skipped "
+                    "because its router/executor could not be imported, so this is "
+                    "a missing-dependency problem rather than a configuration one. "
+                    f"Skipped: {skipped}"
                 )
             raise ValueError(
                 f"No suitable MOE strategy found for configuration. "

@@ -1109,7 +1109,7 @@ class AttentionFP8(nn.Module):
             beta_fast,
             beta_slow,
         )
-        # Phase G: plain attr (not register_buffer).  `reset_rope_cache(device)`
+        # Phase G: plain attr (not register_buffer).  `init_rope_cache(device)`
         # recomputes + moves to the real device after meta-to-device
         # materialization — that's the authoritative placement path; no
         # automatic `.to(device)` semantics needed.
@@ -1864,13 +1864,13 @@ class AttentionFP8(nn.Module):
             return None
         return torch.cat([swa_dense, cmp_dense], dim=1)
 
-    def reset_rope_cache(self, device=None):
+    def init_rope_cache(self, device=None):
         """Recompute `freqs_cis` on the actual device — MUST be called after
         `model.to_empty(device=...)` since meta-tensor construction leaves the
         cached freqs as zeros. Pass ``device`` so the memoized
         ``precompute_freqs_cis`` returns the shared (params, device) tensor;
         all layers with identical rope params now point at the same object,
-        which lets the downstream cos_sin_cache dedupe by ``id()``."""
+        which lets compressors share one prebuilt cos_sin_cache."""
         freqs_cis = precompute_freqs_cis(
             self._rope_dim,
             self._rope_max_seq_len,
@@ -1883,19 +1883,12 @@ class AttentionFP8(nn.Module):
         )
         self.freqs_cis = freqs_cis
 
-        # Clear compressor / indexer bound references so they rebind on next forward.
-        def clear_compressor_rope_cache(compressor: Any) -> None:
-            compressor.freqs_cis = None
-            compressor._cos_sin_cache = None
-            compressor._cos_sin_cache_device = None
-            compressor._cos_sin_cache_key = None
-
         if self.compressor is not None:
-            clear_compressor_rope_cache(self.compressor)
+            self.compressor.init_rope_cache(freqs_cis)
         if self.indexer is not None:
-            self.indexer.freqs_cis = None
+            self.indexer.freqs_cis = freqs_cis
             if self.indexer.compressor is not None:
-                clear_compressor_rope_cache(self.indexer.compressor)
+                self.indexer.compressor.init_rope_cache(freqs_cis)
 
     def _get_fp8_decode_op(self):
         """Lazy-build the persistent ``SparseAttnV4DecodeFp8Op`` so its
@@ -4427,9 +4420,15 @@ class AttentionFP8(nn.Module):
             P_per_req = torch.clamp_max(sp_i32, win - 1)  # [B]
             gather_len_per_req = S_i32 + P_per_req  # [B]
 
-            # Single .item() sync — stack two scalars then one D2H tolist().
-            maxes = torch.stack([N_per_req.max(), gather_len_per_req.max()])
-            N_max, gather_len_max = (int(v) for v in maxes.tolist())
+            # One existing metadata D2H: include the compressed-token total used
+            # to validate fused restore geometry instead of adding a per-layer
+            # ``seq_lens.sum().item()`` synchronization in the reader.
+            host_geometry = torch.stack(
+                [N_per_req.max(), gather_len_per_req.max(), N_per_req.sum()]
+            )
+            N_max, gather_len_max, total_cmp_tokens = (
+                int(v) for v in host_geometry.tolist()
+            )
             N = N_max
             M = N_max + gather_len_max
 
@@ -4525,6 +4524,9 @@ class AttentionFP8(nn.Module):
             per_req_total_kv_lens=per_req_total_kv_lens,
             block_size=cmp_eb if cmp_eb > 0 else None,
             owner_block_size=cmp_owner_block_size,
+            total_kv_len=(
+                total_cmp_tokens if per_req_total_kv_lens is not None else None
+            ),
         )
 
         # Layer-invariant gate for the raw-q-merge alternative path. Compute
@@ -5513,3 +5515,134 @@ class AttentionFP8(nn.Module):
         with record_function_range("dsv4.fp8.attn.out.wo_b"):
             wo_b_in = o_proj.flatten(2).reshape(seqlen, -1)
             self.wo_b(wo_b_in, out=out)
+
+
+class CommitOnlyAttentionFP8(AttentionFP8):
+    """Minimal SWA attention state required by DSpARK's commit path."""
+
+    def __init__(
+        self,
+        layer_id: int,
+        dim: int,
+        n_heads: int,
+        q_lora_rank: int,
+        head_dim: int,
+        rope_head_dim: int,
+        o_lora_rank: int,
+        o_groups: int,
+        window_size: int,
+        compress_ratio: int,
+        compress_rope_theta: float,
+        rope_theta: float,
+        rope_factor: float,
+        beta_fast: int,
+        beta_slow: int,
+        original_seq_len: int,
+        max_batch_size: int,
+        max_seq_len: int,
+        index_n_heads: int,
+        index_head_dim: int,
+        index_topk: int,
+        norm_eps: float = 1e-6,
+        layer_weights: Optional[Dict[str, torch.Tensor]] = None,
+        tp_size: int = 1,
+        tp_rank: int = 0,
+    ):
+        del compress_rope_theta, original_seq_len, max_batch_size, index_topk
+        if layer_weights is None:
+            raise ValueError("commit-only DSpARK attention requires layer weights")
+        if int(compress_ratio) != 0:
+            raise ValueError(
+                "commit-only DSpARK attention supports SWA layers only, got "
+                f"compress_ratio={compress_ratio}"
+            )
+
+        # Avoid the full constructor: proposal Q/O projections, compressor,
+        # indexer, and their caches are unreachable from forward_commit.
+        nn.Module.__init__(self)
+        self.layer_id = int(layer_id)
+        self.dim = int(dim)
+        self.q_lora_rank = int(q_lora_rank)
+        self.o_lora_rank = int(o_lora_rank)
+        self.head_dim = int(head_dim)
+        self.rope_head_dim = int(rope_head_dim)
+        self.window_size = int(window_size)
+        self.compress_ratio = 0
+        self.eps = float(norm_eps)
+        self.softmax_scale = self.head_dim**-0.5
+        self.tp_size = int(tp_size)
+        self.tp_rank = int(tp_rank)
+        if self.tp_size <= 0:
+            raise ValueError(f"invalid attention tp_size={self.tp_size}")
+        if int(n_heads) % self.tp_size:
+            raise ValueError(
+                f"n_heads={n_heads} is not divisible by tp_size={self.tp_size}"
+            )
+        if int(o_groups) % self.tp_size:
+            raise ValueError(
+                f"o_groups={o_groups} is not divisible by tp_size={self.tp_size}"
+            )
+        self.n_heads = int(n_heads) // self.tp_size
+        self.n_groups = int(o_groups) // self.tp_size
+
+        from rtp_llm.utils.model_weight import W
+
+        self.wkv = _v4_fp8_linear(
+            layer_weights[W.v4_attn_wkv_w], layer_weights[W.v4_attn_wkv_s]
+        )
+        self.kv_norm = layer_weights[W.v4_attn_kv_norm]
+
+        self.attn_sink = None
+        self.wq_a = None
+        self.wq_b = None
+        self.wo_a_w = None
+        self.wo_a_s = None
+        self.wo_b = None
+        self.q_norm = None
+        self.compressor = None
+        self.indexer = None
+
+        self._rope_base = float(rope_theta)
+        self._rope_o_seq_len = 0
+        self._rope_factor = float(rope_factor)
+        self._rope_beta_fast = int(beta_fast)
+        self._rope_beta_slow = int(beta_slow)
+        self._rope_dim = int(rope_head_dim)
+        self._rope_max_seq_len = int(max_seq_len)
+        self.freqs_cis = precompute_freqs_cis(
+            self._rope_dim,
+            self._rope_max_seq_len,
+            self._rope_o_seq_len,
+            self._rope_base,
+            self._rope_factor,
+            self._rope_beta_fast,
+            self._rope_beta_slow,
+        )
+        self._fp8_decode_op: Optional[Any] = None
+        self._cp_ctx: Optional[CPContext] = None
+        self._prefill_meta_shared: Optional["PrefillMeta"] = None
+        self._kv_cache: Optional[Any] = None
+        self._block_tables_by_type: Optional[Dict[str, torch.Tensor]] = None
+
+        from rtp_llm.models_py.modules.dsv4.kv_cache_utils import (
+            CSA_KV,
+            CSA_STATE,
+            HCA_KV,
+            HCA_STATE,
+            INDEXER_KV,
+            INDEXER_STATE,
+            SWA_KV,
+        )
+
+        idx_hd = int(index_head_dim)
+        kv_spec = (torch.uint8, _DSV4_FP8_KV_ENTRY_BYTES)
+        indexer_kv_spec = (torch.uint8, _DSV4_FP8_INDEXER_ENTRY_BYTES)
+        self._pool_spec: Dict[str, tuple] = {
+            SWA_KV: kv_spec,
+            CSA_KV: kv_spec,
+            HCA_KV: kv_spec,
+            INDEXER_KV: indexer_kv_spec,
+            CSA_STATE: (torch.float32, 4 * self.head_dim),
+            HCA_STATE: (torch.float32, 2 * self.head_dim),
+            INDEXER_STATE: (torch.float32, 4 * idx_hd),
+        }

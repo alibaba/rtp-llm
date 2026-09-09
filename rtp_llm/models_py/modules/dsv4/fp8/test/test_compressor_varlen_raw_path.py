@@ -70,8 +70,8 @@ def _build_compressor(
         cmp._wkv_wgate_fused = cmp._wkv_wgate_fused.to(DEVICE)
     if cmp.ape.device.type != "cuda":
         cmp.ape = torch.nn.Parameter(cmp.ape.data.to(DEVICE), requires_grad=False)
-    cmp.freqs_cis = torch.ones(
-        4096, rope_head_dim // 2, dtype=torch.complex64, device=DEVICE
+    cmp.init_rope_cache(
+        torch.ones(4096, rope_head_dim // 2, dtype=torch.complex64, device=DEVICE)
     )
     return cmp
 

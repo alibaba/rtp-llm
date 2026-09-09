@@ -38,14 +38,19 @@ from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
 from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
 from rtp_llm.models_py.modules.dsv4.cp import (
     CPContext,
+    cp_actual_owned_kv_len,
     cp_actual_owned_kv_lens,
+    cp_padded_local_kv_len,
     cp_padded_local_kv_lens,
 )
 from rtp_llm.models_py.modules.dsv4.fp8._swa_dequant_triton import (
     ENTRY_BYTES,
+    cp_direct_flat_pack_enabled,
     dequantize_and_gather_k_cache,
     dequantize_packed_k_cache_flat,
     gather_k_cache_packed,
+    try_gather_k_cache_packed_to_flat,
+    try_restore_dequantize_scatter_packed_k_cache_flat,
 )
 
 
@@ -119,6 +124,7 @@ class CPShardConfig:
     block_size: int
     total_local_kv: int
     owner_block_size: int = 0
+    seq_lens_total: Optional[int] = None
     local_seq_lens_padded: Optional[torch.Tensor] = None
     local_seq_lens_actual: Optional[torch.Tensor] = None
     max_local_seq_len_padded: int = 0
@@ -127,6 +133,21 @@ class CPShardConfig:
     def __post_init__(self) -> None:
         owner_block_size = int(self.owner_block_size or self.block_size)
         self.owner_block_size = owner_block_size
+        if self.seq_lens_total is None:
+            # Legacy/test callers may not carry the independently computed host
+            # total. The restore shape is still a safe host-side fallback.
+            self.seq_lens_total = int(self.restore_indices.numel())
+        else:
+            self.seq_lens_total = int(self.seq_lens_total)
+        if self.seq_lens_total < 0:
+            raise ValueError(
+                f"seq_lens_total must be non-negative, got {self.seq_lens_total}"
+            )
+        if int(self.restore_indices.numel()) != self.seq_lens_total:
+            raise ValueError(
+                f"restore_indices rows ({self.restore_indices.numel()}) != host "
+                f"seq_lens total ({self.seq_lens_total})"
+            )
 
         device = self.per_req_total_kv_lens.device
         if self.local_seq_lens_padded is None:
@@ -167,10 +188,12 @@ class CPShardConfig:
 
 @dataclass
 class CPShardedPoolReadHandle:
+    local_flat: torch.Tensor
     gathered: torch.Tensor
     work: Any
     completion_event: torch.cuda.Event
     stream: torch.cuda.Stream
+    producer_stream: torch.cuda.Stream
     out: torch.Tensor
     seq_lens: torch.Tensor
     offset: int
@@ -269,7 +292,6 @@ class CPShardedPoolReader(CompressedKPoolReader):
 
         current_stream = torch.cuda.current_stream(device)
         stream.wait_stream(current_stream)
-        local_flat.record_stream(stream)
         with torch.cuda.stream(stream):
             gathered = torch.empty(
                 (world_size * int(local_flat.shape[0]), ENTRY_BYTES),
@@ -293,13 +315,16 @@ class CPShardedPoolReader(CompressedKPoolReader):
                 # caller never sees the pending handle, so nothing else
                 # would wait it.
                 work.wait()
+                current_stream.wait_stream(stream)
                 raise
 
         return CPShardedPoolReadHandle(
+            local_flat=local_flat,
             gathered=gathered,
             work=work,
             completion_event=completion_event,
             stream=stream,
+            producer_stream=current_stream,
             out=out,
             seq_lens=seq_lens,
             offset=offset,
@@ -328,8 +353,6 @@ class CPShardedPoolReader(CompressedKPoolReader):
                 "dsv4.cp.all_gather.pool_reader.gather_cmp.wait_work"
             ):
                 self._wait_fill_work_once(handle)
-            handle.gathered.record_stream(stream)
-            handle.out.record_stream(stream)
             try:
                 self._restore_dequant_scatter(
                     handle.gathered,
@@ -338,16 +361,22 @@ class CPShardedPoolReader(CompressedKPoolReader):
                     handle.offset,
                 )
             finally:
-                handle.done_event = torch.cuda.Event()
-                handle.done_event.record(stream)
+                try:
+                    handle.done_event = torch.cuda.Event()
+                    handle.done_event.record(stream)
+                except Exception:
+                    stream.synchronize()
+                    raise
 
     def wait_fill_async(self, handle: CPShardedPoolReadHandle) -> None:
         done_event = handle.done_event
         current_stream = torch.cuda.current_stream(handle.out.device)
+        terminal_event = done_event or handle.completion_event
+        current_stream.wait_event(terminal_event)
+        if handle.producer_stream != current_stream:
+            handle.producer_stream.wait_event(terminal_event)
         if done_event is not None:
-            current_stream.wait_event(done_event)
-        else:
-            current_stream.wait_event(handle.completion_event)
+            handle.stream.wait_event(done_event)
         self._wait_fill_work_once(handle)
 
     def discard_fill_async(self, handle: CPShardedPoolReadHandle) -> None:
@@ -402,6 +431,23 @@ class CPShardedPoolReader(CompressedKPoolReader):
             local_seq_lens_padded = local_seq_lens_padded.to(device=device)
         if local_seq_lens_actual.device != device:
             local_seq_lens_actual = local_seq_lens_actual.to(device=device)
+        if cp_direct_flat_pack_enabled():
+            local_flat = torch.empty(
+                (cfg.total_local_kv, ENTRY_BYTES),
+                dtype=torch.uint8,
+                device=device,
+            )
+            if try_gather_k_cache_packed_to_flat(
+                local_flat,
+                k_cache,
+                block_table,
+                local_seq_lens_padded,
+                local_seq_lens_actual,
+                block_size=block_size,
+                has_actual_tokens=bool(cfg.has_local_seq_len_actual),
+            ):
+                return local_flat
+
         # Use the rank's existing block_table directly — Stage 5a guarantees
         # block_table[r, :] holds this rank's local entries in compact form.
         # zeros() (not empty()) so the [actual, padded) tail of each request
@@ -442,7 +488,22 @@ class CPShardedPoolReader(CompressedKPoolReader):
     ) -> None:
         cfg = self.cfg
         D = out.shape[-1]
+        if int(seq_lens.numel()) != int(cfg.per_req_total_kv_lens.numel()):
+            raise ValueError(
+                f"restore seq_lens batch ({seq_lens.numel()}) != configured batch "
+                f"({cfg.per_req_total_kv_lens.numel()})"
+            )
         with record_function_range("dsv4.cp.all_gather.pool_reader.gather_cmp.restore"):
+            if try_restore_dequantize_scatter_packed_k_cache_flat(
+                out,
+                gathered,
+                cfg.restore_indices,
+                seq_lens,
+                offset,
+                seq_lens_total=int(cfg.seq_lens_total),
+            ):
+                return
+
             restored_packed = gathered[cfg.restore_indices].contiguous()
 
             # Step 5: dequant locally after communication. This keeps NCCL payload
@@ -476,7 +537,9 @@ def _pack_padded_to_flat(
     if B == 1:
         return padded[0, :total, :].contiguous()
     b_idx = torch.repeat_interleave(
-        torch.arange(B, device=device, dtype=torch.int64), lens_l
+        torch.arange(B, device=device, dtype=torch.int64),
+        lens_l,
+        output_size=total,
     )
     cu_starts = torch.zeros(B, device=device, dtype=torch.int64)
     if B > 1:
@@ -506,7 +569,9 @@ def _scatter_flat_to_workspace(
         out[0, offset : offset + total, :].copy_(restored)
         return
     b_idx = torch.repeat_interleave(
-        torch.arange(B, device=device, dtype=torch.int64), seq_lens_l
+        torch.arange(B, device=device, dtype=torch.int64),
+        seq_lens_l,
+        output_size=total,
     )
     cu_starts = torch.zeros(B, device=device, dtype=torch.int64)
     if B > 1:
@@ -525,6 +590,7 @@ def make_compressed_k_pool_reader(
     per_req_total_kv_lens: Optional[torch.Tensor] = None,
     block_size: Optional[int] = None,
     owner_block_size: Optional[int] = None,
+    total_kv_len: Optional[int] = None,
 ) -> CompressedKPoolReader:
     """Pick the right reader for this prefill iteration.
 
@@ -543,7 +609,10 @@ def make_compressed_k_pool_reader(
             "block_size; got None. Pass torch.zeros(B, dtype=int64) only when "
             "this iteration has no compressed-K rows to restore."
         )
-    if not torch.any(per_req_total_kv_lens > 0):
+    if total_kv_len is not None:
+        if int(total_kv_len) <= 0:
+            return LocalPoolReader()
+    elif not torch.any(per_req_total_kv_lens > 0):
         return LocalPoolReader()
     # Lazy import to avoid circular: cp.py imports nothing from here.
     from rtp_llm.models_py.modules.dsv4.cp import build_kv_allgather_restore_indices
@@ -552,27 +621,54 @@ def make_compressed_k_pool_reader(
     owner_bs = int(owner_block_size or block_size)
     if owner_bs <= 0:
         raise ValueError(f"owner_block_size must be positive, got {owner_bs}")
-    restore = build_kv_allgather_restore_indices(
-        per_req_total_kv_lens, cp_ctx.cp_size, owner_bs, device
-    )
-    local_lens = cp_padded_local_kv_lens(
-        per_req_total_kv_lens, cp_ctx.cp_size, owner_bs
-    )
-    local_actual_lens = cp_actual_owned_kv_lens(
-        per_req_total_kv_lens, cp_ctx.cp_size, owner_bs, cp_ctx.cp_rank
-    )
-    # Host scalars are needed to size the per-layer flat gather buffers. Keep
-    # these syncs in metadata construction; the read/restore hot path below must
-    # stay kernel-only aside from the single NCCL wait.
-    total_local = int(local_lens.sum().item())
-    if not local_lens.numel():
-        max_local = 0
-    elif local_lens.numel() == 1:
+    batch_size = int(per_req_total_kv_lens.numel())
+    if batch_size == 1 and total_kv_len is not None:
+        total_local = cp_padded_local_kv_len(
+            int(total_kv_len), cp_ctx.cp_size, owner_bs
+        )
         max_local = total_local
+        actual_local = cp_actual_owned_kv_len(
+            int(total_kv_len),
+            cp_ctx.cp_size,
+            owner_bs,
+            cp_ctx.cp_rank,
+        )
+        has_actual = actual_local > 0
+        local_lens = torch.full(
+            (1,), total_local, dtype=torch.int32, device=device
+        )
+        local_actual_lens = torch.full(
+            (1,), actual_local, dtype=torch.int32, device=device
+        )
     else:
-        max_local = int(local_lens.max().item())
-    has_actual = (
-        int(local_actual_lens.max().item()) > 0 if local_actual_lens.numel() else False
+        local_lens = cp_padded_local_kv_lens(
+            per_req_total_kv_lens, cp_ctx.cp_size, owner_bs
+        ).to(device=device, dtype=torch.int32)
+        local_actual_lens = cp_actual_owned_kv_lens(
+            per_req_total_kv_lens, cp_ctx.cp_size, owner_bs, cp_ctx.cp_rank
+        ).to(device=device, dtype=torch.int32)
+        # Host scalars are needed to size the per-layer flat gather buffers. Keep
+        # these syncs in metadata construction; the read/restore hot path below must
+        # stay kernel-only aside from the single NCCL wait.
+        total_local = int(local_lens.sum().item())
+        if not local_lens.numel():
+            max_local = 0
+        elif local_lens.numel() == 1:
+            max_local = total_local
+        else:
+            max_local = int(local_lens.max().item())
+        has_actual = (
+            int(local_actual_lens.max().item()) > 0
+            if local_actual_lens.numel()
+            else False
+        )
+    restore = build_kv_allgather_restore_indices(
+        per_req_total_kv_lens,
+        cp_ctx.cp_size,
+        owner_bs,
+        device,
+        total_kv_len=total_kv_len,
+        total_local_kv=total_local,
     )
     return CPShardedPoolReader(
         CPShardConfig(
@@ -582,6 +678,11 @@ def make_compressed_k_pool_reader(
             block_size=block_size,
             total_local_kv=total_local,
             owner_block_size=owner_bs,
+            seq_lens_total=(
+                int(total_kv_len)
+                if total_kv_len is not None
+                else int(restore.numel())
+            ),
             local_seq_lens_padded=local_lens,
             local_seq_lens_actual=local_actual_lens,
             max_local_seq_len_padded=max_local,

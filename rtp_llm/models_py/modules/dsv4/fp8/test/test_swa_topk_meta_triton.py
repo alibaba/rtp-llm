@@ -117,6 +117,18 @@ class SwaTopkMetaTritonTest(unittest.TestCase):
     def test_cuda_large_window(self):
         self._check(128, [4096], [1024], device=torch.device("cuda"))
 
+    @unittest.skipIf(not torch.cuda.is_available(), "CUDA not available")
+    def test_cuda_host_resident_meta(self):
+        cuda = torch.device("cuda")
+        pos, req_id, cu = _flat_positions([0, 7], [5, 9], cuda)
+        prefix = torch.tensor([0, 7], dtype=torch.int32)
+        got_topk, got_len = _swa_ops.compute_window_topk_and_length_varlen(
+            16, cu.cpu(), pos, prefix, req_id.cpu()
+        )
+        ref_topk, ref_len = _reference(16, cu, pos, prefix.to(cuda), req_id)
+        self.assertTrue(torch.equal(got_topk.cpu(), ref_topk.cpu()))
+        self.assertTrue(torch.equal(got_len.cpu(), ref_len.cpu()))
+
     def _check_slot_in_flat(self, prefix_lengths, input_lengths, *, device):
         pos, req_id, _cu = _flat_positions(prefix_lengths, input_lengths, device)
         prefix = torch.tensor(prefix_lengths, dtype=torch.int32, device=device)

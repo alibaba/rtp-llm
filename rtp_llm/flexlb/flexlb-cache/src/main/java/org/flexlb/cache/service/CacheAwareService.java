@@ -20,10 +20,13 @@ public interface CacheAwareService {
      *
      * @param blockCacheKeys List of cache block IDs to query
      * @param roleType       Engine role to query
-     * @param group          Engine group to query
+     * @param candidateEngineIpPorts exact live candidate addresses
      * @return Engine matching result map, key: engineIpPort, value: prefixMatchLength
      */
-    Map<String/*engineIpPort*/, Integer/*prefixMatchLength*/> findMatchingEngines(List<Long> blockCacheKeys, RoleType roleType, String group);
+    Map<String/*engineIpPort*/, Integer/*prefixMatchLength*/> findMatchingEngines(
+            List<Long> blockCacheKeys,
+            RoleType roleType,
+            List<String> candidateEngineIpPorts);
     
     /**
      * Update engine block KV cache status
@@ -32,4 +35,13 @@ public interface CacheAwareService {
      * @return Update result
      */
     WorkerCacheUpdateResult updateEngineBlockCache(WorkerStatus workerStatus);
+
+    /**
+     * Remove every cached block associated with one engine address.
+     *
+     * <p>Callers must fence the address against generation replacement before
+     * invoking this method. The cache index is address based and therefore
+     * cannot distinguish two worker generations by itself.
+     */
+    void removeEngineBlockCache(String engineIpPort);
 }

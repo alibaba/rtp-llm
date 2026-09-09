@@ -88,3 +88,10 @@ cc_test(
         "TEST_USING_DEVICE": "CUDA",
     },
 )
+
+cc_test(
+    name = "torch_cuda_oom_test",
+    srcs = ["TorchCudaOomTest.cc"],
+    copts = copts(),
+    deps = google_test_deps + ["//rtp_llm/cpp/utils:torch_cuda_oom"],
+)

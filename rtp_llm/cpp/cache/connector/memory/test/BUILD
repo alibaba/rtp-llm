@@ -35,7 +35,7 @@ cc_test(
         "//rtp_llm/cpp/cache/connector/memory/test/mock:test_rpc_service_lib",
     ],
     env = {},
-    exec_properties = {'gpu':'H20'},
+    exec_properties = {'gpu':'A10'},
 )
 
 cc_test(
@@ -60,7 +60,7 @@ cc_test(
         "@local_config_cuda//cuda:cudart",
     ] + torch_deps(),
     env = {},
-    exec_properties = {'gpu':'H20'},
+    exec_properties = {'gpu':'A10'},
 )
 
 cc_test(
@@ -74,7 +74,7 @@ cc_test(
         "//rtp_llm/cpp/cache/connector/memory:memory_connector",
     ],
     env = {},
-    exec_properties = {'gpu':'H20'},
+    exec_properties = {'gpu':'A10'},
 )
 
 cc_test(
@@ -88,7 +88,7 @@ cc_test(
         "//rtp_llm/cpp/cache/connector/memory:memory_connector",
     ],
     env = {},
-    exec_properties = {'gpu':'H20'},
+    exec_properties = {'gpu':'A10'},
 )
 
 cc_test(
@@ -102,7 +102,7 @@ cc_test(
         "//rtp_llm/cpp/cache/connector/memory:memory_connector",
     ],
     env = {},
-    exec_properties = {'gpu':'H20'},
+    exec_properties = {'gpu':'A10'},
 )
 
 cc_test(
@@ -116,7 +116,7 @@ cc_test(
         "//rtp_llm/cpp/cache/connector/memory:memory_connector",
     ],
     env = {},
-    exec_properties = {'gpu':'H20'},
+    exec_properties = {'gpu':'A10'},
 )
 
 cc_test(
@@ -130,5 +130,5 @@ cc_test(
         "//rtp_llm/cpp/cache/connector/memory:memory_connector",
     ],
     env = {},
-    exec_properties = {'gpu':'H20'},
+    exec_properties = {'gpu':'A10'},
 )

@@ -2,7 +2,6 @@ package org.flexlb.mock;
 
 import io.grpc.stub.StreamObserver;
 import org.flexlb.engine.grpc.EngineRpcService;
-import org.flexlb.engine.grpc.RoleTypeProtoConverter;
 import org.flexlb.engine.grpc.RpcServiceGrpc;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -148,8 +147,6 @@ public class MockRpcService extends RpcServiceGrpc.RpcServiceImplBase {
 
         EngineRpcService.WorkerStatusPB.Builder builder = EngineRpcService.WorkerStatusPB.newBuilder()
                 .setAlive(true)
-                .setRole(RoleTypeProtoConverter.toLegacyWorkerStatusString(
-                        RoleTypeProtoConverter.fromProto(beh.getRoleType())))
                 .setRoleType(beh.getRoleType())
                 .setAvailableConcurrency(beh.getAvailableConcurrency())
                 .setAvailableKvCache(beh.getAvailableKvCache())
