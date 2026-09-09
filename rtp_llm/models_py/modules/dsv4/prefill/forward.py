@@ -95,6 +95,7 @@ Padding-token slots are nulled via ``cp_info.prefill_qkv_padding_mask``.
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from contextlib import nullcontext
 from typing import TYPE_CHECKING, Any, Callable, Dict, Optional, Tuple
 
@@ -296,6 +297,7 @@ def forward_layers(
     cu_seqlens: torch.Tensor,  # [B+1] int64 — request boundaries
     block_tables_by_type: Optional[Dict[str, torch.Tensor]],
     attn_inputs: Optional[PyAttentionInputs] = None,
+    attention_inputs: Any = None,
     prepare_hidden_fn: Optional[Any] = None,
 ) -> torch.Tensor:
     """Flat per-layer loop — vLLM-aligned layout.
@@ -325,6 +327,27 @@ def forward_layers(
     owned KV regions are registered with the PD-disagg cache_store immediately
     after that layer's forward.
     """
+    # Allocate the max-sized workspace before CP metadata, embedding, or any
+    # other forward-local CUDA tensor. If embedding lands in the cached block
+    # first, it can split the only contiguous region large enough for this
+    # allocation and force the expandable allocator to map another region.
+    ws: Optional[PrefillWorkspace] = None
+    if v4.fp8_kv_cache:
+        reserve_cp = (
+            getattr(v4, "_cp_info", None) is not None
+            and int(getattr(v4, "_cp_size", 1)) > 1
+            and int(v4._prefill_ws_full_rows) > 0
+        )
+        ws = PrefillWorkspace(
+            input_ids.device,
+            q_rows=v4._prefill_ws_q_rows,
+            q_dim=v4._prefill_ws_q_dim,
+            reserve_cp=reserve_cp,
+            cp_rows=v4._prefill_ws_full_rows,
+            main_w=v4._prefill_ws_main_w,
+            idx_w=v4._prefill_ws_idx_w,
+        )
+
     # Build + propagate CP context once per prefill step. Under CP the
     # caller hands us a per-rank chunk slice (T_local = chunk_length),
     # and each attn / compressor / indexer reads ``cp_ctx`` off the
@@ -366,13 +389,25 @@ def forward_layers(
         if _rt._get_buf() is None:
             _rt_on = False
 
-    # Build the per-layer cache_store writer once per forward. Active
-    # only on prefill calls with cache_store_inputs bound; otherwise
-    # ``write_cache_store_impl`` is None and the per-layer call site is
-    # a cheap None check.
+    # Tagged inputs carry a group-local physical block table in each value.
+    # Preserve that tag when pairing a writer with each LayerKVCache below.
+    cache_store_source = (
+        attention_inputs if attention_inputs is not None else attn_inputs
+    )
     write_cache_store_impl = None
-    if kv_cache is not None and attn_inputs is not None:
-        write_cache_store_impl = create_write_cache_store_impl(attn_inputs, kv_cache)
+    write_cache_store_impl_by_tag = None
+    if kv_cache is not None and cache_store_source is not None:
+        if isinstance(cache_store_source, Mapping):
+            write_cache_store_impl_by_tag = {
+                str(tag): writer
+                for tag, group_inputs in cache_store_source.items()
+                if (writer := create_write_cache_store_impl(group_inputs, kv_cache))
+                is not None
+            }
+        else:
+            write_cache_store_impl = create_write_cache_store_impl(
+                cache_store_source, kv_cache
+            )
 
     if prepare_hidden_fn is None:
         h = v4.embed(input_ids)  # [T_total, dim]
@@ -455,50 +490,34 @@ def forward_layers(
                     prefix_lengths = pl.to(
                         device=positions.device, dtype=torch.int32
                     ).contiguous()
-            # Per-forward prefill workspace: one runtime buffer allocated at the
-            # top of the forward, freed when ``forward_layers`` returns (so the
-            # MTP draft forward, which runs right after on a near-full card, can
-            # borrow it). Holds the prefill-Q output (eager) and — whenever CP is
-            # active — the main + indexer compressor CP gather/restore scratch
-            # (dedicated buffer pairs per role, used by BOTH the serial and
-            # overlap paths for the workspace-backed roles). Sizing is MAX
-            # (capacity-bound, runtime-length-independent) so every forward
-            # allocates the same-sized block → zero allocator fragmentation,
-            # IDENTICAL across main and MTP-draft forwards (the draft overrides
-            # ``_resolve_prefill_ws_gather_widths`` to size off the main model's
-            # ratios — see ``deepseek_v4_mtp_model``). Current-layer SWA ``kv_full``
-            # all-gather is intentionally not workspace-backed.
-            #
-            # ``reserve_cp`` gates the CP region; we cannot derive it from
-            # ``compress_ratio != 0`` on the layers because the workspace is bound
-            # once for the whole prefill forward. The bound ``_prefill_ws_full_rows>0``
-            # is the canonical signal that CP is active at workspace bind time.
-            reserve_cp = (cp_ctx is not None) and int(v4._prefill_ws_full_rows) > 0
-            ws = PrefillWorkspace(
-                input_ids.device,
-                q_rows=v4._prefill_ws_q_rows,
-                q_dim=v4._prefill_ws_q_dim,
-                reserve_cp=reserve_cp,
-                cp_rows=v4._prefill_ws_full_rows,
-                main_w=v4._prefill_ws_main_w,
-                idx_w=v4._prefill_ws_idx_w,
-            )
-            build_and_propagate_prefill_meta_fp8(
-                v4,
-                h,
-                sp_int_for_meta,
-                kv_cache,
-                block_tables_by_type,
-                sp_per_req=sp_per_req,
-                cu_seqlens=cu_seqlens,
-                batch_size=batch_size,
-                input_lengths=input_lengths,
-                prefix_lengths=prefix_lengths,
-                position_ids=positions,
-                req_id_per_token=req_id_per_token,
-                max_seqlen_q=max_seqlen_q,
-                workspace=ws,
-            )
+            # The max-sized workspace was allocated at function entry, before
+            # embedding could fragment its cached address range. It remains a
+            # per-forward local so the MTP draft can reuse the block immediately.
+            assert ws is not None
+            try:
+                build_and_propagate_prefill_meta_fp8(
+                    v4,
+                    h,
+                    sp_int_for_meta,
+                    kv_cache,
+                    block_tables_by_type,
+                    sp_per_req=sp_per_req,
+                    cu_seqlens=cu_seqlens,
+                    batch_size=batch_size,
+                    input_lengths=input_lengths,
+                    prefix_lengths=prefix_lengths,
+                    position_ids=positions,
+                    req_id_per_token=req_id_per_token,
+                    max_seqlen_q=max_seqlen_q,
+                    workspace=ws,
+                )
+            except Exception:
+                # Propagation may have already attached _prefill_meta_shared to
+                # some layers before failing; the layer-loop finally below has
+                # not been entered yet, so clear here to avoid pinning the
+                # per-forward workspace past this failed forward. Idempotent.
+                clear_prefill_meta_shared_fp8(v4)
+                raise
 
     try:
         with record_range_ctx():
@@ -525,8 +544,25 @@ def forward_layers(
                     v4.capture_aux_hidden(layer_idx, h)
                 if _rt_on:
                     _rt.record(f"prefill_layer{layer_idx:02d}_out", h)
-                if write_cache_store_impl is not None:
-                    write_cache_store_impl(kv_cache.get_layer_cache_groups(layer_idx))
+                if write_cache_store_impl_by_tag:
+                    for layer_cache in kv_cache.get_layer_cache_groups(layer_idx):
+                        writer = write_cache_store_impl_by_tag.get(
+                            str(layer_cache.tag)
+                        )
+                        if writer is None:
+                            raise RuntimeError(
+                                "missing cache-store writer for layer "
+                                f"{layer_idx} tag {layer_cache.tag!r}"
+                            )
+                        writer(layer_cache)
+                elif write_cache_store_impl is not None:
+                    layer_caches = kv_cache.get_layer_cache_groups(layer_idx)
+                    if len(layer_caches) != 1:
+                        raise RuntimeError(
+                            "plain cache-store inputs require exactly one cache group "
+                            f"for layer {layer_idx}; got {len(layer_caches)}"
+                        )
+                    write_cache_store_impl(layer_caches[0])
                 if _rt_on:
                     _rt.record(f"layer{layer_idx:02d}_out", h)
                     if cp_ctx is None:
@@ -757,6 +793,7 @@ def forward_prefill(
         cu_seqlens,
         block_tables_by_type,
         attn_inputs=attn,
+        attention_inputs=attn_inputs,
         prepare_hidden_fn=prepare_hidden_fn,
     )  # [T_total, dim]
     return PyModelOutputs(hidden)

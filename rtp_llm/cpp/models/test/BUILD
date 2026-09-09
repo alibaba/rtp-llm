@@ -42,7 +42,7 @@ cc_test(
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
-    exec_properties = {'gpu':'H20'},
+    exec_properties = {'gpu':'A10'},
 )
 
 cc_test(
@@ -54,7 +54,7 @@ cc_test(
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
     ] + torch_deps(),
-    exec_properties = {"gpu": "H20"},
+    exec_properties = {'gpu':'A10'},
 )
 
 py_test(
@@ -97,5 +97,5 @@ py_test(
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
-    exec_properties = {"gpu": "H20"},
+    exec_properties = {'gpu':'A10'},
 )

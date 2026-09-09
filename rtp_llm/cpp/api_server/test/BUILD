@@ -55,7 +55,7 @@ py_test(
         "@//:using_rocm": {"TEST_USING_DEVICE": "ROCM"},
         "//conditions:default": {"TEST_USING_DEVICE": "CUDA"},
     }),
-    exec_properties = {'gpu':'H20'},
+    exec_properties = {'gpu':'A10'},
 )
 
 py_library(

@@ -41,7 +41,7 @@ cc_test(
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
-    exec_properties = {'gpu':'H20'},
+    exec_properties = {'gpu':'A10'},
 )
 
 cc_test(
@@ -57,7 +57,7 @@ cc_test(
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
-    exec_properties = {'gpu':'H20'},
+    exec_properties = {'gpu':'A10'},
 )
 
 cc_test(
@@ -71,7 +71,7 @@ cc_test(
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
-    exec_properties = {'gpu':'H20'},
+    exec_properties = {'gpu':'A10'},
 )
 
 cc_test(
@@ -84,12 +84,17 @@ cc_test(
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
-    exec_properties = {'gpu':'H20'},
+    exec_properties = {'gpu':'A10'},
 )
 
 # The benchmark is gated behind the DISABLED_ gtest prefix; run it explicitly
-# with --test_arg=--gtest_also_run_disabled_tests. Keeping the target in the
-# default test graph preserves compile coverage for the runner API.
+# with --test_arg=--gtest_also_run_disabled_tests.
+#
+# It is tagged manual below, so it is NOT in the default test graph: with only a
+# DISABLED_ case it ran zero tests, reported a pass, and reserved a GPU to do it.
+# manual also drops it from "..." expansion at build time, so compile coverage
+# for the runner API is kept by naming this target explicitly in the compile
+# stage's BAZEL_BUILD_TEST_TARGET rather than by leaving it testable.
 cc_test(
     name = "spec_logits_verify_runner_perf_test",
     srcs = [
@@ -100,7 +105,13 @@ cc_test(
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
-    exec_properties = {'gpu':'H20'},
+    # manual: the only case here is TEST(..., DISABLED_DeepSeekFlashDecodeB35P3),
+    # so gtest reports "Running 0 tests from 0 test suites" and the target passes
+    # having measured nothing -- while still reserving a GPU. The ut jobs ask for
+    # the ... wildcard and filter -manual, so this removes it from CI without
+    # deleting it: run the benchmark on demand by explicit label.
+    tags = ["manual"],
+    exec_properties = {'gpu':'A10'},
 )
 
 cc_test(
@@ -123,5 +134,5 @@ cc_test(
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
-    exec_properties = {'gpu':'H20'},
+    exec_properties = {'gpu':'A10'},
 )

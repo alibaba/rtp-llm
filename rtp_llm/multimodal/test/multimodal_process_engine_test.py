@@ -12,7 +12,11 @@ import pillow_heif
 import torch
 from PIL import Image, ImageFile
 
-from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
+from rtp_llm.config.exceptions import (
+    AdmissionRejectReason,
+    ExceptionType,
+    FtRuntimeException,
+)
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.py_config_modules import (
     ProfilingDebugLoggingConfig,
@@ -521,17 +525,23 @@ class MMProcessEngineGpuBatchTest(TestCase):
 
 class FtRuntimeExceptionSerializationTest(TestCase):
     def test_pickle_round_trip_preserves_error(self):
-        error = FtRuntimeException(
-            ExceptionType.MM_DOWNLOAD_FAILED,
-            "Failed to download multimodal content",
-        )
+        for reason in AdmissionRejectReason:
+            with self.subTest(reason=reason):
+                error = FtRuntimeException(
+                    ExceptionType.MM_DOWNLOAD_FAILED,
+                    "Failed to download multimodal content",
+                    reason,
+                )
 
-        restored = pickle.loads(pickle.dumps(error))
+                restored = pickle.loads(pickle.dumps(error))
 
-        self.assertIsInstance(restored, FtRuntimeException)
-        self.assertEqual(restored.exception_type, ExceptionType.MM_DOWNLOAD_FAILED)
-        self.assertEqual(restored.message, error.message)
-        self.assertEqual(str(restored), error.message)
+                self.assertIsInstance(restored, FtRuntimeException)
+                self.assertEqual(
+                    restored.exception_type, ExceptionType.MM_DOWNLOAD_FAILED
+                )
+                self.assertEqual(restored.message, error.message)
+                self.assertEqual(restored.admission_reject_reason, reason)
+                self.assertEqual(str(restored), error.message)
 
     def test_remote_rpc_error_code_is_registered(self):
         self.assertEqual(ExceptionType.from_value(907), "MM_REMOTE_RPC_FAILED")

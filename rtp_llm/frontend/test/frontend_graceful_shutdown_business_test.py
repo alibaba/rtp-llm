@@ -121,6 +121,7 @@ class FrontendGracefulShutdownBusinessTest(unittest.TestCase):
 
         with patch.dict(os.environ, {"FRONTEND_PRE_STOP_DRAIN_SECONDS": "0"}):
             server.handle_exit(signal.SIGTERM, None)
+            self.assertTrue(server.wait_for_signal_dispatch())
 
         stream_thread.join(timeout=10)
         server_thread.join(timeout=10)
@@ -166,6 +167,7 @@ class FrontendGracefulShutdownBusinessTest(unittest.TestCase):
 
         with patch.dict(os.environ, {"FRONTEND_PRE_STOP_DRAIN_SECONDS": "0.2"}):
             server.handle_exit(signal.SIGTERM, None)
+            self.assertTrue(server.wait_for_signal_dispatch())
             self.assertTrue(server.shutdown_manager.is_unavailable())
             self.assertFalse(server.shutdown_manager.is_draining())
 

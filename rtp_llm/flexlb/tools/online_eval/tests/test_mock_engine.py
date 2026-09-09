@@ -129,6 +129,16 @@ class MockEngineGrpcTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(grpc.StatusCode.UNIMPLEMENTED, raised.exception.code())
 
+    async def test_batch_generate_rpc_is_unimplemented(self) -> None:
+        import grpc
+
+        prefill_stub = self.pb2_grpc.RpcServiceStub(self.channel)
+
+        with self.assertRaises(grpc.aio.AioRpcError) as raised:
+            await prefill_stub.BatchGenerateCall(self.pb2.BatchGenerateInputPB())
+
+        self.assertEqual(grpc.StatusCode.UNIMPLEMENTED, raised.exception.code())
+
     async def test_decode_fetch_response_rpc_is_unimplemented(self) -> None:
         import grpc
 

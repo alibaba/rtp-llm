@@ -31,6 +31,67 @@ Repository defaults (see `rtp_llm/test/perf_test/BUILD`):
 
 - **`//rtp_llm/test/perf_test:grid_perf_test`** — grid example with `qwen35_moe`, small `batch_size` / `input_len`, decode-only (`--partial 1`), `seq_size_per_block=1024`.
 - **`//rtp_llm/test/perf_test:distribution_perf_test`** — distribution sampling with ShareGPT (`--dataset_name sharegpt`), tunable `max_seq_len` / `concurrency_limit`.
+- **`//rtp_llm/test/perf_test:model_perf_test`** — model-agnostic entrypoint with no baked-in checkpoint or topology. Use this target for a new model; supply all model and engine values at invocation time.
+
+#### Reusable model target
+
+`model_perf_test` exposes model, workload, engine, repetition, and output
+settings independently:
+
+| Group | Interface | Meaning |
+| --- | --- | --- |
+| Model | `--test_arg=--model_type=...`, `--test_arg=--checkpoint_path=...`, `--test_arg=--tokenizer_path=...` | Model implementation and local/Hub paths. |
+| Workload | `--test_arg=--batch_size=1,2,4`, `--test_arg=--input_len=1024,4096`, `--test_arg=--partial=2` | Grid shape and phase (`0` both, `1` decode, `2` prefill). |
+| Engine | `--test_arg=--engine_arg=NAME=VALUE` | Any engine flag, repeatable; e.g. `tp_size=8`, `ep_size=8`, `fp8_kv_cache=1`. |
+| Engine environment | `--test_arg=--engine_env=NAME=VALUE` | Repeatable environment default. An explicit Bazel `--test_env` value wins. |
+| Repetitions | `--test_arg=--warmup_runs=1`, `--test_arg=--measure_runs=3`, `--test_arg=--profile_runs=0` | Per-case warmup, measurement, and optional profiling runs. |
+| Output | `--test_arg=--result_dir=...` | Defaults to Bazel's `TEST_UNDECLARED_OUTPUTS_DIR`. |
+
+Example for a new prefill model:
+
+```shell
+bazelisk test //rtp_llm/test/perf_test:model_perf_test \
+    --config=cuda12_9 --config=sm9x \
+    --test_arg=--model_type=deepseek_v4 \
+    --test_arg=--checkpoint_path=/models/DeepSeek-V4 \
+    --test_arg=--tokenizer_path=/models/DeepSeek-V4 \
+    --test_arg=--batch_size=1,2,4,8 \
+    --test_arg=--input_len=1024,4096,16384,65536 \
+    --test_arg=--partial=2 \
+    --test_arg=--decode_test_length=1 \
+    --test_arg=--engine_arg=tp_size=8 \
+    --test_arg=--engine_arg=ep_size=8 \
+    --test_arg=--engine_arg=world_size=8 \
+    --test_arg=--engine_arg=fp8_kv_cache=1 \
+    --test_arg=--engine_arg=load_method=fastsafetensors \
+    --test_arg=--measure_runs=3 \
+    --test_arg=--profile_runs=0 \
+    --test_env=PERF_GRID_WARMUP_RUNS=1
+```
+
+`--engine_arg=NAME=VALUE` is forwarded as the normal engine CLI pair
+`--NAME VALUE`. Existing raw engine flags remain supported, so old targets do
+not change. Keep a given engine flag in one form in a command to avoid
+ambiguous duplicate values.
+
+#### Output contract
+
+Every run writes under the result directory:
+
+* `test_info.json` (schema version 2): model paths/type, workload settings,
+  effective repetition counts, redacted invocation, forwarded engine
+  arguments, and engine environment variable names. Secret-like values are
+  not persisted. It is written once before server startup (`status=running`)
+  and again on successful completion (`status=completed`).
+* `Prefill_Result.json` and/or `Decode_Result.json`: one record per
+  batch-size/input-length point, with success rate, wait time, prefill/decode
+  timing, and `generate_config`.
+* Profiler JSON files, when enabled, are moved into `timelines/`.
+
+The test exits non-zero if server startup or requests fail while preserving
+the output directory for diagnosis. The generic target does not infer a
+model-specific topology: pass every required engine flag explicitly and keep
+`test_info.json` with the result.
 
 Example (SM90; adjust configs for your stack e.g. `cuda12_9` + `sm9x`):
 

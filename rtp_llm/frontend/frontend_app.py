@@ -1,13 +1,18 @@
 import asyncio
+import fcntl
 import gc
 import json
 import logging
+import math
 import os
+import queue
+import secrets
 import signal
 import socket
 import threading
 import time
-from typing import Any, Dict, List, Optional, Union
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 from anyio import CapacityLimiter
 from anyio.lowlevel import RunVar
@@ -76,6 +81,99 @@ def _pre_stop_drain_headroom_seconds(
     )
 
 
+def _allocator_dump_runtime_dir() -> Path:
+    return Path(
+        os.environ.get("LOG_PATH")
+        or os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR")
+        or "logs"
+    )
+
+
+class _AllocatorDumpRequestGuard:
+    _STATE_FILE = ".torch_allocator_dump.state"
+
+    def __init__(
+        self,
+        cooldown_seconds: float,
+        runtime_dir: Optional[Path] = None,
+        clock: Callable[[], float] = time.time,
+    ) -> None:
+        if not math.isfinite(cooldown_seconds) or cooldown_seconds < 0:
+            raise ValueError("allocator dump cooldown must be finite and non-negative")
+        self._cooldown_seconds = cooldown_seconds
+        self._clock = clock
+        self._runtime_dir = runtime_dir or _allocator_dump_runtime_dir()
+        self._thread_lock = threading.Lock()
+        self._fd: Optional[int] = None
+
+    def _release(self, fd: int) -> None:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            try:
+                os.close(fd)
+            finally:
+                self._thread_lock.release()
+
+    def try_begin(self) -> Tuple[str, float]:
+        if not self._thread_lock.acquire(blocking=False):
+            return "in_flight", 0.0
+        fd: Optional[int] = None
+        try:
+            self._runtime_dir.mkdir(parents=True, exist_ok=True)
+            fd = os.open(
+                self._runtime_dir / self._STATE_FILE,
+                os.O_RDWR | os.O_CREAT,
+                0o600,
+            )
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                os.close(fd)
+                self._thread_lock.release()
+                return "in_flight", 0.0
+
+            now = self._clock()
+            os.lseek(fd, 0, os.SEEK_SET)
+            raw_timestamp = os.read(fd, 128).decode("ascii", errors="ignore").strip()
+            try:
+                last_completed_at = float(raw_timestamp) if raw_timestamp else None
+            except ValueError:
+                last_completed_at = None
+            if last_completed_at is not None and math.isfinite(last_completed_at):
+                elapsed = max(0.0, now - last_completed_at)
+                remaining = self._cooldown_seconds - elapsed
+                if remaining > 0:
+                    self._release(fd)
+                    return "cooldown", remaining
+            self._fd = fd
+            return "ok", 0.0
+        except OSError:
+            logging.exception("Allocator dump admission state is unavailable")
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+            self._thread_lock.release()
+            return "unavailable", 0.0
+
+    def finish(self) -> None:
+        fd = self._fd
+        self._fd = None
+        if fd is None:
+            return
+        try:
+            timestamp = f"{self._clock():.9f}\n".encode("ascii")
+            os.lseek(fd, 0, os.SEEK_SET)
+            os.ftruncate(fd, 0)
+            os.write(fd, timestamp)
+        except OSError:
+            logging.exception("Failed to persist allocator dump cooldown state")
+        finally:
+            self._release(fd)
+
+
 class GracefulShutdownServer(Server):
     def set_server(
         self,
@@ -94,6 +192,71 @@ class GracefulShutdownServer(Server):
         self._pre_stop_timer: Optional[threading.Timer] = None
         self._shutdown_requested = False
         self._shutdown_timeout_budget = self.config.timeout_graceful_shutdown
+        # Signal handlers run on the main thread, so anything they touch can be
+        # re-entered mid-update. Two concrete hazards here, and buffering the
+        # logging is not enough to cover either:
+        #
+        #  - FrontendShutdownManager guards its state with a plain threading.Lock
+        #    and takes it in try_begin_request/finish_request, i.e. on every
+        #    request. A signal landing inside that window, whose handler then
+        #    calls start_unavailable or active_request_count, deadlocks the
+        #    process on a non-reentrant lock it already holds.
+        #  - That manager also logs while holding the lock, so the handler can
+        #    re-enter the stderr writer and raise
+        #    "reentrant call inside <_io.BufferedWriter ...>", which escapes the
+        #    handler and takes the shutdown path with it.
+        #
+        # So the handlers do no work at all: they hand the signal to this queue
+        # and return. SimpleQueue.put is documented as reentrant-safe and usable
+        # from a signal handler; everything else runs on the worker below, off
+        # the handler, where locks and logging are ordinary operations.
+        self._signal_events: "queue.SimpleQueue" = queue.SimpleQueue()
+        self._signal_worker = threading.Thread(
+            target=self._dispatch_signal_events,
+            name="frontend-signal-dispatch",
+            daemon=True,
+        )
+        self._signal_worker.start()
+
+    @staticmethod
+    def _signal_name(sig: int) -> str:
+        try:
+            return signal.Signals(sig).name
+        except ValueError:
+            return str(sig)
+
+    def _dispatch_signal_events(self) -> None:
+        while True:
+            kind, sig, frame = self._signal_events.get()
+            try:
+                if kind == "barrier":
+                    sig.set()
+                    continue
+                sig_name = self._signal_name(sig)
+                if kind == "exit":
+                    if not self._defer_sigterm_for_pre_stop_drain(sig, frame, sig_name):
+                        self._begin_shutdown(sig, frame, sig_name)
+                else:
+                    self.shutdown_manager.start_unavailable(f"signal {sig_name}")
+                    if not self._schedule_shutdown_after_pre_stop(sig, frame, sig_name):
+                        self._begin_shutdown(sig, frame, sig_name)
+            except Exception:
+                # Never let the dispatcher die: a lost signal means a frontend
+                # that ignores SIGTERM.
+                logging.exception("Frontend signal dispatch failed for %s", sig)
+
+    def wait_for_signal_dispatch(self, timeout: float = 5.0) -> bool:
+        """Block until every signal handed over before this call was dispatched.
+
+        The queue is FIFO with a single consumer, so a barrier that has been
+        processed proves everything enqueued ahead of it was processed too. That
+        is what makes it sound to assert a *negative* post-condition after
+        signalling -- polling the positive one would let the negative pass while
+        the dispatcher simply had not run yet.
+        """
+        done = threading.Event()
+        self._signal_events.put(("barrier", done, None))
+        return done.wait(timeout)
 
     def install_pre_stop_drain_signal_handler(self) -> None:
         pre_stop_signal = getattr(signal, "SIGUSR1", None)
@@ -108,29 +271,13 @@ class GracefulShutdownServer(Server):
             )
 
     def handle_pre_stop_drain_signal(self, sig: int, frame) -> None:
-        try:
-            sig_name = signal.Signals(sig).name
-        except ValueError:
-            sig_name = str(sig)
-        self.shutdown_manager.start_unavailable(f"signal {sig_name}")
-        logging.info(
-            "Frontend entering pre-stop unavailable state before uvicorn shutdown: "
-            "signal=%s, active_requests=%s",
-            sig_name,
-            self.shutdown_manager.active_request_count(),
-        )
-        if not self._schedule_shutdown_after_pre_stop(sig, frame, sig_name):
-            self._begin_shutdown(sig, frame, sig_name)
+        # Signal-handler context: hand off and return. See set_server.
+        self._signal_events.put(("pre_stop", sig, frame))
 
     @override
     def handle_exit(self, sig: int, frame) -> None:
-        try:
-            sig_name = signal.Signals(sig).name
-        except ValueError:
-            sig_name = str(sig)
-        if self._defer_sigterm_for_pre_stop_drain(sig, frame, sig_name):
-            return
-        self._begin_shutdown(sig, frame, sig_name)
+        # Signal-handler context: hand off and return. See set_server.
+        self._signal_events.put(("exit", sig, frame))
 
     def _defer_sigterm_for_pre_stop_drain(self, sig: int, frame, sig_name: str) -> bool:
         if sig != signal.SIGTERM:
@@ -403,6 +550,32 @@ class FrontendApp(object):
             )
         ]
         app = FastAPI(middleware=middleware)
+        allocator_dump_enabled = bool(
+            getattr(self.server_config, "enable_torch_allocator_dump", False)
+        )
+        allocator_dump_auth_token = str(
+            getattr(self.server_config, "torch_allocator_dump_auth_token", "")
+        )
+        allocator_dump_auth_header = str(
+            getattr(
+                self.server_config,
+                "torch_allocator_dump_auth_header",
+                "X-RTP-LLM-Allocator-Dump-Token",
+            )
+        )
+        if allocator_dump_enabled and not allocator_dump_auth_token:
+            raise ValueError(
+                "allocator dump authentication token is required when enabled"
+            )
+        allocator_dump_guard = _AllocatorDumpRequestGuard(
+            float(
+                getattr(
+                    self.server_config,
+                    "torch_allocator_dump_cooldown_seconds",
+                    60.0,
+                )
+            )
+        )
 
         @app.on_event("startup")
         async def startup():
@@ -614,6 +787,90 @@ class FrontendApp(object):
             check_not_draining(request)
             result = await self.grpc_client.post_request("start_profile", req)
             return result
+
+        @app.post("/rtp_llm/dump_torch_allocator")
+        @app.post("/dump_torch_allocator")
+        async def dump_torch_allocator(request: Request):
+            check_not_draining(request)
+            if not allocator_dump_enabled:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+            supplied_token = request.headers.get(allocator_dump_auth_header, "")
+            if not secrets.compare_digest(
+                supplied_token.encode("utf-8"),
+                allocator_dump_auth_token.encode("utf-8"),
+            ):
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="allocator dump authentication failed",
+                )
+
+            guard_status, retry_after = allocator_dump_guard.try_begin()
+            if guard_status == "in_flight":
+                return ORJSONResponse(
+                    status_code=status.HTTP_409_CONFLICT,
+                    content={
+                        "status": "busy",
+                        "error": "allocator dump already in progress",
+                    },
+                )
+            if guard_status == "cooldown":
+                return ORJSONResponse(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    content={
+                        "status": "cooldown",
+                        "error": "allocator dump cooldown active",
+                    },
+                    headers={"Retry-After": str(max(1, math.ceil(retry_after)))},
+                )
+            if guard_status != "ok":
+                return ORJSONResponse(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    content={
+                        "status": "unavailable",
+                        "error": "allocator dump admission is unavailable",
+                    },
+                    headers={"Retry-After": "1"},
+                )
+
+            dump_id = secrets.token_hex(12)
+            try:
+                result = await asyncio.wait_for(
+                    self.grpc_client.post_request(
+                        "dump_torch_allocator",
+                        {
+                            "auth_token": allocator_dump_auth_token,
+                            "dump_id": dump_id,
+                        },
+                    ),
+                    timeout=95,
+                )
+                if result.get("status") != "ok":
+                    logging.error(
+                        "Allocator dump failed: dump_id=%s backend_result=%r",
+                        dump_id,
+                        result,
+                    )
+                    return ORJSONResponse(
+                        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                        content={
+                            "status": "error",
+                            "dump_id": dump_id,
+                            "error": "allocator dump failed; see server logs",
+                        },
+                    )
+                return {"status": "ok", "dump_id": dump_id}
+            except Exception:
+                logging.exception("Allocator dump request failed: dump_id=%s", dump_id)
+                return ORJSONResponse(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    content={
+                        "status": "error",
+                        "dump_id": dump_id,
+                        "error": "allocator dump failed; see server logs",
+                    },
+                )
+            finally:
+                allocator_dump_guard.finish()
 
         # request format: {"mode": "NONE", "update_time": 5000}
         @app.post("/update_eplb_config")
