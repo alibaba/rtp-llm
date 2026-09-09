@@ -51,7 +51,7 @@ gRPC client implementation for model service communication. Contains protocol bu
 Core load balancing logic, scheduling strategies, and worker status synchronization. This is the heart of the load balancing system.
 
 Key concepts:
-- **Routing**: `DefaultRouter` composes the Prefill cost and Decode capacity selectors and the VIT random selector for multi-role requests
+- **Routing**: `DefaultRouter` composes the Prefill and Decode cost selectors and the VIT random selector for multi-role requests
 - **Queue-based scheduling**: `RequestScheduler` facade + `GlobalQueueCoordinator` ordered placement owner + per-generation `WorkerBatcher` delivery runtime
 - **Resource measurement**: Endpoint resource views used by routing strategies
 - **Worker synchronization**: Periodic gRPC-based status sync (`GrpcWorkerStatusRunner`)
@@ -167,8 +167,18 @@ The `DefaultRouter` orchestrates routing across these stages. If a later stage f
 PREFILL/PDFUSION, `DecodeSelector` for DECODE, and `RandomStrategy`
 for VIT. Both selectors evaluate the complete live fleet before
 reducing to one generation-fenced winner. Prefill uses fixed BEST_ONLY with
-optional cache affinity under `router.roles.prefill.cacheAffinity`. Decode rotates
-among workers that pass KV/request admission.
+optional cache affinity under `router.roles.prefill.cacheAffinity`. Decode uses
+`router.roles.decode.costEstimator.expression`, which defaults to `kvcache_used_ratio`.
+Expressions support arithmetic, powers, scalar functions and
+the variables `running_size`, `max_running_size`, `kvcache_used`, `kvcache_capacity`,
+and `kvcache_used_ratio`; Decode does not support `sum`. Request load includes Engine-owned
+requests (accepted and running) plus local request reservations; the KV ratio divides
+used tokens plus local predicted KV reservations by total KV capacity. Both include
+queued reservations and ownership retained during preemption. Unknown total KV capacity
+of zero contributes zero; ratios above one are not capped. Currently dispatchable workers
+are preferred over feasible workers that must wait, and equal costs rotate within the
+same availability tier. Non-finite formula results exclude workers; an entirely
+non-finite preferred tier fails routing with a formula error.
 
 ### Queue-Based Request Scheduling
 
@@ -249,6 +259,12 @@ variant are rejected. Missing `FLEXLB_CONFIG` fails startup. The online loader
 accepts only schema 3; no legacy-schema converter or old-field aliases are provided.
 `dispatcher.maxInflightPerPrefillWorker` is a positive integer, default 2 in every
 mode. It counts batches in BATCH and requests in NON_BATCH / DIRECT.
+`router.roles.decode.costEstimator.expression` must be non-empty and parse as a valid
+Decode formula. An expression using `max_running_size` requires a positive
+`router.roles.decode.availability.maxEngineRequests` as the variable's fixed value.
+For example, `0.3 * running_size / max_running_size + 0.7 * kvcache_used_ratio`
+combines normalized request load and KV usage. Formulas change worker ranking while
+preserving admission limits. Compiled expressions are cached until the expression changes.
 `scheduler.ordering.preemption.timeoutMs` defaults to 1000 ms and must be positive.
 It bounds the wait for a real Engine terminal after the Cancel ACK phase; explicit
 configuration requires `DECODE_ENGINE_OWNED`. ACK timeout remains internal, 50 ms.
