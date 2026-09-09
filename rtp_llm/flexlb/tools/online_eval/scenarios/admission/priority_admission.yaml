@@ -1,0 +1,20 @@
+# Configuration for the registered Python case; execution and assertions live in Python.
+schema_version: 2
+case: priority_admission
+profiles:
+- batch-window
+environment:
+  backend: java_mock
+  n_prefill: 1
+  n_decode: 1
+  perf_preset: default
+  config_overrides:
+    ordering: priority
+    queue_timeout_ms: 60000
+    max_delivered_not_accepted: 1
+execution:
+  timeout_s: 420
+  stage_timeout_s: 60
+  cleanup_timeout_s: 120
+variants:
+- id: permit_released_without_preemption

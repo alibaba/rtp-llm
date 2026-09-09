@@ -1,0 +1,65 @@
+# Configuration for the registered Python case; execution and assertions live in Python.
+schema_version: 2
+case: cache_global_holders
+profiles:
+- batch-window
+- single-nonbatch
+- single-batch
+- window-nonbatch
+environment:
+  backend: java_mock
+  n_prefill: 2
+  n_decode: 2
+  decode_cache_blocks: 12
+  perf_preset: default
+execution:
+  timeout_s: 900
+  stage_timeout_s: 30
+  cleanup_timeout_s: 120
+variants:
+- id: shared_batch
+  profiles:
+  - batch-window
+  - single-batch
+- id: shared_nonbatch
+  profiles:
+  - single-nonbatch
+  - window-nonbatch
+- id: release_batch
+  profiles:
+  - batch-window
+  - single-batch
+- id: release_nonbatch
+  profiles:
+  - single-nonbatch
+  - window-nonbatch
+- id: redirect_batch
+  profiles:
+  - batch-window
+  - single-batch
+- id: redirect_nonbatch
+  profiles:
+  - single-nonbatch
+  - window-nonbatch
+- id: down_batch
+  profiles:
+  - batch-window
+  - single-batch
+  environment:
+    n_prefill: 3
+    discovery: discovery_file
+- id: down_nonbatch
+  profiles:
+  - single-nonbatch
+  - window-nonbatch
+  environment:
+    n_prefill: 3
+    discovery: discovery_file
+- id: mixed_batch
+  profiles:
+  - batch-window
+  - single-batch
+- id: mixed_nonbatch
+  profiles:
+  - single-nonbatch
+  - window-nonbatch

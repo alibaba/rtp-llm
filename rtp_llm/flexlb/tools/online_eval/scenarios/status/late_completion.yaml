@@ -1,0 +1,22 @@
+# Abnormal reporting probe, not a model of normal real-engine execution.
+schema_version: 2
+case: late_completion
+profiles: [single-batch]
+environment:
+  backend: java_mock
+  n_prefill: 1
+  n_decode: 1
+  mock_auto_fetch: false
+  config_overrides:
+    stale_inflight_ms: 120000
+execution:
+  timeout_s: 300
+  stage_timeout_s: 90
+  cleanup_timeout_s: 120
+parameters:
+  missing_rounds: 1
+  delay_ms: 300
+  clean_window_s: 30
+variants:
+- id: after_missing
+  profiles: [single-batch]

@@ -1,0 +1,44 @@
+# Configuration for the registered Python case; execution and assertions live in Python.
+schema_version: 2
+case: engine_rpc_fault
+profiles:
+- batch-window
+- single-nonbatch
+- single-batch
+- window-nonbatch
+environment:
+  backend: java_mock
+  n_prefill: 2
+  n_decode: 4
+  perf_preset: default
+execution:
+  timeout_s: 300
+  stage_timeout_s: 30
+  cleanup_timeout_s: 120
+variants:
+- id: enqueue_delay_batch
+  profiles:
+  - batch-window
+  - single-batch
+  execution:
+    timeout_s: 600
+- id: generate_delay_batch
+  profiles:
+  - batch-window
+  - single-batch
+  execution:
+    timeout_s: 600
+- id: generate_delay_nonbatch
+  profiles:
+  - single-nonbatch
+  - window-nonbatch
+  execution:
+    timeout_s: 600
+- id: enqueue_error
+  profiles:
+  - batch-window
+  - single-nonbatch
+  - single-batch
+  - window-nonbatch
+  execution:
+    timeout_s: 420

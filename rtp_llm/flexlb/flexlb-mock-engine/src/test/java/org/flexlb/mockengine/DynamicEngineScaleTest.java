@@ -135,6 +135,21 @@ class DynamicEngineScaleTest {
     // ════════════════════════════════════════════════════════════════
 
     @Test
+    void newAndReplacementEnginesUseStartupPerformance() throws Exception {
+        int basePort = startCluster(model("10", 1.0), 1, 1);
+        postOk("/set_perf", "{\"engine\":\"decode-0\",\"decode_scale\":9}");
+        assertEquals(9L, services.get(basePort + 1).getPerformance().decodeMs(1, 1));
+        JsonNode added = postOk("/add_engine", "{\"role\":\"decode\"}");
+        int addedPort = added.path("port").asInt();
+        assertEquals(1L, services.get(addedPort).getPerformance().decodeMs(1, 1));
+        postOk("/set_perf", "{\"port\":" + addedPort + ",\"decode_scale\":4}");
+        assertEquals(9L, services.get(basePort + 1).getPerformance().decodeMs(1, 1));
+        postOk("/remove_engine", "{\"port\":" + addedPort + "}");
+        JsonNode replacement = postOk("/add_engine", "{\"role\":\"decode\"}");
+        assertEquals(1L, services.get(replacement.path("port").asInt()).getPerformance().decodeMs(1, 1));
+    }
+
+    @Test
     void addEngineExposesNewGrpcPortSnapshotAndDiscoveryEntry() throws Exception {
         int basePort = startCluster(model("10", 1.0), 1, 1);
 

@@ -245,6 +245,20 @@ final class MockControlServer {
                     case "enqueue_delay" -> builder.enqueueDelayMs(enabled ? body.path("delay_ms").asLong(0) : 0);
                     case "generate_delay" -> builder.generateDelayMs(enabled ? body.path("delay_ms").asLong(0) : 0);
                     // ── Status-report fault family (getWorkerStatus output layer) ──
+                    case "status_missing_rounds", "status_completion_delay" -> {
+                        if (!body.path("rid").isIntegralNumber() || body.path("rid").asLong() <= 0) {
+                            throw new ApiException(400, "status delivery fault requires positive rid");
+                        }
+                        String field = type.equals("status_missing_rounds") ? "rounds" : "delay_ms";
+                        if (enabled && (!body.path(field).isIntegralNumber()
+                                || body.path(field).asLong() < 0
+                                || body.path(field).asLong() > (field.equals("rounds") ? 1000 : 60000))) {
+                            throw new ApiException(400, "invalid " + field);
+                        }
+                        service.configureStatusDelivery(body.path("rid").asLong(),
+                                field.equals("rounds") ? (enabled ? body.path(field).asInt() : 0) : -1,
+                                field.equals("delay_ms") ? (enabled ? body.path(field).asLong() : 0) : -1);
+                    }
                     case "status_suppress_finished" -> builder.statusSuppressFinished(enabled);
                     case "status_suppress_running" -> builder.statusSuppressRunning(enabled);
                     case "status_suppress_rids" -> builder.statusSuppressRids(
@@ -375,6 +389,14 @@ final class MockControlServer {
     private void handleSetPerf(HttpExchange exchange) throws IOException {
         handleServicePost(exchange, (body, service) -> {
             MockPerformanceModel perf = service.getPerformance();
+            if (body.has("cache_retention_blocks")) {
+                JsonNode value = body.get("cache_retention_blocks");
+                if (!value.isIntegralNumber() || !value.canConvertToInt()
+                        || value.asInt() < 0 || value.asInt() > service.getCacheBlocks()) {
+                    throw new ApiException(400, "cache_retention_blocks outside physical pool");
+                }
+                service.setCacheRetentionBlocks(value.asInt());
+            }
             // Python fields (_http_set_perf):
             if (body.has("prefill_fixed_ms")) {
                 perf.setOverrideFixedPrefillMs(body.get("prefill_fixed_ms").asDouble());
@@ -453,7 +475,7 @@ final class MockControlServer {
      * MockLruBlockCache. Idempotent: keys not present are a no-op. When the
      * key set changes the engine's cacheVersion is bumped, so the master's
      * next cache-status poll re-pulls the key set and its global key→holder
-     * index converges on the eviction (the flexlb_ft KV family's sync
+     * index converges on the eviction (the flexlb_test_framework KV family's sync
      * premise). Response: {status, engine, port, changed, cache_version}.
      */
     private void handleCacheEvict(HttpExchange exchange) throws IOException {

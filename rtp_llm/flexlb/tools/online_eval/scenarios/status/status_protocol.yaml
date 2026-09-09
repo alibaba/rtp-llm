@@ -1,0 +1,142 @@
+# Configuration for the registered Python case; execution and assertions live in Python.
+schema_version: 2
+case: status_protocol
+profiles:
+- batch-window
+- single-nonbatch
+- single-batch
+- window-nonbatch
+environment:
+  backend: java_mock
+  n_prefill: 2
+  n_decode: 2
+  config_overrides:
+    ordering: priority
+    queue_timeout_ms: 10000
+    stale_inflight_ms: 30000
+execution:
+  timeout_s: 600
+  stage_timeout_s: 120
+  cleanup_timeout_s: 120
+variants:
+- id: inflight_ttl_cleanup
+  profiles:
+  - batch-window
+  environment:
+    n_prefill: 2
+    n_decode: 2
+    discovery: discovery_file
+    perf_preset: fault_env
+    config_overrides:
+      ordering: priority
+      queue_timeout_ms:
+        omit: true
+- id: prefill_suppress_all
+  profiles:
+  - batch-window
+- id: prefill_suppress_finished
+  profiles:
+  - batch-window
+  - single-nonbatch
+  - single-batch
+  - window-nonbatch
+- id: decode_suppress_finished
+  profiles:
+  - batch-window
+- id: no_respond
+  profiles:
+  - batch-window
+- id: version_regress
+  profiles:
+  - batch-window
+- id: unknown_rid_finished
+  profiles:
+  - batch-window
+  - single-nonbatch
+  - single-batch
+  - window-nonbatch
+- id: unknown_rid_running
+  profiles:
+  - batch-window
+  - single-nonbatch
+  - single-batch
+  - window-nonbatch
+- id: unknown_batchid
+  profiles:
+  - batch-window
+- id: special_ids
+  profiles:
+  - batch-window
+- id: unbatched_single_request
+  profiles:
+  - batch-window
+- id: foreign_batchid
+  profiles:
+  - batch-window
+- id: duplicate_finished
+  profiles:
+  - batch-window
+  - single-nonbatch
+  - single-batch
+  - window-nonbatch
+- id: cursor_regress
+  profiles:
+  - batch-window
+  - single-nonbatch
+  - single-batch
+  - window-nonbatch
+- id: finished_then_running
+  profiles:
+  - batch-window
+  - single-nonbatch
+  - single-batch
+  - window-nonbatch
+- id: zombie_completed_running
+  profiles:
+  - batch-window
+  - single-nonbatch
+  - single-batch
+  - window-nonbatch
+- id: zombie_fake_running
+  profiles:
+  - batch-window
+  - single-nonbatch
+  - single-batch
+  - window-nonbatch
+- id: decode_before_prefill
+  profiles:
+  - batch-window
+- id: decode_running_before_prefill
+  profiles:
+  - batch-window
+- id: decode_waiting_before_prefill
+  profiles:
+  - batch-window
+- id: fetch_error
+  profiles:
+  - batch-window
+  environment:
+    n_prefill: 2
+    n_decode: 2
+    config_overrides:
+      ordering: priority
+      queue_timeout_ms: 60000
+      stale_inflight_ms: 30000
+- id: debug_snapshot
+  profiles:
+  - batch-window
+  environment:
+    debug_enabled: true
+    n_decode: 4
+    config_overrides:
+      ordering: fifo
+      queue_timeout_ms: 60000
+- id: normal_no_fetch
+  profiles:
+  - batch-window
+  environment:
+    debug_enabled: true
+    n_decode: 4
+    config_overrides:
+      ordering: fifo
+      queue_timeout_ms: 60000

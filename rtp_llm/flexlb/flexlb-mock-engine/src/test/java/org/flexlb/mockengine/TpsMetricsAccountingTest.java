@@ -13,7 +13,7 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import static org.flexlb.mockengine.MockEngineTestSupport.batch;
-import static org.flexlb.mockengine.MockEngineTestSupport.enqueue;
+import static org.flexlb.mockengine.MockEngineTestSupport.enqueueAndFetch;
 import static org.flexlb.mockengine.MockEngineTestSupport.httpGet;
 import static org.flexlb.mockengine.MockEngineTestSupport.inputWithBlockKeys;
 import static org.flexlb.mockengine.MockEngineTestSupport.inputWithDecode;
@@ -85,13 +85,13 @@ class TpsMetricsAccountingTest {
             List<Long> keys = List.of(11L, 12L, 13L);
 
             // Request 1: cold keys — hitTokens = 0, il = 3072 (3 blocks x 1024).
-            enqueue(prefill, batch(1000, slot(0,
+            enqueueAndFetch(prefill, batch(1000, slot(0,
                     inputWithBlockKeys(100, 3072, keys))));
             cluster.awaitCompleted(1, 5_000);
             cluster.awaitAllInflightZero(2_000);
 
             // Request 2: same keys — all 3 blocks hit, hitTokens = 3072.
-            enqueue(prefill, batch(1001, slot(0,
+            enqueueAndFetch(prefill, batch(1001, slot(0,
                     inputWithBlockKeys(101, 3072, keys))));
             cluster.awaitCompleted(2, 5_000);
             cluster.awaitAllInflightZero(2_000);
@@ -170,7 +170,7 @@ class TpsMetricsAccountingTest {
                 inputs[i] = inputWithDecode(200 + i, inputLen,
                         decode.getGrpcPort(), outputLen);
             }
-            enqueue(prefill, batch(2000, slot(0, inputs)));
+            enqueueAndFetch(prefill, batch(2000, slot(0, inputs)));
             cluster.awaitCompleted(n, 10_000);
             cluster.awaitAllInflightZero(5_000);
 
@@ -214,9 +214,9 @@ class TpsMetricsAccountingTest {
             int inputLen = 512;
 
             // A completes normally; B is cancelled while running.
-            enqueue(prefill, batch(3000, slot(0,
+            enqueueAndFetch(prefill, batch(3000, slot(0,
                     inputWithBlockKeys(300, inputLen, List.of()))));
-            enqueue(prefill, batch(3001, slot(0,
+            enqueueAndFetch(prefill, batch(3001, slot(0,
                     inputWithBlockKeys(301, inputLen, List.of()))));
             cluster.awaitInflight(prefill, 2, 5_000);
             prefill.cancel(301L);

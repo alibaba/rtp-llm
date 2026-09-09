@@ -1,0 +1,41 @@
+# Configuration for the registered Python case; execution and assertions live in Python.
+schema_version: 2
+case: batcher_placement_admission
+profiles:
+- batch-window
+- single-batch
+- single-nonbatch
+- window-nonbatch
+environment:
+  backend: java_mock
+  n_prefill: 1
+  n_decode: 2
+  perf_preset: default
+  config_overrides:
+    ordering: priority
+    queue_timeout_ms: 60000
+    max_waiting_requests_per_prefill_worker: 2
+execution:
+  timeout_s: 600
+  stage_timeout_s: 60
+  cleanup_timeout_s: 120
+variants:
+- id: batcher_queue_capacity_park
+  profiles:
+  - batch-window
+  - single-batch
+- id: batcher_queue_deadline
+  profiles:
+  - batch-window
+  - single-batch
+  environment:
+    config_overrides:
+      queue_timeout_ms: 1500
+- id: placement_pool_wait
+  profiles:
+  - single-nonbatch
+  - window-nonbatch
+  environment:
+    config_overrides:
+      ordering: fifo
+      max_inflight_requests_per_worker: 1

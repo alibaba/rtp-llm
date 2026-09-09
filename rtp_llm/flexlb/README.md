@@ -136,7 +136,6 @@ export FLEXLB_CONFIG='{
     "enqueueRpcTimeoutMs": 5000
   },
   "router": {
-    "availabilityHysteresisPercent": 15,
     "groupSelector": {
       "defaultTargets": [
         {"group": "default-group", "weight": 1}
@@ -153,19 +152,13 @@ export FLEXLB_CONFIG='{
     },
     "roles": {
       "prefill": {
-        "availability": {
-          "maxPendingRequests": 64
-        },
-        "selector": {
-          "type": "ESTIMATED_TTFT",
-          "candidateChoice": {
-            "type": "RANDOM_WITHIN_TOLERANCE",
-            "relativeTolerance": 0.1,
-            "minimumToleranceMs": 20,
-            "outlierRejection": {
-              "maxPendingVsAverageMultiplier": 3.0,
-              "maxProjectedDrainVsAverageMultiplier": 3.0
-            }
+        "candidateChoice": {
+          "type": "RANDOM_WITHIN_TOLERANCE",
+          "relativeTolerance": 0.1,
+          "minimumToleranceMs": 20,
+          "outlierRejection": {
+            "maxPendingVsAverageMultiplier": 3.0,
+            "maxProjectedDrainVsAverageMultiplier": 3.0
           }
         },
         "cacheAffinity": {
@@ -181,17 +174,11 @@ export FLEXLB_CONFIG='{
         "kvReservation": {
           "maxOutputTokensForEstimate": 1000
         },
-        "selector": {
-          "type": "KV_USAGE_WEIGHTED_RANDOM",
-          "decayPerToken": 0.001,
-          "outlierRejection": {
-            "maxEngineLoadVsAverageMultiplier": 3.0,
-            "maxKvUsedVsAverageMultiplier": 3.0
-          }
+        "decayPerToken": 0.001,
+        "outlierRejection": {
+          "maxEngineLoadVsAverageMultiplier": 3.0,
+          "maxKvUsedVsAverageMultiplier": 3.0
         }
-      },
-      "vit": {
-        "selector": {"type": "RANDOM"}
       }
     }
   },
@@ -317,7 +304,7 @@ Production-style examples migrated from the former field-level environment varia
 - [QUEUE + PRIORITY + BATCH](docs/config-examples/flexlb-queue-priority-batch.json)
 
 DIRECT uses the same role routing configuration as QUEUE. For example, a compact
-DIRECT configuration with explicit random prefill/decode selection is:
+DIRECT configuration with randomized prefill candidate choice is:
 
 ```bash
 export FLEXLB_CONFIG='{
@@ -326,21 +313,21 @@ export FLEXLB_CONFIG='{
   "dispatcher": {"type": "NON_BATCH"},
   "router": {
     "roles": {
-      "prefill": {"selector": {"type": "RANDOM"}},
-      "decode": {"selector": {"type": "RANDOM"}},
-      "vit": {"selector": {"type": "RANDOM"}}
+      "prefill": {"candidateChoice": {"type": "RANDOM_WITHIN_TOLERANCE"}},
+      "decode": {"availability": {"maxKvUsagePercent": 90}}
     }
   }
 }'
 ```
 
-PREFILL and PDFUSION share the prefill selector. Prefill selector types are
-`RANDOM` and `ESTIMATED_TTFT`; the latter supports `BEST_ONLY`,
-`RANDOM_WITHIN_TOLERANCE`, or `LEAST_RECENTLY_USED_IN_POOL` candidate choice.
-The candidate pool for `LEAST_RECENTLY_USED_IN_POOL` is tagged as either
-`{"type":"RATIO","ratio":0.3,"minimumWorkers":1}` or
-`{"type":"FIXED","workers":2}`. Decode selector types are `RANDOM` and
-`KV_USAGE_WEIGHTED_RANDOM`; VIT currently supports `RANDOM`.
+PREFILL and PDFUSION share the prefill selection. Prefill selection is always
+estimated-TTFT cost based; `router.roles.prefill.candidateChoice` chooses
+`BEST_ONLY`, `RANDOM_WITHIN_TOLERANCE`, or `LEAST_RECENTLY_USED_IN_POOL`
+candidate choice. The candidate pool for `LEAST_RECENTLY_USED_IN_POOL` is
+tagged as either `{"type":"RATIO","ratio":0.3,"minimumWorkers":1}` or
+`{"type":"FIXED","workers":2}`. Decode selection is always KV-usage weighted,
+tuned through `router.roles.decode.decayPerToken` and `outlierRejection`; VIT
+selection is fixed to random and is not configurable.
 
 `ESTIMATED_TTFT` is a deterministic frozen-snapshot projection, not a promise
 about future wall-clock latency. It inserts the incoming request using the live
@@ -351,12 +338,13 @@ observed on the current head is represented as a structured blocked state. The
 model does not invent a release time for delivery capacity that is currently
 unobservable; otherwise its service timeline is conditional on later admission.
 
-Cache affinity is enabled by including `router.roles.prefill.cacheAffinity` and is
-valid only with `ESTIMATED_TTFT`. A cache leader is preferred only when its
-endpoint-specific reusable prefix meets `minPrefixHitPercent` and its frozen
-projected TTFT is no more than `maxExtraTtftMs` above the best candidate. The
-percentage uses predictor-effective reusable tokens (the final cache block remains
-compute work), not the raw routing-prefix match. Omit the object to disable it.
+Cache affinity is enabled by including `router.roles.prefill.cacheAffinity` and
+is valid only with the estimated-TTFT prefill selection. A cache leader is
+preferred only when its endpoint-specific reusable prefix meets
+`minPrefixHitPercent` and its frozen projected TTFT is no more than
+`maxExtraTtftMs` above the best candidate. The percentage uses
+predictor-effective reusable tokens (the final cache block remains compute
+work), not the raw routing-prefix match. Omit the object to disable it.
 Decode admission is controlled by the optional positive
 `router.roles.decode.availability.maxEngineRequests`; omit it for no FlexLB-side
 request-count cap. The cap covers all Engine-facing ownership: engine-confirmed
@@ -416,10 +404,10 @@ Authorization: Bearer <token>
 - **FlexLB behavior**: one strict JSON document in `FLEXLB_CONFIG`.
 - **Prefill execution formula**:
   `router.roles.prefill.executionTimeEstimator.expression` when estimator type is
-  `FORMULA`. Omitting the estimator applies the code default: the production
-  DSv4 prefill fit (`RoutingConfig.FormulaEstimatorConfig.DEFAULT_EXPRESSION`).
-- **Routing strategy parameters**: the tagged selector objects under
-  `router.roles.prefill`, `router.roles.decode`, and `router.roles.vit`.
+  `FORMULA`. Omitting the estimator applies the code default:
+  `sum(computeTokens) + 0.3*sum(hitCacheTokens)`.
+- **Routing strategy parameters**: the candidate-choice, cache-affinity, and
+  decode tuning objects under `router.roles.prefill` and `router.roles.decode`.
 - **Traffic group selection**: `router.groupSelector` inside the same document.
 - **Backend topology**: `MODEL_SERVICE_CONFIG`.
 - **ZooKeeper consistency**: `FLEXLB_SYNC_CONSISTENCY_CONFIG`.

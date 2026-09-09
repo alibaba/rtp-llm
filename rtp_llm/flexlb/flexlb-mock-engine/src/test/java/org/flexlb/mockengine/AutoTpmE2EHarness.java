@@ -184,6 +184,8 @@ final class AutoTpmE2EHarness implements AutoCloseable {
                     port, services, engineScheduler, model, poolBlocks,
                     new JavaMockEngineCluster.ClusterStats());
             services.put(port, svc);
+            // This schedule-only harness has no frontend Fetch consumer.
+            svc.setAutoFetch(true);
             prefillEngines.add(svc);
         }
         for (int i = 0; i < nDecode; i++) {

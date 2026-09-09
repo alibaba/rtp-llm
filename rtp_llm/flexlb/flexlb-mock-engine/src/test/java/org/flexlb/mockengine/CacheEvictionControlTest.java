@@ -20,7 +20,7 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
 import static org.flexlb.mockengine.MockEngineTestSupport.batch;
-import static org.flexlb.mockengine.MockEngineTestSupport.enqueue;
+import static org.flexlb.mockengine.MockEngineTestSupport.enqueueAndFetch;
 import static org.flexlb.mockengine.MockEngineTestSupport.httpGet;
 import static org.flexlb.mockengine.MockEngineTestSupport.httpPostResponse;
 import static org.flexlb.mockengine.MockEngineTestSupport.slot;
@@ -31,8 +31,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
 /**
- * KV observation/control capabilities backing the flexlb_ft KV case family
- * (tools/online_eval/flexlb_ft/cases/kv.py):
+ * KV observation/control capabilities backing the flexlb_test_framework KV case family
+ * (tools/online_eval/flexlb_test_framework/cases/kv/):
  *
  * <p>1. per-engine key-set exposure — every /snapshot engine dict carries
  * {@code cache_key_set} (the engine's full MockLruBlockCache key list,
@@ -123,7 +123,7 @@ class CacheEvictionControlTest {
         assertTrue(idle.get("cache_key_set").isArray(), "cache_key_set must always be present");
         assertEquals(0, idle.get("cache_key_set").size());
 
-        enqueue(prefill, batch(9600, slot(0, inputWithBlockKeys(
+        enqueueAndFetch(prefill, batch(9600, slot(0, inputWithBlockKeys(
                 9601, 10, decode.getGrpcPort(), List.of(101L, 102L, 103L)))));
         awaitCompleted(decode, 1, 10_000);
         awaitEngineCacheKeys("prefill-0", 3, 10_000);
@@ -158,7 +158,7 @@ class CacheEvictionControlTest {
         JavaMockEngineCluster.FastRpcService prefill = prefillServices.get(0);
         JavaMockEngineCluster.FastRpcService decode = decodeServices.get(0);
 
-        enqueue(prefill, batch(9610, slot(0, inputWithBlockKeys(
+        enqueueAndFetch(prefill, batch(9610, slot(0, inputWithBlockKeys(
                 9611, 10, decode.getGrpcPort(), List.of(201L, 202L)))));
         awaitCompleted(decode, 1, 10_000);
         awaitEngineCacheKeys("prefill-0", 2, 10_000);
@@ -197,7 +197,7 @@ class CacheEvictionControlTest {
         JavaMockEngineCluster.FastRpcService prefill = prefillServices.get(0);
         JavaMockEngineCluster.FastRpcService decode = decodeServices.get(0);
 
-        enqueue(prefill, batch(9620, slot(0, inputWithBlockKeys(
+        enqueueAndFetch(prefill, batch(9620, slot(0, inputWithBlockKeys(
                 9621, 10, decode.getGrpcPort(), List.of(301L, 302L)))));
         awaitCompleted(decode, 1, 10_000);
         awaitEngineCacheKeys("prefill-0", 2, 10_000);
@@ -240,7 +240,7 @@ class CacheEvictionControlTest {
         JavaMockEngineCluster.FastRpcService prefill = prefillServices.get(0);
         JavaMockEngineCluster.FastRpcService decode = decodeServices.get(0);
 
-        enqueue(prefill, batch(9630, slot(0, inputWithBlockKeys(
+        enqueueAndFetch(prefill, batch(9630, slot(0, inputWithBlockKeys(
                 9631, 10, decode.getGrpcPort(), List.of(401L, 402L)))));
         awaitCompleted(decode, 1, 10_000);
         awaitEngineCacheKeys("prefill-0", 2, 10_000);

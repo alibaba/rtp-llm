@@ -16,7 +16,7 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import static org.flexlb.mockengine.MockEngineTestSupport.batch;
-import static org.flexlb.mockengine.MockEngineTestSupport.enqueue;
+import static org.flexlb.mockengine.MockEngineTestSupport.enqueueAndFetch;
 import static org.flexlb.mockengine.MockEngineTestSupport.httpPost;
 import static org.flexlb.mockengine.MockEngineTestSupport.inputWithBlockKeys;
 import static org.flexlb.mockengine.MockEngineTestSupport.inputWithDecode;
@@ -93,7 +93,7 @@ class MetricsValidationTest {
                             (i * count + j) % nDecode).getGrpcPort();
                     inputs[j] = inputWithDecode(startRequestId + j, 10, decodePort);
                 }
-                EngineRpcService.EnqueueBatchResponsePB response = enqueue(
+                EngineRpcService.EnqueueBatchResponsePB response = enqueueAndFetch(
                         prefillServices.get(i), batch(1000 + i, slot(0, inputs)));
                 totalEnqueueErrors += response.getErrorsCount();
             }
@@ -257,7 +257,7 @@ class MetricsValidationTest {
             // Request A (3 fresh hash keys) completes → keys parked in the LRU.
             EngineRpcService.GenerateInputPB a = inputWithBlockKeys(
                     101L, (int) (3 * spb), List.of(11L, 22L, 33L));
-            assertEquals(0, enqueue(prefill, batch(1, slot(0, a))).getErrorsCount());
+            assertEquals(0, enqueueAndFetch(prefill, batch(1, slot(0, a))).getErrorsCount());
             awaitEngine(cluster, prefill.getGrpcPort(),
                     snap -> snap.get("cache_keys").asInt() == 3, 5_000,
                     "request A completion must index its 3 keys");
@@ -270,7 +270,7 @@ class MetricsValidationTest {
             // referenced → availability drops by exactly 3 blocks.
             EngineRpcService.GenerateInputPB b = inputWithBlockKeys(
                     102L, (int) (3 * spb), List.of(11L, 22L, 33L));
-            assertEquals(0, enqueue(prefill, batch(2, slot(0, b))).getErrorsCount());
+            assertEquals(0, enqueueAndFetch(prefill, batch(2, slot(0, b))).getErrorsCount());
             awaitEngine(cluster, prefill.getGrpcPort(),
                     snap -> snap.get("available_kv_tokens").asLong() == idleAvailable - 3 * spb,
                     2_000,

@@ -1,0 +1,153 @@
+# Configuration for the registered Python case; execution and assertions live in Python.
+schema_version: 2
+case: cache_affinity
+profiles:
+- batch-window
+- single-nonbatch
+- single-batch
+- window-nonbatch
+environment:
+  backend: java_mock
+  n_prefill: 2
+  n_decode: 4
+  perf_preset: default
+execution:
+  timeout_s: 900
+  stage_timeout_s: 30
+  cleanup_timeout_s: 120
+variants:
+- id: leader_spill_p2
+  use: leader_spill_multi
+  profiles: [single-batch]
+  environment:
+    n_prefill: 2
+    n_decode: 2
+    prefill_cache_blocks: 64
+    decode_cache_blocks: 64
+  parameters:
+    receiver_retention_blocks: 6
+    hot_blocks: 10
+    background_blocks: 4
+    interval_s: 0.15
+    steady_interval_s: 0.4
+    slow_ms: 15000
+    normal_ms: 100
+    background_every: 8
+    window_s: 2
+    baseline_windows: 3
+    saturation_windows: 6
+    recovery_windows: 10
+    # Per-topology samples: docs/calibration/cache-storm-2026-09-08.json
+    concurrency: 128
+    recovery_consecutive: 2
+    min_busy_share: 0.9
+    calibration_runs: 3
+    hit_strict: 0.962367
+    eviction_strict: 0.126957
+    holders_strict: 1
+    hit_normal: 0.939481
+    eviction_normal: 0.165174
+    holders_normal: 1
+    hit_loose: 0.885854
+    eviction_loose: 0.253913
+    holders_loose: 1
+- id: leader_spill_p3
+  use: leader_spill_multi
+  profiles: [single-batch]
+  environment:
+    n_prefill: 3
+    n_decode: 2
+    prefill_cache_blocks: 64
+    decode_cache_blocks: 64
+  parameters:
+    receiver_retention_blocks: 6
+    hot_blocks: 10
+    background_blocks: 4
+    interval_s: 0.15
+    steady_interval_s: 0.4
+    slow_ms: 15000
+    normal_ms: 100
+    background_every: 8
+    window_s: 2
+    baseline_windows: 3
+    saturation_windows: 6
+    recovery_windows: 10
+    # Per-topology samples: docs/calibration/cache-storm-2026-09-08.json
+    concurrency: 128
+    recovery_consecutive: 2
+    min_busy_share: 0.9
+    calibration_runs: 3
+    hit_strict: 0.962367
+    eviction_strict: 0.127133
+    holders_strict: 1
+    hit_normal: 0.939481
+    eviction_normal: 0.165404
+    holders_normal: 1
+    hit_loose: 0.885854
+    eviction_loose: 0.254267
+    holders_loose: 1
+- id: leader_spill_p4
+  use: leader_spill_multi
+  profiles: [single-batch]
+  environment:
+    n_prefill: 4
+    n_decode: 2
+    prefill_cache_blocks: 64
+    decode_cache_blocks: 64
+  parameters:
+    receiver_retention_blocks: 6
+    hot_blocks: 10
+    background_blocks: 4
+    interval_s: 0.15
+    steady_interval_s: 0.4
+    slow_ms: 15000
+    normal_ms: 100
+    background_every: 8
+    window_s: 2
+    baseline_windows: 3
+    saturation_windows: 6
+    recovery_windows: 10
+    # Per-topology samples: docs/calibration/cache-storm-2026-09-08.json
+    concurrency: 128
+    recovery_consecutive: 2
+    min_busy_share: 0.9
+    calibration_runs: 3
+    hit_strict: 0.962367
+    eviction_strict: 0.126818
+    holders_strict: 1
+    hit_normal: 0.939481
+    eviction_normal: 0.164994
+    holders_normal: 1
+    hit_loose: 0.885854
+    eviction_loose: 0.253636
+    holders_loose: 1
+- id: prefix_batch
+  profiles:
+  - batch-window
+  - single-batch
+- id: prefix_nonbatch
+  profiles:
+  - single-nonbatch
+  - window-nonbatch
+- id: hot_tension
+- id: mixed_tiers
+- id: leader_spill_batch
+  profiles:
+  - batch-window
+  - single-batch
+  execution:
+    timeout_s: 1500
+  environment:
+    n_decode: 2
+    prefill_cache_blocks: 12
+    decode_cache_blocks: 12
+- id: leader_spill_nonbatch
+  profiles:
+  - single-nonbatch
+  - window-nonbatch
+  execution:
+    timeout_s: 1500
+  environment:
+    n_decode: 2
+    prefill_cache_blocks: 12
+    decode_cache_blocks: 12

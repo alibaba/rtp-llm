@@ -1,0 +1,22 @@
+# Configuration for the registered Python case; execution and assertions live in Python.
+schema_version: 2
+case: batch_ack_and_execution
+profiles:
+- batch-window
+environment:
+  backend: java_mock
+  n_prefill: 2
+  n_decode: 2
+  config_overrides:
+    ordering: priority
+    queue_timeout_ms: 10000
+    stale_inflight_ms: 30000
+execution:
+  timeout_s: 600
+  stage_timeout_s: 120
+  cleanup_timeout_s: 120
+variants:
+- id: ack_partial
+- id: execution_partial
+- id: ack_multi_error
+- id: ack_drop

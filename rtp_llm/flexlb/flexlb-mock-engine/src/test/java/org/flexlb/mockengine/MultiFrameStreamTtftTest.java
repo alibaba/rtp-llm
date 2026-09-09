@@ -138,17 +138,17 @@ class MultiFrameStreamTtftTest {
 
     @Test
     @Timeout(30)
-    void fetchResponseZeroFramesTimesOutWithCleanCompletion() throws Exception {
+    void unknownFetchReturnsNotFoundWithoutCreatingContext() throws Exception {
         startCluster("100", 50.0);
         prefill.setResponsePollTimeoutMs(150);
         decode.setResponsePollTimeoutMs(150);
 
-        // requestId 4 was never enqueued: an empty queue, a short poll timeout,
-        // and the stream must still complete cleanly with zero frames (the
-        // empty_response contract the load client relies on).
+        // Real Fetch takes an existing deferred context once; an unknown ID
+        // fails immediately rather than allocating an orphan response queue.
         CollectedStream stream = fetch(prefill, 4, 10_000);
 
-        assertNull(stream.error.get(), "zero-frame timeout must complete, not error");
+        assertEquals(io.grpc.Status.Code.NOT_FOUND,
+                io.grpc.Status.fromThrowable(stream.error.get()).getCode());
         assertEquals(0, stream.frames.size(), "no frame may be delivered for an unknown request");
     }
 

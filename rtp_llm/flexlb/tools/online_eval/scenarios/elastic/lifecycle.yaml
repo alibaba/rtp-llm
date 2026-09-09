@@ -1,0 +1,121 @@
+# Configuration for the registered Python case; execution and assertions live in Python.
+schema_version: 2
+case: elastic_lifecycle
+profiles:
+- batch-window
+- single-batch
+- single-nonbatch
+- window-nonbatch
+environment:
+  backend: java_mock
+  n_prefill: 2
+  n_decode: 4
+  discovery: discovery_file
+  perf_preset: fault_env
+  config_overrides:
+    ordering: priority
+    queue_timeout_ms:
+      omit: true
+execution:
+  timeout_s: 1800
+  stage_timeout_s: 50
+  cleanup_timeout_s: 120
+variants:
+- id: decode_scale_out_protection
+  environment:
+    n_prefill: 2
+    n_decode: 2
+    decode_cache_blocks: 64
+    config_overrides:
+      decode_max_engine_requests: 8
+      queue_timeout_ms: 30000
+  parameters:
+    concurrency: 24
+    output_len: 128
+    window_s: 20
+  execution:
+    timeout_s: 480
+    cleanup_timeout_s: 120
+- id: normal
+  profiles:
+  - batch-window
+- id: strict
+  profiles:
+  - batch-window
+- id: rebalance
+  profiles:
+  - batch-window
+- id: kv_skew_hot
+  profiles:
+  - batch-window
+  execution:
+    timeout_s: 1200
+    stage_timeout_s: 100
+    cleanup_timeout_s: 120
+  environment:
+    n_decode: 2
+- id: kv_skew_cold
+  profiles:
+  - batch-window
+  execution:
+    timeout_s: 1200
+    stage_timeout_s: 100
+    cleanup_timeout_s: 120
+  environment:
+    n_decode: 2
+- id: steady_recovery
+  profiles:
+  - batch-window
+  execution:
+    timeout_s: 900
+    stage_timeout_s: 40
+    cleanup_timeout_s: 120
+- id: kv_full_shrink
+  profiles:
+  - batch-window
+  execution:
+    timeout_s: 1600
+    stage_timeout_s: 40
+    cleanup_timeout_s: 120
+  environment:
+    n_prefill: 2
+    n_decode: 2
+    decode_cache_blocks: 24
+- id: transient_imbalance
+  profiles:
+  - batch-window
+  environment:
+    n_prefill: 3
+    n_decode: 2
+    prefill_max_waiting_batches: 16
+    config_overrides:
+      ordering: priority
+      queue_timeout_ms: 60000
+      max_waiting_requests_per_prefill_worker: 64
+- id: rebalance_single_batch
+  profiles:
+  - single-batch
+- id: rebalance_single_nonbatch
+  profiles:
+  - single-nonbatch
+- id: rebalance_window_nonbatch
+  profiles:
+  - window-nonbatch
+- id: normal_single_batch
+  profiles:
+  - single-batch
+- id: strict_single_batch
+  profiles:
+  - single-batch
+- id: normal_single_nonbatch
+  profiles:
+  - single-nonbatch
+- id: strict_single_nonbatch
+  profiles:
+  - single-nonbatch
+- id: normal_window_nonbatch
+  profiles:
+  - window-nonbatch
+- id: strict_window_nonbatch
+  profiles:
+  - window-nonbatch

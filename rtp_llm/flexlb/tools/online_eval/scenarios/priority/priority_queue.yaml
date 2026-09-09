@@ -1,0 +1,112 @@
+# Configuration for the registered Python case; execution and assertions live in Python.
+schema_version: 2
+case: priority_queue
+profiles:
+- batch-window
+- single-nonbatch
+- single-batch
+- window-nonbatch
+environment:
+  backend: java_mock
+  n_prefill: 2
+  n_decode: 4
+execution:
+  timeout_s: 600
+  stage_timeout_s: 60
+  cleanup_timeout_s: 120
+variants:
+- id: same_level_fifo
+  profiles:
+  - single-nonbatch
+  environment:
+    n_prefill: 1
+    config_overrides:
+      ordering: priority
+      queue_timeout_ms:
+        omit: true
+      max_inflight_requests_per_worker: 1
+      max_waiting_requests_per_prefill_worker: 8
+- id: low_no_starvation
+  profiles:
+  - single-nonbatch
+  execution:
+    timeout_s: 2400
+    stage_timeout_s: 60
+    cleanup_timeout_s: 120
+- id: queue_timeout_terminal
+  profiles:
+  - single-nonbatch
+  environment:
+    n_prefill: 1
+    config_overrides:
+      ordering: priority
+      queue_timeout_ms: 8000
+      max_inflight_requests_per_worker: 1
+      max_waiting_requests_per_prefill_worker: 8
+- id: order_basic
+  profiles:
+  - single-nonbatch
+  environment:
+    n_prefill: 1
+    config_overrides:
+      ordering: priority
+      queue_timeout_ms:
+        omit: true
+      max_inflight_requests_per_worker: 1
+      max_waiting_requests_per_prefill_worker: 8
+- id: normalize_default50
+  profiles:
+  - batch-window
+  - single-nonbatch
+  - single-batch
+  - window-nonbatch
+- id: normalize_channels
+  profiles:
+  - batch-window
+  - single-nonbatch
+  - single-batch
+  - window-nonbatch
+  environment:
+    n_prefill: 1
+    config_overrides:
+      ordering: priority
+      queue_timeout_ms:
+        omit: true
+      max_inflight_requests_per_worker: 1
+      max_waiting_requests_per_prefill_worker: 8
+      decision: single
+      dispatcher: non_batch
+- id: normalize_default30
+  profiles:
+  - batch-window
+  - single-nonbatch
+  - single-batch
+  - window-nonbatch
+  environment:
+    n_prefill: 1
+    config_overrides:
+      ordering: priority
+      queue_timeout_ms:
+        omit: true
+      max_inflight_requests_per_worker: 1
+      max_waiting_requests_per_prefill_worker: 8
+      decision: single
+      dispatcher: non_batch
+      default_priority: 30
+- id: normalize_metrics
+  profiles:
+  - batch-window
+  - single-nonbatch
+  - single-batch
+  - window-nonbatch
+  environment:
+    n_prefill: 1
+    config_overrides:
+      ordering: priority
+      queue_timeout_ms:
+        omit: true
+      max_inflight_requests_per_worker: 1
+      max_waiting_requests_per_prefill_worker: 8
+      decision: single
+      dispatcher: non_batch
+    metric_whitelist: flexlb_auto_tpm_request_count

@@ -1,0 +1,130 @@
+# Configuration for the registered Python case; execution and assertions live in Python.
+schema_version: 2
+case: cancel_lifecycle
+profiles:
+- batch-window
+- single-nonbatch
+- single-batch
+- window-nonbatch
+environment:
+  backend: java_mock
+  n_prefill: 2
+  n_decode: 4
+execution:
+  timeout_s: 600
+  stage_timeout_s: 120
+  cleanup_timeout_s: 120
+variants:
+- id: basic_batch
+  profiles:
+  - batch-window
+  - single-batch
+- id: idempotent_batch
+  profiles:
+  - batch-window
+  - single-batch
+- id: after_terminal_batch
+  profiles:
+  - batch-window
+  - single-batch
+- id: basic_nonbatch
+  profiles:
+  - single-nonbatch
+  - window-nonbatch
+- id: idempotent_nonbatch
+  profiles:
+  - single-nonbatch
+  - window-nonbatch
+- id: after_terminal_nonbatch
+  profiles:
+  - single-nonbatch
+  - window-nonbatch
+- id: unknown_rid
+- id: anomaly_path_batch
+  profiles:
+  - batch-window
+  - single-batch
+- id: sibling_isolation_batch
+  profiles:
+  - batch-window
+  - single-batch
+- id: phase_timing_batch
+  profiles:
+  - batch-window
+  - single-batch
+- id: deadline_exempt_inflight_batch
+  profiles:
+  - batch-window
+  - single-batch
+  environment:
+    config_overrides:
+      queue_timeout_ms: 2000
+- id: anomaly_path_nonbatch
+  profiles:
+  - single-nonbatch
+  - window-nonbatch
+- id: sibling_isolation_nonbatch
+  profiles:
+  - single-nonbatch
+  - window-nonbatch
+- id: phase_timing_nonbatch
+  profiles:
+  - single-nonbatch
+  - window-nonbatch
+- id: deadline_exempt_inflight_nonbatch
+  profiles:
+  - single-nonbatch
+  - window-nonbatch
+  environment:
+    config_overrides:
+      queue_timeout_ms: 2000
+- id: schedule_drop_delivered
+  profiles:
+  - batch-window
+  - single-batch
+- id: stream_break_prefill_autonomous
+  profiles:
+  - batch-window
+  - single-batch
+- id: stream_break_decode_autonomous
+  profiles:
+  - single-nonbatch
+  - window-nonbatch
+- id: preemption_victim_batch
+  profiles:
+  - batch-window
+  - single-batch
+  environment:
+    n_prefill: 1
+    n_decode: 1
+    config_overrides:
+      ordering: priority
+      default_priority: 50
+      preemption:
+        allowed_victim_stages:
+        - PREFILL_QUEUED
+        - DECODE_RESERVED
+        - DECODE_ENGINE_OWNED
+        engine_cancellation:
+          ack_timeout_ms: 50
+          completion_timeout_ms: 1000
+      decode_max_engine_requests: 1
+- id: preemption_victim_nonbatch
+  profiles:
+  - single-nonbatch
+  - window-nonbatch
+  environment:
+    n_prefill: 1
+    n_decode: 1
+    config_overrides:
+      ordering: priority
+      default_priority: 50
+      preemption:
+        allowed_victim_stages:
+        - PREFILL_QUEUED
+        - DECODE_RESERVED
+        - DECODE_ENGINE_OWNED
+        engine_cancellation:
+          ack_timeout_ms: 50
+          completion_timeout_ms: 1000
+      decode_max_engine_requests: 1

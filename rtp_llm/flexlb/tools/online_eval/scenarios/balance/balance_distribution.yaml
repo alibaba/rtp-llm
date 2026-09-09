@@ -1,0 +1,16 @@
+# Configuration for the registered Python case; execution and assertions live in Python.
+schema_version: 2
+case: balance_distribution
+environment:
+  backend: java_mock
+  n_prefill: 2
+  n_decode: 4
+execution:
+  timeout_s: 1800
+  stage_timeout_s: 60
+  cleanup_timeout_s: 120
+variants:
+- id: uniform_serial
+- id: concurrent_mix
+- id: decode_spread
+- id: length_mixed

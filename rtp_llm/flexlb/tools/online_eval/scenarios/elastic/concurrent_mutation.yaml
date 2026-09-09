@@ -1,0 +1,35 @@
+# Configuration for the registered Python case; execution and assertions live in Python.
+schema_version: 2
+case: elastic_concurrent_mutation
+profiles:
+- batch-window
+- single-batch
+- single-nonbatch
+- window-nonbatch
+environment:
+  backend: java_mock
+  n_prefill: 2
+  n_decode: 4
+  discovery: discovery_file
+  perf_preset: fault_env
+  config_overrides:
+    ordering: priority
+    queue_timeout_ms:
+      omit: true
+execution:
+  timeout_s: 360
+  stage_timeout_s: 30
+  cleanup_timeout_s: 120
+variants:
+- id: default
+  profiles:
+  - batch-window
+- id: single_batch
+  profiles:
+  - single-batch
+- id: single_nonbatch
+  profiles:
+  - single-nonbatch
+- id: window_nonbatch
+  profiles:
+  - window-nonbatch

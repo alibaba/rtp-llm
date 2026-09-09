@@ -60,6 +60,9 @@ final class MockLruBlockCache {
     /** Blocks held by in-flight requests that carry no cache key (growth/empty-bh). */
     private int heldBlocks;
     private long evictions;
+    // Test-only idle-cache quota. Active leases retain the full physical pool.
+    private int retentionBlocks;
+    private long retentionEvictions;
 
     MockLruBlockCache(int totalBlocks) {
         this(totalBlocks, DEFAULT_RESERVE_RATIO);
@@ -67,6 +70,7 @@ final class MockLruBlockCache {
 
     MockLruBlockCache(int totalBlocks, double reserveRatio) {
         this.totalBlocks = Math.max(0, totalBlocks);
+        this.retentionBlocks = this.totalBlocks;
         this.reserveRatio = Math.max(0, Math.min(0.5, reserveRatio));
         this.blocks = new LinkedHashMap<>(16, 0.75f, true);
     }
@@ -298,13 +302,44 @@ final class MockLruBlockCache {
         while (blocks.size() + heldBlocks > totalBlocks && evictOne()) {
             // evictOne already counted the eviction
         }
-        return changed;
+        long beforeTrim = retentionEvictions;
+        trimRetention();
+        return changed || retentionEvictions != beforeTrim;
+    }
+
+    /** Publish computed P keys while retaining the connector's references until KV transfer. */
+    synchronized BlockLease retainComputed(BlockLease lease, List<Long> keys) {
+        // The P lease was provisioned from this exact key set. Convert its
+        // keyless blocks into referenced keys atomically: no evictable gap.
+        List<Long> retained = new ArrayList<>(lease.hitKeys);
+        int naked = lease.nakedBlocks;
+        for (Long key : keys) {
+            if (retained.contains(key)) {
+                continue;
+            }
+            if (naked == 0) {
+                throw new IllegalStateException("computed keys exceed prefill allocation");
+            }
+            Integer references = blocks.get(key);
+            if (references == null) {
+                blocks.put(key, 1);
+            } else {
+                blocks.put(key, references + 1);
+            }
+            // Another request may already have published this key. Its shared
+            // physical block replaces our reserved keyless block as well.
+            heldBlocks--;
+            naked--;
+            retained.add(key);
+        }
+        return new BlockLease(retained, naked);
     }
 
     /** Cancelled request: release references and return held blocks to free (no LRU handover). */
     synchronized void release(BlockLease lease) {
         dereference(lease.hitKeys);
         heldBlocks -= lease.nakedBlocks;
+        trimRetention();
     }
 
     /**
@@ -329,7 +364,9 @@ final class MockLruBlockCache {
         while (blocks.size() > totalBlocks && evictOne()) {
             // evictOne already counted the eviction
         }
-        return changed;
+        long beforeTrim = retentionEvictions;
+        trimRetention();
+        return changed || retentionEvictions != beforeTrim;
     }
 
     // ─────────────────────────── forced eviction (/cache_evict) ───────────────────────────
@@ -365,6 +402,24 @@ final class MockLruBlockCache {
         blocks.clear();
         heldBlocks = 0;
         evictions = 0;
+        retentionEvictions = 0;
+    }
+
+    synchronized void setRetentionBlocks(int limit) {
+        if (limit < 0 || limit > totalBlocks) {
+            throw new IllegalArgumentException("cache retention must be within the physical pool");
+        }
+        retentionBlocks = limit;
+        trimRetention();
+    }
+
+    synchronized int retentionBlocks() { return retentionBlocks; }
+    synchronized long retentionEvictions() { return retentionEvictions; }
+
+    private void trimRetention() {
+        while (blocks.size() - referencedKeyBlocks() > retentionBlocks && evictOne()) {
+            retentionEvictions++;
+        }
     }
 
     // ─────────────────────────── observation ───────────────────────────

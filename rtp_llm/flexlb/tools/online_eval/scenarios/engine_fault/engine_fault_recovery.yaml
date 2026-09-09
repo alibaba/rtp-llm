@@ -1,0 +1,57 @@
+# Configuration for the registered Python case; execution and assertions live in Python.
+schema_version: 2
+case: engine_fault_recovery
+profiles:
+- batch-window
+- single-nonbatch
+- single-batch
+- window-nonbatch
+environment:
+  backend: java_mock
+  n_prefill: 2
+  n_decode: 2
+  discovery: discovery_file
+  perf_preset: fault_env
+  master_sync_log: true
+  config_overrides:
+    ordering: priority
+    queue_timeout_ms:
+      omit: true
+execution:
+  timeout_s: 900
+  stage_timeout_s: 120
+  cleanup_timeout_s: 120
+variants:
+- id: generation_bump
+- id: status_gap_no_bump
+- id: down_phases
+  environment:
+    n_decode: 4
+    master_sync_log: false
+- id: flap
+  environment:
+    n_decode: 4
+    master_sync_log: false
+- id: kv_resync
+  profiles:
+  - batch-window
+  - single-batch
+  - window-nonbatch
+- id: kv_usage_reset
+- id: crash_after
+  profiles:
+  - batch-window
+  - single-batch
+  environment:
+    discovery: file
+    perf_preset: default
+    master_sync_log: false
+    config_overrides:
+      ordering: priority
+      queue_timeout_ms: 60000
+      stale_inflight_ms: 30000
+- id: no_resurrect
+  profiles:
+  - batch-window
+  - single-batch
+- id: status_gap_long_retire

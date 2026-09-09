@@ -1,0 +1,17 @@
+{
+  "source_commit": "4f7b8203683817862cd5fce40dd786a84ac37110",
+  "python_programs": 31,
+  "yaml_files": 31,
+  "variants": 183,
+  "instances": 385,
+  "checks": 3676,
+  "example_ids": [
+    "request_completion::immediate::batch-window",
+    "request_completion::immediate::single-nonbatch",
+    "request_completion::immediate::single-batch",
+    "request_completion::immediate::window-nonbatch",
+    "request_completion::deferred_fetch::batch-window",
+    "request_completion::deferred_fetch::single-batch"
+  ],
+  "note": "Static configuration expansion, not an execution result."
+}

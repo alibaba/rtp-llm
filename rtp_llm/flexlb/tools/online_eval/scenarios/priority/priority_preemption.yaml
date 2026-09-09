@@ -1,0 +1,238 @@
+# Configuration for the registered Python case; execution and assertions live in Python.
+schema_version: 2
+case: priority_preemption
+profiles:
+- single-nonbatch
+- single-batch
+- batch-window
+environment:
+  backend: java_mock
+  n_prefill: 1
+  n_decode: 4
+  perf_preset: default
+  config_overrides:
+    ordering: priority
+    decision: single
+    dispatcher: non_batch
+    queue_timeout_ms: 60000
+    max_inflight_requests_per_worker: 1
+    max_waiting_requests_per_prefill_worker: 8
+execution:
+  timeout_s: 1200
+  stage_timeout_s: 60
+  cleanup_timeout_s: 120
+variants:
+- id: same_priority_zero_eviction
+  profiles:
+  - single-nonbatch
+  environment:
+    config_overrides:
+      preemption:
+        allowed_victim_stages:
+        - PREFILL_QUEUED
+- id: prefill_queued
+  profiles:
+  - single-nonbatch
+  environment:
+    config_overrides:
+      preemption:
+        allowed_victim_stages:
+        - PREFILL_QUEUED
+- id: timeout_attribution
+  profiles:
+  - single-nonbatch
+  environment:
+    config_overrides:
+      queue_timeout_ms: 7000
+      preemption:
+        allowed_victim_stages:
+        - PREFILL_QUEUED
+- id: disabled_zero_eviction
+  profiles:
+  - single-nonbatch
+  environment:
+    config_overrides:
+      queue_timeout_ms: 8000
+- id: comparator_frozen_weak
+  profiles:
+  - single-nonbatch
+  environment:
+    config_overrides:
+      preemption:
+        allowed_victim_stages:
+        - PREFILL_QUEUED
+- id: config_strict_reject
+  profiles:
+  - single-nonbatch
+  environment:
+    config_overrides:
+      ordering: priority
+      decision: single
+      dispatcher: non_batch
+      queue_timeout_ms:
+        omit: true
+      max_inflight_requests_per_worker: 1
+      max_waiting_requests_per_prefill_worker: 8
+- id: decode_engine_owned
+  profiles:
+  - single-nonbatch
+  environment:
+    n_prefill: 2
+    n_decode: 4
+    config_overrides:
+      max_inflight_requests_per_worker: 3
+      preemption:
+        allowed_victim_stages:
+        - DECODE_RESERVED
+        - DECODE_ENGINE_OWNED
+        engine_cancellation:
+          ack_timeout_ms: 50
+          completion_timeout_ms: 1000
+    metric_whitelist: flexlb_auto_tpm
+- id: error_code_family
+  profiles:
+  - single-nonbatch
+  environment:
+    n_prefill: 2
+    n_decode: 2
+    config_overrides:
+      ordering: priority
+      decision: single
+      dispatcher: non_batch
+      max_outstanding: 2
+      queue_timeout_ms:
+        omit: true
+      max_inflight_requests_per_worker:
+        omit: true
+      max_waiting_requests_per_prefill_worker:
+        omit: true
+- id: decode_reservation_priority
+  profiles:
+  - single-nonbatch
+  environment:
+    n_prefill: 2
+    n_decode: 4
+    config_overrides:
+      max_inflight_requests_per_worker: 3
+      preemption:
+        allowed_victim_stages:
+        - DECODE_RESERVED
+        - DECODE_ENGINE_OWNED
+        engine_cancellation:
+          ack_timeout_ms: 50
+          completion_timeout_ms: 1000
+    metric_whitelist: flexlb_auto_tpm
+- id: observability_integrity
+  profiles:
+  - single-nonbatch
+  environment:
+    metric_whitelist: flexlb_auto_tpm
+    master_debug_log: true
+    config_overrides:
+      queue_timeout_ms: 7000
+      preemption:
+        allowed_victim_stages:
+        - PREFILL_QUEUED
+- id: prefill_queued_live_single
+  profiles:
+  - single-batch
+  environment:
+    metric_whitelist: flexlb_auto_tpm
+    config_overrides:
+      dispatcher: batch
+      decision: single
+      max_inflight_requests_per_worker:
+        omit: true
+      max_waiting_requests_per_prefill_worker: 2
+      queue_timeout_ms: 60000
+      preemption:
+        allowed_victim_stages:
+        - PREFILL_QUEUED
+- id: prefill_queued_live_window
+  profiles:
+  - batch-window
+  environment:
+    metric_whitelist: flexlb_auto_tpm
+    config_overrides:
+      dispatcher: batch
+      decision: fixed_window
+      max_inflight_requests_per_worker:
+        omit: true
+      max_waiting_requests_per_prefill_worker: 2
+      queue_timeout_ms: 60000
+      preemption:
+        allowed_victim_stages:
+        - PREFILL_QUEUED
+      max_collection_wait_ms: 400
+- id: decode_reserved_live_single
+  profiles:
+  - single-batch
+  environment:
+    metric_whitelist: flexlb_auto_tpm
+    config_overrides:
+      dispatcher: batch
+      decision: single
+      max_inflight_requests_per_worker:
+        omit: true
+      max_waiting_requests_per_prefill_worker: 8
+      queue_timeout_ms: 60000
+      preemption:
+        allowed_victim_stages:
+        - PREFILL_QUEUED
+        - DECODE_RESERVED
+    n_decode: 1
+    decode_cache_blocks: 5
+- id: decode_reserved_live_window
+  profiles:
+  - batch-window
+  environment:
+    metric_whitelist: flexlb_auto_tpm
+    config_overrides:
+      dispatcher: batch
+      decision: fixed_window
+      max_inflight_requests_per_worker:
+        omit: true
+      max_waiting_requests_per_prefill_worker: 8
+      queue_timeout_ms: 60000
+      preemption:
+        allowed_victim_stages:
+        - PREFILL_QUEUED
+        - DECODE_RESERVED
+      max_collection_wait_ms: 400
+    n_decode: 1
+    decode_cache_blocks: 5
+- id: cancel_not_found
+  profiles:
+  - single-nonbatch
+  environment:
+    n_decode: 1
+    config_overrides:
+      decode_max_engine_requests: 1
+      preemption:
+        allowed_victim_stages:
+        - PREFILL_QUEUED
+        - DECODE_RESERVED
+        - DECODE_ENGINE_OWNED
+        engine_cancellation:
+          ack_timeout_ms: 50
+          completion_timeout_ms: 1000
+- id: cancel_tombstoned
+  profiles:
+  - single-batch
+  - batch-window
+  environment:
+    n_decode: 1
+    config_overrides:
+      dispatcher: batch
+      decision: single
+      max_inflight_requests_per_worker:
+        omit: true
+      decode_max_engine_requests: 1
+      preemption:
+        allowed_victim_stages:
+        - PREFILL_QUEUED
+        - DECODE_RESERVED
+        - DECODE_ENGINE_OWNED
+        engine_cancellation:
+          ack_timeout_ms: 50
+          completion_timeout_ms: 1000

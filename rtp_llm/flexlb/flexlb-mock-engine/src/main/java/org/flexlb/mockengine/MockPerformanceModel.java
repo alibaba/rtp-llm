@@ -254,6 +254,21 @@ final class MockPerformanceModel {
         this.jitterPct = jitterPct;
     }
 
+    /** Give each engine its own mutable controls, including dynamically added engines. */
+    MockPerformanceModel forEngine() {
+        MockPerformanceModel copy = new MockPerformanceModel(
+                blockSize, sleepScale, prefillScale, prefillMinMs, configuredFixedPrefillMs,
+                maxWaitingPrefillBatches, directBatchSizeMax, maxBatchTokens, maxBatchRequests,
+                prefillFormula, List.copyOf(decodePoints), stepBaseMs, stepPerRunningMs,
+                tokensPerStep, decodeReserveStep, decodeScale, reportQueuedAsKvAllocated, jitterPct);
+        // Explicit overrides installed before startup are part of that engine's initial settings.
+        copy.overrideFixedPrefillMs = overrideFixedPrefillMs;
+        copy.overrideDecodeStepMs = overrideDecodeStepMs;
+        copy.overrideDecodeScale = overrideDecodeScale;
+        copy.overrideMaxWaitingPrefillBatches = overrideMaxWaitingPrefillBatches;
+        return copy;
+    }
+
     static MockPerformanceModel load(String performanceFile, String masterConfigFile) throws IOException {
         JsonNode performance = MAPPER.readTree(Path.of(performanceFile).toFile());
         int blockSize = performance.path("block_size").asInt(1024);
