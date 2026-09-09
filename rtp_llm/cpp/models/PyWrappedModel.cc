@@ -163,11 +163,15 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
     DevicePerfWrapper            wrapper(enable_device_perf_, "py model buildPyAttentionInputs");
     torch_ext::PyAttentionInputs py_attn_inputs;
 
+    // Device-resident predicate (CUDA or NPU); must match the pack-side
+    // classification — host-only branches below pin memory.
+    auto is_accel = [](const torch::Tensor& t) { return t.is_cuda() || t.is_privateuseone(); };
+
     auto normalize_i32 = [this](const torch::Tensor& tensor) -> torch::Tensor {
         if (!tensor.defined()) {
             return tensor;
         }
-        if (tensor.is_cuda()) {
+        if (tensor.is_cuda() || tensor.is_privateuseone()) {
             auto result = tensor.scalar_type() == torch::kInt32 ? tensor : tensor.to(torch::kInt32);
             return result.is_contiguous() ? result : result.contiguous();
         }
@@ -181,7 +185,7 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
     };
     auto to_device_i32 = [this, &normalize_i32](const torch::Tensor& tensor) -> torch::Tensor {
         auto normalized = normalize_i32(tensor);
-        if (!normalized.defined() || normalized.is_cuda()) {
+        if (!normalized.defined() || normalized.is_cuda() || normalized.is_privateuseone()) {
             return normalized;
         }
         return tensorHoldHostAndToCuda(normalized);
@@ -193,23 +197,18 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
 
 
 #if !USING_CUDA
-    // Non-CUDA platforms only support the host metadata pipeline (the device
-    // branch below needs the CUDA-only metadata kernel), so lift any
-    // CUDA-resident lengths (e.g. from the MTP device-state fast path) back
-    // to host before branching.
+    // Non-CUDA platforms only support the host metadata pipeline, so lift any
+    // device-resident lengths (CUDA or NPU) back to host before branching.
     for (auto* t : {&py_attn_inputs.prefix_lengths, &py_attn_inputs.sequence_lengths, &py_attn_inputs.input_lengths}) {
-        if (t->defined() && t->is_cuda()) {
+        if (t->defined() && (t->is_cuda() || t->is_privateuseone())) {
             *t = normalize_i32(t->cpu());
         }
     }
 #endif
-    // MTP draft-prefill hands in a CUDA prefix_lengths (device-state fast path)
-    // while the rest of the host pipeline stays CPU-resident. Normalize it to
-    // host here so downstream host helpers (padding offset, cu_seqlens) keep
-    // their host-tensor contract; prefix_lengths_device below restores the
-    // CUDA copy for device consumers.
-    if (py_attn_inputs.input_lengths.defined() && !py_attn_inputs.input_lengths.is_cuda()
-        && py_attn_inputs.prefix_lengths.defined() && py_attn_inputs.prefix_lengths.is_cuda()) {
+    // MTP draft-prefill hands in a device prefix_lengths while the rest of
+    // the host pipeline stays CPU-resident; normalize it to host here.
+    if (py_attn_inputs.input_lengths.defined() && !is_accel(py_attn_inputs.input_lengths)
+        && py_attn_inputs.prefix_lengths.defined() && is_accel(py_attn_inputs.prefix_lengths)) {
         py_attn_inputs.prefix_lengths = normalize_i32(py_attn_inputs.prefix_lengths.cpu());
     }
     py_attn_inputs.prefix_lengths_device = to_device_i32(py_attn_inputs.prefix_lengths);
@@ -251,7 +250,7 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
     const auto cuda_i32 = torch::TensorOptions(torch::kInt32).device(getTorchCudaDevice());
     const auto host_i32 = torch::TensorOptions(torch::kInt32).device(torch::kCPU).pinned_memory(true);
 
-    if (context_batch_size > 0 && py_attn_inputs.input_lengths.is_cuda()) {
+    if (context_batch_size > 0 && is_accel(py_attn_inputs.input_lengths)) {
         py_attn_inputs.total_tokens = inputs.combo_tokens.defined() ? static_cast<int>(inputs.combo_tokens.numel()) : 0;
         // Must match cu_kv_seqlens_device's definition (input_lengths +
         // prefix_lengths): the CUDA graph padding fill copies this scalar into
@@ -310,10 +309,10 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
 
     // NOTE: to_device_i32/tensorHoldHostAndToCuda return *deferred-copy* tensors:
     // their storage is only filled by the fusedCopy() flush right before forward.
-    // CUDA arithmetic on them here would read uninitialized memory, so "+1" must
+    // Device arithmetic on them here would read uninitialized memory, so "+1" must
     // happen on the host side for host-resident inputs.
     auto plus_1_to_device = [&](const torch::Tensor& t) -> torch::Tensor {
-        if (t.defined() && t.is_cuda()) {
+        if (t.defined() && is_accel(t)) {
             return t.to(torch::kInt32) + 1;
         }
         auto host_plus_1 = normalize_i32(t) + 1;
@@ -331,11 +330,13 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
 }
 
 static void calculatePaddingOffsetDeviceAware(torch_ext::PyAttentionInputs& py_attn_inputs) {
-    if (!py_attn_inputs.input_lengths.defined() || !py_attn_inputs.input_lengths.is_cuda()) {
+    if (!py_attn_inputs.input_lengths.defined()
+        || !(py_attn_inputs.input_lengths.is_cuda() || py_attn_inputs.input_lengths.is_privateuseone())) {
         calculatePaddingOffset(py_attn_inputs);
         return;
     }
-    if (py_attn_inputs.padding_offset.defined() && py_attn_inputs.padding_offset.is_cuda()) {
+    if (py_attn_inputs.padding_offset.defined()
+        && (py_attn_inputs.padding_offset.is_cuda() || py_attn_inputs.padding_offset.is_privateuseone())) {
         return;
     }
 
@@ -379,10 +380,12 @@ PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs& py_
             py_attn_inputs.kv_cache_block_id_device = tensorHoldHostAndToCuda(py_attn_inputs.kv_cache_block_id);
             if (py_attn_inputs.cache_store_inputs.has_value()) {
                 // Async writer reads via raw host pointers; MTP device-state
-                // paths may carry CUDA block tables here.
-                py_attn_inputs.cache_store_inputs->host_kv_cache_offset = py_attn_inputs.kv_cache_block_id.is_cuda() ?
-                                                                              py_attn_inputs.kv_cache_block_id.cpu() :
-                                                                              py_attn_inputs.kv_cache_block_id;
+                // paths may carry CUDA *or* NPU block tables here.
+                py_attn_inputs.cache_store_inputs->host_kv_cache_offset =
+                    (py_attn_inputs.kv_cache_block_id.is_cuda()
+                     || py_attn_inputs.kv_cache_block_id.is_privateuseone()) ?
+                        py_attn_inputs.kv_cache_block_id.cpu() :
+                        py_attn_inputs.kv_cache_block_id;
             }
         }
         return {};
@@ -408,9 +411,10 @@ PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs& py_
             group_inputs.kv_cache_block_id        = inputs.kv_cache_block_id[group_id];
             group_inputs.kv_cache_block_id_device = tensorHoldHostAndToCuda(group_inputs.kv_cache_block_id);
             if (group_inputs.cache_store_inputs.has_value()) {
-                group_inputs.cache_store_inputs->host_kv_cache_offset = group_inputs.kv_cache_block_id.is_cuda() ?
-                                                                            group_inputs.kv_cache_block_id.cpu() :
-                                                                            group_inputs.kv_cache_block_id;
+                group_inputs.cache_store_inputs->host_kv_cache_offset =
+                    (group_inputs.kv_cache_block_id.is_cuda() || group_inputs.kv_cache_block_id.is_privateuseone()) ?
+                        group_inputs.kv_cache_block_id.cpu() :
+                        group_inputs.kv_cache_block_id;
             }
         }
         const auto [it, inserted] = by_tag.emplace(group_tags[group_id], std::move(group_inputs));
@@ -492,9 +496,11 @@ std::optional<PyCacheStoreInputs> PyWrappedModel::prepareWriteCacheParams(const 
 
     PyCacheStoreInputs cache_store_inputs;
     // runtimeWriteCacheStore reads these via raw host pointers on the async
-    // writer thread; MTP device-state paths hand in CUDA tensors, so lift them
-    // to host here (sync copy, prefill-frequency only).
-    const auto to_host = [](const torch::Tensor& t) { return (t.defined() && t.is_cuda()) ? t.cpu() : t; };
+    // writer thread; MTP device-state paths hand in CUDA/NPU tensors, so lift
+    // them to host here (sync copy, prefill-frequency only).
+    const auto to_host = [](const torch::Tensor& t) {
+        return (t.defined() && (t.is_cuda() || t.is_privateuseone())) ? t.cpu() : t;
+    };
     cache_store_inputs.input_lengths_host    = to_host(inputs.input_lengths);
     cache_store_inputs.prefix_lengths_host   = to_host(inputs.prefix_lengths);
     cache_store_inputs.host_kv_cache_offset  = to_host(inputs.kv_cache_block_id);
@@ -1133,8 +1139,11 @@ MicroBatchPlan PyWrappedModel::planMicroBatches(const GptModelInputs& inputs) {
     const size_t decoder_batch_size = sequence_lengths.size(0);
     const size_t context_batch_size = input_lengths.size(0) - decoder_batch_size;
     // TODO(async): layer micro-batch planning still needs host lengths for
-    // split arithmetic. Keep the CPU mirror explicit while model inputs stay CUDA.
-    const auto input_lengths_host = input_lengths.is_cuda() ? input_lengths.cpu().pin_memory() : input_lengths;
+    // split arithmetic. Keep the CPU mirror explicit while model inputs stay
+    // accelerator-resident (CUDA or NPU).
+    const auto input_lengths_host =
+        (input_lengths.is_cuda() || input_lengths.is_privateuseone()) ? input_lengths.cpu().pin_memory() :
+                                                                        input_lengths;
     const auto input_lengths_ptr  = input_lengths_host.data_ptr<int32_t>();
 
     if (decoder_batch_size + context_batch_size < 2) {
@@ -1209,9 +1218,11 @@ PyWrappedModel::splitInputsIntoMicroBatches(const GptModelInputs& inputs, const 
     size_t                      prefill_batch_idx      = 0;
     // TODO(async): micro-batch token slicing still computes CPU scalar sums.
     // Convert explicitly and keep all sliced GptModelInputs device-resident.
-    const auto input_lengths_host = inputs.input_lengths.defined() && inputs.input_lengths.is_cuda() ?
-                                        inputs.input_lengths.cpu().pin_memory() :
-                                        inputs.input_lengths;
+    const auto input_lengths_host =
+        inputs.input_lengths.defined()
+        && (inputs.input_lengths.is_cuda() || inputs.input_lengths.is_privateuseone()) ?
+            inputs.input_lengths.cpu().pin_memory() :
+            inputs.input_lengths;
     const auto* input_lengths_ptr =
         input_lengths_host.defined() ? input_lengths_host.data_ptr<int32_t>() : nullptr;
 

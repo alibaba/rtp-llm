@@ -9,6 +9,7 @@ from rtp_llm.models_py.modules.factory.attention.ascend_impl.ascend_kv_cache_wri
 from rtp_llm.models_py.modules.factory.attention.ascend_impl.ascend_rope_emb import AscendRotaryEmbeddingOp
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
 from rtp_llm.models_py.modules.factory.attention import common
+from rtp_llm.ops import RopeStyle
 
 
 class AscendDecodeImpl(FMHAImplBase):
@@ -25,10 +26,13 @@ class AscendDecodeImpl(FMHAImplBase):
 
         self.fmha_impl = AscendDecodeAttnOp(attn_configs, attn_inputs)
         self.rope_impl = self._create_rope_impl(attn_configs)
+        # FIA read / scatter write / slot mapping all run at kernel-block
+        # granularity (PyAttentionInputs.kv_cache is never assigned).
+        self.kernel_page_size = attn_configs.kernel_tokens_per_block or 128
         self.kv_cache_write_op = AscendKVCacheWriteOp(
             num_kv_heads=attn_configs.kv_head_num,
             head_size=attn_configs.size_per_head,
-            token_per_block=attn_inputs.kv_cache.seq_size_per_block if attn_inputs.kv_cache else 128,
+            token_per_block=self.kernel_page_size,
         )
 
         self.params = AscendAttnParams()
@@ -40,7 +44,6 @@ class AscendDecodeImpl(FMHAImplBase):
         self.write_cache_store_impl = common.create_write_cache_store_impl(attn_inputs)
 
     def _create_rope_impl(self, attn_configs):
-        from rtp_llm.ops import RopeStyle
         if attn_configs.rope_config.style == RopeStyle.No:
             return None
         return AscendRotaryEmbeddingOp(attn_configs)
@@ -61,7 +64,7 @@ class AscendDecodeImpl(FMHAImplBase):
         return query, key, value
 
     def _update_rope_kv_write_params(self, device):
-        positions, slot_mapping = compute_ascend_attn_params(self.attn_inputs)
+        positions, slot_mapping = compute_ascend_attn_params(self.attn_inputs, page_size=self.kernel_page_size)
         self.params.positions_d = positions.to(device, non_blocking=True)
         self.params.slot_mapping = slot_mapping.to(device, non_blocking=True)
 
@@ -93,8 +96,11 @@ class AscendDecodeImpl(FMHAImplBase):
 
     @staticmethod
     def support(attn_configs, attn_inputs):
+        # MRoPE rejected: only 1-D positions are built here (same guard as the
+        # CUDA impl); multi-axis support lands with multimodal models.
         return not attn_inputs.is_prefill and \
                not attn_configs.use_mla and \
+               attn_configs.rope_config.style != RopeStyle.Mrope and \
                torch.npu.is_available()
 
 
@@ -121,8 +127,9 @@ class AscendDecodeAttnOp:
         self.num_kv_heads = attn_configs.kv_head_num
         self.head_dim = attn_configs.size_per_head
         self.scale = attn_configs.q_scaling * self.head_dim ** -0.5
-        self.page_size = attn_inputs.kv_cache.seq_size_per_block if \
-                         attn_inputs.kv_cache else 128
+        # Kernel-block page size (FIA table and kv_cache_base are sized by
+        # kernel_seq_size_per_block, not the physical seq size).
+        self.page_size = attn_configs.kernel_tokens_per_block or 128
         self.block_table = None
         self.context_lens = None
 

@@ -9,9 +9,13 @@ class AscendRotaryEmbeddingOp:
 
     def __init__(self, attn_config: AttentionConfigs, cos_sin_cache: torch.Tensor | None = None):
         self.head_size = attn_config.size_per_head
-        self.is_neox_style = False
         self.token_per_block = attn_config.kernel_tokens_per_block
         self.rope_config = attn_config.rope_config
+        # rope_config.is_neox_style=True means NeoX half-split (repo default),
+        # False means GPT-J interleaved. The helper's flag has inverted naming
+        # (True = interleaved) and always consumes a halves [cos|sin] cache.
+        rope_neox = bool(self.rope_config.is_neox_style) if self.rope_config is not None else True
+        self.is_interleaved = not rope_neox
         self.cos_sin_cache = cos_sin_cache
         if self.cos_sin_cache is None and self.rope_config is not None:
             rope_cache = get_rope_cache_once(
@@ -52,7 +56,7 @@ class AscendRotaryEmbeddingOp:
                 query, key,
                 self.cos_sin_cache,
                 rope_params.positions_d,
-                is_neox_style=self.is_neox_style,
+                is_neox_style=self.is_interleaved,
             )
         else:
             raise RuntimeError("AscendRotaryEmbeddingOp requires cos_sin_cache")

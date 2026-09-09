@@ -7,6 +7,11 @@
 #include "rtp_llm/cpp/utils/Logger.h"
 
 #if USING_ASCEND
+#include <acl/acl.h>
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-function"
+#include <torch_npu/csrc/core/npu/NPUStream.h>
+#pragma GCC diagnostic pop
 #define GRAPH_DEVICE_TYPE torch::kPrivateUse1
 #elif USING_ROCM
 #include <ATen/hip/HIPGraph.h>
@@ -86,7 +91,14 @@ inline GraphStream toGraphStream(const torch::Stream& stream) {
 
 inline void setDevice(int rank) {
 #if USING_ASCEND
-    (void)rank;
+    // aclrtSetDevice requires a concrete index; a negative one must fail
+    // loudly instead of running on whatever device the thread inherited.
+    RTP_LLM_CHECK_WITH_INFO(rank >= 0, "setDevice(rank=%d) requires a concrete NPU index", rank);
+    aclError err = aclrtSetDevice(rank);
+    RTP_LLM_CHECK_WITH_INFO(err == ACL_SUCCESS,
+                            "aclrtSetDevice(%d) failed: %d",
+                            rank,
+                            static_cast<int>(err));
 #elif USING_ROCM
     auto result = hipSetDevice(rank);
     RTP_LLM_CHECK_WITH_INFO(result == hipSuccess, "hipSetDevice(%d) failed: %s", rank, hipGetErrorString(result));
@@ -136,19 +148,16 @@ inline void graphSetCurrentStream(GraphStream stream) {
 }
 
 inline torch::Event makeGraphEvent() {
-#if USING_ASCEND
-    return torch::Event(torch::kPrivateUse1);
-#else
     return torch::Event(GRAPH_DEVICE_TYPE);
-#endif
 }
 
 // Event/stream ordering helpers. Ascend's GraphStream is an opaque handle, so
-// cross-stream record/block pairs degrade to stream-synchronous semantics.
+// record/block run on the current NPU stream (torch_npu implements the
+// PrivateUse1 EventImpl), keeping synchronize() correct on all platforms.
 inline void graphRecordEvent(torch::Event& event, GraphStream stream) {
 #if USING_ASCEND
-    (void)event;
-    (void)stream;
+    (void)stream;  // opaque handle; record on the current NPU stream instead
+    event.record(c10_npu::getCurrentNPUStream().unwrap());
 #else
     event.record(stream);
 #endif
@@ -156,13 +165,12 @@ inline void graphRecordEvent(torch::Event& event, GraphStream stream) {
 
 inline void graphBlockEvent(const torch::Event& event, GraphStream stream) {
 #if USING_ASCEND
-    (void)event;
     (void)stream;
+    event.block(c10_npu::getCurrentNPUStream().unwrap());
 #else
     event.block(stream);
 #endif
 }
-
 
 #if USING_ROCM
 py::module_& getCollectiveTorchModule();
@@ -178,11 +186,7 @@ void            graphMemGetInfo(size_t* free_bytes, size_t* total_bytes);
 size_t          graphReservedBytes();
 size_t          graphAllocatedBytes();
 GraphPoolHandle graphPoolHandle();
-#if USING_CUDA || USING_ROCM
 void            graphCaptureBegin(at::cuda::CUDAGraph& graph, GraphPoolHandle pool);
-#else
-void            graphCaptureBegin(void* graph, GraphPoolHandle pool);
-#endif
 
 }  // namespace cuda_graph
 }  // namespace rtp_llm

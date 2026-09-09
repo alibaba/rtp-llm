@@ -56,7 +56,7 @@ def build_ascend_params(attn_inputs, page_size: int) -> AscendAttnParams:
     return params
 
 
-def compute_ascend_attn_params(attn_inputs):
+def compute_ascend_attn_params(attn_inputs, page_size: Optional[int] = None):
     """Compute RoPE positions and KV cache slot_mapping in pure Python.
 
     Replaces C++ FlashInferMlaAttnParams.fill_params() on Ascend platform.
@@ -69,17 +69,28 @@ def compute_ascend_attn_params(attn_inputs):
             - prefix_lengths: [B] int32 (CPU or NPU)
             - input_lengths: [B] int32 (CPU or NPU)
             - sequence_lengths: [B] int32 (CPU or NPU)
+            - kv_cache_kernel_block_id: [B, max_kernel_blocks] int32 (CPU) --
+              kernel-granularity table, same source as FIA; slot_mapping must
+              use this granularity to match the kv_cache_base view.
             - kv_cache_block_id: [B, max_blocks] int32 (CPU, host mirror per main 5466bafd6)
-            - kv_cache: object with seq_size_per_block
+              physical-granularity fallback when no kernel table exists.
+        page_size: kernel seq size per block (e.g. from
+              attn_configs.kernel_tokens_per_block); 0/None falls back to 128.
 
     Returns:
         positions: [num_tokens] int32, CPU
         slot_mapping: [num_tokens] int64, CPU
     """
     is_prefill = attn_inputs.is_prefill
-    block_table = _squeeze_block_table(attn_inputs.kv_cache_block_id)  # always on CPU
-    page_size = (attn_inputs.kv_cache.seq_size_per_block
-                 if attn_inputs.kv_cache is not None else 128)
+    # Slots are computed at kernel granularity to match the kv_cache_base view
+    # and the FIA block table; the physical table is only a fallback.
+    block_table = _squeeze_block_table(attn_inputs.kv_cache_kernel_block_id)
+    if block_table is None:
+        block_table = _squeeze_block_table(attn_inputs.kv_cache_block_id)
+    if block_table is not None and block_table.device.type != "cpu":
+        block_table = block_table.cpu()  # kernel table may arrive device-resident
+    if not page_size:
+        page_size = 128
 
     if is_prefill:
         prefix_lens = attn_inputs.prefix_lengths.cpu() if attn_inputs.prefix_lengths is not None else None

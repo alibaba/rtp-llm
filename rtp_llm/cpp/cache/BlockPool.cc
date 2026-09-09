@@ -577,7 +577,8 @@ void BlockPool::regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_sto
     if (cache_store_ && !kvcache_reg_mr_) {
         RTP_LLM_LOG_INFO("start to register user mr, pool_name=%s", config_.pool_name.c_str());
         auto       memory_util = cache_store_->getMemoryUtil();
-        const bool gpu         = where() == MemoryType::MEMORY_GPU;
+        // NPU pool memory is device memory; register with the device flag.
+        const bool gpu = where() == MemoryType::MEMORY_GPU || where() == MemoryType::MEMORY_NPU;
 
         for (size_t layout_idx = 0; layout_idx < config_.memory_layouts.size(); ++layout_idx) {
             const auto& layout_cfg = config_.memory_layouts[layout_idx];
@@ -611,7 +612,7 @@ void BlockPool::deregUserMr() {
     if (kvcache_reg_mr_ && cache_store_) {
         RTP_LLM_LOG_INFO("start to deregister user mr, pool_name=%s", config_.pool_name.c_str());
         auto       memory_util = cache_store_->getMemoryUtil();
-        const bool gpu         = where() == MemoryType::MEMORY_GPU;
+        const bool gpu = where() == MemoryType::MEMORY_GPU || where() == MemoryType::MEMORY_NPU;
 
         for (size_t layout_idx = 0; layout_idx < config_.memory_layouts.size(); ++layout_idx) {
             const auto& layout_cfg = config_.memory_layouts[layout_idx];

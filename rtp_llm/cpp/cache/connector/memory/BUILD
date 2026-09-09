@@ -18,6 +18,7 @@ cc_library(
         "//rtp_llm/cpp/utils:lru_cache",
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/utils:profiling_scope",
+        "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
         "@havenask//aios/autil:json",
         "@havenask//aios/autil:lock_free",
     ] + torch_deps() + no_block_copy_link_deps(),
