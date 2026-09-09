@@ -13,11 +13,17 @@ from rtp_llm.utils.model_weight import W
 
 _DEVICE_TYPE = get_device_type()
 if _DEVICE_TYPE == DeviceType.Cuda:
+    from rtp_llm.models_py.triton_kernels.sparse_mla.fused_hy4_indexer_rope_quant import (
+        fused_hy4_indexer_rope_quant_cache,
+    )
     from rtp_llm.models_py.triton_kernels.sparse_mla.fused_logits_head_gate import (
+        fp32_linear_logits_head_gate,
         fused_logits_head_gate,
     )
 else:
+    fused_hy4_indexer_rope_quant_cache = None  # type: ignore
     fused_logits_head_gate = None  # type: ignore
+    fp32_linear_logits_head_gate = None  # type: ignore
 
 
 class Indexer(nn.Module):
@@ -47,10 +53,13 @@ class Indexer(nn.Module):
         # ``ENABLE_FUSE_KERNELS``) → ``self._fuse_logits_head_gate``. Keep it
         # out of the forward path so it's free at decode (no env / config
         # lookup per token).
-        self._fuse_logits_head_gate = (
+        fuse_head_gate = (
             fuse_kernels_enabled(hw_kernel_config)
             and fused_logits_head_gate is not None
         )
+        # Preserve the legacy Hadamard path. HY4 selects its small-T kernel
+        # separately; large-T HY4 must keep the faster FP32 Linear path.
+        self._fuse_logits_head_gate = fuse_head_gate and use_hadamard
 
         self.index_n_heads = attn_config.indexer_head_num
         self.index_head_dim = attn_config.indexer_head_dim
@@ -125,6 +134,23 @@ class Indexer(nn.Module):
             and not self.weights_proj.weight.is_contiguous()
         ):
             self.weights_proj.weight = self.weights_proj.weight.contiguous()
+        # Small-T HY4 uses a coalesced FP32 GEMV, not the large-T TF32 kernel.
+        # Do not replace the original Linear weight: its transposed layout is
+        # part of the large-T GEMM dispatch. Prepare this inference-only view
+        # once, outside forward/CUDA Graph capture, and omit it from checkpoints.
+        head_weight = getattr(self.weights_proj, "weight", None)
+        small_t_weight = None
+        if (
+            fuse_head_gate
+            and not use_hadamard
+            and isinstance(head_weight, torch.Tensor)
+            and tuple(head_weight.shape) == (32, 6144)
+            and head_weight.dtype == torch.float32
+        ):
+            small_t_weight = head_weight.detach().contiguous()
+        self.register_buffer(
+            "_hy4_small_t_head_gate_weight", small_t_weight, persistent=False
+        )
         self.cos_sin_cache = global_weights[W.rope_cos_sin_cache]
 
         self.indexer_op = IndexerOp(
@@ -164,12 +190,30 @@ class Indexer(nn.Module):
         )
 
     def _get_logits_head_gate(
-        self, x: torch.Tensor, q_scale: torch.Tensor
+        self,
+        x: torch.Tensor,
+        q_scale: torch.Tensor,
+        x_fp32: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         # F3: fused (cast + GEMV + 2 elementwise muls) into one Triton kernel.
         # ``self._fuse_logits_head_gate`` is resolved at __init__ from
         # ``HWKernelConfig.enable_fuse_kernels``.
         scale = self.softmax_scale * self.weights_scale
+        small_t_weight = getattr(self, "_hy4_small_t_head_gate_weight", None)
+        if (
+            small_t_weight is not None
+            and x.dim() == 2
+            and 1 <= x.shape[0] <= 32
+            and x.shape[1] == 6144
+            and x.dtype in (torch.bfloat16, torch.float16)
+            and x.is_contiguous()
+            and x.device == small_t_weight.device
+            and q_scale.dtype == torch.float32
+            and q_scale.is_contiguous()
+        ):
+            return fused_logits_head_gate(
+                x, q_scale, small_t_weight, scale, fallback_proj=self.weights_proj
+            )
         if self._fuse_logits_head_gate and x.is_contiguous():
             return fused_logits_head_gate(
                 x,
@@ -177,20 +221,19 @@ class Indexer(nn.Module):
                 self.weights_proj.weight,
                 scale,
                 fallback_proj=self.weights_proj,
-                # HY4 disables the legacy Hadamard path. Its per-head weights
-                # feed a discrete top-k, so do not use the single-pass TF32
-                # approximation that can replace boundary entries.
-                high_precision=not self.use_hadamard,
+                high_precision=False,
+            )
+        if fp32_linear_logits_head_gate is not None:
+            return fp32_linear_logits_head_gate(
+                x, q_scale, self.weights_proj, scale, x_fp32=x_fp32
             )
         x = x.float()
-        weights = self.weights_proj(x)
-        weights = weights.float()
-        weights = weights.unsqueeze(-1) * q_scale * scale
-        return weights
+        weights = self.weights_proj(x).float()
+        return weights.unsqueeze(-1) * q_scale * scale
 
     def _fused_forward_decode(
         self,
-        q_lora: torch.Tensor,
+        q_lora: Optional[torch.Tensor],
         x: torch.Tensor,
         kv_cache: KVCache,
         fmha_params: Any,
@@ -224,7 +267,7 @@ class Indexer(nn.Module):
 
     def _fused_forward_prefill_cp(
         self,
-        q_lora: torch.Tensor,
+        q_lora: Optional[torch.Tensor],
         x: torch.Tensor,
         kv_cache: KVCache,
         fmha_params: Any,
@@ -266,7 +309,7 @@ class Indexer(nn.Module):
 
     def _get_q_k_bf16(
         self,
-        q_lora: torch.Tensor,
+        q_lora: Optional[torch.Tensor],
         x: torch.Tensor,
         flashmla_params: Any,
         attention_inputs: Any,
@@ -385,7 +428,7 @@ class Indexer(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        q_lora: torch.Tensor,
+        q_lora: Optional[torch.Tensor],
         kv_cache: KVCache,
         fmha_params: Any,
         attention_inputs: Any,
@@ -395,11 +438,17 @@ class Indexer(nn.Module):
         x_scale: Optional[torch.Tensor] = None,
         q_c_fp8: Optional[torch.Tensor] = None,
         q_c_scale: Optional[torch.Tensor] = None,
+        x_fp32: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         if use_fast_path:
             key = self._get_k_bf16(hidden_states, fmha_params)
             self.indexer_op.quant_k_only(key, kv_cache, fmha_params.slot_mapping)
             return None
+
+        if q_lora is None and (q_c_fp8 is None or q_c_scale is None):
+            raise RuntimeError(
+                "Indexer q_lora may be omitted only with paired q_c MXFP8 data/scale"
+            )
 
         if self._is_sparse_prefill_cp(attention_inputs):
             assert cp_params is not None, "cp_params is required for sparse prefill CP"
@@ -458,7 +507,7 @@ class Indexer(nn.Module):
                 query, key, kv_cache, fmha_params, attention_inputs, cp_params
             )
 
-        weights = self._get_logits_head_gate(hidden_states, q_scale)
+        weights = self._get_logits_head_gate(hidden_states, q_scale, x_fp32=x_fp32)
         return self._compute_topk(
             q_fp8, weights, kv_cache, fmha_params, attention_inputs, cp_params
         )

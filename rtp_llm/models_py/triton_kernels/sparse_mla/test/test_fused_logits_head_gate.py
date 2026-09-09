@@ -1,14 +1,128 @@
 """Precision tests for fused_logits_head_gate (F3)."""
 
 import unittest
+from unittest.mock import Mock, patch
 
 import torch
 from torch import nn
 
 from rtp_llm.models_py.triton_kernels.sparse_mla.fused_logits_head_gate import (
     _baseline_logits_head_gate,
+    fp32_linear_logits_head_gate,
     fused_logits_head_gate,
+    project_fp32_logits_head_gate,
+    scale_fp32_logits_head_gate,
 )
+
+
+class TestSplitFP32HeadGateCpu(unittest.TestCase):
+    """No CUDA required; the production helper module needs torch + triton."""
+
+    def test_early_and_late_formula_2d_3d_scale_one_projection(self):
+        torch.manual_seed(123)
+        x = torch.randn(8, 17, dtype=torch.bfloat16)
+        linear = nn.Linear(17, 3, bias=False, dtype=torch.float32)
+        scales = torch.rand(8, 6)[:, ::2]  # Exercise non-contiguous fallback.
+        scale_const = 0.03125
+        expected = linear(x.float()).unsqueeze(-1) * scales.unsqueeze(-1) * scale_const
+        for q_scale in (scales, scales.unsqueeze(-1)):
+            with self.subTest(dim=q_scale.dim()):
+                early_proj = Mock(wraps=linear)
+                raw = project_fp32_logits_head_gate(x, early_proj)
+                raw_before = raw.clone()
+                early = scale_fp32_logits_head_gate(raw, q_scale, scale_const)
+                early_proj.assert_called_once()
+                self.assertEqual(raw.shape, (8, 3))
+                self.assertEqual(raw.dtype, torch.float32)
+                self.assertTrue(torch.equal(raw, raw_before))
+                self.assertTrue(torch.equal(early, expected))
+                late_proj = Mock(wraps=linear)
+                late = fp32_linear_logits_head_gate(x, q_scale, late_proj, scale_const)
+                late_proj.assert_called_once()
+                self.assertEqual(late.shape, (8, 3, 1))
+                self.assertTrue(torch.equal(early, late))
+
+    def test_projection_does_not_depend_on_later_query_scale(self):
+        x = torch.tensor([[1.0, -2.0], [0.5, 4.0]], dtype=torch.bfloat16)
+        linear = nn.Linear(2, 3, bias=False, dtype=torch.float32)
+        projection = Mock(wraps=linear)
+        raw = project_fp32_logits_head_gate(x, projection)
+        for value in (0.0, -1.0, 2.0):
+            scales = torch.full_like(raw, value)
+            out = scale_fp32_logits_head_gate(raw, scales, 0.25)
+            self.assertTrue(torch.equal(out, (raw * scales).unsqueeze(-1) * 0.25))
+        projection.assert_called_once()
+
+    def test_invalid_precomputed_fp32_falls_back_to_original_input(self):
+        x = torch.randn(4, 17, dtype=torch.bfloat16)
+        projection = Mock(side_effect=lambda value: value[:, :3])
+        # CPU / wrong-shaped producer views must not bypass the input cast.
+        supplied = torch.full((1, 2), 99.0, dtype=torch.float32)
+        with patch(
+            "rtp_llm.models_py.triton_kernels.sparse_mla.fused_logits_head_gate._hy4_cast_fp32",
+            side_effect=AssertionError("CPU must not invoke Triton cast"),
+        ):
+            out = project_fp32_logits_head_gate(x, projection, x_fp32=supplied)
+        projection.assert_called_once()
+        self.assertTrue(torch.equal(projection.call_args.args[0], x.float()))
+        self.assertTrue(torch.equal(out, x.float()[:, :3]))
+
+
+@unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
+class TestSplitFP32HeadGateCuda(unittest.TestCase):
+    def test_early_late_byte_exact_with_producer_fp32(self):
+        torch.manual_seed(321)
+        for rows in (1, 8, 32, 256):
+            x = torch.randn(rows, 6144, device="cuda", dtype=torch.bfloat16)
+            linear = nn.Linear(6144, 32, bias=False, device="cuda", dtype=torch.float32)
+            scales = torch.rand(rows, 32, device="cuda", dtype=torch.float32)
+            for q_scale in (scales, scales.unsqueeze(-1)):
+                for x_fp32 in (None, x.float()):
+                    with self.subTest(rows=rows, dim=q_scale.dim(), producer=x_fp32 is not None):
+                        projection = Mock(wraps=linear)
+                        raw = project_fp32_logits_head_gate(x, projection, x_fp32=x_fp32)
+                        early = scale_fp32_logits_head_gate(raw, q_scale, 0.03125)
+                        projection.assert_called_once()
+                        if x_fp32 is not None:
+                            self.assertIs(projection.call_args.args[0], x_fp32)
+                        late = fp32_linear_logits_head_gate(x, q_scale, linear, 0.03125, x_fp32=x_fp32)
+                        reference = _baseline_logits_head_gate(x, q_scale, linear, 0.03125)
+                        self.assertTrue(torch.equal(early, late))
+                        self.assertTrue(torch.equal(early, reference))
+
+    def test_multistream_cuda_graph_replays_fresh_inputs(self):
+        torch.manual_seed(99)
+        x = torch.randn(8, 6144, device="cuda", dtype=torch.bfloat16)
+        x_fp32 = x.float()
+        scales = torch.rand(8, 32, 1, device="cuda", dtype=torch.float32)
+        linear = nn.Linear(6144, 32, bias=False, device="cuda", dtype=torch.float32)
+        side = torch.cuda.Stream()
+        ready = torch.cuda.Event()
+
+        def run_split():
+            caller = torch.cuda.current_stream()
+            side.wait_stream(caller)
+            with torch.cuda.stream(side):
+                raw = project_fp32_logits_head_gate(x, linear, x_fp32=x_fp32)
+                ready.record()
+            # Query scales become available independently on the caller.
+            query_scales = scales * 1.25
+            caller.wait_event(ready)
+            return scale_fp32_logits_head_gate(raw, query_scales, 0.03125)
+
+        for _ in range(3):
+            run_split()
+        torch.cuda.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            out = run_split()
+        for _ in range(3):
+            x.copy_(torch.randn_like(x))
+            x_fp32.copy_(x.float())
+            scales.copy_(torch.rand_like(scales))
+            graph.replay()
+            reference = fp32_linear_logits_head_gate(x, scales * 1.25, linear, 0.03125, x_fp32=x_fp32)
+            self.assertTrue(torch.equal(out, reference))
 
 
 class TestFusedLogitsHeadGate(unittest.TestCase):

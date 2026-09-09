@@ -37,13 +37,42 @@ Weight layout handling:
   init time (see ``Indexer.__init__``).
 """
 
-from typing import Optional, Union
+from typing import Optional
 
 import torch
 import triton
 import triton.language as tl
 
 MAX_K = 8192
+HY4_HIDDEN_SIZE = 6144
+HY4_MAX_DECODE_TOKENS = 256
+
+
+@triton.jit
+def _hy4_cast_fp32_kernel(
+    input_ptr,
+    output_ptr,
+    size,
+    BLOCK: tl.constexpr,
+):
+    offsets = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    mask = offsets < size
+    value = tl.load(input_ptr + offsets, mask=mask)
+    tl.store(output_ptr + offsets, value, mask=mask)
+
+
+def _hy4_cast_fp32(x: torch.Tensor) -> torch.Tensor:
+    """Cast contiguous HY4 decode activations without the generic copy path."""
+    output = torch.empty(x.shape, dtype=torch.float32, device=x.device)
+    size = x.numel()
+    _hy4_cast_fp32_kernel[(triton.cdiv(size, 1024),)](
+        x,
+        output,
+        size,
+        BLOCK=1024,
+        num_warps=8,
+    )
+    return output
 
 
 @triton.jit
@@ -176,6 +205,24 @@ def _fused_logits_head_gate_small_t_kernel(
     tl.store(out_ptr + t * stride_o_t + n, out)
 
 
+@triton.jit
+def _fp32_logits_head_gate_epilogue_kernel(
+    projected_ptr,
+    q_scale_ptr,
+    output_ptr,
+    scale_const,
+    size: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    offsets = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    mask = offsets < size
+    projected = tl.load(projected_ptr + offsets, mask=mask)
+    q_scale = tl.load(q_scale_ptr + offsets, mask=mask)
+    # Match ``(projected * q_scale) * scale_const`` including FP32 rounding.
+    output = (projected * q_scale) * scale_const
+    tl.store(output_ptr + offsets, output, mask=mask)
+
+
 def _baseline_logits_head_gate(
     x: torch.Tensor,
     q_scale: torch.Tensor,
@@ -190,6 +237,85 @@ def _baseline_logits_head_gate(
     else:
         q_scale_b = q_scale
     return w.unsqueeze(-1) * q_scale_b * scale_const
+
+
+def project_fp32_logits_head_gate(
+    x: torch.Tensor,
+    weights_proj: torch.nn.Module,
+    x_fp32: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """Compute raw FP32 head weights; this stage does not depend on Q."""
+    use_precomputed_fp32 = (
+        x_fp32 is not None
+        and x_fp32.is_cuda
+        and x_fp32.dtype == torch.float32
+        and x_fp32.is_contiguous()
+        and x_fp32.device == x.device
+        and x_fp32.shape == x.shape
+    )
+    use_hy4_cast = (
+        not use_precomputed_fp32
+        and x.is_cuda
+        and x.dim() == 2
+        and x.is_contiguous()
+        and x.dtype in (torch.bfloat16, torch.float16)
+        and 1 <= x.shape[0] <= HY4_MAX_DECODE_TOKENS
+        and x.shape[1] == HY4_HIDDEN_SIZE
+    )
+    linear_input = (
+        x_fp32
+        if use_precomputed_fp32
+        else (_hy4_cast_fp32(x) if use_hy4_cast else x.float())
+    )
+    return weights_proj(linear_input).float()
+
+
+def scale_fp32_logits_head_gate(
+    projected: torch.Tensor,
+    q_scale: torch.Tensor,
+    scale_const: float,
+) -> torch.Tensor:
+    """Finish head weights once Q quantization has produced its scales."""
+    q_scale_2d = q_scale.squeeze(-1) if q_scale.dim() == 3 else q_scale
+    use_fused_epilogue = (
+        projected.is_cuda
+        and projected.dtype == torch.float32
+        and projected.is_contiguous()
+        and q_scale_2d.is_cuda
+        and q_scale_2d.dtype == torch.float32
+        and q_scale_2d.is_contiguous()
+        and q_scale_2d.device == projected.device
+        and q_scale_2d.shape == projected.shape
+        and projected.numel() > 0
+    )
+    if not use_fused_epilogue:
+        return (projected * q_scale_2d).unsqueeze(-1) * scale_const
+
+    output = torch.empty_like(projected)
+    size = projected.numel()
+    block = 512
+    _fp32_logits_head_gate_epilogue_kernel[(triton.cdiv(size, block),)](
+        projected,
+        q_scale_2d,
+        output,
+        float(scale_const),
+        size=size,
+        BLOCK=block,
+        num_warps=4,
+    )
+    return output.unsqueeze(-1)
+
+
+def fp32_linear_logits_head_gate(
+    x: torch.Tensor,
+    q_scale: torch.Tensor,
+    weights_proj: torch.nn.Module,
+    scale_const: float,
+    x_fp32: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """Original late path, composed of the same FP32 projection and epilogue."""
+    projected = project_fp32_logits_head_gate(x, weights_proj, x_fp32=x_fp32)
+    return scale_fp32_logits_head_gate(projected, q_scale, scale_const)
 
 
 def fused_logits_head_gate(
@@ -209,8 +335,9 @@ def fused_logits_head_gate(
         scale_const: ``softmax_scale * weights_scale`` (Python float).
         fallback_proj: optional callable used only when the fast path bails out
                        (matches the original ``self.weights_proj``).
-        high_precision: use TF32x3 for the large-T dot. HY4 enables this because
-                        these logits directly determine a discrete top-k set.
+        high_precision: use TF32x3 for the large-T dot when callers explicitly
+                        accept that implementation. HY4 keeps its exact FP32
+                        Linear path because it is faster at K=6144, N=32.
 
     Returns:
         ``[T, N, 1]`` fp32 tensor.
