@@ -106,12 +106,17 @@ SGL_DEVICE float coarse_bin_lower_bound(uint32_t bin) {
   // range-checked at once: `key` and `key - 1` both land in the finite band
   // [0x0401, 0xFBFF] -- every boundary a finite-score threshold produces.
   // fp16 rounds to nearest, so the fp32 boundary is the midpoint between the
-  // fp16 values at `key` and `key - 1`. (Verified bit-exact against the slow
-  // path for every bin of kBits 10 and 12, and measured faster than either
-  // per-key dispatch or an ordered-bit decrement trick -- the two conversions
-  // are independent and issue in parallel.)
+  // fp16 values at `key` and `key - 1`, adjusted for ties-to-even below.
+  // The two conversions are independent and can issue in parallel.
   if (key - 0x0401u <= 0xFBFFu - 0x0401u && bin < (1u << kBits)) {
-    return 0.5f * (to_finite_val(key) + to_finite_val(key - 1));
+    const float midpoint = 0.5f * (to_finite_val(key) + to_finite_val(key - 1));
+    // On the negative side the lower ordered key has the even FP16
+    // significand. An exact midpoint rounds to that preceding bin, so the
+    // inclusive FP32 lower bound is the next representable value above it.
+    // This midpoint is finite and is strictly negative for negative keys.
+    // Decrementing its IEEE-754 bits advances it toward zero without the
+    // general nextafterf special-case checks on this hot path.
+    return __uint_as_float(__float_as_uint(midpoint) - static_cast<uint32_t>(key < 0x8000u));
   }
   // Slow path: an edge of `bin` touches the +/-inf keys or NaN key space.
   // The ordered-key line is: [0, 0x03FF) negative-NaN space, 0x03FF = -inf,
@@ -133,7 +138,24 @@ SGL_DEVICE float coarse_bin_lower_bound(uint32_t bin) {
     if (okey > 0xFC00u) return FLT_MAX;
     return to_finite_val(okey);
   };
-  return 0.5f * (to_val(key) + to_val(key - 1));
+  const float midpoint = 0.5f * (to_val(key) + to_val(key - 1));
+  return midpoint < 0.0f && midpoint > -std::numeric_limits<float>::infinity()
+      ? nextafterf(midpoint, FLT_MAX)
+      : midpoint;
+}
+
+// Numeric comparisons cannot distinguish signed-zero bins or reproduce
+// the canonical NaN bin. Scan exact FP32 keys when the threshold touches
+// these bins (including finite scores that round to FP16 infinity).
+template <uint32_t kHistBits>
+SGL_DEVICE bool coarse_bin_needs_exact_scan(uint32_t bin) {
+  constexpr uint32_t shift = 16u - kHistBits;
+  constexpr uint32_t negative_zero = 0x7fffu >> shift;
+  constexpr uint32_t positive_zero = 0x8000u >> shift;
+  constexpr uint32_t finite_begin = (0x03ffu >> shift) + 1u;
+  constexpr uint32_t finite_size = (0xfc00u >> shift) - finite_begin;
+  return bin - negative_zero <= positive_zero - negative_zero ||
+      bin - finite_begin >= finite_size;
 }
 
 SGL_DEVICE uint32_t warp_inclusive_sum(uint32_t lane_id, uint32_t val) {
@@ -233,6 +255,9 @@ struct TopKConfig {
   /// than the fixed shared-memory tie buffer can hold. Re-scan only that
   /// coarse value interval and skip any FP32 key bytes shared by both interval
   /// endpoints. Values above the interval have already been emitted.
+  /// kFullRow instead selects all exact keys, including canonical NaNs,
+  /// when a zero/non-finite coarse threshold has no numeric interval.
+  template <bool kFullRow = false>
   SGL_DEVICE static void exact_boundary_scan_topk(
       const TopKProblem& problem,
       TieHandleSmem* smem,
@@ -247,7 +272,7 @@ struct TopKConfig {
       uint32_t prefix = 0;
       uint32_t first_round = 0;
 #pragma unroll
-      for (uint32_t round = 0; round < 4; ++round) {
+      for (uint32_t round = 0; !kFullRow && round < 4; ++round) {
         const uint32_t shift = 24u - round * 8u;
         const uint32_t lo_byte = (lo_key >> shift) & 0xffu;
         const uint32_t hi_byte = (hi_key >> shift) & 0xffu;
@@ -273,7 +298,7 @@ struct TopKConfig {
       for (uint32_t idx = tx; idx < problem.seq_len; idx += kBlockSize) {
         const float value = problem.in[idx];
         const uint32_t key = extract_exact_bin(value);
-        if (value >= v_lo && value < v_hi && (key & mask) == prefix) {
+        if ((kFullRow || (value >= v_lo && value < v_hi)) && (key & mask) == prefix) {
           atomicAdd(&smem->histogram[0][(key >> shift) & 0xffu], 1u);
         }
       }
@@ -320,7 +345,7 @@ struct TopKConfig {
     __syncthreads();
     for (uint32_t idx = tx; idx < problem.seq_len; idx += kBlockSize) {
       const float value = problem.in[idx];
-      if (value >= v_lo && value < v_hi &&
+      if ((kFullRow || (value >= v_lo && value < v_hi)) &&
           extract_exact_bin(value) > pivot) {
         const uint32_t pos = atomicAdd(&smem->counter, 1u);
         problem.emit(output_base + pos, idx);
@@ -329,7 +354,7 @@ struct TopKConfig {
     __syncthreads();
     for (uint32_t idx = tx; idx < problem.seq_len; idx += kBlockSize) {
       const float value = problem.in[idx];
-      if (value >= v_lo && value < v_hi &&
+      if ((kFullRow || (value >= v_lo && value < v_hi)) &&
           extract_exact_bin(value) == pivot) {
         const uint32_t pos = atomicAdd(&smem->counter, 1u);
         if (output_base + pos < problem.topk) {
@@ -711,6 +736,10 @@ struct TopKRegister : TopKRadixBase<12> {
     // Phase 3: collect by two fp32 boundaries (raw indices; transform applied later)
     const auto topk = problem.topk;
     const auto threshold_bin = smem->threshold_bin;
+    if (__builtin_expect(coarse_bin_needs_exact_scan<kHistBits>(threshold_bin), false)) {
+      exact_boundary_scan_topk<true>(problem, &smem->tie.handle, 0.0f, 0.0f, 0);
+      return;
+    }
     const auto v_hi = coarse_bin_lower_bound<kHistBits>(threshold_bin + 1);
     const auto v_lo = coarse_bin_lower_bound<kHistBits>(threshold_bin);
     const auto collect = [&](float val, uint32_t idx) {
@@ -797,6 +826,10 @@ struct TopKStreaming : TopKRegister<2> {
     // v_lo <= val < v_hi (bin == threshold). This drops the F2F + bit-twiddle from
     // the second full pass over the input.
     const auto threshold_bin = smem->threshold_bin;
+    if (__builtin_expect(coarse_bin_needs_exact_scan<kHistBits>(threshold_bin), false)) {
+      exact_boundary_scan_topk<true>(problem, &smem->tie.handle, 0.0f, 0.0f, 0);
+      return;
+    }
     const float v_hi = coarse_bin_lower_bound<kHistBits>(threshold_bin + 1);
     const float v_lo = coarse_bin_lower_bound<kHistBits>(threshold_bin);
     const auto topk = problem.topk;
@@ -913,6 +946,10 @@ struct TopKCluster : TopKRadixBase<10> {
 
     // Phase 2: Find the threshold bin (uses global seq_len)
     find_threshold(problem.topk, problem.seq_len, smem);
+    // The candidate buffer overlays the histogram. Every rank must finish
+    // reading its histogram before a peer can write candidates into rank 0's
+    // buffer; find_threshold() only synchronizes threads within one block.
+    cluster.sync();
 
     // Phase 3: Collect candidates over this rank's chunk; convert local indices
     // back to global by adding chunk_start. Classify by two fp32 boundaries derived
@@ -921,6 +958,14 @@ struct TopKCluster : TopKRadixBase<10> {
     // across ranks, so v_hi/v_lo are too.
     const auto topk = problem.topk;
     const auto threshold_bin = smem->threshold_bin;
+    if (__builtin_expect(coarse_bin_needs_exact_scan<kHistBits>(threshold_bin), false)) {
+      if (is_primary) {
+        exact_boundary_scan_topk<true>(problem, &smem->tie.handle, 0.0f, 0.0f, 0);
+      }
+      // The caller's cluster barrier keeps every peer's shared memory alive
+      // while the primary block finishes the full-row scan and output writes.
+      return;
+    }
     const float v_hi = coarse_bin_lower_bound<kHistBits>(threshold_bin + 1);
     const float v_lo = coarse_bin_lower_bound<kHistBits>(threshold_bin);
     const auto cur_out = is_primary ? problem.out : smem->tmp_out;

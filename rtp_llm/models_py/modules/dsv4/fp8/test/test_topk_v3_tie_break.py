@@ -432,6 +432,109 @@ def test_empty_batch_is_noop() -> None:
     assert output.numel() == 0
 
 
+def test_overflow_boundary_counter_is_snapshotted_by_all_warps() -> None:
+    # More than 2048 nearby FP32 scores share one FP16 coarse
+    # bin. This forces the boundary-scan fallback with nonzero exact_above;
+    # equal-score-only fixtures cannot expose a race when that count is zero.
+    generator = torch.Generator(device="cuda").manual_seed(900)
+    rows = 64
+    for length in (4095, 8192, 16384, 32768):
+        starts = torch.arange(rows, dtype=torch.int32, device="cuda") % 4
+        ends = starts + length
+        scores = (
+            torch.randn(rows, length + 7, device="cuda", generator=generator) * 1e-5
+            + 13.13
+        )
+        windows = torch.stack(
+            [scores[row, row % 4 : row % 4 + length] for row in range(rows)]
+        )
+        order = torch.argsort(windows, descending=True, stable=True)
+        for k in (512, 1024, 2048):
+            expected = order[:, :k].sort(dim=1).values.int()
+            for repeat in range(3):
+                output = _run(scores, starts, ends, k, length)
+                torch.testing.assert_close(
+                    output.sort(dim=1).values,
+                    expected,
+                    atol=0,
+                    rtol=0,
+                    msg=f"boundary counter length={length} K={k} repeat={repeat}",
+                )
+
+
+def test_negative_midpoint_preserves_higher_scores_and_stable_ties() -> None:
+    # FP16 round-to-nearest-even puts this negative midpoint in the lower
+    # bin. Treating equality with its upper boundary as "above" bypasses
+    # stable tie selection and can also discard the genuinely higher scores.
+    midpoint = (-1.0 - 0.99951171875) * 0.5
+    for length in (4095, 8192, 16384, 32768):
+        rows = 64
+        starts = torch.arange(rows, dtype=torch.int32, device="cuda") % 4
+        ends = starts + length
+        for higher in (0, 128):
+            scores = torch.full((rows, length + 7), 10.0, device="cuda")
+            for row in range(rows):
+                start = row % 4
+                window = scores[row, start : start + length]
+                window.fill_(-2.0)
+                window[:3000] = midpoint
+                if higher:
+                    window[-higher:] = 1.0
+            for k in (512, 1024, 2048):
+                for repeat in range(3):
+                    output = _run(scores, starts, ends, k, length)
+                    expected = (
+                        torch.cat(
+                            (
+                                torch.arange(k - higher, device="cuda"),
+                                torch.arange(length - higher, length, device="cuda"),
+                            )
+                        )
+                        .int()
+                        .expand(rows, -1)
+                    )
+                    torch.testing.assert_close(
+                        output.sort(dim=1).values,
+                        expected,
+                        atol=0,
+                        rtol=0,
+                        msg=f"midpoint length={length} K={k} higher={higher} repeat={repeat}",
+                    )
+
+
+def test_cuda_graph_replay_updates_scores_and_ragged_bounds() -> None:
+    rows, width = 8, 32768
+    for k in (512, 2048):
+        scores = torch.full((rows, width), 13.13, device="cuda")
+        starts = torch.arange(rows, dtype=torch.int32, device="cuda") % 4
+        ends = torch.full_like(starts, width)
+        output = torch.empty((rows, k), dtype=torch.int32, device="cuda")
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            rtp_llm_ops.topk_v3_tie_break(scores, starts, ends, output, k, width)
+        torch.cuda.current_stream().wait_stream(stream)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=stream):
+            rtp_llm_ops.topk_v3_tie_break(scores, starts, ends, output, k, width)
+        for repeat in range(3):
+            scores.fill_((-1.0 - 0.99951171875) * 0.5)
+            scores[:, -128:] = 1.0 + repeat
+            ends[0] = starts[0]  # empty row after capture
+            ends[1] = starts[1] + k - 1
+            graph.replay()
+            torch.cuda.synchronize()
+            _assert_stable_equiv(
+                output,
+                scores,
+                starts,
+                ends,
+                k,
+                width,
+                f"CUDA Graph changed scores/bounds K={k} repeat={repeat}",
+            )
+
+
 if __name__ == "__main__":
     if not hasattr(rtp_llm_ops, "topk_v3_tie_break"):
         print("SKIP: topk_v3_tie_break binding is not built")
@@ -448,4 +551,7 @@ if __name__ == "__main__":
     test_bounds_clamp_empty_rows_and_padding()
     test_stable_selected_set_across_replays()
     test_empty_batch_is_noop()
+    test_overflow_boundary_counter_is_snapshotted_by_all_warps()
+    test_negative_midpoint_preserves_higher_scores_and_stable_ties()
+    test_cuda_graph_replay_updates_scores_and_ragged_bounds()
     print("topk_v3_tie_break correctness: PASS")

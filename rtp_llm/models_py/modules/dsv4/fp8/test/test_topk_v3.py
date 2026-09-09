@@ -945,6 +945,58 @@ def bench_decode_sweep():
     assert not fail, f"topk_v3 slower than torch.topk at: {fail}"
 
 
+def test_coarse_threshold_edges_preserve_exact_scores():
+    # Cover register, streaming, and 2/4/8-CTA paths. Coarse-bin edges must
+    # never let low-score ties consume the slots reserved for higher scores.
+    for rows, length in (
+        (1, 4095),
+        (64, 4096),
+        (3, 8192),
+        (3, 16384),
+        (73, 32768),
+        (1, 32768),
+        (12, 32768),
+        (48, 65536),
+        (1, 1048576),
+    ):
+        for k in (512, 1024, 2048):
+            lengths = torch.full((rows,), length, device="cuda", dtype=torch.int32)
+            for kind in ("negative_midpoint", "signed_zero", "nan_infinity"):
+                scores = torch.full((rows, length), -2.0, device="cuda")
+                if kind == "negative_midpoint":
+                    scores[:, :3000] = (-1.0 - 0.99951171875) * 0.5
+                    scores[:, -128:] = 1.0
+                elif kind == "signed_zero":
+                    scores[:, :3000] = -0.0
+                    scores[:, -128:] = 1e-20
+                else:
+                    scores.fill_(float("nan"))
+                    scores[:, :3000] = torch.finfo(torch.float32).max
+                    scores[:, -128:] = float("inf")
+                output = _run(scores, lengths, k, length)
+                assert ((output >= 0) & (output < length)).all()
+                ordered = output.sort(dim=1).values
+                assert (ordered[:, 1:] != ordered[:, :-1]).all()
+                # V3 canonicalizes every NaN to the highest exact key and
+                # otherwise orders the FP32 bit patterns, including +/-0.
+                bits = scores.view(torch.int32).to(torch.int64) & 0xFFFFFFFF
+                keys = torch.where(
+                    (bits & 0x80000000) != 0,
+                    (~bits) & 0xFFFFFFFF,
+                    bits | 0x80000000,
+                )
+                keys = torch.where(scores.isnan(), 0xFFFFFFFF, keys)
+                actual = keys.gather(1, output.long()).sort(dim=1).values
+                expected = keys.topk(k, dim=1).values.sort(dim=1).values
+                torch.testing.assert_close(
+                    actual,
+                    expected,
+                    atol=0,
+                    rtol=0,
+                    msg=f"{kind} rows={rows} length={length} K={k}",
+                )
+
+
 if __name__ == "__main__":
     if not _HAS_OP:
         print(
@@ -964,6 +1016,7 @@ if __name__ == "__main__":
     test_fp32_subnormal_ordering_exact()
     test_dispatch_boundaries_all_k_exact()
     test_special_float_values_exact()
+    test_coarse_threshold_edges_preserve_exact_scores()
     test_negative_infinity_tie_padding_is_minimal()
     test_mtp_batched_decode_flattened_bs_rows()
     test_batched_streaming_path_b64()
