@@ -877,10 +877,9 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(target_model_forward)");
         maybePrintModelInput(model_input, "prefill target model");
-        int64_t start_time_us               = autil::TimeUtility::currentTimeInMicroSeconds();
-        model_output = std::move(forwardModel(model_.get(), model_input, ModelInputsModelRole::TARGET));
-        maybeOverrideLastHiddenWithMtpBuffer(
-            model_output, *model_, cp_enabled ? -1 : model_input.combo_tokens.numel());
+        int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
+        model_output          = std::move(forwardModel(model_.get(), model_input, ModelInputsModelRole::TARGET));
+        maybeOverrideLastHiddenWithMtpBuffer(model_output, *model_, -1);
         model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
 
@@ -964,7 +963,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         RTP_LLM_CHECK_WITH_INFO(draft_last_hidden_states.defined() && draft_last_hidden_states.numel() > 0,
                                 "CP MTP draft last-hidden buffer must contain per-request rows");
     } else if (!is_dspark_) {
-        maybeOverrideLastHiddenWithMtpBuffer(draft_model_output, *draft_model_);
+        maybeOverrideLastHiddenWithMtpBuffer(draft_model_output, *draft_model_, -1);
     }
 
     // draft model sample

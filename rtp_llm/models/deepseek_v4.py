@@ -958,6 +958,17 @@ class DeepSeekV4DSpark(DeepSeekV4):
     """Runtime-fixed-width DeepSeek-V4 DSpARK proposal model."""
 
     @classmethod
+    def target_aux_hidden_capture_layer_ids(
+        cls,
+        target_model_config: ModelConfig,
+        draft_model_config: ModelConfig,
+    ) -> tuple[int, ...]:
+        return tuple(
+            int(layer_id)
+            for layer_id in draft_model_config.dspark_target_layer_ids or ()
+        )
+
+    @classmethod
     def speculative_weight_alias_names(cls, target_model, draft_model_config):
         """Borrow the two full-vocabulary matrices from the target owner."""
         if not isinstance(target_model, DeepSeekV4) or isinstance(

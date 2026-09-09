@@ -480,13 +480,50 @@ class ModelFactory:
                 sp_config, model_config, propose_model_config
             )
 
+        capture_layer_ids = propose_model_cls.target_aux_hidden_capture_layer_ids(
+            model_config, propose_model_config
+        )
+        ModelFactory._configure_target_aux_hidden_capture(
+            model_config, propose_model_config, capture_layer_ids
+        )
+
         return propose_model_config
+
+    @staticmethod
+    def _configure_target_aux_hidden_capture(
+        target_model_config: ModelConfig,
+        draft_model_config: ModelConfig,
+        layer_ids,
+    ) -> None:
+        capture_layer_ids = tuple(int(layer_id) for layer_id in layer_ids)
+        if len(set(capture_layer_ids)) != len(capture_layer_ids):
+            raise ValueError(
+                f"target auxiliary hidden capture layers must be distinct: {capture_layer_ids}"
+            )
+        invalid_layer_ids = [
+            layer_id
+            for layer_id in capture_layer_ids
+            if layer_id < 0 or layer_id >= target_model_config.num_layers
+        ]
+        if invalid_layer_ids:
+            raise ValueError(
+                f"target auxiliary hidden capture layers {invalid_layer_ids} are out of range "
+                f"for target with {target_model_config.num_layers} layers"
+            )
+        if not capture_layer_ids:
+            return
+        target_model_config.capture_aux_hidden_layer_ids = list(capture_layer_ids)
+        draft_model_config.capture_aux_hidden_layer_ids = list(capture_layer_ids)
+        logging.info(
+            "target auxiliary hidden capture layer ids=%s",
+            capture_layer_ids,
+        )
 
     @staticmethod
     def _setup_dspark_configs(
         sp_config, model_config: ModelConfig, propose_model_config: ModelConfig
     ) -> None:
-        """Validate fixed-width DSpARK and wire target aux-state capture.
+        """Validate fixed-width DSpARK checkpoint and runtime metadata.
 
         DeepSeek-V4 DSpARK uses a draft query block of exactly ``gamma`` rows
         (one anchor plus ``gamma - 1`` noise tokens). The target verifies
@@ -523,27 +560,12 @@ class ModelFactory:
         ]
         if not target_layer_ids:
             raise ValueError("dspark_target_layer_ids must not be empty")
-        invalid_layer_ids = [
-            layer_id
-            for layer_id in target_layer_ids
-            if layer_id < 0 or layer_id >= model_config.num_layers
-        ]
-        if invalid_layer_ids:
-            raise ValueError(
-                f"dspark_target_layer_ids {invalid_layer_ids} are out of range "
-                f"for target with {model_config.num_layers} layers"
-            )
 
         markov_rank = int(propose_model_config.dspark_markov_rank)
         if markov_rank <= 0:
             raise ValueError(f"invalid dspark_markov_rank: {markov_rank}")
 
         sp_config.sp_dspark_mask_token_id = noise_token_id
-        # Both models carry the capture ids: the target uses them to capture
-        # and to size the shared MTP hidden buffer rows; the draft only needs
-        # them for the same row-width derivation (it never captures).
-        model_config.capture_aux_hidden_layer_ids = target_layer_ids
-        propose_model_config.capture_aux_hidden_layer_ids = target_layer_ids
         logging.info(
             "DSpARK fixed-width wiring: gamma=%d, noise_token_id=%d, "
             "target capture layer ids=%s, markov_rank=%d",
