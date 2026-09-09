@@ -15,6 +15,36 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class EngineStatusConverterTest {
 
     @Test
+    void preservesStepMetricsWireNumbersAndDecodeZeros() throws Exception {
+        var bytes = new ByteArrayOutputStream();
+        var wire = CodedOutputStream.newInstance(bytes);
+        wire.writeInt64(2, 42);
+        wire.writeInt64(3, 1700000000000L);
+        wire.writeInt64(4, 64);
+        wire.writeInt64(5, 0);
+        wire.writeInt64(6, 0);
+        wire.writeInt64(7, 32000);
+        wire.writeDouble(8, 0.002);
+        wire.flush();
+        var statusBytes = new ByteArrayOutputStream();
+        var statusWire = CodedOutputStream.newInstance(statusBytes);
+        statusWire.writeByteArray(27, bytes.toByteArray());
+        statusWire.flush();
+        var response = EngineStatusConverter.convertToWorkerStatusResponse(
+                EngineRpcService.WorkerStatusPB.parseFrom(statusBytes.toByteArray()));
+        var step = response.getLastStepMetrics();
+        assertEquals(42, step.stepId());
+        assertEquals(1700000000000L, step.completedTimeMs());
+        assertEquals(64, step.totalScheduledTokens());
+        assertEquals(0, step.prefillRequestCount());
+        assertEquals(0, step.prefillTokens());
+        assertEquals(32000, step.tokenBudget());
+        assertEquals(0.002, step.budgetFillRatio());
+        assertNull(EngineStatusConverter.convertToWorkerStatusResponse(
+                EngineRpcService.WorkerStatusPB.getDefaultInstance()).getLastStepMetrics());
+    }
+
+    @Test
     void convertsOldIntegerAndNewStringTaskIdsWithoutChangingOtherFields() throws Exception {
         var bytes = new ByteArrayOutputStream();
         var wire = CodedOutputStream.newInstance(bytes);
