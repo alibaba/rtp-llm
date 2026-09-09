@@ -11,7 +11,9 @@ from base_attention_test import BaseAttentionTest, compare_tensors
 
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
     PyFlashinferDecodeAttnOp,
+    partition_cascade_decode_pages,
 )
+from rtp_llm.models_py.utils.arch import is_rtx_pro_5000_blackwell
 from rtp_llm.ops import KvCacheDataType
 from rtp_llm.ops.compute_ops import (
     PyAttentionInputs,
@@ -27,6 +29,91 @@ class PageMetadata(NamedTuple):
     page_indptr: List[int]
     page_indices: List[int]
     last_page_lens: List[int]
+
+
+class TestCascadeDecodeMetadata(unittest.TestCase):
+    @staticmethod
+    def _partition(rows, kv_lens, last_page_lens, page_size=64):
+        indptr = [0]
+        indices = []
+        for row in rows:
+            indices.extend(row)
+            indptr.append(len(indices))
+        return partition_cascade_decode_pages(
+            torch.tensor(indptr, dtype=torch.int32),
+            torch.tensor(indices, dtype=torch.int32),
+            torch.tensor(last_page_lens, dtype=torch.int32),
+            torch.tensor(kv_lens, dtype=torch.int32),
+            page_size,
+        )
+
+    def test_partitions_shared_full_pages_and_variable_suffixes(self):
+        metadata = self._partition(
+            [
+                [11, 12, 101],
+                [11, 12, 201],
+                [11, 12, 301, 302, 303],
+                [11, 12, 401, 402, 403],
+            ],
+            [129, 191, 257, 320],
+            [1, 63, 1, 64],
+        )
+
+        self.assertEqual(metadata.shared_page_count, 2)
+        self.assertEqual(metadata.live_batch_size, 4)
+        self.assertEqual(metadata.shared_page_indices.tolist(), [11, 12])
+        self.assertEqual(metadata.suffix_page_indptr.tolist(), [0, 1, 2, 5, 8])
+        self.assertEqual(
+            metadata.suffix_page_indices.tolist(),
+            [101, 201, 301, 302, 303, 401, 402, 403],
+        )
+        self.assertEqual(metadata.suffix_last_page_len.tolist(), [1, 63, 1, 64])
+        self.assertEqual(metadata.merge_mask.tolist(), [True, True, True, True])
+
+    def test_current_token_page_is_never_shared(self):
+        expected_shared_pages = {64: 0, 65: 1, 128: 1, 129: 2}
+        for kv_len, expected in expected_shared_pages.items():
+            page_count = math.ceil(kv_len / 64)
+            common = list(range(11, 11 + max(page_count - 1, 0)))
+            rows = [common + [101], common + [201]]
+            with self.subTest(kv_len=kv_len):
+                metadata = self._partition(
+                    rows,
+                    [kv_len, kv_len],
+                    [kv_len % 64 or 64] * 2,
+                )
+                self.assertEqual(metadata.shared_page_count, expected)
+                self.assertGreaterEqual(
+                    metadata.suffix_page_indptr[1] - metadata.suffix_page_indptr[0],
+                    1,
+                )
+
+    def test_shared_prefix_requires_ordered_physical_identity(self):
+        metadata = self._partition(
+            [[11, 12, 101], [11, 13, 201], [11, 12, 301]],
+            [129, 129, 129],
+            [1, 1, 1],
+        )
+        self.assertEqual(metadata.shared_page_indices.tolist(), [11])
+        self.assertEqual(metadata.shared_page_count, 1)
+
+    def test_padding_rows_do_not_participate(self):
+        metadata = self._partition(
+            [[11, 12, 101], [11, 12, 201], [0], [0]],
+            [129, 191, 1, 1],
+            [1, 63, 1, 1],
+        )
+        self.assertEqual(metadata.live_batch_size, 2)
+        self.assertEqual(metadata.shared_page_indices.tolist(), [11, 12])
+        self.assertEqual(metadata.suffix_page_indices.tolist(), [101, 201, 0, 0])
+        self.assertEqual(metadata.merge_mask.tolist(), [True, True, False, False])
+
+
+def require_cascade_test(test_case: BaseAttentionTest) -> None:
+    if test_case.kv_cache_dtype != KvCacheDataType.BASE:
+        test_case.skipTest("cascade decode intentionally excludes FP8 KV cache")
+    if not is_rtx_pro_5000_blackwell():
+        test_case.skipTest("cascade decode is enabled only on RTX PRO 5000")
 
 
 class TestPyFlashinferDecodeAttnOp(BaseAttentionTest):
@@ -293,6 +380,269 @@ class TestPyFlashinferDecodeAttnOp(BaseAttentionTest):
                 seq_size_per_block=64,
             )
 
+    def test_cascade_is_disabled_on_other_products(self):
+        config = self._create_config(
+            head_num=32,
+            head_num_kv=8,
+            size_per_head=128,
+            seq_size_per_block=64,
+            data_type="bf16",
+        )
+        attn_inputs = self._create_attention_inputs(
+            4, [129, 129, 129, 129], 64, dtype=torch.bfloat16
+        )
+        with mock.patch(
+            "rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha.is_rtx_pro_5000_blackwell",
+            return_value=False,
+        ):
+            attn_op = PyFlashinferDecodeAttnOp(config.attn_configs, attn_inputs)
+        self.assertFalse(attn_op.cascade_enabled)
+
+    def test_cascade_rejects_batch_below_break_even(self):
+        require_cascade_test(self)
+        config = self._create_config(
+            head_num=32,
+            head_num_kv=8,
+            size_per_head=128,
+            seq_size_per_block=64,
+            data_type="bf16",
+        )
+        attn_inputs = self._create_attention_inputs(
+            8, [129] * 8, 64, dtype=torch.bfloat16
+        )
+        attn_op = PyFlashinferDecodeAttnOp(config.attn_configs, attn_inputs)
+        self.assertFalse(attn_op.cascade_enabled)
+
+    @mock.patch(
+        "rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha.MIN_CASCADE_BATCH_SIZE",
+        4,
+    )
+    def test_cascade_rollback_switch(self):
+        require_cascade_test(self)
+        config = self._create_config(
+            head_num=32,
+            head_num_kv=8,
+            size_per_head=128,
+            seq_size_per_block=64,
+            data_type="bf16",
+        )
+        attn_inputs = self._create_attention_inputs(
+            4, [129, 129, 129, 129], 64, dtype=torch.bfloat16
+        )
+        with mock.patch.dict("os.environ", {"RTP_LLM_DISABLE_FLASHINFER_CASCADE": "1"}):
+            attn_op = PyFlashinferDecodeAttnOp(config.attn_configs, attn_inputs)
+        self.assertFalse(attn_op.cascade_enabled)
+
+    @mock.patch(
+        "rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha.MIN_CASCADE_BATCH_SIZE",
+        4,
+    )
+    def test_cascade_rejects_device_metadata_path(self):
+        require_cascade_test(self)
+        config = self._create_config(
+            head_num=32,
+            head_num_kv=8,
+            size_per_head=128,
+            seq_size_per_block=64,
+            data_type="bf16",
+        )
+        attn_inputs = self._create_attention_inputs(
+            4, [129, 129, 129, 129], 64, dtype=torch.bfloat16
+        )
+        attn_inputs.sequence_lengths = attn_inputs.sequence_lengths.cuda()
+        attn_op = PyFlashinferDecodeAttnOp(config.attn_configs, attn_inputs)
+        self.assertFalse(attn_op.cascade_enabled)
+
+    @mock.patch(
+        "rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha.MIN_CASCADE_BATCH_SIZE",
+        4,
+    )
+    def test_cascade_rejects_unprofiled_attention_shape(self):
+        require_cascade_test(self)
+        config = self._create_config(
+            head_num=16,
+            head_num_kv=2,
+            size_per_head=256,
+            seq_size_per_block=64,
+            data_type="bf16",
+        )
+        attn_inputs = self._create_attention_inputs(
+            4, [129, 129, 129, 129], 64, dtype=torch.bfloat16
+        )
+        attn_op = PyFlashinferDecodeAttnOp(config.attn_configs, attn_inputs)
+        self.assertFalse(attn_op.cascade_enabled)
+
+    @mock.patch(
+        "rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha.MIN_CASCADE_BATCH_SIZE",
+        4,
+    )
+    def test_bf16_no_shared_prefix_uses_standard_decode(self):
+        require_cascade_test(self)
+        config = self._create_config(
+            head_num=32,
+            head_num_kv=8,
+            size_per_head=128,
+            seq_size_per_block=64,
+            data_type="bf16",
+        )
+        attn_inputs = self._create_attention_inputs(
+            4, [129, 129, 129, 129], 64, dtype=torch.bfloat16
+        )
+        block_ids = torch.tensor(
+            [[1, 2, 3], [4, 5, 6], [7, 8, 9], [10, 11, 12]],
+            dtype=torch.int32,
+        )
+        attn_inputs.kv_cache_block_id = block_ids
+        attn_inputs.kv_cache_block_id_device = block_ids.cuda()
+        attn_inputs.kv_cache_kernel_block_id = block_ids
+        attn_inputs.kv_cache_kernel_block_id_device = block_ids.cuda()
+
+        attn_op = PyFlashinferDecodeAttnOp(config.attn_configs, attn_inputs)
+        params = rtp_llm_ops.FlashInferMlaAttnParams()
+        attn_op.set_params(params)
+        attn_op.prepare(attn_inputs)
+        self.assertTrue(attn_op.cascade_enabled)
+        self.assertFalse(attn_op._cascade_active)
+        self.assertIsNone(attn_op._cascade_state)
+
+    @mock.patch(
+        "rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha.MIN_CASCADE_BATCH_SIZE",
+        4,
+    )
+    def test_bf16_shared_prefix_cascade_matches_unsplit_reference(self):
+        require_cascade_test(self)
+        config = self._create_config(
+            head_num=32,
+            head_num_kv=8,
+            size_per_head=128,
+            seq_size_per_block=64,
+            data_type="bf16",
+        )
+        sequence_lengths = [129, 191, 257, 320]
+        attn_inputs = self._create_attention_inputs(
+            len(sequence_lengths),
+            sequence_lengths,
+            config.seq_size_per_block,
+            dtype=torch.bfloat16,
+        )
+        block_ids = torch.tensor(
+            [
+                [1, 2, 3, 0, 0],
+                [1, 2, 4, 0, 0],
+                [1, 2, 5, 6, 7],
+                [1, 2, 8, 9, 10],
+            ],
+            dtype=torch.int32,
+        )
+        attn_inputs.kv_cache_block_id = block_ids
+        attn_inputs.kv_cache_block_id_device = block_ids.cuda()
+        attn_inputs.kv_cache_kernel_block_id = block_ids
+        attn_inputs.kv_cache_kernel_block_id_device = block_ids.cuda()
+
+        attn_op = PyFlashinferDecodeAttnOp(config.attn_configs, attn_inputs)
+        self.assertTrue(attn_op.cascade_enabled)
+        params = rtp_llm_ops.FlashInferMlaAttnParams()
+        attn_op.set_params(params)
+        attn_op.prepare(attn_inputs)
+        self.assertTrue(attn_op._cascade_active)
+        self.assertEqual(attn_op._cascade_shared_page_count, 2)
+
+        q = self._create_query_tensor(
+            len(sequence_lengths), 32, 128, dtype=torch.bfloat16
+        )
+        kv_cache, k_cache, v_cache = self._create_kv_cache(
+            11,
+            config.seq_size_per_block,
+            8,
+            128,
+            dtype=torch.bfloat16,
+        )
+        output = attn_op.forward(q, kv_cache, params)
+        reference = compute_flashinfer_decode_reference(
+            q,
+            k_cache,
+            v_cache,
+            sequence_lengths,
+            [
+                [1, 2, 3],
+                [1, 2, 4],
+                [1, 2, 5, 6, 7],
+                [1, 2, 8, 9, 10],
+            ],
+            config.seq_size_per_block,
+        )
+        self._assert_output_close(
+            output,
+            reference,
+            name="BF16 shared-prefix cascade output",
+            rtol=2e-2,
+            atol=2e-2,
+        )
+
+    def _run_bf16_long_shared_prefix_batch32(self, disable_cascade: bool):
+        require_cascade_test(self)
+        config = self._create_config(
+            head_num=32,
+            head_num_kv=8,
+            size_per_head=128,
+            seq_size_per_block=64,
+            data_type="bf16",
+        )
+        batch_size = 32
+        sequence_lengths = [4097] * batch_size
+        attn_inputs = self._create_attention_inputs(
+            batch_size, sequence_lengths, 64, dtype=torch.bfloat16
+        )
+        shared_pages = list(range(1, 64))
+        block_lists = [
+            shared_pages + [64 + 2 * row, 65 + 2 * row] for row in range(batch_size)
+        ]
+        block_ids = torch.tensor(block_lists, dtype=torch.int32)
+        attn_inputs.kv_cache_block_id = block_ids
+        attn_inputs.kv_cache_block_id_device = block_ids.cuda()
+        attn_inputs.kv_cache_kernel_block_id = block_ids
+        attn_inputs.kv_cache_kernel_block_id_device = block_ids.cuda()
+
+        with mock.patch.dict(
+            "os.environ",
+            {"RTP_LLM_DISABLE_FLASHINFER_CASCADE": "1" if disable_cascade else "0"},
+        ):
+            attn_op = PyFlashinferDecodeAttnOp(config.attn_configs, attn_inputs)
+        params = rtp_llm_ops.FlashInferMlaAttnParams()
+        attn_op.set_params(params)
+        attn_op.prepare(attn_inputs)
+        self.assertEqual(attn_op._cascade_active, not disable_cascade)
+        self.assertEqual(
+            attn_op._cascade_shared_page_count, 0 if disable_cascade else 63
+        )
+
+        q = self._create_query_tensor(batch_size, 32, 128, dtype=torch.bfloat16)
+        kv_cache, k_cache, v_cache = self._create_kv_cache(
+            128, 64, 8, 128, dtype=torch.bfloat16
+        )
+        output = attn_op.forward(q, kv_cache, params)
+        reference = compute_flashinfer_decode_reference(
+            q,
+            k_cache,
+            v_cache,
+            sequence_lengths,
+            block_lists,
+            64,
+        )
+        self._assert_output_close(
+            output,
+            reference,
+            name="BF16 batch-32 long shared-prefix output",
+            rtol=2e-2,
+            atol=2e-2,
+        )
+
+    def test_bf16_long_shared_prefix_batch32(self):
+        self._run_bf16_long_shared_prefix_batch32(disable_cascade=False)
+
+    def test_bf16_long_shared_prefix_standard_control_batch32(self):
+        self._run_bf16_long_shared_prefix_batch32(disable_cascade=True)
+
     def test_eager_cuda_metadata_plans_on_device_and_matches_reference(self):
         """Eager CUDA-core decode plans on device and matches the reference."""
         config = self._create_config(head_num=32, head_num_kv=32)
@@ -416,6 +766,136 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
         )
         attn_inputs.dtype = get_typemeta(torch.zeros([1], dtype=dtype))
         return attn_inputs
+
+    @mock.patch(
+        "rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha.MIN_CASCADE_BATCH_SIZE",
+        4,
+    )
+    def test_cascade_graph_replay_shared_no_shared_shared(self):
+        require_cascade_test(self)
+        config = self._create_config(
+            head_num=32,
+            head_num_kv=8,
+            size_per_head=128,
+            seq_size_per_block=64,
+            data_type="bf16",
+        )
+        sequence_lengths = [129] * 4
+        inputs = self._create_cuda_graph_inputs(
+            4,
+            sequence_lengths,
+            config.seq_size_per_block,
+            dtype=torch.bfloat16,
+        )
+        q = self._create_query_tensor(4, 32, 128, dtype=torch.bfloat16)
+        kv_cache, k_cache, v_cache = self._create_kv_cache(
+            24,
+            config.seq_size_per_block,
+            8,
+            128,
+            dtype=torch.bfloat16,
+        )
+        attn_op = PyFlashinferDecodeAttnOp(config.attn_configs, inputs)
+        self.assertTrue(attn_op.cascade_enabled)
+        params = rtp_llm_ops.FlashInferMlaAttnParams()
+        attn_op.set_params(params)
+
+        def install_pages(rows):
+            pages = torch.tensor(rows, dtype=torch.int32)
+            if inputs.kv_cache_kernel_block_id_device.shape != pages.shape:
+                raise AssertionError("graph page-table shape must stay fixed")
+            inputs.kv_cache_kernel_block_id = pages
+            inputs.kv_cache_block_id = pages
+            inputs.kv_cache_kernel_block_id_device.copy_(pages)
+            inputs.kv_cache_block_id_device = inputs.kv_cache_kernel_block_id_device
+
+        def assert_reference(rows, output, active_count=4):
+            active_lengths = sequence_lengths[:active_count]
+            reference = compute_flashinfer_decode_reference(
+                q[:active_count],
+                k_cache,
+                v_cache,
+                active_lengths,
+                rows[:active_count],
+                config.seq_size_per_block,
+            )
+            self._assert_output_close(
+                output[:active_count],
+                reference,
+                name="CUDA graph cascade replay output",
+                rtol=2e-2,
+                atol=2e-2,
+            )
+
+        shared_a = [[1, 2, 3], [1, 2, 4], [1, 2, 5], [1, 2, 6]]
+        no_shared = [[1, 2, 3], [7, 8, 4], [9, 10, 5], [11, 12, 6]]
+        shared_b = [[13, 14, 3], [13, 14, 4], [13, 14, 5], [13, 14, 6]]
+        padded = [[15, 16, 3], [15, 16, 4], [0, 0, 0], [0, 0, 0]]
+
+        install_pages(shared_a)
+        attn_op.prepare(inputs)
+        self.assertEqual(attn_op._cascade_shared_page_count, 2)
+        state = attn_op._cascade_state
+        self.assertIsNotNone(state)
+        pointers = (
+            state.shared_wrapper._paged_kv_indptr_buf.data_ptr(),
+            state.shared_page_indices_d.data_ptr(),
+            state.suffix_wrapper._paged_kv_indptr_buf.data_ptr(),
+            state.suffix_page_indices_d.data_ptr(),
+            state.merge_mask_d.data_ptr(),
+            state.suffix_out.data_ptr(),
+        )
+
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            attn_op.forward(q, kv_cache, params)
+        torch.cuda.current_stream().wait_stream(stream)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            graph_output = attn_op.forward(q, kv_cache, params)
+        graph.replay()
+        torch.cuda.synchronize()
+        assert_reference(shared_a, graph_output)
+
+        for rows, expected_shared in ((no_shared, 0), (shared_b, 2)):
+            install_pages(rows)
+            attn_op.prepare_for_cuda_graph_replay(inputs)
+            self.assertEqual(attn_op._cascade_shared_page_count, expected_shared)
+            graph.replay()
+            torch.cuda.synchronize()
+            assert_reference(rows, graph_output)
+            self.assertEqual(
+                pointers,
+                (
+                    state.shared_wrapper._paged_kv_indptr_buf.data_ptr(),
+                    state.shared_page_indices_d.data_ptr(),
+                    state.suffix_wrapper._paged_kv_indptr_buf.data_ptr(),
+                    state.suffix_page_indices_d.data_ptr(),
+                    state.merge_mask_d.data_ptr(),
+                    state.suffix_out.data_ptr(),
+                ),
+            )
+
+        install_pages(padded)
+        inputs.sequence_lengths.copy_(torch.tensor([128, 128, 0, 0]))
+        attn_op.prepare_for_cuda_graph_replay(inputs)
+        self.assertEqual(attn_op._cascade_shared_page_count, 2)
+        self.assertEqual(state.merge_mask_h.tolist(), [True, True, False, False])
+        graph.replay()
+        torch.cuda.synchronize()
+        assert_reference(padded, graph_output, active_count=2)
+        self.assertEqual(
+            pointers,
+            (
+                state.shared_wrapper._paged_kv_indptr_buf.data_ptr(),
+                state.shared_page_indices_d.data_ptr(),
+                state.suffix_wrapper._paged_kv_indptr_buf.data_ptr(),
+                state.suffix_page_indices_d.data_ptr(),
+                state.merge_mask_d.data_ptr(),
+                state.suffix_out.data_ptr(),
+            ),
+        )
 
     def test_set_params_invalidates_cuda_core_plan_snapshot(self):
         config = self._create_config(head_num=32, head_num_kv=32)
