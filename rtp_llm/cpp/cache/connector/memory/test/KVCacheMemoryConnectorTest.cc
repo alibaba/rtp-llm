@@ -3685,16 +3685,16 @@ TEST_F(KVCacheMemoryConnectorTest, RemoteEvictionBuildsOnlySelectedCompleteHostB
     KVCacheMemoryConnector::HostBlockBuffers buffers;
     ASSERT_TRUE(connector_->buildHostBlockBuffers(victims, {0, 2}, buffers));
     ASSERT_EQ(buffers.size(), 2u);
-    const auto expected_iovs = connector_->layerRegionSlots().size();
     for (size_t output = 0; output < buffers.size(); ++output) {
-        ASSERT_EQ(buffers[output].size(), expected_iovs);
-        size_t bytes = 0;
-        for (const auto& info : buffers[output]) {
-            EXPECT_FALSE(info.is_cuda);
-            EXPECT_NE(info.addr, nullptr);
-            bytes += info.size_bytes;
-        }
-        EXPECT_EQ(bytes, victims[output == 0 ? 0 : 2].block_size);
+        const auto victim_index = output == 0 ? 0 : 2;
+        ASSERT_EQ(buffers[output].size(), 1u);
+        EXPECT_FALSE(buffers[output][0].is_cuda);
+        EXPECT_NE(buffers[output][0].addr, nullptr);
+        EXPECT_EQ(buffers[output][0].size_bytes, victims[victim_index].block_size);
+        const auto pool_buffer =
+            connector_->block_pool_->convertIndexToBuffer(0, victims[victim_index].block_index);
+        ASSERT_EQ(pool_buffer.size(), 1u);
+        EXPECT_EQ(buffers[output][0].addr, pool_buffer[0].addr);
     }
 
     connector_->finishRemoteEviction(victims, true);

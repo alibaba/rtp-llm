@@ -3499,20 +3499,21 @@ bool KVCacheMemoryConnector::buildHostBlockBuffers(const std::vector<MemoryRemot
         if (mem.size() != 1 || !mem[0].addr || mem[0].size_bytes < items[selected].block_size) {
             return false;
         }
-        HostBlockBuffer block_buffer;
-        size_t offset = 0;
+        size_t block_size = 0;
         for (const auto& slot : slots) {
-            if (offset + slot.stride_bytes > mem[0].size_bytes) {
+            if (slot.stride_bytes > mem[0].size_bytes - block_size) {
                 return false;
             }
-            BlockInfo info;
-            info.is_cuda = false;
-            info.addr = static_cast<char*>(mem[0].addr) + offset;
-            info.size_bytes = slot.stride_bytes;
-            block_buffer.push_back(info);
-            offset += slot.stride_bytes;
+            block_size += slot.stride_bytes;
         }
-        buffers.push_back(std::move(block_buffer));
+        if (block_size == 0 || (items[selected].block_size != 0 && block_size != items[selected].block_size)) {
+            return false;
+        }
+        BlockInfo info;
+        info.is_cuda    = false;
+        info.addr       = mem[0].addr;
+        info.size_bytes = block_size;
+        buffers.push_back(HostBlockBuffer{info});
     }
     return true;
 }
