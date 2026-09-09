@@ -62,6 +62,38 @@ def record_module(module, name, value):
     record_model(f"{module._k3_trace_path}.{name}", value)
 
 
+def record_module_cache_pages(module, name, cache, block_map, logical_pages):
+    """Snapshot selected physical pages; invalid entries carry an explicit mask.
+
+    Selection has a fixed shape and stays on device so capture/replay observes
+    the current block map. Values in invalid slots are zero placeholders.
+    """
+    if not enabled() or getattr(_local, "suspended", 0):
+        return
+    in_map = (logical_pages >= 0) & (logical_pages < block_map.shape[1])
+    physical_pages = block_map.gather(
+        1, logical_pages.clamp(0, block_map.shape[1] - 1).long()
+    ).long()
+    physical_pages = torch.where(in_map, physical_pages, -1)
+    valid = in_map & (physical_pages > 0) & (physical_pages < cache.shape[0])
+    values = cache.index_select(
+        0, physical_pages.clamp(0, cache.shape[0] - 1).flatten()
+    ).reshape(*logical_pages.shape, *cache.shape[1:])
+    values = torch.where(
+        valid.reshape(*valid.shape, *([1] * (cache.ndim - 1))), values, 0
+    )
+    record_module(
+        module,
+        name,
+        {
+            "logical_pages": logical_pages,
+            "physical_pages": physical_pages,
+            "valid_pages": valid,
+            "values": values,
+        },
+    )
+
+
 def record_model_inputs(name, inputs):
     if not enabled() or getattr(_local, "suspended", 0):
         return

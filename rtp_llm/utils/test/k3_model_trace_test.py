@@ -100,6 +100,47 @@ class ModelTraceTest(unittest.TestCase):
         tracing.close_models()
         self.assertEqual(len(self.frames()), 1)
 
+    def test_cache_pages_preserve_mapping_and_values_before_reuse(self):
+        model = ToyModel("main")
+        manager = model._k3_trace_replay.__self__
+        cache = torch.arange(20, dtype=torch.float32).reshape(5, 2, 2)
+        block_map = torch.tensor([[3, 1, 0], [2, 4, 99]])
+        pages = torch.tensor([[0, 1, 0, -1], [1, 0, 2, 3]])
+
+        def operation(value):
+            tracing.record_module_cache_pages(
+                model.projection, "cache", cache, block_map, pages
+            )
+            cache.fill_(-100)
+            return value
+
+        manager.forward(operation, inputs(torch.ones(2, 2)))
+        tracing.close_models()
+        tensors = {item["name"]: item["value"] for item in self.frames()[0]["tensors"]}
+        prefix = "main.projection.cache."
+        torch.testing.assert_close(
+            tensors[prefix + "physical_pages"],
+            torch.tensor([[3, 1, 3, -1], [4, 2, 99, -1]]),
+        )
+        torch.testing.assert_close(
+            tensors[prefix + "valid_pages"],
+            torch.tensor([[True, True, True, False], [True, True, False, False]]),
+        )
+        original = torch.arange(20, dtype=torch.float32).reshape(5, 2, 2)
+        expected = torch.stack(
+            [
+                original[3],
+                original[1],
+                original[3],
+                torch.zeros(2, 2),
+                original[4],
+                original[2],
+                torch.zeros(2, 2),
+                torch.zeros(2, 2),
+            ]
+        ).reshape(2, 4, 2, 2)
+        torch.testing.assert_close(tensors[prefix + "values"], expected)
+
     def test_module_replaced_during_initialization_is_observed(self):
         model = ToyModel("main")
         model.projection = torch.nn.Identity()
@@ -142,6 +183,47 @@ class ModelTraceTest(unittest.TestCase):
         self.assertEqual(errors, [])
         tracing.close_models()
         self.assertEqual(len(self.frames()), 1)
+
+    @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA Graph")
+    def test_cache_page_selection_tracks_live_graph_block_map(self):
+        model = ToyModel("main").cuda()
+        manager = model._k3_trace_replay.__self__
+        cache = torch.arange(12, dtype=torch.float32, device="cuda").reshape(3, 2, 2)
+        block_map = torch.tensor([[1, 2]], device="cuda")
+        pages = torch.tensor([[0]], device="cuda")
+        value = inputs(torch.ones(1, 2, device="cuda"))
+
+        def operation(value):
+            tracing.record_module_cache_pages(
+                model.projection, "cache", cache, block_map, pages
+            )
+            cache.add_(100)
+            return value
+
+        torch.cuda.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        model._k3_trace_capture_begin("pages")
+        with torch.cuda.graph(graph):
+            manager.forward(operation, value)
+        model._k3_trace_capture_end()
+        for physical_page in (2, 1):
+            cache.copy_(torch.arange(12, device="cuda").reshape(3, 2, 2))
+            block_map.fill_(physical_page)
+            graph.replay()
+            model._k3_trace_replay("pages", value)
+        tracing.close_models()
+        for frame, physical_page in zip(self.frames(), (2, 1), strict=True):
+            tensors = {item["name"]: item["value"] for item in frame["tensors"]}
+            prefix = "main.projection.cache."
+            torch.testing.assert_close(
+                tensors[prefix + "physical_pages"], torch.tensor([[physical_page]])
+            )
+            torch.testing.assert_close(
+                tensors[prefix + "values"],
+                torch.arange(12, dtype=torch.float32)
+                .reshape(3, 2, 2)[physical_page]
+                .reshape(1, 1, 2, 2),
+            )
 
     @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA Graph")
     def test_each_replay_has_current_values_and_live_inputs(self):

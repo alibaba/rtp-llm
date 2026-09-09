@@ -16,7 +16,8 @@ from rtp_llm.models_py.triton_kernels.kimi_kda import (
     kimi_kda_short_conv_paged_target_verify,
 )
 from rtp_llm.ops.compute_ops import LayerKVCache, PyAttentionInputs
-from rtp_llm.utils.k3_model_trace import record_module
+from rtp_llm.utils.k3_model_trace import record_module, record_module_cache_pages
+from rtp_llm.utils.k3_tensor_trace import enabled as trace_enabled
 from rtp_llm.utils.model_weight import W
 
 
@@ -53,6 +54,34 @@ class KimiK3KDADecode(nn.Module):
         self.history_size = history_size
         self.gate_lower_bound = gate_lower_bound
         self.fused_conv = fused_conv
+
+    def _trace_cache(self, cache, token_count, *, after):
+        if not trace_enabled():
+            return
+        steps = token_count // cache.block_map.shape[0]
+        positions = cache.sequence_lengths_plus_one[:, None].long()
+        offsets = torch.arange(steps, device=positions.device)[None, :]
+        if after:
+            pages = (positions - 1) // cache.page_size + offsets
+            for name, state in (("conv", cache.conv), ("recurrence", cache.ssm)):
+                record_module_cache_pages(
+                    self, f"{name}.cache_checkpoints", state, cache.block_map, pages
+                )
+        else:
+            record_module_cache_pages(
+                self,
+                "conv.cache_source_pages",
+                cache.conv,
+                cache.block_map,
+                (positions + offsets - 2) // cache.page_size,
+            )
+            record_module_cache_pages(
+                self,
+                "recurrence.cache_initial_state",
+                cache.ssm,
+                cache.block_map,
+                (positions - 2) // cache.page_size,
+            )
 
     def _cache_context(
         self,
@@ -267,8 +296,9 @@ class KimiK3KDADecode(nn.Module):
         is_target_verify: bool,
     ) -> torch.Tensor:
         cache = self._cache_context(q_projected, kv_cache, attention_inputs)
+        self._trace_cache(cache, q_projected.shape[0], after=False)
         if is_target_verify:
-            return self._target_verify(
+            output = self._target_verify(
                 q_projected,
                 k_projected,
                 v_projected,
@@ -277,19 +307,22 @@ class KimiK3KDADecode(nn.Module):
                 cu_seqlens,
                 cache,
             )
-        q, k, v = self._short_conv(q_projected, k_projected, v_projected, cache)
-        return self._recurrent(
-            q,
-            k,
-            v,
-            raw_gate,
-            raw_beta,
-            cu_seqlens,
-            cache.ssm,
-            cache.block_map,
-            cache.sequence_lengths_plus_one,
-            cache.page_size,
-        )
+        else:
+            q, k, v = self._short_conv(q_projected, k_projected, v_projected, cache)
+            output = self._recurrent(
+                q,
+                k,
+                v,
+                raw_gate,
+                raw_beta,
+                cu_seqlens,
+                cache.ssm,
+                cache.block_map,
+                cache.sequence_lengths_plus_one,
+                cache.page_size,
+            )
+        self._trace_cache(cache, q_projected.shape[0], after=True)
+        return output
 
 
 __all__ = ["KimiK3KDADecode"]
