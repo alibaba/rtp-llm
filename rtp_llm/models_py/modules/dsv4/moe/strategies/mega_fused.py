@@ -41,7 +41,7 @@ from ..mega_fused_buf import (
     _get_or_create_mega_fused_buf,
     _get_or_create_mega_fused_mid,
     _get_or_create_mega_fused_output,
-    _mega_moe_fused_enabled,
+    _mega_moe_fused_available,
 )
 from ..warmup_sync import sync_cuda_graph_warmup_ranks
 from .base import MoeCfg, register_strategy
@@ -57,10 +57,7 @@ class MegaMoEFusedStrategy(MegaMoEStrategy):
 
     @classmethod
     def can_handle(cls, cfg: MoeCfg) -> bool:
-        # Fused Mega requires EP > 1 plus the opt-in env and the fused DeepGEMM
-        # entrypoints — all checked by ``_mega_moe_fused_enabled()`` except
-        # ep_size > 1, which we check here.
-        return cfg.ep_size > 1 and _mega_moe_fused_enabled()
+        return cfg.ep_size > 1 and _mega_moe_fused_available()
 
     def setup_weights(self, layer_weights: Dict) -> None:
         """Prepare routed + shared-expert kernel weights and symm/scratch

@@ -733,7 +733,15 @@ def compute_swa_slot_in_flat(
     return out
 
 
-@triton.jit(do_not_specialize=["num_tokens", "M", "base_offset"])
+@triton.jit(
+    do_not_specialize=[
+        "num_tokens",
+        "M",
+        "base_offset",
+        "window_size",
+        "num_reqs",
+    ]
+)
 def _compute_swa_slot_in_flat_from_cu_kernel(
     out_ptr,  # [num_tokens] int64
     cu_seqlens_ptr,  # [B+1] int32/int64 full-view starts
@@ -741,8 +749,8 @@ def _compute_swa_slot_in_flat_from_cu_kernel(
     num_tokens,
     M,
     base_offset,
-    window_size: tl.constexpr,
-    NUM_REQS: tl.constexpr,
+    window_size,
+    num_reqs,
     BLOCK_B: tl.constexpr,
     BLOCK_M: tl.constexpr,
 ):
@@ -751,11 +759,11 @@ def _compute_swa_slot_in_flat_from_cu_kernel(
     b = tl.arange(0, BLOCK_B)
     ends = tl.load(
         cu_seqlens_ptr + 1 + b,
-        mask=b < NUM_REQS,
+        mask=b < num_reqs,
         other=num_tokens,
     ).to(tl.int64)
     req = tl.sum(tl.where(rows[:, None] >= ends[None, :], 1, 0), axis=1).to(tl.int64)
-    req = tl.minimum(req, NUM_REQS - 1)
+    req = tl.minimum(req, num_reqs - 1)
     start = tl.load(cu_seqlens_ptr + req, mask=mask, other=0).to(tl.int64)
     prefix = tl.load(prefix_lengths_ptr + req, mask=mask, other=0).to(tl.int64)
     p = tl.minimum(prefix, window_size - 1)
@@ -819,8 +827,8 @@ def compute_swa_slot_in_flat_from_cu(
         num_tokens,
         int(M),
         int(base_offset),
-        window_size=int(window_size),
-        NUM_REQS=num_reqs,
+        int(window_size),
+        num_reqs,
         BLOCK_B=block_b,
         BLOCK_M=block_m,
     )

@@ -22,10 +22,12 @@ Run:
 from __future__ import annotations
 
 import unittest
+from unittest import mock
 
 import torch
 
 from rtp_llm.models_py.modules.dsv4.cp import _CP_ROLE_INDEXER, _CP_ROLE_MAIN
+from rtp_llm.models_py.modules.dsv4.fp8 import compressor as compressor_module
 from rtp_llm.models_py.modules.dsv4.fp8._compressor_consts import (
     INDEXER_ENTRY_BYTES,
     INDEXER_HEAD_DIM,
@@ -70,7 +72,7 @@ def _build_compressor(
     freqs_cis = torch.ones(
         4096, rope_head_dim // 2, dtype=torch.complex64, device=DEVICE
     )
-    cmp.freqs_cis = freqs_cis
+    cmp.init_rope_cache(freqs_cis)
     return cmp
 
 
@@ -109,6 +111,31 @@ def _bind_pools(
         kv_tokens_per_block=kv_eb * compress_ratio,
     )
     return state_view_2d, kv_pool_3d
+
+
+class CompressorRopeCacheTest(unittest.TestCase):
+    def test_same_frequency_tensor_reuses_prebuilt_cache(self) -> None:
+        freqs_cis = torch.ones(8, 4, dtype=torch.complex64)
+        shared_cache = torch.ones(8, 8, dtype=torch.float32)
+        first = CompressorFP8.__new__(CompressorFP8)
+        second = CompressorFP8.__new__(CompressorFP8)
+        torch.nn.Module.__init__(first)
+        torch.nn.Module.__init__(second)
+
+        compressor_module._SHARED_COS_SIN_CACHE.clear()
+        with mock.patch.object(
+            compressor_module,
+            "build_cos_sin_cache",
+            return_value=(shared_cache, None),
+        ) as build:
+            first.init_rope_cache(freqs_cis)
+            second.init_rope_cache(freqs_cis)
+
+        build.assert_called_once_with(freqs_cis)
+        self.assertIs(first.freqs_cis, second.freqs_cis)
+        self.assertIs(first._cos_sin_cache, shared_cache)
+        self.assertIs(second._cos_sin_cache, shared_cache)
+        compressor_module._SHARED_COS_SIN_CACHE.clear()
 
 
 class CompressorDisableRawPathTest(unittest.TestCase):

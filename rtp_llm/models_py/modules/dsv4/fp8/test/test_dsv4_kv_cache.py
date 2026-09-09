@@ -253,7 +253,7 @@ class TestCompressorPrecision:
         freqs_cis = precompute_freqs_cis(
             rope_head_dim, args["max_seq_len"], 0, 160000.0, 1.0, 32, 1
         )
-        our_comp.freqs_cis = freqs_cis
+        our_comp.init_rope_cache(freqs_cis)
         official_comp.freqs_cis = freqs_cis
 
         return our_comp, official_comp, args
@@ -355,7 +355,7 @@ class TestCompressorPrecision:
         freqs_cis = precompute_freqs_cis(
             rope_head_dim, args["max_seq_len"], 0, 160000.0, 1.0, 32, 1
         )
-        our_comp.freqs_cis = freqs_cis
+        our_comp.init_rope_cache(freqs_cis)
         official_comp.freqs_cis = freqs_cis
 
         return our_comp, official_comp, args
@@ -419,7 +419,7 @@ class TestSequenceLengthBoundaries:
         freqs_cis = precompute_freqs_cis(
             args["rope_head_dim"], args["max_seq_len"], 0, 160000.0, 1.0, 32, 1
         )
-        comp.freqs_cis = freqs_cis
+        comp.init_rope_cache(freqs_cis)
         return comp, args
 
     def test_exact_ratio_multiple(self, csa_compressor):
@@ -520,7 +520,7 @@ class TestCompressedKVCache:
         freqs_cis = precompute_freqs_cis(
             rope_head_dim, args["max_seq_len"], 0, 160000.0, 1.0, 32, 1
         )
-        our_comp.freqs_cis = freqs_cis
+        our_comp.init_rope_cache(freqs_cis)
         official_comp.freqs_cis = freqs_cis
 
         B, S = 1, 20  # 20 tokens → 5 compressed entries
@@ -572,7 +572,7 @@ class TestCompressedKVCache:
         freqs_cis = precompute_freqs_cis(
             rope_head_dim, args["max_seq_len"], 0, 160000.0, 1.0, 32, 1
         )
-        our_comp.freqs_cis = freqs_cis
+        our_comp.init_rope_cache(freqs_cis)
         official_comp.freqs_cis = freqs_cis
 
         # Prefill 8 tokens

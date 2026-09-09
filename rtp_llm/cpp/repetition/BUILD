@@ -4,6 +4,13 @@ load("@arch_config//:arch_select.bzl", "torch_deps")
 package(default_visibility = ["//visibility:public"])
 
 cc_library(
+    name = "online_repetition_tracker_core",
+    srcs = ["OnlineRepetitionTracker.cc"],
+    hdrs = ["OnlineRepetitionTracker.h"],
+    copts = copts(),
+)
+
+cc_library(
     name = "token_tool_call_loop_guard_core",
     srcs = ["TokenToolCallLoopGuard.cc"],
     hdrs = ["TokenToolCallLoopGuard.h"],
@@ -15,6 +22,7 @@ cc_library(
     srcs = ["OnlineRepetitionPybind.cc"],
     copts = copts(),
     deps = [
+        ":online_repetition_tracker_core",
         ":token_tool_call_loop_guard_core",
     ] + torch_deps(),
     alwayslink = True,

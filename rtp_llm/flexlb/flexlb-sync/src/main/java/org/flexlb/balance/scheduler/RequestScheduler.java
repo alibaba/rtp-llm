@@ -1,174 +1,155 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.resource.DynamicWorkerManager;
+import org.flexlb.balance.endpoint.EndpointRegistry;
+import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.balance.eviction.EvictionManager;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
-import org.flexlb.service.monitor.RoutingQueueReporter;
-import org.flexlb.util.Logger;
+import org.flexlb.service.monitor.BatchSchedulerReporter;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
-import javax.annotation.PostConstruct;
-import javax.annotation.PreDestroy;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.TimeUnit;
+import java.util.List;
+import java.util.Objects;
+import java.util.concurrent.CompletableFuture;
 
 /**
- * Request scheduler - manages worker thread pool, consumes request queue, and executes routing.
- * Includes configurable max retry count to prevent infinite retry loops.
+ * Public QUEUE scheduling facade.
  *
- * @author saichen.sm
- * @since 2025/12/23
+ * <p>Ingress only registers the canonical lifecycle slot and appends the
+ * request to the model's global ordered queue.  Endpoint selection, exact
+ * reservation and publication happen together at the queue decision point;
+ * endpoint batchers are delivery runtimes, not independent route selectors.</p>
  */
 @Component
-public class RequestScheduler {
+public final class RequestScheduler {
 
-    private final Router router;
     private final ConfigService configService;
-    private final QueueManager queueManager;
-    private final DynamicWorkerManager dynamicWorkerManager;
-    private final RoutingQueueReporter metrics;
+    private final EndpointRegistry endpointRegistry;
+    private final RequestRegistry lifecycle;
+    private final GlobalQueueCoordinator globalQueue;
 
-    // Worker thread pool
-    private ExecutorService workerExecutor;
-    private volatile boolean running = true;
-
-    public RequestScheduler(Router router,
-                            ConfigService configService,
-                            QueueManager queueManager,
-                            DynamicWorkerManager dynamicWorkerManager,
-                            RoutingQueueReporter metrics) {
-        this.router = router;
-        this.configService = configService;
-        this.queueManager = queueManager;
-        this.dynamicWorkerManager = dynamicWorkerManager;
-        this.metrics = metrics;
+    @Autowired
+    RequestScheduler(
+            ConfigService configService,
+            DefaultRouter router,
+            EndpointRegistry endpointRegistry,
+            BatchSchedulerReporter reporter,
+            EvictionManager evictionManager,
+            RequestRegistry lifecycle,
+            PlacementAvailability placementAvailability) {
+        this.configService = Objects.requireNonNull(
+                configService, "configService");
+        this.endpointRegistry = Objects.requireNonNull(
+                endpointRegistry, "endpointRegistry");
+        this.lifecycle = Objects.requireNonNull(lifecycle, "lifecycle");
+        FlexlbConfig startupConfig = this.configService.loadBalanceConfig();
+        this.globalQueue = startupConfig != null && startupConfig.isQueue()
+                ? new GlobalQueueCoordinator(
+                        this.configService,
+                        Objects.requireNonNull(router, "router"),
+                        Objects.requireNonNull(reporter, "reporter"),
+                        Objects.requireNonNull(evictionManager, "evictionManager"),
+                        this.lifecycle,
+                        Objects.requireNonNull(
+                                placementAvailability, "placementAvailability"))
+                : null;
     }
 
-    @PostConstruct
-    public void start() {
-        FlexlbConfig config = configService.loadBalanceConfig();
-
-        // Start worker thread pool
-        this.workerExecutor = Executors.newFixedThreadPool(config.getScheduleWorkerSize(), r -> {
-            Thread t = new Thread(r, "routing-queue-worker");
-            t.setDaemon(true);
-            return t;
-        });
-
-        // Submit worker tasks
-        for (int i = 0; i < config.getScheduleWorkerSize(); i++) {
-            workerExecutor.submit(this::workerLoop);
+    /** Register once, then enqueue without doing route work on ingress. */
+    public CompletableFuture<Response> submit(BalanceContext context) {
+        if (context == null || context.getRequest() == null) {
+            return CompletableFuture.completedFuture(error(
+                    StrategyErrorType.INVALID_REQUEST, null));
         }
-
-        Logger.info("RequestScheduler Worker thread pool started, worker count: {}", config.getScheduleWorkerSize());
-    }
-
-    /**
-     * Worker thread main loop
-     * <p>
-     * Workflow:
-     *   1. Wait for resource availability (acquire permit with timeout)
-     *   2. Take request from queue
-     *   3. Process request
-     * <p>
-     * Both steps use timeouts to avoid blocking indefinitely and to allow
-     * graceful shutdown checks.
-     */
-    private void workerLoop() {
-        Logger.info("Worker thread started, ready to process requests...");
-
-        while (running && !Thread.currentThread().isInterrupted()) {
-            try {
-                // Step 1: Wait for resource permit (with timeout to avoid indefinite blocking)
-                boolean acquired = dynamicWorkerManager.tryAcquirePermit(500, TimeUnit.MILLISECONDS);
-                if (!acquired) {
-                    continue;
-                }
-
-                try {
-                    // Step 2: Take request from queue
-                    BalanceContext ctx = queueManager.takeRequest(500);
-                    if (ctx == null) {
-                        continue; // permit released in finally
-                    }
-
-                    // Step 3: Process request
-                    Logger.debug("Worker processing request id: {}", ctx.getRequestId());
-                    processRequest(ctx);
-                } finally {
-                    dynamicWorkerManager.releasePermit();
-                }
-            } catch (Exception e) {
-                Logger.error("Worker thread encountered error", e);
-            }
-        }
-
-        Logger.info("Worker thread stopped");
-    }
-
-    private void processRequest(BalanceContext ctx) {
+        FlexlbConfig activeConfig;
         try {
-            Response response = router.route(ctx);
-            handleRoutingResult(ctx, response);
-        } catch (Exception e) {
-            Logger.error("Worker thread failed to route ctx id:{}", ctx.getRequestId(), e);
-            ctx.getFuture().completeExceptionally(e);
+            activeConfig = configService.loadBalanceConfig();
+        } catch (Throwable failure) {
+            return CompletableFuture.completedFuture(error(
+                    StrategyErrorType.BATCH_DISPATCH_FAILED,
+                    "Failed to load scheduler configuration: "
+                            + failure.getMessage()));
         }
-    }
-
-    private void handleRoutingResult(BalanceContext ctx, Response response) {
-        int maxRetry = ctx.getConfig() != null ? ctx.getConfig().getMaxRetryCount() : 0;
-        boolean retryAllowed = maxRetry <= 0 || ctx.getRetryCount() < maxRetry;
-        if (!response.isSuccess() && shouldRetry(response) && retryAllowed) {
-            ctx.incrementRetryCount();
-            Logger.warn("Route failed for request id:{}, error: {}, retry count: {}",
-                    ctx.getRequestId(),
-                    response.getCode(),
-                    ctx.getRetryCount());
-            metrics.reportRoutingFailureQps(response.getCode());
-
-            queueManager.offerToHead(ctx);
-        } else {
-            if (!response.isSuccess() && !retryAllowed) {
-                Logger.warn("Max retry count ({}) exceeded for request id:{}, completing with error",
-                        maxRetry, ctx.getRequestId());
+        if (activeConfig == null) {
+            return CompletableFuture.completedFuture(error(
+                    StrategyErrorType.BATCH_DISPATCH_FAILED,
+                    "Scheduler configuration is unavailable"));
+        }
+        if (!activeConfig.isQueue()) {
+            return CompletableFuture.completedFuture(error(
+                    StrategyErrorType.BATCH_DISPATCH_FAILED,
+                    "RequestScheduler requires QUEUE configuration"));
+        }
+        if (globalQueue == null) {
+            return CompletableFuture.completedFuture(error(
+                    StrategyErrorType.BATCH_DISPATCH_FAILED,
+                    "QUEUE configuration was enabled after scheduler startup"));
+        }
+        int maxOutstanding = activeConfig.queueScheduler().getCapacity()
+                .getMaxOutstandingRequestsGlobal();
+        CompletableFuture<Response> future = lifecycle.register(
+                context, maxOutstanding);
+        if (future.isDone()) {
+            return future;
+        }
+        try {
+            if (!globalQueue.offer(context, future, context.getPriority())) {
+                future.complete(error(StrategyErrorType.BATCH_DISPATCH_FAILED,
+                        "request scheduler is shutting down"));
             }
-            ctx.getFuture().complete(response);
-            metrics.reportRoutingSuccessQps(ctx.getRetryCount());
+        } catch (Throwable failure) {
+            future.complete(error(StrategyErrorType.BATCH_DISPATCH_FAILED,
+                    "Queue submission failed: " + failure.getMessage()));
         }
+        return future;
     }
 
-    /**
-     * Determine if request should be retried
-     * <p>
-     * Only resource-unavailable errors should trigger retry to avoid ineffective retry attempts
-     *
-     * @param response Routing response
-     * @return true if request should be retried, false otherwise
-     */
-    private boolean shouldRetry(Response response) {
-        StrategyErrorType errorType = StrategyErrorType.fromErrorCode(response.getCode());
-        return errorType != null && errorType.isCanRetry();
+    public RequestState cancelRequest(
+            long requestId,
+            long expectedBatchId,
+            CancelReason reason) {
+        return lifecycle.cancelRequest(requestId, expectedBatchId, reason);
     }
 
-    @PreDestroy
-    public void shutdown() {
-        running = false;
-        if (workerExecutor != null && !workerExecutor.isShutdown()) {
-            workerExecutor.shutdown();
-            try {
-                if (!workerExecutor.awaitTermination(10, TimeUnit.SECONDS)) {
-                    workerExecutor.shutdownNow();
-                }
-                Logger.info("RequestScheduler Worker thread pool stopped");
-            } catch (InterruptedException e) {
-                workerExecutor.shutdownNow();
-                Thread.currentThread().interrupt();
+    public int getInflightSize() {
+        return lifecycle.liveRequestCount();
+    }
+
+    public int getQueuedRequestCount() {
+        long queued = globalQueue == null ? 0L : globalQueue.size();
+        for (PrefillEndpoint endpoint
+                : endpointRegistry.snapshotPrefillEndpoints().values()) {
+            queued += endpoint.queuedRequestCount();
+            if (queued >= Integer.MAX_VALUE) {
+                return Integer.MAX_VALUE;
             }
         }
+        return (int) queued;
+    }
+
+    public List<RequestState> snapshotActiveRequests() {
+        return lifecycle.snapshotActiveRequests();
+    }
+
+    public RequestState getRequestState(long requestId, long expectedBatchId) {
+        return lifecycle.getRequestState(requestId, expectedBatchId);
+    }
+
+    public boolean ownsRequestGeneration(long requestId) {
+        return lifecycle.ownsRequestGeneration(requestId);
+    }
+
+    public void closePlacement() {
+        if (globalQueue != null) {
+            globalQueue.close();
+        }
+    }
+
+    private static Response error(StrategyErrorType type, String detail) {
+        return RequestRegistry.buildErrorResponse(type, detail);
     }
 }

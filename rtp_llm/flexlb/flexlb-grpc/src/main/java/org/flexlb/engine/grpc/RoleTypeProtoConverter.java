@@ -28,19 +28,6 @@ public final class RoleTypeProtoConverter {
         };
     }
 
-    /**
-     * Convert domain {@link RoleType} to proto enum.
-     */
-    public static EngineRpcService.RoleTypePB toProto(RoleType role) {
-        return switch (role) {
-            case PDFUSION -> EngineRpcService.RoleTypePB.ROLE_TYPE_PDFUSION;
-            case PREFILL -> EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL;
-            case DECODE -> EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE;
-            case VIT -> EngineRpcService.RoleTypePB.ROLE_TYPE_VIT;
-            case FRONTEND -> EngineRpcService.RoleTypePB.ROLE_TYPE_FRONTEND;
-        };
-    }
-
     /** Convert the domain role to the original RoleAddrPB field-1 enum. */
     public static EngineRpcService.RoleAddrPB.RoleType toLegacyProto(RoleType role) {
         return switch (role) {
@@ -50,11 +37,6 @@ public final class RoleTypeProtoConverter {
             case VIT -> EngineRpcService.RoleAddrPB.RoleType.VIT;
             case FRONTEND -> EngineRpcService.RoleAddrPB.RoleType.FRONTEND;
         };
-    }
-
-    /** Original opaque WorkerStatusPB field-1 spelling used by old Masters. */
-    public static String toLegacyWorkerStatusString(RoleType role) {
-        return "RoleType." + role.name();
     }
 
     /** Read RoleAddrPB across dsv4 and dual-write schemas. */

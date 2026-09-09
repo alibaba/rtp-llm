@@ -17,6 +17,12 @@ filegroup(
 )
 
 py_library(
+    name = "xgrammar_core_dump_control",
+    srcs = ["inference/core_dump_control.py"],
+    visibility = ["//visibility:public"],
+)
+
+py_library(
     name = "dash_sc_grpc_server",
     srcs = [
         "__init__.py",
@@ -47,6 +53,7 @@ py_library(
     ],
     visibility = ["//visibility:public"],
     deps = [
+        ":xgrammar_core_dump_control",
         "//rtp_llm:telemetry",
         "//rtp_llm/server:server",
         ":grpcio",

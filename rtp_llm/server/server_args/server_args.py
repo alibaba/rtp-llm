@@ -545,6 +545,7 @@ def setup_args(args: Optional[Sequence[str]] = None) -> PyEnvConfigs:
 
     # 解析参数（会自动应用所有配置绑定）
     parser.parse_args(args)
+    py_env_configs.server_config.validate_allocator_dump_config()
 
     # Normalize the two switches before model construction and process spawn.
     from rtp_llm.utils.warmup import configure_warmup

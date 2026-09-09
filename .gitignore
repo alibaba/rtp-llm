@@ -25,6 +25,7 @@ generated-config.yml
 *.iml
 *vents.out.tfevents*
 .DS_Store
+._*
 __pycache__
 target
 *.pyc

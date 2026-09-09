@@ -603,19 +603,23 @@ TEST_F(GenerateStreamTest, publicReadinessReaderIsSafeDuringPublication) {
     EXPECT_EQ(stream->statusInfo().code(), ErrorCode::CANCELLED);
 }
 
-TEST_F(GenerateStreamTest, testSyncSpeculativeMaxLengthDoesNotCountAnchorAsNewToken) {
-    autil::EnvGuard stream_async("RTP_LLM_STREAM_ASYNC", "0");
+TEST_F(GenerateStreamTest, testSpeculativeMaxLengthUsesGreaterConfiguredAndAsyncReserve) {
+    autil::EnvGuard stream_async("RTP_LLM_STREAM_ASYNC", "1");
     auto            builder = GenerateStreamBuilder();
     auto            stream  = builder.createContextStream({1, 2, 3, 4, 5, 6});
 
     auto sp_output_buffer          = std::make_shared<SpeculativeExecutorStreamOutput>();
     sp_output_buffer->propose_step = 3;
     stream->setSPOutputBuffer(sp_output_buffer);
-    // Scheduler/cache reservation includes the target-verify anchor, but the
-    // output-length limit must reserve only the three newly proposed tokens.
-    stream->setReserveStep(4);
 
-    EXPECT_EQ(stream->maxTokenNum(), 2045);
+    // The configured DSpark reserve can exceed async's 2 * gamma + 1 reserve.
+    stream->setReserveStep(9);
+    EXPECT_EQ(stream->maxTokenNum(), 2039);
+
+    // Conversely, a smaller configured reserve must not reduce async's dynamic
+    // seven-token window for gamma=3.
+    stream->setReserveStep(4);
+    EXPECT_EQ(stream->maxTokenNum(), 2041);
 }
 
 // clearMtpAsyncDeviceState rejects stale epochs. A worker that

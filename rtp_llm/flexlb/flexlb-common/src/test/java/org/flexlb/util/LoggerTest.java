@@ -2,6 +2,7 @@ package org.flexlb.util;
 
 import ch.qos.logback.classic.Level;
 import org.flexlb.enums.LogLevel;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -14,6 +15,7 @@ import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -23,6 +25,11 @@ class LoggerTest {
 
     @BeforeEach
     void setUp() {
+        Logger.setLevel(null);
+    }
+
+    @AfterEach
+    void tearDown() {
         Logger.setLevel(null);
     }
 
@@ -129,6 +136,32 @@ class LoggerTest {
 
         assertNotNull(Logger.class, "Logger class should be loaded");
         assertDoesNotThrow(Logger::getLevel, "getLevel should work");
+    }
+
+    @Test
+    @DisplayName("isDebugEnabled follows the runtime logback level")
+    void isDebugEnabled_followsRuntimeLevel() {
+        Logger.setLevel(LogLevel.INFO);
+        assertFalse(Logger.isDebugEnabled());
+
+        Logger.setLevel(LogLevel.DEBUG);
+        assertTrue(Logger.isDebugEnabled());
+
+        Logger.setLevel(LogLevel.WARN);
+        assertFalse(Logger.isDebugEnabled());
+    }
+
+    @Test
+    @DisplayName("isTraceEnabled follows the runtime logback level")
+    void isTraceEnabled_followsRuntimeLevel() {
+        Logger.setLevel(LogLevel.TRACE);
+        assertTrue(Logger.isTraceEnabled());
+
+        Logger.setLevel(LogLevel.DEBUG);
+        assertFalse(Logger.isTraceEnabled());
+
+        Logger.setLevel(LogLevel.WARN);
+        assertFalse(Logger.isTraceEnabled());
     }
 
     @Test

@@ -200,6 +200,7 @@ class TraceTelemetryLifecycleTest(TestCase):
         app.py_env_configs = MagicMock()
         app.py_env_configs.generate_env_config.think_terminate_token_id = -1
         app.py_env_configs.profiling_debug_logging_config.log_file_backup_count = 1
+        app.py_env_configs.grammar_config.num_workers = 8
         app._grpc_server = MagicMock()
         app._shutdown_manager = MagicMock()
         app._shutdown_event = MagicMock()

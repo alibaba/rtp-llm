@@ -2,9 +2,11 @@ package org.flexlb.cache.service.impl;
 
 import lombok.extern.slf4j.Slf4j;
 import org.flexlb.cache.service.DynamicCacheIntervalService;
+import org.flexlb.config.ConfigService;
+import org.flexlb.config.WorkerRegistryConfig;
 import org.springframework.stereotype.Service;
 
-import java.util.Optional;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 /**
@@ -17,15 +19,15 @@ import java.util.concurrent.locks.ReentrantReadWriteLock;
 @Slf4j
 public class DefaultDynamicCacheIntervalService implements DynamicCacheIntervalService {
 
-    // Environment variable configuration
-    private final int targetDiffSize;
-    private final long minIntervalMs;
-    private final long maxIntervalMs;
-
-    // Rolling average configuration
+    private static final long DEFAULT_INTERVAL_MS = 100L;
     private static final int ROLLING_WINDOW_SIZE = 30;
     private static final double DAMPENING_FACTOR = 0.3;
     private static final double ADJUSTMENT_THRESHOLD = 0.1;
+
+    private final int targetDiffSize;
+    private final long minIntervalMs;
+    private final long maxIntervalMs;
+    private final AtomicLong currentIntervalMs;
 
     // Thread-safe state management
     private final ReentrantReadWriteLock lock = new ReentrantReadWriteLock();
@@ -36,29 +38,28 @@ public class DefaultDynamicCacheIntervalService implements DynamicCacheIntervalS
     private int historySize;
     private double rollingAverage = 0.0;
 
-    public DefaultDynamicCacheIntervalService() {
+    public DefaultDynamicCacheIntervalService(ConfigService configService) {
+        WorkerRegistryConfig.CacheStatusConfig config = configService
+                .loadBalanceConfig().getWorkerRegistry().getCacheStatus();
+        this.targetDiffSize = config.getTargetDiffSize();
+        this.minIntervalMs = config.getMinRefreshIntervalMs();
+        this.maxIntervalMs = config.getMaxRefreshIntervalMs();
+        this.currentIntervalMs = new AtomicLong(
+                Math.max(minIntervalMs, Math.min(maxIntervalMs, DEFAULT_INTERVAL_MS)));
 
-        this.targetDiffSize = Optional.ofNullable(System.getenv("CACHE_STATUS_DIFF_SIZE"))
-                .map(Integer::parseInt)
-                .orElse(30);
-
-        this.minIntervalMs = Optional.ofNullable(System.getenv("CACHE_STATUS_MIN_INTERVAL_MS"))
-                .map(Long::parseLong)
-                .orElse(50L);
-
-        this.maxIntervalMs = Optional.ofNullable(System.getenv("CACHE_STATUS_MAX_INTERVAL_MS"))
-                .map(Long::parseLong)
-                .orElse(3000L);
-
-        log.info("DefaultDynamicIntervalManager initialized - target:{}, min:{}ms, max:{}ms",
-            targetDiffSize, minIntervalMs, maxIntervalMs);
+        log.info("DefaultDynamicIntervalManager initialized - target:{}, min:{}ms, max:{}ms, current:{}ms",
+                targetDiffSize, minIntervalMs, maxIntervalMs, currentIntervalMs.get());
     }
 
     @Override
     public void updateDiffStatistics(int diffSize) {
-
         updateRollingAverage(diffSize);
         adjustIntervalIfNeeded();
+    }
+
+    @Override
+    public long getCurrentIntervalMs() {
+        return currentIntervalMs.get();
     }
 
     /**

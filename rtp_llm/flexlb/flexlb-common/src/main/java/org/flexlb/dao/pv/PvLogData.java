@@ -23,8 +23,7 @@ public class PvLogData {
     private String admissionRejectReason;
     private String scheduleOrigin;
     private int priority;
-    private long requestSloMs;
-    private long generateTimeoutMs;
+    private long requestExpiresAtMs;
     private long latencyMs;
     private long batchId;
     private String requestState;
@@ -50,8 +49,7 @@ public class PvLogData {
         this.admissionRejectReason = admissionRejectReason;
         this.scheduleOrigin = scheduleOrigin;
         this.priority = ctx.getPriority();
-        this.requestSloMs = ctx.getRequestSloMs();
-        this.generateTimeoutMs = ctx.getRequest().getGenerateTimeout();
+        this.requestExpiresAtMs = ctx.getRequestExpiresAtMs();
         this.latencyMs = Math.max(0, completedAtMs - ctx.getStartTime());
         this.batchId = batchId;
         this.requestState = requestState;

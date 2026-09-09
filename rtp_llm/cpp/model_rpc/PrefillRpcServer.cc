@@ -29,6 +29,8 @@ namespace rtp_llm {
 
 namespace {
 
+constexpr auto kDecodeChannelReadyTimeoutCap = std::chrono::milliseconds(15000);
+
 bool envValueIsTrue(const char* value) {
     return value != nullptr
            && (strcmp(value, "1") == 0 || strcasecmp(value, "true") == 0 || strcasecmp(value, "on") == 0
@@ -103,6 +105,27 @@ void logPrefillFailureTrace(const char* event, PrefillGenerateContext& prefill_c
 
 PrefillRpcServer::~PrefillRpcServer() = default;
 
+std::chrono::system_clock::time_point
+PrefillRpcServer::decodeChannelReadyDeadline(const PrefillGenerateContext& prefill_context,
+                                             int64_t                       max_rpc_timeout_ms) {
+    auto       deadline     = std::chrono::system_clock::now() + kDecodeChannelReadyTimeoutCap;
+    const auto rpc_deadline = prefill_context.effectiveDeadline(max_rpc_timeout_ms);
+    if (rpc_deadline.has_value()) {
+        deadline = std::min(deadline, *rpc_deadline);
+    }
+    return deadline;
+}
+
+std::optional<ErrorInfo> PrefillRpcServer::parseDownstreamError(const grpc::Status& status) {
+    ErrorDetailsPB details;
+    if (status.error_details().empty() || !details.ParseFromString(status.error_details())
+        || details.error_code() == static_cast<int64_t>(ErrorCode::NONE_ERROR)) {
+        return std::nullopt;
+    }
+    const auto message = details.error_message().empty() ? status.error_message() : details.error_message();
+    return ErrorInfo(static_cast<ErrorCode>(details.error_code()), message);
+}
+
 #define CLIENT_GRPC_RET_IF_ERROR(prefill_context, state, error_code_value)                                             \
     if (!(state)) {                                                                                                    \
         auto   new_error_code = error_code_value;                                                                      \
@@ -143,9 +166,15 @@ PrefillRpcServer::~PrefillRpcServer() = default;
                 new_error_code = ErrorCode::KEEP_ALIVE_TIMEOUT;                                                        \
                 prefill_context.closeGrpcConnection();                                                                 \
             }                                                                                                          \
-            new_error_msg += error_msg;                                                                                \
-            if (status.error_code() == grpc::StatusCode::RESOURCE_EXHAUSTED) {                                         \
-                new_error_code = ErrorCode::DECODE_MALLOC_FAILED;                                                      \
+            const auto downstream_error = PrefillRpcServer::parseDownstreamError(status);                              \
+            if (downstream_error.has_value()) {                                                                        \
+                new_error_code = downstream_error->code();                                                             \
+                new_error_msg  = downstream_error->ToString();                                                         \
+            } else {                                                                                                   \
+                new_error_msg += error_msg;                                                                            \
+                if (status.error_code() == grpc::StatusCode::RESOURCE_EXHAUSTED) {                                     \
+                    new_error_code = ErrorCode::DECODE_MALLOC_FAILED;                                                  \
+                }                                                                                                      \
             }                                                                                                          \
         } else {                                                                                                       \
             if (prefill_context.client_stream) {                                                                       \
@@ -173,8 +202,9 @@ grpc::Status PrefillRpcServer::init(const EngineInitParams&                     
 }
 
 ErrorInfo PrefillRpcServer::waitStreamBeforeRun(std::shared_ptr<GenerateStream> stream) {
-    static int max_wait_timeout_us = maga_init_params_.pd_sep_config.prefill_max_wait_timeout_ms * 1000;
-    auto       begin_time_us       = currentTimeUs();
+    const int64_t max_wait_timeout_us =
+        static_cast<int64_t>(maga_init_params_.pd_sep_config.prefill_max_wait_timeout_ms) * 1000;
+    auto begin_time_us = currentTimeUs();
     while (!stream->hasError() && stream->getStatus() == StreamState::WAITING) {
         usleep(100);
         auto current_time_us = currentTimeUs();
@@ -256,12 +286,30 @@ void PrefillRpcServer::getRpcConnection(PrefillGenerateContext& prefill_context)
         logPrefillFailureTrace("get_rpc_connection_no_decode_host", prefill_context);
         return;
     }
-    auto decode_addr    = host->ip + ":" + std::to_string(host->rpc_port);
-    auto connect_status = resource_.rpc_pool.getConnection(decode_addr);
+    auto decode_addr = host->ip + ":" + std::to_string(host->rpc_port);
+    if (prefill_context.isRequestCancelled()) {
+        setContextError(prefill_context, ErrorInfo(ErrorCode::CANCELLED, "request is cancelled"));
+        return;
+    }
+    if (prefill_context.requestDeadlineExceeded()) {
+        setContextError(prefill_context, ErrorInfo(ErrorCode::GENERATE_TIMEOUT, "request deadline exhausted"));
+        return;
+    }
+    const auto ready_deadline =
+        decodeChannelReadyDeadline(prefill_context, maga_init_params_.pd_sep_config.max_rpc_timeout_ms);
+    auto connect_status = resource_.rpc_pool.getReadyConnection(
+        decode_addr, ready_deadline, [&prefill_context]() { return prefill_context.isRequestCancelled(); });
     if (!connect_status.ok()) {
-        setContextError(prefill_context,
-                        ErrorInfo(ErrorCode::GET_CONNECTION_FAILED,
-                                  "get grpc connection for decode addr " + decode_addr + " failed"));
+        if (prefill_context.isRequestCancelled()) {
+            setContextError(prefill_context, ErrorInfo(ErrorCode::CANCELLED, "request is cancelled"));
+        } else if (prefill_context.requestDeadlineExceeded()) {
+            setContextError(prefill_context, ErrorInfo(ErrorCode::GENERATE_TIMEOUT, "request deadline exhausted"));
+        } else {
+            setContextError(prefill_context,
+                            ErrorInfo(ErrorCode::GET_CONNECTION_FAILED,
+                                      "get ready grpc connection for decode addr " + decode_addr
+                                          + " failed: " + connect_status.status().ToString()));
+        }
         prefill_context.decode_addr = decode_addr;
         logPrefillFailureTrace("get_rpc_connection_failed", prefill_context);
         return;
@@ -345,6 +393,14 @@ GenerateRequestPB PrefillRpcServer::buildAllocateRequest(PrefillGenerateContext&
 void PrefillRpcServer::remoteAllocateResource(PrefillGenerateContext& prefill_context) {
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%ld] start to remote allocate resource", prefill_context.request_id);
+    if (prefill_context.isRequestCancelled()) {
+        setContextError(prefill_context, ErrorInfo(ErrorCode::CANCELLED, "request is cancelled"));
+        return;
+    }
+    if (prefill_context.requestDeadlineExceeded()) {
+        setContextError(prefill_context, ErrorInfo(ErrorCode::GENERATE_TIMEOUT, "request deadline exhausted"));
+        return;
+    }
     auto client_context = std::make_shared<ClientContext>();
     // P->D CLIENT span: each retry rebuilds ClientContext and opens a NEW
     // physical RemoteGenerate bidi stream (stub->RemoteGenerate
@@ -376,12 +432,9 @@ void PrefillRpcServer::remoteAllocateResource(PrefillGenerateContext& prefill_co
             telemetry::injectSpanToClientContext(client_context.get(), client_span);
         }
     }
-    auto    request_timeout_ms = prefill_context.request_timeout_ms;
-    auto    max_rpc_timeout_ms = maga_init_params_.pd_sep_config.max_rpc_timeout_ms;
-    int64_t final_timeout_ms   = request_timeout_ms > 0 ? request_timeout_ms : max_rpc_timeout_ms;
-    if (final_timeout_ms > 0) {
-        auto deadline = std::chrono::system_clock::now() + std::chrono::milliseconds(final_timeout_ms);
-        client_context->set_deadline(deadline);
+    const auto rpc_deadline = prefill_context.streamRpcDeadline(maga_init_params_.pd_sep_config.max_rpc_timeout_ms);
+    if (rpc_deadline.has_value()) {
+        client_context->set_deadline(*rpc_deadline);
     }
     std::atomic_store(&prefill_context.client_context, client_context);
     // Close the publish-before-cancel window: either requestPriorityPreempt()
@@ -389,7 +442,7 @@ void PrefillRpcServer::remoteAllocateResource(PrefillGenerateContext& prefill_co
     if (prefill_context.cancel_state->load(std::memory_order_seq_cst)) {
         client_context->TryCancel();
     }
-    // final_timeout_ms <= 0: skip set_deadline; gRPC treats it as no deadline.
+    // With neither a request deadline nor max RPC timeout, gRPC keeps no deadline.
     prefill_context.client_stream =
         std::move(prefill_context.grpc_connection.stub->RemoteGenerate(client_context.get()));
     auto&             client_stream = prefill_context.client_stream;
@@ -568,6 +621,8 @@ void PrefillRpcServer::pollRemoteOutput(PrefillGenerateContext& prefill_context)
     auto              prefill_local_reuse_len  = prefill_context.getStream()->localReuseLength();
     auto              prefill_remote_reuse_len = prefill_context.getStream()->remoteReuseLength();
     auto              prefill_memory_reuse_len = prefill_context.getStream()->memoryReuseLength();
+    const auto        cache_manager            = prefill_context.getStream()->resourceContext().cache_manager;
+    const bool use_independent_block_pools = cache_manager && cache_manager->cacheConfig().use_independent_block_pools;
     // Decode workers do not receive ViT features in PD mode, so preserve the
     // prefill-side media usage metadata when forwarding their responses.
     const auto multimodal_lengths =
@@ -591,34 +646,15 @@ void PrefillRpcServer::pollRemoteOutput(PrefillGenerateContext& prefill_context)
         mergeMultimodalLengths(response, multimodal_lengths);
         int64_t cost_time_us = currentTimeUs() - prefill_context.request_begin_time_us;
         for (size_t i = 0; i < response.flatten_output().aux_info_size(); i++) {
-            auto decode_total_reuse_len  = response.flatten_output().aux_info(i).total_reuse_len();
-            auto decode_local_reuse_len  = response.flatten_output().aux_info(i).local_reuse_len();
-            auto decode_remote_reuse_len = response.flatten_output().aux_info(i).remote_reuse_len();
-            auto decode_memory_reuse_len = response.flatten_output().aux_info(i).memory_reuse_len();
-
-            response.mutable_flatten_output()->mutable_aux_info(i)->set_first_token_cost_time_us(first_token_rt_us);
-            response.mutable_flatten_output()->mutable_aux_info(i)->set_cost_time_us(cost_time_us);
-
-            response.mutable_flatten_output()->mutable_aux_info(i)->set_total_reuse_len(prefill_total_reuse_len);
-            response.mutable_flatten_output()->mutable_aux_info(i)->set_local_reuse_len(prefill_local_reuse_len);
-            response.mutable_flatten_output()->mutable_aux_info(i)->set_remote_reuse_len(prefill_remote_reuse_len);
-            response.mutable_flatten_output()->mutable_aux_info(i)->set_memory_reuse_len(prefill_memory_reuse_len);
-
-            response.mutable_flatten_output()->mutable_aux_info(i)->set_prefill_total_reuse_len(
-                prefill_total_reuse_len);
-            response.mutable_flatten_output()->mutable_aux_info(i)->set_prefill_local_reuse_len(
-                prefill_local_reuse_len);
-            response.mutable_flatten_output()->mutable_aux_info(i)->set_prefill_remote_reuse_len(
-                prefill_remote_reuse_len);
-            response.mutable_flatten_output()->mutable_aux_info(i)->set_prefill_memory_reuse_len(
-                prefill_memory_reuse_len);
-
-            response.mutable_flatten_output()->mutable_aux_info(i)->set_decode_total_reuse_len(decode_total_reuse_len);
-            response.mutable_flatten_output()->mutable_aux_info(i)->set_decode_local_reuse_len(decode_local_reuse_len);
-            response.mutable_flatten_output()->mutable_aux_info(i)->set_decode_remote_reuse_len(
-                decode_remote_reuse_len);
-            response.mutable_flatten_output()->mutable_aux_info(i)->set_decode_memory_reuse_len(
-                decode_memory_reuse_len);
+            auto* aux_info = response.mutable_flatten_output()->mutable_aux_info(i);
+            aux_info->set_first_token_cost_time_us(first_token_rt_us);
+            aux_info->set_cost_time_us(cost_time_us);
+            mergeCacheReuseInfo(*aux_info,
+                                prefill_total_reuse_len,
+                                prefill_local_reuse_len,
+                                prefill_remote_reuse_len,
+                                prefill_memory_reuse_len,
+                                use_independent_block_pools);
         }
         if (!prefill_context.rpc_context.writer->Write(response)) {
             RTP_LLM_LOG_WARNING("request [%ld] write outputs pb failed", request_id);
@@ -631,6 +667,40 @@ void PrefillRpcServer::pollRemoteOutput(PrefillGenerateContext& prefill_context)
     auto status = prefill_context.closeGrpcStream();
     if (!status.ok() && status.error_code() != grpc::StatusCode::CANCELLED) {
         CLIENT_GRPC_RET_IF_ERROR(prefill_context, false, ErrorCode::REMOTE_GENERATE_FAILED);
+    }
+}
+
+void PrefillRpcServer::mergeCacheReuseInfo(AuxInfoPB& aux_info,
+                                           int        prefill_total_reuse_len,
+                                           int        prefill_local_reuse_len,
+                                           int        prefill_remote_reuse_len,
+                                           int        prefill_memory_reuse_len,
+                                           bool       use_independent_block_pools) {
+    const int decode_total_reuse_len  = aux_info.total_reuse_len();
+    const int decode_local_reuse_len  = aux_info.local_reuse_len();
+    const int decode_remote_reuse_len = aux_info.remote_reuse_len();
+    const int decode_memory_reuse_len = aux_info.memory_reuse_len();
+
+    aux_info.set_prefill_total_reuse_len(prefill_total_reuse_len);
+    aux_info.set_prefill_local_reuse_len(prefill_local_reuse_len);
+    aux_info.set_prefill_remote_reuse_len(prefill_remote_reuse_len);
+    aux_info.set_prefill_memory_reuse_len(prefill_memory_reuse_len);
+
+    aux_info.set_decode_total_reuse_len(decode_total_reuse_len);
+    aux_info.set_decode_local_reuse_len(decode_local_reuse_len);
+    aux_info.set_decode_remote_reuse_len(decode_remote_reuse_len);
+    aux_info.set_decode_memory_reuse_len(decode_memory_reuse_len);
+
+    if (use_independent_block_pools && decode_total_reuse_len > prefill_total_reuse_len) {
+        aux_info.set_total_reuse_len(decode_total_reuse_len);
+        aux_info.set_local_reuse_len(decode_local_reuse_len);
+        aux_info.set_remote_reuse_len(decode_remote_reuse_len);
+        aux_info.set_memory_reuse_len(decode_memory_reuse_len);
+    } else {
+        aux_info.set_total_reuse_len(prefill_total_reuse_len);
+        aux_info.set_local_reuse_len(prefill_local_reuse_len);
+        aux_info.set_remote_reuse_len(prefill_remote_reuse_len);
+        aux_info.set_memory_reuse_len(prefill_memory_reuse_len);
     }
 }
 
@@ -742,8 +812,8 @@ grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*          
                                                   metrics_reporter_,
                                                   meta_,
                                                   maga_init_params_.pd_sep_config.prefill_stop_stream_wait_timeout_ms);
-    prefill_context.onflight_requests      = onflight_requests_;
-    prefill_context.loading_cache_requests = loading_cache_requests_;
+    prefill_context.onflight_requests      = &onflight_requests_;
+    prefill_context.loading_cache_requests = &loading_cache_requests_;
 
     // Prefill SERVER span is created only on the PD path, AFTER the fallback
     // check above, so Local/Prefill each own exactly one SERVER span. RAII

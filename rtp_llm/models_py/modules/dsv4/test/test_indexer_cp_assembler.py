@@ -324,6 +324,9 @@ def test_async_indexer_k_waits_each_work_once_before_restore_enqueue():
     )
     work_q = _CountingWork()
     work_s = _CountingWork()
+    local_k_quant = torch.empty((0, 1), dtype=torch.uint8)
+    local_k_scale = torch.empty((0, 1), dtype=torch.uint8)
+    producer_stream = object()
     handle = A.IndexerKCPGatherHandle(
         plan=plan,
         gathered_q=torch.empty((0, 1), dtype=torch.uint8),
@@ -332,6 +335,9 @@ def test_async_indexer_k_waits_each_work_once_before_restore_enqueue():
         work_s=work_s,
         completion_event=None,
         stream=None,
+        producer_stream=producer_stream,
+        local_k_quant=local_k_quant,
+        local_k_scale=local_k_scale,
         out_k_quant=torch.empty((0, 1), dtype=torch.uint8),
         out_k_scale=torch.empty((0, 1), dtype=torch.uint8),
     )
@@ -342,6 +348,9 @@ def test_async_indexer_k_waits_each_work_once_before_restore_enqueue():
     assert work_q.wait_calls == 1
     assert work_s.wait_calls == 1
     assert handle.work_waited is True
+    assert handle.local_k_quant is local_k_quant
+    assert handle.local_k_scale is local_k_scale
+    assert handle.producer_stream is producer_stream
 
 
 def test_build_plan_rejects_bad_cp_size():

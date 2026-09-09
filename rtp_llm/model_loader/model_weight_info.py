@@ -197,6 +197,9 @@ class ModelDeployWeightInfo:
         """Initialize ModelDeployWeightInfo with independent configuration objects."""
         self.model_config = model_config
         self.merge_lora = merge_lora
+        # Model-specific descriptor builders may use the serving role to retain
+        # only tensors reachable by a role-specialized execution graph.
+        self.role_type = getattr(parallelism_config, "role_type", None)
 
         self._use_swizzleA = hw_kernel_config.use_swizzleA
         self._use_qk_norm = model_config.qk_norm

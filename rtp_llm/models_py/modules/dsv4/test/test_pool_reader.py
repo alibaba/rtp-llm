@@ -64,6 +64,11 @@ def _stub_modules():
         sk.dequantize_and_gather_k_cache = _stub_dequant
         sk.gather_k_cache_packed = _stub_gather_packed
         sk.dequantize_packed_k_cache_flat = _stub_dequant_flat
+        sk.cp_direct_flat_pack_enabled = lambda: False
+        sk.try_gather_k_cache_packed_to_flat = lambda *args, **kwargs: False
+        sk.try_restore_dequantize_scatter_packed_k_cache_flat = (
+            lambda *args, **kwargs: False
+        )
         sys.modules[sk_name] = sk
         for p in (
             "rtp_llm.models_py.modules",
@@ -215,6 +220,40 @@ def test_factory_sharded_returns_cp_reader():
     assert r.cfg.cp_ctx.cp_size == 4
     # 16 tokens, vb=16 → 1 vb → 4 local tokens per req
     assert r.cfg.total_local_kv == 4
+
+
+def test_factory_single_request_known_total_uses_scalar_geometry():
+    per_req = torch.tensor([17], dtype=torch.int64)
+    old_padded = PR.cp_padded_local_kv_lens
+    old_actual = PR.cp_actual_owned_kv_lens
+    PR.cp_padded_local_kv_lens = lambda *args, **kwargs: (_ for _ in ()).throw(
+        AssertionError("tensor padded-length helper should not run")
+    )
+    PR.cp_actual_owned_kv_lens = lambda *args, **kwargs: (_ for _ in ()).throw(
+        AssertionError("tensor actual-length helper should not run")
+    )
+    try:
+        r = PR.make_compressed_k_pool_reader(
+            cp_ctx=_fake_cp_ctx(cp_size=2, cp_rank=1),
+            kv_cache_sharded=True,
+            per_req_total_kv_lens=per_req,
+            block_size=4,
+            total_kv_len=17,
+        )
+    finally:
+        PR.cp_padded_local_kv_lens = old_padded
+        PR.cp_actual_owned_kv_lens = old_actual
+
+    assert isinstance(r, PR.CPShardedPoolReader)
+    assert r.cfg.total_local_kv == 12
+    assert r.cfg.max_local_seq_len_padded == 12
+    assert torch.equal(
+        r.cfg.local_seq_lens_padded, torch.tensor([12], dtype=torch.int32)
+    )
+    assert torch.equal(
+        r.cfg.local_seq_lens_actual, torch.tensor([8], dtype=torch.int32)
+    )
+    assert r.cfg.restore_indices.numel() == 17
 
 
 def test_factory_sharded_uses_owner_block_size_for_restore_lengths():
@@ -483,6 +522,55 @@ def test_cp_sharded_fill_uses_owner_block_size_for_restore_but_pool_block_for_ga
             assert torch.equal(out[req_id, 1 + token_idx], expected)
 
 
+def test_restore_prefers_fused_path_without_materializing_fallback():
+    per_req = torch.tensor([2], dtype=torch.int64)
+    reader = PR.CPShardedPoolReader(
+        PR.CPShardConfig(
+            cp_ctx=_fake_cp_ctx(cp_size=1, cp_rank=0),
+            per_req_total_kv_lens=per_req,
+            restore_indices=torch.tensor([1, 0], dtype=torch.int64),
+            block_size=2,
+            total_local_kv=2,
+        )
+    )
+    gathered = torch.zeros((2, PR.ENTRY_BYTES), dtype=torch.uint8)
+    out = torch.full((1, 4, 2), -1.0)
+    calls = []
+    old_fused = PR.try_restore_dequantize_scatter_packed_k_cache_flat
+    old_dequant = PR.dequantize_packed_k_cache_flat
+
+    def fake_fused(
+        dst, src, restore_indices, seq_lens, offset, *, seq_lens_total
+    ):
+        calls.append(
+            (dst, src, restore_indices, seq_lens, offset, seq_lens_total)
+        )
+        dst[0, offset : offset + 2].fill_(7)
+        return True
+
+    PR.try_restore_dequantize_scatter_packed_k_cache_flat = fake_fused
+    PR.dequantize_packed_k_cache_flat = lambda *args, **kwargs: (_ for _ in ()).throw(
+        AssertionError("fallback dequant should not run")
+    )
+    try:
+        reader._restore_dequant_scatter(
+            gathered,
+            out,
+            per_req.to(torch.int32),
+            offset=1,
+        )
+    finally:
+        PR.try_restore_dequantize_scatter_packed_k_cache_flat = old_fused
+        PR.dequantize_packed_k_cache_flat = old_dequant
+
+    assert len(calls) == 1
+    assert calls[0][1] is gathered
+    assert calls[0][2] is reader.cfg.restore_indices
+    assert calls[0][5] == 2
+    assert torch.equal(out[0, 1:3], torch.full((2, 2), 7.0))
+    assert torch.equal(out[0, 0], torch.full((2,), -1.0))
+
+
 def test_cp_sharded_async_waits_work_once_before_restore_enqueue():
     cp_ctx = _fake_cp_ctx(cp_size=2, cp_rank=0)
     per_req = torch.tensor([0], dtype=torch.int64)
@@ -497,11 +585,15 @@ def test_cp_sharded_async_waits_work_once_before_restore_enqueue():
         )
     )
     work = _CountingWork()
+    local_flat = torch.empty((0, PR.ENTRY_BYTES), dtype=torch.uint8)
+    producer_stream = object()
     handle = PR.CPShardedPoolReadHandle(
+        local_flat=local_flat,
         gathered=torch.empty((0, PR.ENTRY_BYTES), dtype=torch.uint8),
         work=work,
         completion_event=None,
         stream=None,
+        producer_stream=producer_stream,
         out=torch.empty((1, 0, 1)),
         seq_lens=torch.tensor([0], dtype=torch.int32),
         offset=0,
@@ -512,6 +604,8 @@ def test_cp_sharded_async_waits_work_once_before_restore_enqueue():
 
     assert work.wait_calls == 1
     assert handle.work_waited is True
+    assert handle.local_flat is local_flat
+    assert handle.producer_stream is producer_stream
 
 
 def test_cp_sharded_fill_rejects_gather_lens():

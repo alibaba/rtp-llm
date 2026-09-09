@@ -15,7 +15,7 @@ from online_eval.mock_engine import MockEngineCluster
 from online_eval.proto_utils import ensure_proto_modules
 from online_eval.rt_model import (
     PerformanceModel,
-    extract_prefill_formula_from_master_config,
+    extract_prefill_expression_from_master_config,
     load_performance_config,
 )
 
@@ -30,7 +30,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--master-config",
         default=None,
-        help="Master config JSON (read PREFILL_TIME_FORMULA from here "
+        help="Master config JSON (read the FLEXLB_CONFIG prefill expression "
         "so the mock engine uses the same formula as the Master, "
         "eliminating coefficient duplication)",
     )
@@ -147,11 +147,11 @@ async def main() -> None:
     pb2, pb2_grpc = ensure_proto_modules()
     perf_cfg = load_performance_config(args.performance)
     perf_cfg.setdefault("block_size", args.block_size)
-    # Read PREFILL_TIME_FORMULA from the master config so the mock engine
-    # evaluates the same formula as the Java Master — single source of truth.
-    formula_str = extract_prefill_formula_from_master_config(args.master_config)
-    if formula_str:
-        perf_cfg.setdefault("prefill", {})["formula_str"] = formula_str
+    # Read the active estimator expression from strict FLEXLB_CONFIG so the
+    # mock engine evaluates the same formula as the Java Master.
+    expression = extract_prefill_expression_from_master_config(args.master_config)
+    if expression:
+        perf_cfg.setdefault("prefill", {})["expression"] = expression
     performance = PerformanceModel(perf_cfg)
     per_engine_perf = build_per_engine_perf(perf_cfg, args.per_engine_perf)
     # HTTP control port: unique per shard when sharding.

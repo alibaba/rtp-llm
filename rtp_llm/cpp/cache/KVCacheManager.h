@@ -43,6 +43,9 @@ public:
 
     // 初始化和配置相关
     bool init();
+    bool initialized() const {
+        return allocator_ != nullptr;
+    }
 
     const CacheConfig& cacheConfig() const;
     const CacheConfig& getMTPModuleCacheConfig(int mtp_module_id) const;
