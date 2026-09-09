@@ -11,7 +11,6 @@
 namespace rtp_llm {
 
 class LoadAsyncContext;
-struct BlockTreeMatchPolicy;
 
 class HybridKVCacheAllocator: public KVCacheAllocator, public std::enable_shared_from_this<HybridKVCacheAllocator> {
 public:
@@ -70,7 +69,6 @@ protected:
     std::shared_ptr<LoadAsyncContext> prepareKVCache(const CacheKeysType&                 cache_keys,
                                                      BatchKVCacheResource&                kv_resource,
                                                      const std::shared_ptr<CPSlotMapper>& cp_mapper,
-                                                     const BlockTreeMatchPolicy&          match_policy,
                                                      PreparedKVCache&                     prepared);
     bool                              materializeInitialBlocks(const MallocInfo& malloc_info,
                                                                PreparedKVCache&  prepared,

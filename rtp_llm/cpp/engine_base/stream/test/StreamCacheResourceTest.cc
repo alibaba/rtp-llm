@@ -503,7 +503,7 @@ TEST_F(StreamCacheResourceTest, testReuseCacheIgnoresPerRequestSwitchWhenConfigu
     ASSERT_FALSE(resource.reuseCache());
 }
 
-TEST_F(StreamCacheResourceTest, testCacheLookupRequiresMutuallyPermittedTier) {
+TEST_F(StreamCacheResourceTest, testCacheLookupIgnoresPerRequestTierSwitches) {
     prepareResource(true);
     auto& resource   = stream_->streamCacheResource();
     auto& request    = *stream_->generate_input_->generate_config;
@@ -525,44 +525,18 @@ TEST_F(StreamCacheResourceTest, testCacheLookupRequiresMutuallyPermittedTier) {
                     deployment.enable_host_cache   = host_on;
                     deployment.enable_disk_cache   = disk_on;
                     deployment.enable_remote_cache = remote_on;
-                    const bool mutually_permitted =
-                        (device_on && request.enable_device_cache) || (host_on && request.enable_host_cache)
-                        || (disk_on && request.enable_disk_cache) || (remote_on && request.enable_remote_cache);
-                    EXPECT_EQ(resource.enableCacheLookup(), mutually_permitted);
+                    EXPECT_EQ(resource.enableCacheLookup(), device_on || host_on || disk_on || remote_on);
                 }
             }
         }
     }
 
     deployment.enable_device_cache = true;
-    request.enable_device_cache    = true;
     request.reuse_cache            = false;
     EXPECT_FALSE(resource.enableCacheLookup());
 
     deployment.ignore_request_cache_switches = true;
     EXPECT_TRUE(resource.enableCacheLookup());
-}
-
-TEST_F(StreamCacheResourceTest, testStoreTargetsWritesThroughDeviceAndHost) {
-    prepareResource(true);
-    auto& resource   = stream_->streamCacheResource();
-    auto& request    = *stream_->generate_input_->generate_config;
-    auto& deployment = resource.resource_context_;
-
-    request.reuse_cache            = true;
-    request.enable_device_cache    = true;
-    request.enable_host_cache      = true;
-    request.enable_disk_cache      = true;
-    deployment.enable_device_cache = true;
-    deployment.enable_host_cache   = true;
-    deployment.enable_disk_cache   = true;
-    EXPECT_EQ(resource.storeTargets(), (std::vector<Tier>{Tier::DEVICE, Tier::HOST}));
-
-    request.enable_device_cache = false;
-    EXPECT_EQ(resource.storeTargets(), (std::vector<Tier>{Tier::HOST}));
-
-    request.enable_host_cache = false;
-    EXPECT_EQ(resource.storeTargets(), (std::vector<Tier>{Tier::DISK}));
 }
 
 TEST_F(StreamCacheResourceTest, testStoreTargetPicksHighestMutuallyPermittedTier) {
@@ -876,7 +850,7 @@ TEST_F(StreamCacheResourceTest, StorageMatchDefersReusePublicationUntilReadCompl
     EXPECT_EQ(resource.kvCache().cacheResource(0).storageBackendReuseBlockNum(), 2u);
 }
 
-TEST_F(StreamCacheResourceTest, RequestRemoteDisableSkipsBlockedStorageMatch) {
+TEST_F(StreamCacheResourceTest, StorageMatchDoesNotBlockIndependentAllocation) {
     auto  backend        = prepareStorageBackendResource(/*block_matches=*/true);
     auto& first_resource = stream_->streamCacheResource();
     ASSERT_TRUE(first_resource.initKVBlock().ok());
@@ -898,10 +872,12 @@ TEST_F(StreamCacheResourceTest, RequestRemoteDisableSkipsBlockedStorageMatch) {
     second_stream->streamCacheResource().kvCacheMutable().setBatchCacheKeys(0, {400, 500});
 
     ASSERT_TRUE(second_stream->streamCacheResource().initKVBlock().ok());
-    EXPECT_FALSE(second_stream->streamCacheResource().asyncLoadCache());
+    EXPECT_TRUE(second_stream->streamCacheResource().asyncLoadCache());
+    // Request-level remote disable is not propagated below lookup admission. The process-level backend still matches.
     EXPECT_EQ(backend->matchCalls(), 1u);
 
     backend->releaseMatches();
+    backend->waitForMatches(2);
     ASSERT_TRUE(first_resource.waitForAllocatorLoad().ok());
     ASSERT_TRUE(second_stream->streamCacheResource().waitForAllocatorLoad().ok());
 }

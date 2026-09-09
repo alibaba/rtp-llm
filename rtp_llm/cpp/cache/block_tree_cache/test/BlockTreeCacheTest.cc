@@ -656,7 +656,7 @@ TEST_F(BlockTreeCacheTest, MatchPartialPath) {
     block_tree_cache_test::releaseRequestRefsForTest(*cache_, result.matched_device_resources);
 }
 
-TEST_F(BlockTreeCacheTest, MatchAllowsIndependentIdleTierCopies) {
+TEST_F(BlockTreeCacheTest, MatchFailsFastAtIdleResourceWithMultipleServingTiers) {
     std::vector<std::vector<GroupSetResource>> resources(2, std::vector<GroupSetResource>(1));
     resources[0][0].device_blocks = {10};
     resources[1][0].device_blocks = {11};
@@ -665,9 +665,7 @@ TEST_F(BlockTreeCacheTest, MatchAllowsIndependentIdleTierCopies) {
     TreeNode* first_node                          = cache_->tree()->root()->children.at(100);
     first_node->group_set_resources[0].host_block = 7;
 
-    BlockTreeMatchResult result = cache_->match({100, 200});
-    EXPECT_EQ(result.matched_device_blocks, 2u);
-    block_tree_cache_test::releaseRequestRefsForTest(*cache_, result.matched_device_resources);
+    EXPECT_THROW(cache_->match({100, 200}), std::runtime_error);
 
     first_node->group_set_resources[0].host_block = NULL_BLOCK_IDX;
 }
@@ -794,7 +792,7 @@ TEST_F(BlockTreeCacheTest, MatchSkipsBusyLinearResourceAndReusesTailState) {
     }
 }
 
-TEST_F(BlockTreeCacheTest, InsertFailsFastForNonIdleAndAcceptsSteadyMultiTierResource) {
+TEST_F(BlockTreeCacheTest, InsertFailsFastForNonIdleOrMultiTierResource) {
     std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(1));
     resources[0][0].device_blocks  = {10};
     resources[0][0].transfer_state = GroupSetTransferState::DEMOTING;
@@ -802,44 +800,11 @@ TEST_F(BlockTreeCacheTest, InsertFailsFastForNonIdleAndAcceptsSteadyMultiTierRes
                  std::runtime_error);
     EXPECT_EQ(cache_->tree()->size(), 0u);
 
-    auto device_pool = block_tree_cache_test::makeStructuralDevicePool(0);
-    auto host_pool   = makeHostPool(/*payload_bytes=*/1, /*usable_count=*/2);
-    ASSERT_NE(host_pool, nullptr);
-    auto full = std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{device_pool}, host_pool, nullptr);
-    std::vector<GroupSetPtr> groups           = {full};
-    auto                     multi_tier_cache = makeBlockTreeCacheForTest(std::move(groups));
-
-    constexpr BlockIdxType device_block = 10;
-    const auto             host_block   = host_pool->malloc();
-    ASSERT_TRUE(host_block.has_value());
-    ASSERT_EQ(device_pool->treeRefCount(device_block), 0u);
-    ASSERT_EQ(host_pool->treeRefCount(*host_block), 0u);
-
-    GroupSetResource multi_tier_resource;
-    multi_tier_resource.device_blocks = {device_block};
-    multi_tier_resource.host_block    = *host_block;
-    const auto before                 = multi_tier_cache->getKeySnapshot();
-    multi_tier_cache->insert(
-        {100}, {{multi_tier_resource}}, Tier::DEVICE, /*write_remote=*/true, /*is_resident=*/false);
-
-    const auto after = multi_tier_cache->getKeySnapshot();
-    EXPECT_EQ(after.version, before.version + 1);
-    ASSERT_EQ(after.keys, (CacheKeysType{100}));
-    const auto path = multi_tier_cache->tree()->findNode({100});
-    ASSERT_EQ(path.size(), 1u);
-    const GroupSetResource& inserted = path.back()->group_set_resources[0];
-    EXPECT_EQ(inserted.getTopTier(), Tier::DEVICE);
-    EXPECT_EQ(inserted.servingTierCount(), 2u);
-    EXPECT_EQ(inserted.device_blocks, (BlockIndicesType{device_block}));
-    EXPECT_EQ(inserted.host_block, *host_block);
-    EXPECT_EQ(device_pool->treeRefCount(device_block), 1u);
-    EXPECT_EQ(host_pool->treeRefCount(*host_block), 1u);
-
-    multi_tier_cache.reset();
-    EXPECT_EQ(device_pool->referencedBlocksNum(BlockTreeRefType::CACHE), 0u);
-    EXPECT_EQ(host_pool->referencedBlocksNum(BlockTreeRefType::CACHE), 0u);
-    EXPECT_FALSE(device_pool->isAllocated(device_block));
-    EXPECT_FALSE(host_pool->isAllocated(*host_block));
+    resources[0][0].transfer_state = GroupSetTransferState::IDLE;
+    resources[0][0].host_block     = 7;
+    EXPECT_THROW(cache_->insert({100}, resources, Tier::DEVICE, /*write_remote=*/true, /*is_resident=*/false),
+                 std::runtime_error);
+    EXPECT_EQ(cache_->tree()->size(), 0u);
 }
 
 TEST_F(BlockTreeCacheTest, DuplicateInsertDoesNotCreateNodes) {
