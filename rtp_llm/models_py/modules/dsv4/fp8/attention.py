@@ -29,7 +29,6 @@ import deep_gemm  # noqa: E402
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
 from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
 from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
 from rtp_llm.models_py.modules.dsv4._fused_inv_rope_fp8_quant_triton import (
@@ -2827,13 +2826,9 @@ class AttentionFP8(nn.Module):
         # ``[T_total, q_lora]``). Drop the legacy ``unsqueeze(0)`` so the
         # batched flat caller hits the same code path without rewrapping.
         with record_function_range("dsv4.fp8.attn.csa.indexer"):
-            if self.layer_id == 6:
-                _rt.record_if_level(2, "L06_csa_qr", qkv.qr)
             raw = self.indexer(
                 x, qkv.qr, common.csa_meta.indexer_meta, workspace=common.workspace
             )
-            if self.layer_id == 6:
-                _rt.record_if_level(2, "L06_csa_indexer_topk", raw)
         return self._forward_prefill_compressed(
             x,
             qkv,
@@ -3692,7 +3687,6 @@ class AttentionFP8(nn.Module):
             qkv.q is not None
         ), "_attn_via_workspace_cp_raw_q_merge: prefill Q not materialized"
         from flash_mla import flash_mla_sparse_fwd  # type: ignore[import-not-found]
-
         from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
         from rtp_llm.models_py.modules.dsv4.fp8 import _swa_dequant_triton as _swa_dq
 

@@ -62,21 +62,7 @@ py_test(
     target_compatible_with = _DSV4_CUDA13_ONLY,
 )
 
-py_test(
-    name = "test_t24_dp_contract_source",
-    srcs = ["test_t24_dp_contract_source.py"],
-    # This is data-only: the test parses checked-in Python sources and never
-    # imports the models library or its native dependencies.
-    data = ["//rtp_llm/models_py:modules"],
-)
 
-py_test(
-    name = "test_t24_dp_contract_native_independent",
-    srcs = ["test_t24_dp_contract_native_independent.py"],
-    # The loader executes checked-in production Python directly and supplies
-    # only stdlib shells for unavailable torch/native/unrelated imports.
-    data = ["//rtp_llm/models_py:modules"],
-)
 
 py_test(
     name = "test_cp_context_build",
@@ -507,5 +493,5 @@ py_test(
 py_test(
     name = "test_prefill_communication",
     srcs = ["test_prefill_communication.py"],
-    data = ["//rtp_llm/platforms:platform_sources", "//rtp_llm/server:backend_manager.py"],
+    data = ["//rtp_llm/platforms:platform_sources", "//rtp_llm/platforms:ppu_sources", "//rtp_llm/server:backend_manager.py"],
 )

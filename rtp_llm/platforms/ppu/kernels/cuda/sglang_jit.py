@@ -15,16 +15,12 @@ def _source_bundle():
     root = Path(__file__).with_name("dsv4_ppu") / "fp4_indexer"
     manifest = json.loads((root / "source-manifest.json").read_text())
     digest = hashlib.sha256()
-    for name, expected in sorted(manifest.items()):
+    for name, expected in sorted(manifest["sources"].items()):
         data = (root / name).read_bytes()
         if hashlib.sha256(data).hexdigest() != expected:
             raise RuntimeError(f"Modified frozen SGLang source: {name}")
         digest.update(name.encode())
         digest.update(data)
-    for header in sorted((root / "compat").rglob("*")):
-        if header.is_file():
-            digest.update(str(header.relative_to(root)).encode())
-            digest.update(header.read_bytes())
     return root, digest.hexdigest()[:16]
 
 

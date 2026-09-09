@@ -6,7 +6,6 @@ import unittest
 from unittest.mock import Mock, patch
 
 import torch
-
 from rtp_llm.platforms.ppu.models.dsv4.ppu_decode_provider import PpuDecodeProvider
 from rtp_llm.platforms.ppu.models.dsv4.ppu_wo_a import PpuWoAFp8Linear
 from rtp_llm.platforms.ppu.modules.linear import fp8_linear as fp8
@@ -129,44 +128,6 @@ class DecodeFp8GraphTest(unittest.TestCase):
                         actual[0],
                         torch.empty_strided((batch, 32), (64, 1), device="cuda"),
                     )
-
-    @torch.inference_mode()
-    def test_checked_column_graph_retains_sticky_nonfinite_status(self):
-        for batch in (1, 3, 8, 128):
-            x = torch.ones((batch, 4096), device="cuda", dtype=torch.bfloat16)
-            status = torch.zeros(1, device="cuda", dtype=torch.int32)
-
-            def run():
-                return fp8.quantize_ppu_fp8_activation(
-                    x, status, quantization="v2_column"
-                )
-
-            stream = torch.cuda.Stream()
-            stream.wait_stream(torch.cuda.current_stream())
-            with torch.cuda.stream(stream):
-                for _ in range(3):
-                    run()
-            graph = torch.cuda.CUDAGraph()
-            with torch.cuda.graph(graph, stream=stream):
-                checked = run()
-            torch.cuda.current_stream().wait_stream(stream)
-            expected_status = 0
-            for value in (1.0, float("nan"), 1.0, float("inf"), 1.0):
-                x.fill_(1)
-                x[-1, -1] = value
-                checked[0].view(torch.uint8).fill_(255)
-                checked[1].fill_(float("nan"))
-                graph.replay()
-                expected_status |= int(not math.isfinite(value))
-                self.assertEqual(int(status), expected_status)
-                if value == 1.0:
-                    plain = fp8.quantize_ppu_fp8_activation(x, quantization="v2_column")
-                    self.assertTrue(
-                        torch.equal(
-                            checked[0].view(torch.uint8), plain[0].view(torch.uint8)
-                        )
-                    )
-                    torch.testing.assert_close(checked[1], plain[1], rtol=0, atol=0)
 
 
 if __name__ == "__main__":

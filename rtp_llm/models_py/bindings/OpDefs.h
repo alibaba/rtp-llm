@@ -18,7 +18,6 @@
 #include "rtp_llm/models_py/bindings/ParamsBase.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
-#include "rtp_llm/models_py/bindings/NumericalStatus.h"
 
 namespace torch_ext {
 
@@ -359,7 +358,6 @@ struct PyModelInputs {
     PyAttentionInputs    attention_inputs;
     AttentionInputsByTag attention_inputs_by_tag;
     BertEmbeddingInputs  bert_embedding_inputs;
-    rtp_llm::NumericalStatusView numerical_status;
 
     bool hasAttentionInputsByTag() const {
         return !attention_inputs_by_tag.empty();
@@ -368,7 +366,6 @@ struct PyModelInputs {
 
 struct PyModelOutputs {
     torch::Tensor hidden_states;
-    rtp_llm::NumericalStatusView numerical_status;
 
     PyModelOutputs() = default;
 

@@ -372,8 +372,6 @@ class Dsv4PlatformProviderRegistryTest(unittest.TestCase):
         registry = Dsv4PlatformProviderRegistry()
         registry.register(_BlockOnlyProvider())
         with self.assertRaisesRegex(RuntimeError, "transformer"):
-            registry.validate_capabilities({Dsv4ProviderCapability.TRANSFORMER})
-        with self.assertRaisesRegex(RuntimeError, "transformer"):
             registry.resolve({Dsv4ProviderCapability.TRANSFORMER})
 
     def test_declared_capability_requires_a_factory(self):
@@ -568,57 +566,6 @@ class Dsv4PlatformProviderWiringTest(unittest.TestCase):
                 and isinstance(node.func, ast.Name)
                 and node.func.id == "resolve_dsv4_platform_provider"
                 for statement in provider_guard.orelse
-                for node in ast.walk(statement)
-            )
-        )
-
-    def test_dispatchers_accept_explicit_status_and_forward_it(self):
-        transformer_tree = ast.parse((_DSV4_DIR / "transformer.py").read_text())
-        for relative, function_name in (
-            ("prefill/forward.py", "forward_prefill"),
-            ("decode/forward.py", "forward_decode"),
-        ):
-            tree = ast.parse((_DSV4_DIR / relative).read_text())
-            function = next(
-                node
-                for node in tree.body
-                if isinstance(node, ast.FunctionDef) and node.name == function_name
-            )
-            self.assertIn(
-                "numerical_status",
-                {arg.arg for arg in function.args.args},
-            )
-            self.assertFalse(
-                any(
-                    isinstance(node, ast.Attribute)
-                    and node.attr == "numerical_status"
-                    and isinstance(node.value, ast.Name)
-                    and node.value.id == "inputs"
-                    for node in ast.walk(function)
-                )
-            )
-
-        build_block = next(
-            node
-            for node in transformer_tree.body
-            if isinstance(node, ast.FunctionDef) and node.name == "_build_block"
-        )
-        block_provider_guard = next(
-            node
-            for node in build_block.body
-            if isinstance(node, ast.If)
-            and isinstance(node.test, ast.Compare)
-            and isinstance(node.test.left, ast.Name)
-            and node.test.left.id == "platform_provider"
-        )
-        self.assertIsInstance(block_provider_guard.test.ops[0], ast.Is)
-        self.assertIsNone(block_provider_guard.test.comparators[0].value)
-        self.assertFalse(
-            any(
-                isinstance(node, ast.Call)
-                and isinstance(node.func, ast.Name)
-                and node.func.id == "resolve_dsv4_platform_provider"
-                for statement in block_provider_guard.orelse
                 for node in ast.walk(statement)
             )
         )

@@ -2,14 +2,6 @@ load("//:def.bzl", "copts", "rocm_copts")
 load("@arch_config//:arch_select.bzl", "torch_deps")
 
 cc_library(
-    name = "numerical_status",
-    hdrs = ["NumericalStatus.h"],
-    deps = torch_deps(),
-    copts = copts(),
-    visibility = ["//visibility:public"],
-)
-
-cc_library(
     name = "op_defs",
     hdrs = [
         "CacheStoreWriter.h",
@@ -26,7 +18,6 @@ cc_library(
         "//rtp_llm/cpp/cache:kv_cache_specs",
         "//rtp_llm/cpp/model_utils:model_utils",
         "//rtp_llm/cpp/utils:core_utils",
-        ":numerical_status",
     ],
     visibility = ["//visibility:public"],
     alwayslink = 1,

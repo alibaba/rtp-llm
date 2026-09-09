@@ -3,8 +3,6 @@
 #include <functional>
 #include <memory>
 #include <optional>
-#include <atomic>
-#include <vector>
 #include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/engine_base/Executor.h"
 #include "rtp_llm/cpp/engine_base/EngineInitParams.h"
@@ -90,13 +88,6 @@ protected:
     bool checkDeviceInput() const;
     void ensureModelInputsOnCuda(GptModelInputs& model_input, const char* tag);
     void checkModelInputsOnCuda(const GptModelInputs& model_input, const char* tag) const;
-    torch::Tensor ensureNumericalFailureWorkspace(int64_t rows);
-    torch::Tensor ensureNumericalRowMap(const StreamGroups& stream_groups);
-    void applyNumericalStatusGate(const StreamGroups& stream_groups,
-                                  SamplerInputs& sampler_inputs,
-                                  const NumericalStatusView& status);
-    struct NumericalGateSlot;
-    struct NumericalGateLease;
 
 private:
     std::unique_ptr<ModelBase>                                               model_;
@@ -129,9 +120,6 @@ private:
     // Keeps async copy source tensors alive across release points. NormalExecutor
     // uses this for model-input H2D staging and sampler-input staging.
     TensorHolder buffer_holder_;
-    std::vector<std::shared_ptr<NumericalGateSlot>> numerical_gate_slots_;
-    std::shared_ptr<NumericalGateSlot> active_numerical_gate_slot_;
-    int64_t active_numerical_model_rows_ = 0;
 };
 
 }  // namespace rtp_llm

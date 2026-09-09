@@ -193,166 +193,10 @@ def _downcast_to_mxfp4_kernel(
     )
 
 
-@triton.jit
-def _downcast_to_mxfp4_checked_kernel(
-    packed_ptr,
-    packed_stride_m,
-    prepared_scale_ptr,
-    scale_stride_pair,
-    scale_stride_m,
-    src_ptr,
-    src_stride_m,
-    nonfinite_status_ptr,
-    rows,
-    logical_k,
-    STATUS_PER_ROW: tl.constexpr,
-    padded_k: tl.constexpr,
-    BLOCK_M: tl.constexpr,
-    BLOCK_K: tl.constexpr,
-):
-    """Checked copy of the pack kernel; the legacy kernel stays byte-for-byte."""
-    tl.static_assert(BLOCK_K % 64 == 0)
-
-    block_m = tl.program_id(0).to(tl.int64)
-    block_k = tl.program_id(1).to(tl.int64)
-    start_m = block_m * BLOCK_M
-    start_k = block_k * BLOCK_K
-
-    offsets_m = tl.arange(0, BLOCK_M)[:, None].to(tl.int64)
-    offsets_k = tl.arange(0, BLOCK_K)[None, :].to(tl.int64)
-    source_mask = (start_m + offsets_m < rows) & (start_k + offsets_k < logical_k)
-    source = tl.load(
-        src_ptr + (start_m + offsets_m) * src_stride_m + start_k + offsets_k,
-        mask=source_mask,
-        other=0.0,
-    ).to(tl.float32)
-
-    # Fuse the numerical gate into the source tile already loaded for the amax
-    # reduction. Every K tile sticky-ORs its result; the caller owns reset.
-    source_is_finite = tl.abs(source) < float("inf")
-    row_has_nonfinite = (
-        tl.sum((source_mask & ~source_is_finite).to(tl.int32), axis=1) != 0
-    )
-    if STATUS_PER_ROW:
-        status_offsets = start_m + tl.arange(0, BLOCK_M)
-        tl.atomic_or(
-            nonfinite_status_ptr + status_offsets,
-            1,
-            mask=(status_offsets < rows) & row_has_nonfinite,
-        )
-    else:
-        tile_has_nonfinite = tl.sum(row_has_nonfinite.to(tl.int32), axis=0) != 0
-        tl.atomic_or(nonfinite_status_ptr, 1, mask=tile_has_nonfinite)
-
-    groups_per_block: tl.constexpr = BLOCK_K // 32
-    grouped = tl.reshape(source, [BLOCK_M, groups_per_block, 32])
-    group_amax = tl.max(tl.abs(grouped), axis=2, keep_dims=True)
-    group_amax = tl.maximum(group_amax, 1.0e-10)
-
-    # 2**ceil(log2(amax/6)): rounding the positive float32 significand upward
-    # and keeping only exponent bits is bit-identical to the SGLang PPU path.
-    scale_f32 = group_amax / 6.0
-    scale_bits = (scale_f32.to(tl.uint32, bitcast=True) + 0x007FFFFF) & 0x7F800000
-    rounded_scale = scale_bits.to(tl.float32, bitcast=True)
-    quantized = tl.reshape(grouped / rounded_scale, [BLOCK_M, BLOCK_K])
-
-    pair_count: tl.constexpr = BLOCK_K // 2
-    pairs = tl.reshape(quantized, [BLOCK_M, pair_count, 2])
-    even, odd = tl.split(pairs)
-    # PPU PTX puts the second source operand into the low nibble.
-    packed = tl.inline_asm_elementwise(
-        """
-        {
-            .reg .b8 r;
-            cvt.rn.satfinite.e2m1x2.f32 r, $1, $2;
-            mov.b32 $0, {r, r, r, r};
-        }
-        """,
-        constraints="=r,f,f",
-        args=[odd.to(tl.float32), even.to(tl.float32)],
-        dtype=tl.uint8,
-        is_pure=True,
-        pack=1,
-    )
-
-    packed_offsets = tl.arange(0, pair_count)[None, :].to(tl.int64)
-    packed_mask = (start_m + offsets_m < rows) & (
-        start_k // 2 + packed_offsets < padded_k // 2
-    )
-    tl.store(
-        packed_ptr
-        + (start_m + offsets_m) * packed_stride_m
-        + start_k // 2
-        + packed_offsets,
-        packed,
-        mask=packed_mask,
-    )
-
-    raw_scale = (tl.reshape(scale_bits, [BLOCK_M, groups_per_block]) >> 23).to(tl.uint8)
-    group_offsets = start_k // 32 + tl.arange(0, groups_per_block)[None, :]
-    # A partial final group keeps the scale of its real elements. Groups with
-    # no logical elements are explicit zero bytes so padding cannot leak data.
-    raw_scale = tl.where(group_offsets < (logical_k + 31) // 32, raw_scale, 0)
-    scale_pairs_per_block: tl.constexpr = groups_per_block // 2
-    raw_scale_pairs = tl.reshape(raw_scale, [BLOCK_M, scale_pairs_per_block, 2])
-    low_scale, high_scale = tl.split(raw_scale_pairs)
-    prepared_scale = (low_scale.to(tl.uint32) | (high_scale.to(tl.uint32) << 8)).to(
-        tl.uint16
-    )
-    scale_pair_offsets = tl.arange(0, scale_pairs_per_block)[None, :].to(tl.int64)
-    scale_mask = (start_m + offsets_m < rows) & (
-        start_k // 64 + scale_pair_offsets < padded_k // 64
-    )
-    tl.store(
-        prepared_scale_ptr
-        + (start_k // 64 + scale_pair_offsets) * scale_stride_pair
-        + (start_m + offsets_m) * scale_stride_m,
-        prepared_scale,
-        mask=scale_mask,
-    )
-
-
-def _downcast_to_mxfp4_checked(
-    activation: torch.Tensor, nonfinite_status: torch.Tensor
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    source = activation
-    rows, logical_k = source.shape
-    padded_k = _ceil_to_multiple(logical_k, MXFP4_K_ALIGNMENT)
-    packed = torch.empty((rows, padded_k // 2), dtype=torch.uint8, device=source.device)
-    scale_storage = torch.empty(
-        (padded_k // MXFP4_K_ALIGNMENT, rows),
-        dtype=torch.uint16,
-        device=source.device,
-    )
-
-    block_m = 32
-    block_k = 128
-    grid = (triton.cdiv(rows, block_m), triton.cdiv(padded_k, block_k))
-    _downcast_to_mxfp4_checked_kernel[grid](
-        packed,
-        packed.stride(0),
-        scale_storage,
-        scale_storage.stride(0),
-        scale_storage.stride(1),
-        source,
-        source.stride(0),
-        nonfinite_status,
-        rows,
-        logical_k,
-        STATUS_PER_ROW=nonfinite_status.shape[0] == rows,
-        padded_k=padded_k,
-        BLOCK_M=block_m,
-        BLOCK_K=block_k,
-        num_warps=4,
-    )
-    return packed, scale_storage.t()
-
-
 def downcast_to_mxfp4(
     activation: torch.Tensor,
     *,
     validate_finite: bool = False,
-    nonfinite_status: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Pack a 2-D BF16/FP32 activation into M890P MXFP4 storage.
 
@@ -364,12 +208,7 @@ def downcast_to_mxfp4(
     The input must already be contiguous; this hot-path primitive never makes
     an implicit copy.  ``validate_finite`` is intended for validation and
     data-ingress checks.  It synchronizes to report NaN/Inf immediately, so hot
-    inference paths should keep it disabled after their upstream numerical gate
-    is established.  ``nonfinite_status`` is the graph-safe alternative: it
-    must be a caller-owned contiguous int32 tensor on the same device with
-    shape ``[1]`` (this call) or ``[M]`` (per row).  The kernel only sticky-ORs
-    one into affected entries; the caller owns reset and asynchronous status
-    consumption.
+    inference paths keep it disabled to avoid host synchronization.
     """
     if activation.ndim != 2:
         raise ValueError(
@@ -387,37 +226,8 @@ def downcast_to_mxfp4(
     _require_m890p(activation)
     if not activation.is_contiguous():
         raise ValueError("activation must be contiguous")
-    if nonfinite_status is not None:
-        if not isinstance(nonfinite_status, torch.Tensor):
-            raise TypeError("nonfinite_status must be a torch.Tensor")
-        if nonfinite_status.dtype != torch.int32:
-            raise TypeError(
-                "nonfinite_status must have dtype torch.int32, "
-                f"got {nonfinite_status.dtype}"
-            )
-        if nonfinite_status.device != activation.device:
-            raise ValueError(
-                "nonfinite_status must be on the same device as activation"
-            )
-        if not nonfinite_status.is_contiguous():
-            raise ValueError("nonfinite_status must be contiguous")
-        if nonfinite_status.ndim != 1 or nonfinite_status.shape[0] not in (
-            1,
-            activation.shape[0],
-        ):
-            raise ValueError(
-                "nonfinite_status must have shape [1] or [M], got "
-                f"{tuple(nonfinite_status.shape)} for M={activation.shape[0]}"
-            )
-        if (
-            nonfinite_status.untyped_storage().data_ptr()
-            == activation.untyped_storage().data_ptr()
-        ):
-            raise ValueError("nonfinite_status must not share storage with activation")
     if validate_finite and not bool(torch.isfinite(activation).all().item()):
         raise ValueError("activation contains NaN or Inf")
-    if nonfinite_status is not None:
-        return _downcast_to_mxfp4_checked(activation, nonfinite_status)
 
     source = activation
     rows, logical_k = source.shape

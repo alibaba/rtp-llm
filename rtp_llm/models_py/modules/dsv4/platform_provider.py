@@ -217,22 +217,6 @@ class Dsv4PlatformProviderRegistry:
         with self._lock:
             return _normalize_capabilities(self._active_provider().capabilities)
 
-    def validate_capabilities(self, required: Iterable[Dsv4ProviderCapability]) -> None:
-        """Fail fast if the active provider lacks a required capability."""
-
-        required_set = _normalize_capabilities(required)
-        with self._lock:
-            provider = self._active_provider()
-            _validate_provider(provider)
-            available = _normalize_capabilities(provider.capabilities)
-            missing = required_set - available
-            if missing:
-                missing_names = ", ".join(sorted(cap.value for cap in missing))
-                raise RuntimeError(
-                    f"DSV4 provider {provider.name!r} lacks required capabilities: "
-                    f"{missing_names}"
-                )
-
     def resolve(
         self, required: Iterable[Dsv4ProviderCapability]
     ) -> Dsv4PlatformProvider:
@@ -263,12 +247,6 @@ def register_dsv4_platform_provider(provider: Dsv4PlatformProvider) -> None:
 
 def get_dsv4_platform_provider_capabilities() -> FrozenSet[Dsv4ProviderCapability]:
     return _PROVIDER_REGISTRY.capabilities()
-
-
-def validate_dsv4_platform_provider_capabilities(
-    required: Iterable[Dsv4ProviderCapability],
-) -> None:
-    _PROVIDER_REGISTRY.validate_capabilities(required)
 
 
 def resolve_dsv4_platform_provider(
@@ -434,5 +412,4 @@ __all__ = [
     "run_dsv4_bf16_fp32_linear",
     "run_dsv4_hc_prenorm",
     "run_dsv4_fp8_mqa_logits",
-    "validate_dsv4_platform_provider_capabilities",
 ]

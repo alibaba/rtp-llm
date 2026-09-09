@@ -26,7 +26,6 @@
 
 #if USING_CUDA || USING_ROCM
 #include "rtp_llm/models_py/bindings/common/kernels/mask_logits.h"
-#include "rtp_llm/models_py/bindings/common/kernels/numerical_status_gate.h"
 #endif
 
 using namespace std;
@@ -331,63 +330,6 @@ void runtimeMaskLogits(torch::Tensor& logits, const torch::Tensor& mask) {
     }
 }
 
-void runtimeNumericalStatusGate(torch::Tensor& logits,
-                                const NumericalStatusView& status,
-                                const torch::Tensor& row_to_status,
-                                torch::Tensor& failure_mask) {
-    if (!status.defined()) {
-        return;
-    }
-    TORCH_CHECK(logits.is_cuda() && logits.dim() == 2 && logits.is_contiguous(),
-                "numerical status gate requires contiguous CUDA logits");
-    TORCH_CHECK(status.values.is_cuda() && status.values.scalar_type() == torch::kInt32
-                    && status.values.is_contiguous(),
-                "numerical status gate requires contiguous CUDA int32 status");
-    TORCH_CHECK(row_to_status.is_cuda() && row_to_status.scalar_type() == torch::kInt32
-                    && row_to_status.is_contiguous() && row_to_status.numel() == logits.size(0),
-                "numerical status gate requires contiguous CUDA row mapping");
-    TORCH_CHECK(failure_mask.is_cuda() && failure_mask.scalar_type() == torch::kBool
-                    && failure_mask.dim() == 1 && failure_mask.is_contiguous()
-                    && failure_mask.size(0) == logits.size(0),
-                "numerical status gate requires contiguous CUDA bool mask");
-    const auto rows = static_cast<int>(logits.size(0));
-    auto stream     = at::cuda::getCurrentCUDAStream(logits.device().index()).stream();
-    const auto scope = static_cast<int>(status.scope);
-    if (logits.scalar_type() == torch::kFloat32) {
-        invokeNumericalStatusGate<float>(logits.data_ptr<float>(),
-                                         status.values.data_ptr<int32_t>(),
-                                         row_to_status.data_ptr<int32_t>(),
-                                         reinterpret_cast<uint8_t*>(failure_mask.data_ptr<bool>()),
-                                         rows,
-                                         static_cast<int>(status.values.numel()),
-                                         static_cast<int>(logits.size(1)),
-                                         scope,
-                                         stream);
-    } else if (logits.scalar_type() == torch::kFloat16) {
-        invokeNumericalStatusGate<at::Half>(logits.data_ptr<at::Half>(),
-                                            status.values.data_ptr<int32_t>(),
-                                            row_to_status.data_ptr<int32_t>(),
-                                            reinterpret_cast<uint8_t*>(failure_mask.data_ptr<bool>()),
-                                            rows,
-                                            static_cast<int>(status.values.numel()),
-                                            static_cast<int>(logits.size(1)),
-                                            scope,
-                                            stream);
-    } else if (logits.scalar_type() == torch::kBFloat16) {
-        invokeNumericalStatusGate<at::BFloat16>(logits.data_ptr<at::BFloat16>(),
-                                                status.values.data_ptr<int32_t>(),
-                                                row_to_status.data_ptr<int32_t>(),
-                                                reinterpret_cast<uint8_t*>(failure_mask.data_ptr<bool>()),
-                                                rows,
-                                                static_cast<int>(status.values.numel()),
-                                                static_cast<int>(logits.size(1)),
-                                                scope,
-                                                stream);
-    } else {
-        TORCH_CHECK(false, "numerical status gate unsupported logits dtype");
-    }
-}
-
 void runtimeApplyPackedMaskLogits(const torch::Tensor& logits,
                                   const torch::Tensor& packed_allow_mask,
                                   const torch::Tensor& row_indices,
@@ -483,13 +425,6 @@ static void batchCopyFallback(const BatchCopyParams& params) {
 }
 
 void runtimeMaskLogits(torch::Tensor& logits, const torch::Tensor& mask) {
-    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
-}
-
-void runtimeNumericalStatusGate(torch::Tensor&, const NumericalStatusView& status, const torch::Tensor&, torch::Tensor&) {
-    if (!status.defined()) {
-        return;
-    }
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 

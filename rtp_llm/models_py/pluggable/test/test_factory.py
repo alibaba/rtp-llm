@@ -10,11 +10,11 @@ import weakref
 
 from rtp_llm.config.module_dispatch_config import ModuleDispatchConfig
 from rtp_llm.device.device_type import DeviceType
+from rtp_llm.device.runtime import DeviceRuntimeContext
 from rtp_llm.models_py.pluggable.factory import (
     ModuleBuildContext,
     ModuleSelectionContext,
 )
-from rtp_llm.models_py.pluggable.platform import PlatformContext
 from rtp_llm.models_py.pluggable.registry import ModuleRegistry
 from rtp_llm.models_py.pluggable.spec import (
     BuildRequest,
@@ -150,7 +150,7 @@ def context_for(registry=None, config=None, *, rank=0, world_size=1, metadata=No
     return ModuleBuildContext(
         registry or registry_for(impl_for()),
         ModuleSelectionContext(
-            PlatformContext(DeviceType.Ppu, "ZW-M890P", rank),
+            DeviceRuntimeContext(DeviceType.Ppu, "ZW-M890P", rank),
             json.dumps(metadata or {"tp_size": 4}),
         ),
         config or ModuleDispatchConfig(mode="auto"),
@@ -159,7 +159,7 @@ def context_for(registry=None, config=None, *, rank=0, world_size=1, metadata=No
 
 
 class ModuleFactoryTest(unittest.TestCase):
-    def test_bound_records_identify_actual_object_without_retaining_it(self):
+    def test_bound_tree_validation_does_not_retain_objects(self):
         ctx = context_for()
         ctx.prepare([request_for()])
         ctx.verify_protocol()
@@ -167,15 +167,6 @@ class ModuleFactoryTest(unittest.TestCase):
         ctx.validate_built_tree(module, root_path="model")
         ctx.close()
         ctx.validate_built_tree(module, root_path="model")
-        record = ctx.bound_instances[0]
-        self.assertEqual(record["actual_class"], ENTRY + ".ActualModule")
-        self.assertEqual(record["model_instance_id"], ctx.model_instance_id)
-        self.assertEqual(record["protocol_digest"], ctx.protocol_digest)
-        self.assertEqual(len(record["source"]["sha256"]), 64)
-        record["source"]["sha256"] = "mutated snapshot"
-        self.assertNotEqual(
-            ctx.bound_instances[0]["source"]["sha256"], "mutated snapshot"
-        )
         reference = weakref.ref(module)
         del module
         gc.collect()

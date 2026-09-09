@@ -421,45 +421,6 @@ TEST_F(ExecOpsTest, testRuntimeMaskLogits) {
     EXPECT_FLOAT_EQ(result[1][2].item<float>(), 1.0f);
 }
 
-TEST_F(ExecOpsTest, testRuntimeNumericalStatusGateProducesPointMass) {
-    auto logits = torch::ones({3, 8}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
-    auto status = torch::tensor({0, 7, 0}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
-    NumericalStatusView view;
-    view.values = status;
-    view.scope = NumericalStatusScope::ORIGIN_ROW;
-    auto row_to_status = torch::tensor({0, 1, 2}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
-    auto failure = torch::empty({3}, torch::TensorOptions().dtype(torch::kBool).device(torch::kCUDA));
-    runtimeNumericalStatusGate(logits, view, row_to_status, failure);
-    runtimeSyncAndCheck();
-
-    EXPECT_EQ(failure.to(torch::kCPU).to(torch::kInt32).tolist<int>(), (std::vector<int>{0, 1, 0}));
-    auto result = logits.cpu();
-    EXPECT_FLOAT_EQ(result[0][0].item<float>(), 1.0f);
-    EXPECT_FLOAT_EQ(result[1][0].item<float>(), 0.0f);
-    EXPECT_TRUE(std::isinf(result[1][1].item<float>()));
-    EXPECT_LT(result[1][1].item<float>(), 0.0f);
-}
-
-TEST_F(ExecOpsTest, testRuntimeNumericalStatusGateBatchScopeMapsEverySamplerRow) {
-    auto logits = torch::ones({3, 4}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
-    auto status = torch::tensor({9}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
-    NumericalStatusView view;
-    view.values = status;
-    view.scope = NumericalStatusScope::BATCH;
-    auto row_to_status = torch::tensor({0, 0, 0}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
-    auto failure = torch::empty({3}, torch::TensorOptions().dtype(torch::kBool).device(torch::kCUDA));
-    runtimeNumericalStatusGate(logits, view, row_to_status, failure);
-    runtimeSyncAndCheck();
-
-    EXPECT_EQ(failure.to(torch::kCPU).to(torch::kInt32).tolist<int>(), (std::vector<int>{1, 1, 1}));
-    auto result = logits.cpu();
-    for (int row = 0; row < 3; ++row) {
-        EXPECT_FLOAT_EQ(result[row][0].item<float>(), 0.0f);
-        EXPECT_TRUE(std::isinf(result[row][1].item<float>()));
-        EXPECT_LT(result[row][1].item<float>(), 0.0f);
-    }
-}
-
 TEST_F(ExecOpsTest, testRuntimeApplyPackedMaskLogitsUsesCompactRowMapping) {
     constexpr int64_t vocab_size        = 35;
     constexpr int64_t logits_columns    = 40;

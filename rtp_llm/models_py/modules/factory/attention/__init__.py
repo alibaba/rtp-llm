@@ -129,24 +129,7 @@ elif device_type == DeviceType.Cuda:
     )
 
     PREFILL_MHA_IMPS.append(CPFlashInferImpl)
-else:
-    from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
-        PyFlashinferDecodeImpl,
-        PyFlashinferHybridPrefillImpl,
-        PyFlashinferPagedPrefillImpl,
-        PyFlashinferPrefillImpl,
-    )
-
-    PREFILL_MHA_IMPS.append(PyFlashinferPrefillImpl)
-    PREFILL_MHA_IMPS.append(PyFlashinferHybridPrefillImpl)
-    PREFILL_MHA_IMPS.append(PyFlashinferPagedPrefillImpl)
-    DECODE_MHA_IMPS.append(PyFlashinferDecodeImpl)
-
-    from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.prefill_cp_flashinfer import (
-        CPFlashInferImpl,
-    )
-
-    PREFILL_MHA_IMPS.append(CPFlashInferImpl)
+# Generic PPU MHA kernels are registered by a separate backend package.
 
 # Out-of-tree backends registered a hook before this module existed. Ordering in
 # these lists is priority (earlier wins), so a backend inserts rather than

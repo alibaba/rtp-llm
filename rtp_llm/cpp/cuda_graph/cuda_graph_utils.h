@@ -42,7 +42,6 @@ public:
         py_model_inputs_.attention_inputs.combo_position_ids       = inputs.attention_inputs.combo_position_ids;
         py_model_inputs_.input_ids                                 = inputs.input_ids;
         py_model_inputs_.combo_position_ids                        = inputs.combo_position_ids;
-        py_model_inputs_.numerical_status                          = inputs.numerical_status;
 
         // for spec
         py_model_inputs_.input_hiddens                            = inputs.input_hiddens;
@@ -81,9 +80,7 @@ public:
     }
 #endif
     at::cuda::CUDAGraph graph_;
-    CaptureMemoryHold             mem_hold_;
-    std::shared_ptr<torch::Event> numerical_status_source_fence_;
-    bool                          numerical_status_source_fence_recorded_{false};
+    CaptureMemoryHold   mem_hold_;
 };
 
 class CudaGraphStreamLife {

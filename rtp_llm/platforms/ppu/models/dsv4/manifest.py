@@ -1,13 +1,55 @@
 """Public PPU module descriptions; no PPU kernel or model imports."""
 
 from rtp_llm.device.device_type import DeviceType
-from rtp_llm.models.dsv4.specs import (
-    CONTRACTS,
-    STATE_FORMAT,
-    STATE_FORMAT_FP4,
-    WEIGHT_FORMAT,
-)
+from rtp_llm.models.dsv4.specs import CONTRACTS, STATE_FORMAT_FP4, WEIGHT_FORMAT
 from rtp_llm.models_py.pluggable.spec import ModuleImplSpec, SupportResult
+
+# Explicit launch combinations; these are requirements, not rewritten defaults.
+# Existing ModuleDispatchConfig snapshots and rank digests own the configuration.
+PREFILL_EXECUTION_OPTIONS = {
+    "DSV4_HC_IMPL": "hybrid",
+    "DSV4_MHC_PRE_GEMM_BACKEND": "deepgemm_deterministic",
+    "DSV4_MHC_POST_BACKEND": "tilelang",
+    "DSV4_MHC_POST_PDL": "0",
+    "DSV4_PPU_SGLANG_MOE": "1",
+    "DSV4_PPU_SGLANG_WO_A": "1",
+    "DSV4_MOE_SHARED_EXPERT_OVERLAP": "0",
+    "DSV4_PPU_TP_COMM_WARMUP": "1",
+    "DSV4_PPU_SHARED_QKV_QUANT": "0",
+    "DSV4_MOE_SCALE_GATHER_FUSED": "1",
+}
+
+DECODE_EXECUTION_OPTIONS = {
+    "DSV4_HC_IMPL": "hybrid",
+    "DSV4_MHC_PRE_GEMM_BACKEND": "deepgemm_deterministic",
+    "DSV4_MHC_POST_BACKEND": "tilelang",
+    "DSV4_MHC_POST_PDL": "0",
+    "DSV4_PPU_SGLANG_MOE": "1",
+    "DSV4_PPU_SGLANG_WO_A": "1",
+    "DSV4_MOE_SHARED_EXPERT_OVERLAP": "0",
+    "DSV4_PPU_TP_COMM_WARMUP": "0",
+    "DSV4_PPU_DECODE_HC_REDUCTION": "fused",
+    "DSV4_PPU_DECODE_HC_NORM": "fused",
+    "DSV4_PPU_DECODE_FP8_QUANT": "v2",
+    "DSV4_PPU_DECODE_QKV": "merged",
+    "DSV4_PPU_DECODE_INDEXER": "overlap",
+    "DSV4_PPU_DECODE_ATTN_MODE": "overlap",
+    "DSV4_SHARED_EXPERT_MODE": "overlap",
+    "DSV4_PPU_DECODE_SHARED_SCHEDULE": "before_route",
+    "DSV4_PPU_DECODE_MOE_OUTPUT": "bf16",
+    "DSV4_PPU_DECODE_METADATA": "graph_fused",
+    "DSV4_PPU_DECODE_ROPE": "shared",
+    "DSV4_PPU_DECODE_MOE_HINT": "capacity",
+}
+
+
+def _check_execution_options(options, required):
+    for key, expected in required.items():
+        if options.get(key) != expected:
+            return SupportResult(
+                False, f"requires {key}={expected}; use the PPU launch template"
+            )
+    return SupportResult(True)
 
 
 def _supports_ppu_prefill(selection, request, cache_mode):
@@ -66,16 +108,17 @@ def _supports_ppu_prefill(selection, request, cache_mode):
     return SupportResult(True)
 
 
-def supports_ppu_prefill(selection, request):
-    return _supports_ppu_prefill(selection, request, "fp8")
-
-
 def supports_ppu_fp4_prefill(selection, request):
-    return _supports_ppu_prefill(selection, request, "fp4")
+    result = _supports_ppu_prefill(selection, request, "fp4")
+    if not result.supported:
+        return result
+    return _check_execution_options(
+        selection.model_metadata.get("execution_options", {}), PREFILL_EXECUTION_OPTIONS
+    )
 
 
 def _supports_ppu_tp_moe(selection, request, cache_mode):
-    base = _supports_ppu_prefill(selection, request, cache_mode)
+    base = supports_ppu_fp4_prefill(selection, request)
     if not base.supported:
         return base
     options = selection.model_metadata.get("execution_options", {})
@@ -93,10 +136,6 @@ def _supports_ppu_tp_moe(selection, request, cache_mode):
     if options.get("DSV4_MOE_GATHER_FUSED", "1") != "1":
         return SupportResult(False, "TP MoE v2 requires fused route gathering")
     return SupportResult(True)
-
-
-def supports_ppu_tp_moe(selection, request):
-    return _supports_ppu_tp_moe(selection, request, "fp8")
 
 
 def supports_ppu_fp4_tp_moe(selection, request):
@@ -148,93 +187,15 @@ def supports_ppu_fp4_decode(selection, request):
             "requires a Decode batch capacity in 1..128",
         ),
         (
-            options.get("DSV4_HC_IMPL", "hybrid") in ("hybrid", "tilelang")
-            and options.get("DSV4_MHC_PRE_GEMM_BACKEND", "deepgemm_deterministic")
-            == "deepgemm_deterministic"
-            and options.get("DSV4_MHC_POST_BACKEND", "tilelang") == "tilelang"
-            and options.get("DSV4_MHC_POST_PDL", "0") == "0",
-            "requires deterministic PPU HC with TileLang POST and PDL off",
+            metadata.get("cuda_graph") is True,
+            "requires the measured Decode Graph configuration",
         ),
-        (
-            options.get("DSV4_PPU_DECODE_HC_REDUCTION", "torch") in ("torch", "fused"),
-            "requires torch or fused HC reduction",
-        ),
-        (
-            options.get("DSV4_PPU_DECODE_HC_NORM", "separate") in ("separate", "fused"),
-            "requires separate or fused HC norm",
-        ),
-        (
-            options.get("DSV4_PPU_DECODE_FP8_QUANT", "auto") in ("auto", "v2"),
-            "requires auto or v2 FP8 quantization",
-        ),
-        (
-            options.get("DSV4_PPU_DECODE_QKV", "separate") in ("separate", "merged")
-            and (
-                options.get("DSV4_PPU_DECODE_QKV", "separate") != "merged"
-                or options.get("DSV4_PPU_DECODE_ATTN_MODE", "sequential") == "overlap"
-            ),
-            "requires separate QKV or merged QKV with Attention overlap",
-        ),
-        (
-            options.get("DSV4_PPU_DECODE_INDEXER", "sequential")
-            in ("sequential", "overlap")
-            and (
-                options.get("DSV4_PPU_DECODE_INDEXER", "sequential") != "overlap"
-                or options.get("DSV4_PPU_DECODE_ATTN_MODE", "sequential") == "overlap"
-            ),
-            "requires sequential Indexer or Indexer overlap with Attention overlap",
-        ),
-        (
-            options.get("DSV4_PPU_DECODE_METADATA", "eager")
-            in ("eager", "graph", "graph_fused"),
-            "requires eager, graph or graph_fused Decode metadata",
-        ),
-        (
-            options.get("DSV4_PPU_DECODE_ROPE", "layer") in ("layer", "shared")
-            and (
-                options.get("DSV4_PPU_DECODE_ROPE", "layer") != "shared"
-                or (
-                    options.get("DSV4_PPU_DECODE_METADATA", "eager")
-                    in ("graph", "graph_fused")
-                    and options.get("DSV4_PPU_DECODE_ATTN_MODE", "sequential")
-                    == "overlap"
-                )
-            ),
-            "requires layer RoPE or shared RoPE with metadata Graph and Attention overlap",
-        ),
-        (
-            options.get("DSV4_PPU_DECODE_SHARED_SCHEDULE", "after_route")
-            in ("after_route", "before_route")
-            and (
-                options.get("DSV4_PPU_DECODE_SHARED_SCHEDULE", "after_route")
-                != "before_route"
-                or options.get("DSV4_SHARED_EXPERT_MODE", "sequential") == "overlap"
-            ),
-            "requires after_route or an overlapped before_route shared schedule",
-        ),
-        (
-            options.get("DSV4_PPU_DECODE_MOE_HINT", "capacity")
-            in ("capacity", "batch"),
-            "requires capacity or batch MoE launch hint",
-        ),
-        (
-            options.get("DSV4_PPU_DECODE_MOE_OUTPUT", "fp32") in ("fp32", "bf16"),
-            "requires fp32 or bf16 MoE output storage",
-        ),
-        (
-            options.get("DSV4_PPU_SGLANG_MOE", "0") == "1"
-            and options.get("DSV4_MOE_SHARED_EXPERT_OVERLAP", "0") == "0"
-            and options.get("DSV4_SHARED_EXPERT_MODE", "sequential")
-            in ("sequential", "overlap")
-            and options.get("DSV4_PPU_DECODE_ATTN_MODE", "sequential")
-            in ("sequential", "overlap"),
-            "requires SG activation and a supported PPU shared expert executor",
-        ),
+        (not comm.get("internode", False), "requires single-node DeepEP"),
     )
     for supported, reason in checks:
         if not supported:
             return SupportResult(False, reason)
-    return SupportResult(True)
+    return _check_execution_options(options, DECODE_EXECUTION_OPTIONS)
 
 
 def register_modules(registry):
@@ -326,75 +287,3 @@ def register_modules(registry):
                 ),
             )
         )
-    for kind, contract in CONTRACTS.items():
-        describe = {"model": "describe_model", "block": "describe_block"}.get(kind)
-        registry.register_implementation(
-            ModuleImplSpec(
-                module_id="rtp.dsv4." + kind,
-                impl_id=f"ppu.dsv4.{kind}.v1",
-                api_version=1,
-                builder=f"rtp_llm.platforms.ppu.models.dsv4.pluggable_builders:build_{kind}",
-                supported_devices={DeviceType.Ppu},
-                predicate="rtp_llm.platforms.ppu.models.dsv4.manifest:supports_ppu_prefill",
-                priority=100,
-                contract_id=contract,
-                weight_format_id=WEIGHT_FORMAT,
-                state_format_id=STATE_FORMAT,
-                validate_initialized=(
-                    "rtp_llm.models.dsv4.builders:validate_initialized"
-                    if kind == "model"
-                    else None
-                ),
-                describe_resources=(
-                    "rtp_llm.models.dsv4.resources:fp8_allocator_inputs"
-                    if kind == "model"
-                    else None
-                ),
-                prepare_weights=(
-                    "rtp_llm.platforms.ppu.models.dsv4.resources:routed_tp_preparation"
-                    if kind == "moe"
-                    else None
-                ),
-                collective_protocol_id="ppu.dsv4.tp4-fp32-routed-replicated-shared.v1",
-                capabilities={"prefill"},
-                auto_selectable=False,
-                describe_build_requests=(
-                    ("rtp_llm.models.dsv4.specs:" + describe) if describe else None
-                ),
-            )
-        )
-    registry.register_implementation(
-        ModuleImplSpec(
-            module_id="rtp.dsv4.moe",
-            impl_id="ppu.dsv4.moe.tp_shared_bf16.v2",
-            api_version=1,
-            builder="rtp_llm.platforms.ppu.models.dsv4.pluggable_builders:build_moe_tp",
-            supported_devices={DeviceType.Ppu},
-            predicate="rtp_llm.platforms.ppu.models.dsv4.manifest:supports_ppu_tp_moe",
-            priority=100,
-            contract_id=CONTRACTS["moe"],
-            weight_format_id=WEIGHT_FORMAT,
-            state_format_id=STATE_FORMAT,
-            prepare_weights="rtp_llm.platforms.ppu.models.dsv4.resources:routed_tp_preparation",
-            collective_protocol_id="ppu.dsv4.moe.tp4-shared-sharded-bf16-reduce.v2",
-            capabilities={"prefill"},
-            auto_selectable=False,
-        )
-    )
-    registry.register_implementation(
-        ModuleImplSpec(
-            module_id="rtp.dsv4.attention",
-            impl_id="ppu.dsv4.attention.inverse_rope.v2",
-            api_version=1,
-            builder="rtp_llm.platforms.ppu.models.dsv4.pluggable_builders:build_attention_inverse_rope",
-            supported_devices={DeviceType.Ppu},
-            predicate="rtp_llm.platforms.ppu.models.dsv4.manifest:supports_ppu_prefill",
-            priority=100,
-            contract_id=CONTRACTS["attention"],
-            weight_format_id=WEIGHT_FORMAT,
-            state_format_id=STATE_FORMAT,
-            collective_protocol_id="ppu.dsv4.attention.tp4-bf16.v1",
-            capabilities={"prefill"},
-            auto_selectable=False,
-        )
-    )

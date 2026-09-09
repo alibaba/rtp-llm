@@ -474,8 +474,6 @@ build:ppu --action_env PPU_SDK="/usr/local/PPU_SDK/"
 build:ppu --action_env LD_LIBRARY_PATH="/opt/conda310/lib/:/usr/local/PPU_SDK/lib/:/usr/local/cuda/lib64:/usr/local/PPU_SDK/sailSHMEM/lib"
 test:ppu --test_env PPU_HOME="/usr/local/PPU_SDK/"
 test:ppu --test_env LD_LIBRARY_PATH="/opt/conda310/lib/:/usr/local/PPU_SDK/lib/:/usr/local/cuda/lib64:/usr/local/PPU_SDK/sailSHMEM/lib"
-test:ppu --test_env SKIP_DISTRIBUTED_TEST=1
-test:ppu --test_env LOAD_METHOD=scratch
 build:ppu --define=using_cuda12_9_x86=false
 build:ppu --define=using_cuda12_arm=false
 build:ppu --define=using_cuda13_x86=false

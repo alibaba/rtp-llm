@@ -45,7 +45,6 @@ struct GraphParams {
     // Width of one input_hiddens row. This is deliberately independent from
     // the model output hidden_size because auxiliary feature rows may be wider.
     std::size_t input_hidden_size = 0;
-    NumericalStatusScope numerical_status_scope = NumericalStatusScope::NONE;
 };
 
 class GraphBase {

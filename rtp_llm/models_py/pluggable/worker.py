@@ -1,11 +1,11 @@
 """Generic worker preflight before weight loading and implementation groups."""
 
+from rtp_llm.device.runtime import DeviceRuntimeContext
 from rtp_llm.models_py.pluggable.control import verify_store_protocol
 from rtp_llm.models_py.pluggable.factory import (
     ModuleBuildContext,
     ModuleSelectionContext,
 )
-from rtp_llm.models_py.pluggable.platform import PlatformContext
 from rtp_llm.models_py.pluggable.spec import canonical_json
 
 
@@ -21,7 +21,7 @@ def prepare_worker_model_context(
     if adapter is None:
         raise ValueError(f"Model {model_config.model_type!r} has no module adapter")
     pc = engine_config.parallelism_config
-    platform = PlatformContext.detect(
+    platform = DeviceRuntimeContext.detect(
         local_rank=int(pc.local_rank), requested=config.platform
     )
     ctx = ModuleBuildContext(

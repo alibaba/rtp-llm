@@ -18,16 +18,6 @@ void per_token_group_quant_fp8(at::Tensor& input,
                                double      fp8_max,
                                bool        scale_ue8m0);
 
-void per_token_group_quant_fp8_checked(at::Tensor& input,
-                                       at::Tensor& output_q,
-                                       at::Tensor& output_s,
-                                       int64_t     group_size,
-                                       double      eps,
-                                       double      fp8_min,
-                                       double      fp8_max,
-                                       bool        scale_ue8m0,
-                                       at::Tensor& status);
-
 void per_token_group_quant_fp8_v2(at::Tensor&                         input,
                                   at::Tensor&                         output_q,
                                   at::Tensor&                         output_s,
@@ -38,16 +28,4 @@ void per_token_group_quant_fp8_v2(at::Tensor&                         input,
                                   bool                                scale_ue8m0,
                                   bool                                fuse_silu_and_mul,
                                   const std::optional<torch::Tensor>& masked_m);
-
-void per_token_group_quant_fp8_v2_checked(at::Tensor&                         input,
-                                          at::Tensor&                         output_q,
-                                          at::Tensor&                         output_s,
-                                          int64_t                             group_size,
-                                          double                              eps,
-                                          double                              fp8_min,
-                                          double                              fp8_max,
-                                          bool                                scale_ue8m0,
-                                          bool                                fuse_silu_and_mul,
-                                          const std::optional<torch::Tensor>& masked_m,
-                                          at::Tensor&                         status);
 }  // namespace torch_ext

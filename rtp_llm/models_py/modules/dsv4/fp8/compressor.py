@@ -40,7 +40,6 @@ from typing import Any, Dict, Optional, Tuple
 import torch
 import torch.nn as nn
 from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
-from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
 from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
 from rtp_llm.ops.compute_ops import rtp_llm_ops
 
@@ -566,93 +565,6 @@ class CompressorFP8(PoolBackedModule):
             label = f"{role}.ratio{self.compress_ratio}.hd{self.head_dim}"
         return f"dsv4.cp.all_gather.{label}.kv_score"
 
-    def _debug_record(self, suffix: str, tensor: Optional[torch.Tensor]) -> None:
-        """Record the explicitly selected layer under the existing MOEDBG gate."""
-        label = self._profile_label or ""
-        if tensor is None or len(label) < 4 or label[0] != "L" or label[3] != ".":
-            return
-        try:
-            layer_id = int(label[1:3])
-        except ValueError:
-            return
-        if not _rt.should_record_layer(layer_id):
-            return
-        _rt.record_if_level(2, f"{label.replace('.', '_')}_{suffix}", tensor)
-
-    def _debug_record_pool_rows(self, meta: CompressorMeta) -> None:
-        label = self._profile_label or ""
-        if len(label) < 4 or label[0] != "L" or label[3] != ".":
-            return
-        try:
-            layer_id = int(label[1:3])
-        except ValueError:
-            return
-        # This helper is called from every production prefill compressor.  The
-        # recorder is disabled by default, so reject the call before reading
-        # kv_slots: boolean indexing lowers to nonzero/index and synchronizes
-        # the device even when _debug_record() later discards the tensors.
-        if not _rt.should_record_layer(layer_id):
-            return
-        if meta.kv_slots is None or self._kv_pool_view is None:
-            return
-        self._debug_record("kv_slots", meta.kv_slots)
-        valid_slots = meta.kv_slots[meta.kv_slots >= 0].to(torch.long)
-        if valid_slots.numel() == 0:
-            return
-        # fp8_ds_mla is block-packed, not 584/132 bytes contiguously per
-        # logical token: all token-data segments come first, followed by all
-        # per-token scales at the end of the block.  Recompose logical entries
-        # exactly as the production reader does instead of reshaping the 3-D
-        # compatibility view (which mislabels physical bytes after slot 0).
-        block_size = int(self._kv_pool_view.shape[1])
-        entry_bytes = int(self._pool_entry_bytes)
-        token_data_size = 576 if self.head_dim == KV_HEAD_DIM else entry_bytes - 4
-        scale_dim = entry_bytes - token_data_size
-        block_ids = valid_slots // block_size
-        pos = valid_slots % block_size
-        selected = self._kv_pool_view.index_select(0, block_ids).reshape(
-            valid_slots.numel(), -1
-        )
-        data_idx = (
-            pos[:, None] * token_data_size
-            + torch.arange(token_data_size, device=pos.device)[None, :]
-        )
-        scale_idx = (
-            block_size * token_data_size
-            + pos[:, None] * scale_dim
-            + torch.arange(scale_dim, device=pos.device)[None, :]
-        )
-        logical_rows = torch.cat(
-            [selected.gather(1, data_idx), selected.gather(1, scale_idx)], dim=1
-        )
-        self._debug_record("kv_rows", logical_rows)
-
-    def _debug_record_readonly_inputs(
-        self, meta: CompressorMeta, cos_sin_cache: torch.Tensor
-    ) -> None:
-        """Capture the small read-only inputs of the layer-6 fused writer.
-
-        Keep the 1M-row RoPE cache out of the dump: only boundary positions can
-        write compressed KV entries, so record the corresponding cache rows.
-        """
-        label = self._profile_label or ""
-        # This helper is on the production launch path.  Gate it before any
-        # tensor operation: even the boolean/indexing work below is illegal on
-        # some backends while a CUDA graph stream is being captured.  The
-        # recorder is disabled by default, so the normal path must be a true
-        # no-op rather than relying on _debug_record() to discard the results.
-        if not label.startswith("L06.") or not _rt.should_record_layer(6):
-            return
-        self._debug_record("ape", self.ape)
-        self._debug_record("norm_weight", self.norm.weight)
-        boundary = ((meta.positions + 1) % self.compress_ratio) == 0
-        compressed_pos = (
-            meta.positions[boundary].to(torch.long) // self.compress_ratio
-        ) * self.compress_ratio
-        self._debug_record(
-            "cos_sin_rows", cos_sin_cache.index_select(0, compressed_pos)
-        )
-
     def _fuse_wkv_wgate(self, coff: int) -> None:
         """Concat wkv + wgate along out-dim into one fused bf16 weight,
         then re-point ``wkv.weight`` / ``wgate.weight`` to views of the
@@ -981,7 +893,6 @@ class CompressorFP8(PoolBackedModule):
 
         cos_sin_cache = self._cos_sin_cache
         assert cos_sin_cache is not None
-        self._debug_record_readonly_inputs(meta, cos_sin_cache)
 
         with record_function_range("dsv4.fp8.compressor.launch.save_partial_states"):
             run_save_partial_states(
@@ -1029,7 +940,7 @@ class CompressorFP8(PoolBackedModule):
                 )
 
         with record_function_range("dsv4.fp8.compressor.launch.compress_kv_write"):
-            kernel_internal = run_fused_compress_kv_write(
+            run_fused_compress_kv_write(
                 state_cache_for_read,
                 meta.token_to_req,
                 meta.positions,
@@ -1053,7 +964,6 @@ class CompressorFP8(PoolBackedModule):
                 cu_seq_per_req=meta.cu_seq_per_req if use_varlen_raw else None,
                 state_tokens_per_block=self._state_tokens_per_block,
             )
-        self._debug_record("kernel_internal", kernel_internal)
 
     # ----------------------------------------------------------------------
     # Overlap orchestration: split-phase prefill (start / finish).
@@ -1131,7 +1041,6 @@ class CompressorFP8(PoolBackedModule):
             )
             N = bsz * seqlen
             fused_flat = fused_out.reshape(N, -1)
-            self._debug_record("fused_local", fused_flat)
 
         cp_ctx = self._cp_ctx
         cp_gather = cp_should_gather(cp_ctx, start_pos)
@@ -1199,7 +1108,6 @@ class CompressorFP8(PoolBackedModule):
         with record_function_range(wait_range):
             pending.fused_flat = cp_wait_gather_full(pending.fused_gather_handle)
             pending.fused_gather_handle = None
-            self._debug_record("fused_full", pending.fused_flat)
 
     def finish_prefill(self, pending: Optional[_CompressorPending]) -> None:
         """Drain a :meth:`start_prefill` and write the FP8 KV pool.
@@ -1226,8 +1134,6 @@ class CompressorFP8(PoolBackedModule):
             )
             kv_flat = fused_flat[:, :out_dim]
             score_flat = fused_flat[:, out_dim:]
-            self._debug_record("kv_full", kv_flat)
-            self._debug_record("score_full", score_flat)
 
         if meta is None:
             # Non-CP fallback: rebuild positions/b_idx from sp/bsz/seqlen.
@@ -1243,7 +1149,6 @@ class CompressorFP8(PoolBackedModule):
         seq_start = None if meta.is_batched else pending.sp
         with record_function_range("dsv4.fp8.compressor.prefill.launch"):
             self._launch(kv_flat, score_flat, meta, seq_start=seq_start)
-        self._debug_record_pool_rows(meta)
 
     # ----------------------------------------------------------------------
     # Forward (prefill)
@@ -1301,7 +1206,6 @@ class CompressorFP8(PoolBackedModule):
             )
             N = bsz * seqlen
             fused_flat = fused_out.reshape(N, -1)
-            self._debug_record("fused_local", fused_flat)
 
         cp_ctx = self._cp_ctx
         cp_gather = cp_should_gather(cp_ctx, start_pos)
@@ -1341,7 +1245,6 @@ class CompressorFP8(PoolBackedModule):
             assert fused_gather_handle is not None
             with record_function_range("dsv4.fp8.compressor.prefill.cp_wait_kv_score"):
                 fused_flat = cp_wait_gather_full(fused_gather_handle)
-            self._debug_record("fused_full", fused_flat)
 
         with record_function_range("dsv4.fp8.compressor.prefill.split_kv_score"):
             assert fused_flat.dim() == 2, (
@@ -1354,8 +1257,6 @@ class CompressorFP8(PoolBackedModule):
             )
             kv_flat = fused_flat[:, :out_dim]
             score_flat = fused_flat[:, out_dim:]
-            self._debug_record("kv_full", kv_flat)
-            self._debug_record("score_full", score_flat)
         if meta is None:
             with record_function_range("dsv4.fp8.compressor.prefill.build_meta"):
                 positions, b_idx = _build_prefill_positions(sp, bsz, seqlen, device)
@@ -1376,7 +1277,6 @@ class CompressorFP8(PoolBackedModule):
         seq_start = None if meta.is_batched else sp
         with record_function_range("dsv4.fp8.compressor.prefill.launch"):
             self._launch(kv_flat, score_flat, meta, seq_start=seq_start)
-        self._debug_record_pool_rows(meta)
         return None
 
     # ----------------------------------------------------------------------

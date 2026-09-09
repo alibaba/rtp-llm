@@ -33,7 +33,8 @@ from rtp_llm.utils.backend_registry import run_backend_registrations
 p = argparse.ArgumentParser()
 p.add_argument('--moe_strategy', choices=['auto'])
 run_backend_registrations('moe_strategy_choices', repeatable=True, parser=p)
-assert p.parse_args(['--moe_strategy', 'w8a8_int8_dp_normal_deepgemm']).moe_strategy
+assert p.parse_args([]).moe_strategy is None
+assert p._option_string_actions['--moe_strategy'].choices == ['auto']
 from rtp_llm.models.dsv4.adapter import get_registry as get_module_registry
 r = get_module_registry()
 s = r.implementation('rtp.dsv4.attention', 'ppu.dsv4.attention.fp4_indexer.v1')

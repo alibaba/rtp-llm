@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from rtp_llm.config.module_dispatch_config import ModuleDispatchConfig
-from rtp_llm.models_py.pluggable.platform import PlatformContext
+from rtp_llm.device.runtime import DeviceRuntimeContext
 from rtp_llm.models_py.pluggable.spec import (
     BuildRequest,
     ModuleBinding,
@@ -21,9 +21,9 @@ from rtp_llm.models_py.pluggable.spec import (
 
 @dataclass(frozen=True)
 class ModuleSelectionContext:
-    platform: PlatformContext
+    platform: DeviceRuntimeContext
     # Only rank-invariant selection/communication facts belong in this object.
-    # Device addresses, local rank and resource handles live in PlatformContext
+    # Device addresses, local rank and resource handles live in DeviceRuntimeContext
     # or builder arguments, not in the protocol digest.
     model_metadata_json: str
 
@@ -56,7 +56,9 @@ class ModuleBuildContext:
             config.platform != "auto"
             and config.platform != selection.platform.device_type.name.lower()
         ):
-            raise ValueError("Module config platform conflicts with PlatformContext")
+            raise ValueError(
+                "Module config platform conflicts with DeviceRuntimeContext"
+            )
         if type(world_size) is not int or world_size < 1:
             raise ValueError("world_size must be a positive integer")
         self.registry = registry
@@ -71,7 +73,6 @@ class ModuleBuildContext:
         self._digest = None
         self.model_instance_id = uuid.uuid4().hex
         self._instance_refs = {}
-        self._instance_records = {}
         self._class_sources = {}
         self.model_adapter = model_adapter
         self.resource_plan = None
@@ -125,14 +126,6 @@ class ModuleBuildContext:
     def state(self):
         return self._state
 
-    @property
-    def bound_instances(self):
-        """Diagnostic snapshots contain no references to model tensors or objects."""
-        return tuple(
-            json.loads(canonical_json(self._instance_records[path]))
-            for path in sorted(self._instance_records)
-        )
-
     def _record_instance(self, binding, module):
         cls = type(module)
         class_name = cls.__module__ + "." + cls.__qualname__
@@ -159,7 +152,6 @@ class ModuleBuildContext:
             "protocol_digest": self.protocol_digest,
         }
         self._instance_refs[binding.request.path] = weakref.ref(module)
-        self._instance_records[binding.request.path] = record
         if (
             self.model_adapter is not None
             and binding.request == self.model_adapter.root_request(self.selection)

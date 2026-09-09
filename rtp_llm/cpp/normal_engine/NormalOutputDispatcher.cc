@@ -45,7 +45,6 @@ void syncPinnedCpuCopies(bool need_sync) {
 
 std::optional<ErrorInfo> collectStreamSamplerError(const SamplerOutput& sampler_output,
                                                    const torch::Tensor& success_cpu,
-                                                   const torch::Tensor& numerical_failure_cpu,
                                                    int                  batch_idx_in,
                                                    int                  cur_batch_size) {
     std::optional<ErrorInfo> error_info;
@@ -54,16 +53,6 @@ std::optional<ErrorInfo> collectStreamSamplerError(const SamplerOutput& sampler_
             error_info = error;
         }
     };
-
-    if (numerical_failure_cpu.defined()) {
-        const auto* numerical_failure = numerical_failure_cpu.data_ptr<bool>();
-        for (int i = 0; i < cur_batch_size; ++i) {
-            if (numerical_failure[batch_idx_in + i]) {
-                set_first_error(ErrorInfo(ErrorCode::NUMERICAL_NONFINITE,
-                                          "NUMERICAL_NONFINITE: model numerical status is nonzero"));
-            }
-        }
-    }
 
     // Processor errors and sampling success both use sampler-input coordinates;
     // output coordinates can diverge when beam search changes the batch size.
@@ -85,13 +74,6 @@ std::optional<ErrorInfo> collectStreamSamplerError(const SamplerOutput& sampler_
     }
 
     return error_info;
-}
-
-std::optional<ErrorInfo> collectStreamSamplerError(const SamplerOutput& sampler_output,
-                                                   const torch::Tensor& success_cpu,
-                                                   int                  batch_idx_in,
-                                                   int                  cur_batch_size) {
-    return collectStreamSamplerError(sampler_output, success_cpu, torch::Tensor(), batch_idx_in, cur_batch_size);
 }
 
 bool NormalOutputDispatcher::restoreCurrentTokenIds(const GenerateStreamPtr& stream,
@@ -159,8 +141,6 @@ absl::Status NormalOutputDispatcher::dispatch(const StreamGroups& stream_groups,
     bool                need_d2h_sync = false;
     const torch::Tensor token_ids_cpu = copyToPinnedCpuAsync(token_ids_for_copy, need_d2h_sync);
     const torch::Tensor success_cpu   = copyToPinnedCpuAsync(sampler_output.success, need_d2h_sync);
-    const torch::Tensor numerical_failure_cpu =
-        copyToPinnedCpuAsync(sampler_output.numerical_failure_mask, need_d2h_sync);
     syncPinnedCpuCopies(need_d2h_sync);
     RTP_LLM_LOG_DEBUG("new_all_token_ids = [%s]", tensorDebugStringWithData<int32_t>(token_ids_cpu).c_str());
     int  batch_idx_in     = 0;
@@ -182,8 +162,7 @@ absl::Status NormalOutputDispatcher::dispatch(const StreamGroups& stream_groups,
                              return_all_probs,
                              new_tokens_all,
                              token_ids_cpu,
-                             success_cpu,
-                             numerical_failure_cpu);
+                             success_cpu);
 
         batch_idx_in += cur_batch_size;
         batch_idx_out += next_batch_size;
@@ -202,8 +181,7 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
                                                   bool                 return_all_probs,
                                                   const torch::Tensor& new_tokens_all,
                                                   const torch::Tensor& token_ids_cpu,
-                                                  const torch::Tensor& success_cpu,
-                                                  const torch::Tensor& numerical_failure_cpu) const {
+                                                  const torch::Tensor& success_cpu) const {
 
     const auto&  model_output      = merge_outputs.model_output;
     const auto&  sampler_output    = merge_outputs.sampler_output;
@@ -213,17 +191,6 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
     auto cur_batch_size  = stream->currentBatchSize();
     auto next_batch_size = stream->nextBatchSize();
     auto token_size      = stream->currentExecuteTokenSize();
-
-    if (numerical_failure_cpu.defined()) {
-        const auto* numerical_failure = numerical_failure_cpu.data_ptr<bool>();
-        for (int i = 0; i < cur_batch_size; ++i) {
-            if (numerical_failure[batch_idx_in + i]) {
-                stream->reportError(ErrorCode::NUMERICAL_NONFINITE,
-                                    "NUMERICAL_NONFINITE: model numerical status is nonzero");
-                return;
-            }
-        }
-    }
 
     auto batch_new_all_token_ids = new_all_token_ids.narrow(0, batch_idx_out, next_batch_size);
 
@@ -412,8 +379,7 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
         }
     }
 
-    auto error_info =
-        collectStreamSamplerError(sampler_output, success_cpu, numerical_failure_cpu, batch_idx_in, cur_batch_size);
+    auto error_info = collectStreamSamplerError(sampler_output, success_cpu, batch_idx_in, cur_batch_size);
     if (asyncDebugEnabled() && success_cpu.defined()) {
         for (int i = 0; i < cur_batch_size; ++i) {
             if (!(success_cpu.data_ptr<bool>()[batch_idx_in + i])) {

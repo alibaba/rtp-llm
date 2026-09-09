@@ -3,7 +3,6 @@
 import fcntl
 import importlib
 import os
-import sys
 from functools import wraps
 
 
@@ -58,16 +57,8 @@ class PpuStreamPool:
         return self._streams[key]
 
 
-def configure_runtime_paths():
-    """Restore packaged JIT dependency paths in multiprocessing.spawn workers."""
-    for path in os.environ.get("_JIT_CACHE_PATHS", "").split(os.pathsep):
-        if path and path not in sys.path:
-            sys.path.insert(0, path)
-
-
 def require_symbol(module_name, symbol_name):
     """Resolve a selected SDK operation, failing at initialization on ABI gaps."""
-    configure_runtime_paths()
     try:
         module = importlib.import_module(module_name)
     except ImportError as error:

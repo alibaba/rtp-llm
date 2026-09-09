@@ -100,7 +100,6 @@ from contextlib import nullcontext
 from typing import TYPE_CHECKING, Any, Callable, Dict, Optional, Tuple
 
 import torch
-
 from rtp_llm.models_py.modules.dsv4 import _forward_tensor_debug as _fwd_dbg
 from rtp_llm.models_py.modules.dsv4 import _profiler
 from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
@@ -355,7 +354,6 @@ def forward_layers(
     attn_inputs: Optional[PyAttentionInputs] = None,
     attention_inputs: Any = None,
     prepare_hidden_fn: Optional[Any] = None,
-    numerical_status=None,
 ) -> torch.Tensor:
     """Flat per-layer loop — vLLM-aligned layout.
 
@@ -609,7 +607,6 @@ def forward_layers(
                     cu_seqlens,  # [B+1]
                     kv_cache=kv_cache,
                     block_tables_by_type=block_tables_by_type,
-                    numerical_status=numerical_status,
                 )  # [T, hc, dim]
                 if layer_idx in capture_ids:
                     v4.capture_aux_hidden(layer_idx, h)
@@ -617,9 +614,7 @@ def forward_layers(
                     _rt.record(f"prefill_layer{layer_idx:02d}_out", h)
                 if write_cache_store_impl_by_tag:
                     for layer_cache in kv_cache.get_layer_cache_groups(layer_idx):
-                        writer = write_cache_store_impl_by_tag.get(
-                            str(layer_cache.tag)
-                        )
+                        writer = write_cache_store_impl_by_tag.get(str(layer_cache.tag))
                         if writer is None:
                             raise RuntimeError(
                                 "missing cache-store writer for layer "
@@ -798,7 +793,6 @@ def forward_prefill(
     parallelism_config: Optional[ParallelismConfig],
     inputs: PyModelInputs,
     prepare_hidden_fn: Optional[Any] = None,
-    numerical_status=None,
 ) -> PyModelOutputs:
     """Prefill dispatcher — single :func:`forward_layers` call on the full
     flat ``[T_total]`` batch (vLLM-aligned).
@@ -883,6 +877,5 @@ def forward_prefill(
         attn_inputs=attn,
         attention_inputs=attn_inputs,
         prepare_hidden_fn=prepare_hidden_fn,
-        numerical_status=numerical_status,
     )  # [T_total, dim]
     return PyModelOutputs(hidden)

@@ -63,7 +63,6 @@ class ExceptionType(IntEnum):
     GRAMMAR_VOCAB_EXCEEDS_MODEL_VOCAB = 611
     GRAMMAR_EOS_OUT_OF_VOCAB = 612
     GRAMMAR_VERIFY_EXCEPTION = 613
-    NUMERICAL_NONFINITE = 614
 
     # Internal error-code range. Retryability is decided by the owning
     # subsystem; terminal admission decisions in this range are not retried.

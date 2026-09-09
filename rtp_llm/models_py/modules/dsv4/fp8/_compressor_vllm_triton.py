@@ -59,7 +59,6 @@ from typing import Optional, Tuple
 import torch
 import triton
 import triton.language as tl
-
 from rtp_llm.models_py.modules.dsv4.fp8._trap_utils import (
     invalid_kv_access_validation_enabled,
     trap_invalid_kv_access_enabled,
@@ -190,7 +189,6 @@ def _fused_kv_compress_norm_rope_insert_sparse_attn(
     k_cache_ptr,
     kv_slot_mapping_ptr,
     kv_cache_block_size,
-    debug_ptr,
     HEAD_SIZE: tl.constexpr,
     TRITON_BLOCK_SIZE: tl.constexpr,
     STATE_WIDTH: tl.constexpr,
@@ -207,7 +205,6 @@ def _fused_kv_compress_norm_rope_insert_sparse_attn(
     BATCHED: tl.constexpr,
     TRAP_INVALID_KV_ACCESS: tl.constexpr,
     STATE_RING_ENTRIES: tl.constexpr,
-    DEBUG_INTERNAL: tl.constexpr,
 ):
     token_idx = tl.program_id(0).to(tl.int64)
 
@@ -330,13 +327,6 @@ def _fused_kv_compress_norm_rope_insert_sparse_attn(
     rrms = 1.0 / tl.sqrt(variance + rms_norm_eps)
     normed = compressed_kv * rrms * rms_w
 
-    if DEBUG_INTERNAL:
-        debug_base = debug_ptr + token_idx * 1538
-        tl.store(debug_base + block, compressed_kv, mask=mask)
-        tl.store(debug_base + 512, variance)
-        tl.store(debug_base + 513, rrms)
-        tl.store(debug_base + 514 + block, normed, mask=mask)
-
     kv_slot_idx = tl.load(kv_slot_mapping_ptr + token_idx)
     if kv_slot_idx < 0:
         return
@@ -413,9 +403,6 @@ def _fused_kv_compress_norm_rope_insert_sparse_attn(
     new_odd = odd * cos_v + even * sin_v
     result = tl.interleave(new_even, new_odd)
 
-    if DEBUG_INTERNAL:
-        tl.store(debug_base + 1026 + block, result, mask=mask)
-
     bf16_ptr = (fp8_ptr + NOPE_HEAD_DIM).to(tl.pointer_type(tl.bfloat16))
     rope_local = block - NOPE_HEAD_DIM
     is_rope = (block >= NOPE_HEAD_DIM) & mask
@@ -476,7 +463,6 @@ def _fused_kv_compress_norm_rope_insert_indexer_attn(
     k_cache_ptr,
     kv_slot_mapping_ptr,
     kv_cache_block_size,
-    debug_ptr,
     HEAD_SIZE: tl.constexpr,
     TRITON_BLOCK_SIZE: tl.constexpr,
     STATE_WIDTH: tl.constexpr,
@@ -493,7 +479,6 @@ def _fused_kv_compress_norm_rope_insert_indexer_attn(
     BATCHED: tl.constexpr,
     TRAP_INVALID_KV_ACCESS: tl.constexpr,
     STATE_RING_ENTRIES: tl.constexpr,
-    DEBUG_INTERNAL: tl.constexpr,
 ):
     token_idx = tl.program_id(0).to(tl.int64)
 
@@ -929,15 +914,6 @@ def run_fused_compress_kv_write(
     else:
         kernel = _fused_kv_compress_norm_rope_insert_indexer_attn
 
-    debug_internal = (
-        head_dim == 512 and os.environ.get("DSV4_CSA_KERNEL_INTERNAL_DEBUG", "0") == "1"
-    )
-    debug_out = (
-        torch.zeros((N, 1538), device=positions.device, dtype=torch.float32)
-        if debug_internal
-        else positions
-    )
-
     kernel[(N,)](
         state_cache,
         state_cache.stride(0),
@@ -966,7 +942,6 @@ def run_fused_compress_kv_write(
         kv_cache,
         kv_slot_mapping,
         kv_block_size,
-        debug_out,
         HEAD_SIZE=head_dim,
         TRITON_BLOCK_SIZE=triton.next_power_of_2(head_dim),
         STATE_WIDTH=state_width,
@@ -983,10 +958,8 @@ def run_fused_compress_kv_write(
         BATCHED=batched,
         TRAP_INVALID_KV_ACCESS=trap_invalid_kv_access_enabled(),
         STATE_RING_ENTRIES=state_ring_entries,
-        DEBUG_INTERNAL=debug_internal,
         num_warps=_fused_num_warps(head_dim, compress_ratio, cfg),
     )
-    return debug_out if debug_internal else None
 
 
 def build_cos_sin_cache(freqs_cis: torch.Tensor) -> Tuple[torch.Tensor, int]:

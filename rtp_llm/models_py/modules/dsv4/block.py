@@ -10,7 +10,6 @@ from typing import Callable, Dict, Optional, Tuple
 
 import torch
 import torch.nn as nn
-
 from rtp_llm.models_py.modules import RMSNorm
 from rtp_llm.models_py.modules.dsv4.fp8.attention import (
     AttentionFP8,
@@ -28,15 +27,6 @@ from rtp_llm.models_py.modules.dsv4.platform_provider import (
 from rtp_llm.models_py.modules.dsv4.tp_norm import tp_rms_norm
 
 _PrefillFastHCImpls = Tuple[Callable, Callable, Callable, Callable]
-
-
-def _supports_numerical_status(fn: Callable) -> bool:
-    """Return whether a callable explicitly opts into the status ABI."""
-
-    if bool(getattr(fn, "supports_numerical_status", False)):
-        return True
-    owner = getattr(fn, "__self__", None)
-    return bool(getattr(owner, "supports_numerical_status", False))
 
 
 def _prefill_fast_norm(
@@ -245,16 +235,6 @@ class Block(nn.Module):
         )
         self._prefill_fast_hc_impls_cached = self._resolve_prefill_fast_hc_impls()
 
-    def _call_attention(self, fn, *args, numerical_status=None, **kwargs):
-        if numerical_status is not None and _supports_numerical_status(fn):
-            kwargs["numerical_status"] = numerical_status
-        return fn(*args, **kwargs)
-
-    def _call_moe(self, *args, numerical_status=None, **kwargs):
-        if numerical_status is not None and _supports_numerical_status(self.ffn):
-            kwargs["numerical_status"] = numerical_status
-        return self.ffn(*args, **kwargs)
-
     def _sync_after_first_cp_prefill_attention(self) -> None:
         if self._cp_sync_after_attn_done:
             return
@@ -390,7 +370,6 @@ class Block(nn.Module):
         input_ids: torch.Tensor,  # [B, 1]
         kv_cache=None,
         attn_fn=None,
-        numerical_status=None,
     ) -> torch.Tensor:
         """Decode-only block forward — mirrors prefill ``forward`` but
         delegates attention to ``Attention.forward_decode``. Prefill
@@ -418,12 +397,10 @@ class Block(nn.Module):
         if attn_fn is not None:
             attn_out = attn_fn(x_pre)
         else:
-            attn_out = self._call_attention(
-                self.attn.forward_decode,
+            attn_out = self.attn.forward_decode(
                 x_pre,
                 attn_metadata,
                 kv_cache=kv_cache,
-                numerical_status=numerical_status,
             )
         if _dbg_layer:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_decode_attn_out", attn_out)
@@ -442,7 +419,7 @@ class Block(nn.Module):
         )
         if _dbg_layer:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_decode_ffn_in", x_pre)
-        ffn_out = self._call_moe(x_pre, input_ids, numerical_status=numerical_status)
+        ffn_out = self.ffn(x_pre, input_ids)
         if _dbg_layer:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_decode_ffn_out", ffn_out)
         x = self.ffn_hc.post(ffn_out, residual, post, comb)
@@ -456,7 +433,6 @@ class Block(nn.Module):
         cu_seqlens: torch.Tensor,  # [B+1] int64
         kv_cache=None,
         block_tables_by_type=None,
-        numerical_status=None,
     ) -> torch.Tensor:
         """Prefill fast path for the FP8 production path.
 
@@ -475,7 +451,6 @@ class Block(nn.Module):
                 cu_seqlens,
                 kv_cache=kv_cache,
                 block_tables_by_type=block_tables_by_type,
-                numerical_status=numerical_status,
             )
         return fast_call(
             x,
@@ -484,7 +459,6 @@ class Block(nn.Module):
             cu_seqlens,
             kv_cache=kv_cache,
             block_tables_by_type=block_tables_by_type,
-            numerical_status=numerical_status,
         )
 
     def _forward_prefill_fast_fp8(
@@ -495,7 +469,6 @@ class Block(nn.Module):
         cu_seqlens: torch.Tensor,
         kv_cache=None,
         block_tables_by_type=None,
-        numerical_status=None,
     ) -> torch.Tensor:
         """Validated FP8 prefill fast body.
 
@@ -524,14 +497,12 @@ class Block(nn.Module):
                 self.attn_norm.weight.data,
                 self.attn_norm.variance_epsilon,
             )
-            attn_out = self._call_attention(
-                self.attn.forward_with_shared_input_quant,
+            attn_out = self.attn.forward_with_shared_input_quant(
                 x_pre,
                 positions,
                 shared_input_quant,
                 kv_cache=kv_cache,
                 block_tables_by_type=block_tables_by_type,
-                numerical_status=numerical_status,
             )
         else:
             x_pre = _prefill_fast_norm(
@@ -540,13 +511,11 @@ class Block(nn.Module):
                 tp_size=self.tp_size,
                 tp_rank=self.tp_rank,
             )
-            attn_out = self._call_attention(
-                self.attn,
+            attn_out = self.attn(
                 x_pre,
                 positions,
                 kv_cache=kv_cache,
                 block_tables_by_type=block_tables_by_type,
-                numerical_status=numerical_status,
             )
         x = attn_hc_post(attn_out, residual, post, comb)
         self._sync_after_first_cp_prefill_attention()
@@ -559,7 +528,7 @@ class Block(nn.Module):
             tp_size=self.tp_size,
             tp_rank=self.tp_rank,
         )
-        ffn_out = self._call_moe(x_pre, input_ids, numerical_status=numerical_status)
+        ffn_out = self.ffn(x_pre, input_ids)
         return ffn_hc_post(ffn_out, residual, post, comb)
 
     def forward(
@@ -570,7 +539,6 @@ class Block(nn.Module):
         cu_seqlens: torch.Tensor,  # [B+1] int64
         kv_cache=None,
         block_tables_by_type=None,
-        numerical_status=None,
     ) -> torch.Tensor:
         """Flat per-block forward — accepts ``[T, hc, dim]`` hidden and 1D
         ``input_ids`` / ``positions`` / ``cu_seqlens``, matching the vLLM
@@ -627,13 +595,11 @@ class Block(nn.Module):
         # be false while this branch still constructs AttentionFP8, so dispatch
         # on the module type instead of only the cache config.
         if self._attention_layout == Dsv4AttentionLayout.FLAT:
-            attn_out = self._call_attention(
-                self.attn,
+            attn_out = self.attn(
                 x_pre,  # [T, dim]
                 positions,  # [T] int64 absolute positions
                 kv_cache=kv_cache,
                 block_tables_by_type=block_tables_by_type,
-                numerical_status=numerical_status,
             )  # [T, dim]
         else:
             # Present flat [T, dim] as [B, S, dim] for Attention.  The common
@@ -676,14 +642,12 @@ class Block(nn.Module):
                 )
                 x_padded[b_idx, s_idx] = x_pre
 
-            attn_out_padded = self._call_attention(
-                self.attn,
+            attn_out_padded = self.attn(
                 x_padded,  # [B, max_S, dim]
                 start_pos_per_req,
                 sequence_lengths=seqlens,
                 kv_cache=kv_cache,
                 block_tables_by_type=block_tables_by_type,
-                numerical_status=numerical_status,
             )  # [B, max_S, dim]
             if dense_layout:
                 attn_out = attn_out_padded.reshape(T, D)
@@ -733,9 +697,7 @@ class Block(nn.Module):
         if _dbg_layer and dbg_pos_mask is not None:
             setattr(self.ffn, "_dbg_positions", dbg_positions)
         try:
-            ffn_out = self._call_moe(
-                x_pre, ffn_in_ids, numerical_status=numerical_status
-            )  # [T, dim]
+            ffn_out = self.ffn(x_pre, ffn_in_ids)  # [T, dim]
         finally:
             if _dbg_layer and hasattr(self.ffn, "_dbg_positions"):
                 setattr(self.ffn, "_dbg_positions", None)

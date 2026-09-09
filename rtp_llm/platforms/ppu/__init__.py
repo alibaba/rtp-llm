@@ -6,20 +6,11 @@ Extend the existing factories and ModuleRegistry, retaining per-instance weight,
 state and collective contracts; registration does not qualify new chips/models.
 """
 
-from importlib import import_module
-
 
 def register_backend_hooks():
-    from .runtime import configure_runtime_paths
+    from .models.dsv4.register import install
 
-    configure_runtime_paths()
-    for entry in (
-        "modules.attention.register",
-        "modules.linear.register",
-        "modules.fused_moe.register",
-        "models.dsv4.register",
-    ):
-        import_module(__name__ + "." + entry).install()
+    install()
 
 
 def register_modules(registry):

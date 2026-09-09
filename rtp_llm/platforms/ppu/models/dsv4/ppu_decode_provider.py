@@ -3,7 +3,6 @@
 import weakref
 
 import torch
-
 from rtp_llm.models_py.modules.dsv4.platform_provider import Dsv4ProviderCapability
 
 from .ppu_module_provider import PpuModuleProvider
@@ -48,8 +47,8 @@ class PpuDecodeProvider(PpuModuleProvider):
         self._moe_hint = self.execution_options.get(
             "DSV4_PPU_DECODE_MOE_HINT", "capacity"
         )
-        if self._moe_hint not in ("capacity", "batch"):
-            raise ValueError("PPU Decode MoE hint must be capacity or batch")
+        if self._moe_hint != "capacity":
+            raise ValueError("PPU Decode MoE hint must be capacity")
         moe_output = self.execution_options.get("DSV4_PPU_DECODE_MOE_OUTPUT", "fp32")
         if moe_output not in ("fp32", "bf16"):
             raise ValueError("PPU Decode MoE output must be fp32 or bf16")
@@ -163,27 +162,6 @@ class PpuDecodeProvider(PpuModuleProvider):
         return PpuSharedExpertExecutor(
             stream_pool=self.stream_pool if mode == "overlap" else None,
             start_before_routing=self._shared_schedule == "before_route",
-        )
-
-    def build_moe(self, default_factory, *args, **kwargs):
-        from .ppu_deepep_fp4 import PpuDeepEPFP4Strategy
-
-        if (
-            kwargs.get("tp_size") != 1
-            or kwargs.get("ep_size") != 8
-            or not kwargs.get("is_decode_role")
-        ):
-            raise ValueError("PPU Decode MoE requires the TP1/EP8 Decode role")
-        return default_factory(
-            *args,
-            platform_provider=self,
-            execution_options=self.execution_options,
-            strategy_type=PpuDeepEPFP4Strategy,
-            strategy_kwargs={
-                "expected_m_policy": self._moe_hint,
-                "output_dtype": self._moe_output_dtype,
-            },
-            **kwargs,
         )
 
     def build_hc_unit(self, *args, **kwargs):

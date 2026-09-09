@@ -139,19 +139,6 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
                   py::arg("fp8_max"),
                   py::arg("scale_ue8m0"));
 
-    rtp_ops_m.def("per_token_group_quant_fp8_checked",
-                  &per_token_group_quant_fp8_checked,
-                  "Fp8 Gemm Per Token Group with non-finite status",
-                  py::arg("input"),
-                  py::arg("output_q"),
-                  py::arg("output_s"),
-                  py::arg("group_size"),
-                  py::arg("eps"),
-                  py::arg("fp8_min"),
-                  py::arg("fp8_max"),
-                  py::arg("scale_ue8m0"),
-                  py::arg("status"));
-
     rtp_ops_m.def("per_token_group_quant_fp8_v2",
                   &per_token_group_quant_fp8_v2,
                   "Fp8 Gemm Per Token Group",
@@ -165,21 +152,6 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
                   py::arg("scale_ue8m0"),
                   py::arg("fuse_silu_and_mul"),
                   py::arg("masked_m"));
-
-    rtp_ops_m.def("per_token_group_quant_fp8_v2_checked",
-                  &per_token_group_quant_fp8_v2_checked,
-                  "Fp8 Gemm Per Token Group v2 with non-finite status",
-                  py::arg("input"),
-                  py::arg("output_q"),
-                  py::arg("output_s"),
-                  py::arg("group_size"),
-                  py::arg("eps"),
-                  py::arg("fp8_min"),
-                  py::arg("fp8_max"),
-                  py::arg("scale_ue8m0"),
-                  py::arg("fuse_silu_and_mul"),
-                  py::arg("masked_m"),
-                  py::arg("status"));
 
     rtp_ops_m.def("embedding",
                   &embedding,

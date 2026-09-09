@@ -254,9 +254,6 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
             } else {
                 success.fill_(true);
             }
-            if (inputs.numerical_failure_mask.defined()) {
-                success.masked_fill_(inputs.numerical_failure_mask.narrow(0, from_batch_idx_in, batch_size_in), false);
-            }
             // execSampleGreedy updates token_ids_in in place. Mixed beam transitions use a
             // separate output tensor even when the aggregate input/output row counts match.
             if (requires_independent_output) {
@@ -314,9 +311,6 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
             beam_indices.reshape({(int64_t)beam_batch_size, (int64_t)cur_num_beams_out}).copy_(output.beam_indices);
 
             success.fill_(true);
-            if (inputs.numerical_failure_mask.defined()) {
-                success.masked_fill_(inputs.numerical_failure_mask.narrow(0, from_batch_idx_in, batch_size_in), false);
-            }
         }
 
         // prepare for next sampling
@@ -329,8 +323,6 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
                           std::move(inputs.all_probs),
                           std::move(all_beam_indices),
                           std::move(all_success),
-                          inputs.numerical_failure_mask,
-                          inputs.numerical_failure_lease,
                           std::move(processor_errors)});
 }
 

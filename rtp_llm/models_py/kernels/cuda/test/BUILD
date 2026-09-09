@@ -14,13 +14,6 @@ py_test (
     exec_properties = {'gpu':'L20'},
 )
 
-py_test(
-    name = "per_token_group_quant_fp8_checked_test",
-    srcs = ["per_token_group_quant_fp8_checked_test.py"],
-    deps = py_test_deps,
-    tags = ["open_skip", "H20"],
-    exec_properties = {"gpu": "H20"},
-)
 
 py_test (
     name = "cutlass_fp8_grouped_gemm_test",

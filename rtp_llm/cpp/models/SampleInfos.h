@@ -66,10 +66,6 @@ public:
     mutable torch::Tensor all_probs;      // shape: [batch_size, vocab_size]
 
     std::vector<at::Generator> generator;
-
-    // Append optional execution status to preserve positional aggregate callers.
-    torch::Tensor         numerical_failure_mask; // shape: [batch_size], dtype: bool
-    std::shared_ptr<void> numerical_failure_lease;
 };
 
 struct SamplerOutput {
@@ -79,8 +75,6 @@ public:
     torch::Tensor                         all_probs;
     torch::Tensor                         beam_index;
     torch::Tensor                         success;
-    torch::Tensor                         numerical_failure_mask;
-    std::shared_ptr<void>                 numerical_failure_lease;
     std::vector<std::optional<ErrorInfo>> processor_errors;
     // The draft distribution is a one-hot at token_ids and need not be
     // materialized as [batch, speculative_steps, vocab].

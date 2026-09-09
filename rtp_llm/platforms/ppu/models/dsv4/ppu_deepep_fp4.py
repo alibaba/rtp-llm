@@ -1,7 +1,6 @@
 """Instance-selected V4 routed experts on the engine's PPU DeepEP LL group."""
 
 import torch
-
 from rtp_llm.models_py.modules.dsv4.moe.strategies.base import RoutedExpertsStrategy
 
 
@@ -78,9 +77,8 @@ class PpuDeepEPFP4Strategy(RoutedExpertsStrategy):
         if output_dtype not in (torch.float32, torch.bfloat16):
             raise ValueError("PPU routed output must be FP32 or BF16")
         self.output_dtype = output_dtype
-        if expected_m_policy not in ("capacity", "batch"):
-            raise ValueError("PPU MoE expected rows policy must be capacity or batch")
-        self._expected_m_policy = expected_m_policy
+        if expected_m_policy != "capacity":
+            raise ValueError("PPU MoE expected rows policy must be capacity")
         if not self.can_handle(cfg):
             raise ValueError(
                 "PPU DeepEP MXFP4 requires TP1 with compatible EP-local experts"
@@ -98,14 +96,7 @@ class PpuDeepEPFP4Strategy(RoutedExpertsStrategy):
 
     def expected_rows(self, num_tokens):
         """Host launch hint only; never truncate the buffer or device counts."""
-        if self._expected_m_policy == "capacity":
-            return self._expected_m
-        # Match the SGLang LL dispatch hint, including its positive offset on
-        # exact division. During capture num_tokens is the padded graph batch.
-        cfg = self.cfg
-        return (
-            num_tokens * cfg.ep_size * cfg.n_activated_experts + cfg.n_routed_experts
-        ) // cfg.n_routed_experts
+        return self._expected_m
 
     def setup_weights(self, layer_weights):
         weights = prepare_routed_mxfp4_weights(self.cfg, layer_weights)

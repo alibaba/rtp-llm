@@ -50,38 +50,6 @@ void holdSamplerInputHostBuffers(TensorHolder& holder, const SamplerInputs& inpu
 
 NormalExecutor::ModelFactory NormalExecutor::test_model_factory = nullptr;
 
-struct NormalExecutor::NumericalGateSlot {
-    std::atomic<bool> leased{false};
-    std::atomic<bool> poisoned{false};
-    int64_t capacity = 0;
-    std::shared_ptr<torch::Event> release_event;
-    torch::Tensor row_map_host;
-    torch::Tensor row_map_device;
-    torch::Tensor failure_mask;
-};
-
-struct NormalExecutor::NumericalGateLease {
-    std::shared_ptr<NumericalGateSlot> slot;
-    explicit NumericalGateLease(std::shared_ptr<NumericalGateSlot> value): slot(std::move(value)) {}
-    NumericalGateLease(const NumericalGateLease&) = delete;
-    NumericalGateLease& operator=(const NumericalGateLease&) = delete;
-    NumericalGateLease(NumericalGateLease&&) = delete;
-    NumericalGateLease& operator=(NumericalGateLease&&) = delete;
-    ~NumericalGateLease() {
-        if (slot) {
-            try {
-                if (!slot->release_event) {
-                    slot->release_event = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
-                }
-                slot->release_event->record(cuda_graph::graphGetCurrentStream());
-                slot->leased.store(false, std::memory_order_release);
-            } catch (...) {
-                slot->poisoned.store(true, std::memory_order_release);
-            }
-        }
-    }
-};
-
 NormalExecutor::~NormalExecutor() {
     cudaProfilerEnd();
 }
@@ -348,9 +316,6 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
 
         CHECK_AND_RETURN_REF(sampler_input,
                              batch_stream_processor_->gatherSamplerInput(stream_groups, model_input, model_output));
-        if (model_output.numerical_status.defined()) {
-            applyNumericalStatusGate(stream_groups, sampler_input, model_output.numerical_status);
-        }
         holdSamplerInputHostBuffers(buffer_holder_, sampler_input);
         sampler_output = std::move(sampler_->forward(sampler_input));
         RTP_LLM_LOG_DEBUG("sampler forward done");
@@ -773,96 +738,6 @@ absl::Status NormalExecutor::dispatchOutputAsync(const StreamGroups&           s
     }
 
     return absl::OkStatus();
-}
-
-torch::Tensor NormalExecutor::ensureNumericalFailureWorkspace(int64_t rows) {
-    for (auto& slot : numerical_gate_slots_) {
-        bool expected = false;
-        if (!slot->poisoned.load(std::memory_order_acquire)
-            && slot->leased.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
-            bool reusable = true;
-            try {
-                reusable = !slot->release_event || slot->release_event->query();
-            } catch (...) {
-                reusable = false;
-            }
-            if (!reusable) {
-                slot->leased.store(false, std::memory_order_release);
-                continue;
-            }
-            active_numerical_gate_slot_ = slot;
-            if (slot->capacity < rows) {
-                slot->row_map_host = torch::empty({rows}, torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true));
-                slot->row_map_device = torch::empty({rows}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
-                slot->failure_mask = torch::empty({rows}, torch::TensorOptions().dtype(torch::kBool).device(torch::kCUDA));
-                slot->capacity = rows;
-            }
-            return slot->failure_mask.narrow(0, 0, rows);
-        }
-    }
-    auto slot = std::make_shared<NumericalGateSlot>();
-    slot->leased.store(true, std::memory_order_release);
-    slot->row_map_host = torch::empty({rows}, torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true));
-    slot->row_map_device = torch::empty({rows}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
-    slot->failure_mask = torch::empty({rows}, torch::TensorOptions().dtype(torch::kBool).device(torch::kCUDA));
-    slot->capacity = rows;
-    numerical_gate_slots_.push_back(slot);
-    for (int i = 0; i < 2; ++i) {
-        auto spare = std::make_shared<NumericalGateSlot>();
-        spare->row_map_host = torch::empty({rows}, torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true));
-        spare->row_map_device = torch::empty({rows}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
-        spare->failure_mask = torch::empty({rows}, torch::TensorOptions().dtype(torch::kBool).device(torch::kCUDA));
-        spare->capacity = rows;
-        numerical_gate_slots_.push_back(spare);
-    }
-    active_numerical_gate_slot_ = slot;
-    return slot->failure_mask;
-}
-
-torch::Tensor NormalExecutor::ensureNumericalRowMap(const StreamGroups& stream_groups) {
-    const auto rows = static_cast<int64_t>(stream_groups.totalSamplerBatchSizeIn());
-    auto slot = active_numerical_gate_slot_;
-    int32_t model_row = 0;
-    int32_t sampler_row = 0;
-    auto* map = slot->row_map_host.data_ptr<int32_t>();
-    for (const auto& stream : stream_groups.allStreams()) {
-        const int current_batch = stream->currentBatchSize();
-        const int sampler_batch = stream->needTilingForSampling() ? stream->nextBatchSize() : current_batch;
-        for (int i = 0; i < sampler_batch; ++i) {
-            map[sampler_row++] = model_row + std::min(i, current_batch - 1);
-        }
-        model_row += stream->isContextStream() ? 1 : current_batch;
-    }
-    active_numerical_model_rows_ = model_row;
-    auto map_device = slot->row_map_device.narrow(0, 0, rows);
-    map_device.copy_(slot->row_map_host.narrow(0, 0, rows), /*non_blocking=*/true);
-    return map_device;
-}
-
-void NormalExecutor::applyNumericalStatusGate(const StreamGroups&       stream_groups,
-                                              SamplerInputs&             sampler_inputs,
-                                              const NumericalStatusView& status) {
-    auto stream = cuda_graph::graphGetCurrentStream();
-    if (sampler_inputs.logits.size(0) == 0) {
-        // Empty eager batches have no consumer; T20-a's producer lease remains
-        // valid because no device read is enqueued on this path.
-        sampler_inputs.numerical_failure_mask = torch::empty({0}, torch::TensorOptions().dtype(torch::kBool).device(torch::kCUDA));
-        return;
-    }
-    status.waitReady(stream);
-    sampler_inputs.numerical_failure_mask = ensureNumericalFailureWorkspace(sampler_inputs.logits.size(0));
-    sampler_inputs.numerical_failure_lease = std::make_shared<NumericalGateLease>(active_numerical_gate_slot_);
-    auto row_map = ensureNumericalRowMap(stream_groups);
-    RTP_LLM_CHECK_WITH_INFO(status.scope != NumericalStatusScope::ORIGIN_ROW
-                                || status.live_rows == active_numerical_model_rows_,
-                            "numerical status rows=%ld do not match gathered model rows=%ld",
-                            status.live_rows,
-                            active_numerical_model_rows_);
-    runtimeNumericalStatusGate(sampler_inputs.logits,
-                               status,
-                               row_map,
-                               sampler_inputs.numerical_failure_mask);
-    status.markConsumed(stream);
 }
 
 }  // namespace rtp_llm

@@ -13,7 +13,6 @@ from typing import Dict, List, Optional, Sequence
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
 from rtp_llm.models_py.modules import RMSNorm
 from rtp_llm.models_py.modules.base.common.embedding import EmbeddingTorch
 from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
@@ -526,7 +525,6 @@ class V4Transformer(nn.Module):
         input_ids: torch.Tensor,  # [T_total] int (== [B] for q_len=1)
         attn_metadata: "DSv4DecodeAttnMetadata",  # type: ignore[name-defined]
         kv_cache=None,
-        numerical_status=None,
     ) -> torch.Tensor:
         """Decode-only forward.
 
@@ -547,7 +545,6 @@ class V4Transformer(nn.Module):
                 attn_metadata,
                 input_ids_2d,
                 kv_cache=kv_cache,
-                numerical_status=numerical_status,
             )
         h = self._hc_head_reduce(h)  # [B, q_len, dim]
         # Framework RMSNorm wants 2D — flatten to [T_total, dim] and
@@ -563,7 +560,6 @@ class V4Transformer(nn.Module):
         kv_cache=None,
         block_tables_by_type=None,
         sequence_lengths: Optional[torch.Tensor] = None,
-        numerical_status=None,
     ) -> torch.Tensor:
         """Standalone forward.
 
@@ -672,7 +668,6 @@ class V4Transformer(nn.Module):
                 cu_seqlens,
                 kv_cache=kv_cache,
                 block_tables_by_type=block_tables_by_type,
-                numerical_status=numerical_status,
             )
             if _rt_on:
                 _rt.record(f"layer{li:02d}_out", h_flat)

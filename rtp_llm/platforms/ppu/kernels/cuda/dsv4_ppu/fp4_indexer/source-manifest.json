@@ -1,20 +1,93 @@
 {
-  "csrc/deepseek_v4/topk_prefill_bf16.cuh": "2e25fd0af1cbc1247bf1dc267f9a6769b8699d16758cade1d39d83988ce02624",
-  "include/sgl_kernel/warp.cuh": "3254a491733811043f923423ea7eefec2d2697311bb520a0553ef3cdb177db57",
-  "include/sgl_kernel/utils.cuh": "6dcb47c69906cb32e1d014db21b459ff27e11408ad81449f6fdc5b86eac14582",
-  "include/sgl_kernel/utils.h": "d0e4bf235e004b2cc61924b377f57e876ae6988bfadc61c6f0422306f4f17aac",
-  "include/sgl_kernel/source_location.h": "cd43da52aa20deafdffb0973bed1b101f634c728362aeef06959f0f5700f4973",
-  "include/sgl_kernel/math.cuh": "7679e20835c478de20826d9d5266bbf41c22099275ed01f44909a856eca25da1",
-  "include/sgl_kernel/type.cuh": "f70277be81e61c2737875067a0d91f7ca2c7e2f806be1353319273c55a93e6a5",
-  "include/sgl_kernel/vec.cuh": "eba7c4cc8ca2e778fcaf37edb309682b46be3f99a3a4933abf848fad9ad1c880",
-  "include/sgl_kernel/tensor.h": "b417f6ac51acd6f21a56b00338a4007781b237c4145dd37e87cd8dbb76060479",
-  "csrc/deepseek_v4/c4_v2.cuh": "c0cba89531db057edb7e4d1ceb8d4bfdff5251e622b8edcb772401220a96bc91",
-  "include/sgl_kernel/deepseek_v4/compress_v2.cuh": "a3d2a13e2ffa149ee5ef8cc4d787bd52f9057cd6e2f0017d4c846b40db4bcf92",
-  "include/sgl_kernel/tile.cuh": "3702d86f89e98b3a726b1e7afd1a8cf251bedbad6899bb97eab1f8ac6f5db677",
-  "csrc/deepseek_v4/fused_norm_rope_v2.cuh": "4b559a85ac579f6b4945d0180ccedd96450e3690774d586c17dd21bf43f653cb",
-  "include/sgl_kernel/deepseek_v4/fp8_utils.cuh": "811b3c3ebe55566ed0c7ad255a698a481a0bd025089946b1ef8603c96f888a58",
-  "csrc/deepseek_v4/main_norm_rope.cuh": "3250d52fbc6ed5f46353c3d3550fbbb8c8fdb7bbb5637047e24033d3ac32f193",
-  "csrc/deepseek_v4/topk_v1.cuh": "3e5a87c4aabb23c807a448d7e2760a6ec7609260e97befc5e3107fcb9f400362",
-  "csrc/elementwise/silu_and_mul_masked_post_quant_mxfp4.cuh": "093f2e2cfd2a63a8bb495760a8ce83a847635355fd0093fa506bc02d6a6995f5",
-  "include/sgl_kernel/runtime.cuh": "7ed0f8ae9cac6a125d1e435e3ab628115a7f3179c64f308536c38db37a418542"
+  "schema_version": 2,
+  "upstream": {
+    "repository": "https://github.com/sgl-project/sglang",
+    "snapshot": "PPU qualification checkout collected 2026-09-08",
+    "rtp_source_commit": "f396f8005e95ded47d4947ef5654705aa29c9d3f"
+  },
+  "originals": {
+    "csrc/deepseek_v4/topk_prefill_bf16.cuh": {
+      "sha256": "2e25fd0af1cbc1247bf1dc267f9a6769b8699d16758cade1d39d83988ce02624",
+      "runtime_path": "compat/topk_prefill_bf16.cuh",
+      "patch": "patches/topk_prefill_bf16.cuh.patch"
+    },
+    "include/sgl_kernel/warp.cuh": {
+      "sha256": "3254a491733811043f923423ea7eefec2d2697311bb520a0553ef3cdb177db57"
+    },
+    "include/sgl_kernel/utils.cuh": {
+      "sha256": "6dcb47c69906cb32e1d014db21b459ff27e11408ad81449f6fdc5b86eac14582"
+    },
+    "include/sgl_kernel/utils.h": {
+      "sha256": "d0e4bf235e004b2cc61924b377f57e876ae6988bfadc61c6f0422306f4f17aac"
+    },
+    "include/sgl_kernel/source_location.h": {
+      "sha256": "cd43da52aa20deafdffb0973bed1b101f634c728362aeef06959f0f5700f4973"
+    },
+    "include/sgl_kernel/math.cuh": {
+      "sha256": "7679e20835c478de20826d9d5266bbf41c22099275ed01f44909a856eca25da1"
+    },
+    "include/sgl_kernel/type.cuh": {
+      "sha256": "f70277be81e61c2737875067a0d91f7ca2c7e2f806be1353319273c55a93e6a5"
+    },
+    "include/sgl_kernel/vec.cuh": {
+      "sha256": "eba7c4cc8ca2e778fcaf37edb309682b46be3f99a3a4933abf848fad9ad1c880"
+    },
+    "include/sgl_kernel/tensor.h": {
+      "sha256": "b417f6ac51acd6f21a56b00338a4007781b237c4145dd37e87cd8dbb76060479",
+      "runtime_path": "compat/sgl_kernel/tensor.h",
+      "patch": "patches/tensor.h.patch"
+    },
+    "csrc/deepseek_v4/c4_v2.cuh": {
+      "sha256": "c0cba89531db057edb7e4d1ceb8d4bfdff5251e622b8edcb772401220a96bc91"
+    },
+    "include/sgl_kernel/deepseek_v4/compress_v2.cuh": {
+      "sha256": "a3d2a13e2ffa149ee5ef8cc4d787bd52f9057cd6e2f0017d4c846b40db4bcf92"
+    },
+    "include/sgl_kernel/tile.cuh": {
+      "sha256": "3702d86f89e98b3a726b1e7afd1a8cf251bedbad6899bb97eab1f8ac6f5db677"
+    },
+    "csrc/deepseek_v4/fused_norm_rope_v2.cuh": {
+      "sha256": "4b559a85ac579f6b4945d0180ccedd96450e3690774d586c17dd21bf43f653cb",
+      "runtime_path": "compat/fused_norm_rope_v2.cuh",
+      "patch": "patches/fused_norm_rope_v2.cuh.patch"
+    },
+    "include/sgl_kernel/deepseek_v4/fp8_utils.cuh": {
+      "sha256": "811b3c3ebe55566ed0c7ad255a698a481a0bd025089946b1ef8603c96f888a58"
+    },
+    "csrc/deepseek_v4/main_norm_rope.cuh": {
+      "sha256": "3250d52fbc6ed5f46353c3d3550fbbb8c8fdb7bbb5637047e24033d3ac32f193"
+    },
+    "csrc/deepseek_v4/topk_v1.cuh": {
+      "sha256": "3e5a87c4aabb23c807a448d7e2760a6ec7609260e97befc5e3107fcb9f400362",
+      "runtime_path": "compat/topk_decode_v1.cuh",
+      "patch": "patches/topk_decode_v1.cuh.patch"
+    },
+    "csrc/elementwise/silu_and_mul_masked_post_quant_mxfp4.cuh": {
+      "sha256": "093f2e2cfd2a63a8bb495760a8ce83a847635355fd0093fa506bc02d6a6995f5"
+    },
+    "include/sgl_kernel/runtime.cuh": {
+      "sha256": "7ed0f8ae9cac6a125d1e435e3ab628115a7f3179c64f308536c38db37a418542"
+    }
+  },
+  "sources": {
+    "compat/c4_decode_v2.cuh": "aa3169a3aac3c7585694adb53c6d99a4d43a561dc158b055b91ab8d5966239b8",
+    "compat/fused_norm_rope_v2.cuh": "deeb83814c3ccdf57013374cf4159855fc207aeab611769f0042c00266bcc7c7",
+    "compat/sgl_kernel/tensor.h": "f971fbc9e6740f4d066764e8c88a4d8bacada5a4c607dc1170bc847517f1fcb0",
+    "compat/topk_decode_v1.cuh": "287244449818a9bf2dd06e360d79664a1f2fd517cf4da51678f3da72cff74e04",
+    "compat/topk_prefill_bf16.cuh": "15e951030adf10099fb171a22bb7c46f5cf9936bb6b4caee9bdc1a0918f675d7",
+    "csrc/deepseek_v4/c4_v2.cuh": "c0cba89531db057edb7e4d1ceb8d4bfdff5251e622b8edcb772401220a96bc91",
+    "csrc/deepseek_v4/main_norm_rope.cuh": "3250d52fbc6ed5f46353c3d3550fbbb8c8fdb7bbb5637047e24033d3ac32f193",
+    "csrc/elementwise/silu_and_mul_masked_post_quant_mxfp4.cuh": "093f2e2cfd2a63a8bb495760a8ce83a847635355fd0093fa506bc02d6a6995f5",
+    "include/sgl_kernel/deepseek_v4/compress_v2.cuh": "a3d2a13e2ffa149ee5ef8cc4d787bd52f9057cd6e2f0017d4c846b40db4bcf92",
+    "include/sgl_kernel/deepseek_v4/fp8_utils.cuh": "811b3c3ebe55566ed0c7ad255a698a481a0bd025089946b1ef8603c96f888a58",
+    "include/sgl_kernel/math.cuh": "7679e20835c478de20826d9d5266bbf41c22099275ed01f44909a856eca25da1",
+    "include/sgl_kernel/runtime.cuh": "7ed0f8ae9cac6a125d1e435e3ab628115a7f3179c64f308536c38db37a418542",
+    "include/sgl_kernel/source_location.h": "cd43da52aa20deafdffb0973bed1b101f634c728362aeef06959f0f5700f4973",
+    "include/sgl_kernel/tile.cuh": "3702d86f89e98b3a726b1e7afd1a8cf251bedbad6899bb97eab1f8ac6f5db677",
+    "include/sgl_kernel/type.cuh": "f70277be81e61c2737875067a0d91f7ca2c7e2f806be1353319273c55a93e6a5",
+    "include/sgl_kernel/utils.cuh": "6dcb47c69906cb32e1d014db21b459ff27e11408ad81449f6fdc5b86eac14582",
+    "include/sgl_kernel/utils.h": "d0e4bf235e004b2cc61924b377f57e876ae6988bfadc61c6f0422306f4f17aac",
+    "include/sgl_kernel/vec.cuh": "eba7c4cc8ca2e778fcaf37edb309682b46be3f99a3a4933abf848fad9ad1c880",
+    "include/sgl_kernel/warp.cuh": "3254a491733811043f923423ea7eefec2d2697311bb520a0553ef3cdb177db57"
+  }
 }

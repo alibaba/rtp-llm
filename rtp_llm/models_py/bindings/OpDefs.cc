@@ -22,18 +22,6 @@ void registerCacheGroupType(pybind11::module& m) {
 }  // namespace
 
 void registerPyOpDefs(pybind11::module& m) {
-    pybind11::enum_<rtp_llm::NumericalStatusScope>(m, "NumericalStatusScope")
-        .value("NONE", rtp_llm::NumericalStatusScope::NONE)
-        .value("BATCH", rtp_llm::NumericalStatusScope::BATCH)
-        .value("ORIGIN_ROW", rtp_llm::NumericalStatusScope::ORIGIN_ROW);
-
-    pybind11::class_<rtp_llm::NumericalStatusView>(m, "NumericalStatusView")
-        .def(pybind11::init<>())
-        .def_readonly("values", &rtp_llm::NumericalStatusView::values)
-        .def_readonly("live_rows", &rtp_llm::NumericalStatusView::live_rows)
-        .def_readonly("scope", &rtp_llm::NumericalStatusView::scope)
-        .def_readonly("epoch", &rtp_llm::NumericalStatusView::epoch);
-
     registerCacheGroupType(m);
 
     pybind11::class_<LayerKVCache>(m, "LayerKVCache")
@@ -276,14 +264,12 @@ void registerPyOpDefs(pybind11::module& m) {
             },
             "A PyAttentionInputs value or a tag-to-PyAttentionInputs mapping")
         .def_readwrite(
-            "bert_embedding_inputs", &PyModelInputs::bert_embedding_inputs, "BERT embedding inputs structure")
-        .def_readonly("numerical_status", &PyModelInputs::numerical_status, "Device numerical status view");
+            "bert_embedding_inputs", &PyModelInputs::bert_embedding_inputs, "BERT embedding inputs structure");
 
     pybind11::class_<PyModelOutputs>(m, "PyModelOutputs")
         .def(pybind11::init<>(), "Default constructor")
         .def(pybind11::init<torch::Tensor>(), pybind11::arg("hidden_states"), "Initialize with hidden states tensor")
-        .def_readwrite("hidden_states", &PyModelOutputs::hidden_states, "Hidden states output tensor")
-        .def_readonly("numerical_status", &PyModelOutputs::numerical_status, "Device numerical status view");
+        .def_readwrite("hidden_states", &PyModelOutputs::hidden_states, "Hidden states output tensor");
 }
 
 }  // namespace torch_ext

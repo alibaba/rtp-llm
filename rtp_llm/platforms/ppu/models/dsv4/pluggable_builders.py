@@ -31,31 +31,6 @@ def build_decode_model(*, build_ctx, request, **kwargs):
     )
 
 
-def build_attention(*, build_ctx, request, **kwargs):
-    return baseline.build_attention(build_ctx=build_ctx, request=request, **kwargs)
-
-
-def build_moe(*, build_ctx, request, platform_provider, **kwargs):
-    from .ppu_grouped_fp4 import PpuGroupedFP4Strategy
-
-    if kwargs.get("tp_size") != 4 or kwargs.get("ep_size") != 1:
-        raise ValueError("PPU grouped MoE requires TP4/EP1")
-    return baseline.build_moe(
-        build_ctx=build_ctx,
-        request=request,
-        platform_provider=platform_provider,
-        execution_options=build_ctx.selection.model_metadata["execution_options"],
-        strategy_type=PpuGroupedFP4Strategy,
-        strategy_kwargs={
-            "sglang_moe": platform_provider._bool("DSV4_PPU_SGLANG_MOE", False),
-            "fused_scale_gather": platform_provider._bool(
-                "DSV4_MOE_SCALE_GATHER_FUSED", False
-            ),
-        },
-        **kwargs,
-    )
-
-
 def build_decode_moe(*, build_ctx, request, platform_provider, **kwargs):
     from .ppu_deepep_fp4 import PpuDeepEPFP4Strategy
 
@@ -84,15 +59,6 @@ def build_moe_tp(*, build_ctx, request, **kwargs):
 
     baseline.validate_arguments(build_ctx, request, kwargs)
     return PpuTPMoE(tp_rank=build_ctx.selection.platform.local_rank, **kwargs)
-
-
-def build_attention_inverse_rope(*, build_ctx, request, platform_provider, **kwargs):
-    from .ppu_rope_attention import PpuRopeAttention
-
-    baseline.validate_arguments(build_ctx, request, kwargs)
-    if platform_provider is None:
-        raise ValueError("PPU attention requires an instance-owned operator adapter")
-    return platform_provider.build_attention(PpuRopeAttention, **kwargs)
 
 
 def build_attention_fp4(*, build_ctx, request, platform_provider, **kwargs):

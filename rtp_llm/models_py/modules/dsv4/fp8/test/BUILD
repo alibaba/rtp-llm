@@ -71,7 +71,6 @@ _DSV4_FP8_CPU_TESTS = [
     "test_indexer_forward_with_pending_nested",
     "test_pool_slot_mapping_contract",
     "test_prefill_mixed_layer_cache_store",
-    "test_rich_contract",
 ]
 
 py_test(
@@ -88,6 +87,11 @@ py_test(
     srcs = ["test_fp8_sparse_attn_decode_op.py"],
     deps = _DSV4_FP8_TEST_DEPS,
     target_compatible_with = _DSV4_CUDA13_ONLY,
+)
+
+alias(
+    name = "test_rich_contract",
+    actual = ":test_rich_contract_source_only",
 )
 
 py_test(

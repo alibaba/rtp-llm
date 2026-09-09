@@ -27,12 +27,10 @@ stashed on each module via ``_cp_ctx`` before ``forward`` runs.  A
 single-rank path unchanged.
 """
 
-import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional, Tuple, Union
 
 import torch
-
 from rtp_llm.models_py.distributed import collective_torch
 from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
 from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
@@ -44,9 +42,6 @@ if TYPE_CHECKING:
     from rtp_llm.models_py.modules.dsv4.prefill_workspace import PrefillWorkspace
 
 _DEFAULT_CP_PROFILE_NAME = "dsv4.cp.all_gather"
-_FORCE_FRESH_NONPREFIX_RESTORE = (
-    os.environ.get("DSV4_CP_FORCE_FRESH_NONPREFIX_RESTORE", "0") == "1"
-)
 
 
 # CP gather roles — which workspace buffer backs a given compressor gather.
@@ -585,7 +580,7 @@ def _cp_restore_gathered_full_2d(
     if cp_ctx.unpad_restore_is_prefix:
         full = gathered[: cp_ctx.seq_len_full]  # [seq_len_full, H], view
     else:
-        if out is not None and not _FORCE_FRESH_NONPREFIX_RESTORE:
+        if out is not None:
             expected_shape = (cp_ctx.seq_len_full, gathered.size(1))
             if tuple(out.shape) != expected_shape:
                 raise ValueError(
@@ -1272,9 +1267,7 @@ def build_kv_allgather_restore_indices(
         if batch_size == 1 and total_kv_len is not None:
             total_local = cp_padded_local_kv_len(total_real, cp_size, block_size)
         else:
-            local_per_req = cp_padded_local_kv_lens(
-                total_kv_lens, cp_size, block_size
-            )
+            local_per_req = cp_padded_local_kv_lens(total_kv_lens, cp_size, block_size)
             total_local = int(local_per_req.sum().item())
     else:
         total_local = int(total_local_kv)
@@ -1288,9 +1281,7 @@ def build_kv_allgather_restore_indices(
         cu_offsets = None
     else:
         local_per_req = cp_padded_local_kv_lens(total_kv_lens, cp_size, block_size)
-        cu_local_per_req = torch.zeros(
-            batch_size + 1, dtype=torch.int64, device=device
-        )
+        cu_local_per_req = torch.zeros(batch_size + 1, dtype=torch.int64, device=device)
         cu_local_per_req[1:] = torch.cumsum(local_per_req, dim=0)
         req_ids = torch.repeat_interleave(
             torch.arange(batch_size, dtype=torch.int64, device=device),
@@ -1315,8 +1306,7 @@ def build_kv_allgather_restore_indices(
         restore = restore + cu_offsets
     restore = restore.contiguous()
     assert int(restore.numel()) == total_real, (
-        f"restore size {int(restore.numel())} != expected total_kv_len "
-        f"{total_real}"
+        f"restore size {int(restore.numel())} != expected total_kv_len " f"{total_real}"
     )
     return restore
 

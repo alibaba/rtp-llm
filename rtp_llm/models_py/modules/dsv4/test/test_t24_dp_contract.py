@@ -7,13 +7,11 @@ test is not DP8 acceptance.
 
 from __future__ import annotations
 
-import inspect
 import os
 import unittest
 from unittest import mock
 
 import torch
-
 from rtp_llm.models_py.modules.dsv4.decode.decode_fmha_impl import (
     DSv4DecodeFmhaImpl,
     DSv4DecodeFmhaImplConfig,
@@ -72,25 +70,29 @@ class T24StrategyAndGraphContractTest(unittest.TestCase):
         # DP replication is outside this API. The contract is structural:
         # MoeCfg has no dp field, so DP cannot silently select a strategy.
         self.assertNotIn("dp_size", MoeCfg.__dataclass_fields__)
-        with mock.patch.object(GroupedFP4Strategy, "can_handle", return_value=False), mock.patch.object(
-            MegaMoEStrategy, "can_handle", return_value=False
-        ):
+        with mock.patch.object(
+            GroupedFP4Strategy, "can_handle", return_value=False
+        ), mock.patch.object(MegaMoEStrategy, "can_handle", return_value=False):
             self.assertIs(select_strategy(_cfg(1)), LocalLoopStrategy)
 
     def test_ep_gt1_without_mega_fails_closed_for_each_ep_size(self):
         with mock.patch.object(MegaMoEStrategy, "can_handle", return_value=False):
             for ep_size in (2, 4, 8):
                 with self.subTest(ep_size=ep_size):
-                    with self.assertRaisesRegex(RuntimeError, "requires MegaMoEStrategy"):
+                    with self.assertRaisesRegex(
+                        RuntimeError, "requires MegaMoEStrategy"
+                    ):
                         select_strategy(_cfg(ep_size))
 
     def test_deepep_is_never_an_automatic_ep_strategy(self):
         # Even if a test double says DeepEP can handle the config, the policy
         # rejects it as an EP>1 forced route and auto-pick still requires Mega.
-        with mock.patch.object(DeepEPStrategy, "can_handle", return_value=True), mock.patch.object(
-            MegaMoEStrategy, "can_handle", return_value=False
-        ):
-            with self.assertRaisesRegex(RuntimeError, "fallback to DeepEP/LocalLoop is disabled"):
+        with mock.patch.object(
+            DeepEPStrategy, "can_handle", return_value=True
+        ), mock.patch.object(MegaMoEStrategy, "can_handle", return_value=False):
+            with self.assertRaisesRegex(
+                RuntimeError, "fallback to DeepEP/LocalLoop is disabled"
+            ):
                 select_strategy(_cfg(4))
             with self.assertRaisesRegex(RuntimeError, "bypass Mega"):
                 select_strategy(_cfg(4), forced="deepep")
@@ -100,8 +102,12 @@ class T24StrategyAndGraphContractTest(unittest.TestCase):
         saved_cache = dict(indexer._decode_topk_workspace_cache)
         try:
             indexer._decode_topk_workspace_cache.clear()
-            with mock.patch.object(torch.cuda, "is_current_stream_capturing", return_value=True):
-                with self.assertRaisesRegex(RuntimeError, "warmed before graph capture"):
+            with mock.patch.object(
+                torch.cuda, "is_current_stream_capturing", return_value=True
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError, "warmed before graph capture"
+                ):
                     indexer._get_decode_topk_workspace(torch.device("cuda"))
         finally:
             indexer._decode_topk_workspace_cache.clear()
@@ -117,26 +123,39 @@ class T24StrategyAndGraphContractTest(unittest.TestCase):
             compress_ratios=[4, 128],
             index_topk=4,
         )
-        instances = [DSv4DecodeFmhaImpl(cfg, device=torch.device("cpu")) for _ in range(4)]
+        instances = [
+            DSv4DecodeFmhaImpl(cfg, device=torch.device("cpu")) for _ in range(4)
+        ]
         pointers = [impl.metadata.start_pos.data_ptr() for impl in instances]
         self.assertEqual(len(set(pointers)), len(pointers))
         before = [impl.metadata.start_pos.clone() for impl in instances]
         instances[2].prepare_cuda_graph(
-            type("Attn", (), {"sequence_lengths": torch.tensor([11, 13], dtype=torch.int32)})()
+            type(
+                "Attn",
+                (),
+                {"sequence_lengths": torch.tensor([11, 13], dtype=torch.int32)},
+            )()
         )
-        self.assertTrue(torch.equal(instances[2].metadata.start_pos, torch.tensor([11, 13], dtype=torch.int32)))
+        self.assertTrue(
+            torch.equal(
+                instances[2].metadata.start_pos,
+                torch.tensor([11, 13], dtype=torch.int32),
+            )
+        )
+        with mock.patch.object(
+            instances[2], "prepare", wraps=instances[2].prepare
+        ) as prepare:
+            instances[2].prepare_cuda_graph(
+                type(
+                    "Attn",
+                    (),
+                    {"sequence_lengths": torch.tensor([11, 13], dtype=torch.int32)},
+                )()
+            )
+            self.assertTrue(prepare.call_args.kwargs["forbid_realloc"])
         for i, impl in enumerate(instances):
             if i != 2:
                 self.assertTrue(torch.equal(impl.metadata.start_pos, before[i]))
-
-    def test_decode_dispatch_exposes_status_abi(self):
-        # ABI-only guard. This deliberately does not claim runtime forwarding,
-        # producer ownership, or DP reduction in a host-only contract test.
-        from rtp_llm.models_py.modules.dsv4.decode import forward
-
-        params = inspect.signature(forward.forward_decode).parameters
-        self.assertIn("numerical_status", params)
-        self.assertIn("numerical_status", inspect.signature(forward.forward_layers).parameters)
 
 
 if __name__ == "__main__":

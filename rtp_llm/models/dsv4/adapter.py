@@ -179,7 +179,7 @@ class Dsv4ModelAdapter:
             device_resource_config=owner.device_resource_config,
         )
 
-    def validate_resources(self, model, init_resource, context):
+    def validate_resources(self, model, init_resource, context, *, log_success=True):
         metadata = context.selection.model_metadata
         validate_runtime_role(
             metadata,
@@ -196,19 +196,20 @@ class Dsv4ModelAdapter:
             metadata,
             device=context.selection.platform.device_string,
         )
-        logging.info(
-            "module_dispatch resources: %s",
-            canonical_json(
-                {
-                    "model_instance_id": context.model_instance_id,
-                    "protocol_digest": context.protocol_digest,
-                    **record,
-                }
-            ),
-        )
+        if log_success:
+            logging.info(
+                "module_dispatch resources: %s",
+                canonical_json(
+                    {
+                        "model_instance_id": context.model_instance_id,
+                        "protocol_digest": context.protocol_digest,
+                        **record,
+                    }
+                ),
+            )
 
     def validate_initialized_model(self, model, init_resource, context):
-        self.validate_resources(model, init_resource, context)
+        self.validate_resources(model, init_resource, context, log_success=False)
         if (model.kv_cache is None) != (init_resource.kv_cache is None):
             raise RuntimeError("V4 initialize did not bind its engine resources")
         if model.kv_cache is None:

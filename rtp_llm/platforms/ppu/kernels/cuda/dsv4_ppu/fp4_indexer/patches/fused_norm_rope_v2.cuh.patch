@@ -1,0 +1,28 @@
+--- csrc/deepseek_v4/fused_norm_rope_v2.cuh
++++ compat/fused_norm_rope_v2.cuh
+@@ -70 +70,2 @@
+-  using enum ForwardMode;
++  constexpr auto CompressExtend = ForwardMode::CompressExtend;
++    constexpr auto CompressDecode = ForwardMode::CompressDecode;
+@@ -106,0 +108 @@
++  if (out_loc < 0) return;
+@@ -225 +227,2 @@
+-  using enum ForwardMode;
++  constexpr auto CompressExtend = ForwardMode::CompressExtend;
++    constexpr auto CompressDecode = ForwardMode::CompressDecode;
+@@ -260,0 +264 @@
++  if (out_loc < 0) return;
+@@ -374 +378,2 @@
+-  using enum ForwardMode;
++  constexpr auto CompressExtend = ForwardMode::CompressExtend;
++    constexpr auto CompressDecode = ForwardMode::CompressDecode;
+@@ -411,0 +417 @@
++  if (out_loc < 0) return;
+@@ -526 +532,2 @@
+-    using enum ForwardMode;
++    constexpr auto CompressExtend = ForwardMode::CompressExtend;
++    constexpr auto CompressDecode = ForwardMode::CompressDecode;
+@@ -599 +606,2 @@
+-    using enum ForwardMode;
++    constexpr auto CompressExtend = ForwardMode::CompressExtend;
++    constexpr auto CompressDecode = ForwardMode::CompressDecode;

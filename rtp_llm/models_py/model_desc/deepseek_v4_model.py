@@ -36,7 +36,6 @@ from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
 
 import torch
-
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models.dsv4.specs import forward_capabilities, validate_forward_phase
@@ -839,7 +838,6 @@ class DeepSeekV4Model(GptModelBase):
             # same (H, D, ratio, T) but with mask. We compile both APPLY_MASK
             # variants here.
             import torch as _torch
-
             from rtp_llm.models_py.modules.dsv4._indexer_score_triton import (
                 v4_indexer_score as _v4_idx,
             )
@@ -1418,7 +1416,6 @@ class DeepSeekV4Model(GptModelBase):
                 inputs,
                 fmha_impl,
                 prepare_hidden_fn=prep_decode,
-                numerical_status=inputs.numerical_status,
             )
         elif attn.is_prefill:
             return forward_prefill(
@@ -1427,7 +1424,6 @@ class DeepSeekV4Model(GptModelBase):
                 self.parallelism_config,
                 inputs,
                 prepare_hidden_fn=prep_prefill,
-                numerical_status=inputs.numerical_status,
             )
         else:
             return forward_decode(
@@ -1437,5 +1433,4 @@ class DeepSeekV4Model(GptModelBase):
                 inputs,
                 fmha_impl,
                 prepare_hidden_fn=prep_decode,
-                numerical_status=inputs.numerical_status,
             )

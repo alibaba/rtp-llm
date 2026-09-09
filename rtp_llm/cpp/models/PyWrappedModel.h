@@ -46,7 +46,6 @@ inline void syncCudaGraphCaptureRanks(const ParallelismConfig& parallelism_confi
 }
 
 class KVCacheManager;  // Forward declaration
-class NumericalStatusCompletionRing;
 
 // Fixed construction-time role of a DSpARK Python-model wrapper. This is not
 // per-call phase metadata: propose and commit own different model wrappers and
@@ -81,25 +80,6 @@ public:
     std::string     waitCacheStorePublication() override;
 
 private:
-    class NumericalStatusSourceFenceGuard {
-    public:
-        explicit NumericalStatusSourceFenceGuard(PyWrappedModel* owner): owner_(owner) {}
-        ~NumericalStatusSourceFenceGuard();
-
-        void arm(bool used_cuda_graph) {
-            used_cuda_graph_ = used_cuda_graph;
-            active_          = true;
-        }
-        void dismiss() {
-            active_ = false;
-        }
-
-    private:
-        PyWrappedModel* owner_{nullptr};
-        bool            used_cuda_graph_{false};
-        bool            active_{false};
-    };
-
     std::optional<PyCacheStoreInputs> prepareWriteCacheParams(const GptModelInputs& inputs);
 
 private:
@@ -115,16 +95,6 @@ private:
                                                           bool                  skip_final_layernorm,
                                                           size_t                num_valid_tokens = -1);
     torch::Tensor                   tensorHoldHostAndToCuda(const torch::Tensor& tensor);
-    void                            configureNumericalStatus(const py::object& py_instance, int speculative_steps);
-    NumericalStatusView             prepareEagerNumericalStatus(int64_t live_rows);
-    NumericalStatusView             snapshotNumericalStatus(const NumericalStatusView& source);
-    GptModelOutputs                 attachNumericalStatus(GptModelOutputs          outputs,
-                                                          const NumericalStatusView& source,
-                                                          bool                     used_cuda_graph,
-                                                          NumericalStatusSourceFenceGuard* fence_guard = nullptr);
-    void                            recordNumericalStatusSourceFence(bool used_cuda_graph);
-    void                            waitEagerNumericalStatusSourceFence();
-    void                            recordEagerNumericalStatusSourceFence();
 
     // Methods absorbed from GptModel
     torch::Tensor   tpSyncEmbeddingOrLogits(const torch::Tensor& input);
@@ -172,14 +142,6 @@ private:
     bool       has_mtp_hidden_buffer_{false};
     bool       enable_device_perf_{false};
     bool       check_nan_{false};
-
-    NumericalStatusScope                           numerical_status_scope_{NumericalStatusScope::NONE};
-    torch::Tensor                                  eager_numerical_status_;
-    std::shared_ptr<NumericalStatusCompletionRing> numerical_status_ring_;
-    std::atomic<uint64_t>                          numerical_status_epoch_{0};
-    std::shared_ptr<torch::Event>                   eager_numerical_status_source_fence_;
-    bool                                            eager_numerical_status_source_fence_recorded_{false};
-    std::vector<std::pair<torch::Tensor, std::shared_ptr<torch::Event>>> retired_eager_numerical_status_;
 
     std::unique_ptr<IContextParallelProcessor> context_parallel_processor_{nullptr};
     std::shared_ptr<CacheStoreAsyncWriter>     cache_store_async_writer_;
@@ -286,7 +248,6 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         RTP_LLM_LOG_ERROR("Python model initialize failed:\n%s", e.what());
         throw;
     }
-    configureNumericalStatus(py_model_, params.sp_config.gen_num_per_cycle);
     const char* forward_method     = dspark_model_role_ == DSparkModelRole::PROPOSE ? "forward_propose" :
                                      dspark_model_role_ == DSparkModelRole::COMMIT  ? "forward_commit" :
                                                                                       "forward";
@@ -346,7 +307,6 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         graph_params.position_id_len_factor = (description_.attention_conf.rope_config.style == RopeStyle::Mrope) ?
                                                   description_.attention_conf.rope_config.index_factor :
                                                   0;
-        graph_params.numerical_status_scope = numerical_status_scope_;
 
         // clang-format off
         // Decision table for num_tokens_per_bs:

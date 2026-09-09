@@ -1,0 +1,5 @@
+--- csrc/deepseek_v4/topk_prefill_bf16.cuh
++++ compat/topk_prefill_bf16.cuh
+@@ -1045 +1045 @@
+-    const auto fptr = std::bit_cast<const void*>(f);
++    const auto fptr = reinterpret_cast<const void*>(f);

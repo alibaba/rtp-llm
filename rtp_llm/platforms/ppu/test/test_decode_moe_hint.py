@@ -5,8 +5,8 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
-
 from rtp_llm.models_py.modules.dsv4.moe.strategies.base import MoeCfg
+from rtp_llm.platforms.ppu.models.dsv4 import pluggable_builders
 from rtp_llm.platforms.ppu.models.dsv4.ppu_decode_provider import PpuDecodeProvider
 from rtp_llm.platforms.ppu.models.dsv4.ppu_deepep_fp4 import PpuDeepEPFP4Strategy
 
@@ -28,19 +28,32 @@ class DecodeMoeHintTest(unittest.TestCase):
             max_tokens_per_rank=128,
         )
         options = {
-            "DSV4_PPU_DECODE_MOE_HINT": "batch",
+            "DSV4_PPU_DECODE_MOE_HINT": "capacity",
             "DSV4_PPU_DECODE_MOE_OUTPUT": "bf16",
         }
         provider = PpuDecodeProvider(options)
-        options["DSV4_PPU_DECODE_MOE_HINT"] = "capacity"
+        options["DSV4_PPU_DECODE_MOE_HINT"] = "batch"
         options["DSV4_PPU_DECODE_MOE_OUTPUT"] = "fp32"
 
         def factory(**kwargs):
             return kwargs["strategy_type"](cfg, **kwargs["strategy_kwargs"])
 
-        strategy = provider.build_moe(
-            factory, tp_size=1, ep_size=8, is_decode_role=True
+        context = SimpleNamespace(
+            selection=SimpleNamespace(
+                model_metadata={"execution_options": provider.execution_options}
+            )
         )
+        with patch.object(
+            pluggable_builders.baseline, "build_moe", side_effect=factory
+        ):
+            strategy = pluggable_builders.build_decode_moe(
+                build_ctx=context,
+                request=object(),
+                platform_provider=provider,
+                tp_size=1,
+                ep_size=8,
+                is_decode_role=True,
+            )
         capacity = PpuDeepEPFP4Strategy(cfg)
         self.assertEqual(capacity.output_dtype, torch.float32)
         self.assertEqual(strategy.output_dtype, torch.bfloat16)
@@ -50,7 +63,7 @@ class DecodeMoeHintTest(unittest.TestCase):
         )
         strategy._w13 = strategy._s13 = strategy._w2 = strategy._s2 = object()
         target = "rtp_llm.platforms.ppu.modules.fused_moe.mxfp4_low_latency.low_latency_mxfp4_moe"
-        for batch, expected in ((0, 1), (1, 1), (8, 2), (32, 7), (128, 25)):
+        for batch in (0, 1, 8, 32, 128):
             x = torch.empty((batch, cfg.dim), dtype=torch.bfloat16)
             weights = torch.empty((batch, 6))
             indices = torch.empty((batch, 6), dtype=torch.int64)
@@ -60,7 +73,7 @@ class DecodeMoeHintTest(unittest.TestCase):
             self.assertIs(launch.call_args.args[2], weights)
             self.assertIs(launch.call_args.args[3], indices)
             self.assertEqual(launch.call_args.kwargs["max_dispatch_tokens"], 256)
-            self.assertEqual(launch.call_args.kwargs["expected_m"], expected)
+            self.assertEqual(launch.call_args.kwargs["expected_m"], 24)
             self.assertEqual(launch.call_args.kwargs["output_dtype"], torch.bfloat16)
             self.assertEqual(capacity.expected_rows(batch), 24)
         with self.assertRaisesRegex(ValueError, "MoE hint"):

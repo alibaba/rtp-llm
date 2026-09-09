@@ -75,7 +75,6 @@ cc_library(
         ":type_convert",
         ":common_defines",
         ":tensor_holder",
-        "//rtp_llm/models_py/bindings:numerical_status",
         "//rtp_llm/cpp/models/models_weight:weights_define",
         "//rtp_llm/cpp/model_utils:model_utils",
         "//rtp_llm/cpp/models:stats",

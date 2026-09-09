@@ -4,22 +4,6 @@ from .ppu_provider import M890PDsv4Provider
 
 
 class PpuModuleProvider(M890PDsv4Provider):
-    def build_moe(self, default_factory, *args, **kwargs):
-        from .ppu_grouped_fp4 import PpuGroupedFP4Strategy
-
-        if kwargs.get("tp_size") != 4 or kwargs.get("ep_size") != 1:
-            raise ValueError("The module implementation requires TP4/EP1")
-        return default_factory(
-            *args,
-            platform_provider=self,
-            execution_options=self.execution_options,
-            strategy_type=PpuGroupedFP4Strategy,
-            strategy_kwargs={
-                "sglang_moe": self._bool("DSV4_PPU_SGLANG_MOE", False),
-                "fused_scale_gather": self._bool("DSV4_MOE_SCALE_GATHER_FUSED", False),
-            },
-            **kwargs,
-        )
 
     def build_hc_unit(self, *args, **kwargs):
         from .ppu_hc import PpuHCUnit

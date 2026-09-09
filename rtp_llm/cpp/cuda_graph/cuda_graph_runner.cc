@@ -20,31 +20,6 @@ namespace rtp_llm {
 
 namespace {
 
-struct NumericalStatusIdentity {
-    const c10::TensorImpl* impl{nullptr};
-    const void*            data{nullptr};
-    int64_t                numel{0};
-};
-
-NumericalStatusIdentity captureNumericalStatusIdentity(const NumericalStatusView& status) {
-    if (!status.defined()) {
-        return {};
-    }
-    return {status.values.unsafeGetTensorImpl(), status.values.data_ptr(), status.values.numel()};
-}
-
-void checkNumericalStatusIdentity(const NumericalStatusView& status,
-                                  const NumericalStatusIdentity& expected,
-                                  const char*                      phase) {
-    if (expected.impl == nullptr) {
-        return;
-    }
-    RTP_LLM_CHECK_WITH_INFO(status.defined() && status.values.unsafeGetTensorImpl() == expected.impl
-                                && status.values.data_ptr() == expected.data && status.values.numel() == expected.numel,
-                            "numerical status storage identity changed during %s",
-                            phase);
-}
-
 class ScopedEnvFlag {
 public:
     ScopedEnvFlag(const char* name, const char* value): name_(name) {
@@ -215,19 +190,6 @@ void CudaGraphRunner::prepareInputs(const PyModelInputs& inputs, CudaGraphState&
     RTP_LLM_PROFILE_SCOPE("cuda_graph.prepareInputs");
     prepareInputData(inputs, state);
     prepareAttentionInputs(inputs, state, /*skip_forward_event_sync=*/true);
-}
-
-void CudaGraphRunner::initializeNumericalStatus(PyModelInputs& inputs, int64_t capacity) const {
-    inputs.numerical_status.scope     = numerical_status_scope_;
-    inputs.numerical_status.live_rows = numerical_status_scope_ == NumericalStatusScope::NONE ? 0 : capacity;
-    inputs.numerical_status.epoch     = 0;
-    if (numerical_status_scope_ == NumericalStatusScope::NONE) {
-        inputs.numerical_status.values = torch::Tensor();
-        return;
-    }
-    const int64_t storage_size = numerical_status_scope_ == NumericalStatusScope::BATCH ? 1 : capacity;
-    RTP_LLM_CHECK_WITH_INFO(storage_size > 0, "numerical status capacity must be positive, got %ld", storage_size);
-    inputs.numerical_status.values = torch::zeros({storage_size}, options_cuda_int32_);
 }
 
 void CudaGraphRunner::prepareInputData(const PyModelInputs& inputs, CudaGraphState& state) {
@@ -749,11 +711,6 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs& inputs, CudaGraphSt
         outputs.hidden_states =
             graph_instances_[state.current_real_graph_seq_len].mem_hold_.decoder_layer_hidden_states_.slice(
                 0, 0, state.current_seq_len);
-        if (numerical_status_scope_ != NumericalStatusScope::NONE) {
-            outputs.numerical_status =
-                graph_instances_[state.current_real_graph_seq_len].mem_hold_.py_model_inputs_.numerical_status;
-            outputs.numerical_status.live_rows = state.current_seq_len;
-        }
     } else {
         {
             RTP_LLM_PROFILE_SCOPE("cuda_graph.forward(replayDecode)");
@@ -762,11 +719,6 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs& inputs, CudaGraphSt
         outputs.hidden_states =
             graph_instances_[state.current_real_graph_bs].mem_hold_.decoder_layer_hidden_states_.slice(
                 0, 0, state.seq_len_sum);
-        if (numerical_status_scope_ != NumericalStatusScope::NONE) {
-            outputs.numerical_status =
-                graph_instances_[state.current_real_graph_bs].mem_hold_.py_model_inputs_.numerical_status;
-            outputs.numerical_status.live_rows = state.seq_len_sum;
-        }
     }
     // record forward done event
     forward_event_.record(cuda_graph::graphGetCurrentStream());
@@ -1148,7 +1100,6 @@ void CudaGraphRunner::initCapture() {
 
         torch::Tensor output;
         capture_mem_hold_ = CaptureMemoryHold(output, inputs, is_prefill_cuda_graph_mode_);
-        initializeNumericalStatus(capture_mem_hold_.py_model_inputs_, max_num_token_);
         initKernelInternalMemory();
 
         // get real output data type (params already prepared in attn impl __init__/create_params)
@@ -1165,13 +1116,7 @@ void CudaGraphRunner::initCapture() {
             // eager warmup forward. The flag is scoped so real graph capture
             // and replay never contain that synchronization.
             ScopedEnvFlag cuda_graph_warmup("RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD", "1");
-            auto status_identity = captureNumericalStatusIdentity(capture_mem_hold_.py_model_inputs_.numerical_status);
-            if (capture_mem_hold_.py_model_inputs_.numerical_status.defined()) {
-                capture_mem_hold_.py_model_inputs_.numerical_status.values.zero_();
-            }
             py_forward_method_(capture_mem_hold_.py_model_inputs_, attn_pyobj);
-            checkNumericalStatusIdentity(
-                capture_mem_hold_.py_model_inputs_.numerical_status, status_identity, "capture initialization");
         } catch (const py::error_already_set& e) {
             RTP_LLM_LOG_ERROR("initCapture forward for output datatype failed with Python exception: %s", e.what());
             throw;
@@ -1200,13 +1145,9 @@ void CudaGraphRunner::initCapture() {
 }
 
 void CudaGraphRunner::replayGraph(int key) {
-    auto& instance = graph_instances_[key];
     try {
         retryOnceOnTorchCudaOom(
-            [&]() {
-                waitNumericalStatusSourceFence(instance);
-                instance.graph_.replay();
-            },
+            [&]() { graph_instances_[key].graph_.replay(); },
             [&](const std::exception& exception) {
                 RTP_LLM_LOG_WARNING("[GPU Graph Replay] OOM, empty torch cache and retry once: key=%d mode=%s "
                                     "target_verify=%d error=%s",
@@ -1236,27 +1177,6 @@ void CudaGraphRunner::replayGraph(int key) {
     }
 }
 
-void CudaGraphRunner::waitNumericalStatusSourceFence(GraphInstance& instance) {
-    if (numerical_status_scope_ == NumericalStatusScope::NONE
-        || !instance.numerical_status_source_fence_recorded_) {
-        return;
-    }
-    instance.numerical_status_source_fence_->block(cuda_graph::graphGetCurrentStream());
-}
-
-void CudaGraphRunner::recordNumericalStatusSourceFence(const CudaGraphState& state) {
-    if (numerical_status_scope_ == NumericalStatusScope::NONE) {
-        return;
-    }
-    const int key = is_prefill_cuda_graph_mode_ ? state.current_real_graph_seq_len : state.current_real_graph_bs;
-    auto&     instance = graph_instances_.at(key);
-    if (!instance.numerical_status_source_fence_) {
-        instance.numerical_status_source_fence_ = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
-    }
-    instance.numerical_status_source_fence_->record(cuda_graph::graphGetCurrentStream());
-    instance.numerical_status_source_fence_recorded_ = true;
-}
-
 void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
     auto inputs = graph_instances_[key].mem_hold_.py_model_inputs_;
 
@@ -1266,17 +1186,8 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
     RTP_LLM_LOG_INFO("WarmUp for %s %d start.", key_type, key);
     auto attn_pyobj = graph_instances_[key].mem_hold_.attn_pyobj_;
     try {
-        const auto status_identity = captureNumericalStatusIdentity(inputs.numerical_status);
-        if (inputs.numerical_status.defined()) {
-            inputs.numerical_status.values.zero_();
-        }
         py_forward_method_(inputs, attn_pyobj);
-        checkNumericalStatusIdentity(inputs.numerical_status, status_identity, "first graph warmup");
-        if (inputs.numerical_status.defined()) {
-            inputs.numerical_status.values.zero_();
-        }
         py_forward_method_(inputs, attn_pyobj);
-        checkNumericalStatusIdentity(inputs.numerical_status, status_identity, "second graph warmup");
     } catch (const py::error_already_set& e) {
         RTP_LLM_LOG_ERROR("WarmUp forward failed for %s %d: %s", key_type, key, e.what());
         throw;
@@ -1305,15 +1216,8 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
             cuda_graph::GraphNcclCaptureContext capture_ctx;
             CudaGraphCaptureGuard               capture_guard(&capture_ctx);
             try {
-                // This reset is deliberately the first captured tensor operation.
-                // It clears the full fixed-capacity storage on every replay.
-                if (inputs.numerical_status.defined()) {
-                    inputs.numerical_status.values.zero_();
-                }
-                const auto status_identity = captureNumericalStatusIdentity(inputs.numerical_status);
                 auto py_outputs_obj = py_forward_method_(inputs, attn_pyobj);
                 outputs             = py_outputs_obj.cast<PyModelOutputs>();
-                checkNumericalStatusIdentity(inputs.numerical_status, status_identity, "graph capture");
             } catch (const py::error_already_set& e) {
                 RTP_LLM_LOG_ERROR("Capture forward failed for %s %d: %s", key_type, key, e.what());
                 throw;
@@ -1435,11 +1339,9 @@ void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size
 
 CaptureMemoryHold CudaGraphRunner::createCaptureMemoryHold(PyModelInputs& inputs, int tokens_count) {
     // only when prefill or target model score phase, the num_tokens_per_bs_ > 1
-    auto mem_hold = CaptureMemoryHold(capture_mem_hold_.decoder_layer_hidden_states_.slice(0, 0, tokens_count),
-                                      inputs,
-                                      is_prefill_cuda_graph_mode_ || num_tokens_per_bs_ > 1);
-    initializeNumericalStatus(mem_hold.py_model_inputs_, inputs.input_ids.numel());
-    return mem_hold;
+    return CaptureMemoryHold(capture_mem_hold_.decoder_layer_hidden_states_.slice(0, 0, tokens_count),
+                             inputs,
+                             is_prefill_cuda_graph_mode_ || num_tokens_per_bs_ > 1);
 }
 
 CudaGraphRunner* CudaGraphRunner::createForPrefill(py::object py_instance, GraphParams params) {

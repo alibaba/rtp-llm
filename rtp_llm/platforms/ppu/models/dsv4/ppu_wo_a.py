@@ -4,8 +4,6 @@ import os
 from typing import Optional
 
 import torch
-from torch import nn
-
 from rtp_llm.platforms.ppu.modules.linear.fp8_linear import (
     FP8_BLOCK_SIZE,
     _require_dtype,
@@ -13,10 +11,10 @@ from rtp_llm.platforms.ppu.modules.linear.fp8_linear import (
     _resolve_deep_gemm_symbol,
     _validate_fp8_quantization,
     _validate_out,
-    _validate_quant_status,
     checkpoint_ue8m0_scale_to_fp32,
     quantize_ppu_fp8_activation,
 )
+from torch import nn
 
 
 class PpuWoAFp8Linear(nn.Module):
@@ -35,7 +33,6 @@ class PpuWoAFp8Linear(nn.Module):
         groups: int,
         k_local: int,
         sglang_layout: Optional[bool] = None,
-        quant_status: Optional[torch.Tensor] = None,
         quantization: str = "auto",
     ):
         super().__init__()
@@ -84,10 +81,6 @@ class PpuWoAFp8Linear(nn.Module):
                 f"wo_a weight and checkpoint scale must share a device, got "
                 f"{weight.device} and {scale_fp32.device}"
             )
-        if quant_status is not None:
-            _validate_quant_status(
-                quant_status, weight.device, (weight, checkpoint_scale)
-            )
 
         self.groups = groups
         self.rank = rank
@@ -97,7 +90,6 @@ class PpuWoAFp8Linear(nn.Module):
             weight.view(groups, rank, k_local),
             persistent=False,
         )
-        self.register_buffer("quant_status", quant_status, persistent=False)
         self.register_buffer(
             "weight_scale",
             scale_fp32.view(
@@ -113,10 +105,7 @@ class PpuWoAFp8Linear(nn.Module):
         self,
         x: torch.Tensor,
         out: Optional[torch.Tensor] = None,
-        *,
-        quant_status: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        status = self.quant_status if quant_status is None else quant_status
         if x.ndim < 3 or tuple(x.shape[-2:]) != (self.groups, self.k_local):
             raise ValueError(
                 "wo_a activation shape must end in "
@@ -130,17 +119,13 @@ class PpuWoAFp8Linear(nn.Module):
             raise ValueError(
                 f"wo_a activation device must be {self.weight.device}, got {x.device}"
             )
-        if status is not None:
-            _validate_quant_status(
-                status, x.device, (x, self.weight, self.weight_scale)
-            )
 
         output_shape = tuple(x.shape[:-2]) + (self.groups, self.rank)
         output = _validate_out(
             out,
             output_shape,
             x.device,
-            (x, self.weight, self.weight_scale) + (() if status is None else (status,)),
+            (x, self.weight, self.weight_scale),
         )
         m = x.numel() // (self.groups * self.k_local)
         if m == 0:
@@ -149,14 +134,13 @@ class PpuWoAFp8Linear(nn.Module):
         # Quantization retains the token-major arithmetic and block scales.
         x_2d = x.view(m * self.groups, self.k_local)
         x_fp8, x_scale = quantize_ppu_fp8_activation(
-            x_2d, status, quantization=self.quantization
+            x_2d, quantization=self.quantization
         )
         x_fp8 = x_fp8.view(m, self.groups, self.k_local)
         x_scale = x_scale.view(m, self.groups, self.k_local // FP8_BLOCK_SIZE)
         output_3d = output.view(m, self.groups, self.rank)
         if self.sglang_layout:
             from deep_gemm.jit_kernels.einsum import fp8_bmm
-
             from rtp_llm.platforms.ppu.kernels.cuda.ppu_sglang_permute import (
                 fused_permute,
             )

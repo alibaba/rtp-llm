@@ -6,7 +6,6 @@ from unittest.mock import patch
 
 import torch
 import torch.nn as nn
-
 from rtp_llm.models_py.modules.dsv4 import _profiler
 from rtp_llm.models_py.modules.dsv4.block import Block
 from rtp_llm.models_py.modules.dsv4.fp8.attention import AttentionFP8
@@ -35,7 +34,6 @@ class _FakeLayer(Block):
         cu_seqlens,
         kv_cache=None,
         block_tables_by_type=None,
-        numerical_status=None,
     ):
         self.calls.append(
             (
@@ -59,7 +57,6 @@ class _FakeLayer(Block):
         cu_seqlens,
         kv_cache=None,
         block_tables_by_type=None,
-        numerical_status=None,
     ):
         self.calls.append(
             (

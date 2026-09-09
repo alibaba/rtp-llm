@@ -4,7 +4,6 @@ import unittest
 from unittest.mock import patch
 
 import torch
-
 from rtp_llm.platforms.ppu.models.dsv4.ppu_decode_provider import PpuDecodeProvider
 from rtp_llm.platforms.ppu.modules.linear.fp8_linear import (
     PpuFp8Linear,
@@ -45,33 +44,27 @@ class DecodeQKVContractTest(unittest.TestCase):
 )
 class DecodeQKVGpuTest(unittest.TestCase):
     @torch.inference_mode()
-    def test_owned_concat_snapshot_and_status_contract(self):
+    def test_owned_concat_snapshot_and_quantization_contract(self):
         torch.manual_seed(890437)
-        status = torch.zeros(1, dtype=torch.int32, device="cuda")
 
-        def linear(n, *, quant="v2_column", state=status):
+        def linear(n, *, quant="v2_column"):
             weight = torch.randn(n, 256, device="cuda").to(torch.float8_e4m3fn)
             scale = torch.ones(n // 128, 2, device="cuda").to(torch.float8_e8m0fnu)
-            return PpuFp8Linear(weight, scale, quantization=quant, quant_status=state)
+            return PpuFp8Linear(weight, scale, quantization=quant)
 
         parts = (linear(256), linear(128))
         merged = concatenate_ppu_fp8_linears(parts)
         expected_weight = torch.cat([p.weight.view(torch.uint8) for p in parts])
         self.assertTrue(torch.equal(merged.weight.view(torch.uint8), expected_weight))
-        self.assertIs(merged.quant_status, status)
         self.assertNotEqual(merged.weight.data_ptr(), parts[0].weight.data_ptr())
         for batch in (0, 1, 8, 128):
             x = torch.randn(batch, 256, device="cuda", dtype=torch.bfloat16)
             torch.testing.assert_close(
                 merged(x), torch.cat([p(x) for p in parts], -1), rtol=0, atol=0
             )
-        for other in (
-            linear(128, quant="auto"),
-            linear(128, state=torch.zeros_like(status)),
-        ):
+        for other in (linear(128, quant="auto"),):
             with self.assertRaises(ValueError):
                 concatenate_ppu_fp8_linears((parts[0], other))
-        self.assertEqual(int(status.item()), 0)
 
     @torch.inference_mode()
     def test_dynamic_normalization_graph_and_empty_batch(self):

@@ -126,15 +126,11 @@ cc_library(
     name = "cuda_quantization",
     srcs = [
         "per_token_group_quant_8bit.cu",
-        "per_token_group_quant_8bit_checked.cu",
         "per_token_group_quant_8bit_v2.cu",
-        "per_token_group_quant_8bit_v2_checked.cu",
     ],
     hdrs = [
         "per_token_group_quant_8bit.h",
-        "per_token_group_quant_8bit_checked.h",
         "per_token_group_quant_8bit_v2.h",
-        "per_token_group_quant_8bit_v2_checked.h",
     ],
     deps = [
         "//rtp_llm/models_py/bindings/cuda:cuda_host_utils",

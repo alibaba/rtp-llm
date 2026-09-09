@@ -5,7 +5,6 @@ from typing import List, Optional
 
 import psutil
 import torch
-
 from rtp_llm.device.device_base import DeviceBase, MemInfo
 from rtp_llm.ops.compute_ops import (
     preprocess_gemm_weight_by_key,
@@ -157,12 +156,7 @@ class GpuImpl(DeviceBase):
             self.get_device_type(),
             torch.cuda.get_device_name(local_rank),
             local_rank,
-            evidence=(
-                ("runtime", type(self).__name__),
-                ("torch_version", str(torch.__version__)),
-            ),
             device_string=self.device_string(local_rank),
-            capabilities={"torch_cuda", "nccl", "cuda_graph"},
         )
 
     def unpack_int32_into_int16(self, w_packed: torch.Tensor, int8: bool):

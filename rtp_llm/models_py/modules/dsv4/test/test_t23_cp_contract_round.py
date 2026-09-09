@@ -9,13 +9,12 @@ attempted.
 import contextlib
 import importlib.util
 import sys
-import types
 import traceback
+import types
 from contextlib import contextmanager
 from pathlib import Path
 
 import torch
-
 
 _REPO_ROOT = Path(__file__).resolve().parents[5]
 
@@ -57,11 +56,14 @@ CP = _import_cp()
 
 def _parametrize(values):
     """Tiny stdlib-only parameterization helper for standalone CPU execution."""
+
     def decorate(fn):
         def wrapped():
             for value in values:
                 fn(value)
+
         return wrapped
+
     return decorate
 
 
@@ -100,7 +102,9 @@ def _metadata(chunks, actual_lengths, cp_size):
         pair = chunk // 2
         for rank in range(cp_size):
             local = rank * total_chunk + chunk_offset
-            first = torch.arange(sequence_offset + rank * pair, sequence_offset + (rank + 1) * pair)
+            first = torch.arange(
+                sequence_offset + rank * pair, sequence_offset + (rank + 1) * pair
+            )
             second = torch.arange(
                 sequence_offset + padded - (rank + 1) * pair,
                 sequence_offset + padded - rank * pair,
@@ -143,8 +147,7 @@ def test_cp_positions_restore_batched_prefix_padding(cp_size):
         ).gather(0, ctx.req_id_per_token.long())
         relative_local = ctx.relative_positions - padded_req_offsets
         assert torch.equal(
-            ctx.global_positions[ctx.local_is_real]
-            - relative_local[ctx.local_is_real],
+            ctx.global_positions[ctx.local_is_real] - relative_local[ctx.local_is_real],
             expected_offsets[ctx.local_is_real],
         )
         # Padding positions are clamped to the last valid token of their own
@@ -161,7 +164,10 @@ def test_cp_positions_restore_batched_prefix_padding(cp_size):
         real_positions.append(ctx.relative_positions[ctx.local_is_real])
     union = torch.cat(real_positions).sort().values
     expected = torch.cat(
-        [torch.arange(0, actual[0]), torch.arange(chunks[0] * cp_size, chunks[0] * cp_size + actual[1])]
+        [
+            torch.arange(0, actual[0]),
+            torch.arange(chunks[0] * cp_size, chunks[0] * cp_size + actual[1]),
+        ]
     )
     assert torch.equal(union, expected)
     assert all(ctx.prefix_lengths.tolist() == [11, 29] for ctx in contexts)
@@ -200,9 +206,7 @@ def test_mocked_unsharded_gather_restores_global_request_order(cp_size):
 
     CP.all_gather = lambda local, group=None: gathered
     for ctx in contexts:
-        out = CP.cp_all_gather_full_varlen(
-            rank_values[ctx.cp_rank], ctx
-        ).squeeze(1)
+        out = CP.cp_all_gather_full_varlen(rank_values[ctx.cp_rank], ctx).squeeze(1)
         expected = gathered[ctx.unpad_restore, 0]
         assert torch.equal(out, expected)
 
@@ -225,7 +229,9 @@ def test_mocked_sharded_gather_covers_every_t13_pool(pool):
     tag, ratio, entries, entry_bytes, dtype, scalars_per_entry = pool
     assert tag
     assert ratio in (4, 128)
-    assert scalars_per_entry * torch.empty((), dtype=dtype).element_size() == entry_bytes
+    assert (
+        scalars_per_entry * torch.empty((), dtype=dtype).element_size() == entry_bytes
+    )
     cp_size = 2
     total_blocks = 3
     local_table = torch.tensor([1, 4], dtype=torch.int32)
@@ -235,12 +241,17 @@ def test_mocked_sharded_gather_covers_every_t13_pool(pool):
         local_pool[block].fill_(block + 1)
     rank0 = local_pool.index_select(0, local_table.long())
     rank1 = torch.stack(
-        [torch.full(block_shape, 101, dtype=dtype),
-         torch.full(block_shape, 103, dtype=dtype)]
+        [
+            torch.full(block_shape, 101, dtype=dtype),
+            torch.full(block_shape, 103, dtype=dtype),
+        ]
     )
     CP.all_gather = lambda local, group=None: torch.cat([rank0, rank1], dim=0)
     out = CP.cp_gather_request_pool_blocks(
-        local_pool, local_table, cp_size=cp_size, cp_rank=0,
+        local_pool,
+        local_table,
+        cp_size=cp_size,
+        cp_rank=0,
         total_logical_blocks=total_blocks,
     )
     assert out.shape == (total_blocks, *block_shape)
@@ -248,26 +259,6 @@ def test_mocked_sharded_gather_covers_every_t13_pool(pool):
     assert torch.all(out[0] == 2)
     assert torch.all(out[1] == 101)
     assert torch.all(out[2] == 5)
-
-
-def _validate_indexer_layout(producer_entry_bytes, consumer_entry_bytes):
-    """Independent T23/T31 fail-closed oracle; no production transport call."""
-    if producer_entry_bytes not in (68, 132) or consumer_entry_bytes not in (68, 132):
-        raise ValueError("unsupported indexer entry geometry")
-    if producer_entry_bytes != consumer_entry_bytes:
-        raise ValueError("indexer_kv entry geometry mismatch")
-
-
-@_parametrize([(68, 132), (132, 68)])
-def test_indexer_fp4_fp8_mismatch_oracle_rejects(pair):
-    producer, consumer = pair
-    with _raises(ValueError, match="geometry mismatch"):
-        _validate_indexer_layout(producer, consumer)
-
-
-@_parametrize([68, 132])
-def test_indexer_matching_geometry_is_accepted_by_independent_oracle(entry):
-    _validate_indexer_layout(entry, entry)
 
 
 if __name__ == "__main__":
@@ -278,7 +269,9 @@ if __name__ == "__main__":
         try:
             function()
             print("PASS", name)
-        except Exception as error:  # noqa: BLE001 - test harness must report all failures
+        except (
+            Exception
+        ) as error:  # noqa: BLE001 - test harness must report all failures
             failures.append((name, error))
             print("FAIL", name, repr(error))
             traceback.print_exc()

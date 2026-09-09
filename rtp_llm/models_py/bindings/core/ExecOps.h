@@ -82,10 +82,6 @@ void          setTraceMemory(bool trace_memory);
 void runtimeCopy(const CopyParams& params);
 void runtimeBatchCopy(const BatchCopyParams& params);
 void runtimeMaskLogits(torch::Tensor& logits, const torch::Tensor& mask);
-void runtimeNumericalStatusGate(torch::Tensor& logits,
-                                const NumericalStatusView& status,
-                                const torch::Tensor& row_to_status,
-                                torch::Tensor& failure_mask);
 void runtimeApplyPackedMaskLogits(const torch::Tensor& logits,
                                   const torch::Tensor& packed_allow_mask,
                                   const torch::Tensor& row_indices,

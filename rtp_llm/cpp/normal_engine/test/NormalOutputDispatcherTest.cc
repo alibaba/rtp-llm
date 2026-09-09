@@ -30,16 +30,5 @@ TEST(NormalOutputDispatcherTest, ProcessorErrorsUseSamplerInputCoordinatesAfterB
     EXPECT_NE(second_stream_error->ToString().find("second stream processor failed"), std::string::npos);
 }
 
-TEST(NormalOutputDispatcherTest, NumericalFailurePrecedesGenericSamplerFailure) {
-    SamplerOutput sampler_output;
-    sampler_output.processor_errors = {ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "generic sampler failure")};
-    auto success_cpu = torch::tensor({false}, torch::TensorOptions().dtype(torch::kBool));
-    auto failure_cpu = torch::tensor({true}, torch::TensorOptions().dtype(torch::kBool));
-
-    auto error = collectStreamSamplerError(sampler_output, success_cpu, failure_cpu, 0, 1);
-    ASSERT_TRUE(error.has_value());
-    EXPECT_EQ(error->code(), ErrorCode::NUMERICAL_NONFINITE);
-}
-
 }  // namespace
 }  // namespace rtp_llm

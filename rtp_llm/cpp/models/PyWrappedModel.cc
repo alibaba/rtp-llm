@@ -14,10 +14,8 @@
 #include <cstring>
 #include <iostream>
 #include <numeric>
-#include <optional>
 #include "rtp_llm/cpp/utils/DevicePerfWrapper.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
-#include <algorithm>
 #if USING_CUDA
 #include <c10/cuda/CUDAStream.h>
 #include "rtp_llm/models_py/bindings/cuda/Bf16GemmOp.h"
@@ -29,31 +27,6 @@ using namespace std;
 namespace rtp_llm {
 
 namespace {
-
-struct NumericalStatusIdentity {
-    const c10::TensorImpl* impl{nullptr};
-    const void*            data{nullptr};
-    int64_t                numel{0};
-};
-
-NumericalStatusIdentity captureNumericalStatusIdentity(const NumericalStatusView& status) {
-    if (!status.defined()) {
-        return {};
-    }
-    return {status.values.unsafeGetTensorImpl(), status.values.data_ptr(), status.values.numel()};
-}
-
-void checkNumericalStatusIdentity(const NumericalStatusView& status,
-                                  const NumericalStatusIdentity& expected,
-                                  const char*                      phase) {
-    if (expected.impl == nullptr) {
-        return;
-    }
-    RTP_LLM_CHECK_WITH_INFO(status.defined() && status.values.unsafeGetTensorImpl() == expected.impl
-                                && status.values.data_ptr() == expected.data && status.values.numel() == expected.numel,
-                            "numerical status storage identity changed during %s",
-                            phase);
-}
 
 // Pairs init() with a full drain on exceptional exits. DSpark's normal path
 // finishes only writer submissions here and leaves actual publication for the
@@ -109,342 +82,6 @@ private:
 };
 
 }  // namespace
-
-class NumericalStatusCompletionRing: public std::enable_shared_from_this<NumericalStatusCompletionRing> {
-private:
-    struct RetiredStorage {
-        torch::Tensor                 values;
-        std::shared_ptr<torch::Event> completion_event;
-    };
-
-    struct Slot {
-        torch::Tensor                      values;
-        std::shared_ptr<torch::Event>      ready_event;
-        std::shared_ptr<torch::Event>      consumed_event;
-        std::vector<RetiredStorage>        retired;
-        uint64_t                           generation{0};
-        bool                               ready_recorded{false};
-        bool                               consumed_recorded{false};
-        bool                               leased{false};
-        std::optional<c10::Stream>          waited_stream;
-    };
-
-    class Lease: public NumericalStatusLease {
-    public:
-        std::shared_ptr<NumericalStatusCompletionRing> ring;
-        std::shared_ptr<Slot>                          slot;
-        uint64_t                                       generation;
-
-        Lease(std::shared_ptr<NumericalStatusCompletionRing> ring,
-              std::shared_ptr<Slot>                          slot,
-              uint64_t                                       generation):
-            ring(std::move(ring)), slot(std::move(slot)), generation(generation) {}
-
-        ~Lease() override {
-            ring->release(slot, generation);
-        }
-
-        void waitReady(const c10::Stream& stream) override {
-            ring->waitReady(slot, generation, stream);
-        }
-
-        void markConsumed(const c10::Stream& stream) override {
-            ring->markConsumed(slot, generation, stream);
-        }
-    };
-
-public:
-    explicit NumericalStatusCompletionRing(size_t initial_slots) {
-        slots_.reserve(initial_slots);
-        for (size_t i = 0; i < initial_slots; ++i) {
-            slots_.push_back(std::make_shared<Slot>());
-        }
-    }
-
-    NumericalStatusView snapshot(const NumericalStatusView& source, uint64_t epoch) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        std::shared_ptr<Slot>       slot;
-        for (const auto& candidate : slots_) {
-            collectRetired(*candidate);
-            if (!candidate->leased && candidate->values.defined()
-                && candidate->values.numel() >= source.values.numel()) {
-                slot = candidate;
-                break;
-            }
-        }
-        if (!slot) {
-            for (const auto& candidate : slots_) {
-                if (!candidate->leased) {
-                    slot = candidate;
-                    break;
-                }
-            }
-        }
-        if (!slot) {
-            slot = std::make_shared<Slot>();
-            slots_.push_back(slot);
-        }
-
-#if USING_CUDA || USING_ROCM
-        const c10::Stream current_stream = cuda_graph::graphGetCurrentStream();
-        auto              previous_completion = completionEvent(*slot);
-        if (previous_completion) {
-            previous_completion->block(current_stream);
-        }
-#endif
-        if (!slot->values.defined() || slot->values.numel() < source.values.numel()) {
-#if USING_CUDA || USING_ROCM
-            if (slot->values.defined()) {
-                slot->retired.push_back(RetiredStorage{std::move(slot->values), previous_completion});
-            }
-#endif
-            slot->values = torch::empty_like(source.values);
-        }
-        auto snapshot_values = slot->values.narrow(0, 0, source.values.numel());
-        snapshot_values.copy_(source.values, /*non_blocking=*/true);
-#if USING_CUDA || USING_ROCM
-        if (!slot->ready_event) {
-            slot->ready_event = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
-        }
-        slot->ready_event->record(current_stream);
-        slot->ready_recorded    = true;
-        slot->consumed_recorded = false;
-        slot->waited_stream.reset();
-#endif
-        slot->leased = true;
-        ++slot->generation;
-
-        NumericalStatusView result;
-        result.values      = std::move(snapshot_values);
-        result.live_rows   = source.live_rows;
-        result.scope       = source.scope;
-        result.epoch       = epoch;
-        result.ready_event = slot->ready_event;
-        result.lease       = std::make_shared<Lease>(shared_from_this(), slot, slot->generation);
-        return result;
-    }
-
-private:
-    static std::shared_ptr<torch::Event> completionEvent(const Slot& slot) {
-        if (slot.consumed_recorded) {
-            return slot.consumed_event;
-        }
-        return slot.ready_recorded ? slot.ready_event : nullptr;
-    }
-
-    static void collectRetired(Slot& slot) {
-        slot.retired.erase(std::remove_if(slot.retired.begin(),
-                                          slot.retired.end(),
-                                          [](const RetiredStorage& retired) {
-                                              return !retired.completion_event || retired.completion_event->query();
-                                          }),
-                           slot.retired.end());
-    }
-
-    void waitReady(const std::shared_ptr<Slot>& slot, uint64_t generation, const c10::Stream& stream) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        RTP_LLM_CHECK_WITH_INFO(slot->leased && slot->generation == generation,
-                                "numerical status lease is no longer current");
-        RTP_LLM_CHECK_WITH_INFO(slot->ready_recorded && slot->ready_event,
-                                "numerical status snapshot has no ready event");
-        RTP_LLM_CHECK_WITH_INFO(!slot->waited_stream || *slot->waited_stream == stream,
-                                "numerical status lease supports exactly one consumer stream");
-        slot->ready_event->block(stream);
-        slot->waited_stream = stream;
-    }
-
-    void markConsumed(const std::shared_ptr<Slot>& slot, uint64_t generation, const c10::Stream& stream) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        RTP_LLM_CHECK_WITH_INFO(slot->leased && slot->generation == generation,
-                                "numerical status lease is no longer current");
-        RTP_LLM_CHECK_WITH_INFO(slot->waited_stream && *slot->waited_stream == stream,
-                                "numerical status completion requires the stream passed to waitReady");
-#if USING_CUDA || USING_ROCM
-        if (!slot->consumed_event) {
-            slot->consumed_event = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
-        }
-        slot->consumed_event->record(stream);
-        slot->consumed_recorded = true;
-#else
-        (void)stream;
-        throw std::runtime_error("numerical status consumption requires a CUDA or ROCm execution device");
-#endif
-    }
-
-    void release(const std::shared_ptr<Slot>& slot, uint64_t generation) noexcept {
-        try {
-            std::lock_guard<std::mutex> lock(mutex_);
-            if (slot->generation != generation) {
-                return;
-            }
-#if USING_CUDA || USING_ROCM
-            // Preserve reads already enqueued after waitReady() even when a
-            // consumer accidentally omits the explicit completion marker.
-            if (slot->waited_stream && !slot->consumed_recorded) {
-                if (!slot->consumed_event) {
-                    slot->consumed_event = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
-                }
-                slot->consumed_event->record(*slot->waited_stream);
-                slot->consumed_recorded = true;
-            }
-#endif
-            slot->leased = false;
-        } catch (const std::exception& e) {
-            // Destructors cannot propagate. Keep the slot leased forever so a
-            // failed fallback fence degrades to safe ring growth.
-            RTP_LLM_LOG_ERROR("failed to fence a dropped numerical status lease: %s", e.what());
-        } catch (...) {
-            RTP_LLM_LOG_ERROR("failed to fence a dropped numerical status lease: unknown exception");
-        }
-    }
-
-    std::mutex                         mutex_;
-    std::vector<std::shared_ptr<Slot>> slots_;
-};
-
-void PyWrappedModel::configureNumericalStatus(const py::object& py_instance, int speculative_steps) {
-    PyObject* raw_value = PyObject_GetAttrString(py_instance.ptr(), "numerical_status_scope");
-    if (raw_value == nullptr) {
-        if (PyErr_ExceptionMatches(PyExc_AttributeError)) {
-            PyErr_Clear();
-            return;
-        }
-        throw py::error_already_set();
-    }
-    py::object value = py::reinterpret_steal<py::object>(raw_value);
-    if (PyCallable_Check(value.ptr())) {
-        value = value();
-    }
-    if (py::isinstance<py::str>(value)) {
-        const auto scope = py::cast<std::string>(value);
-        if (scope == "batch") {
-            numerical_status_scope_ = NumericalStatusScope::BATCH;
-        } else if (scope == "origin_row") {
-            numerical_status_scope_ = NumericalStatusScope::ORIGIN_ROW;
-        } else if (scope == "none") {
-            numerical_status_scope_ = NumericalStatusScope::NONE;
-        } else {
-            throw std::invalid_argument("unknown numerical_status_scope: " + scope);
-        }
-    } else {
-        numerical_status_scope_ = value.cast<NumericalStatusScope>();
-    }
-    if (numerical_status_scope_ != NumericalStatusScope::NONE) {
-        const auto initial_slots = static_cast<size_t>(std::max(3, speculative_steps + 2));
-        numerical_status_ring_   = std::make_shared<NumericalStatusCompletionRing>(initial_slots);
-    }
-}
-
-NumericalStatusView PyWrappedModel::prepareEagerNumericalStatus(int64_t live_rows) {
-    RTP_LLM_CHECK_WITH_INFO(live_rows >= 0, "numerical status live_rows must be non-negative, got %ld", live_rows);
-    NumericalStatusView result;
-    result.scope     = numerical_status_scope_;
-    result.live_rows = numerical_status_scope_ == NumericalStatusScope::NONE ? 0 : live_rows;
-    if (numerical_status_scope_ == NumericalStatusScope::NONE) {
-        return result;
-    }
-#if USING_CUDA || USING_ROCM
-    waitEagerNumericalStatusSourceFence();
-    retired_eager_numerical_status_.erase(
-        std::remove_if(retired_eager_numerical_status_.begin(),
-                       retired_eager_numerical_status_.end(),
-                       [](const auto& retired) { return !retired.second || retired.second->query(); }),
-        retired_eager_numerical_status_.end());
-    const int64_t required_capacity =
-        numerical_status_scope_ == NumericalStatusScope::BATCH ? 1 : std::max<int64_t>(1, live_rows);
-    if (!eager_numerical_status_.defined() || eager_numerical_status_.numel() < required_capacity) {
-        if (eager_numerical_status_.defined()) {
-            retired_eager_numerical_status_.emplace_back(std::move(eager_numerical_status_),
-                                                          eager_numerical_status_source_fence_);
-            eager_numerical_status_source_fence_.reset();
-            eager_numerical_status_source_fence_recorded_ = false;
-        }
-        eager_numerical_status_ = torch::empty(
-            {required_capacity}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA).requires_grad(false));
-    }
-    eager_numerical_status_.zero_();
-    result.values = numerical_status_scope_ == NumericalStatusScope::BATCH ?
-                        eager_numerical_status_ :
-                        eager_numerical_status_.narrow(0, 0, live_rows);
-    return result;
-#else
-    throw std::runtime_error("numerical status requires a CUDA or ROCm model execution device");
-#endif
-}
-
-void PyWrappedModel::waitEagerNumericalStatusSourceFence() {
-#if USING_CUDA || USING_ROCM
-    if (eager_numerical_status_source_fence_recorded_) {
-        eager_numerical_status_source_fence_->block(cuda_graph::graphGetCurrentStream());
-    }
-#endif
-}
-
-void PyWrappedModel::recordEagerNumericalStatusSourceFence() {
-#if USING_CUDA || USING_ROCM
-    if (!eager_numerical_status_source_fence_) {
-        eager_numerical_status_source_fence_ = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
-    }
-    eager_numerical_status_source_fence_->record(cuda_graph::graphGetCurrentStream());
-    eager_numerical_status_source_fence_recorded_ = true;
-#endif
-}
-
-NumericalStatusView PyWrappedModel::snapshotNumericalStatus(const NumericalStatusView& source) {
-    if (!source.defined()) {
-        return {};
-    }
-    RTP_LLM_CHECK_WITH_INFO(source.values.is_cuda(), "numerical status must use CUDA device storage");
-    RTP_LLM_CHECK_WITH_INFO(source.values.scalar_type() == torch::kInt32,
-                            "numerical status must use int32 storage");
-    RTP_LLM_CHECK_WITH_INFO(source.values.dim() == 1 && source.values.is_contiguous(),
-                            "numerical status must be a contiguous rank-1 tensor");
-    RTP_LLM_CHECK_WITH_INFO(source.scope != NumericalStatusScope::BATCH || source.values.numel() == 1,
-                            "batch numerical status must have shape [1]");
-    RTP_LLM_CHECK_WITH_INFO(source.live_rows >= 0, "numerical status live_rows must be non-negative");
-    RTP_LLM_CHECK_WITH_INFO(source.scope != NumericalStatusScope::ORIGIN_ROW
-                                || source.values.numel() >= source.live_rows,
-                            "origin-row numerical status capacity is smaller than live_rows");
-    RTP_LLM_CHECK_WITH_INFO(numerical_status_ring_ != nullptr, "numerical status completion ring is not configured");
-    return numerical_status_ring_->snapshot(source, numerical_status_epoch_.fetch_add(1, std::memory_order_relaxed) + 1);
-}
-
-GptModelOutputs PyWrappedModel::attachNumericalStatus(GptModelOutputs           outputs,
-                                                      const NumericalStatusView& source,
-                                                      bool                      used_cuda_graph,
-                                                      NumericalStatusSourceFenceGuard* fence_guard) {
-    outputs.numerical_status = snapshotNumericalStatus(source);
-    recordNumericalStatusSourceFence(used_cuda_graph);
-    if (fence_guard != nullptr) {
-        fence_guard->dismiss();
-    }
-    return outputs;
-}
-
-void PyWrappedModel::recordNumericalStatusSourceFence(bool used_cuda_graph) {
-#if USING_CUDA || USING_ROCM
-    if (used_cuda_graph) {
-        static_cast<CudaGraphRunner*>(graph_runner_)->recordNumericalStatusSourceFence(graph_state_);
-    } else {
-        recordEagerNumericalStatusSourceFence();
-    }
-#else
-    (void)used_cuda_graph;
-#endif
-}
-
-PyWrappedModel::NumericalStatusSourceFenceGuard::~NumericalStatusSourceFenceGuard() {
-    if (!active_) {
-        return;
-    }
-    try {
-        owner_->recordNumericalStatusSourceFence(used_cuda_graph_);
-    } catch (const std::exception& e) {
-        RTP_LLM_LOG_ERROR("failed to record numerical status source fence while unwinding: %s", e.what());
-    } catch (...) {
-        RTP_LLM_LOG_ERROR("failed to record numerical status source fence while unwinding: unknown exception");
-    }
-}
 
 torch::Tensor PyWrappedModel::tensorHoldHostAndToCuda(const torch::Tensor& tensor) {
     if (tensor.device().is_cuda()) {
@@ -891,12 +528,6 @@ std::string PyWrappedModel::waitCacheStorePublication() {
 
 GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs) {
     RTP_LLM_PROFILE_SCOPE("py_model.forwardMicroBatched");
-    NumericalStatusSourceFenceGuard status_fence(this);
-    NumericalStatusView             execution_status;
-    if (numerical_status_scope_ != NumericalStatusScope::NONE) {
-        execution_status = prepareEagerNumericalStatus(inputs.combo_tokens.size(0));
-        status_fence.arm(/*used_cuda_graph=*/false);
-    }
 
     // Per-launch capacity contract: see fuse_copy_util.h sizing rationale.
     // d2d_copies_ accumulates across ALL micro-batches before the single
@@ -917,23 +548,17 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
         if (device_props_.ffn_as_service) {
             py::object py_forward_method = py_model_.attr("forward_micro_batch");
             py::object py_outputs_obj    = py_forward_method(std::vector<PyModelInputs>{});
-            auto outputs                 = GptModelOutputs();
-            return numerical_status_scope_ == NumericalStatusScope::NONE ?
-                       outputs :
-                       attachNumericalStatus(
-                           std::move(outputs), execution_status, /*used_cuda_graph=*/false, &status_fence);
+            return GptModelOutputs();
         }
     }
 
-    auto micro_batch_plan                    = planMicroBatches(inputs);
-    auto [split_inputs, token_slice_recipes] = splitInputsIntoMicroBatches(inputs, micro_batch_plan);
-    RTP_LLM_CHECK_WITH_INFO(token_slice_recipes.size() == split_inputs.size(),
-                            "micro-batch token recipes must align with split inputs");
+    auto micro_batch_plan  = planMicroBatches(inputs);
+    auto [split_inputs, _] = splitInputsIntoMicroBatches(inputs, micro_batch_plan);
     std::vector<PyModelInputs> input_list;
     input_list.reserve(split_inputs.size());
 
     for (size_t i = 0; i < split_inputs.size(); ++i) {
-        const bool  is_real_micro_input   = token_slice_recipes[i].count != 0;
+        const bool  is_real_micro_input   = split_inputs[i].kv_cache_kernel_block_id.defined();
         const auto& micro_inputs          = is_real_micro_input ? split_inputs[i] : split_inputs[0];
         auto        py_attn_inputs        = buildPyAttentionInputs(micro_inputs);
         auto        embedding_inputs      = buildPyEmbeddingInputs(micro_inputs);
@@ -955,35 +580,14 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
         torch::Tensor token_ids = micro_inputs.combo_tokens.clone().cuda();
         torch::Tensor input_hiddens =
             inputs.last_hidden_states.defined() ? inputs.last_hidden_states : torch::empty({0});
-        NumericalStatusView micro_status;
-        if (is_real_micro_input) {
-            micro_status = execution_status;
-        }
-        if (micro_status.scope == NumericalStatusScope::ORIGIN_ROW) {
-            const auto& recipe = token_slice_recipes[i];
-            RTP_LLM_CHECK_WITH_INFO(recipe.offset + recipe.count <= static_cast<size_t>(execution_status.live_rows),
-                                    "micro-batch numerical status slice exceeds live rows");
-            micro_status.values    = execution_status.values.narrow(0, recipe.offset, recipe.count);
-            micro_status.live_rows = recipe.count;
-        }
-        auto py_inputs              = PyModelInputs{token_ids,
-                                      input_hiddens,
-                                      combo_position_ids,
-                                      embedding_inputs,
-                                      multimodal_inputs,
-                                      py_attn_inputs,
-                                      attention_inputs_by_tag,
-                                      bert_embedding_inputs};
-        py_inputs.numerical_status = std::move(micro_status);
-        input_list.emplace_back(std::move(py_inputs));
-    }
-
-    std::vector<NumericalStatusIdentity> numerical_status_identities;
-    if (numerical_status_scope_ != NumericalStatusScope::NONE) {
-        numerical_status_identities.reserve(input_list.size());
-        for (const auto& py_inputs : input_list) {
-            numerical_status_identities.emplace_back(captureNumericalStatusIdentity(py_inputs.numerical_status));
-        }
+        input_list.emplace_back(PyModelInputs{token_ids,
+                                              input_hiddens,
+                                              combo_position_ids,
+                                              embedding_inputs,
+                                              multimodal_inputs,
+                                              py_attn_inputs,
+                                              attention_inputs_by_tag,
+                                              bert_embedding_inputs});
     }
 
     const bool has_cache_store_work = !inputs.warmup && inputs.pd_separation;
@@ -998,13 +602,6 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
         py::object             py_forward_method = py_model_.attr("forward_micro_batch");
         py::object             py_outputs_obj    = py_forward_method(input_list);
         py_model_outputs                         = py_outputs_obj.cast<std::vector<PyModelOutputs>>();
-    }
-
-    if (numerical_status_scope_ != NumericalStatusScope::NONE) {
-        for (size_t i = 0; i < input_list.size(); ++i) {
-            checkNumericalStatusIdentity(
-                input_list[i].numerical_status, numerical_status_identities[i], "micro-batch forward");
-        }
     }
 
     RTP_LLM_CHECK_WITH_INFO(py_model_outputs.size() == input_list.size(),
@@ -1047,11 +644,7 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
 
     RTP_LLM_LOG_DEBUG("Python object instance forward method called successfully.");
 
-    auto outputs             = callForwardPostLayers(hidden_states, inputs, false);
-    return numerical_status_scope_ == NumericalStatusScope::NONE ?
-               outputs :
-               attachNumericalStatus(
-                   std::move(outputs), execution_status, /*used_cuda_graph=*/false, &status_fence);
+    return callForwardPostLayers(hidden_states, inputs, false);
 }
 
 torch_ext::PyEmbeddingInputs PyWrappedModel::buildPyEmbeddingInputs(const GptModelInputs& inputs) {
@@ -1261,16 +854,9 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
                                                         bert_embedding_inputs});
         PyModelOutputs py_model_outputs;
         torch::Tensor  hidden_states;
-        NumericalStatusSourceFenceGuard status_fence(this);
-        NumericalStatusView             numerical_status_source;
-        bool                            used_cuda_graph = false;
 
         // Cast the Python object to PyModelOutputs and extract hidden states
         if (enable_cuda_graph_ && graph_runner_->canRun(py_model_inputs, graph_state_)) {
-            used_cuda_graph = true;
-            if (numerical_status_scope_ != NumericalStatusScope::NONE) {
-                status_fence.arm(/*used_cuda_graph=*/true);
-            }
             py::gil_scoped_acquire gil;
             RTP_LLM_PROFILE_SCOPE("py_model.forward(cuda_graph)");
             DevicePerfWrapper wrapper(enable_device_perf_, "cuda graph python forward");
@@ -1281,9 +867,6 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
                 graph_state_.current_real_graph_bs);
             py_model_inputs.attention_inputs.is_s_padded = true;
             py_model_outputs                             = graph_runner_->forward(py_model_inputs, graph_state_);
-            if (numerical_status_scope_ != NumericalStatusScope::NONE) {
-                numerical_status_source = py_model_outputs.numerical_status;
-            }
             RTP_LLM_LOG_DEBUG("[PyWrappedModel] CUDA graph forward completed");
             hidden_states = py_model_outputs.hidden_states.clone();
         } else {
@@ -1293,19 +876,9 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             RTP_LLM_LOG_DEBUG("[PyWrappedModel] using normal forward, is_target_verify=%d, is_prefill=%d",
                               py_model_inputs.attention_inputs.is_target_verify,
                               py_model_inputs.attention_inputs.is_prefill);
-            if (numerical_status_scope_ != NumericalStatusScope::NONE) {
-                py_model_inputs.numerical_status = prepareEagerNumericalStatus(token_ids.size(0));
-                status_fence.arm(/*used_cuda_graph=*/false);
-            }
-            const auto numerical_status_identity = captureNumericalStatusIdentity(py_model_inputs.numerical_status);
             held_attn_pyobj_ = py_model_.attr("prepare_fmha_impl")(py_model_inputs, false);
             auto outputs     = py_forward_method_(py_model_inputs, held_attn_pyobj_);
             py_model_outputs = outputs.cast<PyModelOutputs>();
-            if (numerical_status_scope_ != NumericalStatusScope::NONE) {
-                checkNumericalStatusIdentity(
-                    py_model_inputs.numerical_status, numerical_status_identity, "eager forward");
-                numerical_status_source = py_model_inputs.numerical_status;
-            }
             hidden_states    = py_model_outputs.hidden_states.clone();
         }
 
@@ -1317,11 +890,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
                 // Python returns normalized [B*gamma, hidden_dim]. Reuse the
                 // regular C++ lm_head and TP logits gather for every proposal
                 // row; the speculative executor owns only Markov sampling.
-                auto outputs = callForwardPostLayers(hidden_states, inputs, true);
-                return numerical_status_scope_ == NumericalStatusScope::NONE ?
-                           outputs :
-                           attachNumericalStatus(
-                               std::move(outputs), numerical_status_source, used_cuda_graph, &status_fence);
+                return callForwardPostLayers(hidden_states, inputs, true);
             }
             // Commit only updates the draft KV cache and has no logits
             // consumer. Preserve its row-aligned hidden output for the common
@@ -1329,32 +898,17 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             GptModelOutputs outputs;
             outputs.hidden_states     = hidden_states;
             outputs.all_hidden_states = hidden_states;
-            return numerical_status_scope_ == NumericalStatusScope::NONE ?
-                       outputs :
-                       attachNumericalStatus(
-                           std::move(outputs), numerical_status_source, used_cuda_graph, &status_fence);
+            return outputs;
         }
         if (device_props_.enable_prefill_cp && has_context_request) {
             if (!inputs.need_all_logits && !inputs.need_all_hidden_states) {
                 context_parallel_processor_->handleOutputsLastHidden(hidden_states, inputs, cp_params);
-                auto outputs = forwardPostLayersLastHidden(hidden_states, inputs);
-                return numerical_status_scope_ == NumericalStatusScope::NONE ?
-                           outputs :
-                           attachNumericalStatus(
-                               std::move(outputs), numerical_status_source, used_cuda_graph, &status_fence);
+                return forwardPostLayersLastHidden(hidden_states, inputs);
             }
             size_t num_valid_tokens = context_parallel_processor_->handleOutputs(hidden_states, inputs, cp_params);
-            auto outputs = callForwardPostLayers(hidden_states, inputs, true, num_valid_tokens);
-            return numerical_status_scope_ == NumericalStatusScope::NONE ?
-                       outputs :
-                       attachNumericalStatus(
-                           std::move(outputs), numerical_status_source, used_cuda_graph, &status_fence);
+            return callForwardPostLayers(hidden_states, inputs, true, num_valid_tokens);
         }
-        auto outputs = callForwardPostLayers(hidden_states, inputs, true);
-        return numerical_status_scope_ == NumericalStatusScope::NONE ?
-                   outputs :
-                   attachNumericalStatus(
-                       std::move(outputs), numerical_status_source, used_cuda_graph, &status_fence);
+        return callForwardPostLayers(hidden_states, inputs, true);
 
     } catch (const py::error_already_set& e) {
         RTP_LLM_LOG_ERROR("Python error during forward call on Python instance: %s", e.what());
@@ -1688,7 +1242,6 @@ PyWrappedModel::splitInputsIntoMicroBatches(const GptModelInputs& inputs, const 
     if (!micro_batch_plan.enable) {
         RTP_LLM_LOG_DEBUG("micro batch disable when enable is false, use fake");
         micro_batch_inputs.push_back(inputs);
-        token_slice_recipes.emplace_back(TokenSliceInfo{0, static_cast<size_t>(inputs.combo_tokens.size(0))});
 
         GptModelInputs fake_inputs;
         fake_inputs.kv_cache_block_id = torch::Tensor();
@@ -1697,7 +1250,6 @@ PyWrappedModel::splitInputsIntoMicroBatches(const GptModelInputs& inputs, const 
         fake_inputs.sequence_lengths  = torch::empty({0}, torch::TensorOptions(torch::kInt32).device(torch::kCUDA));
         fake_inputs.prefix_lengths    = torch::zeros({1}, torch::TensorOptions(torch::kInt32).device(torch::kCUDA));
         micro_batch_inputs.push_back(fake_inputs);
-        token_slice_recipes.emplace_back(TokenSliceInfo{0, 0});
     } else {
         for (size_t i = 0; i < micro_batch_plan.batch_infos.size(); ++i) {
             const auto& p_micro_batch_size = micro_batch_plan.batch_infos[i].prefill_num;

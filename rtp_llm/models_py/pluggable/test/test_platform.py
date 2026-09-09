@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 import rtp_llm.device as device
 from rtp_llm.device.device_type import DeviceType
-from rtp_llm.models_py.pluggable.platform import PlatformContext
+from rtp_llm.device.runtime import DeviceRuntimeContext
 
 
 class PlatformSelectionTest(unittest.TestCase):
@@ -15,12 +15,11 @@ class PlatformSelectionTest(unittest.TestCase):
                 raise RuntimeError(
                     "Capture platform only after setting the worker device"
                 )
-            return PlatformContext(
+            return DeviceRuntimeContext(
                 kind,
                 "ZW-M890P" if kind == DeviceType.Ppu else "test-device",
                 local_rank,
                 device_string=f"device:{local_rank}",
-                capabilities={"test-runtime"},
             )
 
         fake_device = types.SimpleNamespace(runtime_context=context)
@@ -28,7 +27,7 @@ class PlatformSelectionTest(unittest.TestCase):
             patch("rtp_llm.device.runtime.get_device_type", return_value=kind),
             patch.object(device, "get_current_device", return_value=fake_device),
         ):
-            return PlatformContext.detect(local_rank=0, **kwargs)
+            return DeviceRuntimeContext.detect(local_rank=0, **kwargs)
 
     def test_explicit_and_auto_platform_mapping(self):
         for kind in (DeviceType.Cpu, DeviceType.Cuda, DeviceType.Ppu, DeviceType.ROCm):
@@ -62,9 +61,7 @@ class PlatformSelectionTest(unittest.TestCase):
                 self.assertIs(device.get_current_device(), instance)
                 self.assertEqual(device.get_cached_device_type(), DeviceType.Ppu)
             with self.assertRaisesRegex(RuntimeError, "Created device.*conflicts"):
-                self._detect(
-                    DeviceType.Cuda, created_device=device.get_cached_device_type()
-                )
+                self._detect(DeviceType.Cuda)
 
     def test_cached_object_without_identity_fails_closed(self):
         with (

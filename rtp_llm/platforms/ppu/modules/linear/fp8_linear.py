@@ -12,9 +12,8 @@ from functools import lru_cache
 from typing import Callable, Optional, Sequence
 
 import torch
-from torch import nn
-
 from rtp_llm.platforms.ppu.runtime import install_deep_gemm_build_lock, require_symbol
+from torch import nn
 
 FP8_BLOCK_SIZE = 128
 FP8_QUANT_EPS = 1.0e-4
@@ -22,8 +21,6 @@ M890P_DEVICE_NAME = "ZW-M890P"
 _DENSE_SYMBOL = "fp8_gemm_nt"
 _QUANT_LEGACY_SYMBOL = "per_token_group_quant_fp8"
 _QUANT_V2_SYMBOL = "per_token_group_quant_fp8_v2"
-_QUANT_LEGACY_CHECKED_SYMBOL = "per_token_group_quant_fp8_checked"
-_QUANT_V2_CHECKED_SYMBOL = "per_token_group_quant_fp8_v2_checked"
 _QUANT_V2_MIN_ELEMENTS = 4 * 1024 * 1024
 
 
@@ -74,29 +71,6 @@ def _resolve_ppu_quant_symbols() -> tuple[Callable, Callable]:
     return resolved[0], resolved[1]
 
 
-@lru_cache(maxsize=1)
-def _resolve_ppu_checked_quant_symbols() -> tuple[Callable, Callable]:
-    """Resolve checked kernels only for callers that inject a status tensor."""
-
-    try:
-        compute_ops = importlib.import_module("rtp_llm.ops.compute_ops")
-    except ImportError as exc:
-        raise RuntimeError(
-            "M890P DSV4 checked FP8 requires rtp_llm.ops.compute_ops"
-        ) from exc
-
-    resolved = []
-    for name in (_QUANT_LEGACY_CHECKED_SYMBOL, _QUANT_V2_CHECKED_SYMBOL):
-        symbol = getattr(compute_ops, name, None)
-        if not callable(symbol):
-            raise RuntimeError(
-                "M890P DSV4 checked FP8 requires callable "
-                f"rtp_llm.ops.compute_ops.{name}"
-            )
-        resolved.append(symbol)
-    return resolved[0], resolved[1]
-
-
 def _require_cuda_contiguous(tensor: torch.Tensor, name: str) -> None:
     if not tensor.is_cuda:
         raise ValueError(f"{name} must be a CUDA/PPU tensor, got {tensor.device}")
@@ -114,30 +88,6 @@ def _require_m890p(tensor: torch.Tensor, name: str) -> None:
         raise RuntimeError(
             f"{name} must be on {M890P_DEVICE_NAME}, got {device_name!r} "
             f"at {tensor.device}"
-        )
-
-
-def _validate_quant_status(
-    status: torch.Tensor,
-    device: torch.device,
-    aliases: Sequence[torch.Tensor] = (),
-) -> None:
-    if not isinstance(status, torch.Tensor):
-        raise TypeError(
-            f"quant status must be a torch.Tensor, got {type(status).__name__}"
-        )
-    if status.dtype != torch.int32:
-        raise TypeError(f"quant status must be torch.int32, got {status.dtype}")
-    if tuple(status.shape) != (1,):
-        raise ValueError(
-            f"quant status must have shape (1,), got {tuple(status.shape)}"
-        )
-    _require_cuda_contiguous(status, "quant status")
-    if status.device != device:
-        raise ValueError(f"quant status device must be {device}, got {status.device}")
-    if any(_shares_untyped_storage(status, tensor) for tensor in aliases):
-        raise ValueError(
-            "quant status must not alias activation, weight, or scale storage"
         )
 
 
@@ -178,7 +128,6 @@ def checkpoint_ue8m0_scale_to_fp32(
 
 def quantize_ppu_fp8_activation(
     x: torch.Tensor,
-    status: Optional[torch.Tensor] = None,
     *,
     quantization: str = "auto",
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -198,8 +147,6 @@ def quantize_ppu_fp8_activation(
     if x.dtype != torch.bfloat16:
         raise TypeError(f"activation must be torch.bfloat16, got {x.dtype}")
     _require_m890p(x, "activation")
-    if status is not None:
-        _validate_quant_status(status, x.device, (x,))
     if x.shape[1] % FP8_BLOCK_SIZE:
         raise ValueError(
             f"activation K must be divisible by {FP8_BLOCK_SIZE}, got {x.shape[1]}"
@@ -214,14 +161,9 @@ def quantize_ppu_fp8_activation(
     else:
         scale = torch.empty(expected_scale_shape, dtype=torch.float32, device=x.device)
     if x.shape[0] > 0:
-        if status is None:
-            legacy_quant, v2_quant = _resolve_ppu_quant_symbols()
-            legacy_symbol_name = _QUANT_LEGACY_SYMBOL
-            v2_symbol_name = _QUANT_V2_SYMBOL
-        else:
-            legacy_quant, v2_quant = _resolve_ppu_checked_quant_symbols()
-            legacy_symbol_name = _QUANT_LEGACY_CHECKED_SYMBOL
-            v2_symbol_name = _QUANT_V2_CHECKED_SYMBOL
+        legacy_quant, v2_quant = _resolve_ppu_quant_symbols()
+        legacy_symbol_name = _QUANT_LEGACY_SYMBOL
+        v2_symbol_name = _QUANT_V2_SYMBOL
         fp8_max = torch.finfo(payload.dtype).max
         if quantization != "auto" or x.numel() >= _QUANT_V2_MIN_ELEMENTS:
             try:
@@ -236,15 +178,13 @@ def quantize_ppu_fp8_activation(
                     False,
                     False,
                     None,
-                    *(() if status is None else (status,)),
                 )
             except TypeError as exc:
                 raise RuntimeError(
                     f"rtp_llm.ops.compute_ops.{v2_symbol_name} ABI "
                     "mismatch for M890P DSV4 FP8; expected (input, output_q, "
                     "output_s, group_size, eps, fp8_min, fp8_max, "
-                    "scale_ue8m0, fuse_silu_and_mul, masked_m"
-                    + (", status)" if status is not None else ")")
+                    "scale_ue8m0, fuse_silu_and_mul, masked_m" + ")"
                 ) from exc
         else:
             try:
@@ -257,14 +197,12 @@ def quantize_ppu_fp8_activation(
                     -fp8_max,
                     fp8_max,
                     False,
-                    *(() if status is None else (status,)),
                 )
             except TypeError as exc:
                 raise RuntimeError(
                     f"rtp_llm.ops.compute_ops.{legacy_symbol_name} ABI "
                     "mismatch for M890P DSV4 FP8; expected (input, output_q, "
-                    "output_s, group_size, eps, fp8_min, fp8_max, scale_ue8m0"
-                    + (", status)" if status is not None else ")")
+                    "output_s, group_size, eps, fp8_min, fp8_max, scale_ue8m0" + ")"
                 ) from exc
 
     if payload.dtype != _require_dtype("float8_e4m3fn"):
@@ -326,9 +264,7 @@ def _validate_out(
     if not out.is_contiguous():
         raise ValueError("out must be contiguous")
     if any(_shares_untyped_storage(out, tensor) for tensor in aliases):
-        raise ValueError(
-            "out must not alias activation, weight, scale, or quant status storage"
-        )
+        raise ValueError("out must not alias activation, weight, or scale storage")
     return out
 
 
@@ -342,7 +278,6 @@ class PpuFp8Linear(nn.Module):
         weight: torch.Tensor,
         checkpoint_scale: torch.Tensor,
         *,
-        quant_status: Optional[torch.Tensor] = None,
         share_input_quantization: bool = False,
         quantization: str = "auto",
     ):
@@ -363,14 +298,9 @@ class PpuFp8Linear(nn.Module):
                 f"weight and checkpoint scale must share a device, got "
                 f"{weight.device} and {weight_scale.device}"
             )
-        if quant_status is not None:
-            _validate_quant_status(
-                quant_status, weight.device, (weight, checkpoint_scale)
-            )
 
         self.register_buffer("weight", weight, persistent=False)
         self.register_buffer("weight_scale", weight_scale, persistent=False)
-        self.register_buffer("quant_status", quant_status, persistent=False)
         self._gemm = _resolve_deep_gemm_symbol(_DENSE_SYMBOL)
 
         self._share_input_quantization = share_input_quantization
@@ -378,9 +308,7 @@ class PpuFp8Linear(nn.Module):
     def can_share_input_quantization(self, other: nn.Module) -> bool:
         """Provider-local ABI gate; never mix PPU FP32 scales with CUDA UE8M0.
 
-        Both consumers must use the same sticky numerical-status tensor. A
-        separate status owner needs its own checked quantization, so retain
-        the ordinary forward path in that case. Subclasses may change the
+        Subclasses may change the
         quantizer contract and must opt in with their own implementation.
         """
         return (
@@ -390,11 +318,10 @@ class PpuFp8Linear(nn.Module):
             and other._share_input_quantization
             and self.k == other.k
             and self.weight.device == other.weight.device
-            and self.quant_status is other.quant_status
             and self.quantization == other.quantization
         )
 
-    def _validate_input(self, x: torch.Tensor, status: Optional[torch.Tensor]) -> None:
+    def _validate_input(self, x: torch.Tensor) -> None:
         if x.ndim < 2 or int(x.shape[-1]) != self.k:
             raise ValueError(
                 f"activation shape must end in K={self.k}, got {tuple(x.shape)}"
@@ -406,34 +333,24 @@ class PpuFp8Linear(nn.Module):
             raise ValueError(
                 f"activation device must be {self.weight.device}, got {x.device}"
             )
-        if status is not None:
-            _validate_quant_status(
-                status, x.device, (x, self.weight, self.weight_scale)
-            )
 
-    def quantize_input(
-        self, x: torch.Tensor, *, quant_status: Optional[torch.Tensor] = None
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Quantize one 2D input with the existing PPU format and status ABI."""
-        status = self.quant_status if quant_status is None else quant_status
-        self._validate_input(x, status)
+    def quantize_input(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Quantize one 2D input with the existing PPU format."""
+        self._validate_input(x)
         if x.ndim != 2:
             raise ValueError(f"shared quantization input must be 2D, got {x.ndim}D")
-        return quantize_ppu_fp8_activation(x, status, quantization=self.quantization)
+        return quantize_ppu_fp8_activation(x, quantization=self.quantization)
 
     def forward_quantized(
         self,
         x_fp8: torch.Tensor,
         x_scale: torch.Tensor,
         out: Optional[torch.Tensor] = None,
-        *,
-        quant_status: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Consume E4M3/FP32 tensors in this instance's selected scale layout.
 
         The caller retains the quantized tensors through all consumers on
         their producer stream (or supplies an explicit cross-stream fence).
-        This method never resets or re-derives the producer's status.
         """
         if x_fp8.ndim != 2 or x_fp8.shape[1] != self.k:
             raise ValueError(f"quantized activation must have shape (M, {self.k})")
@@ -454,11 +371,7 @@ class PpuFp8Linear(nn.Module):
             raise ValueError(
                 "quantized activation, scale and weight must share a device"
             )
-        status = self.quant_status if quant_status is None else quant_status
         aliases = (x_fp8, x_scale, self.weight, self.weight_scale)
-        if status is not None:
-            _validate_quant_status(status, x_fp8.device, aliases)
-            aliases += (status,)
         output = _validate_out(out, (x_fp8.shape[0], self.n), x_fp8.device, aliases)
         if x_fp8.shape[0] > 0:
             self._run_gemm(x_fp8, x_scale, output)
@@ -468,18 +381,15 @@ class PpuFp8Linear(nn.Module):
         self,
         x: torch.Tensor,
         out: Optional[torch.Tensor] = None,
-        *,
-        quant_status: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        status = self.quant_status if quant_status is None else quant_status
-        self._validate_input(x, status)
+        self._validate_input(x)
 
         output_shape = tuple(x.shape[:-1]) + (self.n,)
         output = _validate_out(
             out,
             output_shape,
             x.device,
-            (x, self.weight, self.weight_scale) + (() if status is None else (status,)),
+            (x, self.weight, self.weight_scale),
         )
         m = x.numel() // self.k
         if m == 0:
@@ -488,7 +398,7 @@ class PpuFp8Linear(nn.Module):
         x_2d = x.view(m, self.k)
         output_2d = output.view(m, self.n)
         x_fp8, x_scale = quantize_ppu_fp8_activation(
-            x_2d, status, quantization=self.quantization
+            x_2d, quantization=self.quantization
         )
         self._run_gemm(x_fp8, x_scale, output_2d)
         return output
@@ -514,7 +424,7 @@ def concatenate_ppu_fp8_linears(linears: Sequence[PpuFp8Linear]) -> PpuFp8Linear
 
     Sources remain valid and are not mutated. The result owns a weight copy;
     callers retain or release the source projections according to their model
-    lifecycle. All consumers must have one quantization and status contract.
+    lifecycle. All consumers must have one quantization contract.
     """
     if len(linears) < 2 or any(type(part) is not PpuFp8Linear for part in linears):
         raise TypeError(
@@ -528,11 +438,8 @@ def concatenate_ppu_fp8_linears(linears: Sequence[PpuFp8Linear]) -> PpuFp8Linear
             part.k != first.k
             or part.weight.device != first.weight.device
             or part.quantization != first.quantization
-            or part.quant_status is not first.quant_status
         ):
-            raise ValueError(
-                "FP8 projections must share K, device, quantization and status"
-            )
+            raise ValueError("FP8 projections must share K, device, quantization")
     weight = torch.cat([part.weight.view(torch.uint8) for part in linears], dim=0).view(
         first.weight.dtype
     )
@@ -545,7 +452,6 @@ def concatenate_ppu_fp8_linears(linears: Sequence[PpuFp8Linear]) -> PpuFp8Linear
     return PpuFp8Linear(
         weight,
         checkpoint_scales,
-        quant_status=first.quant_status,
         share_input_quantization=all(
             part._share_input_quantization for part in linears
         ),
